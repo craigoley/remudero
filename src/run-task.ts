@@ -7983,6 +7983,10 @@ export interface StatusDeps {
    *  a test never shells to `gh`/`git remote`; `null` explicitly omits the gateway (the same
    *  "unreachable" degrade a real outage produces). */
   github?: GitHub | null;
+  /** Overridable so a test can force the `resolveOwnerRepo`/`buildBatchedGithub` construction
+   *  path to throw (the "no git remote" degrade) without shelling to a real `git config`. */
+  resolveOwnerRepo?: () => { owner: string; repo: string };
+  buildBatchedGithub?: typeof buildBatchedGithub;
   buildStatusBoard?: typeof buildStatusBoard;
   renderStatusBoardText?: typeof renderStatusBoardText;
   out?: (line: string) => void;
@@ -8032,8 +8036,8 @@ export async function statusCommand(rest: string[], deps: StatusDeps = {}): Prom
   let github: GitHub | undefined;
   if (deps.github === undefined) {
     try {
-      const { owner, repo } = resolveOwnerRepo();
-      github = buildBatchedGithub(owner, repo);
+      const { owner, repo } = (deps.resolveOwnerRepo ?? resolveOwnerRepo)();
+      github = (deps.buildBatchedGithub ?? buildBatchedGithub)(owner, repo);
     } catch {
       github = undefined;
     }

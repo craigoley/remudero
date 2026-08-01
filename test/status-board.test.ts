@@ -428,6 +428,58 @@ test("statusCommand: --json emits a JSON-parseable model with the SAME latch row
   );
 });
 
+/** A repoRoot whose `plan/tasks.yaml` is genuinely readable — so a statusCommand test can
+ *  isolate the `github`-construction seam's own degrade message ("no GitHub gateway ...")
+ *  from the unrelated "plan/tasks.yaml is unreadable" one `/nonexistent/repo/for/tests`
+ *  (used by every other statusCommand test in this file) produces instead. */
+function repoRootWithEmptyPlan(): string {
+  const dir = mkdtempSync(join(tmpdir(), "status-command-repo-"));
+  mkdirSync(join(dir, "plan"), { recursive: true });
+  writeFileSync(join(dir, "plan", "tasks.yaml"), "[]\n");
+  return dir;
+}
+
+test("statusCommand: an uninjected `github` construction that throws (no git remote) degrades to no gateway, never a thrown status read", async () => {
+  const root = tmpRoot();
+  const lines: string[] = [];
+  const rc = await statusCommand(["--json"], {
+    loadConfig: () => fakeConfig(root),
+    queryService: () => ({ running: false, pid: null }),
+    ledgerPathFor: () => join(tmpdir(), "definitely-does-not-exist-ever.ndjson"),
+    repoRoot: repoRootWithEmptyPlan(),
+    resolveOwnerRepo: () => {
+      throw new Error("could not parse owner/repo from origin url");
+    },
+    out: (l) => lines.push(l),
+    // deliberately no `github` override — exercises the try/catch construction path.
+  });
+  assert.equal(rc, 0);
+  assert.equal(lines.length, 1);
+  const parsed = JSON.parse(lines[0]);
+  // A missing gateway degrades QUEUE HEAD/INBOX to a stated unknown — never a throw.
+  assert.match(parsed.queueHead.unknownReason ?? "", /no GitHub gateway/);
+});
+
+test("statusCommand: `github: null` explicitly omits the gateway (the same degrade a real outage produces), without touching the resolveOwnerRepo/buildBatchedGithub construction path", async () => {
+  const root = tmpRoot();
+  const lines: string[] = [];
+  const rc = await statusCommand(["--json"], {
+    loadConfig: () => fakeConfig(root),
+    queryService: () => ({ running: false, pid: null }),
+    ledgerPathFor: () => join(tmpdir(), "definitely-does-not-exist-ever.ndjson"),
+    repoRoot: repoRootWithEmptyPlan(),
+    github: null,
+    resolveOwnerRepo: () => {
+      throw new Error("must not run when `github` is explicitly provided (even as null)");
+    },
+    out: (l) => lines.push(l),
+  });
+  assert.equal(rc, 0);
+  assert.equal(lines.length, 1);
+  const parsed = JSON.parse(lines[0]);
+  assert.match(parsed.queueHead.unknownReason ?? "", /no GitHub gateway/);
+});
+
 // ── W1-T280: rmd status, half 2 of 2 — the DERIVED sections (BLOCKERS BY CLASS, QUEUE HEAD,
 // INBOX, HEADROOM) APPEND to the SAME model W1-T279 established above. Every test below is
 // still a plain object in, a plain object out: no real `gh`, no real git remote, no real wall
@@ -506,6 +558,27 @@ test("buildStatusBoard: BLOCKERS BY CLASS — circuit-broken and dispatch.indete
   assert.match(text, /indeterminate {2}: W1-T901/);
 });
 
+test("buildStatusBoard: BLOCKERS BY CLASS — an indeterminate-only board (no circuit-broken, no blocked PR) picks the indeterminate row's OWN next action, not a generic fallback", () => {
+  const ledgerPath = writeLedger([ledgerLine({ step: "dispatch.indeterminate", task_id: "W1-T901" })]);
+  const model = buildStatusBoard(tmpRoot(), ledgerPath, baseDeps());
+  assert.equal(model.blockers.rows.length, 1);
+  assert.equal(model.blockers.rows[0]!.kind, "indeterminate");
+  assert.match(model.blockers.nextAction ?? "", /W1-T901's GitHub read is indeterminate/);
+  const text = renderStatusBoardText(model);
+  assert.match(text, /next action: W1-T901's GitHub read is indeterminate/);
+});
+
+test("buildStatusBoard: projectPlan throwing unexpectedly (not a stated readFailed) degrades QUEUE HEAD/INBOX to a stated unknown, never an uncaught throw", () => {
+  const ledgerPath = writeLedger([]);
+  const throwingGithub = fakeGithub({ listMergedHeadBranches: () => { throw new Error("boom"); } });
+  assert.doesNotThrow(() => {
+    const model = buildStatusBoard(tmpRoot(), ledgerPath, baseDeps({ plan: plan(), github: throwingGithub }));
+    assert.match(model.queueHead.unknownReason ?? "", /GitHub projection failed unexpectedly/);
+    assert.match(model.queueHead.unknownReason ?? "", /boom/);
+    assert.match(model.inbox.unknownReason ?? "", /GitHub projection failed unexpectedly/);
+  });
+});
+
 // ── ACCEPTANCE 2 (the four-re-dispatch falsifier): a task re-attempted every cycle appears in
 // QUEUE HEAD flagged with its attempt count AND its observed per-cycle cost ───────────────────
 
@@ -534,6 +607,16 @@ test("buildStatusBoard: QUEUE HEAD — the four-re-dispatch falsifier: a perpetu
 
   const text = renderStatusBoardText(model);
   assert.match(text, /W1-T910.*PERPETUAL.*attempts 4/);
+});
+
+test("buildStatusBoard: QUEUE HEAD — an empty plan (a reachable GitHub, nothing to dispatch) renders 'nothing dispatchable', never an empty-but-silent block", () => {
+  const ledgerPath = writeLedger([]);
+  const emptyPlan = loadPlanFromYaml("[]\n", "fixture");
+  const model = buildStatusBoard(tmpRoot(), ledgerPath, baseDeps({ plan: emptyPlan, github: fakeGithub() }));
+  assert.equal(model.queueHead.unknownReason, undefined);
+  assert.deepEqual(model.queueHead.rows, []);
+  const text = renderStatusBoardText(model);
+  assert.match(text, /nothing dispatchable/);
 });
 
 test("buildStatusBoard: QUEUE HEAD — a task with only ONE dispatch is NOT flagged perpetual, and carries no fabricated cost", () => {
