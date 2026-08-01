@@ -335,6 +335,23 @@ test("statusCommand: text mode (no --json) renders the SAME text renderStatusBoa
   assert.ok(lines[0].includes("PAUSE"), `expected the PAUSE latch in text output, got: ${lines[0]}`);
 });
 
+test("statusCommand: the real, uninjected queryService closure runs an actual launchctl query and fails closed to 'not running' off a label that was never bootstrapped, without throwing", async () => {
+  const root = tmpRoot();
+  const lines: string[] = [];
+  const rc = await statusCommand([], {
+    loadConfig: () => fakeConfig(root),
+    ledgerPathFor: () => join(tmpdir(), "definitely-does-not-exist-ever.ndjson"),
+    repoRoot: "/nonexistent/repo/for/tests",
+    out: (l) => lines.push(l),
+    // deliberately no `queryService` override — exercises the real launchctl-backed closure,
+    // which fails closed (a label that was never bootstrapped, or no `launchctl` binary at all
+    // on a non-macOS CI runner) to "not running", never a throw.
+  });
+  assert.equal(rc, 0);
+  assert.equal(lines.length, 1);
+  assert.ok(lines[0].length > 0);
+});
+
 // ── ACCEPTANCE 7: the UNINJECTED defaults — `defaultResolveOriginMainSha`'s real, offline-safe
 // `git rev-parse origin/main` (no network: a local `refs/remotes/origin/main` ref, never a
 // fetch), success and not-a-repo-failure both; and `markerAgeMs`'s statSync-throws TOCTOU catch
