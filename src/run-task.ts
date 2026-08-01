@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type Server } from "node:http";
@@ -326,6 +326,9 @@ import {
   reviewEvidenceStrength,
   cappedReason,
   reviewLedgerLegibilityFields,
+  parseWhitelistedProof,
+  resolveNameFilteredCandidates,
+  narrowNameFilteredArgs,
   type CappedOverride,
   type CriterionVerdict,
   type ReviewVerdict,
@@ -5413,6 +5416,75 @@ export function describeMintWithHistory(mint: MintedTaskIdWithHistory): string {
  * the open-PR read deliberately — that is a stated scope reduction, still reported, still
  * exit 0 (the history scan still runs offline — it is a local git read, not a network one).
  */
+/**
+ * `rmd check-proof <proof>` — run ONE acceptance proof through the REVIEWER'S OWN code and print
+ * what it will do, so an author never has to hand-roll a verification that differs from the thing
+ * that actually runs.
+ *
+ * WHY THIS EXISTS. The recurring cost is not that authors are careless — it is that local
+ * verification and remote execution are two different programs. PR #1071's author checked a
+ * `grep:` proof with `grep -F`, a FIXED-STRING matcher; the executor runs `grep -arn --`, a REGEX.
+ * The `[call-site]` in the pattern was a character class to one and a literal to the other, so the
+ * local check said green and the review said fail. Measured across the unioned ledger, 1,952
+ * verdicts carry a failed grep proof. This verb removes the gap BY CONSTRUCTION rather than by
+ * asking people to remember a rule nothing states: it calls `parseWhitelistedProof` and prints the
+ * exact argv, then spawns that argv itself.
+ *
+ * STRICTLY READ-ONLY. It writes no cache, no ledger line, and no state file — deliberately unlike
+ * `rmd next-task-id`, which looks like a reader and writes a history cache into the SHARED git
+ * common dir that every worktree and the live daemon use. Nothing here touches `config.root`,
+ * `state/`, or `.git`; the only side effect is one `grep`/`node --test` child process and stdout.
+ */
+export function checkProofCommand(rest: string[]): number {
+  const proof = rest.join(" ").trim();
+  if (!proof) {
+    console.error("rmd check-proof: give me a proof, e.g. `rmd check-proof 'grep: foo in src/lib/bar.ts'`\n" + USAGE);
+    return 2;
+  }
+  const w = parseWhitelistedProof(proof);
+  if (!w) {
+    console.log(`proof:      ${proof}`);
+    console.log("parse:      REFUSED — parseWhitelistedProof returned null.");
+    console.log(
+      "            A `grep:` proof needs an explicit `in <path>` clause; a `unit test:` proof needs a\n" +
+        "            test path or title. A proof wrapped in markdown backticks parses since #1063, but a\n" +
+        "            proof with no dialect prefix at all is prose and never executes.",
+    );
+    return 2;
+  }
+  console.log(`proof:      ${proof}`);
+  console.log(`parse:      OK — kind=${w.kind}${w.nameFiltered ? " (name-filtered)" : ""}`);
+
+  let args = w.args as readonly string[];
+  if (w.nameFiltered) {
+    const r = resolveNameFilteredCandidates(process.cwd(), w.label);
+    if (r.status === "resolved") {
+      console.log(`candidates: ${r.files.length} file(s) — ${r.files.join(", ")}`);
+      args = narrowNameFilteredArgs(w.args, r.files);
+    } else {
+      console.log(`candidates: ${r.status}${"reason" in r ? ` — ${r.reason}` : ""}`);
+      if (r.status === "absent") {
+        console.log("verdict:    no-match — the executor fast-fails here and never spawns node.");
+        return 1;
+      }
+    }
+  }
+  console.log(`argv:       ${w.command} ${args.join(" ")}`);
+
+  const res = spawnSync(w.command, args as string[], { encoding: "utf8" });
+  const stdout = res.stdout ?? "";
+  const hits = stdout.split("\n").filter((l) => l.trim() !== "").length;
+  console.log(`exit:       ${res.status === null ? `killed by ${res.signal}` : res.status}`);
+  console.log(`hits:       ${hits}`);
+  if (stdout.trim()) console.log(stdout.trimEnd().split("\n").slice(0, 10).join("\n"));
+  if (w.kind === "grep" && res.status !== 0)
+    console.log(
+      "note:       a `grep:` pattern is a BASIC REGULAR EXPRESSION, not a literal — `[`, `*`, `^`, `$`\n" +
+        "            are metacharacters. Do NOT re-check this with `grep -F`; that is a different matcher.",
+    );
+  return res.status === 0 ? 0 : 1;
+}
+
 export async function nextTaskIdCommand(rest: string[]): Promise<number> {
   const badArg = unknownArgError("next-task-id", rest, ["--plan"], ["--offline"]);
   if (badArg) {
@@ -12470,6 +12542,11 @@ const COMMANDS: readonly CommandSpec[] = [
     usage:
       "rmd next-task-id [--plan <path>] [--offline]   # print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775), and every id ever declared in the git history of plan/ (the fold class: an id filed then folded away, W1-T278); --offline skips the open-PR read (the mint is then a FLOOR, and says so; the history scan still runs — it is a local git read, not a network one); prints its provenance, spawns nothing",
   },
+  {
+    name: "check-proof",
+    usage:
+      "rmd check-proof <proof>   # run ONE acceptance proof through the REVIEWER'S OWN parser and executor and print what it does: parse kind, resolved candidate file(s), the exact argv, exit code and hit count. A `grep:` pattern is a BASIC REGULAR EXPRESSION (`[ * ^ $` are metacharacters) — verifying with `grep -F` is a DIFFERENT matcher and reports a false green (PR #1071). READ-ONLY: writes no cache, no ledger line, no state file",
+  },
   { name: "retro", usage: "rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)" },
   {
     name: "drain",
@@ -12927,6 +13004,9 @@ export async function main(
   }
   if (cmd === "preflight") {
     process.exit(await preflightCommand(rest));
+  }
+  if (cmd === "check-proof") {
+    process.exit(checkProofCommand(rest));
   }
   if (cmd === "next-task-id") {
     process.exit(await nextTaskIdCommand(rest));

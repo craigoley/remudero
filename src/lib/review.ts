@@ -675,7 +675,23 @@ function parseDialectGrep(body: string): WhitelistedProof | null {
   // file.ts` behaves identically to `grep -n pat file.ts`) and is what
   // makes a DIRECTORY target work at all — always pass it so "in <path>"
   // covers a file OR a directory without a second branch.
-  return { kind: "grep", command: "grep", args: ["-rn", "--", pattern, path], label: `${pattern} in ${path}` };
+  // "-a" (treat binary as text) makes the verdict INDEPENDENT OF THE HOST'S GREP. Without it a
+  // target carrying a raw NUL byte is judged "binary" and the two implementations DISAGREE —
+  // MEASURED on this host against the same file and pattern: BSD grep 2.6.0-FreeBSD exits 0 with
+  // "Binary file … matches", ugrep 7.5.0 exits 1 with no output. So `grep: export function
+  // callSiteViolations in src/lib/task-linter.ts` (PR #1071) passes or fails according to which
+  // binary the review host happens to resolve, which is not a proof. With "-a" both exit 0 and
+  // print the matching line. Exactly 2 of this repo's 96 source files carry a NUL byte, and
+  // task-linter.ts — the file this very check lives in — is one of them.
+  //
+  // DOWNSIDE, bounded: "-a" can only widen. It cannot invent a match — the pattern's bytes must
+  // still occur in the file — and it changes nothing for a NUL-free target (verified). The one
+  // new possibility is a genuinely binary target whose bytes happen to contain the pattern, which
+  // requires the proof's author to have named a binary path explicitly. Note this is not even a
+  // widening relative to BSD grep, which already reported exit 0 for that file; it is ugrep that
+  // was silently reporting "no match", and "-a" removes the disagreement rather than adding
+  // matches.
+  return { kind: "grep", command: "grep", args: ["-arn", "--", pattern, path], label: `${pattern} in ${path}` };
 }
 
 /**
@@ -1638,6 +1654,30 @@ function looksLikePath(token: string): boolean {
   return /[./]/.test(token);
 }
 
+/** Words that mark a sentence as being ABOUT THE CHANGESET rather than about anything else a body
+ *  might count files for. Kept as DATA so widening it is a one-line review, not a regex rewrite. */
+const CHANGESET_CONTEXT_RE =
+  /\b(?:diff|diffs|changed|changes|change|changeset|touch|touches|touched|modif\w*|edits?|edited|adds?|added|deletes?|deleted|removes?|removed|numstat|--stat|git\s+show|this\s+pr|the\s+pr)\b/i;
+
+/**
+ * Is the "exactly N files" match at `index` in a sentence ABOUT THE CHANGESET?
+ *
+ * Looks BACKWARD only, and only to the start of the current sentence — a changeset word in the
+ * NEXT sentence says nothing about this claim, and scanning the whole body would re-create the
+ * unanchored match this exists to prevent (every PR body says "changed" somewhere).
+ */
+export function claimsChangesetContext(report: string, index: number): boolean {
+  const before = report.slice(0, index);
+  // Sentence start: the last terminator, newline, or list-bullet before the claim.
+  const start = Math.max(
+    before.lastIndexOf(". "),
+    before.lastIndexOf("\n"),
+    before.lastIndexOf("! "),
+    before.lastIndexOf("? "),
+  );
+  return CHANGESET_CONTEXT_RE.test(before.slice(start + 1));
+}
+
 /** Does `file` fall under the claimed-absent `path` (an exact file, or a directory prefix)? */
 function fileUnderClaimedPath(file: string, path: string): boolean {
   const normalized = path.replace(/\/$/, "");
@@ -1676,10 +1716,30 @@ export function bodyContradictsDiff(report: string, diffFiles: string[]): Change
 
   // (a) / (c): "exactly N files[: a, b, c]" — the count itself, and (when a
   // count is right but a named file is missing) the enumerated list.
+  //
+  // THE COUNT CLAIM MUST BE ABOUT THE CHANGESET (fixed after PR #1077). The bare pattern has no
+  // SUBJECT: "exactly one file" reads identically whether the sentence is about the diff or about
+  // something else entirely. LIVE FIXTURE — PR #1077 wrote "Each unit-test proof resolves to
+  // exactly one file and matches exactly 1 test", a statement about PROOF CANDIDATE RESOLUTION,
+  // and was posted `failure` over a 7-file diff. Its verdict recorded `proof_exec` 5/5
+  // `executed_pass`, `unmet_criteria: []`, `test_theater: false`, `capped: false` — every
+  // criterion substantiated, the PR blocked anyway, and no rung retried it.
+  //
+  // That is precisely the failure this function's own doc comment forbids: "ANYTHING THIS CANNOT
+  // DECIDE IS SILENCE, NOT A VERDICT … A checker that guesses at natural language would be a
+  // worse tripwire than the gap it closes." An unanchored count IS a guess at natural language.
+  //
+  // So a count claim now counts only when it is TIED TO THE CHANGESET, by either:
+  //   (i)  an enumeration — "exactly one file: MASTER-PLAN.md" — which is unambiguous and is the
+  //        shape #974 actually used (the PR this check was built for; still caught), or
+  //   (ii) a changeset word in the run-up to the phrase ("changed", "touches", "diff", "modifies",
+  //        "git show --stat listed …"), which is how a body states the claim in prose.
+  // Anything else is silence, exactly as an unrecognised sentence already was.
   const countRe = /\bexactly\s+(\w+)\s+files?\b(?:\s*:\s*([^\s,]+(?:\s*,\s*[^\s,]+)*))?/gi;
   for (const m of report.matchAll(countRe)) {
     const claimed = parseClaimedCount(m[1]);
     if (claimed === undefined) continue;
+    if (!m[2] && !claimsChangesetContext(report, m.index ?? 0)) continue;
     let contradicted = claimed !== diffFiles.length;
     if (!contradicted && m[2]) {
       const named = m[2]

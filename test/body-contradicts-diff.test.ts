@@ -255,3 +255,46 @@ test("failSummary: criteriaTampered still takes priority over a changeset contra
   assert.match(s, /Standing rule 15/i);
   assert.doesNotMatch(s, /body contradicts its own diff/i);
 });
+
+// ── SUBJECT ANCHORING (the PR #1077 false positive) ──────────────────────────
+//
+// The count pattern had no SUBJECT: "exactly one file" reads identically whether the sentence is
+// about the diff or about anything else. PR #1077 said "Each unit-test proof resolves to exactly
+// one file" — about PROOF CANDIDATE RESOLUTION — over a 7-file diff, and was posted `failure`
+// while its own verdict recorded 5/5 executed_pass and zero unmet criteria. Nothing retried it.
+
+test("bodyContradictsDiff: a count claim about something OTHER than the changeset is SILENT (the #1077 false positive)", () => {
+  const body =
+    "Each unit-test proof resolves to exactly one file and matches exactly 1 test; the zero-match control returns 0.";
+  assert.deepEqual(
+    bodyContradictsDiff(body, ["a.ts", "b.ts", "c.ts", "d.ts", "e.ts", "f.md", "g.md"]),
+    [],
+    "a sentence about proof resolution is not a claim about the changeset — silence, not a verdict",
+  );
+});
+
+test("bodyContradictsDiff: an ENUMERATED count claim is still caught without any changeset word (the #974 shape)", () => {
+  const hits = bodyContradictsDiff("exactly one file: MASTER-PLAN.md", ["MASTER-PLAN.md", "docs/ORIENTATION.md"]);
+  assert.equal(hits.length, 1, "the enumeration is unambiguous on its own — this is what the check was built for");
+  assert.match(hits[0].claim, /exactly one file: MASTER-PLAN\.md/);
+});
+
+test("bodyContradictsDiff: a PROSE count claim in changeset context is still caught", () => {
+  for (const body of [
+    "This PR changes exactly one file.",
+    "git show --stat listed exactly one file.",
+    "The diff touches exactly two files.",
+  ]) {
+    assert.equal(bodyContradictsDiff(body, ["a.ts", "b.ts", "c.ts"]).length, 1, `must still catch: ${body}`);
+  }
+});
+
+test("bodyContradictsDiff: changeset context does not leak across a sentence boundary", () => {
+  // The changeset word belongs to the PREVIOUS sentence; the claim itself is about tests.
+  const body = "This PR changes seven files. Each proof resolves to exactly one file.";
+  assert.deepEqual(
+    bodyContradictsDiff(body, ["a.ts", "b.ts", "c.ts", "d.ts", "e.ts", "f.ts", "g.ts"]),
+    [],
+    "scanning the whole body would re-create the unanchored match — every PR body says 'changes' somewhere",
+  );
+});
