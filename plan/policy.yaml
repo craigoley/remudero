@@ -164,3 +164,26 @@ launchd:
     origin: "net-new"
     min: 10
     max: 3600
+
+# The boot-time abandoned-review-clone reap (impl-EK, 2026-08-01). Reviewing a PR
+# materialises a standalone clone of this repo into a scratch root and never removes it;
+# 36 survived across os.tmpdir(), /private/tmp and the SDK scratchpad root, totalling
+# 5866 MiB, on a host where macOS's periodic tmp cleaner is absent so nothing ever has.
+scratchReap:
+  # DEFAULT OFF, deliberately: this rung DELETES. While false the boot pass SURVEYS and
+  # writes `daemon.clone_reap` with what it would reclaim, removing nothing — the operator
+  # reads that line, then flips this. Same default-off posture as `autoTriage.enabled`,
+  # which is off because it spends; this is off because it destroys.
+  enabled:
+    value: false
+    origin: "net-new"
+  # The age ceiling below which an idle clone is kept, in hours. Conservative end of the
+  # range the two existing sweeps already set (both 24h). ~15x the 92.3-min longest observed
+  # task wall-time, so no clone of a RUNNING review can reach it even if the liveness probe
+  # were to fail open. Floor 4h matches worker-scratch.ts's teardown ceiling; a lower value
+  # would risk a live review's clone.
+  maxAgeHours:
+    value: 24
+    origin: "lifted:src/lib/worker-scratch.ts (DEFAULT_SCRATCH_SWEEP_MAX_AGE_MS = 24h)"
+    min: 4
+    max: 168
