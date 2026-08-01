@@ -63,6 +63,7 @@ import { buildAddOperatorNoteRoute, buildListOperatorNotesRoute } from "./operat
 import { createLastSeenStore, lastSeenPath, type LastSeenStore } from "./last-seen.js";
 import { buildDaemonHealthRoute, type DaemonHealthDeps } from "./daemon-health.js";
 import { buildAccountUsageRoute, type AccountUsageDeps } from "./account-usage.js";
+import { resolveFreshness } from "./console-freshness.js";
 
 /** Default `rmd serve` port — matches apps/dashboard/src/main.ts's own `?daemon=` default (`http://localhost:4317`), so the shipped dashboard points at a served daemon out of the box. */
 export const DEFAULT_SERVE_PORT = 4317;
@@ -1207,10 +1208,26 @@ export function renderShellHtml(
   }
   function markStale(asOf) {
     // MUTUALLY EXCLUSIVE WITH LIVE/FRESH (fb-…c124f9): a STALE banner can never co-display with
-    // recent live data. If ANY transport (poll OR SSE) delivered inside STALE_DATA_AGE_MS, the
-    // pane is fresh — refuse to raise the banner (mirrors resolveFreshness: fresh ⇒ live). At a
-    // cold cache-restore lastLiveAt is null, so the cached data IS honestly stale and shows.
-    if (lastLiveAt && Date.now() - lastLiveAt < STALE_DATA_AGE_MS) return;
+    // recent live data. W1-T281: this calls the REAL, imported, unit-tested \`resolveFreshness\`
+    // (lib/console-freshness.ts, embedded verbatim below this shell's boot -- see its own
+    // definition) -- never a hand-copied re-derivation of its rule. If ANY transport (poll OR
+    // SSE) delivered inside STALE_DATA_AGE_MS, resolveFreshness reports "live" and the banner is
+    // refused. \`connected\` is always false here: this shell's own \`lastLiveAt\` clock (touched by
+    // BOTH a poll success and an SSE data event, never by SSE transport-connectivity alone) is
+    // already the single freshness signal — a merely-connected-but-idle SSE stream must still be
+    // able to go stale over time, which is why this never re-derives \`connected\` from the SSE
+    // transport's own connection state (unlike resolveFreshness's own doc example). At a cold
+    // cache-restore lastLiveAt is null and pollFailures is 0, so resolveFreshness reports
+    // "reconnecting" (not "live") and the cached data IS honestly shown as stale.
+    if (resolveFreshness({
+      lastLiveMs: lastLiveAt,
+      nowMs: Date.now(),
+      connected: false,
+      pollFailures,
+      asOf: asOf ?? null,
+      staleAfterMs: STALE_DATA_AGE_MS,
+      failuresBeforeStale: STALE_ESCALATE_AFTER,
+    }).mode === "live") return;
     const badge = document.getElementById("stale-badge");
     badge.hidden = false;
     badge.textContent = \`STALE — showing last known data as of \${asOf ? formatTimestamp(asOf) : "an earlier load"}\`;
@@ -2953,6 +2970,15 @@ export function renderShellHtml(
   let lastLiveAt = null; // last successful data of ANY kind -- a poll success OR an SSE event.
   let recapRendered = false; // W1-T163: renders off THIS page load's FIRST /v1/status only -- see renderRecapSection's own doc.
 
+  // W1-T281: the console's ONE freshness model (lib/console-freshness.ts's \`resolveFreshness\`,
+  // shipped by W1-T262/#777) EMBEDDED VERBATIM -- this is \`resolveFreshness.toString()\` off the
+  // REAL import above, not a hand-typed copy, so this shell can never again drift from the
+  // unit-tested rule the way it did for eight days (the ONLY prior reference to it anywhere
+  // outside its own test was a COMMENT claiming to "mirror" it -- serve.ts never actually called
+  // it, so the STALE badge and "live · updated Ns ago" kept contradicting each other). Every
+  // freshness decision below (markStale's guard, handlePollFailure's escalation) calls THIS.
+  const resolveFreshness = ${resolveFreshness.toString()};
+
   function touchFreshness() {
     lastLiveAt = Date.now();
     // Fresh data just landed from SOME transport (poll success or SSE delta) ⇒ the pane is no
@@ -2978,13 +3004,25 @@ export function renderShellHtml(
   // this escalation used to track ONLY a raw consecutive-/v1/status-failure tally, blind to a
   // healthy SSE connection still delivering genuinely fresh rows. A board can be honestly LIVE
   // (via SSE) even while its own REST poll is failing outright -- so the STALE claim (not the
-  // transient "reconnecting" one) must also require that NO live data of any kind is recent,
-  // i.e. both indicators must derive from the SAME \`lastLiveAt\` clock the freshness stamp reads.
+  // transient "reconnecting" one) must also require that NO live data of any kind is recent.
+  // W1-T281: that requirement IS resolveFreshness's own rule -- called here directly (fed
+  // \`lastLiveAt\`, never re-derived from the SSE transport's own "connected" bit -- see
+  // markStale's doc for why a merely-connected-but-idle stream must still be able to go stale)
+  // instead of a second, hand-inlined \`dataIsStale\` arithmetic check that could (and did) drift
+  // from the tested module.
   function handlePollFailure() {
     pollFailures += 1;
     const topStatus = document.getElementById("top-status");
-    const dataIsStale = !lastLiveAt || Date.now() - lastLiveAt >= STALE_DATA_AGE_MS;
-    if (pollFailures < STALE_ESCALATE_AFTER || !dataIsStale) {
+    const freshness = resolveFreshness({
+      lastLiveMs: lastLiveAt,
+      nowMs: Date.now(),
+      connected: false,
+      pollFailures,
+      asOf: lastSuccessAt ? new Date(lastSuccessAt).toISOString() : null,
+      staleAfterMs: STALE_DATA_AGE_MS,
+      failuresBeforeStale: STALE_ESCALATE_AFTER,
+    });
+    if (freshness.mode !== "stale") {
       // TRANSIENT: last-known-good data stays on screen, UNMARKED -- only the top-status line
       // itself says "reconnecting", carrying the last-success time. Never a persistent error
       // banner; the very next successful poll below clears this unconditionally.
