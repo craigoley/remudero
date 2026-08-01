@@ -20,7 +20,7 @@ interface Rec {
   consoleAlerts: string[];
 }
 
-function makeDeps(o: { health?: HealthInputs; consoleUp?: boolean; pids?: Array<number | undefined> } = {}): Rec {
+function makeDeps(o: { health?: HealthInputs; consoleUp?: boolean; pids?: Array<number | undefined>; runningHead?: string } = {}): Rec {
   const calls: string[] = [];
   const ledger: Array<{ step: string; data?: Record<string, unknown> }> = [];
   const alerts: string[] = [];
@@ -32,6 +32,9 @@ function makeDeps(o: { health?: HealthInputs; consoleUp?: boolean; pids?: Array<
     now: () => 1000,
     fetch: () => calls.push("fetch"),
     installHead: () => headRef.value,
+    // Pre-existing tests assume the daemon is on the checkout's code, so staleness never
+    // fires here; the running-sha tests drive this explicitly.
+    runningHead: () => o.runningHead ?? headRef.value,
     originMain: () => "new-head",
     markerPresent: () => true,
     autoMode: () => true,
@@ -126,6 +129,7 @@ test("a no-op cycle restarts nothing — the console is not bounced every 120s",
   const r = makeDeps();
   r.deps.installHead = () => "same-head";
   r.deps.originMain = () => "same-head";
+  r.deps.runningHead = () => "same-head"; // and the daemon is actually on it — nothing to do at all
   const result = runDeployCycle(r.deps);
 
   assert.equal(result.deployed, false);

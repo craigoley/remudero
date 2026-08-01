@@ -46,6 +46,13 @@ export interface TriggerInputs {
   /** In auto mode only: the last HEAD that failed health-check + rolled back — never
    * auto-retried (a manual marker always retries; the operator asked explicitly). */
   lastFailedHead?: string;
+  /**
+   * The sha the DAEMON PROCESS IS ACTUALLY EXECUTING, captured at ITS boot from the code it
+   * loaded — never re-read from the checkout at comparison time (that always matches, which is
+   * the bug this field exists to fix). `undefined` when no daemon has recorded one yet, i.e. the
+   * running daemon booted before this shipped; see {@link decideDeployTrigger} for the polarity.
+   */
+  runningHead?: string;
 }
 
 export interface Decision {
@@ -53,15 +60,53 @@ export interface Decision {
   reason: string;
 }
 
-/** Deploy IFF a trigger is present AND the install is actually behind origin/main. */
+/**
+ * Same commit, tolerating a short-vs-full sha on either side. `git rev-parse HEAD` yields 40
+ * hex chars and the ledger records the same, so this is belt-and-braces — but a format mismatch
+ * would read as STALE and restart the daemon every 120s under the supervisor, which is the
+ * principal risk of this whole change, so the comparison is made explicitly prefix-tolerant
+ * rather than left to luck.
+ */
+export function sameCommit(a: string | undefined, b: string | undefined): boolean {
+  if (!a || !b) return false;
+  const x = a.trim().toLowerCase();
+  const y = b.trim().toLowerCase();
+  if (x === y) return true;
+  const [short, long] = x.length <= y.length ? [x, y] : [y, x];
+  return short.length >= 7 && long.startsWith(short);
+}
+
+/**
+ * Deploy IFF a trigger is present AND the fleet is not already running the checkout's code.
+ *
+ * THE DEFECT THIS FIXES: this used to compare the CHECKOUT against origin only, so anything that
+ * fast-forwarded the checkout first — an operator `git pull`, an agent's pull, or rmd's own
+ * self-sync — consumed the trigger and the restart never happened. The daemon then ran stale code
+ * against a current checkout indefinitely, silently (observed live 2026-08-01: checkout ff'd to
+ * a0d96a9 at 21:44:29, 12 consecutive "no-op: up-to-date" cycles, console still on 3f6a1d1).
+ *
+ * So there are now TWO independent reasons to act, and either suffices:
+ *   BEHIND       — the checkout itself is behind origin/main (needs fast-forward + restart).
+ *   RUNNING STALE — the checkout is current but the running daemon is not on it (restart only).
+ *
+ * UNKNOWN running sha ⇒ treated as STALE (fail-EAGER). A daemon that booted before this shipped
+ * records nothing, and fail-safe would mean the fix could never take effect until something else
+ * restarted the daemon — which is precisely the gap being closed. Fail-eager costs exactly ONE
+ * extra restart, taken at an idle gap the gate already enforces, and it is self-correcting: that
+ * restart records a sha, and every later cycle compares cleanly.
+ */
 export function decideDeployTrigger(i: TriggerInputs): Decision {
-  const behind = i.installHead !== i.originMain;
+  const behind = !sameCommit(i.installHead, i.originMain);
+  const runningStale = !sameCommit(i.runningHead, i.installHead);
   const alreadyFailed = i.lastFailedHead !== undefined && i.originMain === i.lastFailedHead;
-  if (!behind) return { deploy: false, reason: "up-to-date (install HEAD == origin/main)" };
-  if (i.markerPresent) return { deploy: true, reason: "operator marker present + install behind origin/main" };
+  const why = behind ? "install behind origin/main" : "daemon running stale code (install is current)";
+  if (!behind && !runningStale) {
+    return { deploy: false, reason: "up-to-date (install HEAD == origin/main, daemon running it)" };
+  }
+  if (i.markerPresent) return { deploy: true, reason: `operator marker present + ${why}` };
   if (i.autoMode && alreadyFailed) return { deploy: false, reason: "auto: origin/main already failed health-check + rolled back — not retried" };
-  if (i.autoMode) return { deploy: true, reason: "auto mode + install behind origin/main" };
-  return { deploy: false, reason: "install behind origin/main but no operator marker (human-gated; run rmd deploy)" };
+  if (i.autoMode) return { deploy: true, reason: `auto mode + ${why}` };
+  return { deploy: false, reason: `${why} but no operator marker (human-gated; run rmd deploy)` };
 }
 
 export interface IdleProbe {
@@ -152,6 +197,26 @@ export function countLedgerBootsAfter(ledgerPath: string, sinceMs: number): numb
   return n;
 }
 
+/**
+ * The `head_sha` on the MOST RECENT `daemon.boot` line — the sha the running daemon loaded at its
+ * boot. Scans forward and keeps the last hit, because the ledger is append-only so the last boot
+ * line is the current process's. `undefined` when no boot line carries one (a daemon that booted
+ * before this field shipped), which {@link decideDeployTrigger} treats as stale.
+ */
+export function readLatestBootSha(ledgerPath: string): string | undefined {
+  let sha: string | undefined;
+  try {
+    for (const line of readFileSync(ledgerPath, "utf8").split("\n")) {
+      if (!line.includes('"daemon.boot"') && !line.includes('"step":"daemon.boot"')) continue;
+      const m = line.match(/"head_sha":"([0-9a-fA-F]{7,40})"/);
+      if (m) sha = m[1];
+    }
+  } catch {
+    /* no ledger yet — nothing recorded */
+  }
+  return sha;
+}
+
 /** Healthy IFF a fresh boot was seen AND the daemon did not restart-storm. */
 export function assessBootHealth(i: HealthInputs, opts: HealthOpts = {}): HealthResult {
   const threshold = opts.crashThreshold ?? 3;
@@ -181,6 +246,8 @@ export interface DeployDeps {
   markerPresent: () => boolean;
   autoMode: () => boolean;
   lastFailedHead: () => string | undefined;
+  /** The sha the running daemon recorded at ITS boot; undefined if none has. */
+  runningHead: () => string | undefined;
   dirtyFiles: () => string[];
   incomingFiles: (from: string, to: string) => string[];
   /** git pull --ff-only / merge --ff-only origin/main. Throws on a non-ff. */
@@ -305,6 +372,7 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     installHead: fromHead,
     originMain: origin,
     lastFailedHead: deps.lastFailedHead(),
+    runningHead: deps.runningHead(),
   });
   if (!decision.deploy) {
     deps.log("deploy.skip", { reason: decision.reason, install: short(fromHead), origin: short(origin) });
@@ -468,6 +536,7 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
         return undefined;
       }
     },
+    runningHead: () => readLatestBootSha(o.ledgerPath),
     dirtyFiles: () =>
       git(["status", "--porcelain"])
         .split("\n")
