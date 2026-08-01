@@ -7978,6 +7978,15 @@ export interface StatusDeps {
   queryService?: (service: ServiceName) => { running: boolean; pid: number | null };
   ledgerPathFor?: (config: Config) => string;
   repoRoot?: string;
+  /** The DERIVED half's (W1-T280) batched GitHub gateway; defaults to
+   *  `buildBatchedGithub(owner, repo)` off this checkout's own `origin` remote. Overridable so
+   *  a test never shells to `gh`/`git remote`; `null` explicitly omits the gateway (the same
+   *  "unreachable" degrade a real outage produces). */
+  github?: GitHub | null;
+  /** Overridable so a test can force the `resolveOwnerRepo`/`buildBatchedGithub` construction
+   *  path to throw (the "no git remote" degrade) without shelling to a real `git config`. */
+  resolveOwnerRepo?: () => { owner: string; repo: string };
+  buildBatchedGithub?: typeof buildBatchedGithub;
   buildStatusBoard?: typeof buildStatusBoard;
   renderStatusBoardText?: typeof renderStatusBoardText;
   out?: (line: string) => void;
@@ -7985,16 +7994,18 @@ export interface StatusDeps {
 }
 
 /**
- * `rmd status [--json]` — "is it running" from LOCAL truth only (W1-T279, half 1 of 2,
- * MASTER-PLAN §7/§5D). LIVENESS (daemon/serve/deploy-supervisor process state + boot time +
- * running HEAD vs `origin/main` STALE flag + crash-loop), LATCHES (every state marker with its
- * age + stated consequence), LAST CYCLE (the newest `daemon.summary`) — ONE read model
- * (lib/status-board.ts's `buildStatusBoard`), rendered as text by default or as the SAME model
- * verbatim under `--json`. This command is a THIN call site: it resolves the one thing that
- * lives at the CLI layer (the launchd process query, `queryLaunchdService` — lib/ never shells
- * to launchd itself) and hands everything else to the pure builder. Read-only: never writes a
- * marker, never spawns anything, always exits 0 (bad args aside) — offline-safe by construction
- * (no `git fetch`, no `gh` call, no network read at all).
+ * `rmd status [--json]` — "is it running, and why is it stalled" (W1-T279 + W1-T280,
+ * MASTER-PLAN §7/§5D). LIVENESS/LATCHES/LAST CYCLE are LOCAL TRUTH ONLY (no `git fetch`, no
+ * `gh` call — offline-safe by construction). BLOCKERS BY CLASS/QUEUE HEAD/INBOX/HEADROOM are
+ * DERIVED: mostly local (the ledger's own dispatch-breaker/blocked-PR/headroom signals), except
+ * QUEUE HEAD's dispatch eligibility and INBOX's dep-merged predicate, which read through ONE
+ * batched GitHub gateway (`buildBatchedGithub`) this command constructs — a network read, but
+ * NEVER a gate: an unreachable/unconfigured gateway degrades exactly those rows to a stated
+ * unknown, never a throw, never a delayed exit (see status-board.ts's own header doc). This
+ * command is a THIN call site: it resolves the things that live at the CLI layer (the launchd
+ * process query, the plan/tasks.yaml + GitHub-gateway construction, the headroom-governor
+ * config read) and hands everything else to the pure builder. Read-only: never writes a
+ * marker, never spawns anything, always exits 0 (bad args aside).
  */
 export async function statusCommand(rest: string[], deps: StatusDeps = {}): Promise<number> {
   const out = deps.out ?? ((l: string) => console.log(l));
@@ -8018,7 +8029,27 @@ export async function statusCommand(rest: string[], deps: StatusDeps = {}): Prom
   const buildBoard = deps.buildStatusBoard ?? buildStatusBoard;
   const render = deps.renderStatusBoardText ?? renderStatusBoardText;
   const ledgerPath = (deps.ledgerPathFor ?? ledgerPathFor)(config);
-  const model = buildBoard(config.root, ledgerPath, { queryService, repoDir: deps.repoRoot ?? repoRoot });
+  const repoDir = deps.repoRoot ?? repoRoot;
+  // GITHUB IS DECORATION, NEVER A GATE: `resolveOwnerRepo`/`buildBatchedGithub` can themselves
+  // fail (no `git` remote, no network) — caught here so a status read NEVER throws on a bad
+  // network day; the board degrades the rows that needed it to a stated unknown instead.
+  let github: GitHub | undefined;
+  if (deps.github === undefined) {
+    try {
+      const { owner, repo } = (deps.resolveOwnerRepo ?? resolveOwnerRepo)();
+      github = (deps.buildBatchedGithub ?? buildBatchedGithub)(owner, repo);
+    } catch {
+      github = undefined;
+    }
+  } else {
+    github = deps.github ?? undefined;
+  }
+  const model = buildBoard(config.root, ledgerPath, {
+    queryService,
+    repoDir,
+    github,
+    resolveHeadroomEnabled: () => resolveHeadroomEnabled(config),
+  });
   out(rest.includes("--json") ? JSON.stringify(model, null, 2) : render(model));
   return 0;
 }
@@ -12309,7 +12340,7 @@ const COMMANDS: readonly CommandSpec[] = [
   {
     name: "status",
     usage:
-      "rmd status [--json]   # W1-T279: ONE verb answering 'is it running' from LOCAL truth only (no network) — LIVENESS (daemon/serve/deploy-supervisor running/pid/boot-time, running HEAD vs origin/main with a STALE flag, crash-loop), LATCHES (every state marker — STOP/PAUSE/QUIET_HOURS/DEPLOY_FAILED/DEPLOY_AUTO/inflight locks/pending kicks/drain-now — with its age and stated consequence), LAST CYCLE (the newest daemon.summary); each section ends with at most one next action. --json emits the exact same read model the text renders. Read-only: writes nothing, spawns nothing, exits 0 even with the daemon down and the network off.",
+      "rmd status [--json]   # W1-T279+W1-T280: ONE verb answering 'is it running' AND 'why is it stalled' from ONE read model. LOCAL (no network): LIVENESS (daemon/serve/deploy-supervisor running/pid/boot-time, running HEAD vs origin/main with a STALE flag, crash-loop), LATCHES (every state marker — STOP/PAUSE/QUIET_HOURS/DEPLOY_FAILED/DEPLOY_AUTO/inflight locks/pending kicks/drain-now — with its age and stated consequence), LAST CYCLE (the newest daemon.summary). DERIVED: BLOCKERS BY CLASS (circuit-broken w/ reset note, dispatch.indeterminate w/ gh-window note, blocked PRs by sweep.ts's own named reason), QUEUE HEAD (next dispatchables, perpetual-attempt tasks flagged with observed per-cycle cost), INBOX (ready/not-ready counts, head not-ready reason), HEADROOM (newest telemetry + enforcement on/off from the same switch the daemon reads) — these read a batched GitHub gateway and degrade to a stated unknown on an outage, never a gate on the local sections. Each section ends with at most one next action. --json emits the exact same read model the text renders. Read-only: writes nothing, spawns nothing, always exits 0 (bad args aside).",
   },
   {
     name: "sweep",
