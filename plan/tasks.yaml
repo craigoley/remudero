@@ -61,6 +61,163 @@
 #   operator-kicked (the daemon drains the sandbox), so this is the authoritative kick guide, NOT a
 #   physical reordering of the entries below (a contiguous block-move can't produce this interleaving).
 
+- id: W1-T279
+  title: "rmd status, half 1 of 2 — ONE verb answers 'is it running' from LOCAL truth: LIVENESS (daemon/serve/supervisor processes, boot time, running HEAD vs origin/main with a STALE flag, crash-loop), LATCHES (every state marker with its AGE and its stated CONSEQUENCE), LAST CYCLE (the newest daemon.summary), each section ending in the single next action, rendered from ONE read model with --json"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "fb-1784919210522-5ac4ca (the spec). The operator has NO single verb answering is-it-running /
+    what-is-it-doing / why-is-it-stalled: `rmd --help` lists run-task, drain, daemon, stop, pause, resume,
+    away, review, lint-plan, preflight, retro, correct, escalate, digest, deploy, serve, console-url — every
+    one of them ACTS or serves a surface; none READS the machine's own state back in one place
+    (docs/operator-guide.md's command table, verified at filing). Three incidents on 2026-07-24 all had this
+    as question one: (a) a `state/DEPLOY_FAILED` latch sat invisible ~17h while the daemon ran rolled-back
+    code — the marker is real and documented (docs/deploy-supervisor.md: the supervisor writes it and
+    restores the last-good daemon) but NOTHING renders it; (b) a crash-loop read to the operator as 'queue
+    not processing' until launchctl + ledger archaeology found it — even though the SENSOR already exists
+    (`detectCrashLoop` / `DEFAULT_CRASHLOOP_WINDOW` over `daemon.boot` timestamps, src/lib/daemon.ts, filed
+    as W1-T215 precisely because 'nothing in the system observed its OWN boot rate'); (c) four spurious
+    re-dispatches burned money invisibly. THE SHAPE OF THE DEFECT IS RENDERING, NOT SENSING: every fact this
+    half needs is already written down — fleet-control.ts's stop/pause/quiet markers and their `*Detail`
+    reasons, state/DEPLOY_FAILED + state/DEPLOY_AUTO, state/inflight/ locks (inflight-lock.ts), pending kicks
+    and drain-now requests, the ledger's `daemon.boot` and `daemon.summary` lines (DaemonSummary:
+    attempted/merged/stopReason/stopDetail/costUsd/ticks, daemon.ts:1121-1123), and W1-T126's own boot-sha
+    freshness comparison. The operator's cost of assembling them by hand is a multi-hour archaeology dig, per
+    incident. NOT A CONSOLE RE-DECISION: the 2026-07-20 DECISIONS entry deferred a macOS MENU-BAR glanceable
+    because the PWA console covers at-a-glance status; this is the TERMINAL verb (and the JSON the console's
+    own Now tab will consume, fb-1784770111145-cf7c24), and none of the three incidents above was surfaced by
+    the console — it has no LIVENESS or LATCHES pane at all."
+  design: |
+    ONE READ MODEL, TWO RENDERERS. A new `src/lib/status-board.ts` returns a plain data object; the text
+    renderer and `--json` both project THAT — no second derivation, so the console can never disagree with the
+    terminal (the W1-T262 one-coherent-story discipline, applied to a new surface). The CLI verb `rmd status
+    [--json]` in run-task.ts is a thin call site.
+    LOCAL TRUTH ONLY, OFFLINE-SAFE. This half reads the filesystem + the ledger + process liveness; it makes
+    no blocking network call and MUST exit 0 with the daemon down and the network off. Where a fact cannot be
+    resolved (origin/main unfetchable, a pid unreadable) the model carries an explicit UNKNOWN and the text
+    says so — never a zero or a green default rendered as fact (the W1-T262 honesty rule: an unknown that
+    LOOKS healthy is exactly the ~17h failure).
+    LIVENESS: per-service rows (daemon / serve / deploy supervisor) — running or not, pid, and boot time from
+    the newest `daemon.boot`; running HEAD (the sha the live process booted at) vs origin/main with a STALE
+    flag reusing W1-T126's existing comparison rather than a second one; and a CRASH-LOOP row fed by the
+    EXISTING `detectCrashLoop` over `daemon.boot` timestamps (incident b becomes a named line, not archaeology).
+    LATCHES: EVERY state marker enumerated from ONE table — STOP, PAUSE, QUIET_HOURS, DEPLOY_FAILED,
+    DEPLOY_AUTO, inflight locks, pending kicks, drain-now — each with its AGE and its STATED CONSEQUENCE in
+    plain language ("DEPLOY_FAILED, 17h — the checkout was rolled back; the daemon is running the PRIOR
+    HEAD"). The table is DATA, so a marker added later is a row, not a code branch; a marker with no row is a
+    lint-able gap rather than a silent omission.
+    LAST CYCLE: the newest `daemon.summary` line — attempted / merged / stopReason + stopDetail / cost / ticks
+    — with its age. No summary in the ledger renders "no cycle recorded", never zeros.
+    NEXT ACTION: each section ends with AT MOST ONE next action, drawn from a data table keyed by the
+    condition (DEPLOY_FAILED -> the deploy-supervisor recovery step; STALE head -> the kickstart step). No
+    condition, no line — a board that always prints advice trains the operator to skip it.
+    SCOPE FENCE: the derived/remote half (BLOCKERS BY CLASS, QUEUE HEAD, INBOX, HEADROOM) is W1-T280 and
+    APPENDS to this same model. This task ships no GitHub read and no new sensor.
+  acceptance:
+    - claim: "`rmd status` renders LIVENESS with per-service running/pid/boot-time and the running HEAD vs origin/main STALE flag, and any fact it cannot resolve renders as an explicit unknown — never a zero or a healthy-looking default"
+      proof: "unit test: test/status-board.test.ts"
+    - claim: "the incident-(a) falsifier: a seeded state/DEPLOY_FAILED marker renders in LATCHES with its AGE and its stated CONSEQUENCE plus the single next action — the ~17h-invisible latch is impossible against this board"
+      proof: "unit test: test/status-board.test.ts"
+    - claim: "the incident-(b) falsifier: a seeded daemon.boot burst that trips the EXISTING detectCrashLoop renders as a named LIVENESS condition, so a crash-loop can no longer read as 'queue not processing'"
+      proof: "unit test: test/status-board.test.ts"
+    - claim: "LAST CYCLE renders the newest daemon.summary (attempted/merged/stopReason+stopDetail/cost) with its age, and an empty ledger renders 'no cycle recorded' rather than zeros"
+      proof: "unit test: test/status-board.test.ts"
+    - claim: "--json emits the SAME model the text renderer projects (one read model, two renderers), and the verb exits 0 with no daemon running and no network reachable"
+      proof: "unit test: test/status-board.test.ts"
+  risk: high
+  origin: feedback#fb-1784919210522-5ac4ca
+  plan_refs: ["§7", "§5D"]
+  files: [src/lib/status-board.ts, src/run-task.ts, test/status-board.test.ts, docs/operator-guide.md]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-08-01 from feedback fb-1784919210522-5ac4ca, DECOMPOSED into two tasks under standing rule
+    19 (the entry names seven sections across two very different data provenances; one task shipping all seven
+    is >=2 subsystems by inspection). The split line is PROVENANCE, not convenience: W1-T279 is local
+    filesystem + ledger + process state (offline-safe, no gh), W1-T280 adds the derived/remote sections onto
+    the same model. Sources verified at filing rather than assumed: docs/operator-guide.md's command table
+    (no status verb exists), docs/deploy-supervisor.md (DEPLOY_FAILED semantics), src/lib/fleet-control.ts
+    (stop/pause/quiet markers + detail readers), src/lib/inflight-lock.ts, src/lib/daemon.ts:1121-1123
+    (daemon.summary) and its detectCrashLoop/DEFAULT_CRASHLOOP_WINDOW block. RENDERS, NEVER SENSES: every
+    input already exists; a missing sensor is a separate filing (the live-worker states of
+    fb-1785237627858-ffafd9, which names this verb as their renderer). NOT a re-decision of the 2026-07-20
+    menu-bar deferral in DECISIONS.md (that ruled on a NATIVE glanceable, on the ground that the console
+    covers at-a-glance status; this is the terminal verb and the JSON the console's Now tab will consume)."
+- id: W1-T280
+  title: "rmd status, half 2 of 2 — the DERIVED sections append to the same board: BLOCKERS BY CLASS (circuit-broken with reset ETA, dispatch.indeterminate with the gh-window note, blocked PRs by named reason), QUEUE HEAD (next dispatchables, perpetual-attempt items flagged with per-cycle cost), INBOX (ready/not-ready counts), HEADROOM (telemetry + enforcement on/off), each with its single next action and an honest UNKNOWN when GitHub is unreachable"
+  repo: remudero
+  depends_on: ["W1-T279"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "fb-1784919210522-5ac4ca, second half. W1-T279 answers 'is it running'; this answers 'why is it
+    stalled' and 'what is it about to spend'. The 07-24 incident this half owns is the FOUR spurious
+    re-dispatches that burned money invisibly: the daemon already ledgers `dispatch.indeterminate`,
+    `dispatch.circuit_broken` and the breaker verdicts (src/lib/daemon.ts:1458-1472,
+    src/lib/status.ts's isDispatchBreakerTripped/evaluateDispatchBreaker), and drain.ts already computes the
+    dispatchable frontier (`runnableCandidates`, src/lib/drain.ts:202) — but a task being re-attempted every
+    cycle at a real per-cycle cost is visible to NOBODY without a ledger dig. Same for the rest: inbox
+    readiness is a computed InboxState (ready | not_ready | ... , src/lib/inbox.ts:268) with each failing
+    predicate already NAMED, and headroom is ledgered every cycle as a `daemon.headroom` telemetry line whose
+    enforcement is one switch (`resolveHeadroomEnabled`, src/lib/config.ts:142, per the operator ruling in
+    fb-1784894405468-a4153e / W1-T259) — so 'is the governor even on?' is answerable but unanswered."
+  design: |
+    APPENDS TO W1-T279's MODEL, does not fork it. Same object, same --json, four more sections; the text
+    renderer gains four blocks and no second derivation path.
+    BLOCKERS BY CLASS, each class rendered with its OWN vocabulary rather than a generic 'blocked' bucket:
+    (i) circuit-broken tasks with the RESET ETA (the breaker's own reset condition, read from the existing
+    breaker evaluation — not a re-implementation); (ii) `dispatch.indeterminate` tasks WITH the gh-window
+    note, so 'the gateway could not decide' never reads as 'the task is broken'; (iii) blocked PRs carrying
+    the reason the system ITSELF named (the named-reason doctrine, W1-T186 — the board RENDERS that
+    vocabulary and mints none of its own). SEQUENCING FENCE, stated so nothing is orphaned (standing rule
+    14): the paramedic's classified-surface vocabulary (fb-1784842083584-6cc22a) is NOT a dependency — this
+    board renders whatever named reason exists TODAY, and richer classes appear as rows when that filing
+    lands. A blocker with no named reason renders as exactly that ('reason not named' is itself a finding),
+    never as a blank.
+    QUEUE HEAD: the next N dispatchables from the EXISTING runnableCandidates, each with its attempt count,
+    and any task at or near a perpetual-attempt threshold FLAGGED with its observed per-cycle cost from the
+    ledger — the four-re-dispatch incident becomes a line the operator reads in one second.
+    INBOX: ready / not-ready counts from the computed InboxState, with the not-ready reason named for the
+    head item only (the board summarizes; `rmd inbox` remains the detail surface).
+    HEADROOM: the newest `daemon.headroom` telemetry line PLUS enforcement on/off read from the SAME switch
+    the daemon reads. Absent telemetry renders 'no headroom telemetry yet', never 0%; enforcement OFF is
+    stated explicitly, because 'headroom 12%' with the governor disabled means something entirely different
+    from the same number with it enabled.
+    GITHUB IS DECORATION, NEVER A GATE (the house rule the board inherits): every remote fact is read through
+    the existing batched gateway, never per row; a gateway failure degrades that section to a stated UNKNOWN
+    with the last known age, and NEVER blocks the local sections W1-T279 already renders.
+    NEXT ACTION: same one-per-section data table W1-T279 establishes, extended with rows for these classes.
+    CONSUMER, NAMED: the console Now tab (fb-1784770111145-cf7c24) is intended to consume this same --json
+    model. That tab is NOT built here; this task only guarantees the model is the single source it can bind to.
+  acceptance:
+    - claim: "BLOCKERS BY CLASS renders circuit-broken tasks with their reset ETA and dispatch.indeterminate tasks with the gh-window note, as DISTINCT classes reading off the existing breaker/ledger signals — never one generic 'blocked' bucket"
+      proof: "unit test: test/status-board.test.ts"
+    - claim: "the four-re-dispatch falsifier: a task re-attempted every cycle appears in QUEUE HEAD flagged with its attempt count AND its observed per-cycle cost, so repeated spend cannot stay invisible"
+      proof: "unit test: test/status-board.test.ts"
+    - claim: "a blocked item whose reason the system never named renders as 'reason not named' rather than blank, and no blocker class is minted here that the named-reason vocabulary does not already carry"
+      proof: "unit test: test/status-board.test.ts"
+    - claim: "HEADROOM renders the newest daemon.headroom telemetry WITH enforcement on/off from the same switch the daemon reads; absent telemetry renders 'no telemetry yet', never 0%"
+      proof: "unit test: test/status-board.test.ts"
+    - claim: "with the GitHub gateway unreachable the derived sections render a stated UNKNOWN and the LOCAL sections still render in full — the board never fails closed on a network outage, and never fetches per row"
+      proof: "unit test: test/status-board.test.ts"
+  risk: high
+  origin: feedback#fb-1784919210522-5ac4ca
+  plan_refs: ["§7", "§5D"]
+  files: [src/lib/status-board.ts, src/run-task.ts, test/status-board.test.ts, docs/operator-guide.md]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-08-01 from feedback fb-1784919210522-5ac4ca (second of the two-task decomposition; see
+    W1-T279's note for the split rationale). depends_on W1-T279 because it appends to that task's read model.
+    DELIBERATELY NOT DEPENDED ON: fb-1784842083584-6cc22a (the stuck-PR paramedic) and W1-T259 (the headroom
+    governor switch) — this board reads whatever those surfaces have written today and degrades honestly when
+    they have written nothing, so it cannot be held hostage by unbuilt siblings. Sibling relations recorded by
+    the feedback itself: 6cc22a ACTS where this READS; the named-reason doctrine (W1-T186) is the vocabulary
+    this renders; fb-1784770111145-cf7c24's Now tab is the intended --json consumer; fb-1785237627858-ffafd9
+    (live worker states) and fb-1785237559155-feef92 (cache-hit sensor) both name this verb as their renderer
+    and produce inputs it will pick up as rows, not as code branches."
 - id: W1-T254
   title: "reliable sweep post-review — a green PR whose remudero-review went absent on a new head never silently stalls (light-sweep ticker + outcome-keyed dedup + throw containment)"
   repo: remudero
