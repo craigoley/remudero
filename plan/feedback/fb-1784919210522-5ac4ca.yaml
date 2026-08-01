@@ -21,4 +21,4 @@ raw: "RMD STATUS — the operator has no single verb answering: is it running,
 attachments: []
 origin: cli
 status: proposed
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/1058
