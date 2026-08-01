@@ -89,6 +89,31 @@ drain:
 # fires once EITHER threshold crosses — mergesSinceMarker >= mergesThreshold OR
 # daysSinceMarker >= daysThreshold — whichever comes first. Retuning the cadence is now a
 # reviewed policy-data edit, never a source change + deploy.
+# The daemon's auto-triage rung (recon-DC #2, impl-DJ). It turns ONE feedback entry into a plan
+# proposal per idle period, spending ~$2.00 unsupervised each time.
+#
+# DEFAULT OFF, deliberately. Nothing changes until the operator sets `enabled.value: true`.
+#
+# THE TWO BOUNDS ARE THE WHOLE SAFETY ARGUMENT, and they multiply rather than overlap:
+#   minIntervalMinutes 60 -> at most 24 fires/day by pacing alone (~$48/day worst case)
+#   maxPerDay          4  -> the real ceiling: ~$8/day, ~$56/week
+# The daemon idled ~390 times in ten hours on 2026-08-01; a per-POLL rung would have spent ~$780
+# that night. maxPerDay is what makes the worst case a number the operator can accept in advance.
+autoTriage:
+  enabled:
+    value: false
+    origin: "net-new"   # a rung that spends unsupervised is opted into, never shipped on
+  minIntervalMinutes:
+    value: 60
+    origin: "net-new"   # one idle hour is the smallest gap that is clearly not per-poll
+    min: 5
+    max: 1440
+  maxPerDay:
+    value: 4
+    origin: "net-new"   # ~$8/day at the measured ~$2.00/run; 4 PRs is a reviewable morning
+    min: 1
+    max: 24
+
 retro:
   mergesThreshold:
     value: 25

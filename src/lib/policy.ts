@@ -63,6 +63,12 @@ export interface PolicyValues {
     mergesThreshold: number;
     daysThreshold: number;
   };
+  /** The daemon's auto-triage rung (recon-DC #2). DEFAULT OFF — it spends unsupervised. */
+  autoTriage: {
+    enabled: boolean;
+    minIntervalMinutes: number;
+    maxPerDay: number;
+  };
   headroom: {
     curve: PolicyHeadroomRung[];
     reservePct: number;
@@ -112,6 +118,9 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   "sweep.strikeCap": "lifted",
   "sweep.wipLimit": "lifted",
   "drain.max": "lifted",
+  "autoTriage.enabled": "net-new",
+  "autoTriage.minIntervalMinutes": "net-new",
+  "autoTriage.maxPerDay": "net-new",
   "retro.mergesThreshold": "lifted",
   "retro.daysThreshold": "lifted",
   "headroom.curve": "lifted",
@@ -284,6 +293,18 @@ export function validatePolicy(raw: unknown): Policy {
 
   const retroRaw = raw.retro;
   if (!isPlainObject(retroRaw)) throw new PolicyError("policy.yaml: 'retro' must be a mapping.");
+  // AUTO-TRIAGE IS OPTIONAL, AND ITS ABSENCE MEANS OFF (impl-DJ). Making the block REQUIRED would
+  // break every existing policy.yaml on load until someone edited it — and the safe default for a
+  // rung that spends unsupervised is "not running", which is exactly what absence should mean. Only
+  // a PRESENT block is validated, so a typo in an opted-in table still fails loud.
+  const autoTriageRaw = raw.autoTriage as Record<string, unknown> | undefined;
+  const autoTriage = autoTriageRaw
+    ? {
+        enabled: booleanField("autoTriage.enabled", autoTriageRaw.enabled, origin),
+        minIntervalMinutes: numberField("autoTriage.minIntervalMinutes", autoTriageRaw.minIntervalMinutes, origin),
+        maxPerDay: numberField("autoTriage.maxPerDay", autoTriageRaw.maxPerDay, origin),
+      }
+    : { enabled: false, minIntervalMinutes: 60, maxPerDay: 4 };
   const retroMergesThreshold = numberField("retro.mergesThreshold", retroRaw.mergesThreshold, origin);
   const retroDaysThreshold = numberField("retro.daysThreshold", retroRaw.daysThreshold, origin);
 
@@ -306,6 +327,7 @@ export function validatePolicy(raw: unknown): Policy {
       sweep: { staleDays, strikeCap: sweepStrikeCap, wipLimit },
       drain: { max: drainMax },
       retro: { mergesThreshold: retroMergesThreshold, daysThreshold: retroDaysThreshold },
+      autoTriage,
       headroom: { curve, reservePct, enabled: headroomEnabled },
       launchd: { throttleIntervalS },
     },
