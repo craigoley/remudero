@@ -181,13 +181,16 @@ import { assertProposedPlanLoads,
 import { mintNextTaskId, type MintDegradation, type MintSources } from "./lib/task-id.js";
 import {
   firstUnreservedAtOrAbove,
+  reserveTaskIdBlock,
   reserveTaskIdFrom,
+  type TaskIdReservationBlock,
   taskIdReservationsDir,
   type TaskIdReservationHandle,
 } from "./lib/task-id-reservation.js";
 import {
   applyPlanProposalCommit,
   decidePlanArchitect,
+  unreservedFiledIds,
   diffCitesResearchSource,
   formatPlanVerdictLine,
   outOfPlanScopeFilesInDiff,
@@ -10515,6 +10518,18 @@ const PLAN_WORKER_TOOLS = ["Read", "Write", "Edit", "Grep", "Glob", "WebSearch",
  *  `spawnWorker` without paying for a real worker, so diff-coverage reported every added
  *  line here as uncovered whatever it contained. Passing nothing is the production
  *  contract and behaves exactly as before. */
+/**
+ * How many task ids `rmd plan` reserves before spawning.
+ *
+ * The lane files "one or more" tasks and the count is unknowable until the worker runs, so this is a
+ * declared CEILING rather than a prediction: the worker is told it may file at most this many, and
+ * every unused id is released in the same `finally` as the used ones. Five is chosen to be larger
+ * than any plan run this repo has produced (the largest single filing to date is the 8-task session
+ * harvest, which was a HAND filing, not a `rmd plan` run) while staying small enough that a crashed
+ * run holds a trivial slice of the id space until the next acquirer reclaims it lazily.
+ */
+export const PLAN_MAX_NEW_TASKS = 5;
+
 export async function planCommand(
   rest: string[],
   opts: { spawn?: typeof spawnWorker; config?: Config } = {},
@@ -10565,7 +10580,36 @@ export async function planCommand(
   // Liveness token so a concurrent drain's prune skips this plan worktree.
   writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
 
+  let planIdBlock: TaskIdReservationBlock | undefined;
+
   try {
+    // ID MINT + BLOCK RESERVATION (impl-DV), the SAME ordering triage uses at :10222-:10240: mint
+    // from the FRESH worktree's plan, reserve BEFORE spawning, hand the worker ids it cannot
+    // collide on. Until now this lane minted NOTHING — `planArchitectPrompt` received no id, so its
+    // worker chose one by reading the plan files, and nothing could reserve what was never minted.
+    //
+    // A BLOCK, NOT ONE ID, because this lane files "one or more" tasks (plan-architect.ts's PROPOSED
+    // wording in every mode) and the count is unknowable until the worker has run. Reserving a
+    // bounded block up front is the only ordering that both refuses cheaply on collision and leaves
+    // no id stranded — every id, used or not, is released in the `finally` below.
+    const mint = mintNextTaskIdWithHistory({
+      planPath: join(worktreePath, "plan", "tasks.yaml"),
+      repoRoot: worktreePath,
+      openPrTexts: () => openPrMintTexts(owner, repo),
+    });
+    planIdBlock = reserveTaskIdBlock(mint.n, PLAN_MAX_NEW_TASKS, taskIdReservationsDir(config.root), {
+      info: { purpose: `rmd plan --mode=${mode} (run ${runId})` },
+    });
+    const reservedIds = planIdBlock.ids.map((n) => `W1-T${n}`);
+    log("plan.id_minted", {
+      reserved: reservedIds,
+      mint_id: mint.id,
+      reserved_above_mint: planIdBlock.ids[0] !== mint.n,
+      max_seen: mint.maxSeen,
+      degraded: mint.degraded.map((d) => d.source),
+    });
+    say(`reserved ${reservedIds.length} task id(s): ${reservedIds.join(", ")}`);
+
     const worker = await spawn({
       cwd: worktreePath,
       permissionMode: "bypassPermissions",
@@ -10574,7 +10618,7 @@ export async function planCommand(
       maxTurns: mountsTable.architect.maxTurns, // MOUNT-GOVERNED (§9) — never a hardcoded literal.
       maxBudgetUsd: DEFAULT_BUDGET_USD,
       config,
-      prompt: planArchitectPrompt(mode, brief, runId),
+      prompt: planArchitectPrompt(mode, brief, runId, reservedIds),
       tools: PLAN_WORKER_TOOLS,
     });
     log("plan.synthesized", {
@@ -10593,6 +10637,20 @@ export async function planCommand(
       .filter(Boolean);
     const verdict = parsePlanVerdict([worker.text, worker.blocks.join("\n")].join("\n"));
     const decision = decidePlanArchitect({ verdict, changedFiles });
+
+    // OUTPUT VALIDATION (impl-DV): did the worker actually FILE under the ids we reserved? Reserving
+    // is half a contract; this is the other half. Report-only on purpose — see `unreservedFiledIds`.
+    if (decision.action === "propose") {
+      const planDiff = execFileSync("git", ["-C", worktreePath, "diff", "origin/main", "--", "plan"], {
+        encoding: "utf8",
+        maxBuffer: 64 * 1024 * 1024,
+      });
+      const unreserved = unreservedFiledIds(planDiff, reservedIds);
+      log("plan.id_check", { reserved: reservedIds, unreserved, ok: unreserved.length === 0 });
+      if (unreserved.length > 0) {
+        say(`warning: plan worker filed unreserved id(s): ${unreserved.join(", ")} (reserved: ${reservedIds.join(", ")})`);
+      }
+    }
 
     if (decision.action === "error") {
       log("plan.error", { error: decision.reason, changed_files: changedFiles, subtype: worker.subtype });
@@ -10690,6 +10748,10 @@ export async function planCommand(
     throw e;
   } finally {
     removeRunLock(worktreePath); // terminal ⇒ drop the liveness token
+      // Release EVERY reserved id — the ones the worker filed AND the ones it declined. Once the
+      // PR exists the mint sees those ids via openPrMintTexts, so holding them longer would only
+      // punch holes in the id space (the phantom-id trap: W1-T199/224/247/263).
+      planIdBlock?.releaseAll();
   }
 }
 

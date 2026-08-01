@@ -217,3 +217,70 @@ export function firstUnreservedAtOrAbove(
   while (held.has(id)) id++;
   return id;
 }
+
+/** A contiguous-in-intent set of reserved ids, released as a unit. */
+export interface TaskIdReservationBlock {
+  /** The reserved ids, ascending. Not necessarily contiguous — contention advances past a holder. */
+  readonly ids: number[];
+  /** The handles, in the same order as {@link ids}. */
+  readonly handles: TaskIdReservationHandle[];
+  /** Release EVERY handle. Idempotent, and never throws — a release failure must not mask the
+   *  caller's own error. */
+  releaseAll(): void;
+}
+
+/**
+ * Reserve `count` ids at or above `startId`, as a block.
+ *
+ * WHY A BLOCK EXISTS AT ALL. `rmd plan --mode=create` and `--mode=expand` both file "one or more"
+ * tasks, and the count is not knowable until the worker has run — but the ids must be reserved
+ * BEFORE it spawns, or the reservation guarantees nothing. Reserving a bounded block up front and
+ * releasing the whole of it afterwards is the only ordering that both spends nothing on a collision
+ * and leaves no id stranded.
+ *
+ * THIS ALSO CLOSES A GAP #1075 LEFT IN TRIAGE, which is worth stating plainly: triage reserves ONE
+ * id and then tells its worker "if you need more, number them upward" (lib/triage.ts) — so a triage
+ * run filing two tasks has its SECOND id unreserved, and that id is exactly what a concurrent plan
+ * run would take. A block is what makes "more than one" safe for either lane.
+ *
+ * EVERY ID IS RELEASED, INCLUDING THE ONES NOBODY USES — the phantom-id trap. The four ids this repo
+ * has already lost (W1-T199, W1-T224, W1-T247, W1-T263) were lost by being filed and folded away; a
+ * block that reserved five and released one would be a fifth way to punch holes in the id space.
+ * {@link TaskIdReservationBlock.releaseAll} is called from the caller's `finally`, so the used and
+ * the unused are freed on exactly the same path, and a partial failure mid-acquire releases what it
+ * already took before rethrowing.
+ */
+export function reserveTaskIdBlock(
+  startId: number,
+  count: number,
+  dir: string,
+  opts: ReserveTaskIdOpts = {},
+): TaskIdReservationBlock {
+  if (!Number.isInteger(count) || count < 1) {
+    throw new TypeError(`reserveTaskIdBlock: count must be a positive integer, got ${String(count)}`);
+  }
+  const handles: TaskIdReservationHandle[] = [];
+  const releaseAll = (): void => {
+    for (const h of handles) {
+      try {
+        h.release();
+      } catch {
+        /* a release failure must never mask the caller's own error, nor stop the other releases */
+      }
+    }
+  };
+  try {
+    let next = startId;
+    for (let i = 0; i < count; i++) {
+      const h = reserveTaskIdFrom(next, dir, opts);
+      handles.push(h);
+      next = h.id + 1; // ask ABOVE the one just taken, so a block never reserves the same id twice
+    }
+  } catch (err) {
+    // PARTIAL ACQUIRE MUST NOT STRAND. Whatever was taken before the failure is released here, so
+    // the only paths out of this function are "all of them held" or "none of them held".
+    releaseAll();
+    throw err;
+  }
+  return { ids: handles.map((h) => h.id), handles, releaseAll };
+}
