@@ -8925,6 +8925,28 @@ function buildCreditCandidates(
  * and one `gh issue list` for the open queue; a FAILED issue-list read yields [] (do nothing
  * this cycle, never a false "zero open"), the same best-effort contract as buildCreditCandidates.
  */
+/**
+ * What the escalation reconciler's INTAKE saw, so `total: 0` stops being ambiguous.
+ *
+ * `sweep.escalation_reconcile.summary` logs `total` = `candidates.length`, counted AFTER the open
+ * issues have been turned into candidates — so `total: 0` reads identically whether nothing was
+ * open or everything open was dropped. That ambiguity cost a full recon: an operator saw `total: 0`
+ * beside three open needs-human issues and reasonably concluded the reconciler was broken. It was
+ * not — they had been closed minutes earlier, one of them BY the reconciler. But the defective
+ * reading was REAL as recently as the same afternoon: between 16:00 and 17:48, two issues were open
+ * and labelled while 23 of 24 summaries reported `total: 0` (fixed by PR #1084).
+ *
+ * `issuesSeen: 3, total: 0` is the signature of that defect. The old line could not express it.
+ */
+export interface EscalationIntake {
+  /** Issues the query returned, taken one statement after the read and before the candidate loop. */
+  issuesSeen: number;
+  /** Dropped for carrying no `**Task:**` trailer — genuinely human territory. */
+  droppedNoTaskTrailer: number;
+  /** Dropped for naming neither a plan task nor any resolvable PR referent. */
+  droppedNoReferent: number;
+}
+
 export function buildEscalationReconcileCandidates(
   owner: string,
   repo: string,
@@ -8934,7 +8956,7 @@ export function buildEscalationReconcileCandidates(
   // Injectable seams (mirrors buildCreditCandidates' buildBatchedGithub): real callers omit
   // both and get the live `gh` gateways; tests supply fakes to drive the parse + derivation
   // without shelling out.
-  injected: { issues?: IssueGateway; github?: GitHub } = {},
+  injected: { issues?: IssueGateway; github?: GitHub; onIntake?: (intake: EscalationIntake) => void } = {},
 ): EscalationReconcileCandidate[] {
   const issues = injected.issues ?? ghIssueGateway(owner, repo);
   let open: OpenIssue[];
@@ -8944,11 +8966,24 @@ export function buildEscalationReconcileCandidates(
     log?.("sweep.escalation_reconcile.list_failed", { error: String((e as Error)?.message ?? e) });
     return []; // a failed read is "do nothing this cycle", never a confident "zero open needs-human"
   }
+  // WHERE `issuesSeen` IS TAKEN, and why HERE. This is the list as the gateway returned it and as
+  // the loop below is about to consume it — one statement after the read, before the loop, before
+  // any per-issue derivation. Every drop the summary's ambiguity is about happens in that loop, so
+  // `issuesSeen - total` counts exactly those drops and nothing else.
+  //
+  // Deliberately NOT the raw REST row count. `parseLabelledIssuesRest` already drops rows carrying
+  // `pull_request` (escalate.ts:160-173) — an intended filter, not a defect — so counting rows
+  // would make `issuesSeen > total` on a healthy pass whenever a PR happens to carry the label,
+  // i.e. a false alarm in the one field added to stop false alarms.
+  const intake: EscalationIntake = { issuesSeen: open.length, droppedNoTaskTrailer: 0, droppedNoReferent: 0 };
   const deps: DeriveDeps = { ledgerPath, github: injected.github ?? buildBatchedGithub(owner, repo, { log }) };
   const candidates: EscalationReconcileCandidate[] = [];
   for (const issue of open) {
     const taskId = /^\*\*Task:\*\*\s*(\S+)\s*$/m.exec(issue.body ?? "")?.[1];
-    if (!taskId) continue; // no named task — leave untouched (human territory)
+    if (!taskId) {
+      intake.droppedNoTaskTrailer++;
+      continue; // no named task — leave untouched (human territory)
+    }
     const task = plan.byId.get(taskId);
     // SYNTHETIC PR REFERENT. An escalation for an untrailered operator-lane PR names it `PR-<n>`
     // (see the clarification rung's `escalate`, above) — a real, resolvable referent that is
@@ -8976,7 +9011,10 @@ export function buildEscalationReconcileCandidates(
       // for exactly this reason. Title is the fallback source — every escalation title carries the PR URL too,
       // so a body that was edited (or truncated by a gateway) still resolves.
       const bodyReferent = synthetic ? undefined : prReferentFromIssueText(issue.body) ?? prReferentFromIssueText(issue.title);
-      if (!synthetic && bodyReferent === undefined) continue; // no task, no PR anywhere — genuinely human territory
+      if (!synthetic && bodyReferent === undefined) {
+        intake.droppedNoReferent++;
+        continue; // no task, no PR anywhere — genuinely human territory
+      }
       const prNumber = synthetic ? Number(synthetic[1]) : bodyReferent!;
       const ref = deps.github.prByRef(prNumber);
       const state = ref?.state?.toUpperCase();
@@ -9016,6 +9054,13 @@ export function buildEscalationReconcileCandidates(
         source: proj.source,
       },
     });
+  }
+  // NON-FATAL BY CONSTRUCTION: a throwing observer must never take out the sweep, which runs this
+  // every pass on the live fleet. The reconciler proceeds with whatever it built either way.
+  try {
+    injected.onIntake?.(intake);
+  } catch {
+    /* observability only — never fatal */
   }
   return candidates;
 }
@@ -9554,11 +9599,16 @@ export async function sweepEscalationReconcile(
   log: (step: string, extra?: Record<string, unknown>) => void,
   opts: { dryRun?: boolean; issues?: IssueGateway; github?: GitHub } = {},
 ): Promise<EscalationReconcileSummary> {
+  let intake: EscalationIntake | undefined;
   const candidates = buildEscalationReconcileCandidates(owner, repo, plan, ledgerPath, log, {
     issues: opts.issues,
     github: opts.github,
+    onIntake: (i) => {
+      intake = i;
+    },
   });
   return runEscalationReconcile(candidates, {
+    intake,
     closeIssue: buildEscalationCloser(owner, repo, opts.issues),
     ledgerPath,
     runId,

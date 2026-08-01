@@ -2816,6 +2816,12 @@ export interface EscalationReconcileDeps {
   dryRun?: boolean;
   /** Bound on closes this cycle; defaults to {@link MAX_ESCALATION_CLOSES_PER_CYCLE}. */
   maxCloses?: number;
+  /**
+   * What the candidate BUILDER saw on intake, so the summary can distinguish "nothing was open"
+   * from "everything open was dropped". Optional and defaulted: a caller that does not supply it
+   * gets exactly the line it got before, never a crash and never a fabricated zero.
+   */
+  intake?: { issuesSeen: number; droppedNoTaskTrailer: number; droppedNoReferent: number };
 }
 
 /**
@@ -2922,7 +2928,25 @@ export async function runEscalationReconcile(
   }
 
   const summary: EscalationReconcileSummary = { total: candidates.length, closed, results };
-  log("sweep.escalation_reconcile.summary", { total: summary.total, closed: summary.closed });
+  // `total: 0` USED TO BE AMBIGUOUS — see EscalationIntake (run-task.ts) for the recon this cost.
+  // `issues_seen` is always emitted (one integer, negligible on a line that fires ~16x/hour) so the
+  // healthy case is positively identifiable rather than merely un-alarming.
+  //
+  // The per-reason tally rides ONLY on the abnormal path. On every healthy pass issuesSeen === total
+  // and the line is one field wider than before; the detail appears exactly when there is something
+  // to explain, which is also when an operator is reading it.
+  const intake = deps.intake;
+  const dropped =
+    intake && intake.issuesSeen > summary.total
+      ? { no_task_trailer: intake.droppedNoTaskTrailer, no_referent: intake.droppedNoReferent }
+      : undefined;
+  log("sweep.escalation_reconcile.summary", {
+    total: summary.total,
+    closed: summary.closed,
+    // `undefined` when the caller supplied no intake — the field is absent, never a misleading 0.
+    ...(intake ? { issues_seen: intake.issuesSeen } : {}),
+    ...(dropped ? { dropped } : {}),
+  });
   return summary;
 }
 
