@@ -27,7 +27,7 @@
 
 import type { ServerResponse } from "node:http";
 import type { Plan, Task, TaskRisk } from "./plan.js";
-import { TASK_STATUSES } from "./plan.js";
+import { DEFAULT_RISK, TASK_STATUSES } from "./plan.js";
 import {
   createLedgerTailCache,
   deriveStatus,
@@ -161,10 +161,18 @@ export function computeBoardSnapshot(deps: BoardDeps): BoardSnapshot {
   const byId = projectPlan(deps.plan, effectiveDeps);
   const lastActivity = lastActivityByTask(lines);
   const tasks: BoardRow[] = [...byId.values()].map((p) => {
-    // Every projection's taskId is one of the plan's own tasks (projectPlan derives from
-    // deps.plan.tasks), so this lookup is always present — the join is total, never partial.
-    const task = deps.plan.byId.get(p.taskId)!;
-    const row: BoardRow = { ...p, title: task.title, risk: task.risk };
+    // Most projections' taskId is one of the plan's own tasks (projectPlan derives the bulk of
+    // its rows from deps.plan.tasks) — but W1-T283 added a SECOND source: a task-less
+    // escalation's own row, keyed by whatever id its ledger line named, which owns no plan
+    // Task to join title/risk from. Fall back to the escalation's own title (or the bare id)
+    // and the plan's default risk band rather than a non-null assertion that would crash the
+    // whole snapshot the first time such a row appeared.
+    const task = deps.plan.byId.get(p.taskId);
+    const row: BoardRow = {
+      ...p,
+      title: task ? task.title : (p.escalationTitle ?? p.taskId),
+      risk: task ? task.risk : DEFAULT_RISK,
+    };
     const ts = lastActivity.get(p.taskId)?.ts;
     if (ts) row.lastActivityAt = ts;
     if (p.phase) {
