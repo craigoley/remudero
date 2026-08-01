@@ -102,6 +102,7 @@ import { makeTempDir, sweepStaleTempDirs, withTempDir } from "./lib/tmp.js";
 import { reapWorkerScratch, sweepStaleWorkerScratch } from "./lib/worker-scratch.js";
 import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateServeLaunchdPlist, generateSupervisorLaunchdPlist, launchctlGuiTarget, launchdPlistPath, SERVE_LABEL, serveLogPaths, SUPERVISOR_LABEL } from "./lib/launchd.js";
 import { realDeployDeps, requestDeploy, runDeployCycle } from "./lib/deployer.js";
+import { buildStatusBoard, renderStatusBoardText, type ServiceName } from "./lib/status-board.js";
 import { buildDigest, buildMarkerAwareDigest, consoleCardUrl, sendDigest, sendMarkerAwareDigest, sendRundown } from "./lib/digest.js";
 import { createLastSeenStore, hashToken, lastSeenPath } from "./lib/last-seen.js";
 import {
@@ -316,6 +317,7 @@ import {
   reviewerOutcome,
   reviewerVerdictContract,
   reviewEvidenceStrength,
+  cappedReason,
   reviewLedgerLegibilityFields,
   type CappedOverride,
   type CriterionVerdict,
@@ -4644,9 +4646,15 @@ export type MaterializeReviewWorktreeResult =
  * verdict, or a capped one with no materialization failure at all (rmd
  * review's checkout was simply never attempted), is returned unchanged. */
 export function reviewPostedDescription(
-  verdict: Pick<ReviewVerdict, "summary" | "capped">,
+  verdict: Pick<ReviewVerdict, "summary" | "capped"> & Partial<Pick<ReviewVerdict, "criteria">>,
   materializationFailure?: MaterializationFailure,
 ): string {
+  // W1-DH: a capped verdict names WHY it was capped even when materialization was fine — the
+  // code-span defect capped 0/N with a perfectly healthy checkout, and the description said nothing.
+  const skipReason = verdict.capped && verdict.criteria ? cappedReason(verdict.criteria) : undefined;
+  if (verdict.capped && !materializationFailure && skipReason) {
+    return `${verdict.summary} — capped: ${skipReason}`;
+  }
   return verdict.capped && materializationFailure
     ? `${verdict.summary} — degraded: ${materializationFailure.errorClass}: ${materializationFailure.message}`
     : verdict.summary;
@@ -7960,6 +7968,90 @@ export async function upCommand(rest: string[], deps: UpDeps = {}): Promise<numb
 
   const ok = (!daemonPlistPresent || daemonSvc.loaded) && (!servePlistPresent || serveListening);
   return ok ? 0 : 1;
+}
+
+/** Injectable seam for {@link statusCommand} — every default is the real, production behaviour;
+ *  a test overrides just enough to avoid `loadConfig()`'s `which claude` shell-out and any real
+ *  launchd query, the same "swap the edges, keep the middle real" shape as {@link DownDeps}. */
+export interface StatusDeps {
+  loadConfig?: () => Config;
+  queryService?: (service: ServiceName) => { running: boolean; pid: number | null };
+  ledgerPathFor?: (config: Config) => string;
+  repoRoot?: string;
+  /** The DERIVED half's (W1-T280) batched GitHub gateway; defaults to
+   *  `buildBatchedGithub(owner, repo)` off this checkout's own `origin` remote. Overridable so
+   *  a test never shells to `gh`/`git remote`; `null` explicitly omits the gateway (the same
+   *  "unreachable" degrade a real outage produces). */
+  github?: GitHub | null;
+  /** Overridable so a test can force the `resolveOwnerRepo`/`buildBatchedGithub` construction
+   *  path to throw (the "no git remote" degrade) without shelling to a real `git config`. */
+  resolveOwnerRepo?: () => { owner: string; repo: string };
+  buildBatchedGithub?: typeof buildBatchedGithub;
+  buildStatusBoard?: typeof buildStatusBoard;
+  renderStatusBoardText?: typeof renderStatusBoardText;
+  out?: (line: string) => void;
+  err?: (line: string) => void;
+}
+
+/**
+ * `rmd status [--json]` — "is it running, and why is it stalled" (W1-T279 + W1-T280,
+ * MASTER-PLAN §7/§5D). LIVENESS/LATCHES/LAST CYCLE are LOCAL TRUTH ONLY (no `git fetch`, no
+ * `gh` call — offline-safe by construction). BLOCKERS BY CLASS/QUEUE HEAD/INBOX/HEADROOM are
+ * DERIVED: mostly local (the ledger's own dispatch-breaker/blocked-PR/headroom signals), except
+ * QUEUE HEAD's dispatch eligibility and INBOX's dep-merged predicate, which read through ONE
+ * batched GitHub gateway (`buildBatchedGithub`) this command constructs — a network read, but
+ * NEVER a gate: an unreachable/unconfigured gateway degrades exactly those rows to a stated
+ * unknown, never a throw, never a delayed exit (see status-board.ts's own header doc). This
+ * command is a THIN call site: it resolves the things that live at the CLI layer (the launchd
+ * process query, the plan/tasks.yaml + GitHub-gateway construction, the headroom-governor
+ * config read) and hands everything else to the pure builder. Read-only: never writes a
+ * marker, never spawns anything, always exits 0 (bad args aside).
+ */
+export async function statusCommand(rest: string[], deps: StatusDeps = {}): Promise<number> {
+  const out = deps.out ?? ((l: string) => console.log(l));
+  const err = deps.err ?? ((l: string) => console.error(l));
+  const badArg = unknownArgError("status", rest, [], ["--json"]);
+  if (badArg) {
+    err(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const config = (deps.loadConfig ?? loadConfig)();
+  const uid = realUid();
+  const queryService =
+    deps.queryService ??
+    ((service: ServiceName): { running: boolean; pid: number | null } => {
+      const label = service === "daemon" ? DAEMON_LABEL : service === "serve" ? SERVE_LABEL : SUPERVISOR_LABEL;
+      const state = queryLaunchdService(label, uid);
+      // "running" means a live pid, not merely "loaded" — a bootstrapped-but-not-spawned job
+      // answers "is it running" with no, exactly like an unloaded one.
+      return { running: state.pid !== null, pid: state.pid };
+    });
+  const buildBoard = deps.buildStatusBoard ?? buildStatusBoard;
+  const render = deps.renderStatusBoardText ?? renderStatusBoardText;
+  const ledgerPath = (deps.ledgerPathFor ?? ledgerPathFor)(config);
+  const repoDir = deps.repoRoot ?? repoRoot;
+  // GITHUB IS DECORATION, NEVER A GATE: `resolveOwnerRepo`/`buildBatchedGithub` can themselves
+  // fail (no `git` remote, no network) — caught here so a status read NEVER throws on a bad
+  // network day; the board degrades the rows that needed it to a stated unknown instead.
+  let github: GitHub | undefined;
+  if (deps.github === undefined) {
+    try {
+      const { owner, repo } = (deps.resolveOwnerRepo ?? resolveOwnerRepo)();
+      github = (deps.buildBatchedGithub ?? buildBatchedGithub)(owner, repo);
+    } catch {
+      github = undefined;
+    }
+  } else {
+    github = deps.github ?? undefined;
+  }
+  const model = buildBoard(config.root, ledgerPath, {
+    queryService,
+    repoDir,
+    github,
+    resolveHeadroomEnabled: () => resolveHeadroomEnabled(config),
+  });
+  out(rest.includes("--json") ? JSON.stringify(model, null, 2) : render(model));
+  return 0;
 }
 
 // ── rmd serve — the operator console FRONT DOOR (W1-T139, MASTER-PLAN §7/§7B) ──
@@ -12246,6 +12338,11 @@ const COMMANDS: readonly CommandSpec[] = [
       "rmd up [--port <n>] [--host <addr>] [--allow-off-main]   # full resume (W1-T169): runs install-freshness FIRST (W1-T151 — a lockfile-changing pull triggers `npm ci` before anything starts), REFUSES to resume an off-main checkout unless --allow-off-main is given, loads the daemon launchd service, confirms/starts the serve launchd service, and prints a resume report (daemon pid, the console URL WITH its READ token via `rmd console-url`, the in-flight/queued head, needs-human count). IDEMPOTENT: already-up verifies + reports the running state, never a double start.",
   },
   {
+    name: "status",
+    usage:
+      "rmd status [--json]   # W1-T279+W1-T280: ONE verb answering 'is it running' AND 'why is it stalled' from ONE read model. LOCAL (no network): LIVENESS (daemon/serve/deploy-supervisor running/pid/boot-time, running HEAD vs origin/main with a STALE flag, crash-loop), LATCHES (every state marker — STOP/PAUSE/QUIET_HOURS/DEPLOY_FAILED/DEPLOY_AUTO/inflight locks/pending kicks/drain-now — with its age and stated consequence), LAST CYCLE (the newest daemon.summary). DERIVED: BLOCKERS BY CLASS (circuit-broken w/ reset note, dispatch.indeterminate w/ gh-window note, blocked PRs by sweep.ts's own named reason), QUEUE HEAD (next dispatchables, perpetual-attempt tasks flagged with observed per-cycle cost), INBOX (ready/not-ready counts, head not-ready reason), HEADROOM (newest telemetry + enforcement on/off from the same switch the daemon reads) — these read a batched GitHub gateway and degrade to a stated unknown on an outage, never a gate on the local sections. Each section ends with at most one next action. --json emits the exact same read model the text renders. Read-only: writes nothing, spawns nothing, always exits 0 (bad args aside).",
+  },
+  {
     name: "sweep",
     usage:
       "rmd sweep [--repo <name>] [--dry-run]   # level-triggered PR-pipeline reconciler (W1-T77, P22): re-derive EVERY open PR's disposition from observed state and take the ONE gated action — mergeable->arm auto-merge; blocked-fixable->W1-T76 fix rung; stale/superseded->close-with-reason; blocked-ambiguous->the W1-T78 clarification-question rung (a specific, decidable operator question to the §2 backlog + escalate() as transport, never a generic needs-human). Idempotent (a second sweep over unchanged state acts on nothing). The daemon runs this every poll; --dry-run previews dispositions and takes nothing.",
@@ -12683,6 +12780,10 @@ export async function main(
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(await upCommand(rest)) cannot carry a DA hit without forking the process; upCommand's own logic — install-freshness-first, the off-main refuse, the idempotent load sequencing, and the resume report — is unit-tested in test/rmd-down-up.test.ts (same irreducible-glue shape as the sibling console-url/away dispatch cases).
   if (cmd === "up") {
     process.exit(await upCommand(rest));
+  }
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await statusCommand(rest)) cannot carry a DA hit without forking the process; statusCommand's own logic (arg validation, the queryService closure, --json vs text) plus the read model it calls (buildStatusBoard/renderStatusBoardText) are unit-tested in test/status-board.test.ts (same irreducible-glue shape as the sibling console-url/away/down/up dispatch cases).
+  if (cmd === "status") {
+    process.exit(await statusCommand(rest));
   }
   if (cmd === "sweep") {
     process.exit(await sweepCommand(rest));
