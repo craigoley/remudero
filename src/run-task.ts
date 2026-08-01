@@ -288,6 +288,7 @@ import {
 } from "./lib/task-linter.js";
 import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount } from "./lib/mounts.js";
 import { loadPolicy, policyPath, PolicyError, type Policy, type PolicyHeadroomRung } from "./lib/policy.js";
+import { cloneReapRoots, reapStaleClones, tallyDispositions, type CloneReapSummary } from "./lib/clone-reaper.js";
 import { deriveTaskClass } from "./lib/task-class.js";
 import { realRiskJudge, resolveRiskJudgeMount, runRiskJudge, type RiskJudgeInput } from "./lib/risk-judge.js";
 import { loadSkillRegistry, renderSkillList, skillsDir, SkillError } from "./lib/skill.js";
@@ -7045,6 +7046,56 @@ export function headroomPolicyFromCurve(curve: PolicyHeadroomRung[]): HeadroomPo
   }));
 }
 
+/**
+ * The boot rung for {@link reapStaleClones} (impl-EK): survey the scratch roots for abandoned
+ * review clones and ledger the outcome. `scratchReap.enabled` gates whether anything is
+ * actually removed — while false this is a pure survey, which is the state it ships in.
+ *
+ * A LEDGER LINE, NOT A DECISION INPUT. `daemon.clone_reap` is deliberately NOT added to
+ * `DECISION_RELEVANT_LEDGER_STEPS`: nothing reads it to decide anything, so a rotation
+ * archiving it changes no behaviour. Adding it there would make the fleet carry a line
+ * forever for no consumer — the inverse of the `sweep.absent_repush` case, where the count
+ * IS the bound and rotation resets it.
+ *
+ * Deps are injectable and appended LAST so no positional caller shifts; the default path
+ * reads the real policy and the real roots.
+ */
+export function logCloneReapSurvey(
+  config: Config,
+  log: (step: string, fields: Record<string, unknown>) => void,
+  deps: {
+    roots?: () => string[];
+    reap?: typeof reapStaleClones;
+    policy?: () => { enabled: boolean; maxAgeHours: number };
+  } = {},
+): CloneReapSummary | null {
+  try {
+    const readPolicy =
+      deps.policy ?? (() => loadPolicy(policyPath(config.root)).values.scratchReap);
+    const { enabled, maxAgeHours } = readPolicy();
+    const reap = deps.reap ?? reapStaleClones;
+    const summary = reap((deps.roots ?? cloneReapRoots)(), {
+      dryRun: !enabled,
+      maxAgeMs: maxAgeHours * 60 * 60 * 1000,
+    });
+    const actionable = summary.candidates.filter(
+      (c) => c.disposition === "reaped" || c.disposition === "would-reap" || c.disposition === "in-use",
+    );
+    if (actionable.length) {
+      log("daemon.clone_reap", {
+        dry_run: summary.dryRun,
+        reaped: summary.reaped.length,
+        bytes_reclaimed: summary.bytesReclaimed,
+        candidate_bytes: actionable.reduce((n, c) => n + c.bytes, 0),
+        dispositions: tallyDispositions(summary.candidates),
+      });
+    }
+    return summary;
+  } catch {
+    return null; // best-effort, exactly like the sibling boot sweeps — never blocks boot
+  }
+}
+
 export async function daemonCommand(
   rest: string[],
   deps: {
@@ -7276,6 +7327,12 @@ export async function daemonCommand(
       if (scratch.removed.length) {
         log("daemon.scratch_sweep", { removed: scratch.removed.length, sample: scratch.removed.slice(0, 5) });
       }
+      // impl-EK boot rung: abandoned REVIEW CLONES (36 measured across the scratch roots on
+      // 2026-08-01, 5866 MiB). DRY-RUN UNTIL THE OPERATOR OPTS IN — `scratchReap.enabled` is
+      // false by default, so this SURVEYS and ledgers what it would reclaim and deletes
+      // nothing. Ownership is decided by CONTENT (a standalone clone of this repo), never a
+      // name glob: these roots are shared with another application and other sessions.
+      logCloneReapSurvey(config, log);
       // W1-T170 boot sweep: reap per-spawn worker-home dirs (`<root>/worker-home-<id>`)
       // orphaned by a run/spawn that ended without reaching its own reapWorkerHome
       // call (a kill -9, a crashed daemon). Same 24h age ceiling as the scratch/tmp

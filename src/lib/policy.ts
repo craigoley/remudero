@@ -77,6 +77,12 @@ export interface PolicyValues {
   launchd: {
     throttleIntervalS: number;
   };
+  /** The boot-time abandoned-review-clone reap (impl-EK). DEFAULT OFF — it DELETES, so the
+   *  operator turns it on; until then the boot pass surveys and ledgers, removing nothing. */
+  scratchReap: {
+    enabled: boolean;
+    maxAgeHours: number;
+  };
 }
 
 /** One field's provenance, as recorded on load — see this module's header. */
@@ -127,6 +133,8 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   "headroom.reservePct": "lifted",
   "headroom.enabled": "lifted",
   "launchd.throttleIntervalS": "net-new",
+  "scratchReap.enabled": "net-new",
+  "scratchReap.maxAgeHours": "lifted",
 };
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
@@ -318,6 +326,11 @@ export function validatePolicy(raw: unknown): Policy {
   if (!isPlainObject(launchdRaw)) throw new PolicyError("policy.yaml: 'launchd' must be a mapping.");
   const throttleIntervalS = numberField("launchd.throttleIntervalS", launchdRaw.throttleIntervalS, origin);
 
+  const scratchReapRaw = raw.scratchReap;
+  if (!isPlainObject(scratchReapRaw)) throw new PolicyError("policy.yaml: 'scratchReap' must be a mapping.");
+  const scratchReapEnabled = booleanField("scratchReap.enabled", scratchReapRaw.enabled, origin);
+  const scratchReapMaxAgeHours = numberField("scratchReap.maxAgeHours", scratchReapRaw.maxAgeHours, origin);
+
   return {
     values: {
       proofTimeoutMs,
@@ -330,6 +343,7 @@ export function validatePolicy(raw: unknown): Policy {
       autoTriage,
       headroom: { curve, reservePct, enabled: headroomEnabled },
       launchd: { throttleIntervalS },
+      scratchReap: { enabled: scratchReapEnabled, maxAgeHours: scratchReapMaxAgeHours },
     },
     origin,
   };

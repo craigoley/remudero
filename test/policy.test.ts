@@ -104,6 +104,15 @@ function goodRaw(): Record<string, unknown> {
     launchd: {
       throttleIntervalS: { value: 60, origin: "net-new", min: 10, max: 3600 },
     },
+    scratchReap: {
+      enabled: { value: false, origin: "net-new" },
+      maxAgeHours: {
+        value: 24,
+        origin: "lifted:src/lib/worker-scratch.ts (DEFAULT_SCRATCH_SWEEP_MAX_AGE_MS = 24h)",
+        min: 4,
+        max: 168,
+      },
+    },
   };
 }
 
@@ -340,11 +349,14 @@ test("every LIFTED field records origin=lifted:<source-site> — the net-new fie
   const p: Policy = loadPolicy(SHIPPED);
   // impl-DJ: the three `autoTriage.*` fields join `launchd.throttleIntervalS` as net-new — there is
   // no source literal to lift them from, because the rung they configure did not exist before.
+  // impl-EK: `scratchReap.enabled` joins them for the same reason — there was no prior
+  // literal gating a clone reap, because no clone reap existed.
   const NET_NEW = new Set([
     "launchd.throttleIntervalS",
     "autoTriage.enabled",
     "autoTriage.minIntervalMinutes",
     "autoTriage.maxPerDay",
+    "scratchReap.enabled",
   ]);
   const liftedPaths = Object.keys(p.origin).filter((path) => !NET_NEW.has(path));
   assert.ok(liftedPaths.length > 0);
