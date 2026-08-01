@@ -730,6 +730,22 @@ export function renderShellHtml(
   </div>
 </section>
 
+<!-- W1-T285: "accepted" is a real feedback status (set by NEEDS ME's own Accept button AND by a
+     proposal PR merging, panel-graph.ts's reconcileFeedbackEntries) but until this section existed
+     it had NO consumer -- an accepted entry just stopped matching NEEDS ME's grilling/proposed
+     filter and vanished with no downstream trace. This section is that consumer: it renders the
+     SAME latestFeedbackEntries NEEDS ME already receives (never a second, parallel fetch), so an
+     entry accepted by the button and one accepted by a merge are indistinguishable here -- both are
+     just status === "accepted" rows off the one feed. -->
+<section id="accepted" class="panel-section" aria-label="Accepted">
+  <h2><button type="button" class="section-header" id="accepted-toggle" aria-expanded="true" aria-controls="accepted-body">
+    <span>Accepted</span><span class="section-summary" id="accepted-summary">…</span><span class="section-chevron" aria-hidden="true">›</span>
+  </button></h2>
+  <div id="accepted-body">
+    <ul id="accepted-list" class="row-list">${skeletonRows(1)}</ul>
+  </div>
+</section>
+
 <section id="up-next" class="panel-section" aria-label="Up next">
   <h2><button type="button" class="section-header" id="up-next-toggle" aria-expanded="true" aria-controls="up-next-body">
     <span>Up next</span><span class="section-summary" id="up-next-summary">…</span><span class="section-chevron" aria-hidden="true">›</span>
@@ -1284,9 +1300,9 @@ export function renderShellHtml(
   // defaults ONCE per page load to collapsed iff it is genuinely empty at that point (this is the
   // whole of "NEEDS ME auto-expands when non-empty" -- it is not a special case, just this same
   // rule applied to the one section that is rarely empty on a busy fleet). ──────────────────────
-  const SECTION_IDS = ["now", "needs-me", "up-next", "recent", "rest"];
-  const SECTION_BODY_ID = { now: "now-body", "needs-me": "needs-me-body", "up-next": "up-next-body", recent: "recent-body", rest: "rest-detail" };
-  const SECTION_TOGGLE_ID = { now: "now-toggle", "needs-me": "needs-me-toggle", "up-next": "up-next-toggle", recent: "recent-toggle", rest: "rest-toggle" };
+  const SECTION_IDS = ["now", "needs-me", "accepted", "up-next", "recent", "rest"];
+  const SECTION_BODY_ID = { now: "now-body", "needs-me": "needs-me-body", accepted: "accepted-body", "up-next": "up-next-body", recent: "recent-body", rest: "rest-detail" };
+  const SECTION_TOGGLE_ID = { now: "now-toggle", "needs-me": "needs-me-toggle", accepted: "accepted-toggle", "up-next": "up-next-toggle", recent: "recent-toggle", rest: "rest-toggle" };
   const SECTION_PREFS_KEY = "rmd-console-sections-v1";
   function loadSectionPrefs() {
     try {
@@ -1475,16 +1491,17 @@ export function renderShellHtml(
     }
   }
 
-  /** Repaints the task-driven sections (NOW/NEEDS ME/UP NEXT/RECENT/rest) from \`tasksById\` +
-   *  the latest cached feedback/inbox/up-next/recent data -- the ONE function an SSE delta, a
-   *  poll snapshot, AND the cache-restore path all funnel through, so they can never drift into
-   *  different rendering codepaths. Every section render below is keyed/reconciled (never a
-   *  wholesale innerHTML replace), so calling this on every SSE tick costs only the rows that
-   *  actually changed. */
+  /** Repaints the task-driven sections (NOW/NEEDS ME/ACCEPTED/UP NEXT/RECENT/rest) from
+   *  \`tasksById\` + the latest cached feedback/inbox/up-next/recent data -- the ONE function an
+   *  SSE delta, a poll snapshot, AND the cache-restore path all funnel through, so they can never
+   *  drift into different rendering codepaths. Every section render below is keyed/reconciled
+   *  (never a wholesale innerHTML replace), so calling this on every SSE tick costs only the rows
+   *  that actually changed. */
   function paintFromTasksById() {
     const tasks = Array.from(tasksById.values());
     const nowIds = renderNow(tasks);
     const needsMeIds = renderNeedsMe(tasks, latestFeedbackEntries, latestInboxReady, latestInboxDrafting);
+    renderAccepted(latestFeedbackEntries);
     const upNextIds = renderUpNext(latestUpNextCards);
     const recentIds = renderRecent(latestRecentEntries);
     renderRest(tasks, new Set([...nowIds, ...needsMeIds, ...upNextIds, ...recentIds]));
@@ -1854,6 +1871,36 @@ export function renderShellHtml(
     updateTabTitle();
     updateGlanceAnomaly();
     return shown;
+  }
+  /** W1-T285: ACCEPTED's one row template -- deliberately the SAME shape as needsMeProposedHtml
+   *  (statusBadge + task-id + detail + optional proposal-PR link) minus the now-irrelevant
+   *  Accept/Reject buttons, so an operator recognizes it as "the thing I just accepted", not a
+   *  brand-new, unfamiliar row kind. */
+  function acceptedFeedbackHtml(e) {
+    return (
+      \`\${statusBadge("merged")}<span class="task-id">feedback#\${escapeHtml(e.id)}</span><span class="detail">accepted: \${escapeHtml(e.raw)}</span>\` +
+      (e.proposal_pr ? \` <span class="btn-row"><a href="\${escapeHtml(e.proposal_pr)}" target="_blank" rel="noopener noreferrer">proposal PR</a></span>\` : "")
+    );
+  }
+  function acceptedSummaryText(rows) {
+    if (rows.length === 0) return "nothing accepted yet";
+    const ago = oldestAgoText(rows, (r) => r.ts);
+    return \`\${rows.length} accepted\${ago ? \` · most recent \${ago}\` : ""}\`;
+  }
+  /** W1-T285: ACCEPTED is the missing consumer of feedback's \`accepted\` status -- an entry
+   *  disappearing from NEEDS ME (it no longer matches "grilling"/"proposed") is not the same as an
+   *  operator being able to SEE what accepting it did. Reads off the SAME \`feedbackEntries\` NEEDS
+   *  ME itself renders (the console's own data path, latestFeedbackEntries -- never a second fetch
+   *  or a helper nothing calls), so an entry accepted by the button and one accepted by a merge
+   *  (panel-graph.ts's reconcileFeedbackEntries, which persists the SAME "accepted" status) are
+   *  indistinguishable here -- both are just a status === "accepted" row off the one feed. */
+  function renderAccepted(feedbackEntries) {
+    const rows = [];
+    for (const e of feedbackEntries ?? []) {
+      if (e.status === "accepted") rows.push({ key: \`fba:\${e.id}\`, html: acceptedFeedbackHtml(e), ts: e.ts });
+    }
+    reconcileRows(document.getElementById("accepted-list"), rows, "nothing accepted yet");
+    finishSectionRender("accepted", rows.length === 0, () => acceptedSummaryText(rows));
   }
   /** W1-T223: "a NEEDS ME item arriving while the section is collapsed must not be silently
    *  missed" -- gated on \`sectionDefaultsReady\` for the SAME reason \`finishSectionRender\` is (the
@@ -2227,6 +2274,7 @@ export function renderShellHtml(
   wireSectionToggle("rest", () => renderFindView());
   wireSectionToggle("now");
   wireSectionToggle("needs-me");
+  wireSectionToggle("accepted");
   wireSectionToggle("up-next");
   wireSectionToggle("recent");
   document.getElementById("find-search").addEventListener("input", (e) => {
