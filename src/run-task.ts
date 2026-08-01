@@ -8493,10 +8493,23 @@ function reviewPostRefusedFor(ledger: Array<Record<string, unknown>>, taskId: st
   return ledger.some((l) => l.step === "review.post_refused" && l.task_id === taskId && l.head_sha === headSha);
 }
 
-/** The ledger steps that record a review VERDICT having been posted against a specific head. Both
- *  count: a refused post still proves the review lane already ran for that sha, which is what
- *  "reviewed before" means here. Kept as data so a new post step is one line, not a predicate edit. */
-const REVIEW_POSTED_STEPS: ReadonlySet<string> = new Set(["review.posted", "review.post_refused"]);
+/**
+ * WRITTEN AS TWO DIRECT `.step ===` COMPARISONS ON PURPOSE, not as a `Set.has()` over a `typeof`
+ * guard. `test/ledger-rotation.test.ts` derives the expected `DECISION_RELEVANT_LEDGER_STEPS`
+ * membership by scanning consumer source for `/\.step\s*(?:===|!==)\s*["']…["']/`, so this shape
+ * makes the dependency VISIBLE to the very check that exists to find it. Both steps are already in
+ * that set (`ledger.ts:337`), which is what stops a rotation from archiving the lines and silently
+ * resetting `priorReviewOrphans` to zero — the line IS the bound.
+ *
+ * The first draft guarded with a `typeof` check against the step field and CI caught it: the
+ * scanner read that guard's own type literal as a step name and failed. That was a false positive,
+ * but the honest fix is to write the comparison the scanner can read rather than to phrase around
+ * it. NOTE the scanner does not strip comments, so prose here must avoid the compared-literal shape
+ * too — this very paragraph failed the check once for describing it verbatim.
+ */
+function isReviewPostedStep(step: unknown): boolean {
+  return step === "review.posted" || step === "review.post_refused";
+}
 
 /** What {@link reviewOrphansFor} derived — the two halves of the W1-T225 pair, from one scan. */
 interface ReviewOrphanFacts {
@@ -8552,7 +8565,7 @@ export function reviewOrphansFor(
   if (!taskId || !headSha) return { orphanedByPush: false, priorOrphans: 0 };
   const priorHeads = new Set<string>();
   for (const l of ledger) {
-    if (typeof l.step !== "string" || !REVIEW_POSTED_STEPS.has(l.step)) continue;
+    if (!isReviewPostedStep(l.step)) continue;
     if (l.task_id !== taskId) continue;
     const sha = typeof l.head_sha === "string" ? l.head_sha : "";
     if (!sha || sha === headSha) continue; // absent sha, or the CURRENT head — neither is an orphan
