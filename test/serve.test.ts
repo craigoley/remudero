@@ -5,6 +5,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
 import {
+  buildServeRoutes,
+  resolveConsoleSha,
+  CONSOLE_SHA_UNKNOWN,
   buildServeServer,
   DEFAULT_BOARD_PREWARM_MS,
   DEFAULT_SERVE_PORT,
@@ -18,6 +21,7 @@ import {
   serviceTokensPath,
   type ServeDeps,
 } from "../src/lib/serve.js";
+import type { Route } from "../src/lib/service.js";
 import { isPaused, pauseDetail } from "../src/lib/fleet-control.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import { buildBatchedGithub, type GitHub, type PrRef } from "../src/lib/status.js";
@@ -1133,4 +1137,84 @@ test("resolveServeHosts: an all-empty value is refused rather than collapsing to
 
 test("resolveServeHost: the single-host helper still returns the FIRST host, never a wildcard", () => {
   assert.equal(resolveServeHost(["--host", "127.0.0.1,100.90.47.107"], {}), "127.0.0.1");
+});
+
+/** Drive a Route's handler with a stub res and return its parsed JSON body. */
+function readJson(route: Route): Record<string, unknown> {
+  let body = "";
+  const res = { writeHead: () => {}, end: (chunk?: string) => { body = chunk ?? ""; } };
+  (route.handler as (...a: never[]) => void)({} as never, res as never, {} as never);
+  return JSON.parse(body) as Record<string, unknown>;
+}
+
+// ── CONSOLE VERSION (impl-CZ) ───────────────────────────────────────────────────────────────
+//
+// `rmd serve` loads its code ONCE via tsx, and the deploy supervisor's console restart sits
+// behind a short-circuit a manual checkout pull consumes — so the console can serve days-old
+// code against a current checkout, silently. Observed running 3f6a1d1 while the checkout was
+// a0d96a9, and serving 2026-07-29 code through every merge for two days. Until now it could not
+// report its own sha, so "is the console stale?" was answerable only by inference from process
+// start time, and every symptom read as a code defect instead.
+
+test("console version: the sha is captured at server START — mutating HEAD afterwards does NOT change what is reported", () => {
+  // THE TRAP THIS LOCKS. A version re-read from the checkout per request would ALWAYS match the
+  // checkout and therefore always look current — rebuilding, in a new place, the exact bug this
+  // exists to detect. So the value must be frozen at start.
+  let head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const routes = buildServeRoutes(depsFor(tmpRoot(), planOf([]), { consoleSha: head }));
+  const version = routes.find((r: Route) => r.path === "/v1/version");
+  assert.ok(version, "GET /v1/version must be registered");
+
+  const first = readJson(version!);
+  assert.equal(first.sha, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+
+  // The underlying checkout moves on — a merge, a pull, a deploy.
+  head = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+  const second = readJson(version!);
+  assert.equal(second.sha, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "the reported sha must be the one loaded at START, not whatever HEAD is now");
+  assert.notEqual(second.sha, head);
+});
+
+test("console version: an unresolvable sha reports unknown and the server still builds its routes", () => {
+  // SECOND TRAP: the console is the operator's live diagnostic surface. Failing to start is
+  // strictly worse than failing to name a sha.
+  const boom = (): string => {
+    throw new Error("git: command not found");
+  };
+  assert.equal(resolveConsoleSha(boom), CONSOLE_SHA_UNKNOWN);
+  assert.equal(resolveConsoleSha(() => "not-a-sha"), CONSOLE_SHA_UNKNOWN, "a non-sha answer is unknown, never rendered as if real");
+
+  const routes = buildServeRoutes(depsFor(tmpRoot(), planOf([]), { consoleSha: CONSOLE_SHA_UNKNOWN }));
+  assert.ok(routes.find((r: Route) => r.path === "/v1/version"), "routes still build");
+  assert.ok(routes.find((r: Route) => r.path === "/"), "and the shell is still served");
+  assert.equal(readJson(routes.find((r: Route) => r.path === "/v1/version")!).sha, CONSOLE_SHA_UNKNOWN);
+});
+
+test("console version: the served payload carries the sha and NO credential-shaped key", () => {
+  const routes = buildServeRoutes(depsFor(tmpRoot(), planOf([]), { consoleSha: "cafebabecafebabecafebabecafebabecafebabe" }));
+  const body = readJson(routes.find((r: Route) => r.path === "/v1/version")!);
+
+  assert.deepEqual(Object.keys(body), ["sha"], "exactly one field — nothing rides along");
+  for (const k of Object.keys(body)) {
+    assert.doesNotMatch(k, /token|secret|bearer|auth|password|credential/i, `no credential-shaped key: ${k}`);
+  }
+  assert.doesNotMatch(JSON.stringify(body), /token|secret|bearer/i, "and no credential-shaped VALUE either");
+});
+
+test("console version: GET /v1/version is READ-scoped, so a staleness check never needs the write token", () => {
+  const routes = buildServeRoutes(depsFor(tmpRoot(), planOf([]), { consoleSha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" }));
+  const version = routes.find((r: Route) => r.path === "/v1/version")!;
+  assert.equal(version.scope, "read");
+  assert.equal(version.method, "GET");
+});
+
+test("console version: the shell renders the captured sha server-side, so the operator sees it without curl", () => {
+  const html = renderShellHtml(undefined, "abcdef1234567890abcdef1234567890abcdef12");
+  assert.match(html, /console build/);
+  assert.match(html, /abcdef123456/, "the short sha is rendered into the shell");
+  assert.match(html, /id="console-sha"/);
+
+  const unknown = renderShellHtml(undefined, CONSOLE_SHA_UNKNOWN);
+  assert.match(unknown, /unknown/, "and an unresolvable sha renders honestly rather than blank");
 });
