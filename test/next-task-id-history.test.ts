@@ -229,3 +229,66 @@ test("taskIdsEverFiled: the scan is BOUNDED by a sha-keyed cache — a second ca
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+// ── THE 1 MiB WALL (impl-CX) ────────────────────────────────────────────────────────────────
+//
+// `taskIdsEverFiled`'s default runner issues `git log <range> -p -- <planRelPath>`, whose output
+// is the FULL patch of every commit that ever touched the plan. On 2026-08-01 that measured
+// 1,860,892 bytes across 171 commits in this repo — 1.8x Node's 1 MiB execFileSync default — and
+// it grows monotonically. Without an explicit maxBuffer the scan dies `spawnSync git ENOBUFS`,
+// degrades to an EMPTY id set, and the mint silently loses its only protection against reissuing
+// a folded-away id. Observed live during `rmd triage`:
+//   "DEGRADED: history (cannot scan plan/ history (HEAD): Error: spawnSync git ENOBUFS)"
+//
+// THIS TEST MUST EXCEED THE OLD LIMIT FOR REAL. An injected gitRunner returning a big string
+// would prove nothing — it bypasses execFileSync, which is the thing that overflows. So the
+// fixture builds a genuine repo whose `git log -p` output is over 1 MiB and lets the REAL
+// default runner walk it.
+
+test("taskIdsEverFiled: a plan history whose git log -p EXCEEDS 1 MiB scans clean through the REAL default runner", () => {
+  const root = gitPlanFixture();
+
+  // ~1.4 MiB of genuine patch: 14 commits, each adding ~100 KiB of new lines plus one new id.
+  const filler = (tag: string) => Array.from({ length: 1400 }, (_, i) => `  note_${tag}_${i}: "${"x".repeat(60)}"`).join("\n");
+  for (let c = 1; c <= 14; c++) {
+    writeFileSync(
+      join(root, "plan", "tasks.yaml"),
+      Array.from({ length: c }, (_, k) => `- id: W1-T${k + 1}\n  title: "t${k + 1}"\n${filler(`c${k + 1}`)}\n`).join(""),
+    );
+    commitPlan(root, `chore(plan): commit ${c}`);
+  }
+
+  // The fixture must actually clear the old ceiling, or this test proves nothing.
+  const bytes = Buffer.byteLength(
+    execFileSync("git", ["-C", root, "log", "HEAD", "-p", "--", "plan/tasks.yaml"], { encoding: "utf8", maxBuffer: 1 << 26 }),
+  );
+  assert.ok(bytes > 1_048_576, `fixture must exceed Node's 1 MiB default to be meaningful, got ${bytes}`);
+
+  // REAL default runner — no injected gitRunner, so execFileSync's maxBuffer is what is under test.
+  const r = taskIdsEverFiled(root, "plan/tasks.yaml");
+
+  assert.deepEqual(r.degraded, [], `the scan must not degrade on a >1 MiB history; got ${JSON.stringify(r.degraded)}`);
+  assert.equal(r.ids.length, 14, "every id ever added must be recovered");
+  assert.equal(Math.max(...r.ids), 14);
+});
+
+test("taskIdsEverFiled: a scan that fails for a NON-buffer reason still degrades LOUDLY, never a silent empty set", () => {
+  // SECOND TRAP: the degraded path is CORRECT behaviour and must survive the buffer bump. An
+  // empty id set with NO degradation recorded would make the mint a floor without saying so —
+  // the dangerous version of this failure, worse than the crash it replaces.
+  const root = gitPlanFixture();
+  writeMonolith(root, [1, 2, 3]);
+  commitPlan(root, "chore(plan): seed");
+
+  const boom = (args: string[]): string => {
+    if (args[0] === "log") throw new Error("git exploded for some other reason");
+    return execFileSync("git", ["-C", root, ...args], { encoding: "utf8", env: GIT_ENV });
+  };
+  const r = taskIdsEverFiled(root, "plan/tasks.yaml", boom);
+
+  assert.equal(r.ids.length, 0, "a scan it cannot trust contributes nothing");
+  assert.equal(r.degraded.length, 1, "and it must SAY so — silence here is the dangerous failure");
+  assert.equal(r.degraded[0].source, "history");
+  assert.match(r.degraded[0].reason, /cannot scan plan\/ history/);
+  assert.match(r.degraded[0].reason, /git exploded/, "the real cause must survive into the message");
+});

@@ -5267,7 +5267,15 @@ export function taskIdsEverFiled(
   repoRoot: string,
   planRelPath: string,
   gitRunner: (args: string[]) => string = (args) =>
-    execFileSync("git", args, { cwd: repoRoot, encoding: "utf8" }),
+    // maxBuffer: the `git log <range> -p -- <planRelPath>` at the bottom of this function emits
+    // the FULL patch of every commit that ever touched the plan — measured 1,860,892 bytes over
+    // 171 commits on 2026-08-01, already 1.8x Node's 1 MiB execFileSync default and growing
+    // monotonically with every plan commit. Without this the scan dies `spawnSync git ENOBUFS`,
+    // the catch below degrades it to an EMPTY id set, and the mint silently loses its only
+    // ceiling-protector against reissuing a folded-away id. Narrowing the diff does not help:
+    // `--unified=0` still measures 1,673,006 bytes. 1 << 26 (64 MiB) is this file's existing
+    // idiom for exactly this class of problem — see the `gh pr diff` reader at :5047.
+    execFileSync("git", args, { cwd: repoRoot, encoding: "utf8", maxBuffer: 1 << 26 }),
 ): { ids: number[]; degraded: MintDegradation[] } {
   const degraded: MintDegradation[] = [];
   let headSha: string;
