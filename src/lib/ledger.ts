@@ -338,6 +338,10 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "review.post_refused",
   "automerge.capped_override_granted",
   "daemon.boot",
+  // W1-…/impl-DF: the idle rung's reason tally. A HUMAN reads this to tell "starved of work"
+  // from "everything filtered", and it is emitted only on change -- so it is sparse by design and
+  // rotation would otherwise drop exactly the lines that explain a long idle.
+  "daemon.idle_reasons",
   "sweep.post_fix_redriven",
   // W1-T186's ABSENT remedy: `priorActionsFromLedger` counts these lines to enforce
   // ABSENT_REPUSH_CAP. Archived away, the count reads zero and every rotation re-earns the

@@ -2134,3 +2134,44 @@ test("daemonBoot: with no orphan sweep injected, no daemon.orphan_sweep line is 
   daemonBoot((step) => lines.push({ step }), { PATH: "/usr/bin" });
   assert.equal(lines.filter((l) => l.step === "daemon.orphan_sweep").length, 0);
 });
+
+// ── WHY THE DAEMON IS IDLE (impl-DF) ────────────────────────────────────────────────────────
+
+test("idle reasons: an idle daemon SAYS why, and does not repeat an unchanged picture on every tick", async () => {
+  // On 2026-08-01 the daemon idled ~10 hours emitting ~390 bare `daemon.idle` lines and ZERO
+  // `dispatch.*`, while 31 unmerged tasks sat behind four silent filters. This asserts both
+  // halves of the fix: the reasons are stated, and stating them does not add ~390 lines.
+  const plan = fixturePlan(); // A,B(dep A),C(dep B),D,H(verify:human)
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  let polls = 0;
+
+  // Everything merged except H (human) and the dep chain -> nothing dispatchable, so it idles.
+  const merged = new Set<string>(["A", "B", "C", "D"]);
+  const s = await runDaemon(
+    plan,
+    {
+      refreshMerged: () => (id) => merged.has(id),
+      runOne: async (id) => okResult(id),
+      // Bound the otherwise-endless idle loop: stop after the 3rd poll.
+      sleep: async () => {
+        if (++polls >= 3) throw new Error("STOP-IDLE-FIXTURE");
+      },
+      log: (step, extra) => lines.push({ step, extra: extra ?? {} }),
+    },
+  ).catch((e: Error) => {
+    if (!/STOP-IDLE-FIXTURE/.test(e.message)) throw e;
+    return undefined;
+  });
+
+  const idle = lines.filter((l) => l.step === "daemon.idle");
+  const reasons = lines.filter((l) => l.step === "daemon.idle_reasons");
+
+  assert.ok(idle.length >= 2, `expected repeated idle ticks, got ${idle.length}`);
+  assert.equal(reasons.length, 1, `the picture never changed, so the reasons line must appear ONCE, not ${idle.length} times`);
+
+  const t = reasons[0].extra as Record<string, { count: number; ids: string[] }>;
+  assert.equal(t["verify-not-auto"].count, 1, "H is human-verify");
+  assert.deepEqual(t["verify-not-auto"].ids, ["H"], "and the operator is told WHICH");
+  assert.equal(t["already-merged"].count, 4, "A,B,C,D were filtered as already merged");
+  assert.equal(s, undefined, "the fixture stopped the loop, not the daemon");
+});

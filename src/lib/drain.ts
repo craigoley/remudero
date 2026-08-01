@@ -89,6 +89,12 @@ export interface NextRunnableOpts {
    */
   onLifetimeCapExceeded?: (task: Task) => void;
   /**
+   * Called once per task declined by one of the FOUR formerly-silent conditions, with the reason
+   * that actually stopped it (first-match — see {@link tallyDispatchFilters}). Observation only:
+   * omitting it leaves behaviour byte-identical, and supplying it changes no task's eligibility.
+   */
+  onFiltered?: (task: Task, reason: DispatchFilterReason) => void;
+  /**
    * W1-T177 (TERMINAL-STATE CHECK AT EVERY SPENDING SITE): an OPTIONAL fresh
    * re-read of ONE candidate in-flight PR's live GitHub state, consulted
    * ONLY when `isOpenPr` reports a task in-flight — CONFIRMS, with a read
@@ -133,6 +139,62 @@ export function nextRunnable(plan: Plan, isMerged: MergedSet, opts: NextRunnable
 }
 
 /**
+ * Why the eligibility filter declined a task. These are the FOUR conditions that used to return
+ * silently — every later filter (indeterminate, circuit, lifetime cap, open PR) already ledgers
+ * itself. Order matters and is the filter's own: see {@link tallyDispatchFilters} on first-match.
+ */
+export type DispatchFilterReason = "already-merged" | "verify-not-auto" | "blocked" | "unmet-deps";
+
+/** How many ids each bucket names before truncating — a count tells the operator something is
+ *  wrong, ids tell him WHICH, and 8 keeps the line readable against today's largest bucket (18). */
+export const IDLE_REASON_ID_CAP = 8;
+
+/** One bucket: how many were declined for this reason, and (bounded) which. */
+export interface IdleReasonBucket {
+  count: number;
+  ids: string[];
+  truncated: number;
+}
+
+export type IdleReasonTally = Record<DispatchFilterReason, IdleReasonBucket>;
+
+/**
+ * Accumulate the filter's declines so an idle daemon can say WHY it is idle.
+ *
+ * FIRST-MATCH, NOT EXHAUSTIVE — and this is deliberate. `isDispatchEligible` short-circuits: a task
+ * that is BOTH already-merged AND `verify != auto` is counted only under `already-merged`, because
+ * that is the condition that actually stopped it. Evaluating all four to give a "fuller" picture
+ * would mean running `unmetDependencies` (a graph walk) on tasks the filter never needed to test,
+ * on the hot path, to report a reason that was not the blocking one. The buckets therefore sum to
+ * the number of tasks declined by these four conditions, never to something larger.
+ */
+export function tallyDispatchFilters(): {
+  onFiltered: (task: Task, reason: DispatchFilterReason) => void;
+  snapshot: () => IdleReasonTally;
+  signature: () => string;
+} {
+  const seen: Record<DispatchFilterReason, string[]> = {
+    "already-merged": [],
+    "verify-not-auto": [],
+    blocked: [],
+    "unmet-deps": [],
+  };
+  const snapshot = (): IdleReasonTally =>
+    (Object.keys(seen) as DispatchFilterReason[]).reduce((acc, r) => {
+      const all = seen[r];
+      acc[r] = { count: all.length, ids: all.slice(0, IDLE_REASON_ID_CAP), truncated: Math.max(0, all.length - IDLE_REASON_ID_CAP) };
+      return acc;
+    }, {} as IdleReasonTally);
+  return {
+    onFiltered: (task, reason) => seen[reason].push(task.id),
+    snapshot,
+    // The CHANGE key: the daemon re-emits only when this differs, so an unchanged picture does not
+    // repeat 390 times. Ids are included so a swap of equal-sized buckets still counts as a change.
+    signature: () => JSON.stringify(seen),
+  };
+}
+
+/**
  * The exact per-task eligibility chain {@link nextRunnable} and {@link
  * runnableCandidates} both apply, factored out so the two can never drift: a task
  * ineligible for SOLO dispatch must never be offered as a concurrent candidate
@@ -141,10 +203,26 @@ export function nextRunnable(plan: Plan, isMerged: MergedSet, opts: NextRunnable
  */
 function isDispatchEligible(plan: Plan, t: Task, isMerged: MergedSet, opts: NextRunnableOpts): boolean {
   const merged: import("./plan.js").MergedResolver = (task) => isMerged(task.id);
-  if (isMerged(t.id)) return false;
-  if (t.verify !== "auto") return false;
-  if (t.status === "blocked") return false;
-  if (unmetDependencies(plan, t, merged).length > 0) return false;
+  // THE FOUR FORMERLY-SILENT DECLINES. `opts.onFiltered` is observation ONLY — every `return
+  // false` below is byte-identical to before, in the same order, so nothing's dispatchability
+  // changes. Mirrors the `onIndeterminate`/`onCircuitBreak`/`onLifetimeCapExceeded` idiom already
+  // used by the filters further down, which have always been legible.
+  if (isMerged(t.id)) {
+    opts.onFiltered?.(t, "already-merged");
+    return false;
+  }
+  if (t.verify !== "auto") {
+    opts.onFiltered?.(t, "verify-not-auto");
+    return false;
+  }
+  if (t.status === "blocked") {
+    opts.onFiltered?.(t, "blocked");
+    return false;
+  }
+  if (unmetDependencies(plan, t, merged).length > 0) {
+    opts.onFiltered?.(t, "unmet-deps");
+    return false;
+  }
   // INDETERMINATE (W1-T119) — checked BEFORE the circuit breaker and the
   // in-flight guard: an indeterminate read says nothing about either of
   // those, and dispatching now risks re-running work that may already be
