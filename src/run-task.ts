@@ -324,6 +324,7 @@ import {
   type ReviewVerdict,
 } from "./lib/review.js";
 import { buildDepReviewEscalation, decideDepReview } from "./lib/dep-review.js";
+import { decideAutoTriage, newFeedbackIdsOldestFirst, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath } from "./lib/auto-triage.js";
 import { validateWorkerSettingsFile } from "./lib/settings.js";
 import {
   buildBatchedGithub,
@@ -400,7 +401,7 @@ import {
   workerKeychainPaths,
 } from "./lib/worker-home.js";
 import { CI_LOG_FENCE_CLOSE, CI_LOG_FENCE_OPEN, FIX_WORKER_TOOLS, neutralizeFenceMarkers } from "./lib/fix-fence.js";
-import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock } from "./lib/drain-lock.js";
+import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock, type DrainLockHandle } from "./lib/drain-lock.js";
 import { checkCliFreshness, checkServiceFreshness } from "./lib/self-sync.js";
 import { acquireInflightLock, InflightLockError, readInflightLock, sweepStaleInflightLocks } from "./lib/inflight-lock.js";
 import { classifyFailure, MAX_TRANSIENT_RETRIES, type FailureSignal } from "./lib/classify.js";
@@ -9964,7 +9965,51 @@ export const TRIAGE_WORKER_TOOLS = ["Read", "Write", "Edit", "Grep", "Glob", "We
  *  `spawnWorker` without paying for a real worker, so diff-coverage reported every added
  *  line here as uncovered whatever it contained. Passing nothing is the production
  *  contract and behaves exactly as before. */
+/**
+ * `rmd triage <feedback-id>` — acquires the SHARED triage lock, then delegates.
+ *
+ * ★ WHY THE LOCK IS HERE AND NOT ONLY IN THE DAEMON (impl-DJ). The task id is minted from a
+ * SNAPSHOT before the worker runs (lib/triage.ts), so two overlapping triage runs mint the SAME id.
+ * Since PR #1060 each writes its own `plan/tasks.d/<id>-<slug>.yaml` — DIFFERENT filenames, so both
+ * merge CLEANLY and `loadPlan` then throws duplicate-task-id ON MAIN. Before #1060 that was a loud
+ * EOF conflict; now it is a poisoned plan. The daemon loop being single-threaded only ever protected
+ * daemon-vs-daemon; nothing stopped a HAND-RUN racing it, and the auto-triage rung makes that far
+ * likelier because the operator cannot see the daemon is about to fire. Both paths take the same
+ * lock, so whichever is second REFUSES LOUDLY instead of racing.
+ */
 export async function triageCommand(
+  rest: string[],
+  opts: { spawn?: typeof spawnWorker; config?: Config } = {},
+): Promise<number> {
+  const cfg = opts.config ?? loadConfig();
+  const lockPath = triageLockPath(cfg.root);
+  let lock: DrainLockHandle;
+  try {
+    lock = acquireDrainLock(lockPath);
+  } catch (e) {
+    if (e instanceof DrainLockError) {
+      console.error(triageLockRefusalMessage(e.holder.pid, e.holder.startedAt, lockPath));
+      return 2;
+    }
+    throw e;
+  }
+  try {
+    return await triageCommandLocked(rest, { ...opts, config: cfg });
+  } finally {
+    lock.release();
+  }
+}
+
+/** The refusal an operator sees when the daemon's rung (or another hand-run) holds the lock. */
+export function triageLockRefusalMessage(pid: number, startedAt: string, lockPath: string): string {
+  return (
+    `rmd triage: REFUSED — another triage run is already in flight (pid ${pid}, started ${startedAt}). ` +
+    `Two concurrent runs mint the SAME task id, and since #1060 both merge cleanly and poison the ` +
+    `plan on main. Wait for it to finish, or delete ${lockPath} if that process is gone.`
+  );
+}
+
+async function triageCommandLocked(
   rest: string[],
   opts: { spawn?: typeof spawnWorker; config?: Config } = {},
 ): Promise<number> {

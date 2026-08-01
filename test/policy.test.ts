@@ -338,7 +338,15 @@ test("two loads of the SAME file yield identical values", () => {
 
 test("every LIFTED field records origin=lifted:<source-site> — the net-new field is the only exception", () => {
   const p: Policy = loadPolicy(SHIPPED);
-  const liftedPaths = Object.keys(p.origin).filter((path) => path !== "launchd.throttleIntervalS");
+  // impl-DJ: the three `autoTriage.*` fields join `launchd.throttleIntervalS` as net-new — there is
+  // no source literal to lift them from, because the rung they configure did not exist before.
+  const NET_NEW = new Set([
+    "launchd.throttleIntervalS",
+    "autoTriage.enabled",
+    "autoTriage.minIntervalMinutes",
+    "autoTriage.maxPerDay",
+  ]);
+  const liftedPaths = Object.keys(p.origin).filter((path) => !NET_NEW.has(path));
   assert.ok(liftedPaths.length > 0);
   for (const path of liftedPaths) {
     const o = p.origin[path];

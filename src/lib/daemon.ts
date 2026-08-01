@@ -29,6 +29,7 @@
  * already does — this pure module never touches the filesystem.
  */
 
+import type { AutoTriageDecision } from "./auto-triage.js";
 import type { RunResult } from "./run-result.js";
 import { assertCleanBoot, type BootAssertion } from "./env.js";
 import { INITIAL_RETRY_STATE, reasonAboutBlock, type RetryState } from "./block-reason.js";
@@ -636,6 +637,11 @@ export interface DaemonDeps {
    * `checkRetroTrigger` fires.
    */
   runRetroTrigger?: (decision: Extract<RetroTriggerDecision, { fire: true }>) => Promise<void>;
+  /** impl-DJ: the auto-triage rung's decision hook — same injected shape as checkRetroTrigger, so
+   *  the whole rung is unit-testable without a clock, a filesystem or a spend. */
+  checkAutoTriage?: () => AutoTriageDecision;
+  /** impl-DJ: run ONE triage for the decided entry. Awaited under the light-sweep ticker. */
+  runAutoTriage?: (feedbackId: string) => Promise<void>;
   /**
    * W1-T254 (the #707 fix) — the RESTRICTED LIGHT-SWEEP TICKER: `runOne` is
    * UNBOUNDED (a task can hold the daemon inside one call for a whole
@@ -1507,6 +1513,45 @@ export async function runDaemon(
         lastIdleSignature = idleSignature;
         log("daemon.idle_reasons", { tick: ticks, ...idleReasons.snapshot() });
       }
+
+      // ── AUTO-TRIAGE RUNG (impl-DJ, recon-DC #2) ────────────────────────────────
+      // The daemon's SECOND work-generating rung, and the first that fires on IDLE rather than on
+      // CADENCE — recon-DC's critique of the retro is precisely that it "fires on cadence, not on
+      // idle". Placed HERE, inside the idle branch, because this is the one point where "nothing
+      // is dispatchable and nothing is in flight" is ALREADY known: the boolean is free, nothing
+      // is recomputed, and an idle poll costs exactly what it cost before.
+      //
+      // DEFAULT OFF and triple-bounded (enabled / minInterval / maxPerDay — see lib/auto-triage.ts).
+      // Best-effort in the retro's idiom: a throw here costs one logged tick, never the daemon.
+      if (deps.checkAutoTriage) {
+        let decision: AutoTriageDecision | undefined;
+        try {
+          decision = deps.checkAutoTriage();
+        } catch (e) {
+          log("auto_triage.check_failed", { error: String((e as Error)?.message ?? e) });
+        }
+        if (decision?.fire) {
+          log("auto_triage.fired", { feedback: decision.feedbackId, reason: decision.reason });
+          if (deps.runAutoTriage) {
+            const fired = decision;
+            try {
+              // W1-T276's wrapper, reused verbatim. Triage holds for MINUTES after opening its PR
+              // (a CI-polling tail) and this loop is single-threaded, so an unwrapped await would
+              // black out every sweep for that whole duration — the exact defect W1-T276 fixed for
+              // the retro. The ticker keeps dispositioning PRs while triage runs.
+              await sweepLightDuringRetro(deps, pollIntervalMs, log, () => deps.runAutoTriage!(fired.feedbackId));
+            } catch (e) {
+              log("auto_triage.run_failed", {
+                feedback: fired.feedbackId,
+                error: String((e as Error)?.message ?? e),
+              });
+            }
+          }
+        } else if (decision) {
+          log("auto_triage.skipped", { reason: decision.reason });
+        }
+      }
+
       await deps.sleep(pollIntervalMs);
       continue;
     }
