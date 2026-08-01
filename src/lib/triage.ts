@@ -12,6 +12,32 @@ import type { FeedbackEntry, FeedbackStatus } from "./feedback.js";
  * researches via server-side WebSearch, then (if clear) opens a plan PR naming the §sections
  * changed, tasks added/rewired, rationale, and provenance back to feedback#<id>." [MASTER-PLAN §7B]
  *
+ * ★ TRIAGE MUST RUN STRICTLY SERIALLY — WITH ITSELF AND WITH ANY HAND-RUN. READ THIS BEFORE
+ * ADDING A CALLER (a daemon rung, a cron, a second lane).
+ *
+ * The task id is minted by the HARNESS from a snapshot BEFORE the worker starts (see the ID
+ * SELECTION block in `triagePrompt` below). Two runs that start before either opens its PR
+ * therefore mint the SAME id. Because each writes its own `plan/tasks.d/<id>-<slug>.yaml` and the
+ * slugs differ, the two branches touch DIFFERENT FILES — so git merges both cleanly and `loadPlan`
+ * (lib/plan.ts) then throws duplicate-task-id ON MAIN, breaking every plan-loading check for
+ * everyone.
+ *
+ * This is WORSE than it was before proposals were sharded. When both runs appended to the
+ * `plan/tasks.yaml` monolith they collided textually at EOF: ugly, but LOUD, PRE-MERGE and
+ * unmergeable. Sharding traded a conflict you cannot merge for a merge that poisons the plan.
+ * That trade is only safe while something serialises triage.
+ *
+ * What serialises it TODAY: nothing explicit. The daemon's poll loop is single-threaded and awaits
+ * each dispatch, so daemon-initiated runs cannot overlap each other — but NO lock excludes a
+ * hand-run (`rmd triage`) racing a daemon run, and no lock would exist for a second lane.
+ * {@link assertProposedPlanLoads} narrows the window (it re-loads monolith + shards from the
+ * worker's own worktree before anything is pushed, so a collision against MAIN is refused
+ * pre-push) and the minter also consults ids already claimed by OPEN plan PRs — but neither sees a
+ * competitor that has minted and not yet opened its PR. That window is the whole exposure.
+ *
+ * THEREFORE: do not add a concurrent caller without id RESERVATION (an atomic claim at mint time,
+ * not a re-check at write time). A re-check is a half-guard and would merely narrow this window.
+ *
  * THE THREE-WAY VERDICT, deterministic (mirroring lib/dep-review.ts's `decideDepReview` — the
  * judge is CODE, the LLM layer is advisory only, Standing rule 2):
  *   - ALREADY_DECIDED — the ground step found the feedback's answer already settled somewhere in
@@ -122,7 +148,7 @@ export function triagePrompt(entry: FeedbackEntry, runId: string, mintedId?: str
     entry.attachments.length ? `attachments: ${entry.attachments.join(", ")}` : "attachments: (none)",
     "",
     "=== STEP 1 — GROUND ===",
-    "Grep/Read MASTER-PLAN.md, plan/tasks.yaml, LEARNINGS.md, and DECISIONS.md (all in this working",
+    "Grep/Read MASTER-PLAN.md, plan/tasks.yaml, plan/tasks.d/*.yaml, LEARNINGS.md, and DECISIONS.md (all in this working",
     "directory) for whatever this feedback is asking about. Re-deciding a settled question is a",
     "failure mode, not a feature — if the answer is ALREADY there, that is your verdict, full stop.",
     "",
@@ -155,8 +181,13 @@ export function triagePrompt(entry: FeedbackEntry, runId: string, mintedId?: str
     "    AMBIGUOUS: does this want a CLI flag or a config default?",
     "",
     "  PROPOSED — the ask is CLEAR and NOVEL. Edit ONLY plan files in this working directory",
-    "  (plan/tasks.yaml and/or MASTER-PLAN.md — NEVER src/ or test/) to add or rewire whatever the",
-    "  feedback calls for. Every new or rewired plan/tasks.yaml task MUST carry",
+    "  (NEVER src/ or test/) to add or rewire whatever the feedback calls for.",
+    "  A NEW task MUST be created as its OWN SHARD at plan/tasks.d/<id>-<kebab-slug>.yaml — one task",
+    "  per file, a single-element YAML list, matching plan/tasks.d/W1-T278-task-id-from-plan-history.yaml.",
+    "  NEVER append a new task to plan/tasks.yaml: 69 filings appending to one 12.5k-line file all",
+    "  collide at EOF, which is the conflict storm W1-T122 sharded the plan to prevent.",
+    "  REWIRING an EXISTING task edits wherever that task already lives (the monolith or its shard).",
+    "  MASTER-PLAN.md remains a legitimate target for a plan amendment. Every new or rewired task MUST carry",
     `  \`origin: feedback#${entry.id}\` so the provenance is traceable.`,
     ...(mintedId
       ? [
