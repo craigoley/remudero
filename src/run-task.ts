@@ -180,6 +180,12 @@ import { assertProposedPlanLoads,
 } from "./lib/triage.js";
 import { mintNextTaskId, type MintDegradation, type MintSources } from "./lib/task-id.js";
 import {
+  firstUnreservedAtOrAbove,
+  reserveTaskIdFrom,
+  taskIdReservationsDir,
+  type TaskIdReservationHandle,
+} from "./lib/task-id-reservation.js";
+import {
   applyPlanProposalCommit,
   decidePlanArchitect,
   diffCitesResearchSource,
@@ -5427,6 +5433,13 @@ export async function nextTaskIdCommand(rest: string[]): Promise<number> {
     return 2;
   }
   console.log(describeMintWithHistory(mint));
+  // READS reservations, never TAKES one. This verb is advisory and spawns nothing, so an operator
+  // asking "what is next" a hundred times must not burn a hundred ids — and a reservation held by
+  // a process that exits microseconds later reserves nothing anyway. Reporting a number and
+  // claiming it are different acts; only the caller that will actually FILE should claim.
+  const free = firstUnreservedAtOrAbove(mint.n, taskIdReservationsDir(loadConfig().root));
+  if (free !== mint.n)
+    console.log(`(${mint.id} is RESERVED by a live minter — the next unreserved id is W1-T${free})`);
   if (offline) console.log("(--offline: open plan PRs were NOT read — this id is a floor, not a guarantee)");
   return mint.degraded.length ? 1 : 0;
 }
@@ -10136,6 +10149,10 @@ async function triageCommandLocked(
   // Liveness token so a concurrent drain's prune skips this triage worktree.
   writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
 
+  // Declared OUTSIDE the try so the finally releases it on EVERY exit — success, throw, or the
+  // catch arm's rethrow. A reservation that outlived its run would burn the id permanently, which
+  // is the phantom-id class this must not add to (W1-T199/224/247/263 already exist).
+  let reservationHandle: TaskIdReservationHandle | undefined;
   try {
     // Read the entry from the FRESH worktree (origin/main snapshot), not repoRoot, which may be
     // a stale checkout — same discipline retro's next-task read follows.
@@ -10178,8 +10195,24 @@ async function triageCommandLocked(
       repoRoot: worktreePath,
       openPrTexts: () => openPrMintTexts(owner, repo),
     });
+    // RESERVE the minted id before spending anything. The mint above is a SNAPSHOT and reserves
+    // nothing, so a THIRD caller (the lock #1069 added covers only triage's own two paths — not
+    // `rmd plan --mode=create`, not a second machine, not a cross-repo instance filing into this
+    // plan) can mint the same number. Contention ADVANCES rather than refusing, so this only ever
+    // moves the id upward, never blocks. Taken BEFORE `spawn` on purpose: a reservation that
+    // cannot be written throws TaskIdReservationError out of this command, and the paid worker
+    // (median $0.96) is never started — a minter that cannot reserve must not spend.
+    const reservation = reserveTaskIdFrom(mint.n, taskIdReservationsDir(config.root), {
+      info: { purpose: `rmd triage ${feedbackId} (run ${runId})` },
+    });
+    reservationHandle = reservation;
+    // The id the WORKER is told to use — the reserved one, which equals the mint's whenever there
+    // was no contention (the overwhelmingly common case).
+    const reservedTaskId = `W1-T${reservation.id}`;
     log("triage.id_minted", {
-      minted_id: mint.id,
+      minted_id: reservedTaskId,
+      mint_id: mint.id,
+      reserved_above_mint: reservation.id !== mint.n,
       max_seen: mint.maxSeen,
       source_monolith: mint.sources.monolith,
       source_shards: mint.sources.shards,
@@ -10188,6 +10221,8 @@ async function triageCommandLocked(
       degraded: mint.degraded.map((d) => d.source),
     });
     say(`next task id: ${describeMintWithHistory(mint)}`);
+    if (reservation.id !== mint.n)
+      say(`reserved ${reservedTaskId} instead — ${mint.id} is held by a live minter`);
 
     const worker = await spawn({
       cwd: worktreePath,
@@ -10197,7 +10232,7 @@ async function triageCommandLocked(
       maxTurns: mountsTable.architect.maxTurns, // MOUNT-GOVERNED (§9) — never a hardcoded literal.
       maxBudgetUsd: DEFAULT_BUDGET_USD,
       config,
-      prompt: triagePrompt(entry, runId, mint.id),
+      prompt: triagePrompt(entry, runId, reservedTaskId),
       tools: TRIAGE_WORKER_TOOLS,
     });
     log("triage.synthesized", {
@@ -10344,6 +10379,9 @@ async function triageCommandLocked(
     throw e;
   } finally {
     removeRunLock(worktreePath); // terminal ⇒ drop the liveness token
+    // The id is now either ON an open PR (where the mint's openPrs source sees it) or unused and
+    // free to reissue. Either way holding the file longer protects nothing.
+    reservationHandle?.release();
   }
 }
 
