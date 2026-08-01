@@ -291,6 +291,33 @@ export function deliversRealtime(root: string): boolean {
   return presenceMode(root) === "attended";
 }
 
+/**
+ * The PULL-REQUEST NUMBER an escalation issue names in its own text, or `undefined` (impl-DY).
+ *
+ * The escalation-lifecycle reconciler resolves a referent from the `**Task:** <id>` line and looks it up in
+ * the plan. An id the plan does not own — a `TRIAGE-fb-…` minted outside the plan, a mount-probe id — has no
+ * task to derive from, and PR #1041's `PR-<n>` escape only covers ids that were minted in that exact shape.
+ * Everything else is dropped and can never be retired by the machine, however long ago its work landed. That
+ * is how `TRIAGE-fb-1784732687221-3be743` (PR #707, merged 2026-07-24) and
+ * `TRIAGE-fb-1784917146019-88250d` (PR #775, merged 2026-07-25) outlived a hand-cleanup of 55 siblings.
+ *
+ * The referent is not actually missing — {@link renderIssueBody} writes the PR as a FULL URL into the issue
+ * text, so it can be read back. This reads the FIRST `/pull/<n>` in the given text.
+ *
+ * MATCHES A FULL URL ONLY, never a bare `#707`. On GitHub `#707` is ambiguous between an issue and a pull
+ * request, and an escalation body routinely cites sibling issue numbers; resolving one of those as a PR would
+ * retire a live escalation against an unrelated referent. A `/pull/<n>` path is unambiguous by construction.
+ *
+ * PURE. It answers "what does this issue SAY it is about", never "is that thing finished" — the caller joins
+ * the number against live GitHub state and applies its own fail-closed policy.
+ */
+export function prReferentFromIssueText(text: string | undefined): number | undefined {
+  const m = /\/pull\/(\d+)/.exec(text ?? "");
+  if (!m) return undefined;
+  const n = Number(m[1]);
+  return Number.isSafeInteger(n) && n > 0 ? n : undefined;
+}
+
 /** Render the issue body: context, the options, and the recommendation called out. */
 export function renderIssueBody(e: Escalation): string {
   const lines = [

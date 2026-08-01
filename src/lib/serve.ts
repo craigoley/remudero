@@ -454,6 +454,19 @@ export function renderShellHtml(
     margin: 0.4rem 0 0; padding: 0.3rem 0.6rem; border-radius: 6px; font-size: 0.85rem; font-weight: 600;
     background: rgba(255, 107, 107, 0.14); color: var(--status-blocked); border: 1px solid var(--status-blocked);
   }
+  /* impl-DY: the header write-state badge. Colour is a SECONDARY cue only -- the text states the
+     capability outright, so this reads correctly to a colour-blind operator and in a screenshot. */
+  .write-state-badge {
+    margin: 0.35rem 0 0; padding: 0.3rem 0.6rem; border-radius: 6px; font-size: 0.85rem; font-weight: 600;
+    border: 1px solid transparent;
+  }
+  .write-state-badge[data-write-state="read-only"], .write-state-badge[data-write-state="rejected"] {
+    background: rgba(255, 107, 107, 0.14); color: var(--status-blocked); border-color: var(--status-blocked);
+  }
+  .write-state-badge[data-write-state="write"] {
+    background: rgba(87, 214, 140, 0.14); color: var(--status-merged); border-color: var(--status-merged);
+  }
+  .write-state-badge[data-write-state="unknown"] { opacity: 0.7; }
   #stale-badge {
     display: inline-block; margin: 0.25rem 0 0; padding: 0.15rem 0.5rem; border-radius: 999px;
     font-size: 0.75rem; font-weight: 600; background: var(--status-needs-human); color: #241a02;
@@ -642,6 +655,14 @@ export function renderShellHtml(
 <main>
 <header>
   <h1>Remudero — the operator console</h1>
+  <!-- impl-DY: the WRITE-STATE badge. The write token lives in sessionStorage (W1-T202, XSS grounds), so
+       it dies with every tab and every browser restart, and the only statement of that fact used to live in
+       #write-token-status inside the Fleet-control section - the ELEVENTH section on the page, far below
+       NEEDS ME. An operator clicking "Mark handled" never saw it and read a disabled button as a broken
+       one, twice. This says the same thing where the click happens.
+       It renders from hasWriteScope, which is the PROBE result (GET /v1/auth/scope with the held token),
+       never "a token string is present" - a stale or wrong token reads REJECTED here, not green. -->
+  <p id="write-state-badge" class="write-state-badge" role="status" aria-live="polite" data-write-state="unknown">checking write access…</p>
   <!-- W1-T159 GLANCE LAYER: a pinned summary strip -- running/needs-me/blocked/queued/
        merged-today/spend-today/spend-this-week, EVERY number traceable to a named ledger/API
        source (GET /v1/status's counts+spend, the same combined NEEDS ME set the section below
@@ -2603,6 +2624,25 @@ export function renderShellHtml(
         : "Read-only — write actions are unavailable. Enter a write token to enable them for this tab. Get one by running: rmd console-url --write";
       form.hidden = false;
       clearBtn.hidden = true;
+    }
+    paintWriteStateBadge();
+  }
+  // impl-DY: THREE states, never two. "no token" and "token rejected" are different problems with different
+  // remedies, and collapsing them is what misled the operator - he HAD set a token, so being told to set one
+  // read as the console being broken. Driven off hasWriteScope (the probe result) plus whether a token is
+  // held, so a token that is present but not ACCEPTED renders REJECTED, never enabled.
+  function paintWriteStateBadge() {
+    const badge = document.getElementById("write-state-badge");
+    if (!badge) return;
+    if (hasWriteScope) {
+      badge.dataset.writeState = "write";
+      badge.textContent = "Write access enabled — Accept, Reject, Mark handled, Run, Drain and fleet control are live.";
+    } else if (writeToken) {
+      badge.dataset.writeState = "rejected";
+      badge.textContent = "Write token REJECTED — every write control is disabled. Clear it and paste a current one from: rmd console-url --write";
+    } else {
+      badge.dataset.writeState = "read-only";
+      badge.textContent = "READ-ONLY — no write token in this tab, so every write control is disabled. Get one with: rmd console-url --write";
     }
   }
   // W1-T202: re-resolves hasWriteScope off the CURRENT client-held write token (never the URL) --
