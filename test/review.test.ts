@@ -1267,7 +1267,15 @@ test("ACCEPTANCE #3: a free-prose proof is byte-identical to the pre-W1-T65 floo
     execProof: neverCalled,
   });
   const withoutExec = judgeReview(proseCriteria, { diff: "", report: "did something else entirely" });
-  assert.deepEqual(withExec.criteria[0], { ...withoutExec.criteria[0], proof_exec: "not_executable" });
+  // W1-DH: `proof_skip` is the ONE field that legitimately differs between these two runs — it is
+  // the diagnostic that says WHY nothing executed, and "a checkout existed but the proof carried no
+  // dialect" is genuinely not "there was no checkout". The floor itself (met/reason/proof_exec) is
+  // still byte-identical, which is what this test is about.
+  assert.deepEqual(withExec.criteria[0], {
+    ...withoutExec.criteria[0],
+    proof_exec: "not_executable",
+    proof_skip: "no-dialect",
+  });
   assert.equal(withoutExec.criteria[0].proof_exec, "not_executable");
   assert.equal(withExec.state, withoutExec.state);
 });
@@ -2291,7 +2299,14 @@ test("a seeded materialization failure posts a verdict whose description names i
   // `plan_only` joined this projection so the ledger carries every input
   // decideAutoMergeArm needs (lib/sweep.ts's reconciliation reads the ledger, never
   // the verdict object). REAL_TEST_DIFF touches src/test files, so it is false here.
-  assert.deepEqual(reviewLedgerLegibilityFields(v), { capped: true, keyword_only: true, plan_only: false });
+  // W1-DH: the ledger line now also names WHY the cap happened. For a seeded materialization
+  // failure that is `no-exec-context`, which is exactly the fact this test exists to make legible.
+  assert.deepEqual(reviewLedgerLegibilityFields(v), {
+    capped: true,
+    keyword_only: true,
+    plan_only: false,
+    capped_reason: "no-exec-context:2",
+  });
 });
 
 // ── W1-T227: a name-filtered proof must scope its node --test invocation to

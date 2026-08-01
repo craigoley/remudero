@@ -74,6 +74,13 @@ export type ReviewState = "success" | "failure";
  *                     referencing test path legitimately matches nothing
  *                     before the work and everything after).
  */
+/**
+ * WHY a criterion produced no executed outcome. Diagnostic only — it never affects `met`, `state`,
+ * the keyword floor, or whether a verdict is capped. It exists so a CAPPED `0/N` says WHICH KIND it
+ * is instead of collapsing four different causes into one reassuring green.
+ */
+export type ProofSkipReason = "no-dialect" | "prose-no-match" | "exec-error" | "no-exec-context";
+
 export type ProofExecOutcome =
   | "executed_pass"
   | "executed_fail"
@@ -90,6 +97,8 @@ export interface CriterionVerdict {
   /** See {@link ProofExecOutcome}. Always present — `not_executable` is the safe
    * default when the proof is prose, or no PR-head checkout was supplied. */
   proof_exec: ProofExecOutcome;
+  /** See {@link ProofSkipReason}. Absent when the proof executed. */
+  proof_skip?: ProofSkipReason;
   /**
    * W1-T178 (verdict stability): `met` as computed by the mechanical/executed
    * floor, BEFORE any semantic downgrade is applied — the DETERMINISTIC part of
@@ -535,6 +544,26 @@ const DIALECT_TEST_RE = /^unit test:\s*(.+)$/i;
  * only restriction enforced by task-linter.ts, never here (review.ts has no
  * opinion on a task's `verify` field). */
 const DIALECT_DEMO_RE = /^demonstration:\s*(.+)$/i;
+
+/**
+ * A markdown code span WRAPPING the whole string: N backticks, the body, then the SAME N backticks.
+ * The `\1` backreference is what makes this safe — it only ever removes a matched pair at the two
+ * ENDS, so an interior backtick (a `grep:` pattern searching for a template literal, say) is never
+ * touched. `[\s\S]` rather than `.` so a multi-line span is handled; the inner `\s*` absorbs the
+ * padding of the `` ` grep: … ` `` form CommonMark allows.
+ */
+const WRAPPING_CODE_SPAN_RE = /^(`+)\s*([\s\S]*?)\s*\1$/;
+
+/** Unwrap a whole-string code span, once. Returns the input unchanged when it is not wrapped. */
+function stripCodeSpan(s: string): string {
+  const m = s.match(WRAPPING_CODE_SPAN_RE);
+  return m ? m[2].trim() : s;
+}
+
+/** Does this text already lead with a dialect label? Used to keep the bare form on its fast path. */
+function matchesDialectPrefix(s: string): boolean {
+  return DIALECT_TEST_RE.test(s) || DIALECT_GREP_RE.test(s) || DIALECT_DEMO_RE.test(s);
+}
 /** The project's own `test` script glob (package.json) — reused verbatim so a
  * name-filtered run scopes to exactly the suite `npm test` would run. */
 const TEST_GLOB = "test/**/*.test.ts";
@@ -706,6 +735,33 @@ function tokenizeFenced(s: string): string[] {
  * for free prose (or an unsafe/unwhitelisted shape) — the caller then defers
  * entirely to the keyword floor, never attempting execution.
  */
+/**
+ * WHY this verdict is capped, as one short token for the ledger line and the posted status.
+ *
+ * A CAPPED `0/N` is four different situations wearing one face: proofs that never parsed, proofs
+ * that parsed and named nothing, proofs whose execution errored, and a run that never had a checkout
+ * to execute against. Telling them apart from the outside cost a full recon once (the markdown
+ * code-span defect, PR #1037 0/4 and PR #1057 0/6); this makes the next one a one-line read.
+ *
+ * PURE and DIAGNOSTIC. It reads the verdicts it is given and returns a label — it never affects
+ * `met`, `state`, the keyword floor, or whether the verdict is capped. Returns `undefined` when
+ * nothing was capped, so the field is simply absent on a healthy verdict.
+ */
+export function cappedReason(
+  criteria: ReadonlyArray<Pick<CriterionVerdict, "proof_exec" | "proof_skip">>,
+): string | undefined {
+  const skipped = criteria.filter((c) => c.proof_skip !== undefined);
+  if (skipped.length === 0) return undefined;
+  const counts = new Map<string, number>();
+  for (const c of skipped) counts.set(c.proof_skip!, (counts.get(c.proof_skip!) ?? 0) + 1);
+  // Deterministic: highest count first, then alphabetically, so the same verdict always renders the
+  // same string (a ledger field that reorders itself is not comparable across runs).
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([reason, n]) => `${reason}:${n}`)
+    .join(",");
+}
+
 export function parseWhitelistedProof(proof: string): WhitelistedProof | null {
   // House dialect (W1-T72) checked FIRST and EXCLUSIVELY: a proof WRITTEN with
   // a dialect label is handled ONLY by its own parser — success or refuse
@@ -717,16 +773,30 @@ export function parseWhitelistedProof(proof: string): WhitelistedProof | null {
   // swallowed by the legacy unanchored TEST_PATH_RE below into "run that whole
   // test file instead" (a different check than the one actually written).
   const trimmed = proof.trim();
-  const dialectTest = trimmed.match(DIALECT_TEST_RE);
+  // A dialect proof wrapped in a markdown CODE SPAN is the same proof. `parseAcceptanceBlock`
+  // extracts the bullet text verbatim, so an author who writes `` `grep: x in y` `` (rendering
+  // identically to "grep: x in y" in every GitHub view) reached the matchers below with a leading
+  // backtick, failed both, and fell through to `not_executable` — a CAPPED 0/N verdict on work
+  // whose proofs are perfect. Measured: PR #1037 parsed 0/4 and PR #1057 0/6 this way, while
+  // PR #1038's unwrapped proofs parsed 8/8.
+  //
+  // WHY THE STRIP IS A FALLBACK AND NOT AN ENTRY-POINT NORMALISATION. `GREP_FENCE_RE` (the legacy
+  // W1-T65 shape, below) matches ``​`grep -rn x y`​`` and REQUIRES its backticks — stripping them up
+  // front, here or in `parseAcceptanceBlock`, silently converts that proof to `null`. So the bare
+  // text is tried first and the unwrapped text only if it fails, leaving every other consumer of
+  // the extracted string — the claim text, `plan-pr-emitter`'s emptiness check, the legacy shapes —
+  // reading exactly what the author wrote.
+  const dialectSource = matchesDialectPrefix(trimmed) ? trimmed : stripCodeSpan(trimmed);
+  const dialectTest = dialectSource.match(DIALECT_TEST_RE);
   if (dialectTest) return parseTestTarget(dialectTest[1]);
-  const dialectGrep = trimmed.match(DIALECT_GREP_RE);
+  const dialectGrep = dialectSource.match(DIALECT_GREP_RE);
   if (dialectGrep) return parseDialectGrep(dialectGrep[1]);
   // W1-T277: `demonstration:` is never executable, by construction — it names
   // an operator action, not an artifact this process can observe. Refuse
   // (null) rather than falling through to a legacy shape below; task-linter.ts
   // is what decides whether that null is a defect (verify:auto) or the whole
   // point (verify:human) — review.ts has no `verify` field to consult here.
-  if (DIALECT_DEMO_RE.test(trimmed)) return null;
+  if (DIALECT_DEMO_RE.test(dialectSource)) return null;
 
   // Legacy strict shapes (W1-T65) — only reached when the proof carries no
   // dialect label at all.
@@ -1440,9 +1510,14 @@ export function judgeCriterion(
   // exec_error DEGRADES to the keyword floor computed above, verbatim — never a
   // silent hard-fail, never a stall.
   let proofExec: ProofExecOutcome = "not_executable";
+  // W1-DH: WHY a criterion did not execute. `proof_exec: "not_executable"` alone conflates a proof
+  // that never PARSED with one that parsed and named nothing — and a CAPPED 0/N verdict looked
+  // identical either way, which is what made the code-span defect above cost a whole recon to find.
+  let proofSkip: ProofSkipReason | undefined = execCtx ? "no-dialect" : "no-exec-context";
   if (execCtx) {
     const whitelisted = parseWhitelistedProof(criterion.proof);
     if (whitelisted) {
+      proofSkip = undefined;
       const exec = execCtx.exec ?? execWhitelistedProof;
       try {
         const outcome = exec(whitelisted, execCtx.cwd);
@@ -1481,6 +1556,7 @@ export function judgeCriterion(
             // author sees "names no matching test" rather than a misleading
             // "executed and FAILED" — a false block on green, test-passing code.
             proofExec = "not_executable";
+            proofSkip = "prose-no-match";
             reason = `${reason} — NOTE: proof names no matching test (0 tests matched '${whitelisted.label}'); not executed, keyword floor applied`;
           } else {
             // W1-T72's test-theater guard, PRESERVED: the body reads as a bare,
@@ -1499,6 +1575,7 @@ export function judgeCriterion(
         }
       } catch {
         proofExec = "exec_error"; // met/reason stay EXACTLY the keyword-floor verdict above
+        proofSkip = "exec-error";
       }
     }
   }
@@ -1516,7 +1593,7 @@ export function judgeCriterion(
     reason = "reviewer judged the proof non-responsive (semantic downgrade)";
   }
 
-  return { ...base, met, reason, proof_exec: proofExec, floorMet, holdout: !!criterion.holdout };
+  return { ...base, met, reason, proof_exec: proofExec, proof_skip: proofSkip, floorMet, holdout: !!criterion.holdout };
 }
 
 /**
@@ -2400,9 +2477,18 @@ export function keywordOnlyAnnotation(): string {
  * only what was written down about it.
  */
 export function reviewLedgerLegibilityFields(
-  verdict: Pick<ReviewVerdict, "capped" | "keywordOnly" | "planOnly">,
-): { capped: boolean; keyword_only: boolean; plan_only: boolean } {
-  return { capped: verdict.capped, keyword_only: verdict.keywordOnly, plan_only: verdict.planOnly };
+  verdict: Pick<ReviewVerdict, "capped" | "keywordOnly" | "planOnly"> & Partial<Pick<ReviewVerdict, "criteria">>,
+): { capped: boolean; keyword_only: boolean; plan_only: boolean; capped_reason?: string } {
+  // `capped_reason` rides alongside `capped` rather than in its own line, so the ONE record that
+  // says a verdict was capped also says why. Absent (never null/"") on an uncapped verdict, so the
+  // existing ledger shape is byte-identical for every healthy review.
+  const reason = verdict.capped && verdict.criteria ? cappedReason(verdict.criteria) : undefined;
+  return {
+    capped: verdict.capped,
+    keyword_only: verdict.keywordOnly,
+    plan_only: verdict.planOnly,
+    ...(reason ? { capped_reason: reason } : {}),
+  };
 }
 
 /**

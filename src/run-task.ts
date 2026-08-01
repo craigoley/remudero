@@ -316,6 +316,7 @@ import {
   reviewerOutcome,
   reviewerVerdictContract,
   reviewEvidenceStrength,
+  cappedReason,
   reviewLedgerLegibilityFields,
   type CappedOverride,
   type CriterionVerdict,
@@ -4644,9 +4645,15 @@ export type MaterializeReviewWorktreeResult =
  * verdict, or a capped one with no materialization failure at all (rmd
  * review's checkout was simply never attempted), is returned unchanged. */
 export function reviewPostedDescription(
-  verdict: Pick<ReviewVerdict, "summary" | "capped">,
+  verdict: Pick<ReviewVerdict, "summary" | "capped"> & Partial<Pick<ReviewVerdict, "criteria">>,
   materializationFailure?: MaterializationFailure,
 ): string {
+  // W1-DH: a capped verdict names WHY it was capped even when materialization was fine — the
+  // code-span defect capped 0/N with a perfectly healthy checkout, and the description said nothing.
+  const skipReason = verdict.capped && verdict.criteria ? cappedReason(verdict.criteria) : undefined;
+  if (verdict.capped && !materializationFailure && skipReason) {
+    return `${verdict.summary} — capped: ${skipReason}`;
+  }
   return verdict.capped && materializationFailure
     ? `${verdict.summary} — degraded: ${materializationFailure.errorClass}: ${materializationFailure.message}`
     : verdict.summary;
