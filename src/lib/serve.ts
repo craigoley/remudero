@@ -57,6 +57,7 @@ import {
   type PanelActionDeps,
 } from "./panel-actions.js";
 import { buildPanelGraphRoutes, ratifyCliGateway, type PanelGraphDeps } from "./panel-graph.js";
+import { buildPanelSkillsRoutes } from "./panel-skills.js";
 import { buildTaskCardRoute } from "./task-card.js";
 import { buildAddOperatorNoteRoute, buildListOperatorNotesRoute } from "./operator-notes.js";
 import { createLastSeenStore, lastSeenPath, type LastSeenStore } from "./last-seen.js";
@@ -3423,6 +3424,12 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
     buildKickRoute(fleetControlDeps),
     buildDrainNowRoute(fleetControlDeps),
     ...buildPanelGraphRoutes(panelGraphDeps),
+    // W1-T284: the skills-panel button SET, read-scoped -- was built (lib/panel-skills.ts,
+    // W3-T8) but never wired into the real route table, so GET /v1/skills 404'd on every
+    // running console. `questionsRoot` IS repoRoot (see that field's own doc, above) and
+    // `.remudero/skills/` lives under repo root (lib/skill.ts's `skillsDir`), so it is the
+    // same root buildAddOperatorNoteRoute already uses, never a new one.
+    ...buildPanelSkillsRoutes({ root: deps.questionsRoot }),
     buildTaskCardRoute(deps.board),
     buildAuthScopeRoute(),
     buildShellRoute(deps.phaseElapsedThresholdsMs ?? DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS, consoleSha),
