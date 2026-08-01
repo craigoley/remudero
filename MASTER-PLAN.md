@@ -1,34 +1,36 @@
-# REMUDERO — Master Plan (v2.26 · synced 2026-07-30)
+# REMUDERO — Master Plan (v2.27 · synced 2026-08-01)
 
-**FOCUS — THE RATIFIED BACKLOG DRAINED AND THE LEARNING CORPUS DID NOT MOVE. 54 runs → 25 shipped
-tasks** at **$5.139/run — the SECOND consecutive cost drop** ($10.650 → $6.664 → $5.139). **Three
-whole ratified families CLOSED in one cycle: P19 parallel dispatch (W1-T170/T171/T172), P34
-presence/headroom (W1-T248–T251), P37 TIER-1 policy (W1-T252/T253)** — every family NET STATE has
-carried as "ratified, unbuilt" for two cycles except one. And, in the same gather: **LEARNINGS held at
-74 — ZERO added for the SECOND cycle running**, with all three flywheel organs long merged; **ledger
-credit fell again, 21% → 16%** (4 of 25); **the FOREIGN-trailer class QUADRUPLED, 1 → 5**, four of
-them brand-new and permanently poisoning W1-T258/T259/T260/T262; and **9 guard blocks fired inside one
-13-hour window**, including a NEW `isolation/inherited-functions` class that FIELD FINDING 3 predicted.
-P38's effect assertion — run BY HAND this retro, because it is still unbuilt — FLAGS the flywheel.
-Next, in order: **P38 (prove the merged organs execute) → W1-T149 (P29 sibling credit, 20 sibling
-rejections, unbuilt for a FIFTH cycle) → P33's trailer quarantine (5 permanently-poisoned tasks, up
-from 1) → P41 (host-hygiene preflight — 9 guard blocks nobody detected at boot) → P39 → P40/P42**.
+**FOCUS — LEDGER CREDIT QUADRUPLED (16% → 64%) AND RE-DISPATCH CHURN BECAME MEASURABLE IN DOLLARS.
+34 runs → 22 tasks / 25 merged PRs** at **$4.915/run — a THIRD consecutive cost drop** ($10.650 →
+$6.664 → $5.139 → $4.915), and the FIRST cycle in which cost-per-RESULT fell too ($11.10 → $7.60).
+Guard blocks went **9 → 0** and MAST `infrastructure` went **9 → 0**: P41's host transient
+self-resolved with no action. Against that: **four of the 25 "shipped" PRs are NO-OP CLOSES of ONE
+task** — `chore(plan): close W1-T254 re-dispatch as already-satisfied (second/fourth/fifth time)`,
+#1007/#1012/#1015/#1016, **$11.03 of spend for zero code**, against work PR #720 that had already
+merged; **W1-T201 was dispatched THREE times and all three were rejected against `plan/close-t201`
+/#993**, a branch no run of that task owns — a SIXTH permanently-poisoned task. **LEARNINGS held at
+74 — ZERO added for the THIRD cycle running**, this time with a worker explicitly naming the note it
+wanted written. P38's effect assertion — run BY HAND for the second retro, because it is still
+unbuilt — FLAGS again. Next, in order: **P38 → P33's trailer quarantine (6 tasks now) → P29/P39's
+EFFECT CHECK (W1-T271's lifetime dispatch cap #1040 and W1-T272's ALREADY_SATISFIED exit #1044 both
+shipped AFTER this cycle's churn — the next retro must assert they fired) → P42 → P40 → P17, whose
+EU AI Act Art. 50 date is NOW**.
 
-**Header discipline (v2.17).** This header carries the **sync date + current focus and nothing else**.
-The sections are the source of truth; read them. A retro that re-inflates this header has failed the
-HARNESS-COMPRESSION bar (§Self-improvement).
+**Header discipline (v2.17).** Sync date + current focus, nothing else; the sections are the source of
+truth. A retro that re-inflates this header has failed the HARNESS-COMPRESSION bar.
 
 **Retro ledger:** R1–R9 seeded CALIBRATION + P1–P32, corrected the false-merged W1-T54b attribution
-(#80 → #91), and closed P1–P11+P15+P21+P25+P27+P31. The per-retro id roll-call is DELETED — the SHIPPED
-log's section headers already carry every id and date, and maintaining the same list twice is the
-duplication HARNESS-COMPRESSION forbids · R10 (…626054083) logged the console/inbox/governor cycle and
-mined P35 · R11 (…341166059, 2026-07-29) logged the 94-task gate-integrity + onboarding + flywheel
-cycle, RETIRED P28 on its own instrument (22% approval, n=18), closed P12/P13/P14/P18/P20/P23/P24 and
-mined P38/P39/P40 · **R12 (…456064479, this sync)** logs the **25-task ratified-backlog drain**,
-re-bases calibration on 54 runs, CLOSES **P19/P34/P37**, RUNS P38(iii)'s effect assertion by hand
-(FLAGGED), and mines **P41/P42**. **Per-proposal RE-RANK stubs are abolished this retro** — each
-proposal has ONE canonical entry, updated in place, and the live ranking is the single line under
-§Retro proposals.
+(#80 → #91), and closed P1–P11+P15+P21+P25+P27+P31 · R10 (…626054083) logged the console/inbox cycle and
+mined P35 · R11 (…341166059) logged the 94-task gate-integrity + onboarding + flywheel cycle, RETIRED
+P28 on its own instrument (22% approval, n=18), closed P12/P13/P14/P18/P20/P23/P24 and mined
+P38/P39/P40 · R12 (…456064479, 2026-07-30) logged the 25-task ratified-backlog drain, CLOSED
+**P19/P34/P37**, and mined P41/P42 · **R13 (…599040918, this sync)** logs the **22-task account +
+dispatch-integrity + status-board cycle**, re-bases calibration on 34 runs, RUNS P38(iii)'s effect
+assertion by hand a SECOND time (FLAGGED), grades **P41 toward RETIREMENT** on zero recurrence, mines
+NO new P-number (every failure this cycle is an instance of an open one — P8's accretion rule), and
+collapses four cycles of duplicate credit-artifact fold-lines into one. **Per-proposal RE-RANK stubs
+stay abolished** — each proposal has ONE canonical entry, updated in place; the live ranking is the
+single line under §Retro proposals.
 
 > **Remudero** — the wrangler in charge of the remuda: the hand who manages the worker herd and
 > decides which mounts ride today. The orchestrator's own job title. CLI alias `rmd`.
@@ -70,95 +72,112 @@ Dependabot/leak-grep #76, the ci-gate aggregator #75, the dep-review lane #87/#9
 so §5A's "the harness eats first" is FACT on the security tier. As of R11 the daemon also drains
 `remudero` itself and fires its own retro (W1-T160/#853) — the operator-kick era is over.
 
-★ **THIS CYCLE (RETRO-1785456064479, 2026-07-30): THE RATIFIED BACKLOG DRAINED — 54 runs → 25 shipped
-tasks at $5.139/run, the second consecutive cost drop.** Three whole ratified families CLOSED (detail
-in the SHIPPED log): **P19 parallel dispatch** (W1-T170 per-run isolated worker HOMEs / T171 the
-deterministic file-overlap pre-dispatch check / T172 N=2 bounded lanes), **P34 presence-aware autonomy**
-(W1-T248–T251 — the risk judge on the dispatch path, subscription-HEADROOM budgeting, and the
-per-model-class weekly-burn accounting whose FIRST live output is in this gather's own tables), and
-**P37's TIER-1 policy file** (W1-T252/T253). Alongside them: the escalation family (T195 dedupe on
-(pr, head sha, cause), T196 stand-down on an unattributable plan-filing PR, T186, T198), the decisions
-write-path fix (T191), and the T236/T237/T238 + T225/T261 remainder.
+★ **THIS CYCLE (RETRO-1785599040918, 2026-08-01): THE ACCOUNT + DISPATCH-INTEGRITY + STATUS-BOARD
+CYCLE — 34 runs → 22 tasks / 25 merged PRs at $4.915/run, a third consecutive cost drop.** Four arcs
+landed (detail in the SHIPPED log): **multi-ACCOUNT identity** (W1-T265 identity-aware worker keychain
+/ T266 the pinned serial-switch rule / T267 the usage probe reading the worker credential store /
+T268 a ledger `account` dimension with a hard attribution epoch) — a family the plan had no section
+for a cycle ago; **DISPATCH INTEGRITY** (T271 a lifetime dispatch cap **no ledger step can reset**
+/#1040 — this is P29(ii)'s per-task circuit breaker, built; T272 a sanctioned `ALREADY_SATISFIED`
+exit /#1044 — P39's dispatch-side half, built); **THE STATUS BOARD** (T279 `rmd status` local
+liveness/latches → T280 the derived blockers/queue-head/inbox/headroom board → T282 `deriveRunState`
+recognizing every lane's start/terminal step → T275 render-relevant console steps surviving ledger
+rotation); and **THE REVIEW GATE** (T274 the gate fails when a PR body contradicts its own diff, T273
+a grep proof that also matches the merge-base is downgraded, T277 the `verify:human` proof dialect,
+T226 the fix rung's ci-log mode).
 
-★ **THE FINDING: THE EFFECT ASSERTION, RUN BY HAND, FLAGS THE FLYWHEEL — SECOND CYCLE.** P38(iii)
-proposed that the next retro assert a credited task's stated signal actually MOVED. It is unbuilt, so
-this retro ran it manually against R11's own claims, and the result is: **(a) LEARNINGS = 74 entries,
-0 added, unchanged across a further 54 runs and 25 shipped tasks** — W1-T86/T87/T88 have now been
-merged for two full cycles and the corpus they feed has never grown by one line, while the gather's
-procedural miner again proposed reusable shapes (`implement × clean_single_strike`, `× …
-fully_executed_proof`) and again nothing wrote them. **(b) Ledger credit fell a THIRD time: 30% → 21%
-→ 16%** (4 of 25). **(c) Ratification telemetry read 3 approved / 11 reframed / 21% — byte-identical
-to R11's reading**, which means either zero ratifications occurred this cycle or the counter is
-unwindowed; that is decidable and nobody can decide it from the gather, so P40's coverage rule should
-extend to it. Against those three, ONE organ demonstrably EXECUTED: W1-T250's per-model-class weekly
-burn table (sonnet, 97 runs / 419 turns / 100% of weekly burn) appears in this gather for the first
-time. **The class is unchanged and now has a second data point: a merged organ's EFFECT is not
-observed unless something asserts it.** P38 stays #1.
+★ **THE FINDING: THE HARNESS SHIPPED THE CURE AND PAID THE DISEASE IN THE SAME CYCLE.** Four of the 25
+merged PRs are **no-op closes of ONE task**: `chore(plan): close W1-T254 re-dispatch as
+already-satisfied` — **second (#1012), fourth (#1015), fifth (#1016) time**, plus #1007 naming the
+work PR (**#720**) that had already merged. **$11.032 for zero lines of product code**, and all four
+were LEDGER-CREDITED as shipped tasks. In the same window **W1-T201 was dispatched three times and
+every one was rejected** against `plan/close-t201`/#993 — a branch no run of that task owns, so the
+ownership-assert can never credit it and `nextRunnable` re-selects it forever. R12 recorded "zero
+no-op-close PRs this cycle" and declared the churn had moved to the sibling case; **it moved back, and
+it is now countable in dollars.** The cure merged *after* the waste — #1040 (dispatch cap) and #1044
+(ALREADY_SATISFIED) both carry higher PR numbers than all four T254 closes — which makes the next
+retro's test **decidable and pre-committed: no-op-close PRs must be ZERO, or two shipped organs do
+not execute.** That is P38(iii) stated as a falsifiable claim instead of a hope.
 
-★ **P29 IS THE MOST EXPENSIVE UNBUILT RATIFICATION IN THE PLAN — FIFTH CYCLE.** 25 credit rejections;
-**20 are the SIBLING case W1-T149 was ratified to credit** (W1-T249 ×3, W1-T174 ×2, W1-T176 ×2,
-W1-T195 ×2, W1-T196 ×2, W1-T248 ×2, plus T171/T172/T250/T251/T252/T253/T191). Every one of those 20 is
-a run that paid full price to redo work its own sibling had already merged.
+★ **THE EFFECT ASSERTION, RUN BY HAND A SECOND TIME, FLAGS AGAIN — THIRD CYCLE OF ZERO LEARNINGS.**
+**LEARNINGS = 74 entries, 0 added**, across a further 34 runs and 22 shipped tasks; W1-T86/T87/T88
+have now been merged for THREE cycles and the corpus they feed has never grown by one line. This
+cycle sharpens it past the miner's own output: a worker wrote, in its follow-up harvest, *"worth a
+LEARNINGS.md note since it's the second time I've reached for that pattern in this codebase"* — the
+learning was **named, in prose, by the run that discovered it**, and nothing wrote it. The gap is not
+detection; it is a WRITE PATH. Two other flags hold: **ratification telemetry read 3/11/21% for the
+THIRD byte-identical time** — three identical readings across three cycles is no longer explicable as
+"a quiet cycle", so the counter is almost certainly unwindowed and that is now a defect claim, not an
+open question — and **the turn column stayed dark**: 321 turns across 34 runs, but 294 of them belong
+to just three runs (T280 151, T282 92, T284 51), and the *weekly* table reports the same 321 turns
+across 131 runs, i.e. **every turn recorded this week came from this cycle and 97 other runs recorded
+none**. Against those, ONE headline moved hard and NOTHING in the gather says why: **ledger credit
+16% → 64%** (16 of 25). An unexplained 4× improvement in the plan's most-watched integrity metric is
+the same defect as an unobserved organ, pointed the other way. P38 stays #1.
 
-★ **P33 QUADRUPLED AND IS NOW THE SECOND-LARGEST CARRIED COST.** The FOREIGN class — a merged PR
-carrying a task's trailer on a branch NO run of that task owns, which sibling credit can never
-reach — went **1 → 5** and four are BRAND NEW: **W1-T258→#766 (`feat-api-key-overflow`), W1-T259→#768
-(`feat-headroom-flag`), W1-T260→#773 (`feat-console-write-actions`), W1-T262→#777
-(`feat-console-freshness`)**, plus W1-T64→#115 for the FIFTH time. Four tasks became permanently
-underivable in a single cycle. The ownership-assert is behaving correctly each time; what is missing
-is the quarantine list P33 was ratified to build.
+★ **P33 GAINED A SIXTH PERMANENTLY-POISONED TASK, AND FOR THE FIRST TIME ITS COST IS IN-CYCLE.**
+W1-T201 joins W1-T64/#115, W1-T258/#766, W1-T259/#768, W1-T260/#773, W1-T262/#777 — but unlike those
+five, **W1-T201 burned three dispatches inside this very cycle** against `plan/close-t201`/#993. P33's
+carried cost has always been argued as *permanent underivability*; it is now also *repeated spend*,
+which is P39's argument, on P33's data. The ownership-assert behaved correctly all three times. What
+is missing is still only the quarantine list.
 
-★ **THE GUARD CLASS GAINED A NEW CHECK, AND R11's RE-CHECK IS ANSWERED.** 9 guard-fired blocks, all
-excluded from task defect counts by construction (W1-T91/#719): `containment/outside-cwd-denial` ×6
-(W1-T171/T172/T201/T248/T249/T251) and a NEW **`isolation/inherited-functions` ×3**
-(W1-T248/T250/T252). R11 asked: *if the same check fires again, is it a task signal after all?* It
-fired again across an entirely DIFFERENT task set on the same host — so the answer is **no, it is a
-HOST signal**, confirmed, and the gather's own recurrence trend says so independently. Two things are
-new and load-bearing: all 9 events cluster in ONE ~13-hour window (…356723–…402459) with zero in the
-cycle's last ~12 hours — the shape of a host-state transient, though nothing in the gather proves what
-changed — and `inherited-functions` is **FIELD FINDING 3 arriving as a runtime block**: `claude` is a
-shell FUNCTION on this host, and an inherited function reaching a worker is exactly what that finding
-predicted. Mined as **P41**: the host is asserted at BOOT, once, or it is discovered nine times at
-full task cost.
+★ **P29's SIBLING CASE COLLAPSED — 20 → 3.** Rejections fell 25 → 6 (3 FOREIGN, all W1-T201; 3
+SIBLING — W1-T254/#1016, W1-T275/#1050, W1-T277/#1052). W1-T149 stays ratified-and-unbuilt for a SIXTH
+cycle, but its evidence base shrank by 85% while **P29(ii)'s circuit-breaker half SHIPPED as
+W1-T271/#1040**. The honest consequence: P29(i) sibling credit is no longer "THE backlog", and the
+plan should stop calling it that.
 
-★ **PRIOR CYCLES (folded — the SHIPPED log's own section headers carry every id, date and detail; the
-narrative restatement that lived here is DELETED rather than re-synced a fifth time).** R11
-(2026-07-29) drained the gate-integrity ladder, brownfield onboarding and the whole learning flywheel
-— 94 tasks, the biggest cycle by count. R10 made the console a real instrument and closed the P25
-ratification inbox. R9 ended the spin loop (195 runs → 26). R8 recorded 28 merges and **0** ledger
-credits — the LIVENESS integrity inversion that mined P29/P30. R7 built flight control + the
-level-triggered PR reconciler. R6 gave the floor executable proofs (P15). R5 unioned ledger∪GitHub at
-gather time (P11) and found the FIRST integrity inversion — **PR #80's false `W1-T54b` trailer**, the
-residue P33's quarantine list retires.
+★ **P41's EVIDENCE EVAPORATED — 9 GUARD BLOCKS → 0, MAST `infrastructure` 9 → 0.** Zero
+`containment/outside-cwd-denial`, zero `isolation/inherited-functions`, zero infrastructure events of
+any kind. R12 read the 13-hour cluster as a HOST-STATE TRANSIENT and that reading is now confirmed by
+its disappearance — **without anyone building P41**. A proposal whose entire ground truth vanished in
+one cycle does not get to sit at rank 4; it is graded to the bottom with a KILL TRIGGER (below).
 
-**Inventory (verified 2026-07-30: 25 tasks shipped this cycle, ~900 merged PRs on `remudero`, 6 on
-`remudero-sandbox`).** WS-0 and WS-1 SHIPPED; WS-3's control panel is a live instrument; the §5 gate
-stack polices its own integrity end to end; the daemon fires its own retro (W1-T160/#853) and, as of
-this cycle, dispatches **two lanes in parallel** behind a file-overlap check (P19). The SHIPPED log is
-the record (rule 13 — the proof is a merged PR); no PR-by-PR restatement lives here.
+★ **PRIOR CYCLES (folded — the SHIPPED log's own section headers carry every id, date and detail).**
+R12 (2026-07-30) drained the whole ratified backlog: P19 parallel dispatch, P34 presence/headroom, P37
+TIER-1 policy — 25 tasks, three families CLOSED. R11 (2026-07-29) drained the gate-integrity ladder,
+brownfield onboarding and the learning flywheel — 94 tasks, the biggest cycle by count. R10 made the
+console a real instrument and closed the P25 ratification inbox. R9 ended the spin loop (195 runs →
+26). R8 recorded 28 merges and **0** ledger credits — the LIVENESS integrity inversion that mined
+P29/P30. R7 built flight control + the level-triggered PR reconciler. R6 gave the floor executable
+proofs (P15). R5 unioned ledger∪GitHub at gather time (P11) and found the FIRST integrity inversion —
+**PR #80's false `W1-T54b` trailer**, the residue P33's quarantine list retires.
+
+**Inventory (verified 2026-08-01: 22 tasks / 25 merged PRs this cycle, ~1075 merged PRs on `remudero`,
+6 on `remudero-sandbox`).** WS-0 and WS-1 SHIPPED; WS-3's control panel is a live instrument and now
+has a CLI projection (`rmd status`, W1-T279/T280); the §5 gate stack polices its own integrity end to
+end; the daemon fires its own retro (W1-T160/#853), dispatches two lanes in parallel behind a
+file-overlap check (P19), and as of this cycle carries a lifetime per-task dispatch cap (T271) and an
+`ALREADY_SATISFIED` exit (T272). The SHIPPED log is the record (rule 13 — the proof is a merged PR);
+no PR-by-PR restatement lives here.
 
 **mounts.yaml (W1-T5) is SHIPPED** — #42, on disk at `.remudero/mounts.yaml`, re-based to a flat-400
 tripwire by #90, and routing model + effort by task RISK and CLASS since W1-T167/#606. The calibration
-table below is the row that re-bases it. **P40(a) is CLOSED on the class column: 54 of 54 runs resolved
-`task_class` this cycle (0 `unknown`, against 40% last cycle)** — so the routing question is now
-ASKABLE. The turn column is still dark, so it is not yet ANSWERED.
+table below is the row that re-bases it. **P40(a) holds CLOSED on the class column for a second cycle:
+34 of 34 runs resolved `task_class` (0 `unknown`)** — so the routing question is ASKABLE. It is still
+not ANSWERED: the class table is single-row (`src`) for the second cycle running, so there is no
+contrast to measure a discount against, and the turn column is still dark.
 
-**Still PLANNED, not shipped** (the honest remainder): **W1-T149 — P29 sibling credit, ratified FOUR
-cycles ago and still unbuilt**; P17's receipts task (W1-T71); the remaining fleet tasks (W1-T25/T28,
-W2-T2 dry-run). **P19 (W1-T170/T171/T172), P34 (W1-T248–T251) and P37 (W1-T252/T253) ALL DRAINED this
-cycle and are struck from this list** — for the first time since L2 opened, the only ratified-and-
-unbuilt item left in the plan is W1-T149.
+**Still PLANNED, not shipped** (the honest remainder): **W1-T149 — P29(i) sibling credit, ratified
+five cycles ago and unbuilt, now on a shrinking evidence base (20 → 3 sibling rejections) with its
+sibling half P29(ii) SHIPPED as W1-T271/#1040**; P17's receipts task (W1-T71) — **its EU AI Act
+Art. 50 machine-readable-disclosure date is 2026-08, i.e. NOW**; the remaining fleet tasks
+(W1-T25/T28, W2-T2 dry-run); and the class-C console-panel defect batch W1-T281/T283/T285 filed
+alongside W1-T282/T284 in #1068.
 
-**NEXT (L2) — kick order, graded against R12's data:** **(1) P38 — prove the merged organs EXECUTE:
-wire the governors and the freshness hook to live call sites, show ONE learning written on `remudero`,
-and BUILD the effect assertion so the next retro does not run it by hand a third time; (2) W1-T149
-(P29) — 20 sibling rejections, fifth cycle unbuilt; (3) P33's trailer quarantine — 5 permanently-
-poisoned tasks, 4 of them new this cycle; (4) P41 — the host-hygiene preflight, because 9 runs paid
-full price to discover one host's state; (5) P39's pre-dispatch merged-trailer gate; (6) P40's turn
-blackout + P42's verdict exemplars, so the `failed`×10 class can be mined at all.** The binding
-constraint is unchanged from R11 and now has two cycles of evidence: **"the harness cannot tell itself
-whether what it BUILT is running."** What DID move is the backlog — the ratified-unbuilt queue went
-from four families to one.
+**NEXT (L2) — kick order, graded against R13's data:** **(1) P38 — prove the merged organs EXECUTE:
+the LEARNINGS WRITE PATH first (a worker that names a note in its harvest gets it written — the
+corpus has been frozen at 74 for three cycles), then the call-site lint rung, then BUILD the effect
+assertion so a fourth retro does not run it by hand; (2) P33's trailer quarantine — SIX permanently-
+poisoned tasks and, for the first time, three dispatches of one of them inside a single cycle;
+(3) THE EFFECT CHECK ON P29(ii)/P39 — W1-T271/#1040 and W1-T272/#1044 shipped after this cycle's
+churn, so the pre-committed test is that no-op-close PRs read ZERO next cycle; (4) P42's verdict
+exemplars — `failed` is 5 of 34 (15%) and the gather still names not one of them; (5) P40's turn
+blackout + the unwindowed ratification counter; (6) W1-T149 (P29(i)), re-ranked DOWN on collapsed
+evidence.** The binding constraint is unchanged and now has three cycles of evidence: **"the harness
+cannot tell itself whether what it BUILT is running"** — and R13 adds its mirror image: it cannot tell
+itself why what it built got BETTER, either.
 NOTE: `nextRunnable` (drain.ts:31 `plan.tasks.find`) is DECLARATION-ORDERED; this is the authoritative
 KICK ORDER (mirrored as a comment atop plan/tasks.yaml).
 
@@ -166,6 +185,54 @@ KICK ORDER (mirrored as a comment atop plan/tasks.yaml).
 
 Shipped arcs, keyed by Remudero-Task (Standing rule 13: the proof is a MERGED PR, not prose).
 Newest first. Cost/turns from the run ledger.
+
+### RETRO-1785599040918 (2026-08-01) — accounts, dispatch integrity & the status board (22 tasks / 25 PRs)
+
+★ **16 of 25 were LEDGER-CREDITED (64%, UP from R12's 16% and R11's 21%) — the first credit RECOVERY
+ever recorded, and nothing in the gather explains it** (P38's mirror image; see NET STATE). The other
+9 are gate-side merges the W1-T51 union rescued: W1-T169/#987, T194/#990, T221/#978, T265/#1022,
+T268/#1032, T272/#1044, T273/#1047, T279/#1062, T280/#1065. **Turns are OMITTED, not zeroed:** only 3
+of 25 report a nonzero count (T280 151t, T282 92t, T284 51t = 294 of the cycle's 321), so a per-task
+turn column would be fiction (P40). Costs are the crediting run's own ledger cost and sum to
+**$153.196** of the cycle's **$167.119** — the $13.923 remainder is the 9 runs that produced no
+credited PR. **0/34 `budget_usd` trips**; most expensive single run W1-T169 at **$17.676**, less than
+half R12's $35.384 peak.
+
+- **★ THE ACCOUNT ARC — 4 tasks, FOLDED** (an identity-aware worker keychain, per account,
+  W1-T265/#1022 · the pinned SERIAL-SWITCH rule, no concurrency across accounts, T266/#1024 · the
+  usage probe reads the WORKER credential store rather than the daemon's T267/#1026 · a ledger
+  `account` dimension with a **hard attribution epoch** T268/#1032) → **$26.341** · a family the plan
+  had no section for one cycle ago; the epoch is what keeps pre-split ledger rows from being
+  retro-attributed to an account that did not exist.
+- **★ DISPATCH INTEGRITY — 2 tasks, and BOTH ARE OPEN-PROPOSAL HALVES BUILT** (a **lifetime dispatch
+  cap no ledger step can reset** W1-T271/#1040 — this is **P29(ii)'s per-task circuit breaker** ·
+  a sanctioned **`ALREADY_SATISFIED`** run-task exit for a task whose work already merged T272/#1044 —
+  this is **P39's dispatch-side half**) → **$12.136** · NEITHER proposal is CLOSED by these: P29(i)
+  sibling credit and P39(i)'s pre-dispatch merged-trailer gate are still unbuilt, and both organs
+  merged AFTER the churn they target. The pre-committed effect test is in NET STATE.
+- **★ THE STATUS BOARD — 4 tasks, FOLDED** (`rmd status`, the local liveness/latches/last-cycle board,
+  W1-T279/#1062 · the DERIVED board — blockers, queue head, inbox, headroom — T280/#1065, the cycle's
+  second-costliest credited run at $15.532/151t · `deriveRunState` recognizes EVERY lane's
+  start/terminal step T282/#1070 · render-relevant console steps survive ledger rotation T275/#1050)
+  → **$36.278** · WS-3's instrument now has a CLI projection. Open remainder named by T282's own
+  harvest and unfiled (rule 15): the six fleet-lane pseudo ids are recognized by `deriveRunState` but
+  still render no NOW-panel row.
+- **THE REVIEW GATE — 4 tasks, FOLDED** (the gate FAILS when a PR body contradicts its own diff
+  W1-T274/#1048 · a grep proof that also matches the PR merge-base is DOWNGRADED, never counted as
+  executed, T273/#1047 · the `verify:human` proof dialect demonstration T277/#1052 · the fix rung's
+  ci-log mode keys on `ciFailures` presence T226/#983) → **$21.036**
+- **OPERATOR & PLAN HYGIENE — 7 tasks, FOLDED** (`rmd down`/`rmd up` lifecycle verbs W1-T169/#987, at
+  **$17.676** the cycle's most expensive run · `rmd preflight`, the hand route's commit gate,
+  T221/#978 · the light sweep keeps ticking during a fired retro T276/#1049 · the next-task-id mint
+  unions plan GIT HISTORY so a deleted id is never reissued T278/#1051 · retro cadence thresholds
+  lifted into `plan/policy.yaml` T264/#1000 · reframe supersession made structural via `--supersedes`
+  T194/#990 · the skills panel's read route REGISTERED T284/#1073) → **$46.373**
+- **★ THE NO-OP REMAINDER — 1 task, 4 PRs, $11.032, AND ZERO PRODUCT CODE** (`chore(plan): close
+  W1-T254 re-dispatch as already-satisfied` — #1007 naming the real work PR **#720**, then the
+  **second** #1012, **fourth** #1015 and **fifth** #1016) · all four LEDGER-CREDITED as shipped tasks,
+  which is why this section reports 22 tasks and the honest count of tasks that changed product code
+  is **21**. Logged here rather than folded into the arcs above, because a retro that lets this line
+  disappear into a total is how the class went unnoticed between R11 and R13.
 
 ### RETRO-1785456064479 (2026-07-30) — the ratified backlog drains: P19 + P34 + P37 (25 tasks shipped)
 
@@ -177,36 +244,21 @@ nonzero turn count (W1-T191 163t, W1-T195 87t, W1-T196 89t — 339 of the cycle'
 run's own ledger cost and sum to **$244.319** of the cycle's **$277.487** — the ~$33 remainder is the
 29 runs that produced no credited PR, chiefly the sibling re-dispatches P29 leaves uncredited.
 
-- **★ P19 — PARALLEL DISPATCH, ALL THREE RUNGS, FOLDED** (per-run isolated worker HOMEs W1-T170/#888 ·
-  the deterministic file-overlap pre-dispatch check, rung 1, T171/#890 · N parallel dispatch lanes
-  bounded by the queue-governor WIP limit, N=2, T172/#896) → **$19.010** · ★ **P19 CLOSED** — rung 2
-  (Tree-sitter symbol-touch locks) stays BANKED until a rung-1 escape appears in the ledger, and
-  T172's `dispatch.concurrent_set` line is what makes that trigger answerable. The honesty bound is
-  carried, not retired: `files:` is advisory metadata a worker can exceed.
-- **★ P34 — PRESENCE-AWARE AUTONOMY, ALL FOUR TASKS, FOLDED** (the lightweight risk judge on the
-  dispatch path W1-T248/#903 · budget as subscription HEADROOM with a 5% operator reserve
-  (`HEADROOM_LIMIT_PCT=95`) T249/#907 · **per-model-class weekly-limit burn accounting T250/#898 —
-  whose FIRST live output is this gather's model table** · away-mode escalation delivery through the
-  W1-T163 recap T251/#899) → **$30.386** · ★ **P34 CLOSED** on the round-3 envelope: dispatch is NOT
-  presence-gated, the presence×risk matrix is dead, and burn is measured in weekly-limit share, never
-  imputed dollars.
-- **★ P37 — THE TIER-1 POLICY FILE, FOLDED** (operating constants become schema-bounded, lint-gated
-  plan data W1-T252/#901 · the proof-timeout / launchd-ThrottleInterval rows T253/#921) →
-  **$25.801** · ★ **P37 CLOSED**
-- **THE ESCALATION-INTEGRITY ARC — 4 tasks, FOLDED** (escalations deduped on (pr, head sha, cause)
-  across rungs W1-T195/#969 · **the sweep STANDS DOWN on an unattributable plan-filing PR and never
-  escalates `UNKNOWN`** T196/#972 — the cycle's cheapest credited run at $0.260 / 89 turns ·
-  T186/#931 · T198/#933) → **$39.256** · both T195 and T196 name the same open remainder: the other
-  `escalate()` callers (dep-review, risk judge, ops alerts, GRILL, `rmd escalate`) still set no
-  `headSha`/`cause`, and `buildOpenPrViews` still never populates `isPlanFiling` from a real PR body.
-  Harvested below, unfiled (rule 15).
-- **DECISIONS + WRITE-PATH HYGIENE — FOLDED** (`recordDecision` stops dirtying the daemon's own
-  checkout on autochoose+flip, landing through an opt-in `land` path instead, W1-T191/#966) →
-  **$23.119** · the cycle's second-costliest credited run.
-- **THE REMAINDER — 11 tasks, FOLDED** (W1-T168/#884 · T174/#917 · T175/#923 · T176/#926 · T180/#928 ·
-  T202/#892 · T225/#935 · T236/#936 · T237/#938 · T238/#940 · T261/#885) → **$106.747** · W1-T202/#892
-  at **$35.384** is the cycle's most expensive single credited run; R11's W1-T193 still holds the
-  all-time record by $0.259, and those two remain the only runs ever past $35.
+**★ FOLDED TO FAMILY LINES BY R13** (see the R11 section for the standing rationale).
+
+- **★ P19 — PARALLEL DISPATCH, ALL THREE RUNGS** (W1-T170/#888 · T171/#890 · T172/#896) → **$19.010**
+  · ★ **P19 CLOSED**; rung 2 stays BANKED until a rung-1 escape appears in the ledger.
+- **★ P34 — PRESENCE-AWARE AUTONOMY, ALL FOUR TASKS** (W1-T248/#903 · T249/#907 · **T250/#898, the
+  per-model-class weekly-burn accounting the Calibration model table runs on** · T251/#899) →
+  **$30.386** · ★ **P34 CLOSED**
+- **★ P37 — THE TIER-1 POLICY FILE** (W1-T252/#901 · T253/#921) → **$25.801** · ★ **P37 CLOSED**
+- **THE ESCALATION-INTEGRITY ARC — 4 tasks** (W1-T195/#969 · T196/#972, the cycle's cheapest credited
+  run at $0.260/89t · T186/#931 · T198/#933) → **$39.256**
+- **DECISIONS + WRITE-PATH HYGIENE** (W1-T191/#966) → **$23.119**
+- **THE REMAINDER — 11 tasks** (W1-T168/#884 · T174/#917 · T175/#923 · T176/#926 · T180/#928 ·
+  T202/#892 · T225/#935 · T236/#936 · T237/#938 · T238/#940 · T261/#885) → **$106.747** ·
+  W1-T202/#892 at **$35.384** is still the second-costliest run ever recorded, behind R11's W1-T193 by
+  $0.259; **no run since has come within $17 of either.**
 
 ### RETRO-1785341166059 (2026-07-29) — the gate-integrity ladder + onboarding + the flywheel (94 tasks shipped)
 
@@ -217,86 +269,45 @@ would be fiction. Costs are the crediting run's own ledger cost and sum to **$86
 **$979.601** — the ~$112 remainder is the 53 runs that produced no credited PR, chiefly the sibling
 re-dispatches P29 leaves uncredited.
 
-- **THE GATE/REVIEW-INTEGRITY LADDER — 13 tasks, FOLDED** (poster-identity gate on the
-  `remudero-review` channel W1-T203/#508 · status-channel clobber guard T228/#525 · the arm decision
-  derives from the orchestrator's OWN ledger, not the status channel, T230/#523 · a CAPPED verdict
-  never arms regardless of tdd tier T229/#528 · plan-only PRs carved out of the capped floor T205/#562
-  · the fresh reviewer stops being told to post its own status T231/#530 · name-filtered proof runs
-  narrow to candidate files T227/#527 · materialization drops the needless branch checkout T232/#535
-  and names its teardown reason T233/#537 · fail-open holes in the mechanical floor closed T219/#571 ·
-  EVERY Acceptance claim parsed, not just the first, T134/#826 · transient gh 5xx retry on the status
-  POST T135/#828 · a prose zero-match proof is `not_executable`, never a false `executed_fail`,
+**★ FOLDED TO FAMILY LINES BY R13** — the per-task prose that sat here said nothing the family line and
+the PR itself do not, and it is exactly the treatment R11 gave R10 one cycle earlier. Every id and PR
+number is preserved; the descriptive clauses are DELETED, not summarized.
+
+- **THE GATE/REVIEW-INTEGRITY LADDER — 13 tasks** (W1-T203/#508 · T228/#525 · T230/#523 · T229/#528 ·
+  T205/#562 · T231/#530 · T227/#527 · T232/#535 · T233/#537 · T219/#571 · T134/#826 · T135/#828 ·
   T161/#866) → **$67.218**
-- **THE PROOF-DIALECT + PLAN-LINT ARC — 6 tasks, FOLDED** (a proof that cannot execute is BLOCKED at
-  lint time W1-T246/#697 · proof-resolvability lint T101/#735 · headless-fitness scoped by
-  spawn-ownership T118/#817 and made negation/self-reference aware T81/#677 · data/config files
-  discounted from subsystem sizing T92/#723 · the rule-15 blocked-review GOLDEN minted T58/#635)
-  → **$68.406**
-- **BROWNFIELD ONBOARDING (P24, all four phases) — FOLDED** (deterministic repo inventory W1-T82/#683
-  → recon + plan-artifact mining T83/#698 → the planning session T84/#702 → synthesis to ONE
-  ratifiable draft PR T85/#709) → **$43.563** · ★ **P24 CLOSED**
-- **THE LEARNING FLYWHEEL + ITS MINERS — 8 tasks, FOLDED** (`rmd wipe-test`, the P12 learning-utility
-  A/B harness, W1-T86/#631 · procedural-success mining from merged runs T87/#687 (P13) ·
-  contradiction detection marking contested pairs T88/#689 (P14) · MAST-coded verdicts via a
-  deterministic taxonomy map T89/#710 (P18) · the policy-gated alert-fix lane T90/#716 (P20) ·
-  structured guard-cause + infra classification on block verdicts T91/#719 (P23) · degraded-success
-  telemetry mining T73/#654 · the worker-declared follow-up harvest T105/#744) → **$111.191** ·
-  ★ **P12/P13/P14/P18/P20/P23 CLOSED — and see P38: this family merged and the corpus did not grow**
-- **THE SWEEP/RECONCILER FAMILY — 12 tasks, FOLDED** (reliable post-review sweep, light-sweep ticker
-  W1-T254/#720 · post-fix re-verification T124/#821 · arm at PR-open, not after review, T125/#823 ·
-  a WAIT disposition for in-window pending checks T114/#806 · a CONFLICTED disposition + merge-conflict
-  fix mode T106/#804 · escalations whose PR closed unmerged are closed T162/#870 · the daily COST
-  GOVERNOR T148/#839 · one open needs-human per (task, PR) T104/#801 · a correction is unconditionally
-  supreme with zero gh calls T130/#628 · a verified-merged pr-field credit outranks an open-PR row
-  T116/#810 · a merged proposal_pr reconciles to accepted T257/#800 · label provisioning + isolated
-  sweep-action throws T99/#731) → **$80.425**
-- **DAEMON DURABILITY + WORKER SPAWN — 11 tasks, FOLDED** (the retro fires on a merges/days trigger,
-  integrity-gated, W1-T160/#853 — **the retro now has a cadence and this cycle is its first output** ·
-  self-restart when origin/main advances past the boot sha T126/#824 · pause idles in-process instead
-  of exiting into a KeepAlive storm T197/#531 · daemon logs flushed synchronously, ledger path named
-  aloud T143/#837 · install-freshness runs npm install on a lock change T151/#845 · relaunch-loop
-  detection from boot-rate T215/#590 · claude resolved at spawn with infra-failure degradation
-  T113/#752 · `--allow-self-target` consent baked into self-target units T109/#749 · a run's process
-  tree contained and orphans swept T117/#815 · one bounded evidence-preserving test retry T255/#754 ·
-  auto ff-pull of rmd's own checkout at CLI entry T79/#662) → **$141.752**
-- **LEDGER, INBOX + WRITE ATOMICITY — 12 tasks, FOLDED** (ledger rotation by size, breaker-safe,
-  W1-T209/#583 · bounded rotation retention T244/#618 · newsyslog policy that EXCLUDES the ledger
-  T218/#593 · a torn ledger line is dropped LOUD, never faked as `{}`, T206/#549 · atomic status.json
-  cache write T207/#552 · a corrupt run.lock distinguished from an absent one T208/#555 · all four
-  inbox-proposals writers serialized through one lock T240/#608 · the draft rung's drafts/attempts
-  pair made atomic T241/#612 · the last-retro marker written atomically T242/#613 · captured feedback
-  lands on origin/main automatically T243/#619 · tasks.d shards materialized in syncPlanFromOrigin
-  T245/#651 · markdown fences stripped from Architect drafts T173/#660) → **$95.159**
-- **THE CONSOLE + DIGEST ARC — 10 tasks, FOLDED** (GLANCE strip, daemon-health widget, tab badge
-  W1-T159/#861 · marker-aware since-you-last-checked recap T163/#647 · RECENT sourced from the ledger
-  with GitHub decorating, never gating, T184/#479 · status-poll timeouts + stale one-truth routed into
-  the lifecycle T189/#574 · proposal cards wired to the write-token API T193/#602 · skeleton lifecycle
-  proven T200/#622 · inline task detail T222/#625 · live one-line summaries on collapsed sections
-  T223/#626 · `rmd digest-plist`, the daily morning-pulse LaunchAgent, T112/#491 · escalations and
-  drain rundowns pushed with console links T144/#614) → **$176.278** · the cycle's costliest arc
-- **CI, COMMIT + MOUNT HYGIENE — 11 tasks, FOLDED** (a real local commit-msg hook so worker commits
-  are linted before push W1-T137/#842 · the PR TITLE is linted instead of every branch commit
-  T129/#830 · a branch push whose diff touches UNDECLARED files is refused T142/#835 · nightly
-  full-scope mutation run owns the global score while the PR gate stays diff-only T133/#833 ·
-  check-runs deduped by name, latest attempt only, T123/#820 · the hard-failing osv-scan required in
-  ci-gate T211/#587 · one REQUIRED entry per line to avoid tier-gate collisions T107/#747 ·
-  out-of-repo temp-dir records excluded from the coverage ratchet T220/#641 · per-diff coverage gate
-  T212/#582 · repoRoot resolved from cwd with gate read-identity proven T120/#819 · **model/effort
-  routed by task risk and class, not a flat mount, T167/#606**) → **$58.619**
-- **DOCS, OPERATOR SURFACE + THE THREE NO-OP CLOSES — 7 tasks, FOLDED** (four hand-written docs/code
-  contradictions corrected + the claims gate extended W1-T213/#595 · the operator crisis runbook
-  T217/#598 · the ci-log fix worker restricted to a least-privilege toolset T210/#585 · a fix-rung
-  strike counts only once a worker actually RAN T127/#825 · and the three PRs whose entire content is
-  a no-op close of a stale re-dispatch — **W1-T7/#772, W1-T12a/#725, W1-T99/#731** — plus the
-  line-anchored trailer extraction in `rmd review` T70/#640) → **$25.375** · ★ **the three no-op
-  closes are P39's ground truth: the harness paid implement workers to discover the work was done**
+- **THE PROOF-DIALECT + PLAN-LINT ARC — 6 tasks** (W1-T246/#697 · T101/#735 · T118/#817 · T81/#677 ·
+  T92/#723 · T58/#635) → **$68.406**
+- **BROWNFIELD ONBOARDING (P24, all four phases)** (W1-T82/#683 → T83/#698 → T84/#702 → T85/#709) →
+  **$43.563** · ★ **P24 CLOSED**
+- **THE LEARNING FLYWHEEL + ITS MINERS — 8 tasks** (W1-T86/#631 P12 · T87/#687 P13 · T88/#689 P14 ·
+  T89/#710 P18 · T90/#716 P20 · T91/#719 P23 · T73/#654 · T105/#744) → **$111.191** ·
+  ★ **P12/P13/P14/P18/P20/P23 CLOSED — and see P38: this family merged and, three cycles on, the
+  corpus it feeds is still at 74 entries**
+- **THE SWEEP/RECONCILER FAMILY — 12 tasks** (W1-T254/**#720** — *the work PR R13's four no-op closes
+  keep rediscovering* · T124/#821 · T125/#823 · T114/#806 · T106/#804 · T162/#870 · T148/#839 ·
+  T104/#801 · T130/#628 · T116/#810 · T257/#800 · T99/#731) → **$80.425**
+- **DAEMON DURABILITY + WORKER SPAWN — 11 tasks** (W1-T160/#853 — *the retro's own cadence trigger* ·
+  T126/#824 · T197/#531 · T143/#837 · T151/#845 · T215/#590 · T113/#752 · T109/#749 · T117/#815 ·
+  T255/#754 · T79/#662) → **$141.752**
+- **LEDGER, INBOX + WRITE ATOMICITY — 12 tasks** (W1-T209/#583 · T244/#618 · T218/#593 · T206/#549 ·
+  T207/#552 · T208/#555 · T240/#608 · T241/#612 · T242/#613 · T243/#619 · T245/#651 · T173/#660) →
+  **$95.159**
+- **THE CONSOLE + DIGEST ARC — 10 tasks** (W1-T159/#861 · T163/#647 · T184/#479 · T189/#574 ·
+  T193/#602 · T200/#622 · T222/#625 · T223/#626 · T112/#491 · T144/#614) → **$176.278** · the cycle's
+  costliest arc
+- **CI, COMMIT + MOUNT HYGIENE — 11 tasks** (W1-T137/#842 · T129/#830 · T142/#835 · T133/#833 ·
+  T123/#820 · T211/#587 · T107/#747 · T220/#641 · T212/#582 · T120/#819 · **T167/#606 — model/effort
+  routed by task risk and class, the row the Calibration table exists to measure**) → **$58.619**
+- **DOCS, OPERATOR SURFACE + THE THREE NO-OP CLOSES — 7 tasks** (W1-T213/#595 · T217/#598 · T210/#585
+  · T127/#825 · T70/#640 · and the three PRs whose entire content is a no-op close of a stale
+  re-dispatch — **W1-T7/#772, W1-T12a/#725, W1-T99/#731**) → **$25.375** · ★ **P39's ground truth,
+  and R13 recorded FOUR more of exactly this shape**
 
 ### RETRO-1784626054083 (2026-07-21) — the console instrument + the ratification inbox + the governors (23 tasks shipped)
 
 ★ **Only 8 of 23 were LEDGER-CREDITED (30%) — and W1-T150, the fix for exactly this, merged FIRST
-(#358).** That inversion was the cycle's finding and is mined as P35. **FOLDED to family lines this
-retro** — the per-task prose said nothing the family line and the PR do not, and R11 restating 23
-entries verbatim is the duplication HARNESS-COMPRESSION forbids.
+(#358).** That inversion was the cycle's finding and is mined as P35 (now folded into P38).
 
 - **FLOOR + VERDICT INTEGRITY — FOLDED** (a zero-executed-proof verdict renders CAPPED/DEGRADED and
   cannot arm auto-merge on tdd:strict W1-T185/#456 — the cycle's costliest run · verdict stability
@@ -322,22 +333,14 @@ entries verbatim is the duplication HARNESS-COMPRESSION forbids.
 
 ### RETRO-1784556575522 (2026-07-20) — the W3 panel + the console + the intake lane (21 tasks shipped)
 
-★ **13 of these were LEDGER-CREDITED** — the first non-zero credit column since R7, and the reason this
-cycle reads as 21 shipped from only 26 runs. The 8 marked `(gate-side)` are the P30 residue: the PR merged,
-the run verdict never said so. Cost/turns from the run ledger.
+★ **13 of these were LEDGER-CREDITED** — the first non-zero credit column since R7. The 8 marked
+`(gate-side)` are P30 residue: the PR merged, the run verdict never said so.
 
-- **W3-T5** — human-in-the-loop panel actions: answer/approve/Pause-Resume-STOP/quiet-hours →
-  craigoley/remudero#300 · $16.141 · 154 turns · the cycle's most expensive run
-- **W3-T8** — panel skill actions: each registry skill is a panel button wired to the registry →
-  craigoley/remudero#305 · $15.713 · 110 turns · (gate-side; run ended blocked)
-- **W1-T45** — plan/refine/expand unified into `rmd plan --mode=create|clarify|expand` (ONE code path) →
-  craigoley/remudero#303 · $14.006 · 79 turns · (gate-side; run ended blocked)
-- **W3-T6** — panel: plan→task→PR graph + INTERACTIVE plan adjustment →
-  craigoley/remudero#302 · $12.618 · 106 turns
-- **W1-T43** — `rmd trace <id>`: the provenance chain feedback → proposal → task → run → PR → sha →
-  craigoley/remudero#301 · $12.086 · 92 turns
-- **W1-T138** — the fix rung stops mis-routing CI-check-only blocks to reviewer-unmet mode (the W1-T94
-  ci-log follow-up) → craigoley/remudero#345 · $10.972 · 124 turns · (gate-side; run ended blocked_ci)
+- **THE W3 PANEL + PLAN VERBS — 6 tasks, FOLDED BY R13** (W3-T5/#300 $16.141/154t, the cycle's most
+  expensive run, human-in-the-loop panel actions · **W3-T8/#305 $15.713/110t, panel SKILL actions —
+  the family whose `panel-skill-run` POST route R13 finds still unregistered, a P38 instance three
+  cycles old** · W1-T45/#303 $14.006/79t · W3-T6/#302 $12.618/106t · W1-T43/#301 $12.086/92t,
+  `rmd trace` · W1-T138/#345 $10.972/124t) → **$81.536**
 - **W1-T139/T140/T141 — the `rmd serve` console family, FOLDED to one line** (the PWA-installable
   authenticated live board → drain preview + curation panel driving dispatch → post-drain rundown with a
   one-tap operator verdict written to the ledger as `operator_feedback`) →
@@ -358,10 +361,8 @@ the run verdict never said so. Cost/turns from the run ledger.
 
 ### RETRO-1784512714705 (2026-07-19) — the knowledge holes + the fleet remainder (28 merges)
 
-★ **EVERY entry below is a GATE-SIDE merge** — the union half of W1-T51/#97 is the sole reason they are
-here. Not one was ledgered `verdict=merged`; the run-verdict column records what the RUN believed, and it
-was wrong 28/28. That blackout is P30, and it is why cost/turns below are the honest per-task price while
-the calibration table's headline averages are not.
+★ **EVERY entry below is a GATE-SIDE merge** — W1-T51/#97's union half is the sole reason they are here.
+Not one was ledgered `verdict=merged`: the run-verdict column was wrong 28/28. That blackout is P30.
 
 - **W1-T132/T115/T108 — FOLDED (R12)**: three entries that carried an id, a PR number and a price and
   no description at all — a SHIPPED log line with no claim in it is a ledger row in the wrong file →
@@ -383,261 +384,256 @@ the calibration table's headline averages are not.
 
 ### RETRO-1784383376396 (2026-07-18) — flight control + the PR-pipeline reconciler (14 merges)
 
-- **W1-T26** — architecture fitness tier: dependency-cruiser layering rule enforced in CI + ADR discipline
-  → craigoley/remudero#176 · $4.464 · 92 turns
-- **W1-T100** — blocked_ci routes to the ci-log fix path: fix FIRST, ask after exhaustion (the #170 fix;
-  interim `rmd fix` bridge claim FALSIFIED live #175 — the fix path is the real bridge) →
-  craigoley/remudero#173 · $19.270 · 175 turns
-- **W1-T78** — the CLARIFICATION-QUESTION rung: an ambiguous block yields a specific, decidable operator
-  question, never silence (ratifies P22's new rung) → craigoley/remudero#168 · $21.066 · 215 turns
-- **W1-T95** — `rmd fix <pr>`: the operator verb for the fix rung → craigoley/remudero#167 · $4.503 · 70 turns
-- **W1-T94** — fix-rung failure-mode taxonomy: MODE derives from block evidence (per-mode inputs) →
-  craigoley/remudero#166 · $5.470 · 53 turns
-- **W1-T93** — sweep dispositions incorporate CI state: CI-red is never mergeable, escalate is the
-  catch-all (closes the #161 hole) → craigoley/remudero#165 · $2.599 · 30 turns
-- **W1-T80** — dispatch dedup: an OPEN PR means IN-FLIGHT, never runnable (the #143/#145 race) →
-  craigoley/remudero#159 · $4.319 · 72 turns
-- **W1-T76** — the blocked_review FIX RUNG: ONE bounded worker, the FULL unmet-criteria set at once, the
-  SAME branch (absorbs P21's anti-ping-pong invariant + golden verbatim) → craigoley/remudero#158 · $9.701 · 148 turns
-- **W2-T1** — specialist panel (Layer 4): consult, don't committee → craigoley/remudero#145 · $3.317 · 31 turns
-- **W1-T22** — flight control Layer 3: risk scoring — deterministic diff-risk bands that make auto-choose
-  SAFE → craigoley/remudero#142 · $3.065 · 50 turns
-- **W1-T21** — flight control Layer 2: the flight judge — advisory LLM-as-judge on process, deterministic
-  controller acts → craigoley/remudero#141 · $6.829 · 77 turns
-- **W1-T20d** — the retro plan-health sweep: re-grade the open queue + mine overrun patterns →
-  craigoley/remudero#140 · $3.879 · 61 turns
-- **W1-T75** — deriveStatus hoists operator corrections above rung (a) + an `rmd correct` writer (ratifies
-  P9 — the crediting fix that was blocked by the crediting bug) → craigoley/remudero#138 · $5.532 · 87 turns
-- **W1-T20** — flight control Layer 1: deterministic per-turn tripwire signals → craigoley/remudero#132 · $3.619 · 42 turns
+**★ FOLDED TO FAMILY LINES BY R13** (ids/PRs/costs/turns preserved, per-task prose DELETED).
 
-### RETRO-1784213948025 (2026-07-16) — the deterministic floor executes proofs
+- **THE P22 FIX/CLARIFY FAMILY — 5 tasks** (W1-T76/#158 $9.701/148t, the blocked_review FIX RUNG that
+  absorbed **P21** verbatim · T78/#168 $21.066/215t, the CLARIFICATION-QUESTION rung · T94/#166
+  $5.470/53t · T95/#167 $4.503/70t · T93/#165 $2.599/30t)
+- **FLIGHT CONTROL, ALL FOUR LAYERS — 4 tasks** (W1-T20/#132 $3.619/42t tripwires → T21/#141
+  $6.829/77t the flight judge → T22/#142 $3.065/50t risk bands → W2-T1/#145 $3.317/31t the specialist
+  panel) · **the Calibration section's burn-rate signals key off Layer 1**
+- **THE REMAINDER — 5 tasks** (W1-T100/#173 $19.270/175t, blocked_ci → the ci-log fix path · T80/#159
+  $4.319/72t, an OPEN PR means IN-FLIGHT · **T75/#138 $5.532/87t, operator corrections made SUPREME in
+  `deriveStatus` + `rmd correct` — the writer P33's quarantine list extends** · T20d/#140 $3.879/61t,
+  the retro plan-health sweep · T26/#176 $4.464/92t, the architecture-fitness tier)
 
-- **W1-T65** — the deterministic FLOOR executes whitelisted proofs against the PR head: each criterion's
-  named test/grep runs against repo state (case-normalized), so the gate is correct whether or not the LLM
-  reviewer completes and the reviewer is purely additive (ratifies P15; closes the FALSE-PASS/FALSE-BLOCK
-  blind-floor hole) → craigoley/remudero#122 · $7.123 · 94 turns
+### RETRO-1784213948025 / RETRO-1784206755808 (2026-07-16) — the deterministic floor, the gather union, the reviewer mount
 
-### RETRO-1784206755808 (2026-07-16) — the gather union + the reviewer mount + git self-sync
+**★ FOLDED TO FAMILY LINES BY R13** — these were the last sections still carrying full per-task prose,
+i.e. the plan's OLDEST entries were its most verbose. Ids/PRs/costs/turns preserved, prose DELETED.
 
-- **W1-T63** — reviewer/fix/diagnose phases are mount-governed + `reviewer_outcome` surfaced (the reviewer
-  stops walling `error_max_turns`; a floor-only merge becomes legible, not silent; closes P10/P10-a) →
-  craigoley/remudero#104 · $6.938 · 101 turns
-- **W1-T60** — runner self-syncs git state: fetch origin + dispatch from origin/main, never the operator's
-  local checkout → craigoley/remudero#105 · $6.013 · 98 turns
-- **W1-T51** — retro-gather completeness: cross-check ledger-merged vs GitHub-merged trailered PRs so
-  gate-side merges stop being invisible (closes the R3/R4 recurring reconciliation gap; P11) →
-  craigoley/remudero#97 · $4.343 · 64 turns
-- **W1-T17** — isolation preflight probe: fail closed before any task work begins (FIELD FINDING 11b — a
-  populated rc isolates nothing) → craigoley/remudero#99 · $3.797 · 62 turns
+- W1-T65/#122 $7.123/94t — ★ **the deterministic FLOOR executes whitelisted proofs against the PR
+  head**, so the gate is correct whether or not the LLM reviewer completes (ratifies **P15**; closes
+  the FALSE-PASS/FALSE-BLOCK blind-floor hole) · W1-T63/#104 $6.938/101t (P10) · W1-T60/#105
+  $6.013/98t · W1-T51/#97 $4.343/64t — ★ **the gather unions ledger∪GitHub** (**P11**), the mechanism
+  every SHIPPED-log "gate-side merge" line above depends on · W1-T17/#99 $3.797/62t — the isolation
+  preflight probe (FIELD FINDING 11b; **P41's "right probe, wrong altitude"**)
 
 ### RETRO-1784155126258 (2026-07-15) — the security tier + the dep lane + the first integrity fix
 
-- **W1-T62** — PR-attribution integrity: anchored PR_URL parse + run-ownership guard (the fix for the
-  false-merged class below) → craigoley/remudero#93 · $4.107 · 75 turns
-- **W1-T54b** — dependency-lane LIVE proofs against the real parked Dependabot PRs →
-  **craigoley/remudero#91** · $2.951 · 18 turns
-  · ★ **ATTRIBUTION CORRECTED — the ledger, and this retro's gather, both name #80 (Dependabot's PR).
-  That is FALSE.** #91 is this run's actual output. Cited per W1-T62's standing instruction; mechanism
-  and residue in NET STATE + P9.
-- **W1-T54** — dep-review lane: minor/patch arms auto-merge, MAJOR escalates (§5D lane 1; where major
-  exclusion lives in CODE, not Dependabot ignore-rules) → craigoley/remudero#87 · gate-side merge
-  (run ended blocked_review at $8.86/93 turns — the cycle's most expensive run)
-- **W1-T24b** — ci-gate live proofs: a path-filtered ABSENT sub-job does not deadlock merge (#82); the
-  flip-then-prove ordering corrected in `docs/review-gate.md` → craigoley/remudero#85 · gate-side merge
-- **W1-T23** — §5 Tier-1 security stack on remudero: CodeQL (explicit workflow), OSV, Dependabot,
-  leak-grep → craigoley/remudero#76 · gate-side merge (run ended blocked_review)
-- **W1-T24** — ci-gate aggregator workflow — ONE always-runs required context; sub-jobs skip freely →
-  craigoley/remudero#75 · gate-side merge (run ended blocked_review)
+- W1-T62/#93 $4.107/75t — anchored PR_URL parse + run-ownership guard, **the ancestor of every
+  ownership-assert rejection P29/P33 argue about** · W1-T54b/**#91** $2.951/18t · ★ **ATTRIBUTION
+  CORRECTED — the ledger and that gather both name #80 (Dependabot's PR); that is FALSE, #91 is this
+  run's output.** The residue is P33(iii)'s first quarantine entry · W1-T54/#87 (gate-side; the run
+  ended blocked_review at $8.86/93t) · W1-T24b/#85 · W1-T23/#76 · W1-T24/#75 — all gate-side merges
 
 ### RETRO-1784133446353 (2026-07-15) — the 17 merges that CLOSED WS-1
 
-- **W1-T5** — mounts.yaml v0 + Tier Invariant validation → craigoley/remudero#42 · gate-side merge
-  (run ended blocked_review; merged after a rule-16 Architect fix — #44 unblocked it)
-- **W1-T8** — escalations as GitHub issues + imessage-local notifier + daily digest → craigoley/remudero#49
-  · gate-side merge (run ended blocked_review; PR fixed with payload tests + merged)
-- **SBX-T3** — unattended-drain drill, task 3/3 → craigoley/remudero-sandbox#8 · $1.13 · 8 turns
-- **SBX-T2** — unattended-drain drill, task 2/3 → craigoley/remudero-sandbox#7 · $1.19 · 9 turns
-- **SBX-T1** — unattended-drain drill, task 1/3 (the three SBX tasks ARE the WS-1 exit proof: drained
-  by `rmd daemon` with no human in the loop) → craigoley/remudero-sandbox#6 · $1.13 · 9 turns
-- **W1-T15** — plan-sync is an in-repo PR flow — never scp again (§13) →
-  craigoley/remudero#66 · $1.81 · 22 turns
-- **W1-T14** — `rmd` is a real installable CLI (package.json bin, publishable, no secrets in the
-  tarball) → craigoley/remudero#65 · $2.18 · 41 turns
-- **W1-T12c** — daemon crash-recovery logic (reconstruct state from git + GitHub + ledger, headless) →
-  craigoley/remudero#63 · $3.21 · 53 turns
-- **W1-T12b** — launchd unit generation + ANTHROPIC-clean boot assertion (headless) →
-  craigoley/remudero#62 · $3.58 · 58 turns
-- **W1-T12a** — daemon core: scheduler loop (DAG select → dispatch; honors Pause/Resume/STOP +
-  headroom + locks) → craigoley/remudero#61 · $3.73 · 47 turns
-- **W1-T11** — fleet control set: STOP / Pause (drain-and-hold) / Resume →
-  craigoley/remudero#56 · $3.78 · 62 turns
-- **W1-T9c** — `rmd init` wizard, no-TTY safe (--tier/--yes flags + TTY-absent default; the rule-18
-  redesign) → craigoley/remudero#55 · $3.98 · 58 turns
-- **W1-T9b** — tier detection, pure (/usage + ~/.claude.json keys → tier + evidence) →
-  craigoley/remudero#54 · $2.83 · 45 turns
-- **W1-T9a** — config loader + validation (schema + overflow/daily-cap rejection) →
-  craigoley/remudero#53 · $1.92 · 31 turns
-- **W1-T7** — transient-vs-strike classifier + diagnose-then-retry →
-  craigoley/remudero#48 · $5.33 · 63 turns
-- **W1-T6** — NDJSON ledger + context telemetry + brain-plane calls →
-  craigoley/remudero#47 · $4.89 · 69 turns
+- **THE WS-1 EXIT PROOF — 3 tasks drained by `rmd daemon` with no human in the loop**
+  (SBX-T1/sandbox#6 $1.13/9t · SBX-T2/sandbox#7 $1.19/9t · SBX-T3/sandbox#8 $1.13/8t)
+- **THE DAEMON + CLI CORE — 11 tasks** (W1-T12a/#61 $3.73/47t · T12b/#62 $3.58/58t · T12c/#63
+  $3.21/53t · T11/#56 $3.78/62t · T9a/#53 $1.92/31t · T9b/#54 $2.83/45t · T9c/#55 $3.98/58t ·
+  T14/#65 $2.18/41t · T15/#66 $1.81/22t — **§13's plan-sync flow, the one this very PR rides** ·
+  T7/#48 $5.33/63t · T6/#47 $4.89/69t)
+- **GATE-SIDE — 2 tasks** (W1-T5/#42, mounts.yaml v0 + Tier Invariant validation, unblocked by the
+  rule-16 Architect fix #44 · T8/#49, escalations as GitHub issues + notifier + digest)
 - **W1-T4** — HeadroomTracker v0 — /usage parser → craigoley/remudero#39 · $1.92 · 28 turns
 
 ### Earlier
 
-- **W1-T3F** — reviewer verifies acceptance criteria against REPO STATE, not diff+report alone (rule
-  16 correction of the mis-specified W1-T3) → craigoley/remudero#35 · $2.31 · 21 turns
-- **W1-T19** — Promptsmith injects LEARNINGS into worker prompts — the READ side of the compounding
-  thesis (recon/reviewer/diagnose knowledge feeds forward) → craigoley/remudero#34 · $4.05 · 49 turns
-- **W1-T3 arc (5/5, FOLDED)** — escalation issues + notifier + daily digest, decomposed by concern
-  under rule 16; every criterion survived verbatim → craigoley/remudero#26 (T3, $2.99/37t), #27 (T3B,
-  $2.90/31t), #28 (T3C, $2.64/42t), #29 (T3D, $1.77/21t), #30 (T3E, $3.73/31t) · arc total $14.03/162t
-- **W1-T1D** — reviewer ENFORCEMENT wired into `run-task` (the merge gate, rule 3B; the call site is a
-  deliverable, rule 14) → craigoley/remudero#12 · $1.28 · 21 turns
-- **W1-T1C** — reviewer worker + rubric (fresh-context acceptance verdict) →
-  craigoley/remudero#11 · $2.26 · 30 turns
-- **CI-GREEN-PROBE** — CI-gate aggregator green-path probe → craigoley/remudero#5 · $0.44 · 0 turns
-- **SB-HELLO** — proto-runner sandbox smoke task → craigoley/remudero-sandbox#2 · $0.41 · 0 turns
-- **WS-0 spike** — 7/7 verdicts GREEN, loop closed unattended; ground truth in FIELD FINDING 10 →
-  craigoley/remudero#1 · $0.86
+- **THE REVIEWER + ESCALATION ORIGINS — 8 tasks, FOLDED BY R13** (W1-T1C/#11 $2.26/30t the reviewer
+  worker + rubric · W1-T1D/#12 $1.28/21t its ENFORCEMENT wired into `run-task` — **rule 14's founding
+  case, "the call site is a deliverable", which P38 is still arguing** · W1-T3 arc 5/5: #26 $2.99/37t,
+  #27 $2.90/31t, #28 $2.64/42t, #29 $1.77/21t, #30 $3.73/31t, arc total $14.03/162t · W1-T3F/#35
+  $2.31/21t, the rule-16 correction that made the reviewer verify REPO STATE · **W1-T19/#34 $4.05/49t
+  — the Promptsmith LEARNINGS injection, i.e. the READ side of the compounding thesis whose WRITE side
+  P38's TASK A is still trying to build**)
+- **THE FIRST GREEN LOOP — 3 tasks** (WS-0 spike/#1 $0.86, 7/7 verdicts GREEN, ground truth in FIELD
+  FINDING 10 · SB-HELLO/sandbox#2 $0.41 · CI-GREEN-PROBE/#5 $0.44)
 
-## Calibration (observed — through RETRO-1785456064479, 2026-07-30)
+## Calibration (observed — through RETRO-1785599040918, 2026-08-01)
 
 The empirical baseline **mounts.yaml (W1-T5, shipped #42; risk/class routing since W1-T167/#606)** and
 Flight-control burn-rate signals (§4B Layer 1, BUILT — W1-T20/#132) key off.
 
-**★ CURRENT BASELINE — this cycle (RETRO-1785456064479, 54 runs, entirely `implement`-typed). This is
+**★ CURRENT BASELINE — this cycle (RETRO-1785599040918, 34 runs, entirely `implement`-typed). This is
 the row W1-T5's mount table keys off:**
 
 | task_type | runs | merged | avg $ | avg turns | total $ |
 |---|---|---|---|---|---|
-| implement | 54 | 4 | $5.139 | 7.759 | $277.487 |
+| implement | 34 | 16 | $4.915 | 9.441 | $167.119 |
 
 **BY TASK CLASS — the W1-T167 routing question (is the class-routed mount discount paying off?):**
 
 | task_class | runs | merged | merge rate | avg $ | avg turns | total $ |
 |---|---|---|---|---|---|---|
-| src | 54 | 4 | 7% | $5.139 | 7.759 | $277.487 |
+| src | 34 | 16 | 47% | $4.915 | 9.441 | $167.119 |
 
-**BY MODEL CLASS — weekly-limit burn (W1-T250/#898's FIRST live output; P34 clause (d): burn is share
-of the weekly LIMIT, never imputed dollars — the dollar column is context only):**
+**BY MODEL CLASS — weekly-limit burn (W1-T250/#898; P34 clause (d): burn is share of the weekly LIMIT,
+never imputed dollars — the dollar column is context only):**
 
 | model | runs | turns this week | share of weekly burn | $ this week (context only) |
 |---|---|---|---|---|
-| sonnet | 97 | 419 | 100.0% | $558.410 |
+| sonnet | 131 | 321 | 100.0% | $725.008 |
 
-**Prior cycles (FOLDED — trend only):** R11 147 runs / 20 ledger-merged (94 real) / $6.664 / 8t (turn
-column blacked out — do not use) · R10 27 / 8 (23 real) / $10.650 / 86.6t · R9 26 / 13 (21 real) /
-$7.682 / 81.4t (plus the only `diagnose` row ever recorded, n=1 — **still do not re-base a diagnose
-mount on it**) · R8 195 / 0 (28 real) / $1.258 / 14.7t — **churn-poisoned by the W1-T1 spin loop and
-never to be re-based on** · R7 29 / 14 / $5.794 / 72.2t · R6 2 / 1 / $4.673 / 64t · R5 9 / 4 / $3.613 /
-56.9t · R4 10 / 2 (6 real) / $3.290 / 54.5t · R3 22 / 15 / $3.218 / 45.2t · R1+R2 19 / 11 / $1.838 /
-21.4t. **Derived all-time:** ~540 runs, ~242 merged.
+**Prior cycles (FOLDED — trend only):** R12 54 runs / 4 ledger-merged (25 real) / $5.139 / 7.8t · R11
+147 / 20 (94 real) / $6.664 / 8t (turn column blacked out — do not use) · R10 27 / 8 (23 real) /
+$10.650 / 86.6t · R9 26 / 13 (21 real) / $7.682 / 81.4t (plus the only `diagnose` row ever recorded,
+n=1 — **still do not re-base a diagnose mount on it**) · R8 195 / 0 (28 real) / $1.258 / 14.7t —
+**churn-poisoned by the W1-T1 spin loop and never to be re-based on** · R7 29 / 14 / $5.794 / 72.2t ·
+R6 2 / 1 / $4.673 / 64t · R5 9 / 4 / $3.613 / 56.9t · R4 10 / 2 (6 real) / $3.290 / 54.5t · R3 22 / 15
+/ $3.218 / 45.2t · R1+R2 19 / 11 / $1.838 / 21.4t. **Derived all-time:** ~574 runs, ~264 merged.
 
 **Reads:**
+- **★ LEDGER CREDIT RECOVERED FOR THE FIRST TIME EVER: 30% → 21% → 16% → 16/25 (64%).** The `merged`
+  column above reads **16**, not 25, only because 9 merges were gate-side. Every prior retro read this
+  number as a REGRESSION; this one cannot explain the reversal, because **nothing in the gather names
+  a cause and no shipped task in R12 claimed to move it.** An unexplained 4× improvement in the plan's
+  most-watched integrity metric is P38's defect pointed the other way: **a harness that cannot see its
+  organs run also cannot tell a fix from a fluke, and cannot defend the number if it regresses.** The
+  effect assertion must run on IMPROVEMENTS, not only on flags — folded into P38(iii).
+- **★ COST FELL A THIRD TIME AND, FOR THE FIRST TIME, COST PER RESULT FELL WITH IT.** Per run
+  $10.650 → $6.664 → $5.139 → **$4.915**. Per SHIPPED task **$11.10 → $7.60** ($167.119 / 22), the
+  divergence R12 flagged as "cheaper per attempt, dearer per result" now CLOSED. Both halves moved
+  because the 9 runs that shipped nothing cost only **$13.923 (8.3% of spend**, against 12% last
+  cycle). Compare THIS number cycle-over-cycle, never merge rate.
+- **★ $11.032 OF THE $167.119 BOUGHT NOTHING — 6.6% of the cycle.** Four merged, ledger-credited PRs
+  (#1007/#1012/#1015/#1016) are no-op closes of W1-T254 against work PR #720. The honest cost per task
+  that changed product code is **$7.96** ($167.119 / 21). This is P39's cost, in dollars, for the
+  first time; R11 saw the class as 3 PRs and R12 declared it gone.
 - **★ THE `avg turns` CELL IS STILL NOT A MEASUREMENT — DO NOT RE-BASE ANY TURN-KEYED THRESHOLD ON
-  IT.** Of the 25 credited runs, exactly 3 report a nonzero turn count and they carry 339 of the
-  cycle's 419 turns; a headline of 7.759 turns/run is a write-side blackout, not a 10× efficiency gain
-  over R10's 86.6. The honest per-run figure for the three that reported one is **113**. **P40(a) is HALF
-  CLOSED:** the class column recovered completely (0 `unknown` of 54, against 58 of 147 last cycle),
-  which falsifies R11's hypothesis that class and turns are dropped TOGETHER by one write path. They
-  are two paths; only one was fixed, and nothing in the gather says by what.
-- **COST FELL AGAIN, and this is now a trend: $10.650 → $6.664 → $5.139 per run.** Two consecutive
-  drops. Composition explains most of it — this cycle is 25 well-specified tasks from three ratified
-  families with designs already written, which is the cheapest shape the harness has.
-- **Cost per SHIPPED task is $11.10** ($277.487 / 25), UP from R11's $10.42 even as cost-per-RUN fell.
-  That divergence is the honest headline: **the harness got cheaper per attempt and slightly more
-  expensive per result**, because the uncredited sibling re-dispatches P29 leaves behind are cheap
-  runs that ship nothing. Compare THIS number cycle-over-cycle, never merge rate.
-- **Merge rate 25/54 (46%)** against R11's 64%. The 29 runs that shipped nothing cost ~$33 (12% of
-  spend) — the same proportion as last cycle, on a third the volume.
-- **★ LEDGER CREDIT REGRESSED A THIRD TIME: 30% → 21% → 4/25 (16%).** The `merged` column above reads
-  **4**, not 25, for exactly this reason, and every consumer keyed on `verdict` — deriveStatus
-  (dispatch!), this table, `rmd trace`, the P25 readiness predicate — saw a false negative on 21
-  shipped tasks. P35's reading defect (the tally counts `step: "verdict"` lines and is blind to the
-  `verdict.merged` corrections the backfill writes) is still unbuilt; it is the narrow instance of
-  **P38**.
-- **★ THE CLASS TABLE NOW ASKS ITS QUESTION CLEANLY AND CANNOT ANSWER IT YET.** 54 of 54 runs resolved
-  to `src`, so the blackout is gone — but a single-row table has no contrast, and `merged` is still the
-  ledger-credit column (7%), not the true 46%. **W1-T167's routing remains unmeasured, not
-  invalidated.** The measurement needs a cycle with a real docs/plan-class population.
-- **MAST distribution (W1-T89/#710): verification 17 (−37) · specification 10 (+4) · infrastructure 9
-  (+2) — and 14 runs UNMAPPED** (`blocked`×10, `incomplete`×4). Verification collapsed hard, both
-  absolutely and per-run (37% → 31%), while specification ROSE per-run (4% → 19%) — consistent with a
-  cycle spent on pre-designed ratified families where what goes wrong is the spec, not the proof.
-  **P40(iii) is UNBUILT: `blocked` and `incomplete` still have no row**, and `blocked` is still the
-  largest single unmapped class. Named, never guessed — but a taxonomy blind to 26% of its corpus
-  still cannot support the WS-12 publish rung.
-- **Guard-fired blocks: 9, ALL excluded from task defect counts** (W1-T91/#719).
-  `containment/outside-cwd-denial` ×6 and the NEW `isolation/inherited-functions` ×3, on a task set
-  entirely disjoint from R11's. **R11's re-check ("if the same check fires on a SECOND host it is a
-  task signal") is ANSWERED: it fired on the SAME host across DIFFERENT tasks, so it is confirmed a
-  HOST signal** and the gather's recurrence trend says so independently. Mined as **P41**.
-- **The $100 `budget_usd` tripwire: 0/54 trips.** Most expensive single run: W1-T202 at $35.384,
-  $0.259 shy of R11's W1-T193 all-time record. The per-TASK circuit breaker (P29(ii)) remains unbuilt;
-  W1-T249's three dispatches and W1-T174/T176/T195/T196/T248's doubles again cost more in aggregate
-  than most single runs.
+  IT.** 3 of 25 credited runs report a nonzero count and carry **294 of the cycle's 321 turns**
+  (T280 151, T282 92, T284 51); the honest per-run figure for those three is **98**, against a headline
+  of 9.441. New and decisive: the WEEKLY table reports the SAME 321 turns across **131** runs, so
+  **every turn recorded this week came from these 34 runs and 97 others recorded none** — the blackout
+  is a write path, not a sampling artifact. P40(ii) is the fix and is UNBUILT.
+- **THE CLASS TABLE ASKS ITS QUESTION CLEANLY FOR A SECOND CYCLE AND STILL CANNOT ANSWER IT.** 34 of
+  34 resolved to `src` (P40(a) holds closed), but a single-row table has no contrast. **W1-T167's
+  routing remains unmeasured, not invalidated**; the measurement needs a cycle with a real docs/plan
+  population, and two consecutive all-`src` cycles suggest that population may simply not exist under
+  the current dispatch mix — which is itself the answer worth recording.
+- **MAST distribution (W1-T89/#710): verification 10 (−7) · specification 5 (−5) · infrastructure 0
+  (−9) — and 3 runs UNMAPPED** (`blocked`×3). Every category fell absolutely; per-run, verification
+  held (31% → 29%) and specification held (19% → 15%), so the composition is stable and the volume
+  shrank. **Infrastructure went to ZERO** — see the guard bullet. **P40(iii) is still UNBUILT** and
+  `blocked` is still unmapped, but the blind share collapsed from 26% to **9%**, so the taxonomy is
+  now within reach of the WS-12 publish rung for the first time.
+- **★ GUARD-FIRED BLOCKS: 0, DOWN FROM 9.** No `containment/outside-cwd-denial`, no
+  `isolation/inherited-functions`, no infrastructure events at all. R12's reading — a HOST-STATE
+  TRANSIENT inside one ~13-hour window — is CONFIRMED by disappearance, with nothing built. **P41 is
+  graded to the bottom of the ranking with a kill trigger** (§Retro proposals).
+- **The $100 `budget_usd` tripwire: 0/34 trips.** Most expensive single run W1-T169 at **$17.676** —
+  less than half R12's $35.384, and the cheapest cycle peak since R7. **P29(ii)'s per-task circuit
+  breaker SHIPPED this cycle** (W1-T271/#1040, a lifetime dispatch cap no ledger step resets); whether
+  it fires is the next retro's pre-committed test, not a claim to make here.
 - **A retro must not average over a spin loop** — R8's lesson, kept because it is cheap to keep and
   expensive to relearn. **P29(iii)** (annotate credit-rejected runs before they reach the mount table)
-  is still unbuilt, and this cycle had **25** credit-rejected runs to filter.
-- **★ `failed`×10 is the cycle's outlier and this table cannot explain it.** The honest-defect class
-  went from 6 of 147 (4%) to 10 of 54 (19%) — a ~4.5× rate increase, the largest single-class move in
-  the gather — and nothing in the gather names a single one of those runs or its error. Mined as
-  **P42**; until it is built, this bullet is the whole analysis that is available.
+  is still unbuilt; this cycle had 6 credit-rejected runs to filter, down from 25.
+- **`failed`×5 (15% of runs) is still the class this table cannot explain.** Down from 19% but still
+  ~4× R11's 4%, and the gather STILL emits a count and not one run id, task, or error line. **P42 is
+  re-confirmed unchanged**; until it is built, this bullet remains the whole available analysis.
 
-**Ratification telemetry (W1-T111/#373, third reading): approved 3 · reframed 11 · approval rate 21%
-— BYTE-IDENTICAL to the second reading.** Either zero ratification activity occurred this cycle (the
-cycle was a pure drain, which is plausible) or the counter is not windowed to the retro marker. That
-is a decidable question the gather cannot decide, which is exactly P40(ii)'s shape: **a number that
-cannot be distinguished from a stale number should be printed with its coverage, not its value.**
-Cumulative reading unchanged at **4 approved / 18 items ≈ 22%**; the P28 adjudication it drove stands.
+**Ratification telemetry (W1-T111/#373, FOURTH reading): approved 3 · reframed 11 · approval rate 21%
+— BYTE-IDENTICAL for the THIRD consecutive reading.** R12 called this a decidable question. Three
+identical readings across three cycles of very different activity is no longer explicable as "a quiet
+cycle": **the counter is treated here as UNWINDOWED — a defect claim, not an open question** — and the
+fix is P40(ii)'s coverage rule applied to it. Cumulative reading unchanged at **4 approved / 18 items
+≈ 22%**; the P28 adjudication it drove stands regardless, because it was made on the cumulative figure.
 
 ## Retro proposals (PROPOSALS ONLY; NOT yet in plan/tasks.yaml)
 
-**★ LIVE RANKING (the ONE place open proposals are ordered; R12 abolished the per-cycle RE-RANK
-stub).** `P38 > P29 > P33 > P41 > P39 > P40 > P42 > P26 > P17`. Every proposal has exactly ONE
-canonical entry below, updated IN PLACE with each cycle's evidence — a retro that adds a second entry
-restating a proposal it did not change has failed the HARNESS-COMPRESSION bar. **P28 is RETIRED**
-(one entry, in the R5-era block); **P35 is FOLDED into P38** and has no entry of its own.
+**★ LIVE RANKING (the ONE place open proposals are ordered).** `P38 > P33 > P39 > P42 > P40 > P17 >
+P29 > P26 > P41`. Every proposal has exactly ONE canonical entry below, updated IN PLACE with each
+cycle's evidence — a retro that adds a second entry restating a proposal it did not change has failed
+the HARNESS-COMPRESSION bar. **P28 is RETIRED** (one entry, in the R5-era block); **P35 is FOLDED into
+P38** and has no entry of its own. R13 moves **P29 down** (sibling rejections 20 → 3; its (ii) half
+SHIPPED as W1-T271/#1040), **P39 up** (the no-op-close class returned and is now priced), **P17 up**
+(its EU AI Act Art. 50 date arrived), and **P41 to last, with a kill trigger**.
 
-**RETRO-1785456064479 (this cycle)** — mined from 54 runs / 25 shipped tasks / 4 ledger credits
+**★ THE STANDING CREDIT-ARTIFACT FOLD-LINE (one home, replacing four cycles of per-cycle
+restatements).** In every retro from R8 to R13, the dominant "failure" verdict classes — `blocked`,
+`blocked_ci`, `no_pr`, `incomplete`, `pr_attribution_failed` — have been predominantly WRITE-SIDE
+CREDIT ARTIFACTS, not task defects: the work merged gate-side and the ledger did not record it.
+R8 0-of-28 credited · R9 13/21 · R10 8/23 · R11 20/94 · R12 4/25 · **R13 16/25**. They are therefore
+NEVER re-mined as classes — doing so manufactures many proposals from one root cause, the accretion
+failure mode P8 named. They route to **P29/P30/P39** and, for the reading defect, **P38**. A future
+retro adds evidence to THIS line, never a new bullet. *(R13: the four near-identical per-cycle
+restatements of this paragraph — in the R12, R11 and R9 blocks — are DELETED.)*
+
+**RETRO-1785599040918 (this cycle)** — mined from 34 runs / 22 shipped tasks / 25 merged PRs / 16
+ledger credits (`blocked_ci`×7, `failed`×5, `blocked`×3, `no_pr`×3, plus **6 rejected trailers** — 3
+FOREIGN, all W1-T201; 3 SIBLING). **NO NEW P-NUMBER IS MINED.** Every failure class this cycle is an
+instance of an already-open proposal, and P8's accretion rule says a retro that invents an id for a
+known root cause has made the list worse. What R13 files instead are **five concretely-scoped TASK
+proposals** under existing ids, each with its golden — the Architect ratifies via a tasks.yaml PR
+(rule 15), never auto-filed:
+
+- **★ TASK A (P38 — the LEARNINGS write path; THE HIGHEST-VALUE ITEM IN THIS RETRO).** GROUND TRUTH:
+  74 entries, **0 added for a THIRD cycle**, and this time the miss is unambiguous — a worker's own
+  follow-up harvest says *"node's `t.mock.method` cannot mock a named ESM import off a Node built-in
+  module … worth a LEARNINGS.md note since it's the second time I've reached for that pattern in this
+  codebase's test style"* (W1-T280/#1065). The learning was DISCOVERED, JUDGED durable, and NAMED, by
+  the run that hit it — and the corpus did not move. So the defect is not detection (W1-T87's miner
+  works, and again proposed `implement × clean_single_strike` ×10 and `× fully_executed_proof` ×6) and
+  not judgement; it is that **nothing has permission to WRITE**. PROPOSE: the harvest's
+  `[action] … LEARNINGS` items become a first-class DISTILL QUEUE input — the retro (or the sweep)
+  converts each into a schema-valid P32 layer-(i) entry with provenance `[src: run#…]` and the citing
+  PR, appended by the same gated write path any other knowledge edit uses (§Self-improvement's
+  RSI-safety rule: it ships as a PR). GOLDEN (fixture-only, no live dep): a seeded harvest carrying one
+  `LEARNINGS`-flagged action yields exactly one appended entry with provenance and last-cited date; a
+  harvest with none appends nothing and still emits its rung line (P38(ii)); an entry duplicating an
+  existing one is marked CONTESTED by W1-T88's detector rather than appended twice.
+- **★ TASK B (P33 + P29(ii)) — SEED THE QUARANTINE LIST WITH THE SIX KNOWN PAIRS.** GROUND TRUTH: the
+  poisoned set is now **W1-T64/#115 · W1-T201/#993 (`plan/close-t201`, NEW, and it cost THREE
+  dispatches this cycle) · W1-T258/#766 · W1-T259/#768 · W1-T260/#773 · W1-T262/#777**, plus the
+  original residue **#80/W1-T54b**. P33's mechanism is already specified below; what R13 adds is that
+  the list is no longer hypothetical — it is seven concrete `(pr, task)` pairs, enumerable today, and
+  W1-T271's shipped dispatch cap is the backstop that makes halting them safe. GOLDEN: unchanged from
+  P33's, plus — a seeded quarantine file containing these seven pairs derives cleanly and dispatches
+  none of the seven.
+- **★ TASK C (P39(i)) — THE PRE-DISPATCH MERGED-TRAILER GATE, NOW WITH A PRICE TAG.** GROUND TRUTH:
+  W1-T254 produced **four merged no-op-close PRs in one cycle** (#1007 → #1012 "second time" → #1015
+  "fourth time" → #1016 "fifth time"), $11.032, against work PR #720 that had already merged; and the
+  plan's authored `status:` still cannot catch it — W1-T280's own harvest reports **W1-T279 reading
+  `queued`/`attempts: 0` while its PR #1062 was already merged.** W1-T272/#1044 shipped a sanctioned
+  `ALREADY_SATISFIED` EXIT, which makes the close CHEAP; it does not stop the DISPATCH. GOLDEN:
+  unchanged from P39's, plus — a seeded task whose work PR is merged and whose plan status still reads
+  `queued` is REFUSED before dispatch, not exited after it.
+- **TASK D (P42) — VERDICT EXEMPLARS.** `failed` = 5 of 34 (15%). Second cycle at ~4× R11's rate, and
+  the gather still names no run id, no task, no error line. Spec and golden unchanged below; R13 adds
+  only that the class survived a 40% drop in run volume, so it is not a volume artifact.
+- **TASK E (P40(ii)) — COVERAGE, NOT VALUE, AND WINDOW THE RATIFICATION COUNTER.** The turn column is
+  now provably a write-path blackout (321 turns, 34 runs *this cycle*, and the same 321 across 131 runs
+  *this week* — 97 runs recorded none), and the ratification counter has read `3/11/21%` **three times
+  byte-identically**. Both are the same fix: a number that cannot be distinguished from a stale number
+  is printed with its COVERAGE and its WINDOW, or not printed. GOLDEN unchanged below, plus — a seeded
+  ledger whose telemetry counter has no events inside the retro window renders `no activity in window`,
+  never a repeated prior total.
+
+**Watch item (NOT a proposal — n=1, filed with a trigger instead of an id).** W1-T254 merged **four
+PRs under ONE task id**. Every credit consumer in the harness treats a task's credit as a BOOLEAN, so
+an N-PR task is invisible to all of them; here that was benign (three of the four were no-ops), but
+sharded/campaign tasks (§3A) are designed to be N-PR. TRIGGER: if a *non-no-op* task credits more than
+one PR in any future cycle, this becomes a proposal with a real id.
+
+**RETRO-1785456064479 (R12, prior cycle)** — mined from 54 runs / 25 shipped tasks / 4 ledger credits
 (`blocked_ci`×11, `blocked`×10, `failed`×10, `blocked_containment`×6, `no_pr`×4, `incomplete`×4,
 `blocked_isolation`×3, `pr_attribution_failed`×2, plus **25 rejected trailers** — 20 SIBLING, 5
 FOREIGN). Candidates for the Architect to ratify via a tasks.yaml PR (rule 15) — never auto-filed.
 
-- **★ P41 (plan + golden; THE NEW ITEM) — THE HOST IS DISCOVERED NINE TIMES AT FULL TASK COST INSTEAD
-  OF ASSERTED ONCE AT BOOT.** GROUND TRUTH (mechanical, this gather): **9 guard-fired blocks** —
-  `containment/outside-cwd-denial` ×6 (W1-T171/T172/T201/T248/T249/T251) and a NEW class,
-  `isolation/inherited-functions` ×3 (W1-T248/T250/T252) — every one correctly excluded from the
-  task's defect count by W1-T91/#719, and every one a HOST condition the gather's own recurrence trend
-  names as such. All 9 cluster in a single ~13-hour window (…356723–…402459) with zero in the cycle's
-  last ~12 hours. **`inherited-functions` is FIELD FINDING 3 arriving as a runtime block**: `claude` is
-  a shell FUNCTION on this host (wrapping the binary with `security unlock-keychain`), and a function
-  inherited into a worker's environment is precisely the drift that finding predicted and that
-  `buildWorkerEnv()` exists to prevent. ★ **THE SHARP POINT — THE PROBE ALREADY EXISTS AND IS AT THE
-  WRONG ALTITUDE.** W1-T17 SHIPPED the isolation preflight probe (#99, *"fail closed before any task
-  work begins"*), and W1-T18/#100/#102 + this cycle's W1-T170/#888 own the worker-HOME mechanism. So
-  all 9 events are the probe WORKING — each run correctly refused to proceed. DIAGNOSIS: **the probe
-  is per-RUN, and the condition it tests is per-HOST.** A host-level precondition evaluated inside a
-  dispatched run costs (one dispatch × however many tasks draw the bad host state) instead of (one
-  boot assertion) — 9 runs to learn one fact. This is the §9 env-sanitization primitive with its
-  verification half at the wrong altitude, not missing. PROPOSE:
-  **(i) HOIST W1-T17's PROBE TO BOOT** — the daemon, at boot and on self-restart, runs the SAME
-  probe under the real worker env and asserts the same invariants (cwd containment holds; no inherited
-  shell functions reach the child; the resolved `claude` is the configured binary, never a PATH
-  function), ledgering `host.preflight` with pass/fail per invariant **even when it passes** —
-  P38(ii)'s execution-telemetry shape, applied here. The per-run probe STAYS: it is the backstop for
-  drift that appears mid-cycle, which is exactly what this cycle's 13-hour window looks like. **(ii) FAIL-CLOSED AT THE FLEET LEVEL,
-  NOT THE TASK LEVEL** — a failed preflight PAUSES dispatch and raises ONE `needs-human` naming the
-  invariant, rather than letting N tasks each discover it and each burn a run. **(iii) A RECURRENCE
-  RULE AS DATA** — the same guard cause firing K times inside one window is auto-classified `host` and
-  routed to (ii); the gather already computes this trend, so the classification exists and only the
-  ACTION is missing. GOLDEN (fixture-only, no live dep): a seeded env carrying an inherited function
-  FAILS preflight and dispatches ZERO tasks while raising exactly one escalation; a clean env PASSES
-  and still writes its `host.preflight` line; K guard events of one cause inside the window classify
-  `host` and never increment any task's defect count. NOTE the honesty bound: nothing in this gather
-  proves WHAT changed on the host mid-cycle — the proposal is for detection, not for a diagnosis
-  nobody has.
+- **★ P41 (plan + golden) — HOIST THE HOST PROBE FROM PER-RUN TO PER-BOOT. RANKED LAST; ★ KILL
+  TRIGGER ARMED.** GROUND TRUTH, R12: **9 guard-fired blocks** in one ~13-hour window —
+  `containment/outside-cwd-denial` ×6 and a NEW `isolation/inherited-functions` ×3 — each correctly
+  excluded from task defect counts (W1-T91/#719), each a HOST condition. `inherited-functions` was
+  FIELD FINDING 3 arriving as a runtime block (`claude` is a shell FUNCTION on this host). THE SHARP
+  POINT: W1-T17 already SHIPPED the isolation preflight probe (#99), so all 9 events were the probe
+  WORKING — **the probe is per-RUN and the condition it tests is per-HOST**, costing 9 dispatches to
+  learn one fact. PROPOSE: **(i)** the daemon runs the SAME probe at boot/self-restart under the real
+  worker env, ledgering `host.preflight` per invariant **even when it passes** (P38(ii)'s shape); the
+  per-run probe STAYS as the mid-cycle-drift backstop. **(ii)** a failed preflight PAUSES dispatch and
+  raises ONE `needs-human`, instead of N tasks each burning a run. **(iii)** the same guard cause
+  firing K times in one window auto-classifies `host` — the gather already computes the trend, only
+  the ACTION is missing. GOLDEN (fixture-only): a seeded env with an inherited function FAILS
+  preflight, dispatches ZERO tasks, raises exactly one escalation; a clean env PASSES and still writes
+  its line; K same-cause events classify `host` and never increment a task's defect count.
+  **★ R13 GRADING — THE GROUND TRUTH EVAPORATED: 9 guard blocks → 0, MAST `infrastructure` 9 → 0,
+  zero events of any class, with NOTHING BUILT.** R12's own reading (a host-state transient) is
+  confirmed by disappearance, which also confirms the per-run probe is an adequate backstop on its
+  own. The DIAGNOSIS stays true and cheap; the URGENCY is gone. **KILL TRIGGER: if guard-fired blocks
+  read 0 again next cycle, P41 is RETIRED** — two clean cycles is the RATIFY-OR-KILL threshold, and a
+  proposal kept alive on evidence that no longer exists is exactly the graveyard P8 warned about.
+  Honesty bound, carried: nothing ever proved WHAT changed on that host, so its disappearance is not a
+  fix anyone can claim.
 - **★ P42 (measurement; sibling of P40) — THE `failed` CLASS QUADRUPLED IN RATE AND THE GATHER CANNOT
   NAME ONE OF THEM.** GROUND TRUTH: `failed` went from **6 of 147 (4%)** to **10 of 54 (19%)** — the
   largest single-class rate move in the gather, and now the third-largest verdict class overall. It is
@@ -655,28 +651,21 @@ FOREIGN). Candidates for the Architect to ratify via a tasks.yaml PR (rule 15) �
   column is currently a raw count delta across two different denominators — `verification −37` looks
   like a triumph and is a 37%→31% move. GOLDEN (fixture-only): a seeded ledger whose `failed` share
   crosses the threshold emits exactly N exemplars with their first error line; a class that grows in
-  share while shrinking in count is rendered as a RISE.
-- **`blocked`×10 + `blocked_ci`×11 + `no_pr`×4 + `incomplete`×4 + `pr_attribution_failed`×2 — NO new
-  proposal; 21 of 25 shipped tasks merged GATE-SIDE ⇒ P29/P30/P35/P39.** Fifth consecutive cycle in
-  which the dominant "failure" classes are predominantly write-side credit artifacts. Re-mining them
-  as classes would manufacture proposals from one root cause — the accretion failure mode P8 named.
-- **`blocked_containment`×6 + `blocked_isolation`×3 — NO new class-level proposal; the whole guard
-  volume is P41's ground truth** and is excluded from every task's defect count by construction.
-- **`failed`×10 — see P42.** The class W1-T52's shipped triage (#308) owns, and the first cycle in
-  which it is too large to fold into "the honest remainder" without looking at it.
-- **HARVEST CANDIDATES (W1-T105/#744's output — PROPOSAL CANDIDATES ONLY, never auto-filed, rule 15).**
-  The cycle's own workers declared these and the retro does not file them: **(a)** the remaining
-  `escalate()` callers (dep-review, risk judge, ops alerts, GRILL, `rmd escalate`) still set no
-  `headSha`/`cause` — W1-T195's mechanism is proven and unwired to five of its six call sites, which is
-  a P38 instance inside a task that just shipped; **(b)** `run-task.ts`'s `buildOpenPrViews` never
-  populates `isPlanFiling` from a real PR body, so W1-T196's stand-down is dark in production for the
-  case it was built for; **(c)** `setFeedbackStatus` in `panel-skill-run.ts` still writes against the
-  daemon's own checkout — the exact defect W1-T191/#966 fixed one call site of; **(d)** the primary
-  checkout `~/Remudero/repos/remudero` was **85 commits behind origin/main**, so any tool reading that
-  path instead of a worktree sees a stale tree — operational, not a task; **(e)** `src/spike.ts:212`
-  still appends to `DECISIONS.md` the pre-W1-T191 way and should be decided dead-or-updated.
-  **(a)/(b)/(c) are all the same shape and it is P38's:** the wire was built, one consumer was
-  connected, and the rest were left as prose in a PR body.
+  share while shrinking in count is rendered as a RISE. **★ R13 UPDATE — RE-CONFIRMED, UNCHANGED, AND
+  NO LONGER A VOLUME ARTIFACT:** `failed` fell 10 → 5 while run volume fell 54 → 34, so the RATE held
+  at ~15% against R11's 4%, and the gather again names not one run id, task, or error line. A class
+  that survives a 40% drop in volume at four times its historical rate is the one class this retro
+  can see and cannot read.
+- **HARVEST CANDIDATES (R12's, dispositioned by R13 — the full list is DELETED rather than re-carried;
+  it was five bullets restating one shape).** Every item was the SAME defect — a wire built, one
+  consumer connected, the rest left as prose in a PR body — which is **P38's**, and R13's own harvest
+  produced two more of it (`panel-skill-run`'s POST route still unregistered after W1-T284 registered
+  its read twin; the six fleet-lane pseudo ids recognized by `deriveRunState` but rendering no NOW-panel
+  row). Carrying per-cycle harvest lists is the duplication HARNESS-COMPRESSION forbids: the harvest is
+  LIVE (P26's trigger fired), its output is reproducible from any gather, and what it keeps arguing for
+  is already ranked. Operational residue only, because it is worsening and belongs to no task: the
+  primary checkout `~/Remudero/repos/remudero` was 85 commits behind `origin/main` at R12 and **155 at
+  R13** — any tool reading that path instead of a worktree sees a stale tree.
 
 **RETRO-1785341166059 (R11, prior cycle)** — mined from 147 runs / 94 shipped tasks / 20 ledger credits
 (`blocked`×47, `blocked_ci`×25, `no_pr`×17, `incomplete`×12, `pr_attribution_failed`×12,
@@ -690,12 +679,18 @@ trailers**). Candidates for the Architect to ratify via a tasks.yaml PR (rule 15
   stated THREE times that `checkCostGovernor`/`logCostGovernorDeferral` (T148/#839) and the T121 queue
   governor "ship as tested pure functions with no live call site", and that T151's
   `checkFreshness`/`runInstall` are "still unwired in production"; credit fell 30% → 21%.
-  **★ R12 UPDATE — THE ASSERTION THIS PROPOSAL ASKED FOR WAS RUN BY HAND AND IT FLAGS: LEARNINGS = 74,
-  STILL ZERO ADDED**, across a further 54 runs and 25 shipped tasks, with the miner AGAIN proposing
-  reusable shapes and nothing writing them; credit fell a THIRD time to 16%; the ratification counter
-  returned a byte-identical reading. One counter-example is now on the board and it matters: **W1-T250's
-  weekly-burn accounting DID execute** and its table is in this gather — so the class is "unasserted",
-  not "always dead". Two cycles of the same flag is the plan-health signal §Self-improvement names.
+  **★ R12/R13 UPDATE — THE ASSERTION THIS PROPOSAL ASKED FOR HAS NOW BEEN RUN BY HAND TWICE AND FLAGS
+  BOTH TIMES: LEARNINGS = 74, STILL ZERO ADDED**, across a further 54 + 34 runs and 25 + 22 shipped
+  tasks, with the miner AGAIN proposing reusable shapes and nothing writing them. **R13 removes the
+  last benign explanation:** a worker NAMED the note it wanted written, in prose, in its own harvest
+  (W1-T280/#1065, the `t.mock.method`/ESM-builtin finding) and the corpus still did not move — so this
+  is not a detection or a judgement gap, it is a **missing WRITE PATH**, and TASK A above is the
+  narrowest fix. Two counter-examples are now on the board and both matter: **W1-T250's weekly-burn
+  accounting DID execute** (its table is in the gather), and **ledger credit JUMPED 16% → 64% with no
+  named cause** — which is why R13 extends clause (iii): **the effect assertion must run on
+  IMPROVEMENTS too.** An unexplained gain is as unowned as an unobserved organ; it cannot be defended,
+  reproduced, or trusted not to regress. Three cycles of the same flag is the plan-health signal
+  §Self-improvement names.
   DIAGNOSIS: **the gate proves a UNIT and never a WIRE.** Standing rule 14 already says "the call site
   is a deliverable" — it is INSTRUCTION,
   and §5's own doctrine is that instructions shape behavior while gates guarantee it. PROPOSE: **(i) A
@@ -738,12 +733,19 @@ trailers**). Candidates for the Architect to ratify via a tasks.yaml PR (rule 15
   seeded task with a merged owned-branch trailer is REFUSED at dispatch and CREDITED exactly once; a
   task whose only merged trailer is FOREIGN-branched is refused AND escalated, never credited (P33's
   boundary preserved); an uncredited task with no merged trailer dispatches normally.
-  DEPENDENCY: sequence WITH W1-T149 — this is P29's other half. **★ R12 UPDATE — RE-CONFIRMED, and
-  the shape sharpened: zero no-op-close PRs this cycle, but 20 SIBLING rejections across 13 tasks
-  (W1-T249 ×3; T174/T176/T195/T196/T248 ×2 each), i.e. the churn moved from "pay a worker to discover
-  the work was done" to "pay a worker to redo work a sibling already merged". The pre-dispatch gate as
-  specified catches BOTH, because both begin with a task id that already rides a merged owned-branch
-  trailer.** Ranked below P33 this cycle only because P33's damage is permanent and P39's is repeated.
+  DEPENDENCY: sequence WITH W1-T149 — this is P29's other half. **★ R12 UPDATE:** zero no-op-close PRs,
+  but 20 SIBLING rejections across 13 tasks — the churn appeared to move from "pay a worker to discover
+  the work was done" to "pay a worker to redo work a sibling already merged". The gate as specified
+  catches BOTH, because both begin with a task id that already rides a merged owned-branch trailer.
+  **★ R13 UPDATE — R12's "zero no-op closes" WAS A ONE-CYCLE DIP, AND THE CLASS IS NOW PRICED.**
+  W1-T254 merged **FOUR** no-op closes in one cycle — #1007 (naming work PR **#720**), #1012 *"second
+  time"*, #1015 *"fourth time"*, #1016 *"fifth time"* — **$11.032, 6.6% of cycle spend, for zero
+  product code**, and all four were ledger-CREDITED as shipped tasks, so the churn now inflates the
+  very success metric that should expose it. Two further confirmations: the plan's authored `status:`
+  is still untrustworthy in the observed direction (**W1-T279 read `queued`/`attempts: 0` while its PR
+  #1062 was merged**, per W1-T280's harvest), and **W1-T272/#1044 shipped a sanctioned
+  `ALREADY_SATISFIED` exit — which makes the close CHEAP but does not stop the DISPATCH.** P39 rises
+  to rank 3: its damage is repeated, priced, and now demonstrably not self-correcting.
 - **★ P40 (measurement) — THE RETRO'S OWN INSTRUMENTS ARE HALF-DARK, AND THEY FEED THE MOUNT TABLE.**
   GROUND TRUTH: **(a)** 58 of 147 runs recorded exactly 0 turns AND `task_class: unknown` — the same
   58 — so the headline "8 turns/run" (against R10's 86.6) is a write-side blackout masquerading as a
@@ -764,26 +766,14 @@ trailers**). Candidates for the Architect to ratify via a tasks.yaml PR (rule 15
   **54 of 54** runs (0 `unknown`, against 58 of 147) while turns stayed dark on 22 of 25 credited runs
   — so class and turns are NOT dropped together by one write path, and R11's "one cheap falsifiable
   hypothesis" is answered NO. Nothing in the gather says what fixed the class column, which is itself
-  a P38 instance. Parts **(ii)** and **(iii)** are UNBUILT and both bit again this cycle: the turn
-  average printed as `7.759` with no coverage, and `blocked`×10 + `incomplete`×4 are still unmapped.
-  P42 extends (ii) from averages to per-class rates.
-*(R12: the five RE-RANK/RE-CONFIRM stubs that sat here — P28, P35, P29, P33, P26 — are DELETED. Each
-restated a canonical entry that already exists elsewhere in this section, which is the duplication
-HARNESS-COMPRESSION forbids; their evidence is folded INTO those entries and the ordering they carried
-is now the LIVE RANKING line at the top of this section.)*
+  a P38 instance. **★ R13 UPDATE — PART (a) HOLDS CLOSED (34 of 34 classed) AND PART (ii) IS NOW
+  PROVEN, NOT SUSPECTED.** The cycle table reports **321 turns over 34 runs**; the WEEKLY table reports
+  **the same 321 turns over 131 runs** — so 97 runs recorded ZERO, and 3 runs carry 294 of the 321.
+  That is a write path, not sampling. Part (ii) also now owns a second consumer: the ratification
+  counter has printed `3 / 11 / 21%` **byte-identically three times**, which R13 grades as UNWINDOWED
+  rather than as an open question. Part **(iii)** is still UNBUILT, but its blind share fell from 26%
+  to 9% (`blocked`×3 only). P42 extends (ii) from averages to per-class rates.
 
-- **`blocked`×47 + `blocked_ci`×25 + `no_pr`×17 + `incomplete`×12 + `pr_attribution_failed`×12 — NO new
-  proposal; 74 of 94 shipped tasks merged GATE-SIDE ⇒ P29/P30/P35/P39.** Fourth consecutive cycle in
-  which the dominant "failure" classes are predominantly write-side credit artifacts. Re-mining them as
-  classes would manufacture proposals from one root cause — the accretion failure mode P8 named. Note
-  for P40: `blocked`×47 is also the largest UNMAPPED MAST class.
-- **`blocked_containment`×6 — NO new proposal, and R10's "zero for a third cycle" line is DELETED as
-  FALSIFIED.** All six are `containment/outside-cwd-denial` across W1-T209/T212/T230, which W1-T91's
-  new guard-cause field (#719) classifies as a HOST signal and excludes from task defect counts. The
-  guard fail-closed correctly each time. RE-CHECK NEXT RETRO: if the same check fires on a SECOND host,
-  it is a task signal after all and earns its own proposal.
-- **`failed`×6 + `blocked_isolation`×1 — NO new proposal; the honest remainder W1-T52's shipped triage
-  (#308) owns.** One isolation trip at background rate is the designed fail-close (P27 resolved).
 **RETRO-1784556575522 (R9, prior cycle)** — mined from 26 runs / 21 shipped tasks / 13 ledger credits
 (`blocked_ci`×8, `blocked`×3, `incomplete`×1, `no_pr`×1, plus ONE rejected foreign trailer). Candidates for
 the Architect to ratify via a tasks.yaml PR (rule 15) — never auto-filed.
@@ -821,14 +811,16 @@ the Architect to ratify via a tasks.yaml PR (rule 15) — never auto-filed.
   →#115 for the FIFTH time. All four new ones are hand-authored `feat-*` branches carrying task
   trailers no run of those tasks owns — the same residue class as #80/W1-T54b, arriving four at a time.
   P29(i) will never credit any of them, `nextRunnable` re-selects all five forever, and the ONLY
-  mechanism that resolves them is this quarantine list. That is why P33 now outranks P39: **P39's
-  damage is repeated spend; P33's is permanent underivability, and it is compounding.**
+  mechanism that resolves them is this quarantine list. **★ R13 — A SIXTH TASK, AND THE FIRST WITH
+  IN-CYCLE COST: W1-T201 → #993 (`plan/close-t201`), rejected THREE times inside this one cycle.**
+  Unlike the five before it, W1-T201's poisoning was not merely permanent — it was *repeatedly billed*,
+  which fuses P33's argument (underivability) to P39's (repeated spend) on a single task. The poisoned
+  set is now enumerable and finite: **W1-T64/#115 · W1-T201/#993 · W1-T258/#766 · W1-T259/#768 ·
+  W1-T260/#773 · W1-T262/#777**, plus the #80/W1-T54b residue clause (iii) retires. TASK B above files
+  exactly those seven pairs. P33 ranks #2: **its damage is permanent AND compounding AND now priced.**
 - **P31 — RESOLVED; COLLAPSED INTO P30; prose DELETED per RATIFY-OR-KILL.** R8's decisive test (*"19 of
   the 21 blocked_ci merged anyway — if that holds, P31 collapses into P30"*) held in R9 (6 of 8) and has
   held every cycle since. No separate task; the duplicate adjudication in the R8 block below is deleted.
-- **`blocked`×3 + `incomplete`×1 + `no_pr`×1 — NO new proposal;** 2 of 3 merged gate-side ⇒ P30, and the
-  remainder is W1-T52's shipped triage (#308). The R9 cost-rise re-check is DELETED — R10 answered it and
-  R11 closed it (cost FELL to $6.664); keeping both readings is the duplication HARNESS-COMPRESSION forbids.
 
 **RETRO-1784512714705 (prior cycle)** — mined from 195 runs / 28 gate-side merges / 0 ledger credits
 (`incomplete`×111, `no_pr`×42, `blocked_ci`×21, `pr_attribution_failed`×12, `blocked`×5,
@@ -844,10 +836,14 @@ the Architect to ratify via a tasks.yaml PR (rule 15) — never auto-filed.
   CORRECT and must not be loosened** — it stopped R5's false-credit inversion and still does; **(b) a
   fail-closed integrity guard needs a LIVENESS counterpart, or the system pays for its own correctness
   forever.** P39 is its dispatch-side half. **★ EVIDENCE LOG (in place): R11 — 49 credit rejections,
-  ~39 sibling (W1-T230 ×6, T152 ×5, T7 ×4) plus three no-op-close PRs. R12 — 25 rejections, 20 of them
-  the sibling case, across 13 distinct tasks. FIFTH CYCLE UNBUILT, and as of R12 it is the ONLY
-  ratified-and-unbuilt item left in the plan** (P19/P34/P37 all drained) — which makes it, for the
-  first time, not one backlog item among several but THE backlog.
+  ~39 sibling. R12 — 25 rejections, 20 sibling, across 13 tasks; the ONLY ratified-and-unbuilt item
+  left in the plan. ★ R13 — THE SIBLING CASE COLLAPSED, 20 → 3** (W1-T254/#1016, W1-T275/#1050,
+  W1-T277/#1052; total rejections 25 → 6), **and clause (ii) SHIPPED: W1-T271/#1040 is the per-task
+  lifetime dispatch cap that no ledger step can reset.** So P29 splits: **(ii) is BUILT** and its
+  effect is next retro's pre-committed test; **(i) sibling credit stays unbuilt for a SIXTH cycle on
+  an evidence base that shrank 85% in one cycle.** R13 therefore RE-RANKS P29(i) DOWN — the plan
+  should stop calling it "THE backlog" — while keeping it OPEN, because the ownership-assert it
+  complements is still correct and the liveness lesson (b) is still unpaid.
 - **★ P30 — RATIFIED 2026-07-20 -> W1-T150, which SHIPPED 2026-07-21 (#358: the `rmd sweep` reconciler
   gains a level-triggered rung appending a `verdict.merged` correction for any task whose owned PR merged
   but is uncredited). Full prose DELETED per RATIFY-OR-KILL — the task and its PR are the record.** TWO
@@ -856,25 +852,18 @@ the Architect to ratify via a tasks.yaml PR (rule 15) — never auto-filed.
   side), R7 14-vs-14, R8 0-vs-28, R9 13-vs-21, R10 8-vs-23, **R11 20-vs-94**. (b) The open question the
   shipping did NOT close: **the metric still has not moved** — carried as P35, now folded into P38, which
   is P30's live descendant.
-- **`incomplete`×111 + `no_pr`×42 + `pr_attribution_failed`×12 — NO new proposal; STORM RESIDUE, folded
-  into P29.** These three classes account for 165 of 195 runs and their timestamps track the W1-T1/W1-T29
-  redispatch cadence (~75–90s apart). They are not 165 independent failures; they are one defect counted
-  165 times. Re-mining them as classes would manufacture proposals out of a single root cause — the
-  accretion failure mode P8 named. INVESTIGATE only the residue that survives after P29 lands.
-- **`blocked_containment`×2 + `blocked_isolation`×2 — NO new proposal; P27's resolution HELD.** Down from
-  R7's ×5/×1 after #185 absorbed the Claude Code 2.1.214 pkill-wrapper drift. The cause-field ratified as
-  W1-T91 SHIPPED 2026-07-29 (#719) and now classifies these events structurally; R12 re-graded the
-  whole class as a HOST signal and mined it as P41.
-- **`blocked`×5 — NO new proposal; owned by W1-T52 (SHIPPED #308).** 4 of the 5 merged gate-side ⇒ P30
-  again; the near-identical fold-line that sat in the R5 block below is DELETED as the duplicate it became.
+- **`incomplete`×111 + `no_pr`×42 + `pr_attribution_failed`×12 — THE SPIN-LOOP STORM, folded into P29;
+  kept because it is the origin of the fold-line doctrine.** These three classes are 165 of 195 runs and
+  their timestamps track the W1-T1/W1-T29 redispatch cadence (~75–90s apart): not 165 failures, ONE
+  defect counted 165 times. INVESTIGATE only the residue that survives after P29 lands.
 
 **RETRO-1784383376396 (R7) — proposal block DELETED; every item reached a terminal status.** **P27**
 RESOLVED 2026-07-18: the `blocked_isolation`×5 volume was ONE cause — a Claude Code 2.1.214 auto-update
-adding a pkill wrapper the static allowlist predated (named by #184's probe, absorbed by #185); the
-proposed host-hygiene fix was REFUTED by the name, and the guard fail-closed correctly on toolchain drift.
-The resolution held through R8/R9/R10; **R11 recorded 6 containment trips on one host and 1 isolation trip
-— re-graded there as a HOST signal, not a re-opening of P27.** Cause-field P23→W1-T91 SHIPPED (#719).
-R7's remaining classes resolved NO-new-proposal; its blocked_ci caveat became P31, which collapsed into P30.
+adding a pkill wrapper the static allowlist predated (#184's probe named it, #185 absorbed it); the
+proposed host-hygiene fix was REFUTED by the name, and the guard fail-closed correctly on toolchain
+drift. The resolution has held every cycle since; the guard-block volume R11/R12 recorded was re-graded
+as a HOST signal (P41), **and R13 recorded ZERO guard blocks of any class.** Cause-field P23→W1-T91
+SHIPPED (#719). R7's blocked_ci caveat became P31, which collapsed into P30.
 
 **RETRO-1784213948025 / RETRO-1784206755808 (prior cycles) — proposal blocks DELETED.** Both resolved
 entirely into ratified tasks or NO-new-proposal bootstrap findings whose reasoning now lives in the task:
@@ -909,7 +898,9 @@ tasks.yaml PR — never auto-filed, never worker-edited (rule 15).
   assembled from ledger ground truth, plus the byte-equal drift golden; Sigstore + the WS-12 schema publish
   deferred to v2). Design prose DELETED per RATIFY-OR-KILL — the task is the record. STILL UNBUILT.** The
   claim it makes literal is WS-12's: the ledger proves our runs to US and nothing proves them to anyone
-  else, and the EU AI Act Art. 50 machine-readable-disclosure date (2026-08) is now one month out.
+  else. **★ R13 — THE DEADLINE ARRIVED:** the EU AI Act Art. 50 machine-readable-disclosure date is
+  **2026-08, i.e. NOW**, so the countdown this entry has carried for four retros is spent. P17 moves up
+  the ranking on the calendar alone; nothing about the harness changed.
 - **P18 — RATIFIED 2026-07-17 -> W1-T89, SHIPPED 2026-07-29 (#710: a deterministic verdict→MAST mapping
   held as DATA, applied at retro-read). Prose DELETED per RATIFY-OR-KILL.** Its first live output is this
   cycle's failure-by-category table — verification 54 / infrastructure 7 / specification 6 — and the 60
@@ -1091,8 +1082,9 @@ in the rule it amended; restating it here is what turns this list into the grave
     b. **The current `/bin/bash` isolation works ONLY because `~/.bashrc` is absent on this host** — an
        accident, not construction; a populated `~/.bashrc` isolates nothing. Both remedies SHIPPED:
        **W1-T17/#99** (the fail-closed preflight probe) and **W1-T18/#100/#102 → W1-T170/#888** (the
-       per-run isolated worker HOME). **R12 STATUS: the probe fired 3× on `isolation/inherited-functions`
-       — it works, and it is at the wrong altitude (per-run, testing a per-host fact). See P41.** [PR #8]
+       per-run isolated worker HOME). **STATUS: R12 saw the probe fire 3× on
+       `isolation/inherited-functions` (it works, at the wrong altitude — per-run, testing a per-host
+       fact); R13 saw it fire ZERO times. See P41's kill trigger.** [PR #8]
     c. **The SDK yields the `type:"result"` envelope (`num_turns`, `total_cost_usd`, `subtype`) and THEN
        throws** from the iterator on an error subtype — read the envelope before the catch, or a failed
        run looks free in the ledger (failures are the runs that burn most). [PR #8]
@@ -2124,15 +2116,26 @@ EMPTY:** flight control (W1-T20–T22) shipped R7, the retro plan-health sweep (
 knowledge holes (W1-T33–T40) drained R8, and mounts.yaml v0 (W1-T5) shipped #42. Only §5C's linter CODE
 (W1-T20c) is still queued, and NET STATE already says so.
 
-**WS-2 — Flow & quality**: reviewer worker + rubric; provenance linter hardened; N-concurrent
-worktrees with per-repo caps + **N per-worker isolated HOMES** — the singleton <root>/worker-home (W1-T18/#100/#102) does NOT survive concurrency; every concurrent worker needs its own worker-home-<runId> with its own empty rc + its own login.keychain-db / .claude / .config/gh symlinks. A shared home races on rc materialization and the keychain grant. VALIDATE at build: N workers symlinked to the one real login.keychain-db — securityd gates per-item by code identity, but confirm concurrent authentication does not serialize on keychain lock contention. + **merge serialization per repo** (Bors-style: never two auto-merges
-racing one main); **task heartbeats + stall detection** (no ledger output in N min ⇒ classify hung,
-kill, transient-retry); stuck-PR shepherd (absorbs/retires pr-pipeline.sh); rate-limit-aware
-dispatch governor; scope guard (diff/files budget); first fleet-repo target (wild-trails backlog).
-Acceptance: two tasks run concurrently, one induced conflict auto-resolves, one induced hang is
-detected and recycled; proof = ledger timeline.
+**WS-2 — Flow & quality**: reviewer worker + rubric; provenance linter hardened; **merge serialization
+per repo** (Bors-style: never two auto-merges racing one main); **task heartbeats + stall detection**
+(no ledger output in N min ⇒ classify hung, kill, transient-retry); stuck-PR shepherd
+(absorbs/retires pr-pipeline.sh); rate-limit-aware dispatch governor; scope guard (diff/files budget);
+first fleet-repo target (wild-trails backlog). Acceptance: two tasks run concurrently, one induced
+conflict auto-resolves, one induced hang is detected and recycled; proof = ledger timeline.
+**★ R13: the N-concurrent-worktrees + per-worker-isolated-HOMES design paragraph that sat here is
+DELETED as SUPERSEDED — it SHIPPED as P19** (W1-T170/#888 per-run isolated worker HOMEs · T171/#890
+the file-overlap pre-dispatch check · T172/#896 N=2 bounded lanes), and a shipped design restated as
+a scoping note is a lie about the plan's state.
 
-★ PARALLELISM GRANULARITY (grounded — 2026 field consensus + arxiv, Architect 2026-07-16): parallelize INDEPENDENT TASKS (the DAG), NEVER one task's implementation across sub-agents. Git-worktree-per-task isolation is the industry+research standard, but the hard lesson is that worktrees solve FILE collisions, not DEPENDENCY/SEMANTIC conflicts — agents editing related files under incompatible assumptions produce errors that only surface AT INTEGRATION. What makes parallelism safe is HIERARCHICAL TASK DECOMPOSITION (our depends_on DAG), not the concurrency mechanism: independent DAG nodes run concurrent; dependent ones SEQUENCE. A 2026 result (Glite ARF) mirrors this — 12 task-worktrees parallel on one 48GB Mac, zero merge conflicts reaching main, parallelism at TASK granularity NOT agent-granularity-inside-one-problem. This VINDICATES the 'small worker counts, hard verdicts, plan-first' bet and sets its shape: fan out cheap Sonnet workers across independent tasks (mounts already routes implement→sonnet), bounded by the rate-limit-aware governor + headroom, merge-serialized per repo. Intra-task sub-agents are acceptable ONLY for read-heavy recon (additive outputs), never for splitting an implementation. PREREQUISITE: the concurrent drainer depends on the block-reasoner (W1-T46) — until 'one blocked task doesn't stall the independent others' exists, drain-v1 stop-on-block makes concurrency pointless.
+★ PARALLELISM GRANULARITY (grounded — 2026 field consensus + arxiv, Architect 2026-07-16; **kept
+because P19 CLOSED on it and rung 2 is banked against it**): parallelize INDEPENDENT TASKS (the DAG),
+NEVER one task's implementation across sub-agents. Worktrees solve FILE collisions, not
+DEPENDENCY/SEMANTIC ones — those surface only AT INTEGRATION — so what makes parallelism safe is
+HIERARCHICAL TASK DECOMPOSITION (our `depends_on` DAG): independent nodes run concurrent, dependent
+ones SEQUENCE. Intra-task sub-agents are acceptable ONLY for read-heavy recon (additive outputs),
+never for splitting an implementation. *(The Glite-ARF corroboration and the W1-T46 block-reasoner
+prerequisite are DELETED — the first is a citation the closed proposal already carries, the second
+was satisfied when P19's lanes shipped.)*
 
 **WS-3 — Principles engine**: principles.yaml loader; TDD Guard integration + red→green REPORT
 proof; coverage ratchet + jscpd + dependency-cruiser CI templates; auto-filed refactor tasks;
@@ -2545,7 +2548,3 @@ already scrubbed to that standard.
   verdict calibration proves the reviewer.
 - P19 rung 2 — Tree-sitter symbol-touch locks; unbanks only when a rung-1 file-overlap ESCAPE is
   observed in the ledger (W1-T172's `dispatch.concurrent_set` line is the trigger).
-
-*(R12: the P34 and P37 bullets are DELETED from this queue — both families SHIPPED 2026-07-30
-(W1-T248–T251, W1-T252/T253) and a shipped family in the BANKED queue is a lie about the plan's state.
-Their record is the SHIPPED log and their surviving doctrine is in the proposals section.)*
