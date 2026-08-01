@@ -4,6 +4,8 @@ import {
   assessBootHealth,
   daemonIsIdle,
   decideDeployTrigger,
+  readLatestBootSha,
+  sameCommit,
   runDeployCycle,
   treeFfSafe,
   type DeployDeps,
@@ -21,7 +23,9 @@ test("decideDeployTrigger: human-gated by default — no marker ⇒ no deploy ev
 
 test("decideDeployTrigger: marker present + behind ⇒ deploy; up-to-date ⇒ never", () => {
   assert.equal(decideDeployTrigger({ markerPresent: true, autoMode: false, installHead: "old", originMain: "new" }).deploy, true);
-  assert.equal(decideDeployTrigger({ markerPresent: true, autoMode: false, installHead: "same", originMain: "same" }).deploy, false);
+  // "up-to-date" now means the checkout is current AND the daemon is running it — supplying
+  // runningHead is what makes this case up-to-date rather than merely checkout-current.
+  assert.equal(decideDeployTrigger({ markerPresent: true, autoMode: false, installHead: "same", originMain: "same", runningHead: "same" }).deploy, false);
 });
 
 test("decideDeployTrigger: auto mode deploys when behind, but NOT a HEAD that already failed + rolled back", () => {
@@ -62,7 +66,7 @@ function makeDeps(o: {
   markerPresent?: boolean;
   autoMode?: boolean;
   lastFailedHead?: string;
-  installHead?: string;
+  installHead?: string; runningHead?: string;
   originMain?: string;
   dirtyFiles?: string[];
   incomingFiles?: string[];
@@ -87,6 +91,7 @@ function makeDeps(o: {
     now: () => 1000,
     fetch: () => calls.push("fetch"),
     installHead: () => headRef.value,
+    runningHead: () => o.runningHead ?? headRef.value,
     originMain: () => o.originMain ?? "new-head",
     markerPresent: () => o.markerPresent ?? false,
     autoMode: () => o.autoMode ?? false,
@@ -338,4 +343,96 @@ test("realDeployDeps: alert writes DEPLOY_FAILED + DEPLOY_LAST_FAILED; clearMark
     assert.equal(deps.markerPresent(), false);
     deps.clearMarker(); // idempotent when already gone
   });
+});
+
+// ── RUNNING-SHA TRIGGER (deploy supervisor consumed by anyone who pulls first) ──────────────
+//
+// decideDeployTrigger used to compare the CHECKOUT against origin only, so an operator `git
+// pull`, an agent's pull, or rmd's own self-sync consumed the trigger and the restart never
+// happened — the daemon then ran stale code against a current checkout, silently. Captured live
+// 2026-08-01: checkout ff'd to a0d96a9 at 21:44:29, 12 consecutive "no-op: up-to-date" cycles,
+// console still on 3f6a1d1. These lock the fix and, above all, lock it against FALSE POSITIVES:
+// a trigger that reads "stale" for a current daemon restarts it every 120s under the supervisor.
+
+test("running-sha trigger: a daemon on an OLDER sha than the checkout DEPLOYS even though the checkout is current", () => {
+  const d = decideDeployTrigger({
+    markerPresent: false,
+    autoMode: true,
+    installHead: "a0d96a958e6a162d8a4a800b4b5ccaa1664fa682",
+    originMain: "a0d96a958e6a162d8a4a800b4b5ccaa1664fa682", // someone already pulled
+    runningHead: "3f6a1d1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", // daemon still on the old code
+  });
+  assert.equal(d.deploy, true);
+  assert.match(d.reason, /daemon running stale code/);
+});
+
+test("running-sha trigger: a daemon that has JUST restarted onto the CURRENT sha does NOT deploy — the false-positive lock", () => {
+  const cur = "a0d96a958e6a162d8a4a800b4b5ccaa1664fa682";
+  const d = decideDeployTrigger({ markerPresent: false, autoMode: true, installHead: cur, originMain: cur, runningHead: cur });
+  assert.equal(d.deploy, false, "a current daemon must never be restarted — the supervisor runs every 120s");
+  assert.match(d.reason, /up-to-date/);
+
+  // SHORT-vs-FULL sha: a format mismatch would read as stale and loop forever.
+  const shortSide = decideDeployTrigger({ markerPresent: false, autoMode: true, installHead: cur, originMain: cur, runningHead: cur.slice(0, 12) });
+  assert.equal(shortSide.deploy, false, "a short running sha that prefixes the full install head is the SAME commit");
+  const otherSide = decideDeployTrigger({ markerPresent: false, autoMode: true, installHead: cur.slice(0, 12), originMain: cur.slice(0, 12), runningHead: cur });
+  assert.equal(otherSide.deploy, false, "and symmetrically, a full running sha against a short install head");
+
+  // A genuinely different sha that happens to share a prefix shorter than 7 must NOT be equal.
+  assert.equal(sameCommit("a0d9", "a0d96a958e6a162d8a4a800b4b5ccaa1664fa682"), false, "under 7 chars is not a commit identity");
+});
+
+test("running-sha trigger: an UNKNOWN (unrecorded) running sha DEPLOYS — fail-EAGER, chosen deliberately", () => {
+  const cur = "a0d96a958e6a162d8a4a800b4b5ccaa1664fa682";
+  const d = decideDeployTrigger({ markerPresent: false, autoMode: true, installHead: cur, originMain: cur, runningHead: undefined });
+  assert.equal(d.deploy, true, "a daemon that booted before this shipped records nothing; fail-safe would mean the fix can never take effect");
+  assert.match(d.reason, /daemon running stale code/);
+});
+
+test("running-sha trigger: REPLAY of the live 2026-08-01 sequence — old logic said up-to-date, new logic deploys", () => {
+  // The checkout was fast-forwarded to a0d96a9 by a manual `pull --ff-only` at 21:44:29; the
+  // daemon had last booted on 3f6a1d1. Twelve cycles reported "no-op: up-to-date".
+  const checkout = "a0d96a958e6a162d8a4a800b4b5ccaa1664fa682";
+  const daemonOn = "3f6a1d1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+  // OLD comparison, reproduced inline: checkout vs origin only.
+  assert.equal(checkout !== checkout, false, "the old `behind` was false — which is why nothing happened");
+
+  const now = decideDeployTrigger({ markerPresent: false, autoMode: true, installHead: checkout, originMain: checkout, runningHead: daemonOn });
+  assert.equal(now.deploy, true, "the new trigger acts on the running code, so the same state now deploys");
+});
+
+test("readLatestBootSha: takes the LAST daemon.boot head_sha, and is undefined when none carries one", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-bootsha-"));
+  const p = join(dir, "ledger.ndjson");
+  writeFileSync(p, [
+    '{"ts":"2026-08-01T00:00:00.000Z","step":"daemon.boot","head_sha":"1111111111111111111111111111111111111111"}',
+    '{"ts":"2026-08-01T01:00:00.000Z","step":"run.start"}',
+    '{"ts":"2026-08-01T02:00:00.000Z","step":"daemon.boot","head_sha":"2222222222222222222222222222222222222222"}',
+  ].join("\n"));
+  assert.equal(readLatestBootSha(p), "2222222222222222222222222222222222222222");
+
+  const bare = join(dir, "bare.ndjson");
+  writeFileSync(bare, '{"ts":"2026-08-01T00:00:00.000Z","step":"daemon.boot","env_clean":true}\n');
+  assert.equal(readLatestBootSha(bare), undefined, "a pre-fix daemon recorded no sha");
+  assert.equal(readLatestBootSha(join(dir, "nope.ndjson")), undefined, "no ledger at all");
+});
+
+test("running-sha trigger: the idle gate STILL blocks — a stale daemon with a worker in flight does NOT restart", () => {
+  // THE REGRESSION LOCK ON THE THING THAT MUST NOT BREAK. A restart under a live worker SIGKILLs
+  // it (it has already cost a run on this host). The new running-sha reason must reach the gate
+  // by exactly the same path the old behind-origin reason did — never around it.
+  const cur = "a0d96a958e6a162d8a4a800b4b5ccaa1664fa682";
+  const r = makeDeps({
+    markerPresent: true,
+    installHead: cur,
+    originMain: cur, // checkout already current — only the RUNNING sha is stale
+    runningHead: "3f6a1d1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    idle: { workers: 1, inflightLocks: 0, worktreeLocks: 0 },
+  });
+  const result = runDeployCycle(r.deps);
+
+  assert.equal(result.deployed, false, "a worker in flight must veto the restart, stale or not");
+  assert.ok(!r.calls.includes("kickstart"), "no kickstart while a worker is live");
+  assert.ok(!r.calls.includes("pullFf"), "and the gate is reached BEFORE any tree mutation");
 });

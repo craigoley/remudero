@@ -7083,6 +7083,23 @@ export async function daemonCommand(
     // report `api` iff this daemon deliberately drains on API credits, matching
     // what its workers will actually bill (the key must ALSO be in the env).
     config.overflow === "api_key",
+    undefined, // sweepOrphanWorkers — not wired at this call site
+    // THE SHA THIS PROCESS IS ACTUALLY EXECUTING. Resolved from the directory the RUNNING
+    // MODULE was loaded from (`import.meta.url`), never from cwd and never re-read later — the
+    // deploy supervisor compares this against the checkout's HEAD, and a value read live at
+    // comparison time would always match and reproduce the very bug this closes. Best-effort:
+    // if git is unavailable the field is omitted and the supervisor fails eager (one extra
+    // restart at an idle gap), which is strictly safer than recording a wrong sha.
+    (() => {
+      try {
+        return execFileSync("git", ["-C", dirname(dirname(fileURLToPath(import.meta.url))), "rev-parse", "HEAD"], {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "ignore"],
+        }).trim();
+      } catch {
+        return undefined;
+      }
+    })(),
   );
 
   const runDaemonFn = deps.runDaemon ?? runDaemon;

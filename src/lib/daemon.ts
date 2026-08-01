@@ -940,9 +940,22 @@ export function daemonBoot(
    * from before W1-T117.
    */
   sweepOrphanWorkers?: () => OrphanSweepReport,
+  /**
+   * The sha of the CODE THIS PROCESS LOADED, resolved by the caller at boot (`git rev-parse HEAD`
+   * in the install it was launched from). Recorded on `daemon.boot` so the deploy supervisor can
+   * compare the RUNNING code against the checkout instead of comparing the checkout against
+   * origin — the latter is consumed by anyone who pulls first, which left the daemon running
+   * stale code silently (see `decideDeployTrigger`). Appended LAST so no positional caller
+   * shifts. Omitted ⇒ the field is absent, exactly as before, and the supervisor fails eager.
+   */
+  bootHeadSha?: string,
 ): BootAssertion {
   const assertion = assertCleanBoot(env, allowApiKey);
-  log("daemon.boot", { env_clean: assertion.env_clean, billing_mode: assertion.billing_mode });
+  log("daemon.boot", {
+    env_clean: assertion.env_clean,
+    billing_mode: assertion.billing_mode,
+    ...(bootHeadSha ? { head_sha: bootHeadSha } : {}),
+  });
   // BOOT-RATE INVARIANT (W1-T215): the SHAPE-not-cause check — see this
   // function's doc and detectDaemonCrashLoop's, above. Logged either way
   // (daemon.crashloop_check) so the invariant's own pass/fail is part of the
