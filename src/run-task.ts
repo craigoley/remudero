@@ -120,7 +120,7 @@ import {
   type OpenIssue,
   type PresenceMode,
 } from "./lib/escalate.js";
-import { fetchOpenPrsRest, fetchSinglePrRest, type GhApiFetcher } from "./lib/open-prs-rest.js";
+import { fetchOpenPrsRest, fetchSinglePrRest, hydrateMergeStates, type GhApiFetcher } from "./lib/open-prs-rest.js";
 import { imessageChannel, notify, type NotifyChannel } from "./lib/notify.js";
 import {
   alertOriginId,
@@ -8707,14 +8707,39 @@ export function openPrMintTexts(owner: string, repo: string): string[] {
  * whole critical path behind a budget that was exhausted on 2026-07-28 — 22 consecutive minutes
  * of totally blind passes, zero PRs dispositioned, while core sat healthy. See lib/open-prs-rest.ts.
  */
-export function buildOpenPrViews(owner: string, repo: string, ledgerPath: string): OpenPrView[] {
-  const raw = fetchOpenPrsRest(owner, repo, ghJson) as RawOpenPr[];
+export function buildOpenPrViews(
+  owner: string,
+  repo: string,
+  ledgerPath: string,
+  // APPENDED LAST, both defaulted, so none of the three positional call sites shift. Injectable
+  // because the merge-state wiring below is otherwise unreachable in a test — every existing
+  // sweep test builds `OpenPrView` fixtures by hand and so never exercises this function at all.
+  deps: {
+    fetch?: GhApiFetcher;
+    requiredContexts?: (owner: string, repo: string) => string[] | undefined;
+  } = {},
+): OpenPrView[] {
+  const fetch = deps.fetch ?? ghJson;
+  const raw = fetchOpenPrsRest(owner, repo, fetch) as RawOpenPr[];
   const ledger = readLedgerLines(ledgerPath);
   // W1-T103: branch protection's OWN required-contexts list, read ONCE per
   // repo for this whole sweep pass (never per-PR, never hardcoded) — see
   // checksStateFromRollup's doc for why this must gate checksState instead of
   // every reported check.
-  const requiredContexts = ghRequiredStatusCheckContexts(owner, repo);
+  const requiredContexts = (deps.requiredContexts ?? ghRequiredStatusCheckContexts)(owner, repo);
+
+  // MERGE STATE: one bounded follow-up fetch per PR, because the LIST endpoint omits
+  // `mergeable_state` (see hydrateMergeStates' doc for the live verification and the incident).
+  // Scoped to the PRs this pass will actually disposition — measured median 1, p95 6, max 23 over
+  // 5,735 sweeps — and hard-capped, so the pathological case cannot run away. Best-effort by
+  // construction: an exhausted budget yields an empty map and every PR keeps the `undefined` it
+  // has carried since the REST migration, i.e. exactly today's behaviour.
+  const mergeStates = hydrateMergeStates(
+    owner,
+    repo,
+    raw.map((p) => p.number),
+    fetch,
+  );
 
   // supersededBy: the HIGHEST-numbered other open PR crediting the same task.
   const byTask = new Map<string, number[]>();
@@ -8763,6 +8788,9 @@ export function buildOpenPrViews(owner: string, repo: string, ledgerPath: string
       // signal must gate the zero-runs discriminator OFF (never assume
       // permissive on missing information).
       requiredContextsUnreadable: !requiredContexts || requiredContexts.length === 0,
+      // Absent from the map ⇒ GitHub had not computed it (or we could not ask) ⇒ undefined, the
+      // pre-existing value. Only a DEFINITE observed "dirty" ever reaches the conflicted rows.
+      mergeState: mergeStates.get(pr.number),
     };
   });
 }

@@ -34,6 +34,8 @@
  * PAGE, which `JSON.parse` rejects outright, and the `--slurp` that fixes that cannot be
  * combined with `--jq`.
  */
+import type { MergeState } from "./sweep.js";
+
 export function openPrsRestArgs(owner: string, repo: string): string[] {
   return ["api", `repos/${owner}/${repo}/pulls?state=open&per_page=100`];
 }
@@ -487,4 +489,101 @@ export function fetchBoardPrsRest(
   }
 
   return { rows: [...out.values()], calls, mode, truncated };
+}
+
+/* ────────────────────────────────────────────────────────────────────────────────────────────
+ * MERGE-STATE HYDRATION (the third instance of the single-PR-only field class)
+ *
+ * `mergeable` and `mergeable_state` are among the fields GitHub documents as single-PR-only, and
+ * the LIST endpoint omits them exactly as it omits `merged`. VERIFIED LIVE against PR #1074:
+ *
+ *   GET /repos/{o}/{r}/pulls?state=…  ->  has_mergeable:false  has_mergeable_state:false
+ *   GET /repos/{o}/{r}/pulls/1074     ->  has_mergeable:true   has_mergeable_state:true
+ *
+ * So `OpenPrView.mergeState` was ALWAYS `undefined` after the REST migration, the sweep's two
+ * `mergeState === "dirty"` disposition rows were unreachable, and a conflicted PR fell through to
+ * the `mergeable` catch-all. MEASURED 2026-08-01 16:01–16:05Z: PR #1074 was dispositioned
+ * `mergeable` FIVE CONSECUTIVE TIMES while GitHub reported `mergeable: false,
+ * mergeable_state: "dirty"`; the sweep kept trying to arm auto-merge, which cannot succeed on a
+ * conflicted PR, and a human rebased it by hand.
+ *
+ * This is the same defect shape as #1017 (`merged` omitted ⇒ every merged PR read CLOSED ⇒ 60
+ * merged tasks became dispatch-eligible ⇒ a five-dispatch runaway at real model spend). Same
+ * endpoint, same omission list, same silent `undefined`.
+ *
+ * WHY A PER-PR FETCH IS AFFORDABLE HERE, MEASURED rather than assumed. Over 5,735 sweeps in the
+ * unioned ledger the per-sweep PR count is: median 1, mean 1.9, p95 6, p99 17, max 23; since
+ * 2026-07-28 it is median 1, p95 5, max 7. Exactly ONE sweep of 5,735 ever exceeded 20 PRs. At a
+ * 60 s poll that is ~60 extra calls/hour typical and ~360/hour at p95, against a 5,000/hour core
+ * budget. {@link MERGE_STATE_HYDRATION_CAP} bounds the pathological case regardless.
+ *
+ * THE SAME SHAPE `ciFailures` ALREADY USES: a bounded, conditional, per-PR follow-up fetch off
+ * the list row, best-effort, never a hard failure of the sweep.
+ */
+
+/** Hard ceiling on per-PR merge-state fetches in ONE sweep pass. Above it, the remaining PRs keep
+ *  `mergeState: undefined` and disposition EXACTLY as they did before this existed — the honest
+ *  degradation, since an unknown merge state was the status quo for every PR until now. 25 sits
+ *  just above the all-time observed maximum of 23. */
+export const MERGE_STATE_HYDRATION_CAP = 25;
+
+/**
+ * GitHub's raw `mergeable_state`, narrowed to the sweep's {@link MergeState} vocabulary.
+ *
+ * THREE STATES, NOT TWO — and this is the trap the fix has to survive. GitHub computes
+ * mergeability ASYNCHRONOUSLY: until it finishes, the single-PR response carries
+ * `mergeable: null, mergeable_state: "unknown"`, and this repo has seen a PR sit `unknown` across
+ * five consecutive polls. So:
+ *
+ *   "dirty"                    -> "dirty"    a DEFINITE, OBSERVED conflict. Act on it.
+ *   "clean" | "unstable" | …   -> "clean"    definitely not conflicted.
+ *   "unknown" | absent | error -> undefined  NOT YET KNOWN — deliberately left in the catch-all.
+ *
+ * `undefined` is chosen for unknown rather than any {@link MergeState} value ON PURPOSE. Mapping
+ * it to `"dirty"` would escalate healthy PRs the instant GitHub was merely slow; mapping it to
+ * `"clean"` would assert something unobserved and reproduce the very defect this closes, just on
+ * a slower clock. `undefined` is what every PR carried before this change, so an unknown PR
+ * disposition is byte-identical to today's behaviour — the failure mode is "no improvement",
+ * never "wrong answer".
+ */
+export function mergeStateFromRest(row: { mergeable_state?: string | null; mergeable?: boolean | null }): MergeState | undefined {
+  const raw = typeof row.mergeable_state === "string" ? row.mergeable_state.toLowerCase() : undefined;
+  if (raw === "dirty") return "dirty";
+  if (raw === undefined || raw === "unknown") return undefined;
+  // Every other documented value ("clean", "blocked", "behind", "unstable", "draft", "has_hooks")
+  // means GitHub COULD compute mergeability and did not find a conflict. `behind` is deliberately
+  // NOT surfaced as its own state here — see MergeState's doc: it is out of scope for the sweep.
+  return "clean";
+}
+
+/**
+ * Fetch `mergeable_state` for up to {@link MERGE_STATE_HYDRATION_CAP} PRs, returning a map from
+ * PR number to the narrowed state. Absent from the map ⇒ not known ⇒ caller leaves `mergeState`
+ * undefined.
+ *
+ * BEST-EFFORT, PER PR (trap 2). A throw on ONE PR — rate limit exhausted mid-pass, a 404 on a PR
+ * closed between the list and this call, a network blip — skips THAT PR and continues. It never
+ * propagates, because the degraded outcome (no merge state, disposition exactly as before) is
+ * strictly better than a sweep that dies and dispositions nothing at all. When the core budget is
+ * exhausted every fetch throws, the map comes back empty, and the sweep behaves precisely as it
+ * did before this change.
+ */
+export function hydrateMergeStates(
+  owner: string,
+  repo: string,
+  prNumbers: readonly number[],
+  fetch: GhApiFetcher,
+  cap: number = MERGE_STATE_HYDRATION_CAP,
+): Map<number, MergeState> {
+  const out = new Map<number, MergeState>();
+  for (const n of prNumbers.slice(0, cap)) {
+    try {
+      const row = fetch(singlePrRestArgs(owner, repo, n)) as { mergeable_state?: string | null; mergeable?: boolean | null };
+      const state = mergeStateFromRest(row);
+      if (state !== undefined) out.set(n, state);
+    } catch {
+      /* best-effort: this PR keeps the pre-existing undefined, the pass continues */
+    }
+  }
+  return out;
 }
