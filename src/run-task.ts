@@ -324,7 +324,7 @@ import {
   type ReviewVerdict,
 } from "./lib/review.js";
 import { buildDepReviewEscalation, decideDepReview } from "./lib/dep-review.js";
-import { decideAutoTriage, newFeedbackIdsOldestFirst, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath } from "./lib/auto-triage.js";
+import { decideAutoTriage, newFeedbackIdsOldestFirst, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, type AutoTriageDecision } from "./lib/auto-triage.js";
 import { validateWorkerSettingsFile } from "./lib/settings.js";
 import {
   buildBatchedGithub,
@@ -5738,6 +5738,73 @@ export function retroTriggerCheck(
  * everything the daemon loop needs (retro_triggered, retro_aborted_integrity, pr.opened,
  * retro.marker.advanced).
  */
+/**
+ * The auto-triage rung's PRODUCER (impl-DM), mirroring {@link buildRetroDaemonHooks} exactly.
+ *
+ * ★ WHY THIS EXISTS AT ALL. PR #1066 shipped the rung's CONSUMER — `daemon.ts` reads
+ * `deps.checkAutoTriage` inside its idle branch — and never wired a producer. `deps.checkAutoTriage`
+ * was therefore `undefined` in every production boot, the `if` was always false, and setting
+ * `autoTriage.enabled: true` in policy did nothing at all. Eighteen tests passed, diff-coverage
+ * passed, the review went green, and the feature was inert on main. That is the seventh instance in
+ * three days of code that is written, tested, merged and never reached.
+ *
+ * TWO ROOTS, AND THEY ARE NOT THE SAME ONE. The lock and the marker live under `config.root`
+ * (`<root>/state/…`) because that is where every other fleet latch lives and where the CLI's own
+ * `triageLockPath(cfg.root)` already points. The feedback entries live under `repoRoot`
+ * (`<repo>/plan/feedback/*.yaml`) because they are committed artifacts. Passing one root for both
+ * would read an empty candidate list and silently never fire — the same shape of quiet nothing this
+ * change exists to remove.
+ */
+export function buildAutoTriageDaemonHooks(deps: {
+  check?: () => AutoTriageDecision;
+  runTriage?: (feedbackId: string) => Promise<number>;
+  config?: Config;
+  now?: () => Date;
+} = {}): {
+  checkAutoTriage: () => AutoTriageDecision;
+  runAutoTriage: (feedbackId: string) => Promise<void>;
+} {
+  const check = deps.check ?? (() => autoTriageCheck({ config: deps.config, now: deps.now?.() }));
+  const runTriage = deps.runTriage ?? ((feedbackId: string) => triageCommand([feedbackId]));
+  const configFor = () => deps.config ?? loadConfig();
+  return {
+    checkAutoTriage: () => check(),
+    runAutoTriage: async (feedbackId) => {
+      // RECORD THE FIRE FIRST, deliberately. If triage throws or the process dies mid-run, the
+      // marker has already advanced and the interval bound still holds — the failure costs one
+      // skipped period rather than authorising an immediate, unbounded retry at ~$2.00 a time.
+      recordAutoTriageFire(autoTriageMarkerPath(configFor().root), deps.now?.() ?? new Date(), 24 * 60 * 60 * 1000);
+      await runTriage(feedbackId);
+    },
+  };
+}
+
+/**
+ * The rung's real decision, assembled from live state. Pure-ish: every input is read here and handed
+ * to the PURE {@link decideAutoTriage}, which owns every bound and is unchanged by this PR.
+ *
+ * `idle: true` is not an assumption — it is a fact about the CALL SITE. `daemon.ts` consults this
+ * hook only from inside its idle branch (`if (!next) { … }`), so by construction the daemon has
+ * nothing dispatchable and nothing in flight whenever this runs. The parameter stays on the pure
+ * function because tests must be able to assert the not-idle refusal.
+ */
+export function autoTriageCheck(opts: { config?: Config; now?: Date } = {}): AutoTriageDecision {
+  const config = opts.config ?? loadConfig();
+  const policy = loadPolicy(policyPath(repoRoot));
+  const held = readDrainLock(triageLockPath(config.root));
+  return decideAutoTriage({
+    policy: policy.values.autoTriage,
+    idle: true,
+    // A lock whose holder is DEAD is not held — the same liveness rule `acquireDrainLock` itself
+    // applies, so a crashed run cannot wedge the rung shut forever.
+    lockHeld: held !== null && defaultIsPidAlive(held.pid),
+    marker: readAutoTriageMarker(autoTriageMarkerPath(config.root)),
+    now: opts.now ?? new Date(),
+    // repoRoot, NOT config.root — see this block's doc comment.
+    candidates: newFeedbackIdsOldestFirst(repoRoot),
+  });
+}
+
 export function buildRetroDaemonHooks(deps: {
   check?: () => RetroTriggerDecision | undefined;
   runRetro?: (rest: string[], opts: { automated: Extract<RetroTriggerDecision, { fire: true }> }) => Promise<number>;
@@ -7136,6 +7203,11 @@ export async function daemonCommand(
   const runDaemonFn = deps.runDaemon ?? runDaemon;
   // W1-T160: the retro cadence hooks (self-target only) — see buildRetroDaemonHooks.
   const retroHooks = target.isSelf ? buildRetroDaemonHooks() : undefined;
+  // impl-DM: the auto-triage rung's producer. SELF-TARGET ONLY, for the same reason the retro is —
+  // it reads THIS repo's plan/feedback and writes THIS repo's plan, never a drained target's.
+  // Without this line `deps.checkAutoTriage` is undefined and the whole rung is dead code, which is
+  // exactly how #1066 merged: consumer wired, producer never.
+  const autoTriageHooks = target.isSelf ? buildAutoTriageDaemonHooks({ config }) : undefined;
   try {
     const summary = await runDaemonFn(
       plan,
@@ -7197,6 +7269,11 @@ export async function daemonCommand(
         // retro_aborted_integrity, pr.opened, retro.marker.advanced).
         checkRetroTrigger: retroHooks?.checkRetroTrigger,
         runRetroTrigger: retroHooks?.runRetroTrigger,
+        // AUTO-TRIAGE RUNG (impl-DJ's design, wired here by impl-DM). Same shape as the retro
+        // hooks above and gated the same way. The rung is DEFAULT OFF in policy data — this line
+        // makes the switch REACHABLE, it does not turn anything on.
+        checkAutoTriage: autoTriageHooks?.checkAutoTriage,
+        runAutoTriage: autoTriageHooks?.runAutoTriage,
         // W1-T46 block-reasoning: a GENUINE BLOCKER (real downstream work
         // transitively needs the blocked task) opens a `needs-human` issue
         // naming the dependents it protects, via W1-T8's escalation taxonomy
