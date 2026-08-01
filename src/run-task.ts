@@ -5876,11 +5876,14 @@ export function buildAutoTriageDaemonHooks(deps: {
   runTriage?: (feedbackId: string) => Promise<number>;
   config?: Config;
   now?: () => Date;
+  /** Injected policy, forwarded to {@link autoTriageCheck} — see its doc for why this seam exists.
+   *  Production passes none and the checked-in `plan/policy.yaml` governs, exactly as before. */
+  policy?: Policy;
 } = {}): {
   checkAutoTriage: () => AutoTriageDecision;
   runAutoTriage: (feedbackId: string) => Promise<void>;
 } {
-  const check = deps.check ?? (() => autoTriageCheck({ config: deps.config, now: deps.now?.() }));
+  const check = deps.check ?? (() => autoTriageCheck({ config: deps.config, now: deps.now?.(), policy: deps.policy }));
   const runTriage = deps.runTriage ?? ((feedbackId: string) => triageCommand([feedbackId]));
   const configFor = () => deps.config ?? loadConfig();
   return {
@@ -5903,10 +5906,19 @@ export function buildAutoTriageDaemonHooks(deps: {
  * hook only from inside its idle branch (`if (!next) { … }`), so by construction the daemon has
  * nothing dispatchable and nothing in flight whenever this runs. The parameter stays on the pure
  * function because tests must be able to assert the not-idle refusal.
+ *
+ * `opts.policy` is the SAME injection seam {@link retroTriggerCheck} already offers, and it exists
+ * for a measured reason. Without it this function's ONLY policy source is the CHECKED-IN
+ * `plan/policy.yaml`, resolved through `repoRoot` — which is derived from the running process's own
+ * cwd, so a test driving this reads the REPO's policy no matter what fixture it built. That is not
+ * hypothetical: `test/auto-triage-wiring.test.ts` asserted an unconditional refusal under a title
+ * claiming the flag was ABSENT, its fixture wrote no policy file at all, and it was really pinning
+ * "the shipped default is false". It passed by coincidence of that value until the flag was genuinely
+ * flipped (#1093). Production still passes nothing and reads the checked-in file exactly as before.
  */
-export function autoTriageCheck(opts: { config?: Config; now?: Date } = {}): AutoTriageDecision {
+export function autoTriageCheck(opts: { config?: Config; now?: Date; policy?: Policy } = {}): AutoTriageDecision {
   const config = opts.config ?? loadConfig();
-  const policy = loadPolicy(policyPath(repoRoot));
+  const policy = opts.policy ?? loadPolicy(policyPath(repoRoot));
   const held = readDrainLock(triageLockPath(config.root));
   return decideAutoTriage({
     policy: policy.values.autoTriage,
