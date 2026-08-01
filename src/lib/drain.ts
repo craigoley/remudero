@@ -131,8 +131,53 @@ export interface NextRunnableOpts {
  * `unmetDependencies` — the DAG logic is never reimplemented here. Returns
  * `undefined` when nothing is runnable.
  */
+/**
+ * DISPATCH ORDER (impl-DQ). Sort the plan's tasks into a stable, meaningful order before selection.
+ *
+ * THE DEFECT THIS REPLACES. `loadPlan` (lib/plan.ts) parses `plan/tasks.yaml` and then APPENDS every
+ * `plan/tasks.d/*.yaml` shard's tasks with `tasks.push(t)`. Measured on today's plan: the monolith
+ * occupies indices 0–268 and the shards 269–312, contiguously after. Both selectors below iterated
+ * that array with no sort, so EVERY shard task ranked behind EVERY monolith task, permanently.
+ * Dispatch priority was file placement.
+ *
+ * That became load-bearing on 2026-08-01, when PR #1060 redirected `rmd triage` to propose into
+ * shards: from that point everything newly filed sorted last, behind 269 older entries.
+ *
+ * WHY TASK ID, AND WHAT IT COSTS. Ids are minted monotonically at filing time (the minter maxes over
+ * every source and adds one), so ascending id IS filing order — a real, committed, deterministic
+ * signal that exists on every task and needs no migration. It makes file placement irrelevant, which
+ * is the whole point.
+ *
+ * THE COST, NAMED RATHER THAN GLOSSED: this DISCARDS the monolith's positional signal. Position in
+ * `plan/tasks.yaml` was a soft priority an operator could express by moving a block, and after this
+ * change moving a block does nothing. That trade is deliberate — an implicit signal that only half
+ * the plan can express, and that silently starves the other half, is worse than a uniform one — but
+ * it is a real loss and an explicit `priority:` field would be the honest successor.
+ *
+ * DETERMINISM IS ABSOLUTE. The comparator reads only `id`, which is committed content. It never
+ * consults file order, mtime, or enumeration order. The numeric-then-lexicographic tiebreak makes it
+ * a TOTAL order, so two runs over the same plan always select the same task.
+ */
+export function dispatchOrder(tasks: readonly Task[]): Task[] {
+  return [...tasks].sort(compareDispatch);
+}
+
+/** Total order over task ids: leading integer ascending, then the raw id as a stable tiebreak. */
+export function compareDispatch(a: Task, b: Task): number {
+  const na = idOrdinal(a.id);
+  const nb = idOrdinal(b.id);
+  if (na !== nb) return na - nb;
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
+/** The first integer run in an id (`W1-T281` -> 281). Ids with none sort last, then lexicographically. */
+function idOrdinal(id: string): number {
+  const m = /(\d+)(?!.*\d)/.exec(id);
+  return m ? Number(m[1]) : Number.MAX_SAFE_INTEGER;
+}
+
 export function nextRunnable(plan: Plan, isMerged: MergedSet, opts: NextRunnableOpts = {}): Task | undefined {
-  for (const t of plan.tasks) {
+  for (const t of dispatchOrder(plan.tasks)) {
     if (isDispatchEligible(plan, t, isMerged, opts)) return t;
   }
   return undefined;
@@ -279,7 +324,7 @@ function isDispatchEligible(plan: Plan, t: Task, isMerged: MergedSet, opts: Next
  */
 export function runnableCandidates(plan: Plan, isMerged: MergedSet, limit: number, opts: NextRunnableOpts = {}): Task[] {
   const out: Task[] = [];
-  for (const t of plan.tasks) {
+  for (const t of dispatchOrder(plan.tasks)) {
     if (out.length >= limit) break;
     if (isDispatchEligible(plan, t, isMerged, opts)) out.push(t);
   }
