@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { relative, sep } from "node:path";
 import type { AcceptanceCriterion, Plan, Task } from "./plan.js";
-import { isDialectPrefixed, parseWhitelistedProof } from "./review.js";
+import { isDemonstrationProof, isDialectPrefixed, parseWhitelistedProof } from "./review.js";
 
 /**
  * Deterministic task linter (MASTER-PLAN §5C Layer A). NO LLM — a PURE function
@@ -445,6 +445,16 @@ export function proofShapeViolations(task: Task): LintViolation[] {
 // belongs at AUTHORING, not a third rescue lever on the review side — this
 // check REUSES review.ts's own predicate (never a reimplementation that could
 // drift from what the executor actually runs).
+//
+// W1-T277: a THIRD dialect, `demonstration: <what the operator must do>`,
+// is also never executed — but unlike the free prose above, that is not a
+// defect: it is an honest, on-the-record declaration that the proof is an
+// operator action with no executable form and never will be (a chaos drill,
+// a device recording, a live deploy). Legal ONLY on a `verify: human` task
+// (where it lints clean); refused outright on `verify: auto` (where the
+// identical prefix would be an escape hatch from the rule this check exists
+// to enforce). See the dedicated block below, checked BEFORE the general
+// dead-proof-floor logic.
 
 /** A near-miss dialect prefix — close enough to the real `unit test:`/`grep:`
  *  labels that it reads as an authoring TYPO rather than deliberate prose
@@ -485,6 +495,34 @@ export function proofDialectViolations(task: Task, opts: LintOpts = {}): LintVio
     const proof = c.proof ?? "";
     const trimmed = proof.trim();
     const claimHead = (c.claim ?? "").slice(0, 60);
+
+    // W1-T277: `demonstration: <what the operator must do>` names an operator
+    // action with no executable form and never will (a chaos drill, a device
+    // recording, a live deploy) — it is a proof the harness DECLINES to check,
+    // on the record, not one that failed to parse. Legal ONLY on a
+    // verify:human task, where declining to execute it is the entire point
+    // (lints clean, no violation at all — never even a warn). On a
+    // verify:auto task the identical prefix is an escape hatch from the
+    // executable-proof rule this check exists to enforce, so it is BLOCKED
+    // unconditionally here — that asymmetry is the dialect's whole safety
+    // property (W1-T277 design), so it holds regardless of `opts.proofDialect`
+    // (the legacy-backlog warn-only rollout knob applies to proofs that FAIL
+    // to parse, never to one that is illegal by construction).
+    if (isDemonstrationProof(trimmed)) {
+      if (task.verify === "human") return;
+      const head = trimmed.slice(0, 80) + (trimmed.length > 80 ? "…" : "");
+      violations.push({
+        check: "proof-dialect",
+        severity: "block",
+        message:
+          `criterion ${i + 1} ("${claimHead}") proof "${head}" uses \`demonstration:\` on a verify:${task.verify} ` +
+          "task — that dialect is legal ONLY on verify:human tasks (it declares an operator action the harness " +
+          "will never execute); on a verify:auto task it is an escape hatch from the executable-proof rule and " +
+          "is refused",
+      });
+      return;
+    }
+
     const whitelisted = parseWhitelistedProof(proof);
     if (whitelisted) {
       if (whitelisted.kind === "test" && whitelisted.nameFiltered && looksLikeNonTitleBody(whitelisted.label)) {

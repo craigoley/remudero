@@ -527,20 +527,42 @@ const UNSAFE_FENCE_CHARS_RE = /[;&`$<>\n]/;
  * mentioned mid-sentence. */
 const DIALECT_GREP_RE = /^grep:\s*(.+)$/i;
 const DIALECT_TEST_RE = /^unit test:\s*(.+)$/i;
+/** W1-T277: the third house dialect — `demonstration: <what the operator must
+ * do>` — is the honest OPPOSITE of `grep:`/`unit test:`: it names a proof the
+ * harness DECLINES to check, on the record, rather than one it mechanically
+ * runs. {@link parseWhitelistedProof} always refuses it (null, by
+ * construction — there is nothing to execute); legality is a `verify:human`-
+ * only restriction enforced by task-linter.ts, never here (review.ts has no
+ * opinion on a task's `verify` field). */
+const DIALECT_DEMO_RE = /^demonstration:\s*(.+)$/i;
 /** The project's own `test` script glob (package.json) — reused verbatim so a
  * name-filtered run scopes to exactly the suite `npm test` would run. */
 const TEST_GLOB = "test/**/*.test.ts";
 
 /**
- * True when a proof's TEXT is written in the house dialect — i.e. it was
- * WRITTEN to be mechanically executed, independent of whether
+ * True when a proof's TEXT is written in a recognised house dialect — either
+ * meant to be mechanically executed (`grep:`/`unit test:`, W1-T72) or an
+ * honest, on-the-record declaration that no execution will ever occur
+ * (`demonstration:`, W1-T277) — independent of whether
  * {@link parseWhitelistedProof} actually accepted it (an unsafe/unparseable
- * dialect body still returns null from that function). Used ONLY for the
+ * dialect body, or a `demonstration:` body which is never executable by
+ * construction, still returns null from that function). Used ONLY for the
  * `floorDegraded` legibility signal (W1-T72) — never affects execution.
  */
 export function isDialectPrefixed(proof: string): boolean {
   const trimmed = proof.trim();
-  return DIALECT_GREP_RE.test(trimmed) || DIALECT_TEST_RE.test(trimmed);
+  return DIALECT_GREP_RE.test(trimmed) || DIALECT_TEST_RE.test(trimmed) || DIALECT_DEMO_RE.test(trimmed);
+}
+
+/**
+ * True when a proof's TEXT is written in the `demonstration:` dialect
+ * (W1-T277) — the single source of truth task-linter.ts imports rather than
+ * redeclaring {@link DIALECT_DEMO_RE} itself, so the verify:human-only
+ * legality restriction it enforces can never drift from what review.ts
+ * actually recognises as this dialect.
+ */
+export function isDemonstrationProof(proof: string): boolean {
+  return DIALECT_DEMO_RE.test(proof.trim());
 }
 
 /** Sentence-level punctuation a bare test-name title would not carry: a
@@ -699,6 +721,12 @@ export function parseWhitelistedProof(proof: string): WhitelistedProof | null {
   if (dialectTest) return parseTestTarget(dialectTest[1]);
   const dialectGrep = trimmed.match(DIALECT_GREP_RE);
   if (dialectGrep) return parseDialectGrep(dialectGrep[1]);
+  // W1-T277: `demonstration:` is never executable, by construction — it names
+  // an operator action, not an artifact this process can observe. Refuse
+  // (null) rather than falling through to a legacy shape below; task-linter.ts
+  // is what decides whether that null is a defect (verify:auto) or the whole
+  // point (verify:human) — review.ts has no `verify` field to consult here.
+  if (DIALECT_DEMO_RE.test(trimmed)) return null;
 
   // Legacy strict shapes (W1-T65) — only reached when the proof carries no
   // dialect label at all.
