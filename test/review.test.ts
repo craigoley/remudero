@@ -1373,7 +1373,7 @@ test("parseWhitelistedProof: house-dialect 'grep: <pattern> in <path>' compiles 
   const wp = parseWhitelistedProof("grep: wx flag present in src/lib/config.ts");
   assert.ok(wp);
   assert.equal(wp!.kind, "grep");
-  assert.deepEqual(wp!.args, ["-rn", "--", "wx flag present", "src/lib/config.ts"]);
+  assert.deepEqual(wp!.args, ["-arn", "--", "wx flag present", "src/lib/config.ts"]);
 });
 
 test("W1-T219 (recon R-13(iii)): house-dialect 'grep: <pattern>' with NO 'in <path>' is refused (null), never a pathless repo-wide default — a pattern matching one incidental line anywhere is not evidence for a specific criterion", () => {
@@ -1388,7 +1388,7 @@ test("parseWhitelistedProof: a dialect grep whose pattern happens to look like a
   const wp = parseWhitelistedProof("grep: TODO in test/foo.test.ts");
   assert.ok(wp);
   assert.equal(wp!.kind, "grep");
-  assert.deepEqual(wp!.args, ["-rn", "--", "TODO", "test/foo.test.ts"]);
+  assert.deepEqual(wp!.args, ["-arn", "--", "TODO", "test/foo.test.ts"]);
 });
 
 test("parseWhitelistedProof: a dialect body containing a semicolon and a test-path SUBSTRING is NAME-FILTERED over the whole body, never silently reinterpreted as that substring's file (W1-T128 — no legacy fallthrough)", () => {
@@ -1627,11 +1627,11 @@ test("parseWhitelistedProof (W1-T128): a dialect grep whose pattern contains pro
   const withSemicolon = parseWhitelistedProof("grep: foo; rm -rf / in src/lib/config.ts");
   assert.ok(withSemicolon);
   assert.equal(withSemicolon!.kind, "grep");
-  assert.deepEqual(withSemicolon!.args, ["-rn", "--", "foo; rm -rf /", "src/lib/config.ts"]);
+  assert.deepEqual(withSemicolon!.args, ["-arn", "--", "foo; rm -rf /", "src/lib/config.ts"]);
 
   const withSubshell = parseWhitelistedProof("grep: $(whoami) in src/lib/config.ts");
   assert.ok(withSubshell);
-  assert.deepEqual(withSubshell!.args, ["-rn", "--", "$(whoami)", "src/lib/config.ts"]);
+  assert.deepEqual(withSubshell!.args, ["-arn", "--", "$(whoami)", "src/lib/config.ts"]);
 });
 
 test("parseWhitelistedProof (W1-T128): a dialect unit-test NAME with prose-style shell metacharacters EXECUTES (name-filtered) — same argv-array reasoning as the grep case", () => {
@@ -1702,7 +1702,7 @@ test("ACCEPTANCE (W1-T128 safety): a dialect-prefixed proof with prose-style she
     execProof: capture,
   });
   assert.equal(v.criteria[0].proof_exec, "executed_fail");
-  assert.deepEqual(received!.args, ["-rn", "--", "foo; rm -rf /", "src/lib/config.ts"]);
+  assert.deepEqual(received!.args, ["-arn", "--", "foo; rm -rf /", "src/lib/config.ts"]);
 });
 
 test("ACCEPTANCE (W1-T128 safety): the REAL remaining hazards — path traversal ('..') and a literal glob ('*') in a grep TARGET — still leave the proof not_executable and the executor NEVER called", () => {

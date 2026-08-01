@@ -47,6 +47,7 @@ export type LintCheck =
   | "proof-shape"
   | "proof-dialect"
   | "proof-resolvability"
+  | "proof-grep-safety"
   | "post-merge-amendment"
   | "provenance"
   | "call-site"
@@ -676,6 +677,143 @@ export function proofResolvabilityViolations(
   return violations;
 }
 
+// ── PROOF-GREP-SAFETY (W1-T287) ──────────────────────────────────────────────
+//
+// A `grep:` proof's pattern is compiled by `execWhitelistedProof` as
+// `grep -rn -- <pattern> <path>` — a BASIC REGULAR EXPRESSION, not a fixed
+// string. Nothing in the dialect docs, the authoring prompts, or CLAUDE.md says
+// so, and guidance circulating in this project ("`grep -F` is case-sensitive")
+// actively teaches the wrong model. The result is measurable: 1,952 verdicts in
+// the unioned ledger carry a FAILED grep proof, including `grep: loadPolicy in
+// src/lib/review.ts` failing four separate times on W1-T253.
+//
+// THE LIVE FIXTURE (PR #1071): a proof reading `grep: For a [call-site]
+// violation in <path>` had `[call-site]` read as a CHARACTER CLASS matching one
+// character from {c,a,l,-,s,i,t,e}. The pattern meant "For a X violation" and
+// could never match the literal text. Its author verified locally with
+// `grep -F` — a DIFFERENT MATCHER — and got a false green.
+//
+// THE SET IS MEASURED, NOT REMEMBERED. Determined by running both grep
+// implementations on this host against two discriminators: (1) does `aXb` match
+// the text `aQb`, which contains no `X`? (2) does `aXb` FAIL to match the
+// literal text `aXb`? Either ⇒ `X` is a metacharacter. Results:
+//
+//   * . ^ $ [   metacharacters      ] ( ) { } + ? | \   literal-safe
+//
+// `(` is NOT a BRE metacharacter (it is an ERE one), which matters because
+// PR #1071's own call-site proofs use `foo(` — rejecting it would break a rule
+// that merged the same day. `]` alone is literal-safe on both implementations,
+// so only `[` — which is what OPENS a bracket expression — is refused.
+//
+// IMPLEMENTATIONS DISAGREE, so the set is the UNION (⇒ the safe intersection of
+// accepted patterns). BSD grep 2.6.0-FreeBSD reads a mid-pattern `^` as a
+// literal; ugrep 7.5.0 (what `grep` actually resolves to on this host) reads it
+// as an anchor everywhere. A pattern whose meaning depends on which binary the
+// review host happens to run is not a proof, so anything special to EITHER is
+// refused.
+//
+// SEVERITY IS SPLIT ON THE FAILURE MODE, and the split is what the retrofit
+// measurement earned. Across all 313 tasks / 31 parseable `grep:` proofs:
+//   - `[ * ^ $` can make a proof NEVER match its intended text — a silent
+//     false FAIL, the #1071 class. Retrofit: 0 tasks. ⇒ BLOCK.
+//   - `.` merely matches MORE than intended (`a.b` also matches `aQb`) — the
+//     proof still finds its literal text, so the failure mode is over-breadth,
+//     not a false fail. Retrofit: 4 tasks (W1-T254, W1-T266, W1-T275, W1-T284),
+//     every one a dot inside an identifier (`panel-skills.js`,
+//     `sweep.post_review.attempt`). ⇒ WARN, so working proofs are not stranded.
+// Blocking `.` would have forced four rewrites of proofs that function; warning
+// on `[` would have let the #1071 defect through again.
+//
+// AN ESCAPED METACHARACTER IS LEGITIMATE and is accepted: `\.` matches a literal
+// dot and NOT any character (verified on both implementations). But a backslash
+// that OPENS a BRE construct — `\(`, `\)`, `\{`, `\}` (grouping and intervals,
+// both confirmed working) — is itself a metacharacter and is refused.
+
+/** BRE metacharacters whose presence can make a pattern NEVER match its literal
+ *  text — the silent-false-FAIL class. Blocking; measured retrofit 0. */
+const BRE_BLOCKING_METACHARS: ReadonlyArray<string> = ["[", "*", "^", "$"];
+
+/** BRE metacharacters that only WIDEN a match. The proof still finds its own
+ *  text, so this warns rather than stranding the 4 tasks that use it. */
+const BRE_WARNING_METACHARS: ReadonlyArray<string> = ["."];
+
+/** Characters that become a BRE construct when a backslash precedes them —
+ *  grouping and intervals. `\.`-style escapes are NOT here: those are literals. */
+const BRE_CONSTRUCT_AFTER_BACKSLASH: ReadonlyArray<string> = ["(", ")", "{", "}"];
+
+/**
+ * The unescaped BRE metacharacters in `pattern`, split by severity. Walks the
+ * string rather than regex-matching it, because the one thing that must be
+ * exactly right here is which characters an escape consumes — and expressing
+ * that as a regex over a regex is how this class of bug is born.
+ */
+export function breMetacharsIn(pattern: string): { blocking: string[]; warning: string[] } {
+  const blocking: string[] = [];
+  const warning: string[] = [];
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i];
+    if (ch === "\\") {
+      const next = pattern[i + 1];
+      if (next === undefined) {
+        blocking.push("\\"); // a dangling escape is undefined behaviour across implementations
+        break;
+      }
+      if (BRE_CONSTRUCT_AFTER_BACKSLASH.includes(next)) blocking.push("\\" + next);
+      i++; // the escape consumes its next char — `\.` is a LITERAL dot, legitimate
+      continue;
+    }
+    if (BRE_BLOCKING_METACHARS.includes(ch)) blocking.push(ch);
+    else if (BRE_WARNING_METACHARS.includes(ch)) warning.push(ch);
+  }
+  return { blocking: [...new Set(blocking)], warning: [...new Set(warning)] };
+}
+
+/** Every criterion whose `grep:` proof carries an unescaped BRE metacharacter. */
+export function proofGrepSafetyViolations(task: Task): LintViolation[] {
+  const violations: LintViolation[] = [];
+  for (const [i, c] of (task.acceptance ?? []).entries()) {
+    const proof = typeof c.proof === "string" ? c.proof : "";
+    const m = proof.trim().match(/^grep:\s*([\s\S]*)$/i);
+    if (!m) continue;
+    // Same split parseDialectGrep uses: an " in " followed by a PATH-LIKE trailing token.
+    // NO FALLBACK TO THE WHOLE BODY. A path-less `grep:` is REFUSED outright by parseDialectGrep
+    // (review.ts), so it never executes and has no pattern to be unsafe — treating its prose as a
+    // pattern warned about a dot in text nobody will ever grep. Measured: that fallback produced
+    // 2 spurious warnings (W1-T66, W1-T90) on proofs the real parser rejects, both of which
+    // proof-dialect already flags for the actual defect. This check polices only proofs that RUN.
+    const split = m[1].match(/^([\s\S]*?)\s+in\s+(\S*[./]\S*)\s*$/i);
+    if (!split) continue;
+    const pattern = split[1].trim();
+    if (!pattern) continue;
+    const { blocking, warning } = breMetacharsIn(pattern);
+    const where = `criterion ${i + 1} ("${(c.claim ?? "").slice(0, 56)}")`;
+    if (blocking.length) {
+      violations.push({
+        check: "proof-grep-safety",
+        severity: "block",
+        message:
+          `${where} \`grep:\` pattern "${pattern.slice(0, 70)}" contains unescaped BRE ` +
+          `metacharacter(s) ${blocking.map((x) => `\`${x}\``).join(", ")} — the executor runs ` +
+          `\`grep -rn -- <pattern> <path>\`, a REGEX, so this may never match the literal text ` +
+          `you mean (PR #1071: \`[call-site]\` was read as a character class). Escape it (\\${blocking[0]}) ` +
+          `or reword the pattern. Verify with \`rmd check-proof\`, never with \`grep -F\` — that is a ` +
+          `different matcher and reports a false green.`,
+      });
+    }
+    if (warning.length) {
+      violations.push({
+        check: "proof-grep-safety",
+        severity: "warn",
+        message:
+          `${where} \`grep:\` pattern "${pattern.slice(0, 70)}" contains an unescaped \`.\`, which ` +
+          `matches ANY character in a BRE — the proof still finds its own text but would also ` +
+          `match text you did not intend. Escape it (\\.) to mean a literal dot.`,
+      });
+    }
+  }
+  return violations;
+}
+
 // ── POST-MERGE-AMENDMENT (§5C, W1-T180) ──────────────────────────────────────
 //
 // An amendment to an ALREADY-MERGED task's acceptance criteria is unreachable by
@@ -1003,6 +1141,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...proofShapeViolations(task));
   violations.push(...proofDialectViolations(task, opts));
   violations.push(...proofResolvabilityViolations(task, opts));
+  violations.push(...proofGrepSafetyViolations(task));
   violations.push(...postMergeAmendmentViolations(task, opts));
   violations.push(...callSiteViolations(task, opts));
   violations.push(...monolithFilingViolations(task, opts));

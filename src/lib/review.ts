@@ -675,7 +675,23 @@ function parseDialectGrep(body: string): WhitelistedProof | null {
   // file.ts` behaves identically to `grep -n pat file.ts`) and is what
   // makes a DIRECTORY target work at all — always pass it so "in <path>"
   // covers a file OR a directory without a second branch.
-  return { kind: "grep", command: "grep", args: ["-rn", "--", pattern, path], label: `${pattern} in ${path}` };
+  // "-a" (treat binary as text) makes the verdict INDEPENDENT OF THE HOST'S GREP. Without it a
+  // target carrying a raw NUL byte is judged "binary" and the two implementations DISAGREE —
+  // MEASURED on this host against the same file and pattern: BSD grep 2.6.0-FreeBSD exits 0 with
+  // "Binary file … matches", ugrep 7.5.0 exits 1 with no output. So `grep: export function
+  // callSiteViolations in src/lib/task-linter.ts` (PR #1071) passes or fails according to which
+  // binary the review host happens to resolve, which is not a proof. With "-a" both exit 0 and
+  // print the matching line. Exactly 2 of this repo's 96 source files carry a NUL byte, and
+  // task-linter.ts — the file this very check lives in — is one of them.
+  //
+  // DOWNSIDE, bounded: "-a" can only widen. It cannot invent a match — the pattern's bytes must
+  // still occur in the file — and it changes nothing for a NUL-free target (verified). The one
+  // new possibility is a genuinely binary target whose bytes happen to contain the pattern, which
+  // requires the proof's author to have named a binary path explicitly. Note this is not even a
+  // widening relative to BSD grep, which already reported exit 0 for that file; it is ugrep that
+  // was silently reporting "no match", and "-a" removes the disagreement rather than adding
+  // matches.
+  return { kind: "grep", command: "grep", args: ["-arn", "--", pattern, path], label: `${pattern} in ${path}` };
 }
 
 /**
