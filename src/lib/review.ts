@@ -1678,6 +1678,47 @@ export function claimsChangesetContext(report: string, index: number): boolean {
   return CHANGESET_CONTEXT_RE.test(before.slice(start + 1));
 }
 
+/**
+ * Is a `no <token>` claim ABOUT THE CHANGESET? `rest` is the report text immediately AFTER the
+ * matched `no <token>`.
+ *
+ * WHY THIS IS NOT {@link claimsChangesetContext}. The obvious fix — reuse the helper #1077 built —
+ * is wrong here, and measurably so. That helper looks BACKWARD, because a count claim carries its
+ * context before it ("This PR changes exactly one file"). A `no <token>` claim carries it AFTER.
+ * Measured against the real bodies:
+ *
+ *   #974  "Plan-only, no code touched | `git show --stat` lists three files"   backward ⇒ SILENT ✗
+ *   #1025 `the body's own "data-only: no code" claim false`                     backward ⇒ SILENT ✗
+ *   FP    "This change introduces no code duplication anywhere."                backward ⇒ FIRE   ✗
+ *
+ * Backward-looking would have broken BOTH preservation cases and still fired on the false positive,
+ * because "This change introduces …" contains a changeset word while "Data-only: …" does not. The
+ * direction is the whole point.
+ *
+ * THE RULE, in one sentence: a `no <token>` claim counts only when the TOKEN ENDS THE CLAIM — what
+ * immediately follows is punctuation, end of line, or a changeset word — because an ordinary word
+ * following the token makes the token a MODIFIER of that word ("no code DUPLICATION", "no src/
+ * DIRECTORY convention") rather than the thing claimed absent.
+ *
+ * IT IS A HEURISTIC ABOUT ENGLISH COMPOUND NOUNS, and stating that plainly matters. "no code
+ * changes" and "no code duplication" are grammatically identical; only the head noun differs, so
+ * the classifier is the head-noun test and nothing deeper. It fails toward SILENCE — "no code was
+ * changed" reads as a modifier and stays silent, a missed contradiction — which is the direction
+ * this function's own doc demands: "ANYTHING THIS CANNOT DECIDE IS SILENCE, NOT A VERDICT … A
+ * checker that guesses at natural language would be a worse tripwire than the gap it closes."
+ * A missed contradiction costs one bad PR body; a false positive strands a correct PR indefinitely,
+ * because a PR that files no task logs `sweep.fix.no_task` every tick and nothing ever retries it.
+ *
+ * Scoped to the SAME LINE (`[ \t]*`, never `\s*`): a word on the next line belongs to another
+ * sentence and says nothing about this claim — the same reasoning that keeps
+ * {@link claimsChangesetContext} inside its own sentence.
+ */
+export function noClaimIsAboutChangeset(rest: string): boolean {
+  const next = /^[ \t]*([A-Za-z][A-Za-z0-9_-]*)/.exec(rest);
+  if (!next) return true; // punctuation, end of line, or end of input — the token IS the claim
+  return CHANGESET_CONTEXT_RE.test(next[1]);
+}
+
 /** Does `file` fall under the claimed-absent `path` (an exact file, or a directory prefix)? */
 function fileUnderClaimedPath(file: string, path: string): boolean {
   const normalized = path.replace(/\/$/, "");
@@ -1755,6 +1796,11 @@ export function bodyContradictsDiff(report: string, diffFiles: string[]): Change
   const noPathRe = /\bno\s+([A-Za-z0-9_./-]+)/gi;
   for (const m of report.matchAll(noPathRe)) {
     const token = m[1].replace(/[,.\s]+$/, "");
+    // ANCHOR (the sibling of #1077's, in the other direction — see noClaimIsAboutChangeset).
+    // Predicate (b) was never anchored, and fired six times today on prose whose subject was not
+    // the changeset: "This change introduces no code duplication anywhere" produced `claim: "no
+    // code"` against any source-touching diff, in a repo that runs a jscpd duplication gate.
+    if (!noClaimIsAboutChangeset(report.slice((m.index ?? 0) + m[0].length))) continue;
     let violators: string[];
     if (token.toLowerCase() === "code") {
       violators = diffFiles.filter((f) => f.startsWith("src/") || isTestPath(f));
