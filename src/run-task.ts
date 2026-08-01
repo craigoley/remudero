@@ -102,6 +102,7 @@ import { makeTempDir, sweepStaleTempDirs, withTempDir } from "./lib/tmp.js";
 import { reapWorkerScratch, sweepStaleWorkerScratch } from "./lib/worker-scratch.js";
 import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateServeLaunchdPlist, generateSupervisorLaunchdPlist, launchctlGuiTarget, launchdPlistPath, SERVE_LABEL, serveLogPaths, SUPERVISOR_LABEL } from "./lib/launchd.js";
 import { realDeployDeps, requestDeploy, runDeployCycle } from "./lib/deployer.js";
+import { buildStatusBoard, renderStatusBoardText, type ServiceName } from "./lib/status-board.js";
 import { buildDigest, buildMarkerAwareDigest, consoleCardUrl, sendDigest, sendMarkerAwareDigest, sendRundown } from "./lib/digest.js";
 import { createLastSeenStore, hashToken, lastSeenPath } from "./lib/last-seen.js";
 import {
@@ -7969,6 +7970,59 @@ export async function upCommand(rest: string[], deps: UpDeps = {}): Promise<numb
   return ok ? 0 : 1;
 }
 
+/** Injectable seam for {@link statusCommand} — every default is the real, production behaviour;
+ *  a test overrides just enough to avoid `loadConfig()`'s `which claude` shell-out and any real
+ *  launchd query, the same "swap the edges, keep the middle real" shape as {@link DownDeps}. */
+export interface StatusDeps {
+  loadConfig?: () => Config;
+  queryService?: (service: ServiceName) => { running: boolean; pid: number | null };
+  ledgerPathFor?: (config: Config) => string;
+  repoRoot?: string;
+  buildStatusBoard?: typeof buildStatusBoard;
+  renderStatusBoardText?: typeof renderStatusBoardText;
+  out?: (line: string) => void;
+  err?: (line: string) => void;
+}
+
+/**
+ * `rmd status [--json]` — "is it running" from LOCAL truth only (W1-T279, half 1 of 2,
+ * MASTER-PLAN §7/§5D). LIVENESS (daemon/serve/deploy-supervisor process state + boot time +
+ * running HEAD vs `origin/main` STALE flag + crash-loop), LATCHES (every state marker with its
+ * age + stated consequence), LAST CYCLE (the newest `daemon.summary`) — ONE read model
+ * (lib/status-board.ts's `buildStatusBoard`), rendered as text by default or as the SAME model
+ * verbatim under `--json`. This command is a THIN call site: it resolves the one thing that
+ * lives at the CLI layer (the launchd process query, `queryLaunchdService` — lib/ never shells
+ * to launchd itself) and hands everything else to the pure builder. Read-only: never writes a
+ * marker, never spawns anything, always exits 0 (bad args aside) — offline-safe by construction
+ * (no `git fetch`, no `gh` call, no network read at all).
+ */
+export async function statusCommand(rest: string[], deps: StatusDeps = {}): Promise<number> {
+  const out = deps.out ?? ((l: string) => console.log(l));
+  const err = deps.err ?? ((l: string) => console.error(l));
+  const badArg = unknownArgError("status", rest, [], ["--json"]);
+  if (badArg) {
+    err(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const config = (deps.loadConfig ?? loadConfig)();
+  const uid = realUid();
+  const queryService =
+    deps.queryService ??
+    ((service: ServiceName): { running: boolean; pid: number | null } => {
+      const label = service === "daemon" ? DAEMON_LABEL : service === "serve" ? SERVE_LABEL : SUPERVISOR_LABEL;
+      const state = queryLaunchdService(label, uid);
+      // "running" means a live pid, not merely "loaded" — a bootstrapped-but-not-spawned job
+      // answers "is it running" with no, exactly like an unloaded one.
+      return { running: state.pid !== null, pid: state.pid };
+    });
+  const buildBoard = deps.buildStatusBoard ?? buildStatusBoard;
+  const render = deps.renderStatusBoardText ?? renderStatusBoardText;
+  const ledgerPath = (deps.ledgerPathFor ?? ledgerPathFor)(config);
+  const model = buildBoard(config.root, ledgerPath, { queryService, repoDir: deps.repoRoot ?? repoRoot });
+  out(rest.includes("--json") ? JSON.stringify(model, null, 2) : render(model));
+  return 0;
+}
+
 // ── rmd serve — the operator console FRONT DOOR (W1-T139, MASTER-PLAN §7/§7B) ──
 //
 // Real business logic lives entirely in the four already-proven modules lib/serve.ts
@@ -12253,6 +12307,11 @@ const COMMANDS: readonly CommandSpec[] = [
       "rmd up [--port <n>] [--host <addr>] [--allow-off-main]   # full resume (W1-T169): runs install-freshness FIRST (W1-T151 — a lockfile-changing pull triggers `npm ci` before anything starts), REFUSES to resume an off-main checkout unless --allow-off-main is given, loads the daemon launchd service, confirms/starts the serve launchd service, and prints a resume report (daemon pid, the console URL WITH its READ token via `rmd console-url`, the in-flight/queued head, needs-human count). IDEMPOTENT: already-up verifies + reports the running state, never a double start.",
   },
   {
+    name: "status",
+    usage:
+      "rmd status [--json]   # W1-T279: ONE verb answering 'is it running' from LOCAL truth only (no network) — LIVENESS (daemon/serve/deploy-supervisor running/pid/boot-time, running HEAD vs origin/main with a STALE flag, crash-loop), LATCHES (every state marker — STOP/PAUSE/QUIET_HOURS/DEPLOY_FAILED/DEPLOY_AUTO/inflight locks/pending kicks/drain-now — with its age and stated consequence), LAST CYCLE (the newest daemon.summary); each section ends with at most one next action. --json emits the exact same read model the text renders. Read-only: writes nothing, spawns nothing, exits 0 even with the daemon down and the network off.",
+  },
+  {
     name: "sweep",
     usage:
       "rmd sweep [--repo <name>] [--dry-run]   # level-triggered PR-pipeline reconciler (W1-T77, P22): re-derive EVERY open PR's disposition from observed state and take the ONE gated action — mergeable->arm auto-merge; blocked-fixable->W1-T76 fix rung; stale/superseded->close-with-reason; blocked-ambiguous->the W1-T78 clarification-question rung (a specific, decidable operator question to the §2 backlog + escalate() as transport, never a generic needs-human). Idempotent (a second sweep over unchanged state acts on nothing). The daemon runs this every poll; --dry-run previews dispositions and takes nothing.",
@@ -12690,6 +12749,10 @@ export async function main(
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(await upCommand(rest)) cannot carry a DA hit without forking the process; upCommand's own logic — install-freshness-first, the off-main refuse, the idempotent load sequencing, and the resume report — is unit-tested in test/rmd-down-up.test.ts (same irreducible-glue shape as the sibling console-url/away dispatch cases).
   if (cmd === "up") {
     process.exit(await upCommand(rest));
+  }
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await statusCommand(rest)) cannot carry a DA hit without forking the process; statusCommand's own logic (arg validation, the queryService closure, --json vs text) plus the read model it calls (buildStatusBoard/renderStatusBoardText) are unit-tested in test/status-board.test.ts (same irreducible-glue shape as the sibling console-url/away/down/up dispatch cases).
+  if (cmd === "status") {
+    process.exit(await statusCommand(rest));
   }
   if (cmd === "sweep") {
     process.exit(await sweepCommand(rest));
