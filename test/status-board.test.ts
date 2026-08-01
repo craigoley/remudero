@@ -11,6 +11,9 @@ import { acquireInflightLock } from "../src/lib/inflight-lock.js";
 import { deployAutoPath, deployFailedAlertPath } from "../src/lib/deployer.js";
 import { statusCommand } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
+import { loadPlanFromYaml, type Plan } from "../src/lib/plan.js";
+import { DEFAULT_MAX_TASK_DISPATCHES, type GitHub } from "../src/lib/status.js";
+import type { DraftCache, Proposal } from "../src/lib/inbox.js";
 
 // ── W1-T279: rmd status, half 1 of 2 — ONE read model over LOCAL truth (LIVENESS / LATCHES /
 // LAST CYCLE), rendered as text or --json from the SAME buildStatusBoard() result. Every test
@@ -423,4 +426,297 @@ test("statusCommand: --json emits a JSON-parseable model with the SAME latch row
     parsed.latches.rows.some((r: { name: string }) => r.name === "STOP"),
     `expected a STOP latch row, got: ${lines[0]}`,
   );
+});
+
+// ── W1-T280: rmd status, half 2 of 2 — the DERIVED sections (BLOCKERS BY CLASS, QUEUE HEAD,
+// INBOX, HEADROOM) APPEND to the SAME model W1-T279 established above. Every test below is
+// still a plain object in, a plain object out: no real `gh`, no real git remote, no real wall
+// clock — every new seam status-board.ts exposes is injected exactly like the ones above.
+
+const PLAN_YAML = (extra = "") => `
+- id: W1-T910
+  title: a queue-head candidate
+  repo: remudero
+  type: implement
+  verify: auto
+  depends_on: []
+  status: queued
+${extra}`;
+
+function plan(extra = ""): Plan {
+  return loadPlanFromYaml(PLAN_YAML(extra), "fixture");
+}
+
+/** A GitHub gateway fixture carrying only the four REQUIRED {@link GitHub} methods, every one
+ *  answering "no evidence" — the ordinary "not merged, nothing found" reachable-gateway shape.
+ *  `readFailed`/`readFailureReason` default to a REACHABLE gateway; override to simulate an
+ *  outage. */
+function fakeGithub(overrides: Partial<GitHub> = {}): GitHub {
+  return {
+    prByRef: () => null,
+    findMergedByTrailer: () => null,
+    headRefName: () => undefined,
+    prBody: () => undefined,
+    readFailed: () => false,
+    ...overrides,
+  };
+}
+
+function writeLedger(lines: Record<string, unknown>[]): string {
+  const ledgerPath = join(mkdtempSync(join(tmpdir(), "status-board-ledger-")), "ledger.ndjson");
+  writeFileSync(ledgerPath, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+  return ledgerPath;
+}
+
+// ── ACCEPTANCE 1: BLOCKERS BY CLASS — circuit-broken (+ reset ETA) and dispatch.indeterminate
+// (+ gh-window note) render as DISTINCT classes off the EXISTING breaker/ledger signals, never
+// one generic "blocked" bucket ─────────────────────────────────────────────────────────────────
+
+test("buildStatusBoard: BLOCKERS BY CLASS — circuit-broken and dispatch.indeterminate render as DISTINCT classes, each reading off the existing ledger signal, never a generic 'blocked' bucket", () => {
+  const runStarts = Array.from({ length: DEFAULT_MAX_TASK_DISPATCHES }, (_, i) =>
+    ledgerLine({ step: "run.start", task_id: "W1-T900", run_id: `W1-T900-${i}` }),
+  );
+  const ledgerPath = writeLedger([...runStarts, ledgerLine({ step: "dispatch.indeterminate", task_id: "W1-T901" })]);
+
+  const model = buildStatusBoard(tmpRoot(), ledgerPath, baseDeps());
+
+  const circuitBroken = model.blockers.rows.find((r) => r.kind === "circuit_broken" && r.taskId === "W1-T900");
+  assert.ok(circuitBroken, "W1-T900 must render as a circuit_broken row");
+  assert.equal(circuitBroken!.kind, "circuit_broken");
+  if (circuitBroken!.kind === "circuit_broken") {
+    assert.equal(circuitBroken!.dispatchCount, DEFAULT_MAX_TASK_DISPATCHES);
+    assert.equal(circuitBroken!.maxDispatches, DEFAULT_MAX_TASK_DISPATCHES);
+    assert.match(circuitBroken!.resetNote, /fresh owned PR/);
+  }
+
+  const indeterminate = model.blockers.rows.find((r) => r.kind === "indeterminate" && r.taskId === "W1-T901");
+  assert.ok(indeterminate, "W1-T901 must render as an indeterminate row");
+  if (indeterminate!.kind === "indeterminate") {
+    assert.match(indeterminate!.ghWindowNote, /gateway.*window/i);
+    assert.match(indeterminate!.ghWindowNote, /not a claim that the task itself is broken/);
+  }
+
+  // Never one generic bucket: the two rows are distinguishable by `kind`, and no row is tagged
+  // with a bare "blocked" that erases which class it belongs to.
+  assert.notEqual(circuitBroken!.kind, indeterminate!.kind);
+
+  assert.match(model.blockers.nextAction ?? "", /W1-T900/);
+  const text = renderStatusBoardText(model);
+  assert.match(text, /circuit-broken : W1-T900/);
+  assert.match(text, /indeterminate {2}: W1-T901/);
+});
+
+// ── ACCEPTANCE 2 (the four-re-dispatch falsifier): a task re-attempted every cycle appears in
+// QUEUE HEAD flagged with its attempt count AND its observed per-cycle cost ───────────────────
+
+test("buildStatusBoard: QUEUE HEAD — the four-re-dispatch falsifier: a perpetually-re-attempted task is flagged with its attempt count AND its observed per-cycle cost, so repeated spend cannot stay invisible", () => {
+  const attempts = DEFAULT_MAX_TASK_DISPATCHES - 1; // one dispatch away from tripping the breaker
+  const lines: Record<string, unknown>[] = [];
+  for (let i = 0; i < attempts; i++) {
+    lines.push(ledgerLine({ step: "run.start", task_id: "W1-T910", run_id: `W1-T910-${i}` }));
+    lines.push(
+      ledgerLine({ step: "verdict", task_id: "W1-T910", run_id: `W1-T910-${i}`, verdict: "blocked_review", cost_usd: 1 + i }),
+    );
+  }
+  const ledgerPath = writeLedger(lines);
+
+  const model = buildStatusBoard(tmpRoot(), ledgerPath, baseDeps({ plan: plan(), github: fakeGithub() }));
+
+  assert.equal(model.queueHead.unknownReason, undefined);
+  const row = model.queueHead.rows.find((r) => r.taskId === "W1-T910");
+  assert.ok(row, "W1-T910 must appear in QUEUE HEAD");
+  assert.equal(row!.attempts, attempts);
+  assert.equal(row!.perpetual, true);
+  assert.equal(row!.observedPerCycleCostUsd, attempts); // the LAST run's own cost_usd (1 + (attempts-1))
+
+  assert.match(model.queueHead.nextAction ?? "", /W1-T910/);
+  assert.match(model.queueHead.nextAction ?? "", new RegExp(`${attempts} times`));
+
+  const text = renderStatusBoardText(model);
+  assert.match(text, /W1-T910.*PERPETUAL.*attempts 4/);
+});
+
+test("buildStatusBoard: QUEUE HEAD — a task with only ONE dispatch is NOT flagged perpetual, and carries no fabricated cost", () => {
+  const ledgerPath = writeLedger([ledgerLine({ step: "run.start", task_id: "W1-T910", run_id: "W1-T910-0" })]);
+  const model = buildStatusBoard(tmpRoot(), ledgerPath, baseDeps({ plan: plan(), github: fakeGithub() }));
+  const row = model.queueHead.rows.find((r) => r.taskId === "W1-T910");
+  assert.ok(row);
+  assert.equal(row!.attempts, 1);
+  assert.equal(row!.perpetual, false);
+  assert.equal(row!.observedPerCycleCostUsd, undefined);
+});
+
+// ── ACCEPTANCE 3: a blocked item whose reason the system never named renders as "reason not
+// named" rather than blank, and no blocker class is minted here that the named-reason
+// vocabulary (sweep.ts's own `disposition`) does not already carry ────────────────────────────
+
+test("buildStatusBoard: BLOCKERS BY CLASS — blocked PRs RENDER sweep.ts's own named reason; a line with no `reason` field renders 'reason not named', never a blank; an ordinary 'mergeable' PR never renders as blocked", () => {
+  const ledgerPath = writeLedger([
+    ledgerLine({ step: "sweep.disposed", task_id: "W1-T50", pr_number: 100, pr_url: "https://x/100", disposition: "blocked-fixable", reason: "required checks red — ci-log fix, strike 1/3", acted: true }),
+    // No `reason` field at all, and no real owning task (sweep.ts's own `pr.taskId ?? "SWEEP"`
+    // fallback) — the honest "nobody named this" case.
+    ledgerLine({ step: "sweep.disposed", task_id: "SWEEP", pr_number: 101, pr_url: "https://x/101", disposition: "blocked-ambiguous", acted: false }),
+    // An ordinary progressing PR must NEVER show up as a blocker.
+    ledgerLine({ step: "sweep.disposed", task_id: "W1-T51", pr_number: 102, pr_url: "https://x/102", disposition: "mergeable", reason: "arming auto-merge", acted: true }),
+  ]);
+
+  const model = buildStatusBoard(tmpRoot(), ledgerPath, baseDeps());
+
+  const named = model.blockers.rows.find((r) => r.kind === "blocked_pr" && r.prNumber === 100);
+  assert.ok(named);
+  if (named!.kind === "blocked_pr") {
+    assert.equal(named!.taskId, "W1-T50");
+    assert.equal(named!.disposition, "blocked-fixable"); // sweep.ts's OWN vocabulary, verbatim
+    assert.equal(named!.reason, "required checks red — ci-log fix, strike 1/3");
+  }
+
+  const unnamed = model.blockers.rows.find((r) => r.kind === "blocked_pr" && r.prNumber === 101);
+  assert.ok(unnamed);
+  if (unnamed!.kind === "blocked_pr") {
+    assert.equal(unnamed!.reason, "reason not named"); // never a blank
+  }
+
+  assert.equal(
+    model.blockers.rows.find((r) => r.kind === "blocked_pr" && r.prNumber === 102),
+    undefined,
+    "an ordinary 'mergeable' disposition must never render as a blocker",
+  );
+
+  const text = renderStatusBoardText(model);
+  assert.match(text, /blocked PR {5}: #100 \(W1-T50\) \[blocked-fixable\]/);
+  assert.match(text, /blocked PR {5}: #101 \[blocked-ambiguous\] — reason not named/);
+});
+
+// ── ACCEPTANCE 4: HEADROOM renders the newest daemon.headroom telemetry WITH enforcement on/off
+// from the SAME switch the daemon reads; absent telemetry renders "no telemetry yet", never 0% ─
+
+test("buildStatusBoard: HEADROOM — no daemon.headroom line ever ledgered renders 'no headroom telemetry yet', never a fabricated 0%", () => {
+  const model = buildStatusBoard(tmpRoot(), join(tmpdir(), "does-not-exist.ndjson"), baseDeps());
+  assert.equal(model.headroom.found, false);
+  assert.equal(model.headroom.telemetry, undefined);
+  assert.equal(model.headroom.enforced, true); // the product default (governor ON) when unspecified
+
+  const text = renderStatusBoardText(model);
+  assert.match(text, /no headroom telemetry yet/);
+  assert.doesNotMatch(text, /0%/);
+});
+
+test("buildStatusBoard: HEADROOM — the newest daemon.headroom line renders its telemetry, and enforcement reads off the SAME switch the daemon itself reads (not off the telemetry line)", () => {
+  const ledgerPath = writeLedger([
+    ledgerLine({
+      step: "daemon.headroom",
+      ts: "2026-08-01T09:00:00.000Z",
+      window: "session (5h)",
+      percent_used: 10,
+      limit_pct: 90,
+      resets_at: "2026-08-01T14:00:00.000Z",
+      enforced: true,
+    }),
+    ledgerLine({
+      step: "daemon.headroom",
+      ts: "2026-08-01T11:45:00.000Z",
+      window: "session (5h)",
+      percent_used: 42,
+      limit_pct: 90,
+      resets_at: "2026-08-01T17:00:00.000Z",
+      enforced: false,
+      note: "headroom governor disabled (ruling a4153e) — telemetry only, dispatch not gated",
+    }),
+  ]);
+
+  // The switch says OFF even though the newest ledgered line's own `enforced` field says true
+  // for an OLDER line — the model must read the SWITCH, never trust a stale ledgered copy.
+  const model = buildStatusBoard(tmpRoot(), ledgerPath, baseDeps({ resolveHeadroomEnabled: () => false }));
+
+  assert.equal(model.headroom.found, true);
+  assert.equal(model.headroom.enforced, false);
+  assert.deepEqual(model.headroom.telemetry, {
+    window: "session (5h)",
+    percentUsed: 42,
+    limitPct: 90,
+    resetsAt: "2026-08-01T17:00:00.000Z",
+    note: "headroom governor disabled (ruling a4153e) — telemetry only, dispatch not gated",
+  });
+  assert.equal(model.headroom.ts, "2026-08-01T11:45:00.000Z");
+  assert.equal(model.headroom.ageMs, NOW_MS - Date.parse("2026-08-01T11:45:00.000Z"));
+  assert.match(model.headroom.nextAction ?? "", /OFF/);
+
+  const text = renderStatusBoardText(model);
+  assert.match(text, /enforcement : OFF/);
+  assert.match(text, /used {8}: 42% \(limit 90%\)/);
+});
+
+// ── ACCEPTANCE 5: with the GitHub gateway unreachable the derived sections render a stated
+// UNKNOWN and the LOCAL sections still render in full — the board never fails closed on a
+// network outage, and never fetches per row ────────────────────────────────────────────────────
+
+test("buildStatusBoard: GitHub gateway unreachable ⇒ QUEUE HEAD/INBOX render a stated unknown; LIVENESS/LATCHES/LAST CYCLE and BLOCKERS' ledger-only classes still render in FULL, never a throw", () => {
+  const root = tmpRoot();
+  requestPause(root, "operator break"); // proves LATCHES still renders in full
+  const runStarts = Array.from({ length: DEFAULT_MAX_TASK_DISPATCHES }, (_, i) =>
+    ledgerLine({ step: "run.start", task_id: "W1-T900", run_id: `W1-T900-${i}` }),
+  );
+  const ledgerPath = writeLedger([
+    ...runStarts,
+    ledgerLine({ step: "daemon.boot", head_sha: "a".repeat(40), ts: "2026-08-01T11:00:00.000Z" }),
+    ledgerLine({ step: "daemon.summary", attempted: ["W1-T1"], merged: [], stopReason: "max_reached", costUsd: 1, ticks: 2 }),
+  ]);
+  const unreachable = fakeGithub({ readFailed: () => true, readFailureReason: () => "transport" });
+
+  assert.doesNotThrow(() => {
+    const model = buildStatusBoard(root, ledgerPath, baseDeps({ plan: plan(), github: unreachable }));
+
+    // LOCAL sections (W1-T279) render in FULL, completely unaffected.
+    assert.ok(model.latches.rows.some((r) => r.name === "PAUSE"));
+    assert.equal(model.liveness.services.length, 3);
+    assert.equal(model.lastCycle.found, true);
+
+    // BLOCKERS' ledger-only classes are UNAFFECTED — GitHub is decoration, never a gate.
+    assert.ok(model.blockers.rows.some((r) => r.kind === "circuit_broken" && r.taskId === "W1-T900"));
+
+    // The two GitHub-dependent DERIVED sections degrade to a stated unknown — never empty-but-silent.
+    assert.match(model.queueHead.unknownReason ?? "", /unreachable/);
+    assert.match(model.queueHead.unknownReason ?? "", /transport/);
+    assert.deepEqual(model.queueHead.rows, []);
+    assert.match(model.inbox.unknownReason ?? "", /unreachable/);
+    assert.equal(model.inbox.readyCount, 0);
+    assert.equal(model.inbox.notReadyCount, 0);
+
+    const text = renderStatusBoardText(model);
+    assert.match(text, /PAUSE/); // LATCHES block still present
+    assert.match(text, /unknown — .*unreachable/); // QUEUE HEAD / INBOX name the outage
+    JSON.stringify(model);
+  });
+});
+
+test("buildStatusBoard: no plan/tasks.yaml available ⇒ QUEUE HEAD/INBOX render a stated unknown, never a throw (mirrors the offline/no-checkout case every prior test in this file already exercises via baseDeps())", () => {
+  const model = buildStatusBoard(tmpRoot(), join(tmpdir(), "does-not-exist.ndjson"), baseDeps());
+  assert.match(model.queueHead.unknownReason ?? "", /plan\/tasks\.yaml/);
+  assert.match(model.inbox.unknownReason ?? "", /plan\/tasks\.yaml/);
+});
+
+// ── INBOX — ready/not-ready counts from inbox.ts's own InboxState, with the not-ready reason
+// named for the head item only (not an acceptance bullet on its own, but the design's own
+// falsifier: a proposal registry with a mix of ready/not-ready must summarize honestly) ────────
+
+test("buildStatusBoard: INBOX — ready/not-ready counts from inbox.ts's own classifyProposal, with the not-ready reason named for the head item only", () => {
+  const proposals: Proposal[] = [
+    { id: "P1", summary: "first", evidenceAnchors: [] },
+    { id: "P2", summary: "second", evidenceAnchors: [] },
+  ];
+  const model = buildStatusBoard(
+    tmpRoot(),
+    join(tmpdir(), "does-not-exist.ndjson"),
+    baseDeps({
+      plan: plan(),
+      github: fakeGithub(),
+      readProposalRegistry: () => proposals,
+      readDraftCache: () => ({}) as DraftCache,
+      grepAnchorTrue: () => true,
+    }),
+  );
+  assert.equal(model.inbox.unknownReason, undefined);
+  assert.equal(model.inbox.readyCount, 0);
+  assert.equal(model.inbox.notReadyCount, 2);
+  assert.match(model.inbox.headNotReadyReason ?? "", /not-drafted/); // P1 (registry order) — no draft cached
 });

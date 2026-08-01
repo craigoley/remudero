@@ -46,7 +46,7 @@ All logic lives in TypeScript; `bin/rmd` is a thin `exec` wrapper into
 | `rmd serve-plist [--port <n>] [--host <addr>] [--write]` | Generate the `launchd` unit that runs the console as a background **service** (KeepAlive + ThrottleInterval 60, logs 0600 under `state/logs/`). Loading it is an operator action. |
 | `rmd down [--port <n>] [--host <addr>]` | Graceful wind-down for restart/maintenance: unloads the daemon `launchd` service (waiting a bounded window for any in-flight task to reach a safe boundary, else reporting its run id + recoverability), stops `rmd serve` **by port** with a reap-wait (never an argv/pattern kill), and prints a wind-down summary (in-flight state, open-PR count, needs-human count, safe-to-restart). Idempotent — already down is a no-op honest report. |
 | `rmd up [--port <n>] [--host <addr>] [--allow-off-main]` | Full resume: runs install-freshness first, refuses to resume an off-`main` checkout unless `--allow-off-main` is given, loads the daemon `launchd` service, confirms/starts the serve `launchd` service, and prints a resume report (daemon pid, the console URL with its read token, the in-flight/queued head, needs-human count). Idempotent — already up verifies and reports, never a double start. |
-| `rmd status [--json]` | "Is it running" from **local truth only** (no network — exits 0 even with the daemon down): LIVENESS (daemon/serve/deploy-supervisor running/pid/boot-time, running HEAD vs `origin/main` with a STALE flag, crash-loop), LATCHES (every state marker — STOP/PAUSE/QUIET_HOURS/DEPLOY_FAILED/DEPLOY_AUTO/inflight locks/pending kicks/drain-now — with its age and stated consequence), LAST CYCLE (the newest `daemon.summary`). Each section ends with at most one next action. `--json` emits the exact same read model the text renders — the future console Now tab's intended data source. |
+| `rmd status [--json]` | "Is it running, and why is it stalled" from ONE read model. **Local** (no network): LIVENESS (daemon/serve/deploy-supervisor running/pid/boot-time, running HEAD vs `origin/main` with a STALE flag, crash-loop), LATCHES (every state marker — STOP/PAUSE/QUIET_HOURS/DEPLOY_FAILED/DEPLOY_AUTO/inflight locks/pending kicks/drain-now — with its age and stated consequence), LAST CYCLE (the newest `daemon.summary`). **Derived**: BLOCKERS BY CLASS (circuit-broken w/ its reset condition, `dispatch.indeterminate` w/ the gh-window note, blocked PRs by the reason `rmd sweep` already named), QUEUE HEAD (next dispatchables, a perpetually re-attempted task flagged with its observed per-cycle cost), INBOX (ready/not-ready counts, the head item's not-ready reason), HEADROOM (newest telemetry + enforcement on/off from the same switch the daemon reads) — these read a batched GitHub gateway and degrade to a stated unknown on an outage, never a gate on the local sections above. Each section ends with at most one next action. `--json` emits the exact same read model the text renders — the future console Now tab's intended data source. |
 | `rmd sweep [--repo <name>] [--dry-run]` | Level-triggered PR-pipeline reconciler: re-derives every open PR's disposition and takes the one gated action (arm merge, fix, close, or escalate). The daemon runs this every poll. |
 | `rmd fix <pr-number> [--repo <name>]` | Operator verb for the fix rung sweep uses — manual override to drive a stuck PR through the same fix path. |
 | `rmd wipe-test <task-id> [--repo remudero-sandbox] [--allow-non-sandbox]` | The P12 learning-utility A/B harness: runs `<task-id>` twice — normal learnings injection vs masked — and ledgers the turn/cost/verdict/strike deltas. Sandbox-only by default; refuses any other `--repo` (including the primary repo) without `--allow-non-sandbox`. |
@@ -80,12 +80,15 @@ repo changes.
 
 ## A normal day
 
-1. **Check what's running.** `rmd status` answers "is it running" from local
-   truth in one shot — liveness, every active latch (with its age and
-   consequence), and the last cycle. For what's *queued* (not yet running),
-   read `plan/tasks.yaml` for tasks in `queued`/`recon` with satisfied
-   dependencies — the derived/remote half of the board (queue head, blockers,
-   inbox, headroom) is future work (W1-T280).
+1. **Check what's running, and why it's stalled.** `rmd status` answers both
+   in one shot: local liveness (every active latch with its age and
+   consequence, and the last cycle), plus the derived half — BLOCKERS BY
+   CLASS (circuit-broken/`dispatch.indeterminate`/named-reason blocked PRs),
+   QUEUE HEAD (next dispatchables, a perpetually re-attempted task flagged
+   with its per-cycle cost), INBOX (ready/not-ready counts), and HEADROOM
+   (telemetry + enforcement on/off). The derived half reads GitHub through a
+   batched gateway and degrades to a stated unknown on an outage — it never
+   blocks the local sections.
 2. **Let the daemon run.** If `rmd daemon` is loaded via `launchd`, new
    runnable work is picked up automatically — you mostly watch the ledger and
    digests, you don't kick off individual tasks by hand.

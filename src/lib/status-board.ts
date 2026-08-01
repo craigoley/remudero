@@ -1,5 +1,5 @@
 /**
- * lib/status-board.ts — `rmd status`, half 1 of 2 (W1-T279, MASTER-PLAN §7/§5D).
+ * lib/status-board.ts — `rmd status` (W1-T279 half 1 + W1-T280 half 2, MASTER-PLAN §7/§5D).
  *
  * ONE READ MODEL, TWO RENDERERS. {@link buildStatusBoard} returns a plain data object
  * ({@link StatusBoardModel}); the text renderer ({@link renderStatusBoardText}) and `--json`
@@ -8,11 +8,19 @@
  * disagree with the terminal (the W1-T262 one-coherent-story discipline, applied to this
  * surface).
  *
- * LOCAL TRUTH ONLY, OFFLINE-SAFE. Every read here is the filesystem, the ledger, or a launchd
- * process query injected by the caller — never a blocking network call. The `origin/main`
- * comparison below is a LOCAL `git rev-parse` (no `git fetch`), deliberately: this half must
- * exit 0 with the daemon down and the network off. Where a fact cannot be resolved (a pid
- * unreadable, `origin/main` unresolvable, no `daemon.boot` line yet) the model carries an
+ * TWO HALVES, ONE MODEL. LIVENESS/LATCHES/LAST CYCLE (W1-T279) are LOCAL TRUTH ONLY,
+ * OFFLINE-SAFE — the filesystem, the ledger, or a launchd process query injected by the
+ * caller, never a blocking network call; the `origin/main` comparison is a LOCAL
+ * `git rev-parse` (no `git fetch`). BLOCKERS BY CLASS/QUEUE HEAD/INBOX/HEADROOM (W1-T280) are
+ * DERIVED — mostly still ledger/plan-local (the dispatch circuit breaker, blocked-PR reasons,
+ * headroom telemetry), except the two facts that generically need a live merge-state read
+ * (QUEUE HEAD's dispatch eligibility, INBOX's dep-merged predicate), which go through the
+ * SAME batched {@link GitHub} gateway every other command already reads through. GITHUB IS
+ * DECORATION, NEVER A GATE (see {@link StatusBoardDeps.github}): a gateway failure — or none
+ * configured at all — degrades ONLY the sections/rows that actually needed it to a stated
+ * `unknownReason`, never a throw, never a silently-empty section indistinguishable from
+ * "nothing to report". Where a fact cannot be resolved (a pid unreadable, `origin/main`
+ * unresolvable, no `daemon.boot` line yet, no headroom telemetry yet) the model carries an
  * explicit `"unknown"` / absent field, never a zero or a healthy-looking default rendered as
  * fact (the W1-T262 honesty rule: an unknown that LOOKS healthy is exactly the ~17h
  * DEPLOY_FAILED-invisible failure this task exists to retire).
@@ -20,16 +28,16 @@
  * RENDERS, NEVER SENSES. Every fact this module reports is already written down somewhere —
  * fleet-control.ts's STOP/PAUSE/QUIET_HOURS flags, deployer.ts's DEPLOY_FAILED/DEPLOY_AUTO
  * markers, inflight-lock.ts's per-task locks, fleet-control.ts's pending kicks/drain-now
- * markers, and daemon.ts's own `daemon.boot`/`daemon.summary` ledger lines +
- * `detectDaemonCrashLoop`. This module reads and assembles; it invents no new sensor.
+ * markers, daemon.ts's own `daemon.boot`/`daemon.summary`/`daemon.headroom` ledger lines +
+ * `detectDaemonCrashLoop`, status.ts's dispatch-circuit-breaker/GitHub-projection signals,
+ * sweep.ts's already-named PR disposition/reason (the W1-T186 named-reason doctrine — this
+ * module RENDERS that vocabulary and mints none of its own), and config.ts's headroom-governor
+ * switch. This module reads and assembles; it invents no new sensor.
  *
  * NEXT ACTION TABLES are POLICY AS DATA (rule 2): each section's `nextAction` is picked by
  * scanning an ordered list of `{applies, action}` rules and taking the FIRST match — a new
  * condition is a new table row, never a new branch buried in a renderer. No rule matches, no
  * line: a board that always prints advice trains the operator to skip it.
- *
- * SCOPE FENCE: the derived/remote half (BLOCKERS BY CLASS, QUEUE HEAD, INBOX, HEADROOM) is
- * W1-T280 and APPENDS to this same model — this module ships no GitHub read.
  */
 
 import { execFileSync } from "node:child_process";
@@ -51,9 +59,35 @@ import {
 } from "./daemon.js";
 import { deployAutoPath, deployFailedAlertPath, sameCommit } from "./deployer.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
+import { runnableCandidates, type MergedSet } from "./drain.js";
 import { drainNowFilePath, pauseFilePath, pendingKicks, quietHoursFilePath, stopFilePath } from "./fleet-control.js";
 import { readInflightLock } from "./inflight-lock.js";
-import { readLedgerLines, type LedgerReader } from "./status.js";
+import {
+  classifyProposal,
+  gitGrepAnchorTrue,
+  isRatifiedInLedger,
+  parseDraftCache,
+  parseProposalRegistry,
+  refusalReason,
+  type DraftCache,
+  type EvidenceAnchor,
+  type InboxClassification,
+  type Proposal,
+  type ReadinessContext,
+} from "./inbox.js";
+import { loadPlan, type MergedResolver, type Plan } from "./plan.js";
+import {
+  DEFAULT_MAX_TASK_DISPATCHES,
+  dispatchesWithoutNewOwnedPr,
+  isDispatchBreakerTripped,
+  projectPlan,
+  readLedgerLines,
+  type DeriveDeps,
+  type GitHub,
+  type LedgerReader,
+  type StatusProjection,
+} from "./status.js";
+import { taskCardRuns } from "./task-card.js";
 
 // ── The model ────────────────────────────────────────────────────────────────────────────────
 
@@ -116,11 +150,137 @@ export interface LastCycleSection {
   nextAction?: string;
 }
 
+// ── BLOCKERS BY CLASS (W1-T280) — each class in its OWN vocabulary, never a generic "blocked"
+// bucket (design fence: the board mints no blocker taxonomy that named-reason/breaker signals
+// don't already carry) ──────────────────────────────────────────────────────────────────────
+
+/** The streak dispatch-circuit-breaker (status.ts's `isDispatchBreakerTripped`) tripped for
+ *  this task — the SAME ledger signal drain.ts/daemon.ts already gate dispatch on, re-read
+ *  here, never re-implemented. `resetNote` states the breaker's OWN reset condition (a fresh
+ *  owned PR resets the streak to 0) — the only "ETA" this ledger-derived signal actually
+ *  carries; there is no time-based reset to compute. */
+export interface CircuitBrokenBlocker {
+  kind: "circuit_broken";
+  taskId: string;
+  dispatchCount: number;
+  maxDispatches: number;
+  resetNote: string;
+}
+
+/** This task's most recent dispatch was flagged INDETERMINATE (the ledger's own
+ *  `dispatch.indeterminate` line — daemon.ts/drain.ts's existing `isIndeterminate` gate,
+ *  itself either a GitHub-read failure or a ledger-count regression) — a PURE ledger read, so
+ *  it renders regardless of GitHub reachability (the daemon already ledgers this; "visible to
+ *  nobody without a ledger dig" is the falsifier this class exists to retire). `ghWindowNote`
+ *  is ENRICHED, opportunistically, with the classified GitHub failure reason (status.ts's
+ *  `StatusProjection.unavailableReason`, from the SAME batched `projectPlan` pass QUEUE
+ *  HEAD/INBOX read) when a reachable gateway confirms the read is STILL indeterminate right
+ *  now; otherwise it names the ledger fact alone — either way, "the gateway could not decide"
+ *  never reads as "the task is broken". */
+export interface IndeterminateBlocker {
+  kind: "indeterminate";
+  taskId: string;
+  ghWindowNote: string;
+}
+
+/** An open PR the sweep reconciler (sweep.ts's `runSweep`) already disposed into a non-
+ *  progressing class — RENDERS the vocabulary its own `sweep.disposed` ledger line already
+ *  minted (the W1-T186 named-reason doctrine), never a second taxonomy. `reason` reads
+ *  "reason not named" — never a blank — when the ledger line itself carries none. */
+export interface BlockedPrBlocker {
+  kind: "blocked_pr";
+  taskId?: string;
+  prNumber: number;
+  prUrl?: string;
+  disposition: string;
+  reason: string;
+}
+
+export type BlockerRow = CircuitBrokenBlocker | IndeterminateBlocker | BlockedPrBlocker;
+
+/** Every class here is a PURE ledger read — ALWAYS present in full regardless of GitHub
+ *  reachability (GitHub only ever ENRICHES the `indeterminate` class's note, never gates its
+ *  presence). See status-board.ts's own header doc: GitHub is decoration, never a gate. */
+export interface BlockersSection {
+  rows: BlockerRow[];
+  nextAction?: string;
+}
+
+// ── QUEUE HEAD (W1-T280) — the next dispatchables, with the four-re-dispatch falsifier named
+// as a per-row flag (attempt count + observed per-cycle cost) ─────────────────────────────────
+
+export interface QueueHeadRow {
+  taskId: string;
+  title: string;
+  /** status.ts's `dispatchesWithoutNewOwnedPr` — the SAME streak count the circuit breaker
+   *  itself trips on, so this row's number and BLOCKERS' `circuit_broken` class can never
+   *  disagree about what "close to tripping" means. */
+  attempts: number;
+  /** True once `attempts` is at or near the streak breaker's threshold — the four-re-dispatch
+   *  incident (07-24) becomes a line the operator reads in one second, before the fifth
+   *  dispatch trips the breaker and forces an escalation. */
+  perpetual: boolean;
+  /** The most recent costed run's `cost_usd` (task-card.ts's `taskCardRuns`) — present only
+   *  when `perpetual` is true, so repeated spend cannot stay invisible. */
+  observedPerCycleCostUsd?: number;
+}
+
+export interface QueueHeadSection {
+  rows: QueueHeadRow[];
+  /** Present when dispatch eligibility (merge state) could not be resolved — no reachable
+   *  GitHub gateway, so nothing here would be trustworthy enough to print as "next up". */
+  unknownReason?: string;
+  nextAction?: string;
+}
+
+// ── INBOX (W1-T280) — ready/not-ready COUNTS from inbox.ts's own InboxState; `rmd inbox`
+// remains the detail surface, this board only summarizes ─────────────────────────────────────
+
+export interface InboxSection {
+  readyCount: number;
+  notReadyCount: number;
+  /** inbox.ts's `refusalReason` for the FIRST not-ready proposal only (registry order) — the
+   *  board summarizes, it does not replace `rmd inbox`. */
+  headNotReadyReason?: string;
+  /** Present when classification could not be resolved — no reachable GitHub gateway for the
+   *  dep-merged predicate, or no plan/tasks.yaml to resolve dependency ids against. */
+  unknownReason?: string;
+  nextAction?: string;
+}
+
+// ── HEADROOM (W1-T280) — the newest `daemon.headroom` telemetry line PLUS enforcement on/off
+// from the SAME switch the daemon reads ────────────────────────────────────────────────────────
+
+export interface HeadroomTelemetry {
+  window: string;
+  percentUsed: number;
+  limitPct: number;
+  resetsAt?: string;
+  /** The daemon's own "governor disabled — telemetry only" note (config.ts ruling
+   *  fb-1784894405468-a4153e), carried verbatim when the ledger line has one. */
+  note?: string;
+}
+
+export interface HeadroomSection {
+  found: boolean;
+  telemetry?: HeadroomTelemetry;
+  ts?: string;
+  ageMs?: number;
+  /** config.ts's `resolveHeadroomEnabled` — the SAME switch the daemon reads, never a second
+   *  derivation. Present unconditionally: this is a LOCAL config read, never gated on GitHub. */
+  enforced: boolean;
+  nextAction?: string;
+}
+
 export interface StatusBoardModel {
   generatedAt: string;
   liveness: LivenessSection;
   latches: LatchesSection;
   lastCycle: LastCycleSection;
+  blockers: BlockersSection;
+  queueHead: QueueHeadSection;
+  inbox: InboxSection;
+  headroom: HeadroomSection;
 }
 
 // ── Deps ─────────────────────────────────────────────────────────────────────────────────────
@@ -148,6 +308,46 @@ export interface StatusBoardDeps {
   crashLoopWindow?: CrashLoopWindow;
   /** Pid-liveness probe for inflight-lock rows; defaults to drain-lock.ts's real check. */
   isPidAlive?: (pid: number) => boolean;
+
+  // ── W1-T280 (DERIVED half) ────────────────────────────────────────────────────────────────
+
+  /** Local (offline) `plan/tasks.yaml` read — the DAG source QUEUE HEAD and INBOX resolve
+   *  against (and BLOCKERS' `indeterminate` class opportunistically enriches its note from,
+   *  when reachable). Defaults to `loadPlan(join(repoDir, "plan", "tasks.yaml"))`; `undefined`
+   *  (never a throw) when unreadable, degrading QUEUE HEAD/INBOX to a stated `unknownReason` —
+   *  BLOCKERS is a pure ledger read and needs no plan at all, unaffected either way. */
+  plan?: Plan;
+  /**
+   * The batched GitHub gateway (status.ts's `buildBatchedGithub`) backing every remote fact
+   * QUEUE HEAD's dispatch eligibility and INBOX's dep-merged predicate read — read through ONCE
+   * per render (`projectPlan`'s own batching), never per row. Omitted, or reporting
+   * `readFailed()` after that one batched pass, degrades exactly those two sections to a
+   * stated `unknownReason` — never a throw, never a fail-closed board. LIVENESS/LATCHES/LAST
+   * CYCLE and BLOCKERS BY CLASS (a pure ledger read, always in full — GitHub only ever
+   * ENRICHES its `indeterminate` class's note, never gates the row's presence) are UNAFFECTED
+   * (GitHub is decoration, never a gate).
+   */
+  github?: GitHub;
+  /** Local (no-network) evidence-anchor grep for INBOX; defaults to inbox.ts's
+   *  `gitGrepAnchorTrue(repoDir, "origin/main", anchor)`. */
+  grepAnchorTrue?: (anchor: EvidenceAnchor) => boolean;
+  /** `state/inbox-proposals.json` reader; defaults to the real file under `root`, parsed by
+   *  inbox.ts's own fail-soft-to-empty `parseProposalRegistry`. */
+  readProposalRegistry?: () => Proposal[];
+  /** `state/inbox-drafts.json` reader; defaults to the real file under `root`, parsed by
+   *  inbox.ts's own fail-soft-to-empty `parseDraftCache`. */
+  readDraftCache?: () => DraftCache;
+  /**
+   * The headroom-governor switch (config.ts's `resolveHeadroomEnabled(config)`) — a
+   * config-file read, so injected exactly like `queryService` rather than re-derived inside
+   * lib/ (Rule 16: this module stays a thin seam over the CLI layer's own config load). The
+   * real wiring passes `() => resolveHeadroomEnabled(config)`, the SAME switch the daemon
+   * itself reads every tick. Omitted falls back to the product default (`true`, governor ON)
+   * rather than fabricating "off".
+   */
+  resolveHeadroomEnabled?: () => boolean;
+  /** Max rows QUEUE HEAD and BLOCKERS' blocked-PR class each show; defaults to 5. */
+  queueHeadLimit?: number;
 }
 
 // ── origin/main (local, no fetch) ───────────────────────────────────────────────────────────
@@ -416,6 +616,330 @@ const LAST_CYCLE_NEXT_ACTIONS: readonly NextActionRule<LastCycleSection>[] = [
   },
 ];
 
+// ── W1-T280 helpers — plan/GitHub read (once) ───────────────────────────────────────────────
+
+function tryLoadDefaultPlan(repoDir: string): Plan | undefined {
+  try {
+    return loadPlan(join(repoDir, "plan", "tasks.yaml"));
+  } catch {
+    return undefined; // no tasks.yaml at repoDir (offline checkout, test fixture, ...) — never a throw
+  }
+}
+
+function readTextFileIfExists(path: string): string | undefined {
+  try {
+    return fs.readFileSync(path, "utf8");
+  } catch {
+    return undefined;
+  }
+}
+
+/** ONE batched projection pass over the whole plan (status.ts's `projectPlan`, which itself
+ *  fetches GitHub exactly once and shares it across every task) — the single remote read that
+ *  backs QUEUE HEAD's dispatch eligibility, INBOX's dep-merged predicate, and BLOCKERS'
+ *  `indeterminate` class. Returns `undefined` projections with a stated `unknownReason` when
+ *  no plan or no reachable gateway backs this render — NEVER a throw, never a per-row fetch. */
+function projectPlanOnce(
+  plan: Plan | undefined,
+  github: GitHub | undefined,
+  ledgerPath: string,
+  lines: Array<Record<string, unknown>>,
+  now: () => number,
+): { projections?: Map<string, StatusProjection>; unknownReason?: string } {
+  if (!plan) return { unknownReason: "plan/tasks.yaml is unreadable — dispatch eligibility cannot be resolved" };
+  if (!github) return { unknownReason: "no GitHub gateway configured for this read" };
+  const deriveDeps: DeriveDeps = { ledgerPath, github, readLedger: () => lines, now };
+  let projections: Map<string, StatusProjection> | undefined;
+  try {
+    projections = projectPlan(plan, deriveDeps);
+  } catch (e) {
+    return { unknownReason: `GitHub projection failed unexpectedly (${String((e as Error)?.message ?? e)})` };
+  }
+  if (github.readFailed?.()) {
+    const reason = github.readFailureReason?.() ?? "unknown";
+    return { unknownReason: `GitHub gateway unreachable (${reason})` };
+  }
+  return { projections };
+}
+
+// ── BLOCKERS BY CLASS derivation ────────────────────────────────────────────────────────────
+
+/** Every distinct task id the ledger has EVER dispatched — the circuit-broken class needs no
+ *  plan at all, just the ledger's own `run.start` history (mirrors `dispatchesWithoutNewOwnedPr`'s
+ *  own task-id-agnostic scan). */
+function distinctDispatchedTaskIds(lines: Array<Record<string, unknown>>): string[] {
+  const ids = new Set<string>();
+  for (const line of lines) {
+    if (line.step === "run.start" && typeof line.task_id === "string") ids.add(line.task_id);
+  }
+  return [...ids];
+}
+
+function deriveCircuitBrokenBlockers(lines: Array<Record<string, unknown>>): CircuitBrokenBlocker[] {
+  const out: CircuitBrokenBlocker[] = [];
+  for (const taskId of distinctDispatchedTaskIds(lines)) {
+    if (!isDispatchBreakerTripped(lines, taskId)) continue;
+    const dispatchCount = dispatchesWithoutNewOwnedPr(lines, taskId);
+    out.push({
+      kind: "circuit_broken",
+      taskId,
+      dispatchCount,
+      maxDispatches: DEFAULT_MAX_TASK_DISPATCHES,
+      resetNote: `resets only on a fresh owned PR for ${taskId} — ${dispatchCount}/${DEFAULT_MAX_TASK_DISPATCHES} dispatches since the last one`,
+    });
+  }
+  return out;
+}
+
+/** The newest `dispatch.indeterminate {task}` ledger line per task id — a PURE ledger read
+ *  (never gated on GitHub reachability). Skips a task the batched projection (when reachable)
+ *  already confirms MERGED — landed work is no longer news, no matter what an older ledger
+ *  line says. `ghWindowNote` is ENRICHED with the classified failure reason when that SAME
+ *  projection confirms the task is STILL indeterminate right now; otherwise it names the
+ *  ledger fact alone (never blank, never silently upgraded to "the task is broken"). */
+function deriveIndeterminateBlockers(
+  lines: Array<Record<string, unknown>>,
+  projections: Map<string, StatusProjection> | undefined,
+): IndeterminateBlocker[] {
+  const out: IndeterminateBlocker[] = [];
+  const seen = new Set<string>();
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (line.step !== "dispatch.indeterminate" || typeof line.task_id !== "string") continue;
+    const taskId = line.task_id;
+    if (seen.has(taskId)) continue; // only the NEWEST occurrence per task
+    seen.add(taskId);
+    if (projections?.get(taskId)?.merged) continue; // landed since — no longer news
+    const p = projections?.get(taskId);
+    const ghWindowNote =
+      p?.indeterminate && p.unavailableReason
+        ? `the GitHub read could not decide (${p.unavailableReason}${p.githubUnobservableSince ? `, unobservable since ${p.githubUnobservableSince}` : ""}) — a gateway window, not a claim that the task itself is broken`
+        : "flagged indeterminate at its last dispatch attempt (ledger: dispatch.indeterminate) — a gateway/ledger window, not a claim that the task itself is broken";
+    out.push({ kind: "indeterminate", taskId, ghWindowNote });
+  }
+  return out;
+}
+
+/** sweep.ts's `runSweep` dispositions that mean "not progressing" — the SAME vocabulary
+ *  sweep.ts already minted (W1-T186), never a second taxonomy. `"mergeable"`/`"post-review"`/
+ *  `"dep-review"`/`"wait"` are ordinary in-progress states, not blockers. */
+const BLOCKED_PR_DISPOSITIONS: ReadonlySet<string> = new Set(["blocked-fixable", "blocked-ambiguous", "conflicted", "stale"]);
+
+function deriveBlockedPrBlockers(lines: Array<Record<string, unknown>>, limit: number): BlockedPrBlocker[] {
+  // Newest `sweep.disposed` line per PR number wins — ledger append order, later overwrites earlier.
+  const latestByPr = new Map<number, Record<string, unknown>>();
+  for (const line of lines) {
+    if (line.step !== "sweep.disposed") continue;
+    if (typeof line.pr_number !== "number") continue;
+    latestByPr.set(line.pr_number, line);
+  }
+  const rows: BlockedPrBlocker[] = [];
+  for (const [prNumber, line] of latestByPr) {
+    const disposition = typeof line.disposition === "string" ? line.disposition : undefined;
+    if (!disposition || !BLOCKED_PR_DISPOSITIONS.has(disposition)) continue;
+    const reason = typeof line.reason === "string" && line.reason.trim().length > 0 ? line.reason : "reason not named";
+    const taskId = typeof line.task_id === "string" && line.task_id !== "SWEEP" ? line.task_id : undefined;
+    rows.push({
+      kind: "blocked_pr",
+      taskId,
+      prNumber,
+      prUrl: typeof line.pr_url === "string" ? line.pr_url : undefined,
+      disposition,
+      reason,
+    });
+  }
+  rows.sort((a, b) => {
+    const tsA = typeof latestByPr.get(a.prNumber)?.ts === "string" ? (latestByPr.get(a.prNumber)!.ts as string) : "";
+    const tsB = typeof latestByPr.get(b.prNumber)?.ts === "string" ? (latestByPr.get(b.prNumber)!.ts as string) : "";
+    return tsB.localeCompare(tsA); // newest-disposed first
+  });
+  return rows.slice(0, limit);
+}
+
+function deriveBlockers(
+  lines: Array<Record<string, unknown>>,
+  projections: Map<string, StatusProjection> | undefined,
+  limit: number,
+): BlockersSection {
+  const circuitBroken = deriveCircuitBrokenBlockers(lines);
+  const blockedPrs = deriveBlockedPrBlockers(lines, limit);
+  const indeterminate = deriveIndeterminateBlockers(lines, projections);
+  const rows: BlockerRow[] = [...circuitBroken, ...indeterminate, ...blockedPrs];
+  const section: BlockersSection = { rows };
+  section.nextAction = pickNextAction(BLOCKERS_NEXT_ACTIONS, section);
+  return section;
+}
+
+const BLOCKERS_NEXT_ACTIONS: readonly NextActionRule<BlockersSection>[] = [
+  {
+    applies: (ctx) => ctx.rows.some((r): r is CircuitBrokenBlocker => r.kind === "circuit_broken"),
+    action: (ctx) => {
+      const r = ctx.rows.find((row): row is CircuitBrokenBlocker => row.kind === "circuit_broken")!;
+      return `${r.taskId}'s dispatch circuit is broken — ${r.resetNote}; investigate before it re-dispatches again`;
+    },
+  },
+  {
+    applies: (ctx) => ctx.rows.some((r): r is BlockedPrBlocker => r.kind === "blocked_pr"),
+    action: (ctx) => {
+      const r = ctx.rows.find((row): row is BlockedPrBlocker => row.kind === "blocked_pr")!;
+      return `PR #${r.prNumber} is blocked (${r.disposition}): ${r.reason}`;
+    },
+  },
+  {
+    applies: (ctx) => ctx.rows.some((r): r is IndeterminateBlocker => r.kind === "indeterminate"),
+    action: (ctx) => {
+      const r = ctx.rows.find((row): row is IndeterminateBlocker => row.kind === "indeterminate")!;
+      return `${r.taskId}'s GitHub read is indeterminate — ${r.ghWindowNote}`;
+    },
+  },
+];
+
+// ── QUEUE HEAD derivation ────────────────────────────────────────────────────────────────────
+
+/** One dispatch away from the streak breaker's own threshold — "at or near" per the design's
+ *  own wording, so a perpetual-attempt task is flagged BEFORE it trips and forces an
+ *  escalation, not only after. */
+const PERPETUAL_ATTEMPT_THRESHOLD = DEFAULT_MAX_TASK_DISPATCHES - 1;
+
+function deriveQueueHead(
+  plan: Plan | undefined,
+  lines: Array<Record<string, unknown>>,
+  projections: Map<string, StatusProjection> | undefined,
+  ghUnknownReason: string | undefined,
+  limit: number,
+): QueueHeadSection {
+  if (!plan || !projections || ghUnknownReason) {
+    const section: QueueHeadSection = { rows: [], unknownReason: ghUnknownReason ?? "plan/tasks.yaml is unreadable" };
+    section.nextAction = pickNextAction(QUEUE_HEAD_NEXT_ACTIONS, section);
+    return section;
+  }
+  const isMerged: MergedSet = (id) => projections.get(id)?.merged === true;
+  const isIndeterminate = (id: string) => projections.get(id)?.indeterminate === true;
+  const isCircuitTripped = (id: string) => isDispatchBreakerTripped(lines, id);
+  const candidates = runnableCandidates(plan, isMerged, limit, { isIndeterminate, isCircuitTripped });
+  const rows: QueueHeadRow[] = candidates.map((t) => {
+    const attempts = dispatchesWithoutNewOwnedPr(lines, t.id);
+    const perpetual = attempts >= PERPETUAL_ATTEMPT_THRESHOLD;
+    const row: QueueHeadRow = { taskId: t.id, title: t.title, attempts, perpetual };
+    if (perpetual) {
+      const runs = taskCardRuns(lines as Array<Record<string, unknown>>, t.id);
+      const lastCosted = [...runs].reverse().find((r) => r.costUsd !== undefined);
+      if (lastCosted) row.observedPerCycleCostUsd = lastCosted.costUsd;
+    }
+    return row;
+  });
+  const section: QueueHeadSection = { rows };
+  section.nextAction = pickNextAction(QUEUE_HEAD_NEXT_ACTIONS, section);
+  return section;
+}
+
+const QUEUE_HEAD_NEXT_ACTIONS: readonly NextActionRule<QueueHeadSection>[] = [
+  { applies: (ctx) => ctx.unknownReason !== undefined, action: (ctx) => `queue head is unknown — ${ctx.unknownReason}` },
+  {
+    applies: (ctx) => ctx.rows.some((r) => r.perpetual),
+    action: (ctx) => {
+      const r = ctx.rows.find((row) => row.perpetual)!;
+      const cost = r.observedPerCycleCostUsd !== undefined ? `~$${r.observedPerCycleCostUsd.toFixed(2)}/cycle` : "an unknown per-cycle cost";
+      return `${r.taskId} has re-dispatched ${r.attempts} times with nothing new merged (${cost}) — investigate before it trips the circuit breaker`;
+    },
+  },
+];
+
+// ── INBOX derivation ─────────────────────────────────────────────────────────────────────────
+
+function deriveInbox(
+  plan: Plan | undefined,
+  lines: Array<Record<string, unknown>>,
+  projections: Map<string, StatusProjection> | undefined,
+  ghUnknownReason: string | undefined,
+  readProposalRegistry: () => Proposal[],
+  readDraftCache: () => DraftCache,
+  grepAnchorTrue: (a: EvidenceAnchor) => boolean,
+): InboxSection {
+  if (!plan || !projections || ghUnknownReason) {
+    const section: InboxSection = { readyCount: 0, notReadyCount: 0, unknownReason: ghUnknownReason ?? "plan/tasks.yaml is unreadable" };
+    section.nextAction = pickNextAction(INBOX_NEXT_ACTIONS, section);
+    return section;
+  }
+  const proposals = readProposalRegistry();
+  const drafts = readDraftCache();
+  const isMerged: MergedResolver = (t) => projections.get(t.id)?.merged === true;
+  const ctx: ReadinessContext = {
+    plan,
+    isMerged,
+    grepAnchorTrue,
+    openProposalIds: new Set(proposals.map((p) => p.id)),
+    isRatified: (id) => isRatifiedInLedger(lines, id),
+  };
+  const classifications: InboxClassification[] = proposals.map((p) => classifyProposal(p, drafts[p.id], ctx));
+  const readyCount = classifications.filter((c) => c.state === "ready").length;
+  const notReadyCount = classifications.length - readyCount;
+  const headNotReady = classifications.find((c) => c.state !== "ready");
+  const section: InboxSection = {
+    readyCount,
+    notReadyCount,
+    headNotReadyReason: headNotReady ? refusalReason(headNotReady) : undefined,
+  };
+  section.nextAction = pickNextAction(INBOX_NEXT_ACTIONS, section);
+  return section;
+}
+
+const INBOX_NEXT_ACTIONS: readonly NextActionRule<InboxSection>[] = [
+  { applies: (ctx) => ctx.unknownReason !== undefined, action: (ctx) => `inbox readiness is unknown — ${ctx.unknownReason}` },
+  { applies: (ctx) => ctx.readyCount > 0, action: (ctx) => `${ctx.readyCount} proposal(s) ready — \`rmd approve <id>\`` },
+  {
+    applies: (ctx) => ctx.notReadyCount > 0 && ctx.headNotReadyReason !== undefined,
+    action: (ctx) => `next proposal not ready: ${ctx.headNotReadyReason}`,
+  },
+];
+
+// ── HEADROOM derivation ──────────────────────────────────────────────────────────────────────
+
+function deriveHeadroomLatest(lines: Array<Record<string, unknown>>): { ts?: string; telemetry?: HeadroomTelemetry } {
+  let bestTs: string | undefined;
+  let bestParsed = -Infinity;
+  let best: HeadroomTelemetry | undefined;
+  for (const line of lines) {
+    if (line.step !== "daemon.headroom") continue;
+    const ts = typeof line.ts === "string" ? line.ts : undefined;
+    const parsed = ts ? Date.parse(ts) : NaN;
+    if (!Number.isFinite(parsed) || parsed < bestParsed) continue;
+    bestParsed = parsed;
+    bestTs = ts;
+    best = {
+      window: typeof line.window === "string" ? line.window : "unknown window",
+      percentUsed: typeof line.percent_used === "number" ? line.percent_used : 0,
+      limitPct: typeof line.limit_pct === "number" ? line.limit_pct : 0,
+      resetsAt: typeof line.resets_at === "string" ? line.resets_at : undefined,
+      note: typeof line.note === "string" ? line.note : undefined,
+    };
+  }
+  return { ts: bestTs, telemetry: best };
+}
+
+function deriveHeadroom(lines: Array<Record<string, unknown>>, nowMs: number, enforced: boolean): HeadroomSection {
+  const { ts, telemetry } = deriveHeadroomLatest(lines);
+  const tsParsed = ts ? Date.parse(ts) : NaN;
+  const section: HeadroomSection = {
+    found: telemetry !== undefined,
+    telemetry,
+    ts,
+    ageMs: Number.isFinite(tsParsed) ? Math.max(0, nowMs - tsParsed) : undefined,
+    enforced,
+  };
+  section.nextAction = pickNextAction(HEADROOM_NEXT_ACTIONS, section);
+  return section;
+}
+
+const HEADROOM_NEXT_ACTIONS: readonly NextActionRule<HeadroomSection>[] = [
+  { applies: (ctx) => !ctx.found, action: () => "no headroom telemetry yet — it appears after the daemon's first tick" },
+  { applies: (ctx) => !ctx.enforced, action: () => "headroom governor is OFF — telemetry only, dispatch is never throttled on it" },
+  {
+    applies: (ctx) => ctx.found && ctx.enforced && (ctx.telemetry?.percentUsed ?? 0) >= (ctx.telemetry?.limitPct ?? 100),
+    action: (ctx) => `headroom at/over its ${ctx.telemetry?.limitPct}% ceiling — dispatch is throttled until ${ctx.telemetry?.resetsAt ?? "the next reset"}`,
+  },
+];
+
 // ── buildStatusBoard — the ONE read model ───────────────────────────────────────────────────────
 
 export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusBoardDeps): StatusBoardModel {
@@ -481,11 +1005,29 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
   };
   lastCycle.nextAction = pickNextAction(LAST_CYCLE_NEXT_ACTIONS, lastCycle);
 
+  // ── W1-T280 (DERIVED half) ──
+  const plan = deps.plan ?? tryLoadDefaultPlan(deps.repoDir);
+  const { projections, unknownReason: ghUnknownReason } = projectPlanOnce(plan, deps.github, ledgerPath, lines, now);
+  const queueHeadLimit = deps.queueHeadLimit ?? 5;
+
+  const blockers = deriveBlockers(lines, projections, queueHeadLimit);
+  const queueHead = deriveQueueHead(plan, lines, projections, ghUnknownReason, queueHeadLimit);
+  const grepAnchorTrue = deps.grepAnchorTrue ?? ((a: EvidenceAnchor) => gitGrepAnchorTrue(deps.repoDir, "origin/main", a));
+  const readProposalRegistry =
+    deps.readProposalRegistry ?? (() => parseProposalRegistry(readTextFileIfExists(join(root, "state", "inbox-proposals.json"))));
+  const readDraftCache = deps.readDraftCache ?? (() => parseDraftCache(readTextFileIfExists(join(root, "state", "inbox-drafts.json"))));
+  const inbox = deriveInbox(plan, lines, projections, ghUnknownReason, readProposalRegistry, readDraftCache, grepAnchorTrue);
+  const headroom = deriveHeadroom(lines, nowMs, (deps.resolveHeadroomEnabled ?? (() => true))());
+
   return {
     generatedAt: new Date(nowMs).toISOString(),
     liveness,
     latches: latchesSection,
     lastCycle,
+    blockers,
+    queueHead,
+    inbox,
+    headroom,
   };
 }
 
@@ -558,6 +1100,67 @@ function renderLastCycleBlock(lc: LastCycleSection): string[] {
   return out;
 }
 
+function renderBlockersBlock(b: BlockersSection): string[] {
+  const out = ["── BLOCKERS BY CLASS ────────────────────────────────────"];
+  const circuitBroken = b.rows.filter((r): r is CircuitBrokenBlocker => r.kind === "circuit_broken");
+  const blockedPrs = b.rows.filter((r): r is BlockedPrBlocker => r.kind === "blocked_pr");
+  const indeterminate = b.rows.filter((r): r is IndeterminateBlocker => r.kind === "indeterminate");
+  if (circuitBroken.length === 0 && blockedPrs.length === 0 && indeterminate.length === 0) {
+    out.push("no blockers");
+  }
+  for (const r of circuitBroken) out.push(`circuit-broken : ${r.taskId} — ${r.resetNote}`);
+  for (const r of blockedPrs) out.push(`blocked PR     : #${r.prNumber}${r.taskId ? ` (${r.taskId})` : ""} [${r.disposition}] — ${r.reason}`);
+  for (const r of indeterminate) out.push(`indeterminate  : ${r.taskId} — ${r.ghWindowNote}`);
+  if (b.nextAction) out.push(`next action: ${b.nextAction}`);
+  return out;
+}
+
+function renderQueueHeadBlock(q: QueueHeadSection): string[] {
+  const out = ["── QUEUE HEAD ───────────────────────────────────────────"];
+  if (q.unknownReason) {
+    out.push(`unknown — ${q.unknownReason}`);
+  } else if (q.rows.length === 0) {
+    out.push("nothing dispatchable");
+  } else {
+    for (const r of q.rows) {
+      const cost = r.observedPerCycleCostUsd !== undefined ? `, ~$${r.observedPerCycleCostUsd.toFixed(4)}/cycle` : "";
+      const flag = r.perpetual ? ` — PERPETUAL (attempts ${r.attempts}${cost})` : ` (attempts ${r.attempts})`;
+      out.push(`${r.taskId} — ${r.title}${flag}`);
+    }
+  }
+  if (q.nextAction) out.push(`next action: ${q.nextAction}`);
+  return out;
+}
+
+function renderInboxBlock(i: InboxSection): string[] {
+  const out = ["── INBOX ────────────────────────────────────────────────"];
+  if (i.unknownReason) {
+    out.push(`unknown — ${i.unknownReason}`);
+  } else {
+    out.push(`ready: ${i.readyCount}, not ready: ${i.notReadyCount}`);
+    if (i.headNotReadyReason) out.push(`head not-ready reason: ${i.headNotReadyReason}`);
+  }
+  if (i.nextAction) out.push(`next action: ${i.nextAction}`);
+  return out;
+}
+
+function renderHeadroomBlock(h: HeadroomSection): string[] {
+  const out = ["── HEADROOM ─────────────────────────────────────────────"];
+  out.push(`enforcement : ${h.enforced ? "ON" : "OFF"}`);
+  if (!h.found || !h.telemetry) {
+    out.push("no headroom telemetry yet");
+  } else {
+    const t = h.telemetry;
+    out.push(`window      : ${t.window}`);
+    out.push(`used        : ${t.percentUsed}% (limit ${t.limitPct}%)`);
+    if (t.resetsAt) out.push(`resets at   : ${t.resetsAt}`);
+    if (t.note) out.push(`note        : ${t.note}`);
+    out.push(`age         : ${formatAgeMs(h.ageMs)} ago`);
+  }
+  if (h.nextAction) out.push(`next action: ${h.nextAction}`);
+  return out;
+}
+
 /** The text projection of {@link StatusBoardModel} — every field it prints comes off the model
  *  passed in, never a fresh read, so `--json` and the default text output can never disagree
  *  (they are the SAME derivation, rendered twice). */
@@ -565,6 +1168,10 @@ export function renderStatusBoardText(model: StatusBoardModel): string {
   const lines: string[] = [`### rmd status — ${model.generatedAt}`, ""];
   lines.push(...renderLivenessBlock(model.liveness), "");
   lines.push(...renderLatchesBlock(model.latches), "");
-  lines.push(...renderLastCycleBlock(model.lastCycle));
+  lines.push(...renderLastCycleBlock(model.lastCycle), "");
+  lines.push(...renderBlockersBlock(model.blockers), "");
+  lines.push(...renderQueueHeadBlock(model.queueHead), "");
+  lines.push(...renderInboxBlock(model.inbox), "");
+  lines.push(...renderHeadroomBlock(model.headroom));
   return lines.join("\n");
 }
