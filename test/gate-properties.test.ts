@@ -232,6 +232,83 @@ test("PROPERTY bodyContradictsDiff: every reported claim appears verbatim in the
   );
 });
 
+// ── 3b. The `no <token>` anchor (predicate (b)) ──────────────────────────────
+//
+// #1077 anchored the COUNT claim; predicate (b) was left unanchored and fired six times in one day
+// on prose whose subject was not the changeset. These three properties pin the boundary the anchor
+// draws — and the two preservation halves matter as much as the silence half, because a suite that
+// only pinned "does not fire" would pass against a predicate deleted outright.
+
+/** Tokens predicate (b) can act on at all: "code", or something path-shaped. */
+const CLAIM_TOKENS = ["code", "src/", "test/", "src/lib/x.ts", "MASTER-PLAN.md", "docs/"] as const;
+
+/** Ordinary head nouns. A token followed by one of these is a MODIFIER, not the thing claimed
+ *  absent — "no code duplication" is about duplication, and the repo runs a jscpd gate, so that is
+ *  a sentence a real PR body writes. */
+const HEAD_NOUNS = ["duplication", "coverage", "smells", "convention", "directory", "review", "churn", "debt"] as const;
+
+/** Words that make the claim about the changeset, drawn from CHANGESET_CONTEXT_RE itself. */
+const CHANGESET_WORDS = ["changes", "touched", "modifications", "edits", "added", "removed", "deleted"] as const;
+
+/** What can END a claim, leaving the token as the thing claimed absent. */
+const TERMINATORS = [",", ".", '"', ")", "", " ", "\n"] as const;
+
+test("PROPERTY bodyContradictsDiff: a no-CLAIM whose token MODIFIES a following noun stays silent", () => {
+  // THE FIX'S CENTRAL INVARIANT. "no code duplication" / "no src/ directory" are about duplication
+  // and directories, not about the diff, and must not produce a verdict against a source-touching PR.
+  fc.assert(
+    fc.property(fc.constantFrom(...CLAIM_TOKENS), fc.constantFrom(...HEAD_NOUNS), (tok, noun) => {
+      const body = `This change introduces no ${tok} ${noun} anywhere.`;
+      assert.deepEqual(
+        bodyContradictsDiff(body, ["src/lib/x.ts", "docs/y.md"]),
+        [],
+        `fired on a modifier claim: ${JSON.stringify(body)}`,
+      );
+    }),
+    CFG,
+  );
+});
+
+test("PROPERTY bodyContradictsDiff: a no-CLAIM the token ENDS still fires", () => {
+  // PRESERVATION HALF ONE — #1025's real shape, `the body's own "data-only: no code" claim`, and
+  // #974's `no code, no plan/tasks.yaml`. Punctuation or end-of-line after the token means the
+  // token IS the thing claimed absent.
+  fc.assert(
+    fc.property(fc.constantFrom("code", "src/", "src/lib"), fc.constantFrom(...TERMINATORS), (tok, term) => {
+      // "Data-only:" is deliberately NOT the lead here. An earlier draft used it and the property
+      // passed with the anchor MUTATED OUT, because the `data-only` shorthand fired independently
+      // and satisfied a bare "something fired" assertion. The assertion now names the `no ` claim.
+      // The trailing line matters: a word on the NEXT line belongs to another sentence and must not
+      // be read as this claim's head noun. That is why the anchor scans `[ \t]*`, never `\s*`.
+      const body = `The revert carries no ${tok}${term}\nduplication elsewhere is out of scope.`;
+      const hits = bodyContradictsDiff(body, ["src/lib/x.ts"]);
+      assert.ok(
+        hits.some((h) => /^no /i.test(h.claim)),
+        `missed a terminated claim: ${JSON.stringify(body)} -> ${JSON.stringify(hits.map((h) => h.claim))}`,
+      );
+    }),
+    CFG,
+  );
+});
+
+test("PROPERTY bodyContradictsDiff: a no-CLAIM followed by a changeset word still fires", () => {
+  // PRESERVATION HALF TWO — #974's real shape, "Plan-only, no code touched". The changeset word
+  // comes AFTER the token, which is exactly why #1077's backward-looking helper does not fit here.
+  fc.assert(
+    fc.property(fc.constantFrom("code", "src/", "src/lib"), fc.constantFrom(...CHANGESET_WORDS), (tok, word) => {
+      // Same discipline as above: no shorthand lead, and the assertion names the `no ` claim, so a
+      // reverted anchor cannot be masked by a different predicate firing.
+      const body = `This revert carries no ${tok} ${word} at all.`;
+      const hits = bodyContradictsDiff(body, ["src/lib/x.ts"]);
+      assert.ok(
+        hits.some((h) => /^no /i.test(h.claim)),
+        `missed a changeset-word claim: ${JSON.stringify(body)} -> ${JSON.stringify(hits.map((h) => h.claim))}`,
+      );
+    }),
+    CFG,
+  );
+});
+
 test("PROPERTY bodyContradictsDiff: a no-CLAIM about a non-path word stays silent", () => {
   // The documented boundary: "no bugs"/"no issues" are not changeset claims. Only "code" or a
   // path-shaped token may fire, which is what keeps ordinary review prose out of the verdict.
