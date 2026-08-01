@@ -1,0 +1,32 @@
+- id: W1-T284
+  title: "the console's skills panel is dead code — panel-skills.ts and panel-skill-run.ts import only each other, serve.ts never registers them, so GET /v1/skills does not exist on the running console"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 50.00
+  rationale: "MEASURED at 63f63ed. src/lib/panel-skills.ts and src/lib/panel-skill-run.ts reference each other and
+    nothing else references either: searching serve.ts for panel-skills, panel-skill-run and /v1/skills returns
+    0 hits. The route is never registered, so the documented capability — drop a .remudero/skills/<name>.yaml and
+    get a button, with zero UI code — is absent from the running console.
+    A MUTUALLY-IMPORTING PAIR DEFEATS THE OBVIOUS ORPHAN CHECK. Each module has an importer, so a naive
+    'imported by nothing' scan calls both reachable. The pair has no EXTERNAL importer, which is the property
+    that matters and the one a future check should test.
+    THIS IS THE SAME CLASS AS W1-T262: shipped, tested, unreachable. Two modules rather than one."
+  design: |
+    REGISTER THE ROUTE OR REMOVE THE PAIR — decide, do not leave it ambiguous. Registering is the smaller change
+    and restores a documented capability; removing is honest if the capability is not wanted. The task fails if
+    it lands with the modules still present and still unregistered.
+    IF REGISTERED, THE ROUTE MUST BE READ-SCOPED, matching every other read route on the console.
+  acceptance:
+    - claim: "the skills route is registered on the console's real route table"
+      proof: "unit test: test/skills-panel-registered.test.ts"
+    - claim: "a request to the skills endpoint returns the registry rather than a 404"
+      proof: "unit test: test/skills-panel-registered.test.ts"
+    - claim: "the route is read-scoped so a view never needs the write token"
+      proof: "unit test: test/skills-panel-registered.test.ts"
+    - claim: "serve.ts references the skills panel module, so the pair is no longer externally unimported"
+      proof: "grep: panel-skills.js in src/lib/serve.ts"
+  risk: medium
+  origin: architect

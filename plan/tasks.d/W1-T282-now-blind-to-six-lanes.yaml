@@ -1,0 +1,36 @@
+- id: W1-T282
+  title: "the console's NOW panel is blind to six of seven lanes — deriveRunState opens a run only on run.start, so a running daemon, drain, plan, retro, serve or triage renders as 'nothing in flight'"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  rationale: "MEASURED at 63f63ed. deriveRunState (src/lib/status.ts:1327) opens a run on exactly one step —
+    case \"run.start\" at :1336. Six other lanes emit their own start step and NONE is recognised: searching
+    status.ts for daemon.start, drain.start, plan.start, retro.start, serve.start and triage.start returns 0 hits
+    each. So 'nothing in flight' means 'no dispatched TASK run', not 'the fleet is idle', and the panel states
+    the second while measuring the first.
+    THE TERMINAL-STEP QUESTION recon-DD left open IS ANSWERED HERE so an implementer does not rediscover it.
+    Every lane has at least one terminal step declared in src/: daemon.stop and daemon.summary; drain.stop and
+    drain.summary; plan.verdict and plan.error; retro.error; serve.stop; triage.error. Two of them — retro and
+    triage — have ONLY an error terminal, so a SUCCESSFUL retro or triage emits no terminal step at all. That
+    asymmetry is the real work: a lane whose success is silent needs either a new terminal step or a liveness
+    bound, and choosing between those is the design decision, not the wiring."
+  design: |
+    GENERALISE THE OPEN, THEN FIX THE ASYMMETRY. The open side is a table of start steps rather than one literal.
+    The close side is not uniform and must not be pretended uniform: retro and triage emit only an error
+    terminal today, so their success path needs an explicit terminal step or an activity-bounded close.
+    DO NOT INVENT A TERMINAL STEP WITHOUT A WRITER. Adding a name that nothing emits is the declared-but-never-
+    written class this repo has hit six times; if a lane needs a terminal step, the same change must emit it.
+  acceptance:
+    - claim: "a non-run.start lane appears in the projection as in-flight"
+      proof: "unit test: test/now-panel-lanes.test.ts"
+    - claim: "every lane's start step is recognised, driven from the lane table rather than one literal"
+      proof: "grep: LANE_START_STEPS in src/lib/status.ts"
+    - claim: "a lane whose success emits no terminal step does not hang open forever"
+      proof: "unit test: test/now-panel-lanes.test.ts"
+    - claim: "a dispatched task run still opens and closes exactly as it does today"
+      proof: "unit test: test/now-panel-lanes.test.ts"
+  risk: high
+  origin: architect
