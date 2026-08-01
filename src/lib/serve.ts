@@ -497,6 +497,13 @@ export function renderShellHtml(
     background: rgba(255, 107, 107, 0.12); border-color: var(--status-blocked);
     color: var(--status-blocked); white-space: pre-line;
   }
+  /* impl-EA: a SUCCEEDED write. Green for a completed action; the gh-banner amber is kept for one
+     that was only REQUESTED - the fleet has not acted yet and may still refuse. Colour is a
+     SECONDARY cue only; the text says which, so this reads correctly in a screenshot. */
+  .write-ack { white-space: pre-line; }
+  .write-ack[data-ack-kind="done"] {
+    background: rgba(87, 214, 140, 0.12); border-color: var(--status-merged); color: var(--status-merged);
+  }
   .live-indicator {
     width: 0.5em; height: 0.5em; border-radius: 50%; background: var(--status-running);
     display: inline-block; animation: live-pulse 1.2s ease-in-out infinite;
@@ -723,6 +730,13 @@ export function renderShellHtml(
   <span id="stale-badge" hidden>STALE — showing last known data</span>
   <div id="gh-unreachable-banner" class="gh-banner" hidden role="status" aria-live="polite"></div>
   <div id="write-error-banner" class="gh-banner write-error" hidden role="alert" aria-live="assertive"></div>
+  <!-- impl-EA: a SUCCESSFUL write's acknowledgement. PR #1003 made a FAILED write visible; a
+       successful one still produced no change the operator could see, because refreshAll re-reads a
+       15s-TTL gateway and the row re-renders identically. He clicked Mark handled three more times
+       on an action that had already worked. role=status (polite), not alert: success must not
+       interrupt, and it is a SEPARATE element from the error banner - a green box and a red box in
+       one element would make "did it work" a question of which paint landed last. -->
+  <div id="write-ack-banner" class="gh-banner write-ack" hidden role="status" aria-live="polite" data-ack-kind=""></div>
   <!-- W1-T156: a single dedicated aria-live region for status-change announcements -- screen
        reader users get "task flipped" news without a sighted user's visual flash/highlight. -->
   <div id="aria-announcer" class="sr-only" role="status" aria-live="polite"></div>
@@ -1011,6 +1025,53 @@ export function renderShellHtml(
     var el = document.getElementById("write-error-banner");
     if (el) { el.hidden = true; el.textContent = ""; }
   }
+  // impl-EA: WHAT A 200 ACTUALLY MEANS, per write route. Two different truths live behind one status
+  // code and conflating them would replace a silent success with a confident lie:
+  //
+  //   done      - the console service ITSELF performed the action before replying. Mark handled has
+  //               already closed the issue; pause/resume/stop/quiet-hours have already written the
+  //               fleet-control state the daemon reads; a decision/approve/reframe/answer has already
+  //               been persisted. "Done" is true at the moment the operator reads it.
+  //   requested - the service recorded an INTENT and nothing more. /v1/drain/kick and /v1/drain/run
+  //               drop a marker file; the daemon picks it up at its NEXT poll and runs it through
+  //               assertRunnable, which can refuse outright (console.kick_refused appears in this
+  //               repo's own ledger). The outcome arrives minutes later, asynchronously, and the
+  //               console cannot observe it here. Saying "done" for these would be false.
+  //
+  // A route absent from this table gets the neutral "recorded" wording rather than an invented
+  // claim - unknown is reported as unknown, never upgraded to "done".
+  const WRITE_ACK = {
+    "/v1/escalation/mark-handled": { kind: "done", text: "Marked handled — the escalation issue is closed. The row clears on the next refresh." },
+    "/v1/feedback/decision": { kind: "done", text: "Decision recorded — the entry moves out of NEEDS ME on the next refresh." },
+    "/v1/inbox/approve": { kind: "done", text: "Proposal approved — the drafted tasks are filed." },
+    "/v1/inbox/reframe": { kind: "done", text: "Reframe recorded — your wording is saved against the proposal." },
+    "/v1/feedback": { kind: "done", text: "Answer recorded." },
+    "/v1/control/pause": { kind: "done", text: "Fleet PAUSED — no new task will be dispatched until you resume." },
+    "/v1/control/resume": { kind: "done", text: "Fleet RESUMED — dispatch is live again." },
+    "/v1/control/stop": { kind: "done", text: "Fleet STOPPED — dispatch is halted until you resume." },
+    "/v1/quiet-hours": { kind: "done", text: "Quiet hours updated." },
+    "/v1/drain/kick": { kind: "requested", text: "Run REQUESTED — not started yet. The daemon picks this up at its next poll and can still refuse it (for example a task that is not runnable). Watch RECENT for the outcome." },
+    "/v1/drain/run": { kind: "requested", text: "Drain REQUESTED — not started yet. The daemon runs one dispatch cycle at its next poll. Watch RECENT for the outcome." },
+  };
+  // Long enough to read a two-line message without hunting for it, short enough that it never
+  // becomes furniture the operator stops seeing. Cleared by the next write either way.
+  const WRITE_ACK_MS = 12000;
+  var writeAckTimer;
+  function showWriteAck(path) {
+    var el = document.getElementById("write-ack-banner");
+    if (!el) return;
+    var ack = WRITE_ACK[path] || { kind: "requested", text: "Recorded — the console accepted this request." };
+    el.dataset.ackKind = ack.kind;
+    el.textContent = ack.text;
+    el.hidden = false;
+    clearTimeout(writeAckTimer);
+    writeAckTimer = setTimeout(clearWriteAck, WRITE_ACK_MS);
+  }
+  function clearWriteAck() {
+    var el = document.getElementById("write-ack-banner");
+    if (el) { el.hidden = true; el.textContent = ""; el.dataset.ackKind = ""; }
+    clearTimeout(writeAckTimer);
+  }
   function postJson(path, body) {
     // fetch() rejects only on a NETWORK failure -- an HTTP 401/404/500 resolves normally, which is
     // why every call site discarding this result showed the operator nothing. Check .ok HERE, once,
@@ -1020,7 +1081,11 @@ export function renderShellHtml(
       headers: { ...writeAuthHeaders(), "content-type": "application/json" },
       body: JSON.stringify(body ?? {}),
     }).then(function (res) {
-      if (res.ok) { clearWriteError(); return res; }
+      // impl-EA: the acknowledgement fires HERE, on the ok path only, for the same reason #1003 put
+      // the .ok check here - one place covers all twelve write controls, so nobody has to remember
+      // to add it to the thirteenth.
+      if (res.ok) { clearWriteError(); showWriteAck(path); return res; }
+      clearWriteAck(); // a failure must never leave a stale "done" from the previous write on screen
       // Surface the server's own message when it supplies one; fall back to the bare status.
       return res.text().then(function (raw) {
         var detail = "";
@@ -1030,6 +1095,7 @@ export function renderShellHtml(
         return res;
       }, function () { showWriteError(path, res.status, ""); return res; });
     }, function (err) {
+      clearWriteAck();
       showWriteError(path, 0, String((err && err.message) || err || ""));
       throw err;
     });
