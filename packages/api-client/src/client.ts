@@ -132,9 +132,66 @@ function parseSseFrame(frame: string): { event: string; data: string } | undefin
   return { event, data: dataLines.join("\n") };
 }
 
+/** Protocols a daemon may be reached over. Anything else — `javascript:`, `data:`, `file:`,
+ *  `blob:` — is rejected outright: they are not transports, they are script-execution and
+ *  local-file vectors that happen to parse as URLs. */
+const ALLOWED_PROTOCOLS = new Set(["http:", "https:"]);
+
+/**
+ * Validate `baseUrl` ONCE, at construction, and return the origin every request is pinned to
+ * (CodeQL js/client-side-request-forgery, alerts #32/#33/#52/#54).
+ *
+ * WHY THIS IS A REAL FIX AND NOT A LINT SILENCER. Every request this client makes carries
+ * `authHeaders(opts.token)`, so the host named by `baseUrl` receives the operator's bearer token.
+ * `baseUrl` is not a constant: `apps/dashboard/src/main.ts`'s `readConfig()` reads it from the
+ * `?daemon=` QUERY PARAMETER, with `?token=` beside it. A crafted link therefore aimed an
+ * authenticated request — token included — at any host the link's author chose. Concatenating an
+ * unvalidated string into a request URL was the mechanism; this is where it stops.
+ *
+ * Rejecting rather than coercing is deliberate. A silently-corrected base URL would send requests
+ * somewhere the caller did not ask for, which is the same class of surprise in the other
+ * direction. A construction-time throw is loud, happens before any token is transmitted, and is
+ * trivially testable.
+ */
+export function resolveBaseUrl(raw: string): URL {
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error(`createDaemonClient: baseUrl is not a valid absolute URL: ${JSON.stringify(raw)}`);
+  }
+  if (!ALLOWED_PROTOCOLS.has(parsed.protocol)) {
+    throw new Error(
+      `createDaemonClient: baseUrl protocol ${parsed.protocol} is not allowed (expected http: or https:)`,
+    );
+  }
+  return parsed;
+}
+
+/**
+ * Build the URL for one request against the validated base, and PROVE it did not escape.
+ *
+ * The two-argument `new URL(path, base)` form resolves `path` against `base` rather than
+ * concatenating, so it already handles the ordinary cases. The origin re-check after it is the
+ * part that matters: a `path` beginning `//evil.com` is a PROTOCOL-RELATIVE URL and resolves to a
+ * different host entirely, and enough `../` segments walk out of any path prefix. Neither can
+ * survive an equality check against the origin we pinned at construction.
+ *
+ * Today every call site passes a hardcoded literal (`/v1/status`, `/v1/control/pause`, …), so this
+ * cannot fire. It is here so that it still cannot fire the day someone adds a method that takes a
+ * path fragment from a caller — the failure mode this whole file is being hardened against.
+ */
+export function requestUrl(base: URL, path: string): URL {
+  const url = new URL(path, base);
+  if (url.origin !== base.origin) {
+    throw new Error(`api-client: refusing to request ${url.origin} — outside the client's base origin ${base.origin}`);
+  }
+  return url;
+}
+
 export function createDaemonClient(opts: DaemonClientOptions): DaemonClient {
   const fetchImpl = opts.fetchImpl ?? fetch;
-  const baseUrl = opts.baseUrl.replace(/\/+$/, "");
+  const base = resolveBaseUrl(opts.baseUrl);
 
   /**
    * The one write helper every W3-T5 method funnels through — POST `body` as JSON with the
@@ -144,7 +201,7 @@ export function createDaemonClient(opts: DaemonClientOptions): DaemonClient {
    * body parses as JSON — never throws a SECOND time trying to build the first error.
    */
   async function postJson<T>(path: string, body: unknown): Promise<T> {
-    const res = await fetchImpl(`${baseUrl}${path}`, {
+    const res = await fetchImpl(requestUrl(base, path).toString(), {
       method: "POST",
       headers: { ...authHeaders(opts.token), "content-type": "application/json" },
       body: JSON.stringify(body),
@@ -167,7 +224,7 @@ export function createDaemonClient(opts: DaemonClientOptions): DaemonClient {
    * it were a result.
    */
   async function getJson<T>(path: string, query?: Record<string, string | undefined>): Promise<T> {
-    const url = new URL(`${baseUrl}${path}`);
+    const url = requestUrl(base, path);
     for (const [key, value] of Object.entries(query ?? {})) {
       if (value !== undefined) url.searchParams.set(key, value);
     }
@@ -185,7 +242,7 @@ export function createDaemonClient(opts: DaemonClientOptions): DaemonClient {
 
   return {
     async getStatus() {
-      const res = await fetchImpl(`${baseUrl}/v1/status`, { headers: authHeaders(opts.token) });
+      const res = await fetchImpl(requestUrl(base, "/v1/status").toString(), { headers: authHeaders(opts.token) });
       if (!res.ok) throw new Error(`getStatus: daemon returned ${res.status}`);
       return (await res.json()) as StatusSnapshot;
     },
@@ -252,7 +309,7 @@ export function createDaemonClient(opts: DaemonClientOptions): DaemonClient {
       void (async () => {
         let res: Response;
         try {
-          res = await fetchImpl(`${baseUrl}/v1/status/stream`, {
+          res = await fetchImpl(requestUrl(base, "/v1/status/stream").toString(), {
             headers: authHeaders(opts.token),
             signal: controller.signal,
           });

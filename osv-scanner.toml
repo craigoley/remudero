@@ -1,0 +1,35 @@
+# osv-scanner configuration.
+#
+# An entry here SUPPRESSES a real advisory, so each one states what was checked and when it must be
+# re-checked. "We looked and it does not reach us" is a finding with a shelf life: it expires the
+# moment the dependency graph moves. Nothing is ignored because it is inconvenient.
+
+[[IgnoredVulns]]
+id = "GHSA-frvp-7c67-39w9"
+# Node.js Adapter for Hono: path traversal in `serve-static` on Windows via encoded backslash
+# (%5C). Present as @hono/node-server@1.19.14; fixed in 2.0.5.
+#
+# NOT UPGRADABLE FROM HERE. The full chain is:
+#     remudero -> @anthropic-ai/claude-agent-sdk (direct)
+#              -> peer @modelcontextprotocol/sdk@^1.29.0
+#              -> @hono/node-server@^1.19.9
+# The fix is a MAJOR version, and `^1.19.9` cannot resolve 2.0.5. No override this repo can write
+# changes that; @modelcontextprotocol/sdk has to widen its range first.
+#
+# NOT REACHABLE, checked three independent ways on 2026-08-01:
+#   1. WRONG PLATFORM. The advisory is Windows-specific — it turns on Windows treating an encoded
+#      backslash as a path separator. This project runs on darwin and its CI runners are
+#      ubuntu-latest, so the vulnerable branch cannot be taken on either.
+#   2. NO FIRST-PARTY IMPORT. Zero hits across src/, apps/, packages/, scripts/ and .remudero/ for
+#      each of: `from "hono`, `@hono/node-server`, `serveStatic`, `serve-static`,
+#      `StreamableHTTPServerTransport`, `SSEServerTransport`, `@modelcontextprotocol/sdk`. This
+#      repo serves its console from its own node:http server (src/lib/serve.ts), never Hono.
+#   3. NO RUNTIME IMPORT IN THE PACKAGE THAT PULLS IT IN. No `.js` under
+#      @modelcontextprotocol/sdk/dist/esm/ imports serve-static. The only textual match in that
+#      package is `serve-static-core` in auth-middleware .d.ts files — Express's TYPE package, a
+#      different dependency entirely, with 0 runtime hits.
+#
+# RE-EVALUATE when @modelcontextprotocol/sdk widens its @hono/node-server range (then just take the
+# fix and delete this entry), or if this project ever serves static files through Hono, or if it is
+# ever run or built on Windows. Any of those invalidates the reasoning above.
+reason = "Windows-only path traversal in @hono/node-server's serve-static; unreachable here (darwin/ubuntu only, no first-party Hono import, and the transitive parent @modelcontextprotocol/sdk has no runtime serve-static import). Not upgradable: the fix is 2.0.5 and the parent pins ^1.19.9. Re-check when that range widens."
