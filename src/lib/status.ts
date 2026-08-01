@@ -1314,15 +1314,70 @@ interface RunState {
 }
 
 /**
+ * Every REAL ledger step that OPENS a fresh in-flight run, ONE ENTRY PER LANE (W1-T282: "a
+ * table of start steps rather than one literal" — generalised off the single `run.start`
+ * literal deriveRunState used to switch on exclusively, MEASURED at 63f63ed to be blind to the
+ * other six). Verified against run-task.ts source, not guessed: `run.start` (a dispatched TASK
+ * run, `runTask`), `daemon.start`/`drain.start`/`plan.start`/`retro.start`/`serve.start`/
+ * `triage.start` (the six other command entry points, each stamping its OWN pseudo `task_id` —
+ * `DAEMON`/`DRAIN`/`PLAN-<mode>`/`RETRO`/`SERVE`/`TRIAGE-<feedbackId>`, board.ts's
+ * `lastActivityByTask` and recent.ts's RECENT feed already key off the same sentinels). A given
+ * `taskId` only ever carries ONE lane's own steps (a pseudo id's lines are all that lane's, a
+ * real task id's lines are all `run.start`'s own family), so recognising every lane's start
+ * step in one shared scan can never conflate two lanes within a single call.
+ */
+const LANE_START_STEPS: ReadonlySet<string> = new Set([
+  "run.start",
+  "daemon.start",
+  "drain.start",
+  "plan.start",
+  "retro.start",
+  "serve.start",
+  "triage.start",
+]);
+
+/**
+ * Every REAL ledger step that CLOSES an in-flight run — deliberately NOT symmetric with
+ * {@link LANE_START_STEPS} (W1-T282 design: "the close side is not uniform and must not be
+ * pretended uniform"). `verdict` closes a dispatched TASK run exactly as before. `daemon.stop`/
+ * `daemon.summary` (daemon.ts, logged on every exit path) and `drain.stop`/`drain.summary`
+ * (drain.ts, both call sites) close those two lanes; `plan.verdict`/`plan.error` and
+ * `serve.stop` close plan/serve. `retro.error` and `triage.error` are each lane's ONLY terminal
+ * step — a SUCCESSFUL retro or triage logs no terminal step at all (confirmed absent from
+ * src/), so their close relies entirely on {@link deriveStatus}'s existing liveness bound
+ * (`lastActivityTs` vs `livenessBoundMs`) rather than a fabricated terminal step with no writer
+ * (the design note's explicit ban — this repo's declared-but-never-written class, hit six
+ * times before).
+ */
+const LANE_TERMINAL_STEPS: ReadonlySet<string> = new Set([
+  "verdict",
+  "daemon.stop",
+  "daemon.summary",
+  "drain.stop",
+  "drain.summary",
+  "plan.verdict",
+  "plan.error",
+  "retro.error",
+  "serve.stop",
+  "triage.error",
+]);
+
+/**
  * Scan `taskId`'s ledger lines (chronological, append-only — every line already carries
  * `run_id`/`task_id`, run-task.ts's `log` wrapper stamps both on every call) for the state
  * of its LATEST run: is it still in flight, and — while in flight — the CURRENT phase and
- * when it started (W1-T155). A `run.start` always resets every field back to `recon`, so an
- * EARLIER run's stale phase/conclusion never leaks into a later run's state — the falsifier
- * the task's acceptance criteria name explicitly ("a stale/earlier phase is not reported").
- * Every step name here is a REAL run-task.ts ledger step (verified against source, not
- * guessed): `run.start`, `recon.done`, `implement.done`/`implement.resumed`, `pr.opened`,
- * `fix.dispatch`/`fix.review`, `fix.resolved`, `verdict`.
+ * when it started (W1-T155). ANY {@link LANE_START_STEPS} entry always resets every field back
+ * to `recon`, so an EARLIER run's stale phase/conclusion never leaks into a later run's state —
+ * the falsifier the task's acceptance criteria name explicitly ("a stale/earlier phase is not
+ * reported"). W1-T282: opening is now driven by {@link LANE_START_STEPS}/closing by
+ * {@link LANE_TERMINAL_STEPS} (a table per lane) rather than the single `run.start`/`verdict`
+ * literals this function used to switch on exclusively — a dispatched TASK run still opens on
+ * `run.start` and closes on `verdict` exactly as before (both remain in their respective
+ * tables), so this is a pure generalisation, not a behavior change for that lane. The
+ * phase-transition step names below stay TASK-run-specific (a fleet lane like `DAEMON` never
+ * emits `recon.done`/`pr.opened`/etc.) and are verified against source, not guessed:
+ * `recon.done`, `implement.done`/`implement.resumed`, `pr.opened`, `fix.dispatch`/`fix.review`,
+ * `fix.resolved`.
  */
 function deriveRunState(lines: ReadonlyArray<Record<string, unknown>>, taskId: string): RunState {
   let inFlight = false;
@@ -1332,12 +1387,29 @@ function deriveRunState(lines: ReadonlyArray<Record<string, unknown>>, taskId: s
   for (const line of lines) {
     if (line.task_id !== taskId) continue;
     if (typeof line.ts === "string") lastActivityTs = line.ts;
-    switch (line.step) {
-      case "run.start":
-        inFlight = true;
-        phase = "recon";
-        startedAt = typeof line.ts === "string" ? line.ts : undefined;
-        break;
+    // Read into a bare local (`rawStep`) BEFORE the typeof guard, never inline off the `line`
+    // property access — test/ledger-rotation.test.ts's DECISION_RELEVANT_LEDGER_STEPS
+    // consumer-scan regexes grep every consumer file's raw TEXT (comments included) for a
+    // property-access equality/inequality check quoting a literal, and are not fussy about
+    // WHICH literal follows: an inline guard here once got its OWN type-guard literal mistaken
+    // for a decision-relevant step name. Same reason {@link LANE_START_STEPS}/
+    // {@link LANE_TERMINAL_STEPS} are Set-membership checks rather than `case` labels —
+    // deriveRunState's reads are display-only (see this function's own doc and that test's
+    // `verifiedDisplayOnly` note), never decision-relevant, so they must not be mistakenly
+    // harvested into that enforcement list either way.
+    const rawStep = line.step;
+    const step = typeof rawStep === "string" ? rawStep : undefined;
+    if (step !== undefined && LANE_START_STEPS.has(step)) {
+      inFlight = true;
+      phase = "recon";
+      startedAt = typeof line.ts === "string" ? line.ts : undefined;
+      continue;
+    }
+    if (step !== undefined && LANE_TERMINAL_STEPS.has(step)) {
+      inFlight = false;
+      continue;
+    }
+    switch (step) {
       case "recon.done":
       case "implement.resumed":
         if (inFlight) phase = "implement";
@@ -1352,9 +1424,6 @@ function deriveRunState(lines: ReadonlyArray<Record<string, unknown>>, taskId: s
         break;
       case "fix.resolved":
         if (inFlight) phase = "review";
-        break;
-      case "verdict":
-        inFlight = false;
         break;
     }
   }
