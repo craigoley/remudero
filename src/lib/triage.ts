@@ -27,16 +27,27 @@ import type { FeedbackEntry, FeedbackStatus } from "./feedback.js";
  * unmergeable. Sharding traded a conflict you cannot merge for a merge that poisons the plan.
  * That trade is only safe while something serialises triage.
  *
- * What serialises it TODAY: nothing explicit. The daemon's poll loop is single-threaded and awaits
- * each dispatch, so daemon-initiated runs cannot overlap each other — but NO lock excludes a
- * hand-run (`rmd triage`) racing a daemon run, and no lock would exist for a second lane.
- * {@link assertProposedPlanLoads} narrows the window (it re-loads monolith + shards from the
- * worker's own worktree before anything is pushed, so a collision against MAIN is refused
- * pre-push) and the minter also consults ids already claimed by OPEN plan PRs — but neither sees a
- * competitor that has minted and not yet opened its PR. That window is the whole exposure.
+ * What serialises it TODAY — CORRECTED, this paragraph was stale and said "nothing explicit":
+ *   (1) The daemon's poll loop is single-threaded and awaits each dispatch, so daemon-initiated
+ *       runs cannot overlap each other.
+ *   (2) PR #1069 added a SHARED lock across triage's two paths: `triageCommand` (run-task.ts)
+ *       acquires it before doing anything and refuses loudly if held, and `decideAutoTriage`
+ *       (lib/auto-triage.ts) refuses on `lockHeld`. The hand-run-versus-daemon race the previous
+ *       wording described as open has been closed since 2026-08-01.
+ *   (3) The minted id is now RESERVED atomically (lib/task-id-reservation.ts's
+ *       `reserveTaskIdFrom`, one `O_EXCL` file per id under `<root>/state/task-id-reservations/`)
+ *       BEFORE the worker spawns. That is the "atomic claim at mint time" this comment used to ask
+ *       for, and it covers a caller the LOCK cannot: the lock is triage-specific, so it never
+ *       excluded `rmd plan --mode=create`, a second machine, or a cross-repo instance filing into
+ *       this plan. Contention ADVANCES the id rather than refusing, so no caller waits.
  *
- * THEREFORE: do not add a concurrent caller without id RESERVATION (an atomic claim at mint time,
- * not a re-check at write time). A re-check is a half-guard and would merely narrow this window.
+ * `assertProposedPlanLoads` remains the pre-push backstop (it re-loads monolith + shards from the
+ * worker's own worktree, so a collision against MAIN is refused before anything is pushed).
+ *
+ * STILL NOT COVERED, and the reason this comment stays long: `rmd plan --mode=create` does not
+ * call the mint AT ALL — `planArchitectPrompt` receives no minted id, so its worker picks one by
+ * reading the plan files. Nothing reserves what was never minted. Routing that lane through the
+ * mint is the remaining work.
  *
  * THE THREE-WAY VERDICT, deterministic (mirroring lib/dep-review.ts's `decideDepReview` — the
  * judge is CODE, the LLM layer is advisory only, Standing rule 2):
