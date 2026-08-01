@@ -1605,6 +1605,24 @@ export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
 }
 
 /**
+ * Every distinct `task_id` named on an `escalation.issue_opened` ledger line (W1-T283) — the
+ * ONE scan {@link projectPlan} needs to find escalations that may not belong to any plan task,
+ * done once over the already-read ledger, never per candidate id.
+ */
+function taskIdsWithEscalationLines(lines: ReadonlyArray<Record<string, unknown>>): string[] {
+  const seen = new Set<string>();
+  const ids: string[] = [];
+  for (const line of lines) {
+    if (line.step !== "escalation.issue_opened") continue;
+    if (typeof line.task_id !== "string") continue;
+    if (seen.has(line.task_id)) continue;
+    seen.add(line.task_id);
+    ids.push(line.task_id);
+  }
+  return ids;
+}
+
+/**
  * Derive every task in a plan and cache the projection to `cachePath`
  * (state/status.json). Returns a taskId -> projection map. Writes ONLY the cache.
  */
@@ -1671,6 +1689,30 @@ export function projectPlan(
   }
   const byId = new Map<string, StatusProjection>();
   for (const task of plan.tasks) byId.set(task.id, deriveStatus(task, effectiveDeps));
+  // TASK-LESS ESCALATIONS (W1-T283): the loop above is a function of plan.tasks ALONE, so an
+  // escalation whose ledger `task_id` names no plan task (a triage/mount-probe id minted
+  // outside the plan) had no row to attach to and could never render, however long it stayed
+  // open — the panel read "nothing needs you" while dozens of such issues were open. A SECOND,
+  // INDEPENDENT source (never a wider version of the loop above, which would still require a
+  // plan Task to hand deriveStatus): scan the ledger once for every escalated task_id and, for
+  // any id the plan does NOT own, resolve it live and add its OWN row. An id the plan DOES own
+  // is skipped here — it already got its row above — so nothing is ever double-counted.
+  for (const taskId of taskIdsWithEscalationLines(ledgerLinesOnce)) {
+    if (plan.byId.has(taskId)) continue;
+    const escalation = resolveEscalation(ledgerLinesOnce, taskId, effectiveDeps.github);
+    if (!escalation) continue; // confirmed closed (or otherwise resolved) — no row, same as above.
+    byId.set(taskId, {
+      taskId,
+      status: "blocked",
+      merged: false,
+      source: "none",
+      needsHuman: true,
+      ...(escalation.issueUrl !== undefined ? { escalationIssueUrl: escalation.issueUrl } : {}),
+      ...(escalation.title !== undefined ? { escalationTitle: escalation.title } : {}),
+      ...(escalation.unverified !== undefined ? { escalationUnverified: true } : {}),
+      ...(escalation.openedAt !== undefined ? { escalationOpenedAt: escalation.openedAt } : {}),
+    });
+  }
   if (cachePath) {
     fs.mkdirSync(dirname(cachePath), { recursive: true });
     const projection = {
