@@ -265,6 +265,7 @@ import {
   type MergedResolver,
   type Plan,
   type Task,
+  parseTasksFromYaml,
 } from "./lib/plan.js";
 import {
   assertLintClean,
@@ -5480,6 +5481,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   let scope: Set<string> | undefined;
   let oldById: Map<string, Task> | undefined;
   let newTaskIds: Set<string> | undefined;
+  let newMonolithIds: Set<string> | undefined;
   if (baseRef) {
     const relPath = relative(repoRoot, planPath);
     // W1-T246 (recon): a plain `git show <base>:<relPath>` only ever materializes the MONOLITH
@@ -5508,12 +5510,25 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       // Tasks this PR introduces outright (absent at the base ref) — the only tasks that
       // can possibly BE a post-merge-amendment follow-up (W1-T180).
       newTaskIds = new Set(plan.tasks.filter((t) => !oldById!.has(t.id)).map((t) => t.id));
+      // impl-DS: ids NEW to the MONOLITH specifically. `oldRaw` above is the base's plan/tasks.yaml
+      // blob — the monolith ALONE, before shards are materialized beside it — so this is a per-FILE
+      // comparison, not a merged-plan one, and it costs no extra git call.
+      // That precision buys the reverse case for free: a task moved from a shard INTO the monolith is
+      // absent from the base monolith and trips, while the RIGHT migration (monolith -> shard) simply
+      // leaves the set and never does.
+      const baseMonolithIds = new Set(parseTasksFromYaml(oldRaw, `${baseRef}:${relPath}`).map((t) => t.id));
+      const headMonolithIds = parseTasksFromYaml(readFileSync(planPath, "utf8"), planPath).map((t) => t.id);
+      newMonolithIds = new Set(headMonolithIds.filter((id) => !baseMonolithIds.has(id)));
     } catch (e) {
       console.error(`### rmd lint-plan: cannot resolve --base ${baseRef}: ${(e as Error).message}`);
       return 2;
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }
+  } else {
+    // TRAP 1: this check is MEANINGLESS without a base — "new" has no definition — and a check that
+    // silently does nothing in the mode people run by hand is a check nobody notices is broken.
+    console.log("### rmd lint-plan: no --base given — the monolith-filing check is SKIPPED (it needs a base ref to know which ids are new).");
   }
 
   // W1-T180 (§5C post-merge-amendment): derived merge status for every task in `scope`,
@@ -5563,6 +5578,8 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
           baseAcceptance: oldTask?.acceptance,
           followUpFiled: followUpCarriesCriteria(added, followUpTasks),
         },
+        // impl-DS: only ever populated in --base mode, so the check is silent whole-plan.
+        newMonolithIds,
       };
     }
     // impl-DO: the CALL-SITE check needs to know whether a module already exists, and the linter
