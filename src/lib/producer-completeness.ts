@@ -216,14 +216,6 @@ export const KNOWN_UNWIRED: Readonly<Record<string, string>> = {
     "documented as pending at its own declaration and again at the row that reads it (sweep.ts:1127, " +
     "'once pendingAnswer production wiring lands'). Ledger-derived; neither buildOpenPrViews nor " +
     "fixCommand sets it.",
-  reviewOrphanedByPush:
-    "declared by W1-T225 for the review-orphan cap; no producer derives 'reviewed on an earlier " +
-    "head'. MEASURED: the two arms of the ternary at sweep.ts:1305-1309 differ 878 to 0 — the " +
-    "orphaned arm has never rendered. NOT documented as pending at its declaration; this entry is " +
-    "the first honest record of it.",
-  priorReviewOrphans:
-    "the count half of the same W1-T225 pair as reviewOrphanedByPush; the cap at sweep.ts:1266 " +
-    "never trips. NOT documented as pending at its declaration.",
 };
 
 /** What the audit concluded. Both lists must be empty for the check to pass. */
