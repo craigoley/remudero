@@ -50,6 +50,7 @@ export type LintCheck =
   | "post-merge-amendment"
   | "provenance"
   | "call-site"
+  | "monolith-filing"
   | "budget-sanity";
 export type LintSeverity = "block" | "warn";
 
@@ -909,6 +910,51 @@ export function callSiteViolations(task: Task, opts: LintOpts = {}): LintViolati
   ];
 }
 
+/**
+ * MONOLITH-FILING (impl-DS) — one storage convention for new tasks.
+ *
+ * PR #1060 redirected `rmd triage` to propose a new task as its own `plan/tasks.d/<id>-<slug>.yaml`
+ * shard rather than appending to the 992 KB `plan/tasks.yaml` monolith. But that is ONLY A PROMPT
+ * INSTRUCTION TO AN LLM: `decideTriage` (lib/triage.ts) filters `!f.startsWith("plan/")`, so a shard
+ * passes AND so does a monolith append. #1060's own author flagged the gap — the prompt DIRECTS a
+ * shard, the validator does not REQUIRE one, and a disobedient worker (or any hand-filing, or the
+ * plan/architect lanes) still passes.
+ *
+ * THIS IS NOT A SIZE EMERGENCY, and the old framing should not be repeated. The 1 MiB buffer cliff
+ * is gone (run-task.ts:589/:5298/:5500) and the monolith has essentially stopped growing: +303,798
+ * bytes on 07-20, +3,666 on 07-30, ZERO on 07-31. The reason to enforce this is CONSISTENCY — one
+ * storage convention the whole toolchain, the id minter and the conflict story can rely on.
+ *
+ * ID SETS, NEVER DIFF LINES. A reformat, a rename, a moved block or a whitespace change inside the
+ * monolith leaves the id set untouched and cannot trip this. Only an id PRESENT in the monolith on
+ * this branch and ABSENT from the monolith at the base ref is a violation.
+ *
+ * IT ALSO CATCHES THE REVERSE MIGRATION, which is more than the minimum asked for and costs nothing
+ * extra: the base side is the base's MONOLITH blob specifically (not the merged base plan), so a
+ * task moving from a shard INTO the monolith trips too — its id is absent from the base monolith.
+ * A task moving the RIGHT way, monolith → shard, never trips: its id simply leaves the monolith.
+ *
+ * REQUIRES `--base`. "New" has no meaning without one, so {@link LintOpts.newMonolithIds} is
+ * undefined in whole-plan mode and this check is silent there — the caller says so out loud rather
+ * than letting a check that cannot run look like a check that passed.
+ */
+export function monolithFilingViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  if (!opts.newMonolithIds?.has(task.id)) return [];
+  const severity: LintSeverity = opts.monolithFiling ?? "block";
+  return [
+    {
+      check: "monolith-filing",
+      severity,
+      message:
+        `task ${task.id} is NEW and was filed into plan/tasks.yaml. New tasks belong in their own ` +
+        `shard: create plan/tasks.d/${task.id}-<kebab-slug>.yaml holding a single-element YAML list ` +
+        `and remove the entry from the monolith. One task per file is the convention every new ` +
+        `filing has followed since PR #1060, and it is what keeps two concurrent filings from ` +
+        `colliding at end-of-file.`,
+    },
+  ];
+}
+
 export interface LintOpts {
   /** The task's resolved mount turn-budget — only needed to opt INTO budget-sanity. */
   mountMaxTurns?: number;
@@ -938,6 +984,11 @@ export interface LintOpts {
    *  judge against, e.g. the pre-dispatch call site, which never dispatches an
    *  already-merged task in the first place). */
   postMergeAmendment?: PostMergeAmendmentContext;
+  /** Ids present in THIS branch's `plan/tasks.yaml` and absent from the base ref's monolith.
+   *  Supplied only in `--base` mode; undefined ⇒ {@link monolithFilingViolations} is silent. */
+  newMonolithIds?: ReadonlySet<string>;
+  /** Severity for {@link monolithFilingViolations}. Default "block" — retrofit cost is zero. */
+  monolithFiling?: LintSeverity;
 }
 
 /** Lint one task. Hard checks (sizing/headless-fitness/proof-shape/proof-dialect/
@@ -954,6 +1005,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...proofResolvabilityViolations(task, opts));
   violations.push(...postMergeAmendmentViolations(task, opts));
   violations.push(...callSiteViolations(task, opts));
+  violations.push(...monolithFilingViolations(task, opts));
   const prov = provenanceViolation(task);
   if (prov) violations.push(prov);
   if (opts.mountMaxTurns !== undefined) {
