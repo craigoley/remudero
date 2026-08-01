@@ -1,0 +1,35 @@
+- id: W1-T283
+  title: "NEEDS ME can only ever show escalations that belong to a plan task — it read 'nothing needs you' while 59 issues were open, and 3 of the 4 survivors carry ids no plan task owns"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  rationale: "MEASURED at 63f63ed. The projection is built by iterating the plan and nothing else —
+    for (const task of plan.tasks) at src/lib/status.ts:1604 — and an escalation is attached inside that loop by
+    resolveEscalation(ledgerLines, task.id, deps.github) at :1519. An escalation whose task id is not a plan task
+    therefore has no row to attach to and CANNOT be rendered, however many exist.
+    OBSERVED, NOT THEORISED: the panel read 'nothing needs you' while 59 needs-human issues were open. 55 were
+    closed by hand on 2026-08-01. Of the 4 survivors, 3 carry ids that are not plan tasks (T-MOUNTPROBE and two
+    TRIAGE-fb-… ids), so plan.byId.get() is undefined for them and they will never retire or render either.
+    THE PANEL WAS TELLING THE TRUTH ABOUT ITS OWN DATA MODEL — no TASK needs you — while the operator read it as
+    a claim about the fleet. That gap is the defect."
+  design: |
+    THE PROJECTION NEEDS A SECOND SOURCE, NOT A WIDER LOOP. Escalations exist independently of the plan; the
+    render set is currently a function of plan.tasks alone. Surface task-less escalations as their own rows
+    rather than trying to synthesise a plan task for each, which would poison the plan the same way a minted
+    PR-<n> id would.
+    IT MUST NOT DOUBLE-COUNT. An escalation that DOES belong to a plan task must still render once, on that
+    task's row, exactly as today.
+  acceptance:
+    - claim: "an escalation whose task id is not a plan task renders as a NEEDS ME row"
+      proof: "unit test: test/needs-me-taskless.test.ts"
+    - claim: "the render set is reached through the real projection rather than a helper nothing calls"
+      proof: "unit test: test/needs-me-taskless.test.ts"
+    - claim: "an escalation belonging to a plan task still renders exactly once"
+      proof: "unit test: test/needs-me-taskless.test.ts"
+    - claim: "a closed escalation is absent from the rows whether or not it owns a plan task"
+      proof: "unit test: test/needs-me-taskless.test.ts"
+  risk: high
+  origin: architect

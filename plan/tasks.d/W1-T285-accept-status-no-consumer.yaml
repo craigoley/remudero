@@ -1,0 +1,35 @@
+- id: W1-T285
+  title: "the console's Accept button writes a feedback status nothing acts on — accepted is written at two sites and read by none, so the affordance changes a field and nothing else"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: "MEASURED at 63f63ed, and this CORRECTS the description this task was filed from. The claim was that
+    the only other occurrence of accepted is the enum. That is false: there are TWO writers —
+    src/lib/panel-graph.ts:175 sets accepted when a proposal PR merges, and :382 sets it when the operator's
+    decision is accept. What there is NO instance of is a READ: nothing filters, branches or renders on the
+    accepted state. Every other src/ hit is prose in a comment.
+    SO THE DEFECT IS REAL BUT IT IS A MISSING CONSUMER, NOT A MISSING WRITER, and a task that went looking for
+    the writer would find two and conclude it was already fine.
+    A BUTTON THAT CHANGES A FIELD NOBODY READS IS WORSE THAN NO BUTTON: it tells the operator an action was
+    taken and no action follows."
+  design: |
+    THIS IS AN OPERATOR RULING BEFORE IT IS AN IMPLEMENTATION, and the task must not guess. The two options are
+    (a) give accepted a consumer — an accepted proposal disappears from the inbox and appears somewhere that
+    shows accepted work, or (b) remove the affordance and let merge-state alone drive the lifecycle, since
+    panel-graph.ts:175 already sets accepted on merge without any button.
+    WHICHEVER IS CHOSEN, THE ACCEPTANCE BELOW MUST BE REWRITTEN TO MATCH IT. Filed with (a)'s shape because it
+    preserves the existing UI; a ruling for (b) makes this a deletion and shrinks the budget.
+  acceptance:
+    - claim: "an accepted entry is treated differently from a new one by a real consumer"
+      proof: "unit test: test/accept-status-consumed.test.ts"
+    - claim: "the consumer is reached from the console's own data path rather than a helper nothing calls"
+      proof: "unit test: test/accept-status-consumed.test.ts"
+    - claim: "accepting through the console changes what the operator subsequently sees"
+      proof: "unit test: test/accept-status-consumed.test.ts"
+    - claim: "an entry accepted by PR merge behaves identically to one accepted by the button"
+      proof: "unit test: test/accept-status-consumed.test.ts"
+  risk: medium
+  origin: architect

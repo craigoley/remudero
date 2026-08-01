@@ -1,0 +1,33 @@
+- id: W1-T281
+  title: "the console's ONE freshness model is unimported and serve.ts hand-mirrors it — resolveFreshness has zero callers, so STALE still renders beside 'live · updated 2s ago' eight days after the fix merged"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: "MEASURED at 63f63ed. src/lib/console-freshness.ts exports resolveFreshness (111 lines, 83 lines of
+    tests, shipped by W1-T262 / PR #777). Its ONLY reference anywhere outside its own test is a COMMENT in
+    serve.ts:1210 reading 'mirrors resolveFreshness'. serve.ts does not import the module. The tested model and
+    the rendered behaviour are two separate implementations, and the rendered one is the wrong one.
+    THIS IS WHY THE OPERATOR STILL SEES THE BUG. W1-T262 merged 2026-07-25 and the header still shows STALE next
+    to a fresh timestamp, because the fix landed in a module nothing calls.
+    THE SHAPE IS THE POINT, AND IT RECURS. Six instances in three days of code that is declared, tested and
+    unreachable: console-freshness.ts, policy.ts's discarded parse, dispatch-overlap.ts, sweep.absent_repush,
+    checksPendingSince, and the dead mounts rows. A task that only proves the function exists reproduces it."
+  design: |
+    IMPORT IT AND DELETE THE MIRROR. One call site. The behaviour is already specified by a passing suite, so
+    this is a wiring change, not a design change — do not re-derive the freshness rules.
+    THE MIRROR MUST GO. Leaving both is how the two drifted apart in the first place; a second implementation
+    beside the imported one is the defect, not a fallback.
+  acceptance:
+    - claim: "serve.ts imports and calls resolveFreshness rather than reimplementing it"
+      proof: "grep: resolveFreshness(  in src/lib/serve.ts"
+    - claim: "the hand-written mirror comment and its parallel logic are gone from serve.ts"
+      proof: "unit test: test/console-freshness-wired.test.ts"
+    - claim: "a fresh pane never renders STALE, driven through the real rendering path"
+      proof: "unit test: test/console-freshness-wired.test.ts"
+    - claim: "the module has at least one non-test importer, so it can never go orphaned again"
+      proof: "unit test: test/console-freshness-wired.test.ts"
+  risk: low
+  origin: architect
