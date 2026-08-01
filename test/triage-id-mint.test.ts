@@ -160,7 +160,10 @@ test("nextTaskIdCommand --offline: prints the id + its provenance and exits 0, r
   const planPath = planOnDisk("- id: W1-T5\n", { name: "W1-T9-x.yaml", text: "- id: W1-T9\n" });
   const code = await nextTaskIdCommand(["--plan", planPath, "--offline"]);
   assert.equal(code, 0);
-  assert.match(logs.join("\n"), /W1-T10 \(max 9 across tasks\.yaml 5, shards 9, open PRs not enumerated\)/);
+  // W1-T278: the plan fixture lives outside this checkout's repoRoot, so the git-history
+  // source has nothing to scan — "history -", never a degradation (see
+  // test/next-task-id-history.test.ts for the in-tree-history cases).
+  assert.match(logs.join("\n"), /W1-T10 \(max 9 across tasks\.yaml 5, shards 9, open PRs not enumerated, history -\)/);
   assert.match(logs.join("\n"), /--offline: open plan PRs were NOT read/, "the reduced scope is stated, never implied");
 });
 

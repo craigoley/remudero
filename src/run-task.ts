@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { homedir } from "node:os";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   architectModel,
@@ -177,7 +177,7 @@ import { assertProposedPlanLoads,
   triageCommitMessage,
   triagePrompt,
 } from "./lib/triage.js";
-import { describeMint, mintNextTaskId } from "./lib/task-id.js";
+import { mintNextTaskId, type MintDegradation, type MintSources } from "./lib/task-id.js";
 import {
   applyPlanProposalCommit,
   decidePlanArchitect,
@@ -5166,16 +5166,217 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
  * no-op — the control surface never guesses on ambiguous input.
  */
 /**
+ * W1-T278: the git-HISTORY half of the mint, layered on top of {@link mintNextTaskId}'s
+ * current-tree union (lib/task-id.ts, untouched by this task). A task filed then FOLDED away
+ * — removed from tasks.yaml, every `tasks.d/` shard, and its PR long since merged/closed —
+ * leaves NO trace in any of the three sources that module already unions, by construction:
+ * each of those reads the CURRENT tree, and a fold is exactly a removal from the current
+ * tree. Git history is the one source that survives it: every id ever DECLARED under `plan/`
+ * across every commit that ever touched it, recoverable without a network call and without
+ * checking out any ref other than the one already on disk.
+ *
+ * Only the id's ADDITION counts (a `+`-prefixed line in `git log -p`'s patch stream) — its
+ * later removal (the fold itself) never un-counts it, which is the entire point: once filed,
+ * always treated as used, so the derivation MAY skip a number but must never hand back one
+ * some past commit already owned. Renumbering, reclaiming a folded id, and changing the id
+ * format are explicitly out of scope (W1-T278's own design note).
+ */
+const ADDED_TASK_ID_RE = /^\+\s*(?:-\s*)?id:\s*["']?W1-T(\d+)/gm;
+
+/** Ids DECLARED in lines a `git log -p` patch ADDS — see {@link ADDED_TASK_ID_RE}. */
+function extractAddedTaskIds(patch: string): number[] {
+  return [...patch.matchAll(ADDED_TASK_ID_RE)].map((m) => Number(m[1]));
+}
+
+/** The on-disk shape of the history scan's cache — see {@link taskIdsEverFiled}. */
+interface TaskIdHistoryCache {
+  /** The commit sha the scan last walked THROUGH — everything at or before it is in `ids`. */
+  sha: string;
+  /** The `plan/`-relative path scanned; a cache from a different path is never trusted. */
+  planRelPath: string;
+  /** Every id ever ADDED at or before `sha`. */
+  ids: number[];
+}
+
+/**
+ * Where the history scan's cache lives: the repo's shared git-common-dir (NOT `repoRoot`
+ * itself), so a triage worktree — whose own `.git` is a FILE pointing at the main
+ * checkout's object store, not a directory — still shares one cache with every other
+ * worktree of the same repo. `null` when even `--git-common-dir` fails: every mint then
+ * does a full (still-correct, just slower) scan with no cache to read or write.
+ */
+function taskIdHistoryCachePath(repoRoot: string, gitRunner: (args: string[]) => string): string | null {
+  try {
+    const raw = gitRunner(["rev-parse", "--git-common-dir"]).trim();
+    const gitDir = isAbsolute(raw) ? raw : resolve(repoRoot, raw);
+    return join(gitDir, "rmd-task-id-history-cache.json");
+  } catch {
+    return null;
+  }
+}
+
+/** A cache that fails to parse, or was shaped by an older/different scan, is never trusted —
+ *  it is silently discarded in favor of a full rescan, never treated as a partial truth. */
+function readTaskIdHistoryCache(cachePath: string): TaskIdHistoryCache | null {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(cachePath, "utf8"));
+    if (
+      parsed !== null &&
+      typeof parsed === "object" &&
+      typeof (parsed as TaskIdHistoryCache).sha === "string" &&
+      typeof (parsed as TaskIdHistoryCache).planRelPath === "string" &&
+      Array.isArray((parsed as TaskIdHistoryCache).ids) &&
+      (parsed as TaskIdHistoryCache).ids.every((n) => typeof n === "number")
+    ) {
+      return parsed as TaskIdHistoryCache;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** Best-effort write — the cache is a cost optimization, never a correctness requirement, so
+ *  a write failure (read-only checkout, full disk) is swallowed rather than degrading the mint. */
+function writeTaskIdHistoryCache(cachePath: string, cache: TaskIdHistoryCache): void {
+  try {
+    writeFileSync(cachePath, JSON.stringify(cache), "utf8");
+  } catch {
+    // best-effort
+  }
+}
+
+/**
+ * Every task id ever DECLARED under `planRelPath` across the git history of `repoRoot`,
+ * bounded by a cache keyed on the commit sha it last scanned through (measured on this repo:
+ * a full `git log -p` over `plan/`'s ~260 history-touching commits costs ~0.12s; a warm,
+ * cache-bounded rescan of only the commits ADDED since is ~0.01s — the shape the design note
+ * asked for, cheap enough for an interactive verb either way). The id set is append-only in
+ * practice (renumbering a filed id stays out of scope), so a cached sha that is still
+ * resolvable is trusted as a floor and only the NEW commits are walked; a cache that fails to
+ * parse, or whose sha has been pruned (a history rewrite), triggers a full rescan rather than
+ * trusting stale data.
+ *
+ * DEGRADES HONESTLY: a `git` invocation that fails (no work tree, `git` unavailable, a
+ * corrupt object store) is reported via {@link MintDegradation} exactly like an unreadable
+ * shard — never swallowed into an empty, falsely-reassuring result. `degraded` here always
+ * means "this scan could not prove completeness"; the caller decides what that means for the
+ * mint's exit code, same as every other source.
+ */
+export function taskIdsEverFiled(
+  repoRoot: string,
+  planRelPath: string,
+  gitRunner: (args: string[]) => string = (args) =>
+    execFileSync("git", args, { cwd: repoRoot, encoding: "utf8" }),
+): { ids: number[]; degraded: MintDegradation[] } {
+  const degraded: MintDegradation[] = [];
+  let headSha: string;
+  try {
+    headSha = gitRunner(["rev-parse", "HEAD"]).trim();
+  } catch (err) {
+    degraded.push({ source: "history", reason: `cannot resolve HEAD: ${String(err)}` });
+    return { ids: [], degraded };
+  }
+
+  const cachePath = taskIdHistoryCachePath(repoRoot, gitRunner);
+  const cache = cachePath ? readTaskIdHistoryCache(cachePath) : null;
+  if (cache && cache.sha === headSha && cache.planRelPath === planRelPath) {
+    return { ids: cache.ids, degraded }; // nothing has changed since the last scan
+  }
+
+  let range = "HEAD";
+  let baseIds: number[] = [];
+  if (cache && cache.planRelPath === planRelPath) {
+    try {
+      gitRunner(["cat-file", "-e", `${cache.sha}^{commit}`]);
+      range = `${cache.sha}..HEAD`; // the cached sha is still resolvable — scan only what's new
+      baseIds = cache.ids;
+    } catch {
+      // pruned/rewritten history under us — fall through to a full rescan, not a partial one
+    }
+  }
+
+  let patch: string;
+  try {
+    patch = gitRunner(["log", range, "-p", "--", planRelPath]);
+  } catch (err) {
+    degraded.push({ source: "history", reason: `cannot scan plan/ history (${range}): ${String(err)}` });
+    return { ids: [], degraded };
+  }
+
+  const ids = [...new Set([...baseIds, ...extractAddedTaskIds(patch)])].sort((a, b) => a - b);
+  if (cachePath) writeTaskIdHistoryCache(cachePath, { sha: headSha, planRelPath, ids });
+  return { ids, degraded };
+}
+
+/** {@link mintNextTaskId}'s result, floored by {@link taskIdsEverFiled} — see that function's
+ *  doc for why a folded id needs its own source. `historyMax` is `null` when `planPath` is
+ *  not inside `repoRoot` at all (a fixture plan with no associated git history — skipped, same
+ *  as an absent `tasks.d/` is treated as empty rather than degraded) or when the scan found no
+ *  ids; either way it never LOWERS the mint, only ever raises the floor. */
+export interface MintedTaskIdWithHistory {
+  id: string;
+  n: number;
+  maxSeen: number;
+  sources: MintSources;
+  historyMax: number | null;
+  degraded: MintDegradation[];
+}
+
+export function mintNextTaskIdWithHistory(opts: {
+  planPath: string;
+  repoRoot: string;
+  openPrTexts?: () => string[];
+  gitRunner?: (args: string[]) => string;
+}): MintedTaskIdWithHistory {
+  const base = mintNextTaskId({ planPath: opts.planPath, openPrTexts: opts.openPrTexts });
+
+  const planRelPath = relative(opts.repoRoot, dirname(opts.planPath));
+  let historyMax: number | null = null;
+  let historyDegraded: MintDegradation[] = [];
+  if (!isAbsolute(planRelPath) && !planRelPath.startsWith("..")) {
+    const history = taskIdsEverFiled(opts.repoRoot, planRelPath === "" ? "." : planRelPath, opts.gitRunner);
+    historyMax = history.ids.length ? Math.max(...history.ids) : null;
+    historyDegraded = history.degraded;
+  }
+
+  const maxSeen = Math.max(base.maxSeen, historyMax ?? 0);
+  return {
+    id: `W1-T${maxSeen + 1}`,
+    n: maxSeen + 1,
+    maxSeen,
+    sources: base.sources,
+    historyMax,
+    degraded: [...base.degraded, ...historyDegraded],
+  };
+}
+
+/** lib/task-id.ts's `describeMint`, plus the history source — one-line provenance for the
+ *  layered mint. */
+export function describeMintWithHistory(mint: MintedTaskIdWithHistory): string {
+  const src =
+    `tasks.yaml ${mint.sources.monolith ?? "-"}, shards ${mint.sources.shards ?? "-"}, ` +
+    `open PRs ${mint.sources.openPrs ?? "not enumerated"}, history ${mint.historyMax ?? "-"}`;
+  const warn = mint.degraded.length
+    ? ` — DEGRADED: ${mint.degraded.map((d) => `${d.source} (${d.reason})`).join("; ")}`
+    : "";
+  return `${mint.id} (max ${mint.maxSeen} across ${src})${warn}`;
+}
+
+/**
  * `rmd next-task-id [--plan <path>] [--offline]` — the OPERATOR-facing half of the mint
- * (lib/task-id.ts). An id picked by eye collided twice in one session (W1-T256->257 in #770,
- * W1-T260->261 in #775: one already owned by a merged PR, one by a `plan/tasks.d/` shard),
- * each costing a mechanical renumber + re-push after `rmd lint-plan` refused the duplicate.
+ * (lib/task-id.ts, layered with the git-history scan above). An id picked by eye collided
+ * twice in one session (W1-T256->257 in #770, W1-T260->261 in #775: one already owned by a
+ * merged PR, one by a `plan/tasks.d/` shard), each costing a mechanical renumber + re-push
+ * after `rmd lint-plan` refused the duplicate. A THIRD class — an id filed and later folded
+ * away, invisible to every current-tree source — is what the history layer closes (W1-T278).
  * This prints the derived id AND its provenance, so a mint is checkable rather than trusted.
  *
- * Exits 0 on a clean mint, 1 when a source DEGRADED (an unreadable shard, or an open-PR read
- * that failed): the id is then a FLOOR that may still collide upward, and a non-zero exit is
- * what stops a script from consuming it as authoritative. `--offline` skips the open-PR read
- * deliberately — that is a stated scope reduction, still reported, still exit 0.
+ * Exits 0 on a clean mint, 1 when a source DEGRADED (an unreadable shard, a failed open-PR
+ * read, or a failed history scan): the id is then a FLOOR that may still collide upward, and
+ * a non-zero exit is what stops a script from consuming it as authoritative. `--offline` skips
+ * the open-PR read deliberately — that is a stated scope reduction, still reported, still
+ * exit 0 (the history scan still runs offline — it is a local git read, not a network one).
  */
 export async function nextTaskIdCommand(rest: string[]): Promise<number> {
   const badArg = unknownArgError("next-task-id", rest, ["--plan"], ["--offline"]);
@@ -5186,17 +5387,18 @@ export async function nextTaskIdCommand(rest: string[]): Promise<number> {
   const planPath = flagValue(rest, "--plan") ?? join(repoRoot, "plan", "tasks.yaml");
   const offline = rest.includes("--offline");
   const self = resolveOwnerRepo();
-  let mint;
+  let mint: MintedTaskIdWithHistory;
   try {
-    mint = mintNextTaskId({
+    mint = mintNextTaskIdWithHistory({
       planPath,
+      repoRoot,
       openPrTexts: offline ? undefined : () => openPrMintTexts(self.owner, self.repo),
     });
   } catch (e) {
     console.error(`### rmd next-task-id: ${(e as Error).message}`);
     return 2;
   }
-  console.log(describeMint(mint));
+  console.log(describeMintWithHistory(mint));
   if (offline) console.log("(--offline: open plan PRs were NOT read — this id is a floor, not a guarantee)");
   return mint.degraded.length ? 1 : 0;
 }
@@ -9711,12 +9913,16 @@ export async function triageCommand(
     }
 
     // ID MINT (the 2/2 collision evidence: W1-T256->257 #770, W1-T260->261 #775; lineage
-    // feedback#fb-1784766965325-c7b673). Derived HERE, from the FRESH worktree's plan (monolith
-    // + every tasks.d shard) plus the ids open plan PRs have already minted, and handed to the
-    // worker — which has no Bash tool and so could never have run the grep the prompt used to
-    // describe. Ledgered with its provenance so a degraded source is visible, never silent.
-    const mint = mintNextTaskId({
+    // feedback#fb-1784766965325-c7b673; PLUS the W1-T278 fold class: an id filed and later
+    // folded away is invisible to every current-tree source, so the mint is also floored by
+    // the plan/ git history — see mintNextTaskIdWithHistory). Derived HERE, from the FRESH
+    // worktree's plan (monolith + every tasks.d shard + its own git history) plus the ids
+    // open plan PRs have already minted, and handed to the worker — which has no Bash tool
+    // and so could never have run the grep the prompt used to describe. Ledgered with its
+    // provenance so a degraded source is visible, never silent.
+    const mint = mintNextTaskIdWithHistory({
       planPath: join(worktreePath, "plan", "tasks.yaml"),
+      repoRoot: worktreePath,
       openPrTexts: () => openPrMintTexts(owner, repo),
     });
     log("triage.id_minted", {
@@ -9725,9 +9931,10 @@ export async function triageCommand(
       source_monolith: mint.sources.monolith,
       source_shards: mint.sources.shards,
       source_open_prs: mint.sources.openPrs,
+      source_history: mint.historyMax,
       degraded: mint.degraded.map((d) => d.source),
     });
-    say(`next task id: ${describeMint(mint)}`);
+    say(`next task id: ${describeMintWithHistory(mint)}`);
 
     const worker = await spawn({
       cwd: worktreePath,
@@ -11941,7 +12148,7 @@ const COMMANDS: readonly CommandSpec[] = [
   {
     name: "next-task-id",
     usage:
-      "rmd next-task-id [--plan <path>] [--offline]   # print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, and the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775); --offline skips the open-PR read (the mint is then a FLOOR, and says so); prints its provenance, spawns nothing",
+      "rmd next-task-id [--plan <path>] [--offline]   # print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775), and every id ever declared in the git history of plan/ (the fold class: an id filed then folded away, W1-T278); --offline skips the open-PR read (the mint is then a FLOOR, and says so; the history scan still runs — it is a local git read, not a network one); prints its provenance, spawns nothing",
   },
   { name: "retro", usage: "rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)" },
   {
