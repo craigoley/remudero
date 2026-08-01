@@ -33,7 +33,15 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+// Imported as the module's DEFAULT export (a plain, mutable object), not as named bindings
+// (`import { existsSync } from "node:fs"`) — the same load-bearing reason status.ts's own header
+// comment documents: ESM named-export bindings off `node:fs` are non-configurable, so a test
+// spying via `node:test`'s `mock.method` cannot intercept a call already bound to a named import
+// at load time. Calling `fs.existsSync(...)` as a property access AT CALL TIME (never
+// destructured to a local const) keeps every call a live lookup on this same mutable object, so
+// a TOCTOU-race test (a marker present at `existsSync` but gone by `statSync`) can actually
+// simulate it.
+import fs from "node:fs";
 import { join } from "node:path";
 import {
   detectDaemonCrashLoop,
@@ -213,7 +221,7 @@ function deriveLastCycle(lines: ReadonlyArray<Record<string, unknown>>): { ts?: 
 
 function readJsonMarker(path: string): Record<string, unknown> | null {
   try {
-    return JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    return JSON.parse(fs.readFileSync(path, "utf8")) as Record<string, unknown>;
   } catch {
     return null; // absent, or present-but-unparseable — either way, no extra detail to show
   }
@@ -226,7 +234,7 @@ function markerAgeMs(path: string, json: Record<string, unknown> | null, nowMs: 
   const parsed = iso ? Date.parse(iso) : NaN;
   if (Number.isFinite(parsed)) return Math.max(0, nowMs - parsed);
   try {
-    return Math.max(0, nowMs - statSync(path).mtimeMs);
+    return Math.max(0, nowMs - fs.statSync(path).mtimeMs);
   } catch {
     return undefined;
   }
@@ -288,7 +296,7 @@ function buildLatchRows(root: string, nowMs: number, isPidAlive: (pid: number) =
 
   for (const def of STATIC_LATCHES) {
     const path = def.path(root);
-    if (!existsSync(path)) continue;
+    if (!fs.existsSync(path)) continue;
     const json = readJsonMarker(path);
     rows.push({ name: def.name, ageMs: markerAgeMs(path, json, nowMs), consequence: def.consequence(json) });
   }
@@ -297,7 +305,7 @@ function buildLatchRows(root: string, nowMs: number, isPidAlive: (pid: number) =
   // latch — mirrors run-task.ts's own liveInflightRuns definition of "in flight").
   const inflightDir = join(root, "state", "inflight");
   try {
-    for (const entry of readdirSync(inflightDir)) {
+    for (const entry of fs.readdirSync(inflightDir)) {
       if (!entry.endsWith(".lock")) continue;
       const taskId = entry.slice(0, -".lock".length);
       const info = readInflightLock(inflightDir, taskId);
@@ -326,7 +334,7 @@ function buildLatchRows(root: string, nowMs: number, isPidAlive: (pid: number) =
   // drain-now — PEEK ONLY, never consume (consuming is exclusively the daemon's own job;
   // a status read must never have the side effect of erasing the very request it reports).
   const drainNowPath = drainNowFilePath(root);
-  if (existsSync(drainNowPath)) {
+  if (fs.existsSync(drainNowPath)) {
     const json = readJsonMarker(drainNowPath);
     rows.push({
       name: "drain-now",

@@ -7963,6 +7963,20 @@ export async function upCommand(rest: string[], deps: UpDeps = {}): Promise<numb
   return ok ? 0 : 1;
 }
 
+/** Injectable seam for {@link statusCommand} — every default is the real, production behaviour;
+ *  a test overrides just enough to avoid `loadConfig()`'s `which claude` shell-out and any real
+ *  launchd query, the same "swap the edges, keep the middle real" shape as {@link DownDeps}. */
+export interface StatusDeps {
+  loadConfig?: () => Config;
+  queryService?: (service: ServiceName) => { running: boolean; pid: number | null };
+  ledgerPathFor?: (config: Config) => string;
+  repoRoot?: string;
+  buildStatusBoard?: typeof buildStatusBoard;
+  renderStatusBoardText?: typeof renderStatusBoardText;
+  out?: (line: string) => void;
+  err?: (line: string) => void;
+}
+
 /**
  * `rmd status [--json]` — "is it running" from LOCAL truth only (W1-T279, half 1 of 2,
  * MASTER-PLAN §7/§5D). LIVENESS (daemon/serve/deploy-supervisor process state + boot time +
@@ -7975,23 +7989,30 @@ export async function upCommand(rest: string[], deps: UpDeps = {}): Promise<numb
  * marker, never spawns anything, always exits 0 (bad args aside) — offline-safe by construction
  * (no `git fetch`, no `gh` call, no network read at all).
  */
-async function statusCommand(rest: string[]): Promise<number> {
+export async function statusCommand(rest: string[], deps: StatusDeps = {}): Promise<number> {
+  const out = deps.out ?? ((l: string) => console.log(l));
+  const err = deps.err ?? ((l: string) => console.error(l));
   const badArg = unknownArgError("status", rest, [], ["--json"]);
   if (badArg) {
-    console.error(badArg + "\n" + USAGE);
+    err(badArg + "\n" + USAGE);
     return 2;
   }
-  const config = loadConfig();
+  const config = (deps.loadConfig ?? loadConfig)();
   const uid = realUid();
-  const queryService = (service: ServiceName): { running: boolean; pid: number | null } => {
-    const label = service === "daemon" ? DAEMON_LABEL : service === "serve" ? SERVE_LABEL : SUPERVISOR_LABEL;
-    const state = queryLaunchdService(label, uid);
-    // "running" means a live pid, not merely "loaded" — a bootstrapped-but-not-spawned job
-    // answers "is it running" with no, exactly like an unloaded one.
-    return { running: state.pid !== null, pid: state.pid };
-  };
-  const model = buildStatusBoard(config.root, ledgerPathFor(config), { queryService, repoDir: repoRoot });
-  console.log(rest.includes("--json") ? JSON.stringify(model, null, 2) : renderStatusBoardText(model));
+  const queryService =
+    deps.queryService ??
+    ((service: ServiceName): { running: boolean; pid: number | null } => {
+      const label = service === "daemon" ? DAEMON_LABEL : service === "serve" ? SERVE_LABEL : SUPERVISOR_LABEL;
+      const state = queryLaunchdService(label, uid);
+      // "running" means a live pid, not merely "loaded" — a bootstrapped-but-not-spawned job
+      // answers "is it running" with no, exactly like an unloaded one.
+      return { running: state.pid !== null, pid: state.pid };
+    });
+  const buildBoard = deps.buildStatusBoard ?? buildStatusBoard;
+  const render = deps.renderStatusBoardText ?? renderStatusBoardText;
+  const ledgerPath = (deps.ledgerPathFor ?? ledgerPathFor)(config);
+  const model = buildBoard(config.root, ledgerPath, { queryService, repoDir: deps.repoRoot ?? repoRoot });
+  out(rest.includes("--json") ? JSON.stringify(model, null, 2) : render(model));
   return 0;
 }
 

@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import fsDefault from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -7,6 +9,8 @@ import { buildStatusBoard, renderStatusBoardText, type ServiceName, type StatusB
 import { requestDrainNow, requestKick, requestPause, requestStop, setQuietHours } from "../src/lib/fleet-control.js";
 import { acquireInflightLock } from "../src/lib/inflight-lock.js";
 import { deployAutoPath, deployFailedAlertPath } from "../src/lib/deployer.js";
+import { statusCommand } from "../src/run-task.js";
+import type { Config } from "../src/lib/config.js";
 
 // ── W1-T279: rmd status, half 1 of 2 — ONE read model over LOCAL truth (LIVENESS / LATCHES /
 // LAST CYCLE), rendered as text or --json from the SAME buildStatusBoard() result. Every test
@@ -293,4 +297,113 @@ test("buildStatusBoard: is a pure function of its deps — the SAME inputs produ
   const a = buildStatusBoard(root, ledgerPath, deps);
   const b = buildStatusBoard(root, ledgerPath, deps);
   assert.deepEqual(a, b);
+});
+
+// ── ACCEPTANCE 6: `statusCommand` (run-task.ts's CLI call site) — thin glue over the SAME
+// buildStatusBoard()/renderStatusBoardText() this file already proves; every seam is injected so
+// `loadConfig()` (shells `which claude`) and `queryLaunchdService` (real launchctl) never run.
+
+function fakeConfig(root: string): Config {
+  return { claudeBin: "/nonexistent/claude", root } as Config;
+}
+
+test("statusCommand: an unknown flag returns 2 and reports the bad-arg message, without touching config/ledger/launchd", async () => {
+  const lines: string[] = [];
+  const rc = await statusCommand(["--bogus"], {
+    loadConfig: () => {
+      throw new Error("loadConfig must not run for a bad-arg exit");
+    },
+    err: (l) => lines.push(l),
+  });
+  assert.equal(rc, 2);
+  assert.ok(lines.some((l) => l.includes("--bogus")), `expected a --bogus mention, got: ${lines.join("\n")}`);
+});
+
+test("statusCommand: text mode (no --json) renders the SAME text renderStatusBoardText() produces for the injected model", async () => {
+  const root = tmpRoot();
+  requestPause(root, "text-mode check");
+  const lines: string[] = [];
+  const rc = await statusCommand([], {
+    loadConfig: () => fakeConfig(root),
+    queryService: () => ({ running: false, pid: null }),
+    ledgerPathFor: () => join(tmpdir(), "definitely-does-not-exist-ever.ndjson"),
+    repoRoot: "/nonexistent/repo/for/tests",
+    out: (l) => lines.push(l),
+  });
+  assert.equal(rc, 0);
+  assert.equal(lines.length, 1);
+  assert.ok(lines[0].includes("PAUSE"), `expected the PAUSE latch in text output, got: ${lines[0]}`);
+});
+
+// ── ACCEPTANCE 7: the UNINJECTED defaults — `defaultResolveOriginMainSha`'s real, offline-safe
+// `git rev-parse origin/main` (no network: a local `refs/remotes/origin/main` ref, never a
+// fetch), success and not-a-repo-failure both; and `markerAgeMs`'s statSync-throws TOCTOU catch
+// (a marker present at the `existsSync` check but gone/unreadable by the time its age is read) —
+// every one of these three is reachable ONLY by leaving the seam uninjected, so `baseDeps()`
+// (which always overrides `resolveOriginMainSha`) never exercises them.
+
+test("buildStatusBoard: LIVENESS — the real, uninjected origin/main resolver runs an actual local `git rev-parse` (fresh) and fails closed to 'unknown' off a non-repo dir (no network either way)", () => {
+  const gitRoot = mkdtempSync(join(tmpdir(), "status-board-git-"));
+  execFileSync("git", ["init", "-q"], { cwd: gitRoot });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: gitRoot });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: gitRoot });
+  writeFileSync(join(gitRoot, "f.txt"), "x");
+  execFileSync("git", ["add", "."], { cwd: gitRoot });
+  execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: gitRoot });
+  const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: gitRoot }).toString().trim();
+  // A LOCAL remote-tracking ref, never a real remote/fetch — offline-safe by construction.
+  execFileSync("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], { cwd: gitRoot });
+
+  const ledgerPath = join(mkdtempSync(join(tmpdir(), "status-board-ledger-")), "ledger.ndjson");
+  writeFileSync(ledgerPath, JSON.stringify(ledgerLine({ step: "daemon.boot", head_sha: sha })) + "\n");
+
+  const deps: StatusBoardDeps = {
+    queryService: (service) => (service === "daemon" ? { running: true, pid: 111 } : { running: false, pid: null }),
+    repoDir: gitRoot,
+    now: () => NOW_MS,
+    isPidAlive: () => true,
+    // deliberately no `resolveOriginMainSha` override — exercises the real default.
+  };
+  const fresh = buildStatusBoard(tmpRoot(), ledgerPath, deps);
+  assert.deepEqual(fresh.liveness.headVsOriginMain, { status: "fresh" });
+
+  const notARepo = tmpRoot();
+  const unresolvable = buildStatusBoard(tmpRoot(), ledgerPath, { ...deps, repoDir: notARepo });
+  assert.deepEqual(unresolvable.liveness.headVsOriginMain, { status: "unknown" });
+});
+
+test("buildStatusBoard: LATCHES — a marker that vanishes between the existsSync check and its age read (TOCTOU) renders an unknown age, never a thrown error", (t) => {
+  const root = tmpRoot();
+  writeFileSync(deployAutoPath(root), ""); // bare touch file, no JSON body — normally an mtime read
+  const target = deployAutoPath(root);
+  const realStatSync = fsDefault.statSync;
+  t.mock.method(fsDefault, "statSync", (p: unknown, ...rest: unknown[]) => {
+    if (String(p) === target) throw new Error("ENOENT: raced away between existsSync and statSync");
+    return (realStatSync as (...a: unknown[]) => unknown)(p, ...rest);
+  });
+
+  const model = buildStatusBoard(root, join(tmpdir(), "does-not-exist.ndjson"), baseDeps());
+  const row = model.latches.rows.find((r) => r.name === "DEPLOY_AUTO");
+  assert.ok(row, "DEPLOY_AUTO must still render as a row — existsSync already confirmed it present");
+  assert.equal(row!.ageMs, undefined);
+});
+
+test("statusCommand: --json emits a JSON-parseable model with the SAME latch row --json would give buildStatusBoard directly", async () => {
+  const root = tmpRoot();
+  requestStop(root, "json-mode check");
+  const lines: string[] = [];
+  const rc = await statusCommand(["--json"], {
+    loadConfig: () => fakeConfig(root),
+    queryService: () => ({ running: false, pid: null }),
+    ledgerPathFor: () => join(tmpdir(), "definitely-does-not-exist-ever.ndjson"),
+    repoRoot: "/nonexistent/repo/for/tests",
+    out: (l) => lines.push(l),
+  });
+  assert.equal(rc, 0);
+  assert.equal(lines.length, 1);
+  const parsed = JSON.parse(lines[0]);
+  assert.ok(
+    parsed.latches.rows.some((r: { name: string }) => r.name === "STOP"),
+    `expected a STOP latch row, got: ${lines[0]}`,
+  );
 });
