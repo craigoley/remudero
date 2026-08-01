@@ -42,12 +42,67 @@ import {
   type TraceChain,
 } from "@remudero/api-client/client";
 
-function readConfig(): { baseUrl: string; token: string } {
-  const params = new URLSearchParams(window.location.search);
-  return {
-    baseUrl: params.get("daemon") ?? "http://localhost:4317",
-    token: params.get("token") ?? "",
-  };
+export const DEFAULT_DAEMON_URL = "http://localhost:4317";
+
+/**
+ * Is `raw` a daemon this page is willing to send its bearer token to?
+ *
+ * CodeQL js/client-side-request-forgery (alerts #32/#33/#52/#54) flagged the four request sites in
+ * packages/api-client; the taint SOURCE is here. `?daemon=` is attacker-choosable — anyone who can
+ * get the operator to open a link chooses it — and `readConfig` handed it to `createDaemonClient`,
+ * which sends `authorization: Bearer <?token=>` to whatever host it names. A link of the shape
+ * `?daemon=https://evil.example&token=<the operator's token>` therefore exfiltrated a live
+ * credential. That is the whole bug, and validating the URL's SHAPE in the client library does not
+ * fix it: `https://evil.example` is a perfectly well-formed https URL.
+ *
+ * So this is the allow-list CodeQL's own remediation asks for ("Pick the hostname from an
+ * allow-list instead of constructing it directly from user input"). Three admissible cases, each
+ * matching a way this page is actually reached:
+ *
+ *   - THE PAGE'S OWN ORIGIN. The end state named in this file's header — the daemon serving this
+ *     static page itself. Nothing is gained by refusing the host we were already loaded from.
+ *   - LOOPBACK. `localhost` / `127.0.0.1` / `[::1]`, the documented local-testing path and the
+ *     default. Reaching an attacker's machine through loopback would already require code
+ *     execution on this host, at which point a query parameter is not the problem.
+ *   - THE TAILNET. `*.ts.net`, the documented deployment. Tailscale names are issued by the
+ *     tailnet, not chosen by whoever wrote the link.
+ *
+ * MATCHED ON THE PARSED `hostname`, never on the raw string. A substring test against the whole
+ * URL is defeated by `https://evil.example/?x=.ts.net` or `https://evil.example#localhost`, and a
+ * suffix test on `hostname` alone would admit `https://nottailscale-ts.net` — hence the leading-dot
+ * check below.
+ */
+export function isAllowedDaemonUrl(raw: string, pageOrigin: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return false;
+  if (u.origin === pageOrigin) return true;
+  const host = u.hostname.toLowerCase();
+  if (host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]") return true;
+  return host === "ts.net" || host.endsWith(".ts.net");
+}
+
+/**
+ * Connection config from the query string, with a REFUSED `?daemon=` falling back to the default
+ * rather than being honoured. `rejectedDaemon` carries the refused value so the caller can say so
+ * out loud — a silent fallback would leave an operator staring at localhost data wondering why
+ * their link did nothing.
+ */
+export function readConfig(
+  search: string = window.location.search,
+  pageOrigin: string = window.location.origin,
+): { baseUrl: string; token: string; rejectedDaemon?: string } {
+  const params = new URLSearchParams(search);
+  const requested = params.get("daemon");
+  const token = params.get("token") ?? "";
+  if (requested !== null && !isAllowedDaemonUrl(requested, pageOrigin)) {
+    return { baseUrl: DEFAULT_DAEMON_URL, token, rejectedDaemon: requested };
+  }
+  return { baseUrl: requested ?? DEFAULT_DAEMON_URL, token };
 }
 
 function statusLabel(p: StatusProjection): string {
@@ -136,6 +191,11 @@ function runAction(status: HTMLElement, action: string, fn: () => Promise<unknow
  * through `client`, never a hand-rolled HTTP call of its own (scripts/no-hand-rolled-fetch-check.mjs).
  */
 export function wireControls(doc: Document, client: DaemonClient): void {
+  // The refused-daemon warning is raised HERE rather than in the `typeof document` entry block
+  // below: that block cannot be entered by any test (there is no `document` under `node --test`),
+  // so a warning wired there would ship unproven. This function already receives the document, is
+  // exported, and runs on every page that has controls — the same surface the refusal concerns.
+  applyDaemonRejection(doc, readConfig());
   const status = requiredEl<HTMLElement>(doc, "controls-status");
   const reasonInput = requiredEl<HTMLInputElement>(doc, "control-reason");
 
@@ -322,6 +382,24 @@ export function wireFeedbackPanel(doc: Document, client: DaemonClient): void {
       renderTraceGraph(graphRoot, chain);
     });
   });
+}
+
+/**
+ * Say out loud that a `?daemon=` was refused. Falling back silently would leave an operator looking
+ * at localhost data believing their link worked — and would hide the fact that someone sent them a
+ * link pointing at a host that wanted their token, which is the part worth knowing.
+ *
+ * Takes the document rather than reaching for the global so the message is assertable without a
+ * DOM, the same split render()/applyUpdate() already uses. No-ops when nothing was refused.
+ */
+export function applyDaemonRejection(doc: Document, cfg: { rejectedDaemon?: string }): void {
+  if (cfg.rejectedDaemon === undefined) return;
+  const banner = doc.getElementById("controls-status");
+  if (!banner) return;
+  banner.textContent =
+    `Refused the ?daemon= in this link (${cfg.rejectedDaemon}) — it is not this page's origin, ` +
+    `loopback, or a tailnet host. Using ${DEFAULT_DAEMON_URL}. If you did not construct this ` +
+    `link yourself, treat the token in it as compromised.`;
 }
 
 if (typeof document !== "undefined") {
