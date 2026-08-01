@@ -5565,6 +5565,9 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
         },
       };
     }
+    // impl-DO: the CALL-SITE check needs to know whether a module already exists, and the linter
+    // is pure — so the predicate is supplied here, the one place holding a real checkout to ask.
+    opts.moduleExists = (rel: string) => existsSync(join(repoRoot, rel));
     const { violations } = lintTask(task, opts);
     const blocking = violations.filter((v) => v.severity === "block");
     const soft = violations.filter((v) => v.severity === "warn");

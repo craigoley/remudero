@@ -49,6 +49,7 @@ export type LintCheck =
   | "proof-resolvability"
   | "post-merge-amendment"
   | "provenance"
+  | "call-site"
   | "budget-sanity";
 export type LintSeverity = "block" | "warn";
 
@@ -838,6 +839,76 @@ export function budgetSanityWarning(
 
 // ── Aggregator ────────────────────────────────────────────────────────────────
 
+/**
+ * CALL-SITE (impl-DO) — "the code is REACHED, not merely that it exists".
+ *
+ * ELEVEN MEASURED INSTANCES IN THREE DAYS of code that merged green and nothing ever calls:
+ * `console-freshness.ts` (111 lines, 83 of tests, `serve.ts` never imported it — the defect it
+ * fixed is still on screen eight days later), `panel-skills.ts`, `panel-skill-run.ts`,
+ * `runbook-coverage.ts`, `log-rotation.ts`, and PR #1066's auto-triage rung, whose producer
+ * `daemonCommand` never supplied. Eighteen passing tests, three genuine diff-coverage blocks and a
+ * green review, dead on arrival.
+ *
+ * WHY NO EXISTING GATE CATCHES IT (recon-DL): `lint-plan` never opens src/; `tsc` is satisfied
+ * because a TEST is an importer; `coverage-ratchet` is satisfied because a unit test calling the
+ * function directly covers 100% of it; `remudero-review` executes those same tests. Every gate asks
+ * whether the code WORKS. None asks whether anything CALLS it.
+ *
+ * THE RULE. A task that will CREATE a src/ module must carry at least one acceptance criterion
+ * whose proof demonstrates a CALL SITE in a DIFFERENT file: `grep: <symbol>( in <consumer path>`.
+ *
+ * ★ CALL vs MENTION, AND THE EXACT LIMIT OF WHAT THIS CHECKS. `grep: resolveFreshness in
+ * src/lib/serve.ts` passes on a COMMENT — that is precisely how W1-T267's proof exited 0 against
+ * entirely unbuilt work. `grep: resolveFreshness( in src/lib/serve.ts` demands the open paren, so
+ * the pattern can only be satisfied by something shaped like an invocation. This check enforces
+ * THE SHAPE OF THE PROOF, which is mechanically decidable. It does NOT and cannot verify that the
+ * eventual grep hit is executable code rather than a comment containing `foo(` — that would need to
+ * run the proof against a tree that does not exist yet. Saying so plainly is the point: this is the
+ * honest weaker version, and what it cannot catch is a comment written to look like a call.
+ *
+ * MULTI-LINE CALLS ARE NOT A PRACTICAL RISK HERE, and that was measured rather than assumed: across
+ * all of src/ at b5fd9cc there are 12,639 same-line `identifier(` occurrences and ONE split across a
+ * newline (0.008%). A line-oriented grep for `foo(` therefore finds real call sites.
+ */
+export function callSiteViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  // NO PREDICATE ⇒ NO OPINION. The linter is pure (no fs), so whether a module already exists is
+  // the caller's to answer. Absent it this check is silent rather than guessing — a wrong guess
+  // here would flag every task that merely EDITS a module.
+  if (!opts.moduleExists) return [];
+  const severity: LintSeverity = opts.callSite ?? "warn";
+  const created = (task.files ?? []).filter(
+    (f) => f.startsWith("src/") && f.endsWith(".ts") && !f.includes("*") && !opts.moduleExists!(f),
+  );
+  if (created.length === 0) return [];
+
+  const proves = (c: AcceptanceCriterion): boolean => {
+    const parsed = parseWhitelistedProof(c.proof);
+    if (!parsed || parsed.kind !== "grep") return false;
+    const m = /^grep:\s*(.+?)\s+in\s+(\S+)\s*$/i.exec(String(c.proof).trim());
+    if (!m) return false;
+    const [, pattern, path] = m;
+    // A CALL, not a mention: the pattern must demand an invocation…
+    if (!pattern.includes("(")) return false;
+    // …in a file OTHER than the module being created. A module calling itself proves nothing about
+    // whether the rest of the program reaches it.
+    return !created.includes(path);
+  };
+
+  if ((task.acceptance ?? []).some(proves)) return [];
+  return [
+    {
+      check: "call-site",
+      severity,
+      message:
+        `task ${task.id} creates ${created.join(", ")} but no acceptance criterion proves a CALL SITE ` +
+        `for it. Add one of the form: grep: <symbol>( in <the file that calls it> — the open paren is ` +
+        `required (a bare symbol name passes on a comment), and the path must differ from the new ` +
+        `module. Eleven modules have merged green and unreached; this is the check that would have ` +
+        `caught six of them.`,
+    },
+  ];
+}
+
 export interface LintOpts {
   /** The task's resolved mount turn-budget — only needed to opt INTO budget-sanity. */
   mountMaxTurns?: number;
@@ -849,6 +920,11 @@ export interface LintOpts {
    *  pre-dispatch site used to pass is still honoured here, but nothing passes it: a proof
    *  that cannot execute is refused before a worker spawns. */
   proofDialect?: LintSeverity;
+  /** Does this repo-relative path already exist? Supplied by the caller because the linter is pure.
+   *  Absent ⇒ {@link callSiteViolations} is silent. */
+  moduleExists?: (repoRelPath: string) => boolean;
+  /** Severity for {@link callSiteViolations}. Default "warn" — see the report's retrofit count. */
+  callSite?: LintSeverity;
   /** Severity for {@link proofResolvabilityViolations}. Default "block" — but `rmd
    *  run-task`'s pre-dispatch call site DELIBERATELY still passes "warn", and that is not an
    *  oversight: a queued task's proof legitimately FORWARD-REFERENCES the test its own PR
@@ -877,6 +953,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...proofDialectViolations(task, opts));
   violations.push(...proofResolvabilityViolations(task, opts));
   violations.push(...postMergeAmendmentViolations(task, opts));
+  violations.push(...callSiteViolations(task, opts));
   const prov = provenanceViolation(task);
   if (prov) violations.push(prov);
   if (opts.mountMaxTurns !== undefined) {
