@@ -37,6 +37,7 @@ import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, st
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
 import { createService, type Route, type ServiceOptions, type ServiceTokens, type SseRoute } from "./service.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
@@ -66,6 +67,9 @@ import { buildAccountUsageRoute, type AccountUsageDeps } from "./account-usage.j
 export const DEFAULT_SERVE_PORT = 4317;
 
 export interface ServeDeps {
+  /** Injectable ONLY so a unit test can pin the captured sha; real callers omit it and get
+   *  {@link resolveConsoleSha}, resolved once at server start. */
+  consoleSha?: string;
   board: BoardDeps;
   /**
    * `plan/feedback/` + `plan/tasks.yaml` root and GitHub trace gateway (panel-graph.ts).
@@ -322,7 +326,10 @@ function skeletonRows(n: number): string {
   return Array.from({ length: n }, () => '<li class="row skeleton" aria-hidden="true"><span class="skeleton-bar"></span></li>').join("");
 }
 
-export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number> = DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS): string {
+export function renderShellHtml(
+  phaseElapsedThresholdsMs: Record<string, number> = DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS,
+  consoleSha: string = CONSOLE_SHA_UNKNOWN,
+): string {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -676,6 +683,11 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
     <span class="glance-item"><span class="glance-label">governor</span><span class="glance-value" id="au-governor">…</span></span>
     <span class="glance-item"><span class="glance-label">usage as of</span><span class="glance-value" id="au-as-of">…</span></span>
     <span class="glance-item glance-scope"><span class="glance-label" id="au-measures"></span></span>
+  </section>
+  <!-- Rendered SERVER-SIDE from the sha captured at start: a static span, deliberately NOT a
+       client-script field, so this carries no risk to the template literal below. -->
+  <section id="console-version" class="daemon-health" aria-label="Console build">
+    <span class="glance-item"><span class="glance-label">console build</span><span class="glance-value" id="console-sha">${consoleSha.slice(0, 12)}</span></span>
   </section>
   <p id="top-status" role="status" aria-live="polite">loading…</p>
   <p id="summary" class="counts" aria-live="polite"></p>
@@ -3260,6 +3272,59 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
 `;
 }
 
+/** What {@link resolveConsoleSha} reports when the sha genuinely cannot be resolved. */
+export const CONSOLE_SHA_UNKNOWN = "unknown";
+
+/**
+ * The sha of the CODE THIS CONSOLE PROCESS LOADED — resolved ONCE, from the directory the running
+ * module was loaded from (`import.meta.url`), never from cwd and NEVER re-read per request.
+ *
+ * WHY THAT MATTERS MORE THAN IT LOOKS. `rmd serve` loads its code once via tsx and the deploy
+ * supervisor's console restart sits behind a short-circuit a manual checkout pull consumes, so the
+ * console can serve days-old code against a current checkout — observed running 3f6a1d1 while the
+ * checkout was a0d96a9, and serving 2026-07-29 code through every merge for two days. A version
+ * re-read from the checkout at request time would ALWAYS match the checkout and therefore always
+ * look current: it would rebuild the very bug this exists to detect. Captured at start, it cannot.
+ *
+ * This mirrors the daemon's `bootHeadSha` (PR #1054, src/run-task.ts) exactly in intent — the
+ * loaded module's own directory — adjusted for depth: that call site is `src/run-task.ts` and
+ * walks up two levels; this file is `src/lib/serve.ts` and therefore walks up three.
+ *
+ * NEVER FATAL. Every failure mode (no git, no repo, detached, git absent from PATH) returns
+ * {@link CONSOLE_SHA_UNKNOWN}. The console is the operator's live diagnostic surface; a console
+ * that will not start is strictly worse than one that cannot name its own sha.
+ */
+export function resolveConsoleSha(
+  exec: (dir: string) => string = (dir) =>
+    execFileSync("git", ["-C", dir, "rev-parse", "HEAD"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).toString(),
+): string {
+  try {
+    const moduleDir = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
+    const sha = exec(moduleDir).trim();
+    return /^[0-9a-f]{7,40}$/i.test(sha) ? sha : CONSOLE_SHA_UNKNOWN;
+  } catch {
+    return CONSOLE_SHA_UNKNOWN;
+  }
+}
+
+/**
+ * `GET /v1/version` — read-scoped, and the value is the one captured at server start (a closure
+ * over `sha`, not a fresh resolution). READ scope deliberately: a commit sha is not a secret, and
+ * requiring the WRITE token would make the operator's staleness check need his most privileged
+ * credential. The payload carries the sha and nothing else — no token, no path, no config.
+ */
+export function buildVersionRoute(sha: string): Route {
+  return {
+    method: "GET",
+    path: "/v1/version",
+    scope: "read",
+    handler: (_req, res) => {
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ sha }));
+    },
+  };
+}
+
 /**
  * `GET /` — the shell above, read-scoped like every other route on this surface, but ALSO
  * accepting the token via `?token=` (allowQueryToken). A browser NAVIGATION to `/?token=<read>`
@@ -3268,7 +3333,7 @@ export function renderShellHtml(phaseElapsedThresholdsMs: Record<string, number>
  * closes the W1-T139 bootstrap paradox: the auth spec was satisfied against header-sending fetch
  * clients and unreachable by the one client that matters, the browser opening the URL.
  */
-function buildShellRoute(phaseElapsedThresholdsMs: Record<string, number>): Route {
+function buildShellRoute(phaseElapsedThresholdsMs: Record<string, number>, consoleSha: string): Route {
   return {
     method: "GET",
     path: "/",
@@ -3276,7 +3341,7 @@ function buildShellRoute(phaseElapsedThresholdsMs: Record<string, number>): Rout
     allowQueryToken: true,
     handler: (_req, res) => {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      res.end(renderShellHtml(phaseElapsedThresholdsMs));
+      res.end(renderShellHtml(phaseElapsedThresholdsMs, consoleSha));
     },
   };
 }
@@ -3305,6 +3370,11 @@ function buildAuthScopeRoute(): Route {
 
 /** Every REST route `rmd serve` registers — board, panel actions (two-root split, see module header), panel graph, and the shell. Reused verbatim from each module's own exported builder. */
 export function buildServeRoutes(deps: ServeDeps): Route[] {
+  // CAPTURED ONCE, HERE. buildServeRoutes runs exactly once per `rmd serve` process, so this is
+  // server start; both the shell span and GET /v1/version close over this one value and neither
+  // ever re-resolves it. See resolveConsoleSha for why re-reading per request would be worse
+  // than not reporting at all.
+  const consoleSha = deps.consoleSha ?? resolveConsoleSha();
   const fleetControlDeps: PanelActionDeps = { root: deps.fleetControlRoot, ledgerPath: deps.ledgerPath, issues: deps.issues };
   const questionDeps: PanelActionDeps = { root: deps.questionsRoot, ledgerPath: deps.ledgerPath, issues: deps.issues };
   // panel-graph's GET /v1/inbox needs config.root (inbox-proposals.json/inbox-drafts.json live
@@ -3355,7 +3425,8 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
     ...buildPanelGraphRoutes(panelGraphDeps),
     buildTaskCardRoute(deps.board),
     buildAuthScopeRoute(),
-    buildShellRoute(deps.phaseElapsedThresholdsMs ?? DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS),
+    buildShellRoute(deps.phaseElapsedThresholdsMs ?? DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS, consoleSha),
+    buildVersionRoute(consoleSha),
   ];
 }
 
