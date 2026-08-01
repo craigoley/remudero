@@ -118,8 +118,7 @@ import {
   type EscalationOption,
   type IssueGateway,
   type OpenIssue,
-  type PresenceMode,
-} from "./lib/escalate.js";
+  type PresenceMode, prReferentFromIssueText,} from "./lib/escalate.js";
 import { fetchOpenPrsRest, fetchSinglePrRest, hydrateMergeStates, type GhApiFetcher } from "./lib/open-prs-rest.js";
 import { imessageChannel, notify, type NotifyChannel } from "./lib/notify.js";
 import {
@@ -8880,8 +8879,17 @@ export function buildEscalationReconcileCandidates(
     // a read failure.
     if (!task) {
       const synthetic = /^PR-(\d+)$/.exec(taskId);
-      if (!synthetic) continue; // not a task and not a PR referent — genuinely human territory
-      const prNumber = Number(synthetic[1]);
+      // impl-DY: an id the plan does not own and that was NOT minted in the `PR-<n>` shape still names its
+      // referent — `renderIssueBody` writes the PR as a full URL into the issue text. Read it back rather
+      // than dropping the issue forever. This is the operator's own framing ("the system should be able to
+      // determine that those are already handled") and it is the last remaining way an escalation becomes
+      // permanently unretirable: `TRIAGE-fb-1784732687221-3be743` (PR #707, merged 2026-07-24) and
+      // `TRIAGE-fb-1784917146019-88250d` (PR #775, merged 2026-07-25) survived a hand-cleanup of 55 siblings
+      // for exactly this reason. Title is the fallback source — every escalation title carries the PR URL too,
+      // so a body that was edited (or truncated by a gateway) still resolves.
+      const bodyReferent = synthetic ? undefined : prReferentFromIssueText(issue.body) ?? prReferentFromIssueText(issue.title);
+      if (!synthetic && bodyReferent === undefined) continue; // no task, no PR anywhere — genuinely human territory
+      const prNumber = synthetic ? Number(synthetic[1]) : bodyReferent!;
       const ref = deps.github.prByRef(prNumber);
       const state = ref?.state?.toUpperCase();
       candidates.push({
@@ -8894,7 +8902,7 @@ export function buildEscalationReconcileCandidates(
           indeterminate: ref === null || ref === undefined ? true : undefined,
           prUrl: ref?.url,
           prNumber: ref?.number ?? prNumber,
-          source: "pr-referent",
+          source: synthetic ? "pr-referent" : "pr-referent-from-issue-text",
         },
       });
       continue;
