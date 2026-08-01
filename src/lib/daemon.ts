@@ -712,6 +712,53 @@ function isSpawnInfraBlocked(err: unknown): err is { reasonClass: "blocked_toolc
 }
 
 /**
+ * W1-T276: wraps a fired retro's `runRetroTrigger` call with the SAME
+ * restricted light-sweep ticker `runOne` already uses (W1-T254, lines
+ * ~1441-1462 below) — a fired retro is a bare, unbounded await too, and
+ * without a ticker of its own the whole sweep goes dark for the retro's
+ * entire duration (MEASURED over the live ledger: 22.0 and 21.0 minutes
+ * across the two firings to date, zero sweep dispositions in either
+ * window — the daemon looked healthy throughout because it WAS healthy;
+ * it was simply busy). Same clock (`deps.sleep` on `pollIntervalMs`), same
+ * `stopTicker` discipline: cleared on every exit path (`run` resolves OR
+ * throws, via `finally`), and a `sweepLight()` call already in flight when
+ * `run` settles is allowed to finish rather than aborted. Only the
+ * RESTRICTED light sweep (`deps.sweepLight`) is ticked here, never full
+ * dispatch — the retro itself already spends a real, budget-costing
+ * Architect run, and a ticker that dispatches would turn one concurrent
+ * spend into two. A `sweepLight` throw is caught and ledgered
+ * (`daemon.sweep_light.failed`), never propagated — a ticker hiccup costs
+ * one logged tick, never the retro's own outcome.
+ */
+async function sweepLightDuringRetro(
+  deps: DaemonDeps,
+  pollIntervalMs: number,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  run: () => Promise<void>,
+): Promise<void> {
+  let tickerActive = true;
+  const ticker = deps.sweepLight
+    ? (async () => {
+        while (tickerActive) {
+          await deps.sleep(pollIntervalMs);
+          if (!tickerActive) break;
+          try {
+            await deps.sweepLight!();
+          } catch (e) {
+            log("daemon.sweep_light.failed", { error: String((e as Error)?.message ?? e) });
+          }
+        }
+      })()
+    : undefined;
+  try {
+    await run();
+  } finally {
+    tickerActive = false;
+    if (ticker) await ticker;
+  }
+}
+
+/**
  * The spawn-infra backoff ceiling (POLICY DATA, rule 2): consecutive failures
  * double `pollIntervalMs` up to this cap rather than hammering a dispatch that
  * is failing for an infrastructure reason nobody has fixed yet — see the
@@ -1324,7 +1371,11 @@ export async function runDaemon(
         });
         if (deps.runRetroTrigger) {
           try {
-            await deps.runRetroTrigger(decision);
+            // W1-T276: the retro's own await is unbounded, just like `runOne`
+            // below — wrap it in the SAME light-sweep ticker so the loop's
+            // sweep keeps dispositioning PRs while the retro runs, instead
+            // of going dark for the retro's whole duration.
+            await sweepLightDuringRetro(deps, pollIntervalMs, log, () => deps.runRetroTrigger!(decision));
           } catch (e) {
             log("daemon.retro_trigger.run_failed", { error: String((e as Error)?.message ?? e) });
           }
