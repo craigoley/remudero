@@ -183,7 +183,14 @@ after(async () => {
 });
 
 async function openShell(base: string, token: string = READ_TOKEN, qs = ""): Promise<Page> {
-  const context = await browser.newContext();
+  // A viewport tall enough that the fixture's rows sit comfortably ABOVE the fold. The default
+  // 720px height happens to land the first RECENT row at ~721px — right on the fold — so any
+  // header-height change (e.g. adding a glance strip) tips it below, and then the row-focus that
+  // a click triggers (rows are tabindex="0"; a click focuses the nearest focusable ancestor)
+  // scrolls the off-screen row into view. That native focus-scroll, not the expand logic, is the
+  // "viewport jump" these tests forbid; a row already on-screen makes the assertions meaningful.
+  // Matches the tall viewport serve.density-ia.test.ts already uses for the same reason.
+  const context = await browser.newContext({ viewport: { width: 1280, height: 1440 } });
   const page = await context.newPage();
   await page.goto(`${base}/?token=${token}${qs}`);
   await page.waitForFunction(shellBootReady);
