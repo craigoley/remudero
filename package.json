@@ -64,6 +64,7 @@
     "@types/node": "^22.20.1",
     "commit-and-tag-version": "^13.1.2",
     "dependency-cruiser": "^18.1.0",
+    "fast-check": "^4.9.0",
     "jscpd": "^5.0.14",
     "playwright": "^1.62.0"
   },
