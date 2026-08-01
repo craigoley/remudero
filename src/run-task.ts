@@ -8494,6 +8494,87 @@ function reviewPostRefusedFor(ledger: Array<Record<string, unknown>>, taskId: st
 }
 
 /**
+ * WRITTEN AS TWO DIRECT `.step ===` COMPARISONS ON PURPOSE, not as a `Set.has()` over a `typeof`
+ * guard. `test/ledger-rotation.test.ts` derives the expected `DECISION_RELEVANT_LEDGER_STEPS`
+ * membership by scanning consumer source for `/\.step\s*(?:===|!==)\s*["']…["']/`, so this shape
+ * makes the dependency VISIBLE to the very check that exists to find it. Both steps are already in
+ * that set (`ledger.ts:337`), which is what stops a rotation from archiving the lines and silently
+ * resetting `priorReviewOrphans` to zero — the line IS the bound.
+ *
+ * The first draft guarded with a `typeof` check against the step field and CI caught it: the
+ * scanner read that guard's own type literal as a step name and failed. That was a false positive,
+ * but the honest fix is to write the comparison the scanner can read rather than to phrase around
+ * it. NOTE the scanner does not strip comments, so prose here must avoid the compared-literal shape
+ * too — this very paragraph failed the check once for describing it verbatim.
+ */
+function isReviewPostedStep(step: unknown): boolean {
+  return step === "review.posted" || step === "review.post_refused";
+}
+
+/** What {@link reviewOrphansFor} derived — the two halves of the W1-T225 pair, from one scan. */
+interface ReviewOrphanFacts {
+  /** True iff this PR was reviewed on a head that is no longer the current one. */
+  orphanedByPush: boolean;
+  /** How many DISTINCT prior heads carry a posted review — the loop falsifier's count. */
+  priorOrphans: number;
+}
+
+/**
+ * W1-T225's producer: was this PR's `remudero-review` posted against a head that has since been
+ * superseded, and across how many distinct prior heads?
+ *
+ * DERIVED FROM THE LEDGER THE PASS ALREADY READ — `buildOpenPrViews` holds `readLedgerLines` for
+ * `unmetFromLedger`/`priorStrikesFor`/`reviewPostRefusedFor` already, so this costs ZERO additional
+ * REST requests. That is the shape the field's own SCOPE note asked for: "buildOpenPrViews would
+ * derive it the SAME way it already derives `reviewPostRefused`: scan the ledger for a prior
+ * `review.posted`/`review.post_refused` line for this `taskId` at a head sha OTHER than the current
+ * one." This is that scan, plus the distinct-head count `priorReviewOrphans`' doc specifies
+ * ("counting the distinct prior heads it found").
+ *
+ * ── THE FALSE-POSITIVE BOUNDARY, which is the whole risk surface ────────────────────────────────
+ * Three states must NOT read as orphaned, and each is excluded by construction:
+ *
+ *   1. NEVER REVIEWED AT ALL — no posted line for this task. `prior` is empty ⇒ false/0. A PR
+ *      awaiting its first review is not orphaned, and the cap row's own comment requires exactly
+ *      this ("a PR awaiting its FIRST review never matches this row").
+ *   2. REVIEW IS CURRENT — the only posted lines carry the CURRENT head. Filtering on
+ *      `head_sha !== headSha` leaves nothing ⇒ false/0.
+ *   3. A HEAD THE LEDGER HAS NOT SEEN YET — the race between a push and the next poll. This is the
+ *      subtle one, and it resolves correctly for a reason worth stating: a brand-new head has no
+ *      posted line of its own, but the PRIOR head's line is still there, so this reads TRUE — which
+ *      is CORRECT, because that is precisely what "orphaned by a push" means. What it must not do
+ *      is read true when the review simply has not been *observed* yet, and it cannot: a line only
+ *      exists once a verdict was actually posted for that sha.
+ *
+ * A LINE WITH NO `head_sha` IS IGNORED, never counted as a prior head. The ledger carries such rows
+ * (the pre-#981 blind-arm class wrote outcomes with no sha), and treating an absent sha as "some
+ * other head" would manufacture an orphan out of missing information — the same
+ * unknown-as-a-definite-answer mistake `mergeable` taught today in the other direction.
+ *
+ * BLAST RADIUS IF WRONG, measured against the consumers rather than assumed: the post-review row's
+ * `when` clause does NOT reference either field, so a false positive there changes only which
+ * REASON STRING is logged, never whether the review lane runs. The one action-bearing consumer is
+ * the cap row, which escalates once `priorOrphans >= policy.reviewOrphanCap` (2). So the real
+ * false-positive cost is a premature needs-human issue, NOT a paid re-review.
+ */
+export function reviewOrphansFor(
+  ledger: Array<Record<string, unknown>>,
+  taskId: string | undefined,
+  headSha: string,
+): ReviewOrphanFacts {
+  if (!taskId || !headSha) return { orphanedByPush: false, priorOrphans: 0 };
+  const priorHeads = new Set<string>();
+  for (const l of ledger) {
+    if (!isReviewPostedStep(l.step)) continue;
+    if (l.task_id !== taskId) continue;
+    const sha = typeof l.head_sha === "string" ? l.head_sha : "";
+    if (!sha || sha === headSha) continue; // absent sha, or the CURRENT head — neither is an orphan
+    priorHeads.add(sha);
+  }
+  return { orphanedByPush: priorHeads.size > 0, priorOrphans: priorHeads.size };
+}
+
+/**
  * W1-T100 (the #170 fix): failing required-check names + a tail of each one's
  * log — the ci-log fix mode's ONLY input (deriveFixMode/renderFixPrompt,
  * W1-T94). Best-effort: a log-fetch failure degrades to an EMPTY tail
@@ -8755,6 +8836,7 @@ export function buildOpenPrViews(
     const supersededBy = newest > pr.number ? newest : undefined;
     const reviewState = reviewStateFromRollup(pr.statusCheckRollup);
     const checksState = checksStateFromRollup(pr.statusCheckRollup, requiredContexts);
+    const reviewOrphans = reviewOrphansFor(ledger, taskId, pr.headRefOid);
     return {
       prNumber: pr.number,
       prUrl: pr.url,
@@ -8782,6 +8864,12 @@ export function buildOpenPrViews(
       // cheap to compute unconditionally rather than re-deriving checksState
       // green/reviewState none here just to gate the ledger scan.
       reviewPostRefused: reviewPostRefusedFor(ledger, taskId, pr.headRefOid),
+      // W1-T225: both halves from ONE ledger scan, off the ledger this function already holds —
+      // no extra request. Assigned INSIDE this literal deliberately: PR #1083's
+      // producer-completeness test anchors on an object literal assigning every required
+      // OpenPrView field, so an assignment made anywhere else would still read as unwired.
+      reviewOrphanedByPush: reviewOrphans.orphanedByPush,
+      priorReviewOrphans: reviewOrphans.priorOrphans,
       // W1-T176 (design boundary (ii)): `ghRequiredStatusCheckContexts` fails
       // SOFT to undefined/empty on an unreadable protection rule — that same
       // signal must gate the zero-runs discriminator OFF (never assume
