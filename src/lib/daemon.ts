@@ -32,7 +32,7 @@
 import type { RunResult } from "./run-result.js";
 import { assertCleanBoot, type BootAssertion } from "./env.js";
 import { INITIAL_RETRY_STATE, reasonAboutBlock, type RetryState } from "./block-reason.js";
-import { nextRunnable, type MergedSet, type OpenPrCheck } from "./drain.js";
+import { nextRunnable, type MergedSet, type OpenPrCheck , tallyDispatchFilters} from "./drain.js";
 import { HEADROOM_LIMIT_PCT, RESET_UNKNOWN } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
 import { assertRunnable, PlanError, type MergedResolver, type Plan, type Task } from "./plan.js";
@@ -1067,6 +1067,8 @@ export async function runDaemon(
   const merged: string[] = [];
   let costUsd = 0;
   let ticks = 0;
+  /** Last emitted idle-reason signature — see the cadence note at the idle rung. */
+  let lastIdleSignature: string | undefined;
   // W1-T46: per-task TRANSIENT retry state, threaded across ticks for the
   // SAME task id — bounds `blocked_transient` retries via classify.ts's
   // MAX_TRANSIENT_RETRIES (reasonAboutBlock). Dropped once a task's
@@ -1430,8 +1432,14 @@ export async function runDaemon(
       }
     }
 
+    // WHY THE DAEMON IS IDLE. The four eligibility conditions used to decline silently, so a
+    // ten-hour idle emitted ~390 bare `daemon.idle` lines and ZERO `dispatch.*` — the record could
+    // not distinguish "starved of work" from "everything filtered". This tallies the declines as
+    // the filter runs; nothing about what is eligible changes.
+    const idleReasons = tallyDispatchFilters();
     const next = forcedNext ?? nextRunnable(plan, isMerged, {
       isOpenPr: deps.isOpenPr,
+      onFiltered: idleReasons.onFiltered,
       // IN-FLIGHT (W1-T80): a legible skip on console + ledger; the daemon
       // keeps polling rather than treating an open PR as a block.
       onSkip: (t, prNumber) => log("dispatch.skipped", { task: t.id, reason: "open-pr", pr_number: prNumber }),
@@ -1489,6 +1497,16 @@ export async function runDaemon(
       // injected clock and keeps polling rather than exiting.
       ticks++;
       log("daemon.idle", { tick: ticks, poll_interval_ms: pollIntervalMs });
+      // CADENCE: ON CHANGE, NOT EVERY TICK. `daemon.idle` still fires every poll and is byte-
+      // compatible with before (anything parsing it is unaffected). The REASONS ride a separate
+      // step emitted only when the picture actually changes -- the first idle after boot, then
+      // whenever a bucket's membership differs. Logging the tally on all ~390 ticks would be 390
+      // identical lines: noise that accelerates rotation and buries the one line that matters.
+      const idleSignature = idleReasons.signature();
+      if (idleSignature !== lastIdleSignature) {
+        lastIdleSignature = idleSignature;
+        log("daemon.idle_reasons", { tick: ticks, ...idleReasons.snapshot() });
+      }
       await deps.sleep(pollIntervalMs);
       continue;
     }

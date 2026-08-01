@@ -7,6 +7,8 @@ import { loadPlan, type Plan } from "../src/lib/plan.js";
 import type { RunResult } from "../src/run-task.js";
 import type { UsageSnapshot } from "../src/lib/headroom.js";
 import {
+  IDLE_REASON_ID_CAP,
+  tallyDispatchFilters,
   applyCuratedSelection,
   buildDrainPreview,
   buildRundown,
@@ -1028,4 +1030,129 @@ test("renderSummary + resumeCommand: 'what happened while away' is reconstructab
   assert.match(line, /merged    : A/);
   assert.match(line, /stopped   : blocked — B → blocked_review/);
   assert.match(line, /resume    : rmd drain --until C/);
+});
+
+// ── WHY THE DAEMON IS IDLE (impl-DF) ────────────────────────────────────────────────────────
+//
+// `isDispatchEligible` declined on FOUR conditions with no ledger line at all, so a ten-hour idle
+// on 2026-08-01 emitted ~390 bare `daemon.idle` lines and ZERO `dispatch.*`. The record could not
+// distinguish "starved of work" from "everything filtered", and neither could the operator.
+// These lock the tally AND, above all, lock that eligibility itself did not move.
+
+const IDLE_YAML = `- id: ELIGIBLE
+  title: eligible
+  repo: remudero
+  type: implement
+  depends_on: []
+  status: queued
+- id: MERGED_ONE
+  title: already merged
+  repo: remudero
+  type: implement
+  depends_on: []
+  status: queued
+- id: HUMAN_ONE
+  title: human verify
+  repo: remudero
+  type: implement
+  verify: human
+  depends_on: []
+  status: queued
+- id: BLOCKED_ONE
+  title: blocked
+  repo: remudero
+  type: implement
+  depends_on: []
+  status: blocked
+- id: DEPS_ONE
+  title: unmet deps
+  repo: remudero
+  type: implement
+  depends_on: [ELIGIBLE]
+  status: queued
+`;
+
+function idlePlan(): Plan {
+  const dir = mkdtempSync(join(tmpdir(), "idle-reasons-"));
+  const f = join(dir, "tasks.yaml");
+  writeFileSync(f, IDLE_YAML);
+  return loadPlan(f);
+}
+
+test("idle reasons: each of the four formerly-silent conditions lands in its OWN bucket, with ids", () => {
+  const plan = idlePlan();
+  const tally = tallyDispatchFilters();
+  const merged = mergedSetOf("MERGED_ONE");
+
+  runnableCandidates(plan, merged, 99, { onFiltered: tally.onFiltered });
+  const t = tally.snapshot();
+
+  assert.deepEqual(t["already-merged"].ids, ["MERGED_ONE"]);
+  assert.equal(t["already-merged"].count, 1);
+  assert.deepEqual(t["verify-not-auto"].ids, ["HUMAN_ONE"]);
+  assert.deepEqual(t.blocked.ids, ["BLOCKED_ONE"]);
+  assert.deepEqual(t["unmet-deps"].ids, ["DEPS_ONE"]);
+  // ELIGIBLE is in NO bucket -- it was not declined.
+  const everyId = Object.values(t).flatMap((b) => b.ids);
+  assert.ok(!everyId.includes("ELIGIBLE"), "an eligible task must never be tallied as declined");
+});
+
+test("idle reasons: the ELIGIBILITY SET is byte-identical with and without the tally wired", () => {
+  // THE MOST IMPORTANT TEST IN THIS CHANGE. This is pure observability; if one task's
+  // dispatchability moved, the PR is a behaviour change wearing an observability change's clothes.
+  const plan = idlePlan();
+  const merged = mergedSetOf("MERGED_ONE");
+
+  const withoutTally = runnableCandidates(plan, merged, 99).map((t) => t.id);
+  const withTally = runnableCandidates(plan, merged, 99, { onFiltered: tallyDispatchFilters().onFiltered }).map((t) => t.id);
+  assert.deepEqual(withTally, withoutTally, "the candidate set must not move");
+  assert.deepEqual(withoutTally, ["ELIGIBLE"], "and it is still exactly the one eligible task");
+
+  // nextRunnable shares the same filter -- lock it too, both directions.
+  assert.equal(nextRunnable(plan, merged)?.id, "ELIGIBLE");
+  assert.equal(nextRunnable(plan, merged, { onFiltered: tallyDispatchFilters().onFiltered })?.id, "ELIGIBLE");
+});
+
+test("idle reasons: buckets are FIRST-MATCH — a task that is both merged and human counts once, under the condition that stopped it", () => {
+  const plan = idlePlan();
+  const tally = tallyDispatchFilters();
+  // HUMAN_ONE is verify:human AND now also merged. `isMerged` is checked first.
+  runnableCandidates(plan, mergedSetOf("HUMAN_ONE"), 99, { onFiltered: tally.onFiltered });
+  const t = tally.snapshot();
+
+  assert.deepEqual(t["already-merged"].ids, ["HUMAN_ONE"], "reported under the FIRST condition hit");
+  assert.equal(t["verify-not-auto"].count, 0, "and NOT double-counted under the later one");
+});
+
+test("idle reasons: the id list is bounded and reports how many it truncated", () => {
+  const many = Array.from({ length: 12 }, (_, i) => `- id: H${i}\n  title: h\n  repo: remudero\n  type: implement\n  verify: human\n  depends_on: []\n  status: queued\n`).join("");
+  const dir = mkdtempSync(join(tmpdir(), "idle-cap-"));
+  const f = join(dir, "tasks.yaml");
+  writeFileSync(f, many);
+  const plan = loadPlan(f);
+
+  const tally = tallyDispatchFilters();
+  runnableCandidates(plan, NONE_MERGED, 99, { onFiltered: tally.onFiltered });
+  const b = tally.snapshot()["verify-not-auto"];
+
+  assert.equal(b.count, 12, "the COUNT is complete");
+  assert.equal(b.ids.length, IDLE_REASON_ID_CAP, "the ids are capped");
+  assert.equal(b.truncated, 12 - IDLE_REASON_ID_CAP, "and the line says how many it did not name");
+});
+
+test("idle reasons: the signature is stable for an unchanged picture and moves when it changes", () => {
+  // THE CADENCE LOCK. The daemon re-emits only when this differs; a stable signature is what
+  // stops ~390 identical lines.
+  const plan = idlePlan();
+  const merged = mergedSetOf("MERGED_ONE");
+
+  const a = tallyDispatchFilters();
+  runnableCandidates(plan, merged, 99, { onFiltered: a.onFiltered });
+  const b = tallyDispatchFilters();
+  runnableCandidates(plan, merged, 99, { onFiltered: b.onFiltered });
+  assert.equal(a.signature(), b.signature(), "an unchanged picture must NOT re-emit");
+
+  const c = tallyDispatchFilters();
+  runnableCandidates(plan, mergedSetOf("MERGED_ONE", "ELIGIBLE"), 99, { onFiltered: c.onFiltered });
+  assert.notEqual(c.signature(), a.signature(), "a changed picture MUST emit");
 });
