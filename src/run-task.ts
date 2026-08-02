@@ -25,6 +25,12 @@ import {
 import { readFileIfExists } from "./lib/fs-race-safe.js";
 import { buildWorkerEnv, billingMode, type BillingMode } from "./lib/env.js";
 import { outputContractLines, renderAnchorBlock, commitMessageContractLines } from "./lib/compaction.js";
+import {
+  lintFiledTasks,
+  newMonolithIdsAgainstBase,
+  relintRefusalMessage,
+  runRelintLoop,
+} from "./lib/relint.js";
 import type { RunResult } from "./lib/run-result.js";
 export type { RunResult };
 import { InitError, readClaudeJsonKeys, runInit } from "./lib/init.js";
@@ -10817,28 +10823,63 @@ async function triageCommandLocked(
     if (reservation.id !== mint.n)
       say(`reserved ${reservedTaskId} instead — ${mint.id} is held by a live minter`);
 
-    const worker = await spawn({
-      cwd: worktreePath,
-      permissionMode: "bypassPermissions",
-      settingsFile,
-      model: arch, // the Architect tier
-      maxTurns: mountsTable.architect.maxTurns, // MOUNT-GOVERNED (§9) — never a hardcoded literal.
-      maxBudgetUsd: DEFAULT_BUDGET_USD,
-      config,
-      prompt: triagePrompt(entry, runId, reservedTaskId),
-      tools: TRIAGE_WORKER_TOOLS,
+    // impl-FU — THE RELINT LOOP. Spawn, lint what was actually filed with the REAL linter, hand the
+    // REAL violations back, bounded. Sits AFTER `decideTriage` inside each round (a CLEAR/GRILL
+    // files nothing, so there is nothing to lint and no extra turn is bought) and BEFORE any
+    // commit/push/PR — which is the whole point: W1-T286 cost $1.48 and reached a PR that
+    // `lint-plan` then rejected with six violations. `decideTriage` itself is UNCHANGED.
+    let worker!: WorkerResult;
+    const loop = await runRelintLoop({
+      lane: "triage",
+      filedIds: [reservedTaskId],
+      initialPrompt: triagePrompt(entry, runId, reservedTaskId),
+      log,
+      run: async (prompt, attempt) => {
+        worker = await spawn({
+          cwd: worktreePath,
+          permissionMode: "bypassPermissions",
+          settingsFile,
+          model: arch, // the Architect tier
+          maxTurns: mountsTable.architect.maxTurns, // MOUNT-GOVERNED (§9) — never a hardcoded literal.
+          maxBudgetUsd: DEFAULT_BUDGET_USD,
+          config,
+          prompt,
+          tools: TRIAGE_WORKER_TOOLS,
+        });
+        log("triage.synthesized", {
+          attempt,
+          session_id: worker.sessionId,
+          cost_usd: worker.costUsd,
+          subtype: worker.subtype,
+          ...workerLedgerFields(worker),
+        });
+        // Ground truth: what did the worker ACTUALLY touch (before the harness's own status write)?
+        const changedFiles = worktreeChangedFiles(worktreePath);
+        const verdict = parseTriageVerdict([worker.text, worker.blocks.join("\n")].join("\n"));
+        return { decision: decideTriage({ verdict, changedFiles }), changedFiles };
+      },
+      filed: (r) => r.decision.action === "propose",
+      lint: () =>
+        lintFiledTasks(worktreePath, [reservedTaskId], {
+          newMonolithIds: newMonolithIdsAgainstBase(worktreePath),
+        }),
     });
-    log("triage.synthesized", {
-      session_id: worker.sessionId,
-      cost_usd: worker.costUsd,
-      subtype: worker.subtype,
-      ...workerLedgerFields(worker),
-    });
+    const { decision, changedFiles } = loop.decision;
 
-    // Ground truth: what did the worker ACTUALLY touch (before the harness's own status write)?
-    const changedFiles = worktreeChangedFiles(worktreePath);
-    const verdict = parseTriageVerdict([worker.text, worker.blocks.join("\n")].join("\n"));
-    const decision = decideTriage({ verdict, changedFiles });
+    // FAIL EARLY, AND SAY WHY. Before this, a violating filing became a PR that opened, burned CI,
+    // and reported only "ci failure" — indistinguishable from a flake.
+    if (loop.violations.length > 0) {
+      const reason = relintRefusalMessage("triage", [reservedTaskId], loop.violations, loop.attempts, loop.stop);
+      log("triage.relint_refused", {
+        stop: loop.stop,
+        attempts: loop.attempts,
+        checks: [...new Set(loop.violations.map((v) => v.check))],
+        violations: loop.violations.map((v) => v.message),
+      });
+      say(reason);
+      worktreeRemove(repoDir, worktreePath);
+      return 1;
+    }
 
     if (decision.action === "error") {
       log("triage.error", { error: decision.reason, changed_files: changedFiles, subtype: worker.subtype });
@@ -11094,22 +11135,41 @@ export async function planCommand(
     });
     say(`reserved ${reservedIds.length} task id(s): ${reservedIds.join(", ")}`);
 
-    const worker = await spawn({
-      cwd: worktreePath,
-      permissionMode: "bypassPermissions",
-      settingsFile,
-      model: arch, // the Architect tier
-      maxTurns: mountsTable.architect.maxTurns, // MOUNT-GOVERNED (§9) — never a hardcoded literal.
-      maxBudgetUsd: DEFAULT_BUDGET_USD,
-      config,
-      prompt: planArchitectPrompt(mode, brief, runId, reservedIds),
-      tools: PLAN_WORKER_TOOLS,
-    });
-    log("plan.synthesized", {
-      session_id: worker.sessionId,
-      cost_usd: worker.costUsd,
-      subtype: worker.subtype,
-      ...workerLedgerFields(worker),
+    // impl-FU — THE RELINT LOOP, the same shared runner the triage lane and the inbox draft rung
+    // use. This lane has NEVER EXECUTED, so it has never paid for the class this prevents — but its
+    // prompt drifted from `monolith-filing` for a fortnight, and the next drift will be found the
+    // same way unless the linter itself is in the loop. `decidePlanArchitect` is UNCHANGED.
+    let worker!: WorkerResult;
+    const loop = await runRelintLoop({
+      lane: "plan",
+      filedIds: reservedIds,
+      initialPrompt: planArchitectPrompt(mode, brief, runId, reservedIds),
+      log,
+      run: async (prompt, attempt) => {
+        worker = await spawn({
+          cwd: worktreePath,
+          permissionMode: "bypassPermissions",
+          settingsFile,
+          model: arch, // the Architect tier
+          maxTurns: mountsTable.architect.maxTurns, // MOUNT-GOVERNED (§9) — never a hardcoded literal.
+          maxBudgetUsd: DEFAULT_BUDGET_USD,
+          config,
+          prompt,
+          tools: PLAN_WORKER_TOOLS,
+        });
+        log("plan.synthesized", {
+          attempt,
+          session_id: worker.sessionId,
+          cost_usd: worker.costUsd,
+          subtype: worker.subtype,
+          ...workerLedgerFields(worker),
+        });
+        const changed = worktreeChangedFiles(worktreePath);
+        return { decision: decidePlanArchitect({ verdict: parsePlanVerdict([worker.text, worker.blocks.join("\n")].join("\n")), changedFiles: changed }), changedFiles: changed };
+      },
+      filed: (r) => r.decision.action === "propose",
+      // Only the ids THIS run reserved — the plan carries 193 tasks that already fail the linter.
+      lint: () => lintFiledTasks(worktreePath, reservedIds, { newMonolithIds: newMonolithIdsAgainstBase(worktreePath) }),
     });
 
     // Ground truth: what did the worker ACTUALLY touch, INCLUDING files it CREATED (impl-ER).
@@ -11119,9 +11179,21 @@ export async function planCommand(
     // "PROPOSED but no plan files were changed". `.remudero/skills/plan.yaml`'s own PROPOSED wording
     // directs the worker to add tasks, and PR #1074's monolith-filing rule pushes those into shards —
     // so the created-file case is the NORMAL one here, not an edge.
-    const changedFiles = worktreeChangedFiles(worktreePath);
-    const verdict = parsePlanVerdict([worker.text, worker.blocks.join("\n")].join("\n"));
-    const decision = decidePlanArchitect({ verdict, changedFiles });
+    const { decision, changedFiles } = loop.decision;
+
+    // FAIL EARLY, AND SAY WHY — see the triage lane's twin of this block.
+    if (loop.violations.length > 0) {
+      const reason = relintRefusalMessage("plan", reservedIds, loop.violations, loop.attempts, loop.stop);
+      log("plan.relint_refused", {
+        stop: loop.stop,
+        attempts: loop.attempts,
+        checks: [...new Set(loop.violations.map((v) => v.check))],
+        violations: loop.violations.map((v) => v.message),
+      });
+      say(reason);
+      worktreeRemove(repoDir, worktreePath);
+      return 1;
+    }
 
     // OUTPUT VALIDATION (impl-DV): did the worker actually FILE under the ids we reserved? Reserving
     // is half a contract; this is the other half. Report-only on purpose — see `unreservedFiledIds`.
