@@ -1,0 +1,82 @@
+- id: W1-T287
+  title: "every console visibility proof asserts the `hidden` ATTRIBUTE, and `#stale-badge`'s unconditional `display: inline-block` overrides it — the STALE banner is PAINTED beside 'live · updated 2s ago' while the whole suite is green"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "MEASURED AT SOURCE on main, 2026-08-02. src/lib/serve.ts:479-482 declares
+    `#stale-badge { display: inline-block; ... }` in the AUTHOR stylesheet with no `[hidden]` guard. An author
+    `display` declaration beats the UA sheet's `[hidden] { display: none }` regardless of specificity, so the
+    badge is painted whether or not `el.hidden` is true. `markStale`/`clearStale` (serve.ts:1344-1350) flip the
+    attribute faithfully and change nothing on screen.
+    IT IS THE ONLY OFFENDER, WHICH IS WHY IT SURVIVED. Every other hidden-toggled element in the shell
+    (`.gh-banner` at :499, `.glance-anomaly` at :462, `section.panel-section` at :395, `#panel`, `#recap`)
+    declares no `display`, so the UA rule applies and `hidden` works. `.cmdk-overlay[hidden] { display: none; }`
+    (serve.ts:587) shows the trap was already known ONCE and guarded in exactly one place.
+    THE PROOFS CANNOT SEE IT, AND THAT IS THE LARGER DEFECT. Every shipped assertion about this badge reads the
+    ATTRIBUTE: test/console-freshness-wired.test.ts:165-170 (`staleHidden` === true — W1-T281's own falsifier
+    test, the newest and most authoritative one), and test/serve.live-state.test.ts:401/409/420/469 (W1-T156's
+    and W1-T189's lifecycle assertions). All of them pass on a page that is rendering the banner. The runs are
+    REAL — Playwright, real Chromium, a real booted shell — so this is not the zero-match instrument artifact
+    #540/#541 fixed; it is a genuine blind spot one layer down, at the ASSERTION.
+    THIS IS WHY THE OPERATOR STILL SEES IT AFTER TWO FIXES. W1-T262 (#777) built the one freshness model,
+    W1-T281 imported it and deleted the mirror, and both certified against `.hidden`. The DATA is now right and
+    the PIXELS are still wrong, which is precisely the gap an attribute-level proof is structurally unable to
+    report."
+  design: |
+    FIX THE CSS FIRST AND WATCH THE NEW PROOF GO RED, THEN GREEN (rule: a proof must fail before the work —
+    W1-T273). Write the computed-visibility assertion against UNFIXED serve.ts, confirm it FAILS while the
+    existing attribute assertions pass — that contrast IS the evidence this task exists to produce — and only
+    then guard the rule.
+    THE GUARD, NOT A REWRITE. `#stale-badge` needs its hidden state to win; the shell's own precedent is
+    `.cmdk-overlay[hidden] { display: none; }`. Do not restyle the badge, do not move it, do not touch the
+    freshness model — resolveFreshness is imported and tested and is not the defect here.
+    COMPUTED STATE, NEVER ATTRIBUTES, is the durable half. Assert what the browser actually resolved —
+    Playwright's `isVisible()` / `getComputedStyle` / `boundingBox()` — because an attribute is an INPUT to
+    rendering and this task is the proof that the two disagree. The ONE-TRUTH predicate stated as an assertion:
+    NOT (`.conn-badge[data-state=connected]` visible AND `#stale-badge` visible) — a single expression over two
+    surfaces, which is the form that catches the live bug.
+    RETROFIT THE EXISTING ONE-TRUTH ASSERTIONS RATHER THAN LEAVING TWO STANDARDS. The `.hidden` reads in
+    test/serve.live-state.test.ts and test/console-freshness-wired.test.ts are the instruments that missed this;
+    a new file beside them that they contradict is worse than either alone.
+    SWEEP FOR SIBLINGS BEFORE CLOSING. Enumerate every element the shell toggles via `hidden` and confirm from
+    the COMPUTED style that each is genuinely unpainted when hidden — the audit is cheap and the class is
+    exactly the kind that recurs the next time a `display` is added to a toggled selector.
+    EXPLICITLY NOT IN SCOPE: the density/one-click/anomaly proofs (already real Playwright tests in
+    test/serve.density-ia.test.ts), count parity (W1-T223, test/serve.live-state.test.ts:599), and daemon
+    liveness behind 'fleet is running' (filed separately as W1-T288).
+  acceptance:
+    - claim: "the connected badge and the STALE badge are never BOTH computed-visible at once, asserted as one predicate over two surfaces"
+      proof: "unit test: test/serve.computed-visibility.test.ts"
+    - claim: "a hidden #stale-badge resolves to display none in getComputedStyle and has no box — the CSS override is gone, not merely the attribute set"
+      proof: "unit test: test/serve.computed-visibility.test.ts"
+    - claim: "every element the shell toggles via the hidden attribute is unpainted when hidden, checked from computed style rather than from the attribute"
+      proof: "unit test: test/serve.computed-visibility.test.ts"
+    - claim: "the shipped one-truth assertions in W1-T156/W1-T189's own lifecycle suite now read COMPUTED visibility, not the hidden attribute"
+      proof: "grep: isVisible( in test/serve.live-state.test.ts"
+  risk: high
+  origin: feedback#fb-1784731575322-753af9
+  plan_refs: ["§7"]
+  files: [src/lib/serve.ts, test/serve.computed-visibility.test.ts, test/serve.live-state.test.ts]
+  status: queued
+  attempts: 0
+  note: "FILED from feedback#fb-1784731575322-753af9 (Session 5 console recon, 2026-07-22), re-verified at source
+    2026-08-02 before filing — serve.ts:479-482 still carries the unguarded `display: inline-block`, and
+    console-freshness-wired.test.ts:170 still asserts `staleHidden === true`. The entry is eleven days old and
+    the defect it names is live TODAY, which is itself the argument for the assertion-level rule.
+    WHAT THE FEEDBACK ASKED FOR THAT IS ALREADY SHIPPED, recorded so no one re-files it: the RUNNER (boot the
+    real shell against a fixture state dir, drive headless Chromium at an explicit viewport) is already this
+    repo's normal practice — CLAUDE.md's Code-traps section names `test/serve.*.test.ts` as REAL
+    Playwright/Chromium coverage, and [T183-density] (serve.density-ia.test.ts:181, explicit viewport, real
+    boundingBox arithmetic), [T183-one-click] (:399) and [T183-anomaly] (:432, with the under-threshold control
+    row) all exist and pass. [T189-count-parity] is W1-T223 (serve.live-state.test.ts:599). Only the ASSERTION
+    LEVEL was never closed, so that is the whole of this task.
+    NEW FILE, NOT the feedback's proposed `test/serve.playwright.test.ts`: sixteen serve suites are ALREADY
+    Playwright-driven and split by concern, so a file named for the runner rather than the concern would be
+    misleading the day it lands. Named for what it proves.
+    risk:high — the same regrade W1-T189 took for the same file pair: this governs how the console reports its
+    OWN liveness, and the failure mode is a surface that looks certified while lying. The change itself is small;
+    the property is load-bearing.
+    NO depends_on: the CSS guard and the assertion retrofit are independent of every queued console task."
