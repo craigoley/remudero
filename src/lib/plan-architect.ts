@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { shapeCommitMessage } from "./commit-message.js";
+import { ACCEPTANCE_PROOF_GRAMMAR } from "./proof-grammar.js";
 
 /**
  * `rmd plan --mode=create|clarify|expand` — the unified Architect PLAN skill (MASTER-PLAN
@@ -227,6 +228,12 @@ export function planArchitectPrompt(
     ...step3Instructions(mode, brief),
     "",
     ...reservedIdsInstructions(reservedIds),
+    // Same gap, one lane over (impl-ES trap 3): this prompt stated the proof dialect no more than
+    // triage's did, and BOTH lanes file tasks into the SAME changed-tasks-only `lint-plan` gate.
+    // Spliced here, in the shared body, rather than into step3Instructions: `create` and `expand`
+    // both add tasks, so a per-mode copy would be two copies that can drift. Verbatim from
+    // proof-grammar.ts — see that module for why there is exactly one copy across both lanes.
+    ...ACCEPTANCE_PROOF_GRAMMAR,
     "Exactly one of CLEAR / GRILL / PROPOSED must be the LAST line of your output. Whenever you",
     "add or rewire a `plan/tasks.yaml` task, only touch `plan/tasks.yaml` and/or",
     "`MASTER-PLAN.md` — NEVER `src/` or `test/`. Do NOT touch docs/ORIENTATION.md.",
