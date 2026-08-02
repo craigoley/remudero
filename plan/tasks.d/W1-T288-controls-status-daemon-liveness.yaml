@@ -1,0 +1,59 @@
+- id: W1-T288
+  title: "`#controls-status` renders 'fleet is running' from the ABSENCE of flag files alone — a dead daemon and a healthy one are the same pixels"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 50.00
+  rationale: "MEASURED AT SOURCE on main, 2026-08-02. serve.ts:2693 is the whole derivation:
+    `status.stopped ? status.stopDetail : status.paused ? status.pauseDetail : 'fleet is running'`. The three
+    inputs are STOP/PAUSE/QUIET_HOURS flag files (serve.ts:100, the module header at :18-20). Nothing in that
+    expression observes whether a daemon is ALIVE, so 'fleet is running' means only 'nobody wrote a stop file'.
+    A CRASHED DAEMON IS THE CASE THAT MATTERS, and it renders identically to a healthy one: no STOP flag exists
+    after a crash — that is what distinguishes a crash from a deliberate stop — so the console positively asserts
+    the fleet is running at exactly the moment it is not. The operator's one at-a-glance answer to 'is anything
+    happening' is unfalsifiable.
+    THE EVIDENCE EXISTS AND IS NOT CONSULTED. The daemon writes heartbeat/liveness steps to the local ledger
+    (the liveness-bound doctrine W1-T179 built the console's task rows on: 'running' requires recent ledger
+    activity), and GET /v1/daemon-health already serves a health body the shell fetches for its own widget
+    (serve.ts:700-705, 1384, 1699). The control-status route simply does not carry it.
+    THIS IS STANDING RULE 22 AT THE FLEET LEVEL. A flag file is a CLAIM about intent ('no one asked me to
+    stop'); a heartbeat is EVIDENCE of activity. The console renders the first as though it were the second,
+    which is the same inversion W1-T181 and W1-T184 were filed for one layer up."
+  design: |
+    THE ROUTE CARRIES LIVENESS; THE SHELL RENDERS THREE STATES, NOT TWO. GET /v1/control/status answers with the
+    flags AND a daemon-liveness verdict, and `#controls-status` renders running / stopped-or-paused / NOT-OBSERVED
+    distinctly. 'Cannot tell' is a real answer and must be sayable — cannot-observe never degrades to permitted
+    (the read-side doctrine, standing rule 23's sibling).
+    REUSE THE LIVENESS BOUND, DO NOT INVENT A SECOND ONE. W1-T179's rule — recent ledger activity within a data
+    threshold — already decides 'is this actually running' for task rows. A second, differently-tuned notion of
+    liveness for the fleet banner is how two surfaces start disagreeing; read that source before writing any
+    threshold, and take the threshold from data rather than a literal.
+    DO NOT DOUBLE-FETCH. The shell already holds a daemon-health body; whichever route ends up owning liveness,
+    exactly one does, and the other reads it.
+    EXPLICITLY NOT IN SCOPE: restarting or supervising the daemon, changing the flag-file protocol, and the
+    console's freshness/STALE model (W1-T262/W1-T281, and W1-T287 for its computed-visibility proof).
+  acceptance:
+    - claim: "with no daemon heartbeat in the fixture ledger and no stop or pause flag, #controls-status does NOT read 'fleet is running'"
+      proof: "unit test: test/control-status-daemon-liveness.test.ts"
+    - claim: "GET /v1/control/status carries a daemon-liveness verdict alongside the flags, rather than flags alone"
+      proof: "unit test: test/control-status-daemon-liveness.test.ts"
+    - claim: "a fleet whose liveness cannot be observed renders as unobserved — never silently as running"
+      proof: "unit test: test/control-status-daemon-liveness.test.ts"
+    - claim: "a live daemon with a recent heartbeat still renders 'fleet is running', and STOP or PAUSE still wins over liveness exactly as today"
+      proof: "unit test: test/control-status-daemon-liveness.test.ts"
+  risk: medium
+  origin: feedback#fb-1784731575322-753af9
+  plan_refs: ["§7"]
+  files: [src/lib/serve.ts, test/control-status-daemon-liveness.test.ts]
+  status: queued
+  attempts: 0
+  note: "FILED from feedback#fb-1784731575322-753af9's [T189-fleet-truth] item, which named the source condition
+    ('/v1/control/status is currently flags-only') as a PREREQUISITE for its proof rather than a proof. Re-verified
+    at serve.ts:2693 on 2026-08-02: still flags-only. Split from W1-T287 deliberately — T287 is an assertion-level
+    and CSS fix over already-correct data, this is a missing INPUT; folding them would let one green half certify
+    the other.
+    risk:medium — one route plus one render path, no dispatch and no spend, but it changes the meaning of the
+    console's most-read line and a wrong liveness threshold reads as a dead fleet.
+    NO depends_on: independent of W1-T287 and of the queued console work."
