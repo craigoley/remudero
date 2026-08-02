@@ -182,7 +182,32 @@ export function buildDefaultHeadroomPolicy(holdLimitPct: number = HEADROOM_LIMIT
  * on a CONFIRMED close reset, never on a parse failure.
  */
 export function resolveHeadroomLimitPct(hoursToReset: number | null, policy: HeadroomPolicy = buildDefaultHeadroomPolicy()): number {
-  if (hoursToReset === null || !Number.isFinite(hoursToReset)) {
+  // A reset already in the PAST is UPSTREAM LAG, not "the reset is imminent" — and a negative
+  // `hoursToReset` would satisfy `<= 24` and select the LAXER rung. This clause makes that
+  // impossible.
+  //
+  // HONEST SCOPE, because the comment that used to justify a number in this subsystem was itself
+  // wrong and that is how the wrong number persisted: THIS IS HARDENING, NOT A LIVE BUG FIX. The
+  // sole production caller (below, ~line 348) derives `hoursToReset` from
+  // `parseResetInstant(w.resetsAt, now)` with the SAME `now`, and that function's contract is "the
+  // nearest instant AT OR AFTER now" — every branch rolls forward (+24h / +1 year). Probed across
+  // 20 shapes spanning both sides of `now`, it never returned a past instant, so today this branch
+  // is unreachable and the change is behaviour-neutral.
+  //
+  // recon-FH reported 36 of 2368 `daemon.headroom` lines carrying a `resets_at` behind their own
+  // `ts` and inferred the ceiling had been relaxed. That inference was WRONG: those lines are a
+  // DISPLAY artifact — `resetsAtDisplay` is computed at `now` and written to a line stamped later —
+  // and the ceiling never received a negative number.
+  //
+  // It is kept because the guarantee lives in a DIFFERENT function. Any future caller that computes
+  // `hoursToReset` from a cached instant, or any relaxation of the roll-forward, would silently
+  // reach the lax rung at the spending boundary. Past-dated and unknown-shaped are the same
+  // epistemic state — we do not know when the reset is — so they take the same strict fallback.
+  //
+  // The +1-year roll in `parseResetInstant` is DELIBERATELY untouched: confusing to a reader, but it
+  // selects the STRICTER rung, and fixing it properly needs a notion of window cadence this
+  // function does not have.
+  if (hoursToReset === null || !Number.isFinite(hoursToReset) || hoursToReset < 0) {
     return policy[policy.length - 1]?.limitPct ?? HEADROOM_LIMIT_PCT;
   }
   const rule = policy.find((r) => hoursToReset <= r.maxHoursToReset);
