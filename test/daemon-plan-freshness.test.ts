@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -266,4 +267,49 @@ test("REACHABILITY: daemonCommand hands a reloadPlan to the loop (and NOT for an
     "an explicit --plan must NOT get a reloader — that path asked for a literal file",
   );
   rmSync(home, { recursive: true, force: true });
+});
+
+// ── THE REAL DEFAULT. This is the gap that let the -C bug ship. ──────────────────────────
+// Every planReloader test above injects `treeSha`, so the production default — the actual
+// `execFileSync("git", …)` call — was never executed by any test. It shipped running in the DAEMON
+// PROCESS's working directory instead of the checkout, threw `fatal: not a git repository` on
+// every tick, and was caught and ledgered as a failure, so the re-read never once happened in
+// production. These drive the default with NO injection, against a real git repo.
+
+test("planReloader REAL DEFAULT: resolves the plan tree sha from the checkout, not the cwd", () => {
+  const root = mkdtempSync(join(tmpdir(), "fz-realgit-"));
+  const g = (...a: string[]) => execFileSync("git", ["-C", root, ...a], { encoding: "utf8" });
+  const prevCwd = process.cwd();
+  try {
+    g("init", "-q", "-b", "main");
+    g("config", "user.email", "t@t"); g("config", "user.name", "t");
+    mkdirSync(join(root, "plan"), { recursive: true });
+    writeFileSync(join(root, "plan", "tasks.yaml"), "- id: A\n  title: a\n  repo: r\n  type: implement\n  depends_on: []\n  status: queued\n");
+    g("add", "-A"); g("commit", "-q", "-m", "seed");
+    // `origin/main` must resolve — the reloader reads the ORIGIN ref, never the working tree.
+    g("update-ref", "refs/remotes/origin/main", g("rev-parse", "HEAD").trim());
+
+    // Run from a directory that is NOT a git repo — exactly the daemon's situation. Before the
+    // fix this threw `fatal: not a git repository`; the reloader must be immune to cwd.
+    const outside = mkdtempSync(join(tmpdir(), "fz-outside-"));
+    process.chdir(outside);
+
+    const r = planReloader({ isSelf: true, planPath: join(root, "plan", "tasks.yaml") }, false, () => {})!;
+    assert.ok(r, "a self target gets a reloader");
+    assert.equal(r(), null, "first tick records the boot sha without reporting a reload");
+    assert.equal(r(), null, "unchanged tree ⇒ still null, and crucially NO THROW");
+
+    // Move the plan on origin/main; the next call must return a freshly parsed plan.
+    writeFileSync(join(root, "plan", "tasks.yaml"), "- id: A\n  title: a\n  repo: r\n  type: implement\n  depends_on: []\n  status: queued\n- id: B-NEW\n  title: b\n  repo: r\n  type: implement\n  depends_on: []\n  status: queued\n");
+    g("add", "-A"); g("commit", "-q", "-m", "filed");
+    g("update-ref", "refs/remotes/origin/main", g("rev-parse", "HEAD").trim());
+
+    const fresh = r();
+    assert.ok(fresh, "a moved plan tree yields a reload");
+    assert.deepEqual(fresh!.tasks.map((t) => t.id), ["A", "B-NEW"], "and it is the NEW plan");
+    rmSync(outside, { recursive: true, force: true });
+  } finally {
+    process.chdir(prevCwd);
+    rmSync(root, { recursive: true, force: true });
+  }
 });
