@@ -7382,9 +7382,23 @@ export function planReloader(
   } = {},
 ): (() => Plan | null) | undefined {
   if (!target.isSelf) return undefined;
+  // `-C` IS LOAD-BEARING. Without it this ran in the DAEMON PROCESS's working directory, which is
+  // not the checkout, so every tick threw `fatal: not a git repository` — caught and ledgered as
+  // `daemon.plan_reload_failed`, which meant the re-read failed safe but never actually happened.
+  // Observed live on the first boot after #1139 shipped: 0 `daemon.plan_reloaded` rows, ever.
+  // The tests all injected `treeSha`, so nothing exercised this default — see the real-git test
+  // in test/daemon-plan-freshness.test.ts, which drives it with no injection.
+  //
+  // Any directory INSIDE the work tree is enough: git walks up from `-C` to find `.git`. Deriving
+  // it from `planPath` keeps this in step with whatever plan location the caller resolved, rather
+  // than introducing a second notion of where the repo is.
+  const repoDirForGit = dirname(target.planPath);
   const treeSha =
     deps.treeSha ??
-    (() => execFileSync("git", ["rev-parse", "origin/main:plan"], { encoding: "utf8" }).trim());
+    (() =>
+      execFileSync("git", ["-C", repoDirForGit, "rev-parse", "origin/main:plan"], {
+        encoding: "utf8",
+      }).trim());
   const load = deps.load ?? ((pp: string) => loadPlan(pp));
   let lastSha: string | undefined;
   return () => {
