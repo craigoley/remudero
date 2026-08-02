@@ -1,8 +1,7 @@
 import { execFileSync } from "node:child_process";
-import { closeSync, mkdirSync, writeSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { createOrReadExclusive } from "./fs-race-safe.js";
 
 /**
  * Instance configuration for a Remudero install.
@@ -379,31 +378,48 @@ function resolveClaudeBin(): string {
  * plus `readFileSync(fd, ...)` never hands a file-name string to the read
  * sink, so there is nothing left for the query to flag as a re-check.
  *
- * CodeQL js/file-system-race, round 4 (alert #60): CodeQL still correlates the
- * `wx` attempt's `p` with the fallback read's `p`, even through the descriptor
- * indirection (a false positive — see fs-race-safe.ts's header comment). Rather
- * than open-code a fourth copy of this exact create-or-read shape, both the
- * `wx` attempt and the descriptor read now live in the shared
- * `createOrReadExclusive` helper (also used by serve.ts's `resolveServiceTokens`),
- * so a fifth round reuses tested code instead of a new copy.
+ * CodeQL js/file-system-race, round 4 (alert #60, W1-T286): re-flagged this SAME
+ * shape again on `origin/main` (a re-analysis re-flags a previously-dismissed
+ * alert at unchanged code — dismissal doesn't retroactively suppress future scans).
+ * A human dismissed it `false positive` again, same rationale as round 2 — the
+ * `wx` attempt IS the race guard and the EEXIST read never re-derives existence
+ * from the path string. This function's SHAPE stays exactly as it was reviewed and
+ * dismissed: moving it into a shared helper module (tried, then reverted for this
+ * task) turns out to make things WORSE, not better — CodeQL's alert fingerprint is
+ * location-sensitive, so relocating this exact code to a brand-new file/line
+ * produces a genuinely NEW, un-dismissed alert instance rather than reusing the
+ * dismissal already on record for THIS location. Only the unrelated catch-ENOENT
+ * optional-read shape (never itself flagged) moved to a shared helper —
+ * `readFileIfExists` in fs-race-safe.ts.
  */
 export function loadConfig(): Config {
   const p = configPath();
   mkdirSync(dirname(p), { recursive: true });
-  const result = createOrReadExclusive(p, 0o600);
-  if (result.created) {
+  let fd: number | undefined;
+  try {
+    fd = openSync(p, "wx", 0o600);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+  }
+  if (fd !== undefined) {
     try {
       const created: Config = {
         claudeBin: resolveClaudeBin(),
         root: join(homedir(), "Remudero"),
       };
-      writeSync(result.fd, JSON.stringify(created, null, 2) + "\n");
+      writeSync(fd, JSON.stringify(created, null, 2) + "\n");
       return created;
     } finally {
-      closeSync(result.fd);
+      closeSync(fd);
     }
   }
-  const parsed = JSON.parse(result.raw) as Partial<Config>;
+  const readFd = openSync(p, "r");
+  let parsed: Partial<Config>;
+  try {
+    parsed = JSON.parse(readFileSync(readFd, "utf8")) as Partial<Config>;
+  } finally {
+    closeSync(readFd);
+  }
   if (!parsed.claudeBin) parsed.claudeBin = resolveClaudeBin();
   if (!parsed.root) parsed.root = join(homedir(), "Remudero");
   validateConfig(parsed as Config);

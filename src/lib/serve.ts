@@ -33,13 +33,12 @@
  * everywhere else in this codebase).
  */
 
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, statSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, writeSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
-import { createOrReadExclusive } from "./fs-race-safe.js";
 import { createService, type Route, type ServiceOptions, type ServiceTokens, type SseRoute } from "./service.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
 import type { GitHub } from "./status.js";
@@ -3920,25 +3919,38 @@ export function serviceTokensPath(configRoot: string): string {
  * redirected to a world-readable `serve.log`. Any token that reached a log, a terminal
  * transcript, or a chat window is compromised and must be rotated, not merely un-shared.
  *
- * CodeQL js/file-system-race, round 4 (alert #61): the `wx` attempt and the EEXIST fallback
- * read both go through the shared `createOrReadExclusive` helper (fs-race-safe.ts) — the same
- * one config.ts's `loadConfig` uses — rather than a fourth open-coded copy of this exact
- * create-or-read shape.
+ * CodeQL js/file-system-race, round 4 (alert #61, W1-T286): re-flagged this SAME shape
+ * again on `origin/main`. A human dismissed it `false positive` again — see config.ts's
+ * `loadConfig` doc comment (round 4, alert #60) for why this shape stays exactly as
+ * reviewed and dismissed rather than moving into a shared helper: CodeQL's alert
+ * fingerprint is location-sensitive, so relocating this exact code to a new file/line
+ * would produce a genuinely NEW, un-dismissed alert instead of reusing the dismissal
+ * already on record for THIS location.
  */
 export function resolveServiceTokens(configRoot: string): ServiceTokens {
   const p = serviceTokensPath(configRoot);
   mkdirSync(dirname(p), { recursive: true });
-  const result = createOrReadExclusive(p, 0o600);
-  if (result.created) {
+  let fd: number | undefined;
+  try {
+    fd = openSync(p, "wx", 0o600);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+  }
+  if (fd !== undefined) {
     try {
       const created: ServiceTokens = { read: randomBytes(32).toString("hex"), write: randomBytes(32).toString("hex") };
-      writeSync(result.fd, JSON.stringify(created, null, 2) + "\n");
+      writeSync(fd, JSON.stringify(created, null, 2) + "\n");
       return created;
     } finally {
-      closeSync(result.fd);
+      closeSync(fd);
     }
   }
-  return JSON.parse(result.raw) as ServiceTokens;
+  const readFd = openSync(p, "r");
+  try {
+    return JSON.parse(readFileSync(readFd, "utf8")) as ServiceTokens;
+  } finally {
+    closeSync(readFd);
+  }
 }
 
 /** `existsSync` re-export point kept trivial — used only by test fixtures wanting to assert the tokens file's persistence without importing node:fs directly for that one check. */
