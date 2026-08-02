@@ -289,6 +289,13 @@ import {
 } from "./lib/task-linter.js";
 import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount } from "./lib/mounts.js";
 import { loadDefaultPolicy, loadPolicy, policyPath, PolicyError, type Policy, type PolicyHeadroomRung } from "./lib/policy.js";
+import {
+  attributeVerbs,
+  deriveCliVerbs,
+  deriveStepPrefixes,
+  emissionsReport,
+  EMISSIONS_ALLOWLIST,
+} from "./lib/emissions.js";
 import { cloneReapRoots, reapStaleClones, tallyDispositions, type CloneReapSummary } from "./lib/clone-reaper.js";
 import { deriveTaskClass } from "./lib/task-class.js";
 import { realRiskJudge, resolveRiskJudgeMount, runRiskJudge, type RiskJudgeInput } from "./lib/risk-judge.js";
@@ -5475,6 +5482,137 @@ export function checkProofTimeoutMs(readPolicy?: () => number): number {
   } catch {
     return CHECK_PROOF_TIMEOUT_FLOOR_MS;
   }
+}
+
+/** Default window for `rmd emissions`. 30 days covers this host's entire rotation history, so
+ *  "zero in the window" is a claim about the corpus rather than about retention. */
+const EMISSIONS_DEFAULT_DAYS = 30;
+
+/** Every `<root>/state/ledger*.ndjson` — the LIVE file AND its rotations. Reading the live file
+ *  alone undercounts by roughly 4x on this host (664 files), reporting hot verbs as dead. */
+export function ledgerCorpusFiles(stateDir: string): string[] {
+  let names: string[];
+  try {
+    names = readdirSync(stateDir);
+  } catch {
+    return [];
+  }
+  return names.filter((n) => n.startsWith("ledger") && n.endsWith(".ndjson")).map((n) => join(stateDir, n)).sort();
+}
+
+/**
+ * `rmd emissions [--days N]` — which CLI verbs have written NO ledger line in the window.
+ *
+ * STRICTLY READ-ONLY: unions the ledger corpus, counts, prints. Writes nothing, spawns nothing.
+ * See lib/emissions.ts for what it surveys, what it deliberately does not, and why the runtime
+ * count is paired with a static call-site count rather than reported alone.
+ */
+export function emissionsCommand(rest: string[], opts: { stateDir?: string } = {}): number {
+  const badArg = unknownArgError("emissions", rest, ["--days"], []);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const daysRaw = flagValue(rest, "--days");
+  const days = daysRaw === undefined ? EMISSIONS_DEFAULT_DAYS : Number(daysRaw);
+  if (!Number.isFinite(days) || days <= 0) {
+    console.error(`rmd emissions: --days must be a positive number, got ${JSON.stringify(daysRaw)}\n` + USAGE);
+    return 2;
+  }
+
+  const srcDir = join(repoRoot, "src");
+  const sources: string[] = [];
+  const walk = (d: string): void => {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      const child = join(d, e.name);
+      if (e.isDirectory()) walk(child);
+      else if (e.name.endsWith(".ts")) sources.push(readFileSync(child, "utf8"));
+    }
+  };
+  walk(srcDir);
+
+  const verbs = deriveCliVerbs(readFileSync(join(srcDir, "run-task.ts"), "utf8"));
+  const attributed = attributeVerbs(verbs, deriveStepPrefixes(sources));
+  const measurable = attributed.filter((a): a is { name: string; prefix: string } => a.prefix !== null);
+  const unauditable = attributed.filter((a) => a.prefix === null).map((a) => a.name);
+
+  // THE STATIC HALF of the pairing: call sites beyond the verb's own definition and CLI dispatch.
+  // A verb whose only references are those two cannot be invoked by anything but a human typing it.
+  const callSites = new Map<string, number>();
+  for (const { name } of measurable) {
+    const fn = name.replace(/-([a-z])/g, (_m, c: string) => String(c).toUpperCase()) + "Command";
+    let n = 0;
+    for (const text of sources) n += [...text.matchAll(new RegExp(`\\b${fn}\\s*\\(`, "g"))].length;
+    callSites.set(name, Math.max(0, n - 2));
+  }
+
+  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+  // `stateDir` is injected LAST and defaulted, so no positional caller shifts — and so the
+  // unreadable-file arm below is reachable from a test instead of only on a corrupted host.
+  // A DIAGNOSTIC VERB MUST NOT CRASH ON AN UNREADABLE CONFIG. `loadConfig()` throws
+  // `Unexpected end of JSON input` on a host whose config is absent or empty — which is every CI
+  // checkout — and this command's only use for it is locating the ledger. An unreadable config is
+  // therefore "no corpus" (reported honestly as 0 files, which the render already handles), never
+  // a stack trace out of a read-only report.
+  const stateDir =
+    opts.stateDir ??
+    (() => {
+      try {
+        return join(loadConfig().root, "state");
+      } catch {
+        return undefined;
+      }
+    })();
+  const files = stateDir === undefined ? [] : ledgerCorpusFiles(stateDir);
+  const wanted = new Set(measurable.map((m) => m.prefix));
+  const counts = new Map<string, number>();
+  // DEDUPE IS NOT OPTIONAL and it is not free. The rotations are CUMULATIVE SNAPSHOTS, not disjoint
+  // segments: measured on this host, 663 of 664 files have a ts span overlapping the previous
+  // file's, so a naive union counts the same event many times over. But a Set over 4.2M raw lines
+  // exhausts the heap (measured: OOM). So the filter comes FIRST — only lines whose prefix is one
+  // we actually measure are kept — and the identity is `ts|step`, which is short and unique per
+  // event, rather than the whole line.
+  const seen = new Set<string>();
+  let scanned = 0;
+  for (const file of files) {
+    let text: string;
+    try {
+      text = readFileSync(file, "utf8");
+    } catch {
+      continue;
+    }
+    for (const line of text.split("\n")) {
+      if (!line) continue;
+      scanned++;
+      // NOTE the ledger writes `"step":"…"` with NO SPACE after the colon.
+      const sm = /"step":"([^"]+)"/.exec(line);
+      if (!sm) continue;
+      const prefix = sm[1].slice(0, sm[1].indexOf("."));
+      if (!wanted.has(prefix)) continue;
+      const tm = /"ts":"([^"]+)"/.exec(line);
+      if (!tm || tm[1] < cutoff) continue;
+      const key = `${tm[1]}|${sm[1]}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      counts.set(prefix, (counts.get(prefix) ?? 0) + 1);
+    }
+  }
+
+  const rows = emissionsReport({ measurable, counts, callSites, allowlist: EMISSIONS_ALLOWLIST });
+  console.log(`rmd emissions — window ${days}d (since ${cutoff.slice(0, 10)})`);
+  console.log(`  corpus  : ${files.length} ledger file(s), ${scanned} lines scanned, ${seen.size} distinct in-window events on measured prefixes`);
+  console.log(`  verbs   : ${verbs.length} declared, ${measurable.length} measurable, ${unauditable.length} unauditable`);
+  console.log("");
+  for (const r of rows) {
+    console.log(
+      `  ${r.status.toUpperCase().padEnd(24)} rmd ${r.verb.padEnd(12)} ${String(r.count).padStart(7)} line(s)  beyond-dispatch-call-sites=${r.callSitesBeyondDispatch}`,
+    );
+    if (r.allowlistReason) console.log(`  ${" ".repeat(24)}   allowlisted: ${r.allowlistReason}`);
+  }
+  console.log("");
+  console.log(`  UNAUDITABLE (no ledger step carries the verb's name): ${unauditable.join(", ")}`);
+  console.log("  Unauditable is not unused — it means this instrument cannot see the verb at all.");
+  return 0;
 }
 
 export function checkProofCommand(rest: string[]): number {
@@ -12934,6 +13072,11 @@ const COMMANDS: readonly CommandSpec[] = [
       "rmd next-task-id [--plan <path>] [--offline]   # print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775), and every id ever declared in the git history of plan/ (the fold class: an id filed then folded away, W1-T278); --offline skips the open-PR read (the mint is then a FLOOR, and says so; the history scan still runs — it is a local git read, not a network one); prints its provenance, spawns nothing",
   },
   {
+    name: "emissions",
+    usage:
+      "rmd emissions [--days N]   # which CLI verbs have written NO ledger line in the window (default 30d) — the runtime half of dead-capability detection, paired with a static call-site count so 'reachable but never typed' is distinguishable from 'unreachable'. Unions the ledger AND its rotations (reading the live file alone undercounts ~4x). READ-ONLY: writes nothing, spawns nothing",
+  },
+  {
     name: "check-proof",
     usage:
       "rmd check-proof <proof> [--allow-full-suite]   # run ONE acceptance proof through the REVIEWER'S OWN parser and executor and print what it does: parse kind, resolved candidate file(s), the exact argv, exit code and hit count. A `grep:` pattern is a BASIC REGULAR EXPRESSION (`[ * ^ $` are metacharacters) — verifying with `grep -F` is a DIFFERENT matcher and reports a false green (PR #1071). A `unit test:` proof naming a TITLE rather than a test/<file>.test.ts PATH is resolved to its file first; when it resolves to none, the run is REFUSED rather than falling back to the whole-suite glob (--allow-full-suite overrides, time-boxed). READ-ONLY: writes no cache, no ledger line, no state file",
@@ -13395,6 +13538,10 @@ export async function main(
   }
   if (cmd === "preflight") {
     process.exit(await preflightCommand(rest));
+  }
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(emissionsCommand(rest)) cannot carry a DA hit without forking the process; emissionsCommand's own logic — arg validation, the corpus union, the derivation/attribution and the render — is unit-tested in test/emissions.test.ts (same irreducible-glue shape as the sibling console-url/down/up dispatch cases).
+  if (cmd === "emissions") {
+    process.exit(emissionsCommand(rest));
   }
   if (cmd === "check-proof") {
     process.exit(checkProofCommand(rest));
