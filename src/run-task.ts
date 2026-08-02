@@ -7605,7 +7605,6 @@ async function deployRunCommand(rest: string[]): Promise<number> {
     servePort: resolveServePort([], config.serve?.port),
     uid,
     ledgerPath: ledgerPathFor(config),
-    log: (step, data) => console.log(`### [deploy] ${step}${data ? " " + JSON.stringify(data) : ""}`),
   });
   const result = runDeployCycle(deps, { dryRun: rest.includes("--dry-run") });
   console.log(`### rmd deploy-run — ${result.deployed ? "DEPLOYED" : "no-op"}: ${result.reason}`);

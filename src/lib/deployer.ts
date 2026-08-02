@@ -31,6 +31,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { appendLedger } from "./ledger.js";
 
 // ── Pure decisions ─────────────────────────────────────────────────────────────
 
@@ -487,7 +488,9 @@ export interface RealDeployOpts {
   /** For `launchctl kickstart -k gui/<uid>/<label>`. */
   uid: number;
   ledgerPath: string;
-  log: (step: string, data?: Record<string, unknown>) => void;
+  /** OPTIONAL since impl-EP — omitted ⇒ {@link buildDeployLogger} against `ledgerPath`, which writes
+   *  to BOTH stdout and the ledger. Supplied only by tests that want to observe the calls. */
+  log?: (step: string, data?: Record<string, unknown>) => void;
   /** Health window: total ms to watch the daemon after kickstart (default 45s). */
   healthWindowMs?: number;
   /** Poll pace within the window (default 3s). */
@@ -510,6 +513,43 @@ export interface RealDeployOpts {
  * SEVERAL in the window means KeepAlive is restart-storming a broken daemon
  * (crashCount = extra boots). Absent-and-none means it never came up.
  */
+/**
+ * The deploy cycle's logger — stdout AND the ledger (impl-EP).
+ *
+ * `deployer.ts` already emits `deploy.abort_dirty_tree` with the conflicting paths named, and
+ * `ledger.ts`'s HEALTH_RELEVANT_LEDGER_STEP_PREFIXES already retains every `deploy.*` step through
+ * rotation. But this logger only ever wrote to `console.log`, so all of it landed in
+ * `supervisor.out.log` and NONE of it in the ledger — which is why 107 dirty-tree aborts left ZERO
+ * ledger rows across 663 rotations, and much of why the defect survived eleven days and six
+ * investigations. `ledgerPath` was already being passed to `realDeployDeps` and simply unused here.
+ *
+ * NOTHING IS ADDED TO `DECISION_RELEVANT_LEDGER_STEPS`: membership there is for steps a DECISION
+ * consults, and `sweep.absent_repush` is the cautionary case — sitting in that set while occurring
+ * zero times. `deploy.*` is already covered by `ledger.ts`'s health-window PREFIX rule, which is the
+ * correct retention for an observability step.
+ *
+ * BEST-EFFORT: a deploy must never fail because its own logging could not write.
+ *
+ * Extracted rather than inlined so it is directly testable — a closure inside `deployRunCommand`
+ * cannot be reached without running a real deploy cycle.
+ */
+export function buildDeployLogger(
+  ledgerPath: string,
+  deps: { append?: typeof appendLedger; out?: (line: string) => void; now?: () => number } = {},
+): (step: string, data?: Record<string, unknown>) => void {
+  const append = deps.append ?? appendLedger;
+  const out = deps.out ?? ((line: string) => console.log(line));
+  const now = deps.now ?? (() => Date.now());
+  return (step, data) => {
+    out(`### [deploy] ${step}${data ? " " + JSON.stringify(data) : ""}`);
+    try {
+      append(ledgerPath, { run_id: `DEPLOY-${now()}`, task_id: "DEPLOY", step, ...(data ?? {}) });
+    } catch {
+      // stdout already carries it; a ledger write failure must not abort the deploy cycle.
+    }
+  };
+}
+
 export function realDeployDeps(o: RealDeployOpts): DeployDeps {
   const exec = o.execFile ?? ((cmd: string, args: string[]) => execFileSync(cmd, args, { encoding: "utf8" }).toString());
   const git = (args: string[]): string => exec("git", ["-C", o.installPath, ...args]);
@@ -520,7 +560,7 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
   const countBootsAfter = (sinceMs: number): number => countLedgerBootsAfter(o.ledgerPath, sinceMs);
 
   return {
-    log: o.log,
+    log: o.log ?? buildDeployLogger(o.ledgerPath),
     now: () => Date.now(),
     fetch: () => {
       git(["fetch", "origin", "--quiet"]);

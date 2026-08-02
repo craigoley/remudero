@@ -39,4 +39,9 @@ reports/audit/
 state/
 plan/questions.ndjson
 plan/operator-notes.ndjson
+# impl-EP: agent scratch that has landed in the canonical checkout. Four bytes of this was on its own
+# enough to disable auto-sync (self-sync.ts's dirty check is unscoped) and to count toward the 107
+# deploy aborts. NAMED EXACTLY, never a *.json glob — that would mask package-lock.json and be worse
+# than the disease.
+ee-open.json
 *.log

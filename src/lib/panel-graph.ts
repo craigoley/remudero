@@ -168,11 +168,25 @@ export type ReconciledFeedbackEntry = FeedbackEntry & { unverified?: true };
  *   inverse of W1-T182's merged-count direction: hiding a possibly-live decision is worse than
  *   showing a resolved one).
  */
-export function reconcileFeedbackEntries(root: string, entries: FeedbackEntry[], statusGithub: GitHub): ReconciledFeedbackEntry[] {
+export function reconcileFeedbackEntries(
+  root: string,
+  entries: FeedbackEntry[],
+  statusGithub: GitHub,
+  // W1-T191 SITE 3 (impl-EP). #966 wired the bridge at the DECISION route only; this reconcile path
+  // was 208 lines above it in the same file and kept taking `setFeedbackStatus`'s raw-write branch
+  // straight into the daemon's own checkout. It fires whenever a proposal PR merges, inside the
+  // long-lived `rmd serve` process — which is how `plan/feedback/fb-…5ac4ca.yaml` came to sit
+  // modified 63 seconds after PR #1058 merged, and how 107 deploys were aborted on a dirty tree.
+  //
+  // OPTIONAL, and absent means UNCHANGED. Every caller that passes a WORKTREE root
+  // (`run-task.ts`'s triage lane, twice) legitimately wants the local write and must keep it, so the
+  // option is passed at the site that needs it rather than flipped as a default.
+  land?: LandFeedbackOpts,
+): ReconciledFeedbackEntry[] {
   return entries.map((entry) => {
     if (entry.status !== "proposed" || !entry.proposal_pr) return entry;
     const pr = statusGithub.prByRef(entry.proposal_pr);
-    if (pr && pr.state === "MERGED") return setFeedbackStatus(root, entry.id, "accepted");
+    if (pr && pr.state === "MERGED") return setFeedbackStatus(root, entry.id, "accepted", land ? { land } : {});
     if (!pr && statusGithub.readFailed?.()) return { ...entry, unverified: true };
     return entry;
   });
@@ -191,7 +205,7 @@ export function buildFeedbackInboxRoute(deps: PanelGraphDeps): Route {
         sendJson(res, 400, { error: "invalid_request", detail: `status must be one of ${FEEDBACK_STATUSES.join(", ")}` });
         return;
       }
-      const reconciled = reconcileFeedbackEntries(deps.root, listFeedback(deps.root, {}), deps.statusGithub);
+      const reconciled = reconcileFeedbackEntries(deps.root, listFeedback(deps.root, {}), deps.statusGithub, deps.feedbackLand);
       const entries = statusParam ? reconciled.filter((e) => e.status === statusParam) : reconciled;
       sendJson(res, 200, { entries });
     },
