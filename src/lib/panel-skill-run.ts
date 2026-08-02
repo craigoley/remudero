@@ -50,6 +50,7 @@ import { join } from "node:path";
 import { loadPlan, type Task } from "./plan.js";
 import { lintTask, type LintResult } from "./task-linter.js";
 import { captureFeedback, setFeedbackStatus, type FeedbackEntry } from "./feedback.js";
+import type { LandFeedbackOpts } from "./feedback-landing.js";
 import { loadSkill, loadSkillRegistry, skillsDir, type Skill } from "./skill.js";
 import type { Route } from "./service.js";
 import { appendPanelLedger, bearerTokenId, isRecord, jsonAction, sendJson } from "./panel-actions.js";
@@ -60,6 +61,13 @@ export interface PanelSkillRunDeps {
   /** `plan/tasks.yaml`'s path — reloaded fresh on every request (mirrors GET /v1/trace, lib/panel-graph.ts). */
   planPath: string;
   ledgerPath: string;
+  /**
+   * W1-T191 SITE 4 (impl-EP) — the feedback-landing bridge, same shape `PanelGraphDeps.feedbackLand`
+   * carries. Absent ⇒ the raw local write, unchanged, which is what every test and every
+   * worktree-rooted caller wants. Supplied by the live server so a Refine grill lands on a bot branch
+   * instead of dirtying the daemon's own checkout.
+   */
+  feedbackLand?: LandFeedbackOpts;
 }
 
 // ── GROUND: consult the "plan" skill's OWN registry-declared grounding_sources ──────────────
@@ -242,7 +250,14 @@ export function buildRunSkillRoute(deps: PanelSkillRunDeps): Route {
       const lint = lintTask(task);
       const grillText = buildClarifyGrill(task, lint, grounding);
       const captured = captureFeedback(deps.root, { raw: grillText, origin: "ui" });
-      const entry: FeedbackEntry = setFeedbackStatus(deps.root, captured.id, "grilling");
+      // impl-EP: previously unreported twin of the reconcile-path defect — the same raw write into
+      // the daemon's checkout, on the `grilling` flip. Bridged the same way, and absent ⇒ unchanged.
+      const entry: FeedbackEntry = setFeedbackStatus(
+        deps.root,
+        captured.id,
+        "grilling",
+        deps.feedbackLand ? { land: deps.feedbackLand } : {},
+      );
 
       const origin = bearerTokenId(req);
       appendPanelLedger(deps.ledgerPath, "panel.skill_invoked", input.taskId, origin, {
