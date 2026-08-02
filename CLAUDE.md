@@ -1,48 +1,229 @@
 # remudero — Claude rules
 
-Rules Claude should follow when working in this repo. Append-only; each rule cites the source that earned it.
+Always-on **workflow** rules that prevent repeated wasted cycles. Organized by the question you're
+asking when you need one, because that — not the date you learned it — is how a rule gets found.
 
-Note: this repo's primary knowledge store is the per-session memory system (`memory/MEMORY.md` + files), `plan/`, `LEARNINGS.md`, and `DECISIONS.md`. CLAUDE.md holds only the always-on **workflow** rules that prevent repeated wasted cycles — it does not restate feature history.
+**Where knowledge actually lives:** `learnings/*.yaml` (the machine-readable, lifecycle-managed,
+CI-budgeted store — `scripts/learnings-budget-ratchet.mjs` caps its injectable weight), `plan/` +
+`MASTER-PLAN.md`, `DECISIONS.md`, `LEARNINGS.md`. CLAUDE.md holds only workflow rules; it does not
+restate feature history.
 
-## Lessons from 2026-07-25
+**Maintaining this file:** it is injected in full into every session, so it is a context tax paid
+per session — keep it compressed. Per MASTER-PLAN §8A, *compression is a deliverable, not just
+accretion*: a retro that adds a rule must also fold, sharpen, or delete the ones it supersedes.
+Cite **symbol names, not line numbers** — line numbers drift and every one this file used to carry
+had gone stale. Each rule cites the PR that earned it; that citation is the pointer to the full
+forensic detail, so the narrative does not need to live here.
 
-- **Run the diff-coverage gate LOCALLY before pushing any PR that adds source lines.** `coverage-ratchet` blocked three consecutive PRs on the first push — each a separate amend + force-push + full-CI round-trip for a check that runs in seconds locally: `node --test --experimental-test-coverage --enable-source-maps --test-reporter=lcov --test-reporter-destination=/tmp/x.lcov --import tsx --import ./test/setup/tmp-hygiene.ts <touched test files>` then `node scripts/diff-coverage.mjs --lcov /tmp/x.lcov --diff <(git diff --cached origin/main -- <touched src files>)`. *(from #768 — an unused function; #773 — a register-all-at-once route helper whose lines are uncovered because tests wire routes individually; #777 — type-only interface lines)*
-- **In a NEW `.ts` file, sandwich type-only `interface`/`type` declarations BETWEEN covered functions — never at the file's head or tail.** `--experimental-test-coverage` stamps `DA:<line>,0` across a new file's leading AND trailing source-line records (a module preamble/epilogue source-map artifact), and diff-coverage flags an `interface`'s non-comment property lines sitting there as uncovered "code". Middle types (bracketed by executed statements) get no `DA:0`. *(from #777 — moving types to the top, then the bottom, both failed; sandwiching passed)*
-- **`gh pr create` uses GraphQL and dies with "API rate limit already exceeded" when the GraphQL budget is spent** (frequent on this account, while REST/core stays healthy). Open PRs via REST instead: `gh api --method POST repos/<owner>/<repo>/pulls -f title=… -f head=… -f base=main -F body=@<file>`. Check first with `gh api rate_limit` (`.resources.graphql.remaining` vs `.resources.core.remaining`). `rmd review`/`gh pr view --json` are ALSO GraphQL, so a hand-opened PR can't be reviewed until GraphQL resets. *(from #766, recurred through the session including during this retro)*
-- **Author PR-body `## Acceptance` proofs as bare exact-title substrings, not `test/foo.test.ts::title` anchors.** The `::` form satisfies `rmd lint-plan`'s proof-resolvability check, but the `remudero-review` executor feeds the whole string to `--test-name-pattern` and matches ZERO tests → the review posts `success` but CAPPED at `proof_exec: 0/N`, which won't arm auto-merge. Verify each proof matches exactly one passing test (`node --test --test-name-pattern "<escaped substring>" <file>`) BEFORE opening the PR. In a **plan shard** (which IS lint-checked), use the pure-path form `unit test: test/foo.test.ts` — it both lint-passes and executes the whole file. *(from #766 — a CAPPED re-review cost an extra cycle; #773/#777 applied the fix up front)*
-- **`src/lib/serve.ts`'s client JS lives inside a backtick template literal — never put a backtick inside a client-code comment** (e.g. `` `lastLiveAt` ``). It terminates the outer template and esbuild fails with "Expected ";" but found …". Sanity-check a serve.ts change by rendering the shell and parsing the client script: `new Function(<the largest <script> block of renderShellHtml()>)`. serve.ts DOM behavior is covered by REAL Playwright/Chromium tests (`test/serve.*.test.ts`) — run them for any client change. *(from #777)*
-- **Keep the operator checkout (`~/Remudero/remudero`) on `main`; do branch work in a `git worktree`, never by checking out a feature branch on it.** The launchd daemon (`com.remudero.daemon`) loads its code from that checkout, so a branch checkout risks it serving branch code on restart. To deploy a merged change: `git pull` the checkout, then `launchctl kickstart -k gui/$UID/com.remudero.daemon` — the deploy supervisor no-ops "up-to-date (install HEAD == origin)" if you fast-forward first, so it will NOT restart the daemon for you; the running process keeps the pre-merge code until an explicit kickstart. *(from this session's deploys of #768/#773 — a supervisor "up-to-date" no-op left the daemon on old code)*
+## Before you push
 
-## Lessons from 2026-07-25 (b)
+- **Run the diff-coverage gate LOCALLY before pushing any PR that adds source lines.** It runs in
+  seconds; `coverage-ratchet` blocked three consecutive PRs on first push, each costing a full
+  amend + force-push + CI round-trip.
+  `node --test --experimental-test-coverage --enable-source-maps --test-reporter=lcov --test-reporter-destination=/tmp/x.lcov --import tsx --import ./test/setup/tmp-hygiene.ts <touched test files>`
+  then `node scripts/diff-coverage.mjs --lcov /tmp/x.lcov --diff <(git diff --cached origin/main -- <touched src files>)`.
+  *(#768, #773, #777)*
+- **A local lcov is not predictive in EITHER direction — calibrate it before trusting a local block
+  or a local pass.** CI builds its lcov from the full suite and reaches paths a scoped run never
+  does (one local run flagged 13 lines where CI flagged 3; it also cannot prove absence). Calibrate
+  by running `scripts/diff-coverage.mjs` with your lcov against a recently-merged, CI-green commit
+  (`git show <sha> -- src/… > /tmp/x.diff`). If that blocks too, your lcov under-reports and a
+  local block means "investigate", not "stop". *(#981; #973/#975 both blocked locally yet merged green)*
+- **Verify every PR-body claim about your own diff against `git diff --numstat`, and RE-VERIFY after
+  each follow-up commit.** The `remudero-review` keyword floor matches the BODY and never opens the
+  diff, so a body contradicting its own changeset still merges on a `success` status. #974 merged
+  claiming "exactly one file: MASTER-PLAN.md" while carrying three, including `docs/ORIENTATION.md`
+  — which sits outside `isInPlanScope` and cost the PR its `planOnly` carve-out. *(#974, #984)*
 
-- **Before landing a triage-added task, verify the new task id collides with nothing across BOTH `plan/tasks.yaml` AND every `plan/tasks.d/*.yaml` shard.** The naive "next number after the last one I saw" collides with tasks that landed concurrently or that live in a shard you didn't read — `rmd lint-plan` then blocks the push on the duplicate id, and every collision costs a mechanical renumber + re-push cycle. Compute the next id from the max across all shards (`grep -rhoE '^\s*- id: W1-T[0-9]+' plan/tasks.yaml plan/tasks.d/ | grep -oE 'T[0-9]+'` → max+1), not from a single file. *(from #770 — W1-T256 was already taken by a merged PR, renumbered to W1-T257; #775 — W1-T260 collided with a tasks.d shard, renumbered to W1-T261; the same class of collision twice in one session)*
-- **Put any new coverage-load-bearing test in its own `test/*.test.ts` file — do NOT append it to `test/run-task.test.ts`.** That file intermittently crashes at the FILE level under `--experimental-test-coverage` (the W1-T240 registry tests), which zeroes the coverage record for everything in it — so a diff-coverage-critical test appended there can lose its own coverage nondeterministically and fail `coverage-ratchet` on a rerun that had nothing to do with your change. *(from #781 — the inbox-draft mount test went into a fresh `test/architect-mount.test.ts` for exactly this reason)*
-- **Before editing the config file you were TOLD to change, trace from source where the runtime value is actually read — the named/declarative source may be inert while a code-level default governs live behavior.** The `.remudero/mounts.yaml` `architect:` row looked like the model source, but the Architect-tier spawns resolved their model from `architectModel(config)` (a `config.architectModel ?? "opus"` default); a mounts-row-only edit would have shipped green and changed nothing observable. Confirm the edit reaches the live code path (or wire it) before declaring the change done. *(from #781 — required wiring `architectModel(config, mounts)` to read the mounts row first, not just editing the yaml)*
+## Writing proofs and acceptance criteria
 
-## Lessons from 2026-07-29
+- **Write `## Acceptance` proofs as bare exact-title substrings, and verify each resolves before
+  opening the PR.** The `test/foo.test.ts::title` form satisfies `rmd lint-plan` but the review
+  executor feeds the whole string to `--test-name-pattern`, matches zero tests, and posts `success`
+  CAPPED at `proof_exec: 0/N` — which will not arm auto-merge. In a **plan shard**, use the pure-path
+  form `unit test: test/foo.test.ts`: it lint-passes and executes the whole file. *(#766, #773, #777)*
+- **Require a verbatim `grep -rlF -- '<substring>' test/` hit — a passing scoped test run is NOT
+  evidence the proof resolves.** `resolveNameFilteredCandidates` greps the SOURCE with a fixed
+  string, so a title assembled from `" + "`-joined literals exists verbatim in no file: a proof
+  spanning that concatenation seam resolves to ZERO candidates and is judged unexecutable even
+  though the test exists and passes. *(impl-AG, caught pre-commit)*
+- **Keep a `unit test:` body under 100 characters with at most ONE comma and no `"; "`, and never
+  let a `grep:` PATTERN contain `" in "`.** `looksLikeScenarioNarrative` (`src/lib/task-linter.ts`)
+  fails `proof-resolvability` at ≥2 commas, or `"; "` plus a comma, or >100 chars. A `grep:` proof
+  splits on the LAST `" in "` before a path-like token, so `" in "` inside the pattern mis-splits.
+  Forward references are legitimate — for an unimplemented task the named test does not exist yet;
+  what must hold today is that the proof PARSES. Forward-referencing a PATH is safe;
+  forward-referencing a SYMBOL NAME is a guess. *(#982, #984; #920 → #943 vs #921 as counter-example)*
+- **Verify a `grep:` proof with the executor's REAL invocation — `grep -arn -- '<pattern>' <path>` —
+  never with `grep -F`.** The executor passes the pattern with no `-F`, so it is a BASIC REGEX and a
+  glob-looking pattern is silently wrong: `learnings/*.yaml` reads as *learnings, zero-or-more slashes,
+  any char, yaml* and matches nothing. That is not a soft cap — `executed_fail` OVERRIDES keyword
+  coverage and FAILS the PR. Also require the pattern to MISS the merge-base: one matching both head
+  and base is downgraded to `executed_stale` (W1-T273) because it discriminates nothing. Run a control
+  pattern that must NOT match, because `grep -r` with no file operand searches the cwd instead of stdin
+  and will fake a match for every pattern you test. *(#1120 — a `-F`-verified proof failed the review)*
+- **A plan-only PR is not automatically CAPPED — prefer certification over the W1-T205 carve-out.**
+  `planOnly` (`src/lib/review.ts`) exempts a plan-only diff from the proof-execution FLOOR; it does
+  not stop real proofs from executing. `grep: <pattern> in <path>` proofs with an EXPLICIT path do
+  execute and can earn a full PASS — #877 posted "PASS — 4 criteria substantiated" on 4/4. A
+  path-less `grep:` is refused outright by `parseDialectGrep`. *(#877)*
+- **Do NOT rewrite proofs on `verify: human` tasks.** `isDispatchEligible` (`src/lib/drain.ts`)
+  returns false at `t.verify !== "auto"` BEFORE the linter is consulted, so their dialect debt can
+  never stall the queue. Forcing chaos drills, device recordings and live deploys into `unit test:`
+  yields proofs that parse, match zero tests, and cap the review — the exact theatre the dialect
+  gate exists to stop. Report them as needing a proof kind the dialect lacks. *(#984)*
 
-- **Any "N occurrences in the ledger" measurement must union `state/ledger.ndjson` with its rotations — the live file is lossy.** A `review.posted` count taken over the live file alone read 212; the same count over the union of the live file plus all 658 archives (4.1M lines) read 912 — a ~4x undercount. Any claim of the form "N occurrences in the ledger", and especially "zero occurrences in the entire ledger history", is unsupportable unless the archives were unioned. *(from recon-AE, `state/recon-AE-dispatch-certifiability.md` §0)*
-- **Never run an installing package manager (`npm ci`/`npm install`) anywhere on this host while the daemon is up — every worktree SHARES the canonical `node_modules`.** Worktrees symlink `node_modules` back to `~/Remudero/remudero/node_modules`: one mutable tree, no lock, shared by the live daemon and every concurrent worker. On 2026-07-29 an install inside a worktree emptied it under the running daemon and `bin/rmd` died at `node_modules/.bin/tsx: No such file or directory` on every KeepAlive relaunch (LastExitStatus 1) until a restoring install put 401 packages back. Wire a worktree up with `ln -s ~/Remudero/remudero/node_modules <worktree>/node_modules` instead, and note that `.gitignore`'s `node_modules/` has a trailing slash so it does NOT match that symlink — add a local exclude before staging. *(from the 2026-07-29 daemon outage)*
-- **Verify every `## Acceptance` proof substring with `grep -rlF -- '<substring>' test/` and require a verbatim hit — a scoped test run passing is NOT evidence the proof will resolve.** `resolveNameFilteredCandidates` greps the SOURCE with a fixed string (`grep -rlF`), so a test title assembled from `" + "`-joined literals exists verbatim in no file: a proof naming text that spans the concatenation seam resolves to ZERO candidates and is judged unexecutable, even though the test itself exists and passes under `--test-name-pattern`. Tightens the bare-substring rule above — a green `--test-name-pattern` run is necessary, not sufficient. *(caught live in impl-AG before commit)*
-- **A plan-only PR is not automatically CAPPED — prefer certification over the W1-T205 carve-out.** The carve-out (`planOnly`, `src/lib/review.ts:200-221`) exempts a plan-only diff from the proof-execution FLOOR; it does not stop genuinely executable proofs from executing. Plan-PR proofs written in the `grep: <pattern> in <path>` dialect with an EXPLICIT path do execute, and can earn a full PASS rather than a CAPPED-but-armable verdict — PR #877 posted "PASS — 4 criteria substantiated, no test theater" on 4/4 grep proofs exiting 0. A path-less `grep:` is refused outright (`parseDialectGrep`, `src/lib/review.ts:527`), leaving that criterion on the keyword floor. *(from #877)*
-- **A stale-red `ci-gate` needs a NEW SHA — no re-run path clears it.** ci-gate aggregates, and goes red when it times out on sibling checks that have not finished; when those siblings later complete green on the SAME head sha the aggregate never re-aggregates. PR #873's ci-gate went red at 15:18:02Z while `refactor-campaign` and `mutation-ratchet` subsequently completed green on that very sha; pushing the byte-identical tree to a fresh sha as PR #877 went fully green about nine minutes later. The underlying defect (no per-name dedupe, no re-aggregation trigger) is already filed as `fb-1784917146019-88250d` / W1-T261 and is UNIMPLEMENTED — this entry is the operational workaround, not the fix. *(from #873/#877)*
+## Coverage traps
 
-## Lessons from 2026-07-30
+- **In a NEW `.ts` file, sandwich type-only `interface`/`type` declarations BETWEEN covered
+  functions — never at the file's head or tail.** `--experimental-test-coverage` stamps `DA:<line>,0`
+  across a new file's leading AND trailing source-line records (a source-map preamble/epilogue
+  artifact), and diff-coverage flags an interface's property lines sitting there as uncovered code.
+  Middle types, bracketed by executed statements, get no `DA:0`. *(#777 — head and tail both failed)*
+- **Put any coverage-load-bearing test in its OWN `test/*.test.ts` file — never append it to
+  `test/run-task.test.ts`.** That file intermittently crashes at FILE level under
+  `--experimental-test-coverage` (the W1-T240 registry tests), zeroing the coverage record for
+  everything in it — so a diff-coverage-critical test can lose its own coverage nondeterministically
+  and fail on a rerun unrelated to your change. *(#781)*
+- **When every test injects a fake, the seam's DEFAULT implementation and each `catch` arm are
+  unreachable — write one test that really shells out, and one per catch arm.** #978 shipped 182
+  lines of tests that all supplied their own `PreflightSpawn`, so `defaultPreflightSpawn` never ran
+  and 1 of 3 catch arms was exercised (9 uncovered lines). Fix shape: append the injectable
+  parameter LAST so no positional caller shifts, cover the wiring with a recorder, and assert the
+  real thing (status, stdout, stderr, piped stdin) — a leaf that threw on nonzero exit would turn
+  every ordinary check failure into the catch arm's message and lose the tool's own output.
+  *(#977, #978)*
 
-- **Never derive "which tasks are merged" from ledger verdict lines — read the `Remudero-Task:` trailer off merged PRs.** This repo's dominant merge path is the GATE-SIDE merge: the PR merges after the run has already ended `blocked`/`blocked_ci`, so that task's run never writes a `merged` verdict and a ledger-only scan cannot see it. impl-BJ built the set that way (even correctly unioned over all 661 files), got 236 ids, and `runnableCandidates` then offered long-merged work as runnable — naming **W1-T227 and W1-T192 as the frontier when both had merged weeks earlier** (#527 on 2026-07-22, #457 on 2026-07-21). Enumerating merged PRs and reading their trailers gives 301; unioned with the ledger, 311 — and the real frontier was three entirely different tasks. Cheap and authoritative: `gh api 'repos/craigoley/remudero/pulls?state=closed&per_page=100&page=N'`, filter `merged_at != null`, match `^Remudero-Task: (\S+)$` in the body. *(from impl-BJ's stale frontier, corrected in #984)*
-- **`lint-plan` runs CHANGED-TASKS-ONLY in CI, so touching a task promotes ITS OWN pre-existing violations to blocking — including ones that are merely `warn` at dispatch.** "Fix only the criterion that blocks dispatch" is right for the drain and wrong for the PR: `proof-resolvability` is demoted to `warn` at the dispatch call site (`preDispatchLint`, `src/run-task.ts`) but blocks in the changed-tasks gate. Once a task is in your diff, clear **every** violation on it, not just the dispatch-blocking ones. *(from #984 — W1-T165 was left at one pre-existing resolvability warning on a criterion I had deliberately not touched; CI's lint-plan failed on `6 task(s) checked (6 new/changed) — 1 failing` and cost a round-trip)*
-- **A locally-produced lcov is not predictive of `coverage-ratchet` in EITHER direction — calibrate it before trusting a local BLOCK or a local pass.** A local run over a hand-picked test-file set flagged **13** lines where CI flagged **3**; it also cannot prove absence, because CI builds its lcov from the full suite (which drives real `runTask`/sweep paths a scoped run never reaches). Calibrate in one command: run `scripts/diff-coverage.mjs` with your local lcov against a **recently-merged, CI-green commit** on the same tree (`git show <sha> -- src/… > /tmp/x.diff`). If that commit blocks too, your lcov under-reports and a local block means "investigate", not "stop". *(from #981 — #973 and #975 both blocked against my local lcov despite having merged green; the three lines CI actually flagged were real and needed a test seam)*
-- **`automerge.armed` in the ledger is NOT evidence that anything was armed.** `armAutoMerge` RETURNS one of seven outcomes and never throws; five of them arm nothing. Five Architect lanes (dep-review, retro, triage, plan, approve) did `armAutoMerge(...); log("automerge.armed", {})` unconditionally, so a refusal was recorded as an arm and the console printed "gated + armed" one line after `automerge.ledger_refused`. Measured over the unioned ledger: **176 rows, 135 of them blind, 17 provably false, 119 undecidable** — the blind rows recorded no `head_sha`, so whether the gate matched can never be recovered. Any historical claim resting on that step name is unsound for rows written before #981. *(from #981)*
-- **On a zero match, `node --test --test-name-pattern` emits `ok 1 - <RELATIVE test path>` — exclude the wrapper by the relative path, never the absolute one.** A zero-match control that filters on the absolute path still counts the wrapper, returns 1, and reports a false pass — which would make every proof verification in the session vacuous. Always run the control (`--test-name-pattern "no test title matches this xyzzy"`) and require the post-filter count to be **0** before believing any proof's match count. *(from #981 — my first discriminator was blind and the control caught it, not the proofs)*
-- **`verify: human` tasks NEVER dispatch, so their proof-dialect debt can never stall the queue — do not rewrite their proofs.** `isDispatchEligible` (`src/lib/drain.ts`) returns false at `t.verify !== "auto"` **before** the linter is consulted. Six of the plan's refusing tasks are human-verified chaos drills, device recordings and live deploys whose proof IS an operator demonstration; forcing them into `unit test:` produces proofs that parse, match zero tests, and cap the review at `proof_exec: 0/N` — the exact theatre the dialect gate exists to stop. Report them as needing a proof kind the dialect lacks. *(from #984 — W1-T12e, W1-T147, W12-T1, W2-T2, W3-T4, W3-T7 were left alone deliberately)*
-- **Verify every PR-body claim about your own diff against `git diff --numstat`, and RE-VERIFY after each follow-up commit.** The `remudero-review` keyword floor matches the BODY and never opens the diff, so a body that contradicts its own changeset merges on a `success` status. PR #974 merged asserting `git show --stat` listed "exactly one file: `MASTER-PLAN.md`. No `src/`, no `test/`, no `docs/ORIENTATION.md`" while its diff carried three files including `docs/ORIENTATION.md` at +29/-98 — and that misclassification was load-bearing, because `docs/ORIENTATION.md` sits outside `isInPlanScope` and cost the PR its `planOnly` carve-out. A body written once against a moving diff goes stale on the next push. *(from #974; the same class hit me twice in #984 — guessed numstat figures caught against real output pre-open, then re-patched after a follow-up commit changed them)*
-## Lessons from 2026-07-31
+## Plan and task hygiene
 
-- **When a gate reads the ledger for a record the SAME function writes, check the write order before believing the gate's stated reason.** `armIfVerdictPermits` is called at `src/run-task.ts:1527`, thirty-five lines BEFORE the `log("review.posted", …)` at `:1562` that its own gate (`decideArmFromLedgerVerdict`) requires — so the gate fail-closes to `ledger-refused` on every first pass, and nothing retries it. The comment at `:1522` justifies the ordering by asserting `postReviewStatusGuarded` "just wrote" that line; it does not — that function only ever writes `review.post_refused` / `review.post_failed`. The ledger proves it: every refused arm precedes its own `review.posted` line by 0–1ms (`PR-977` refused at `00:57:06.808`, posted at `.809`; same for PR-981, PR-982, W1-T226, W1-T221, PR-984), and the only outcomes reading `armed` carry `at: "open"` — the ungated arm-at-open path. FOUR consecutive PRs rewrote this path in three hours without fixing it. *(from #968 → #973 → #975 → #981, and the ledger forensics that finally caught it while merging #977/#978)*
-- **A ledger line must carry the reason from the DECISION THAT PRODUCED ITS OUTCOME.** `automerge.armed` logged `outcome: "ledger-refused"` beside `reason: "verdict is a full PASS"` — the outcome from the ledger gate that refused, the reason from `decideAutoMergeArm` (`src/lib/review.ts:1802`) which had APPROVED. The real refusal reason went only to stdout via `deps.say`. A self-contradictory line is worse than a terse one: it sends every subsequent diagnosis toward a policy question instead of the ordering bug above. *(from #981, which fixed the step NAME (`automerge.arm_skipped`) but left the mismatched `reason` field and the ordering defect)*
-- **Never do interactive work inside `<config.root>/worktrees` — the fleet reaps it.** `reapStaleWorktrees(worktreesDir(config))` scans that directory on a cadence and `rm -rf`s entries it judges terminal; it removes the working directory without running `git worktree prune`, so its signature is every worktree gone while the admin records survive as `prunable`. An impl-BH worktree there was destroyed twice in about eleven minutes mid-command. Cut worktrees somewhere else (e.g. `~/Remudero/<name>-work`). Recovery, if it happens: the worktree's git admin dir and index live in the PARENT clone, so staged blobs survive — `GIT_INDEX_FILE=<clone>/.git/worktrees/<name>/index git ls-files -s -- <path>` then `git cat-file -p <sha>`. Commit and push more often than feels necessary. *(from the 2026-07-31 impl-BH run — two wipes, full recovery from the index)*
-- **When every test injects a fake, the seam's DEFAULT implementation and each `catch` arm are unreachable — write one test that really shells out and one test per catch arm.** This blocked two separate PRs in one session: #978's preflight shipped 182 lines of tests that all supplied their own `PreflightSpawn`, so `defaultPreflightSpawn` never ran and only 1 of 3 per-step catch arms was exercised (9 uncovered lines); and #977's `buildSweepEffects` closure called the push leaf directly with no seam at all. The fix shape for both: append the injectable parameter LAST so no positional caller shifts, cover the wiring with a recorder, and add a leaf test asserting the real thing (status, stdout, stderr, piped stdin) — a leaf that threw on a nonzero exit would turn every ordinary check failure into the catch arm's message and lose the tool's own output. *(from #977 and #978)*
-- **A new ledger step that any DECISION reads must be added to `DECISION_RELEVANT_LEDGER_STEPS` (`src/lib/ledger.ts`) in the same PR.** `sweep.absent_repush` is not merely a record: `priorActionsFromLedger` enforces `ABSENT_REPUSH_CAP` by COUNTING those lines, so a rotation archiving them resets the count to zero and every rotation re-earns the PR another empty commit — the unbounded loop the cap exists to prevent. `test/ledger-rotation.test.ts` re-derives the expected set from every consumer's source and caught it on the first CI push; a scoped local run cannot, because the coupling is to a different file's derived invariant. *(from #977 — the bound lives in the ledger, so the line IS the bound)*
-- **`rmd drain --dry-run` is neither side-effect-free nor able to see your branch — do not reach for it to prove a dispatch change.** `drainCommand` resolves `ledgerPathFor(config)` to the LIVE ledger and its `log()` appends there before the dry-run branch is reached, and its W1-T60 git self-sync dispatches from **origin/main's** plan blob, never the working tree. Prove a dispatch change in-process instead, with the choke point's own objects: `assertLintClean(task, { proofResolvability: "warn" })` (the literal at `src/run-task.ts:3184`) over `git show origin/main:<planfile>` versus yours. Note the blocking count is smaller than `lint-plan`'s total — only `proof-dialect` blocks at dispatch; `proof-resolvability` is demoted to `warn` there. *(from #982)*
-- **Writing a plan proof: keep a `unit test:` body under 100 characters with at most ONE comma and no `"; "`, and never let a `grep:` PATTERN contain `" in "`.** `looksLikeScenarioNarrative` (`src/lib/task-linter.ts`) calls a body a narrative — and fails `proof-resolvability` — at ≥2 commas, or `"; "` plus a comma, or >100 chars; staying under that clears the check with no `::` anchor (which lint-passes but CAPs the review). A `grep:` proof splits on the LAST `" in "` followed by a path-like token, so a pattern containing `" in "` mis-splits. Forward references are legitimate: for an unimplemented task the named test does not exist yet — what must hold today is that the proof PARSES. *(from #982/#984; #920 → #943 is the counter-example — forward-referencing a PATH is safe, forward-referencing a SYMBOL NAME is a guess, and `loadPolicy` was not the symbol #921 shipped)*
-- **#906 made a non-executable proof BLOCK at dispatch, but the drain has no remedy for a refused task — it re-selects and re-refuses the same one every tick, silently.** Five separate PRs in this window rewrote proofs one task at a time (#920, #942, #943, #982, #984). Fix them in BULK, and before believing "task X is next", verify the actual frontier head with the repo's own selector — `runnableCandidates(plan, isMerged, n)` — rather than the task a brief or retro names: W1-T169 was rank 23 behind three unmet deps, not the head at all. Feed that selector a merged set built from the `Remudero-Task:` trailers of merged PRs, NOT from ledger `verdict.merged` lines: my own #982 frontier used the ledger-only set and named W1-T227/W1-T192 as the head when both had merged weeks earlier — see the 2026-07-30 rule above, which is the authoritative method. Immediately after #982, 15 of 55 unmerged tasks still refused; #984 cleared six more. *(from #982's frontier measurement, corrected by #984/#985 — the stale-frontier rule is why the count and the head named here were both off)*
+- **Derive "which tasks are merged" from the `Remudero-Task:` trailer on merged PRs — never from
+  ledger verdict lines.** The dominant merge path here is GATE-SIDE: the PR merges after the run
+  already ended `blocked`/`blocked_ci`, so that task never writes a `merged` verdict and a
+  ledger-only scan cannot see it. A ledger-built set gave 236 ids and offered long-merged work as
+  runnable, naming W1-T227/W1-T192 as the frontier when both had merged weeks earlier (#527, #457).
+  Trailers give 301; unioned with the ledger, 311.
+  `gh api 'repos/craigoley/remudero/pulls?state=closed&per_page=100&page=N'`, filter
+  `merged_at != null`, match `^Remudero-Task: (\S+)$`. *(#984)*
+- **Before believing "task X is next", confirm the frontier with the repo's own selector —
+  `runnableCandidates(plan, isMerged, n)` — not the task a brief or retro names**, and feed it the
+  trailer-built merged set above. W1-T169 was rank 23 behind three unmet deps, not the head. A
+  refused task is re-selected and re-refused every tick, silently, so **fix proofs in BULK**: five
+  separate PRs rewrote them one at a time. *(#982, #984, #985, #906, #920, #942, #943)*
+- **Compute a new task id from the max across BOTH `plan/tasks.yaml` AND every `plan/tasks.d/*.yaml`
+  shard.** "Next number after the last one I saw" collides with tasks that landed concurrently or
+  live in a shard you didn't read, and `rmd lint-plan` then blocks the push.
+  `grep -rhoE '^\s*- id: W1-T[0-9]+' plan/tasks.yaml plan/tasks.d/ | grep -oE 'T[0-9]+'` → max+1.
+  *(#770 — renumbered to W1-T257; #775 — to W1-T261; same collision twice in one session)*
+- **`lint-plan` runs CHANGED-TASKS-ONLY in CI, so touching a task promotes its OWN pre-existing
+  violations to blocking — including ones that are merely `warn` at dispatch.** `proof-resolvability`
+  is demoted to `warn` at `preDispatchLint` but blocks in the changed-tasks gate. Once a task is in
+  your diff, clear EVERY violation on it, not just the dispatch-blocking ones. *(#984)*
+
+## CI and merging
+
+- **A stale-red `ci-gate` needs a NEW SHA — no re-run path clears it.** ci-gate aggregates and goes
+  red when it times out on siblings that have not finished; when those siblings later complete green
+  on the SAME head sha it never re-aggregates. #873 went red while two checks subsequently passed on
+  that very sha; the byte-identical tree pushed to a fresh sha as #877 went fully green. The
+  underlying defect is filed as W1-T261 and UNIMPLEMENTED — this is the workaround, not the fix.
+  *(#873/#877)*
+- **`gh pr create` is GraphQL and dies with "API rate limit already exceeded" when that budget is
+  spent** (frequent on this account while REST/core stays healthy). Open PRs via REST:
+  `gh api --method POST repos/<owner>/<repo>/pulls -f title=… -f head=… -f base=main -F body=@<file>`.
+  Check with `gh api rate_limit` (`.resources.graphql.remaining` vs `.resources.core.remaining`).
+  `rmd review` and `gh pr view --json` are ALSO GraphQL, so a hand-opened PR can't be reviewed until
+  GraphQL resets. *(#766)*
+
+## Ledger and evidence discipline
+
+- **Any "N occurrences in the ledger" measurement must union `state/ledger.ndjson` with its
+  rotations — the live file is lossy.** A `review.posted` count read 212 live and 912 over the union
+  of the live file plus all 658 archives: a ~4x undercount. Claims of the form "N occurrences", and
+  especially "zero in the entire history", are unsupportable without the archives.
+  *(recon-AE, `state/recon-AE-dispatch-certifiability.md` §0)*
+- **A new ledger step that any DECISION reads must be added to `DECISION_RELEVANT_LEDGER_STEPS`
+  (`src/lib/ledger.ts`) in the same PR.** `priorActionsFromLedger` enforces `ABSENT_REPUSH_CAP` by
+  COUNTING `sweep.absent_repush` lines, so a rotation archiving them resets the count to zero and
+  every rotation re-earns the PR another empty commit — the unbounded loop the cap exists to
+  prevent. `test/ledger-rotation.test.ts` re-derives the expected set from every consumer's source;
+  a scoped local run cannot catch this. *(#977 — the bound lives in the ledger, so the line IS the bound)*
+- **A ledger line must carry the reason from the DECISION THAT PRODUCED ITS OUTCOME.**
+  `automerge.armed` once logged `outcome: "ledger-refused"` beside `reason: "verdict is a full PASS"`
+  — outcome from the gate that refused, reason from `decideAutoMergeArm` which had APPROVED, with
+  the real reason going only to stdout. A self-contradictory line is worse than a terse one: it
+  sends every later diagnosis toward a policy question instead of the real defect. *(#981)*
+- **Treat a step NAME as a claim, not evidence — check what the function that wrote it can actually
+  return.** `armAutoMerge` returns one of seven outcomes and never throws; five arm nothing, yet five
+  Architect lanes logged `automerge.armed` unconditionally. Measured over the unioned ledger: 176
+  rows, 135 blind, 17 provably false, 119 undecidable — the blind rows recorded no `head_sha`, so
+  they can never be adjudicated. Any historical claim resting on that step name is unsound for rows
+  written before #981. *(#981)*
+- **On a zero match, `node --test --test-name-pattern` still emits `ok 1 - <RELATIVE test path>` —
+  exclude the wrapper by the RELATIVE path, never the absolute one.** A control filtering on the
+  absolute path counts the wrapper, returns 1, and reports a false pass, which would make every
+  proof verification vacuous. Always run the control
+  (`--test-name-pattern "no test title matches this xyzzy"`) and require a post-filter count of 0
+  before believing any match count. *(#981 — the control caught the blind discriminator, not the proofs)*
+
+## Investigation discipline
+
+- **Before editing the config file you were TOLD to change, trace from source where the runtime
+  value is actually read.** The named declarative source may be inert while a code-level default
+  governs live behavior: the `.remudero/mounts.yaml` `architect:` row looked authoritative, but
+  spawns resolved from `architectModel(config)`'s `?? "opus"` default, so a row-only edit would have
+  shipped green and changed nothing observable. *(#781 — required wiring `architectModel(config, mounts)`)*
+- **When a gate reads the ledger for a record the SAME function writes, check the WRITE ORDER before
+  believing the gate's stated reason.** `armIfVerdictPermits` once ran before the `log("review.posted")`
+  its own gate required, so it fail-closed to `ledger-refused` on every first pass with nothing
+  retrying it — while a nearby comment asserted the line had "just" been written. Four consecutive
+  PRs rewrote that path in three hours without fixing it; the ledger proved it, every refusal
+  preceding its own `review.posted` by 0–1ms. (Now fixed — the call site must stay BELOW that log.)
+  *(#968 → #973 → #975 → #981, diagnosed while merging #977/#978)*
+- **`rmd drain --dry-run` is neither side-effect-free nor able to see your branch.** `drainCommand`
+  resolves the LIVE ledger and appends to it before the dry-run branch is reached, and its W1-T60
+  self-sync dispatches from **origin/main's** plan blob, never the working tree. Prove a dispatch
+  change in-process with the choke point's own objects — `assertLintClean(task, preDispatchLint)`
+  over `git show origin/main:<planfile>` versus yours. Only `proof-dialect` blocks at dispatch;
+  `proof-resolvability` is demoted to `warn` there, so the blocking count is smaller than
+  `lint-plan`'s. *(#982)*
+
+## Operating this host
+
+- **Never run an installing package manager (`npm ci` / `npm install`) anywhere on this host while
+  the daemon is up — every worktree SHARES the canonical `node_modules`.** Worktrees symlink back to
+  `~/Remudero/remudero/node_modules`: one mutable tree, no lock, shared by the live daemon and every
+  concurrent worker. On 2026-07-29 an install inside a worktree emptied it under the running daemon
+  and `bin/rmd` died at `node_modules/.bin/tsx: No such file or directory` on every KeepAlive
+  relaunch until a restoring install put 401 packages back. Wire a worktree up with
+  `ln -s ~/Remudero/remudero/node_modules <worktree>/node_modules`; note `.gitignore`'s
+  `node_modules/` has a trailing slash so it does NOT match that symlink — add a local exclude
+  before staging. *(the 2026-07-29 daemon outage)*
+- **Never do interactive work inside `<config.root>/worktrees` — the fleet reaps it.**
+  `reapStaleWorktrees` scans that directory on a cadence and `rm -rf`s entries it judges terminal,
+  without running `git worktree prune`; its signature is every worktree gone while the admin records
+  survive as `prunable`. One was destroyed twice in about eleven minutes mid-command. Cut worktrees
+  elsewhere (e.g. `~/Remudero/<name>-work`) and commit more often than feels necessary. Recovery:
+  the git admin dir and index live in the PARENT clone, so staged blobs survive —
+  `GIT_INDEX_FILE=<clone>/.git/worktrees/<name>/index git ls-files -s -- <path>` then
+  `git cat-file -p <sha>`. *(the 2026-07-31 impl-BH run — two wipes, full recovery)*
+- **Keep the operator checkout (`~/Remudero/remudero`) on `main`; do branch work in a `git worktree`,
+  never by checking out a feature branch on it.** The launchd daemon (`com.remudero.daemon`) loads
+  its code from that checkout, so a branch checkout risks it serving branch code on restart.
+  *(#768/#773)*
+- **A deploy is only observable if the daemon records the sha it booted on.** `decideDeployTrigger`
+  now deploys when EITHER the install is behind origin/main OR the running daemon is not on the
+  install (`runningStale`), so fast-forwarding the checkout no longer consumes the trigger. Before
+  that fix, an operator `git pull` left the supervisor reporting "up-to-date" while the daemon ran
+  stale code indefinitely. An unrecorded running sha is treated as stale (fail-eager), costing one
+  self-correcting restart. To force a deploy by hand: `git pull` then
+  `launchctl kickstart -k gui/$UID/com.remudero.daemon`. *(#1054, superseding the #768/#773 rule that
+  the supervisor never restarts for you)*
+
+## Code traps
+
+- **`src/lib/serve.ts`'s client JS lives inside a backtick template literal — never put a backtick
+  inside a client-code comment** (e.g. `` `lastLiveAt` ``). It terminates the outer template and
+  esbuild fails with `Expected ";" but found …`. Sanity-check by rendering the shell and parsing the
+  client script (`new Function(<largest <script> block of renderShellHtml()>)`). serve.ts DOM
+  behavior is covered by REAL Playwright/Chromium tests (`test/serve.*.test.ts`) — run them for any
+  client change. *(#777)*
