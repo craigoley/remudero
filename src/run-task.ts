@@ -9685,19 +9685,35 @@ export function escalationTaskIdFor(pr: { taskId?: string; prNumber: number }): 
  * un-synthesised PR would have been not merely reachable but UNBOUNDED — the same shape as the
  * defect. With the id present the strike cap keys on it exactly as it does for a plan task.
  *
- * `risk` is DEFAULT_RISK because a mount must resolve and a PR carries no risk field; `acceptance`
- * is empty because a no-task PR has no plan criteria — which costs nothing here, since the only
- * disposition that reaches this path (blocked_ci / conflicted) already seeds `criteria: []` and
- * targets the FAILING CHECKS, never a review verdict (see buildFixRungDispatchArgs).
+ * `risk` is DEFAULT_RISK because a mount must resolve and a PR carries no risk field.
+ *
+ * `acceptance` FOR A SYNTHETIC TASK (round 2, PR #1146's own review-floor failure): the ORIGINAL
+ * premise here — "empty because a no-task PR has no plan criteria, which costs nothing since the
+ * only disposition reaching this path seeds `criteria: []` and targets FAILING CHECKS, never a
+ * review verdict" — is FALSE for a `blocked_review` disposition. That disposition DOES reach this
+ * path for a synthetic (no-task) PR, and `runFixRung`'s post-strike `runReview` call judges
+ * `task.acceptance` DIRECTLY (`criteria = task.acceptance ?? []`, never re-reading the PR body) —
+ * so a hardcoded `[]` here made every synthetic-task review permanently unjudgeable
+ * ("no acceptance criteria to judge (fail closed)"), regardless of what the fix worker changed,
+ * on EVERY strike after the first: an unfixable loop, not merely a no-op one. `caller`-supplied
+ * `body` closes it the SAME way `reviewCommand` already resolves criteria for a manual/plan PR —
+ * `parseAcceptanceBlock` over the PR body's `## Acceptance` block — so a synthetic task carries
+ * the SAME criteria a human `rmd review` run would find, instead of none.
  */
 export function fixRungTaskFor(
   plan: Plan,
   pr: { prNumber: number; taskId?: string },
+  body?: string,
 ): { task: { id: string; title: string; risk: TaskRisk; acceptance: AcceptanceCriterion[]; budget_usd?: number }; synthetic: boolean } {
   const found = pr.taskId ? plan.tasks.find((t) => t.id === pr.taskId) : undefined;
   if (found) return { task: found as never, synthetic: false };
   return {
-    task: { id: escalationTaskIdFor(pr), title: `PR #${pr.prNumber}`, risk: DEFAULT_RISK, acceptance: [] },
+    task: {
+      id: escalationTaskIdFor(pr),
+      title: `PR #${pr.prNumber}`,
+      risk: DEFAULT_RISK,
+      acceptance: body ? parseAcceptanceBlock(body) : [],
+    },
     synthetic: true,
   };
 }
@@ -9883,11 +9899,6 @@ export function buildSweepEffects(
     },
 
     dispatchFix: async (pr, evidence) => {
-      // impl-FY: a PR with no plan task is STILL repairable — see fixRungTaskFor. The rung used to
-      // log `sweep.fix.no_task` and return here, which is why seven agent-authored PRs were
-      // classified fixable and then silently skipped every poll.
-      const { task, synthetic } = fixRungTaskFor(plan, pr);
-      if (synthetic) log("sweep.fix.synthetic_task", { pr_number: pr.prNumber, task_id: task.id });
       let worktreePath = "";
       try {
         // W1-T177 SITE (v): an INDEPENDENT fresh live-state read, via the
@@ -9902,9 +9913,20 @@ export function buildSweepEffects(
         // Creditability is load-bearing (status.ts ownsBranch): a fix must amend
         // THIS task's own run-branch (run-<id>-<epochMs>), never a foreign/fix-*
         // head — a fix on an uncreditable head loops forever + strands dependents.
-        const headRef = ghJson(["pr", "view", pr.prUrl, "--json", "headRefName"]) as {
+        // `body` is fetched in the SAME call (never a second `gh pr view`) so
+        // `fixRungTaskFor` can resolve a synthetic (no-task) PR's acceptance
+        // criteria from its `## Acceptance` block — see that function's doc for
+        // why a hardcoded `[]` here made a `blocked_review` synthetic dispatch
+        // permanently unjudgeable.
+        const headRef = ghJson(["pr", "view", pr.prUrl, "--json", "headRefName,body"]) as {
           headRefName?: string;
+          body?: string;
         };
+        // impl-FY: a PR with no plan task is STILL repairable — see fixRungTaskFor. The rung used to
+        // log `sweep.fix.no_task` and return here, which is why seven agent-authored PRs were
+        // classified fixable and then silently skipped every poll.
+        const { task, synthetic } = fixRungTaskFor(plan, pr, headRef.body);
+        if (synthetic) log("sweep.fix.synthetic_task", { pr_number: pr.prNumber, task_id: task.id });
         const realBranch = headRef.headRefName;
         if (!realBranch || !fixHeadAcceptable(realBranch, task.id, synthetic)) {
           log("sweep.fix.uncreditable_head", { pr_number: pr.prNumber, head: realBranch, synthetic });
