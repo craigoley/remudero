@@ -201,11 +201,28 @@ describe("plan changed-file detection", () => {
     // here without spawning a paid worker, so the wiring is asserted structurally instead.
     const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
     const planLane = src.slice(src.indexOf("export async function planCommand("));
-    const upToDecision = planLane.slice(0, planLane.indexOf("decidePlanArchitect({ verdict, changedFiles })"));
+    // Anchor on the CALLEE NAME only. This used to slice on the whole literal
+    // `decidePlanArchitect({ verdict, changedFiles })`, which pinned the argument spelling as
+    // well as the wiring — so the relint refactor broke it by renaming the local to `changed` and
+    // widening the call, while still deriving from the shared helper. indexOf returned -1, the
+    // slice silently became the whole lane, and the test failed for a shape change rather than
+    // the defect. What must hold is the WIRING, not the identifier.
+    const decisionAt = planLane.indexOf("decidePlanArchitect(");
+    assert.notEqual(decisionAt, -1, "the plan lane must still reach decidePlanArchitect");
+    const upToDecision = planLane.slice(0, decisionAt);
 
-    assert.match(upToDecision, /const changedFiles = worktreeChangedFiles\(worktreePath\);/,
-      "the plan lane must derive changedFiles from the shared helper");
+    assert.match(upToDecision, /worktreeChangedFiles\(worktreePath\)/,
+      "the plan lane must derive its changed-file set from the shared helper");
     assert.doesNotMatch(upToDecision, /diff", "--name-only", "origin\/main"/,
       "...and must NOT have a tracked-only git diff of its own");
+    // The helper's RESULT must be what reaches the decision — deriving it and then passing
+    // something else would satisfy the two assertions above while restoring the defect.
+    const derivedName = /(?:const|let)\s+(\w+)\s*=\s*worktreeChangedFiles\(worktreePath\)/.exec(upToDecision)?.[1];
+    assert.ok(derivedName, "the helper's result must be bound to a name the decision can receive");
+    assert.match(
+      planLane.slice(decisionAt, decisionAt + 400),
+      new RegExp(`changedFiles:\\s*${derivedName}\\b|changedFiles\\s*[,}]`),
+      "decidePlanArchitect must receive the helper-derived set, not a separately-computed one",
+    );
   });
 });

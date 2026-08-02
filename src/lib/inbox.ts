@@ -15,7 +15,10 @@ import { lintPlan, lintTask } from "./task-linter.js";
  *  `check` is a strict LintCheck) PLUS the draft rung's own `draft-parse` finding for a fragment
  *  that won't even parse — structurally typed so both flow through one path without widening the
  *  linter's closed check union (and without a type-only line the diff-coverage gate can't cover). */
-export type DraftLintViolation = { check: string; severity: "block" | "warn"; message: string };
+// impl-FU: an ALIAS of the shared type, not a second declaration — this rung's loop was the
+// prototype and lib/relint.ts is that mechanism extracted for triage/plan to share.
+export type DraftLintViolation = RelintViolation;
+import { MAX_RELINT_ATTEMPTS, relintGuidanceLines, type RelintViolation } from "./relint.js";
 import { appendLedger } from "./ledger.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { buildPlanPrCommitMessage } from "./plan-pr-emitter.js";
@@ -654,7 +657,9 @@ export type DraftRungOutcome =
 /** cc71f2: the draft rung's own bounded self-lint. The first attempt is the ordinary draft;
  *  each further attempt is a redraft carrying the prior fragment's linter violations. Keeps the
  *  Architect from re-rolling blind while never looping unboundedly. */
-export const MAX_DRAFT_LINT_ATTEMPTS = 3;
+// impl-FU: re-exported from lib/relint.ts so triage/plan/inbox share ONE bound. The name is
+// kept because test/inbox.test.ts imports it.
+export const MAX_DRAFT_LINT_ATTEMPTS = MAX_RELINT_ATTEMPTS;
 
 /** Lint a drafted fragment exactly as `rmd lint-plan` would: parse it, then collect every
  *  BLOCK-severity violation across its tasks. A fragment that does not even parse is itself one
@@ -680,12 +685,7 @@ export function inboxDraftRelintPrompt(proposal: Proposal, fragmentYaml: string,
   return [
     `Your drafted plan fragment for ${proposal.id} FAILED the plan's own linter (rmd lint-plan) and CANNOT be cached as-is. Fix EVERY blocking violation below, then re-emit the COMPLETE corrected fragment + stamp in the same FRAGMENT/STAMP marker format.`,
     "",
-    "BLOCKING VIOLATIONS:",
-    ...violations.map((v) => `  - [${v.check}] ${v.message}`),
-    "",
-    "For a [call-site] violation (impl-DO): the task CREATES a src/ module and no criterion proves anything CALLS it. Eleven modules have merged green and unreached — console-freshness.ts shipped 111 lines with 83 lines of tests that serve.ts never imported, and the bug it fixed is still on screen. Add a criterion whose proof is 'grep: <symbol>( in <the file that calls it>'. THE OPEN PAREN IS THE WHOLE POINT: 'grep: foo in x.ts' passes on a COMMENT mentioning foo, which is how a proof once exited 0 against entirely unbuilt work; 'grep: foo( in x.ts' can only be satisfied by something shaped like a call. The path must be a DIFFERENT file from the module being created — a module calling itself proves nothing about whether the program reaches it.",
-    "",
-    "For a [sizing] (Rule 19) violation apply the #588 MERITS TEST: does that task's acceptance assert ONE cross-file invariant that is unsatisfiable piecewise (a single test needing all its files together)? If YES — raise that task to risk:high and record the one-line rationale in the task. If NO — DECOMPOSE it into one task per subsystem with an explicit depends_on spine preserving order, budgets resized per piece, every resulting task keeping the same origin: provenance. Keep every proof executable ('unit test: <path or exact test-title substring>' or 'grep: <pattern> in <path>').",
+    ...relintGuidanceLines(violations),
     "",
     "The fragment you must fix:",
     fragmentYaml,
