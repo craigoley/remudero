@@ -4,6 +4,7 @@ import {
   assessBootHealth,
   daemonIsIdle,
   decideDeployTrigger,
+  describeFailureKind,
   readLatestBootSha,
   sameCommit,
   runDeployCycle,
@@ -43,8 +44,77 @@ test("daemonIsIdle: idle IFF no worker AND no inflight AND no worktree lock", ()
 });
 
 test("treeFfSafe: a benign local mod NOT in the incoming diff is fine; one that IS conflicts", () => {
-  assert.deepEqual(treeFfSafe({ dirtyFiles: ["DECISIONS.md"], incomingFiles: ["src/x.ts"] }), { ok: true, conflicting: [] });
-  assert.deepEqual(treeFfSafe({ dirtyFiles: ["DECISIONS.md", "src/x.ts"], incomingFiles: ["src/x.ts"] }), { ok: false, conflicting: ["src/x.ts"] });
+  assert.deepEqual(treeFfSafe({ dirtyFiles: ["DECISIONS.md"], incomingFiles: ["src/x.ts"] }), { ok: true, conflicting: [], discardable: [] });
+  assert.deepEqual(treeFfSafe({ dirtyFiles: ["DECISIONS.md", "src/x.ts"], incomingFiles: ["src/x.ts"] }), { ok: false, conflicting: ["src/x.ts"], discardable: [] });
+});
+
+test("treeFfSafe: WITHOUT a byte-identity probe, nothing is discardable — the old behaviour exactly", () => {
+  // The seam is optional so a caller that never supplies it cannot be regressed into discarding.
+  const r = treeFfSafe({ dirtyFiles: ["a.yaml", "b.yaml"], incomingFiles: ["a.yaml", "b.yaml"] });
+  assert.deepEqual(r, { ok: false, conflicting: ["a.yaml", "b.yaml"], discardable: [] });
+});
+
+test("treeFfSafe: a local file byte-identical to the incoming blob is discardable, not a conflict", () => {
+  // THE DEADLOCK. The daemon wrote a.yaml itself; main now carries the identical bytes.
+  const r = treeFfSafe({
+    dirtyFiles: ["a.yaml"],
+    incomingFiles: ["a.yaml"],
+    sameAsIncoming: (p) => p === "a.yaml",
+  });
+  assert.deepEqual(r, { ok: true, conflicting: [], discardable: ["a.yaml"] });
+});
+
+test("treeFfSafe: one identical file does NOT excuse a differing one — the ff still aborts", () => {
+  // The safety property: partial identity must never unblock a genuinely divergent tree.
+  const r = treeFfSafe({
+    dirtyFiles: ["same.yaml", "edited.ts"],
+    incomingFiles: ["same.yaml", "edited.ts"],
+    sameAsIncoming: (p) => p === "same.yaml",
+  });
+  assert.equal(r.ok, false, "a real conflict must still abort");
+  assert.deepEqual(r.conflicting, ["edited.ts"]);
+  assert.deepEqual(r.discardable, ["same.yaml"]);
+});
+
+test("treeFfSafe: a probe that throws or answers false keeps the file a conflict (fail-closed)", () => {
+  const r = treeFfSafe({
+    dirtyFiles: ["x.ts"],
+    incomingFiles: ["x.ts"],
+    sameAsIncoming: () => false,
+  });
+  assert.deepEqual(r, { ok: false, conflicting: ["x.ts"], discardable: [] });
+});
+
+test("describeFailureKind names the real cause, and never invents one it was not given", () => {
+  assert.match(describeFailureKind("dirty-tree-conflict"), /dirty-tree conflict/);
+  assert.match(describeFailureKind("health-check-rollback"), /health-check/);
+  assert.equal(describeFailureKind(undefined), "reason not recorded");
+});
+
+test("the skip line states the recorded cause — a dirty-tree stall no longer claims a health-check", () => {
+  // The defect: BOTH failures wrote lastFailedHead, and the skip line hardcoded the health-check
+  // wording, so a dirty-tree stall reported a rollback that never happened.
+  const base = { markerPresent: false, autoMode: true, installHead: "aaa", originMain: "bbb", lastFailedHead: "bbb" } as const;
+  const dirty = decideDeployTrigger({ ...base, lastFailedKind: "dirty-tree-conflict" });
+  assert.equal(dirty.deploy, false);
+  assert.match(dirty.reason, /dirty-tree conflict/);
+  assert.doesNotMatch(dirty.reason, /health-check/, "must not claim a health-check that never ran");
+  assert.match(dirty.reason, /DEPLOY_FAILED/, "and must point at the record that has the detail");
+
+  const health = decideDeployTrigger({ ...base, lastFailedKind: "health-check-rollback" });
+  assert.match(health.reason, /health-check/);
+  assert.doesNotMatch(health.reason, /dirty-tree/);
+
+  // Legacy record with no kind: say so rather than guess.
+  assert.match(decideDeployTrigger(base).reason, /reason not recorded/);
+});
+
+test("an operator marker still overrides the not-retried latch, whatever the recorded kind", () => {
+  const d = decideDeployTrigger({
+    markerPresent: true, autoMode: true, installHead: "aaa", originMain: "bbb",
+    lastFailedHead: "bbb", lastFailedKind: "dirty-tree-conflict",
+  });
+  assert.equal(d.deploy, true, "the operator asked explicitly — the latch is auto-mode only");
 });
 
 test("assessBootHealth: healthy needs a fresh boot AND no crash-loop", () => {
@@ -70,6 +140,8 @@ function makeDeps(o: {
   originMain?: string;
   dirtyFiles?: string[];
   incomingFiles?: string[];
+  /** Paths whose local bytes already equal the incoming blob (impl: the byte-identity probe). */
+  identical?: string[];
   idle?: IdleProbe | IdleProbe[]; // one value, or a sequence consumed per probeIdle() call
   health?: HealthInputs;
   consoleUp?: boolean;
@@ -98,6 +170,10 @@ function makeDeps(o: {
     lastFailedHead: () => o.lastFailedHead,
     dirtyFiles: () => o.dirtyFiles ?? [],
     incomingFiles: () => o.incomingFiles ?? [],
+    sameAsIncoming: o.identical ? (p2) => (o.identical ?? []).includes(p2) : undefined,
+    discardLocal: (p2) => {
+      calls.push(`discard:${p2}`);
+    },
     pullFf: () => {
       calls.push("pullFf");
       headRef.value = o.originMain ?? "new-head"; // ff advances HEAD to origin
@@ -200,6 +276,7 @@ test("cycle #4 — clean-tree guard: a conflicting dirty file ⇒ abort, alert, 
 
 // ── realDeployDeps + marker helpers (adapter coverage; injected exec + real temp fs) ──
 
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -329,7 +406,7 @@ test("realDeployDeps: alert writes DEPLOY_FAILED + DEPLOY_LAST_FAILED; clearMark
       sleep: () => {},
     });
     assert.equal(deps.lastFailedHead(), undefined);
-    deps.alert("boom", "badsha");
+    deps.alert("boom", "badsha", "health-check-rollback");
     assert.match(readFileSync(deployFailedAlertPath(root), "utf8"), /boom/);
     assert.equal(deps.lastFailedHead(), "badsha");
     // marker present/auto reflect the fs
@@ -435,4 +512,119 @@ test("running-sha trigger: the idle gate STILL blocks — a stale daemon with a 
   assert.equal(result.deployed, false, "a worker in flight must veto the restart, stale or not");
   assert.ok(!r.calls.includes("kickstart"), "no kickstart while a worker is live");
   assert.ok(!r.calls.includes("pullFf"), "and the gate is reached BEFORE any tree mutation");
+});
+
+// ── impl: the byte-identical discard, driven through the real cycle ──────────────────
+
+test("the cycle PROCEEDS past exhaust it wrote itself, discarding only byte-identical paths", async () => {
+  // The live deadlock, end to end: the daemon wrote plan/feedback/*.yaml, a filing PR committed
+  // the identical bytes, and the ff then refused to clobber them — so the daemon could not pull
+  // the commit containing its own output. It stuck for 5 commits until an operator intervened.
+  const r = makeDeps({
+    autoMode: true,
+    installHead: "old-head",
+    originMain: "new-head",
+    dirtyFiles: ["plan/feedback/fb-alert-70.yaml", "plan/feedback/fb-alert-73.yaml"],
+    incomingFiles: ["plan/feedback/fb-alert-70.yaml", "plan/feedback/fb-alert-73.yaml", "src/x.ts"],
+    identical: ["plan/feedback/fb-alert-70.yaml", "plan/feedback/fb-alert-73.yaml"],
+  });
+  const out = await runDeployCycle(r.deps, { dryRun: false });
+  assert.equal(out.deployed, true, "the deploy must no longer be blocked by its own exhaust");
+  assert.ok(r.calls.includes("discard:plan/feedback/fb-alert-70.yaml"));
+  assert.ok(r.calls.includes("discard:plan/feedback/fb-alert-73.yaml"));
+  assert.ok(r.calls.includes("pullFf"), "and the fast-forward actually ran");
+  assert.equal(r.alerts.length, 0, "no failure alert, so nothing arms the not-retried latch");
+});
+
+test("the cycle STILL aborts when any conflicting file genuinely differs", async () => {
+  // The safety property under the real orchestrator: a hand-edit must not be discarded just
+  // because some OTHER path happened to be identical.
+  const r = makeDeps({
+    autoMode: true,
+    installHead: "old-head",
+    originMain: "new-head",
+    dirtyFiles: ["plan/feedback/fb-alert-70.yaml", "src/hand-edited.ts"],
+    incomingFiles: ["plan/feedback/fb-alert-70.yaml", "src/hand-edited.ts"],
+    identical: ["plan/feedback/fb-alert-70.yaml"], // the hand-edit is NOT identical
+  });
+  const out = await runDeployCycle(r.deps, { dryRun: false });
+  assert.equal(out.deployed, false);
+  assert.equal(out.reason, "dirty-tree-conflict");
+  assert.ok(!r.calls.includes("pullFf"), "the operator's edit must never be fast-forwarded over");
+  assert.ok(!r.calls.some((c) => c.startsWith("discard:")), "and nothing is discarded on the abort path");
+  assert.match(r.alerts.join("\n"), /src\/hand-edited\.ts/, "the alert names the file that actually conflicts");
+});
+
+test("realDeployDeps: byte-identity + discard work against REAL git, including the UNTRACKED case", () => {
+  // The adapters are where the safety argument actually lives, so they are exercised against real
+  // git rather than a fake. The untracked case is the one that matters: `git diff` ignores
+  // untracked files entirely and would have answered "identical" for anything, which is why this
+  // uses blob SHAs instead.
+  const root = mkdtempSync(join(tmpdir(), "rmd-deployer-git-"));
+  const g = (...args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8" });
+  try {
+    g("init", "-q", "-b", "main");
+    g("config", "user.email", "t@t"); g("config", "user.name", "t");
+    writeFileSync(join(root, "seed"), "seed\n");
+    g("add", "-A"); g("commit", "-q", "-m", "seed");
+    const base = g("rev-parse", "HEAD").trim();
+
+    // A future commit adds the exhaust file and edits a source file.
+    writeFileSync(join(root, "feedback.yaml"), "id: fb-70\nstatus: new\n");
+    writeFileSync(join(root, "src.ts"), "export const upstream = 1;\n");
+    g("add", "-A"); g("commit", "-q", "-m", "incoming");
+    const incoming = g("rev-parse", "HEAD").trim();
+
+    // Rewind the working tree to base, then reproduce the live shape: an UNTRACKED file whose
+    // bytes already equal the incoming blob, plus a divergent local edit.
+    g("reset", "-q", "--hard", base);
+    writeFileSync(join(root, "feedback.yaml"), "id: fb-70\nstatus: new\n"); // identical, untracked
+    writeFileSync(join(root, "src.ts"), "export const MINE = 999;\n");     // differs, untracked
+
+    const deps = realDeployDeps({
+      installPath: root, stateRoot: root, daemonLabel: "d", serveLabel: "s",
+      servePort: 1, uid: 1, ledgerPath: join(root, "l"), log: () => {},
+    });
+
+    assert.equal(deps.sameAsIncoming!("feedback.yaml", incoming), true, "identical untracked file must be recognised");
+    assert.equal(deps.sameAsIncoming!("src.ts", incoming), false, "a divergent file must NOT be");
+    assert.equal(deps.sameAsIncoming!("absent.txt", incoming), false, "a path absent from the ref fails closed");
+
+    // Discard the identical one only; the divergent edit must survive untouched.
+    deps.discardLocal!("feedback.yaml");
+    assert.equal(existsSync(join(root, "feedback.yaml")), false, "the redundant copy is gone");
+    assert.equal(readFileSync(join(root, "src.ts"), "utf8"), "export const MINE = 999;\n", "the real edit is untouched");
+
+    // The ff is still correctly refused while the DIVERGENT file remains — discarding the
+    // identical one does not license fast-forwarding over a real local edit, and `treeFfSafe`
+    // reports ok=false for exactly this shape.
+    assert.throws(() => g("merge", "--ff-only", incoming), /untracked working tree files would be overwritten/);
+
+    // Once the operator resolves their own edit, the ff the exhaust was blocking succeeds.
+    rmSync(join(root, "src.ts"));
+    g("merge", "--ff-only", incoming);
+    assert.equal(g("rev-parse", "HEAD").trim(), incoming, "the ff that previously aborted now lands");
+    assert.equal(readFileSync(join(root, "feedback.yaml"), "utf8"), "id: fb-70\nstatus: new\n", "and restores identical content — the discard was lossless");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("realDeployDeps: the recorded failure kind round-trips, so the skip line can cite it", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-deployer-kind-"));
+  try {
+    const deps = realDeployDeps({
+      installPath: root, stateRoot: root, daemonLabel: "d", serveLabel: "s",
+      servePort: 1, uid: 1, ledgerPath: join(root, "l"), log: () => {}, execFile: () => "", sleep: () => {},
+    });
+    assert.equal(deps.lastFailedKind!(), undefined, "nothing recorded yet");
+    deps.alert("tree blocked the ff", "deadbeef", "dirty-tree-conflict");
+    assert.equal(deps.lastFailedKind!(), "dirty-tree-conflict", "the cause survives to the next poll");
+    assert.equal(deps.lastFailedHead(), "deadbeef");
+    // A legacy record with no kind must read as unknown, never as a guessed health-check.
+    writeFileSync(deployFailedAlertPath(root), JSON.stringify({ message: "old", failedHead: "x" }));
+    assert.equal(deps.lastFailedKind!(), undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
