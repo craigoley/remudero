@@ -492,6 +492,17 @@ export interface DaemonSummary {
 
 /** Injectable dependencies — the real command wires GitHub/run-task/usage/locks. */
 export interface DaemonDeps {
+  /**
+   * impl-FZ — re-read the plan from the SAME source the boot used, returning the fresh plan or
+   * `null` when nothing changed. Optional: omitted ⇒ the plan stays frozen at boot, which is
+   * exactly the pre-existing behaviour, so no existing caller changes.
+   *
+   * The dep owns CHANGE DETECTION because the cheap signal is caller-specific: the real wiring
+   * compares `git rev-parse origin/main:plan` (a tree sha, ~8ms) and only pays the ~60ms
+   * `loadPlan` parse when that sha actually moved. Returning `null` on the unchanged path is what
+   * keeps a 60-second poll from re-parsing a ~1MB monolith plus 45 shards for nothing.
+   */
+  reloadPlan?: () => Plan | null;
   /** Fresh merged predicate each call (re-derived from GitHub between iterations). */
   refreshMerged: () => MergedSet;
   /**
@@ -1221,6 +1232,39 @@ export async function runDaemon(
     if (stopped) {
       log("daemon.stop", { detail: stopped });
       return summary("stopped", stopped);
+    }
+
+    // PLAN FRESHNESS (impl-FZ). `plan` arrives as a parameter and, before this, was NEVER
+    // reassigned — no `loadPlan`, no `syncPlan`, nothing — so a task filed after this boot began
+    // was invisible to EVERY dispatch decision for the boot's lifetime. Measured on the real
+    // ledger: the median gap between a task landing on origin/main and the daemon next booting is
+    // 106 minutes; 64% of filings waited over an hour, 40% over three. With auto-triage now filing
+    // unattended, that is a task queue the running fleet cannot see.
+    //
+    // PLACED HERE DELIBERATELY, and the position is the in-flight safety argument:
+    //   - AFTER `checkStop`, so a deliberately halted fleet never does I/O to reload.
+    //   - At the TOP of the tick, before any dispatch decision reads `plan`. Everything below in
+    //     this iteration therefore sees ONE consistent plan; a file changing mid-tick cannot
+    //     produce two different answers within the same tick, because it is only ever observed
+    //     here. `runOne` is awaited to completion before the loop returns, so a reload can never
+    //     land under an in-flight task either.
+    //
+    // The dep returns null when nothing changed, so the caller owns change detection and the
+    // common case costs no parse. It must re-read from the SAME source the boot used
+    // (origin/main, never the working tree) — a second source of truth here is the exact defect
+    // this project has spent days unpicking. A throw is caught and ledgered, never fatal: a
+    // transient git failure must degrade to "keep running on the plan we have", not take the
+    // fleet down.
+    if (deps.reloadPlan) {
+      try {
+        const fresh = deps.reloadPlan();
+        if (fresh) {
+          plan = fresh;
+          log("daemon.plan_reloaded", { tasks: fresh.tasks.length });
+        }
+      } catch (e) {
+        log("daemon.plan_reload_failed", { reason: e instanceof Error ? e.message : String(e) });
+      }
     }
     // SELF-FRESHNESS (W1-T126): checked directly after STOP — a hard STOP still wins
     // outright, a deliberately halted fleet never self-restarts for freshness — and

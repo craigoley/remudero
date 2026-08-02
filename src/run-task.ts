@@ -7363,6 +7363,43 @@ export function logCloneReapSurvey(
   }
 }
 
+/**
+ * impl-FZ — build the daemon's plan re-reader, or `undefined` when this invocation must keep the
+ * frozen-at-boot behaviour (an explicit `--plan`, or a non-self target).
+ *
+ * Returns a closure holding the last-seen plan tree sha. It answers `null` while that sha is
+ * unchanged, so `runDaemon` re-parses only when the plan genuinely moved on origin/main.
+ */
+export function planReloader(
+  target: { isSelf: boolean; planPath: string; repoDir?: string },
+  allowStale: boolean,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  deps: {
+    treeSha?: () => string;
+    load?: (planPath: string) => Plan;
+  } = {},
+): (() => Plan | null) | undefined {
+  if (!target.isSelf) return undefined;
+  const treeSha =
+    deps.treeSha ??
+    (() => execFileSync("git", ["rev-parse", "origin/main:plan"], { encoding: "utf8" }).trim());
+  const load = deps.load ?? ((pp: string) => loadPlan(pp));
+  let lastSha: string | undefined;
+  return () => {
+    const sha = treeSha();
+    if (lastSha === undefined) {
+      // First tick: record the boot's sha WITHOUT reloading. The plan we were handed already came
+      // from this sha, so reporting a reload here would be a lie and would log a no-op every boot.
+      lastSha = sha;
+      return null;
+    }
+    if (sha === lastSha) return null;
+    lastSha = sha;
+    log("daemon.plan_changed", { tree_sha: sha.slice(0, 12), allow_stale: allowStale });
+    return load(target.planPath);
+  };
+}
+
 export async function daemonCommand(
   rest: string[],
   deps: {
@@ -7695,6 +7732,19 @@ export async function daemonCommand(
         onHeadroomBreach: (info) => escalateHeadroomReserve(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
         checkStop: () => stopDetail(config.root),
         checkPause: () => pauseDetail(config.root),
+        // impl-FZ — PLAN FRESHNESS. Wired ONLY on the git-synced self-target path, so the reload
+        // reads the SAME source the boot did (origin/main, never the working tree). An explicit
+        // `--plan` keeps the frozen-at-boot behaviour, because that caller asked for a literal file.
+        //
+        // Change detection is a TREE SHA, not a timestamp: `origin/main:plan` covers the monolith
+        // AND all 45 shards in one ~8ms call, and only when it moves do we pay the ~60ms parse of
+        // a ~1MB plan. Unchanged ticks therefore cost 8ms, not 60. The sha is read from the
+        // already-fetched origin/main ref rather than fetching here — the deploy supervisor keeps
+        // that ref current on its own ~2-minute cadence, and adding a per-tick fetch to the
+        // dispatch path would be new network I/O for no extra freshness.
+        // Mirrors the BOOT condition at the plan binding above (`target.isSelf && !--plan`)
+        // exactly, so the reload source can never diverge from the load source.
+        reloadPlan: flagValue(rest, "--plan") ? undefined : planReloader(target, allowStale, log),
         // Console UP NEXT write-actions (fb-1784988460437-9daa9b): the daemon
         // consumes markers the write-token API drops, dispatching a kicked task
         // through its normal assertRunnable-gated path and honouring "drain now".
