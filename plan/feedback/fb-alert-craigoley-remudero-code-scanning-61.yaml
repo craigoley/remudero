@@ -8,5 +8,5 @@ raw: >-
   https://github.com/craigoley/remudero/security/code-scanning/61
 attachments: []
 origin: alert#code-scanning-61
-status: proposed
+status: accepted
 proposal_pr: https://github.com/craigoley/remudero/pull/1102
