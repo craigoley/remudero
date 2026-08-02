@@ -54,6 +54,14 @@ forensic detail, so the narrative does not need to live here.
   Forward references are legitimate — for an unimplemented task the named test does not exist yet;
   what must hold today is that the proof PARSES. Forward-referencing a PATH is safe;
   forward-referencing a SYMBOL NAME is a guess. *(#982, #984; #920 → #943 vs #921 as counter-example)*
+- **Verify a `grep:` proof with the executor's REAL invocation — `grep -arn -- '<pattern>' <path>` —
+  never with `grep -F`.** The executor passes the pattern with no `-F`, so it is a BASIC REGEX and a
+  glob-looking pattern is silently wrong: `learnings/*.yaml` reads as *learnings, zero-or-more slashes,
+  any char, yaml* and matches nothing. That is not a soft cap — `executed_fail` OVERRIDES keyword
+  coverage and FAILS the PR. Also require the pattern to MISS the merge-base: one matching both head
+  and base is downgraded to `executed_stale` (W1-T273) because it discriminates nothing. Run a control
+  pattern that must NOT match, because `grep -r` with no file operand searches the cwd instead of stdin
+  and will fake a match for every pattern you test. *(#1120 — a `-F`-verified proof failed the review)*
 - **A plan-only PR is not automatically CAPPED — prefer certification over the W1-T205 carve-out.**
   `planOnly` (`src/lib/review.ts`) exempts a plan-only diff from the proof-execution FLOOR; it does
   not stop real proofs from executing. `grep: <pattern> in <path>` proofs with an EXPLICIT path do
