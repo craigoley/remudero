@@ -85,7 +85,10 @@ export interface LandFeedbackOpts {
 }
 
 export interface LandFeedbackResult {
-  /** True iff at least one file was pushed to the landing branch by THIS call. */
+  /** True iff the content is ON the landing branch — pushed by this call, or already there from
+   *  an earlier one (see finishLanding's already-landed short-circuit). The one consumer renders
+   *  this to an operator as "landed" vs "landing pending", and content sitting on the branch
+   *  awaiting its gate is landed. */
   landed: boolean;
   /** Repo-relative, forward-slash paths landed this call (empty when `landed` is false). */
   files: string[];
@@ -221,6 +224,19 @@ const DECISIONS_LANDING_KIND: LandingKind = {
  * `gh pr create` failure below, which still counts as `landed: true` (the push already
  * succeeded).
  */
+/**
+ * The tree the landing branch currently carries on the remote, or `null` when that cannot be
+ * determined. `null` means "push" — never "skip" — so an unreadable ref degrades to the previous
+ * unconditional-push behaviour rather than silently withholding a landing.
+ */
+function remoteBranchTree(git: GitExec, branch: string): string | null {
+  try {
+    return git(["rev-parse", `origin/${branch}^{tree}`]).trim();
+  } catch {
+    return null;
+  }
+}
+
 function finishLanding(
   kind: LandingKind,
   git: GitExec,
@@ -230,6 +246,31 @@ function finishLanding(
   unlanded: string[],
   env: NodeJS.ProcessEnv,
 ): LandFeedbackResult {
+  // ── ALREADY-LANDED SHORT-CIRCUIT: push only when the CONTENT differs. ────────────────────────
+  // The tree is deterministic — `read-tree origin/main` plus the same blobs yields the same
+  // `treeSha` on every call for unchanged content. The COMMIT is not: `commit-tree` stamps the
+  // current time, so an unchanged landing minted a fresh sha and force-pushed it EVERY call.
+  //
+  // MEASURED ON PR #1113, and it is a deadlock rather than mere noise. The daemon calls this each
+  // poll, so the branch head moved every ~60s (`02e270a4 → 187cf42f → 379c4160 → fa15cc73` in four
+  // minutes, one commit each, identical message). Every push cancelled the in-flight CI run —
+  // `CI gate 16:28:37 -> CANCELLED 16:29:51`, superseded before it could finish — so `ci-gate`, a
+  // REQUIRED context, could never complete and `remudero-review` never posted (`count=0`, no
+  // settled sha to post against). The PR therefore could not merge, which kept the files unlanded,
+  // which kept this function pushing. Self-sustaining.
+  //
+  // Comparing the TREE and not the commit is the whole point: the commit sha is guaranteed to
+  // differ, the tree is guaranteed not to. A parent-only difference (origin/main moved under an
+  // unchanged landing) deliberately does NOT force a push either — protection is `strict: false`,
+  // so a behind-but-mergeable branch is fine, and re-pushing to advance the parent is exactly the
+  // churn this removes.
+  //
+  // FAILS OPEN: an unreadable/absent remote ref (the first landing for this branch, or no
+  // remote-tracking ref configured) falls through to the push, i.e. to the previous behaviour.
+  if (remoteBranchTree(git, kind.branch) === treeSha) {
+    return { landed: true, files: unlanded, prUrl: findPendingLandingPr({ gh, branch: kind.branch }) };
+  }
+
   const message = kind.commitMessage(unlanded);
   const commitSha = git(
     [

@@ -42,6 +42,17 @@ name: Mutation Nightly
 # ratcheting the nightly floor up is a deliberate, reviewed change, the same convention every
 # other baseline in this repo already follows, not something a cron job should do unattended. The
 # uploaded report artifact is what a human uses to make that call.
+#
+# DELIVERY (the "loud" in LOUD FAILURE has to reach a human). Blocking the workflow only produces a
+# red badge on a page nobody opens: every other failing check in this repo rides a PR, so a human
+# sees it while doing normal work, but a cron job has no such carrier. That made this workflow --
+# the falsifier of record for the ~15k lines of src/** the PR gate deliberately does not mutate --
+# silent in practice exactly when it had something to say. The `notify` step below closes that with
+# scripts/needs-human-issue.mjs, which COMMENTS on an existing open needs-human issue rather than
+# opening a new one per night (365 issues a year would train the reader to ignore the label, which
+# would rebuild the same gap one level up). The four scheduled security scanners do not need this:
+# each uploads SARIF, so its findings already land as code-scanning alerts the alert-intake lane
+# reads. This workflow raises no alert and uploads no SARIF, which is what made it the outlier.
 on:
   schedule:
     # Nightly, off-peak (03:31 UTC -- staggered from CodeQL 04:43/Scorecard 02:23's own slots).
@@ -56,6 +67,12 @@ jobs:
   mutation-nightly:
     name: mutation-nightly (full src/** scope, sampled + rotated)
     runs-on: ubuntu-latest
+    # Job-level permissions REPLACE the top-level block, so `contents: read` is restated rather
+    # than inherited. `issues: write` is the minimum the delivery step needs and is scoped to this
+    # job alone (Scorecard TokenPermissions -- W1-T66).
+    permissions:
+      contents: read
+      issues: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -64,6 +81,7 @@ jobs:
         with:
           node-version-file: .nvmrc
       - name: Install (clean, from lockfile)
+        id: install
         run: npm ci
       - name: List this run's mutate candidates (all of src/**; test/** is never produced by this glob)
         run: find src -type f \( -name '*.ts' -o -name '*.tsx' \) | sort > nightly-candidates.txt
@@ -81,13 +99,44 @@ jobs:
           key: mutation-nightly-incremental-${{ github.run_id }}
           restore-keys: |
             mutation-nightly-incremental-
+      # Both runs tee into one log so the failure issue can carry the real diagnosis instead of
+      # "it failed, go look". `set -o pipefail` is what keeps the step's own exit code authoritative
+      # through the pipe -- without it `tee` would return 0 and a below-baseline night would PASS,
+      # turning the delivery fix into a correctness regression.
       - name: Stryker mutation run (tonight's sampled scope -- see the `scope` step above)
-        run: npx stryker run --mutate "${{ steps.scope.outputs.mutate }}"
-      - name: Nightly mutation ratchet (blocks LOUDLY on a below-baseline sample or a missing/broken report)
+        id: stryker
         run: |
+          set -o pipefail
+          npx stryker run --mutate "${{ steps.scope.outputs.mutate }}" 2>&1 | tee -a nightly-failure.log
+      - name: Nightly mutation ratchet (blocks LOUDLY on a below-baseline sample or a missing/broken report)
+        id: ratchet
+        run: |
+          set -o pipefail
           node scripts/mutation-ratchet.mjs --nightly-ratchet \
             --report reports/mutation/mutation.json \
-            --baseline scripts/mutation-baseline.json
+            --baseline scripts/mutation-baseline.json 2>&1 | tee -a nightly-failure.log
+
+      # Delivery. `if: failure()` so a green night stays silent -- a notifier that also fires on
+      # success is one the reader learns to filter, which is the same gap again.
+      - name: Notify a human (the delivery of record -- see this workflow's header)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_WHEN: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          # An earlier step (checkout/install/scope) can fail before the log exists; name the
+          # failing step explicitly so the issue is actionable even with no captured output.
+          {
+            echo "failing step: install=${{ steps.install.outcome }} scope=${{ steps.scope.outcome }} stryker=${{ steps.stryker.outcome }} ratchet=${{ steps.ratchet.outcome }}"
+            echo
+          } > nightly-notify.log
+          cat nightly-failure.log >> nightly-notify.log 2>/dev/null || echo "(no output captured -- the run failed before the mutation steps)" >> nightly-notify.log
+          node scripts/needs-human-issue.mjs \
+            --source mutation-nightly \
+            --title "mutation-nightly is failing" \
+            --body-file nightly-notify.log
       - name: Upload the full Stryker JSON report (for a human ratchet-up decision)
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

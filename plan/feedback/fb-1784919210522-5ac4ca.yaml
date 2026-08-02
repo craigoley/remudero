@@ -20,5 +20,5 @@ raw: "RMD STATUS — the operator has no single verb answering: is it running,
   vocabulary it renders."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 proposal_pr: https://github.com/craigoley/remudero/pull/1058
