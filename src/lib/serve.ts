@@ -480,6 +480,11 @@ export function renderShellHtml(
     display: inline-block; margin: 0.25rem 0 0; padding: 0.15rem 0.5rem; border-radius: 999px;
     font-size: 0.75rem; font-weight: 600; background: var(--status-needs-human); color: #241a02;
   }
+  /* W1-T287: the author \`display\` above beats the UA sheet's own \`[hidden] { display: none }\`
+     regardless of specificity, so markStale/clearStale flipping the \`hidden\` attribute
+     (serve.ts ~1344-1350) changed nothing on screen -- the badge painted even while hidden.
+     Same guard as .cmdk-overlay[hidden] below: hidden must win. */
+  #stale-badge[hidden] { display: none; }
   /* W1-T156: TRUST — the console must never lie about its own liveness. ─────────────────── */
   .sr-only {
     position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
