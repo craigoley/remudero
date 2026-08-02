@@ -1,0 +1,195 @@
+/**
+ * test/usage-reset-unrecognised.test.ts — impl-FL.
+ *
+ * THE GAP. `readUsageSnapshot` shells out to `claude -p "/usage"` and parses text produced by an
+ * externally-versioned CLI. When that text changed shape once before, one unparseable line
+ * discarded every window, the governor failed closed, and the fleet idled for THREE HOURS while the
+ * message that would have ended it in two minutes was thrown away every 60 seconds.
+ *
+ * The ceiling half is already correct — an unknown reset takes the STRICTER rung. What was missing
+ * is that the fleet said nothing. This suite pins the announcement.
+ *
+ * IT DRIVES `runDaemon`, NOT THE EMITTER. A test that called the callback directly would prove the
+ * function works and nothing about whether it is reached — the exact shape that once shipped a
+ * daemon rung whose producer was never supplied. Every assertion below goes through the real loop.
+ */
+import assert from "node:assert/strict";
+import { test } from "node:test";
+
+import { priorUnrecognisedResetStrings, runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
+import type { UsageSnapshot } from "../src/lib/headroom.js";
+import type { Plan } from "../src/lib/plan.js";
+
+const STEP = "daemon.usage_reset_unrecognised";
+
+/** An empty plan: nothing dispatchable, so the loop reaches the headroom block and idles out. */
+function emptyPlan(): Plan {
+  return { tasks: [], byId: new Map() };
+}
+
+/** Fixed clock — every reset instant below is judged against this, never the wall clock. */
+const NOW = () => new Date("2026-08-02T12:00:00.000Z");
+
+function snap(session: { percentUsed: number; resetsAt?: string }, weekly: Array<{ label: string; percentUsed: number; resetsAt?: string }> = []): UsageSnapshot {
+  return { billingMode: "subscription", session, weekly } as UsageSnapshot;
+}
+
+/** Run the REAL daemon loop for `ticks` iterations and return every ledger line it wrote. */
+async function runLoop(
+  usage: UsageSnapshot,
+  ticks = 1,
+  extra: Partial<DaemonDeps> = {},
+): Promise<Array<{ step: string; extra: Record<string, unknown> }>> {
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  let n = 0;
+  await runDaemon(
+    emptyPlan(),
+    {
+      refreshMerged: () => () => false,
+      runOne: async () => {
+        throw new Error("nothing should dispatch from an empty plan");
+      },
+      readUsage: () => usage,
+      now: NOW,
+      // Stop after `ticks` iterations by reporting a STOP once the budget is spent.
+      checkStop: () => (++n > ticks ? "test-complete" : undefined),
+      sleep: async () => {},
+      log: (step, e = {}) => lines.push({ step, extra: e as Record<string, unknown> }),
+      ...extra,
+    } as DaemonDeps,
+    { maxTicks: ticks + 1 } as never,
+  );
+  return lines;
+}
+
+const firedFor = (lines: Array<{ step: string; extra: Record<string, unknown> }>) =>
+  lines.filter((l) => l.step === STEP);
+
+// ── (4) an ISO-shaped reset fires it, carrying the string ────────────────────
+
+test("an ISO-shaped reset fires the step through the real loop, carrying the string", async () => {
+  const raw = "2026-08-09T01:00:00-04:00";
+  const lines = await runLoop(snap({ percentUsed: 3, resetsAt: raw }));
+
+  const fired = firedFor(lines);
+  assert.equal(fired.length, 1, `expected exactly one ${STEP}; got ${JSON.stringify(lines.map((l) => l.step))}`);
+  assert.equal(fired[0].extra.raw, raw, "the unrecognised string itself must be on the line");
+  assert.equal(fired[0].extra.window, "session (5h)", "and the window it came from");
+});
+
+// ── (5) a relative-shaped reset fires it ────────────────────────────────────
+
+test("a relative-shaped reset ('in 5 hours') fires the step", async () => {
+  const raw = "in 5 hours";
+  const lines = await runLoop(snap({ percentUsed: 3, resetsAt: "Aug 2 at 3:20pm" }, [
+    { label: "all models", percentUsed: 1, resetsAt: raw },
+  ]));
+
+  const fired = firedFor(lines);
+  assert.equal(fired.length, 1, "only the unrecognised window fires");
+  assert.equal(fired[0].extra.raw, raw);
+  assert.equal(fired[0].extra.window, "weekly (all models)", "the weekly label, not the session's");
+});
+
+// ── (6) THE FALSE-POSITIVE LOCK: every recognised shape stays silent ─────────
+
+test("every currently-recognised reset shape does NOT fire the step", async () => {
+  // Taken from a REAL `claude -p /usage` capture on this host, 2026-08-02, plus the two other
+  // shapes parseResetInstant accepts. An invented fixture is how a lock ends up agreeing with a bug.
+  for (const raw of [
+    "Aug 2 at 3:20pm", // monthDay — the live session line
+    "Aug 9 at 1am", // monthDay — the live weekly line
+    "3:20pm", // timeOnly
+    "1am", // timeOnly, no minutes
+    "Sunday", // weekday
+    "wed", // weekday, abbreviated
+  ]) {
+    const lines = await runLoop(snap({ percentUsed: 3, resetsAt: raw }));
+    assert.equal(firedFor(lines).length, 0, `recognised shape ${JSON.stringify(raw)} must stay silent`);
+  }
+});
+
+// ── (7) THE DELIBERATE-UNKNOWN LOCK: an ABSENT clause is not a parse failure ──
+
+test("a deliberately absent reset clause does NOT fire the step", async () => {
+  // `Current week (Fable): 0% used` — verbatim shape from today's real capture: no `· resets …`
+  // clause at all. This is state (c), the CLI's normal weekly form, and it is the line whose
+  // mishandling caused the three-hour outage. 184 of these were measured against 56 real
+  // passthroughs, so firing here would bury the signal within a day.
+  const lines = await runLoop(snap({ percentUsed: 4, resetsAt: "Aug 2 at 3:20pm" }, [
+    { label: "all models", percentUsed: 3, resetsAt: "Aug 9 at 1am" },
+    { label: "Fable", percentUsed: 0 }, // no resetsAt — absent, not unparseable
+  ]));
+
+  assert.equal(firedFor(lines).length, 0, "an absent clause is a deliberate unknown, never a parse failure");
+});
+
+// ── (8) THE DEDUP: same string across many ticks emits ONCE ─────────────────
+
+test("the same unrecognised string across many ticks emits exactly once", async () => {
+  const lines = await runLoop(snap({ percentUsed: 3, resetsAt: "2026-08-09T01:00:00Z" }), 12);
+
+  const fired = firedFor(lines);
+  // COUNT, not presence: a per-tick emission would write ~1,440 lines a day and bury the signal.
+  assert.equal(fired.length, 1, `expected ONE line across 12 ticks, got ${fired.length}`);
+  // Control: the loop really did run every tick — otherwise "once" would be trivially true.
+  const heartbeats = lines.filter((l) => l.step === "daemon.headroom").length;
+  assert.ok(heartbeats >= 10, `the loop must actually have ticked; saw ${heartbeats} heartbeats`);
+});
+
+test("two DIFFERENT unrecognised strings each emit once — the bound is per-string, not global", async () => {
+  const lines = await runLoop(
+    snap({ percentUsed: 3, resetsAt: "2026-08-09T01:00:00Z" }, [
+      { label: "all models", percentUsed: 1, resetsAt: "in 5 hours" },
+    ]),
+    6,
+  );
+
+  const fired = firedFor(lines);
+  assert.equal(fired.length, 2, "one per distinct string");
+  assert.deepEqual(
+    fired.map((f) => f.extra.raw).sort(),
+    ["2026-08-09T01:00:00Z", "in 5 hours"],
+  );
+});
+
+// ── the restart half of the bound ───────────────────────────────────────────
+
+test("a string a PREVIOUS process already announced is not re-announced after restart", async () => {
+  const raw = "2026-08-09T01:00:00Z";
+  const lines = await runLoop(snap({ percentUsed: 3, resetsAt: raw }), 3, {
+    // What run-task.ts seeds from the ledger — the restart half of the once-per-string bound.
+    priorUnrecognisedResets: new Set([raw]),
+  });
+
+  assert.equal(firedFor(lines).length, 0, "already on the ledger ⇒ already announced");
+});
+
+test("the raw string is bounded in length so a pathological upstream cannot write an unbounded line", async () => {
+  const raw = "x".repeat(500);
+  const lines = await runLoop(snap({ percentUsed: 3, resetsAt: raw }));
+
+  const fired = firedFor(lines);
+  assert.equal(fired.length, 1);
+  assert.equal(String(fired[0].extra.raw).length, 200, "truncated to the documented bound");
+  assert.equal(fired[0].extra.truncated, true, "and says so, so a reader knows it was cut");
+});
+
+// ── the LEDGER-DERIVED seed: the restart half of the bound, at its source ────
+
+test("priorUnrecognisedResetStrings reads back exactly the strings this step wrote", () => {
+  const seeded = priorUnrecognisedResetStrings([
+    { step: STEP, raw: "in 5 hours", window: "session (5h)" },
+    { step: STEP, raw: "2026-08-09T01:00:00Z", window: "weekly (all models)" },
+    { step: STEP, raw: 42 }, // non-string raw — ignored, never coerced
+    { step: "daemon.headroom", raw: "not-this-step" }, // a DIFFERENT step must not seed the bound
+    { step: STEP }, // no raw at all
+  ]);
+
+  assert.deepEqual([...seeded].sort(), ["2026-08-09T01:00:00Z", "in 5 hours"]);
+  assert.equal(seeded.has("not-this-step"), false, "only this step's own lines are the dedup key");
+});
+
+test("an empty or absent ledger seeds an empty bound, never throws", () => {
+  assert.equal(priorUnrecognisedResetStrings([]).size, 0);
+});

@@ -239,6 +239,25 @@ function to24Hour(h: number, ampm: string): number {
  *   `"<H>(:<MM>)?(am|pm)"`                e.g. "3pm"
  *   `"<weekday name or abbrev>"`          e.g. "Mon", "Monday"
  */
+/** Ledger lines are read by humans and by rotation; a pathological upstream string must not be
+ *  able to write an unbounded one. 200 chars is far longer than any observed reset clause. */
+const UNRECOGNISED_RESET_MAX_LEN = 200;
+
+/**
+ * Every reset string a previous process already announced — the ledger-derived seed for
+ * {@link DaemonDeps.priorUnrecognisedResets}. Mirrors `priorEscalatedAlertIds` /
+ * `priorReconciledAlertFeedbackIds` exactly: the step this reads is the step the loop writes, so
+ * the ledger is the store and no new state file exists. Exported for the caller that owns the
+ * ledger read (run-task.ts) — daemon.ts itself never touches the filesystem.
+ */
+export function priorUnrecognisedResetStrings(lines: ReadonlyArray<Record<string, unknown>>): ReadonlySet<string> {
+  const out = new Set<string>();
+  for (const l of lines) {
+    if (l.step === "daemon.usage_reset_unrecognised" && typeof l.raw === "string") out.add(l.raw);
+  }
+  return out;
+}
+
 export function parseResetInstant(raw: string, now: Date): Date | null {
   const text = raw.trim();
 
@@ -325,7 +344,19 @@ interface ResolvedWindow {
  * `[0]` for the burn telemetry line and `.find(w => w.percentUsed >= w.limitPct)` for
  * the enforcement decision (the governor ON path), so both share ONE resolution.
  */
-function resolveHeadroomWindows(snap: UsageSnapshot, now: Date, policy: HeadroomPolicy): ResolvedWindow[] {
+function resolveHeadroomWindows(
+  snap: UsageSnapshot,
+  now: Date,
+  policy: HeadroomPolicy,
+  /**
+   * Called for state (b) ONLY — a reset clause was PRESENT and `parseResetInstant` did not
+   * recognise it. Appended LAST and optional, so no existing caller shifts. The emission lives at
+   * the CALL SITE (the daemon loop wires this to `log`) rather than inside `parseResetInstant`,
+   * because that parser's purity is why it is testable across shapes and why it must not learn
+   * about ledgers.
+   */
+  onUnrecognisedReset?: (window: string, raw: string) => void,
+): ResolvedWindow[] {
   // `resetsAt` is OPTIONAL on a `UsageWindow` (headroom.ts): the CLI emits weekly lines with no
   // `· resets …` clause at all. Carried through as possibly-absent rather than coerced here, so
   // the two distinct cases below stay distinguishable.
@@ -345,6 +376,13 @@ function resolveHeadroomWindows(snap: UsageSnapshot, now: Date, policy: Headroom
       // reset." So a window whose reset we do not know is held to the STRICTER ceiling, which is
       // the fail-closed direction at the spending boundary. Absent is explicit here, not accidental.
       const instant = w.resetsAt !== undefined ? parseResetInstant(w.resetsAt, now) : null;
+        // STATE (b) ONLY — present-but-unrecognised. State (c), an ABSENT clause, is the CLI's
+        // normal shape for a weekly line and must never fire this: recon-FH measured 184 legitimate
+        // "unknown" sentinels against 56 raw passthroughs, so emitting on every null would be
+        // ignored within a day. The two are separable exactly HERE, because this is the last place
+        // that still knows whether `resetsAt` was present at all — four lines down it collapses
+        // into the RESET_UNKNOWN sentinel and the distinction is gone for good.
+        if (w.resetsAt !== undefined && instant === null) onUnrecognisedReset?.(w.window, w.resetsAt);
       const hoursToReset = instant ? (instant.getTime() - now.getTime()) / 3_600_000 : null;
       return {
         ...w,
@@ -500,6 +538,15 @@ export interface DaemonDeps {
   runOne: (taskId: string) => Promise<RunResult>;
   /** Read current /usage; `undefined` ⇒ unavailable (headroom check is skipped). */
   readUsage?: () => UsageSnapshot | undefined;
+  /**
+   * Reset strings ALREADY reported by a previous process, read back off the ledger by whoever
+   * builds these deps (run-task.ts). THE LEDGER IS THE DEDUP — the same idiom
+   * `priorEscalatedAlertIds` and `priorReconciledAlertFeedbackIds` already use: a step written once
+   * and read back as the key, never a new state file. Seeding from it is what makes the
+   * once-per-string bound survive a restart; without it a daemon that reboots hourly would
+   * re-announce the same string on every boot.
+   */
+  priorUnrecognisedResets?: ReadonlySet<string>;
   /**
    * P34 clause (c), W1-T249: called when a window first crosses the operator
    * reserve (a CONFIRMED, readable breach — never on the unreadable/degraded
@@ -1142,6 +1189,9 @@ export async function runDaemon(
   // read; escalates to the in-process idle heartbeat once it exceeds
   // `unreadableDegradedLimit` — see the headroom check below.
   let consecutiveUnreadable = 0;
+  // Seeded from the ledger so the once-per-string bound survives a restart, then maintained
+  // in-process for the life of this daemon.
+  const reportedUnrecognisedResets = new Set<string>(deps.priorUnrecognisedResets ?? []);
   const headroomPolicy = opts.headroomPolicy ?? buildDefaultHeadroomPolicy(opts.headroomLimitPct);
   // The headroom governor switch (ruling fb-1784894405468-a4153e). Library default
   // TRUE (existing enforcement + tests unchanged); the live `rmd daemon` entry
@@ -1275,7 +1325,21 @@ export async function runDaemon(
         // A GOOD read clears the degraded-mode counter — only CONSECUTIVE
         // misses count toward escalation, not a lifetime total.
         consecutiveUnreadable = 0;
-        const windows = resolveHeadroomWindows(snap, now(), headroomPolicy);
+        const windows = resolveHeadroomWindows(snap, now(), headroomPolicy, (window, raw) => {
+            // ONCE PER DISTINCT STRING, NOT PER TICK. The loop polls every 60s, so a per-tick
+            // emission would write ~1,440 identical lines a day and bury the one thing worth
+            // reading. The set is seeded from the ledger (DaemonDeps.priorUnrecognisedResets), so
+            // the bound holds across a restart as well as within one process.
+            if (reportedUnrecognisedResets.has(raw)) return;
+            reportedUnrecognisedResets.add(raw);
+            // CARRY THE STRING — the whole value is knowing WHAT could not be parsed. A line
+            // saying only "parse failed" would have saved nobody the three-hour outage.
+            log("daemon.usage_reset_unrecognised", {
+              window,
+              raw: raw.slice(0, UNRECOGNISED_RESET_MAX_LEN),
+              truncated: raw.length > UNRECOGNISED_RESET_MAX_LEN,
+            });
+          });
         const over = windows.find((w) => w.percentUsed >= w.limitPct) ?? null;
         // P34 clause (c), W1-T249: a breach episode escalates AT MOST ONCE (see
         // `headroomReserveEscalated`'s doc above) — clearing here, unconditionally
