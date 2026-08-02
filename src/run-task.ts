@@ -278,6 +278,8 @@ import {
   selectTask,
   visibleCriteria,
   type AcceptanceCriterion,
+  DEFAULT_RISK,
+  type TaskRisk,
   type MergedResolver,
   type Plan,
   type Task,
@@ -9539,6 +9541,70 @@ export function escalationTaskIdFor(pr: { taskId?: string; prNumber: number }): 
   return pr.taskId ?? `PR-${pr.prNumber}`;
 }
 
+/**
+ * THE TASK THE FIX RUNG REPAIRS AGAINST — the plan task when the PR has one, otherwise a SYNTHETIC
+ * stand-in keyed by the SAME id the review lane and the escalation lane already mint.
+ *
+ * THE DEFECT (impl-FY). `dispatchFix` looked the PR's task up in the plan and returned when it
+ * found none, logging `sweep.fix.no_task`. An agent-authored PR has a descriptive branch and no
+ * `Remudero-Task:` trailer, so it matches no task — and the rung that exists to repair a CI-failing
+ * PR could not act on it. Measured: #1115, #1116, #1117, #1118, #1120, #1127 and #1132 all logged
+ * `sweep.fix.no_task` with `task_id=(none)`, #1132 while dispositioned `blocked-fixable` — the
+ * sweep correctly identifying a fixable PR and then doing nothing, every poll, silently.
+ *
+ * NOT A SECOND MECHANISM: the id comes from {@link escalationTaskIdFor} — `pr.taskId ?? PR-<n>`,
+ * the SAME synthetic form `reviewCommand` writes its `review.posted` key with, so one PR has ONE
+ * identity across the review, escalation and fix surfaces.
+ *
+ * AND IT IS WHAT MAKES THE CAP BIND. `priorStrikesFor` returns 0 for an undefined taskId, so an
+ * un-synthesised PR would have been not merely reachable but UNBOUNDED — the same shape as the
+ * defect. With the id present the strike cap keys on it exactly as it does for a plan task.
+ *
+ * `risk` is DEFAULT_RISK because a mount must resolve and a PR carries no risk field; `acceptance`
+ * is empty because a no-task PR has no plan criteria — which costs nothing here, since the only
+ * disposition that reaches this path (blocked_ci / conflicted) already seeds `criteria: []` and
+ * targets the FAILING CHECKS, never a review verdict (see buildFixRungDispatchArgs).
+ */
+export function fixRungTaskFor(
+  plan: Plan,
+  pr: { prNumber: number; taskId?: string },
+): { task: { id: string; title: string; risk: TaskRisk; acceptance: AcceptanceCriterion[]; budget_usd?: number }; synthetic: boolean } {
+  const found = pr.taskId ? plan.tasks.find((t) => t.id === pr.taskId) : undefined;
+  if (found) return { task: found as never, synthetic: false };
+  return {
+    task: { id: escalationTaskIdFor(pr), title: `PR #${pr.prNumber}`, risk: DEFAULT_RISK, acceptance: [] },
+    synthetic: true,
+  };
+}
+
+/**
+ * Is `head` an acceptable branch for a fix dispatch to amend?
+ *
+ * FOR A PLAN TASK, unchanged and still strict: the fix must amend THAT task's own run branch,
+ * because creditability is load-bearing (status.ts's `ownsBranch`) and a fix on an uncreditable
+ * head loops forever and strands dependents.
+ *
+ * FOR A SYNTHETIC (no-task) PR the entire rationale is inapplicable — there is no task to credit
+ * and no dependent to strand — so its own descriptive head is acceptable. ONE guard remains, and it
+ * is the load-bearing half: a head that CLAIMS SOME OTHER TASK (`run-W1-T123-…`) is refused. Such a
+ * PR is not task-less, it is MIS-TRAILERED, and amending it would push commits onto another task's
+ * run branch under a synthetic identity.
+ *
+ * This never widens WHICH PRs are fixable — the disposition set is untouched — only whether the
+ * rung can act on one the sweep has already classified.
+ */
+export function fixHeadAcceptable(head: string | undefined, taskId: string, synthetic: boolean): boolean {
+  if (!head) return false;
+  const ownRunBranch = new RegExp(`^run-${taskId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-\\d+$`).test(head);
+  if (!synthetic) return ownRunBranch;
+  // A synthetic id covers two shapes: an agent PR with NO id at all (descriptive branch), and a
+  // LANE PR whose id is real but absent from plan.tasks (TRIAGE-*/RETRO-*/PLAN-* — 20 of the 65
+  // PRs in the measured trail). The lane PR's own `run-<id>-<ts>` head is legitimately its own, so
+  // accept it; refuse only a head claiming a DIFFERENT task, which means mis-trailered, not
+  // task-less, and amending it would push onto another task's run branch.
+  return ownRunBranch || !/^run-.+-\d+$/.test(head);
+}
+
 export function buildSweepEffects(
   owner: string,
   repo: string,
@@ -9692,11 +9758,11 @@ export function buildSweepEffects(
     },
 
     dispatchFix: async (pr, evidence) => {
-      const task = plan.tasks.find((t) => t.id === pr.taskId);
-      if (!task) {
-        log("sweep.fix.no_task", { pr_number: pr.prNumber, task_id: pr.taskId });
-        return;
-      }
+      // impl-FY: a PR with no plan task is STILL repairable — see fixRungTaskFor. The rung used to
+      // log `sweep.fix.no_task` and return here, which is why seven agent-authored PRs were
+      // classified fixable and then silently skipped every poll.
+      const { task, synthetic } = fixRungTaskFor(plan, pr);
+      if (synthetic) log("sweep.fix.synthetic_task", { pr_number: pr.prNumber, task_id: task.id });
       let worktreePath = "";
       try {
         // W1-T177 SITE (v): an INDEPENDENT fresh live-state read, via the
@@ -9715,8 +9781,8 @@ export function buildSweepEffects(
           headRefName?: string;
         };
         const realBranch = headRef.headRefName;
-        if (!realBranch || !new RegExp(`^run-${task.id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-\\d+$`).test(realBranch)) {
-          log("sweep.fix.uncreditable_head", { pr_number: pr.prNumber, head: realBranch });
+        if (!realBranch || !fixHeadAcceptable(realBranch, task.id, synthetic)) {
+          log("sweep.fix.uncreditable_head", { pr_number: pr.prNumber, head: realBranch, synthetic });
           return;
         }
         worktreePath = join(worktreesDir(config), `sweep-${task.id}-${Date.now()}`);
