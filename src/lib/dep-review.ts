@@ -307,6 +307,64 @@ export function decideDepReview(input: DepReviewInput): DepReviewResult {
  * usage ("verify: human ⇒ ... MANUAL escalation, never auto-merge"), matching this
  * lane's "no auto-merge" contract for majors exactly.
  */
+/**
+ * impl-FR — the DETECTOR for the one failure this lane has no remedy for.
+ *
+ * A Dependabot PR has NO independent arm path. `sweep.ts`'s `DISPOSITION_RULES` are ordered and
+ * first-match-wins (`DISPOSITION_RULES.find(...)`), and the `dep-review` row sits ABOVE both
+ * arming rows — so a Dependabot PR never reaches `mergeable` or `post-review` — while the review
+ * lane refuses `dependabot/` heads by name ("the dep-review lane owns arming for these"). If this
+ * lane decides `arm` and the arm does not take, **nothing else will ever arm that PR**. It goes
+ * green, collects no objections, and simply never merges.
+ *
+ * That silence is the whole risk, so the remedy is a SIGNAL, not a second arming path: a rescue
+ * would have to re-derive the semver policy to avoid arming a major bump, and a second copy of
+ * that policy is worse than the gap it closes. This escalation cannot arm anything.
+ *
+ * BOUNDED by construction rather than by a counter: `escalate()`'s composite dedup key is
+ * (taskId, PR, headSha, cause) — W1-T195 — so passing `headSha` yields exactly one issue per PR
+ * per push, and a re-poll of the same unchanged PR comments rather than opening again. The bound
+ * therefore lives in GitHub's open issues, NOT in the ledger, which is what makes it immune to the
+ * rotation class that reset `ABSENT_REPUSH_CAP`. The `taskId` is deliberately distinct from
+ * {@link buildDepReviewEscalation}'s so the two signals can never dedup against each other.
+ */
+export function buildDepReviewArmUnreachableEscalation(args: {
+  prUrl: string;
+  prNumber: number;
+  title: string;
+  headSha: string;
+  outcome: string;
+}): Escalation {
+  return {
+    class: "MANUAL",
+    taskId: `dep-review-arm-PR${args.prNumber}`,
+    headSha: args.headSha,
+    summary: `Dependabot PR passed review but auto-merge did not arm (${args.outcome}): ${args.title}`,
+    detail: [
+      `${args.prUrl} was judged a minor/patch bump with green gates, and remudero-review was posted`,
+      `as success — but arming auto-merge returned "${args.outcome}", so the PR is NOT armed.`,
+      ``,
+      `This needs a human because NOTHING ELSE WILL ARM IT. The sweep routes Dependabot PRs to the`,
+      `dep-review lane above its own arming rules, and the shared review lane refuses`,
+      `\`dependabot/\` heads by name. There is no fallback path: left alone, this PR stays green,`,
+      `unobjected-to, and unmerged indefinitely.`,
+      ``,
+      `Head: ${args.headSha}`,
+    ].join("\n"),
+    options: [
+      {
+        label: "merge",
+        detail: `merge ${args.prUrl} by hand — review already passed, only the arming step failed`,
+      },
+      {
+        label: "investigate",
+        detail: `arming returned "${args.outcome}" — check whether armAutoMerge's ledger gate found this run's own review.posted record for this head sha`,
+      },
+    ],
+    recommendation: "merge",
+  };
+}
+
 export function buildDepReviewEscalation(args: {
   prUrl: string;
   prNumber: number;

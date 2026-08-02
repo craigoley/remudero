@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -263,6 +263,10 @@ test("dep-review drives its arm branch to a real outcome and reports that outcom
       postStatus: (async () => ({ posted: true })) as never,
       // THE ARM IS REFUSED — the shape that used to print "auto-merge armed" regardless.
       arm: () => "ledger-refused",
+      // impl-FR: a refused arm now ALSO escalates (nothing else can arm a Dependabot PR), so this
+      // test needs a gateway or it would file a real issue — the live-write-guard caught exactly
+      // that. Injecting one keeps the assertions below unchanged and the boundary offline.
+      issues: { create: () => "https://github.com/craigoley/remudero/issues/999", ensureLabel: () => true } as never,
     });
   } finally {
     console.log = realLog;
@@ -283,5 +287,208 @@ test("dep-review drives its arm branch to a real outcome and reports that outcom
   const line = printed.find((p) => p.includes("remudero-review=success posted"));
   assert.match(String(line), /NOT armed \(ledger-refused\)/, "and the console says so too");
   assert.doesNotMatch(String(line), /auto-merge armed:/, "never the old fixed claim");
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+// ── impl-FR: the arm-unreachable DETECTOR ───────────────────────────────────────────
+// A Dependabot PR has no independent arm path (sweep's first-match-wins DISPOSITION_RULES put
+// `dep-review` above both arming rows; the review lane refuses `dependabot/` heads by name), so an
+// arm that does not take leaves the PR green and permanently unmerged with nothing to rescue it.
+// These extend test 14 above through the SAME injected seams rather than adding a parallel harness.
+
+/** A stateful issue gateway: `create` records, `listOpen` returns what was created — which is what
+ *  makes escalate()'s (taskId, PR, headSha) dedup observable across repeated invocations. */
+function issueRecorder() {
+  const created: Array<{ title: string; body: string }> = [];
+  const comments: string[] = [];
+  return {
+    created,
+    comments,
+    gateway: {
+      create(title: string, body: string) {
+        created.push({ title, body });
+        return `https://github.com/craigoley/remudero/issues/${900 + created.length}`;
+      },
+      listOpen() {
+        return created.map((c, i) => ({
+          url: `https://github.com/craigoley/remudero/issues/${901 + i}`,
+          title: c.title,
+          body: c.body,
+        }));
+      },
+      comment(url: string) {
+        comments.push(url);
+      },
+      ensureLabel: () => true,
+    },
+  };
+}
+
+const MANIFEST_DIFF = "diff --git a/package-lock.json b/package-lock.json\n--- a/package-lock.json\n+++ b/package-lock.json\n";
+const GREEN_CHECKS = [
+  { name: "ci", conclusion: "SUCCESS" },
+  { name: "Review", conclusion: "SUCCESS" },
+];
+
+async function driveDepReview(opts: {
+  title: string;
+  body?: string;
+  diff?: string;
+  headSha?: string;
+  arm?: () => string;
+  issues?: unknown;
+  tmp?: string;
+}) {
+  const { depReviewCommand } = await import("../src/run-task.js");
+  const tmp = opts.tmp ?? mkdtempSync(join(tmpdir(), "rmd-fr-"));
+  const ledgerPath = join(tmp, "state", "ledger.ndjson");
+  const armCalls: string[] = [];
+  const printed: string[] = [];
+  const realLog = console.log;
+  console.log = (...a: unknown[]) => void printed.push(a.map(String).join(" "));
+  let code: number;
+  try {
+    code = await (depReviewCommand as never as (p: string, r: string[], d: unknown) => Promise<number>)(
+      "80",
+      ["--repo", "remudero"],
+      {
+        config: { root: tmp, ledger: ledgerPath },
+        gh: () => ({
+          number: 80,
+          url: "https://github.com/craigoley/remudero/pull/80",
+          title: opts.title,
+          body: opts.body ?? "",
+          headRefOid: opts.headSha ?? "beefcafe1234",
+          author: { login: "app/dependabot" },
+          statusCheckRollup: GREEN_CHECKS,
+        }),
+        prDiff: () => opts.diff ?? MANIFEST_DIFF,
+        postStatus: async () => ({ posted: true }),
+        arm: () => {
+          armCalls.push("called");
+          return (opts.arm ?? (() => "ledger-refused"))();
+        },
+        issues: opts.issues,
+      },
+    );
+  } finally {
+    console.log = realLog;
+  }
+  const steps = existsSync(ledgerPath)
+    ? readFileSync(ledgerPath, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>)
+    : [];
+  return { code, steps, printed, armCalls, tmp, ledgerPath };
+}
+
+test("impl-FR: a minor/patch bump whose arm did NOT take is detected and escalated", async () => {
+  const rec = issueRecorder();
+  const r = await driveDepReview({
+    title: "build(deps): bump @anthropic-ai/claude-agent-sdk from 0.3.209 to 0.3.210 in the npm-minor-and-patch group",
+    arm: () => "ledger-refused",
+    issues: rec.gateway,
+  });
+  assert.equal(r.armCalls.length, 1, "the real arm path was driven, not stubbed around");
+  const detector = r.steps.filter((s) => s.step === "dep-review.arm_unreachable");
+  assert.equal(detector.length, 1, "the unreachable PR must be reported exactly once");
+  assert.equal(detector[0].outcome, "ledger-refused", "carrying the outcome that actually occurred");
+  assert.equal(detector[0].head_sha, "beefcafe1234");
+  assert.equal(rec.created.length, 1, "and a human-visible issue was opened");
+  assert.match(rec.created[0].title, /auto-merge did not arm/);
+  assert.match(String(r.printed.join("\n")), /NOTHING ELSE CAN ARM THIS PR/);
+  rmSync(r.tmp, { recursive: true, force: true });
+});
+
+test("impl-FR: a successful arm emits NO detector signal — the notifier must stay silent when fine", async () => {
+  const rec = issueRecorder();
+  const r = await driveDepReview({
+    title: "build(deps): bump left-pad from 1.0.0 to 1.0.1 in the npm-minor-and-patch group",
+    arm: () => "armed",
+    issues: rec.gateway,
+  });
+  assert.equal(r.steps.filter((s) => s.step === "dep-review.arm_unreachable").length, 0);
+  assert.equal(rec.created.length, 0, "a signal that also fires on success is one you learn to ignore");
+  rmSync(r.tmp, { recursive: true, force: true });
+});
+
+// ── THE SAFETY LOCK. The most important test here. ──────────────────────────────────
+test("impl-FR SAFETY: a MAJOR bump is never armed and never reaches the detector", async () => {
+  const rec = issueRecorder();
+  const r = await driveDepReview({
+    title: "build(deps): bump @types/node from 25.4.1 to 26.1.2",
+    body: "Updates `@types/node` from 25.4.1 to 26.1.2",
+    arm: () => "armed", // even if arming WOULD succeed, it must never be attempted
+    issues: rec.gateway,
+  });
+  assert.equal(r.armCalls.length, 0, "a major bump must never reach the arm at all");
+  assert.equal(
+    r.steps.filter((s) => s.step === "dep-review.arm_unreachable").length,
+    0,
+    "and the detector must not fire for it — that would be the rescue path this design refuses to build",
+  );
+  assert.deepEqual(
+    r.steps.filter((s) => String(s.step).startsWith("automerge.")).map((s) => s.step),
+    [],
+    "no arm line of any kind for a major bump",
+  );
+  const decided = r.steps.filter((s) => s.step === "dep-review.decided");
+  assert.equal(decided[0].decision, "escalate", "the lane's own policy still owns this outcome");
+  rmSync(r.tmp, { recursive: true, force: true });
+});
+
+test("impl-FR SAFETY: an unparseable version is likewise never armed and never detected", async () => {
+  const rec = issueRecorder();
+  const r = await driveDepReview({
+    title: "build(deps): bump some-package to the latest release",
+    body: "no parseable semver pair here",
+    arm: () => "armed",
+    issues: rec.gateway,
+  });
+  assert.equal(r.armCalls.length, 0, "an unparseable bump must never reach the arm");
+  assert.equal(r.steps.filter((s) => s.step === "dep-review.arm_unreachable").length, 0);
+  assert.notEqual(r.steps.filter((s) => s.step === "dep-review.decided")[0].decision, "arm");
+  rmSync(r.tmp, { recursive: true, force: true });
+});
+
+test("impl-FR SAFETY: a diff touching source outside the manifests is refused, never armed or detected", async () => {
+  const rec = issueRecorder();
+  const r = await driveDepReview({
+    title: "build(deps): bump left-pad from 1.0.0 to 1.0.1 in the npm-minor-and-patch group",
+    diff: "diff --git a/src/run-task.ts b/src/run-task.ts\n--- a/src/run-task.ts\n+++ b/src/run-task.ts\n",
+    arm: () => "armed",
+    issues: rec.gateway,
+  });
+  assert.equal(r.armCalls.length, 0, "a bump carrying source changes must never reach the arm");
+  assert.equal(r.steps.filter((s) => s.step === "dep-review.arm_unreachable").length, 0);
+  assert.equal(r.steps.filter((s) => s.step === "dep-review.decided")[0].decision, "refuse");
+  assert.equal(rec.created.length, 0);
+  rmSync(r.tmp, { recursive: true, force: true });
+});
+
+// ── THE BOUND (trap 3). The ticks are made distinguishable by HEAD SHA, which is the
+// dimension escalate()'s composite key actually reads — not by wall-clock, which it ignores.
+test("impl-FR: repeated dispositions of the SAME unchanged PR open exactly one issue", async () => {
+  const rec = issueRecorder();
+  const tmp = mkdtempSync(join(tmpdir(), "rmd-fr-bound-"));
+  for (let i = 0; i < 3; i++) {
+    await driveDepReview({
+      title: "build(deps): bump left-pad from 1.0.0 to 1.0.1 in the npm-minor-and-patch group",
+      arm: () => "ledger-refused",
+      issues: rec.gateway,
+      headSha: "sameshaAAAA",
+      tmp,
+    });
+  }
+  assert.equal(rec.created.length, 1, "three polls of one stuck PR must not open three issues");
+  assert.equal(rec.comments.length, 2, "the later polls append to the open issue instead");
+
+  // A NEW PUSH is a genuinely different state and must NOT be suppressed by the stale issue.
+  await driveDepReview({
+    title: "build(deps): bump left-pad from 1.0.0 to 1.0.1 in the npm-minor-and-patch group",
+    arm: () => "ledger-refused",
+    issues: rec.gateway,
+    headSha: "differentshaBBBB",
+    tmp,
+  });
+  assert.equal(rec.created.length, 2, "a new head sha is a distinct state and gets its own issue");
   rmSync(tmp, { recursive: true, force: true });
 });

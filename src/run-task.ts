@@ -345,7 +345,7 @@ import {
   type CriterionVerdict,
   type ReviewVerdict,
 } from "./lib/review.js";
-import { buildDepReviewEscalation, decideDepReview } from "./lib/dep-review.js";
+import { buildDepReviewArmUnreachableEscalation, buildDepReviewEscalation, decideDepReview } from "./lib/dep-review.js";
 import { decideAutoTriage, newFeedbackIdsOldestFirst, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, type AutoTriageDecision } from "./lib/auto-triage.js";
 import { validateWorkerSettingsFile } from "./lib/settings.js";
 import {
@@ -5064,6 +5064,17 @@ export interface DepReviewDeps {
   config?: Config;
   postStatus?: typeof postReviewStatusGuarded;
   arm?: (prUrl: string, taskId: string | undefined) => ArmOutcome;
+  /**
+   * impl-FR — appended LAST so no existing caller shifts. Used by BOTH escalating call sites.
+   *
+   * I first wired only the new detector and left the escalate branch's hardcoded gateway alone,
+   * on the reasoning that this task had no business widening it. The `live-write-guard` falsified
+   * that: driving a major/unparseable bump offline is exactly what proves the safety lock, and
+   * with the gateway hardcoded those tests tried to file a REAL issue on craigoley/remudero. A
+   * branch that cannot be exercised without a live write is a branch whose safety cannot be
+   * asserted, so both sites now take the seam.
+   */
+  issues?: IssueGateway;
 }
 
 async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepReviewDeps = {}): Promise<number> {
@@ -5148,6 +5159,37 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     });
     const armOutcome = armAndLogOutcome(view.url, taskId, log, deps.arm);
     console.log(`remudero-review=success posted + auto-merge ${armReportPhrase(armOutcome)}: ${view.url}`);
+    // impl-FR — THE DETECTOR. This lane is the ONLY arm path for a Dependabot PR: the sweep's
+    // ordered, first-match-wins DISPOSITION_RULES put `dep-review` above both `mergeable` and
+    // `post-review`, and the shared review lane refuses `dependabot/` heads by name. So an arm
+    // that did not take leaves the PR green, unobjected-to and permanently unmerged, with nothing
+    // to rescue it — the one silent failure in this repo that no other surface reports.
+    //
+    // SAFETY IS POSITIONAL, not re-derived: this sits INSIDE `if (result.decision === "arm")`,
+    // after decideDepReview already refused (`return 2`), held (`return 1`) or escalated. A major
+    // bump, an unparseable version and a source outside the manifests all return before here, so
+    // this cannot fire for them — and it arms nothing in any case, it only reports.
+    if (!armOutcomeArmed(armOutcome)) {
+      const stuck = buildDepReviewArmUnreachableEscalation({
+        prUrl: view.url,
+        prNumber: view.number,
+        title: view.title ?? "",
+        headSha: view.headRefOid,
+        outcome: String(armOutcome),
+      });
+      const issueUrl = escalate(stuck, {
+        issues: deps.issues ?? ghIssueGateway(owner, repo),
+        ledgerPath,
+        runId,
+      });
+      log("dep-review.arm_unreachable", {
+        issue_url: issueUrl,
+        outcome: armOutcome,
+        head_sha: view.headRefOid,
+        pr_url: view.url,
+      });
+      console.log(`dep-review: NOTHING ELSE CAN ARM THIS PR — escalated: ${issueUrl}`);
+    }
     return 0;
   }
   // escalate: post failure (NEVER auto-merge for a major) + open the MANUAL issue.
@@ -5184,7 +5226,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     body: view.body ?? "",
     semverLevel: result.semverLevel,
   });
-  const issueUrl = escalate(escalation, { issues: ghIssueGateway(owner, repo), ledgerPath, runId });
+  const issueUrl = escalate(escalation, { issues: deps.issues ?? ghIssueGateway(owner, repo), ledgerPath, runId });
   log("dep-review.escalated", { issue_url: issueUrl });
   console.log(`remudero-review=failure posted (no auto-merge); escalated: ${issueUrl}`);
   return 1;
