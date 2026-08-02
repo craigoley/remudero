@@ -27,7 +27,22 @@ function ledgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-post-fix-reverification-")), "ledger.ndjson");
 }
 
-const RECENT = "2026-07-19T12:00:00Z";
+/**
+ * `lastActivityAt` for a fixture PR that must read as RECENT — i.e. NOT stale.
+ *
+ * THIS WAS A TIME BOMB and it went off on 2026-08-02T12:00:00Z. It was a hardcoded
+ * `"2026-07-19T12:00:00Z"`, and staleness is `now - lastActivityAt >= policy.staleDays` (14 days,
+ * plan/policy.yaml). Fourteen days after that literal, three tests here began asserting
+ * `mergeable` against a disposition that had silently become `stale` — and because `ci` runs the
+ * whole suite, EVERY open PR inherited three red tests and `ci-gate` failed for all of them, so
+ * nothing could merge. PR #1112 (ci at 09:30Z) passed; #1114 (13:40Z) did not; the only thing that
+ * changed between them was the wall clock.
+ *
+ * A fixture that means "recent" must be relative to the run, never a date. The 2026-07-19 incident
+ * this suite replays is documented in the comments above and in the fixture NAMES — the calendar
+ * date carries the provenance, and this constant carries the semantics, which are different jobs.
+ */
+const RECENT = new Date(Date.now() - 60 * 60 * 1000).toISOString();
 
 function pr(over: Partial<OpenPrView> = {}): OpenPrView {
   return {
