@@ -95,16 +95,23 @@ drain:
 #
 # DEFAULT OFF, deliberately. Nothing changes until the operator sets `enabled.value: true`.
 #
-# THE PACING BOUND IS minIntervalMinutes, AND IT IS NOW THE ONLY ONE (impl-FO):
-#   minIntervalMinutes 60 -> at most 24 fires/day by pacing alone: ~$23.54/day typical,
-#                            $48.12/day only if every run were the most expensive ever recorded
-#   maxPerDay          24 -> deliberately NON-BINDING; see that field's own comment for the proof
-# maxPerDay was 4 and was the binding ceiling; it was retired because a COUNT is the wrong
-# instrument for a SPEND risk, and because its stated basis ("~$2.00/run") was the single worst run
-# ever recorded quoted as typical — 2.04x the real median.
+# THE PACING BOUND WAS minIntervalMinutes ALONE AT 60m (impl-FO); policy/triage-cadence (60 -> 15,
+# to drain a 58-entry feedback backlog faster) REACTIVATED maxPerDay as a genuine second bound:
+#   minIntervalMinutes 15 -> up to 96 fires/day by pacing alone if maxPerDay did not intervene
+#   maxPerDay          24 -> now the BINDING constraint: it catches up after the 24th fire each
+#                            rolling day, so the WORST-CASE daily spend is unchanged from the 60m
+#                            era (~$23.54/day typical, ~$48.12/day only if every run were the most
+#                            expensive ever recorded) even though the short-run rate quadrupled.
+# maxPerDay was 4 and was the binding ceiling before impl-FO; it was raised to 24 because a COUNT
+# is the wrong instrument for a SPEND risk, and because its stated basis ("~$2.00/run") was the
+# single worst run ever recorded quoted as typical — 2.04x the real median. Raising it to 24 was
+# safe under the THEN-shipped 60m pacing because 60m alone already capped a rolling day at 24
+# fires (see maxPerDay's own comment below); it is the 60 -> 15 change that put a real floor back
+# under this field, not a value change to maxPerDay itself.
 # The daemon idled ~390 times in ten hours on 2026-08-01; a per-POLL rung would have spent ~$780
-# that night. minIntervalMinutes is what keeps the worst case a number the operator can accept in
-# advance — and `enabled: false` plus `state/PAUSE` remain the two real stops.
+# that night. Together minIntervalMinutes and maxPerDay are what keep the worst case a number the
+# operator can accept in advance — and `enabled: false` plus `state/PAUSE` remain the two real
+# stops.
 autoTriage:
   enabled:
     value: true
@@ -117,12 +124,14 @@ autoTriage:
   maxPerDay:
     value: 24
     origin: "net-new"
-    # NON-BINDING BY CONSTRUCTION, and that is the point: minIntervalMinutes 60 already caps the
-    # rolling 24h window at 24 fires, so every value >= 24 behaves identically. Verified by driving
-    # the real decideAutoTriage over a simulated 3-day span, polling once a minute, always idle,
-    # always with a candidate: 24, 1000 and 1000000 each fire exactly 24/day (72 over 3 days).
-    # minIntervalMinutes is now the sole pacing bound; this field is kept (not deleted) because
-    # numberField throws on a missing key, and because it stays the one-line lever to tighten again.
+    # AT THE ORIGINAL 60m minIntervalMinutes this was NON-BINDING BY CONSTRUCTION: 60m already
+    # capped the rolling 24h window at 24 fires, so every value >= 24 behaved identically (verified
+    # by driving the real decideAutoTriage over a simulated 3-day span, polling once a minute,
+    # always idle, always with a candidate: 24, 1000 and 1000000 each fired exactly 24/day, 72 over
+    # 3 days). policy/triage-cadence dropped minIntervalMinutes to 15, which alone would allow 96
+    # fires/day — so this field is now the BINDING constraint, not a kept-but-inert fallback: it is
+    # the one-line lever that keeps the worst-case daily spend unchanged while the short-run rate
+    # quadruples (see the block comment above `autoTriage:` for the arithmetic).
     # COST, measured over the ledger unioned across all rotations, deduplicated, summed per run_id:
     # MEDIAN $0.98/run, mean $0.99, range $0.27-$2.00, n=27 runs with recorded spend, total $26.76.
     # So ~$23.54/day typical at the 24-fire ceiling; $48.12/day only if every run were the most
