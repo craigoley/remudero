@@ -29,5 +29,5 @@ raw: "LATENT BUG (TOCTOU in the lock-RECLAIM path — the #143/#145/W1-T7
   cross-host false reclaim if lock dirs are ever on a shared FS."
 attachments: []
 origin: cli
-status: new
+status: proposed
 proposal_pr: null
