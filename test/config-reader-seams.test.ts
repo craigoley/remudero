@@ -171,7 +171,11 @@ test("CALIBRATION: the detection finds the readers recon-EJ measured, and no mor
   const readers = findUnredirectablePolicyReaders();
   // recon-EJ enumerated eight CONSUMER sites; this detection also sees loadDefaultPolicy's own body,
   // which that recon counted as the mechanism rather than a reader. Eight consumers + one definition.
-  assert.equal(readers.length, 9, `expected 9 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
+  // TEN since `checkProofTimeoutMs` (run-task.ts) landed — a NINTH consumer, and a SEAMED one: it
+  // is counted here because the detector counts every unredirectable READ, seamed or not, and the
+  // seam question is test 2's job. Raising this number is the correct response to a new reader
+  // ONLY when that reader also passes test 2; a bare new reader must fail there first.
+  assert.equal(readers.length, 10, `expected 10 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
 
   // `symbolise` labels the LAST bare `const policy = loadPolicy(...)` as daemonCommand's, because that
   // reader carries no distinctive identifier of its own. Today exactly ONE such line survives —

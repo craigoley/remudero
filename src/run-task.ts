@@ -5464,11 +5464,14 @@ const CHECK_PROOF_TIMEOUT_FLOOR_MS = 60_000;
  * caller shifts — and so the catch arm is reachable from a test rather than being dead code that
  * only fires on a broken checkout.
  */
-export function checkProofTimeoutMs(
-  readPolicy: () => number = () => loadDefaultPolicy().values.proofTimeoutMs,
-): number {
+export function checkProofTimeoutMs(readPolicy?: () => number): number {
   try {
-    return readPolicy();
+    // THE SEAM IS THE `??` FORM DELIBERATELY. test/config-reader-seams.test.ts detects an
+    // injectable policy read by the literal `?? loadDefaultPolicy(` shape; a defaulted PARAMETER
+    // is just as injectable but reads to that detector as unseamed, and allowlisting it would
+    // trip its own stale-entry lock (an allowlisted reader that HAS a seam is a failure). Writing
+    // the seam in the house form is cheaper than teaching the detector a second shape.
+    return readPolicy?.() ?? loadDefaultPolicy().values.proofTimeoutMs;
   } catch {
     return CHECK_PROOF_TIMEOUT_FLOOR_MS;
   }
