@@ -329,6 +329,14 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "correction.provenance",
   "sweep.disposed",
   "escalation.issue_opened",
+  // impl-FL: daemon.ts's once-per-distinct-string bound COUNTS these lines back (seeded via
+  // DaemonDeps.priorUnrecognisedResets) to decide whether a reset string has already been
+  // announced. The line IS the dedup key, so rotating it away would make every restart
+  // re-announce strings already reported — the same reason `ops.feedback_reconciled` is here.
+  // Registered by EXACT name deliberately: `isRenderRelevantStep` is a `Set.has`, and
+  // `daemon.headroom.degraded` was emitted 52 times and rotated away entirely because a dotted
+  // child does not inherit its parent's membership.
+  "daemon.usage_reset_unrecognised",
   // impl-EV: ops.ts's `priorReconciledAlertFeedbackIds` COUNTS these to decide whether an
   // alert-feedback entry was already closed. The status flip goes through the landing bridge,
   // which never touches this checkout, so the local entry still reads `status: new` until the

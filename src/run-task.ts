@@ -98,6 +98,7 @@ import {
   type DaemonOpts,
   type DaemonSummary,
   type HeadroomPolicy,
+  priorUnrecognisedResetStrings,
 } from "./lib/daemon.js";
 import { makeTempDir, sweepStaleTempDirs, withTempDir } from "./lib/tmp.js";
 import { reapWorkerScratch, sweepStaleWorkerScratch } from "./lib/worker-scratch.js";
@@ -7627,6 +7628,10 @@ export async function daemonCommand(
             skipGitSync: !!flagValue(rest, "--plan"),
           }),
         readUsage: () => readUsageSnapshot(config),
+        // THE LEDGER IS THE DEDUP (impl-FL): seed the once-per-string bound from what previous
+        // processes already announced, so a restart does not re-announce. Read ONCE at daemon
+        // construction, never per tick.
+        priorUnrecognisedResets: priorUnrecognisedResetStrings(readLedgerLines(ledgerPath)),
         // P34 clause (c), W1-T249: the reserve gate's notification — dispatch is
         // already paused (runDaemon's own in-process idle) by the time this fires.
         onHeadroomBreach: (info) => escalateHeadroomReserve(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
