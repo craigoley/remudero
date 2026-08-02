@@ -1,8 +1,8 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type Server } from "node:http";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -324,6 +324,7 @@ import {
 } from "./lib/wipe-test.js";
 import { loadPlanIndex, renderPlanIndex } from "./lib/plan-index.js";
 import {
+  materialiseBaseProofBlobs,
   REVIEW_CONTEXT,
   applyVerdictStability,
   buildReviewPrompt,
@@ -1478,6 +1479,8 @@ async function runReview(args: {
    * behavior (used by `rmd review`'s manual-PR path, which has no checkout).
    */
   headCheckoutDir?: string;
+  /** impl-GE: merge-base blobs for the staleness check — see buildBaseProofDir. */
+  baseCheckoutDir?: string;
   /**
    * W1-T233: the NAMED reason `headCheckoutDir` is absent because a worktree
    * materialization attempt failed (rather than simply never having been
@@ -1603,6 +1606,7 @@ async function runReview(args: {
     report,
     semantic,
     headCheckoutDir: args.headCheckoutDir,
+    baseCheckoutDir: args.baseCheckoutDir,
   });
 
   // W1-T178 (verdict stability): a re-review of an UNCHANGED head sha whose
@@ -4590,6 +4594,58 @@ export function resolveReviewTarget(
   return { owner: defaults.owner, repo: arg };
 }
 
+
+/**
+ * Build the BASE-revision directory {@link preexistingProofHits} needs, containing only the blobs
+ * this review's `grep:` proofs name. Returns the directory, or `undefined` when there is nothing to
+ * put in it (no grep proof, or no resolvable merge-base) — in which case the staleness check stays
+ * inert exactly as it was, which is the pre-impl-GE behaviour.
+ *
+ * THE MERGE-BASE, not `origin/main`: "already matched before this work existed" is a question about
+ * the commit the branch forked from, and a proof legitimately added by a PR merged in between must
+ * not count against this one.
+ */
+export function buildBaseProofDir(
+  criteria: ReadonlyArray<{ proof?: string }>,
+  headCheckoutDir: string,
+  deps: {
+    mergeBase?: (cwd: string) => string;
+    showBlob?: (cwd: string, rev: string, repoRelPath: string) => string;
+    makeDir?: () => string;
+  } = {},
+): string | undefined {
+  const mergeBase =
+    deps.mergeBase ??
+    ((cwd: string) =>
+      execFileSync("git", ["-C", cwd, "merge-base", "origin/main", "HEAD"], { encoding: "utf8" }).trim());
+  const showBlob =
+    deps.showBlob ??
+    ((cwd: string, rev: string, rel: string) =>
+      execFileSync("git", ["-C", cwd, "show", `${rev}:${rel}`], { encoding: "utf8", maxBuffer: 1 << 26 }));
+  const makeDir = deps.makeDir ?? (() => mkdtempSync(join(tmpdir(), "rmd-proof-base-")));
+
+  let base: string;
+  try {
+    base = mergeBase(headCheckoutDir);
+  } catch {
+    return undefined; // unresolvable base ⇒ no staleness signal, never a false positive
+  }
+  if (!base) return undefined;
+
+  const dir = makeDir();
+  const written = materialiseBaseProofBlobs(
+    criteria,
+    base,
+    (rev: string, rel: string) => showBlob(headCheckoutDir, rev, rel),
+    (rel: string, contents: string) => {
+      const dest = join(dir, rel);
+      mkdirSync(dirname(dest), { recursive: true });
+      writeFileSync(dest, contents);
+    },
+  );
+  return written > 0 ? dir : undefined;
+}
+
 // ── W1-T185 (Gap 2): materialize a PR-head worktree for `rmd review` ────────
 //
 // GROUND TRUTH this closes: every review hand-posted on 2026-07-20 read
@@ -4989,6 +5045,11 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
       // makes `judgeReview` mark the verdict `keywordOnly`+`capped`, exactly
       // the documented fallback (criterion 5) — never silent.
       headCheckoutDir: worktreePath,
+      // impl-GE: the merge-base blobs this PR's `grep:` proofs name, so a proof that ALREADY
+      // matched before the work existed is marked `executed_stale` instead of counting as evidence.
+      // `undefined` when the PR has no grep proof or no resolvable base — the check then stays inert,
+      // exactly as it was for its first 1,180 verdicts.
+      baseCheckoutDir: worktreePath ? buildBaseProofDir(criteria, worktreePath) : undefined,
       // W1-T233: the named reason materialization failed (absent ⇒ it was
       // never attempted at all) — carried onto the posted CAPPED description
       // and the review.posted ledger line's degraded_reason fields.

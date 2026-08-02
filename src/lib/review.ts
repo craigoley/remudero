@@ -1447,6 +1447,53 @@ export interface ProofExecContext {
  * gap, not a finding; degrades to "not stale" exactly like `exec_error`
  * degrades elsewhere in this module — never a silent hard-fail).
  */
+/**
+ * Materialise, into a throwaway directory, ONLY the base-revision blobs a review's `grep:` proofs
+ * name — the cheap stand-in for a second checkout that {@link preexistingProofHits} needs.
+ *
+ * WHY NOT A SECOND WORKTREE (impl-GE). `preexistingProofHits` takes a directory and runs the SAME
+ * `grep -arn -- <pattern> <path>` in it, so a full base checkout would work — but the reviewer
+ * already pays for one `git worktree add` at the head, and a second doubles that plus the collision
+ * surface its own comment warns about. Measured first: of 644 dialect proofs in the plan, **41 are
+ * `grep:` and 599 are `unit test:`** — the guard applies to 6.4% of proofs, and only a `grep:` proof
+ * can ever be judged stale (`preexistingProofHits` returns false for any other kind). Paying for a
+ * whole checkout to serve 6.4% is the wrong trade; one `git show` per grep proof is not.
+ *
+ * A PATH ABSENT AT THE BASE IS SIMPLY NOT WRITTEN, which is the FORWARD-REFERENCE case and must not
+ * be confused with staleness: a proof naming a file the branch creates correctly finds nothing here,
+ * so `grep` reports no match and the proof is NOT flagged. "Did not exist before" and "already
+ * matched before" are opposite conditions; only the second is the defect.
+ *
+ * Best-effort throughout: an unresolvable rev, an unreadable blob, or a write failure skips that one
+ * path rather than throwing inside a review. A missing file degrades to "not stale", never to a
+ * false positive.
+ */
+export function materialiseBaseProofBlobs(
+  criteria: ReadonlyArray<{ proof?: string }>,
+  baseRev: string,
+  showBlob: (rev: string, repoRelPath: string) => string,
+  writeBlob: (repoRelPath: string, contents: string) => void,
+): number {
+  let written = 0;
+  const seen = new Set<string>();
+  for (const c of criteria) {
+    const parsed = c.proof ? parseWhitelistedProof(c.proof) : null;
+    if (!parsed || parsed.kind !== "grep") continue;
+    // The compiled argv is ["-arn", "--", <pattern>, <path>] — the path is the LAST element, taken
+    // from the compiler rather than re-parsed from the proof text, so the two can never disagree.
+    const repoRelPath = parsed.args[parsed.args.length - 1];
+    if (!repoRelPath || seen.has(repoRelPath)) continue;
+    seen.add(repoRelPath);
+    try {
+      writeBlob(repoRelPath, showBlob(baseRev, repoRelPath));
+      written++;
+    } catch {
+      /* absent at base (forward reference) or unreadable — leave it out; grep then finds nothing */
+    }
+  }
+  return written;
+}
+
 export function preexistingProofHits(
   whitelisted: WhitelistedProof,
   exec: ProofExecutor,
