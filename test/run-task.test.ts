@@ -4912,8 +4912,8 @@ const fs = require("fs");
 const args = process.argv.slice(2);
 const idx = args.indexOf("--json");
 const field = idx >= 0 ? args[idx + 1] : undefined;
-if (args[0] === "pr" && args[1] === "view" && field === "headRefName") {
-  process.stdout.write(JSON.stringify({ headRefName: ${JSON.stringify(branch)} }));
+if (args[0] === "pr" && args[1] === "view" && field && field.startsWith("headRefName")) {
+  process.stdout.write(JSON.stringify({ headRefName: ${JSON.stringify(branch)}, body: "" }));
 } else if (args[0] === "pr" && args[1] === "view" && field === "state") {
   const n = parseInt(fs.readFileSync(${JSON.stringify(counterFile)}, "utf8") || "0", 10);
   fs.writeFileSync(${JSON.stringify(counterFile)}, String(n + 1));

@@ -54,6 +54,34 @@ test("a PR with no plan task now resolves to a SYNTHETIC task instead of being s
   assert.deepEqual(task.acceptance, [], "a no-task PR carries no plan criteria — the ci-log mode targets the failing checks");
 });
 
+// ── round-2 fix (PR #1146's own review floor): a synthetic task's `acceptance` ──
+// used to be hardcoded `[]`, which made `runFixRung`'s post-strike `runReview`
+// (which judges `task.acceptance` DIRECTLY, never the PR body) permanently
+// report "no acceptance criteria to judge" for ANY `blocked_review` synthetic
+// dispatch — an unfixable loop, not merely a no-op one. `fixRungTaskFor` now
+// takes the PR body and resolves it the SAME way `reviewCommand` already does
+// for a manual/plan PR: `parseAcceptanceBlock` over the `## Acceptance` block.
+test("a no-task PR's synthetic acceptance is resolved from its own PR body's Acceptance block", () => {
+  const body = [
+    "## Acceptance",
+    "",
+    "- the value is fifteen | grep: value: 15 in plan/policy.yaml",
+    "- the cap still binds | grep: maxPerDay in plan/policy.yaml",
+    "",
+  ].join("\n");
+  const { task, synthetic } = fixRungTaskFor(PLAN, AGENT_PR, body);
+  assert.equal(synthetic, true);
+  assert.deepEqual(task.acceptance, [
+    { claim: "the value is fifteen", proof: "grep: value: 15 in plan/policy.yaml" },
+    { claim: "the cap still binds", proof: "grep: maxPerDay in plan/policy.yaml" },
+  ]);
+});
+
+test("a no-task PR whose body carries no Acceptance block still resolves to []", () => {
+  const { task } = fixRungTaskFor(PLAN, AGENT_PR, "no acceptance section here at all");
+  assert.deepEqual(task.acceptance, []);
+});
+
 test("a PR WITH a plan task is untouched — the real task, not a synthetic one", () => {
   const { task, synthetic } = fixRungTaskFor(PLAN, { prNumber: 9, taskId: "W1-T500" });
   assert.equal(synthetic, false);
@@ -171,7 +199,8 @@ test("dispatchFix REFUSES a synthetic PR whose head claims another task, before 
       "#!/usr/bin/env node",
       'const a = process.argv.slice(2); const i = a.indexOf("--json"); const f = i >= 0 ? a[i+1] : undefined;',
       // A FOREIGN run-branch: this PR carries no task, but its head claims W1-T999.
-      'if (f === "headRefName") process.stdout.write(JSON.stringify({ headRefName: "run-W1-T999-1785600000000" }));',
+      // `dispatchFix` now asks for `headRefName,body` in ONE call (never two `gh pr view`s).
+      'if (f && f.includes("headRefName")) process.stdout.write(JSON.stringify({ headRefName: "run-W1-T999-1785600000000", body: "" }));',
       'else if (f === "state") process.stdout.write(JSON.stringify({ state: "OPEN" }));',
       'else process.stdout.write("{}");',
       "",
