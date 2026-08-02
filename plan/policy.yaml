@@ -90,15 +90,21 @@ drain:
 # daysSinceMarker >= daysThreshold — whichever comes first. Retuning the cadence is now a
 # reviewed policy-data edit, never a source change + deploy.
 # The daemon's auto-triage rung (recon-DC #2, impl-DJ). It turns ONE feedback entry into a plan
-# proposal per idle period, spending ~$2.00 unsupervised each time.
+# proposal per idle period, spending a MEDIAN $0.98 unsupervised each time (mean $0.99, range
+# $0.27-$2.00, n=27 ledgered runs — impl-FO re-measured this over the unioned, deduplicated ledger).
 #
 # DEFAULT OFF, deliberately. Nothing changes until the operator sets `enabled.value: true`.
 #
-# THE TWO BOUNDS ARE THE WHOLE SAFETY ARGUMENT, and they multiply rather than overlap:
-#   minIntervalMinutes 60 -> at most 24 fires/day by pacing alone (~$48/day worst case)
-#   maxPerDay          4  -> the real ceiling: ~$8/day, ~$56/week
+# THE PACING BOUND IS minIntervalMinutes, AND IT IS NOW THE ONLY ONE (impl-FO):
+#   minIntervalMinutes 60 -> at most 24 fires/day by pacing alone: ~$23.54/day typical,
+#                            $48.12/day only if every run were the most expensive ever recorded
+#   maxPerDay          24 -> deliberately NON-BINDING; see that field's own comment for the proof
+# maxPerDay was 4 and was the binding ceiling; it was retired because a COUNT is the wrong
+# instrument for a SPEND risk, and because its stated basis ("~$2.00/run") was the single worst run
+# ever recorded quoted as typical — 2.04x the real median.
 # The daemon idled ~390 times in ten hours on 2026-08-01; a per-POLL rung would have spent ~$780
-# that night. maxPerDay is what makes the worst case a number the operator can accept in advance.
+# that night. minIntervalMinutes is what keeps the worst case a number the operator can accept in
+# advance — and `enabled: false` plus `state/PAUSE` remain the two real stops.
 autoTriage:
   enabled:
     value: true
@@ -109,8 +115,19 @@ autoTriage:
     min: 5
     max: 1440
   maxPerDay:
-    value: 4
-    origin: "net-new"   # ~$8/day at the measured ~$2.00/run; 4 PRs is a reviewable morning
+    value: 24
+    origin: "net-new"
+    # NON-BINDING BY CONSTRUCTION, and that is the point: minIntervalMinutes 60 already caps the
+    # rolling 24h window at 24 fires, so every value >= 24 behaves identically. Verified by driving
+    # the real decideAutoTriage over a simulated 3-day span, polling once a minute, always idle,
+    # always with a candidate: 24, 1000 and 1000000 each fire exactly 24/day (72 over 3 days).
+    # minIntervalMinutes is now the sole pacing bound; this field is kept (not deleted) because
+    # numberField throws on a missing key, and because it stays the one-line lever to tighten again.
+    # COST, measured over the ledger unioned across all rotations, deduplicated, summed per run_id:
+    # MEDIAN $0.98/run, mean $0.99, range $0.27-$2.00, n=27 runs with recorded spend, total $26.76.
+    # So ~$23.54/day typical at the 24-fire ceiling; $48.12/day only if every run were the most
+    # expensive ever recorded. The previous comment here claimed "~$8/day at the measured ~$2.00/run"
+    # -- $2.00 was that single worst run, quoted as typical, overstating the median by 2.04x.
     min: 1
     max: 24
 
