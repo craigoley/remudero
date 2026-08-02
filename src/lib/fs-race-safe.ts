@@ -1,31 +1,96 @@
-import { readFileSync } from "node:fs";
+import { closeSync, openSync, readFileSync } from "node:fs";
 
 /**
- * W1-T286 (CodeQL alerts #60 `src/lib/config.ts:402`, #61 `src/lib/serve.ts:3940`, both
- * `js/file-system-race`): both flagged sites were, per the code-scanning API, already
- * `state: dismissed` / `dismissed_reason: false positive` before this task started — the
- * SAME exclusive-create (`wx`) + EEXIST-fallback-read-by-descriptor idiom this repo has
- * shipped three times before (W1-T67, alert #24, alert #71) was already in place at both
- * lines, and this task's re-analysis simply re-flagged the same reviewed-and-dismissed
- * shape again (a re-scan re-flags previously-dismissed alerts at unchanged code —
- * dismissal doesn't retroactively suppress future scans). A human dismissed both again,
- * `false positive`, same rationale as every prior round: the `wx` attempt IS the race
- * guard, and the EEXIST fallback reads through a FRESH descriptor (`openSync(path, "r")`
- * + `readFileSync(fd, ...)`) rather than `existsSync`-then-`readFileSync(path, ...)`,
- * which is exactly what the query's own recommendation asks for.
+ * The `js/file-system-race`-safe idiom this repo has now shipped for a state file that is
+ * created ONCE and read on every later call (config.ts's `loadConfig`, worker-home.ts's
+ * `ensureWorkerKeychain`, and — via this shared helper — serve.ts's `resolveServiceTokens`).
+ * CodeQL alerts #15/#16 (round 1), #24 (round 2), #71 (round 3), and #60/#61 (round 4, this
+ * task) all trace back to the SAME check-then-act shape at a different call site:
+ * `existsSync`-then-write on create, or a bare `readFileSync(path, ...)` re-checking the path
+ * string on the fallback read. Folding create-or-read into ONE shared helper means a future
+ * "first boot writes a state file" site reuses tested code instead of open-coding a fifth copy.
  *
- * An earlier draft of this fix ALSO folded that create-or-read shape into a shared
- * `createOrReadExclusive` helper here, reasoning that config.ts and serve.ts open-coding
- * the identical shape twice was worth deduplicating. That draft made CI go RED: CodeQL's
- * new-alert-in-diff check keys off (file, line), not code shape, so relocating the exact
- * same dismissed pattern to a brand-new file/line produced a genuinely NEW, un-dismissed
- * alert on `fs-race-safe.ts` itself — worse than the two it was meant to retire. The
- * create-or-read shape was reverted back to config.ts/serve.ts's own dismissed locations
- * (byte-identical to what a human already reviewed), and this file keeps ONLY the piece
- * that was never itself flagged: the catch-ENOENT optional-read shape below, independently
- * open-coded in run-task.ts (moved here) and panel-graph.ts (left as-is; a follow-up, not
- * this task's scope, could point it at this shared copy too).
+ * Attempts an exclusive `O_CREAT|O_EXCL` ("wx") open at `path` in ONE syscall — no separate
+ * existence check that a second process could race between check and write. On success, the
+ * open file descriptor is handed back (`created: true`) so the CALLER writes its own freshly
+ * generated content through that SAME descriptor — never a path re-open, so there is no window
+ * where a later syscall could re-resolve `path` to something else. The caller owns closing it.
+ *
+ * On EEXIST — the file already exists, whether a concurrent first-provisioner won the race or
+ * this is simply the second-and-later boot — this reads it back through a FRESH read descriptor
+ * (`openSync(path, "r")` + `readFileSync(fd, ...)`), never `existsSync`-then-`readFileSync(path,
+ * ...)`. Reading through the descriptor rather than re-checking the path is what the CodeQL
+ * query's own recommendation asks for on the READ itself.
+ *
+ * BUT THE FALLBACK READ DOES RE-RESOLVE THE PATH, and an earlier revision of this header claimed
+ * otherwise. `openSync(path, "r")` resolves `path` by name a second time, so the sequence
+ * "`wx` proved it exists" → "open it" is a genuine check-then-act window: a peer that unlinks in
+ * between made this helper throw ENOENT out of the very function meant to make the sequence
+ * safe. CodeQL flagged exactly that (alert #84, `js/file-system-race`, on the fallback read) and
+ * it was RIGHT. {@link createOrReadExclusive} therefore RETRIES rather than asserting the window
+ * away — see its body. The flag is answered with code, not with a dismissal.
+ *
+ * Any other open error (e.g. `EISDIR` from a misconfigured path) propagates unchanged — it is
+ * never swallowed as if it were a benign race.
  */
+export type CreateOrReadResult = { created: true; fd: number } | { created: false; raw: string };
+
+/**
+ * Attempts before giving up on the create/read flip-flop below. Each iteration requires a
+ * CONCURRENT writer to have both created and unlinked the file since our previous syscall, so
+ * two attempts already covers any realistic interleaving; the bound exists so a pathological
+ * peer (a loop that unlinks the file continuously) surfaces its own ENOENT rather than
+ * spinning this process forever.
+ */
+const CREATE_OR_READ_ATTEMPTS = 3;
+
+/** The three syscalls this helper makes, injectable so a test can drive the check-then-act
+ *  WINDOW deterministically. Appended LAST so no positional caller shifts. */
+export interface FsRaceSyscalls {
+  openSync: typeof openSync;
+  readFileSync: typeof readFileSync;
+  closeSync: typeof closeSync;
+}
+
+export function createOrReadExclusive(
+  path: string,
+  mode: number,
+  fsImpl: FsRaceSyscalls = { openSync, readFileSync, closeSync },
+): CreateOrReadResult {
+  // THE TWO SYSCALLS ARE INDIVIDUALLY ATOMIC BUT NOT ATOMIC TOGETHER, so the flip-flop is
+  // retried rather than assumed away. `wx` failing EEXIST proves the file existed AT THAT
+  // INSTANT; it does not prove it still exists when the fallback read opens it. If a peer
+  // unlinks in that window the read raises ENOENT — which the previous shape let escape as a
+  // crash from a helper whose whole purpose is to make this sequence safe. Looping turns that
+  // window into "someone else's file went away, so try to become the creator ourselves",
+  // which is the only correct answer and the reason CodeQL's js/file-system-race flag on the
+  // fallback read is answerable with code rather than with a dismissal.
+  for (let attempt = 1; ; attempt++) {
+    let fd: number | undefined;
+    try {
+      fd = fsImpl.openSync(path, "wx", mode);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    }
+    if (fd !== undefined) {
+      return { created: true, fd };
+    }
+    let readFd: number;
+    try {
+      readFd = fsImpl.openSync(path, "r");
+    } catch (err) {
+      // ENOENT here is precisely the check-then-act window: it existed for the `wx`, and was
+      // gone by the read. Retry — on the next pass we are very likely the creator.
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT" || attempt >= CREATE_OR_READ_ATTEMPTS) throw err;
+      continue;
+    }
+    try {
+      return { created: false, raw: fsImpl.readFileSync(readFd, "utf8") as string };
+    } finally {
+      fsImpl.closeSync(readFd);
+    }
+  }
+}
 
 /**
  * Read a file's contents, or `undefined` if it doesn't exist — a single `readFileSync` guarded
