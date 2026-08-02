@@ -437,6 +437,31 @@ export const RENDER_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "retro.start",
   "serve.start",
   "triage.start",
+  // THE GOVERNOR'S TWO "I CANNOT READ USAGE" SIGNALS. `isRenderRelevantStep` is an exact
+  // `Set.has`, so a dotted CHILD does not inherit its parent's protection: `daemon.headroom` was
+  // retained while `daemon.headroom.degraded`/`.unavailable` were not. Measured on this host —
+  // 52 and 215 lines in the unioned corpus, ZERO in the live ledger against a `run.start` control
+  // of 200. Rotation had already stripped every one from the surface the console reads.
+  //
+  // WHY IT MATTERS MORE THAN THE COUNT SUGGESTS. A governor that cannot read usage fails closed
+  // and idles the whole fleet — measured once at three hours, during which the operator could not
+  // distinguish "blind" from "comfortably under ceiling" and four wrong theories were built before
+  // the cause was found. `daemon.headroom.degraded` is HOW A BLIND GOVERNOR ANNOUNCES ITSELF, and
+  // it was evaporating within the hour.
+  //
+  // THE 30-MINUTE RENDER WINDOW IS SUFFICIENT, and the measurement is why rather than the hope.
+  // While blind, `degraded` re-fires every tick: 49 of 51 consecutive gaps are under ten minutes,
+  // median 2.32. So a blind episode ALWAYS has a line inside the window. And duration does not
+  // depend on retention at all — each line carries `consecutive_unreadable` (observed 4..42) plus
+  // `poll_interval_ms` (60000), so ONE line states how long the blindness has lasted. A reader
+  // concludes "blind for N minutes" from the counter, never from how much history survived.
+  //
+  // PROTECTED FOR A CONSUMER THAT DOES NOT EXIST YET, deliberately and on the record: the panel
+  // that will render these (governor visibility, blind-vs-reading) is not merged. If it never
+  // lands, the cost is 13.9 lines/day held for 30 minutes — under 0.3 lines resident — which is a
+  // KNOWN cost, not an accident. Nothing else in the tree reads these two steps today.
+  "daemon.headroom.degraded",
+  "daemon.headroom.unavailable",
 ]);
 
 /** True for any step in {@link RENDER_RELEVANT_LEDGER_STEPS}. */
