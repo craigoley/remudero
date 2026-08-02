@@ -5193,7 +5193,12 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     return 0;
   }
   // escalate: post failure (NEVER auto-merge for a major) + open the MANUAL issue.
-  const postedFailure = await postReviewStatusGuarded({
+  // impl-FR: routed through the SAME seam as the arm branch at :5132. It was hardcoded, so the
+  // escalate path always reached the real `postReviewStatusGuarded` → `fetchPrLifecycle` →
+  // `gh pr view`. That is why the two SAFETY tests passed locally (an authenticated `gh` quietly
+  // made a LIVE call about PR #80) and failed in CI, where no GH_TOKEN exists. A branch whose
+  // safety is asserted by a test that silently talks to the network is not actually asserted.
+  const postedFailure = await (deps.postStatus ?? postReviewStatusGuarded)({
     owner,
     repo,
     sha: view.headRefOid,
