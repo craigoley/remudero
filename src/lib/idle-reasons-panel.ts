@@ -133,10 +133,15 @@ function humanAge(ms: number): string {
  */
 export function renderIdleReasonsHtml(reading: IdleReasonsReading): string {
   if (reading.kind === "unknown") {
+    // ONE ROW, NOT A BLOCK. "unknown" is not "zero" and must stay visible — hiding it is the
+    // misleading failure this panel exists to remove. But a heading-plus-paragraph reporting the
+    // ABSENCE of data cost three of the fifteen dense rows serve.density-ia.test.ts requires above
+    // the fold, and broke that invariant. As a `glance-item` strip — the idiom the daemon-health
+    // and account-usage headers already use — it says the same thing in one row.
     return (
-      '<section class="idle-reasons" data-idle-reasons="unknown">' +
-      "<h2>Why idle</h2>" +
-      `<p class="idle-unknown">UNKNOWN — ${esc(reading.why)}. This is not zero: the console could not read the daemon's tally.</p>` +
+      '<section class="idle-reasons daemon-health" data-idle-reasons="unknown" aria-label="Why idle">' +
+      '<span class="glance-item"><span class="glance-label">why idle</span>' +
+      `<span class="glance-value idle-unknown">UNKNOWN — ${esc(reading.why)}. This is not zero.</span></span>` +
       "</section>"
     );
   }
