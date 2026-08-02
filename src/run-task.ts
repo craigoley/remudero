@@ -10384,9 +10384,13 @@ async function feedbackCommand(rest: string[]): Promise<number> {
 export const TRIAGE_WORKER_TOOLS = ["Read", "Write", "Edit", "Grep", "Glob", "WebSearch"];
 
 /**
- * Every path the triage worker touched in its worktree, measured against `origin/main` —
- * INCLUDING files it CREATED. This is the input `decideTriage` judges a PROPOSED verdict on, so
+ * Every path a worker touched in its worktree, measured against `origin/main` — INCLUDING files it
+ * CREATED. This is the input `decideTriage` and `decidePlanArchitect` judge a PROPOSED verdict on, so
  * a path missing here is a run that did the work and gets thrown away.
+ *
+ * SHARED BY BOTH FILING LANES (impl-ER renamed it from `triageChangedFiles` for exactly that reason).
+ * The plan lane carried its own tracked-only `git diff` until then; a lane-specific name on a
+ * lane-neutral helper is how this repo twice ended up with two implementations of one rule.
  *
  * WHY THE UNION, AND NOT `git diff` ALONE (impl-EO, 2026-08-01). `git diff --name-only origin/main`
  * reports TRACKED paths only; a brand-new file is untracked and is invisible to it. That was
@@ -10404,7 +10408,7 @@ export const TRIAGE_WORKER_TOOLS = ["Read", "Write", "Edit", "Grep", "Glob", "We
  * disjoint by definition and a future third source must not double-report. Detection runs BEFORE
  * the harness's bookkeeping commit, which is exactly why staging cannot be assumed.
  */
-export function triageChangedFiles(worktreePath: string): string[] {
+export function worktreeChangedFiles(worktreePath: string): string[] {
   const run = (args: string[]): string[] =>
     execFileSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" })
       .split("\n")
@@ -10619,7 +10623,7 @@ async function triageCommandLocked(
     });
 
     // Ground truth: what did the worker ACTUALLY touch (before the harness's own status write)?
-    const changedFiles = triageChangedFiles(worktreePath);
+    const changedFiles = worktreeChangedFiles(worktreePath);
     const verdict = parseTriageVerdict([worker.text, worker.blocks.join("\n")].join("\n"));
     const decision = decideTriage({ verdict, changedFiles });
 
@@ -10895,13 +10899,14 @@ export async function planCommand(
       ...workerLedgerFields(worker),
     });
 
-    // Ground truth: what did the worker ACTUALLY touch?
-    const changedFiles = execFileSync("git", ["-C", worktreePath, "diff", "--name-only", "origin/main"], {
-      encoding: "utf8",
-    })
-      .split("\n")
-      .map((s) => s.trim())
-      .filter(Boolean);
+    // Ground truth: what did the worker ACTUALLY touch, INCLUDING files it CREATED (impl-ER).
+    // This lane carried the tracked-only `git diff` that PR #1100 replaced in the triage lane, and it
+    // is the same defect: a plan worker that files a NEW shard under `plan/tasks.d/` writes an
+    // UNTRACKED path, `git diff` reports nothing, and `decidePlanArchitect` refuses a correct run as
+    // "PROPOSED but no plan files were changed". `.remudero/skills/plan.yaml`'s own PROPOSED wording
+    // directs the worker to add tasks, and PR #1074's monolith-filing rule pushes those into shards —
+    // so the created-file case is the NORMAL one here, not an edge.
+    const changedFiles = worktreeChangedFiles(worktreePath);
     const verdict = parsePlanVerdict([worker.text, worker.blocks.join("\n")].join("\n"));
     const decision = decidePlanArchitect({ verdict, changedFiles });
 
