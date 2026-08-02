@@ -9,4 +9,4 @@ raw: >-
 attachments: []
 origin: alert#code-scanning-61
 status: proposed
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/1102
