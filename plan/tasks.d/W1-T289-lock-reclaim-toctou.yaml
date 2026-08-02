@@ -1,0 +1,126 @@
+- id: W1-T289
+  title: "All three single-instance locks reclaim a stale holder with an UNCONDITIONAL unlink — two reclaimers of one dead lock can both end up holding it, so the double-run guard fails exactly when a crash makes it matter"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 75.00
+  rationale: "OBSERVED AT SOURCE on main, 2026-08-02; the race is INFERRED from that code, not from a
+    captured incident, and saying which is which is part of the filing.
+    THE CREATE IS ATOMIC, THE RECLAIM IS NOT — and all three locks say so in a comment that is only half
+    true. Each does: openSync(lockPath,'wx') -> on EEXIST read the holder -> if isAlive(held.pid) is false,
+    unlinkSync(lockPath) UNCONDITIONALLY, then loop to re-create. inflight-lock.ts:92-105 (unlink at :101),
+    drain-lock.ts:85-99 (unlink at :95), review.ts:3891-3912 (unlink at :3907). The O_EXCL create has no
+    TOCTOU gap, exactly as the comments at inflight-lock.ts:92, drain-lock.ts:84 and review.ts:3893 claim.
+    The unlink is a different syscall and is conditioned on NOTHING — not on the file still being the same
+    dead lock that was just read.
+    THE INTERLEAVING: dead lock P, reclaimers A and B. A reads P (dead). B reads P (dead). A unlinks P and
+    re-creates -> A holds a FRESH LIVE lock. B, still acting on its stale read, unlinks — and what it
+    deletes is A's live lock. B creates. A and B both believe they hold it. That is two drains, or two runs
+    of one task, or two review-status posters inside the mutex, i.e. the #143/#145/W1-T7 double-run class
+    resurfacing through the stale-holder branch rather than the create branch that was hardened.
+    IT LEAVES NO TRACE BY CONSTRUCTION. The catch around each reclaim unlink is empty and its comment
+    ('another actor cleared it concurrently; retry the create' — inflight-lock.ts:102-104,
+    drain-lock.ts:96-98, review.ts:3908-3910) describes the SAFE interleaving only. In the DANGEROUS one
+    the unlink SUCCEEDS (it removed a live competitor's lock), so the catch never fires and nothing is
+    logged. The failure is silent at the exact site written to notice it.
+    THE SAME READ-THEN-UNLINK REAP IS IN THE BOOT SWEEP. sweepStaleInflightLocks reads the lock at
+    inflight-lock.ts:175 and unlinks at :181 with no re-verification, so a REAL acquire landing between
+    those two lines has its live lock reaped; the catch at :183-188 is documented as covering 'raced with a
+    real acquire' but cannot, because in that race the unlink succeeds. (Wired at src/run-task.ts:7728, not
+    daemon.ts:459 as the feedback guessed — corrected here so no one re-derives it.)
+    COMMON TRIGGER, NOT AN EXOTIC ONE: a crashed run leaves a stale lock and two retriers collide — a drain
+    plus a manual run-task, or two drains. The stale lock is the NORMAL post-crash state; the sweep at boot
+    and the next acquire are both racing for it.
+    UNCOVERED AND UNFALSIFIED. No task in plan/tasks.yaml or plan/tasks.d/ covers lock reclaim. The three
+    existing tests exercise a SINGLE reclaimer against a pre-seeded dead-pid lock and therefore pass under
+    the bug: test/inflight-lock.test.ts:71, test/drain-lock.test.ts:50,
+    test/review-status-gate.test.ts:186. W1-T286/PR #1106's createOrReadExclusive hardened a DIFFERENT
+    window (the EEXIST fallback READ re-resolving the path in src/lib/fs-race-safe.ts) and does not touch
+    the reclaim unlink."
+  design: |
+    ONE SHARED RECLAIM PRIMITIVE, USED BY ALL THREE LOCKS AND THE SWEEP. Four copies of this shape is how
+    it got here; a fourth open-coded fix is how round five arrives. src/lib/fs-race-safe.ts is the
+    established home for exactly this kind of shared fs-race idiom (it already owns createOrReadExclusive
+    and readFileIfExists) and is the default landing site.
+
+    WRITE THE FALSIFYING TEST FIRST AND WATCH IT FAIL (principles tdd:strict, and the standing
+    proof-must-fail-before-work rule W1-T273 filed). The test is the deliverable that outlives the fix:
+    two acquirers against a pre-seeded DEAD-pid lock, with the interleaving FORCED — A completes
+    unlink+recreate BEFORE B reaches its unlink — asserting that A and B cannot BOTH come away holding.
+    Force it by injection, not by timing: a seam on the reclaim step (or on the fs calls the primitive
+    makes) that lets the test run A's whole reclaim inside B's read->unlink window. A sleep-based or
+    thread-of-luck test that passes by accident is worse than no test, because it certifies the bug.
+    Do the same for sweepStaleInflightLocks: a real acquire lands between the sweep's read and its unlink,
+    and the assertion is that the live lock SURVIVES and is not counted as reaped.
+
+    THE MECHANISM IS THE IMPLEMENTER'S CALL, BUT IT MUST BE ACTUALLY ATOMIC — the point of the test above
+    is that this is decidable rather than arguable. Two candidates, both named in the report:
+      (a) COMPARE-AND-DELETE: only delete the file you READ. Note plain unlink(2) has no compare form, so
+          a naive stat-then-unlink just moves the same window; if you take this route, the identity check
+          (dev+ino via fstat on a held descriptor, or a nonce written into the lock body) must be what the
+          delete is conditioned on, and you must state in the PR body which syscall makes it indivisible.
+      (b) SERIALIZE THE RECLAIM: gate the read->unlink->create sequence behind a second O_EXCL-created
+          baton file, so at most one reclaimer runs it and the loser simply loops back to the atomic
+          create. The baton is held for a few syscalls rather than a whole run, so its own staleness bound
+          is a far weaker claim than the one this task is fixing — but it IS a claim, so bound it and say
+          how. Reclaim-via-rename is NOT a third option unless you can show it: rename(2) overwrites
+          unconditionally, so B's rename moves A's fresh lock exactly as B's unlink deletes it today.
+    Whichever is chosen, a reclaimer that LOSES the race must restart the whole acquire (and then honestly
+    find a live holder), never assume it won.
+
+    STOP SWALLOWING THE LOSS. Replace the empty catches with a path that can be observed: a lost reclaim,
+    or a detected attempt to remove a lock that is no longer the one that was read, leaves a trace the same
+    way other fleet anomalies do. Silence here is what made this latent for as long as it has been.
+
+    FIX THE COMMENTS THAT ASSERT THE INVARIANT. inflight-lock.ts:69-73, drain-lock.ts:68-71 and
+    review.ts:3864-3875 each state that creation is atomic so two racing acquirers cannot both win. That
+    sentence is what stops a reader from finding this; it must end up either true or explicitly scoped to
+    the create.
+
+    SINGLE-RECLAIMER BEHAVIOR IS FROZEN. A dead-pid or garbage lock is still reclaimed; a live holder still
+    throws (InflightLockError / DrainLockError) for the two SINGLETON guards and still WAITS-and-retries
+    for review.ts's MUTEX — that asymmetry is deliberate (review.ts:3869-3874) and this task does not
+    revisit it. The existing three tests must pass unchanged.
+
+    EXPLICITLY NOT IN SCOPE: the MINOR SIBLING the report grades low — reclaim tests isAlive(held.pid) and
+    ignores the recorded `host` field (inflight-lock.ts:99, drain-lock.ts:93), so a lock dir on a shared FS
+    could be false-reclaimed cross-host. Lock dirs are per-host under state/ today, so it is unreachable;
+    it is named here for cheap re-filing rather than smuggled into a concurrency fix (one concern per PR).
+    Also out of scope: changing the lock file FORMAT beyond whatever the chosen mechanism needs, adding
+    heartbeats/lease renewal, and re-opening createOrReadExclusive (W1-T286 / PR #1106 stands).
+  acceptance:
+    - claim: "two reclaimers of one dead-pid lock, with A's unlink+recreate forced BEFORE B's unlink, cannot both end up holding — exactly one acquires and the other restarts or refuses"
+      proof: "unit test: test/lock-reclaim-race.test.ts"
+    - claim: "a real acquire landing between sweepStaleInflightLocks' read and its unlink keeps its live lock, and the sweep does not report it as reaped"
+      proof: "unit test: test/lock-reclaim-race.test.ts"
+    - claim: "a reclaimer that loses the race leaves an observable trace instead of a swallowed empty catch"
+      proof: "unit test: test/lock-reclaim-race.test.ts"
+    - claim: "the reclaim is ONE shared primitive rather than a fourth open-coded copy of read-then-unlink"
+      proof: "grep: reclaimStaleLock( in src/lib"
+    - claim: "single-reclaimer behavior is unchanged — a dead-pid or garbage lock is still reclaimed and a live holder is still refused"
+      proof: "unit test: test/inflight-lock.test.ts"
+  risk: high
+  origin: feedback#fb-1784732585507-04eac2
+  plan_refs: ["§4B", "§5"]
+  files: [src/lib/fs-race-safe.ts, src/lib/inflight-lock.ts, src/lib/drain-lock.ts, src/lib/review.ts, test/lock-reclaim-race.test.ts]
+  status: queued
+  attempts: 0
+  note: "FILED from feedback#fb-1784732585507-04eac2 (covered-by: NONE, confirmed against plan/tasks.yaml and
+    every plan/tasks.d shard). The report's line refs were verified and TWO were wrong — the review.ts
+    reclaim is at :3907 inside acquireReviewStatusLock (:3876), NOT :2489, and the sweep is wired at
+    src/run-task.ts:7728, NOT daemon.ts:459. inflight-lock.ts:99-101, :175-182 and drain-lock.ts:94-96 were
+    accurate as given.
+    risk:high — this is the concurrency guard that stands between the fleet and a double dispatch, and both
+    directions of a wrong fix are severe: too weak leaves the double-run, too strong deadlocks a lock nobody
+    can ever reclaim after a crash. It also spans four call sites in three files by necessity (the whole
+    point is ONE primitive), which Rule 19 grades up rather than decomposed — splitting it per-lock would
+    let one green third certify the other two.
+    budget_usd 75 — above the recent 50-60 band because the deliverable is a FORCED-interleaving test with
+    an injection seam, not a straight-line diff; the fix itself is small.
+    verify:auto — every claim is a unit test over injected interleavings or a grep for the shared symbol.
+    LATENT, NOT OBSERVED IN THE WILD: no incident is attached. It is filed at high anyway because the
+    trigger (a crashed run leaving a stale lock, then two retriers) is the ordinary post-crash path, and
+    because the failure is SILENT — there is no signal that would have told us it already happened.
+    NO depends_on: independent of W1-T286 (withdrawn) and of everything queued."
