@@ -1,9 +1,11 @@
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { join } from "node:path";
 import { appendLedger } from "./ledger.js";
 import { escalate, type Escalation, type IssueGateway } from "./escalate.js";
+import type { LandFeedbackOpts } from "./feedback-landing.js";
 import { readLedgerLines } from "./status.js";
-import { captureFeedback, feedbackEntryPath, type FeedbackEntry } from "./feedback.js";
+import { captureFeedback, feedbackDir, feedbackEntryPath, setFeedbackStatus, type FeedbackEntry } from "./feedback.js";
 
 /**
  * Alert intake v0+v1 (W1-T55 / W1-T56, MASTER-PLAN §5D lane 2, §7B).
@@ -350,6 +352,73 @@ export function priorEscalatedAlertIds(lines: Array<Record<string, unknown>>): S
   return ids;
 }
 
+/** The ledger step {@link staleAlertFeedbackIds}'s dedup reads — one line per reconciled entry. */
+export const OPS_FEEDBACK_RECONCILED_STEP = "ops.feedback_reconciled";
+
+/**
+ * Every alert-feedback id a prior poll already reconciled. THE LEDGER IS THE DEDUP, mirroring
+ * {@link priorEscalatedAlertIds} exactly — and it has to be, because the status flip is written
+ * through the landing bridge, which by design never touches this checkout's working tree. So the
+ * LOCAL `plan/feedback/<id>.yaml` still reads `status: new` until the landing PR merges and
+ * self-sync pulls it; without a ledger record, the very next poll would re-reconcile the same
+ * entry and force-push another landing branch every tick. This step is registered in
+ * `DECISION_RELEVANT_LEDGER_STEPS` for the same reason `sweep.absent_repush` is: rotation
+ * archiving it would reset the dedup and reopen the loop it exists to close.
+ */
+export function priorReconciledAlertFeedbackIds(lines: Array<Record<string, unknown>>): Set<string> {
+  const ids = new Set<string>();
+  for (const l of lines) {
+    if (l.step === OPS_FEEDBACK_RECONCILED_STEP && typeof l.feedback_id === "string") ids.add(l.feedback_id);
+  }
+  return ids;
+}
+
+/**
+ * The alert-origin feedback entries this poll should close: on disk, still `status: new`, and
+ * whose alert is NOT in the set this poll just observed as open — i.e. dismissed on GitHub, or
+ * fixed by a merge. Those entries are otherwise immortal: nothing has ever closed one, so they
+ * age into being the OLDEST `status: new` entry and auto-triage buys a task for an alert nobody
+ * can act on. That is exactly what happened on 2026-08-02 (W1-T286, $1.48, alerts #60/#61 —
+ * dismissed as false positives eleven days before the task was filed).
+ *
+ * ONLY `status: new` IS TOUCHED. An entry a human already moved to `grilling`/`proposed`/
+ * `accepted`/`rejected` is left exactly where they put it — this reconciler closes a backlog, it
+ * never overrides a decision.
+ *
+ * REOPEN IS SAFE, and it is the trap worth naming. `alertFeedbackId` keys on the alert NUMBER, and
+ * a REOPENED alert keeps its number, so it returns to the open set and simply stops being stale —
+ * this function no longer names it, and `pollAlerts`'s capture loop finds the file already present
+ * and leaves it alone. A REGRESSED finding, by contrast, arrives as a NEW number, so it is a new
+ * id and is captured fresh. Neither case is blocked by having reconciled the old entry.
+ */
+export function staleAlertFeedbackIds(
+  root: string,
+  owner: string,
+  repo: string,
+  openAlerts: ReadonlyArray<Pick<RawAlert, "source" | "id">>,
+  alreadyReconciled: ReadonlySet<string> = new Set(),
+): string[] {
+  const dir = feedbackDir(root);
+  if (!existsSync(dir)) return [];
+  const openIds = new Set(openAlerts.map((a) => alertFeedbackId(owner, repo, a)));
+  const out: string[] = [];
+  for (const name of readdirSync(dir)) {
+    if (!name.endsWith(".yaml")) continue;
+    const id = name.slice(0, -".yaml".length);
+    if (!id.startsWith("fb-alert-")) continue;
+    if (openIds.has(id) || alreadyReconciled.has(id)) continue;
+    let text: string;
+    try {
+      text = readFileSync(join(dir, name), "utf8");
+    } catch {
+      continue; // unreadable entry — skipped, never a reason to refuse the whole poll
+    }
+    if (!/^status:\s*new\s*$/m.test(text)) continue; // never override a human's decision
+    out.push(id);
+  }
+  return out.sort();
+}
+
 /**
  * Build the {@link Escalation} for one new critical/high alert — class MANUAL
  * (mirrors dep-review.ts's major-bump escalation: needs a human, this loop
@@ -395,12 +464,17 @@ export interface OpsPollDeps {
   now?: () => number;
   /** Preview only: fetch + summarize, escalate/capture/ledger NOTHING. Mirrors sweep.ts's --dry-run. */
   dryRun?: boolean;
+  /** Landing-bridge options for the reconciler's status flip — `{}` (the default) is the real
+   *  bridge, exactly what `captureFeedback` already passes. Tests inject a recorder. */
+  land?: LandFeedbackOpts;
 }
 
 export interface OpsPollResult {
   summary: AlertsPollSummary;
   /** New critical/high alerts this poll found (dedup already applied) — populated even under --dry-run, as a preview. */
   newCritical: RawAlert[];
+  /** Alert-feedback ids closed this poll because their alert is no longer open. */
+  reconciled?: string[];
   /** Alerts actually escalated this poll — always `[]` under --dry-run (no effects, no ledger line). */
   escalated: Array<{ alert: RawAlert; issueUrl: string }>;
   /**
@@ -437,6 +511,8 @@ export async function pollAlerts(owner: string, repo: string, deps: OpsPollDeps)
 
   const escalated: Array<{ alert: RawAlert; issueUrl: string }> = [];
   const feedbackCreated: FeedbackEntry[] = [];
+  const reconciledPrior = priorReconciledAlertFeedbackIds(readLedger(deps.ledgerPath));
+  const reconciled: string[] = [];
   if (!deps.dryRun) {
     for (const alert of newCritical) {
       const issueUrl = escalate(buildAlertEscalation(alert), {
@@ -457,6 +533,24 @@ export async function pollAlerts(owner: string, repo: string, deps: OpsPollDeps)
         }),
       );
     }
+    // RECONCILE the other direction (impl-EV): the capture loop above only ever ADDS. An entry
+    // whose alert has since been dismissed or fixed was never closed by anything, so it aged into
+    // being the oldest `status: new` entry and auto-triage bought a task for it. Closing it here —
+    // at the poll that already knows which alerts are open — fixes the backlog and keeps it fixed,
+    // rather than teaching the triage selector to skip a class of entry it then leaves rotting.
+    for (const feedbackId of staleAlertFeedbackIds(deps.root, owner, repo, open, reconciledPrior)) {
+      // THROUGH THE BRIDGE, never a raw local write: a raw `writeFileSync` here would dirty the
+      // daemon's own checkout on every poll, which is what has been aborting deploys.
+      setFeedbackStatus(deps.root, feedbackId, "rejected", { land: deps.land ?? {} });
+      reconciled.push(feedbackId);
+      appendLedger(deps.ledgerPath, {
+        run_id: deps.runId,
+        task_id: "OPS",
+        step: OPS_FEEDBACK_RECONCILED_STEP,
+        feedback_id: feedbackId,
+        reason: "alert is no longer open (dismissed or fixed)",
+      });
+    }
     appendLedger(deps.ledgerPath, {
       run_id: deps.runId,
       task_id: "OPS",
@@ -466,8 +560,9 @@ export async function pollAlerts(owner: string, repo: string, deps: OpsPollDeps)
       alerts: summary,
       new_critical_count: newCritical.length,
       feedback_created: feedbackCreated.length,
+      feedback_reconciled: reconciled.length,
     });
   }
 
-  return { summary, newCritical, escalated, feedbackCreated };
+  return { summary, newCritical, escalated, feedbackCreated, reconciled };
 }

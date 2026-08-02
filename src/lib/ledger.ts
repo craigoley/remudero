@@ -329,6 +329,13 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "correction.provenance",
   "sweep.disposed",
   "escalation.issue_opened",
+  // impl-EV: ops.ts's `priorReconciledAlertFeedbackIds` COUNTS these to decide whether an
+  // alert-feedback entry was already closed. The status flip goes through the landing bridge,
+  // which never touches this checkout, so the local entry still reads `status: new` until the
+  // landing PR merges — the ledger line IS the dedup. Rotating it away would make every poll
+  // re-reconcile the same entries and force-push a landing branch each tick, the same shape
+  // `sweep.absent_repush` is retained to prevent.
+  "ops.feedback_reconciled",
   "ratify.approved",
   "ratify.reframed",
   "fix.dispatch",
