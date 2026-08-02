@@ -2,6 +2,7 @@ import type { Escalation, EscalationOption } from "./escalate.js";
 import { join } from "node:path";
 import { shapeCommitMessage } from "./commit-message.js";
 import { loadPlan } from "./plan.js";
+import { ACCEPTANCE_PROOF_GRAMMAR } from "./proof-grammar.js";
 import type { FeedbackEntry, FeedbackStatus } from "./feedback.js";
 
 /**
@@ -194,7 +195,9 @@ export function triagePrompt(entry: FeedbackEntry, runId: string, mintedId?: str
     "  PROPOSED — the ask is CLEAR and NOVEL. Edit ONLY plan files in this working directory",
     "  (NEVER src/ or test/) to add or rewire whatever the feedback calls for.",
     "  A NEW task MUST be created as its OWN SHARD at plan/tasks.d/<id>-<kebab-slug>.yaml — one task",
-    "  per file, a single-element YAML list, matching plan/tasks.d/W1-T278-task-id-from-plan-history.yaml.",
+    "  per file, a single-element YAML list. plan/tasks.d/W1-T278-task-id-from-plan-history.yaml is the",
+    "  model for that STRUCTURE (file shape and fields) only; for `proof:` values follow the ACCEPTANCE",
+    "  PROOFS rules below, which are what CI actually enforces.",
     "  NEVER append a new task to plan/tasks.yaml: 69 filings appending to one 12.5k-line file all",
     "  collide at EOF, which is the conflict storm W1-T122 sharded the plan to prevent.",
     "  REWIRING an EXISTING task edits wherever that task already lives (the monolith or its shard).",
@@ -214,6 +217,7 @@ export function triagePrompt(entry: FeedbackEntry, runId: string, mintedId?: str
           "  pick means NO proposal opens). Mint the next integer above the highest id across the",
           "  monolith AND every shard — read both, never the monolith alone.",
         ]),
+    ...ACCEPTANCE_PROOF_GRAMMAR,
     "  End your output with a line",
     "  starting exactly `PROPOSED:` with a one-line summary of what changed and why, e.g.",
     "  `PROPOSED: add W1-T200 (origin: feedback#" + entry.id + ") to cover the requested CLI flag`.",
