@@ -532,13 +532,19 @@ fix is P40(ii)'s coverage rule applied to it. Cumulative reading unchanged at **
 
 ## Retro proposals (PROPOSALS ONLY; NOT yet in plan/tasks.yaml)
 
-**★ LIVE RANKING (the ONE place open proposals are ordered).** `P38 > P33 > P39 > P42 > P40 > P17 >
-P29 > P26 > P41`. Every proposal has exactly ONE canonical entry below, updated IN PLACE with each
+**★ LIVE RANKING (the ONE place open proposals are ordered).** `P38 > P33 > P39 > P42 > P40 > P45 >
+P43 > P44 > P17 > P29 > P26 > P41`. Every proposal has exactly ONE canonical entry below, updated IN PLACE with each
 cycle's evidence — a retro that adds a second entry restating a proposal it did not change has failed
 the HARNESS-COMPRESSION bar. **P28 is RETIRED** (one entry, in the R5-era block); **P35 is FOLDED into
 P38** and has no entry of its own. R13 moves **P29 down** (sibling rejections 20 → 3; its (ii) half
 SHIPPED as W1-T271/#1040), **P39 up** (the no-op-close class returned and is now priced), **P17 up**
-(its EU AI Act Art. 50 date arrived), and **P41 to last, with a kill trigger**.
+(its EU AI Act Art. 50 date arrived), and **P41 to last, with a kill trigger**. The 2026-08-02
+decision-quality review inserts **P45 > P43 > P44** below the measured R13 items and above the older held
+ones, disturbing no existing pair: P45 first because it is one bounded enum and one ledger line and it
+GENERATES the prediction data the other two consume; P43 next because R13's own unexplained 4× reversal
+is the open wound it closes; P44 last because it must read a per-class distribution off the unioned
+ledger before it can derive anything. All three are UNRATIFIED — placement here is a proposal, not a
+decision.
 
 **★ THE STANDING CREDIT-ARTIFACT FOLD-LINE (one home, replacing four cycles of per-cycle
 restatements).** In every retro from R8 to R13, the dominant "failure" verdict classes — `blocked`,
@@ -666,6 +672,80 @@ FOREIGN). Candidates for the Architect to ratify via a tasks.yaml PR (rule 15) �
   is already ranked. Operational residue only, because it is worsening and belongs to no task: the
   primary checkout `~/Remudero/repos/remudero` was 85 commits behind `origin/main` at R12 and **155 at
   R13** — any tool reading that path instead of a worktree sees a stale tree.
+
+**DECISION-QUALITY REVIEW (2026-08-02, OUT-OF-CYCLE — not retro-mined).** Derived from reading the plan
+against the decision-research literature (§5E carries the mapping and the vocabulary). These are
+candidates for the Architect to ratify via a tasks.yaml PR (rule 15) — **never auto-filed**, and
+deliberately NOT written as tasks, because the ratification telemetry (21% approval) is the governance
+that keeps this list from becoming the graveyard P8 warned about. Each names a root cause no open
+proposal covers; everything else the literature flags in this plan is already an instance of P38, P40(ii),
+P42 or W1-T271 and is folded there rather than given an id.
+
+- **★ P43 (plan + golden) — THE COUNTERFACTUAL GAP: THE HARNESS CANNOT TELL A FIX FROM A FLUKE.**
+  GROUND TRUTH, stated by R13 itself: ledger credit ran 30% → 21% → 16% → **64%**, and the retro records
+  that **"nothing in the gather names a cause and no shipped task in R12 claimed to move it."** Every
+  prior retro read that same metric as a REGRESSION. In the same document, the ratification counter has
+  read `3 / 11 / 21%` **byte-identically for three consecutive cycles** across wildly different activity.
+  So the plan holds, simultaneously, an unexplained 4× improvement and a provably frozen counter, and has
+  no mechanism that distinguishes either from noise. This is NOT P38: P38 asks *did the merged organ
+  execute?*; P43 asks *would the number have moved anyway?* — a live organ and a real effect are
+  different claims, and R13's reversal is the case where the first was satisfied and the second was not.
+  PROPOSE, three clauses. **(i) PRE-REGISTRATION** — a ratified proposal records a numeric EXPECTED
+  EFFECT on a NAMED metric and the cycle it should be visible in, stored as data beside the proposal, not
+  as prose. **(ii) REGRESSION CONTROL** — before attributing a move to a shipped task, the retro compares
+  it against that metric's own prior variance and against the in-cycle runs the intervention could not
+  have touched; a move inside prior variance is reported **UNATTRIBUTED**, never as an effect. An extreme
+  reading is the single most likely thing to revert regardless of what shipped, which is exactly what the
+  16% → 64% row demands be ruled out first. **(iii) SCORING** — each cycle scores the previous cycle's
+  pre-registrations (hit / miss / unresolvable) and prints a running calibration line. The Architect's own
+  forecasting accuracy becomes measured data, which is the only durable defense against the coherent
+  causal story a retro is structurally motivated to write about the cycle it just lived through.
+  GOLDEN (fixture-only, no live dep): a seeded metric series whose latest move lies INSIDE prior variance
+  renders `UNATTRIBUTED` even when a task claiming it merged in-window; a move outside variance with a
+  matching pre-registration renders `ATTRIBUTED` carrying the predicted-vs-observed pair; a cycle with
+  zero pre-registrations prints the calibration line at `n=0` rather than omitting it (the P40(ii) rule —
+  a number that cannot be distinguished from a stale number is printed with its coverage, or not printed).
+
+- **★ P44 (plan + golden) — THE TRIPWIRE IS AN ANCHOR, NOT A MEASUREMENT.** GROUND TRUTH (mechanical,
+  measured at `dcbe275`): **254 of 315 tasks carry `budget_usd: 100.00` exactly**, and the entire plan
+  uses **13 distinct values, every one a round multiple**. Against that constant the observed figures are
+  avg **$4.915**/run, this cycle's most expensive single run **$17.676**, R12's peak $35.384, and
+  **0 / 34 trips**. The plan already concedes the failure in BOTH directions: W1-T3 died `blocked_budget`
+  at **$3.57 against a GUESSED $4 cap** — a limit set NEAR the work acting as a work limit — while R8's
+  W1-T1 spin loop churned **195 runs** and a global $100 cap never caught it. One constant cannot separate
+  pathology from honest-but-expensive work across heterogeneous classes, because it carries no information
+  from the ~574 runs of history that exist. §5C **already has the seam** — *"BUDGET SANITY (soft): flag a
+  task whose turn-budget is below the observed mean for its class (ledger calibration)"* — but it reads
+  ONE statistic, in ONE direction, on turns only. PROPOSE: derive the tripwire from the class's own
+  observed distribution instead of a constant. Per `(task_class, risk)`, compute the cost/turn
+  distribution over the **unioned** ledger (live ∪ rotations — the 212-vs-912 rule) and set the tripwire
+  at a high percentile plus margin, under a **HARD FLOOR** that can never sit near honest work: W1-T3 is
+  the error this must not reproduce. It then fires EARLIER than $100 on a class whose honest work is cheap
+  — catching a spin loop against its own class's tail rather than letting it run to a global number — and
+  LATER on a genuinely expensive class. **Explicitly NOT a cost-saving measure and NOT an allowance**;
+  §9's tripwire doctrine is unchanged, only the constant's PROVENANCE.
+  GOLDEN (fixture-only, no live dep): a seeded per-class distribution yields a tripwire above that class's
+  observed max and below the global constant; a class with fewer than N observations **REFUSES to derive**
+  and falls back to the constant, printing why — the law-of-small-numbers guard the `diagnose` row (n=1,
+  *"still do not re-base a diagnose mount on it"*) already earned by hand; a seeded run inside its class's
+  honest range never trips.
+
+- **★ P45 (plan + golden) — NOTHING ASKS THE CHEAPEST QUESTION: ASSUME IT ALREADY FAILED.** GROUND TRUTH:
+  §5C Layer B already interrogates a task before dispatch (*"is this genuinely ONE concern?"*), and the
+  plan's history is full of failures predictable in KIND though not in detail — four malformed tasks
+  reached workers and burned budget (W1-T6 / W1-T9 / W1-T12); `failed` is **5 of 34 runs (15%)**, a second
+  cycle at ~4× R11's rate that the gather still cannot name a single run id for (P42); and five separate
+  PRs rewrote proofs one task at a time before anyone framed it as one class. No rung asks the dispatching
+  side to state, in advance, how this is most likely to go wrong. PROPOSE: a pre-dispatch rung recording
+  as LEDGER DATA (a) the single most likely failure mode from a BOUNDED taxonomy, and (b) one falsifiable
+  tripwire that would surface it early. Two consequences, both compounding: the worker's prompt carries
+  the named risk, and the ledger gains a PREDICTION the verdict later confirms or refutes — which feeds
+  P43(iii)'s calibration line and finally gives P42's unexplained `failed` class a prior to test against
+  instead of a count. Cheapest item in this block: one bounded enum, one ledger line, no new organ.
+  GOLDEN (fixture-only, no live dep): a seeded dispatch records exactly ONE premortem line carrying a
+  taxonomy-valid mode and a tripwire; a verdict matching the predicted mode scores `HIT`, a different mode
+  scores `MISS`, and a task that never dispatched scores neither; an empty or free-prose mode is REFUSED
+  at the linter rather than written (the proof-shape rule, applied to predictions).
 
 **RETRO-1785341166059 (R11, prior cycle)** — mined from 147 runs / 94 shipped tasks / 20 ledger credits
 (`blocked`×47, `blocked_ci`×25, `no_pr`×17, `incomplete`×12, `pr_attribution_failed`×12,
@@ -1617,6 +1697,51 @@ tasks, NOT a parallel loop. One inbox, one triage discipline, whatever the sourc
 **★ G-6 (operator standing decision):** remudero's OWN public issues stay **OFF** until WS-4. Flipping that
 is the operator's call, not the harness's; W1-T57 covers issues on repos the harness MANAGES, not
 remudero's own public tracker.
+
+## 5E. Decision quality — the two-system model
+
+**The harness makes thousands of judgments an hour under uncertainty, and its observed failure modes are,
+almost one for one, the documented failure modes of fast judgment. This plan has been rediscovering them
+one incident at a time, without names.** Naming them is not decoration: an unnamed bias is re-derived
+every cycle at the cost of a PR, while a named one is greppable, is checkable in review, and can be
+argued about before it burns a dispatch. This section is VOCABULARY plus a map of what already gates
+each failure — it introduces no new machinery of its own (that is P43/P44/P45).
+
+**The two systems, in this harness.** Every verdict here is produced by one of two layers.
+**FAST** is the cheap deterministic layer — the keyword floor, the linter, a `grep`, an authored
+`status:` field. It is always available, costs nothing, and is wrong in one specific direction: it
+answers an EASIER question than the one asked and returns the answer as if it were the hard one.
+**SLOW** is execution — running the proof, executing the grep against the head, unioning the ledger with
+its rotations, reading the `Remudero-Task:` trailers off merged PRs. It is correct and expensive.
+
+**The doctrine: the harness must always know which layer produced a verdict, and must never record a FAST
+answer in a shape that reads like a SLOW one.** Read that way, the plan's existing verdict vocabulary
+already IS a two-layer labelling discipline — `CAPPED`, `executed_pass` / `executed_fail`,
+`executed_stale` (W1-T273), `not_executable`, `exec_error`, `automerge.arm_skipped` — and every one of
+them exists because a FAST answer once passed for a SLOW one. The `automerge.armed` incident is the
+counter-example that proves the rule: **176 rows, 135 blind, 17 provably false**, because a step NAME
+asserted an outcome the writing function never checked.
+
+| failure mode | where it bit, measured | what gates it today |
+|---|---|---|
+| **Substitution** — answering an easier question | the keyword floor answers *"does the body contain the words?"* for *"did the work happen?"* | **GATED**: `executed_pass`/`executed_fail` override the floor (W1-T51/#100); `executed_stale` closes the residue (W1-T273) |
+| **What-you-see-is-all-there-is** | a `review.posted` count read **212** over the live ledger and **912** over the union with 658 archives — a ~4× undercount | **CONVENTION ONLY** (CLAUDE.md); the union is not enforced in code |
+| **Law of small numbers** | the `diagnose` mount row at **n=1** (*"still do not re-base"*); the class table's single `src` row | **PROSE DISCIPLINE**, not a gate → P44's refuse-to-derive clause |
+| **Denominator neglect** | `avg turns` headlines **9.441** while 3 of 25 runs carry **294 of 321** turns — honest figure **98** | **P40(ii)**, UNBUILT |
+| **Anchoring** | **254 of 315** tasks at exactly `budget_usd: 100.00`; 13 distinct values, all round | **P44** |
+| **Regression to the mean / illusion of cause** | ledger credit 16% → **64%** with *"nothing in the gather naming a cause"* | **P43** — nothing today |
+| **Escalation of commitment** | four consecutive PRs rewrote the arm path in three hours without fixing it (#968→#973→#975→#981) | **PARTLY**: W1-T271/#1040's lifetime dispatch cap |
+| **Planning fallacy / inside view** | per-task budgets guessed rather than drawn from ~574 recorded runs; W1-T3 died against a GUESSED $4 cap | **P44** |
+| **Hindsight & narrative fallacy** | a retro writes one coherent causal story per cycle; CLAUDE.md was ordered by RECENCY until #1120 | **P43(i)** pre-registration |
+| **Narrow framing** | the drain dispatches one task per tick; proofs were fixed one-at-a-time across five PRs | **PARTLY**: §5C's retro MINE duty (*"a CLASS-level fix, NOT another per-task patch"*) |
+
+**Two standing consequences, both already half-present in this plan and worth stating once.** First,
+**a number that keys a decision carries its denominator and its window, or it is not printed** — P40(ii)
+generalized: `9.441` and a three-times-identical `21%` are the same defect wearing different clothes.
+Second, **a causal claim names what would have happened otherwise.** "Metric moved and X shipped" is a
+narrative; "metric moved beyond its own prior variance, and the runs X could not have touched did not
+move" is a finding. R13 is the plan's own best evidence for the distinction: it reported the reversal
+honestly and could not defend it, which is precisely the position P43 exists to end.
 
 ## 6. Open-source packaging
 
