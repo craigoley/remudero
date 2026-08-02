@@ -33,12 +33,13 @@
  * everywhere else in this codebase).
  */
 
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, statSync, writeSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
+import { createOrReadExclusive } from "./fs-race-safe.js";
 import { createService, type Route, type ServiceOptions, type ServiceTokens, type SseRoute } from "./service.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
 import type { GitHub } from "./status.js";
@@ -3918,31 +3919,26 @@ export function serviceTokensPath(configRoot: string): string {
  * expose both, because it printed them to stdout, which under the operator's launch is
  * redirected to a world-readable `serve.log`. Any token that reached a log, a terminal
  * transcript, or a chat window is compromised and must be rotated, not merely un-shared.
+ *
+ * CodeQL js/file-system-race, round 4 (alert #61): the `wx` attempt and the EEXIST fallback
+ * read both go through the shared `createOrReadExclusive` helper (fs-race-safe.ts) — the same
+ * one config.ts's `loadConfig` uses — rather than a fourth open-coded copy of this exact
+ * create-or-read shape.
  */
 export function resolveServiceTokens(configRoot: string): ServiceTokens {
   const p = serviceTokensPath(configRoot);
   mkdirSync(dirname(p), { recursive: true });
-  let fd: number | undefined;
-  try {
-    fd = openSync(p, "wx", 0o600);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-  }
-  if (fd !== undefined) {
+  const result = createOrReadExclusive(p, 0o600);
+  if (result.created) {
     try {
       const created: ServiceTokens = { read: randomBytes(32).toString("hex"), write: randomBytes(32).toString("hex") };
-      writeSync(fd, JSON.stringify(created, null, 2) + "\n");
+      writeSync(result.fd, JSON.stringify(created, null, 2) + "\n");
       return created;
     } finally {
-      closeSync(fd);
+      closeSync(result.fd);
     }
   }
-  const readFd = openSync(p, "r");
-  try {
-    return JSON.parse(readFileSync(readFd, "utf8")) as ServiceTokens;
-  } finally {
-    closeSync(readFd);
-  }
+  return JSON.parse(result.raw) as ServiceTokens;
 }
 
 /** `existsSync` re-export point kept trivial — used only by test fixtures wanting to assert the tokens file's persistence without importing node:fs directly for that one check. */

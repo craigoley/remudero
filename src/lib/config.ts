@@ -1,7 +1,8 @@
 import { execFileSync } from "node:child_process";
-import { closeSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs";
+import { closeSync, mkdirSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { createOrReadExclusive } from "./fs-race-safe.js";
 
 /**
  * Instance configuration for a Remudero install.
@@ -377,35 +378,32 @@ function resolveClaudeBin(): string {
  * here too: read through the DESCRIPTOR, not the path. `openSync(p, "r")`
  * plus `readFileSync(fd, ...)` never hands a file-name string to the read
  * sink, so there is nothing left for the query to flag as a re-check.
+ *
+ * CodeQL js/file-system-race, round 4 (alert #60): CodeQL still correlates the
+ * `wx` attempt's `p` with the fallback read's `p`, even through the descriptor
+ * indirection (a false positive — see fs-race-safe.ts's header comment). Rather
+ * than open-code a fourth copy of this exact create-or-read shape, both the
+ * `wx` attempt and the descriptor read now live in the shared
+ * `createOrReadExclusive` helper (also used by serve.ts's `resolveServiceTokens`),
+ * so a fifth round reuses tested code instead of a new copy.
  */
 export function loadConfig(): Config {
   const p = configPath();
   mkdirSync(dirname(p), { recursive: true });
-  let fd: number | undefined;
-  try {
-    fd = openSync(p, "wx", 0o600);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-  }
-  if (fd !== undefined) {
+  const result = createOrReadExclusive(p, 0o600);
+  if (result.created) {
     try {
       const created: Config = {
         claudeBin: resolveClaudeBin(),
         root: join(homedir(), "Remudero"),
       };
-      writeSync(fd, JSON.stringify(created, null, 2) + "\n");
+      writeSync(result.fd, JSON.stringify(created, null, 2) + "\n");
       return created;
     } finally {
-      closeSync(fd);
+      closeSync(result.fd);
     }
   }
-  const readFd = openSync(p, "r");
-  let parsed: Partial<Config>;
-  try {
-    parsed = JSON.parse(readFileSync(readFd, "utf8")) as Partial<Config>;
-  } finally {
-    closeSync(readFd);
-  }
+  const parsed = JSON.parse(result.raw) as Partial<Config>;
   if (!parsed.claudeBin) parsed.claudeBin = resolveClaudeBin();
   if (!parsed.root) parsed.root = join(homedir(), "Remudero");
   validateConfig(parsed as Config);
