@@ -1,0 +1,91 @@
+- id: W1-T286
+  title: "Close the two HIGH js/file-system-race code-scanning alerts (#60, #61) — resolve the flagged sites from the API, apply the shipped exclusive-create/ENOENT discipline"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "Two HIGH code-scanning alerts captured 2026-07-21 are untriaged and uncovered by any task:
+    alert #61 (plan/feedback/fb-alert-craigoley-remudero-code-scanning-61.yaml) and its twin #60
+    (fb-alert-craigoley-remudero-code-scanning-60.yaml), both 'Potential file system race condition' —
+    CodeQL's js/file-system-race. MASTER-PLAN §5D routes scanner alerts through the §7B inbox into
+    CORRECTIVE TASKS, and plan/alert-policy.yaml puts 'high' outside act_severities, so the unattended
+    alert-fix lane will never touch these two: a plan task is the only path that closes them.
+    THIS IS THE FOURTH ROUND OF THE SAME RULE, which is the real finding. Round 1: alerts #15/#16 ->
+    W1-T67 (config.ts loadConfig + init.ts writeTierIntoConfig, both existsSync-gated writes). Round 2:
+    alert #24 -> the EEXIST fallback READ in config.ts (see its own comment at src/lib/config.ts:372).
+    Round 3: alert #71 -> ensureWorkerKeychain (src/lib/worker-home.ts:510). Each round was patched
+    per-instance, and src/ still holds 88 existsSync call sites across 35 files, so round five is
+    already paid for unless this task leaves something behind that is cheaper than another task.
+    WHY THE ENTRY CANNOT NAME THE SITES: ops.ts's normalizeCodeScanningAlert does not extract
+    most_recent_instance.location.path (the gap src/lib/alert-lane.ts:67-75 documents as FUTURE WORK),
+    so every fb-alert-* entry carries a title and a URL and nothing else. The path is one gh api call
+    away for a worker that HAS gh; triage does not have it. That is why step 1 below is a read, not a guess."
+  design: |
+    STEP 1 — READ THE ALERTS BEFORE TOUCHING ANY CODE (distrust this filing's guesses about location):
+      gh api repos/craigoley/remudero/code-scanning/alerts/61
+      gh api repos/craigoley/remudero/code-scanning/alerts/60
+    Record, in the PR body, for EACH alert: state, rule.id, and most_recent_instance.location
+    (path + start_line). The rule is expected to be js/file-system-race; if either alert is a
+    DIFFERENT rule than the title suggests, fix what the API says and say so — the alert is the
+    authority, not this task text.
+
+    STEP 2 — HONEST NO-OP IS AN ALLOWED OUTCOME. These alerts were captured 2026-07-21 and three
+    later rounds of this same rule have already been patched by hand. If the API reports an alert
+    as state `fixed`/`closed`, it is OUT OF SCOPE — drop it and paste the API output as the evidence.
+    If BOTH are already closed, close this task as a no-op with that evidence in the PR body and
+    change no source file; do NOT manufacture a diff (the precedent is DECISIONS.md's W1-T1 no-op
+    closure). Never dismiss an alert by hand — the fix closes it on the next CodeQL run
+    (the standing instruction on W1-T66, plan/tasks.yaml:8775).
+
+    STEP 3 — FIX EACH LIVE SITE WITH THE DISCIPLINE THIS REPO HAS ALREADY SHIPPED THREE TIMES.
+    Fold check-and-act into ONE syscall; do not add a lock, a retry loop, or a new abstraction:
+      - create: writeFileSync/openSync with flag "wx" (O_CREAT|O_EXCL), catching EEXIST to fall
+        through to the read path — src/lib/config.ts:358-380, src/lib/worker-home.ts:510 are the
+        in-repo models, mode preserved (0600 where it is 0600 today).
+      - read:   a direct readFileSync guarded by catch-ENOENT, never existsSync-then-read — the
+        shipped shape is run-task.ts's readFileIfExists (src/run-task.ts:11030).
+    Observable behavior must be byte-identical for the single-process case (contents, file mode,
+    any created/existed flag the function returns).
+
+    STEP 4 — LEAVE A GUARD SO ROUND FIVE IS NOT ANOTHER TASK. Reuse ONE shared helper for the
+    catch-ENOENT read rather than open-coding a fourth copy of it (readFileIfExists is already
+    written and already private to run-task.ts — exporting/relocating it is the cheap move), and
+    add a unit test pinning both branches (EEXIST falls through to the read; ENOENT yields the
+    absent case). If a stronger deterministic guard is genuinely available at proportionate cost
+    (e.g. a lint rule over existsSync-then-write), do it; if not, state in the PR body why not
+    rather than claiming a guard that does not exist.
+
+    EXPLICITLY OUT OF SCOPE: sweeping all 88 existsSync call sites; changing plan/alert-policy.yaml's
+    act_severities; teaching ops.ts to extract most_recent_instance.location.path (a REAL separate
+    gap — alert-lane.ts:67-75 — that stays unfiled here rather than being smuggled into a security fix).
+  acceptance:
+    - claim: "each of alerts #60 and #61 is accounted for by API evidence — either its flagged site is fixed in this diff, or the alert is shown already-closed and dropped"
+      proof: "unit test: test/fs-race-alerts.test.ts"
+    - claim: "no check-then-act remains at any site this PR touched: creation is exclusive (wx) with EEXIST falling through to read, reads are catch-ENOENT"
+      proof: "unit test: test/fs-race-alerts.test.ts"
+    - claim: "the EEXIST branch reads the existing file instead of clobbering it, and the ENOENT branch reports absence instead of throwing"
+      proof: "unit test: both branches asserted for each site this PR touched"
+    - claim: "the catch-ENOENT read is ONE shared helper, not a fourth open-coded copy"
+      proof: "unit test: test/fs-race-alerts.test.ts"
+    - claim: "single-process behavior is unchanged — contents, file mode, and any created/existed return flag"
+      proof: "unit test: test/fs-race-alerts.test.ts"
+  risk: high
+  origin: feedback#fb-alert-craigoley-remudero-code-scanning-61
+  plan_refs: ["§5", "§5D", "§7B"]
+  status: queued
+  attempts: 0
+  note: "Filed by triage of feedback#fb-alert-craigoley-remudero-code-scanning-61. COVERS BOTH TWINS —
+    alert #60 (fb-alert-craigoley-remudero-code-scanning-60) is the same rule captured in the same poll
+    milliseconds apart and is IN SCOPE here; a later triage of that entry should read this task and
+    stand down rather than filing a second one.
+    NO files: KEY ON PURPOSE — the flagged paths are not knowable from the feedback entry (ops.ts drops
+    most_recent_instance.location.path), and a guessed file list here would be exactly the
+    distrust-the-prompt failure step 1 exists to prevent.
+    risk:high — it edits first-run/state-file writes on the control plane's own paths, where a botched
+    EEXIST fallback silently clobbers config; the same grade W1-T67 carried for the same defect class.
+    budget_usd 60 — the diff is small and precedented three times over; the spend is in reading the two
+    alerts and proving the branches, not in design.
+    verify:auto — every claim is a grep or a unit test over injected EEXIST/ENOENT.
+    NO depends_on: the three prior rounds all shipped; nothing queued blocks this."
