@@ -288,7 +288,7 @@ import {
   type LintOpts,
 } from "./lib/task-linter.js";
 import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount } from "./lib/mounts.js";
-import { loadPolicy, policyPath, PolicyError, type Policy, type PolicyHeadroomRung } from "./lib/policy.js";
+import { loadDefaultPolicy, loadPolicy, policyPath, PolicyError, type Policy, type PolicyHeadroomRung } from "./lib/policy.js";
 import { cloneReapRoots, reapStaleClones, tallyDispositions, type CloneReapSummary } from "./lib/clone-reaper.js";
 import { deriveTaskClass } from "./lib/task-class.js";
 import { realRiskJudge, resolveRiskJudgeMount, runRiskJudge, type RiskJudgeInput } from "./lib/risk-judge.js";
@@ -5438,9 +5438,47 @@ export function describeMintWithHistory(mint: MintedTaskIdWithHistory): string {
  * `rmd next-task-id`, which looks like a reader and writes a history cache into the SHARED git
  * common dir that every worktree and the live daemon use. Nothing here touches `config.root`,
  * `state/`, or `.git`; the only side effect is one `grep`/`node --test` child process and stdout.
+ *
+ * "ONE child process" WAS DOING A LOT OF WORK IN THAT SENTENCE, and the `unresolvable` branch below
+ * is why it now says less. A `unit test:` proof naming a TITLE compiles to a `--test-name-pattern`
+ * run over TEST_GLOB; when the title resolves to no file, that glob survived into the spawn, so the
+ * "one child process" was `node --test` over the ENTIRE SUITE, with no timeout. Writing nothing is
+ * not the same as doing nothing. The branch below refuses that run by default.
  */
+/** Opt-in for the one `check-proof` path that would otherwise run the ENTIRE suite — see the
+ *  `unresolvable` branch in {@link checkProofCommand}. */
+export const CHECK_PROOF_FULL_SUITE_FLAG = "--allow-full-suite";
+
+/** Fallback when plan/policy.yaml cannot be read: that file's own documented floor for
+ *  `proofTimeoutMs`, so this verb is never less bounded than the reviewer. */
+const CHECK_PROOF_TIMEOUT_FLOOR_MS = 60_000;
+
+/**
+ * How long `check-proof` lets a proof run. Time-boxed for the SAME reason the reviewer time-boxes,
+ * reading the SAME policy field (`proofTimeoutMs`) so the two cannot drift: a proof that hangs must
+ * fail rather than wedge the operator's terminal — this verb had no timeout at all, which is half of
+ * what made the whole-suite fallback below so expensive.
+ *
+ * Best-effort by design: an unreadable policy must not turn a diagnostic verb into a crash, so it
+ * degrades to that field's own documented floor. `readPolicy` is injected LAST and defaulted, so no
+ * caller shifts — and so the catch arm is reachable from a test rather than being dead code that
+ * only fires on a broken checkout.
+ */
+export function checkProofTimeoutMs(
+  readPolicy: () => number = () => loadDefaultPolicy().values.proofTimeoutMs,
+): number {
+  try {
+    return readPolicy();
+  } catch {
+    return CHECK_PROOF_TIMEOUT_FLOOR_MS;
+  }
+}
+
 export function checkProofCommand(rest: string[]): number {
-  const proof = rest.join(" ").trim();
+  // Matched as a STANDALONE token, never a substring: a proof body is free text that could
+  // legitimately quote this flag's name.
+  const allowFullSuite = rest.includes(CHECK_PROOF_FULL_SUITE_FLAG);
+  const proof = rest.filter((t) => t !== CHECK_PROOF_FULL_SUITE_FLAG).join(" ").trim();
   if (!proof) {
     console.error("rmd check-proof: give me a proof, e.g. `rmd check-proof 'grep: foo in src/lib/bar.ts'`\n" + USAGE);
     return 2;
@@ -5471,11 +5509,39 @@ export function checkProofCommand(rest: string[]): number {
         console.log("verdict:    no-match — the executor fast-fails here and never spawns node.");
         return 1;
       }
+      // UNRESOLVABLE ⇒ `narrowNameFilteredArgs` returns the args UNCHANGED, still carrying
+      // TEST_GLOB — so executing here runs the ENTIRE SUITE. That fallback is defensible inside
+      // the reviewer, whose own comment argues it: with no evidence either way, the wide run is
+      // the honest attempt. It was NOT defensible here, because this verb called `spawnSync` with
+      // no `timeout` — so an operator asking a one-line question about one proof got an UNBOUNDED
+      // full-suite run. review.ts's comment names what that costs: "the full glob loads every file
+      // including several that drive a real headless browser and hang when the name filter matches
+      // none of their tests".
+      //
+      // The trigger is not exotic. `resolveNameFilteredCandidates` answers `unresolvable` whenever
+      // `couldBeInterpolatedTitle` is true — i.e. whenever the proof's title merely SHARES A
+      // STATIC CHUNK with any template-literal title in the corpus — which happens in a perfectly
+      // ordinary checkout, and is indistinguishable to the author from a title that simply typo'd.
+      //
+      // So: report, and decline to be the thing that runs the suite. Everything an author came for
+      // (parse kind, the resolution and its reason, the exact argv) is printed either way; only
+      // the spawn is withheld.
+      if (!allowFullSuite) {
+        console.log(`argv:       ${w.command} ${args.join(" ")}`);
+        console.log(
+          "verdict:    NOT EXECUTED — this proof resolved to no file, so running it would run the\n" +
+            "            WHOLE test suite (note the trailing glob in the argv above), unbounded.\n" +
+            `            Re-run with ${CHECK_PROOF_FULL_SUITE_FLAG} to do it anyway (time-boxed to the\n` +
+            "            same proofTimeoutMs the reviewer uses), or name a test/<file>.test.ts path —\n" +
+            "            the path form runs exactly one file.",
+        );
+        return 2;
+      }
     }
   }
   console.log(`argv:       ${w.command} ${args.join(" ")}`);
 
-  const res = spawnSync(w.command, args as string[], { encoding: "utf8" });
+  const res = spawnSync(w.command, args as string[], { encoding: "utf8", timeout: checkProofTimeoutMs() });
   const stdout = res.stdout ?? "";
   const hits = stdout.split("\n").filter((l) => l.trim() !== "").length;
   console.log(`exit:       ${res.status === null ? `killed by ${res.signal}` : res.status}`);
@@ -12867,7 +12933,7 @@ const COMMANDS: readonly CommandSpec[] = [
   {
     name: "check-proof",
     usage:
-      "rmd check-proof <proof>   # run ONE acceptance proof through the REVIEWER'S OWN parser and executor and print what it does: parse kind, resolved candidate file(s), the exact argv, exit code and hit count. A `grep:` pattern is a BASIC REGULAR EXPRESSION (`[ * ^ $` are metacharacters) — verifying with `grep -F` is a DIFFERENT matcher and reports a false green (PR #1071). READ-ONLY: writes no cache, no ledger line, no state file",
+      "rmd check-proof <proof> [--allow-full-suite]   # run ONE acceptance proof through the REVIEWER'S OWN parser and executor and print what it does: parse kind, resolved candidate file(s), the exact argv, exit code and hit count. A `grep:` pattern is a BASIC REGULAR EXPRESSION (`[ * ^ $` are metacharacters) — verifying with `grep -F` is a DIFFERENT matcher and reports a false green (PR #1071). A `unit test:` proof naming a TITLE rather than a test/<file>.test.ts PATH is resolved to its file first; when it resolves to none, the run is REFUSED rather than falling back to the whole-suite glob (--allow-full-suite overrides, time-boxed). READ-ONLY: writes no cache, no ledger line, no state file",
   },
   { name: "retro", usage: "rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)" },
   {
