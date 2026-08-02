@@ -31,6 +31,7 @@ import { detectCompactionEvents, isQualitySuspect, type CompactionEvent } from "
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { buildWorkerEnv, billingMode, type BillingMode } from "./env.js";
 import { loadDefaultPolicy } from "./policy.js";
+import { assertLiveSpawnAllowed } from "./spawn-guard.js";
 import { validateWorkerSettingsFile } from "./settings.js";
 import { DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS, reapWorkerScratch, sweepStaleWorkerScratch } from "./worker-scratch.js";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
@@ -746,6 +747,22 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     if (typeof args.maxBudgetUsd === "number") options.maxBudgetUsd = args.maxBudgetUsd;
     if (args.tools) options.tools = args.tools;
 
+    // impl-EM LIVE-SPAWN GUARD — the last statement before the SDK is invoked, and the SDK call is
+    // what creates the paid worker. Everything above this line is local and free (config load, binary
+    // resolve, worker-home materialisation, keychain unlock, env construction) and pushes nothing,
+    // reaches no network and spends nothing — verified over the whole range. Those steps ALSO refuse
+    // on their own for bad input (an invalid settings file, an absent toolchain, a locked keychain),
+    // and those refusals are safety features with their own tests; guarding above them would mask
+    // three of them and make this guard the reason they stopped being exercised.
+    //
+    // Scoped to a REAL spawn: `args.queryFn` is the W1-T117 seam replacing the SDK's own `query()`, so
+    // a test injecting it creates no process and is not what this refuses. What it stops is the shape
+    // that actually cost money — a test reaching the real SDK through an un-stubbed dep or an
+    // `as never` cast, which is how test/mounts-wiring.test.ts once spent $1.42+ and left six ghost
+    // branches behind.
+    if (args.queryFn === undefined) {
+      assertLiveSpawnAllowed(`spawnWorker for task ${args.taskId ?? "<no taskId>"}`);
+    }
     const runQuery = args.queryFn ?? query;
     return await withWorkerGroupTeardown(
       pidRef,
