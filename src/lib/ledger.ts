@@ -407,6 +407,36 @@ export const RENDER_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "daemon.headroom",
   "console.kick_refused",
   "console.kick_dispatched",
+  // W1-T282's LANE_START_STEPS (status.ts) taught the NOW panel to open a run on any lane's start,
+  // not just `run.start` — and then none of the six new ones was retained, so a long-running lane
+  // could VANISH from "currently running" the moment a rotation happened. Measured on this host:
+  // `drain.start`, `retro.start` and `triage.start` all read ZERO in the live ledger against 25/14/34
+  // in the unioned corpus, i.e. every one of them had ALREADY been rotated away.
+  //
+  // RENDER, NOT DECISION, and the window is why. `deriveRunState`'s own consumer bound is
+  // DEFAULT_LIVENESS_BOUND_MS = 30 minutes (status.ts:471) — a run whose last activity is older than
+  // that is ALREADY not shown as live — and RENDER_STEP_RETENTION_WINDOW_MS is 30 minutes too. So
+  // this window is sized exactly to the consumer, retaining a start for precisely as long as NOW
+  // could still act on it and not one tick longer. Putting them in DECISION_RELEVANT would retain
+  // every lane start FOREVER for a display-only read; status.ts's own note says these reads are
+  // "display-only ... never decision-relevant, so they must not be mistakenly harvested into that
+  // enforcement list either way".
+  //
+  // IT ALSO CANNOT STRAND A PERPETUAL IN-FLIGHT ROW. A successful retro or triage logs no terminal
+  // step at all (status.ts's LANE_TERMINAL_STEPS doc: `retro.error`/`triage.error` are each lane's
+  // ONLY terminal), so those lanes close purely on the liveness bound. Because this retention window
+  // EQUALS that bound, the start line ages out at the same moment NOW stops calling it live.
+  //
+  // `run.start` is deliberately absent: it is already in DECISION_RELEVANT_LEDGER_STEPS, where it
+  // belongs for reasons beyond this panel. `plan.start` is deliberately absent too — it has a real
+  // emitter (run-task.ts:10832) but ZERO emissions in 19 days of unioned ledger, so protecting it
+  // would be the `sweep.absent_repush` defect in the other direction: membership for a step nothing
+  // writes. Add it when `rmd plan` actually runs.
+  "daemon.start",
+  "drain.start",
+  "retro.start",
+  "serve.start",
+  "triage.start",
 ]);
 
 /** True for any step in {@link RENDER_RELEVANT_LEDGER_STEPS}. */
