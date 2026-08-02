@@ -707,8 +707,8 @@ export function renderShellHtml(
     <span class="glance-item"><span class="glance-label">next poll</span><span class="glance-value" id="dh-next-poll">…</span></span>
     <span class="glance-item"><span class="glance-label">disk free</span><span class="glance-value" id="dh-disk-free">…</span></span>
     <span class="glance-item"><span class="glance-label">rate limit</span><span class="glance-value" id="dh-rate-limit">…</span></span>
+    ${idleReasonsHtml}
   </section>
-  ${idleReasonsHtml}
   <!-- ACCOUNT strip: WHICH Anthropic account the fleet is spending, and how much of each usage
        window is gone (GET /v1/account-usage; see account-usage.ts's header for why usage comes
        from ~/.claude.json's cachedUsageUtilization and NOT from the daemon.headroom ledger line).

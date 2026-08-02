@@ -123,6 +123,14 @@ function humanAge(ms: number): string {
   return h < 24 ? `${h}h ${m % 60}m ago` : `${Math.floor(h / 24)}d ${h % 24}h ago`;
 }
 
+/** Strip-width short forms; the daemon's own full label rides in each bucket's `title`. */
+const SHORT_LABEL: Record<string, string> = {
+  "already-merged": "merged",
+  "verify-not-auto": "need you",
+  blocked: "blocked",
+  "unmet-deps": "deps",
+};
+
 /**
  * The panel, as a server-rendered fragment.
  *
@@ -132,41 +140,64 @@ function humanAge(ms: number): string {
  * page-load freshness with an explicit as-of is adequate; nothing here needs interactivity.
  */
 export function renderIdleReasonsHtml(reading: IdleReasonsReading): string {
+  // ZERO ADDED HEIGHT, BY CONSTRUCTION. This returns BARE `.glance-item` spans, never a wrapping
+  // `<section>`, and `renderShellHtml` splices them INSIDE the existing `#daemon-health` strip.
+  //
+  // The earlier shape emitted its own `<section class="… daemon-health">`. That is a whole extra
+  // strip — `margin: 0.4rem 0; padding: 0.5rem 0.65rem` plus a border, ~42px — which is one dense
+  // row, and it took serve.density-ia.test.ts's 214-task idle view from 15 rows above the fold to
+  // 14. W1-T183's density bar is an acceptance bar, so the panel has to earn its place in a strip
+  // that already exists rather than open a new one. The strip is `flex-wrap`, so these items flow
+  // in beside "last poll"/"disk free" and cost nothing until the row genuinely fills.
   if (reading.kind === "unknown") {
-    // ONE ROW, NOT A BLOCK. "unknown" is not "zero" and must stay visible — hiding it is the
-    // misleading failure this panel exists to remove. But a heading-plus-paragraph reporting the
-    // ABSENCE of data cost three of the fifteen dense rows serve.density-ia.test.ts requires above
-    // the fold, and broke that invariant. As a `glance-item` strip — the idiom the daemon-health
-    // and account-usage headers already use — it says the same thing in one row.
+    // "unknown" is not "zero" and must stay visible — hiding it is the misleading failure this
+    // panel exists to remove (a governor that could not read usage once looked identical to one
+    // under ceiling and idled the fleet for three hours).
+    // The DIAGNOSTIC REASON moves to `title`; the HONESTY stays visible. Measured at a 1440px
+    // viewport the strip's content box is 1024px and its four existing items take ~282px, so an
+    // item carrying the full reason inline rendered 675px wide and WRAPPED the strip onto a second
+    // line — 37px becoming ~64px, which is the dense row this panel must not cost. The reason is
+    // still in the served bytes and on hover; what a glance must never lose is that this is an
+    // absence of data and not a benign zero.
     return (
-      '<section class="idle-reasons daemon-health" data-idle-reasons="unknown" aria-label="Why idle">' +
-      '<span class="glance-item"><span class="glance-label">why idle</span>' +
-      `<span class="glance-value idle-unknown">UNKNOWN — ${esc(reading.why)}. This is not zero.</span></span>` +
-      "</section>"
+      `<span class="glance-item" data-idle-reasons="unknown" title="${esc(reading.why)}">` +
+      '<span class="glance-label">why idle</span>' +
+      '<span class="glance-value idle-unknown">UNKNOWN. This is not zero.</span></span>'
     );
   }
-  const stamp = reading.current
-    ? `<span class="idle-current">current</span> · as of ${esc(humanAge(reading.ageMs))}`
-    : `<span class="idle-stale">not confirmed current</span> · last emitted ${esc(humanAge(reading.ageMs))}`;
+  // The CURRENCY VERDICT stays visible — it is the one thing a reader must not have to hover for,
+  // because a stale tally read as current is the failure this panel's sibling-step logic exists to
+  // prevent. Its AGE and the total ride in `title` beside it: measured, rendering both inline made
+  // this item 1001px against 1024px of strip, wrapping it onto a second line (37px → 83px) exactly
+  // when a real tally exists, i.e. when the operator is idle and wants it most.
+  const marker = reading.current
+    ? '<span class="idle-current">current</span>'
+    : '<span class="idle-stale">not confirmed current</span>';
+  const agePhrase = reading.current
+    ? `as of ${humanAge(reading.ageMs)}`
+    : `last emitted ${humanAge(reading.ageMs)}`;
+  const detail = `${reading.total} task(s) declined by these four filters · eligible 0 · ${agePhrase}`;
 
-  const rows = reading.buckets
+  // Counts and labels stay VISIBLE; the per-bucket ids move to `title`. They remain in the DOM and
+  // on hover, but they are the one part long enough to wrap the strip onto a second line — which
+  // would give the row back. `data-reason`/`data-count` are unchanged, so every assertion that
+  // reconciles the panel against the daemon's own line reads exactly as before.
+  const items = reading.buckets
     .map((b) => {
-      const ids = b.ids.length
-        ? `<span class="idle-ids">${b.ids.map((i) => esc(i)).join(", ")}${b.truncated > 0 ? ` +${b.truncated} more` : ""}</span>`
-        : "";
+      const ids = b.ids.length ? `${b.ids.join(", ")}${b.truncated > 0 ? ` +${b.truncated} more` : ""}` : "none listed";
       return (
-        `<li class="idle-bucket" data-reason="${esc(b.key)}" data-count="${b.count}">` +
-        `<span class="idle-count">${b.count}</span> <span class="idle-label">${esc(b.label)}</span>${ids ? " " + ids : ""}` +
-        "</li>"
+        `<span class="idle-bucket" data-reason="${esc(b.key)}" data-count="${b.count}" title="${esc(`${b.label} — ${ids}`)}">` +
+        `<span class="idle-count">${b.count}</span> <span class="idle-label">${esc(SHORT_LABEL[b.key] ?? b.label)}</span>` +
+        "</span>"
       );
     })
-    .join("");
+    .join(" · ");
 
   return (
-    '<section class="idle-reasons" data-idle-reasons="reading">' +
-    `<h2>Why idle</h2><p class="idle-asof">${stamp}</p>` +
-    `<ul class="idle-buckets">${rows}</ul>` +
-    `<p class="idle-total">${reading.total} task(s) declined by these four filters · eligible 0</p>` +
-    "</section>"
+    `<span class="glance-item idle-reasons" data-idle-reasons="reading" title="${esc(detail)}">` +
+    '<span class="glance-label">why idle</span>' +
+    `<span class="glance-value idle-buckets">${items}</span>` +
+    `<span class="idle-asof">${marker}</span>` +
+    "</span>"
   );
 }
