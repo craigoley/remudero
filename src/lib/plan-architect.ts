@@ -40,8 +40,11 @@ import { ACCEPTANCE_PROOF_GRAMMAR } from "./proof-grammar.js";
  *                AskUserQuestion / async needs-human delivery is W1-T42's job, same deferral
  *                triage.ts already documents — LEARNINGS "no live operator in a headless
  *                worker".)
- *   - PROPOSED — edit ONLY `plan/tasks.yaml` and/or `MASTER-PLAN.md` and end with a summary.
- *                The harness (never the LLM) commits/pushes/opens the PR.
+ *   - PROPOSED — edit ONLY plan-scope files (`plan/**` — the `plan/tasks.yaml` monolith or a
+ *                `plan/tasks.d/*.yaml` shard) and/or `MASTER-PLAN.md`, and end with a summary.
+ *                A NEW task goes in its OWN shard, never appended to the monolith (impl-FS: CI's
+ *                `monolith-filing` rule blocks the latter). The harness (never the LLM)
+ *                commits/pushes/opens the PR.
  *
  * THE WORKER NEVER RUNS GIT — it only grounds/researches/edits plan-scope files via
  * Read/Grep/Glob/WebSearch/WebFetch/Write/Edit; the commit/push/PR-open/gate sequence is
@@ -120,9 +123,10 @@ function step3Instructions(mode: PlanMode, brief: string): string[] {
       "  very different things). Touch NO files. End with a line starting exactly `GRILL:`",
       "  naming the open question, e.g. `GRILL: onboard which repo — this one or a new one?`.",
       "",
-      "  PROPOSED — scaffold it: add one or more new `plan/tasks.yaml` task(s) (and, if the",
-      "  initiative is big enough to need one, a new `MASTER-PLAN.md` §section) covering the",
-      "  initiative. End with a line starting exactly `PROPOSED:` with a one-line summary, e.g.",
+      "  PROPOSED — scaffold it: add one or more NEW task(s) covering the initiative (see NEW TASK",
+      "  PLACEMENT below for where a new task goes), and, if the initiative is big enough to need",
+      "  one, a new `MASTER-PLAN.md` §section.",
+      "  End with a line starting exactly `PROPOSED:` with a one-line summary, e.g.",
       "  `PROPOSED: add W1-T300 scaffolding the <initiative> initiative`.",
     ];
   }
@@ -141,8 +145,14 @@ function step3Instructions(mode: PlanMode, brief: string): string[] {
       "  NO files. End with a line starting exactly `GRILL:` naming the open question, e.g.",
       "  `GRILL: does W1-T90's 'the daemon' mean rmd daemon or rmd drain?`.",
       "",
-      "  PROPOSED — the ambiguity has a clear resolution: rewrite the affected `plan/tasks.yaml`",
-      "  task(s) (and/or `MASTER-PLAN.md`) to remove it. End with a line starting exactly",
+      // CLARIFY REWRITES, it does not file: its ids already exist, so `monolithFilingViolations`
+      // (which fires only on an id NEW to the monolith) cannot trip here. The correction this line
+      // needs is therefore NOT the shard rule but triage's REWIRING clause — a task named here may
+      // live in a shard, and naming `plan/tasks.yaml` sends the worker to the wrong file for 45 of
+      // the 314 tasks currently in the plan.
+      "  PROPOSED — the ambiguity has a clear resolution: rewrite the affected task(s) wherever they",
+      "  already live — the `plan/tasks.yaml` monolith or that task's own `plan/tasks.d/*.yaml`",
+      "  shard — (and/or `MASTER-PLAN.md`) to remove it. End with a line starting exactly",
       "  `PROPOSED:` with a one-line summary, e.g. `PROPOSED: disambiguate W1-T90's 'the daemon'`.",
     ];
   }
@@ -163,7 +173,8 @@ function step3Instructions(mode: PlanMode, brief: string): string[] {
     "  of two directions to take). Touch NO files. End with a line starting exactly `GRILL:`",
     "  naming the open question.",
     "",
-    "  PROPOSED — add one or more new `plan/tasks.yaml` task(s) filling the gap. Every new task's",
+    "  PROPOSED — add one or more NEW task(s) filling the gap (see NEW TASK PLACEMENT below for",
+    "  where a new task goes). Every new task's",
     "  `rationale:` MUST cite the research source (a URL) that grounds it. End with a line",
     "  starting exactly `PROPOSED:` with a one-line summary, e.g.",
     "  `PROPOSED: add W1-T301 for <gap>, citing <url>`.",
@@ -215,8 +226,13 @@ export function planArchitectPrompt(
     "(or none) and printed your verdict; the harness commits/pushes/opens the PR after you finish.",
     "",
     "=== STEP 1 — GROUND ===",
-    "Grep/Read MASTER-PLAN.md, plan/tasks.yaml, LEARNINGS.md, and DECISIONS.md (all in this",
-    "working directory) for what is already decided. Re-deciding a settled question, or",
+    // The shard glob is NOT optional here (impl-FS defect 2): new tasks have been filed as their
+    // own `plan/tasks.d/<id>-<slug>.yaml` since PR #1060, so the shards hold the MOST RECENTLY
+    // filed tasks — 45 of 314 at authoring time. A worker told not to duplicate an existing task,
+    // while reading only the monolith, is blind to exactly the set a fresh proposal is likeliest to
+    // duplicate. Matches triage's own grounding line (lib/triage.ts), which already lists both.
+    "Grep/Read MASTER-PLAN.md, plan/tasks.yaml, plan/tasks.d/*.yaml, LEARNINGS.md, and DECISIONS.md",
+    "(all in this working directory) for what is already decided. Re-deciding a settled question, or",
     "proposing a task that duplicates an existing one, is a failure mode, not a feature.",
     "",
     "=== STEP 2 — RESEARCH ===",
@@ -234,8 +250,37 @@ export function planArchitectPrompt(
     // both add tasks, so a per-mode copy would be two copies that can drift. Verbatim from
     // proof-grammar.ts — see that module for why there is exactly one copy across both lanes.
     ...ACCEPTANCE_PROOF_GRAMMAR,
+    // NEW TASK PLACEMENT (impl-FS defect 1). Spliced HERE, in the shared body, for the same reason
+    // ACCEPTANCE_PROOF_GRAMMAR is directly above: `create` and `expand` both file new tasks, so a
+    // per-mode copy would be two copies that can drift. `clarify` rewrites existing tasks and is
+    // unaffected — its own branch says so.
+    //
+    // WHY THIS IS NOT COSMETIC: this prompt used to direct new tasks into `plan/tasks.yaml`, which
+    // `monolithFilingViolations` (lib/task-linter.ts) fails at severity `block`, and CI runs that
+    // rule in its activating mode (`lint-plan --base <sha>`, an unconditional required check). The
+    // lane has never run, so its FIRST create/expand run would have spent an Architect budget,
+    // opened a PR, and then sat red on `lint-plan` — reported to the operator only as "ci failure".
+    // Wording matched to lib/triage.ts's shard rule rather than reworded: two phrasings of one rule
+    // is how this repo ends up with two implementations of one rule.
+    "NEW TASK PLACEMENT — a NEW task MUST be created as its OWN SHARD at",
+    "plan/tasks.d/<id>-<kebab-slug>.yaml — one task per file, a single-element YAML list.",
+    "plan/tasks.d/W1-T278-task-id-from-plan-history.yaml is the model for that STRUCTURE (file shape",
+    "and fields) only; for `proof:` values follow the ACCEPTANCE PROOFS rules above, which are what",
+    "CI actually enforces.",
+    "NEVER append a new task to plan/tasks.yaml: 69 filings appending to one 12.5k-line file all",
+    "collide at EOF, which is the conflict storm W1-T122 sharded the plan to prevent — and CI's",
+    "`lint-plan` FAILS a new task found in the monolith, so a PR filed that way cannot merge.",
+    "REWIRING an EXISTING task edits wherever that task already lives (the monolith or its shard).",
+    // impl-FS defect 3 (surfaced by this PR's own aggregate-lint assertion, not by the recon): this
+    // prompt named `origin:` NOWHERE, while `provenanceViolation` (lib/task-linter.ts) BLOCKS a task
+    // that lacks one. Fixing only the placement rule would have moved the first run's failure from
+    // `monolith-filing` to `provenance` and left the observable symptom identical — "ci failure".
+    // `architect` is the value 272 of the plan's 314 tasks already carry, and is what this lane is.
+    "Every NEW task MUST carry `origin: architect` so its provenance is traceable — CI's `lint-plan`",
+    "FAILS a task with no `origin:`.",
+    "",
     "Exactly one of CLEAR / GRILL / PROPOSED must be the LAST line of your output. Whenever you",
-    "add or rewire a `plan/tasks.yaml` task, only touch `plan/tasks.yaml` and/or",
+    "add or rewire a task, only touch `plan/**` (the monolith, a shard) and/or",
     "`MASTER-PLAN.md` — NEVER `src/` or `test/`. Do NOT touch docs/ORIENTATION.md.",
     "",
     `(mode: ${mode})`,

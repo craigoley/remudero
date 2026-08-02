@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -47,6 +47,9 @@ const VALID_TASK = (id: string, title: string): string =>
     `- id: ${id}`,
     `  title: "${title}"`,
     "  repo: remudero",
+    // impl-FS: the prompt now requires `origin:` on every new task (CI's `provenance` rule BLOCKS
+    // its absence), so the fixture worker writes what a compliant worker writes.
+    "  origin: architect",
     "  depends_on: []",
     "  type: implement",
     "  verify: auto",
@@ -54,6 +57,23 @@ const VALID_TASK = (id: string, title: string): string =>
     "  attempts: 0",
     "",
   ].join("\n");
+
+/**
+ * File a task the way the CORRECTED prompt directs — its OWN shard at
+ * plan/tasks.d/<id>-<slug>.yaml — rather than appending to the monolith.
+ *
+ * impl-FS (trap 2): these fixtures used `appendFileSync(join(cwd, "plan", "tasks.yaml"), …)`, which
+ * is precisely the placement `monolithFilingViolations` blocks and the prompt no longer directs. A
+ * fixture that simulates the worker doing the wrong thing encodes the defect as normal behaviour —
+ * part of why nobody noticed the prompt was wrong for nineteen days. What is ASSERTED here (the
+ * reserve-before-spawn ordering and the release-everything contract) is unchanged; only the
+ * placement the fake worker writes has moved.
+ */
+function fileTaskAsShard(cwd: string, id: string, title: string): void {
+  const shardDir = join(cwd, "plan", "tasks.d");
+  mkdirSync(shardDir, { recursive: true });
+  writeFileSync(join(shardDir, `${id}-fixture-filing.yaml`), VALID_TASK(id, title));
+}
 
 function fakeWorker(text: string): WorkerResult {
   return {
@@ -187,7 +207,7 @@ test("plan lane reserves its task ids BEFORE the paid worker spawns", async () =
         // nothing, or mints after the worker — the two orderings impl-DV exists to rule out.
         seenAtSpawn = idsOnDisk(reservationsDir);
         promptSeen = args.prompt;
-        appendFileSync(join(args.cwd, "plan", "tasks.yaml"), VALID_TASK(`W1-T${seenAtSpawn[0]}`, "filed by the fixture worker"));
+        fileTaskAsShard(args.cwd, `W1-T${seenAtSpawn[0]}`, "filed by the fixture worker");
         return fakeWorker(`PROPOSED: file W1-T${seenAtSpawn[0]} for the plan-lane mint fixture`);
       },
     }).catch(() => undefined);
@@ -215,7 +235,7 @@ test("plan lane releases EVERY reserved id, including the ones the worker declin
         // File ONE task against a block of PLAN_MAX_NEW_TASKS: the other ids are declined, and
         // are the exact ids a leak would strand (nobody ever files them, so nobody ever frees
         // them). This is the phantom-id trap the plan already carries four instances of.
-        appendFileSync(join(args.cwd, "plan", "tasks.yaml"), VALID_TASK(`W1-T${first}`, "one task out of a block of five"));
+        fileTaskAsShard(args.cwd, `W1-T${first}`, "one task out of a block of five");
         return fakeWorker(`PROPOSED: file W1-T${first} only`);
       },
     }).catch(() => undefined);
@@ -262,7 +282,7 @@ test("plan lane SKIPS ids a live cross-lane holder already reserved", async () =
     await planCommand(BRIEF, {
       spawn: async (args: { cwd: string }) => {
         seenAtSpawn = idsOnDisk(reservationsDir).filter((n) => n > HELD_THROUGH);
-        appendFileSync(join(args.cwd, "plan", "tasks.yaml"), VALID_TASK(`W1-T${seenAtSpawn[0]}`, "filed above the held range"));
+        fileTaskAsShard(args.cwd, `W1-T${seenAtSpawn[0]}`, "filed above the held range");
         return fakeWorker(`PROPOSED: file W1-T${seenAtSpawn[0]}`);
       },
     }).catch(() => undefined);
