@@ -22,6 +22,7 @@ import {
   workerZdotdir,
   type Config,
 } from "./lib/config.js";
+import { readFileIfExists } from "./lib/fs-race-safe.js";
 import { buildWorkerEnv, billingMode, type BillingMode } from "./lib/env.js";
 import { outputContractLines, renderAnchorBlock, commitMessageContractLines } from "./lib/compaction.js";
 import type { RunResult } from "./lib/run-result.js";
@@ -11031,19 +11032,6 @@ export async function planCommand(
  *  Write/Edit/Bash. Drafting is TEXT the harness parses/caches state-side (never
  *  committed), so unlike `rmd triage`/`rmd plan` this worker never touches a file. */
 const INBOX_DRAFT_WORKER_TOOLS = ["Read", "Grep", "Glob"];
-
-/** Read a file's contents, or `undefined` if it doesn't exist — a single `readFileSync`
- *  guarded by `catch`, NOT a separate `existsSync` check-then-read (the latter is a
- *  TOCTOU race CodeQL flags: `js/file-system-race`, real here because `inboxCommand`
- *  later writes back to this same state path). */
-function readFileIfExists(path: string): string | undefined {
-  try {
-    return readFileSync(path, "utf8");
-  } catch (e: unknown) {
-    if (e && typeof e === "object" && "code" in e && (e as { code: unknown }).code === "ENOENT") return undefined;
-    throw e;
-  }
-}
 
 /**
  * Materialize ONE worktree and draft EVERY proposal in `toDraft` against it — the shared
