@@ -12,15 +12,7 @@ const SWEEP_URL = pathToFileURL(
   join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "clock-sweep.mjs"),
 ).href;
 
-const {
-  CLOCK_ARTIFACTS,
-  SPAWN_REACHING,
-  SWEEP_SHIFT_DAYS,
-  classifySweep,
-  deriveCandidates,
-  failingTitles,
-  runnableCandidates,
-} = (await import(SWEEP_URL)) as {
+const mod = (await import(SWEEP_URL)) as {
   CLOCK_ARTIFACTS: ReadonlyMap<string, string>;
   SPAWN_REACHING: ReadonlyMap<string, string>;
   SWEEP_SHIFT_DAYS: number;
@@ -31,7 +23,35 @@ const {
   deriveCandidates: (testDir?: string) => string[];
   failingTitles: (output: string) => string[];
   runnableCandidates: (candidates: string[]) => string[];
+  runSuite: (
+    suite: string,
+    days: number,
+    exec?: (file: string, args: string[], opts: { env: Record<string, string> }) => string,
+  ) => { failed: boolean; output: string };
+  bisectFuse: (
+    suite: string,
+    run?: (suite: string, days: number) => { failed: boolean; output?: string },
+  ) => number | null;
+  main: (opts?: {
+    argv?: string[];
+    run?: (suite: string, days: number) => { failed: boolean; output?: string };
+    derive?: () => string[];
+    log?: (m: string) => void;
+    write?: (m: string) => void;
+  }) => number;
 };
+const {
+  CLOCK_ARTIFACTS,
+  SPAWN_REACHING,
+  SWEEP_SHIFT_DAYS,
+  classifySweep,
+  deriveCandidates,
+  failingTitles,
+  runnableCandidates,
+  runSuite,
+  bisectFuse,
+  main,
+} = mod;
 
 // ── The scheduled sweep's own logic, guarded. The sweep itself takes minutes and spawns dozens of
 // child processes; everything decision-shaped here is pure, so it is asserted directly instead.
@@ -133,4 +153,162 @@ test("the shift is a single large value — a second shorter shift would add cos
   // catches, a larger one catches too, and the measured false-flag rate at +400d across the whole
   // population was zero.
   assert.equal(SWEEP_SHIFT_DAYS, 400);
+});
+
+// ── The orchestration half. Every collaborator is injected, so these exercise the real runner,
+// bisector and report WITHOUT spawning a single child process — which matters because each suite
+// the sweep runs is a real test file, so an un-injectable runner would make covering this cost a
+// full sweep (tens of minutes).
+
+// Recorders, deliberately SHARED across the tests below rather than written inline per test. A
+// test whose whole point is "this collaborator is never called" cannot cover its own inline
+// closure — the body is unreachable by construction — so an inline stub leaves permanently
+// uncovered added lines. Hoisting them means the bodies are exercised by the tests that DO call
+// them, and the non-invocation assertion reads a counter instead.
+function runRecorder(result: (suite: string, days: number) => { failed: boolean; output?: string } = () => ({ failed: false })) {
+  const calls: Array<{ suite: string; days: number }> = [];
+  return {
+    calls,
+    run: (suite: string, days: number) => {
+      calls.push({ suite, days });
+      return result(suite, days);
+    },
+  };
+}
+
+function deriveRecorder(suites: string[]) {
+  const state = { called: 0 };
+  return {
+    state,
+    derive: () => {
+      state.called += 1;
+      return suites;
+    },
+  };
+}
+
+test("runSuite reports success and swallows no output when the child exits 0", () => {
+  const seen: Array<{ file: string; days: string }> = [];
+  const r = runSuite("emissions", 400, (file, _args, opts) => {
+    seen.push({ file, days: opts.env.FK_SHIFT_DAYS });
+    return "";
+  });
+  assert.deepEqual(r, { failed: false, output: "" });
+  assert.equal(seen[0].days, "400", "the shift must reach the child as FK_SHIFT_DAYS");
+});
+
+test("runSuite captures BOTH stdout and stderr from a failing child, so the report can name tests", () => {
+  const r = runSuite("emissions", 400, () => {
+    const e = new Error("child failed") as Error & { stdout: string; stderr: string };
+    e.stdout = "not ok 1 - a drifting title\n";
+    e.stderr = "AssertionError\n";
+    throw e;
+  });
+  assert.equal(r.failed, true);
+  assert.match(r.output, /not ok 1 - a drifting title/);
+  assert.match(r.output, /AssertionError/, "stderr must not be dropped -- node prints diffs there");
+});
+
+test("runSuite passes the shift for whatever rung it is asked about, not a hardcoded 400", () => {
+  const days: string[] = [];
+  runSuite("emissions", 7, (_f, _a, opts) => {
+    days.push(opts.env.FK_SHIFT_DAYS);
+    return "";
+  });
+  assert.deepEqual(days, ["7"]);
+});
+
+test("bisectFuse returns the SMALLEST rung that already fails, not the first tried", () => {
+  // Fails from +30 onward: the operator needs the tightest bound, or the fuse reads longer than it is.
+  const fuse = bisectFuse("x", (_s, days) => ({ failed: days >= 30 }));
+  assert.equal(fuse, 30);
+});
+
+test("bisectFuse returns null when no rung fails, so the report says 'only at the full shift'", () => {
+  assert.equal(bisectFuse("x", () => ({ failed: false })), null);
+});
+
+test("main --list prints the plan and runs nothing at all", () => {
+  const lines: string[] = [];
+  const r = runRecorder();
+  const d = deriveRecorder(["emissions", "mounts-wiring"]);
+  const code = main({ argv: ["--list"], derive: d.derive, run: r.run, log: (m) => lines.push(m), write: () => {} });
+  assert.equal(code, 0);
+  assert.equal(r.calls.length, 0, "--list must never execute a suite");
+  assert.equal(d.state.called, 1, "the plan still comes from the real derivation");
+  assert.match(lines.join("\n"), /will run\s+: 1/, "the spawn-reaching suite must be subtracted");
+});
+
+test("main returns 0 and reports the immune count from what actually RAN", () => {
+  const lines: string[] = [];
+  const code = main({
+    argv: [],
+    derive: () => ["emissions", "learnings"],
+    run: (s) => ({ failed: CLOCK_ARTIFACTS.has(s) }), // artifacts fail as expected; others pass
+    log: (m) => lines.push(m),
+    write: () => {},
+  });
+  assert.equal(code, 0);
+  const out = lines.join("\n");
+  assert.match(out, /^PASS — /m);
+  assert.ok(!/-\d+ suite\(s\) immune/.test(out), "the immune count must never go negative");
+});
+
+test("main returns 1 on drift and names the suite, the failing test, the fuse and a reproduce line", () => {
+  const lines: string[] = [];
+  const code = main({
+    argv: [],
+    derive: () => ["learnings"],
+    run: (_s, days) => ({
+      failed: days >= 14,
+      output: "not ok 1 - a fixture date goes stale\n",
+    }),
+    log: (m) => lines.push(m),
+    write: () => {},
+  });
+  assert.equal(code, 1, "drift must exit non-zero or the workflow never notifies");
+  const out = lines.join("\n");
+  assert.match(out, /WALL-CLOCK DRIFT/);
+  assert.match(out, /test\/learnings\.test\.ts/);
+  assert.match(out, /fails by\s+: \+14 days/, "the fuse must be the tightest failing rung");
+  assert.match(out, /failing test\s+: a fixture date goes stale/);
+  assert.match(out, /reproduce\s+: FK_SHIFT_DAYS=14 node --test/);
+});
+
+test("main reports a STALE EXCLUSION when a listed clock artifact starts passing shifted", () => {
+  const lines: string[] = [];
+  const artifact = [...CLOCK_ARTIFACTS.keys()][0];
+  const code = main({
+    argv: [],
+    derive: () => [artifact],
+    run: () => ({ failed: false }), // the artifact no longer fails -- its stated mechanism is gone
+    log: (m) => lines.push(m),
+    write: () => {},
+  });
+  assert.equal(code, 1, "a stale exclusion must block: it is silently shrinking coverage");
+  assert.match(lines.join("\n"), /STALE EXCLUSIONS/);
+  assert.match(lines.join("\n"), new RegExp(`test/${artifact}\\.test\\.ts`));
+});
+
+test("main emits per-suite progress as it goes, so a long sweep is distinguishable from a hang", () => {
+  const written: string[] = [];
+  // Uses the SHARED recorders, which is what makes their bodies covered for the two
+  // never-invoked assertions above and below.
+  const r = runRecorder();
+  const d = deriveRecorder(["emissions", "learnings"]);
+  main({ argv: [], derive: d.derive, run: r.run, log: () => {}, write: (m) => written.push(m) });
+  assert.equal(written.length, 2, "one progress line per suite actually run");
+  assert.deepEqual(r.calls.map((c) => c.suite), ["emissions", "learnings"]);
+  assert.equal(r.calls[0].days, SWEEP_SHIFT_DAYS, "the sweep runs at the full shift");
+  assert.match(written[0], /\[\s*1\/2\]/);
+});
+
+test("main routes --only through the spawn guard, so even an explicit spawn suite runs nothing", () => {
+  const spawnSuite = [...SPAWN_REACHING.keys()][0];
+  const r = runRecorder();
+  const d = deriveRecorder(["should-not-be-consulted"]);
+  const code = main({ argv: ["--only", spawnSuite], derive: d.derive, run: r.run, log: () => {}, write: () => {} });
+  assert.equal(r.calls.length, 0, "a paid spawn must be unreachable even when named explicitly");
+  assert.equal(d.state.called, 0, "--only must not consult the derivation at all");
+  assert.equal(code, 0);
 });

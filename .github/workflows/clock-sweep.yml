@@ -68,27 +68,37 @@ jobs:
       - name: What this sweep will run (and what it will never run)
         run: node scripts/clock-sweep.mjs --list
 
+      # `set -o pipefail` is load-bearing and is NOT redundant with the runner default: a `run:`
+      # block with no explicit `shell:` executes under `bash -e {0}`, which does not set pipefail
+      # (only an explicit `shell: bash` gets `-eo pipefail`). Without it `tee` returns 0 and
+      # main()'s exit-1-on-drift is DISCARDED -- the step goes green, `if: failure()` below never
+      # fires, and the sweep silently reports success on exactly the drift it exists to catch.
       - name: Sweep at +400d
         id: sweep
-        run: node scripts/clock-sweep.mjs | tee sweep-report.txt
+        run: |
+          set -o pipefail
+          node scripts/clock-sweep.mjs | tee sweep-report.txt
 
+      # Delivery goes through the shared scripts/needs-human-issue.mjs rather than an inline `gh`
+      # block, so this job and mutation-nightly cannot drift apart -- and so the idempotency rule
+      # is covered by tests instead of by a YAML block nothing can exercise. Identity rides a
+      # source-scoped marker in the body, which also fixes a real defect in the block this
+      # replaces: that one matched on `in:title`, so a human retitling the issue while triaging it
+      # forked a duplicate, and `--source` keeps this job's failures out of mutation-nightly's
+      # thread.
       - name: Open or update a needs-human issue on drift
         if: failure() && github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_WHEN: ${{ github.event_name }}
         run: |
           set -euo pipefail
-          title="clock-sweep: a fixture drifts on the wall clock"
-          existing="$(gh issue list --label needs-human --search "$title in:title" --state open --json number --jq '.[0].number // empty')"
-          body="$(printf '%s\n\n%s\n\n```\n%s\n```\n' \
-            "The weekly shifted-clock sweep found a suite that passes today and fails in the future." \
-            "This is the shape that took main red on 2026-08-02 and blocked every open PR at once. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            "$(cat sweep-report.txt || echo 'no report captured')")"
-          if [ -n "$existing" ]; then
-            gh issue comment "$existing" --body "$body"
-          else
-            gh issue create --title "$title" --label needs-human --body "$body"
-          fi
+          test -s sweep-report.txt || echo "(no report captured -- the run failed before the sweep produced output)" > sweep-report.txt
+          node scripts/needs-human-issue.mjs \
+            --source clock-sweep \
+            --title "clock-sweep: a fixture drifts on the wall clock" \
+            --body-file sweep-report.txt
 
       - name: Upload the sweep report
         if: always()

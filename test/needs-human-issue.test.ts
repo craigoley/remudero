@@ -158,20 +158,31 @@ test("deliver treats unparseable `gh issue list` output as no-issues rather than
   assert.equal(deliver({ source: "mutation-nightly", title: "t", body: "b" }, exec).action, "create");
 });
 
+// Shared on purpose: a test asserting "delivery was never attempted" cannot cover its own inline
+// stub (the body is unreachable by construction), which would leave permanently uncovered added
+// lines. Hoisting it means the body is exercised by the tests that DO deliver.
+function deliverRecorder(result: Delivered) {
+  const calls: Array<{ source: string; title: string; body: string }> = [];
+  return {
+    calls,
+    deliverFn: (input: { source: string; title: string; body: string }) => {
+      calls.push(input);
+      return result;
+    },
+  };
+}
+
 test("main exits 1 without notifying when required arguments are missing", () => {
   const errs: string[] = [];
-  let delivered = false;
+  const d = deliverRecorder({ action: "create", marker: "" });
   const code = main({
     argv: ["--source", "mutation-nightly"], // no --title
-    deliverFn: () => {
-      delivered = true;
-      return { action: "create", marker: "" };
-    },
+    deliverFn: d.deliverFn,
     error: (m) => errs.push(m),
     log: () => {},
   });
   assert.equal(code, 1);
-  assert.equal(delivered, false, "must not attempt a delivery it cannot address");
+  assert.equal(d.calls.length, 0, "must not attempt a delivery it cannot address");
   assert.match(errs.join("\n"), /required/);
 });
 
@@ -198,13 +209,16 @@ test("main reads the body file, stamps the run URL, and reports the issue it ope
 
 test("main reports the comment path distinctly, so a reader can tell a repeat night from a new one", () => {
   const logs: string[] = [];
+  // Uses the SHARED recorder, which is what covers its body for the never-invoked assertion above.
+  const d = deliverRecorder({ action: "comment", number: 77, marker: markerFor("mutation-nightly") });
   const code = main({
     argv: ["--source", "mutation-nightly", "--title", "t"],
-    deliverFn: () => ({ action: "comment", number: 77, marker: markerFor("mutation-nightly") }),
+    deliverFn: d.deliverFn,
     log: (m) => logs.push(m),
     error: () => {},
   });
   assert.equal(code, 0);
+  assert.equal(d.calls.length, 1);
   assert.match(logs.join("\n"), /commented on existing issue #77/);
 });
 

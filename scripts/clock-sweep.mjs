@@ -132,9 +132,12 @@ export function classifySweep(results, artifacts = CLOCK_ARTIFACTS) {
   return { drifted, staleExclusions, ok: drifted.length === 0 && staleExclusions.length === 0 };
 }
 
-function runSuite(suite, days) {
+// `exec` is injected LAST with the real default so a test can drive the whole orchestration
+// without spawning node once. That is not just for speed: every suite this script runs is a REAL
+// test file, so an un-injectable runner would make covering main() cost a full sweep.
+export function runSuite(suite, days, exec = execFileSync) {
   try {
-    execFileSync(
+    exec(
       process.execPath,
       ["--test", "--import", "tsx", "--import", join(REPO, "scripts", "clock-shift.mjs"), join("test", `${suite}.test.ts`)],
       { cwd: REPO, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, FK_SHIFT_DAYS: String(days) } },
@@ -146,9 +149,9 @@ function runSuite(suite, days) {
 }
 
 /** The smallest ladder rung at which `suite` already fails — the fuse bound for the report. */
-function bisectFuse(suite) {
+export function bisectFuse(suite, run = runSuite) {
   for (const days of FUSE_LADDER_DAYS) {
-    if (runSuite(suite, days).failed) return days;
+    if (run(suite, days).failed) return days;
   }
   return null;
 }
@@ -158,22 +161,31 @@ export function failingTitles(output) {
   return [...output.matchAll(/^not ok \d+ - (.+)$/gm)].map((m) => m[1].trim()).slice(0, 5);
 }
 
-function main() {
-  const listOnly = process.argv.includes("--list");
+// Every collaborator injected LAST with a real default, so the CLI call stays `main()` while a
+// test can exercise the list / pass / drift / stale-exclusion paths without spawning anything.
+// Returns the exit code rather than calling process.exit, so assertions read a value.
+export function main({
+  argv = process.argv.slice(2),
+  run = runSuite,
+  derive = deriveCandidates,
+  log = console.log,
+  write = (s) => process.stdout.write(s),
+} = {}) {
+  const listOnly = argv.includes("--list");
   // `--only <suite>` re-checks ONE suite — what the report's own reproduce line points an operator
   // at, and what makes this script's falsifier cheap. Still routed through runnableCandidates, so
   // even an explicit `--only mounts-wiring` cannot reach a spawn.
-  const onlyIdx = process.argv.indexOf("--only");
-  const only = onlyIdx !== -1 ? process.argv[onlyIdx + 1] : undefined;
-  const candidates = only ? [only] : deriveCandidates();
+  const onlyIdx = argv.indexOf("--only");
+  const only = onlyIdx !== -1 ? argv[onlyIdx + 1] : undefined;
+  const candidates = only ? [only] : derive();
   const runnable = runnableCandidates(candidates);
 
-  console.log(`clock-sweep — shift +${SWEEP_SHIFT_DAYS}d`);
-  console.log(`  candidates derived : ${candidates.length}`);
-  console.log(`  never run (spawn)  : ${candidates.length - runnable.length}  [${[...SPAWN_REACHING.keys()].filter((s) => candidates.includes(s)).join(", ") || "none in candidate set"}]`);
-  console.log(`  will run           : ${runnable.length}`);
+  log(`clock-sweep — shift +${SWEEP_SHIFT_DAYS}d`);
+  log(`  candidates derived : ${candidates.length}`);
+  log(`  never run (spawn)  : ${candidates.length - runnable.length}  [${[...SPAWN_REACHING.keys()].filter((s) => candidates.includes(s)).join(", ") || "none in candidate set"}]`);
+  log(`  will run           : ${runnable.length}`);
   if (listOnly) {
-    for (const s of runnable) console.log(`    ${CLOCK_ARTIFACTS.has(s) ? "artifact" : "        "}  ${s}`);
+    for (const s of runnable) log(`    ${CLOCK_ARTIFACTS.has(s) ? "artifact" : "        "}  ${s}`);
     return 0;
   }
 
@@ -183,20 +195,20 @@ function main() {
   const results = new Map();
   let done = 0;
   for (const suite of runnable) {
-    const r = runSuite(suite, SWEEP_SHIFT_DAYS);
+    const r = run(suite, SWEEP_SHIFT_DAYS);
     results.set(suite, r);
     done++;
     const verdict = r.failed ? (CLOCK_ARTIFACTS.has(suite) ? "fail (known artifact)" : "FAIL") : "ok";
-    process.stdout.write(`  [${String(done).padStart(3)}/${runnable.length}] ${verdict.padEnd(21)} ${suite}\n`);
+    write(`  [${String(done).padStart(3)}/${runnable.length}] ${verdict.padEnd(21)} ${suite}\n`);
   }
   const { drifted, staleExclusions, ok } = classifySweep(results);
 
-  console.log("");
+  log("");
   if (ok) {
     // Counted from what actually RAN, never `runnable.length - CLOCK_ARTIFACTS.size` — that goes
     // NEGATIVE under `--only`, and a summary line that prints "-2 suites immune" is worse than none.
     const artifactsRun = runnable.filter((s) => CLOCK_ARTIFACTS.has(s)).length;
-    console.log(
+    log(
       `PASS — ${runnable.length - artifactsRun} suite(s) immune at +${SWEEP_SHIFT_DAYS}d` +
         (artifactsRun ? `; ${artifactsRun} known artifact(s) still failing as expected.` : "."),
     );
@@ -206,21 +218,21 @@ function main() {
   // ── THE REPORT. An operator reads this months from now with no context, so it names the suite,
   // the failing test, the fuse, and what to do — never just "the shifted run failed".
   if (drifted.length) {
-    console.log(`WALL-CLOCK DRIFT — ${drifted.length} suite(s) pass today and FAIL in the future.`);
-    console.log(`This is the shape that took main red on 2026-08-02 and blocked every open PR at once.`);
+    log(`WALL-CLOCK DRIFT — ${drifted.length} suite(s) pass today and FAIL in the future.`);
+    log(`This is the shape that took main red on 2026-08-02 and blocked every open PR at once.`);
     for (const d of drifted) {
-      const fuse = bisectFuse(d.suite);
-      console.log(`\n  test/${d.suite}.test.ts`);
-      console.log(`    fails by      : +${fuse ?? SWEEP_SHIFT_DAYS} days from now${fuse ? "" : " (only at the full shift)"}`);
-      for (const t of failingTitles(d.output)) console.log(`    failing test  : ${t}`);
-      console.log(`    reproduce     : FK_SHIFT_DAYS=${fuse ?? SWEEP_SHIFT_DAYS} node --test --import tsx --import scripts/clock-shift.mjs test/${d.suite}.test.ts`);
-      console.log(`    likely fix    : the fixture holds a DATE LITERAL compared against a real clock. Derive it at run time and assert its margin against the policy that judges it (PR #1116 is the shape).`);
+      const fuse = bisectFuse(d.suite, run);
+      log(`\n  test/${d.suite}.test.ts`);
+      log(`    fails by      : +${fuse ?? SWEEP_SHIFT_DAYS} days from now${fuse ? "" : " (only at the full shift)"}`);
+      for (const t of failingTitles(d.output)) log(`    failing test  : ${t}`);
+      log(`    reproduce     : FK_SHIFT_DAYS=${fuse ?? SWEEP_SHIFT_DAYS} node --test --import tsx --import scripts/clock-shift.mjs test/${d.suite}.test.ts`);
+      log(`    likely fix    : the fixture holds a DATE LITERAL compared against a real clock. Derive it at run time and assert its margin against the policy that judges it (PR #1116 is the shape).`);
     }
   }
   if (staleExclusions.length) {
-    console.log(`\nSTALE EXCLUSIONS — ${staleExclusions.length} suite(s) listed as clock artifacts now PASS shifted.`);
-    console.log(`Their stated mechanism no longer holds; remove them from CLOCK_ARTIFACTS in scripts/clock-sweep.mjs.`);
-    for (const s of staleExclusions) console.log(`  test/${s.suite}.test.ts — was excluded because: ${s.reason}`);
+    log(`\nSTALE EXCLUSIONS — ${staleExclusions.length} suite(s) listed as clock artifacts now PASS shifted.`);
+    log(`Their stated mechanism no longer holds; remove them from CLOCK_ARTIFACTS in scripts/clock-sweep.mjs.`);
+    for (const s of staleExclusions) log(`  test/${s.suite}.test.ts — was excluded because: ${s.reason}`);
   }
   return 1;
 }
