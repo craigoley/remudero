@@ -1,0 +1,109 @@
+name: Clock Sweep
+
+# W1-…/impl-FN: run the suite IN THE FUTURE, weekly, and say what drifted.
+#
+# WHY. `main` went red at exactly 2026-08-02T12:00:00Z and EVERY OPEN PR inherited it, because `ci`
+# runs the whole suite and `ci-gate` aggregates. A fixture hardcoded `lastActivityAt` as
+# `2026-07-19T12:00:00Z`; `staleDays` is 14; fourteen days later three tests began asserting the
+# wrong disposition. A PR whose `ci` ran at 09:30Z passed; one at 13:40Z did not. Nothing changed but
+# the wall clock, and it cost a session of misattributed debugging.
+#
+# NOT A REQUIRED CHECK, AND NOT A PR TRIGGER — the same polarity `mutation-nightly` establishes.
+# A shifted run on every PR would roughly double CI cost for a defect that surfaces every few
+# months, and a red shifted run on an unrelated PR is exactly the noise that gets a check disabled.
+# It is deliberately absent from ci-gate.yml.
+#
+# WEEKLY, sized from the measured hazard: the real bomb had a 14-day fuse, so a weekly sweep names it
+# with roughly two weeks of warning. Monday 05:23 UTC — off-peak, and deliberately not on :00/:30,
+# matching codeql.yml's own scheduling note.
+on:
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+  # ALSO on changes to the instrument itself: a probe or sweep edit that breaks detection would
+  # otherwise sit undetected until the next Monday, and a broken probe reports universal immunity —
+  # a false clean, which is worse than no check.
+  pull_request:
+    paths:
+      - "scripts/clock-shift.mjs"
+      - "scripts/clock-sweep.mjs"
+      - "test/clock-shift-probe.test.ts"
+      - "test/clock-sweep.test.ts"
+      - ".github/workflows/clock-sweep.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  clock-sweep:
+    name: clock-sweep (+400d, artifacts excluded by name)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # DELIVERY. Without this the job's only output is a red badge on a page nobody opens — the
+      # thirteenth instance of this repo's built-tested-merged-and-never-reached class. `issues:
+      # write` is what lets a failure actually arrive.
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Install (clean, from lockfile)
+        run: npm ci
+
+      # The instrument's own guard runs FIRST and gates the sweep. If `Date.parse` ever shifted along
+      # with the clock, both sides of every comparison would move together and the sweep would report
+      # universal immunity — a green run that means nothing. A broken probe must fail here, loudly,
+      # rather than produce a false clean below.
+      - name: Probe self-check (a broken probe reports universal immunity — fail before sweeping)
+        run: node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/clock-shift-probe.test.ts
+
+      - name: Sweep logic self-check (exclusion list cannot swallow a real failure; stale entries surface)
+        run: node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/clock-sweep.test.ts
+
+      # Runs ONE FILE PER INVOCATION over a derived candidate list — never a glob. The six
+      # spawn-reaching suites are subtracted before the run loop (scripts/clock-sweep.mjs's
+      # SPAWN_REACHING); a shifted clock does not make a paid spawn cheaper.
+      - name: What this sweep will run (and what it will never run)
+        run: node scripts/clock-sweep.mjs --list
+
+      # `set -o pipefail` is load-bearing and is NOT redundant with the runner default: a `run:`
+      # block with no explicit `shell:` executes under `bash -e {0}`, which does not set pipefail
+      # (only an explicit `shell: bash` gets `-eo pipefail`). Without it `tee` returns 0 and
+      # main()'s exit-1-on-drift is DISCARDED -- the step goes green, `if: failure()` below never
+      # fires, and the sweep silently reports success on exactly the drift it exists to catch.
+      - name: Sweep at +400d
+        id: sweep
+        run: |
+          set -o pipefail
+          node scripts/clock-sweep.mjs | tee sweep-report.txt
+
+      # Delivery goes through the shared scripts/needs-human-issue.mjs rather than an inline `gh`
+      # block, so this job and mutation-nightly cannot drift apart -- and so the idempotency rule
+      # is covered by tests instead of by a YAML block nothing can exercise. Identity rides a
+      # source-scoped marker in the body, which also fixes a real defect in the block this
+      # replaces: that one matched on `in:title`, so a human retitling the issue while triaging it
+      # forked a duplicate, and `--source` keeps this job's failures out of mutation-nightly's
+      # thread.
+      - name: Open or update a needs-human issue on drift
+        if: failure() && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_WHEN: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          test -s sweep-report.txt || echo "(no report captured -- the run failed before the sweep produced output)" > sweep-report.txt
+          node scripts/needs-human-issue.mjs \
+            --source clock-sweep \
+            --title "clock-sweep: a fixture drifts on the wall clock" \
+            --body-file sweep-report.txt
+
+      - name: Upload the sweep report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: clock-sweep-report
+          path: sweep-report.txt
+          if-no-files-found: warn
