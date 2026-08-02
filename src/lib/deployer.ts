@@ -44,9 +44,19 @@ export interface TriggerInputs {
   installHead: string;
   /** origin/main's sha after a fetch. */
   originMain: string;
-  /** In auto mode only: the last HEAD that failed health-check + rolled back — never
-   * auto-retried (a manual marker always retries; the operator asked explicitly). */
+  /** In auto mode only: the last HEAD whose deploy FAILED — never auto-retried (a manual marker
+   * always retries; the operator asked explicitly). */
   lastFailedHead?: string;
+  /**
+   * WHY that head failed, so the skip message states the real cause. Two very different failures
+   * write `lastFailedHead`, and until this existed the skip line hardcoded the health-check
+   * wording for both — so a deploy stuck on a dirty tree reported "failed health-check + rolled
+   * back" when no health-check had run and nothing had been rolled back. That sends the next
+   * diagnosis at the wrong subsystem entirely; it cost a live investigation on 2026-08-02, where
+   * the true cause sat in `state/DEPLOY_FAILED` the whole time. Undefined for records written
+   * before this shipped — rendered as "reason not recorded", never guessed.
+   */
+  lastFailedKind?: DeployFailureKind;
   /**
    * The sha the DAEMON PROCESS IS ACTUALLY EXECUTING, captured at ITS boot from the code it
    * loaded — never re-read from the checkout at comparison time (that always matches, which is
@@ -105,7 +115,9 @@ export function decideDeployTrigger(i: TriggerInputs): Decision {
     return { deploy: false, reason: "up-to-date (install HEAD == origin/main, daemon running it)" };
   }
   if (i.markerPresent) return { deploy: true, reason: `operator marker present + ${why}` };
-  if (i.autoMode && alreadyFailed) return { deploy: false, reason: "auto: origin/main already failed health-check + rolled back — not retried" };
+  if (i.autoMode && alreadyFailed) {
+    return { deploy: false, reason: `auto: origin/main already failed to deploy (${describeFailureKind(i.lastFailedKind)}) — not retried; see state/DEPLOY_FAILED` };
+  }
   if (i.autoMode) return { deploy: true, reason: `auto mode + ${why}` };
   return { deploy: false, reason: `${why} but no operator marker (human-gated; run rmd deploy)` };
 }
@@ -128,33 +140,74 @@ export function daemonIsIdle(p: IdleProbe): boolean {
   return p.workers === 0 && p.inflightLocks === 0 && p.worktreeLocks === 0;
 }
 
+/**
+ * The two ways a deploy can fail and poison the auto-retry. They are NOT interchangeable: one is a
+ * checkout-state problem the operator fixes locally, the other is bad code that was rolled back.
+ */
+export type DeployFailureKind = "dirty-tree-conflict" | "health-check-rollback";
+
+/** Render a recorded failure kind for the skip line. An unrecorded kind is stated as unknown
+ *  rather than assumed — assuming is exactly the defect this replaced. */
+export function describeFailureKind(kind: DeployFailureKind | undefined): string {
+  if (kind === "dirty-tree-conflict") return "dirty-tree conflict — local files block the fast-forward";
+  if (kind === "health-check-rollback") return "failed health-check, rolled back";
+  return "reason not recorded";
+}
+
 export interface TreeFfInputs {
   /** Paths with uncommitted local modifications (git status --porcelain). */
   dirtyFiles: string[];
   /** Paths the incoming fast-forward would change (git diff HEAD..origin/main). */
   incomingFiles: string[];
+  /**
+   * True when the local content at `path` is BYTE-IDENTICAL to the blob the fast-forward would
+   * write there. Optional: omitted ⇒ nothing is ever discardable, i.e. exactly the pre-existing
+   * abort-on-any-overlap behaviour, so a caller that does not supply it cannot regress.
+   */
+  sameAsIncoming?: (path: string) => boolean;
 }
 
 export interface TreeFfResult {
   ok: boolean;
-  /** The locally-modified paths the ff would also touch — the conflict. */
+  /** The locally-modified paths the ff would also touch AND whose content differs — a real conflict. */
   conflicting: string[];
+  /**
+   * Paths that overlap the incoming diff but whose local bytes ALREADY EQUAL what the ff would
+   * write. Discarding them is lossless by definition — the fast-forward reproduces them exactly.
+   */
+  discardable: string[];
 }
 
-/** Fast-forward is safe IFF no locally-modified file is ALSO in the incoming diff.
- * A benign local mod the ff doesn't touch (e.g. DECISIONS.md) is preserved; a modified
- * file the ff wants to change would abort git, so we abort + alert first and NEVER
- * force/reset the operator's checkout. */
+/**
+ * Fast-forward is safe IFF no locally-modified file is ALSO in the incoming diff *with different
+ * content*. A benign local mod the ff doesn't touch (e.g. DECISIONS.md) is preserved; a genuinely
+ * divergent file would abort git, so we abort + alert first and NEVER force/reset the checkout.
+ *
+ * THE DEADLOCK THIS FIXES (observed live 2026-08-02, and once before on 2026-07-31). The daemon
+ * writes into its OWN checkout — `plan/feedback/*.yaml` alert-intake records are its exhaust. A
+ * filing PR then commits that same exhaust to main. Now the fast-forward wants to create paths the
+ * daemon has already written locally, git refuses to clobber them, and the deploy aborts — so the
+ * daemon's own output blocks it from pulling the commit that CONTAINS that output. Each abort
+ * re-arms the never-retry latch, and the install sticks until an operator intervenes by hand. It
+ * stuck for five commits and roughly two hours before anyone noticed, because the only symptom is
+ * a fleet that quietly stops building.
+ *
+ * The resolution is not to force: it is to notice that a local file identical to the incoming blob
+ * is not a conflict at all. Byte-identity is the whole safety argument — discarding such a file
+ * cannot lose information, because the very next operation writes those same bytes back. Anything
+ * that differs by even one byte still aborts, untouched.
+ */
 export function treeFfSafe(i: TreeFfInputs): TreeFfResult {
   const incoming = new Set(i.incomingFiles);
   const conflicting: string[] = [];
+  const discardable: string[] = [];
   for (const f of i.dirtyFiles) {
-    if (incoming.has(f)) {
-      conflicting.push(f);
-    }
+    if (!incoming.has(f)) continue;
+    if (i.sameAsIncoming?.(f)) discardable.push(f);
+    else conflicting.push(f);
   }
   const ok = conflicting.length === 0;
-  return { ok, conflicting };
+  return { ok, conflicting, discardable };
 }
 
 export interface HealthInputs {
@@ -247,6 +300,12 @@ export interface DeployDeps {
   markerPresent: () => boolean;
   autoMode: () => boolean;
   lastFailedHead: () => string | undefined;
+  /** The recorded reason `lastFailedHead` failed, so the skip line can state it. */
+  lastFailedKind?: () => DeployFailureKind | undefined;
+  /** Local bytes at `path` == the blob `ref` would write there. Optional: absent ⇒ no discards. */
+  sameAsIncoming?: (path: string, ref: string) => boolean;
+  /** Drop a local file proven byte-identical to the incoming blob (checkout if tracked, else rm). */
+  discardLocal?: (path: string) => void;
   /** The sha the running daemon recorded at ITS boot; undefined if none has. */
   runningHead: () => string | undefined;
   dirtyFiles: () => string[];
@@ -261,7 +320,7 @@ export interface DeployDeps {
   /** Poll for boot health for the configured window; returns what was observed. */
   waitBootHealth: (sinceMs: number) => HealthInputs;
   /** Record a failure for the operator (state/DEPLOY_FAILED) + the failed HEAD. */
-  alert: (message: string, failedHead: string) => void;
+  alert: (message: string, failedHead: string, kind: DeployFailureKind) => void;
   /** Consume the operator marker after a terminal outcome (success or rollback). */
   clearMarker: () => void;
 
@@ -373,6 +432,7 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     installHead: fromHead,
     originMain: origin,
     lastFailedHead: deps.lastFailedHead(),
+    lastFailedKind: deps.lastFailedKind?.(),
     runningHead: deps.runningHead(),
   });
   if (!decision.deploy) {
@@ -381,12 +441,24 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
   }
 
   // Clean-tree guard — abort (never force) on a conflicting dirty tree.
-  const tree = treeFfSafe({ dirtyFiles: deps.dirtyFiles(), incomingFiles: deps.incomingFiles(fromHead, origin) });
+  const tree = treeFfSafe({
+    dirtyFiles: deps.dirtyFiles(),
+    incomingFiles: deps.incomingFiles(fromHead, origin),
+    sameAsIncoming: deps.sameAsIncoming ? (p) => deps.sameAsIncoming!(p, origin) : undefined,
+  });
   if (!tree.ok) {
     const msg = `deploy aborted: locally-modified files conflict with the fast-forward: ${tree.conflicting.join(", ")}`;
     deps.log("deploy.abort_dirty_tree", { conflicting: tree.conflicting });
-    deps.alert(msg, origin);
+    deps.alert(msg, origin, "dirty-tree-conflict");
     return { deployed: false, reason: "dirty-tree-conflict", fromHead };
+  }
+  // Lossless unblock: these overlap the incoming diff but already hold exactly the bytes the ff
+  // would write, so dropping them cannot lose anything — and NOT dropping them deadlocks the
+  // daemon against its own exhaust (see treeFfSafe). Logged by name: a silent discard would be
+  // indistinguishable from the force-reset this deliberately is not.
+  if (tree.discardable.length > 0 && deps.discardLocal) {
+    for (const f of tree.discardable) deps.discardLocal(f);
+    deps.log("deploy.discarded_identical", { paths: tree.discardable, count: tree.discardable.length });
   }
 
   // Idle gate — the pull is safe anytime, but hold if a task is in flight so we don't
@@ -441,7 +513,7 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
   deps.log("deploy.unhealthy_rollback", { failed: short(toHead), reason: health.reason, rolling_back_to: short(fromHead) });
   deps.resetHard(fromHead);
   deps.kickstart();
-  deps.alert(`deploy of ${toHead} failed health-check (${health.reason}); rolled back to ${fromHead}`, toHead);
+  deps.alert(`deploy of ${toHead} failed health-check (${health.reason}); rolled back to ${fromHead}`, toHead, "health-check-rollback");
   deps.clearMarker();
   return { deployed: false, reason: `health-check-failed-rolled-back: ${health.reason}`, fromHead, toHead, rolledBackTo: fromHead };
 }
@@ -576,6 +648,49 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
         return undefined;
       }
     },
+    lastFailedKind: () => {
+      try {
+        const k = (JSON.parse(readFileSync(deployFailedAlertPath(o.stateRoot), "utf8")) as { kind?: string }).kind;
+        return k === "dirty-tree-conflict" || k === "health-check-rollback" ? k : undefined;
+      } catch {
+        return undefined; // absent/legacy/corrupt ⇒ "reason not recorded", never a guess
+      }
+    },
+    // Byte-identity via BLOB SHA, compared through the injected `git` helper.
+    //
+    // Two rejected alternatives, both unsafe here. Comparing decoded strings can false-MATCH on
+    // binary content, because invalid UTF-8 collapses to U+FFFD and two different blobs can decode
+    // alike — and a false match discards a file that actually differs. `git diff --quiet <ref> --
+    // <path>` is worse: it ignores UNTRACKED files entirely, so it reports "no difference" for
+    // precisely the alert-intake exhaust this fix exists to handle. Hashing the working file
+    // covers tracked and untracked identically, and git's hash is byte-exact.
+    //
+    // ANY failure (path absent from the ref, unreadable file, git error) answers false, so the
+    // conservative abort remains the default and only a positive match can unblock a deploy.
+    sameAsIncoming: (path, ref) => {
+      try {
+        const local = git(["hash-object", "--", path]).trim();
+        const incoming = git(["rev-parse", `${ref}:${path}`]).trim();
+        return local.length > 0 && local === incoming;
+      } catch {
+        return false;
+      }
+    },
+    // Tracked ⇒ restore from HEAD (leaves a clean path the ff can advance); untracked ⇒ remove.
+    // Never `reset --hard`: this touches ONLY paths already proven byte-identical to the incoming
+    // blob, one at a time.
+    discardLocal: (path) => {
+      const tracked = (() => {
+        try {
+          git(["ls-files", "--error-unmatch", "--", path]);
+          return true;
+        } catch {
+          return false;
+        }
+      })();
+      if (tracked) git(["checkout", "--", path]);
+      else unlinkSync(join(o.installPath, path));
+    },
     runningHead: () => readLatestBootSha(o.ledgerPath),
     dirtyFiles: () =>
       git(["status", "--porcelain"])
@@ -663,11 +778,14 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       }
       return { bootObserved: boots >= 1, crashCount: Math.max(0, boots - 1) };
     },
-    alert: (message, failedHead) => {
+    alert: (message, failedHead, kind) => {
       mkdirSync(join(o.stateRoot, "state"), { recursive: true });
+      // `kind` is persisted so the NEXT poll's skip line can state the real cause. Without it the
+      // record and the message that cites it can disagree, which is how a dirty-tree stall spent
+      // an investigation being read as a health-check failure.
       writeFileSync(
         deployFailedAlertPath(o.stateRoot),
-        JSON.stringify({ message, failedHead, at: new Date().toISOString() }, null, 2),
+        JSON.stringify({ message, failedHead, kind, at: new Date().toISOString() }, null, 2),
       );
       writeFileSync(deployLastFailedPath(o.stateRoot), failedHead);
     },
