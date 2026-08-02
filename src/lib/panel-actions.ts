@@ -515,7 +515,24 @@ export function buildDrainNowRoute(deps: Pick<PanelActionDeps, "root" | "ledgerP
   };
 }
 
-/** Every panel write route, for a caller registering the full set at once (`rmd serve` wiring, later work). */
+/**
+ * Every panel write route, for a caller registering the full set at once.
+ *
+ * NOT THE PRODUCTION WIRING, AND DO NOT MAKE IT SO. `rmd serve` deliberately imports the ten
+ * singular builders and calls them one at a time (serve.ts's `buildServeRoutes`) because they do
+ * NOT all take the same deps: `buildAnswerQuestionRoute` is given a `questionDeps` rooted at
+ * `questionsRoot`, while the rest take `fleetControlDeps` rooted at `fleetControlRoot`. This
+ * function has only ONE `deps` to give, so mounting it wholesale would silently re-root
+ * POST /v1/questions/answer onto the wrong directory. The original "(`rmd serve` wiring, later
+ * work)" note on this doc invited exactly that; it is withdrawn.
+ *
+ * So this is a DECLARATION, not a registration — and the two lists drifted apart in silence
+ * until recon-ER: this one carried `buildDrainFeedbackRoute` and serve.ts did not, so
+ * POST /v1/drain/feedback 404'd on every running console while six tests POSTed to a server
+ * built from THIS list and got real 200s. What keeps them in step now is
+ * test/route-registration.test.ts, which requires every route declared anywhere in src/lib —
+ * this list included — to answer on the real assembled server.
+ */
 export function buildPanelActionRoutes(deps: PanelActionDeps): Route[] {
   return [
     buildControlStatusRoute(deps),

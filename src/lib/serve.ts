@@ -46,6 +46,7 @@ import {
   buildAnswerQuestionRoute,
   buildApproveManualRoute,
   buildControlStatusRoute,
+  buildDrainFeedbackRoute,
   buildDrainNowRoute,
   buildEscalationMarkHandledRoute,
   buildKickRoute,
@@ -3616,6 +3617,20 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
     // Console UP NEXT write-actions (fb-1784988460437-9daa9b): Run a queued task, Drain now.
     buildKickRoute(fleetControlDeps),
     buildDrainNowRoute(fleetControlDeps),
+    // recon-ER: the post-drain rundown's one-tap verdict (W1-T141). Declared, aggregated into
+    // buildPanelActionRoutes, and covered by six tests that stand up a REAL server and get real
+    // 200s from it -- but never mounted here, so POST /v1/drain/feedback 404'd on every running
+    // console since W1-T141 landed. That is why `operator_feedback` occurs ZERO times across the
+    // ledger's 663-file union: not the unbuilt learning limb downstream (W1-T87/T88), which is
+    // real but cannot be the binding constraint -- nothing upstream of it could ever fire.
+    //
+    // Third instance of one class: GET /v1/skills (W1-T284), POST /v1/skills/run (impl-EQ), this.
+    // `assertDeclaredRoutesAreMounted` (test/route-registration.test.ts) is the check that ends it.
+    //
+    // `fleetControlDeps` and not a new root: the handler's only dep is `ledgerPath`
+    // (ledgerPanelAction, panel-actions.ts:134), which is identical across both PanelActionDeps
+    // instances built above -- so this route reads no root at all and cannot be misrooted.
+    buildDrainFeedbackRoute(fleetControlDeps),
     ...buildPanelGraphRoutes(panelGraphDeps),
     // W1-T284: the skills-panel button SET, read-scoped -- was built (lib/panel-skills.ts,
     // W3-T8) but never wired into the real route table, so GET /v1/skills 404'd on every
