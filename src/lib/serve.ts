@@ -58,6 +58,7 @@ import {
 } from "./panel-actions.js";
 import { buildPanelGraphRoutes, ratifyCliGateway, type PanelGraphDeps } from "./panel-graph.js";
 import { buildPanelSkillsRoutes } from "./panel-skills.js";
+import { buildPanelSkillRunRoutes } from "./panel-skill-run.js";
 import { buildTaskCardRoute } from "./task-card.js";
 import { buildAddOperatorNoteRoute, buildListOperatorNotesRoute } from "./operator-notes.js";
 import { createLastSeenStore, lastSeenPath, type LastSeenStore } from "./last-seen.js";
@@ -3622,6 +3623,23 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
     // `.remudero/skills/` lives under repo root (lib/skill.ts's `skillsDir`), so it is the
     // same root buildAddOperatorNoteRoute already uses, never a new one.
     ...buildPanelSkillsRoutes({ root: deps.questionsRoot }),
+    // impl-EQ: the WRITE half of the same panel, and the same defect W1-T284 fixed for the read
+    // half one module earlier — `buildPanelSkillRunRoutes` (lib/panel-skill-run.ts, W3-T8 round 3)
+    // had no caller anywhere in src/, so POST /v1/skills/run 404'd on every running console while
+    // twelve tests exercised a route the server never mounted.
+    //
+    // IT DOES NOT SPAWN. Exactly one skill+mode is wired, `{ skill: "plan", mode: "clarify" }` (the
+    // Refine button); every other combination is refused with a 400 that names what is unwired. The
+    // wired path is a synchronous filesystem+ledger op — load the plan, lint the task, ground it
+    // against the "plan" skill's own registry-declared `grounding_sources`, capture a `grilling`
+    // feedback entry, ledger `panel.skill_invoked`. No worker, no spend.
+    //
+    // `panelGraphDeps` is passed WHOLE and deliberately: this module needs the same `root`,
+    // `planPath`, `ledgerPath` and `feedbackLand` that POST /v1/feedback/decision already uses, and
+    // production sets `panelGraph.root` and `questionsRoot` to the SAME `repoRoot` (run-task.ts) —
+    // so the skills registry and the feedback write resolve under one root, and the grill lands on
+    // the bot branch instead of dirtying the daemon's checkout.
+    ...buildPanelSkillRunRoutes(panelGraphDeps),
     buildTaskCardRoute(deps.board),
     buildAuthScopeRoute(),
     buildShellRoute(deps.phaseElapsedThresholdsMs ?? DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS, consoleSha),
