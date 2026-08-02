@@ -24,6 +24,45 @@ function tmpDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));
 }
 
+// ── consolidated proof: both branches asserted for each site this PR touched ───────────────
+// Every site this PR touched (config.ts's loadConfig, serve.ts's resolveServiceTokens,
+// fs-race-safe.ts's readFileIfExists) gets BOTH its branches exercised in one place: the
+// exclusive-create ("wx") sites assert their EEXIST fallback reads the existing file rather
+// than clobbering it, and the shared optional-read helper asserts its ENOENT branch reports
+// absence (`undefined`) rather than throwing. (The per-site tests below also cover each of
+// these individually, plus their non-EEXIST/non-ENOENT error-rethrow edges.)
+test("W1-T286: both branches asserted for each site this PR touched (EEXIST-read, ENOENT-absence)", () => {
+  // site 1: config.ts loadConfig — EEXIST branch reads the existing config, does not clobber it
+  const home = mkdtempSync(join(tmpdir(), "rmd-fsrace-both-cfg-"));
+  const savedHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    const p = configPath();
+    const existing: Config = { claudeBin: "/opt/homebrew/bin/claude", root: "/SENTINEL/both-branches" };
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, JSON.stringify(existing, null, 2) + "\n");
+    const loaded = loadConfig(); // wx -> EEXIST -> read-by-descriptor fallback
+    assert.equal(loaded.root, "/SENTINEL/both-branches", "config.ts EEXIST branch must READ, not clobber");
+  } finally {
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+  }
+
+  // site 2: serve.ts resolveServiceTokens — EEXIST branch reads the existing tokens, does not clobber them
+  const dir = tmpDir("rmd-fsrace-both-svc-");
+  const root = join(dir, "root");
+  const firstTokens = resolveServiceTokens(root);
+  const secondTokens = resolveServiceTokens(root); // wx -> EEXIST -> read-by-descriptor fallback
+  assert.deepEqual(secondTokens, firstTokens, "serve.ts EEXIST branch must READ, not clobber");
+
+  // site 3: fs-race-safe.ts readFileIfExists — ENOENT branch reports absence, never throws
+  assert.equal(
+    readFileIfExists(join(dir, "does-not-exist-either.json")),
+    undefined,
+    "readFileIfExists ENOENT branch must report absence, not throw",
+  );
+});
+
 // ── readFileIfExists: the shared catch-ENOENT optional-read helper ─────────────────────────
 
 test("readFileIfExists: an existing file returns its contents", () => {
