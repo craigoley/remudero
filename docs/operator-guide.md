@@ -61,6 +61,7 @@ All logic lives in TypeScript; `bin/rmd` is a thin `exec` wrapper into
 | `rmd approve <P##>` | Ratifies a currently-READY proposal, shipping its cached draft into a plan PR gated by the normal checks. |
 | `rmd reframe <P##> --feedback "<text>"` | Records feedback against a proposal and invalidates its cached draft so the next `rmd inbox` redrafts with that feedback in view. |
 | `rmd skill list` | Lists the `.remudero/skills/<name>.yaml` skill registry. |
+| `rmd emissions [--days <n>]` | Reports CLI verbs that exist in the COMMANDS registry but have emitted no ledger line in the window — the declared-but-never-run class, with a reasoned allowlist for verbs that are legitimately rare. |
 | `rmd trace <id>` | Renders the provenance chain for a task or feedback id — feedback → proposal PR → task(s) → run(s) → PR(s) → merge sha. |
 
 An **unknown command or unrecognized flag never spawns anything** — it prints
