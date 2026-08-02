@@ -67,6 +67,8 @@ import { createLastSeenStore, lastSeenPath, type LastSeenStore } from "./last-se
 import { buildDaemonHealthRoute, type DaemonHealthDeps } from "./daemon-health.js";
 import { buildAccountUsageRoute, type AccountUsageDeps } from "./account-usage.js";
 import { resolveFreshness } from "./console-freshness.js";
+import { readIdleReasons, renderIdleReasonsHtml } from "./idle-reasons-panel.js";
+import { readLedgerLines } from "./status.js";
 
 /** Default `rmd serve` port — matches apps/dashboard/src/main.ts's own `?daemon=` default (`http://localhost:4317`), so the shipped dashboard points at a served daemon out of the box. */
 export const DEFAULT_SERVE_PORT = 4317;
@@ -334,6 +336,10 @@ function skeletonRows(n: number): string {
 export function renderShellHtml(
   phaseElapsedThresholdsMs: Record<string, number> = DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS,
   consoleSha: string = CONSOLE_SHA_UNKNOWN,
+  // impl-FC: the WHY-IDLE panel, rendered SERVER-SIDE by buildShellRoute and spliced in as a static
+  // fragment. Appended last and defaulted to "" so every existing caller and test is unaffected,
+  // and so the client script below is untouched -- byte-identical to main, deliberately.
+  idleReasonsHtml: string = "",
 ): string {
   return `<!doctype html>
 <html lang="en">
@@ -701,6 +707,7 @@ export function renderShellHtml(
     <span class="glance-item"><span class="glance-label">next poll</span><span class="glance-value" id="dh-next-poll">…</span></span>
     <span class="glance-item"><span class="glance-label">disk free</span><span class="glance-value" id="dh-disk-free">…</span></span>
     <span class="glance-item"><span class="glance-label">rate limit</span><span class="glance-value" id="dh-rate-limit">…</span></span>
+    ${idleReasonsHtml}
   </section>
   <!-- ACCOUNT strip: WHICH Anthropic account the fleet is spending, and how much of each usage
        window is gone (GET /v1/account-usage; see account-usage.ts's header for why usage comes
@@ -3529,15 +3536,37 @@ export function buildVersionRoute(sha: string): Route {
  * closes the W1-T139 bootstrap paradox: the auth spec was satisfied against header-sending fetch
  * clients and unreachable by the one client that matters, the browser opening the URL.
  */
-function buildShellRoute(phaseElapsedThresholdsMs: Record<string, number>, consoleSha: string): Route {
+function buildShellRoute(
+  phaseElapsedThresholdsMs: Record<string, number>,
+  consoleSha: string,
+  // W1-…/impl-FC: the WHY-IDLE panel's inputs. Appended LAST and defaulted so no positional caller
+  // shifts. `readLedger` is the same `readLedgerLines` the board's routes already use — one ledger
+  // read path, never a second.
+  idle: { ledgerPath?: string; readLedger?: (p: string) => ReadonlyArray<Record<string, unknown>>; now?: () => Date } = {},
+): Route {
   return {
     method: "GET",
     path: "/",
     scope: "read",
     allowQueryToken: true,
     handler: (_req, res) => {
+      // PER REQUEST, deliberately: the shell re-renders on every page load, so the panel is fresh
+      // without touching the client script (which lives in a template literal and has broken the
+      // last five PRs that edited it). A read failure degrades to UNKNOWN, never to zero.
+      let panel: string;
+      try {
+        const read = idle.readLedger ?? readLedgerLines;
+        const lines = idle.ledgerPath ? read(idle.ledgerPath) : [];
+        panel = renderIdleReasonsHtml(
+          idle.ledgerPath
+            ? readIdleReasons(lines, idle.now?.() ?? new Date())
+            : { kind: "unknown", why: "the console was assembled without a ledger path" },
+        );
+      } catch (e) {
+        panel = renderIdleReasonsHtml({ kind: "unknown", why: `ledger unreadable: ${String((e as Error)?.message ?? e)}` });
+      }
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      res.end(renderShellHtml(phaseElapsedThresholdsMs, consoleSha));
+      res.end(renderShellHtml(phaseElapsedThresholdsMs, consoleSha, panel));
     },
   };
 }
@@ -3658,7 +3687,9 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
     ...buildPanelSkillRunRoutes(panelGraphDeps),
     buildTaskCardRoute(deps.board),
     buildAuthScopeRoute(),
-    buildShellRoute(deps.phaseElapsedThresholdsMs ?? DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS, consoleSha),
+    buildShellRoute(deps.phaseElapsedThresholdsMs ?? DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS, consoleSha, {
+      ledgerPath: deps.ledgerPath,
+    }),
     buildVersionRoute(consoleSha),
   ];
 }
