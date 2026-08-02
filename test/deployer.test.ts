@@ -628,3 +628,104 @@ test("realDeployDeps: the recorded failure kind round-trips, so the skip line ca
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+// ── recon-GF: the reversible-stop trap ──────────────────────────────────────────────────
+// `daemonExitCode` maps `stopped`/`max_reached` to 0, and the daemon's KeepAlive is
+// {SuccessfulExit: false}, so a clean exit is NOT restarted by launchd. Correct while STOP is set.
+// But when the operator REMOVES the marker nothing brings the daemon back — launchd will not (the
+// exit was successful) and the trigger would not (the shas still match) — and this very function
+// reported "daemon running it" every 120s over the corpse.
+
+const LIVE_BASE = { markerPresent: false, autoMode: true, installHead: "same", originMain: "same", runningHead: "same" } as const;
+
+test("recon-GF: a dead daemon with NO STOP triggers a restart, even though every sha matches", () => {
+  const d = decideDeployTrigger({ ...LIVE_BASE, daemonAlive: false, stopPresent: false });
+  assert.equal(d.deploy, true, "matching shas must not mask a process that is not running");
+  assert.match(d.reason, /not running and no STOP/);
+});
+
+test("recon-GF STORM GUARD: a dead daemon WITH a STOP set is left alone", () => {
+  // The safety property. Restarting here relaunches it straight back into its own refusal — the
+  // relaunch-storm class this repo has paid for twice.
+  const d = decideDeployTrigger({ ...LIVE_BASE, daemonAlive: false, stopPresent: true });
+  assert.equal(d.deploy, false, "a deliberately halted fleet must stay halted");
+  assert.doesNotMatch(d.reason, /not running/);
+});
+
+test("recon-GF STORM GUARD: an UNREADABLE STOP marker is treated as present, not absent", () => {
+  // Fail-safe: guessing "no STOP" is what starts the storm, so unknown must not restart.
+  const d = decideDeployTrigger({ ...LIVE_BASE, daemonAlive: false, stopPresent: undefined });
+  assert.equal(d.deploy, false, "unknown STOP state must never authorise a restart");
+});
+
+test("recon-GF: the up-to-date line no longer CLAIMS the daemon is running unless it was observed", () => {
+  const observed = decideDeployTrigger({ ...LIVE_BASE, daemonAlive: true, stopPresent: false });
+  assert.equal(observed.deploy, false);
+  assert.match(observed.reason, /daemon alive and running it/, "an observed-alive daemon may be asserted");
+
+  const unobserved = decideDeployTrigger({ ...LIVE_BASE });
+  assert.equal(unobserved.deploy, false);
+  assert.match(unobserved.reason, /liveness not observed/, "an unprobed daemon must not be asserted healthy");
+  assert.doesNotMatch(unobserved.reason, /running it/, "the old unconditional claim is gone");
+});
+
+test("recon-GF REGRESSION LOCK: with neither dep supplied, every pre-existing decision is unchanged", () => {
+  // A caller that cannot probe must degrade to exactly today's behaviour.
+  assert.equal(decideDeployTrigger({ markerPresent: false, autoMode: false, installHead: "old", originMain: "new" }).deploy, false);
+  assert.equal(decideDeployTrigger({ markerPresent: true, autoMode: false, installHead: "old", originMain: "new" }).deploy, true);
+  assert.equal(decideDeployTrigger({ markerPresent: false, autoMode: true, installHead: "old", originMain: "new" }).deploy, true);
+  const blocked = decideDeployTrigger({ markerPresent: false, autoMode: true, installHead: "old", originMain: "bad", lastFailedHead: "bad" });
+  assert.equal(blocked.deploy, false, "the never-retry latch still binds");
+  assert.equal(decideDeployTrigger({ ...LIVE_BASE }).deploy, false, "and matching shas still short-circuit");
+});
+
+test("recon-GF: liveness does NOT override a STOP even when the install is also behind", () => {
+  // The stale path must not become a back door around STOP either.
+  const d = decideDeployTrigger({
+    markerPresent: false, autoMode: true, installHead: "old", originMain: "new",
+    daemonAlive: false, stopPresent: true,
+  });
+  assert.match(d.reason, /auto mode/, "it falls through to the ordinary stale path, not the liveness path");
+  assert.doesNotMatch(d.reason, /not running/);
+});
+
+test("recon-GF: realDeployDeps probes the DAEMON label for liveness, and parses a PID", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-gf-"));
+  try {
+    const seen: string[][] = [];
+    const deps = realDeployDeps({
+      installPath: root, stateRoot: root, daemonLabel: "com.test.daemon", serveLabel: "com.test.serve",
+      servePort: 1, uid: 501, ledgerPath: join(root, "l"), log: () => {},
+      execFile: (_f: string, a: string[]) => { seen.push(a); return '{ "PID" = 4242; };'; },
+      sleep: () => {},
+    });
+    assert.equal(deps.daemonAlive!(), true, "a PID in the launchctl output means alive");
+    const call = seen.find((a) => a[0] === "list");
+    assert.deepEqual(call, ["list", "com.test.daemon"], "it must query the DAEMON label, not the console's");
+    // No STOP file written ⇒ absent.
+    assert.equal(deps.stopPresent!(), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("recon-GF: a FAILING launchctl query reports liveness as UNOBSERVED, never as dead", () => {
+  // The catch arm is the fail-safe: an unavailable launchctl must not be read as "daemon dead",
+  // which would authorise a restart on no evidence.
+  const root = mkdtempSync(join(tmpdir(), "rmd-gf-throw-"));
+  try {
+    const deps = realDeployDeps({
+      installPath: root, stateRoot: root, daemonLabel: "d", serveLabel: "s",
+      servePort: 1, uid: 501, ledgerPath: join(root, "l"), log: () => {},
+      execFile: () => { throw new Error("launchctl unavailable"); },
+      sleep: () => {},
+    });
+    assert.equal(deps.daemonAlive!(), undefined, "unknown, NOT false — false would trigger a restart");
+    // And undefined must not reach the restart branch.
+    assert.equal(
+      decideDeployTrigger({ markerPresent: false, autoMode: true, installHead: "s", originMain: "s", runningHead: "s", daemonAlive: deps.daemonAlive!(), stopPresent: false }).deploy,
+      false,
+      "an unobserved daemon is never restarted on liveness grounds",
+    );
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

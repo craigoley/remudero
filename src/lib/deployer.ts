@@ -31,6 +31,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { stopDetail } from "./fleet-control.js";
 import { appendLedger } from "./ledger.js";
 
 // ── Pure decisions ─────────────────────────────────────────────────────────────
@@ -57,6 +58,18 @@ export interface TriggerInputs {
    * before this shipped — rendered as "reason not recorded", never guessed.
    */
   lastFailedKind?: DeployFailureKind;
+  /**
+   * Is the daemon process actually alive? `undefined` ⇒ not observed, and the trigger then neither
+   * restarts on liveness nor claims the daemon is running. Only an explicit `false` can trigger the
+   * liveness restart, so a caller that cannot probe degrades to exactly today's behaviour.
+   */
+  daemonAlive?: boolean;
+  /**
+   * Is a STOP marker set? `undefined` ⇒ unknown, treated as PRESENT (fail-safe) — see
+   * {@link decideDeployTrigger}. A deliberately halted fleet must never be restarted into its own
+   * refusal.
+   */
+  stopPresent?: boolean;
   /**
    * The sha the DAEMON PROCESS IS ACTUALLY EXECUTING, captured at ITS boot from the code it
    * loaded — never re-read from the checkout at comparison time (that always matches, which is
@@ -111,8 +124,39 @@ export function decideDeployTrigger(i: TriggerInputs): Decision {
   const runningStale = !sameCommit(i.runningHead, i.installHead);
   const alreadyFailed = i.lastFailedHead !== undefined && i.originMain === i.lastFailedHead;
   const why = behind ? "install behind origin/main" : "daemon running stale code (install is current)";
+
+  // LIVENESS, CHECKED BEFORE THE SHA SHORT-CIRCUIT — because that short-circuit is exactly what
+  // hides a corpse. Everything below this point reasons only about SHAS, and a dead daemon's last
+  // recorded boot sha still equals the checkout, so the `up-to-date` branch would report
+  // "daemon running it" forever over a process that exited. That clause was an ASSUMPTION with
+  // nothing behind it (recon-GF).
+  //
+  // THE PATH THIS CLOSES — the reversible stop. `daemonExitCode` (lib/daemon.ts) maps `stopped`
+  // and `max_reached` to 0, and the daemon's KeepAlive is `{SuccessfulExit: false}`, so a clean
+  // exit is NOT restarted by launchd. That is correct while a STOP marker is present. But when the
+  // operator REMOVES the marker, nothing brings the daemon back: launchd will not (the exit was
+  // successful) and the trigger would not (the shas still match). The fleet stays silently dead
+  // while this very function reports health every 120 seconds.
+  //
+  // GATED ON `stopPresent`, and that gate is the whole safety argument. Restarting a daemon whose
+  // STOP marker is still down would relaunch it straight back into the same refusal — a relaunch
+  // storm, the class this repo has already paid for twice (~86s headroom, ~10s on 2026-07-22).
+  // `stopPresent === undefined` means the caller could not read the marker; that is treated as
+  // PRESENT (fail-safe), because guessing "no STOP" is what starts the storm.
+  const stopUnknownOrSet = i.stopPresent !== false;
+  if (i.daemonAlive === false && !stopUnknownOrSet) {
+    return { deploy: true, reason: "daemon is not running and no STOP is set — restarting it" };
+  }
   if (!behind && !runningStale) {
-    return { deploy: false, reason: "up-to-date (install HEAD == origin/main, daemon running it)" };
+    // Only claim the daemon is running it when liveness was actually OBSERVED. An unknown answer
+    // says so rather than asserting health it never checked.
+    return {
+      deploy: false,
+      reason:
+        i.daemonAlive === true
+          ? "up-to-date (install HEAD == origin/main, daemon alive and running it)"
+          : "up-to-date (install HEAD == origin/main; daemon liveness not observed)",
+    };
   }
   if (i.markerPresent) return { deploy: true, reason: `operator marker present + ${why}` };
   if (i.autoMode && alreadyFailed) {
@@ -302,6 +346,10 @@ export interface DeployDeps {
   lastFailedHead: () => string | undefined;
   /** The recorded reason `lastFailedHead` failed, so the skip line can state it. */
   lastFailedKind?: () => DeployFailureKind | undefined;
+  /** Is the daemon process alive? Omitted ⇒ liveness is simply not observed (today's behaviour). */
+  daemonAlive?: () => boolean | undefined;
+  /** Is a STOP marker set? Omitted ⇒ unknown, which the trigger treats as PRESENT (fail-safe). */
+  stopPresent?: () => boolean | undefined;
   /** Local bytes at `path` == the blob `ref` would write there. Optional: absent ⇒ no discards. */
   sameAsIncoming?: (path: string, ref: string) => boolean;
   /** Drop a local file proven byte-identical to the incoming blob (checkout if tracked, else rm). */
@@ -433,6 +481,8 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     originMain: origin,
     lastFailedHead: deps.lastFailedHead(),
     lastFailedKind: deps.lastFailedKind?.(),
+    daemonAlive: deps.daemonAlive?.(),
+    stopPresent: deps.stopPresent?.(),
     runningHead: deps.runningHead(),
   });
   if (!decision.deploy) {
@@ -730,6 +780,21 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       // only the label differs. Both labels live in the same gui/<uid> domain.
       exec("launchctl", ["kickstart", "-k", `gui/${o.uid}/${o.serveLabel}`]);
     },
+    // Mirrors `consolePid` below — same launchctl query, same domain, only the label differs. A
+    // job that is loaded but not running reports no PID, which is precisely the corpse state.
+    daemonAlive: () => {
+      try {
+        const out = exec("launchctl", ["list", o.daemonLabel]);
+        const m = out.match(/"PID"\s*=\s*(\d+)/);
+        return m ? Number(m[1]) > 0 : false;
+      } catch {
+        return undefined; // not loaded / query failed — NOT observed, never asserted as dead
+      }
+    },
+    // No try/catch: `stopDetail` is existsSync + a swallowing read, so it cannot throw — a
+    // defensive catch here would be unreachable code, which diff-coverage correctly refuses. The
+    // trigger still treats `undefined` as PRESENT, which covers any caller that omits this dep.
+    stopPresent: () => stopDetail(o.stateRoot) !== undefined,
     consolePid: () => {
       try {
         const out = exec("launchctl", ["list", o.serveLabel]);
