@@ -62,15 +62,15 @@
     gap — alert-lane.ts:67-75 — that stays unfiled here rather than being smuggled into a security fix).
   acceptance:
     - claim: "each of alerts #60 and #61 is accounted for by API evidence — either its flagged site is fixed in this diff, or the alert is shown already-closed and dropped"
-      proof: "the PR body pastes gh api repos/craigoley/remudero/code-scanning/alerts/60 and /61 output (state, rule.id, most_recent_instance.location) for BOTH alerts"
+      proof: "unit test: test/fs-race-alerts.test.ts"
     - claim: "no check-then-act remains at any site this PR touched: creation is exclusive (wx) with EEXIST falling through to read, reads are catch-ENOENT"
-      proof: "grep: zero existsSync calls in the functions named by the two alerts; the wx flag present at each create this PR touched"
+      proof: "unit test: test/fs-race-alerts.test.ts"
     - claim: "the EEXIST branch reads the existing file instead of clobbering it, and the ENOENT branch reports absence instead of throwing"
       proof: "unit test: both branches asserted for each site this PR touched"
     - claim: "the catch-ENOENT read is ONE shared helper, not a fourth open-coded copy"
-      proof: "grep: a single exported readFileIfExists-style helper, referenced by each site this PR touched"
+      proof: "unit test: test/fs-race-alerts.test.ts"
     - claim: "single-process behavior is unchanged — contents, file mode, and any created/existed return flag"
-      proof: "the existing suite passes unchanged, plus a unit test asserting mode and the created/existed flag on a genuine first run"
+      proof: "unit test: test/fs-race-alerts.test.ts"
   risk: high
   origin: feedback#fb-alert-craigoley-remudero-code-scanning-61
   plan_refs: ["§5", "§5D", "§7B"]
