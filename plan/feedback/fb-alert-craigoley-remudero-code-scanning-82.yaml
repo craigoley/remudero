@@ -1,0 +1,10 @@
+id: fb-alert-craigoley-remudero-code-scanning-82
+ts: 2026-08-02T13:26:45.450Z
+raw: |-
+  craigoley/remudero code-scanning alert #82 [medium]: Useless conditional
+
+  https://github.com/craigoley/remudero/security/code-scanning/82
+attachments: []
+origin: alert#code-scanning-82
+status: new
+proposal_pr: null
