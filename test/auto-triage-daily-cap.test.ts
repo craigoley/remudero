@@ -1,18 +1,23 @@
 /**
- * test/auto-triage-daily-cap.test.ts — impl-FO.
+ * test/auto-triage-daily-cap.test.ts — impl-FO, updated for the W1 triage-cadence change.
  *
- * THE CHANGE. `plan/policy.yaml`'s `autoTriage.maxPerDay` went 4 -> 24, retiring the daily cap as
- * an instrument: `minIntervalMinutes: 60` already caps a rolling 24h window at 24 fires, so every
- * value >= 24 is behaviourally identical and 60 minutes becomes the sole pacing bound.
+ * THE CHANGE (impl-FO). `plan/policy.yaml`'s `autoTriage.maxPerDay` went 4 -> 24, retiring the
+ * daily cap as an instrument AT THE THEN-SHIPPED `minIntervalMinutes: 60`: 60m already capped a
+ * rolling 24h window at 24 fires, so every `maxPerDay` value >= 24 was behaviourally identical.
+ *
+ * THE FOLLOW-ON CHANGE (policy/triage-cadence). `minIntervalMinutes` went 60 -> 15 to drain a
+ * 58-entry backlog faster. This REACTIVATES the daily cap: 15m pacing alone would allow 96
+ * fires/day, so `maxPerDay: 24` is now the binding constraint (worst-case daily spend is
+ * unchanged; the short-run rate quadruples until the cap catches up). The tests below assert
+ * that reactivated behaviour directly, rather than the old "cap is retired" claim.
  *
  * WHY THESE TESTS ARE SHAPED THIS WAY. A test asserting `maxPerDay === 24` would prove nothing —
  * it restates the constant it is meant to police and passes for a value that is wrong. Every
  * assertion below instead DRIVES the real `decideAutoTriage` and the real `recordAutoTriageFire`
- * over a simulated three-day span, polling once a minute, and counts what actually fires. Reverting
- * the shipped value to 4 makes the counts fall to 12/4-per-day and these tests fail.
+ * over a simulated three-day span, polling once a minute, and counts what actually fires.
  *
  * THE SPAN IS OBSERVABLE TO THE CODE. The clock advances a full minute per poll across 4320 polls;
- * `minIntervalMinutes` is 60 and the window is 24h, so both bounds move many times inside the span.
+ * `minIntervalMinutes` is 15 and the window is 24h, so both bounds move many times inside the span.
  * (A prior session shipped two vacuous tests because its span was smaller than the 1-second
  * granularity the code could see.)
  *
@@ -91,19 +96,20 @@ test("the shipped policy fires 24 times a day over a simulated 3-day span", () =
   assert.deepEqual([...perDay.values()], [24, 24, 24], `per-day was ${JSON.stringify([...perDay])}`);
 });
 
-test("the shipped value is behaviourally identical to an unbounded cap — the cap is retired", () => {
+test("at the shipped 15m interval, the daily cap is REACTIVATED — no longer redundant", () => {
   const shipped = shippedAutoTriagePolicy();
   const unbounded = { ...shipped, maxPerDay: 1_000_000 };
 
   const a = simulate(shipped, 3);
   const b = simulate(unbounded, 3);
 
-  // If the shipped cap still bound anything, these would differ.
-  assert.equal(a.total, b.total, `shipped fired ${a.total}, unbounded fired ${b.total} — cap still binds`);
-  assert.deepEqual([...a.perDay.entries()], [...b.perDay.entries()]);
-  // And the daily-cap refusal must never be reachable at the shipped value.
+  // 15m pacing alone would allow 96 fires/day; the shipped 24/day cap now visibly holds it down.
+  assert.equal(a.total, 72, `expected 72 capped fires over 3 days, got ${a.total}`);
+  assert.equal(b.total, 288, `expected 288 unbounded fires over 3 days, got ${b.total}`);
+  assert.notEqual(a.total, b.total, "the cap must now bind — shipped and unbounded should diverge");
+  // And the daily-cap refusal must be reachable at the shipped value (it was not, at 60m).
   const capReasons = [...a.reasons].filter((r) => r.includes("daily cap reached"));
-  assert.deepEqual(capReasons, [], `daily cap still refused: ${JSON.stringify(capReasons)}`);
+  assert.ok(capReasons.length > 0, "expected the daily cap refusal to be reachable at the shipped 15m value");
 });
 
 // ── (6) minInterval still holds, INDEPENDENTLY ───────────────────────────────
@@ -139,11 +145,11 @@ test("a fire inside the interval is refused naming minInterval, not the daily ca
       idle: true,
       lockHeld: false,
       marker: readAutoTriageMarker(markerPath),
-      now: new Date(t0.getTime() + 59 * 60_000), // 59m — one minute short
+      now: new Date(t0.getTime() + 14 * 60_000), // 14m — one minute short of the shipped 15m floor
       candidates: ["fb-x"],
     });
     assert.equal(d.fire, false);
-    assert.match(d.reason, /since the last fire \(minInterval 60m\)/);
+    assert.match(d.reason, /since the last fire \(minInterval 15m\)/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -174,7 +180,7 @@ test("raising maxPerDay does not weaken the disabled lock even with a huge cap",
 test("the shipped policy keeps its schema bounds, so tightening again stays a one-line edit", () => {
   const raw = loadPolicy(policyPath(REPO_ROOT));
   const p = raw.values.autoTriage;
-  assert.equal(p.minIntervalMinutes, 60, "minIntervalMinutes must not have moved");
+  assert.equal(p.minIntervalMinutes, 15, "minIntervalMinutes must not have moved");
   assert.equal(p.enabled, true, "this PR does not change the opt-in");
   // The value must remain within the schema's own declared ceiling.
   assert.ok(p.maxPerDay <= 24, `maxPerDay ${p.maxPerDay} exceeds the schema max of 24`);
