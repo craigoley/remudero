@@ -43,7 +43,7 @@
       proof: "unit test: test/control-status-daemon-liveness.test.ts"
     - claim: "a live daemon with a recent heartbeat still renders 'fleet is running', and STOP or PAUSE still wins over liveness exactly as today"
       proof: "unit test: test/control-status-daemon-liveness.test.ts"
-  risk: medium
+  risk: high
   origin: feedback#fb-1784731575322-753af9
   plan_refs: ["§7"]
   files: [src/lib/serve.ts, test/control-status-daemon-liveness.test.ts]
@@ -54,6 +54,9 @@
     at serve.ts:2693 on 2026-08-02: still flags-only. Split from W1-T287 deliberately — T287 is an assertion-level
     and CSS fix over already-correct data, this is a missing INPUT; folding them would let one green half certify
     the other.
-    risk:medium — one route plus one render path, no dispatch and no spend, but it changes the meaning of the
-    console's most-read line and a wrong liveness threshold reads as a dead fleet.
+    risk:high (Rule 19 MERITS TEST, #588): all four acceptance criteria are proved by the SAME
+    test/control-status-daemon-liveness.test.ts, which must exercise the route's liveness verdict AND the
+    shell's three-state render TOGETHER — 'unobserved never silently renders as running' is a cross-file
+    invariant no single-file test can assert piecewise, so this is one task, raised rather than decomposed;
+    was previously filed risk:medium (rationale below still holds for the change's blast radius, not its span).
     NO depends_on: independent of W1-T287 and of the queued console work."
