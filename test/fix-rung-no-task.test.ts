@@ -20,7 +20,7 @@ import { deriveDisposition, DEFAULT_SWEEP_POLICY, type OpenPrView } from "../src
 import type { Plan, Task } from "../src/lib/plan.js";
 import { escalationTaskIdFor, fixHeadAcceptable, fixRungTaskFor, priorStrikesFor } from "../src/run-task.js";
 
-const NOW = new Date("2026-08-02T12:00:00.000Z");
+const NOW = Date.parse("2026-08-02T12:00:00.000Z");
 
 const T = (id: string, over: Partial<Task> = {}): Task =>
   ({ id, title: id, repo: "remudero", depends_on: [], type: "implement", verify: "auto", status: "queued", attempts: 0, ...over }) as Task;
