@@ -12,6 +12,7 @@ import {
   type PostFixReverificationDeps,
   type RedriveResult,
 } from "../src/lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY } from "../src/lib/sweep.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { appendLedger } from "../src/lib/ledger.js";
 
@@ -43,6 +44,22 @@ function ledgerPath(): string {
  * date carries the provenance, and this constant carries the semantics, which are different jobs.
  */
 const RECENT = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+
+// ── THE REGRESSION LOCK for the time bomb above ────────────────────────────────────────────
+// This is the assertion whose absence let the fixture rot silently. `RECENT` must sit INSIDE the
+// staleness window on every run, forever. A future edit that writes a date literal back here
+// fails this immediately instead of fourteen days later, in CI, on somebody else's PR.
+test("the RECENT fixture can never age into staleness — it is derived, not a date literal", () => {
+  const ageDays = (Date.now() - Date.parse(RECENT)) / 86_400_000;
+  assert.ok(Number.isFinite(ageDays), `RECENT must parse as a date, got ${RECENT}`);
+  assert.ok(ageDays >= 0, `RECENT must not be in the future (age ${ageDays}d)`);
+  // The margin is the whole point: comfortably inside staleDays, not one tick under it.
+  assert.ok(
+    ageDays < DEFAULT_SWEEP_POLICY.staleDays,
+    `RECENT is ${ageDays.toFixed(1)}d old against staleDays=${DEFAULT_SWEEP_POLICY.staleDays} — ` +
+      `the fixture has aged into 'stale' and every disposition assertion below is now testing the wrong branch`,
+  );
+});
 
 function pr(over: Partial<OpenPrView> = {}): OpenPrView {
   return {
