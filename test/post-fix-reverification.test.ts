@@ -12,6 +12,7 @@ import {
   type PostFixReverificationDeps,
   type RedriveResult,
 } from "../src/lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY } from "../src/lib/sweep.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { appendLedger } from "../src/lib/ledger.js";
 
@@ -27,7 +28,38 @@ function ledgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-post-fix-reverification-")), "ledger.ndjson");
 }
 
-const RECENT = "2026-07-19T12:00:00Z";
+/**
+ * `lastActivityAt` for a fixture PR that must read as RECENT — i.e. NOT stale.
+ *
+ * THIS WAS A TIME BOMB and it went off on 2026-08-02T12:00:00Z. It was a hardcoded
+ * `"2026-07-19T12:00:00Z"`, and staleness is `now - lastActivityAt >= policy.staleDays` (14 days,
+ * plan/policy.yaml). Fourteen days after that literal, three tests here began asserting
+ * `mergeable` against a disposition that had silently become `stale` — and because `ci` runs the
+ * whole suite, EVERY open PR inherited three red tests and `ci-gate` failed for all of them, so
+ * nothing could merge. PR #1112 (ci at 09:30Z) passed; #1114 (13:40Z) did not; the only thing that
+ * changed between them was the wall clock.
+ *
+ * A fixture that means "recent" must be relative to the run, never a date. The 2026-07-19 incident
+ * this suite replays is documented in the comments above and in the fixture NAMES — the calendar
+ * date carries the provenance, and this constant carries the semantics, which are different jobs.
+ */
+const RECENT = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+
+// ── THE REGRESSION LOCK for the time bomb above ────────────────────────────────────────────
+// This is the assertion whose absence let the fixture rot silently. `RECENT` must sit INSIDE the
+// staleness window on every run, forever. A future edit that writes a date literal back here
+// fails this immediately instead of fourteen days later, in CI, on somebody else's PR.
+test("the RECENT fixture can never age into staleness — it is derived, not a date literal", () => {
+  const ageDays = (Date.now() - Date.parse(RECENT)) / 86_400_000;
+  assert.ok(Number.isFinite(ageDays), `RECENT must parse as a date, got ${RECENT}`);
+  assert.ok(ageDays >= 0, `RECENT must not be in the future (age ${ageDays}d)`);
+  // The margin is the whole point: comfortably inside staleDays, not one tick under it.
+  assert.ok(
+    ageDays < DEFAULT_SWEEP_POLICY.staleDays,
+    `RECENT is ${ageDays.toFixed(1)}d old against staleDays=${DEFAULT_SWEEP_POLICY.staleDays} — ` +
+      `the fixture has aged into 'stale' and every disposition assertion below is now testing the wrong branch`,
+  );
+});
 
 function pr(over: Partial<OpenPrView> = {}): OpenPrView {
   return {
