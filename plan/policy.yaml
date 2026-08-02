@@ -110,7 +110,7 @@ autoTriage:
     value: true
     origin: "net-new"   # a rung that spends unsupervised is opted into, never shipped on
   minIntervalMinutes:
-    value: 60
+    value: 15
     origin: "net-new"   # one idle hour is the smallest gap that is clearly not per-poll
     min: 5
     max: 1440
