@@ -10384,6 +10384,36 @@ async function feedbackCommand(rest: string[]): Promise<number> {
 export const TRIAGE_WORKER_TOOLS = ["Read", "Write", "Edit", "Grep", "Glob", "WebSearch"];
 
 /**
+ * Every path the triage worker touched in its worktree, measured against `origin/main` —
+ * INCLUDING files it CREATED. This is the input `decideTriage` judges a PROPOSED verdict on, so
+ * a path missing here is a run that did the work and gets thrown away.
+ *
+ * WHY THE UNION, AND NOT `git diff` ALONE (impl-EO, 2026-08-01). `git diff --name-only origin/main`
+ * reports TRACKED paths only; a brand-new file is untracked and is invisible to it. That was
+ * harmless while a proposal EDITED the tracked `plan/tasks.yaml` monolith — and became a
+ * money-burning failure the moment PR #1060 redirected proposals into a NEW shard at
+ * `plan/tasks.d/<id>-<kebab-slug>.yaml`. The worker complied, wrote the shard, and returned
+ * PROPOSED; `git diff` saw nothing; `decideTriage` correctly refused the run as inconsistent
+ * ("PROPOSED but no plan files were changed", `changed_files: []`) and opened no PR. Two
+ * auto-triage fires on `fb-alert-craigoley-remudero-code-scanning-61` failed this way at
+ * $1.0547 and $1.0916, and the entry stayed `status: new` — so it would be re-picked as the
+ * oldest candidate forever, at ~$1 a fire.
+ *
+ * `ls-files --others --exclude-standard` is the untracked half, `--exclude-standard` so an
+ * ignored build artifact never counts as a plan change. Deduped because the two halves are
+ * disjoint by definition and a future third source must not double-report. Detection runs BEFORE
+ * the harness's bookkeeping commit, which is exactly why staging cannot be assumed.
+ */
+export function triageChangedFiles(worktreePath: string): string[] {
+  const run = (args: string[]): string[] =>
+    execFileSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" })
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean);
+  return [...new Set([...run(["diff", "--name-only", "origin/main"]), ...run(["ls-files", "--others", "--exclude-standard"])])];
+}
+
+/**
  * `rmd triage <feedback-id>` — the Architect intake worker (MASTER-PLAN §7B, W1-T41).
  *
  * GROUND -> RESEARCH -> GRILL-OR-PROPOSE, run by a fresh higher-tier Architect worker
@@ -10589,12 +10619,7 @@ async function triageCommandLocked(
     });
 
     // Ground truth: what did the worker ACTUALLY touch (before the harness's own status write)?
-    const changedFiles = execFileSync("git", ["-C", worktreePath, "diff", "--name-only", "origin/main"], {
-      encoding: "utf8",
-    })
-      .split("\n")
-      .map((s) => s.trim())
-      .filter(Boolean);
+    const changedFiles = triageChangedFiles(worktreePath);
     const verdict = parseTriageVerdict([worker.text, worker.blocks.join("\n")].join("\n"));
     const decision = decideTriage({ verdict, changedFiles });
 
