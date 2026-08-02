@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
+import { declaredConsoleRoutes, type DeclaredRoute } from "./helpers/declared-routes.js";
 import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
 import { buildPanelActionRoutes, type IssueCloser } from "../src/lib/panel-actions.js";
 import { createService } from "../src/lib/service.js";
@@ -50,52 +50,6 @@ import type { RatifyCliGateway } from "../src/lib/panel-graph.js";
 
 const READ_TOKEN = "route-registration-read-token";
 const WRITE_TOKEN = "route-registration-write-token";
-
-const LIB_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "lib");
-
-interface DeclaredRoute {
-  method: string;
-  path: string;
-  where: string;
-}
-
-/**
- * Every console route DECLARED in src/lib, read out of the source rather than out of any
- * registration list — so a route that no aggregator and no `serve.ts` line mentions is still
- * found. The module set is itself derived (every file exporting a `build*Route`/`build*Routes`),
- * so a brand-new route module is in scope the moment it exists.
- *
- * A `path:` literal's method is the nearest `method:` above it within the same route object
- * literal; an SSE route declares no method and is probed as GET, which is what it accepts.
- */
-export function declaredConsoleRoutes(libDir: string = LIB_DIR): DeclaredRoute[] {
-  const modules = readdirSync(libDir)
-    .filter((name) => name.endsWith(".ts"))
-    .filter((name) => /export function build\w*Routes?\s*\(/.test(readFileSync(join(libDir, name), "utf8")));
-
-  const seen = new Set<string>();
-  const declared: DeclaredRoute[] = [];
-  for (const name of modules) {
-    const lines = readFileSync(join(libDir, name), "utf8").split("\n");
-    lines.forEach((line, index) => {
-      const pathMatch = /^\s*path:\s*"([^"]+)"/.exec(line);
-      if (!pathMatch) return;
-      let method = "GET";
-      for (let back = index - 1; back >= Math.max(0, index - 4); back--) {
-        const methodMatch = /^\s*method:\s*"([A-Z]+)"/.exec(lines[back]);
-        if (methodMatch) {
-          method = methodMatch[1];
-          break;
-        }
-      }
-      const key = `${method} ${pathMatch[1]}`;
-      if (seen.has(key)) return;
-      seen.add(key);
-      declared.push({ method, path: pathMatch[1], where: `src/lib/${name}:${index + 1}` });
-    });
-  }
-  return declared;
-}
 
 /** Probe every declared route ANONYMOUSLY against a live server; return the ones that 404. */
 async function unmountedAmong(base: string, routes: DeclaredRoute[]): Promise<string[]> {
