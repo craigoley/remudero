@@ -396,32 +396,32 @@ test("poll failures: a transient 'reconnecting' indicator, escalating to a visib
       await page.waitForFunction(() => document.getElementById("top-status")?.getAttribute("data-poll-state") === "reconnecting", null, {
         timeout: 5000,
       });
-      const midway = await page.evaluate(() => ({
-        text: document.getElementById("top-status")?.textContent ?? "",
-        staleHidden: (document.getElementById("stale-badge") as HTMLElement)?.hidden,
-      }));
-      assert.match(midway.text, /reconnecting/);
-      assert.equal(midway.staleHidden, true, "under the escalation threshold the board must not (yet) be stamped stale");
+      // W1-T287: COMPUTED visibility (Playwright's isVisible(), backed by getComputedStyle), not
+      // the `hidden` attribute -- an attribute is only an INPUT to rendering, and #stale-badge's
+      // own unguarded `display: inline-block` used to override it (serve.ts ~479) while every
+      // assertion here kept reading the attribute and staying green.
+      const midwayText = await page.evaluate(() => document.getElementById("top-status")?.textContent ?? "");
+      const midwayStaleVisible = await page.locator("#stale-badge").isVisible();
+      assert.match(midwayText, /reconnecting/);
+      assert.equal(midwayStaleVisible, false, "under the escalation threshold the board must not (yet) be stamped stale");
 
       // Let it keep failing until escalation (3 consecutive failures -> visibly stale).
       await page.waitForFunction(() => document.getElementById("top-status")?.getAttribute("data-poll-state") === "stale", null, { timeout: 12000 });
-      const escalated = await page.evaluate(() => ({
-        staleHidden: (document.getElementById("stale-badge") as HTMLElement)?.hidden,
-        dataStale: document.getElementById("top-status")?.getAttribute("data-stale"),
-      }));
-      assert.equal(escalated.staleHidden, false, "N consecutive failures must visibly stamp the board stale");
-      assert.equal(escalated.dataStale, "true");
+      const escalatedStaleVisible = await page.locator("#stale-badge").isVisible();
+      const escalatedDataStale = await page.evaluate(() => document.getElementById("top-status")?.getAttribute("data-stale"));
+      assert.equal(escalatedStaleVisible, true, "N consecutive failures must visibly stamp the board stale");
+      assert.equal(escalatedDataStale, "true");
 
       // The NEXT successful poll must clear it unconditionally -- never a stale banner surviving
       // beside fresh data (the operator-observed bug this lifecycle fixes).
       shouldFail = false;
       await page.waitForFunction(() => document.getElementById("top-status")?.getAttribute("data-poll-state") === "ok", null, { timeout: 8000 });
+      const recoveredStaleVisible = await page.locator("#stale-badge").isVisible();
       const recovered = await page.evaluate(() => ({
-        staleHidden: (document.getElementById("stale-badge") as HTMLElement)?.hidden,
         dataStale: document.getElementById("top-status")?.getAttribute("data-stale"),
         text: document.getElementById("top-status")?.textContent ?? "",
       }));
-      assert.equal(recovered.staleHidden, true);
+      assert.equal(recoveredStaleVisible, false);
       assert.equal(recovered.dataStale, null);
       assert.match(recovered.text, /updated/);
       assert.doesNotMatch(recovered.text, /reconnecting|failed/);
@@ -464,12 +464,11 @@ test("poll failures alongside a healthy SSE connection: staleness is gated on ge
       // and the stale escalation must read the SAME clock (the operator-observed contradiction:
       // "live · updated 8s ago" directly above "STALE — showing last known data").
       await new Promise((resolve) => setTimeout(resolve, 8500));
-      const midway = await page.evaluate(() => ({
-        pollState: document.getElementById("top-status")?.getAttribute("data-poll-state"),
-        staleHidden: (document.getElementById("stale-badge") as HTMLElement)?.hidden,
-      }));
-      assert.notEqual(midway.pollState, "stale", "an SSE delta just landed -- a raw consecutive-failure count must not override that with a contradicting STALE claim");
-      assert.equal(midway.staleHidden, true);
+      // W1-T287: computed visibility, not the `hidden` attribute (see the sibling test above).
+      const midwayStaleVisible = await page.locator("#stale-badge").isVisible();
+      const midwayPollState = await page.evaluate(() => document.getElementById("top-status")?.getAttribute("data-poll-state"));
+      assert.notEqual(midwayPollState, "stale", "an SSE delta just landed -- a raw consecutive-failure count must not override that with a contradicting STALE claim");
+      assert.equal(midwayStaleVisible, false);
 
       // ... and once THAT data genuinely goes stale too (no further SSE, the poll still failing),
       // the escalation must still eventually fire -- this proves a freshness GATE, not a disabled
