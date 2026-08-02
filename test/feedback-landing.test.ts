@@ -928,3 +928,103 @@ test("W1-T191 REGRESSION: a bridge run leaves the caller's working tree, index a
   assert.equal(git(root, "status", "--porcelain").trim(), "", "the bridge must never dirty the caller's working tree or index");
   assert.equal(git(root, "rev-parse", "HEAD").trim(), headBefore, "the bridge must never move the caller's local HEAD");
 });
+
+// ── PUSH CADENCE: the landing branch must only move when the CONTENT moves.
+//
+// `commit-tree` stamps the current time, so an unchanged landing used to mint a fresh commit sha
+// and force-push it on EVERY call. The daemon calls this each poll, so PR #1113's head moved every
+// ~60s and each push cancelled the in-flight CI run — `ci-gate` (a REQUIRED context) could never
+// complete, `remudero-review` never posted, the PR could never merge, so the files stayed unlanded
+// and the bridge kept pushing. Self-sustaining.
+//
+// These two tests are a pair and neither is sufficient alone: the first proves the push is SKIPPED
+// for unchanged content, the second proves it still HAPPENS when content changes. Without the
+// second, a fix that simply never pushed would pass.
+
+/** The landing branch's current commit sha on the bare origin — the thing CI keys on. */
+function landingHead(bareOrigin: string): string {
+  return execFileSync("git", ["--git-dir", bareOrigin, "rev-parse", `refs/heads/${LANDING_BRANCH}`], {
+    encoding: "utf8",
+  }).trim();
+}
+
+/**
+ * A real `git`, but with the commit date pinned to a caller-chosen instant.
+ *
+ * WITHOUT THIS THE TESTS BELOW PASS TRIVIALLY, which I found by running the falsifier: git commit
+ * timestamps are 1-SECOND granular, so two `commit-tree` calls in the same second over the same
+ * tree produce the BYTE-IDENTICAL sha whether or not the fix is present. Verified directly —
+ * `c1 === c2` back to back, and only an explicit date makes them diverge. The daemon's real calls
+ * are ~60s apart, so production DOES churn; a test that fires both calls in one second cannot see
+ * it. Each call therefore gets its own `at`, standing in for the poll gap.
+ */
+function gitAt(root: string, at: () => string) {
+  return (args: string[], opts?: { env?: NodeJS.ProcessEnv }): string =>
+    execFileSync("git", args, {
+      cwd: root,
+      encoding: "utf8",
+      env: { ...(opts?.env ?? process.env), GIT_AUTHOR_DATE: at(), GIT_COMMITTER_DATE: at() },
+    });
+}
+
+test("landFeedback: an unchanged landing does NOT move the branch head — no push, so CI is never restarted", () => {
+  const bareOrigin = makeBareOrigin();
+  const root = cloneRoot(bareOrigin);
+  mkdirSync(join(root, "plan", "feedback"), { recursive: true });
+  writeFileSync(join(root, "plan", "feedback", "fb-1.yaml"), "id: fb-1\nraw: x\n");
+
+  const { gh, createCount } = fakeGh("https://github.com/o/r/pull/9");
+  // Two calls a poll-interval apart, which is the only way the pre-fix churn is observable.
+  let pollAt = "2026-08-02T16:28:00Z";
+  const git = gitAt(root, () => pollAt);
+
+  const first = withLiveWritesAllowed(() => landFeedback(root, { gh, git }));
+  assert.equal(first.landed, true);
+  const headAfterFirst = landingHead(bareOrigin);
+
+  // The PR is still OPEN and nothing on disk changed — exactly the daemon's every-poll case.
+  pollAt = "2026-08-02T16:29:00Z";
+  const second = withLiveWritesAllowed(() => landFeedback(root, { gh, git }));
+
+  assert.equal(
+    landingHead(bareOrigin),
+    headAfterFirst,
+    "the branch head moved for unchanged content — every such move cancels the in-flight CI run, " +
+      "which is what made #1113 unmergeable",
+  );
+  // The content IS on the branch, so the caller must still be told it landed — that boolean is
+  // rendered to an operator as "landed" vs "landing pending".
+  assert.equal(second.landed, true);
+  assert.deepEqual(second.files, ["plan/feedback/fb-1.yaml"]);
+  assert.equal(createCount(), 1, "and no second PR was opened");
+});
+
+test("landFeedback: a CHANGED landing still moves the branch head — the skip is selective, not a mute", () => {
+  // The control for the test above. Without it, a fix that never pushed at all would pass there.
+  const bareOrigin = makeBareOrigin();
+  const root = cloneRoot(bareOrigin);
+  mkdirSync(join(root, "plan", "feedback"), { recursive: true });
+  writeFileSync(join(root, "plan", "feedback", "fb-1.yaml"), "id: fb-1\nraw: x\n");
+
+  const { gh } = fakeGh("https://github.com/o/r/pull/10");
+  let pollAt = "2026-08-02T16:28:00Z";
+  const git = gitAt(root, () => pollAt);
+  withLiveWritesAllowed(() => landFeedback(root, { gh, git }));
+  const headAfterFirst = landingHead(bareOrigin);
+
+  // A genuinely new capture — the branch MUST advance to carry it.
+  pollAt = "2026-08-02T16:29:00Z";
+  writeFileSync(join(root, "plan", "feedback", "fb-2.yaml"), "id: fb-2\nraw: y\n");
+  const second = withLiveWritesAllowed(() => landFeedback(root, { gh, git }));
+
+  assert.notEqual(landingHead(bareOrigin), headAfterFirst, "new content must still be pushed");
+  assert.equal(second.landed, true);
+  assert.deepEqual(second.files.sort(), ["plan/feedback/fb-1.yaml", "plan/feedback/fb-2.yaml"]);
+
+  // And an EDIT to an already-landed file counts as changed content too, not just a new file.
+  const headAfterSecond = landingHead(bareOrigin);
+  pollAt = "2026-08-02T16:30:00Z";
+  writeFileSync(join(root, "plan", "feedback", "fb-1.yaml"), "id: fb-1\nraw: EDITED\n");
+  withLiveWritesAllowed(() => landFeedback(root, { gh, git }));
+  assert.notEqual(landingHead(bareOrigin), headAfterSecond, "an edited entry must still be pushed");
+});
