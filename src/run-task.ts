@@ -24,7 +24,7 @@ import {
 } from "./lib/config.js";
 import { readFileIfExists } from "./lib/fs-race-safe.js";
 import { buildWorkerEnv, billingMode, type BillingMode } from "./lib/env.js";
-import { outputContractLines, renderAnchorBlock, commitMessageContractLines } from "./lib/compaction.js";
+import { bodyVsDiffContractLines, outputContractLines, renderAnchorBlock, commitMessageContractLines } from "./lib/compaction.js";
 import type { RunResult } from "./lib/run-result.js";
 export type { RunResult };
 import { InitError, readClaudeJsonKeys, runInit } from "./lib/init.js";
@@ -2012,7 +2012,12 @@ export function renderFixPrompt(opts: {
     `branch (only a run-<taskId>-<epochMs> head is creditable). \`git push origin HEAD\` (no`,
     `-u) when done — never force-push. Your PR body must substantiate EVERY task acceptance`,
     `criterion, not only the ones fixed here — the review floor judges the body against the`,
-    `FULL criteria set. Anything you discover here that is OUT OF SCOPE for THIS fix — a`,
+    // impl-FV: the SAME literal the implement contract carries, for the same reason
+    // `commitMessageContractLines` above is shared — and this rung needs it MOST: it amends an
+    // existing PR, so its body is the one most likely to have been written against an earlier diff.
+    `FULL criteria set.`,
+    ...bodyVsDiffContractLines(),
+    `Anything you discover here that is OUT OF SCOPE for THIS fix — a`,
     `research question, a follow-up task, or an action someone should take — goes in an`,
     `OPTIONAL '## Follow-ups' section of your REPORT (W1-T105), never into the diff: one`,
     `typed entry per line, \`research:\` | \`task:\` | \`action:\`, its own one-line why inline.`,

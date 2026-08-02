@@ -92,6 +92,40 @@ export function commitMessageContractLines(): string[] {
  * never drift apart, and the anchor is provably byte-identical to what the
  * worker was told at turn 0 (never re-derived, never paraphrased).
  */
+/**
+ * THE BODY-VERSUS-DIFF CONTRACT (impl-FV) — shared VERBATIM by the implement contract above and by
+ * the fix rung (`renderFixPrompt`, run-task.ts), the two prompts whose worker authors a PR body.
+ * Shared for the same reason {@link commitMessageContractLines} is: two literals of one rule drift.
+ *
+ * WHY THIS EXISTS. `bodyContradictsDiff` (lib/review.ts) folds into `judgeReview`'s state, so a
+ * contradiction is a REQUIRED-check failure with no floor to fall back on — and until now NO prompt
+ * in this repository mentioned it (recon-FT). It landed 2026-07-31; its zero observed failures are
+ * its AGE, not compliance. It exists for a measured reason: #974 claimed one file over a 3-file
+ * diff, and #1025's claim rode a -515-line source revert that silently reverted three merged PRs.
+ *
+ * WHY IT STATES THE RULE RATHER THAN A WORD LIST. The check is deliberately SUBJECT-SENSITIVE —
+ * both predicates are anchored (`claimsChangesetContext` backward, `noClaimIsAboutChangeset`
+ * forward) precisely so a sentence about something OTHER than the changeset stays silent. A "never
+ * write these words" instruction would be false, would make bodies worse, and would still not stop
+ * the failures, because the ones that fired were about subject, not vocabulary.
+ */
+export function bodyVsDiffContractLines(): string[] {
+  return [
+    "- YOUR PR BODY IS CHECKED AGAINST YOUR OWN DIFF: a body that contradicts its changeset FAILS",
+    "  remudero-review outright, with no proof or keyword floor to fall back on. The rule is about a",
+    "  SENTENCE'S SUBJECT, never a word blacklist — if the subject is YOUR CHANGESET it must be true",
+    "  of it, and the identical words about anything else are deliberately ignored. Three shapes:",
+    "  (1) `exactly N file(s)` — read only when tied to the changeset by a `:` list after it or a",
+    "  changeset word ('changed'/'touches'/'diff'/'this PR') earlier in the SAME sentence; N must",
+    "  equal your real file count and every file you name must be in the diff. (2) `no <path>` —",
+    "  read when the next word on that line is a changeset word, OR when nothing follows it on that",
+    "  line; that path must really be absent ('no bugs' is ignored — not a path). (3) the hyphenated",
+    "  shorthands `plan-only`/`data-only` — matched ANYWHERE whatever the subject, so never write",
+    "  either unless it is literally true of your diff.",
+    "  RE-CHECK AFTER EVERY PUSH — a body written against an earlier diff goes stale silently.",
+  ];
+}
+
 export function outputContractLines(taskId: string): string[] {
   return [
     "# OUTPUT CONTRACT",
@@ -135,6 +169,7 @@ export function outputContractLines(taskId: string): string[] {
     "  diff satisfies it and NAME the test or grep that proves it. remudero-review executes each",
     "  proof and, when a proof is not executable, judges your body against that proof's own text —",
     "  a body that does not engage each proof is scored UNMET even when the work is correct.",
+    ...bodyVsDiffContractLines(),
     "- End with a REPORT whose LAST line is exactly: PR_URL: <the pull request url>",
   ];
 }
