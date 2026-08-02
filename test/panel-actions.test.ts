@@ -1,28 +1,18 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { createService } from "../src/lib/service.js";
+import { buildServeRoutes, buildServeServer, type ServeDeps } from "../src/lib/serve.js";
 import {
   bearerTokenId,
-  buildAnswerQuestionRoute,
-  buildApproveManualRoute,
-  buildDrainFeedbackRoute,
-  buildDrainNowRoute,
-  buildEscalationMarkHandledRoute,
-  buildKickRoute,
-  buildPanelActionRoutes,
-  buildPauseRoute,
-  buildQuietHoursRoute,
-  buildResumeRoute,
-  buildStopRoute,
   DRAIN_FEEDBACK_VERDICTS,
   type IssueCloser,
   type PanelActionDeps,
 } from "../src/lib/panel-actions.js";
+import type { GitHub } from "../src/lib/status.js";
 import { consumeDrainNow, isPaused, isQuietHours, isStopped, kickFilePath, pauseDetail, pendingKicks, requestPause, requestStop, stopDetail } from "../src/lib/fleet-control.js";
 import { runDrain, type DrainDeps } from "../src/lib/drain.js";
 import type { Plan, Task } from "../src/lib/plan.js";
@@ -39,10 +29,20 @@ import { appendLedger } from "../src/lib/ledger.js";
 //       /v1/control/stop and asserting fleet-control.ts's `isStopped`/`stopDetail` (the SAME
 //       predicate drain.ts checks first, every tick) flips synchronously.
 //
-// Same discipline as test/board.test.ts: real createService()/fetch() plumbing, never a mock
-// of either. Business logic (fleet-control.ts flag files, the ledger) is EXISTING and already
-// covered by its own suite — these tests exercise the WIRING (route registration, scope,
-// request validation, ledger attribution), not fleet-control.ts's flag semantics again.
+// Same discipline as test/board.test.ts: real server/fetch() plumbing, never a mock of either.
+// Business logic (fleet-control.ts flag files, the ledger) is EXISTING and already covered by its
+// own suite — these tests exercise scope, request validation and ledger attribution, not
+// fleet-control.ts's flag semantics again.
+//
+// CORRECTION, and it is why `withService` was migrated: this paragraph used to claim these tests
+// covered "route registration". They did not. The helper built its own service from ten
+// hand-listed builders, so the suite could not see the console's registration at all — proven by
+// unmounting `buildDrainFeedbackRoute` in serve.ts, against which the old harness passed 37/37
+// while the six /v1/drain/feedback tests below were exercising a route no operator could reach.
+// The helper now assembles through `buildServeServer`, so that same mutation fails exactly those
+// six. Registration COVERAGE is still test/route-registration.test.ts's job, and which root each
+// route reads is test/route-wiring.test.ts's; what changed here is that this suite is no longer
+// blind to either.
 
 const READ_TOKEN = "panel-read-token";
 const WRITE_TOKEN = "panel-write-token";
@@ -63,6 +63,10 @@ function readLedgerLines(path: string): Array<Record<string, unknown>> {
     .map((l) => JSON.parse(l) as Record<string, unknown>);
 }
 
+function fakeGitHub(): GitHub {
+  return { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined };
+}
+
 function fakeIssueCloser(): IssueCloser & { closed: string[] } {
   const closed: string[] = [];
   return {
@@ -77,22 +81,55 @@ function depsFor(root: string, issues: IssueCloser = fakeIssueCloser()): PanelAc
   return { root, ledgerPath: ledgerPathFor(root), issues };
 }
 
-async function withService<T>(deps: PanelActionDeps, fn: (baseUrl: string) => Promise<T>): Promise<T> {
-  const server = createService({
+/**
+ * Stand the console up THE WAY `rmd serve` DOES — `buildServeServer`, the same assembler
+ * `src/run-task.ts` calls — instead of hand-listing the route builders.
+ *
+ * WHY THIS CHANGED. This helper used to build its own service from ten hand-listed builders. That
+ * is a SECOND registration list, and a suite driven from it is blind to the real one: every test
+ * below passed in full while `POST /v1/drain/feedback` was declared, aggregated, exercised here —
+ * and never mounted on the console, because `serve.ts` imported ten builders and the aggregator
+ * returned eleven. Six tests in this file stood up a real HTTP server, made real requests and
+ * asserted real 200s against a route no operator could reach. impl-EQ measured the same contrast
+ * from the other side: "my route-level suite fails 6 of 7; the pre-existing handler suite passes
+ * 15/15, completely blind."
+ *
+ * Routing every test through the production assembler removes the second list. Deleting a route's
+ * line from `serve.ts` now turns this suite red.
+ *
+ * ONE ROOT, DELIBERATELY. Production gives `buildServeServer` two different roots
+ * (`fleetControlRoot: config.root`, `questionsRoot: repoRoot`) and this helper points both at the
+ * caller's single `deps.root`, preserving every existing test's semantics exactly. That is the
+ * right split of duties, not an omission: which route reads WHICH root is asserted by
+ * test/route-wiring.test.ts, using two distinct directories. This file's job is handler behaviour
+ * — validation, scope, ledger attribution — on a correctly assembled server.
+ */
+function serveDepsFor(deps: PanelActionDeps): ServeDeps {
+  mkdirSync(join(deps.root, "plan"), { recursive: true });
+  const planPath = join(deps.root, "plan", "tasks.yaml");
+  if (!existsSync(planPath)) writeFileSync(planPath, "[]\n");
+  return {
+    board: { plan: { tasks: [], byId: new Map() }, ledgerPath: deps.ledgerPath, github: fakeGitHub() },
+    panelGraph: {
+      root: deps.root,
+      planPath,
+      ledgerPath: deps.ledgerPath,
+      github: { prView: () => null },
+      statusGithub: fakeGitHub(),
+      ratify: { approve: () => {}, reframe: () => {} },
+    },
+    ledgerPath: deps.ledgerPath,
+    issues: deps.issues,
+    fleetControlRoot: deps.root,
+    questionsRoot: deps.root,
     tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
-    routes: [
-      buildPauseRoute(deps),
-      buildResumeRoute(deps),
-      buildStopRoute(deps),
-      buildQuietHoursRoute(deps),
-      buildAnswerQuestionRoute(deps),
-      buildApproveManualRoute(deps),
-      buildEscalationMarkHandledRoute(deps),
-      buildDrainFeedbackRoute(deps),
-      buildKickRoute(deps),
-      buildDrainNowRoute(deps),
-    ],
-  });
+    pollMs: 50,
+    log: () => {},
+  };
+}
+
+async function withService<T>(deps: PanelActionDeps, fn: (baseUrl: string) => Promise<T>): Promise<T> {
+  const server = buildServeServer(serveDepsFor(deps));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = (server.address() as AddressInfo).port;
   try {
@@ -713,9 +750,14 @@ test("both /v1/drain/kick and /v1/drain/run are write-scoped: a read token gets 
   assert.equal(consumeDrainNow(root), null);
 });
 
-test("buildPanelActionRoutes registers the FULL write-action set, including the UP NEXT Run + Drain-now routes (fb-…9daa9b)", () => {
+// The console MOUNTS the UP NEXT Run + Drain-now routes (fb-…9daa9b). This used to read
+// `buildPanelActionRoutes(deps)` — the aggregator comparing itself to itself, which is true of a
+// list `serve.ts` never imports and says nothing about what an operator can reach. Asserting it
+// against `buildServeRoutes` keeps the original regression (those two routes must exist) and makes
+// it mean what its title always claimed.
+test("the console's real route table registers the UP NEXT Run + Drain-now routes (fb-…9daa9b)", () => {
   const deps = depsFor(mkdtempSync(join(tmpdir(), "panel-routes-")));
-  const paths = buildPanelActionRoutes(deps).map((r) => `${r.method} ${r.path}`);
-  assert.ok(paths.includes("POST /v1/drain/kick"), "the per-row Run kick route is in the complete set");
-  assert.ok(paths.includes("POST /v1/drain/run"), "the Drain-now route is in the complete set");
+  const paths = buildServeRoutes(serveDepsFor(deps)).map((r) => `${r.method} ${r.path}`);
+  assert.ok(paths.includes("POST /v1/drain/kick"), "the per-row Run kick route is mounted on the console");
+  assert.ok(paths.includes("POST /v1/drain/run"), "the Drain-now route is mounted on the console");
 });
