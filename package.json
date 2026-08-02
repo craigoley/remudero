@@ -27,6 +27,8 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "check": "node scripts/check.mjs",
     "test": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts \"test/**/*.test.ts\"",
     "test:ci": "node scripts/test-with-retry.mjs node --test --import tsx --import ./test/setup/tmp-hygiene.ts \"test/**/*.test.ts\"",
     "lint-plan": "tsx src/run-task.ts lint-plan",
