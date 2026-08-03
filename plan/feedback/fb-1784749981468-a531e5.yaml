@@ -17,5 +17,5 @@ raw: "WORKER OAUTH TOKEN-EXPIRY AUTO-RECOVERY (keychain arc, follow-on to
   provisioning), the W1-T235 PR #539, the 19:20Z ledger OAuth failures."
 attachments: []
 origin: cli
-status: new
+status: proposed
 proposal_pr: null
