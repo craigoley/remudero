@@ -1,0 +1,29 @@
+id: fb-1785780032614-be23bf
+ts: 2026-08-03T18:00:32.614Z
+raw: "LOCAL GATE INVOCATION MUST BE BYTE-IDENTICAL TO CI's — a session's own
+  retro found 5 of 6 errors were one failure mode: verifying a proxy for what a
+  gate does rather than running the gate's exact invocation on the real input.
+  Measured instances: grep -qF (fixed string) locally vs the executor's grep
+  -arn -- (basic regex), so a proof passed locally and failed review; a diff
+  filtered by src/**/*.ts which matched nothing, so diff-coverage reported OK
+  over ZERO lines; a claim checked against the expected phrase rather than the
+  whole body, missing a quoted claim the real checker catches. 'Be careful'
+  catches none of these; 'run the consumer's exact invocation' catches all of
+  them. RELATED PRECEDENT: npm run check shipped today binds tsc to the scoped
+  suite for the same reason — a validation whose result can go stale between
+  running and reporting must be bound to the thing it validates, not to a step
+  in a list. RECON: enumerate every gate a contributor is asked to run locally
+  (diff-coverage, lint-plan, check-proof, bodyContradictsDiff, commitlint, tsc)
+  and establish for each whether the documented local invocation is
+  byte-identical to CI's; report every divergence. Then assess a single entry
+  point that shells out to CI's own commands rather than approximating them. TWO
+  SUB-FINDINGS worth their own answer: (a) a gate that passes on ABSENT input is
+  not evidence — several instruments here have reported OK over an empty
+  denominator, so establish which can and whether each reports its input size;
+  (b) src/**/*.ts silently not matching src/run-task.ts is a footgun that cost
+  real cycles. Falsifying check: if every documented local invocation already
+  matches CI's, this is a documentation gap rather than a tooling one."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
