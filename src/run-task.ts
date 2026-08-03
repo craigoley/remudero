@@ -2185,13 +2185,20 @@ export interface FixRungOutcome {
   /** The last review computed — passing when `outcome === "fixed"`. */
   review: ReviewVerdict & { headSha: string; reviewerOutcome: string };
   strikes: number;
-  /** Set only when `outcome === "escalated"`. */
+  /**
+   * Set when `outcome === "escalated"`, and — W1-T296 — also set when a
+   * `"stood_down"` outcome escalated a foreign-authorship stand-down (the
+   * ONLY stand-down reason that opens a needs-human issue; the terminal-state
+   * reasons, W1-T177 below, still ledger-only — nothing for a human to decide
+   * on a merged/closed PR).
+   */
   issueUrl?: string;
   /**
    * W1-T177: set only when `outcome === "stood_down"` — the freshly observed
    * terminal-state reason (from {@link terminalStateReason}) that stopped a
    * strike from being spent, or the exhaustion escalate() from firing, on a
-   * PR that no longer carries a live block.
+   * PR that no longer carries a live block. W1-T296 extends this SAME field
+   * with a second reason source — see {@link branchAuthorshipStandDownReason}.
    */
   standDownReason?: string;
 }
@@ -2213,23 +2220,114 @@ function ghLiveState(prUrl: string): LiveStateResult {
 }
 
 /**
+ * W1-T296: one fresh, live read of a PR's head commit sha + its author —
+ * the branch-authorship stand-down's evidence. `ok:false` marks a genuinely
+ * FAILED or INDETERMINATE read (network/auth/rate-limit), mirroring
+ * {@link LiveStateResult}'s own contract: the caller must treat that exactly
+ * as if no check ran at all, never as foreign. `headSha`/`author` are present
+ * only when `ok`; `author` itself may still be absent (an unattributable
+ * commit, e.g. a squash-merge bot) even on an otherwise-successful read.
+ */
+export interface LiveHeadResult {
+  ok: boolean;
+  headSha?: string;
+  author?: string;
+}
+
+/**
+ * W1-T296: the real live-head reader the fix rung wires for its pre-strike
+ * branch-authorship check — a fresh `gh pr view --json headRefOid,commits`
+ * read (never a cached snapshot, and never the headRefOid-only read
+ * {@link realArmDeps} uses, which carries no author). Names the HEAD
+ * commit's author specifically (matched by `oid`, not just "the last commit
+ * listed") so the escalation this stands down into names the right person
+ * even when `commits` is not sha-ordered. A throw (rate limit, network,
+ * auth) or a response missing `headRefOid` reports `ok:false`.
+ */
+function ghLiveHead(prUrl: string): LiveHeadResult {
+  try {
+    const v = ghJson(["pr", "view", prUrl, "--json", "headRefOid,commits"]) as {
+      headRefOid?: string;
+      commits?: Array<{ oid?: string; authors?: Array<{ login?: string; name?: string }> }>;
+    };
+    if (!v?.headRefOid) return { ok: false };
+    const headCommit = v.commits?.find((c) => c.oid === v.headRefOid);
+    const author = headCommit?.authors?.[0]?.login ?? headCommit?.authors?.[0]?.name;
+    return { ok: true, headSha: v.headRefOid, author };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/**
+ * W1-T296 (the fix-rung pre-strike gate's second reason source): is a
+ * freshly-observed live head one the fix rung did NOT itself produce?
+ *
+ * `rungOwnHeadSha` is `undefined` on a FIRST round — this invocation has not
+ * pushed anything yet, so there is no reference to compare against, and a
+ * first round must never be read as foreign (standing down on it would
+ * disable the fix rung entirely; see runFixRung's own doc). From the second
+ * round on, `rungOwnHeadSha` is the head this invocation's OWN most recent
+ * strike produced (the SHA-LINEAGE signal the design prefers over a
+ * committer-identity check — it is exact, and needs no threshold). A live
+ * head equal to it is the rung's own work, not foreign, even across a CI
+ * wait. Any OTHER live head means something else moved the branch since.
+ *
+ * PURE and exported so the boundary is unit-testable independent of the
+ * rung's `gh`/spawn/push plumbing. The caller is responsible for its own
+ * fail-open direction on an unreadable `liveHead` (`ok:false` here always
+ * returns `undefined` — never foreign).
+ */
+export function branchAuthorshipStandDownReason(
+  rungOwnHeadSha: string | undefined,
+  liveHead: LiveHeadResult,
+): { reason: string; headSha: string; author: string } | undefined {
+  if (rungOwnHeadSha === undefined) return undefined; // first round: nothing to compare against yet
+  if (!liveHead.ok || !liveHead.headSha) return undefined; // unreadable: fail open, exactly as before this check existed
+  if (liveHead.headSha === rungOwnHeadSha) return undefined; // still the rung's own head
+  const author = liveHead.author ?? "unknown author";
+  return {
+    headSha: liveHead.headSha,
+    author,
+    reason:
+      `branch moved by a non-rung push — head is now ${liveHead.headSha} (author: ${author}), not the ` +
+      `${rungOwnHeadSha} this rung last pushed`,
+  };
+}
+
+/**
  * W1-T177: resolve a stand-down reason from an OPTIONAL live-state reader —
- * shared by the fix rung's two internal checks (top of round; immediately
- * before the exhaustion escalate()) so both read via the SAME fail-open
- * contract. `undefined` (no reader wired, or a failed/indeterminate read)
- * means "proceed exactly as before this check existed" — standing down fires
- * ONLY on a positive, freshly-observed terminal reading. A FAILED/
- * INDETERMINATE read (`ok:false`) is explicitly LEDGERED here (never a
- * silent swallow) so an unreadable state is legible on the ledger even
- * though it never halts anything — the read failure itself is observable,
- * distinct from an ordinary un-wired site (which never calls `log` at all).
+ * shared by the fix rung's THREE internal checks (top of round; immediately
+ * before a false-block escalation; immediately before the exhaustion
+ * escalate()) so all three read via the SAME fail-open contract. `undefined`
+ * (no reader wired, or a failed/indeterminate read) means "proceed exactly
+ * as before this check existed" — standing down fires ONLY on a positive,
+ * freshly-observed terminal reading. A FAILED/INDETERMINATE read (`ok:false`)
+ * is explicitly LEDGERED here (never a silent swallow) so an unreadable
+ * state is legible on the ledger even though it never halts anything — the
+ * read failure itself is observable, distinct from an ordinary un-wired site
+ * (which never calls `log` at all).
+ *
+ * W1-T296 extends this SAME function with a second reason source — branch
+ * authorship — rather than a parallel early-return path: `authorship`, when
+ * supplied, is consulted ONLY after the terminal-state read comes back
+ * OPEN, and ONLY the caller at site `rung.strike` ever passes it (the other
+ * two call sites omit it, so their behavior is byte-identical to before this
+ * task). A foreign read is distinguished on the return value's `foreignHead`
+ * field so the caller knows to escalate, not just ledger — the terminal-state
+ * reason never sets it (a merged/closed PR carries no operator-decidable
+ * question; W1-T196's same reasoning).
  */
 async function fixRungStandDownReason(
   readLiveState: ((prUrl: string) => LiveStateResult | Promise<LiveStateResult>) | undefined,
   prUrl: string,
   site: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
-): Promise<string | undefined> {
+  authorship?: {
+    readLiveHead: (prUrl: string) => LiveHeadResult | Promise<LiveHeadResult>;
+    rungOwnHeadSha: string | undefined;
+  },
+): Promise<{ reason: string; foreignHead?: { headSha: string; author: string } } | undefined> {
   if (!readLiveState) return undefined;
   const live = await readLiveState(prUrl);
   if (!live.ok) {
@@ -2241,7 +2339,23 @@ async function fixRungStandDownReason(
     log("fix.live_state_indeterminate", { site });
     return undefined;
   }
-  return terminalStateReason(live.state);
+  const terminal = terminalStateReason(live.state);
+  if (terminal) return { reason: terminal };
+
+  if (authorship) {
+    const liveHead = await authorship.readLiveHead(prUrl);
+    const foreign = branchAuthorshipStandDownReason(authorship.rungOwnHeadSha, liveHead);
+    if (foreign) {
+      return { reason: foreign.reason, foreignHead: { headSha: foreign.headSha, author: foreign.author } };
+    }
+    if (!liveHead.ok) {
+      // Same fail-open discipline as the terminal-state read above, ledgered
+      // under its own step name so the two indeterminate causes stay
+      // distinguishable on the ledger.
+      log("fix.live_head_indeterminate", { site });
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -2449,6 +2563,17 @@ export async function runFixRung(opts: {
      */
     readLiveState?: (prUrl: string) => LiveStateResult | Promise<LiveStateResult>;
     /**
+     * W1-T296: an OPTIONAL fresh read of THIS PR's live head sha + its head
+     * commit's author, consulted ONLY at the pre-strike gate (site
+     * `rung.strike`), and ONLY once this invocation has itself pushed at
+     * least one round (see {@link branchAuthorshipStandDownReason}'s
+     * "first round has no prior head" contract). Never a cached snapshot —
+     * a fresh `gh` read every time, mirroring `readLiveState`'s own
+     * discipline. Omitted, or a failed/indeterminate read, behaves EXACTLY
+     * as before this check existed: the rung proceeds.
+     */
+    readLiveHead?: (prUrl: string) => LiveHeadResult | Promise<LiveHeadResult>;
+    /**
      * W1-T138 (the #303/#305/#292/#315 fix): fetch the CURRENTLY failing
      * required check(s) + log tails for THIS pr, called whenever a strike's
      * push leaves CI non-green — refreshes the NEXT strike's ci-log evidence
@@ -2515,17 +2640,83 @@ export async function runFixRung(opts: {
   // resolved enough for GitHub to compute the merge ref, so every later
   // strike reverts to whichever mode its now-computable state derives.
   let currentMergeConflict = opts.mergeConflict;
+  // W1-T296: the head THIS INVOCATION's own most recent strike produced —
+  // `undefined` until the first round's push+review completes below, which
+  // is exactly the "first round has no prior head" contract
+  // {@link branchAuthorshipStandDownReason} documents: round 1 never reads
+  // as foreign no matter what the live head is.
+  let rungOwnHeadSha: string | undefined;
 
   while (review.state !== "success" && strikes < opts.strikeCap) {
     // W1-T177 SITE (i) — TERMINAL-STATE CHECK before `strikes++`: the ONLY
     // point that stops a strike being SPENT on a PR that went terminal
     // (merged/closed) since the previous round. Read FRESH every round —
-    // never the caller's snapshot.
-    const preStrikeStandDown = await fixRungStandDownReason(deps.readLiveState, opts.prUrl, "rung.strike", deps.log);
+    // never the caller's snapshot. W1-T296 composes a SECOND reason source
+    // into this SAME check (never a parallel early-return): a live head
+    // this invocation did not itself produce, which escalates rather than
+    // ledgering silently — see the `foreignHead` branch below.
+    const preStrikeStandDown = await fixRungStandDownReason(
+      deps.readLiveState,
+      opts.prUrl,
+      "rung.strike",
+      deps.log,
+      deps.readLiveHead ? { readLiveHead: deps.readLiveHead, rungOwnHeadSha } : undefined,
+    );
     if (preStrikeStandDown) {
-      deps.log("fix.stood_down", { site: "rung.strike", strike: strikes + 1, reason: preStrikeStandDown });
-      deps.say(`fix rung: standing down before strike ${strikes + 1} — ${preStrikeStandDown}`);
-      return { outcome: "stood_down", review, strikes, standDownReason: preStrikeStandDown };
+      if (preStrikeStandDown.foreignHead) {
+        // W1-T296: a human or a sibling session appears to be actively
+        // editing this branch — unlike the terminal-state reason above,
+        // this carries an operator-decidable question (yield, or confirm
+        // the takeover), so it escalates rather than ledgering silently.
+        // Distinct disposition from W1-T196's unattributable-pr stand-down,
+        // which ledgers because THAT state carries no decidable question.
+        const { headSha: foreignHeadSha, author: foreignAuthor } = preStrikeStandDown.foreignHead;
+        const issueUrl = escalate(
+          {
+            class: "BLOCKED",
+            taskId: opts.taskId,
+            runId: opts.runId,
+            // W1-T195 dedup shape: keying on the foreign head sha (never a
+            // cause) means repeated sweep passes that observe the SAME
+            // foreign head collapse into ONE issue instead of one per pass.
+            headSha: foreignHeadSha,
+            summary: `fix rung standing down — branch moved by a non-rung push (${foreignHeadSha.slice(0, 7)}) — ${opts.prUrl}`,
+            detail:
+              `The blocked_review FIX RUNG (W1-T76, W1-T296) observed ${opts.branch}'s head move to ` +
+              `${foreignHeadSha} (author: ${foreignAuthor}) before spending strike ${strikes + 1} — a head this ` +
+              `rung did not itself push. Dispatching a fix worker onto it risks either clobbering or duplicating ` +
+              `in-flight manual work, so the rung stood down without spending the strike. This differs from ` +
+              `W1-T196's unattributable-pr stand-down (which ledgers silently — that state carries no ` +
+              `operator-decidable question); here a human is apparently mid-edit, and only a human can say ` +
+              `whether the rung should yield, or the takeover should be confirmed and the rung resumed.`,
+            options: [
+              {
+                label: "yield",
+                detail: "leave the branch to whoever pushed it; close this PR or re-scope the task if the manual work supersedes it.",
+              },
+              {
+                label: "confirm-takeover",
+                detail: "the foreign push was expected (e.g. a hand-fix) — re-run `rmd fix` to resume the fix rung against the current head.",
+              },
+            ],
+            recommendation: "yield",
+          },
+          { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId },
+        );
+        deps.log("fix.stood_down", {
+          site: "rung.strike",
+          strike: strikes + 1,
+          reason: preStrikeStandDown.reason,
+          issue_url: issueUrl,
+        });
+        deps.say(
+          `fix rung: standing down before strike ${strikes + 1} — ${preStrikeStandDown.reason} — escalated: ${issueUrl}`,
+        );
+        return { outcome: "stood_down", review, strikes, standDownReason: preStrikeStandDown.reason, issueUrl };
+      }
+      deps.log("fix.stood_down", { site: "rung.strike", strike: strikes + 1, reason: preStrikeStandDown.reason });
+      deps.say(`fix rung: standing down before strike ${strikes + 1} — ${preStrikeStandDown.reason}`);
+      return { outcome: "stood_down", review, strikes, standDownReason: preStrikeStandDown.reason };
     }
 
     // W1-T58 (ratifies P3 via P8/RETRO-1784058021334, Standing rule 15): a diff
@@ -2782,6 +2973,10 @@ export async function runFixRung(opts: {
     // strike stays review-mode from here. W1-T138: this can still flip back
     // to true on a LATER strike if ITS push regresses CI again (see above).
     noReviewYet = false;
+    // W1-T296: this round's OWN push produced the head this review just
+    // evaluated — it becomes the reference the NEXT round's pre-strike
+    // authorship check compares the live head against (sha lineage).
+    rungOwnHeadSha = review.headSha;
     deps.log("fix.review", {
       strike: strikes,
       state: review.state,
@@ -2806,9 +3001,9 @@ export async function runFixRung(opts: {
         deps.log,
       );
       if (preFalseBlockStandDown) {
-        deps.log("fix.stood_down", { site: "rung.false_block", strikes, reason: preFalseBlockStandDown });
-        deps.say(`fix rung: standing down before false-block escalation — ${preFalseBlockStandDown}`);
-        return { outcome: "stood_down", review, strikes, standDownReason: preFalseBlockStandDown };
+        deps.log("fix.stood_down", { site: "rung.false_block", strikes, reason: preFalseBlockStandDown.reason });
+        deps.say(`fix rung: standing down before false-block escalation — ${preFalseBlockStandDown.reason}`);
+        return { outcome: "stood_down", review, strikes, standDownReason: preFalseBlockStandDown.reason };
       }
       const stillUnmet = review.criteria.filter((c) => !c.met);
       deps.log("fix.false_block", {
@@ -2869,9 +3064,9 @@ export async function runFixRung(opts: {
   // carries a live block.
   const preEscalateStandDown = await fixRungStandDownReason(deps.readLiveState, opts.prUrl, "rung.exhaustion", deps.log);
   if (preEscalateStandDown) {
-    deps.log("fix.stood_down", { site: "rung.exhaustion", strikes, reason: preEscalateStandDown });
-    deps.say(`fix rung: standing down before escalation — ${preEscalateStandDown}`);
-    return { outcome: "stood_down", review, strikes, standDownReason: preEscalateStandDown };
+    deps.log("fix.stood_down", { site: "rung.exhaustion", strikes, reason: preEscalateStandDown.reason });
+    deps.say(`fix rung: standing down before escalation — ${preEscalateStandDown.reason}`);
+    return { outcome: "stood_down", review, strikes, standDownReason: preEscalateStandDown.reason };
   }
 
   // Strikes exhausted — escalate (BLOCKED class, W1-T8) rather than loop
@@ -4367,6 +4562,9 @@ async function runTask(
           // W1-T177: the SAME live-state reader every fix-rung call site
           // wires — a fresh `gh pr view` read, never this run's own snapshot.
           readLiveState: ghLiveState,
+          // W1-T296: the pre-strike branch-authorship check's live-head
+          // reader — same fresh-`gh`-read discipline as `readLiveState`.
+          readLiveHead: ghLiveHead,
         },
       });
       review = rung.review;
@@ -10089,6 +10287,9 @@ export function buildSweepEffects(
             // wires — a fresh `gh pr view` read, never the sweep's `openPrs`
             // snapshot this dispatch was selected from.
             readLiveState: ghLiveState,
+            // W1-T296: the SAME live-head reader every fix-rung call site
+            // wires for the pre-strike branch-authorship check.
+            readLiveHead: ghLiveHead,
           },
         });
       } catch (e) {
