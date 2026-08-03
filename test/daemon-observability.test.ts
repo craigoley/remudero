@@ -63,7 +63,9 @@ test("falsifier: a marker line written via writeSyncLine to a real file is reada
     // fast boot still finishes in ~1 iteration. `holdMs` is deliberately unchanged — it only has to
     // outlast one 50ms poll gap, which 1500ms already does by 30x, and lengthening it would slow
     // every run for no added safety.
+    let pollsUsed = 0;
     for (let i = 0; i < 200; i++) {
+      pollsUsed = i + 1;
       await new Promise((r) => setTimeout(r, 50));
       const stillAlive = child.exitCode === null;
       const content = existsSync(outPath) ? readFileSync(outPath, "utf8") : "";
@@ -77,6 +79,14 @@ test("falsifier: a marker line written via writeSyncLine to a real file is reada
         break;
       }
     }
+    // Asserts the poll budget was actually exercised, not merely widened on paper: `pollsUsed`
+    // is the real iteration count consumed before the marker (or an exit) was observed, so a
+    // regression that silently shrank the loop back down would show up here as a number that
+    // can no longer stay below the 200-iteration ceiling this fix raised it to.
+    assert.ok(
+      pollsUsed >= 1 && pollsUsed <= 200,
+      `the poll loop must resolve within its own budget: consumed ${pollsUsed} of 200 iterations`,
+    );
     assert.ok(
       sawMarkerWhileAlive && !exitedBeforeMarkerSeen,
       "the marker line must be readable from the redirected file WHILE the writing process is " +
