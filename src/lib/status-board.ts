@@ -275,10 +275,11 @@ export type BlockerRow = CircuitBrokenBlocker | IndeterminateBlocker | BlockedPr
 export interface BlockersSection {
   rows: BlockerRow[];
   /** Set (W1-T306 design (4)) ONLY when the ledger holds at least one `sweep.disposed`
-   *  "not progressing" line whose live GitHub state could NOT be checked this cycle (no plan,
-   *  no gateway, or the gateway read itself failed) — those entries are withheld from `rows`
-   *  entirely rather than printed as if their disposition were still current. Absent whenever
-   *  every candidate WAS checked (whatever the outcome), or there was nothing to check at all. */
+   *  "not progressing" line whose live GitHub state could NOT be checked this cycle (no
+   *  gateway configured, or the gateway read itself failed — W1-T309: NOT gated on `plan`,
+   *  this class needs none) — those entries are withheld from `rows` entirely rather than
+   *  printed as if their disposition were still current. Absent whenever every candidate WAS
+   *  checked (whatever the outcome), or there was nothing to check at all. */
   blockedPrsUnverifiedReason?: string;
   nextAction?: string;
 }
@@ -891,52 +892,57 @@ function rawBlockedPrCandidates(lines: Array<Record<string, unknown>>): BlockedP
 
 /** `rawBlockedPrCandidates` RE-DERIVED against LIVE GitHub state (W1-T306 design (2): "a PR
  *  that is merged or closed is NOT a blocker … whatever the ledger still says about it; merge
- *  state is the authority"). A candidate is dropped when the batched projection confirms
- *  EITHER outcome for its PR NUMBER — checked over every projection's `prNumber` (not just the
- *  disposed line's own `task_id`, which can be absent/"SWEEP" while GitHub still knows the PR
- *  landed or closed) — mirroring `deriveIndeterminateBlockers`'s `projections?.get(taskId)?.merged`
- *  skip: landed (or abandoned) work is no longer news, no matter what an older ledger line says.
- *  ONLY called once the caller has already confirmed `projections` is live and reachable this
- *  cycle — see `deriveBlockers`'s unverified branch for the "cannot be read" case. */
-function deriveBlockedPrBlockers(
-  candidates: BlockedPrBlocker[],
-  projections: Map<string, StatusProjection>,
-  limit: number,
-): BlockedPrBlocker[] {
-  const settledPrNumbers = new Set<number>();
-  for (const projection of projections.values()) {
-    const settled = projection.merged || projection.prState?.toUpperCase() === "CLOSED";
-    if (settled && typeof projection.prNumber === "number") settledPrNumbers.add(projection.prNumber);
-  }
-  const isSettled = (taskId: string | undefined, prNumber: number): boolean => {
-    const own = taskId ? projections.get(taskId) : undefined;
-    if (own && (own.merged || own.prState?.toUpperCase() === "CLOSED")) return true;
-    return settledPrNumbers.has(prNumber); // matched by PR number when task id is absent/foreign
+ *  state is the authority") — via a DIRECT `github.prByRef(row.prNumber)` lookup on EACH
+ *  candidate's OWN PR number, never through a task's derived {@link StatusProjection}.
+ *
+ *  W1-T309: the prior implementation matched against the batched `projectPlan` projections
+ *  keyed by TASK id, which carry only that task's LATEST `pr.opened` line (status.ts's
+ *  `lastPrOpened`, "last one wins" — see `deriveStatus` rung (a)). A task dispatched more than
+ *  once opens a NEW PR each time; once a later dispatch opens PR #B, the task's projection
+ *  resolves against #B only, and an EARLIER PR #A that sweep once disposed "blocked" becomes
+ *  permanently unreachable through that projection — #A is never the task's "own" result and
+ *  never lands in any projection's `prNumber` either, so live confirmation that #A later merged
+ *  or was closed (abandoned) had nowhere to register. Every W1-T306 test happened to give each
+ *  disposed PR number as the SAME number the owning task's single projection resolved to (via
+ *  its lone `pr:` field or lone `pr.opened` line) — a shape multi-dispatch production tasks
+ *  don't share, which is exactly the seam those passing tests never exercised. Querying the
+ *  candidate's PR number directly needs no plan/projection at all, matching this module's own
+ *  documented claim that BLOCKERS is unaffected by a missing plan (see {@link
+ *  StatusBoardDeps.plan}'s doc) — a claim the projection-keyed implementation did not honor.
+ *  ONLY called once the caller has already confirmed `github` is live and reachable this cycle
+ *  — see `deriveBlockers`'s unverified branch for the "cannot be read" case. */
+function deriveBlockedPrBlockers(candidates: BlockedPrBlocker[], github: GitHub, limit: number): BlockedPrBlocker[] {
+  const isSettled = (prNumber: number): boolean => {
+    const pr = github.prByRef(prNumber);
+    return pr !== null && (pr.state.toUpperCase() === "MERGED" || pr.state.toUpperCase() === "CLOSED");
   };
-  return candidates.filter((row) => !isSettled(row.taskId, row.prNumber)).slice(0, limit);
+  return candidates.filter((row) => !isSettled(row.prNumber)).slice(0, limit);
 }
 
 function deriveBlockers(
   lines: Array<Record<string, unknown>>,
   projections: Map<string, StatusProjection> | undefined,
-  ghUnknownReason: string | undefined,
+  github: GitHub | undefined,
   limit: number,
 ): BlockersSection {
   const circuitBroken = deriveCircuitBrokenBlockers(lines);
   const indeterminate = deriveIndeterminateBlockers(lines, projections);
   let blockedPrs: BlockedPrBlocker[] = [];
   let blockedPrsUnverifiedReason: string | undefined;
-  if (projections) {
-    // Live GitHub state IS reachable this cycle: re-derive against it, exactly as design (2).
-    blockedPrs = deriveBlockedPrBlockers(rawBlockedPrCandidates(lines), projections, limit);
-  } else {
-    // W1-T306 design (4), DEGRADE HONESTLY: merge state cannot be read this cycle (no plan, no
-    // gateway, or the gateway itself failed) — printing the raw ledger dispositions here would
-    // be replaying HISTORY as CURRENT, exactly the failure this task exists to retire. Withhold
-    // the class and say so, rather than silently falling back to the stale ledger read.
-    const raw = rawBlockedPrCandidates(lines);
-    if (raw.length > 0) {
-      const reason = ghUnknownReason ?? "no reachable GitHub gateway this cycle";
+  const raw = rawBlockedPrCandidates(lines);
+  if (raw.length > 0) {
+    // W1-T309: gated on `github` alone, never on `projections`/`plan` — a missing/unreadable
+    // plan must not withhold this class when GitHub itself is perfectly reachable (see
+    // `deriveBlockedPrBlockers`'s own doc: this class needs no plan at all).
+    if (github && !github.readFailed?.()) {
+      // Live GitHub state IS reachable this cycle: re-derive against it, exactly as design (2).
+      blockedPrs = deriveBlockedPrBlockers(raw, github, limit);
+    } else {
+      // W1-T306 design (4), DEGRADE HONESTLY: merge state cannot be read this cycle (no
+      // gateway, or the gateway itself failed) — printing the raw ledger dispositions here
+      // would be replaying HISTORY as CURRENT, exactly the failure this task exists to retire.
+      // Withhold the class and say so, rather than silently falling back to the stale ledger read.
+      const reason = !github ? "no GitHub gateway configured for this read" : (github.readFailureReason?.() ?? "unknown");
       blockedPrsUnverifiedReason = `${raw.length} blocked-PR ledger ${raw.length === 1 ? "entry" : "entries"} could not be checked against live GitHub state (${reason}) — withheld rather than replay possibly-stale history as current`;
     }
   }
@@ -1199,7 +1205,7 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
   const { projections, unknownReason: ghUnknownReason } = projectPlanOnce(plan, deps.github, ledgerPath, lines, now);
   const queueHeadLimit = deps.queueHeadLimit ?? 5;
 
-  const blockers = deriveBlockers(lines, projections, ghUnknownReason, queueHeadLimit);
+  const blockers = deriveBlockers(lines, projections, deps.github, queueHeadLimit);
   const queueHead = deriveQueueHead(plan, lines, projections, ghUnknownReason, queueHeadLimit);
   const grepAnchorTrue = deps.grepAnchorTrue ?? ((a: EvidenceAnchor) => gitGrepAnchorTrue(deps.repoDir, "origin/main", a));
   const readProposalRegistry =
