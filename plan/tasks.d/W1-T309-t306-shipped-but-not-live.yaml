@@ -55,4 +55,4 @@
   risk: medium
   origin: oper#t306-not-live-2026-08-03
   plan_refs: ["§5C", "§7"]
-  files: [src/lib/status-board.ts]
+  files: [src/lib/status-board.ts, test/status-blockers-live.test.ts]
