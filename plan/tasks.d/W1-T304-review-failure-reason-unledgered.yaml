@@ -1,0 +1,50 @@
+- id: W1-T304
+  title: "a review FAILURE writes its reason only to the GitHub status description — `reasons: []` in the ledger, so no failure class can ever be counted, including a false positive blocking real work"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 50.00
+  rationale: "MEASURED 2026-08-03 while diagnosing a live false positive. PR #1193 (W1-T298) was
+    posted `failure` by `bodyContradictsDiff`. Its `review.posted` ledger row reads:
+    `state: failure`, `proof_exec: ['executed_pass','executed_pass','executed_pass']`,
+    `unmet_criteria: []`, `test_theater: False`, `capped: False`, `reasons: []`. Every criterion
+    substantiated, every proof executed and passed, the PR failed — and the row records NO reason.
+    The contradiction text existed only in the GitHub commit-status description.
+    THE CONSEQUENCE IS THAT THE FAILURE CLASS IS UNCOUNTABLE. `grep -a 'body contradicts its own
+    diff'` over `state/ledger.ndjson` unioned with all 664 rotations returns ZERO. Two instances
+    were confirmed that morning (#1192 and #1193) only because both were watched live; how often
+    this predicate has failed a correct PR before is unrecoverable from the evidence store. A gate
+    whose refusals cannot be counted cannot be audited, tuned, or trusted — and the status
+    description is a 140-character field that truncates the reason anyway.
+    THIS IS THE LEDGER RULE APPLIED TO THE GATE'S OWN OUTPUT. The repo already holds that a step
+    NAME is a claim rather than evidence, and that a line must carry the reason from the decision
+    that produced its outcome. `review.posted` carries `state: failure` with `reasons: []` — the
+    outcome without the reason, which is exactly the shape that rule forbids."
+  design: |
+    THE REASON TRAVELS WITH THE OUTCOME. Small, and mostly a plumbing correction.
+    (1) Whatever text the gate posts as the status description must ALSO be written to
+        `review.posted`, in a machine-readable form: a stable failure-class key (so it can be
+        counted) plus the human text (so it can be read). A truncated 140-char description is not
+        the artifact to persist — persist the full reason.
+    (2) `reasons: []` is currently populated from somewhere that does not include the
+        changeset-contradiction path. FIND EVERY path that can set `state: failure` and confirm each
+        one writes its reason; the contradiction predicate is the one measured here, but a fix that
+        closes only that path leaves the same hole for the next predicate. Enumerate them in the PR.
+    (3) A new field a DECISION reads must join `DECISION_RELEVANT_LEDGER_STEPS` in the same PR if
+        anything gates on it. If it is purely for counting and audit, say so explicitly rather than
+        registering it by reflex — over-registering costs rotation weight.
+    (4) DO NOT change any verdict's behaviour. This task is about making the existing decision
+        legible; a fix that also alters what passes or fails is out of scope and should be filed.
+  acceptance:
+    - claim: "a review posted as failure writes its failure-class key and full reason text into the review.posted ledger row, not only into the GitHub status description"
+      proof: "unit test: test/review-failure-reason-ledgered.test.ts"
+    - claim: "every code path that can post a failure state carries a reason, so no failure class is silently uncountable"
+      proof: "unit test: test/review-failure-reason-ledgered.test.ts"
+    - claim: "the reason persisted is the full text, not the truncated status description"
+      proof: "unit test: test/review-failure-reason-ledgered.test.ts"
+  risk: medium
+  origin: oper#unledgered-review-reason-2026-08-03
+  plan_refs: ["§5C", "§7B"]
+  files: [src/lib/review.ts]
