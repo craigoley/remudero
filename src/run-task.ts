@@ -329,6 +329,7 @@ import {
   materialiseBaseProofBlobs,
   REVIEW_CONTEXT,
   applyVerdictStability,
+  bodyContradictsDiff,
   buildReviewPrompt,
   cappedAnnotation,
   cappedOverrideFromLedger,
@@ -1210,6 +1211,125 @@ export function armFailureAction(stderrText: string): "direct-merge" | "ignore" 
 export async function fetchPrBodyViaGh(prUrl: string, gh: (args: string[]) => unknown = ghJson): Promise<string> {
   const view = gh(["pr", "view", prUrl, "--json", "body"]) as { body?: string };
   return view.body ?? "";
+}
+
+/**
+ * W1-T307: fetch a PR's CURRENT changeset (file paths only) via gh — the same "what did this PR
+ * actually touch" fact {@link bodyContradictsDiff} otherwise learns from a parsed `git diff`, read
+ * live instead since the fix rung calls this mid-strike, before anything re-fetches a diff blob.
+ * Injectable for the same reason {@link fetchPrBodyViaGh} is (a unit test drives the pure logic
+ * without a subprocess).
+ */
+export async function fetchPrDiffFilesViaGh(prUrl: string, gh: (args: string[]) => unknown = ghJson): Promise<string[]> {
+  const view = gh(["pr", "view", prUrl, "--json", "files"]) as { files?: { path: string }[] };
+  return (view.files ?? []).map((f) => f.path);
+}
+
+/**
+ * W1-T307: write a PR's body via gh — the mechanism {@link deriveChangesetClaimUpdate}'s narrow,
+ * mechanical edit is actually committed through. Injectable so a unit test can assert the UPDATE
+ * ITSELF (what was written) rather than mocking a subprocess.
+ */
+export async function updatePrBodyViaGh(prUrl: string, body: string): Promise<void> {
+  execFileSync("gh", ["pr", "edit", prUrl, "--body", body], { stdio: "pipe" });
+}
+
+/**
+ * A single enumerated item's wrapping, split from its core so {@link rebuildChangesetEnumeration}
+ * can copy the SAME wrap style (backticks, quotes, parens — whatever the body's own house style
+ * used) forward onto the new file list, rather than inventing a style of its own.
+ */
+function splitEnumerationWrap(item: string): { prefix: string; suffix: string } {
+  const prefixMatch = /^[`'"([]+/.exec(item);
+  const prefix = prefixMatch ? prefixMatch[0] : "";
+  const rest = item.slice(prefix.length);
+  const suffixMatch = /[`'")\].,;:]+$/.exec(rest);
+  const suffix = suffixMatch ? suffixMatch[0] : "";
+  return { prefix, suffix };
+}
+
+/**
+ * Rebuild an "exactly N files: a, b, c" claim's enumeration clause (the text after the colon)
+ * against the CURRENT `diffFiles`, copying the original items' wrap style forward. Returns
+ * `undefined` — fail safe, per {@link deriveChangesetClaimUpdate}'s doc — when the original
+ * items' wrapping is not uniform enough to copy forward with confidence: this is deliberately
+ * NOT a general prose rewriter, only a mechanical splice of a shape it can prove it understood.
+ */
+function rebuildChangesetEnumeration(raw: string, diffFiles: string[]): string | undefined {
+  if (diffFiles.length === 0) return undefined;
+  const items = raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  if (items.length === 0) return undefined;
+  const wraps = items.map(splitEnumerationWrap);
+  const prefix = wraps[0].prefix;
+  if (!wraps.every((w) => w.prefix === prefix)) return undefined; // inconsistent wrapping
+  const suffix = wraps[0].suffix;
+  const nonLast = wraps.slice(0, -1);
+  if (!nonLast.every((w) => w.suffix === suffix)) return undefined;
+  const last = wraps[wraps.length - 1];
+  if (!last.suffix.startsWith(suffix)) return undefined;
+  // The last item may carry EXTRA trailing sentence punctuation beyond the shared wrap (e.g.
+  // "`d.ts`." vs every other item's "`b.ts`") — preserved on the new last item, never invented.
+  const trailingPunct = last.suffix.slice(suffix.length);
+  if (trailingPunct && !/^[.,;:)\]}]*$/.test(trailingPunct)) return undefined;
+  return diffFiles
+    .map((f, i) => `${prefix}${f}${suffix}${i === diffFiles.length - 1 ? trailingPunct : ""}`)
+    .join(", ");
+}
+
+/**
+ * W1-T307 (the #1202/W1-T301 fixture — MEASURED: a body-coverage strike genuinely repaired
+ * coverage-ratchet by committing the missing test, which took the changeset from 4 files to 5;
+ * the body still read "This PR touches exactly 4 files: …", `bodyContradictsDiff` correctly
+ * flagged the now-stale claim, and the successful repair was converted into a `needs a human`
+ * block). THE COMMIT THAT CHANGES THE DIFF OWNS THE CLAIM ABOUT THE DIFF.
+ *
+ * Reuses `bodyContradictsDiff`'s OWN parse to decide whether a claim is even stale — never a
+ * second contradiction matcher that could disagree with the gate (design point 1). When exactly
+ * one "exactly N files[: a, b]" claim is the sole count-shaped contradiction, returns `body` with
+ * ONLY that claim's count + enumeration mechanically corrected to `diffFiles` (design point 2).
+ * Returns `undefined` — leave the body exactly as it is — in every other case:
+ *
+ *   - no changeset claim at all, or a claim that does not contradict the diff (nothing stale to
+ *     fix, and injecting a claim that was never there would create the very contradiction risk
+ *     this closes — design point 3);
+ *   - anything this cannot reconstruct with confidence: more than one count-shaped contradiction,
+ *     the claimed text repeated elsewhere in the body (an unambiguous splice is impossible), or an
+ *     enumeration whose item wrapping is not uniform enough to copy forward faithfully (design
+ *     point 4 — FAIL SAFE: a wrong edit certifies something false, worse than the stale claim the
+ *     review already correctly refuses).
+ *
+ * Path/absence claims ("no src/", "plan-only", "data-only") are deliberately NOT rewritten here —
+ * rewriting an arbitrary "no X" sentence is exactly the "rung rewriting a human's rationale"
+ * failure design point 2 warns is worse than the one being fixed; this stays scoped to the
+ * count/enumeration shape the #1202 fixture actually hit.
+ */
+export function deriveChangesetClaimUpdate(body: string, diffFiles: string[]): string | undefined {
+  if (diffFiles.length === 0) return undefined;
+  const contradictions = bodyContradictsDiff(body, diffFiles);
+  const countClaims = contradictions.filter((c) => /^exactly\s+\w+\s+files?\b/i.test(c.claim));
+  if (countClaims.length !== 1) return undefined; // none, or ambiguous — fail safe
+
+  const claim = countClaims[0].claim;
+  const firstIdx = body.indexOf(claim);
+  // The claim must appear, and appear EXACTLY ONCE — a repeat means the splice below could land
+  // on the wrong occurrence (or both), which is exactly the "wrong edit" design point 4 forbids.
+  if (firstIdx === -1 || body.indexOf(claim, firstIdx + 1) !== -1) return undefined;
+
+  const m = /^(exactly\s+)\w+(\s+files?\b)(?:\s*:\s*(.+))?$/i.exec(claim);
+  if (!m) return undefined;
+  const [, exactlyWord, , enumerationRaw] = m;
+
+  const newFilesWord = ` file${diffFiles.length === 1 ? "" : "s"}`;
+  let newClaim = `${exactlyWord}${diffFiles.length}${newFilesWord}`;
+  if (enumerationRaw !== undefined) {
+    const rebuilt = rebuildChangesetEnumeration(enumerationRaw, diffFiles);
+    if (rebuilt === undefined) return undefined; // fail safe — can't copy the wrap style forward
+    newClaim += `: ${rebuilt}`;
+  }
+  return body.slice(0, firstIdx) + newClaim + body.slice(firstIdx + claim.length);
 }
 
 function ensureTaskTrailer(prUrl: string, taskId: string): void {
@@ -2601,6 +2721,25 @@ export async function runFixRung(opts: {
      * exactly the pre-W1-T256 behavior; only body-coverage strikes ever consult it.
      */
     fetchPrBody?: (prUrl: string) => Promise<string>;
+    /**
+     * W1-T307: fetch THIS PR's CURRENT changeset (file paths) — consulted alongside
+     * `fetchPrBody` in `body-coverage` mode ONLY, to check whether this strike's own commit
+     * left the just-fetched body's file-count/enumeration claim stale (see
+     * {@link deriveChangesetClaimUpdate}). Injected only by tests; in production it DEFAULTS
+     * to {@link fetchPrDiffFilesViaGh}. Best-effort: a throwing fetcher skips the repair for
+     * this strike (the claim, if stale, is left exactly as `bodyContradictsDiff` would have
+     * found it — never a partial or guessed edit).
+     */
+    fetchPrDiffFiles?: (prUrl: string) => Promise<string[]>;
+    /**
+     * W1-T307: write a PR's body — how {@link deriveChangesetClaimUpdate}'s narrow,
+     * mechanical edit actually reaches GitHub before the review below re-runs. Injected only
+     * by tests; in production it DEFAULTS to {@link updatePrBodyViaGh}. Best-effort: a
+     * throwing writer leaves the live body stale (the review that follows judges the
+     * fetched-but-unwritten body text this round already computed, so the CORRECTED review
+     * report is still used for this round's verdict even if persisting it to GitHub failed).
+     */
+    updatePrBody?: (prUrl: string, body: string) => Promise<void>;
     runReview: (args: Parameters<typeof runReview>[0]) => ReturnType<typeof runReview>;
     /** Push whatever the fix worker committed. Best-effort — a worker that
      * already pushed leaves nothing new, which is not an error. */
@@ -3008,6 +3147,32 @@ export async function runFixRung(opts: {
         reviewReport = await fetchBody(opts.prUrl);
       } catch (e) {
         deps.log("fix.body_fetch_error", { strike: strikes, error: String((e as Error)?.message ?? e) });
+      }
+      // W1-T307: THE COMMIT THAT CHANGES THE DIFF OWNS THE CLAIM ABOUT THE DIFF. This strike
+      // is exactly the shape that repairs coverage by ADDING a file (the #1202/W1-T301
+      // fixture) — check whether the body just fetched now carries a stale file-count/
+      // enumeration claim against the CURRENT diff, and if `deriveChangesetClaimUpdate` can
+      // fix it with confidence, write the correction BEFORE the review below ever sees this
+      // body — never after, which would let this exact strike fail on the staleness it could
+      // have closed. Best-effort + fail-safe throughout: any throw, or `undefined` back from
+      // `deriveChangesetClaimUpdate` (no claim, or one it cannot update confidently), leaves
+      // `reviewReport` exactly as fetched above and lets the review judge it as it always has.
+      try {
+        const fetchDiffFiles = deps.fetchPrDiffFiles ?? fetchPrDiffFilesViaGh;
+        const diffFiles = await fetchDiffFiles(opts.prUrl);
+        const updatedBody = deriveChangesetClaimUpdate(reviewReport, diffFiles);
+        if (updatedBody !== undefined) {
+          const writeBody = deps.updatePrBody ?? updatePrBodyViaGh;
+          await writeBody(opts.prUrl, updatedBody);
+          deps.log("fix.body_claim_updated", { strike: strikes });
+          deps.say(
+            `fix rung: this strike's commit changed the file set — updated the PR body's stale ` +
+              `changeset claim to match before re-review`,
+          );
+          reviewReport = updatedBody;
+        }
+      } catch (e) {
+        deps.log("fix.body_claim_update_error", { strike: strikes, error: String((e as Error)?.message ?? e) });
       }
     }
     review = await deps.runReview({
