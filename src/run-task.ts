@@ -220,6 +220,7 @@ import {
   inboxDraftPrompt,
   isDraftStale,
   isRatifiedInLedger,
+  materializeDraftTaskIds,
   parseDraftAttemptCache,
   parseDraftCache,
   parseProposalRegistry,
@@ -12727,6 +12728,12 @@ export async function approveCommand(rest: string[], deps: { config?: Config; ga
   // Acceptance-criteria auto-authorship below — the closure approach lets openPlanPr's
   // signature (part of the RatifyGateway interface other tests fake) stay unchanged.
   let filedTaskIds: string[] = [];
+  // W1-T311: the block {@link materializeDraftTaskIds} reserves for this approve's placeholder
+  // ids — held until the PR actually exists (released below, once `result.ok`), so a
+  // console-initiated or second-machine approve overlapping this CLI one cannot mint the same
+  // ids. Released on any failure path too (the catch around `approveProposal` below) — every
+  // reserved id, used or not, must come back, or it is a phantom-id hole (W1-T199/224/247/263).
+  let idBlock: TaskIdReservationBlock | undefined;
   const gateway: RatifyGateway = deps.gateway ?? {
     createRatificationBranch(payload) {
       repoDir = join(config.root, "repos", repo);
@@ -12741,10 +12748,38 @@ export async function approveCommand(rest: string[], deps: { config?: Config; ga
       worktreeAdd(repoDir, worktreePath, branch, "origin/main");
       writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
 
+      // W1-T311: MINT + RESERVE the drafted fragment's placeholder (`NEW-<n>`) ids from the
+      // FRESH worktree's plan, AFTER it is created at origin/main and BEFORE anything is
+      // written — the same ordering `rmd triage`/`rmd plan` already use (:11831,:12159), calling
+      // the ONE shared derivation rather than re-deriving ids locally here. A degraded mint
+      // source or a reservation failure REFUSES (throws) before any write, so no partial union
+      // ever reaches the worktree.
+      const materialized = materializeDraftTaskIds(
+        { fragmentYaml: payload.fragmentYaml, stampLine: payload.stampLine },
+        {
+          mint: () =>
+            mintNextTaskIdWithHistory({
+              planPath: join(worktreePath as string, "plan", "tasks.yaml"),
+              repoRoot: worktreePath as string,
+              openPrTexts: () => openPrMintTexts(owner, repo),
+            }),
+          reserveBlock: (startId, count) => {
+            idBlock = reserveTaskIdBlock(startId, count, taskIdReservationsDir(config.root), {
+              info: { purpose: `rmd approve ${payload.proposalId} (run ${runId})` },
+            });
+            return idBlock;
+          },
+        },
+      );
+      if (!materialized.ok) {
+        throw new Error(`rmd approve: refusing to materialize task id(s) for ${payload.proposalId} — ${materialized.reason}`);
+      }
+      log("approve.id_materialized", { proposal_id: payload.proposalId, ids: materialized.ids });
+
       const tasksPath = join(worktreePath, "plan", "tasks.yaml");
-      writeFileSync(tasksPath, applyFragmentToPlanYaml(readFileSync(tasksPath, "utf8"), payload.fragmentYaml), "utf8");
+      writeFileSync(tasksPath, applyFragmentToPlanYaml(readFileSync(tasksPath, "utf8"), materialized.fragmentYaml), "utf8");
       const masterPlanPath = join(worktreePath, "MASTER-PLAN.md");
-      writeFileSync(masterPlanPath, applyStampToMasterPlan(readFileSync(masterPlanPath, "utf8"), payload.proposalId, payload.stampLine), "utf8");
+      writeFileSync(masterPlanPath, applyStampToMasterPlan(readFileSync(masterPlanPath, "utf8"), payload.proposalId, materialized.stampLine), "utf8");
 
       // W1-T136 (#287 class): regenerate plan/plan-index.json to reflect the just-stamped
       // MASTER-PLAN.md BEFORE the single git-add below, which already sweeps up anything
@@ -12755,10 +12790,10 @@ export async function approveCommand(rest: string[], deps: { config?: Config; ga
         log("plan_index.regen.error", { error: String((e as Error)?.message ?? e) });
       }
 
-      // fragmentYaml is already a valid top-level sequence (schema v1 — see
-      // applyFragmentToPlanYaml's doc comment), so a per-line regex over `- id: <id>` is
-      // sufficient without a full YAML re-parse.
-      filedTaskIds = [...payload.fragmentYaml.matchAll(/^- id:\s*(\S+)/gm)].map((m) => m[1]);
+      // materialized.fragmentYaml carries only REAL ids now (materializeDraftTaskIds already
+      // rewrote every placeholder) — same per-line `- id: <id>` regex the pre-W1-T311 code used,
+      // just over the rewritten text rather than payload.fragmentYaml verbatim.
+      filedTaskIds = [...materialized.fragmentYaml.matchAll(/^- id:\s*(\S+)/gm)].map((m) => m[1]);
 
       execFileSync("git", ["-C", worktreePath, "add", "-A", "--", "plan/", "MASTER-PLAN.md"], { stdio: "inherit" });
       execFileSync("git", ["-C", worktreePath, "commit", "-m", approveCommitMessage(payload)], { stdio: "inherit" });
@@ -12794,11 +12829,41 @@ export async function approveCommand(rest: string[], deps: { config?: Config; ga
     },
   };
 
-  const result = approveProposal(classification, gateway, { ledgerPath, runId });
+  let result: ReturnType<typeof approveProposal>;
+  try {
+    result = approveProposal(classification, gateway, { ledgerPath, runId });
+  } catch (e) {
+    // W1-T311: createRatificationBranch REFUSED (a degraded mint or a failed reservation) —
+    // or any other failure inside either gateway call. approveProposal never reached its own
+    // ledger append on this path, so NOTHING was ratified: no PR opened, the registry entry
+    // below is never touched (this proposal stays READY), and every id this run reserved
+    // (if any) comes back rather than punching a phantom-id hole.
+    log("approve.error", { error: String((e as Error)?.message ?? e) });
+    idBlock?.releaseAll();
+    if (repoDir && worktreePath) {
+      try {
+        worktreeRemove(repoDir, worktreePath);
+      } catch {
+        /* best-effort */
+      }
+      try {
+        removeRunLock(worktreePath);
+      } catch {
+        /* best-effort */
+      }
+    }
+    throw e;
+  }
   if (!result.ok) {
     console.error(`rmd approve: ${result.refusal}`);
     return 1;
   }
+
+  // W1-T311: both gateway calls above succeeded — the PR already exists, so the mint now sees
+  // this run's ids via openPrMintTexts. Release the reservation here rather than holding it
+  // through the CI wait below: holding longer only punches holes in the id space (the
+  // phantom-id trap: W1-T199/224/247/263), the same reasoning `rmd plan`'s own release carries.
+  idBlock?.releaseAll();
 
   // W1-T190: `ratify.approved` above just ledgered this proposal's ratification, but the
   // ledger and the registry are two different sources of truth — `rmd inbox`/the console's
