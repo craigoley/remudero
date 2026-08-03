@@ -46,6 +46,8 @@ import { appendLedger } from "./ledger.js";
 import { isPaused, isQuietHours, isStopped, isSafeTaskId, pauseDetail, requestDrainNow, requestKick, requestPause, requestStop, resumeFleet, setQuietHours, stopDetail } from "./fleet-control.js";
 import { appendQuestionAnswer } from "./worker.js";
 import { hashToken } from "./last-seen.js";
+import { readLedgerLines, DEFAULT_LIVENESS_BOUND_MS, type LedgerReader } from "./status.js";
+import { deriveLastPoll } from "./daemon-health.js";
 
 /** Non-task-scoped panel actions (pause/resume/stop/quiet-hours) ledger under this sentinel — mirrors run-task.ts's drainCommand, which ledgers its own fleet-wide lines as `task_id: "DRAIN"`. */
 export const PANEL_TASK_ID = "PANEL";
@@ -165,13 +167,40 @@ export function jsonAction<T extends object>(
 
 // ── GET /v1/control/status ──────────────────────────────────────────────────
 
-/** GET /v1/control/status's body — the CURRENT fleet-control tri-state, read-scoped. */
+/** GET /v1/control/status's body — the CURRENT fleet-control tri-state, read-scoped, PLUS a
+ *  daemon-liveness verdict (W1-T288) alongside the flags. */
 export interface FleetControlStatus {
   paused: boolean;
   pauseDetail?: string;
   stopped: boolean;
   stopDetail?: string;
   quietHours: boolean;
+  /**
+   * W1-T288: is a daemon actually alive, evidenced by a recent `daemon.*` ledger heartbeat
+   * within the liveness bound (the SAME bound W1-T179 already uses for a task row's "running"
+   * determination — status.ts's `DEFAULT_LIVENESS_BOUND_MS`, never a second one)? `true` when a
+   * heartbeat lands inside that window; OMITTED (never a fabricated `false`) when there is no
+   * heartbeat at all or the last one has aged past the bound — liveness is then simply NOT
+   * OBSERVED, the same fail-soft shape `deployer.ts`'s own liveness field already uses ("Omitted
+   * ⇒ liveness is simply not observed"). The three flags above are a CLAIM ("no one asked me to
+   * stop"); this field is EVIDENCE of activity — a crashed daemon leaves no stop flag behind, so
+   * without this field the flags alone render identically for "running" and "crashed".
+   */
+  daemonLive?: boolean;
+}
+
+/** {@link buildControlStatusRoute}'s dependencies. */
+export interface ControlStatusDeps extends Pick<PanelActionDeps, "root" | "ledgerPath"> {
+  /** Ledger reader; defaults to reading + parsing NDJSON from disk — mirrors daemon-health.ts's
+   *  own `DaemonHealthDeps.readLedger` (same injectable shape, never a second copy of the read). */
+  readLedger?: LedgerReader;
+  /** Clock; defaults to `Date.now`. Injectable so a test can assert an exact liveness boundary
+   *  without a real sleep (mirrors `DaemonHealthDeps.now`/status.ts's `DeriveDeps.now`). */
+  now?: () => number;
+  /** LIVENESS BOUND (W1-T179 design (ii), REUSED not reinvented): defaults to
+   *  {@link DEFAULT_LIVENESS_BOUND_MS} — see that constant's own doc for why a second,
+   *  differently-tuned threshold here would let this surface and the task-row surface disagree. */
+  livenessBoundMs?: number;
 }
 
 /**
@@ -181,19 +210,32 @@ export interface FleetControlStatus {
  * that invite discovery-by-actuation ("should I try clicking start?" on a STOP'd fleet). No
  * route on this surface exposed the tri-state before this task — every prior panel-actions.ts
  * route only ever returned the flag ITS OWN write just flipped, never the full current state.
+ *
+ * W1-T288: also carries `daemonLive`, derived from the SAME `daemon.*`-prefixed ledger heartbeat
+ * `daemon-health.ts`'s `deriveLastPoll` already computes for GET /v1/daemon-health — imported,
+ * not reimplemented, so this route and that one can never disagree about what "recent" means.
+ * The ledger is read ONCE per request by this route (no call out to the daemon-health route
+ * itself — that would be the double-fetch the task's design note rules out).
  */
-export function buildControlStatusRoute(deps: Pick<PanelActionDeps, "root">): Route {
+export function buildControlStatusRoute(deps: ControlStatusDeps): Route {
   return {
     method: "GET",
     path: "/v1/control/status",
     scope: "read",
     handler: (_req, res) => {
+      const now = deps.now ?? Date.now;
+      const readLedger = deps.readLedger ?? readLedgerLines;
+      const livenessBoundMs = deps.livenessBoundMs ?? DEFAULT_LIVENESS_BOUND_MS;
+      const poll = deriveLastPoll(readLedger(deps.ledgerPath));
+      const lastPollAgeMs = poll.lastPollTs ? Math.max(0, now() - Date.parse(poll.lastPollTs)) : undefined;
+      const daemonLive = lastPollAgeMs !== undefined && lastPollAgeMs <= livenessBoundMs ? true : undefined;
       const status: FleetControlStatus = {
         paused: isPaused(deps.root),
         pauseDetail: pauseDetail(deps.root),
         stopped: isStopped(deps.root),
         stopDetail: stopDetail(deps.root),
         quietHours: isQuietHours(deps.root),
+        daemonLive,
       };
       sendJson(res, 200, status);
     },
