@@ -158,6 +158,7 @@ import {
 import { findPendingLandingPr, recordDecision } from "./lib/feedback-landing.js";
 import { ghTraceGateway, renderTraceChain, traceForward, traceReverse } from "./lib/trace.js";
 import { runPreflight, type PreflightDeps } from "./lib/commit-message.js";
+import { runCiParity } from "./lib/ci-parity.js";
 import { ghIssueCloser } from "./lib/panel-actions.js";
 import {
   buildServeServer,
@@ -6087,17 +6088,24 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
 }
 
 /**
- * `rmd preflight [--from <ref>] [--to <ref>]` — W1-T221's hand-route commit gate.
- * Runs {@link runPreflight}'s three independent steps (commitlint, `tsc --noEmit`, and
+ * `rmd preflight [--from <ref>] [--to <ref>] [--ci-parity]` — W1-T221's hand-route commit
+ * gate. Runs {@link runPreflight}'s three independent steps (commitlint, `tsc --noEmit`, and
  * lib/commit-message.ts's own header/body checks) over the commit range not yet on
  * `origin/main`, prints every step's own pass/fail line UNCONDITIONALLY (never only on
  * failure — fixture 3's redirected-and-swallowed check is exactly the shape this avoids),
  * and exits non-zero iff any step failed. `--from`/`--to` override the default
  * `origin/main..HEAD` range so a caller can preflight an arbitrary range (e.g. re-checking
  * after amending).
+ *
+ * `--ci-parity` (W1-T294) is a SECOND, ADDITIVE mode on this same verb — never a second
+ * command, never a change to the three steps above. When passed, {@link runCiParity}'s
+ * steps (one or more per .github/workflows/ci.yml job — see lib/ci-parity.ts) print after
+ * the hand-route steps, with the same independent-step, print-everything, exit-non-zero-
+ * iff-any-failed discipline; omitting the flag leaves the shipped hand route byte-for-byte
+ * unchanged.
  */
 export async function preflightCommand(rest: string[], deps: PreflightDeps = {}): Promise<number> {
-  const badArg = unknownArgError("preflight", rest, ["--from", "--to"], []);
+  const badArg = unknownArgError("preflight", rest, ["--from", "--to"], ["--ci-parity"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
@@ -6107,15 +6115,23 @@ export async function preflightCommand(rest: string[], deps: PreflightDeps = {})
   const range = deps.range ?? (from !== undefined || to !== undefined ? { from: from ?? "origin/main", to: to ?? "HEAD" } : undefined);
 
   const result = runPreflight(repoRoot, { ...deps, range });
+  const ciParity = rest.includes("--ci-parity") ? runCiParity(repoRoot, { spawn: deps.spawn }) : undefined;
+
   for (const step of result.steps) {
     console.log(step.detail);
   }
+  if (ciParity) {
+    for (const step of ciParity.steps) {
+      console.log(step.detail);
+    }
+  }
+  const ok = result.ok && (ciParity?.ok ?? true);
   console.log(
-    result.ok
+    ok
       ? "\n### rmd preflight: PASS — commitlint, typecheck, and emitter checks are all clean; the push may proceed"
       : "\n### rmd preflight: FAIL — see the named step(s) above; do not push until every step passes",
   );
-  return result.ok ? 0 : 1;
+  return ok ? 0 : 1;
 }
 
 /** Best-effort read for the follow-up harvest's dedup source (W1-T105 design iv):
@@ -13460,7 +13476,7 @@ const COMMANDS: readonly CommandSpec[] = [
   {
     name: "preflight",
     usage:
-      "rmd preflight [--from <ref>] [--to <ref>]   # W1-T221: the HAND route's commit gate — runs commitlint, `tsc --noEmit`, and lib/commit-message.ts's own header/body checks as three INDEPENDENT steps (each names its own pass/fail, never chained with &&) over the commit range not yet on origin/main; --from/--to override the default origin/main..HEAD range; exits non-zero if any step fails, after every step has run and reported",
+      "rmd preflight [--from <ref>] [--to <ref>] [--ci-parity]   # W1-T221: the HAND route's commit gate — runs commitlint, `tsc --noEmit`, and lib/commit-message.ts's own header/body checks as three INDEPENDENT steps (each names its own pass/fail, never chained with &&) over the commit range not yet on origin/main; --from/--to override the default origin/main..HEAD range; --ci-parity (W1-T294) ADDS one or more named steps per .github/workflows/ci.yml job (lib/ci-parity.ts), computed against a freshly refreshed origin/main and CI's own coverage/diff-scoping flags, with a dedicated ci-parity:drift step that fails if a ci.yml job has no parity entry; exits non-zero if any step fails, after every step has run and reported",
   },
   {
     name: "next-task-id",
