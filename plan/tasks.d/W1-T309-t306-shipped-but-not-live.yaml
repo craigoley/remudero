@@ -52,7 +52,15 @@
       proof: "unit test: test/status-blockers-live.test.ts"
     - claim: "the report names what #1214's passing tests exercised that the rmd status path does not"
       proof: "grep: W1-T309 in plan/tasks.d/W1-T309-t306-shipped-but-not-live.yaml"
-  risk: medium
+  # RAISED medium -> high BY THE SAME EDIT THAT DECLARED THE TEST FILE, and the two are one change.
+  # `subsystemsOf` mints a tag per declared path, so adding `test/status-blockers-live.test.ts`
+  # made this task read as spanning TWO subsystems (status-blockers-live, status-board) and
+  # `sizingViolation` blocks that at risk<high — i.e. declaring a task's OWN test file is what
+  # created the violation. The two remedies Rule 19 names are "raise to high" or "decompose"; a
+  # source file and the test that proves it are ONE concern, so decomposing here would be a lie
+  # about the work. `high` is read as W1-T264 already established it — "spans more than one
+  # concern", not "dangerous" — and `sizingViolation` exempts it outright.
+  risk: high
   origin: oper#t306-not-live-2026-08-03
   plan_refs: ["§5C", "§7"]
-  files: [src/lib/status-board.ts]
+  files: [src/lib/status-board.ts, test/status-blockers-live.test.ts]
