@@ -12,10 +12,12 @@
  * OFFLINE-SAFE — the filesystem, the ledger, or a launchd process query injected by the
  * caller, never a blocking network call; the `origin/main` comparison is a LOCAL
  * `git rev-parse` (no `git fetch`). BLOCKERS BY CLASS/QUEUE HEAD/INBOX/HEADROOM (W1-T280) are
- * DERIVED — mostly still ledger/plan-local (the dispatch circuit breaker, blocked-PR reasons,
- * headroom telemetry), except the two facts that generically need a live merge-state read
- * (QUEUE HEAD's dispatch eligibility, INBOX's dep-merged predicate), which go through the
- * SAME batched {@link GitHub} gateway every other command already reads through. GITHUB IS
+ * DERIVED — some still ledger/plan-local (the dispatch circuit breaker, headroom telemetry),
+ * others need a live merge-state read (QUEUE HEAD's dispatch eligibility, INBOX's dep-merged
+ * predicate, and — since W1-T306 — BLOCKERS' own `blocked_pr` class: a PR the ledger once
+ * disposed as blocked is re-checked against live GitHub state every render, never printed on
+ * the ledger's word alone), which go through the SAME batched {@link GitHub} gateway every
+ * other command already reads through. GITHUB IS
  * DECORATION, NEVER A GATE (see {@link StatusBoardDeps.github}): a gateway failure — or none
  * configured at all — degrades ONLY the sections/rows that actually needed it to a stated
  * `unknownReason`, never a throw, never a silently-empty section indistinguishable from
@@ -263,11 +265,21 @@ export interface BlockedPrBlocker {
 
 export type BlockerRow = CircuitBrokenBlocker | IndeterminateBlocker | BlockedPrBlocker;
 
-/** Every class here is a PURE ledger read — ALWAYS present in full regardless of GitHub
- *  reachability (GitHub only ever ENRICHES the `indeterminate` class's note, never gates its
- *  presence). See status-board.ts's own header doc: GitHub is decoration, never a gate. */
+/** `circuit_broken` and `indeterminate` are PURE ledger reads — ALWAYS present in full
+ *  regardless of GitHub reachability (GitHub only ever ENRICHES `indeterminate`'s note, never
+ *  gates its presence). `blocked_pr` (W1-T306) is DIFFERENT: it is a claim about NOW, so its
+ *  rows are re-derived against live GitHub merge state every render — never the raw ledger
+ *  replay `sweep.disposed` alone would give. See status-board.ts's own header doc: GitHub is
+ *  decoration, never a gate — but decoration for `blocked_pr` means "unverified", not
+ *  "present the ledger's stale opinion anyway". */
 export interface BlockersSection {
   rows: BlockerRow[];
+  /** Set (W1-T306 design (4)) ONLY when the ledger holds at least one `sweep.disposed`
+   *  "not progressing" line whose live GitHub state could NOT be checked this cycle (no plan,
+   *  no gateway, or the gateway read itself failed) — those entries are withheld from `rows`
+   *  entirely rather than printed as if their disposition were still current. Absent whenever
+   *  every candidate WAS checked (whatever the outcome), or there was nothing to check at all. */
+  blockedPrsUnverifiedReason?: string;
   nextAction?: string;
 }
 
@@ -842,36 +854,23 @@ function deriveIndeterminateBlockers(
  *  `"dep-review"`/`"wait"` are ordinary in-progress states, not blockers. */
 const BLOCKED_PR_DISPOSITIONS: ReadonlySet<string> = new Set(["blocked-fixable", "blocked-ambiguous", "conflicted", "stale"]);
 
-function deriveBlockedPrBlockers(
-  lines: Array<Record<string, unknown>>,
-  projections: Map<string, StatusProjection> | undefined,
-  limit: number,
-): BlockedPrBlocker[] {
-  // Newest `sweep.disposed` line per PR number wins — ledger append order, later overwrites earlier.
+/** The newest `sweep.disposed` line per PR number, filtered to the "not progressing"
+ *  dispositions — a PURE ledger read with no live-state opinion at all (W1-T306's own
+ *  design step (1): "establish where the list comes from before changing anything"). Every
+ *  caller below either re-derives this against live GitHub state or, when that live read is
+ *  itself unavailable, uses only this raw count to name what it is declining to print. */
+function rawBlockedPrCandidates(lines: Array<Record<string, unknown>>): BlockedPrBlocker[] {
   const latestByPr = new Map<number, Record<string, unknown>>();
   for (const line of lines) {
     if (line.step !== "sweep.disposed") continue;
     if (typeof line.pr_number !== "number") continue;
     latestByPr.set(line.pr_number, line);
   }
-  // PR numbers the batched projection (when reachable) already confirms MERGED — checked by
-  // BOTH the disposed line's own task id AND a reverse index over every projection's `prNumber`,
-  // since a `sweep.disposed` line's `task_id` can be absent/"SWEEP" while GitHub still knows the
-  // PR landed. Mirrors `deriveIndeterminateBlockers`'s `projections?.get(taskId)?.merged` skip —
-  // landed work is no longer news, no matter what an older ledger line says.
-  const mergedPrNumbers = new Set<number>();
-  if (projections) {
-    for (const projection of projections.values()) {
-      if (projection.merged && typeof projection.prNumber === "number") mergedPrNumbers.add(projection.prNumber);
-    }
-  }
   const rows: BlockedPrBlocker[] = [];
   for (const [prNumber, line] of latestByPr) {
     const disposition = typeof line.disposition === "string" ? line.disposition : undefined;
     if (!disposition || !BLOCKED_PR_DISPOSITIONS.has(disposition)) continue;
     const taskId = typeof line.task_id === "string" && line.task_id !== "SWEEP" ? line.task_id : undefined;
-    if (projections?.get(taskId ?? "")?.merged) continue; // landed since — no longer news
-    if (mergedPrNumbers.has(prNumber)) continue; // landed since (matched by PR number, not task id)
     const reason = typeof line.reason === "string" && line.reason.trim().length > 0 ? line.reason : "reason not named";
     rows.push({
       kind: "blocked_pr",
@@ -887,19 +886,62 @@ function deriveBlockedPrBlockers(
     const tsB = typeof latestByPr.get(b.prNumber)?.ts === "string" ? (latestByPr.get(b.prNumber)!.ts as string) : "";
     return tsB.localeCompare(tsA); // newest-disposed first
   });
-  return rows.slice(0, limit);
+  return rows;
+}
+
+/** `rawBlockedPrCandidates` RE-DERIVED against LIVE GitHub state (W1-T306 design (2): "a PR
+ *  that is merged or closed is NOT a blocker … whatever the ledger still says about it; merge
+ *  state is the authority"). A candidate is dropped when the batched projection confirms
+ *  EITHER outcome for its PR NUMBER — checked over every projection's `prNumber` (not just the
+ *  disposed line's own `task_id`, which can be absent/"SWEEP" while GitHub still knows the PR
+ *  landed or closed) — mirroring `deriveIndeterminateBlockers`'s `projections?.get(taskId)?.merged`
+ *  skip: landed (or abandoned) work is no longer news, no matter what an older ledger line says.
+ *  ONLY called once the caller has already confirmed `projections` is live and reachable this
+ *  cycle — see `deriveBlockers`'s unverified branch for the "cannot be read" case. */
+function deriveBlockedPrBlockers(
+  candidates: BlockedPrBlocker[],
+  projections: Map<string, StatusProjection>,
+  limit: number,
+): BlockedPrBlocker[] {
+  const settledPrNumbers = new Set<number>();
+  for (const projection of projections.values()) {
+    const settled = projection.merged || projection.prState?.toUpperCase() === "CLOSED";
+    if (settled && typeof projection.prNumber === "number") settledPrNumbers.add(projection.prNumber);
+  }
+  const isSettled = (taskId: string | undefined, prNumber: number): boolean => {
+    const own = taskId ? projections.get(taskId) : undefined;
+    if (own && (own.merged || own.prState?.toUpperCase() === "CLOSED")) return true;
+    return settledPrNumbers.has(prNumber); // matched by PR number when task id is absent/foreign
+  };
+  return candidates.filter((row) => !isSettled(row.taskId, row.prNumber)).slice(0, limit);
 }
 
 function deriveBlockers(
   lines: Array<Record<string, unknown>>,
   projections: Map<string, StatusProjection> | undefined,
+  ghUnknownReason: string | undefined,
   limit: number,
 ): BlockersSection {
   const circuitBroken = deriveCircuitBrokenBlockers(lines);
-  const blockedPrs = deriveBlockedPrBlockers(lines, projections, limit);
   const indeterminate = deriveIndeterminateBlockers(lines, projections);
+  let blockedPrs: BlockedPrBlocker[] = [];
+  let blockedPrsUnverifiedReason: string | undefined;
+  if (projections) {
+    // Live GitHub state IS reachable this cycle: re-derive against it, exactly as design (2).
+    blockedPrs = deriveBlockedPrBlockers(rawBlockedPrCandidates(lines), projections, limit);
+  } else {
+    // W1-T306 design (4), DEGRADE HONESTLY: merge state cannot be read this cycle (no plan, no
+    // gateway, or the gateway itself failed) — printing the raw ledger dispositions here would
+    // be replaying HISTORY as CURRENT, exactly the failure this task exists to retire. Withhold
+    // the class and say so, rather than silently falling back to the stale ledger read.
+    const raw = rawBlockedPrCandidates(lines);
+    if (raw.length > 0) {
+      const reason = ghUnknownReason ?? "no reachable GitHub gateway this cycle";
+      blockedPrsUnverifiedReason = `${raw.length} blocked-PR ledger ${raw.length === 1 ? "entry" : "entries"} could not be checked against live GitHub state (${reason}) — withheld rather than replay possibly-stale history as current`;
+    }
+  }
   const rows: BlockerRow[] = [...circuitBroken, ...indeterminate, ...blockedPrs];
-  const section: BlockersSection = { rows };
+  const section: BlockersSection = { rows, blockedPrsUnverifiedReason };
   section.nextAction = pickNextAction(BLOCKERS_NEXT_ACTIONS, section);
   return section;
 }
@@ -925,6 +967,10 @@ const BLOCKERS_NEXT_ACTIONS: readonly NextActionRule<BlockersSection>[] = [
       const r = ctx.rows.find((row): row is IndeterminateBlocker => row.kind === "indeterminate")!;
       return `${r.taskId}'s GitHub read is indeterminate — ${r.ghWindowNote}`;
     },
+  },
+  {
+    applies: (ctx) => ctx.blockedPrsUnverifiedReason !== undefined,
+    action: (ctx) => `blocked-PR ledger entries are unverified — ${ctx.blockedPrsUnverifiedReason}`,
   },
 ];
 
@@ -1153,7 +1199,7 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
   const { projections, unknownReason: ghUnknownReason } = projectPlanOnce(plan, deps.github, ledgerPath, lines, now);
   const queueHeadLimit = deps.queueHeadLimit ?? 5;
 
-  const blockers = deriveBlockers(lines, projections, queueHeadLimit);
+  const blockers = deriveBlockers(lines, projections, ghUnknownReason, queueHeadLimit);
   const queueHead = deriveQueueHead(plan, lines, projections, ghUnknownReason, queueHeadLimit);
   const grepAnchorTrue = deps.grepAnchorTrue ?? ((a: EvidenceAnchor) => gitGrepAnchorTrue(deps.repoDir, "origin/main", a));
   const readProposalRegistry =
@@ -1268,12 +1314,13 @@ function renderBlockersBlock(b: BlockersSection): string[] {
   const circuitBroken = b.rows.filter((r): r is CircuitBrokenBlocker => r.kind === "circuit_broken");
   const blockedPrs = b.rows.filter((r): r is BlockedPrBlocker => r.kind === "blocked_pr");
   const indeterminate = b.rows.filter((r): r is IndeterminateBlocker => r.kind === "indeterminate");
-  if (circuitBroken.length === 0 && blockedPrs.length === 0 && indeterminate.length === 0) {
+  if (circuitBroken.length === 0 && blockedPrs.length === 0 && indeterminate.length === 0 && !b.blockedPrsUnverifiedReason) {
     out.push("no blockers");
   }
   for (const r of circuitBroken) out.push(`circuit-broken : ${r.taskId} — ${r.resetNote}`);
   for (const r of blockedPrs) out.push(`blocked PR     : #${r.prNumber}${r.taskId ? ` (${r.taskId})` : ""} [${r.disposition}] — ${r.reason}`);
   for (const r of indeterminate) out.push(`indeterminate  : ${r.taskId} — ${r.ghWindowNote}`);
+  if (b.blockedPrsUnverifiedReason) out.push(`blocked PR     : unverified — ${b.blockedPrsUnverifiedReason}`);
   if (b.nextAction) out.push(`next action: ${b.nextAction}`);
   return out;
 }
