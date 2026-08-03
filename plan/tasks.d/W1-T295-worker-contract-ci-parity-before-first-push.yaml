@@ -1,0 +1,71 @@
+- id: W1-T295
+  title: "the implement and fix prompts tell a worker to commit and push with nothing said about reaching green first — the output contract must require a green CI-parity preflight BEFORE the first push"
+  repo: remudero
+  depends_on: [W1-T294]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: "READ AT INTAKE from src/lib/compaction.ts. outputContractLines goes straight from 'Otherwise:
+    stage the changed file(s), commit, then run git push origin HEAD' to opening the PR. The contract already
+    carries the commit-message rules (commitMessageContractLines), the body-versus-diff rules
+    (bodyVsDiffContractLines) and the proof-substantiation rule — every one of them added after a gate fired —
+    and says NOTHING about the worker verifying its own change against the gates before the first push.
+    THE ONE PLACE THE RULE EXISTS TODAY IS PROSE IN A DOC. CLAUDE.md's 'Before you push' section records that
+    coverage-ratchet blocked three consecutive PRs on first push, each costing an amend, a force-push and a CI
+    round-trip. That is a report, and LEARNINGS' PR 407 entry is explicit that a report is not a backlog and
+    that a gap named only in prose leaks.
+    THE COST IS PAID IN STRIKES. A red first push spends a fix-rung attempt on infrastructure discovery rather
+    than on a review finding — the filing feedback's whole complaint, and the shape W1-T210/#585 paid for
+    across a five-layer chain most of which reproduced locally.
+    THE DRIFT CLASS IS ALREADY DOCUMENTED HERE. PR #427/#428: renderFixPrompt had push guidance but no
+    commit-message guidance because the rule had been shipped to the implement contract only, so a fix worker
+    authored a 111-character header and blocked the PR. That is why this must land as ONE shared literal both
+    prompts compose, exactly as commitMessageContractLines and bodyVsDiffContractLines already do."
+  design: |
+    ONE SHARED LITERAL, TWO PROMPTS. Add the requirement as its own contract-lines function beside
+    commitMessageContractLines and bodyVsDiffContractLines in src/lib/compaction.ts, composed into BOTH the
+    implement contract and the fix rung's prompt. Two copies of one rule is the #427/#428 failure restated;
+    a rule that reaches only the implement lane is the same defect one lane over.
+    WHAT IT SAYS. Run the parity preflight (W1-T294's mode) and reach green BEFORE the first push, fixing what
+    it names rather than pushing to find out. State it as an ordered step in the same place the contract
+    already tells the worker to stage, commit and push, so it is impossible to follow the contract in order and
+    skip it.
+    ONCE, NOT PER COMMIT. The requirement is about the FIRST push — the expensive steps are diff-scoped in the
+    parity mode itself, and a rule that reads as 'before every push' would be ignored or would cost more than
+    the round-trips it saves.
+    IT MUST SURVIVE A COMPACTION. This belongs with the constraints re-injected verbatim after compaction
+    (MASTER-PLAN section 8B, renderAnchorBlock) rather than only in the turn-0 prompt, since the push happens
+    at the END of a long run — which is exactly where a lost instruction costs the round-trip it was meant to
+    prevent.
+    ADVISORY BY DESIGN, FOR NOW, AND SAID OUT LOUD. This is prompt contract text, so it is judgment, not
+    supervision (MASTER-PLAN standing rule 12). A deterministic refusal of the push itself would need a sandbox
+    hook, and a wedged push hook stops every PR the fleet opens; that escalation is deliberately NOT taken here
+    and should be filed on EVIDENCE that the contract fails to hold, not in advance of it.
+    EXPLICITLY NOT IN SCOPE: building or changing the parity check set (W1-T294), any git hook, and any change
+    to the review gate or the strike accounting.
+  acceptance:
+    - claim: "the implement output contract requires a green CI-parity preflight before the first push, stated at turn 0 rather than only after a check has already gone red"
+      proof: "unit test: test/ci-parity-contract.test.ts"
+    - claim: "the fix rung's prompt carries the byte-identical requirement from the same shared source, so the two prompts cannot drift the way the commit-message rule once did"
+      proof: "unit test: test/ci-parity-contract.test.ts"
+    - claim: "the requirement names the exact command a worker is expected to run and says the named failures are fixed before pushing, not after"
+      proof: "unit test: test/ci-parity-contract.test.ts"
+    - claim: "the requirement is part of the block re-injected verbatim after a compaction, so a long run cannot lose it before it reaches the push"
+      proof: "unit test: test/ci-parity-contract.test.ts"
+    - claim: "both prompt renderers consume the shared contract function rather than restating its text"
+      proof: "grep: ciParityContractLines( in src/run-task.ts"
+  risk: low
+  origin: feedback#fb-1784762611444-e6bdc0
+  plan_refs: ["§8B", "§5C"]
+  files: [src/lib/compaction.ts]
+  status: queued
+  attempts: 0
+  note: "FILED FROM fb-1784762611444-e6bdc0, the second half of that feedback: W1-T294 makes a local run mean
+    what a CI run means, and this task is what makes a worker do it. depends_on W1-T294 because a contract line
+    naming a command that does not exist yet is worse than no line.
+    ONE MODULE by the sizing count: files: names src/lib/compaction.ts, where the sibling contract literals
+    already live; the prompt renderers that compose it are in run-task.ts and are proven by the call-site grep
+    criterion rather than by widening the file list.
+    risk:low and budget 40 — this is text plus two call sites plus a drift test, and the shared-literal shape it
+    copies is already shipped twice over."

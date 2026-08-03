@@ -1,0 +1,92 @@
+- id: W1-T294
+  title: "`rmd preflight` covers 3 of CI's 14 jobs — a --ci-parity mode that mirrors the workflow's own check set, computed against the SAME merge-base and the SAME coverage flags CI uses"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  rationale: "MEASURED AT INTAKE against .github/workflows/ci.yml and the shipped CLI.
+    THE GAP IS ARITHMETIC. ci.yml defines fourteen jobs: ci (tsc --noEmit + test:ci), commitlint, leak-grep,
+    coverage-ratchet (which also runs the diff-coverage step), mutation-ratchet, learnings-budget-ratchet,
+    jscpd-gate, refactor-campaign, claims, lint-plan, depcruise, containment-probe, api-client-drift and
+    no-hand-rolled-fetch. The shipped `rmd preflight` (W1-T221, preflightCommand in src/run-task.ts, listed in
+    docs/cli-reference.md) runs THREE steps: commitlint, tsc --noEmit and lib/commit-message.ts's own
+    header/body checks. Everything a coverage, plan-lint, claims, fitness or drift job would say is
+    discoverable only after a push.
+    THE FIXTURE THIS WAS FILED FROM. W1-T210/#585 needed a five-layer chain — a covering test,
+    --enable-source-maps on the coverage run, the fix-fence extraction into src/lib/fix-fence.ts, the
+    diff-coverage non-executable-line fix, a coverage-baseline re-capture and a merge-base refresh. Most of
+    those layers were reproducible locally; each was instead discovered one CI round-trip at a time.
+    THE PROSE RECIPE THAT EXISTS IS NOT PARITY, and that is the sharp point. CLAUDE.md's 'Before you push'
+    note gives a diff-coverage recipe that (a) scopes the coverage run to the TOUCHED test files while the
+    coverage-ratchet job runs the whole test/**/*.test.ts glob with --test-coverage-exclude=test/**, and
+    (b) diffs against whatever origin/main this checkout last fetched, while the job diffs
+    \"$BASE_SHA\"...HEAD from a fetch-depth:0 checkout where BASE_SHA is the pull request's base sha. Both
+    differences change the verdict, so a locally-green recipe run can still land red — which is the merge-base
+    layer of the #585 chain restated. LEARNINGS' PR 407 entry is the doctrine: a gap named only in prose is a
+    leak.
+    WHY NOT A SECOND VERB: the verb already exists, already has the independent-step discipline this needs
+    (W1-T221 fixture 3 — a chained, redirected check reported its failure only by staying silent), and a second
+    command would be a second place for the same rules to drift."
+  design: |
+    ONE NEW MODE ON THE EXISTING VERB — `rmd preflight --ci-parity` — never a second command, and never a
+    change to the default no-flag behaviour, which is the hand route's shipped commit gate and stays exactly
+    as it is.
+    THE STEP LIST IS DATA, MIRRORING ci.yml. Each parity step names the CI job it stands in for and the command
+    that job runs. A job that is deliberately NOT mirrored (because it cannot be reproduced locally, or because
+    its cost is not worth paying before every push) is listed with its reason rather than omitted silently — an
+    absent entry and a considered exclusion must not look the same. The drift falsifier matters more than the
+    initial contents: a job added to ci.yml with no entry in the table has to turn this red.
+    MERGE-BASE PARITY IS A FIRST-CLASS STEP, NOT AN IMPLEMENTATION DETAIL. The diff fed to
+    scripts/diff-coverage.mjs is computed the way the workflow computes it: refresh the base ref first, then a
+    three-dot diff against that refreshed tip. A stale base silently changes which lines count as added, and
+    that is one of the layers the filing fixture paid for.
+    COVERAGE PARITY MEANS THE SAME FLAGS AND THE SAME SCOPE. The lcov this consumes is produced with
+    --experimental-test-coverage, --enable-source-maps and --test-coverage-exclude=test/** over the full test
+    glob, because --enable-source-maps is what makes lcov's DA line numbers agree with git diff's numbering
+    (ci.yml records the measurement: a source at true line 1120 was reported at 506 without it), and a scoped
+    run attributes a line to nothing when the test that covers it was not in the scope.
+    COST IS BOUNDED BY REUSING CI'S OWN TRIGGERS, NEVER BY RE-DECIDING THEM. mutation-ratchet is already
+    diff-scoped by scripts/mutation-ratchet.mjs --changed-files, containment-probe by
+    .github/scripts/containment-diff-trigger.ts, refactor-campaign by a label — the parity mode calls those
+    same predicates, so a diff that cannot move a score skips that step locally exactly as it does in CI.
+    A STEP THAT CANNOT RUN IS NAMED AND STILL RED. An unavailable toolchain reports its own distinct line and
+    a non-zero exit; it never reports as a pass and never disappears into a missing success line.
+    EXPLICITLY NOT IN SCOPE: changing any CI job, changing any recorded baseline, changing the default
+    preflight behaviour, and wiring the worker prompt to this mode (that is W1-T295).
+  acceptance:
+    - claim: "every job defined in .github/workflows/ci.yml is either mirrored by a named parity step or carries a recorded reason for exclusion, and a job present in the workflow with neither turns the check red"
+      proof: "unit test: test/preflight-ci-parity.test.ts"
+    - claim: "the diff handed to the diff-coverage step is computed against a freshly refreshed base with a three-dot range, so a checkout whose base ref is behind yields the same added-line set as the refreshed one rather than a different verdict"
+      proof: "unit test: test/preflight-ci-parity.test.ts"
+    - claim: "the coverage step runs with source maps enabled, the test directory excluded from the ratio, and the full test glob in scope — a scoped or source-map-less invocation is refused rather than reported green"
+      proof: "unit test: test/preflight-ci-parity.test.ts"
+    - claim: "the diff-scoped steps consult the same trigger predicates CI consults, so a diff that cannot move a score is skipped locally for the same reason and with the same answer"
+      proof: "unit test: test/preflight-ci-parity.test.ts"
+    - claim: "each step reports its own pass or fail independently and one failure never prevents a later step from running, with a non-zero exit only after every step has reported"
+      proof: "unit test: test/preflight-ci-parity.test.ts"
+    - claim: "a step whose toolchain is unavailable prints a distinct named line and exits non-zero, so an unrunnable check can never read as a passing one"
+      proof: "unit test: test/preflight-ci-parity.test.ts"
+    - claim: "`rmd preflight` with no flag still runs exactly the shipped hand-route steps, unchanged"
+      proof: "unit test: test/preflight.test.ts"
+  risk: medium
+  origin: feedback#fb-1784762611444-e6bdc0
+  plan_refs: ["§5C", "§5"]
+  files: [src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "FILED FROM fb-1784762611444-e6bdc0. The feedback asks for workers to reach green locally before the
+    first push; that decomposes into a suite that actually mirrors CI (this task) and the worker-side
+    requirement to run it (W1-T295). Kept apart under Rule 19 — one is a CLI check set, the other is prompt
+    contract text.
+    ONE MODULE by the sizing count: files: names src/run-task.ts, where preflightCommand already lives. This
+    mirrors W1-T221's own filing shape, whose files: named src/lib/commit-message.ts while the verb it added
+    landed in run-task.ts.
+    OBSERVED, NOT ACTED ON: plan/tasks.d/W1-T221-hand-author-preflight.yaml still reads status: queued while
+    `rmd preflight` is live in the CLI registry, in docs/cli-reference.md and under test in
+    test/preflight.test.ts. That looks like an unreconciled status rather than unshipped work; it is recorded
+    here for the retro and deliberately NOT edited by this filing, and this task takes no depends_on on it so a
+    stale status cannot gate the queue.
+    risk:medium — it spawns nothing and dispatches nothing, but a parity suite that is wrong in the LENIENT
+    direction teaches a false all-clear, which is worse than no suite at all."
