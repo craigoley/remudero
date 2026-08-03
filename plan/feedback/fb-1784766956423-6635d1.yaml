@@ -13,5 +13,5 @@ raw: "DEPLOY TRIGGER MUST COMPARE BOOTED SHA, NOT CHECKOUT SHA —
   recovering on the next main-advance is a lucky property, not a design."
 attachments: []
 origin: cli
-status: new
+status: rejected
 proposal_pr: null
