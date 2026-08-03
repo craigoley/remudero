@@ -3519,6 +3519,25 @@ function reconObservedToContext(recon: WorkerResult, taskId: string): string {
 }
 
 /**
+ * W1-T299: the CONTEXT block injected when recon DEGRADED — a bounded retry (see the recon
+ * spawn site below) still ended in an error, and the run proceeds to implement anyway rather
+ * than dying with the whole dispatch (a read-only preamble failing must never cost the task a
+ * dispatch it can never get back). This is `reconObservedToContext`'s degraded sibling: an
+ * EXPLICIT absence claim, never a silently-empty block, so implement is TOLD recon produced
+ * nothing rather than inferring it from an empty CONTEXT section. Carries the same
+ * `recon#<taskId>` citation so the provenance linter (assertProvenance) treats "recon produced
+ * nothing" as a claim like any other, not an omission that slips past unlinted.
+ */
+function reconDegradedContextNote(subtype: string, taskId: string): string {
+  return (
+    `- RECON CONTEXT ABSENT: the recon worker errored twice in a row (${subtype}) and the ` +
+    "bounded retry was exhausted, so no OBSERVED lines are available for this run — do not " +
+    "assume recon ran cleanly; rely only on the CONTEXT/TASK below and your own read-only " +
+    `inspection. ${citation(`recon#${taskId}`)}`
+  );
+}
+
+/**
  * The RECON spawn's turn cap — the ONE place the number lives, so the code and every
  * `routes.recon` cell in `.remudero/mounts.yaml` cannot say different things (the impl-BP/impl-BS
  * lineage: a table row asserting what the code does not do). Deliberately a constant rather than
@@ -3533,11 +3552,16 @@ function reconObservedToContext(recon: WorkerResult, taskId: string): string {
  *
  * 11 of 18 died on the cap — 90% of haiku recons and 25% of sonnet's. It binds on BOTH models,
  * harder on the cheaper one; it is not a haiku-capability story, and every failure across both
- * lands on exactly the same number. Because `failOnWorkerError(recon, "recon")` is fatal to the
- * whole run, each death burned a dispatch WITHOUT opening a PR, and five of those trip
- * `dispatchesWithoutNewOwnedPr`'s breaker — which resets only on a fresh owned PR. That is how
- * W1-T288 (2 deaths, both sonnet) and W1-T295 (5, all haiku) latched dead and the queue reached
- * "nothing dispatchable" with 14% of the weekly headroom spent.
+ * lands on exactly the same number. AT THE TIME OF THIS MEASUREMENT, `failOnWorkerError(recon,
+ * "recon")` was UNCONDITIONALLY fatal to the whole run, so each death burned a dispatch WITHOUT
+ * opening a PR, and five of those tripped `dispatchesWithoutNewOwnedPr`'s breaker — which resets
+ * only on a fresh owned PR. That is how W1-T288 (2 deaths, both sonnet) and W1-T295 (5, all
+ * haiku) latched dead and the queue reached "nothing dispatchable" with 14% of the weekly
+ * headroom spent. W1-T299 (this task's own companion fix, filed off this exact measurement)
+ * changed that: a recon error now gets one bounded retry, and a SECOND error degrades — the run
+ * still reaches implement with an explicit absent-context note — rather than ending the dispatch.
+ * The turn cap itself (this constant) is unchanged; only recon's failure no longer costs the
+ * task a dispatch it can never get back.
  *
  * 20 clears the highest observed completion (17) with margin while staying far below the implement
  * rows' 400. Recorded honestly: that 17-turn success happened under a cap of 8, so the SDK's
@@ -4122,19 +4146,22 @@ async function runTask(
     const operatorNotes = loadOperatorNotesForTask(repoRoot, task.id);
     const operatorNotesBlock = renderOperatorNotes(operatorNotes);
     log("operator_notes.injected", { count: operatorNotes.length });
-    const recon = account(
-      await spawn({
+    // impl-BP: model/effort come from the RECON row of the mount table (task_type "recon" ×
+    // risk × class, §9) — the same discipline the implement spawn ~100 lines below states as
+    // "never a hardcoded literal". These were simply absent, so every recon ran on the SDK
+    // default and `routes.recon` was dead data.
+    //
+    // `undefined` is a SUPPORTED value, not a bug: `lib/worker.ts`'s `if (args.model)` /
+    // `if (args.effort)` guards leave the option unset, which is exactly today's behaviour.
+    // That is what makes an absent/unreadable `recon:` row inert here — see resolveRunMounts.
+    //
+    // Hoisted into a closure (W1-T299) so the SAME spawn can be issued a bounded second time
+    // on a worker error, below — never a copy-pasted second call site to drift out of sync.
+    const spawnRecon = () =>
+      spawn({
         cwd: worktreePath,
         permissionMode: "bypassPermissions",
         settingsFile,
-        // impl-BP: model/effort come from the RECON row of the mount table (task_type "recon" ×
-        // risk × class, §9) — the same discipline the implement spawn ~100 lines below states as
-        // "never a hardcoded literal". These were simply absent, so every recon ran on the SDK
-        // default and `routes.recon` was dead data.
-        //
-        // `undefined` is a SUPPORTED value, not a bug: `lib/worker.ts`'s `if (args.model)` /
-        // `if (args.effort)` guards leave the option unset, which is exactly today's behaviour.
-        // That is what makes an absent/unreadable `recon:` row inert here — see resolveRunMounts.
         model: reconMount?.model,
         effort: reconMount?.effort,
         // maxTurns DELIBERATELY NOT taken from the mount, and the ROW agrees with this cap.
@@ -4146,22 +4173,79 @@ async function runTask(
         maxBudgetUsd: budgetUsd, // dollars are the real backstop (WS-0 knob a).
         config,
         prompt: renderReconPrompt(planIndexBlock, operatorNotesBlock),
-      }),
-    );
+      });
+
+    let recon = account(await spawnRecon());
     log("recon.done", {
       session_id: recon.sessionId,
       cost_usd: recon.costUsd,
       num_turns: recon.numTurns,
       subtype: recon.subtype,
+      attempt: 1,
       // W1-T6: every worker call ledgers the standard telemetry shape.
       ...workerLedgerFields(recon),
     });
-    const reconFail = failOnWorkerError(recon, "recon");
-    if (reconFail) return reconFail;
 
-    // Recon's own optional '## Follow-ups' section (renderReconPrompt above) — no
-    // `pr_url` (recon never opens one); the retro harvest still cites its run/task.
-    harvestFollowupsFromReport([recon.text, recon.blocks.join("\n")].join("\n"), { label: "recon", log, say });
+    // W1-T299: recon is a READ-ONLY preamble — a worker ERROR here (overwhelmingly
+    // `error_max_turns`; RECON_MAX_TURNS's own doc above measured 11/18 recons dying on the cap
+    // on 2026-08-03) used to be FATAL to the WHOLE RUN via failOnWorkerError, ending dispatch
+    // before implement ever spawned and burning a strike toward `dispatchesWithoutNewOwnedPr`'s
+    // per-task breaker with no PR and no chance of ever getting one. Degrade instead of abort:
+    // ONE bounded retry, and if that ALSO errors, proceed to implement anyway with an EXPLICIT
+    // "recon context absent" claim (reconDegradedContextNote, never a silently empty CONTEXT
+    // block) and a loud `recon.degraded` ledger line naming the subtype.
+    //
+    // The ONE exception is a budget breach: workerErrorVerdict's own doc says dollars are the
+    // hard backstop, never retried anywhere in this file — recon gets no special case there and
+    // stays fatal on a budget breach, unchanged from before this task.
+    //
+    // OPEN QUESTION the task file left for the implementer: should a degraded-recon run be
+    // exempted from `dispatchesWithoutNewOwnedPr`? Decided NO — `run.start` above already
+    // ledgered this dispatch before recon ever spawned, so it counts as a REAL dispatch exactly
+    // like every other run regardless of what recon does; a task whose recon can never complete
+    // must still eventually trip the breaker rather than dispatch forever for free.
+    let reconDegradedSubtype: string | undefined;
+    const reconVerdict1 = workerErrorVerdict(recon, costUsd, "recon");
+    if (reconVerdict1) {
+      if (reconVerdict1.budgetBreach) {
+        const reconFail = failOnWorkerError(recon, "recon");
+        if (reconFail) return reconFail;
+      }
+      say(`recon worker errored (${recon.subtype}) — one bounded retry before degrading (W1-T299)`);
+      log("recon.retry", { subtype: recon.subtype, num_turns: recon.numTurns });
+      recon = account(await spawnRecon());
+      log("recon.done", {
+        session_id: recon.sessionId,
+        cost_usd: recon.costUsd,
+        num_turns: recon.numTurns,
+        subtype: recon.subtype,
+        attempt: 2,
+        ...workerLedgerFields(recon),
+      });
+      const reconVerdict2 = workerErrorVerdict(recon, costUsd, "recon");
+      if (reconVerdict2) {
+        if (reconVerdict2.budgetBreach) {
+          const reconFail = failOnWorkerError(recon, "recon");
+          if (reconFail) return reconFail;
+        }
+        // Second failure — DEGRADE, never abort: proceed to implement with an EMPTY recon
+        // context (reconDegradedContextNote below makes the absence explicit in the prompt).
+        reconDegradedSubtype = recon.subtype;
+        log("recon.degraded", {
+          subtype: recon.subtype,
+          num_turns: recon.numTurns,
+          reason: `recon errored twice in a row (${recon.subtype}) — bounded retry exhausted; implement proceeds with an EMPTY recon context`,
+        });
+        say(`⚠️ recon.degraded (${recon.subtype}) — implement proceeds with NO recon context`);
+      }
+    }
+
+    // Recon's own optional '## Follow-ups' section (renderReconPrompt above) — no `pr_url`
+    // (recon never opens one); the retro harvest still cites its run/task. Skipped on a
+    // degraded recon: the final attempt's text is an error envelope, not a report to harvest.
+    if (!reconDegradedSubtype) {
+      harvestFollowupsFromReport([recon.text, recon.blocks.join("\n")].join("\n"), { label: "recon", log, say });
+    }
 
     // ── Promptsmith READ side (W1-T19; SPLIT + INDEX + SUPERSESSION, W1-T33;
     // LAYERED — project + user-overall + global, P32/W1-T145): inject the
@@ -4210,7 +4294,9 @@ async function runTask(
     });
 
     // ── Render + provenance-lint the prompt.
-    const reconContext = reconObservedToContext(recon, taskId);
+    const reconContext = reconDegradedSubtype
+      ? reconDegradedContextNote(reconDegradedSubtype, taskId)
+      : reconObservedToContext(recon, taskId);
     const prompt = renderImplementPrompt(task, reconContext, runId, matchedLearnings, operatorNotesBlock);
     assertProvenance(prompt); // throws ProvenanceError on any uncited CONTEXT claim
     log("prompt.linted", { provenance: "clean" });
