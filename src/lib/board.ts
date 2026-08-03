@@ -212,13 +212,31 @@ export function isRunningRow(row: Pick<BoardRow, "phase">): boolean {
 /** The header count summary, computed from the SAME task set the rows render. `merged_known` is
  * false when the GitHub read backing merge-state was unreachable — the console then renders the
  * merged tally as "unknown", never `0` as fact (fb-1784902052582-c124f9). */
-export function summarizeCounts(tasks: Array<Pick<BoardRow, "phase" | "status">>, githubUnreachable: boolean): CountSummary {
+export function summarizeCounts(
+  tasks: Array<Pick<BoardRow, "phase" | "status"> & { needsHuman?: boolean }>,
+  githubUnreachable: boolean,
+): CountSummary {
   return {
     total: tasks.length,
     running: tasks.filter(isRunningRow).length,
     merged: tasks.filter((t) => t.status === "merged" || t.status === "done").length,
     queued: tasks.filter((t) => t.status === "queued").length,
-    blocked: tasks.filter((t) => t.status === "blocked").length,
+    // COUNTS WHAT THE PANEL LISTS. This counted only `status === "blocked"`, while the NEEDS ME
+    // panel filters on `needsHuman` (serve.ts's `group === "needsMe"` predicate) — two different
+    // fields for one question, so the badge and the list could disagree.
+    //
+    // They disagree because the two `needsHuman` writers are ASYMMETRIC (lib/status.ts): the
+    // not-in-plan path sets BOTH `status: "blocked"` and `needsHuman: true`, while the in-plan path
+    // sets ONLY `needsHuman` and leaves the derived status alone. So a PLAN task with an open
+    // escalation was needsHuman-but-not-blocked: listed in the panel, absent from the badge.
+    // Observed live — two tasks stopped with open escalation issues while this read 0.
+    //
+    // A zero here is the expensive direction: a wrong number is acted on, a missing one is merely
+    // noticed. `needsHuman` is a safe thing to count — both writers gate on `resolveEscalation`
+    // returning an OPEN issue, and a confirmed-closed escalation drops the row entirely, so this
+    // cannot latch permanently non-zero. `filter` yields one row per task, so a task satisfying
+    // both clauses is counted once.
+    blocked: tasks.filter((t) => t.status === "blocked" || t.needsHuman === true).length,
     merged_known: !githubUnreachable,
   };
 }

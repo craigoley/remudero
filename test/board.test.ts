@@ -1350,3 +1350,32 @@ test("W1-T163 (backward compatibility): buildStatusRoute with NO lastSeen store 
     assert.ok(!("sinceCheckpoint" in body));
   });
 });
+
+// ── the `blocked` badge must count what the NEEDS ME panel lists ──────────────────────
+// It counted only `status === "blocked"`, while the panel filters `needsHuman`. The two
+// `needsHuman` writers are asymmetric: the not-in-plan path sets BOTH status and the flag; the
+// in-plan path sets ONLY the flag. So a plan task with an open escalation was listed in the panel
+// and absent from the badge — observed live with two tasks stopped and the badge reading 0.
+
+test("blocked counts a task with an open escalation (needsHuman) even when its status is not blocked", () => {
+  const c = summarizeCounts([{ phase: undefined, status: "queued", needsHuman: true }], false);
+  assert.equal(c.blocked, 1, "a needsHuman task must reach the badge the panel already lists");
+});
+
+test("blocked still counts status blocked — no regression for the pre-existing case", () => {
+  assert.equal(summarizeCounts([{ phase: undefined, status: "blocked" }], false).blocked, 1);
+});
+
+test("blocked does NOT count a merely-queued task — the false-positive lock", () => {
+  // A permanently non-zero badge is ignored within a day, which is worse than an occasional zero.
+  const c = summarizeCounts(
+    [{ phase: undefined, status: "queued" }, { phase: undefined, status: "merged" }, { phase: undefined, status: "done" }],
+    false,
+  );
+  assert.equal(c.blocked, 0, "nothing without an escalation or a blocked status may count");
+});
+
+test("a task satisfying BOTH conditions is counted exactly once", () => {
+  const c = summarizeCounts([{ phase: undefined, status: "blocked", needsHuman: true }], false);
+  assert.equal(c.blocked, 1, "filter yields one row per task regardless of how many clauses match");
+});
