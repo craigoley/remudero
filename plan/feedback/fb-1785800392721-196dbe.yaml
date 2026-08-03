@@ -1,0 +1,27 @@
+id: fb-1785800392721-196dbe
+ts: 2026-08-03T23:39:52.721Z
+raw: "DISK FILLED TO ENOSPC AND CRASH-LOOPED THE DAEMON — 2026-08-03T23:32Z, /
+  at 2.6 GiB free. appendLedger threw ENOSPC, the daemon exited 1, KeepAlive
+  restarted it, and W1-T312 was re-dispatched FIVE times without completing. tsx
+  could not even open its IPC pipe. TWO CAUSES, one already solved: (a) 5.4 GB
+  in two agent-built ledger-union scratch files at /tmp/cg-union.ndjson and
+  /tmp/ce-union.ndjson, dated 2026-07-31, plus /tmp/rp.ndjson at 217 MB — each
+  written by a session running a unioned count over the ~663 rotated ledger
+  files, none ever cleaned, none read by anything. impl-EK measured these and
+  explicitly declined to reap them because no predicate distinguishes them from
+  anything else in a shared tmp root. (b) abandoned review clones —
+  review-w1t299, review-t237, rmd-main-check at ~490 MB each, the class #1098's
+  scratchReap was built for, which ships DISABLED. Hand-clearing (a) and three
+  of (b) took free space 2.6 -> 11 GiB. RECON/ACTION: enabling scratchReap
+  closes (b) permanently — a one-line policy change now that the daemon can
+  deploy again. (a) is unsolved and recurs whenever a session materialises a
+  ledger union: establish whether the counting idiom can stream and delete
+  rather than writing a 2.7 GB file per session, or whether a named scratch
+  convention would let a reaper claim them safely. ALSO: nothing alarmed. The
+  daemon crash-looped for ~50 minutes, burned five dispatches, and the only
+  signal was slow progress an operator happened to notice. Establish whether a
+  free-space or ENOSPC check belongs in the daemon's own health path."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
