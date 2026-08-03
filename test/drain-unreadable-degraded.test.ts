@@ -221,3 +221,59 @@ test("with headroomEnabled: false, an unreadable read never escalates — absent
   assert.ok(!lines.includes("drain.headroom.degraded"), "no escalation line — the ceiling never fires while disabled");
   assert.ok(!lines.includes("drain.headroom.unavailable"), "no telemetry line either — ABSENT, not just non-blocking");
 });
+
+// ── acceptance 6: multi-lane's OWN reset + disabled-governor branches ───────
+// runDrainLanes carries its own copy of both the reset-on-success branch and
+// the disabled-governor branch (see the loop body's W1-T290 comment) — the
+// multi-lane test above (acceptance 3) only ever observes `undefined` reads,
+// so it never exercises either. These two tests are the multi-lane mirror of
+// acceptance 4 and acceptance 5, isolating `runDrainLanes`' own `if (snap)`
+// and `else` branches.
+
+test("multi-lane: a single successful read resets the consecutive-unreadable count to zero too", async () => {
+  const plan = fixturePlan();
+  const merged = new Set<string>();
+  // undefined, undefined, GOOD, undefined, undefined, GOOD — 4 total misses, but
+  // never more than 2 CONSECUTIVE, so a limit of 2 must never trip, even though
+  // each pass may consult readUsage once regardless of lane count.
+  const reads: Array<UsageSnapshot | undefined> = [
+    undefined,
+    undefined,
+    HEALTHY_SNAPSHOT,
+    undefined,
+    undefined,
+    HEALTHY_SNAPSHOT,
+  ];
+  let i = 0;
+  const s = await runDrain(
+    plan,
+    {
+      refreshMerged: () => (id) => merged.has(id),
+      runOne: async (id) => { merged.add(id); return okResult(id); },
+      readUsage: () => reads[Math.min(i++, reads.length - 1)],
+    },
+    { max: 6, laneCount: 2, unreadableDegradedLimit: 2 },
+  );
+  assert.equal(s.stopReason, "max_reached", "the reset branch fired — a cumulative count would have tripped at limit=2");
+  assert.deepEqual(s.merged.sort(), ["A", "B", "C", "D", "E", "F"]);
+});
+
+test("multi-lane: with headroomEnabled: false, an unreadable read never escalates either", async () => {
+  const plan = fixturePlan();
+  const merged = new Set<string>();
+  const { log, lines } = recordingLog();
+  const s = await runDrain(
+    plan,
+    {
+      refreshMerged: () => (id) => merged.has(id),
+      runOne: async (id) => { merged.add(id); return okResult(id); },
+      readUsage: () => undefined, // unreadable on EVERY tick, far past any bounded limit
+      log,
+    },
+    { max: 6, laneCount: 2, unreadableDegradedLimit: 1, headroomEnabled: false },
+  );
+  assert.equal(s.stopReason, "max_reached", "disabled governor: no headroom_degraded on the multi-lane path either");
+  assert.deepEqual(s.merged.sort(), ["A", "B", "C", "D", "E", "F"]);
+  assert.ok(!lines.includes("drain.headroom.degraded"), "no escalation line — the ceiling never fires while disabled");
+  assert.ok(!lines.includes("drain.headroom.unavailable"), "no telemetry line either — ABSENT, not just non-blocking");
+});
