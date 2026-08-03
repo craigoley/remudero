@@ -241,6 +241,12 @@ export const LEDGER_ROTATION_CEILING_BYTES = 4 * 1024 * 1024; // 4 MiB
  *                                              itself (MASTER-PLAN P29(ii)).
  *   - "dispatch.circuit_broken.escalated"   → run-task.ts's escalateCircuitBreak dedup —
  *                                              never re-escalates the same tripped breaker.
+ *   - "dispatch.starvation.escalated"       → run-task.ts's escalateStarvation dedup — reads
+ *                                              this line back against "run.start" (above) to
+ *                                              tell whether anything has dispatched since the
+ *                                              last starvation notice; losing it re-pages the
+ *                                              operator on every idle poll for as long as the
+ *                                              queue stays starved (oper#queue-starvation-2026-08-03).
  *   - "verdict" / "verdict.merged"          → sweep.ts's hasMergeCredit — the credit-backfill
  *                                              rung's idempotence (P29(i)/W1-T149/W1-T150).
  *   - "correction.provenance"               → status.ts's debunkedTrailerUrls / the
@@ -324,6 +330,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "pr.opened",
   "dispatch.circuit_broken.escalated",
   "daemon.headroom_reserve.escalated",
+  "dispatch.starvation.escalated",
   "verdict",
   "verdict.merged",
   "correction.provenance",
