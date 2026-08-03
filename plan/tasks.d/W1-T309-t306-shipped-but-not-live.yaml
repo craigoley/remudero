@@ -1,0 +1,58 @@
+- id: W1-T309
+  title: "W1-T306 merged with PASS 3/3 and its behaviour is ABSENT in production — `rmd status` still prints five CLOSED PRs as current blockers, on a build that contains the fix"
+  repo: remudero
+  depends_on: []
+  type: diagnose
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 50.00
+  rationale: "MEASURED 2026-08-03 ~17:10, after #1214 (W1-T306) merged and deployed. Verified in
+    this order so the finding cannot be explained away:
+      (a) THE FIX IS DEPLOYED. `git merge-base --is-ancestor <W1-T306 commit> 31385758b299` -> YES,
+          and the daemon was booted on that sha. `head vs origin/main: fresh`.
+      (b) THE CODE IS PRESENT in the checkout that produced the output — status-board.ts's header
+          states, verbatim, that since W1-T306 the `blocked_pr` class 'is re-checked against live
+          GitHub state every render, never printed on the ledger's word alone'.
+      (c) THE OUTPUT IS UNCHANGED. `rmd status` printed FIVE `blocked PR` rows: #1206, #1187, #1165,
+          #1171, #1151. Checked against the API, ALL FIVE are closed — #1206/#1187/#1165 merged,
+          #1171/#1151 closed-unmerged. Both halves of the fix (drop merged, drop closed) had no
+          effect.
+      (d) THE DEGRADATION PATH DID NOT ENGAGE EITHER. `rmd status --json` shows `blockers` carrying
+          ONLY `rows` and `nextAction` — there is no `unverified` field at all, though W1-T306's
+          design point (4) requires one — and each `blocked_pr` row carries no merge-state field.
+          The rows are raw ledger replay, which is precisely what the task existed to stop.
+    WHY THIS IS THE IMPORTANT ONE. It is the first IN-THE-WILD instance of the W1-T302 class: a task
+    credited merged whose acceptance does not hold on main. The review posted
+    `PASS — 3 criteria substantiated, no test theater` on 3/3 executed proofs. So three proofs
+    executed, passed, and certified behaviour that is not there. That is worse than an unexecuted
+    proof (W1-T305's 418 heads), because this one carries positive evidence for a false claim.
+    NO MECHANISM IS CLAIMED. Whether the gateway is unconfigured on the CLI path, the re-check is
+    wired into a different render than the one `rmd status` hits, or the tests exercise a seam the
+    command does not reach — all three fit (a)-(d) and this task does not choose between them."
+  design: |
+    ESTABLISH WHY A PASSING PROOF CERTIFIED ABSENT BEHAVIOUR. The rendering bug is secondary.
+    (1) Reproduce (c) and (d) first, from a clean checkout, and record the exact invocation. If it
+        does not reproduce, STOP and report that — a finding that will not reproduce is retracted,
+        not worked around.
+    (2) Then read #1214's three tests and answer ONE question: what do they exercise that
+        `rmd status` does not? The likely shapes are a seam injected in the test but unreachable
+        from the CLI wiring, or a gateway the test supplies and the command never configures. Name
+        which, with the line.
+    (3) Fix the rendering so a closed PR does not appear, AND make the `unverified` field real —
+        (d) shows the honest-degradation half was never wired, so a GitHub outage today would
+        silently print stale rows rather than say so.
+    (4) THE GENERALISABLE PART, and the reason this is `diagnose` rather than `implement`: state
+        whether other merged tasks can pass proofs against a seam their command never reaches. If
+        yes, that is a gate defect worth its own task, and W1-T302's claim-level audit should look
+        for it rather than only for unresolvable proofs.
+  acceptance:
+    - claim: "a closed or merged PR does not appear under BLOCKERS BY CLASS in the output rmd status actually produces, reproduced from a clean checkout"
+      proof: "unit test: test/status-blockers-live.test.ts"
+    - claim: "the blockers section carries a real unverified field when live merge state cannot be read, rather than omitting it"
+      proof: "unit test: test/status-blockers-live.test.ts"
+    - claim: "the report names what #1214's passing tests exercised that the rmd status path does not"
+      proof: "grep: W1-T309 in plan/tasks.d/W1-T309-t306-shipped-but-not-live.yaml"
+  risk: medium
+  origin: oper#t306-not-live-2026-08-03
+  plan_refs: ["§5C", "§7"]
+  files: [src/lib/status-board.ts]
