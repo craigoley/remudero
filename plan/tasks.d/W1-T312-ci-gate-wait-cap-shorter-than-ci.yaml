@@ -1,0 +1,54 @@
+- id: W1-T312
+  title: "ci-gate's 900s wait cap is shorter than this repo's own CI, so it errors `timed out waiting` while siblings are still green-in-progress — W1-T261's grace window cannot help, it only covers a check that already FAILED"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 50.00
+  files: [.github/workflows/ci-gate.yml, test/ci-gate-reaggregate.test.ts]
+  risk: high
+  rationale: "MEASURED 2026-08-03 — THREE occurrences in one evening (#1229, #1234, and one earlier),
+    each costing an operator-minted throwaway sha. Diagnosed from the failing run's own log rather
+    than inferred:
+      ci-gate step began ~19:23:55 and polled `waiting for required check(s) to complete` every
+      ~16s from 19:25:14 onward. It concluded FAILURE at 19:39:03 — EXACTLY 900 seconds after the
+      loop began, matching `deadline=$(( $(date +%s) + 900 ))`. The `ci` job it was waiting for
+      finished SUCCESSFULLY at 19:42:29, 3m26s past the cap. On #1234 the same shape: ci-gate
+      failed 20:29:19, last sibling completed 20:36:44.
+    In both cases ci-gate was the ONLY red check and every sibling was green.
+    W1-T261 IS IMPLEMENTED AND CANNOT HELP HERE — this is the correction that matters. #885 shipped
+    a 600s `GRACE_WINDOW_SECONDS` re-read into `.github/workflows/ci-gate.yml`, and it works: it
+    covers a required check that COMPLETED as failing and may re-run green on the same sha. It does
+    NOT cover a check that has not completed at all, which is a different branch of the same script
+    (`# 1) WAIT until every REQUIRED check is present + completed`). The grace window never engages
+    for this failure, so raising it would change nothing.
+    CLAUDE.md IS STALE ON THIS AND MISLEADS THE READER: its `ci and merging` section states the
+    defect 'is filed as W1-T261 and UNIMPLEMENTED — this is the workaround, not the fix'. W1-T261
+    merged 2026-07-29 via #885. A reader following that note concludes no fix exists and keeps
+    minting throwaway shas, which is exactly what happened three times tonight."
+  design: |
+    THE CAP MUST EXCEED THE THING IT WAITS FOR — and that is a measurement, not a guess.
+    (1) MEASURE this repo's actual sibling wall-clock before choosing a number. Take the
+        distribution of `completed_at - started_at` for the required checks over recent merged PRs;
+        the two samples here (ci finishing ~15m50s and ~17m after the gate started) are two points,
+        not a distribution. State the p95 in the PR body and size the cap from it with headroom.
+    (2) The cap exists to stop an unbounded hang, so do not simply delete it. A LOUD, correct
+        failure after a genuinely stuck check is the intended behaviour; the defect is that the
+        bound is below the normal case, turning the routine path into the exceptional one.
+    (3) DISTINGUISH THE TWO MESSAGES. `timed out waiting for required check(s) to complete` and
+        `required check(s) FAILED` mean different things and today both surface as one red aggregate
+        that no re-run can clear. The timeout case should say, in the check output, that a NEW SHA is
+        the only remedy — otherwise every future operator re-derives it from the log as this task did.
+    (4) CORRECT CLAUDE.md IN THE SAME PR: the `ci and merging` bullet must stop claiming W1-T261 is
+        unimplemented, and should name THIS task as the remaining gap. Per §8A the bullet is
+        sharpened in place, not appended alongside.
+  acceptance:
+    - claim: "the wait cap is sized from a measured distribution of this repo's own required-check durations, with the p95 stated"
+      proof: "unit test: test/ci-gate-reaggregate.test.ts"
+    - claim: "a timed-out wait is reported distinctly from a genuine check failure, and names a new sha as the remedy"
+      proof: "unit test: test/ci-gate-reaggregate.test.ts"
+    - claim: "CLAUDE.md no longer states that W1-T261 is unimplemented"
+      proof: "unit test: test/ci-gate-reaggregate.test.ts"
+  origin: oper#ci-gate-wait-cap-2026-08-03
+  plan_refs: ["§5C"]
