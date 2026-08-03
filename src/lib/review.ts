@@ -2031,6 +2031,41 @@ function fileUnderClaimedPath(file: string, path: string): boolean {
 }
 
 /**
+ * A QUOTATION IS NOT AN ASSERTION (W1-T308). `bodyContradictsDiff` scans the whole body for the
+ * claim shape, so a blockquote or a fenced code block quoting ANOTHER PR's body — or a body's own
+ * earlier, since-fixed claim — read identically to this PR's own assertion. LIVE FIXTURES: #1194
+ * (the backtick fix) quoted #1192's failing fixture verbatim inside a blockquote and was failed
+ * over a two-file diff; #1206 (filing W1-T307) cited #1202's body the same way and was failed over
+ * a one-file plan shard. Both passed only once the quotation was paraphrased, with no change to
+ * any code or to the diff — the workaround silently destroys the most useful record of what went
+ * wrong.
+ *
+ * Blanks blockquote lines (`> …`) and the full contents of fenced code blocks (``` … ```),
+ * preserving every other character's position — including newlines — so match indices returned
+ * against this text line up exactly with the original body for backward/forward scans like
+ * {@link claimsChangesetContext} and {@link noClaimIsAboutChangeset}, and so a REAL, unquoted claim
+ * elsewhere in the same body (before or after a quoted one) is untouched and still read.
+ *
+ * DELIBERATELY NARROW: only blockquote lines and fences. Widening the exclusion (e.g. inline
+ * `code spans`, which the enumeration cleanup already unwraps) would let a real contradiction hide
+ * behind a single backtick — strictly worse than today's over-firing.
+ */
+function stripQuotedRegions(report: string): string {
+  let inFence = false;
+  return report
+    .split("\n")
+    .map((line) => {
+      if (/^\s*```/.test(line)) {
+        inFence = !inFence;
+        return " ".repeat(line.length);
+      }
+      if (inFence || /^\s*>/.test(line)) return " ".repeat(line.length);
+      return line;
+    })
+    .join("\n");
+}
+
+/**
  * THE NARROW, FALSIFIABLE CHECK (W1-T274). Two PRs merged THIS WEEK on bodies
  * that contradicted their own diffs — #974 claimed "exactly one file:
  * MASTER-PLAN.md. No src/, no test/, no docs/ORIENTATION.md" over a 3-file
@@ -2059,6 +2094,10 @@ function fileUnderClaimedPath(file: string, path: string): boolean {
  */
 export function bodyContradictsDiff(report: string, diffFiles: string[]): ChangesetClaimContradiction[] {
   const out: ChangesetClaimContradiction[] = [];
+  // W1-T308: scan the QUOTED-STRIPPED text throughout, never the raw `report` — see
+  // {@link stripQuotedRegions}. Length- and newline-preserving, so every index below still lines up
+  // with the original body.
+  const scan = stripQuotedRegions(report);
 
   // (a) / (c): "exactly N files[: a, b, c]" — the count itself, and (when a
   // count is right but a named file is missing) the enumerated list.
@@ -2082,10 +2121,10 @@ export function bodyContradictsDiff(report: string, diffFiles: string[]): Change
   //        "git show --stat listed …"), which is how a body states the claim in prose.
   // Anything else is silence, exactly as an unrecognised sentence already was.
   const countRe = /\bexactly\s+(\w+)\s+files?\b(?:\s*:\s*([^\s,]+(?:\s*,\s*[^\s,]+)*))?/gi;
-  for (const m of report.matchAll(countRe)) {
+  for (const m of scan.matchAll(countRe)) {
     const claimed = parseClaimedCount(m[1]);
     if (claimed === undefined) continue;
-    if (!m[2] && !claimsChangesetContext(report, m.index ?? 0)) continue;
+    if (!m[2] && !claimsChangesetContext(scan, m.index ?? 0)) continue;
     let contradicted = claimed !== diffFiles.length;
     if (!contradicted && m[2]) {
       // MARKDOWN QUOTING IS STRIPPED BEFORE THE COMPARISON. A body writes a path the way this
@@ -2127,13 +2166,13 @@ export function bodyContradictsDiff(report: string, diffFiles: string[]): Change
 
   // (b): "no <path>" claims, plus the "plan-only"/"data-only" house shorthands.
   const noPathRe = /\bno\s+([A-Za-z0-9_./-]+)/gi;
-  for (const m of report.matchAll(noPathRe)) {
+  for (const m of scan.matchAll(noPathRe)) {
     const token = m[1].replace(/[,.\s]+$/, "");
     // ANCHOR (the sibling of #1077's, in the other direction — see noClaimIsAboutChangeset).
     // Predicate (b) was never anchored, and fired six times today on prose whose subject was not
     // the changeset: "This change introduces no code duplication anywhere" produced `claim: "no
     // code"` against any source-touching diff, in a repo that runs a jscpd duplication gate.
-    if (!noClaimIsAboutChangeset(report.slice((m.index ?? 0) + m[0].length))) continue;
+    if (!noClaimIsAboutChangeset(scan.slice((m.index ?? 0) + m[0].length))) continue;
     let violators: string[];
     if (token.toLowerCase() === "code") {
       violators = diffFiles.filter((f) => f.startsWith("src/") || isTestPath(f));
@@ -2144,11 +2183,11 @@ export function bodyContradictsDiff(report: string, diffFiles: string[]): Change
     }
     if (violators.length > 0) out.push({ claim: m[0].trim(), files: violators });
   }
-  if (/\bplan-only\b/i.test(report)) {
+  if (/\bplan-only\b/i.test(scan)) {
     const violators = diffFiles.filter((f) => !isInPlanScope(f));
     if (violators.length > 0) out.push({ claim: "plan-only", files: violators });
   }
-  if (/\bdata-only\b/i.test(report)) {
+  if (/\bdata-only\b/i.test(scan)) {
     const violators = diffFiles.filter((f) => f.startsWith("src/") || isTestPath(f));
     if (violators.length > 0) out.push({ claim: "data-only", files: violators });
   }
