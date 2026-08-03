@@ -255,9 +255,14 @@ test("decideSweepArm returns byte-identical decisions to the run flow's own deci
 });
 
 test("the review.posted ledger projection carries plan_only, so the sweep can tell a structural plan-only cap from a proof-failure cap at all", () => {
+  // W1-T305: `unexecutable_count`/`unexecutable_proofs`/`partially_executed` now ride alongside,
+  // unconditionally (0/[]/false here — this fixture supplies no `criteria` to derive them from).
   assert.deepEqual(reviewLedgerLegibilityFields({ capped: true, keywordOnly: false, planOnly: true }), {
     capped: true,
     keyword_only: false,
     plan_only: true,
+    unexecutable_count: 0,
+    unexecutable_proofs: [],
+    partially_executed: false,
   });
 });

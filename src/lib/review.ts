@@ -79,8 +79,30 @@ export type ReviewState = "success" | "failure";
  * WHY a criterion produced no executed outcome. Diagnostic only — it never affects `met`, `state`,
  * the keyword floor, or whether a verdict is capped. It exists so a CAPPED `0/N` says WHICH KIND it
  * is instead of collapsing four different causes into one reassuring green.
+ *
+ *   no-dialect          — the proof carries NO house-dialect prefix at all (ordinary prose). This
+ *                          is the EXPECTED shape for a non-mechanical claim, never itself a defect.
+ *   dialect-parse-error — (W1-T305) the proof STARTS with a house-dialect label (`grep:`/
+ *                          `unit test:`) but its body fails to parse into a runnable check (e.g. a
+ *                          `grep:` with no `in <path>` clause, a path-traversal/glob target, or a
+ *                          `unit test:` path escaping the checkout). Distinct from `no-dialect` on
+ *                          purpose: this proof's author WROTE an executable-check intent and got the
+ *                          syntax wrong — an AUTHORING ERROR, not a prose claim that never asked to
+ *                          be mechanically checked. Today's `not_executable` alone made these two
+ *                          causes indistinguishable from the outside (design (2), the measurement
+ *                          this task is filed against). Never assigned to a `demonstration:` proof —
+ *                          that dialect is deliberately never executable, by design (W1-T277), which
+ *                          is not an authoring error.
+ *   prose-no-match      — the proof DID parse (a `unit test:` name-filtered check ran to
+ *                          completion) and resolved to zero candidates, but its body reads as a
+ *                          PROSE paraphrase rather than a fabricated bare test name (W1-T161/#349) —
+ *                          degrades to the keyword floor rather than a false `executed_fail`.
+ *   exec-error          — the whitelisted check threw or timed out (or a `unit test:`/`grep:`
+ *                          proof's named PATH is simply absent on the checkout).
+ *   no-exec-context      — no PR-head checkout was supplied at all; execution was never attempted
+ *                          for ANY criterion.
  */
-export type ProofSkipReason = "no-dialect" | "prose-no-match" | "exec-error" | "no-exec-context";
+export type ProofSkipReason = "no-dialect" | "dialect-parse-error" | "prose-no-match" | "exec-error" | "no-exec-context";
 
 export type ProofExecOutcome =
   | "executed_pass"
@@ -366,6 +388,45 @@ export interface ReviewVerdict {
    * {@link judgeReview} populates it — treat absent identically to `null`.
    */
   rewardHackingGap?: number | null;
+  /**
+   * W1-T305 (design (1)/(2) — "SIZE IT FIRST … make it countable, not a claim nobody reads"):
+   * how many criteria in this review carry a {@link CriterionVerdict.proof_skip} — i.e. every
+   * `not_executable`/`exec_error` criterion, over the SAME set `capped`/`floorDegraded` already
+   * count (satisfied_by criteria excluded implicitly: they never set `proof_skip` at all). This
+   * is `verdicts.filter(v => v.proof_skip !== undefined).length` over EVERY criterion (holdout
+   * included in the count, matching how `capped`'s own executable-criteria count already folds
+   * holdout in — the AGGREGATE NUMBER is never secret, only holdout TEXT is), so the class is
+   * legible without re-deriving it from the ledger's `proof_exec` array by hand.
+   */
+  unexecutableCount?: number;
+  /**
+   * W1-T305: the OFFENDING PROOF TEXT for every unexecutable criterion counted above —
+   * `criterion.proof`, never a paraphrase, so an operator reading the ledger row sees exactly
+   * what was written. VISIBLE criteria only ({@link visibleCriteria}) — a holdout criterion's
+   * proof text stays out of every worker-facing surface exactly like its claim/reason already do
+   * (W1-T166); `unexecutableCount` above may therefore exceed `unexecutableProofs.length` when a
+   * holdout criterion is among the unexecutable set.
+   */
+  unexecutableProofs?: string[];
+  /**
+   * W1-T305 (design (4) — "a body whose proofs are half-executable must not read the same as one
+   * whose proofs all ran"): true when SOME but not ALL executable criteria (excluding
+   * `satisfied_by`) actually executed (`proof_exec` is `executed_pass`/`executed_fail` — the
+   * SAME "was anything OBSERVED" set `capped`'s own `executedCount` already counts) — the
+   * 52-partial-head shape the rationale measured, distinct from `capped` (ALL zero-executed) and
+   * from a fully-observed review (every executable criterion ran).
+   * Never forces `state`; purely a LEGIBILITY signal like `capped`/`floorDegraded`, surfaced on
+   * the posted PASS summary (see {@link passSummary}) so a partially-certified PASS is never
+   * rendered identically to a fully-certified one.
+   */
+  partiallyExecuted?: boolean;
+  /** W1-T305: how many criteria (of `executableProofCount`) actually executed — the numerator
+   *  {@link partiallyExecuted} and the posted "PARTIAL: X/Y" annotation are both derived from. */
+  executedProofCount?: number;
+  /** W1-T305: how many criteria COULD have executed (every criterion except `satisfied_by`) —
+   *  the SAME set `capped` already counts against, exposed here so `passSummary`'s partial
+   *  annotation and any later consumer read it rather than re-deriving it. */
+  executableProofCount?: number;
 }
 
 // ── Tokenisation (deterministic, dependency-free) ──────────────────────────
@@ -622,6 +683,25 @@ export function isDialectPrefixed(proof: string): boolean {
  */
 export function isDemonstrationProof(proof: string): boolean {
   return DIALECT_DEMO_RE.test(proof.trim());
+}
+
+/**
+ * True when a proof's text carries a `grep:`/`unit test:` LABEL — under the SAME code-span
+ * normalization {@link parseWhitelistedProof} itself applies (matchesDialectPrefix first, then
+ * {@link stripCodeSpan} as a fallback), so a backtick-wrapped malformed proof is recognised
+ * identically to a bare one. ONLY meaningful for a proof {@link parseWhitelistedProof} already
+ * refused (returned null): it is what makes THAT refusal an AUTHORING ERROR
+ * (`dialect-parse-error`, W1-T305) rather than ordinary prose (`no-dialect`) — the proof declared
+ * an executable intent and its body's syntax is what parsing rejected (no `in <path>` clause, a
+ * path-traversal/glob target, a `..`-escaping test path), not a claim that never asked to be
+ * mechanically checked at all. Excludes `demonstration:`: that dialect is deliberately
+ * unexecutable by design (W1-T277) — refusing it is the intended behavior, never a mistake.
+ */
+function isMalformedDialectProof(proof: string): boolean {
+  const trimmed = proof.trim();
+  const dialectSource = matchesDialectPrefix(trimmed) ? trimmed : stripCodeSpan(trimmed);
+  if (DIALECT_DEMO_RE.test(dialectSource)) return false;
+  return DIALECT_GREP_RE.test(dialectSource) || DIALECT_TEST_RE.test(dialectSource);
 }
 
 /** Sentence-level punctuation a bare test-name title would not carry: a
@@ -1606,7 +1686,7 @@ export function judgeCriterion(
   // W1-DH: WHY a criterion did not execute. `proof_exec: "not_executable"` alone conflates a proof
   // that never PARSED with one that parsed and named nothing — and a CAPPED 0/N verdict looked
   // identical either way, which is what made the code-span defect above cost a whole recon to find.
-  let proofSkip: ProofSkipReason | undefined = execCtx ? "no-dialect" : "no-exec-context";
+  let proofSkip: ProofSkipReason | undefined;
   if (execCtx) {
     const whitelisted = parseWhitelistedProof(criterion.proof);
     if (whitelisted) {
@@ -1670,7 +1750,20 @@ export function judgeCriterion(
         proofExec = "exec_error"; // met/reason stay EXACTLY the keyword-floor verdict above
         proofSkip = "exec-error";
       }
+    } else if (isMalformedDialectProof(criterion.proof)) {
+      // W1-T305: a proof declaring a dialect label (`grep:`/`unit test:`) that still failed to
+      // parse is an AUTHORING ERROR, never silently the same bucket as a proof that read as
+      // ordinary prose from the start — see isMalformedDialectProof's doc.
+      proofSkip = "dialect-parse-error";
+      reason =
+        `${reason} — NOTE: proof declares a dialect prefix (grep:/unit test:) but its body does ` +
+        `not parse into a runnable check (authoring error — malformed syntax, not free prose); ` +
+        `not executed, keyword floor applied`;
+    } else {
+      proofSkip = "no-dialect";
     }
+  } else {
+    proofSkip = "no-exec-context";
   }
 
   // W1-T178 (verdict stability): capture the DETERMINISTIC floor's own verdict
@@ -1756,9 +1849,13 @@ function describeUnresolvedOrFailing(proofExec: ProofExecOutcome, proofSkip: Pro
     case "exec_error":
       return "proof named a whitelisted check that failed to execute (timeout, spawn error, or missing target)";
     default:
-      return proofSkip === "prose-no-match"
-        ? "proof names a unit test that matches nothing on the current checkout (0 matches)"
-        : "proof did not resolve to a passing, runnable check";
+      if (proofSkip === "prose-no-match") return "proof names a unit test that matches nothing on the current checkout (0 matches)";
+      // W1-T305: a dialect-labelled proof that never parsed is an AUTHORING ERROR, not the same
+      // "cannot resolve either way" shape a genuinely unresolved check reports.
+      if (proofSkip === "dialect-parse-error") {
+        return "proof declares a dialect prefix (grep:/unit test:) but its body does not parse into a runnable check — authoring error";
+      }
+      return "proof did not resolve to a passing, runnable check";
   }
 }
 
@@ -2166,6 +2263,16 @@ export function judgeReview(
   const executableCriteria = criteria.filter((c) => !c.satisfied_by);
   const capped = executableCriteria.length > 0 && executedCount === 0;
 
+  // W1-T305 (design (4)): SOME but not ALL executable criteria were observed — the 52-partial-head
+  // shape the rationale measured, distinct from `capped` (zero observed anywhere).
+  const partiallyExecuted = executableCriteria.length > 0 && executedCount > 0 && executedCount < executableCriteria.length;
+
+  // W1-T305 (design (1)/(2)): the unexecutable class, made countable. `unexecutableCount` folds
+  // holdout criteria in (an aggregate NUMBER, never secret — matches `capped`'s own scope);
+  // `unexecutableProofs` is VISIBLE-only text (holdout proof text stays worker-invisible, W1-T166).
+  const unexecutableCount = verdicts.filter((v) => v.proof_skip !== undefined).length;
+  const unexecutableProofs = visibleVerdicts.filter((v) => v.proof_skip !== undefined).map((v) => v.proof);
+
   // W1-T185 (closes the second W1-T128 gap): this verdict never attempted
   // execution for ANY criterion (no `headCheckoutDir` was given at all) — the
   // case today when `rmd review`'s worktree materialization fails or is
@@ -2202,7 +2309,13 @@ export function judgeReview(
         ? planOnly
           ? planOnlySummary(verdicts.length)
           : cappedSummary(verdicts.length, keywordOnly)
-        : passSummary(verdicts.length, keywordOnly)
+        : passSummary(
+            verdicts.length,
+            keywordOnly,
+            // W1-T305 (design (4)): a partially-observed PASS never renders identically to a fully-
+            // observed one — the fraction actually executed rides on the same commit-status text.
+            partiallyExecuted ? { executed: executedCount, executable: executableCriteria.length } : undefined,
+          )
       : failSummary(
           // W1-T166: only VISIBLE unmet claims name themselves in the posted
           // summary — a holdout claim never reaches this text (see failSummary's
@@ -2234,6 +2347,11 @@ export function judgeReview(
       ? { instrumentPaths: instrumentEntanglement.instrumentPaths, srcPaths: instrumentEntanglement.srcPaths }
       : undefined,
     rewardHackingGap,
+    unexecutableCount,
+    unexecutableProofs,
+    partiallyExecuted,
+    executedProofCount: executedCount,
+    executableProofCount: executableCriteria.length,
   };
 }
 
@@ -2246,10 +2364,16 @@ export function judgeReview(
  * status GitHub renders for `rmd review`'s manual-PR path. {@link
  * applyVerdictStability} passes the SUPPRESSED verdict's own `keywordOnly`
  * through unchanged, so a re-review that was keyword-only stays labeled that
- * way even when its semantic downgrade is suppressed back to success. */
-function passSummary(criteriaCount: number, keywordOnly = false): string {
+ * way even when its semantic downgrade is suppressed back to success.
+ *
+ * `partial` (W1-T305, design (4)) appends an explicit "(PARTIAL: X/Y)" tag whenever SOME but not
+ * ALL executable criteria were observed — never present alongside `keywordOnly` (that flag implies
+ * ZERO executed anywhere, which routes through {@link cappedSummary} instead, never here), so a
+ * partially-certified PASS is never rendered identically to a fully-certified one. */
+function passSummary(criteriaCount: number, keywordOnly = false, partial?: { executed: number; executable: number }): string {
   return (
     `remudero-review: PASS — ${criteriaCount} criteria substantiated, no test theater` +
+    (partial ? ` (PARTIAL: ${partial.executed}/${partial.executable} proofs executed on the PR head)` : "") +
     (keywordOnly ? " (keyword-only: no proof was executed on the PR head)" : "")
   );
 }
@@ -2390,7 +2514,16 @@ export function applyVerdictStability(
       ...computed,
       state: "success",
       criteria,
-      summary: passSummary(criteria.length, computed.keywordOnly),
+      summary: passSummary(
+        criteria.length,
+        computed.keywordOnly,
+        // W1-T305: the suppressed rebuild carries the SAME partial-execution facts `computed`
+        // already measured (suppression only replaces `state`/`criteria`/`summary`, never
+        // re-executes anything), so a re-review's "PARTIAL" tag survives verdict stability too.
+        computed.partiallyExecuted
+          ? { executed: computed.executedProofCount ?? 0, executable: computed.executableProofCount ?? 0 }
+          : undefined,
+      ),
     },
     suppressed: true,
   };
@@ -2902,15 +3035,39 @@ export function reviewFailureClass(
  * DECISION in this codebase reads it, so it needs no entry in
  * `DECISION_RELEVANT_LEDGER_STEPS` (that set is keyed by ledger STEP name —
  * `"review.posted"` is already unconditionally retained — not by field).
+ *
+ * W1-T305: `unexecutable_count`/`unexecutable_proofs`/`partially_executed` ride alongside,
+ * UNCONDITIONALLY (0/[]/false on a healthy review, never absent) — the same "make the class
+ * countable, never a claim nobody reads" doctrine as the rest of this line, applied to the gap
+ * this task measured: 418 of 821 code-review heads executed ZERO proofs and posted `success`
+ * anyway on the keyword floor, indistinguishable on the ledger from a review that certified
+ * everything. See {@link ReviewVerdict.unexecutableCount}/`.unexecutableProofs`/
+ * `.partiallyExecuted`'s own docs for exactly what each counts.
  */
 export function reviewLedgerLegibilityFields(
   verdict: Pick<ReviewVerdict, "capped" | "keywordOnly" | "planOnly"> &
-    Partial<Pick<ReviewVerdict, "criteria" | "state" | "summary" | "criteriaTampered" | "changesetContradictions" | "instrumentEntangled">>,
+    Partial<
+      Pick<
+        ReviewVerdict,
+        | "criteria"
+        | "state"
+        | "summary"
+        | "criteriaTampered"
+        | "changesetContradictions"
+        | "instrumentEntangled"
+        | "unexecutableCount"
+        | "unexecutableProofs"
+        | "partiallyExecuted"
+      >
+    >,
 ): {
   capped: boolean;
   keyword_only: boolean;
   plan_only: boolean;
   capped_reason?: string;
+  unexecutable_count: number;
+  unexecutable_proofs: string[];
+  partially_executed: boolean;
   failure_class?: string;
   failure_reason?: string;
 } {
@@ -2924,6 +3081,13 @@ export function reviewLedgerLegibilityFields(
     keyword_only: verdict.keywordOnly,
     plan_only: verdict.planOnly,
     ...(reason ? { capped_reason: reason } : {}),
+    // W1-T305 (design (2)): the unexecutable class's COUNT and OFFENDING TEXT ride on the ledger
+    // line UNCONDITIONALLY — 0/[] on a healthy review, never absent, so a consumer counting this
+    // class across the fleet never has to special-case "the field wasn't there".
+    unexecutable_count: verdict.unexecutableCount ?? 0,
+    unexecutable_proofs: verdict.unexecutableProofs ?? [],
+    // W1-T305 (design (4)): SOME-but-not-ALL executed, unconditional like `capped`/`keyword_only`.
+    partially_executed: verdict.partiallyExecuted ?? false,
     ...(failed
       ? {
           failure_class: reviewFailureClass({
