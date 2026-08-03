@@ -21,7 +21,7 @@
  * striking again on a block it already fixed.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -30,6 +30,7 @@ import {
   runFixRung,
   deriveChangesetClaimUpdate,
   fetchPrDiffFilesViaGh,
+  updatePrBodyViaGh,
 } from "../src/run-task.js";
 import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
@@ -310,4 +311,88 @@ test("runFixRung (acceptance 3): a claim the rung cannot update confidently is l
   assert.equal(updateCalls, 0, "an unconfident reconstruction must never be written — fail safe, not a wrong edit");
   assert.equal(reviewReports[0], AMBIGUOUS_BODY, "the review must judge the body exactly as fetched — no partial/guessed edit");
   assert.equal(outcome.outcome, "escalated", "left stale, the review keeps failing exactly as it did before this fix — a human is still needed for the SAME reason, not a new one");
+});
+
+// ── The `gh` LEAF ITSELF. Every test above injects `updatePrBody`, so `updatePrBodyViaGh` --
+// the function that actually shells out -- never runs in any of them: the CLAUDE.md #977/#978
+// shape, where a fully-faked seam leaves its default implementation unreachable and uncovered.
+// This drives the REAL leaf against a recorder `gh` first on PATH, and asserts the argv it
+// builds, because that argv is the whole contract (`gh pr edit <url> --body <body>`) -- a wrong
+// flag here would silently rewrite the wrong field of a live PR.
+
+test("updatePrBodyViaGh: shells the REAL `gh pr edit --body`, with the URL and body it was given", async () => {
+  const binDir = mkdtempSync(join(tmpdir(), "fixrung-gh-bin-"));
+  const recordPath = join(binDir, "argv.json");
+  writeFileSync(
+    join(binDir, "gh"),
+    ["#!/usr/bin/env node", 'require("fs").writeFileSync(' + JSON.stringify(recordPath) + ", JSON.stringify(process.argv.slice(2)));", "process.exit(0);"].join("\n"),
+  );
+  chmodSync(join(binDir, "gh"), 0o755);
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${binDir}:${originalPath ?? ""}`;
+  try {
+    await updatePrBodyViaGh("https://github.com/o/r/pull/1216", "the corrected body");
+    const argv = JSON.parse(readFileSync(recordPath, "utf8")) as string[];
+    assert.deepEqual(argv, ["pr", "edit", "https://github.com/o/r/pull/1216", "--body", "the corrected body"]);
+  } finally {
+    process.env.PATH = originalPath;
+  }
+});
+
+test("updatePrBodyViaGh: a nonzero `gh` exit PROPAGATES rather than silently reporting success", async () => {
+  const binDir = mkdtempSync(join(tmpdir(), "fixrung-gh-fail-"));
+  writeFileSync(join(binDir, "gh"), ["#!/usr/bin/env node", 'process.stderr.write("could not update pull request");', "process.exit(1);"].join("\n"));
+  chmodSync(join(binDir, "gh"), 0o755);
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${binDir}:${originalPath ?? ""}`;
+  try {
+    // A swallowed failure here would leave a stale claim on the PR while the rung believed it had
+    // corrected it -- the review would then fail on a body the rung reports as already fixed.
+    await assert.rejects(() => updatePrBodyViaGh("https://github.com/o/r/pull/1216", "body"));
+  } finally {
+    process.env.PATH = originalPath;
+  }
+});
+
+test("runFixRung: a FAILING body update is traced and the review still runs on the original body — the rung degrades, never crashes", async () => {
+  const failing = fakeReview("failure", [
+    criterion({ claim: "criterion A is covered", met: false, reason: "proof unmet: report does not substantiate it (matched 4/12 proof keywords)" }),
+  ]);
+  const STALE_BODY = "This PR touches exactly 2 files: a.ts, b.ts.\n\nRemudero-Task: W1-T307X\n";
+
+  const steps: string[] = [];
+  const reviewReports: string[] = [];
+
+  const outcome = await runFixRung({
+    ...fixRungBaseOpts(),
+    strikeCap: 1,
+    initialReview: failing,
+    deps: {
+      spawn: async () => result({ sessionId: "fix-1" }),
+      waitForCiGreen: async () => "green",
+      fetchPrBody: async () => STALE_BODY,
+      fetchPrDiffFiles: async () => ["a.ts", "b.ts", "new.test.ts"],
+      // `gh pr edit` can fail for reasons that have nothing to do with the claim (rate limit,
+      // a revoked token, a PR closed underneath us). The correction is best-effort: losing it
+      // must cost the ORIGINAL refusal, never the whole rung.
+      updatePrBody: async () => {
+        throw new Error("gh: could not update pull request");
+      },
+      runReview: async (args) => {
+        reviewReports.push(args.report);
+        return failing;
+      },
+      push: () => {},
+      issues: fakeIssues(),
+      ledgerPath: tmpLedgerPath(),
+      log: (step) => steps.push(step),
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+
+  assert.ok(steps.includes("fix.body_claim_update_error"), "the failed update is TRACED, not swallowed into silence");
+  assert.ok(!steps.includes("fix.body_claim_updated"), "a failed write must never be recorded as a successful correction");
+  assert.equal(reviewReports[0], STALE_BODY, "the review judges the body exactly as fetched when the correction could not be written");
+  assert.equal(outcome.outcome, "escalated", "the rung completes its ordinary refusal rather than throwing");
 });
