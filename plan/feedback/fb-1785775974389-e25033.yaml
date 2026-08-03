@@ -1,0 +1,19 @@
+id: fb-1785775974389-e25033
+ts: 2026-08-03T16:52:54.389Z
+raw: "WORKER-HOME CONFIG RACE — 14 recon runs between 2026-08-03T00:54Z and
+  12:03Z carried 'Claude configuration file not found at
+  .../worker-home-<uuid>/.claude.json' in stderr, with a backup already present
+  at .claude/backups/.claude.json.backup.<epoch>. 12 haiku, 2 sonnet — NOT
+  confined to the haiku recon cell retired by #1199 (merged 12:20:36Z, after the
+  last occurrence). Never caused a failure: the sonnet recon at 12:26 succeeded
+  with the same provisioning, and the live worker home carries a valid 33KB
+  .claude.json. So something writes a backup and the config is transiently
+  absent when the worker reads it. Zero occurrences in the four hours since
+  12:03Z, but that may be sample size rather than a fix. RECON: establish what
+  creates a worker home's .claude.json and what writes the backup; whether the
+  restore is automatic; and whether the gap can widen under load. Falsifying
+  check: if the message recurs after 2026-08-03T16:00Z, it was never fixed."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
