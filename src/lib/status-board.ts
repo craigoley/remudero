@@ -62,6 +62,7 @@ import { defaultIsPidAlive } from "./drain-lock.js";
 import { runnableCandidates, type MergedSet } from "./drain.js";
 import { drainNowFilePath, pauseFilePath, pendingKicks, quietHoursFilePath, stopFilePath } from "./fleet-control.js";
 import { readInflightLock } from "./inflight-lock.js";
+import { DEFAULT_SUPERVISOR_INTERVAL_S } from "./launchd.js";
 import {
   classifyProposal,
   gitGrepAnchorTrue,
@@ -93,10 +94,30 @@ import { taskCardRuns } from "./task-card.js";
 
 export type ServiceName = "daemon" | "serve" | "deploy-supervisor";
 
+/** `"daemon"`/`"serve"` are RESIDENT (launchd `KeepAlive`) — `running` means "is the process up
+ *  right now", and a `false` between events genuinely means dead. `"deploy-supervisor"` is an
+ *  INTERVAL job (launchd `StartInterval`, W1-T… supervisor plist): launchd spawns ONE
+ *  `rmd deploy-run`, it runs for well under a second, and exits — `running: false` is its
+ *  NORMAL resting state between ticks, not a symptom. A binary running/not-running render
+ *  can't tell those two "false" cases apart; {@link ServiceKind} lets the caller pick the right
+ *  question for each row. */
+export type ServiceKind = "resident" | "interval";
+
+export function serviceKind(service: ServiceName): ServiceKind {
+  return service === "deploy-supervisor" ? "interval" : "resident";
+}
+
 /** One LIVENESS row. `bootedAt`/`bootedAgeMs`/`headSha` are populated ONLY for `"daemon"` — the
- *  only service that logs a `daemon.boot` heartbeat to the ledger today (W1-T126); `serve`/
- *  `"deploy-supervisor"` carry none of the three, which the text renderer shows as "unknown",
- *  never a fabricated zero. */
+ *  only service that logs a `daemon.boot` heartbeat to the ledger today (W1-T126); `serve`
+ *  carries none of the three, which the text renderer shows as "unknown", never a fabricated
+ *  zero. `tickAt`/`tickAgeMs`/`tickStep`/`lastExitCode`/`overdueThresholdMs` are populated ONLY
+ *  for `"deploy-supervisor"` — recency comes from the ledger (every `rmd deploy-run` cycle logs
+ *  a `deploy.*` line, even a same-head no-op logs `deploy.skip`; see deployer.ts's
+ *  `runDeployCycle` — exactly parallel to `daemon.boot` for the daemon, no new sensor invented,
+ *  per this module's own RENDERS-NEVER-SENSES rule); `lastExitCode` comes from the CLI layer's
+ *  own `launchctl list <label>` read (its `Status` column — see run-task.ts's `queryService`),
+ *  the same fact the W1-T301 rationale used by hand (`launchctl list` showing `LAST EXIT 0`) —
+ *  never re-derived by guessing from the ledger step name. */
 export interface ServiceLivenessRow {
   service: ServiceName;
   running: boolean;
@@ -104,6 +125,50 @@ export interface ServiceLivenessRow {
   bootedAt?: string;
   bootedAgeMs?: number;
   headSha?: string;
+  /** Timestamp of the most recent `deploy.*` ledger line ("deploy-supervisor" only). */
+  tickAt?: string;
+  /** `now - tickAt`, clamped to >= 0 ("deploy-supervisor" only). */
+  tickAgeMs?: number;
+  /** The latest tick's ledger step name, e.g. `"deploy.skip"` / `"deploy.ok"` — informational
+   *  only; failure is judged by {@link ServiceLivenessRow.lastExitCode}, not this. */
+  tickStep?: string;
+  /** `launchctl list`'s `Status` column for the job's last completed run — `0` healthy, nonzero
+   *  a real exit failure, `undefined` unknown (never bootstrapped, or the query failed). */
+  lastExitCode?: number;
+  /** How stale `tickAgeMs` may get before this row reads `"overdue"` instead of `"idle"` —
+   *  resolved from the INSTALLED unit's own `StartInterval` (never a hardcoded restatement of
+   *  it — a plist edit must not silently desync this threshold); falls back to {@link
+   *  SUPERVISOR_TICK_OVERDUE_MS} when the installed interval can't be read. */
+  overdueThresholdMs?: number;
+}
+
+/** The THREE liveness states a service can be in, replacing the old binary running/not-running
+ *  render that made a healthy idle-between-ticks supervisor and a genuinely dead one print the
+ *  identical "not running" line (the bug this type exists to retire). Resident services only
+ *  ever report `"running"`/`"stopped"`; interval services add `"idle"` (mid-tick or fresh since
+ *  its last tick) and `"overdue"` (no tick recently enough, or its last exit was nonzero). */
+export type LivenessState = "running" | "stopped" | "idle" | "overdue";
+
+/** Fallback for {@link ServiceLivenessRow.overdueThresholdMs} when the installed unit's own
+ *  `StartInterval` could not be read — 3x the supervisor plist's own default pace ({@link
+ *  DEFAULT_SUPERVISOR_INTERVAL_S}), so one or two missed/slow ticks (a busy idle-gate retry, a
+ *  slow health-check) don't false-positive; a supervisor gone genuinely quiet does. */
+export const SUPERVISOR_TICK_OVERDUE_MS = DEFAULT_SUPERVISOR_INTERVAL_S * 3 * 1000;
+
+/** Classify one row into its {@link LivenessState} — pure function of the row alone (every
+ *  input, including its own overdue threshold, already lives on it), so the text renderer and
+ *  `--json` consumers, and the LIVENESS next-action table, all derive the identical state from
+ *  the identical facts. */
+export function livenessState(row: ServiceLivenessRow): LivenessState {
+  if (row.running) return "running";
+  if (serviceKind(row.service) === "resident") return "stopped";
+  // interval: a nonzero last exit is a real failure regardless of how fresh it was, and no
+  // tick ever observed reads as overdue too — never a healthy-looking "idle" for a supervisor
+  // the ledger/launchd has never heard from.
+  if (row.lastExitCode !== undefined && row.lastExitCode !== 0) return "overdue";
+  const overdueMs = row.overdueThresholdMs ?? SUPERVISOR_TICK_OVERDUE_MS;
+  if (row.tickAgeMs === undefined || row.tickAgeMs > overdueMs) return "overdue";
+  return "idle";
 }
 
 /** The running daemon's boot sha vs a LOCAL (no-fetch) read of `origin/main` — reuses W1-T126's
@@ -287,14 +352,23 @@ export interface StatusBoardModel {
 
 export interface StatusBoardDeps {
   /**
-   * Per-service running/pid. `launchctl print` lives at the CLI layer (run-task.ts's own
+   * Per-service running/pid(+ for `"deploy-supervisor"`, its last completed run's exit code).
+   * `launchctl print`/`launchctl list` live at the CLI layer (run-task.ts's own
    * `queryLaunchdService` + `DAEMON_LABEL`/`SERVE_LABEL`/`SUPERVISOR_LABEL`) — this module never
    * shells to launchd itself (Rule 16: lib/ stays a thin, injectable seam over that). Required;
-   * no default exists inside lib/.
+   * no default exists inside lib/. `lastExitCode` is `undefined` when unknown (never bootstrapped,
+   * or the query failed) — the caller must not fabricate a healthy-looking `0`.
    */
-  queryService: (service: ServiceName) => { running: boolean; pid: number | null };
+  queryService: (service: ServiceName) => { running: boolean; pid: number | null; lastExitCode?: number };
   /** The checkout to compare against `origin/main` (the daemon's own repoRoot). */
   repoDir: string;
+  /**
+   * The deploy-supervisor's OWN installed `StartInterval` (seconds), read from the unit actually
+   * on disk — never a restated constant, so a `--interval` override at install time can't silently
+   * desync this module's overdue threshold from it. Defaults to {@link DEFAULT_SUPERVISOR_INTERVAL_S}
+   * when omitted or the installed unit can't be read (never a plist read, never a throw, from lib/).
+   */
+  resolveSupervisorIntervalS?: () => number | undefined;
   /** Ledger reader; defaults to status.ts's real `readLedgerLines`. */
   readLedger?: LedgerReader;
   /** LOCAL (no-fetch) resolution of `origin/main`'s sha — offline-safe by construction. Defaults
@@ -415,6 +489,34 @@ function deriveLastCycle(lines: ReadonlyArray<Record<string, unknown>>): { ts?: 
     };
   }
   return { ts: bestTs, summary: bestSummary };
+}
+
+interface SupervisorTick {
+  ts?: string;
+  step?: string;
+}
+
+/** The latest `deploy.*` ledger line — every `rmd deploy-run` cycle logs exactly one (see
+ *  deployer.ts's `runDeployCycle`), so this is the deploy-supervisor's own recency heartbeat,
+ *  read the same "scan for the newest line with this step-family, by parsed `ts`" way {@link
+ *  deriveDaemonBoots}/{@link deriveLastCycle} already read the daemon's. Failure is judged
+ *  separately, from the CLI layer's own `launchctl list` exit-code read (see `lastExitCode` on
+ *  {@link ServiceLivenessRow}) — never guessed from a step name here. */
+function deriveSupervisorTick(lines: ReadonlyArray<Record<string, unknown>>): SupervisorTick {
+  let bestTs: string | undefined;
+  let bestParsed = -Infinity;
+  let bestStep: string | undefined;
+  for (const line of lines) {
+    const step = typeof line.step === "string" ? line.step : undefined;
+    if (!step || !step.startsWith("deploy.")) continue;
+    const ts = typeof line.ts === "string" ? line.ts : undefined;
+    const parsed = ts ? Date.parse(ts) : NaN;
+    if (!Number.isFinite(parsed) || parsed < bestParsed) continue;
+    bestParsed = parsed;
+    bestTs = ts;
+    bestStep = step;
+  }
+  return { ts: bestTs, step: bestStep };
 }
 
 // ── LATCHES table (DATA — a marker added later is a row, not a branch) ─────────────────────────
@@ -586,6 +688,21 @@ const LIVENESS_NEXT_ACTIONS: readonly NextActionRule<LivenessCtx>[] = [
   {
     applies: (ctx) => !ctx.services.find((s) => s.service === "daemon")?.running,
     action: () => "the daemon is not running — `rmd up` (or `rmd daemon ...`) to resume the fleet",
+  },
+  {
+    // deploy-supervisor is a periodic one-shot: `running: false` between ticks is its NORMAL
+    // rest state (see ServiceKind), so this only fires once a tick is actually overdue/failing —
+    // never on the routine idle-between-ticks gap the binary render used to misreport.
+    applies: (ctx) => {
+      const row = ctx.services.find((s) => s.service === "deploy-supervisor");
+      return row !== undefined && livenessState(row) === "overdue";
+    },
+    action: (ctx) => {
+      const row = ctx.services.find((s) => s.service === "deploy-supervisor")!;
+      return row.lastExitCode !== undefined && row.lastExitCode !== 0
+        ? `deploy-supervisor's last run exited ${row.lastExitCode} — check state/logs/supervisor.err.log`
+        : "deploy-supervisor has missed its interval — check it is loaded (`launchctl print gui/$UID/com.remudero.supervisor`) and state/logs/supervisor.err.log";
+    },
   },
 ];
 
@@ -953,6 +1070,7 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
   const lines = readLedger(ledgerPath);
   const boots = deriveDaemonBoots(lines);
   const lastCycleRaw = deriveLastCycle(lines);
+  const supervisorTick = deriveSupervisorTick(lines);
 
   // ── LIVENESS ──
   const services: ServiceLivenessRow[] = (["daemon", "serve", "deploy-supervisor"] as const).map((service) => {
@@ -963,6 +1081,14 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
       const parsed = boots.ts ? Date.parse(boots.ts) : NaN;
       row.bootedAgeMs = Number.isFinite(parsed) ? Math.max(0, nowMs - parsed) : undefined;
       row.headSha = boots.headSha;
+    } else if (service === "deploy-supervisor") {
+      row.tickAt = supervisorTick.ts;
+      const parsed = supervisorTick.ts ? Date.parse(supervisorTick.ts) : NaN;
+      row.tickAgeMs = Number.isFinite(parsed) ? Math.max(0, nowMs - parsed) : undefined;
+      row.tickStep = supervisorTick.step;
+      row.lastExitCode = q.lastExitCode;
+      const intervalS = deps.resolveSupervisorIntervalS?.() ?? DEFAULT_SUPERVISOR_INTERVAL_S;
+      row.overdueThresholdMs = intervalS * 3 * 1000;
     }
     return row;
   });
@@ -1050,12 +1176,32 @@ function shortSha(sha: string | undefined): string {
   return sha ? sha.slice(0, 12) : "unknown";
 }
 
+/** Render one row's {@link LivenessState} — the THREE-way text the binary `running (pid …)` /
+ *  `not running` render used to collapse an interval service's healthy idle-between-ticks rest
+ *  and a genuinely dead one into the same "not running" line (the bug W1-T301 exists to fix).
+ *  Resident services (`"daemon"`/`"serve"`) only ever hit the first two branches, unchanged
+ *  from the prior render. */
+function renderLivenessState(s: ServiceLivenessRow): string {
+  switch (livenessState(s)) {
+    case "running":
+      return `running (pid ${s.pid ?? "unknown"})`;
+    case "stopped":
+      return "not running";
+    case "idle":
+      return `idle — last tick ${s.tickAt ? `${formatAgeMs(s.tickAgeMs)} ago` : "unknown"} (${s.tickStep ?? "unknown"})`;
+    case "overdue":
+      return s.lastExitCode !== undefined && s.lastExitCode !== 0
+        ? `overdue — last exit code ${s.lastExitCode}${s.tickAt ? ` (${formatAgeMs(s.tickAgeMs)} ago)` : ""}`
+        : `overdue — ${s.tickAt ? `last tick ${formatAgeMs(s.tickAgeMs)} ago, no fresher one since` : "no tick observed yet"}`;
+  }
+}
+
 function renderLivenessBlock(l: LivenessSection): string[] {
   const out = ["── LIVENESS ─────────────────────────────────────────────"];
   for (const s of l.services) {
     const bootPart =
       s.service === "daemon" ? ` — boot ${s.bootedAt ? `${formatAgeMs(s.bootedAgeMs)} ago` : "unknown"} (${shortSha(s.headSha)})` : "";
-    out.push(`${s.service.padEnd(16)}: ${s.running ? `running (pid ${s.pid ?? "unknown"})` : "not running"}${bootPart}`);
+    out.push(`${s.service.padEnd(16)}: ${renderLivenessState(s)}${bootPart}`);
   }
   const stale = l.headVsOriginMain;
   out.push(

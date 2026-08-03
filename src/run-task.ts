@@ -109,7 +109,7 @@ import {
 } from "./lib/daemon.js";
 import { makeTempDir, sweepStaleTempDirs, withTempDir } from "./lib/tmp.js";
 import { reapWorkerScratch, sweepStaleWorkerScratch } from "./lib/worker-scratch.js";
-import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateServeLaunchdPlist, generateSupervisorLaunchdPlist, launchctlGuiTarget, launchdPlistPath, SERVE_LABEL, serveLogPaths, SUPERVISOR_LABEL } from "./lib/launchd.js";
+import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateServeLaunchdPlist, generateSupervisorLaunchdPlist, launchctlGuiTarget, launchdPlistPath, parseSupervisorStartInterval, SERVE_LABEL, serveLogPaths, SUPERVISOR_LABEL } from "./lib/launchd.js";
 import { realDeployDeps, requestDeploy, runDeployCycle } from "./lib/deployer.js";
 import { buildStatusBoard, renderStatusBoardText, type ServiceName } from "./lib/status-board.js";
 import { buildDigest, buildMarkerAwareDigest, consoleCardUrl, sendDigest, sendMarkerAwareDigest, sendRundown } from "./lib/digest.js";
@@ -8739,6 +8739,40 @@ export function queryLaunchdService(
   return { loaded: true, pid: m ? Number(m[1]) : null };
 }
 
+/** `launchctl list <label>`'s one-line, tab-separated `PID\tStatus\tLabel` — the SAME fact the
+ *  W1-T301 rationale read by hand off a real box (`launchctl list` showing `-  0
+ *  com.remudero.supervisor`, i.e. not running, last exit 0) to prove a healthy periodic one-shot
+ *  was being mis-reported "not running" by a pid-presence-only check. `PID` is `-` when not
+ *  currently running (interval jobs rest between ticks — see status-board.ts's `ServiceKind`);
+ *  `Status` is the job's LAST completed run's exit code (0 healthy, nonzero a real failure) —
+ *  exactly the datum a resident-service pid check can never surface for a periodic job. A
+ *  non-bootstrapped label, or any unparseable output, is caught/returned as "unknown" — never a
+ *  throw, never a fabricated healthy `0`. */
+export interface LaunchdListStatus {
+  pid: number | null;
+  lastExitCode: number | undefined;
+}
+
+const LAUNCHCTL_LIST_LINE_RE = /^(-|\d+)\s+(-?\d+)\s+(\S+)/;
+
+export function queryLaunchdListStatus(
+  label: string,
+  exec: (cmd: string, args: string[]) => string = defaultLifecycleExec,
+): LaunchdListStatus {
+  let out: string;
+  try {
+    out = exec("launchctl", ["list", label]);
+  } catch {
+    return { pid: null, lastExitCode: undefined };
+  }
+  const line = out.split("\n").find((l) => LAUNCHCTL_LIST_LINE_RE.test(l.trim()));
+  const m = line ? LAUNCHCTL_LIST_LINE_RE.exec(line.trim()) : null;
+  if (!m) return { pid: null, lastExitCode: undefined };
+  const pid = m[1] === "-" ? null : Number(m[1]);
+  const lastExitCode = Number(m[2]);
+  return { pid, lastExitCode: Number.isFinite(lastExitCode) ? lastExitCode : undefined };
+}
+
 /** `launchctl bootstrap gui/<uid> <plistPath>` — loads a unit that is not yet loaded. */
 export function loadLaunchdService(
   plistPath: string,
@@ -9177,7 +9211,11 @@ export async function upCommand(rest: string[], deps: UpDeps = {}): Promise<numb
  *  launchd query, the same "swap the edges, keep the middle real" shape as {@link DownDeps}. */
 export interface StatusDeps {
   loadConfig?: () => Config;
-  queryService?: (service: ServiceName) => { running: boolean; pid: number | null };
+  queryService?: (service: ServiceName) => { running: boolean; pid: number | null; lastExitCode?: number };
+  /** The deploy-supervisor's installed `StartInterval`, seconds — defaults to reading the
+   *  actual unit off disk (`launchdPlistPath(SUPERVISOR_LABEL)`); overridable so a test never
+   *  touches the real filesystem. */
+  resolveSupervisorIntervalS?: () => number | undefined;
   ledgerPathFor?: (config: Config) => string;
   repoRoot?: string;
   /** The DERIVED half's (W1-T280) batched GitHub gateway; defaults to
@@ -9221,12 +9259,27 @@ export async function statusCommand(rest: string[], deps: StatusDeps = {}): Prom
   const uid = realUid();
   const queryService =
     deps.queryService ??
-    ((service: ServiceName): { running: boolean; pid: number | null } => {
+    ((service: ServiceName): { running: boolean; pid: number | null; lastExitCode?: number } => {
       const label = service === "daemon" ? DAEMON_LABEL : service === "serve" ? SERVE_LABEL : SUPERVISOR_LABEL;
       const state = queryLaunchdService(label, uid);
       // "running" means a live pid, not merely "loaded" — a bootstrapped-but-not-spawned job
       // answers "is it running" with no, exactly like an unloaded one.
-      return { running: state.pid !== null, pid: state.pid };
+      if (service !== "deploy-supervisor") return { running: state.pid !== null, pid: state.pid };
+      // deploy-supervisor is an interval job: its own `pid`/`loaded` mean nothing between ticks
+      // (see status-board.ts's ServiceKind) — `launchctl list`'s Status column is the fact that
+      // actually carries its health (the W1-T301 fix).
+      const listStatus = queryLaunchdListStatus(label);
+      return { running: listStatus.pid !== null, pid: listStatus.pid, lastExitCode: listStatus.lastExitCode };
+    });
+  const resolveSupervisorIntervalS =
+    deps.resolveSupervisorIntervalS ??
+    ((): number | undefined => {
+      try {
+        const xml = readFileSync(launchdPlistPath(SUPERVISOR_LABEL), "utf8");
+        return parseSupervisorStartInterval(xml);
+      } catch {
+        return undefined; // not installed / unreadable — the board falls back to the default pace
+      }
     });
   const buildBoard = deps.buildStatusBoard ?? buildStatusBoard;
   const render = deps.renderStatusBoardText ?? renderStatusBoardText;
@@ -9251,6 +9304,7 @@ export async function statusCommand(rest: string[], deps: StatusDeps = {}): Prom
     repoDir,
     github,
     resolveHeadroomEnabled: () => resolveHeadroomEnabled(config),
+    resolveSupervisorIntervalS,
   });
   out(rest.includes("--json") ? JSON.stringify(model, null, 2) : render(model));
   return 0;

@@ -9,7 +9,9 @@ import {
   assertNoAnthropicKeys,
   generateDigestLaunchdPlist,
   generateLaunchdPlist,
+  generateSupervisorLaunchdPlist,
   launchdPlistPath,
+  parseSupervisorStartInterval,
 } from "../src/lib/launchd.js";
 
 const VALID = { rmdBin: "/Users/op/Remudero/bin/rmd", root: "/Users/op/Remudero" };
@@ -339,5 +341,24 @@ test("generated plist fixture -> StartCalendarInterval at the given hour, Enviro
   assert.throws(
     () => assertNoAnthropicKeys({ ...env, ANTHROPIC_API_KEY: "sneaky" }, "generateDigestLaunchdPlist"),
     (e) => e instanceof LaunchdPlistError && /billing-boundary violation/.test(e.message) && /ANTHROPIC_API_KEY/.test(e.message),
+  );
+});
+
+test("parseSupervisorStartInterval reads back the StartInterval it just generated (W1-T301)", () => {
+  const plist = generateSupervisorLaunchdPlist({ ...VALID, intervalSeconds: 90 });
+  assert.equal(parseSupervisorStartInterval(plist), 90);
+});
+
+test("parseSupervisorStartInterval falls back to undefined on garbage/absent input (W1-T301)", () => {
+  assert.equal(parseSupervisorStartInterval("<plist></plist>"), undefined);
+  assert.equal(parseSupervisorStartInterval(""), undefined);
+  assert.equal(
+    parseSupervisorStartInterval("<key>StartInterval</key><integer>-5</integer>"),
+    undefined,
+    "a non-positive interval is never a fabricated liveness threshold",
+  );
+  assert.equal(
+    parseSupervisorStartInterval("<key>StartInterval</key><integer>not-a-number</integer>"),
+    undefined,
   );
 });

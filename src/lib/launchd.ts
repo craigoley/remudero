@@ -627,3 +627,17 @@ ${stringArray(programArguments)}
 </plist>
 `;
 }
+
+/** Pure string parse of a generated (or installed-on-disk) supervisor plist's `StartInterval` —
+ *  no file I/O here (this module's own never-touches-disk boundary, see header); the CLI layer
+ *  (run-task.ts) reads the installed unit's bytes and hands them to this. Used by `rmd status`
+ *  (W1-T301) so the deploy-supervisor's LIVENESS overdue threshold tracks whatever interval is
+ *  ACTUALLY installed rather than restating {@link DEFAULT_SUPERVISOR_INTERVAL_S} and drifting
+ *  the moment an operator installs with `--interval`. Returns `undefined` on anything
+ *  unparseable — never a throw, never a fabricated number. */
+export function parseSupervisorStartInterval(plistXml: string): number | undefined {
+  const m = /<key>\s*StartInterval\s*<\/key>\s*<integer>\s*(-?\d+)\s*<\/integer>/.exec(plistXml);
+  if (!m) return undefined;
+  const n = Number(m[1]);
+  return Number.isInteger(n) && n > 0 ? n : undefined;
+}
