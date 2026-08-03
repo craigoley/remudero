@@ -1,0 +1,111 @@
+- id: W1-T290
+  title: "the drain never got the daemon's bounded-degraded ceiling — an unreadable /usage takes the no-stop branch on EVERY tick, so a drain that coincides with real headroom exhaustion keeps dispatching against an exhausted pool, and a test enshrines it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "OBSERVED at source, both consumers read the SAME reader and disagree on polarity.
+    THE DRAIN SIDE: src/lib/drain.ts's single-lane loop reads deps.readUsage() at the top of every tick and
+    computes `const over = snap ? headroomExhausted(snap, opts.headroomLimitPct) : null` — an unreadable
+    snapshot (snap === undefined) yields over = null, which is the SAME value as a healthy read with headroom
+    to spare, so no stop is taken and the loop dispatches. It then logs drain.headroom.unavailable with the
+    note 'usage unreadable — continuing (best-effort)', and the comment above it concedes the polarity in
+    words: 'an unreadable /usage does not halt the whole drain'. The multi-lane pass (runDrainLanes) carries a
+    BYTE-IDENTICAL copy of the same three lines, so the defect is at TWO sites, not one.
+    THE DAEMON SIDE: src/lib/daemon.ts EXPLICITLY REJECTED that behaviour. It counts CONSECUTIVE unreadable
+    reads, resets the count on any successful read, and once the count exceeds unreadableDegradedLimit
+    (DEFAULT_UNREADABLE_DEGRADED_LIMIT = 3) it stops dispatching and idles on the in-process heartbeat,
+    ledgering daemon.headroom.degraded with 'usage unreadable beyond the bounded allowance — idling, not
+    dispatching'. Within the allowance it still dispatches and logs daemon.headroom.unavailable. That is the
+    bounded degraded mode W1-T197 was amended to require.
+    ONE READER, TWO CONSUMERS, ONE FIX: readUsageSnapshot (src/run-task.ts) is wired as deps.readUsage for BOTH
+    the `rmd drain` call site and the daemon call site. The reader correctly returns undefined on an unreadable
+    read (W1-T267 ratifies that and is not touched here); the polarity fix landed on the daemon CONSUMER only.
+    WHY IT MATTERS AT THIS RATE: recon R-7's measured figure, recorded in W1-T197's own note, is that /usage is
+    unreadable ~78% of the time (daemon.headroom.unavailable 197 of 253 checks). At that rate the drain's
+    headroom gate is inoperative on most ticks, and the only remaining bounds on a drain that coincides with a
+    genuinely exhausted window are --max and the per-task budget_usd tripwire, both of which can be large. The
+    drain is not an attended-only verb — its own summary renders 'what happened while I was away'.
+    ENSHRINED, WHICH IS WHY IT SURVIVED: test/drain.test.ts's 'headroom unreadable (undefined) does NOT halt —
+    best-effort, the drain continues' asserts the fail-open direction, so the asymmetry reads as intended
+    behaviour to anyone who greps the tests.
+    WHY THIS IS NOT ALREADY COVERED. W1-T197 NAMED the mirror ('daemon.ts:286, mirrored at drain.ts:554') but
+    scoped itself to files [src/lib/daemon.ts, test/daemon.test.ts] and every one of its acceptance claims is
+    daemon-worded — the drain consumer was observed and left unowned. W1-T249 (P34 clause c, the reserve gate)
+    carries the identical 'never proceed-as-if-unlimited' claim but its files are [src/lib/daemon.ts,
+    src/run-task.ts], again not drain.ts. W1-T267 mentions the drain only to FENCE ITS OWN SCOPE ('not this
+    task's to change') while it fixes which credential store the probe reads. No entry in DECISIONS.md rules
+    the drain's fail-open correct on the merits; the 2026-07-28 governor ruling constrains WHEN a hold may
+    fire, not this polarity."
+  design: |
+    PORT THE DAEMON'S BOUNDED-DEGRADED CEILING TO THE DRAIN, at BOTH sites, with ONE shared policy number.
+    (1) COUNT CONSECUTIVE UNREADABLE READS, not any-unreadable. An unconditional fail-closed-on-first-miss is
+        the WRONG fix and is refused for the same measured reason W1-T197 records: at a ~78% unreadable rate it
+        would halt the drain most of the time. Within the allowance the drain dispatches exactly as today and
+        keeps logging drain.headroom.unavailable; any successful read resets the count to zero.
+    (2) BEYOND THE ALLOWANCE THE DRAIN STOPS DISPATCHING. The daemon's terminal shape is an in-process idle
+        heartbeat because it is a long-lived loop with a poll interval; the drain has no such interval, so its
+        analogue is a distinguishable terminal StopReason (with the existing resumeCommand telling the operator
+        how to resume) rather than a silent continue — VERIFY THE LOOP'S OWN SHAPE FROM SOURCE and choose the
+        stop-vs-back-off form that matches it, rather than transplanting the daemon's sleep. Either way the
+        drain-and-hold guarantee is untouched: the check sits at the TOP of a tick, so no in-flight task is ever
+        interrupted.
+    (3) BOTH SITES OR NEITHER. runDrain's single-lane loop and runDrainLanes' pass loop each carry their own
+        copy of the read; a fix on one leaves the other as the same latent bug reachable by --lanes.
+    (4) ONE CONSTANT, TWO CONSUMERS. Do NOT mint a second, drift-prone degraded limit. daemon.ts already imports
+        from drain.ts (nextRunnable), so a back-import would be a cycle — home the shared limit where both can
+        read it (src/lib/headroom.ts is the natural shared module) and have the daemon keep its current default
+        and override option. The number stays POLICY DATA (rule 2), and W1-T252/W1-T253's policy file is its
+        eventual home; do not hard-fork it here.
+    (5) RESPECT THE GOVERNOR SWITCH — this is a hard constraint, not a nicety. Per the 2026-07-28 operator
+        ruling (and W1-T259/fb-1784894405468-a4153e's retained mechanism), ONE switch gates all headroom-based
+        dispatch gating, and while the governor is DISABLED an unreadable read is ABSENT TELEMETRY, NEVER A
+        HOLD. VERIFY FROM SOURCE: the drain call site currently passes readUsage with no resolveHeadroomEnabled
+        consultation at all, so a new hold added blind would fire on exactly the hosts that deliberately opted
+        out. The new ceiling must be gated by the same resolved posture the daemon uses.
+    (6) RETARGET THE ENSHRINING TEST. test/drain.test.ts's 'headroom unreadable (undefined) does NOT halt' must
+        be rewritten to prove the BOUNDED allowance (within K, the drain continues) instead of unbounded
+        continuation — deleting the fail-open assertion without replacing it would lose the coverage that the
+        drain is not halted by an ordinary blind read.
+    EXPLICITLY NOT IN SCOPE: the reader itself (readUsageSnapshot keeps returning undefined — W1-T267's
+    ratified reader polarity is untouched), any change to the daemon's own behaviour, the at/near-limit
+    headroom_exhausted stop (already correct at both sites), and imputed dollar figures, which gate nothing.
+  acceptance:
+    - claim: "WITHIN the bounded allowance an unreadable /usage still dispatches — a reader blind most of the time does not halt the drain (the anti-falsifier for a naive fail-closed-on-first-miss)"
+      proof: "unit test: test/drain-unreadable-degraded.test.ts"
+    - claim: "BEYOND the allowance the single-lane drain stops dispatching with a distinguishable terminal reason instead of taking the no-stop branch every tick"
+      proof: "unit test: test/drain-unreadable-degraded.test.ts"
+    - claim: "the multi-lane pass enforces the SAME ceiling as the single-lane loop — both readUsage sites, one polarity"
+      proof: "unit test: test/drain-unreadable-degraded.test.ts"
+    - claim: "a single successful read resets the consecutive-unreadable count to zero, exactly as the daemon's does"
+      proof: "unit test: test/drain-unreadable-degraded.test.ts"
+    - claim: "with the headroom governor DISABLED an unreadable read is absent telemetry and never a hold — the new ceiling cannot fire on a host that opted out (2026-07-28 ruling)"
+      proof: "unit test: test/drain-unreadable-degraded.test.ts"
+    - claim: "the drain reads the SHARED degraded limit rather than a second constant that can drift from the daemon's"
+      proof: "grep: UNREADABLE_DEGRADED_LIMIT in src/lib/drain.ts"
+    - claim: "the enshrining test is retargeted, not merely deleted — the drain suite proves the bounded allowance"
+      proof: "unit test: test/drain.test.ts"
+  risk: high
+  origin: feedback#fb-1784732685925-86544b
+  plan_refs: ["§4", "§9"]
+  files: [src/lib/drain.ts, src/lib/headroom.ts, test/drain.test.ts]
+  status: queued
+  attempts: 0
+  note: "Filed from feedback fb-1784732685925-86544b (cli, 2026-07-22), triaged 2026-08-02.
+    verify:auto — every criterion is assertable against an injected readUsage and an injected runner over a
+    fixture plan: no real /usage call, no credential, no worker spawn (Rule 18, headless).
+    risk:high — this is the dispatch/spending path and the failure is asymmetric in BOTH directions (too
+    permissive spends past a wall it cannot see; too conservative parks a fleet on a window that is actually
+    full), which is the same grading W1-T197 and W1-T267 carry for the same organ.
+    budget_usd 100 — house default; the diff is small but it touches two loops, a shared constant home, and a
+    test that currently asserts the opposite.
+    NO depends_on DELIBERATELY: the daemon's mechanism (DEFAULT_UNREADABLE_DEGRADED_LIMIT, the consecutive
+    counter, the degraded log line) is ALREADY LIVE in src/lib/daemon.ts, so this port has a working precedent
+    to copy and needs no queued task to land first. It does NOT supersede W1-T197 (daemon consumer + the
+    time-aware curve) or W1-T249 (the reserve gate); it closes the drain consumer those two left unowned, and
+    W1-T249's implementer should reuse whatever shared home this task establishes rather than adding a third.
+    FALSIFYING CHECK carried verbatim from the filing: run runDrain with readUsage() -> undefined for more
+    ticks than the degraded limit and a large --max; today it dispatches every tick with no back-off, while the
+    daemon under the same reader idles after the bounded allowance."
