@@ -325,3 +325,38 @@ test("bodyContradictsDiff: the sentence's full stop sits OUTSIDE the closing bac
   // re-introduce the false positive for one-item and last-item enumerations only.
   assert.deepEqual(bodyContradictsDiff("This PR touches exactly 1 file: `src/lib/serve.ts`.", ["src/lib/serve.ts"]), []);
 });
+
+test("bodyContradictsDiff: a PARENTHESISED enumeration is not a contradiction (PR #1209)", () => {
+  // The second live fixture, and the one #1194's narrower fix missed. It stripped `[.\s]+$` then
+  // backticks anchored at the ends — neither matches when the final character is a paren, so the
+  // item stayed "`…test.ts`)" and a TRUE claim was failed.
+  const body =
+    "(this changeset is exactly 2 files: `src/lib/review.ts`, `test/review-failure-reason-ledgered.test.ts`)";
+  const diff = ["src/lib/review.ts", "test/review-failure-reason-ledgered.test.ts"];
+
+  assert.deepEqual(bodyContradictsDiff(body, diff), [], "a parenthesised true enumeration must be silence");
+});
+
+test("bodyContradictsDiff: wrapping punctuation comes off whatever the wrapper", () => {
+  // The point of a character class rather than a fixed pair: robustness to the NEXT wrapper, not
+  // just the two that have been observed. Each of these enumerates the same true two-file diff.
+  const diff = ["src/lib/review.ts", "test/x.test.ts"];
+  for (const body of [
+    "the diff is exactly 2 files: `src/lib/review.ts`, `test/x.test.ts`.",
+    "the diff is exactly 2 files: `src/lib/review.ts`, `test/x.test.ts`)",
+    "the diff is exactly 2 files: [src/lib/review.ts], [test/x.test.ts];",
+    'the diff is exactly 2 files: "src/lib/review.ts", "test/x.test.ts"',
+  ]) {
+    assert.deepEqual(bodyContradictsDiff(body, diff), [], `must be silence: ${body}`);
+  }
+});
+
+test("bodyContradictsDiff: over-stripping cannot invent a match for a file not in the diff", () => {
+  // The guard on the guard. looksLikePath still demands a `.` or `/`, and a stripped token that is
+  // genuinely absent must still contradict — otherwise this cleanup becomes a way past the gate.
+  const hits = bodyContradictsDiff("the diff is exactly 2 files: (`src/lib/review.ts`), (`src/lib/ABSENT.ts`).", [
+    "src/lib/review.ts",
+    "test/x.test.ts",
+  ]);
+  assert.equal(hits.length, 1, "a wrapped file that is not in the diff is still a contradiction");
+});
