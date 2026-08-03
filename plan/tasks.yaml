@@ -788,45 +788,65 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 60.00
-  rationale: "RECON R-2, and recon T1-AC3. A CAPPED verdict means zero proofs were executed and the pass rests
-    entirely on keyword coverage - a claim, never evidence. Today that still arms auto-merge unless the task is
-    marked tdd:strict, and tdd:strict is not the default. So the DEFAULT merge floor for this system is prose.
-    THE CEILING IS STRONG AND THE FLOOR IS NOT. Executed proofs, the awareness surface, the ratchets and the
-    review judge are all real, and on a tdd:strict task they bind. The recon's summary of the gap is exact: the
-    ceiling is strong, the floor is prose, and most work rides the floor.
-    THIS SESSION SUPPLIED THE FIXTURES WITHOUT MEANING TO. Every remudero-review verdict posted by hand on
-    2026-07-21 came back CAPPED at 0 proofs executed, because worktree materialization was unavailable, and
-    those PRs armed and merged on that basis. The mechanism is not hypothetical and it is not rare - it was the
-    normal case for a full day of merges."
+  rationale: "WITHDRAWN AS ALREADY SATISFIED 2026-08-03. Both acceptance criteria below were met by work that
+    merged the day AFTER this task was filed, and the task was never closed, so it sat queued with attempts: 0
+    where the dispatcher would eventually spend a run on it. Verified from source before withdrawing, not
+    inherited from a claim.
+    CRITERION 1 IS SATISFIED BY commit 98b4ec6 (PR #528, 2026-07-22, 'capped verdicts refuse to arm auto-merge
+    regardless of tdd tier'), which supersedes the tdd:strict-only version in dcf1755 (PR #456). Executing the
+    real function today: decideAutoMergeArm({state: success, capped: true, planOnly: false}, tddStrict=false)
+    returns arm:false, reason 'CAPPED verdict (zero proofs executed) - refuses to arm auto-merge without executed
+    proof or an explicit, ledgered operator override'. It holds MORE strongly than the criterion asked: tddStrict
+    appears only in the signature and is never consulted in the body, so a capped verdict refuses at every tier.
+    CRITERION 2 IS SATISFIED BY commit 60ec329 (PR #562, 2026-07-22, 'carve out plan-only PRs from the
+    capped-never-arms floor'), the W1-T205 rider this task's own design made binding. Executing it today:
+    decideAutoMergeArm({state: success, capped: true, planOnly: true}) returns arm:true, so the plan lane does
+    not stall.
+    THE CODE STANDS AND MUST NOT BE REVERTED. This entry withdraws a WORK ITEM, not the behaviour. Reverting
+    98b4ec6 or 60ec329 would reopen the prose-merge-floor defect this task was filed to close, and PR #1232
+    (commit 6ebd05b) since extended the same rule to decideArmFromLedgerVerdict, which had been arming capped
+    verdicts on the sweep, dep-review, retro, triage, plan and approve lanes."
   design: |
-    decideAutoMergeArm RETURNS arm:false FOR A CAPPED VERDICT REGARDLESS OF TDD TIER. One conditional, at the
-    decision function rather than at its callers, so every arm point inherits it - Phase-1 enumeration found
-    seven distinct armAutoMerge call sites, and a rule applied per-caller would be applied per-caller wrong.
-    VERIFY THE PLAN-ONLY CARVE-OUT SURVIVES. W1-T205 carries the operator's standing rider: a plan-only PR is
-    STRUCTURALLY capped, because the task it files has no code and therefore no executable proof. If this
-    change makes capped-never-arms unconditional without that exemption, every retro, approve and filing PR
-    stalls forever. Read W1-T205 before implementing, and treat its falsifier as binding here.
-    EXPECT THIS TO BITE IMMEDIATELY, AND SIZE FOR IT. Once capped stops arming, work whose proofs cannot execute
-    stops merging - which is the point, and which is also a throughput cliff if proof execution is unreliable.
-    W1-T227 (narrow the proof runs so they stop timing out) is the task that makes this survivable. Sequence
-    accordingly rather than landing this into a harness that coins exec_error under load.
+    NOT TO BE BUILT. Left in the plan as a RECORD of the withdrawal decision, not a work item. status: blocked so
+    nextRunnable/assertRunnable never dispatch it (drain.ts's isDispatchEligible refuses `status === "blocked"`
+    before any dependency or breaker check) - `withdrawn` is not one of plan.ts's TASK_STATUSES, and blocked is
+    the equivalent this repo already established for a retirement record (precedent: W1-T270 in PR #1027 and
+    W1-T269 in PR #1030).
+    WHY IT COULD NEVER HAVE CERTIFIED ITSELF, which is the part worth keeping. Both criteria carried the proof
+    `unit test: case added to test/review.test.ts`. That is not a test name - it is a description of an intended
+    edit. `rmd check-proof` reports `parse: OK - kind=test (name-filtered)`, `candidates: absent`,
+    `verdict: no-match - the executor fast-fails here and never spawns node`. So the proof resolves to ZERO tests
+    for any runner, and a dispatched run could have implemented the task perfectly and still posted CAPPED at
+    proof_exec 0/2. The task was unfalsifiable as written, independently of whether the work was done.
+    depends_on is left UNCHANGED at [] and no other task is touched. Nothing in src/ or test/ is edited by the
+    withdrawal - the behaviour is already live and covered.
   acceptance:
-    - claim: "decideAutoMergeArm with a capped verdict and tddStrict false returns arm false"
-      proof: "unit test: case added to test/review.test.ts"
-    - claim: "a plan-only PR still arms under the raised floor, so the plan lane does not stall"
-      proof: "unit test: case added to test/review.test.ts"
+    - claim: "this task is withdrawn as already satisfied and never dispatched; the shipped code that satisfies it is named"
+      proof: "grep: refuses to arm auto-merge without executed proof in src/lib/review.ts"
   risk: high
   origin: architect
   plan_refs: ["§5C", "P22"]
   files: [src/run-task.ts]
-  status: queued
+  status: blocked
   attempts: 0
-  note: "FILED 2026-07-21. Recon R-2 / T1-AC3.
-    THE PLAN-ONLY CARVE-OUT IS NOT OPTIONAL and is carried as the second criterion rather than left to the
-    implementer to remember - W1-T205 records the operator's rider verbatim, and a floor raised without it
-    halts every machine-emitted plan PR.
-    SEQUENCING: land W1-T227 first. Raising the floor while the proof harness still times out under load turns
-    an evidence gate into a throughput stop."
+  note: "THE TWO WITHDRAWN CRITERIA, PRESERVED VERBATIM so a future re-filing needs no archaeology - they are
+    withdrawn because they are ALREADY MET, never because they were wrong:
+    (1) claim 'decideAutoMergeArm with a capped verdict and tddStrict false returns arm false' /
+    proof 'unit test: case added to test/review.test.ts';
+    (2) claim 'a plan-only PR still arms under the raised floor, so the plan lane does not stall' /
+    proof 'unit test: case added to test/review.test.ts'.
+    SATISFACTION MEASURED PER CRITERION, not asserted in aggregate: (1) by 98b4ec6 / PR #528; (2) by 60ec329 /
+    PR #562. Both merged 2026-07-22, one day after this task was filed on 2026-07-21. Neither was attributed to
+    W1-T229, which is why it stayed queued.
+    THE GAP THIS LEAVES IS NOT CLOSED HERE. An unresolvable proof certified nothing and nothing noticed for
+    thirteen days; the task was found only by hand inspection. Whether a residual task should be filed for that -
+    the W1-T201 -> W1-T264 shape - is an operator decision and is deliberately NOT smuggled into this bookkeeping
+    edit.
+    ORIGINAL FILING NOTE, unchanged and still true of the withdrawn product: 'FILED 2026-07-21. Recon R-2 /
+    T1-AC3. THE PLAN-ONLY CARVE-OUT IS NOT OPTIONAL and is carried as the second criterion rather than left to
+    the implementer to remember - W1-T205 records the operator's rider verbatim, and a floor raised without it
+    halts every machine-emitted plan PR. SEQUENCING: land W1-T227 first. Raising the floor while the proof
+    harness still times out under load turns an evidence gate into a throughput stop.'"
 - id: W1-T231
   title: "the review prompt still tells the worker to POST the status the deny-floor now refuses - prompt and enforcement disagree"
   repo: remudero
