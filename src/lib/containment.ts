@@ -84,6 +84,18 @@ export interface ContainmentEvidence {
    * saw a credential failure need not spell it out.
    */
   credentialFailure?: boolean;
+  /**
+   * W1-T292: did the probe worker die on an EXPIRED copied OAuth token (isError
+   * PLUS the conservative `CREDENTIAL_EXPIRED_RE` + `CREDENTIAL_REFRESH_FAILED_RE`
+   * signature) rather than the never-logged-in signature above? A DISTINCT field
+   * (not folded into `credentialFailure`) so the recovery path can key on a
+   * stable `spawn_credential_expired` symbol — "re-mint/refresh the token" is a
+   * different operator action than "this host was never logged in at all" —
+   * and so a locked/logged-out 'Not logged in' probe still reports the
+   * unmodified W1-T237 `spawn_credential_failure` reason, never this one.
+   * Optional — defaults falsy.
+   */
+  credentialExpired?: boolean;
 }
 
 /**
@@ -93,6 +105,19 @@ export interface ContainmentEvidence {
  * which must also fail closed). Every other combination is `contained: false`.
  */
 export function assessContainment(e: ContainmentEvidence): { contained: boolean; reason: string } {
+  // W1-T292: checked BEFORE credentialFailure so an expired copied token is
+  // never collapsed into the never-logged-in reason — the two demand different
+  // operator actions (refresh the token vs. log in at all) and must stay
+  // textually distinct symbols, not just distinct booleans.
+  if (e.credentialExpired) {
+    return {
+      contained: false,
+      reason:
+        "spawn_credential_expired — the probe worker died on an EXPIRED OAuth token (session expired, " +
+        "could not be refreshed) before it could attempt any write; this is NOT a containment finding " +
+        "(re-mint/refresh the token, don't investigate the sandbox)",
+    };
+  }
   if (e.credentialFailure) {
     return {
       contained: false,
@@ -316,14 +341,18 @@ export async function probeContainment(opts: {
     insideWriteCreated: r.insideWriteCreated,
     // W1-T237: isError PLUS BOTH conservative credential fragments — not "any
     // error" — so an unrelated error-result is never mislabelled a credential
-    // failure (the design's own conservatism requirement). Two independent
-    // credential-dead phrasings are recognized: never-logged-in, and an
-    // expired copied token that could not be refreshed.
+    // failure (the design's own conservatism requirement).
     credentialFailure:
       r.isError === true &&
-      ((CREDENTIAL_FAILURE_RE.test(r.transcript) && CREDENTIAL_LOGIN_HINT_RE.test(r.transcript)) ||
-        (CREDENTIAL_EXPIRED_RE.test(r.transcript) &&
-          CREDENTIAL_REFRESH_FAILED_RE.test(r.transcript))),
+      CREDENTIAL_FAILURE_RE.test(r.transcript) &&
+      CREDENTIAL_LOGIN_HINT_RE.test(r.transcript),
+    // W1-T292: a SECOND, DISTINCT credential-dead signature — an expired copied
+    // OAuth token — kept out of `credentialFailure` above so the two never
+    // collapse into one reason. Same conservative both-fragments-required shape.
+    credentialExpired:
+      r.isError === true &&
+      CREDENTIAL_EXPIRED_RE.test(r.transcript) &&
+      CREDENTIAL_REFRESH_FAILED_RE.test(r.transcript),
   };
   const verdict = assessContainment(evidence);
   const costUsd = r.costUsd ?? 0;
@@ -331,6 +360,7 @@ export async function probeContainment(opts: {
     contained: verdict.contained,
     reason: verdict.reason,
     credential_failure: evidence.credentialFailure,
+    credential_expired: evidence.credentialExpired,
     outside_write_created: evidence.outsideWriteCreated,
     os_denial_seen: evidence.osDenialSeen,
     inside_write_created: evidence.insideWriteCreated,
@@ -341,18 +371,32 @@ export async function probeContainment(opts: {
     ...(r.isError ? { stderr_excerpt: capStderrExcerpt(r.transcript) } : {}),
   });
   if (!verdict.contained) {
-    // OBSERVED (W1-T91/P23 part i, extended by W1-T237): the write's OWN outcome
-    // names which of THREE states this was, checked in this order so a
-    // credential-dead worker can never be reported as the genuine unproven case:
-    //  1. credentialFailure — the probe worker died on auth, before it could
-    //     attempt any write. Named `spawn_credential_failure` distinctly: this
-    //     proves NOTHING about isolation either way (unlock the keychain, don't
-    //     investigate the sandbox) — the opposite operator response from #2.
-    //  2. outsideWriteCreated — proven-broken (the outside write LANDED, the
+    // OBSERVED (W1-T91/P23 part i, extended by W1-T237, then W1-T292): the
+    // write's OWN outcome names which of FOUR states this was, checked in this
+    // order so a credential-dead worker can never be reported as the genuine
+    // unproven case:
+    //  1. credentialExpired — the probe worker died because a COPIED OAuth
+    //     token had EXPIRED. Named `spawn_credential_expired` distinctly from
+    //     #2 below: the operator action differs (re-mint/refresh the token vs.
+    //     log in from scratch), so the two reasons must never share a symbol.
+    //  2. credentialFailure — the probe worker died on auth (never logged in),
+    //     before it could attempt any write. Named `spawn_credential_failure`
+    //     distinctly: this proves NOTHING about isolation either way (unlock
+    //     the keychain, don't investigate the sandbox).
+    //  3. outsideWriteCreated — proven-broken (the outside write LANDED, the
     //     sandbox did not engage) is data-bearing.
-    //  3. neither — genuinely UNPROVEN (the write may never have been
+    //  4. neither — genuinely UNPROVEN (the write may never have been
     //     attempted) and reports the literal "unproven" rather than a
     //     fabricated data string.
+    if (evidence.credentialExpired) {
+      throw new ContainmentError(
+        `containment preflight: spawn_credential_expired — ${verdict.reason} — FAIL CLOSED, the run does not proceed`,
+        "spawn-credential-expired",
+        "spawn_credential_expired",
+        r.childEnvKeys ?? [],
+        r.accountLabel,
+      );
+    }
     if (evidence.credentialFailure) {
       throw new ContainmentError(
         `containment preflight: spawn_credential_failure — ${verdict.reason} — FAIL CLOSED, the run does not proceed`,
