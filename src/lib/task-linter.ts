@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { relative, sep } from "node:path";
 import type { AcceptanceCriterion, Plan, Task } from "./plan.js";
-import { isDemonstrationProof, isDialectPrefixed, parseWhitelistedProof } from "./review.js";
+import { isDemonstrationProof, isDialectPrefixed, parseWhitelistedProof, type WhitelistedProof } from "./review.js";
 
 /**
  * Deterministic task linter (MASTER-PLAN §5C Layer A). NO LLM — a PURE function
@@ -11,7 +11,9 @@ import { isDemonstrationProof, isDialectPrefixed, parseWhitelistedProof } from "
  * (Rule 19), headless-unfitness (Rule 18), vibe proofs, a proof that CANNOT
  * EXECUTE at all (the dead proof floor, moratorium finding 9, W1-T246), a
  * dialect-prefixed proof that promises executability but names no resolvable
- * artifact (the W1-T100 0/3, W1-T101), an ALREADY-MERGED task's criteria being
+ * artifact (the W1-T100 0/3, W1-T101), a proof that names a path OUTSIDE the
+ * task's own declared `files:` (W1-T310 — the scope guard then refuses the
+ * branch AFTER the work is done), an ALREADY-MERGED task's criteria being
  * amended with no follow-up filed in the same PR (W1-T180 — MERGED is terminal,
  * so the drain and the retro sweep both skip it and the amendment would
  * otherwise orphan silently), and missing provenance (Rules 16/17).
@@ -36,9 +38,11 @@ import { isDemonstrationProof, isDialectPrefixed, parseWhitelistedProof } from "
  * never blocks — budget-sanity always warns; proof-dialect and proof-resolvability
  * warn instead of blocking ONLY at the pre-dispatch call site (`opts.proofDialect:
  * "warn"` / `opts.proofResolvability: "warn"`, so the legacy backlog authored
- * before either check existed does not brick overnight), and proof-dialect always
+ * before either check existed does not brick overnight), proof-dialect always
  * warns (regardless of that option) for a `unit test:` proof whose body reads as a
- * runtime narrative rather than a literal test-title substring.
+ * runtime narrative rather than a literal test-title substring, and proof-scope
+ * (W1-T310) warns EVERYWHERE by default (`opts.proofScope`, default "warn") — see
+ * that check's own module comment for the measured retrofit count behind the call.
  */
 
 export type LintCheck =
@@ -48,6 +52,7 @@ export type LintCheck =
   | "proof-dialect"
   | "proof-resolvability"
   | "proof-grep-safety"
+  | "proof-scope"
   | "post-merge-amendment"
   | "provenance"
   | "call-site"
@@ -814,6 +819,93 @@ export function proofGrepSafetyViolations(task: Task): LintViolation[] {
   return violations;
 }
 
+// ── PROOF-SCOPE (W1-T310 — a proof naming a path the task never declared) ───
+//
+// scopeGuardOutOfScopeFiles (run-task.ts) refuses to push any branch whose diff
+// touches a path outside the task's declared `files:` — EXACT Set membership,
+// `declared.has(f)`, never a prefix or glob (read directly off that guard so
+// this check can never disagree with it about what "in scope" means, design
+// point 2). A proof naming a path outside that same declared set is therefore
+// GUARANTEED to trip the guard once the work satisfying it is done — W1-T309's
+// own postmortem: `files: [src/lib/status-board.ts]`, two of its three proofs
+// named `test/status-blockers-live.test.ts`, refused after 106 turns / $4.36.
+// ALL TWELVE tasks filed that day (W1-T298..W1-T309) carried the flaw and
+// `lint-plan` passed every one of them — it validates proof SHAPE
+// (proof-dialect) and RESOLVABILITY (proof-resolvability), never whether the
+// artifact a proof names is inside the scope the SAME task declares.
+//
+// REUSES parseWhitelistedProof (review.ts) — the SAME parse the reviewer's
+// executor runs (design point 1) — so this check can never disagree with
+// `rmd check-proof` about what a proof names. A proof that does not parse
+// (free prose, a malformed dialect body — proof-dialect's concern) or that
+// parses but names no path (a bare, name-filtered `unit test: <title>` —
+// design point 4) is SILENT here: there is nothing to compare against
+// `files:`.
+//
+// SEVERITY defaults to WARN, not block, and that is a measured call, not an
+// oversight (design point 3: "recommend, with the count of existing tasks
+// that would trip it, and let the operator rule"). Against the live plan at
+// filing (338 tasks, 2026-08-03): 102 already carry this flaw. `lint-plan`
+// runs CHANGED-TASKS-ONLY in CI, so a BLOCKING default would refuse merging
+// any UNRELATED future edit to one of those 102 tasks until its `files:` is
+// separately repaired. Worse, at the PRE-DISPATCH call site
+// (`assertLintClean`) there is no severity override available to THIS task:
+// this task's own declared `files:` is `[src/lib/task-linter.ts,
+// test/lint-proof-scope.test.ts]` — adding one to run-task.ts's
+// `preDispatchLint` object would itself be an out-of-declared-scope edit, the
+// exact defect this check exists to catch. A BLOCKING default here would
+// therefore immediately brick pre-dispatch (`blocked_illformed`) for those
+// same 102 already-queued tasks the moment this merges, with no way for this
+// PR to carve out the "legacy backlog must not brick overnight" exemption
+// {@link proofResolvabilityViolations} and {@link proofDialectViolations}
+// both used during their own rollout. `opts.proofScope` is the override knob
+// — an operator can flip any call site (whole-plan, or just pre-dispatch, via
+// a follow-up run-task.ts edit) to "block" with zero further engine changes,
+// once the backlog is repaired or the risk is judged acceptable.
+
+/** The repo-relative path a {@link WhitelistedProof} names, or `undefined` when
+ *  it names none. Mirrors exactly how {@link parseWhitelistedProof}'s own
+ *  parseTestTarget/parseDialectGrep (review.ts) build `label`/`args`: a
+ *  test-kind proof's `label` IS the literal path UNLESS `nameFiltered` (a bare
+ *  test title, design point 4's silent case); a grep-kind proof's path is the
+ *  token after the `--` separator every whitelisted grep shape inserts before
+ *  its pattern (`args: ["-arn", "--", pattern, path]`) — a legacy fenced
+ *  `` `grep -rn x y` `` proof (no dialect label, no `--` separator) names no
+ *  path here either, silent rather than guessed at. */
+function proofScopePath(w: WhitelistedProof): string | undefined {
+  if (w.kind === "test") return w.nameFiltered ? undefined : w.label;
+  return w.args[1] === "--" ? w.args[3] : undefined;
+}
+
+/** Every criterion whose proof names a path OUTSIDE the task's declared
+ *  `files:` — the mismatch {@link scopeGuardOutOfScopeFiles} (run-task.ts)
+ *  refuses AFTER the work satisfying it is done. WARN by default; see the
+ *  module comment above for the measured retrofit count driving that default. */
+export function proofScopeViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  const severity: LintSeverity = opts.proofScope ?? "warn";
+  const declared = new Set(task.files ?? []);
+  const violations: LintViolation[] = [];
+  (task.acceptance ?? []).forEach((c, i) => {
+    if (c.satisfied_by) return; // Architect-only; no proof text to parse
+    const whitelisted = parseWhitelistedProof(c.proof ?? "");
+    if (!whitelisted) return; // does not parse — proof-dialect's concern, not this one
+    const path = proofScopePath(whitelisted);
+    if (!path) return; // names no path (design point 4) — nothing to compare
+    if (declared.has(path)) return; // inside the declared scope — silent
+    const claimHead = (c.claim ?? "").slice(0, 60);
+    violations.push({
+      check: "proof-scope",
+      severity,
+      message:
+        `criterion ${i + 1} ("${claimHead}") proof names "${path}", which is OUTSIDE this task's ` +
+        `declared files: [${[...declared].join(", ")}] — the scope guard (run-task.ts's ` +
+        "scopeGuardOutOfScopeFiles) will refuse a branch touching it, AFTER the work is done; add " +
+        `"${path}" to files: or rewrite the proof to name a path already in scope`,
+    });
+  });
+  return violations;
+}
+
 // ── POST-MERGE-AMENDMENT (§5C, W1-T180) ──────────────────────────────────────
 //
 // An amendment to an ALREADY-MERGED task's acceptance criteria is unreachable by
@@ -1127,6 +1219,11 @@ export interface LintOpts {
   newMonolithIds?: ReadonlySet<string>;
   /** Severity for {@link monolithFilingViolations}. Default "block" — retrofit cost is zero. */
   monolithFiling?: LintSeverity;
+  /** Severity for {@link proofScopeViolations}. Default "warn" — see that check's module
+   *  comment for the measured 102/338 retrofit count driving the default, and why THIS
+   *  task cannot itself wire a pre-dispatch "block" override (it would be an out-of-scope
+   *  edit to run-task.ts, the exact defect this check exists to catch). */
+  proofScope?: LintSeverity;
 }
 
 /** Lint one task. Hard checks (sizing/headless-fitness/proof-shape/proof-dialect/
@@ -1142,6 +1239,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...proofDialectViolations(task, opts));
   violations.push(...proofResolvabilityViolations(task, opts));
   violations.push(...proofGrepSafetyViolations(task));
+  violations.push(...proofScopeViolations(task, opts));
   violations.push(...postMergeAmendmentViolations(task, opts));
   violations.push(...callSiteViolations(task, opts));
   violations.push(...monolithFilingViolations(task, opts));
