@@ -2301,11 +2301,16 @@ test("a seeded materialization failure posts a verdict whose description names i
   // the verdict object). REAL_TEST_DIFF touches src/test files, so it is false here.
   // W1-DH: the ledger line now also names WHY the cap happened. For a seeded materialization
   // failure that is `no-exec-context`, which is exactly the fact this test exists to make legible.
+  // W1-T305: the ledger line also names the unexecutable class's COUNT and OFFENDING TEXT, and
+  // whether execution was partial — 0/[]/false is not applicable here (nothing at all executed).
   assert.deepEqual(reviewLedgerLegibilityFields(v), {
     capped: true,
     keyword_only: true,
     plan_only: false,
     capped_reason: "no-exec-context:2",
+    unexecutable_count: 2,
+    unexecutable_proofs: CRITERIA.map((c) => c.proof),
+    partially_executed: false,
   });
 });
 
