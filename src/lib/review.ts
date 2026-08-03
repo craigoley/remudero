@@ -2810,6 +2810,57 @@ export function keywordOnlyAnnotation(): string {
 }
 
 /**
+ * W1-T304: the stable, COUNTABLE key naming WHICH structural path forced a
+ * `state: "failure"` verdict. Before this, `review.posted` carried `state:
+ * "failure"` with `reasons: []` whenever the failing path was NOT an unmet
+ * named criterion (`bodyContradictsDiff`'s changeset-contradiction path, the
+ * measured PR #1193 case: every criterion substantiated, every proof
+ * executed and passed, yet the review still failed) — the reason existed
+ * only inside the posted commit-status description (a 140-char field that
+ * truncates it), so `grep -a` over the ledger for that failure class returns
+ * ZERO and the predicate can never be counted, audited, or tuned.
+ *
+ * Mirrors {@link failSummary}'s own precedence exactly (both read the SAME
+ * structural facts off the SAME verdict) so the class named here always
+ * matches the prose {@link failSummary} would have rendered for this verdict
+ * — never a second, divergent notion of "why this failed":
+ *   - `no_criteria`            — {@link ReviewVerdict.criteria} is empty.
+ *   - `criteria_tampered`      — {@link ReviewVerdict.criteriaTampered}.
+ *   - `changeset_contradiction`— {@link ReviewVerdict.changesetContradictions}
+ *                                 non-empty (the bodyContradictsDiff path).
+ *   - `instrument_entangled`   — {@link ReviewVerdict.instrumentEntangled}.
+ *   - `holdout_unmet`          — every VISIBLE criterion passed, but a
+ *                                 reviewer-only holdout criterion did not.
+ *   - `test_theater`           — every criterion passed, but added tests
+ *                                 assert nothing.
+ *   - `unmet_criteria`         — at least one visible named criterion failed
+ *                                 (the ordinary case; already fully named via
+ *                                 the ledger's own `unmet_criteria`/`reasons`
+ *                                 arrays — this class exists so THAT path is
+ *                                 counted by the same key space as every
+ *                                 other one, not because it was gapped).
+ * Returns `undefined` on a passing verdict — there is no failure to class.
+ */
+export function reviewFailureClass(
+  verdict: Pick<ReviewVerdict, "criteriaTampered" | "changesetContradictions" | "instrumentEntangled"> & {
+    criteria: ReadonlyArray<Pick<CriterionVerdict, "met" | "holdout">>;
+  },
+): "no_criteria" | "criteria_tampered" | "changeset_contradiction" | "instrument_entangled" | "holdout_unmet" | "test_theater" | "unmet_criteria" {
+  if (verdict.criteria.length === 0) return "no_criteria";
+  if (verdict.criteriaTampered) return "criteria_tampered";
+  if ((verdict.changesetContradictions?.length ?? 0) > 0) return "changeset_contradiction";
+  if (verdict.instrumentEntangled) return "instrument_entangled";
+  const unmet = verdict.criteria.filter((c) => !c.met);
+  const visibleUnmet = visibleCriteria(unmet);
+  if (visibleUnmet.length > 0) return "unmet_criteria";
+  // Neither structural fact above fired and no VISIBLE criterion is unmet, yet
+  // `judgeReview` still folded this verdict to failure — the only two triggers
+  // left in its OR-chain are a holdout-only miss or test theater.
+  if (unmet.length > visibleUnmet.length) return "holdout_unmet";
+  return "test_theater";
+}
+
+/**
  * The `capped`/`keywordOnly`/`planOnly` facts the `review.posted` ledger line
  * records (W1-T185, criterion 5: "when materialization is impossible the verdict
  * is EXPLICITLY marked keyword-only, in both the posted status and the ledger —
@@ -2827,19 +2878,52 @@ export function keywordOnlyAnnotation(): string {
  * postedArmFactsFromLedger} is the reader; `sweep.ts`'s reconciliation is why it
  * has to be on the ledger at all — that path never holds the verdict object,
  * only what was written down about it.
+ *
+ * W1-T304: `failure_class`/`failure_reason` ride alongside on any `state:
+ * "failure"` verdict — the SAME `reviewFailureClass` key plus the verdict's
+ * own `summary` (the FULL rendered failure text {@link failSummary} produced,
+ * not the 140-char-truncated string the commit status itself is capped to —
+ * `reviewPostedDescription`'s only further edit is appending a capped/degraded
+ * suffix, which is already separately ledgered via `capped`/`capped_reason`/
+ * `degraded_reason`, so `summary` alone is the full reason for THIS field).
+ * Absent on a passing verdict, exactly like `capped_reason` — this is
+ * PURELY for counting/audit (retro.ts-style mining of `review.posted`); no
+ * DECISION in this codebase reads it, so it needs no entry in
+ * `DECISION_RELEVANT_LEDGER_STEPS` (that set is keyed by ledger STEP name —
+ * `"review.posted"` is already unconditionally retained — not by field).
  */
 export function reviewLedgerLegibilityFields(
-  verdict: Pick<ReviewVerdict, "capped" | "keywordOnly" | "planOnly"> & Partial<Pick<ReviewVerdict, "criteria">>,
-): { capped: boolean; keyword_only: boolean; plan_only: boolean; capped_reason?: string } {
+  verdict: Pick<ReviewVerdict, "capped" | "keywordOnly" | "planOnly"> &
+    Partial<Pick<ReviewVerdict, "criteria" | "state" | "summary" | "criteriaTampered" | "changesetContradictions" | "instrumentEntangled">>,
+): {
+  capped: boolean;
+  keyword_only: boolean;
+  plan_only: boolean;
+  capped_reason?: string;
+  failure_class?: string;
+  failure_reason?: string;
+} {
   // `capped_reason` rides alongside `capped` rather than in its own line, so the ONE record that
   // says a verdict was capped also says why. Absent (never null/"") on an uncapped verdict, so the
   // existing ledger shape is byte-identical for every healthy review.
   const reason = verdict.capped && verdict.criteria ? cappedReason(verdict.criteria) : undefined;
+  const failed = verdict.state === "failure" && verdict.criteria !== undefined && verdict.summary !== undefined;
   return {
     capped: verdict.capped,
     keyword_only: verdict.keywordOnly,
     plan_only: verdict.planOnly,
     ...(reason ? { capped_reason: reason } : {}),
+    ...(failed
+      ? {
+          failure_class: reviewFailureClass({
+            criteria: verdict.criteria!,
+            criteriaTampered: verdict.criteriaTampered,
+            changesetContradictions: verdict.changesetContradictions,
+            instrumentEntangled: verdict.instrumentEntangled,
+          }),
+          failure_reason: verdict.summary!,
+        }
+      : {}),
   };
 }
 
