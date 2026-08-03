@@ -8,5 +8,5 @@ raw: "FIX-RUNG STAND-DOWN ON RECENT NON-RUNG AUTHORSHIP — when a human or
   instead of striking."
 attachments: []
 origin: cli
-status: new
-proposal_pr: null
+status: proposed
+proposal_pr: https://github.com/craigoley/remudero/pull/1176

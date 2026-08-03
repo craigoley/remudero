@@ -1,0 +1,97 @@
+- id: W1-T296
+  title: "FIX-RUNG STAND-DOWN ON NON-RUNG BRANCH AUTHORSHIP — the pre-strike gate reads only TERMINAL state, so a branch a human or sibling session moved since the last round still draws a strike; the rung must detect a head it did not itself push, stand down, and escalate a NAMED, decidable reason instead of clobbering or duplicating in-flight manual work"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  rationale: "THE GATE EXISTS AND ITS CONDITION IS TOO NARROW. Verified from source at filing:
+    runFixRung's while-loop opens each round with `fixRungStandDownReason(deps.readLiveState, opts.prUrl,
+    'rung.strike', deps.log)` (run-task.ts:2524), the ONLY point that stops a strike being spent, and its
+    body resolves to `terminalStateReason(live.state)` (run-task.ts:2244) — merged or closed, nothing else.
+    A PR that is still OPEN but whose head moved under someone else's hands reads exactly like a PR nobody
+    touched, so the rung strikes.
+    WHAT THAT COSTS, from the filing feedback's #585 arc: a fix worker dispatched against a branch a human or
+    a sibling session is actively editing either CLOBBERS that work or DUPLICATES it. Both are worse than the
+    block the strike was spending money to clear, and neither is visible until someone reads the diff.
+    THE STRIKE IS THE EXPENSIVE HALF, WHICH IS WHY THE CHECK BELONGS BEFORE IT. `strikes++` and the
+    `fix.dispatch` line commit strictly after this point (run-task.ts:2577-2679), so a check added here spends
+    nothing; a check added anywhere later has already paid for a worker and already raced the human.
+    NOT COVERED BY WHAT IS ALREADY FILED, each confirmed by reading the shard rather than its title:
+      - W1-T177 (tasks.yaml:1974) built THIS seam, and built it for terminal state only. Its five criteria are
+        all merged/closed/unreadable — none observes who moved the branch. This task adds a second reason to
+        the gate it created.
+      - W1-T196 (unattributable-pr stand-down) is about a rung that cannot resolve a TASK ID, and rules that
+        the benign case ledgers and does NOT escalate. Different observation, and — see the design — the
+        opposite disposition, for a reason that must be stated rather than assumed.
+      - W1-T225 (review orphaned by push) reacts to a push by RE-REVIEWING the new head. It makes the machine
+        act on a foreign push; it never asks whether the rung should stand down before spending on one.
+      - W1-T221 (hand-author preflight) guards what the HUMAN pushes (commitlint, tsc). This guards what the
+        MACHINE does after the human pushed.
+    THE HEAD SHA IS ALREADY LOAD-BEARING NEARBY — the fix rung keys dispatch idempotence to a head sha
+    (tasks.yaml:4310) — but idempotence keyed to the head does the WRONG thing here by construction: a foreign
+    push produces a NEW head, which reads as new work to do and therefore ARMS a fresh strike rather than
+    suppressing one. The very signal that should stop the rung currently starts it."
+  design: |
+    ADD A SECOND REASON TO THE EXISTING GATE, NOT A SECOND EARLY RETURN. The pre-strike stand-down already
+    returns `{outcome: "stood_down", standDownReason}` and already ledgers `fix.stood_down` with a site tag.
+    Extend the reason source consulted at site `rung.strike`; do not add a parallel branch. Note that
+    run-task.test.ts carries an invariant test that COUNTS call sites (recorded on W1-T177 at tasks.yaml:2064),
+    so a new early-return path would break it — one more reason the composed form is the right shape.
+    DEFINE "NOT ITS OWN" BY LINEAGE, NOT BY A WALL-CLOCK WINDOW. The feedback says "recent", but a time window
+    needs a threshold nobody can defend and misfires on a slow CI wait. The rung already knows the head it
+    last pushed for this PR: a current head the rung did not itself produce is the whole signal, and it is
+    exact. VERIFY FROM SOURCE how the rung's own pushes are identifiable before choosing — the candidates are
+    the head sha the rung last pushed/observed this round, the committer identity on the head commit, and the
+    fix-round commit header the rung builds through lib/commit-message.ts (tasks.yaml:11355). Prefer the sha
+    lineage; fall back to identity only if lineage cannot be established, and record which was chosen and why.
+    A FIRST ROUND HAS NO PRIOR HEAD, and must not be read as foreign. The rung's first strike against a PR it
+    has never pushed to is the ordinary case, and standing down on it would disable the fix rung entirely.
+    ESCALATE HERE, AND SAY WHY THAT DIFFERS FROM W1-T196. W1-T196 rules that a rung which cannot ATTRIBUTE a
+    PR ledgers and opens no issue, because that state carries no operator-decidable question. This state does:
+    a human is mid-edit on a branch the machine wants to take over, and only a human can say whether to yield,
+    take over, or abandon. So the disposition is stand down AND escalate — but under §4 the escalation must
+    carry actionable choices, never a bare alert, and it must NAME the observed evidence (the foreign head sha
+    and its author) rather than an inferred symptom, per W1-T186.
+    FAIL OPEN ON AN UNREADABLE AUTHORSHIP READ. If the head or its authorship cannot be determined, PROCEED as
+    today and ledger the indeterminate read. This is W1-T177's own criterion 5 restated for the new condition,
+    and for the same reason: fail-closed here would turn one `gh`/git outage into a silent fleet-wide halt of
+    every fix rung, which is far worse than the waste this task prevents.
+    BOUND THE ESCALATION. A branch a human works on for an hour must not open a fresh issue every sweep pass;
+    key the escalation to the foreign head so it fires once per observed takeover, the W1-T195 dedup shape.
+    EXPLICITLY NOT IN SCOPE: force-push protection, changing push semantics, reverting or rebasing anyone's
+    work, and widening this to the review or implement rungs. This is the fix rung's pre-strike gate only.
+  acceptance:
+    - claim: "a still-OPEN PR whose head was moved by a non-rung author since the previous round spends ZERO further strikes — the rung stands down instead of dispatching a fix worker"
+      proof: "unit test: test/fix-rung-authorship-stand-down.test.ts"
+    - claim: "the stand-down ESCALATES with a named, decidable reason carrying the foreign head sha and its author, rather than ledgering silently or filing a bare alert"
+      proof: "unit test: test/fix-rung-authorship-stand-down.test.ts"
+    - claim: "a head the RUNG ITSELF pushed in a prior round is not read as foreign, and a FIRST round against a PR the rung has never pushed to proceeds normally — otherwise the fix rung disables itself"
+      proof: "unit test: test/fix-rung-authorship-stand-down.test.ts"
+    - claim: "an UNREADABLE head or authorship read PROCEEDS as today and ledgers the indeterminate read, so a git or gh outage can never become a silent fleet-wide halt of every fix rung"
+      proof: "unit test: test/fix-rung-authorship-stand-down.test.ts"
+    - claim: "repeated sweep passes over the SAME foreign head escalate once, not once per pass"
+      proof: "unit test: test/fix-rung-authorship-stand-down.test.ts"
+    - claim: "the check is composed into the EXISTING pre-strike stand-down reason at site rung.strike rather than added as a second early-return path"
+      proof: "grep: branchAuthorshipStandDownReason( in src/run-task.ts"
+  risk: medium
+  origin: feedback#fb-1784762617707-d6e3d5
+  plan_refs: ["§4", "§9"]
+  files: [src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "FILED from feedback#fb-1784762617707-d6e3d5 (captured 2026-07-22), covered-by NONE — checked against
+    plan/tasks.yaml and every plan/tasks.d shard. The four near neighbours are enumerated in the rationale with
+    the reason each falls short; W1-T196 is the closest in SHAPE and the furthest in DISPOSITION, which is why
+    the design argues the escalate-vs-ledger split explicitly instead of inheriting it.
+    NO depends_on DELIBERATELY. W1-T177 is still status:queued in tasks.yaml, but the seam this task extends is
+    ALREADY IN SOURCE at run-task.ts:2524 with its W1-T177 comment, so a hard dep would block buildable work on
+    a task whose relevant half has landed. Verify that seam from source before building — the line references
+    here are a 2026-08-03 read and should be distrusted on sight.
+    risk:medium — ONE subsystem, and the gate already exists, so the change is a reason source rather than new
+    control flow. It argues UP because the dangerous direction is over-suppression: a rung that wrongly reads
+    its own pushes as foreign stops fixing anything, which is why that case is its own criterion alongside the
+    fail-open one, and DOWN because the check sits before any spend and costs nothing when it does not fire.
+    budget_usd 70 — the logic is small; the cost is establishing authorship from source and the fixture repo
+    needed to seed a foreign push."
