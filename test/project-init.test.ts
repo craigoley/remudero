@@ -162,6 +162,67 @@ for (const profile of KNOWN_PROFILES) {
   });
 }
 
+// ── W1-T291: the dotnet profile ships a SHA-pinned setup-dotnet and an honest (unarmed) fitness gate ──
+
+test("W1-T291: the generated dotnet ci.yml pins setup-dotnet by a 40-char SHA — no moving tag, no operator TODO", () => {
+  const payload = buildProjectInit(fixtureInput("dotnet"));
+  const ci = payload.workflows["ci.yml"]!;
+  assert.match(ci, /uses: actions\/setup-dotnet@[0-9a-f]{40} # v\d+\.\d+\.\d+/);
+  assert.doesNotMatch(ci, /setup-dotnet@v\d+\s*$/m, "must not reference a bare moving version tag");
+  assert.doesNotMatch(ci, /TODO\(operator\)/, "must not defer pinning to the operator");
+});
+
+test("W1-T291: no generated workflow step claims a placeholder 'always succeeds'", () => {
+  for (const profile of KNOWN_PROFILES) {
+    const payload = buildProjectInit(fixtureInput(profile));
+    for (const [name, content] of Object.entries(payload.workflows)) {
+      assert.doesNotMatch(
+        content,
+        /always succeeds/i,
+        `${profile}/${name} must not report success while asserting nothing`,
+      );
+    }
+  }
+});
+
+test("W1-T291: the dotnet depcruise job still runs unconditionally, so the required check-run can't go absent and deadlock", () => {
+  const payload = buildProjectInit(fixtureInput("dotnet"));
+  const depcruise = payload.workflows["depcruise.yml"]!;
+  // Same shape acceptance-1 already asserts for the default (ts-node) fixture: the `depcruise`
+  // job is defined by exactly that name, with no job- or workflow-level `if:`/path filter that
+  // could make its check-run go silently absent instead of reporting a terminal conclusion.
+  assert.match(depcruise, /\n {2}depcruise:\n {4}name: depcruise\n/);
+  // Check real YAML lines only — the header comment prose mentions `if:` in backticks while
+  // explaining why there ISN'T one, which would otherwise false-positive a naive whole-string match.
+  const yamlLines = depcruise.split("\n").filter((l) => !l.trim().startsWith("#"));
+  assert.ok(
+    !yamlLines.some((l) => /\bif:\s/.test(l)),
+    "the dotnet depcruise job must run unconditionally, same as every other profile",
+  );
+  assert.match(depcruise, /UNARMED/);
+});
+
+test("W1-T291: principles.yaml marks the dotnet fitness rule unarmed; the other three profiles stay armed (unchanged)", () => {
+  for (const profile of KNOWN_PROFILES) {
+    const payload = buildProjectInit(fixtureInput(profile));
+    const parsed = parseYaml(payload.principlesYaml) as Record<string, any>;
+    const rule = parsed.fitness_rules[0];
+    if (profile === "dotnet") {
+      assert.equal(rule.armed, false, "dotnet's generated fitness rule must be marked unarmed, not an enforced contract");
+      assert.match(rule.description, /NOT YET ARMED/);
+    } else {
+      assert.equal(rule.armed, true, `${profile}'s real, enforced fitness rule must stay armed`);
+    }
+  }
+});
+
+test("W1-T291: the pinned dotnet action ref is a named constant on the generator's dotnet path (SETUP_DOTNET_PINNED)", () => {
+  // Belt-and-suspenders alongside the source-level grep proof: the SHA that constant resolves to
+  // must actually appear in the generated dotnet ci.yml.
+  const payload = buildProjectInit(fixtureInput("dotnet"));
+  assert.match(payload.workflows["ci.yml"]!, /actions\/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9/);
+});
+
 test("parseProfileFlag: undefined ⇒ the ts-node default (remudero's own, strictest profile)", () => {
   assert.equal(parseProfileFlag(undefined), "ts-node");
 });
