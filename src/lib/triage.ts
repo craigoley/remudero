@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { shapeCommitMessage } from "./commit-message.js";
 import { loadPlan } from "./plan.js";
 import { ACCEPTANCE_PROOF_GRAMMAR } from "./proof-grammar.js";
+import { feedbackEntryRepoPath } from "./feedback.js";
 import type { FeedbackEntry, FeedbackStatus } from "./feedback.js";
 
 /**
@@ -468,6 +469,52 @@ export function fitAcceptanceBullet(bullet: string, max: number = COMMIT_BODY_MA
 }
 
 /**
+ * The EXECUTABLE proof for a triage outcome: the feedback entry's own status flip, in the house
+ * `grep: <pattern> in <path>` dialect {@link "./review.js".parseWhitelistedProof} accepts.
+ *
+ * WHY THIS EXISTS. Every triage PR used to carry a FIXED ENGLISH PHRASE here \u2014 "feedback yaml flips
+ * to rejected", "in-diff provenance; status proposed", "needs-human issue; grilling". They named a
+ * true, checkable fact and no parser could read any of them, so EVERY triage PR posted
+ * `CAPPED \u2014 0/1 proofs executed`: 25 of the 28 capped verdicts in the two days after the
+ * `capped_reason` field was added were this, one per triage fire, now firing every 15 minutes
+ * (state/recon-GY-no-dialect-caps.md). It was never an authoring failure \u2014 no model writes this
+ * string \u2014 so no prompt could have fixed it.
+ *
+ * DERIVED FROM `decision.status`, never re-typed: the proof asserts exactly the status
+ * `run-task.ts`'s `setFeedbackStatus(worktreePath, feedbackId, decision.status)` writes into the
+ * same diff, so the two cannot drift into a proof that greps for a status the harness never wrote.
+ *
+ * IT DISCRIMINATES. The entry reads `status: new` on the merge base and the flipped value on the
+ * head, so the grep MISSES the base \u2014 a pattern matching both is downgraded to `executed_stale`
+ * (W1-T273) and would leave the verdict capped exactly as before.
+ */
+export function triageAcceptanceProof(feedbackId: string, status: FeedbackStatus): string {
+  return `grep: status: ${status} in ${feedbackEntryRepoPath(feedbackId)}`;
+}
+
+/**
+ * One Acceptance criterion as the LABELLED TWO-LINE form (`- claim: \u2026` + an indented `proof: \u2026`),
+ * which {@link "./review.js".parseAcceptanceBlock} recognises alongside the single-line
+ * `- claim | proof` shape.
+ *
+ * WHY TWO LINES AND NOT THE ONE-LINER. commitlint's `body-max-line-length` is 100 and is a REQUIRED
+ * check ({@link COMMIT_BODY_MAX_LINE}), while a real proof for a long feedback id is already ~90
+ * characters on its own \u2014 `grep: status: rejected in plan/feedback/fb-alert-craigoley-remudero-code-scanning-17.yaml`
+ * is 89. A single-line bullet carrying both would be ~170 and {@link fitAcceptanceBullet} would
+ * elide it \u2014 which is how four of the shipped bodies ended up with a `\u2026` mid-phrase. Splitting the
+ * criterion gives the proof a line of its own with room to spare.
+ *
+ * THE CLAIM IS ELIDED, THE PROOF NEVER IS. Truncating prose costs legibility; truncating a proof
+ * costs execution, which is the whole defect this function exists to end. If a feedback id is ever
+ * long enough that the PROOF line alone exceeds the budget, that is returned UNTRUNCATED and
+ * commitlint will say so loudly \u2014 a caught red beats a silent cap. `test/triage-proof-dialect.test.ts`
+ * pins the worst id length that still fits.
+ */
+export function acceptanceCriterionLines(claim: string, proof: string, max: number = COMMIT_BODY_MAX_LINE): string[] {
+  return [fitAcceptanceBullet(`- claim: ${claim}`, max), ` proof: ${proof}`];
+}
+
+/**
  * The commit message (and, via `gh pr create --fill`, the PR title+body) the HARNESS authors for
  * a triage outcome — never the LLM, so the `Acceptance:`/`Remudero-Task:` contract can never be
  * skipped or malformed the way a free-text worker report could be. Title line first (conventional
@@ -492,8 +539,9 @@ export function triageCommitMessage(opts: {
       ...wrapBodyLine(`Grounding found this already answered — adds NO redundant task: ${decision.detail}`),
       "",
       "Acceptance:",
-      fitAcceptanceBullet(
-        `- feedback#${feedbackId} already decided, NO task | feedback yaml flips to rejected`,
+      ...acceptanceCriterionLines(
+        `feedback#${feedbackId} already decided, NO task — the entry is closed out, not left open`,
+        triageAcceptanceProof(feedbackId, decision.status),
       ),
       "",
       `Remudero-Task: ${taskId}`,
@@ -510,8 +558,9 @@ export function triageCommitMessage(opts: {
       ),
       "",
       "Acceptance:",
-      fitAcceptanceBullet(
-        `- feedback#${feedbackId} grilled: ambiguous, NO task | needs-human issue; grilling`,
+      ...acceptanceCriterionLines(
+        `feedback#${feedbackId} grilled: ambiguous, NO task — parked on a needs-human issue`,
+        triageAcceptanceProof(feedbackId, decision.status),
       ),
       "",
       `Remudero-Task: ${taskId}`,
@@ -527,8 +576,9 @@ export function triageCommitMessage(opts: {
     ...wrapBodyLine(`Proposed by the intake triage (origin: feedback#${feedbackId}): ${decision.detail}`),
     "",
     "Acceptance:",
-    fitAcceptanceBullet(
-      `- feedback#${feedbackId} plan-only proposal | in-diff provenance; status proposed`,
+    ...acceptanceCriterionLines(
+      `feedback#${feedbackId} proposal filed — in-diff provenance back to the entry`,
+      triageAcceptanceProof(feedbackId, decision.status),
     ),
     "",
     `Remudero-Task: ${taskId}`,

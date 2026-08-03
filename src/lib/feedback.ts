@@ -115,6 +115,19 @@ function feedbackEntryRelPath(root: string, id: string): string {
   return relative(root, feedbackEntryPath(root, id)).split(sep).join("/");
 }
 
+/**
+ * ROOT-FREE repo-relative path of a feedback entry — `plan/feedback/<id>.yaml`.
+ *
+ * The same string {@link feedbackEntryRelPath} produces, for the callers that must name the entry
+ * WITHOUT holding a checkout root: `lib/triage.ts` renders it into an Acceptance proof at commit
+ * time, when the only thing it has is the id. Derived from {@link feedbackEntryPath} against a
+ * sentinel root rather than re-typing the literal, so a future move of `plan/feedback/` cannot
+ * leave a proof pointing at a path that no longer exists.
+ */
+export function feedbackEntryRepoPath(id: string): string {
+  return feedbackEntryRelPath("/", id);
+}
+
 /** `fb-<epoch-ms>-<6 hex>` — sortable by capture order, collision-safe under concurrent capture. */
 function generateFeedbackId(): string {
   return `fb-${Date.now()}-${randomBytes(3).toString("hex")}`;
