@@ -1,0 +1,30 @@
+id: fb-1785792944591-e0473c
+ts: 2026-08-03T21:35:44.591Z
+raw: "A HOLD MAY BE CHEAPER AS A DISARM THAN AS AN ARM GATE — the #1182 recon
+  costed operator-controlled merge suppression as a new bounded policy row
+  gating EIGHT arm sites, plus a resume path to arm the backlog, plus console
+  work because a never-armed PR is invisible (status-board.ts has no
+  autoMergeArmed reference, so it lands in no blocker class and no needs-me
+  bucket). But a disarm mechanism already exists and does the hard half:
+  disarmAutoMerge calls a real gh pr merge --disable-auto, never throws when not
+  armed, and withdrawArmIfVerdictRefuses delegates to decideAutoMergeArm rather
+  than copying the rule. Measured 81 disarms across the unioned ledger, 69 with
+  reasons — 49 non-success verdicts, 12 capped, 8 risk-judge escalations. IF A
+  HOLD IS A DISARM REASON RATHER THAN AN ARM GATE: the at-open arm still fires,
+  the withdrawal is explicit and ledgered, a held PR is a RECORDED state rather
+  than an absence (killing the invisibility problem), and there is no resume
+  path because nothing was suppressed. RECON: (1) is disarmAutoMerge reachable
+  outside a verdict path — its documented call sites are inside runTask plus
+  withdrawArmIfVerdictRefuses from runReview — and could a sweep pass invoke it
+  over open PRs using OpenPrView.autoMergeArmed, which sweep already consumes as
+  'GitHub's own is the authority'? (2) THE KILLER QUESTION: would the sweep's
+  post-review lane RE-ARM what a hold disarms on its next pass, roughly every 93
+  seconds? If yes a disarm-based hold flickers and the arm-gate design is
+  required after all. (3) does feedback-landing.ts, which calls gh pr merge
+  --auto directly and bypasses attemptArm, also bypass any disarm? Falsifying
+  check: if the sweep re-arms a disarmed PR without an operator action, this
+  option is dead and the policy row stands as costed."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
