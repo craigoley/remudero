@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -107,15 +107,19 @@ function makeOrigin(feedbackId?: string): string {
 
 /** A `gh` shim answering every subcommand these runs make, so execution reaches the pushes
  *  instead of dying at the first gh call. `pr view --json headRefName` echoes back the run's
- *  OWN branch so the run-ownership guard passes. */
-function writeGhShim(dir: string): void {
+ *  OWN branch so the run-ownership guard passes. `opts.failPrList` makes `gh pr list` (the
+ *  mint's `openPrTexts` enumerator, W1-T311) fail non-zero — used by the degraded-mint test
+ *  below to reach the real gateway's refusal/catch path rather than its success path. */
+function writeGhShim(dir: string, opts: { failPrList?: boolean } = {}): void {
   writeFileSync(
     join(dir, "gh"),
     [
       "#!/bin/sh",
       "# $* is the full argv; branch name is embedded in --head for create, else derived.",
       'case "$*" in',
-      '  *"pr list"*) echo "[]" ;;',
+      opts.failPrList
+        ? '  *"pr list"*) echo "gh: rate limit exceeded" 1>&2; exit 1 ;;'
+        : '  *"pr list"*) echo "[]" ;;',
       '  *"pr create"*)',
       '    echo "https://github.com/craigoley/remudero/pull/4242" ;;',
       '  *"headRefName"*)',
@@ -247,6 +251,12 @@ test("GUARDED SITE plan push: the run reaches planCommand's gitPushRunBranch", a
 // so never runs its two guarded lines. Omitting it runs the real one: it clones/worktrees,
 // commits, pushes (:9116) and opens a plan PR (:9136). Offline throughout — config.root is a
 // tmpdir, the repo is pre-seeded from a bare TMPDIR origin, and gh is shimmed.
+//
+// W1-T311: the draft below carries a `NEW-1` PLACEHOLDER id (not a concrete `W1-Tnnn` one), so
+// the real gateway's mint-and-reserve block (materializeDraftTaskIds -> mintNextTaskIdWithHistory
+// + reserveTaskIdBlock, run-task.ts's createRatificationBranch) actually executes rather than
+// short-circuiting as a no-op — the ONLY way to cover those closures without injecting a fake
+// gateway (every other approve test does inject one, which replaces this code entirely).
 test("GUARDED SITE approve push and pr-create: the REAL un-injected gateway reaches both guarded lines", async () => {
   const bare = makeOrigin(undefined);
   const home = mkdtempSync(join(tmpdir(), "cmdsite-apphome-"));
@@ -290,8 +300,8 @@ test("GUARDED SITE approve push and pr-create: the REAL un-injected gateway reac
         "P-GUARD": {
           proposalId: "P-GUARD",
           fragmentYaml:
-            "- id: W1-TGUARD\n  title: fixture drafted task\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n",
-          stampLine: "- P-GUARD (plan) — RATIFIED -> W1-TGUARD.",
+            "- id: NEW-1\n  title: fixture drafted task\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n",
+          stampLine: "- P-GUARD (plan) — RATIFIED -> NEW-1.",
           anchorFingerprint: "",
         },
       }),
@@ -306,6 +316,96 @@ test("GUARDED SITE approve push and pr-create: the REAL un-injected gateway reac
     // The gateway's branch really landed on the throwaway origin — the push executed.
     const refs = execFileSync("git", ["-C", bare, "for-each-ref", "--format=%(refname:short)"], { encoding: "utf8" });
     assert.match(refs, /run-/, `the ratification branch reached the origin; refs=${JSON.stringify(refs)}`);
+    // The placeholder was really minted+reserved (not left as-is) — the pushed branch's plan
+    // carries a concrete W1-Tnnn id, never the NEW-1 placeholder it started from.
+    const clone = mkdtempSync(join(tmpdir(), "cmdsite-appverify-"));
+    execFileSync("git", ["clone", "--quiet", bare, clone], { encoding: "utf8", env: GIT_ENV });
+    const branch = refs.split("\n").find((l) => l.startsWith("run-"));
+    assert.ok(branch, "expected a run- branch on the throwaway origin");
+    const plan = execFileSync("git", ["-C", clone, "show", `origin/${branch}:plan/tasks.yaml`], { encoding: "utf8" });
+    assert.match(plan, /^- id: W1-T\d+$/m, `expected a minted concrete id in the pushed plan; got:\n${plan}`);
+    assert.doesNotMatch(plan, /NEW-1/, "the NEW-1 placeholder must never survive to the pushed plan");
+    rmSync(clone, { recursive: true, force: true });
+  } finally {
+    process.env.HOME = savedHome;
+    process.env.PATH = savedPath;
+    for (const d of [bare, home, root, shimDir]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+// ── run-task.ts:12761-12775 and :12841-12855 — approveCommand's REAL gateway on a DEGRADED
+// mint (W1-T311) ───────────────────────────────────────────────────────────────────────────
+// The success test above proves the mint+reserve closures execute; this one proves the
+// REFUSAL path they guard: `gh pr list` (the mint's `openPrTexts` enumerator) fails, so
+// mintNextTaskIdWithHistory reports a degraded source, materializeDraftTaskIds refuses, and
+// createRatificationBranch's real (un-injected) gateway throws BEFORE any write/commit/push —
+// caught by approveCommand's own catch, which removes the worktree/run-lock and rethrows.
+// Offline throughout, same fixture shape as the success test above.
+test("GUARDED SITE approve degraded-mint refusal: the REAL gateway throws before any write and approveCommand cleans up + rethrows", async () => {
+  const bare = makeOrigin(undefined);
+  const home = mkdtempSync(join(tmpdir(), "cmdsite-apphome2-"));
+  const root = mkdtempSync(join(tmpdir(), "cmdsite-approot2-"));
+  const shimDir = mkdtempSync(join(tmpdir(), "cmdsite-appshim2-"));
+  const savedHome = process.env.HOME;
+  const savedPath = process.env.PATH;
+  try {
+    mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+    writeFileSync(
+      join(home, ".config", "remudero", "config.json"),
+      JSON.stringify({ claudeBin: "/usr/bin/true", root }, null, 2),
+      "utf8",
+    );
+    process.env.HOME = home;
+    writeGhShim(shimDir, { failPrList: true });
+    process.env.PATH = `${shimDir}:${savedPath}`;
+
+    const originUrl = execFileSync("git", ["-C", REPO_ROOT, "config", "--get", "remote.origin.url"], {
+      encoding: "utf8",
+    }).trim();
+    const repoName = originUrl.match(/[/:]([^/:]+)\/([^/]+?)(?:\.git)?$/)![2];
+    const repoDir = join(root, "repos", repoName);
+    mkdirSync(dirname(repoDir), { recursive: true });
+    execFileSync("git", ["clone", "--quiet", bare, repoDir], { encoding: "utf8", env: GIT_ENV });
+    execFileSync("git", ["-C", repoDir, "config", "user.name", "remudero-test"], { encoding: "utf8" });
+    execFileSync("git", ["-C", repoDir, "config", "user.email", "test@remudero.invalid"], { encoding: "utf8" });
+
+    mkdirSync(join(root, "state"), { recursive: true });
+    writeFileSync(
+      join(root, "state", "inbox-proposals.json"),
+      JSON.stringify({ proposals: [{ id: "P-DEGRADE", summary: "degraded-mint fixture", evidenceAnchors: [] }] }, null, 2),
+      "utf8",
+    );
+    writeFileSync(
+      join(root, "state", "inbox-drafts.json"),
+      JSON.stringify({
+        "P-DEGRADE": {
+          proposalId: "P-DEGRADE",
+          fragmentYaml:
+            "- id: NEW-1\n  title: fixture drafted task\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n",
+          stampLine: "- P-DEGRADE (plan) — RATIFIED -> NEW-1.",
+          anchorFingerprint: "",
+        },
+      }),
+      "utf8",
+    );
+
+    let threw: unknown;
+    await withLiveWritesAllowed(() => approveCommand(["P-DEGRADE"], { config: { claudeBin: "/usr/bin/true", root } as never })).catch(
+      (e) => {
+        threw = e;
+      },
+    );
+    assert.ok(threw, "a degraded mint must throw all the way out of approveCommand, never succeed silently");
+    assert.match(String((threw as Error)?.message ?? threw), /refusing to materialize task id/i);
+
+    // Nothing reached the origin — the throw happened before the gateway's commit/push.
+    const refs = execFileSync("git", ["-C", bare, "for-each-ref", "--format=%(refname:short)"], { encoding: "utf8" });
+    assert.doesNotMatch(refs, /run-/, `no ratification branch may reach the origin on a refusal; refs=${JSON.stringify(refs)}`);
+
+    // approveCommand's catch removed the worktree it had already created (best-effort cleanup,
+    // run-task.ts:12843-12854) rather than leaving an orphaned directory behind.
+    const worktrees = existsSync(join(root, "worktrees")) ? readdirSync(join(root, "worktrees")) : [];
+    assert.deepEqual(worktrees, [], `expected the refused run's worktree to be removed; found ${JSON.stringify(worktrees)}`);
   } finally {
     process.env.HOME = savedHome;
     process.env.PATH = savedPath;

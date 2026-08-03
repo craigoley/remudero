@@ -527,11 +527,22 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
     "=== plan/tasks.yaml (current, for depends_on grounding) ===",
     currentPlanText,
     "",
+    "=== TASK IDS — PLACEHOLDERS ONLY, never a real W1-Tnnn id (feedback#fb-1784766965325-c7b673) ===",
+    "Every task you draft gets its `id:` from a PLACEHOLDER, not a guess: NEW-1, NEW-2, NEW-3, ...",
+    "numbered in the order the tasks appear in your fragment. `rmd approve` mints and reserves the",
+    "real ids for you when the operator approves — picking one yourself risks colliding with",
+    "another proposal drafted in the same window. If a drafted task's depends_on points at ANOTHER",
+    "task inside THIS SAME fragment, cite that task's placeholder (e.g. `depends_on: [NEW-1]`) —",
+    "never a guessed real id. A depends_on on an EXISTING task already in plan/tasks.yaml above",
+    "stays that task's real W1-T id, unchanged. Use the SAME NEW-<n> placeholders in the stamp",
+    "line's task-id list below; `rmd approve` rewrites every placeholder to its real id together.",
+    "",
     "=== OUTPUT (exactly this shape, nothing else) ===",
     "Print ONE or more new tasks.yaml entries (schema v1 — id/title/repo/depends_on/type/verify/",
     "risk/status/attempts/acceptance/origin at minimum) between the two FRAGMENT markers below,",
     "then ONE stamp line for MASTER-PLAN.md's proposal list between the two markers below that —",
-    "the same shape as an existing RATIFIED stamp (`- P## (...) — RATIFIED <date> -> <task ids>.`).",
+    "the same shape as an existing RATIFIED stamp (`- P## (...) — RATIFIED <date> -> <task ids>.`),",
+    "with the task-id list written as the placeholders (e.g. `-> NEW-1/NEW-2.`).",
     "RAW YAML ONLY between the FRAGMENT markers — do NOT wrap it in a markdown code fence",
     "(no ```yaml or ``` line before or after it); the harness parses the fragment as YAML",
     "verbatim, and a fence around it fails that parse.",
@@ -1249,6 +1260,113 @@ export function applyStampToMasterPlan(masterPlanMd: string, proposalId: string,
   }
   const base = masterPlanMd.replace(/\s*$/, "");
   return `${base}\n${stampLine}\n`;
+}
+
+// ── Draft placeholder ids -> concrete ids AT APPROVE TIME (feedback#fb-1784766965325-c7b673,
+//    the SEQUENCING half; lib/task-id.ts is the DERIVATION half) ─────────────────────────────
+//
+// {@link inboxDraftPrompt} now hands the drafting worker NO real id at all — it emits `NEW-1`,
+// `NEW-2`, ... placeholders (never W1-T shaped, so a cached draft can never pin a concrete id
+// even by accident). `rmd approve`'s `createRatificationBranch` calls {@link
+// materializeDraftTaskIds} to mint + RESERVE the real ids and rewrite every placeholder — the
+// fragment's `- id:` lines, any intra-fragment `depends_on` reference, and the stamp line's
+// task-id list — in one pass, before anything is written to the ratification worktree.
+
+/** The placeholder id shape {@link inboxDraftPrompt} instructs drafting workers to emit:
+ *  `NEW-1`, `NEW-2`, ... in fragment order. Deliberately never `W1-T`-shaped, so it can never
+ *  be mistaken for (or accidentally collide with) a real filed id. */
+const DRAFT_PLACEHOLDER_DECL_RE = /^\s*(?:-\s*)?id:\s*["']?(NEW-\d+)/gm;
+
+/**
+ * A drafted fragment's placeholder ids, in first-DECLARATION order (the `- id:` key, never a
+ * stray `depends_on` mention — the same anchoring discipline {@link
+ * "./task-id.js".declaredTaskIds} uses for real ids), deduplicated. Empty for a fragment that
+ * carries no placeholders at all (every `- id:` already real — a pre-existing cached draft from
+ * before this doctrine, or a fragment with zero tasks) — {@link materializeDraftTaskIds} treats
+ * that as nothing-to-materialize, never an error.
+ */
+export function draftPlaceholderIds(fragmentYaml: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const m of fragmentYaml.matchAll(DRAFT_PLACEHOLDER_DECL_RE)) {
+    if (!seen.has(m[1])) {
+      seen.add(m[1]);
+      out.push(m[1]);
+    }
+  }
+  return out;
+}
+
+/** Replace every occurrence of each mapped placeholder — a `- id:` declaration OR a
+ *  `depends_on`/stamp-line REFERENCE — with its materialized real id. Word-boundary-safe so
+ *  `NEW-1` never eats into `NEW-10`/`NEW-11`: a digit run has no `\b` before its next digit. */
+export function substitutePlaceholderIds(text: string, mapping: ReadonlyMap<string, string>): string {
+  let out = text;
+  for (const [placeholder, real] of mapping) {
+    out = out.replace(new RegExp(`\\b${placeholder}\\b`, "g"), real);
+  }
+  return out;
+}
+
+/** What {@link materializeDraftTaskIds} needs FROM its caller, I/O-injected so the
+ *  materializer's own decision logic (what refuses, what gets rewritten) stays pure and
+ *  unit-testable — the same mint/reserve split `rmd triage` and `rmd plan` already wire into
+ *  run-task.ts, reused here rather than re-derived (design: "one derivation, one doctrine"). */
+export interface DraftTaskIdMintDeps {
+  /** The shared mint (lib/task-id.ts's derivation, or run-task.ts's history-layered wrapper) —
+   *  called ONCE, after the placeholder count is known, before anything is reserved. */
+  mint(): { n: number; degraded: { source: string; reason: string }[] };
+  /** Reserve `count` ids at/above `startId` as a block ({@link
+   *  "./task-id-reservation.js".reserveTaskIdBlock}); THROWS on a non-contention failure (an
+   *  unwritable state dir — {@link "./task-id-reservation.js".TaskIdReservationError}). */
+  reserveBlock(startId: number, count: number): { ids: number[] };
+}
+
+export type DraftTaskIdMaterialization =
+  | { ok: true; fragmentYaml: string; stampLine: string; ids: string[] }
+  | { ok: false; reason: string };
+
+/**
+ * Materialize a drafted fragment's `NEW-<n>` placeholder ids into concrete, RESERVED `W1-Tnnn`
+ * ids. A fragment with no placeholders at all is a pass-through no-op (nothing to mint, nothing
+ * to reserve) — see {@link draftPlaceholderIds}.
+ *
+ * DEGRADE HONESTLY, NEVER GUESS (design (5)): a degraded mint source, or a reservation that
+ * fails for a reason that is NOT contention, REFUSES — naming the unread source — rather than
+ * falling back to an unreserved id. The caller (run-task.ts's `createRatificationBranch`) must
+ * treat a `{ ok: false }` result as "write nothing, commit nothing, open no PR, leave the
+ * proposal READY": a partial union here lands a duplicate id on main, which breaks `loadPlan`
+ * for every consumer — strictly worse than refusing the approve and trying again.
+ */
+export function materializeDraftTaskIds(
+  payload: { fragmentYaml: string; stampLine: string },
+  deps: DraftTaskIdMintDeps,
+): DraftTaskIdMaterialization {
+  const placeholders = draftPlaceholderIds(payload.fragmentYaml);
+  if (placeholders.length === 0) {
+    return { ok: true, fragmentYaml: payload.fragmentYaml, stampLine: payload.stampLine, ids: [] };
+  }
+
+  const mint = deps.mint();
+  if (mint.degraded.length > 0) {
+    const sources = mint.degraded.map((d) => `${d.source} (${d.reason})`).join("; ");
+    return { ok: false, reason: `task-id mint degraded — refusing rather than risk a collision: ${sources}` };
+  }
+
+  let block: { ids: number[] };
+  try {
+    block = deps.reserveBlock(mint.n, placeholders.length);
+  } catch (e) {
+    return { ok: false, reason: `task-id reservation failed: ${String((e as Error)?.message ?? e)}` };
+  }
+
+  const mapping = new Map<string, string>(placeholders.map((placeholder, i) => [placeholder, `W1-T${block.ids[i]}`]));
+  return {
+    ok: true,
+    fragmentYaml: substitutePlaceholderIds(payload.fragmentYaml, mapping),
+    stampLine: substitutePlaceholderIds(payload.stampLine, mapping),
+    ids: [...mapping.values()],
+  };
 }
 
 // ── rmd reframe — feedback redrafts through the ledger (MASTER-PLAN P25 iii, W1-T111) ────
