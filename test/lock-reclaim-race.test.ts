@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -11,6 +11,7 @@ import {
   sweepStaleInflightLocks,
 } from "../src/lib/inflight-lock.js";
 import { acquireDrainLock, DrainLockError, readDrainLock } from "../src/lib/drain-lock.js";
+import { acquireReviewStatusLock } from "../src/lib/review.js";
 
 /**
  * W1-T289: all three single-instance locks (plus the boot sweep) reclaimed a stale
@@ -209,6 +210,96 @@ test("reclaimStaleLock: with no onLostReclaim override, a lost reclaim still tra
     assert.equal(calls.length, 1, "the default onLostReclaim left a console trace instead of swallowing it");
   } finally {
     console.error = originalError;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── The catch arms. Every test above supplies a real on-disk lock that still exists at
+// delete time, so the "it vanished underneath us" and "the bytes are garbage" arms are
+// unreachable from them — the CLAUDE.md #977/#978 shape: a seam whose error paths no test
+// ever enters looks covered and is not.
+
+test("reclaimStaleLock: a lock that VANISHES before the delete-time check is lost, not reclaimed", () => {
+  const dir = tmp();
+  const lockPath = join(dir, "vanish.lock");
+  writeFileSync(lockPath, JSON.stringify({ pid: 999999 }));
+  const traces: Array<{ lockPath: string; reason: string }> = [];
+  try {
+    const result = reclaimStaleLock(lockPath, {
+      parseHolder: (raw) => JSON.parse(raw),
+      isStale: () => true,
+      onLostReclaim: (d) => traces.push(d),
+      // Another actor reclaimed it and did NOT recreate — the path is simply gone.
+      beforeDelete: () => unlinkSync(lockPath),
+    });
+    assert.equal(result.outcome, "lost", "a vanished lock must never report as reclaimed by this call");
+    assert.equal(traces.length, 1, "the loss was traced, not silently swallowed");
+    assert.match(traces[0].reason, /vanished/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("reclaimStaleLock: unparseable lock bytes are treated as reclaimable, not thrown", () => {
+  const dir = tmp();
+  const lockPath = join(dir, "garbage.lock");
+  writeFileSync(lockPath, "{ this is not json");
+  try {
+    const result = reclaimStaleLock(lockPath, {
+      // The real parsers return null for garbage rather than throwing (see review.ts's
+      // parseReviewStatusLockInfo) — a holder nothing can read is not a live holder.
+      parseHolder: () => null,
+      isStale: () => true,
+    });
+    assert.equal(result.outcome, "reclaimed");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("reclaimStaleLock: a non-ENOENT open failure propagates rather than reading as missing", () => {
+  const dir = tmp();
+  const lockPath = join(dir, "eacces.lock");
+  writeFileSync(lockPath, JSON.stringify({ pid: 999999 }));
+  try {
+    assert.throws(
+      () =>
+        reclaimStaleLock(
+          lockPath,
+          { parseHolder: (raw) => JSON.parse(raw), isStale: () => true },
+          {
+            openSync: () => {
+              const e = new Error("permission denied") as NodeJS.ErrnoException;
+              e.code = "EACCES";
+              throw e;
+            },
+          } as never,
+        ),
+      /permission denied/,
+      "a real I/O error must not be swallowed into outcome: missing",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("acquireReviewStatusLock: a lock file holding GARBAGE bytes is reclaimed, never treated as a live holder", async () => {
+  const dir = tmp();
+  const lockPath = join(dir, "garbage-status.lock");
+  // Not JSON at all — parseReviewStatusLockInfo's catch arm. A holder nothing can parse must
+  // never read as live, or a corrupt byte on disk would wedge the review-status gate forever.
+  writeFileSync(lockPath, "}}not json at all{{");
+  try {
+    const handle = await acquireReviewStatusLock(lockPath, {
+      info: { pid: process.pid },
+      isPidAlive: () => true,
+      timeoutMs: 2000,
+      retryMs: 10,
+    });
+    assert.ok(handle, "the garbage lock was reclaimed rather than waited on");
+    assert.deepEqual(JSON.parse(readFileSync(lockPath, "utf8")).pid, process.pid, "we now hold it");
+    handle.release();
+  } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });

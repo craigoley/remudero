@@ -236,17 +236,34 @@ export function reclaimStaleLock<Holder>(
   // test run a second reclaimer's whole flow here, before this call's identity check.
   opts.beforeDelete?.();
 
+  // IDENTITY IS `dev`+`ino` **AND THE BYTES** — dev+ino ALONE DOES NOT CLOSE THIS RACE.
+  // Measured on ext4 (this repo's CI and Linux hosts): unlink followed immediately by a create
+  // in the same directory REUSES the just-freed inode — a probe writing, unlinking and
+  // rewriting one path read `ino=1957993` both times. So in the exact scenario this function
+  // exists for (reclaimer A unlinks and recreates before B reaches its delete), B's dev+ino
+  // check matches and B deletes A's LIVE lock: the TOCTOU, still open, with a check in front
+  // of it that looks like a fix. The lock's own bytes carry the holder (a pid), so a
+  // replacement writes different content; comparing them detects the swap that the inode
+  // number cannot. Read through a single fd, like the stale read above, so the content and
+  // the identity describe the same open file rather than two path re-resolutions.
   let deleteIdentity: FileIdentity;
+  let deleteRaw: string;
   try {
     const st = fsImpl.statSync(lockPath);
     deleteIdentity = { dev: st.dev, ino: st.ino };
+    const delFd = fsImpl.openSync(lockPath, "r");
+    try {
+      deleteRaw = fsImpl.readFileSync(delFd, "utf8") as string;
+    } finally {
+      fsImpl.closeSync(delFd);
+    }
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
     onLostReclaim({ lockPath, reason: "lock vanished between the stale read and the delete-time identity check" });
     return { outcome: "lost" };
   }
 
-  if (deleteIdentity.dev !== readIdentity.dev || deleteIdentity.ino !== readIdentity.ino) {
+  if (deleteIdentity.dev !== readIdentity.dev || deleteIdentity.ino !== readIdentity.ino || deleteRaw !== raw) {
     onLostReclaim({
       lockPath,
       reason:
