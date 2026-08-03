@@ -331,6 +331,51 @@ test("claim: recovery attempts are BOUNDED — a permanently dead login token yi
   }
 });
 
+// ── Claim: a create-keychain failure during an expiry recovery is bounded too ─
+
+test("claim: when create-keychain itself fails during an expiry recovery, it throws provision-failed and is bounded the same as a locked login read", () => {
+  const root = tmp();
+  try {
+    const paths = workerKeychainPaths(join(root, "state"));
+    const expiresAt = 1_000_000;
+    const first = fakeRunner(loginHandlers(credentialSecret(expiresAt)));
+    ensureWorkerKeychain({ ...paths, loginKeychainPath: LOGIN, runner: first.runner, exists: () => false });
+
+    let createCalls = 0;
+    const failingCreateRunner = (argv: string[]): string => {
+      if (argv[0] === "find-generic-password" && argv.includes(LOGIN) && argv.includes("-w")) return `${credentialSecret(expiresAt + 5_000_000)}\n`;
+      if (argv[0] === "find-generic-password" && argv[3] === LOGIN) return ITEM_ATTRS;
+      if (argv[0] === "create-keychain") {
+        createCalls++;
+        throw new Error("security: SecKeychainCreate: An I/O error occurred");
+      }
+      return "";
+    };
+
+    const attempt = () =>
+      capture(() =>
+        ensureWorkerKeychain({
+          ...paths,
+          loginKeychainPath: LOGIN,
+          runner: failingCreateRunner,
+          exists: () => true,
+          now: () => expiresAt + 1,
+        }),
+      );
+
+    const e1 = attempt();
+    assert.equal(e1.reasonClass, "provision-failed");
+    assert.ok(e1.message.includes(paths.keychainPath), "the error names the store path it failed to create/populate");
+    assert.equal(createCalls, 1, "the first recovery attempt genuinely tried create-keychain");
+
+    const e2 = attempt();
+    assert.equal(e2.reasonClass, "provision-failed", "the escalation still carries the ORIGINAL named reason class");
+    assert.equal(createCalls, 1, "the second call did NOT retry create-keychain — bounded, not a re-provision attempt on every spawn");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // ── Claim: no credential value ever leaves the function ──────────────────────
 
 test("claim: no credential VALUE appears in the summary, the sidecar, or any error message — the self-heal stays in the name/timestamp domain", () => {
