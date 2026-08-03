@@ -8,6 +8,7 @@ import { createService } from "../src/lib/service.js";
 import {
   buildStatusRoute,
   isBlockedRow,
+  RECAP_ACK_HEADER,
   requestAcknowledgesRecap,
   summarizeCounts,
   type BoardDeps,
@@ -211,12 +212,11 @@ test("the four idle buckets still partition the declined tasks — changing the 
 
 // ── DEFECT 2 ──────────────────────────────────────────────────────────────────────────────────
 
-test("requestAcknowledgesRecap: only an explicit ack flag counts; a bare poll and an unrelated query do not", () => {
-  assert.equal(requestAcknowledgesRecap("/v1/status"), false);
-  assert.equal(requestAcknowledgesRecap("/v1/status?other=1"), false);
-  assert.equal(requestAcknowledgesRecap(undefined), false);
-  assert.equal(requestAcknowledgesRecap("/v1/status?ack=1"), true);
-  assert.equal(requestAcknowledgesRecap("/v1/status?ack="), true, "presence is the signal, not the value");
+test("requestAcknowledgesRecap: only the explicit ack HEADER counts; a bare poll does not", () => {
+  assert.equal(requestAcknowledgesRecap(undefined), false, "an ordinary poll sends no such header");
+  assert.equal(requestAcknowledgesRecap("1"), true);
+  assert.equal(requestAcknowledgesRecap(""), true, "presence is the signal, not the value");
+  assert.equal(RECAP_ACK_HEADER, "x-rmd-recap-ack", "the header name is part of the wire contract");
 });
 
 test("repeated automatic polls do NOT advance the marker; an explicit acknowledge does", async () => {
@@ -227,10 +227,13 @@ test("repeated automatic polls do NOT advance the marker; an explicit acknowledg
   const tokenId = hashToken(READ_TOKEN);
 
   await withMarkerBoard(deps, store, async (base) => {
-    const get = (suffix: string) => fetch(`${base}/v1/status${suffix}`, { headers: { authorization: `Bearer ${READ_TOKEN}` } });
+    const get = (ack: boolean) =>
+      fetch(`${base}/v1/status`, {
+        headers: ack ? { authorization: `Bearer ${READ_TOKEN}`, [RECAP_ACK_HEADER]: "1" } : { authorization: `Bearer ${READ_TOKEN}` },
+      });
 
     // A human opens the tab: the acknowledged view establishes the marker.
-    await (await get("?ack=1")).json();
+    await (await get(true)).json();
     const established = store.get(tokenId);
     assert.ok(established, "an acknowledged view must establish the marker");
 
@@ -241,11 +244,11 @@ test("repeated automatic polls do NOT advance the marker; an explicit acknowledg
     );
 
     // The tab keeps polling — this is the loop that used to eat the evening.
-    for (let i = 0; i < 5; i++) await (await get("")).json();
+    for (let i = 0; i < 5; i++) await (await get(false)).json();
     assert.equal(store.get(tokenId), established, "FIVE automatic polls must leave the marker exactly where it was");
 
     // He comes back and reloads: the acknowledged view still sees the whole window.
-    const body = (await (await get("?ack=1")).json()) as { recap: Array<{ taskId: string }>; sinceCheckpoint?: string };
+    const body = (await (await get(true)).json()) as { recap: Array<{ taskId: string }>; sinceCheckpoint?: string };
     assert.equal(body.sinceCheckpoint, established, "the recap must be computed from the marker the polls did not move");
     assert.equal(body.recap.length, 1, "the event that happened while he was away must survive five polls");
     assert.equal(body.recap[0]!.taskId, "W1-T2");
@@ -257,11 +260,11 @@ test("the shell asks for an ack on exactly the fetch whose recap it renders, and
   const shell = readFileSync(new URL("../src/lib/serve.ts", import.meta.url), "utf8");
   assert.match(
     shell,
-    /getJson\(recapRendered \? "\/v1\/status" : "\/v1\/status\?ack=1"/,
+    /extraHeaders: recapRendered \? undefined : \{ "x-rmd-recap-ack": "1" \}/,
     "the first fetch of a page load acks; every later poll does not",
   );
   assert.ok(
-    !/getJson\("\/v1\/status",/.test(shell),
-    "no unconditional bare /v1/status fetch may remain — that is the poll that used to advance the marker",
+    !/\/v1\/status\?/.test(shell),
+    "the URL must stay BARE — a query string slips past every page.route(\"**/v1/status\") interception in the suite",
   );
 });

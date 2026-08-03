@@ -995,11 +995,16 @@ export function renderShellHtml(
   // an HTTP error status) once that budget elapses, rather than waiting on a request that may
   // never settle. Callers that omit it (panel/card/journey, all interactive one-shot fetches) are
   // unchanged -- this is additive, not a behavior change to every getJson call site.
-  async function getJson(path, { timeoutMs } = {}) {
+  // extraHeaders rides ON TOP of authHeaders for the one caller that needs to say something
+  // about the request itself (the recap acknowledgement below). It is a HEADER and not a query
+  // param on purpose: every /v1/status interception in the suite matches the BARE path, so a
+  // query string would slip past them -- see board.ts's RECAP_ACK_HEADER doc.
+  async function getJson(path, { timeoutMs, extraHeaders } = {}) {
     const controller = new AbortController();
     const timer = timeoutMs ? setTimeout(() => controller.abort(), timeoutMs) : undefined;
     try {
-      const res = await fetch(path, { headers: authHeaders, signal: controller.signal });
+      const headers = extraHeaders ? Object.assign({}, authHeaders, extraHeaders) : authHeaders;
+      const res = await fetch(path, { headers, signal: controller.signal });
       if (!res.ok) throw new Error(\`GET \${path} -> \${res.status}\`);
       return await res.json();
     } finally {
@@ -3236,12 +3241,15 @@ export function renderShellHtml(
   async function refreshAll() {
     let statusSnap;
     try {
-      // W1-T163 MARKER, ACKNOWLEDGED VIEWS ONLY: "?ack=1" tells board.ts a HUMAN is about to see
-      // this recap, and it is sent on exactly the fetch whose recap this page renders (the
-      // recapRendered gate below). Every later poll asks WITHOUT it, so a tab left open no longer
-      // marks the evening seen three seconds at a time. Bare "/v1/status" -- getJson passes the
-      // token as a header, never a query param, so there is no "&" case to get wrong.
-      statusSnap = await getJson(recapRendered ? "/v1/status" : "/v1/status?ack=1", { timeoutMs: STATUS_FETCH_TIMEOUT_MS });
+      // W1-T163 MARKER, ACKNOWLEDGED VIEWS ONLY: the x-rmd-recap-ack header tells board.ts a HUMAN
+      // is about to see this recap, and it rides on exactly the fetch whose recap this page renders
+      // (the recapRendered gate below). Every later poll omits it, so a tab left open no longer
+      // marks the evening seen three seconds at a time. The URL stays BARE "/v1/status" so every
+      // shipped page.route("**/v1/status") interception still matches it.
+      statusSnap = await getJson("/v1/status", {
+        timeoutMs: STATUS_FETCH_TIMEOUT_MS,
+        extraHeaders: recapRendered ? undefined : { "x-rmd-recap-ack": "1" },
+      });
     } catch (e) {
       handlePollFailure();
       return;

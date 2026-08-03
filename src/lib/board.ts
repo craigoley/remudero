@@ -406,14 +406,22 @@ export interface StatusResponse extends BoardSnapshot {
 }
 
 /**
- * The query flag a caller sets to say "a HUMAN is looking at this response, mark it seen".
+ * The request HEADER a caller sets to say "a HUMAN is looking at this response, mark it seen".
  * Absent ⇒ the request is an automatic poll and MUST NOT advance the marker.
+ *
+ * WHY A HEADER AND NOT `?ack=1`. A query param was this fix's first shape and it BROKE two shipped
+ * first-paint tests: `test/serve.first-paint.test.ts` intercepts the poll with
+ * `page.route("**' + '/v1/status")`, a Playwright glob that matches the bare path and NOT
+ * `/v1/status?ack=1`, so the shell's very first fetch slipped past the interception those tests
+ * exist to impose. Fourteen `/v1/status` sites across the suite are written against that same bare
+ * path. A header carries the one bit without touching the URL, so the request line stays
+ * byte-identical to what every existing caller, interception and hand-run `curl` already matches.
  */
-export const ACK_QUERY_PARAM = "ack";
+export const RECAP_ACK_HEADER = "x-rmd-recap-ack";
 
-/** Is this `GET /v1/status` an acknowledged view (`?ack=1`), or an automatic poll? */
-export function requestAcknowledgesRecap(url: string | undefined): boolean {
-  return new URL(url ?? "/", "http://localhost").searchParams.get(ACK_QUERY_PARAM) !== null;
+/** Is this `GET /v1/status` an acknowledged view, or an automatic poll? Presence is the signal. */
+export function requestAcknowledgesRecap(headerValue: string | string[] | undefined): boolean {
+  return headerValue !== undefined;
 }
 
 /**
@@ -421,9 +429,9 @@ export function requestAcknowledgesRecap(url: string | undefined): boolean {
  * W1-T163: when `lastSeen` (lib/last-seen.ts) is supplied, a view also reads the calling token's
  * own recap off its CURRENT marker and folds it into the response.
  *
- * THE MARKER ADVANCES ONLY ON AN ACKNOWLEDGED VIEW (`?ack=1`), NOT ON EVERY REQUEST. W1-T163's
+ * THE MARKER ADVANCES ONLY ON AN ACKNOWLEDGED VIEW, NOT ON EVERY REQUEST. W1-T163's
  * intent — "viewing the board advances the marker", so an immediate reload recaps nothing — is
- * correct and is PRESERVED: the shell sends `?ack=1` on exactly the one fetch per page load whose
+ * correct and is PRESERVED: the shell sets {@link RECAP_ACK_HEADER} on exactly the one fetch per page load whose
  * recap it actually renders (its own `recapRendered` gate), so a reload still recaps nothing.
  *
  * WHAT WAS BROKEN. The advance was unconditional while the shell re-fetches this route every
@@ -434,7 +442,7 @@ export function requestAcknowledgesRecap(url: string | undefined): boolean {
  * The operator's actual use is a tab left open all evening, which is exactly the case that lost
  * every event it was built to show him.
  *
- * WHY A QUERY FLAG AND NOT THE ALTERNATIVES. A POST acknowledge would need WRITE scope, and the
+ * WHY AN OPT-IN REQUEST SIGNAL AND NOT THE ALTERNATIVES. A POST acknowledge would need WRITE scope, and the
  * operator's bookmark carries only the READ token — the one client that must be able to ack could
  * not. A second route duplicates the whole board handler and forces every existing caller to
  * choose. A client-side `document.hidden` check does not separate the two cases at all: a tab left
@@ -468,7 +476,7 @@ export function buildStatusRoute(deps: BoardDeps, lastSeen?: LastSeenStore): Rou
       // Advance AFTER computing the recap, off the SAME timestamp the snapshot itself claims to
       // be current as of -- never `Date.now()` a second time, which could race a hair ahead of
       // what this response actually reflects. Gated on the ack flag: see this function's doc.
-      if (requestAcknowledgesRecap(req.url)) lastSeen.advance(tokenId, snapshot.generated_at);
+      if (requestAcknowledgesRecap(req.headers[RECAP_ACK_HEADER])) lastSeen.advance(tokenId, snapshot.generated_at);
       const body: StatusResponse = { ...snapshot, recap, sinceCheckpoint };
       sendJson(res, 200, body);
     },

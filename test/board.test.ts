@@ -19,6 +19,7 @@ import {
   createRecentActivityCache,
   DEFAULT_POLL_MS,
   isRunningRow,
+  RECAP_ACK_HEADER,
   sortBoardRows,
   summarizeCounts,
   type BoardDeps,
@@ -1252,10 +1253,10 @@ test("GET /v1/recent: reachable through the real assembled route (not just the p
 //
 // W1-T163's acceptance bar ("viewing the board advances the marker") is UNCHANGED and is what
 // these tests still assert; what changed is only HOW a request says a human is viewing. The
-// advance is now opt-in via `?ack=1` (board.ts's `requestAcknowledgesRecap`), because the shell
+// advance is now opt-in via the `x-rmd-recap-ack` HEADER (board.ts's `requestAcknowledgesRecap`), because the shell
 // re-fetches this route every 3000ms and an automatic poll used to be indistinguishable from a
 // human — collapsing a left-open tab's recap window to ~3 seconds. These four tests therefore
-// send `?ack=1`, which is exactly what the shell now sends on the one fetch per page load whose
+// send that header, which is exactly what the shell now sends on the one fetch per page load whose
 // recap it renders. The poll-does-NOT-advance half lives in test/console-stopped-counts.test.ts.
 // ───────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -1267,7 +1268,7 @@ test("W1-T163: a token's FIRST-EVER view establishes its marker and recaps NOTHI
   const store = createLastSeenStore(join(mkdtempSync(join(tmpdir(), "rmd-last-seen-")), "last-seen.json"));
 
   await withMarkerAwareBoardService(deps, store, async (base) => {
-    const res = await fetch(`${base}/v1/status?ack=1`, { headers: { authorization: `Bearer ${READ_TOKEN}` } });
+    const res = await fetch(`${base}/v1/status`, { headers: { authorization: `Bearer ${READ_TOKEN}`, [RECAP_ACK_HEADER]: "1" } });
     assert.equal(res.status, 200);
     const body = (await res.json()) as { recap: unknown[]; sinceCheckpoint?: string; generated_at: string };
     assert.deepEqual(body.recap, []);
@@ -1285,11 +1286,11 @@ test("W1-T163: viewing the board ADVANCES the marker — an immediate reload fro
   const store = createLastSeenStore(join(mkdtempSync(join(tmpdir(), "rmd-last-seen-")), "last-seen.json"));
 
   await withMarkerAwareBoardService(deps, store, async (base) => {
-    const first = await fetch(`${base}/v1/status?ack=1`, { headers: { authorization: `Bearer ${READ_TOKEN}` } });
+    const first = await fetch(`${base}/v1/status`, { headers: { authorization: `Bearer ${READ_TOKEN}`, [RECAP_ACK_HEADER]: "1" } });
     assert.equal(((await first.json()) as { recap: unknown[] }).recap.length, 0);
 
     // reload, no new ledger activity in between.
-    const second = await fetch(`${base}/v1/status?ack=1`, { headers: { authorization: `Bearer ${READ_TOKEN}` } });
+    const second = await fetch(`${base}/v1/status`, { headers: { authorization: `Bearer ${READ_TOKEN}`, [RECAP_ACK_HEADER]: "1" } });
     const body = (await second.json()) as { recap: unknown[]; sinceCheckpoint?: string };
     assert.ok(body.sinceCheckpoint, "the second view must see a real prior marker (from the first view)");
     assert.deepEqual(body.recap, [], "a reload with NOTHING new since the last view must recap nothing — a non-empty recap here FAILS");
@@ -1309,7 +1310,7 @@ test(
       // First view: establishes the marker; the pre-existing W1-T1 merge is invisible (first-ever
       // view recaps nothing — see the dedicated test above) but this is the marker every LATER
       // view's window opens from.
-      await fetch(`${base}/v1/status?ack=1`, { headers: { authorization: `Bearer ${READ_TOKEN}` } });
+      await fetch(`${base}/v1/status`, { headers: { authorization: `Bearer ${READ_TOKEN}`, [RECAP_ACK_HEADER]: "1" } });
 
       // New activity strictly AFTER the first view.
       appendFileSync(
@@ -1317,7 +1318,7 @@ test(
         JSON.stringify({ ts: new Date(Date.now() + 1000).toISOString(), task_id: "W1-T2", step: "verdict", verdict: "merged" }) + "\n",
       );
 
-      const second = await fetch(`${base}/v1/status?ack=1`, { headers: { authorization: `Bearer ${READ_TOKEN}` } });
+      const second = await fetch(`${base}/v1/status`, { headers: { authorization: `Bearer ${READ_TOKEN}`, [RECAP_ACK_HEADER]: "1" } });
       const body = (await second.json()) as { recap: Array<{ taskId: string }> };
       assert.equal(body.recap.length, 1, "exactly the ONE event between the two views");
       assert.equal(body.recap[0].taskId, "W1-T2");
@@ -1337,13 +1338,13 @@ test("W1-T163: two different tokens each get their OWN marker/recap — one toke
 
   await withMarkerAwareBoardService(deps, store, async (base) => {
     // WRITE_TOKEN views first (establishing ITS marker only).
-    await fetch(`${base}/v1/status?ack=1`, { headers: { authorization: `Bearer ${WRITE_TOKEN}` } });
+    await fetch(`${base}/v1/status`, { headers: { authorization: `Bearer ${WRITE_TOKEN}`, [RECAP_ACK_HEADER]: "1" } });
 
     appendFileSync(ledgerPath, JSON.stringify({ ts: new Date().toISOString(), task_id: "W1-T1", step: "verdict", verdict: "merged" }) + "\n");
 
     // READ_TOKEN's FIRST-EVER view still recaps nothing (it has no marker of its own yet), even
     // though WRITE_TOKEN already has one and new activity landed since.
-    const res = await fetch(`${base}/v1/status?ack=1`, { headers: { authorization: `Bearer ${READ_TOKEN}` } });
+    const res = await fetch(`${base}/v1/status`, { headers: { authorization: `Bearer ${READ_TOKEN}`, [RECAP_ACK_HEADER]: "1" } });
     const body = (await res.json()) as { recap: unknown[] };
     assert.deepEqual(body.recap, []);
   });
