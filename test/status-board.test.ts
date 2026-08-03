@@ -643,7 +643,12 @@ test("buildStatusBoard: BLOCKERS BY CLASS — blocked PRs RENDER sweep.ts's own 
     ledgerLine({ step: "sweep.disposed", task_id: "W1-T51", pr_number: 102, pr_url: "https://x/102", disposition: "mergeable", reason: "arming auto-merge", acted: true }),
   ]);
 
-  const model = buildStatusBoard(tmpRoot(), ledgerPath, baseDeps());
+  // A reachable plan + GitHub gateway (W1-T306): `blocked_pr` rows are now re-derived against
+  // LIVE merge state every render, so this "sweep.ts's own vocabulary" test needs a reachable
+  // gateway to reach that live-check path at all — none of PRs #100/#101/#102 are ever resolved
+  // MERGED/CLOSED by it (the plan's own task carries no `pr:` field), so they render exactly as
+  // this test always expected.
+  const model = buildStatusBoard(tmpRoot(), ledgerPath, baseDeps({ plan: plan(), github: fakeGithub() }));
 
   const named = model.blockers.rows.find((r) => r.kind === "blocked_pr" && r.prNumber === 100);
   assert.ok(named);
