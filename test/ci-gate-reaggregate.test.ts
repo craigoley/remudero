@@ -88,7 +88,13 @@ async function runAggregateScript(
   required: string[],
   ignore: string[],
   sequence: CheckRun[][],
-  opts: { graceWindowSeconds?: number; gracePollIntervalSeconds?: number; timeoutMs?: number } = {},
+  opts: {
+    graceWindowSeconds?: number;
+    gracePollIntervalSeconds?: number;
+    timeoutMs?: number;
+    waitCapSeconds?: number;
+    waitPollIntervalSeconds?: number;
+  } = {},
 ) {
   const dir = await mkdtemp(join(tmpdir(), "ci-gate-reaggregate-bin-"));
   const stateDir = await mkdtemp(join(tmpdir(), "ci-gate-reaggregate-state-"));
@@ -105,6 +111,8 @@ async function runAggregateScript(
         IGNORE: JSON.stringify(ignore),
         GRACE_WINDOW_SECONDS: String(opts.graceWindowSeconds ?? 5),
         GRACE_POLL_INTERVAL_SECONDS: String(opts.gracePollIntervalSeconds ?? 1),
+        WAIT_CAP_SECONDS: String(opts.waitCapSeconds ?? 2400),
+        WAIT_POLL_INTERVAL_SECONDS: String(opts.waitPollIntervalSeconds ?? 15),
       },
       encoding: "utf8",
       timeout: opts.timeoutMs ?? 20_000,
@@ -283,4 +291,81 @@ test("ci-gate-reaggregate: the workflow carries the grace-window fallback in its
   assert.ok(Number(env.GRACE_POLL_INTERVAL_SECONDS) > 0, "expected a positive default GRACE_POLL_INTERVAL_SECONDS in ci-gate.yml");
   assert.match(raw, /check_run/, "expected ci-gate.yml to name the investigated check_run trigger");
   assert.match(raw, /GitHub Actions/, "expected ci-gate.yml to document the GitHub Actions recursion-guard finding");
+});
+
+// ── W1-T312: the wait cap itself was shorter than this repo's own CI ────────────────────────
+//
+// A SEPARATE defect from the grace-window re-aggregation above: step 1's own wait loop (the one
+// that runs BEFORE any check has failed) hard-capped at 900s, which sat below this repo's own
+// measured p95 required-check wall-clock (~1345s, n=10 samples 2026-08-03 — see the
+// WAIT_CAP_SECONDS comment in ci-gate.yml's job env). ci-gate timed out on siblings that were
+// still green-in-progress (#1229, #1234), and the W1-T261 grace window above cannot help here: it
+// only re-reads once `fails` is non-empty, i.e. once a required check has COMPLETED as failing --
+// a check that has not completed at all never reaches that branch.
+
+test("ci-gate-reaggregate (W1-T312): the wait cap is sized from a measured distribution of this repo's own required-check durations, with the p95 stated inline", async () => {
+  const raw = await readFile(CI_GATE_PATH, "utf8");
+  const doc = parseYaml(raw) as { jobs: Record<string, any> };
+  const env = doc.jobs["ci-gate"].env as Record<string, string>;
+  const waitCapSeconds = Number(env.WAIT_CAP_SECONDS);
+  assert.ok(waitCapSeconds > 0, "expected a positive default WAIT_CAP_SECONDS in ci-gate.yml");
+  // The old hard-coded cap (900s / 15 minutes) sat below the measured p95 and produced the false
+  // timeouts this task was filed from -- the fix must raise it, not just parameterize it.
+  assert.ok(
+    waitCapSeconds > 900,
+    `expected WAIT_CAP_SECONDS (${waitCapSeconds}) to exceed the old 900s hard cap that caused the false timeouts`,
+  );
+  assert.ok(Number(env.WAIT_POLL_INTERVAL_SECONDS) > 0, "expected a positive default WAIT_POLL_INTERVAL_SECONDS in ci-gate.yml");
+  assert.match(raw, /p95/i, "expected ci-gate.yml to state the measured p95 inline, not just a bare number");
+  assert.match(raw, /measured/i, "expected ci-gate.yml to document that the cap comes from a measurement, not a guess");
+  // The script must actually use the env var for its deadline, not just declare it unused.
+  assert.match(raw, /WAIT_CAP_SECONDS/);
+  assert.doesNotMatch(
+    raw,
+    /\$\(\(\s*\$\(date \+%s\)\s*\+\s*900\s*\)\)/,
+    "expected the literal 900s hard-coded deadline to be gone, replaced by the WAIT_CAP_SECONDS env var",
+  );
+});
+
+test("ci-gate-reaggregate (W1-T312): a required check that never completes within the wait cap is reported as a TIMEOUT, distinctly from a genuine check FAILURE, and names a new sha as the remedy", async () => {
+  const script = await loadAggregateScript();
+  // "missing-check" never registers as completed across any read -- this drives step 1's own
+  // wait loop (unchanged in shape) all the way to its deadline, never reaching step 2/3's
+  // FAILED-check evaluation at all.
+  const snapshot: CheckRun[] = [
+    { name: "present-check", status: "completed", conclusion: "success", started_at: "2026-07-24T17:00:00Z" },
+  ];
+  const sequence = Array.from({ length: 20 }, () => snapshot);
+  const { result } = await runAggregateScript(
+    script,
+    ["present-check", "missing-check"],
+    [],
+    sequence,
+    { waitCapSeconds: 2, waitPollIntervalSeconds: 1, timeoutMs: 15_000 },
+  );
+  const out = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+  assert.notEqual(result.status, 0, out);
+  assert.match(out, /::error::ci-gate: TIMED OUT waiting for required check\(s\) to complete/, out);
+  assert.match(out, /- missing-check/);
+  // Distinct from the FAILED-check message path (step 2/3) -- a timeout must never read as one.
+  assert.doesNotMatch(out, /required check\(s\) FAILED/);
+  // The remedy: a NEW sha, not a re-run of this one.
+  assert.match(out, /NEW sha/i);
+});
+
+test("ci-gate-reaggregate (W1-T312): CLAUDE.md no longer states that W1-T261 is unimplemented", async () => {
+  const claudeMdPath = join(REPO_ROOT, "CLAUDE.md");
+  const raw = await readFile(claudeMdPath, "utf8");
+  assert.doesNotMatch(
+    raw,
+    /W1-T261[^\n]*UNIMPLEMENTED/i,
+    "expected CLAUDE.md to stop claiming W1-T261 is unimplemented (it merged 2026-07-29 via #885)",
+  );
+  assert.doesNotMatch(
+    raw,
+    /underlying defect is filed as W1-T261 and UNIMPLEMENTED/i,
+  );
+  // The corrected bullet should still exist and now name the merged PR + this task.
+  assert.match(raw, /W1-T261.*#885/s);
+  assert.match(raw, /W1-T312/);
 });
