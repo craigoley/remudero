@@ -2482,6 +2482,27 @@ function planOnlySummary(criteriaCount: number): string {
 export interface PriorReviewVerdict {
   headSha: string;
   state: ReviewState;
+  /**
+   * W1-T229's `capped` as it was RECORDED on the `review.posted` line — read back rather than
+   * recomputed, so the arming path judges the same fact the review posted. It has always been
+   * written ({@link reviewLedgerLegibilityFields}); nothing read it, so a CAPPED verdict — which
+   * posts `state: "success"` because CAPPED IS NOT FAIL — armed on the strength of that success
+   * alone, on every lane routed through {@link decideArmFromLedgerVerdict}.
+   *
+   * ABSENT MEANS NOT CAPPED (operator ruling, binding). Lines older than the field carry no
+   * `capped` key at all, and failing closed on them would refuse to arm across the entire
+   * pre-field history — the shape of a governor that could not read usage and idled the fleet
+   * for three hours. An unreadable field fails OPEN here; {@link cappedFieldAbsent} keeps that
+   * choice legible rather than silent.
+   */
+  capped: boolean;
+  /** Recorded `plan_only`. Carried because {@link decideAutoMergeArm}'s W1-T205 carve-out reads
+   *  it; same absent-means-false rule. */
+  planOnly: boolean;
+  /** True when the ledger line carried no `capped` key at all, so {@link capped} above is the
+   *  fail-open DEFAULT rather than a recorded fact. Surfaced in the arm decision's own reason
+   *  string — no new ledger step, so a polling lane cannot amplify it into per-tick noise. */
+  cappedFieldAbsent?: true;
 }
 
 /** Result of applying the W1-T178 verdict-stability rule to a freshly computed verdict. */
@@ -2508,7 +2529,18 @@ export function priorReviewVerdictFromLedger(
     if (line.step !== "review.posted" || line.task_id !== taskId) continue;
     if (typeof line.head_sha !== "string") continue;
     if (line.state !== "success" && line.state !== "failure") continue;
-    prior = { headSha: line.head_sha, state: line.state };
+    // `capped`/`plan_only` are read back from the SAME line that carried `state`, never
+    // recomputed — the arming path must judge the verdict that was actually posted. A
+    // non-boolean (absent on a pre-W1-T185 line, or malformed) is the fail-open default,
+    // recorded via `cappedFieldAbsent` so the decision can say it took that default.
+    const cappedRecorded = typeof line.capped === "boolean" ? line.capped : undefined;
+    prior = {
+      headSha: line.head_sha,
+      state: line.state,
+      capped: cappedRecorded ?? false,
+      planOnly: typeof line.plan_only === "boolean" ? line.plan_only : false,
+      ...(cappedRecorded === undefined ? { cappedFieldAbsent: true as const } : {}),
+    };
   }
   return prior;
 }
@@ -2918,7 +2950,13 @@ export function decideAutoMergeArmAtSha(entry: ReviewStatusEntry | undefined, tr
  *   live status channel currently says, including a stubbed-unavailable read
  *   (acceptance criterion 2).
  */
-export function decideArmFromLedgerVerdict(prior: PriorReviewVerdict | undefined, headSha: string): ArmDecision {
+export function decideArmFromLedgerVerdict(
+  prior: PriorReviewVerdict | undefined,
+  headSha: string,
+  // Appended LAST so no positional caller shifts. Without it, delegating below would silently
+  // drop the operator's `rmd review --override-capped-by` escape hatch on this path.
+  override?: CappedOverride,
+): ArmDecision {
   if (!prior) {
     return {
       arm: false,
@@ -2933,12 +2971,28 @@ export function decideArmFromLedgerVerdict(prior: PriorReviewVerdict | undefined
         `(${headSha.slice(0, 7)}) — a push after the verdict was posted must not arm the new head (W1-T230)`,
     };
   }
-  if (prior.state !== "success") {
-    return { arm: false, reason: "the ledgered verdict for this exact head is not success (W1-T230)" };
-  }
+  // ── ONE RULE, ONE IMPLEMENTATION ──────────────────────────────────────────────────────────
+  // The two checks above are W1-T230's and stay here: they decide WHICH verdict may be trusted
+  // (one exists, and it is for THIS head). They say nothing about whether that verdict is good
+  // enough to merge on — and this function used to answer that itself, with `state === "success"`
+  // and nothing else. That was a SECOND, weaker copy of a policy `decideAutoMergeArm` already
+  // owns: it refuses a CAPPED verdict (W1-T229), carves out plan-only PRs (W1-T205), and honours
+  // a ledgered operator override. A CAPPED verdict posts `success`, so the copy here armed
+  // unproven work on every lane that routes through this function — sweep, dep-review, retro,
+  // triage, plan, approve — while the other copy refused it. Two implementations of one rule is
+  // a defect this repo has already paid for twice; delegating deletes the copy rather than
+  // teaching it the same lesson again.
+  const decision = decideAutoMergeArm(
+    { state: prior.state, capped: prior.capped, planOnly: prior.planOnly },
+    false,
+    override,
+  );
+  if (!prior.cappedFieldAbsent) return decision;
+  // The fail-open default is legible in the decision's own reason — which every caller already
+  // records — instead of a new ledger step a polling lane would re-emit every tick.
   return {
-    arm: true,
-    reason: `ledgered review.posted verdict for this exact head (${headSha.slice(0, 7)}) is success (W1-T230)`,
+    ...decision,
+    reason: `${decision.reason} [the ledgered verdict carried no 'capped' field (a line older than W1-T185); treated as NOT capped]`,
   };
 }
 

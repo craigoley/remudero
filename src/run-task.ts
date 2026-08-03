@@ -875,8 +875,13 @@ export function armAutoMerge(
     );
     return "head-unavailable";
   }
-  const prior = priorReviewVerdictFromLedger(deps.ledgerLines(), taskId);
-  const decision = decideArmFromLedgerVerdict(prior, headSha);
+  // ONE ledger read feeds both the verdict and its override — the same construction the two
+  // `decideAutoMergeArm` call sites above already use, so the override escape hatch survives
+  // this path's delegation instead of being silently dropped by it.
+  const ledgerLines = deps.ledgerLines();
+  const prior = priorReviewVerdictFromLedger(ledgerLines, taskId);
+  const override = prior?.capped ? cappedOverrideFromLedger(ledgerLines, taskId, headSha) : undefined;
+  const decision = decideArmFromLedgerVerdict(prior, headSha, override);
   if (!decision.arm) {
     deps.say(`automerge.ledger_refused (W1-T230): ${decision.reason} — ${prUrl}`);
     return "ledger-refused";

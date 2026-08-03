@@ -263,7 +263,7 @@ test("ACCEPTANCE 3: the PARTIAL tag survives verdict-stability suppression — a
     executedProofCount: 1,
     executableProofCount: 2,
   };
-  const prior: PriorReviewVerdict = { headSha: "abc1234", state: "success" };
+  const prior: PriorReviewVerdict = { headSha: "abc1234", state: "success", capped: false, planOnly: false };
   const result = applyVerdictStability(computed, "abc1234", prior);
   assert.equal(result.suppressed, true);
   assert.equal(result.verdict.state, "success");
