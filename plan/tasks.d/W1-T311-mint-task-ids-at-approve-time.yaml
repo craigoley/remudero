@@ -1,0 +1,108 @@
+- id: W1-T311
+  title: "MINT TASK IDS AT APPROVE TIME, NOT DRAFT TIME — inbox drafts carry PLACEHOLDER ids, and `rmd approve` materializes concrete W1-Tnnn ids from the ONE existing derivation at branch-creation time (the P34/P37 W1-T244 overlap)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "VERIFIED FROM SOURCE 2026-08-03, and the missing half is named IN the code that closed the
+    other half. src/lib/task-id.ts:15-20 records this feedback as its lineage and states that the module is
+    only the DERIVATION half — 'leaving c7b673's approve-time SEQUENCING (placeholder ids in drafts,
+    concrete ids minted only at rmd approve) to its own task'. That task does not exist; this is it.
+    THE DRAFT LANE STILL MINTS BY EYE. inboxDraftPrompt (src/lib/inbox.ts:513-545) hands the drafting
+    Architect the whole current plan/tasks.yaml 'so you cite REAL existing task ids in depends_on' and
+    carries NO ID SELECTION block at all — unlike triagePrompt and planArchitectPrompt, which are handed a
+    harness-minted, harness-RESERVED id before the worker spawns (run-task.ts:11819-11823,
+    lib/plan-architect.ts:195). So the drafted candidate's own ids are picked by the worker from a file
+    read, which is exactly the 'one above the last one I saw' method task-id.ts's header records failing
+    twice in one session (#770, #775).
+    APPROVE SHIPS THOSE IDS VERBATIM. approveCommand's createRatificationBranch applies the cached
+    fragment unchanged (run-task.ts:12740, applyFragmentToPlanYaml) and then READS the ids back OUT of it
+    (:12756, `^- id:` over payload.fragmentYaml) to build the PR body — i.e. by the time the operator
+    approves, the ids are draft-time constants nothing re-derives.
+    THE WINDOW IS WIDE BY CONSTRUCTION, NOT BY ACCIDENT. Drafts are cached state-side
+    (state/inbox-drafts.json) and only invalidate on evidence-anchor drift or a reframe (isDraftStale,
+    lib/inbox.ts:161), so a draft can sit for days while main files tasks past it. Two proposals drafted
+    independently in that window mint from the same floor: OBSERVED 2026-07-22 23:38Z, the P34 and P37
+    drafts both starting at W1-T244.
+    THAT COLLISION WAS PAID OFF BY HAND, NOT CLOSED. plan/tasks.yaml:12524 and :12581 carry the receipts —
+    'Minted strictly above main's current max task id (W1-T251, after P34's W1-T248-T251 and the parallel
+    ...)' — a manual renumber, per task, at filing time. Nothing prevents the next one.
+    WHY THE SHIPPED GUARDS DO NOT COVER THIS LANE: the triage lock (#1069) is triage-specific, and
+    reserveTaskIdFrom (lib/task-id-reservation.ts) reserves ids the MINT produced — the draft rung never
+    calls the mint, so there is nothing to reserve. assertProposedPlanLoads is a pre-push backstop on the
+    triage worker's worktree, not on an approve branch."
+  design: |
+    ALREADY DECIDED, REUSED HERE, NOT RE-LITIGATED — read this before touching anything:
+      - THE DERIVATION IS SETTLED AND SINGULAR: lib/task-id.ts (monolith ∪ shards ∪ open plan-PR minted
+        ids, with MintDegradation reported rather than swallowed), extended by W1-T278 to the git history
+        of plan/. CALL IT. Do NOT write a second derivation for the approve lane — 'one derivation, one
+        doctrine' is the whole point, and a second one re-creates the class.
+      - THE TRIAGE LOCK AND THE STATE-SIDE RESERVATION STAY. The originating feedback asked to retire
+        both; the repo settled that the other way on 2026-08-01 (lib/triage.ts's header, PR #1069) because
+        the reservation covers callers a lock cannot (a second machine, the console, a cross-repo filer).
+        This task USES reserveTaskIdFrom; it does not remove it.
+    (1) PLACEHOLDER FORM IN THE DRAFT. inboxDraftPrompt instructs the drafting worker to emit ids as
+        NEW-1, NEW-2, ... in fragment order, and to use those SAME placeholders for any depends_on
+        pointing INSIDE the drafted set. depends_on on EXISTING tasks stays a real W1-T id. The
+        placeholder namespace must be structurally impossible to mistake for a filed id (never W1-T
+        shaped), so a cached draft cannot pin a concrete id even by accident.
+    (2) THE READINESS LINT MUST STILL WORK, AND THIS IS THE TRAP. The READY predicate requires the drafted
+        fragment to be lint-clean (lib/inbox.ts's `lint_clean` / draft-unclean state), and rmd lint-plan
+        validates the W1-T id shape. Placeholders must therefore be substituted with PROVISIONAL ids for
+        the lint pass ONLY, never written back into the cached draft. State in the PR which shape was
+        chosen and prove the negative: a lint pass that simply fails on placeholders would park every
+        proposal at draft-unclean forever, which is a worse defect than the collision.
+    (3) MINT INSIDE createRatificationBranch, AFTER the worktree is created at origin/main and BEFORE the
+        write/commit. Mint N ids from the shared derivation, RESERVE each (reserveTaskIdFrom), then
+        rewrite, in one pass: the fragment's `- id:` lines, every intra-fragment depends_on reference, and
+        the MASTER-PLAN stamp line's task-id list (it is authored at draft time too — applyStampToMasterPlan,
+        run-task.ts:12742 — and would otherwise name ids that were never filed). filedTaskIds (:12756)
+        then reads the REAL ids, so the PR body's filing criteria name what actually landed.
+    (4) SERIALIZATION IS THE OPERATOR'S APPROVE ACTIONS, with the reservation as the backstop for a
+        console-initiated or second-machine approve overlapping a CLI one.
+    (5) DEGRADE HONESTLY, DO NOT GUESS. A MintDegradation on any source, or a TaskIdReservationError, must
+        REFUSE the approve naming the unread source, open no PR, and leave the proposal READY. A partial
+        union here does not cost a renumber-and-re-push like #770 did — it lands a duplicate id on main,
+        which breaks loadPlan for every consumer.
+    (6) THE CONSOLE READ-BACK STAYS HONEST. The READY card and the arm-then-confirm read-back promise 'the
+        drafted task ids' (W1-T188). With placeholders there are no ids to show until approve, so read back
+        TITLES plus the placeholder labels and say the ids are minted on approve. Do not let a card claim
+        an id it cannot know.
+    EXPLICITLY NOT IN SCOPE: changing WHERE approve writes the fragment (it appends to plan/tasks.yaml
+    today), altering the derivation itself, touching the triage lock or the reservation directory, and
+    renumbering anything already filed.
+  acceptance:
+    - claim: "a cached inbox draft carries placeholder ids only — it contains no W1-Tnnn id in any `id:` position, so no concrete id can be pinned at draft time"
+      proof: "unit test: test/inbox-approve-mint.test.ts"
+    - claim: "rmd approve materializes concrete consecutive ids from the shared derivation and rewrites the fragment ids, the intra-fragment depends_on references, and the MASTER-PLAN stamp line's id list before the branch is committed"
+      proof: "unit test: test/inbox-approve-mint.test.ts"
+    - claim: "two independently drafted proposals whose placeholders both start at NEW-1 approve to DISJOINT id ranges — the 2026-07-22 P34/P37 W1-T244 overlap, replayed"
+      proof: "unit test: test/inbox-approve-mint.test.ts"
+    - claim: "a degraded mint source or a failed reservation REFUSES the approve naming the source, opens no PR, and leaves the proposal READY"
+      proof: "unit test: test/inbox-approve-mint.test.ts"
+    - claim: "the readiness lint still passes over a placeholder-carrying draft — a lint-clean drafted fragment is still classified READY, not draft-unclean"
+      proof: "unit test: test/inbox-approve-mint.test.ts"
+    - claim: "the approve path calls the materializer rather than re-deriving ids locally"
+      proof: "grep: materializeDraftTaskIds( in src/run-task.ts"
+  # risk:high on Rule 19's SIZING count, not on danger — the change necessarily spans the draft prompt
+  # + readiness core (src/lib/inbox.ts), the approve gateway (src/run-task.ts) and its own test file, so
+  # `subsystemsOf` counts three and `sizingViolation` blocks that below high. Decomposing would split one
+  # contract (what a draft carries / what approve materializes) across two tasks and re-create the very
+  # divergence this closes. It argues DOWN toward medium — approve already rides the full gate stack and
+  # merges nothing on its own — and that is why the refusal path in (5) is a first-class criterion.
+  risk: high
+  origin: feedback#fb-1784766965325-c7b673
+  plan_refs: ["§5C", "§7"]
+  files: [src/lib/inbox.ts, src/run-task.ts, test/inbox-approve-mint.test.ts]
+  status: queued
+  attempts: 0
+  note: "Files the SECOND half of feedback#fb-1784766965325-c7b673. The first half (one GitHub-derived
+    derivation: merged plan ∪ shards ∪ open plan-PR minted ids, no state-side registry in the DERIVATION)
+    already shipped as src/lib/task-id.ts, whose header names this feedback and defers exactly this work.
+    The feedback's third ask — retiring the triage serialization workaround — is DECLINED as already
+    settled the other way (lib/triage.ts header, PR #1069, 2026-08-01): the lock and the atomic reservation
+    stay, and this task consumes them rather than replacing them.
+    NO depends_on: W1-T278 (history-aware mint) improves the derivation this task calls, but this task is
+    correct against whatever the shared mint returns and must not be gated on it."
