@@ -1,0 +1,25 @@
+id: fb-1785798596440-f9576e
+ts: 2026-08-03T23:09:56.440Z
+raw: "THE DAILY SPEND CEILING HAS NO CALLER — checkCostGovernor and
+  checkQueueGovernor have ZERO callers anywhere in src/, found while reconning
+  concurrency. checkCostGovernor was built after the $206/60-run incident
+  SPECIFICALLY to catch what the per-run budget_usd cap cannot see: many cheap
+  runs summing past a daily ceiling. It is dead. This is live at N=1 — the fleet
+  has run autonomously for two days and merged ~50 PRs today with no daily bound
+  in force. It compounds a second finding: the headroom governor IS armed but
+  has never blocked a dispatch (98 over-ceiling events, all enforced: false), so
+  the branch that holds dispatch under load has never executed in production
+  either. Two spend guards, both believed working, neither functional. RECON:
+  confirm both have no caller at today's sha and establish where each was
+  intended to be invoked — per-dispatch, per-tick, or at daemon boot. Then
+  establish what a wired checkCostGovernor would have done on the highest-spend
+  day on record, so the ceiling can be set from measurement rather than guessed.
+  Report whether wiring it could stop the queue outright, since a ceiling that
+  halts the fleet silently is the failure mode the headroom governor already
+  produced once for three hours. Falsifying check: if either is called through a
+  dynamic dispatch or a config-driven rung a source grep would miss, this is a
+  measurement error and there is nothing dead here."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
