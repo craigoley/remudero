@@ -407,6 +407,16 @@ export interface WorkerKeychainPaths {
    * `accountId` never touches this file, so pre-W1-T265 behavior is unchanged.
    */
   identityPath: string;
+  /**
+   * W1-T293: the 0600 sidecar recording the copied credential's OWN `claudeAiOauth.expiresAt`
+   * (a plain epoch-ms NUMBER — never the secret) as of the last (re-)provision. `ensureWorkerKeychain`
+   * reads it to detect the credential going stale WITHOUT re-reading the login keychain or the
+   * worker store's own secret on every call — see `EnsureWorkerKeychainOpts.now`'s doc. Written on
+   * every (re-)provision regardless of whether `accountId` is supplied (independent of the identity
+   * sidecar above); absent when the credential carried no parseable expiry field, in which case the
+   * expiry gate reports "unknown" rather than inventing one.
+   */
+  expiryPath: string;
 }
 
 /**
@@ -427,6 +437,7 @@ export function workerKeychainPaths(stateDir: string, accountLabel?: string): Wo
     keychainPath: join(stateDir, `remudero-worker${suffix}.keychain-db`),
     passwordPath: join(stateDir, `worker-keychain-password${suffix}`),
     identityPath: join(stateDir, `worker-keychain-account${suffix}`),
+    expiryPath: join(stateDir, `worker-keychain-expiry${suffix}`),
   };
 }
 
@@ -461,10 +472,33 @@ export interface EnsureWorkerKeychainOpts extends WorkerKeychainPaths {
    * positional caller shifts.
    */
   accountId?: string;
+  /**
+   * W1-T293 arm (2): injectable clock for the credential-expiry sidecar gate below.
+   * Omitted ⇒ `Date.now`. Tests inject a fixed value for deterministic expiry math.
+   * Appended LAST — no positional caller shifts.
+   */
+  now?: () => number;
+  /**
+   * W1-T293 arm (2): a token AT OR WITHIN this window of its recorded `expiresAt` is
+   * treated as already stale, so a spawn never races a token that expires mid-run.
+   * Omitted ⇒ `DEFAULT_CREDENTIAL_EXPIRY_SKEW_MS`. Appended LAST — no positional
+   * caller shifts.
+   */
+  credentialExpirySkewMs?: number;
+  /**
+   * W1-T293 arm (3): set by the caller when the PRIOR spawn died on the containment
+   * preflight's expiry-named reason (W1-T292's `spawn_credential_expired`, once that
+   * task wires it through) — forces THIS call to re-provision even when arm (2)'s own
+   * before-the-fact sidecar read saw nothing wrong (the token expired mid-run, after
+   * the last check). `ensureWorkerKeychain` never sets this itself; it is purely a
+   * caller-supplied hint. Appended LAST — no positional caller shifts.
+   */
+  priorSpawnCredentialExpired?: boolean;
 }
 
-/** Why THIS call did (or didn't) provision — the switch's audit trail (W1-T265). */
-export type WorkerKeychainProvisionReason = "absent" | "identity-changed" | "skipped";
+/** Why THIS call did (or didn't) provision — the switch's audit trail (W1-T265),
+ * now also naming a same-account copy that went stale on its own clock (W1-T293). */
+export type WorkerKeychainProvisionReason = "absent" | "identity-changed" | "credential-expired" | "skipped";
 
 export interface WorkerKeychainSummary {
   keychainPath: string;
@@ -487,6 +521,68 @@ function classifyLoginReadError(err: unknown): WorkerKeychainReasonClass {
   if (/could not be found/i.test(text)) return "credential-item-missing";
   return "provision-failed";
 }
+
+/** Default skew for the arm-2 expiry gate below: a stored token AT OR WITHIN this
+ * window of its recorded `expiresAt` is treated as already stale, so a spawn never
+ * races a token that expires mid-run. */
+export const DEFAULT_CREDENTIAL_EXPIRY_SKEW_MS = 5 * 60 * 1000;
+
+/**
+ * Pure: pull `claudeAiOauth.expiresAt` (epoch ms) out of the RAW secret the login
+ * keychain's `Claude Code-credentials` item carries. VERIFIED FROM SOURCE (a live
+ * host's `~/.claude/.credentials.json`, byte-identical shape to what
+ * `find-generic-password -w` returns and what `add-generic-password -w` copies
+ * verbatim into the worker store): `{"claudeAiOauth":{"accessToken":...,
+ * "expiresAt":<epoch-ms>,...}}`. Returns `undefined` for anything that doesn't parse
+ * to that shape — callers must never invent a field when this comes back empty;
+ * W1-T293's arm (3) (a caller-supplied hint) is the only fallback when a credential
+ * genuinely carries no expiry.
+ */
+export function extractCredentialExpiryMs(secret: string): number | undefined {
+  if (!secret || secret.trim() === "") return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(secret);
+  } catch {
+    return undefined;
+  }
+  const expiresAt = (parsed as { claudeAiOauth?: { expiresAt?: unknown } } | null)?.claudeAiOauth?.expiresAt;
+  return typeof expiresAt === "number" && Number.isFinite(expiresAt) ? expiresAt : undefined;
+}
+
+/** Verdict of the cheap, sidecar-only arm-2 staleness read, below. */
+export type CredentialSidecarVerdict = "unknown" | "fresh" | "expired" | "broken";
+
+/**
+ * Pure: classify a RECORDED expiry-sidecar value (never the credential itself — see
+ * `WorkerKeychainPaths.expiryPath`'s doc) against a clock + skew. `undefined` (no
+ * sidecar file — predates this feature, or the credential carried no expiry field at
+ * provisioning time) is `"unknown"`: arm (2) has nothing to say, and only arm (3)'s
+ * explicit hint can force a re-provision. A present-but-empty/non-numeric value is
+ * `"broken"` — the #29896 wipe shape's signature at the sidecar layer — never read
+ * as healthy.
+ */
+export function classifyCredentialSidecar(
+  recorded: string | undefined,
+  opts: { nowMs: number; skewMs: number },
+): CredentialSidecarVerdict {
+  if (recorded === undefined) return "unknown";
+  const trimmed = recorded.trim();
+  if (trimmed === "") return "broken";
+  const expiresAt = Number(trimmed);
+  if (!Number.isFinite(expiresAt)) return "broken";
+  return opts.nowMs + opts.skewMs >= expiresAt ? "expired" : "fresh";
+}
+
+// W1-T293 arm (6): NO HOT LOOP. A daemon whose LOGIN token is itself dead must not
+// re-read it once per spawn forever — module-level (per-boot: resets only on process
+// restart, never persisted to disk) so a permanently dead login token escalates ONCE
+// per keychainPath, and every later credential-expired call in the SAME boot fails
+// fast on the remembered reason class without touching `security` again. Scoped to
+// the credential-expired trigger only: arms (1)/(4)/(5) (absent, identity-changed)
+// keep their pre-existing, unbounded behavior byte-for-byte — this never bounds those.
+const MAX_CREDENTIAL_RECOVERY_ATTEMPTS = 1;
+const credentialRecoveryFailures = new Map<string, { count: number; lastReasonClass: WorkerKeychainReasonClass }>();
 
 /**
  * Guarantee the dedicated worker keychain exists, holds the credential item,
@@ -544,11 +640,59 @@ export function ensureWorkerKeychain(opts: EnsureWorkerKeychainOpts): WorkerKeyc
     identityChanged = recordedId !== opts.accountId;
   }
 
-  if (!storeExists || identityChanged) {
-    // A mismatch means a LIVE keychain file is sitting at this path already —
-    // `create-keychain` refuses to overwrite one, so it must go first. Nothing
-    // to remove when the store was simply absent.
-    if (identityChanged) {
+  // W1-T293 arms (2)+(3): EXPIRY-AWARE, at the seam W1-T265 already built. Only
+  // worth asking when identity alone hasn't already decided to re-provision. Arm
+  // (2) reads ONLY the small `expiryPath` sidecar (a NAME-like numeric timestamp
+  // recorded at provisioning time — never the credential secret itself, and never
+  // a `security` call), so the steady-state (fresh, matching) spawn path costs one
+  // fs read: no credential read, no extra unlock. Arm (3) is the caller's hint that
+  // the PRIOR spawn died on the expiry-named preflight reason — forces a
+  // re-provision even when arm (2) alone saw nothing wrong (a token that expired
+  // mid-run, after the last check).
+  let credentialExpired = false;
+  let credentialSidecarBroken = false;
+  if (storeExists && !identityChanged) {
+    if (opts.priorSpawnCredentialExpired) {
+      credentialExpired = true;
+    } else {
+      let recorded: string | undefined;
+      try {
+        recorded = readFileSync(opts.expiryPath, "utf8");
+      } catch {
+        recorded = undefined; // no sidecar — predates this feature, or the credential carried no expiry field
+      }
+      const verdict = classifyCredentialSidecar(recorded, {
+        nowMs: (opts.now ?? Date.now)(),
+        skewMs: opts.credentialExpirySkewMs ?? DEFAULT_CREDENTIAL_EXPIRY_SKEW_MS,
+      });
+      if (verdict === "expired") credentialExpired = true;
+      else if (verdict === "broken") credentialSidecarBroken = true; // present-but-empty/unparseable never reads as healthy
+    }
+  }
+  // A broken sidecar means THIS store cannot be trusted — the same remedy as never
+  // having provisioned it at all.
+  const treatAsAbsent = !storeExists || credentialSidecarBroken;
+
+  // Arm (6): fail fast, without touching the login keychain again, once a
+  // credential-expiry recovery has already failed once this boot for this path.
+  if (credentialExpired) {
+    const prior = credentialRecoveryFailures.get(opts.keychainPath);
+    if (prior && prior.count >= MAX_CREDENTIAL_RECOVERY_ATTEMPTS) {
+      throw new WorkerKeychainError(
+        prior.lastReasonClass,
+        `worker-keychain credential-expiry recovery already failed ${prior.count} time(s) this boot for ` +
+          `${opts.keychainPath} (last: ${prior.lastReasonClass}) — not re-reading the login keychain again ` +
+          `until the process restarts. A permanently dead login token escalates ONCE, never re-copies a dead ` +
+          `token on every spawn.`,
+      );
+    }
+  }
+
+  if (treatAsAbsent || identityChanged || credentialExpired) {
+    // A mismatch/staleness verdict means a LIVE keychain file may be sitting at
+    // this path already — `create-keychain` refuses to overwrite one, so it must
+    // go first. Nothing to remove when the store was simply absent.
+    if (storeExists) {
       try {
         rmSync(opts.keychainPath, { force: true });
       } catch {
@@ -577,6 +721,12 @@ export function ensureWorkerKeychain(opts: EnsureWorkerKeychainOpts): WorkerKeyc
       ]).replace(/\n$/, "");
     } catch (err) {
       const reasonClass = classifyLoginReadError(err);
+      if (credentialExpired) {
+        credentialRecoveryFailures.set(opts.keychainPath, {
+          count: (credentialRecoveryFailures.get(opts.keychainPath)?.count ?? 0) + 1,
+          lastReasonClass: reasonClass,
+        });
+      }
       throw new WorkerKeychainError(
         reasonClass,
         `worker-keychain provisioning could not read the '${WORKER_KEYCHAIN_SERVICE}' item from the login keychain ` +
@@ -603,15 +753,37 @@ export function ensureWorkerKeychain(opts: EnsureWorkerKeychainOpts): WorkerKeyc
       ]);
       provisioned = true;
     } catch (err) {
+      if (credentialExpired) {
+        credentialRecoveryFailures.set(opts.keychainPath, {
+          count: (credentialRecoveryFailures.get(opts.keychainPath)?.count ?? 0) + 1,
+          lastReasonClass: "provision-failed",
+        });
+      }
       throw new WorkerKeychainError(
         "provision-failed",
         `worker-keychain provisioning failed while creating/populating ${opts.keychainPath}: ` +
           String((err as Error)?.message ?? err),
       );
     }
+    if (credentialExpired) credentialRecoveryFailures.delete(opts.keychainPath); // a successful recovery clears the boot-scoped cap
     if (opts.accountId !== undefined) {
       mkdirSync(dirname(opts.identityPath), { recursive: true });
       writeFileSync(opts.identityPath, opts.accountId, { mode: 0o600 });
+    }
+    // W1-T293: record the freshly-copied secret's OWN expiry (never the secret
+    // itself) for the NEXT call's cheap arm-2 read. No parseable
+    // `claudeAiOauth.expiresAt` on this credential ⇒ clear any stale sidecar from a
+    // PREVIOUS copy rather than misattributing its timestamp to this one — arm (2)
+    // then correctly reports "unknown" (arm (3) remains available).
+    const expiresAtMs = extractCredentialExpiryMs(secret);
+    if (expiresAtMs !== undefined) {
+      writeFileSync(opts.expiryPath, String(expiresAtMs), { mode: 0o600 });
+    } else {
+      try {
+        unlinkSync(opts.expiryPath);
+      } catch {
+        // already absent — fine
+      }
     }
   }
 
@@ -633,6 +805,12 @@ export function ensureWorkerKeychain(opts: EnsureWorkerKeychainOpts): WorkerKeyc
     provisioned,
     unlocked: true,
     account_label: opts.accountId,
-    reason: !storeExists ? "absent" : identityChanged ? "identity-changed" : "skipped",
+    reason: treatAsAbsent
+      ? "absent"
+      : identityChanged
+        ? "identity-changed"
+        : credentialExpired
+          ? "credential-expired"
+          : "skipped",
   };
 }

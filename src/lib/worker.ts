@@ -564,6 +564,16 @@ export interface SpawnWorkerArgs {
      * without touching the real `~/.claude.json`.
      */
     accountId?: string;
+    /**
+     * W1-T293 arm (3): set when the PRIOR spawn died on the containment preflight's
+     * expiry-named reason (W1-T292's `spawn_credential_expired`, once that task wires
+     * it through this call site) — forces `ensureWorkerKeychain` to re-provision even
+     * when its own before-the-fact sidecar check (worker-home.ts's `expiryPath`) saw
+     * nothing wrong. NOT YET WIRED to any containment token here (W1-T292 hasn't
+     * shipped one to consume) — this is the hook a future caller sets; omitted ⇒
+     * unchanged behavior, matching every other opt-in seam in this block.
+     */
+    priorSpawnCredentialExpired?: boolean;
   };
   /**
    * W1-T117: attribution markers threaded into the child's env
@@ -677,6 +687,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         runner: args.keychain?.runner,
         exists: args.keychain?.exists,
         accountId,
+        priorSpawnCredentialExpired: args.keychain?.priorSpawnCredentialExpired,
       }).keychainPath;
     }
     materializeWorkerHome({ workerHome, realHome, workerKeychainPath });

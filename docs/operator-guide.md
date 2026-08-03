@@ -400,6 +400,33 @@ ledger line itself does not yet name which account it provisioned for. Also out 
 account a given run should use in the first place — nothing in remudero selects an account; this
 task only makes the one store that exists follow whichever account is actually logged in.
 
+### Recovering from an expired worker credential copy (W1-T293)
+
+Before this task, the copied OAuth token in `state/remudero-worker.keychain-db` had no expiry of
+its own tracked anywhere: `ensureWorkerKeychain` gated re-provisioning on file existence (and, as
+of W1-T265, account identity) only, so a SAME-account copy that simply went stale over time kept
+reading as healthy and was reused forever. Recovery required a human: unlock the login keychain,
+delete `state/remudero-worker.keychain-db` and `state/worker-keychain-password` by hand, and wait
+for the next spawn to re-provision. Left unattended, the fleet spun on dead-credential spawns at
+$0 until someone did that by hand.
+
+**As of this task, the manual two-file deletion is no longer the recovery path.** Every spawn now
+carries a third, cheap check alongside the identity gate: a small sidecar
+(`state/worker-keychain-expiry`, a plain-text epoch-ms NUMBER — never a credential) records the
+copied token's own `expiresAt` at the moment it was last provisioned, and a token at or within a
+five-minute skew of that timestamp is treated as stale and re-provisioned from the live login item,
+exactly like the absent/identity-mismatch paths already did. The reason is auditable on the
+returned summary as `"credential-expired"`, distinct from `"absent"`/`"identity-changed"`/
+`"skipped"`. A worker store whose sidecar is present but empty or unparseable — the shape a failed
+in-process token refresh can leave behind — is treated the same as absent, never as healthy. If the
+login keychain itself is locked when a recovery is attempted, the run fails closed with a named
+reason (never spawns on the known-dead copy), and a login token that stays dead escalates once per
+daemon boot rather than re-attempting the read on every spawn.
+
+Manually deleting `state/remudero-worker.keychain-db` / `state/worker-keychain-password` is still a
+safe escape hatch (it still forces the next spawn's provisioning path), but is no longer required
+for an expired copy to heal — the next spawn does it automatically.
+
 ### Engaging the overflow valve: draining on API credits (W1-T258)
 
 When the subscription window is exhausted and you want the fleet to keep draining on **metered
