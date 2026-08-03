@@ -1,0 +1,61 @@
+- id: W1-T310
+  title: "`lint-plan` never checks that a proof's test path is inside the task's own declared `files:` — the scope guard then refuses the run after the work is done, and 12 of 12 tasks filed in one day carried the flaw"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 50.00
+  rationale: "MEASURED 2026-08-03. W1-T309 declared `files: [src/lib/status-board.ts]` while two of
+    its three acceptance proofs name `test/status-blockers-live.test.ts`. Run
+    W1-T309-1785780253389 was refused by the scope guard at 18:23:17Z on exactly that mismatch —
+    `out_of_scope [\"test/status-blockers-live.test.ts\"]` against
+    `declared_files [\"src/lib/status-board.ts\"]` — AFTER 106 turns and $4.36 of completed work. The
+    task then re-dispatched into the same wall every cycle, reaching 3/5 on the breaker before an
+    operator noticed; two more and it would have latched with the queue holding nothing else.
+    THE FLAW IS SYSTEMIC AND WAS INVISIBLE AT FILING TIME. All TWELVE tasks filed that day
+    (W1-T298..W1-T309) declare `files:` without the test path their own proofs name. `rmd lint-plan`
+    passed every one of them: it validates proof SHAPE (dialect, resolvability, narrative form) and
+    never asks whether the path a proof names is inside the scope the same task declares. Most of the
+    twelve shipped anyway, so the guard does not fire on every run — which makes this worse, not
+    better: the failure is late, expensive and intermittent rather than caught at filing.
+    THE COST SHAPE IS THE ARGUMENT. The refusal lands at the END of the run, so the full turn and
+    dollar spend is incurred and then discarded, and the dispatch still counts toward
+    `dispatchesWithoutNewOwnedPr`. One malformed `files:` list therefore buys a latched task and
+    several dollars, for a defect a string comparison at filing time would have caught."
+  design: |
+    A FILING-TIME CHECK, because that is the only place it is cheap.
+    (1) For each acceptance proof that names a path — `unit test: test/foo.test.ts`, and the path
+        half of `grep: <pattern> in <path>` — require that path to be inside the task's declared
+        `files:`. Reuse the SAME parse the reviewer's executor uses (`rmd check-proof`'s parser) so
+        the linter cannot disagree with the gate about what a proof names.
+    (2) Match the scope guard's own comparison, whatever it is — prefix, glob, or exact. Establish
+        that by reading the guard rather than assuming; a linter that is stricter than the guard
+        blocks legitimate tasks, and one that is looser lets the expensive case through, which is
+        the whole defect.
+    (3) BLOCKING or warn is a real decision, not a detail. Blocking at filing is what makes it
+        cheap, but `lint-plan` runs CHANGED-TASKS-ONLY in CI, so promoting this to blocking makes
+        every future edit to an old task inherit its pre-existing violation. Recommend, with the
+        count of existing tasks that would trip it, and let the operator rule.
+    (4) A title-only `unit test:` proof names no path and must be silent here — not every proof
+        carries one, and inventing a scope requirement for those would be noise.
+    (5) NAME THE TENSION WITH RULE 19, because complying with this check TRIPS it. Adding the test
+        path to `files:` makes the task span two concerns (`src/...` and `test/...`), which
+        `lint-plan`'s sizing rule then fails at `risk: medium` and demands be raised to high or
+        decomposed. Both #1225 (repairing W1-T309) and THIS task hit it within minutes of each
+        other, and both resolved it by raising the grade. So the current rules jointly imply that
+        any task with a src change and a new test must be `risk: high`, which is almost all of them
+        — that is either intended and should be stated, or it is a sizing rule that mis-reads a
+        test file as a second subsystem. Decide it explicitly and record the ruling; do not let a
+        third task rediscover it.
+  acceptance:
+    - claim: "a task whose acceptance proof names a test path outside its declared files is reported by lint-plan, naming the path and the declared list"
+      proof: "unit test: test/lint-proof-scope.test.ts"
+    - claim: "a proof naming no path, and one whose path is inside the declared files, are both silent"
+      proof: "unit test: test/lint-proof-scope.test.ts"
+    - claim: "the check uses the same proof parse the reviewer's executor uses, so linter and gate cannot disagree about what a proof names"
+      proof: "unit test: test/lint-proof-scope.test.ts"
+  risk: high
+  origin: oper#lint-proof-scope-2026-08-03
+  plan_refs: ["§5C"]
+  files: [src/lib/task-linter.ts, test/lint-proof-scope.test.ts]
