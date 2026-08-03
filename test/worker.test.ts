@@ -314,7 +314,7 @@ test("collectWorkerResult: tokens zero out (never crash) when a synthetic/older 
   assert.deepEqual(r.modelUsage, {});
 });
 
-test("workerLedgerFields: success call ⇒ {model, effort, tokens, cache_read_input_tokens, cache_creation_input_tokens, total_cost_usd, billing_mode, account_label, verdict, quality_suspect, compaction_events} with billing_mode='subscription', verdict='success', quality_suspect=false", async () => {
+test("workerLedgerFields: success call ⇒ {model, effort, tokens, cache_read_input_tokens, cache_creation_input_tokens, total_cost_usd, billing_mode, account_label, verdict, quality_suspect, compaction_events, max_turns} with billing_mode='subscription', verdict='success', quality_suspect=false", async () => {
   const r = await collectWorkerResult(usageStream(), {
     childEnvKeys: [],
     model: "claude-opus-4",
@@ -322,6 +322,8 @@ test("workerLedgerFields: success call ⇒ {model, effort, tokens, cache_read_in
     // W1-T268: the account this call's spend is attributed to — a NAME, carried
     // verbatim onto the ledger fields below, never a secret.
     accountLabel: "acct-uuid-123",
+    // W1-T303: the configured cap this call ran under — see max_turns below.
+    maxTurns: 20,
   });
   const fields = workerLedgerFields(r);
   assert.deepEqual(fields, {
@@ -336,6 +338,7 @@ test("workerLedgerFields: success call ⇒ {model, effort, tokens, cache_read_in
     verdict: "success",
     quality_suspect: false,
     compaction_events: [],
+    max_turns: 20,
   });
   assert.equal(BILLING_MODE, "subscription");
 });
