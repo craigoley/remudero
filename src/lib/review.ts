@@ -2001,15 +2001,26 @@ export function bodyContradictsDiff(report: string, diffFiles: string[]): Change
       // over a diff of exactly those three. Reported 1 contradiction; with backticks stripped
       // from the same body and the same diff, 0. Nothing else about the claim was wrong.
       //
-      // Trailing punctuation comes off FIRST: the sentence's full stop sits OUTSIDE the closing
-      // backtick ("…test.ts`."), so stripping backticks first would leave the dot stranded.
+      // WRAPPING PUNCTUATION COMES OFF FROM BOTH ENDS, AS A CLASS — not backticks then a full
+      // stop. #1194 shipped exactly that narrower pair and it was incomplete: it handled
+      // "…test.ts`." and NOT "…test.ts`)".
+      //
+      // SECOND LIVE FIXTURE (PR #1209, W1-T304): the enumeration was parenthesised, so the final
+      // item arrived as "`test/review-failure-reason-ledgered.test.ts`)". The old cleanup stripped
+      // `[.\s]+$` (no match — the last character is a paren), then backticks anchored at the ends
+      // (no match — the last character is still a paren), leaving the item unchanged and the PR
+      // failed for a claim that was TRUE. Reproduced against the installed build before this edit.
+      //
+      // A single character class from each end handles quoting and punctuation in either order,
+      // which is what makes it robust to the next wrapper rather than to the two seen so far.
+      // `looksLikePath` still requires a `.` or `/`, so an over-strip cannot invent a match.
       const named = m[2]
         .split(",")
         .map((s) =>
           s
             .trim()
-            .replace(/[.\s]+$/, "")
-            .replace(/^`+|`+$/g, ""),
+            .replace(/^[`'"([\]]+/, "")
+            .replace(/[`'")\].,;:\s]+$/, ""),
         )
         .filter(looksLikePath);
       contradicted = named.some((f) => !diffFiles.includes(f));
