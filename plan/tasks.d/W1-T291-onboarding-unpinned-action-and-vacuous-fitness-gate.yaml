@@ -1,0 +1,127 @@
+- id: W1-T291
+  title: "`rmd project init --profile dotnet` ships the two things §5 forbids — an UNPINNED third-party action and an always-green architecture-fitness step — into every onboarded repo"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "MEASURED in src/lib/project-init.ts. §5 TIER 1 states the rule without qualification —
+    'Pinned action SHAs, never tags — uses org/action@<40-char-sha>; a moved tag is a supply-chain
+    vector' (MASTER-PLAN.md:1519) — and §5A:1587 says the stack rmd project init scaffolds is
+    'SHA-pinned, least-privilege'. The dotnet profile violates both on the ONBOARDING OUTPUT PATH:
+    project-init.ts:111 defines SETUP_DOTNET_UNPINNED = actions/setup-dotnet@v4 with a TODO(operator)
+    comment, emitted at :399 into every generated ci.yml. Nine sibling refs at :98-105 are
+    SHA-pinned; this one is not. THE REPO EATS THIS GATE ITSELF (W1-T66 pinned its own
+    semgrep reference rather than accept a moving ref — DECISIONS.md:182-184), so shipping the
+    unpinned form to onboarded repos inverts 'the harness eats first' (§5:1573-1575).
+    SECOND DEFECT, SAME FILE. project-init.ts:409-413 emits an 'Architecture fitness (placeholder)'
+    step whose whole body is two echoes, one of which literally reads 'This placeholder always
+    succeeds'. It is an ACTIVE-BUT-VACUOUS gate — it reports GREEN while asserting NOTHING until an
+    operator hand-wires NetArchTest (the stub at :248-265, advertised as a real fitness_rules entry
+    by fitnessRuleDescription at :413). §5 TIER 2 already names this class as the thing gates exist
+    to prevent — 'Green tests that kill no mutants are theater' (:1533) and '0 violations from a
+    fresh strict gate is suspicious until falsified' (:1540). A green fitness check that asserts
+    nothing is worse than an absent one, because .remudero/principles.yaml tells the operator a
+    fitness rule is ARMED.
+    WHY THE EXISTING PLAN DOES NOT COVER IT: W1-T27 (plan/tasks.yaml:6992) specifies the generator
+    and its acceptance asserts the workflow/config SET is complete — it never asserts any generated
+    ref is pinned or any generated step is falsifiable, so both defects pass its fixtures today.
+    W1-T66 hardened remudero's OWN workflows only. Grepped plan/tasks.yaml, every plan/tasks.d shard,
+    LEARNINGS.md and DECISIONS.md: no task, learning or decision covers the generated output.
+    THE STANDING JUSTIFICATION IS STALE, AND SAYING SO IS PART OF THE FILING. The :106-110 comment
+    argues an unverified pin is worse than an honest gap because remudero ships no .NET and has no
+    fleet-verified SHA to grep. That reasoning is sound about INVENTING a SHA and unsound as a
+    permanent resting state — a tag can be resolved to its commit from upstream and recorded, which
+    is how the :98-105 pins were established in the first place. It is also now demonstrably
+    decaying: actions/setup-dotnet is at v5.2.0 with v6 released 2026-07-20, so @v4 is a moving tag
+    that is TWO MAJORS stale, and every repo onboarded since inherits it."
+  design: |
+    TWO DEFECTS, ONE FILE, ONE PR. Both are on the generated-output path; neither touches remudero's
+    own workflows.
+
+    (A) PIN setup-dotnet. Resolve the chosen release tag to its commit from upstream and record it in
+    the exact shape the siblings at :98-105 use — `actions/setup-dotnet@<40-char-sha> # vX.Y.Z` —
+    replacing SETUP_DOTNET_UNPINNED and its :106-110 justification comment. RESOLVE, DO NOT INVENT:
+    read the tag's commit (e.g. `gh api repos/actions/setup-dotnet/git/ref/tags/vX.Y.Z`) and state
+    the resolved sha + release version in the PR body so the reviewer can re-resolve it. If the pin
+    moves the major off v4, CHECK THE INPUTS before bumping — `dotnet-version: "8.0.x"` at :401 is
+    the generated caller and a major bump that changes input names ships a broken ci.yml to every
+    onboarded repo. Pinning the v4 line's own tip is an acceptable outcome if a bump is not
+    separately justified; an unpinned ref is not.
+
+    (B) MAKE THE FITNESS PLACEHOLDER HONEST — it must stop reporting GREEN while asserting nothing.
+    IT MUST ALSO NOT HARD-FAIL A FRESH REPO: blocking onboarding on a rule set nobody has authored
+    is the failure the :253-254 comment correctly avoided, and re-introducing it is not the fix.
+    The honest shapes are ABSENCE or SKIP, not success. Preferred: for the dotnet profile do not emit
+    a fake fitness step at all, and record the gap where the operator actually reads it — the
+    generated .remudero/principles.yaml entry (fitnessRuleDescription, :413) must say the rule is
+    UNARMED/not yet wired rather than describing it as an enforced contract, and the command's
+    printed manual next-steps must name wiring NetArchTest as a step.
+    TRAP, STATED — DO NOT TRADE A FALSE GREEN FOR A DEADLOCK. §5's CI mechanics (MASTER-PLAN.md:1554-
+    1558) are explicit that a skipped required check deadlocks merge forever, which is why the
+    generated stack keys protection on the single always-reporting ci-gate aggregator. So before
+    dropping or skipping the generated depcruise job, READ the generated aggregator's needs[] and its
+    result-checking expression: an aggregator that treats a skipped or absent sub-job as failure turns
+    this fix into a permanent CI-red on every fresh dotnet repo. Whichever shape is chosen, prove BOTH
+    that no generated step reports success while asserting nothing AND that the generated aggregator
+    still reports on a fresh dotnet repo.
+
+    EXPLICITLY NOT IN SCOPE: the ts/python profiles' pins or fitness configs (they are pinned and
+    have real rules), remudero's own workflows, changing the branch-protection contexts, and
+    authoring an actual NetArchTest rule set for onboarded repos.
+
+    WHERE THE TESTS GO: test/project-init.test.ts, the generator's OWN test file — not a new
+    test/project-init-dotnet.test.ts. That file already fixtures the dotnet profile (the
+    EXPECTED_ARCH_FITNESS_FILE/EXPECTED_STRICT_CONFIG_FILE tables at :130-142 and the
+    KNOWN_PROFILES loop at :144) and already asserts the generated aggregator's needs[] at :64,
+    which is exactly the fixture (B) has to extend. Both new assertions read the same
+    buildProjectInit payload the existing cases read; a second file would fork that fixture setup.
+  acceptance:
+    - claim: "the generated dotnet ci.yml references setup-dotnet by 40-char SHA — no moving tag, no TODO(operator) deferral"
+      proof: "unit test: test/project-init.test.ts"
+    - claim: "no step in any generated workflow reports success while asserting nothing, and the generated dotnet stack still reports green-not-deadlocked on a fresh repo with no fitness rules authored"
+      proof: "unit test: test/project-init.test.ts"
+    - claim: "the generated .remudero/principles.yaml describes the dotnet fitness rule as unarmed rather than as an enforced contract"
+      proof: "unit test: test/project-init.test.ts"
+    - claim: "the pinned dotnet action ref is a named constant on the generator's dotnet path"
+      proof: "grep: SETUP_DOTNET_PINNED in src/lib/project-init.ts"
+    - claim: "the existing project-init fixtures still pass unchanged for the ts and python profiles"
+      proof: "unit test: test/project-init.test.ts"
+  risk: medium
+  origin: feedback#fb-1784732686801-a1d4df
+  plan_refs: ["§5", "§5A"]
+  files: [src/lib/project-init.ts, test/project-init.test.ts]
+  status: queued
+  attempts: 0
+  note: "Filed from feedback fb-1784732686801-a1d4df (cli, 2026-07-22), which reported both defects with
+    falsifying greps — `grep -n 'setup-dotnet@v4' src/lib/project-init.ts` and `grep -n 'always succeeds'
+    src/lib/project-init.ts` — and both still match at filing time.
+    verify:auto — the whole surface is generated text asserted against fixtures, exactly as W1-T27's own
+    acceptance does it; no live repo required.
+    RULE 19 / #588 MERITS TEST, RUN AFTER lint-plan FLAGGED THIS TASK (sizing, block). The linter
+    counted TWO subsystems — `project-init` and `project-init-dotnet` — because `subsystemsOf` keys
+    on a path's module stem and folds `test/<x>.test.ts` into `<x>` (task-linter.test.ts:55-58).
+    The second stem was NOT a second subsystem: it was a new test file I named after the PROFILE
+    instead of after the MODULE under test, so `test/project-init-dotnet.test.ts` minted a phantom
+    module id for a task whose only product file is src/lib/project-init.ts. Fixed at the root by
+    putting the assertions in the generator's own test file; files: is now one module + its
+    co-located test, the 1-subsystem shape W1-T92 ACCEPTANCE 1 pins (task-linter.test.ts:92-100).
+    NEITHER PRESCRIBED BRANCH WAS TAKEN, AND WHY. Decompose: impossible and dishonest here — both
+    defects are edits to the SAME file (:111 and :409-413), so 'one task per subsystem' would have
+    to split one file's diff across two PRs with a depends_on spine invented to sequence them, and
+    the second task would own no product file at all. Raise to risk:high: that would launder a test
+    filename into a risk signal and contradict this note's own sizing argument; the change did not
+    get riskier because I renamed a test. The honest move was to delete the false boundary.
+    risk:medium — ONE module by Rule 19's count, and it is generator output rather than a dispatch or
+    spend path. It argues UP because the output is inherited by every repo onboarded afterward and a
+    broken generated ci.yml is discovered on someone else's repo, and DOWN because nothing already
+    onboarded is touched by this change; medium is the honest middle.
+    budget_usd 60 — the pin is a constant swap; the cost is (B)'s aggregator interaction and its fixture.
+    NOT A REGRESSION OF THE :106-110 REASONING — that comment is right that an INVENTED pin is worse than
+    an honest gap. This task resolves the tag from upstream instead of inventing, which is the option the
+    comment did not take.
+    BOOKKEEPING SIGHTED, NOT FIXED: W1-T27 reads `status: queued` / `attempts: 0` in plan/tasks.yaml
+    although project-init.ts ships — same class as LEARNINGS.md:385. Left alone deliberately; this task
+    does not touch W1-T27's record.
+    NO depends_on: the generator exists in the tree today."
