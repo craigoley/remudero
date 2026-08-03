@@ -103,12 +103,14 @@ const CODEQL_ANALYZE = "github/codeql-action/analyze@99df26d4f13ea111d4ec1a7ddde
 const CODEQL_UPLOAD_SARIF = "github/codeql-action/upload-sarif@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0";
 const OSV_REUSABLE = "google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8";
 const DEPENDENCY_REVIEW = "actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0";
-// Not used anywhere in remudero's own workflow set (remudero ships no .NET code), so there is no
-// fleet-verified SHA to reuse here the way the refs above were grepped from real usage. Pinning an
-// UNVERIFIED SHA would be worse than an honest gap: it could silently pin a malicious or simply
-// wrong commit. The dotnet profile's generated ci.yml therefore uses the moving major-version tag
-// and calls this out explicitly so the operator pins it themselves before the workflow goes live.
-const SETUP_DOTNET_UNPINNED = "actions/setup-dotnet@v4  # TODO(operator): pin to a SHA — no fleet-verified pin exists for this action yet";
+// Not used anywhere in remudero's own workflow set (remudero ships no .NET code), so there was no
+// fleet-verified SHA to reuse here the way the refs above were grepped from real usage. RESOLVED
+// (not invented) from upstream instead: `gh api repos/actions/setup-dotnet/tags` on 2026-08-02
+// shows tag v4.3.1 (the current tip of the v4 line — same commit the moving `v4` tag itself
+// resolves to today) at commit 67a3573c9a986a3f9c594539f4ab511d57bb3ce9. Pinned to that tag's tip
+// rather than bumping to v5/v6: a major bump can rename inputs (this profile's ci.yml passes
+// `dotnet-version:`), and re-verifying that compatibility is out of this fix's scope — see W1-T291.
+const SETUP_DOTNET_PINNED = "actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1";
 
 // ── Per-profile spec: ecosystem, architecture-fitness tool, strict config, CI steps ──────────────
 
@@ -135,6 +137,14 @@ interface ProfileSpec {
   depcruiseSteps: () => string;
   /** One-line description of the fitness rule, written into `.remudero/principles.yaml`'s `fitness_rules[]`. */
   fitnessRuleDescription: string;
+  /**
+   * Whether `depcruiseSteps()` actually ASSERTS something (a real dependency-cruiser/import-linter
+   * run that can fail) vs. is an unwired no-op that merely reports a green check-run so the
+   * required `depcruise` context still registers (W1-T291: a step that reports success while
+   * asserting nothing is worse than an absent one — the honest signal lives here, not in a fake
+   * pass). Written into `.remudero/principles.yaml`'s `fitness_rules[].armed`.
+   */
+  fitnessArmed: boolean;
 }
 
 function tsArchFitnessContent(): string {
@@ -316,6 +326,7 @@ const PROFILES: Record<Profile, ProfileSpec> = {
       `      - name: dependency-cruiser fitness rules\n` +
       `        run: npx --yes dependency-cruiser src --config .dependency-cruiser.cjs\n`,
     fitnessRuleDescription: "dependency-cruiser layering rule (.dependency-cruiser.cjs) — see forbidden[] for the enforced layers.",
+    fitnessArmed: true,
   },
   "ts-web": {
     ecosystem: "npm",
@@ -350,6 +361,7 @@ const PROFILES: Record<Profile, ProfileSpec> = {
       `      - name: dependency-cruiser fitness rules\n` +
       `        run: npx --yes dependency-cruiser src --config .dependency-cruiser.cjs\n`,
     fitnessRuleDescription: "dependency-cruiser layering rule (.dependency-cruiser.cjs) — see forbidden[] for the enforced layers.",
+    fitnessArmed: true,
   },
   python: {
     ecosystem: "pip",
@@ -382,6 +394,7 @@ const PROFILES: Record<Profile, ProfileSpec> = {
       `      - name: import-linter fitness contracts (.importlinter)\n` +
       `        run: lint-imports\n`,
     fitnessRuleDescription: "import-linter contract (.importlinter) — see [importlinter:contract:*] sections for the enforced layers.",
+    fitnessArmed: true,
   },
   dotnet: {
     ecosystem: "nuget",
@@ -396,7 +409,7 @@ const PROFILES: Record<Profile, ProfileSpec> = {
     ciSteps: () =>
       `      - uses: ${CHECKOUT}\n` +
       `      - name: Setup .NET\n` +
-      `        uses: ${SETUP_DOTNET_UNPINNED}\n` +
+      `        uses: ${SETUP_DOTNET_PINNED}\n` +
       `        with:\n` +
       `          dotnet-version: "8.0.x"\n` +
       `      - name: Restore\n` +
@@ -405,12 +418,20 @@ const PROFILES: Record<Profile, ProfileSpec> = {
       `        run: dotnet build --no-restore /warnaserror\n` +
       `      - name: Test\n` +
       `        run: dotnet test --no-build\n`,
+    // UNARMED, NOT a fake pass (W1-T291): this step must not claim to verify anything it doesn't.
+    // It still runs UNCONDITIONALLY (no `if:`, no path filter) — the `depcruise` job name is in
+    // ci-gate.yml's REQUIRED list, and a required check-run that goes silently ABSENT (rather than
+    // reporting any terminal conclusion) is exactly the deadlock class this generated stack's
+    // single-aggregator pattern exists to avoid (see buildCiGateYml's header comment). So the job
+    // stays; only the dishonest "always succeeds" framing is removed.
     depcruiseSteps: () =>
-      `      - name: Architecture fitness (placeholder — see architecture-fitness.stub.cs)\n` +
+      `      - name: Architecture fitness — UNARMED (see architecture-fitness.stub.cs)\n` +
       `        run: |\n` +
-      `          echo "No architecture-fitness test project wired yet — see architecture-fitness.stub.cs for the suggested NetArchTest.Rules setup."\n` +
-      `          echo "This placeholder always succeeds so onboarding a fresh repo isn't blocked on a rule set nobody authored yet."\n`,
-    fitnessRuleDescription: "NetArchTest placeholder (architecture-fitness.stub.cs) — not yet a real rule; see the stub's suggested contract.",
+      `          echo "No architecture-fitness rule set has been authored yet for this repo."\n` +
+      `          echo "This step intentionally asserts NOTHING yet — it exists only so the required 'depcruise' check-run still reports, instead of going absent and deadlocking merges."\n` +
+      `          echo "See architecture-fitness.stub.cs for the suggested NetArchTest.Rules contract, and .remudero/principles.yaml's fitness_rules[].armed (false) for the operator-facing signal."\n`,
+    fitnessRuleDescription: "NetArchTest — NOT YET ARMED: architecture-fitness.stub.cs is a suggested contract, not an enforced one; depcruise.yml's step asserts nothing until it is wired to a real `dotnet test` run.",
+    fitnessArmed: false,
   },
 };
 
@@ -788,7 +809,7 @@ function buildPrinciplesYaml(profile: Profile, baselines: Baselines): string {
     complexity: {
       max_cyclomatic: 15,
     },
-    fitness_rules: [{ name: spec.archFitnessFile, description: spec.fitnessRuleDescription }],
+    fitness_rules: [{ name: spec.archFitnessFile, description: spec.fitnessRuleDescription, armed: spec.fitnessArmed }],
     security_profile: {
       codeql: true,
       osv_scanner: true,
