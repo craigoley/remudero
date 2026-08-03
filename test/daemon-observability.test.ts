@@ -54,7 +54,16 @@ test("falsifier: a marker line written via writeSyncLine to a real file is reada
     // not a race against however long the child happens to take to boot.
     let sawMarkerWhileAlive = false;
     let exitedBeforeMarkerSeen = false;
-    for (let i = 0; i < 40; i++) {
+    // POLL BUDGET, not hold time, is what made this flaky (5+ CI reds on 2026-08-02/03). The child
+    // must boot `tsx` and resolve run-task.ts BEFORE it writes the marker; under CI load that boot
+    // alone can exceed the old 40x50ms = 2s budget, so the loop expired before the marker existed
+    // and the test failed having observed nothing. 200 iterations = 10s tolerates a slow boot.
+    //
+    // This costs NOTHING in the common case: the loop breaks the moment it sees the marker, so a
+    // fast boot still finishes in ~1 iteration. `holdMs` is deliberately unchanged — it only has to
+    // outlast one 50ms poll gap, which 1500ms already does by 30x, and lengthening it would slow
+    // every run for no added safety.
+    for (let i = 0; i < 200; i++) {
       await new Promise((r) => setTimeout(r, 50));
       const stillAlive = child.exitCode === null;
       const content = existsSync(outPath) ? readFileSync(outPath, "utf8") : "";
