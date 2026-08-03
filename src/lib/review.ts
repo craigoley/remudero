@@ -1740,13 +1740,19 @@ export interface MergedClaimAuditReport {
 /** Plain-language cause for a {@link MergedClaimFinding}, read off the SAME
  *  {@link ProofExecOutcome}/{@link ProofSkipReason} pair {@link judgeCriterion} already
  *  computed — never a second, independently-worded classification that could disagree
- *  with the executor's own verdict. */
+ *  with the executor's own verdict.
+ *
+ *  NOTE on `"executed_stale"`: {@link auditMergedTaskClaims} calls {@link judgeCriterion}
+ *  with an `execCtx` that never carries a `baseCwd` (there is no single, well-defined
+ *  "PR base" for an already-merged task audited standalone against the current
+ *  checkout — {@link preexistingProofHits}'s own doc says it always returns `false`,
+ *  never stale, when `baseCwd` is absent). That makes `"executed_stale"` structurally
+ *  unreachable through THIS caller, so it is intentionally folded into the same
+ *  generic `default` wording below rather than carrying a dedicated, untestable case. */
 function describeUnresolvedOrFailing(proofExec: ProofExecOutcome, proofSkip: ProofSkipReason | undefined): string {
   switch (proofExec) {
     case "executed_fail":
       return "proof executed and FAILED against the current checkout";
-    case "executed_stale":
-      return "proof passes but also matches the merge-base — does not discriminate done from not-done";
     case "exec_error":
       return "proof named a whitelisted check that failed to execute (timeout, spawn error, or missing target)";
     default:
