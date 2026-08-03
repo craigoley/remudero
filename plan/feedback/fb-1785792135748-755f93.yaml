@@ -1,0 +1,23 @@
+id: fb-1785792135748-755f93
+ts: 2026-08-03T21:22:15.748Z
+raw: "ACCEPTANCE BLOCK: THE REVIEWER'S PATH MAY PARSE NARROWER THAN
+  parseAcceptanceBlock — during #1232 an agent's two-line Acceptance block did
+  not resolve, and rewriting it to pipe form worked. But the agent could not
+  reproduce the narrowing: parseAcceptanceBlock handles the two-line form in
+  full-body context, and parseWhitelistedProof accepts all four shapes. So
+  something on the CI reviewer's path resolves criteria differently from
+  reviewCommand. This is the same shape as W1-T309's premise — a proof that
+  certifies against a seam the command never reaches. CONSEQUENCE IF REAL: every
+  contributor following the DOCUMENTED two-line form silently produces
+  unresolvable criteria, and the review reports an unmet claim rather than a
+  parse failure, so the cause is never visible. RECON: trace the
+  criteria-resolution path the CI reviewer actually takes and compare it to
+  reviewCommand's; establish whether both call parseAcceptanceBlock with the
+  same input, and if not, where the input differs. Then say whether the
+  documentation or the parser is wrong. Falsifying check: if both paths call the
+  same function on the same input, the #1232 observation was a body-formatting
+  error and there is nothing here."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
