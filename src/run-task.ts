@@ -7130,6 +7130,12 @@ async function drainCommand(
   };
   const opts: DrainOpts = curatedSelection ? applyCuratedSelection(baseOpts, curatedSelection) : baseOpts;
   const config = deps.config ?? loadConfig();
+  // W1-T290: the headroom governor switch (operator ruling fb-1784894405468-a4153e), the
+  // SAME resolved posture daemonCommand passes as opts.headroomEnabled below — resolved
+  // HERE so the drain's new bounded-degraded-on-unreadable ceiling (lib/drain.ts) never
+  // fires on a host that opted out via config `headroom.enabled: false`. Unwired before
+  // this task: the ceiling did not exist, so nothing needed to consult the switch.
+  opts.headroomEnabled = resolveHeadroomEnabled(config);
   const planPath = deps.planPath ?? join(repoRoot, "plan", "tasks.yaml");
   const ledgerPath = ledgerPathFor(config);
   const statusPath = join(config.root, "state", "status.json");

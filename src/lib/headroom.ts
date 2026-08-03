@@ -168,6 +168,23 @@ export function parseUsage(text: string): UsageSnapshot {
 export const HEADROOM_LIMIT_PCT = 95;
 
 /**
+ * Default: CONSECUTIVE unreadable `/usage` reads a headroom-gated dispatch loop tolerates
+ * before escalating to its own terminal degraded posture (daemon.ts: the in-process idle
+ * heartbeat; drain.ts, W1-T290: a distinguishable terminal stop). A single blip (or a
+ * handful) is a transient read failure, not evidence the budget is exhausted — but an
+ * unreadable budget that never stops dispatching is the fail-open polarity at the spending
+ * layer (recon R-7: the real read is unavailable ~78% of the time in the live ledger, so an
+ * unconditional fail-closed-on-first-miss would halt the fleet most of the time — hence a
+ * BOUNDED allowance, not an immediate halt). ONE constant, shared by both consumers, so
+ * their ceilings cannot drift apart — daemon.ts's `DEFAULT_UNREADABLE_DEGRADED_LIMIT` and
+ * drain.ts's own read of this export both resolve to this same number; each consumer tracks
+ * its OWN consecutive-count state (this module does no I/O and holds no state itself), and a
+ * single successful read resets that count to zero. POLICY DATA (rule 2) — W1-T252/W1-T253's
+ * policy file is its eventual home; this literal is the fs-free fallback until then.
+ */
+export const UNREADABLE_DEGRADED_LIMIT = 3;
+
+/**
  * Is any window (the 5-hour session or a weekly cap) at/near its limit? Returns
  * the tightest offending window + its reset, or `null` when there is headroom.
  * PURE — the drain calls this before each iteration so an unattended burst never
