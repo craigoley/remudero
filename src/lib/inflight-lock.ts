@@ -2,6 +2,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, 
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { defaultIsPidAlive } from "./drain-lock.js";
+import { reclaimStaleLock } from "./fs-race-safe.js";
 
 /**
  * PER-TASK IN-FLIGHT LOCK (DIAGNOSIS.md, diag/drain-sequential-await).
@@ -41,11 +42,21 @@ export function inflightLockPath(inflightDir: string, taskId: string): string {
   return join(inflightDir, `${taskId}.lock`);
 }
 
+/** Parse raw lock file contents into a holder record, or `null` for garbage/unshaped JSON
+ *  (shared with {@link reclaimStaleLock}'s `parseHolder`, so the acquire loop and the
+ *  read-only peek below apply the identical "what counts as a valid holder" rule). */
+export function parseInflightLockInfo(raw: string): InflightLockInfo | null {
+  try {
+    const o = JSON.parse(raw);
+    return typeof o?.pid === "number" && typeof o?.run_id === "string" ? (o as InflightLockInfo) : null;
+  } catch {
+    return null;
+  }
+}
+
 export function readInflightLock(inflightDir: string, taskId: string): InflightLockInfo | null {
   try {
-    const o = JSON.parse(readFileSync(inflightLockPath(inflightDir, taskId), "utf8"));
-    if (typeof o?.pid === "number" && typeof o?.run_id === "string") return o as InflightLockInfo;
-    return null;
+    return parseInflightLockInfo(readFileSync(inflightLockPath(inflightDir, taskId), "utf8"));
   } catch {
     return null; // missing, unreadable, or garbage → no valid holder
   }
@@ -57,6 +68,13 @@ export interface AcquireInflightOpts {
   info?: Partial<Omit<InflightLockInfo, "run_id">>;
   /** Injectable liveness probe (tests). Defaults to {@link defaultIsPidAlive}. */
   isPidAlive?: (pid: number) => boolean;
+  /** Called when a reclaim attempt loses the race (see {@link reclaimStaleLock}). Defaults
+   *  to a `console.error` trace; tests override it to observe the event directly. */
+  onLostReclaim?: (detail: { lockPath: string; reason: string }) => void;
+  /** TEST-ONLY seam forwarded to {@link reclaimStaleLock}'s `beforeDelete` — lets a test
+   *  force a second reclaimer's whole acquire to complete inside this call's reclaim
+   *  window. Never set outside tests. */
+  __beforeReclaimDelete?: () => void;
 }
 
 export interface InflightLockHandle {
@@ -69,8 +87,11 @@ export interface InflightLockHandle {
 /**
  * Acquire the in-flight lock for `taskId`, or throw {@link InflightLockError} if a LIVE
  * run of the same task holds it. A stale lock (holder pid dead, or the file is
- * unreadable/garbage) is reclaimed. Creation is atomic (`O_EXCL`) so two racing
- * acquirers of the same task cannot both win.
+ * unreadable/garbage) is reclaimed via {@link reclaimStaleLock}. Creation is atomic
+ * (`O_EXCL`), so two racing acquirers hitting the create fresh cannot both win it; the
+ * RECLAIM of a stale holder is separately made safe by conditioning its delete on the
+ * lock's on-disk identity, so two reclaimers of the SAME dead lock cannot both come away
+ * believing they hold it either (W1-T289).
  */
 export function acquireInflightLock(
   inflightDir: string,
@@ -95,13 +116,15 @@ export function acquireInflightLock(
       break;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-      const held = readInflightLock(inflightDir, taskId);
-      if (held && isAlive(held.pid)) throw new InflightLockError(taskId, held);
-      try {
-        unlinkSync(lockPath); // stale (dead pid / garbage) → clear and re-create
-      } catch {
-        // another actor cleared it concurrently; retry the create
-      }
+      const result = reclaimStaleLock(lockPath, {
+        parseHolder: parseInflightLockInfo,
+        isStale: (held) => !isAlive(held.pid),
+        onLostReclaim: opts.onLostReclaim,
+        beforeDelete: opts.__beforeReclaimDelete,
+      });
+      if (result.outcome === "live") throw new InflightLockError(taskId, result.holder);
+      // "missing" | "reclaimed" | "lost" → loop back and retry the atomic create on
+      // whatever is (or isn't) there now.
     }
   }
 
@@ -160,10 +183,21 @@ export interface InflightSweepResult {
  *
  * A lock whose file cannot be parsed is treated as reapable: an unreadable lock names no live
  * holder, and leaving it would preserve exactly the misleading state this exists to remove.
+ *
+ * THE READ AND THE UNLINK GO THROUGH {@link reclaimStaleLock} (W1-T289): a real acquire can
+ * land on the SAME task between this sweep's read and its unlink, reclaim the dead lock
+ * itself, and write a fresh LIVE one — the old shape's unconditional unlink would then
+ * delete that live lock. Conditioning the delete on the lock's on-disk identity means the
+ * sweep detects that hand-off and leaves the fresh lock alone instead of reaping it.
  */
 export function sweepStaleInflightLocks(
   inflightDir: string,
-  opts: { isPidAlive?: (pid: number) => boolean } = {},
+  opts: {
+    isPidAlive?: (pid: number) => boolean;
+    onLostReclaim?: (detail: { lockPath: string; reason: string }) => void;
+    /** TEST-ONLY seam forwarded to {@link reclaimStaleLock}'s `beforeDelete`. */
+    __beforeReclaimDelete?: () => void;
+  } = {},
 ): InflightSweepResult {
   const isAlive = opts.isPidAlive ?? defaultIsPidAlive;
   const result: InflightSweepResult = { reaped: [], kept: [] };
@@ -172,18 +206,19 @@ export function sweepStaleInflightLocks(
   for (const entry of readdirSync(inflightDir)) {
     if (!entry.endsWith(".lock")) continue;
     const taskId = entry.slice(0, -".lock".length);
-    const held = readInflightLock(inflightDir, taskId);
-    if (held && isAlive(held.pid)) {
-      result.kept.push(taskId);
-      continue;
-    }
-    try {
-      unlinkSync(inflightLockPath(inflightDir, taskId));
+    const lockPath = inflightLockPath(inflightDir, taskId);
+    const reclaim = reclaimStaleLock(lockPath, {
+      parseHolder: parseInflightLockInfo,
+      isStale: (held) => !isAlive(held.pid),
+      onLostReclaim: opts.onLostReclaim,
+      beforeDelete: opts.__beforeReclaimDelete,
+    });
+    if (reclaim.outcome === "reclaimed") {
       result.reaped.push(taskId);
-    } catch {
-      // Raced with a real acquire, or removed by another actor between the read and the
-      // unlink. Either way the lock is no longer ours to reason about — leave it counted
-      // as kept rather than claiming a reap that did not happen.
+    } else {
+      // "live" (a real holder), "missing" (already gone), or "lost" (raced with a real
+      // acquire that reclaimed it first) — none of these is a reap this sweep performed,
+      // so count it as kept rather than claiming one that did not happen.
       result.kept.push(taskId);
     }
   }

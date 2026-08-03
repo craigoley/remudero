@@ -1,4 +1,4 @@
-import { closeSync, openSync, readFileSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readFileSync, statSync, unlinkSync } from "node:fs";
 
 /**
  * The `js/file-system-race`-safe idiom this repo has now shipped for a state file that is
@@ -108,4 +108,177 @@ export function readFileIfExists(path: string): string | undefined {
     if (e && typeof e === "object" && "code" in e && (e as { code: unknown }).code === "ENOENT") return undefined;
     throw e;
   }
+}
+
+// ── reclaimStaleLock: the ONE shared "read a dead-holder lock and clear it" idiom ──
+//
+// W1-T289. Four call sites (inflight-lock.ts, drain-lock.ts, review.ts's mutex, and the
+// boot sweep in inflight-lock.ts) each did the same shape: read a lock, decide its holder
+// is dead, then `unlinkSync(lockPath)` UNCONDITIONALLY. The create half of these locks is
+// genuinely atomic (`O_EXCL`), but that unlink is a SEPARATE syscall conditioned on
+// NOTHING — not on the file still being the same dead lock that was just read. Two
+// reclaimers of one dead lock could both decide "stale"; the first to unlink+recreate wins
+// a FRESH LIVE lock, and the second's unconditional unlink then deletes THAT, not the dead
+// lock it actually judged — so both come away believing they hold it.
+
+/** A file's on-disk identity at the moment it was read — `dev`+`ino` from `fstat` on the
+ *  descriptor used for that read. Two of these being equal proves "this is still exactly
+ *  the inode I read", which is what {@link reclaimStaleLock} conditions its delete on. */
+export interface FileIdentity {
+  dev: number;
+  ino: number;
+}
+
+export interface ReclaimStaleLockSyscalls extends FsRaceSyscalls {
+  fstatSync: typeof fstatSync;
+  statSync: typeof statSync;
+  unlinkSync: typeof unlinkSync;
+}
+
+const defaultReclaimSyscalls: ReclaimStaleLockSyscalls = {
+  openSync,
+  readFileSync,
+  closeSync,
+  fstatSync,
+  statSync,
+  unlinkSync,
+};
+
+export type ReclaimStaleLockResult<Holder> =
+  | { outcome: "missing" }
+  | { outcome: "live"; holder: Holder }
+  | { outcome: "reclaimed" }
+  | { outcome: "lost" };
+
+export interface ReclaimStaleLockOpts<Holder> {
+  /** Parse raw lock file contents into a holder record, or `null` for missing/garbage
+   *  (garbage is treated the same as "no valid holder" everywhere this is called). */
+  parseHolder: (raw: string) => Holder | null;
+  /** True when `holder` names a dead process — safe to reclaim. */
+  isStale: (holder: Holder) => boolean;
+  /** Called whenever a reclaim attempt could NOT complete: this call lost the race to
+   *  another reclaimer (the identity check found the file already changed, or it vanished
+   *  outright). Defaults to `console.error` — the same "leave a visible trace rather than
+   *  swallow it" precedent `ledger.ts` uses for its own write failure — so the empty
+   *  catches this primitive replaces stop being silent. Never throws itself. */
+  onLostReclaim?: (detail: { lockPath: string; reason: string }) => void;
+  /** TEST-ONLY seam: invoked once the read has judged the current holder stale, BEFORE the
+   *  delete-time identity check runs — exactly the window the TOCTOU lived in. A test uses
+   *  it to run a second reclaimer's ENTIRE flow to completion first (so it unlinks and
+   *  recreates a fresh live lock), then lets this call proceed: its identity check must
+   *  then find the path no longer matches what it read, and refuse to delete it. */
+  beforeDelete?: () => void;
+}
+
+function defaultOnLostReclaim(detail: { lockPath: string; reason: string }): void {
+  console.error(`[reclaimStaleLock] ${detail.lockPath}: ${detail.reason}`);
+}
+
+/**
+ * Safely reclaim `lockPath` if, and only if, the holder read from it is confirmed stale
+ * AND the file at `lockPath` is STILL the exact inode that read came from at the moment of
+ * deletion. This is the shared primitive behind every "read a lock, and if its holder is
+ * dead, clear it" call site: {@link import("./inflight-lock.js").acquireInflightLock},
+ * {@link import("./drain-lock.js").acquireDrainLock},
+ * {@link import("./review.js").acquireReviewStatusLock}, and the boot sweep
+ * {@link import("./inflight-lock.js").sweepStaleInflightLocks}.
+ *
+ * THE FIX: the delete is conditioned on file IDENTITY, not merely on the path string. The
+ * SAME descriptor opened to do the stale-holder READ is `fstat`'d, right after the read,
+ * BEFORE it is closed — so the `{dev, ino}` captured is guaranteed to be the identity of
+ * the EXACT bytes this call judged dead, never a separately re-resolved path. Immediately
+ * before deleting, the path is `stat`'d fresh (by name, since we need to know what is
+ * THERE NOW, not what our old descriptor still points to); the unlink proceeds ONLY if
+ * `dev`+`ino` still match. If they don't — or the path is gone entirely —
+ * another actor already reclaimed (or recreated) it, so this call backs off with
+ * `{outcome: "lost"}` rather than deleting whatever is there now. The caller's own acquire
+ * loop simply retries from the top, which re-reads the CURRENT state fresh.
+ *
+ * HONEST ABOUT THE REMAINING WINDOW: `stat`-then-`unlink` is still two syscalls, not one
+ * indivisible one — POSIX `unlink(2)` has no compare-and-delete form. What remains is "a
+ * brand-new, unrelated file lands on this exact path AND is assigned the SAME (dev, ino)
+ * pair as what we just read, in between this call's final `stat` and its `unlink`" — inode
+ * reuse within a handful of in-process syscalls. That is categorically narrower than the
+ * bug this replaces, which was unconditional: ANY interleaving hit it, not only inode
+ * reuse on an already-freed inode landing back on this path in a single-digit-syscall
+ * window.
+ */
+export function reclaimStaleLock<Holder>(
+  lockPath: string,
+  opts: ReclaimStaleLockOpts<Holder>,
+  fsImpl: ReclaimStaleLockSyscalls = defaultReclaimSyscalls,
+): ReclaimStaleLockResult<Holder> {
+  const onLostReclaim = opts.onLostReclaim ?? defaultOnLostReclaim;
+
+  let readFd: number;
+  try {
+    readFd = fsImpl.openSync(lockPath, "r");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return { outcome: "missing" };
+    throw e;
+  }
+  let raw: string;
+  let readIdentity: FileIdentity;
+  try {
+    raw = fsImpl.readFileSync(readFd, "utf8") as string;
+    const st = fsImpl.fstatSync(readFd); // same fd as the read above — no re-resolve window
+    readIdentity = { dev: st.dev, ino: st.ino };
+  } finally {
+    fsImpl.closeSync(readFd);
+  }
+
+  const holder = opts.parseHolder(raw);
+  if (holder !== null && !opts.isStale(holder)) {
+    return { outcome: "live", holder };
+  }
+
+  // Stale (dead pid) or garbage/unparseable — either way, reclaimable. TEST SEAM: let a
+  // test run a second reclaimer's whole flow here, before this call's identity check.
+  opts.beforeDelete?.();
+
+  // IDENTITY IS `dev`+`ino` **AND THE BYTES** — dev+ino ALONE DOES NOT CLOSE THIS RACE.
+  // Measured on ext4 (this repo's CI and Linux hosts): unlink followed immediately by a create
+  // in the same directory REUSES the just-freed inode — a probe writing, unlinking and
+  // rewriting one path read `ino=1957993` both times. So in the exact scenario this function
+  // exists for (reclaimer A unlinks and recreates before B reaches its delete), B's dev+ino
+  // check matches and B deletes A's LIVE lock: the TOCTOU, still open, with a check in front
+  // of it that looks like a fix. The lock's own bytes carry the holder (a pid), so a
+  // replacement writes different content; comparing them detects the swap that the inode
+  // number cannot. Read through a single fd, like the stale read above, so the content and
+  // the identity describe the same open file rather than two path re-resolutions.
+  let deleteIdentity: FileIdentity;
+  let deleteRaw: string;
+  try {
+    const st = fsImpl.statSync(lockPath);
+    deleteIdentity = { dev: st.dev, ino: st.ino };
+    const delFd = fsImpl.openSync(lockPath, "r");
+    try {
+      deleteRaw = fsImpl.readFileSync(delFd, "utf8") as string;
+    } finally {
+      fsImpl.closeSync(delFd);
+    }
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+    onLostReclaim({ lockPath, reason: "lock vanished between the stale read and the delete-time identity check" });
+    return { outcome: "lost" };
+  }
+
+  if (deleteIdentity.dev !== readIdentity.dev || deleteIdentity.ino !== readIdentity.ino || deleteRaw !== raw) {
+    onLostReclaim({
+      lockPath,
+      reason:
+        "the file at this path changed identity since the stale read — another actor already reclaimed or " +
+        "recreated it; refusing to delete what is there now",
+    });
+    return { outcome: "lost" };
+  }
+
+  try {
+    fsImpl.unlinkSync(lockPath);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+    onLostReclaim({ lockPath, reason: "lock vanished between the identity check and the unlink" });
+    return { outcome: "lost" };
+  }
+  return { outcome: "reclaimed" };
 }

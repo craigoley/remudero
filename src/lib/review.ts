@@ -4,6 +4,7 @@ import { homedir, hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { classifyFailure } from "./classify.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
+import { reclaimStaleLock } from "./fs-race-safe.js";
 import { appendLedger } from "./ledger.js";
 import { isInPlanScope } from "./plan-architect.js";
 import { visibleCriteria, type AcceptanceCriterion } from "./plan.js";
@@ -3830,13 +3831,14 @@ export class ReviewStatusLockTimeoutError extends Error {
   }
 }
 
-function readReviewStatusLock(lockPath: string): ReviewStatusLockInfo | null {
+/** Parse raw lock file contents into a holder record, or `null` for garbage/unshaped JSON
+ *  (shared with {@link reclaimStaleLock}'s `parseHolder`). */
+function parseReviewStatusLockInfo(raw: string): ReviewStatusLockInfo | null {
   try {
-    const o = JSON.parse(readFileSync(lockPath, "utf8"));
-    if (typeof o?.pid === "number") return o as ReviewStatusLockInfo;
-    return null;
+    const o = JSON.parse(raw);
+    return typeof o?.pid === "number" ? (o as ReviewStatusLockInfo) : null;
   } catch {
-    return null; // missing, unreadable, or garbage → treat as "no valid holder"
+    return null;
   }
 }
 
@@ -3853,6 +3855,13 @@ export interface AcquireReviewStatusLockOpts {
   retryMs?: number;
   /** Give up and throw {@link ReviewStatusLockTimeoutError} after this long. */
   timeoutMs?: number;
+  /** Called when a reclaim attempt loses the race (see {@link reclaimStaleLock}). Defaults
+   *  to a `console.error` trace; tests override it to observe the event directly. */
+  onLostReclaim?: (detail: { lockPath: string; reason: string }) => void;
+  /** TEST-ONLY seam forwarded to {@link reclaimStaleLock}'s `beforeDelete` — lets a test
+   *  force a second reclaimer's whole acquire to complete inside this call's reclaim
+   *  window. Never set outside tests. */
+  __beforeReclaimDelete?: () => void;
 }
 
 export interface ReviewStatusLockHandle {
@@ -3865,11 +3874,14 @@ export interface ReviewStatusLockHandle {
  * Acquire the per-task review-status MUTEX — the SAME O_EXCL create-or-fail
  * primitive {@link import("./drain-lock.js").acquireDrainLock}/{@link
  * import("./inflight-lock.js").acquireInflightLock} use (creation is atomic,
- * so two racing acquirers cannot both win; a stale lock — holder pid dead, or
- * the file unreadable/garbage — is reclaimed), adapted from a SINGLETON
- * GUARD to a MUTEX: where those THROW immediately when a live holder is
- * found, this WAITS (bounded by `timeoutMs`) and retries — the callers here
- * are N uncoordinated posters that must all eventually run their own
+ * so two racing acquirers hitting the create fresh cannot both win it; a stale
+ * lock — holder pid dead, or the file unreadable/garbage — is reclaimed via
+ * {@link reclaimStaleLock}, whose delete is conditioned on the lock's on-disk
+ * identity, so two reclaimers of the SAME dead lock cannot both come away
+ * believing they hold it either, W1-T289), adapted from a SINGLETON GUARD to a
+ * MUTEX: where those THROW immediately when a live holder is found, this
+ * WAITS (bounded by `timeoutMs`) and retries — the callers here are N
+ * uncoordinated posters that must all eventually run their own
  * read-decide-write, never a second run of the same long-lived task that
  * should simply refuse to start.
  */
@@ -3897,17 +3909,18 @@ export async function acquireReviewStatusLock(
       break;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-      const held = readReviewStatusLock(lockPath);
-      if (held && isAlive(held.pid)) {
-        if (Date.now() >= deadline) throw new ReviewStatusLockTimeoutError(lockPath, held);
+      const result = reclaimStaleLock(lockPath, {
+        parseHolder: parseReviewStatusLockInfo,
+        isStale: (held) => !isAlive(held.pid),
+        onLostReclaim: opts.onLostReclaim,
+        beforeDelete: opts.__beforeReclaimDelete,
+      });
+      if (result.outcome === "live") {
+        if (Date.now() >= deadline) throw new ReviewStatusLockTimeoutError(lockPath, result.holder);
         await reviewStatusLockDelay(retryMs); // MUTEX: wait + retry, never throw on a live holder
         continue;
       }
-      try {
-        unlinkSync(lockPath); // stale (dead pid / garbage) → clear and loop to re-create
-      } catch {
-        // another actor may have cleared it concurrently; retry the create
-      }
+      // "missing" | "reclaimed" | "lost" → loop back and retry the atomic create.
     }
   }
 
