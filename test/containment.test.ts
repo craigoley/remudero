@@ -248,6 +248,112 @@ test("probeContainment: a genuine no-write, no-denial, non-error run still yield
   );
 });
 
+// ── W1-T292: EXPIRED copied OAuth token — a SECOND, DISTINCT credential-dead
+// signature from W1-T237's never-logged-in one. "OAuth session expired and
+// could not be refreshed" matches NEITHER CREDENTIAL_FAILURE_RE ("not logged
+// in") NOR CREDENTIAL_LOGIN_HINT_RE ("run /login"), so before this fix it fell
+// through to the generic unproven verdict — the exact misdiagnosis W1-T237
+// was built to prevent, just via a different message shape. ──────────────────
+
+test("assessContainment: credentialExpired ⇒ FAILS CLOSED with the DISTINCT spawn_credential_expired reason, never spawn_credential_failure or UNPROVEN", () => {
+  const v = assessContainment({
+    outsideWriteCreated: false,
+    osDenialSeen: false,
+    insideWriteCreated: false,
+    credentialExpired: true,
+  });
+  assert.equal(v.contained, false);
+  assert.match(v.reason, /spawn_credential_expired/);
+  assert.doesNotMatch(v.reason, /spawn_credential_failure/);
+  assert.doesNotMatch(v.reason, /UNPROVEN/);
+});
+
+test("probeContainment: a seeded error-result carrying 'OAuth session expired and could not be refreshed' (an EXPIRED copied token) yields the DISTINCT spawn_credential_expired reason, FAILS CLOSED", async () => {
+  await assert.rejects(
+    () =>
+      probeContainment({
+        settingsFile: settingsFile(ENABLED),
+        token: "expiredtok",
+        exec: async () => ({
+          transcript: "OAuth session expired and could not be refreshed",
+          outsideWriteCreated: false,
+          insideWriteCreated: false,
+          isError: true,
+        }),
+      }),
+    (e: unknown) => {
+      assert.ok(e instanceof ContainmentError);
+      const err = e as ContainmentError;
+      assert.equal(err.guard, "containment");
+      assert.equal(err.check, "spawn-credential-expired");
+      assert.equal(err.observed, "spawn_credential_expired");
+      // NOT the W1-T237 never-logged-in reason — the two symbols never collide.
+      assert.notEqual(err.check, "spawn-credential-failure");
+      assert.notEqual(err.observed, "spawn_credential_failure");
+      assert.match(err.message, /spawn_credential_expired/);
+      return true;
+    },
+  );
+});
+
+test("probeContainment: a seeded 'Not logged in · Please run /login' result still yields the UNMODIFIED W1-T237 spawn_credential_failure reason, not the new expired reason", async () => {
+  // Guards against the fix regressing W1-T237: a locked/logged-out probe (never
+  // logged in at all) must keep reporting spawn_credential_failure, not the new
+  // spawn_credential_expired symbol — the two demand different operator action
+  // (log in from scratch vs. refresh/re-mint an existing token).
+  await assert.rejects(
+    () =>
+      probeContainment({
+        settingsFile: settingsFile(ENABLED),
+        token: "lockedtok",
+        exec: async () => ({
+          transcript: "Not logged in · Please run /login",
+          outsideWriteCreated: false,
+          insideWriteCreated: false,
+          isError: true,
+        }),
+      }),
+    (e: unknown) => {
+      assert.ok(e instanceof ContainmentError);
+      const err = e as ContainmentError;
+      assert.equal(err.check, "spawn-credential-failure");
+      assert.equal(err.observed, "spawn_credential_failure");
+      assert.notEqual(err.check, "spawn-credential-expired");
+      assert.notEqual(err.observed, "spawn_credential_expired");
+      return true;
+    },
+  );
+});
+
+test("probeContainment: an UNRELATED error-result that merely mentions 'expired' (rate-limit / session-window text) is NOT mislabelled a credential expiry — falls through to genuine unproven", async () => {
+  await assert.rejects(
+    () =>
+      probeContainment({
+        settingsFile: settingsFile(ENABLED),
+        token: "ratelimittok",
+        exec: async () => ({
+          // Deliberately shares the word "expired" with the real signature but
+          // carries neither the "oauth session expired" NOR the "could not be
+          // refreshed" fragment — a rate-limit / session-window message, not an
+          // auth-dead one.
+          transcript: "rate limit exceeded: the request session window expired, please retry later",
+          outsideWriteCreated: false,
+          insideWriteCreated: false,
+          isError: true,
+        }),
+      }),
+    (e: unknown) => {
+      assert.ok(e instanceof ContainmentError);
+      const err = e as ContainmentError;
+      assert.equal(err.check, "outside-cwd-denial");
+      assert.equal(err.observed, "unproven");
+      assert.notEqual(err.observed, "spawn_credential_expired");
+      assert.notEqual(err.observed, "spawn_credential_failure");
+      return true;
+    },
+  );
+});
+
 test("probeContainment: isError alone (no credential-shaped text) does NOT trip the credential verdict — falls through to genuine unproven", async () => {
   await assert.rejects(
     () =>
