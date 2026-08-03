@@ -8,5 +8,5 @@ raw: "INSTRUMENT-CHANGES-RIDE-ALONE — coverage/measurement-instrument changes
   an instrument it just changed."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 proposal_pr: https://github.com/craigoley/remudero/pull/1178
