@@ -995,11 +995,16 @@ export function renderShellHtml(
   // an HTTP error status) once that budget elapses, rather than waiting on a request that may
   // never settle. Callers that omit it (panel/card/journey, all interactive one-shot fetches) are
   // unchanged -- this is additive, not a behavior change to every getJson call site.
-  async function getJson(path, { timeoutMs } = {}) {
+  // extraHeaders rides ON TOP of authHeaders for the one caller that needs to say something
+  // about the request itself (the recap acknowledgement below). It is a HEADER and not a query
+  // param on purpose: every /v1/status interception in the suite matches the BARE path, so a
+  // query string would slip past them -- see board.ts's RECAP_ACK_HEADER doc.
+  async function getJson(path, { timeoutMs, extraHeaders } = {}) {
     const controller = new AbortController();
     const timer = timeoutMs ? setTimeout(() => controller.abort(), timeoutMs) : undefined;
     try {
-      const res = await fetch(path, { headers: authHeaders, signal: controller.signal });
+      const headers = extraHeaders ? Object.assign({}, authHeaders, extraHeaders) : authHeaders;
+      const res = await fetch(path, { headers, signal: controller.signal });
       if (!res.ok) throw new Error(\`GET \${path} -> \${res.status}\`);
       return await res.json();
     } finally {
@@ -1621,17 +1626,28 @@ export function renderShellHtml(
     if (el) el.textContent = String(text);
   }
 
-  /** running/blocked/queued reuse the EXACT predicates summaryText/statusColorKey already use
-   *  for the SAME words elsewhere on this page (never a second, disagreeing derivation);
-   *  needs-me is latestNeedsMeRows.length -- the SAME combined set (tasks.needsHuman + feedback
-   *  grilling/proposed + inbox ready/drafting) the NEEDS ME section itself just rendered.
+  /** THE STOPPED PREDICATE, mirroring board.ts's exported isBlockedRow EXACTLY. It cannot be
+   *  imported -- this script is a string in the server module -- so it is duplicated here
+   *  deliberately and locked by a source-text test, because the strip is the number the operator
+   *  actually READS: board.ts's counts.blocked has no consumer on this page, so fixing only the
+   *  server field would have changed nothing he can see. A task with an open, unsuperseded
+   *  escalation is STOPPED even though its own status is still "queued" or "running". */
+  function isBlockedRow(t) {
+    return t.status === "blocked" || t.needsHuman === true;
+  }
+
+  /** running/queued reuse the EXACT predicates summaryText/statusColorKey already use for the
+   *  SAME words elsewhere on this page (never a second, disagreeing derivation); blocked uses
+   *  isBlockedRow above, the mirror of board.ts's; needs-me is latestNeedsMeRows.length -- the
+   *  SAME combined set (tasks.needsHuman + feedback grilling/proposed + inbox ready/drafting) the
+   *  NEEDS ME section itself just rendered, and a STRICT SUBSET of blocked by construction.
    *  merged-today/spend-today/spend-this-week come from latestSpend (GET /v1/status's "spend"
    *  field, board.ts's computeGlanceSpend) -- "…" (unknown, never a fabricated 0) until the
    *  first real snapshot has landed. */
   function renderGlanceStrip(tasks) {
     setGlanceValue("glance-running", tasks.filter((t) => t.phase).length);
     setGlanceValue("glance-needs-me", latestNeedsMeRows.length);
-    setGlanceValue("glance-blocked", tasks.filter((t) => t.status === "blocked").length);
+    setGlanceValue("glance-blocked", tasks.filter(isBlockedRow).length);
     setGlanceValue("glance-queued", tasks.filter((t) => t.status === "queued").length);
     setGlanceValue("glance-merged-today", latestSpend ? latestSpend.mergedToday : "…");
     setGlanceValue("glance-spend-today", latestSpend ? costLabel(latestSpend.spendTodayUsd) : "…");
@@ -3225,7 +3241,15 @@ export function renderShellHtml(
   async function refreshAll() {
     let statusSnap;
     try {
-      statusSnap = await getJson("/v1/status", { timeoutMs: STATUS_FETCH_TIMEOUT_MS });
+      // W1-T163 MARKER, ACKNOWLEDGED VIEWS ONLY: the x-rmd-recap-ack header tells board.ts a HUMAN
+      // is about to see this recap, and it rides on exactly the fetch whose recap this page renders
+      // (the recapRendered gate below). Every later poll omits it, so a tab left open no longer
+      // marks the evening seen three seconds at a time. The URL stays BARE "/v1/status" so every
+      // shipped page.route("**/v1/status") interception still matches it.
+      statusSnap = await getJson("/v1/status", {
+        timeoutMs: STATUS_FETCH_TIMEOUT_MS,
+        extraHeaders: recapRendered ? undefined : { "x-rmd-recap-ack": "1" },
+      });
     } catch (e) {
       handlePollFailure();
       return;
