@@ -7468,6 +7468,22 @@ export function planReloader(
       // First tick: record the boot's sha WITHOUT reloading. The plan we were handed already came
       // from this sha, so reporting a reload here would be a lie and would log a no-op every boot.
       lastSha = sha;
+      // LIVENESS HEARTBEAT, once per boot (recon-GM). `daemon.plan_reloaded` is legitimately 0 in
+      // production: the deploy supervisor restarts the daemon on ANY main move, and a plan change
+      // IS a main move — measured at +0.7min and +0.5min for the two plan changes of 2026-08-02 —
+      // so the daemon reboots with the fresh plan before its next 60s tick can observe a
+      // difference. The re-reader is therefore DORMANT BY DESIGN, not broken.
+      //
+      // But a zero could not be distinguished from "never ran". Failures were already visible
+      // (`daemon.plan_reload_failed`); success was not. This line closes that gap: it proves the
+      // probe EXECUTED and the git call SUCCEEDED, and records which plan tree the boot is pinned
+      // to — turning an unfalsifiable silence into a positive signal.
+      //
+      // BOUNDED TO ONE LINE PER BOOT. Emitting per tick would be ~1,440 rows/day of "nothing
+      // happened", which is the noise that gets a signal ignored — the failure mode this repo has
+      // already paid for elsewhere. One row per boot is enough to prove liveness and to answer
+      // "which plan was this boot running?".
+      log("daemon.plan_unchanged", { tree_sha: sha.slice(0, 12), first_tick: true });
       return null;
     }
     if (sha === lastSha) return null;

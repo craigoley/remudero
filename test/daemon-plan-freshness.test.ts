@@ -313,3 +313,48 @@ test("planReloader REAL DEFAULT: resolves the plan tree sha from the checkout, n
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+// ── recon-GM: the liveness heartbeat ────────────────────────────────────────────────
+// `daemon.plan_reloaded` is legitimately 0 in production — the deploy supervisor restarts the
+// daemon on any main move, so a plan change lands a fresh boot (+0.7min, +0.5min measured) before
+// the next tick could observe a difference. But a zero could not be told apart from "never ran".
+// Failures were already visible; success was not. These pin the signal that closes that gap.
+
+test("recon-GM: the probe emits ONE liveness heartbeat per boot, carrying the plan tree sha", () => {
+  const logged: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const r = planReloader({ isSelf: true, planPath: "/x/plan/tasks.yaml" }, false,
+    (step, extra) => logged.push({ step, extra }),
+    { treeSha: () => "abcdef1234567890", load: () => ({ tasks: [] }) as unknown as Plan })!;
+
+  assert.equal(r(), null, "first tick reloads nothing — the boot plan already came from this sha");
+  const hb = logged.filter((l) => l.step === "daemon.plan_unchanged");
+  assert.equal(hb.length, 1, "exactly one heartbeat on the first tick");
+  assert.equal(hb[0].extra?.tree_sha, "abcdef123456", "it records WHICH plan the boot is pinned to");
+});
+
+test("recon-GM: the heartbeat is BOUNDED — repeated unchanged ticks do not re-emit", () => {
+  // ~1,440 rows/day of "nothing happened" is the noise that gets a signal ignored. One per boot.
+  const logged: string[] = [];
+  const r = planReloader({ isSelf: true, planPath: "/x/plan/tasks.yaml" }, false,
+    (step) => logged.push(step),
+    { treeSha: () => "samesha0000", load: () => ({ tasks: [] }) as unknown as Plan })!;
+  for (let i = 0; i < 25; i++) assert.equal(r(), null);
+  assert.equal(
+    logged.filter((s) => s === "daemon.plan_unchanged").length,
+    1,
+    "25 unchanged ticks must still produce exactly ONE heartbeat",
+  );
+});
+
+test("recon-GM: a real change still reports plan_changed, and does not re-emit the heartbeat", () => {
+  const logged: string[] = [];
+  let sha = "first000000";
+  const r = planReloader({ isSelf: true, planPath: "/x/plan/tasks.yaml" }, false,
+    (step) => logged.push(step),
+    { treeSha: () => sha, load: () => ({ tasks: [{ id: "NEW" }] }) as unknown as Plan })!;
+  assert.equal(r(), null);
+  sha = "second00000";
+  assert.ok(r(), "a moved tree sha still yields a reload");
+  assert.deepEqual(logged, ["daemon.plan_unchanged", "daemon.plan_changed"],
+    "heartbeat once at boot, then the real change — the heartbeat never repeats");
+});
