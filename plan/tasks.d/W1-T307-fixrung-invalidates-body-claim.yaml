@@ -1,0 +1,50 @@
+- id: W1-T307
+  title: "the fix rung adds a file and leaves the PR body's changeset claim stale — its own repair then fails `bodyContradictsDiff`, converting a successful auto-fix into 'needs a human'"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 50.00
+  rationale: "MEASURED 2026-08-03 on PR #1202 (W1-T301). The PR went red on coverage-ratchet. The
+    W1-T76 fix rung read the CI log and repaired it correctly, committing
+    `test(launchd): cover parseSupervisorStartInterval` — genuinely the missing coverage. That
+    commit took the changeset from 4 files to 5. The BODY still read `This PR touches exactly 4
+    files: …` and enumerated the original four. `bodyContradictsDiff` then failed the PR, CORRECTLY:
+    the body did contradict its diff. The verdict was `FAIL … needs a human` and the merge loop
+    parked it. An operator edit to the count (4 -> 5, plus the new file) took it to
+    `PASS — 3 criteria substantiated, proof_exec 3/3` on the SAME head sha.
+    THE LOOP IS SELF-DEFEATING, WHICH IS WHY IT IS WORTH A TASK. The fix rung is not a marginal
+    capability — it self-repaired two PRs unaided the same day (#1198 and #1202), and
+    coverage-ratchet is the most common way fleet work stalls. But every repair that ADDS a file to
+    a PR whose body enumerates its changeset guarantees a `bodyContradictsDiff` failure. The rung's
+    success is converted into a human-needed block, and the more reliably it works the more often
+    that happens.
+    THE RULE ALREADY EXISTS FOR HUMANS AND IS NOT WIRED INTO THE RUNG. CLAUDE.md: 'Verify every
+    PR-body claim about your own diff against `git diff --numstat`, and RE-VERIFY after each
+    follow-up commit.' The fix rung is precisely a follow-up commit and does not re-verify."
+  design: |
+    THE COMMIT THAT CHANGES THE DIFF OWNS THE CLAIM ABOUT THE DIFF.
+    (1) Establish first whether the rung can amend the body at all from where it runs, and what it
+        would have to re-derive. `bodyContradictsDiff` is the authority on what counts as a claim —
+        reuse its parse rather than writing a second matcher that can disagree with the gate.
+    (2) When the rung's commit changes the file set, update the body's changeset claim to match
+        before the review re-runs. Prefer a NARROW, mechanical edit (the count and the enumeration
+        it already parses) over regenerating prose — a rung rewriting a human's rationale is a
+        worse failure than the one being fixed.
+    (3) If the body carries no changeset claim, do nothing. Most bodies do not, and injecting one
+        would create the very contradiction risk this closes.
+    (4) FAIL SAFE: if the claim cannot be updated confidently, leave the body alone and let the
+        review fail as it does today. A wrong edit to a claim is worse than a stale one, because
+        the gate then certifies something false rather than refusing.
+  acceptance:
+    - claim: "when the fix rung's commit changes the file set, the PR body's file-count and enumeration claim is updated to match before the review re-runs"
+      proof: "unit test: test/fixrung-body-claim.test.ts"
+    - claim: "a body carrying no changeset claim is left untouched, never given one"
+      proof: "unit test: test/fixrung-body-claim.test.ts"
+    - claim: "a claim the rung cannot update confidently is left stale rather than edited wrongly"
+      proof: "unit test: test/fixrung-body-claim.test.ts"
+  risk: medium
+  origin: oper#fixrung-body-staleness-2026-08-03
+  plan_refs: ["§5C", "§7B"]
+  files: [src/run-task.ts]
