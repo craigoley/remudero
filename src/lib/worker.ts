@@ -85,8 +85,45 @@ export interface WorkerResult {
    * Turns the worker actually took (SDK `num_turns` off the result envelope).
    * Recorded on BOTH success and error paths — a run's turn count is telemetry
    * that seeds mounts.yaml calibration (W1-T5), so a failed run is never `0`.
+   *
+   * W1-T303 GROUND TRUTH: `num_turns` is NOT guaranteed to count the same unit
+   * `Options.maxTurns` bounds. sdk.d.ts documents `maxTurns` precisely
+   * ("Maximum number of conversation turns before the query stops. A turn
+   * consists of a user message and assistant response.") but gives `num_turns`
+   * on `SDKResultSuccess`/`SDKResultError` no counting rule at all beyond the
+   * bare type `number` — treating the two as interchangeable was always an
+   * ASSUMPTION, not something the contract promises. MEASURED over every
+   * `recon.done` row for 2026-08-03 under a single hardcoded `maxTurns: 8`:
+   * eleven `error_max_turns` failures, across both routed models, every one
+   * landing at EXACTLY `num_turns: 9` (cap+1 — consistent with one extra
+   * wrap-up turn closing out the error envelope after the cap trips), and one
+   * SUCCESS at `num_turns: 17` — nearly double the cap, with no error and no
+   * resume/retry involved (recon's retry, W1-T299, always issues a brand-new
+   * `query()` call with no `.resume`, never carries a turn count over). A
+   * `num_turns` this far past the cap on a clean success means whatever the
+   * CLI enforces `maxTurns` against is not simply "the same counter `num_turns`
+   * reports" — the leading, falsifiable-but-unverified account is that a
+   * mid-run compaction (already detected here as `compactionEvents`) resets
+   * the CLI's own enforcement window while `num_turns` keeps a cumulative,
+   * whole-session tally; this diagnosis did not confirm that mechanism (it
+   * would require inferring from the ledger, which is the same evidence class
+   * the puzzle came from) and files it as a follow-up rather than asserting
+   * it. Either way: `numTurns` alone cannot be reasoned about against a cap
+   * unless the cap it actually ran under rides the SAME row — see `maxTurns`
+   * below, which does exactly that.
    */
   numTurns: number;
+  /**
+   * W1-T303: the `maxTurns` THIS call was CONFIGURED with (from
+   * `SpawnWorkerArgs.maxTurns`) — an INPUT, never a read-back off the
+   * envelope, mirroring the `model`/`effort` discipline below. Ledgered
+   * BESIDE `numTurns`/`num_turns` (never replacing it) precisely so a ledger
+   * row can be checked against its own cap without cross-referencing
+   * `mounts.yaml`, which changes over time and had already moved
+   * (`RECON_MAX_TURNS` 8 → 20) by the time this mismatch was diagnosed —
+   * `undefined` (never guessed) when the caller configured no cap.
+   */
+  maxTurns?: number;
   /** Final result text (the `result` field of the SDK result message). */
   text: string;
   /** All assistant text blocks concatenated, in order. */
@@ -236,6 +273,15 @@ export function workerFailureExcerpt(r: Pick<WorkerResult, "isError" | "stderr" 
  * own ledger (keyed by `run_id`/`task_id` at every existing call site) is the
  * recoverable-after-the-fact home for the stderr that used to die with the
  * process, never a second, uncapped surface.
+ *
+ * `max_turns` (W1-T303) rides the same line for the SAME reason `quality_suspect`
+ * does: every call site already logs `num_turns: r.numTurns` by hand next to this
+ * spread, and `num_turns` alone cannot be reasoned about against a cap that lives
+ * only in `mounts.yaml` — a value that moves over time (`RECON_MAX_TURNS` itself
+ * moved 8 → 20 the same day this mismatch was found). Ledgering the cap THIS call
+ * was configured with, beside `num_turns` rather than replacing it, means every
+ * historical row stays checkable against its own cap forever, independent of
+ * whatever mounts.yaml says today.
  */
 export function workerLedgerFields(r: WorkerResult): {
   model: string;
@@ -249,6 +295,7 @@ export function workerLedgerFields(r: WorkerResult): {
   verdict: string;
   quality_suspect: boolean;
   compaction_events: CompactionEvent[];
+  max_turns?: number;
   stderr_excerpt?: string;
 } {
   const stderrExcerpt = workerFailureExcerpt(r);
@@ -260,6 +307,7 @@ export function workerLedgerFields(r: WorkerResult): {
     ...cacheTokenLedgerFields(r.tokens),
     total_cost_usd: r.costUsd,
     billing_mode: billingMode(r.childEnvKeys),
+    max_turns: r.maxTurns,
     // W1-T268: the account this spend is attributed to — a NAME (never a
     // credential), same discipline `billing_mode` above already keeps. Carried
     // verbatim off `WorkerResult.accountLabel`; `undefined` (never guessed) when
@@ -788,6 +836,10 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
           model: args.model ?? DEFAULT_MODEL_LABEL,
           effort: args.effort ?? DEFAULT_EFFORT_LABEL,
           accountLabel: accountId,
+          // W1-T303: mirrored verbatim from the SAME `options.maxTurns` this call was
+          // spawned with — see {@link WorkerResult.maxTurns}. `undefined` when the
+          // caller configured no cap, never a guessed value.
+          maxTurns: args.maxTurns,
         }),
       teardownContained,
     );
@@ -827,6 +879,8 @@ export async function collectWorkerResult(
     effort?: string;
     /** W1-T268: the account this call's spend is attributed to — see {@link WorkerResult.accountLabel}. */
     accountLabel?: string;
+    /** W1-T303: configured input, mirrored verbatim — see {@link WorkerResult.maxTurns}. */
+    maxTurns?: number;
   },
 ): Promise<WorkerResult> {
   const blocks: string[] = [];
@@ -933,6 +987,7 @@ export async function collectWorkerResult(
     sessionId,
     costUsd,
     numTurns,
+    maxTurns: opts.maxTurns,
     text,
     blocks,
     stderr: stderrChunks.join(""),
