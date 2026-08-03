@@ -105,13 +105,13 @@ judge:
 routes:
   recon:
     low:
-      src:       { model: haiku,  effort: medium, max_turns: 20,   context_budget: 60000 }
-      docs:      { model: haiku,  effort: low,    max_turns: 20,   context_budget: 40000 }
-      plan-lint: { model: haiku,  effort: low,    max_turns: 20,   context_budget: 40000 }
+      src:       { model: sonnet, effort: medium, max_turns: 20,   context_budget: 60000 }
+      docs:      { model: sonnet, effort: medium, max_turns: 20,   context_budget: 40000 }
+      plan-lint: { model: sonnet, effort: medium, max_turns: 20,   context_budget: 40000 }
     medium:
       src:       { model: sonnet, effort: medium, max_turns: 20,   context_budget: 90000 }
-      docs:      { model: haiku,  effort: medium, max_turns: 20,   context_budget: 60000 }
-      plan-lint: { model: haiku,  effort: medium, max_turns: 20,   context_budget: 60000 }
+      docs:      { model: sonnet, effort: medium, max_turns: 20,   context_budget: 60000 }
+      plan-lint: { model: sonnet, effort: medium, max_turns: 20,   context_budget: 60000 }
     high:
       src:       { model: sonnet, effort: high,   max_turns: 20,   context_budget: 120000 }
   implement:

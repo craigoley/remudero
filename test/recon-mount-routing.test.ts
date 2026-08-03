@@ -135,3 +135,28 @@ test("maxTurns on the recon spawn is the bounded RECON_MAX_TURNS, and every reco
     );
   }
 });
+
+test("no recon cell routes haiku — measured 1 success in 13 attempts, at two different caps", () => {
+  // THE MEASUREMENT, over every `recon.done` row for 2026-08-03 (two turn caps, 8 then 20):
+  //
+  //   sonnet :  9 success /  2 error_max_turns   (82%)
+  //   haiku  :  1 success / 12 error_max_turns   (7.7%)
+  //
+  // Every haiku failure landed on exactly `cap + 1` — 9 under a cap of 8, and 21 under a cap of
+  // 20 (W1-T295, W1-T300, W1-T301). Raising the cap did not move it: haiku does not converge on
+  // this recon at ANY bound tested, while sonnet completed at 7, 17 and 20 turns.
+  //
+  // The cost reads backwards until the wasted dispatch is counted. A haiku recon is ~$0.15 and a
+  // sonnet one ~$0.40 — but a haiku recon FAILS, and `failOnWorkerError(recon, "recon")` ends the
+  // run before implement, so it also burns a dispatch that opens no PR. Five of those trip
+  // `dispatchesWithoutNewOwnedPr`, which resets only on a fresh owned PR. Three tasks latched dead
+  // that way. The cheap mount is the expensive one.
+  const mounts = readFileSync(new URL("../.remudero/mounts.yaml", import.meta.url), "utf8");
+  const reconRow = mounts.slice(mounts.indexOf("\n  recon:"), mounts.indexOf("\n  implement:"));
+
+  assert.doesNotMatch(reconRow, /model:\s*haiku/, "no recon cell may route haiku");
+  assert.ok(reconRow.includes("model: sonnet"), "recon routes sonnet");
+  // Effort stays at or above medium: every observed sonnet SUCCESS was medium or high effort, so
+  // `low` is untested here and must not be assumed equivalent.
+  assert.doesNotMatch(reconRow, /effort:\s*low/, "recon effort stays >= medium — low is unmeasured");
+});
