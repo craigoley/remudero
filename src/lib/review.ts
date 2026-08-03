@@ -1860,9 +1860,26 @@ export function bodyContradictsDiff(report: string, diffFiles: string[]): Change
     if (!m[2] && !claimsChangesetContext(report, m.index ?? 0)) continue;
     let contradicted = claimed !== diffFiles.length;
     if (!contradicted && m[2]) {
+      // MARKDOWN QUOTING IS STRIPPED BEFORE THE COMPARISON. A body writes a path the way this
+      // repo's own house style writes one — in backticks — so the enumeration items arrive as
+      // "`src/lib/serve.ts`" while `diffFiles` holds bare paths. `includes` then fails on every
+      // correctly-enumerated file and the PR is failed for a claim that is TRUE.
+      //
+      // LIVE FIXTURE (PR #1192, W1-T288): body said "This PR touches exactly 3 files:
+      // `src/lib/panel-actions.ts`, `src/lib/serve.ts`, `test/control-status-daemon-liveness.test.ts`."
+      // over a diff of exactly those three. Reported 1 contradiction; with backticks stripped
+      // from the same body and the same diff, 0. Nothing else about the claim was wrong.
+      //
+      // Trailing punctuation comes off FIRST: the sentence's full stop sits OUTSIDE the closing
+      // backtick ("…test.ts`."), so stripping backticks first would leave the dot stranded.
       const named = m[2]
         .split(",")
-        .map((s) => s.trim().replace(/[.\s]+$/, ""))
+        .map((s) =>
+          s
+            .trim()
+            .replace(/[.\s]+$/, "")
+            .replace(/^`+|`+$/g, ""),
+        )
         .filter(looksLikePath);
       contradicted = named.some((f) => !diffFiles.includes(f));
     }

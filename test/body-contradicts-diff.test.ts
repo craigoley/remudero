@@ -298,3 +298,30 @@ test("bodyContradictsDiff: changeset context does not leak across a sentence bou
     "scanning the whole body would re-create the unanchored match — every PR body says 'changes' somewhere",
   );
 });
+
+test("bodyContradictsDiff: BACKTICKED paths in an enumeration are not a contradiction (PR #1192)", () => {
+  // The live fixture, verbatim. W1-T288's PR enumerated exactly its three changed files in this
+  // repo's own house style — in backticks — and was posted `failure` for a claim that was TRUE.
+  // The items arrived as "`src/lib/serve.ts`" while diffFiles holds bare paths, so `includes`
+  // missed every one of them.
+  const body =
+    "This PR touches exactly 3 files: `src/lib/panel-actions.ts`, `src/lib/serve.ts`, " +
+    "`test/control-status-daemon-liveness.test.ts`.";
+  const diff = ["src/lib/panel-actions.ts", "src/lib/serve.ts", "test/control-status-daemon-liveness.test.ts"];
+
+  assert.deepEqual(bodyContradictsDiff(body, diff), [], "a true enumeration must be silence, whatever the quoting");
+});
+
+test("bodyContradictsDiff: stripping backticks does NOT blind the check to a genuinely wrong file", () => {
+  // The other half — the strip must not become a way to smuggle a false claim past the gate.
+  const body = "This PR touches exactly 2 files: `src/lib/serve.ts`, `src/lib/NOT-IN-DIFF.ts`.";
+  const hits = bodyContradictsDiff(body, ["src/lib/serve.ts", "src/lib/panel-actions.ts"]);
+  assert.equal(hits.length, 1, "a backticked file that is not in the diff is still a contradiction");
+});
+
+test("bodyContradictsDiff: the sentence's full stop sits OUTSIDE the closing backtick", () => {
+  // Order-of-operations guard: stripping backticks before trailing punctuation would leave the
+  // dot stranded on the final item ("serve.ts`." -> "serve.ts`" -> ... -> "serve.ts.") and
+  // re-introduce the false positive for one-item and last-item enumerations only.
+  assert.deepEqual(bodyContradictsDiff("This PR touches exactly 1 file: `src/lib/serve.ts`.", ["src/lib/serve.ts"]), []);
+});
