@@ -185,13 +185,25 @@ test("GLANCE strip: every number (running/needs-me/blocked/queued/merged-today/s
     try {
       await page.waitForFunction(() => (document.getElementById("glance-running")?.textContent ?? "…") !== "…", null, { timeout: 5000 });
       assert.equal(await glanceText(page, "glance-running"), "1", "W1-T1 alone has a live phase");
-      assert.equal(await glanceText(page, "glance-blocked"), "1", "W1-T2 alone has a CLOSED, unmerged PR");
+      // BLOCKED is the STOPPED predicate (board.ts's isBlockedRow, mirrored by the strip): W1-T2's
+      // CLOSED unmerged PR AND W1-T4's OPEN escalation. W1-T4 used to be counted here as ZERO —
+      // `needsHuman` was treated as an ORTHOGONAL flag, so an escalated task whose own status was
+      // still "queued" fell out of every stopped tally. That is the exact live shape this fixture
+      // reproduces and the exact reason the console read `blocked: 0` on 2026-08-03 while W1-T288
+      // and W1-T290 sat escalated with open issues.
+      assert.equal(await glanceText(page, "glance-blocked"), "2", "W1-T2's closed PR AND W1-T4's open escalation are both stopped");
       // "queued" is status:"queued" (the SAME predicate summaryText/renderRest already use) --
-      // W1-T3 (no ledger line), W1-T4 (needsHuman is an ORTHOGONAL flag; without a real PR its
-      // own status still defaults to queued), and W1-T5 (a ledger-only verdict:merged with no PR
-      // to confirm it -- the board taxonomy only credits a GitHub-confirmed merge) all land here.
+      // W1-T3 (no ledger line), W1-T4 (its own status still defaults to queued — UNCHANGED by the
+      // stopped predicate, which reads it as blocked WITHOUT rewriting its status), and W1-T5 (a
+      // ledger-only verdict:merged with no PR to confirm it -- the board taxonomy only credits a
+      // GitHub-confirmed merge) all land here.
       assert.equal(await glanceText(page, "glance-queued"), "3");
       assert.equal(await glanceText(page, "glance-needs-me"), "1", "W1-T4 alone carries an OPEN escalation");
+      // THE NESTING, asserted on live DOM: needs-me is a strict subset of blocked, never a rival.
+      assert.ok(
+        Number(await glanceText(page, "glance-needs-me")) < Number(await glanceText(page, "glance-blocked")),
+        "needs-me must nest inside blocked — here 1 of the 2 stopped tasks has an issue to click",
+      );
       assert.equal(await glanceText(page, "glance-merged-today"), "1", "W1-T5's verdict:merged line, dated today per the fixed clock");
       assert.equal(await glanceText(page, "glance-spend-today"), "$1.500", "W1-T5's own cost_usd, ledger-traceable");
     } finally {
