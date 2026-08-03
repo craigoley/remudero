@@ -842,7 +842,11 @@ function deriveIndeterminateBlockers(
  *  `"dep-review"`/`"wait"` are ordinary in-progress states, not blockers. */
 const BLOCKED_PR_DISPOSITIONS: ReadonlySet<string> = new Set(["blocked-fixable", "blocked-ambiguous", "conflicted", "stale"]);
 
-function deriveBlockedPrBlockers(lines: Array<Record<string, unknown>>, limit: number): BlockedPrBlocker[] {
+function deriveBlockedPrBlockers(
+  lines: Array<Record<string, unknown>>,
+  projections: Map<string, StatusProjection> | undefined,
+  limit: number,
+): BlockedPrBlocker[] {
   // Newest `sweep.disposed` line per PR number wins — ledger append order, later overwrites earlier.
   const latestByPr = new Map<number, Record<string, unknown>>();
   for (const line of lines) {
@@ -850,12 +854,25 @@ function deriveBlockedPrBlockers(lines: Array<Record<string, unknown>>, limit: n
     if (typeof line.pr_number !== "number") continue;
     latestByPr.set(line.pr_number, line);
   }
+  // PR numbers the batched projection (when reachable) already confirms MERGED — checked by
+  // BOTH the disposed line's own task id AND a reverse index over every projection's `prNumber`,
+  // since a `sweep.disposed` line's `task_id` can be absent/"SWEEP" while GitHub still knows the
+  // PR landed. Mirrors `deriveIndeterminateBlockers`'s `projections?.get(taskId)?.merged` skip —
+  // landed work is no longer news, no matter what an older ledger line says.
+  const mergedPrNumbers = new Set<number>();
+  if (projections) {
+    for (const projection of projections.values()) {
+      if (projection.merged && typeof projection.prNumber === "number") mergedPrNumbers.add(projection.prNumber);
+    }
+  }
   const rows: BlockedPrBlocker[] = [];
   for (const [prNumber, line] of latestByPr) {
     const disposition = typeof line.disposition === "string" ? line.disposition : undefined;
     if (!disposition || !BLOCKED_PR_DISPOSITIONS.has(disposition)) continue;
-    const reason = typeof line.reason === "string" && line.reason.trim().length > 0 ? line.reason : "reason not named";
     const taskId = typeof line.task_id === "string" && line.task_id !== "SWEEP" ? line.task_id : undefined;
+    if (projections?.get(taskId ?? "")?.merged) continue; // landed since — no longer news
+    if (mergedPrNumbers.has(prNumber)) continue; // landed since (matched by PR number, not task id)
+    const reason = typeof line.reason === "string" && line.reason.trim().length > 0 ? line.reason : "reason not named";
     rows.push({
       kind: "blocked_pr",
       taskId,
@@ -879,7 +896,7 @@ function deriveBlockers(
   limit: number,
 ): BlockersSection {
   const circuitBroken = deriveCircuitBrokenBlockers(lines);
-  const blockedPrs = deriveBlockedPrBlockers(lines, limit);
+  const blockedPrs = deriveBlockedPrBlockers(lines, projections, limit);
   const indeterminate = deriveIndeterminateBlockers(lines, projections);
   const rows: BlockerRow[] = [...circuitBroken, ...indeterminate, ...blockedPrs];
   const section: BlockersSection = { rows };
