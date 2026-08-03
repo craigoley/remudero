@@ -320,6 +320,35 @@ export interface ReviewVerdict {
    */
   changesetContradictions?: ChangesetClaimContradiction[];
   /**
+   * W1-T297 (Standing rule 25 — INSTRUMENT CHANGES RIDE ALONE): true when the
+   * diff changes at least one measurement-instrument path ({@link
+   * INSTRUMENT_SURFACE} — a CI workflow's measurement wiring, a ratchet/
+   * coverage script, a recorded baseline, or the mutation-scope config) AND
+   * at least one src/ PRODUCT path (`test/` excluded — see {@link
+   * isProductPath}) IN THE SAME PR. "the instrument is right" and "the code
+   * is right" are two independently falsifiable claims; a diff that ships
+   * both proves neither, because the code's own falsifiers were graded by
+   * the very version of the instrument that shipped beside them (the
+   * #585/#586 arc this task's rationale documents: a coverage flag, a
+   * diff-coverage carve-out, and a re-captured baseline all rode inside
+   * ordinary fix-rung strikes). FORCES `state`/`floorState` to `"failure"`
+   * exactly like `criteriaTampered`/`changesetContradictions`: this is a
+   * structural, diff-derived fact, never a semantic reviewer opinion, so —
+   * like them — never suppressible by {@link applyVerdictStability}. An
+   * instrument-only PR (even one carrying its own `test/` fixture, or a
+   * `docs/` update) is the SANCTIONED shape and reads `false`; so does a
+   * src-only, plan-only, or docs-only PR. See {@link
+   * detectInstrumentEntanglement} for the pure predicate this folds in.
+   */
+  instrumentEntangled?: boolean;
+  /**
+   * The observed evidence behind a `true` {@link instrumentEntangled} —
+   * the instrument paths found and the src/ product paths beside them
+   * (W1-T186 emitter discipline: never a bare "entangled" with nothing
+   * named). `undefined` whenever `instrumentEntangled` is `false`/absent.
+   */
+  instrumentEntanglementPaths?: { instrumentPaths: string[]; srcPaths: string[] };
+  /**
    * W1-T166 (the reward-hacking measurement): visible-pass-rate minus
    * holdout-pass-rate, over this verdict's own criteria — `(visible criteria
    * met / visible criteria count) − (holdout criteria met / holdout criteria
@@ -1908,10 +1937,21 @@ export function judgeReview(
   // `diffFiles`) — no new fetch, no new gateway.
   const changesetContradictions = bodyContradictsDiff(evidence.report, diffFiles);
 
+  // W1-T297 (Standing rule 25): see {@link ReviewVerdict.instrumentEntangled}'s
+  // doc. Reuses the SAME `diffFiles` every other structural check above
+  // already computed — no new diff walk.
+  const instrumentEntanglement = detectInstrumentEntanglement(diffFiles);
+  const instrumentEntangled = instrumentEntanglement.entangled;
+
   const unmet = verdicts.filter((v) => !v.met);
   const noCriteria = criteria.length === 0;
   const state: ReviewState =
-    noCriteria || unmet.length > 0 || testTheater || criteriaTampered || changesetContradictions.length > 0
+    noCriteria ||
+    unmet.length > 0 ||
+    testTheater ||
+    criteriaTampered ||
+    changesetContradictions.length > 0 ||
+    instrumentEntangled
       ? "failure"
       : "success";
 
@@ -1936,7 +1976,12 @@ export function judgeReview(
   // checks before trusting a downgrade.
   const floorUnmet = verdicts.filter((v) => !(v.floorMet ?? v.met));
   const floorState: ReviewState =
-    noCriteria || floorUnmet.length > 0 || testTheater || criteriaTampered || changesetContradictions.length > 0
+    noCriteria ||
+    floorUnmet.length > 0 ||
+    testTheater ||
+    criteriaTampered ||
+    changesetContradictions.length > 0 ||
+    instrumentEntangled
       ? "failure"
       : "success";
 
@@ -2010,6 +2055,7 @@ export function judgeReview(
           criteriaTampered,
           unmet.length - visibleCriteria(unmet).length,
           changesetContradictions,
+          instrumentEntangled ? instrumentEntanglement : undefined,
         );
 
   return {
@@ -2024,6 +2070,10 @@ export function judgeReview(
     planOnly,
     criteriaTampered,
     changesetContradictions,
+    instrumentEntangled,
+    instrumentEntanglementPaths: instrumentEntangled
+      ? { instrumentPaths: instrumentEntanglement.instrumentPaths, srcPaths: instrumentEntanglement.srcPaths }
+      : undefined,
     rewardHackingGap,
   };
 }
@@ -2742,6 +2792,14 @@ const FAIL_PREFIX = "remudero-review: FAIL — ";
  * the files that refute it") — an unexplained red is the shape that gets
  * overridden, so a bare "changeset contradiction" with no specifics would
  * defeat the point.
+ *
+ * `instrumentEntanglement` (W1-T297, Standing rule 25) takes priority right
+ * after `changesetContradictions` — the same reasoning: a structural,
+ * diff-derived fact that preempts the ordinary unmet-criteria text. The
+ * message NAMES the instrument paths found and the src paths beside them
+ * (W1-T186 emitter discipline) AND STATES THE RESOLUTION — split the PR (land
+ * the instrument change alone, then rebase) or revert the instrument hunk —
+ * because a rule that only refuses re-teaches nothing and gets worked around.
  */
 export function failSummary(
   unmetClaims: string[],
@@ -2750,6 +2808,7 @@ export function failSummary(
   criteriaTampered = false,
   hiddenUnmetCount = 0,
   changesetContradictions: ChangesetClaimContradiction[] = [],
+  instrumentEntanglement?: { instrumentPaths: string[]; srcPaths: string[] },
 ): string {
   if (noCriteria) return `${FAIL_PREFIX}no acceptance criteria to judge (fail closed)`;
   if (criteriaTampered) {
@@ -2763,6 +2822,13 @@ export function failSummary(
       first.files.slice(0, filesBudget).join(", ") +
       (first.files.length > filesBudget ? `, +${first.files.length - filesBudget} more` : "");
     return `${FAIL_PREFIX}body contradicts its own diff: claimed "${first.claim}", actual changed files: ${filesText}${more}`;
+  }
+  if (instrumentEntanglement) {
+    return (
+      `${FAIL_PREFIX}entangled: instrument path(s) ${instrumentEntanglement.instrumentPaths.join(", ")} changed ` +
+      `alongside src/ path(s) ${instrumentEntanglement.srcPaths.join(", ")} in the same PR — split it: land the ` +
+      `instrument change in its own PR, then rebase this one onto it (or revert the instrument hunk here)`
+    );
   }
   if (unmetClaims.length === 0 && hiddenUnmetCount > 0) {
     return (
@@ -3265,6 +3331,33 @@ export function checkRefactorHonesty(diff: string, report?: string): RubricItemR
  * or deleting a required check from `ci-gate.yml` cleared docs-awareness
  * silently (`no CLI/config/gate/verdict surface changed`).
  */
+/**
+ * The measurement-INSTRUMENT surface (W1-T297, Standing rule 25): paths a
+ * diff can touch to change WHAT a CI gate measures, rather than what the gate
+ * concludes about a change. ONE PATH SET, EXPORTED — {@link
+ * USER_VISIBLE_SURFACE_RE}'s instrument arm (W1-T212's docs-awareness rung)
+ * and {@link detectInstrumentEntanglement} (this task's BINDING isolation
+ * gate) are both DERIVED FROM THIS constant so the two surfaces can never
+ * drift apart into a second, hand-maintained copy. Membership verified
+ * against the live tree at filing (2026-08-03 — verify again before trusting
+ * it): `.github/workflows/` (CI measurement wiring), every
+ * `scripts/*-ratchet.mjs` (ratchet gate scripts), `scripts/diff-coverage.mjs`
+ * (coverage's own text-awareness carve-outs — the W1-T210 fixture this
+ * task's rationale names), every `scripts/*-baseline.json` (recorded
+ * floors/caps), `scripts/mutation-relevant-paths.json` (mutation-ratchet's
+ * diff-scoping config), and `stryker.conf.json` (mutation scope/config).
+ */
+export const INSTRUMENT_SURFACE: readonly string[] = [
+  "^\\.github/workflows/",
+  "^scripts/[^/]*-ratchet\\.mjs$",
+  "^scripts/diff-coverage\\.mjs$",
+  "^scripts/[^/]*-baseline\\.json$",
+  "^scripts/mutation-relevant-paths\\.json$",
+  "^stryker\\.conf\\.json$",
+];
+
+const INSTRUMENT_SURFACE_RE = new RegExp(INSTRUMENT_SURFACE.join("|"));
+
 const USER_VISIBLE_SURFACE_RE = new RegExp(
   [
     "^bin/", // the CLI entry point
@@ -3273,13 +3366,38 @@ const USER_VISIBLE_SURFACE_RE = new RegExp(
     "^src/lib/(config|settings|mounts)\\.ts$", // config surface
     "^src/lib/(review|task-linter)\\.ts$", // gate surface
     "^src/lib/(run-result|status|ledger|flight-judge)\\.ts$", // verdict surface
-    "^\\.github/workflows/", // CI workflow surface — gates are wired/required here
-    "^scripts/[^/]*-ratchet\\.mjs$", // ratchet gate scripts
-    "^scripts/[^/]*-baseline\\.json$", // ratchet floor/cap configs
-    "^scripts/mutation-relevant-paths\\.json$", // mutation-ratchet's diff-scoping config
-    "^stryker\\.conf\\.json$", // mutation ratchet's mutate scope/config
+    ...INSTRUMENT_SURFACE, // measurement-instrument surface (shared, see its own doc)
   ].join("|"),
 );
+
+/**
+ * A "product" path for entanglement purposes (W1-T297): under `src/` and NOT
+ * itself a test file. `test/` files must NOT count as the product half of an
+ * entanglement — the design's own carve-out — or an instrument-only PR could
+ * never carry the fixture that proves it (`test/diff-coverage.test.ts` is
+ * exactly the file W1-T212 shipped for this purpose).
+ */
+function isProductPath(path: string): boolean {
+  return path.startsWith("src/") && !isTestPath(path);
+}
+
+/**
+ * INSTRUMENT ISOLATION (W1-T297, Standing rule 25): true when `diffFiles`
+ * contains at least one {@link INSTRUMENT_SURFACE} path AND at least one
+ * {@link isProductPath} src/ path — the ENTANGLEMENT predicate, not mere
+ * instrument-touching. An instrument-only diff (optionally with its own
+ * `test/` falsifier and/or a `docs/` update) is the sanctioned shape and
+ * returns `entangled: false`; so does a src-only, plan-only, or docs-only
+ * diff. `instrumentPaths`/`srcPaths` are the OBSERVED EVIDENCE named in the
+ * failure text and the fix rung's escalation (W1-T186 emitter discipline).
+ */
+function detectInstrumentEntanglement(
+  diffFiles: string[],
+): { entangled: boolean; instrumentPaths: string[]; srcPaths: string[] } {
+  const instrumentPaths = diffFiles.filter((f) => INSTRUMENT_SURFACE_RE.test(f));
+  const srcPaths = diffFiles.filter(isProductPath);
+  return { entangled: instrumentPaths.length > 0 && srcPaths.length > 0, instrumentPaths, srcPaths };
+}
 
 /** True when a changed path is anywhere under a `docs/` directory. */
 function isDocsPath(path: string): boolean {

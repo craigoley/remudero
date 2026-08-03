@@ -2761,6 +2761,63 @@ export async function runFixRung(opts: {
       return { outcome: "escalated", review, strikes, issueUrl };
     }
 
+    // W1-T297 (Standing rule 25 — INSTRUMENT CHANGES RIDE ALONE): a diff that
+    // changes a measurement-instrument path (a ratchet/coverage script, a
+    // recorded baseline, a workflow's measurement wiring, or the mutation
+    // scope) AND a src/ product path in the SAME PR (see
+    // ReviewVerdict.instrumentEntangled, review.ts) is never eligible for an
+    // ordinary "add the work" fix dispatch: no worker can legitimately
+    // resolve an entanglement by WRITING MORE CODE — the only honest
+    // resolutions (split the PR, or revert the instrument hunk) restructure
+    // it instead. REFUSE the strike and escalate immediately (zero strikes
+    // spent), naming the observed evidence (W1-T186) — the instrument paths
+    // found and the src paths beside them.
+    if (review.instrumentEntangled) {
+      const paths = review.instrumentEntanglementPaths;
+      const instrumentList = paths?.instrumentPaths.join(", ") ?? "(unavailable)";
+      const srcList = paths?.srcPaths.join(", ") ?? "(unavailable)";
+      deps.log("fix.instrument_entangled", {
+        strike: strikes,
+        summary: review.summary,
+        instrument_paths: paths?.instrumentPaths,
+        src_paths: paths?.srcPaths,
+      });
+      deps.say(
+        `fix rung: REFUSED — instrument path(s) ${instrumentList} entangled with src/ path(s) ${srcList} in the ` +
+          `same PR; escalating rather than dispatching a fix worker: ${opts.prUrl}`,
+      );
+      const issueUrl = escalate(
+        {
+          class: "BLOCKED",
+          taskId: opts.taskId,
+          runId: opts.runId,
+          summary: `blocked_review: instrument change entangled with src/ in one PR (Standing rule 25) — ${opts.prUrl}`,
+          detail:
+            `The blocked_review FIX RUNG (W1-T76, W1-T297) refused to dispatch a fix worker: the PR's diff ` +
+            `changes measurement-instrument path(s) ${instrumentList} alongside src/ path(s) ${srcList} — two ` +
+            `independently falsifiable claims ("the instrument is right" and "the code is right") shipped as one ` +
+            `green, self-graded by the very instrument version it also changed. No worker may legitimately resolve ` +
+            `this by writing more code. Review summary: ${review.summary}`,
+          options: [
+            {
+              label: "split",
+              detail:
+                "land the instrument change in its own PR, then rebase this one onto it — the sanctioned shape.",
+            },
+            {
+              label: "revert",
+              detail: "revert the instrument hunk on this branch, keeping only the src/ change, then re-review.",
+            },
+          ],
+          recommendation: "split",
+        },
+        { issues: deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId },
+      );
+      deps.log("fix.exhausted", { strikes, issue_url: issueUrl, reason: "instrument_entangled" });
+      deps.say(`fix rung: escalated (instrument entanglement) — ${issueUrl}`);
+      return { outcome: "escalated", review, strikes, issueUrl };
+    }
+
     // W1-T127 (the #212 fixture — PR #212/#213, a spawn-ENOENT/autoupdater-race
     // binary crash that debited a fix-rung strike, and escalated, on a worker that
     // never ran): `attempt` is only a CANDIDATE strike number until `deps.spawn`
