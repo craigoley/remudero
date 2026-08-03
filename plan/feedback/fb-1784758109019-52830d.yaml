@@ -14,5 +14,5 @@ raw: "TRIAGE MUST EMIT GATE-GREEN PLANS — the triage Architect authored three
   panel-graph, run-task) / (inbox, run-task) / (retro, run-task)."
 attachments: []
 origin: cli
-status: new
+status: rejected
 proposal_pr: null
