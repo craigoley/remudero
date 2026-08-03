@@ -6,7 +6,7 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 50.00
-  files: [.github/workflows/ci-gate.yml, test/ci-gate-reaggregate.test.ts]
+  files: [.github/workflows/ci-gate.yml, test/ci-gate-reaggregate.test.ts, CLAUDE.md]
   risk: high
   rationale: "MEASURED 2026-08-03 — THREE occurrences in one evening (#1229, #1234, and one earlier),
     each costing an operator-minted throwaway sha. Diagnosed from the failing run's own log rather
