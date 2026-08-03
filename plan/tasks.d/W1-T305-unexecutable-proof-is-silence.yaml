@@ -1,0 +1,55 @@
+- id: W1-T305
+  title: "322 code PRs were certified `success` with ZERO proofs executed — an unparseable proof scores as `not_executable` and passes on the keyword floor instead of failing loudly"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "MEASURED 2026-08-03 over `review.posted` in state/ledger.ndjson UNIONED with all 664
+    rotations, deduped by head_sha. Of 821 distinct CODE review heads (plan-only excluded — its
+    W1-T205 carve-out accounts for only 47 heads in the whole corpus):
+      ALL proofs executed  : 351  (42.8%)
+      SOME executed        :  52  ( 6.3%)
+      NONE executed        : 418  (50.9%)
+    Inside those 418 zero-executed heads there are 1,157 proof markers and EVERY SINGLE ONE is
+    `not_executable` — zero `executed_stale`, zero `executed_fail`. And 322 of the 418 posted
+    `state: success`. More than half of all code reviews in this repo's history certified nothing by
+    execution, and the large majority of those passed anyway on the keyword-coverage floor — which
+    the codebase itself calls 'a claim, never evidence'.
+    ONE DEMONSTRATED CAUSE, found the same day: a proof with NO DIALECT PREFIX is prose and never
+    executes. `rmd check-proof` refuses it outright ('a proof with no dialect prefix at all is prose
+    and never executes'). PR #1194 posted CAPPED 0/3 that way and reached 3/3 on the same head sha
+    once `unit test:` was prefixed to each; PR #1189 MERGED at proof_exec 2/4 with two silently
+    inert proofs. NOT CLAIMED: that this explains all 418. The marker is uniform but the causes
+    behind `not_executable` are not enumerated here, and sizing them is step (1) below.
+    WHY IT STAYS INVISIBLE: nothing distinguishes 'this proof did not execute' from 'no proof was
+    written'. A CAPPED verdict at least refuses to arm auto-merge and is therefore loud. A PARTIAL
+    set (the 52) merges having certified less than it appears to, and says so only in a count nobody
+    reads."
+  design: |
+    MAKE UNEXECUTABILITY LOUD. The floor decision is the operator's; the silence is the defect.
+    (1) SIZE IT FIRST, and put the table in the PR body. Break `not_executable` down by CAUSE —
+        no dialect prefix, dialect parsed but zero candidates, path absent, title matched nothing.
+        The remedy differs per cause and the proportions decide which is worth enforcing.
+    (2) A proof that does not PARSE as a dialect is an authoring error and must be reported as one,
+        distinctly from a proof that parses and resolves to nothing. Today both land in the same
+        bucket. Report the count and the offending text in the verdict AND in the ledger row, so
+        the class becomes countable without re-deriving it from 664 rotations.
+    (3) DO NOT silently tighten the floor in this task. Whether an unparseable proof should FAIL a
+        PR is a policy change with a blast radius this measurement does not by itself justify —
+        propose it with the numbers from (1) and let the operator rule. Making it visible is the
+        deliverable; making it blocking is a separate, ratified decision.
+    (4) The 52 partial heads are the sharpest case and deserve their own regression test: a body
+        whose proofs are half-executable must not read the same as one whose proofs all ran.
+  acceptance:
+    - claim: "a proof that fails to parse as a dialect is reported as an authoring error, distinct from one that parses but resolves to no candidate"
+      proof: "unit test: test/unexecutable-proof-visibility.test.ts"
+    - claim: "the verdict and the ledger row both carry the unexecutable count and the offending proof text"
+      proof: "unit test: test/unexecutable-proof-visibility.test.ts"
+    - claim: "a partially-executed proof set is distinguishable from a fully-executed one in the posted verdict"
+      proof: "unit test: test/unexecutable-proof-visibility.test.ts"
+  risk: medium
+  origin: oper#unexecutable-proof-floor-2026-08-03
+  plan_refs: ["§5C", "§8A"]
+  files: [src/lib/review.ts]
