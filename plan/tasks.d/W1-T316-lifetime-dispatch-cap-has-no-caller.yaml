@@ -1,0 +1,74 @@
+- id: W1-T316
+  title: "the LIFETIME dispatch cap is built, tested and never asked — isDispatchEligible consults opts.isLifetimeCapExceeded, and no caller in the repo ever supplies it, so W1-T271's backstop is inert in production"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "MEASURED FROM SOURCE at 62d034a, with the ledger UNAVAILABLE on the recon host — so this
+    task rests on grep results a reader can reproduce, never on a dispatch count.
+    THE HOLE. dispatchesWithoutNewOwnedPr (src/lib/status.ts) resets its count to 0 on every pr.opened,
+    so a task that alternates failure and near-success re-arms the streak breaker each cycle and can
+    dispatch indefinitely. W1-T271 diagnosed exactly that (its own rationale names W1-T254, five
+    dispatches in eighty minutes) and BUILT the fix: dispatchesEver plus isLifetimeDispatchCapExceeded,
+    a counter no ledger step resets, defaulting to 10.
+    THE DEFECT IS THAT NOTHING ASKS IT. isDispatchEligible (src/lib/drain.ts) consults it behind an
+    OPTIONAL callback whose own doc reads 'Optional - omitted, dispatch behaves exactly as before this
+    cap existed'. Grepping src/ scripts/ .github/ bin/ for an assignment to isLifetimeCapExceeded or
+    onLifetimeCapExceeded returns NOTHING, and isLifetimeDispatchCapExceeded has no call site anywhere
+    outside its own definition. test/dispatch-lifetime-breaker.test.ts covers the predicate, so this is
+    the tested-but-inert shape, not an untested one.
+    WHY THIS IS NOT W1-T271 AGAIN. W1-T271's declared files are status.ts, drain.ts and ledger.ts;
+    src/run-task.ts, where BOTH wiring sites live (drainCommand's and daemonCommand's dep objects), is
+    not among them, and not one of its four acceptance criteria needs a production caller. It did what
+    it was scoped to do. This task is the wiring only.
+    THE FAILURE IS SILENT because the hook is optional: no error, no warning, no ledger line marks its
+    absence, which is why it survived a merge and a MASTER-PLAN entry claiming the cap ships."
+  design: |
+    SUPPLY THE PREDICATE AT BOTH EXISTING WIRING SITES. Nothing new is invented here: the counter, the
+    threshold, the refusal branch and its tests all exist and are unchanged.
+    (i) At each site in src/run-task.ts that already passes isCircuitTripped and onCircuitBreak - the
+    drain CLI's dep object and the daemon's - ALSO pass isLifetimeCapExceeded, reading
+    isLifetimeDispatchCapExceeded over the SAME ledger lines the streak breaker already reads. Do not
+    open a second ledger read path; reuse the one the breaker gate already holds for the invocation.
+    (ii) Pass onLifetimeCapExceeded alongside it, mirroring onCircuitBreak's legibility contract, so a
+    task excluded by the lifetime cap is ledgered and escalated ONCE rather than silently skipped. An
+    exclusion nobody can see is the same class of defect as the missing wiring.
+    (iii) A REGRESSION LOCK IS MANDATORY and is the real deliverable: a test that FAILS if either dep
+    object stops supplying the predicate. Assert against the dep object the command actually builds -
+    never a hand-built fixture that would pass while production stayed unwired, which is precisely how
+    this gap survived.
+    (iv) If a new ledger step name is introduced for the exclusion, add it to
+    DECISION_RELEVANT_LEDGER_STEPS (src/lib/ledger.ts) in the SAME change - the dedup above is a
+    decision that reads the ledger, and a rotation dropping it re-arms the escalation forever.
+    EXPLICITLY NOT IN SCOPE: the threshold value, the streak breaker's reset rule, what the breaker does
+    when it trips, and any change to isDispatchEligible itself. This task changes WHO ASKS, never WHAT
+    IS ASKED. Raising or lowering 10 is a separate ruling on separate evidence.
+    VERIFY THE TWO CALL SITES FROM SOURCE before wiring - distrust this note; symbol names drift.
+  acceptance:
+    - claim: "the drain and daemon dep objects each supply isLifetimeCapExceeded, and a test fails if either one stops"
+      proof: "unit test: test/dispatch-lifetime-breaker.test.ts"
+    - claim: "a task at or over the lifetime cap is excluded from dispatch through the real command wiring rather than only through a hand-built options fixture"
+      proof: "unit test: test/dispatch-lifetime-breaker.test.ts"
+    - claim: "an exclusion by the lifetime cap is ledgered and escalated once, never a silent skip"
+      proof: "unit test: test/dispatch-lifetime-breaker.test.ts"
+    - claim: "the predicate is named at the wiring site in run-task.ts, not merely defined in status.ts"
+      proof: "grep: isLifetimeCapExceeded in src/run-task.ts"
+  risk: high
+  origin: oper#throughput-blockers-2026-08-03
+  plan_refs: ["§9", "W1-T271"]
+  files: [src/run-task.ts, test/dispatch-lifetime-breaker.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto - the whole behaviour is a predicate supplied to a dep object plus a ledger line,
+    machine-checkable with no operator present.
+    risk:high - it gates DISPATCH. A predicate wired wrongly halts legitimate work; wired not at all
+    leaves the current spend loop open. The blast radius is every task the fleet would otherwise run.
+    budget_usd 60 - well under the house default: the counter, threshold and refusal branch already
+    exist and are tested, so this is two dep-object edits plus a regression lock.
+    NO depends_on: W1-T271 is already merged (#- see MASTER-PLAN's P29 entry); nothing else blocks this.
+    SIBLING PATTERN, worth the worker knowing: this is the THIRD shipped-but-unasked predicate found in
+    this codebase - checkCostGovernor and checkQueueGovernor (src/lib/sweep.ts) are in the identical
+    state, and W1-T317 files the first of those. If a general 'every exported gate has a caller' lint is
+    ever built, these three are its fixtures. Do NOT build it here."

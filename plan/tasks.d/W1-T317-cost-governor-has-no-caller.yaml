@@ -1,0 +1,76 @@
+- id: W1-T317
+  title: "the DAILY cost ceiling has no caller — checkCostGovernor was built after the $206/60-run incident, is tested, and is invoked by nothing, so the only live bound on autonomous spend is a per-run cap that cannot see across runs"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "MEASURED FROM SOURCE at 62d034a. The ledger was UNAVAILABLE on the recon host, so every
+    claim here is a grep a reader can reproduce - no spend figure is asserted from memory.
+    THE GAP. checkCostGovernor (src/lib/sweep.ts) is a pure predicate returning deferred when the day's
+    ledgered spend reaches policy.dailyCostCeilingUsd. Its own doc states the failure it exists to catch:
+    'a half-finished PR must still merge' on the drainage side, but NEW dispatch defers - and, verbatim,
+    '60 runs each safely under their own per-run cap is exactly how the $206 incident accumulated'.
+    Grepping src/ scripts/ .github/ bin/ for checkCostGovernor returns ONLY its own definition and
+    doc cross-references inside sweep.ts. There is no call site. test/cost-governor.test.ts covers the
+    predicate, so this is tested-but-inert, not untested.
+    WHAT ACTUALLY BOUNDS SPEND TODAY. runTask reads task.budget_usd or DEFAULT_BUDGET_USD as a hard
+    per-run cap. That is PER RUN and blind across runs, which is the exact blindness the daily ceiling
+    was built to cover. dailyCostCeilingUsd is also NOT a row in plan/policy.yaml - the sweep section
+    carries only staleDays, strikeCap and wipLimit - so today the ceiling can be neither invoked nor
+    retuned without a code change.
+    WHY IT MATTERS NOW, not merely in principle: plan/policy.yaml records the auto-triage rung's measured
+    cost as median $0.98 per run over 27 runs, and that rung fires unsupervised. The only thing bounding
+    its daily total is autoTriage.maxPerDay, pinned at 24 which is also its schema maximum. W1-T318
+    proposes making that cadence responsive to queue depth; doing so without this wired would remove the
+    single live bound on unattended spend. That is why this is filed as its own task and named as
+    W1-T318's dependency."
+  design: |
+    GIVE THE EXISTING PREDICATE A CALLER. The predicate, its threshold semantics and its tests all
+    exist and are unchanged; this task supplies the consultation and its ledger line.
+    (i) Consult checkCostGovernor on the DISPATCH path only, alongside the guards already consulted
+    there. Its own doc is binding on scope: drainage - sweep, heal, arm, merge, at ANY depth - is NEVER
+    gated by it, because 'stranding in-flight work to save money is a worse failure than the spend
+    itself'. A deferral must stop NEW dispatch and nothing else.
+    (ii) The day's spend input must come from the ledger the fleet already writes, not a new meter.
+    Re-derive it per consultation the way the dispatch breaker re-derives its own count, so the bound
+    survives a process restart.
+    (iii) LEDGER THE DEFERRAL with the ceiling, the observed day total and the task that was held, so a
+    quiet fleet is distinguishable from a throttled one. A hold nobody can see reads as starvation and
+    will be mis-diagnosed - W1-T298 exists because exactly that confusion already cost the operator half
+    a day.
+    (iv) If the deferral is deduped through a ledger read, its step name must be added to
+    DECISION_RELEVANT_LEDGER_STEPS (src/lib/ledger.ts) in the SAME change, or a rotation silently
+    un-defers.
+    (v) A REGRESSION LOCK that fails if the dispatch path stops consulting the predicate - asserted
+    against the dep object the command actually builds, never a hand-built fixture, since a fixture-only
+    assertion is how the predicate came to be shipped with no caller in the first place.
+    EXPLICITLY NOT IN SCOPE: the ceiling VALUE, moving it into plan/policy.yaml, checkQueueGovernor
+    (which is in the identical unwired state and is deliberately left alone), and any change to the
+    per-run budget_usd cap. Retuning the number is a separate ruling on separate evidence.
+    VERIFY THE DISPATCH-PATH CALL SITES FROM SOURCE before wiring - distrust this note.
+  acceptance:
+    - claim: "the dispatch path consults checkCostGovernor, and a test fails if it stops"
+      proof: "unit test: test/cost-governor.test.ts"
+    - claim: "at or over the daily ceiling NEW dispatch defers while drainage of in-flight work is never gated"
+      proof: "unit test: test/cost-governor.test.ts"
+    - claim: "a cost deferral is ledgered with the ceiling and the observed day total so a held fleet is distinguishable from an idle one"
+      proof: "unit test: test/cost-governor.test.ts"
+    - claim: "the governor is named at its dispatch-path call site, not only in sweep.ts where it is defined"
+      proof: "grep: checkCostGovernor in src/run-task.ts"
+  risk: high
+  origin: oper#throughput-blockers-2026-08-03
+  plan_refs: ["§5", "W1-T148"]
+  files: [src/run-task.ts, test/cost-governor.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto - a predicate consultation plus a ledger line, both machine-checkable.
+    risk:high - it gates DISPATCH and it gates SPEND. Wired too tightly it halts a healthy fleet; left
+    unwired it leaves the $206-class accumulation open. Both directions are expensive.
+    budget_usd 60 - the predicate and its tests exist; this is a call site, a ledger line and a lock.
+    NO depends_on: nothing blocks this, and it is deliberately filed AHEAD of W1-T318 rather than folded
+    into it - one concern per task, and this one stands on its own evidence whether or not triage cadence
+    ever changes.
+    FILE OVERLAP with W1-T316: both write src/run-task.ts. That is a concern for dispatch-overlap.ts to
+    partition across a dispatch pass, NOT a dependency - neither task needs the other's output."

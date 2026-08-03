@@ -1,0 +1,79 @@
+- id: W1-T318
+  title: "triage cadence is a constant, so a near-empty queue pulls in no more work than a full one — and the lever that governs supply is maxPerDay pinned at its own schema maximum, not the interval"
+  repo: remudero
+  depends_on: [W1-T317]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  rationale: "OPERATOR ASK, verbatim: 'If it gets close to clearing the queue, it should triage more
+    tasks in from the plan.' MEASURED FROM SOURCE and from plan/policy.yaml at 62d034a; the ledger was
+    UNAVAILABLE on the recon host, so no consumption rate is asserted here.
+    WHAT THE SUPPLY SIDE ACTUALLY IS. decideAutoTriage (src/lib/auto-triage.ts) refuses when the gap
+    since the last fire is under minIntervalMinutes, then when the rolling 24h count reaches maxPerDay.
+    At most ONE task is produced per fire. plan/policy.yaml holds minIntervalMinutes 15 and maxPerDay 24.
+    Supply is therefore hard-capped at 24 tasks per day, and it is FINITE besides: it is fed from
+    plan/feedback entries at status new, of which 46 remain - under two days of supply at the ceiling.
+    THE QUEUE CAN GENUINELY EMPTY, and neither reason depends on how fast the daemon consumes.
+    THE COMMON BELIEF ABOUT THE LEVER IS STALE, and a worker acting on it would tune the wrong field.
+    maxPerDay was non-binding when minIntervalMinutes was 60, because 60m already capped the window at
+    24. plan/policy.yaml's own comment records the change: minIntervalMinutes dropped to 15, 'which alone
+    would allow 96 fires/day - so this field is now the BINDING constraint, not a kept-but-inert
+    fallback'. maxPerDay's schema max is 24, EQUAL to its value, so the binding lever cannot be raised at
+    all without editing its bound.
+    WHY THE DEPENDENCY IS HARD, not advisory. maxPerDay pinned at its maximum is currently the ONLY live
+    bound on unattended triage spend, because checkCostGovernor has no caller (W1-T317). Raising or
+    relaxing that cap before the daily ceiling is wired removes the last bound rather than trading one
+    for another. plan/policy.yaml measures this rung at median $0.98 per run over 27 runs."
+  design: |
+    MAKE THE INTERVAL A FUNCTION OF RUNNABLE DEPTH, and leave the daily cap as the ceiling.
+    (i) The depth input must be the census the daemon ALREADY writes - the dispatch-filter tally behind
+    daemon.idle_reasons - never a new probe and never a second definition of runnable. W1-T298 relies on
+    that same census; two derivations of depth that can disagree is worse than none.
+    (ii) Shorten the interval as depth approaches zero and restore it as depth recovers, as bounded
+    POLICY DATA in plan/policy.yaml carrying its own min and max the way every other row does, so the
+    curve is retunable by plan review rather than by a deploy. An out-of-bounds edit must be refused at
+    load by the existing validatePolicy, not caught in review.
+    (iii) THE DAILY CAP REMAINS THE CEILING and is not raised by this task. Adaptive cadence changes the
+    RATE at which a bounded daily budget is spent, never the bound - the same discipline lanes carry
+    against the WIP limit. If evidence later justifies a higher ceiling, that is its own ruling with its
+    own spend argument.
+    (iv) AN ALL-MERGED PLAN IS DONE, NOT STARVED, and must not trigger faster triage. This is the same
+    distinction W1-T298 draws and it needs its own test here too: a plan with nothing left to do should
+    go quiet, not accelerate.
+    (v) A FALSIFIER IS REQUIRED: a run in which depth is zero and the daily cap is already reached must
+    fire NOTHING. Adaptive cadence that can outrun its own ceiling is the failure this task must prove
+    it does not have.
+    EXPLICITLY NOT IN SCOPE: raising maxPerDay or its schema bound, wiring checkCostGovernor (that is
+    W1-T317, this task's dependency), changing what triage produces, and the starvation ESCALATION
+    (W1-T298 owns that - this task changes the RESPONSE to a thin queue, never the paging).
+    VERIFY decideAutoTriage's current refusal order and the policy rows FROM SOURCE before wiring.
+  acceptance:
+    - claim: "the triage interval shortens as runnable depth approaches zero and lengthens as depth recovers"
+      proof: "unit test: test/auto-triage-policy-seam.test.ts"
+    - claim: "adaptive cadence never exceeds the daily cap — at the cap with zero depth nothing fires"
+      proof: "unit test: test/auto-triage-policy-seam.test.ts"
+    - claim: "a plan whose every task is already merged is DONE and does not accelerate triage"
+      proof: "unit test: test/auto-triage-policy-seam.test.ts"
+    - claim: "the cadence curve is bounded policy data whose out-of-range value is refused at load"
+      proof: "unit test: test/auto-triage-policy-seam.test.ts"
+    - claim: "the depth input is the census the daemon already writes, not a second derivation of runnable"
+      proof: "grep: idle_reasons in src/lib/auto-triage.ts"
+  risk: high
+  origin: oper#throughput-blockers-2026-08-03
+  plan_refs: ["§9", "W1-T298"]
+  files: [src/lib/auto-triage.ts, plan/policy.yaml, test/auto-triage-policy-seam.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto - a pure decision function over a census plus bounded policy rows.
+    risk:high - three subsystems by Rule 19's count (auto-triage, policy data, test) and it raises the
+    rate of UNATTENDED SPEND. A curve that is too eager burns budget on a thin backlog with no daily
+    ceiling to catch it.
+    budget_usd 80 - above W1-T316/T317 because this adds a curve and a policy row with bounds rather
+    than supplying an existing predicate, and the all-merged-is-DONE distinction needs its own fixtures.
+    depends_on W1-T317 IS HARD, not a courtesy: maxPerDay pinned at its schema max is today the only
+    live bound on this rung's spend, so relaxing cadence before the daily ceiling has a caller removes
+    the last bound. Do not start this task while W1-T317 is unmerged.
+    OPERATOR-FACING FINDING this task carries: the belief that raising throughput means changing the
+    interval is stale. At 15m the interval no longer binds; maxPerDay does, and it sits at its own
+    maximum. Anyone tuning for throughput must know which field actually moves."
