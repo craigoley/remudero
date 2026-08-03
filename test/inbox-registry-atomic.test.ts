@@ -153,7 +153,14 @@ test("W1-T240 claim 2: two 'concurrent' updateProposalRegistry calls -- B's read
         isPidAlive: () => !aDone,
         sleep: () => {
           if (aDone) return;
-          updateProposalRegistry(registryPath, (current) => [...current, proposal("A")]);
+          // A's OWN nested updateProposalRegistry call is a second, independent real
+          // wall-clock budget -- it inherits the 2000ms default unless given its own, and
+          // under c8-instrumented coverage runs THIS is the call that actually times out
+          // (observed in CI 2026-08-03: "timed out after 2000ms ... held by pid 111",
+          // thrown from inside this `sleep` hook, not from B's outer wait above). Give it
+          // the same generous budget for the same reason -- this call's own genuine
+          // deadlock path is exercised separately by the two sibling tests below.
+          updateProposalRegistry(registryPath, (current) => [...current, proposal("A")], { maxWaitMs: 60_000 });
           aDone = true;
         },
       },
