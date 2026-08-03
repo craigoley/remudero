@@ -93,6 +93,13 @@ const PLAN_YAML = `
   depends_on: []
   status: queued
   pr: 500
+- id: W1-T60
+  title: redispatched — its FIRST PR was disposed blocked, its SECOND (current) PR is still open
+  repo: remudero
+  type: implement
+  verify: auto
+  depends_on: []
+  status: queued
 `;
 
 function plan(): Plan {
@@ -299,4 +306,66 @@ test("buildStatusBoard: BLOCKERS BY CLASS — GitHub gateway unreachable but the
     model.blockers.rows.filter((r) => r.kind === "blocked_pr"),
     [],
   );
+});
+
+// ── W1-T309: W1-T306 merged with PASS 3/3, yet `rmd status` in production kept printing FIVE
+// closed/merged PRs as current blockers. Every W1-T306 test above hands `deriveBlockedPrBlockers`
+// a PR number that IS the owning task's own single, current PR (its lone `pr:` field, or its
+// only-ever `pr.opened` line) — so the batched per-TASK projection it matched against always
+// happened to carry that exact PR number. Production tasks are frequently REDISPATCHED (P29(ii)'s
+// own "resets only on a fresh owned PR" streak breaker): a task's FIRST PR gets disposed
+// blocked-fixable by sweep, the daemon redispatches, and a SECOND PR opens. status.ts's
+// `lastPrOpened` is "last one wins" (deriveStatus rung (a)) — so once the SECOND PR opens, the
+// task's projection resolves ONLY against it; the FIRST PR's number never appears in any
+// projection's own `prNumber`, so `settledPrNumbers` can never learn it later merged or closed,
+// no matter what GitHub says NOW. This is the seam #1214's tests never reached. ─────────────────
+
+const REDISPATCH_PRS: Record<number, PrRef> = {
+  600: { number: 600, url: "https://x/600", state: "CLOSED" }, // FIRST attempt — abandoned once redispatched
+  601: { number: 601, url: "https://x/601", state: "OPEN" }, // SECOND (current) attempt — genuinely still open
+};
+
+function redispatchGithub(overrides: Partial<GitHub> = {}): GitHub {
+  return {
+    // Mirrors buildBatchedGithub's own lookup: matches a bare number OR a URL ending `/<number>`.
+    prByRef: (ref) => {
+      const n = typeof ref === "number" ? ref : Number(String(ref).replace(/^.*\/(\d+)$/, "$1"));
+      return REDISPATCH_PRS[n] ?? null;
+    },
+    findMergedByTrailer: () => null,
+    headRefName: () => undefined,
+    prBody: () => undefined,
+    readFailed: () => false,
+    ...overrides,
+  };
+}
+
+test("buildStatusBoard: BLOCKERS BY CLASS — a task's FIRST (now GitHub-confirmed CLOSED) PR is dropped even though the task has since redispatched a SECOND, still-open PR", () => {
+  const ledgerPath = writeLedger([
+    ledgerLine({ step: "pr.opened", task_id: "W1-T60", pr_url: "https://x/600" }),
+    ledgerLine({
+      step: "sweep.disposed",
+      task_id: "W1-T60",
+      pr_number: 600,
+      pr_url: "https://x/600",
+      disposition: "blocked-fixable",
+      reason: "required checks red — ci-log fix, strike 1/3",
+      acted: true,
+    }),
+    // The redispatch: a NEW pr.opened line supersedes the first for `lastPrOpened`'s "last one
+    // wins" scan — the task's own projection now resolves against #601, never #600 again.
+    ledgerLine({ step: "pr.opened", task_id: "W1-T60", pr_url: "https://x/601" }),
+  ]);
+
+  const model = buildStatusBoard(tmpRoot(), ledgerPath, baseDeps({ plan: plan(), github: redispatchGithub() }));
+
+  assert.equal(
+    model.blockers.rows.find((r) => r.kind === "blocked_pr" && r.prNumber === 600),
+    undefined,
+    "PR #600 is GitHub-confirmed CLOSED right now — it must not render as a blocker just because " +
+      "the owning task's CURRENT pr.opened line points at a different (later) PR",
+  );
+  assert.equal(model.blockers.blockedPrsUnverifiedReason, undefined, "GitHub was reachable — nothing withheld as unverified");
+  const text = renderStatusBoardText(model);
+  assert.doesNotMatch(text, /#600/);
 });
