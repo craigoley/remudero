@@ -1,0 +1,49 @@
+- id: W1-T308
+  title: "`bodyContradictsDiff` reads a QUOTED changeset claim as the PR's own — a body that cites another PR's file count is failed for it, three times in one day"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: "MEASURED 2026-08-03, three instances, all TRUE positives by the predicate's current
+    reading and all wrong in intent. PR #1194 (the backtick fix) quoted the failing fixture from
+    #1192 verbatim inside a blockquote; the predicate read that quotation as #1194's own claim and
+    failed it over a two-file diff. PR #1206 (filing W1-T307) cited #1202's body the same way and
+    was failed over a ONE-file plan shard. Both passed once the quotation was paraphrased —
+    #1194 to 3/3, #1206 to 2/2 — with no change to any code or to the diff.
+    THE PREDICATE HAS NO NOTION OF QUOTED OR ILLUSTRATIVE TEXT. It scans the whole body for the
+    claim shape, so a blockquote, a fenced block, or a sentence reporting what ANOTHER PR said is
+    indistinguishable from an assertion about this changeset.
+    SCOPED HONESTLY, THIS IS NARROW. It bites PRs that discuss changeset checking or quote another
+    PR's body — incident write-ups, gate fixes, and the plan tasks filed from them. That is a small
+    class, and every instance so far has been self-inflicted by work ON this predicate. It is filed
+    because #1194's merged body states it was filed separately, and because the workaround
+    (paraphrase the quotation) silently degrades the record: the exact text that caused a failure is
+    the most useful thing an incident write-up can carry, and the gate currently forbids carrying it.
+    NOT A REGRESSION AND NOT URGENT. The predicate is doing what it was built to do (#974's shape);
+    this is a missing distinction, not a broken one."
+  design: |
+    A QUOTATION IS NOT AN ASSERTION.
+    (1) Exclude markdown-quoted regions from the scan: blockquote lines and fenced code blocks at
+        minimum. Establish what the body actually renders before choosing the set — a rule that
+        excludes too much would let a real contradiction hide inside a fence, which is strictly
+        worse than today's over-firing.
+    (2) Keep the existing anchoring intact. #1077's fix (a count claim counts only when tied to the
+        changeset by an enumeration or a changeset word) is what stops this predicate guessing at
+        natural language, and must not be loosened while adding this.
+    (3) A REGRESSION TEST PER DIRECTION. A quoted claim that does not match the diff must be
+        silence; an UNQUOTED claim that does not match must still fail; and a real claim sitting
+        after a quoted one in the same body must still be read.
+    (4) Weigh doing nothing. The workaround is one sentence of paraphrase and the class is small —
+        if the exclusion cannot be made precise, recording that verdict with its reasoning is a
+        legitimate outcome and better than a loose rule guarding the gate.
+  acceptance:
+    - claim: "a changeset claim inside a blockquote or fenced block is not read as the PR's own assertion"
+      proof: "unit test: test/quoted-changeset-claim.test.ts"
+    - claim: "an unquoted claim contradicting the diff still fails, and a real claim following a quoted one is still read"
+      proof: "unit test: test/quoted-changeset-claim.test.ts"
+  risk: low
+  origin: oper#quoted-changeset-claim-2026-08-03
+  plan_refs: ["§5C"]
+  files: [src/lib/review.ts]
