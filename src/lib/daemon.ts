@@ -34,7 +34,7 @@ import type { RunResult } from "./run-result.js";
 import { assertCleanBoot, type BootAssertion } from "./env.js";
 import { INITIAL_RETRY_STATE, reasonAboutBlock, type RetryState } from "./block-reason.js";
 import { nextRunnable, type MergedSet, type OpenPrCheck , tallyDispatchFilters} from "./drain.js";
-import { HEADROOM_LIMIT_PCT, RESET_UNKNOWN } from "./headroom.js";
+import { HEADROOM_LIMIT_PCT, RESET_UNKNOWN, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
 import { assertRunnable, PlanError, type MergedResolver, type Plan, type Task } from "./plan.js";
 import type { StatusProjection } from "./status.js";
@@ -405,8 +405,15 @@ function resolveHeadroomWindows(
  * W1-T181; the projection regressing to `queued`, W1-T179). Recon R-7 found
  * the real read is unavailable ~78% of the time in the live ledger, so an
  * unconditional fail-closed-on-first-miss would halt the fleet most of the
- * time — hence a BOUNDED allowance, not an immediate halt. */
-export const DEFAULT_UNREADABLE_DEGRADED_LIMIT = 3;
+ * time — hence a BOUNDED allowance, not an immediate halt.
+ *
+ * W1-T290: this literal now RESOLVES TO, rather than merely matches, {@link
+ * UNREADABLE_DEGRADED_LIMIT} (headroom.ts) — the drain's identical bounded-degraded
+ * ceiling reads that SAME export, so the two consumers cannot drift apart the way two
+ * independent `= 3` literals could. This name and this module's own default/override
+ * option (`DaemonOpts.unreadableDegradedLimit`) are UNCHANGED — only where the number
+ * comes from moved. */
+export const DEFAULT_UNREADABLE_DEGRADED_LIMIT = UNREADABLE_DEGRADED_LIMIT;
 
 export interface DaemonOpts {
   /**
