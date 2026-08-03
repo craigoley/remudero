@@ -1568,6 +1568,89 @@ test("BEHAVIORAL (W1-T268): a real runTask run all the way to a real MERGED verd
   }
 });
 
+test("BEHAVIORAL (recon-GK): a real runTask run whose fetchPrBody THROWS falls back to the worker's REPORT text for the implementation review, ledgers review.body_fetch_error, and still reaches a MERGED verdict", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "runtask-bodyfetcherr-root-"));
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(planPath, FOLLOWUP_FIXTURE_PLAN);
+  const config: Config = { claudeBin: "/bin/true", root };
+  followupGitFixture(root);
+
+  const FIXED_TS = 1785000000016;
+  const branch = `run-T-FOLLOWUP-${FIXED_TS}`;
+  const dateNowSpy = t.mock.method(Date, "now", () => FIXED_TS);
+
+  const fakeBinDir = statefulFakeGh({
+    branch,
+    ciSeq: [[{ name: "ci", conclusion: "SUCCESS" }]],
+    pollSeq: [{ state: "MERGED" }],
+  });
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${fakeBinDir}:${savedPath}`;
+
+  const IMPLEMENT_TEXT = "REPORT\nWORKER-CHAT-FALLBACK-TEXT\nPR_URL: https://github.com/acme/remudero/pull/602\n";
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const spawn: typeof spawnWorker = async (args) => {
+    spawnCalls.push(args);
+    if (spawnCalls.length === 1) {
+      return result({
+        sessionId: "s-recon",
+        text: "RECON REPORT\nOBSERVED: nothing\nINFERRED: nothing\nCOULDN'T-VERIFY: nothing\n",
+      });
+    }
+    if (spawnCalls.length === 2) {
+      return result({ sessionId: "s-implement", accountLabel: "acct-bodyfetcherr", text: IMPLEMENT_TEXT });
+    }
+    return result({
+      sessionId: "s-risk-judge",
+      text: "RISK_VERDICT: low\nRISK_CONFIDENCE: 0.95\nRISK_REASON: a small, well-tested fixture change\n",
+    });
+  };
+
+  const reviewReports: string[] = [];
+
+  try {
+    const res = await withLiveWritesAllowed(() =>
+      runTask("T-FOLLOWUP", {
+        skipGitSync: true,
+        planPath,
+        config,
+        github: FOLLOWUP_OFFLINE_GITHUB,
+        spawn,
+        containmentExec: followupHoldingContainmentExec,
+        isolationExec: followupCleanIsolationExec,
+        fetchPrBody: async () => {
+          throw new Error("gh pr view unavailable");
+        },
+        runReview: async (args) => {
+          reviewReports.push(args.report);
+          return fakeReview("success", []);
+        },
+      }),
+    );
+
+    assert.equal(res.verdict, "merged", "a throwing fetchPrBody must never block the run — it degrades, not crashes");
+    assert.equal(res.merged, true);
+    assert.equal(reviewReports.length, 1);
+    assert.match(
+      reviewReports[0],
+      /WORKER-CHAT-FALLBACK-TEXT/,
+      "the review must fall back to the worker's REPORT text when fetchPrBody throws",
+    );
+
+    const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
+    const fetchErr = ledger.find((l) => l.step === "review.body_fetch_error");
+    assert.ok(fetchErr, "the throwing fetchPrBody must be ledgered, not silently swallowed");
+    assert.match(String(fetchErr.error ?? ""), /gh pr view unavailable/);
+  } finally {
+    dateNowSpy.mock.restore();
+    process.env.PATH = savedPath;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("BEHAVIORAL (W1-T268): a real runTask run past the risk judge whose FINAL poll reads a red required check reaches the terminal (post-poll) blocked_ci verdict, ledgered with billing_mode + account_label", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "runtask-blockedci-final-root-"));
   const planPath = join(root, "tasks.yaml");
