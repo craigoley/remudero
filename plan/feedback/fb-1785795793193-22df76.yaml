@@ -1,0 +1,19 @@
+id: fb-1785795793193-22df76
+ts: 2026-08-03T22:23:13.194Z
+raw: "MERGE COMMIT CARRIES A LEAKED HEREDOC TAIL — 62d034a (#1236, merged
+  2026-08-03T22:08:04Z) has a Co-Authored-By: trailer followed by a literal EOF
+  and a closing paren, inherited from the PR body. So a worker built its body
+  with a heredoc and the terminator leaked into the text. Cosmetic on this
+  commit, but commitlint is a REQUIRED check that lints every commit on a PR and
+  enforces header length and body wrapping — it evidently does not check trailer
+  well-formedness, so this can recur silently on any body. RECON: establish
+  which lane or prompt builds a PR body with a heredoc (CLAUDE.md's zsh paste
+  rules already forbid heredocs in operator paste blocks for a related reason),
+  whether commitlint could reject a malformed trailer without false positives,
+  and how many merged commits carry the same shape. Falsifying check: if this is
+  a one-off from a hand-written body rather than a template, there is nothing to
+  fix."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
