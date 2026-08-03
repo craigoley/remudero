@@ -104,6 +104,7 @@ import {
   type DaemonOpts,
   type DaemonSummary,
   type HeadroomPolicy,
+  type StarvationCensus,
   priorUnrecognisedResetStrings,
 } from "./lib/daemon.js";
 import { makeTempDir, sweepStaleTempDirs, withTempDir } from "./lib/tmp.js";
@@ -7328,6 +7329,103 @@ export function escalateHeadroomReserve(
 }
 
 /**
+ * Recon oper#queue-starvation-2026-08-03: the daemon's `onStarvation` hook, called on an idle
+ * tick whose dispatch-filter census names at least one RECOVERABLE-class blocker (circuit-
+ * broken, blocked, or unmet-deps — see daemon.ts's `StarvationCensus`/starvation predicate)
+ * rather than every remaining task being already-merged or verify:human. THE ASYMMETRY THIS
+ * FIXES: a FAILING run already escalates (`escalateCircuitBreak` above fires once per tripped
+ * breaker), but a queue that has run OUT of dispatchable work used to be indistinguishable
+ * from one quietly healthy between tasks — both logged only `daemon.idle`. Dispatch is
+ * already idle by the time this fires (the same in-process bound `runDaemon`'s own
+ * `starvationEscalated` applies before ever calling this) — a pure notification, mirroring
+ * `escalateCircuitBreak`/`escalateHeadroomReserve` immediately above rather than a second
+ * mechanism.
+ *
+ * CROSS-BOOT DEDUP, KEYED ON "has anything actually dispatched since this last escalated" —
+ * never a fixed key (there is only ever one starvation state at a time, unlike
+ * `escalateCircuitBreak`'s per-task-id dedup) and never the census contents (the exact set of
+ * blocked ids can churn while the queue stays starved throughout — that is still the SAME
+ * episode, not a new one). `run.start` (status.ts's own dispatch-attempt marker, already
+ * decision-relevant) is the natural episode boundary: it is written the moment ANY task is
+ * next attempted, which is exactly what ends a starvation episode ("a new dispatchable task
+ * ends the episode and re-arms"). If the most recent `dispatch.starvation.escalated` line
+ * postdates the most recent `run.start` line, this starvation has already been reported and
+ * nothing has dispatched since — no-op. Otherwise a dispatch happened since the last notice
+ * (or none was ever sent), so the episode is fresh: escalate and write the marker, whether or
+ * not delivery succeeded (`escalateCircuitBreak`'s discipline — an undelivered notice must
+ * never retry into an unbounded relaunch loop).
+ */
+export function escalateStarvation(
+  census: StarvationCensus,
+  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
+): void {
+  const lines = readLedgerLines(ctx.ledgerPath);
+  let lastEscalatedIdx = -1;
+  let lastDispatchIdx = -1;
+  lines.forEach((l, i) => {
+    if (l.step === "dispatch.starvation.escalated") lastEscalatedIdx = i;
+    if (l.step === "run.start") lastDispatchIdx = i;
+  });
+  if (lastEscalatedIdx !== -1 && lastEscalatedIdx > lastDispatchIdx) return;
+
+  const name = (label: string, bucket: { count: number; ids: readonly string[]; truncated: number }): string | null =>
+    bucket.count === 0
+      ? null
+      : `${label}: ${bucket.count} (${bucket.ids.join(", ")}${bucket.truncated > 0 ? `, +${bucket.truncated} more` : ""})`;
+  const parts = [
+    name("circuit-broken", census.circuitBroken),
+    name("blocked", census.blocked),
+    name("unmet-deps", census.unmetDeps),
+  ].filter((p): p is string => p !== null);
+
+  const issueUrl = tryEscalate(
+    {
+      class: "BLOCKED",
+      taskId: "daemon",
+      runId: ctx.runId,
+      summary: `dispatch queue starved — zero dispatchable, ${parts.length} recoverable class(es) blocking`,
+      detail:
+        `oper#queue-starvation-2026-08-03: the queue has nothing dispatchable, but this is NOT ` +
+        `every task being done or needing a human — at least one RECOVERABLE-class blocker is ` +
+        `holding it back: ${parts.join("; ")}. The fleet has headroom to spend and is sitting idle ` +
+        `instead; the only prior symptom was a bare \`daemon.idle\` line every poll.`,
+      options: [
+        {
+          label: "resolve the blockers",
+          detail:
+            "Fix the named ids: a circuit-broken task needs a manual patch or `rmd fix` (then a " +
+            "fresh owned PR clears the breaker); a `blocked:` task needs the plan mark lifted; an " +
+            "unmet-deps task clears itself once its dependency merges.",
+        },
+        {
+          label: "acknowledge and wait",
+          detail: "If the blockers are already being worked, no action is needed — the daemon keeps polling and re-arms this notice once it next dispatches.",
+        },
+      ],
+      recommendation: "resolve the blockers",
+    },
+    {
+      issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo),
+      ledgerPath: ctx.ledgerPath,
+      runId: ctx.runId,
+    },
+  );
+  appendLedger(ctx.ledgerPath, {
+    run_id: ctx.runId,
+    task_id: "daemon",
+    step: "dispatch.starvation.escalated",
+    circuit_broken: census.circuitBroken.count,
+    blocked: census.blocked.count,
+    unmet_deps: census.unmetDeps.count,
+    circuit_broken_ids: census.circuitBroken.ids,
+    blocked_ids: census.blocked.ids,
+    unmet_deps_ids: census.unmetDeps.ids,
+    issue_url: issueUrl,
+    delivered: issueUrl !== null,
+  });
+}
+
+/**
  * W1-T206: shared dispatch-breaker gate for drainCommand/daemonCommand — ONE
  * {@link DispatchBreakerCache} per invocation (never rebuilt per tick/per task, so a
  * same-process rotation gets caught as it happens — see the cache's own doc), memoized
@@ -8161,6 +8259,10 @@ export async function daemonCommand(
         // P34 clause (c), W1-T249: the reserve gate's notification — dispatch is
         // already paused (runDaemon's own in-process idle) by the time this fires.
         onHeadroomBreach: (info) => escalateHeadroomReserve(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
+        // oper#queue-starvation-2026-08-03: the idle rung's starvation notification — dispatch
+        // is already idle (runDaemon's own in-process bound, `starvationEscalated`) by the time
+        // this fires.
+        onStarvation: (census) => escalateStarvation(census, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
         checkStop: () => stopDetail(config.root),
         checkPause: () => pauseDetail(config.root),
         // impl-FZ — PLAN FRESHNESS. Wired ONLY on the git-synced self-target path, so the reload

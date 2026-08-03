@@ -33,7 +33,14 @@ import type { AutoTriageDecision } from "./auto-triage.js";
 import type { RunResult } from "./run-result.js";
 import { assertCleanBoot, type BootAssertion } from "./env.js";
 import { INITIAL_RETRY_STATE, reasonAboutBlock, type RetryState } from "./block-reason.js";
-import { nextRunnable, type MergedSet, type OpenPrCheck , tallyDispatchFilters} from "./drain.js";
+import {
+  nextRunnable,
+  type MergedSet,
+  type OpenPrCheck,
+  tallyDispatchFilters,
+  type IdleReasonBucket,
+  IDLE_REASON_ID_CAP,
+} from "./drain.js";
 import { HEADROOM_LIMIT_PCT, RESET_UNKNOWN, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
 import { assertRunnable, PlanError, type MergedResolver, type Plan, type Task } from "./plan.js";
@@ -486,6 +493,28 @@ export type DaemonFreshness =
   | { stale: false }
   | { stale: true; oldSha: string; newSha: string; installNeeded?: boolean };
 
+/**
+ * QUEUE STARVATION census (recon oper#queue-starvation-2026-08-03): the RECOVERABLE-class
+ * subset of an idle tick's dispatch-filter tally — the classes that could clear on their own
+ * (a human resolves the block, a dependency merges, a fresh owned PR appears) without the
+ * plan itself ever changing, as opposed to `already-merged` (the plan is DONE) or
+ * `verify-not-auto` (permanently needs a human, waiting never helps). `circuitBroken` is
+ * reported separately from `blocked`/`unmetDeps` because `isDispatchEligible` ledgers it
+ * through its own `onCircuitBreak` callback rather than `tallyDispatchFilters`'s
+ * `DispatchFilterReason` union — see drain.ts's doc on that split.
+ */
+export interface StarvationCensus {
+  circuitBroken: IdleReasonBucket;
+  blocked: IdleReasonBucket;
+  unmetDeps: IdleReasonBucket;
+}
+
+/** Same shape/truncation discipline as {@link tallyDispatchFilters}'s own buckets, applied to
+ *  the circuit-broken ids collected outside that tally (see {@link StarvationCensus}'s doc). */
+function bucketFromIds(ids: readonly string[]): IdleReasonBucket {
+  return { count: ids.length, ids: ids.slice(0, IDLE_REASON_ID_CAP), truncated: Math.max(0, ids.length - IDLE_REASON_ID_CAP) };
+}
+
 export interface DaemonSummary {
   attempted: string[];
   merged: string[];
@@ -591,6 +620,22 @@ export interface DaemonDeps {
     limitPct: number;
     resetsAt: string;
   }) => void | Promise<void>;
+  /**
+   * QUEUE STARVATION (recon oper#queue-starvation-2026-08-03): called on an idle tick whose
+   * dispatch-filter census names at least one RECOVERABLE-class blocker — see {@link
+   * StarvationCensus} and the predicate right above where this fires in the idle rung. Fires
+   * AT MOST ONCE per starvation episode (the SAME "dedup while the condition holds, reset once
+   * a dispatchable task ends it" discipline `onHeadroomBreach`/`onCircuitBreak` already apply),
+   * and dispatch is already idle by the time this fires, so the hook is a pure notification,
+   * never a dispatch decision. The real command wires escalate.ts's `escalate()` (via
+   * run-task.ts's `escalateStarvation`) naming the census, with its OWN cross-boot ledger dedup
+   * (mirroring `escalateCircuitBreak`'s durable dedup, since this in-process bound alone resets
+   * to empty on every daemon restart — see `daemon.ts`'s `starvationEscalated`). Wrapped in the
+   * caller's own try/catch (same discipline as `onCircuitBreak`/`onHeadroomBreach`) so a failed
+   * notification costs one logged line, never the daemon's liveness. Optional — omitted, the
+   * daemon still idles exactly as before this hook existed, it just opens no issue.
+   */
+  onStarvation?: (census: StarvationCensus) => void | Promise<void>;
   /**
    * Fleet control (W1-T11, MASTER-PLAN §4A/§4B): a defined return ⇒ a hard STOP
    * is in effect, and the string is the ledger/summary detail. Checked FIRST,
@@ -1199,6 +1244,14 @@ export async function runDaemon(
   // episode) escalates again rather than staying silenced for the rest of
   // this process's life.
   let headroomReserveEscalated = false;
+  // QUEUE STARVATION ESCALATION DEDUP (recon oper#queue-starvation-2026-08-03): the SAME
+  // per-episode bound `headroomReserveEscalated`/`circuitEscalated` apply above — the census is
+  // re-derived fresh every idle tick, so without this the notification hook would fire on
+  // every poll for as long as the queue stays starved. Cleared the moment a tick is NOT
+  // starved (a dispatchable task appeared, or every remaining recoverable-class blocker
+  // cleared), so a LATER episode escalates again rather than staying silenced for the rest of
+  // this process's life.
+  let starvationEscalated = false;
   const maxSpawnInfraBackoffMs = opts.maxSpawnInfraBackoffMs ?? DEFAULT_MAX_SPAWN_INFRA_BACKOFF_MS;
   // BOUNDED DEGRADED MODE (recon R-7: the live ledger shows /usage unreadable
   // ~78% of the time — an unconditional fail-closed-on-first-miss would halt
@@ -1583,6 +1636,11 @@ export async function runDaemon(
     // not distinguish "starved of work" from "everything filtered". This tallies the declines as
     // the filter runs; nothing about what is eligible changes.
     const idleReasons = tallyDispatchFilters();
+    // QUEUE STARVATION (recon oper#queue-starvation-2026-08-03): `isDispatchEligible` ledgers a
+    // circuit-broken decline through its own `onCircuitBreak` callback, never through
+    // `idleReasons`'s `DispatchFilterReason` tally (see drain.ts's doc) — collected here, per
+    // tick, so the starvation census below can name it alongside `blocked`/`unmet-deps`.
+    const circuitBrokenThisTick: string[] = [];
     const next = forcedNext ?? nextRunnable(plan, isMerged, {
       isOpenPr: deps.isOpenPr,
       onFiltered: idleReasons.onFiltered,
@@ -1622,6 +1680,7 @@ export async function runDaemon(
       // loop, and never re-escalates a task it already escalated.
       onCircuitBreak: (t) => {
         log("dispatch.circuit_broken", { task: t.id });
+        circuitBrokenThisTick.push(t.id);
         if (!circuitEscalated.has(t.id)) {
           circuitEscalated.add(t.id);
           // The injected hook opens a GitHub issue (escalateCircuitBreak ->
@@ -1652,6 +1711,47 @@ export async function runDaemon(
       if (idleSignature !== lastIdleSignature) {
         lastIdleSignature = idleSignature;
         log("daemon.idle_reasons", { tick: ticks, ...idleReasons.snapshot() });
+      }
+
+      // ── QUEUE STARVATION (recon oper#queue-starvation-2026-08-03) ──────────────
+      // A FAILING run already escalates (`onCircuitBreak` above, once per tripped breaker) —
+      // but until now a queue that has run OUT of dispatchable work was indistinguishable in
+      // the ledger from a queue that is quietly healthy between tasks: both emitted only
+      // `daemon.idle`. The census `idleReasons` already tallies is the data; this is the first
+      // reader. STARVED := zero dispatchable (already true, this is the idle branch) AND at
+      // least one task filtered by a RECOVERABLE class — circuit-broken, blocked, or
+      // unmet-deps, each capable of clearing on its own without the plan changing.
+      // `already-merged` and `verify-not-auto` are DELIBERATELY excluded: an all-merged plan
+      // is DONE, not starved, and a verify:human task never becomes machine-dispatchable no
+      // matter how long the daemon waits — counting either would misreport "nothing left to
+      // do" or "everything needs a human anyway" as the SAME starvation this predicate exists
+      // to name apart from.
+      const idleTally = idleReasons.snapshot();
+      const starvationCensus: StarvationCensus = {
+        circuitBroken: bucketFromIds(circuitBrokenThisTick),
+        blocked: idleTally.blocked,
+        unmetDeps: idleTally["unmet-deps"],
+      };
+      const starved =
+        starvationCensus.circuitBroken.count > 0 ||
+        starvationCensus.blocked.count > 0 ||
+        starvationCensus.unmetDeps.count > 0;
+      if (starved) {
+        if (!starvationEscalated) {
+          starvationEscalated = true;
+          // Same backstop discipline as `onCircuitBreak`/`onHeadroomBreach` above: a failed
+          // notification costs one logged line, never the daemon's liveness.
+          try {
+            await deps.onStarvation?.(starvationCensus);
+          } catch (e) {
+            log("daemon.escalation.failed", { task: "daemon", error: String((e as Error)?.message ?? e) });
+          }
+        }
+      } else {
+        // Nothing recoverable is blocking this tick — re-arm, so a LATER starvation episode
+        // (new recoverable blockers, after this one cleared) escalates again rather than
+        // staying silenced for the rest of this process's life.
+        starvationEscalated = false;
       }
 
       // ── AUTO-TRIAGE RUNG (impl-DJ, recon-DC #2) ────────────────────────────────
@@ -1695,6 +1795,9 @@ export async function runDaemon(
       await deps.sleep(pollIntervalMs);
       continue;
     }
+
+    // A dispatchable task ends any starvation episode — re-arm so a LATER one escalates again.
+    starvationEscalated = false;
 
     log("daemon.iteration", { task: next.id, attempted: attempted.length + 1, max: opts.max ?? null });
     attempted.push(next.id);
