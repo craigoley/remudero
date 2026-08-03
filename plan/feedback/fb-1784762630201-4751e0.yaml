@@ -10,5 +10,5 @@ raw: "FEEDBACK-ONLY PRS FAIL REVIEW CLOSED — a plan/feedback/-only PR carries 
   bridge — its PRs must be mergeable through the gate unattended."
 attachments: []
 origin: cli
-status: new
+status: rejected
 proposal_pr: null
