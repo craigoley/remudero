@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, fstatSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -277,6 +277,79 @@ test("reclaimStaleLock: a non-ENOENT open failure propagates rather than reading
         ),
       /permission denied/,
       "a real I/O error must not be swallowed into outcome: missing",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test(
+  "reclaimStaleLock: the lock vanishes AFTER the identity check passes but " +
+    "BEFORE unlinkSync itself — the ENOENT from that syscall is a lost reclaim, not a crash",
+  () => {
+    const dir = tmp();
+    const lockPath = join(dir, "unlink-race.lock");
+    writeFileSync(lockPath, JSON.stringify({ pid: 999999 }));
+    const traces: Array<{ lockPath: string; reason: string }> = [];
+    try {
+      const result = reclaimStaleLock(
+        lockPath,
+        {
+          parseHolder: (raw) => JSON.parse(raw),
+          isStale: () => true,
+          onLostReclaim: (d) => traces.push(d),
+        },
+        {
+          openSync,
+          readFileSync,
+          closeSync,
+          fstatSync,
+          statSync,
+          // The identity check (real statSync above) still finds the untouched file — it is
+          // ONLY the unlink call itself that discovers it is gone, simulating a peer that
+          // won this exact narrow window between our stat and our unlink.
+          unlinkSync: () => {
+            const e = new Error("ENOENT: no such file or directory") as NodeJS.ErrnoException;
+            e.code = "ENOENT";
+            throw e;
+          },
+        },
+      );
+      assert.equal(result.outcome, "lost", "an ENOENT from unlinkSync itself must not read as reclaimed");
+      assert.equal(traces.length, 1, "the loss was traced, not silently swallowed");
+      assert.match(traces[0].reason, /vanished between the identity check and the unlink/);
+      assert.equal(traces[0].lockPath, lockPath);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+test("reclaimStaleLock: a non-ENOENT unlinkSync failure propagates rather than reading as a lost reclaim", () => {
+  const dir = tmp();
+  const lockPath = join(dir, "unlink-eacces.lock");
+  writeFileSync(lockPath, JSON.stringify({ pid: 999999 }));
+  try {
+    assert.throws(
+      () =>
+        reclaimStaleLock(
+          lockPath,
+          { parseHolder: (raw) => JSON.parse(raw), isStale: () => true },
+          {
+            openSync,
+            readFileSync,
+            closeSync,
+            fstatSync,
+            statSync,
+            unlinkSync: () => {
+              const e = new Error("permission denied") as NodeJS.ErrnoException;
+              e.code = "EACCES";
+              throw e;
+            },
+          },
+        ),
+      /permission denied/,
+      "a real I/O error out of unlinkSync must not be swallowed into outcome: lost",
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
