@@ -1,0 +1,47 @@
+- id: W1-T302
+  title: "a task credited merged can have had only half its acceptance shipped — W1-T64's empty-branch guard is absent from src while the task reads done, and nothing in the system can see the gap"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "MEASURED AT SOURCE on main, 2026-08-03. W1-T64 carries TWO acceptance claims: (1) the
+    retro/architect spawn resolves its turn budget from mounts rather than a hardcoded 40, and (2)
+    `gh pr create` is guarded by `commitsAhead` so an empty branch is logged and cleaned, never PR'd.
+    Claim (1) SHIPPED — run-task.ts carries `maxTurns: mountsTable.architect.maxTurns` under a
+    comment naming W1-T64. Claim (2) DID NOT: `grep -rn 'commitsAhead\\|ahead_by\\|rev-list --count'`
+    over src/ returns NOTHING. The task is credited merged and filtered out of every queue.
+    THE ORIGINAL SYMPTOM IS THEREFORE STILL LIVE. W1-T64's own rationale records that `rmd retro`
+    fails at `gh pr create --fill` on a branch 0 commits ahead of main, and calls it 'this DISABLES
+    the self-improvement loop: the system drains but cannot learn'. That guard is still not there.
+    THE CLASS MATTERS MORE THAN THE INSTANCE. Merge credit is derived per TASK, never per CLAIM, so a
+    multi-claim task whose PR satisfies one claim is indistinguishable from one that satisfied all of
+    them. Every such task leaves a silent hole exactly where someone already argued a hole was
+    expensive. This was found by hand while investigating something unrelated, which is not a
+    detection strategy."
+  design: |
+    A CLAIM-LEVEL AUDIT over merged tasks — a REPORT first, enforcement only if the report earns it.
+    (1) For every task credited merged whose acceptance proofs are in an executable dialect, run each
+        proof through the reviewer's OWN parser and executor (the machinery `rmd check-proof` already
+        exposes — reuse it, do not re-implement a second matcher that can disagree with the gate).
+    (2) Emit the tasks with at least one proof that does NOT resolve or does NOT pass. Report ONLY;
+        a proof that fails to resolve is frequently a stale proof rather than missing work, and this
+        must not start closing or re-opening tasks on that ambiguity.
+    (3) SIZE THE PROBLEM BEFORE PROPOSING ENFORCEMENT. Run it over the ~299 merged tasks and record
+        the count in the PR body. If half the corpus trips it, the finding is that the proofs decayed;
+        if a handful do, they are real holes worth filing individually. Either answer is a result.
+    (4) Prose-proof tasks (W1-T64's own are prose) are NOT executable and must be reported as
+        UNCHECKABLE in their own bucket, never silently counted as passing — that bucket's size is
+        itself the interesting number.
+  acceptance:
+    - claim: "the audit runs every executable acceptance proof of a merged task through the reviewer's own executor and lists tasks with an unresolved or failing proof"
+      proof: "unit test: test/merged-claim-audit.test.ts"
+    - claim: "tasks whose proofs are prose and therefore unexecutable are reported as uncheckable rather than counted as passing"
+      proof: "unit test: test/merged-claim-audit.test.ts"
+    - claim: "W1-T64's second claim is still unshipped on main — no commits-ahead guard exists in src"
+      proof: "unit test: test/merged-claim-audit.test.ts"
+  risk: medium
+  origin: oper#half-shipped-w1t64-2026-08-03
+  plan_refs: ["§5C", "§8A"]
+  files: [src/lib/review.ts]

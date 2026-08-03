@@ -1,0 +1,45 @@
+- id: W1-T298
+  title: "an EMPTY dispatch queue escalates nothing — the fleet starved for ~12h with 14% headroom spent and the only symptom was `daemon.idle` in a log nobody reads"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 50.00
+  rationale: "MEASURED 2026-08-03. `rmd status` reported `QUEUE HEAD: nothing dispatchable` with four
+    tasks circuit-broken. The daemon had been in that state for hours: every tick logged
+    `dispatch.circuit_broken` for W1-T288 and W1-T295, then `daemon.idle`, then slept 60s. Twenty
+    `dispatch.circuit_broken` lines are in the live ledger for a single morning. NOTHING ESCALATED.
+    The operator discovered it by hand.
+    THE ASYMMETRY IS THE DEFECT: a FAILING run escalates (escalateCircuitBreak fires once per tripped
+    breaker), but a queue that has run OUT of dispatchable work is indistinguishable in the ledger
+    from a queue that is quietly healthy between tasks — both emit `daemon.idle`. `daemon.idle_reasons`
+    carries the full census (already-merged 299, verify-not-auto 18, blocked 3, unmet-deps 3) and is
+    written every tick, so the DATA to decide 'this is starvation, not a gap' is already on the line;
+    no reader consumes it. Headroom was at 14% of the weekly limit — the fleet was not throttled, it
+    was starved, and had capacity to burn for the whole window it sat still."
+  design: |
+    A STARVATION PREDICATE over the census `daemon.idle_reasons` ALREADY writes — not a new probe.
+    (1) Starved := zero dispatchable AND at least one task filtered by a RECOVERABLE class
+        (circuit-broken, unmet-deps, blocked). An all-merged plan is DONE, not starved, and must
+        stay silent — that distinction is the whole point and needs its own test.
+    (2) Escalate exactly ONCE per starvation episode, deduped through the same ledger-step idiom
+        `escalateCircuitBreak` uses (a step read back before firing), so a 60s poll loop cannot page
+        the operator every minute for 12 hours. A new dispatchable task ends the episode and re-arms.
+    (3) The escalation NAMES the census: how many tasks in each recoverable class and the specific
+        ids, because 'the queue is empty' is not actionable while 'W1-T288/W1-T295 are circuit-broken
+        and reset only on a fresh owned PR' is.
+    (4) Any new ledger step a DECISION reads must be added to DECISION_RELEVANT_LEDGER_STEPS in the
+        SAME PR — the dedup above is exactly such a decision, and a rotation that drops the step
+        re-pages the operator forever (the ABSENT_REPUSH_CAP class, CLAUDE.md).
+  acceptance:
+    - claim: "a queue with zero dispatchable tasks and at least one recoverable-class blocker escalates exactly once, naming the class census and the blocked ids"
+      proof: "unit test: test/queue-starvation.test.ts"
+    - claim: "a plan whose every task is already merged is DONE, not starved, and escalates nothing"
+      proof: "unit test: test/queue-starvation.test.ts"
+    - claim: "the dedup step is registered so a ledger rotation cannot re-arm the page"
+      proof: "unit test: test/queue-starvation.test.ts"
+  risk: high
+  origin: oper#queue-starvation-2026-08-03
+  plan_refs: ["§5D", "§7B"]
+  files: [src/lib/daemon.ts, src/lib/ledger.ts]

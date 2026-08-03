@@ -1,0 +1,47 @@
+- id: W1-T301
+  title: "`rmd status` reports the deploy supervisor as 'not running' whenever it is between ticks — a healthy periodic one-shot and a dead service render as the same words"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: "MEASURED 2026-08-03. `rmd status` printed `deploy-supervisor: not running` under
+    LIVENESS while the supervisor was in fact healthy and working: `launchctl list` showed
+    `-  0  com.remudero.supervisor` (pid `-`, LAST EXIT 0) and the ledger carried eight `deploy.ok`,
+    eight `deploy.kickstart` and eight `deploy.console_ok` lines for that same morning. The daemon
+    was running on the current origin/main sha, which is only possible if the supervisor had deployed
+    it. The report was wrong in the direction that matters — it accuses a working component.
+    THE MODEL ERROR: the supervisor is a launchd StartInterval ONE-SHOT (`rmd deploy-run`, ~120s).
+    Its correct steady state is NOT RUNNING — it wakes, acts, exits 0, sleeps. A liveness check that
+    asks 'is there a pid right now' is asking a question a periodic job's health does not answer, and
+    it returns the alarming answer roughly all of the time.
+    THIS IS W1-T288's DEFECT MIRRORED. There, `#controls-status` rendered health from the ABSENCE of
+    flag files, so a dead daemon and a healthy one were the same pixels. Here a healthy periodic job
+    and a dead one are the same words. Same root: a liveness claim derived from a signal that does
+    not carry liveness. An operator who trusts this line either chases a non-problem or, far worse,
+    learns to ignore the LIVENESS section — which is the section that will report the real outage."
+  design: |
+    LIVENESS FOR A PERIODIC JOB IS RECENCY PLUS EXIT STATUS, never instantaneous pid presence.
+    (1) Model the two service shapes distinctly. A resident service (daemon, serve) is healthy when
+        it HAS a pid. An interval service is healthy when its last exit was 0 and it has run within
+        a bounded multiple of its own StartInterval. Read that interval from the installed unit
+        rather than restating it — a hardcoded 120 drifts the moment the plist changes.
+    (2) Render three states, not two: running, idle-between-ticks (with the age of the last tick),
+        and overdue/failing (with the last exit code). 'not running' must become unreachable for an
+        interval service, because it is never the useful thing to say about one.
+    (3) VERIFY THE LABEL AGAINST launchctl BEFORE EDITING ANYTHING. The installed unit is
+        `com.remudero.supervisor`; the status text says 'deploy-supervisor'. Whether the check is
+        looking up a label that does not exist is UNRESOLVED here and is the first thing to measure —
+        if so, the fix is smaller than this design assumes, and the rest still stands.
+  acceptance:
+    - claim: "an interval service with last-exit 0 and a tick inside its window renders as healthy-idle with the tick age, never as 'not running'"
+      proof: "unit test: test/status-service-liveness.test.ts"
+    - claim: "an interval service overdue past its window or last-exiting nonzero renders as overdue and names the exit code"
+      proof: "unit test: test/status-service-liveness.test.ts"
+    - claim: "a resident service is still judged by pid presence, unchanged"
+      proof: "unit test: test/status-service-liveness.test.ts"
+  risk: low
+  origin: oper#status-supervisor-2026-08-03
+  plan_refs: ["§7"]
+  files: [src/lib/status.ts]
