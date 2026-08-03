@@ -1,0 +1,65 @@
+- id: W1-T315
+  title: "the console can answer 'what is this task doing' but not 'where does the workstream STAND' — a Plan view: progress (done / in-flight / queued, derived from GitHub, never the yaml status field) plus the frontier, each item carrying WHY it is next"
+  repo: remudero
+  depends_on: [W1-T314]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "OPERATOR DIRECTIVE 2026-07-22 (feedback fb-1784770111145-cf7c24, clause 2). The console renders
+    rows — per-task status, phase, elapsed, spend — and W1-T157's find layer answers 'where is X'. Neither
+    answers 'how far along is the workstream and what happens next', which is the question the operator opens
+    the console to answer and today reconstructs by hand from a 12.5k-line plan file plus a shard directory.
+    'DERIVED FROM GITHUB, NOT YAML' IS HOUSE DOCTRINE WITH A LIVE FIXTURE, not a preference: task status is
+    derived from GitHub precisely because the yaml `status:` field proved decorative, and W1-T280's harvest
+    recorded W1-T279 reading `queued`/`attempts: 0` while its own PR #1062 was MERGED. A progress bar computed
+    off `status:` would therefore be confidently wrong on exactly the tasks that just shipped.
+    'AND WHY' IS THE HALF THAT MAKES IT TRUSTWORTHY. A frontier list with no reason is a list the operator
+    must verify against drain semantics before believing; the ordering predicate already exists in the drain
+    path (runnableCandidates, src/lib/drain.ts:202) and can state its own reason."
+  design: |
+    PROGRESS — DERIVED, BATCHED, HONEST UNDER DARKNESS. Counts of done / in-flight / queued for the workstream,
+    computed from the SAME GitHub-derived projection the board already uses (projectPlan + the batched
+    gateway), never from the yaml `status:` field and never one fetch per row (the W1-T181/W1-T182 batching
+    discipline, and the 1 MiB execFileSync outage W1-T160 fixed, both apply). A gateway failure renders a
+    stated UNKNOWN with the last-known value and its age — never a zero, never a silently-shrunk denominator
+    (W1-T262's rule that the merged tally reads 'unknown' during an outage rather than 0).
+    FRONTIER — THE SAME ORDER THE DRAIN WOULD PICK, WITH ITS OWN REASON. Render the next N candidates in the
+    order the dispatcher would actually take them by BINDING the existing selector rather than re-implementing
+    ordering in the console: a board that computes its own order can disagree with the daemon, and a frontier
+    that disagrees with what runs next is worse than no frontier. Each row states WHY — that it is the head of
+    file order, or which dependency is unmet, or the named blocker holding it (the W1-T186 named-reason
+    vocabulary) — and the reason is DERIVED from the same predicate that ordered the row, never a hand-written
+    blurb that can drift.
+    NOT-RUNNABLE IS INFORMATION, NOT ABSENCE: a task held by an unmet dep, a circuit breaker with its reset
+    ETA, or a verify:human parking must be visible AS held with its reason, because 'why is nothing running'
+    is the same question as 'what is next'.
+    WHERE IT LIVES: the Plan tab W1-T314 creates. FALLBACK, stated so this cannot deadlock: if W1-T314 stalls,
+    drop the dep and ship this as a console SECTION — the view is the deliverable and the tab is its home, not
+    its precondition.
+    OUT OF SCOPE, OWNED ELSEWHERE: live run rows / daemon / deploy state (the Now tab, bound to
+    src/lib/status-board.ts), priority as a data field (feedback fb-1785237638458-0524f6 — this view RENDERS
+    whatever ordering the drain uses today and must not introduce a second notion of priority), and any write
+    action on a frontier row (W1-T260 owns the Run button).
+  acceptance:
+    - claim: "progress counts (done / in-flight / queued) are computed from the GitHub-derived projection, and a task whose yaml status says queued while its PR is merged counts as DONE — the falsifier is a count read off the yaml status field"
+      proof: "unit test: test/plan-view.test.ts"
+    - claim: "an unreadable GitHub gateway renders a stated UNKNOWN with the last-known value and its age, never a zero, and the counts resolve through ONE batched call rather than one per task"
+      proof: "unit test: test/plan-view.test.ts"
+    - claim: "the frontier renders the next candidates in the SAME order the dispatcher would take them, by binding the existing runnable selector rather than re-deriving ordering in the console"
+      proof: "unit test: test/plan-view.test.ts"
+    - claim: "every frontier row states a machine-derived reason (file-order head / named unmet dependency / named blocker with breaker ETA), and a held task renders as held-with-reason instead of being omitted"
+      proof: "unit test: test/plan-view.test.ts"
+  risk: high
+  origin: feedback#fb-1784770111145-cf7c24
+  plan_refs: ["§7", "§7B"]
+  files: [src/lib/panel-graph.ts, src/lib/serve.ts, test/plan-view.test.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-08-03 from feedback fb-1784770111145-cf7c24 (clause 2). depends_on [W1-T314] is a real
+    dependency — this fills the tab that task creates — and the design states the explicit fallback if T314
+    stalls, per the W1-T183/#410 lesson that a hard dep stalls its dependant. risk:high: it reads the drain's
+    own ordering predicate and the batched GitHub gateway; a wrong frontier misdirects the operator's
+    attention, which is the exact failure this arc exists to fix. NOT a re-decision of W1-T279/W1-T280 (the
+    CLI status board and its --json, which own liveness and feed the Now tab) — those answer 'is it running',
+    this answers 'where does the plan stand and what is next'."

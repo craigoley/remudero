@@ -1,0 +1,80 @@
+- id: W1-T313
+  title: "every decision surface renders raw triage-architect analysis — a decision card must OPEN with a machine-written plain-language summary (headline / what happened / the decision, imperative / 2-3 labelled options with consequences), generated once at escalation-and-proposal creation time and cached with the artifact, with the raw payload behind an expandable Details"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "OPERATOR DIRECTIVE 2026-07-22 with screenshot evidence (feedback fb-1784770111145-cf7c24):
+    the NEEDS-ME surface is 'really wordy and hard to understand'. VERIFIED AT SOURCE: every decision row is
+    the artifact's RAW text with no summarization layer anywhere — needsMeTaskRowHtml (src/lib/serve.ts:1903),
+    needsMeGrillHtml (:1918) and needsMeProposedHtml (:1927) render the escalation/feedback payload directly,
+    and the escalation issue body is likewise assembled raw by renderIssueBody (src/lib/escalate.ts:322) at
+    escalate() (:435). The producers of that text are ARCHITECT-tier analyses written for a machine reader and
+    for the plan record — a triage rationale routinely runs several hundred words of file:line forensics — so
+    the operator's console is being asked to serve as a reader of engineering prose at the exact moment he is
+    being asked to RULE. FeedbackEntry (src/lib/feedback.ts:80) carries {id, ts, raw, attachments, origin,
+    status, proposal_pr} and NO summary field, so there is nothing legible to render even if the console
+    wanted to: this is a missing artifact, not a render bug, and it cannot be fixed in the template.
+    WHY AT CREATION TIME, NOT AT RENDER TIME: the console is a hot read path (W1-T154's <2s first-paint budget,
+    W1-T156's 250ms live patching) and summarization is an LLM call; doing it per render is both a latency and
+    a cost multiplier on every poll, and it would make the same card read differently on two consecutive loads."
+  design: |
+    ONE TYPED RECORD, WRITTEN ONCE, CACHED WITH THE ARTIFACT. The summary is
+    `{headline (<=15 words), what_happened (1-2 sentences), decision (stated IMPERATIVELY), options: 2-3 x
+    {label, consequence (one line)}}` — a STRUCTURED record, never a blob of prose, so the renderer lays it out
+    and the linter can bound it. It is generated at CREATION time on both producers:
+      (a) FEEDBACK PROPOSALS — written when triage sets `status: proposed` (setFeedbackStatus,
+          src/lib/feedback.ts:326), persisted as a `summary:` block on plan/feedback/<id>.yaml. The §7B entry
+          shape is amended by this filing to carry it.
+      (b) ESCALATIONS — written into the issue body renderIssueBody (src/lib/escalate.ts:322) assembles, ABOVE
+          the raw detail, so the summary also rides the GitHub-mobile push channel (§7's M1) where the operator
+          most often first sees it.
+    DO NOT INVENT OPTIONS THAT ALREADY EXIST. §4 already REFUSES an escalation with no options, so an escalation
+    arrives WITH its options; the rung summarizes headline/what-happened/decision and PASSES THE EXISTING
+    OPTIONS THROUGH verbatim rather than paraphrasing them — a paraphrased option is a changed choice. Only
+    where a producer genuinely offers none (a triage proposal, whose implicit choice is accept/reject) may the
+    rung derive labelled options, and there it derives them from the proposal's own accept/reject affordance.
+    NEVER LOSSY, ALWAYS FAIL-OPEN. The raw payload is kept BYTE-IDENTICAL and moves behind an expandable
+    Details in the card (LEARNINGS: a summary that DROPS a critical fact is worse than no summary — the
+    mitigation is that the source stays one click away, not that the summary is trusted). A summarizer that
+    fails, times out, is unavailable, or returns a record that fails validation MUST degrade to exactly today's
+    raw rendering, and MUST NEVER block capture, triage, escalation or a status transition: no operator decision
+    may become unreachable because a summarizer was down.
+    CHEAP, AND ROUTED LIKE EVERYTHING ELSE. The rung selects its model through the existing .remudero/mounts.yaml
+    class routing (W1-T167), never a hard-coded model id, and its spend is ledgered like any other rung so the
+    cost of the surface is visible. VERIFY from source which existing rung helper is the cheapest correct host
+    before adding a new one.
+    DETERMINISTIC UNDER TEST: the summarizer is an INJECTED dependency (the escalate.ts / panel-graph.ts deps
+    pattern already used throughout), so every criterion below is assertable with no network and no model call.
+    OUT OF SCOPE, OWNED ELSEWHERE: the four-tab IA (W1-T314), the Plan view (W1-T315), filtering already-resolved
+    decisions off the board (W1-T257 for merged proposals, the escalation-lifecycle reconciler for stale issues).
+    This task changes WHAT A CARD SAYS, not WHICH CARDS EXIST.
+  acceptance:
+    - claim: "a triage proposal writes a structured summary (headline <=15 words, what_happened, an imperative decision, 2-3 labelled options with one-line consequences) onto the feedback entry at proposal time, and it is validated against those bounds rather than stored as free prose"
+      proof: "unit test: test/decision-summary.test.ts"
+    - claim: "an escalation's issue body carries the summary ABOVE the raw detail, and the options it renders are the escalation's OWN options passed through verbatim, never paraphrased"
+      proof: "unit test: test/decision-summary.test.ts"
+    - claim: "the console decision card renders the summary first with the raw payload byte-identical behind an expandable Details — the falsifier is a card whose first text is the raw payload"
+      proof: "unit test: test/decision-summary.test.ts"
+    - claim: "a failed, unavailable or invalid summarizer degrades to today's raw rendering and never blocks capture, triage, escalation or a status transition"
+      proof: "unit test: test/decision-summary.test.ts"
+    - claim: "the summary is written ONCE at creation and read from the cache thereafter — a console render never invokes the summarizer"
+      proof: "unit test: test/decision-summary.test.ts"
+  risk: high
+  origin: feedback#fb-1784770111145-cf7c24
+  plan_refs: ["§7", "§7B", "§4"]
+  files: [src/lib/feedback.ts, src/lib/escalate.ts, src/lib/serve.ts, test/decision-summary.test.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-08-03 from feedback fb-1784770111145-cf7c24 (clause 1), source-verified at filing:
+    serve.ts:1903/1918/1927 (the three raw decision-row templates), escalate.ts:322/435 (the raw issue body),
+    feedback.ts:80/326 (the entry shape with no summary field, and the only writer of `proposed`).
+    MASTER-PLAN §7B's entry shape is amended by this same filing to declare `summary` — a schema change stated
+    in the plan rather than smuggled into a yaml file. §7 gains the four-tab + summary doctrine.
+    risk:high — it adds an LLM rung to two creation paths and rewrites the decision-card template; the
+    fail-open requirement is the load-bearing criterion, since a summarizer outage must not be able to hide an
+    operator decision. NOT a re-decision of W1-T182 (escalation row AFFORDANCES) or W1-T257 (consumed feedback
+    still rendering as pending): both concern WHICH rows exist; this concerns what a row SAYS. depends_on empty
+    — it improves whatever cards the board renders today and needs no IA change to be useful."
