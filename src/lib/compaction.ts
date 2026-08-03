@@ -126,6 +126,34 @@ export function bodyVsDiffContractLines(): string[] {
   ];
 }
 
+/**
+ * THE CI-PARITY-BEFORE-FIRST-PUSH CONTRACT (W1-T295) — shared VERBATIM by the implement
+ * contract (`outputContractLines`, below) and the fix rung's footer (`renderFixPrompt`,
+ * run-task.ts), the same two prompts {@link commitMessageContractLines} and
+ * {@link bodyVsDiffContractLines} already keep in sync — for the same reason: two copies of
+ * one rule drift (PR #427/#428, where the commit-message rule reached only the implement
+ * lane and a fix worker paid for the gap).
+ *
+ * WHY IT EXISTS. `outputContractLines` went straight from "stage, commit, push" to opening
+ * the PR with nothing said about reaching green first. CLAUDE.md's "Before you push" section
+ * records the coverage ratchet alone blocking three consecutive PRs on their first push, each
+ * costing an amend, a force-push and a CI round-trip — a cost paid in strikes, since a red
+ * first push spends a fix-rung attempt on infrastructure discovery instead of a review
+ * finding. That prose lived only in a doc a worker is never shown; W1-T294 gives it a command
+ * (`rmd preflight --ci-parity`, mirroring every CI job — see lib/ci-parity.ts) and this
+ * function is what makes a worker RUN it before the first push rather than after a check goes
+ * red on GitHub.
+ *
+ * ONCE, NOT PER COMMIT: this is about the FIRST push only — the fix rung already amends the
+ * same PR, and a "before every push" reading would be ignored or cost more than it saves.
+ */
+export function ciParityContractLines(): string[] {
+  return [
+    "- BEFORE THE FIRST PUSH, run `rmd preflight --ci-parity` (mirrors every CI job) and reach a",
+    "  PASS: fix whatever step it names — do not push to find out whether a required check is red.",
+  ];
+}
+
 export function outputContractLines(taskId: string): string[] {
   return [
     "# OUTPUT CONTRACT",
@@ -155,8 +183,10 @@ export function outputContractLines(taskId: string): string[] {
     `  That PR must actually be MERGED and its body must carry \`Remudero-Task: ${taskId}\` for`,
     "  THIS task, or the claim is refused and treated as if you had opened no PR at all.",
     "- Otherwise: stage the changed file(s), commit, then run",
-    "  `git push origin HEAD` (NOT `-u` — the shared .git/config is outside the sandbox",
-    "  write scope, WS-0 FF10f), and open a PR with `gh pr create --fill --base main`.",
+    ...ciParityContractLines(),
+    "  Only once that passes: `git push origin HEAD` (NOT `-u` — the shared .git/config is",
+    "  outside the sandbox write scope, WS-0 FF10f), and open a PR with `gh pr create --fill",
+    "  --base main`.",
     ...commitMessageContractLines(),
     `- Include this exact trailer as the LAST line of the PR body: Remudero-Task: ${taskId}`,
     // W1-T81/T82 class (PRs #677/#683): a correct, fully-tested PR still FAILED review because
