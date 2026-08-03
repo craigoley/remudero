@@ -24,7 +24,7 @@ import {
 } from "./lib/config.js";
 import { readFileIfExists } from "./lib/fs-race-safe.js";
 import { buildWorkerEnv, billingMode, type BillingMode } from "./lib/env.js";
-import { bodyVsDiffContractLines, outputContractLines, renderAnchorBlock, commitMessageContractLines } from "./lib/compaction.js";
+import { bodyVsDiffContractLines, outputContractLines, renderAnchorBlock, commitMessageContractLines, ciParityContractLines } from "./lib/compaction.js";
 import {
   lintFiledTasks,
   newMonolithIdsAgainstBase,
@@ -2023,8 +2023,13 @@ export function renderFixPrompt(opts: {
     // told NOTHING about the format — #427/#428 blocked on a 111-char round-3 header. Same
     // literal the implement contract uses, so the two prompts cannot drift.
     ...commitMessageContractLines(),
-    `branch (only a run-<taskId>-<epochMs> head is creditable). \`git push origin HEAD\` (no`,
-    `-u) when done — never force-push. Your PR body must substantiate EVERY task acceptance`,
+    `branch (only a run-<taskId>-<epochMs> head is creditable).`,
+    // impl-FV shape, same reason as commitMessageContractLines/bodyVsDiffContractLines above:
+    // the SAME literal the implement contract carries (W1-T295), so a fix-rung push cannot
+    // skip the gate the implement lane requires.
+    ...ciParityContractLines(),
+    `Only once that passes: \`git push origin HEAD\` (no -u) — never force-push. Your PR body`,
+    `must substantiate EVERY task acceptance`,
     `criterion, not only the ones fixed here — the review floor judges the body against the`,
     // impl-FV: the SAME literal the implement contract carries, for the same reason
     // `commitMessageContractLines` above is shared — and this rung needs it MOST: it amends an
