@@ -1,0 +1,24 @@
+id: fb-1785785017959-c23215
+ts: 2026-08-03T19:23:37.959Z
+raw: "A DISPATCHED WORKER IS RUNNING IN THE USAGE PROBE'S HOME — at
+  2026-08-03T19:22Z, run W1-T309-1785783002827's live worker session sits at
+  worker-home-usage-probe/.claude/projects/-Users-craigoleyagent-Remudero-workt\
+  rees-run-W1-T309-1785783002827/, and 'ls -d ~/Remudero/worker-home-*' returns
+  that path ALONE. Yet 14 recon runs earlier today logged 'Claude configuration
+  file not found at .../worker-home-<uuid>/.claude.json' — so per-run homes
+  existed this morning and do not now. Either allocation changed, or a run falls
+  back to the probe's home when no per-run home is provisioned. Not currently
+  broken: the run is working normally. But W1-T265 gave each ACCOUNT its own
+  keychain-backed home deliberately, and a dispatched worker reading the usage
+  probe's .claude.json is a shared-state path that was designed against. RECON:
+  establish how a run's worker home is chosen; whether a per-run home is created
+  and reaped, or whether the probe's home is the intended default; and what
+  reads or writes that home concurrently — the usage probe runs on the daemon's
+  own cadence, so a worker and a probe writing one .claude.json at once is the
+  shape to rule out. Falsifying check: if per-run homes are created and reaped
+  within a run and this observation caught a legitimate shared default, there is
+  nothing here."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
