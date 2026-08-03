@@ -649,7 +649,14 @@ test("headroom: a near-limit reading STOPS with reason=headroom_exhausted BEFORE
   assert.equal(spawned, 0, "no task is spawned when a window is at/near its limit");
 });
 
-test("headroom unreadable (undefined) does NOT halt — best-effort, the drain continues", async () => {
+// W1-T290: this used to assert UNBOUNDED continuation on an unreadable read — the
+// fail-open polarity the daemon's bounded-degraded ceiling was explicitly ported here
+// to close. Retargeted to prove the BOUNDED allowance instead: 3 consecutive
+// unreadable ticks (the default `UNREADABLE_DEGRADED_LIMIT`) still dispatch, every one
+// of them, without the drain stopping early. The "beyond the allowance it stops"
+// half of this same defect, the multi-lane parity, the consecutive-count reset, and
+// the governor-disabled carve-out all live in test/drain-unreadable-degraded.test.ts.
+test("headroom unreadable (undefined): WITHIN the bounded allowance the drain keeps dispatching", async () => {
   const plan = fixturePlan();
   const merged = new Set<string>();
   const s = await runDrain(
@@ -659,10 +666,10 @@ test("headroom unreadable (undefined) does NOT halt — best-effort, the drain c
       runOne: async (id) => { merged.add(id); return okResult(id); },
       readUsage: () => undefined,
     },
-    { max: 1 },
+    { max: 3 }, // == the default UNREADABLE_DEGRADED_LIMIT: every tick is still within bounds.
   );
   assert.equal(s.stopReason, "max_reached");
-  assert.deepEqual(s.merged, ["A"]);
+  assert.deepEqual(s.merged, ["A", "B", "C"]);
 });
 
 test("--until: drains until the target merges, then stops", async () => {

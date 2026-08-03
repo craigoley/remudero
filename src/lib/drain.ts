@@ -16,7 +16,7 @@
  */
 
 import type { RunResult } from "./run-result.js";
-import { headroomExhausted } from "./headroom.js";
+import { headroomExhausted, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
 import { unmetDependencies, type Plan, type Task } from "./plan.js";
 import { partitionByFileOverlap, serializedLedgerPayload } from "./dispatch-overlap.js";
@@ -349,7 +349,18 @@ export type StopReason =
    * via the multi-lane path ({@link runDrainLanes}); the single-lane path
    * never consults the governor and can never produce it.
    */
-  | "wip_deferred";
+  | "wip_deferred"
+  /**
+   * W1-T290: `/usage` came back unreadable on more than {@link
+   * UNREADABLE_DEGRADED_LIMIT} (or `DrainOpts.unreadableDegradedLimit`)
+   * CONSECUTIVE ticks — the daemon's bounded-degraded ceiling, ported to the
+   * drain. Distinct from `headroom_exhausted` (a confirmed at/near-limit
+   * reading): this is "the reader itself has gone dark for too long to keep
+   * dispatching blind." Only reachable when `DrainOpts.headroomEnabled` is
+   * not explicitly `false` — the 2026-07-28 governor ruling makes an
+   * unreadable read ABSENT TELEMETRY, never a hold, on a host that opted out.
+   */
+  | "headroom_degraded";
 
 export interface DrainOpts {
   until?: string;
@@ -389,6 +400,31 @@ export interface DrainOpts {
    * single-lane path (unchanged from before this task).
    */
   wipLimit?: number;
+  /**
+   * W1-T290: the headroom governor switch — the SAME resolved posture
+   * `daemon.ts`'s identically-named `DaemonOpts.headroomEnabled` reads
+   * (operator ruling fb-1784894405468-a4153e; config.ts's
+   * `resolveHeadroomEnabled`). Gates ONLY the new unreadable-degraded ceiling
+   * below (`headroom_degraded`) — the existing at/near-limit
+   * `headroom_exhausted` stop is unconditional, unchanged by this option, on
+   * both loops. When `false`, an unreadable `/usage` read is ABSENT
+   * TELEMETRY, never a hold: no `drain.headroom.unavailable`/`.degraded`
+   * line, no consecutive-count escalation, dispatch proceeds regardless.
+   * Defaults to `true` so an unconfigured caller's behavior — and every
+   * existing test — is unchanged; the real `rmd drain` CLI entry resolves
+   * this from config/env and passes it explicitly, mirroring the daemon's
+   * own wiring.
+   */
+  headroomEnabled?: boolean;
+  /**
+   * W1-T290: CONSECUTIVE unreadable `/usage` reads this drain tolerates
+   * before stopping with `headroom_degraded` (default {@link
+   * UNREADABLE_DEGRADED_LIMIT}, the SAME shared constant `daemon.ts`'s
+   * `DEFAULT_UNREADABLE_DEGRADED_LIMIT` resolves to — one policy number, two
+   * consumers, never a second drift-prone literal). A single successful read
+   * resets the count to zero, exactly as the daemon's does.
+   */
+  unreadableDegradedLimit?: number;
 }
 
 /**
@@ -734,8 +770,8 @@ export interface DrainDeps {
  * W1-T172 PARALLEL DISPATCH: `opts.laneCount >= 2` hands off to {@link
  * runDrainLanes}, the concurrent multi-task pass loop, entirely separate code
  * so THIS loop can never drift under lane changes. Omitted or `<= 1` runs the
- * single-task loop below UNCHANGED, byte-for-byte, from before this task —
- * both the regression lock and the off switch.
+ * single-task loop below, unchanged from before this task except for the
+ * bounded-degraded headroom ceiling (W1-T290, see the loop body).
  */
 export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}): Promise<DrainSummary> {
   if ((opts.laneCount ?? 1) >= 2) return runDrainLanes(plan, deps, opts);
@@ -745,6 +781,13 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
   const attempted: string[] = [];
   const merged: string[] = [];
   let costUsd = 0;
+  // W1-T290: the daemon's bounded-degraded ceiling, ported — CONSECUTIVE
+  // unreadable `/usage` reads, not any-unreadable. Reset to 0 on any
+  // successful read; escalates past `unreadableDegradedLimit` (see the
+  // headroom block below).
+  let consecutiveUnreadable = 0;
+  const headroomEnabled = opts.headroomEnabled ?? true;
+  const unreadableDegradedLimit = opts.unreadableDegradedLimit ?? UNREADABLE_DEGRADED_LIMIT;
   // CIRCUIT BREAKER ESCALATION DEDUP (P29(ii)): `nextRunnable`/`nextCurated` are
   // re-invoked every tick, so a task that stays tripped (never dispatched, never
   // resolved) would otherwise be re-observed — and re-escalated — on EVERY
@@ -784,9 +827,16 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
     // --until satisfied ⇒ done (target task has merged).
     if (opts.until && isMerged(opts.until)) return summary("until_reached", opts.until);
 
-    // HEADROOM: never hammer a nearly-exhausted pool. Best-effort — an unreadable
-    // /usage does not halt the whole drain (max + the budget tripwire still bound
-    // it); an at/near-limit reading DOES, with the reset time reported.
+    // HEADROOM: never hammer a nearly-exhausted pool. An at/near-limit reading
+    // STOPS the drain outright, with the reset time reported (unchanged by
+    // this task). An unreadable read is BOUNDED best-effort (W1-T290, ported
+    // from daemon.ts's identical mechanism): within `unreadableDegradedLimit`
+    // CONSECUTIVE misses the drain still dispatches — max + the budget
+    // tripwire still bound it — but beyond the allowance it stops rather than
+    // dispatching blind against a pool that may already be exhausted; a
+    // single successful read resets the count to zero. Gated by
+    // `headroomEnabled` (2026-07-28 ruling): disabled, an unreadable read is
+    // absent telemetry, never a hold.
     if (deps.readUsage) {
       const snap = deps.readUsage();
       const over = snap ? headroomExhausted(snap, opts.headroomLimitPct) : null;
@@ -794,7 +844,33 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
         log("drain.headroom", { window: over.window, percent_used: over.percentUsed, resets_at: over.resetsAt });
         return summary("headroom_exhausted", `${over.window} at ${over.percentUsed}% — resets ${over.resetsAt}`);
       }
-      if (!snap) log("drain.headroom.unavailable", { note: "usage unreadable — continuing (best-effort)" });
+      if (snap) {
+        consecutiveUnreadable = 0;
+      } else if (headroomEnabled) {
+        consecutiveUnreadable++;
+        if (consecutiveUnreadable > unreadableDegradedLimit) {
+          log("drain.headroom.degraded", {
+            consecutive_unreadable: consecutiveUnreadable,
+            degraded_limit: unreadableDegradedLimit,
+            note: "usage unreadable beyond the bounded allowance — stopping, not dispatching",
+          });
+          return summary(
+            "headroom_degraded",
+            `usage unreadable ${consecutiveUnreadable}x consecutively (limit ${unreadableDegradedLimit})`,
+          );
+        }
+        log("drain.headroom.unavailable", {
+          consecutive_unreadable: consecutiveUnreadable,
+          degraded_limit: unreadableDegradedLimit,
+          note: "usage unreadable — bounded degraded-mode allowance, still dispatching",
+        });
+      } else {
+        // GOVERNOR DISABLED (operator ruling fb-1784894405468-a4153e): an
+        // unreadable read is ABSENT TELEMETRY, never a hold — no degraded
+        // stop, no escalation counter, no headroom line. Dispatch proceeds;
+        // reset the counter so a later enable starts from a clean slate.
+        consecutiveUnreadable = 0;
+      }
     }
 
     const skipOpts: NextRunnableOpts = {
@@ -945,6 +1021,12 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
   // tripped task id, across every pass — `isCircuitTripped` itself is still
   // consulted (and still excludes the task) every pass.
   const circuitEscalated = new Set<string>();
+  // W1-T290: same bounded-degraded ceiling as the single-lane loop above —
+  // see that loop's comment. BOTH sites carry it, or the multi-lane path
+  // (`--lanes`) would stay the latent fail-open bug this task closes.
+  let consecutiveUnreadable = 0;
+  const headroomEnabled = opts.headroomEnabled ?? true;
+  const unreadableDegradedLimit = opts.unreadableDegradedLimit ?? UNREADABLE_DEGRADED_LIMIT;
 
   const summary = (stopReason: StopReason, stopDetail?: string): DrainSummary => {
     const s: DrainSummary = { attempted, merged, stopReason, stopDetail, costUsd, resumeCommand: resumeCommand(opts) };
@@ -974,7 +1056,30 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
         log("drain.headroom", { window: over.window, percent_used: over.percentUsed, resets_at: over.resetsAt });
         return summary("headroom_exhausted", `${over.window} at ${over.percentUsed}% — resets ${over.resetsAt}`);
       }
-      if (!snap) log("drain.headroom.unavailable", { note: "usage unreadable — continuing (best-effort)" });
+      if (snap) {
+        consecutiveUnreadable = 0;
+      } else if (headroomEnabled) {
+        consecutiveUnreadable++;
+        if (consecutiveUnreadable > unreadableDegradedLimit) {
+          log("drain.headroom.degraded", {
+            consecutive_unreadable: consecutiveUnreadable,
+            degraded_limit: unreadableDegradedLimit,
+            note: "usage unreadable beyond the bounded allowance — stopping, not dispatching",
+          });
+          return summary(
+            "headroom_degraded",
+            `usage unreadable ${consecutiveUnreadable}x consecutively (limit ${unreadableDegradedLimit})`,
+          );
+        }
+        log("drain.headroom.unavailable", {
+          consecutive_unreadable: consecutiveUnreadable,
+          degraded_limit: unreadableDegradedLimit,
+          note: "usage unreadable — bounded degraded-mode allowance, still dispatching",
+        });
+      } else {
+        // GOVERNOR DISABLED — see the single-lane loop's identical branch.
+        consecutiveUnreadable = 0;
+      }
     }
 
     const openCount = deps.openPrCount?.();
