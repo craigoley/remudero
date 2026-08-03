@@ -276,6 +276,28 @@ test("runCiParity: a step whose spawn THROWS (binary missing) is caught and repo
   assert.ok(result.steps.some((s) => s.name === "depcruise"));
 });
 
+test("runCiParity: an entry whose run() ITSELF throws (not just a leaf's spawn inside runStep) is caught by the TOP-LEVEL catch and reported as '<job>:error', never aborting the run", () => {
+  // lint-plan's run() calls `spawn("git", ["rev-parse", ...])` directly, OUTSIDE any runStep —
+  // a throw there must be caught by runCiParity's own try/catch around entry.run!(), not just
+  // the per-leaf one runStep already covers (see the "spawn THROWS" test above).
+  const spawn: PreflightSpawn = (file, args) => {
+    if (file === "git" && args.includes("rev-parse")) throw new Error("ENOENT: git not found");
+    return { status: 0, stdout: "", stderr: "" };
+  };
+  const result = runCiParity(REPO_ROOT, { spawn });
+
+  const lintPlanError = result.steps.find((s) => s.name === "lint-plan:error");
+  assert.ok(lintPlanError, "expected a 'lint-plan:error' step from runCiParity's top-level catch");
+  assert.equal(lintPlanError!.ok, false, "an entry.run() throw must never read as a passing step");
+  assert.match(lintPlanError!.detail, /toolchain unavailable/, "the top-level catch reuses the SAME toolchainFailure phrasing as a leaf-level throw");
+  assert.match(lintPlanError!.detail, /ENOENT/);
+  assert.equal(result.ok, false);
+
+  // The run did not abort — later table entries still ran and reported despite lint-plan's throw.
+  assert.ok(result.steps.some((s) => s.name === "depcruise"));
+  assert.ok(result.steps.some((s) => s.name === "containment-probe:trigger"));
+});
+
 // ── acceptance 7: `rmd preflight` with no flag is unchanged; `--ci-parity` is additive ──────
 
 test("preflightCommand: --ci-parity ADDS the ci-parity steps after the three hand-route steps and folds their verdict into the exit code", async () => {
