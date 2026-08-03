@@ -1,0 +1,47 @@
+- id: W1-T303
+  title: "`maxTurns` and the envelope's `num_turns` do not count the same unit — a recon capped at 8 reported 17 on success, so no turn budget in mounts.yaml can be reasoned about from the ledger"
+  repo: remudero
+  depends_on: []
+  type: diagnose
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: "MEASURED over `recon.done` for 2026-08-03, where the recon spawn passed a hardcoded
+    `maxTurns: 8` and there is exactly ONE emitter of that step (run-task.ts) and ONE cap. Under that
+    single cap the ledger recorded 18 recons: ELEVEN failures, every one at `num_turns: 9` across
+    both routed models, and seven successes at 5, 6, 7, 8, 8, 8 — and ONE at 17. A success at 17 under a cap of 8 cannot be
+    reconciled with `num_turns` being the quantity `maxTurns` bounds.
+    WHY THIS IS WORTH A TASK RATHER THAN A SHRUG. Every cell of `.remudero/mounts.yaml` sets
+    `max_turns`, and the only observability anyone has for whether a cell is well-sized is
+    `num_turns` on the matching ledger row. If the two are different units, every one of those
+    numbers has been tuned against a counter that does not measure it — including the 400 the
+    implement rows carry and the 8 recon carried while it was killing 11 of 18 recons. The
+    turn-cap fix that closed that outage was itself calibrated against the observed counter and said
+    so, because the mechanism was not available to calibrate against instead.
+    A LIKELY-BUT-UNVERIFIED READING, recorded so it can be falsified rather than inherited: `maxTurns`
+    bounds AGENT turns (assistant/tool cycles) while `num_turns` counts MESSAGES. It does not survive
+    contact with the failures all landing on exactly 9 — do not assume it."
+  design: |
+    A DIAGNOSIS, not a fix. The deliverable is a written finding plus whatever instrumentation makes
+    the finding checkable later; changing any cap is explicitly out of scope.
+    (1) Establish what each side counts, from the SDK's own contract and from `lib/worker.ts` where
+        the envelope is read — not by inference from the ledger, which is what produced the puzzle.
+    (2) Explain the two observations that any answer has to fit: failures pinned at exactly 9, and a
+        success at 17. An account that explains only one of them is not the answer.
+    (3) If they are genuinely different units, ledger the one that is comparable to the cap, beside
+        the existing field rather than replacing it — a renamed field silently invalidates every
+        historical row and the rotations, which is the same evidence-destruction class the ledger
+        rules already forbid.
+    (4) State plainly in the report whether the `max_turns` values in mounts.yaml are currently
+        tuned against the wrong quantity, and which cells that puts in doubt.
+  acceptance:
+    - claim: "the report states what maxTurns bounds and what num_turns counts, sourced from the SDK contract and the envelope read site rather than inferred from the ledger"
+      proof: "unit test: test/turn-budget-units.test.ts"
+    - claim: "the account fits both observations — failures pinned at 9 and a success at 17 under the same cap"
+      proof: "unit test: test/turn-budget-units.test.ts"
+    - claim: "if the units differ, a cap-comparable turn count is ledgered alongside the existing field, never replacing it"
+      proof: "unit test: test/turn-budget-units.test.ts"
+  risk: low
+  origin: oper#turn-unit-mismatch-2026-08-03
+  plan_refs: ["§9"]
+  files: [src/lib/worker.ts]

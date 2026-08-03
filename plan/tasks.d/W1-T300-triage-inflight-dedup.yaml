@@ -1,0 +1,41 @@
+- id: W1-T300
+  title: "auto-triage re-dispatches a feedback id whose first triage PR has not merged yet — the same entry was ground twice, five minutes apart, for two identical no-op PRs"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: "MEASURED 2026-08-03 on the live repo. feedback#fb-1784762630201-4751e0 was triaged
+    TWICE: PR #1184 merged 10:06:13Z and PR #1185 merged 10:11:47Z, both titled
+    `chore(triage): feedback#fb-1784762630201-4751e0 — already decided, no task`, five minutes and
+    thirty-four seconds apart. Two Architect workers, two plan-only PRs, two full gate rounds
+    (ci-gate + remudero-review), for one feedback entry and zero tasks.
+    THE MECHANISM IS AN IN-FLIGHT GAP, NOT A MISSING DEDUP. The status of a feedback entry advances
+    when its triage PR MERGES — it is a committed file under plan/feedback/. Between dispatch and
+    merge the entry still reads `status: new`, so the next auto-triage fire (minInterval 15m, per
+    `auto_triage.skipped`) selects the same head again. Any entry whose triage round-trip exceeds the
+    fire interval is exposed, and a slow CI round makes that the common case rather than the rare one.
+    THE COST COMPOUNDS WITH THE QUEUE BEING EMPTY: with no dispatchable plan work, triage is most of
+    what the fleet does, so its duplicate rate is close to its whole waste rate."
+  design: |
+    An IN-FLIGHT guard keyed on the feedback id, symmetric with the one the task lane already has.
+    (1) Before dispatching triage for id X, refuse if an OPEN PR already carries X's provenance.
+        `origin: feedback#<id>` is already written into the triage PR, so the signal exists; confirm
+        the exact carrier by reading the emitter rather than trusting this sentence.
+    (2) Prefer the same shape drain.ts uses for tasks (`isOpenPr`, then a fresh confirming read
+        before skipping, W1-T177) over a new mechanism — a stale OPEN wrongly parking a feedback
+        entry forever is the failure mode that guard exists to prevent, and it applies here verbatim.
+    (3) The refusal is LEDGERED naming the id and the open PR number. A silent skip here is
+        indistinguishable from the starvation W1-T298 is about.
+    NOT IN SCOPE: changing when a feedback entry's status advances. Moving the write earlier would
+    close this gap too, but it makes an un-merged triage decision authoritative — strictly worse.
+  acceptance:
+    - claim: "auto-triage refuses to dispatch a feedback id that already has an open triage PR, and ledgers the refusal with the id and PR number"
+      proof: "unit test: test/triage-inflight-dedup.test.ts"
+    - claim: "a stale open-PR reading is confirmed by a fresh read before the skip, so a merged-but-cached PR cannot park an entry forever"
+      proof: "unit test: test/triage-inflight-dedup.test.ts"
+  risk: low
+  origin: oper#triage-duplicate-2026-08-03
+  plan_refs: ["§7B"]
+  files: [src/lib/daemon.ts]

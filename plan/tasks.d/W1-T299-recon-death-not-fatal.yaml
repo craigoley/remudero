@@ -1,0 +1,46 @@
+- id: W1-T299
+  title: "a recon worker that runs out of turns kills the whole dispatch and burns a circuit-breaker slot — a read-only preamble failing must never cost the task its ability to ever run again"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "MEASURED over `recon.done` for 2026-08-03. Eleven recons died `error_max_turns` and
+    seven succeeded. `failOnWorkerError(recon, \"recon\")` in run-task.ts returns immediately, so
+    every one of those eleven ended the run BEFORE the implement stage and therefore WITHOUT opening
+    a PR. `dispatchesWithoutNewOwnedPr` counts exactly that shape, and five of them trip the per-task
+    circuit breaker, which by construction resets ONLY on a fresh owned PR. W1-T295 burned five and
+    latched; W1-T292 burned four and got through on its fifth only by luck of the draw.
+    THE COST IS NOT THE FAILED RECON, IT IS THE LATCH. Recon is a READ-ONLY context-gathering
+    preamble whose whole output is advisory `OBSERVED` lines folded into the implement prompt. A
+    transient failure in it is being paid for with the task's permanent dispatchability. The turn cap
+    itself is addressed separately (fix/recon-turn-cap); this task is the structural half — the cap
+    will bind again on some future model/task pair and must not be able to kill a task when it does."
+  design: |
+    RECON DEGRADES, IT DOES NOT ABORT. Ordered by how much each part changes behaviour:
+    (1) On a recon worker error, run ONE bounded retry. A second failure does NOT return: the run
+        proceeds to implement with an EMPTY recon context and a loud ledger line, step name `recon.degraded`, naming the subtype.
+        `reconObservedToContext` already handles a report it cannot parse, so the empty case is a
+        supported input, not a new one — verify that by reading it rather than assuming.
+    (2) The implement prompt must SAY the recon context is absent when it is, rather than silently
+        omitting the section — a worker that believes recon found nothing is differently wrong from
+        one that knows recon did not run.
+    (3) A run that reaches implement on a degraded recon is still a real dispatch and still opens (or
+        fails to open) a PR on its own merits — which is precisely what lets the breaker do its
+        actual job of catching tasks that produce nothing, instead of catching a flaky preamble.
+    OPEN QUESTION FOR THE IMPLEMENTER, decide it explicitly and record the ruling: whether a
+    degraded-recon run should be ineligible to COUNT toward the breaker at all. Argument for: it is
+    not a fair sample of the task's implementability. Argument against: an unbounded supply of
+    non-counting dispatches is exactly the runaway the breaker exists to bound.
+  acceptance:
+    - claim: "a recon worker error retries once and then proceeds to implement with an empty recon context rather than ending the run"
+      proof: "unit test: test/recon-degrade.test.ts"
+    - claim: "the degraded run still reaches the implement spawn, so the dispatch can open a PR and the breaker sees a real sample"
+      proof: "unit test: test/recon-degrade.test.ts"
+    - claim: "the degradation is ledgered with the worker subtype, never silent"
+      proof: "grep: recon\\.degraded in src/run-task.ts"
+  risk: medium
+  origin: oper#recon-turn-cap-2026-08-03
+  plan_refs: ["§8A", "§9"]
+  files: [src/run-task.ts]
