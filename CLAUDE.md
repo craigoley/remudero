@@ -37,11 +37,19 @@ forensic detail, so the narrative does not need to live here.
 
 ## Writing proofs and acceptance criteria
 
-- **Write `## Acceptance` proofs as bare exact-title substrings, and verify each resolves before
-  opening the PR.** The `test/foo.test.ts::title` form satisfies `rmd lint-plan` but the review
-  executor feeds the whole string to `--test-name-pattern`, matches zero tests, and posts `success`
-  CAPPED at `proof_exec: 0/N` — which will not arm auto-merge. In a **plan shard**, use the pure-path
-  form `unit test: test/foo.test.ts`: it lint-passes and executes the whole file. *(#766, #773, #777)*
+- **EVERY proof needs a dialect prefix — `unit test:` or `grep:`. A bare title is PROSE and never
+  executes.** `rmd check-proof` refuses it in as many words: *"a proof with no dialect prefix at all
+  is prose and never executes."* It does not fail loudly; it silently contributes nothing and the
+  verdict lands CAPPED at `proof_exec: 0/N`, which will not arm auto-merge. #1194 posted 0/3 that
+  way, and **#1189 MERGED at 2/4** — only its two `grep:` proofs ever ran, and nothing said so.
+  Write `unit test: <exact-title substring>`: the prefix is required, and what follows it must be a
+  bare title, NOT the `test/foo.test.ts::title` form — that form satisfies `rmd lint-plan` but the
+  executor feeds the whole string to `--test-name-pattern` and matches zero tests. In a **plan
+  shard**, use the pure-path form `unit test: test/foo.test.ts`: it lint-passes and executes the
+  whole file. **Verify every proof through `rmd check-proof '<proof>'` before opening the PR** — it
+  is the reviewer's own parser and executor, and prints the parse kind, the resolved candidates and
+  the exit code. Require `candidates: 1 file(s)` and the REAL test name in the TAP output; a
+  zero-match returns `candidates: absent`. *(#766, #773, #777, #1189, #1194)*
 - **Require a verbatim `grep -rlF -- '<substring>' test/` hit — a passing scoped test run is NOT
   evidence the proof resolves.** `resolveNameFilteredCandidates` greps the SOURCE with a fixed
   string, so a title assembled from `" + "`-joined literals exists verbatim in no file: a proof
