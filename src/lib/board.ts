@@ -94,8 +94,9 @@ export interface CountSummary {
   running: number;
   merged: number;
   queued: number;
-  /** W1-T159 (GLANCE strip): tasks whose `status` is `"blocked"` — the SAME predicate the rest
-   *  section's status color/REST grouping already use, so the strip can never disagree with them. */
+  /** W1-T159 (GLANCE strip): tasks that are STOPPED — `status === "blocked"` OR carrying an open,
+   *  unsuperseded escalation (`needsHuman`). See {@link isBlockedRow} for why the second disjunct
+   *  is required and why `needs me` remains a strict SUBSET of this count rather than a rival to it. */
   blocked: number;
   /** False when the GitHub read backing merge-state was unreachable ⇒ the `merged` tally is
    * UNKNOWN, not a fact — the console renders "merged: unknown" rather than "0 merged". */
@@ -209,16 +210,47 @@ export function isRunningRow(row: Pick<BoardRow, "phase">): boolean {
   return row.phase != null;
 }
 
+/**
+ * One STOPPED predicate, shared by the header tally and (textually mirrored) by the GLANCE strip's
+ * own client-side recompute in serve.ts's `renderGlanceStrip`.
+ *
+ * WHY `status === "blocked"` ALONE WAS WRONG, measured. On 2026-08-03 at 02:22:47Z the live board
+ * carried 318 rows, of which ZERO had `status === "blocked"` while TWO — W1-T288 and W1-T290 —
+ * carried `needsHuman: true` with open escalation issues (#1161, #1158). Both were genuinely
+ * stopped; neither was counted. `blocked` read 0 at the exact moment two things needed a human.
+ * `status` never becomes `"blocked"` on that path: W1-T288 sat at `queued` (its dispatch circuit
+ * breaker tripped) and W1-T290 at `running` (its PR was open with a failed review), because
+ * `deriveStatus` sets `needsHuman` as a SEPARATE field beside `status`, never by overwriting it
+ * (status.ts's two writers, at the `resolveEscalation` guard and the task-less-escalation loop).
+ *
+ * WHY THIS DOES NOT DOUBLE-COUNT AGAINST `needs me`. `needsHuman` is set ONLY by those two writers
+ * and ONLY when `resolveEscalation` reports an OPEN escalation that no later `run.start` has
+ * superseded — never for a merely slow or queued task. So the sets nest: every `needs me` row is a
+ * `blocked` row, and `blocked` additionally holds plan-declared `status: "blocked"` tasks that have
+ * no issue to click. `needs me` answers "what can I act on", `blocked` answers "what is stopped".
+ *
+ * NOT the five-state row BADGE. `statusColorKey` (serve.ts) deliberately renders a needs-human row
+ * as "needs human" rather than "blocked" — one badge per row, needs-human winning. That is a
+ * rendering choice about a single row and is left exactly as it is; this is a COUNT over rows, and
+ * a count of stopped work legitimately spans both badges.
+ */
+export function isBlockedRow(row: Pick<BoardRow, "status" | "needsHuman">): boolean {
+  return row.status === "blocked" || row.needsHuman === true;
+}
+
 /** The header count summary, computed from the SAME task set the rows render. `merged_known` is
  * false when the GitHub read backing merge-state was unreachable — the console then renders the
  * merged tally as "unknown", never `0` as fact (fb-1784902052582-c124f9). */
-export function summarizeCounts(tasks: Array<Pick<BoardRow, "phase" | "status">>, githubUnreachable: boolean): CountSummary {
+export function summarizeCounts(
+  tasks: Array<Pick<BoardRow, "phase" | "status" | "needsHuman">>,
+  githubUnreachable: boolean,
+): CountSummary {
   return {
     total: tasks.length,
     running: tasks.filter(isRunningRow).length,
     merged: tasks.filter((t) => t.status === "merged" || t.status === "done").length,
     queued: tasks.filter((t) => t.status === "queued").length,
-    blocked: tasks.filter((t) => t.status === "blocked").length,
+    blocked: tasks.filter(isBlockedRow).length,
     merged_known: !githubUnreachable,
   };
 }
@@ -374,13 +406,46 @@ export interface StatusResponse extends BoardSnapshot {
 }
 
 /**
+ * The query flag a caller sets to say "a HUMAN is looking at this response, mark it seen".
+ * Absent ⇒ the request is an automatic poll and MUST NOT advance the marker.
+ */
+export const ACK_QUERY_PARAM = "ack";
+
+/** Is this `GET /v1/status` an acknowledged view (`?ack=1`), or an automatic poll? */
+export function requestAcknowledgesRecap(url: string | undefined): boolean {
+  return new URL(url ?? "/", "http://localhost").searchParams.get(ACK_QUERY_PARAM) !== null;
+}
+
+/**
  * GET /v1/status — the board snapshot, read-scoped, memoized per {@link createBoardSnapshotCache}.
- * W1-T163: when `lastSeen` (lib/last-seen.ts) is supplied, EVERY view also (a) reads the calling
- * token's own recap off its CURRENT marker, folded into the response, then (b) advances that SAME
- * marker to `snapshot.generated_at` — "viewing the board advances the marker" (the task's own
- * acceptance bar), so an immediate reload from the same token recaps nothing (the falsifier: a
- * reload still showing pre-view events). `lastSeen` is OPTIONAL and defaults to undefined (no
- * recap at all) so a caller that hasn't wired a store yet keeps today's exact response shape.
+ * W1-T163: when `lastSeen` (lib/last-seen.ts) is supplied, a view also reads the calling token's
+ * own recap off its CURRENT marker and folds it into the response.
+ *
+ * THE MARKER ADVANCES ONLY ON AN ACKNOWLEDGED VIEW (`?ack=1`), NOT ON EVERY REQUEST. W1-T163's
+ * intent — "viewing the board advances the marker", so an immediate reload recaps nothing — is
+ * correct and is PRESERVED: the shell sends `?ack=1` on exactly the one fetch per page load whose
+ * recap it actually renders (its own `recapRendered` gate), so a reload still recaps nothing.
+ *
+ * WHAT WAS BROKEN. The advance was unconditional while the shell re-fetches this route every
+ * `POLL_INTERVAL_MS` (3000ms, serve.ts). An automatic poll is indistinguishable from a human at
+ * the wire, so a tab left open advanced its own marker every three seconds and its recap window
+ * was permanently ~3s wide. Measured live 2026-08-03T02:22:47Z: `sinceCheckpoint`
+ * 02:22:28.933Z against `generated_at` 02:22:47.152Z — an 18-second window — and `recap: []`.
+ * The operator's actual use is a tab left open all evening, which is exactly the case that lost
+ * every event it was built to show him.
+ *
+ * WHY A QUERY FLAG AND NOT THE ALTERNATIVES. A POST acknowledge would need WRITE scope, and the
+ * operator's bookmark carries only the READ token — the one client that must be able to ack could
+ * not. A second route duplicates the whole board handler and forces every existing caller to
+ * choose. A client-side `document.hidden` check does not separate the two cases at all: a tab left
+ * open while he is away is still visible. Advancing on `focus`/`visibilitychange` adds listeners
+ * for an event a never-blurred tab never fires.
+ *
+ * THE DEFAULT IS DELIBERATELY "DO NOT ADVANCE". A caller that never acks accumulates recap rather
+ * than losing it — too much history is a nuisance, none is the defect being fixed here.
+ *
+ * `lastSeen` is OPTIONAL and defaults to undefined (no recap at all) so a caller that hasn't wired
+ * a store yet keeps today's exact response shape.
  */
 export function buildStatusRoute(deps: BoardDeps, lastSeen?: LastSeenStore): Route {
   const cache = createBoardSnapshotCache();
@@ -402,8 +467,8 @@ export function buildStatusRoute(deps: BoardDeps, lastSeen?: LastSeenStore): Rou
           : buildRecapEvents(deps.readLedger?.(deps.ledgerPath) ?? readLedgerLines(deps.ledgerPath), sinceCheckpoint, deps.plan);
       // Advance AFTER computing the recap, off the SAME timestamp the snapshot itself claims to
       // be current as of -- never `Date.now()` a second time, which could race a hair ahead of
-      // what this response actually reflects.
-      lastSeen.advance(tokenId, snapshot.generated_at);
+      // what this response actually reflects. Gated on the ack flag: see this function's doc.
+      if (requestAcknowledgesRecap(req.url)) lastSeen.advance(tokenId, snapshot.generated_at);
       const body: StatusResponse = { ...snapshot, recap, sinceCheckpoint };
       sendJson(res, 200, body);
     },

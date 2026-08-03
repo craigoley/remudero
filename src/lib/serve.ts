@@ -1621,17 +1621,28 @@ export function renderShellHtml(
     if (el) el.textContent = String(text);
   }
 
-  /** running/blocked/queued reuse the EXACT predicates summaryText/statusColorKey already use
-   *  for the SAME words elsewhere on this page (never a second, disagreeing derivation);
-   *  needs-me is latestNeedsMeRows.length -- the SAME combined set (tasks.needsHuman + feedback
-   *  grilling/proposed + inbox ready/drafting) the NEEDS ME section itself just rendered.
+  /** THE STOPPED PREDICATE, mirroring board.ts's exported isBlockedRow EXACTLY. It cannot be
+   *  imported -- this script is a string in the server module -- so it is duplicated here
+   *  deliberately and locked by a source-text test, because the strip is the number the operator
+   *  actually READS: board.ts's counts.blocked has no consumer on this page, so fixing only the
+   *  server field would have changed nothing he can see. A task with an open, unsuperseded
+   *  escalation is STOPPED even though its own status is still "queued" or "running". */
+  function isBlockedRow(t) {
+    return t.status === "blocked" || t.needsHuman === true;
+  }
+
+  /** running/queued reuse the EXACT predicates summaryText/statusColorKey already use for the
+   *  SAME words elsewhere on this page (never a second, disagreeing derivation); blocked uses
+   *  isBlockedRow above, the mirror of board.ts's; needs-me is latestNeedsMeRows.length -- the
+   *  SAME combined set (tasks.needsHuman + feedback grilling/proposed + inbox ready/drafting) the
+   *  NEEDS ME section itself just rendered, and a STRICT SUBSET of blocked by construction.
    *  merged-today/spend-today/spend-this-week come from latestSpend (GET /v1/status's "spend"
    *  field, board.ts's computeGlanceSpend) -- "…" (unknown, never a fabricated 0) until the
    *  first real snapshot has landed. */
   function renderGlanceStrip(tasks) {
     setGlanceValue("glance-running", tasks.filter((t) => t.phase).length);
     setGlanceValue("glance-needs-me", latestNeedsMeRows.length);
-    setGlanceValue("glance-blocked", tasks.filter((t) => t.status === "blocked").length);
+    setGlanceValue("glance-blocked", tasks.filter(isBlockedRow).length);
     setGlanceValue("glance-queued", tasks.filter((t) => t.status === "queued").length);
     setGlanceValue("glance-merged-today", latestSpend ? latestSpend.mergedToday : "…");
     setGlanceValue("glance-spend-today", latestSpend ? costLabel(latestSpend.spendTodayUsd) : "…");
@@ -3225,7 +3236,12 @@ export function renderShellHtml(
   async function refreshAll() {
     let statusSnap;
     try {
-      statusSnap = await getJson("/v1/status", { timeoutMs: STATUS_FETCH_TIMEOUT_MS });
+      // W1-T163 MARKER, ACKNOWLEDGED VIEWS ONLY: "?ack=1" tells board.ts a HUMAN is about to see
+      // this recap, and it is sent on exactly the fetch whose recap this page renders (the
+      // recapRendered gate below). Every later poll asks WITHOUT it, so a tab left open no longer
+      // marks the evening seen three seconds at a time. Bare "/v1/status" -- getJson passes the
+      // token as a header, never a query param, so there is no "&" case to get wrong.
+      statusSnap = await getJson(recapRendered ? "/v1/status" : "/v1/status?ack=1", { timeoutMs: STATUS_FETCH_TIMEOUT_MS });
     } catch (e) {
       handlePollFailure();
       return;
