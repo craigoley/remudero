@@ -131,6 +131,20 @@ jobs:
       # (not a literal) so tests can shrink both to seconds instead of minutes.
       GRACE_WINDOW_SECONDS: "600"
       GRACE_POLL_INTERVAL_SECONDS: "20"
+      # W1-T312 WAIT CAP — sized from a MEASURED distribution of this repo's own required-check
+      # wall-clock (max(completed_at) - min(started_at) across the REQUIRED set), not a guess:
+      # n=10 samples on 2026-08-03 via `gh api repos/craigoley/remudero/commits/<sha>/check-runs`
+      # — 8 routine PR merges clustered 241-550s (241, 292, 297, 298, 300, 304, 306, 550), plus the
+      # 2 real timeout incidents this task was filed from (#1229: ~1114s; #1234: ~1345s, both
+      # derived from the failing run's own log timestamps — ci-gate started, then the `ci` job it
+      # was waiting on finished 3m26s / past-cap minutes later). p95 of this n=10 sample ≈ 1345s
+      # (the max). The OLD 900s cap sat BELOW that p95, so ci-gate timed out on green-in-progress
+      # siblings on the routine-but-slow tail — the exact defect this task fixes. 2400s (40min)
+      # gives ~79% headroom over the measured p95/max while staying a FINITE, loud bound (the cap
+      # exists to catch a genuinely stuck check, not to be deleted — see the step below). Kept as
+      # env (like GRACE_WINDOW_SECONDS) so tests can shrink it to seconds instead of minutes.
+      WAIT_CAP_SECONDS: "2400"
+      WAIT_POLL_INTERVAL_SECONDS: "15"
     steps:
       - name: Aggregate sibling check results (fail only on a REAL failure; skipped/absent are OK)
         run: |
@@ -140,6 +154,8 @@ jobs:
           # on `set -u` if either is ever left unset.
           GRACE_WINDOW_SECONDS="${GRACE_WINDOW_SECONDS:-600}"
           GRACE_POLL_INTERVAL_SECONDS="${GRACE_POLL_INTERVAL_SECONDS:-20}"
+          WAIT_CAP_SECONDS="${WAIT_CAP_SECONDS:-2400}"
+          WAIT_POLL_INTERVAL_SECONDS="${WAIT_POLL_INTERVAL_SECONDS:-15}"
 
           runs_json() {
             # All check runs on the PR head SHA, across every workflow + app, merged across pages,
@@ -158,7 +174,10 @@ jobs:
 
           # 1) WAIT until every REQUIRED check is present + completed (terminal). A required check
           #    that never registers -> timeout -> ci-gate FAILS (fail-closed; never a silent pass).
-          deadline=$(( $(date +%s) + 900 ))   # 15-minute hard cap
+          #    W1-T312: the cap is WAIT_CAP_SECONDS (measured + documented in the job env above),
+          #    not a literal -- the old hardcoded 900s sat below this repo's own p95 wall-clock and
+          #    turned the routine slow-but-green case into a false timeout (#1229, #1234).
+          deadline=$(( $(date +%s) + WAIT_CAP_SECONDS ))
           while :; do
             runs="$(runs_json)"
             not_ready="$(jq -r --argjson req "${REQUIRED}" '
@@ -167,13 +186,17 @@ jobs:
               | .[]' <<< "${runs}")"
             [ -z "${not_ready}" ] && break
             if [ "$(date +%s)" -ge "${deadline}" ]; then
-              echo "::error::ci-gate: timed out waiting for required check(s) to complete:"
+              # W1-T312: this is a TIMEOUT, distinct from step 2/3's "required check(s) FAILED" --
+              # nothing here concluded a failure, the wait cap simply elapsed first. Re-running the
+              # SAME sha changes nothing (the check(s) below are still not registered/completed);
+              # the only remedy is a NEW commit/sha to re-trigger the still-pending check(s).
+              echo "::error::ci-gate: TIMED OUT waiting for required check(s) to complete (this is NOT a check failure -- a NEW sha is the only remedy, re-running this same sha will not help):"
               printf '%s\n' "${not_ready}" | sed 's/^/  - /'
               exit 1
             fi
             echo "waiting for required check(s) to complete:"
             printf '%s\n' "${not_ready}" | sed 's/^/  - /'
-            sleep 15
+            sleep "${WAIT_POLL_INTERVAL_SECONDS}"
           done
 
           # 2) FAIL if ANY check (excluding IGNORE) concluded as a real failure. Skipped / neutral

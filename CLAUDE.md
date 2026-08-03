@@ -129,12 +129,16 @@ forensic detail, so the narrative does not need to live here.
 
 ## CI and merging
 
-- **A stale-red `ci-gate` needs a NEW SHA — no re-run path clears it.** ci-gate aggregates and goes
-  red when it times out on siblings that have not finished; when those siblings later complete green
-  on the SAME head sha it never re-aggregates. #873 went red while two checks subsequently passed on
-  that very sha; the byte-identical tree pushed to a fresh sha as #877 went fully green. The
-  underlying defect is filed as W1-T261 and UNIMPLEMENTED — this is the workaround, not the fix.
-  *(#873/#877)*
+- **A stale-red `ci-gate` used to need a NEW SHA when a same-sha rerun landed AFTER ci-gate's own
+  read — W1-T261 (merged 2026-07-29, #885) fixed exactly this.** ci-gate now RE-READS inside a
+  bounded grace window before concluding FAILURE, so a required check that flips FAILURE→SUCCESS on
+  the SAME head sha self-clears with no fresh sha and no manual re-run. #873 went red while two
+  checks subsequently passed on that very sha; #877 (a byte-identical tree pushed to a fresh sha)
+  went fully green — that gap is now closed. A DIFFERENT defect in the same job — the WAIT CAP
+  itself sized shorter than this repo's own required-check wall-clock, so ci-gate timed out on
+  siblings that were still green-in-progress rather than on any failure — is fixed by W1-T312 in
+  the same change that corrects this bullet (see the `WAIT_CAP_SECONDS` comment in
+  `.github/workflows/ci-gate.yml`). *(#873/#877, W1-T261/#885, W1-T312)*
 - **`gh pr create` is GraphQL and dies with "API rate limit already exceeded" when that budget is
   spent** (frequent on this account while REST/core stays healthy). Open PRs via REST:
   `gh api --method POST repos/<owner>/<repo>/pulls -f title=… -f head=… -f base=main -F body=@<file>`.
