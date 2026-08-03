@@ -242,7 +242,7 @@ export function isBlockedRow(row: Pick<BoardRow, "status" | "needsHuman">): bool
  * false when the GitHub read backing merge-state was unreachable — the console then renders the
  * merged tally as "unknown", never `0` as fact (fb-1784902052582-c124f9). */
 export function summarizeCounts(
-  tasks: Array<Pick<BoardRow, "phase" | "status"> & { needsHuman?: boolean }>,
+  tasks: Array<Pick<BoardRow, "phase" | "status" | "needsHuman">>,
   githubUnreachable: boolean,
 ): CountSummary {
   return {
