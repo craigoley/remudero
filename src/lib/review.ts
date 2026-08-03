@@ -1689,6 +1689,131 @@ export function judgeCriterion(
   return { ...base, met, reason, proof_exec: proofExec, proof_skip: proofSkip, floorMet, holdout: !!criterion.holdout };
 }
 
+/** The slice of {@link Task} the merged-claim audit needs — just enough to name a
+ *  finding without importing all of `plan.js`'s Task surface. Any object with these
+ *  two fields (a real {@link Task}, or a test fixture) satisfies it. */
+export interface AuditableMergedTask {
+  id: string;
+  acceptance?: ReadonlyArray<AcceptanceCriterion>;
+}
+
+/** One acceptance criterion of a MERGED task whose proof is in an executable
+ *  dialect (`grep:` / `unit test:` / a legacy bare test path or fenced grep) but did
+ *  NOT resolve to a runnable check, or resolved and did not pass — merge credit was
+ *  given per TASK, so this is the gap {@link judgeReview} itself cannot see once the
+ *  task is already merged and off its desk. */
+export interface MergedClaimFinding {
+  taskId: string;
+  claim: string;
+  proof: string;
+  proofExec: ProofExecOutcome;
+  /** Plain-language cause, independent of {@link CriterionVerdict.reason}'s keyword-floor
+   *  phrasing — there is no PR report to score keyword coverage against here, only the
+   *  proof's own execution outcome. */
+  reason: string;
+}
+
+/** One acceptance criterion of a merged task whose proof carries NO whitelisted
+ *  dialect at all (W1-T64's own two criteria are exactly this shape) — prose, and
+ *  therefore structurally unauditable by this or any mechanical check. Reported in
+ *  its OWN bucket so its size is legible; NEVER folded into {@link MergedClaimFinding}
+ *  (that would misreport "unauditable" as "broken") and NEVER treated as passing
+ *  (that would misreport "unauditable" as "verified") — design (4).
+ */
+export interface MergedClaimUncheckable {
+  taskId: string;
+  claim: string;
+  proof: string;
+}
+
+/** The full report {@link auditMergedTaskClaims} returns — REPORT ONLY, per design (2):
+ *  nothing here closes, reopens, or re-scores a task; it just makes the gap visible. */
+export interface MergedClaimAuditReport {
+  findings: MergedClaimFinding[];
+  uncheckable: MergedClaimUncheckable[];
+  tasksAudited: number;
+  /** Criteria whose proof DID parse to a whitelisted dialect and were actually run —
+   *  i.e. `findings.length` plus every executable criterion that passed cleanly. */
+  executableClaimsChecked: number;
+}
+
+/** Plain-language cause for a {@link MergedClaimFinding}, read off the SAME
+ *  {@link ProofExecOutcome}/{@link ProofSkipReason} pair {@link judgeCriterion} already
+ *  computed — never a second, independently-worded classification that could disagree
+ *  with the executor's own verdict. */
+function describeUnresolvedOrFailing(proofExec: ProofExecOutcome, proofSkip: ProofSkipReason | undefined): string {
+  switch (proofExec) {
+    case "executed_fail":
+      return "proof executed and FAILED against the current checkout";
+    case "executed_stale":
+      return "proof passes but also matches the merge-base — does not discriminate done from not-done";
+    case "exec_error":
+      return "proof named a whitelisted check that failed to execute (timeout, spawn error, or missing target)";
+    default:
+      return proofSkip === "prose-no-match"
+        ? "proof names a unit test that matches nothing on the current checkout (0 matches)"
+        : "proof did not resolve to a passing, runnable check";
+  }
+}
+
+/**
+ * W1-T302: a CLAIM-LEVEL audit over MERGED tasks. Merge credit is derived per TASK
+ * (deriveStatus/{@link projectPlan}), never per CRITERION, so a multi-claim task whose
+ * PR satisfied only SOME of its acceptance criteria reads identically to one that
+ * satisfied all of them — the gap W1-T64 fell into (its mount-budget claim shipped;
+ * its `commitsAhead` guard claim's own status is invisible to every existing check
+ * because that claim's proof is prose, not because anyone verified it either way).
+ *
+ * REUSES the reviewer's OWN parser+executor ({@link parseWhitelistedProof} via
+ * {@link judgeCriterion}, the exact machinery `rmd check-proof` and the live gate both
+ * run) rather than re-implementing a second matcher that could disagree with it
+ * (design (1)). Called with an EMPTY report-token set and no semantic verdict: there
+ * is no PR report to score keyword coverage against once a task is already merged —
+ * only `verdict.proof_exec`/`proof_skip`, which `judgeCriterion` computes purely from
+ * executing the proof, are read here; `verdict.met`/`reason` (keyword-floor artifacts
+ * of a report that does not exist in this context) are deliberately ignored.
+ *
+ * An ARCHITECT-set `satisfied_by` criterion is skipped outright — it is already,
+ * deliberately, credited to an earlier merge, never a hole this audit should surface.
+ *
+ * REPORT ONLY (design (2)): callers use this list to FILE follow-up tasks, never to
+ * mechanically close or reopen the merged task itself — an unresolved proof is
+ * frequently a stale proof, not missing work, and only a human can tell those apart.
+ */
+export function auditMergedTaskClaims(
+  tasks: ReadonlyArray<AuditableMergedTask>,
+  cwd: string,
+  exec?: ProofExecutor,
+): MergedClaimAuditReport {
+  const findings: MergedClaimFinding[] = [];
+  const uncheckable: MergedClaimUncheckable[] = [];
+  let executableClaimsChecked = 0;
+  const noReportTokens = new Set<string>();
+
+  for (const task of tasks) {
+    for (const criterion of task.acceptance ?? []) {
+      if (criterion.satisfied_by) continue; // already credited to an earlier merge — not a hole.
+      const verdict = judgeCriterion(criterion, noReportTokens, undefined, { cwd, exec });
+      if (verdict.proof_skip === "no-dialect") {
+        uncheckable.push({ taskId: task.id, claim: criterion.claim, proof: criterion.proof });
+        continue;
+      }
+      executableClaimsChecked++;
+      if (verdict.proof_exec !== "executed_pass") {
+        findings.push({
+          taskId: task.id,
+          claim: criterion.claim,
+          proof: criterion.proof,
+          proofExec: verdict.proof_exec,
+          reason: describeUnresolvedOrFailing(verdict.proof_exec, verdict.proof_skip),
+        });
+      }
+    }
+  }
+
+  return { findings, uncheckable, tasksAudited: tasks.length, executableClaimsChecked };
+}
+
 /**
  * A body's own claim about its changeset that {@link bodyContradictsDiff}
  * proved false against the diff it actually shipped.
