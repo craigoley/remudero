@@ -11,5 +11,5 @@ raw: "MINT TASK IDS AT APPROVE TIME, NOT DRAFT TIME — the P34 and P37 drafts
   collision classes and the triage serialization workaround."
 attachments: []
 origin: cli
-status: new
-proposal_pr: null
+status: proposed
+proposal_pr: https://github.com/craigoley/remudero/pull/1234
