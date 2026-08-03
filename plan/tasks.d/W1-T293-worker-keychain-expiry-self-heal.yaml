@@ -1,0 +1,112 @@
+- id: W1-T293
+  title: "the copied worker OAuth token EXPIRES and nothing re-provisions it — ensureWorkerKeychain's provision reasons are absent | identity-changed | skipped, so a same-account expired copy is 'skipped' forever and an unattended daemon walls at $0 until a human deletes two files by hand"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 150.00
+  rationale: "OBSERVED LIVE 2026-07-22 ~19:20Z: spawns died at $0 with 'OAuth session expired and could not be
+    refreshed'. RECOVERY WAS ENTIRELY MANUAL — unlock the login keychain, rm ~/Remudero/state/
+    remudero-worker.keychain-db and worker-keychain-password, let the next spawn re-provision. Unattended, the
+    daemon repeats the dead spawn indefinitely, and because each attempt is a real failed run it can burn fix
+    strikes against a cause no code change can reach.
+    VERIFIED AT SOURCE, this tree: WorkerKeychainProvisionReason = 'absent' | 'identity-changed' | 'skipped'
+    (src/lib/worker-home.ts:467) and the summary's reason is computed as
+    `!storeExists ? 'absent' : identityChanged ? 'identity-changed' : 'skipped'` (:636). W1-T265 made the gate
+    IDENTITY-aware — it compares ~/.claude.json's oauthAccount identity against the store's recorded identity
+    (src/lib/worker.ts:481-505) — but expiry is NOT an identity change: the same account's copy simply goes stale,
+    the identities still match, and the call returns 'skipped'. ensureWorkerKeychain runs PER SPAWN
+    (src/lib/worker.ts:590), so the fleet re-uses a dead credential on every attempt.
+    W1-T265 FILED THIS DEFERRAL EXPLICITLY: 'SIBLING FILING: fb-1784749981468-a531e5 names the same !exists gate
+    from the EXPIRY angle — a copied token that expires with no re-read. Same gate, same remedy shape; this task
+    makes the gate content-aware and that filing's clause (b) rides on it.' This is that clause, and the seam
+    W1-T265 shipped is what makes it cheap.
+    PLATFORM FACTS, researched rather than assumed (anthropics/claude-code): #21765 — a COPIED credential's
+    refresh token is NOT used on the machine it was copied to, which is exactly this fleet's provisioning shape,
+    so 'the copy will refresh itself' is CLOSED as a hypothesis; #28827 / #50743 — OAuth tokens are not refreshed
+    in non-interactive/headless invocation at all; #19456 — even when a refresh is attempted, macOS Keychain
+    permission errors can prevent the refreshed token being persisted back into the item; #29896 — a FAILED
+    refresh can wipe/empty the stored credential rather than preserving it, so the store can also end up present
+    but EMPTY, which today's file-existence check reads as a healthy store.
+    THE FILE-CREDENTIAL ESCAPE REMAINS CLOSED (FINDINGS.md, W1-T235): no OAuth token is stored in a file, keychain
+    only. The live LOGIN keychain item is the sole re-provisioning source."
+  design: |
+    MAKE THE GATE EXPIRY-AWARE AT THE SEAM W1-T265 ALREADY BUILT. No new subsystem.
+    (1) A FOURTH PROVISION REASON: 'credential-expired' joins absent | identity-changed | skipped in
+        WorkerKeychainProvisionReason and in the daemon.worker_keychain ledger line, so a self-heal is an audit
+        record rather than an invisible re-copy.
+    (2) DETECT STALENESS BEFORE THE SPAWN, cheaply. The worker store is always-unlocked by construction, so its
+        own item can be read and its expiry inspected without touching the login keychain. VERIFY FROM SOURCE
+        what the stored blob actually contains (the credentials JSON the copy carries) before keying on any
+        field name — if it carries an expiry timestamp, treat a token at/near expiry as stale under a small
+        configurable skew; if it does not, fall back to arm (3) alone and SAY SO in the PR body rather than
+        inventing a field. TREAT AN EMPTY OR UNPARSEABLE STORED CREDENTIAL AS ABSENT (the #29896 wipe shape) —
+        present-but-empty must never read as healthy. THE SECRET NEVER LEAVES THE FUNCTION: no logging, no
+        summary field, no ledger value — the same secret-free discipline W1-T265 held to (names only).
+    (3) RECOVER ON THE OBSERVED FAILURE TOO. W1-T292's spawn_credential_expired token is the after-the-fact
+        trigger: when a spawn dies expired, the next provisioning attempt must re-provision rather than skip,
+        even if arm (2) saw nothing wrong. Detection-before and recovery-after are both wanted; neither alone
+        covers a token that expires mid-run.
+    (4) RE-PROVISION = RE-READ THE LIVE LOGIN ITEM, exactly as the absent path already does, reusing the existing
+        atomic teardown (worker-home.ts:555-560 — never leave a half-provisioned store behind).
+    (5) FAIL CLOSED AND LOUD WHEN RECOVERY IS IMPOSSIBLE. Re-provisioning READS the login keychain, and the
+        login keychain may be LOCKED — the very condition W1-T235 built this copy to survive. When the re-read
+        fails, the existing WorkerKeychainError reason CLASSES (worker-home.ts:376-380) must carry it through as
+        a named, ledgered reason and the run must stop, never fall back to spawning on the known-dead copy.
+    (6) NO HOT LOOP. A daemon whose LOGIN token is itself dead must not re-provision once per spawn forever:
+        bound the attempts (backoff or a per-boot cap) and escalate ONCE with the named reason, so the failure
+        mode is a single actionable escalation rather than a strike-burning retry storm.
+    (7) DOCUMENT THE SELF-HEAL in docs/operator-guide.md alongside the W1-T265 switch procedure, and record that
+        the manual rm-two-files ritual is no longer the recovery path.
+    THE COVERAGE TRAP (W1-T265's note, #977/#978): every test of this module injects its own SecurityRunner and
+    `exists`, so default implementations and catch arms go unreached. Append any new injectable parameter LAST so
+    no positional caller shifts, and include a leaf test exercising the real default runner.
+    NOT IN SCOPE: naming the failure at the preflight (W1-T292), which account to use (W1-T266), or replacing the
+    copy with `claude setup-token` / a long-lived token — that is a credential-STRATEGY change with its own
+    account and billing consequences and must be decided on its own filing, not smuggled in as a bug fix.
+  acceptance:
+    - claim: "a store whose stored credential is EXPIRED re-provisions from the live login item instead of returning skipped, and the summary names the reason"
+      proof: "unit test: test/worker-keychain-expiry.test.ts"
+    - claim: "a store that is present but EMPTY or unparseable is treated as absent and re-provisioned — present-but-empty never reads as healthy"
+      proof: "unit test: test/worker-keychain-expiry.test.ts"
+    - claim: "a FRESH, matching-identity store still returns skipped — the steady-state spawn path adds no credential read and no extra unlock"
+      proof: "unit test: test/worker-keychain-expiry.test.ts"
+    - claim: "a spawn that died with the expiry-named reason forces the next provisioning attempt to re-provision rather than skip"
+      proof: "unit test: test/worker-keychain-expiry.test.ts"
+    - claim: "when the LOGIN keychain is locked the recovery FAILS CLOSED with a named reason class and the run never spawns on the known-dead copy"
+      proof: "unit test: test/worker-keychain-expiry.test.ts"
+    - claim: "recovery attempts are BOUNDED — a permanently dead login token yields one escalation, not a re-provision on every spawn"
+      proof: "unit test: test/worker-keychain-expiry.test.ts"
+    - claim: "no credential VALUE appears in the summary, the ledger line or any log — the self-heal stays in the name domain"
+      proof: "grep: credential-expired in src/lib/worker-home.ts"
+    - claim: "the DEFAULT SecurityRunner is exercised by a leaf test rather than only through an injected recorder"
+      proof: "unit test: test/worker-keychain-expiry.test.ts"
+    - claim: "the operator guide documents the self-heal and retires the manual rm-the-store ritual as the recovery path"
+      proof: "grep: remudero-worker in docs/operator-guide.md"
+  risk: high
+  origin: feedback#fb-1784749981468-a531e5
+  plan_refs: ["§9", "§4A"]
+  files: [src/lib/worker-home.ts, src/lib/worker.ts, docs/operator-guide.md]
+  status: queued
+  attempts: 0
+  note: "FILED from feedback fb-1784749981468-a531e5 (captured 2026-07-22T19:53:01Z; incident ~19:20Z; manual
+    recovery recorded in the raw entry). Anchors verified in this tree: worker-home.ts:467 (the three-reason
+    union), :636 (the reason computation that can never say 'expired'), :376-380 (the reason CLASSES),
+    :555-560 (the atomic teardown), worker.ts:481-505 (the W1-T265 identity source), worker.ts:590 (per-spawn
+    call site). Lineage: W1-T235/#539 created the copy, W1-T265/#1022 made the gate identity-aware and
+    explicitly deferred this clause, W1-T237 established the named-reason doctrine this rides on.
+    verify:auto and NOT verify:human, deliberately, on the W1-T265 precedent for the SAME function: SecurityRunner
+    and `exists` are injectable parameters, so an expired/empty/fresh store, a locked login keychain and the
+    attempt bound are all provable headlessly against a recorded argv with no real keychain, no real credential
+    and no spawn. The live arm W1-T235 needed a human for (does a spawn actually authenticate) is unchanged by
+    this task — it re-runs the provisioning path that already shipped.
+    risk:high — this decides whether EVERY worker spawns, and the asymmetric failure is a recovery loop that
+    re-copies a dead token per spawn (strike burn) or a wrong staleness verdict that re-provisions healthy
+    credentials continuously. Acceptance claims 3 and 6 are those two falsifiers.
+    budget_usd 150 — matching W1-T265, its structural twin: three files, a matrix over
+    expired/empty/fresh/locked-login/bounded-retry, plus the all-fakes coverage debt a real-default leaf test
+    pays off, which is the exact shape that cost #977 and #978 an extra CI round trip each.
+    SEQUENCING, expressed here rather than as a depends_on edge (both tasks arrive on one plan PR and each is
+    independently valuable): W1-T292 names the condition; arm (3) consumes that token, so if this lands first,
+    ship arms (1)(2)(4)(5)(6) and wire arm (3) when the token exists rather than inventing a rival matcher."
