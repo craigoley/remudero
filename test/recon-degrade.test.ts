@@ -261,3 +261,53 @@ test("BEHAVIORAL: a recon that errors twice in a row DEGRADES (never aborts the 
   assert.match(String(implementSpawn.prompt), /RECON CONTEXT ABSENT/, "implement is explicitly told recon context is absent");
   assert.match(String(implementSpawn.prompt), /error_max_turns/, "the absence note names the subtype, same as the ledger line");
 });
+
+// ── Behavioral: a BUDGET breach at recon is the ONE exception the task carved out — it stays
+// FATAL (never retried, never degraded) exactly like every other stage, on EITHER attempt ────
+
+test("BEHAVIORAL: a recon budget breach on the FIRST attempt is FATAL — no retry, no implement, blocked_budget", async (t) => {
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const spawn: typeof spawnWorker = async (args) => {
+    spawnCalls.push(args);
+    // The lone spawn breaches maxBudgetUsd — workerErrorVerdict's own doc says dollars are
+    // the hard backstop and are NEVER retried, recon included.
+    return result({ sessionId: "s-recon-1", subtype: "error_max_budget_usd", isError: true, numTurns: 5 });
+  };
+
+  const { res, ledger } = await runFixture(t, spawn);
+
+  assert.equal(res.verdict, "blocked_budget", "a recon budget breach still ends the run as blocked_budget");
+  assert.equal(spawnCalls.length, 1, "no bounded retry and no implement spawn follow a budget breach");
+
+  assert.equal(ledger.filter((l) => l.step === "recon.retry").length, 0, "a budget breach is never retried");
+  assert.equal(ledger.filter((l) => l.step === "recon.degraded").length, 0, "a budget breach degrades nothing — it is fatal");
+  const verdicts = ledger.filter((l) => l.step === "verdict" && l.stage === "recon");
+  assert.equal(verdicts.length, 1, "the budget breach is ledgered as the run's one terminal verdict");
+  assert.equal(verdicts[0].verdict, "blocked_budget");
+  assert.equal(verdicts[0].subtype, "error_max_budget_usd");
+});
+
+test("BEHAVIORAL: a recon budget breach on the SECOND (retry) attempt is still FATAL — never degraded to implement", async (t) => {
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const spawn: typeof spawnWorker = async (args) => {
+    spawnCalls.push(args);
+    if (spawnCalls.length === 1) {
+      // First attempt: an ordinary (non-budget) error — earns the ONE bounded retry.
+      return result({ sessionId: "s-recon-1", subtype: "error_max_turns", isError: true, numTurns: 20 });
+    }
+    // The retry itself breaches maxBudgetUsd — still fatal, never degraded to implement.
+    return result({ sessionId: "s-recon-2", subtype: "error_max_budget_usd", isError: true, numTurns: 5 });
+  };
+
+  const { res, ledger } = await runFixture(t, spawn);
+
+  assert.equal(res.verdict, "blocked_budget", "the retry's budget breach ends the run as blocked_budget, never a degrade");
+  assert.equal(spawnCalls.length, 2, "recon attempt 1 (error), recon attempt 2 (budget breach) — implement never spawns");
+
+  assert.equal(ledger.filter((l) => l.step === "recon.retry").length, 1, "the one bounded retry is still ledgered before the breach");
+  assert.equal(ledger.filter((l) => l.step === "recon.degraded").length, 0, "a budget breach on the retry is fatal, not a degrade");
+  const verdicts = ledger.filter((l) => l.step === "verdict" && l.stage === "recon");
+  assert.equal(verdicts.length, 1, "the retry's budget breach is ledgered as the run's one terminal verdict");
+  assert.equal(verdicts[0].verdict, "blocked_budget");
+  assert.equal(verdicts[0].subtype, "error_max_budget_usd");
+});
