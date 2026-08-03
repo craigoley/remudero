@@ -1,0 +1,75 @@
+- id: W1-T314
+  title: "the console is ONE scroll of ten sections, so a genuine decision, a live run and the raw firehose compete for the same screen — separate them into four tabs (Decisions / Now / Plan / Feed) with the firehose preserved UNCHANGED behind Feed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "OPERATOR DIRECTIVE 2026-07-22 (feedback fb-1784770111145-cf7c24, clause 3), with the same
+    screenshot that produced W1-T313. VERIFIED AT SOURCE: the shell renders TEN stacked sections in one
+    scroll — glance, recap, now, needs-me, accepted, up-next, recent, rest, controls, more (src/lib/serve.ts
+    sections at :702, :769, :774, :783, :799, :808, :820, :829, :861, :890). W1-T153 chose that stack
+    deliberately at v0 scale and it was right then; at today's scale the operator's two questions —
+    'what needs ME' and 'what is the fleet doing' — are answered by rows separated by hundreds of pixels of
+    unrelated rows, and the same surface also carries archaeology (`rest`, the find layer) that is only ever
+    wanted deliberately. The 2026-07-22 fixture behind fb-1784756096314-a6f58b measured the cost: 31 needs-me
+    items of which 26 were stale and 4 were genuine.
+    THIS IS AN IA CHANGE, NOT A REWRITE. Every section already exists, already binds a live projection, and
+    already patches in place (W1-T156). What is missing is the SEPARATION."
+  design: |
+    FOUR TABS OVER THE EXISTING SECTIONS — the sections are MOVED, not rebuilt.
+      DECISIONS — genuine operator decisions ONLY: the needs-me set, with already-resolved items FILTERED OUT
+        rather than sorted down. CONSUME the existing verdicts, never a second derivation: W1-T257 owns
+        'a proposal_pr that MERGED is no longer a pending decision', and the escalation-lifecycle reconciler
+        (feedback fb-1784756088300-6a481e, src/lib/sweep.ts:2751) owns 'this escalation's referent resolved'.
+        Where a verdict is not yet live, this tab renders exactly today's set — it must NOT invent a third,
+        competing staleness rule.
+      NOW — live runs + daemon + deploy state, bound to the ONE `rmd status` read model
+        (src/lib/status-board.ts, W1-T279/W1-T280's --json, whose header already names this tab as its
+        intended consumer). No second derivation of liveness in the console.
+      PLAN — progress + frontier. W1-T315 fills it; this task creates the tab and, until then, it renders an
+        honest 'not built yet' rather than a blank panel.
+      FEED — the raw firehose, UNCHANGED: recent, rest, the find layer (W1-T157) and the recap keep working
+        exactly as they do today. Archaeology is a first-class use, and nothing may be deleted to make room.
+    WHAT DOES NOT MOVE: the GLANCE strip (W1-T159) stays PINNED above the tabs — it is the cross-tab answer to
+    'is anything on fire' and putting it inside a tab hides it. Fleet CONTROLS keep their confirm discipline
+    wherever they land, and the browser-tab needs-me badge must keep firing when Decisions is NOT the active
+    tab (the alert must not depend on already looking at it).
+    PRESERVE WHAT SHIPPED, EXPLICITLY. Verify from source before rewriting the shell: W1-T156's DOM-stable
+    in-place patching and text-selection stability (a tab switch must not re-create rows or drop an
+    in-progress selection), W1-T157's URL-persisted view state (tab selection joins it, so a tab is
+    deep-linkable and survives reload), W1-T154's first-paint budget, and W1-T262's freshness story (each tab
+    declares its own source's age; a STALE badge never co-displays with 'live').
+    NO NEW FETCHES. Tabs are a projection of the SAME data the shell already receives — an inactive tab must
+    not add a poll, a request, or a second gateway call. If anything, non-active sections may render lazily.
+    HONEST EMPTINESS: an empty Decisions tab says 'nothing needs you' (and W1-T283's lesson applies — it must
+    be able to say that only when it has actually looked at the whole set); no tab is hidden because it is
+    empty, because a missing tab reads as a missing capability.
+    OUT OF SCOPE: what a card SAYS (W1-T313), the Plan view's own content (W1-T315), grouping/batch-close of
+    escalations (fb-1784756096314-a6f58b).
+  acceptance:
+    - claim: "the shell renders exactly four tabs — Decisions, Now, Plan, Feed — and the active tab is URL-persisted and deep-linkable, surviving a reload"
+      proof: "unit test: test/console-tabs.test.ts"
+    - claim: "Decisions renders only items no live verdict has already resolved, consuming the existing merged-proposal and escalation-reconciler verdicts rather than a new staleness rule of its own"
+      proof: "unit test: test/console-tabs.test.ts"
+    - claim: "Feed still renders recent + everything-else + the find layer unchanged — the falsifier is any firehose row that exists today and cannot be reached after the change"
+      proof: "unit test: test/console-tabs.test.ts"
+    - claim: "the glance strip stays outside the tabs and the needs-me badge still fires while another tab is active"
+      proof: "unit test: test/console-tabs.test.ts"
+    - claim: "switching tabs issues NO additional fetch and preserves in-place row patching (rows are not re-created), so live state and text selection survive the switch"
+      proof: "unit test: test/console-tabs.test.ts"
+  risk: high
+  origin: feedback#fb-1784770111145-cf7c24
+  plan_refs: ["§7"]
+  files: [src/lib/serve.ts, test/console-tabs.test.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-08-03 from feedback fb-1784770111145-cf7c24 (clause 3), source-verified at filing: the ten
+    single-scroll sections at serve.ts:702/769/774/783/799/808/820/829/861/890. MASTER-PLAN §7 is amended by
+    this same filing to record the four-tab IA, so this supersedes W1-T153's five-section single-scroll IA
+    AS AN IA — none of W1-T153's shipped behaviour (design system, responsiveness, control read-back) is
+    withdrawn. risk:high: it touches the shell every other console task renders through, and its real danger
+    is silent regression of W1-T156/W1-T157/W1-T262 behaviour, which is why preserving those is a criterion
+    rather than a note. depends_on empty deliberately — it must not be gated behind W1-T313 or W1-T315;
+    separation is useful with today's card text and an empty Plan tab."
