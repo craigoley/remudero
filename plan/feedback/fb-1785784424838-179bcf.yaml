@@ -1,0 +1,21 @@
+id: fb-1785784424838-179bcf
+ts: 2026-08-03T19:13:44.838Z
+raw: "WORKER SPAWN DEPENDS ON THE ADMIN ACCOUNT'S NODE — a live worker process
+  (pid 74384, run W1-T309-1785783002827, 2026-08-03T19:12Z) runs
+  /Users/craigoley/.nvm/versions/node/v22.22.1/bin/node while the fleet runs
+  entirely as craigoleyagent. So every worker spawn depends on a binary owned by
+  a DIFFERENT account, at a version-pinned nvm path. Not currently broken and
+  not urgent. But if that nvm install is pruned, upgraded, or the admin
+  account's home becomes unreadable, every spawn fails at once, and the symptom
+  would be a spawn error with no obvious cause — the same diagnostic shape as
+  the Claude binary husk outage. RECON: establish how the daemon resolves node
+  for a worker spawn (inherited PATH, an absolute path in a plist, a config
+  value); whether the constructed worker env pins it deliberately; and what the
+  failure looks like if that path disappears. Then say whether the fleet should
+  depend on a node under craigoleyagent instead. Falsifying check: if the daemon
+  resolves node from craigoleyagent's own PATH and this process is an artifact
+  of how it was started, there is nothing here."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
