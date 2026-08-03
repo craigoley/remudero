@@ -1,0 +1,104 @@
+- id: W1-T297
+  title: "INSTRUMENT CHANGES RIDE ALONE — a diff that edits what CI MEASURES (ratchet/coverage scripts, recorded baselines, workflow measurement flags, mutation scope) while also changing src/ is refused by the review floor as a partly SELF-GRADED green, and the fix rung refuses to spend strikes on an entanglement no worker may legitimately resolve by writing more code"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 90.00
+  rationale: "TWO SEPARATE CLAIMS SHIPPED AS ONE GREEN. 'the instrument is right' and 'the code is right'
+    are independently falsifiable, and a PR carrying both proves neither: the instrument's own falsifiers
+    were graded by the version of the instrument that shipped with them, and the task's green rests on a
+    floor the same commit moved. THE FIXTURE, from the filing feedback and confirmed in docs/review-gate.md
+    (the '2026-07-22, W1-T210 round 2' section): the --enable-source-maps coverage flag, diff-coverage.mjs's
+    text-awareness carve-outs, and a RE-CAPTURE of scripts/coverage-baseline.json (lines 89.64 -> 82.75)
+    all rode INSIDE task fix chains in the #585/#586 arc. Each change may well be correct - that is the
+    point: nobody can tell from the merge. The same doc records a later round landing as an
+    'instrument-only change, own PR' - the right shape, practised by hand, enforced by nothing.
+    NOT COVERED BY WHAT IS ALREADY FILED OR SHIPPED. Each neighbour was read at filing, not inferred from
+    its title:
+      - W1-T212 (tasks.yaml:3630) SHIPPED USER_VISIBLE_SURFACE_RE (review.ts:3268-3282), which makes a
+        gate-weakening diff VISIBLE to the docs-awareness rung. Visible is not isolated: that rung is
+        satisfied by a docs update or a stated reason, and the instrument still rides along.
+      - W1-T204 (tasks.yaml:3432, queued) decides WHO MAY MERGE a gate-config edit - path-scoped protection
+        or an operator-only push path. An operator may still approve the bundle, so entanglement survives
+        it. Its own rationale names the co-mingling ('IN THE SAME PR whose merge those files govern') but
+        its three criteria are all about live protection state, never about what else the PR contains.
+      - checkOneConcern (review.ts:3097) is STRUCTURALLY BLIND here: concernStem returns null for any path
+        outside src/ and test/ (review.ts:3077-3082), so scripts/, .github/workflows/ and every baseline
+        json carry NO concern at all and a bundled instrument change cannot trip it. It is also layer 2
+        (advisory) and judgeRubric has no call site in src/ outside review.ts itself - so the rubric is the
+        wrong place for a property that must BIND.
+    THE SEAM ALREADY EXISTS AND HAS A PRECEDENT THAT FITS EXACTLY. Standing rule 15's criteriaTampered is
+    the same prohibition one layer up (a worker may not edit the criteria that judge it): computed from
+    evidence.diff at review.ts:1904, folded into BOTH state (:1914) and floorState (:1939) so verdict
+    stability can never suppress it, prioritised in failSummary (:2750-2755), and REFUSED by the fix rung
+    at run-task.ts:2540 - zero strikes spent, escalate instead. This task is that same shape for the
+    INSTRUMENT that judges the diff. Line refs are a 2026-08-03 read: verify from source, distrust them."
+  design: |
+    ONE PATH SET, EXPORTED, NOT A THIRD COPY. The instrument surface must be a SINGLE named constant that
+    USER_VISIBLE_SURFACE_RE's instrument arm is derived from or shares, so the docs-awareness surface and
+    the isolation gate can never drift apart. Membership (verify each against the tree before wiring):
+    .github/workflows/ measurement wiring, scripts/*-ratchet.mjs, scripts/diff-coverage.mjs, every
+    scripts/*-baseline.json, scripts/mutation-relevant-paths.json, stryker.conf.json.
+    THE PREDICATE IS ENTANGLEMENT, NOT INSTRUMENT-TOUCHING. Refuse only when the diff changes at least one
+    instrument path AND at least one src/ product path. An instrument-only PR is the SANCTIONED shape and
+    must pass; so must a src-only PR, a plan-only PR, and a docs-only PR.
+    THE INSTRUMENT'S OWN FALSIFIERS TRAVEL WITH IT. test/ files must NOT count as the product half, or an
+    instrument PR could never carry the fixture that proves it (test/diff-coverage.test.ts is exactly the
+    file W1-T212 shipped for this purpose). This is the carve-out most likely to be got wrong, so it is its
+    own criterion.
+    BIND IT WHERE criteriaTampered BINDS. A new ReviewVerdict flag folded into state AND floorState beside
+    criteriaTampered, never suppressible by verdict stability (W1-T178 only ever forgives a SEMANTIC
+    downgrade, and this is a structural diff-derived fact). Do NOT add it to judgeRubric: an advisory item
+    that nothing calls cannot stop a self-graded green.
+    THE FIX RUNG MUST REFUSE, NOT FIX. A fix worker cannot legitimately resolve entanglement by writing more
+    code - the only honest resolutions are SPLIT (land the instrument alone, then rebase) or REVERT the
+    instrument hunk, and both restructure the PR rather than add work. Follow run-task.ts:2540: spend zero
+    strikes, escalate with actionable options per section 4 (never a bare alert), and NAME the observed
+    evidence - the instrument paths found and the src paths beside them - per W1-T186.
+    THE MESSAGE MUST TEACH THE ESCAPE. The failure text states the resolution ("land the instrument change
+    in its own PR, then rebase this one onto it") - a rule that only says no re-teaches nothing and gets
+    worked around.
+    EXPLICITLY OUT OF SCOPE, with reasons rather than silence: (a) src/lib gate MODULES (review.ts,
+    task-linter.ts, flight-judge.ts) - a rule that forbade a reviewer change beside its own run-task.ts
+    wiring would collide head-on with Standing rule 14 (the wiring is a deliverable, not a seam); those
+    files stay under W1-T212's docs-awareness rung. (b) Branch-protection enforcement - that is W1-T204's
+    concern and this task must not touch live protection state. (c) Retroactively splitting anything the
+    #585/#586 arc already merged.
+  acceptance:
+    - claim: "a diff that changes a measurement-instrument path (a ratchet/coverage script, a recorded baseline, a workflow's measurement flags, or the mutation scope config) AND a src/ path in the same PR FAILS the review floor as entangled, and the failure is stated as such rather than as an ordinary unmet criterion"
+      proof: "unit test: test/instrument-isolation.test.ts"
+    - claim: "the entanglement flag binds BOTH the rolled-up state and the floor state, so a verdict-stability re-review of an unchanged head can never suppress it — exactly as criteriaTampered cannot be suppressed"
+      proof: "unit test: test/instrument-isolation.test.ts"
+    - claim: "THE FALSE-POSITIVE FALSIFIERS — an instrument-only PR (instrument paths plus their own test/ falsifiers plus docs) PASSES, a src-only PR PASSES, and a plan-only or docs-only PR PASSES, so the sanctioned shape stays cheap and the gate does not become noise everyone routes around"
+      proof: "unit test: test/instrument-isolation.test.ts"
+    - claim: "the fix rung spends ZERO strikes on an entangled PR and escalates with actionable options naming the instrument paths and the src paths observed, rather than dispatching a fix worker at work it cannot legitimately do"
+      proof: "unit test: test/instrument-isolation.test.ts"
+    - claim: "the failure text names the resolution — land the instrument change in its own PR, then rebase — so the rule teaches the escape instead of only refusing"
+      proof: "unit test: test/instrument-isolation.test.ts"
+    - claim: "the instrument path set is ONE exported constant shared with the docs-awareness user-visible surface, not a second hand-maintained copy that can drift"
+      proof: "grep: INSTRUMENT_SURFACE in src/lib/review.ts"
+    - claim: "the binding flag is computed in the review floor beside criteriaTampered and consumed by the run loop, so it is wired rather than dead code (Standing rule 14)"
+      proof: "grep: instrumentEntangled in src/run-task.ts"
+  risk: high
+  origin: feedback#fb-1784762618336-8211ab
+  plan_refs: ["§5", "§12"]
+  files: [src/lib/review.ts, src/run-task.ts]
+  status: queued
+  attempts: 0
+  note: "FILED from feedback#fb-1784762618336-8211ab (captured 2026-07-22), covered-by NONE — checked against
+    plan/tasks.yaml and every plan/tasks.d shard. Ships with the MASTER-PLAN §12 amendment that states the
+    RULE (Standing rule 25) this task makes executable; the feedback asked for 'a rule plus lint' and a rule
+    with no gate is the doc-that-describes-a-mechanism rule 13 refuses.
+    risk:high, and the reason is blast radius rather than size: this adds a BINDING refusal to the review
+    floor, so a wrong path set or a missed carve-out false-blocks every PR in the fleet at once. That is why
+    the false-positive falsifiers are one of the six criteria and why the test/ carve-out is called out
+    separately in the design. TWO FILES, ONE CONCERN (a self-graded green is refused and never fix-dispatched)
+    — the run-task.ts half is the call site, and rule 14 makes the wiring a deliverable, not a follow-up.
+    budget_usd 90 — the logic is a path predicate; the cost is verifying the instrument surface against the
+    live tree and building the six-way fixture matrix.
+    NAMED AND NOT FOLDED IN (rule 19 sizing, rule 15 of the retro doctrine — cheap re-filing beats smuggling):
+    judgeRubric (review.ts:3483) appears to have NO call site in src/ outside its own module, which would make
+    the whole §5 layer-2 rubric — including checkOneConcern — dead code. That is a separate defect with a
+    separate proof and must not ride inside this task; whoever confirms it from source should file it."
