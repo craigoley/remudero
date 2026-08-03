@@ -1,0 +1,49 @@
+- id: W1-T306
+  title: "`rmd status` lists MERGED PRs under BLOCKERS BY CLASS — all five entries in one live run were merged, so the section an operator reads first is mostly noise"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 50.00
+  rationale: "MEASURED 2026-08-03 12:50 on the live repo. `rmd status` printed five `blocked PR`
+    entries under BLOCKERS BY CLASS: #1198 (W1-T299), #1192 (W1-T288), #1193 (W1-T298), #1187 and
+    #1179 (W1-T297), with reasons like 'required checks red — ci-log fix, strike 1/2' and 'fix
+    strikes exhausted (2/2) … escalating'. Checked against the API, EVERY ONE was merged:
+    #1179 09:25:08Z, #1187 10:43:56Z, #1192 11:26:46Z, #1193 11:27:17Z, #1198 12:17:16Z.
+    FIVE OF FIVE. Not a stale entry among live ones — the whole section was history.
+    THE SECTION IS THE ONE AN OPERATOR READS FIRST, and `next action:` is computed from it. A
+    reader acting on that output would chase five closed PRs, and the two genuinely useful lines
+    (the circuit-broken tasks) are buried among them. The failure is toward alarm, which is the
+    direction that trains an operator to skip the section — and it is the section that will carry
+    the real outage.
+    SAME FAMILY, THIRD INSTANCE. W1-T288: `#controls-status` rendered health from the ABSENCE of
+    flag files, so a dead daemon and a healthy one were the same pixels. W1-T301: `rmd status`
+    calls a healthy periodic one-shot 'not running'. Here a merged PR and a blocked one read the
+    same. Each is a claim derived from a signal that no longer carries what the claim asserts.
+    LIKELY MECHANISM, UNVERIFIED — measure before trusting it: the dispositions look like they are
+    replayed from `sweep.disposed` ledger lines rather than re-derived against current PR state, so
+    a disposition written while a PR was genuinely blocked survives its merge forever."
+  design: |
+    A BLOCKER IS A CLAIM ABOUT NOW. Re-derive it, or do not print it.
+    (1) Establish where the list comes from before changing anything — ledger replay versus a live
+        read. If it is replay, the fix is to intersect against currently-OPEN PRs; if it is a live
+        read with a stale cache, the fix is different. The rationale's guess is a guess.
+    (2) A PR that is merged or closed is NOT a blocker and must not appear, whatever the ledger
+        still says about it. Merge state is the authority.
+    (3) `next action:` is computed from this section — confirm it stops naming closed work too, or
+        the visible symptom moves rather than clearing.
+    (4) DEGRADE HONESTLY: if the merge state cannot be read (a GitHub outage), say the section is
+        unverified rather than printing history as if it were current. The repo already holds that
+        an unreadable count is not "nothing to report".
+  acceptance:
+    - claim: "a PR that is merged or closed never appears under BLOCKERS BY CLASS, whatever disposition the ledger still carries for it"
+      proof: "unit test: test/status-blockers-live.test.ts"
+    - claim: "the next-action line is not computed from a closed PR"
+      proof: "unit test: test/status-blockers-live.test.ts"
+    - claim: "when merge state cannot be read the section reports itself unverified rather than replaying history as current"
+      proof: "unit test: test/status-blockers-live.test.ts"
+  risk: medium
+  origin: oper#status-stale-blockers-2026-08-03
+  plan_refs: ["§7"]
+  files: [src/lib/status.ts]
