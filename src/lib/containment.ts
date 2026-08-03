@@ -194,6 +194,18 @@ const CREDENTIAL_FAILURE_RE = /not logged in/i;
 const CREDENTIAL_LOGIN_HINT_RE = /run \/login/i;
 
 /**
+ * Regex marking the SDK's OTHER credential-dead result text: a copied OAuth
+ * token that has since EXPIRED (as opposed to never being logged in at all)
+ * exits "OAuth session expired and could not be refreshed" at $0 before any
+ * turn — a distinct string from CREDENTIAL_FAILURE_RE/CREDENTIAL_LOGIN_HINT_RE
+ * above, so it previously matched neither and fell through to the generic
+ * "unproven" verdict W1-T237 exists to prevent. Same conservative shape: both
+ * fragments must appear, applied only in combination with `isError`.
+ */
+const CREDENTIAL_EXPIRED_RE = /oauth session expired/i;
+const CREDENTIAL_REFRESH_FAILED_RE = /could not be refreshed/i;
+
+/**
  * Default executor: spawn a real sandboxed worker in a scratch cwd under the
  * workspace. `spawn` is injectable (defaults to the real {@link spawnWorker})
  * so both W1-T237's `isError` plumbing and W1-T238's stderr-persistence branch
@@ -304,11 +316,14 @@ export async function probeContainment(opts: {
     insideWriteCreated: r.insideWriteCreated,
     // W1-T237: isError PLUS BOTH conservative credential fragments — not "any
     // error" — so an unrelated error-result is never mislabelled a credential
-    // failure (the design's own conservatism requirement).
+    // failure (the design's own conservatism requirement). Two independent
+    // credential-dead phrasings are recognized: never-logged-in, and an
+    // expired copied token that could not be refreshed.
     credentialFailure:
       r.isError === true &&
-      CREDENTIAL_FAILURE_RE.test(r.transcript) &&
-      CREDENTIAL_LOGIN_HINT_RE.test(r.transcript),
+      ((CREDENTIAL_FAILURE_RE.test(r.transcript) && CREDENTIAL_LOGIN_HINT_RE.test(r.transcript)) ||
+        (CREDENTIAL_EXPIRED_RE.test(r.transcript) &&
+          CREDENTIAL_REFRESH_FAILED_RE.test(r.transcript))),
   };
   const verdict = assessContainment(evidence);
   const costUsd = r.costUsd ?? 0;

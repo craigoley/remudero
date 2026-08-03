@@ -248,6 +248,31 @@ test("probeContainment: a genuine no-write, no-denial, non-error run still yield
   );
 });
 
+test("probeContainment: a seeded error-result carrying 'OAuth session expired and could not be refreshed' (an EXPIRED copied token) yields the credential-named reason, FAILS CLOSED", async () => {
+  await assert.rejects(
+    () =>
+      probeContainment({
+        settingsFile: settingsFile(ENABLED),
+        token: "expiredtok",
+        exec: async () => ({
+          transcript: "OAuth session expired and could not be refreshed",
+          outsideWriteCreated: false,
+          insideWriteCreated: false,
+          isError: true,
+        }),
+      }),
+    (e: unknown) => {
+      assert.ok(e instanceof ContainmentError);
+      const err = e as ContainmentError;
+      assert.equal(err.guard, "containment");
+      assert.equal(err.check, "spawn-credential-failure");
+      assert.equal(err.observed, "spawn_credential_failure");
+      assert.match(err.message, /spawn_credential_failure/);
+      return true;
+    },
+  );
+});
+
 test("probeContainment: isError alone (no credential-shaped text) does NOT trip the credential verdict — falls through to genuine unproven", async () => {
   await assert.rejects(
     () =>
