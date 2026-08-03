@@ -1,0 +1,23 @@
+id: fb-1785798733822-7da796
+ts: 2026-08-03T23:12:13.822Z
+raw: "ADDENDUM to fb-1785798596440-f9576e (dead spend guards) — confirmed at
+  today's sha: checkCostGovernor and checkQueueGovernor are each defined ONCE in
+  src/lib/sweep.ts and invoked ONLY from test/cost-governor.test.ts and
+  test/queue-governor.test.ts. Zero src/ call sites. Their own doc comments
+  describe a consumer that was never written — sweep.ts refers to
+  'checkCostGovernor's existing call'. Both are pure predicates with thorough
+  tests (nine assertions covering the ceiling boundary, tightening, and
+  defaults), so the hard part is done and the missing piece is a caller that
+  computes the day's spend and consults it. THE TRAP FOR WHOEVER WIRES THIS:
+  both live in sweep.ts, but a concurrency recon established that the DAEMON
+  dispatches through runDaemon's own for(;;) loop and never calls runDrain at
+  all — the same daemon-vs-drain split that made MASTER-PLAN's 'dispatches two
+  lanes in parallel' claim false. So wiring these where their doc comments imply
+  may guard a path that does not spend, producing a SECOND dormant guard that
+  everyone then believes is working. Establish which loop actually dispatches
+  before choosing a call site, and prove the wired guard fires on a real
+  dispatch rather than only in a test."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
