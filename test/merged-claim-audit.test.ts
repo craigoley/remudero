@@ -91,6 +91,14 @@ test("auditMergedTaskClaims reports a prose proof as uncheckable, never as passi
   assert.equal(report.executableClaimsChecked, 0);
 });
 
+// NOTE (W1-T302 acceptance 3, for the record): `commitsAhead` already exists in
+// `src/run-task.ts` (shipped in PR #115, well before this task was filed in PR #1191)
+// — the guard this claim names is NOT actually missing from `src`. That does not
+// change what this test proves: W1-T64's own acceptance block writes BOTH claims as
+// PROSE (no `grep:`/`unit test:` dialect prefix), so no mechanical check — this one
+// included — can resolve either claim as shipped or not from the plan text alone.
+// "uncheckable" is the honest, literal verdict either way; it is not a claim that the
+// guard is absent.
 test("auditMergedTaskClaims marks BOTH of W1-T64's real acceptance claims uncheckable — nothing in the system can see whether its commitsAhead guard claim shipped (acceptance 3)", () => {
   const w1t64 = REAL_PLAN.tasks.find((t) => t.id === "W1-T64");
   assert.ok(w1t64, "W1-T64 must still be a real task in plan/tasks.yaml");
