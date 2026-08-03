@@ -3494,6 +3494,13 @@ async function runTask(
      *  this file's injectable `spawn` param), so a genuine CAPPED verdict from a real
      *  reviewer round-trip cannot be produced deterministically in a test. */
     runReview?: (args: Parameters<typeof runReview>[0]) => ReturnType<typeof runReview>;
+    /**
+     * Read THIS PR's current body, so the review judges the artefact the author is told is judged.
+     * Appended LAST so no positional caller shifts. Injected only by tests; in production it
+     * DEFAULTS to {@link fetchPrBodyViaGh}. Best-effort — a throwing fetcher falls back to the
+     * worker-text report, i.e. exactly the pre-fix behaviour.
+     */
+    fetchPrBody?: (prUrl: string) => Promise<string>;
     /** Injectable decision-record writer+lander (W1-T191, write site 1) — lets a behavioral
      *  test drive a REAL runTask() through the DECISION_REQUEST auto-choose branch and assert
      *  exactly what it writes/lands, without ever shelling out to a real git/gh. Default: the
@@ -3506,6 +3513,7 @@ async function runTask(
   const config = opts.config ?? loadConfig();
   const spawn = opts.spawn ?? spawnWorker;
   const runReviewFn = opts.runReview ?? runReview;
+  const fetchPrBodyFn = opts.fetchPrBody ?? fetchPrBodyViaGh;
   const recordDecisionFn = opts.recordDecision ?? recordDecision;
   const planPath = opts.planPath ?? join(repoRoot, "plan", "tasks.yaml");
   const ledgerPath = ledgerPathFor(config);
@@ -4259,12 +4267,36 @@ async function runTask(
       say(`verdict: blocked_ci (ci ${ci}) — PR left OPEN: ${prUrl}`);
       return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked_ci" };
     }
+    // THE REVIEW MUST JUDGE THE PR BODY, NOT THE WORKER'S CHAT TEXT (recon-GK).
+    //
+    // This passed `fullText(impl)` — the implementation worker's running narrative. `runReview`
+    // feeds that string to `bodyContradictsDiff` (lib/review.ts:1803), which asks whether the
+    // author's CLAIMS ABOUT THE CHANGESET match the diff. A narrative naturally contains phrases
+    // like "plan-only" or "exactly one file" while DESCRIBING the job, so the gate correctly
+    // reported a contradiction of a claim the PR BODY never made. Observed live on #1156, the
+    // first task PR the autonomous loop produced end to end: its 7,528-byte body contains zero
+    // occurrences of "plan-only", and driving `bodyContradictsDiff` with that body and that file
+    // list offline returns [] — the checker is right, it was handed the wrong document.
+    //
+    // W1-T256 fixed this EXACT confusion for the fix rung (see `fetchPrBody`'s doc, above:
+    // "this re-review judges the fix worker's CHAT TEXT instead"), and the authoritative
+    // `reviewCommand`/`post-review` path has always used `report: body`. This is the third and
+    // last consumer to be brought in line.
+    //
+    // Best-effort, same discipline as W1-T256: a failed read falls back to the worker text rather
+    // than blocking the review, so a `gh` outage degrades to the old behaviour instead of a stall.
+    let reviewReport = fullText(impl);
+    try {
+      reviewReport = await fetchPrBodyFn(prUrl);
+    } catch (e) {
+      log("review.body_fetch_error", { error: String((e as Error)?.message ?? e) });
+    }
     let review = await runReviewFn({
       owner,
       repo: task.repo,
       prUrl,
       task,
-      report: fullText(impl),
+      report: reviewReport,
       settingsFile,
       config,
       budgetUsd,
