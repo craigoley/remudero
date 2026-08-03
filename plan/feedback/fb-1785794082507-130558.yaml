@@ -1,0 +1,32 @@
+id: fb-1785794082507-130558
+ts: 2026-08-03T21:54:42.508Z
+raw: "AN UNRESOLVABLE PROOF CERTIFIES NOTHING AND NOTHING NOTICES — residual
+  from W1-T229, withdrawn in #1239. Both its proofs resolved to ZERO tests: rmd
+  check-proof reports candidates: absent, no-match, executor never spawns node.
+  So the task was UNFALSIFIABLE as written — a dispatched run could have
+  implemented it perfectly and still posted CAPPED at 0/2, whoever ran it. It
+  sat queued 13 days and was caught only by hand inspection. rmd check-proof
+  ALREADY COMPUTES that verdict; nothing calls it over the plan. TWO
+  CONSTRAINTS, both load-bearing: (1) SCOPE TO QUEUED TASKS ONLY — a forward
+  reference to a test the implementing PR will create is legitimate and must
+  stay legitimate, so a check over all tasks would fire on every
+  correctly-written new task; (2) LAND IT AS A REPORT BEFORE A GATE — 188 tasks
+  already carry blocking violations and gating immediately would stop the queue
+  outright, and this repo has already concluded that a build gate producing
+  false positives gets deleted within a week. THIS IS THE THIRD ENTRY ON ONE
+  MECHANISM and the convergence may matter more than any of them: W1-T309 (a
+  task credited merged with PASS 3/3 whose behaviour is absent in production —
+  proofs certifying against a seam the command never reaches),
+  fb-1785792135748-755f93 (the CI reviewer may resolve criteria differently from
+  reviewCommand, so a documented two-line block silently produces unresolvable
+  criteria), and this. RECON: run rmd check-proof over every queued task and
+  report the count and the list. Then say whether the three entries share one
+  cause — a proof that resolves to nothing looking identical to a proof that
+  resolves to something passing — and whether one instrument covers all three.
+  Falsifying check: if fewer than a handful of queued tasks carry unresolvable
+  proofs, W1-T229 was an isolated authoring error and a report is not worth
+  building."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
