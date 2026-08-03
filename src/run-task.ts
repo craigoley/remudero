@@ -3518,6 +3518,35 @@ function reconObservedToContext(recon: WorkerResult, taskId: string): string {
 }
 
 /**
+ * The RECON spawn's turn cap — the ONE place the number lives, so the code and every
+ * `routes.recon` cell in `.remudero/mounts.yaml` cannot say different things (the impl-BP/impl-BS
+ * lineage: a table row asserting what the code does not do). Deliberately a constant rather than
+ * `reconMount.maxTurns`: recon is read-only and must stay bounded regardless of which class routed
+ * it, and `maxBudgetUsd` remains the real backstop (WS-0 knob a).
+ *
+ * WHY 20 AND NOT 8. Measured over every `recon.done` row for 2026-08-03, the day the queue
+ * emptied — 18 recons, split by the model the recon row routed:
+ *
+ *   haiku  : 9 `error_max_turns` / 1 success   (failures 9×9;  success 17)
+ *   sonnet : 2 `error_max_turns` / 6 success   (failures 9, 9; successes 5, 6, 7, 8, 8, 8)
+ *
+ * 11 of 18 died on the cap — 90% of haiku recons and 25% of sonnet's. It binds on BOTH models,
+ * harder on the cheaper one; it is not a haiku-capability story, and every failure across both
+ * lands on exactly the same number. Because `failOnWorkerError(recon, "recon")` is fatal to the
+ * whole run, each death burned a dispatch WITHOUT opening a PR, and five of those trip
+ * `dispatchesWithoutNewOwnedPr`'s breaker — which resets only on a fresh owned PR. That is how
+ * W1-T288 (2 deaths, both sonnet) and W1-T295 (5, all haiku) latched dead and the queue reached
+ * "nothing dispatchable" with 14% of the weekly headroom spent.
+ *
+ * 20 clears the highest observed completion (17) with margin while staying far below the implement
+ * rows' 400. Recorded honestly: that 17-turn success happened under a cap of 8, so the SDK's
+ * `maxTurns` and the envelope's `num_turns` do not count the same unit. 20 is calibrated against
+ * the observed counter, NOT against a derivation of the cap's own semantics — W1-T303 is filed to
+ * establish what each side actually counts, and until it lands this number is empirical.
+ */
+export const RECON_MAX_TURNS = 20;
+
+/**
  * Render the RECON worker's prompt (W1-T37, MASTER-PLAN §8A Tier 2): the fixed read-only recon
  * instructions, plus the generated PLAN INDEX in place of the plan body. The plan (MASTER-PLAN.md)
  * is NOT shipped to workers — `planIndexBlock` (from {@link renderPlanIndex}) is a compact list of
@@ -4107,12 +4136,12 @@ async function runTask(
         // That is what makes an absent/unreadable `recon:` row inert here — see resolveRunMounts.
         model: reconMount?.model,
         effort: reconMount?.effort,
-        // maxTurns DELIBERATELY NOT taken from the mount, and the ROW now agrees with this cap.
+        // maxTurns DELIBERATELY NOT taken from the mount, and the ROW agrees with this cap.
         // impl-BP flagged a 50x contradiction (rows said 400, this said 8); the operator ruled the
-        // ROW moves to 8 rather than this bound moving to 400, so recon stays cheap on every
-        // dispatch and the table no longer asserts something the code does not do (impl-BS).
-        // Both halves are pinned by test/recon-mount-routing.test.ts so neither can drift back.
-        maxTurns: 8, // recon is read-only + bounded; turns stay tight here.
+        // ROW moves rather than this bound moving to 400, so recon stays cheap on every dispatch
+        // and the table no longer asserts something the code does not do (impl-BS). Both halves
+        // are pinned by test/recon-mount-routing.test.ts so neither can drift back.
+        maxTurns: RECON_MAX_TURNS,
         maxBudgetUsd: budgetUsd, // dollars are the real backstop (WS-0 knob a).
         config,
         prompt: renderReconPrompt(planIndexBlock, operatorNotesBlock),

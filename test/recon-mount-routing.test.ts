@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { resolveRunMounts } from "../src/run-task.js";
+import { RECON_MAX_TURNS, resolveRunMounts } from "../src/run-task.js";
 
 // ── THE DEFECT ────────────────────────────────────────────────────────────────────────
 // The RECON spawn passed neither `model` nor `effort`. Both are optional on SpawnWorkerArgs
@@ -103,23 +103,35 @@ test("the recon spawn passes the mount's model and effort, and the implement spa
   assert.match(SRC, /effort:\s*mount\.effort/, "and mount.effort");
 });
 
-// ── 4: maxTurns — the code keeps 8, and the ROW now AGREES (operator ruling, impl-BS) ──
-test("maxTurns on the recon spawn is the deliberate bounded 8, and every recon row cell now agrees", () => {
+// ── 4: maxTurns — the code and the ROW agree, on ONE constant (operator ruling, impl-BS) ──
+test("maxTurns on the recon spawn is the bounded RECON_MAX_TURNS, and every recon row cell agrees", () => {
   const recon = SRC.slice(SRC.indexOf("renderReconPrompt(planIndexBlock, operatorNotesBlock)") - 1400);
   const reconCall = recon.slice(0, recon.indexOf("renderReconPrompt(planIndexBlock, operatorNotesBlock)"));
   const mounts = readFileSync(new URL("../.remudero/mounts.yaml", import.meta.url), "utf8");
   const reconRow = mounts.slice(mounts.indexOf("\n  recon:"), mounts.indexOf("\n  implement:"));
 
-  assert.match(reconCall, /maxTurns:\s*8,/, "the bounded cap is preserved verbatim");
+  // The spawn names the CONSTANT, never a literal — that is what makes the two halves below
+  // impossible to drift apart. impl-BP pinned a CONTRADICTION here (the row said 400, the code
+  // said 8) and the operator ruled the ROW moves rather than the code; keeping the value in one
+  // exported place is that ruling made structural instead of re-asserted by hand each time.
+  assert.match(reconCall, /maxTurns:\s*RECON_MAX_TURNS,/, "the spawn takes the constant, not a literal");
   assert.doesNotMatch(reconCall, /maxTurns:\s*reconMount/, "turns are deliberately NOT taken from the mount");
-  // impl-BP pinned a CONTRADICTION here: the row said 400, the code said 8. The operator ruled
-  // the ROW moves rather than the code — a table asserting one thing while the code does another
-  // is exactly the class this lineage is closing (#781 architect:, #992 recon:). The code's bound
-  // is untouched; both halves are pinned so neither can drift back.
   assert.doesNotMatch(reconRow, /max_turns:\s*400/, "no recon cell may still claim the old 400");
+
+  // BOUNDED, still: the point of a constant is that it stays small and read-only-cheap, not that
+  // it is free to grow. 400 (the implement cap) would defeat the whole bound.
+  assert.ok(
+    RECON_MAX_TURNS >= 8 && RECON_MAX_TURNS <= 40,
+    `recon stays bounded and cheap, saw ${RECON_MAX_TURNS}`,
+  );
+
   const cells = reconRow.match(/max_turns:\s*\d+/g) ?? [];
   assert.ok(cells.length >= 7, `every recon cell must carry max_turns, found ${cells.length}`);
   for (const cell of cells) {
-    assert.match(cell, /max_turns:\s*8$/, `every recon cell must read 8 to match the spawn, saw: ${cell}`);
+    assert.equal(
+      Number(cell.replace(/\D+/g, "")),
+      RECON_MAX_TURNS,
+      `every recon cell must equal the spawn's own constant, saw: ${cell}`,
+    );
   }
 });
