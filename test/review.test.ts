@@ -310,7 +310,7 @@ test("given a prior review.posted success on sha X and a semantic lane returning
   });
   assert.equal(computed.state, "failure"); // this is the #388 flip: success -> failure, same sha
   assert.equal(computed.floorState, "success");
-  const prior: PriorReviewVerdict = { headSha: "1fbea36", state: "success" };
+  const prior: PriorReviewVerdict = { headSha: "1fbea36", state: "success", capped: false, planOnly: false };
   const { verdict, suppressed } = applyVerdictStability(computed, "1fbea36", prior);
   assert.equal(suppressed, true);
   assert.equal(verdict.state, "success"); // the prior success STANDS, not the #388 flip
@@ -331,7 +331,7 @@ test("a re-review whose head sha CHANGED, or whose deterministic FLOOR fails, do
     report: RESPONSIVE_REPORT,
     semantic: [false, undefined],
   });
-  const priorAtOldSha: PriorReviewVerdict = { headSha: "aaaaaaa", state: "success" };
+  const priorAtOldSha: PriorReviewVerdict = { headSha: "aaaaaaa", state: "success", capped: false, planOnly: false };
   const changedHeadResult = applyVerdictStability(changedHeadComputed, "bbbbbbb", priorAtOldSha);
   assert.equal(changedHeadResult.suppressed, false);
   assert.equal(changedHeadResult.verdict.state, "failure");
@@ -339,7 +339,7 @@ test("a re-review whose head sha CHANGED, or whose deterministic FLOOR fails, do
   // Sub-case 2: the deterministic FLOOR itself fails — a real regression, never suppressed.
   const floorFailComputed = judgeReview(CRITERIA, { diff: REAL_TEST_DIFF, report: NON_RESPONSIVE_REPORT });
   assert.equal(floorFailComputed.floorState, "failure");
-  const priorSameSha: PriorReviewVerdict = { headSha: "1fbea36", state: "success" };
+  const priorSameSha: PriorReviewVerdict = { headSha: "1fbea36", state: "success", capped: false, planOnly: false };
   const floorFailResult = applyVerdictStability(floorFailComputed, "1fbea36", priorSameSha);
   assert.equal(floorFailResult.suppressed, false);
   assert.equal(floorFailResult.verdict.state, "failure");
@@ -348,7 +348,7 @@ test("a re-review whose head sha CHANGED, or whose deterministic FLOOR fails, do
 test("a prior failure on sha X followed by a success on the SAME sha X posts the success. FALSIFIER: the #177/W1-T102 incident — body-coverage fixes changed no commit, so a rule pinning verdicts to a sha would re-create the stale-status exhaustion where two CORRECT fixes exhausted against a stale 7/28 verdict that post-fix measurement scored 28/28 ALL MET", () => {
   const computed = judgeReview(CRITERIA, { diff: REAL_TEST_DIFF, report: RESPONSIVE_REPORT });
   assert.equal(computed.state, "success"); // the post-fix measurement: ALL MET
-  const prior: PriorReviewVerdict = { headSha: "same-sha", state: "failure" }; // the stale 7/28 verdict
+  const prior: PriorReviewVerdict = { headSha: "same-sha", state: "failure", capped: false, planOnly: false }; // the stale 7/28 verdict
   const { verdict, suppressed } = applyVerdictStability(computed, "same-sha", prior);
   assert.equal(suppressed, false); // an UPGRADE is never suppressed
   assert.equal(verdict.state, "success");
@@ -360,7 +360,7 @@ test("each suppression ledgers an event carrying the sha, the predecessor verdic
     report: RESPONSIVE_REPORT,
     semantic: [false, undefined],
   });
-  const prior: PriorReviewVerdict = { headSha: "1fbea36", state: "success" };
+  const prior: PriorReviewVerdict = { headSha: "1fbea36", state: "success", capped: false, planOnly: false };
   const headSha = "1fbea36";
   const { suppressed } = applyVerdictStability(computed, headSha, prior);
   assert.equal(suppressed, true);
@@ -394,7 +394,16 @@ test("priorReviewVerdictFromLedger: recovers the MOST RECENT review.posted verdi
     { step: "review.posted", task_id: "W1-T1", head_sha: "bbb", state: "success" },
     { step: "review.posted", task_id: "W1-T2", head_sha: "ccc", state: "failure" }, // a different task
   ];
-  assert.deepEqual(priorReviewVerdictFromLedger(lines, "W1-T1"), { headSha: "bbb", state: "success" });
+  // These fixtures carry no `capped`/`plan_only` key — the pre-W1-T185 line shape — so the
+  // recovered verdict takes the fail-open default and says so via `cappedFieldAbsent`. The
+  // claim under test is unchanged: the LAST matching line for this task wins.
+  assert.deepEqual(priorReviewVerdictFromLedger(lines, "W1-T1"), {
+    headSha: "bbb",
+    state: "success",
+    capped: false,
+    planOnly: false,
+    cappedFieldAbsent: true,
+  });
 });
 
 test("priorReviewVerdictFromLedger: no review.posted line for the task yields undefined", () => {
@@ -415,7 +424,7 @@ test("decideArmFromLedgerVerdict: a remudero-review success status on the head w
 });
 
 test("decideArmFromLedgerVerdict: a ledgered passing verdict for the head arms even with the status read stubbed unavailable", () => {
-  const prior: PriorReviewVerdict = { headSha: "abc1234", state: "success" };
+  const prior: PriorReviewVerdict = { headSha: "abc1234", state: "success", capped: false, planOnly: false };
   const decision = decideArmFromLedgerVerdict(prior, "abc1234");
   assert.equal(decision.arm, true);
 });
@@ -430,13 +439,13 @@ test("decideArmFromLedgerVerdict: a resumed pass in a fresh process arms from th
 });
 
 test("decideArmFromLedgerVerdict: a ledgered verdict for a DIFFERENT sha does not arm the current head. FALSIFIER: a verdict ledgered before a subsequent push must never arm the new head — this is what makes push-invalidates-review real at the decision layer", () => {
-  const prior: PriorReviewVerdict = { headSha: "old-sha", state: "success" };
+  const prior: PriorReviewVerdict = { headSha: "old-sha", state: "success", capped: false, planOnly: false };
   const decision = decideArmFromLedgerVerdict(prior, "new-sha-after-push");
   assert.equal(decision.arm, false);
 });
 
 test("decideArmFromLedgerVerdict: a ledgered FAILURE verdict for the exact head still refuses to arm — this task changes nothing about a genuine failing review", () => {
-  const prior: PriorReviewVerdict = { headSha: "abc1234", state: "failure" };
+  const prior: PriorReviewVerdict = { headSha: "abc1234", state: "failure", capped: false, planOnly: false };
   const decision = decideArmFromLedgerVerdict(prior, "abc1234");
   assert.equal(decision.arm, false);
 });

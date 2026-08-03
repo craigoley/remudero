@@ -156,7 +156,7 @@ test("W1-T297 criterion 2: instrumentEntangled binds BOTH state and floorState, 
   const v = judgeReview(SIMPLE_CRITERIA, { diff: ENTANGLED_DIFF, report: SIMPLE_REPORT });
   assert.equal(v.state, "failure");
   assert.equal(v.floorState, "failure", "diff-derived, never suppressible — exactly like criteriaTampered");
-  const prior: PriorReviewVerdict = { headSha: "deadbeef", state: "success" };
+  const prior: PriorReviewVerdict = { headSha: "deadbeef", state: "success", capped: false, planOnly: false };
   const { verdict, suppressed } = applyVerdictStability(v, "deadbeef", prior);
   assert.equal(suppressed, false, "floorState already fails, so the semantic-downgrade suppression never engages");
   assert.equal(verdict.state, "failure");
