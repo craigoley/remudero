@@ -55,6 +55,7 @@ import {
   buildQuietHoursRoute,
   buildResumeRoute,
   buildStopRoute,
+  type ControlStatusDeps,
   type IssueCloser,
   type PanelActionDeps,
 } from "./panel-actions.js";
@@ -142,6 +143,14 @@ export interface ServeDeps {
    * follows (see `panelGraph.ratify`/`lastSeen`'s own docs, above).
    */
   daemonHealth?: Omit<DaemonHealthDeps, "ledgerPath" | "diskPath"> & { diskPath?: string };
+  /**
+   * W1-T288: GET /v1/control/status's daemon-liveness verdict deps (injectable ledger reader /
+   * clock / liveness bound — see panel-actions.ts's `ControlStatusDeps` for each field's real
+   * source). OPTIONAL and defaults to the real `readLedgerLines`/`Date.now`/
+   * `DEFAULT_LIVENESS_BOUND_MS` when the caller doesn't supply one, the SAME "the assembler
+   * wires the real thing, a test injects a fake" split `daemonHealth` above already follows.
+   */
+  controlStatus?: Omit<ControlStatusDeps, "root" | "ledgerPath">;
   /**
    * The ACCOUNT strip's deps (see account-usage.ts's header). OPTIONAL and defaults to the real
    * `~/.claude.json` + `Date.now`, exactly like `daemonHealth` above — the assembler wires the
@@ -2711,8 +2720,22 @@ export function renderShellHtml(
     stopBtn.title = locked ? lockTitle : "";
     quietHours.title = locked ? lockTitle : "";
     if (drainBtn) drainBtn.title = locked ? lockTitle : "";
-    const detail = status.stopped ? status.stopDetail : status.paused ? status.pauseDetail : "fleet is running";
-    document.getElementById("controls-status").textContent = detail ?? (status.stopped ? "stopped" : status.paused ? "paused" : "running");
+    // W1-T288: THREE states, not two. STOP/PAUSE still win over liveness exactly as before --
+    // but with neither flag set, 'fleet is running' is now gated on status.daemonLive (a real
+    // ledger heartbeat GET /v1/control/status now carries), never inferred from the mere
+    // absence of a stop/pause flag file -- a crashed daemon leaves no stop flag behind, so that
+    // absence alone used to render identically to a healthy fleet. status.daemonLive undefined
+    // means liveness could not be observed at all (no heartbeat, or one stale past the liveness
+    // bound) -- a real third answer, never silently downgraded to "running".
+    const detail = status.stopped
+      ? status.stopDetail
+      : status.paused
+        ? status.pauseDetail
+        : status.daemonLive
+          ? "fleet is running"
+          : "fleet liveness not observed";
+    document.getElementById("controls-status").textContent =
+      detail ?? (status.stopped ? "stopped" : status.paused ? "paused" : status.daemonLive ? "running" : "unobserved");
   }
 
   // ── STOP requires an explicit second click ("Confirm STOP") — never a single click ──────
@@ -3631,6 +3654,9 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
   const consoleSha = deps.consoleSha ?? resolveConsoleSha();
   const fleetControlDeps: PanelActionDeps = { root: deps.fleetControlRoot, ledgerPath: deps.ledgerPath, issues: deps.issues };
   const questionDeps: PanelActionDeps = { root: deps.questionsRoot, ledgerPath: deps.ledgerPath, issues: deps.issues };
+  // W1-T288: the SAME fleetControlDeps root/ledgerPath, plus the (optional, injectable)
+  // liveness-verdict deps -- never a second root, never a second ledger read primitive.
+  const controlStatusDeps: ControlStatusDeps = { ...fleetControlDeps, ...deps.controlStatus };
   // panel-graph's GET /v1/inbox needs config.root (inbox-proposals.json/inbox-drafts.json live
   // under state/, same as fleet-control's own flags) -- `fleetControlRoot` IS config.root
   // (module header), so it is the same root, never a THIRD independently-resolved path.
@@ -3660,7 +3686,7 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
     buildRecentRoute(deps.board),
     buildDaemonHealthRoute(daemonHealthDeps),
     buildAccountUsageRoute(accountUsageDeps),
-    buildControlStatusRoute(fleetControlDeps),
+    buildControlStatusRoute(controlStatusDeps),
     buildPauseRoute(fleetControlDeps),
     buildResumeRoute(fleetControlDeps),
     buildStopRoute(fleetControlDeps),
