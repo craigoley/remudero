@@ -778,6 +778,24 @@ export interface DaemonDeps {
   /** impl-DJ: run ONE triage for the decided entry. Awaited under the light-sweep ticker. */
   runAutoTriage?: (feedbackId: string) => Promise<void>;
   /**
+   * W1-T300 (the #1184/#1185 duplicate-triage race): the auto-triage rung's OWN in-flight guard,
+   * symmetric with `isOpenPr` above but keyed on FEEDBACK id rather than task id — a feedback
+   * entry's `status` only advances when its triage PR MERGES (a committed file under
+   * plan/feedback/), so between dispatch and merge `newFeedbackIdsOldestFirst` keeps returning the
+   * same head and a slow CI round re-fires the identical entry. Returns the OPEN PR number that
+   * already carries this id's `origin: feedback#<id>` provenance, or `undefined` when none is
+   * open. Optional — omitted, auto-triage dispatch behaves exactly as before this guard existed.
+   */
+  isFeedbackOpenPr?: (feedbackId: string) => number | undefined;
+  /**
+   * W1-T300, mirroring `readLiveState`'s W1-T177 contract exactly: an OPTIONAL fresh, live re-read
+   * of ONE candidate in-flight triage PR's GitHub state, consulted ONLY when `isFeedbackOpenPr`
+   * reports one open — so a merged-or-closed-but-cached PR can never park a feedback entry
+   * forever. `undefined` (unreadable/indeterminate) fails OPEN, same as the task lane. Optional —
+   * omitted, dispatch behaves exactly as before this check existed.
+   */
+  readFeedbackLiveState?: (feedbackId: string, prNumber: number) => string | undefined;
+  /**
    * W1-T254 (the #707 fix) — the RESTRICTED LIGHT-SWEEP TICKER: `runOne` is
    * UNBOUNDED (a task can hold the daemon inside one call for a whole
    * session), and `deps.sweep` above only runs BETWEEN iterations — so a PR
@@ -1771,20 +1789,52 @@ export async function runDaemon(
           log("auto_triage.check_failed", { error: String((e as Error)?.message ?? e) });
         }
         if (decision?.fire) {
-          log("auto_triage.fired", { feedback: decision.feedbackId, reason: decision.reason });
-          if (deps.runAutoTriage) {
-            const fired = decision;
-            try {
-              // W1-T276's wrapper, reused verbatim. Triage holds for MINUTES after opening its PR
-              // (a CI-polling tail) and this loop is single-threaded, so an unwrapped await would
-              // black out every sweep for that whole duration — the exact defect W1-T276 fixed for
-              // the retro. The ticker keeps dispositioning PRs while triage runs.
-              await sweepLightDuringRetro(deps, pollIntervalMs, log, () => deps.runAutoTriage!(fired.feedbackId));
-            } catch (e) {
-              log("auto_triage.run_failed", {
-                feedback: fired.feedbackId,
-                error: String((e as Error)?.message ?? e),
+          // IN-FLIGHT GUARD (W1-T300, the #1184/#1185 duplicate-triage race): the SAME shape as
+          // the task lane's `isOpenPr`/`readLiveState` pair above, keyed on feedback id instead of
+          // task id. `decideAutoTriage` only knows the entry's own `status: new` — it cannot see an
+          // already-open PR carrying this id's `origin: feedback#<id>` provenance, so that read
+          // happens here, right before the fire it would otherwise duplicate.
+          const openPrNumber = deps.isFeedbackOpenPr?.(decision.feedbackId);
+          let inFlight = openPrNumber !== undefined;
+          if (inFlight && openPrNumber !== undefined) {
+            // W1-T177's confirming-read discipline, applied verbatim: a cached OPEN can be stale
+            // (merged/closed since), so a fresh read stands the guard down rather than parking the
+            // entry forever on yesterday's snapshot.
+            const liveState = deps.readFeedbackLiveState?.(decision.feedbackId, openPrNumber);
+            if (liveState !== undefined && liveState !== "OPEN") {
+              inFlight = false;
+              log("auto_triage.stood_down", {
+                feedback: decision.feedbackId,
+                pr_number: openPrNumber,
+                state: liveState,
+                reason: "cached in-flight read was stale",
               });
+            }
+          }
+          if (inFlight) {
+            // LEDGERED refusal naming the id and the open PR number (design's clause 3) — a silent
+            // skip here is indistinguishable from the starvation W1-T298 is about.
+            log("auto_triage.skipped_inflight", {
+              feedback: decision.feedbackId,
+              pr_number: openPrNumber,
+              reason: "an open triage PR already carries this feedback id's provenance",
+            });
+          } else {
+            log("auto_triage.fired", { feedback: decision.feedbackId, reason: decision.reason });
+            if (deps.runAutoTriage) {
+              const fired = decision;
+              try {
+                // W1-T276's wrapper, reused verbatim. Triage holds for MINUTES after opening its PR
+                // (a CI-polling tail) and this loop is single-threaded, so an unwrapped await would
+                // black out every sweep for that whole duration — the exact defect W1-T276 fixed for
+                // the retro. The ticker keeps dispositioning PRs while triage runs.
+                await sweepLightDuringRetro(deps, pollIntervalMs, log, () => deps.runAutoTriage!(fired.feedbackId));
+              } catch (e) {
+                log("auto_triage.run_failed", {
+                  feedback: fired.feedbackId,
+                  error: String((e as Error)?.message ?? e),
+                });
+              }
             }
           }
         } else if (decision) {
