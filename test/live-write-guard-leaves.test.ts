@@ -1,14 +1,29 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { ghPrMergeSquash } from "../src/lib/worker.js";
 import { ghPrCreateFillCommand } from "../src/run-task.js";
 import { ghIssueGateway } from "../src/lib/escalate.js";
 import { defaultGitCapture, defaultPushExec, gitPushRunBranch } from "../src/lib/git-push.js";
 import { LiveWriteBlockedError, withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+
+// W1-T327: drives the emitted title through the REAL commitlint CLI, the same subprocess
+// shape test/commit-message.test.ts already uses — never a hand-rolled regex approximating
+// commitlint.config.mjs's rules.
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = join(__dirname, "..");
+const COMMITLINT_CONFIG = join(REPO_ROOT, "commitlint.config.mjs");
+function lintHeader(header: string) {
+  return spawnSync(process.execPath, [join(REPO_ROOT, "node_modules", ".bin", "commitlint"), "--config", COMMITLINT_CONFIG], {
+    cwd: REPO_ROOT,
+    input: `${header}\n`,
+    encoding: "utf8",
+  });
+}
 
 // ── LEAF-LEVEL GUARD PROOFS ──────────────────────────────────────────────────────────
 // PR #954 guards 18 outward-effect sites. A structural test asserts each site EXISTS; until
@@ -99,6 +114,46 @@ test("LEAF GUARD gh-pr-create: the ghPrCreateFillCommand builder REFUSES, so its
   const ok = withLiveWritesAllowed(() => ghPrCreateFillCommand("/tmp/wt", "acme", "remudero", "run-T1-123"));
   assert.equal(ok.command, "gh");
   assert.deepEqual(ok.args.slice(0, 4), ["pr", "create", "--repo", "acme/remudero"]);
+});
+
+// W1-T327: `--fill` alone lets `gh pr create` invent a title from the branch/commits, and
+// nothing in this repo can repair one afterwards (the three `gh pr edit` sites all pass
+// `--body` only) — a non-conventional title then fails the REQUIRED `commitlint` check on a
+// PR whose commits are individually clean. The fix authors the title instead of inheriting
+// one: ghPrCreateFillCommand now takes an explicit `title` and emits `--title`.
+test("LEAF GUARD gh-pr-create: an explicit title is emitted as --title and passes the REAL commitlint gate", () => {
+  const title = "feat(serve): add fuzzy search to the board (W1-T157)";
+  const ok = withLiveWritesAllowed(() =>
+    ghPrCreateFillCommand("/tmp/wt", "acme", "remudero", "run-T1-123", title),
+  );
+
+  // REGRESSION LOCK: if `--title` is ever dropped from the argv again, this fails —
+  // the whole point of W1-T327 is that `--fill` alone is what lets a non-conventional
+  // title through uncontested.
+  const idx = ok.args.indexOf("--title");
+  assert.notEqual(idx, -1, "the argv must carry --title — an omitted --title is the W1-T327 defect");
+  assert.equal(ok.args[idx + 1], title, "the exact subject is passed through verbatim, never re-derived");
+  assert.ok(ok.args.includes("--fill"), "--fill stays too — gh docs: an explicit --title overrides --fill's " +
+    "title but --fill still autofills the body, so this is additive, not a replacement");
+
+  const lint = lintHeader(title);
+  assert.equal(lint.status, 0, `the emitted title must pass the real commitlint CLI:\n${lint.stdout}${lint.stderr}`);
+});
+
+test("LEAF GUARD gh-pr-create: a branch-shaped, non-conventional title is what commitlint actually rejects", () => {
+  // OBSERVED 2026-08-04 on #1249: `--fill` derived `run W1 T313 1785801110471` from the
+  // branch name and commitlint failed subject-empty + type-empty. Pinned here so the
+  // FALSIFIER above (title supplied → passes) has a paired proof that an un-authored
+  // title (the pre-fix shape) genuinely fails the same real gate.
+  const lint = lintHeader("run W1 T313 1785801110471");
+  assert.notEqual(lint.status, 0, "a branch-shaped title must be rejected by the real gate");
+  assert.match(lint.stdout + lint.stderr, /subject-empty|type-empty/);
+});
+
+test("LEAF GUARD gh-pr-create: an omitted title falls back to --fill alone — the documented no-title decision", () => {
+  const ok = withLiveWritesAllowed(() => ghPrCreateFillCommand("/tmp/wt", "acme", "remudero", "run-T1-123"));
+  assert.ok(!ok.args.includes("--title"), "no title given => old --fill-only argv, unchanged");
+  assert.ok(ok.args.includes("--fill"), "--fill is still present so a PR still opens rather than refusing");
 });
 
 // ── LEAF: escalate.ts ghIssueGateway().create — boundary "gh-issue-create" ────────────
