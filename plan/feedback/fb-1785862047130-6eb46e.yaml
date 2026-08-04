@@ -1,0 +1,32 @@
+id: fb-1785862047130-6eb46e
+ts: 2026-08-04T16:47:27.130Z
+raw: "THE OUTPUT CONTRACT HAS NO EXIT FOR 'THE WORK IS DONE BUT PREFLIGHT WILL
+  NOT GO GREEN' — found while decomposing W1-T314 (PR #1293).
+  outputContractLines offers exactly two PR-less exits: DECISION_REQUEST, which
+  requires a filename or approach choice, and ALREADY_SATISFIED, which is gated
+  on naming a MERGED PR carrying the task's own trailer. Neither fits a worker
+  that finished the work and cannot reach a preflight PASS.
+  ciParityContractLines instructs 'BEFORE THE FIRST PUSH, run rmd preflight
+  --ci-parity and reach a PASS: fix whatever step it names — do not push to find
+  out whether a required check is red', and --ci-parity's ci:test step shells
+  npm run test:ci, the FULL suite. So a task whose change breaks suites it
+  cannot also fix in one dispatch has only one available behaviour: stop.
+  OBSERVED: W1-T314's sixth run logged implement.done at 179 turns, subtype
+  success, $16.78 — and no pr.opened, no scope_guard.refused, no gate step of
+  any kind. That is a silent, expensive nothing with no diagnosable signal. The
+  contract worked as written; the task could not satisfy it. WHY THIS
+  GENERALISES: any task large enough that its own preflight cannot go green in
+  one dispatch produces this shape, and the ledger records success. RECON:
+  establish whether a third exit is warranted — something like PREFLIGHT_BLOCKED
+  naming the failing step and what it would take — and what would consume it (a
+  verdict class, an escalation, a size signal that argues for decomposition).
+  Weigh it against the risk that an easy exit becomes the path of least
+  resistance for a worker facing an ordinary red test. Falsifying check: if a
+  worker in this state is expected to push anyway and let CI report, then the
+  contract's 'do not push to find out' line is the defect and the fix is there,
+  not in a new exit."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null
