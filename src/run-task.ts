@@ -289,6 +289,7 @@ import {
   type MergedResolver,
   type Plan,
   type Task,
+  type TaskStatus,
   parseTasksFromYaml,
 } from "./lib/plan.js";
 import {
@@ -5996,7 +5997,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
 }
 
 /**
- * `rmd lint-plan [--plan <path>] [--base <git-ref>]` — the CI half of §5C Layer A
+ * `rmd lint-plan [--plan <path>] [--base <git-ref>] [--all]` — the CI half of §5C Layer A
  * (the pre-dispatch half lives in `runTask`, see `assertLintClean`).
  *
  * With `--base`, lints ONLY the task ids that are NEW or CHANGED relative to
@@ -6004,14 +6005,41 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
  * working copy) — this is what makes the FAIL-CLOSED CI gate safe to turn on
  * immediately: it judges the PR's OWN edit, not the whole historical queue
  * (re-grading everything already open is the retro's separate, periodic
- * plan-health sweep, W1-T20d — not every PR's gate). Without `--base`, lints
- * the WHOLE plan (the mode a future retro sweep wants).
+ * plan-health sweep, W1-T20d — not every PR's gate). CI's `--base` MODE IS
+ * UNTOUCHED BY W1-T324 — its scope, its output shape, its exit code are
+ * byte-identical to before; nothing below affects it.
+ *
+ * Without `--base` (W1-T324): DEFAULTS to OPEN-TASK failures only — a task
+ * whose status is `blocked`, `merged`, or `done` (see {@link isOpenLintTask})
+ * is a RETIRED or LANDED plan record, not live queue debt, and is excluded
+ * from both the check and the printed count. MEASURED at the audit that filed
+ * W1-T324: ~92% of the whole-plan failure count sat on such records — a
+ * standing number nobody could burn down trained everyone to ignore the
+ * gauge. `--all` restores the PRE-W1-T324 behavior (every task, open or not)
+ * for the periodic archaeology sweep that wants it (W1-T20d). Either way the
+ * summary line NAMES both counts — how many open tasks are failing, and how
+ * many additional records exist behind `--all` — so the retired/landed corpus
+ * stays visible without being the headline.
  *
  * Exits non-zero iff any IN-SCOPE task has a BLOCKING violation. Resolving
  * `--base` itself failing (bad ref, unreadable git history) is a LOUD
  * configuration error (exit 2), never a silent fall-back to full-plan or
  * no-op — the control surface never guesses on ambiguous input.
  */
+/** W1-T324: a task whose plan record still represents LIVE, dispatchable work — the
+ *  complement of a RETIRED withdrawal record (`blocked`, the W1-T229 convention) or a
+ *  LANDED one (`merged`/`done`). This is a literal `status:` field read, deliberately —
+ *  NOT the derived-from-GitHub merge status `lintPlanCommand`'s `--base` branch already
+ *  computes via `projectPlan` (that read is scoped + network-backed and stays exactly
+ *  where it is); this is the cheap, always-available filter the whole-plan default needs.
+ *  Kept LOCAL to run-task.ts, not lifted into lib/plan.ts — W1-T324's declared `files:` is
+ *  [plan/tasks.yaml, src/run-task.ts, test/lint-plan-open-only.test.ts] only. */
+const NON_OPEN_LINT_STATUSES = new Set<TaskStatus>(["blocked", "merged", "done"]);
+
+/** See {@link NON_OPEN_LINT_STATUSES}. */
+function isOpenLintTask(task: Pick<Task, "status">): boolean {
+  return !NON_OPEN_LINT_STATUSES.has(task.status);
+}
 /**
  * W1-T278: the git-HISTORY half of the mint, layered on top of {@link mintNextTaskId}'s
  * current-tree union (lib/task-id.ts, untouched by this task). A task filed then FOLDED away
@@ -6559,11 +6587,16 @@ export type LintPlanStatusDeps = {
 };
 
 export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps = {}): Promise<number> {
-  const badArg = unknownArgError("lint-plan", rest, ["--plan", "--base"], []);
+  const badArg = unknownArgError("lint-plan", rest, ["--plan", "--base"], ["--all"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
   }
+  // W1-T324: matched as a standalone token, same discipline as every other boolean flag in
+  // this file — never a substring match against a proof body that could legitimately quote
+  // "--all". Meaningless (and silently ignored) in --base mode: --base's own scope already
+  // defines what's in-bounds, and that mode stays byte-identical whether or not this is set.
+  const allFlag = rest.includes("--all");
   const planPathArg = flagValue(rest, "--plan");
   const planPath = planPathArg !== undefined ? resolve(planPathArg) : join(repoRoot, "plan", "tasks.yaml");
   // W1-T120: an explicit --plan resolving OUTSIDE the resolved root is REFUSED right
@@ -6642,6 +6675,21 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     console.log("### rmd lint-plan: no --base given — the monolith-filing check is SKIPPED (it needs a base ref to know which ids are new).");
   }
 
+  // W1-T324: the whole-plan (no --base) scope filter. `--base` mode is untouched — `scope`
+  // above already defines its bounds and this block never runs alongside it in a way that
+  // changes that branch's behavior. `nonOpenRecordCount` is computed UNCONDITIONALLY (cheap —
+  // one pass over already-loaded tasks, no extra I/O) so the summary line can name it even in
+  // the default run that never lints those records — the debt stays visible without being
+  // the headline. `wholePlanScope` stays undefined (⇒ every task is checked, exactly the
+  // pre-W1-T324 shape) when either `--base` is set or `--all` was passed.
+  let wholePlanScope: Set<string> | undefined;
+  let nonOpenRecordCount = 0;
+  if (!baseRef) {
+    const openIds = plan.tasks.filter(isOpenLintTask).map((t) => t.id);
+    nonOpenRecordCount = plan.tasks.length - openIds.length;
+    if (!allFlag) wholePlanScope = new Set(openIds);
+  }
+
   // W1-T180 (§5C post-merge-amendment): derived merge status for every task in `scope`,
   // resolved ONCE here (never per-task) and injected via LintOpts — task-linter.ts stays
   // a pure function over already-loaded data, per its own documented contract. FAIL OPEN,
@@ -6669,6 +6717,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   let checked = 0;
   for (const task of plan.tasks) {
     if (scope && !scope.has(task.id)) continue;
+    if (wholePlanScope && !wholePlanScope.has(task.id)) continue;
     checked++;
     let opts: LintOpts = {};
     if (scope) {
@@ -6727,14 +6776,32 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     }
   }
 
-  const scopeNote = scope ? ` (${scope.size} new/changed vs ${baseRef})` : "";
+  // W1-T324: three summary shapes, chosen by mode — every shape keeps the literal
+  // "${checked} task(s) checked" PREFIX (pre-existing consumers, e.g.
+  // test/repo-root-identity.test.ts's #271 regression, match on that exact substring), with
+  // mode-specific detail appended rather than a word inserted mid-phrase. `--base` is
+  // BYTE-IDENTICAL to its pre-W1-T324 text (that mode's own acceptance criterion is
+  // "unchanged"); the whole-plan default names BOTH the open-failing count and how many
+  // additional records sit behind --all, per the task's own design ('N open failing; M
+  // merged-task records behind --all'); --all itself restores the pre-W1-T324 full-corpus
+  // wording, with the same count named so a reader who passed --all can see how much of what
+  // they're looking at is retired/landed.
+  let summary: string;
+  if (scope) {
+    summary = `${checked} task(s) checked (${scope.size} new/changed vs ${baseRef}) — ${failing} failing, ${warned} warning(s)`;
+  } else if (wholePlanScope) {
+    summary =
+      `${checked} task(s) checked (open tasks only) — ${failing} open failing, ${warned} warning(s); ` +
+      `${nonOpenRecordCount} merged-task record(s) behind --all`;
+  } else {
+    summary =
+      `${checked} task(s) checked (--all: full corpus, ${nonOpenRecordCount} merged-task record(s) included) — ` +
+      `${failing} failing, ${warned} warning(s)`;
+  }
   // W1-T120: the READ-IDENTITY ASSERTION — the abs path + content hash of the plan file
   // ACTUALLY opened, so a wrong-file run (a false green pointed at the wrong tree) is
   // legible in the gate's own output, not merely inferable from cwd.
-  console.log(
-    `\nrmd lint-plan: ${checked} task(s) checked${scopeNote} — ${failing} failing, ${warned} warning(s)\n` +
-      `  read: ${formatReadIdentity(planPath, planRaw)}`,
-  );
+  console.log(`\nrmd lint-plan: ${summary}\n  read: ${formatReadIdentity(planPath, planRaw)}`);
   return failing > 0 ? 1 : 0;
 }
 
