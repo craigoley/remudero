@@ -88,8 +88,44 @@ export function recordAutoTriageFire(path: string, at: Date, windowMs: number): 
 
 export interface AutoTriagePolicy {
   enabled: boolean;
+  /** The FLOOR of the cadence curve — the fastest the interval ever gets, at
+   *  `census.depth <= depthFloor`. Unchanged in role from before W1-T318 (adaptive cadence);
+   *  a caller that never supplies a census gets this value unconditionally, exactly as before. */
   minIntervalMinutes: number;
+  /** The CEILING of the cadence curve — the slowest the interval ever gets, at
+   *  `census.depth >= depthCeiling`, and unconditionally when `census.allMerged` (W1-T318). */
+  maxIntervalMinutes: number;
+  /** Depth at/below which the interval is pinned to `minIntervalMinutes` — "near-empty". */
+  depthFloor: number;
+  /** Depth at/above which the interval is pinned to `maxIntervalMinutes` — "full". */
+  depthCeiling: number;
   maxPerDay: number;
+}
+
+/**
+ * The cadence curve's INPUT (W1-T318). "Depth" is deliberately not a new probe: both fields
+ * are read straight off the same census the daemon already computes and logs every idle tick as
+ * `daemon.idle_reasons` (`drain.ts`'s `tallyDispatchFilters`, consulted right before this rung
+ * fires — see `daemon.ts`'s idle branch). W1-T298's `StarvationCensus` reads the identical two
+ * buckets for its own "recoverable vs. done" split; this is that same split, reused rather than
+ * re-derived, so the two can never disagree about what "runnable" means.
+ */
+export interface AutoTriageCensus {
+  /** `blocked.count + unmet-deps.count` off the idle_reasons tally — real, machine-workable
+   *  backlog that isn't dispatchable THIS tick but will clear on its own (a dep merges, a
+   *  breaker resets). This is "queue depth": how much runnable-soon work is still queued. It
+   *  does NOT include `already-merged` (done, not queued) or `verify-not-auto` (never becomes
+   *  machine-dispatchable, so waiting for it never "recovers" the queue). */
+  depth: number;
+  /**
+   * True when the idle_reasons tally saw ONLY `already-merged` declines (no blocked, no
+   * unmet-deps, no verify-not-auto) — every task in the plan is merged. The SAME distinction
+   * `daemon.ts`'s starvation predicate draws for W1-T298: a plan with nothing left to do is
+   * DONE, not starved, and here it must not accelerate triage either (design clause iv) — it
+   * forces `maxIntervalMinutes` regardless of `depth`, which is also 0 in this state and would
+   * otherwise read as "near-empty, go fast".
+   */
+  allMerged: boolean;
 }
 
 export interface AutoTriageInputs {
@@ -102,6 +138,11 @@ export interface AutoTriageInputs {
   now: Date;
   /** Feedback ids at `status: new`, oldest first. Empty ⇒ nothing to do. */
   candidates: string[];
+  /** Runnable-depth census driving the adaptive interval (W1-T318). ABSENT ⇒ treated as
+   *  `{ depth: 0, allMerged: false }`, i.e. the curve's fastest point — byte-identical to this
+   *  function's behaviour before the curve existed, so every caller that predates the census
+   *  (and every test that does not construct one) is completely unaffected. */
+  census?: AutoTriageCensus;
 }
 
 export type AutoTriageDecision =
@@ -109,6 +150,28 @@ export type AutoTriageDecision =
   | { fire: false; reason: string };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The adaptive interval (W1-T318): shortens toward `minIntervalMinutes` as `depth` approaches
+ * `depthFloor` (queue near-empty — pull more work in sooner) and lengthens toward
+ * `maxIntervalMinutes` as `depth` approaches `depthCeiling` (queue full — no rush), linearly
+ * interpolated in between. `allMerged` overrides the whole curve to `maxIntervalMinutes`
+ * (design clause iv: DONE is not STARVED, and must not read as "near-empty").
+ *
+ * THE DAILY CAP IS NEVER TOUCHED HERE. This only changes how fast `maxPerDay` fires get spent,
+ * never how many — `decideAutoTriage`'s cap check below runs unconditionally afterward, off the
+ * policy's own `maxPerDay`, exactly as before this curve existed.
+ */
+function effectiveIntervalMinutes(policy: AutoTriagePolicy, census: AutoTriageCensus): number {
+  if (census.allMerged) return policy.maxIntervalMinutes;
+  const { depth } = census;
+  const { minIntervalMinutes, maxIntervalMinutes, depthFloor, depthCeiling } = policy;
+  if (depth <= depthFloor) return minIntervalMinutes;
+  if (depth >= depthCeiling) return maxIntervalMinutes;
+  const span = depthCeiling - depthFloor;
+  const t = span > 0 ? (depth - depthFloor) / span : 0;
+  return minIntervalMinutes + t * (maxIntervalMinutes - minIntervalMinutes);
+}
 
 /**
  * Decide whether to fire, and on WHAT. Pure — no I/O, no clock, no filesystem — so every bound
@@ -127,14 +190,19 @@ export function decideAutoTriage(i: AutoTriageInputs): AutoTriageDecision {
   const fires = i.marker.kind === "ok" ? i.marker.marker.fires : [];
   const parsed = fires.map((f) => Date.parse(f)).filter((n) => !Number.isNaN(n));
 
+  // ABSENT CENSUS ⇒ the curve's fastest point (see AutoTriageInputs.census's doc) — a caller
+  // that never built one gets exactly the fixed minIntervalMinutes behaviour this rung always
+  // had, INCLUDING the refusal's wording below (every pre-W1-T318 caller/test names it verbatim).
+  const intervalMinutes = effectiveIntervalMinutes(i.policy, i.census ?? { depth: 0, allMerged: false });
+
   const lastFire = parsed.length ? Math.max(...parsed) : undefined;
   if (lastFire !== undefined) {
     const sinceMin = (i.now.getTime() - lastFire) / 60_000;
-    if (sinceMin < i.policy.minIntervalMinutes) {
-      return {
-        fire: false,
-        reason: `only ${sinceMin.toFixed(1)}m since the last fire (minInterval ${i.policy.minIntervalMinutes}m)`,
-      };
+    if (sinceMin < intervalMinutes) {
+      const detail = i.census
+        ? `interval ${intervalMinutes.toFixed(1)}m at depth ${i.census.depth}${i.census.allMerged ? ", all-merged" : ""}`
+        : `minInterval ${intervalMinutes}m`;
+      return { fire: false, reason: `only ${sinceMin.toFixed(1)}m since the last fire (${detail})` };
     }
   }
 

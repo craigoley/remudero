@@ -29,7 +29,7 @@
  * already does — this pure module never touches the filesystem.
  */
 
-import type { AutoTriageDecision } from "./auto-triage.js";
+import type { AutoTriageDecision, AutoTriageCensus } from "./auto-triage.js";
 import type { RunResult } from "./run-result.js";
 import { assertCleanBoot, type BootAssertion } from "./env.js";
 import { INITIAL_RETRY_STATE, reasonAboutBlock, type RetryState } from "./block-reason.js";
@@ -805,8 +805,11 @@ export interface DaemonDeps {
    */
   runRetroTrigger?: (decision: Extract<RetroTriggerDecision, { fire: true }>) => Promise<void>;
   /** impl-DJ: the auto-triage rung's decision hook — same injected shape as checkRetroTrigger, so
-   *  the whole rung is unit-testable without a clock, a filesystem or a spend. */
-  checkAutoTriage?: () => AutoTriageDecision;
+   *  the whole rung is unit-testable without a clock, a filesystem or a spend. W1-T318: the caller
+   *  (below, in this file's idle branch) passes the runnable-depth census it already computed for
+   *  `daemon.idle_reasons`/starvation this same tick — a hook that ignores the argument (every
+   *  test predating the curve) still typechecks and behaves exactly as before. */
+  checkAutoTriage?: (census?: AutoTriageCensus) => AutoTriageDecision;
   /** impl-DJ: run ONE triage for the decided entry. Awaited under the light-sweep ticker. */
   runAutoTriage?: (feedbackId: string) => Promise<void>;
   /**
@@ -1818,6 +1821,19 @@ export async function runDaemon(
       // do" or "everything needs a human anyway" as the SAME starvation this predicate exists
       // to name apart from.
       const idleTally = idleReasons.snapshot();
+      // W1-T318: the auto-triage rung's cadence census, read off this SAME idleTally — never a
+      // second derivation of runnable. `depth` is the recoverable backlog (blocked + unmet-deps,
+      // same two buckets StarvationCensus reads just below); `allMerged` is true only when the
+      // tally saw nothing BUT already-merged declines, i.e. the plan is DONE rather than starved
+      // — see AutoTriageCensus's doc on why that must not read as "near-empty, go fast".
+      const autoTriageCensus: AutoTriageCensus = {
+        depth: idleTally.blocked.count + idleTally["unmet-deps"].count,
+        allMerged:
+          idleTally["already-merged"].count > 0 &&
+          idleTally.blocked.count === 0 &&
+          idleTally["unmet-deps"].count === 0 &&
+          idleTally["verify-not-auto"].count === 0,
+      };
       const starvationCensus: StarvationCensus = {
         circuitBroken: bucketFromIds(circuitBrokenThisTick),
         blocked: idleTally.blocked,
@@ -1852,12 +1868,13 @@ export async function runDaemon(
       // is dispatchable and nothing is in flight" is ALREADY known: the boolean is free, nothing
       // is recomputed, and an idle poll costs exactly what it cost before.
       //
-      // DEFAULT OFF and triple-bounded (enabled / minInterval / maxPerDay — see lib/auto-triage.ts).
-      // Best-effort in the retro's idiom: a throw here costs one logged tick, never the daemon.
+      // DEFAULT OFF and triple-bounded (enabled / adaptive interval / maxPerDay — see
+      // lib/auto-triage.ts). Best-effort in the retro's idiom: a throw here costs one logged
+      // tick, never the daemon.
       if (deps.checkAutoTriage) {
         let decision: AutoTriageDecision | undefined;
         try {
-          decision = deps.checkAutoTriage();
+          decision = deps.checkAutoTriage(autoTriageCensus);
         } catch (e) {
           log("auto_triage.check_failed", { error: String((e as Error)?.message ?? e) });
         }

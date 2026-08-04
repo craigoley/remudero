@@ -121,6 +121,39 @@ autoTriage:
     origin: "net-new"   # one idle hour is the smallest gap that is clearly not per-poll
     min: 5
     max: 1440
+    # W1-T318: this is now the CADENCE CURVE's FLOOR — the fastest the interval ever gets,
+    # reached once runnable depth (see depthFloor below) is thin. Unchanged in value and in
+    # every pre-existing consumer's behaviour: a caller that supplies no census (every caller
+    # that predates this curve) gets this fixed number unconditionally, exactly as before.
+  maxIntervalMinutes:
+    value: 60
+    origin: "net-new"
+    min: 15
+    max: 1440
+    # W1-T318: the curve's CEILING — the slowest the interval gets, reached once runnable depth
+    # (see depthCeiling below) is full, OR whenever the plan is entirely merged (design clause
+    # iv: DONE is not STARVED, and must not read as "near-empty, go fast"). 60m is the interval
+    # this rung shipped with before policy/triage-cadence dropped it to 15 — restored here as the
+    # RELAXED end of the curve rather than the fixed value, so a full queue paces exactly as
+    # conservatively as the rung always did before it needed to go faster on a thin one.
+  depthFloor:
+    value: 0
+    origin: "net-new"
+    min: 0
+    max: 5
+    # W1-T318: runnable depth (blocked + unmet-deps tasks off the SAME idle_reasons census the
+    # daemon already logs — drain.ts's tallyDispatchFilters, also W1-T298's StarvationCensus
+    # input) at/below which the interval is pinned to minIntervalMinutes. 0 is deliberate: the
+    # curve should already be at its fastest the moment the queue has NO recoverable backlog
+    # left queued (short of the all-merged exception above), not merely once it is negative.
+  depthCeiling:
+    value: 10
+    origin: "net-new"
+    min: 1
+    max: 100
+    # W1-T318: runnable depth at/above which the interval is pinned to maxIntervalMinutes — a
+    # queue with ten or more tasks still blocked/unmet-deps is "full enough" that triage need
+    # not rush to add more. Retunable by plan review (this row), never a deploy.
   maxPerDay:
     value: 24
     origin: "net-new"

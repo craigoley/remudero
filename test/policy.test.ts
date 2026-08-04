@@ -355,6 +355,9 @@ test("every LIFTED field records origin=lifted:<source-site> — the net-new fie
     "launchd.throttleIntervalS",
     "autoTriage.enabled",
     "autoTriage.minIntervalMinutes",
+    "autoTriage.maxIntervalMinutes",
+    "autoTriage.depthFloor",
+    "autoTriage.depthCeiling",
     "autoTriage.maxPerDay",
     "scratchReap.enabled",
   ]);
