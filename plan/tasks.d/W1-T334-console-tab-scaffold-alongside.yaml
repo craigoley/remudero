@@ -1,0 +1,85 @@
+- id: W1-T334
+  title: "the four-tab console cannot land in one dispatch, so land the SCAFFOLD first — render the tab bar pinned under the glance strip while every existing section keeps rendering exactly where it does today"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 50.00
+  rationale: "FIRST OF THREE SHARDS SPLIT OUT OF W1-T314, which burned six dispatches with nothing
+    merged. RE-DERIVED AT 1867c35 — every structural claim below is a grep a reader can reproduce.
+    WHY A SCAFFOLD-ONLY TASK EXISTS AT ALL. W1-T314's sixth run ended `implement.done` at 179 turns,
+    subtype success, with NO pr.opened and no gate step of any kind: the worker completed and did not
+    push. THE MECHANISM IS IN THE OUTPUT CONTRACT, confirmed from source, not assumed:
+    `ciParityContractLines` (src/lib/compaction.ts) is spliced into `outputContractLines` BETWEEN
+    'stage the changed file(s), commit, then run' and 'Only once that passes: `git push origin HEAD`',
+    and it reads 'BEFORE THE FIRST PUSH, run `rmd preflight --ci-parity` (mirrors every CI job) and
+    reach a PASS: fix whatever step it names — do not push to find out whether a required check is
+    red.' `--ci-parity`'s `ci:test` step shells `npm run test:ci` — THE FULL SUITE. So a worker that
+    restructures the shell DOM faces the eight serve.* suites red, is told to fix them before pushing,
+    and has no sanctioned exit: `outputContractLines`' only PR-less exits are DECISION_REQUEST and
+    ALREADY_SATISFIED, neither of which fits 'the work is done but preflight will not go green'.
+    Ending without a push is the contract working as written on a task too large for one dispatch.
+    THE SHELL CAN CARRY BOTH SHAPES AT ONCE — established from source, and this is what makes a split
+    that keeps main green possible at all. `renderShellHtml` emits a FLAT `<main>` of sibling
+    `<section>` elements each with a stable id (glance, recap, now, needs-me, accepted, up-next,
+    recent, rest, controls, more). Adding a tab bar as a further sibling changes no existing section's
+    id, position or content. The precedent is inside the function being edited: `idleReasonsHtml` was
+    appended LAST as a defaulted parameter with the reason stated in its own comment — 'so every
+    existing caller and test is unaffected'. `recap` already ships with a bare `hidden` attribute, so
+    a present-but-not-displayed section is a shape the suites already tolerate."
+  design: |
+    ADD, REMOVE NOTHING. At the end of this task the console renders the four tab controls AND the
+    full existing single-scroll stack. No section is hidden, moved, reparented or filtered. A reader
+    sees a tab bar that does not yet govern anything, and that is the intended end state — it is the
+    strangler seam, not an oversight.
+    (i) FOUR TABS, NAMED EXACTLY: Decisions, Now, Plan, Feed. No fifth, no dynamic set, and none
+    hidden when empty — W1-T314's constraint that 'a missing tab reads as a missing capability'
+    is inherited here because this is the task that creates them.
+    (ii) THE GLANCE STRIP STAYS PINNED ABOVE THE TAB BAR, never inside a tab. It is the cross-tab
+    answer to 'is anything on fire'. This shard owns that placement because this shard is what
+    introduces something for it to be above.
+    (iii) THE ACTIVE TAB JOINS W1-T157'S URL-PERSISTED VIEW STATE, so a tab is deep-linkable and
+    survives a reload. Join the EXISTING view-state mechanism; do not add a second one alongside it.
+    (iv) NO NEW FETCHES, and at this stage that is trivially checkable because the tabs project
+    nothing yet: selecting a tab must not add a poll, a request or a second gateway call.
+    (v) PLAN RENDERS AN HONEST 'not built yet' — W1-T315 fills it. An empty panel that looks broken
+    is worse than a panel that says what it is.
+    (vi) THE FALSIFIER THAT MAKES THIS SHARD WORTH ITS OWN DISPATCH: after this change every one of
+    the eight serve.* suites still passes UNMODIFIED. That is the whole claim — the scaffold is
+    additive. If a suite needs editing to stay green, the change is not additive and the seam is
+    wrong; stop and report rather than editing the suite here, because making the suites shape-
+    agnostic is W1-T335 and doing it here rebuilds the dispatch that failed six times.
+    NOT IN SCOPE, AND EACH IS SOMEONE ELSE'S SHARD: making the suites shape-agnostic (W1-T335);
+    moving any section under a tab, filtering Decisions, binding Now, or the cross-tab needs-me badge
+    (W1-T336); the Plan view's content (W1-T315); what a card says (W1-T313).
+    VERIFY `renderShellHtml`'s current parameter list, the section ids and W1-T157's view-state
+    mechanism FROM SOURCE before editing — symbol names drift and this note is a snapshot.
+  acceptance:
+    - claim: "the shell renders exactly four tab controls named Decisions, Now, Plan and Feed, with the glance strip outside and above them, and the Plan tab saying it is not built yet"
+      proof: "unit test: test/serve.shell-ux.test.ts"
+    - claim: "the active tab is URL-persisted and deep-linkable, surviving a reload, and joins the existing view-state mechanism rather than adding a second one"
+      proof: "unit test: test/serve.shell-ux.test.ts"
+    - claim: "selecting a tab issues no additional fetch, poll or gateway call"
+      proof: "unit test: test/serve.live-state.test.ts"
+  risk: high
+  origin: oper#split-w1-t314-2026-08-04
+  plan_refs: ["§7", "W1-T314"]
+  files: [src/lib/serve.ts, test/serve.shell-ux.test.ts, test/serve.live-state.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — tab presence, URL round-trip and fetch counting are all machine-checkable
+    against the real Chromium shell the serve.* suites already drive.
+    risk:high — Rule 19 counts serve.ts and the test surface as distinct subsystems, and this edits the
+    shell every other console task renders through. The danger is not the tab bar; it is silently
+    perturbing W1-T156's in-place patching or W1-T154's first-paint budget while adding it.
+    budget_usd 50 — the smallest of the three because it adds markup and a URL key and deliberately
+    changes no projection. If this one overruns, the seam is wrong and the report should say so.
+    PROOFS LAND IN EXISTING SUITES, DELIBERATELY. W1-T314's five criteria all named
+    `test/console-tabs.test.ts`, a file that does not exist: `rmd check-proof` on it returns exit 1,
+    hits 0. That resolves once a worker creates it, so it was a legitimate forward reference and NOT
+    the W1-T229 dead-proof class — but it is unverifiable at filing time, and this repo has merged a
+    PR at proof_exec 2/4 without noticing. serve.shell-ux.test.ts and serve.live-state.test.ts already
+    open the real shell in Chromium and already assert shell UX and fetch behaviour, so they are the
+    honest home and their proofs execute TODAY.
+    depends_on empty — this is the root of the split and blocks on nothing."

@@ -6,7 +6,33 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
-  rationale: "OPERATOR DIRECTIVE 2026-07-22 (feedback fb-1784770111145-cf7c24, clause 3), with the same
+  rationale: "WITHDRAWN AND DECOMPOSED 2026-08-04, on dispatch evidence, not on a judgement about the
+    design. The design is inherited WHOLE by W1-T334, W1-T335 and W1-T336; nothing below is retracted.
+    SIX DISPATCHES, NOTHING MERGED, AND THE FAILURE CHANGED SHAPE THREE TIMES — which is the signal
+    that a task is too large rather than mis-specified: two scope_guard refusals (files: declared two
+    paths for work touching eleven; since widened, and the sixth run was not refused); one review
+    failure with a fix-rung strike and then required checks red; and finally a run ending
+    `implement.done` at 179 turns, subtype success, with NO pr.opened and no gate step of any kind —
+    the worker completed and did not push.
+    THE MECHANISM, CONFIRMED FROM SOURCE RATHER THAN ASSUMED. `ciParityContractLines`
+    (src/lib/compaction.ts) is spliced into `outputContractLines` BETWEEN 'stage the changed file(s),
+    commit, then run' and 'Only once that passes: `git push origin HEAD`'. It reads: 'BEFORE THE FIRST
+    PUSH, run `rmd preflight --ci-parity` (mirrors every CI job) and reach a PASS: fix whatever step it
+    names — do not push to find out whether a required check is red.' That command's `ci:test` step
+    shells `npm run test:ci`, the FULL suite. A four-tab DOM restructure turns the eight serve.* suites
+    red, so the worker is instructed to fix eight suites before pushing and has no sanctioned exit:
+    `outputContractLines`' only PR-less exits are DECISION_REQUEST and ALREADY_SATISFIED, and neither
+    fits 'the work is done but preflight will not go green'. Ending without a push is the contract
+    working exactly as written, on a task too large to satisfy it in one dispatch.
+    THE SPLIT KEEPS MAIN GREEN BETWEEN HALVES, which was the standing objection to splitting and is
+    correct. Established from source: `renderShellHtml` emits a FLAT `<main>` of sibling `<section>`
+    elements with stable ids, and the same function already carries an append-last defaulted parameter
+    (`idleReasonsHtml`) whose own comment gives the reason — 'so every existing caller and test is
+    unaffected'. A tab bar can therefore be added as a further sibling with no section moved, and
+    `recap` already ships with a bare `hidden` attribute, so a present-but-not-displayed section is a
+    shape the suites already tolerate.
+    THE ORIGINAL RATIONALE, PRESERVED BECAUSE THE SHARDS INHERIT IT: OPERATOR DIRECTIVE 2026-07-22
+    (feedback fb-1784770111145-cf7c24, clause 3), with the same
     screenshot that produced W1-T313. VERIFIED AT SOURCE: the shell renders TEN stacked sections in one
     scroll — glance, recap, now, needs-me, accepted, up-next, recent, rest, controls, more (src/lib/serve.ts
     sections at :702, :769, :774, :783, :799, :808, :820, :829, :861, :890). W1-T153 chose that stack
@@ -18,6 +44,19 @@
     THIS IS AN IA CHANGE, NOT A REWRITE. Every section already exists, already binds a live projection, and
     already patches in place (W1-T156). What is missing is the SEPARATION."
   design: |
+    NOT TO BE BUILT AS ONE TASK. Left in the plan as a RECORD of the decomposition decision, not a
+    work item. status: blocked so nextRunnable/assertRunnable never dispatch it — drain.ts's
+    isDispatchEligible refuses `status === "blocked"` before any dependency or breaker check, and
+    `withdrawn` is not one of plan.ts's TASK_STATUSES, so blocked is the equivalent this repo already
+    established for a retirement record (precedent: W1-T229, and W1-T270/W1-T269 in PR #1027/#1030).
+    THE WORK IS NOT WITHDRAWN — ONLY THIS CONTAINER FOR IT. The design below is inherited whole:
+      W1-T334 adds the tab scaffold alongside the existing stack, removing nothing;
+      W1-T335 makes the eight serve.* suites shape-agnostic through the shared harness (test-only);
+      W1-T336 makes the tabs authoritative and moves the sections under them.
+    Every constraint below belongs to one of those three; the per-criterion mapping is in note:.
+    W1-T315 (the Plan view) declared depends_on [W1-T314] and is REPOINTED to [W1-T336] in the same
+    change, because a dependency on a blocked task can never become runnable.
+    THE ORIGINAL DESIGN, PRESERVED VERBATIM FROM HERE DOWN:
     FOUR TABS OVER THE EXISTING SECTIONS — the sections are MOVED, not rebuilt.
       DECISIONS — genuine operator decisions ONLY: the needs-me set, with already-resolved items FILTERED OUT
         rather than sorted down. CONSUME the existing verdicts, never a second derivation: W1-T257 owns
@@ -49,21 +88,21 @@
     OUT OF SCOPE: what a card SAYS (W1-T313), the Plan view's own content (W1-T315), grouping/batch-close of
     escalations (fb-1784756096314-a6f58b).
   acceptance:
-    - claim: "the shell renders exactly four tabs — Decisions, Now, Plan, Feed — and the active tab is URL-persisted and deep-linkable, surviving a reload"
-      proof: "unit test: test/console-tabs.test.ts"
-    - claim: "Decisions renders only items no live verdict has already resolved, consuming the existing merged-proposal and escalation-reconciler verdicts rather than a new staleness rule of its own"
-      proof: "unit test: test/console-tabs.test.ts"
-    - claim: "Feed still renders recent + everything-else + the find layer unchanged — the falsifier is any firehose row that exists today and cannot be reached after the change"
-      proof: "unit test: test/console-tabs.test.ts"
-    - claim: "the glance strip stays outside the tabs and the needs-me badge still fires while another tab is active"
-      proof: "unit test: test/console-tabs.test.ts"
-    - claim: "switching tabs issues NO additional fetch and preserves in-place row patching (rows are not re-created), so live state and text selection survive the switch"
-      proof: "unit test: test/console-tabs.test.ts"
+    - claim: "this task is withdrawn as too large for one dispatch and decomposed into W1-T334, W1-T335 and W1-T336; it is never dispatched, and the three shards that inherit its criteria are named"
+      proof: "grep: WITHDRAWN AND DECOMPOSED in plan/tasks.d/W1-T314-console-four-tab-separation.yaml"
   risk: high
   origin: feedback#fb-1784770111145-cf7c24
   plan_refs: ["§7"]
-  files: [src/lib/serve.ts, test/console-tabs.test.ts, test/setup/open-shell.ts, test/serve.test.ts, test/serve.density-ia.test.ts, test/serve.detail-journey.test.ts, test/serve.find.test.ts, test/serve.first-paint.test.ts, test/serve.live-state.test.ts, test/serve.shell-ux.test.ts, test/serve.write-ack.test.ts]
-  status: queued
+  # files: is now the WITHDRAWAL RECORD's own path, not the abandoned work's. A blocked task is never
+  # dispatched, so this list no longer describes anything a worker will write — and leaving the old
+  # eleven here made the withdrawal criterion fail [proof-scope], since its proof reads THIS file.
+  # The original list is preserved verbatim in note: for archaeology.
+  files: [plan/tasks.d/W1-T314-console-four-tab-separation.yaml]
+  status: blocked
+  # WITHDRAWN AND DECOMPOSED 2026-08-04 into W1-T334 -> W1-T335 -> W1-T336. The comment below is the
+  # EARLIER block, kept as history: it was written after the FOURTH dispatch, the status was later
+  # returned to `queued`, and two further dispatches ran and failed. Its own diagnosis — "the likely
+  # cause is SIZE" — was right, and the two extra dispatches are what confirmed it.
   # BLOCKED BY THE OPERATOR 2026-08-04, on spend evidence, not on a judgement about the design.
   # Four dispatches produced ZERO commits and no PR, each ending implement.done subtype:success and
   # re-filing the whole task as a followup:
@@ -79,7 +118,53 @@
   # NOTE: W1-T315 declares depends_on [W1-T314], so it is blocked behind this too.
   # Reverse with: status back to `queued`.
   attempts: 0
-  note: "FILED 2026-08-03 from feedback fb-1784770111145-cf7c24 (clause 3), source-verified at filing: the ten
+  note: "THE FIVE WITHDRAWN CRITERIA, PRESERVED VERBATIM WITH THE SHARD THAT INHERITS EACH — they are
+    redistributed, not abandoned, and no re-filing should need archaeology:
+    (1) claim 'the shell renders exactly four tabs — Decisions, Now, Plan, Feed — and the active tab is
+    URL-persisted and deep-linkable, surviving a reload' / proof 'unit test: test/console-tabs.test.ts'
+    -> INHERITED BY W1-T334 (criteria 1 and 2, which split it into tab presence and URL persistence).
+    (2) claim 'Decisions renders only items no live verdict has already resolved, consuming the existing
+    merged-proposal and escalation-reconciler verdicts rather than a new staleness rule of its own' /
+    proof 'unit test: test/console-tabs.test.ts' -> INHERITED BY W1-T336 (criterion 1, verbatim).
+    (3) claim 'Feed still renders recent + everything-else + the find layer unchanged — the falsifier is
+    any firehose row that exists today and cannot be reached after the change' /
+    proof 'unit test: test/console-tabs.test.ts' -> INHERITED BY W1-T336 (criterion 2).
+    (4) claim 'the glance strip stays outside the tabs and the needs-me badge still fires while another
+    tab is active' / proof 'unit test: test/console-tabs.test.ts' -> SPLIT ACROSS TWO SHARDS, because
+    its halves become checkable at different times: glance-outside-the-tabs is W1-T334 criterion 1
+    (the shard that creates something for it to be outside OF), and the cross-tab badge is W1-T336
+    criterion 3 (it needs a tab that can be INACTIVE, which only exists once tabs govern).
+    (5) claim 'switching tabs issues NO additional fetch and preserves in-place row patching (rows are
+    not re-created), so live state and text selection survive the switch' /
+    proof 'unit test: test/console-tabs.test.ts' -> SPLIT: the no-additional-fetch property is W1-T334
+    criterion 3 (checkable as soon as tabs exist), and the full claim including in-place patching and
+    selection survival is W1-T336 criterion 4, where a switch actually re-projects anything.
+    NOTHING IS DROPPED: all five claims appear above, and W1-T335 carries no inherited criterion because
+    it is net-new work the original task never named — making the eight suites shape-agnostic is
+    precisely what W1-T314 lacked, and its absence is why the sixth run could not push.
+    ALL FIVE PROOFS NAMED test/console-tabs.test.ts, WHICH DOES NOT EXIST. `rmd check-proof` on it
+    returns exit 1, hits 0 today. That is a legitimate forward reference rather than the W1-T229
+    dead-proof class — it would resolve once a worker created the file — but it was unverifiable at
+    filing time, and this repo has merged a PR at proof_exec 2/4 without anything saying so. The three
+    shards therefore point every proof at a serve.* suite that EXISTS and executes today.
+    THE DISPATCH HISTORY, AND ITS HONEST LIMIT. The four runs enumerated in the comment above
+    (W1-T314-1785803822339 $24.64 | -1785808504719 $21.25 | -1785812393844 $14.99 | -1785815089597
+    $23.62, total $84.50) are quoted from that comment. The fifth (a review failure with a fix-rung
+    strike, then required checks red) and the sixth (`implement.done`, 179 turns, $16.78, subtype
+    success, no pr.opened) are reported from the operator's own account. THEY ARE NOT RE-DERIVED HERE:
+    this container carries no state/ledger.ndjson and no rotations, so the ledger could not be
+    consulted. The DECOMPOSITION does not rest on those figures — it rests on the contract mechanism
+    confirmed from source in rationale: above, which a reader can reproduce with a grep.
+    THE ORIGINAL files: LIST, PRESERVED VERBATIM before it was replaced by this record's own path —
+    it is the widened eleven, after the two scope_guard refusals: [src/lib/serve.ts,
+    test/console-tabs.test.ts, test/setup/open-shell.ts, test/serve.test.ts,
+    test/serve.density-ia.test.ts, test/serve.detail-journey.test.ts, test/serve.find.test.ts,
+    test/serve.first-paint.test.ts, test/serve.live-state.test.ts, test/serve.shell-ux.test.ts,
+    test/serve.write-ack.test.ts]. Those eleven are now distributed across the three shards: W1-T334
+    takes serve.ts and two suites, W1-T335 takes open-shell.ts and all eight suites, W1-T336 takes
+    serve.ts and four suites. test/console-tabs.test.ts is deliberately dropped — see the proof note
+    above.
+    ORIGINAL NOTE, PRESERVED: FILED 2026-08-03 from feedback fb-1784770111145-cf7c24 (clause 3), source-verified at filing: the ten
     single-scroll sections at serve.ts:702/769/774/783/799/808/820/829/861/890. MASTER-PLAN §7 is amended by
     this same filing to record the four-tab IA, so this supersedes W1-T153's five-section single-scroll IA
     AS AN IA — none of W1-T153's shipped behaviour (design system, responsiveness, control read-back) is
