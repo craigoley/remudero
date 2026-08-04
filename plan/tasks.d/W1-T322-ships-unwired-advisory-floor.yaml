@@ -1,0 +1,87 @@
+- id: W1-T322
+  title: "SHIPS-UNWIRED advisory floor — one reachability scan, consumed at review time and retro
+    time, flags a diff that adds unreached exports with no wiring marker and a NET-STATE capability
+    claim whose named symbol has no caller; ADVISORY ONLY, with a stated measurement window, so the
+    blocking decision is made on a measured false-positive rate rather than a guess"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "MEASURED FROM SOURCE at bce8338, this filing session. The class is live: even after
+    W1-T316/#1257 and W1-T317/#1259 wired two governors, these organs still have ZERO production
+    consumers (each re-grepped across src/ scripts/ bin/ this session, definitions and doc
+    cross-references excluded): summarizeEscalation and realDecisionSummarizer (W1-T313, merged
+    2026-08-03 with a PASS review, unreachable end-to-end), evaluateFlightSignals (since
+    2026-07-16), checkBinaryPin (W1-T236), planHealthSweep (W1-T20d), sweepOrphanWorkers (W1-T117
+    — daemonCommand passes undefined for both its wiring points). The audit's §3b found 18 doc
+    comments naming callers that never existed, every one born false in the merging commit, every
+    one on a protective mechanism behind an optional parameter — no test, type error, or ledger
+    line ever contradicts the comment. Every existing gate asks whether code WORKS; none asks
+    whether anything CALLS it. W1-T316's own note names these organs as the fixtures for exactly
+    this check and rules 'Do NOT build it here' — this is the task that builds it.
+    WHY ADVISORY FIRST, stated as policy: this floor fronts every merge on a fleet doing ~50 PRs
+    a day. This repo has twice independently concluded that a blocking check which false-positives
+    gets routed around or deleted within a week (recon-CY's 'deleted within a week' rule behind
+    producer-completeness; proof-scope's own measured warn-default rollout). So this task ships
+    the scan WARN-ONLY and MEASURES; W1-T323 (depends on this) flips severity once the measured
+    rate clears the threshold stated below."
+  design: |
+    ONE SCAN, TWO CONSUMERS, THREE REASON CODES — all advisory in this task.
+    (i) THE SCAN, a new module src/lib/reachability.ts with entry point scanUnreachedExports():
+    given a diff's added `export function` names and a checkout, report each whose only references
+    outside its defining file are tests — using the seam-default discount the audit validated (a
+    symbol referenced within its own file beyond its definition is runtime-reachable; the audit
+    measured 396 seam-defaults vs 24 true orphans, so without this discount the check is
+    unshippable). Read files with readFileSync, never grep — two source files carry NUL bytes and
+    are invisible to grep without -a (the config-reader-seams lesson, verbatim in its header).
+    (ii) REVIEW-TIME CONSUMER: where judgeReview's structural checks already walk the diff
+    (bodyContradictsDiff, detectInstrumentEntanglement idiom), emit an ADVISORY — a ledgered
+    review.unwired_advisory line naming the PR, the reason code and the symbols — when:
+    (a) the diff adds unreached exports and the body carries neither `WIRED-AT: <file>::<symbol>`
+    nor `SHIPS-UNWIRED: <open-task-id>` (verify a claimed id exists and is open against the loaded
+    plan, the postMergeAmendmentViolations discipline); (b) INVERSE-SCOPE, the #839 class: the
+    PR's task declares files: it never touched — the scope guard is one-directional and fires only
+    on the orchestrator fallback push path, so the review-side walk is the only place that sees
+    every PR. Advisory means: NEVER changes met/state/capped; the verdict is untouched.
+    (iii) RETRO-TIME CONSUMER: the retro's doc pass runs the same scan over MASTER-PLAN NET-STATE
+    capability sentences — a claim naming a symbol with no caller gets an advisory line in the
+    retro report (reason code c). This is what would have caught 'the daemon carries a lifetime
+    per-task dispatch cap' being written one day after the unwired merge.
+    (iv) THE MEASUREMENT, so W1-T323 has a criterion and not a judgement call: WINDOW = 14 days or
+    100 merged PRs from this task's merge, whichever comes FIRST. THRESHOLD = flip to blocking
+    only if the false-positive rate is at most 5% of flagged PRs, where a false positive is a
+    flagged PR whose flagged export was in fact reached (adjudicated against source at
+    measurement time) or whose omission of a marker was correct. The advisory ledger lines are
+    the dataset; count and adjudicate from them.
+    (v) Registration: add review.unwired_advisory to DECISION_RELEVANT_LEDGER_STEPS ONLY if a
+    decision consumes it (W1-T323's measurement is analytical; if it reads the ledger to decide
+    the flip, register in W1-T323's change, not speculatively here).
+    NOT IN SCOPE: any severity above advisory (that is W1-T323, gated on the measurement); doc
+    EDITS (the retro consumer reports, never rewrites); the historical backlog of unwired organs
+    (they are W1-T320/W1-T321-class work, one wiring per task).
+  acceptance:
+    - claim: "a diff adding an unreached export with neither marker in the body yields exactly one ledgered advisory and an unchanged verdict"
+      proof: "unit test: test/ships-unwired-floor.test.ts"
+    - claim: "a SHIPS-UNWIRED marker naming a missing or merged task id is flagged, one naming a real open task is honoured"
+      proof: "unit test: test/ships-unwired-floor.test.ts"
+    - claim: "a PR whose task declares files it never touched yields the inverse-scope advisory — the direction the scope guard cannot see"
+      proof: "unit test: test/ships-unwired-floor.test.ts"
+    - claim: "the seam-default discount holds: an export referenced in its own file beyond its definition is never flagged"
+      proof: "unit test: test/ships-unwired-floor.test.ts"
+    - claim: "the scan is CALLED from the review path, not merely defined"
+      proof: "grep: scanUnreachedExports( in src/lib/review.ts"
+  risk: high
+  origin: "oper#audit-filings-2026-08-04 (audit §1d/§3b/§4; W1-T316's note names the fixtures)"
+  plan_refs: ["W1-T316", "W1-T310", "W1-T297"]
+  files: [src/lib/reachability.ts, src/lib/review.ts, src/lib/retro.ts, src/run-task.ts, test/ships-unwired-floor.test.ts]
+  status: queued
+  attempts: 0
+  note: "risk:high — it touches the review path that fronts every merge, even though advisory-only
+    by construction. budget 100: a new module, two consumers, five-claim lock. The call-site
+    criterion (grep with the open paren) is the exact shape callSiteViolations asks of a task
+    creating a new src module, and the symbol misses bce8338 by construction (new name), so it
+    discriminates. files: over-declares run-task.ts deliberately: the review invocation's dep
+    objects live there, and the single most expensive filing defect in this plan's history is a
+    wiring site missing from files: (W1-T271's shard vs W1-T316's correction)."
