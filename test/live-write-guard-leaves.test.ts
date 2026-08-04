@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { ghPrMergeSquash } from "../src/lib/worker.js";
-import { ghPrCreateFillCommand } from "../src/run-task.js";
+import { ghPrCreateFillCommand, lastCommitSubject } from "../src/run-task.js";
 import { ghIssueGateway } from "../src/lib/escalate.js";
 import { defaultGitCapture, defaultPushExec, gitPushRunBranch } from "../src/lib/git-push.js";
 import { LiveWriteBlockedError, withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
@@ -154,6 +154,37 @@ test("LEAF GUARD gh-pr-create: an omitted title falls back to --fill alone — t
   const ok = withLiveWritesAllowed(() => ghPrCreateFillCommand("/tmp/wt", "acme", "remudero", "run-T1-123"));
   assert.ok(!ok.args.includes("--title"), "no title given => old --fill-only argv, unchanged");
   assert.ok(ok.args.includes("--fill"), "--fill is still present so a PR still opens rather than refusing");
+});
+
+// lastCommitSubject feeds the title into the implement/retro call sites (the two paths whose
+// commit is worker-authored, so there is no harness-computed subject variable to reuse) — it
+// reads the ACTUAL committed subject back from git, never a second derivation.
+test("lastCommitSubject: reads back the real last-commit subject from a worktree", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-last-commit-subject-"));
+  try {
+    execFileSync("git", ["init", "--quiet", "-b", "main", dir], { encoding: "utf8" });
+    execFileSync("git", ["-C", dir, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", dir, "config", "user.name", "Test"]);
+    writeFileSync(join(dir, "f.txt"), "content");
+    execFileSync("git", ["-C", dir, "add", "-A"]);
+    execFileSync("git", ["-C", dir, "commit", "-q", "-m", "feat(x): the real committed subject"]);
+    assert.equal(lastCommitSubject(dir), "feat(x): the real committed subject");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("lastCommitSubject: a git failure (no commit / not a repo) returns undefined, never throws — the no-title fallback path", () => {
+  // A directory that is not a git repo at all: `git -C <dir> log -1 --format=%s` fails, which
+  // is the exact "no title available" case ghPrCreateFillCommand's doc comment decides —
+  // undefined here is what makes a call site fall back to --fill alone.
+  const dir = mkdtempSync(join(tmpdir(), "rmd-last-commit-subject-fail-"));
+  try {
+    assert.equal(lastCommitSubject(dir), undefined, "no repo at all => undefined, not a throw");
+    assert.equal(lastCommitSubject("/no/such/path/at/all"), undefined, "a nonexistent path => undefined too");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ── LEAF: escalate.ts ghIssueGateway().create — boundary "gh-issue-create" ────────────

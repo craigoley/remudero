@@ -823,7 +823,7 @@ export function ghPrCreateFillCommand(
  * is exactly the "no title available" case {@link ghPrCreateFillCommand}'s own doc
  * comment decides: the caller then falls back to `--fill` alone.
  */
-function lastCommitSubject(worktreePath: string): string | undefined {
+export function lastCommitSubject(worktreePath: string): string | undefined {
   try {
     const subject = execFileSync("git", ["-C", worktreePath, "log", "-1", "--format=%s"], {
       encoding: "utf8",
