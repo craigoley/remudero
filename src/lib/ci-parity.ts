@@ -111,6 +111,16 @@ function excludedStep(job: string, reason: string): CiParityStepResult {
   return { name, ok: true, detail: `${name}: EXCLUDED — ${reason}` };
 }
 
+/** The suite's per-process temp-dir reaper (W1-T131) — REQUIRED on both direct `node --test`
+ * spawns in this table (coverage-ratchet's full-glob run and containment-probe's scoped run),
+ * neither of which routes through package.json's protected `test`/`test:ci` scripts. Without it
+ * each local preflight leaked one OS-tmpdir dir per fixture in the loaded files — part of the
+ * 53,310-dir ENOSPC of 2026-08-03 (plan/feedback/fb-1785807201821-e4c9dc.yaml). ci.yml's own
+ * coverage and containment jobs still omit it: harmless THERE (ephemeral runners), and mirroring
+ * that omission locally is what leaked HERE. Relative, resolved from the spawn's `cwd: repoRoot`,
+ * exactly like package.json's own scripts; must ride AFTER `--import tsx` (tsx parses the .ts). */
+const TMP_HYGIENE_IMPORT = "./test/setup/tmp-hygiene.ts";
+
 /** An ordinary leaf: run a command, PASS iff it exits 0, and only echo its output on FAIL —
  *  the shape every straightforward job (leak-grep, the npm-script jobs, the coverage/lint-plan
  *  sub-steps) uses. */
@@ -261,7 +271,7 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
         // instead of failing --ci-parity on a flake CI itself would have gone green on.
         return shellOut(
           spawn,
-          "node scripts/test-with-retry.mjs node --enable-source-maps --experimental-test-coverage --test-coverage-exclude=test/** --test --import tsx test/**/*.test.ts",
+          "node scripts/test-with-retry.mjs node --enable-source-maps --experimental-test-coverage --test-coverage-exclude=test/** --test --import tsx --import ./test/setup/tmp-hygiene.ts test/**/*.test.ts",
           process.execPath,
           [
             join(repoRoot, "scripts", "test-with-retry.mjs"),
@@ -276,6 +286,8 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
             "--test",
             "--import",
             "tsx",
+            "--import",
+            TMP_HYGIENE_IMPORT,
             "test/**/*.test.ts",
           ],
           { cwd: repoRoot },
@@ -357,7 +369,13 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
         { cwd: repoRoot },
         () => [
           runStep("containment-probe:test", () =>
-            shellOut(spawn, "node --test --import tsx test/containment.test.ts", process.execPath, ["--test", "--import", "tsx", join(repoRoot, "test", "containment.test.ts")], { cwd: repoRoot }),
+            shellOut(
+              spawn,
+              "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/containment.test.ts",
+              process.execPath,
+              ["--test", "--import", "tsx", "--import", TMP_HYGIENE_IMPORT, join(repoRoot, "test", "containment.test.ts")],
+              { cwd: repoRoot },
+            ),
           ),
         ],
       ),

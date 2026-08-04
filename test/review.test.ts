@@ -1162,7 +1162,7 @@ test("parseWhitelistedProof: a named test-file proof is the 'test' shape", () =>
   const wp = parseWhitelistedProof("run `test/foo.test.ts` and see it pass");
   assert.ok(wp);
   assert.equal(wp!.kind, "test");
-  assert.deepEqual(wp!.args, ["--test", "--import", "tsx", "test/foo.test.ts"]);
+  assert.deepEqual(wp!.args, ["--test", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "test/foo.test.ts"]);
 });
 
 test("parseWhitelistedProof: a fenced literal grep command is the 'grep' shape", () => {
@@ -1417,6 +1417,8 @@ test("parseWhitelistedProof: a dialect body containing a semicolon and a test-pa
     "--test",
     "--import",
     "tsx",
+    "--import",
+    "./test/setup/tmp-hygiene.ts",
     "--test-name-pattern",
     "test/foo\\.test\\.ts; rm -rf /",
     "test/**/*.test.ts",
@@ -1431,6 +1433,8 @@ test("parseWhitelistedProof: house-dialect 'unit test: <name>' (not a path) comp
     "--test",
     "--import",
     "tsx",
+    "--import",
+    "./test/setup/tmp-hygiene.ts",
     "--test-name-pattern",
     "exclusive-create EEXIST falls through to read",
     "test/**/*.test.ts",
@@ -1459,7 +1463,7 @@ test("parseWhitelistedProof (W1-T112 round-3): a dialect NAME containing regex-s
 test("parseWhitelistedProof: house-dialect 'unit test: <path>' reuses the exact-file shape verbatim", () => {
   const wp = parseWhitelistedProof("unit test: test/foo.test.ts");
   assert.ok(wp);
-  assert.deepEqual(wp!.args, ["--test", "--import", "tsx", "test/foo.test.ts"]);
+  assert.deepEqual(wp!.args, ["--test", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "test/foo.test.ts"]);
 });
 
 // ── nameFilteredOutcome (W1-T178, round 2): a name-filtered proof globs the
