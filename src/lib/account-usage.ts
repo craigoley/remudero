@@ -120,6 +120,47 @@ export type UsageUnknownReason = "unreadable" | "no-cache" | "account-mismatch" 
 export type GovernorState = "armed" | "telemetry-only" | "unknown";
 
 /**
+ * Whether a DISPATCH-DEFERRING governor (the cost ceiling or the WIP/queue ceiling) is currently
+ * holding back NEW dispatch, per the fleet's own newest heartbeat for that governor (W1-T329,
+ * OPERATOR COMPLAINT 2026-08-04: the fleet deferred every dispatch for ~40 minutes at $152.28
+ * against a $150 ceiling and the console said only "nothing in flight").
+ *
+ * ONLY TWO STATES, DELIBERATELY — there is no "clear"/"under-ceiling" third state to derive.
+ * Unlike `daemon.headroom` (written on EVERY tick, deferring or not, so its `enforced` field is a
+ * real tri-state), `daemon.cost_governor`/`daemon.queue_governor` (daemon.ts) are written ONLY
+ * while that governor is actively deferring — no line ever states "not deferring". So the only
+ * two honest answers are "the newest deferral we've seen" and "we've never seen one", and the
+ * second one must NEVER be presented as healthy: `GovernorState`'s own doc already establishes
+ * why absent must not collapse into a healthy-looking default ("would report an armed-and-
+ * breaching governor as telemetry-only") — the identical hazard here would report a governor
+ * that has idled the whole fleet for hours as indistinguishable from one comfortably under
+ * ceiling.
+ */
+export type DispatchGovernorState = "deferred" | "unknown";
+
+/** The cost governor's dispatch-deferral reading — see {@link DispatchGovernorState}. */
+export interface CostGovernorDeferral {
+  state: DispatchGovernorState;
+  /** `ts` of the newest `daemon.cost_governor` line, present iff `state` is "deferred". */
+  asOf?: string;
+  /** `observed_day_cost_usd` off that same line. */
+  observedDayCostUsd?: number;
+  /** `daily_cost_ceiling_usd` off that same line. */
+  ceilingUsd?: number;
+}
+
+/** The queue (WIP) governor's dispatch-deferral reading — see {@link DispatchGovernorState}. */
+export interface QueueGovernorDeferral {
+  state: DispatchGovernorState;
+  /** `ts` of the newest `daemon.queue_governor` line, present iff `state` is "deferred". */
+  asOf?: string;
+  /** `observed_open_count` off that same line. */
+  observedOpenCount?: number;
+  /** `wip_limit` off that same line. */
+  wipLimit?: number;
+}
+
+/**
  * `GET /v1/account-usage`'s body. EVERY value field is optional and absent — never a placeholder
  * and never a zero — when its own source could not be read, exactly the discipline
  * `DaemonHealthSnapshot` already holds itself to.
@@ -140,6 +181,26 @@ export interface AccountUsageSnapshot {
   /** `ts` of the `daemon.headroom` line the posture came from. */
   governorAsOf?: string;
   governorAgeMs?: number;
+  /** W1-T329: the cost ceiling's dispatch-deferral posture — see {@link DispatchGovernorState}. */
+  costGovernor: DispatchGovernorState;
+  /** `ts` of the `daemon.cost_governor` line the posture came from; absent iff "unknown". */
+  costGovernorAsOf?: string;
+  costGovernorAgeMs?: number;
+  /** The day's ledgered cost that produced the deferral, present only while `costGovernor` is
+   *  "deferred" — RENDER THE NUMBER, NOT JUST THE FLAG ("$152.28 of $150" is actionable). */
+  costGovernorObservedUsd?: number;
+  /** The ceiling consulted, present only while `costGovernor` is "deferred". */
+  costGovernorCeilingUsd?: number;
+  /** W1-T329: the WIP/queue ceiling's dispatch-deferral posture — see {@link DispatchGovernorState}. */
+  queueGovernor: DispatchGovernorState;
+  /** `ts` of the `daemon.queue_governor` line the posture came from; absent iff "unknown". */
+  queueGovernorAsOf?: string;
+  queueGovernorAgeMs?: number;
+  /** The observed open-PR count that produced the deferral, present only while `queueGovernor`
+   *  is "deferred". */
+  queueGovernorObservedOpenCount?: number;
+  /** The WIP limit consulted, present only while `queueGovernor` is "deferred". */
+  queueGovernorWipLimit?: number;
   /** The scope note, carried in the payload so the render can never drop it. */
   measures: string;
 }
@@ -170,13 +231,29 @@ export function deriveAccountUsage(
   nowMs: number,
 ): AccountUsageSnapshot {
   const governor = deriveGovernorPosture(lines);
+  const costGovernor = deriveCostGovernorDeferral(lines);
+  const queueGovernor = deriveQueueGovernorDeferral(lines);
   const base: AccountUsageSnapshot = {
     governor: governor.state,
+    costGovernor: costGovernor.state,
+    queueGovernor: queueGovernor.state,
     measures: USAGE_SCOPE_NOTE,
   };
   if (governor.asOf !== undefined) {
     base.governorAsOf = governor.asOf;
     base.governorAgeMs = Math.max(0, nowMs - Date.parse(governor.asOf));
+  }
+  if (costGovernor.asOf !== undefined) {
+    base.costGovernorAsOf = costGovernor.asOf;
+    base.costGovernorAgeMs = Math.max(0, nowMs - Date.parse(costGovernor.asOf));
+    base.costGovernorObservedUsd = costGovernor.observedDayCostUsd;
+    base.costGovernorCeilingUsd = costGovernor.ceilingUsd;
+  }
+  if (queueGovernor.asOf !== undefined) {
+    base.queueGovernorAsOf = queueGovernor.asOf;
+    base.queueGovernorAgeMs = Math.max(0, nowMs - Date.parse(queueGovernor.asOf));
+    base.queueGovernorObservedOpenCount = queueGovernor.observedOpenCount;
+    base.queueGovernorWipLimit = queueGovernor.wipLimit;
   }
   if (input.email !== undefined) base.accountEmail = input.email;
   if (input.uuid !== undefined) base.accountUuid = input.uuid;
@@ -239,6 +316,66 @@ function deriveGovernorPosture(
   if (bestEnforced === true) return { state: "armed", asOf: bestTs };
   if (bestEnforced === false) return { state: "telemetry-only", asOf: bestTs };
   return { state: "unknown", asOf: bestTs };
+}
+
+/**
+ * W1-T329: the cost governor's dispatch-deferral reading from the NEWEST `daemon.cost_governor`
+ * ledger line (daemon.ts, written on every tick that governor defers new dispatch). Mirrors
+ * {@link deriveGovernorPosture}'s own shape deliberately — "read the newest line, carry its own
+ * as-of, age it inline" — rather than inventing a second way to answer "is the fleet allowed to
+ * work". No line at all ⇒ `{ state: "unknown" }`; see {@link DispatchGovernorState}'s doc for why
+ * that must never be presented as "under ceiling".
+ */
+function deriveCostGovernorDeferral(lines: ReadonlyArray<Record<string, unknown>>): CostGovernorDeferral {
+  let bestTs: string | undefined;
+  let bestParsed = -Infinity;
+  let bestObservedUsd: unknown;
+  let bestCeilingUsd: unknown;
+  for (const line of lines) {
+    if (line.step !== "daemon.cost_governor") continue;
+    const ts = typeof line.ts === "string" ? line.ts : undefined;
+    const parsed = ts ? Date.parse(ts) : NaN;
+    if (!Number.isFinite(parsed) || parsed < bestParsed) continue;
+    bestParsed = parsed;
+    bestTs = ts;
+    bestObservedUsd = line.observed_day_cost_usd;
+    bestCeilingUsd = line.daily_cost_ceiling_usd;
+  }
+  if (bestTs === undefined) return { state: "unknown" };
+  const out: CostGovernorDeferral = { state: "deferred", asOf: bestTs };
+  if (typeof bestObservedUsd === "number" && Number.isFinite(bestObservedUsd)) out.observedDayCostUsd = bestObservedUsd;
+  if (typeof bestCeilingUsd === "number" && Number.isFinite(bestCeilingUsd)) out.ceilingUsd = bestCeilingUsd;
+  return out;
+}
+
+/**
+ * W1-T329: the queue (WIP) governor's dispatch-deferral reading from the NEWEST
+ * `daemon.queue_governor` ledger line (daemon.ts). Same shape as
+ * {@link deriveCostGovernorDeferral} immediately above, deliberately — two governors, one
+ * derivation shape, so they cannot drift apart.
+ */
+function deriveQueueGovernorDeferral(lines: ReadonlyArray<Record<string, unknown>>): QueueGovernorDeferral {
+  let bestTs: string | undefined;
+  let bestParsed = -Infinity;
+  let bestObservedOpenCount: unknown;
+  let bestWipLimit: unknown;
+  for (const line of lines) {
+    if (line.step !== "daemon.queue_governor") continue;
+    const ts = typeof line.ts === "string" ? line.ts : undefined;
+    const parsed = ts ? Date.parse(ts) : NaN;
+    if (!Number.isFinite(parsed) || parsed < bestParsed) continue;
+    bestParsed = parsed;
+    bestTs = ts;
+    bestObservedOpenCount = line.observed_open_count;
+    bestWipLimit = line.wip_limit;
+  }
+  if (bestTs === undefined) return { state: "unknown" };
+  const out: QueueGovernorDeferral = { state: "deferred", asOf: bestTs };
+  if (typeof bestObservedOpenCount === "number" && Number.isFinite(bestObservedOpenCount)) {
+    out.observedOpenCount = bestObservedOpenCount;
+  }
+  if (typeof bestWipLimit === "number" && Number.isFinite(bestWipLimit)) out.wipLimit = bestWipLimit;
+  return out;
 }
 
 /** The shape {@link readAccountUsageFile} narrows `~/.claude.json` down to. Nothing else in that

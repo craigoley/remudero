@@ -418,6 +418,10 @@ export const HEALTH_STEP_RETENTION_WINDOW_MS = 15 * 60 * 1000;
  * Consumers, and why each step is here:
  *   src/lib/account-usage.ts `deriveGovernorPosture` reads the NEWEST `daemon.headroom` line
  *     for the ACCOUNT strip's governor posture (`line.step !== "daemon.headroom"` guard).
+ *   src/lib/account-usage.ts `deriveCostGovernorDeferral`/`deriveQueueGovernorDeferral` (W1-T329)
+ *     read the NEWEST `daemon.cost_governor`/`daemon.queue_governor` line for the ACCOUNT strip's
+ *     dispatch-deferral slots (`line.step !== "daemon.cost_governor"` /
+ *     `line.step !== "daemon.queue_governor"` guards).
  *   src/lib/board.ts's `OPERATOR_ACTION_STEPS` / `classifyLine` read `console.kick_refused` and
  *     `console.kick_dispatched` for the RECENT feed's operator-action row (`case "console.kick_refused":` /
  *     `case "console.kick_dispatched":`).
@@ -486,6 +490,26 @@ export const RENDER_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // KNOWN cost, not an accident. Nothing else in the tree reads these two steps today.
   "daemon.headroom.degraded",
   "daemon.headroom.unavailable",
+  // W1-T329 (OPERATOR COMPLAINT, 2026-08-04): THE TWO DISPATCH-DEFERRING GOVERNORS' OWN
+  // HEARTBEATS. `daemon.cost_governor` (daemon.ts) and `daemon.queue_governor` (daemon.ts) are
+  // written on EVERY tick either governor defers NEW dispatch, carrying the observed figure
+  // against its ceiling (`observed_day_cost_usd`/`daily_cost_ceiling_usd` for cost,
+  // `observed_open_count`/`wip_limit` for queue) — but neither was in either retention set, so a
+  // fleet that deferred every dispatch for ~40 minutes at $152.28 against a $150 ceiling had
+  // ZERO surviving lines the moment a rotation happened, and the ACCOUNT strip (below) had
+  // nothing to read even after this task wired it up. RENDER, NOT DECISION: nothing in this
+  // codebase's own dispatch path re-reads these two ledger lines to decide anything (the
+  // predicates in sweep.ts are re-evaluated fresh every tick against the ledger's cost/PR
+  // totals, never against their own prior emission) — they exist purely so a human can see WHY
+  // the fleet looks idle, the same operator-visible-history role `daemon.headroom` already
+  // holds for the governor's own posture.
+  //
+  // src/lib/account-usage.ts's `deriveCostGovernorDeferral`/`deriveQueueGovernorDeferral` read
+  // the NEWEST line of each for the ACCOUNT strip's new cost-governor/queue-governor slots
+  // (`line.step !== "daemon.cost_governor"` / `line.step !== "daemon.queue_governor"` guards,
+  // the same shape `deriveGovernorPosture`'s own guard above uses).
+  "daemon.cost_governor",
+  "daemon.queue_governor",
 ]);
 
 /** True for any step in {@link RENDER_RELEVANT_LEDGER_STEPS}. */

@@ -77,6 +77,31 @@ const REAL_LEGACY_LINE = {
 /** What the symmetric heartbeat now writes when the governor is ARMED and under the ceiling. */
 const ARMED_LINE = { ...REAL_TELEMETRY_LINE, ts: "2026-07-31T16:45:00.000Z", enforced: true, percent_used: 3 };
 
+/** W1-T329: a real-shaped `daemon.cost_governor` line (daemon.ts), written on every tick the
+ *  cost ceiling defers new dispatch — the OPERATOR COMPLAINT's own numbers, 2026-08-04. */
+const COST_GOVERNOR_LINE = {
+  ts: "2026-08-04T15:30:00.000Z",
+  run_id: "DAEMON-1785878000000",
+  task_id: "DAEMON",
+  step: "daemon.cost_governor",
+  tick: 40,
+  observed_day_cost_usd: 152.28,
+  daily_cost_ceiling_usd: 150,
+  poll_interval_ms: 60000,
+};
+
+/** W1-T329: a real-shaped `daemon.queue_governor` line (daemon.ts). */
+const QUEUE_GOVERNOR_LINE = {
+  ts: "2026-08-04T15:31:00.000Z",
+  run_id: "DAEMON-1785878001000",
+  task_id: "DAEMON",
+  step: "daemon.queue_governor",
+  tick: 41,
+  observed_open_count: 12,
+  wip_limit: 10,
+  poll_interval_ms: 60000,
+};
+
 test("the panel renders the account and both usage windows from a real captured reading, with an as-of timestamp", () => {
   const input = readAccountUsageFile(FIXTURE);
   const snap = deriveAccountUsage(input, [ARMED_LINE], CAPTURED_AT + 60_000);
@@ -101,6 +126,59 @@ test("the panel renders the account and both usage windows from a real captured 
 
   // The scope caveat travels IN the payload, so a render cannot drop it.
   assert.equal(snap.measures, USAGE_SCOPE_NOTE);
+});
+
+// ── W1-T329 (OPERATOR COMPLAINT, 2026-08-04): the two DISPATCH-DEFERRING governors. Neither
+// `daemon.cost_governor` nor `daemon.queue_governor` is emitted except while that governor is
+// actively deferring, so — unlike the headroom governor's tri-state above — there is no "clear"
+// reading to derive: only "the newest deferral we've seen" or "we've never seen one" (unknown).
+
+test("the cost-governor deferral is derived from the newest daemon.cost_governor line, with its own as-of and the observed figure against its ceiling", () => {
+  const input = readAccountUsageFile(FIXTURE);
+  const snap = deriveAccountUsage(input, [COST_GOVERNOR_LINE], CAPTURED_AT + 60_000);
+
+  assert.equal(snap.costGovernor, "deferred", "a real daemon.cost_governor line renders deferred, not unknown");
+  assert.equal(snap.costGovernorAsOf, "2026-08-04T15:30:00.000Z");
+  assert.equal(snap.costGovernorObservedUsd, 152.28, "RENDER THE NUMBER, not just the flag");
+  assert.equal(snap.costGovernorCeilingUsd, 150);
+
+  // NEWEST WINS, and a second, older cost_governor line must not overwrite the newer reading.
+  const older = { ...COST_GOVERNOR_LINE, ts: "2026-08-04T15:00:00.000Z", observed_day_cost_usd: 140 };
+  const outOfOrder = deriveAccountUsage(input, [COST_GOVERNOR_LINE, older], CAPTURED_AT);
+  assert.equal(outOfOrder.costGovernorObservedUsd, 152.28, "the newest line's own figure wins, never an older one");
+});
+
+test("the queue-governor deferral is derived from the newest daemon.queue_governor line, with its own as-of and the observed count against the WIP limit", () => {
+  const input = readAccountUsageFile(FIXTURE);
+  const snap = deriveAccountUsage(input, [QUEUE_GOVERNOR_LINE], CAPTURED_AT + 60_000);
+
+  assert.equal(snap.queueGovernor, "deferred", "a real daemon.queue_governor line renders deferred, not unknown");
+  assert.equal(snap.queueGovernorAsOf, "2026-08-04T15:31:00.000Z");
+  assert.equal(snap.queueGovernorObservedOpenCount, 12);
+  assert.equal(snap.queueGovernorWipLimit, 10);
+});
+
+test("an absent dispatch-governor reading is UNKNOWN, never zero or under-ceiling — even when the OTHER governor has real data", () => {
+  const input = readAccountUsageFile(FIXTURE);
+
+  // (1) Nothing on the ledger at all — the common case (most ticks never defer).
+  const nothing = deriveAccountUsage(input, [], CAPTURED_AT);
+  assert.equal(nothing.costGovernor, "unknown", "no daemon.cost_governor line ever seen must never read as under-ceiling");
+  assert.equal(nothing.costGovernorAsOf, undefined);
+  assert.equal(nothing.costGovernorObservedUsd, undefined, "no number is ever fabricated for an unknown reading");
+  assert.equal(nothing.queueGovernor, "unknown");
+  assert.equal(nothing.queueGovernorAsOf, undefined);
+
+  // (2) One governor has a real, current deferral; the other has never fired. Each posture is
+  // independent — a cost deferral must not bleed into the queue governor's own reading.
+  const mixed = deriveAccountUsage(input, [COST_GOVERNOR_LINE], CAPTURED_AT);
+  assert.equal(mixed.costGovernor, "deferred");
+  assert.equal(mixed.queueGovernor, "unknown", "the queue governor's own silence must still read unknown, not clear, alongside a real cost deferral");
+
+  // (3) Other, unrelated ledger noise must not be mistaken for either governor's own step.
+  const noise = deriveAccountUsage(input, [{ ts: REAL_TELEMETRY_LINE.ts, step: "daemon.headroom", enforced: true }], CAPTURED_AT);
+  assert.equal(noise.costGovernor, "unknown");
+  assert.equal(noise.queueGovernor, "unknown");
 });
 
 test("a stale or missing reading renders as unknown and never as 0% or as a stale value presented as current", () => {

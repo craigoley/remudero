@@ -735,6 +735,12 @@ export function renderShellHtml(
     <span class="glance-item"><span class="glance-label">5h window</span><span class="glance-value" id="au-five-hour">…</span></span>
     <span class="glance-item"><span class="glance-label">7d window</span><span class="glance-value" id="au-seven-day">…</span></span>
     <span class="glance-item"><span class="glance-label">governor</span><span class="glance-value" id="au-governor">…</span></span>
+    <!-- W1-T329: the two DISPATCH-DEFERRING governors (cost ceiling, WIP/queue ceiling). Sibling
+         slots on the SAME strip as "governor" (the headroom governor's own posture) above --
+         extending the existing surface rather than a new panel, per this task's own design note:
+         "that is the surface that already answers 'may the fleet work'". -->
+    <span class="glance-item"><span class="glance-label">cost governor</span><span class="glance-value" id="au-cost-governor">…</span></span>
+    <span class="glance-item"><span class="glance-label">queue governor</span><span class="glance-value" id="au-queue-governor">…</span></span>
     <span class="glance-item"><span class="glance-label">usage as of</span><span class="glance-value" id="au-as-of">…</span></span>
     <span class="glance-item glance-scope"><span class="glance-label" id="au-measures"></span></span>
   </section>
@@ -1790,6 +1796,23 @@ export function renderShellHtml(
     // ticked since the governor was flipped would otherwise report the pre-flip posture as
     // current. Ageing it inline is the whole guard.
     setGlanceValue("au-governor", a.governorAsOf ? \`\${gov} · \${formatRelative(a.governorAgeMs)}\` : gov);
+    // W1-T329: the two DISPATCH-DEFERRING governors -- "unknown" is the honest default (neither
+    // governor ever logs "not deferring", only that it IS, so absence can never be shown as
+    // healthy/under-ceiling -- see account-usage.ts's DispatchGovernorState doc). RENDER THE
+    // NUMBERS, NOT JUST THE FLAG: "$152.28 of $150" told the operator what "deferred" alone could
+    // not -- the OPERATOR COMPLAINT this task fixes was exactly "nothing stating that in console".
+    setGlanceValue(
+      "au-cost-governor",
+      a.costGovernor === "deferred"
+        ? \`\${costLabel(a.costGovernorObservedUsd)} of \${costLabel(a.costGovernorCeilingUsd)} · \${formatRelative(a.costGovernorAgeMs)}\`
+        : "unknown",
+    );
+    setGlanceValue(
+      "au-queue-governor",
+      a.queueGovernor === "deferred"
+        ? \`\${a.queueGovernorObservedOpenCount} of \${a.queueGovernorWipLimit} open · \${formatRelative(a.queueGovernorAgeMs)}\`
+        : "unknown",
+    );
     setGlanceValue(
       "au-as-of",
       a.usageUnknownReason ? \`unknown (\${a.usageUnknownReason})\` : formatTimestamp(a.usageAsOf),

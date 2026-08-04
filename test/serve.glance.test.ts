@@ -409,6 +409,71 @@ test("ACCOUNT strip: a usage cache belonging to a DIFFERENT account renders unkn
       assert.equal(body?.includes("77%"), false, "the stale account's percentage must appear NOWHERE on the page");
       // Nothing is on the ledger, so the posture is honestly unknown rather than defaulted.
       assert.equal(await glanceText(page, "au-governor"), "unknown");
+      // W1-T329: neither dispatch-deferring governor has ever fired here either, and that
+      // silence must read unknown -- never as "clear"/under-ceiling.
+      assert.equal(await glanceText(page, "au-cost-governor"), "unknown");
+      assert.equal(await glanceText(page, "au-queue-governor"), "unknown");
+    } finally {
+      await context.close();
+    }
+  });
+});
+
+// ── W1-T329 (OPERATOR COMPLAINT, 2026-08-04): "When we hit the $150 limit, there was nothing
+// stating that in console." The fleet deferred every dispatch for ~40 minutes at $152.28 against
+// a $150 ceiling and the console showed only "nothing in flight" -- this proves the GLANCE
+// strip now states the reason, with the actionable numbers, not just a flag.
+
+test("ACCOUNT strip: a deferring cost/queue governor renders the observed figure against its ceiling, so an idle fleet states its reason", async () => {
+  const root = tmpRoot();
+  const deps = fixtureDeps(root, [task({ id: "W1-T1" })], {
+    accountUsage: {
+      readAccount: () => ({
+        email: "operator@example.com",
+        uuid: "00000000-1111-2222-3333-444444444444",
+        cacheUuid: "00000000-1111-2222-3333-444444444444",
+        cacheFetchedAtMs: Date.now(),
+        fiveHour: { percentUsed: 3, resetsAt: "2026-08-04T20:49:59.000Z" },
+        sevenDay: { percentUsed: 0, resetsAt: "2026-08-05T04:59:59.000Z" },
+      }),
+    },
+  });
+  appendFileSync(
+    deps.board.ledgerPath,
+    ledgerLine({
+      ts: new Date(Date.now() - 30_000).toISOString(),
+      step: "daemon.cost_governor",
+      tick: 40,
+      observed_day_cost_usd: 152.28,
+      daily_cost_ceiling_usd: 150,
+      poll_interval_ms: 60000,
+    }),
+  );
+  appendFileSync(
+    deps.board.ledgerPath,
+    ledgerLine({
+      ts: new Date(Date.now() - 45_000).toISOString(),
+      step: "daemon.queue_governor",
+      tick: 41,
+      observed_open_count: 12,
+      wip_limit: 10,
+      poll_interval_ms: 60000,
+    }),
+  );
+
+  await withShell(deps, async (base) => {
+    const { context, page } = await openShell(base);
+    try {
+      await page.waitForFunction(() => (document.getElementById("au-account")?.textContent ?? "…") !== "…", null, { timeout: 5000 });
+      const costText = await glanceText(page, "au-cost-governor");
+      assert.match(costText, /\$152\.28/, "the observed day cost renders, not just a 'deferred' flag");
+      assert.match(costText, /\$150/, "the ceiling it was checked against renders alongside it");
+      assert.match(costText, /ago/, "the reading carries its own age, the same discipline as the headroom governor above");
+
+      const queueText = await glanceText(page, "au-queue-governor");
+      assert.match(queueText, /12/, "the observed open-PR count renders");
+      assert.match(queueText, /10/, "the WIP limit it was checked against renders alongside it");
+      assert.match(queueText, /ago/);
     } finally {
       await context.close();
     }
