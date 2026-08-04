@@ -62,7 +62,7 @@ test("W1-T253: worker.ts's DEFAULT_PRUNE_GRACE_MS reads plan/policy.yaml's prune
   assert.equal(DEFAULT_PRUNE_GRACE_MS, 120_000);
 });
 
-// ── sweep.ts: staleDays / strikeCap / wipLimit ──────────────────────────────────────────
+// ── sweep.ts: staleDays / strikeCap / wipLimit / dispatchLanes ─────────────────────────
 
 test("W1-T253: sweep.ts's DEFAULT_SWEEP_POLICY.staleDays/strikeCap/wipLimit read plan/policy.yaml's sweep row, not source literals", () => {
   assert.equal(DEFAULT_SWEEP_POLICY.staleDays, SHIPPED.values.sweep.staleDays);
@@ -71,6 +71,13 @@ test("W1-T253: sweep.ts's DEFAULT_SWEEP_POLICY.staleDays/strikeCap/wipLimit read
   assert.equal(DEFAULT_SWEEP_POLICY.staleDays, 14);
   assert.equal(DEFAULT_SWEEP_POLICY.strikeCap, 2);
   assert.equal(DEFAULT_SWEEP_POLICY.wipLimit, 10);
+});
+
+// W1-T325: dispatchLanes joins its three siblings above — a relocation of the pre-existing
+// source literal, not a retune (the value is asserted unchanged at 2).
+test("W1-T325: sweep.ts's DEFAULT_SWEEP_POLICY.dispatchLanes reads plan/policy.yaml's sweep.dispatchLanes row, not a source literal, and the value is unchanged at 2", () => {
+  assert.equal(DEFAULT_SWEEP_POLICY.dispatchLanes, SHIPPED.values.sweep.dispatchLanes);
+  assert.equal(DEFAULT_SWEEP_POLICY.dispatchLanes, 2);
 });
 
 // ── launchd.ts: ThrottleInterval (net-new — emission-from-policy, not literal-removal) ──
@@ -168,6 +175,7 @@ test("W1-T253 GUARD: no collected operating constant resolves from a source lite
     { site: "sweep.ts staleDays", actual: DEFAULT_SWEEP_POLICY.staleDays, expected: SHIPPED.values.sweep.staleDays },
     { site: "sweep.ts strikeCap", actual: DEFAULT_SWEEP_POLICY.strikeCap, expected: SHIPPED.values.sweep.strikeCap },
     { site: "sweep.ts wipLimit", actual: DEFAULT_SWEEP_POLICY.wipLimit, expected: SHIPPED.values.sweep.wipLimit },
+    { site: "sweep.ts dispatchLanes", actual: DEFAULT_SWEEP_POLICY.dispatchLanes, expected: SHIPPED.values.sweep.dispatchLanes },
     { site: "drain.ts max (fs-free fallback)", actual: DEFAULT_MAX, expected: SHIPPED.values.drain.max },
   ];
   for (const { site, actual, expected } of sites) {
