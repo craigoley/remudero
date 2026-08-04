@@ -9,5 +9,6 @@ raw: "CONSOLE URL VERB — no rmd command prints the console URL with its token;
   the console UX arc, fb-1784770111145-cf7c24."
 attachments: []
 origin: cli
-status: new
+status: rejected
 proposal_pr: null
+summary: null
