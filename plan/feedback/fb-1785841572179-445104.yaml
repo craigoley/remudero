@@ -1,0 +1,29 @@
+id: fb-1785841572179-445104
+ts: 2026-08-04T11:06:12.179Z
+raw: "REPO AUDIT 2026-08-04 — thesis: this system is excellent at proving code
+  WORKS and structurally blind to whether code RUNS. Full report at
+  state/remudero-quality-audit-2026-08-04.md. Headline measurements, each to
+  re-derive before acting: 209 of 276 name-filtered test proofs on merged tasks
+  resolve to ZERO tests today, and 29% of 1,160 proofs corpus-wide can never
+  execute; only 14 of 47 open auto-verify tasks carry a proof that both executes
+  and resolves. ~16 safety and governance organs are built, tested, and never
+  called — all three spend/dispatch governors, the crash-loop breaker, the
+  orphan sweep, in-flight supervision since 2026-07-16, and the entire
+  seven-item reviewer rubric, whose checkCallersAudited (the item asking 'did
+  you audit the callers?') has never had a caller. 18 doc comments name callers
+  that never existed, all born false in the same commit as their code, clustered
+  on protective mechanisms behind optional parameters. THE SCOPE GUARD IS
+  ONE-DIRECTIONAL: nothing checks that DECLARED files were touched, and one
+  governor PR merged touching zero of its declared scope — so it catches
+  over-reach and is blind to under-delivery, which is the direction that
+  produces unreached code. WHAT IS HEALTHY: 94% of tasks merge first-try, so the
+  expensive failure mode is doneness-illegibility (re-dispatching settled work),
+  not implementation; the consumption-checking instruments ended their classes;
+  the 193-task lint debt is ~92% archaeology. Falsifying check: if a spot-check
+  of five merged-task proofs resolves cleanly, the 209/276 figure is stale and
+  the priority order changes."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null
