@@ -93,7 +93,10 @@ drain:
 # proposal per idle period, spending a MEDIAN $0.98 unsupervised each time (mean $0.99, range
 # $0.27-$2.00, n=27 ledgered runs — impl-FO re-measured this over the unioned, deduplicated ledger).
 #
-# DEFAULT OFF, deliberately. Nothing changes until the operator sets `enabled.value: true`.
+# SHIPPED OFF, deliberately — a rung that spends unsupervised is opted into, never shipped on;
+# nothing changed until the operator set `enabled.value: true`. FLIPPED ON by PR #1093
+# (2026-08-01) and live since: the rung now spends unattended each idle period, inside the
+# bounds below.
 #
 # THE PACING BOUND WAS minIntervalMinutes ALONE AT 60m (impl-FO); policy/triage-cadence (60 -> 15,
 # to drain a 58-entry feedback backlog faster) REACTIVATED maxPerDay as a genuine second bound:
@@ -229,10 +232,12 @@ launchd:
 # 36 survived across os.tmpdir(), /private/tmp and the SDK scratchpad root, totalling
 # 5866 MiB, on a host where macOS's periodic tmp cleaner is absent so nothing ever has.
 scratchReap:
-  # DEFAULT OFF, deliberately: this rung DELETES. While false the boot pass SURVEYS and
-  # writes `daemon.clone_reap` with what it would reclaim, removing nothing — the operator
-  # reads that line, then flips this. Same default-off posture as `autoTriage.enabled`,
-  # which is off because it spends; this is off because it destroys.
+  # SHIPPED OFF, deliberately: this rung DELETES, so it began survey-only — while false the
+  # boot pass SURVEYS and writes `daemon.clone_reap` with what it would reclaim, removing
+  # nothing, so the operator could read that line before arming it. FLIPPED ON by PR #1250
+  # (2026-08-03, "after a third hand-clear tonight") and live since: the boot pass now REMOVES
+  # qualifying clones. Same shipped-off posture as `autoTriage.enabled` above (itself flipped
+  # on by PR #1093), which began off because it spends; this began off because it destroys.
   enabled:
     value: true
     origin: "net-new"
