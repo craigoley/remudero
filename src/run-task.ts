@@ -14887,6 +14887,12 @@ export async function main(
   if (cmd === "wipe-test" && arg) {
     process.exit(await wipeTestCommand(rest));
   }
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(...) around the runTask call
+  // cannot carry a DA hit without forking the process; the dispatched logic itself — arg
+  // validation (unknownArgError, incl. --rerun), the already-merged refusal (W1-T319), and
+  // every terminal verdict runTask can return — is unit-tested directly, driving REAL runTask()
+  // calls, in test/run-task.test.ts (same irreducible-glue shape as the sibling emissions/
+  // console-url/down/up/status/away dispatch cases just below).
   if (cmd === "run-task" && arg) {
     const badArg = unknownArgError("run-task", rest.slice(1), [], ["--allow-stale", "--rerun"]);
     if (badArg) {
