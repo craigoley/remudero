@@ -101,6 +101,7 @@ import {
   daemonBoot,
   daemonExitCode,
   runDaemon,
+  type CrashLoopVerdict,
   type DaemonOpts,
   type DaemonSummary,
   type HeadroomPolicy,
@@ -7638,6 +7639,93 @@ export function escalateLifetimeCapExceeded(
 }
 
 /**
+ * W1-T215's escalation side, wired at last — `escalateCircuitBreak`'s sibling for the daemon
+ * BOOT-RATE invariant: called by `daemonBoot`'s `crashLoopCheck.onBreach` (lib/daemon.ts) when
+ * `detectDaemonCrashLoop` finds MORE than `maxBoots` boots inside one rolling `windowMs`. The
+ * detector merged 2026-07-22 (#590) and sat unasked while the 2026-08-03 ENOSPC storm relaunched
+ * the daemon ten times with ZERO escalation — four dispatches died and the only operator signal
+ * was "progress seems slow". This function is what a breach DOES: it opens a needs-human issue
+ * carrying the verdict's own evidence (the densest window's boot timestamps), so the loop is
+ * legible the moment it exists instead of after a hand-read of raw ledger timestamps.
+ *
+ * CROSS-BOOT DEDUP keyed on the STORM, not a task (there is none) and not a per-process flag
+ * (every relaunch IS a new process — a process flag would open one issue per boot, ~one a
+ * minute). The episode rule, same discipline as `escalateHeadroomReserveBreach`'s `resets_at`
+ * key: skip iff a prior `daemon.crashloop.escalated` marker's `window_newest` falls within
+ * `windowMs` of THIS verdict's newest boot — an ongoing storm keeps every subsequent boot inside
+ * one escalation, while a genuinely NEW storm (a quiet gap longer than the window, then fresh
+ * boots) escalates again. The marker is written whether or not delivery succeeds, for
+ * `escalateCircuitBreak`'s own stated reason: an undelivered notice costs one operator read, not
+ * an unbounded retry loop. The step is in DECISION_RELEVANT_LEDGER_STEPS (ledger.ts) — this
+ * function READS it to dedup, so a rotation archiving it would re-open a duplicate issue per
+ * boot for as long as the storm lasts (the #977 class).
+ *
+ * DELIBERATELY NOT A BOOT BLOCKER: daemonBoot logs `daemon.crashloop_check` either way and boot
+ * continues — KeepAlive keeps relaunching until the operator acts, and `state/PAUSE` remains the
+ * stop. This surfaces; it does not gate.
+ */
+export function escalateCrashLoop(
+  verdict: CrashLoopVerdict,
+  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
+): void {
+  const newest = verdict.windowBoots[verdict.windowBoots.length - 1];
+  const newestMs = Date.parse(newest ?? "");
+  if (!verdict.breached || !Number.isFinite(newestMs)) return;
+  const already = readLedgerLines(ctx.ledgerPath).some((l) => {
+    if (l.step !== "daemon.crashloop.escalated") return false;
+    const priorMs = Date.parse(String(l.window_newest ?? ""));
+    return Number.isFinite(priorMs) && newestMs - priorMs <= verdict.windowMs;
+  });
+  if (already) return;
+  const issueUrl = tryEscalate(
+    {
+      class: "BLOCKED",
+      taskId: "DAEMON",
+      runId: ctx.runId,
+      summary: `daemon crash-loop: ${verdict.windowBoots.length} boots inside ${Math.round(verdict.windowMs / 60_000)} minutes`,
+      detail:
+        `W1-T215: detectDaemonCrashLoop found ${verdict.windowBoots.length} daemon boots inside one rolling ` +
+        `${Math.round(verdict.windowMs / 60_000)}-minute window (threshold: more than ${verdict.maxBoots}). ` +
+        `launchd's KeepAlive relaunches a nonzero-exiting daemon every ThrottleInterval, so a boot rate like ` +
+        `this means the daemon is DYING during or shortly after boot, being restarted, and dying again — the ` +
+        `2026-08-03 shape, where an ENOSPC write in the boot path crash-looped ten boots with no signal. The ` +
+        `densest window's boots, oldest first: ${verdict.windowBoots.join(", ")}. Boot itself is NOT blocked ` +
+        `by this notice; the loop is still running until acted on.`,
+      options: [
+        {
+          label: "read the last boot's failure and fix the cause",
+          detail:
+            "The crash is whatever kills the process between `daemon.boot` and its next tick — check the newest " +
+            "ledger lines after the last `daemon.boot`, then the launchd stderr log. Disk-full, a thrown ledger " +
+            "write, and a bad deploy are the observed causes.",
+        },
+        {
+          label: "pause the fleet while diagnosing",
+          detail: "Drop `state/PAUSE` (the daemon idles in-process, no relaunch storm) or `launchctl bootout` the unit.",
+        },
+      ],
+      recommendation: "read the last boot's failure and fix the cause",
+    },
+    {
+      issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo),
+      ledgerPath: ctx.ledgerPath,
+      runId: ctx.runId,
+    },
+  );
+  appendLedger(ctx.ledgerPath, {
+    run_id: ctx.runId,
+    task_id: "DAEMON",
+    step: "daemon.crashloop.escalated",
+    window_newest: newest,
+    window_boots: verdict.windowBoots.length,
+    window_ms: verdict.windowMs,
+    max_boots: verdict.maxBoots,
+    issue_url: issueUrl,
+    delivered: issueUrl !== null,
+  });
+}
+
+/**
  * P34 clause (c), W1-T249: the daemon's `onHeadroomBreach` hook, called when a
  * weekly (or session) window first crosses the operator reserve. Dispatch is
  * ALREADY paused by the time this fires (`runDaemon`'s own in-process idle,
@@ -8635,6 +8723,14 @@ export async function daemonCommand(
     // Ruling fb-1784894405468-a4153e: the resolved governor posture, legible each boot.
     headroom_enabled: opts.headroomEnabled,
   });
+  // W1-T215 crash-loop input, snapshotted EAGERLY — before daemonBoot writes this boot's own
+  // `daemon.boot` line — so the check's `priorBoots` contract (prior boots ONLY) holds even
+  // though the closure is invoked after that write. See the crashLoopCheck argument below.
+  const priorDaemonBootTs = readLedgerLines(ledgerPath)
+    .filter((l) => l.step === "daemon.boot")
+    .map((l) => String(l.ts ?? ""))
+    .filter(Boolean)
+    .slice(-200);
   // ANTHROPIC-clean-env boot assertion (W1-T12b): checked once, before the loop
   // starts, over the daemon process's OWN live env — belt-and-suspenders atop
   // the launchd unit's own closed EnvironmentVariables allowlist (lib/launchd.ts).
@@ -8685,7 +8781,19 @@ export async function daemonCommand(
             grantApps: [config.claudeBin, "/usr/bin/security"],
           })
       : undefined,
-    undefined, // crashLoopCheck — not wired at this call site
+    // W1-T215's boot-rate invariant, WIRED (it shipped 2026-07-22/#590 and sat unasked through
+    // the 2026-08-03 ten-boot ENOSPC storm — the exact incident it detects). `priorBoots` is an
+    // EAGER pre-boot snapshot, never a lazy read: daemonBoot logs THIS boot's own `daemon.boot`
+    // line BEFORE consulting the check, and its contract says priorBoots "must NOT include this
+    // boot's own timestamp" (daemonBoot appends it via `now`). Bounded tail per
+    // detectDaemonCrashLoop's own doc ("a bounded recent tail, never full history"): 200 boots
+    // covers >3h of a one-per-minute storm. `daemon.boot` is DECISION_RELEVANT (W1-T244), so
+    // the read survives rotation. Window/now take DEFAULT_CRASHLOOP_WINDOW/wall-clock defaults.
+    {
+      priorBoots: () => priorDaemonBootTs,
+      onBreach: (verdict: CrashLoopVerdict) =>
+        escalateCrashLoop(verdict, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
+    },
     undefined, // resolveClaudeBin — default
     // §9 overflow valve (W1-T258): make the daemon.boot billing_mode canary
     // report `api` iff this daemon deliberately drains on API credits, matching
