@@ -1,0 +1,38 @@
+id: fb-1785858048118-50fab8
+ts: 2026-08-04T15:40:48.118Z
+raw: "RUNTIME CONFIG BELONGS IN A CONFIG STORE WITH A DASHBOARD, NOT IN SOURCE —
+  operator ruling 2026-08-04. Today the daily cost ceiling fired at $152.28/$150
+  and stopped the fleet for ~40 minutes; raising it required editing a literal
+  in DEFAULT_SWEEP_POLICY, a PR, CI, and a deploy. That is config-as-code past
+  the point where it serves anything: a spend ceiling is runtime configuration,
+  not a build-time constant, and standard practice puts it in a store with a UI
+  and an audit log. The operator wants every such value adjustable from the
+  console without a PR. WHAT THE AUDIT TRAIL ACTUALLY REQUIRES is
+  who/when/from/to on every change — a ledgered console write satisfies that
+  better than git does, because it is queryable at runtime. Git is not the
+  mechanism; the record is. THE ARCHITECTURAL OBSTACLE, which must be solved
+  first or a dashboard write will silently do nothing: loadDefaultPolicy
+  MEMOIZES into cachedDefaultPolicy for the process lifetime, and
+  DEFAULT_SWEEP_POLICY is a module-level const built at module load — so a
+  running daemon holds its boot-time values until restart, and even migrating a
+  literal into plan/policy.yaml does not give live adjustment. THREE LAYERS: (1)
+  get the values out of source — W1-T325 covers dispatchLanes, W1-T330 covers
+  dailyCostCeilingUsd, pendingCeilingMinutes is uncovered; (2) make the daemon
+  re-read config per tick or on change rather than memoizing at load, which is
+  the load-bearing change and is not filed; (3) a console write surface with a
+  ledgered audit line — the console already has a write token, arm-then-confirm
+  discipline, and ledgered actions, so this is less new machinery than it
+  appears. RECON: enumerate EVERY runtime-tunable value currently in source
+  (start with DEFAULT_SWEEP_POLICY and the headroom curve), establish which are
+  genuinely build-time constants and which are operator knobs, and cost the
+  memoization fix. Then propose the store: whether plan/policy.yaml with live
+  re-read is sufficient or whether operator knobs want a separate mutable store
+  outside git, given that an uncommitted policy.yaml edit was silently discarded
+  by a deploy's pull --ff-only this week. Falsifying check: if fewer than a
+  handful of values are genuinely operator-tunable, the migration is
+  over-engineering and per-value literals with a documented deploy are honest."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null
