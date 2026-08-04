@@ -201,7 +201,7 @@ scratchReap:
   # reads that line, then flips this. Same default-off posture as `autoTriage.enabled`,
   # which is off because it spends; this is off because it destroys.
   enabled:
-    value: false
+    value: true
     origin: "net-new"
   # The age ceiling below which an idle clone is kept, in hours. Conservative end of the
   # range the two existing sweeps already set (both 24h). ~15x the 92.3-min longest observed
