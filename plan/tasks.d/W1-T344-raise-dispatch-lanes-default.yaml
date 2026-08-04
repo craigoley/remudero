@@ -1,0 +1,78 @@
+- id: W1-T344
+  title: "raise `sweep.dispatchLanes` from 1 to 2 after a stated observation window — the flip is its own decision because a second lane doubles refused runs and spend as readily as throughput"
+  repo: remudero
+  depends_on: [W1-T343]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: "RE-DERIVED AT d6a4f55. W1-T343 ships daemon lanes DARK at `sweep.dispatchLanes: 1`. This
+    task is the flip, kept separate on purpose: shipping a capability and turning it on are different
+    decisions with different evidence, and bundling them removes the operator's chance to watch the
+    first before committing to the second.
+    THE CASE FOR 2, measured on the production ledger 2026-08-04: 20 consecutive dispatch gaps of
+    45-90 MINUTES against ~25-minute runs — the daemon is idle roughly 60% of the time. That idle
+    capacity is real and is what W1-T326's own reopening condition asked for.
+    THE COST OF 2, FROM THE SAME LEDGER AND STATED PLAINLY BECAUSE IT MUST NOT BE DISCOVERED AFTER THE
+    FACT: 226 `run.start` produced 39 merged verdicts. Roughly five of every six dispatches do not
+    merge. A second lane therefore buys about twice the throughput AND about twice the refused runs,
+    twice the `no_pr`, and twice the spend on work that does not land. The cost governor fired for the
+    first time ever at $152.28 on the day this was measured. Doubling dispatch width against a 17%
+    merge rate is a spend decision at least as much as a throughput one.
+    WHY IT IS STILL PROBABLY RIGHT: a refused run costs the same at N=1 and N=2, so parallelism does
+    not make waste more likely per run — it makes more runs. If the merge rate is the binding
+    constraint, lanes convert idle time into more of the same mix rather than improving it. That is an
+    argument for watching the ratio, not for staying at 1 forever.
+    AND THE FLIP IS CHEAP TO REVERSE, which is what makes it safe to try: `sweep.dispatchLanes` is a
+    bounded policy row (W1-T325), so reverting is a one-line policy edit plus a daemon restart — no
+    source change, no PR, no CI, no deploy."
+  design: |
+    A DECISION TASK WITH A STATED WINDOW, NOT A ONE-LINE EDIT.
+    (i) NAME THE OBSERVATION WINDOW BEFORE FLIPPING. State how long W1-T343 must have run at lane
+    count 1 with the four preconditions live, and what must have been true across it: no keychain
+    provisioning failure, no plan-snapshot inconsistency, no deploy deferral reaching its ceiling, no
+    governor admitting past its limit. A flip on the day the capability lands proves nothing about any
+    of them.
+    (ii) NAME THE MEASUREMENTS TO CAPTURE AT 1 AND AGAIN AT 2, so the flip is evaluable rather than
+    permanent: dispatches per day, mean run duration, idle fraction, and the fraction of dispatches
+    producing no merged PR. The LAST of these is the one that decides whether lanes helped or merely
+    doubled the churn — throughput alone will improve by construction and must not be read as success.
+    (iii) STATE THE REVERSION TRIGGER IN ADVANCE. What observation sends it back to 1 — a merge-rate
+    drop, a cost-governor trip, a deploy deferral hitting its bound. A flip with no pre-agreed
+    reversion condition becomes permanent by default, which is the shape this repo has repeatedly paid
+    for.
+    (iv) THE CHANGE ITSELF IS `plan/policy.yaml`'s `sweep.dispatchLanes` 1 -> 2, within the bounds
+    W1-T325's row already declares. VERIFY the bounds accept 2 before filing the PR; a value outside
+    them is refused at load by `validatePolicy`.
+    (v) A RUNNING DAEMON WILL NOT PICK THIS UP UNTIL IT RESTARTS. `DEFAULT_SWEEP_POLICY` is a
+    module-level const built at import, so the flip takes effect at the next daemon start. Say so in
+    the PR body — an operator who edits the row and watches for a change that cannot arrive will
+    conclude the feature is broken.
+    (vi) FALSIFIER: the shipped `plan/policy.yaml` loads with `dispatchLanes: 2` through the REAL
+    `loadPolicy` against the real file — not a fixture — and the value survives `validatePolicy`'s
+    bounds. Assert against what production loads, the W1-T316 lesson.
+    NOT IN SCOPE: the lane wiring (W1-T343); making policy reads live without a restart (W1-T331);
+    any change to lane machinery.
+  acceptance:
+    - claim: "the shipped plan/policy.yaml carries dispatchLanes 2 and loads through the real loadPolicy within the row's declared bounds, proven against the shipped file rather than a fixture"
+      proof: "unit test: test/policy.test.ts"
+    - claim: "the policy-consumer surface still resolves a lane count from the row, so the raised value reaches the dispatch path rather than being read from a source literal"
+      proof: "unit test: test/policy-consumers.test.ts"
+  risk: high
+  origin: oper#build-daemon-parallelism-2026-08-04
+  plan_refs: ["W1-T325", "W1-T326", "W1-T343"]
+  files: [plan/policy.yaml, test/policy.test.ts, test/policy-consumers.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — a real policy load against the shipped file.
+    risk:high — the diff is one number and the consequence is doubling the fleet's dispatch rate
+    against a 17% merge rate and a cost ceiling that has already fired once. Rule 19's sizing is not
+    what sets this band; the blast radius is.
+    budget_usd 40 — the lowest in the chain because the edit is one line; the work is the window, the
+    measurements and the reversion trigger, all of which are writing rather than deriving.
+    depends_on W1-T343 IS HARD: raising the row before anything reads it changes nothing, and raising
+    it before the four preconditions land would enable a second lane against an unserialized keychain,
+    a mutable plan binding, an unbounded deploy wait and a per-tick governor — the exact four silent
+    failures the chain exists to close.
+    THIS IS THE TASK THAT SAYS THE COST OUT LOUD. 226 dispatches, 39 merges. Twice the lanes is twice
+    the refused runs. That sentence belongs in the flip's own record, not only in the ruling."

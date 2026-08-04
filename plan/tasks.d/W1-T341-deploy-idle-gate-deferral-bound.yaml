@@ -1,0 +1,85 @@
+- id: W1-T341
+  title: "`daemonIsIdle` waits for the WHOLE fleet to go quiet and has NO deferral bound, so more lanes make a common quiet window rarer and a merged fix can wait indefinitely — give the gate a ceiling after which it deploys anyway"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 65.00
+  rationale: "RE-DERIVED AT d6a4f55. W1-T326's DECISIONS.md entry names the deploy idle gate as
+    blocker (3); this task is that blocker restated as the work, and it is the one the operator's
+    own framing sharpens: a merged fix that cannot deploy is a WORSE failure than slow throughput, so
+    what this needs is a BOUND, not merely a better condition.
+    THE GATE, IN FULL. `daemonIsIdle` (src/lib/deployer.ts) is one line:
+    `p.workers === 0 && p.inflightLocks === 0 && p.worktreeLocks === 0` — a conjunction over GLOBAL
+    fleet counters, not lane-scoped ones. It is consulted twice on the deploy path (a re-check), and
+    on a false reading the deploy is simply skipped.
+    THERE IS NO CEILING TODAY. Nothing in the deploy path bounds how long that skip may repeat. At
+    N=1 that is tolerable because the daemon is idle roughly 60% of the time — the operator's own
+    measurement over 20 consecutive dispatch gaps of 45-90 minutes against ~25-minute runs — so a
+    quiet window arrives on its own. THE ARITHMETIC IS EXACTLY WHAT PARALLELISM SPENDS. Raising lane
+    width converts idle time into work, which is the point; the same change shrinks the common quiet
+    window the deploy gate depends on. The capacity that makes lanes worth building is the capacity
+    this gate is currently consuming.
+    THE FAILURE MODE IS THE WORST-DIAGNOSED KIND. Its only symptom is nothing happening: no error, no
+    failed deploy, no ledger line saying 'deferred again'. W1-T326's entry says exactly this —
+    'unbounded deploy latency whose only symptom is nothing happening — is strictly worse to diagnose
+    than merely slow throughput'. That judgement stands; only its conclusion (therefore do not build
+    lanes) is overridden."
+  design: |
+    A CEILING, THEN A CONDITION — in that order of importance.
+    (i) BOUND THE DEFERRAL. After a stated maximum, the deploy proceeds even though the fleet is not
+    quiet. Pick the bound, state it as a NAMED constant with its reasoning, and defend it in the PR
+    body against the two failure directions: too short interrupts real work mid-run, too long
+    reproduces today's unbounded wait. It is a CEILING on waiting, never a target.
+    (ii) MAKE THE DEFERRAL VISIBLE WHILE IT IS HAPPENING. The defining property of this failure is
+    silence, so a deferral must be observable BEFORE the bound fires — how long it has been waiting
+    and what it is waiting on (which counter is non-zero). A bound that only becomes visible when it
+    trips leaves the operator blind for exactly the interval that matters. Decide where this is
+    surfaced (a ledger step and/or the console) and cover it; if a ledger step is added, W1-T338's
+    neighbourhood rule applies — a render-relevant step belongs in `RENDER_RELEVANT_LEDGER_STEPS`,
+    NOT the never-rotated decision core, and `test/ledger-render-retention.test.ts` re-derives that
+    set from its consumers and must be updated in the SAME change.
+    (iii) DECIDE WHAT THE CONDITION SHOULD BE AT N>1 and say why. Three candidates, and the task does
+    not pre-judge: all lanes quiet (today's semantics, just rarer); a lane-count-aware threshold
+    (deploy when no lane has been busy for X); or the bound alone carrying it. State the choice and
+    what it costs.
+    (iv) DEPLOYING WHILE A LANE RUNS MUST BE SAFE OR EXPLICITLY REFUSED. If the bound fires while work
+    is in flight, say what happens to that work — the whole reason the gate waits is that a deploy
+    restarts the daemon. An honest 'the in-flight run is abandoned and re-dispatched' is acceptable
+    and must be stated; silently killing a paid run is not.
+    (v) FALSIFIER: a fleet that NEVER goes quiet must still deploy once the bound elapses, and a fleet
+    that goes quiet before the bound must deploy at that point rather than waiting it out. Both
+    directions, or the bound is unproven in one of them. State whether the test drives the real
+    deploy path or an injected `probeIdle`, and name any line left unproven.
+    NOT IN SCOPE: lane wiring (W1-T343); the deploy's own health-check/rollback path; `decideDeployTrigger`'s
+    staleness rule (W1-T1054), which decides WHETHER to deploy, not how long to wait for quiet.
+    VERIFY `daemonIsIdle`'s callers and the deploy path's skip behaviour FROM SOURCE before editing.
+  acceptance:
+    - claim: "a fleet that never reaches the idle condition still deploys once the stated deferral ceiling elapses, rather than skipping indefinitely"
+      proof: "unit test: test/deployer.test.ts"
+    - claim: "a fleet that goes quiet before the ceiling deploys at that point, so the bound is a ceiling on waiting and not a delay imposed on every deploy"
+      proof: "unit test: test/deployer.test.ts"
+    - claim: "an in-progress deferral is observable before the ceiling fires, naming how long it has waited and which counter is holding it"
+      proof: "unit test: test/deployer.test.ts"
+  risk: high
+  origin: oper#build-daemon-parallelism-2026-08-04
+  plan_refs: ["W1-T326", "W1-T1054"]
+  files: [src/lib/deployer.ts, src/lib/ledger.ts, test/deployer.test.ts, test/ledger-render-retention.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — elapsed-time bounds and counter states are pure decisions over injected inputs.
+    risk:high — Rule 19 counts deployer and ledger as distinct subsystems, and this decides when a
+    deploy may interrupt paid work. Bound too tight and it kills runs; too loose and the defect stands.
+    budget_usd 65 — a bound, a visibility surface and a two-direction falsifier, plus the retention
+    set if a ledger step lands.
+    files: DECLARES src/lib/ledger.ts AND test/ledger-render-retention.test.ts because design (ii) may
+    add a ledger step, and a rendered step implies the retention set AND the lock that re-derives it
+    from consumer source. If the implementation surfaces the deferral without a new step, declaring
+    them costs nothing; omitting a written path is what refused five dispatches this week.
+    NO depends_on: the unbounded wait is a defect at N=1 today — nothing about it requires lanes. It is
+    in this chain because lanes make it common, not because lanes cause it.
+    THIS NARROWS W1-T326's BLOCKER (3) BY INVERTING ITS CONCLUSION. The entry's diagnosis — a
+    conjunction over global counters, a rarer quiet window, a silent failure — is confirmed from
+    source. What changes is that 'therefore do not add lanes' becomes 'therefore bound the wait', and
+    the bound is worth having whether or not lanes ever ship."

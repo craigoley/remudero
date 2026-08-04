@@ -1,0 +1,90 @@
+- id: W1-T343
+  title: "wire `runDaemon` to drain's existing `runDrainLanes` behind the `sweep.dispatchLanes` policy row, DEFAULT 1 — the capability ships dark and the operator flips it, never a second lane implementation"
+  repo: remudero
+  depends_on: [W1-T339, W1-T340, W1-T341, W1-T342]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 90.00
+  rationale: "RE-DERIVED AT d6a4f55, under the operator's 2026-08-04 ruling to BUILD daemon parallelism.
+    THE MACHINERY ALREADY EXISTS AND IS ALREADY LIVE. `runDrain` (src/lib/drain.ts) dispatches to
+    `runDrainLanes` on `if ((opts.laneCount ?? 1) >= 2)`, and `partitionByFileOverlap` is fail-closed on
+    undeclared scope. `rmd drain` already runs two lanes through this path. THE DAEMON MUST ADOPT IT,
+    NOT GROW A SECOND IMPLEMENTATION — two dispatch loops with different concurrency semantics is the
+    defect this repo has spent the week unpicking in other forms.
+    WHAT `runDaemon` IS TODAY: one `for (;;)` loop that calls `nextRunnable` once per tick and awaits a
+    single `runOne` to completion. N=1, unchanged since W1-T170/T171/T172 shipped lanes for the DRAIN
+    only — none of those tasks' declared files ever touched daemon.ts.
+    THE OPERATOR'S CAPACITY EVIDENCE, measured on the production ledger 2026-08-04 — the data W1-T326
+    named as its own reopening condition and could not obtain: 20 consecutive dispatch gaps of 45-90
+    MINUTES against ~25-minute runs, so the daemon is idle roughly 60% of the time. That is the case
+    for lanes.
+    AND THE COST, STATED HERE RATHER THAN DISCOVERED: 226 `run.start` produced 39 merged verdicts. Most
+    dispatches do not land. A second lane therefore buys roughly twice the throughput AND roughly twice
+    the refused runs, twice the `no_pr`, and twice the spend on work that does not merge. That is why
+    this task ships the capability at DEFAULT 1 and leaves the flip to a separate, evidenced decision
+    (W1-T344).
+    A HONEST LIMIT ON 'THE OPERATOR CAN FLIP IT WITHOUT A DEPLOY'. `sweep.dispatchLanes` is a bounded
+    policy row since W1-T325 — but `DEFAULT_SWEEP_POLICY` is a module-level const built at IMPORT from
+    `loadDefaultPolicy()`, so a RUNNING daemon holds its boot-time value however plan/policy.yaml
+    changes. Flipping lanes therefore needs a policy edit plus a daemon RESTART, not a source change
+    plus a PR, CI and a deploy. Do not claim live adjustment this repo does not have; W1-T331 owns
+    making such a value live and is deliberately NOT a dependency here."
+  design: |
+    ADOPT THE EXISTING LANE PATH; CHANGE NOTHING ABOUT HOW A LANE RUNS.
+    (i) READ THE WIDTH FROM POLICY, DEFAULT 1. Resolve lane count from `sweep.dispatchLanes` and pass it
+    into the existing entry point. At 1, the daemon's behaviour must be BYTE-IDENTICAL to today —
+    that is the safety property that lets this merge before anyone has decided to run two.
+    (ii) REUSE `runDrainLanes` AND `partitionByFileOverlap`. Do not reimplement partitioning, lane
+    scheduling or overlap refusal. Establish and STATE the assumptions that differ between
+    `drainCommand` and `runDaemon` — the drain is a BOUNDED one-shot pass while the daemon is a
+    PERSISTENT loop, so anything the drain does once per invocation may need to happen per tick, and
+    anything the drain leaves to process exit has no equivalent here.
+    (iii) THE INFLIGHT LOCK IS THE ANTI-DOUBLE-DISPATCH PROOF, AND IT ALREADY HOLDS. `acquireInflightLock`
+    (src/lib/inflight-lock.ts) opens `<inflightDir>/<taskId>.lock` with `openSync(lockPath, \"wx\")` —
+    create-or-fail, per task id, documented as having 'no TOCTOU gap'. Two lanes cannot both take one
+    task. PROVE IT rather than assert it: a test in which two lanes are offered the SAME task must see
+    exactly one dispatch. Nothing may assume exactly one lock exists.
+    (iv) THE PRECONDITIONS ARE REAL AND ARE THIS TASK'S dependencies, not decoration: the keychain's
+    provisioning race (W1-T339), the plan snapshot per batch (W1-T340), the deploy deferral bound
+    (W1-T341) and per-dispatch governor admission (W1-T342). Each is independently landable and each is
+    unsafe to be missing once a second lane exists.
+    (v) FALSIFIER, BOTH DIRECTIONS. At laneCount 1 the dispatch sequence must be indistinguishable from
+    today's. At laneCount 2 two non-overlapping tasks must dispatch concurrently, and two tasks whose
+    `files:` overlap — or either of which declares none — must NOT. State whether each test drives
+    `runDaemon` itself or an injected seam, and NAME ANY LINE LEFT UNPROVEN: every existing daemon test
+    injects its seams, which is precisely why the N=1 assumptions in this loop went unexamined.
+    (vi) SHIP DARK. Do not change plan/policy.yaml's value in this task. W1-T344 owns the flip.
+    NOT IN SCOPE: raising the default (W1-T344); making policy reads live (W1-T331); lane-aware
+    console rendering; any change to how an individual run executes.
+    VERIFY `runDrain`'s laneCount branch, `runDrainLanes`' signature and `runDaemon`'s tick body FROM
+    SOURCE before editing — this note is a snapshot.
+  acceptance:
+    - claim: "at lane count 1 the daemon's dispatch behaviour is unchanged from today, so the capability is inert until the policy row is raised"
+      proof: "unit test: test/daemon-plan-freshness.test.ts"
+    - claim: "at lane count 2 two tasks with disjoint declared files dispatch concurrently through drain's existing lane machinery rather than a second implementation"
+      proof: "unit test: test/drain.test.ts"
+    - claim: "two lanes offered the same task produce exactly one dispatch, because the per-task inflight lock is create-or-fail"
+      proof: "unit test: test/drain-lock.test.ts"
+    - claim: "tasks whose declared files overlap, and a task declaring no files at all, never share a pass — the fail-closed partition is honoured rather than re-derived"
+      proof: "unit test: test/drain.test.ts"
+  risk: high
+  origin: oper#build-daemon-parallelism-2026-08-04
+  plan_refs: ["W1-T326", "W1-T172", "W1-T325", "P19"]
+  files: [src/lib/daemon.ts, src/run-task.ts, test/daemon-plan-freshness.test.ts, test/drain.test.ts, test/drain-lock.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — dispatch counts and concurrency are assertable in-process against the real lane
+    path.
+    risk:high — it changes the dispatch shape of the persistent loop that spends the fleet's money.
+    budget_usd 90 — the largest in the chain: it is the integration, and its falsifier needs a real
+    two-lane fixture rather than a unit assertion.
+    files: src/run-task.ts is declared because `daemonCommand` is where the policy value is resolved and
+    threaded in — if the implementation finds it needs no change there, declaring it costs nothing,
+    whereas omitting a written path is what refused five dispatches this week.
+    EVERY depends_on EDGE IS A SAFETY PRECONDITION, not sequencing preference. W1-T339: a second lane
+    can re-provision the shared keychain under the first. W1-T340: a second lane can be judged against
+    a plan blob it was not selected under. W1-T341: two lanes make the deploy's quiet window rare and
+    the wait is unbounded. W1-T342: one per-tick governor reading would admit both lanes. Each failure
+    is silent, and each becomes reachable only when this task lands — which is exactly why they precede
+    it rather than follow."
