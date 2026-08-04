@@ -1,0 +1,104 @@
+- id: W1-T338
+  title: "`rmd preflight --ci-parity`'s ci:test step reports FAIL on EVERY run of this repo — the shared spawn caps stdout at Node's 1MB default and the suite emits ~1.7MB — so the contract orders every worker to reach a PASS from a step that cannot produce one"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 50.00
+  rationale: "RE-DERIVED AT b57520a — every claim below is a grep or a two-line script a reader can
+    reproduce. DISCOVERED INDEPENDENTLY THREE TIMES (#1289's PR body, #1295's follow-ups, and a
+    from-source trace on 2026-08-04); filing it so there is not a fourth.
+    THE MECHANISM, END TO END. `defaultPreflightSpawn` (src/lib/commit-message.ts) calls `spawnSync`
+    with `{cwd, input, encoding}` and NO `maxBuffer`, so Node's 1MB default applies. `ci:test`
+    (src/lib/ci-parity.ts) shells `npm run test:ci`, whose package.json script sets NO reporter and
+    therefore gets node --test's default TAP writer — currently ~1.7MB for ~4957 tests. `shellOut`
+    judges success as `const ok = res.status === 0`, and an ENOBUFS spawn returns `status: null`.
+    `null !== 0`, so the step reports FAIL.
+    MEASURED, not reasoned: spawnSync of a child writing 2MB to stdout with the default maxBuffer
+    returns `status: null, error: ENOBUFS`; the identical call with `maxBuffer` raised returns
+    `status: 0`. And `npm run test:ci` exits 0 with the full suite passing when it is NOT routed
+    through that spawn.
+    THE FAILURE CANNOT EXPLAIN ITSELF. `shellOut`'s detail on failure is
+    `FAIL — <label>\\n<stdout + stderr>`, and on ENOBUFS those are truncated or empty — so the worker
+    sees a bare FAIL naming a step whose output is missing, with nothing pointing at the buffer.
+    WHY THE SIBLING STEP SURVIVES, which is the proof this is the harness and not the suite:
+    `coverage-ratchet:test-with-coverage` runs the SAME full suite through the SAME
+    `defaultPreflightSpawn`, but passes `--test-reporter=spec` with the lcov reporter directed to a
+    FILE, so its stdout stays small. Two steps, one suite, one spawn leaf, opposite outcomes — the
+    discriminator is stdout volume, nothing else.
+    THE COST IS PAID ON EVERY DISPATCH. `ciParityContractLines` (src/lib/compaction.ts) is spliced into
+    `outputContractLines` BETWEEN 'stage the changed file(s), commit, then run' and 'Only once that
+    passes: `git push origin HEAD`', and reads: 'BEFORE THE FIRST PUSH, run `rmd preflight --ci-parity`
+    (mirrors every CI job) and reach a PASS: fix whatever step it names — do not push to find out
+    whether a required check is red.' So every worker that obeys the contract meets an unpassable step,
+    and `outputContractLines`' only PR-less exits are DECISION_REQUEST and ALREADY_SATISFIED — neither
+    fits 'the work is done but preflight will not go green'. A worker that believes the step has
+    nowhere to go but stop without pushing; one that learns to ignore it has learned to ignore the
+    whole gate, which is worse."
+  design: |
+    FIX THE SHARED LEAF, NOT THE ONE STEP. `defaultPreflightSpawn` is the single seam every
+    ci-parity step spawns through, so raising the ceiling there fixes `ci:test` and inoculates every
+    future step whose output grows. Changing only `ci:test`'s reporter leaves the same landmine armed
+    for the next verbose command.
+    (i) GIVE `defaultPreflightSpawn` AN EXPLICIT, GENEROUS `maxBuffer`. State the number chosen and why
+    in a comment — an unexplained constant is the next reader's mystery. It must be well clear of
+    today's ~1.7MB with room for suite growth, and it is a CEILING against runaway output, not a
+    target.
+    (ii) A NON-EXIT SPAWN FAILURE MUST SAY WHAT HAPPENED. `shellOut` currently renders any
+    `status !== 0` as `FAIL — <label>` plus a stdout/stderr that ENOBUFS leaves empty. When `spawnSync`
+    returns a `status` of null and/or an `error`, the detail must name that — the spawn failed, and
+    which way — rather than presenting as an ordinary red test step. THIS IS THE SAME CONCERN, not a
+    second one: the defect is that the step reports a test failure that did not happen, and both parts
+    are required for it to stop doing so.
+    (iii) THE DEFAULT IMPLEMENTATION IS THE THING UNDER TEST, so it cannot be proven with an injected
+    fake. Every existing ci-parity test supplies its own `PreflightSpawn`, which is exactly why this
+    defect survived: the seam's default never ran under test. THE FALSIFIER MUST REALLY SHELL OUT —
+    spawn a child that writes MORE than the old 1MB ceiling to stdout through the REAL
+    `defaultPreflightSpawn`, and assert it returns the child's true exit status and its full output
+    rather than a null status. A test that injects a spawn proves nothing here and is the shape to
+    refuse. (CLAUDE.md records this exact lesson from #977/#978: when every test injects a fake, the
+    seam's default implementation is unreachable.)
+    (iv) A REGRESSION LOCK that fails if the explicit `maxBuffer` is dropped again.
+    (v) DO NOT CHANGE THE CONTRACT. `ciParityContractLines`' wording is correct — the problem is that
+    the step it names lies, not that workers are told to run it. Whether a worker needs a sanctioned
+    exit for a step it genuinely cannot pass is a REAL and SEPARATE question, named here as a
+    follow-on and deliberately not filed: it is a change to the worker contract's exit set, with its
+    own argument.
+    NOT IN SCOPE: the contract's exit set (above); `test:ci`'s own reporter choice (optional, and
+    strictly secondary once the leaf is fixed — mention it in the PR body if you also do it, but the
+    buffer is the fix); the full-suite parallel-load flakiness tracked by W1-T337; and
+    `scripts/test-with-retry.mjs`, which re-spawns the whole command and is a separate concern.
+    VERIFY `defaultPreflightSpawn`'s current signature, `shellOut`'s ok-predicate and detail shape, and
+    package.json's `test:ci` script FROM SOURCE before editing — this note is a snapshot and symbol
+    names drift.
+  acceptance:
+    - claim: "the real defaultPreflightSpawn returns a child's true exit status and complete output when that child writes more to stdout than the old 1MB default allowed, driven by actually shelling out rather than through an injected spawn"
+      proof: "unit test: test/preflight.test.ts"
+    - claim: "a spawn that fails for a non-exit reason is reported as a spawn failure naming what happened, not as a bare red step with empty output"
+      proof: "unit test: test/preflight-ci-parity.test.ts"
+  risk: high
+  origin: oper#file-preflight-enobufs-2026-08-04
+  plan_refs: ["§5", "§5C", "W1-T294"]
+  files: [src/lib/commit-message.ts, src/lib/ci-parity.ts, test/preflight.test.ts, test/preflight-ci-parity.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — both claims are assertions over a real child process's status and output, fully
+    machine-checkable with no operator present.
+    risk:high — Rule 19 counts commit-message.ts and ci-parity.ts as distinct subsystems, and this
+    changes what EVERY worker sees at its pre-push gate. Set too low the defect persists; a spawn
+    failure mis-reported in the other direction (a real red step rendered as an infrastructure hiccup)
+    would be worse than today, which is why criterion 2 pins the reporting rather than leaving it to
+    taste.
+    budget_usd 50 — small: one explicit option, one detail-shape change, one real-shell-out test and
+    one lock. If it overruns, the seam is not where this note says it is and the report should say so.
+    files: DECLARES BOTH TEST PATHS. test/preflight.test.ts already exercises defaultPreflightSpawn and
+    is the home for the shell-out falsifier; test/preflight-ci-parity.test.ts already drives the
+    ci-parity job table and is the home for the reporting claim. Both exist and both proofs execute
+    today (151 and 130 hits via `rmd check-proof`), so neither criterion is a forward reference.
+    NO `grep:` PROOF, deliberately. A pattern like `maxBuffer in src/lib/commit-message.ts` would be a
+    forward-referenced SYMBOL rather than a path — a guess about the implementer's choice — and if the
+    fix lands as a named constant or a shared option object the pattern misses and the criterion
+    becomes executed_fail, which OVERRIDES keyword coverage. The two unit-test criteria carry the claim.
+    NO depends_on: nothing blocks this, and nothing should — it is a precondition for trusting the
+    pre-push gate at all."
