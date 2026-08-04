@@ -1,0 +1,76 @@
+- id: W1-T324
+  title: "make the lint signal readable — retire the pre-dialect zombie tasks via the W1-T229
+    withdrawal convention, adjudicate the five open tasks whose grep proofs already match main
+    (merged-but-uncredited suspects), and default rmd lint-plan's whole-plan report to open tasks
+    with the ~92% merged-task archaeology behind a flag"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "MEASURED at bce8338, this filing session, by executing the plan through the repo's
+    own loader/linter/proof-parser (never inherited from the audit's snapshot):
+    THE HEADLINE IS ARCHAEOLOGY. rmd lint-plan reports 193 of 347 tasks failing — and ~92% of
+    those failures sit on tasks with merge evidence, which CI never re-lints (changed-tasks-only)
+    and the drain never dispatches. A standing number nobody can burn down trains everyone to
+    ignore the gauge; the audit's §2c measured this and the count is unchanged today.
+    THE ZOMBIES, re-derived: 18 open verify:auto tasks have ZERO executable proofs — every proof
+    is pre-dialect prose, so a dispatch ends CAPPED proof_exec 0/N, cannot arm, and burns a run
+    to prove nothing. Candidate ids (each to be VERIFIED per-entry before its record is written,
+    never inherited from this list): W1-T1B W1-T1C W1-T1D W1-T3 W1-T3B W1-T3D W1-T5 W1-T8 W1-T9a
+    W1-T9b W1-T9c W1-T11 W1-T12b W1-T12c W1-T14 W1-T37 W1-T53 W1-T61.
+    THE SUSPECTS, re-derived by executing every open task's grep proofs with the executor's own
+    argv: five open tasks carry grep: proofs that ALREADY MATCH main — W1-T191, W1-T273, W1-T291,
+    W1-T292, W1-T293. On an open task a pattern already on main either discriminates nothing
+    (executed_stale at review, W1-T273's own rule) or means the work is DONE and uncredited.
+    W1-T273 is the sharpest case: the executed_stale mechanism it specifies is verifiably live in
+    src/lib/review.ts while its shard reads status queued.
+    WHY THIS IS THE CAUSE AND NOT A SYMPTOM, for whoever works this: 94% of this plan's tasks
+    merged with exactly ONE PR; the expensive failure mode is doneness-ILLEGIBILITY — W1-T1's 12
+    re-dispatches and W1-T254's five no-op-merge cycles were crediting failures, not
+    implementation retries. W1-T316's lifetime cap (since wired, #1257) bounds that symptom;
+    THIS task retires the queue's standing instances of the cause."
+  design: |
+    ONE CONCERN — the plan's standing signal tells the truth — in three moves the same PR ships:
+    (i) ZOMBIE RETIREMENT, per entry, via the established convention (read W1-T229's record in
+    plan/tasks.yaml, written by PR #1239, precedents W1-T269/W1-T270): status: blocked as the
+    retirement record; rationale rewritten to WITHDRAWN with the per-entry reason PROVEN from
+    source (either 'already satisfied by <commit/PR>' with the evidence, or 'pre-dialect relic,
+    unfalsifiable as written' with its rmd check-proof output quoted); the original criteria
+    PRESERVED VERBATIM in note:; one executable proof on the record itself. An entry that turns
+    out to be live and worth keeping is REWORDED to executable proofs instead of retired — the
+    candidate list above is candidates, not verdicts.
+    (ii) SUSPECT ADJUDICATION, per entry, same convention: establish from git history and the
+    PR record whether the work already merged (then: withdrawn-as-already-satisfied with the
+    crediting evidence) or is genuinely open (then: rewrite the stale grep proof to one that
+    MISSES main today so it can discriminate; keep the task queued).
+    (iii) LINT SIGNAL DEFAULT: lintPlanCommand's whole-plan mode reports open-task failures by
+    default, with the full corpus behind an explicit flag (--all or equivalent); CI's --base
+    changed-tasks mode is UNTOUCHED — it already scopes correctly and is load-bearing. The
+    printed summary must name both numbers ('N open failing; M merged-task records behind
+    --all') so the debt stays visible without being the headline.
+    DISCIPLINE: plan edits here touch ONLY the entries named by (i)/(ii) after per-entry
+    verification; nothing in src/ changes except lintPlanCommand's reporting default; no
+    acceptance criterion of any MERGED task is added or changed (the post-merge-amendment gate
+    is the wall here, and rightly).
+  acceptance:
+    - claim: "every retired entry is status blocked with a WITHDRAWN rationale carrying per-entry evidence and its original criteria preserved verbatim in note, asserted against the SHIPPED plan"
+      proof: "unit test: test/lint-plan-open-only.test.ts"
+    - claim: "each of the five suspects is either credited with named evidence or left queued with a rewritten proof that misses main at the PR's merge-base"
+      proof: "unit test: test/lint-plan-open-only.test.ts"
+    - claim: "whole-plan lint-plan defaults to open-task failures and prints both counts, with the full corpus behind the flag; --base mode is byte-identical to before"
+      proof: "unit test: test/lint-plan-open-only.test.ts"
+  risk: high
+  origin: "oper#audit-filings-2026-08-04 (audit §2b/§2c/§2d + rec 3)"
+  plan_refs: ["W1-T229", "W1-T269", "W1-T270", "W1-T273", "W1-T246"]
+  files: [plan/tasks.yaml, src/run-task.ts, test/lint-plan-open-only.test.ts]
+  status: queued
+  attempts: 0
+  note: "risk:high — it edits the plan's standing records (23 entries) and a CI-adjacent command's
+    default in one reviewed change; the sizing exemption is earned, not claimed: the concern is
+    single (signal truthfulness) even though the file set spans plan data and the CLI. budget 100
+    — the per-entry archaeology is the real work; W1-T229's record (54 inserted lines for ONE
+    task) calibrates it. The unit-test proofs are whole-file path form into a DECLARED new test
+    file; the plan-content claims are testable the same way test/policy.test.ts already tests the
+    SHIPPED policy file — load the real plan, assert the records."

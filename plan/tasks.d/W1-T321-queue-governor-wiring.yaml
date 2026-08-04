@@ -1,0 +1,66 @@
+- id: W1-T321
+  title: "the WIP limit has no caller — checkQueueGovernor (W1-T121, the 23-open-PR incident) is
+    built, tested, and consulted by nothing; W1-T317 wired the cost governor and deliberately left
+    this one alone, so it needs its own wiring"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "MEASURED FROM SOURCE at bce8338, this filing session — AFTER W1-T316 (#1257) and
+    W1-T317 (#1259) merged: grepping src/ scripts/ bin/ .github/ for checkQueueGovernor or
+    logQueueGovernorDeferral returns only their definitions and doc cross-references in
+    src/lib/sweep.ts. The other two governors are now genuinely wired (checkCostGovernor and
+    isLifetimeDispatchCapExceeded both have live call sites in run-task.ts/drain.ts/daemon.ts),
+    which makes this the LAST shipped-but-unasked dispatch governor. test/queue-governor.test.ts
+    covers the predicate, so this is the tested-but-inert shape, third and final instance.
+    TWO COMPLICATIONS the worker must know, both re-verified at bce8338: (1) W1-T172's
+    laneDispatchBudget (src/lib/drain.ts) re-implemented the WIP throttle inline for the hand-run
+    drain lanes path, ledgering dispatch.wip_deferred — a DIFFERENT step name than this governor's
+    logQueueGovernorDeferral writes (dispatch_deferred_wip); the UNGUARDED path is the daemon's
+    serial dispatch. Reconciling the two step names (or retiring one implementation) is part of
+    this task's report, not a silent choice. (2) wipLimit IS already a plan/policy.yaml row
+    (unlike dailyCostCeilingUsd before W1-T317), so this is wiring only — no policy migration."
+  design: |
+    GIVE THE EXISTING PREDICATE A CALLER, mirroring the SHAPE THAT JUST LANDED: W1-T317's #1259
+    wired checkCostGovernor via an optional dep on DrainDeps consulted on the NEW-dispatch path,
+    supplied by BOTH real dep-object construction sites in src/run-task.ts (drain and daemon),
+    with the deferral ledgered so a held fleet is distinguishable from an idle one, and a
+    regression lock asserted against the dep objects the commands actually build. Read that
+    landed diff (commit c020040) before writing anything and mirror it — including its
+    drainage-is-never-gated scope rule: at or over wipLimit NEW dispatch defers; sweep, heal,
+    arm and merge at ANY depth are never gated.
+    LEDGER DISCIPLINE: if the wiring introduces or first-emits a step name any decision reads,
+    register it in DECISION_RELEVANT_LEDGER_STEPS (src/lib/ledger.ts) in the SAME change — the
+    W1-T316(iv) rule; a rotation dropping a decision-read line re-arms its behaviour forever.
+    VERIFY THE CALL SITES FROM SOURCE before wiring — distrust this note; symbol names drift.
+    EXPLICITLY NOT IN SCOPE: the wipLimit VALUE, laneDispatchBudget's own behaviour on the drain
+    lanes path (reconcile step NAMES, do not rewrite the lane budget), and any change to
+    checkQueueGovernor's predicate semantics.
+  acceptance:
+    - claim: "the daemon and drain dispatch paths consult checkQueueGovernor, and a regression test asserting against the real dep objects fails if either stops"
+      proof: "unit test: test/queue-governor.test.ts"
+    - claim: "at or over wipLimit NEW dispatch defers while drainage at any depth is never gated"
+      proof: "unit test: test/queue-governor.test.ts"
+    - claim: "a deferral is ledgered so a held fleet is distinguishable from an idle one, and the wip_deferred/dispatch_deferred_wip step-name split is reconciled on the record"
+      proof: "grep: logQueueGovernorDeferral( in src/run-task.ts"
+    - claim: "the governor is named at its dispatch-path call site, not only in sweep.ts where it is defined"
+      proof: "grep: checkQueueGovernor( in src/run-task.ts"
+  risk: high
+  origin: "oper#audit-filings-2026-08-04 (audit §4/§2d; sibling of W1-T316/W1-T317)"
+  plan_refs: ["W1-T121", "W1-T172", "W1-T316", "W1-T317"]
+  files: [src/lib/drain.ts, src/lib/daemon.ts, src/run-task.ts, test/queue-governor.test.ts]
+  status: queued
+  attempts: 0
+  note: "risk:high — gates DISPATCH, same blast radius W1-T316/T317 argued. budget 60 — the
+    predicate, its test file and the landed sibling template all exist; this is call sites, a
+    ledger line and a lock. files: mirrors EXACTLY the file set #1259's diff touched
+    (drain.ts, daemon.ts, run-task.ts, and the governor's existing test file, which the worker
+    EXTENDS with the wiring locks the way #1259 extended test/cost-governor.test.ts) — the
+    audit's §2d draft of this shard predated #1259 and named a narrower set; the landed template
+    supersedes it. Both grep proofs are call-site-shaped (the open paren is required — a bare
+    name passes on a comment), BRE-safe, and verified this session to MISS bce8338, so they
+    discriminate base from head (W1-T273). NO depends_on: W1-T317 already merged; file overlap
+    with in-flight work is dispatch-overlap.ts's concern, not a dependency (W1-T317's own note
+    rules exactly this)."

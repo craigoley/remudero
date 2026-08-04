@@ -1,0 +1,51 @@
+- id: W1-T323
+  title: "flip the SHIPS-UNWIRED floor from advisory to blocking — ONLY once W1-T322's measurement
+    window closes with a false-positive rate at or under its stated threshold; the criterion is the
+    measured number, not a judgement call"
+  repo: remudero
+  depends_on: [W1-T322]
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: "Filed together with W1-T322 so the flip is a stated intention with a stated
+    criterion, not a later improvisation. W1-T322 ships the reachability floor WARN-ONLY and
+    defines the measurement: WINDOW = 14 days or 100 merged PRs from its merge, whichever first;
+    THRESHOLD = false-positive rate at most 5% of flagged PRs, adjudicated from the
+    review.unwired_advisory ledger lines against source. This task consumes that measurement and
+    flips the severity default. It is verify:human DELIBERATELY: the dispatcher must never burn a
+    run on it before the window closes (isDispatchEligible refuses verify:human before any other
+    check, so it can never auto-dispatch early), and reading the window's adjudicated rate is an
+    operator act on ledger data the way W1-T277's demonstration dialect was designed to record.
+    If the measured rate EXCEEDS the threshold, the honest outcome is: do not flip; file the
+    false-positive fixes as their own task and re-measure — record that outcome here rather than
+    forcing the flip."
+  design: |
+    (i) Read the advisory lines for the window; adjudicate each flagged PR (reached-in-fact, or
+    marker rightly omitted = false positive); compute the rate; record the computation — counts,
+    ids, rate — in the PR body so the flip carries its own evidence.
+    (ii) At or under threshold: change the floor's severity default from advisory to a review
+    FAIL, the same hard-fail shape bodyContradictsDiff produces, honouring both markers exactly
+    as W1-T322 shipped them. Over threshold: no severity change; write the rate and the
+    false-positive taxonomy into the PR body and this task's record instead.
+    (iii) If the flip decision reads the ledger, register the step it reads in
+    DECISION_RELEVANT_LEDGER_STEPS in the SAME change (the W1-T316(iv)/#977 rotation rule).
+    NOT IN SCOPE: changing the scan, the markers, the window, or the threshold — those are
+    W1-T322's contract; renegotiating them is a new filing, not a flip.
+  acceptance:
+    - claim: "the operator confirms the window closed and the adjudicated false-positive rate, and the flip (or the recorded refusal to flip) matches the threshold criterion"
+      proof: "demonstration: operator reads the review.unwired_advisory window from the ledger, adjudicates flagged PRs against source, and records the rate and the flip decision in this task's PR"
+    - claim: "with the severity flipped, an unmarked unreached-export diff fails review outright while both honest markers still pass"
+      proof: "unit test: test/ships-unwired-floor.test.ts"
+  risk: high
+  origin: "oper#audit-filings-2026-08-04 (audit §1d; second half of the warn-first pair)"
+  plan_refs: ["W1-T322", "W1-T277"]
+  files: [src/lib/review.ts, test/ships-unwired-floor.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:human is the load-bearing choice: it is what makes 'the second task has a
+    criterion rather than a judgement call' TRUE in practice — the criterion is mechanical, but
+    the window's closing is a calendar fact no headless dispatch should race. The demonstration:
+    proof is legal only on verify:human and is exactly W1-T277's intended use (an operator action
+    on the record). budget 40 — the code half is a severity default plus test updates; the work
+    is the adjudication."

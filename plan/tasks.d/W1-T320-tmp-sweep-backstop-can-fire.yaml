@@ -1,0 +1,78 @@
+- id: W1-T320
+  title: "the tmp backstop cannot fire before ENOSPC — sweepStaleTempDirs' 24h age ceiling was sized
+    for one-function-call dirs and its boot-only cadence never re-sweeps a healthy daemon, so it
+    logged 'removed: 0, kept: 49979' on ten straight boots while the disk filled"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 75.00
+  rationale: "MEASURED FROM SOURCE at bce8338, this filing session, never inherited from the audit:
+    RMD_TMP_PREFIX is 'rmd-' and DEFAULT_TEMP_SWEEP_MAX_AGE_MS is 24h (src/lib/tmp.ts);
+    sweepStaleTempDirs' only production call sits inside daemonBoot's sweepTmp composite
+    (src/run-task.ts), so it runs at BOOT only; and 'daemon.tmp_sweep' appears nowhere in
+    src/lib/ledger.ts, so the line has no retention contract and no consumer.
+    WHY kept:49979 IS PROOF THE PREFIX MATCHED, not that ownership failed: in sweepStaleTempDirs a
+    non-rmd-* name is skipped BEFORE it can be counted, so every kept entry passed the ownership
+    rule. The keep decision is purely age. The 2026-08-03 incident
+    (plan/feedback/fb-1785807201821-e4c9dc.yaml): 53,310 rmd-* dirs minting at ~200/minute — at
+    that rate the whole population is younger than 24h when the disk fills, so the backstop
+    mathematically cannot fire before ENOSPC, and a healthy daemon never re-runs it anyway.
+    THE VECTOR IS ALREADY FIXED and is NOT this task: PR #1269 (merged 2026-08-04, bce8338) rides
+    the tmp-hygiene import on every direct node --test spawn, which removes the dominant minting
+    path. THIS task is the backstop that must catch whatever still leaks — SIGKILL'd runs skip
+    exit handlers by design (test/setup/tmp-hygiene.ts's own comment), scripts/clock-sweep.mjs
+    spawns without the import, and any future bare spawn re-opens the class. A backstop that only
+    works when nothing leaks is not a backstop.
+    OWNERSHIP ANSWER the filing brief demanded: the sweep DOES own rmd-* — these dirs were always
+    its job; it fails on ceiling and cadence, not scope. No new owner is needed; this one must be
+    made able to act."
+  design: |
+    ONE CONCERN: the backstop fires before ENOSPC on the observed leak class. Two knobs, one
+    concern, same module family.
+    (i) CEILING AS POLICY DATA, re-derived: move the sweep's age ceiling to a plan/policy.yaml row
+    (rule 2 — and do NOT repeat the dispatchLanes defect the audit documented: the row must be
+    READ by the sweep, with a test proving the shipped policy value reaches the predicate; a row
+    with no reader is the defect class this plan just spent a week unwinding). Default it well
+    below 24h for the fixture class — tmp-hygiene-owned dirs live for ONE test process; an hour is
+    generous. Keep a distinct, longer bound for withTempDir production dirs ONLY if the worker
+    finds a live path that needs one; do not invent a second bound speculatively.
+    (ii) CADENCE BEYOND BOOT: run the sweep from the daemon's existing per-poll sweep composite
+    (the same hook daemonBoot's sweepTmp composite already feeds at boot — consult how
+    runWorktreeReapRung rides the poll loop for the established idiom). A backstop that runs only
+    at boot fires exactly when the deploy supervisor restarts the daemon and never during the
+    long-running task that mints the leak.
+    (iii) THE LINE MUST BE JUDGEABLE: keep 'daemon.tmp_sweep' but carry enough to distinguish
+    'did nothing because nothing qualified' from 'did nothing while the population grew' — at
+    minimum the kept-count AND the oldest-kept age. Do NOT add the step to
+    DECISION_RELEVANT_LEDGER_STEPS unless a decision actually reads it (src/lib/ledger.ts's own
+    doctrine: a retained line with no consumer is carried forever for nobody).
+    (iv) REGRESSION LOCK, the W1-T316 lesson verbatim: assert against the sweep configuration the
+    daemon command actually builds — never a hand-built fixture that would pass while production
+    stayed on the old ceiling.
+    EXPLICITLY NOT IN SCOPE: the leak vectors themselves (PR #1269 closed the dominant one;
+    clock-sweep.mjs is its own decision), tmp-hygiene.ts, and any change to what withTempDir
+    creates. VERIFY THE CALL SITES FROM SOURCE before wiring — distrust this note; symbol names
+    drift.
+  acceptance:
+    - claim: "the sweep's age ceiling is a policy row the shipped plan/policy.yaml actually feeds into the predicate, proven against the real loaded policy, not a fixture"
+      proof: "unit test: test/temp-sweep-backstop.test.ts"
+    - claim: "a population minting faster than the old 24h ceiling is reaped before it can grow unbounded — seeded dirs older than the new ceiling are removed, younger ones kept"
+      proof: "unit test: test/temp-sweep-backstop.test.ts"
+    - claim: "the sweep runs on the daemon's poll cadence, not only at boot, asserted against the dep wiring the daemon command actually builds"
+      proof: "unit test: test/temp-sweep-backstop.test.ts"
+    - claim: "the daemon.tmp_sweep line carries the oldest-kept age so 'did nothing while the population grew' is distinguishable from health"
+      proof: "unit test: test/temp-sweep-backstop.test.ts"
+  risk: high
+  origin: "oper#audit-filings-2026-08-04 (audit §5b L2 + feedback#fb-1785807201821-e4c9dc)"
+  plan_refs: ["W1-T115", "W1-T131"]
+  files: [src/lib/tmp.ts, src/run-task.ts, plan/policy.yaml, test/temp-sweep-backstop.test.ts]
+  status: queued
+  attempts: 0
+  note: "risk:high — this is the host's disk-survival backstop and it touches the daemon's sweep
+    wiring; sized like W1-T316/T317, the sibling wire-the-safety-organ tasks. budget 75: predicate,
+    policy row with a real reader, cadence hook and a four-claim lock. The proofs are all
+    whole-file unit test paths (the form that parses today and executes once the file exists) and
+    the test file is DECLARED in files:, so neither the scope guard nor proof-scope can refuse the
+    branch after the work is done — the W1-T309 lesson."
