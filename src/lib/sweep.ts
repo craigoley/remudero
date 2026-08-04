@@ -274,6 +274,9 @@ export interface SweepPolicy {
    * unvalidated and per-repo merge serialization is server-side auto-merge
    * rather than a queue of our own. Raising N is a policy-data row edit, not
    * a code change — the point of holding it here rather than as a constant.
+   * W1-T325: this is now literally true — `plan/policy.yaml`'s `sweep.dispatchLanes`
+   * row is the source of the default below (read via {@link loadDefaultPolicy}), not
+   * a source literal. The relocation retunes nothing; the value stays 2.
    */
   dispatchLanes: number;
   /**
@@ -343,12 +346,14 @@ export interface SweepPolicy {
  * governor are the other two limits, and the headroom window was at 28% of a
  * 95% limit when this was raised, nowhere near binding.
  *
- * W1-T253 (P37 CONSUMERS): `staleDays`/`strikeCap`/`wipLimit` are the three fields this task's
+ * W1-T253 (P37 CONSUMERS): `staleDays`/`strikeCap`/`wipLimit` are three fields that task's
  * substrate (W1-T252) collected into `plan/policy.yaml` — read here via {@link
  * loadDefaultPolicy} (self-locates the policy file from its own install location, never cwd)
  * rather than a source literal, so a plan-reviewed policy edit retunes them with zero code
- * change. The other rows (`dispatchLanes`/`dailyCostCeilingUsd`/`pendingCeilingMinutes`) are
- * NOT collected constants for this task and stay exactly as they were.
+ * change. W1-T325 collects `dispatchLanes` the same way, closing the gap its own doc comment
+ * (above) and W1-T170/W1-T172's merged task notes already described as a policy row while the
+ * source still carried a literal. `dailyCostCeilingUsd`/`pendingCeilingMinutes` are NOT
+ * collected constants for this task and stay exactly as they were.
  */
 const POLICY_SWEEP = loadDefaultPolicy().values.sweep;
 export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
@@ -356,7 +361,7 @@ export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
   strikeCap: POLICY_SWEEP.strikeCap,
   clarify: DEFAULT_CLARIFY_POLICY,
   wipLimit: POLICY_SWEEP.wipLimit,
-  dispatchLanes: 2,
+  dispatchLanes: POLICY_SWEEP.dispatchLanes,
   dailyCostCeilingUsd: 500,
   pendingCeilingMinutes: 60,
   // 10 minutes: an order of magnitude above the observed push->first-check-registers latency

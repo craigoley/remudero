@@ -77,6 +77,21 @@ sweep:
     origin: "lifted:src/lib/sweep.ts:257 (DEFAULT_SWEEP_POLICY.wipLimit)"
     min: 1
     max: 50
+  # W1-T325: the concurrent dispatch-lane count `rmd drain` fills per pass (W1-T172, P19,
+  # DECISIONS.md 2026-07-21 — "start N=2"). This row RELOCATES the pre-existing source literal;
+  # it does not retune it (value unchanged at 2). Bounds are deliberately tighter than this
+  # table's usual ~5x-of-value convention (compare wipLimit's 1-50, strikeCap's 1-10): raising
+  # dispatch width is exactly the lever W1-T326 documents as unvalidated against real
+  # concurrency risk (the WS-2 concurrent-keychain question, per this field's own sweep.ts
+  # comment, plus the daemon-quiescence deploy-gate concern this task was filed alongside) — a
+  # max that let one in-bounds edit jump straight to a large N would re-create the hazard this
+  # row exists to make reviewable. max: 4 permits a modest, still-reviewed doubling; a bound
+  # past that should be its own deliberate ruling, not a side effect of a generous default range.
+  dispatchLanes:
+    value: 2
+    origin: "lifted:src/lib/sweep.ts:359 (DEFAULT_SWEEP_POLICY.dispatchLanes)"
+    min: 1
+    max: 4
   # W1-T320: the rmd-owned temp-dir backstop's age ceiling (src/lib/tmp.ts's
   # sweepStaleTempDirs). NET-NEW, not lifted from DEFAULT_TEMP_SWEEP_MAX_AGE_MS (24h) —
   # the 2026-08-03 incident (fb-1785807201821-e4c9dc) measured 53,310 rmd-* dirs minting
