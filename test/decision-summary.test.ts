@@ -25,10 +25,14 @@ import { after, before, test } from "node:test";
 import type { AddressInfo } from "node:net";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import {
+  buildDecisionSummaryPrompt,
+  buildDecisionSummarySpawnArgs,
   captureFeedback,
   listFeedback,
   proposeFeedbackWithSummary,
   readFeedbackEntry,
+  realDecisionSummarizer,
+  resolveDecisionSummaryMount,
   setFeedbackStatus,
   summarizeFeedbackProposal,
   validateDecisionSummary,
@@ -42,6 +46,8 @@ import type { Plan } from "../src/lib/plan.js";
 import type { GitHub } from "../src/lib/status.js";
 import type { TraceGithub } from "../src/lib/trace.js";
 import type { IssueCloser } from "../src/lib/panel-actions.js";
+import { validateMounts, type Mount } from "../src/lib/mounts.js";
+import type { spawnWorker, WorkerResult } from "../src/lib/worker.js";
 
 // ── Shared fixtures ───────────────────────────────────────────────────────────
 
@@ -164,6 +170,116 @@ test("W1-T313 criterion 1: a summary that fails validation is stored as null -- 
 
   assert.equal(proposed.status, "proposed", "the transition still happens — a bad summary never blocks it");
   assert.equal(proposed.summary, null);
+});
+
+// ── Real production wiring: routed via mounts.yaml, never a hard-coded model id ─────────────
+// Mirrors test/risk-judge.test.ts's own split exactly: buildDecisionSummaryPrompt and
+// buildDecisionSummarySpawnArgs are pure and fully unit-tested; realDecisionSummarizer is
+// exercised with an INJECTED fake spawn (never a real shell-out) covering its success,
+// no-JSON-found, and malformed-JSON branches.
+
+function goodMounts() {
+  return validateMounts({
+    tiers: { haiku: 1, sonnet: 2, opus: 3 },
+    efforts: { low: 1, medium: 2, high: 3 },
+    architect: { model: "opus", effort: "high", max_turns: 60, context_budget: 180000 },
+    judge: { model: "opus", effort: "high", max_turns: 60, context_budget: 150000 },
+    routes: {
+      implement: {
+        low: { src: { model: "sonnet", effort: "medium", max_turns: 30, context_budget: 120000 } },
+        high: { src: { model: "sonnet", effort: "high", max_turns: 50, context_budget: 180000 } },
+      },
+      recon: {
+        low: { src: { model: "haiku", effort: "medium", max_turns: 20, context_budget: 60000 } },
+      },
+    },
+  });
+}
+
+function fakeWorkerResult(text: string): WorkerResult {
+  return {
+    sessionId: "s-decision-summary",
+    costUsd: 0.001,
+    numTurns: 1,
+    text,
+    blocks: [text],
+    stderr: "",
+    subtype: "success",
+    isError: false,
+    apiError: false,
+    permissionDenials: [],
+    childEnvKeys: [],
+    model: "haiku",
+    effort: "medium",
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    modelUsage: {},
+    compactionEvents: [],
+    qualitySuspect: false,
+  };
+}
+
+test("buildDecisionSummaryPrompt embeds the given context and instructs a JSON-only, structured response", () => {
+  const prompt = buildDecisionSummaryPrompt({ context: "the console is really wordy and hard to understand" });
+  assert.match(prompt, /the console is really wordy and hard to understand/);
+  assert.match(prompt, /ONLY a JSON object/);
+  assert.match(prompt, /headline/);
+  assert.match(prompt, /IMPERATIVE instruction, never a question/);
+  assert.match(prompt, /2-3 entries/);
+});
+
+test("buildDecisionSummarySpawnArgs carries an EMPTY tool list and the resolved mount's model/effort/maxTurns — the judge cannot write/edit, by construction", () => {
+  const mount: Mount = { model: "haiku", effort: "medium", maxTurns: 20, contextBudget: 60000 };
+  const input = { context: "some raw text" };
+  const args = buildDecisionSummarySpawnArgs({ input, mount, cwd: "/tmp/x", settingsFile: "/tmp/settings.json" });
+
+  assert.deepEqual(args.tools, []);
+  assert.equal(args.model, "haiku");
+  assert.equal(args.effort, "medium");
+  assert.equal(args.maxTurns, 20);
+  assert.equal(args.cwd, "/tmp/x");
+  assert.equal(args.settingsFile, "/tmp/settings.json");
+  assert.equal(args.permissionMode, "bypassPermissions");
+  assert.equal(args.prompt, buildDecisionSummaryPrompt(input));
+});
+
+test("realDecisionSummarizer parses a JSON object out of the worker's response text and returns it", async () => {
+  const mount: Mount = { model: "haiku", effort: "medium", maxTurns: 20, contextBudget: 60000 };
+  const calls: unknown[] = [];
+  const responseObject = { headline: "Decide now", what_happened: "context", decision: "act", options: [] };
+  const spawn = (async (args: unknown) => {
+    calls.push(args);
+    return fakeWorkerResult(`Here is the JSON:\n${JSON.stringify(responseObject)}\nthanks`);
+  }) as typeof spawnWorker;
+
+  const summarize = realDecisionSummarizer({ mount, cwd: "/tmp/x", settingsFile: "/tmp/settings.json", spawn });
+  const out = await summarize({ context: "raw text" });
+
+  assert.equal(calls.length, 1, "calls the injected spawn exactly once");
+  assert.deepEqual(
+    calls[0],
+    buildDecisionSummarySpawnArgs({ input: { context: "raw text" }, mount, cwd: "/tmp/x", settingsFile: "/tmp/settings.json" }),
+  );
+  assert.deepEqual(out, responseObject);
+});
+
+test("realDecisionSummarizer returns null when the worker's response contains no JSON object at all", async () => {
+  const mount: Mount = { model: "haiku", effort: "medium", maxTurns: 20, contextBudget: 60000 };
+  const spawn = (async () => fakeWorkerResult("sorry, I could not summarize this")) as typeof spawnWorker;
+  const summarize = realDecisionSummarizer({ mount, cwd: "/tmp/x", settingsFile: "/tmp/settings.json", spawn });
+  assert.equal(await summarize({ context: "raw text" }), null);
+});
+
+test("realDecisionSummarizer returns null when the extracted braces are not valid JSON", async () => {
+  const mount: Mount = { model: "haiku", effort: "medium", maxTurns: 20, contextBudget: 60000 };
+  const spawn = (async () => fakeWorkerResult("{not: valid, json}")) as typeof spawnWorker;
+  const summarize = realDecisionSummarizer({ mount, cwd: "/tmp/x", settingsFile: "/tmp/settings.json", spawn });
+  assert.equal(await summarize({ context: "raw text" }), null);
+});
+
+test("resolveDecisionSummaryMount resolves the CHEAPEST configured tier — reused from risk-judge.ts, never a hard-coded model id", () => {
+  const mount = resolveDecisionSummaryMount(goodMounts());
+  assert.equal(mount.model, "haiku");
+  assert.deepEqual(mount, { model: "haiku", effort: "medium", maxTurns: 20, contextBudget: 60000 });
 });
 
 // ── Criterion 2: escalation issue body carries the summary above raw detail,  ───────────────
