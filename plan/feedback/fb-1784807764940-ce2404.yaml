@@ -15,5 +15,6 @@ raw: "W1-T144 PR #614 BLOCKED BY UNTESTED digestCommand CLI GLUE —
   uncovered CLI-glue lines, so a glue-only coverage gap loops until escalation."
 attachments: []
 origin: cli
-status: new
+status: rejected
 proposal_pr: null
+summary: null
