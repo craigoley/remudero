@@ -20,7 +20,8 @@ import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { runDrain, type DrainDeps, type DrainSummary, type MergedSet } from "../src/lib/drain.js";
 import { runDaemon, type DaemonDeps, type DaemonSummary } from "../src/lib/daemon.js";
 import type { Config } from "../src/lib/config.js";
-import { drainCommand, daemonCommand } from "../src/run-task.js";
+import { drainCommand, daemonCommand, dailyCostCeilingReloader } from "../src/run-task.js";
+import { loadDefaultPolicy, type Policy } from "../src/lib/policy.js";
 
 // ── W1-T148 COST GOVERNOR — a daily spend ceiling as policy data; new
 // DISPATCH waits (ledgered dispatch_deferred_budget) when the day's ledgered
@@ -531,6 +532,114 @@ test("W1-T317: daemonCommand's WIRED checkCostGovernor reads a REAL ledger, defe
     else process.env.HOME = oldHome;
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+// ── W1-T331 acceptance 1 (the reloader itself): dailyCostCeilingReloader resolves the ceiling
+// from the CURRENT injected policy on every call, never a value captured once at construction.
+
+test("W1-T331: dailyCostCeilingReloader resolves its ceiling from the CURRENT injected policy on every call — a policy swapped between two calls changes what the SAME reloader returns", () => {
+  const base = loadDefaultPolicy();
+  const tight: Policy = { ...base, values: { ...base.values, sweep: { ...base.values.sweep, dailyCostCeilingUsd: 7 } } };
+  const loose: Policy = { ...base, values: { ...base.values, sweep: { ...base.values.sweep, dailyCostCeilingUsd: 999 } } };
+  const deps: { policy?: Policy } = { policy: tight };
+  const reload = dailyCostCeilingReloader(deps);
+  assert.equal(reload(), 7, "the reloader resolves the ceiling from the policy it is given, not a source literal");
+  deps.policy = loose;
+  assert.equal(
+    reload(),
+    999,
+    "the SAME reloader, called again after the injected policy changed, returns the NEW value — never the first call's figure, which is exactly what a value captured once at construction (or at import) would do",
+  );
+});
+
+test("W1-T331: dailyCostCeilingReloader with no injected policy reads the REAL checked-in plan/policy.yaml (repoRoot-scoped), the same value DEFAULT_SWEEP_POLICY carries", () => {
+  const reload = dailyCostCeilingReloader();
+  assert.equal(reload(), DEFAULT_SWEEP_POLICY.dailyCostCeilingUsd);
+});
+
+// ── W1-T331 acceptance 1: the ceiling is resolved from the loaded policy PER CONSULTATION,
+// never a value fixed once at construction (module-import time) — the closest sibling gap
+// W1-T330 alone left open (see plan/tasks.d/W1-T331…: "a row is necessary and not sufficient").
+// Drives the REAL wired checkCostGovernor (daemonCommand's captured DaemonDeps), never a
+// hand-built fixture — the SAME "these tests drive the real command wiring" discipline the
+// W1-T317 REACHABILITY tests above already established. ───────────────────────────────────
+
+test("W1-T331: daemonCommand's WIRED checkCostGovernor resolves its ceiling from the CALLER's per-consultation argument — the SAME closure, the SAME ledgered spend, defers under one ceiling and clears under another", async () => {
+  const { home, root, planPath } = daemonFixtureHome();
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    const ledgerPath = join(root, "state", "ledger.ndjson");
+    seedTodaySpendUsd(ledgerPath, 120);
+    const deps = await captureDaemonDeps(planPath);
+    const strict = deps.checkCostGovernor!(100);
+    assert.ok(strict, "a $100 ceiling argument, against the SAME $120 ledgered day, must defer");
+    assert.equal(strict!.ceilingUsd, 100, "the reported ceiling is the ARGUMENT supplied, not DEFAULT_SWEEP_POLICY's frozen figure");
+    const loose = deps.checkCostGovernor!(500);
+    assert.equal(
+      loose,
+      undefined,
+      "the IDENTICAL closure, re-consulted with a $500 ceiling instead, clears the SAME $120 day — proving the decision is NOT fixed at construction",
+    );
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("W1-T331: daemonCommand's WIRED checkCostGovernor falls back to DEFAULT_SWEEP_POLICY (never unbounded) when called with no live ceiling at all", async () => {
+  const { home, root, planPath } = daemonFixtureHome();
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    const ledgerPath = join(root, "state", "ledger.ndjson");
+    seedTodaySpendUsd(ledgerPath, DEFAULT_SWEEP_POLICY.dailyCostCeilingUsd + 1);
+    const deps = await captureDaemonDeps(planPath);
+    const result = deps.checkCostGovernor!(); // no argument — the pre-reload / no-reloader shape
+    assert.ok(result, "an omitted ceiling argument must still fall back to a BOUNDED default, never proceed unbounded");
+    assert.equal(result!.ceilingUsd, DEFAULT_SWEEP_POLICY.dailyCostCeilingUsd);
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T331 acceptance 3: an unreadable policy read must never SILENTLY WIDEN the ceiling —
+// it holds the last known-good value rather than falling back to an unbounded/permissive one.
+// Drives the REAL runDaemon loop (never a hand-built single-call fixture) so the falsifier is
+// about the ACTUAL per-tick threading, not just DaemonDeps.reloadDailyCostCeilingUsd in isolation.
+
+test("W1-T331: reloadDailyCostCeilingUsd failing on tick 2+ holds tick 1's ceiling — the governor NEVER sees undefined (which would silently widen back to the frozen default)", async () => {
+  const plan = onePlan();
+  const received: Array<number | undefined> = [];
+  let reloadCalls = 0;
+  let ticks = 0;
+  await runDaemon(
+    plan,
+    {
+      refreshMerged: () => NONE_MERGED,
+      checkStop: () => (++ticks > 3 ? "tick cap" : undefined),
+      reloadDailyCostCeilingUsd: () => {
+        reloadCalls++;
+        if (reloadCalls === 1) return 42;
+        throw new Error("plan/policy.yaml is unreadable this tick");
+      },
+      checkCostGovernor: (ceilingUsd) => {
+        received.push(ceilingUsd);
+        return undefined; // never defer — this test is only about WHAT ceiling was threaded in
+      },
+      runOne: async (id) => ({ taskId: id, runId: "R", merged: true, costUsd: 0, verdict: "merged" }),
+      sleep: async () => {},
+    },
+  );
+  assert.ok(reloadCalls >= 3, `the reload must be retried every tick despite failing — got ${reloadCalls} calls`);
+  assert.deepEqual(
+    received,
+    [42, 42, 42],
+    `every tick's governor consultation must see the LAST KNOWN-GOOD ceiling, never undefined, despite ticks 2+ failing to reload — got ${JSON.stringify(received)}`,
+  );
 });
 
 // ── acceptance 2 — the dispatch path itself: runDrain/runDaemon actually CONSULT

@@ -602,7 +602,26 @@ export interface DaemonDeps {
    * separate code path this predicate is never wired into (see `checkCostGovernor`'s own doc:
    * "stranding in-flight work to save money is a worse failure than the spend itself").
    */
-  checkCostGovernor?: () => CostGovernorResult | undefined;
+  checkCostGovernor?: (dailyCostCeilingUsd?: number) => CostGovernorResult | undefined;
+  /**
+   * W1-T331 (closing the gap W1-T330's policy row alone left open): re-reads the SAME
+   * repoRoot-scoped `plan/policy.yaml` `sweep.dailyCostCeilingUsd` row `reloadPlan` (above) reads
+   * for the plan, returning the LIVE figure. Mirrors `reloadPlan`'s EXACT placement/contract in
+   * the loop below — called once, at the TOP of the tick, before any dispatch decision, so
+   * everything else in this tick sees ONE consistent ceiling and a file changing mid-tick cannot
+   * produce two different answers within the same tick (the same argument `reloadPlan`'s own doc
+   * gives, reused rather than re-derived). Optional — omitted, `checkCostGovernor` is consulted
+   * with `undefined` and resolves its own (frozen-at-import) default exactly as before this task.
+   *
+   * A throw here is caught by the loop, never here, and — UNLIKE `reloadPlan`, whose failure
+   * just keeps the plan the loop already has — the loop holds the LAST KNOWN-GOOD ceiling rather
+   * than discarding it to `undefined`: this value flows straight into `checkCostGovernor` above,
+   * and `undefined` there reads as "no override, fall back to the shipped default," which could
+   * SILENTLY WIDEN an operator-tightened live ceiling back to the frozen default the moment one
+   * read glitches (a transient `plan/policy.yaml` read failure must never look like permission to
+   * spend more, mirroring `reloadPlan`'s "degrade to what we already had, never fail open").
+   */
+  reloadDailyCostCeilingUsd?: () => number;
   /**
    * W1-T321 (wiring `checkQueueGovernor`, sweep.ts, the W1-T121 23-open-PR incident): THE WIP
    * CEILING, re-derived from the current open-PR count each call — same freshness contract as
@@ -1277,6 +1296,13 @@ export async function runDaemon(
   const log = deps.log ?? (() => {});
   const attempted: string[] = [];
   const merged: string[] = [];
+  // W1-T331: THE SNAPSHOT `deps.reloadDailyCostCeilingUsd` (top of the loop, below) writes into
+  // and `deps.checkCostGovernor` (the governor consultation, below) reads from — never reassigned
+  // anywhere else, so a read and the tick's decision always agree. Starts `undefined`: on tick 1
+  // this is populated by the reload BEFORE the governor is ever consulted in that SAME tick, so
+  // there is no genuinely-unset window in practice; `checkCostGovernor`'s own default parameter
+  // covers a caller that omits the reload dep entirely.
+  let dailyCostCeilingUsd: number | undefined;
   let costUsd = 0;
   let ticks = 0;
   /** Last emitted idle-reason signature — see the cadence note at the idle rung. */
@@ -1398,6 +1424,21 @@ export async function runDaemon(
         }
       } catch (e) {
         log("daemon.plan_reload_failed", { reason: e instanceof Error ? e.message : String(e) });
+      }
+    }
+    // DAILY COST CEILING FRESHNESS (W1-T331): mirrors `reloadPlan` immediately above — SAME
+    // placement (top of the tick, before any dispatch decision, so everything below sees ONE
+    // consistent ceiling), SAME "a throw is caught and ledgered, never fatal" contract. UNLIKE
+    // `reloadPlan` (whose failure just keeps serving the plan already held), a failed read here
+    // deliberately does NOT touch `dailyCostCeilingUsd` — see `DaemonDeps.reloadDailyCostCeilingUsd`'s
+    // doc for why leaving it at its last known-good value, rather than resetting it to
+    // `undefined`, is the correct degrade: `undefined` reaching `checkCostGovernor` reads as "no
+    // live override," silently widening the ceiling back to the frozen shipped default.
+    if (deps.reloadDailyCostCeilingUsd) {
+      try {
+        dailyCostCeilingUsd = deps.reloadDailyCostCeilingUsd();
+      } catch (e) {
+        log("daemon.cost_ceiling_reload_failed", { reason: e instanceof Error ? e.message : String(e) });
       }
     }
     // SELF-FRESHNESS (W1-T126): checked directly after STOP — a hard STOP still wins
@@ -1643,7 +1684,9 @@ export async function runDaemon(
     // daemon is PERSISTENT: a deferral is an in-process idle heartbeat, identical in shape to
     // headroom's own `enforcingIdle` branch just above, so the loop resumes automatically once
     // the observed day-cost drops back under the ceiling.
-    const costGoverned = deps.checkCostGovernor?.();
+    // W1-T331: threads THIS tick's own snapshot (reloaded above, top of tick) through — never a
+    // fresh read here and never the frozen default unless the reload itself never populated one.
+    const costGoverned = deps.checkCostGovernor?.(dailyCostCeilingUsd);
     if (costGoverned) {
       ticks++;
       log("daemon.cost_governor", {
