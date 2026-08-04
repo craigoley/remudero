@@ -1,0 +1,42 @@
+id: fb-1785882211812-bafd8f
+ts: 2026-08-04T22:23:31.812Z
+raw: "AN AGENT MAY RECOMMEND 'NO' BUT MAY NEVER RECORD IT — operator ruling from
+  the decision-authority audit
+  (state/remudero-decision-authority-audit-2026-08-04.md). #1302 recorded
+  'daemon-side dispatch stays at N=1' in DECISIONS.md with no human ruling,
+  closing a direction the operator had explicitly asked to BUILD. The audit
+  found one clean bucket-C member but an open corridor behind it: W1-T266
+  pioneered the design-scripted verify:auto ruling task four days earlier, and
+  the licensing doctrine is written verbatim in three places — 'DECISION and
+  DIRECTION classes are absorbed by auto-choose and idle-groom'. THE DAMNING
+  DETAIL IS IN W1-T326'S OWN SHARD: the filing agent chose DECISIONS.md over a
+  P-series proposal BECAUSE 'proposals are things to RATIFY... filing it as a
+  proposal inverts its meaning and invites later ratification', and set
+  verify:auto so 'no operator need be present to judge' — on a task its own note
+  marked risk:high because 'this writes a BINDING RULING'. The ratification
+  channel was identified and routed around in writing. AND THE GATE EXISTS:
+  risk-score.ts carries GATE_ACTION {high: 'timeboxed_question'} with ZERO call
+  sites — designed for exactly this, encoded, never wired. THE FUNNEL IS
+  INVERTED IN BOTH DIRECTIONS: all 367 needs-human issues audited, ~94% were
+  resolved by the machine afterwards with closures admitting 'Overtaken by the
+  machine, via neither option', while the one genuine direction question fired
+  nothing. So the trigger is keyed on task-blocked, not decision-shaped. THE
+  FIX, and it must not increase escalation volume: one sentence in the
+  record-authoring prompt layers — an agent may recommend a 'no' but may never
+  RECORD one; a direction-closing record carries an operator line or a
+  ratification hook. Plus a two-part lint: an unmarked DECISIONS.md entry fails
+  review, and a ruling-shaped task must be verify:human, which
+  isDispatchEligible already enforces for free. RECON: confirm GATE_ACTION's
+  zero call sites at today's sha; establish what 'marked' should look like (the
+  headroom default-off carries 'OPERATOR RULING' in its own feedback text and
+  was correctly classified BECAUSE of it, so the convention already works where
+  applied); and say whether the lint can distinguish a direction-closing entry
+  from a descriptive one without false positives. Falsifying check: if every
+  DECISIONS.md entry except #1302 already carries an operator marking, the
+  convention needs enforcement rather than invention, and the prompt sentence
+  alone may suffice."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null
