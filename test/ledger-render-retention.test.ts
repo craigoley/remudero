@@ -176,6 +176,142 @@ test("RENDER RETENTION — a daemon.headroom line older than RENDER_STEP_RETENTI
   }
 });
 
+// ── W1-T329 (OPERATOR COMPLAINT, 2026-08-04): the two DISPATCH-DEFERRING governors' own
+// heartbeats. Same exposure as daemon.headroom above — neither was in either retention set, so a
+// fleet deferring every dispatch for ~40 minutes at $152.28 against a $150 ceiling had ZERO
+// surviving `daemon.cost_governor`/`daemon.queue_governor` lines the moment a rotation happened.
+
+test("RENDER RETENTION — a fresh daemon.cost_governor line survives rotation and the ACCOUNT strip's cost-governor posture reads deferred, not unknown", () => {
+  const dir = tmpDir();
+  try {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    const nowMs = Date.now();
+    const freshMs = nowMs - 60_000;
+
+    const lines: string[] = [
+      rawLine("daemon.cost_governor", "DAEMON", freshMs, { tick: 5, observed_day_cost_usd: 152.28, daily_cost_ceiling_usd: 150, poll_interval_ms: 60000 }),
+    ];
+    for (let i = 0; i < 300; i++) lines.push(noiseLine(i, freshMs));
+    writeFileSync(ledgerPath, lines.join("\n") + "\n");
+
+    const ceiling = 2000;
+    assert.ok(ledgerExceedsRotationCeiling(ledgerPath, ceiling), "sanity: padded past the ceiling");
+
+    const result = rotateLedger(ledgerPath, { ceilingBytes: ceiling, now: () => new Date(nowMs) });
+    assert.equal(result.rotated, true);
+
+    const liveContent = readFileSync(ledgerPath, "utf8");
+    assert.ok(liveContent.includes("daemon.cost_governor"), "the fresh daemon.cost_governor line survives rotation");
+
+    // The REAL consumer, not a string check.
+    const input: AccountUsageInput = { unreadable: true };
+    const postRotationLines = readLedgerLines(ledgerPath);
+    const snapshot = deriveAccountUsage(input, postRotationLines, nowMs);
+    assert.equal(snapshot.costGovernor, "deferred", "the console must resolve a real cost-governor deferral from the post-rotation live ledger, not 'unknown'");
+    assert.equal(snapshot.costGovernorObservedUsd, 152.28);
+    assert.equal(snapshot.costGovernorCeilingUsd, 150);
+    assert.ok(snapshot.costGovernorAsOf, "costGovernorAsOf must be set from the surviving line's ts");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("RENDER RETENTION — a daemon.cost_governor line older than RENDER_STEP_RETENTION_WINDOW_MS is archived, not retained forever", () => {
+  const dir = tmpDir();
+  try {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    const nowMs = Date.now();
+    const staleMs = nowMs - (RENDER_STEP_RETENTION_WINDOW_MS + 60_000);
+    const freshMarkerMs = nowMs - 60_000;
+
+    const lines: string[] = [rawLine("daemon.cost_governor", "DAEMON", staleMs, { observed_day_cost_usd: 200, daily_cost_ceiling_usd: 150 })];
+    for (let i = 0; i < 300; i++) lines.push(noiseLine(i, freshMarkerMs));
+    writeFileSync(ledgerPath, lines.join("\n") + "\n");
+
+    const ceiling = 2000;
+    assert.ok(ledgerExceedsRotationCeiling(ledgerPath, ceiling), "sanity: padded past the ceiling");
+
+    const result = rotateLedger(ledgerPath, { ceilingBytes: ceiling, now: () => new Date(nowMs) });
+    assert.equal(result.rotated, true);
+
+    const liveContent = readFileSync(ledgerPath, "utf8");
+    assert.ok(
+      !liveContent.includes(new Date(staleMs).toISOString()),
+      "a daemon.cost_governor line long outside the render window is archived — bounded by recency, not kept forever",
+    );
+
+    const archiveContent = readFileSync(result.archivePath as string, "utf8");
+    assert.ok(archiveContent.includes(new Date(staleMs).toISOString()), "the archived roll still holds the stale line verbatim");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("RENDER RETENTION — a fresh daemon.queue_governor line survives rotation and the ACCOUNT strip's queue-governor posture reads deferred, not unknown", () => {
+  const dir = tmpDir();
+  try {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    const nowMs = Date.now();
+    const freshMs = nowMs - 60_000;
+
+    const lines: string[] = [
+      rawLine("daemon.queue_governor", "DAEMON", freshMs, { tick: 5, observed_open_count: 12, wip_limit: 10, poll_interval_ms: 60000 }),
+    ];
+    for (let i = 0; i < 300; i++) lines.push(noiseLine(i, freshMs));
+    writeFileSync(ledgerPath, lines.join("\n") + "\n");
+
+    const ceiling = 2000;
+    assert.ok(ledgerExceedsRotationCeiling(ledgerPath, ceiling), "sanity: padded past the ceiling");
+
+    const result = rotateLedger(ledgerPath, { ceilingBytes: ceiling, now: () => new Date(nowMs) });
+    assert.equal(result.rotated, true);
+
+    const liveContent = readFileSync(ledgerPath, "utf8");
+    assert.ok(liveContent.includes("daemon.queue_governor"), "the fresh daemon.queue_governor line survives rotation");
+
+    const input: AccountUsageInput = { unreadable: true };
+    const postRotationLines = readLedgerLines(ledgerPath);
+    const snapshot = deriveAccountUsage(input, postRotationLines, nowMs);
+    assert.equal(snapshot.queueGovernor, "deferred", "the console must resolve a real queue-governor deferral from the post-rotation live ledger, not 'unknown'");
+    assert.equal(snapshot.queueGovernorObservedOpenCount, 12);
+    assert.equal(snapshot.queueGovernorWipLimit, 10);
+    assert.ok(snapshot.queueGovernorAsOf, "queueGovernorAsOf must be set from the surviving line's ts");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("RENDER RETENTION — a daemon.queue_governor line older than RENDER_STEP_RETENTION_WINDOW_MS is archived, not retained forever", () => {
+  const dir = tmpDir();
+  try {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    const nowMs = Date.now();
+    const staleMs = nowMs - (RENDER_STEP_RETENTION_WINDOW_MS + 60_000);
+    const freshMarkerMs = nowMs - 60_000;
+
+    const lines: string[] = [rawLine("daemon.queue_governor", "DAEMON", staleMs, { observed_open_count: 12, wip_limit: 10 })];
+    for (let i = 0; i < 300; i++) lines.push(noiseLine(i, freshMarkerMs));
+    writeFileSync(ledgerPath, lines.join("\n") + "\n");
+
+    const ceiling = 2000;
+    assert.ok(ledgerExceedsRotationCeiling(ledgerPath, ceiling), "sanity: padded past the ceiling");
+
+    const result = rotateLedger(ledgerPath, { ceilingBytes: ceiling, now: () => new Date(nowMs) });
+    assert.equal(result.rotated, true);
+
+    const liveContent = readFileSync(ledgerPath, "utf8");
+    assert.ok(
+      !liveContent.includes(new Date(staleMs).toISOString()),
+      "a daemon.queue_governor line long outside the render window is archived — bounded by recency, not kept forever",
+    );
+
+    const archiveContent = readFileSync(result.archivePath as string, "utf8");
+    assert.ok(archiveContent.includes(new Date(staleMs).toISOString()), "the archived roll still holds the stale line verbatim");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("RENDER RETENTION — a fresh console.kick_refused line survives rotation with its reason intact, so the RECENT feed's refusal record survives", () => {
   const dir = tmpDir();
   try {
@@ -267,6 +403,12 @@ test("RENDER_RELEVANT_LEDGER_STEPS includes daemon.headroom, console.kick_refuse
   assert.ok(RENDER_RELEVANT_LEDGER_STEPS.has("daemon.headroom"));
   assert.ok(RENDER_RELEVANT_LEDGER_STEPS.has("console.kick_refused"));
   assert.ok(RENDER_RELEVANT_LEDGER_STEPS.has("console.kick_dispatched"));
+});
+
+// W1-T329's own literal ask, mirroring the sanity test immediately above.
+test("RENDER_RELEVANT_LEDGER_STEPS includes daemon.cost_governor and daemon.queue_governor", () => {
+  assert.ok(RENDER_RELEVANT_LEDGER_STEPS.has("daemon.cost_governor"));
+  assert.ok(RENDER_RELEVANT_LEDGER_STEPS.has("daemon.queue_governor"));
 });
 
 test("sanity: an absent ledger never exceeds anything and RENDER_RELEVANT_LEDGER_STEPS is unaffected by that path", () => {
