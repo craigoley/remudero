@@ -327,12 +327,21 @@ export interface SweepPolicy {
 /**
  * The default policy — 14-day stale window, 2 fix strikes (mirrors
  * fixStrikeCap), 10-PR WIP limit, 2 dispatch lanes (W1-T172, start N=2),
- * 60-minute pending ceiling, $150/day cost ceiling. The $150 default is a
- * SAFE, fail-closed guess (rule 2: an absent policy value falls back to a
- * bounded default, never unbounded spend) — well under the $206/60-run W1-T1
- * incident it exists to catch, while generous enough that ordinary
- * single-day operation (well under DEFAULT_BUDGET_USD's $100 per-run cap,
- * run once or twice) does not trip it by accident.
+ * 60-minute pending ceiling, $500/day cost ceiling. The default is a BOUNDED
+ * fail-safe (rule 2: an absent policy value falls back to a bounded default,
+ * never unbounded spend), RAISED from $150 to $500 on 2026-08-04 after the
+ * governor fired in production for the first time — $152.28 observed against
+ * the $150 ceiling, deferring every dispatch (`daemon.cost_governor` /
+ * `dispatch_deferred_budget`, run DAEMON-1785853416568) — on a day whose spend
+ * was roughly ten times the prior day's. The $150 figure predated any
+ * measurement of a heavy day.
+ *
+ * THE TRADE-OFF IS DELIBERATE AND MUST NOT BE MISREAD: at $500 this ceiling
+ * would NOT by itself have caught the $206/60-run W1-T1 incident, which the
+ * $150 figure was chosen against. It remains a bound on RUNAWAY spend, not a
+ * budget — the per-run `DEFAULT_BUDGET_USD` cap and the INDEPENDENT headroom
+ * governor are the other two limits, and the headroom window was at 28% of a
+ * 95% limit when this was raised, nowhere near binding.
  *
  * W1-T253 (P37 CONSUMERS): `staleDays`/`strikeCap`/`wipLimit` are the three fields this task's
  * substrate (W1-T252) collected into `plan/policy.yaml` — read here via {@link
@@ -348,7 +357,7 @@ export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
   clarify: DEFAULT_CLARIFY_POLICY,
   wipLimit: POLICY_SWEEP.wipLimit,
   dispatchLanes: 2,
-  dailyCostCeilingUsd: 150,
+  dailyCostCeilingUsd: 500,
   pendingCeilingMinutes: 60,
   // 10 minutes: an order of magnitude above the observed push->first-check-registers latency
   // (seconds), and far below the 7h45m #921 sat in its silent loop.

@@ -243,9 +243,52 @@ test("acceptance 3 — changing the ceiling is a policy-data row edit with zero 
 test("acceptance 3b — DEFAULT_SWEEP_POLICY carries dailyCostCeilingUsd as a table row (policy-as-data, not an inlined constant), and an absent policy value falls back to a SAFE bounded default (never unbounded)", () => {
   assert.equal(typeof DEFAULT_SWEEP_POLICY.dailyCostCeilingUsd, "number");
   assert.ok(DEFAULT_SWEEP_POLICY.dailyCostCeilingUsd > 0);
+  // RAISED 2026-08-04, $150 -> $500. This bound used to read `< 206`, calibrated against the
+  // $206/60-run W1-T1 incident. That calibration was superseded by a real measurement: the
+  // governor fired in production for the first time at $152.28 observed against the $150
+  // ceiling and deferred EVERY dispatch, on a day whose spend was ~10x the prior day's.
+  // What must still hold is the rule-2 property — BOUNDED, never unbounded — so the assertion
+  // keeps an upper bound rather than dropping one. It is deliberately not `=== 500`: pinning
+  // the exact figure here would make every future retune a two-file edit for no added safety,
+  // and the defers-at/does-not-defer-below lock below is what actually guards the value.
   assert.ok(
-    DEFAULT_SWEEP_POLICY.dailyCostCeilingUsd < 206,
-    "the fail-safe default must be well under the $206/60-run incident it exists to catch",
+    DEFAULT_SWEEP_POLICY.dailyCostCeilingUsd < 1000,
+    "the fail-safe default must stay a bounded ceiling, never an effectively unbounded one",
+  );
+});
+
+// ── the shipped default's own behaviour, at and around the ceiling ────────────
+//
+// THE GAP THIS CLOSES. Every other test in this file either builds its own policy
+// (`{ ...DEFAULT_SWEEP_POLICY, dailyCostCeilingUsd: <literal> }`) or fakes the governor's
+// result outright, so NONE of them observes the shipped default's value. Raising the ceiling
+// from $150 to $500 changed live daemon behaviour and the suite was entirely blind to it.
+// This test reads the default and exercises the real `checkCostGovernor` on both sides of it.
+
+test("the SHIPPED default ceiling defers at and above itself and does NOT defer below it — the real predicate, the real DEFAULT_SWEEP_POLICY, no locally-built policy", () => {
+  const ceiling = DEFAULT_SWEEP_POLICY.dailyCostCeilingUsd;
+
+  // BELOW: one cent under, and a comfortably-under day, both dispatch-eligible.
+  assert.equal(checkCostGovernor(ceiling - 0.01).deferred, false, "a cent under the ceiling still dispatches");
+  assert.equal(checkCostGovernor(ceiling / 2).deferred, false, "half the ceiling still dispatches");
+
+  // AT: the predicate is `>=`, so the boundary itself defers. This is the case the
+  // production incident hit — $152.28 observed against a $150 ceiling.
+  assert.equal(checkCostGovernor(ceiling).deferred, true, "AT the ceiling defers — the predicate is >=, not >");
+
+  // ABOVE: and the reported figures are the observed spend and the consulted ceiling,
+  // not a rounded or defaulted pair.
+  const over = checkCostGovernor(ceiling + 2.28);
+  assert.equal(over.deferred, true, "above the ceiling defers");
+  assert.equal(over.observedDayCostUsd, ceiling + 2.28);
+  assert.equal(over.ceilingUsd, ceiling);
+
+  // THE REGRESSION THIS LOCKS: $152.28 was a deferral before this change and must not be
+  // one after it. A revert of the constant makes exactly this line fail.
+  assert.equal(
+    checkCostGovernor(152.28).deferred,
+    false,
+    "the production observation that triggered this raise ($152.28) must no longer defer",
   );
 });
 
