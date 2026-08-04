@@ -1915,9 +1915,43 @@ export function renderShellHtml(
       (viewIssueLink || markHandledBtn ? \`<span class="btn-row">\${viewIssueLink}\${markHandledBtn}</span>\` : "")
     );
   }
-  function needsMeGrillHtml(e) {
+  // W1-T313: a decision card OPENS with the cached plain-language summary (headline / what
+  // happened / the decision + labelled options) with the raw payload moved BYTE-IDENTICAL
+  // behind a collapsed <details> -- the summarizer is NEVER invoked here (this function makes
+  // zero network calls; the summary was written ONCE at creation time and is just read off
+  // \`e.summary\`). \`e.summary\` absent or shaped wrong (fail-open: the same guard the server
+  // itself already applied before persisting) degrades to exactly \`rawHtml\`, unchanged from
+  // before this task -- the falsifier this bar exists for is a card whose FIRST text is the
+  // raw payload; when a valid summary exists, the raw payload is never that first text again.
+  function decisionSummaryHtml(e, rawHtml) {
+    const s = e && e.summary;
+    if (
+      !s ||
+      typeof s.headline !== "string" ||
+      typeof s.decision !== "string" ||
+      !Array.isArray(s.options) ||
+      s.options.length < 2
+    ) {
+      return rawHtml;
+    }
+    const optionsHtml = s.options
+      .map((o) => \`<li><strong>\${escapeHtml(o.label)}</strong> — \${escapeHtml(o.consequence)}</li>\`)
+      .join("");
     return (
-      \`\${statusBadge("needs-human")}<span class="task-id">feedback#\${escapeHtml(e.id)}</span><span class="detail">asks: \${escapeHtml(e.raw)}</span>\` +
+      \`<div class="decision-summary">\` +
+      \`<p class="decision-headline">\${escapeHtml(s.headline)}</p>\` +
+      (s.what_happened ? \`<p class="decision-what-happened">\${escapeHtml(s.what_happened)}</p>\` : "") +
+      \`<p class="decision-decision">\${escapeHtml(s.decision)}</p>\` +
+      \`<ul class="decision-options">\${optionsHtml}</ul>\` +
+      \`</div>\` +
+      \`<details class="decision-raw"><summary>Show raw</summary>\${rawHtml}</details>\`
+    );
+  }
+  function needsMeGrillHtml(e) {
+    const rawHtml = \`<span class="detail">asks: \${escapeHtml(e.raw)}</span>\`;
+    return (
+      \`\${statusBadge("needs-human")}<span class="task-id">feedback#\${escapeHtml(e.id)}</span>\` +
+      decisionSummaryHtml(e, rawHtml) +
       \`<form class="inline-action needs-me-answer" data-reply-to="\${escapeHtml(e.id)}">\` +
       \`<label for="answer-\${escapeHtml(e.id)}">Answer</label>\` +
       \`<input id="answer-\${escapeHtml(e.id)}" type="text" required />\` +
@@ -1925,8 +1959,10 @@ export function renderShellHtml(
     );
   }
   function needsMeProposedHtml(e) {
+    const rawHtml = \`<span class="detail">proposes: \${escapeHtml(e.raw)}</span>\`;
     return (
-      \`\${statusBadge("needs-human")}<span class="task-id">feedback#\${escapeHtml(e.id)}</span><span class="detail">proposes: \${escapeHtml(e.raw)}</span>\` +
+      \`\${statusBadge("needs-human")}<span class="task-id">feedback#\${escapeHtml(e.id)}</span>\` +
+      decisionSummaryHtml(e, rawHtml) +
       \`<span class="btn-row"><button type="button" class="needs-me-decide"\${writeGateAttrs()} data-id="\${escapeHtml(e.id)}" data-decision="accept">Accept</button>\` +
       \`<button type="button" class="needs-me-decide"\${writeGateAttrs()} data-id="\${escapeHtml(e.id)}" data-decision="reject">Reject</button></span>\`
     );

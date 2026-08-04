@@ -3,6 +3,9 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSyn
 import { basename, join, relative, resolve, sep } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { landFeedback, landFeedbackStatusContent, type LandFeedbackOpts } from "./feedback-landing.js";
+import type { Mount, Mounts } from "./mounts.js";
+import { resolveRiskJudgeMount } from "./risk-judge.js";
+import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
 
 /**
  * `plan/feedback/` — the durable, diffable feedback inbox (MASTER-PLAN §7B, W1-T40).
@@ -86,6 +89,210 @@ export interface FeedbackEntry {
   status: FeedbackStatus;
   /** Set once `rmd triage` (W1-T41) opens a proposal PR for this entry; null until then. */
   proposal_pr: string | null;
+  /**
+   * A machine-written plain-language decision card, generated ONCE when this entry is set to
+   * `status: proposed` (see {@link proposeFeedbackWithSummary}) and cached here thereafter — a
+   * console render NEVER invokes the summarizer (W1-T313). `null` until proposed, or when a
+   * summarizer failed/was unavailable/returned a record that failed
+   * {@link validateDecisionSummary}: the raw `raw` text above stays byte-identical and
+   * renderable either way — fail-open, never lossy (MASTER-PLAN §7B amendment; the entry shape
+   * gains this ONE field, every existing consumer of the other fields is untouched).
+   */
+  summary?: DecisionSummary | null;
+}
+
+// ── Decision summaries (W1-T313) ─────────────────────────────────────────────
+//
+// "every decision surface renders raw triage-architect analysis" (operator directive,
+// fb-1784770111145-cf7c24): a triage proposal and an escalation both carry engineering prose
+// written for a machine/plan reader, not the console the operator actually rules from. A
+// DecisionSummary is a small, STRUCTURED record — never a blob of prose — so a renderer can
+// lay it out and {@link validateDecisionSummary} can bound it before anything trusts it.
+// Written ONCE at creation time by the producer (a feedback proposal here, an escalation in
+// escalate.ts) and cached with the artifact; a render path NEVER calls the summarizer again.
+
+/** One labelled choice inside a {@link DecisionSummary} — `consequence` is ONE LINE (no
+ *  newline), so the console renders it as a single list item with no wrapping surprise. */
+export interface DecisionSummaryOption {
+  label: string;
+  consequence: string;
+}
+
+/**
+ * A machine-written, plain-language decision card. `headline`/`what_happened`/`decision` are
+ * free text (bounded by {@link validateDecisionSummary}); `options` is 2-3 labelled choices —
+ * for an escalation these are the escalation's OWN options passed through verbatim (see
+ * escalate.ts's `summarizeEscalation`), never a paraphrase the model might invent.
+ */
+export interface DecisionSummary {
+  /** <=15 words — the one-line hook a busy operator reads first. */
+  headline: string;
+  /** 1-2 sentences of plain-language context: what happened. */
+  what_happened: string;
+  /** Stated IMPERATIVELY — an instruction, never a question — what the operator should do. */
+  decision: string;
+  /** 2-3 labelled choices, each with a one-line consequence. */
+  options: DecisionSummaryOption[];
+}
+
+const DECISION_SUMMARY_MAX_HEADLINE_WORDS = 15;
+const DECISION_SUMMARY_MIN_OPTIONS = 2;
+const DECISION_SUMMARY_MAX_OPTIONS = 3;
+
+function isBoundedString(x: unknown, maxLen: number): x is string {
+  return typeof x === "string" && x.trim().length > 0 && x.length <= maxLen;
+}
+
+function isValidDecisionSummaryOptionShape(x: unknown): x is DecisionSummaryOption {
+  if (typeof x !== "object" || x === null) return false;
+  const o = x as Record<string, unknown>;
+  return isBoundedString(o.label, 80) && isBoundedString(o.consequence, 240) && !(o.consequence as string).includes("\n");
+}
+
+/**
+ * Validate an UNTRUSTED value (a raw summarizer response, or a value read back off disk)
+ * against the {@link DecisionSummary} bounds — headline <=15 words, a non-empty
+ * `what_happened`, a non-interrogative `decision`, and 2-3 options each with a one-line
+ * consequence. Returns `null` on ANY violation rather than throwing: this is the fail-open
+ * gate every producer/consumer in this task routes a summary through (W1-T313 acceptance:
+ * "validated against those bounds rather than stored as free prose"). Trims whitespace on the
+ * way out so a validated summary is always render-ready.
+ */
+export function validateDecisionSummary(x: unknown): DecisionSummary | null {
+  if (typeof x !== "object" || x === null) return null;
+  const o = x as Record<string, unknown>;
+  if (!isBoundedString(o.headline, 200)) return null;
+  const headline = (o.headline as string).trim();
+  if (headline.split(/\s+/).length > DECISION_SUMMARY_MAX_HEADLINE_WORDS) return null;
+  if (!isBoundedString(o.what_happened, 600)) return null;
+  if (!isBoundedString(o.decision, 300)) return null;
+  const decision = (o.decision as string).trim();
+  if (decision.endsWith("?")) return null; // an imperative is a directive, never a question
+  if (!Array.isArray(o.options)) return null;
+  if (o.options.length < DECISION_SUMMARY_MIN_OPTIONS || o.options.length > DECISION_SUMMARY_MAX_OPTIONS) return null;
+  if (!o.options.every(isValidDecisionSummaryOptionShape)) return null;
+  const options = (o.options as DecisionSummaryOption[]).map((opt) => ({
+    label: opt.label.trim(),
+    consequence: opt.consequence.trim(),
+  }));
+  return { headline, what_happened: (o.what_happened as string).trim(), decision, options };
+}
+
+/** What a decision-summary rung reads to write its plain-language card — free-text CONTEXT
+ *  only, never a live artifact reference, so {@link SummarizeDeps.summarize} is reusable
+ *  across every producer (a feedback proposal here, an escalation in escalate.ts) with no
+ *  producer-shaped branching inside the deps contract itself. */
+export interface SummarizeInput {
+  context: string;
+}
+
+/**
+ * Injected decision-summary dependency (mirrors retro.ts's `ProceduralPhraseDeps`/
+ * learnings.ts's `PromotionJudgeDeps.judge` shape): receives ONLY the already-assembled
+ * {@link SummarizeInput}, returns an UNTRUSTED value this module validates before ever
+ * trusting it. Real callers wire {@link realDecisionSummarizer}; tests inject a canned return
+ * (or a throw) so every criterion is assertable with no network and no model call (W1-T313).
+ */
+export interface SummarizeDeps {
+  summarize: (input: SummarizeInput) => unknown | Promise<unknown>;
+}
+
+/**
+ * Summarize ONE feedback proposal into a {@link DecisionSummary}, FAIL-OPEN: a throw, a
+ * rejected promise, or a response that fails {@link validateDecisionSummary} all resolve to
+ * `null` — never propagate — so a summarizer outage can never block a triage proposal from
+ * writing (W1-T313 acceptance: "never blocks capture, triage, escalation or a status
+ * transition").
+ */
+export async function summarizeFeedbackProposal(
+  entry: Pick<FeedbackEntry, "raw">,
+  deps: SummarizeDeps,
+): Promise<DecisionSummary | null> {
+  try {
+    const out = await deps.summarize({ context: entry.raw });
+    return validateDecisionSummary(out);
+  } catch {
+    return null;
+  }
+}
+
+// ── Real decision-summary rung — routed via mounts.yaml, never a hard-coded model id ────────
+//
+// Mirrors risk-judge.ts's testable split exactly: a pure prompt builder + a pure spawn-args
+// builder are unit-tested; the actual spawn ({@link realDecisionSummarizer}) is untested by
+// unit, like every other real spawn in worker.ts — {@link buildDecisionSummaryPrompt} and
+// {@link validateDecisionSummary} carry the testable contract.
+//
+// {@link resolveDecisionSummaryMount} reuses risk-judge.ts's `resolveRiskJudgeMount` rather
+// than adding a new mounts.yaml row: it already scans the WHOLE routing table for the
+// cheapest configured tier with no hardcoded model name — exactly "the cheapest correct host"
+// the design calls for, and a decision summary is the same shape of cheap, structured,
+// no-tool judgment call the risk judge already is (VERIFIED at source before reuse, per this
+// task's own design note).
+
+export function buildDecisionSummaryPrompt(input: SummarizeInput): string {
+  return [
+    "You are writing a PLAIN-LANGUAGE decision-card summary for an operator who must RULE on",
+    "the item below, not read engineering prose. Respond with ONLY a JSON object — no prose,",
+    "no markdown fence — shaped EXACTLY:",
+    '{"headline": string (<=15 words), "what_happened": string (1-2 sentences),',
+    ' "decision": string (an IMPERATIVE instruction, never a question),',
+    ' "options": [{"label": string, "consequence": string (one line)}, ...] (2-3 entries)}',
+    "",
+    "ITEM:",
+    input.context,
+  ].join("\n");
+}
+
+/** Build the real spawn args for a decision-summary rung — pure, so the "no write tool,
+ *  cheapest mount" contract is unit-testable with no spawn (mirrors risk-judge.ts's
+ *  `buildRiskJudgeSpawnArgs`). */
+export function buildDecisionSummarySpawnArgs(opts: {
+  input: SummarizeInput;
+  mount: Mount;
+  cwd: string;
+  settingsFile: string;
+}): SpawnWorkerArgs {
+  return {
+    cwd: opts.cwd,
+    permissionMode: "bypassPermissions",
+    settingsFile: opts.settingsFile,
+    prompt: buildDecisionSummaryPrompt(opts.input),
+    model: opts.mount.model,
+    effort: opts.mount.effort,
+    maxTurns: opts.mount.maxTurns,
+    tools: [], // everything it needs is in the prompt — no exploration, mirrors RISK_JUDGE_TOOLS
+  };
+}
+
+/** Wire a real {@link SummarizeDeps.summarize} to an actual worker spawn — the production
+ *  wiring for {@link summarizeFeedbackProposal} and escalate.ts's `summarizeEscalation`.
+ *  Untested by unit (it shells out via the SDK, same as every other real spawn in worker.ts). */
+export function realDecisionSummarizer(opts: {
+  mount: Mount;
+  cwd: string;
+  settingsFile: string;
+  spawn?: typeof spawnWorker;
+}): (input: SummarizeInput) => Promise<unknown> {
+  const spawn = opts.spawn ?? spawnWorker;
+  return async (input: SummarizeInput) => {
+    const result: WorkerResult = await spawn(
+      buildDecisionSummarySpawnArgs({ input, mount: opts.mount, cwd: opts.cwd, settingsFile: opts.settingsFile }),
+    );
+    const match = /\{[\s\S]*\}/.exec(result.text);
+    if (!match) return null;
+    try {
+      return JSON.parse(match[0]);
+    } catch {
+      return null;
+    }
+  };
+}
+
+/** The cheapest configured mount for a decision-summary rung — see the section doc above for
+ *  why this reuses risk-judge.ts's scanner rather than adding a new mounts.yaml row. */
+export function resolveDecisionSummaryMount(mounts: Mounts): Mount {
+  return resolveRiskJudgeMount(mounts);
 }
 
 export class FeedbackError extends Error {
@@ -265,6 +472,7 @@ export function captureFeedback(root: string, opts: CaptureFeedbackOptions): Fee
     origin,
     status: "new",
     proposal_pr: null,
+    summary: null,
   };
   writeFileSync(feedbackEntryPath(root, id), stringifyYaml(entry));
   try {
@@ -327,7 +535,7 @@ export function setFeedbackStatus(
   root: string,
   id: string,
   status: FeedbackStatus,
-  opts: { proposalPr?: string; land?: LandFeedbackOpts } = {},
+  opts: { proposalPr?: string; land?: LandFeedbackOpts; summary?: DecisionSummary | null } = {},
 ): FeedbackEntry {
   if (!(FEEDBACK_STATUSES as readonly string[]).includes(status)) {
     throw new FeedbackError(`invalid status "${status}" — must be one of ${FEEDBACK_STATUSES.join(", ")}`);
@@ -337,6 +545,11 @@ export function setFeedbackStatus(
     ...entry,
     status,
     proposal_pr: opts.proposalPr ?? entry.proposal_pr ?? null,
+    // W1-T313: `summary` is set ONLY when THIS caller passed one — `undefined` means "leave
+    // whatever this entry already had", so every pre-W1-T313 caller keeps writing
+    // byte-identical entries. A caller that DOES pass one ({@link proposeFeedbackWithSummary},
+    // below) overwrites unconditionally, including with `null` (a fail-open summarizer result).
+    summary: opts.summary !== undefined ? opts.summary : (entry.summary ?? null),
   };
   const content = stringifyYaml(updated);
   if (opts.land) {
@@ -351,4 +564,25 @@ export function setFeedbackStatus(
     writeFileSync(feedbackEntryPath(root, id), content);
   }
   return updated;
+}
+
+/**
+ * `rmd triage`'s CREATION-TIME write for a proposal (W1-T313): reads the entry, asks
+ * `deps.summarize` for a plain-language decision card ONCE (fail-open via
+ * {@link summarizeFeedbackProposal} — never throws), and writes BOTH the `proposed` status
+ * transition and the resulting summary (or `null`) in the SAME {@link setFeedbackStatus} call
+ * — so a proposal never exists half-written (transitioned but not yet summarized, or vice
+ * versa). A summarizer outage degrades to `summary: null`: the entry still proposes normally
+ * and the console still renders it (off `entry.raw`, unchanged) — it just has no decision
+ * card yet, exactly today's behavior.
+ */
+export async function proposeFeedbackWithSummary(
+  root: string,
+  id: string,
+  deps: SummarizeDeps,
+  opts: { proposalPr?: string; land?: LandFeedbackOpts } = {},
+): Promise<FeedbackEntry> {
+  const entry = readFeedbackEntry(root, id);
+  const summary = await summarizeFeedbackProposal(entry, deps);
+  return setFeedbackStatus(root, id, "proposed", { ...opts, summary });
 }

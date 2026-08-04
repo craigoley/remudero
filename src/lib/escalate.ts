@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { appendLedger } from "./ledger.js";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
+import { validateDecisionSummary, type DecisionSummary, type SummarizeDeps } from "./feedback.js";
 
 /**
  * Escalations as GitHub issues (W1-T8, MASTER-PLAN §4 "Escalation taxonomy").
@@ -67,6 +68,15 @@ export interface Escalation {
    * {@link Escalation.headSha}.
    */
   cause?: EscalationCause;
+  /**
+   * A machine-written plain-language decision card, generated ONCE at escalation-creation time
+   * (see this module's own {@link summarizeEscalation}) and cached here — {@link
+   * renderIssueBody} renders it ABOVE the raw `detail` when present. Named `decisionSummary`,
+   * NOT `summary` — {@link Escalation.summary} above is already taken (the short issue-title
+   * text) and means something different. `null`/absent degrades to exactly today's raw-only
+   * body (fail-open, never lossy — W1-T313).
+   */
+  decisionSummary?: DecisionSummary | null;
 }
 
 /** The three-way cause split {@link Escalation.cause} keys on (W1-T195's design). */
@@ -318,8 +328,22 @@ export function prReferentFromIssueText(text: string | undefined): number | unde
   return Number.isSafeInteger(n) && n > 0 ? n : undefined;
 }
 
-/** Render the issue body: context, the options, and the recommendation called out. */
+/**
+ * Render the issue body: context, the options, and the recommendation called out.
+ *
+ * W1-T313: when `e.decisionSummary` validates, a "## Decision Summary" block (headline /
+ * what-happened / the decision, imperative) renders ABOVE the raw `detail` — so the summary
+ * rides the SAME GitHub-mobile push channel the operator sees the issue on first. `e.detail`
+ * itself is untouched, byte-identical either way: the summary block is purely additive, never
+ * a replacement. Re-validates `e.decisionSummary` here (not just trusting whatever a caller
+ * attached) so this render path degrades to exactly today's raw-only body — fail-open, never
+ * lossy — even if something upstream attached a malformed value. Options are DELIBERATELY not
+ * repeated inside the summary block: the "## Options" section below already renders `e.options`
+ * verbatim, and {@link summarizeEscalation} guarantees any decisionSummary's own `options`
+ * equal that same list — duplicating them here would just be the same text twice.
+ */
 export function renderIssueBody(e: Escalation): string {
+  const decisionSummary = validateDecisionSummary(e.decisionSummary ?? null);
   const lines = [
     `**Class:** ${e.class}`,
     `**Task:** ${e.taskId}`,
@@ -332,6 +356,9 @@ export function renderIssueBody(e: Escalation): string {
     e.headSha ? `**Head:** ${e.headSha}` : undefined,
     e.cause ? `**Cause:** ${e.cause}` : undefined,
     "",
+    ...(decisionSummary
+      ? ["## Decision Summary", decisionSummary.headline, "", decisionSummary.what_happened, "", `**Decision:** ${decisionSummary.decision}`, ""]
+      : []),
     e.detail,
     "",
     "## Options",
@@ -344,6 +371,38 @@ export function renderIssueBody(e: Escalation): string {
     "_not resolve the underlying block by itself — act on it, then resume via `rmd drain`._",
   ].filter((l): l is string => l !== undefined);
   return lines.join("\n");
+}
+
+/**
+ * Summarize ONE escalation into a {@link DecisionSummary}, FAIL-OPEN exactly like
+ * feedback.ts's `summarizeFeedbackProposal` (a throw, a rejected promise, or an invalid
+ * response all resolve to `null`, never propagate — never blocks escalation creation).
+ * `options` is NEVER taken from the summarizer's own response: §4 already refuses an
+ * escalation with no options, so this escalation ARRIVES with its own real options, and this
+ * rung PASSES THEM THROUGH VERBATIM (mapped to the DecisionSummary option shape) rather than
+ * trusting a paraphrase the model might invent (W1-T313 acceptance: "the options it renders
+ * are the escalation's OWN options passed through verbatim, never paraphrased" — enforced HERE
+ * as a code guarantee, not merely a prompt instruction the model could ignore).
+ *
+ * A caller wanting a decision summary on the issue calls this BEFORE {@link escalate}/{@link
+ * tryEscalate} and attaches the result to `e.decisionSummary` — `escalate()` itself stays
+ * synchronous and unchanged, so no existing call site is forced to become async by this task.
+ */
+export async function summarizeEscalation(e: Escalation, deps: SummarizeDeps): Promise<DecisionSummary | null> {
+  try {
+    const out = await deps.summarize({ context: `${e.summary}\n\n${e.detail}` });
+    if (typeof out !== "object" || out === null) return null;
+    const o = out as Record<string, unknown>;
+    const composed = {
+      headline: o.headline,
+      what_happened: o.what_happened,
+      decision: o.decision,
+      options: e.options.map((opt) => ({ label: opt.label, consequence: opt.detail })),
+    };
+    return validateDecisionSummary(composed);
+  } catch {
+    return null;
+  }
 }
 
 export interface EscalateDeps {
