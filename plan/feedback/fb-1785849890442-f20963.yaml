@@ -1,0 +1,20 @@
+id: fb-1785849890442-f20963
+ts: 2026-08-04T13:24:50.442Z
+raw: "AN ENV-HYGIENE TEST SCRUBS ANTHROPIC_API_KEY BUT NOT ANTHROPIC_BASE_URL —
+  one suite fails on this host at 171/172, identically on a branch and on
+  pristine origin/main, because the runner exports ANTHROPIC_BASE_URL and the
+  test's scrub list omits it. Pre-existing, environment-dependent, and NOT a
+  regression — but every session that runs that suite here sees a red result and
+  must re-derive that it is environmental before it can trust the rest of its
+  run. That has now cost at least one session's attention. RECON: find the scrub
+  list, establish which ANTHROPIC_* variables it covers and why the set was
+  chosen, and say whether omitting BASE_URL is deliberate (the test may care
+  only about credential leakage) or an oversight. If deliberate, the fix is the
+  failure MESSAGE saying so, not the scrub. Falsifying check: if the suite
+  passes on a host without ANTHROPIC_BASE_URL exported and the test's own doc
+  names the omission, this is documentation rather than a defect."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null
