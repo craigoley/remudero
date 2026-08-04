@@ -13,5 +13,5 @@ raw: "MERGED-TASK KICK PREFLIGHT — rmd run-task <id> dispatches the named task
 attachments: []
 origin: cli
 status: proposed
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/1265
 summary: null
