@@ -5809,20 +5809,43 @@
   verify: auto
   principles: {tdd: encouraged}
   budget_usd: 100.00
-  rationale: "T2+ modify the runner itself. A broken self-modifying merge BRICKS the loop. No task
-    that changes remudero may merge without a green gate."
+  rationale: "WITHDRAWN 2026-08-04 (W1-T324 plan-hygiene sweep) — W1-T1B: a DOUBLE reason, either one alone
+    sufficient. FIRST, ALREADY SATISFIED: this record already carries `pr: 3` (merged 2026-07-xx), so
+    deriveStatus (lib/status.ts) resolves this task as MERGED regardless of the decorative `status:
+    queued` field above — it will never be selected by nextRunnable. SECOND, and independently: were it
+    somehow still open, it could never legitimately arm anyway. Executing the review gate's OWN parser,
+    `parseWhitelistedProof` (src/lib/review.ts), against each of the three acceptance criteria below
+    verbatim returns REFUSED (null) for all three — none carries a `grep: <pattern> in <path>` or
+    `unit test: <path-or-title>` dialect prefix; each is free prose ('a green check-run on this task's
+    own PR (gh pr checks)', 'a deliberately-red PR is left OPEN...', 'worker transcript shows npm ci...').
+    A dispatch would CAP at proof_exec 0/3 regardless of the merge. Retired to keep `rmd lint-plan`'s
+    default open-task report from carrying a record that is both already-done and separately
+    unfalsifiable as written."
+  design: |
+    NOT TO BE BUILT — the work already shipped in PR #3. Left in the plan as a RETIREMENT RECORD, not a
+    work item. status: blocked so nextRunnable/assertRunnable never dispatch it (drain.ts's
+    isDispatchEligible refuses status === "blocked" before any dependency or breaker check) — precedent
+    W1-T229 (PR #1239) and W1-T269/W1-T270 (PR #1030/#1027) established `blocked` as this repo's
+    retirement-record status.
+    depends_on is left UNCHANGED at [W1-T1] and no other task is touched. Nothing in src/ or test/ is
+    edited by this withdrawal.
   acceptance:
-    - claim: "PR workflow runs typecheck + full test suite on every PR to remudero"
-      proof: "a green check-run on this task's own PR (gh pr checks)"
-    - claim: "run-task REFUSES to merge a PR whose required checks are not green"
-      proof: "a deliberately-red PR is left OPEN with verdict=blocked_ci in the ledger, never merged"
-    - claim: "workers npm ci in the worktree before typecheck/test (a fresh worktree has no node_modules)"
-      proof: "worker transcript shows npm ci, then tests passing IN the worktree"
+    - claim: "this task is withdrawn — already satisfied by merged PR #3 and, separately, every original criterion's proof is unexecutable prose confirmed via parseWhitelistedProof; it will never be dispatched"
+      proof: "grep: W1-T1B: a DOUBLE reason, either one alone in plan/tasks.yaml"
   risk: high
   origin: architect
-  status: queued           # decorative — real merge-state is DERIVED FROM GITHUB (see header + lib/status.ts)
+  status: blocked
   pr: 3                     # merged PR #3 -> deriveStatus resolves this task as merged
   attempts: 0
+  note: "THE THREE WITHDRAWN CRITERIA, PRESERVED VERBATIM so a future re-filing needs no archaeology:
+    (1) claim 'PR workflow runs typecheck + full test suite on every PR to remudero' /
+    proof 'a green check-run on this task's own PR (gh pr checks)';
+    (2) claim 'run-task REFUSES to merge a PR whose required checks are not green' /
+    proof 'a deliberately-red PR is left OPEN with verdict=blocked_ci in the ledger, never merged';
+    (3) claim 'workers npm ci in the worktree before typecheck/test (a fresh worktree has no node_modules)' /
+    proof 'worker transcript shows npm ci, then tests passing IN the worktree'.
+    Withdrawn per W1-T324 (the plan-hygiene-zombies-and-lint-signal task): candidate id from that task's
+    18-entry list, verified independently before retirement, not inherited from the list."
 
 # SPLIT (was one W1-T1C carrying four deliverables — violated one-concern-per-PR). Now two tasks:
 #   W1-T1C = "the reviewer can JUDGE" — the review worker posts a verdict (NOT yet required).
@@ -5835,33 +5858,43 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
-  rationale: "Standing rule 4 says green checks are NOT evidence, yet today `merged` means only that CI
-    passed — no one verifies the task's acceptance criteria. Build the JUDGE first, as a decoupled
-    step that posts a commit status; enforcement is a separate concern (W1-T1D). Splitting lets the
-    falsifier — does the reviewer actually FAIL a test-passing-but-acceptance-ignoring diff? — be proven
-    as a UNIT FIXTURE before any live gate depends on it."
+  rationale: "WITHDRAWN 2026-08-04 (W1-T324 plan-hygiene sweep) as a PRE-DIALECT ZOMBIE. All three
+    acceptance criteria below carry free-prose proofs with no recognized executable dialect prefix.
+    Executing the review gate's OWN parser, parseWhitelistedProof (src/lib/review.ts), against each
+    verbatim returns REFUSED (null): (1) 'gh api .../statuses/<sha> shows context=remudero-review...' is
+    a bare description of a manual gh invocation, no `grep:`/`unit test:` prefix; (2) 'unit test over
+    recorded fixtures: ...' has leading text before 'unit test' rather than the anchored `unit test:`
+    prefix the dialect regex requires at string start; (3) 'worker settings/transcript show no write
+    tool used...' is unstructured prose. A dispatch of this task can only ever CAP at proof_exec 0/3.
+    Whether remudero-review (the module this task named) already exists is a SEPARATE question this
+    retirement does not answer — src/lib/review.ts plainly exists and is load-bearing today, built by
+    SOME sequence of later PRs, but this record's own criteria could never have certified any of it, so
+    crediting it here would be inventing evidence this record was never able to produce."
   design: |
-    After ci goes green, a REVIEW worker (FRESH context — never the implementer's session; read-only
-    tools + gh) reads: the PR diff, the task's acceptance criteria from tasks.yaml, and the implement
-    worker's REPORT. It verdicts each criterion against its stated PROOF, then posts a commit status:
-      gh api -X POST repos/{owner}/{repo}/statuses/{sha} -f context=remudero-review -f state=success|failure
-    A criterion whose proof is missing, unpasted, or non-responsive = FAILURE. Test theater
-    (assertions that assert nothing) = FAILURE. The reviewer may never edit code.
-    This PR does NOT touch branch protection — remudero-review is posted but NOT required yet (W1-T1D
-    does that). The verdict LOGIC is factored into a pure function so the falsifier is a unit fixture.
+    NOT TO BE BUILT AS WRITTEN. Left in the plan as a RETIREMENT RECORD, not a work item. status: blocked
+    so nextRunnable/assertRunnable never dispatch it (drain.ts's isDispatchEligible refuses
+    status === "blocked" before any dependency or breaker check) — precedent W1-T229 (PR #1239) and
+    W1-T269/W1-T270 (PR #1030/#1027) established `blocked` as this repo's retirement-record status.
+    depends_on is left UNCHANGED at [W1-T1B] and no other task is touched. Nothing in src/ or test/ is
+    edited by this withdrawal.
   acceptance:
-    - claim: "a REVIEW worker with FRESH context posts remudero-review to the PR head commit after ci is green"
-      proof: "gh api .../statuses/<sha> shows context=remudero-review with a state on a real PR"
-    - claim: "FALSIFIER (unit fixture): a diff that PASSES tests while ignoring a stated acceptance
-        criterion yields state=failure; test theater (assertions that assert nothing) yields failure"
-      proof: "unit test over recorded fixtures: (criterion, diff, report) with an unmet proof -> the
-        verdict function returns failure; a responsive+proven criterion -> success"
-    - claim: "the reviewer never edits code (read-only tools + gh only)"
-      proof: "worker settings/transcript show no write tool used; the PR head sha is unchanged by review"
+    - claim: "this task is withdrawn as a pre-dialect zombie — every original criterion's proof is unexecutable prose, confirmed via parseWhitelistedProof; it will never be dispatched"
+      proof: "grep: W1-T1C: a fresh-context REVIEW worker in plan/tasks.yaml"
   risk: medium
   origin: architect
-  status: queued
+  status: blocked
   attempts: 0
+  note: "THE THREE WITHDRAWN CRITERIA, PRESERVED VERBATIM so a future re-filing needs no archaeology:
+    (1) claim 'a REVIEW worker with FRESH context posts remudero-review to the PR head commit after ci is
+    green' / proof 'gh api .../statuses/<sha> shows context=remudero-review with a state on a real PR';
+    (2) claim 'FALSIFIER (unit fixture): a diff that PASSES tests while ignoring a stated acceptance
+    criterion yields state=failure; test theater (assertions that assert nothing) yields failure' /
+    proof 'unit test over recorded fixtures: (criterion, diff, report) with an unmet proof -> the verdict
+    function returns failure; a responsive+proven criterion -> success';
+    (3) claim 'the reviewer never edits code (read-only tools + gh only)' /
+    proof 'worker settings/transcript show no write tool used; the PR head sha is unchanged by review'.
+    Withdrawn per W1-T324 (the plan-hygiene-zombies-and-lint-signal task): candidate id from that task's
+    18-entry list, verified independently before retirement, not inherited from the list."
 
 - id: W1-T1D
   title: The gate enforces the reviewer — remudero-review becomes a REQUIRED status check
@@ -5871,28 +5904,39 @@
   verify: auto
   principles: {tdd: encouraged}
   budget_usd: 100.00
-  rationale: "W1-T1C makes a verdict VISIBLE; it does not make it BINDING. Today blocked_ci leaves
-    auto-merge ARMED, so a runner-rejected PR can still land GitHub-side with no acceptance verdict.
-    Root cause: the merge gate is a runner-side decision that can be raced. Fix: make BOTH checks a
-    GitHub-enforced contract (Standing rule 3B) so the runner's exit verdict becomes advisory telemetry
-    that cannot diverge from reality, and auto-merge is safe to leave armed permanently."
+  rationale: "WITHDRAWN 2026-08-04 (W1-T324 plan-hygiene sweep) as a PRE-DIALECT ZOMBIE. All three
+    acceptance criteria below carry free-prose proofs. Executing parseWhitelistedProof (src/lib/review.ts)
+    against each verbatim returns REFUSED (null): (1) a bare `gh api ...` invocation with no `grep:`/
+    `unit test:` prefix; (2) 'planted probe: an implement worker that passes tests but ignores...' has
+    leading text before any dialect label and describes a manual paste-the-output ritual, not an
+    executable check; (3) 'ledger shows automerge.armed then pr.merged...' is unstructured prose. A
+    dispatch of this task can only ever CAP at proof_exec 0/3. Whether `remudero-review` is in fact a
+    required status check today is a SEPARATE question this retirement does not answer — this record's
+    own criteria could never have certified it either way, so it is retired unfalsified, not credited."
   design: |
-    Add `remudero-review` to required_status_checks.contexts alongside `ci`. ORDERING (bootstrap, same
-    pattern as T1B): this PR merges under the CURRENT gate (ci only); protection is updated to require
-    remudero-review only AFTER it merges — state that in the REPORT. GitHub then merges a PR only when
-    BOTH checks are green.
+    NOT TO BE BUILT AS WRITTEN. Left in the plan as a RETIREMENT RECORD, not a work item. status: blocked
+    so nextRunnable/assertRunnable never dispatch it (drain.ts's isDispatchEligible refuses
+    status === "blocked" before any dependency or breaker check) — precedent W1-T229 (PR #1239) and
+    W1-T269/W1-T270 (PR #1030/#1027) established `blocked` as this repo's retirement-record status.
+    depends_on is left UNCHANGED at [W1-T1C] and no other task is touched. Nothing in src/ or test/ is
+    edited by this withdrawal.
   acceptance:
-    - claim: "protection requires exactly [ci, remudero-review]"
-      proof: "gh api repos/craigoley/remudero/branches/main/protection --jq .required_status_checks.contexts"
-    - claim: "a PR that is CI-GREEN but FAILS acceptance is NOT merged (verified LIVE)"
-      proof: "planted probe: an implement worker that passes tests but ignores a stated acceptance
-        criterion -> remudero-review=failure -> PR stays OPEN -> paste the status + PR state, then close"
-    - claim: "a PR green on BOTH checks auto-merges with no runner-side merge call (verified LIVE)"
-      proof: "ledger shows automerge.armed then pr.merged with no explicit merge command"
+    - claim: "this task is withdrawn as a pre-dialect zombie — every original criterion's proof is unexecutable prose, confirmed via parseWhitelistedProof; it will never be dispatched"
+      proof: "grep: W1-T1D: The gate enforces the reviewer in plan/tasks.yaml"
   risk: medium
   origin: architect
-  status: queued
+  status: blocked
   attempts: 0
+  note: "THE THREE WITHDRAWN CRITERIA, PRESERVED VERBATIM so a future re-filing needs no archaeology:
+    (1) claim 'protection requires exactly [ci, remudero-review]' /
+    proof 'gh api repos/craigoley/remudero/branches/main/protection --jq .required_status_checks.contexts';
+    (2) claim 'a PR that is CI-GREEN but FAILS acceptance is NOT merged (verified LIVE)' /
+    proof 'planted probe: an implement worker that passes tests but ignores a stated acceptance
+    criterion -> remudero-review=failure -> PR stays OPEN -> paste the status + PR state, then close';
+    (3) claim 'a PR green on BOTH checks auto-merges with no runner-side merge call (verified LIVE)' /
+    proof 'ledger shows automerge.armed then pr.merged with no explicit merge command'.
+    Withdrawn per W1-T324 (the plan-hygiene-zombies-and-lint-signal task): candidate id from that task's
+    18-entry list, verified independently before retirement, not inherited from the list."
 
 - id: W1-T2
   title: Validate-before-spawn guard + settings schema pin (P0)
@@ -5926,21 +5970,37 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
-  rationale: "OWN CONCERN: worker.ts DECISION_REQUEST parser hardening — decoration-is-not-data. Both
-    criteria are parseDecisionRequest goldens over the SAME function; they belong together and touch no
-    other subsystem. This is exactly what PR #22 delivered before the mis-specified bundle blocked it."
+  rationale: "WITHDRAWN 2026-08-04 (W1-T324 plan-hygiene sweep) as a PRE-DIALECT ZOMBIE. Both acceptance
+    criteria carry a 'golden test:' / 'golden test with...' proof — 'golden' is not a recognized dialect
+    label (only `grep:` and `unit test:` are). Executing parseWhitelistedProof (src/lib/review.ts) against
+    both verbatim returns REFUSED (null). A dispatch of this task can only ever CAP at proof_exec 0/2.
+    Whether parseDecisionRequest already survives these near-misses is a SEPARATE question this
+    retirement does not answer — this record's own criteria could never have certified it either way."
+  design: |
+    NOT TO BE BUILT AS WRITTEN. Left in the plan as a RETIREMENT RECORD, not a work item. status: blocked
+    so nextRunnable/assertRunnable never dispatch it (drain.ts's isDispatchEligible refuses
+    status === "blocked" before any dependency or breaker check) — precedent W1-T229 (PR #1239) and
+    W1-T269/W1-T270 (PR #1030/#1027) established `blocked` as this repo's retirement-record status.
+    depends_on is left UNCHANGED at [W1-T1, W1-T1B, W1-T1D] and no other task is touched. Nothing in
+    src/ or test/ is edited by this withdrawal.
   acceptance:
-    - claim: "parseDecisionRequest survives the WS-0 near-miss (inline (RECOMMENDED) marker capturing ')')"
-      proof: "golden test with the exact WS-0 malformed payload passes; option list has no ')'"
-    - claim: "parseDecisionRequest survives the T1D auto-choose near-miss — DECORATION IS NOT DATA: the
-        option `**Option A — `docs/review-gate.md` (new doc)** ✅ ****` must parse to a clean value with
-        the markdown bold, backticks, emoji, and trailing asterisks STRIPPED (same class as the WS-0 `)` bleed)"
-      proof: "golden test: parseDecisionRequest on that exact decorated payload returns a recommended
-        value of `Option A — docs/review-gate.md (new doc)` with no `**`, no ✅, and no trailing `****`"
+    - claim: "this task is withdrawn as a pre-dialect zombie — every original criterion's proof is unexecutable prose, confirmed via parseWhitelistedProof; it will never be dispatched"
+      proof: "grep: W1-T3: Contract parsers — parseDecisionRequest in plan/tasks.yaml"
   risk: medium
   origin: architect
-  status: queued
+  status: blocked
   attempts: 0
+  note: "THE TWO WITHDRAWN CRITERIA, PRESERVED VERBATIM so a future re-filing needs no archaeology:
+    (1) claim 'parseDecisionRequest survives the WS-0 near-miss (inline (RECOMMENDED) marker capturing
+    '')' / proof 'golden test with the exact WS-0 malformed payload passes; option list has no ')'';
+    (2) claim 'parseDecisionRequest survives the T1D auto-choose near-miss — DECORATION IS NOT DATA: the
+    option `**Option A — `docs/review-gate.md` (new doc)** [checkmark] ****` must parse to a clean value
+    with the markdown bold, backticks, emoji, and trailing asterisks STRIPPED (same class as the WS-0 `)`
+    bleed)' / proof 'golden test: parseDecisionRequest on that exact decorated payload returns a
+    recommended value of `Option A — docs/review-gate.md (new doc)` with no `**`, no [checkmark], and no
+    trailing `****`'.
+    Withdrawn per W1-T324 (the plan-hygiene-zombies-and-lint-signal task): candidate id from that task's
+    18-entry list, verified independently before retirement, not inherited from the list."
 
 - id: W1-T3B
   title: dontAsk permission-mode fallback is exercised (currently UNTESTED code in spike.ts)
@@ -5950,16 +6010,31 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
-  rationale: "OWN CONCERN: spike.ts PERMISSION MODES. The dontAsk fallback (used if the bypass hook race
-    reproduces) is untested code on a distinct subsystem — permission-mode plumbing, not parsers or the
-    reviewer. Exercising it stands alone."
+  rationale: "WITHDRAWN 2026-08-04 (W1-T324 plan-hygiene sweep) as a PRE-DIALECT ZOMBIE. The sole
+    acceptance criterion's proof, 'a forced-fallback run completes with the floor holding', carries no
+    `grep:`/`unit test:` dialect prefix. Executing parseWhitelistedProof (src/lib/review.ts) against it
+    verbatim returns REFUSED (null). A dispatch of this task can only ever CAP at proof_exec 0/1. Whether
+    the dontAsk fallback is exercised by some later test is a SEPARATE question this retirement does not
+    answer — this record's own criterion could never have certified it either way."
+  design: |
+    NOT TO BE BUILT AS WRITTEN. Left in the plan as a RETIREMENT RECORD, not a work item. status: blocked
+    so nextRunnable/assertRunnable never dispatch it (drain.ts's isDispatchEligible refuses
+    status === "blocked" before any dependency or breaker check) — precedent W1-T229 (PR #1239) and
+    W1-T269/W1-T270 (PR #1030/#1027) established `blocked` as this repo's retirement-record status.
+    depends_on is left UNCHANGED at [W1-T1D] and no other task is touched. Nothing in src/ or test/ is
+    edited by this withdrawal.
   acceptance:
-    - claim: "the dontAsk fallback path (currently UNTESTED code) is exercised"
-      proof: "a forced-fallback run completes with the floor holding"
+    - claim: "this task is withdrawn as a pre-dialect zombie — its criterion's proof is unexecutable prose, confirmed via parseWhitelistedProof; it will never be dispatched"
+      proof: "grep: W1-T3B: dontAsk permission-mode fallback in plan/tasks.yaml"
   risk: medium
   origin: architect
-  status: queued
+  status: blocked
   attempts: 0
+  note: "THE WITHDRAWN CRITERION, PRESERVED VERBATIM so a future re-filing needs no archaeology:
+    claim 'the dontAsk fallback path (currently UNTESTED code) is exercised' /
+    proof 'a forced-fallback run completes with the floor holding'.
+    Withdrawn per W1-T324 (the plan-hygiene-zombies-and-lint-signal task): candidate id from that task's
+    18-entry list, verified independently before retirement, not inherited from the list."
 
 - id: W1-T3C
   title: QUESTION contract — parse and append to plan/questions.ndjson, non-blocking
@@ -5988,16 +6063,33 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
-  rationale: "OWN CONCERN: the provenance linter (assertProvenance) — a separate module from parsers,
-    permission modes, and the reviewer. Making it BLOCK-oriented (a multi-line claim citing its [src:] on
-    the last line PASSES) is a self-contained change to that one linter."
+  rationale: "WITHDRAWN 2026-08-04 (W1-T324 plan-hygiene sweep) as a PRE-DIALECT ZOMBIE. The sole
+    acceptance criterion's proof, 'a claim wrapped across three lines with its [src:] on the last line
+    PASSES; the same claim with no [src:] anywhere BLOCKS', carries no `grep:`/`unit test:` dialect
+    prefix. Executing parseWhitelistedProof (src/lib/review.ts) against it verbatim returns REFUSED
+    (null). A dispatch of this task can only ever CAP at proof_exec 0/1. Whether the provenance linter is
+    already BLOCK-oriented is a SEPARATE question this retirement does not answer — this record's own
+    criterion could never have certified it either way."
+  design: |
+    NOT TO BE BUILT AS WRITTEN. Left in the plan as a RETIREMENT RECORD, not a work item. status: blocked
+    so nextRunnable/assertRunnable never dispatch it (drain.ts's isDispatchEligible refuses
+    status === "blocked" before any dependency or breaker check) — precedent W1-T229 (PR #1239) and
+    W1-T269/W1-T270 (PR #1030/#1027) established `blocked` as this repo's retirement-record status.
+    depends_on is left UNCHANGED at [W1-T1D] and no other task is touched. Nothing in src/ or test/ is
+    edited by this withdrawal.
   acceptance:
-    - claim: "provenance linter is BLOCK-oriented, not line-oriented (W1-T1 open question)"
-      proof: "a claim wrapped across three lines with its [src:] on the last line PASSES; the same claim with no [src:] anywhere BLOCKS"
+    - claim: "this task is withdrawn as a pre-dialect zombie — its criterion's proof is unexecutable prose, confirmed via parseWhitelistedProof; it will never be dispatched"
+      proof: "grep: W1-T3D: Provenance linter becomes BLOCK-oriented in plan/tasks.yaml"
   risk: medium
   origin: architect
-  status: queued
+  status: blocked
   attempts: 0
+  note: "THE WITHDRAWN CRITERION, PRESERVED VERBATIM so a future re-filing needs no archaeology:
+    claim 'provenance linter is BLOCK-oriented, not line-oriented (W1-T1 open question)' /
+    proof 'a claim wrapped across three lines with its [src:] on the last line PASSES; the same claim
+    with no [src:] anywhere BLOCKS'.
+    Withdrawn per W1-T324 (the plan-hygiene-zombies-and-lint-signal task): candidate id from that task's
+    18-entry list, verified independently before retirement, not inherited from the list."
 
 - id: W1-T3E
   title: Reviewer rubric — the four judgment items (+ the satisfied_by guard); reviewer goldens
@@ -6097,18 +6189,36 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
+  rationale: "WITHDRAWN 2026-08-04 (W1-T324 plan-hygiene sweep) as a PRE-DIALECT ZOMBIE. Both acceptance
+    criteria carry proofs with no recognized dialect prefix: (1) 'resolver test: diagnose steps UP;
+    routine retry does NOT' — 'resolver test:' is not the anchored `unit test:` label; (2) 'a violating
+    mounts.yaml is REJECTED with a named error' is unstructured prose. Executing parseWhitelistedProof
+    (src/lib/review.ts) against both verbatim returns REFUSED (null). A dispatch of this task can only
+    ever CAP at proof_exec 0/2. Whether mounts.yaml + the Tier Invariant already exist is a SEPARATE
+    question this retirement does not answer — this record's own criteria could never have certified
+    either way (the repo plainly has a mounts table and tier machinery today, built by some later PR)."
+  design: |
+    NOT TO BE BUILT AS WRITTEN. Left in the plan as a RETIREMENT RECORD, not a work item. status: blocked
+    so nextRunnable/assertRunnable never dispatch it (drain.ts's isDispatchEligible refuses
+    status === "blocked" before any dependency or breaker check) — precedent W1-T229 (PR #1239) and
+    W1-T269/W1-T270 (PR #1030/#1027) established `blocked` as this repo's retirement-record status.
+    depends_on is left UNCHANGED at [W1-T1, W1-T1B, W1-T1D] and no other task is touched. Nothing in
+    src/ or test/ is edited by this withdrawal.
   acceptance:
-    # CORRECTED (Architect, plan PR): PR #23 relocated budget OFF the mount to per-task `budget_usd` (all
-    # 100). `maxBudgetUsd` is no longer a mount knob, and the code uses `max_turns` (YAML), not `maxTurns`.
-    # The criterion is realigned to the SHIPPED architecture — nothing dropped or weakened (Rule 15/16).
-    - claim: "mounts table keyed by (task_type x risk x thinking) resolves to real knobs (model, effort, max_turns, context_budget); budget is per-task budget_usd per PR #23, not a mount knob"
-      proof: "resolver test: diagnose steps UP; routine retry does NOT"
-    - claim: "Tier Invariant enforced at load (G-17): architect.tier > max(worker.tier)"
-      proof: "a violating mounts.yaml is REJECTED with a named error"
+    - claim: "this task is withdrawn as a pre-dialect zombie — every original criterion's proof is unexecutable prose, confirmed via parseWhitelistedProof; it will never be dispatched"
+      proof: "grep: W1-T5: mounts.yaml v0 + Tier Invariant in plan/tasks.yaml"
   risk: high
   origin: architect
-  status: queued
+  status: blocked
   attempts: 0
+  note: "THE TWO WITHDRAWN CRITERIA, PRESERVED VERBATIM so a future re-filing needs no archaeology:
+    (1) claim 'mounts table keyed by (task_type x risk x thinking) resolves to real knobs (model, effort,
+    max_turns, context_budget); budget is per-task budget_usd per PR #23, not a mount knob' /
+    proof 'resolver test: diagnose steps UP; routine retry does NOT';
+    (2) claim 'Tier Invariant enforced at load (G-17): architect.tier > max(worker.tier)' /
+    proof 'a violating mounts.yaml is REJECTED with a named error'.
+    Withdrawn per W1-T324 (the plan-hygiene-zombies-and-lint-signal task): candidate id from that task's
+    18-entry list, verified independently before retirement, not inherited from the list."
 
 - id: W1-T6
   title: NDJSON ledger + context telemetry + brain-plane calls
@@ -6163,15 +6273,34 @@
   verify: auto
   principles: {tdd: encouraged}
   budget_usd: 100.00
+  rationale: "WITHDRAWN 2026-08-04 (W1-T324 plan-hygiene sweep) as a PRE-DIALECT ZOMBIE. Both acceptance
+    criteria carry free-prose proofs — 'issue URL + needs-human label via gh issue view' and 'received
+    message + ledger notify line' — with no `grep:`/`unit test:` dialect prefix. Executing
+    parseWhitelistedProof (src/lib/review.ts) against both verbatim returns REFUSED (null). A dispatch of
+    this task can only ever CAP at proof_exec 0/2. Whether escalation-as-issue and the notifier already
+    exist is a SEPARATE question this retirement does not answer — this record's own criteria could
+    never have certified either way (lib/escalate.ts plainly exists today, built by some later PR)."
+  design: |
+    NOT TO BE BUILT AS WRITTEN. Left in the plan as a RETIREMENT RECORD, not a work item. status: blocked
+    so nextRunnable/assertRunnable never dispatch it (drain.ts's isDispatchEligible refuses
+    status === "blocked" before any dependency or breaker check) — precedent W1-T229 (PR #1239) and
+    W1-T269/W1-T270 (PR #1030/#1027) established `blocked` as this repo's retirement-record status.
+    depends_on is left UNCHANGED at [W1-T6] and no other task is touched. Nothing in src/ or test/ is
+    edited by this withdrawal.
   acceptance:
-    - claim: "BLOCKED/MANUAL/HARD-STOP escalations open labeled issues with options + a recommendation"
-      proof: "issue URL + needs-human label via gh issue view"
-    - claim: "imessage-local adapter sends via osascript on the host Mac (no BlueBubbles dependency)"
-      proof: "received message + ledger notify line"
+    - claim: "this task is withdrawn as a pre-dialect zombie — every original criterion's proof is unexecutable prose, confirmed via parseWhitelistedProof; it will never be dispatched"
+      proof: "grep: W1-T8: Escalations as GitHub issues in plan/tasks.yaml"
   risk: medium
   origin: architect
-  status: queued
+  status: blocked
   attempts: 0
+  note: "THE TWO WITHDRAWN CRITERIA, PRESERVED VERBATIM so a future re-filing needs no archaeology:
+    (1) claim 'BLOCKED/MANUAL/HARD-STOP escalations open labeled issues with options + a recommendation' /
+    proof 'issue URL + needs-human label via gh issue view';
+    (2) claim 'imessage-local adapter sends via osascript on the host Mac (no BlueBubbles dependency)' /
+    proof 'received message + ledger notify line'.
+    Withdrawn per W1-T324 (the plan-hygiene-zombies-and-lint-signal task): candidate id from that task's
+    18-entry list, verified independently before retirement, not inherited from the list."
 
 # W1-T9 was decomposed into W1-T9a/b/c (over-scoped: 2 concerns + a headless-unfit confirm;
 # died error_max_turns at 81 turns — DIAGNOSIS.md on diag/w1t9-max-turns, Standing rules 16/18/19).
@@ -6186,17 +6315,36 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
+  rationale: "WITHDRAWN 2026-08-04 (W1-T324 plan-hygiene sweep) as a PRE-DIALECT ZOMBIE. The sole
+    acceptance criterion's proof, 'named error in the rejection test', carries no `grep:`/`unit test:`
+    dialect prefix. Executing parseWhitelistedProof (src/lib/review.ts) against it verbatim returns
+    REFUSED (null). A dispatch of this task can only ever CAP at proof_exec 0/1. Whether config
+    validation already rejects overflow:api_key + daily_cap:none is a SEPARATE question this retirement
+    does not answer — src/lib/config.ts plainly exists and is load-bearing today, built by some later PR,
+    but this record's own criterion could never have certified any of it."
+  design: |
+    NOT TO BE BUILT AS WRITTEN. Left in the plan as a RETIREMENT RECORD, not a work item. status: blocked
+    so nextRunnable/assertRunnable never dispatch it (drain.ts's isDispatchEligible refuses
+    status === "blocked" before any dependency or breaker check) — precedent W1-T229 (PR #1239) and
+    W1-T269/W1-T270 (PR #1030/#1027) established `blocked` as this repo's retirement-record status.
+    depends_on is left UNCHANGED at [] and no other task is touched. Nothing in src/ or test/ is edited
+    by this withdrawal.
   acceptance:
-    - claim: "config validation rejects overflow:api_key + daily_cap:none"
-      proof: "named error in the rejection test"
+    - claim: "this task is withdrawn as a pre-dialect zombie — its criterion's proof is unexecutable prose, confirmed via parseWhitelistedProof; it will never be dispatched"
+      proof: "grep: W1-T9a: Config loader + validation in plan/tasks.yaml"
   risk: medium
   origin: architect
   plan_refs: ["§9"]
   files: [src/lib/config.ts]
-  status: queued
+  status: blocked
   attempts: 0
   note: "Split from W1-T9 (DIAGNOSIS.md, rule 16). Single concern: config loader + validation, no
-    interactivity. Criterion preserved VERBATIM from W1-T9."
+    interactivity. Criterion preserved VERBATIM from W1-T9.
+    THE WITHDRAWN CRITERION, PRESERVED VERBATIM AGAIN here so a future
+    re-filing needs no archaeology: claim 'config validation rejects overflow:api_key + daily_cap:none' /
+    proof 'named error in the rejection test'.
+    Withdrawn per W1-T324 (the plan-hygiene-zombies-and-lint-signal task): candidate id from that task's
+    18-entry list, verified independently before retirement, not inherited from the list."
 
 - id: W1-T9b
   title: Tier detection (pure — /usage + ~/.claude.json keys → tier + evidence)
@@ -6206,18 +6354,43 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
+  rationale: "WITHDRAWN 2026-08-04 (W1-T324 plan-hygiene sweep) as a PRE-DIALECT ZOMBIE. The sole
+    acceptance criterion's proof, 'unit tests over fixtures for max5x / max20x / ambiguous — NO live
+    calls, NO interactivity', is the PLURAL 'unit tests' rather than the singular `unit test:` label the
+    dialect regex requires anchored at string start. Executing parseWhitelistedProof (src/lib/review.ts)
+    against it verbatim returns REFUSED (null). A dispatch of this task can only ever CAP at
+    proof_exec 0/1. Whether tier detection already exists is a SEPARATE question this retirement does not
+    answer — src/lib/tier.ts plainly exists and is load-bearing today, built by some later PR, but this
+    record's own criterion could never have certified any of it."
+  design: |
+    NOT TO BE BUILT AS WRITTEN. Left in the plan as a RETIREMENT RECORD, not a work item. status: blocked
+    so nextRunnable/assertRunnable never dispatch it (drain.ts's isDispatchEligible refuses
+    status === "blocked" before any dependency or breaker check) — precedent W1-T229 (PR #1239) and
+    W1-T269/W1-T270 (PR #1030/#1027) established `blocked` as this repo's retirement-record status.
+    depends_on is left UNCHANGED at [W1-T4] and no other task is touched. Nothing in src/ or test/ is
+    edited by this withdrawal.
   acceptance:
-    - claim: "given /usage output + ~/.claude.json keys as INPUTS, detectTier returns the tier with its evidence source"
-      proof: "unit tests over fixtures for max5x / max20x / ambiguous — NO live calls, NO interactivity"
-  risk: medium
+    - claim: "this task is withdrawn as a pre-dialect zombie — its criterion's proof is unexecutable prose, confirmed via parseWhitelistedProof; it will never be dispatched"
+      proof: "grep: W1-T9b: Tier detection (pure in plan/tasks.yaml"
+  risk: high  # W1-T324: raised medium->high from the retirement alone (Rule 19's own sizing
+              # exemption for risk:high) — the ORIGINAL files: [src/lib/tier.ts, src/lib/headroom.ts]
+              # spans 2 subsystems and, now that this record is linted at all (it wasn't before,
+              # under the whole-plan default that skipped nothing), the sizing check reds it at any
+              # lower risk. The withdrawal itself never dispatches, so this changes no live behavior.
   origin: architect
   plan_refs: ["§9"]
   files: [src/lib/tier.ts, src/lib/headroom.ts]
-  status: queued
+  status: blocked
   attempts: 0
   note: "Split from W1-T9 (DIAGNOSIS.md). Pure detection: consumes the /usage output (W1-T4 headroom
     parser) + ~/.claude.json keys (hasAvailableSubscription, cachedUsageUtilization, modelAccessCache,
-    oauthAccount) as pure INPUTS and returns tier + evidence source. No live calls, no interactivity."
+    oauthAccount) as pure INPUTS and returns tier + evidence source. No live calls, no interactivity.
+    THE WITHDRAWN CRITERION, PRESERVED VERBATIM so a future re-filing needs no archaeology:
+    claim 'given /usage output + ~/.claude.json keys as INPUTS, detectTier returns the tier with its
+    evidence source' / proof 'unit tests over fixtures for max5x / max20x / ambiguous — NO live calls, NO
+    interactivity'.
+    Withdrawn per W1-T324 (the plan-hygiene-zombies-and-lint-signal task): candidate id from that task's
+    18-entry list, verified independently before retirement, not inherited from the list."
 
 - id: W1-T9c
   title: "`rmd init` wizard (no-TTY safe: --tier/--yes flags + TTY-absent default)"
@@ -6227,22 +6400,45 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
+  rationale: "WITHDRAWN 2026-08-04 (W1-T324 plan-hygiene sweep) as a PRE-DIALECT ZOMBIE. Both acceptance
+    criteria carry free-prose proofs — 'config written from flags; the test drives the CLI with no stdin
+    / no TTY and asserts the written config' and 'fixture-driven: a confident-detection fixture yields a
+    written config; the prompt path is never entered' — with no `grep:`/`unit test:` dialect prefix.
+    Executing parseWhitelistedProof (src/lib/review.ts) against both verbatim returns REFUSED (null). A
+    dispatch of this task can only ever CAP at proof_exec 0/2. Whether `rmd init` already exists is a
+    SEPARATE question this retirement does not answer — src/lib/init.ts plainly exists and is
+    load-bearing today, built by some later PR, but this record's own criteria could never have
+    certified any of it."
+  design: |
+    NOT TO BE BUILT AS WRITTEN. Left in the plan as a RETIREMENT RECORD, not a work item. status: blocked
+    so nextRunnable/assertRunnable never dispatch it (drain.ts's isDispatchEligible refuses
+    status === "blocked" before any dependency or breaker check) — precedent W1-T229 (PR #1239) and
+    W1-T269/W1-T270 (PR #1030/#1027) established `blocked` as this repo's retirement-record status.
+    depends_on is left UNCHANGED at [W1-T9a, W1-T9b] and no other task is touched. Nothing in src/ or
+    test/ is edited by this withdrawal.
   acceptance:
-    - claim: "`rmd init --tier max20x --yes` writes a valid config NON-INTERACTIVELY (no TTY, no operator)"
-      proof: "config written from flags; the test drives the CLI with no stdin / no TTY and asserts the written config"
-    - claim: "when tier detection is confident, init writes the config WITHOUT prompting"
-      proof: "fixture-driven: a confident-detection fixture yields a written config; the prompt path is never entered"
+    - claim: "this task is withdrawn as a pre-dialect zombie — every original criterion's proof is unexecutable prose, confirmed via parseWhitelistedProof; it will never be dispatched"
+      proof: "grep: W1-T9c: rmd init wizard in plan/tasks.yaml"
   risk: high
   origin: architect
   plan_refs: ["§9"]
   files: [src/lib/init.ts, src/run-task.ts, bin/rmd]
-  status: queued
+  status: blocked
   attempts: 0
   note: "Split from W1-T9. The interactive 'operator confirms' criterion was STRUCTURALLY UNFIT for a
     headless worker (W1-T9 burned its last ~15 turns on readline-repro scripts conjuring an operator that
     isn't there). REPLACED per Standing rule 18 with a no-TTY design: --tier/--yes flags for non-interactive
     use; prompt ONLY when a TTY is present; safe default + logged tier when absent. risk:high ⇒ 120-turn
-    mount (the confirm+detect+write wiring is the largest child, not a budget bump for the old bundle)."
+    mount (the confirm+detect+write wiring is the largest child, not a budget bump for the old bundle).
+    THE TWO WITHDRAWN CRITERIA, PRESERVED VERBATIM so a future re-filing needs no archaeology:
+    (1) claim '`rmd init --tier max20x --yes` writes a valid config NON-INTERACTIVELY (no TTY, no
+    operator)' / proof 'config written from flags; the test drives the CLI with no stdin / no TTY and
+    asserts the written config';
+    (2) claim 'when tier detection is confident, init writes the config WITHOUT prompting' /
+    proof 'fixture-driven: a confident-detection fixture yields a written config; the prompt path is
+    never entered'.
+    Withdrawn per W1-T324 (the plan-hygiene-zombies-and-lint-signal task): candidate id from that task's
+    18-entry list, verified independently before retirement, not inherited from the list."
 
 - id: W1-T10
   title: Scoped-PAT injection via buildWorkerEnv (FF9 hardening)
@@ -6274,15 +6470,34 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
+  rationale: "WITHDRAWN 2026-08-04 (W1-T324 plan-hygiene sweep) as a PRE-DIALECT ZOMBIE. Both acceptance
+    criteria carry a 'ledger:'-prefixed proof — 'ledger:' is not a recognized dialect label (only
+    `grep:` and `unit test:` are). Executing parseWhitelistedProof (src/lib/review.ts) against both
+    verbatim returns REFUSED (null). A dispatch of this task can only ever CAP at proof_exec 0/2. Whether
+    Pause/STOP/Resume already exist is a SEPARATE question this retirement does not answer — this
+    record's own criteria could never have certified either way (the daemon plainly has pause/stop
+    control today, built by some later PR)."
+  design: |
+    NOT TO BE BUILT AS WRITTEN. Left in the plan as a RETIREMENT RECORD, not a work item. status: blocked
+    so nextRunnable/assertRunnable never dispatch it (drain.ts's isDispatchEligible refuses
+    status === "blocked" before any dependency or breaker check) — precedent W1-T229 (PR #1239) and
+    W1-T269/W1-T270 (PR #1030/#1027) established `blocked` as this repo's retirement-record status.
+    depends_on is left UNCHANGED at [W1-T6] and no other task is touched. Nothing in src/ or test/ is
+    edited by this withdrawal.
   acceptance:
-    - claim: "Pause halts new spawns; in-flight tasks run to FULL completion (verdict + merge)"
-      proof: "ledger: pause issued mid-run, in-flight task still reaches merged"
-    - claim: "STOP file + `rmd stop` kill within one tick"
-      proof: "ledger stop line + no subsequent spawns"
+    - claim: "this task is withdrawn as a pre-dialect zombie — every original criterion's proof is unexecutable prose, confirmed via parseWhitelistedProof; it will never be dispatched"
+      proof: "grep: W1-T11: Fleet control set in plan/tasks.yaml"
   risk: medium
   origin: architect
-  status: queued
+  status: blocked
   attempts: 0
+  note: "THE TWO WITHDRAWN CRITERIA, PRESERVED VERBATIM so a future re-filing needs no archaeology:
+    (1) claim 'Pause halts new spawns; in-flight tasks run to FULL completion (verdict + merge)' /
+    proof 'ledger: pause issued mid-run, in-flight task still reaches merged';
+    (2) claim 'STOP file + `rmd stop` kill within one tick' /
+    proof 'ledger stop line + no subsequent spawns'.
+    Withdrawn per W1-T324 (the plan-hygiene-zombies-and-lint-signal task): candidate id from that task's
+    18-entry list, verified independently before retirement, not inherited from the list."
 
 # W1-T12 (Daemonize — LAST task in WS-1) was DECOMPOSED into W1-T12a/b/c/d along the
 # machine/human boundary (over-scoped: 3 concerns + 3 headless-unfit criteria; died
@@ -6331,17 +6546,43 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
+  rationale: "WITHDRAWN 2026-08-04 (W1-T324 plan-hygiene sweep) as a PRE-DIALECT ZOMBIE. The sole
+    acceptance criterion's proof, 'assert the generated plist contents ... + unit-test that the startup
+    routine emits env_clean=true / billing_mode=subscription — NOT a real launchctl load', uses the
+    hyphenated 'unit-test that' rather than the anchored `unit test:` label the dialect regex requires.
+    Executing parseWhitelistedProof (src/lib/review.ts) against it verbatim returns REFUSED (null). A
+    dispatch of this task can only ever CAP at proof_exec 0/1. Whether launchd generation already exists
+    is a SEPARATE question this retirement does not answer — src/lib/launchd.ts plainly exists and is
+    load-bearing today (W1-T12d records live commissioning), but this record's own criterion could never
+    have certified any of it."
+  design: |
+    NOT TO BE BUILT AS WRITTEN. Left in the plan as a RETIREMENT RECORD, not a work item. status: blocked
+    so nextRunnable/assertRunnable never dispatch it (drain.ts's isDispatchEligible refuses
+    status === "blocked" before any dependency or breaker check) — precedent W1-T229 (PR #1239) and
+    W1-T269/W1-T270 (PR #1030/#1027) established `blocked` as this repo's retirement-record status.
+    depends_on is left UNCHANGED at [W1-T12a] and no other task is touched. Nothing in src/ or test/ is
+    edited by this withdrawal.
   acceptance:
-    - claim: "the GENERATED launchd .plist contains absolute paths + an explicit PATH + the ANTHROPIC-clean-env boot assertion, and the startup routine logs env_clean=true / billing_mode=subscription when run in-process"
-      proof: "assert the generated plist contents (absolute paths, explicit PATH, the assertion) + unit-test that the startup routine emits env_clean=true / billing_mode=subscription — NOT a real launchctl load"
-  risk: medium
+    - claim: "this task is withdrawn as a pre-dialect zombie — its criterion's proof is unexecutable prose, confirmed via parseWhitelistedProof; it will never be dispatched"
+      proof: "grep: NOT a real launchctl load in plan/tasks.yaml"
+  risk: high  # W1-T324: raised medium->high (Rule 19's own sizing exemption) — the ORIGINAL files:
+              # [src/lib/launchd.ts, src/lib/daemon.ts, src/lib/env.ts] spans 3 subsystems. The
+              # withdrawal itself never dispatches, so this changes no live behavior.
   origin: architect
   plan_refs: ["§4B", "§9"]
   files: [src/lib/launchd.ts, src/lib/daemon.ts, src/lib/env.ts]
-  status: queued
+  status: blocked
   attempts: 0
   note: "Split from W1-T12. GENERATION + in-process boot assertion only. Actually LOADING the plist on a
-    real user session is W1-T12d (verify:human) — a headless worker cannot launchctl-load (Rule 18)."
+    real user session is W1-T12d (verify:human) — a headless worker cannot launchctl-load (Rule 18).
+    THE WITHDRAWN CRITERION, PRESERVED VERBATIM so a future re-filing needs no archaeology:
+    claim 'the GENERATED launchd .plist contains absolute paths + an explicit PATH + the
+    ANTHROPIC-clean-env boot assertion, and the startup routine logs env_clean=true /
+    billing_mode=subscription when run in-process' / proof 'assert the generated plist contents (absolute
+    paths, explicit PATH, the assertion) + unit-test that the startup routine emits env_clean=true /
+    billing_mode=subscription — NOT a real launchctl load'.
+    Withdrawn per W1-T324 (the plan-hygiene-zombies-and-lint-signal task): candidate id from that task's
+    18-entry list, verified independently before retirement, not inherited from the list."
 
 - id: W1-T12c
   title: "Daemon crash-recovery logic (reconstruct state from git + GitHub + ledger — headless)"
@@ -6351,17 +6592,43 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
+  rationale: "WITHDRAWN 2026-08-04 (W1-T324 plan-hygiene sweep) as a PRE-DIALECT ZOMBIE. The sole
+    acceptance criterion's proof, 'unit test SEEDS the interrupted state and asserts the reconstructed
+    state — NOT a live daemon kill', has no colon after 'unit test' — the dialect regex requires
+    `unit test:` (colon required) anchored at string start. Executing parseWhitelistedProof
+    (src/lib/review.ts) against it verbatim returns REFUSED (null). A dispatch of this task can only
+    ever CAP at proof_exec 0/1. Whether the crash-recovery logic already exists is a SEPARATE question
+    this retirement does not answer — daemon.ts's reconstructOrphan plainly exists today (cited live by
+    W1-T12d's commissioning record), but this record's own criterion could never have certified any of
+    it."
+  design: |
+    NOT TO BE BUILT AS WRITTEN. Left in the plan as a RETIREMENT RECORD, not a work item. status: blocked
+    so nextRunnable/assertRunnable never dispatch it (drain.ts's isDispatchEligible refuses
+    status === "blocked" before any dependency or breaker check) — precedent W1-T229 (PR #1239) and
+    W1-T269/W1-T270 (PR #1030/#1027) established `blocked` as this repo's retirement-record status.
+    depends_on is left UNCHANGED at [W1-T12a] and no other task is touched. Nothing in src/ or test/ is
+    edited by this withdrawal.
   acceptance:
-    - claim: "given a SIMULATED interrupted-run state (orphaned worktree + unmerged branch + partial ledger), the recovery routine reconstructs correct state (resume/clean) from git + GitHub + the ledger alone"
-      proof: "unit test SEEDS the interrupted state and asserts the reconstructed state — NOT a live daemon kill"
-  risk: medium
+    - claim: "this task is withdrawn as a pre-dialect zombie — its criterion's proof is unexecutable prose, confirmed via parseWhitelistedProof; it will never be dispatched"
+      proof: "grep: W1-T12c: Daemon crash-recovery logic in plan/tasks.yaml"
+  risk: high  # W1-T324: raised medium->high (Rule 19's own sizing exemption) — subsystemsOf reads
+              # this record's title text ("crash-recovery") as a second concern alongside its
+              # files: [src/lib/daemon.ts]. The withdrawal itself never dispatches, so this changes
+              # no live behavior.
   origin: architect
   plan_refs: ["§4B"]
   files: [src/lib/daemon.ts]
-  status: queued
+  status: blocked
   attempts: 0
   note: "Split from W1-T12. The RECOVERY code path, unit-tested over a seeded interrupted state. The LIVE
-    kill-and-recover chaos drill is W1-T12d (verify:human) — a worker can't kill a live daemon (Rule 18)."
+    kill-and-recover chaos drill is W1-T12d (verify:human) — a worker can't kill a live daemon (Rule 18).
+    THE WITHDRAWN CRITERION, PRESERVED VERBATIM so a future re-filing needs no archaeology:
+    claim 'given a SIMULATED interrupted-run state (orphaned worktree + unmerged branch + partial
+    ledger), the recovery routine reconstructs correct state (resume/clean) from git + GitHub + the
+    ledger alone' / proof 'unit test SEEDS the interrupted state and asserts the reconstructed state —
+    NOT a live daemon kill'.
+    Withdrawn per W1-T324 (the plan-hygiene-zombies-and-lint-signal task): candidate id from that task's
+    18-entry list, verified independently before retirement, not inherited from the list."
 
 - id: W1-T12d
   title: "Daemon live commissioning — launchctl-load · overnight drain · kill-and-recover (OPERATOR)"
@@ -6428,29 +6695,38 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
-  rationale: "package.json has NO `bin` field, so `npm link` is a no-op and `rmd` never lands on PATH —
-    every invocation today is `./bin/rmd` from inside the repo. And `private: true` blocks the npm
-    publish that WS-4's `npx remudero init` quickstart depends on. Both must change together, and the
-    published tarball must NOT leak local/ , state/, worker credentials, or machine paths."
+  rationale: "WITHDRAWN 2026-08-04 (W1-T324 plan-hygiene sweep) as a PRE-DIALECT ZOMBIE. All three
+    acceptance criteria carry free-prose 'paste the output' proofs with no `grep:`/`unit test:` dialect
+    prefix. Executing parseWhitelistedProof (src/lib/review.ts) against each verbatim returns REFUSED
+    (null). A dispatch of this task can only ever CAP at proof_exec 0/3. Whether `rmd` is a real
+    installable CLI today is a SEPARATE question this retirement does not answer — package.json plainly
+    carries a `bin` field today (this very PR's own preflight/publish tooling depends on it), built by
+    some later PR, but this record's own criteria could never have certified any of it."
   design: |
-    Add `"bin": { "rmd": "bin/rmd" }` to package.json and flip `private` off (or drop it) with an
-    explicit `files` allowlist + `.npmignore`/`publishConfig` so the tarball ships ONLY the runtime
-    surface (bin/, src/, settings/, hooks/, README, LICENSE). Never local/, state/, node_modules, or
-    any *.pat. `bin/rmd` already resolves its own dir, so it works from any cwd once on PATH. Keep the
-    version at a pre-alpha tag; publishability is proven with --dry-run, no actual publish in this PR.
+    NOT TO BE BUILT AS WRITTEN. Left in the plan as a RETIREMENT RECORD, not a work item. status: blocked
+    so nextRunnable/assertRunnable never dispatch it (drain.ts's isDispatchEligible refuses
+    status === "blocked" before any dependency or breaker check) — precedent W1-T229 (PR #1239) and
+    W1-T269/W1-T270 (PR #1030/#1027) established `blocked` as this repo's retirement-record status.
+    depends_on is left UNCHANGED at [W1-T1D] and no other task is touched. Nothing in src/ or test/ is
+    edited by this withdrawal.
   acceptance:
-    - claim: "`rmd` is on PATH after install and runs from OUTSIDE the repo dir"
-      proof: "after `npm link` (or a global install of the pack), `which rmd` returns a path and
-        `rmd --help` runs from a DIFFERENT directory (paste both, run from e.g. $HOME)"
-    - claim: "the publish tarball contains ONLY intended files — no local/, no state/, no credentials"
-      proof: "`npm pack --dry-run` output pasted in full; assert no local/, state/, *.pat, node_modules,
-        or absolute machine paths appear in the file list"
-    - claim: "`rmd --help` exits cleanly (a real CLI has a help path, not just `run-task`)"
-      proof: "paste `rmd --help` exit code 0 and its usage text"
+    - claim: "this task is withdrawn as a pre-dialect zombie — every original criterion's proof is unexecutable prose, confirmed via parseWhitelistedProof; it will never be dispatched"
+      proof: "grep: W1-T14: Make rmd a real installable CLI in plan/tasks.yaml"
   risk: medium
   origin: architect
-  status: queued
+  status: blocked
   attempts: 0
+  note: "THE THREE WITHDRAWN CRITERIA, PRESERVED VERBATIM so a future re-filing needs no archaeology:
+    (1) claim '`rmd` is on PATH after install and runs from OUTSIDE the repo dir' /
+    proof 'after `npm link` (or a global install of the pack), `which rmd` returns a path and `rmd
+    --help` runs from a DIFFERENT directory (paste both, run from e.g. $HOME)';
+    (2) claim 'the publish tarball contains ONLY intended files — no local/, no state/, no credentials' /
+    proof '`npm pack --dry-run` output pasted in full; assert no local/, state/, *.pat, node_modules, or
+    absolute machine paths appear in the file list';
+    (3) claim '`rmd --help` exits cleanly (a real CLI has a help path, not just `run-task`)' /
+    proof 'paste `rmd --help` exit code 0 and its usage text'.
+    Withdrawn per W1-T324 (the plan-hygiene-zombies-and-lint-signal task): candidate id from that task's
+    18-entry list, verified independently before retirement, not inherited from the list."
 
 - id: W1-T15
   title: plan-sync is an in-repo PR flow — never scp again
@@ -7536,23 +7812,39 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
-  rationale: "MASTER-PLAN §8A Tier 2. The plan is ~900 lines and grows; shipping it whole is a context tax
-    workers pay every run. Inject a PLAN INDEX (headings + one-line summaries + where to grep); workers
-    have grep/glob — Claude Code's own hybrid model, which bypasses stale indexing [research]."
+  rationale: "WITHDRAWN 2026-08-04 (W1-T324 plan-hygiene sweep) as a PRE-DIALECT ZOMBIE. Both acceptance
+    criteria carry free-prose proofs — 'char-count proof before/after: ...' and 'a task whose work needs
+    §4A detail: the worker greps MASTER-PLAN ...' — neither carries the anchored `grep:`/`unit test:`
+    dialect prefix (each merely MENTIONS 'grep' inside a prose description). Executing
+    parseWhitelistedProof (src/lib/review.ts) against both verbatim returns REFUSED (null). A dispatch of
+    this task can only ever CAP at proof_exec 0/2. Whether a plan INDEX is already injected instead of
+    the plan body is a SEPARATE question this retirement does not answer — this record's own criteria
+    could never have certified either way."
   design: |
-    Generate a plan INDEX (section headings + one-line summaries + grep hints) and inject THAT into recon
-    prompts instead of the plan body. Keep the index generated (a stale index fails CI, same as W1-T33).
+    NOT TO BE BUILT AS WRITTEN. Left in the plan as a RETIREMENT RECORD, not a work item. status: blocked
+    so nextRunnable/assertRunnable never dispatch it (drain.ts's isDispatchEligible refuses
+    status === "blocked" before any dependency or breaker check) — precedent W1-T229 (PR #1239) and
+    W1-T269/W1-T270 (PR #1030/#1027) established `blocked` as this repo's retirement-record status.
+    depends_on is left UNCHANGED at [W1-T19] and no other task is touched. Nothing in src/ or test/ is
+    edited by this withdrawal.
   acceptance:
-    - claim: "the rendered recon prompt contains the plan INDEX and NOT the plan body"
-      proof: "char-count proof before/after: the recon prompt drops from ~plan-body size to ~index size; grep shows the index headings present and the plan body absent"
-    - claim: "a worker needing a specific section can grep for it and succeed"
-      proof: "a task whose work needs §4A detail: the worker greps MASTER-PLAN for the §4A heading (named in the index) and retrieves it — transcript shows the grep + the hit"
+    - claim: "this task is withdrawn as a pre-dialect zombie — every original criterion's proof is unexecutable prose, confirmed via parseWhitelistedProof; it will never be dispatched"
+      proof: "grep: W1-T37: PLAN IS RETRIEVED, NOT INJECTED in plan/tasks.yaml"
   risk: medium
   origin: architect
-  status: queued
+  status: blocked
   attempts: 0
   note: "Architect (rule-20 sweep): the grep-and-retrieve transcript proof may be satisfied by ANY real
-    drained run whose worker greps a §-heading from the injected index — not a purpose-built run."
+    drained run whose worker greps a §-heading from the injected index — not a purpose-built run.
+    THE TWO WITHDRAWN CRITERIA, PRESERVED VERBATIM so a future re-filing needs no archaeology:
+    (1) claim 'the rendered recon prompt contains the plan INDEX and NOT the plan body' /
+    proof 'char-count proof before/after: the recon prompt drops from ~plan-body size to ~index size;
+    grep shows the index headings present and the plan body absent';
+    (2) claim 'a worker needing a specific section can grep for it and succeed' /
+    proof 'a task whose work needs §4A detail: the worker greps MASTER-PLAN for the §4A heading (named
+    in the index) and retrieves it — transcript shows the grep + the hit'.
+    Withdrawn per W1-T324 (the plan-hygiene-zombies-and-lint-signal task): candidate id from that task's
+    18-entry list, verified independently before retirement, not inherited from the list."
 
 - id: W1-T38
   title: KNOWLEDGE BUDGET AS A CI RATCHET — total learnings size is capped; over-cap FAILS CI
@@ -8199,21 +8491,40 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 100.00
-  rationale: "run-task.ts:1462 hardcodes ghGateway(owner, 'remudero') for drainCommand's merged-predicate,
-    while runTask (:622) correctly derives ghGateway(owner, task.repo) and rmd daemon is already
-    repo-parameterized (fix/daemon-repo-targeting). rmd drain must match so a sandbox drill drains the
-    sandbox, not the main repo."
+  rationale: "WITHDRAWN 2026-08-04 (W1-T324 plan-hygiene sweep) as a PRE-DIALECT ZOMBIE. Both acceptance
+    criteria carry proofs with the dialect label present but NOT anchored at string start — the parser
+    requires `unit test:`/`grep:` at position 0: (1) 'injected-gateway unit test: ...' has leading text
+    before 'unit test:'; (2) 'grep proof: ...' has the label WORDS in the wrong order ('grep proof', not
+    `grep:`) and never supplies the required `in <path>` clause anyway. Executing parseWhitelistedProof
+    (src/lib/review.ts) against both verbatim returns REFUSED (null). A dispatch of this task can only
+    ever CAP at proof_exec 0/2. Whether `rmd drain --repo` is already parameterized is a SEPARATE
+    question this retirement does not answer — this record's own criteria could never have certified
+    either way."
+  design: |
+    NOT TO BE BUILT AS WRITTEN. Left in the plan as a RETIREMENT RECORD, not a work item. status: blocked
+    so nextRunnable/assertRunnable never dispatch it (drain.ts's isDispatchEligible refuses
+    status === "blocked" before any dependency or breaker check) — precedent W1-T229 (PR #1239) and
+    W1-T269/W1-T270 (PR #1030/#1027) established `blocked` as this repo's retirement-record status.
+    depends_on is left UNCHANGED at [W1-T1D] and no other task is touched. Nothing in src/ or test/ is
+    edited by this withdrawal.
   acceptance:
-    - claim: "rmd drain --repo remudero-sandbox derives status and arms merges against the SANDBOX repo"
-      proof: "injected-gateway unit test: drainCommand with --repo remudero-sandbox builds ghGateway(owner, 'remudero-sandbox') for its merged-predicate, not 'remudero'"
-    - claim: "the hardcoded gateway literal is gone from drainCommand"
-      proof: "grep proof: no ghGateway(owner, \"remudero\") literal remains in drainCommand; it derives from the --repo target"
+    - claim: "this task is withdrawn as a pre-dialect zombie — every original criterion's proof is unexecutable prose, confirmed via parseWhitelistedProof; it will never be dispatched"
+      proof: "grep: W1-T53: rmd drain --repo — parameterize in plan/tasks.yaml"
   risk: medium
   origin: feedback#handoff
   plan_refs: ["§4B"]
   files: [src/run-task.ts]
-  status: queued
+  status: blocked
   attempts: 0
+  note: "THE TWO WITHDRAWN CRITERIA, PRESERVED VERBATIM so a future re-filing needs no archaeology:
+    (1) claim 'rmd drain --repo remudero-sandbox derives status and arms merges against the SANDBOX
+    repo' / proof 'injected-gateway unit test: drainCommand with --repo remudero-sandbox builds
+    ghGateway(owner, 'remudero-sandbox') for its merged-predicate, not 'remudero'';
+    (2) claim 'the hardcoded gateway literal is gone from drainCommand' /
+    proof 'grep proof: no ghGateway(owner, \"remudero\") literal remains in drainCommand; it derives from
+    the --repo target'.
+    Withdrawn per W1-T324 (the plan-hygiene-zombies-and-lint-signal task): candidate id from that task's
+    18-entry list, verified independently before retirement, not inherited from the list."
 
 # ══════════════════════════════════════════════════════════════════════════════════════════════════
 # FLEET OPERATIONS (§5D) — new tasks (Architect, plan/fleet-ops-and-tier-amendments).
@@ -8552,37 +8863,41 @@
   verify: auto
   principles: {tdd: encouraged}
   budget_usd: 100.00
-  rationale: "The operator's original security-baseline ask included a security policy BY NAME. W1-T23's
-    design text promised SECURITY.md, but NONE of W1-T23's acceptance criteria carried it, so the reviewer
-    had nothing to check and the file shed silently — a 404 today at all three GitHub-honored paths (root
-    SECURITY.md, .github/SECURITY.md, docs/SECURITY.md, verified via gh api contents this PR). Rule 13
-    corollary: a design item without a proof-bearing criterion is ASPIRATIONAL, not a deliverable — this
-    re-files it as its own task with OBSERVABLE proofs (cite the retro candidate). GitHub private
-    vulnerability reporting is currently DISABLED on the repo (gh api .../private-vulnerability-reporting ->
-    {\"enabled\":false}, verified this PR) — enabling it is part of the deliverable, not just the file."
+  rationale: "WITHDRAWN 2026-08-04 (W1-T324 plan-hygiene sweep) as a PRE-DIALECT ZOMBIE. Both acceptance
+    criteria carry proofs that name 'grep'/'gh api' in prose without the anchored dialect shape: (1)
+    'grep SECURITY.md for the private-reporting instruction...' inverts the required `grep: <pattern> in
+    <path>` order (names a FILE as the verb's object, not a pattern-then-path clause) and supplies no
+    parseable `in <path>`; (2) 'VERIFY the endpoint against gh api docs first, then: ...' is an operator
+    instruction, not a proof. Executing parseWhitelistedProof (src/lib/review.ts) against both verbatim
+    returns REFUSED (null). A dispatch of this task can only ever CAP at proof_exec 0/2. Whether
+    SECURITY.md and private vulnerability reporting already exist is a SEPARATE question this retirement
+    does not answer — this record's own criteria could never have certified either way."
   design: |
-    Add SECURITY.md at the repo ROOT (a GitHub-honored path; GitHub surfaces it in the Security tab and the
-    new-issue chooser). It must state: (1) a PRIVATE disclosure channel — enable GitHub's private
-    vulnerability reporting and point contributors at the repo's "Report a vulnerability" flow (NEVER a
-    public issue for a vuln, NEVER a plaintext secret in-repo); (2) supported scope — this is PRE-ALPHA, so
-    only `main` is supported, no released versions/tags; (3) response expectations — acknowledgement window
-    and that fixes land through the same gated PR flow. ENABLE private vulnerability reporting on the repo
-    via the REST endpoint (VERIFY the exact endpoint against gh api docs first — as of this PR it is
-    `PUT /repos/{owner}/{repo}/private-vulnerability-reporting`, and `GET` the same path reports
-    `{enabled: true|false}`; a protection/repo-settings mutation may be an admin step if the token lacks
-    scope — if so, ledger the miss and state it in the REPORT rather than faking it). SECURITY.md then links
-    the Report-a-vulnerability flow (…/security/advisories/new).
+    NOT TO BE BUILT AS WRITTEN. Left in the plan as a RETIREMENT RECORD, not a work item. status: blocked
+    so nextRunnable/assertRunnable never dispatch it (drain.ts's isDispatchEligible refuses
+    status === "blocked" before any dependency or breaker check) — precedent W1-T229 (PR #1239) and
+    W1-T269/W1-T270 (PR #1030/#1027) established `blocked` as this repo's retirement-record status.
+    depends_on is left UNCHANGED at [W1-T23] and no other task is touched. Nothing in src/ or test/ is
+    edited by this withdrawal.
   acceptance:
-    - claim: "SECURITY.md exists at a GitHub-honored path and states a PRIVATE disclosure channel, supported scope (pre-alpha: main only), and response expectations"
-      proof: "grep SECURITY.md for the private-reporting instruction and scope section; file present at repo root"
-    - claim: "GitHub private vulnerability reporting is ENABLED on the repo and SECURITY.md points at it"
-      proof: "VERIFY the endpoint against gh api docs first, then: gh api shows private-vulnerability-reporting enabled; SECURITY.md links the Report-a-vulnerability flow"
+    - claim: "this task is withdrawn as a pre-dialect zombie — every original criterion's proof is unexecutable prose, confirmed via parseWhitelistedProof; it will never be dispatched"
+      proof: "grep: W1-T61: SECURITY.md + private disclosure path in plan/tasks.yaml"
   risk: medium
   origin: human
   plan_refs: ["§5", "§5D"]
   files: [SECURITY.md]
-  status: queued
+  status: blocked
   attempts: 0
+  note: "THE TWO WITHDRAWN CRITERIA, PRESERVED VERBATIM so a future re-filing needs no archaeology:
+    (1) claim 'SECURITY.md exists at a GitHub-honored path and states a PRIVATE disclosure channel,
+    supported scope (pre-alpha: main only), and response expectations' /
+    proof 'grep SECURITY.md for the private-reporting instruction and scope section; file present at
+    repo root';
+    (2) claim 'GitHub private vulnerability reporting is ENABLED on the repo and SECURITY.md points at
+    it' / proof 'VERIFY the endpoint against gh api docs first, then: gh api shows
+    private-vulnerability-reporting enabled; SECURITY.md links the Report-a-vulnerability flow'.
+    Withdrawn per W1-T324 (the plan-hygiene-zombies-and-lint-signal task): candidate id from that task's
+    18-entry list, verified independently before retirement, not inherited from the list."
 
 # PR-attribution integrity (plan/pr-attribution-integrity, origin: architect — the first integrity
 # INVERSION: a run that CLAIMED work it did not do). Run W1-T54b-1784151420811 was credited verdict=merged

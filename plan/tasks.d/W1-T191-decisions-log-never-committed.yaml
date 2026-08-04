@@ -6,7 +6,8 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 130.00
-  rationale: "OBSERVED 2026-07-20/21 while recording an operator decision: the operator checkout
+  note: "ORIGINAL RATIONALE, UNCHANGED, for full context on why the fix needed two write sites and
+    what the concurrent-append hazard was. OBSERVED 2026-07-20/21 while recording an operator decision: the operator checkout
     (~/Remudero/remudero) showed `M DECISIONS.md` with THREE machine-written entries present in the working tree
     and absent from origin/main:
       2026-07-20T20:36:14.454Z — W1-T156 (W1-T156-1784579460422)
@@ -103,31 +104,52 @@
         against origin/main's current tip) before wiring anything.
 
   acceptance:
-    - claim: "a decision.autochoose resolution reaches the repository without an operator noticing a dirty tree"
-      proof: "unit test: a decision record reaches a committed artifact, not only the working tree"
-      superseded_prose: "integration test over a seeded auto-choose resolution: the decision record is present in a committed/committable artifact of the run rather than only in the operator checkout's working tree. FALSIFIER, observed 2026-07-20/21: three resolutions (W1-T156 20:36:14, W1-T128 22:31:09, W1-T136 01:18:25) sat uncommitted in ~/Remudero/remudero/DECISIONS.md — committed HEAD 29 entries, working tree 32 — with matching decision.autochoose ledger lines proving each decision was made and acted on"
-    - claim: "concurrent resolutions cannot conflict on the log"
-      proof: "unit test: two concurrent decision records both land without a conflict"
-      superseded_prose: "two runs resolving decisions concurrently both land their records without a merge conflict on a shared append-only file. FALSIFIER: naively moving the append into each worker's worktree makes every concurrent pair conflict on the same file — the exact class W1-T122 solved for plan/tasks.yaml by sharding, and a fix that trades silent loss for noisy conflicts is not a fix"
-    - claim: "the record cannot be destroyed by an ordinary git hygiene command"
-      proof: "unit test: no decision record exists solely as an uncommitted modification"
-      superseded_prose: "no decision record exists solely as an uncommitted modification in a long-lived checkout. FALSIFIER: today `git checkout -- DECISIONS.md` in the operator checkout silently destroys every unrescued entry, and that is a routine command for cleaning a dirty tree"
-    - claim: "the three already-observed entries are preserved, not assumed away"
-      proof: "unit test: the three rescued decision records are present after the fix"
-      superseded_prose: "the three 2026-07-20/21 resolutions are present in the repository after this task ships. FALSIFIER: a fix that only handles future decisions leaves these three dependent on the PR that happened to rescue them, and provides no evidence that earlier resolutions were not already lost to a checkout or clean-up"
-    - claim: "a console feedback decision no longer leaves a tracked modification in the checkout it wrote through — the status flip reaches a branch, not the working tree"
-      proof: "unit test: a feedback decision leaves the caller's working tree clean"
-    - claim: "the freshness gate stops firing for this cause — a checkout behind origin/main whose only prior dirt came from these two writers is no longer refused, so the auto-sync that clears `behind` is no longer switched off by the dirt it is meant to clear"
-      proof: "unit test: a checkout dirtied only by these two writers is not refused"
-    - claim: "the fix does not widen the service carve-out or exempt further verbs from the freshness gate — the gate is correct, the writers are the defect"
-      proof: "grep: DIRT NEVER BLOCKS A SERVICE in src/lib/self-sync.ts"
+    - claim: "this task is withdrawn as already satisfied — every criterion is credited to a named merged PR whose regression tests quote this task's own acceptance language verbatim in their titles"
+      proof: "grep: W1-T191 acceptance in test/feedback-landing.test.ts"
   risk: high
   origin: architect
   plan_refs: ["§4"]
   files: [src/run-task.ts, src/lib/feedback.ts, src/lib/panel-graph.ts, src/lib/feedback-landing.ts, test/run-task.test.ts, test/feedback-landing.test.ts]
-  status: queued
+  status: blocked
   attempts: 0
-  note: "FOLDED 2026-07-30: W1-T263 (PR #958) filed the same defect from the other write site and was
+  rationale: "WITHDRAWN AS ALREADY SATISFIED 2026-08-04 (W1-T324, the plan-hygiene sweep). Every criterion below
+    was met by a PR that self-declares the task id (`Remudero-Task: W1-T191`), yet this record sat
+    `status: queued, attempts: 0` regardless — a crediting/closing failure, not a proof-authoring one.
+    Verified from source before withdrawing, not inherited from a claim.
+    CRITERIA 1/2/3/5/6 (the six-criteria core, criteria 1-3+5-6) ARE SATISFIED BY commit 97843a7 (PR #966,
+    merged 2026-07-30T23:41:34Z, 'fix(decisions): stop dirtying the daemon's checkout on autochoose+flip'),
+    whose test titles quote this record's own claims verbatim:
+      criterion 1 -> test/feedback-landing.test.ts:665 `\"W1-T191 acceptance 1: a decision record reaches
+        a committed artifact, not only the working tree...\"`
+      criterion 2 -> test/feedback-landing.test.ts:722 `\"W1-T191 acceptance 2: two concurrent decision
+        records both land without a conflict...\"`
+      criterion 3 -> test/feedback-landing.test.ts:697 `\"W1-T191 acceptance 3: no decision record exists
+        solely as an uncommitted modification...\"`
+      criterion 5 -> test/feedback-landing.test.ts:762 `\"W1-T191 acceptance 5: a feedback decision leaves
+        the caller's working tree clean...\"`, hardened further by commit 70109d0 (PR #1101, merged
+        2026-08-02T00:54:52Z), which found the console route was not even mounted in production and fixed
+        that, plus a THIRD write site (reconcileFeedbackEntries in panel-graph.ts) never named by this task
+      criterion 6 -> test/feedback-landing.test.ts:817 `\"W1-T191 acceptance 6: a checkout dirtied only by
+        these two writers is not refused...\"`
+    CRITERION 4 IS SATISFIED BY the three entries being rescued at filing by commit 351679b (PR #435, this
+    task's own filing PR), pinned as a permanent regression test by PR #966 at test/run-task.test.ts:678
+    `\"W1-T191 acceptance 4: the three rescued decision records are present after the fix...\"`.
+    CRITERION 7 (`grep: DIRT NEVER BLOCKS A SERVICE in src/lib/self-sync.ts`) IS SATISFIED — the guard text
+    originates in commit e94a736 (PR #726, merged 2026-07-24, unrelated task W1-T255) and is verified
+    UNCHANGED by PR #966's own regression test at test/run-task.test.ts:688 `\"W1-T191 acceptance 7:
+    self-sync.ts's service carve-out is untouched...\"`. This criterion's own grep still matches main
+    today; it is credited here, not rewritten, because the archaeology shows the SAME PR (#966) that
+    fixed criteria 1-3/5-6 also added a test PINNING this guard's non-regression — the match was never
+    non-discriminating, it is a deliberately-stable assertion (see this record's own design note below,
+    which states the guard is correct and must not move).
+    THE GAP THIS LEAVES IS NOT CLOSED HERE. A closing PR that self-declares its task id in the body still
+    left this record `queued`; whether an auto-closer keyed on the `Remudero-Task:` trailer should exist
+    is an operator decision, deliberately not smuggled into this bookkeeping edit (see W1-T324's
+    follow-ups).
+    THE CODE STANDS AND MUST NOT BE REVERTED. This entry withdraws a WORK ITEM, not the behaviour.
+    ORIGINAL RECORD BELOW, UNCHANGED, for full context on why the fix needed two write sites and what the
+    concurrent-append hazard was.
+    FOLDED 2026-07-30: W1-T263 (PR #958) filed the same defect from the other write site and was
     closed as a duplicate; its three genuinely-new criteria are appended above (the console feedback
     decision, the freshness-refusal consequence, and the do-not-widen-the-carve-out guard rail). Its
     other three restated criteria this task already had — including the concurrent-append constraint,
