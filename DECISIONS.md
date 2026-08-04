@@ -767,3 +767,53 @@ resolution, and marked so in the manner of the 2026-07-20 and 2026-07-31 (W1-T20
   touched by this PR.
 - Rollback: revert this PR — removes only this DECISIONS.md entry; no runtime code touched, and no
   ledger line written.
+
+## 2026-08-04 — RULING: daemon parallelism stays at N=1 (no parallel dispatch lanes)
+
+No entry in this file, MASTER-PLAN.md, or plan/tasks.yaml has ever ruled on **daemon parallelism**
+— i.e. the in-process lane width of `rmd daemon`'s own dispatch loop (`runDaemon`,
+`src/lib/daemon.ts`). P19 (RATIFIED 2026-07-20 -> W1-T170/T171/T172, all shipped 2026-07-30) is
+frequently misread as having answered this, because it did ship "N parallel dispatch lanes bounded
+by the queue governor's WIP limit (N=2)" — but that lane machinery
+(`partitionByFileOverlap`/`runDrainLanes`, `src/lib/drain.ts`) lives entirely under `rmd drain`.
+None of W1-T170/T171/T172's declared files ever touched `daemon.ts`, and P19 is now CLOSED with its
+design prose deleted. `runDaemon` today is still one `for (;;)` loop that calls `nextRunnable` once
+per tick and `await`s a single `runOne` to completion before looping again — N=1, unchanged. So the
+daemon half of this question was never decided, only never built, and every re-derivation of it
+starts from a MASTER-PLAN sentence that has never been true of `daemon.ts`.
+
+**Ruling: daemon-side dispatch stays at N=1.** `rmd daemon` does not adopt drain's multi-lane
+machinery. Three falsifiable blockers, each checkable against source rather than taken on trust:
+
+1. **The keychain.** `workerKeychainPaths` (`src/lib/worker-home.ts`) derives its keychain-db,
+   password, account and expiry paths from the state dir plus an optional account label — never
+   from a run id. Concurrent daemon lanes on one account would share one keychain, and the failure
+   would present as flaky auth, not as an obvious concurrency bug. W1-T170's own note already
+   flagged this as unvalidated, and it still is.
+2. **The plan-reload invariant.** `runDaemon`'s periodic re-read of `plan/tasks.yaml` is safe today
+   for a reason the code states in its own comment: `runOne` is awaited to completion before the
+   loop returns, so a reload can never land under an in-flight task. With N>1 lanes that invariant
+   is simply false, and it would break SILENTLY — nothing fails loudly when it does.
+3. **The deploy idle gate.** `daemonIsIdle` (`src/lib/deployer.ts`) is a conjunction over global
+   worker/inflight/worktree counters, so it waits for the WHOLE fleet to go quiet. More lanes make
+   a common idle window rarer, and the failure mode — unbounded deploy latency whose only symptom
+   is nothing happening — is strictly worse to diagnose than merely slow throughput.
+
+General argument alongside the three blockers: a refused run costs the same at N=1 and N=2, so
+parallelism multiplies waste as readily as work, and `partitionByFileOverlap` is fail-closed on
+undeclared scope — a task with an empty or absent `files:` list takes a lane alone regardless of
+lane count, so many nominally-2-lane passes collapse back to one in practice anyway.
+
+**What reopens this ruling:** either of two measurements neither recon that raised this question
+could take, because both need a production ledger no single container run has. (a) The distribution
+of idle gaps between dispatches, which decides whether a second daemon lane would starve the deploy
+idle gate. (b) Daemon throughput itself — dispatches per day, mean run duration, idle fraction, and
+the fraction of dispatches producing no merged PR — which decides whether lane width is even the
+binding constraint. Either measurement landing against this ruling reopens this ruling; absent
+that, re-deriving the answer from scratch again is wasted work this entry is meant to stop.
+
+Not in scope here: building daemon-side lanes, moving N, or the W1-T325 `dispatchLanes` policy row
+(a prerequisite for ever ACTING on a different answer, not for this ruling to stand).
+
+- Rollback: revert this PR — removes only this DECISIONS.md entry; no runtime code touched, and no
+  ledger line written.
