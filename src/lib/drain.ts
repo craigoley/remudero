@@ -723,6 +723,19 @@ export interface DrainDeps {
    */
   onCircuitBreak?: (task: Task) => void;
   /**
+   * W1-T316 (wiring W1-T271's own predicate): THE LIFETIME DISPATCH CAP, re-derived from the
+   * ledger each call — same freshness contract as `isCircuitTripped`. Unlike the streak
+   * breaker, never reset by a `pr.opened` line — see {@link NextRunnableOpts.isLifetimeCapExceeded}'s
+   * doc for the full W1-T254 rationale. Optional — omitted, dispatch behaves exactly as before
+   * this cap existed.
+   */
+  isLifetimeCapExceeded?: (taskId: string) => boolean;
+  /**
+   * Called once per task excluded because its lifetime dispatch cap is exceeded — mirrors
+   * `onCircuitBreak`'s legibility contract, so this exclusion is never a silent skip.
+   */
+  onLifetimeCapExceeded?: (task: Task) => void;
+  /**
    * W1-T119: true when a task's own GitHub read is INDETERMINATE (a genuine
    * read failure), re-derived from the SAME projection `refreshMerged` just
    * built — same freshness contract as `isOpenPr`/`isCircuitTripped`. Optional
@@ -798,6 +811,10 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
   // drain's own first observation of each task id; `isCircuitTripped` itself is
   // still consulted (and still excludes the task from dispatch) every tick.
   const circuitEscalated = new Set<string>();
+  // LIFETIME CAP ESCALATION DEDUP (W1-T316, mirroring `circuitEscalated` immediately above):
+  // bounds the CALLBACK to the drain's own first observation of each task id — the predicate
+  // itself is still consulted (and still excludes the task) every tick.
+  const lifetimeCapEscalated = new Set<string>();
 
   const summary = (stopReason: StopReason, stopDetail?: string): DrainSummary => {
     const s: DrainSummary = { attempted, merged, stopReason, stopDetail, costUsd, resumeCommand: resumeCommand(opts) };
@@ -920,6 +937,18 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
           deps.onCircuitBreak?.(t);
         }
       },
+      isLifetimeCapExceeded: deps.isLifetimeCapExceeded,
+      // LIFETIME DISPATCH CAP (W1-T316/W1-T271): a legible ledger line every tick it is
+      // consulted (mirrors dispatch.circuit_broken) — but the caller's own escalation hook
+      // fires AT MOST ONCE per task id per drain run (`lifetimeCapEscalated`, above) — the
+      // drain proceeds to the next runnable task rather than halting.
+      onLifetimeCapExceeded: (t) => {
+        log("dispatch.lifetime_capped", { task: t.id });
+        if (!lifetimeCapEscalated.has(t.id)) {
+          lifetimeCapEscalated.add(t.id);
+          deps.onLifetimeCapExceeded?.(t);
+        }
+      },
     };
     // CURATION (W1-T140): a curated selection overrides the natural DAG scan
     // entirely — dispatch honors EXACTLY the operator's list and order, never
@@ -1021,6 +1050,8 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
   // tripped task id, across every pass — `isCircuitTripped` itself is still
   // consulted (and still excludes the task) every pass.
   const circuitEscalated = new Set<string>();
+  // Same escalation-dedup contract, for the lifetime cap (W1-T316/W1-T271).
+  const lifetimeCapEscalated = new Set<string>();
   // W1-T290: same bounded-degraded ceiling as the single-lane loop above —
   // see that loop's comment. BOTH sites carry it, or the multi-lane path
   // (`--lanes`) would stay the latent fail-open bug this task closes.
@@ -1120,6 +1151,14 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
         if (!circuitEscalated.has(t.id)) {
           circuitEscalated.add(t.id);
           deps.onCircuitBreak?.(t);
+        }
+      },
+      isLifetimeCapExceeded: deps.isLifetimeCapExceeded,
+      onLifetimeCapExceeded: (t) => {
+        log("dispatch.lifetime_capped", { task: t.id });
+        if (!lifetimeCapEscalated.has(t.id)) {
+          lifetimeCapEscalated.add(t.id);
+          deps.onLifetimeCapExceeded?.(t);
         }
       },
     };
