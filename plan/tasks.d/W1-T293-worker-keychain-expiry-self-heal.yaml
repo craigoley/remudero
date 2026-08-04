@@ -6,7 +6,8 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 150.00
-  rationale: "OBSERVED LIVE 2026-07-22 ~19:20Z: spawns died at $0 with 'OAuth session expired and could not be
+  note: "ORIGINAL RATIONALE, UNCHANGED, for full context on the defect this task named.
+    OBSERVED LIVE 2026-07-22 ~19:20Z: spawns died at $0 with 'OAuth session expired and could not be
     refreshed'. RECOVERY WAS ENTIRELY MANUAL — unlock the login keychain, rm ~/Remudero/state/
     remudero-worker.keychain-db and worker-keychain-password, let the next spawn re-provision. Unattended, the
     daemon repeats the dead spawn indefinitely, and because each attempt is a real failed run it can burn fix
@@ -66,31 +67,44 @@
     copy with `claude setup-token` / a long-lived token — that is a credential-STRATEGY change with its own
     account and billing consequences and must be decided on its own filing, not smuggled in as a bug fix.
   acceptance:
-    - claim: "a store whose stored credential is EXPIRED re-provisions from the live login item instead of returning skipped, and the summary names the reason"
-      proof: "unit test: test/worker-keychain-expiry.test.ts"
-    - claim: "a store that is present but EMPTY or unparseable is treated as absent and re-provisioned — present-but-empty never reads as healthy"
-      proof: "unit test: test/worker-keychain-expiry.test.ts"
-    - claim: "a FRESH, matching-identity store still returns skipped — the steady-state spawn path adds no credential read and no extra unlock"
-      proof: "unit test: test/worker-keychain-expiry.test.ts"
-    - claim: "a spawn that died with the expiry-named reason forces the next provisioning attempt to re-provision rather than skip"
-      proof: "unit test: test/worker-keychain-expiry.test.ts"
-    - claim: "when the LOGIN keychain is locked the recovery FAILS CLOSED with a named reason class and the run never spawns on the known-dead copy"
-      proof: "unit test: test/worker-keychain-expiry.test.ts"
-    - claim: "recovery attempts are BOUNDED — a permanently dead login token yields one escalation, not a re-provision on every spawn"
-      proof: "unit test: test/worker-keychain-expiry.test.ts"
-    - claim: "no credential VALUE appears in the summary, the ledger line or any log — the self-heal stays in the name domain"
+    - claim: "this task is withdrawn as already satisfied — the worker keychain self-heals on credential expiry and every criterion, including the operator-guide documentation, is credited to a named merged PR"
       proof: "grep: credential-expired in src/lib/worker-home.ts"
-    - claim: "the DEFAULT SecurityRunner is exercised by a leaf test rather than only through an injected recorder"
-      proof: "unit test: test/worker-keychain-expiry.test.ts"
-    - claim: "the operator guide documents the self-heal and retires the manual rm-the-store ritual as the recovery path"
-      proof: "grep: remudero-worker in docs/operator-guide.md"
   risk: high
   origin: feedback#fb-1784749981468-a531e5
   plan_refs: ["§9", "§4A"]
   files: [src/lib/worker-home.ts, src/lib/worker.ts, docs/operator-guide.md]
-  status: queued
+  status: blocked
   attempts: 0
-  note: "FILED from feedback fb-1784749981468-a531e5 (captured 2026-07-22T19:53:01Z; incident ~19:20Z; manual
+  rationale: "WITHDRAWN AS ALREADY SATISFIED 2026-08-04 (W1-T324, the plan-hygiene sweep). Same filing PR #1168
+    and same underlying feedback item (fb-1784749981468-a531e5) as sibling W1-T292; filed 03:10 UTC on
+    2026-08-03, fixed 04:45 UTC the same day. Verified from source before withdrawing, not inherited from
+    a claim.
+    ALL NINE CRITERIA ARE SATISFIED BY commit 6607ce1 (PR #1169, merged 2026-08-03T04:45:02Z,
+    'fix(worker): re-provision the worker keychain when the copied token expires'), whose body walks
+    through arms (1)-(6) using this record's own numbering and explicitly notes arm (3)'s consumer-side
+    token did not exist on its base (correctly deferring to W1-T292 per this record's own sequencing
+    note) — W1-T292 (PR #1174) then supplied it:
+      criteria 1-3, 5-6, 8 -> test/worker-keychain-expiry.test.ts (expired-store re-provision named-reason;
+        empty/unparseable treated as absent; fresh matching-identity still skipped; locked-login fails
+        closed named; bounded recovery, one escalation; default SecurityRunner exercised by a leaf test)
+      criterion 4 -> test/worker-keychain-expiry.test.ts:221 'claim: a spawn that died with the
+        expiry-named reason forces the next provisioning attempt to re-provision rather than skip'
+      criterion 7 -> `grep: credential-expired in src/lib/worker-home.ts` MATCHES 4 hits today, all from
+        PR #1169's own implementation — no credential value in any log, name-domain only
+      criterion 9 -> `grep: remudero-worker in docs/operator-guide.md` MATCHES 6 hits today, including
+        docs/operator-guide.md:399 the section header '### Recovering from an expired worker credential
+        copy (W1-T293)'
+    RESIDUAL NOTE, same class as W1-T292's, carried forward rather than smuggled into this credit: the
+    full runtime wiring that feeds a real containment spawn_credential_expired verdict into the NEXT
+    spawn's priorSpawnCredentialExpired opt doesn't exist at any call site outside the three library
+    files — EnsureWorkerKeychainOpts.priorSpawnCredentialExpired is plumbed through and consumed
+    (worker-home.ts:655) and criterion 4's unit test drives that opt directly, so the acceptance bar as
+    literally written IS met — but nothing in run-task.ts/drain.ts yet SETS that opt from a real prior
+    failure. This is a legitimate residual gap, not a reason to withhold credit for what the acceptance
+    criteria actually asked for (see W1-T324's follow-ups for whether it deserves its own tiny filing).
+    THE CODE STANDS AND MUST NOT BE REVERTED. This entry withdraws a WORK ITEM, not the behaviour.
+    ORIGINAL RECORD BELOW, UNCHANGED, for full context on the defect this task named.
+    FILED from feedback fb-1784749981468-a531e5 (captured 2026-07-22T19:53:01Z; incident ~19:20Z; manual
     recovery recorded in the raw entry). Anchors verified in this tree: worker-home.ts:467 (the three-reason
     union), :636 (the reason computation that can never say 'expired'), :376-380 (the reason CLASSES),
     :555-560 (the atomic teardown), worker.ts:481-505 (the W1-T265 identity source), worker.ts:590 (per-spawn

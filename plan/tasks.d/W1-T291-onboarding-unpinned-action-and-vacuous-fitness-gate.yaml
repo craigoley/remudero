@@ -6,7 +6,8 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 60.00
-  rationale: "MEASURED in src/lib/project-init.ts. §5 TIER 1 states the rule without qualification —
+  note: "ORIGINAL RATIONALE, UNCHANGED, for full context on the two defects this task named.
+    MEASURED in src/lib/project-init.ts. §5 TIER 1 states the rule without qualification —
     'Pinned action SHAs, never tags — uses org/action@<40-char-sha>; a moved tag is a supply-chain
     vector' (MASTER-PLAN.md:1519) — and §5A:1587 says the stack rmd project init scaffolds is
     'SHA-pinned, least-privilege'. The dotnet profile violates both on the ONBOARDING OUTPUT PATH:
@@ -78,23 +79,35 @@
     which is exactly the fixture (B) has to extend. Both new assertions read the same
     buildProjectInit payload the existing cases read; a second file would fork that fixture setup.
   acceptance:
-    - claim: "the generated dotnet ci.yml references setup-dotnet by 40-char SHA — no moving tag, no TODO(operator) deferral"
-      proof: "unit test: test/project-init.test.ts"
-    - claim: "no step in any generated workflow reports success while asserting nothing, and the generated dotnet stack still reports green-not-deadlocked on a fresh repo with no fitness rules authored"
-      proof: "unit test: test/project-init.test.ts"
-    - claim: "the generated .remudero/principles.yaml describes the dotnet fitness rule as unarmed rather than as an enforced contract"
-      proof: "unit test: test/project-init.test.ts"
-    - claim: "the pinned dotnet action ref is a named constant on the generator's dotnet path"
+    - claim: "this task is withdrawn as already satisfied — the generated dotnet action is pinned, the fake fitness gate is disarmed, and both are credited to a named merged PR"
       proof: "grep: SETUP_DOTNET_PINNED in src/lib/project-init.ts"
-    - claim: "the existing project-init fixtures still pass unchanged for the ts and python profiles"
-      proof: "unit test: test/project-init.test.ts"
   risk: medium
   origin: feedback#fb-1784732686801-a1d4df
   plan_refs: ["§5", "§5A"]
   files: [src/lib/project-init.ts, test/project-init.test.ts]
-  status: queued
+  status: blocked
   attempts: 0
-  note: "Filed from feedback fb-1784732686801-a1d4df (cli, 2026-07-22), which reported both defects with
+  rationale: "WITHDRAWN AS ALREADY SATISFIED 2026-08-04 (W1-T324, the plan-hygiene sweep). Filed and fixed
+    within the same 23-minute window on 2026-08-03 — almost certainly the triage-filing PR (#1163, this
+    record's own origin) and the implementation PR (#1164) were dispatched concurrently against the same
+    underlying feedback item, and whichever landed second never saw the other's output. Verified from
+    source before withdrawing, not inherited from a claim.
+    ALL FIVE CRITERIA ARE SATISFIED BY commit d7f8823 (PR #1164, merged 2026-08-03T02:54:43Z,
+    'fix(project-init): pin dotnet setup action and disarm the fake fitness gate'), whose body states
+    verbatim: 'This PR touches only src/lib/project-init.ts and its co-located test — exactly the two
+    files plan/tasks.d/W1-T291-...yaml scopes':
+      criterion 1 -> test/project-init.test.ts:167 (setup-dotnet pinned by 40-char SHA, no TODO(operator))
+      criterion 2 -> test/project-init.test.ts:175,188 (no step reports success while asserting nothing;
+        the generated aggregator still reports green-not-deadlocked)
+      criterion 3 -> test/project-init.test.ts:205 (principles.yaml marks dotnet fitness UNARMED)
+      criterion 4 -> `grep: SETUP_DOTNET_PINNED in src/lib/project-init.ts` MATCHES 2 hits today
+        (:113 the constant, :412 its use) — the old SETUP_DOTNET_UNPINNED literal and the
+        'always succeeds' placeholder text are both gone from the tree, replaced by a comment reading
+        'UNARMED, NOT a fake pass (W1-T291)'
+      criterion 5 -> test/project-init.test.ts (ts/python fixtures preserved unchanged)
+    THE CODE STANDS AND MUST NOT BE REVERTED. This entry withdraws a WORK ITEM, not the behaviour.
+    ORIGINAL RECORD BELOW, UNCHANGED, for full context on the two defects this task named.
+    Filed from feedback fb-1784732686801-a1d4df (cli, 2026-07-22), which reported both defects with
     falsifying greps — `grep -n 'setup-dotnet@v4' src/lib/project-init.ts` and `grep -n 'always succeeds'
     src/lib/project-init.ts` — and both still match at filing time.
     verify:auto — the whole surface is generated text asserted against fixtures, exactly as W1-T27's own
