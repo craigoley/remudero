@@ -1,0 +1,57 @@
+- id: W1-T337
+  title: "the updateProposalRegistry lock assertion fails intermittently in the REQUIRED ci check — and nothing establishes whether the TEST is racy or the LOCK is, so a green main may be masking a real write-clobbering race"
+  repo: remudero
+  depends_on: []
+  type: diagnose
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 50.00
+  files: [test/inbox-registry-atomic.test.ts, src/lib/inbox.ts]
+  risk: high
+  rationale: "MEASURED 2026-08-04, twice, on unrelated PRs. `test/inbox-registry-atomic.test.ts`'s
+    `W1-T240 claim 2: two 'concurrent' updateProposalRegistry calls -- B's read genuinely happens
+    only after A's write has landed, enforced by the lock -- preserve BOTH updates, never one
+    clobbering the other` failed as `not ok` in the REQUIRED `ci` check:
+      PR #1256 — failed at 04:48 and again at 04:50 on the same head sha (1 fail / 4855 pass)
+      PR #1295 — failed at 17:38 and again at 17:40 on the same head sha (1 fail / ~5000 pass)
+    Both PRs were plan-only shard edits that cannot touch registry locking. Both cleared on a
+    re-minted sha with a byte-identical tree, which is what identifies it as non-deterministic
+    rather than a break on main.
+    THE FRAMING THAT MATTERS, AND THE REASON THIS IS `diagnose` NOT A TEST-QUARANTINE TASK: this
+    test asserts a LOCKING INVARIANT — that B's read happens strictly after A's write lands, so
+    neither update clobbers the other. A 1-in-N failure of such an assertion has two possible
+    causes and they are not equally benign:
+      (a) the TEST's own choreography is racy and the lock is sound, or
+      (b) THE LOCK IS racy, and the test is correctly catching a real intermittent
+          write-clobbering race in `updateProposalRegistry` that a green main is otherwise hiding.
+    Nothing measured so far distinguishes them. Treating it as 'a flaky test' presumes (a), which
+    is the assumption that would let a genuine data-loss race ship. The registry is the ratification
+    inbox's own state — a clobbered write there loses a proposal.
+    THE OPERATIONAL COST IS SECONDARY BUT REAL: it blocks a REQUIRED check, the W1-T76 fix rung
+    cannot repair it (there is no code defect in the PR to fix), and no lane retries a flake — so
+    every occurrence costs a full CI cycle plus a hand-minted sha. Two such cycles were spent today.
+    CLAUDE.md records a DIFFERENT W1-T240 symptom — `test/run-task.test.ts` crashing at FILE level
+    under `--experimental-test-coverage`. This is not that: a single named test returns `not ok`
+    while its file's other ~4855 assertions pass."
+  design: |
+    ESTABLISH (a) OR (b) BEFORE CHANGING EITHER. The answer decides what the fix even is.
+    (1) Reproduce deterministically. Run the single test under repetition until it fails, and
+        capture WHICH invariant broke — a lost update, an out-of-order read, or a timeout. A
+        failure mode that cannot be reproduced locally is itself a finding worth reporting.
+    (2) Read the lock implementation and the test's choreography side by side, and state which one
+        does not guarantee what the assertion assumes. Name the line.
+    (3) If the LOCK is racy (b), that is a correctness defect in the ratification inbox and the
+        test is doing its job — fix the lock, keep the test, and say plainly in the PR body that a
+        real race was found. Do NOT quarantine or loosen the assertion.
+    (4) If the TEST is racy (a), tighten its synchronisation so it asserts the same invariant
+        deterministically. Weakening the claim to make it pass is the failure mode to avoid — the
+        assertion is the only thing standing between a lock regression and a silent clobber.
+    (5) Only after (1)-(4): consider whether a required-check flake warrants an automatic re-run
+        path, since no lane retries one today. That is a separate concern and may be its own task.
+  acceptance:
+    - claim: "the report names whether the test's choreography or the lock itself fails to guarantee the asserted ordering, citing the line"
+      proof: "unit test: test/inbox-registry-atomic.test.ts"
+    - claim: "the assertion still requires both concurrent updates to survive — it is not weakened or quarantined to make CI green"
+      proof: "grep: preserve BOTH updates in test/inbox-registry-atomic.test.ts"
+  origin: oper#registry-lock-flake-2026-08-04
+  plan_refs: ["§5C"]
