@@ -43,7 +43,7 @@ import {
 } from "./drain.js";
 import { HEADROOM_LIMIT_PCT, RESET_UNKNOWN, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
-import type { CostGovernorResult } from "./sweep.js";
+import type { CostGovernorResult, QueueGovernorResult } from "./sweep.js";
 import { assertRunnable, PlanError, type MergedResolver, type Plan, type Task } from "./plan.js";
 import type { StatusProjection } from "./status.js";
 // Type-only (erased at build, same discipline as StatusProjection above) — W1-T160's
@@ -603,6 +603,24 @@ export interface DaemonDeps {
    * "stranding in-flight work to save money is a worse failure than the spend itself").
    */
   checkCostGovernor?: () => CostGovernorResult | undefined;
+  /**
+   * W1-T321 (wiring `checkQueueGovernor`, sweep.ts, the W1-T121 23-open-PR incident): THE WIP
+   * CEILING, re-derived from the current open-PR count each call — same freshness contract as
+   * `checkCostGovernor` immediately above. UNLIKE `isCircuitTripped`/`isLifetimeCapExceeded`, this
+   * is NOT task-specific — one answer per tick — so it is consulted directly in the loop below,
+   * alongside `checkCostGovernor`, rather than threaded through `nextRunnable`'s per-task chain. A
+   * defined return means "defer — do not open a new run this tick", carrying the observed open
+   * count/limit that produced it; `undefined` means proceed normally. UNLIKE drain.ts's bounded
+   * pass (which stops outright on a deferral), this daemon is PERSISTENT: a deferral is an
+   * in-process idle heartbeat, the same shape `checkCostGovernor`'s own branch just above already
+   * uses, so the loop resumes on its own once the observed open count drops back under the limit
+   * (a PR merges/closes elsewhere). The real wiring (run-task.ts) also LEDGERS the deferral itself
+   * (`logQueueGovernorDeferral`) before returning, so this loop never needs `ledgerPath`/`runId` to
+   * report it. Optional — omitted, dispatch behaves exactly as before this governor existed. Never
+   * consulted from `deps.sweep`/`deps.sweepLight` — drainage of already-open PRs is a separate code
+   * path this predicate is never wired into (see `checkQueueGovernor`'s own asymmetry note).
+   */
+  checkQueueGovernor?: () => QueueGovernorResult | undefined;
   /**
    * W1-T119: true when a task's own GitHub read is INDETERMINATE (a genuine
    * read failure — rate-limited, network error, auth failure — rather than a
@@ -1632,6 +1650,26 @@ export async function runDaemon(
         tick: ticks,
         observed_day_cost_usd: costGoverned.observedDayCostUsd,
         daily_cost_ceiling_usd: costGoverned.ceilingUsd,
+        poll_interval_ms: pollIntervalMs,
+      });
+      await deps.sleep(pollIntervalMs);
+      continue;
+    }
+
+    // QUEUE GOVERNOR / WIP CEILING (W1-T321, wiring `checkQueueGovernor`/sweep.ts, the W1-T121
+    // 23-open-PR incident): a global gate, not a per-task one, so — like the cost governor just
+    // above — it is checked directly here, right after it and before the retro trigger (a fired
+    // retro spawns a real, budget-costing run too). UNLIKE drain.ts's bounded pass (which stops
+    // outright), this daemon is PERSISTENT: a deferral is an in-process idle heartbeat, identical
+    // in shape to the cost governor's own branch just above, so the loop resumes automatically
+    // once the observed open-PR count drops back under the limit.
+    const queueGoverned = deps.checkQueueGovernor?.();
+    if (queueGoverned) {
+      ticks++;
+      log("daemon.queue_governor", {
+        tick: ticks,
+        observed_open_count: queueGoverned.observedOpenCount,
+        wip_limit: queueGoverned.wipLimit,
         poll_interval_ms: pollIntervalMs,
       });
       await deps.sleep(pollIntervalMs);
