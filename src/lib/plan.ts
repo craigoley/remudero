@@ -62,6 +62,24 @@ export interface AcceptanceCriterion {
    * ordinary criterion, shown to the worker like any other.
    */
   holdout?: boolean;
+  /**
+   * W1-T324 (the plan-hygiene sweep, Standing rule 15 compliance): marks a criterion as an
+   * INERT ARCHAEOLOGY RECORD — the ORIGINAL claim/proof of a task that has since been
+   * withdrawn (per the W1-T229 retirement convention: `status: blocked`, rationale rewritten
+   * to `WITHDRAWN`, one fresh executable criterion appended after it). The retirement
+   * convention APPENDS its new criterion rather than replacing the array in place, because
+   * `criterionFieldTampered` (lib/review.ts, the Standing rule 15 binding gate) fails ANY
+   * diff that DELETES an existing `claim:`/`proof:` line from `plan/tasks.yaml` unless the
+   * whole PR is plan-only — and a PR that also ships non-plan code (as W1-T324's own did) is
+   * never plan-only. Leaving the pre-dialect original text physically in place (rather than
+   * deleting it, even to move it to `note:`) means the array still carries free-prose
+   * proofs; `historical: true` tells `proofDialectViolations` (lib/task-linter.ts) to skip
+   * exactly those — the SAME "never expected to be executable" exemption `satisfied_by`
+   * already gets, but without implying the criterion is SATISFIED (it is retired, not met).
+   * A blocked task never dispatches (drain.ts's isDispatchEligible), so an unexecuted
+   * historical criterion can never be reached by a real run either way.
+   */
+  historical?: boolean;
 }
 
 /**

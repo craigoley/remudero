@@ -486,7 +486,7 @@ function looksLikeNonTitleBody(body: string): boolean {
   return body.includes(" -> ") || body.includes("; ") || body.length > 100;
 }
 
-/** Every non-`satisfied_by` criterion whose proof does not parse as a
+/** Every non-`satisfied_by`, non-`historical` criterion whose proof does not parse as a
  *  {@link parseWhitelistedProof} shape — a proof that CANNOT execute never
  *  lands (the dead proof floor, moratorium finding 9). BLOCK by default, and
  *  since impl-AK every call site including run-task.ts's pre-dispatch gate
@@ -500,6 +500,13 @@ export function proofDialectViolations(task: Task, opts: LintOpts = {}): LintVio
   const violations: LintViolation[] = [];
   (task.acceptance ?? []).forEach((c, i) => {
     if (c.satisfied_by) return; // Architect-only; never expected to be executable prose
+    // W1-T324: `historical: true` is an inert archaeology record — the pre-withdrawal
+    // ORIGINAL text of a now-retired criterion, preserved in place (see AcceptanceCriterion.
+    // historical's doc for why it cannot simply be deleted). It was never executable when
+    // filed and is not expected to become so; the task's `status: blocked` is what actually
+    // keeps it from ever being dispatched, so flagging its prose here would only re-report a
+    // fact already fully disclosed by the record's own rationale/note.
+    if (c.historical) return;
     const proof = c.proof ?? "";
     const trimmed = proof.trim();
     const claimHead = (c.claim ?? "").slice(0, 60);

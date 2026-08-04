@@ -722,6 +722,27 @@ test("a satisfied_by criterion is exempt — Architect-only, never expected to b
   assert.deepEqual(proofDialectViolations(t), []);
 });
 
+test("W1-T324: a historical criterion is exempt from the dead-proof floor — an inert archaeology record, not a satisfied one", () => {
+  const t = task({
+    id: "FIX-DIALECT-HISTORICAL",
+    acceptance: [
+      { claim: "pre-withdrawal free prose", proof: "worker transcript shows npm ci, never executed", historical: true },
+    ],
+  });
+  assert.deepEqual(proofDialectViolations(t), []);
+});
+
+test("W1-T324: WITHOUT historical, the identical free-prose proof is still blocked — the exemption is opt-in, never ambient", () => {
+  const t = task({
+    id: "FIX-DIALECT-NOT-HISTORICAL",
+    acceptance: [{ claim: "pre-withdrawal free prose", proof: "worker transcript shows npm ci, never executed" }],
+  });
+  const violations = proofDialectViolations(t);
+  assert.equal(violations.length, 1);
+  assert.equal(violations[0]!.severity, "block");
+  assert.equal(violations[0]!.check, "proof-dialect");
+});
+
 // ── PROOF-RESOLVABILITY (W1-T101 — a dialect prefix is a promise) ────────────
 
 test("ACCEPTANCE 1: the W1-T100 regression corpus — all three verbatim proofs flag, remedy text names both options", () => {
