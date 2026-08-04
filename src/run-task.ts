@@ -364,10 +364,12 @@ import { validateWorkerSettingsFile } from "./lib/settings.js";
 import {
   buildBatchedGithub,
   createDispatchBreakerCache,
+  DEFAULT_MAX_TASK_LIFETIME_DISPATCHES,
   deriveStatus,
   evaluateDispatchBreaker,
   ghGateway,
   ghRequiredStatusCheckContexts,
+  isLifetimeDispatchCapExceeded,
   projectPlan,
   readLedgerLines,
   type DeriveDeps,
@@ -7525,6 +7527,69 @@ export function escalateCircuitBreak(
 }
 
 /**
+ * W1-T316's escalation side — `escalateCircuitBreak`'s twin for the LIFETIME dispatch cap
+ * (W1-T271): called once `nextRunnable`'s `isLifetimeCapExceeded` (status.ts's
+ * `isLifetimeDispatchCapExceeded`, via this file's `breakerGateFor`) reports a task has been
+ * dispatched (`run.start`) at least `DEFAULT_MAX_TASK_LIFETIME_DISPATCHES` times across its
+ * WHOLE recorded history — a count `pr.opened` never resets, unlike the streak breaker's own,
+ * so this fires for the shape that evades that breaker entirely (W1-T254: five dispatches in
+ * eighty minutes, each one opening and merging its own genuine no-op PR).
+ *
+ * DEDUP + ORDERING mirror `escalateCircuitBreak` exactly, on the sibling ledger step
+ * (`dispatch.lifetime_capped.escalated`, DECISION_RELEVANT so a rotation never re-arms it):
+ * checked via this module's OWN ledger line (never `escalation.issue_opened` alone), and the
+ * marker is written whether or not delivery succeeds, for the same reason `escalateCircuitBreak`'s
+ * own doc gives — an undelivered notice costs one operator read, not an unbounded retry loop.
+ */
+export function escalateLifetimeCapExceeded(
+  task: Task,
+  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
+): void {
+  const already = readLedgerLines(ctx.ledgerPath).some(
+    (l) => l.step === "dispatch.lifetime_capped.escalated" && l.task_id === task.id,
+  );
+  if (already) return;
+  const issueUrl = tryEscalate(
+    {
+      class: "BLOCKED",
+      taskId: task.id,
+      runId: ctx.runId,
+      summary: `${task.id}: lifetime dispatch cap exceeded — dispatched ${DEFAULT_MAX_TASK_LIFETIME_DISPATCHES}+ times, ever`,
+      detail:
+        `W1-T271: ${task.id} has been dispatched (\`run.start\`) at least ${DEFAULT_MAX_TASK_LIFETIME_DISPATCHES} ` +
+        `times across its whole recorded ledger history. UNLIKE the per-task circuit breaker above, this count is ` +
+        `NEVER reset by a \`pr.opened\` line — so a task that merges a genuine no-op PR every cycle (the W1-T254 ` +
+        `shape: five dispatches in eighty minutes, each one opening and merging its own PR) still trips this ` +
+        `backstop even though the streak breaker alone never would. Dispatch is now HALTED for this task until a ` +
+        `human resolves the underlying loop; this is the backstop, not a diagnosis of WHY.`,
+      options: [
+        {
+          label: "fix and resume",
+          detail: `Resolve ${task.id}'s underlying loop (a manual patch, a task re-scope, or \`rmd fix\`), then \`rmd drain\`/\`rmd daemon\` to continue.`,
+        },
+        {
+          label: "correct the credit",
+          detail: `If ${task.id} actually landed under a PR the ownership-assert rejected, \`rmd correct\` it (P9/W1-T75).`,
+        },
+      ],
+      recommendation: "fix and resume",
+    },
+    {
+      issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo),
+      ledgerPath: ctx.ledgerPath,
+      runId: ctx.runId,
+    },
+  );
+  appendLedger(ctx.ledgerPath, {
+    run_id: ctx.runId,
+    task_id: task.id,
+    step: "dispatch.lifetime_capped.escalated",
+    issue_url: issueUrl,
+    delivered: issueUrl !== null,
+  });
+}
+
+/**
  * P34 clause (c), W1-T249: the daemon's `onHeadroomBreach` hook, called when a
  * weekly (or session) window first crosses the operator reserve. Dispatch is
  * ALREADY paused by the time this fires (`runDaemon`'s own in-process idle,
@@ -7694,8 +7759,23 @@ export function escalateStarvation(
  * per (taskId, this tick) since `nextRunnable` calls `isIndeterminate` then, only if that
  * was false, `isCircuitTripped` for the SAME task in the same pass; without the memo the
  * breaker's full ledger re-read would run twice per task per tick for no reason.
+ *
+ * W1-T316 adds `isLifetimeCapExceeded` to this SAME gate rather than standing up a second
+ * per-invocation cache/read path elsewhere — `isDispatchEligible` consults it right after
+ * `isIndeterminate`/`isTripped` for the SAME task in the SAME pass (drain.ts), so it gets the
+ * identical per-(taskId, tick) memo those two already share. `evaluateDispatchBreaker` above
+ * owns its own internal ledger read for the streak breaker's regression check (status.ts,
+ * unchanged by this task); this is a second, independent, but equally memoized read of the
+ * SAME `ledgerPath` for `isLifetimeDispatchCapExceeded`'s different question (count EVERY
+ * `run.start`, never reset) — deliberately not routed through `evaluateDispatchBreaker`
+ * itself, whose cache/regression semantics belong to the streak breaker alone (W1-T271's own
+ * scope, not this task's to touch).
  */
-function breakerGateFor(ledgerPath: string): { isIndeterminate: (taskId: string) => boolean; isTripped: (taskId: string) => boolean } {
+function breakerGateFor(ledgerPath: string): {
+  isIndeterminate: (taskId: string) => boolean;
+  isTripped: (taskId: string) => boolean;
+  isLifetimeCapExceeded: (taskId: string) => boolean;
+} {
   const cache = createDispatchBreakerCache();
   let memo: { taskId: string; state: "tripped" | "clear" | "indeterminate" } | undefined;
   const stateFor = (taskId: string) => {
@@ -7704,9 +7784,17 @@ function breakerGateFor(ledgerPath: string): { isIndeterminate: (taskId: string)
     }
     return memo.state;
   };
+  let lifetimeMemo: { taskId: string; exceeded: boolean } | undefined;
+  const lifetimeCapExceededFor = (taskId: string) => {
+    if (lifetimeMemo?.taskId !== taskId) {
+      lifetimeMemo = { taskId, exceeded: isLifetimeDispatchCapExceeded(readLedgerLines(ledgerPath), taskId) };
+    }
+    return lifetimeMemo.exceeded;
+  };
   return {
     isIndeterminate: (taskId) => stateFor(taskId) === "indeterminate",
     isTripped: (taskId) => stateFor(taskId) === "tripped",
+    isLifetimeCapExceeded: lifetimeCapExceededFor,
   };
 }
 
@@ -7759,6 +7847,12 @@ async function drainCommand(
      *  test supplies a recording fake so the push glue runs without a real osascript send.
      *  Defaults to the operator's iMessage channel. */
     notifyChannel?: NotifyChannel;
+    /** W1-T316: injectable drain loop (mirrors {@link daemonCommand}'s identical `runDaemon`
+     *  seam). Defaults to the real {@link runDrain}. A test passes a stub that captures the
+     *  wired `DrainDeps` and returns immediately, so the dep object drainCommand actually
+     *  builds — the lifetime-cap predicate/callback included — is provable without spawning a
+     *  real, unbounded drain. Production never passes this. */
+    runDrain?: typeof runDrain;
   } = {},
 ): Promise<number> {
   // FAIL LOUD on junk args BEFORE touching config/locks/spawns (a malformed control command
@@ -7961,8 +8055,9 @@ async function drainCommand(
     lock_pid: drainLock.info.pid,
   });
 
+  const runDrainFn = deps.runDrain ?? runDrain;
   try {
-    const summary = await runDrain(
+    const summary = await runDrainFn(
       plan,
       {
         refreshMerged,
@@ -7979,6 +8074,11 @@ async function drainCommand(
         // "clear" that would silently untrip an already-tripped task.
         isCircuitTripped: (taskId) => breakerGate.isTripped(taskId),
         onCircuitBreak: (t) => escalateCircuitBreak(t, { owner, repo, ledgerPath, runId }),
+        // LIFETIME DISPATCH CAP (W1-T316 wires W1-T271's own predicate): the SAME
+        // breakerGate this invocation already holds for the streak breaker above,
+        // never a second cache/read path — see breakerGateFor's doc.
+        isLifetimeCapExceeded: (taskId) => breakerGate.isLifetimeCapExceeded(taskId),
+        onLifetimeCapExceeded: (t) => escalateLifetimeCapExceeded(t, { owner, repo, ledgerPath, runId }),
         runOne: (taskId) => runTask(taskId, { planPath, config, allowStale }),
         readUsage: () => readUsageSnapshot(config),
         checkStop: () => stopDetail(config.root),
@@ -8506,6 +8606,11 @@ export async function daemonCommand(
         // "clear" that would silently untrip an already-tripped task.
         isCircuitTripped: (taskId) => breakerGate.isTripped(taskId),
         onCircuitBreak: (t) => escalateCircuitBreak(t, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
+        // LIFETIME DISPATCH CAP (W1-T316 wires W1-T271's own predicate): the SAME
+        // breakerGate this invocation already holds for the streak breaker above,
+        // never a second cache/read path — see breakerGateFor's doc.
+        isLifetimeCapExceeded: (taskId) => breakerGate.isLifetimeCapExceeded(taskId),
+        onLifetimeCapExceeded: (t) => escalateLifetimeCapExceeded(t, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
         runOne: (taskId) =>
           runTask(taskId, {
             planPath: target.planPath,

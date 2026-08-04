@@ -329,6 +329,10 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "run.start",
   "pr.opened",
   "dispatch.circuit_broken.escalated",
+  // W1-T316: escalateLifetimeCapExceeded's (run-task.ts) own dedup marker — the SAME
+  // "written whether or not delivery succeeds" discipline as `dispatch.circuit_broken.escalated`
+  // immediately above; a rotation dropping it re-opens a duplicate lifetime-cap escalation.
+  "dispatch.lifetime_capped.escalated",
   "daemon.headroom_reserve.escalated",
   "dispatch.starvation.escalated",
   "verdict",

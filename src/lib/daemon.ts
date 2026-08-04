@@ -572,6 +572,18 @@ export interface DaemonDeps {
    */
   onCircuitBreak?: (task: Task) => void;
   /**
+   * W1-T316 (wiring W1-T271's own predicate): THE LIFETIME DISPATCH CAP (status.ts's
+   * `isLifetimeDispatchCapExceeded`, ledger-derived — `run.start` lines counted across the
+   * task's WHOLE history, never reset by a `pr.opened` line, unlike `isCircuitTripped`'s own
+   * count). Optional — omitted, dispatch behaves exactly as before this cap existed.
+   */
+  isLifetimeCapExceeded?: (taskId: string) => boolean;
+  /**
+   * Called once per task excluded because its lifetime dispatch cap is exceeded — mirrors
+   * `onCircuitBreak`'s legibility contract, so this exclusion is never a silent skip.
+   */
+  onLifetimeCapExceeded?: (task: Task) => void;
+  /**
    * W1-T119: true when a task's own GitHub read is INDETERMINATE (a genuine
    * read failure — rate-limited, network error, auth failure — rather than a
    * clean "no evidence"), re-derived from the SAME projection `refreshMerged`
@@ -1243,6 +1255,9 @@ export async function runDaemon(
   // every tick — see drain.ts's `runDrain`, the identical fix for the bounded
   // one-shot loop.
   const circuitEscalated = new Set<string>();
+  // Same per-run escalation-dedup contract, for the lifetime cap (W1-T316/W1-T271) — the
+  // predicate itself is still consulted (and still excludes the task) every tick.
+  const lifetimeCapEscalated = new Set<string>();
   // SPAWN-INFRA ESCALATION DEDUP (W1-T113 part iii, the W1-T104 discipline):
   // content-keyed on the failure's OWN `reason` text, never on task id — the
   // vanished-binary class blocks dispatch identically for every task, so
@@ -1708,6 +1723,23 @@ export async function runDaemon(
           // send it must never outrank staying alive to do the work.
           try {
             deps.onCircuitBreak?.(t);
+          } catch (e) {
+            log("daemon.escalation.failed", { task: t.id, error: String((e as Error)?.message ?? e) });
+          }
+        }
+      },
+      isLifetimeCapExceeded: deps.isLifetimeCapExceeded,
+      // LIFETIME DISPATCH CAP (W1-T316/W1-T271): a legible ledger line every tick it is
+      // consulted — but the caller's own escalation hook fires AT MOST ONCE per task id for
+      // this daemon run (`lifetimeCapEscalated`, above), mirroring `onCircuitBreak` immediately
+      // above including its try/catch — a failed notification costs one logged line, never the
+      // daemon's liveness.
+      onLifetimeCapExceeded: (t) => {
+        log("dispatch.lifetime_capped", { task: t.id });
+        if (!lifetimeCapEscalated.has(t.id)) {
+          lifetimeCapEscalated.add(t.id);
+          try {
+            deps.onLifetimeCapExceeded?.(t);
           } catch (e) {
             log("daemon.escalation.failed", { task: t.id, error: String((e as Error)?.message ?? e) });
           }
