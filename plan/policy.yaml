@@ -77,6 +77,18 @@ sweep:
     origin: "lifted:src/lib/sweep.ts:257 (DEFAULT_SWEEP_POLICY.wipLimit)"
     min: 1
     max: 50
+  # W1-T320: the rmd-owned temp-dir backstop's age ceiling (src/lib/tmp.ts's
+  # sweepStaleTempDirs). NET-NEW, not lifted from DEFAULT_TEMP_SWEEP_MAX_AGE_MS (24h) —
+  # the 2026-08-03 incident (fb-1785807201821-e4c9dc) measured 53,310 rmd-* dirs minting
+  # at ~200/minute, so the ENTIRE population is younger than 24h when the disk fills and
+  # the old ceiling mathematically cannot fire before ENOSPC. tmp-hygiene-owned dirs live
+  # for ONE test process, so an hour is generous headroom, not a tight shave. Retunable by
+  # plan review (this row), never a source-literal edit.
+  tmpMaxAgeMs:
+    value: 3600000
+    origin: "net-new"
+    min: 60000
+    max: 86400000
 
 drain:
   max:

@@ -127,6 +127,13 @@ test("sweepStaleTempDirs: removes rmd-owned dirs older than the ceiling, keeps f
 
     assert.deepEqual(summary.removed.sort(), [`${RMD_TMP_PREFIX}review-stale`]);
     assert.ok(summary.kept.includes(`${RMD_TMP_PREFIX}review-fresh`), "fresh rmd- dir is kept");
+    // W1-T320: the oldest-kept age (ms) — the fresh dir was seeded 1_000ms old, so the
+    // reported age must be at least that (real wall-clock elapses a little more by the time
+    // the sweep stats it, so ">=" rather than "==").
+    assert.ok(
+      summary.oldestKeptAgeMs !== null && summary.oldestKeptAgeMs >= 1_000,
+      `oldestKeptAgeMs (${summary.oldestKeptAgeMs}) must be at least the seeded 1_000ms age of the kept fresh dir`,
+    );
     assert.equal(existsSync(stale), false, "the stale dir is actually gone from disk");
     assert.equal(existsSync(fresh), true, "the fresh dir is untouched");
     assert.equal(existsSync(unrelated), true, "a non-rmd- entry is never touched, however old");
@@ -138,7 +145,7 @@ test("sweepStaleTempDirs: removes rmd-owned dirs older than the ceiling, keeps f
 
 test("sweepStaleTempDirs: an unreadable root is best-effort — returns empty, never throws", () => {
   const summary = sweepStaleTempDirs({ root: join(tmpdir(), "rmd-does-not-exist-" + "xyz123") });
-  assert.deepEqual(summary, { removed: [], kept: [] });
+  assert.deepEqual(summary, { removed: [], kept: [], oldestKeptAgeMs: null });
 });
 
 test("sweepStaleTempDirs: respects an injected clock, not real wall-clock age", () => {
@@ -151,6 +158,7 @@ test("sweepStaleTempDirs: respects an injected clock, not real wall-clock age", 
     const summary = sweepStaleTempDirs({ root, now: () => fakeNow });
     assert.deepEqual(summary.removed, [`${RMD_TMP_PREFIX}clocktest`]);
     assert.equal(existsSync(dir), false);
+    assert.equal(summary.oldestKeptAgeMs, null, "everything seeded was removed — nothing was kept, so the age is null, never a stale number");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

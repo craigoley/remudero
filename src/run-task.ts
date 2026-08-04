@@ -108,7 +108,7 @@ import {
   type StarvationCensus,
   priorUnrecognisedResetStrings,
 } from "./lib/daemon.js";
-import { makeTempDir, sweepStaleTempDirs, withTempDir } from "./lib/tmp.js";
+import { makeTempDir, sweepStaleTempDirs, withTempDir, type TempSweepOpts, type TempSweepSummary } from "./lib/tmp.js";
 import { reapWorkerScratch, sweepStaleWorkerScratch } from "./lib/worker-scratch.js";
 import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateServeLaunchdPlist, generateSupervisorLaunchdPlist, launchctlGuiTarget, launchdPlistPath, parseSupervisorStartInterval, SERVE_LABEL, serveLogPaths, SUPERVISOR_LABEL } from "./lib/launchd.js";
 import { realDeployDeps, requestDeploy, runDeployCycle } from "./lib/deployer.js";
@@ -8763,7 +8763,10 @@ export async function daemonCommand(
       if (homes.removed.length) {
         log("daemon.worker_home_sweep", { removed: homes.removed.length, sample: homes.removed.slice(0, 5) });
       }
-      return sweepStaleTempDirs();
+      // W1-T320: the age ceiling is now POLICY DATA (plan/policy.yaml's sweep.tmpMaxAgeMs),
+      // read off the SAME repoRoot-scoped `policy` this function already reads
+      // pollIntervalMs/the headroom curve from — never a second, independently-resolved read.
+      return sweepStaleTempDirs({ maxAgeMs: policy.values.sweep.tmpMaxAgeMs });
     },
     () => sweepStaleInflightLocks(join(config.root, "state", "inflight")),
     // W1-T235: the boot-time worker-keychain unlock, explicit and ledgered
@@ -8907,7 +8910,11 @@ export async function daemonCommand(
         // LEVEL-TRIGGERED PR-PIPELINE RECONCILER (W1-T77): the SAME runSweep the
         // `rmd sweep` CLI invokes, run once per poll iteration so no open PR
         // strands open-and-orphaned (#111/#113/#123). Best-effort by contract.
-        sweep: buildSweepHook(target.owner, target.repo, config, ledgerPath, runId, plan, log),
+        // W1-T320: threads the SAME repoRoot-scoped `policy` (loaded above for
+        // pollIntervalMs/the headroom curve) into the per-poll tmp-sweep rung — the
+        // regression lock this task's design demands (proof against the sweep
+        // configuration the daemon command actually builds, never a hand-built fixture).
+        sweep: buildSweepHook(target.owner, target.repo, config, ledgerPath, runId, plan, log, policy.values.sweep.tmpMaxAgeMs),
         // W1-T254 (the #707 fix): the restricted light-sweep ticker — ticks ONLY
         // the deterministic post-review re-post while `runOne` is unbounded and in
         // flight, so a green PR whose review went absent re-posts within one poll
@@ -11296,9 +11303,54 @@ export async function sweepEscalationReconcile(
 }
 
 /**
+ * W1-T320's PER-POLL rung for the tmp-dir backstop (design clause ii) — rides the daemon's
+ * poll cadence the same way `runWorktreeReapRung` (worker.ts) does, so the 26,711-dir ENOSPC
+ * backstop (src/lib/tmp.ts's `sweepStaleTempDirs`) actually re-fires on a long-running healthy
+ * daemon instead of only once at boot ('removed: 0, kept: 49979' on ten straight boots was the
+ * boot-only cadence's failure mode: a healthy daemon between boots never re-ran it at all).
+ *
+ * `opts.maxAgeMs` is the caller's resolved policy value — the real command threads
+ * `policy.values.sweep.tmpMaxAgeMs`, off the SAME repoRoot-scoped `policy` load
+ * pollIntervalMs/the headroom curve already use (see `buildSweepHook`'s `tmpMaxAgeMs` param),
+ * never a second, independent policy read here (test/config-reader-seams.test.ts's structural
+ * check pins every unredirectable `loadPolicy`/`loadDefaultPolicy` call site by name — this rung
+ * deliberately stays off that list by taking the value in, not reading it). Omitted ⇒
+ * `sweepStaleTempDirs`'s own default (`DEFAULT_TEMP_SWEEP_MAX_AGE_MS`) applies, same as before
+ * this task for any caller that predates it.
+ *
+ * Logs `daemon.tmp_sweep` with removed/kept COUNTS plus the oldest-kept age in ms (design
+ * clause iii), so "kept 0 because nothing qualified" reads differently from "kept N and the
+ * oldest is already close to the ceiling" — the boot-only line carried neither signal.
+ * Best-effort: `sweepStaleTempDirs` itself never throws, but this wrapper still degrades to a
+ * logged error rather than ever escaping into the sweep composite around it.
+ */
+export function runTmpSweepRung(
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  opts: TempSweepOpts = {},
+): TempSweepSummary {
+  try {
+    const swept = sweepStaleTempDirs(opts);
+    log("daemon.tmp_sweep", {
+      removed: swept.removed.length,
+      kept: swept.kept.length,
+      oldest_kept_age_ms: swept.oldestKeptAgeMs,
+    });
+    return swept;
+  } catch (e) {
+    log("daemon.tmp_sweep", { error: String((e as Error)?.message ?? e) });
+    return { removed: [], kept: [], oldestKeptAgeMs: null };
+  }
+}
+
+/**
  * The daemon's per-iteration sweep hook (acceptance 4: the SAME runSweep the CLI
  * uses). Best-effort by the DaemonDeps.sweep contract — swallows its own errors so
  * a sweep hiccup never halts the scheduler loop.
+ *
+ * `tmpMaxAgeMs` (W1-T320): the resolved `policy.values.sweep.tmpMaxAgeMs` the real daemon
+ * command threads through to {@link runTmpSweepRung} below — optional and trailing so every
+ * existing caller (tests included) that predates W1-T320 is unaffected; omitted ⇒
+ * `sweepStaleTempDirs`'s own default (`DEFAULT_TEMP_SWEEP_MAX_AGE_MS`) applies.
  */
 export function buildSweepHook(
   owner: string,
@@ -11308,6 +11360,7 @@ export function buildSweepHook(
   runId: string,
   plan: Plan,
   log: (step: string, extra?: Record<string, unknown>) => void,
+  tmpMaxAgeMs?: number,
 ): () => Promise<void> {
   // W1-T192: the daemon-side draft rung, built ONCE per daemon start (mirrors this
   // function's own once-per-daemon-start construction) — see buildInboxDraftHook's doc for
@@ -11334,6 +11387,10 @@ export function buildSweepHook(
       // try/catch, folded into runWorktreeReapRung (distinct from the shared "sweep.error"
       // below) so a reap hiccup never masks — or is masked by — the rungs above it.
       runWorktreeReapRung(config, log);
+      // W1-T320 — the tmp-dir backstop's PER-POLL rung (design clause ii): rides this SAME
+      // composite so it re-fires on a long-running healthy daemon, not only at boot. Own
+      // try/catch (folded into runTmpSweepRung), same discipline as the reap rung above.
+      runTmpSweepRung(log, tmpMaxAgeMs !== undefined ? { maxAgeMs: tmpMaxAgeMs } : {});
     } catch (e) {
       log("sweep.error", { error: String((e as Error)?.message ?? e) });
     }

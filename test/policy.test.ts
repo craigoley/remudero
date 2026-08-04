@@ -82,6 +82,7 @@ function goodRaw(): Record<string, unknown> {
       staleDays: { value: 14, origin: "lifted:src/lib/sweep.ts:254 (DEFAULT_SWEEP_POLICY.staleDays)", min: 1, max: 90 },
       strikeCap: { value: 2, origin: "lifted:src/lib/sweep.ts:255 (DEFAULT_SWEEP_POLICY.strikeCap)", min: 1, max: 10 },
       wipLimit: { value: 10, origin: "lifted:src/lib/sweep.ts:257 (DEFAULT_SWEEP_POLICY.wipLimit)", min: 1, max: 50 },
+      tmpMaxAgeMs: { value: 3_600_000, origin: "net-new", min: 60_000, max: 86_400_000 },
     },
     drain: {
       max: { value: 10, origin: "lifted:src/lib/drain.ts:243 (DEFAULT_MAX)", min: 1, max: 100 },
@@ -131,7 +132,7 @@ test("the SHIPPED plan/policy.yaml loads and lifts the current source values", (
   assert.equal(p.values.pruneGraceMs, 120_000);
   assert.equal(p.values.pollIntervalMs, 60_000);
   assert.equal(p.values.fixStrikeCap, 2);
-  assert.deepEqual(p.values.sweep, { staleDays: 14, strikeCap: 2, wipLimit: 10 });
+  assert.deepEqual(p.values.sweep, { staleDays: 14, strikeCap: 2, wipLimit: 10, tmpMaxAgeMs: 3_600_000 });
   assert.equal(p.values.drain.max, 10);
   assert.deepEqual(p.values.retro, { mergesThreshold: 25, daysThreshold: 7 });
   assert.deepEqual(p.values.headroom.curve, [
@@ -228,6 +229,14 @@ test("REJECTS a nested sweep field out of bounds, naming its dotted path", () =>
   const raw = goodRaw();
   (raw.sweep as Record<string, Record<string, unknown>>).wipLimit.value = 0;
   throwsPolicyError(() => validatePolicy(raw), /sweep\.wipLimit\.value.*out of its declared bound/);
+});
+
+// W1-T320: sweep.tmpMaxAgeMs is a bounded row like its three sweep.* siblings above — same
+// falsifier shape, proving the bound actually binds rather than accepting any number.
+test("REJECTS sweep.tmpMaxAgeMs out of its declared bound, naming its dotted path", () => {
+  const raw = goodRaw();
+  (raw.sweep as Record<string, Record<string, unknown>>).tmpMaxAgeMs.value = 999_999_999;
+  throwsPolicyError(() => validatePolicy(raw), /sweep\.tmpMaxAgeMs\.value.*out of its declared bound/);
 });
 
 test("W1-T264 acceptance 4 — a retro threshold outside its declared bound fails validation", () => {
@@ -351,6 +360,11 @@ test("every LIFTED field records origin=lifted:<source-site> — the net-new fie
   // no source literal to lift them from, because the rung they configure did not exist before.
   // impl-EK: `scratchReap.enabled` joins them for the same reason — there was no prior
   // literal gating a clone reap, because no clone reap existed.
+  // W1-T320: `sweep.tmpMaxAgeMs` joins them too — it is NOT a straight lift of
+  // src/lib/tmp.ts's DEFAULT_TEMP_SWEEP_MAX_AGE_MS (24h): the shipped policy value is a
+  // deliberate retuning (well below 24h — see this field's plan/policy.yaml comment for the
+  // ENOSPC incident that made 24h unsafe), so citing that constant as its origin would claim
+  // a source-site copy that never happened.
   const NET_NEW = new Set([
     "launchd.throttleIntervalS",
     "autoTriage.enabled",
@@ -360,6 +374,7 @@ test("every LIFTED field records origin=lifted:<source-site> — the net-new fie
     "autoTriage.depthCeiling",
     "autoTriage.maxPerDay",
     "scratchReap.enabled",
+    "sweep.tmpMaxAgeMs",
   ]);
   const liftedPaths = Object.keys(p.origin).filter((path) => !NET_NEW.has(path));
   assert.ok(liftedPaths.length > 0);

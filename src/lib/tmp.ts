@@ -70,10 +70,19 @@ export async function withTempDir<T>(kind: string, fn: (dir: string) => T | Prom
   }
 }
 
-/** What a boot sweep did, by dir name (not full path — the root is implicit). */
+/** What a sweep did, by dir name (not full path — the root is implicit).
+ *
+ * W1-T320: `oldestKeptAgeMs` — the largest `now() - mtime` among everything still on disk
+ * after this sweep (both deliberately-fresh kept dirs and any removal that hit a permission
+ * hiccup) — exists so `daemon.tmp_sweep` can distinguish "kept nothing because nothing
+ * qualified" (kept: 0) from "kept a population that is quietly aging toward the ceiling"
+ * (kept: N, oldestKeptAgeMs approaching maxAgeMs) — the boot-only-cadence health line that
+ * logged 'removed: 0, kept: 49979' ten times straight carried no signal to tell those apart.
+ * `null` iff nothing was kept. */
 export interface TempSweepSummary {
   removed: string[];
   kept: string[];
+  oldestKeptAgeMs: number | null;
 }
 
 export interface TempSweepOpts {
@@ -112,12 +121,17 @@ export function sweepStaleTempDirs(opts: TempSweepOpts = {}): TempSweepSummary {
   const now = opts.now ?? (() => Date.now());
   const removed: string[] = [];
   const kept: string[] = [];
+  let oldestKeptAgeMs: number | null = null;
+  const noteKept = (name: string, ageMs: number) => {
+    kept.push(name);
+    if (oldestKeptAgeMs === null || ageMs > oldestKeptAgeMs) oldestKeptAgeMs = ageMs;
+  };
 
   let entries: string[];
   try {
     entries = fs.readdirSync(root);
   } catch {
-    return { removed, kept }; // unreadable tmp root — best-effort, never throws
+    return { removed, kept, oldestKeptAgeMs }; // unreadable tmp root — best-effort, never throws
   }
 
   for (const name of entries) {
@@ -133,16 +147,17 @@ export function sweepStaleTempDirs(opts: TempSweepOpts = {}): TempSweepSummary {
       continue; // vanished between readdir and stat — someone else's cleanup won the race
     }
     if (!isDir) continue; // never touch a file, only rmd's own mkdtempSync dirs
-    if (now() - mtimeMs <= maxAgeMs) {
-      kept.push(name);
+    const ageMs = now() - mtimeMs;
+    if (ageMs <= maxAgeMs) {
+      noteKept(name, ageMs);
       continue;
     }
     try {
       fs.rmSync(full, { recursive: true, force: true });
       removed.push(name);
     } catch {
-      kept.push(name); // a permissions hiccup on one entry never blocks boot
+      noteKept(name, ageMs); // a permissions hiccup on one entry never blocks boot
     }
   }
-  return { removed, kept };
+  return { removed, kept, oldestKeptAgeMs };
 }
