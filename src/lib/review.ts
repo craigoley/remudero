@@ -8,6 +8,7 @@ import { reclaimStaleLock } from "./fs-race-safe.js";
 import { appendLedger } from "./ledger.js";
 import { isInPlanScope } from "./plan-architect.js";
 import { visibleCriteria, type AcceptanceCriterion } from "./plan.js";
+import { scanUnreachedExports, type UnreachedExport } from "./reachability.js";
 import { loadDefaultPolicy } from "./policy.js";
 import { readLedgerLines } from "./status.js";
 
@@ -191,6 +192,39 @@ export interface ReviewEvidence {
    * to cover both.
    */
   execProof?: ProofExecutor;
+  /**
+   * W1-T322 (SHIPS-UNWIRED advisory floor, design (ii)(b)): the task's DECLARED `files:` scope
+   * (plan.ts `Task.files`) — used ONLY for the INVERSE-SCOPE advisory, the direction {@link
+   * "../run-task.js".scopeGuardOutOfScopeFiles} cannot see (that guard flags a diff touching an
+   * UNDECLARED file; this flags a declared file the diff never touched at all). Advisory only —
+   * never affects `state`. Absent/empty ⇒ the inverse-scope check never fires (nothing declared,
+   * nothing to compare against), matching every caller/fixture that predates this task.
+   */
+  taskDeclaredFiles?: string[];
+  /**
+   * W1-T322 (design (ii)(a)): task ids currently OPEN in the loaded plan (status not
+   * `merged`/`done`) — consulted ONLY to verify a report's `SHIPS-UNWIRED: <id>` marker names a
+   * real, still-open task before honouring it (an id that is absent from the plan, or already
+   * merged/done, does not excuse the advisory). FAIL-CLOSED: absent ⇒ no marker can ever be
+   * honoured (every claimed id reads as unverifiable), the same direction every other structural
+   * check in this file defaults toward.
+   */
+  openTaskIds?: ReadonlySet<string>;
+}
+
+/** See {@link ReviewVerdict.unwiredAdvisories}'s doc for what each code means and why
+ *  `net_state_claim` never appears here (retro-time only). */
+export type UnwiredReasonCode = "unwired_export" | "inverse_scope" | "net_state_claim";
+
+/** One SHIPS-UNWIRED advisory line (W1-T322) — see {@link ReviewVerdict.unwiredAdvisories}. */
+export interface UnwiredAdvisory {
+  reasonCode: UnwiredReasonCode;
+  /** The offending symbol(s)/path(s), rendered `file::symbol` for `unwired_export`, bare repo
+   *  paths for `inverse_scope` — never a bare "flagged" with nothing named (W1-T186 emitter
+   *  discipline, the same one {@link ReviewVerdict.instrumentEntanglementPaths} follows). */
+  symbols: string[];
+  /** Human-readable detail — the exact text the ledger line and any console annotation render. */
+  detail: string;
 }
 
 /** The rolled-up review verdict — exactly what {@link postReviewStatus} posts. */
@@ -370,6 +404,28 @@ export interface ReviewVerdict {
    * named). `undefined` whenever `instrumentEntangled` is `false`/absent.
    */
   instrumentEntanglementPaths?: { instrumentPaths: string[]; srcPaths: string[] };
+  /**
+   * W1-T322 (SHIPS-UNWIRED advisory floor). ADVISORY ONLY, by design (see the task's own
+   * rationale for WHY: a blocking check that false-positives on a fleet doing ~50 PRs/day gets
+   * routed around or deleted within a week — this floor ships WARN-ONLY and MEASURES; W1-T323
+   * flips severity once a measured false-positive rate clears a stated threshold). This field
+   * NEVER folds into `state`/`floorState`/`capped` — unlike every other structural field on this
+   * interface (`criteriaTampered`, `changesetContradictions`, `instrumentEntangled`), which all
+   * force `state` to `"failure"`. Empty array when nothing to advise. Two reason codes fire here
+   * (a third, `net_state_claim`, is retro-time only — see {@link "./retro.js".netStateCapabilityAdvisories}):
+   *   - `unwired_export`  — the diff adds an `export function` {@link scanUnreachedExports}
+   *                         cannot find a real caller for, and the report carries neither a
+   *                         `WIRED-AT: <file>::<symbol>` marker naming it nor a `SHIPS-UNWIRED:
+   *                         <task-id>` marker naming a real, open task (see {@link
+   *                         ReviewEvidence.openTaskIds}).
+   *   - `inverse_scope`   — the task's declared `files:` scope (see {@link
+   *                         ReviewEvidence.taskDeclaredFiles}) names a file this diff never
+   *                         touched — the direction {@link "../run-task.js".scopeGuardOutOfScopeFiles}
+   *                         (diff-touches-undeclared) cannot see.
+   * The caller (run-task.ts) ledgers each entry as a `review.unwired_advisory` line naming the
+   * PR, the reason code and the symbols — the dataset W1-T323's measurement reads.
+   */
+  unwiredAdvisories?: UnwiredAdvisory[];
   /**
    * W1-T166 (the reward-hacking measurement): visible-pass-rate minus
    * holdout-pass-rate, over this verdict's own criteria — `(visible criteria
@@ -2224,6 +2280,93 @@ export function bodyContradictsDiff(report: string, diffFiles: string[]): Change
   return out;
 }
 
+// ── SHIPS-UNWIRED advisory floor (W1-T322) ─────────────────────────────────
+
+const WIRED_AT_RE = /\bWIRED-AT:\s*([^\s:]+)::(\w+)/g;
+const SHIPS_UNWIRED_RE = /\bSHIPS-UNWIRED:\s*([^\s,;]+)/g;
+
+/** Every `file::symbol` pair the report claims is wired — scanned over the WHOLE report (a
+ *  marker can sit anywhere in the body, unlike {@link bodyContradictsDiff}'s quoted-region
+ *  concern, which is about a CLAIM being mistaken for an assertion; a marker line is never
+ *  something a body would legitimately quote from another PR). */
+function wiredAtPairs(report: string): Set<string> {
+  const out = new Set<string>();
+  for (const m of report.matchAll(WIRED_AT_RE)) out.add(`${m[1]}::${m[2]}`);
+  return out;
+}
+
+/** Every task id a `SHIPS-UNWIRED:` marker names, trailing punctuation stripped (the same
+ *  wrapping-punctuation class {@link bodyContradictsDiff}'s enumeration cleanup strips). */
+function shipsUnwiredIds(report: string): string[] {
+  return [...report.matchAll(SHIPS_UNWIRED_RE)].map((m) => m[1].replace(/[.,;:)"'`]+$/, ""));
+}
+
+/**
+ * INVERSE-SCOPE (design (ii)(b), the #839 class): the mirror of {@link
+ * "../run-task.js".scopeGuardOutOfScopeFiles}, in the OTHER direction. That guard (diff → declared)
+ * fires only on the orchestrator's fallback push path and flags a diff touching a file OUTSIDE the
+ * task's declared scope. This is declared → diff: a file the task's `files:` list NAMES that the
+ * diff never actually touched at all — visible from EVERY review, not just that one narrow push
+ * path, because the review-side walk sees every PR. FAIL-CLOSED in the safe direction: an absent
+ * or empty declared scope has nothing to compare, so it never fires (a task with no declared
+ * scope is not this check's business — {@link scopeGuardOutOfScopeFiles} already owns that case).
+ */
+function inverseScopeUntouchedFiles(diffFiles: readonly string[], declaredFiles: readonly string[] | undefined): string[] {
+  if (!declaredFiles || declaredFiles.length === 0) return [];
+  const touched = new Set(diffFiles);
+  return declaredFiles.filter((f) => !touched.has(f));
+}
+
+/**
+ * Assemble this review's {@link UnwiredAdvisory} list (design (ii)) — ADVISORY ONLY, never
+ * consulted by `state`. `checkoutDir` mirrors {@link ReviewEvidence.headCheckoutDir}'s own
+ * "absent ⇒ skip" contract: the `unwired_export` reason needs real files to read, so it is
+ * silently skipped (not a false "nothing to advise") when no checkout was supplied — exactly the
+ * degradation {@link judgeCriterion}'s own `execCtx` already applies to proof execution.
+ * `inverse_scope` needs no checkout (a pure diff-files/declared-files comparison) and always runs.
+ */
+function unwiredAdvisoriesFor(
+  diff: string,
+  report: string,
+  diffFiles: string[],
+  checkoutDir: string | undefined,
+  taskDeclaredFiles: string[] | undefined,
+  openTaskIds: ReadonlySet<string> | undefined,
+): UnwiredAdvisory[] {
+  const out: UnwiredAdvisory[] = [];
+
+  if (checkoutDir) {
+    const unreached: UnreachedExport[] = scanUnreachedExports(diff, checkoutDir);
+    if (unreached.length > 0) {
+      const wired = wiredAtPairs(report);
+      const knownOpenIds = openTaskIds ?? new Set<string>();
+      const honouredByTaskMarker = shipsUnwiredIds(report).some((id) => knownOpenIds.has(id));
+      const stillUnmarked = honouredByTaskMarker
+        ? []
+        : unreached.filter((u) => !wired.has(`${u.file}::${u.name}`));
+      if (stillUnmarked.length > 0) {
+        const named = stillUnmarked.map((u) => `${u.file}::${u.name}`);
+        out.push({
+          reasonCode: "unwired_export",
+          symbols: named,
+          detail: `unreached export(s) added with no WIRED-AT/SHIPS-UNWIRED marker: ${named.join(", ")}`,
+        });
+      }
+    }
+  }
+
+  const untouched = inverseScopeUntouchedFiles(diffFiles, taskDeclaredFiles);
+  if (untouched.length > 0) {
+    out.push({
+      reasonCode: "inverse_scope",
+      symbols: untouched,
+      detail: `task declares file(s) this diff never touched: ${untouched.join(", ")}`,
+    });
+  }
+
+  return out;
+}
+
 /**
  * The pure verdict function (acceptance #2). Given the acceptance criteria and
  * the evidence (diff + report [+ optional semantic verdicts]), roll up a single
@@ -2266,6 +2409,18 @@ export function judgeReview(
   // already computed — no new diff walk.
   const instrumentEntanglement = detectInstrumentEntanglement(diffFiles);
   const instrumentEntangled = instrumentEntanglement.entangled;
+
+  // W1-T322 (SHIPS-UNWIRED advisory floor): computed alongside the structural checks above but
+  // folded into NEITHER `state` NOR `floorState` below — see {@link ReviewVerdict.unwiredAdvisories}'s
+  // doc for why (ADVISORY ONLY, by design, until W1-T323's measured flip).
+  const unwiredAdvisories = unwiredAdvisoriesFor(
+    evidence.diff,
+    evidence.report,
+    diffFiles,
+    evidence.headCheckoutDir,
+    evidence.taskDeclaredFiles,
+    evidence.openTaskIds,
+  );
 
   const unmet = verdicts.filter((v) => !v.met);
   const noCriteria = criteria.length === 0;
@@ -2414,6 +2569,7 @@ export function judgeReview(
     instrumentEntanglementPaths: instrumentEntangled
       ? { instrumentPaths: instrumentEntanglement.instrumentPaths, srcPaths: instrumentEntanglement.srcPaths }
       : undefined,
+    unwiredAdvisories,
     rewardHackingGap,
     unexecutableCount,
     unexecutableProofs,
