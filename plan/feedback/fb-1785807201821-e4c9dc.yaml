@@ -1,0 +1,34 @@
+id: fb-1785807201821-e4c9dc
+ts: 2026-08-04T01:33:21.821Z
+raw: "TEST FIXTURES LEAK TEMP DIRS AT SCALE AND daemon.tmp_sweep REAPS NONE OF
+  THEM — TMPDIR held 80,940 entries at 2026-08-04T01:50Z, of which 53,310
+  matched rmd-*, growing at roughly 200/minute while a task ran. Top prefixes
+  are test-suite names: rmd-sweep 3248, rmd-status 3204, rmd-fixrung 2065,
+  rmd-panel-graph 1692, rmd-board 1681, rmd-panel-actions 1290,
+  rmd-drain-gw-root 1239, rmd-serve 1118. So every scoped test run leaks a temp
+  dir per fixture and nothing cleans them. 49,826 were older than an hour;
+  removing those took the root to 32,937 entries and free space to 13 GiB. THE
+  SWEEP THAT SHOULD OWN THIS IS DOING NOTHING: daemon.tmp_sweep logs 'removed:
+  0, kept: 49979' on EVERY boot — ten boots, zero removals, while its stated
+  population sat there. Establish why it keeps them; whatever its age or
+  ownership rule is, it does not match rmd-*. THIS IS THE ACTUAL CAUSE OF
+  TONIGHT'S ENOSPC, which crash-looped the daemon at 23:32Z and killed four
+  W1-T312 dispatches. Two related findings, neither the cause: the clone reaper
+  (impl-EK, #1098) surveys the CORRECT roots and correctly returns
+  not-a-fleet-clone for these — they carry no .git — so enabling scratchReap
+  addresses none of this and PR #1250 should be reconsidered; and separately, a
+  survey that classifies every candidate as not-a-fleet-clone writes NO ledger
+  line at all, because the log is gated on actionable.length and
+  not-a-fleet-clone is excluded from that set, so a total predicate mismatch
+  would be invisible by construction. RECON: find what creates
+  rmd-<suite>-<6char> dirs and whether the creating helper has a teardown;
+  establish why daemon.tmp_sweep keeps 49,979 entries every boot; and say
+  whether the fix belongs in the test helper, the sweep, or both. Falsifying
+  check: if the sweep is deliberately scoped to a different prefix and rmd-* was
+  never its job, then the gap is that NOTHING owns them and the fix is a new
+  owner rather than a repair."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null
