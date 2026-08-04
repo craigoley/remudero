@@ -92,6 +92,28 @@ sweep:
     origin: "lifted:src/lib/sweep.ts:359 (DEFAULT_SWEEP_POLICY.dispatchLanes)"
     min: 1
     max: 4
+  # W1-T330: the daily spend ceiling (W1-T148 COST GOVERNOR) — at or over this many ledgered
+  # dollars spent today, NEW dispatch is deferred (drainage is never gated). This is a
+  # RELOCATION, not a retune: the value stays exactly what src/lib/sweep.ts's
+  # DEFAULT_SWEEP_POLICY.dailyCostCeilingUsd already carried (raised 150 -> 500 on 2026-08-04,
+  # the day the governor first fired in production — $152.28 observed against the old $150
+  # ceiling, roughly ten times the prior, ordinary day's spend). Retuning this row is now a
+  # reviewed plan-data PR instead of a src/ edit + CI + deploy; it does NOT let a running
+  # daemon pick up a new ceiling mid-flight — `loadDefaultPolicy` memoizes for the process
+  # lifetime, so a long-lived daemon holds its boot-time ceiling until it restarts, while a
+  # short-lived CLI verb picks up the new value on its next invocation.
+  # min: 100 stays comfortably above the ~$15/day an ORDINARY (non-incident) day cost before
+  # the $152.28 spike — a ceiling this low must not defer every dispatch on a normal day.
+  # max: 2500 (5x the shipped value) follows this table's usual bounded-row convention
+  # (wipLimit/fixStrikeCap/strikeCap all bound at 5x their value) rather than pinning
+  # min/max to the value the way autoTriage.maxPerDay deliberately does — this ceiling gates
+  # SPEND, so an editor still has room to raise it well past today's figure without the bound
+  # itself becoming a second incident, while staying finite rather than effectively unbounded.
+  dailyCostCeilingUsd:
+    value: 500
+    origin: "lifted:src/lib/sweep.ts:365 (DEFAULT_SWEEP_POLICY.dailyCostCeilingUsd)"
+    min: 100
+    max: 2500
   # W1-T320: the rmd-owned temp-dir backstop's age ceiling (src/lib/tmp.ts's
   # sweepStaleTempDirs). NET-NEW, not lifted from DEFAULT_TEMP_SWEEP_MAX_AGE_MS (24h) —
   # the 2026-08-03 incident (fb-1785807201821-e4c9dc) measured 53,310 rmd-* dirs minting

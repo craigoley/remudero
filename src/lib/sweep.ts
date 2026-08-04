@@ -292,6 +292,9 @@ export interface SweepPolicy {
    * single worker spawn: this is the CROSS-RUN, daily total the per-run cap
    * cannot see (60 runs each safely under their own per-run cap is exactly how
    * the $206 incident accumulated).
+   * W1-T330: this is now literally true — `plan/policy.yaml`'s `sweep.dailyCostCeilingUsd`
+   * row is the source of the default below (read via {@link loadDefaultPolicy}), not a
+   * source literal. The relocation retunes nothing; the value stays whatever the row carries.
    */
   dailyCostCeilingUsd: number;
   /**
@@ -352,8 +355,9 @@ export interface SweepPolicy {
  * rather than a source literal, so a plan-reviewed policy edit retunes them with zero code
  * change. W1-T325 collects `dispatchLanes` the same way, closing the gap its own doc comment
  * (above) and W1-T170/W1-T172's merged task notes already described as a policy row while the
- * source still carried a literal. `dailyCostCeilingUsd`/`pendingCeilingMinutes` are NOT
- * collected constants for this task and stay exactly as they were.
+ * source still carried a literal. W1-T330 collects `dailyCostCeilingUsd` the same way — a
+ * RELOCATION, not a retune (the value is unchanged at whatever plan/policy.yaml's row carries).
+ * `pendingCeilingMinutes` is NOT a collected constant for this task and stays exactly as it was.
  */
 const POLICY_SWEEP = loadDefaultPolicy().values.sweep;
 export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
@@ -362,7 +366,7 @@ export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
   clarify: DEFAULT_CLARIFY_POLICY,
   wipLimit: POLICY_SWEEP.wipLimit,
   dispatchLanes: POLICY_SWEEP.dispatchLanes,
-  dailyCostCeilingUsd: 500,
+  dailyCostCeilingUsd: POLICY_SWEEP.dailyCostCeilingUsd,
   pendingCeilingMinutes: 60,
   // 10 minutes: an order of magnitude above the observed push->first-check-registers latency
   // (seconds), and far below the 7h45m #921 sat in its silent loop.
