@@ -817,3 +817,76 @@ Not in scope here: building daemon-side lanes, moving N, or the W1-T325 `dispatc
 
 - Rollback: revert this PR — removes only this DECISIONS.md entry; no runtime code touched, and no
   ledger line written.
+
+## 2026-08-04 — AMENDMENT: the ruling above is OVERRIDDEN; build daemon parallelism
+
+**The operator has overridden the N=1 ruling.** The entry above is not deleted, because its three
+blockers are the engineering work; it is superseded as a *decision* and retained as an *obstacle
+list*. This amendment records why, on the entry's own terms.
+
+**Its reopening condition has been met.** The ruling named exactly two measurements that would
+reopen it and said neither recon could take them for want of a production ledger. Both are now in
+hand, measured on the ledger 2026-08-04:
+
+- **Idle-gap distribution.** 20 consecutive dispatch gaps of **45–90 minutes** against runs of
+  ~25 minutes — the daemon is idle roughly **60%** of the time. The question of whether a second
+  lane would starve the deploy has an answer, and it is that the capacity is there.
+- **Throughput.** **226 `run.start` against 39 merged verdicts.** Ample idle capacity, and a merge
+  rate near 17%.
+
+The second number cuts both ways and is recorded here so it cannot be discovered later: roughly
+five of every six dispatches do not merge, so a second lane buys about twice the throughput **and**
+about twice the refused runs, twice the `no_pr`, and twice the spend on work that does not land.
+The cost governor fired for the first time ever at $152.28 on the day this was measured. Lane width
+is therefore a spend decision as much as a throughput one, which is why the capability ships dark
+(W1-T343, default 1) and the flip is its own evidenced task (W1-T344).
+
+**Blocker (1), the keychain, is narrower than stated — and was observed not to bite.** Two runs
+overlapped on 2026-08-04 (`W1-T314-1785856070318` and `W1-T320-1785855748631`, ~15:11–15:5x) on the
+same account label and the same keychain paths, both completing with no auth failure. Re-derived
+from source, that is explained rather than lucky: `ensureWorkerKeychain`'s steady-state path is
+read-only (its own comment: "no credential read, no extra unlock"), the password write is already
+race-safe via `flag: "wx"` with the loser converging on the winner's password (the CodeQL
+js/file-system-race fix, whose comment names "daemon boot racing a spawn"), and every call ends in
+an *idempotent* `unlock-keychain` plus settings re-pin. The pair proves concurrent **steady-state**
+runs are safe; it proves nothing about provisioning, because neither run provisioned. The real
+hazard is one lane re-provisioning — which deletes and recreates the store — while another holds it
+mid-run. That is a lock around one branch (**W1-T339**), not per-run keychains: provisioning copies
+from the *login* keychain, so per-run derivation would break the cold-boot property the design
+exists to protect.
+
+**Blocker (2), the plan-reload invariant, loses one leg of two.** The safety argument was (a) one
+observation point per tick and (b) `runOne` awaited to completion. Only (b) fails at N>1. Because
+`plan = fresh` is a *reassignment* and not a mutation, a lane holding its own reference is
+unaffected; the hazard is a lane re-reading the mutable binding after a reload and being judged
+against a blob it was not selected under. The fix is a snapshot per dispatch batch — leg (a)
+generalised (**W1-T340**), not a read barrier and not moving the reload.
+
+**Blocker (3), the deploy idle gate, is confirmed and needs a bound rather than a condition.**
+`daemonIsIdle` is still a conjunction over global counters and there is still **no ceiling** on how
+long a deploy may be deferred. A merged fix that cannot deploy is worse than slow throughput, so
+**W1-T341** adds a maximum deferral after which the deploy proceeds anyway, plus visibility *during*
+the wait — the failure's defining property is silence.
+
+**A FOURTH obstacle the ruling did not name.** Both governors are evaluated **once per tick**,
+before dispatch: `checkCostGovernor` and `checkQueueGovernor` each guard their own deferral in the
+tick body. At N=1 per-tick and per-dispatch coincide; at N=2 one reading admits two dispatches, and
+a lane's spend is not observed until it lands. Both predicates gained daemon callers only recently
+(W1-T317, W1-T321). **W1-T342** moves admission to the dispatch.
+
+**One honest limit on "the operator can flip it".** `sweep.dispatchLanes` is a bounded policy row
+(W1-T325), but `DEFAULT_SWEEP_POLICY` is a module-level const built at *import*, so a running daemon
+holds its boot value. Flipping lanes needs a policy edit plus a daemon **restart** — cheaper than a
+source change, a PR, CI and a deploy, but not live. Making such reads live is W1-T331 and is
+deliberately not a prerequisite here.
+
+**The chain:** W1-T339, W1-T340, W1-T341 and W1-T342 are independent of each other and each is
+correct at N=1; all four gate **W1-T343** (wire `runDaemon` to drain's existing `runDrainLanes`,
+default 1), which gates **W1-T344** (raise the default). The daemon adopts drain's lane machinery —
+`runDrainLanes`, `partitionByFileOverlap`, already live under `rmd drain` and fail-closed on
+undeclared scope — rather than growing a second implementation. Two lanes cannot take one task:
+`acquireInflightLock` is per-task `openSync(..., "wx")`, create-or-fail with no TOCTOU gap, and
+W1-T343 must prove that rather than assume it.
+
+- Rollback: revert this PR — removes only this amendment, restoring the N=1 ruling above as the
+  operative decision; no runtime code touched, and no ledger line written.

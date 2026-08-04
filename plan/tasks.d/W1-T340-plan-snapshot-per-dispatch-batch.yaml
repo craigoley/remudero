@@ -1,0 +1,84 @@
+- id: W1-T340
+  title: "`runDaemon`'s plan reload is safe today only because `runOne` is awaited to completion — at N>1 that leg is false, so the tick must hand every lane ONE snapshot instead of a mutable binding"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  rationale: "RE-DERIVED AT d6a4f55. W1-T326's DECISIONS.md entry names the plan-reload invariant as
+    blocker (2); this task is that blocker restated as the work.
+    THE INVARIANT, IN THE CODE'S OWN WORDS. `runDaemon` reassigns `plan` from `deps.reloadPlan()` at
+    the TOP of each tick, and its comment gives a TWO-LEGGED safety argument: (a) the reload sits
+    'at the TOP of the tick, before any dispatch decision reads `plan`. Everything below in this
+    iteration therefore sees ONE consistent plan; a file changing mid-tick cannot produce two
+    different answers within the same tick, because it is only ever observed here.' (b) '`runOne` is
+    awaited to completion before the loop returns, so a reload can never land under an in-flight task
+    either.'
+    WHAT BREAKS AT N>1, PRECISELY. Leg (b) is simply false once lanes outlive a tick: the loop can
+    reach the next reload while a lane is still running. Leg (a) is the one worth keeping, and it
+    generalises.
+    WHAT DOES *NOT* BREAK, and getting this right is what keeps the fix small. `plan = fresh` is a
+    REASSIGNMENT of a local binding, not a mutation of the Plan object. A lane that already holds a
+    reference to the previous Plan keeps reading that object unchanged — JS reference semantics mean a
+    reload cannot corrupt a lane's in-hand snapshot. The hazard is therefore NARROWER than 'a reload
+    lands under a running task': it is a lane that re-reads the MUTABLE BINDING after the reload and
+    so sees a different blob from the one its own dispatch decision was made against.
+    THE CONCRETE HARM. Lane A is dispatched from plan blob P1. The tick reloads to P2, in which A's
+    task now has an unmet dependency, a changed `files:` list, or `status: blocked`. If any later
+    read in A's path consults the live binding rather than P1 — an overlap partition, a re-check, a
+    retro — A is judged against a plan it was never selected under. Nothing fails loudly; the two
+    answers simply disagree.
+    IT FAILS SILENTLY, WHICH IS WHY IT MUST BE DESIGNED RATHER THAN OBSERVED. There is no error, no
+    ledger line and no assertion today that would catch a lane reading a post-reload plan."
+  design: |
+    ONE SNAPSHOT PER DISPATCH BATCH, PASSED BY VALUE.
+    (i) Capture the reloaded plan into a single per-tick binding at the point the reload already
+    happens, and pass THAT to every lane and to every decision below it. No lane may close over the
+    mutable `plan` variable. This is leg (a) of the existing argument, generalised from 'one tick' to
+    'one batch' — reuse that argument and its placement rather than inventing a second discipline.
+    (ii) DO NOT MOVE THE RELOAD and do not add a read barrier. Moving it outside the dispatch window
+    changes when freshness is observed, which is impl-FZ's whole deliverable (the median filing waited
+    106 minutes to be seen); a read barrier is a second synchronisation primitive where a value copy
+    suffices. State this choice in the PR body so the cheaper option is not re-litigated.
+    (iii) THE INVARIANT MUST BE STATED WHERE IT CAN BE CHECKED. The existing comment's leg (b) becomes
+    false the moment lanes land; rewrite it to say what is actually true — every lane in a batch is
+    dispatched from one snapshot, and a reload affects only the NEXT batch. A comment asserting a
+    property the code no longer has is worse than none, and this file already carries that risk.
+    (iv) FALSIFIER: a plan that CHANGES between two dispatches within one batch must not change what
+    the second dispatch is judged against — drive it by reloading mid-batch and asserting both lanes
+    resolved against the same blob. It must FAIL against a mutable-binding implementation; a test that
+    passes both before and after proves nothing. State in the report whether it drives `runDaemon`
+    itself or an injected `reloadPlan` seam, and name any line left unproven — every existing daemon
+    test injects its seams, which is exactly how leg (b) went unchallenged this long.
+    (v) THIS MUST HOLD AT N=1 TOO, so it is landable and provable before any lane exists: a single-lane
+    batch is a batch of one, and the snapshot discipline is identical. That is what makes this task
+    independently correct rather than speculative scaffolding.
+    NOT IN SCOPE: lane wiring (W1-T343); `deps.reloadPlan`'s own source-of-truth contract (origin/main,
+    never the working tree), which is unchanged; the freshness self-restart path.
+    VERIFY `runDaemon`'s current reload block and the exact wording of its two-legged comment FROM
+    SOURCE before editing.
+  acceptance:
+    - claim: "every dispatch in one batch resolves against a single plan snapshot, so a reload landing mid-batch cannot change what a later dispatch in that same batch is judged against"
+      proof: "unit test: test/daemon-plan-freshness.test.ts"
+    - claim: "the reload still happens at the top of the tick and a task filed since the last tick is still visible to the next batch — freshness is not traded away for the snapshot"
+      proof: "unit test: test/daemon-plan-freshness.test.ts"
+  risk: high
+  origin: oper#build-daemon-parallelism-2026-08-04
+  plan_refs: ["W1-T326", "§4B"]
+  files: [src/lib/daemon.ts, test/daemon-plan-freshness.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — a mid-batch reload and two dispatch decisions, both assertable in-process.
+    risk:high — it touches the dispatch hot path of the persistent loop, and the failure it prevents is
+    SILENT, so a wrong fix is not self-announcing. Rule 19: one subsystem plus its test, but the
+    silent-failure class is what sets the band.
+    budget_usd 55 — a value capture and a comment correction; the cost is the falsifier, which must
+    fail against the current code to be worth anything.
+    NO depends_on: correct and provable at N=1, so it lands before lanes rather than with them. That
+    ordering is deliberate — bundling it into the lane wiring would make the wiring PR carry a silent
+    correctness change, which is how a regression hides inside a feature.
+    THIS NARROWS W1-T326's BLOCKER (2). The entry said the invariant 'is simply false' at N>1 and would
+    'break SILENTLY'. Both true. What the source adds is that only leg (b) fails, that reassignment
+    (not mutation) bounds the blast radius to lanes re-reading the live binding, and that the fix is a
+    value copy rather than a locking or ordering change."

@@ -1,0 +1,91 @@
+- id: W1-T339
+  title: "concurrent daemon lanes are safe on the SHARED worker keychain in steady state but not while one lane RE-PROVISIONS it — serialize the provisioning branch rather than keying keychains per run"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "RE-DERIVED AT d6a4f55, from source, against the operator's 2026-08-04 ruling to BUILD
+    daemon parallelism. W1-T326's DECISIONS.md entry names the keychain as blocker (1); this task is
+    that blocker restated as the engineering work it actually is.
+    WHAT IS SHARED. `workerKeychainPaths` (src/lib/worker-home.ts) derives keychain-db, password,
+    identity and expiry paths from the state dir plus an OPTIONAL account label — never a run id. So
+    every concurrent run on one account shares all four.
+    WHAT IS ACTUALLY WRITTEN PER RUN, which is the part the blocker overstated:
+    (a) THE PASSWORD IS ALREADY RACE-SAFE. `ensureWorkerKeychain` writes it with `flag: \"wx\"`
+        (O_CREAT|O_EXCL) and, on EEXIST, READS the winner's password instead of inventing a second.
+        Its own comment names this exact scenario — 'two concurrent first-provisioners (daemon boot
+        racing a spawn)' — and cites the CodeQL js/file-system-race alert it closed.
+    (b) IDENTITY AND EXPIRY ARE WRITTEN ONLY INSIDE THE PROVISIONING BRANCH, never on a steady-state
+        call.
+    (c) THE STEADY-STATE PATH IS READ-ONLY. With the store present, identity matching and the
+        credential fresh, the call costs ONE fs read of the expiry sidecar — its own comment says so:
+        'no credential read, no extra unlock'.
+    (d) EVERY call then runs `unlock-keychain` and `set-keychain-settings`. Both are IDEMPOTENT: an
+        already-unlocked keychain unlocks again harmlessly and the settings re-pin is byte-identical
+        between lanes.
+    THE OBSERVED CONCURRENT PAIR IS EXPLAINED BY (c)+(d), NOT BY LUCK. Two runs overlapped on
+    2026-08-04 (W1-T314-1785856070318 and W1-T320-1785855748631, ~15:11-15:5x) with no auth failure.
+    Both were steady-state: same account label, same paths, read-only checks plus idempotent unlocks.
+    That pair is REAL counter-evidence to the keychain being an absolute blocker — and it is NOT
+    evidence that provisioning is safe, because neither run provisioned.
+    THE ACTUAL HAZARD IS NARROW AND REAL: the provisioning branch DELETES and recreates the store
+    (identity change, credential-expiry recovery, or absent store). A lane doing that while another
+    lane holds the same keychain mid-run pulls the store out from under it, and the symptom is flaky
+    auth — the failure class W1-T326 correctly feared, reached by a path two orders narrower."
+  design: |
+    SERIALIZE THE PROVISIONING BRANCH. Do not key keychains per run.
+    (i) WHY NOT PER-RUN, stated so it is not revisited: provisioning COPIES the credential from the
+    operator's LOGIN keychain. `ensureWorkerKeychain`'s own doc records the property that makes the
+    fleet work cold — 'including a cold-boot daemon while the login keychain is LOCKED — touches only
+    the worker keychain'. A per-run keychain would force a login-keychain read on EVERY run, so it
+    would not merely be untidy, it would break cold-boot operation and add a credential copy per
+    dispatch. Per-run derivation is the more expensive AND more fragile option.
+    (ii) TAKE AN EXCLUSIVE LOCK AROUND THE PROVISIONING BRANCH ONLY — not around the whole function.
+    The steady-state path must stay lock-free: it is one fs read plus an idempotent unlock, it is what
+    the overwhelming majority of calls do, and putting it behind a lock would serialize every dispatch
+    on a mutex for no benefit.
+    (iii) REUSE THE EXISTING PRIMITIVE. `acquireInflightLock` (src/lib/inflight-lock.ts) already does
+    create-or-fail with `openSync(lockPath, \"wx\")` and 'no TOCTOU gap', and `src/lib/fs-race-safe.ts`
+    owns the stale-lock question. Use that shape rather than a third locking idiom.
+    (iv) A LOSER MUST WAIT AND RE-READ, NEVER PROCEED OR THROW. After the winner provisions, the loser's
+    correct action is to re-evaluate (the store now exists and matches) and continue — the same
+    converge-on-the-winner discipline the password write already implements one branch above.
+    (v) A STALE LOCK MUST NOT WEDGE THE FLEET. A crashed provisioner leaves a lock; state the recovery
+    (age-based takeover, matching what fs-race-safe.ts already does for inflight locks) and cover it.
+    (vi) THE FALSIFIER MUST DRIVE REAL CONCURRENCY, not an injected seam. Two genuinely concurrent
+    `ensureWorkerKeychain` calls that BOTH take the provisioning branch must leave exactly one coherent
+    store, with the loser converging on the winner rather than recreating it. Assert against the real
+    files. A test that injects `runner`/`exists` for both callers proves the lock's bookkeeping and NOT
+    the race — name in the report which lines the injected test leaves unproven.
+    NOT IN SCOPE: lane wiring (W1-T343); per-run HOME/worktree isolation, which already exists; the
+    account-switch identity gate itself (W1-T265), which this only serializes.
+    VERIFY `ensureWorkerKeychain`'s current branch structure and `acquireInflightLock`'s signature FROM
+    SOURCE before editing — this note is a snapshot and symbol names drift.
+  acceptance:
+    - claim: "two concurrent provisioning calls on one account leave a single coherent keychain, with the loser converging on the winner's store rather than recreating it, driven by real concurrency rather than an injected runner"
+      proof: "unit test: test/worker-keychain-account.test.ts"
+    - claim: "the steady-state path stays lock-free — a call with a present, identity-matching, unexpired store takes no lock and performs no credential read"
+      proof: "unit test: test/worker-home.test.ts"
+    - claim: "a stale provisioning lock left by a crashed run is taken over rather than wedging every later dispatch"
+      proof: "unit test: test/worker-keychain-account.test.ts"
+  risk: high
+  origin: oper#build-daemon-parallelism-2026-08-04
+  plan_refs: ["W1-T326", "W1-T265", "W1-T293"]
+  files: [src/lib/worker-home.ts, test/worker-keychain-account.test.ts, test/worker-home.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — real concurrent calls against real files, machine-checkable without an operator.
+    risk:high — it guards the credential path every dispatch depends on. Lock too widely and every
+    dispatch serializes; lock too narrowly and the store is recreated under a running lane, which
+    presents as flaky auth rather than as a lock bug.
+    budget_usd 60 — one lock around one branch, a converge-on-winner path, a stale-lock takeover and a
+    real-concurrency falsifier.
+    NO depends_on: this is independently correct and independently valuable — the provisioning race is
+    reachable TODAY whenever a daemon boot overlaps a spawn, which the existing password-write comment
+    already names. It does not wait on lanes.
+    THIS TASK NARROWS W1-T326's BLOCKER (1) RATHER THAN CONTRADICTING IT. The entry said concurrent
+    lanes 'would share one keychain' and that the failure 'would present as flaky auth'. Both remain
+    true; what the source shows is that sharing is only dangerous across the provisioning branch, which
+    is a lock, not a redesign."

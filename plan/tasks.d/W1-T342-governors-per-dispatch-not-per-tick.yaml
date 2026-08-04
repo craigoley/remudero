@@ -1,0 +1,82 @@
+- id: W1-T342
+  title: "the cost and queue governors are evaluated ONCE PER TICK, before dispatch — so two lanes dispatching in one tick both pass a single check, and a ceiling that just fired for the first time ever would be crossed by a full lane's spend"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "RE-DERIVED AT d6a4f55. NOT one of W1-T326's three blockers — this is a FOURTH obstacle the
+    operator's regression list names, and it is the one that turns a throughput change into a spend
+    change.
+    THE EVALUATION POINT, FROM SOURCE. `runDaemon` calls `deps.checkCostGovernor?.()` and
+    `deps.checkQueueGovernor?.()` ONCE per iteration, in the tick body BEFORE the dispatch decision,
+    each guarding its own `continue`-shaped deferral. Both are per-TICK gates, not per-DISPATCH gates.
+    At N=1 the distinction is invisible because a tick dispatches at most one task — per-tick and
+    per-dispatch are the same thing. At N=2 they are not: ONE check admits TWO dispatches.
+    WHY THIS IS URGENT RATHER THAN THEORETICAL. Both predicates gained their daemon callers only
+    RECENTLY (W1-T317 wired `checkCostGovernor`, W1-T321 wired `checkQueueGovernor`; both docs record
+    that the predicates previously had no caller at all). The cost governor then fired for the FIRST
+    TIME EVER at $152.28 against a $150 ceiling and stopped every dispatch for ~40 minutes. A gate with
+    that little production history is exactly the wrong one to double the traffic through.
+    THE ARITHMETIC OF THE OVERSHOOT. The check reads an OBSERVED day cost; a lane's spend is not
+    counted until it lands. Admitting two lanes on one reading means the ceiling can be exceeded by up
+    to a full extra run's cost before the next tick observes anything. The queue governor has the same
+    shape against the open-PR WIP limit — the very limit whose breach W1-T321 cites as the 23-open-PR
+    incident.
+    AND THE BASE RATE MAKES IT WORSE, NOT BETTER. The operator's ledger measurement is 226 `run.start`
+    against 39 merged verdicts. Most dispatches do not produce a merge, so doubling width doubles the
+    spend on work that does not land — which is precisely the traffic these two governors exist to
+    bound."
+  design: |
+    MOVE THE GATE TO THE DISPATCH, NOT THE TICK.
+    (i) EACH DISPATCH MUST BE ADMITTED ON ITS OWN CHECK. Whatever the lane count, the Nth dispatch in a
+    batch must be gated by a reading that ACCOUNTS FOR the N-1 dispatches already admitted in that same
+    batch. A second lane admitted on a reading taken before the first lane started is the defect.
+    (ii) THE READING MUST NOT SILENTLY GO STALE WITHIN A BATCH. `checkCostGovernor` reads an observed
+    day cost that a just-admitted, still-running lane has not yet contributed to. Decide and STATE the
+    treatment: either re-observe per dispatch, or debit the admitted lane's expected cost against the
+    reading for the remainder of the batch. Defend the choice — a re-observation that cannot see
+    in-flight spend is not actually a second check.
+    (iii) DO NOT WEAKEN THE DEFERRAL SEMANTICS. Both governors currently defer as an in-process idle
+    heartbeat, and both docs stress the daemon is PERSISTENT — the loop resumes automatically when the
+    observation drops back under the limit. Preserve that: a per-dispatch gate must still DEFER the
+    batch, never abort the daemon and never escalate.
+    (iv) FAIL CLOSED ON AN UNREADABLE OBSERVATION. If the reading cannot be taken for a later dispatch
+    in a batch, the safe answer is to admit no further lanes this batch — never to fall through to
+    'admitted' because the check errored. State this and cover it.
+    (v) FALSIFIER: with the governor tripping between the first and second dispatch of ONE batch, the
+    second must NOT be admitted. That test must FAIL against a per-tick implementation — it is the
+    whole claim. State whether it drives `runDaemon` or an injected `checkCostGovernor` seam and name
+    any line left unproven.
+    (vi) MUST BE CORRECT AND LANDABLE AT N=1, where per-dispatch and per-tick coincide, so the
+    behaviour change is provably nil until lanes exist.
+    NOT IN SCOPE: lane wiring (W1-T343); the ceiling's VALUE (W1-T330/W1-T331 own making it live and
+    adjustable); the WIP limit's value; `isCircuitTripped`/`isLifetimeCapExceeded`, which are already
+    per-task inside `nextRunnable` rather than per-tick and so do not have this shape.
+    VERIFY both call sites' current position in the tick body, and each predicate's return shape, FROM
+    SOURCE before editing.
+  acceptance:
+    - claim: "a governor that trips between the first and second dispatch of one batch refuses the second, so two dispatches are never admitted on a single reading"
+      proof: "unit test: test/cost-governor.test.ts"
+    - claim: "an unreadable governor observation admits no further dispatches in that batch rather than falling through to admitted"
+      proof: "unit test: test/cost-governor.test.ts"
+    - claim: "a governed batch still defers as an in-process heartbeat and resumes on its own, never aborting the daemon or escalating"
+      proof: "unit test: test/daemon-plan-freshness.test.ts"
+  risk: high
+  origin: oper#build-daemon-parallelism-2026-08-04
+  plan_refs: ["W1-T317", "W1-T321", "W1-T326"]
+  files: [src/lib/daemon.ts, test/cost-governor.test.ts, test/daemon-plan-freshness.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — admission decisions over injected readings, fully machine-checkable.
+    risk:high — it changes how a SPEND ceiling admits work, on a gate with almost no production
+    history. Wrong in the permissive direction it doubles the overshoot lanes would cause; wrong in the
+    restrictive direction it stalls the fleet on a governor that should not have fired.
+    budget_usd 60 — one gate relocation plus staleness treatment and a two-direction falsifier.
+    NO depends_on: correct at N=1 (where it is a provable no-op) and it must land BEFORE the lane
+    wiring, not after — shipping lanes first would double the traffic through an ungated ceiling for
+    however long this took to follow. It is a prerequisite of W1-T343 rather than a companion to it.
+    NOT A W1-T326 BLOCKER. That entry named three obstacles and did not name this one; the per-tick
+    evaluation point is a fourth, surfaced by the operator's regression list. Recording it here so the
+    ruling amendment can carry four obstacles rather than silently inheriting three."
