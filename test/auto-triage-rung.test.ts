@@ -17,7 +17,14 @@ import {
 // below is a spend bound, and the lock is a plan-integrity bound: two overlapping triage runs mint
 // the SAME task id, and since PR #1060 both merge cleanly and poison the plan on main.
 
-const ON: AutoTriagePolicy = { enabled: true, minIntervalMinutes: 60, maxPerDay: 4 };
+const ON: AutoTriagePolicy = {
+  enabled: true,
+  minIntervalMinutes: 60,
+  maxIntervalMinutes: 60,
+  depthFloor: 0,
+  depthCeiling: 10,
+  maxPerDay: 4,
+};
 const NOW = new Date("2026-08-01T12:00:00.000Z");
 const base = { idle: true, lockHeld: false, now: NOW, candidates: ["fb-1", "fb-2"] };
 

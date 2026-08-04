@@ -117,7 +117,7 @@ test("at the shipped 15m interval, the daily cap is REACTIVATED — no longer re
 test("minIntervalMinutes alone still paces the rung when the daily cap cannot bind", () => {
   // maxPerDay deliberately enormous so ONLY minInterval can pace this.
   const { total, perDay, reasons } = simulate(
-    { enabled: true, minIntervalMinutes: 60, maxPerDay: 1_000_000 },
+    { enabled: true, minIntervalMinutes: 60, maxIntervalMinutes: 60, depthFloor: 0, depthCeiling: 10, maxPerDay: 1_000_000 },
     3,
   );
   assert.equal(total, 72, "60-minute spacing alone must still yield 24/day");
@@ -129,7 +129,10 @@ test("minIntervalMinutes alone still paces the rung when the daily cap cannot bi
 });
 
 test("a longer minInterval still throttles below 24 — the bound is live, not vestigial", () => {
-  const { total, perDay } = simulate({ enabled: true, minIntervalMinutes: 180, maxPerDay: 1_000_000 }, 3);
+  const { total, perDay } = simulate(
+    { enabled: true, minIntervalMinutes: 180, maxIntervalMinutes: 180, depthFloor: 0, depthCeiling: 10, maxPerDay: 1_000_000 },
+    3,
+  );
   assert.equal(total, 24, "180-minute spacing must yield 8/day, not 24");
   assert.deepEqual([...perDay.values()], [8, 8, 8]);
 });
@@ -171,7 +174,10 @@ test("an ABSENT enabled flag is treated as off — the kill switch fails closed"
 });
 
 test("raising maxPerDay does not weaken the disabled lock even with a huge cap", () => {
-  const { total } = simulate({ enabled: false, minIntervalMinutes: 1, maxPerDay: 1_000_000 }, 3);
+  const { total } = simulate(
+    { enabled: false, minIntervalMinutes: 1, maxIntervalMinutes: 1, depthFloor: 0, depthCeiling: 10, maxPerDay: 1_000_000 },
+    3,
+  );
   assert.equal(total, 0);
 });
 
