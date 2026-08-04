@@ -1,0 +1,81 @@
+- id: W1-T332
+  title: "there is no PR-free write target for the cost ceiling — plan/policy.yaml is committed state, so a console write must commit to survive and an uncommitted edit is destroyed by the deploy's pull --ff-only"
+  repo: remudero
+  depends_on: [W1-T331]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  rationale: "OPERATOR RULING 2026-08-04: runtime-tunable values belong in a store adjustable from the
+    console, not in source behind a PR and a deploy. The audit requirement is who/when/from/to, and a
+    ledgered write satisfies it — queryably, at runtime, which git does not.
+    RE-DERIVED AT a828750.
+    WHY THE COMMITTED FILE CANNOT BE THE WRITE TARGET. `plan/policy.yaml` has genuinely good
+    properties — bounds enforced at load by validatePolicy, visible to `rmd lint-plan`, reviewable.
+    But a console write to it must COMMIT to survive, which reintroduces the PR the ruling exists to
+    remove; and an UNCOMMITTED edit is not merely unsaved, it is actively destroyed — the deploy's
+    `pull --ff-only` discarded one this week and took an operator kill switch with it.
+    THE PRECEDENT ALREADY EXISTS AND IS LOAD-BEARING. `.gitignore` carries `state/`, and fleet control
+    already keeps operator intent there: `state/STOP` and `state/PAUSE` are files under
+    `<root>/state/`, outside git, surviving every pull. `state/PAUSE` is a working operator control a
+    deploy cannot clobber — same directory, same lifetime, same survival property an overrides store
+    needs. This task does not invent a mechanism; it reuses one.
+    THE SHAPE THAT FOLLOWS: plan/policy.yaml stays the committed, bounded DEFAULT; a `state/`-resident
+    override carries the operator's delta; the effective value is override-or-default."
+  design: |
+    ONE VALUE, ONE STORE, ONE PRECEDENCE RULE.
+    (i) An override file under `<config.root>/state/`, `state/PAUSE`-shaped in lifetime and location,
+    carrying the daily cost ceiling ONLY. Not a general key-value store — the other literals are
+    follow-ons and each needs its own argument.
+    (ii) PRECEDENCE IS EXACTLY ONE RULE, STATED ONCE: an override wins; its absence means the
+    committed default. No merging, no partial objects, no per-field fallback chains.
+    (iii) BOUNDS ARE NOT DUPLICATED. The committed row already carries min/max and those bounds ARE
+    the schema. An override is validated against the COMMITTED ROW'S bounds and REFUSED AT WRITE TIME,
+    so an out-of-range value fails where the operator can see it rather than at the next daemon read.
+    A second copy of the bounds is a second source of truth and must not be created.
+    (iv) A MALFORMED OR UNREADABLE OVERRIDE FILE FALLS BACK TO THE COMMITTED DEFAULT AND SAYS SO. It
+    must never be read as zero, as unbounded, or as absent-and-fine.
+    (v) THE DISAPPEARANCE CASE MUST BE DESIGNED, NOT DISCOVERED — this is the task's hardest
+    requirement and the reason it is filed separately. `state/` is deliberately outside git, so a
+    container rebuild or a wiped state root silently reverts every override to its committed default.
+    THAT IS A NEW FAILURE CLASS THIS REPO DOES NOT HAVE TODAY, and it has no natural signal: nothing
+    is missing, nothing errors, the number simply goes back. This task must state, and cover:
+      - what is observable while an override EXISTS (the effective value AND that it is overridden,
+        with its committed default alongside — never the bare number);
+      - what is observable when one DISAPPEARS (the fleet must be able to say 'this value is at its
+        committed default' distinguishably from 'this value was never overridden').
+    RENDERING those observables is W1-T333; DEFINING them is this task, because a store whose
+    observability is deferred is how a value gets overridden invisibly — the exact defect class this
+    repo has spent a week on.
+    NOT IN SCOPE: the console write surface itself beyond what this value needs; the ledger audit line
+    and its retention (W1-T333); and the other ~28 knobs — a general store is the migration shape the
+    recon argues against.
+    VERIFY fleet-control's `state/PAUSE` path construction and the committed row's bound fields FROM
+    SOURCE before building.
+  acceptance:
+    - claim: "an override under state/ takes precedence over the committed default, and its absence yields the committed default — one rule, no merging"
+      proof: "unit test: test/policy.test.ts"
+    - claim: "an override outside the committed row's bounds is refused at write time rather than clamped or accepted, and the bounds are read from the row rather than duplicated"
+      proof: "unit test: test/policy.test.ts"
+    - claim: "a malformed or unreadable override falls back to the committed default and is reported as such, never read as zero or unbounded"
+      proof: "unit test: test/policy.test.ts"
+    - claim: "an effective value carries its provenance, so a value at its committed default is distinguishable from one that was overridden"
+      proof: "unit test: test/policy.test.ts"
+  risk: high
+  origin: oper#runtime-config-slice-2026-08-04
+  plan_refs: ["§5", "W1-T330", "W1-T331"]
+  files: [src/lib/policy.ts, src/lib/config.ts, test/policy.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — precedence, bounds and fallback are pure decisions over a file, all
+    machine-checkable without an operator present.
+    risk:high — it introduces state that overrides reviewed policy from OUTSIDE git. Wrong precedence
+    silently ignores an operator; wrong bounds put unbounded spend one console write away.
+    budget_usd 80 — a store, a precedence rule, bounds delegation and a fallback, plus the provenance
+    the next task renders.
+    files: src/lib/config.ts is declared because the store's location must be derived the way
+    `<config.root>/state/` paths already are, not hardcoded — if the implementation finds it needs no
+    change there, declaring it costs nothing, whereas omitting a written path is what refused five
+    dispatches this week.
+    depends_on W1-T331 IS HARD: an override that the running fleet cannot read is exactly the
+    'writes a number nobody reads' failure this chain is ordered to avoid."
