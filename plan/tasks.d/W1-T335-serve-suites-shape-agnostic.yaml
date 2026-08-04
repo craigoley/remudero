@@ -1,0 +1,91 @@
+- id: W1-T335
+  title: "the eight serve.* suites assert the single-scroll shell directly, so ANY tab restructure turns them red at `preflight --ci-parity` and the worker stops before pushing — teach them to reach a section through the shared harness instead"
+  repo: remudero
+  depends_on: [W1-T334]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "SECOND OF THREE SHARDS SPLIT OUT OF W1-T314. THIS SHARD IS THE ONE THAT REMOVES THE
+    FAILURE, and it is test-only. RE-DERIVED AT 1867c35.
+    THE CLIFF, CONFIRMED FROM SOURCE. `ciParityContractLines` (src/lib/compaction.ts) sits inside
+    `outputContractLines` between the commit step and the push step and instructs a worker to reach a
+    PASS from `rmd preflight --ci-parity` before its first push. That command's `ci:test` step shells
+    `npm run test:ci`, the full suite. So the sequence for a one-dispatch restructure is: restructure
+    the DOM, run preflight, watch eight suites go red, be told to fix them before pushing — with no
+    contract exit for 'done but not green'. Six dispatches, three different-looking failures, one
+    cause.
+    WHAT THE SUITES ACTUALLY ASSERT, MEASURED NOT ASSUMED. Across the eight, section access is by
+    stable id and content — `#now-list` 48 times, `#recent-list` 28, `#rest-list` 7, `#needs-me-list`
+    4 — while VISIBILITY assertions appear in only ONE of the eight (serve.live-state.test.ts, 5
+    occurrences). So the great majority of the surface does not care whether a section is displayed,
+    only that it exists and holds the right rows. THAT IS WHY THIS IS TRACTABLE: the suites are mostly
+    already shape-agnostic by accident, and the work is to make it deliberate and total rather than to
+    rewrite eight suites' worth of assertions.
+    THE SEAM ALREADY EXISTS AND HAS THE RIGHT HISTORY. `test/setup/open-shell.ts` was created by
+    W1-T255 for exactly this reason: five suites each carried a private copy of the same shell-boot
+    wait, one of them subtly wrong, and folding it into one shared helper meant 'the next suite that
+    needs this wait inherits the fix instead of re-introducing the bug'. A per-suite tab fix would
+    re-run that mistake deliberately.
+    A CONSTRAINT ON THE HELPER, from the same file: `shellBootReady` is handed DIRECTLY to Playwright's
+    `page.waitForFunction`, which serializes the function's own source and evaluates it in the page —
+    it cannot resolve imports or outer closures. Any new helper must therefore be a SEPARATE export,
+    not extra logic bolted inside `shellBootReady`."
+  design: |
+    ONE SHARED WAY TO REACH A SECTION, INHERITED BY ALL EIGHT SUITES.
+    (i) ADD a helper beside `shellBootReady` in test/setup/open-shell.ts that makes the section a test
+    is about reachable, whatever shape the shell is in: under today's flat stack it is a no-op, and
+    once W1-T336 makes the tabs authoritative it activates the owning tab first. ONE helper, ONE
+    mapping from section id to owning tab.
+    (ii) DO NOT MODIFY `shellBootReady` ITSELF. It is serialized into the page by
+    `page.waitForFunction` and must stay a zero-argument, self-contained read of the page's `document`.
+    The new helper is a separate export that takes the page.
+    (iii) ROUTE ALL EIGHT SUITES THROUGH IT: serve.test.ts, serve.density-ia, serve.detail-journey,
+    serve.find, serve.first-paint, serve.live-state, serve.shell-ux, serve.write-ack. A suite left
+    unrouted is the one that goes red in W1-T336 and re-creates the cliff, so completeness is the
+    deliverable and a partial sweep is a failed task, not a partial success.
+    (iv) THE SUITES MUST PASS BOTH BEFORE AND AFTER THE FLIP. That is the property that keeps main
+    green between halves and it is this shard's whole reason for existing. Prove it in BOTH
+    directions, because passing today is the weaker half and is what a no-op helper would give you
+    for free: assert the helper actually activates an owning tab when one is present, using a fixture
+    that presents the tabbed shape, rather than only that the suites still pass under the flat one.
+    (v) NO PRODUCTION CHANGE. src/lib/serve.ts is NOT in this task's files and must not be edited. If
+    a suite cannot be made shape-agnostic without a production change, STOP AND REPORT — that is a
+    finding about the seam, and making it silently by widening scope is the class of move that cost
+    W1-T314 two scope_guard refusals.
+    (vi) VISIBILITY ASSERTIONS ARE THE KNOWN HARD CASE. serve.live-state.test.ts is the only one of the
+    eight that asserts visibility. Decide per assertion whether it means 'rendered' or 'on screen',
+    state which in the report, and keep the ones that genuinely mean on-screen — do not weaken an
+    assertion to make it shape-agnostic. Note that test/serve.computed-visibility.test.ts also asserts
+    visibility but is NOT one of the eight and is NOT in scope; if it turns out to need the helper,
+    report it rather than editing it.
+    NOT IN SCOPE: any src/ change; moving sections under tabs (W1-T336); the tab scaffold itself
+    (W1-T334, already merged by the time this runs).
+    VERIFY open-shell.ts's current exports and each suite's section-access pattern FROM SOURCE first.
+  acceptance:
+    - claim: "a shared helper in the test setup reaches a section whatever shape the shell is in, activating the owning tab when a tabbed shape is present and doing nothing when it is not"
+      proof: "unit test: test/serve.shell-ux.test.ts"
+    - claim: "the suites that assert row content reach their sections through the shared helper rather than by direct id lookup, so a later restructure cannot silently strand them"
+      proof: "unit test: test/serve.density-ia.test.ts"
+    - claim: "the find layer and the write-ack path still pass unchanged in behaviour once routed through the helper"
+      proof: "unit test: test/serve.find.test.ts"
+    - claim: "visibility assertions that genuinely mean on-screen are preserved rather than weakened, and still pass"
+      proof: "unit test: test/serve.live-state.test.ts"
+  risk: high
+  origin: oper#split-w1-t314-2026-08-04
+  plan_refs: ["§7", "W1-T314", "W1-T255"]
+  files: [test/setup/open-shell.ts, test/serve.test.ts, test/serve.density-ia.test.ts, test/serve.detail-journey.test.ts, test/serve.find.test.ts, test/serve.first-paint.test.ts, test/serve.live-state.test.ts, test/serve.shell-ux.test.ts, test/serve.write-ack.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — every claim is a real Chromium suite passing, which is the standard this repo
+    already holds serve.ts DOM behaviour to.
+    risk:high — Rule 19 counts the shared harness and eight consuming suites as distinct subsystems.
+    The danger is a helper that silently no-ops under the tabbed shape too, which would look like a
+    pass here and strand W1-T336 exactly as before; criterion 1 exists to make that failure loud.
+    budget_usd 60 — nine files, but the work is mechanical routing, not new assertions. Higher than
+    W1-T334 for breadth, lower than W1-T336 because nothing in production changes.
+    files: LISTS ALL NINE PATHS, every one of which the worker writes. W1-T314's own history is the
+    cautionary case — it declared two paths for work touching eleven and took two scope_guard refusals
+    before the shard was widened.
+    depends_on W1-T334 IS HARD, not sequencing preference: the helper's tabbed branch cannot be
+    written, let alone proven, until a tab bar exists for it to activate."

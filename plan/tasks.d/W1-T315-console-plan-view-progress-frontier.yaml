@@ -1,7 +1,7 @@
 - id: W1-T315
   title: "the console can answer 'what is this task doing' but not 'where does the workstream STAND' — a Plan view: progress (done / in-flight / queued, derived from GitHub, never the yaml status field) plus the frontier, each item carrying WHY it is next"
   repo: remudero
-  depends_on: [W1-T314]
+  depends_on: [W1-T336]
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -56,9 +56,14 @@
   files: [src/lib/panel-graph.ts, src/lib/serve.ts, test/plan-view.test.ts]
   status: queued
   attempts: 0
-  note: "FILED 2026-08-03 from feedback fb-1784770111145-cf7c24 (clause 2). depends_on [W1-T314] is a real
-    dependency — this fills the tab that task creates — and the design states the explicit fallback if T314
-    stalls, per the W1-T183/#410 lesson that a hard dep stalls its dependant. risk:high: it reads the drain's
+  note: "FILED 2026-08-03 from feedback fb-1784770111145-cf7c24 (clause 2). depends_on REPOINTED
+    [W1-T314] -> [W1-T336] on 2026-08-04, when W1-T314 was withdrawn and decomposed. THIS EDIT IS
+    MANDATORY, NOT TIDYING: W1-T314 is now `status: blocked`, drain.ts's isDispatchEligible refuses a
+    blocked task, and a blocked task never merges — so a dependant pointing at it can never become
+    runnable, and this task would have been stranded silently. W1-T336 is the shard that actually
+    creates the Plan tab this one fills, so the dependency is unchanged in substance: it still says
+    'this fills the tab that task creates', and the design's explicit fallback if the tab work stalls
+    still applies, per the W1-T183/#410 lesson that a hard dep stalls its dependant. risk:high: it reads the drain's
     own ordering predicate and the batched GitHub gateway; a wrong frontier misdirects the operator's
     attention, which is the exact failure this arc exists to fix. NOT a re-decision of W1-T279/W1-T280 (the
     CLI status board and its --json, which own liveness and feed the Now tab) — those answer 'is it running',

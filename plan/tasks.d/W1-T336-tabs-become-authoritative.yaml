@@ -1,0 +1,88 @@
+- id: W1-T336
+  title: "with the scaffold up and the suites shape-agnostic, make the tabs AUTHORITATIVE — move the ten sections under Decisions/Now/Plan/Feed, filter Decisions by existing verdicts, and keep the needs-me badge firing from an inactive tab"
+  repo: remudero
+  depends_on: [W1-T335]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 90.00
+  rationale: "THIRD AND LAST SHARD SPLIT OUT OF W1-T314, and the only one that changes what the
+    operator sees. RE-DERIVED AT 1867c35.
+    WHY THIS ONE CAN NOW SUCCEED WHERE W1-T314 FAILED SIX TIMES. The failure was never the DOM work;
+    it was that the DOM work turned eight suites red at `rmd preflight --ci-parity`, which
+    `ciParityContractLines` (src/lib/compaction.ts) requires to PASS before the first push. By the
+    time this shard runs, W1-T334 has put the tab bar up and W1-T335 has routed all eight suites
+    through the shared harness, so the restructure this shard performs does not turn them red and the
+    preflight the contract demands can actually go green. That is the entire point of the ordering.
+    WHAT MOVES. `renderShellHtml` emits a flat `<main>` of sibling sections with stable ids — glance,
+    recap, now, needs-me, accepted, up-next, recent, rest, controls, more. This shard assigns each to
+    a tab. THE SECTIONS ARE MOVED, NOT REBUILT: every one already exists, already binds a live
+    projection and already patches in place under W1-T156. What is missing is the separation, and
+    that is all this shard adds.
+    THE MEASURED REASON THE SEPARATION IS WANTED, preserved from W1-T314: the 2026-07-22 fixture
+    behind fb-1784756096314-a6f58b measured 31 needs-me items of which 26 were stale and 4 genuine."
+  design: |
+    THE TABS BECOME THE SHELL'S ORGANISING STRUCTURE. This is one concern — 'the tabs now govern' —
+    even though it touches four of them, because a tab bar in which only some tabs govern is a worse
+    state than either endpoint and would leave the operator unable to trust any of it.
+    DECISIONS — the needs-me set with already-resolved items FILTERED OUT rather than sorted down.
+      CONSUME THE EXISTING VERDICTS AND INVENT NO THIRD STALENESS RULE: W1-T257 owns 'a proposal_pr
+      that MERGED is no longer a pending decision', and the escalation-lifecycle reconciler owns
+      'this escalation's referent resolved'. Where a verdict is not yet live, render exactly today's
+      set. A competing rule here is the failure mode, not a feature.
+    NOW — live runs, daemon and deploy state, bound to the ONE `rmd status` read model
+      (src/lib/status-board.ts, whose own header already names this tab as its intended consumer).
+      NO second derivation of liveness in the console.
+    PLAN — still the honest 'not built yet' W1-T334 put there. W1-T315 fills it and is repointed to
+      depend on THIS task. Do not pre-empt it.
+    FEED — the raw firehose, UNCHANGED: recent, rest, the find layer and the recap keep working
+      exactly as today. ARCHAEOLOGY IS A FIRST-CLASS USE AND NOTHING MAY BE DELETED TO MAKE ROOM. The
+      falsifier is any firehose row reachable today that cannot be reached after the change.
+    WHAT DOES NOT MOVE: the GLANCE strip stays pinned above the tabs, where W1-T334 put it.
+    THE BADGE MUST FIRE FROM AN INACTIVE TAB. The browser-tab needs-me badge keeps firing when
+    Decisions is NOT the active tab — an alert that depends on already looking at it is not an alert.
+    This is the half of W1-T314's fourth criterion that only becomes real once a tab can be inactive,
+    which is why it lands here and the glance-placement half landed in W1-T334.
+    PRESERVE WHAT SHIPPED, VERIFIED FROM SOURCE BEFORE REWRITING: W1-T156's DOM-stable in-place
+    patching and text-selection stability — a tab switch must not re-create rows or drop an
+    in-progress selection; W1-T154's first-paint budget; W1-T262's freshness story, where each tab
+    declares its own source's age and a STALE badge never co-displays with 'live'.
+    NO NEW FETCHES. Tabs are a projection of the SAME data the shell already receives; an inactive tab
+    must not add a poll, a request or a second gateway call. Non-active sections may render lazily.
+    HONEST EMPTINESS: an empty Decisions tab says 'nothing needs you', and W1-T283's lesson applies —
+    it may say that only when it has actually looked at the whole set. No tab is hidden when empty.
+    IF THIS SHARD ITSELF PROVES TOO LARGE, the next seam is per-tab: Feed and Plan are pure moves,
+    while Decisions (filtering) and Now (binding) each carry a projection change. Report that rather
+    than pushing a partial restructure — a half-moved shell is the state this whole split exists to
+    avoid.
+    NOT IN SCOPE: the Plan view's content (W1-T315); what a card says (W1-T313); grouping or
+    batch-close of escalations (fb-1784756096314-a6f58b); any further change to the shared test
+    harness beyond using it (W1-T335 owns it).
+  acceptance:
+    - claim: "Decisions renders only items no live verdict has already resolved, consuming the existing merged-proposal and escalation-reconciler verdicts rather than a staleness rule of its own"
+      proof: "unit test: test/serve.density-ia.test.ts"
+    - claim: "Feed still renders recent, everything-else and the find layer unchanged — every firehose row reachable before the change is reachable after it"
+      proof: "unit test: test/serve.find.test.ts"
+    - claim: "the needs-me badge still fires while a tab other than Decisions is active, and the glance strip remains outside the tabs"
+      proof: "unit test: test/serve.shell-ux.test.ts"
+    - claim: "switching tabs issues no additional fetch and preserves in-place row patching, so live state and an in-progress text selection survive the switch"
+      proof: "unit test: test/serve.live-state.test.ts"
+  risk: high
+  origin: oper#split-w1-t314-2026-08-04
+  plan_refs: ["§7", "W1-T314", "W1-T156", "W1-T257"]
+  files: [src/lib/serve.ts, test/serve.shell-ux.test.ts, test/serve.density-ia.test.ts, test/serve.find.test.ts, test/serve.live-state.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — four claims, each a real Chromium assertion against the shipped shell.
+    risk:high — it is the restructure itself. Its real danger is silent regression of W1-T156's
+    in-place patching or W1-T262's freshness story, which is why preserving those is a criterion
+    rather than a note.
+    budget_usd 90 — the largest of the three, and deliberately below W1-T314's 100 because two thirds
+    of that task's surface has moved to W1-T334 and W1-T335.
+    files: FIVE PATHS, not eleven. The eight-suite sweep belongs to W1-T335; this shard writes only the
+    four suites carrying its own criteria plus serve.ts. If it finds it must edit a suite outside that
+    list, that is a signal W1-T335 left the harness incomplete and it should be reported, not absorbed
+    — absorbing it is how W1-T314 grew to eleven files and took two scope_guard refusals.
+    depends_on W1-T335 IS HARD: the whole ordering exists so this shard's restructure meets suites that
+    already tolerate it. Running this before W1-T335 reproduces the exact preflight cliff that killed
+    W1-T314 six times, which makes this the least defensive edge in the plan."
