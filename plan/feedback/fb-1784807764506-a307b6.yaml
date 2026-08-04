@@ -17,5 +17,6 @@ raw: "W1-T86 ACCEPTANCE PROOFS ARE PROSE-DIALECT, UNCERTIFIABLE (blocks PR #631)
   proofs, not prose that names no runnable test."
 attachments: []
 origin: cli
-status: new
+status: rejected
 proposal_pr: null
+summary: null
