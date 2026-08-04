@@ -1,0 +1,87 @@
+- id: W1-T329
+  title: "a governor that DEFERS EVERY DISPATCH is invisible — daemon.cost_governor and daemon.queue_governor are emitted every tick with the numbers, no console surface reads either, and neither is retained, so the console shows an idle fleet with no reason"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 90.00
+  rationale: "OPERATOR COMPLAINT, 2026-08-04: 'When we hit the $150 limit, there was nothing stating
+    that in console.' RE-DERIVED AT 486e499 — every claim below is a grep a reader can reproduce.
+    THE DATA IS RECORDED. `daemon.cost_governor` (src/lib/daemon.ts) carries `tick`,
+    `observed_day_cost_usd`, `daily_cost_ceiling_usd` and `poll_interval_ms`, and is written on EVERY
+    tick the governor defers. `logCostGovernorDeferral` (src/lib/sweep.ts) writes
+    `dispatch_deferred_budget` with `observed_day_cost_usd` and `daily_cost_ceiling_usd`.
+    `daemon.queue_governor` carries `observed_open_count` and `wip_limit` the same way. THIS IS A
+    RENDER GAP, NOT A RECORDING GAP.
+    NOTHING READS THEM. Grepping serve.ts, panel-graph.ts, board.ts and idle-reasons-panel.ts for
+    `cost_governor`, `dispatch_deferred_budget` or `queue_governor` returns ZERO hits. The fleet
+    deferred every dispatch for ~40 minutes on 2026-08-04 at $152.28 against a $150 ceiling and the
+    console said only 'nothing in flight'. The operator diagnosed it by grepping the ledger after
+    first chasing a suspected restart loop.
+    AND THEY WOULD NOT SURVIVE ROTATION ANYWAY. Neither step is in
+    DECISION_RELEVANT_LEDGER_STEPS nor in RENDER_RELEVANT_LEDGER_STEPS (verified: all three of
+    daemon.cost_governor, dispatch_deferred_budget and daemon.queue_governor are absent from both).
+    Retention is therefore a PRECONDITION of rendering, not a follow-up — this is the exact defect
+    W1-T275 fixed for `daemon.headroom`, whose own doc records the ACCOUNT strip reading 'unknown' on
+    a healthy fleet because rotation had archived every line of it.
+    THE SURFACE ALREADY EXISTS. The GLANCE strip's `au-governor` slot renders the headroom governor's
+    posture from `deriveGovernorPosture` (src/lib/account-usage.ts), aged by its own `governorAsOf`.
+    That is the surface that already answers 'may the fleet work', and it is where a dispatch-blocking
+    deferral belongs."
+  design: |
+    EXTEND THE EXISTING GLANCE SURFACE. NO NEW PANEL. The console's RECENT feed is a fixed 20-row
+    window already oversubscribed roughly 2.2x, so anything added there displaces something; the
+    GLANCE strip is a fixed set of labelled slots and is the correct home.
+    (i) RETENTION FIRST, and in RENDER_RELEVANT_LEDGER_STEPS — NOT the decision set. That distinction
+    is load-bearing and ledger.ts states why: the decision set is the never-rotated core, so a
+    render-only step added there is retained FOREVER rather than for as long as the console needs it.
+    The render set gets its own recency-bounded category. `test/ledger-render-retention.test.ts`
+    re-derives that set from its consumers' own source, so it must be updated in the SAME change or it
+    fails.
+    (ii) DERIVE A DEFERRAL POSTURE the way `deriveGovernorPosture` already derives the headroom one:
+    read the NEWEST line, carry its own as-of, and age it inline. Reuse that shape rather than
+    inventing a second one — two derivations of 'is the fleet allowed to work' will drift.
+    (iii) RENDER THE NUMBERS, NOT JUST A FLAG. '$152.28 of $150' is actionable; 'deferred' is not.
+    The operator's complaint was that nothing STATED it.
+    (iv) ABSENT READS AS UNKNOWN, NEVER AS ZERO OR HEALTHY. `GovernorState` is already a tri-state
+    (`armed` | `telemetry-only` | `unknown`) precisely because mapping absent to false 'would report an
+    armed-and-breaching governor as telemetry-only'. The same discipline is mandatory here: no reading
+    must render as UNKNOWN, never as under-ceiling. A governor that could not read its input already
+    idled this fleet for three hours looking identical to one under ceiling.
+    (v) COVER BOTH DISPATCH-DEFERRING GOVERNORS — cost and queue. They are one concern: a bounded
+    governor that stops NEW dispatch while leaving drainage alone, whose deferral the operator cannot
+    see. They share the surface, the retention gap and the unknown rule.
+    DELIBERATELY NOT WIDENED TO THE HEADROOM GOVERNOR'S FIELD DEPTH. That is a DIFFERENT defect:
+    `daemon.headroom` IS already rendered and IS already retained, and its gap is that
+    `deriveGovernorPosture` reads only `enforced`, so armed-and-reading is indistinguishable from
+    armed-and-blind. Same surface, different failure, no retention precondition, and folding it in
+    would put two unrelated fixes behind one review. Named here so it is not lost; not filed here.
+    VERIFY the two retention sets, the emitters' field names and the strip's slot ids FROM SOURCE
+    before wiring — distrust this note.
+  acceptance:
+    - claim: "both dispatch-deferring governor steps are retained for rendering, in the render-relevant set rather than the never-rotated decision core, and the lock that re-derives that set from its consumers still passes"
+      proof: "unit test: test/ledger-render-retention.test.ts"
+    - claim: "a deferral posture is derived from the newest line with its own as-of, and an absent reading yields UNKNOWN rather than zero or under-ceiling"
+      proof: "unit test: test/account-usage.test.ts"
+    - claim: "the glance strip renders the observed figure against its ceiling while deferred, so an idle fleet states its reason instead of showing nothing in flight"
+      proof: "unit test: test/serve.glance.test.ts"
+  risk: high
+  origin: oper#console-governor-surface-2026-08-04
+  plan_refs: ["§7", "W1-T275"]
+  files: [src/lib/ledger.ts, src/lib/account-usage.ts, src/lib/serve.ts, test/ledger-render-retention.test.ts, test/account-usage.test.ts, test/serve.glance.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — a retention set, a pure posture derivation and a rendered slot, all
+    machine-checkable. The strip render is covered by a REAL Chromium page (test/serve.glance.test.ts),
+    which is the standard this repo already holds serve.ts DOM behaviour to.
+    risk:high — Rule 19 counts ledger, account-usage, serve and the test surface as distinct
+    subsystems, and it touches the rotation path: a step added to the WRONG set is retained forever.
+    budget_usd 90 — the highest on this board because retention, derivation and a real-browser render
+    are three separate proofs, and the retention lock re-derives from consumer source so it cannot be
+    satisfied by editing a list.
+    files: DELIBERATELY LISTS ALL SIX. A rendered ledger step implies the retention set AND the lock
+    that re-derives it; omitting either is how five dispatches died to the scope guard this week.
+    NO depends_on: nothing blocks this. W1-T330 (the cost ceiling as a policy row) is the ADJUSTMENT
+    half of the same operator complaint and is independent — seeing the limit and changing it are
+    different changes to different files."

@@ -1,0 +1,86 @@
+- id: W1-T330
+  title: "dailyCostCeilingUsd is a source literal, so retuning the spend ceiling costs a src/ change, a PR, CI and a deploy — roughly forty minutes for a number, on the day the governor first fired"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  rationale: "OPERATOR COMPLAINT, 2026-08-04: 'there was ... no way to adjust the limit.'
+    RE-DERIVED AT 486e499.
+    THE FACT. `DEFAULT_SWEEP_POLICY.dailyCostCeilingUsd` (src/lib/sweep.ts) is a source literal.
+    `plan/policy.yaml`'s sweep section carries exactly three rows — staleDays, strikeCap, wipLimit —
+    and NO dailyCostCeilingUsd key. Raising it on 2026-08-04 took a src/ edit, a PR, CI and a deploy.
+    NOT A DUPLICATE OF W1-T325, and I checked rather than assumed. W1-T325 is scoped to
+    `dispatchLanes` ALONE: the string `dailyCostCeilingUsd` appears NOWHERE in that shard, its title
+    names only the dispatch width, and all four of its acceptance criteria are about dispatchLanes.
+    The belief that it covers all three misdescribed literals comes from the doc comment above
+    DEFAULT_SWEEP_POLICY, which lists `dispatchLanes`/`dailyCostCeilingUsd`/`pendingCeilingMinutes`
+    together as 'rows' — that comment describes what W1-T253 did NOT collect, not what W1-T325 will.
+    THE HONEST LIMIT ON THE WIN, verified and stated so no one over-promises it: a policy row does NOT
+    let a running daemon pick up a new ceiling. `loadDefaultPolicy` memoizes into `cachedDefaultPolicy`
+    for the process lifetime, and `DEFAULT_SWEEP_POLICY` is a module-level const built from it at
+    module-load. `checkCostGovernor`'s policy parameter defaults to that frozen object. So a long-lived
+    daemon holds its BOOT-TIME ceiling until it restarts. A short-lived CLI verb picks the new value up
+    on its next invocation, because that is a fresh process.
+    WHAT THE ROW ACTUALLY BUYS: the edit moves from src/ to reviewed plan data, gains min/max bounds
+    enforced at load by validatePolicy, becomes visible to `rmd lint-plan`, and stops requiring a code
+    review of a number. It still requires a PR — plan/policy.yaml is committed state, and an
+    uncommitted edit is discarded by the deploy's `pull --ff-only`."
+  design: |
+    ONE VALUE, THE ESTABLISHED PATTERN. staleDays/strikeCap/wipLimit are the worked example; follow
+    them exactly rather than inventing a shape.
+    (i) Add `sweep.dailyCostCeilingUsd` to plan/policy.yaml with `value`, an `origin: "lifted:..."`
+    naming DEFAULT_SWEEP_POLICY.dailyCostCeilingUsd as the site it is lifted from, and explicit
+    `min`/`max`.
+    (ii) THE VALUE IS WHATEVER src/lib/sweep.ts HOLDS AT IMPLEMENTATION TIME — read it, do not copy a
+    number from this note. It was raised from 150 to 500 on 2026-08-04 and may move again before this
+    task runs. This is a RELOCATION, NOT A RETUNE: a consumer must observe the identical ceiling before
+    and after.
+    (iii) CHOOSE THE BOUNDS DELIBERATELY AND DEFEND THEM IN THE PR BODY. `min` must not permit a
+    ceiling so low it defers every dispatch on an ordinary day; `max` must not permit an effectively
+    unbounded one, since rule 2 is that an absent value falls back to a BOUNDED default. Note that
+    `maxPerDay`'s max currently equals its value, which pins that lever — do not repeat that here
+    unless it is argued.
+    (iv) Teach the loader: src/lib/policy.ts needs the field on its `sweep` shape, an entry in the
+    lifted/net-new provenance map, a `numberField("sweep.dailyCostCeilingUsd", ...)` parse so an
+    out-of-range edit is REFUSED AT LOAD, and the field on the returned object.
+    (v) src/lib/sweep.ts then reads POLICY_SWEEP.dailyCostCeilingUsd instead of the literal.
+    (vi) BOTH POLICY TESTS ARE IMPLICATED AND BOTH ARE DECLARED: test/policy.test.ts holds a minimal
+    raw table mirroring the shipped shape plus a drift lock over the SHIPPED file, so a new required
+    field breaks every fixture until updated; test/policy-consumers.test.ts holds the per-row 'reads
+    the policy, not a source literal' assertion.
+    (vii) DO NOT CLAIM THIS REMOVES THE RESTART. If the PR body says a running daemon picks the new
+    ceiling up live, it is wrong — see the rationale's memoization finding. Say what is true: the edit
+    becomes reviewed, bounded plan data instead of code.
+    NOT IN SCOPE: changing the ceiling's value; `dispatchLanes` (W1-T325) and `pendingCeilingMinutes`,
+    which are separate values with separate arguments; and any mechanism for changing a ceiling WITHOUT
+    a PR, which is a third thing and needs its own operator ruling.
+    VERIFY the loader's current field list and both tests' fixture shapes FROM SOURCE before editing.
+  acceptance:
+    - claim: "the shipped policy file carries a bounded daily cost ceiling row and the loader refuses an out-of-range value at load rather than clamping it"
+      proof: "unit test: test/policy.test.ts"
+    - claim: "sweep.ts reads the daily cost ceiling from the loaded policy rather than a source literal, and a consumer observes the identical ceiling before and after the relocation"
+      proof: "unit test: test/policy-consumers.test.ts"
+    - claim: "the row exists in the shipped policy data, not merely in the loader's type"
+      proof: "grep: dailyCostCeilingUsd in plan/policy.yaml"
+  risk: high
+  origin: oper#console-governor-surface-2026-08-04
+  plan_refs: ["§5", "W1-T252", "W1-T253"]
+  files: [src/lib/policy.ts, src/lib/sweep.ts, plan/policy.yaml, test/policy.test.ts, test/policy-consumers.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — a loader field, a data row and two test locks.
+    risk:high — it edits the substrate every other bounded row depends on; a loader mistake fails EVERY
+    rmd verb at load, not just dispatch. And the value it moves gates SPEND.
+    budget_usd 70 — the pattern is fully worked by three sibling rows, so this is following an example
+    across five declared files.
+    files: DELIBERATELY LISTS ALL FIVE. A bounded row is never a one-file change: the loader that
+    bounds it and the two tests that lock it are part of the row. A shard declaring only
+    plan/policy.yaml was refused by the scope guard after reaching implement.done this week.
+    THE THIRD THING, NAMED NOT FILED: changing a ceiling with NO PR at all — a console control or an
+    operator-writable override — is a different decision with a different blast radius (it would put
+    live spend policy outside review and outside git). It needs an operator ruling before anyone builds
+    it. This task deliberately does not smuggle it in.
+    NO depends_on: independent of W1-T325 (dispatchLanes) and of W1-T329, which is the SEEING half of
+    the same complaint while this is the ADJUSTING half."
