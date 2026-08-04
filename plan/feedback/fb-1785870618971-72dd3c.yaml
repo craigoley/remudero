@@ -1,0 +1,30 @@
+id: fb-1785870618971-72dd3c
+ts: 2026-08-04T19:10:18.971Z
+raw: "WORKER FOLLOW-UPS TYPED 'task:' HAVE NO CONSUMER — the ci:test ENOBUFS
+  defect was independently reported by TWO workers in their report.followups
+  entries before anyone filed it: W1-T313 at 2026-08-04T00:36:04Z (PR #1249) and
+  W1-T320 at 15:45:43Z (PR #1289), fifteen hours apart. Both PRs merged. Neither
+  follow-up became a task. It was filed as W1-T338 only when a third agent
+  rediscovered it from scratch hours later. The output contract explicitly
+  instructs workers to put out-of-scope discoveries in a '## Follow-ups' section
+  as 'task: <what, and why>' — so the fleet is generating well-formed task
+  proposals and discarding them. RELATED AND WORSE: rmd preflight --ci-parity
+  emits NO ledger step under any name (grep for any step containing 'preflight'
+  returns zero across the whole ledger), so a preflight failure is invisible
+  except when a worker happens to mention it in prose. That is why W1-T314's
+  sixth run read implement.done, subtype success, 179 turns, $16.78, with no PR
+  and no gate line — the step that stopped it recorded nothing. RECON: establish
+  what, if anything, reads report.followups entries by type; whether the triage
+  or plan lane could consume 'task:' entries the way it consumes feedback; and
+  what a preflight ledger line should carry (step, verdict, failing step name)
+  so a stall is diagnosable without reading prose. Note the volume risk — if
+  every run emits follow-ups, a naive consumer manufactures a task per run — so
+  the recon must propose a filter, not just a pipe. Falsifying check: if a
+  consumer exists and these two were dropped for a specific reason (dedup, a
+  confidence threshold, a lane that only reads 'research:'), the gap is narrower
+  than it looks and the fix is in that filter."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null
