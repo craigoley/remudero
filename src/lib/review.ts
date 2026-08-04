@@ -658,6 +658,16 @@ function matchesDialectPrefix(s: string): boolean {
 /** The project's own `test` script glob (package.json) — reused verbatim so a
  * name-filtered run scopes to exactly the suite `npm test` would run. */
 const TEST_GLOB = "test/**/*.test.ts";
+/** The suite's per-process temp-dir reaper (W1-T131), passed on EVERY direct `node --test`
+ * spawn this module builds — the same `--import` package.json's `test`/`test:ci`,
+ * scripts/check.mjs and stryker.conf.json already pass. The proof executor omitted it, so
+ * every proof execution leaked one OS-tmpdir dir per fixture in the loaded files: 53,310
+ * `rmd-*` dirs, growing ~200/min, ENOSPC-crash-looped the daemon on 2026-08-03
+ * (plan/feedback/fb-1785807201821-e4c9dc.yaml). Relative like every reference site: node
+ * resolves `--import` from the spawn's cwd, which {@link execWhitelistedProof} pins to the
+ * PR-head checkout — the file ships in that checkout. Must sort AFTER `--import tsx`: tsx's
+ * loader is what lets node parse the `.ts` setup file at all. */
+const TMP_HYGIENE_IMPORT = "./test/setup/tmp-hygiene.ts";
 
 /**
  * True when a proof's TEXT is written in a recognised house dialect — either
@@ -814,7 +824,12 @@ function parseTestTarget(body: string): WhitelistedProof | null {
   if (!trimmed) return null;
   if (TEST_PATH_EXACT_RE.test(trimmed)) {
     if (trimmed.includes("..")) return null; // no path traversal out of the checkout
-    return { kind: "test", command: "node", args: ["--test", "--import", "tsx", trimmed], label: trimmed };
+    return {
+      kind: "test",
+      command: "node",
+      args: ["--test", "--import", "tsx", "--import", TMP_HYGIENE_IMPORT, trimmed],
+      label: trimmed,
+    };
   }
   // W1-T128: no shell-metacharacter check on a bare TEST NAME — it becomes the
   // single `--test-name-pattern` argv value passed to execFile (never a shell),
@@ -840,7 +855,16 @@ function parseTestTarget(body: string): WhitelistedProof | null {
   return {
     kind: "test",
     command: "node",
-    args: ["--test", "--import", "tsx", "--test-name-pattern", escapeRegExp(trimmed), TEST_GLOB],
+    args: [
+      "--test",
+      "--import",
+      "tsx",
+      "--import",
+      TMP_HYGIENE_IMPORT,
+      "--test-name-pattern",
+      escapeRegExp(trimmed),
+      TEST_GLOB,
+    ],
     label: trimmed,
     nameFiltered: true,
   };
@@ -930,7 +954,12 @@ export function parseWhitelistedProof(proof: string): WhitelistedProof | null {
   if (testMatch) {
     const path = testMatch[0];
     if (path.includes("..")) return null; // no path traversal out of the checkout
-    return { kind: "test", command: "node", args: ["--test", "--import", "tsx", path], label: path };
+    return {
+      kind: "test",
+      command: "node",
+      args: ["--test", "--import", "tsx", "--import", TMP_HYGIENE_IMPORT, path],
+      label: path,
+    };
   }
 
   const grepMatch = proof.match(GREP_FENCE_RE);
