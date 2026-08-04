@@ -104,6 +104,24 @@
         against origin/main's current tip) before wiring anything.
 
   acceptance:
+    - claim: "a decision.autochoose resolution reaches the repository without an operator noticing a dirty tree"
+      proof: "unit test: a decision record reaches a committed artifact, not only the working tree"
+      superseded_prose: "integration test over a seeded auto-choose resolution: the decision record is present in a committed/committable artifact of the run rather than only in the operator checkout's working tree. FALSIFIER, observed 2026-07-20/21: three resolutions (W1-T156 20:36:14, W1-T128 22:31:09, W1-T136 01:18:25) sat uncommitted in ~/Remudero/remudero/DECISIONS.md — committed HEAD 29 entries, working tree 32 — with matching decision.autochoose ledger lines proving each decision was made and acted on"
+    - claim: "concurrent resolutions cannot conflict on the log"
+      proof: "unit test: two concurrent decision records both land without a conflict"
+      superseded_prose: "two runs resolving decisions concurrently both land their records without a merge conflict on a shared append-only file. FALSIFIER: naively moving the append into each worker's worktree makes every concurrent pair conflict on the same file — the exact class W1-T122 solved for plan/tasks.yaml by sharding, and a fix that trades silent loss for noisy conflicts is not a fix"
+    - claim: "the record cannot be destroyed by an ordinary git hygiene command"
+      proof: "unit test: no decision record exists solely as an uncommitted modification"
+      superseded_prose: "no decision record exists solely as an uncommitted modification in a long-lived checkout. FALSIFIER: today `git checkout -- DECISIONS.md` in the operator checkout silently destroys every unrescued entry, and that is a routine command for cleaning a dirty tree"
+    - claim: "the three already-observed entries are preserved, not assumed away"
+      proof: "unit test: the three rescued decision records are present after the fix"
+      superseded_prose: "the three 2026-07-20/21 resolutions are present in the repository after this task ships. FALSIFIER: a fix that only handles future decisions leaves these three dependent on the PR that happened to rescue them, and provides no evidence that earlier resolutions were not already lost to a checkout or clean-up"
+    - claim: "a console feedback decision no longer leaves a tracked modification in the checkout it wrote through — the status flip reaches a branch, not the working tree"
+      proof: "unit test: a feedback decision leaves the caller's working tree clean"
+    - claim: "the freshness gate stops firing for this cause — a checkout behind origin/main whose only prior dirt came from these two writers is no longer refused, so the auto-sync that clears `behind` is no longer switched off by the dirt it is meant to clear"
+      proof: "unit test: a checkout dirtied only by these two writers is not refused"
+    - claim: "the fix does not widen the service carve-out or exempt further verbs from the freshness gate — the gate is correct, the writers are the defect"
+      proof: "grep: DIRT NEVER BLOCKS A SERVICE in src/lib/self-sync.ts"
     - claim: "this task is withdrawn as already satisfied — every criterion is credited to a named merged PR whose regression tests quote this task's own acceptance language verbatim in their titles"
       proof: "grep: W1-T191 acceptance in test/feedback-landing.test.ts"
   risk: high

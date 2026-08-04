@@ -34,6 +34,14 @@
     before the work and everything after, so the same rule does not apply to them and must not be extended
     there by analogy.
   acceptance:
+    - claim: "a grep proof matching on the merge-base as well as the head is flagged non-discriminating"
+      proof: "unit test: test/proof-discrimination.test.ts"
+    - claim: "the non-discriminating outcome removes the proof's positive override"
+      proof: "unit test: test/proof-discrimination.test.ts"
+    - claim: "a grep proof matching only on the head still counts as executed and passing"
+      proof: "unit test: test/proof-discrimination.test.ts"
+    - claim: "the check names a distinct recorded outcome rather than reusing failure"
+      proof: "grep: preexistingProofHits in src/lib/review.ts"
     - claim: "this task is withdrawn as already satisfied — every criterion, including the `executed_stale` mechanism this record specifically anticipated, is credited to a named merged PR"
       proof: "grep: W1-T273 in test/proof-discrimination.test.ts"
   risk: medium

@@ -5830,6 +5830,12 @@
     depends_on is left UNCHANGED at [W1-T1] and no other task is touched. Nothing in src/ or test/ is
     edited by this withdrawal.
   acceptance:
+    - claim: "PR workflow runs typecheck + full test suite on every PR to remudero"
+      proof: "a green check-run on this task's own PR (gh pr checks)"
+    - claim: "run-task REFUSES to merge a PR whose required checks are not green"
+      proof: "a deliberately-red PR is left OPEN with verdict=blocked_ci in the ledger, never merged"
+    - claim: "workers npm ci in the worktree before typecheck/test (a fresh worktree has no node_modules)"
+      proof: "worker transcript shows npm ci, then tests passing IN the worktree"
     - claim: "this task is withdrawn — already satisfied by merged PR #3 and, separately, every original criterion's proof is unexecutable prose confirmed via parseWhitelistedProof; it will never be dispatched"
       proof: "grep: W1-T1B: a DOUBLE reason, either one alone in plan/tasks.yaml"
   risk: high
@@ -5878,6 +5884,14 @@
     depends_on is left UNCHANGED at [W1-T1B] and no other task is touched. Nothing in src/ or test/ is
     edited by this withdrawal.
   acceptance:
+    - claim: "a REVIEW worker with FRESH context posts remudero-review to the PR head commit after ci is green"
+      proof: "gh api .../statuses/<sha> shows context=remudero-review with a state on a real PR"
+    - claim: "FALSIFIER (unit fixture): a diff that PASSES tests while ignoring a stated acceptance
+        criterion yields state=failure; test theater (assertions that assert nothing) yields failure"
+      proof: "unit test over recorded fixtures: (criterion, diff, report) with an unmet proof -> the
+        verdict function returns failure; a responsive+proven criterion -> success"
+    - claim: "the reviewer never edits code (read-only tools + gh only)"
+      proof: "worker settings/transcript show no write tool used; the PR head sha is unchanged by review"
     - claim: "this task is withdrawn as a pre-dialect zombie — every original criterion's proof is unexecutable prose, confirmed via parseWhitelistedProof; it will never be dispatched"
       proof: "grep: W1-T1C: a fresh-context REVIEW worker in plan/tasks.yaml"
   risk: medium
@@ -5921,6 +5935,13 @@
     depends_on is left UNCHANGED at [W1-T1C] and no other task is touched. Nothing in src/ or test/ is
     edited by this withdrawal.
   acceptance:
+    - claim: "protection requires exactly [ci, remudero-review]"
+      proof: "gh api repos/craigoley/remudero/branches/main/protection --jq .required_status_checks.contexts"
+    - claim: "a PR that is CI-GREEN but FAILS acceptance is NOT merged (verified LIVE)"
+      proof: "planted probe: an implement worker that passes tests but ignores a stated acceptance
+        criterion -> remudero-review=failure -> PR stays OPEN -> paste the status + PR state, then close"
+    - claim: "a PR green on BOTH checks auto-merges with no runner-side merge call (verified LIVE)"
+      proof: "ledger shows automerge.armed then pr.merged with no explicit merge command"
     - claim: "this task is withdrawn as a pre-dialect zombie — every original criterion's proof is unexecutable prose, confirmed via parseWhitelistedProof; it will never be dispatched"
       proof: "grep: W1-T1D: The gate enforces the reviewer in plan/tasks.yaml"
   risk: medium
@@ -5984,6 +6005,13 @@
     depends_on is left UNCHANGED at [W1-T1, W1-T1B, W1-T1D] and no other task is touched. Nothing in
     src/ or test/ is edited by this withdrawal.
   acceptance:
+    - claim: "parseDecisionRequest survives the WS-0 near-miss (inline (RECOMMENDED) marker capturing ')')"
+      proof: "golden test with the exact WS-0 malformed payload passes; option list has no ')'"
+    - claim: "parseDecisionRequest survives the T1D auto-choose near-miss — DECORATION IS NOT DATA: the
+        option `**Option A — `docs/review-gate.md` (new doc)** ✅ ****` must parse to a clean value with
+        the markdown bold, backticks, emoji, and trailing asterisks STRIPPED (same class as the WS-0 `)` bleed)"
+      proof: "golden test: parseDecisionRequest on that exact decorated payload returns a recommended
+        value of `Option A — docs/review-gate.md (new doc)` with no `**`, no ✅, and no trailing `****`"
     - claim: "this task is withdrawn as a pre-dialect zombie — every original criterion's proof is unexecutable prose, confirmed via parseWhitelistedProof; it will never be dispatched"
       proof: "grep: W1-T3: Contract parsers — parseDecisionRequest in plan/tasks.yaml"
   risk: medium
@@ -6024,6 +6052,8 @@
     depends_on is left UNCHANGED at [W1-T1D] and no other task is touched. Nothing in src/ or test/ is
     edited by this withdrawal.
   acceptance:
+    - claim: "the dontAsk fallback path (currently UNTESTED code) is exercised"
+      proof: "a forced-fallback run completes with the floor holding"
     - claim: "this task is withdrawn as a pre-dialect zombie — its criterion's proof is unexecutable prose, confirmed via parseWhitelistedProof; it will never be dispatched"
       proof: "grep: W1-T3B: dontAsk permission-mode fallback in plan/tasks.yaml"
   risk: medium
@@ -6078,6 +6108,8 @@
     depends_on is left UNCHANGED at [W1-T1D] and no other task is touched. Nothing in src/ or test/ is
     edited by this withdrawal.
   acceptance:
+    - claim: "provenance linter is BLOCK-oriented, not line-oriented (W1-T1 open question)"
+      proof: "a claim wrapped across three lines with its [src:] on the last line PASSES; the same claim with no [src:] anywhere BLOCKS"
     - claim: "this task is withdrawn as a pre-dialect zombie — its criterion's proof is unexecutable prose, confirmed via parseWhitelistedProof; it will never be dispatched"
       proof: "grep: W1-T3D: Provenance linter becomes BLOCK-oriented in plan/tasks.yaml"
   risk: medium
@@ -6205,6 +6237,13 @@
     depends_on is left UNCHANGED at [W1-T1, W1-T1B, W1-T1D] and no other task is touched. Nothing in
     src/ or test/ is edited by this withdrawal.
   acceptance:
+    # CORRECTED (Architect, plan PR): PR #23 relocated budget OFF the mount to per-task `budget_usd` (all
+    # 100). `maxBudgetUsd` is no longer a mount knob, and the code uses `max_turns` (YAML), not `maxTurns`.
+    # The criterion is realigned to the SHIPPED architecture — nothing dropped or weakened (Rule 15/16).
+    - claim: "mounts table keyed by (task_type x risk x thinking) resolves to real knobs (model, effort, max_turns, context_budget); budget is per-task budget_usd per PR #23, not a mount knob"
+      proof: "resolver test: diagnose steps UP; routine retry does NOT"
+    - claim: "Tier Invariant enforced at load (G-17): architect.tier > max(worker.tier)"
+      proof: "a violating mounts.yaml is REJECTED with a named error"
     - claim: "this task is withdrawn as a pre-dialect zombie — every original criterion's proof is unexecutable prose, confirmed via parseWhitelistedProof; it will never be dispatched"
       proof: "grep: W1-T5: mounts.yaml v0 + Tier Invariant in plan/tasks.yaml"
   risk: high
@@ -6288,6 +6327,10 @@
     depends_on is left UNCHANGED at [W1-T6] and no other task is touched. Nothing in src/ or test/ is
     edited by this withdrawal.
   acceptance:
+    - claim: "BLOCKED/MANUAL/HARD-STOP escalations open labeled issues with options + a recommendation"
+      proof: "issue URL + needs-human label via gh issue view"
+    - claim: "imessage-local adapter sends via osascript on the host Mac (no BlueBubbles dependency)"
+      proof: "received message + ledger notify line"
     - claim: "this task is withdrawn as a pre-dialect zombie — every original criterion's proof is unexecutable prose, confirmed via parseWhitelistedProof; it will never be dispatched"
       proof: "grep: W1-T8: Escalations as GitHub issues in plan/tasks.yaml"
   risk: medium
@@ -6330,6 +6373,8 @@
     depends_on is left UNCHANGED at [] and no other task is touched. Nothing in src/ or test/ is edited
     by this withdrawal.
   acceptance:
+    - claim: "config validation rejects overflow:api_key + daily_cap:none"
+      proof: "named error in the rejection test"
     - claim: "this task is withdrawn as a pre-dialect zombie — its criterion's proof is unexecutable prose, confirmed via parseWhitelistedProof; it will never be dispatched"
       proof: "grep: W1-T9a: Config loader + validation in plan/tasks.yaml"
   risk: medium
@@ -6370,6 +6415,8 @@
     depends_on is left UNCHANGED at [W1-T4] and no other task is touched. Nothing in src/ or test/ is
     edited by this withdrawal.
   acceptance:
+    - claim: "given /usage output + ~/.claude.json keys as INPUTS, detectTier returns the tier with its evidence source"
+      proof: "unit tests over fixtures for max5x / max20x / ambiguous — NO live calls, NO interactivity"
     - claim: "this task is withdrawn as a pre-dialect zombie — its criterion's proof is unexecutable prose, confirmed via parseWhitelistedProof; it will never be dispatched"
       proof: "grep: W1-T9b: Tier detection (pure in plan/tasks.yaml"
   risk: high  # W1-T324: raised medium->high from the retirement alone (Rule 19's own sizing
@@ -6417,6 +6464,10 @@
     depends_on is left UNCHANGED at [W1-T9a, W1-T9b] and no other task is touched. Nothing in src/ or
     test/ is edited by this withdrawal.
   acceptance:
+    - claim: "`rmd init --tier max20x --yes` writes a valid config NON-INTERACTIVELY (no TTY, no operator)"
+      proof: "config written from flags; the test drives the CLI with no stdin / no TTY and asserts the written config"
+    - claim: "when tier detection is confident, init writes the config WITHOUT prompting"
+      proof: "fixture-driven: a confident-detection fixture yields a written config; the prompt path is never entered"
     - claim: "this task is withdrawn as a pre-dialect zombie — every original criterion's proof is unexecutable prose, confirmed via parseWhitelistedProof; it will never be dispatched"
       proof: "grep: W1-T9c: rmd init wizard in plan/tasks.yaml"
   risk: high
@@ -6485,6 +6536,10 @@
     depends_on is left UNCHANGED at [W1-T6] and no other task is touched. Nothing in src/ or test/ is
     edited by this withdrawal.
   acceptance:
+    - claim: "Pause halts new spawns; in-flight tasks run to FULL completion (verdict + merge)"
+      proof: "ledger: pause issued mid-run, in-flight task still reaches merged"
+    - claim: "STOP file + `rmd stop` kill within one tick"
+      proof: "ledger stop line + no subsequent spawns"
     - claim: "this task is withdrawn as a pre-dialect zombie — every original criterion's proof is unexecutable prose, confirmed via parseWhitelistedProof; it will never be dispatched"
       proof: "grep: W1-T11: Fleet control set in plan/tasks.yaml"
   risk: medium
@@ -6563,6 +6618,8 @@
     depends_on is left UNCHANGED at [W1-T12a] and no other task is touched. Nothing in src/ or test/ is
     edited by this withdrawal.
   acceptance:
+    - claim: "the GENERATED launchd .plist contains absolute paths + an explicit PATH + the ANTHROPIC-clean-env boot assertion, and the startup routine logs env_clean=true / billing_mode=subscription when run in-process"
+      proof: "assert the generated plist contents (absolute paths, explicit PATH, the assertion) + unit-test that the startup routine emits env_clean=true / billing_mode=subscription — NOT a real launchctl load"
     - claim: "this task is withdrawn as a pre-dialect zombie — its criterion's proof is unexecutable prose, confirmed via parseWhitelistedProof; it will never be dispatched"
       proof: "grep: NOT a real launchctl load in plan/tasks.yaml"
   risk: high  # W1-T324: raised medium->high (Rule 19's own sizing exemption) — the ORIGINAL files:
@@ -6609,6 +6666,8 @@
     depends_on is left UNCHANGED at [W1-T12a] and no other task is touched. Nothing in src/ or test/ is
     edited by this withdrawal.
   acceptance:
+    - claim: "given a SIMULATED interrupted-run state (orphaned worktree + unmerged branch + partial ledger), the recovery routine reconstructs correct state (resume/clean) from git + GitHub + the ledger alone"
+      proof: "unit test SEEDS the interrupted state and asserts the reconstructed state — NOT a live daemon kill"
     - claim: "this task is withdrawn as a pre-dialect zombie — its criterion's proof is unexecutable prose, confirmed via parseWhitelistedProof; it will never be dispatched"
       proof: "grep: W1-T12c: Daemon crash-recovery logic in plan/tasks.yaml"
   risk: high  # W1-T324: raised medium->high (Rule 19's own sizing exemption) — subsystemsOf reads
@@ -6710,6 +6769,14 @@
     depends_on is left UNCHANGED at [W1-T1D] and no other task is touched. Nothing in src/ or test/ is
     edited by this withdrawal.
   acceptance:
+    - claim: "`rmd` is on PATH after install and runs from OUTSIDE the repo dir"
+      proof: "after `npm link` (or a global install of the pack), `which rmd` returns a path and
+        `rmd --help` runs from a DIFFERENT directory (paste both, run from e.g. $HOME)"
+    - claim: "the publish tarball contains ONLY intended files — no local/, no state/, no credentials"
+      proof: "`npm pack --dry-run` output pasted in full; assert no local/, state/, *.pat, node_modules,
+        or absolute machine paths appear in the file list"
+    - claim: "`rmd --help` exits cleanly (a real CLI has a help path, not just `run-task`)"
+      proof: "paste `rmd --help` exit code 0 and its usage text"
     - claim: "this task is withdrawn as a pre-dialect zombie — every original criterion's proof is unexecutable prose, confirmed via parseWhitelistedProof; it will never be dispatched"
       proof: "grep: W1-T14: Make rmd a real installable CLI in plan/tasks.yaml"
   risk: medium
@@ -7828,6 +7895,10 @@
     depends_on is left UNCHANGED at [W1-T19] and no other task is touched. Nothing in src/ or test/ is
     edited by this withdrawal.
   acceptance:
+    - claim: "the rendered recon prompt contains the plan INDEX and NOT the plan body"
+      proof: "char-count proof before/after: the recon prompt drops from ~plan-body size to ~index size; grep shows the index headings present and the plan body absent"
+    - claim: "a worker needing a specific section can grep for it and succeed"
+      proof: "a task whose work needs §4A detail: the worker greps MASTER-PLAN for the §4A heading (named in the index) and retrieves it — transcript shows the grep + the hit"
     - claim: "this task is withdrawn as a pre-dialect zombie — every original criterion's proof is unexecutable prose, confirmed via parseWhitelistedProof; it will never be dispatched"
       proof: "grep: W1-T37: PLAN IS RETRIEVED, NOT INJECTED in plan/tasks.yaml"
   risk: medium
@@ -8508,6 +8579,10 @@
     depends_on is left UNCHANGED at [W1-T1D] and no other task is touched. Nothing in src/ or test/ is
     edited by this withdrawal.
   acceptance:
+    - claim: "rmd drain --repo remudero-sandbox derives status and arms merges against the SANDBOX repo"
+      proof: "injected-gateway unit test: drainCommand with --repo remudero-sandbox builds ghGateway(owner, 'remudero-sandbox') for its merged-predicate, not 'remudero'"
+    - claim: "the hardcoded gateway literal is gone from drainCommand"
+      proof: "grep proof: no ghGateway(owner, \"remudero\") literal remains in drainCommand; it derives from the --repo target"
     - claim: "this task is withdrawn as a pre-dialect zombie — every original criterion's proof is unexecutable prose, confirmed via parseWhitelistedProof; it will never be dispatched"
       proof: "grep: W1-T53: rmd drain --repo — parameterize in plan/tasks.yaml"
   risk: medium
@@ -8880,6 +8955,10 @@
     depends_on is left UNCHANGED at [W1-T23] and no other task is touched. Nothing in src/ or test/ is
     edited by this withdrawal.
   acceptance:
+    - claim: "SECURITY.md exists at a GitHub-honored path and states a PRIVATE disclosure channel, supported scope (pre-alpha: main only), and response expectations"
+      proof: "grep SECURITY.md for the private-reporting instruction and scope section; file present at repo root"
+    - claim: "GitHub private vulnerability reporting is ENABLED on the repo and SECURITY.md points at it"
+      proof: "VERIFY the endpoint against gh api docs first, then: gh api shows private-vulnerability-reporting enabled; SECURITY.md links the Report-a-vulnerability flow"
     - claim: "this task is withdrawn as a pre-dialect zombie — every original criterion's proof is unexecutable prose, confirmed via parseWhitelistedProof; it will never be dispatched"
       proof: "grep: W1-T61: SECURITY.md + private disclosure path in plan/tasks.yaml"
   risk: medium

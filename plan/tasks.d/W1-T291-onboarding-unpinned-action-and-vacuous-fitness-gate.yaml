@@ -79,6 +79,16 @@
     which is exactly the fixture (B) has to extend. Both new assertions read the same
     buildProjectInit payload the existing cases read; a second file would fork that fixture setup.
   acceptance:
+    - claim: "the generated dotnet ci.yml references setup-dotnet by 40-char SHA — no moving tag, no TODO(operator) deferral"
+      proof: "unit test: test/project-init.test.ts"
+    - claim: "no step in any generated workflow reports success while asserting nothing, and the generated dotnet stack still reports green-not-deadlocked on a fresh repo with no fitness rules authored"
+      proof: "unit test: test/project-init.test.ts"
+    - claim: "the generated .remudero/principles.yaml describes the dotnet fitness rule as unarmed rather than as an enforced contract"
+      proof: "unit test: test/project-init.test.ts"
+    - claim: "the pinned dotnet action ref is a named constant on the generator's dotnet path"
+      proof: "grep: SETUP_DOTNET_PINNED in src/lib/project-init.ts"
+    - claim: "the existing project-init fixtures still pass unchanged for the ts and python profiles"
+      proof: "unit test: test/project-init.test.ts"
     - claim: "this task is withdrawn as already satisfied — the generated dotnet action is pinned, the fake fitness gate is disarmed, and both are credited to a named merged PR"
       proof: "grep: SETUP_DOTNET_PINNED in src/lib/project-init.ts"
   risk: medium

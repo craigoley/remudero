@@ -67,6 +67,24 @@
     copy with `claude setup-token` / a long-lived token — that is a credential-STRATEGY change with its own
     account and billing consequences and must be decided on its own filing, not smuggled in as a bug fix.
   acceptance:
+    - claim: "a store whose stored credential is EXPIRED re-provisions from the live login item instead of returning skipped, and the summary names the reason"
+      proof: "unit test: test/worker-keychain-expiry.test.ts"
+    - claim: "a store that is present but EMPTY or unparseable is treated as absent and re-provisioned — present-but-empty never reads as healthy"
+      proof: "unit test: test/worker-keychain-expiry.test.ts"
+    - claim: "a FRESH, matching-identity store still returns skipped — the steady-state spawn path adds no credential read and no extra unlock"
+      proof: "unit test: test/worker-keychain-expiry.test.ts"
+    - claim: "a spawn that died with the expiry-named reason forces the next provisioning attempt to re-provision rather than skip"
+      proof: "unit test: test/worker-keychain-expiry.test.ts"
+    - claim: "when the LOGIN keychain is locked the recovery FAILS CLOSED with a named reason class and the run never spawns on the known-dead copy"
+      proof: "unit test: test/worker-keychain-expiry.test.ts"
+    - claim: "recovery attempts are BOUNDED — a permanently dead login token yields one escalation, not a re-provision on every spawn"
+      proof: "unit test: test/worker-keychain-expiry.test.ts"
+    - claim: "no credential VALUE appears in the summary, the ledger line or any log — the self-heal stays in the name domain"
+      proof: "grep: credential-expired in src/lib/worker-home.ts"
+    - claim: "the DEFAULT SecurityRunner is exercised by a leaf test rather than only through an injected recorder"
+      proof: "unit test: test/worker-keychain-expiry.test.ts"
+    - claim: "the operator guide documents the self-heal and retires the manual rm-the-store ritual as the recovery path"
+      proof: "grep: remudero-worker in docs/operator-guide.md"
     - claim: "this task is withdrawn as already satisfied — the worker keychain self-heals on credential expiry and every criterion, including the operator-guide documentation, is credited to a named merged PR"
       proof: "grep: credential-expired in src/lib/worker-home.ts"
   risk: high
