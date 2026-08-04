@@ -1,0 +1,80 @@
+- id: W1-T325
+  title: "dispatchLanes is a source literal that FOUR separate places describe as policy data — so changing the dispatch width needs a deploy, and a deploy is the mechanism daemon concurrency would put at risk"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  rationale: "RE-DERIVED AT a17d916, every claim reproducible by grep — nothing inherited from the recon
+    that prompted this, which is a dated snapshot.
+    THE FACT. src/lib/sweep.ts sets DEFAULT_SWEEP_POLICY.dispatchLanes to the literal 2, and
+    plan/policy.yaml has NO dispatchLanes key at all. The sweep section of that file carries exactly
+    three rows — staleDays, strikeCap, wipLimit — all lifted, all bounded.
+    FOUR PLACES SAY OTHERWISE, and I counted them myself rather than accepting the number:
+      (1) dispatchLanes' own doc in sweep.ts: 'A ROW in THIS SAME table' and 'Raising N is a
+          policy-data row edit, not a code change - the point of holding it here rather than as a
+          constant.'
+      (2) W1-T170's note in plan/tasks.yaml: 'N is capped at 2 by W1-T172's policy row - deliberate.'
+      (3) W1-T172's note in plan/tasks.yaml: 'Raising N is a policy-data row edit once the ledger
+          supports it, which is the point of holding the threshold in SweepPolicy rather than in code.'
+      (4) plan/policy.yaml's own header lists 'drain width' among the constants it collected; the
+          drain section contains only `max`.
+    WHY THIS IS NOT TIDYING. Changing N today is a source edit, a merge and a DEPLOY. The deploy path
+    is gated by daemonIsIdle, a conjunction over global worker/inflight/worktree counters that waits
+    for the whole fleet to fall quiet. So the one lever anyone would reach for to run a dispatch-width
+    experiment is currently gated behind the exact mechanism that experiment would put under strain.
+    Making it a row is independently correct and is the prerequisite for any future ruling on N.
+    W1-T320's note already cites this as a known defect ('do NOT repeat the dispatchLanes defect the
+    audit documented') without fixing it; no task in the monolith or any shard fixes it."
+  design: |
+    A RELOCATION, NOT A RETUNE. THE VALUE STAYS 2. A worker reading this task as licence to change the
+    dispatch width has misread it: N is a separate ruling on separate evidence, and nothing here
+    authorises moving it. The observable behaviour of every consumer must be byte-identical afterwards.
+    (i) Add `sweep.dispatchLanes` to plan/policy.yaml as a BOUNDED row in the same shape as its three
+    siblings: `value: 2`, an `origin: "lifted:..."` naming DEFAULT_SWEEP_POLICY.dispatchLanes as the
+    source site it is lifted from, and explicit `min`/`max`. Choose the bounds deliberately and defend
+    them in the PR body — a max that permits an unreviewed jump to a large N re-creates the hazard this
+    row exists to make reviewable.
+    (ii) Teach the loader: src/lib/policy.ts needs the field on its `sweep` shape, an entry in the
+    lifted/net-new provenance map, a `numberField("sweep.dispatchLanes", ...)` parse so an
+    out-of-bounds edit is refused AT LOAD by validatePolicy, and the field on the returned object.
+    (iii) src/lib/sweep.ts then reads POLICY_SWEEP.dispatchLanes instead of the literal, exactly as
+    staleDays/strikeCap/wipLimit already do.
+    (iv) BOTH POLICY TESTS ARE IMPLICATED AND BOTH ARE DECLARED. test/policy.test.ts holds a minimal
+    valid raw table mirroring the shipped shape plus a drift lock asserting the SHIPPED file lifts the
+    current source values — a new required field breaks every fixture until updated.
+    test/policy-consumers.test.ts holds the per-row 'reads the policy, not a source literal' assertion
+    that is the whole point of the substrate. Neither is optional.
+    (v) THE FALSIFIER: a test that fails if sweep.ts goes back to reading a literal, and a bounds test
+    proving an out-of-range dispatchLanes is REFUSED at load rather than silently clamped.
+    NOT IN SCOPE: changing N; adding lanes to runDaemon; the four prose sites above (three are in src/
+    or in merged task notes and are corrected by a separate pass, not by editing merged tasks here).
+    VERIFY the loader's current field list and both tests' fixture shapes FROM SOURCE before editing —
+    distrust this note; symbol names drift.
+  acceptance:
+    - claim: "the shipped policy file carries a bounded dispatchLanes row and the loader parses it, refusing an out-of-range value at load rather than clamping it"
+      proof: "unit test: test/policy.test.ts"
+    - claim: "sweep.ts reads the dispatch width from the loaded policy rather than a source literal, the same way its three sibling rows already do"
+      proof: "unit test: test/policy-consumers.test.ts"
+    - claim: "the value is unchanged at 2 — this relocation retunes nothing, and a consumer observes the identical width before and after"
+      proof: "unit test: test/policy-consumers.test.ts"
+    - claim: "the row exists in the shipped policy data, not merely in the loader's type"
+      proof: "grep: dispatchLanes in plan/policy.yaml"
+  risk: high
+  origin: oper#parallelism-filings-2026-08-04
+  plan_refs: ["§5", "W1-T252", "W1-T253"]
+  files: [src/lib/policy.ts, src/lib/sweep.ts, plan/policy.yaml, test/policy.test.ts, test/policy-consumers.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto - a loader field, a data row and two test locks, all machine-checkable.
+    risk:high - Rule 19 counts policy, sweep and the test surface as distinct subsystems, and this
+    edits the substrate every other bounded row depends on. A loader mistake here fails EVERY rmd verb
+    at load, not just dispatch.
+    budget_usd 70 - the pattern is fully established by staleDays/strikeCap/wipLimit, so this is
+    following a worked example across five declared files rather than inventing anything.
+    files: DELIBERATELY LISTS ALL FIVE. A shard declaring only plan/policy.yaml was refused by the
+    scope guard after reaching implement.done this week; a bounded row is never a one-file change,
+    because the loader that bounds it and the tests that lock it are part of the row.
+    NO depends_on: nothing blocks this. It is the PREREQUISITE for any future ruling that would move N,
+    which is why it is filed on its own rather than folded into a concurrency task."

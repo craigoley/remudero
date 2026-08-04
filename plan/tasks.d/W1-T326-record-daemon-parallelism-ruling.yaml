@@ -1,0 +1,83 @@
+- id: W1-T326
+  title: "nobody has ruled on whether the DAEMON should dispatch in parallel — P19 covers rmd drain and is closed, so the answer gets re-derived from scratch every time someone asks, and MASTER-PLAN meanwhile asserts the daemon already does it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: "RE-DERIVED AT a17d916. I searched DECISIONS.md, MASTER-PLAN.md, plan/tasks.yaml and every
+    shard for a ruling on daemon-side dispatch width. THERE IS NONE. The two apparent hits are both
+    false: DECISIONS.md's only 'daemon' near 'concurrent' is the entry ruling on how DECISIONS.md
+    ITSELF is written, and W1-T282's 'six of seven lanes' are the console's DISPLAY lanes (daemon,
+    drain, plan, retro, serve, triage) — a homonym, not dispatch width.
+    WHAT DOES EXIST is the 2026-07-21 DECISIONS.md entry rejecting an ad-hoc second checkout/daemon
+    and resolving to 'N parallel dispatch lanes bounded by the governor's WIP limit (start N=2)'.
+    W1-T172 delivered exactly that FOR THE DRAIN — its declared files were drain.ts and run-task.ts,
+    daemon.ts was never in scope, and every one of its acceptance criteria proves against the drain
+    loop. P19 was then closed. So the daemon half was never decided, only never built.
+    THE COST OF LEAVING IT UNRECORDED IS ALREADY BEING PAID. Two separate recons this week reached the
+    same conclusion independently, and both STARTED from MASTER-PLAN's sentence claiming the daemon
+    'dispatches two lanes in parallel behind a file-overlap check' — a sentence that has never been
+    true, since runDaemon calls nextRunnable once and awaits deps.runOne in a for(;;) loop and contains
+    no laneCount, no runDrain and no partitionByFileOverlap. An unrecorded ruling is re-derived; a
+    false claim is worse, because it is inherited."
+  design: |
+    ONE ENTRY IN DECISIONS.md. That file is the home, not MASTER-PLAN and not a P-series proposal:
+    it already holds this ruling's direct ancestor (the 2026-07-21 second-daemon rejection), its
+    entries carry a Rollback line which is the natural place for a reopening condition, and a
+    P-series proposal would be actively wrong — proposals are things to RATIFY, and this is a decision
+    NOT to build, so filing it as a proposal inverts its meaning and invites later ratification.
+    THE ENTRY MUST CARRY THREE FALSIFIABLE BLOCKERS, each stated so a future reader can CHECK it
+    rather than take it on trust:
+    (1) THE KEYCHAIN. workerKeychainPaths derives its keychain-db, password, account and expiry paths
+        from the state dir plus an optional ACCOUNT label — never from runId. So every concurrent run
+        on one account shares one keychain, and the failure would present as flaky auth rather than as
+        a concurrency bug. W1-T170's own note has flagged this as unvalidated and it still is.
+    (2) THE PLAN RELOAD. runDaemon's re-read is safe today for a reason the code states in its own
+        words: runOne is awaited to completion before the loop returns, so a reload can never land
+        under an in-flight task. With N lanes that invariant is simply false, and it would become
+        false SILENTLY — nothing fails loudly when it breaks.
+    (3) THE DEPLOY GATE. daemonIsIdle is a conjunction over global worker/inflight/worktree counters,
+        so it waits for the WHOLE fleet. N lanes make a common quiet window rarer, and the failure is
+        unbounded deploy latency whose symptom is nothing happening — strictly worse to diagnose than
+        slow throughput.
+    PLUS THE GENERAL ARGUMENT: a refused run costs the same at N=1 and N=2, so parallelism multiplies
+    waste as readily as work; and partitionByFileOverlap is fail-closed on undeclared scope, so a task
+    with an empty or absent files: list takes a lane alone and many 2-lane passes collapse back to one.
+    STATE WHAT WOULD REOPEN IT — a ruling with no reopening condition becomes dogma. Name the two
+    measurements neither recon could take, because both needed a production ledger neither container
+    had: the distribution of idle gaps between dispatches (which decides whether N=2 starves the
+    deploy gate), and throughput — dispatches per day, mean run duration, idle fraction, and the
+    fraction of dispatches producing no merged PR (which decides whether width is the binding
+    constraint at all). Either measurement landing against the ruling reopens it.
+    THE TWO PROOF PATTERNS ARE LOAD-BEARING TEXT: the entry must contain the literal strings
+    `daemon parallelism` and `reopens this ruling`, because those are what the acceptance proofs grep
+    for. Write the entry to read naturally WITH them, never bolt them on.
+    NOT IN SCOPE: building lanes; moving N; MASTER-PLAN's false two-lanes sentence (already corrected
+    in the PR that filed this task); and editing the merged W1-T170/W1-T172 notes that repeat the
+    policy-row claim (touching a merged task promotes its own pre-existing violations to blocking).
+  acceptance:
+    - claim: "DECISIONS.md carries a dated entry ruling on daemon-side dispatch width, naming the keychain, the plan-reload invariant and the deploy idle gate as its blockers"
+      proof: "grep: daemon parallelism in DECISIONS.md"
+    - claim: "the entry states the measurements that would reopen it, so the ruling is falsifiable rather than dogma"
+      proof: "grep: reopens this ruling in DECISIONS.md"
+  risk: high
+  origin: oper#parallelism-filings-2026-08-04
+  plan_refs: ["P19", "§4B"]
+  files: [DECISIONS.md]
+  status: queued
+  attempts: 0
+  note: "verify:auto - the whole deliverable is text at known paths, so grep proofs execute against it
+    directly and no operator need be present to judge them.
+    risk:high - this writes a BINDING RULING on dispatch architecture: an entry that overstates its blockers would stop work that should happen, while one
+    that understates them would licence a change with three unresolved hazards.
+    budget_usd 40 - the lowest on the current board because the content is dictated by this task's own
+    design and the verification is two greps; the work is writing it accurately, not deriving it.
+    NO NEGATIVE PROOFS HERE, deliberately. An earlier draft of this task carried a third criterion
+    proving MASTER-PLAN no longer claims the daemon runs two lanes. That pattern MATCHES main and would
+    have to MISS after the work — and a `grep:` proof that misses at review time is executed_fail,
+    which OVERRIDES keyword coverage and fails the very PR that satisfied it. The MASTER-PLAN sentence
+    is therefore corrected in the filing PR instead, and both proofs here are positive.
+    NO depends_on: this records a decision and blocks nothing. W1-T325 (the dispatchLanes policy row)
+    is the prerequisite for ever ACTING on a different answer, but the ruling stands without it."

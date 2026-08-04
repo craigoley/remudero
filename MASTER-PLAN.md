@@ -148,7 +148,7 @@ proofs (P15). R5 unioned ledger∪GitHub at gather time (P11) and found the FIRS
 CLI projection (`rmd status`, W1-T279/T280) and, as of this cycle, a drained class-C defect batch;
 the §5 gate stack polices its own integrity end to end and now ledgers a REASON on every review
 failure path (T304) and distinguishes three kinds of unexecutable proof (T305); the daemon fires its
-own retro (W1-T160/#853), dispatches two lanes in parallel behind a file-overlap check (P19), carries
+own retro (W1-T160/#853), dispatches ONE task at a time (P19's lanes are `rmd drain`-only, W1-T326), carries
 a lifetime per-task dispatch cap (T271) and an `ALREADY_SATISFIED` exit (T272), and survives a dying
 recon without losing the dispatch (T299). The SHIPPED log is the record (rule 13 — the proof is a
 merged PR); no PR-by-PR restatement lives here.
