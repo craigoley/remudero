@@ -24,5 +24,6 @@ raw: "CONSOLE MUST TRANSLATE, SUMMARIZE, AND SEPARATE — operator directive
   follow-up rmd feedback if it is a distinct defect."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 proposal_pr: https://github.com/craigoley/remudero/pull/1243
+summary: null
