@@ -12,5 +12,6 @@ raw: "MERGED-TASK KICK PREFLIGHT — rmd run-task <id> dispatches the named task
   computed lines later in the same path."
 attachments: []
 origin: cli
-status: new
+status: proposed
 proposal_pr: null
+summary: null

@@ -1,0 +1,112 @@
+- id: W1-T319
+  title: "rmd run-task <id> dispatches an ALREADY-MERGED task — runTask builds the merged projection two lines before assertRunnable and never asks whether the TARGET itself is merged, so a by-id kick is a guaranteed pr_attribution_failed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "OBSERVED 2026-07-23 (feedback fb-1784773321502-86793d) and RE-VERIFIED AT SOURCE during triage.
+    THE INCIDENT. W1-T112 was kicked by id while state/status.json — written 23ms before that run's
+    run.start — already recorded it as source:ledger merged=true via PR #491. The worker ran anyway,
+    pushed an empty branch, claimed the OLD PR, and the ownership guard returned pr_attribution_failed.
+    $1.30 for an outcome that was determined before the worker spawned.
+    THE HOLE, AT SOURCE. runTask (src/run-task.ts) builds `projection = projectPlan(...)` and
+    `const isMerged = (t) => projection.get(t.id)?.merged ?? false` and IMMEDIATELY passes that resolver to
+    `assertRunnable(plan, task, isMerged)` on the next line. assertRunnable (src/lib/plan.ts) refuses three
+    things — status:blocked, verify:human, and UNMERGED DEPENDENCIES — and the merged resolver it is handed
+    is spent entirely on the DEPENDENCIES. Nothing in that path ever asks the one question the projection
+    already answers about the target: is THIS task merged. The refusal costs one map lookup on data already
+    in memory; zero new derivation, zero extra gateway call, zero extra git or gh work.
+    EVERY OTHER DISPATCH ENTRY ALREADY HAS THIS GUARD — WHICH IS WHY THIS ONE IS THE OUTLIER.
+    (a) The QUEUE path: isDispatchEligible (src/lib/drain.ts) filters merged tasks into its own
+    `already-merged` idle bucket before a task can ever be picked. (b) The CONSOLE KICK path: the daemon
+    (src/lib/daemon.ts) opens its kick loop with `if (isMerged(kick.taskId)) { refuse('already merged —
+    stale kick'); continue; }`, shipped by W1-T260 against the sibling feedback fb-1784988460437-9daa9b and
+    locked by a test in test/daemon.test.ts naming this very feedback ('the 86793d class'). The BY-ID CLI
+    path is the only dispatch entry point with no such check: `if (cmd === 'run-task' && arg)` accepts
+    exactly one flag (--allow-stale) and calls runTask straight through.
+    THIS IS LEARNINGS.md's INVERTED-PROTECTION RULE RUNNING BACKWARDS. That rule was written from W1-T177,
+    where the operator verb had the guard and the unattended rung did not. Here the two UNATTENDED paths
+    (drain, daemon kick) both carry it and the HAND-DRIVEN verb does not — the same asymmetry, the same
+    remedy: when a safety check is found on one dispatch path, ask which other path skips it.
+    WHY NO EXISTING TASK COVERS IT. W1-T260 shipped the daemon's kick guard, not runTask's. W1-T272's
+    ALREADY_SATISFIED exit makes the close CHEAP but explicitly does NOT stop the dispatch (MASTER-PLAN's
+    own R13 note says so). W1-T271/W1-T316's lifetime cap is a COUNT-based backstop that only trips after
+    ~10 dispatches. MASTER-PLAN P39(i) is the queue-selection gate in nextRunnable and is still unbuilt —
+    and even once built it would not cover a by-id kick, which never consults nextRunnable at all."
+  design: |
+    ONE GUARD, AT THE CHOKEPOINT THAT ALREADY HOLDS THE EVIDENCE. Verify the exact lines from source before
+    editing (symbols and line numbers drift; the anchors below were read at triage time).
+    (i) THE REFUSAL. In runTask (src/run-task.ts), between the `isMerged` resolver and the existing
+    `assertRunnable(plan, task, isMerged)` call, refuse when `isMerged(task)` is true and the new opt is
+    absent. It must sit BEFORE assertRunnable so the reason reported is the accurate one (already merged),
+    not a downstream dependency message, and BEFORE the inflight lock, the §5C task linter, the worktree
+    materialization and any spawn — the whole point is that nothing is paid for. Reuse the SAME `projection`
+    and the SAME `github` gateway instance already in scope. Do NOT call projectPlan a second time and do
+    NOT open a second gateway: a second derivation is a second answer, and this task exists because the
+    first answer was already correct and simply unread.
+    Return `{ taskId, runId, merged: false, costUsd: 0, verdict: "task_already_merged" }` and ledger
+    `dispatch.refused_already_merged` — the step name MASTER-PLAN P39(i) already reserves for exactly this
+    class — carrying the task id, the run id and the merged PR url the projection holds, so the refusal is
+    legible in the ledger rather than only on stdout. A refusal nobody can see is the same defect class as
+    the missing check.
+    (ii) THE VERDICT MUST BE WIRED EVERYWHERE VERDICTS ARE ENUMERATED, IN THIS SAME CHANGE, or it
+    half-ships. Add `task_already_merged` to the RunResult union (src/lib/run-result.ts) with a comment
+    naming this feedback, and add a row for it to plan/mast-mapping.yaml (test/mast-mapping.test.ts renders
+    'Unmapped verdict classes' and an unmapped verdict is a silent hole in the failure taxonomy).
+    It is NOT an overrun and NOT a strike: leave it OUT of retro.ts's OVERRUN_VERDICTS for the same reason
+    `already_satisfied` is out — no worker ran, no turns were spent, nothing about a (task_type x risk)
+    class is defective — and AUDIT block-reason.ts's verdictFailureClass (which today returns "strike" for
+    every verdict except blocked_transient) plus any strike/attempt accounting that reads the verdict, so a
+    pre-spawn refusal can never spend a strike or an attempt. Add the row to docs/task-lifecycle.md's
+    verdict table, where every sibling verdict is already documented.
+    (iii) THE OVERRIDE IS EXPLICIT AND LEDGERED. `--rerun` is the deliberate escape hatch, modelled on the
+    existing --allow-stale: add it to the run-task branch's unknownArgError boolean list and pass it into
+    runTask's opts; with it set the run proceeds EXACTLY as today, and the ledger records the override
+    (never a silent bypass) so a deliberate re-run is distinguishable from a guard that failed to fire.
+    Update the USAGE string for run-task (the help registry test polices coverage, and docs/cli-reference.md
+    is generated from it by scripts/generate-cli-reference.mjs — regenerate rather than hand-edit).
+    (iv) THE OTHER CALLERS ARE UNAFFECTED, AND THAT IS DELIBERATE, NOT AN OVERSIGHT. Because the guard lives
+    in runTask, drain and the daemon inherit it — but both already exclude merged tasks upstream, so for
+    them it is a backstop that fires never in the normal case and correctly in the pick-then-merge race
+    (a task that merges between selection and dispatch). Any test asserting drain/daemon behaviour on a
+    merged task must still pass unchanged.
+    EXPLICITLY NOT IN SCOPE: building P39(i)'s nextRunnable merged-trailer gate (a separate, still-open
+    proposal on the queue-selection side); changing assertRunnable's three existing refusals or its
+    signature; the lifetime dispatch cap (W1-T316); the ALREADY_SATISFIED worker exit (W1-T272); and any
+    change to how merged-ness is DERIVED. This task changes only WHO ASKS an already-computed projection.
+  acceptance:
+    - claim: "runTask on a task the projection reports merged REFUSES with verdict task_already_merged at zero cost — no lock, no worktree, no worker spawn"
+      proof: "unit test: test/run-task.test.ts"
+    - claim: "the refusal reads the projection runTask already builds — no second projectPlan call and no second gateway instance — and fires BEFORE assertRunnable so the named reason is the merged one"
+      proof: "unit test: test/run-task.test.ts"
+    - claim: "the refusal is ledgered as dispatch.refused_already_merged naming the merged PR, never a silent decline"
+      proof: "unit test: test/run-task.test.ts"
+    - claim: "--rerun is accepted by the run-task arg validator, proceeds with the dispatch exactly as before this guard existed, and its deliberate override is ledgered"
+      proof: "unit test: test/run-task.test.ts"
+    - claim: "a pre-spawn merged refusal is not mined as an overrun and does not spend a strike or an attempt"
+      proof: "unit test: test/retro.test.ts"
+    - claim: "the refusal verdict is named at the dispatch call site in run-task.ts, not merely added to the verdict union"
+      proof: "grep: task_already_merged in src/run-task.ts"
+    - claim: "the verdict is a member of the shared RunResult union every consumer types against"
+      proof: "grep: task_already_merged in src/lib/run-result.ts"
+  risk: high
+  origin: feedback#fb-1784773321502-86793d
+  plan_refs: ["§7", "P39", "W1-T260"]
+  files: [src/run-task.ts, src/lib/run-result.ts, src/lib/retro.ts, src/lib/block-reason.ts, plan/mast-mapping.yaml, docs/task-lifecycle.md, test/run-task.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — every claim is a predicate over an injected projection plus a ledger line, assertable
+    with no operator present and no live GitHub.
+    risk:high — it gates DISPATCH, and by Rule 19's count it spans run-task, run-result, retro and the MAST
+    mapping. A guard wired too broadly refuses legitimate work; wired not at all leaves the by-id kick
+    paying full price for a determined failure. The --rerun escape hatch is what bounds the downside.
+    budget_usd 60 — the projection, the resolver and the refusal precedent (daemon.ts's kick loop) all
+    already exist; the real work is the verdict's registry wiring and the regression lock.
+    NO depends_on: W1-T260 (the daemon-side sibling guard) is already shipped, and nothing else blocks this.
+    FILE OVERLAP with W1-T316 and W1-T317, which also write src/run-task.ts — a dispatch-overlap concern for
+    the scheduler, not a dependency: all three touch disjoint regions of the file.
+    THE FALSIFIER, if a reviewer wants to check the premise cheaply: assertRunnable (src/lib/plan.ts) has
+    exactly three refusals — blocked, verify:human, unmerged dependencies — and none of them reads the
+    target task's own merged state, while daemon.ts's console-kick loop refuses precisely that case."
