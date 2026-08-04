@@ -52,6 +52,10 @@ export interface PolicyValues {
     staleDays: number;
     strikeCap: number;
     wipLimit: number;
+    /** W1-T320: the rmd-owned temp-dir backstop's age ceiling (src/lib/tmp.ts's
+     *  sweepStaleTempDirs) — see this field's plan/policy.yaml row for the incident
+     *  that made the ceiling policy data instead of a source literal. */
+    tmpMaxAgeMs: number;
   };
   drain: {
     max: number;
@@ -128,6 +132,7 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   "sweep.staleDays": "lifted",
   "sweep.strikeCap": "lifted",
   "sweep.wipLimit": "lifted",
+  "sweep.tmpMaxAgeMs": "net-new",
   "drain.max": "lifted",
   "autoTriage.enabled": "net-new",
   "autoTriage.minIntervalMinutes": "net-new",
@@ -302,6 +307,7 @@ export function validatePolicy(raw: unknown): Policy {
   const staleDays = numberField("sweep.staleDays", sweepRaw.staleDays, origin);
   const sweepStrikeCap = numberField("sweep.strikeCap", sweepRaw.strikeCap, origin);
   const wipLimit = numberField("sweep.wipLimit", sweepRaw.wipLimit, origin);
+  const tmpMaxAgeMs = numberField("sweep.tmpMaxAgeMs", sweepRaw.tmpMaxAgeMs, origin);
 
   const drainRaw = raw.drain;
   if (!isPlainObject(drainRaw)) throw new PolicyError("policy.yaml: 'drain' must be a mapping.");
@@ -348,7 +354,7 @@ export function validatePolicy(raw: unknown): Policy {
       pruneGraceMs,
       pollIntervalMs,
       fixStrikeCap,
-      sweep: { staleDays, strikeCap: sweepStrikeCap, wipLimit },
+      sweep: { staleDays, strikeCap: sweepStrikeCap, wipLimit, tmpMaxAgeMs },
       drain: { max: drainMax },
       retro: { mergesThreshold: retroMergesThreshold, daysThreshold: retroDaysThreshold },
       autoTriage,

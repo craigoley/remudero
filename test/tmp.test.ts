@@ -127,6 +127,13 @@ test("sweepStaleTempDirs: removes rmd-owned dirs older than the ceiling, keeps f
 
     assert.deepEqual(summary.removed.sort(), [`${RMD_TMP_PREFIX}review-stale`]);
     assert.ok(summary.kept.includes(`${RMD_TMP_PREFIX}review-fresh`), "fresh rmd- dir is kept");
+    // W1-T320: the oldest-kept age (ms) — the fresh dir was seeded 1_000ms old, so the
+    // reported age must be at least that (real wall-clock elapses a little more by the time
+    // the sweep stats it, so ">=" rather than "==").
+    assert.ok(
+      summary.oldestKeptAgeMs !== null && summary.oldestKeptAgeMs >= 1_000,
+      `oldestKeptAgeMs (${summary.oldestKeptAgeMs}) must be at least the seeded 1_000ms age of the kept fresh dir`,
+    );
     assert.equal(existsSync(stale), false, "the stale dir is actually gone from disk");
     assert.equal(existsSync(fresh), true, "the fresh dir is untouched");
     assert.equal(existsSync(unrelated), true, "a non-rmd- entry is never touched, however old");
@@ -138,7 +145,7 @@ test("sweepStaleTempDirs: removes rmd-owned dirs older than the ceiling, keeps f
 
 test("sweepStaleTempDirs: an unreadable root is best-effort — returns empty, never throws", () => {
   const summary = sweepStaleTempDirs({ root: join(tmpdir(), "rmd-does-not-exist-" + "xyz123") });
-  assert.deepEqual(summary, { removed: [], kept: [] });
+  assert.deepEqual(summary, { removed: [], kept: [], oldestKeptAgeMs: null });
 });
 
 test("sweepStaleTempDirs: respects an injected clock, not real wall-clock age", () => {
@@ -151,6 +158,7 @@ test("sweepStaleTempDirs: respects an injected clock, not real wall-clock age", 
     const summary = sweepStaleTempDirs({ root, now: () => fakeNow });
     assert.deepEqual(summary.removed, [`${RMD_TMP_PREFIX}clocktest`]);
     assert.equal(existsSync(dir), false);
+    assert.equal(summary.oldestKeptAgeMs, null, "everything seeded was removed — nothing was kept, so the age is null, never a stale number");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -394,6 +402,45 @@ test("deriveStatus: an external spy on the real fs module sees zero mkdtempSync 
     const mkdtempSpy = t.mock.method(fsDefault, "mkdtempSync");
     assert.throws(() => deriveStatus(task({ id: "W1-TX" }), { ledgerPath, github }), /GitHub API unreachable/);
     assert.equal(mkdtempSpy.mock.calls.length, 0, "no temp dir created even when the run throws mid-derivation");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ── sweepStaleTempDirs' rmSync CATCH arm — diff-coverage flagged tmp.ts's `noteKept` there ────
+//
+// The reap loop wraps `fs.rmSync` in a try whose catch re-classifies the entry as KEPT rather
+// than letting one unremovable dir abort the sweep ("a permissions hiccup on one entry never
+// blocks boot"). Every other test in this file removes cleanly, so that line had zero covering
+// tests. `tmp.ts` imports the DEFAULT `fs` export — a plain, mutable object — so `t.mock.method`
+// intercepts the real call, exactly the idiom this file's mkdtemp/rm spies already use.
+
+test("sweepStaleTempDirs: an rmSync that THROWS re-classifies that entry as kept rather than aborting the sweep — and the sibling that removes cleanly still removes", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-tmp-rmthrow-"));
+  try {
+    const stubborn = join(root, `${RMD_TMP_PREFIX}stubborn`);
+    const yielding = join(root, `${RMD_TMP_PREFIX}yielding`);
+    for (const d of [stubborn, yielding]) {
+      mkdirSync(d, { recursive: true });
+      const past = new Date(Date.now() - 60 * 60 * 1000);
+      utimesSync(d, past, past);
+    }
+
+    const realRm = fsDefault.rmSync.bind(fsDefault);
+    t.mock.method(fsDefault, "rmSync", (p: string, o?: object) => {
+      if (String(p).endsWith("stubborn")) throw new Error("EPERM: operation not permitted");
+      return realRm(p as never, o as never);
+    });
+
+    const summary = sweepStaleTempDirs({ root, maxAgeMs: 1 });
+
+    // THE CATCH ARM: the unremovable entry lands in `kept`, never in `removed`.
+    assert.ok(summary.kept.includes(`${RMD_TMP_PREFIX}stubborn`), "an rmSync failure re-classifies the entry as kept");
+    assert.ok(!summary.removed.includes(`${RMD_TMP_PREFIX}stubborn`), "and it is never reported as removed");
+    // AND THE SWEEP CONTINUED: the whole point of catching per entry rather than per sweep.
+    assert.ok(summary.removed.includes(`${RMD_TMP_PREFIX}yielding`), "one bad entry never aborts the rest of the sweep");
+    // The kept entry feeds the oldest-kept signal, so a stuck dir is visible rather than silent.
+    assert.ok((summary.oldestKeptAgeMs ?? 0) > 0, "the re-classified entry contributes its age to oldestKeptAgeMs");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
