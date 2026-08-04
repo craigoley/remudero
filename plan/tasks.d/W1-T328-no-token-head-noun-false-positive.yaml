@@ -1,0 +1,81 @@
+- id: W1-T328
+  title: "bodyContradictsDiff's head-noun test reads `no code change` as a claim about the DIFF even when the sentence's subject is a different file — the false-positive direction its own doc calls the costlier one, observed blocking a correct PR"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  rationale: "RE-DERIVED AT 486e499, and it CORRECTS a claim I had previously stated wrongly. I had
+    said the `no <token>` claim lacks the subject anchor the count claim received after #1077. THAT IS
+    FALSE and the code says so explicitly: `noClaimIsAboutChangeset` IS that anchor. It is deliberately
+    FORWARD-looking where `claimsChangesetContext` looks backward, and its doc measures why — a
+    backward check would have broken #974 and #1025 while still firing on the duplication
+    false positive. The anchor exists, is deliberate, and is well argued. The defect is narrower.
+    THE ACTUAL DEFECT, measured against the real functions:
+      noClaimIsAboutChangeset(' change was needed') -> true
+      noClaimIsAboutChangeset(' changes')           -> true
+      noClaimIsAboutChangeset(' duplication')       -> false
+      noClaimIsAboutChangeset(' was changed')       -> false
+    `CHANGESET_CONTEXT_RE` contains `change`, so the head noun `change` marks the claim as
+    changeset-scoped. That is right for 'no code changes' and wrong for 'no code change was needed FOR
+    THIS TASK'S TESTS' — a sentence whose subject is another module entirely. The test is one word
+    wide; a subject sitting elsewhere in the sentence is invisible to it.
+    OBSERVED 2026-08-04 on #1249, which was blocked by exactly this. Its body carried a research
+    follow-up: 'it already forwards FeedbackEntry wholesale, so no code change was needed for this
+    task's tests to prove the console-rendering path' — a statement about panel-graph.ts, which was NOT
+    in the diff. remudero-review posted FAIL: 'body contradicts its own diff: claimed no code'.
+    Reproduced against the real bodyContradictsDiff with that PR's four-file list: FIRES.
+    THIS IS THE DIRECTION THE FUNCTION'S OWN DOC CALLS COSTLIER, verbatim: 'A missed contradiction
+    costs one bad PR body; a false positive strands a correct PR indefinitely, because a PR that files
+    no task logs sweep.fix.no_task every tick and nothing ever retries it.' #1249 needed a human to
+    clear it. The doc states the design fails toward SILENCE; here it fired."
+  design: |
+    NARROW THE FIRING, NEVER WIDEN IT. The bar is the function's own: anything undecidable is SILENCE,
+    not a verdict. A change that makes this checker MORE talkative is a regression however well it
+    scores on the fixture below.
+    (i) The failing shape is a `no <token>` claim whose head noun is a changeset word but whose
+    sentence names a DIFFERENT subject — a path, a module, a symbol — that is not in the diff.
+    Distinguish it. Options exist and this task must pick one and defend it: look for an explicit
+    subject in the same sentence and stand down when that subject is absent from the diff; or require
+    the claim to be the sentence's own assertion rather than a subordinate clause ('so no code change
+    was needed' is subordinate). Do NOT reach for a general natural-language parse — the doc rules
+    that out by name.
+    (ii) THE THREE PRESERVATION FIXTURES ARE NON-NEGOTIABLE and must all still FIRE, because each is a
+    real body that was genuinely false: #974 ('Plan-only, no code touched'), #1025 ('data-only: no
+    code'), and a plain 'no src/' claim over a diff containing src/ files. A fix that silences any of
+    them has removed the tripwire rather than aimed it.
+    (iii) THE TWO SILENCE FIXTURES must still stay silent: the doc's own 'no code duplication anywhere'
+    example, and 'no code was changed' (which reads as a modifier today and is an accepted miss).
+    (iv) ADD #1249's SENTENCE AS THE NEW FIXTURE, verbatim, with its real four-file diff list. It is
+    the falsifier: it must go from FIRES to silent, and nothing else may move.
+    (v) The quoted-region strip (W1-T308) is upstream of this and unchanged — #1249's sentence was NOT
+    quoted, so that fix could not have helped, which is why this is a separate defect.
+    NOT IN SCOPE: `claimsChangesetContext` (the backward count-claim anchor — different shape,
+    different fixture set), the quoted-region strip, and the enumerated-file branch.
+    VERIFY the current predicate, CHANGESET_CONTEXT_RE's word list and the existing fixture set FROM
+    SOURCE before editing — distrust this note.
+  acceptance:
+    - claim: "a no-token claim whose sentence names a subject outside the diff no longer fires, proven with the #1249 body verbatim against its real file list"
+      proof: "unit test: test/body-contradicts-diff.test.ts"
+    - claim: "the three genuinely-false bodies still fire — plan-only with src changes, data-only with src changes, and a no-src claim over a diff containing src files"
+      proof: "unit test: test/body-contradicts-diff.test.ts"
+    - claim: "the accepted silences stay silent, so the fix narrows the firing rather than trading one false positive for a new miss"
+      proof: "unit test: test/body-contradicts-diff.test.ts"
+  risk: high
+  origin: oper#remaining-items-2026-08-04
+  plan_refs: ["§5", "W1-T274", "W1-T308"]
+  files: [src/lib/review.ts, test/body-contradicts-diff.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — a pure predicate over text plus a fixture table, no operator present.
+    risk:high — this edits the gate that blocks merges. Widening it strands correct PRs (the observed
+    failure); narrowing it too far removes a tripwire that has caught real false bodies twice.
+    budget_usd 70 — above the plan-filing tasks because the fixture table must be preserved wholesale
+    and the discrimination rule has to be argued, not just coded.
+    NOT A DUPLICATE OF W1-T308, and the distinction is load-bearing: that task strips QUOTED regions
+    (blockquotes and fences) so a body citing another PR's failing claim is not judged as asserting it.
+    #1249's sentence was unquoted prose in its own follow-up section, so the quoted-region strip ran
+    and correctly left it in scope. Different cause, different fix.
+    W1-T274 built this checker; W1-T307 keeps fix-rung bodies from going stale against it. Neither
+    addresses which claims it should read as changeset-scoped."

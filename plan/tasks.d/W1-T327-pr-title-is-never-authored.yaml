@@ -1,0 +1,83 @@
+- id: W1-T327
+  title: "every harness-opened PR lets `gh pr create --fill` invent its own title, and NOTHING in the repo can repair one — so a non-conventional title fails commitlint on a PR whose commits are all clean, and no lane retries it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "RE-DERIVED AT 486e499 — every claim below is a grep a reader can reproduce.
+    THE ARGV. `ghPrCreateFillCommand` (src/run-task.ts) builds
+    ['pr','create','--repo',…,'--base','main','--head',branch,'--fill'] and passes NO `--title`. It is
+    the sole builder for the plan/triage/retro PR-create path, and its own doc says so: the guard is
+    placed there precisely because 'this function exists only to produce a `gh pr create` argv, so
+    refusing here covers every call site at once'. The title is therefore whatever `--fill` derives.
+    NOTHING CAN REPAIR IT AFTERWARDS. There are exactly THREE `gh pr edit` call sites in src/
+    (run-task.ts, the body-repair and fix-rung paths) and ALL THREE pass `--body` only. Grepping those
+    three sites for `--title` returns ZERO. So once `--fill` picks a bad title, no harness lane can
+    correct it — only a human, or a fresh sha after someone edits the title by hand.
+    WHAT BREAKS. The `commitlint` CI job lints `github.event.pull_request.title` — the PR TITLE, not
+    the commits. Its own workflow comment explains the relocation: the squash-merge takes the PR title,
+    so that is the artifact that survives. A derived title that is not conventional-commit shaped fails
+    a REQUIRED check on a PR whose commits are individually clean.
+    OBSERVED 2026-08-04 on #1249: commitlint received `run W1 T313 1785801110471` — the branch name
+    `run-W1-T313-1785801110471` with separators as spaces — and failed `subject-empty` + `type-empty`,
+    taking ci-gate red with it. Verified locally against this repo's own commitlint.config.mjs: that
+    string yields exactly those two problems, while the PR's real title
+    'feat(feedback): decision-summary cards at creation time (W1-T313)' yields `0 problems`.
+    HONEST LIMIT ON THE FIXTURE: I could not reconstruct from source WHY `--fill` produced a
+    branch-shaped title on that PR rather than a commit subject — that depends on how many commits
+    existed at create time, which the ledger on the recon host could not show. The DEFECT does not rest
+    on it: the argv carries no `--title`, nothing repairs one, and a required check reads it.
+    WHY EXISTING PREFLIGHT TASKS DO NOT COVER THIS: W1-T221 and W1-T294 run commitlint LOCALLY BEFORE
+    the push. The PR title does not exist before the push, so neither can ever catch this."
+  design: |
+    AUTHOR THE TITLE INSTEAD OF INHERITING ONE. The harness already knows the conventional-commit
+    subject it wants — `shapeCommitMessage`/the plan-PR emitter author one for the commit — so the fix
+    is to pass that same subject as an explicit `--title`, never to let `--fill` guess.
+    (i) `ghPrCreateFillCommand` takes the title as a parameter and emits `--title <subject>`.
+    APPEND THE PARAMETER LAST and default it, so none of its four positional call sites shifts and an
+    un-updated caller behaves exactly as today — the same append-last discipline this file already
+    applies to injectable deps.
+    (ii) The subject must come from the SAME author the commit used, never a second derivation:
+    two places computing a title is how they drift.
+    (iii) DECIDE AND STATE what happens when no subject is available. Falling back to `--fill` restores
+    today's defect silently; refusing strands the run with a pushed branch and no PR, which the
+    builder's own doc records as a real past failure ('a harness-opened PR silently failed and left an
+    orphan branch with no PR'). Pick one, defend it in the PR body, and cover it.
+    (iv) THE FALSIFIER: a test asserting the built argv contains `--title` with a
+    conventional-commit-shaped subject, and that the subject PASSES this repo's own
+    commitlint.config.mjs — driven through the REAL commitlint CLI the way test/commit-message.ts
+    already does, not a hand-rolled regex approximating it.
+    (v) A REGRESSION LOCK that fails if `--title` is dropped from the argv again.
+    NOT IN SCOPE: the commitlint workflow itself (it is correct to lint the title — the squash-merge
+    takes it); the three `gh pr edit` body-repair sites; and `rmd approve`'s PR-create call, which
+    ALREADY passes an explicit `--title` and is the proof that this shape works.
+    VERIFY the builder's current signature and its four call sites FROM SOURCE before editing.
+  acceptance:
+    - claim: "the harness PR-create argv carries an explicit conventional-commit title, and a test fails if it is dropped"
+      proof: "unit test: test/live-write-guard-leaves.test.ts"
+    - claim: "the title the builder emits passes this repo's own commitlint config, driven through the real commitlint CLI rather than a regex approximating it"
+      proof: "unit test: test/live-write-guard-leaves.test.ts"
+  risk: high
+  origin: oper#remaining-items-2026-08-04
+  plan_refs: ["§5", "W1-T221"]
+  files: [src/run-task.ts, test/live-write-guard-leaves.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — an argv assertion plus a real-CLI commitlint run, both machine-checkable.
+    risk:high — it changes the argv of EVERY harness-opened PR. A malformed title fails a required
+    check on every run at once, and the failure mode is a red gate rather than a wrong merge.
+    budget_usd 60 — one builder, one appended parameter, one caller sweep and two locks.
+    files: test/live-write-guard-leaves.test.ts is the declared home because it is the focused file
+    that already imports and asserts `ghPrCreateFillCommand`. run-task.test.ts also touches it but is
+    the WRONG home: CLAUDE.md records that it intermittently crashes at FILE level under
+    --experimental-test-coverage, which would let a coverage-load-bearing assertion lose its own
+    coverage nondeterministically.
+    NO GREP PROOF, deliberately. A `grep: --title in src/run-task.ts` criterion was drafted and cut:
+    it ALREADY matches on main, because `rmd approve`'s own PR-create passes an explicit `--title`.
+    A pattern matching both head and merge base discriminates nothing and is downgraded to
+    executed_stale (W1-T273), so it would have looked like evidence and proved nothing. The two
+    unit-test criteria carry the claim.
+    NO depends_on: nothing blocks this. W1-T221/W1-T294 are adjacent (local preflight) but cannot
+    cover it — the title does not exist until after the push."
