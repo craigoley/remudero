@@ -6,7 +6,10 @@ import { test } from "node:test";
 import type { AcceptanceCriterion } from "../src/lib/plan.js";
 import { judgeReview } from "../src/lib/review.js";
 import { findExportDefinition, isExportReachable, scanUnreachedExports } from "../src/lib/reachability.js";
-import { scopeGuardOutOfScopeFiles } from "../src/run-task.js";
+import { netStateCapabilityAdvisories, renderNetStateUnwiredAdvisories } from "../src/lib/retro.js";
+import { netStateAdvisorySectionFor, runReview, scopeGuardOutOfScopeFiles } from "../src/run-task.js";
+import type { Config } from "../src/lib/config.js";
+import type { WorkerResult } from "../src/lib/worker.js";
 
 // W1-T322 — SHIPS-UNWIRED advisory floor. ONE reachability scan (lib/reachability.ts),
 // consumed at review time (judgeReview's `unwiredAdvisories`, ADVISORY ONLY — never touches
@@ -229,4 +232,191 @@ test("sanity: findExportDefinition resolves a real export against the actual rep
   const repoRoot = join(import.meta.dirname, "..");
   assert.equal(findExportDefinition("scanUnreachedExports", repoRoot), "src/lib/reachability.ts");
   assert.equal(findExportDefinition("thisSymbolDoesNotExistAnywhere123", repoRoot), undefined);
+});
+
+// ── DIFF-COVERAGE FIXTURES ───────────────────────────────────────────────────────────────
+// The four groups below cover the lines `diff-coverage` flagged on this PR's first push
+// (reachability's unreadable-file arm, retro's `snippetAround`/render-non-empty branch, the
+// review path's advisory ledger loop, and the retro scan's degradation arm). Each drives the
+// REAL exported function — none asserts against a hand-built stand-in for what production does.
+
+test("an unreadable candidate file is skipped, never treated as a file that failed to match", () => {
+  const checkoutDir = makeCheckout();
+  try {
+    // `isExportReachable` always reads `definingFile`, even outside SCAN_ROOTS — so a
+    // definingFile that does not exist is the one deterministic way into the shared
+    // unreadable-file arm. Everything `listCandidateFiles` yields is a real readable file.
+    assert.equal(
+      isExportReachable("ghostFn", "src/lib/does-not-exist.ts", checkoutDir),
+      false,
+      "an unreadable definingFile yields 'not reachable' — it must not throw, and must not report reachable",
+    );
+
+    // FALSIFIER: with a REAL caller present, the same call returns true — proving the skip above
+    // is the unreadable path and not a blanket false.
+    writeFile(checkoutDir, "src/lib/ghost.ts", "export function ghostFn(): number {\n  return 1;\n}\n");
+    writeFile(checkoutDir, "src/lib/caller.ts", "import { ghostFn } from './ghost.js';\nexport const v = ghostFn();\n");
+    assert.equal(isExportReachable("ghostFn", "src/lib/ghost.ts", checkoutDir), true);
+
+    // And the resolver shares that arm: an empty tree resolves nothing rather than throwing.
+    assert.equal(findExportDefinition("ghostFn", join(checkoutDir, "no-such-subtree")), undefined);
+  } finally {
+    rmSync(checkoutDir, { recursive: true, force: true });
+  }
+});
+
+test("a NET STATE sentence naming an unreached symbol becomes an advisory carrying a collapsed snippet, and renders as a section", () => {
+  const checkoutDir = makeCheckout();
+  try {
+    writeFile(checkoutDir, "src/lib/claimed.ts", "export function claimedFeature(): number {\n  return 1;\n}\n");
+    const netStateText = [
+      "\n## NET STATE",
+      "",
+      "- The console   ships   `claimedFeature` end to end,",
+      "  and it is wired into the daemon.",
+    ].join("\n");
+
+    const advisories = netStateCapabilityAdvisories(netStateText, checkoutDir);
+
+    assert.equal(advisories.length, 1, "one advisory for the one unreached symbol the sentence names");
+    assert.equal(advisories[0].symbol, "claimedFeature");
+    assert.equal(advisories[0].file, "src/lib/claimed.ts");
+    assert.match(advisories[0].snippet, /claimedFeature/, "the snippet quotes the claim it is about");
+    assert.doesNotMatch(advisories[0].snippet, /\s\s/, "whitespace is collapsed — never the raw multi-line bullet");
+    assert.ok(advisories[0].snippet.length <= 300, "and it is a window, not the whole section");
+
+    const rendered = renderNetStateUnwiredAdvisories(advisories);
+    assert.match(rendered, /ADVISORY ONLY/, "the non-empty section states it decides nothing");
+    assert.match(rendered, /`claimedFeature` \(src\/lib\/claimed\.ts\)/, "and names the symbol with its file");
+
+    // The empty branch is a DIFFERENT sentence, not the same one with nothing in it.
+    const empty = renderNetStateUnwiredAdvisories([]);
+    assert.match(empty, /No NET STATE claim names a symbol this scan finds unreached/);
+    assert.doesNotMatch(empty, /ADVISORY ONLY/);
+
+    // A symbol that is REACHED yields no advisory at all — the falsifier for the above.
+    writeFile(checkoutDir, "src/lib/uses.ts", "import { claimedFeature } from './claimed.js';\nexport const n = claimedFeature();\n");
+    assert.deepEqual(netStateCapabilityAdvisories(netStateText, checkoutDir), []);
+  } finally {
+    rmSync(checkoutDir, { recursive: true, force: true });
+  }
+});
+
+test("the retro's NET STATE scan degrades to an empty section when MASTER-PLAN.md exists but cannot be read", () => {
+  const root = makeCheckout();
+  try {
+    // A DIRECTORY at MASTER-PLAN.md: `existsSync` says yes, `readFileSync` throws EISDIR — the
+    // exists-but-unreadable shape the degradation arm is written for.
+    mkdirSync(join(root, "MASTER-PLAN.md"), { recursive: true });
+    assert.equal(netStateAdvisorySectionFor(root), "", "an unreadable MASTER-PLAN.md degrades to no section, never a throw");
+
+    // Absent file: also empty, and by the OTHER path (existsSync false) — so the two
+    // degradations are not the same branch wearing two hats.
+    assert.equal(netStateAdvisorySectionFor(join(root, "nope")), "");
+
+    // A readable MASTER-PLAN.md with no NET STATE heading is still empty...
+    writeFileSync(join(root, "other.md"), "# nothing\n", "utf8");
+    rmSync(join(root, "MASTER-PLAN.md"), { recursive: true, force: true });
+    writeFileSync(join(root, "MASTER-PLAN.md"), "# Plan\n\n## SOMETHING ELSE\n\nno net state here\n", "utf8");
+    assert.equal(netStateAdvisorySectionFor(root), "");
+
+    // ...and one WITH the heading produces a real section, proving the empty results above are
+    // the degradation and not the function simply never working.
+    writeFile(root, "src/lib/claimed.ts", "export function claimedFeature(): number {\n  return 1;\n}\n");
+    writeFileSync(
+      join(root, "MASTER-PLAN.md"),
+      "# Plan\n\n## NET STATE\n\n- ships `claimedFeature` today\n\n## AFTER\n\ntail\n",
+      "utf8",
+    );
+    const section = netStateAdvisorySectionFor(root);
+    assert.match(section, /SHIPS-UNWIRED — NET STATE capability claims/);
+    assert.match(section, /claimedFeature/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runReview ledgers one review.unwired_advisory line per advisory, and none when the scan finds nothing", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-unwired-review-"));
+  const binDir = mkdtempSync(join(tmpdir(), "rmd-unwired-gh-"));
+  const checkoutDir = makeCheckout();
+  const oldPath = process.env.PATH;
+  try {
+    mkdirSync(join(root, "state"), { recursive: true });
+    const ledgerPath = join(root, "state", "ledger.ndjson");
+    writeFileSync(join(root, "settings.json"), "{}", "utf8");
+
+    // The head checkout carries an ADDED export nothing reaches — the `unwired_export` shape.
+    writeFile(checkoutDir, "src/lib/stranded.ts", "export function strandedFn(): number {\n  return 1;\n}\n");
+    const diff = [
+      "diff --git a/src/lib/stranded.ts b/src/lib/stranded.ts",
+      "+++ b/src/lib/stranded.ts",
+      "@@",
+      "+export function strandedFn(): number {",
+      "+  return 1;",
+      "+}",
+    ].join("\n");
+
+    // `gh` stub: the diff above is what the review path scans.
+    writeFileSync(
+      join(binDir, "gh"),
+      `#!/bin/sh
+case "$1 $2" in
+  "pr view")
+    case "$*" in
+      *headRefOid*) echo '{"headRefOid":"deadbeefcafe01"}' ;;
+      *state*) echo '{"state":"OPEN"}' ;;
+      *) echo '{}' ;;
+    esac ;;
+  "pr diff") cat <<'DIFF'
+${diff}
+DIFF
+    ;;
+  *) exit 0 ;;
+esac
+`,
+      { mode: 0o755 },
+    );
+    process.env.PATH = `${binDir}:${oldPath}`;
+
+    const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+    const runOnce = async (headCheckoutDir?: string) => {
+      lines.length = 0;
+      await runReview({
+        owner: "acme",
+        repo: "remudero",
+        prUrl: "https://github.com/acme/remudero/pull/1292",
+        task: { id: "W1-T322", acceptance: SIMPLE_CRITERIA },
+        report: SIMPLE_REPORT,
+        settingsFile: join(root, "settings.json"),
+        config: { claudeBin: "/bin/true", root } as Config,
+        log: (step: string, extra: Record<string, unknown> = {}) => void lines.push({ step, extra: extra ?? {} }),
+        say: () => {},
+        account: (r: WorkerResult) => r,
+        spawnReviewer: false,
+        reviewerMount: { model: "sonnet", effort: "medium", maxTurns: 400, contextBudget: 120000 },
+        headCheckoutDir,
+        ledgerPath,
+        runId: "REVIEW-UNWIRED-1",
+      });
+      return lines.filter((l) => l.step === "review.unwired_advisory");
+    };
+
+    const advised = await runOnce(checkoutDir);
+
+    assert.equal(advised.length, 1, "one ledger line for the one advisory the scan produced");
+    assert.equal(advised[0].extra.reason_code, "unwired_export", "the line carries the reason code W1-T323 will measure");
+    assert.deepEqual(advised[0].extra.symbols, ["src/lib/stranded.ts::strandedFn"], "and the offending symbol");
+    assert.equal(advised[0].extra.head_sha, "deadbeefcafe01", "attributed to the head sha it scanned");
+    assert.equal(advised[0].extra.pr_url, "https://github.com/acme/remudero/pull/1292");
+
+    // CONTROL: no headCheckoutDir -> no scan -> the loop body never runs. Without this, a test
+    // asserting only the presence of lines could pass on a loop that ran unconditionally.
+    assert.deepEqual(await runOnce(undefined), [], "no checkout to scan ledgers no advisory at all");
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(root, { recursive: true, force: true });
+    rmSync(binDir, { recursive: true, force: true });
+    rmSync(checkoutDir, { recursive: true, force: true });
+  }
 });

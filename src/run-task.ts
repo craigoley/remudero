@@ -6987,6 +6987,35 @@ export function buildRetroDaemonHooks(deps: {
   };
 }
 
+/**
+ * W1-T322 (design (iii)): the RETRO-TIME consumer of the SAME reachability scan the review path
+ * uses — MASTER-PLAN's own NET STATE section, re-checked against the CURRENT mainline checkout
+ * (`repoRoot`, never a PR diff). Returns the report section to concatenate, or `""`.
+ *
+ * BEST-EFFORT AND NON-FATAL, the same discipline `openProposalLines`/`openTaskTitles` follow: a
+ * read or scan hiccup degrades to "nothing to advise" rather than aborting the retro.
+ *
+ * EXTRACTED FROM `retroCommand` SO THE DEGRADATION ARM IS REACHABLE. Inline, the `catch` was
+ * dead to every test: `retroCommand` derives `repoRoot` internally, so no test could hand it a
+ * tree whose MASTER-PLAN.md exists but will not read. As a function taking `repoRoot`, one can —
+ * a directory at that path passes `existsSync` and throws EISDIR on read, which is exactly the
+ * "exists but unreadable" shape the arm is written for.
+ */
+export function netStateAdvisorySectionFor(repoRoot: string): string {
+  try {
+    const masterPlanPath = join(repoRoot, "MASTER-PLAN.md");
+    const masterPlanMd = existsSync(masterPlanPath) ? readFileSync(masterPlanPath, "utf8") : "";
+    const netStateStart = masterPlanMd.indexOf("\n## NET STATE");
+    if (netStateStart === -1) return "";
+    const nextHeading = masterPlanMd.indexOf("\n## ", netStateStart + 1);
+    const netStateText = masterPlanMd.slice(netStateStart, nextHeading === -1 ? undefined : nextHeading);
+    return `\n\n${renderNetStateUnwiredAdvisories(netStateCapabilityAdvisories(netStateText, repoRoot))}`;
+  } catch (e) {
+    console.error(`### [retro] net_state_unwired_advisories — scan failed, degrading to none: ${String((e as Error)?.message ?? e)}`);
+    return "";
+  }
+}
+
 async function retroCommand(
   rest: string[],
   opts: {
@@ -7107,20 +7136,7 @@ async function retroCommand(
   // checkout (this repo's own working tree, `repoRoot` — never a PR diff). Best-effort + silent
   // on failure, the SAME non-fatal discipline `openProposalLines`/`openTaskTitles` above already
   // follow: a read/scan hiccup degrades to "nothing to advise" rather than aborting the retro.
-  let netStateAdvisorySection = "";
-  try {
-    const masterPlanPath = join(repoRoot, "MASTER-PLAN.md");
-    const masterPlanMd = existsSync(masterPlanPath) ? readFileSync(masterPlanPath, "utf8") : "";
-    const netStateStart = masterPlanMd.indexOf("\n## NET STATE");
-    if (netStateStart !== -1) {
-      const nextHeading = masterPlanMd.indexOf("\n## ", netStateStart + 1);
-      const netStateText = masterPlanMd.slice(netStateStart, nextHeading === -1 ? undefined : nextHeading);
-      const advisories = netStateCapabilityAdvisories(netStateText, repoRoot);
-      netStateAdvisorySection = `\n\n${renderNetStateUnwiredAdvisories(advisories)}`;
-    }
-  } catch (e) {
-    console.error(`### [retro] net_state_unwired_advisories — scan failed, degrading to none: ${String((e as Error)?.message ?? e)}`);
-  }
+  const netStateAdvisorySection = netStateAdvisorySectionFor(repoRoot);
   const report = [renderGather(gather), "", renderRatifyTelemetry(ratifyTelemetry(parseLedger(ledgerNdjson)))].join("\n") + netStateAdvisorySection;
 
   if (dryRun) {

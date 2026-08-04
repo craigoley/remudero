@@ -96,18 +96,37 @@ function identifierRe(name: string): RegExp {
  * caller passing a path this scan wouldn't otherwise walk (e.g. a synthetic fixture file) must
  * still get its own seam-default check.
  */
+/**
+ * Read one candidate file, or `undefined` if it cannot be read. THE SINGLE UNREADABLE-FILE ARM
+ * for this module: {@link isExportReachable} and {@link findExportDefinition} each carried a
+ * byte-identical `try { readFileSync } catch { continue }`, and two copies of one rule drift.
+ *
+ * IT IS ALSO THE ONLY ONE A TEST CAN REACH. `listCandidateFiles` pushes `e.isFile()` entries
+ * only, so every path IT yields is a real, readable file and its arm was dead by construction;
+ * `isExportReachable` additionally reads `definingFile`, which a caller supplies and which need
+ * not exist. Folding both into this helper puts the whole behaviour behind that one reachable
+ * door — a non-existent `definingFile` now exercises the arm both callers share.
+ *
+ * `undefined` (not `""`) is deliberate: an empty file is a legitimate read whose text matches no
+ * identifier, and collapsing the two would make "unreadable" and "matches nothing" the same
+ * answer at every call site.
+ */
+function readCandidate(checkoutDir: string, rel: string): string | undefined {
+  try {
+    return readFileSync(join(checkoutDir, rel), "utf8");
+  } catch {
+    return undefined; // unreadable — never the reason a real caller goes unfound; just skip it
+  }
+}
+
 export function isExportReachable(name: string, definingFile: string, checkoutDir: string): boolean {
   const re = identifierRe(name);
   const defRe = new RegExp(`export\\s+(?:async\\s+)?function\\s+${escapeRegExp(name)}\\b`);
   const files = new Set(listCandidateFiles(checkoutDir));
   files.add(definingFile);
   for (const rel of files) {
-    let text: string;
-    try {
-      text = readFileSync(join(checkoutDir, rel), "utf8");
-    } catch {
-      continue; // unreadable — never the reason a real caller goes unfound; just skip it
-    }
+    const text = readCandidate(checkoutDir, rel);
+    if (text === undefined) continue;
     if (rel === definingFile) {
       const defMatch = defRe.exec(text);
       const beyondDefinition = defMatch ? text.slice(0, defMatch.index) + text.slice(defMatch.index + defMatch[0].length) : text;
@@ -179,12 +198,8 @@ export function findExportDefinition(name: string, checkoutDir: string): string 
   const defRe = new RegExp(`export\\s+(?:async\\s+)?function\\s+${escapeRegExp(name)}\\b|export\\s+const\\s+${escapeRegExp(name)}\\b`);
   for (const rel of listCandidateFiles(checkoutDir)) {
     if (!rel.startsWith("src/") || isTestPath(rel)) continue;
-    let text: string;
-    try {
-      text = readFileSync(join(checkoutDir, rel), "utf8");
-    } catch {
-      continue;
-    }
+    const text = readCandidate(checkoutDir, rel);
+    if (text === undefined) continue;
     if (defRe.test(text)) return rel;
   }
   return undefined;
