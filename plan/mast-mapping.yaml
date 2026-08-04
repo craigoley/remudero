@@ -24,6 +24,13 @@
 # `merged` carries no row: success is out of scope for a FAILURE distribution (P18's own
 # framing) — mastCategoryDistribution skips it before ever consulting this table.
 #
+# `already_satisfied` and `task_already_merged` (W1-T272, W1-T319) likewise carry no row, for
+# the same reason: both are CREDITED_VERDICTS (src/lib/retro.ts) skipped before this table is
+# ever consulted, so neither is ever mined as a class-level defect nor reported UNMAPPED.
+# `task_already_merged` specifically is a by-id `rmd run-task <id>` dispatch refused at zero
+# cost because the projection already reported the TARGET task merged (fb-1784773321502-86793d)
+# — no worker ran, so there is nothing here to code a MAST failure mode against.
+#
 # `infrastructure` is a FOURTH category, alongside MAST's three (specification/inter-agent/
 # verification): a guard (isolation|containment) firing CORRECTLY is not an agent failure at
 # all -- it is the harness's own preflight catching a HOST condition (an unproven sandbox, a

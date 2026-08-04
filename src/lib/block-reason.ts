@@ -60,9 +60,19 @@ export { INITIAL_RETRY_STATE, type RetryState };
  * transient cause (its `isTransientWorkerError` already gates on
  * `classifyFailure`) — every other non-merged verdict is a real, deterministic
  * failure (a strike), fail-closed exactly as W1-T7's own classifier is.
+ *
+ * `task_already_merged` (W1-T319) is the ONE other exception, classified the SAME as
+ * `blocked_transient` rather than falling into "strike": drain's eligibility filter and the
+ * daemon's own console-kick loop both already exclude merged tasks upstream, so this verdict
+ * only ever reaches here via the pick-then-merge RACE (a task merges between selection and
+ * `runTask`'s own dispatch). That is not a real failure to strike against the task — the
+ * task IS merged — and treating it as transient means the daemon retries (i.e. re-consults
+ * `nextRunnable`) rather than halting to escalate for a human or spending a fix-rung strike
+ * on work that already landed; the very next tick's eligibility filter naturally stops
+ * re-selecting it.
  */
 export function verdictFailureClass(verdict: RunResult["verdict"]): FailureClass {
-  return verdict === "blocked_transient" ? "transient" : "strike";
+  return verdict === "blocked_transient" || verdict === "task_already_merged" ? "transient" : "strike";
 }
 
 /**

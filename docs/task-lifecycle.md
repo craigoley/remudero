@@ -116,6 +116,7 @@ the runner arm auto-merge. The full `RunResult.verdict` space
 | `blocked_inflight` | The task was already running elsewhere. |
 | `blocked_git_fetch` | The plan could not be synced from origin before the run started. |
 | `blocked_illformed` | The pre-dispatch linter refused the task — no worker was ever spawned. |
+| `task_already_merged` | A by-id dispatch found the target already merged; refused at zero cost — no worker was ever spawned. |
 | `blocked_transient` | A recoverable environment hiccup, not a genuine failure. |
 | `no_pr` | The worker ended without opening a PR. |
 | `pr_attribution_failed` | The PR found does not actually belong to this task/run. |

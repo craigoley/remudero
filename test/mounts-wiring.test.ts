@@ -7,6 +7,17 @@ import { resolveRunMounts } from "../src/run-task.js";
 import { fileURLToPath } from "node:url";
 import { loadMounts, mountsPath, MountsError, resolveMount } from "../src/lib/mounts.js";
 import { loadPlan, TASK_RISKS } from "../src/lib/plan.js";
+import type { GitHub } from "../src/lib/status.js";
+
+/** An offline GitHub gateway: the merged-status projection runs with zero network round-trips
+ *  (and zero dependence on whatever real state craigoley/remudero happens to carry for a
+ *  fixture-only task id — see the W1-T319 already-merged guard this stands in for). */
+const OFFLINE_GITHUB: GitHub = {
+  prByRef: () => null,
+  findMergedByTrailer: () => null,
+  headRefName: () => undefined,
+  prBody: () => undefined,
+};
 
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -227,7 +238,7 @@ test("runTask resolves the class-routed mount and ledgers run.start with task_cl
   // to a failed result depending on the boundary's error path; both are acceptable —
   // the assertion is the ledger line, not the failure shape.
   try {
-    await runTask("T-MOUNTPROBE", { planPath, config, skipGitSync: true } as never);
+    await runTask("T-MOUNTPROBE", { planPath, config, skipGitSync: true, github: OFFLINE_GITHUB } as never);
   } catch {
     // expected: the spawn boundary cannot start a worker in this fixture
   }
