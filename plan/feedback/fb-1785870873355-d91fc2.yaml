@@ -1,0 +1,30 @@
+id: fb-1785870873355-d91fc2
+ts: 2026-08-04T19:14:33.355Z
+raw: "THE SHIPS-UNWIRED FLOOR CANNOT DISTINGUISH 'CLEAN' FROM 'NEVER RAN' —
+  scanUnreachedExports is called in review.ts and its result is gated on 'if
+  (unreached.length > 0)', then filtered again by wiredAtPairs and
+  shipsUnwiredIds, and only then pushed as reasonCode unwired_export. So a
+  verdict on a clean diff and a verdict where the scan silently returned nothing
+  produce the SAME ledger row: reasons:[] with no reachability field at all.
+  Measured: since #1292 deployed at 2026-08-04T17:43Z, review.posted has reached
+  266 and unwired_export is 0 — including W1-T325, a real src/ PR merged after
+  the deploy. That zero is currently uninformative. THIS IS THE CLONE-REAPER
+  SHAPE: the same 'if (actionable.length)' gating hid a TOTAL predicate mismatch
+  for two days while 9.4 GB of its stated target accumulated, because a survey
+  finding nothing and a survey rejecting everything both wrote no line. W1-T323
+  is the filed task to flip this floor from advisory to blocking once the
+  false-positive rate is known — but it has no DENOMINATOR until something
+  fires, so its criterion is currently unsatisfiable in the same way W1-T229's
+  proofs were. RECON: establish the cheapest way to make the scan's execution
+  observable without adding a line per review — a periodic count, a field on the
+  verdict carrying the scanned-export count rather than only the violations, or
+  a one-off test that adds an unwired export and asserts a fire. Then say
+  whether W1-T323's flip criterion should require at least one true positive
+  before the window is considered valid. Falsifying check: if unwired_export
+  fires within the next few src/ merges, the instrument is demonstrably reaching
+  its input and only the observability of the zero case is at issue."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null
