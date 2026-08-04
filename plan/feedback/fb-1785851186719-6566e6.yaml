@@ -1,0 +1,29 @@
+id: fb-1785851186719-6566e6
+ts: 2026-08-04T13:46:26.719Z
+raw: "ESCALATION DEDUP HAS NO COVERAGE FOR A PR-LESS ESCALATION — escalate() in
+  src/lib/escalate.ts gates its entire dedup block on 'if (prRef &&
+  deps.issues.listOpen)', where prRef comes from extractPrRef over the summary
+  and detail. An escalation that names no PR therefore skips dedup entirely and
+  creates a fresh issue every time. Measured 2026-08-04: 13 open needs-human
+  issues, of which EIGHT are byte-identical 'dispatch queue starved — zero
+  dispatchable, 2 recoverable class(es) blocking' and four are W1-T314 blocked
+  (three no_pr, one failed). The starvation escalation fires per daemon tick and
+  names no PR, so it duplicates indefinitely. The composite key W1-T195 built —
+  taskId + PR required, headSha and cause as optional vetoing dimensions — is
+  correct for what it covers and has NO DOMAIN for a PR-less caller. This is the
+  audit's class exactly: a mechanism working correctly on its designed inputs
+  and doing nothing on the ones it was not. CONSEQUENCE BEYOND NOISE: the
+  console's NEEDS ME shows 3 while GitHub holds 13, because it filters
+  escalations that resolve to a plan task and a daemon-scoped one has no task id
+  — the same filter that once hid 55 issues. RECON: establish whether a PR-less
+  escalation can key on (taskId, class) safely, and what a daemon-scoped taskId
+  means for that key. Note the design's own stated principle — a dedup miss must
+  never suppress a real escalation — so the fix must fail toward creating, not
+  toward silence. Falsifying check: if every PR-less escalation caller is
+  one-shot by nature and only the starvation rung recurs, the fix belongs in
+  that rung's cadence rather than in the dedup key."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null
