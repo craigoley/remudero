@@ -37,6 +37,14 @@ export interface RunResult {
     // from BOTH `merged` (this run's own PR) and `no_pr` (the drain-halting anomaly): it
     // CREDITS the task and behaves like forward progress, never a block.
     | "already_satisfied"
+    // W1-T319 (fb-1784773321502-86793d): a BY-ID `rmd run-task <id>` dispatch refused BEFORE
+    // any lock/worktree/spawn because the projection `runTask` already builds reports the
+    // TARGET task itself (not a dependency) as merged -- the by-id CLI kick was the one
+    // dispatch entry point missing this guard (drain's eligibility filter and the daemon's
+    // console-kick loop both already have it). `merged: false` (this run produced no PR of
+    // its own) but `costUsd: 0` -- nothing was ever spent. `--rerun` is the explicit,
+    // ledgered override.
+    | "task_already_merged"
     | "blocked_transient"
     | "pr_attribution_failed"
     | "failed";

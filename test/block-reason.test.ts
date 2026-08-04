@@ -60,6 +60,28 @@ test("verdictFailureClass: every other non-merged verdict classifies strike (fai
   for (const v of verdicts) assert.equal(verdictFailureClass(v), "strike", v);
 });
 
+test("verdictFailureClass: task_already_merged (W1-T319) ALSO classifies transient -- a pre-spawn merged refusal is never a strike", () => {
+  assert.equal(verdictFailureClass("task_already_merged"), "transient");
+});
+
+test("reasonAboutBlock: a task_already_merged verdict retries (no strike, no halt+escalate) -- it only ever reaches here via the pick-then-merge race, and the task IS merged", () => {
+  const plan = loadPlanFromYaml([
+    "- id: A",
+    "  title: a",
+    "  repo: remudero",
+    "  type: implement",
+    "  depends_on: []",
+    "- id: B",
+    "  title: b",
+    "  repo: remudero",
+    "  type: implement",
+    "  depends_on: [A]", // B transitively depends on A -- would be a genuine_blocker for any real failure verdict
+    "",
+  ].join("\n"), "fixture");
+  const disposition = reasonAboutBlock(plan, "A", "task_already_merged", INITIAL_RETRY_STATE);
+  assert.equal(disposition.kind, "retry_transient");
+});
+
 // ── acceptance #1: TRANSIENT retries, no strike ─────────────────────────────
 
 test("reasonAboutBlock: a first blocked_transient retries (no strike), bumping transientRetries", () => {

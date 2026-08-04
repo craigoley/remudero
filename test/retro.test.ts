@@ -17,11 +17,13 @@ import {
   flagContradictions,
   gatherRuns,
   keyContradictionCandidates,
+  mastCategoryDistribution,
   mergedSince,
   mineDegradedSuccess,
   mineFollowups,
   mineOverrunClasses,
   mineProceduralCandidates,
+  OVERRUN_VERDICTS,
   ownBranchOf,
   parseLedger,
   phraseProceduralCandidate,
@@ -42,6 +44,7 @@ import {
   renderPlanHealth,
   renderProceduralCandidates,
   shippedSince,
+  taskDefectCounts,
   tierOf,
   verdictDistribution,
   type ContradictionCandidatePair,
@@ -445,6 +448,31 @@ test("mineOverrunClasses: distinct classes each get their OWN proposal, and a me
   assert.ok(proposals.some((p) => p.taskType === "implement" && p.risk === "medium"));
   assert.ok(proposals.some((p) => p.taskType === "review" && p.risk === "low"));
   assert.ok(!proposals.some((p) => p.taskIds.includes("W1-T-OK")));
+});
+
+// W1-T319 ACCEPTANCE: a pre-spawn `task_already_merged` refusal (no worker ran, zero cost) is
+// not mined as a class-level overrun and does not spend a strike against the task's own
+// defect count -- same treatment as `already_satisfied` (W1-T272), same CREDITED_VERDICTS
+// mechanism (src/lib/retro.ts), proven at each of the THREE reducers it drives.
+test("W1-T319: task_already_merged is DELIBERATELY ABSENT from OVERRUN_VERDICTS -- never mined for a class-level fix", () => {
+  assert.equal(OVERRUN_VERDICTS.has("task_already_merged"), false);
+  const runs = [
+    run({ runId: "R1", taskId: "W1-T319a", type: "implement", risk: "high", verdict: "task_already_merged", costUsd: 0, numTurns: 0, subtype: undefined }),
+    run({ runId: "R2", taskId: "W1-T319b", type: "implement", risk: "high", verdict: "task_already_merged", costUsd: 0, numTurns: 0, subtype: undefined }),
+    run({ runId: "R3", taskId: "W1-T319c", type: "implement", risk: "high", verdict: "task_already_merged", costUsd: 0, numTurns: 0, subtype: undefined }),
+  ];
+  assert.deepEqual(mineOverrunClasses(runs), []);
+});
+
+test("W1-T319: task_already_merged never appears in the MAST failure distribution -- not a category count, not unmapped, not a task defect", () => {
+  const runs = [
+    run({ runId: "R1", taskId: "W1-T319", type: "implement", risk: "high", verdict: "task_already_merged", costUsd: 0, numTurns: 0, subtype: undefined }),
+  ];
+  const emptyMapping = { rows: [] };
+  const dist = mastCategoryDistribution(runs, emptyMapping);
+  assert.deepEqual(dist.byCategory, {});
+  assert.equal("task_already_merged" in dist.unmapped, false, "credited, never surfaced as an unmapped failure class");
+  assert.deepEqual(taskDefectCounts(runs, emptyMapping), {}, "no worker ran -- never inflates the task's own defect count");
 });
 
 test("renderOverrunProposals reports 'no pattern' when nothing meets threshold", () => {

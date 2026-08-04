@@ -342,6 +342,180 @@ test(
   },
 );
 
+// ── W1-T319 (fb-1784773321502-86793d): a BY-ID `rmd run-task <id>` REFUSES an
+// ALREADY-MERGED task at zero cost, instead of dispatching straight through and
+// (deterministically) claiming the wrong PR. `skipGitSync: true` reads the fixture plan
+// literally (no git needed at all) -- the guard fires immediately after the projection is
+// built and BEFORE the inflight lock, the §5C linter, worktree materialization, or any
+// spawn, so none of those need a fixture here either. ──────────────────────────────────
+
+const MERGED_FIXTURE_PLAN = [
+  "- id: T-MERGED",
+  "  title: already-merged by-id kick probe",
+  "  repo: remudero",
+  "  type: implement",
+  "  verify: auto",
+  "  risk: medium",
+  "  depends_on: []",
+  "  status: queued",
+  "",
+].join("\n");
+
+const MERGED_PR_URL = "https://github.com/acme/remudero/pull/491";
+
+/** A GitHub gateway reporting T-MERGED already merged via `findMergedByTrailer` (the
+ *  `source: "trailer"` rung `deriveStatus` resolves before ever looking at dependents) --
+ *  the exact shape the W1-T112 incident's `state/status.json` carried (source:ledger,
+ *  merged=true, via a real PR). Counts calls so a test can prove `projectPlan` (and this
+ *  gateway) ran exactly ONCE, never twice. */
+function mergedGithubFixture(): { github: GitHub; findMergedByTrailerCalls: string[] } {
+  const findMergedByTrailerCalls: string[] = [];
+  const github: GitHub = {
+    prByRef: () => null,
+    findMergedByTrailer: (taskId) => {
+      findMergedByTrailerCalls.push(taskId);
+      return taskId === "T-MERGED" ? { number: 491, url: MERGED_PR_URL, state: "MERGED" } : null;
+    },
+    // Rung (c)'s ownership-assert (creditsByAnchoredTrailer, status.ts) requires BOTH an
+    // anchored `Remudero-Task:` trailer in the body AND a readable head ref that does not
+    // claim a DIFFERENT task — a merged-but-unowned hit would be REJECTED (not credited),
+    // exactly the W1-T20c false-credit class that assert exists to catch.
+    headRefName: (url) => (url === MERGED_PR_URL ? "run-T-MERGED-1700000000000" : undefined),
+    prBody: (url) => (url === MERGED_PR_URL ? "REPORT\n\nRemudero-Task: T-MERGED\n" : undefined),
+  };
+  return { github, findMergedByTrailerCalls };
+}
+
+function mergedFixtureRoot(planYaml: string = MERGED_FIXTURE_PLAN): { root: string; planPath: string; config: Config } {
+  const root = mkdtempSync(join(tmpdir(), "runtask-already-merged-root-"));
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(planPath, planYaml);
+  return { root, planPath, config: { claudeBin: "/bin/true", root } };
+}
+
+function readLedgerLinesFor(root: string): Array<Record<string, unknown>> {
+  return readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => JSON.parse(l));
+}
+
+test("W1-T319 ACCEPTANCE: runTask on an already-merged task refuses with verdict task_already_merged at zero cost -- no lock, no worktree, no worker spawn", async () => {
+  const { root, planPath, config } = mergedFixtureRoot();
+  const { github, findMergedByTrailerCalls } = mergedGithubFixture();
+  const spawn: typeof spawnWorker = async () => {
+    throw new Error("spawnWorker must never be called for an already-merged by-id kick");
+  };
+
+  try {
+    const res = await runTask("T-MERGED", { skipGitSync: true, planPath, config, github, spawn });
+
+    assert.equal(res.verdict, "task_already_merged");
+    assert.equal(res.merged, false, "this run produced no PR of its own");
+    assert.equal(res.costUsd, 0);
+    // The projection is built exactly ONCE (one task in the plan) -- proves no SECOND
+    // projectPlan call and no second gateway instance were spun up for the refusal.
+    assert.deepEqual(findMergedByTrailerCalls, ["T-MERGED"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T319 ACCEPTANCE: the refusal is ledgered as dispatch.refused_already_merged, naming the merged PR, never a silent decline", async () => {
+  const { root, planPath, config } = mergedFixtureRoot();
+  const { github } = mergedGithubFixture();
+
+  try {
+    await runTask("T-MERGED", { skipGitSync: true, planPath, config, github });
+
+    const refusals = readLedgerLinesFor(root).filter((l) => l.step === "dispatch.refused_already_merged");
+    assert.equal(refusals.length, 1);
+    assert.equal(refusals[0].task_id, "T-MERGED");
+    assert.equal(refusals[0].pr_url, MERGED_PR_URL);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T319 ACCEPTANCE: the merged refusal fires BEFORE assertRunnable, so an already-merged task with an ALSO-unmet dependency still names the merged reason, not a dependency one", async () => {
+  const planYaml = [
+    "- id: T-DEP",
+    "  title: unmet dep",
+    "  repo: remudero",
+    "  type: implement",
+    "  depends_on: []",
+    "  status: queued",
+    "- id: T-MERGED",
+    "  title: already-merged by-id kick probe, with an unmet dependency",
+    "  repo: remudero",
+    "  type: implement",
+    "  verify: auto",
+    "  risk: medium",
+    "  depends_on: [T-DEP]", // T-DEP is NOT merged -- assertRunnable would refuse on this alone
+    "  status: queued",
+    "",
+  ].join("\n");
+  const { root, planPath, config } = mergedFixtureRoot(planYaml);
+  const { github } = mergedGithubFixture(); // only T-MERGED reports merged; T-DEP does not
+
+  try {
+    const res = await runTask("T-MERGED", { skipGitSync: true, planPath, config, github });
+    // Had assertRunnable run first, this would throw an "unmerged dependencies" PlanError
+    // instead (an uncaught throw, not a RunResult) -- reaching a clean task_already_merged
+    // RunResult proves the merged-refusal short-circuits BEFORE that call.
+    assert.equal(res.verdict, "task_already_merged");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T319 ACCEPTANCE: --rerun is accepted by the run-task arg validator, proceeds with dispatch exactly as before this guard existed, and the override is ledgered", async () => {
+  // (a) THE CLI ARG VALIDATOR: `--rerun` is a recognized boolean flag, same as `--allow-stale`.
+  assert.equal(unknownArgError("run-task", ["--rerun"], [], ["--allow-stale", "--rerun"]), null);
+  assert.equal(unknownArgError("run-task", ["--allow-stale", "--rerun"], [], ["--allow-stale", "--rerun"]), null);
+
+  // (b) THE DISPATCH: with `rerun: true`, an already-merged task proceeds past the guard
+  // into `assertRunnable` exactly as it did before this guard existed -- proven here by an
+  // UNMET dependency surfacing as assertRunnable's own `PlanError`, not a silent bypass.
+  const planYaml = [
+    "- id: T-DEP",
+    "  title: unmet dep",
+    "  repo: remudero",
+    "  type: implement",
+    "  depends_on: []",
+    "  status: queued",
+    "- id: T-MERGED",
+    "  title: already-merged by-id kick probe, rerun",
+    "  repo: remudero",
+    "  type: implement",
+    "  verify: auto",
+    "  risk: medium",
+    "  depends_on: [T-DEP]",
+    "  status: queued",
+    "",
+  ].join("\n");
+  const { root, planPath, config } = mergedFixtureRoot(planYaml);
+  const { github } = mergedGithubFixture();
+
+  try {
+    await assert.rejects(
+      () => runTask("T-MERGED", { skipGitSync: true, planPath, config, github, rerun: true }),
+      /unmerged dependencies/,
+      "rerun:true reaches the SAME assertRunnable refusal an unguarded dispatch always hit -- proceeds exactly as before this guard existed",
+    );
+
+    const overrides = readLedgerLinesFor(root).filter((l) => l.step === "dispatch.rerun_override");
+    assert.equal(overrides.length, 1, "the deliberate override is ledgered, never a silent bypass");
+    assert.equal(overrides[0].task_id, "T-MERGED");
+    assert.equal(overrides[0].pr_url, MERGED_PR_URL);
+
+    const refusals = readLedgerLinesFor(root).filter((l) => l.step === "dispatch.refused_already_merged");
+    assert.equal(refusals.length, 0, "rerun:true must never ALSO log the refusal it overrode");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // ── W1-T191: DECISION_REQUEST auto-choose no longer appends to THIS checkout's own
 // DECISIONS.md (a real working-tree write that made checkCliFreshness refuse every
 // non-exempt `rmd` verb once the checkout also fell behind origin/main) — it calls the

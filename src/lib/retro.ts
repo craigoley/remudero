@@ -704,11 +704,15 @@ function sortedCountRecord(m: Record<string, number>): Record<string, number> {
  *  ({@link infrastructureEvents}), and never a task defect ({@link taskDefectCounts}).
  *  `merged` (this run's own PR merged) and `already_satisfied` (W1-T272: the task's
  *  acceptance was already true on origin/main, VERIFIED via a merged PR carrying this
- *  task's own trailer — forward progress, not a defect, exactly like `merged`). DATA-shaped,
- *  mirrored by every MAST-taxonomy reducer below (Rule 2 — one classifier, never a
- *  per-function guess) so an already-satisfied exit is never miscounted as an unmapped
- *  failure or inflate a task's defect count. */
-const CREDITED_VERDICTS: ReadonlySet<string> = new Set(["merged", "already_satisfied"]);
+ *  task's own trailer — forward progress, not a defect, exactly like `merged`).
+ *  `task_already_merged` (W1-T319, fb-1784773321502-86793d) is a THIRD member for a
+ *  different reason — not forward progress (no worker ran, `merged: false` on the
+ *  `RunResult`) but a zero-cost pre-spawn refusal: the projection already reported the
+ *  TARGET merged, so nothing about a (task_type x risk) class is defective and no work was
+ *  ever attempted to mine. DATA-shaped, mirrored by every MAST-taxonomy reducer below (Rule
+ *  2 — one classifier, never a per-function guess) so none of these three is ever
+ *  miscounted as an unmapped failure or inflates a task's defect count. */
+const CREDITED_VERDICTS: ReadonlySet<string> = new Set(["merged", "already_satisfied", "task_already_merged"]);
 
 /**
  * Reduce a cycle's runs into a {@link MastCategoryDistribution} against `mapping`.
@@ -1308,7 +1312,10 @@ export function renderPlanHealth(report: PlanHealthReport): string {
  *  `already_satisfied` (W1-T272) is DELIBERATELY ABSENT: it is forward progress that CREDITS
  *  the task, not a block — see {@link CREDITED_VERDICTS} below, which is what the MAST
  *  failure taxonomy (mastCategoryDistribution/infrastructureEvents/taskDefectCounts) checks
- *  instead, so a verified already-satisfied exit is never mined as a class-level defect. */
+ *  instead, so a verified already-satisfied exit is never mined as a class-level defect.
+ *  `task_already_merged` (W1-T319) is ALSO DELIBERATELY ABSENT, for a related but distinct
+ *  reason: no worker ran and no turns were spent, so there is nothing about a (task_type x
+ *  risk) class to mine a fix for — see {@link CREDITED_VERDICTS} below, the SAME set. */
 export const OVERRUN_VERDICTS: ReadonlySet<string> = new Set([
   "blocked",
   "blocked_ci",

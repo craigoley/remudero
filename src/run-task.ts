@@ -3954,6 +3954,13 @@ async function runTask(
      *  sync — the operator named an exact file, so honor it verbatim, same as the sibling
      *  guard around the daemon's own non-self clone-sync (`!flagValue(rest, "--plan")`). */
     skipGitSync?: boolean;
+    /** W1-T319 (fb-1784773321502-86793d): the deliberate override for the ALREADY-MERGED
+     *  by-id refusal below — modelled on `allowStale` above. With it unset (the default), a
+     *  task the projection already reports merged refuses at zero cost, verdict
+     *  `task_already_merged`; set, the dispatch proceeds EXACTLY as it did before this guard
+     *  existed. Always ledgered (`dispatch.rerun_override`) so a deliberate re-run is never
+     *  indistinguishable from a guard that failed to fire. */
+    rerun?: boolean;
     /** Injectable worker-spawn — behavioral tests (W1-T20c criterion 5) count calls to prove
      *  a linter-failing task NEVER reaches a spawn. Default: the real {@link spawnWorker}. */
     spawn?: typeof spawnWorker;
@@ -4043,6 +4050,33 @@ async function runTask(
   const github = opts.github ?? ghGateway(owner, task.repo);
   const projection = projectPlan(plan, { ledgerPath: ledgerPathFor(config), github }, statusPath);
   const isMerged = (t: Task): boolean => projection.get(t.id)?.merged ?? false;
+
+  // ── ALREADY-MERGED BY-ID REFUSAL (W1-T319, fb-1784773321502-86793d): `isMerged` above is
+  // handed to `assertRunnable` next, which spends it ENTIRELY on the target's DEPENDENCIES —
+  // nothing on this path ever asks the one question the projection already answers about the
+  // TARGET itself. The incident this fixes: a task the projection already recorded merged
+  // (source:ledger, via a real PR) was dispatched anyway, pushed an empty branch, and claimed
+  // the OLD PR (pr_attribution_failed) — $1.30 for an outcome decided before the worker
+  // spawned. Reuses the SAME `projection` and `github` gateway already in scope — no second
+  // `projectPlan` call, no second gateway. Sits BEFORE `assertRunnable` (so the refusal names
+  // the accurate reason, not a downstream dependency message), before the §5C linter, the
+  // inflight lock, worktree materialization and any spawn: zero cost beyond the map lookup.
+  // The daemon's console-kick loop (`isMerged(kick.taskId)` in daemon.ts) and drain's
+  // eligibility filter already guard their own paths — this was the one dispatch entry point
+  // without it. `--rerun` is the explicit, ledgered escape hatch (mirrors `--allow-stale`).
+  if (isMerged(task)) {
+    if (opts.rerun) {
+      log("dispatch.rerun_override", { pr_url: projection.get(task.id)?.prUrl });
+    } else {
+      const mergedPrUrl = projection.get(task.id)?.prUrl;
+      log("dispatch.refused_already_merged", { pr_url: mergedPrUrl });
+      say(
+        `REFUSED: ${task.id} is already merged${mergedPrUrl ? ` (${mergedPrUrl})` : ""} — pass --rerun to dispatch anyway`,
+      );
+      return { taskId, runId, merged: false, costUsd: 0, verdict: "task_already_merged" };
+    }
+  }
+
   assertRunnable(plan, task, isMerged); // refuse unmerged deps / blocked / verify:human
 
   // ── §5C LAYER A: deterministic task linter, FAIL-CLOSED pre-dispatch guard
@@ -14380,7 +14414,7 @@ const COMMANDS: readonly CommandSpec[] = [
   {
     name: "run-task",
     usage:
-      "rmd run-task <task-id> [--allow-stale]   # dispatches from the origin/main plan blob (W1-T60), fetching first; --allow-stale proceeds on the last-fetched refs if the fetch fails instead of refusing",
+      "rmd run-task <task-id> [--allow-stale] [--rerun]   # dispatches from the origin/main plan blob (W1-T60), fetching first; --allow-stale proceeds on the last-fetched refs if the fetch fails instead of refusing; --rerun dispatches even when the projection already reports the task merged (W1-T319), instead of refusing at zero cost with verdict task_already_merged",
   },
   {
     name: "review",
@@ -14853,13 +14887,22 @@ export async function main(
   if (cmd === "wipe-test" && arg) {
     process.exit(await wipeTestCommand(rest));
   }
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(...) around the runTask call
+  // cannot carry a DA hit without forking the process; the dispatched logic itself — arg
+  // validation (unknownArgError, incl. --rerun), the already-merged refusal (W1-T319), and
+  // every terminal verdict runTask can return — is unit-tested directly, driving REAL runTask()
+  // calls, in test/run-task.test.ts (same irreducible-glue shape as the sibling emissions/
+  // console-url/down/up/status/away dispatch cases just below).
   if (cmd === "run-task" && arg) {
-    const badArg = unknownArgError("run-task", rest.slice(1), [], ["--allow-stale"]);
+    const badArg = unknownArgError("run-task", rest.slice(1), [], ["--allow-stale", "--rerun"]);
     if (badArg) {
       console.error(badArg + "\n" + USAGE);
       process.exit(2);
     }
-    const result = await runTask(arg, { allowStale: rest.includes("--allow-stale") });
+    const result = await runTask(arg, {
+      allowStale: rest.includes("--allow-stale"),
+      rerun: rest.includes("--rerun"),
+    });
     console.log("\n" + JSON.stringify(result, null, 2));
     process.exit(result.merged ? 0 : 1);
   }
