@@ -63,7 +63,21 @@
   origin: feedback#fb-1784770111145-cf7c24
   plan_refs: ["§7"]
   files: [src/lib/serve.ts, test/console-tabs.test.ts]
-  status: queued
+  status: blocked
+  # BLOCKED BY THE OPERATOR 2026-08-04, on spend evidence, not on a judgement about the design.
+  # Four dispatches produced ZERO commits and no PR, each ending implement.done subtype:success and
+  # re-filing the whole task as a followup:
+  #   W1-T314-1785803822339 $24.64 | -1785808504719 $21.25 | -1785812393844 $14.99 | -1785815089597 $23.62
+  #   TOTAL $84.50 for nothing. `rmd status` classes it PERPETUAL at ~$23.97/cycle.
+  # It is NOT the scope-declaration class that stalled W1-T312 — the ledger carries no out_of_scope
+  # refusal, and the files it names beyond its own (status-board.ts, sweep.ts) are named to be READ
+  # ("CONSUME the existing verdicts, never a second derivation"), not written.
+  # The likely cause is SIZE: a four-tab console shell with URL persistence, deep-linking and five
+  # acceptance claims, inside serve.ts (client JS in a backtick template, real Playwright tests), in
+  # one dispatch. Splitting it is a design decision for the operator, not a 4am edit.
+  # Blocking now saves the ~$24 fifth cycle the circuit breaker would otherwise cost before latching.
+  # NOTE: W1-T315 declares depends_on [W1-T314], so it is blocked behind this too.
+  # Reverse with: status back to `queued`.
   attempts: 0
   note: "FILED 2026-08-03 from feedback fb-1784770111145-cf7c24 (clause 3), source-verified at filing: the ten
     single-scroll sections at serve.ts:702/769/774/783/799/808/820/829/861/890. MASTER-PLAN §7 is amended by
