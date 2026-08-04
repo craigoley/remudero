@@ -351,6 +351,72 @@ test("bodyContradictsDiff: wrapping punctuation comes off whatever the wrapper",
   }
 });
 
+// ── HEAD-NOUN NEED-CLAUSE (the PR #1249 false positive, W1-T328) ────────────
+//
+// `noClaimIsAboutChangeset` is a one-word lookahead: "no code CHANGE" reads as a claim about the
+// diff because "change" is a changeset word, whichever sentence it sits in. #1249's follow-up
+// section said "it already forwards FeedbackEntry wholesale, so no code change was needed for
+// this task's tests to prove the console-rendering path" — a remark about panel-graph.ts, which
+// was NOT in the diff — and was posted `failure` over a diff of exactly
+// src/lib/escalate.ts, src/lib/feedback.ts, src/lib/serve.ts, test/decision-summary.test.ts.
+// The PR needed a human to hand-rephrase the sentence before it would pass.
+
+const PR_1249_DIFF_FILES = [
+  "src/lib/escalate.ts",
+  "src/lib/feedback.ts",
+  "src/lib/serve.ts",
+  "test/decision-summary.test.ts",
+];
+
+test("bodyContradictsDiff: #1249's own shape — 'no code change was needed for X' names X, not the diff, and stays silent", () => {
+  const body =
+    "it already forwards FeedbackEntry wholesale, so no code change was needed for this task's " +
+    "tests to prove the console-rendering path";
+  assert.deepEqual(
+    bodyContradictsDiff(body, PR_1249_DIFF_FILES),
+    [],
+    "the claim's subject is 'this task's tests' (via panel-graph.ts), not this PR's own diff",
+  );
+});
+
+test("bodyContradictsDiff: 'no code change was needed to <do something>' stays silent the same way, with 'to' in place of 'for'", () => {
+  const body = "no code change was needed to make the existing forwarding work.";
+  assert.deepEqual(bodyContradictsDiff(body, PR_1249_DIFF_FILES), []);
+});
+
+test("bodyContradictsDiff: the three genuinely-false bodies still fire after the W1-T328 narrowing", () => {
+  // (1) plan-only with src changes
+  const planOnly = bodyContradictsDiff("plan-only change.", ["src/lib/widget.ts"]);
+  assert.ok(planOnly.some((c) => c.claim === "plan-only"), "plan-only must still fire over a src/ diff");
+  // (2) data-only with src changes
+  const dataOnly = bodyContradictsDiff("data-only: no code.", EIGHT_FILE_REVERT_DIFF_FILES);
+  assert.ok(dataOnly.length > 0, "data-only must still fire over a src/+test/ diff");
+  // (3) a plain 'no src/' claim over a diff containing src/ files
+  const noSrc = bodyContradictsDiff("Plan-only edit. No src/ changes here.", ["src/lib/widget.ts", "plan/tasks.yaml"]);
+  assert.ok(
+    noSrc.some((c) => /no src\//i.test(c.claim)),
+    "a plain 'no src/ changes' claim must still fire over a diff that touches src/",
+  );
+});
+
+test("bodyContradictsDiff: the accepted silences stay silent after the W1-T328 narrowing", () => {
+  assert.deepEqual(
+    bodyContradictsDiff("This change introduces no code duplication anywhere.", ["src/lib/a.ts"]),
+    [],
+    "'no code duplication' — the head noun is not a changeset word — unaffected by the need-clause narrowing",
+  );
+  assert.deepEqual(
+    bodyContradictsDiff("No code was changed.", ["src/lib/a.ts"]),
+    [],
+    "'no code was changed' — the word right after 'no code' is 'was', not a changeset word — unaffected",
+  );
+});
+
+test("bodyContradictsDiff: 'no code changes were needed' WITHOUT a 'for'/'to' tail still fires — the narrowing is scoped to the observed construction only", () => {
+  const hits = bodyContradictsDiff("No code changes were needed.", ["src/lib/widget.ts"]);
+  assert.ok(hits.length > 0, "a bare 'were needed.' with no named subject elsewhere is still a direct claim about the diff");
+});
+
 test("bodyContradictsDiff: over-stripping cannot invent a match for a file not in the diff", () => {
   // The guard on the guard. looksLikePath still demands a `.` or `/`, and a stripped token that is
   // genuinely absent must still contradict — otherwise this cleanup becomes a way past the gate.

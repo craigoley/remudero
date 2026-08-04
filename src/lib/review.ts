@@ -2102,11 +2102,35 @@ export function claimsChangesetContext(report: string, index: number): boolean {
  * Scoped to the SAME LINE (`[ \t]*`, never `\s*`): a word on the next line belongs to another
  * sentence and says nothing about this claim — the same reasoning that keeps
  * {@link claimsChangesetContext} inside its own sentence.
+ *
+ * THE HEAD NOUN CAN STILL BE MADE THE SUBJECT OF A NEED-CLAUSE NAMING SOMETHING ELSE (W1-T328).
+ * The head-noun test above is one word wide: it sees "no code CHANGE" and stops, so it cannot
+ * tell "no code changes" (a direct claim about the diff) from "no code change WAS NEEDED FOR
+ * <something else>" (a clause whose grammatical subject is "no code change" but whose REASON —
+ * the thing actually being talked about — is the "for X"/"to X" that follows). LIVE FIXTURE
+ * (#1249, W1-T313): "it already forwards FeedbackEntry wholesale, so no code change was needed
+ * for this task's tests to prove the console-rendering path" — a remark about panel-graph.ts,
+ * which was NOT in the diff — fired because "change" is a changeset word, over a diff of
+ * `src/lib/escalate.ts`, `src/lib/feedback.ts`, `src/lib/serve.ts`, `test/decision-summary.test.ts`
+ * (none of them panel-graph.ts). Reproduced against the pre-fix function: FIRES. The PR needed a
+ * human to hand-edit the sentence before remudero-review would pass it — exactly the costlier
+ * direction this file's own doc calls out: "A missed contradiction costs one bad PR body; a false
+ * positive strands a correct PR indefinitely."
+ *
+ * NARROWLY: only a "was/is/were/are needed/required/necessary FOR/TO …" tail flips the verdict to
+ * silence — not bare "was needed." alone, which still reads as a direct (if oddly phrased) claim
+ * about the diff. This is deliberately narrow, not a general parse: it targets the one construction
+ * observed to misfire, and nothing wider.
  */
+const NEED_CLAUSE_RE = /^\s+(?:was|is|were|are)\s+(?:needed|required|necessary)\s+(?:for|to)\b/i;
+
 export function noClaimIsAboutChangeset(rest: string): boolean {
   const next = /^[ \t]*([A-Za-z][A-Za-z0-9_-]*)/.exec(rest);
   if (!next) return true; // punctuation, end of line, or end of input — the token IS the claim
-  return CHANGESET_CONTEXT_RE.test(next[1]);
+  if (!CHANGESET_CONTEXT_RE.test(next[1])) return false;
+  // The head noun alone says "about the changeset" — but see whether it is itself the subject of a
+  // NEED-clause naming something else (the W1-T328 fixture above) before trusting that.
+  return !NEED_CLAUSE_RE.test(rest.slice(next[0].length));
 }
 
 /** Does `file` fall under the claimed-absent `path` (an exact file, or a directory prefix)? */
