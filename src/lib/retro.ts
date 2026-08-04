@@ -23,6 +23,7 @@ import { appendLedger, type LedgerLine } from "./ledger.js";
 import type { Lifecycle, LearningEntry } from "./learnings.js";
 import { resolveMountForClass, type Mounts } from "./mounts.js";
 import type { Task } from "./plan.js";
+import { findExportDefinition, isExportReachable } from "./reachability.js";
 import { utcWeekWindowMs } from "./sweep.js";
 import { DEFAULT_TASK_CLASS } from "./task-class.js";
 import { lintTask, type LintOpts, type LintViolation } from "./task-linter.js";
@@ -2535,5 +2536,80 @@ export function renderOrientation(input: OrientationInput): string {
     "## Never-do invariants (MASTER-PLAN §12 Standing rules — extracted verbatim; §12 is authoritative)",
     "",
     ...invariantLines,
+  ].join("\n");
+}
+
+// ── SHIPS-UNWIRED advisory floor — RETRO-TIME CONSUMER (W1-T322, design (iii)) ────────────
+
+/** A backtick-quoted, function-shaped identifier a NET STATE sentence names — the retro-time
+ *  mirror of review-time's `unwired_export` reason. DELIBERATELY NARROW (requires an internal
+ *  case-transition or underscore): a bare CLI word (`` `rmd` ``, `` `main` ``) or a config key
+ *  reads identically to a real export's name from punctuation alone, and this scan's own
+ *  "silence, not a verdict" discipline (see {@link "./reachability.js".findExportDefinition}'s
+ *  doc) means anything this pattern can't tell apart from ordinary prose is simply never
+ *  considered — never a false claim, just nothing said about it. */
+const BACKTICK_SYMBOL_RE = /`([a-zA-Z_][a-zA-Z0-9_]*)`/g;
+
+function looksLikeSymbolName(name: string): boolean {
+  return /[a-z][A-Z]|_/.test(name);
+}
+
+/** A short, human-legible window of `text` around `index` — collapsed whitespace, trimmed to
+ *  roughly one sentence's worth either side, never the whole (often paragraph-length) NET STATE
+ *  bullet. */
+function snippetAround(text: string, index: number, radius = 140): string {
+  const start = Math.max(0, index - radius);
+  const end = Math.min(text.length, index + radius);
+  return text.slice(start, end).replace(/\s+/g, " ").trim();
+}
+
+/** One MASTER-PLAN NET STATE capability sentence naming a symbol {@link
+ *  "./reachability.js".isExportReachable} reports as unreached — the retro-time `net_state_claim`
+ *  reason code (see lib/review.ts's `ReviewVerdict.unwiredAdvisories` doc for the full set). */
+export interface NetStateCapabilityAdvisory {
+  symbol: string;
+  file: string;
+  snippet: string;
+}
+
+/**
+ * THE RETRO-TIME CONSUMER (design (iii)): the SAME reachability scan the review-time consumer
+ * uses (lib/review.ts's `unwired_export` reason), run over MASTER-PLAN's own NET STATE prose
+ * instead of a diff. A claim naming a symbol with no caller gets an advisory line in the retro
+ * report — REPORTS, never REWRITES (the doc pass is read-only by design; editing MASTER-PLAN.md
+ * is explicitly NOT IN SCOPE per this task's own design doc). `netStateText` is the NET STATE
+ * section's own text (the caller slices it out of MASTER-PLAN.md — this function has no opinion
+ * on where that section starts/ends); `checkoutDir` is the live tree the claim is checked
+ * against (retro runs against the CURRENT mainline checkout, never a PR diff).
+ */
+export function netStateCapabilityAdvisories(netStateText: string, checkoutDir: string): NetStateCapabilityAdvisory[] {
+  const out: NetStateCapabilityAdvisory[] = [];
+  const seen = new Set<string>();
+  for (const m of netStateText.matchAll(BACKTICK_SYMBOL_RE)) {
+    const symbol = m[1];
+    if (!looksLikeSymbolName(symbol) || seen.has(symbol)) continue;
+    seen.add(symbol);
+    const file = findExportDefinition(symbol, checkoutDir);
+    if (!file) continue; // not a real export — silence, not a verdict
+    if (isExportReachable(symbol, file, checkoutDir)) continue;
+    out.push({ symbol, file, snippet: snippetAround(netStateText, m.index ?? 0) });
+  }
+  return out;
+}
+
+/** Render {@link netStateCapabilityAdvisories}'s findings as a retro-report section — printed
+ *  alongside the plan-health sweep, never blocking anything (this whole floor is advisory-only
+ *  by design; see lib/review.ts's `ReviewVerdict.unwiredAdvisories` doc for the full rationale). */
+export function renderNetStateUnwiredAdvisories(advisories: NetStateCapabilityAdvisory[]): string {
+  if (advisories.length === 0) {
+    return "## SHIPS-UNWIRED — NET STATE capability claims\n\nNo NET STATE claim names a symbol this scan finds unreached.";
+  }
+  return [
+    "## SHIPS-UNWIRED — NET STATE capability claims (ADVISORY ONLY, W1-T322)",
+    "",
+    "Each line below names a MASTER-PLAN NET STATE capability sentence whose named symbol has no",
+    "caller this scan can find — never a verdict on the claim's truth, only a pointer to re-check it:",
+    "",
+    ...advisories.map((a) => `- \`${a.symbol}\` (${a.file}) — "${a.snippet}"`),
   ].join("\n");
 }

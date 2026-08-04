@@ -256,10 +256,12 @@ import {
   evaluateRetroTrigger,
   gatherRuns,
   loadMastMapping,
+  netStateCapabilityAdvisories,
   parseLedger,
   probeGithubThrottle,
   recordFollowupHarvest,
   renderGather,
+  renderNetStateUnwiredAdvisories,
   resolveMarkerForGather,
   saveMarker,
   shippedSince,
@@ -1479,6 +1481,16 @@ export function scopeGuardOutOfScopeFiles(
   return diffFiles.filter((f) => !declared.has(f));
 }
 
+/**
+ * W1-T322: task ids currently OPEN in `plan` (status not `merged`/`done`) — the set a report's
+ * `SHIPS-UNWIRED: <id>` marker is checked against before it can honour an unreached export (see
+ * {@link "./lib/review.js".ReviewEvidence.openTaskIds}'s doc). PURE — no I/O, reads only the
+ * already-loaded `plan` every real caller already has in scope by the time it reviews a PR.
+ */
+export function openTaskIdsFromPlan(plan: Plan): Set<string> {
+  return new Set(plan.tasks.filter((t) => t.status !== "merged" && t.status !== "done").map((t) => t.id));
+}
+
 interface GateOutcome {
   merged: boolean;
   reason: string;
@@ -1596,7 +1608,9 @@ async function runReview(args: {
   owner: string;
   repo: string;
   prUrl: string;
-  task: { id: string; acceptance?: AcceptanceCriterion[] };
+  /** `files` (W1-T322): the task's declared scope — see {@link "./lib/review.js".ReviewEvidence.taskDeclaredFiles}'s
+   *  doc. Every real caller already passes the full plan `Task`, so this widens for free. */
+  task: { id: string; acceptance?: AcceptanceCriterion[]; files?: string[] };
   report: string;
   settingsFile: string;
   config: Config;
@@ -1659,6 +1673,13 @@ async function runReview(args: {
    * line for this call already is.
    */
   runId: string;
+  /**
+   * W1-T322: task ids currently OPEN in the loaded plan — see {@link
+   * "./lib/review.js".ReviewEvidence.openTaskIds}'s doc. Optional (fail-closed default: `undefined`,
+   * meaning no `SHIPS-UNWIRED:` marker can ever be honoured) so every existing caller/fixture that
+   * predates this task needs no update.
+   */
+  openTaskIds?: ReadonlySet<string>;
 }): Promise<ReviewVerdict & { headSha: string; reviewerOutcome: string }> {
   const { owner, repo, prUrl, task, report, log, say } = args;
   const view = ghJson(["pr", "view", prUrl, "--json", "headRefOid"]) as { headRefOid: string };
@@ -1745,6 +1766,9 @@ async function runReview(args: {
     semantic,
     headCheckoutDir: args.headCheckoutDir,
     baseCheckoutDir: args.baseCheckoutDir,
+    // W1-T322: advisory-only inputs — see ReviewEvidence's own doc for both fields.
+    taskDeclaredFiles: task.files,
+    openTaskIds: args.openTaskIds,
   });
 
   // W1-T178 (verdict stability): a re-review of an UNCHANGED head sha whose
@@ -1891,6 +1915,22 @@ async function runReview(args: {
     // criteria declared). See ReviewVerdict.rewardHackingGap's doc.
     reward_hacking_gap: verdict.rewardHackingGap,
   });
+  // W1-T322 (SHIPS-UNWIRED advisory floor): ADVISORY ONLY — ledgered here, never consulted by the
+  // verdict/arm decision above or below. One `review.unwired_advisory` line per reason code (see
+  // {@link "./lib/review.js".UnwiredAdvisory}'s doc), naming the PR (taskId + headSha + prUrl), the
+  // reason code and the offending symbols — this is the dataset W1-T323's measurement window reads.
+  // NOT added to DECISION_RELEVANT_LEDGER_STEPS (lib/ledger.ts), deliberately: nothing DECIDES
+  // anything off this step yet — see design (v), which defers registration to W1-T323's own change,
+  // the same rotation discipline `run.start`/other analytical-only steps already follow.
+  for (const advisory of verdict.unwiredAdvisories ?? []) {
+    log("review.unwired_advisory", {
+      pr_url: prUrl,
+      head_sha: headSha,
+      reason_code: advisory.reasonCode,
+      symbols: advisory.symbols,
+      detail: advisory.detail,
+    });
+  }
   // impl-BL — THE MIRROR OF THE WITHDRAWAL ABOVE, AND IT MUST STAY BELOW THE `log("review.posted")`
   // CALL DIRECTLY ABOVE THIS ONE. That line is the evidence W1-T230's gate requires: `armAutoMerge`
   // → `priorReviewVerdictFromLedger` → `decideArmFromLedgerVerdict` looks for a `review.posted`
@@ -2637,7 +2677,9 @@ export function detectReviewFalseBlock(check: {
 export async function runFixRung(opts: {
   taskId: string;
   runId: string;
-  task: { id: string; title: string; acceptance?: AcceptanceCriterion[] };
+  /** `files` (W1-T322) — see runReview's own `task` doc; every real caller already passes the
+   *  full plan `Task`, so this widens for free. */
+  task: { id: string; title: string; acceptance?: AcceptanceCriterion[]; files?: string[] };
   prUrl: string;
   branch: string;
   worktreePath: string;
@@ -2651,6 +2693,9 @@ export async function runFixRung(opts: {
   /** The blocked_review verdict that triggered this rung. */
   initialReview: ReviewVerdict & { headSha: string; reviewerOutcome: string };
   reviewBase: { owner: string; repo: string; headCheckoutDir: string; reviewerMount: Mount };
+  /** W1-T322: threaded straight through to every re-review this rung runs — see runReview's own
+   *  `openTaskIds` doc. Optional; absent behaves exactly as every pre-W1-T322 caller already does. */
+  openTaskIds?: ReadonlySet<string>;
   /**
    * W1-T78: an operator's answer to a clarification question, if this is a
    * RE-DISPATCH — carried verbatim on EVERY strike's prompt as an added
@@ -3212,6 +3257,7 @@ export async function runFixRung(opts: {
       headCheckoutDir: opts.reviewBase.headCheckoutDir,
       ledgerPath: deps.ledgerPath,
       runId: opts.runId,
+      openTaskIds: opts.openTaskIds,
     });
     // W1-T100: a real review verdict now exists for THIS head — the CURRENT
     // strike stays review-mode from here. W1-T138: this can still flip back
@@ -4042,6 +4088,9 @@ async function runTask(
     plan = synced.plan;
   }
   const task = selectTask(plan, taskId);
+  // W1-T322: computed once per run off the SAME plan already loaded above — the SHIPS-UNWIRED
+  // marker verification set both `runReviewFn` and `runFixRung` below consult.
+  const openTaskIds = openTaskIdsFromPlan(plan);
 
   // ── Merge-state is DERIVED FROM GITHUB, never from the yaml `status:` field
   // (MASTER-PLAN v2.1). Project the whole plan against GitHub, cache it to a
@@ -4900,6 +4949,7 @@ async function runTask(
       headCheckoutDir: worktreePath,
       ledgerPath,
       runId,
+      openTaskIds,
     });
 
     // ── THE blocked_review FIX RUNG (W1-T76, absorbs P21; §3's fixing state).
@@ -4926,6 +4976,7 @@ async function runTask(
         strikeCap: fixStrikeCap(config),
         initialReview: review,
         reviewBase: { owner, repo: task.repo, headCheckoutDir: worktreePath, reviewerMount },
+        openTaskIds,
         deps: {
           spawn,
           waitForCiGreen,
@@ -5589,6 +5640,12 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   let criteria: AcceptanceCriterion[] = [];
   let source = "NONE (fail closed — nothing to judge is never a pass)";
   const taskId = reviewTaskIdFromBody(body);
+  // W1-T322: the same plan lookup this block already does for `criteria` also carries the
+  // task's declared scope + the plan's open-id set — advisory-only inputs judgeReview needs.
+  // Both stay `undefined` on ANY read/parse failure (see the catch below), exactly like
+  // `criteria` degrading to the body's Acceptance: block — never a reason to fail the review.
+  let taskDeclaredFiles: string[] | undefined;
+  let openTaskIds: Set<string> | undefined;
   if (taskId) {
     try {
       const reviewPlanPath = join(repoRoot, "plan", "tasks.yaml");
@@ -5605,6 +5662,8 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
           `plan/tasks.yaml task ${taskId} (${criteria.length} criteria) — ` +
           `read: ${formatReadIdentity(reviewPlanPath, reviewPlanRaw)}`;
       }
+      taskDeclaredFiles = t?.files;
+      openTaskIds = openTaskIdsFromPlan(plan);
     } catch {
       // A bad/absent plan is not the reviewer's concern; fall through to the body.
     }
@@ -5651,7 +5710,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
       prUrl: view.url,
       // impl-BG: excludes dependabot heads from the post-verdict arm (the dep-review lane owns those).
       headRefName: view.headRefName,
-      task: { id: taskId ?? `PR-${view.number}`, acceptance: criteria },
+      task: { id: taskId ?? `PR-${view.number}`, acceptance: criteria, files: taskDeclaredFiles },
       report: body, // the PR body is the manual author's REPORT (proofs are pasted here)
       settingsFile: "",
       config,
@@ -5680,6 +5739,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
       materializationFailure: materialized.failure,
       ledgerPath,
       runId,
+      openTaskIds,
     }),
   );
 
@@ -7042,7 +7102,26 @@ async function retroCommand(
   // failure mode is the rubber-stamp queue, so it rides EVERY retro (cumulative, all-time,
   // never scoped to `sinceTs` — a fatigue signal needs the whole history to be trustworthy).
   // lib/retro.ts itself stays untouched; this is a standalone section concatenated on.
-  const report = [renderGather(gather), "", renderRatifyTelemetry(ratifyTelemetry(parseLedger(ledgerNdjson)))].join("\n");
+  // W1-T322 (design (iii)): the RETRO-TIME consumer of the SAME reachability scan the review
+  // path uses — MASTER-PLAN's own NET STATE section, re-checked against the CURRENT mainline
+  // checkout (this repo's own working tree, `repoRoot` — never a PR diff). Best-effort + silent
+  // on failure, the SAME non-fatal discipline `openProposalLines`/`openTaskTitles` above already
+  // follow: a read/scan hiccup degrades to "nothing to advise" rather than aborting the retro.
+  let netStateAdvisorySection = "";
+  try {
+    const masterPlanPath = join(repoRoot, "MASTER-PLAN.md");
+    const masterPlanMd = existsSync(masterPlanPath) ? readFileSync(masterPlanPath, "utf8") : "";
+    const netStateStart = masterPlanMd.indexOf("\n## NET STATE");
+    if (netStateStart !== -1) {
+      const nextHeading = masterPlanMd.indexOf("\n## ", netStateStart + 1);
+      const netStateText = masterPlanMd.slice(netStateStart, nextHeading === -1 ? undefined : nextHeading);
+      const advisories = netStateCapabilityAdvisories(netStateText, repoRoot);
+      netStateAdvisorySection = `\n\n${renderNetStateUnwiredAdvisories(advisories)}`;
+    }
+  } catch (e) {
+    console.error(`### [retro] net_state_unwired_advisories — scan failed, degrading to none: ${String((e as Error)?.message ?? e)}`);
+  }
+  const report = [renderGather(gather), "", renderRatifyTelemetry(ratifyTelemetry(parseLedger(ledgerNdjson)))].join("\n") + netStateAdvisorySection;
 
   if (dryRun) {
     console.log(report);
@@ -11109,6 +11188,9 @@ export function buildSweepEffects(
             pr,
             reviewBase: { owner, repo, headCheckoutDir: worktreePath, reviewerMount },
           }),
+          // W1-T322: same plan this sweep already loaded (`fixRungTaskFor(plan, …)` above) — see
+          // runTask's own `openTaskIds` comment for what this set is and why it's computed once.
+          openTaskIds: openTaskIdsFromPlan(plan),
           deps: {
             // Fresh-spawn adapter: an empty resumeSessionId (cold PR) becomes a
             // fresh spawn rather than an attempt to resume a session that doesn't exist.
