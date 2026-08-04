@@ -380,11 +380,13 @@ import {
   DEFAULT_SWEEP_POLICY,
   armOutcomeArmed,
   checkCostGovernor,
+  checkQueueGovernor,
   checksStateFromRollup,
   deriveDayCostUsd,
   deriveDisposition,
   isBlockedCi,
   logCostGovernorDeferral,
+  logQueueGovernorDeferral,
   renderClarificationQuestion,
   renderSweepSummary,
   runCreditBackfill,
@@ -403,6 +405,7 @@ import {
   type LiveStateResult,
   type MergeConflictEvidence,
   type OpenPrView,
+  type QueueGovernorResult,
   type StrikeAttempt,
   type SweepDeps,
   type SweepPolicy,
@@ -7875,6 +7878,42 @@ function costGovernorGateFor(ledgerPath: string, runId: string): () => CostGover
 }
 
 /**
+ * W1-T321: THE WIP CEILING'S caller — {@link checkQueueGovernor} (sweep.ts, built for W1-T121's
+ * 23-open-PR incident) is a pure predicate that was built, tested (test/queue-governor.test.ts),
+ * and never invoked from any dispatch path; this supplies that call site for `drainCommand`'s and
+ * `daemonCommand`'s `DrainDeps`/`DaemonDeps.checkQueueGovernor` fields (drain.ts/daemon.ts).
+ * Mirrors {@link costGovernorGateFor} immediately above: `openPrCount` is a caller-supplied
+ * closure (drainCommand's own `openPrCount`, already re-derived fresh from the SAME
+ * `refreshMerged` projection each call for the W1-T172 lanes budget; daemonCommand's own
+ * equivalent, added by this task) rather than a ledger read — the governor's input is the LIVE
+ * open-PR count, never a ledgered figure.
+ *
+ * A deferred consultation LEDGERS ITSELF (`logQueueGovernorDeferral`, sweep.ts) before returning,
+ * so drain.ts/daemon.ts never need `ledgerPath`/`runId`/`appendLedger` just to report it — the
+ * SAME "the callback does the escalation, the caller only logs its own generic step" split
+ * `costGovernorGateFor` already uses.
+ *
+ * `policy` defaults to `DEFAULT_SWEEP_POLICY` deliberately — the limit VALUE is already a policy
+ * row (`plan/policy.yaml`'s `wipLimit`, origin `lifted:src/lib/sweep.ts:257`); retuning it is a
+ * separate ruling on separate evidence, out of this task's scope. Never called from `runSweep` or
+ * any of its deps (arm/dispatchFix/close/escalate) — see `checkQueueGovernor`'s own asymmetry note
+ * for why drainage of already-open PRs must never be gated by WIP.
+ */
+function queueGovernorGateFor(
+  openPrCount: () => number,
+  ledgerPath: string,
+  runId: string,
+  policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
+): () => QueueGovernorResult | undefined {
+  return () => {
+    const result = checkQueueGovernor(openPrCount(), policy);
+    if (!result.deferred) return undefined;
+    logQueueGovernorDeferral(result, appendLedger, ledgerPath, runId);
+    return result;
+  };
+}
+
+/**
  * `rmd drain [--until <id>] [--max <n>] [--dry-run]` — drain the DAG through the
  * EXISTING run-task path. Thin + deterministic: next-runnable is the plan.ts DAG
  * logic over GitHub-derived status; it STOPS ON ANY BLOCK (v1); it is headroom-aware
@@ -8159,6 +8198,10 @@ async function drainCommand(
         // fresh per-consultation re-derivation of today's ledgered spend, mirroring the streak/
         // lifetime breakers' restart-survives freshness contract — see costGovernorGateFor's doc.
         checkCostGovernor: costGovernorGateFor(ledgerPath, runId),
+        // WIP CEILING (W1-T321 wires checkQueueGovernor's own predicate, sweep.ts, the W1-T121
+        // 23-open-PR incident): the SAME `openPrCount` closure the W1-T172 lanes budget already
+        // reads (below), never a second GitHub read path — see queueGovernorGateFor's doc.
+        checkQueueGovernor: queueGovernorGateFor(openPrCount, ledgerPath, runId),
         runOne: (taskId) => runTask(taskId, { planPath, config, allowStale }),
         readUsage: () => readUsageSnapshot(config),
         checkStop: () => stopDetail(config.root),
@@ -8521,6 +8564,13 @@ export async function daemonCommand(
     const p = lastProj?.get(id);
     return p?.prState === "OPEN" ? p.prNumber : undefined;
   };
+  // W1-T321: the queue governor's live input, mirroring drainCommand's identical `openPrCount` —
+  // OPEN entries in the SAME projection `refreshMerged` just read, never a second GitHub read path.
+  const openPrCount = () => {
+    let n = 0;
+    for (const p of lastProj?.values() ?? []) if (p.prState === "OPEN") n++;
+    return n;
+  };
   // W1-T206: see breakerGateFor's doc — ONE cache for this whole `rmd daemon` invocation.
   const breakerGate = breakerGateFor(ledgerPath);
   // W1-T119: same freshness contract as `isOpenPr` — the SAME projection
@@ -8695,6 +8745,10 @@ export async function daemonCommand(
         // fresh per-consultation re-derivation of today's ledgered spend, mirroring the streak/
         // lifetime breakers' restart-survives freshness contract — see costGovernorGateFor's doc.
         checkCostGovernor: costGovernorGateFor(ledgerPath, runId),
+        // WIP CEILING (W1-T321 wires checkQueueGovernor's own predicate, sweep.ts, the W1-T121
+        // 23-open-PR incident): the SAME `openPrCount` closure just defined above, never a second
+        // GitHub read path — see queueGovernorGateFor's doc.
+        checkQueueGovernor: queueGovernorGateFor(openPrCount, ledgerPath, runId),
         runOne: (taskId) =>
           runTask(taskId, {
             planPath: target.planPath,

@@ -18,7 +18,7 @@
 import type { RunResult } from "./run-result.js";
 import { headroomExhausted, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
-import type { CostGovernorResult } from "./sweep.js";
+import type { CostGovernorResult, QueueGovernorResult } from "./sweep.js";
 import { unmetDependencies, type Plan, type Task } from "./plan.js";
 import { partitionByFileOverlap, serializedLedgerPayload } from "./dispatch-overlap.js";
 
@@ -370,7 +370,18 @@ export type StopReason =
    * invocation, or the daemon's own idle heartbeat) re-derives the day's spend fresh and resumes
    * once it drops back under the ceiling.
    */
-  | "cost_governor_deferred";
+  | "cost_governor_deferred"
+  /**
+   * W1-T321 (wiring `checkQueueGovernor`, sweep.ts, the W1-T121 23-open-PR incident): the open-PR
+   * WIP count is at/over `policy.wipLimit` — new dispatch is held back this pass, distinct from
+   * `cost_governor_deferred` above (a spend ceiling) and from the lanes path's own PRE-EXISTING
+   * `laneDispatchBudget` throttle (W1-T172, `dispatch.wip_deferred`, which only SIZES a still-open
+   * lanes pass and never stops one outright). Drainage (sweep/heal/arm/merge, at any depth) is
+   * unaffected, only NEW dispatch stops — see `checkQueueGovernor`'s own asymmetry note. A future
+   * pass (the next `rmd drain` invocation, or the daemon's own idle heartbeat) re-derives the open
+   * count fresh and resumes once it drops back under the limit.
+   */
+  | "queue_governor_deferred";
 
 export interface DrainOpts {
   until?: string;
@@ -762,6 +773,26 @@ export interface DrainDeps {
    */
   checkCostGovernor?: () => CostGovernorResult | undefined;
   /**
+   * W1-T321 (wiring `checkQueueGovernor`, sweep.ts, the W1-T121 23-open-PR incident): THE WIP
+   * CEILING, re-derived from the current open-PR count each call — same freshness contract as
+   * `checkCostGovernor` immediately above. Like the cost governor and UNLIKE
+   * `isCircuitTripped`/`isLifetimeCapExceeded` below, this is NOT task-specific — one answer per
+   * pass — so it is consulted directly in the loop below, in the SAME position as
+   * `checkCostGovernor`, before `nextRunnable` is ever called. A defined return means "defer — do
+   * not open a new run this pass", carrying the observed open count/limit that produced it;
+   * `undefined` means proceed normally. STOPS the pass outright (this is a bounded, one-shot
+   * command, the same shape `cost_governor_deferred` already uses) — drainage of already-open PRs
+   * never runs through this loop at all. Distinct from `openPrCount` below: that field feeds the
+   * lanes path's own PRE-EXISTING `laneDispatchBudget` throttle (W1-T172), which only SIZES a
+   * still-open lanes pass; this field is the hard governor gate, consulted on BOTH the single-lane
+   * and lanes loops. The real wiring (run-task.ts) also LEDGERS the deferral itself
+   * (`logQueueGovernorDeferral`) before returning, so this loop never needs `ledgerPath`/`runId` to
+   * report it. Optional — omitted, dispatch behaves exactly as before this governor existed. Never
+   * consulted from `runSweep` or any of its deps (arm/dispatchFix/close/escalate) — see
+   * `checkQueueGovernor`'s own asymmetry note for why drainage must never be gated by it.
+   */
+  checkQueueGovernor?: () => QueueGovernorResult | undefined;
+  /**
    * W1-T119: true when a task's own GitHub read is INDETERMINATE (a genuine
    * read failure), re-derived from the SAME projection `refreshMerged` just
    * built — same freshness contract as `isOpenPr`/`isCircuitTripped`. Optional
@@ -931,6 +962,24 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
       return summary(
         "cost_governor_deferred",
         `$${costGoverned.observedDayCostUsd.toFixed(2)} spent today at/over the $${costGoverned.ceilingUsd.toFixed(2)} daily ceiling — new dispatch deferred`,
+      );
+    }
+
+    // QUEUE GOVERNOR / WIP CEILING (W1-T321, wiring `checkQueueGovernor`/sweep.ts, the W1-T121
+    // 23-open-PR incident): a global gate, not a per-task one, so it is checked directly here, in
+    // the SAME position as the cost governor just above, before `nextRunnable` is ever called:
+    // at/over the WIP limit, NO task this tick would change the outcome. STOPS the pass outright
+    // (the same bounded, one-shot shape `cost_governor_deferred` already uses) — drainage of
+    // already-open PRs never runs through this loop at all.
+    const queueGoverned = deps.checkQueueGovernor?.();
+    if (queueGoverned) {
+      log("drain.queue_governor", {
+        observed_open_count: queueGoverned.observedOpenCount,
+        wip_limit: queueGoverned.wipLimit,
+      });
+      return summary(
+        "queue_governor_deferred",
+        `${queueGoverned.observedOpenCount} open PRs at/over the ${queueGoverned.wipLimit} WIP limit — new dispatch deferred`,
       );
     }
 
@@ -1167,6 +1216,21 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
       return summary(
         "cost_governor_deferred",
         `$${costGoverned.observedDayCostUsd.toFixed(2)} spent today at/over the $${costGoverned.ceilingUsd.toFixed(2)} daily ceiling — new dispatch deferred`,
+      );
+    }
+
+    // QUEUE GOVERNOR / WIP CEILING (W1-T321) — see the single-lane loop's identical branch above.
+    // Distinct from `openPrCount`/`laneDispatchBudget` just below, which only SIZES this still-open
+    // lanes pass — this governor STOPS the pass outright.
+    const queueGoverned = deps.checkQueueGovernor?.();
+    if (queueGoverned) {
+      log("drain.queue_governor", {
+        observed_open_count: queueGoverned.observedOpenCount,
+        wip_limit: queueGoverned.wipLimit,
+      });
+      return summary(
+        "queue_governor_deferred",
+        `${queueGoverned.observedOpenCount} open PRs at/over the ${queueGoverned.wipLimit} WIP limit — new dispatch deferred`,
       );
     }
 
