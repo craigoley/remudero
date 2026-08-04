@@ -358,6 +358,19 @@ export interface SweepPolicy {
  * source still carried a literal. W1-T330 collects `dailyCostCeilingUsd` the same way — a
  * RELOCATION, not a retune (the value is unchanged at whatever plan/policy.yaml's row carries).
  * `pendingCeilingMinutes` is NOT a collected constant for this task and stays exactly as it was.
+ *
+ * W1-T331 — `dailyCostCeilingUsd` ON THIS OBJECT IS FROZEN AT IMPORT, DELIBERATELY UNCHANGED BY
+ * THAT TASK: `loadDefaultPolicy()` below runs once, at module load, and this const is never
+ * rebuilt afterward — a RUNNING daemon holds whatever value was current at its own boot no
+ * matter how `plan/policy.yaml` changes later (W1-T330 put the ceiling IN the policy row; it did
+ * not make a live process re-read that row). `checkCostGovernor`'s own doc, immediately below,
+ * covers who reads the ceiling LIVE instead: `run-task.ts`'s `costGovernorGateFor` resolves a
+ * per-consultation `dailyCostCeilingUsd` argument when the daemon's tick loop supplies one
+ * (`daemon.ts`'s `runDaemon`, via the injected `reloadDailyCostCeilingUsd` dep, snapshotted once
+ * per tick), falling back to THIS frozen default only when no live value is available (e.g. the
+ * bounded `rmd drain` one-shot path, or a caller that never wires the reload dep at all). This
+ * default therefore stays exactly what its name says — the SHIPPED default / degraded-read
+ * fallback — never the live daemon's operative ceiling.
  */
 const POLICY_SWEEP = loadDefaultPolicy().values.sweep;
 export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
@@ -2586,6 +2599,15 @@ export interface CostGovernorResult {
  * `policy.dailyCostCeilingUsd` is the ONLY thing that moves this decision.
  * Never call this from `runSweep` or any of its deps (arm/dispatchFix/close/
  * escalate) — see the asymmetry note above.
+ *
+ * W1-T331: THIS FUNCTION WAS NEVER THE FROZEN PART — `policy` is already a per-call argument,
+ * so any caller that builds/resolves its own `SweepPolicy` per consultation already gets a live
+ * decision. The bug W1-T330 alone left open was that every real caller omitted `policy` and
+ * silently took the default parameter, which resolves to {@link DEFAULT_SWEEP_POLICY} — a
+ * const captured once at import (see that constant's own doc). `run-task.ts`'s
+ * `costGovernorGateFor` is the fix: it builds an explicit `SweepPolicy` from a per-consultation
+ * ceiling (sourced live by `daemon.ts`'s `runDaemon`, once per tick) and passes it here instead
+ * of relying on the default.
  */
 export function checkCostGovernor(
   dayCostUsd: number,

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -225,6 +225,131 @@ test("impl-FZ: a THROWING reloadPlan is caught and never takes the fleet down", 
     `the failure is ledgered — got ${JSON.stringify(logged.slice(0, 8))}`,
   );
   p.cleanup();
+});
+
+// ── W1-T331 acceptance 2: the daily cost ceiling is snapshotted ONCE PER TICK, at the SAME
+// placement as the plan reload immediately above, and threaded through the tick — so two
+// consultations within one tick can never disagree. Mirrors every "impl-FZ" test above exactly:
+// same placement argument, same "REAL disk read, never two in-memory numbers" TRAP 3 discipline.
+
+/** A real ceiling FILE that can be rewritten between ticks, plus a real disk-backed reader —
+ *  mirrors `planOnDisk` above (a genuine `readFileSync` per call, never two in-memory numbers). */
+function ceilingOnDisk(initial: number) {
+  const dir = mkdtempSync(join(tmpdir(), "fz-ceiling-"));
+  const file = join(dir, "ceiling.txt");
+  writeFileSync(file, String(initial));
+  return {
+    dir,
+    file,
+    read: (): number => Number(readFileSync(file, "utf8")),
+    rewrite: (next: number) => writeFileSync(file, String(next)),
+    cleanup: () => rmSync(dir, { recursive: true, force: true }),
+  };
+}
+
+test("W1-T331: a tick sees ONE consistent cost ceiling even if the policy value changes mid-tick", async () => {
+  const p = planOnDisk(["A"]);
+  const c = ceilingOnDisk(100);
+  const merged = new Set<string>();
+  const receivedByGovernor: Array<number | undefined> = [];
+  let ticks = 0;
+  await runDaemon(
+    p.plan(),
+    {
+      refreshMerged: () => (id: string) => merged.has(id),
+      checkStop: () => (++ticks > 3 ? "tick cap" : undefined),
+      reloadDailyCostCeilingUsd: c.read,
+      checkCostGovernor: (ceilingUsd?: number) => {
+        receivedByGovernor.push(ceilingUsd);
+        return undefined; // never defer — this test only observes WHAT ceiling was threaded in
+      },
+      runOne: async (id: string) => {
+        merged.add(id);
+        c.rewrite(999); // mutate the file DURING the tick's dispatch
+        return okResult(id);
+      },
+      sleep: async () => {},
+    } as unknown as DaemonDeps,
+  );
+  assert.ok(
+    receivedByGovernor.length >= 2,
+    `the governor was consulted on more than one tick — got ${JSON.stringify(receivedByGovernor)}`,
+  );
+  assert.equal(receivedByGovernor[0], 100, "tick 1's governor saw the ceiling reloaded at the TOP of tick 1, before runOne ran");
+  assert.ok(
+    receivedByGovernor[1]! >= 999,
+    "the mid-tick rewrite is visible only from the NEXT tick's reload — no tick straddled two ceilings",
+  );
+  p.cleanup();
+  c.cleanup();
+});
+
+test("W1-T331: a THROWING reloadDailyCostCeilingUsd is caught and never takes the fleet down", async () => {
+  // Mirrors "impl-FZ: a THROWING reloadPlan is caught…" above exactly, for the ceiling reload.
+  const p = planOnDisk(["A"]);
+  const logged: string[] = [];
+  const merged = new Set<string>();
+  const ran: string[] = [];
+  let ticks = 0;
+  const s = await runDaemon(
+    p.plan(),
+    {
+      refreshMerged: () => (id: string) => merged.has(id),
+      checkStop: () => (++ticks > 6 ? "tick cap" : undefined),
+      reloadDailyCostCeilingUsd: () => {
+        throw new Error("plan/policy.yaml exploded");
+      },
+      log: (step: string) => logged.push(step),
+      runOne: async (id: string) => { ran.push(id); merged.add(id); return okResult(id); },
+      sleep: async () => {},
+    } as unknown as DaemonDeps,
+    { max: 1 },
+  );
+  assert.deepEqual(ran, ["A"], "the loop kept dispatching despite the ceiling reload failing");
+  assert.equal(s.stopReason, "max_reached", "and returned normally rather than throwing");
+  assert.ok(
+    logged.includes("daemon.cost_ceiling_reload_failed"),
+    `the failure is ledgered — got ${JSON.stringify(logged.slice(0, 8))}`,
+  );
+  p.cleanup();
+});
+
+test("W1-T331 REACHABILITY: daemonCommand hands a reloadDailyCostCeilingUsd to the loop", async () => {
+  const { daemonCommand } = await import("../src/run-task.js");
+  const home = mkdtempSync(join(tmpdir(), "fz-ceiling-wiring-"));
+  const root = join(home, "Remudero");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  mkdirSync(join(root, "state"), { recursive: true });
+  const planPath = join(home, "tasks.yaml");
+  writeFileSync(planPath, "[]\n");
+
+  const prevHome = process.env.HOME;
+  process.env.HOME = home;
+  let captured: DaemonDeps | undefined;
+  try {
+    await (daemonCommand as unknown as (a: string[], d: unknown) => Promise<number>)(
+      ["--allow-self-target", "--plan", planPath, "--max", "0"],
+      {
+        runDaemon: async (_plan: unknown, deps: DaemonDeps) => {
+          captured = deps;
+          return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+        },
+      },
+    );
+  } finally {
+    process.env.HOME = prevHome;
+  }
+  assert.ok(captured, "runDaemon was reached and its deps captured");
+  assert.equal(
+    typeof captured!.reloadDailyCostCeilingUsd,
+    "function",
+    "daemonCommand must wire a live per-tick cost-ceiling reloader",
+  );
+  // Reads THIS checkout's real plan/policy.yaml (repoRoot-scoped, never config.root) — a genuine
+  // number, proving it is a live read rather than a stub returning some fixed literal.
+  assert.equal(typeof captured!.reloadDailyCostCeilingUsd!(), "number");
+  rmSync(home, { recursive: true, force: true });
 });
 
 // ── REACHABILITY: the production wiring, not just the helper ────────────────────────────

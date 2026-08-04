@@ -8154,20 +8154,50 @@ function breakerGateFor(ledgerPath: string): {
  * SAME "the callback does the escalation, the caller only logs its own generic step" split
  * `onCircuitBreak`/`onLifetimeCapExceeded` already use.
  *
- * `policy` defaults to `DEFAULT_SWEEP_POLICY` deliberately — the ceiling VALUE and moving it into
- * `plan/policy.yaml` are both explicitly out of this task's scope; retuning it is a separate
- * ruling on separate evidence. Never called from `runSweep` or any of its deps (arm/dispatchFix/
- * close/escalate) — see `checkCostGovernor`'s own doc for why drainage of in-flight work must
- * never be gated by spend.
+ * W1-T331: the returned closure now takes an OPTIONAL `dailyCostCeilingUsd` — the per-consultation
+ * LIVE ceiling, when the caller has one. `daemonCommand` (below) wires `DaemonDeps`'s
+ * `reloadDailyCostCeilingUsd` so `runDaemon` supplies this argument every tick, snapshotted fresh
+ * from `plan/policy.yaml` (see that dep's own doc, daemon.ts). `drainCommand` supplies none — a
+ * bounded one-shot pass, out of this task's scope (see plan/tasks.d, "NOT IN SCOPE") — so its
+ * calls fall through to `DEFAULT_SWEEP_POLICY`'s frozen-at-import ceiling exactly as before this
+ * task, unchanged behaviour, not a regression. `undefined` is also what a caller gets on the
+ * VERY FIRST daemon tick before any reload has run, or if `reloadDailyCostCeilingUsd` itself is
+ * ever omitted — the fallback is the shipped default, never an unbounded one, so an unwired
+ * caller degrades to the pre-task ceiling rather than to "no ceiling at all."
  */
-function costGovernorGateFor(ledgerPath: string, runId: string): () => CostGovernorResult | undefined {
-  return () => {
+function costGovernorGateFor(
+  ledgerPath: string,
+  runId: string,
+): (dailyCostCeilingUsd?: number) => CostGovernorResult | undefined {
+  return (dailyCostCeilingUsd) => {
     const dayCostUsd = deriveDayCostUsd(readLedgerLines(ledgerPath), Date.now());
-    const result = checkCostGovernor(dayCostUsd);
+    const policy = dailyCostCeilingUsd === undefined ? DEFAULT_SWEEP_POLICY : { ...DEFAULT_SWEEP_POLICY, dailyCostCeilingUsd };
+    const result = checkCostGovernor(dayCostUsd, policy);
     if (!result.deferred) return undefined;
     logCostGovernorDeferral(result, appendLedger, ledgerPath, runId);
     return result;
   };
+}
+
+/**
+ * W1-T331: builds `DaemonDeps.reloadDailyCostCeilingUsd` — the daemon's LIVE, per-tick read of
+ * `plan/policy.yaml`'s `sweep.dailyCostCeilingUsd`, which `runDaemon` snapshots once at the top
+ * of each tick and threads into {@link costGovernorGateFor}'s returned closure (see both docs).
+ *
+ * `deps.policy` is the SAME injection seam `retroTriggerCheck`/`autoTriageCheck` already offer
+ * (test/config-reader-seams.test.ts's structural check, recon-EJ: `repoRoot` is a MODULE-LEVEL
+ * const no test can redirect, so an unseamed `loadPolicy(policyPath(repoRoot))` call is
+ * UNREDIRECTABLE — a test could only ever pin the shipped default, never prove a policy edit
+ * actually moves the decision). Production passes none, so the daemon reads the checked-in
+ * `plan/policy.yaml` via the SAME `loadPolicy(policyPath(repoRoot))` construction those two
+ * already use; a test injects a fixture `Policy` to prove the live ceiling changes with it.
+ *
+ * A throw (unreadable/malformed `policy.yaml`) is deliberately left uncaught here — `runDaemon`'s
+ * own reload step (daemon.ts) catches it and holds the last known-good ceiling; catching it here
+ * too would just be a second, redundant discipline.
+ */
+export function dailyCostCeilingReloader(deps: { policy?: Policy } = {}): () => number {
+  return () => (deps.policy ?? loadPolicy(policyPath(repoRoot))).values.sweep.dailyCostCeilingUsd;
 }
 
 /**
@@ -9061,6 +9091,15 @@ export async function daemonCommand(
         // fresh per-consultation re-derivation of today's ledgered spend, mirroring the streak/
         // lifetime breakers' restart-survives freshness contract — see costGovernorGateFor's doc.
         checkCostGovernor: costGovernorGateFor(ledgerPath, runId),
+        // W1-T331: THE LIVE CEILING costGovernorGateFor's own doc, immediately above, describes —
+        // re-reads the SAME repoRoot-scoped plan/policy.yaml the boot-time `policy` (line ~8754,
+        // loaded ONCE for pollIntervalMs/the headroom curve) also reads, but THIS one is called
+        // AGAIN on every tick (runDaemon's own placement, daemon.ts) rather than reused from that
+        // boot-frozen binding — reusing it here would just move the identical frozen-at-import
+        // defect from sweep.ts's module scope to this function's closure scope. See
+        // dailyCostCeilingReloader's own doc for why production wires it with no `deps.policy`
+        // override (only a test does).
+        reloadDailyCostCeilingUsd: dailyCostCeilingReloader(),
         // WIP CEILING (W1-T321 wires checkQueueGovernor's own predicate, sweep.ts, the W1-T121
         // 23-open-PR incident): the SAME `openPrCount` closure just defined above, never a second
         // GitHub read path — see queueGovernorGateFor's doc.
