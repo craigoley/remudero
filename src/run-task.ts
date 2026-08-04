@@ -379,9 +379,12 @@ import {
 import {
   DEFAULT_SWEEP_POLICY,
   armOutcomeArmed,
+  checkCostGovernor,
   checksStateFromRollup,
+  deriveDayCostUsd,
   deriveDisposition,
   isBlockedCi,
+  logCostGovernorDeferral,
   renderClarificationQuestion,
   renderSweepSummary,
   runCreditBackfill,
@@ -392,6 +395,7 @@ import {
   toQuestionEntry,
   type CiFailure,
   type ClarificationQuestion,
+  type CostGovernorResult,
   type CreditCandidate,
   type EscalationReconcileCandidate,
   type EscalationReconcileSummary,
@@ -7799,6 +7803,37 @@ function breakerGateFor(ledgerPath: string): {
 }
 
 /**
+ * W1-T317: THE DAILY COST CEILING'S caller — {@link checkCostGovernor} (sweep.ts) is a pure
+ * predicate that was built, tested, and never invoked from any dispatch path; this supplies that
+ * call site for `drainCommand`'s and `daemonCommand`'s `DrainDeps`/`DaemonDeps.checkCostGovernor`
+ * fields (drain.ts/daemon.ts). Re-derives the day's ledgered spend fresh on EVERY consultation —
+ * the same "survives a process restart" freshness contract {@link breakerGateFor} gives the
+ * streak/lifetime breakers — rather than a function on that SAME cache, because the governor is
+ * NOT task-specific (one answer per tick, never keyed by taskId), so it needs none of that cache's
+ * per-(taskId, tick) memoization.
+ *
+ * A deferred consultation LEDGERS ITSELF (`logCostGovernorDeferral`, sweep.ts) before returning,
+ * so drain.ts/daemon.ts never need `ledgerPath`/`runId`/`appendLedger` just to report it — the
+ * SAME "the callback does the escalation, the caller only logs its own generic step" split
+ * `onCircuitBreak`/`onLifetimeCapExceeded` already use.
+ *
+ * `policy` defaults to `DEFAULT_SWEEP_POLICY` deliberately — the ceiling VALUE and moving it into
+ * `plan/policy.yaml` are both explicitly out of this task's scope; retuning it is a separate
+ * ruling on separate evidence. Never called from `runSweep` or any of its deps (arm/dispatchFix/
+ * close/escalate) — see `checkCostGovernor`'s own doc for why drainage of in-flight work must
+ * never be gated by spend.
+ */
+function costGovernorGateFor(ledgerPath: string, runId: string): () => CostGovernorResult | undefined {
+  return () => {
+    const dayCostUsd = deriveDayCostUsd(readLedgerLines(ledgerPath), Date.now());
+    const result = checkCostGovernor(dayCostUsd);
+    if (!result.deferred) return undefined;
+    logCostGovernorDeferral(result, appendLedger, ledgerPath, runId);
+    return result;
+  };
+}
+
+/**
  * `rmd drain [--until <id>] [--max <n>] [--dry-run]` — drain the DAG through the
  * EXISTING run-task path. Thin + deterministic: next-runnable is the plan.ts DAG
  * logic over GitHub-derived status; it STOPS ON ANY BLOCK (v1); it is headroom-aware
@@ -8079,6 +8114,10 @@ async function drainCommand(
         // never a second cache/read path — see breakerGateFor's doc.
         isLifetimeCapExceeded: (taskId) => breakerGate.isLifetimeCapExceeded(taskId),
         onLifetimeCapExceeded: (t) => escalateLifetimeCapExceeded(t, { owner, repo, ledgerPath, runId }),
+        // DAILY COST CEILING (W1-T317 wires checkCostGovernor's own predicate, sweep.ts): a
+        // fresh per-consultation re-derivation of today's ledgered spend, mirroring the streak/
+        // lifetime breakers' restart-survives freshness contract — see costGovernorGateFor's doc.
+        checkCostGovernor: costGovernorGateFor(ledgerPath, runId),
         runOne: (taskId) => runTask(taskId, { planPath, config, allowStale }),
         readUsage: () => readUsageSnapshot(config),
         checkStop: () => stopDetail(config.root),
@@ -8611,6 +8650,10 @@ export async function daemonCommand(
         // never a second cache/read path — see breakerGateFor's doc.
         isLifetimeCapExceeded: (taskId) => breakerGate.isLifetimeCapExceeded(taskId),
         onLifetimeCapExceeded: (t) => escalateLifetimeCapExceeded(t, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
+        // DAILY COST CEILING (W1-T317 wires checkCostGovernor's own predicate, sweep.ts): a
+        // fresh per-consultation re-derivation of today's ledgered spend, mirroring the streak/
+        // lifetime breakers' restart-survives freshness contract — see costGovernorGateFor's doc.
+        checkCostGovernor: costGovernorGateFor(ledgerPath, runId),
         runOne: (taskId) =>
           runTask(taskId, {
             planPath: target.planPath,

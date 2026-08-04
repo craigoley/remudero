@@ -18,6 +18,7 @@
 import type { RunResult } from "./run-result.js";
 import { headroomExhausted, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
+import type { CostGovernorResult } from "./sweep.js";
 import { unmetDependencies, type Plan, type Task } from "./plan.js";
 import { partitionByFileOverlap, serializedLedgerPayload } from "./dispatch-overlap.js";
 
@@ -360,7 +361,16 @@ export type StopReason =
    * not explicitly `false` — the 2026-07-28 governor ruling makes an
    * unreadable read ABSENT TELEMETRY, never a hold, on a host that opted out.
    */
-  | "headroom_degraded";
+  | "headroom_degraded"
+  /**
+   * W1-T317: the DAILY COST CEILING (`checkCostGovernor`, sweep.ts) reports the day's ledgered
+   * spend at/over `policy.dailyCostCeilingUsd` — new dispatch is held back this pass, distinct
+   * from `headroom_exhausted` (an API-usage window) and from `blocked` (a real task failure):
+   * drainage is unaffected, only NEW dispatch stops. A future pass (the next `rmd drain`
+   * invocation, or the daemon's own idle heartbeat) re-derives the day's spend fresh and resumes
+   * once it drops back under the ceiling.
+   */
+  | "cost_governor_deferred";
 
 export interface DrainOpts {
   until?: string;
@@ -736,6 +746,22 @@ export interface DrainDeps {
    */
   onLifetimeCapExceeded?: (task: Task) => void;
   /**
+   * W1-T317 (wiring `checkCostGovernor`, sweep.ts): THE DAILY COST CEILING, re-derived from the
+   * ledger each call — same freshness contract as `isCircuitTripped`/`isLifetimeCapExceeded`
+   * above. UNLIKE those, this is NOT task-specific — one answer per tick, never keyed by taskId
+   * — so it is consulted directly in the loop below, alongside `checkStop`/`checkPause`/headroom,
+   * rather than threaded through `NextRunnableOpts`'s per-task chain. A defined return means
+   * "defer — do not open a new run this pass", carrying the observed day-cost/ceiling that
+   * produced it; `undefined` means proceed normally. The real wiring (run-task.ts) also LEDGERS
+   * the deferral itself (`logCostGovernorDeferral`) before returning, so this loop never needs
+   * `ledgerPath`/`runId` to report it. Optional — omitted, dispatch behaves exactly as before
+   * this governor existed. Never consulted from `runSweep` or any of its deps (arm/dispatchFix/
+   * close/escalate) — drainage of already-open PRs is a separate code path this predicate is
+   * never wired into (see `checkCostGovernor`'s own doc: "stranding in-flight work to save money
+   * is a worse failure than the spend itself").
+   */
+  checkCostGovernor?: () => CostGovernorResult | undefined;
+  /**
    * W1-T119: true when a task's own GitHub read is INDETERMINATE (a genuine
    * read failure), re-derived from the SAME projection `refreshMerged` just
    * built — same freshness contract as `isOpenPr`/`isCircuitTripped`. Optional
@@ -888,6 +914,24 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
         // reset the counter so a later enable starts from a clean slate.
         consecutiveUnreadable = 0;
       }
+    }
+
+    // DAILY COST CEILING (W1-T317, wiring `checkCostGovernor`/sweep.ts): a global gate, not a
+    // per-task one, so — unlike `isCircuitTripped`/`isLifetimeCapExceeded` below — it is checked
+    // directly here, in the SAME position as headroom just above, before `nextRunnable` is ever
+    // called: at/over the day's ceiling, NO task this tick would change the outcome. STOPS the
+    // pass outright (this is a bounded, one-shot command, the same shape `headroom_exhausted`
+    // already uses) — drainage of already-open PRs never runs through this loop at all.
+    const costGoverned = deps.checkCostGovernor?.();
+    if (costGoverned) {
+      log("drain.cost_governor", {
+        observed_day_cost_usd: costGoverned.observedDayCostUsd,
+        daily_cost_ceiling_usd: costGoverned.ceilingUsd,
+      });
+      return summary(
+        "cost_governor_deferred",
+        `$${costGoverned.observedDayCostUsd.toFixed(2)} spent today at/over the $${costGoverned.ceilingUsd.toFixed(2)} daily ceiling — new dispatch deferred`,
+      );
     }
 
     const skipOpts: NextRunnableOpts = {
@@ -1111,6 +1155,19 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
         // GOVERNOR DISABLED — see the single-lane loop's identical branch.
         consecutiveUnreadable = 0;
       }
+    }
+
+    // DAILY COST CEILING (W1-T317) — see the single-lane loop's identical branch above.
+    const costGoverned = deps.checkCostGovernor?.();
+    if (costGoverned) {
+      log("drain.cost_governor", {
+        observed_day_cost_usd: costGoverned.observedDayCostUsd,
+        daily_cost_ceiling_usd: costGoverned.ceilingUsd,
+      });
+      return summary(
+        "cost_governor_deferred",
+        `$${costGoverned.observedDayCostUsd.toFixed(2)} spent today at/over the $${costGoverned.ceilingUsd.toFixed(2)} daily ceiling — new dispatch deferred`,
+      );
     }
 
     const openCount = deps.openPrCount?.();

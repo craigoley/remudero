@@ -43,6 +43,7 @@ import {
 } from "./drain.js";
 import { HEADROOM_LIMIT_PCT, RESET_UNKNOWN, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
+import type { CostGovernorResult } from "./sweep.js";
 import { assertRunnable, PlanError, type MergedResolver, type Plan, type Task } from "./plan.js";
 import type { StatusProjection } from "./status.js";
 // Type-only (erased at build, same discipline as StatusProjection above) — W1-T160's
@@ -583,6 +584,25 @@ export interface DaemonDeps {
    * `onCircuitBreak`'s legibility contract, so this exclusion is never a silent skip.
    */
   onLifetimeCapExceeded?: (task: Task) => void;
+  /**
+   * W1-T317 (wiring `checkCostGovernor`, sweep.ts): THE DAILY COST CEILING, re-derived from the
+   * ledger each call — same freshness contract as `isCircuitTripped`/`isLifetimeCapExceeded`
+   * above. UNLIKE those, this is NOT task-specific — one answer per tick, never keyed by taskId
+   * — so it is consulted directly in the loop below, alongside `readUsage`'s headroom block,
+   * rather than threaded through `nextRunnable`'s per-task chain. A defined return means "defer
+   * — do not open a new run this tick", carrying the observed day-cost/ceiling that produced it;
+   * `undefined` means proceed normally. UNLIKE drain.ts's bounded pass (which stops outright on
+   * a deferral), this daemon is PERSISTENT: a deferral is an in-process idle heartbeat, the same
+   * shape headroom's own `enforcingIdle` branch already uses, so the loop resumes on its own once
+   * the observed day-cost drops back under the ceiling (spend ages out of the window, or the UTC
+   * calendar day rolls over). The real wiring (run-task.ts) also LEDGERS the deferral itself
+   * (`logCostGovernorDeferral`) before returning, so this loop never needs `ledgerPath`/`runId`
+   * to report it. Optional — omitted, dispatch behaves exactly as before this governor existed.
+   * Never consulted from `deps.sweep`/`deps.sweepLight` — drainage of already-open PRs is a
+   * separate code path this predicate is never wired into (see `checkCostGovernor`'s own doc:
+   * "stranding in-flight work to save money is a worse failure than the spend itself").
+   */
+  checkCostGovernor?: () => CostGovernorResult | undefined;
   /**
    * W1-T119: true when a task's own GitHub read is INDETERMINATE (a genuine
    * read failure — rate-limited, network error, auth failure — rather than a
@@ -1592,6 +1612,27 @@ export async function runDaemon(
         // so a later enable starts from a clean slate.
         consecutiveUnreadable = 0;
       }
+    }
+
+    // DAILY COST CEILING (W1-T317, wiring `checkCostGovernor`/sweep.ts): a global gate, not a
+    // per-task one, so — unlike `isCircuitTripped`/`isLifetimeCapExceeded` below — it is checked
+    // directly here, right after headroom and before the retro trigger (a fired retro spawns a
+    // real, budget-costing run too — same reasoning the retro trigger's own comment already gives
+    // for running after headroom). UNLIKE drain.ts's bounded pass (which stops outright), this
+    // daemon is PERSISTENT: a deferral is an in-process idle heartbeat, identical in shape to
+    // headroom's own `enforcingIdle` branch just above, so the loop resumes automatically once
+    // the observed day-cost drops back under the ceiling.
+    const costGoverned = deps.checkCostGovernor?.();
+    if (costGoverned) {
+      ticks++;
+      log("daemon.cost_governor", {
+        tick: ticks,
+        observed_day_cost_usd: costGoverned.observedDayCostUsd,
+        daily_cost_ceiling_usd: costGoverned.ceilingUsd,
+        poll_interval_ms: pollIntervalMs,
+      });
+      await deps.sleep(pollIntervalMs);
+      continue;
     }
 
     // RETRO CADENCE TRIGGER (W1-T160): evaluated once per tick, AFTER headroom (an
