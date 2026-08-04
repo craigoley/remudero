@@ -1,0 +1,29 @@
+id: fb-1785846532609-8f1e76
+ts: 2026-08-04T12:28:52.609Z
+raw: "A TASK DECLARING plan/policy.yaml MUST ALSO DECLARE src/lib/policy.ts —
+  third scope-guard refusal of the same shape in two days. W1-T320 (run
+  W1-T320-1785844552391, refused 2026-08-04T12:22:16Z) declared [src/lib/tmp.ts,
+  src/run-task.ts, plan/policy.yaml, test/temp-sweep-backstop.test.ts] and was
+  refused on out_of_scope [src/lib/policy.ts, test/policy.test.ts,
+  test/tmp.test.ts]. The worker had reached implement.done; the run was
+  discarded and re-dispatches. Prior instances: W1-T309 (declared only its
+  source file while two proofs named a new test) and W1-T312. THE SPECIFIC RULE
+  IS MECHANICAL, not a judgement: a bounded policy row cannot be added without
+  the loader that parses and bounds it, so plan/policy.yaml in files: implies
+  src/lib/policy.ts and its test. That is checkable at FILING time by lint-plan,
+  before a dispatch spends anything. Note the shard's own design note reasoned
+  explicitly about the scope guard — 'the test file is DECLARED in files:, so
+  neither the scope guard nor proof-scope can refuse the...' — and still missed
+  the loader, so a prose convention did not prevent it. RECON: establish whether
+  other implication pairs exist and are as clean (a task touching a workflow
+  file and its parity checker; a task adding a ledger step and the retention
+  set). Then say whether a files:-implication rule is worth adding to lint-plan
+  as a WARN, and what its false-positive rate would be against the current 352
+  tasks. Falsifying check: if fewer than three such pairs exist, this is a
+  one-off authoring gap and a rule would be over-engineering for a hand-fix that
+  costs one line."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null
