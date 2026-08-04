@@ -172,3 +172,47 @@ test("daemon.tmp_sweep: nothing qualified (kept: 0) logs a null oldest-kept age,
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+// ── the wrapper's CATCH arm — diff-coverage flagged run-task.ts's `catch (e)` as uncovered ──
+//
+// `runTmpSweepRung`'s own doc says `sweepStaleTempDirs` "itself never throws", which is why the
+// catch is DEFENSIVE and why every other test in this file lands on the happy path — leaving both
+// of its lines with zero covering tests. The seam that reaches it without inventing a new one:
+// `TempSweepOpts.now` is injectable, and `sweepStaleTempDirs` calls `now()` OUTSIDE its two inner
+// try blocks (after the stat guard), so a throwing clock propagates out of the callee and into
+// this wrapper. That is exactly the "something unexpected escaped the callee" case the catch
+// promises to absorb, driven through the REAL function rather than a stubbed one.
+
+test("runTmpSweepRung ABSORBS a throw escaping sweepStaleTempDirs — it ledgers daemon.tmp_sweep with the error and returns an empty summary, so a sweep hiccup never escapes into the composite around it", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-backstop-throw-"));
+  try {
+    // A real, stat-able rmd-owned dir, so the loop reaches the `now()` call rather than
+    // short-circuiting on the prefix or the stat guard.
+    seedDir(root, `${RMD_TMP_PREFIX}throwcase`, 60_000);
+    const { log, lines } = collectingLog();
+
+    const summary = runTmpSweepRung(log, {
+      root,
+      maxAgeMs: 1,
+      now: () => {
+        throw new Error("clock exploded");
+      },
+    });
+
+    // DEGRADED, NOT THROWN: the wrapper returned normally.
+    assert.deepEqual(summary, { removed: [], kept: [], oldestKeptAgeMs: null });
+
+    const swept = lines.filter((l) => l.step === "daemon.tmp_sweep");
+    assert.equal(swept.length, 1, "exactly one daemon.tmp_sweep line, carrying the failure");
+    assert.match(
+      String(swept[0].extra.error),
+      /clock exploded/,
+      "the ledger line names the real cause rather than a generic failure",
+    );
+    // FALSIFIER: on the success path this line carries removed/kept counts and never an error —
+    // asserting the error field is present is what distinguishes the catch arm from the try.
+    assert.equal(swept[0].extra.removed, undefined, "the error line is the catch arm's, not the success arm's");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
