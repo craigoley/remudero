@@ -773,22 +773,65 @@ interface RollupEntry {
  * no PR. The build/retro WORKER paths avoid this by opening the PR from inside the
  * worktree (their own cwd); the harness paths must pass the cwd explicitly. Pure so
  * a unit test can assert the cwd without spawning gh.
+ *
+ * W1-T327 (THE TITLE): `title`, appended LAST and optional so none of the four
+ * existing positional call sites shifts. When a caller has one, it is emitted as an
+ * explicit `--title` ALONGSIDE `--fill` — `gh pr create --help` documents that an
+ * explicit `--title` takes precedence over `--fill`'s autofill while `--fill` still
+ * supplies the body, so this is additive, never a second title-computation path.
+ * Every real call site passes the SAME string the commit itself used (the shaped
+ * header for triage/plan, the worktree's actual last-commit subject for
+ * implement/retro — see `lastCommitSubject`) — never a re-derivation, so the title
+ * and the commit cannot drift apart.
+ * DECISION (design point iii): when no title is available, this falls back to
+ * `--fill` ALONE, exactly today's behavior — never a refusal. By the time this
+ * builder runs the branch is typically already pushed, so refusing here would
+ * strand it with no PR, the same orphan-branch failure this doc comment already
+ * records for the cwd bug above; a `--fill`-derived title is a pre-existing,
+ * narrower risk (a red commitlint check, not a lost run) that this task's four
+ * updated call sites eliminate in the common case without introducing a new,
+ * worse failure mode in the rare one.
  */
 export function ghPrCreateFillCommand(
   worktreePath: string,
   owner: string,
   repo: string,
   branch: string,
+  title?: string,
 ): { command: "gh"; args: string[]; options: { cwd: string; encoding: "utf8" } } {
   // LIVE-WRITE GUARD at the BUILDER, not at each of its four executors: this function
   // exists only to produce a `gh pr create` argv, so refusing here covers every call
   // site at once and cannot be bypassed by a new one.
   assertLiveWriteAllowed("gh-pr-create", `opening a PR against ${owner}/${repo}`);
+  const args = ["pr", "create", "--repo", `${owner}/${repo}`, "--base", "main", "--head", branch];
+  if (title && title.trim().length > 0) {
+    args.push("--title", title.trim());
+  }
+  args.push("--fill");
   return {
     command: "gh",
-    args: ["pr", "create", "--repo", `${owner}/${repo}`, "--base", "main", "--head", branch, "--fill"],
+    args,
     options: { cwd: worktreePath, encoding: "utf8" },
   };
+}
+
+/**
+ * The subject line of the worktree's actual last commit — read back from git, never
+ * re-derived — for the two `ghPrCreateFillCommand` call sites (implement, retro)
+ * where a worker LLM authored the commit and no harness-computed subject variable
+ * exists to pass instead. Returns undefined (never throws) on any git failure, which
+ * is exactly the "no title available" case {@link ghPrCreateFillCommand}'s own doc
+ * comment decides: the caller then falls back to `--fill` alone.
+ */
+export function lastCommitSubject(worktreePath: string): string | undefined {
+  try {
+    const subject = execFileSync("git", ["-C", worktreePath, "log", "-1", "--format=%s"], {
+      encoding: "utf8",
+    }).trim();
+    return subject.length > 0 ? subject : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -4838,7 +4881,7 @@ async function runTask(
       gitPushRunBranch(worktreePath);
     }
     if (!prUrl) {
-      const prCreate = ghPrCreateFillCommand(worktreePath, owner, task.repo, branch);
+      const prCreate = ghPrCreateFillCommand(worktreePath, owner, task.repo, branch, lastCommitSubject(worktreePath));
       const out = execFileSync(prCreate.command, prCreate.args, prCreate.options);
       prUrl = out.match(/https:\/\/github\.com\/[^\s]+\/pull\/\d+/)?.[0];
     }
@@ -7385,7 +7428,7 @@ async function retroCommand(
         worktreeRemove(repoDir, worktreePath);
         return 1;
       }
-      const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch);
+      const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, lastCommitSubject(worktreePath));
       const out = execFileSync(prCreate.command, prCreate.args, prCreate.options);
       prUrl = out.match(/https:\/\/github\.com\/[^\s]+\/pull\/\d+/)?.[0];
     }
@@ -12540,7 +12583,9 @@ async function triageCommandLocked(
     execFileSync("git", ["-C", worktreePath, "commit", "-m", commitMessage], { stdio: "inherit" });
     gitPushRunBranch(worktreePath);
 
-    const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch);
+    // The title is the SAME header string that just went into the commit, split off
+    // its first line — never a second computation (W1-T327 design point ii).
+    const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, commitMessage.split("\n")[0]);
     const out = execFileSync(prCreate.command, prCreate.args, prCreate.options);
     const prUrl = out.match(/https:\/\/github\.com\/[^\s]+\/pull\/\d+/)?.[0];
     if (!prUrl) {
@@ -12850,7 +12895,9 @@ export async function planCommand(
     applyPlanProposalCommit(worktreePath, commitMessage);
     gitPushRunBranch(worktreePath);
 
-    const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch);
+    // The title is the SAME header string that just went into the commit, split off
+    // its first line — never a second computation (W1-T327 design point ii).
+    const prCreate = ghPrCreateFillCommand(worktreePath, owner, repo, branch, commitMessage.split("\n")[0]);
     const out = execFileSync(prCreate.command, prCreate.args, prCreate.options);
     const prUrl = out.match(/https:\/\/github\.com\/[^\s]+\/pull\/\d+/)?.[0];
     if (!prUrl) {
