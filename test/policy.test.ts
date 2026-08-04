@@ -84,6 +84,7 @@ function goodRaw(): Record<string, unknown> {
       wipLimit: { value: 10, origin: "lifted:src/lib/sweep.ts:257 (DEFAULT_SWEEP_POLICY.wipLimit)", min: 1, max: 50 },
       tmpMaxAgeMs: { value: 3_600_000, origin: "net-new", min: 60_000, max: 86_400_000 },
       dispatchLanes: { value: 2, origin: "lifted:src/lib/sweep.ts:359 (DEFAULT_SWEEP_POLICY.dispatchLanes)", min: 1, max: 4 },
+      dailyCostCeilingUsd: { value: 500, origin: "lifted:src/lib/sweep.ts:365 (DEFAULT_SWEEP_POLICY.dailyCostCeilingUsd)", min: 100, max: 2500 },
     },
     drain: {
       max: { value: 10, origin: "lifted:src/lib/drain.ts:243 (DEFAULT_MAX)", min: 1, max: 100 },
@@ -133,7 +134,14 @@ test("the SHIPPED plan/policy.yaml loads and lifts the current source values", (
   assert.equal(p.values.pruneGraceMs, 120_000);
   assert.equal(p.values.pollIntervalMs, 60_000);
   assert.equal(p.values.fixStrikeCap, 2);
-  assert.deepEqual(p.values.sweep, { staleDays: 14, strikeCap: 2, wipLimit: 10, tmpMaxAgeMs: 3_600_000, dispatchLanes: 2 });
+  assert.deepEqual(p.values.sweep, {
+    staleDays: 14,
+    strikeCap: 2,
+    wipLimit: 10,
+    tmpMaxAgeMs: 3_600_000,
+    dispatchLanes: 2,
+    dailyCostCeilingUsd: 500,
+  });
   assert.equal(p.values.drain.max, 10);
   assert.deepEqual(p.values.retro, { mergesThreshold: 25, daysThreshold: 7 });
   assert.deepEqual(p.values.headroom.curve, [
@@ -171,6 +179,11 @@ test("every LIFTED policy value equals the SOURCE constant it cites — the drif
   assert.equal(p.sweep.strikeCap, DEFAULT_SWEEP_POLICY.strikeCap, "sweep.strikeCap drifted from sweep.ts's DEFAULT_SWEEP_POLICY");
   assert.equal(p.sweep.wipLimit, DEFAULT_SWEEP_POLICY.wipLimit, "sweep.wipLimit drifted from sweep.ts's DEFAULT_SWEEP_POLICY");
   assert.equal(p.sweep.dispatchLanes, DEFAULT_SWEEP_POLICY.dispatchLanes, "sweep.dispatchLanes drifted from sweep.ts's DEFAULT_SWEEP_POLICY");
+  assert.equal(
+    p.sweep.dailyCostCeilingUsd,
+    DEFAULT_SWEEP_POLICY.dailyCostCeilingUsd,
+    "sweep.dailyCostCeilingUsd drifted from sweep.ts's DEFAULT_SWEEP_POLICY",
+  );
   assert.equal(p.drain.max, DEFAULT_MAX, "drain.max drifted from drain.ts's DEFAULT_MAX");
   assert.equal(
     p.retro.mergesThreshold,
@@ -247,6 +260,14 @@ test("REJECTS sweep.dispatchLanes out of its declared bound, naming its dotted p
   const raw = goodRaw();
   (raw.sweep as Record<string, Record<string, unknown>>).dispatchLanes.value = 999;
   throwsPolicyError(() => validatePolicy(raw), /sweep\.dispatchLanes\.value.*out of its declared bound/);
+});
+
+// W1-T330: sweep.dailyCostCeilingUsd is a bounded row now too (a relocation, not a retune — the
+// falsifier below proves an out-of-bounds edit is REFUSED at load, never silently clamped).
+test("REJECTS sweep.dailyCostCeilingUsd out of its declared bound, naming its dotted path", () => {
+  const raw = goodRaw();
+  (raw.sweep as Record<string, Record<string, unknown>>).dailyCostCeilingUsd.value = 99_999;
+  throwsPolicyError(() => validatePolicy(raw), /sweep\.dailyCostCeilingUsd\.value.*out of its declared bound/);
 });
 
 test("W1-T264 acceptance 4 — a retro threshold outside its declared bound fails validation", () => {

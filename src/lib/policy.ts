@@ -59,6 +59,10 @@ export interface PolicyValues {
     /** W1-T325: the concurrent dispatch-lane count `rmd drain` fills per pass
      *  (W1-T172/P19) — a RELOCATION of the pre-existing source literal, not a retune. */
     dispatchLanes: number;
+    /** W1-T330: the daily spend ceiling (W1-T148 COST GOVERNOR) — see this field's
+     *  plan/policy.yaml row for the incident that made retuning it a plan PR instead of a
+     *  src/ edit + CI + deploy. A RELOCATION of the pre-existing source literal, not a retune. */
+    dailyCostCeilingUsd: number;
   };
   drain: {
     max: number;
@@ -137,6 +141,7 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   "sweep.wipLimit": "lifted",
   "sweep.tmpMaxAgeMs": "net-new",
   "sweep.dispatchLanes": "lifted",
+  "sweep.dailyCostCeilingUsd": "lifted",
   "drain.max": "lifted",
   "autoTriage.enabled": "net-new",
   "autoTriage.minIntervalMinutes": "net-new",
@@ -313,6 +318,7 @@ export function validatePolicy(raw: unknown): Policy {
   const wipLimit = numberField("sweep.wipLimit", sweepRaw.wipLimit, origin);
   const tmpMaxAgeMs = numberField("sweep.tmpMaxAgeMs", sweepRaw.tmpMaxAgeMs, origin);
   const dispatchLanes = numberField("sweep.dispatchLanes", sweepRaw.dispatchLanes, origin);
+  const dailyCostCeilingUsd = numberField("sweep.dailyCostCeilingUsd", sweepRaw.dailyCostCeilingUsd, origin);
 
   const drainRaw = raw.drain;
   if (!isPlainObject(drainRaw)) throw new PolicyError("policy.yaml: 'drain' must be a mapping.");
@@ -359,7 +365,7 @@ export function validatePolicy(raw: unknown): Policy {
       pruneGraceMs,
       pollIntervalMs,
       fixStrikeCap,
-      sweep: { staleDays, strikeCap: sweepStrikeCap, wipLimit, tmpMaxAgeMs, dispatchLanes },
+      sweep: { staleDays, strikeCap: sweepStrikeCap, wipLimit, tmpMaxAgeMs, dispatchLanes, dailyCostCeilingUsd },
       drain: { max: drainMax },
       retro: { mergesThreshold: retroMergesThreshold, daysThreshold: retroDaysThreshold },
       autoTriage,

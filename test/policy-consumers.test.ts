@@ -62,7 +62,7 @@ test("W1-T253: worker.ts's DEFAULT_PRUNE_GRACE_MS reads plan/policy.yaml's prune
   assert.equal(DEFAULT_PRUNE_GRACE_MS, 120_000);
 });
 
-// ── sweep.ts: staleDays / strikeCap / wipLimit / dispatchLanes ─────────────────────────
+// ── sweep.ts: staleDays / strikeCap / wipLimit / dispatchLanes / dailyCostCeilingUsd ────
 
 test("W1-T253: sweep.ts's DEFAULT_SWEEP_POLICY.staleDays/strikeCap/wipLimit read plan/policy.yaml's sweep row, not source literals", () => {
   assert.equal(DEFAULT_SWEEP_POLICY.staleDays, SHIPPED.values.sweep.staleDays);
@@ -78,6 +78,14 @@ test("W1-T253: sweep.ts's DEFAULT_SWEEP_POLICY.staleDays/strikeCap/wipLimit read
 test("W1-T325: sweep.ts's DEFAULT_SWEEP_POLICY.dispatchLanes reads plan/policy.yaml's sweep.dispatchLanes row, not a source literal, and the value is unchanged at 2", () => {
   assert.equal(DEFAULT_SWEEP_POLICY.dispatchLanes, SHIPPED.values.sweep.dispatchLanes);
   assert.equal(DEFAULT_SWEEP_POLICY.dispatchLanes, 2);
+});
+
+// W1-T330: dailyCostCeilingUsd joins its siblings above — a relocation of the pre-existing
+// source literal, not a retune (the value is asserted unchanged at 500 — the figure raised
+// from 150 to 500 on 2026-08-04, the day the cost governor first fired in production).
+test("W1-T330: sweep.ts's DEFAULT_SWEEP_POLICY.dailyCostCeilingUsd reads plan/policy.yaml's sweep.dailyCostCeilingUsd row, not a source literal, and the value is unchanged at 500", () => {
+  assert.equal(DEFAULT_SWEEP_POLICY.dailyCostCeilingUsd, SHIPPED.values.sweep.dailyCostCeilingUsd);
+  assert.equal(DEFAULT_SWEEP_POLICY.dailyCostCeilingUsd, 500);
 });
 
 // ── launchd.ts: ThrottleInterval (net-new — emission-from-policy, not literal-removal) ──
@@ -176,6 +184,7 @@ test("W1-T253 GUARD: no collected operating constant resolves from a source lite
     { site: "sweep.ts strikeCap", actual: DEFAULT_SWEEP_POLICY.strikeCap, expected: SHIPPED.values.sweep.strikeCap },
     { site: "sweep.ts wipLimit", actual: DEFAULT_SWEEP_POLICY.wipLimit, expected: SHIPPED.values.sweep.wipLimit },
     { site: "sweep.ts dispatchLanes", actual: DEFAULT_SWEEP_POLICY.dispatchLanes, expected: SHIPPED.values.sweep.dispatchLanes },
+    { site: "sweep.ts dailyCostCeilingUsd", actual: DEFAULT_SWEEP_POLICY.dailyCostCeilingUsd, expected: SHIPPED.values.sweep.dailyCostCeilingUsd },
     { site: "drain.ts max (fs-free fallback)", actual: DEFAULT_MAX, expected: SHIPPED.values.drain.max },
   ];
   for (const { site, actual, expected } of sites) {
