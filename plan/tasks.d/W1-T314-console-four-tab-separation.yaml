@@ -63,7 +63,7 @@
   origin: feedback#fb-1784770111145-cf7c24
   plan_refs: ["§7"]
   files: [src/lib/serve.ts, test/console-tabs.test.ts, test/setup/open-shell.ts, test/serve.test.ts, test/serve.density-ia.test.ts, test/serve.detail-journey.test.ts, test/serve.find.test.ts, test/serve.first-paint.test.ts, test/serve.live-state.test.ts, test/serve.shell-ux.test.ts, test/serve.write-ack.test.ts]
-  status: blocked
+  status: queued
   # BLOCKED BY THE OPERATOR 2026-08-04, on spend evidence, not on a judgement about the design.
   # Four dispatches produced ZERO commits and no PR, each ending implement.done subtype:success and
   # re-filing the whole task as a followup:
