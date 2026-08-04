@@ -1,0 +1,77 @@
+- id: W1-T331
+  title: "the daily cost ceiling is captured into a module-level const at import, so a running daemon holds its boot-time value however the policy file changes — making it a row is necessary and not sufficient"
+  repo: remudero
+  depends_on: [W1-T330]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 90.00
+  rationale: "RE-DERIVED AT a828750 — every claim below is a grep a reader can reproduce.
+    THE OBSTACLE IS NOT THE MEMO, and getting this wrong is what would waste the whole arc.
+    `loadDefaultPolicy` memoizes into `cachedDefaultPolicy` with NO invalidation path anywhere in src/
+    (grep returns exactly one hit, the assignment itself). But the daemon ALREADY re-reads
+    plan/policy.yaml live: `retroTriggerCheck` and `autoTriageCheck` both call `loadPolicy` fresh and
+    are both wired as per-tick daemon hooks. Measured on this host: `loadPolicy` costs 2.636 ms per
+    call against the real file, versus a 60,000 ms poll interval — 0.004% of a tick, already paid
+    twice. COST IS NOT THE OBSTACLE AND MUST NOT BE CITED AS ONE.
+    THE ACTUAL OBSTACLE is that `DEFAULT_SWEEP_POLICY` is a module-level `const` object built at
+    IMPORT time from `const POLICY_SWEEP = loadDefaultPolicy().values.sweep`. `checkCostGovernor`'s
+    policy parameter defaults to that object. A value captured into a const at import is frozen no
+    matter what the memo or the file does — so W1-T330's row is necessary and NOT SUFFICIENT.
+    WHY THIS IS THE ROOT OF THE CHAIN. Build the override store first and you ship a console that
+    writes a number the running fleet never reads, and the write LOOKS like it worked. That is the
+    'tested, inert' shape this repo has hit repeatedly: a lifetime dispatch cap built and never wired,
+    two governors with no callers, a MASTER-PLAN sentence describing a capability that never existed.
+    THE OBSERVED COST: the governor fired at $152.28 against $150, stopped every dispatch for ~40
+    minutes, and raising the bound took a source edit, a PR, CI and a deploy."
+  design: |
+    MAKE THE VALUE ASKED FOR, NOT REMEMBERED — AND KEEP IT CONSISTENT WITHIN A TICK. These are ONE
+    concern, deliberately: making the ceiling live without a per-tick snapshot ships a known hazard
+    (a dispatch authorised under one ceiling and a later check in the same tick using another), so
+    splitting them would land a defect between two merges.
+    (i) The cost governor must resolve its ceiling through a CALL, not a captured const.
+    `DEFAULT_SWEEP_POLICY` may remain for callers that want the shipped defaults; what must change is
+    that the governor's effective ceiling is resolved per consultation from the loaded policy.
+    (ii) SNAPSHOT ONCE PER TICK, at the top of `runDaemon`, and thread that object through the tick.
+    The placement is not a new idea — it is exactly where the plan reload already sits, for exactly
+    the stated reason: everything below in the iteration sees ONE consistent view, and a file changing
+    mid-tick cannot produce two different answers within the same tick because it is only observed
+    there. REUSE that placement and its argument rather than inventing a second discipline.
+    (iii) THE COST BUDGET IS EXPLICIT: one additional `loadPolicy` per tick. Do not add a read per
+    consultation, and do not add a cache with its own lifetime — a second cache is how the memo
+    problem got here.
+    (iv) A DEGRADED OR UNREADABLE POLICY READ MUST NOT SILENTLY WIDEN THE CEILING. Decide the
+    behaviour, defend it in the PR body, and cover it: falling back to the last good snapshot is
+    defensible; falling back to an unbounded or default-high value is not.
+    (v) FALSIFIER: a test in which the policy file's ceiling changes between two ticks and the
+    governor's decision changes with it — failing if the value is still read from an import-time const.
+    NOT IN SCOPE: the override store (W1-T332); any console write surface; the other four literals in
+    DEFAULT_SWEEP_POLICY; and general memo invalidation, which is a broader change with its own
+    argument and is deliberately NOT the fix here.
+    VERIFY the governor's current default-parameter shape and `runDaemon`'s reload placement FROM
+    SOURCE before editing — distrust this note; symbol names drift.
+  acceptance:
+    - claim: "the cost governor's ceiling is resolved from the loaded policy per consultation rather than from a value captured at import, and a ceiling that changes between ticks changes the decision"
+      proof: "unit test: test/cost-governor.test.ts"
+    - claim: "the policy is snapshotted once per tick and threaded through it, so two reads within one tick cannot disagree"
+      proof: "unit test: test/daemon-plan-freshness.test.ts"
+    - claim: "an unreadable policy read never widens the ceiling — it holds the last good value rather than falling back to a permissive one"
+      proof: "unit test: test/cost-governor.test.ts"
+  risk: high
+  origin: oper#runtime-config-slice-2026-08-04
+  plan_refs: ["§5", "W1-T330"]
+  files: [src/lib/sweep.ts, src/lib/daemon.ts, src/run-task.ts, test/cost-governor.test.ts, test/daemon-plan-freshness.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — a resolution path and a per-tick snapshot, both machine-checkable.
+    risk:high — Rule 19 counts sweep, daemon and run-task as distinct subsystems, and this changes how
+    a DISPATCH-GATING value is read on every tick. Read too eagerly it costs a file read per
+    consultation; read wrongly it widens a spend ceiling silently.
+    budget_usd 90 — the highest in this chain: it is the only task that changes a hot-path read, and
+    the falsifier needs a real two-tick fixture rather than a unit assertion.
+    depends_on W1-T330 IS HARD, not defensive: the governor cannot read the ceiling live FROM THE
+    POLICY FILE until the ceiling is IN the policy file. Verified: `rmd lint-plan` hard-aborts with
+    'depends_on unknown task' if that edge is declared before W1-T330 lands, which is itself proof the
+    plan treats the edge as real.
+    THE CHAIN: W1-T330 (row) -> THIS (live + consistent) -> W1-T332 (override store) -> W1-T333
+    (visibility + audit). Each edge is a genuine precondition, not sequencing preference."

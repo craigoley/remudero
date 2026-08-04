@@ -1,0 +1,89 @@
+- id: W1-T333
+  title: "an override with no surface is a value overridden invisibly — the effective ceiling, its provenance and the who/when/from/to of every console write must be visible and must survive rotation"
+  repo: remudero
+  depends_on: [W1-T332]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 90.00
+  rationale: "THE OPERATOR'S AUDIT REQUIREMENT, verbatim in substance: who/when/from/to, satisfied by
+    a ledgered console write and better than git because it is queryable at runtime.
+    RE-DERIVED AT a828750.
+    WHY VISIBILITY IS THE REQUIREMENT AND NOT A NICETY. This repo's dominant defect class this week
+    was not broken code — it was a gap between what the fleet was believed to do and what it did: a
+    lifetime dispatch cap built, tested and supplied by no caller; two governors with no callers; a
+    MASTER-PLAN sentence describing lanes the daemon has never had; a $150 ceiling that stopped every
+    dispatch for ~40 minutes while the console showed 'nothing in flight' with no reason. An override
+    that changes a spend ceiling and cannot be seen is the same shape, applied to spend.
+    THE SURFACE EXISTS. The GLANCE strip already renders a governor posture via
+    `deriveGovernorPosture`, aged by its own as-of, with `GovernorState` a deliberate TRI-STATE
+    (armed/telemetry-only/unknown) precisely because mapping absent to false 'would report an
+    armed-and-breaching governor as telemetry-only'. That tri-state discipline is the model to reuse.
+    THE RETENTION TRAP IS LIVE AND BIDIRECTIONAL, verified: the membership test is an exact
+    `DECISION_RELEVANT_LEDGER_STEPS.has(parsed.step)`, so a dotted child does NOT inherit its parent's
+    membership; and there are TWO sets with different lifetimes. `RENDER_RELEVANT_LEDGER_STEPS` exists
+    because `daemon.headroom` once rotated away and the ACCOUNT strip read 'unknown' on a healthy
+    fleet. Its own doc warns the decision set is the never-rotated core, so a render-only step added
+    there is kept FOREVER."
+  design: |
+    THREE OBSERVABLES, ONE SURFACE, ONE AUDIT LINE.
+    (i) RENDER THE EFFECTIVE CEILING WITH ITS PROVENANCE, never the bare number. An overridden value
+    must read as the effective figure AND its committed default together, so a reader can see it was
+    changed and from what. A value at its committed default must be distinguishable from one never
+    overridden — that distinction is what makes W1-T332's disappearance case observable, and it is the
+    whole reason this task is not optional polish.
+    (ii) LEDGER EVERY CONSOLE WRITE with who, when, from, to, and the resulting effective value. That
+    is the operator's stated audit trail.
+    (iii) RETENTION, AND THE SET CHOICE IS THE DECISION. The audit line is render-relevant — the
+    console shows it — so it belongs in `RENDER_RELEVANT_LEDGER_STEPS`, which is recency-bounded, NOT
+    in the never-rotated decision core. THE ARGUMENT FOR THAT CHOICE, which the implementer must
+    confirm rather than inherit: the CURRENT override is state and lives in the store file, read from
+    there; the ledger line is HISTORY. A decision therefore never depends on the ledger line
+    surviving, so it does not need the never-rotated core, and putting it there would retain a
+    frequently-tuned knob's history forever. If that reasoning does not survive contact with the
+    source, choose the other set and say why — but do not choose by default.
+    (iv) THE MEMBERSHIP TEST IS AN EXACT `Set.has`. A step named with dots does not inherit anything.
+    Whichever set is chosen, `test/ledger-render-retention.test.ts` re-derives it from its consumers'
+    own source and will fail unless updated in the SAME change.
+    (v) FALSIFIER: a rotation that would previously have erased the audit line leaves it readable, and
+    a rendered override survives it.
+    NOT IN SCOPE: the console WRITE control itself (this task makes the write visible and auditable,
+    not the button); the other ~28 knobs; and the headroom governor's field depth, which is a
+    separate, already-retained signal.
+    FILE OVERLAP, NOT A DEPENDENCY: W1-T329 also edits account-usage.ts and serve.ts to render the
+    governor's DEFERRAL. That is a concern for dispatch-overlap.ts to partition across a pass, not an
+    edge — neither task needs the other's output, and declaring a false edge would stall this behind
+    unrelated work.
+    VERIFY both retention sets, their locks, and the strip's slot ids FROM SOURCE before wiring.
+  acceptance:
+    - claim: "the rendered ceiling carries its provenance — an overridden value shows the effective figure and its committed default, and a value at default is distinguishable from one never overridden"
+      proof: "unit test: test/account-usage.test.ts"
+    - claim: "a console write is ledgered with who, when, from, to and the resulting effective value"
+      proof: "unit test: test/ledger-render-retention.test.ts"
+    - claim: "the audit step is retained through a rotation that would previously have erased it, and the lock that re-derives the retention set from its consumers still passes"
+      proof: "unit test: test/ledger-render-retention.test.ts"
+    - claim: "the strip renders the effective value and its provenance in a real browser, not only in a string builder"
+      proof: "unit test: test/serve.glance.test.ts"
+  risk: high
+  origin: oper#runtime-config-slice-2026-08-04
+  plan_refs: ["§7", "W1-T275", "W1-T332"]
+  files: [src/lib/ledger.ts, src/lib/account-usage.ts, src/lib/serve.ts, test/ledger-render-retention.test.ts, test/account-usage.test.ts, test/serve.glance.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — a derivation, a ledger line, a retention set and a rendered slot, all
+    machine-checkable; the strip is covered by a REAL Chromium page, which is the standard this repo
+    already holds serve.ts DOM behaviour to.
+    risk:high — Rule 19 counts ledger, account-usage, serve and the test surface as distinct
+    subsystems, and it touches the rotation path: a step added to the WRONG set is retained forever.
+    budget_usd 90 — three observables across three subsystems plus a real-browser proof, and the
+    retention lock re-derives from consumer source so it cannot be satisfied by editing a list.
+    files: DELIBERATELY LISTS ALL SIX. A rendered ledger step implies the retention set AND the lock
+    that re-derives it; omitting either is how five dispatches died to the scope guard this week.
+    THE FOLLOW-ONS, NAMED AND DELIBERATELY NOT FILED, because a big-bang migration is the wrong shape:
+    (a) the remaining four literals in DEFAULT_SWEEP_POLICY (dispatchLanes is W1-T325;
+    pendingCeilingMinutes, absentCeilingMinutes and reviewOrphanCap are unfiled); (b) the ~24 other
+    operator knobs an audit counted across src/, each of which froze itself in its own way and needs
+    its own conversion; (c) memo invalidation as a general fix, which would make every
+    function-call reader live but does nothing for import-time consts and so does not answer this
+    complaint; (d) the console WRITE control. Each wants its own argument once this slice has proven
+    the shape end to end."
