@@ -1,0 +1,119 @@
+- id: W1-T371
+  title: "the write token is re-pasted every tab because it IS the credential — trust tailnet-asserted identity for scope on the Tailscale Serve interface, with token auth retained as the fallback so a Tailscale failure degrades rather than locks the operator out"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  rationale: "OPERATOR RULING on state/recon-console-access.md, 2026-08-05: build the Tailscale
+    identity option; push the remudero.com hosted login far down the backlog. The recon's own trade,
+    verbatim: 'Tailscale Serve gets you about 90% of this for an afternoon. remudero.com is a month of
+    work plus a permanent attack surface on the one machine that runs everything.' It forecloses
+    nothing — token auth stays the fallback and a domain can front the same service later.
+    THIS IS W1-T202'S PREFERRED HALF, AND ONLY THAT HALF. The 2026-07-21 operator amendment named
+    TAILSCALE IDENTITY as PREFERRED and token-paste-once as merely ACCEPTABLE. The acceptable half
+    shipped in #892. W1-T202 was withdrawn in #1334 as already satisfied, and that withdrawal carries
+    the ruling verbatim while flagging this half unbuilt: 'THE PREFERRED AUTH-ENDGAME OPTION WAS NOT
+    BUILT AND IS NOT WITHDRAWN BY THIS ENTRY'.
+    RE-DERIVED AT 493656b, NOT INHERITED FROM THE RECON. The identity work is genuinely absent:
+    tsnet, Tailscale-User-Login, Tailscale-User-Name, tailscale-user and identity-header each match 0
+    files under src/, against a control of grantedScopes matching 1. The friction being removed is
+    real and specific: #892 shipped paste-once PER TAB in sessionStorage, which by design dies with
+    the tab, so the operator re-pastes on every new tab and every browser restart.
+    WHY IDENTITY RATHER THAN A NICER TOKEN. It removes the credential instead of relocating it: no
+    paste, no rotation, no bookmark to leak. localStorage was already rejected on stated XSS grounds
+    and short-lived elevation makes the operator manage the token MORE often, not less."
+  design: |
+    ONE CONCERN: an identity path alongside the bearer path in the auth decision. Nothing else.
+
+    (i) WHERE IT GOES. `service.ts`'s `grantedScopes` is the single auth decision — it is called once,
+    from the request handler, and today resolves `bearerToken(req)` (or `queryToken(req)` when
+    `allowQuery`) against `tokens.write` / `tokens.read` via `safeEqual`, returning `READ_WRITE`,
+    `READ_ONLY` or undefined. The identity path is a branch INSIDE that function, consulted when no
+    bearer is present. `ServiceOptions` gains the identity configuration; `serve.ts` holds the only
+    real `createService({...})` call site and must pass it.
+
+    (ii) THE TOKEN SPLIT STAYS. Measured at 493656b: 17 read-scoped and 19 write-scoped declarations
+    (control: a fabricated scope value matches 0). Write scope gates routes that SPEND MONEY
+    (/v1/drain/run), EXECUTE A SKILL ON THE OPERATOR'S MACHINE (/v1/skills/run) and MOVE CODE TOWARD
+    MERGE (/v1/manual/approve, /v1/inbox/approve) — all four verified present. Identity changes HOW
+    the operator proves who they are; it must not change WHAT write scope protects. A read-token leak
+    is a confidentiality incident; a write-token leak is unbounded spend and arbitrary execution.
+
+    (iii) THE TAILNET IS NOT ONLY PERSONAL DEVICES — DO NOT TRUST ANY TAILNET PEER.
+    Enumerated 2026-08-05: three nodes, all craigoley@ — craigs-mac-mini (100.90.47.107),
+    iphone-15-pro-max (100.65.205.58), and homeassistant (100.104.82.90, offline, last seen 55d).
+    The third is an appliance, not a personal computing device, and it carries the same tailnet user.
+    Granting WRITE scope to any authenticated tailnet peer would grant it to that appliance. The
+    implementation MUST gate on an explicit allowlist — a Tailscale ACL, or a per-node/per-user check
+    the service applies itself — and the identity of an unlisted node must grant nothing. State which
+    mechanism was chosen and why.
+
+    (iv) AN IDENTITY HEADER IS ONLY TRUSTWORTHY ON THE INTERFACE THE PROXY DELIVERS TO. The service
+    binds two interfaces today — RMD_SERVE_HOST is `127.0.0.1,100.90.47.107` in
+    com.remudero.serve.plist. Trusting an injected header unconditionally would let anything reaching
+    loopback forge write scope by setting it. The trust decision must be scoped to the interface the
+    Serve proxy actually delivers on, and a forged header arriving anywhere else must grant nothing.
+
+    (v) SERVE ONLY. FUNNEL IS UNVERIFIED AND MUST BE VERIFIED, NOT ASSUMED. Funnel makes the surface
+    PUBLIC. The recon recorded, explicitly as an ASSUMPTION it did not confirm, that Funnel traffic is
+    anonymous and carries no tailnet identity headers — which would expose the console to the internet
+    while removing the very mechanism replacing the token. VERIFY THIS FROM TAILSCALE'S CURRENT
+    DOCUMENTATION AND NEVER INVENT AN API (W1-T202's own standing instruction). Record what the
+    documentation says. Do not enable Funnel.
+
+    (vi) SEQUENCE FOR DEGRADATION, NOT LOCKOUT. Token auth is RETAINED as the fallback, for loopback
+    and for the case where Tailscale is down — which is exactly why serve binds both interfaces. The
+    identity path is additive and preferred; the token path must keep working unchanged when no
+    identity is presented. A failure of the identity mechanism must degrade to the token, never to a
+    locked-out operator. This is also why the work can land WITHOUT removing token auth, and it should.
+
+    (vii) ARM-THEN-CONFIRM IS NOT A SECOND FACTOR AND MUST NOT BE TREATED AS ONE. Verified at 493656b:
+    zero confirm-nonce or confirm-token hits across panel-actions.ts, panel-graph.ts, service.ts and
+    fleet-control.ts, against a control of 17 scope declarations in service.ts. The console's arm and
+    confirm timers live only in the client script — a mis-click guard, bypassed by anything speaking
+    HTTP. It cannot substitute for the write token; do not reason as though it can.
+
+    (viii) NOT IN SCOPE: remudero.com, DNS, TLS termination, public ingress, a hosted mirror, a login
+    system, and removing token auth. The console surviving the daemon being down is an EXISTING
+    property (com.remudero.serve is a separate launchd job from com.remudero.daemon) and must not
+    regress, but nothing here changes it.
+  acceptance:
+    - claim: "arriving over the Tailscale Serve interface as an allowlisted identity grants scope with no bearer token in any header, URL or storage — the credential is removed rather than relocated"
+      proof: "unit test: test/tailnet-identity-scope.test.ts"
+    - claim: "identity is honoured only on the interface the proxy delivers to and only for an explicitly allowlisted node, so a forged identity header and an unlisted tailnet peer each grant nothing"
+      proof: "unit test: test/tailnet-identity-scope.test.ts"
+    - claim: "with no identity presented the bearer token still authenticates exactly as before, so a Tailscale failure degrades to the token rather than locking the operator out"
+      proof: "unit test: test/tailnet-identity-scope.test.ts"
+    - claim: "the read and write scope boundary is unchanged — every write-scoped route still requires write scope, whether the caller proved identity or presented a token"
+      proof: "unit test: test/service.test.ts"
+  status: queued
+  attempts: 0
+  note: "verify:auto — every claim is an assertion over the service's own auth decision against a
+    constructed request, with no operator present. It builds a mechanism and touches no DECISIONS.md,
+    so W1-T353's verify:human requirement for ruling-shaped tasks does not apply.
+    risk:high — this is the authorization boundary. A mistake here does not fail loudly; it grants
+    write scope, which spends money and executes skills on the operator's machine. Design (iii) and
+    (iv) are where that risk is actually managed.
+    budget_usd 80 — an auth branch, an allowlist decision, a two-direction falsifier over interface
+    and node identity, plus the documentation verification design (v) requires before any Funnel
+    reasoning is written down.
+    files: DECLARES test/service.test.ts because the fourth criterion asserts the existing scope
+    boundary still holds and the worker will extend that suite; it also declares src/lib/serve.ts
+    because that file holds the only real createService call site and must pass any new option.
+    Omitting a written path is what refused five dispatches in one week.
+    ON THE PROOFS. Three of the four name test/tailnet-identity-scope.test.ts, which does not exist
+    yet: `rmd check-proof` reports 0 candidates for it today. That is a FORWARD REFERENCE TO A PATH,
+    which CLAUDE.md records as safe — unlike forward-referencing a symbol name, which is a guess — and
+    the path is declared in files: so the worker creates it. The fourth criterion deliberately names
+    an EXISTING suite so at least one proof executes at filing time. It is a GUARD criterion and it
+    passes at the merge-base BY DESIGN: its claim is that the boundary was not weakened, a property
+    that must hold both before and after. `unit test:` proofs are structurally exempt from the
+    executed_stale downgrade (review.ts records that they never produce that outcome), which applies
+    to `grep:` proofs only. No `grep:` proof is used here, so the line-based and basic-regex traps
+    that cost a filer two attempts yesterday do not arise."
+  risk: high
+  origin: oper#ruling-console-access-2026-08-05
+  plan_refs: ["§7", "W1-T202"]
+  files: [src/lib/service.ts, src/lib/serve.ts, test/tailnet-identity-scope.test.ts, test/service.test.ts]
