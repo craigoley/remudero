@@ -12519,52 +12519,75 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 60.00
-  rationale: "CONSEQUENCE OF A SHIPPED SECURITY FIX, filed by the amender under standing rule 21 rather
-    than left for the operator to discover. The token-hygiene PR stopped the startup banner printing the
-    WRITE bearer token, because under the real launch serve's stdout is redirected to a serve.log that was
-    mode 0644 — running the command wrote a fleet-control credential to a world-readable file. The console
-    URL now carries the READ token.
-    THE COST IS REAL AND WAS ACCEPTED KNOWINGLY. service.ts:153-154 maps the write token to READ_WRITE and
-    the read token to READ_ONLY. So the operator's bookmarked console is now a view: fleet-control
-    pause/stop, answering a question, and manual approve all 401. That is precisely the NEEDS-ME
-    affordance set the console v2 design pass is built around, so the security fix and the console arc
-    are currently pulling against each other.
-    THE TWO PROPERTIES ARE NOT ACTUALLY IN CONFLICT — they only look it because the bookmark is the sole
-    credential channel. A URL is the WRONG place for a write credential: it is copied, screenshotted,
-    logged by proxies, and restored by the browser session-restore. A client-side store the operator pastes
-    into ONCE is both safer than the URL and more usable than re-pasting per action."
+  rationale: "WITHDRAWN AS ALREADY SATISFIED 2026-08-05. All FOUR acceptance criteria below were met by
+    commit 683399b (PR #892, 2026-07-29, 'feat(serve): hold the write token client-side, never in the
+    console URL (W1-T202)'), and the task was never closed, so it sat queued with attempts: 0 where the
+    dispatcher would eventually spend a run rebuilding a channel that already exists. Verified from source
+    before withdrawing, not inherited from a claim.
+    SATISFACTION MEASURED PER CRITERION, by the strongest available evidence: each criterion's claim text
+    exists VERBATIM as a test title in the very file that criterion's proof names. Criteria 1, 3 and 4 are
+    each a test in test/serve.shell-ux.test.ts; criterion 2 is a test in test/serve.live-state.test.ts.
+    #892 touched both of those files and no others outside src/lib/serve.ts and the test tree. So the four
+    criteria are not merely plausible-as-done — the tests that certify them are named, present, and carry
+    the criterion wording they were written against.
+    THE CODE STANDS AND MUST NOT BE REVERTED. This entry withdraws a WORK ITEM, not the behaviour.
+    Reverting 683399b would put the WRITE bearer token back into the console URL, which is the leak the
+    token-hygiene PR was filed to close: grantedScopes (src/lib/service.ts) maps the write token to
+    READ_WRITE and the read token to READ_ONLY, and the shell document route is the ONLY route that
+    accepts a ?token= query at all — /v1/* never does. That separation is live and covered."
   design: |
-    HAVE THE SHELL HOLD THE WRITE TOKEN, NOT THE URL. The read token stays in the bookmark and keeps the
-    board loading on first paint with no prompt. When the operator takes a WRITE action, the shell uses a
-    write token it has been given once and kept client-side, rather than reading it from the query string.
-    VERIFY FROM SOURCE FIRST, do not invent an API: read service.ts's token comparison (safeEqual against
-    tokens.write / tokens.read) and serve.ts's `?token=` bootstrap at the HTML shell before choosing where
-    the write token enters. The auth model is already two-level and does not need changing — this is about
-    the CHANNEL the write token arrives on.
-    STORAGE CHOICE IS THE REAL DECISION and should be made on stated trade-offs: sessionStorage dies with
-    the tab (safest, most re-pasting), localStorage persists (most usable, readable by any script that
-    achieves XSS on this origin). Whichever is chosen, the write token must NEVER be written back into the
-    URL, into a log line, or into the ledger — that is the defect this task exists to avoid recreating.
-    DEGRADE HONESTLY WHEN READ-ONLY (standing rule 22: the console distinguishes CLAIMED from EVIDENCED
-    state — here, PERMITTED from ATTEMPTED). With only a read token the write affordances must render
-    visibly unavailable with a stated reason, never render armed and 401 on click. A button that looks
-    live and fails is worse than one that says why it is disabled.
+    NOT TO BE BUILT. Left in the plan as a RECORD of the withdrawal decision, not a work item. status:
+    blocked so nextRunnable/assertRunnable never dispatch it (drain.ts's isDispatchEligible refuses
+    `status === "blocked"` before any dependency or breaker check) — `withdrawn` is not one of plan.ts's
+    TASK_STATUSES, and blocked is the equivalent this repo already established for a retirement record
+    (precedent: W1-T229, and W1-T270 in PR #1027 / W1-T269 in PR #1030).
+    HOW THE STORAGE DECISION ACTUALLY RESOLVED, which is the part worth keeping. The design left the
+    sessionStorage-vs-localStorage choice open on stated trade-offs. #892 chose sessionStorage, on XSS
+    grounds, and serve.ts records that choice in its own comments at WRITE_TOKEN_STORAGE_KEY. The
+    consequence is real and is NOT a defect: the write token dies with the tab, so the operator re-enters
+    it per tab and after a browser restart. Anyone reopening this ground should treat that as the recorded
+    trade-off it is, not as an oversight to quietly reverse.
+    THE PREFERRED AUTH-ENDGAME OPTION WAS NOT BUILT AND IS NOT WITHDRAWN BY THIS ENTRY. The 2026-07-21
+    operator amendment named TAILSCALE IDENTITY as PREFERRED and token-paste-once as merely ACCEPTABLE.
+    #892 built the ACCEPTABLE one. Verified at this sha: src/ carries no tsnet, no identity-header
+    handling, and no tailnet-identity path anywhere, so the preferred option is untouched work. It is
+    preserved verbatim in the note below. NO NEW TASK ID IS MINTED HERE — whether to file it is the
+    operator's call and is deliberately not smuggled into a bookkeeping edit.
+    depends_on is left UNCHANGED at [] and no other task is touched. Nothing in src/ or test/ is edited by
+    the withdrawal — the behaviour is already live and covered.
   acceptance:
-    - claim: "a console loaded with the READ token alone renders the board fully and shows every write affordance as explicitly unavailable with a stated reason, rather than rendering it armed"
-      proof: "unit test: test/serve.shell-ux.test.ts"
-    - claim: "a write action issued with a client-held write token succeeds while the URL still carries only the read token — the bookmark never gains write power"
-      proof: "unit test: test/serve.live-state.test.ts"
-    - claim: "the write token is never written into the URL, a ledger line, or a log line at any point in the flow — asserted against the rendered shell and the emitted ledger steps"
-      proof: "unit test: test/serve.shell-ux.test.ts"
-    - claim: "clearing the stored write token returns the console to the read-only rendering without a reload"
-      proof: "unit test: test/serve.shell-ux.test.ts"
+    - claim: "this task is withdrawn as already satisfied and never dispatched; the shipped PR that satisfies each criterion is named"
+      proof: "grep: WITHDRAWN AS ALREADY SATISFIED 2026-08-05 in plan/tasks.yaml"
   risk: medium
   origin: architect
   plan_refs: ["§7", "§7B"]
-  files: [src/lib/serve.ts]
-  status: queued
+  files: [plan/tasks.yaml]
+  status: blocked
   attempts: 0
-  note: "AMENDED 2026-07-21 by operator ruling, adding the AUTH ENDGAME design. Task verified QUEUED
+  note: "THE FOUR WITHDRAWN CRITERIA, PRESERVED VERBATIM so a future re-filing needs no archaeology - they
+    are withdrawn because they are ALREADY MET, never because they were wrong. Each is given with the proof
+    it carried and the PR that satisfied it:
+    (1) claim 'a console loaded with the READ token alone renders the board fully and shows every write
+    affordance as explicitly unavailable with a stated reason, rather than rendering it armed' /
+    proof 'unit test: test/serve.shell-ux.test.ts' / satisfied by 683399b, PR #892;
+    (2) claim 'a write action issued with a client-held write token succeeds while the URL still carries
+    only the read token — the bookmark never gains write power' /
+    proof 'unit test: test/serve.live-state.test.ts' / satisfied by 683399b, PR #892;
+    (3) claim 'the write token is never written into the URL, a ledger line, or a log line at any point in
+    the flow — asserted against the rendered shell and the emitted ledger steps' /
+    proof 'unit test: test/serve.shell-ux.test.ts' / satisfied by 683399b, PR #892;
+    (4) claim 'clearing the stored write token returns the console to the read-only rendering without a
+    reload' / proof 'unit test: test/serve.shell-ux.test.ts' / satisfied by 683399b, PR #892.
+    ALL FOUR BY THE SAME PR, which is why no single criterion was ever attributed to W1-T202 and why the
+    shard stayed queued for six days after its own work merged.
+    A NOTE ON THE OLD PROOFS, since it explains the stale record rather than excusing it: all four carried
+    the pure-path form 'unit test: test/<file>.test.ts', which is legal in a shard and executes the whole
+    file. They were resolvable. What was missing was not a proof but a CLOSER — nothing attributed #892
+    back to this shard, so the record and the source diverged silently.
+    ORIGINAL AMENDMENT AND FILING NOTE FOLLOW, UNCHANGED. The AUTH ENDGAME text below is the operator's own
+    2026-07-21 ruling and its PREFERRED option is STILL UNBUILT at 2026-08-05, so it is kept verbatim
+    rather than summarised or dropped.
+    AMENDED 2026-07-21 by operator ruling, adding the AUTH ENDGAME design. Task verified QUEUED
     first - zero merged PRs carry its Remudero-Task trailer - so standing rule 21 does not apply.
     THE IMPLEMENTER VERIFIES FROM DOCUMENTATION AND NEVER INVENTS AN API. Both options below depend on what
     Tailscale and the runtime actually provide. Read the current documentation before designing, and if the
