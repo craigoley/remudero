@@ -5,8 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  CEILING_OVERRIDE_WRITTEN_STEP,
   RENDER_RELEVANT_LEDGER_STEPS,
   RENDER_STEP_RETENTION_WINDOW_MS,
+  appendDailyCostCeilingOverrideAudit,
   ledgerExceedsRotationCeiling,
   rotateLedger,
 } from "../src/lib/ledger.js";
@@ -394,6 +396,119 @@ test("RENDER RETENTION — a fresh console.kick_dispatched line survives rotatio
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── W1-T333 (THE OPERATOR'S AUDIT REQUIREMENT, verbatim in substance): every console write to
+// the daily-cost-ceiling override must be ledgered with who/when/from/to and the resulting
+// effective value, and that audit line must survive a rotation that would previously have erased
+// it -- the SAME exposure daemon.headroom/console.kick_refused/daemon.cost_governor above already
+// had, for the same reason: a step absent from either retention set is gone the moment a rotation
+// happens, real history or not. ────────────────────────────────────────────────────────────────
+
+test("CONSOLE WRITE AUDIT — appendDailyCostCeilingOverrideAudit ledgers who, from, to and the resulting effective value, and appendLedger's own clock supplies when", () => {
+  const dir = tmpDir();
+  try {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    appendDailyCostCeilingOverrideAudit(ledgerPath, {
+      runId: "console-1",
+      taskId: "_console",
+      who: "operator@example.com",
+      fromUsd: 150,
+      toUsd: 200,
+      effectiveUsd: 200,
+    });
+    const [line] = readLedgerLines(ledgerPath);
+    assert.equal(line.step, CEILING_OVERRIDE_WRITTEN_STEP);
+    assert.equal(line.who, "operator@example.com", "WHO");
+    assert.equal(line.from_usd, 150, "FROM");
+    assert.equal(line.to_usd, 200, "TO");
+    assert.equal(line.effective_usd, 200, "the resulting effective value");
+    assert.equal(typeof line.ts, "string", "WHEN — appendLedger stamps ts itself, at write time");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("RENDER RETENTION — a fresh console.ceiling_override_written line survives rotation and the ACCOUNT strip's audit trail reads the real who/from/to, not absent", () => {
+  const dir = tmpDir();
+  try {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    const nowMs = Date.now();
+    const freshMs = nowMs - 60_000;
+
+    const lines: string[] = [
+      rawLine(CEILING_OVERRIDE_WRITTEN_STEP, "_console", freshMs, {
+        who: "operator@example.com",
+        from_usd: 150,
+        to_usd: 200,
+        effective_usd: 200,
+      }),
+    ];
+    for (let i = 0; i < 300; i++) lines.push(noiseLine(i, freshMs));
+    writeFileSync(ledgerPath, lines.join("\n") + "\n");
+
+    const ceiling = 2000;
+    assert.ok(ledgerExceedsRotationCeiling(ledgerPath, ceiling), "sanity: padded past the ceiling");
+
+    const result = rotateLedger(ledgerPath, { ceilingBytes: ceiling, now: () => new Date(nowMs) });
+    assert.equal(result.rotated, true);
+
+    const liveContent = readFileSync(ledgerPath, "utf8");
+    assert.ok(liveContent.includes(CEILING_OVERRIDE_WRITTEN_STEP), "the fresh audit line survives rotation");
+
+    // The REAL consumer, not a string check: account-usage.ts's own deriveAccountUsage reading
+    // the post-rotation live ledger must report the real audit trail.
+    const input: AccountUsageInput = { unreadable: true };
+    const postRotationLines = readLedgerLines(ledgerPath);
+    const snapshot = deriveAccountUsage(input, postRotationLines, nowMs);
+    assert.equal(snapshot.dailyCostCeilingAuditWho, "operator@example.com");
+    assert.equal(snapshot.dailyCostCeilingAuditFromUsd, 150);
+    assert.equal(snapshot.dailyCostCeilingAuditToUsd, 200);
+    assert.equal(snapshot.dailyCostCeilingAuditEffectiveUsd, 200);
+    assert.ok(snapshot.dailyCostCeilingAuditAsOf, "the audit's own as-of must survive rotation, from the surviving line's ts");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("RENDER RETENTION — a console.ceiling_override_written line older than RENDER_STEP_RETENTION_WINDOW_MS is archived, not retained forever", () => {
+  const dir = tmpDir();
+  try {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    const nowMs = Date.now();
+    const staleMs = nowMs - (RENDER_STEP_RETENTION_WINDOW_MS + 60_000);
+    const freshMarkerMs = nowMs - 60_000;
+
+    const lines: string[] = [
+      rawLine(CEILING_OVERRIDE_WRITTEN_STEP, "_console", staleMs, { who: "operator@example.com", from_usd: 150, to_usd: 200, effective_usd: 200 }),
+    ];
+    for (let i = 0; i < 300; i++) lines.push(noiseLine(i, freshMarkerMs));
+    writeFileSync(ledgerPath, lines.join("\n") + "\n");
+
+    const ceiling = 2000;
+    assert.ok(ledgerExceedsRotationCeiling(ledgerPath, ceiling), "sanity: padded past the ceiling");
+
+    const result = rotateLedger(ledgerPath, { ceilingBytes: ceiling, now: () => new Date(nowMs) });
+    assert.equal(result.rotated, true);
+
+    const liveContent = readFileSync(ledgerPath, "utf8");
+    assert.ok(
+      !liveContent.includes(new Date(staleMs).toISOString()),
+      "a console.ceiling_override_written line long outside the render window is archived — bounded by recency, not kept forever",
+    );
+
+    const archiveContent = readFileSync(result.archivePath as string, "utf8");
+    assert.ok(
+      archiveContent.includes(new Date(staleMs).toISOString()),
+      "the archived (never deleted) roll still holds the stale audit line verbatim",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("RENDER_RELEVANT_LEDGER_STEPS includes console.ceiling_override_written, and the derived-from-consumers lock (above) already re-derives it from account-usage.ts's own source", () => {
+  assert.ok(RENDER_RELEVANT_LEDGER_STEPS.has(CEILING_OVERRIDE_WRITTEN_STEP));
 });
 
 // ── Sanity: RENDER_RELEVANT_LEDGER_STEPS itself names the three console steps (W1-T275's literal
