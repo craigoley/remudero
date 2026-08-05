@@ -87,8 +87,15 @@ sweep:
   # max that let one in-bounds edit jump straight to a large N would re-create the hazard this
   # row exists to make reviewable. max: 4 permits a modest, still-reviewed doubling; a bound
   # past that should be its own deliberate ruling, not a side effect of a generous default range.
+  # W1-T344 IS THE FLIP TO 2, AND IT HAS NOT HAPPENED YET. W1-T325 (#1297) relocated this row out
+  # of DEFAULT_SWEEP_POLICY and lifted the source literal verbatim — a relocation, not a retune —
+  # so it arrived reading 2 while W1-T343 (wire runDaemon to runDrainLanes) is still queued and
+  # unmerged. Left at 2, the daemon would take two lanes the moment that wiring merges and it next
+  # restarts: no dark ship, no observation window, and no separate decision, which is exactly the
+  # split W1-T344's `depends_on: [W1-T343]` exists to preserve. Its own rationale already assumes
+  # this row reads 1. Set to 1 so the capability can ship dark and the flip stays deliberate.
   dispatchLanes:
-    value: 2
+    value: 1
     origin: "lifted:src/lib/sweep.ts:359 (DEFAULT_SWEEP_POLICY.dispatchLanes)"
     min: 1
     max: 4
