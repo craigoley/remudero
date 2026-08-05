@@ -1,0 +1,113 @@
+- id: W1-T368
+  title: "a lock identifies its holder by a bare pid, so a RECYCLED pid reads as a live holder — the task is then refused dispatch forever and rendered as running, and no age or host check bounds it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  rationale: "OBSERVED AT SOURCE at cdf885a; the failure is INFERRED from that code plus a measured pid
+    space, not from a captured incident, and saying which is which is part of the filing.
+    THE PREDICATE IS `isStale: (held) => !isAlive(held.pid)` — inflight-lock.ts's acquireInflightLock and
+    sweepStaleInflightLocks both pass it to reclaimStaleLock, and drain-lock.ts passes the same shape.
+    defaultIsPidAlive is `process.kill(pid, 0)`, treating EPERM as alive. So a lock is judged by whether
+    SOME process currently owns that number — never by whether it is the process that wrote the lock.
+    THE PID SPACE WRAPS, MEASURED ON THE FLEET HOST: kern.maxproc 4000, kern.maxprocperuid 2666, 793
+    processes live, and pids observed in one session ran 15430 then 99032 then 26253 — non-monotonic, i.e.
+    already wrapped. A dead holder's number being reissued is ordinary, not exotic.
+    THE CONSEQUENCE IS A DISPATCH STALL, NOT A DISPLAY BUG. acquireInflightLock does
+    `if (result.outcome === 'live') throw new InflightLockError(taskId, result.holder)`. A recycled pid
+    therefore makes the holder read LIVE, and that task is REFUSED every time it is selected — for as long
+    as the unrelated process holding that number lives. sweepStaleInflightLocks reaches the same verdict and
+    counts the lock as `kept`, so the boot sweep and the per-poll rung both decline to clear it. Nothing
+    logs a suspicion, because from the predicate's point of view the answer was clean.
+    IT ALSO NOW MISRENDERS, WHICH IS NEW. deriveStatus reads a held lock plus this same pid probe as its
+    third liveness disjunct (DeriveDeps.inflightHolder / isPidAlive). A recycled pid therefore also renders
+    a dead run as RUNNING on the console — the exact defect the liveness bound (W1-T179) was added to close,
+    re-entering through the lock rather than through the ledger.
+    NEITHER OTHER RECORDED FIELD BOUNDS IT. The lock body carries `startedAt` and `host`; `startedAt` is
+    never compared against any ceiling and `host` is never compared at all — both are written, rendered in
+    InflightLockError's message, and read by nothing. W1-T289 (merged, PR #1154) hardened the reclaim DELETE
+    against a TOCTOU using dev+ino AND the file bytes, which is a different window: it makes the delete
+    operate on the file you read, and says nothing about whether the holder that file names is real.
+    COVERED-BY: PARTIAL AND NAMED. W1-T289's own 'EXPLICITLY NOT IN SCOPE' block names the host half for
+    cheap re-filing, verbatim: 'reclaim tests isAlive(held.pid) and ignores the recorded host field ... it is
+    named here for cheap re-filing rather than smuggled into a concurrency fix (one concern per PR)'. That
+    invitation is taken up here. The pid-REUSE half is named by no task in plan/tasks.yaml or any
+    plan/tasks.d shard — checked at cdf885a."
+  design: |
+    ONE CONCERN: THE LOCK MUST IDENTIFY ITS HOLDER, NOT JUST NAME A NUMBER. The host gap and the pid-reuse
+    gap are the same defect seen twice — a pid is not an identity — so they are fixed together rather than
+    as two passes over the same predicate. Anything that changes WHEN a lock is reclaimed beyond that is a
+    different task.
+
+    WRITE THE FALSIFYING TEST FIRST AND WATCH IT FAIL (tdd:strict, and the standing
+    proof-must-fail-before-work rule). The deliverable that outlives the fix is a test that seeds a lock
+    naming a pid that IS currently alive but is NOT the process that wrote it, and asserts the lock is
+    judged stale — reclaimable, sweepable, and NOT rendered as a live holder. Force it by injection, never
+    by waiting for a real wrap: the test must be deterministic. A test that passes only because no wrap
+    happened during the run certifies the bug.
+
+    THE MECHANISM IS THE IMPLEMENTER'S CALL AND MUST BE ESTABLISHED FROM DOCUMENTATION, NOT INVENTED.
+    Candidates, all of which must state what they actually prove:
+      (a) PROCESS START TIME. Record the holder's start time and compare it on read. A reissued pid has a
+          later start time than the lock, which is decidable. Establish from source/docs how to read it on
+          this platform before designing — do not assume a ps flag or a syscall exists in the form you want,
+          and say so and fall back if it does not.
+      (b) HOST. Compare the recorded `host` before the pid probe is even meaningful. Cheap, closes the
+          cross-host arm, and closes nothing about reuse — so it is necessary and NOT sufficient.
+      (c) AN AGE CEILING on `startedAt`. Simple and bounded, but it trades one wrong answer for another: a
+          ceiling below the longest legitimate run reaps live work. If this is chosen, the ceiling must be
+          justified against MEASURED run durations rather than picked, and it belongs in plan/policy.yaml as
+          policy data, not as a source literal (the W1-T330 precedent).
+    Whichever is chosen, the ONE predicate must be shared by every consumer. There are four today
+    (acquireInflightLock, sweepStaleInflightLocks, drain-lock, and deriveStatus's own default) and a fix
+    that lands in three of them leaves the fourth disagreeing with the other three about whether a run is
+    alive — which is worse than the current uniform wrongness.
+
+    STATUS.TS IS IN SCOPE FOR ALIGNMENT ONLY, AND CONDITIONALLY. deriveStatus grew an `isPidAlive` dep whose
+    default is defaultIsPidAlive; if that has landed when this is picked up, it must adopt the same
+    strengthened predicate rather than keeping its own weaker copy. It is declared in files: deliberately —
+    a file declared and untouched is an ADVISORY (W1-T322 inverse_scope), whereas a file touched and
+    undeclared is refused by the scope guard AFTER the work is done, which is how five dispatches died in
+    one week. Prefer the advisory.
+
+    SAY WHAT IS STILL UNPROVEN. Whatever lands, a lock remains a REASON to believe a holder is alive rather
+    than proof, and the PR body should say which residual window it leaves rather than claiming closure.
+
+    NOT IN SCOPE: heartbeats or lease renewal; changing the lock file FORMAT beyond the one field the chosen
+    mechanism needs; re-opening W1-T289's reclaim-delete identity check (it stands); and the liveness bound
+    itself (W1-T179), which is a separate signal that must keep working when the lock says nothing.
+  acceptance:
+    - claim: "a lock naming a pid that is alive but belongs to a different process than the one that wrote it is judged stale, not live"
+      proof: "unit test: test/lock-holder-identity.test.ts"
+    - claim: "such a lock is reclaimed by an acquire and reaped by the sweep, so the task it names is dispatchable again rather than refused"
+      proof: "unit test: test/lock-holder-identity.test.ts"
+    - claim: "a lock written by a genuinely live holder is still honoured — an acquire is refused and the sweep keeps it"
+      proof: "unit test: test/inflight-lock.test.ts"
+    - claim: "every consumer of the staleness predicate shares one implementation rather than keeping its own weaker copy"
+      proof: "unit test: test/lock-holder-identity.test.ts"
+  risk: high
+  origin: oper#console-liveness-followup-2026-08-05
+  plan_refs: ["W1-T289", "W1-T179", "§4B"]
+  files: [src/lib/fs-race-safe.ts, src/lib/inflight-lock.ts, src/lib/drain-lock.ts, src/lib/status.ts, test/lock-holder-identity.test.ts, test/inflight-lock.test.ts]
+  status: queued
+  attempts: 0
+  note: "FILED as the named follow-up to the inflight-lock liveness anchor. The anchor's own PR body states
+    this ceiling rather than hiding it — the lock's startedAt is never compared against a ceiling and its
+    host is never compared at all — and this is that residual, filed rather than left in a PR body where the
+    next reader would not find it.
+    risk:high, and NOT sizing-driven: the failure mode is a task that cannot be dispatched at all, silently,
+    with the guard reporting a clean answer. That is the same class as the W1-T289 double-run it sits beside,
+    in the other direction — that one admitted a second run, this one admits none.
+    budget_usd 70 — slightly under W1-T289's 75 because the shared primitive already exists (reclaimStaleLock
+    is the seam, not a new abstraction); the cost is the deterministic reuse fixture and establishing the
+    platform mechanism from documentation.
+    verify:auto — every claim is decidable by an injected fixture over the predicate.
+    NO depends_on. The dispatch-stall arm predates the console anchor entirely and is independent of it; the
+    misrender arm only exists once that anchor lands, which is why status.ts is declared conditionally in the
+    design rather than as an edge that would stall this behind an unmerged PR.
+    LATENT, NOT OBSERVED IN THE WILD: no incident is attached, and I did not find one in the ledger. It is
+    graded high anyway because the trigger is ordinary (a crashed run's lock plus a wrapped pid space,
+    measured wrapping on this host) and because the failure is SILENT — a refused dispatch reads as a task
+    that simply never runs."
