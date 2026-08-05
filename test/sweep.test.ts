@@ -13,6 +13,7 @@ import {
   isPureConcurrentAddition,
   observedBlockerState,
   renderClarificationQuestion,
+  renderMootedCloseComment,
   renderReconcileCloseComment,
   renderSweepSummary,
   runCreditBackfill,
@@ -1624,6 +1625,7 @@ function reconcileCandidate(over: Partial<EscalationReconcileCandidate> = {}): E
     issueUrl: over.issueUrl ?? "https://github.com/o/r/issues/1",
     issueNumber: over.issueNumber ?? 1,
     taskId: over.taskId ?? "W1-T1",
+    ...(over.askType !== undefined ? { askType: over.askType } : {}),
     derived: {
       merged: true,
       prUrl: "https://github.com/o/r/pull/255",
@@ -1660,6 +1662,35 @@ test("renderReconcileCloseComment (W1-T162): a CLOSED-WITHOUT-MERGING referent n
   assert.match(comment, /closed without merging/);
   assert.doesNotMatch(comment, /is now \*\*merged\*\*/, "a closed-without-merge referent must never be cited as merged");
   assert.match(comment, /fb-1784756088300-6a481e/);
+});
+
+test("renderMootedCloseComment (W1-T347) names the mooting PR, states the question was NOT answered, and starts with a fixed distinguishable prefix", () => {
+  const comment = renderMootedCloseComment(
+    reconcileCandidate({
+      taskId: "W1-T1200",
+      derived: { merged: true, prUrl: "https://github.com/o/r/pull/1215", prNumber: 1215, source: "head-branch" },
+    }),
+  );
+  assert.match(comment, /^MOOTED by the escalation-lifecycle reconciler/, "fixed prefix, mechanically distinguishable from a resolved close");
+  assert.match(comment, /W1-T1200/, "names the task");
+  assert.match(comment, /#1215/, "names the mooting PR");
+  assert.match(comment, /pull\/1215/);
+  assert.match(comment, /head-branch/);
+  assert.match(comment, /NOT answer/i, "states plainly that the question was not answered");
+  assert.doesNotMatch(comment, /is now \*\*merged\*\*, resolved by/, "must never claim the merge RESOLVED the question");
+  assert.match(comment, /fb-1784756088300-6a481e/);
+});
+
+test("renderMootedCloseComment (W1-T347): a CLOSED-WITHOUT-MERGING referent names the PR as closed, never claims 'merged'", () => {
+  const comment = renderMootedCloseComment(
+    reconcileCandidate({
+      taskId: "W1-T1200",
+      derived: { merged: false, closed: true, prUrl: "https://github.com/o/r/pull/1216", prNumber: 1216, source: "pr-field" },
+    }),
+  );
+  assert.match(comment, /#1216/);
+  assert.match(comment, /closed without merging/);
+  assert.doesNotMatch(comment, /\bmerged\b/i, "a closed-without-merge referent must never be cited as merged");
 });
 
 test("escalation reconcile (W1-T162): a RESOLVED-but-CLOSED-WITHOUT-MERGING referent (superseded/abandoned PR) closes its needs-human issue too — this is the falsifier's positive complement", async () => {
@@ -1745,6 +1776,50 @@ test("escalation reconcile: a RESOLVED (merged) referent closes its needs-human 
   assert.equal(closedLines[0].issue_url, "https://github.com/o/r/issues/44");
   assert.equal(closedLines[0].task_id, "W1-T189");
   assert.equal(closedLines[0].pr_number, 574);
+});
+
+test("escalation reconcile (W1-T347): a QUESTION-typed issue whose referent went terminal closes with the MOOTED comment — names the mooting PR and states the question was never answered, never the resolved-close citation", async () => {
+  const shared = ledgerPath();
+  const closes: Array<{ url: string; comment: string }> = [];
+  const summary = await runEscalationReconcile(
+    [
+      reconcileCandidate({
+        issueUrl: "https://github.com/o/r/issues/1200",
+        issueNumber: 1200,
+        taskId: "W1-T1200",
+        askType: "question",
+        derived: { merged: true, prUrl: "https://github.com/o/r/pull/1215", prNumber: 1215, source: "head-branch" },
+      }),
+    ],
+    { closeIssue: (url, comment) => closes.push({ url, comment }), ledgerPath: shared, runId: "SWEEP-1" },
+  );
+  assert.equal(summary.closed, 1, "the board still clears — the close still happens");
+  assert.equal(summary.results[0].outcome, "closed");
+  assert.equal(closes.length, 1);
+  assert.match(closes[0].comment, /^MOOTED by the escalation-lifecycle reconciler/, "the MOOTED comment, not the resolved-close comment");
+  assert.match(closes[0].comment, /W1-T1200/);
+  assert.match(closes[0].comment, /#1215/, "names the mooting PR");
+  assert.match(closes[0].comment, /NOT answer/i, "states plainly the question was never answered");
+  assert.doesNotMatch(closes[0].comment, /is now \*\*merged\*\*, resolved by/, "must never claim the merge resolved the question");
+});
+
+test("escalation reconcile (W1-T347, falsifier): an ACTION-typed issue with the same terminal referent keeps today's resolved-close comment, byte-identical to the untyped path", async () => {
+  const shared = ledgerPath();
+  const closesAction: Array<{ url: string; comment: string }> = [];
+  const closesUntyped: Array<{ url: string; comment: string }> = [];
+  const derived = { merged: true, prUrl: "https://github.com/o/r/pull/1215", prNumber: 1215, source: "head-branch" };
+  await runEscalationReconcile(
+    [reconcileCandidate({ issueUrl: "iss/action", taskId: "W1-T1200", askType: "action", derived })],
+    { closeIssue: (url, comment) => closesAction.push({ url, comment }), ledgerPath: shared, runId: "SWEEP-1" },
+  );
+  await runEscalationReconcile(
+    [reconcileCandidate({ issueUrl: "iss/untyped", taskId: "W1-T1200", derived })],
+    { closeIssue: (url, comment) => closesUntyped.push({ url, comment }), ledgerPath: shared, runId: "SWEEP-2" },
+  );
+  assert.doesNotMatch(closesAction[0].comment, /^MOOTED/, "an action-typed issue never gets the MOOTED comment");
+  assert.match(closesAction[0].comment, /^Auto-closed by the escalation-lifecycle reconciler/);
+  assert.equal(closesAction[0].comment, closesUntyped[0].comment, "action-typed and untyped (absent askType, the legacy corpus) close identically");
+  assert.equal(closesAction[0].comment, renderReconcileCloseComment(reconcileCandidate({ taskId: "W1-T1200", derived })), "byte-identical to today's close path");
 });
 
 test("escalation reconcile: a still-LIVE referent (not merged) is left untouched — no close, no ledger line", async () => {
