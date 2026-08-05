@@ -2015,6 +2015,40 @@ export async function runSweep(
   let actionsFailed = 0;
   let noneCount = 0;
 
+  // ── PER-PASS HEARTBEAT, WRITTEN BEFORE THE LOOP ────────────────────────────────────────────
+  // A BLIND SWEEP AND A QUIET FLEET ARE INDISTINGUISHABLE without this. `sweep.disposed` writes a
+  // decision for every PR every tick, so its ABSENCE across a window is the only signal today —
+  // and absence is exactly what a healthy quiet period looks like. Measured on 2026-08-05, a day
+  // the daemon was continuously up: `sweep.disposed` had gaps of 66.3, 53.0 and 46.7 minutes that
+  // were entirely healthy (nothing open to dispose), which is why no threshold over that step can
+  // work.
+  //
+  // WHY `sweep.summary` IS NOT ALREADY THIS. It fires on an EMPTY pass (there is no early return
+  // between here and it, and the ledger carries more summaries than disposeds), but it sits AFTER
+  // the loop, so a pass that dies mid-way writes nothing at all. That is not hypothetical: the
+  // 13:06:57 -> 13:30:28 window on 2026-08-05 is a 23.5-minute gap in `sweep.summary` that
+  // CONTAINS four `sweep.disposed` rows — passes were starting and not finishing, and PR #1348
+  // opened and closed entirely inside it. `deriveDisposition` runs at the top of each iteration,
+  // OUTSIDE the per-action try/catch below, so a throw there escapes `runSweep` entirely.
+  //
+  // POSITION IS THE WHOLE POINT: written here, a pass that throws mid-loop still leaves this row,
+  // so "started but never summarised" becomes a legible state instead of silence.
+  //
+  // `enumerated` is the count, not a bare pulse — a pass that enumerated 12 and summarised nothing
+  // is a different failure from a pass that enumerated 0 and summarised cleanly, and only the count
+  // separates them. It is deliberately the ONLY count here: how many were DISPOSITIONED cannot be
+  // known before the loop runs, and `sweep.summary`'s own `total` already carries it for any pass
+  // that completes. The pair — this row present, a summary absent — is the mid-pass-death signal.
+  //
+  // NOT REGISTERED in DECISION_RELEVANT_LEDGER_STEPS or RENDER_RELEVANT_LEDGER_STEPS, deliberately:
+  // nothing reads it yet (the consumer is out of scope here, one concern), and the decision set is
+  // the NEVER-ROTATED core, so registering an unread step there would keep it forever for no
+  // reader. It rotates like any other diagnostic row until a consumer exists; the change that
+  // builds that consumer registers it then, in the same PR, which is the discipline
+  // `test/ledger-rotation.test.ts` enforces.
+
+  log("sweep.pass", { enumerated: openPrs.length, dry_run: deps.dryRun === true });
+
   for (const pr of openPrs) {
     const { disposition, reason } = deriveDisposition(pr, policy, now);
     byDisposition[disposition]++;
