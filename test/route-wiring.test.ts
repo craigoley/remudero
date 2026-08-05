@@ -72,6 +72,7 @@ const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
   ["POST /v1/inbox/approve", "needs an inbox-proposals fixture; ratify gateway already injected"],
   ["POST /v1/inbox/reframe", "needs an inbox-proposals fixture; ratify gateway already injected"],
   ["POST /v1/feedback", "capture-only; no fleet effect"],
+  ["POST /v1/feedback/preview", "W1-T350: files nothing (no root-scoped side effect to mis-root) — behavior covered in test/panel-graph.test.ts and the console idiom in test/serve.test.ts"],
   ["POST /v1/feedback/decision", "needs a feedback-landing fixture (real git bridge)"],
   ["POST /v1/operator-notes/add", "advisory note; no fleet effect"],
   ["POST /v1/drain/feedback", "covered by test/route-registration.test.ts (mount + write scope)"],

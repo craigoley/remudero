@@ -1188,6 +1188,9 @@ export function renderShellHtml(
     "/v1/inbox/approve": { kind: "done", text: "Proposal approved — the drafted tasks are filed." },
     "/v1/inbox/reframe": { kind: "done", text: "Reframe recorded — your wording is saved against the proposal." },
     "/v1/feedback": { kind: "done", text: "Answer recorded." },
+    // W1-T350: a preview FILES NOTHING -- distinct wording so this never reads as "recorded"
+    // (the neutral fallback every unlisted write route gets would say exactly that).
+    "/v1/feedback/preview": { kind: "done", text: "Preview generated — nothing is filed yet. Review it, then submit again to confirm and file." },
     "/v1/control/pause": { kind: "done", text: "Fleet PAUSED — no new task will be dispatched until you resume." },
     "/v1/control/resume": { kind: "done", text: "Fleet RESUMED — dispatch is live again." },
     "/v1/control/stop": { kind: "done", text: "Fleet STOPPED — dispatch is halted until you resume." },
@@ -2174,6 +2177,16 @@ export function renderShellHtml(
       \`<details class="decision-raw"><summary>Show raw</summary>\${rawHtml}</details>\`
     );
   }
+  // W1-T350: the Answer form is the ONE console control that submits raw operator text to
+  // POST /v1/feedback, so it is "the console's own... submit control" this task's design (ii)
+  // converts to arm-then-confirm with a read-back. First submit PREVIEWS (POST
+  // /v1/feedback/preview) and, when an expansion comes back, ARMS the submit button with a
+  // read-back of it — never files on that click. A second submit (data-confirming==="true")
+  // files WITH the previewed expansion attached. When the preview yields no expansion (unset/
+  // outage/timeout — the fail-open falsifier), the FIRST click files immediately, unchanged
+  // from before this task: never a single-click submit of an unseen rewrite, but never a
+  // second click required for a plain, un-expandable answer either. "File raw" is the escape
+  // (design (iv)) — one deliberate click away, always skips the preview entirely.
   function needsMeGrillHtml(e) {
     const rawHtml = \`<span class="detail">asks: \${escapeHtml(e.raw)}</span>\`;
     return (
@@ -2182,7 +2195,8 @@ export function renderShellHtml(
       \`<form class="inline-action needs-me-answer" data-reply-to="\${escapeHtml(e.id)}">\` +
       \`<label for="answer-\${escapeHtml(e.id)}">Answer</label>\` +
       \`<input id="answer-\${escapeHtml(e.id)}" type="text" required />\` +
-      \`<button type="submit"\${writeGateAttrs()}>Answer</button></form>\`
+      \`<button type="submit" class="needs-me-answer-submit" data-confirming="false" aria-pressed="false"\${writeGateAttrs()}>Answer</button>\` +
+      \`<button type="button" class="needs-me-answer-raw"\${writeGateAttrs()}>File raw</button></form>\`
     );
   }
   function needsMeProposedHtml(e) {
@@ -2900,6 +2914,24 @@ export function renderShellHtml(
   });
 
   // ── NEEDS ME row actions (event delegation — rows are re-rendered on every refresh) ─────
+  // W1-T350: one confirm-arm timer + one cached expansion PER answer form (a shared single
+  // timer/cache, STOP's own shape, would misfire if two grill answers were mid-preview at
+  // once) -- keyed by replyTo, mirroring approveConfirmTimers's own per-proposalId keying.
+  const answerConfirmTimers = new Map();
+  const answerExpansions = new Map();
+  function resetAnswerButton(btn) {
+    btn.dataset.confirming = "false";
+    btn.setAttribute("aria-pressed", "false");
+    btn.classList.remove("confirming");
+    btn.textContent = "Answer";
+    const form = btn.closest(".needs-me-answer");
+    const replyTo = form && form.dataset.replyTo;
+    if (replyTo) {
+      clearTimeout(answerConfirmTimers.get(replyTo));
+      answerConfirmTimers.delete(replyTo);
+      answerExpansions.delete(replyTo);
+    }
+  }
   document.getElementById("needs-me-list").addEventListener("submit", async (e) => {
     const answerForm = e.target.closest(".needs-me-answer");
     const reframeForm = e.target.closest(".needs-me-reframe");
@@ -2910,9 +2942,50 @@ export function renderShellHtml(
     if (answerForm) {
       e.preventDefault();
       const replyTo = answerForm.dataset.replyTo;
-      const answer = answerForm.querySelector("input").value.trim();
-      await postJson("/v1/feedback", { text: answer, replyTo });
-      refreshAll();
+      const input = answerForm.querySelector("input");
+      const answer = input.value.trim();
+      if (!answer) return;
+      const submitBtn = answerForm.querySelector(".needs-me-answer-submit");
+      // W1-T350: a SECOND submit while armed files WITH the expansion the first submit already
+      // read back -- the round trip's whole point (never file an unseen rewrite).
+      if (submitBtn.dataset.confirming === "true") {
+        const expansion = answerExpansions.get(replyTo) ?? null;
+        resetAnswerButton(submitBtn);
+        await postJson("/v1/feedback", { text: answer, replyTo, expansion });
+        input.value = "";
+        refreshAll();
+        return;
+      }
+      // First submit: PREVIEW the expansion -- FAIL-OPEN, never blocks filing on an expander
+      // outage/timeout (this task's stated failure mode).
+      let expansion = null;
+      try {
+        const previewRes = await postJson("/v1/feedback/preview", { text: answer, replyTo });
+        if (previewRes && previewRes.ok) {
+          const previewBody = await previewRes.json();
+          expansion = previewBody.expansion ?? null;
+        }
+      } catch {
+        expansion = null;
+      }
+      if (!expansion) {
+        // Nothing to show -- file exactly as before this task, single click, unchanged: the
+        // fail-open falsifier this bar names ("an expander error or timeout leaves plain raw
+        // submission working unchanged").
+        await postJson("/v1/feedback", { text: answer, replyTo });
+        input.value = "";
+        refreshAll();
+        return;
+      }
+      // ARM: the armed control shows the expansion's read-back before anything files -- never a
+      // single-click submit of an unseen rewrite (this task's console acceptance bar).
+      answerExpansions.set(replyTo, expansion);
+      submitBtn.dataset.confirming = "true";
+      submitBtn.setAttribute("aria-pressed", "true");
+      submitBtn.classList.add("confirming");
+      submitBtn.textContent = \`Confirm: \${expansion.claim} (RECON \${expansion.recon.length}) — file?\`;
+      clearTimeout(answerConfirmTimers.get(replyTo));
+      answerConfirmTimers.set(replyTo, setTimeout(() => resetAnswerButton(submitBtn), 8000));
     } else if (reframeForm) {
       // W1-T193: REFRAME captures the operator's own words VERBATIM -- a textarea, not a link
       // to a terminal (the wrong asymmetry: agreeing easy, disagreeing hard). Wired to the
@@ -2944,10 +3017,24 @@ export function renderShellHtml(
     const decideBtn = e.target.closest(".needs-me-decide");
     const markHandledBtn = e.target.closest(".needs-me-mark-handled");
     const approveBtn = e.target.closest(".proposal-approve-btn");
+    const rawBtn = e.target.closest(".needs-me-answer-raw");
     // W1-T202 defense-in-depth (see the submit handler above for why this exists alongside the
     // 'disabled' attribute already on each of these three buttons).
-    if (!hasWriteScope && (decideBtn || markHandledBtn || approveBtn)) return;
-    if (decideBtn) {
+    if (!hasWriteScope && (decideBtn || markHandledBtn || approveBtn || rawBtn)) return;
+    if (rawBtn) {
+      // W1-T350: THE ESCAPE (design (iv)) -- one deliberate click, ALWAYS skips the preview and
+      // files the plain submission, exactly the pre-this-task behavior. Never armed, never a
+      // confirm -- distinct from Answer's own arm-then-confirm above.
+      const form = rawBtn.closest(".needs-me-answer");
+      const replyTo = form.dataset.replyTo;
+      const input = form.querySelector("input");
+      const answer = input.value.trim();
+      if (!answer) return;
+      resetAnswerButton(form.querySelector(".needs-me-answer-submit"));
+      await postJson("/v1/feedback", { text: answer, replyTo });
+      input.value = "";
+      refreshAll();
+    } else if (decideBtn) {
       await postJson("/v1/feedback/decision", { id: decideBtn.dataset.id, decision: decideBtn.dataset.decision });
       refreshAll();
     } else if (markHandledBtn) {

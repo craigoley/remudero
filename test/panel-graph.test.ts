@@ -10,6 +10,7 @@ import {
   buildDrainPreviewRoute,
   buildFeedbackInboxRoute,
   buildPanelGraphRoutes,
+  buildPreviewFeedbackRoute,
   buildProposalDecisionRoute,
   buildSubmitFeedbackRoute,
   buildTraceRoute,
@@ -20,7 +21,17 @@ import {
   type RatifyCliGateway,
 } from "../src/lib/panel-graph.js";
 import { bearerTokenId } from "../src/lib/panel-actions.js";
-import { captureFeedback, feedbackEntryPath, readFeedbackEntry, setFeedbackStatus, type FeedbackEntry } from "../src/lib/feedback.js";
+import {
+  captureFeedback,
+  feedbackDir,
+  feedbackEntryPath,
+  readFeedbackEntry,
+  setFeedbackStatus,
+  validateFeedbackExpansion,
+  type FeedbackEntry,
+  type FeedbackExpanderDeps,
+  type FeedbackExpansion,
+} from "../src/lib/feedback.js";
 import { appendLedger } from "../src/lib/ledger.js";
 import type { TraceGithub, TracePrView } from "../src/lib/trace.js";
 import type { GitHub } from "../src/lib/status.js";
@@ -166,6 +177,8 @@ test("GET /v1/feedback, GET /v1/trace are read-scoped; POST /v1/feedback, POST /
     assert.equal(readOnPost.status, 403);
     const readOnDecision = await post(base, "/v1/feedback/decision", READ_TOKEN, { id: "x", decision: "accept" });
     assert.equal(readOnDecision.status, 403);
+    const readOnPreview = await post(base, "/v1/feedback/preview", READ_TOKEN, { text: "x" });
+    assert.equal(readOnPreview.status, 403);
   });
 });
 
@@ -437,6 +450,202 @@ test("POST /v1/feedback with replyTo naming a NON-grilling entry -> 400 (nothing
   });
 });
 
+// ── POST /v1/feedback/preview (W1-T350: the feedback interpreter's preview seam) ────────────
+//
+// Acceptance criterion 1 (plan/tasks.d/W1-T350...): "the preview endpoint returns a four-section
+// expansion in which every specific the operator did not state appears under RECON as a
+// directive, and an expander failure leaves plain submission filing today's entry unchanged."
+
+function validExpansionPayload(over: Partial<FeedbackExpansion> = {}): FeedbackExpansion {
+  return {
+    claim: "the drain retry banner overlaps the status pill",
+    evidence: "",
+    recon: ["establish whether this reproduces at other viewport widths", "establish which build introduced it"],
+    falsifying_check: "if the overlap does not reproduce on a fresh reload, this is a one-off render glitch",
+    ...over,
+  };
+}
+
+function fakeExpandFeedback(payload: unknown): FeedbackExpanderDeps["expand"] {
+  return async () => payload;
+}
+
+test("POST /v1/feedback/preview: returns the four-section expansion and FILES NOTHING — no plan/feedback/<id>.yaml, no ledger line", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  const expansion = validExpansionPayload();
+  const deps = { ...depsFor(root, planPath), expandFeedback: fakeExpandFeedback(expansion) };
+
+  await withService(deps, async (base) => {
+    const res = await post(base, "/v1/feedback/preview", WRITE_TOKEN, { text: "the console doesn't show me when spend is blocked" });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { expansion: FeedbackExpansion };
+    assert.deepEqual(body.expansion, expansion);
+  });
+
+  // the acceptance criterion's literal proof: nothing was filed.
+  assert.ok(!existsSync(feedbackDir(root)) || readdirSync(feedbackDir(root)).filter((f) => f.endsWith(".yaml")).length === 0);
+  assert.equal(readLedgerLines(ledgerPathFor(root)).length, 0);
+});
+
+test("POST /v1/feedback/preview: every specific under `recon` is preserved verbatim through validateFeedbackExpansion — the RECON-placement contract a downstream reader can check", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  const expansion = validExpansionPayload({ evidence: "", recon: ["establish whether X was ever measured", "establish what Y depends on"] });
+  const deps = { ...depsFor(root, planPath), expandFeedback: fakeExpandFeedback(expansion) };
+  await withService(deps, async (base) => {
+    const res = await post(base, "/v1/feedback/preview", WRITE_TOKEN, { text: "a short note with two unverified specifics" });
+    const body = (await res.json()) as { expansion: FeedbackExpansion };
+    assert.deepEqual(body.expansion.recon, ["establish whether X was ever measured", "establish what Y depends on"]);
+    assert.equal(body.expansion.evidence, "", "an unverified specific must never land in evidence");
+  });
+});
+
+test("POST /v1/feedback/preview: no expander configured (no production caller wires one yet) -> { expansion: null }, 200, never a 5xx", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  await withService(depsFor(root, planPath), async (base) => {
+    const res = await post(base, "/v1/feedback/preview", WRITE_TOKEN, { text: "x" });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { expansion: null });
+  });
+});
+
+test("POST /v1/feedback/preview: an expander that THROWS degrades to { expansion: null }, 200 — the fail-open falsifier, never a 5xx", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  const deps: PanelGraphDeps = {
+    ...depsFor(root, planPath),
+    expandFeedback: async () => {
+      throw new Error("model unavailable");
+    },
+  };
+  await withService(deps, async (base) => {
+    const res = await post(base, "/v1/feedback/preview", WRITE_TOKEN, { text: "x" });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { expansion: null });
+  });
+});
+
+test("POST /v1/feedback/preview: a response that fails FeedbackExpansion validation degrades to { expansion: null }", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  const deps = { ...depsFor(root, planPath), expandFeedback: fakeExpandFeedback({ claim: "" }) };
+  await withService(deps, async (base) => {
+    const res = await post(base, "/v1/feedback/preview", WRITE_TOKEN, { text: "x" });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { expansion: null });
+  });
+});
+
+test("POST /v1/feedback/preview: missing text -> 400", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  await withService(depsFor(root, planPath), async (base) => {
+    const res = await post(base, "/v1/feedback/preview", WRITE_TOKEN, {});
+    assert.equal(res.status, 400);
+  });
+});
+
+test("POST /v1/feedback/preview: an empty-string replyTo -> 400 (must be a non-empty string when present)", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  await withService(depsFor(root, planPath), async (base) => {
+    const res = await post(base, "/v1/feedback/preview", WRITE_TOKEN, { text: "x", replyTo: "  " });
+    assert.equal(res.status, 400);
+  });
+});
+
+test("POST /v1/feedback/preview with replyTo naming an unknown entry -> 400 — never arms a Confirm the eventual submission would then reject", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  await withService(depsFor(root, planPath), async (base) => {
+    const res = await post(base, "/v1/feedback/preview", WRITE_TOKEN, { text: "x", replyTo: "fb-does-not-exist" });
+    assert.equal(res.status, 400);
+  });
+});
+
+test("POST /v1/feedback/preview with replyTo naming a NON-grilling entry -> 400", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  const notGrilling = captureFeedback(root, { raw: "already new", origin: "cli" });
+  await withService(depsFor(root, planPath), async (base) => {
+    const res = await post(base, "/v1/feedback/preview", WRITE_TOKEN, { text: "x", replyTo: notGrilling.id });
+    assert.equal(res.status, 400);
+  });
+});
+
+test("POST /v1/feedback/preview: a valid replyTo naming a real grilling entry expands normally", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  const parked = captureFeedback(root, { raw: "does this want a CLI flag or a config default?", origin: "cli" });
+  setFeedbackStatus(root, parked.id, "grilling");
+  const expansion = validExpansionPayload();
+  const deps = { ...depsFor(root, planPath), expandFeedback: fakeExpandFeedback(expansion) };
+  await withService(deps, async (base) => {
+    const res = await post(base, "/v1/feedback/preview", WRITE_TOKEN, { text: "a config default, please", replyTo: parked.id });
+    assert.equal(res.status, 200);
+    assert.deepEqual((await res.json()).expansion, expansion);
+  });
+});
+
+// ── POST /v1/feedback: threading a confirmed expansion through to capture (W1-T350) ─────────
+//
+// Acceptance criterion 2: "a confirmed submission stores the operator's raw text
+// byte-identical alongside the expansion, and the file-raw escape still files without an
+// expansion." captureFeedback's own storage contract is covered directly in
+// test/feedback.test.ts; these two prove the ROUTE threads (or omits) it correctly.
+
+test("POST /v1/feedback: a CONFIRMED submission carrying a valid `expansion` stores it alongside raw, byte-identical", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  const expansion = validExpansionPayload();
+  await withService(depsFor(root, planPath), async (base) => {
+    const res = await post(base, "/v1/feedback", WRITE_TOKEN, { text: "the drain retry banner overlaps the status pill", expansion });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { entry: FeedbackEntry };
+    assert.equal(body.entry.raw, "the drain retry banner overlaps the status pill");
+    assert.deepEqual(body.entry.expansion, expansion);
+  });
+});
+
+test("POST /v1/feedback: the file-raw escape (no `expansion` field at all) captures exactly as before this task", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  await withService(depsFor(root, planPath), async (base) => {
+    const res = await post(base, "/v1/feedback", WRITE_TOKEN, { text: "just file this as-is" });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { entry: FeedbackEntry };
+    assert.equal(body.entry.expansion ?? null, null);
+  });
+});
+
+test("POST /v1/feedback: an EXPLICIT `expansion: null` (a confirm whose preview never produced one) captures with expansion null, same as omitting it", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  await withService(depsFor(root, planPath), async (base) => {
+    const res = await post(base, "/v1/feedback", WRITE_TOKEN, { text: "x", expansion: null });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { entry: FeedbackEntry };
+    assert.equal(body.entry.expansion, null);
+  });
+});
+
+test("POST /v1/feedback: a malformed `expansion` is rejected loud (400), never silently stored or silently dropped", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  await withService(depsFor(root, planPath), async (base) => {
+    const res = await post(base, "/v1/feedback", WRITE_TOKEN, { text: "x", expansion: { claim: "" } });
+    assert.equal(res.status, 400);
+  });
+  assert.ok(!existsSync(feedbackDir(root)) || readdirSync(feedbackDir(root)).filter((f) => f.endsWith(".yaml")).length === 0, "a rejected expansion must not leave a captured entry");
+});
+
+test("validateFeedbackExpansion re-validates whatever POST /v1/feedback stores — a sanity check that the route never bypasses the module's own gate", () => {
+  const expansion = validExpansionPayload();
+  assert.deepEqual(validateFeedbackExpansion(expansion), expansion);
+});
+
 // ── END-TO-END (acceptance criterion 1): panel capture -> REAL triage decision -> proposal PR,
 // read back through the panel's OWN routes ──────────────────────────────────────────────────
 
@@ -683,6 +892,8 @@ test("individual route builders each return their own exact-match route", () => 
   assert.equal(buildFeedbackInboxRoute(deps).path, "/v1/feedback");
   assert.equal(buildFeedbackInboxRoute(deps).method, "GET");
   assert.equal(buildSubmitFeedbackRoute(deps).method, "POST");
+  assert.equal(buildPreviewFeedbackRoute(deps).path, "/v1/feedback/preview");
+  assert.equal(buildPreviewFeedbackRoute(deps).method, "POST");
   assert.equal(buildTraceRoute(deps).path, "/v1/trace");
   assert.equal(buildProposalDecisionRoute(deps).path, "/v1/feedback/decision");
   assert.equal(buildDrainPreviewRoute(deps).path, "/v1/drain/preview");

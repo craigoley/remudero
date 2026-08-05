@@ -13,10 +13,16 @@
  * createService() instance) is later work, same split every prior W3-T* panel task's header
  * documents.
  *
- * FIVE ROUTES:
+ * SIX ROUTES:
  *   - GET  /v1/feedback           — the inbox list (read-scoped).
  *   - POST /v1/feedback           — submit feedback, ALWAYS origin=ui (write-scoped). See
- *     `buildSubmitFeedbackRoute`'s doc comment for how this doubles as "answer a grill".
+ *     `buildSubmitFeedbackRoute`'s doc comment for how this doubles as "answer a grill". Accepts
+ *     an optional, re-validated `expansion` (W1-T350) — the four-section CLAIM/EVIDENCE/RECON/
+ *     FALSIFYING CHECK skeleton the console read back from the preview route below and the
+ *     operator confirmed — stored alongside `raw`, never in place of it.
+ *   - POST /v1/feedback/preview   — expand a draft into that same four-section skeleton WITHOUT
+ *     filing anything (write-scoped: a real cheap-mount model call). See
+ *     `buildPreviewFeedbackRoute`'s doc comment for the fail-open contract.
  *   - GET  /v1/trace              — the plan→task→PR provenance graph for one id, task or
  *     feedback (read-scoped). Mirrors `rmd trace <id>`'s own two-entry-point resolution
  *     (run-task.ts's `traceCommand`) exactly, over the SAME lib/trace.ts primitives.
@@ -67,11 +73,16 @@ import {
 import { buildDrainPreview, dispatchOrder, runnableCandidates, type DrainOpts, type DispatchFilterReason, type MergedSet } from "./drain.js";
 import {
   captureFeedback,
+  expandFeedbackDraft,
   FEEDBACK_STATUSES,
   listFeedback,
   readFeedbackEntry,
+  recentFeedbackFewShot,
   setFeedbackStatus,
+  validateFeedbackExpansion,
   type FeedbackEntry,
+  type FeedbackExpanderDeps,
+  type FeedbackExpansion,
   type FeedbackStatus,
 } from "./feedback.js";
 import type { LandFeedbackOpts } from "./feedback-landing.js";
@@ -141,6 +152,16 @@ export interface PanelGraphDeps {
    * bridge fires with real git/gh.
    */
   feedbackLand?: LandFeedbackOpts;
+  /**
+   * W1-T350: the feedback-expansion rung POST /v1/feedback/preview calls — {@link
+   * FeedbackExpanderDeps.expand} injected directly (not the whole deps object, so a test wires
+   * a bare function like every other injected judge in this codebase). `undefined` (no
+   * production caller wires a real one yet — see feedback.ts's `realFeedbackExpander` doc for
+   * why) makes the preview route resolve `{ expansion: null }` unconditionally — the SAME
+   * fail-open degrade an expander throw/invalid-response produces, so "unconfigured" and
+   * "outage" read identically to the console.
+   */
+  expandFeedback?: FeedbackExpanderDeps["expand"];
 }
 
 // ── GET /v1/feedback — the inbox list ───────────────────────────────────────
@@ -226,6 +247,7 @@ interface SubmitFeedbackInput {
   text: string;
   attachments: string[];
   replyTo?: string;
+  expansion?: FeedbackExpansion | null;
 }
 
 /**
@@ -233,6 +255,13 @@ interface SubmitFeedbackInput {
  * into a browser form field would resolve against the DAEMON's filesystem (lib/feedback.ts's
  * `resolveAttachments`), not the operator's own machine, which is confusing at best and a path-
  * disclosure/read hazard at worst for a network-facing route. FAIL LOUD before any capture.
+ *
+ * `expansion`, if present, is the four-section {@link FeedbackExpansion} the console read back
+ * from POST /v1/feedback/preview and the operator CONFIRMED (W1-T350) — re-validated here
+ * rather than trusted verbatim (the same "never trust a value read back off the wire" posture
+ * every other body field on this route already gets), so a malformed/tampered expansion is
+ * rejected loud rather than silently stored. Omitting it entirely is the file-raw escape (design
+ * (iv)): the entry captures exactly as it did before this task.
  */
 function validateSubmitFeedback(body: unknown): { error: string } | SubmitFeedbackInput {
   if (!isRecord(body)) return { error: "body must be a JSON object" };
@@ -253,7 +282,14 @@ function validateSubmitFeedback(body: unknown): { error: string } | SubmitFeedba
   if (body.replyTo !== undefined && (typeof body.replyTo !== "string" || !body.replyTo.trim())) {
     return { error: "replyTo must be a non-empty string when present" };
   }
-  return { text: body.text, attachments, replyTo: body.replyTo as string | undefined };
+  let expansion: FeedbackExpansion | null | undefined;
+  if (body.expansion !== undefined && body.expansion !== null) {
+    expansion = validateFeedbackExpansion(body.expansion);
+    if (expansion === null) return { error: "expansion, when present, must be a valid four-section FeedbackExpansion" };
+  } else if (body.expansion === null) {
+    expansion = null;
+  }
+  return { text: body.text, attachments, replyTo: body.replyTo as string | undefined, expansion };
 }
 
 /**
@@ -290,13 +326,84 @@ export function buildSubmitFeedbackRoute(deps: PanelGraphDeps): Route {
         }
       }
       const raw = input.replyTo !== undefined ? `[answer to feedback#${input.replyTo}] ${input.text}` : input.text;
-      const entry = captureFeedback(deps.root, { raw, attachments: input.attachments, origin: "ui" });
+      const entry = captureFeedback(deps.root, { raw, attachments: input.attachments, origin: "ui", expansion: input.expansion });
       const origin = bearerTokenId(req);
       appendPanelLedger(deps.ledgerPath, "panel.feedback_submitted", entry.id, origin, {
         origin_field: entry.origin,
         reply_to: input.replyTo ?? null,
       });
       sendJson(res, 200, { ok: true, entry });
+    }),
+  };
+}
+
+// ── POST /v1/feedback/preview — expand a draft WITHOUT filing anything (W1-T350) ────────────
+
+interface PreviewFeedbackInput {
+  text: string;
+  replyTo?: string;
+}
+
+/** Same `replyTo` shape POST /v1/feedback validates — a preview must be refused for exactly
+ *  the same drafts a submission would refuse, so the console never arms a Confirm the write
+ *  itself would then 400 on. No `attachments`/`expansion` here: a preview neither stores
+ *  anything nor accepts one back. */
+function validatePreviewFeedback(body: unknown): { error: string } | PreviewFeedbackInput {
+  if (!isRecord(body)) return { error: "body must be a JSON object" };
+  if (typeof body.text !== "string" || !body.text.trim()) return { error: "text is required" };
+  if (body.replyTo !== undefined && (typeof body.replyTo !== "string" || !body.replyTo.trim())) {
+    return { error: "replyTo must be a non-empty string when present" };
+  }
+  return { text: body.text, replyTo: body.replyTo as string | undefined };
+}
+
+/**
+ * POST /v1/feedback/preview — write-scoped (a real cheap-mount model call, operator-initiated,
+ * never a passive read): runs the feedback-expansion rung (feedback.ts's `expandFeedbackDraft`)
+ * over the operator's DRAFT and returns the four-section {@link FeedbackExpansion} it produced.
+ * FILES NOTHING — no `plan/feedback/<id>.yaml`, no ledger line, no status transition; this is
+ * the PREVIEW SEAM the console's arm-then-confirm read-back shows before POST /v1/feedback ever
+ * runs (this task's design (i)/(ii)).
+ *
+ * `replyTo`, when present, is validated the SAME way POST /v1/feedback validates it (must name a
+ * real `grilling` entry) so a preview can never arm a Confirm that the eventual submission would
+ * then reject.
+ *
+ * FAIL-OPEN, every direction: `deps.expandFeedback` left unset (no production caller wires a
+ * real one yet), a rung that throws or times out, or a response {@link validateFeedbackExpansion}
+ * rejects, all resolve `{ expansion: null }` with a 200 — NEVER a 5xx. The console's own
+ * fallback on `expansion: null` is to file the plain submission unchanged (this task's stated
+ * failure mode), and it can only do that if this route never errors on an expander outage.
+ */
+export function buildPreviewFeedbackRoute(deps: PanelGraphDeps): Route {
+  return {
+    method: "POST",
+    path: "/v1/feedback/preview",
+    scope: "write",
+    handler: jsonAction(validatePreviewFeedback, async (input, _req, res) => {
+      if (input.replyTo !== undefined) {
+        let target: FeedbackEntry;
+        try {
+          target = readFeedbackEntry(deps.root, input.replyTo);
+        } catch {
+          sendJson(res, 400, { error: "invalid_request", detail: `replyTo names no known feedback entry "${input.replyTo}"` });
+          return;
+        }
+        if (target.status !== "grilling") {
+          sendJson(res, 400, {
+            error: "invalid_request",
+            detail: `feedback#${input.replyTo} is not parked at grilling (status: ${target.status}) — nothing to answer`,
+          });
+          return;
+        }
+      }
+      if (!deps.expandFeedback) {
+        sendJson(res, 200, { expansion: null });
+        return;
+      }
+      const fewShot = recentFeedbackFewShot(deps.root);
+      const expansion = await expandFeedbackDraft(input.text, fewShot, { expand: deps.expandFeedback });
+      sendJson(res, 200, { expansion });
     }),
   };
 }
@@ -1016,6 +1123,7 @@ export function buildPanelGraphRoutes(deps: PanelGraphDeps): Route[] {
   return [
     buildFeedbackInboxRoute(deps),
     buildSubmitFeedbackRoute(deps),
+    buildPreviewFeedbackRoute(deps),
     buildTraceRoute(deps),
     buildProposalDecisionRoute(deps),
     buildDrainPreviewRoute(deps),
