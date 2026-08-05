@@ -143,7 +143,7 @@ test("the SHIPPED plan/policy.yaml loads and lifts the current source values", (
     strikeCap: 2,
     wipLimit: 10,
     tmpMaxAgeMs: 3_600_000,
-    dispatchLanes: 1,
+    dispatchLanes: 2,
     dailyCostCeilingUsd: 500,
   });
   assert.equal(p.values.drain.max, 10);

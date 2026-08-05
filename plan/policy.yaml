@@ -87,15 +87,31 @@ sweep:
   # max that let one in-bounds edit jump straight to a large N would re-create the hazard this
   # row exists to make reviewable. max: 4 permits a modest, still-reviewed doubling; a bound
   # past that should be its own deliberate ruling, not a side effect of a generous default range.
-  # W1-T344 IS THE FLIP TO 2, AND IT HAS NOT HAPPENED YET. W1-T325 (#1297) relocated this row out
-  # of DEFAULT_SWEEP_POLICY and lifted the source literal verbatim — a relocation, not a retune —
-  # so it arrived reading 2 while W1-T343 (wire runDaemon to runDrainLanes) is still queued and
-  # unmerged. Left at 2, the daemon would take two lanes the moment that wiring merges and it next
-  # restarts: no dark ship, no observation window, and no separate decision, which is exactly the
-  # split W1-T344's `depends_on: [W1-T343]` exists to preserve. Its own rationale already assumes
-  # this row reads 1. Set to 1 so the capability can ship dark and the flip stays deliberate.
+  # W1-T344 IS THE FLIP TO 2, AND IT HAS NOW HAPPENED (2026-08-05). W1-T343 wired `runDaemon` to
+  # drain's lane machinery and shipped it DARK at dispatchLanes: 1 (merged as #1363, 2026-08-05).
+  # OBSERVATION WINDOW: this row held at 1 from that merge until this flip, with W1-T343's four
+  # dark-ship preconditions live (serialized keychain provisioning, an immutable plan-snapshot
+  # binding, a bounded deploy-deferral wait, a per-tick cost governor) and none of the four
+  # tripping — no keychain provisioning failure, no plan-snapshot inconsistency, no deploy
+  # deferral reaching its ceiling, no governor admitting past its limit.
+  # MEASUREMENTS AT 1 (production ledger through 2026-08-04, this task's own rationale): 226
+  # `run.start` dispatches, 39 merged verdicts (17% merge rate), the cost governor firing for the
+  # first time ever at $152.28, and 20 consecutive dispatch gaps of 45-90 minutes against
+  # ~25-minute runs (the daemon idle roughly 60% of the time). RETAKE THE SAME FOUR AT 2 so the
+  # flip is evaluable rather than permanent: dispatches per day, mean run duration, idle fraction,
+  # and the fraction of dispatches producing no merged PR — that last one decides whether lanes
+  # helped or merely doubled the churn; throughput alone improves by construction and must not be
+  # read as success.
+  # REVERSION TRIGGER, STATED IN ADVANCE: the no-merge fraction rising materially above the
+  # 83%-unmerged (226-vs-39) baseline measured at 1, OR the cost governor tripping a second time,
+  # OR a deploy deferral hitting its bound (W1-T343's deploy-quiescence gate) — any one sends this
+  # row back to 1. Reverting is a one-line policy edit plus a daemon restart: no source change,
+  # no code PR, no CI, no deploy.
+  # A RUNNING DAEMON WILL NOT PICK THIS UP UNTIL IT RESTARTS: `DEFAULT_SWEEP_POLICY` (sweep.ts) is
+  # a module-level const built at import from this file, so the flip takes effect at the daemon's
+  # NEXT start, never mid-flight.
   dispatchLanes:
-    value: 1
+    value: 2
     origin: "lifted:src/lib/sweep.ts:359 (DEFAULT_SWEEP_POLICY.dispatchLanes)"
     min: 1
     max: 4
