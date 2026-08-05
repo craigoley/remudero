@@ -315,6 +315,51 @@ export function readLatestBootSha(ledgerPath: string): string | undefined {
   return sha;
 }
 
+/**
+ * The newest `daemon.boot` `head_sha` that is NOT `excludeSha` — a sha this daemon is OBSERVED to
+ * have booted on, for {@link runDeployCycle}'s rollback target.
+ *
+ * WHY THIS EXISTS, measured: the rollback used to reset to `deps.installHead()` read at the top of
+ * the cycle. That is not a known-good sha, it is just *whatever the checkout currently points at*,
+ * and the checkout is mutable shared state with a second writer — `checkCliFreshness`
+ * (lib/self-sync.ts) fast-forwards the install to origin/main at the entry of EVERY `rmd`
+ * subcommand except daemon/serve/deploy-run, and logs nothing when it does. So a broken head that
+ * merged could be pulled into the install by any unrelated `rmd` invocation BEFORE the deploy cycle
+ * ran; `fromHead` then already WAS the broken head, and the rollback reset to the thing it was
+ * rolling back from. Observed 2026-08-05: seven consecutive `deploy.unhealthy_rollback` rows each
+ * recording `rolling_back_to == failed == a8e11cb`, the daemon down 53 minutes, recovered only when
+ * an unrelated fix commit merged.
+ *
+ * A boot line is the strongest evidence available that a sha is runnable: the daemon reached its
+ * own logging. A head that cannot boot never writes one, which is exactly why the broken sha is
+ * absent from this scan and the last healthy one is not. `excludeSha` guards the one case where the
+ * failed sha DID write a boot line before dying (a daemon that starts, logs, then crashes).
+ *
+ * `undefined` when nothing qualifies — no ledger, no boot line carrying `head_sha` (they predate
+ * that field), or every candidate is `excludeSha`. Callers MUST fall back rather than treat
+ * `undefined` as "roll back to nothing"; see {@link runDeployCycle}'s rollback branch.
+ *
+ * ROTATION: `daemon.boot` is retained by `isHealthOrDeployStep`/`HEALTH_STEP_RETENTION_WINDOW_MS`
+ * (lib/ledger.ts) for 15 minutes, comfortably longer than a deploy cycle's kickstart-to-health
+ * window, but a last-good boot older than that can be archived out of the live file. That degrades
+ * to `undefined` and therefore to the previous behaviour — never to a worse target. Deliberately
+ * reads the live ledger ONLY, matching `readLatestBootSha`/`countLedgerBootsAfter` above: this runs
+ * on a 120-second supervisor cycle and must not walk ~665 rotations.
+ */
+export function readLastGoodBootSha(ledgerPath: string, excludeSha?: string): string | undefined {
+  let sha: string | undefined;
+  try {
+    for (const line of readFileSync(ledgerPath, "utf8").split("\n")) {
+      if (!line.includes('"daemon.boot"') && !line.includes('"step":"daemon.boot"')) continue;
+      const m = line.match(/"head_sha":"([0-9a-fA-F]{7,40})"/);
+      if (m && !(excludeSha && sameCommit(m[1], excludeSha))) sha = m[1];
+    }
+  } catch {
+    /* no ledger yet — nothing recorded */
+  }
+  return sha;
+}
+
 /** Healthy IFF a fresh boot was seen AND the daemon did not restart-storm. */
 export function assessBootHealth(i: HealthInputs, opts: HealthOpts = {}): HealthResult {
   const threshold = opts.crashThreshold ?? 3;
@@ -362,6 +407,15 @@ export interface DeployDeps {
   pullFf: () => void;
   /** git reset --hard <ref> — rollback only (recovery). */
   resetHard: (ref: string) => void;
+  /**
+   * The newest sha the daemon is OBSERVED to have booted on, excluding `excludeSha` — the rollback
+   * target. Wired by {@link realDeployDeps} to {@link readLastGoodBootSha} over the live ledger.
+   * OPTIONAL: omitted (or returning `undefined`) ⇒ the rollback falls back to the cycle's
+   * `installHead()` exactly as it did before this dep existed, so an unwired caller degrades to the
+   * previous behaviour rather than to no rollback at all. See {@link readLastGoodBootSha} for why
+   * `installHead()` is not a safe anchor.
+   */
+  lastGoodBootSha?: (excludeSha: string) => string | undefined;
   probeIdle: () => IdleProbe;
   /** launchctl kickstart -k the daemon job. */
   kickstart: () => void;
@@ -558,14 +612,35 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     };
   }
 
-  // ROLLBACK — restore the known-good HEAD and daemon, alert, never leave a
+  // ROLLBACK — restore a head the daemon is OBSERVED to have booted on, alert, never leave a
   // crash-looping daemon live.
-  deps.log("deploy.unhealthy_rollback", { failed: short(toHead), reason: health.reason, rolling_back_to: short(fromHead) });
-  deps.resetHard(fromHead);
+  //
+  // The target is NOT `fromHead`. `fromHead` is `installHead()` read at the top of this cycle, and
+  // the install checkout has a second, unlogged writer — `checkCliFreshness` (lib/self-sync.ts)
+  // fast-forwards it at the entry of nearly every `rmd` subcommand. When that happens between a bad
+  // head merging and this cycle running, `fromHead` IS the bad head and `resetHard(fromHead)`
+  // restores the failure. That is not hypothetical: 2026-08-05 logged seven consecutive rollbacks
+  // with `rolling_back_to == failed`, and the fleet stayed down 53 minutes because none of them
+  // moved the tree. See {@link readLastGoodBootSha}.
+  //
+  // `fromHead` remains the fallback when no booted sha is known (no ledger, boot lines predating
+  // `head_sha`, or rotation aged the last good one out): the previous behaviour, never worse.
+  const bootedSha = deps.lastGoodBootSha?.(toHead);
+  const rollbackTo = bootedSha ?? fromHead;
+  deps.log("deploy.unhealthy_rollback", {
+    failed: short(toHead),
+    reason: health.reason,
+    rolling_back_to: short(rollbackTo),
+    // Distinguishes a rollback aimed by observed evidence from one that fell back to the install's
+    // own head — the latter is the shape that silently did nothing, so it must be legible in the
+    // ledger rather than inferred from two shas happening to match.
+    anchor: bootedSha ? "booted" : "install-head",
+  });
+  deps.resetHard(rollbackTo);
   deps.kickstart();
-  deps.alert(`deploy of ${toHead} failed health-check (${health.reason}); rolled back to ${fromHead}`, toHead, "health-check-rollback");
+  deps.alert(`deploy of ${toHead} failed health-check (${health.reason}); rolled back to ${rollbackTo}`, toHead, "health-check-rollback");
   deps.clearMarker();
-  return { deployed: false, reason: `health-check-failed-rolled-back: ${health.reason}`, fromHead, toHead, rolledBackTo: fromHead };
+  return { deployed: false, reason: `health-check-failed-rolled-back: ${health.reason}`, fromHead, toHead, rolledBackTo: rollbackTo };
 }
 
 // ── Marker + alert file paths (state/) ──────────────────────────────────────────
@@ -742,6 +817,9 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       else unlinkSync(join(o.installPath, path));
     },
     runningHead: () => readLatestBootSha(o.ledgerPath),
+    // Same ledger, same live-file-only read as `runningHead` directly above — the rollback anchor
+    // (see runDeployCycle's rollback branch for why it is not `installHead()`).
+    lastGoodBootSha: (excludeSha) => readLastGoodBootSha(o.ledgerPath, excludeSha),
     dirtyFiles: () =>
       git(["status", "--porcelain"])
         .split("\n")
