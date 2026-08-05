@@ -79,9 +79,9 @@ test("W1-T253: sweep.ts's DEFAULT_SWEEP_POLICY.staleDays/strikeCap/wipLimit read
 // ONLY THE PIN MOVES. The assertion above it — that the consumer equals SHIPPED.values, i.e. the
 // value is LIFTED rather than a source literal — is what this test exists for and holds at ANY
 // value; it is deliberately untouched by every retune.
-test("W1-T325/W1-T344: sweep.ts's DEFAULT_SWEEP_POLICY.dispatchLanes reads plan/policy.yaml's sweep.dispatchLanes row, not a source literal, and the shipped value is 3", () => {
+test("W1-T325/W1-T344: sweep.ts's DEFAULT_SWEEP_POLICY.dispatchLanes reads plan/policy.yaml's sweep.dispatchLanes row, not a source literal, and the shipped value is 2", () => {
   assert.equal(DEFAULT_SWEEP_POLICY.dispatchLanes, SHIPPED.values.sweep.dispatchLanes);
-  assert.equal(DEFAULT_SWEEP_POLICY.dispatchLanes, 3);
+  assert.equal(DEFAULT_SWEEP_POLICY.dispatchLanes, 2);
 });
 
 // W1-T330: dailyCostCeilingUsd joins its siblings above — a relocation of the pre-existing

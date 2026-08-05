@@ -168,8 +168,27 @@ sweep:
   # per tick BETWEEN iterations, so it halts new dispatch within the 60s poll without
   # interrupting in-flight work, needs no PR and no restart, and survives the deploy's
   # `pull --ff-only` because .gitignore ignores state/.
+  # ── BACK TO 2 (2026-08-05, same night). THE EXPERIMENT WAS INCONCLUSIVE — SAY SO. ──────────
+  # N=3 merged 22:11Z but did NOT go live until 23:14:51Z (39cb7a9), so for the entire watch
+  # window the daemon held its boot value and NO TICK WAS EVER OFFERED THREE LANES. In the ~25
+  # minutes it was live it dispatched ONE task, single-lane: zero `dispatch.concurrent_set` and
+  # zero `dispatch.settled_set` rows carry `lane_count: 3`, because none was ever written.
+  # "THE QUEUE COULD NOT FILL THREE" IS NOT A FINDING AND MUST NOT BE RECORDED AS ONE — it was
+  # never tested. This revert rests on the DEFERRAL measurement, not on any lane result.
+  # WHAT WAS ESTABLISHED, AT TWO LANES: `daemonIsIdle` was not true for a SINGLE probe across 32
+  # continuous minutes. Three deferral episodes ended at ~10m, 8.6m and 30.7m, the last hitting
+  # the 1800000ms ceiling; `waited_ms: 511594` was observed at 23:27Z with only ONE lock held.
+  # W1-T341's own doc predicted exactly this — "parallelism spends exactly that slack" — and the
+  # slack was already gone at two.
+  # NO CONCURRENCY COST APPEARED, and a later reader must not conclude lanes were harmful:
+  # `rejected: 0` on EVERY settled set, `run.error` unchanged at 18 lifetime,
+  # `scope_guard.refused` unchanged at 8, no auth-shaped failure. THE PROBLEM IS DELIVERY, NOT
+  # PARALLELISM.
+  # WHY NOW: W1-T380 (a dry-run deploy clears the ceiling clock without restarting, so the bound
+  # that guarantees delivery disarms itself) is filed and being built. This reduces pressure on a
+  # delivery path that is currently broken, and 3 is worth revisiting once it is fixed.
   dispatchLanes:
-    value: 3
+    value: 2
     origin: "lifted:src/lib/sweep.ts:359 (DEFAULT_SWEEP_POLICY.dispatchLanes)"
     min: 1
     max: 4
