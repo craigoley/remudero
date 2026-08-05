@@ -652,12 +652,14 @@ test("console tab bar: exactly four tabs (Decisions, Now, Plan, Feed), pinned un
       assert.equal(order.eitherContainsTheOther, false);
       assert.equal(order.glancePrecedesTabs, true);
 
-      // Plan: an honest "not built yet," present in the DOM but hidden until selected.
+      // Plan: W1-T315 fills the W1-T336 placeholder with the real progress + frontier view --
+      // present in the DOM but hidden until selected, same as before.
       assert.equal(await page.$eval("#tab-plan-panel", (el) => (el as HTMLElement).hidden), true);
       await page.click("#tab-plan");
       const plan = await page.$eval("#tab-plan-panel", (el) => ({ hidden: (el as HTMLElement).hidden, text: el.textContent ?? "" }));
       assert.equal(plan.hidden, false);
-      assert.match(plan.text, /not built yet/i);
+      assert.doesNotMatch(plan.text, /not built yet/i);
+      assert.match(plan.text, /Frontier/i);
 
       // ADD, REMOVE NOTHING, BUT NOW GATED: every one of the nine sections is still in the
       // document (never deleted -- W1-T314's "a missing tab reads as a missing capability," and
