@@ -20,6 +20,7 @@ import {
   checkTroubleshootingCoverage,
   decideArmFromLedgerVerdict,
   decideAutoMergeArm,
+  decisionsEntryProvenanceViolations,
   detectTestTheater,
   execWhitelistedProof,
   failSummary,
@@ -162,6 +163,137 @@ test("detectTestTheater: a diff that touches no test file is not theater", () =>
 test("empty acceptance criteria fail closed (nothing to judge is never a pass)", () => {
   const v = judgeReview([], { diff: REAL_TEST_DIFF, report: RESPONSIVE_REPORT });
   assert.equal(v.state, "failure");
+});
+
+// ── W1-T352: DECISIONS.md ENTRY PROVENANCE FLOOR ────────────────────────────
+// A diff that ADDS a new `## ` entry header to DECISIONS.md must carry, among
+// that SAME entry's own added lines, either the machine auto-choose stamp or
+// an operator-attribution line (the corpus's two provenance genres) — or the
+// review FAILS, naming the unmarked entry. The floor reads the DIFF only: a
+// PR touching DECISIONS.md without adding a header, or whose only header line
+// is unchanged CONTEXT, never fires — DECISIONS.md's own historical unmarked
+// entries (predating this floor) are never re-litigated. Fixtures mirror the
+// incident this task closes: PR #1302 appended a bare "## … RULING:" header
+// in neither genre; the operator overrode it within the hour (#1303, whose
+// own amendment carries "**The operator has overridden …**").
+
+const DECISIONS_UNMARKED_ENTRY_DIFF = `
+diff --git a/DECISIONS.md b/DECISIONS.md
++++ b/DECISIONS.md
+@@
++## 2026-08-05 — RULING: something binding happens now
++
++This entry describes a binding ruling with no provenance mark anywhere in it.
++
++- Rollback: revert this PR.
+`.trim();
+
+const DECISIONS_STAMPED_ENTRY_DIFF = `
+diff --git a/DECISIONS.md b/DECISIONS.md
++++ b/DECISIONS.md
+@@
++## 2026-08-05T00:00:00.000Z — W1-T999 (W1-T999-abc)
++- Options: Option A | Option B
++- Chosen (RECOMMENDED, auto): Option A — no functional code change.
++- Rollback: revert this PR.
+`.trim();
+
+const DECISIONS_OPERATOR_ENTRY_DIFF = `
+diff --git a/DECISIONS.md b/DECISIONS.md
++++ b/DECISIONS.md
+@@
++## 2026-08-05 — OPERATOR RULING: something is decided by hand
++
++*Operator-authored, not a machine auto-choose resolution — recorded by hand at the operator's
++instruction.*
++
++- The ruling text goes here.
+`.trim();
+
+const DECISIONS_OVERRIDE_ATTRIBUTION_DIFF = `
+diff --git a/DECISIONS.md b/DECISIONS.md
++++ b/DECISIONS.md
+@@
++## 2026-08-05 — AMENDMENT: the ruling above is overridden
++
++**The operator has overridden the earlier ruling.** Recorded here so the reason survives.
+`.trim();
+
+const DECISIONS_TOUCH_NO_NEW_HEADER_DIFF = `
+diff --git a/DECISIONS.md b/DECISIONS.md
++++ b/DECISIONS.md
+@@
+-- Rollback: revert this PR.
++- Rollback: revert this PR (typo fix).
+`.trim();
+
+const DECISIONS_CONTEXT_ONLY_OLD_HEADER_DIFF = `
+diff --git a/DECISIONS.md b/DECISIONS.md
++++ b/DECISIONS.md
+@@
+ ## 2026-07-20 — OPERATOR DECISION: WS-2 deferral, overnight posture, P34 family
+-- Rollback: revert this PR.
++- Rollback: revert this PR (typo fix).
+`.trim();
+
+test("decisionsEntryProvenanceViolations: an added entry header with NEITHER genre is named as a violation", () => {
+  assert.deepEqual(decisionsEntryProvenanceViolations(DECISIONS_UNMARKED_ENTRY_DIFF), [
+    "## 2026-08-05 — RULING: something binding happens now",
+  ]);
+});
+
+test("decisionsEntryProvenanceViolations: the machine auto-choose stamp clears the floor", () => {
+  assert.deepEqual(decisionsEntryProvenanceViolations(DECISIONS_STAMPED_ENTRY_DIFF), []);
+});
+
+test("decisionsEntryProvenanceViolations: an 'Operator-authored' hand-record line clears the floor", () => {
+  assert.deepEqual(decisionsEntryProvenanceViolations(DECISIONS_OPERATOR_ENTRY_DIFF), []);
+});
+
+test("decisionsEntryProvenanceViolations: an explicit 'the operator has overridden' sentence clears the floor", () => {
+  assert.deepEqual(decisionsEntryProvenanceViolations(DECISIONS_OVERRIDE_ATTRIBUTION_DIFF), []);
+});
+
+test("decisionsEntryProvenanceViolations: reads the DIFF, not the file — touching DECISIONS.md without adding a new '## ' header never fires", () => {
+  assert.deepEqual(decisionsEntryProvenanceViolations(DECISIONS_TOUCH_NO_NEW_HEADER_DIFF), []);
+});
+
+test("decisionsEntryProvenanceViolations: an existing entry header appearing only as unchanged CONTEXT never fires — historical unmarked entries are never re-litigated", () => {
+  assert.deepEqual(decisionsEntryProvenanceViolations(DECISIONS_CONTEXT_ONLY_OLD_HEADER_DIFF), []);
+});
+
+test("judgeReview: a diff adding an unprovenanced DECISIONS.md entry FAILS even though every named criterion is otherwise met, and NAMES the entry", () => {
+  const v = judgeReview(CRITERIA, { diff: DECISIONS_UNMARKED_ENTRY_DIFF, report: RESPONSIVE_REPORT });
+  assert.equal(v.state, "failure");
+  assert.equal(v.floorState, "failure");
+  assert.deepEqual(v.unprovenancedDecisionsEntries, ["## 2026-08-05 — RULING: something binding happens now"]);
+  assert.ok(
+    v.summary.includes("RULING: something binding happens now"),
+    `summary must name the unmarked entry, got: ${v.summary}`,
+  );
+});
+
+test("judgeReview: a stamped machine entry and a marked operator entry both PASS unchanged", () => {
+  const stamped = judgeReview(CRITERIA, { diff: DECISIONS_STAMPED_ENTRY_DIFF, report: RESPONSIVE_REPORT });
+  assert.equal(stamped.state, "success", stamped.summary);
+  assert.deepEqual(stamped.unprovenancedDecisionsEntries, []);
+
+  const operator = judgeReview(CRITERIA, { diff: DECISIONS_OPERATOR_ENTRY_DIFF, report: RESPONSIVE_REPORT });
+  assert.equal(operator.state, "success", operator.summary);
+  assert.deepEqual(operator.unprovenancedDecisionsEntries, []);
+});
+
+test("judgeReview: a PR touching DECISIONS.md without adding a new entry header passes, unaffected by this floor", () => {
+  const v = judgeReview(CRITERIA, { diff: DECISIONS_TOUCH_NO_NEW_HEADER_DIFF, report: RESPONSIVE_REPORT });
+  assert.equal(v.state, "success", v.summary);
+  assert.deepEqual(v.unprovenancedDecisionsEntries, []);
+});
+
+test("failSummary: an unprovenanced DECISIONS.md entry names the entry and states the two accepted genres", () => {
+  const s = failSummary([], false, false, false, 0, [], undefined, ["## unmarked entry"]);
+  assert.match(s, /## unmarked entry/);
+  assert.match(s, /Chosen \(RECOMMENDED, auto\)/);
+  assert.match(s, /Operator-authored/);
 });
 
 test("NORMALIZE: `maxTurns` in a criterion matches `max_turns` in the report (case/separator-insensitive)", () => {
