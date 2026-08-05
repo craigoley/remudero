@@ -182,7 +182,21 @@ test("W1-T240 claim 2: two 'concurrent' updateProposalRegistry calls -- B's read
           // `isPidAlive: () => false` here, matching what B's own outer call already does
           // at `isPidAlive: () => !aDone` above, makes A's reclaim of the fake pid-111 lock
           // unconditional and OS-independent, closing the remaining race deterministically.
-          updateProposalRegistry(registryPath, (current) => [...current, proposal("A")], { maxWaitMs: 60_000, isPidAlive: () => false });
+          //
+          // The assertion right below is new: previously A's own write result was never
+          // checked directly -- only inferred later from B's downstream read. Asserting it
+          // HERE, before `aDone` even flips, pins down that A's reclaim-and-write itself
+          // produced exactly ["seed", "A"] (the reclaimed seed plus A's own update, nothing
+          // lost and nothing extra), independent of whatever B goes on to do with it.
+          const aResult = updateProposalRegistry(registryPath, (current) => [...current, proposal("A")], {
+            maxWaitMs: 60_000,
+            isPidAlive: () => false,
+          });
+          assert.deepEqual(
+            (aResult ?? []).map((p) => p.id),
+            ["seed", "A"],
+            "A's own reclaim-and-write must land exactly its own update over the reclaimed seed, before B's read/write even begins",
+          );
           aDone = true;
         },
       },
