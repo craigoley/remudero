@@ -1,0 +1,90 @@
+- id: W1-T370
+  title: "136 MERGED tasks carry 391 unexecutable proofs that certify already-shipped work — the operator rules whether that debt is worth retiring at all, because two adjacent levers were already declined"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: "RE-DERIVED AT cdf885a. THE POPULATION: of the 175 tasks carrying a BLOCKING lint
+    violation, 136 have already MERGED — derived from merged PRs naming a task id, positive control
+    W1-T339 -> #1329, negative control a nonexistent id -> 0. They carry 391 violations: 239
+    [proof-dialect], 147 [proof-resolvability], 5 [headless-fitness]. 131 of the 136 live in
+    plan/tasks.yaml; 5 in shards.
+    WHY THIS IS A RULING AND NOT AN IMPLEMENTATION. Their proofs certify work that ALREADY SHIPPED, so
+    rewriting them proves nothing about the code — the code is merged and covered by whatever tests it
+    actually landed with. The only live consequence is that `rmd lint-plan --base <sha>` grades CHANGED
+    tasks, so ANY future diff touching one of these 136 promotes its pre-existing violations to
+    blocking. That is a real cost, paid unpredictably, by whoever next edits one of those rows.
+    TWO ADJACENT LEVERS WERE ALREADY DECLINED, WHICH IS WHY THIS NEEDS A RULING RATHER THAN A DESIGN.
+      - CORRECTING THE `status:` FIELD so these drop out of the linter's open set: the operator ruled
+        LEAVE THEM on 2026-08-05. The field is decorative by documented design and plan/tasks.yaml's own
+        header says the runner never writes it back.
+      - CONVERTING `isOpenLintTask` to a derived projection so the linter stops grading merged work:
+        W1-T367 design (iii) rules LEAVE IT, deliberately and with reasons — `rmd lint-plan` is an
+        OFFLINE, DETERMINISTIC linter and a projection needs a GitHub read.
+    Both rulings stand and are not reopened here. What they leave is exactly this: the debt is graded,
+    cannot be dismissed by either cheap route, and can only be retired by rewriting 391 proofs for work
+    that is finished. Whether that is worth an implementer's time is a spend decision, and this repo's
+    standing rule is that an agent may RECOMMEND 'no' but may never RECORD it
+    (feedback fb-1785882211812-bafd8f, operator ruling from the decision-authority audit).
+    MY RECOMMENDATION, RECORDED AS A RECOMMENDATION AND NOT AS A DECISION: do not retire it wholesale.
+    Fix a row only when a diff already touches it, and let the pool drain by attrition. The arc's real
+    value is W1-T369's 39 open tasks, which waste live runs; these 136 waste nothing until touched."
+  design: |
+    THE DELIVERABLE IS A RECORDED RULING PLUS WHATEVER IT AUTHORISES — in that order.
+    (i) THE OPERATOR RULES between the options below. Each is stated with what it costs and what it
+    leaves behind; none is presented as obviously correct.
+      (a) ATTRITION (the recommendation). Change nothing now. A PR that touches one of the 136 fixes
+          that row's proofs as part of its own work, because it must to stay green. Cost: an
+          unpredictable tax on unrelated PRs, paid one row at a time. Leaves: the count decays slowly
+          and is never zero.
+      (b) BULK RETIREMENT. Rewrite all 391, per class, in one or two plan PRs. Cost: the largest single
+          plan diff this repo would have taken, over rows whose proofs certify nothing. Leaves: a clean
+          linter and no future tax. NOTE the same trap W1-T369 names — a proof rewritten into a
+          plausible-but-unresolvable form re-creates the defect while looking fixed, so bulk work here
+          needs check-proof verification per row, which is what makes (b) expensive rather than
+          mechanical.
+      (c) SCOPE THE LINTER'S CHANGED-TASK GATE instead: grade a changed task only on violations its own
+          diff INTRODUCED, not on pre-existing ones. Cost: a real change to a required gate, and it
+          weakens the ratchet that currently forces a toucher to leave a row better than they found it.
+          Leaves: the debt intact but harmless. This is a different task if chosen, not this one.
+    (ii) RECORD THE RULING WHERE THE NEXT READER FINDS IT — this task's own record and DECISIONS.md,
+    not a PR body. Three sessions have now independently re-derived facts about the `status:` field
+    because earlier findings lived only in PR bodies (W1-T367's rationale documents that explicitly).
+    (iii) IF THE RULING IS (a) OR (c), THIS TASK CLOSES WITH NO PROOF REWRITES AT ALL and says so. A
+    task that records 'we decided not to' is a legitimate outcome and is the W1-T229/W1-T202 withdrawal
+    shape — status: blocked, the reasoning preserved verbatim, the count recorded.
+    (iv) IF THE RULING IS (b), THE WORK IS PER CLASS AND PER FILE, mirroring W1-T369's design clauses
+    (i)-(iv) verbatim rather than re-deriving them, and it should follow W1-T369 rather than precede it
+    so the technique is proven on the 39 that actually matter first.
+    NOT IN SCOPE: reopening the `status:` ruling or W1-T367 design (iii); changing what the linter
+    checks; and the 39 open tasks (W1-T369).
+  acceptance:
+    - claim: "the operator's ruling between attrition, bulk retirement and gate-scoping is recorded with its reasoning, and the measured population it was ruled on is recorded alongside it"
+      proof: "demonstration: operator records the ruling and the measured counts in this task's record and in DECISIONS.md"
+    - claim: "if the ruling authorises no rewrites, this task closes as a recorded decision rather than staying queued as work nobody intends to do"
+      proof: "demonstration: operator confirms the task's terminal state matches the ruling"
+  risk: low
+  origin: oper#proof-debt-arc-2026-08-05
+  plan_refs: ["W1-T369", "W1-T367", "W1-T229"]
+  files: [plan/tasks.yaml]
+  status: queued
+  attempts: 0
+  note: "verify:human is the load-bearing choice, not a formality. The question is whether to SPEND an
+    implementer on 391 rewrites for shipped work, and this repo's standing rule (fb-1785882211812-bafd8f)
+    is that an agent may recommend 'no' but may never record it. `isDispatchEligible` refuses
+    verify:human at `t.verify !== \"auto\"` BEFORE the linter is consulted, so this task can never
+    auto-dispatch and its own proofs can never stall the queue.
+    The `demonstration:` proofs are legal ONLY on verify:human and are W1-T277's intended use — an
+    operator action on the record. Verified: W1-T323 carries the same shape and lints clean at cdf885a.
+    They are deliberately NOT rewritten into `unit test:` form, which is design clause (iv) of W1-T369
+    applied to this task itself.
+    risk:low — nothing ships. The failure mode is that no ruling is recorded and the task sits, which is
+    the status quo it was filed to end.
+    budget_usd 40 — the adjudication and the record, not the rewrites. If the ruling is (b), the
+    rewriting work is sized separately at that point rather than pre-budgeted here for an outcome that
+    may not be chosen.
+    NO depends_on. It is readable and rulable today; the preference that W1-T369 land first is stated in
+    design (iv) rather than encoded as an edge, so a ruling of (a) or (c) is not gated behind work it
+    would make unnecessary."
