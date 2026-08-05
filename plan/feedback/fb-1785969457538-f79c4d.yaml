@@ -1,0 +1,37 @@
+id: fb-1785969457538-f79c4d
+ts: 2026-08-05T22:37:37.539Z
+raw: "THE LEDGER ARCHIVES ARE NOW GZIPPED — grep -h ledger.*.ndjson MATCHES
+  NOTHING AND WILL SILENTLY UNDERCOUNT. Operator action 2026-08-05T22:40Z: all
+  666 rotations compressed in place, state/ went 2.8G to 116M, a 24x reduction,
+  losslessly — one file measured 12,267,995 to 767,322 bytes, exactly 16.0x. The
+  live ledger.ndjson is UNCOMPRESSED and untouched; the glob carries a timestamp
+  so it never matched the live file. Zero plain rotations remain. THE IDIOM MUST
+  CHANGE EVERYWHERE. Every historical count this week used: grep -h '<pat>'
+  ~/Remudero/state/ledger.*.ndjson ~/Remudero/state/ledger.ndjson | sort -u.
+  That glob now matches NOTHING, so the command silently reads only the live
+  file — which is exactly the failure that cost $129.76 and a false diagnosis
+  written into a shard, a commit and a PR body earlier this week, when a session
+  grepped the live file three times and reached a different conclusion each
+  time. THE REPLACEMENT, verified working against a known count: zgrep -h
+  '<pat>' ~/Remudero/state/ledger.*.ndjson.gz ~/Remudero/state/ledger.ndjson |
+  sort -u — zgrep handles compressed and plain inputs in one invocation, so it
+  is a drop-in for the mixed set. WHY COMPRESSION AND NOT DELETION: the
+  rotations are CUMULATIVE SNAPSHOTS and are the evidence base for every
+  historical measurement; readLedgerLines opens exactly ONE path with no glob
+  and no readdir, so nothing in src/ reads them and compressing changed no
+  behaviour. RECON: find every place the plain-glob idiom is written down —
+  CLAUDE.md, MASTER-PLAN, task shards, prompt templates, any script under bin/
+  or scripts/ — and establish which would now silently undercount. Then say
+  whether a helper verb (rmd ledger-grep, or similar) belongs in the fix so the
+  idiom lives in one place rather than in every brief. Note the danger is
+  asymmetric: a session using the old glob gets a plausible-looking smaller
+  number with no error, which is the silent-fail-open family this repo has hit
+  four times this week. Falsifying check: if some existing helper already
+  abstracts the union read, the fix is to point everyone at it rather than to
+  build a new one."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null
+expansion: null

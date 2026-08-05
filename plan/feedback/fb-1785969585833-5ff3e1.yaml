@@ -1,0 +1,32 @@
+id: fb-1785969585833-5ff3e1
+ts: 2026-08-05T22:39:45.833Z
+raw: "ADDENDUM to fb-1785969457538-f79c4d — THE RECOMMENDED zgrep IDIOM FAILS
+  UNDER zsh AND HERE IS THE ONE THAT WORKS. The entry recommended: zgrep -h
+  '<pat>' ~/Remudero/state/ledger.*.ndjson.gz ~/Remudero/state/ledger.ndjson.
+  That is correct today but becomes wrong as soon as rotation writes a NEW plain
+  .ndjson archive — a .gz-only glob would then undercount in the opposite
+  direction from the original defect. The obvious repair, adding a third
+  plain-archive glob, ABORTS UNDER zsh: with no plain archives present, zsh's
+  nomatch fires and refuses the whole command before running anything ('zsh: no
+  matches found'), so the operator gets an error rather than a count. Bash would
+  pass the literal through and behave differently. THE IDIOM THAT WORKS,
+  verified against a known count of 5: find ~/Remudero/state -maxdepth 1 -name
+  'ledger*.ndjson*' -print0 | xargs -0 zgrep -h '<pat>' 2>/dev/null | sort -u.
+  It matches the live file, plain rotations and gzipped rotations in one
+  expression; it does not care which of the three exist; it cannot be aborted by
+  an unmatched glob; and it is immune to the argument-limit failure that
+  silently produced empty output on a 77,000-entry TMPDIR earlier tonight. THREE
+  FAILURE MODES IN ONE LINE, all silent or misleading: a stale glob that
+  undercounts, a zsh abort that looks like a broken command, and an
+  argument-limit overflow that returns nothing. That is the argument for a
+  helper verb rather than a documented string — the idiom has now been wrong
+  twice within an hour of being written down. Falsifying check: if xargs splits
+  the file list across multiple zgrep invocations on a large enough set, the
+  sort -u still dedupes correctly across them and the count holds — verify that
+  before relying on it at a much larger archive count than 666."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null
+expansion: null

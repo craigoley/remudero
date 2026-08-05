@@ -1,0 +1,37 @@
+id: fb-1785969198980-c1d665
+ts: 2026-08-05T22:33:18.980Z
+raw: "OPERATOR RULING — AUTO-TRIAGE AND AUTO-MERGE STAY, BUT ANY JUDGE'S 'NEEDS
+  HUMAN' MUST BECOME A NEEDS-ME ITEM. The operator's position, in his words: the
+  auto-triage and auto-merge process is good, UNLESS any of the judges in the
+  process determine it needs human input — in which case it should become a
+  needs-me feedback request. So the default stays autonomous; the exception is
+  that a judge's own uncertainty is a first-class route to the operator rather
+  than something absorbed silently. WHAT THIS RULES ON: the grill verdict
+  already escalates from the triage lane, but a prior recon found the
+  PLAN-ARCHITECT lane parses a GRILL verdict and opens NO issue — only triage
+  escalates one. GRILL is the one channel that demonstrably carried a genuine
+  operator question through to a human (#1182), so a lane computing that verdict
+  and discarding it is the shape this ruling forbids. RECON: enumerate EVERY
+  judge in the pipeline — the reviewer, the risk judge, the plan architect, the
+  triage grill, judgeRubric's items, flight-judge if it is still reachable — and
+  for each establish whether it can express 'this needs a human', and if it can,
+  whether that expression reaches a needs-me item or is dropped. Report the full
+  table before proposing anything. THE VOLUME CONSTRAINT IS LOAD-BEARING and
+  must shape the answer: a decision-authority audit measured 369 needs-human
+  issues as 297 NEITHER (80%), 56 ACTION, 7 QUESTION — the machine resolved four
+  fifths of them itself. So a rule that routes MORE judge output to the operator
+  makes the dominant problem worse unless it is paired with the retraction and
+  classification work (W1-T345/346/347/348, all merged or landing). Establish
+  whether those change the arithmetic before adding a source. ALSO ESTABLISH:
+  whether a judge's needs-human is distinguishable from a judge simply failing
+  or being unable to decide. classifyAsk has no NEITHER branch and defaults to
+  ACTION, so an ambiguous judge verdict routed naively would be labelled 'Do' in
+  the operator's highest-attention surface. Falsifying check: if every judge
+  that can say 'needs human' already escalates, and the plan-architect GRILL gap
+  is the only hole, then this is one wiring task and not a policy change."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null
+expansion: null
