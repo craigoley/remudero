@@ -80,6 +80,8 @@ function goodRaw(): Record<string, unknown> {
   return {
     proofTimeoutMs: { value: 60_000, origin: "lifted:src/lib/review.ts:675 (DEFAULT_PROOF_TIMEOUT_MS)", min: 60_000, max: 300_000 },
     pruneGraceMs: { value: 120_000, origin: "lifted:src/lib/worker.ts:1243 (DEFAULT_PRUNE_GRACE_MS)", min: 30_000, max: 900_000 },
+    // W1-T378: the cadence reaper's own ceiling — net-new, deliberately not pruneGraceMs.
+    worktreeReapGraceMs: { value: 1_800_000, origin: "net-new", min: 120_000, max: 7_200_000 },
     pollIntervalMs: { value: 60_000, origin: "lifted:src/lib/daemon.ts:87 (DEFAULT_POLL_INTERVAL_MS)", min: 5_000, max: 600_000 },
     fixStrikeCap: { value: 2, origin: "lifted:src/lib/config.ts:218 (fixStrikeCap default)", min: 1, max: 10 },
     sweep: {
@@ -410,6 +412,11 @@ test("every LIFTED field records origin=lifted:<source-site> — the net-new fie
     "autoTriage.maxPerDay",
     "scratchReap.enabled",
     "sweep.tmpMaxAgeMs",
+    // W1-T378: `worktreeReapGraceMs` is net-new for the same reason as sweep.tmpMaxAgeMs — it is
+    // NOT a lift of DEFAULT_PRUNE_GRACE_MS. It is a deliberately SEPARATE dial (the cadence
+    // reaper's, measured at p99 of intra-run ledger gaps), and citing worker.ts's pruneGraceMs
+    // site as its origin would claim a source-site copy that never happened.
+    "worktreeReapGraceMs",
   ]);
   const liftedPaths = Object.keys(p.origin).filter((path) => !NET_NEW.has(path));
   assert.ok(liftedPaths.length > 0);

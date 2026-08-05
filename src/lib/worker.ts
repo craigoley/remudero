@@ -1743,6 +1743,107 @@ export function pruneStaleRuns(
 // nuance — it runs on a cadence, not to urgently reclaim a name collision at
 // run start), so a wrong reap here would take strictly longer to happen.
 
+/**
+ * The CADENCE reaper's own age ceiling (W1-T378) — see plan/policy.yaml's `worktreeReapGraceMs`
+ * for the measurement behind the number. Deliberately NOT {@link DEFAULT_PRUNE_GRACE_MS}: that
+ * one is consumed by six `pruneStaleRuns` call sites at RUN START, where a longer value delays
+ * reclaiming a colliding worktree name; this reaper runs on a cadence with no such urgency.
+ */
+export const DEFAULT_WORKTREE_REAP_GRACE_MS = loadDefaultPolicy().values.worktreeReapGraceMs;
+
+/** Directory names never descended into by {@link newestActivityMs} — see its doc. */
+const ACTIVITY_SKIP_DIRS = new Set([".git", "node_modules"]);
+
+/** How many filesystem entries {@link newestActivityMs} will stat before giving up. */
+export const ACTIVITY_WALK_ENTRY_CAP = 20_000;
+
+/** Why {@link reapStaleWorktrees} left an entry alone — the "and why" half of its ledger row. */
+export type WorktreeKeepReason =
+  /** A run lock naming a pid that is currently alive. */
+  | "live-pid"
+  /** Registered on a branch still live upstream (an open, unmerged PR). */
+  | "live-branch"
+  /** Recent file activity somewhere in the tree — the W1-T378 gate. */
+  | "recent-activity"
+  /** The activity probe could not complete (unreadable, or past the entry cap), so liveness is
+   *  UNKNOWN and the entry is kept. An ambiguous signal keeps; it never destroys. */
+  | "activity-unknown"
+  /** rmSync itself failed — best-effort, the rest of the pass continues. */
+  | "removal-failed";
+
+/**
+ * The newest mtime anywhere under `dir`, and whether the walk could be trusted (W1-T378).
+ *
+ * WHY THIS EXISTS. `reapStaleWorktrees` age-gated on `statSync(worktreeRoot).mtimeMs`, and a
+ * DIRECTORY's mtime advances only when an entry is added to or removed from THAT directory —
+ * never when a file nested inside it is modified. A worker editing `src/lib/feedback.ts` touches
+ * `src/lib/`'s mtime, not the root's; `git commit` in a linked worktree writes to
+ * `<parent>/.git/worktrees/<name>/index`, outside the tree entirely. So the root's mtime was
+ * effectively FROZEN AT CHECKOUT and the age gate degraded to "reap unconditionally".
+ * MEASURED CONSEQUENCE (2026-08-05, W1-T350): a run that was actively committing had its worktree
+ * destroyed 40 minutes in; it stayed alive another 51 minutes but lost its ledger identity, and the
+ * task re-dispatched and rebuilt itself (see W1-T377 for the other half of that incident).
+ *
+ * BOUNDED, because this runs per candidate on every cadence pass: `.git` and `node_modules` are
+ * never descended into ({@link ACTIVITY_SKIP_DIRS}) — `.git` churns for reasons unrelated to the
+ * worker and `node_modules` is a symlink to the shared canonical tree on this host — and the walk
+ * stops after {@link ACTIVITY_WALK_ENTRY_CAP} entries.
+ *
+ * `complete: false` means DO NOT TRUST `mtimeMs`: either the walk hit the cap (so the max is
+ * partial and could be older than the true newest) or a read failed. Callers must treat that as
+ * unknown-and-keep, never as "old enough to reap" — a partial max is exactly the value that would
+ * destroy live work.
+ */
+export function newestActivityMs(
+  dir: string,
+  opts: { entryCap?: number; skipDirs?: ReadonlySet<string> } = {},
+): { mtimeMs: number; complete: boolean } {
+  const entryCap = opts.entryCap ?? ACTIVITY_WALK_ENTRY_CAP;
+  const skipDirs = opts.skipDirs ?? ACTIVITY_SKIP_DIRS;
+  // THE ROOT'S OWN MTIME IS THE FLOOR, not a starting zero. An entry that was just created and is
+  // still EMPTY (a `git worktree add` caught mid-flight, or a lockless `sweep-*` dir whose lock is
+  // a SIBLING outside it) has nothing to walk, and a zero floor would read as maximally ancient —
+  // reaping the exact create-before-lock race the age gate exists to protect. Measured: this is
+  // what broke prune-liveness's "PROTECTS a git-invisible, dead-pid directory within the age gate".
+  let newest: number;
+  try {
+    newest = statSync(dir).mtimeMs;
+  } catch (e) {
+    // GONE is not UNREADABLE. A dir that vanished mid-pass (a registration lookup removing it as a
+    // side effect) has nothing left to protect, so it stays reapable — `complete: true` with age 0.
+    // Any OTHER failure (permissions, I/O) is genuinely unknown and must keep.
+    return { mtimeMs: 0, complete: (e as NodeJS.ErrnoException)?.code === "ENOENT" };
+  }
+  let visited = 0;
+  const stack: string[] = [dir];
+  while (stack.length > 0) {
+    const cur = stack.pop() as string;
+    let entries: Array<{ name: string; isDirectory: () => boolean; isSymbolicLink: () => boolean }>;
+    try {
+      entries = fs.readdirSync(cur, { withFileTypes: true });
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException)?.code === "ENOENT") continue; // vanished mid-walk — not unreadable
+      return { mtimeMs: newest, complete: false }; // unreadable ⇒ unknown, never "old"
+    }
+    for (const e of entries) {
+      if (++visited > entryCap) return { mtimeMs: newest, complete: false };
+      if (e.isSymbolicLink()) continue; // never follow — the node_modules symlink alone would leave the repo
+      const p = join(cur, e.name);
+      if (e.isDirectory()) {
+        if (!skipDirs.has(e.name)) stack.push(p);
+        // A directory's OWN mtime still counts: it advances when a file is created or deleted in it.
+      }
+      try {
+        const m = statSync(p).mtimeMs;
+        if (m > newest) newest = m;
+      } catch {
+        // A single vanished entry mid-walk is someone else's cleanup, not an unreadable tree.
+      }
+    }
+  }
+  return { mtimeMs: newest, complete: true };
+}
+
 /** What a cadence reap pass did, by dir/lock name (not full path). */
 export interface WorktreeReapSummary {
   /** Worktree directories force-removed (git-invisible, detached-HEAD orphan, or a
@@ -1752,6 +1853,14 @@ export interface WorktreeReapSummary {
   reapedLocks: string[];
   /** Entries deliberately left: a live pid, a branch still live upstream, or too young. */
   kept: string[];
+  /**
+   * W1-T378: the SAME entries as {@link WorktreeReapSummary.kept}, each paired with the reason it
+   * survived, so a pass that keeps everything is diagnosable instead of silent — and so the
+   * `activity-unknown` keeps (the ones that bound disk growth) are visible to an operator.
+   * OPTIONAL so callers holding a `{ reaped: [], reapedLocks: [], kept: [] }` literal keep
+   * typechecking; {@link reapStaleWorktrees} always populates it.
+   */
+  keptReasons?: Array<{ name: string; reason: WorktreeKeepReason }>;
 }
 
 export interface WorktreeReapOpts {
@@ -1759,13 +1868,20 @@ export interface WorktreeReapOpts {
   isPidAlive?: (pid: number) => boolean;
   /** Age ceiling (ms) below which a terminal-looking entry is still protected — the
    * same create-before-lock / branch-not-yet-pushed race {@link DEFAULT_PRUNE_GRACE_MS}
-   * protects against in pruneStaleRuns. Default {@link DEFAULT_PRUNE_GRACE_MS}. */
+   * protects against in pruneStaleRuns. Default {@link DEFAULT_WORKTREE_REAP_GRACE_MS}
+   * (W1-T378 — this reaper's OWN ceiling, no longer pruneGraceMs). */
   maxAgeMs?: number;
   /** Injectable clock (tests). Defaults to Date.now. */
   now?: () => number;
   /** Whether `branch` (in `repoDir`) is still live upstream — true means KEEP, fail
    * closed. Defaults to {@link defaultBranchIsLiveUpstream} (an `origin` ls-remote). */
   branchIsLiveUpstream?: (branch: string, repoDir: string) => boolean;
+  /**
+   * W1-T378: the tree-activity probe the age gate measures against. Injectable so a test can
+   * assert the boundary without constructing a deep fixture for every case. Defaults to
+   * {@link newestActivityMs} — the REAL bounded walk, which the fixture-free tests drive.
+   */
+  newestActivity?: (dir: string) => { mtimeMs: number; complete: boolean };
 }
 
 /**
@@ -1859,18 +1975,24 @@ function defaultBranchIsLiveUpstream(branch: string, repoDir: string): boolean {
  */
 export function reapStaleWorktrees(root: string, opts: WorktreeReapOpts = {}): WorktreeReapSummary {
   const isPidAlive = opts.isPidAlive ?? defaultIsPidAlive;
-  const maxAgeMs = opts.maxAgeMs ?? DEFAULT_PRUNE_GRACE_MS;
+  const maxAgeMs = opts.maxAgeMs ?? DEFAULT_WORKTREE_REAP_GRACE_MS;
   const now = opts.now ?? (() => Date.now());
   const branchIsLiveUpstream = opts.branchIsLiveUpstream ?? defaultBranchIsLiveUpstream;
+  const newestActivity = opts.newestActivity ?? ((d: string) => newestActivityMs(d));
   const reaped: string[] = [];
   const reapedLocks: string[] = [];
   const kept: string[] = [];
+  const keptReasons: Array<{ name: string; reason: WorktreeKeepReason }> = [];
+  const keep = (name: string, reason: WorktreeKeepReason): void => {
+    kept.push(name);
+    keptReasons.push({ name, reason });
+  };
 
   let entries: string[];
   try {
     entries = fs.readdirSync(root);
   } catch {
-    return { reaped, reapedLocks, kept }; // unreadable root — best-effort, never throws
+    return { reaped, reapedLocks, kept, keptReasons }; // unreadable root — best-effort, never throws
   }
 
   for (const name of entries) {
@@ -1886,7 +2008,7 @@ export function reapStaleWorktrees(root: string, opts: WorktreeReapOpts = {}): W
 
     const lockRead = readRunLock(entryPath);
     if (lockRead.kind === "live" && isPidAlive(lockRead.info.pid)) {
-      kept.push(name); // LIVE pid — never reaped, the same guard pruneStaleRuns applies
+      keep(name, "live-pid"); // LIVE pid — never reaped, the same guard pruneStaleRuns applies
       continue;
     }
 
@@ -1896,7 +2018,7 @@ export function reapStaleWorktrees(root: string, opts: WorktreeReapOpts = {}): W
     // tell it apart from genuine debris; only the branch/PR signal can.
     const registration = resolveWorktreeRegistration(entryPath);
     if (registration?.branch && branchIsLiveUpstream(registration.branch, registration.repoDir)) {
-      kept.push(name);
+      keep(name, "live-branch");
       continue;
     }
 
@@ -1904,14 +2026,16 @@ export function reapStaleWorktrees(root: string, opts: WorktreeReapOpts = {}): W
     // registers this directory at all (hole 1), it is registered but on a detached
     // HEAD with no branch to check (hole 3), or its branch is confirmed
     // merged-or-deleted upstream. Age-gate before acting on any of them.
-    let mtimeMs = 0;
-    try {
-      mtimeMs = statSync(entryPath).mtimeMs;
-    } catch {
-      mtimeMs = 0;
+    // AGE GATE, W1-T378: measured against the newest mtime ANYWHERE IN THE TREE, not the root
+    // directory's own — see {@link newestActivityMs} for why the root's is frozen at checkout and
+    // what that cost. An INCOMPLETE probe means liveness is unknown, and an ambiguous signal keeps.
+    const activity = newestActivity(entryPath);
+    if (!activity.complete) {
+      keep(name, "activity-unknown");
+      continue;
     }
-    if (now() - mtimeMs < maxAgeMs) {
-      kept.push(name);
+    if (now() - activity.mtimeMs < maxAgeMs) {
+      keep(name, "recent-activity");
       continue;
     }
     try {
@@ -1919,7 +2043,7 @@ export function reapStaleWorktrees(root: string, opts: WorktreeReapOpts = {}): W
       removeRunLock(entryPath); // clear the sibling lock so it can't linger widowed
       reaped.push(name);
     } catch {
-      kept.push(name); // best-effort: a removal hiccup never blocks the rest of the pass
+      keep(name, "removal-failed"); // best-effort: a removal hiccup never blocks the rest of the pass
     }
   }
 
@@ -1941,7 +2065,7 @@ export function reapStaleWorktrees(root: string, opts: WorktreeReapOpts = {}): W
     }
   }
 
-  return { reaped, reapedLocks, kept };
+  return { reaped, reapedLocks, kept, keptReasons };
 }
 
 /**
@@ -1963,6 +2087,14 @@ export function runWorktreeReapRung(
   try {
     reapSummary = reapStaleWorktrees(worktreesDir(config));
     if (reapSummary.reaped.length || reapSummary.reapedLocks.length) log("worktree.reaped", { ...reapSummary });
+    // W1-T378: an `activity-unknown` keep is the one outcome that needs its own row. It is the
+    // reaper declining to decide, and it is what bounds disk growth now that an ambiguous signal
+    // keeps rather than destroys — so a tree that can never be probed would otherwise accumulate
+    // silently, which is exactly the invisible-leak shape W1-T175 was filed against. Logged even
+    // when nothing was reaped (the pass above stays quiet in that case), and NOT logged for the
+    // ordinary live-pid/live-branch/recent-activity keeps, which are the reaper working correctly.
+    const undecidable = (reapSummary.keptReasons ?? []).filter((k) => k.reason === "activity-unknown");
+    if (undecidable.length) log("worktree.reap.undecidable", { kept: undecidable.map((k) => k.name) });
   } catch (e) {
     log("worktree.reap.error", { error: String((e as Error)?.message ?? e) });
   }
