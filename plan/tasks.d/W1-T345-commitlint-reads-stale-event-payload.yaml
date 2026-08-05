@@ -1,0 +1,53 @@
+- id: W1-T345
+  title: "the commitlint job lints `github.event.pull_request.title` — an event-payload SNAPSHOT — so a title set after the `opened` event can never pass, and re-running the job replays the same empty string"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  files: [.github/workflows/ci.yml, test/ci-title-lint.test.ts]
+  risk: high
+  rationale: "MEASURED twice, on PRs whose titles are VALID. `.github/workflows/ci.yml`'s commitlint
+    job reads `PR_TITLE: ${{ github.event.pull_request.title }}` and pipes it to commitlint. That
+    expression is a SNAPSHOT of the webhook payload, not a live read.
+      PR #1249 — title `feat(feedback): decision-summary cards at creation time (W1-T313)`.
+      PR #1312 — title `feat(policy): add a state/-resident override store for the daily cost
+                 ceiling (W1-T332)`.
+    Both lint CLEAN locally (`printf '%s' \"$TITLE\" | npx commitlint` exits 0). Both FAILED in CI
+    with `subject may not be empty` AND `type may not be empty` together — the signature of an EMPTY
+    string reaching the linter, not of a non-conventional one. The captured log confirms it: the
+    `--- input ---` marker is followed immediately by the two errors, with no title between them.
+    THE TRAP IS THAT THE OBVIOUS REMEDIES ARE BOTH INERT. Re-running the job replays the same stale
+    payload, so it fails identically. And EDITING the title does not help either: the workflow is
+    `on: pull_request:` with no `types:`, which defaults to `[opened, synchronize, reopened]` and
+    excludes `edited` — so a corrected title fires no event at all. The ONLY thing that clears it is
+    a PUSH, which fires `synchronize` with a fresh payload. Three PRs were unblocked today by
+    minting a throwaway sha with a byte-identical tree, once the remedy was known; before that it
+    reads as 'the fix did not work'.
+    DISTINCT FROM W1-T327, which shipped today. That fixed `gh pr create --fill` INVENTING a
+    non-conventional title (PR #1270 opened as `run W1 T319 1785839822377`, its branch name). This
+    is the opposite: the title is correct and the check reads nothing. #1312 is a post-W1-T327 PR
+    and still failed, so authoring the title at creation does not close this."
+  design: |
+    READ THE TITLE LIVE, or make the staleness impossible.
+    (1) Establish WHY the payload is empty at `opened` before choosing a fix — whether the harness
+        creates-then-titles, or the API returns before the title is durable. The remedy differs:
+        a live read fixes both, a creation-order fix only the first.
+    (2) Prefer querying the title at job time (`gh pr view --json title`, or the REST equivalent)
+        over trusting the payload. That also makes a corrected title testable without a push,
+        which is the property this defect actually removes.
+    (3) If the payload read is kept, add `types: [opened, synchronize, reopened, edited]` so a
+        retitle at least re-triggers — but note this is the WEAKER fix: it makes the remedy
+        discoverable, not the failure impossible.
+    (4) SAY WHICH IN THE CHECK OUTPUT. Today `subject may not be empty` reads as a malformed title
+        and sends the operator to fix something that is already correct. An empty input should say
+        so — 'no title was received; this is a stale-payload read, push a new sha' — because the
+        diagnosis cost three separate investigations before the pattern was recognised.
+  acceptance:
+    - claim: "the commitlint job obtains the PR title from a live read rather than the event payload snapshot, so a title set or corrected after the opened event is linted as it stands"
+      proof: "unit test: test/ci-title-lint.test.ts"
+    - claim: "an empty title input is reported as an empty read, distinctly from a non-conventional title"
+      proof: "unit test: test/ci-title-lint.test.ts"
+  origin: oper#commitlint-stale-payload-2026-08-04
+  plan_refs: ["§5C"]
