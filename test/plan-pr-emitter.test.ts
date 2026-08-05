@@ -8,6 +8,7 @@ import { test } from "node:test";
 
 import {
   buildPlanPrBody,
+  bodyNeedsAcceptanceRepair,
   buildPlanPrCommitMessage,
   ensureJudgeableBody,
   filingAcceptanceCriteria,
@@ -357,4 +358,155 @@ test("integration: the #394-shaped fixture PR body becomes judgeable after ensur
   assert.ok(parsed.length > 0, "the repaired body must be judgeable");
   // The original prose (including the worker's broken header) is preserved, never discarded.
   assert.match(repaired, /This retro cycle:/);
+});
+
+// ── THE REPAIR TRIGGER WAS OFF BY ONE FROM ITS OWN DEFECT ────────────────────────────────────
+//
+// `ensureJudgeableBody`'s trigger was `parseAcceptanceBlock(body).length === 0`. But the parser
+// ends the block at the first indented line that is not `proof:`, so a bullet whose text WRAPS —
+// or one written `- **"claim"** — prose` with no `|` and no `proof:` line — yields ONE criterion
+// with an EMPTY proof and discards the rest. Parsed length is 1, not 0, so the repair declined to
+// fire on exactly the shape it exists for.
+//
+// MEASURED at 5ea9172 over the 100 most recent PRs: 67 healthy, 11 with no block (the only case
+// the old trigger caught), 22 parsing to a criterion with an EMPTY proof — all `parsed=1 empty=1`.
+//
+// WHAT THESE DRIVE: `bodyNeedsAcceptanceRepair` and `ensureJudgeableBody` are the real production
+// functions, called directly with no seam and no injection. The run-task.ts CALL SITE is pinned
+// separately below by source text, and says why.
+
+const REPAIR_FALLBACK = [{ claim: "fallback claim", proof: "fallback proof" }];
+
+test("a WRAPPED claim parses to one criterion with an empty proof, and now triggers the repair", () => {
+  const wrapped = [
+    "## Acceptance",
+    "- claim: the first claim is long enough that an author wraps it onto a second",
+    "  line for readability",
+    "  proof: grep: alpha in src/a.ts",
+    "- claim: second",
+    "  proof: grep: beta in src/b.ts",
+    "- claim: third",
+    "  proof: grep: gamma in src/c.ts",
+    "",
+  ].join("\n");
+  const parsed = parseAcceptanceBlock(wrapped);
+  // Captured BEFORE the asserts below, which narrow `parsed.length` to the literal 1 and would make
+  // this comparison statically false (tsc TS2367) rather than a runtime observation.
+  const oldTriggerWouldFire = parsed.length === 0;
+  // The defect, asserted rather than described: 3 bullets written, 1 parsed, its proof empty.
+  assert.equal(parsed.length, 1, "the wrap ends the block, so bullets 2 and 3 are discarded");
+  assert.equal(parsed[0].proof, "", "and bullet 1 keeps no proof");
+  assert.equal(oldTriggerWouldFire, false, "so the OLD `length === 0` trigger could never fire here");
+
+  assert.equal(bodyNeedsAcceptanceRepair(wrapped), true, "the widened trigger fires");
+  const out = ensureJudgeableBody(wrapped, REPAIR_FALLBACK);
+  assert.notEqual(out, wrapped, "and the body is actually repaired");
+  // THE POINT OF THE REPAIR, asserted on the OUTPUT rather than on the fact that it changed: the
+  // repaired body must PARSE judgeably. Appending alone did not achieve this — the parser stopped at
+  // the original defective header and never reached the appended block.
+  const reparsed = parseAcceptanceBlock(out);
+  assert.ok(reparsed.length > 0, "the repaired body parses");
+  assert.equal(reparsed.every((c) => c.proof.trim().length > 0), true, "with no empty proofs left");
+  assert.equal(bodyNeedsAcceptanceRepair(out), false, "and is no longer judged defective — the repair is idempotent");
+  assert.ok(out.includes("the first claim is long enough"), "the author's original text is preserved, not deleted");
+});
+
+test("the shape actually measured in the wild — a bold-quoted prose bullet — triggers the repair", () => {
+  // Verbatim shape from PR #1340: `- **"claim"** — prose`, no `|`, no `proof:` continuation, and a
+  // wrapped second line. This is the shape 22 of 100 recent PRs carried.
+  const wild = [
+    "## Acceptance criteria",
+    "",
+    '- **"a governor that trips between the first and second dispatch of one batch refuses the',
+    '  second, so two dispatches are never admitted on a single reading"** — `runDaemon` cannot',
+    "  yet be driven through two dispatches in ONE tick, so this is proven by driving the seam",
+    "",
+  ].join("\n");
+  const parsed = parseAcceptanceBlock(wild);
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].proof, "", "no `|` separator means the whole item is the claim, proof empty");
+  assert.equal(bodyNeedsAcceptanceRepair(wild), true);
+  const out = ensureJudgeableBody(wild, REPAIR_FALLBACK);
+  assert.equal(bodyNeedsAcceptanceRepair(out), false, "and the repaired body is judgeable, not merely edited");
+  assert.ok(out.includes("a governor that trips between"), "the worker's original wording survives");
+});
+
+test("a criterion with an EMPTY proof triggers the repair even when the block is otherwise intact", () => {
+  // No wrapping at all — the empty-proof signal alone is sufficient and needs no notion of how many
+  // criteria were written.
+  const body = ["Acceptance:", "- a claim with a real proof | grep: alpha in src/a.ts", "- a claim with no proof at all", ""].join("\n");
+  const parsed = parseAcceptanceBlock(body);
+  assert.equal(parsed.length, 2, "both bullets parse — this is not a truncation case");
+  assert.equal(parsed[1].proof, "");
+  assert.equal(bodyNeedsAcceptanceRepair(body), true, "one empty proof is enough");
+});
+
+test("a whitespace-only proof counts as empty — a space is not a proof", () => {
+  const body = ["Acceptance:", "- a claim |    ", ""].join("\n");
+  assert.equal(parseAcceptanceBlock(body).length, 1);
+  assert.equal(bodyNeedsAcceptanceRepair(body), true);
+});
+
+// ── THE REGRESSION LOCK — this matters more than the feature ─────────────────────────────────
+//
+// A repair that rewrites CORRECT bodies is worse than one that misses defective ones. Every shape
+// below is healthy and must be returned byte-identical.
+
+test("REGRESSION LOCK: a healthy body does NOT trigger the repair and is returned byte-identical", () => {
+  const healthy = [
+    "Some prose about the change.",
+    "",
+    "## Acceptance",
+    "- claim: the first claim stays on one line",
+    "  proof: grep: alpha in src/a.ts",
+    "- claim: the second likewise",
+    "  proof: unit test: some real test title",
+    "",
+    "## Validation",
+    "Trailing prose under the block, which parseAcceptanceBlock stops at and must stay legal.",
+    "",
+  ].join("\n");
+  assert.equal(parseAcceptanceBlock(healthy).length, 2);
+  assert.equal(bodyNeedsAcceptanceRepair(healthy), false, "a healthy body must never be judged defective");
+  assert.equal(ensureJudgeableBody(healthy, REPAIR_FALLBACK), healthy, "returned byte-identical");
+});
+
+test("REGRESSION LOCK: the pipe form renderAcceptanceBlock itself emits is healthy and untouched", () => {
+  // The round-trip guarantee: what the emitter writes must never be judged defective by the repair.
+  const emitted = renderAcceptanceBlock([
+    { claim: "a claim", proof: "grep: alpha in src/a.ts" },
+    { claim: "another", proof: "unit test: a title" },
+  ]);
+  const body = `Prose.\n\n${emitted}\n`;
+  assert.equal(bodyNeedsAcceptanceRepair(body), false, "the emitter's own output round-trips clean");
+  assert.equal(ensureJudgeableBody(body, REPAIR_FALLBACK), body);
+});
+
+test("REGRESSION LOCK: the 67 healthy shapes' common form — one-line claim plus indented proof — is untouched", () => {
+  const body = ["Acceptance:", "- claim: exactly the house two-line form", "  proof: grep: needle in src/x.ts", ""].join("\n");
+  assert.equal(bodyNeedsAcceptanceRepair(body), false);
+  assert.equal(ensureJudgeableBody(body, REPAIR_FALLBACK), body);
+});
+
+test("a body with NO block at all still triggers the repair — the old trigger's case is not lost", () => {
+  assert.equal(bodyNeedsAcceptanceRepair("just prose, no header"), true);
+  assert.equal(bodyNeedsAcceptanceRepair(""), true);
+});
+
+// ── THE CALL SITE — the half a unit test cannot reach ────────────────────────────────────────
+
+test("the retro call site uses the SHARED predicate, not its own `=== 0` copy", () => {
+  // WHY THIS IS SOURCE-TEXT AND SAYS SO. The call site lives inside `retroCommand`'s gh-dependent
+  // flow (it reads the body via `gh pr view` and writes it back via `gh pr edit`), so driving it
+  // needs a gh gateway. It carried a SECOND copy of `parseAcceptanceBlock(body).length === 0`, which
+  // meant widening the function alone would have left this guard still declining to fire — the
+  // defect intact at the only place it fires in production. Same shape and same reason as
+  // test/preexisting-proof-hits-wiring.test.ts's own wiring pin.
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "src", "run-task.ts"), "utf8");
+  assert.match(src, /if \(!bodyNeedsAcceptanceRepair\(body\)\) return "healthy";/, "the caller must use the shared predicate");
+  assert.doesNotMatch(
+    src,
+    /if \(parseAcceptanceBlock\(body\)\.length === 0\) \{/,
+    "and must not keep a duplicate `=== 0` copy of the trigger",
+  );
 });
