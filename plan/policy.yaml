@@ -89,11 +89,26 @@ sweep:
   # past that should be its own deliberate ruling, not a side effect of a generous default range.
   # W1-T344 IS THE FLIP TO 2, AND IT HAS NOW HAPPENED (2026-08-05). W1-T343 wired `runDaemon` to
   # drain's lane machinery and shipped it DARK at dispatchLanes: 1 (merged as #1363, 2026-08-05).
-  # OBSERVATION WINDOW: this row held at 1 from that merge until this flip, with W1-T343's four
-  # dark-ship preconditions live (serialized keychain provisioning, an immutable plan-snapshot
-  # binding, a bounded deploy-deferral wait, a per-tick cost governor) and none of the four
-  # tripping — no keychain provisioning failure, no plan-snapshot inconsistency, no deploy
-  # deferral reaching its ceiling, no governor admitting past its limit.
+  # OBSERVATION WINDOW — n=1. WHAT WAS MERGED IS NOT WHAT WAS OBSERVED, AND THIS COMMENT ONCE
+  # CONFLATED THEM. W1-T343's four dark-ship preconditions were MERGED and live in the shipped
+  # code before this flip: serialized keychain provisioning, an immutable plan-snapshot binding, a
+  # bounded deploy-deferral wait, a per-tick cost governor. That part is true, and it is why the
+  # flip was reasonable to attempt. What this comment previously ALSO claimed — that none of the
+  # four tripped — is NOT supported by the ledger. The row held at 1 for 25 MINUTES (W1-T343
+  # merged 17:02:56Z, W1-T344 merged 17:28:18Z) and EXACTLY ONE dispatch occurred in that window;
+  # positive control, 30 `run.start` in the preceding 24h. That one dispatch was run
+  # W1-T344-1785949571975 — the flip's OWN implementation run, i.e. the run that wrote the claim
+  # about itself. None of the four preconditions COULD have tripped, because almost nothing ran.
+  # W1-T344's design item (i) anticipated this verbatim — "a flip on the day the capability lands
+  # proves nothing about any of them" — so the task shipped against its own stated bar. A future
+  # reader deciding whether to REVERT should treat the dark-ship period as UNOBSERVED rather than
+  # as evidence of safety, and weigh the REVERSION TRIGGER below on its own merits.
+  # THE SETTLED-COUNTERPART SEQUENCING WAS LUCK, NOT DESIGN: #1364 — which logs
+  # `dispatch.settled_set`, so a lane that dies is a row rather than a set-difference nobody
+  # computes — merged 26 SECONDS AFTER the daemon had already booted onto this flip. The fleet
+  # therefore ran 2m54s at N=2 without that row, the exact state #1364's own gate existed to
+  # prevent. No dispatch occurred inside it and `decideDeployTrigger` closed it at 17:32:10Z.
+  # Nothing sequenced those two merges; next time the ordering may not be kind.
   # MEASUREMENTS AT 1 (production ledger through 2026-08-04, this task's own rationale): 226
   # `run.start` dispatches, 39 merged verdicts (17% merge rate), the cost governor firing for the
   # first time ever at $152.28, and 20 consecutive dispatch gaps of 45-90 minutes against
