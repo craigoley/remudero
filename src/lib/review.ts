@@ -3703,6 +3703,17 @@ function stripQuotes(s: string): string {
  * merge must therefore STATE what it is claiming and how it is proven; silence is
  * a failure, not a bypass.
  */
+/** The Acceptance HEADER line: `Acceptance:`, `**Acceptance:**`, `## Acceptance`, `Acceptance
+ *  criteria:`. Extracted as a shared constant so {@link parseAcceptanceBlock} and
+ *  {@link acceptanceBlockDiagnostics} can never disagree about where a block begins — a
+ *  diagnostic that recognised a different header than the parser would report on a block the
+ *  parser never read. Semantics are byte-for-byte what the parser used inline before. */
+const ACCEPTANCE_HEADER_RE = /^\s*#{0,6}\s*\**\s*acceptance(\s+criteria)?\b\s*\**\s*:?\s*\**\s*$/i;
+
+/** A criterion BULLET. Shared with {@link acceptanceBlockDiagnostics} for the same reason as
+ *  {@link ACCEPTANCE_HEADER_RE}. Unchanged from the parser's previous inline literal. */
+const ACCEPTANCE_BULLET_RE = /^\s*(?:[-*]|\d+[.)])\s+(.*\S)\s*$/;
+
 export function parseAcceptanceBlock(body: string): AcceptanceCriterion[] {
   const lines = (body ?? "").split("\n");
   const criteria: AcceptanceCriterion[] = [];
@@ -3711,12 +3722,12 @@ export function parseAcceptanceBlock(body: string): AcceptanceCriterion[] {
     const line = raw.replace(/\r$/, "");
     // Header: "Acceptance:", "**Acceptance:**", "## Acceptance", "Acceptance criteria:".
     if (!inBlock) {
-      if (/^\s*#{0,6}\s*\**\s*acceptance(\s+criteria)?\b\s*\**\s*:?\s*\**\s*$/i.test(line)) {
+      if (ACCEPTANCE_HEADER_RE.test(line)) {
         inBlock = true;
       }
       continue;
     }
-    const bullet = line.match(/^\s*(?:[-*]|\d+[.)])\s+(.*\S)\s*$/);
+    const bullet = line.match(ACCEPTANCE_BULLET_RE);
     if (bullet) {
       const item = bullet[1].trim();
       const pipe = item.indexOf("|");
@@ -3745,6 +3756,79 @@ export function parseAcceptanceBlock(body: string): AcceptanceCriterion[] {
     break;
   }
   return criteria;
+}
+
+/** {@link acceptanceBlockDiagnostics}'s report. */
+export interface AcceptanceBlockDiagnostics {
+  /** Was an Acceptance HEADER found at all? False ⇒ the parser resolves nothing and review fails closed. */
+  headerFound: boolean;
+  /** Criterion BULLETS the author wrote under that header, counted with the parser's own bullet regex. */
+  bulletsWritten: number;
+  /** Criteria {@link parseAcceptanceBlock} actually resolved. */
+  criteriaParsed: number;
+  /** Parsed criteria whose proof is empty — a claim with nothing to execute. */
+  emptyProofs: number;
+  /** The 1-based index of the first bullet the parser did NOT reach, when it stopped early. */
+  truncatedAtBullet?: number;
+  /** true ⇒ the body does not say what the author wrote: absent header, dropped bullets, or an empty proof. */
+  defective: boolean;
+}
+
+/**
+ * Compare what an author WROTE in an Acceptance block against what {@link parseAcceptanceBlock}
+ * actually resolves, and report the difference.
+ *
+ * WHY THIS EXISTS, measured. `parseAcceptanceBlock` treats any indented line that is not `proof:`
+ * as the END of the block. So a claim WRAPPED onto a second line — the most natural thing an author
+ * does to a long claim — silently truncates: a body with three criteria parses to ONE, with an
+ * EMPTY proof, and the review then judges a PR against a criterion the author never meant to stand
+ * alone. Reproduced at this sha: written 3, parsed 1, emptyProofs 1, against a no-wrap control of
+ * written 3, parsed 3, emptyProofs 0.
+ *
+ * That is the same overloaded-zero shape as the `grep:` traps this repo has already paid for twice
+ * (a pattern wrapping across a YAML line matches nothing; a case-mismatched pattern returns nothing).
+ * All three are LINE-ORIENTED PARSERS MEETING WRAPPED TEXT, and all three fail by returning FEWER
+ * things rather than raising.
+ *
+ * DELIBERATELY DOES NOT CHANGE `parseAcceptanceBlock`. Making the parser reject would fail bodies
+ * that merge today — including any whose trailing prose happens to sit under the block — so the
+ * parser keeps its permissive contract and this reports the discrepancy instead. The check belongs
+ * where a body is AUTHORED, not where it is judged.
+ *
+ * `bulletsWritten` counts with the parser's OWN {@link ACCEPTANCE_BULLET_RE}, and scanning stops at
+ * the first line that is neither a bullet nor an indented continuation nor a tolerated leading
+ * blank — so a `## Validation` section after the block is not miscounted as more criteria.
+ */
+export function acceptanceBlockDiagnostics(body: string): AcceptanceBlockDiagnostics {
+  const parsed = parseAcceptanceBlock(body);
+  const lines = (body ?? "").split("\n");
+  let inBlock = false;
+  let bulletsWritten = 0;
+  for (const raw of lines) {
+    const line = raw.replace(/\r$/, "");
+    if (!inBlock) {
+      if (ACCEPTANCE_HEADER_RE.test(line)) inBlock = true;
+      continue;
+    }
+    if (ACCEPTANCE_BULLET_RE.test(line)) {
+      bulletsWritten++;
+      continue;
+    }
+    // An indented continuation (wrapped claim OR a `proof:` line) belongs to the current bullet.
+    if (bulletsWritten > 0 && /^\s+\S/.test(line)) continue;
+    if (line.trim() === "" && bulletsWritten === 0) continue;
+    break;
+  }
+  const emptyProofs = parsed.filter((c) => !c.proof).length;
+  const headerFound = inBlock;
+  return {
+    headerFound,
+    bulletsWritten,
+    criteriaParsed: parsed.length,
+    emptyProofs,
+    truncatedAtBullet: parsed.length < bulletsWritten ? parsed.length + 1 : undefined,
+    defective: !headerFound || parsed.length !== bulletsWritten || emptyProofs > 0,
+  };
 }
 
 // ── The reviewer RUBRIC (MASTER-PLAN §5 layer 2 — advisory judgment) ────────
