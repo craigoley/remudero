@@ -346,6 +346,75 @@ test("idle ceiling: under the ceiling, a busy fleet still just defers (not yet f
   assert.ok(!r.logs.some((l) => l.step === "deploy.idle_ceiling_forced"), "not forced yet");
 });
 
+// ── W1-T380: a dry-run must not consume the ceiling ──────────────────────────────────────────
+// The defect these lock, observed live 2026-08-05T22:43:42Z: `clearDeferredSince` sat ABOVE the
+// `opts.dryRun` check, so a dry-run that won the race to the ceiling ENDED the deferral episode
+// and delivered nothing — forced at waited_ms 1843684, pulled, logged `deploy.dry_run`, then
+// `deploy.not_idle waited_ms=0` sixteen seconds later with the daemon still on its old sha. Both
+// directions are asserted against the PERSISTED value (`deferredSinceRef`), never a spy on the
+// call, because the bug is about what survives to the NEXT process.
+
+test("W1-T380: a DRY-RUN at the ceiling leaves the persisted deferral clock INTACT — nothing restarted, so the episode is not over", () => {
+  const ceilingMs = 1000;
+  const r = makeDeps({
+    markerPresent: true,
+    installHead: "old",
+    originMain: "new",
+    idle: { workers: 3, inflightLocks: 0, worktreeLocks: 0 }, // never idle — only the ceiling carries it
+    deferredSinceMs: 500,
+    nowMs: 500 + ceilingMs, // exactly at the ceiling
+  });
+  const out = runDeployCycle(r.deps, { idleDeferCeilingMs: ceilingMs, dryRun: true });
+  assert.equal(out.deployed, false, "a dry-run never reports a deploy");
+  assert.ok(!r.calls.includes("kickstart"), "and never restarts anything");
+  assert.equal(
+    r.deferredSinceRef.value,
+    500,
+    "THE PERSISTED CLOCK SURVIVES — the next real cycle inherits the accumulated wait instead of restarting from zero",
+  );
+  assert.ok(!r.calls.includes("clearDeferredSince"), "the deferral episode was never ended by a cycle that did not restart");
+});
+
+test("W1-T380: the dry-run row carries the wait it retained, so a dropped delivery cannot read as success", () => {
+  const ceilingMs = 1000;
+  const r = makeDeps({
+    markerPresent: true,
+    installHead: "old",
+    originMain: "new",
+    idle: { workers: 3, inflightLocks: 0, worktreeLocks: 0 },
+    deferredSinceMs: 500,
+    nowMs: 500 + ceilingMs,
+  });
+  runDeployCycle(r.deps, { idleDeferCeilingMs: ceilingMs, dryRun: true });
+  const row = r.logs.find((l) => l.step === "deploy.dry_run");
+  assert.ok(row, "the dry-run is ledgered");
+  assert.equal(row?.data?.would_kickstart, true, "it still says what it would have done");
+  assert.equal(row?.data?.retained_wait_ms, ceilingMs, "and how much accumulated wait it did NOT discard");
+});
+
+// THE OVERCORRECTION LOCK. Moving the clear too far (below `kickstart`, or into the health-success
+// branch) would leave the clock never resetting, so every later tick forces a SIGKILL restart into
+// `reconstructOrphan` — a path never exercised in production. This pins the clear to a real cycle
+// AND pins its position: it must happen, and it must happen BEFORE the restart.
+test("W1-T380 (overcorrection lock): a REAL forced cycle still clears the clock, and clears it BEFORE kickstarting", () => {
+  const ceilingMs = 1000;
+  const r = makeDeps({
+    markerPresent: true,
+    installHead: "old",
+    originMain: "new",
+    idle: { workers: 3, inflightLocks: 0, worktreeLocks: 0 },
+    deferredSinceMs: 500,
+    nowMs: 500 + ceilingMs,
+  });
+  const out = runDeployCycle(r.deps, { idleDeferCeilingMs: ceilingMs });
+  assert.equal(out.deployed, true, "not a dry-run — this cycle really restarts");
+  assert.equal(r.deferredSinceRef.value, undefined, "so the episode ends and the clock resets");
+  const clearAt = r.calls.indexOf("clearDeferredSince");
+  const kickAt = r.calls.indexOf("kickstart");
+  assert.ok(clearAt >= 0 && kickAt >= 0, "both happened");
+  assert.ok(clearAt < kickAt, "and the clear precedes the restart — never gated behind a healthy boot");
+});
+
 test("idle ceiling: once genuinely idle, deploys immediately — never waits out the rest of the ceiling (falsifier, direction 2)", () => {
   const r = makeDeps({
     markerPresent: true,
