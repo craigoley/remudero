@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
+import { fork } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   WORKER_KEYCHAIN_SERVICE,
   WorkerKeychainError,
   ensureWorkerKeychain,
+  keychainProvisionLockPath,
   workerKeychainPaths,
 } from "../src/lib/worker-home.js";
 
@@ -295,6 +298,270 @@ test("leaf (real defaults): omitting `runner` on the PROVISIONING path also reac
       `expected a named reason class, got ${err.reasonClass}`,
     );
     assert.ok(err.message.includes(WORKER_KEYCHAIN_SERVICE), "the real find-generic-password call named the real service");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T339: serialize ONLY the provisioning branch ─────────────────────────
+//
+// The two claims below are about the hazard W1-T326 named narrowly: two lanes that
+// BOTH decide to (re-)provision the SAME worker keychain must not pull the store out
+// from under each other. The steady-state lock-freedom half of this task's proof
+// lives in test/worker-home.test.ts instead (a present, identity-matching, unexpired
+// store never touches this lock at all).
+//
+// THE FIRST TEST DRIVES REAL CONCURRENCY (this task's falsifier point (vi)): two
+// GENUINELY separate OS processes, forked via `child_process.fork`, both loading the
+// real `ensureWorkerKeychain` and racing on the SAME real lock file and real sidecar
+// files on disk. A same-process test that hand-sequences two calls with injected
+// `runner`/`exists` hooks would only prove the lock's internal bookkeeping (it would
+// never actually contend on the `wx` create, because nothing would run the two calls
+// at the same wall-clock instant) -- it would leave UNPROVEN exactly the lines that
+// matter: `acquireKeychainProvisionLock`'s `openSync(lockPath, "wx")` truly losing to
+// a concurrent winner, and the loser's poll-and-re-derive loop genuinely blocking on
+// a live peer rather than a scripted stand-in for one. Both children still inject
+// `runner`/`exists` INTERNALLY (there is no real `security(1)`/login keychain in CI),
+// but WHICH process wins the real lock file, and whether the other one genuinely
+// blocks on it, is decided by the OS scheduler across two live processes -- never by
+// this test's own control flow. A parent/child "ready" + "go" IPC handshake (below)
+// pins the moment both children call `ensureWorkerKeychain` to within microseconds of
+// each other, so Node/tsx process-startup jitter can never be mistaken for "the two
+// calls didn't really overlap".
+
+const WORKER_HOME_MODULE_PATH = fileURLToPath(new URL("../src/lib/worker-home.ts", import.meta.url));
+
+/** How long the fake `create-keychain` step sleeps (synchronously, via `Atomics.wait`)
+ *  inside the WINNING child -- long enough that the loser's poll loop (20ms ticks,
+ *  see worker-home.ts's `KEYCHAIN_PROVISION_LOCK_POLL_MS`) observes several live
+ *  polls before the lock frees, without making this test slow. */
+const CHILD_PROVISION_DELAY_MS = 300;
+
+interface ChildProvisionInput {
+  keychainPath: string;
+  passwordPath: string;
+  identityPath: string;
+  expiryPath: string;
+  loginKeychainPath: string;
+  accountId: string;
+  itemAttrs: string;
+  secret: string;
+  provisionDelayMs: number;
+  resultPath: string;
+}
+
+interface ChildProvisionResult {
+  ok: boolean;
+  summary?: { provisioned: boolean; reason: string; account_label?: string };
+  error?: string;
+}
+
+function childProvisionScript(input: ChildProvisionInput): string {
+  return `
+import { ensureWorkerKeychain } from ${JSON.stringify(WORKER_HOME_MODULE_PATH)};
+import { writeFileSync } from "node:fs";
+
+const input = ${JSON.stringify(input)};
+
+function runner(argv) {
+  if (argv[0] === "create-keychain") {
+    // The REAL provisioning hazard this task closes: a non-trivial window during
+    // which a SECOND concurrent provisioner could pull the store out from under
+    // this one, widened here on purpose so the OS scheduler has room to actually
+    // interleave the two real processes rather than one finishing before the
+    // other even starts.
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, input.provisionDelayMs);
+    // A real "security create-keychain" leaves a real file at this path -- mirror
+    // that here, since this test's runner is otherwise fully faked (no real
+    // security(1) in CI).
+    writeFileSync(input.keychainPath, "fake keychain db written by the real-concurrency test's injected runner\\n");
+    return "";
+  }
+  if (argv[0] === "find-generic-password" && !argv.includes("-w")) return input.itemAttrs;
+  if (argv[0] === "find-generic-password" && argv.includes("-w")) return input.secret;
+  return "";
+}
+
+// Synchronize with the parent: block until told "go", so both sibling children call
+// ensureWorkerKeychain within microseconds of each other, well after each one's own
+// process/tsx startup rather than racing that startup jitter.
+await new Promise((resolve) => {
+  process.once("message", (m) => {
+    if (m === "go") resolve();
+  });
+  process.send("ready");
+});
+
+let result;
+try {
+  const summary = ensureWorkerKeychain({
+    keychainPath: input.keychainPath,
+    passwordPath: input.passwordPath,
+    identityPath: input.identityPath,
+    expiryPath: input.expiryPath,
+    loginKeychainPath: input.loginKeychainPath,
+    accountId: input.accountId,
+    runner,
+  });
+  result = { ok: true, summary };
+} catch (e) {
+  result = { ok: false, error: String((e && e.message) || e) };
+}
+writeFileSync(input.resultPath, JSON.stringify(result));
+process.exit(0);
+`;
+}
+
+function forkProvisionChild(scriptDir: string, id: string, input: Omit<ChildProvisionInput, "resultPath">) {
+  const scriptPath = join(scriptDir, `provision-${id}.mjs`);
+  const resultPath = join(scriptDir, `result-${id}.json`);
+  writeFileSync(scriptPath, childProvisionScript({ ...input, resultPath }));
+  const child = fork(scriptPath, [], { execArgv: ["--import", "tsx"] });
+  let stderr = "";
+  child.stderr?.on("data", (d) => {
+    stderr += String(d);
+  });
+  const ready = new Promise<void>((resolvePromise) => {
+    child.once("message", (m) => {
+      if (m === "ready") resolvePromise();
+    });
+  });
+  const exited = new Promise<number | null>((resolvePromise) => {
+    child.once("exit", (code) => resolvePromise(code));
+  });
+  return { child, resultPath, ready, exited, stderr: () => stderr };
+}
+
+/** Fork TWO real OS processes, hold them at the "ready" handshake until BOTH have
+ *  started, then release both in the same tick -- see the section doc above for why
+ *  this (and not an injected-seam sequencing) is what proves the real race. */
+async function runTwoConcurrentProvisioners(
+  scriptDir: string,
+  input: Omit<ChildProvisionInput, "resultPath">,
+): Promise<[ChildProvisionResult, ChildProvisionResult]> {
+  const a = forkProvisionChild(scriptDir, "a", input);
+  const b = forkProvisionChild(scriptDir, "b", input);
+  await Promise.all([a.ready, b.ready]);
+  a.child.send("go");
+  b.child.send("go");
+  const [codeA, codeB] = await Promise.all([a.exited, b.exited]);
+  if (codeA !== 0) throw new Error(`child a exited ${codeA}: ${a.stderr()}`);
+  if (codeB !== 0) throw new Error(`child b exited ${codeB}: ${b.stderr()}`);
+  return [JSON.parse(readFileSync(a.resultPath, "utf8")), JSON.parse(readFileSync(b.resultPath, "utf8"))];
+}
+
+test(
+  "W1-T339 (real concurrency, not an injected seam): two GENUINELY concurrent provisioning calls on one account leave a single coherent keychain, with the loser converging on the winner's store rather than recreating it",
+  async () => {
+    const root = tmp();
+    try {
+      const paths = workerKeychainPaths(join(root, "state"));
+      mkdirSync(join(root, "state"), { recursive: true });
+
+      const [ra, rb] = await runTwoConcurrentProvisioners(root, {
+        keychainPath: paths.keychainPath,
+        passwordPath: paths.passwordPath,
+        identityPath: paths.identityPath,
+        expiryPath: paths.expiryPath,
+        loginKeychainPath: LOGIN,
+        accountId: "acct-real-concurrency",
+        itemAttrs: ITEM_ATTRS,
+        secret: "sekrit-oauth-token\n",
+        provisionDelayMs: CHILD_PROVISION_DELAY_MS,
+      });
+
+      assert.ok(ra.ok, `child a threw: ${ra.error}`);
+      assert.ok(rb.ok, `child b threw: ${rb.error}`);
+
+      const summaries = [ra.summary!, rb.summary!];
+      const provisioners = summaries.filter((s) => s.provisioned);
+      const losers = summaries.filter((s) => !s.provisioned);
+      assert.equal(
+        provisioners.length,
+        1,
+        `exactly ONE of the two genuinely concurrent calls must actually provision; got ${JSON.stringify(summaries)}`,
+      );
+      assert.equal(losers.length, 1);
+      assert.equal(losers[0].reason, "skipped", "the loser converges on the winner's store (present, identity-matching) rather than recreating it");
+      assert.equal(losers[0].account_label, "acct-real-concurrency");
+
+      // The store is left in ONE coherent, non-corrupted state -- not two interleaved
+      // half-writes from both processes independently believing they were first.
+      assert.equal(existsSync(paths.keychainPath), true);
+      assert.equal(readFileSync(paths.identityPath, "utf8"), "acct-real-concurrency");
+      assert.ok(!existsSync(keychainProvisionLockPath(paths.keychainPath)), "the provisioning lock is released by both processes, never left behind");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
+// ── Claim: a stale provisioning lock (crashed holder) does not wedge the fleet ──
+
+test("W1-T339: a stale provisioning lock left by a crashed provisioner is taken over rather than wedging every later dispatch", () => {
+  const root = tmp();
+  try {
+    const paths = workerKeychainPaths(join(root, "state"));
+    mkdirSync(join(root, "state"), { recursive: true });
+
+    // An abandoned lock from a provisioner that crashed mid-run: a pid that is not,
+    // and cannot become, alive (implausibly high -- exceeds any real pid ceiling on
+    // macOS or Linux), so the REAL default liveness probe (`process.kill(pid, 0)`,
+    // never injected here) reliably judges it dead.
+    const DEAD_PID = 2 ** 30;
+    writeFileSync(
+      keychainProvisionLockPath(paths.keychainPath),
+      JSON.stringify({ pid: DEAD_PID, startedAt: new Date(0).toISOString() }, null, 2),
+    );
+
+    const { runner } = fakeRunner(unlockedLoginHandlers());
+    const summary = ensureWorkerKeychain({
+      ...paths,
+      loginKeychainPath: LOGIN,
+      runner,
+      exists: () => false,
+      accountId: "acct-1",
+    });
+
+    assert.equal(summary.provisioned, true, "the stale lock is taken over -- this call completes and provisions rather than wedging");
+    assert.equal(summary.reason, "absent");
+    assert.ok(
+      !existsSync(keychainProvisionLockPath(paths.keychainPath)),
+      "the lock this call took over and then released is gone, not left behind for the NEXT dispatch to trip over",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T339: a GARBAGE/unparseable provisioning lock (unreadable JSON, e.g. a truncated write) names no live holder, so it is reclaimed rather than wedging dispatch forever", () => {
+  const root = tmp();
+  try {
+    const paths = workerKeychainPaths(join(root, "state"));
+    mkdirSync(join(root, "state"), { recursive: true });
+
+    // Not valid JSON at all -- e.g. a write truncated by a crash mid-flush. Unlike the
+    // dead-pid case above, this exercises parseKeychainProvisionLockInfo's OWN catch
+    // branch (no `pid` to even judge stale/live): garbage names no holder, so it is
+    // treated the same as "reclaimable" everywhere else in this repo's lock family
+    // (inflight-lock.ts's parseInflightLockInfo, drain-lock.ts's parseDrainLockInfo).
+    writeFileSync(keychainProvisionLockPath(paths.keychainPath), "{not valid json at all");
+
+    const { runner } = fakeRunner(unlockedLoginHandlers());
+    const summary = ensureWorkerKeychain({
+      ...paths,
+      loginKeychainPath: LOGIN,
+      runner,
+      exists: () => false,
+      accountId: "acct-1",
+    });
+
+    assert.equal(summary.provisioned, true, "a garbage lock is reclaimed -- this call completes and provisions rather than wedging");
+    assert.equal(summary.reason, "absent");
+    assert.ok(
+      !existsSync(keychainProvisionLockPath(paths.keychainPath)),
+      "the reclaimed garbage lock is gone after this call, not left behind",
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
