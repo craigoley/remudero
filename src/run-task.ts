@@ -108,6 +108,15 @@ import {
   type StarvationCensus,
   priorUnrecognisedResetStrings,
 } from "./lib/daemon.js";
+// W1-T117/W1-T356: the orphan sweep's own exported defaults — see the shared `sweepOrphans`
+// closure below (daemonCommand), wired into BOTH daemonBoot's boot-time param and
+// DaemonDeps.sweepOrphans.
+import {
+  defaultListCandidates,
+  defaultReadMarkers,
+  killProcessGroup,
+  sweepOrphanWorkers,
+} from "./lib/worker-containment.js";
 import { makeTempDir, sweepStaleTempDirs, withTempDir, type TempSweepOpts, type TempSweepSummary } from "./lib/tmp.js";
 import { reapWorkerScratch, sweepStaleWorkerScratch } from "./lib/worker-scratch.js";
 import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateServeLaunchdPlist, generateSupervisorLaunchdPlist, launchctlGuiTarget, launchdPlistPath, parseSupervisorStartInterval, SERVE_LABEL, serveLogPaths, SUPERVISOR_LABEL } from "./lib/launchd.js";
@@ -9266,6 +9275,32 @@ export async function daemonCommand(
     .map((l) => String(l.ts ?? ""))
     .filter(Boolean)
     .slice(-200);
+  // W1-T117/W1-T356: the orphan sweep, composed from the module's OWN exported defaults
+  // (design part i/ii) — ONE shared closure wired into BOTH daemonBoot's boot-time param
+  // (below) and DaemonDeps.sweepOrphans (the per-poll half, at the deps literal further
+  // down), so both halves run the identical attribution/kill/ledger logic rather than two
+  // independently drifting copies. `isRunActive` reads the SAME inflight-lock directory
+  // (state/inflight/*.lock) the drain/daemon dispatch path itself takes before running a
+  // task (see `liveInflightRuns`'s own doc) — a run still holding that lock is never a
+  // stray, no matter how long its process has been alive. Each kill's own
+  // `worker_orphan_killed` ledger line carries the ORPHAN's run_id/task_id (never this
+  // daemon's own runId), matching `sweepOrphanWorkers`'s `ledger` dep contract.
+  const inflightDir = join(config.root, "state", "inflight");
+  const sweepOrphans = () =>
+    sweepOrphanWorkers({
+      listCandidates: defaultListCandidates,
+      readMarkers: defaultReadMarkers,
+      isRunActive: (candidateRunId) => liveInflightRuns(inflightDir).some((r) => r.runId === candidateRunId),
+      kill: (pid) => killProcessGroup(pid),
+      ledger: (line) =>
+        appendLedger(ledgerPath, {
+          run_id: line.run_id,
+          task_id: line.task_id,
+          step: "worker_orphan_killed",
+          pid: line.pid,
+          cmdline: line.cmdline,
+        }),
+    });
   // ANTHROPIC-clean-env boot assertion (W1-T12b): checked once, before the loop
   // starts, over the daemon process's OWN live env — belt-and-suspenders atop
   // the launchd unit's own closed EnvironmentVariables allowlist (lib/launchd.ts).
@@ -9337,7 +9372,10 @@ export async function daemonCommand(
     // report `api` iff this daemon deliberately drains on API credits, matching
     // what its workers will actually bill (the key must ALSO be in the env).
     config.overflow === "api_key",
-    undefined, // sweepOrphanWorkers — not wired at this call site
+    // W1-T356: the boot-time half of the W1-T117 orphan sweep, wired at last — see the
+    // shared `sweepOrphans` closure defined above this call (built from worker-containment.ts's
+    // own exported defaults, never a hand-rolled substitute).
+    sweepOrphans,
     // THE SHA THIS PROCESS IS ACTUALLY EXECUTING. Resolved from the directory the RUNNING
     // MODULE was loaded from (`import.meta.url`), never from cwd and never re-read later — the
     // deploy supervisor compares this against the checkout's HEAD, and a value read live at
@@ -9465,6 +9503,10 @@ export async function daemonCommand(
         // flight, so a green PR whose review went absent re-posts within one poll
         // interval. Dangerous lanes (fix/close/arm/escalate) stay non-concurrent.
         sweepLight: buildSweepLightHook(target.owner, target.repo, config, ledgerPath, runId, plan, log),
+        // W1-T117/W1-T356: the per-poll half of the orphan sweep — the SAME `sweepOrphans`
+        // closure daemonBoot already runs once, above, wired here so a stray from a run that
+        // ended BETWEEN polls (not only at the last boot) is still found within one cycle.
+        sweepOrphans,
         // RETRO CADENCE TRIGGER (W1-T160) — SELF-TARGET ONLY: the retro reads/writes
         // THIS repo's own MASTER-PLAN.md/LEARNINGS.md/plan/tasks.yaml/state, never a
         // drained target's, so the trigger is wired only when the daemon is draining
