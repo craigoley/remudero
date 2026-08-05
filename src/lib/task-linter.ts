@@ -16,7 +16,10 @@ import { isDemonstrationProof, isDialectPrefixed, parseWhitelistedProof, type Wh
  * branch AFTER the work is done), an ALREADY-MERGED task's criteria being
  * amended with no follow-up filed in the same PR (W1-T180 — MERGED is terminal,
  * so the drain and the retro sweep both skip it and the amendment would
- * otherwise orphan silently), and missing provenance (Rules 16/17).
+ * otherwise orphan silently), missing provenance (Rules 16/17), and a
+ * ruling-shaped task (its `files:` includes DECISIONS.md) filed verify:auto —
+ * a worker's proof that a ruling was WRITTEN is not an operator RATIFYING it
+ * (W1-T326, #1302/#1303).
  *
  * Wired at TWO points, both FAIL-CLOSED — EXCEPT post-merge-amendment, which is
  * CI-only (see below):
@@ -57,7 +60,8 @@ export type LintCheck =
   | "provenance"
   | "call-site"
   | "monolith-filing"
-  | "budget-sanity";
+  | "budget-sanity"
+  | "ruling-verify";
 export type LintSeverity = "block" | "warn";
 
 export interface LintViolation {
@@ -1042,6 +1046,65 @@ export function provenanceViolation(task: Task): LintViolation | undefined {
   return undefined;
 }
 
+// ── RULING-VERIFY (W1-T326 — a ruling needs an operator, not a grep) ────────
+//
+// W1-T326's own shard set verify:auto with the note "the whole deliverable is
+// text at known paths, so grep proofs execute against it directly and no
+// operator need be present to judge them" — on a task whose SAME note says
+// risk:high because "this writes a BINDING RULING on dispatch architecture."
+// The proofs verified the ruling was WRITTEN, not that anyone RATIFIED it:
+// #1302 merged in ten minutes and the operator overrode it in twenty-three
+// more (#1303). isDispatchEligible (drain.ts) already refuses to dispatch any
+// task whose `verify !== "auto"` — that enforcement lever is free and
+// pre-existing; a ruling-shaped task at verify:human simply PARKS until the
+// operator looks, which is the entire point. What was missing is only the
+// rule that puts it there.
+//
+// TRIGGER A ONLY — `files:` contains "DECISIONS.md" (an exact entry, the
+// literal repo-relative path this repo's single decision log lives at, per
+// {@link isDataArtifact}'s own root-relative convention). A task whose
+// declared write surface includes the decision log is ruling-shaped by
+// construction, and A ALONE would have caught W1-T326 (its shard's `files:`
+// named exactly this path). A mixed diff — other files alongside
+// DECISIONS.md — still triggers: that is how the entry rides in unnoticed.
+//
+// TRIGGER B (a ruling-shaped TITLE, e.g. a bare `\bruling\b` word match) is
+// the design's proposed belt for a ruling landing in some OTHER file (a
+// MASTER-PLAN "ruling" section, a docs/ decision record) — DELIBERATELY NOT
+// SHIPPED. Measured against the very task that files this check: W1-T353's
+// own title reads "...deliverable is a RULING... a ruling-shaped task..." —
+// describing the INCIDENT and the CHECK, not claiming its own diff (files:
+// [src/lib/task-linter.ts, test/task-linter.test.ts], no DECISIONS.md) is a
+// ruling — so a bare word match would misfire on the task introducing it, the
+// same self-reference failure mode the headless-fitness lexicon special-cases
+// for W1-T20c (see {@link HEADLESS_FORBIDDEN_LEXICON}'s FALSE POSITIVE #2
+// above). No enumeration/quote-span exemption of that kind applies here (the
+// title is one unquoted YAML string), so B cannot be stated precisely without
+// either false-positiving on this task or growing bespoke self-reference
+// carve-outs the design never asked for. The design's own fallback governs
+// exactly this case: "if B proves too fuzzy to state without false positives,
+// ship A alone and say so in the report" — done here.
+
+/** The exact repo-relative path this repo's single decision log lives at —
+ *  the literal `files:` entry {@link rulingVerifyViolation} looks for. */
+const DECISIONS_LOG_PATH = "DECISIONS.md";
+
+/** A task whose `files:` includes the decision log but is not verify:human —
+ *  W1-T326's exact shape. TRIGGER A only; see the module comment above for
+ *  why the title-word trigger B is deliberately not shipped. */
+export function rulingVerifyViolation(task: Task): LintViolation | undefined {
+  if (task.verify === "human") return undefined;
+  if (!(task.files ?? []).includes(DECISIONS_LOG_PATH)) return undefined;
+  return {
+    check: "ruling-verify",
+    severity: "block",
+    message:
+      `task ${task.id} declares files: including ${DECISIONS_LOG_PATH} at verify:${task.verify} — ` +
+      "a ruling-shaped task must be verify: human — the operator judges rulings; isDispatchEligible " +
+      "parks it until then.",
+  };
+}
+
 // ── BUDGET-SANITY (soft) ─────────────────────────────────────────────────────
 //
 // A WARNING (never blocks) when a task's resolved mount turn-budget sits below
@@ -1227,9 +1290,9 @@ export interface LintOpts {
 }
 
 /** Lint one task. Hard checks (sizing/headless-fitness/proof-shape/proof-dialect/
- *  proof-resolvability/post-merge-amendment/provenance) always run — post-merge-
- *  amendment is a no-op absent `opts.postMergeAmendment` — budget-sanity runs
- *  only when `opts.mountMaxTurns` is supplied. */
+ *  proof-resolvability/post-merge-amendment/provenance/ruling-verify) always run —
+ *  post-merge-amendment is a no-op absent `opts.postMergeAmendment` — budget-sanity
+ *  runs only when `opts.mountMaxTurns` is supplied. */
 export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   const violations: LintViolation[] = [];
   const sizing = sizingViolation(task);
@@ -1245,6 +1308,8 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...monolithFilingViolations(task, opts));
   const prov = provenanceViolation(task);
   if (prov) violations.push(prov);
+  const ruling = rulingVerifyViolation(task);
+  if (ruling) violations.push(ruling);
   if (opts.mountMaxTurns !== undefined) {
     const warn = budgetSanityWarning(opts.mountMaxTurns, opts.calibration);
     if (warn) violations.push(warn);

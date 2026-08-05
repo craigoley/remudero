@@ -20,6 +20,7 @@ import {
   proofResolvabilityViolations,
   proofShapeViolations,
   provenanceViolation,
+  rulingVerifyViolation,
   sizingViolation,
   SPAWN_OWNERSHIP_CUE,
   subsystemsOf,
@@ -868,6 +869,62 @@ test("a task missing origin: is FLAGGED (provenance)", () => {
 test("a task with origin: present passes provenance", () => {
   const t = task({ id: "FIX-ORIGIN-OK", origin: "feedback#plan-health" });
   assert.equal(provenanceViolation(t), undefined);
+});
+
+// ── RULING-VERIFY (W1-T326 — a ruling needs an operator, not a grep) ──────────
+
+test("ACCEPTANCE 1: files: including DECISIONS.md at verify:auto is FLAGGED (ruling-verify), naming verify:human", () => {
+  const t = task({ id: "FIX-RULING-AUTO", verify: "auto", files: ["DECISIONS.md"] });
+  const v = rulingVerifyViolation(t);
+  assert.ok(v, "expected a ruling-verify violation");
+  assert.equal(v?.severity, "block");
+  assert.match(v!.message, /verify:\s*human/);
+  const res = lintTask(t);
+  assert.equal(res.ok, false);
+  assert.ok(res.violations.some((x) => x.check === "ruling-verify"));
+});
+
+test("ACCEPTANCE 1: the IDENTICAL task at verify:human PASSES ruling-verify", () => {
+  const t = task({ id: "FIX-RULING-HUMAN", verify: "human", files: ["DECISIONS.md"] });
+  assert.equal(rulingVerifyViolation(t), undefined);
+  assert.equal(lintTask(t).ok, true);
+});
+
+test("a mixed diff — DECISIONS.md alongside other files — still triggers at verify:auto", () => {
+  const t = task({ id: "FIX-RULING-MIXED", verify: "auto", files: ["src/lib/review.ts", "DECISIONS.md"] });
+  const v = rulingVerifyViolation(t);
+  assert.ok(v, "a mixed diff must still trigger — that is how the entry rides in unnoticed");
+});
+
+test("ACCEPTANCE 2: an ordinary implement task with NEITHER trigger (no DECISIONS.md in files:) is untouched", () => {
+  const t = task({ id: "FIX-RULING-ORDINARY", verify: "auto", files: ["src/lib/review.ts"] });
+  assert.equal(rulingVerifyViolation(t), undefined);
+  const res = lintTask(t);
+  assert.ok(!res.violations.some((x) => x.check === "ruling-verify"));
+});
+
+test("FALSIFIER: W1-T355's own shape (files include DECISIONS.md, verify:human) PASSES — the rule accepts the first task filed under it", () => {
+  const t = task({
+    id: "W1-T355",
+    verify: "human",
+    files: ["DECISIONS.md", "plan/tasks.d/W1-T355-rerecord-feedback-rulings-into-decisions.yaml"],
+  });
+  assert.equal(rulingVerifyViolation(t), undefined);
+  assert.equal(lintTask(t).ok, true);
+});
+
+test("SELF-REFERENCE: W1-T353's own ruling-shaped TITLE (word 'ruling' appears repeatedly) never trips this check — trigger A is files-only, no title trigger is implemented", () => {
+  const t = task({
+    id: "W1-T353",
+    verify: "auto",
+    files: ["src/lib/task-linter.ts", "test/task-linter.test.ts"],
+    title:
+      "a task whose deliverable is a RULING chose verify:auto so 'no operator need be present to judge' a " +
+      "record its own note called BINDING — the task linter REFUSES a ruling-shaped task (files containing " +
+      "DECISIONS.md, or a ruling-shaped title) that is not verify:human",
+  });
+  assert.equal(rulingVerifyViolation(t), undefined);
+  assert.equal(lintTask(t).ok, true);
 });
 
 // ── BUDGET-SANITY (soft) ──────────────────────────────────────────────────────
