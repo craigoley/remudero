@@ -20,7 +20,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
@@ -287,5 +287,18 @@ test("the agent-scratch ignore names the file EXACTLY and does not glob json", (
   assert.ok(lines.includes("ee-open.json"), "the exact filename is ignored");
   // A `*.json` glob would mask package-lock.json and be worse than the disease.
   assert.ok(!lines.includes("*.json"), "a bare *.json glob must never be added");
-  assert.ok(!existsSync(new URL("../ee-open.json", import.meta.url)), "and the file is not committed");
+
+  // NOT COMMITTED is a question for the INDEX, not for the disk. This asserted
+  // `!existsSync` under a "not committed" message, which conflates the two: the
+  // runtime WRITES ee-open.json into the operator's checkout, where it is present
+  // and correctly ignored, so the assertion failed on the one host that actually
+  // runs the fleet while CI — which clones fresh and never produces the file —
+  // stayed green. Every session on that host re-derived the red as environmental.
+  // `git ls-files` answers the question the message asks: empty output means the
+  // path is untracked, whether or not it exists on disk.
+  const tracked = execFileSync("git", ["ls-files", "--", "ee-open.json"], {
+    cwd: new URL("../", import.meta.url),
+    encoding: "utf8",
+  }).trim();
+  assert.equal(tracked, "", "and the file is not committed (untracked in the index, present on disk or not)");
 });

@@ -2178,8 +2178,13 @@ function stripQuotedRegions(report: string): string {
  * THE NARROW, FALSIFIABLE CHECK (W1-T274). Two PRs merged THIS WEEK on bodies
  * that contradicted their own diffs — #974 claimed "exactly one file:
  * MASTER-PLAN.md. No src/, no test/, no docs/ORIENTATION.md" over a 3-file
- * diff that DID touch docs/ORIENTATION.md (load-bearing: that file sits
- * outside {@link isInPlanScope} and cost the PR its planOnly carve-out);
+ * diff that DID touch docs/ORIENTATION.md (load-bearing because the body NAMED
+ * the very file the diff touched — NOT because of plan scope: `isInPlanScope`
+ * returns TRUE for docs/ORIENTATION.md, which plan-architect.ts calls "the
+ * single regenerated doc", so #974 kept its planOnly carve-out and this check
+ * is what caught it. test/arm-outcome-five-sites.test.ts asserts that scope
+ * membership directly; an earlier revision of this comment claimed the
+ * opposite and contradicted that passing test);
  * #1025 claimed "data-only: no code" while reverting 6 src/ + 2 test/ files.
  * Both landed because `judgeReview` already held the parsed changeset
  * (`diffFiles`) and the body (`evidence.report`) in the same function and
