@@ -418,10 +418,12 @@ import {
   type MergeConflictEvidence,
   type OpenPrView,
   type QueueGovernorResult,
+  type PostReviewStallVerdict,
   type StrikeAttempt,
   type SweepDeps,
   type SweepPolicy,
   ABSENT_REPUSH_CAP,
+  detectPostReviewStall,
 } from "./lib/sweep.js";
 import { applyCorrection } from "./lib/correct.js";
 import {
@@ -8010,6 +8012,101 @@ export function escalateCrashLoop(
 }
 
 /**
+ * The post-review STALL notice: the sweep's `postReview` path has failed {@link
+ * POST_REVIEW_STALL_THRESHOLD} times in a row with no success between.
+ *
+ * THE DEFECT, MEASURED. `sweep.post_review.failed` fired 91 times across a week — every one a
+ * GraphQL rate-limit — and produced NO operator-visible signal. Green PRs sat unreviewed while the
+ * sweep retried each tick and appended another identical line; an operator found it by hand after a
+ * full session. That is the week's recurring shape: a mechanism failing correctly and saying
+ * nothing. A transport fix removes this CAUSE; only a signal removes the CLASS.
+ *
+ * WHY A NEW CLASS RATHER THAN AN EXISTING ONE. A decision-authority audit found the escalation
+ * funnel INVERTED — of 369 needs-human issues, roughly 80% were things the machine resolved itself
+ * and were never retracted — so adding noise is the failure mode to avoid. This qualifies on the
+ * test that audit implies: the machine CANNOT resolve it. Every existing class names a task or a PR
+ * the fleet can act on (`dispatch.circuit_broken`, `dispatch.lifetime_capped`,
+ * `dispatch.starvation`, `daemon.crashloop`, `daemon.headroom_reserve`); a post-review stall is
+ * fleet-wide, blocks EVERY green PR at once, and its observed cause — an exhausted API quota — is
+ * outside the fleet's power to fix. Reusing `daemon.crashloop` would misname it and reusing a
+ * per-task class would file one issue per stuck PR, which is the inversion again.
+ *
+ * DEDUP IS THE WHOLE DESIGN, NOT A DETAIL. `escalate()` gates its entire dedup block on
+ * `if (prRef && deps.issues.listOpen)`, so an escalation naming no PR skips dedup and opens a FRESH
+ * issue every call — the observed eight-identical-"dispatch queue starved"-issues shape. This
+ * escalation names no single PR (the condition is fleet-wide), so it dedups the way
+ * `escalateCrashLoop` does: an EPISODE key in the ledger. Skip iff a prior
+ * `sweep.post_review.stalled.escalated` marker's `episode_newest` is within `episodeMs` of THIS
+ * verdict's newest failure. An ongoing stall therefore escalates ONCE however many ticks it spans,
+ * while a genuinely new stall after a quiet gap escalates again. The marker is written whether or
+ * not delivery succeeded, for `escalateCircuitBreak`'s stated reason: an undelivered notice costs
+ * one operator read, not an unbounded retry loop. The step is registered in
+ * DECISION_RELEVANT_LEDGER_STEPS (ledger.ts) because THIS function reads it back.
+ */
+export const POST_REVIEW_STALL_EPISODE_MS = 60 * 60 * 1000;
+
+export function escalatePostReviewStall(
+  verdict: PostReviewStallVerdict,
+  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway; episodeMs?: number },
+): void {
+  const newestMs = Date.parse(verdict.newestFailureTs ?? "");
+  if (!verdict.stalled || !Number.isFinite(newestMs)) return;
+  const episodeMs = ctx.episodeMs ?? POST_REVIEW_STALL_EPISODE_MS;
+  const already = readLedgerLines(ctx.ledgerPath).some((l) => {
+    if (l.step !== "sweep.post_review.stalled.escalated") return false;
+    const priorMs = Date.parse(String(l.episode_newest ?? ""));
+    return Number.isFinite(priorMs) && newestMs - priorMs <= episodeMs;
+  });
+  if (already) return;
+  const quota = verdict.rateLimited
+    ? " Every failure in the run is an API quota exhaustion, which is fleet-stopping but self-clearing at the " +
+      "bucket's reset — check `gh api rate_limit` before assuming a code fault."
+    : "";
+  const issueUrl = tryEscalate(
+    {
+      class: "BLOCKED",
+      taskId: "DAEMON",
+      runId: ctx.runId,
+      summary: `post-review stalled: ${verdict.consecutiveFailures} consecutive failures, no review posted`,
+      detail:
+        `The sweep's post-review path has failed ${verdict.consecutiveFailures} times in a row with no success ` +
+        `between (first ${verdict.oldestFailureTs}, newest ${verdict.newestFailureTs}). While this holds, a PR ` +
+        `whose checks are green never receives its remudero-review status, so it cannot merge and the sweep ` +
+        `re-attempts it every tick — silently, which is why this notice exists.${quota} The failing call, with ` +
+        `digits normalised so one stall does not read as many: ${verdict.normalisedError}`,
+      options: [
+        {
+          label: "clear the cause, then let the next sweep tick post the reviews",
+          detail:
+            "No manual re-drive is needed — the sweep re-attempts every tick, so the backlog clears itself once " +
+            "the cause is gone." +
+            // Only offered when it actually applies: naming a quota remedy on a stall that is not a
+            // quota problem sends the operator to the wrong instrument, which is the failure mode
+            // this whole notice exists to avoid.
+            (verdict.rateLimited ? " `gh api rate_limit` shows the reset." : ""),
+        },
+        {
+          label: "post the blocked reviews by hand",
+          detail: "`rmd review <pr>` per stuck PR — the same deterministic verb the sweep calls.",
+        },
+      ],
+      recommendation: "clear the cause, then let the next sweep tick post the reviews",
+    },
+    { issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo), ledgerPath: ctx.ledgerPath, runId: ctx.runId },
+  );
+  appendLedger(ctx.ledgerPath, {
+    run_id: ctx.runId,
+    task_id: "DAEMON",
+    step: "sweep.post_review.stalled.escalated",
+    episode_newest: verdict.newestFailureTs,
+    consecutive_failures: verdict.consecutiveFailures,
+    rate_limited: verdict.rateLimited,
+    issue_url: issueUrl,
+    delivered: issueUrl !== null,
+  });
+}
+
+/**
  * P34 clause (c), W1-T249: the daemon's `onHeadroomBreach` hook, called when a
  * weekly (or session) window first crosses the operator reserve. Dispatch is
  * ALREADY paused by the time this fires (`runDaemon`'s own in-process idle,
@@ -11232,6 +11329,12 @@ export function buildSweepEffects(
   // closure's own body is unreachable from any offline test (it would open a REAL needs-human
   // issue), which is exactly how the `taskId:` mint inside it went uncovered.
   issuesImpl?: IssueGateway,
+  // Injectable stall notice — appended LAST so no positional caller shifts, the same convention
+  // `reviewRunner`/`spawnImpl`/`pushEmptyCommit`/`issuesImpl` above already follow. The postReview
+  // closure wraps this call in a try/catch so a throw from the NOTICE can never replace the real
+  // failure being reported; that catch arm is only reachable if something in here throws, so it is
+  // only provable with an injected thrower.
+  stallNotice: (verdict: PostReviewStallVerdict, ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway }) => void = escalatePostReviewStall,
 ): Pick<SweepDeps, "arm" | "close" | "dispatchFix" | "escalate" | "readLiveState" | "depReview" | "postReview" | "repushAbsent"> {
   const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
   const issues = issuesImpl ?? ghIssueGateway(owner, repo);
@@ -11302,6 +11405,27 @@ export function buildSweepEffects(
           head_sha: pr.headSha,
           error: String((e as Error)?.message ?? e),
         });
+        // A REPEATED failure escalates; a single one does not. Read back AFTER the log above so the
+        // failure just recorded is counted — 91 identical failures produced no signal precisely
+        // because nothing ever looked. detectPostReviewStall counts the CURRENT consecutive run
+        // (any `.done` resets it) and escalatePostReviewStall dedups on an episode key, so an
+        // ongoing stall escalates once however many ticks it spans. Never allowed to mask the
+        // original failure: the rethrow below is what runSweep's per-PR containment records, and a
+        // throw from the notice itself would replace a real error with a bookkeeping one.
+        try {
+          // `issues` (not the default gateway) — the SAME reason `issuesImpl` exists on this
+          // function: without it this closure's body would open a REAL needs-human issue from any
+          // offline test, which is how the escalate closure's own mint went uncovered.
+          stallNotice(detectPostReviewStall(readLedgerLines(ledgerPath)), {
+            owner,
+            repo,
+            ledgerPath,
+            runId,
+            issues,
+          });
+        } catch (notifyErr) {
+          log("sweep.post_review.stall_notice_failed", { error: String((notifyErr as Error)?.message ?? notifyErr) });
+        }
         throw e;
       }
     },
