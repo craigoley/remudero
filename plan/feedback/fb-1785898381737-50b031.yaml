@@ -1,0 +1,34 @@
+id: fb-1785898381737-50b031
+ts: 2026-08-05T02:53:01.737Z
+raw: "THE CONSOLE EXHAUSTS THE SHARED GRAPHQL BUDGET THE FLEET NEEDS — measured
+  2026-08-05T02:52Z: GraphQL 5031/5000 used, remaining 0, while REST core sat at
+  4848/5000 remaining. The cause is board_gateway.issue_fetch_ok firing EVERY 30
+  SECONDS with issueCount: 371 (301 occurrences in the live ledger file alone;
+  consecutive timestamps 02:51:22, 02:51:52, 02:52:23). GraphQL bills by NODE
+  COUNT, so that is ~120 fetches/hour x 371 issues. Every lane shares one token
+  (cao825): the console, the workers, the sweep, the review lane and the
+  operator's shell all draw from the same bucket. CONSEQUENCE: a worker that
+  cannot open or check a PR because a browser tab drained the quota fails in a
+  way that looks like a stall, not a quota error — nothing in the ledger logged
+  a rate-limit response, and the operator found it only because his own gh issue
+  list started failing. This is a real overnight risk for an unattended fleet.
+  IT COMPOUNDS: a decision-authority audit measured 297 of 369 needs-human
+  issues (80%) as items the machine subsequently resolved itself and which were
+  never retracted, so the console is paying every 30 seconds to re-fetch issues
+  that settled days ago. Six such stale issues were closed by hand tonight.
+  RECON: establish whether the board's issue fetch must be GraphQL at all — the
+  fleet's own standing rule is REST-only for exactly this reason, and gh api
+  (REST) was unaffected while gh issue list (GraphQL) failed. Then establish
+  whether the fetch can be incremental (since-based, or only open issues) rather
+  than re-fetching all 371 every poll, and whether the 30s cadence is necessary
+  for a surface whose data changes on the order of minutes. Note the retraction
+  work already filed (W1-T345-T350) shrinks the denominator but does not fix the
+  cadence or the protocol. Falsifying check: if the board fetch is already REST
+  and something else consumed the GraphQL budget, the cadence is not the cause
+  and the real consumer needs finding — check the sweep's PR queries first,
+  since gh pr subcommands use GraphQL while gh api does not."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null

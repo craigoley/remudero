@@ -1,0 +1,34 @@
+id: fb-1785899307058-60fbcf
+ts: 2026-08-05T03:08:27.058Z
+raw: "CONFIRMED WITHIN THE HOUR — fb-1785898381737-50b031's hypothesis is now a
+  measured incident with the error verbatim. Run W1-T333-1785895930303 completed
+  its work (implement.done, verdict success) and then threw at
+  2026-08-05T02:54:07.579Z: step run.error, error 'Command failed: gh pr create
+  --repo craigoley/remudero --base main --head run-W1-T333-1785895930303 --title
+  test(config-reader-seams): allowlist the cost ceiling default reader (W1-T333)
+  --fill\\nGraphQL: API rate limit already exceeded for user ID 4397075.'
+  GraphQL had been measured at 5031/5000 used, remaining 0, two minutes earlier,
+  while REST core sat at 4848/5000 remaining. So gh pr create IS GraphQL, and
+  the console's board_gateway.issue_fetch_ok at 30-second intervals over 371
+  issues is what drained the shared cao825 budget. A COMPLETED risk:high RUN WAS
+  LOST AT THE PUSH BOUNDARY and re-dispatched from scratch (run
+  W1-T333-1785898499462 at 02:57:41Z) — roughly 40 minutes of implement work
+  redone. THE FAILURE IS DIAGNOSABLE ONLY BY LUCK: run.error carried the
+  message, but nothing counts or alarms on quota, and had the harness swallowed
+  it this would have read as another no_pr — the same silent shape that cost six
+  dispatches on W1-T314. THREE THINGS THIS ADDS TO THE ORIGINAL FILING: (1) the
+  falsifying check is answered — the board fetch is the consumer and gh pr
+  create is the victim, so the cadence and protocol work stands; (2) the fix
+  must also cover the WORKER side — a push-boundary command that fails on quota
+  should retry after the reset window rather than discarding a completed run,
+  since GraphQL resets hourly and a completed run is worth more than the wait;
+  (3) a quota check belongs in the daemon's health path — remaining==0 on either
+  bucket is a fleet-stopping condition today and nothing observes it. Falsifying
+  check: if gh pr create can be made to use REST, or if the fleet already has a
+  retry path that simply did not fire here, the retry half is moot and only the
+  console's consumption needs fixing."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null
