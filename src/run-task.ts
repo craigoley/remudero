@@ -354,6 +354,7 @@ import {
   isTddStrict,
   judgeReview,
   keywordOnlyAnnotation,
+  acceptanceBlockDiagnostics,
   parseAcceptanceBlock,
   parseReviewerVerdicts,
   postReviewStatusGuarded,
@@ -6517,6 +6518,72 @@ export function ledgerCorpusFiles(stateDir: string): string[] {
     return [];
   }
   return names.filter((n) => n.startsWith("ledger") && n.endsWith(".ndjson")).map((n) => join(stateDir, n)).sort();
+}
+
+/**
+ * `rmd check-acceptance <body-file>` — read a PR body from a file and report what
+ * {@link "./lib/review.js".parseAcceptanceBlock} ACTUALLY resolves from it, against what the author
+ * wrote. Exits non-zero when the two disagree.
+ *
+ * THE POPULATION THIS SERVES. `gh pr create` is GraphQL, and GraphQL exhaustion has repeatedly
+ * forced PRs to be opened over REST — which bypasses the orchestrator path that emits the house
+ * Acceptance block (`plan-pr-emitter.ts`'s `renderAcceptanceBlock`, guaranteed to round-trip). A
+ * REST-opened PR therefore carries HAND-AUTHORED markdown, and nothing checks it before it is
+ * posted. That emitter is reusable but has no CLI surface; this is the smallest surface that lets a
+ * hand-authored body be checked with the reviewer's OWN parser before it reaches the gate.
+ *
+ * READ-ONLY: writes no ledger line, no state file, opens nothing.
+ */
+export function checkAcceptanceCommand(rest: string[]): number {
+  const file = rest.find((a) => !a.startsWith("--"));
+  if (!file) {
+    console.error("usage: rmd check-acceptance <body-file>");
+    return 2;
+  }
+  let body: string;
+  try {
+    body = readFileSync(file, "utf8");
+  } catch (e) {
+    console.error(`check-acceptance: cannot read ${file}: ${String((e as Error)?.message ?? e)}`);
+    return 2;
+  }
+  const d = acceptanceBlockDiagnostics(body);
+  const criteria = parseAcceptanceBlock(body);
+  console.log(`file:            ${file}`);
+  console.log(`header found:    ${d.headerFound}`);
+  console.log(`bullets written: ${d.bulletsWritten}`);
+  console.log(`criteria parsed: ${d.criteriaParsed}`);
+  console.log(`empty proofs:    ${d.emptyProofs}`);
+  criteria.forEach((c, i) => {
+    console.log(`  [${i + 1}] claim: ${c.claim.slice(0, 88)}`);
+    console.log(`      proof: ${c.proof ? c.proof.slice(0, 88) : "(EMPTY — nothing will execute)"}`);
+  });
+  if (!d.defective) {
+    console.log("OK — the parser resolves exactly what was written, and every proof is non-empty.");
+    return 0;
+  }
+  if (!d.headerFound) {
+    console.error(
+      "DEFECTIVE: no Acceptance header. The header must be a BARE line — `## Acceptance` or " +
+        "`Acceptance:` with nothing else on it. A `## Validation` section is not one, and the review " +
+        "fails CLOSED with nothing to judge.",
+    );
+  }
+  if (d.truncatedAtBullet !== undefined) {
+    console.error(
+      `DEFECTIVE: ${d.bulletsWritten} bullets written but only ${d.criteriaParsed} parsed — the block ` +
+        `ends before bullet ${d.truncatedAtBullet}. parseAcceptanceBlock treats any indented line that ` +
+        `is not \`proof:\` as the END of the block, so a claim WRAPPED onto a second line silently ` +
+        `truncates everything after it. Keep each claim on ONE line.`,
+    );
+  }
+  if (d.emptyProofs > 0) {
+    console.error(
+      `DEFECTIVE: ${d.emptyProofs} parsed criterion/criteria have an EMPTY proof — a claim with nothing ` +
+        `to execute. The proof must be on the immediately-following indented line as \`proof: ...\`.`,
+    );
+  }
+  return 1;
 }
 
 /**
@@ -15222,6 +15289,11 @@ const COMMANDS: readonly CommandSpec[] = [
     usage:
       "rmd check-proof <proof> [--allow-full-suite]   # run ONE acceptance proof through the REVIEWER'S OWN parser and executor and print what it does: parse kind, resolved candidate file(s), the exact argv, exit code and hit count. A `grep:` pattern is a BASIC REGULAR EXPRESSION (`[ * ^ $` are metacharacters) — verifying with `grep -F` is a DIFFERENT matcher and reports a false green (PR #1071). A `unit test:` proof naming a TITLE rather than a test/<file>.test.ts PATH is resolved to its file first; when it resolves to none, the run is REFUSED rather than falling back to the whole-suite glob (--allow-full-suite overrides, time-boxed). READ-ONLY: writes no cache, no ledger line, no state file",
   },
+  {
+    name: "check-acceptance",
+    usage:
+      "rmd check-acceptance <body-file>   # read a PR body from a file and report what the REVIEWER'S OWN parseAcceptanceBlock actually resolves from it, against what was written: header found, bullets written, criteria parsed, empty proofs. Exits non-zero when they disagree. A claim WRAPPED onto a second line silently truncates the block (any indented line that is not `proof:` ends it), and a `## Validation` heading is not an Acceptance header — both ship a body that says less than its author wrote. Run this before opening a PR over REST, which bypasses the orchestrator's house-block emitter. READ-ONLY: writes no ledger line, no state file",
+  },
   { name: "retro", usage: "rmd retro [--dry-run]    # sync the plan from the ledger (Architect retro)" },
   {
     name: "drain",
@@ -15695,6 +15767,10 @@ export async function main(
   }
   if (cmd === "check-proof") {
     process.exit(checkProofCommand(rest));
+  }
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(checkAcceptanceCommand(rest)) cannot carry a DA hit without forking the process; checkAcceptanceCommand's own logic — the usage refusal, the unreadable-file refusal, the truncation report, the missing-header report and the clean pass — is unit-tested in test/acceptance-block-diagnostics.test.ts (same irreducible-glue shape as the sibling check-proof/emissions dispatch cases).
+  if (cmd === "check-acceptance") {
+    process.exit(checkAcceptanceCommand(rest));
   }
   if (cmd === "next-task-id") {
     process.exit(await nextTaskIdCommand(rest));
