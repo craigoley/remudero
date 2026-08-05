@@ -263,6 +263,61 @@ test("the account reader projects only identity and usage out of the config file
   }
 });
 
+// ── W1-T333: the daily cost ceiling's EFFECTIVE value, its PROVENANCE, and the audit trail that
+// distinguishes "at default, never overridden" from "at default because a real override just
+// vanished" — the store alone (policy.ts's resolveDailyCostCeiling) cannot tell those two apart,
+// by its own documented design (the DISAPPEARANCE CASE): both read `provenance: "default"` with
+// no `fallback`. Only the ledger's independent write history can.
+
+test("the rendered ceiling carries its provenance — an overridden value shows the effective figure and its committed default, and a value at default is distinguishable from one never overridden", () => {
+  const input = readAccountUsageFile(FIXTURE);
+
+  // OVERRIDDEN: the effective figure AND what it was overridden FROM both render, together.
+  const overridden = deriveAccountUsage(input, [], CAPTURED_AT, { usd: 200, provenance: "overridden", committedDefaultUsd: 150 });
+  assert.equal(overridden.dailyCostCeilingUsd, 200, "the EFFECTIVE figure");
+  assert.equal(overridden.dailyCostCeilingProvenance, "overridden");
+  assert.equal(overridden.dailyCostCeilingDefaultUsd, 150, "the committed default travels alongside the effective figure");
+
+  // AT DEFAULT, NEVER OVERRIDDEN: no console.ceiling_override_written line has ever been ledgered.
+  const neverOverridden = deriveAccountUsage(input, [], CAPTURED_AT, { usd: 150, provenance: "default", committedDefaultUsd: 150 });
+  assert.equal(neverOverridden.dailyCostCeilingProvenance, "default");
+  assert.equal(neverOverridden.dailyCostCeilingUsd, 150);
+  assert.equal(neverOverridden.dailyCostCeilingAuditAsOf, undefined, "no audit line at all -- this value was never overridden");
+  assert.equal(neverOverridden.dailyCostCeilingAuditWho, undefined);
+
+  // AT DEFAULT BECAUSE A REAL OVERRIDE DISAPPEARED: `state/` was wiped, so
+  // resolveDailyCostCeiling reads back an ordinary ENOENT-absence and reports `provenance:
+  // "default"` with no `fallback` -- IDENTICAL, from the store alone, to never-overridden above.
+  // The ledger's own independent history is what makes the two distinguishable.
+  const auditLine = {
+    ts: "2026-08-04T12:00:00.000Z",
+    step: "console.ceiling_override_written",
+    who: "operator@example.com",
+    from_usd: 150,
+    to_usd: 200,
+    effective_usd: 200,
+  };
+  const disappeared = deriveAccountUsage(input, [auditLine], CAPTURED_AT, { usd: 150, provenance: "default", committedDefaultUsd: 150 });
+  assert.equal(disappeared.dailyCostCeilingProvenance, "default", "resolveDailyCostCeiling ALONE cannot tell this apart from never-overridden");
+  assert.equal(disappeared.dailyCostCeilingUsd, 150);
+  assert.equal(disappeared.dailyCostCeilingAuditWho, "operator@example.com", "but the ledger's write history shows a real past write");
+  assert.equal(disappeared.dailyCostCeilingAuditFromUsd, 150);
+  assert.equal(disappeared.dailyCostCeilingAuditToUsd, 200);
+  assert.equal(disappeared.dailyCostCeilingAuditEffectiveUsd, 200);
+  assert.ok(disappeared.dailyCostCeilingAuditAsOf, "the audit's own as-of is set");
+  assert.notEqual(
+    disappeared.dailyCostCeilingAuditAsOf,
+    neverOverridden.dailyCostCeilingAuditAsOf,
+    "the two 'provenance: default' readings are now distinguishable via the audit trail",
+  );
+
+  // NEWEST WINS, the same discipline every other ledger-derived reading in this module already
+  // has -- an older audit line must not shadow a newer one.
+  const older = { ...auditLine, ts: "2026-08-04T10:00:00.000Z", to_usd: 180, effective_usd: 180 };
+  const outOfOrder = deriveAccountUsage(input, [auditLine, older], CAPTURED_AT, { usd: 150, provenance: "default", committedDefaultUsd: 150 });
+  assert.equal(outOfOrder.dailyCostCeilingAuditToUsd, 200, "the newest write's own figure wins, never an older one");
+});
+
 test("GET /v1/account-usage answers 200 from its real defaults — the real file reader and the real ledger reader", async () => {
   // THE ROUTE ITSELF, with NOTHING injected but the two paths. Every other test here drives the
   // pure projection directly, so the route's own default wiring (`?? Date.now`,

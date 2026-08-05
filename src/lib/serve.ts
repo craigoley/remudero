@@ -741,6 +741,13 @@ export function renderShellHtml(
          "that is the surface that already answers 'may the fleet work'". -->
     <span class="glance-item"><span class="glance-label">cost governor</span><span class="glance-value" id="au-cost-governor">…</span></span>
     <span class="glance-item"><span class="glance-label">queue governor</span><span class="glance-value" id="au-queue-governor">…</span></span>
+    <!-- W1-T333: the EFFECTIVE daily cost ceiling with its provenance (never the bare number --
+         design note i), and the newest console write's who/when/from/to audit trail (the
+         operator's stated audit requirement). Sibling slots on the SAME strip, same reason
+         cost/queue governor above are: "that is the surface that already answers 'may the fleet
+         work'". -->
+    <span class="glance-item"><span class="glance-label">cost ceiling</span><span class="glance-value" id="au-cost-ceiling">…</span></span>
+    <span class="glance-item"><span class="glance-label">ceiling override</span><span class="glance-value" id="au-cost-ceiling-audit">…</span></span>
     <span class="glance-item"><span class="glance-label">usage as of</span><span class="glance-value" id="au-as-of">…</span></span>
     <span class="glance-item glance-scope"><span class="glance-label" id="au-measures"></span></span>
   </section>
@@ -1812,6 +1819,34 @@ export function renderShellHtml(
       a.queueGovernor === "deferred"
         ? \`\${a.queueGovernorObservedOpenCount} of \${a.queueGovernorWipLimit} open · \${formatRelative(a.queueGovernorAgeMs)}\`
         : "unknown",
+    );
+    // W1-T333: the EFFECTIVE ceiling with its provenance -- never the bare number (design note i):
+    // an overridden value shows the effective figure AND its committed default TOGETHER, so a
+    // reader can see it was changed and from what; a value at default renders "(default)" so it
+    // reads as distinguishable from an overridden one, never ambiguous between the two.
+    if (a.dailyCostCeilingUsd != null) {
+      const ceilingText =
+        a.dailyCostCeilingProvenance === "overridden"
+          ? \`\${costLabel(a.dailyCostCeilingUsd)} (overridden, default \${costLabel(a.dailyCostCeilingDefaultUsd)})\`
+          : \`\${costLabel(a.dailyCostCeilingUsd)} (default)\`;
+      setGlanceValue(
+        "au-cost-ceiling",
+        a.dailyCostCeilingFallbackReason ? \`\${ceilingText} — \${a.dailyCostCeilingFallbackReason}\` : ceilingText,
+      );
+    } else {
+      setGlanceValue("au-cost-ceiling", "unknown");
+    }
+    // W1-T333: THE AUDIT TRAIL -- who/when/from/to and the resulting effective value, off the
+    // newest console.ceiling_override_written ledger line. Absent means never overridden through
+    // the console at all -- stated plainly, never left blank -- which is exactly what makes a
+    // value "at default because never overridden" distinguishable from one "at default because a
+    // real override just vanished" (the store's own documented disappearance case: the store
+    // alone cannot tell those two apart, only this ledger-derived trail can).
+    setGlanceValue(
+      "au-cost-ceiling-audit",
+      a.dailyCostCeilingAuditAsOf
+        ? \`\${a.dailyCostCeilingAuditWho || "unknown"} set \${costLabel(a.dailyCostCeilingAuditFromUsd)} -> \${costLabel(a.dailyCostCeilingAuditToUsd)} (effective \${costLabel(a.dailyCostCeilingAuditEffectiveUsd)}) · \${formatTimestamp(a.dailyCostCeilingAuditAsOf)}\`
+        : "no override written",
     );
     setGlanceValue(
       "au-as-of",
@@ -3738,7 +3773,14 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
     defaultPollIntervalMs: deps.daemonHealth?.defaultPollIntervalMs,
   };
 
-  const accountUsageDeps: AccountUsageDeps = { ...deps.accountUsage, ledgerPath: deps.ledgerPath };
+  // W1-T333: `root` defaults to the SAME fleetControlRoot every other console write surface
+  // already resolves `state/` against (daemonHealthDeps.diskPath above follows the identical
+  // "assembler wires the real root, a test injects its own" split).
+  const accountUsageDeps: AccountUsageDeps = {
+    ...deps.accountUsage,
+    ledgerPath: deps.ledgerPath,
+    root: deps.accountUsage?.root ?? deps.fleetControlRoot,
+  };
 
   return [
     buildStatusRoute(deps.board, lastSeen),

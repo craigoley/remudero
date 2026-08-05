@@ -479,3 +479,77 @@ test("ACCOUNT strip: a deferring cost/queue governor renders the observed figure
     }
   });
 });
+
+// ── W1-T333: an override with no surface is a value overridden invisibly -- the EFFECTIVE ceiling,
+// its PROVENANCE, and the who/when/from/to of a console write must render in a REAL browser, not
+// only in a string builder (this task's own acceptance criterion, verbatim).
+
+test("ACCOUNT strip: renders the effective daily cost ceiling with its provenance, and the newest console write's who/when/from/to audit trail", async () => {
+  const root = tmpRoot();
+  const deps = fixtureDeps(root, [task({ id: "W1-T1" })], {
+    accountUsage: {
+      readAccount: () => ({
+        email: "operator@example.com",
+        cacheFetchedAtMs: Date.now(),
+      }),
+      // Injected directly (bypassing state/ + plan/policy.yaml entirely) -- the same "the
+      // assembler wires the real thing, a test injects a fake" split every other optional
+      // accountUsage field in this fixture already follows.
+      resolveCeiling: () => ({ usd: 200, provenance: "overridden", committedDefaultUsd: 150 }),
+    },
+  });
+  appendFileSync(
+    deps.board.ledgerPath,
+    ledgerLine({
+      ts: new Date(Date.now() - 30_000).toISOString(),
+      step: "console.ceiling_override_written",
+      who: "operator@example.com",
+      from_usd: 150,
+      to_usd: 200,
+      effective_usd: 200,
+    }),
+  );
+
+  await withShell(deps, async (base) => {
+    const { context, page } = await openShell(base);
+    try {
+      await page.waitForFunction(() => (document.getElementById("au-cost-ceiling")?.textContent ?? "…") !== "…", null, { timeout: 5000 });
+
+      const ceilingText = await glanceText(page, "au-cost-ceiling");
+      assert.match(ceilingText, /\$200\.000/, "the EFFECTIVE figure renders, not the committed default alone");
+      assert.match(ceilingText, /\$150\.000/, "the committed default renders alongside it -- so a reader sees it was changed and from what");
+      assert.match(ceilingText, /overridden/i, "the provenance itself is stated, not left to be inferred from the two numbers");
+
+      const auditText = await glanceText(page, "au-cost-ceiling-audit");
+      assert.match(auditText, /operator@example\.com/, "WHO wrote the override");
+      assert.match(auditText, /\$150\.000/, "FROM");
+      assert.match(auditText, /\$200\.000/, "TO, and the resulting effective value");
+      assert.match(auditText, /ago|[AP]M|:\d{2}/, "WHEN -- a real rendered timestamp, not a placeholder");
+    } finally {
+      await context.close();
+    }
+  });
+});
+
+test("ACCOUNT strip: a ceiling at its committed default with no console write ever ledgered renders 'no override written', distinguishing it from an overridden one", async () => {
+  const root = tmpRoot();
+  const deps = fixtureDeps(root, [task({ id: "W1-T1" })], {
+    accountUsage: {
+      readAccount: () => ({ email: "operator@example.com", cacheFetchedAtMs: Date.now() }),
+      resolveCeiling: () => ({ usd: 150, provenance: "default", committedDefaultUsd: 150 }),
+    },
+  });
+
+  await withShell(deps, async (base) => {
+    const { context, page } = await openShell(base);
+    try {
+      await page.waitForFunction(() => (document.getElementById("au-cost-ceiling")?.textContent ?? "…") !== "…", null, { timeout: 5000 });
+      const ceilingText = await glanceText(page, "au-cost-ceiling");
+      assert.match(ceilingText, /\$150\.000/);
+      assert.match(ceilingText, /\(default\)/, "distinguishable from an overridden reading, which names its committed default explicitly");
+      assert.equal(await glanceText(page, "au-cost-ceiling-audit"), "no override written", "no console.ceiling_override_written line was ever ledgered here");
+    } finally {
+      await context.close();
+    }
+  });
+});

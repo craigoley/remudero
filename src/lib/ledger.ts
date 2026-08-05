@@ -510,6 +510,27 @@ export const RENDER_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // the same shape `deriveGovernorPosture`'s own guard above uses).
   "daemon.cost_governor",
   "daemon.queue_governor",
+  // W1-T333 (THE OPERATOR'S AUDIT REQUIREMENT): who/when/from/to for every console write to the
+  // daily-cost-ceiling override (policy.ts's `state/DAILY_COST_CEILING_OVERRIDE`, W1-T332).
+  // RENDER, NOT DECISION -- THE ARGUMENT, CONFIRMED AGAINST SOURCE RATHER THAN INHERITED (this
+  // task's own design note demands exactly that): the CURRENT override value is STATE and lives
+  // in `state/DAILY_COST_CEILING_OVERRIDE`, read fresh by `policy.ts`'s `resolveDailyCostCeiling`
+  // on every call -- no decision in this codebase re-reads THIS ledger line to learn the ceiling,
+  // it reads the store. This line is HISTORY: it is how "was this ever overridden, by whom, when,
+  // from what, to what" survives the store's own documented DISAPPEARANCE CASE (policy.ts's
+  // header) -- `state/` is deliberately outside git, so a wiped state root reverts silently to the
+  // committed default with NO error, and `resolveDailyCostCeiling` ALONE cannot then tell "never
+  // overridden" apart from "a real override just vanished" (both read `provenance: "default"`
+  // with no `fallback`). A decision therefore never depends on this line surviving, so it belongs
+  // in the recency-bounded render set, not the never-rotated decision core -- putting it there
+  // would retain a frequently-tuned knob's full write history forever for a value that is, itself,
+  // already retained in `state/`.
+  //
+  // src/lib/account-usage.ts's `deriveCeilingOverrideAudit` reads the NEWEST
+  // `console.ceiling_override_written` line for the ACCOUNT strip's ceiling-audit slot
+  // (`line.step !== "console.ceiling_override_written"` guard, the same shape every other
+  // render-relevant reader above already uses).
+  "console.ceiling_override_written",
 ]);
 
 /** True for any step in {@link RENDER_RELEVANT_LEDGER_STEPS}. */
@@ -529,6 +550,55 @@ function isRenderRelevantStep(step: string): boolean {
  * account-usage.ts here would be circular.
  */
 export const RENDER_STEP_RETENTION_WINDOW_MS = 30 * 60 * 1000;
+
+// ── CONSOLE WRITE AUDIT: the daily-cost-ceiling override (W1-T333) ─────────────────────────────
+//
+// THE OPERATOR'S AUDIT REQUIREMENT, verbatim in substance: who/when/from/to for every console
+// write, and better than git because it is queryable at runtime. `appendLedger` is append-only, so
+// ONE LINE PER WRITE is the full history, never a summary that could itself go stale.
+
+/** The step name a console write to the daily-cost-ceiling override is ledgered under — see
+ *  {@link RENDER_RELEVANT_LEDGER_STEPS}'s entry for this exact string for why it is render-, not
+ *  decision-, relevant, and {@link appendDailyCostCeilingOverrideAudit} for what it carries. */
+export const CEILING_OVERRIDE_WRITTEN_STEP = "console.ceiling_override_written";
+
+/** One console write to the daily cost ceiling override, as ledgered — the who/when/from/to the
+ *  operator asked for, plus the RESULTING effective value. `when` is deliberately not a field
+ *  here: {@link appendLedger} stamps `ts` itself, at write time, so the line's own `ts` IS the
+ *  "when" — a caller-supplied one could drift from the actual write instant it is meant to record. */
+export interface DailyCostCeilingOverrideAudit {
+  runId: string;
+  taskId: string;
+  /** Who performed the write — an operator identity/session label, never blank. */
+  who: string;
+  fromUsd: number;
+  toUsd: number;
+  /** The effective ceiling immediately after the write (per `policy.ts`'s
+   *  `resolveDailyCostCeiling`) — ordinarily equal to `toUsd`, but recorded independently so a
+   *  write that the store immediately refused to honor is still visible as a mismatch here rather
+   *  than silently assumed to have taken effect. */
+  effectiveUsd: number;
+}
+
+/**
+ * Ledger one console write to the daily cost ceiling override — see this section's header and
+ * {@link DailyCostCeilingOverrideAudit}'s doc for what "who/when/from/to" maps to here. The
+ * caller (the console WRITE control itself — NOT built by this task; see W1-T333's own "NOT IN
+ * SCOPE" note) is responsible for invoking this immediately alongside `policy.ts`'s
+ * `writeDailyCostCeilingOverride`, so a write that is auditable but never actually took effect
+ * (or vice versa) can never happen.
+ */
+export function appendDailyCostCeilingOverrideAudit(ledgerPath: string, audit: DailyCostCeilingOverrideAudit): void {
+  appendLedger(ledgerPath, {
+    run_id: audit.runId,
+    task_id: audit.taskId,
+    step: CEILING_OVERRIDE_WRITTEN_STEP,
+    who: audit.who,
+    from_usd: audit.fromUsd,
+    to_usd: audit.toUsd,
+    effective_usd: audit.effectiveUsd,
+  });
+}
 
 /** Hard cap on how many lines of any single decision-relevant `step` `rotateLedger` retains,
  *  EXCLUDING `sweep.disposed` (its own per-`pr@head` dedup below supersedes a flat count cap)
