@@ -1,0 +1,120 @@
+- id: W1-T373
+  title: "the cheap deterministic gates are reachable only through `--ci-parity`, which shells the FULL suite — so the checks that actually block PRs cost a CI round-trip instead of the four seconds they really take: give preflight a FAST mode"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  rationale: "EVERY PR BLOCKED THIS WEEK WAS A GATE THAT WAS RIGHT AND AN AUTHOR WHO COULD NOT SEE IT
+    UNTIL CI SAID SO. #1352 was blocked TWICE in one sitting by the same class: first `claims` wanted a
+    docs/operator-guide.md row for a new verb, then the committed docs/cli-reference.md was stale
+    against the COMMANDS registry — the CI log's own words, `not ok 449 - generate-cli-reference
+    --check: the REAL committed docs/cli-reference.md is NOT stale`, with `Drifted command(s):
+    check-acceptance`. Both cost a full CI round-trip.
+    RE-DERIVED AT 81af5af, AND THE PREMISE NEEDED SHARPENING. It is NOT that these checks are missing.
+    `claims` IS already a ci-parity step (`npmScriptEntry(\"claims\", \"claims\")` in lib/ci-parity.ts).
+    The defect is that reaching it requires `rmd preflight --ci-parity`, whose `ci` job entry shells
+    `npm run test:ci` — and `test:ci` is the FULL `test/**/*.test.ts` glob. So the only way to run a
+    2-second check is to run everything.
+    THE cli-reference CHECK IS WORSE: it appears in NO workflow file at all. It is asserted from
+    INSIDE the suite, which is why #1352's failure surfaced as a numbered TAP line rather than a named
+    job — and it is absent from lib/ci-parity.ts entirely (zero matches). A 0.69-second npm script
+    exists that would have caught it, and nothing outside the full suite runs it.
+    MEASURED, NOT ASSERTED. Every deterministic npm-script gate, timed on this host at 81af5af:
+    no-hand-rolled-fetch:check 0.14s, learnings-budget-ratchet 0.16s, jscpd 0.17s, api-client:check
+    0.17s, depcruise 0.48s, cli-reference:check 0.69s, claims 2.38s — about 4.3 seconds for all seven,
+    against a full suite for the one mode that currently carries any of them."
+  design: |
+    ONE CONCERN: a FAST mode on `rmd preflight` that runs the deterministic npm-script gates and
+    nothing else.
+
+    (i) A FAST MODE, NOT MORE STEPS ON THE EXISTING ONE — and this is the finding that shaped the
+    task rather than a preference. `--ci-parity` cannot be run habitually, so adding cheap steps to it
+    would not make them reachable. Its `ci` job entry shells `npm run test:ci`, the full
+    `test/**/*.test.ts` glob. Follow `--ci-parity`'s own precedent: a SECOND, ADDITIVE mode on the
+    same verb, never a second verb.
+
+    (ii) THE CURATION CRITERION IS THE TASK'S BACKBONE, and it must be stated in the code that
+    implements it. Include a check ONLY if it is deterministic, runs in seconds, needs no network, and
+    has demonstrably blocked a PR or is the same class as one that has. By that criterion the
+    npm-script gates qualify and the test suite does not.
+
+    (iii) WHAT THIS MUST NOT BECOME: `npm test`. `test/mounts-wiring.test.ts` is inside the `test:ci`
+    glob and calls `runTask` directly; the operator has MEASURED $1.42 of real worker spend for one
+    run of that suite. A fast mode that shelled the suite would be the expensive mode wearing a
+    cheaper name, and would make the habit it exists to create unaffordable. The mode must refuse to
+    grow into it: state the rule where the step list is defined.
+
+    (iv) THE REQUIRED CORE, both demonstrated on #1352:
+      - `cli-reference:check` — absent from lib/ci-parity.ts entirely, and from every workflow file.
+      - `claims` — present in ci-parity, unreachable habitually.
+    THE SAME-CLASS REST, included because each costs under half a second and is the identical shape
+    (a deterministic npm-script gate CI runs): learnings-budget-ratchet, jscpd, depcruise,
+    api-client:check, no-hand-rolled-fetch:check. Say per step which of the two reasons admits it.
+
+    (v) FIX THE PARITY GAP WHILE HERE, because it is the same concern. `cli-reference:check` is
+    missing from lib/ci-parity.ts, so `--ci-parity` is not actually at parity with CI on this check.
+    Add it there too — one list, one truth. This is not scope creep: leaving it means the check has
+    two homes and one of them still lies.
+
+    (vi) EXIT CODE AND OUTPUT SHAPE: follow the existing preflight contract — each step names its own
+    pass/fail, and the verb exits non-zero if any step fails. A step that cannot run (a missing npm
+    script) must report itself distinctly from a step that ran and failed; a silent skip is how a
+    gate goes quiet.
+
+    (vii) NOT IN SCOPE, deliberately, and each for a stated reason:
+      - The full test suite (iii).
+      - `rmd check-acceptance` over a PR body. It SHIPPED in #1352 and nothing calls it, but a body
+        does not exist at pre-push time — preflight runs against a commit range, not a PR. Its caller
+        belongs at PR-OPEN time, which is a different surface and a different task.
+      - `bodyContradictsDiff` against `git diff --numstat`. Same reason: it needs a body. It would
+        have caught the changeset claim going stale three times on #1352 (3 -> 4 -> 5 files, each
+        time because a gate forced a legitimate late file), and that is worth fixing — at PR-open.
+      - Any check requiring the network, which would make the mode unreliable rather than fast.
+
+    (viii) THE TWO GATES THIS TASK'S OWN CHANGE WILL TRIP, named so the implementer does not
+    rediscover them the way #1352 did: adding or changing a verb's usage string means (a) `claims`
+    requires a matching docs/operator-guide.md row — `test/docs-claims.test.ts` asserts the command
+    table covers every COMMANDS registry verb — and (b) `generate-cli-reference --check` requires a
+    regenerated docs/cli-reference.md, because it byte-compares the committed file against a fresh
+    render of that registry. A new FLAG changes the `preflight` usage string, so BOTH apply here.
+    Regenerate with `npm run cli-reference`. Adding those files late also makes any changeset claim
+    already written stale — re-check it.
+  acceptance:
+    - claim: "the fast mode runs the deterministic npm-script gates and reports each step's own pass or fail"
+      proof: "unit test: test/preflight-fast-mode.test.ts"
+    - claim: "the fast mode never shells the test suite, so it cannot spend worker budget however often it is run"
+      proof: "unit test: test/preflight-fast-mode.test.ts"
+    - claim: "a step whose script is missing reports itself distinctly from a step that ran and failed"
+      proof: "unit test: test/preflight-fast-mode.test.ts"
+    - claim: "the cli-reference check is a ci-parity entry, so that mode is at parity with CI on it"
+      proof: "unit test: test/ci-parity-contract.test.ts"
+  status: queued
+  attempts: 0
+  note: "verify:auto — every claim is an assertion over an injected spawn recorder, with no operator
+    present. It builds a mechanism and touches no DECISIONS.md, so W1-T353's verify:human requirement
+    does not apply.
+    risk:high — set by Rule 19's own counting, not by blast radius: `lint-plan` scores this at FIVE
+    distinct subsystems (ci-parity, cli-reference, operator-guide, preflight-fast-mode, run-task) and
+    offers raise-or-decompose. Decomposing would split a verb from the two doc artifacts its own
+    usage-string change forces (viii), which is one concern wearing three file names, so the honest
+    move is the raise. The real hazard is smaller than the label: a fast mode that grew into the
+    suite would silently start costing worker spend, which is why (iii)'s refusal is a stated rule.
+    budget_usd 70 — a mode flag, a curated step list, the ci-parity parity fix, a spawn-recorder
+    falsifier proving the suite is never shelled, and the two doc regenerations (viii) forces.
+    files: DECLARES src/lib/ci-parity.ts for the parity fix (v), docs/operator-guide.md and
+    docs/cli-reference.md because (viii)'s two gates require them for a usage-string change, and
+    test/ci-parity-contract.test.ts because the fourth criterion asserts the new entry there. Omitting a
+    written path is what refused five dispatches in one week.
+    ON THE PROOFS. Three name test/preflight-fast-mode.test.ts, which does not exist yet: `rmd
+    check-proof` reports 0 candidates for it today. That is a FORWARD REFERENCE TO A PATH, which
+    CLAUDE.md records as safe — unlike forward-referencing a symbol name, which is a guess — and the
+    path is declared in files: so the worker creates it. The fourth names test/ci-parity-contract.test.ts, an
+    EXISTING suite, so at least one proof executes at filing time. `unit test:` proofs are
+    structurally exempt from the executed_stale downgrade, which applies to `grep:` only; no `grep:`
+    proof is used here, so the line-based and basic-regex traps do not arise."
+  risk: high
+  origin: oper#ruling-preflight-fast-2026-08-05
+  plan_refs: ["§5C", "W1-T221", "W1-T294"]
+  files: [src/run-task.ts, src/lib/ci-parity.ts, test/preflight-fast-mode.test.ts, test/ci-parity-contract.test.ts, docs/operator-guide.md, docs/cli-reference.md]
