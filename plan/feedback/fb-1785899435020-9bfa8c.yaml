@@ -1,0 +1,23 @@
+id: fb-1785899435020-9bfa8c
+ts: 2026-08-05T03:10:35.020Z
+raw: "ADDENDUM to fb-1785899307058-60fbcf — THE GRAPHQL DRAIN IS PER OPEN TAB,
+  NOT PER SERVER. Measured 2026-08-05T03:09Z: with the console open in a
+  browser, GraphQL fell 4517 -> 4410 in three minutes (~107 nodes/min, ~40
+  minutes to exhaustion). Closing the tab stopped it dead: two consecutive reads
+  at 4401, unchanged. So board_gateway.issue_fetch_ok fires only while a client
+  is connected, and com.remudero.serve can stay loaded — the cost is per open
+  tab. THIS IS THE OPERATOR-FACING SHAPE OF THE DEFECT: watching the fleet is
+  what stops the fleet. An operator who leaves the console open to see what is
+  happening will, within roughly 40 minutes, exhaust the budget the workers need
+  to open PRs — and the resulting failure (a completed run discarded at gh pr
+  create) looks like the fleet being idle, which invites him to keep watching.
+  Useful for scoping the fix: a client-driven fetch is cheaper to make
+  incremental than a server-side poll, and the 30-second cadence is a client
+  choice. Falsifying check: if the fetch also fires with no client connected
+  (check the rate over a period with the console closed and a task running),
+  then the server polls too and closing the tab is only a partial mitigation."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null
