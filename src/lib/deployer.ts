@@ -715,13 +715,31 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
   if (gate2.forced) {
     deps.log("deploy.idle_ceiling_forced", { phase: "pre-kickstart", ...gate2Fields });
   }
-  // Either genuinely idle or the ceiling carried it — the deferral episode is over either way.
-  deps.clearDeferredSince?.();
-
+  // W1-T380: A DEFERRAL EPISODE IS ENDED ONLY BY A CYCLE THAT ACTUALLY RESTARTS, so this branch
+  // returns with the persisted clock INTACT and the next real cycle inherits the accumulated wait.
+  // The clear used to sit ABOVE this check, under the comment "the deferral episode is over either
+  // way" — but a dry-run never reaches `deps.kickstart()`, so a dry-run that won the race to the
+  // ceiling ended the episode and delivered nothing. Observed 2026-08-05T22:43:42Z: forced at
+  // waited_ms 1843684, pulled, logged `deploy.dry_run`, and 16s later `deploy.not_idle waited_ms=0`
+  // — the clock reset with the daemon still on its old sha, and a merged PR sat undelivered for
+  // over an hour while a second episode climbed from zero. THE CEILING WORKED; this branch threw
+  // its result away while consuming the entitlement that would have forced the next one.
+  // Same shape as the `!gate2.proceed` return above (`pulledPendingRestart`), and for the same
+  // reason: pulled, not restarted, so the episode is still open. The pull itself is deliberately
+  // unchanged — "the pull is already safe and inert; only the RESTART is dangerous".
+  // `retained_wait_ms` is on the row because `would_kickstart: true` alone reads as success while a
+  // delivery was dropped; a reader must be able to see the episode is still open.
   if (opts.dryRun) {
-    deps.log("deploy.dry_run", { would_kickstart: true, to: short(toHead) });
+    deps.log("deploy.dry_run", { would_kickstart: true, to: short(toHead), retained_wait_ms: gate2.waitedMs });
     return { deployed: false, reason: "dry-run (pulled; kickstart skipped)", fromHead, toHead };
   }
+
+  // Genuinely idle, or the ceiling carried it — and THIS cycle is restarting, so the episode ends.
+  // Kept ABOVE `deps.kickstart()` deliberately: a real cycle must clear unconditionally, or the
+  // clock never resets and every later tick forces a SIGKILL restart into `reconstructOrphan`, a
+  // path never exercised in production. That overcorrection is what this task's second criterion
+  // locks, against the PERSISTED value rather than a spy on the call.
+  deps.clearDeferredSince?.();
 
   const kickstartAt = deps.now();
   deps.kickstart();
