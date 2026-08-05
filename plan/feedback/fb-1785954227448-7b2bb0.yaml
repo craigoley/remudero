@@ -1,0 +1,33 @@
+id: fb-1785954227448-7b2bb0
+ts: 2026-08-05T18:23:47.448Z
+raw: "DEPLOY_FAILED PERSISTS AFTER ITS CAUSE IS GONE, AND rmd status RENDERS IT
+  AS CURRENT — measured 2026-08-05T18:23Z. state/DEPLOY_FAILED records kind
+  dirty-tree-conflict at 14:18:47Z against failed head 6222d055, message
+  'locally-modified files conflict with the fast-forward:
+  test/sweep-pass-heartbeat.test.ts'. The conflict is long gone: git status
+  --porcelain is empty, HEAD equals origin/main at fe55589, and the daemon
+  BOOTED on fe55589 at 17:59:09Z — four hours and many successful deploys after
+  the failure. The marker has no retraction path. WHAT IT COSTS: rmd status
+  renders it under LATCHES with 'next action: inspect state/DEPLOY_FAILED and
+  re-deploy once fixed', so an operator reads a four-hour-old resolved failure
+  as a live one and diagnoses a problem that fixed itself. Worse, the same
+  status output simultaneously reports 'head vs origin/main: fresh' — two
+  surfaces disagreeing, and the reassuring one is not the one rendered as a
+  latch. This is the same class as the needs-human escalations a
+  decision-authority audit measured at ~80% machine-resolved and never
+  retracted; W1-T345 is the filed retraction work for those and does not cover
+  this. RECON: establish what writes DEPLOY_FAILED and what, if anything, clears
+  it — whether a subsequent successful deploy clears it, whether only a manual
+  removal does, and whether rmd deploy consumes it. Then say whether the honest
+  fix is retraction on the next successful deploy, or a rendered age so a stale
+  latch is visibly stale. Note the marker carries failedHead, so a cheap test is
+  whether the daemon has since booted on a LATER sha — if it has, the failure is
+  by definition superseded. Falsifying check: if a successful deploy already
+  clears it and this instance survived for a specific reason (the deploy path
+  never ran, DEPLOY_REQUESTED was never consumed), the gap is narrower and lives
+  in that path."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null
