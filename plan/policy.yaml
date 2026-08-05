@@ -125,8 +125,32 @@ sweep:
   # A RUNNING DAEMON WILL NOT PICK THIS UP UNTIL IT RESTARTS: `DEFAULT_SWEEP_POLICY` (sweep.ts) is
   # a module-level const built at import from this file, so the flip takes effect at the daemon's
   # NEXT start, never mid-flight.
+  # ── N=3 (2026-08-05 evening, operator-directed, TIME-BOXED) ────────────────────────────────
+  # MEASURED AT 2 BEFORE THIS FLIP: 4 `dispatch.concurrent_set` rows, EVERY ONE `lane_count: 2`
+  # carrying exactly two ids — the cap was binding, not the queue. 5 `dispatch.settled_set` rows
+  # with `rejected: 0` on every one, so no lane has ever failed for a concurrency reason.
+  # Governors are PER-DISPATCH: daemon.ts calls `checkDispatchGovernors` inside the admission
+  # loop per candidate ("never one reading admitting the whole"), so a third lane is admitted
+  # against its own fresh reading rather than one reading covering the batch.
+  # TWO PREMISES THAT WERE WRONG WHEN THIS FLIP WAS PROPOSED, RECORDED SO 4 IS NOT WAVED THROUGH:
+  # (a) OVERLAP IS A REAL CEILING. The partitioner does not log `dispatch.overlap*`; its deferral
+  # step is `dispatch.serialized` (`serializedLedgerPayload`). There are FOUR such rows, all the
+  # same collision on src/lib/escalate.ts + test/escalate.test.ts. That cuts BOTH ways: a
+  # deferral proves a candidate existed beyond the lanes in use, but it also means a third lane
+  # can convert into a serialized deferral rather than parallelism when shards cluster on a file.
+  # (b) DEPLOY STARVATION HAS MATERIALISED. `daemonIsIdle` conjoins workers + inflight locks +
+  # worktree locks; at N=2 all three are rarely zero at once. A deploy was observed deferring
+  # continuously from 21:46Z, reaching `waited_ms: 482972` (8.05 min) against `ceiling_ms:
+  # 1800000` with the counter still climbing — exactly what W1-T341's own comment predicts
+  # ("parallelism spends exactly that slack"). N=3 strictly worsens it, and the ceiling's failure
+  # mode is a forced deploy SIGKILLing a live worker into `reconstructOrphan`, never yet
+  # exercised. THIS IS THE FIRST THING TO WATCH, and reaching the ceiling sends this row back.
+  # THE STOP IS `rmd pause`, not a revert PR: it writes state/PAUSE, runDaemon consults it once
+  # per tick BETWEEN iterations, so it halts new dispatch within the 60s poll without
+  # interrupting in-flight work, needs no PR and no restart, and survives the deploy's
+  # `pull --ff-only` because .gitignore ignores state/.
   dispatchLanes:
-    value: 2
+    value: 3
     origin: "lifted:src/lib/sweep.ts:359 (DEFAULT_SWEEP_POLICY.dispatchLanes)"
     min: 1
     max: 4

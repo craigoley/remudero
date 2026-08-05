@@ -74,11 +74,14 @@ test("W1-T253: sweep.ts's DEFAULT_SWEEP_POLICY.staleDays/strikeCap/wipLimit read
 });
 
 // W1-T325 relocated dispatchLanes out of DEFAULT_SWEEP_POLICY (a relocation, not a retune, at the
-// time). W1-T344 is the deliberate retune that follows: the row moves 1 -> 2 after the observation
-// window plan/policy.yaml's own comment records, so the shipped value asserted below is now 2.
-test("W1-T325/W1-T344: sweep.ts's DEFAULT_SWEEP_POLICY.dispatchLanes reads plan/policy.yaml's sweep.dispatchLanes row, not a source literal, and the shipped value is 2", () => {
+// time). W1-T344 retuned it 1 -> 2; the 2026-08-05 evening flip retunes it 2 -> 3 after the N=2
+// measurements plan/policy.yaml's own comment records, so the shipped value asserted below is 3.
+// ONLY THE PIN MOVES. The assertion above it — that the consumer equals SHIPPED.values, i.e. the
+// value is LIFTED rather than a source literal — is what this test exists for and holds at ANY
+// value; it is deliberately untouched by every retune.
+test("W1-T325/W1-T344: sweep.ts's DEFAULT_SWEEP_POLICY.dispatchLanes reads plan/policy.yaml's sweep.dispatchLanes row, not a source literal, and the shipped value is 3", () => {
   assert.equal(DEFAULT_SWEEP_POLICY.dispatchLanes, SHIPPED.values.sweep.dispatchLanes);
-  assert.equal(DEFAULT_SWEEP_POLICY.dispatchLanes, 2);
+  assert.equal(DEFAULT_SWEEP_POLICY.dispatchLanes, 3);
 });
 
 // W1-T330: dailyCostCeilingUsd joins its siblings above — a relocation of the pre-existing
