@@ -126,6 +126,15 @@ const TMP_HYGIENE_IMPORT = "./test/setup/tmp-hygiene.ts";
  *  sub-steps) uses. */
 function shellOut(spawn: PreflightSpawn, label: string, file: string, args: string[], opts?: { cwd?: string; input?: string }): CiParityLeafResult {
   const res = spawn(file, args, opts);
+  if (res.status === null) {
+    // The child never produced an exit status at all — a signal kill, a buffer ceiling hit,
+    // ENOENT, etc. This is NOT an ordinary test failure, and rendering it as `FAIL — <label>`
+    // with whatever (often empty/truncated) output happened to come back is exactly how a
+    // ci:test ENOBUFS previously read as a real red test with no visible cause. Name the spawn
+    // failure as its own outcome instead.
+    const why = res.error ?? "spawn produced no exit status and no error message";
+    return { ok: false, detail: `SPAWN FAILURE — ${label}: ${why}` };
+  }
   const ok = res.status === 0;
   return { ok, detail: ok ? `PASS — ${label}` : `FAIL — ${label}\n${(res.stdout + res.stderr).trim()}` };
 }
