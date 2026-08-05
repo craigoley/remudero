@@ -17,6 +17,7 @@ import type { AddressInfo } from "node:net";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { buildServeServer, DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS, type ServeDeps } from "../src/lib/serve.js";
 import { reachSection, shellBootReady } from "./setup/open-shell.js";
+import { captureFeedback, setFeedbackStatus } from "../src/lib/feedback.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import type { GitHub, PrRef } from "../src/lib/status.js";
 import type { TraceGithub } from "../src/lib/trace.js";
@@ -174,42 +175,29 @@ async function openShell(base: string, opts: { viewport?: { width: number; heigh
 }
 
 // ── (1) DENSITY: a first screen at a 1440px viewport height shows at least ~15 tasks ───────────
-// Mirrors the operator fixture this task falsifies: 6 in-flight tasks (NOW) + 10 terminal tasks
-// (RECENT, capped at the route's own default of 10) -- a realistic multi-section spread, not one
-// section artificially stuffed -- must together fit ABOVE THE FOLD as dense single-line rows.
+// Originally mirrored a realistic fixture spread across TWO sections (6 in-flight NOW + 10
+// terminal RECENT) rendered as flat siblings. W1-T336 makes the tab bar authoritative: NOW now
+// lives under its own Now tab and RECENT under Feed (design notes "NOW ... bound to the ONE rmd
+// status read model" / "FEED ... recap/recent/rest ... unchanged"), so the two can no longer
+// render on-screen together. This proves the SAME dense CSS still clears 15 rows within Now's
+// OWN tab alone at a realistic viewport -- reaching that tab is the one navigation step this
+// task's design treats as free (same as reachSection elsewhere in this suite), not a count
+// against density. Feed's own density bar is (1b) below, unchanged in spirit.
 
-test("density: at a 1440px viewport height, at least 15 task rows render fully above the fold", async () => {
+test("density: the Now tab alone renders at least 15 in-flight rows above the fold at a 1440px viewport height", async () => {
   const root = tmpRoot();
-  const running = Array.from({ length: 6 }, (_, i) => task({ id: `W1-T${i}` }));
-  const recent = Array.from({ length: 10 }, (_, i) => task({ id: `W2-T${i}` }));
-  // status is DERIVED FROM GITHUB, never trusted from yaml (module convention, see
-  // serve.detail-journey.test.ts's own fixture note) -- so RECENT needs a real pr.opened +
-  // verdict ledger pair per task, backed by a matching fakeGitHub PR state (MERGED/CLOSED).
-  const byRef: Record<string, PrRef> = {};
-  const github = fakeGitHub(byRef);
-  const deps = fixtureDeps(root, [...running, ...recent], { github });
+  const running = Array.from({ length: 16 }, (_, i) => task({ id: `W1-T${i}` }));
+  const deps = fixtureDeps(root, running);
   for (const t of running) appendFileSync(deps.board.ledgerPath, runStart(t.id));
-  recent.forEach((t, i) => {
-    const prUrl = `https://github.com/o/r/pull/${i}`;
-    const merged = i % 2 === 0;
-    byRef[prUrl] = { number: i, url: prUrl, state: merged ? "MERGED" : "CLOSED" };
-    appendFileSync(
-      deps.board.ledgerPath,
-      [
-        JSON.stringify({ ts: new Date().toISOString(), run_id: `${t.id}-1`, task_id: t.id, step: "pr.opened", pr_url: prUrl }),
-        JSON.stringify({ ts: new Date().toISOString(), run_id: `${t.id}-1`, task_id: t.id, step: "verdict", verdict: merged ? "merged" : "blocked_review" }),
-      ].join("\n") + "\n",
-    );
-  });
   await withShell(deps, async (base) => {
     const { context, page } = await openShell(base, { viewport: { width: 1440, height: 1440 } });
     try {
-      await page.waitForFunction(() => document.querySelectorAll("#now-list li[data-key]").length === 6);
-      await page.waitForFunction(() => document.querySelectorAll("#recent-list li[data-key]").length === 10);
+      await reachSection(page, "now"); // the one free navigation step -- Now is not the default tab
+      await page.waitForFunction(() => document.querySelectorAll("#now-list li[data-key]").length === 16);
 
       const aboveFold = await page.evaluate(() => {
         const vh = window.innerHeight;
-        const rows = [...document.querySelectorAll(".row-list .row:not(.skeleton)")];
+        const rows = [...document.querySelectorAll("#now-list .row:not(.skeleton)")];
         return rows.filter((el) => {
           const r = el.getBoundingClientRect();
           return r.top >= 0 && r.bottom <= vh;
@@ -227,17 +215,20 @@ test("density: at a 1440px viewport height, at least 15 task rows render fully a
 // at 5. Before this fix, "everything else" stayed hidden behind an "Expand" click, so a first
 // screen here showed only a handful of rows even though the CSS itself was already dense -- the
 // exact 2026-07-20 console v2 bug. This is the fixture that catches that regression; (1) above
-// only proves the CSS is dense once rows are visible. ──────────────────────────────────────────
+// only proves the CSS is dense once rows are visible. "Everything else" now lives under Feed
+// (W1-T336), not the default Decisions tab, so reaching it costs ONE tab click via reachSection
+// -- the falsifier this test still enforces is the EXPAND click that used to gate it, never that.
 
-test("density: a realistic 214-task, mostly-queued plan (no NOW/NEEDS-ME/RECENT activity) still shows >= 15 rows on the FIRST screen, no interaction", async () => {
+test("density: a realistic 214-task, mostly-queued plan (no NOW/NEEDS-ME/RECENT activity) still shows >= 15 rows on the Feed tab, no EXPAND click", async () => {
   const root = tmpRoot();
   const tasks = Array.from({ length: 214 }, (_, i) => task({ id: `W1-T${i}` }));
   const deps = fixtureDeps(root, tasks);
   await withShell(deps, async (base) => {
     const { context, page } = await openShell(base, { viewport: { width: 1440, height: 1440 } });
     try {
+      await reachSection(page, "rest"); // one tab click to Feed -- "rest" is no longer a flat sibling
       await page.waitForFunction(() => document.querySelectorAll("#rest-list li[data-key]").length > 0);
-      // no click, no scroll, no expand -- exactly what a fresh page load hands the operator.
+      // no EXPAND click, no scroll -- once on Feed, this is exactly what the tab hands the operator.
       const aboveFold = await page.evaluate(() => {
         const vh = window.innerHeight;
         const rows = [...document.querySelectorAll(".row-list .row:not(.skeleton)")];
@@ -246,7 +237,7 @@ test("density: a realistic 214-task, mostly-queued plan (no NOW/NEEDS-ME/RECENT 
           return r.top >= 0 && r.bottom <= vh;
         }).length;
       });
-      assert.ok(aboveFold >= 15, `expected >= 15 dense rows above the fold with NO interaction, got ${aboveFold}`);
+      assert.ok(aboveFold >= 15, `expected >= 15 dense rows above the fold with no EXPAND click, got ${aboveFold}`);
     } finally {
       await context.close();
     }
@@ -532,6 +523,48 @@ test("anomaly flag: a genuinely still-running task at 27h21m elapsed (open PR, D
       assert.equal(stale.flagVisible, true);
       assert.equal(fresh.anomaly, false, "a run started a minute ago must NOT be flagged -- the two must render visibly distinct");
       assert.equal(fresh.flagVisible, false);
+    } finally {
+      await context.close();
+    }
+  });
+});
+
+// ── W1-T336: Decisions renders only items no live verdict has already resolved ─────────────────
+// CONSUME THE EXISTING VERDICTS, INVENT NO THIRD STALENESS RULE (this task's own design note):
+// W1-T257's reconcileFeedbackEntries already flips a `proposed` feedback entry to `accepted` the
+// moment its own proposal_pr resolves MERGED -- live, on every GET /v1/feedback read, the SAME
+// read NEEDS ME/Decisions renders from. This fixture seeds one entry whose proposal already
+// merged (a resolved verdict) alongside one genuinely still-open entry, and proves the FIRST
+// never reaches Decisions while the SECOND does -- no new filter added here, just the existing
+// reconciler consumed under its own tab now instead of the flat NEEDS ME section.
+
+test("W1-T336: Decisions filters out a feedback entry whose proposal PR already MERGED, and keeps a genuinely open one", async () => {
+  const root = tmpRoot();
+  const prUrl = "https://github.com/o/r/pull/9";
+  const byRef: Record<string, PrRef> = { [prUrl]: { number: 9, url: prUrl, state: "MERGED" } };
+  const deps = fixtureDeps(root, [], { github: fakeGitHub(byRef) });
+
+  const resolved = captureFeedback(root, { raw: "resolved by a merged proposal" });
+  setFeedbackStatus(root, resolved.id, "proposed", { proposalPr: prUrl });
+  const pending = captureFeedback(root, { raw: "still genuinely open" });
+  setFeedbackStatus(root, pending.id, "proposed");
+
+  await withShell(deps, async (base) => {
+    const { context, page } = await openShell(base);
+    try {
+      // Decisions is the DEFAULT active tab -- reaching "needs-me" costs no click at all, proving
+      // this criterion needs no navigation either.
+      assert.equal(await page.$eval("#tab-decisions", (el) => el.getAttribute("aria-selected")), "true");
+      await page.waitForFunction(() => document.querySelectorAll("#needs-me-list li[data-key]").length > 0);
+
+      const text = (await page.$eval("#needs-me-list", (el) => el.textContent)) ?? "";
+      assert.match(text, /still genuinely open/, "a genuinely pending decision must render in Decisions");
+      assert.doesNotMatch(
+        text,
+        /resolved by a merged proposal/,
+        "an entry whose proposal PR already merged must be filtered OUT, not sorted down, by the existing W1-T257 reconciler",
+      );
+      assert.equal(await page.$$eval("#needs-me-list li[data-key]", (els) => els.length), 1);
     } finally {
       await context.close();
     }

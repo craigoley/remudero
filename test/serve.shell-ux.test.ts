@@ -628,9 +628,9 @@ test("clearing the stored write token returns the console to the read-only rende
   });
 });
 
-// ── W1-T334: the four-tab console SCAFFOLD (FIRST of three shards split out of W1-T314) ─────
+// ── W1-T334/T336: the four-tab console bar -- scaffolded flat, now AUTHORITATIVE ────────────
 
-test("console tab bar: exactly four tabs (Decisions, Now, Plan, Feed), pinned under the glance strip, and the existing section stack is unhidden/unmoved", async () => {
+test("console tab bar: exactly four tabs (Decisions, Now, Plan, Feed), pinned under the glance strip, and every section renders under exactly one tab, visible only while that tab is active", async () => {
   const root = tmpRoot();
   await withShell(fixtureDeps(root), async (base) => {
     const page = await openShell(base);
@@ -639,7 +639,8 @@ test("console tab bar: exactly four tabs (Decisions, Now, Plan, Feed), pinned un
       assert.deepEqual(tabLabels, ["Decisions", "Now", "Plan", "Feed"]);
 
       // the glance strip (#glance) sits OUTSIDE the tab bar and BEFORE it in document order --
-      // "pinned above," never a descendant of one and never reparented into one.
+      // "pinned above," never a descendant of one and never reparented into one -- UNCHANGED by
+      // W1-T336 (design note "what does not move").
       const order = await page.evaluate(() => {
         const glance = document.getElementById("glance")!;
         const tabs = document.getElementById("console-tabs")!;
@@ -651,19 +652,84 @@ test("console tab bar: exactly four tabs (Decisions, Now, Plan, Feed), pinned un
       assert.equal(order.eitherContainsTheOther, false);
       assert.equal(order.glancePrecedesTabs, true);
 
-      // Plan: an honest "not built yet," present in the DOM but hidden until selected -- the SAME
-      // present-but-not-displayed shape `#recap` already ships with.
+      // Plan: an honest "not built yet," present in the DOM but hidden until selected.
       assert.equal(await page.$eval("#tab-plan-panel", (el) => (el as HTMLElement).hidden), true);
       await page.click("#tab-plan");
       const plan = await page.$eval("#tab-plan-panel", (el) => ({ hidden: (el as HTMLElement).hidden, text: el.textContent ?? "" }));
       assert.equal(plan.hidden, false);
       assert.match(plan.text, /not built yet/i);
 
-      // ADD, REMOVE NOTHING: every pre-existing section is still in the document, unhidden by the
-      // tab bar's own presence (this scaffold binds no section to any tab -- that is W1-T336's job).
-      for (const id of ["now", "needs-me", "accepted", "up-next", "recent", "rest", "controls", "more"]) {
-        assert.equal(await page.$eval(`#${id}`, (el) => document.body.contains(el) && !(el as HTMLElement).hidden), true, `#${id} missing or hidden`);
+      // ADD, REMOVE NOTHING, BUT NOW GATED: every one of the nine sections is still in the
+      // document (never deleted -- W1-T314's "a missing tab reads as a missing capability," and
+      // this task's own "the falsifier is any firehose row reachable today that cannot be
+      // reached after the change"), but each is visible on EXACTLY the one tab that owns it.
+      const isVisible = (id: string) => page.$eval(id, (el) => (el as HTMLElement).offsetParent !== null);
+      const inDocument = (id: string) => page.$eval(id, (el) => document.body.contains(el));
+      const ALL_SECTIONS = ["#needs-me", "#now", "#up-next", "#controls", "#accepted", "#recent", "#rest", "#more"];
+      for (const sel of ALL_SECTIONS) assert.equal(await inDocument(sel), true, `${sel} missing from the document`);
+
+      // Decisions is the default active tab -- only its own section (needs-me) is visible.
+      await page.click("#tab-decisions");
+      assert.equal(await isVisible("#needs-me"), true);
+      for (const sel of ["#now", "#up-next", "#controls", "#accepted", "#recent", "#rest", "#more"]) {
+        assert.equal(await isVisible(sel), false, `${sel} must be hidden while Decisions is active`);
       }
+
+      // Now owns now/up-next/controls.
+      await page.click("#tab-now");
+      for (const sel of ["#now", "#up-next", "#controls"]) assert.equal(await isVisible(sel), true, `${sel} must be visible on the Now tab`);
+      for (const sel of ["#needs-me", "#accepted", "#recent", "#rest", "#more"]) {
+        assert.equal(await isVisible(sel), false, `${sel} must be hidden while Now is active`);
+      }
+
+      // Feed owns accepted/recent/rest/more (recap is content-gated separately, not asserted here).
+      await page.click("#tab-feed");
+      for (const sel of ["#accepted", "#recent", "#rest", "#more"]) assert.equal(await isVisible(sel), true, `${sel} must be visible on the Feed tab`);
+      for (const sel of ["#needs-me", "#now", "#up-next", "#controls"]) {
+        assert.equal(await isVisible(sel), false, `${sel} must be hidden while Feed is active`);
+      }
+    } finally {
+      await page.context().close();
+    }
+  });
+});
+
+// ── W1-T336: the needs-me browser-tab badge fires regardless of which tab is active ─────────
+// The alert this badge exists for must not depend on already looking at Decisions -- an escalation
+// landing while the operator sits on Now (or any other tab) must still flip the badge.
+
+test("the needs-me browser-tab badge still fires while Decisions is NOT the active tab", async () => {
+  const root = tmpRoot();
+  const deps = fixtureDeps(root);
+  await withShell(deps, async (base) => {
+    const page = await openShell(base);
+    try {
+      const baseTitle = await page.title();
+      assert.equal(baseTitle.startsWith("("), false, "no needs-me items yet -- no badge prefix");
+
+      await page.click("#tab-now");
+      assert.equal(await page.$eval("#tab-now", (el) => el.getAttribute("aria-selected")), "true");
+      assert.equal(await page.$eval("#tab-decisions", (el) => el.getAttribute("aria-selected")), "false");
+
+      // A real ledger append -- the daemon-side SSE stream (buildStatusStream, board.ts) picks
+      // this up within one poll tick and pushes a "status" event carrying needsHuman: true,
+      // exactly the mechanism test/serve.glance.test.ts's own badge criterion already proves.
+      appendFileSync(
+        deps.board.ledgerPath,
+        JSON.stringify({
+          ts: new Date().toISOString(),
+          run_id: "r3",
+          task_id: "W1-T3",
+          step: "escalation.issue_opened",
+          issue_url: "https://github.com/o/r/issues/3",
+          class: "BLOCKED",
+        }) + "\n",
+      );
+
+      await page.waitForFunction(() => document.title.startsWith("(1)"), null, { timeout: 5000 });
+      // still on Now -- the badge must not require Decisions to be active, and switching tabs
+      // must never have been required to make it fire.
+      assert.equal(await page.$eval("#tab-now", (el) => el.getAttribute("aria-selected")), "true");
     } finally {
       await page.context().close();
     }
@@ -699,37 +765,46 @@ test("console tab bar: the active tab is URL-persisted, deep-linkable, and survi
   });
 });
 
-// ── W1-T335: the shared "reach a section" helper the eight serve.* suites now route through ──
+// ── W1-T335/T336: the shared "reach a section" helper now drives the REAL tabbed shell ─────
 
-test("W1-T335 reachSection: a true no-op against today's flat shell -- every real section is already reachable, so activating one selects no tab at all", async () => {
+test("W1-T336: reachSection activates the real owning tab for a real section, and is a true no-op when the section is already on the active tab", async () => {
   const root = tmpRoot();
   await withShell(fixtureDeps(root), async (base) => {
     const page = await openShell(base);
     try {
-      for (const id of ["now", "needs-me", "accepted", "up-next", "recent", "rest", "controls", "more"]) {
-        await reachSection(page, id);
-      }
-      // still on the default tab (Decisions) -- reachSection never had to click, because every
-      // one of today's sections is already a direct, always-visible sibling of <main>.
+      // "needs-me" lives under Decisions, the default active tab -- a genuine no-op, no click.
+      await reachSection(page, "needs-me");
       assert.equal(await page.$eval("#tab-decisions", (el) => el.getAttribute("aria-selected")), "true");
       for (const tab of ["tab-now", "tab-plan", "tab-feed"]) {
         assert.equal(await page.$eval(`#${tab}`, (el) => el.getAttribute("aria-selected")), "false");
       }
+
+      // "now" lives under Now -- reachSection must actually click that tab to reveal it.
+      await reachSection(page, "now");
+      assert.equal(await page.$eval("#tab-now", (el) => el.getAttribute("aria-selected")), "true");
+      assert.equal(await page.$eval("#now", (el) => (el as HTMLElement).offsetParent !== null), true);
+
+      // "rest" lives under Feed -- a further switch, proving this is a real per-call activation
+      // across every tab the real shell now has, not a one-shot fluke.
+      await reachSection(page, "rest");
+      assert.equal(await page.$eval("#tab-feed", (el) => el.getAttribute("aria-selected")), "true");
+      assert.equal(await page.$eval("#rest", (el) => (el as HTMLElement).offsetParent !== null), true);
+      assert.equal(await page.$eval("#now", (el) => (el as HTMLElement).offsetParent !== null), false, "switching to Feed must hide Now's own sections");
     } finally {
       await page.context().close();
     }
   });
 });
 
-test("W1-T335 reachSection: activates the owning tab when a section genuinely IS tab-owned, proven against a fixture that presents the tabbed shape (independent of today's flat shell, which owns none of its sections yet)", async () => {
+test("W1-T335 reachSection: activates the owning tab when a section genuinely IS tab-owned, proven independently against a fixture that presents the tabbed shape", async () => {
   const context = await browser.newContext();
   const page = await context.newPage();
   try {
-    // A minimal stand-in for the shape W1-T336 introduces: a tablist plus two panels, each
-    // hidden unless its own tab is selected -- NOT today's real shell, which nests nothing
-    // inside a tab panel yet (see the no-op test above). Proving reachSection against this
-    // fixture, rather than only against today's shell, is what makes criterion 1 falsifiable:
-    // a helper that silently no-ops under a tabbed shape too would still pass the test above.
+    // A minimal, independent stand-in for a tabbed shape: a tablist plus two panels, each hidden
+    // unless its own tab is selected. Proving reachSection against a synthetic fixture too --
+    // never only against the real shell above -- is what makes this helper's own criterion
+    // falsifiable: a helper that silently no-ops under ANY tabbed shape would still pass by
+    // accident if the only fixture it were ever run against were today's real, known-good shell.
     await page.setContent(`
       <div id="console-tabs" role="tablist" aria-label="Console view">
         <button type="button" class="tab-btn" id="tab-a" role="tab" data-tab="a" aria-selected="true">A</button>

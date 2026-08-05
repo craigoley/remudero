@@ -233,6 +233,7 @@ test("update cycle: an unchanged row keeps DOM identity, and an active text sele
     const { context, page } = await openShell(base);
     try {
       await page.waitForFunction(() => document.querySelectorAll("#now-list li[data-key]").length === 2);
+      await reachSection(page, "now"); // W1-T336: "now" lives under its own tab, not the default (Decisions)
 
       // Mark BOTH rows, then select text inside W1-T2's row (the one that will stay UNCHANGED).
       await page.evaluate(() => {
@@ -833,12 +834,17 @@ test("a write action issued with a client-held write token succeeds while the UR
 
       // the operator pastes the write token into the shell's OWN entry form -- never the URL.
       await reachSection(page, "controls"); // the write-token form and #pause-btn both live in "controls"
+      // W1-T336: "controls" now lives under the Now tab, so reachSection's OWN click may have
+      // already added a legitimate &tab=now -- capture the URL AFTER that navigation as the
+      // baseline, so this test still asserts its real claim ("entering the write token changes
+      // nothing further"), not the now-stale claim that reaching a section changes nothing at all.
+      const urlBeforeToken = page.url();
       await page.fill("#write-token-input", WRITE_TOKEN);
       await page.click("#write-token-form button[type=submit]");
       await page.waitForFunction(() => (document.getElementById("pause-btn") as HTMLButtonElement).disabled === false);
 
-      // the URL is untouched by entering the token -- still exactly the read-token bookmark.
-      assert.match(page.url(), new RegExp(`\\?token=${READ_TOKEN}$`));
+      // entering/submitting the write token changes NOTHING further in the URL.
+      assert.equal(page.url(), urlBeforeToken, "entering the write token must not change the URL at all");
       assert.doesNotMatch(page.url(), new RegExp(WRITE_TOKEN));
 
       // the write action now actually succeeds -- a REAL server-side effect, not merely a
@@ -852,7 +858,10 @@ test("a write action issued with a client-held write token succeeds while the UR
   });
 });
 
-// ── W1-T334: the four-tab console SCAFFOLD projects nothing yet -- selecting one issues no fetch ─
+// ── W1-T334/T336: the four-tab console bar, now authoritative -- selecting one issues no fetch,
+// and switching away from and back to a tab must patch in place like a poll update, never
+// re-render (this task's own criterion 4: "no additional fetch AND preserves in-place row
+// patching, so live state and an in-progress text selection survive the switch"). ──────────────
 
 test("W1-T334: selecting a console tab issues no additional fetch, poll or gateway call", async () => {
   const root = tmpRoot();
@@ -876,6 +885,57 @@ test("W1-T334: selecting a console tab issues no additional fetch, poll or gatew
       await page.waitForTimeout(200); // give any wrongly-fired request a moment to land
 
       assert.deepEqual(apiRequests, [], `tab selection must never call the gateway; saw: ${apiRequests.join(", ")}`);
+    } finally {
+      await context.close();
+    }
+  });
+});
+
+test("W1-T336: switching tabs away and back preserves a row's DOM identity, an open card, and an active selection inside it -- a tab switch patches in place, never a re-render", async () => {
+  const root = tmpRoot();
+  const deps = fixtureDeps(root, [task({ id: "W1-T1" })]);
+  appendFileSync(deps.board.ledgerPath, runStart("W1-T1"));
+  await withShell(deps, async (base) => {
+    const { context, page } = await openShell(base);
+    try {
+      await page.waitForFunction(() => document.querySelectorAll("#now-list li[data-key]").length === 1);
+      await reachSection(page, "now"); // "now" lives under its own tab post-W1-T336
+
+      // Open W1-T1's card, then select text inside its title -- same setup the poll-update DOM-
+      // stability tests above use, but the "background event" here is a switch away and back.
+      await page.click('#now-list li[data-key="W1-T1"] .task-id');
+      await page.waitForFunction(() => document.querySelector('#now-list li[data-key="W1-T1"]')?.getAttribute("aria-expanded") === "true");
+      await page.waitForFunction(() => (document.querySelector(".row-detail-title")?.textContent ?? "").length > 0);
+      await page.evaluate(() => {
+        document.querySelector("#now-list li")!.setAttribute("data-test-mark", "same-node");
+        document.querySelector(".row-detail")!.setAttribute("data-test-mark", "open-card");
+        const target = document.querySelector(".row-detail-title")!;
+        const range = document.createRange();
+        range.selectNodeContents(target);
+        const sel = window.getSelection()!;
+        sel.removeAllRanges();
+        sel.addRange(range);
+      });
+      const selectedBefore = await page.evaluate(() => window.getSelection()?.toString());
+      assert.match(selectedBefore ?? "", /^W1-T1/);
+
+      // Switch away to Decisions, then back to Now -- exactly the interaction this task's own
+      // criterion names.
+      await page.click("#tab-decisions");
+      await page.click("#tab-now");
+
+      const after = await page.evaluate(() => ({
+        rowMark: document.querySelector("#now-list li")?.getAttribute("data-test-mark"),
+        expanded: document.querySelector('#now-list li[data-key="W1-T1"]')?.getAttribute("aria-expanded"),
+        cardMark: document.querySelector(".row-detail")?.getAttribute("data-test-mark"),
+        selection: window.getSelection()?.toString(),
+        selectionConnected: window.getSelection()?.anchorNode?.isConnected ?? false,
+      }));
+      assert.equal(after.rowMark, "same-node", "a tab switch must not recreate a row's DOM node");
+      assert.equal(after.expanded, "true", "switching tabs away and back must not collapse an open card");
+      assert.equal(after.cardMark, "open-card", "the open card must be the SAME DOM node across a tab switch");
+      assert.match(after.selection ?? "", /^W1-T1/, "an in-progress selection must survive a tab switch");
+      assert.equal(after.selectionConnected, true);
     } finally {
       await context.close();
     }
