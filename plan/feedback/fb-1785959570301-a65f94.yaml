@@ -1,0 +1,28 @@
+id: fb-1785959570301-a65f94
+ts: 2026-08-05T19:52:50.301Z
+raw: "A SHARED TEST HELPER DOUBLES EVERY VERDICT LINE AND SILENTLY FAILS THE
+  THING UNDER TEST — found while covering #1372's grill wiring, cost two
+  debugging rounds. run-task.ts parses a worker verdict from [worker.text,
+  worker.blocks.join('\\n')].join('\\n'). The shared t348FakeWorker helper puts
+  the SAME string in both fields, so every OPTION line is seen TWICE. Four
+  options exceeds DECISION_SUMMARY_MAX_OPTIONS (3), validateDecisionSummary
+  returns null, and the grill path FAILS OPEN to a raw body — which is
+  INDISTINGUISHABLE from the wiring being absent. So a test written against that
+  helper can pass while proving the opposite of what it claims, and blocks: []
+  is load-bearing in a way nothing says. THIS IS THE SILENT-FAIL-OPEN FAMILY
+  AGAIN: like parseAcceptanceBlock returning 1 criterion where 3 were written,
+  and a grep: pattern wrapping across a line returning 0 — the mechanism returns
+  FEWER things rather than raising, and the shortfall reads as a legitimate
+  result. RECON: establish every test helper that feeds both text and blocks
+  from one source, and whether the doubling affects other parsers that read the
+  joined pair. Then say whether validateDecisionSummary should DISTINGUISH 'no
+  summary produced' from 'summary rejected as invalid' — today both yield a raw
+  body and the caller cannot tell. Falsifying check: if the helper is used by
+  only this one suite and the joined-pair parse is unique to the decision
+  summary, the blast radius is one file and a comment on the helper is the whole
+  fix."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null
