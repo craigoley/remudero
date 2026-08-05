@@ -11,6 +11,7 @@ import {
   deriveDisposition,
   isBlockedCi,
   isPureConcurrentAddition,
+  listRetirableEscalationIssues,
   observedBlockerState,
   renderClarificationQuestion,
   renderMootedCloseComment,
@@ -22,6 +23,7 @@ import {
   strikeCapForAnswer,
   toQuestionEntry,
   MAX_ESCALATION_CLOSES_PER_CYCLE,
+  RETIRABLE_ESCALATION_LABELS,
   type CiFailure,
   type ClarificationQuestion,
   type ConflictFileDiff,
@@ -38,7 +40,7 @@ import {
 import type { CriterionVerdict } from "../src/lib/review.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { appendLedger } from "../src/lib/ledger.js";
-import { escalate } from "../src/lib/escalate.js";
+import { escalate, FLEET_NOTICE_LABEL, NEEDS_HUMAN_LABEL, type IssueGateway, type OpenIssue } from "../src/lib/escalate.js";
 
 // ── fixtures ────────────────────────────────────────────────────────────────
 
@@ -1916,6 +1918,74 @@ test("escalation reconcile: --dry-run previews the closes but makes NO gh call a
     0,
     "and leaves no ledger line",
   );
+});
+
+// ── W1-T349: the reconciler retires fleet-notice issues exactly as it retires needs-human ones ──
+
+test("RETIRABLE_ESCALATION_LABELS: exactly needs-human and fleet-notice", () => {
+  assert.deepEqual([...RETIRABLE_ESCALATION_LABELS].sort(), [FLEET_NOTICE_LABEL, NEEDS_HUMAN_LABEL].sort());
+});
+
+test("listRetirableEscalationIssues: merges OPEN issues across needs-human and fleet-notice, deduped by issue number", () => {
+  const byLabel: Record<string, OpenIssue[]> = {
+    [NEEDS_HUMAN_LABEL]: [
+      { number: 1, url: "https://github.com/o/r/issues/1", title: "a", body: "**Task:** W1-T1" },
+      { number: 2, url: "https://github.com/o/r/issues/2", title: "b", body: "**Task:** W1-T2" },
+    ],
+    [FLEET_NOTICE_LABEL]: [
+      { number: 3, url: "https://github.com/o/r/issues/3", title: "c", body: "**Task:** W1-T3" },
+      // #1 appears under BOTH labels here — never happens in production (an issue carries
+      // exactly one queue label, by construction of escalate()/escalateWithJudge), but the
+      // defensive dedup must not double-count it if it somehow did.
+      { number: 1, url: "https://github.com/o/r/issues/1", title: "a", body: "**Task:** W1-T1" },
+    ],
+  };
+  const issues: IssueGateway = {
+    create: () => {
+      throw new Error("not used");
+    },
+    listOpen: (label) => byLabel[label] ?? [],
+  };
+  const merged = listRetirableEscalationIssues(issues);
+  assert.equal(merged.length, 3, "3 distinct issues — #1 counted once despite appearing under both labels");
+  assert.deepEqual(
+    merged.map((i) => i.number).sort((a, b) => a - b),
+    [1, 2, 3],
+  );
+});
+
+test("listRetirableEscalationIssues: a gateway with no listOpen yields nothing (matches a single-label call's back-compat)", () => {
+  const issues: IssueGateway = { create: () => "https://github.com/o/r/issues/1" };
+  assert.deepEqual(listRetirableEscalationIssues(issues), []);
+});
+
+test("W1-T349: a fleet-notice-sourced candidate retires EXACTLY like a needs-human one once its referent resolves — EscalationReconcileCandidate carries no label field, so runEscalationReconcile cannot (and need not) distinguish them", async () => {
+  // The candidate below is indistinguishable, at runEscalationReconcile's level, from one built
+  // off a needs-human issue — proving the design's promise ("the reconciler must treat
+  // fleet-notice issues exactly as it treats needs-human ones") by CONSTRUCTION: there is no
+  // label field to branch on, so there is nothing this reconciler could get wrong here even if
+  // it wanted to. The label-aware half of the fix — actually FINDING the fleet-notice issue in
+  // the first place — is `listRetirableEscalationIssues`, asserted above.
+  const shared = ledgerPath();
+  const closes: Array<{ url: string; comment: string }> = [];
+  const summary = await runEscalationReconcile(
+    [
+      reconcileCandidate({
+        issueUrl: "https://github.com/o/r/issues/700",
+        taskId: "W1-T700",
+        derived: { merged: true, prUrl: "https://github.com/o/r/pull/699", prNumber: 699, source: "trailer" },
+      }),
+    ],
+    {
+      closeIssue: (url, comment) => closes.push({ url, comment }),
+      ledgerPath: shared,
+      runId: "RUN-1",
+    },
+  );
+  assert.equal(summary.closed, 1);
+  assert.equal(closes.length, 1);
+  assert.equal(closes[0].url, "https://github.com/o/r/issues/700");
+  assert.match(closes[0].comment, /is now \*\*merged\*\*, resolved by #699/);
 });
 
 // ── post-review routing: a green-but-ungated PR gets the review lane, not an escalation ──

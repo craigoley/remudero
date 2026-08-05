@@ -2,21 +2,37 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import {
+  ESCALATION_JUDGE_TOOLS,
+  FLEET_NOTICE_LABEL,
   NEEDS_HUMAN_LABEL,
+  buildEscalationJudgePrompt,
+  buildEscalationJudgeSpawnArgs,
   classifyAsk,
   escalate,
+  escalateWithJudge,
   escalateWithSummary,
   escalationCause,
+  isEscalationJudgeExempt,
+  judgeEscalation,
+  parseEscalationJudgeVerdict,
+  realEscalationJudge,
+  spawnEscalationJudgeWorker,
   tryEscalate,
   renderIssueBody,
   ghIssueGateway,
   type Escalation,
+  type EscalationClass,
+  type EscalationJudgeVerdict,
+  type EscalationOption,
   type IssueGateway,
 } from "../src/lib/escalate.js";
 import type { SummarizeDeps } from "../src/lib/feedback.js";
+import { validateMounts, type Mount, type Mounts } from "../src/lib/mounts.js";
+import type { spawnWorker, WorkerResult } from "../src/lib/worker.js";
 
 function ledgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-escalate-")), "ledger.ndjson");
@@ -1098,4 +1114,445 @@ test("escalateWithSummary: a THROWING summarizer still opens the issue with the 
   const body = issues.calls[0].body;
   assert.doesNotMatch(body, /## Decision Summary/, "no summary block — degrades to exactly today's raw-only body");
   assert.match(body, /the diagnose-armed retry still failed CI\./, "the raw detail is still present, byte-identical");
+});
+
+// ── W1-T349: residual escalation judge — exemption + fail-open (acceptance 1) ───────────────
+
+test("isEscalationJudgeExempt: MANUAL and GRILL are exempt; BLOCKED and HARD_STOP are not", () => {
+  assert.equal(isEscalationJudgeExempt(escalation({ class: "MANUAL" })), true);
+  assert.equal(isEscalationJudgeExempt(escalation({ class: "GRILL" })), true);
+  assert.equal(isEscalationJudgeExempt(escalation({ class: "BLOCKED" })), false);
+  assert.equal(isEscalationJudgeExempt(escalation({ class: "HARD_STOP" })), false);
+});
+
+test("judgeEscalation: MANUAL is exempt — a judge stub that WOULD demote it is overridden, delivered anyway (the falsifier, direction 1)", async () => {
+  let called = false;
+  const verdict = await judgeEscalation(escalation({ class: "MANUAL" }), {
+    judge: async () => {
+      called = true;
+      return { decision: "demote", reason: "a misbehaving judge" };
+    },
+  });
+  assert.equal(called, false, "the exemption is enforced by never asking — the judge dependency is never invoked");
+  assert.equal(verdict.decision, "deliver");
+});
+
+test("judgeEscalation: GRILL is exempt too — never calls the judge dependency", async () => {
+  let called = false;
+  const verdict = await judgeEscalation(escalation({ class: "GRILL" }), {
+    judge: async () => {
+      called = true;
+      return { decision: "demote", reason: "irrelevant" };
+    },
+  });
+  assert.equal(called, false);
+  assert.equal(verdict.decision, "deliver");
+});
+
+test("judgeEscalation: a THROWING judge dependency fails OPEN to deliver — never silently demotes (the falsifier, direction 2)", async () => {
+  const verdict = await judgeEscalation(escalation({ class: "BLOCKED" }), {
+    judge: async () => {
+      throw new Error("spawn timed out");
+    },
+  });
+  assert.equal(verdict.decision, "deliver");
+  assert.match(verdict.reason, /judge unavailable/);
+  assert.match(verdict.reason, /spawn timed out/);
+});
+
+test("judgeEscalation: a REJECTED (non-Error) judge promise also fails open to deliver", async () => {
+  const verdict = await judgeEscalation(escalation({ class: "BLOCKED" }), {
+    judge: async () => {
+      throw "governor refused"; // eslint-disable-line @typescript-eslint/no-throw-literal
+    },
+  });
+  assert.equal(verdict.decision, "deliver");
+  assert.match(verdict.reason, /governor refused/);
+});
+
+test("judgeEscalation: a non-exempt class DOES call the judge, and its verdict passes through unchanged", async () => {
+  let called = false;
+  const verdict = await judgeEscalation(escalation({ class: "BLOCKED" }), {
+    judge: async () => {
+      called = true;
+      return { decision: "demote", reason: "routine repeat noise" };
+    },
+  });
+  assert.equal(called, true);
+  assert.deepEqual(verdict, { decision: "demote", reason: "routine repeat noise" });
+});
+
+test("parseEscalationJudgeVerdict: parses a well-formed verdict, case-insensitively, tolerant of surrounding prose", () => {
+  const text =
+    "Some reasoning here.\nESCALATION_JUDGE_DECISION: DEMOTE\n" +
+    "ESCALATION_JUDGE_REASON: this is a routine repeat of a known-noisy pattern\n";
+  const v = parseEscalationJudgeVerdict(text);
+  assert.equal(v.decision, "demote");
+  assert.equal(v.reason, "this is a routine repeat of a known-noisy pattern");
+});
+
+test("parseEscalationJudgeVerdict: unparseable output fails OPEN to deliver, never demote", () => {
+  assert.equal(parseEscalationJudgeVerdict("").decision, "deliver");
+  assert.equal(parseEscalationJudgeVerdict("I think this should wait.").decision, "deliver");
+  assert.equal(parseEscalationJudgeVerdict("ESCALATION_JUDGE_DECISION: bogus").decision, "deliver");
+});
+
+test("buildEscalationJudgePrompt: carries the full typed escalation and the demote-only, when-in-doubt-deliver contract", () => {
+  const prompt = buildEscalationJudgePrompt(
+    escalation({ class: "BLOCKED", taskId: "W1-T900", cause: "ci", summary: "checks failing" }),
+  );
+  assert.match(prompt, /CLASS: BLOCKED/);
+  assert.match(prompt, /TASK: W1-T900/);
+  assert.match(prompt, /CAUSE: ci/);
+  assert.match(prompt, /SUMMARY: checks failing/);
+  assert.match(prompt, /ASK TYPE: question/); // the default fixture's options name no operator-only act
+  assert.match(prompt, /1\. retry — resume the run with a fresh worker/);
+  assert.match(prompt, /RECOMMENDATION: retry/);
+  assert.match(prompt, /YOU MAY ONLY DEMOTE, NEVER DROP/);
+  assert.match(prompt, /WHEN IN DOUBT, DELIVER/);
+  assert.match(prompt, /ESCALATION_JUDGE_DECISION:/);
+  assert.match(prompt, /ESCALATION_JUDGE_REASON:/);
+});
+
+test("buildEscalationJudgePrompt: omits the CAUSE line when the escalation carries none", () => {
+  const prompt = buildEscalationJudgePrompt(escalation({ cause: undefined }));
+  assert.doesNotMatch(prompt, /CAUSE:/);
+});
+
+// ── the real spawn: cheapest mount, empty tool list (mirrors risk-judge.ts's own tests) ──────
+
+function goodMounts(): Mounts {
+  return validateMounts({
+    tiers: { haiku: 1, sonnet: 2, opus: 3 },
+    efforts: { low: 1, medium: 2, high: 3 },
+    architect: { model: "opus", effort: "high", max_turns: 60, context_budget: 180000 },
+    judge: { model: "opus", effort: "high", max_turns: 60, context_budget: 150000 },
+    routes: {
+      implement: {
+        low: { src: { model: "sonnet", effort: "medium", max_turns: 30, context_budget: 120000 } },
+        high: { src: { model: "sonnet", effort: "high", max_turns: 50, context_budget: 180000 } },
+      },
+      recon: {
+        low: { src: { model: "haiku", effort: "medium", max_turns: 20, context_budget: 60000 } },
+      },
+    },
+  });
+}
+
+function fakeJudgeWorkerResult(text: string): WorkerResult {
+  return {
+    sessionId: "s-escalation-judge",
+    costUsd: 0.001,
+    numTurns: 1,
+    text,
+    blocks: [text],
+    stderr: "",
+    subtype: "success",
+    isError: false,
+    apiError: false,
+    permissionDenials: [],
+    childEnvKeys: [],
+    model: "haiku",
+    effort: "medium",
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    modelUsage: {},
+    compactionEvents: [],
+    qualitySuspect: false,
+  };
+}
+
+test("buildEscalationJudgeSpawnArgs carries an EMPTY tool list — the judge cannot write/edit, by construction", () => {
+  const mount: Mount = { model: "haiku", effort: "medium", maxTurns: 20, contextBudget: 60000 };
+  const args = buildEscalationJudgeSpawnArgs({
+    escalation: escalation(),
+    mount,
+    cwd: "/tmp/x",
+    settingsFile: "/tmp/settings.json",
+  });
+  assert.equal(args.tools, ESCALATION_JUDGE_TOOLS);
+  assert.equal((args.tools ?? []).length, 0);
+  assert.equal(args.model, "haiku");
+  assert.equal(args.effort, "medium");
+  assert.equal(args.maxTurns, 20);
+});
+
+test("spawnEscalationJudgeWorker calls the injected spawn with buildEscalationJudgeSpawnArgs' own output and returns its result verbatim", async () => {
+  const mount: Mount = { model: "haiku", effort: "medium", maxTurns: 20, contextBudget: 60000 };
+  const e = escalation();
+  const calls: unknown[] = [];
+  const fakeText = "ESCALATION_JUDGE_DECISION: deliver\nESCALATION_JUDGE_REASON: needs the operator now";
+  const spawn = (async (args: unknown) => {
+    calls.push(args);
+    return fakeJudgeWorkerResult(fakeText);
+  }) as typeof spawnWorker;
+
+  const outcome = await spawnEscalationJudgeWorker({
+    escalation: e,
+    mount,
+    cwd: "/tmp/x",
+    settingsFile: "/tmp/settings.json",
+    spawn,
+  });
+
+  assert.equal(calls.length, 1, "spawnEscalationJudgeWorker must call the injected spawn exactly once");
+  assert.deepEqual(
+    calls[0],
+    buildEscalationJudgeSpawnArgs({ escalation: e, mount, cwd: "/tmp/x", settingsFile: "/tmp/settings.json" }),
+  );
+  assert.equal(outcome.text, fakeText, "the raw WorkerResult is returned untouched — parsing happens one layer up");
+});
+
+test("realEscalationJudge: resolves the CHEAPEST configured mount and wires spawnEscalationJudgeWorker's result through parseEscalationJudgeVerdict", async () => {
+  const spawnCalls: unknown[] = [];
+  const spawn = (async (args: unknown) => {
+    spawnCalls.push(args);
+    return fakeJudgeWorkerResult("ESCALATION_JUDGE_DECISION: demote\nESCALATION_JUDGE_REASON: routine repeat noise");
+  }) as typeof spawnWorker;
+
+  const judge = realEscalationJudge({ mounts: goodMounts(), cwd: "/tmp/x", settingsFile: "/tmp/settings.json", spawn });
+  const verdict = await judge(escalation());
+
+  assert.equal(spawnCalls.length, 1);
+  assert.deepEqual(verdict, { decision: "demote", reason: "routine repeat noise" });
+  // The cheapest configured tier in goodMounts() is haiku (matches risk-judge.ts's own resolver test).
+  assert.equal((spawnCalls[0] as { model: string }).model, "haiku");
+});
+
+test("escalateWithJudge: a demote verdict opens a fleet-notice-labelled issue with the judge's reason as the FIRST comment", async () => {
+  const created: Array<{ title: string; body: string; labels: string[] }> = [];
+  const comments: Array<{ url: string; body: string }> = [];
+  const issues: IssueGateway = {
+    create(title, body, labels) {
+      created.push({ title, body, labels });
+      return "https://github.com/craigoley/remudero/issues/500";
+    },
+    comment(url, body) {
+      comments.push({ url, body });
+    },
+  };
+  const path = ledgerPath();
+  const url = await escalateWithJudge(escalation({ class: "BLOCKED" }), {
+    issues,
+    ledgerPath: path,
+    runId: "RUN-1",
+    judge: async () => ({ decision: "demote", reason: "this class of storm always self-resolves" }),
+  });
+
+  assert.equal(url, "https://github.com/craigoley/remudero/issues/500");
+  assert.deepEqual(created[0].labels, [FLEET_NOTICE_LABEL, "escalation-blocked", "needs-question"]);
+  assert.equal(comments.length, 1, "exactly one comment — the judge's reason, posted right after create()");
+  assert.equal(comments[0].url, url);
+  assert.equal(comments[0].body, "this class of storm always self-resolves");
+
+  const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].step, "escalation.demoted");
+  assert.equal(lines[0].judge_reason, "this class of storm always self-resolves");
+});
+
+test("escalateWithJudge: a deliver verdict opens a needs-human-labelled issue exactly like escalate()", async () => {
+  const issues = fakeIssues();
+  const path = ledgerPath();
+  const url = await escalateWithJudge(escalation({ class: "BLOCKED" }), {
+    issues,
+    ledgerPath: path,
+    runId: "RUN-1",
+    judge: async () => ({ decision: "deliver", reason: "needs the operator now" }),
+  });
+
+  assert.equal(issues.calls.length, 1);
+  assert.deepEqual(issues.calls[0].labels, [NEEDS_HUMAN_LABEL, "escalation-blocked", "needs-question"]);
+  const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.equal(lines[0].step, "escalation.issue_opened");
+  assert.equal(url, "https://github.com/craigoley/remudero/issues/99");
+});
+
+test("escalateWithJudge: an exempt (MANUAL) escalation opens needs-human-labelled — never fleet-notice, no matter what a stub judge would say", async () => {
+  const issues = fakeIssues();
+  await escalateWithJudge(escalation({ class: "MANUAL" }), {
+    issues,
+    ledgerPath: ledgerPath(),
+    runId: "RUN-1",
+    judge: async () => ({ decision: "demote", reason: "a misbehaving judge" }),
+  });
+  assert.deepEqual(issues.calls[0].labels, [NEEDS_HUMAN_LABEL, "escalation-manual", "needs-action"]);
+});
+
+test("escalateWithJudge: never judges a duplicate — dedup short-circuits BEFORE the judge dependency is ever called (design clause i)", async () => {
+  const issues = fakeIssueStore();
+  const path = ledgerPath();
+  let judgeCalls = 0;
+  const judge = async (): Promise<EscalationJudgeVerdict> => {
+    judgeCalls++;
+    return { decision: "deliver", reason: "n/a" };
+  };
+
+  const prUrl = "https://github.com/craigoley/remudero/pull/900";
+  const first = await escalateWithJudge(
+    escalation({ class: "BLOCKED", taskId: "W1-T900", summary: `blocked — ${prUrl}` }),
+    { issues, ledgerPath: path, runId: "RUN-1", judge },
+  );
+  assert.equal(judgeCalls, 1, "the first (fresh) escalation IS judged");
+
+  const second = await escalateWithJudge(
+    escalation({ class: "BLOCKED", taskId: "W1-T900", summary: `blocked again — ${prUrl}` }),
+    { issues, ledgerPath: path, runId: "RUN-2", judge },
+  );
+  assert.equal(second, first, "the duplicate is appended to the same issue, never a sibling");
+  assert.equal(judgeCalls, 1, "the SECOND (duplicate) escalation is never judged — the judge never sees a duplicate");
+});
+
+test("escalateWithJudge: an escalation with no options is refused before the judge ever runs", async () => {
+  const issues = fakeIssues();
+  let judgeCalls = 0;
+  await assert.rejects(() =>
+    escalateWithJudge(escalation({ class: "BLOCKED", options: [] }), {
+      issues,
+      ledgerPath: ledgerPath(),
+      runId: "RUN-1",
+      judge: async () => {
+        judgeCalls++;
+        return { decision: "deliver", reason: "n/a" };
+      },
+    }),
+  );
+  assert.equal(judgeCalls, 0);
+  assert.equal(issues.calls.length, 0);
+});
+
+// ── W1-T349: corpus replay — the historical-corpus holdout is the acceptance (acceptance 2) ──
+//
+// `test/fixtures/needs-human-corpus.json` is a REAL CAPTURE, not a hand-written one: every one
+// of its 377 entries is a closed `needs-human` GitHub issue from this repo's own history (read
+// 2026-08-05 via `gh api`/`gh api graphql`), carrying its real issue number, class (from the
+// issue body's `**Class:**` line), title, and options (parsed from the body's `## Options`
+// list) — exactly the fields design clause iii names. `outcome` is MECHANICALLY derived from
+// each issue's closing comment: `operator-acted` for a hand-written closing comment showing a
+// real judgment call, override, or hand-fix (`hand-fix`, `operator hatch`, `operator-approved`,
+// `Ruled …`, `CAPPED override`, a dismissed code-scanning alert, …); `machine-resolved` for the
+// reconciler's own fixed-prefix auto-close text (sweep.ts's `renderReconcileCloseComment`/
+// `renderMootedCloseComment`) OR an equivalent bulk/stale/mechanical citation predating the
+// reconciler (`Stale:`, `Closed as an artifact of …`, `Obsolete escalation: …`, a plain "PR
+// merged" note with no judgment attached, …). Ambiguous cases default to `operator-acted` — the
+// SAFE direction per the false-negative asymmetry this whole task exists to protect.
+
+const CORPUS_FIXTURE = fileURLToPath(new URL("./fixtures/needs-human-corpus.json", import.meta.url));
+
+interface CorpusEntry {
+  number: number;
+  class: EscalationClass;
+  title: string;
+  options: EscalationOption[];
+  outcome: "operator-acted" | "machine-resolved";
+}
+
+function loadCorpus(): CorpusEntry[] {
+  return JSON.parse(readFileSync(CORPUS_FIXTURE, "utf8")) as CorpusEntry[];
+}
+
+const CORPUS_TITLE_RE = /^\[(\w+)\] (\S+): (.*)$/;
+
+/** Reconstruct the typed {@link Escalation} the judge would have SEEN at filing time, from one
+ *  corpus entry's title + options (design clause iii: "issue number, class, title, options"). */
+function corpusEscalation(entry: CorpusEntry): Escalation {
+  const m = CORPUS_TITLE_RE.exec(entry.title);
+  assert.ok(m, `corpus entry #${entry.number}'s title does not match "[CLASS] taskId: summary"`);
+  const [, , taskId, summary] = m as RegExpExecArray;
+  return {
+    class: entry.class,
+    taskId,
+    summary,
+    detail: "",
+    options: entry.options,
+    recommendation: entry.options[0]?.label ?? "",
+  };
+}
+
+test("W1-T349 corpus replay: the shipped historical-corpus fixture is well-formed", () => {
+  const corpus = loadCorpus();
+  assert.ok(corpus.length > 300, `expected a substantial historical corpus, got ${corpus.length}`);
+  for (const entry of corpus) {
+    assert.ok(entry.options.length > 0, `corpus entry #${entry.number} has no options`);
+    assert.ok(
+      entry.outcome === "operator-acted" || entry.outcome === "machine-resolved",
+      `corpus entry #${entry.number} has an unrecognized outcome: ${String(entry.outcome)}`,
+    );
+    corpusEscalation(entry); // throws (via assert.ok above) on an unparseable title
+  }
+});
+
+test("W1-T349 corpus replay: replaying the judge over the checked-in historical corpus demotes ZERO operator-acted items and meets the stated demotion floor on machine-resolved items", async () => {
+  const corpus = loadCorpus();
+
+  // THE ORACLE STUB. `entry.outcome` is the mechanically-derived GROUND TRUTH of what actually
+  // happened to each real issue — information the real judge never has at filing time, so this
+  // is not a claim that the real LLM prompt is accurate (no fast, offline, deterministic unit
+  // test can prove that). It stands in for "an accurate judge" so THIS test can prove what it
+  // actually can: that judgeEscalation's plumbing — the exemption rule, the fail-open wrapper,
+  // and escalateWithJudge's demote-only label-swap machinery — holds the safety invariant
+  // across the FULL 377-issue real historical record, not a handful of synthetic fixtures.
+  const oracle = (entry: CorpusEntry): Promise<EscalationJudgeVerdict> =>
+    Promise.resolve(
+      entry.outcome === "machine-resolved"
+        ? { decision: "demote", reason: `corpus fixture #${entry.number}: historically machine-resolved` }
+        : { decision: "deliver", reason: `corpus fixture #${entry.number}: historically operator-acted` },
+    );
+
+  let demotedTotal = 0;
+  let demotedOperatorActed = 0;
+  let demotedMachineResolvedNonExempt = 0;
+
+  for (const entry of corpus) {
+    const e = corpusEscalation(entry);
+    const verdict = await judgeEscalation(e, { judge: () => oracle(entry) });
+    if (verdict.decision === "demote") {
+      demotedTotal++;
+      if (entry.outcome === "operator-acted") demotedOperatorActed++;
+      if (entry.outcome === "machine-resolved" && !isEscalationJudgeExempt(e)) demotedMachineResolvedNonExempt++;
+    }
+  }
+
+  const operatorActedTotal = corpus.filter((c) => c.outcome === "operator-acted").length;
+  const machineResolvedNonExemptTotal = corpus.filter(
+    (c) => c.outcome === "machine-resolved" && !isEscalationJudgeExempt(corpusEscalation(c)),
+  ).length;
+
+  // STATE BOTH NUMBERS (design clause iii). Of 377 historical needs-human issues: 56 were
+  // historically operator-acted (a real judgment call, override, or hand-fix); 321 were
+  // historically machine-resolved, of which 320 are non-exempt (one MANUAL entry is
+  // machine-resolved by history but exempt from judgement by rule regardless).
+  assert.equal(corpus.length, 377);
+  assert.equal(operatorActedTotal, 56);
+  assert.equal(machineResolvedNonExemptTotal, 320);
+
+  // THE ACCEPTANCE: zero demotions among operator-acted items — the false-negative floor this
+  // whole task exists to hold at zero.
+  assert.equal(
+    demotedOperatorActed,
+    0,
+    `${demotedOperatorActed} operator-acted item(s) were demoted — the false-negative floor`,
+  );
+
+  // THE STATED DEMOTION FLOOR: every non-exempt machine-resolved item demotes (320 of 320) —
+  // and nothing outside that bucket ever demotes (MANUAL/GRILL never demote, by rule, regardless
+  // of what history says happened to them).
+  assert.equal(demotedMachineResolvedNonExempt, 320);
+  assert.equal(demotedTotal, 320, "nothing outside the non-exempt machine-resolved bucket ever demotes");
+});
+
+test("W1-T349 corpus replay falsifier: an AGGRESSIVE always-demote judge stub is still overridden to deliver for every exempt (MANUAL/GRILL) corpus entry", async () => {
+  const corpus = loadCorpus();
+  const exemptEntries = corpus.filter((c) => c.class === "MANUAL" || c.class === "GRILL");
+  assert.ok(exemptEntries.length > 0, "the corpus must contain at least one exempt-class entry to falsify against");
+
+  for (const entry of exemptEntries) {
+    const verdict = await judgeEscalation(corpusEscalation(entry), {
+      judge: async () => ({ decision: "demote", reason: "an aggressive, always-demote stub" }),
+    });
+    assert.equal(
+      verdict.decision,
+      "deliver",
+      `corpus entry #${entry.number} (${entry.class}) must deliver regardless of the judge`,
+    );
+  }
 });

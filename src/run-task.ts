@@ -121,7 +121,6 @@ import {
   escalateWithSummary,
   escalationCause,
   ghIssueGateway,
-  NEEDS_HUMAN_LABEL,
   presenceMode,
   setPresenceMode,
   tryEscalate,
@@ -404,6 +403,7 @@ import {
   deriveDayCostUsd,
   deriveDisposition,
   isBlockedCi,
+  listRetirableEscalationIssues,
   logCostGovernorDeferral,
   logQueueGovernorDeferral,
   renderClarificationQuestion,
@@ -11108,7 +11108,8 @@ export function buildEscalationReconcileCandidates(
   const issues = injected.issues ?? ghIssueGateway(owner, repo);
   let open: OpenIssue[];
   try {
-    open = issues.listOpen?.(NEEDS_HUMAN_LABEL) ?? [];
+    // W1-T349: needs-human AND fleet-notice — a demoted item must still self-retire.
+    open = listRetirableEscalationIssues(issues);
   } catch (e) {
     log?.("sweep.escalation_reconcile.list_failed", { error: String((e as Error)?.message ?? e) });
     return []; // a failed read is "do nothing this cycle", never a confident "zero open needs-human"
