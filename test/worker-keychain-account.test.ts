@@ -533,3 +533,36 @@ test("W1-T339: a stale provisioning lock left by a crashed provisioner is taken 
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("W1-T339: a GARBAGE/unparseable provisioning lock (unreadable JSON, e.g. a truncated write) names no live holder, so it is reclaimed rather than wedging dispatch forever", () => {
+  const root = tmp();
+  try {
+    const paths = workerKeychainPaths(join(root, "state"));
+    mkdirSync(join(root, "state"), { recursive: true });
+
+    // Not valid JSON at all -- e.g. a write truncated by a crash mid-flush. Unlike the
+    // dead-pid case above, this exercises parseKeychainProvisionLockInfo's OWN catch
+    // branch (no `pid` to even judge stale/live): garbage names no holder, so it is
+    // treated the same as "reclaimable" everywhere else in this repo's lock family
+    // (inflight-lock.ts's parseInflightLockInfo, drain-lock.ts's parseDrainLockInfo).
+    writeFileSync(keychainProvisionLockPath(paths.keychainPath), "{not valid json at all");
+
+    const { runner } = fakeRunner(unlockedLoginHandlers());
+    const summary = ensureWorkerKeychain({
+      ...paths,
+      loginKeychainPath: LOGIN,
+      runner,
+      exists: () => false,
+      accountId: "acct-1",
+    });
+
+    assert.equal(summary.provisioned, true, "a garbage lock is reclaimed -- this call completes and provisions rather than wedging");
+    assert.equal(summary.reason, "absent");
+    assert.ok(
+      !existsSync(keychainProvisionLockPath(paths.keychainPath)),
+      "the reclaimed garbage lock is gone after this call, not left behind",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
