@@ -620,3 +620,74 @@ test("clearing the stored write token returns the console to the read-only rende
     }
   });
 });
+
+// ── W1-T334: the four-tab console SCAFFOLD (FIRST of three shards split out of W1-T314) ─────
+
+test("console tab bar: exactly four tabs (Decisions, Now, Plan, Feed), pinned under the glance strip, and the existing section stack is unhidden/unmoved", async () => {
+  const root = tmpRoot();
+  await withShell(fixtureDeps(root), async (base) => {
+    const page = await openShell(base);
+    try {
+      const tabLabels = await page.$$eval("#console-tabs .tab-btn", (els) => els.map((el) => el.textContent?.trim()));
+      assert.deepEqual(tabLabels, ["Decisions", "Now", "Plan", "Feed"]);
+
+      // the glance strip (#glance) sits OUTSIDE the tab bar and BEFORE it in document order --
+      // "pinned above," never a descendant of one and never reparented into one.
+      const order = await page.evaluate(() => {
+        const glance = document.getElementById("glance")!;
+        const tabs = document.getElementById("console-tabs")!;
+        return {
+          eitherContainsTheOther: glance.contains(tabs) || tabs.contains(glance),
+          glancePrecedesTabs: !!(glance.compareDocumentPosition(tabs) & Node.DOCUMENT_POSITION_FOLLOWING),
+        };
+      });
+      assert.equal(order.eitherContainsTheOther, false);
+      assert.equal(order.glancePrecedesTabs, true);
+
+      // Plan: an honest "not built yet," present in the DOM but hidden until selected -- the SAME
+      // present-but-not-displayed shape `#recap` already ships with.
+      assert.equal(await page.$eval("#tab-plan-panel", (el) => (el as HTMLElement).hidden), true);
+      await page.click("#tab-plan");
+      const plan = await page.$eval("#tab-plan-panel", (el) => ({ hidden: (el as HTMLElement).hidden, text: el.textContent ?? "" }));
+      assert.equal(plan.hidden, false);
+      assert.match(plan.text, /not built yet/i);
+
+      // ADD, REMOVE NOTHING: every pre-existing section is still in the document, unhidden by the
+      // tab bar's own presence (this scaffold binds no section to any tab -- that is W1-T336's job).
+      for (const id of ["now", "needs-me", "accepted", "up-next", "recent", "rest", "controls", "more"]) {
+        assert.equal(await page.$eval(`#${id}`, (el) => document.body.contains(el) && !(el as HTMLElement).hidden), true, `#${id} missing or hidden`);
+      }
+    } finally {
+      await page.context().close();
+    }
+  });
+});
+
+test("console tab bar: the active tab is URL-persisted, deep-linkable, and survives a reload, on the SAME URLSearchParams+history.replaceState round-trip FIND already uses", async () => {
+  const root = tmpRoot();
+  await withShell(fixtureDeps(root), async (base) => {
+    const page = await openShell(base);
+    try {
+      // selecting a tab updates the URL in place -- no navigation, and the read token round-trips
+      // through the exact same URLSearchParams mechanism serve.ts's FIND layer already uses.
+      await page.click("#tab-plan");
+      await page.waitForFunction(() => new URLSearchParams(window.location.search).get("tab") === "plan");
+      const afterClick = new URL(page.url());
+      assert.equal(afterClick.searchParams.get("tab"), "plan");
+      assert.equal(afterClick.searchParams.get("token"), READ_TOKEN, "the existing round-trip preserves token — this must too");
+
+      // deep link: navigating straight to ?tab=plan renders Plan active/visible with no interaction.
+      await page.goto(`${base}/?token=${READ_TOKEN}&tab=plan`);
+      await page.waitForFunction(shellBootReady);
+      assert.equal(await page.$eval("#tab-plan", (el) => el.getAttribute("aria-selected")), "true");
+      assert.equal(await page.$eval("#tab-plan-panel", (el) => !(el as HTMLElement).hidden), true);
+
+      // reload: the SAME deep-linked tab survives a reload, not just an in-memory click.
+      await page.reload();
+      await page.waitForFunction(shellBootReady);
+      assert.equal(await page.$eval("#tab-plan", (el) => el.getAttribute("aria-selected")), "true");
+    } finally {
+      await page.context().close();
+    }
+  });
+});

@@ -847,3 +847,33 @@ test("a write action issued with a client-held write token succeeds while the UR
     }
   });
 });
+
+// ── W1-T334: the four-tab console SCAFFOLD projects nothing yet -- selecting one issues no fetch ─
+
+test("W1-T334: selecting a console tab issues no additional fetch, poll or gateway call", async () => {
+  const root = tmpRoot();
+  const deps = fixtureDeps(root, [task({ id: "W1-T1" })]);
+  await withShell(deps, async (base) => {
+    const { context, page } = await openShell(base);
+    try {
+      // openShell already waited for the FIRST real poll to land -- start recording only now, so
+      // boot-time requests never count against the tab bar. The 3s refreshAll cadence and the
+      // single long-lived SSE fetch both stay quiet across the short window this test runs in.
+      const apiRequests: string[] = [];
+      page.on("request", (req) => {
+        const path = new URL(req.url()).pathname;
+        if (path.startsWith("/v1/")) apiRequests.push(path);
+      });
+
+      await page.click("#tab-plan");
+      await page.click("#tab-now");
+      await page.click("#tab-feed");
+      await page.click("#tab-decisions");
+      await page.waitForTimeout(200); // give any wrongly-fired request a moment to land
+
+      assert.deepEqual(apiRequests, [], `tab selection must never call the gateway; saw: ${apiRequests.join(", ")}`);
+    } finally {
+      await context.close();
+    }
+  });
+});

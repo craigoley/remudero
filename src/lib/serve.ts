@@ -472,6 +472,17 @@ export function renderShellHtml(
     margin: 0.4rem 0 0; padding: 0.3rem 0.6rem; border-radius: 6px; font-size: 0.85rem; font-weight: 600;
     background: rgba(255, 107, 107, 0.14); color: var(--status-blocked); border: 1px solid var(--status-blocked);
   }
+  /* W1-T334: the four-tab console SCAFFOLD's tab bar -- pinned directly under the glance strip
+     (the header block, above), a plain role="tablist" of role="tab" buttons. Purely presentational
+     chrome for now: the bar governs no section's visibility (see the script's own note by
+     #console-tabs) except its own new, still-empty Plan panel. Sized like FIND's own .sort-header
+     buttons (line 601-ish), not the default toolbar button chrome -- W1-T183's own hard-won
+     lesson, recorded right above the .row rules, is that TOOLBAR CHROME (not row height) is what
+     determines how many rows clear the fold, so a new toolbar row here keeps that same compact
+     footprint rather than reintroducing the cost that lesson exists to avoid. */
+  .console-tabs { display: flex; flex-wrap: wrap; gap: 0.25rem; margin: 0; }
+  .tab-btn { font-size: 0.65rem; line-height: 1; padding: 0 0.35rem; border: none; }
+  .tab-btn[aria-selected="true"] { background: var(--accent); color: #04101f; }
   /* impl-DY: the header write-state badge. Colour is a SECONDARY cue only -- the text states the
      capability outright, so this reads correctly to a colour-blind operator and in a screenshot. */
   .write-state-badge {
@@ -778,6 +789,29 @@ export function renderShellHtml(
        reader users get "task flipped" news without a sighted user's visual flash/highlight. -->
   <div id="aria-announcer" class="sr-only" role="status" aria-live="polite"></div>
 </header>
+
+<!-- W1-T334: the four-tab console SCAFFOLD -- FIRST of three shards split out of W1-T314 (see
+     that task's rationale). ADD, REMOVE NOTHING: the full existing single-scroll stack below
+     (recap/now/needs-me/accepted/up-next/recent/rest/controls/more) keeps rendering exactly where
+     it does today, unhidden, unmoved, unfiltered -- this bar does not govern any of it yet. Binding
+     a section to a tab (filtering Decisions, the Now view, the cross-tab needs-me badge) is
+     W1-T336's job; this shard only introduces the seam. The GLANCE STRIP -- the whole pinned
+     header block closed just above (glance/daemon-health/account-usage/console-version, plus the
+     write-state/connection/staleness status line) -- stays OUTSIDE and ABOVE this bar, never
+     inside a tab: it is the cross-tab "is anything on fire" answer. Exactly four tabs, named
+     exactly Decisions/Now/Plan/Feed, none hidden when empty (W1-T314's "a missing tab reads as a
+     missing capability"). The one exception to "governs nothing": Plan gets its own panel below,
+     rendered as an honest "not built yet" (W1-T315 fills it in) using the SAME present-but-hidden
+     shape \`recap\` above already ships -- toggled by the script's applyActiveTab, never fetched. -->
+<div id="console-tabs" class="console-tabs" role="tablist" aria-label="Console view">
+  <button type="button" class="tab-btn" id="tab-decisions" role="tab" data-tab="decisions" aria-selected="true">Decisions</button>
+  <button type="button" class="tab-btn" id="tab-now" role="tab" data-tab="now" aria-selected="false">Now</button>
+  <button type="button" class="tab-btn" id="tab-plan" role="tab" data-tab="plan" aria-selected="false" aria-controls="tab-plan-panel">Plan</button>
+  <button type="button" class="tab-btn" id="tab-feed" role="tab" data-tab="feed" aria-selected="false">Feed</button>
+</div>
+<section id="tab-plan-panel" class="panel-section" aria-label="Plan" hidden>
+  <p class="empty">Plan view — not built yet.</p>
+</section>
 
 <section id="recap" class="panel-section" aria-label="Since you last checked" hidden>
   <h2><span>Since you last checked</span></h2>
@@ -2526,6 +2560,43 @@ export function renderShellHtml(
   document.getElementById("find-search").value = findState.q;
   renderSortHeaders();
   if (findHasUrlState()) expandRest();
+
+  // ── W1-T334: the four-tab console SCAFFOLD's OWN url state ───────────────────────────────
+  // Same idiom as FIND's round-trip just above -- URLSearchParams read fresh off
+  // window.location.search, one key set, history.replaceState preserving token + every other
+  // existing param -- a SEPARATE key ("tab") riding the page's ONE existing view-state
+  // mechanism, never a second channel (no localStorage, no custom event). The tab itself governs
+  // NOTHING but its own Plan panel (W1-T336 wires real sections to a tab later); selecting one
+  // issues no fetch, poll or gateway call.
+  const CONSOLE_TABS = ["decisions", "now", "plan", "feed"];
+  function readTabFromUrl() {
+    const p = new URLSearchParams(window.location.search);
+    const t = p.get("tab");
+    return CONSOLE_TABS.includes(t) ? t : "decisions";
+  }
+  function writeTabToUrl(tab) {
+    const p = new URLSearchParams(window.location.search); // preserve token + anything else already there
+    if (tab && tab !== "decisions") p.set("tab", tab);
+    else p.delete("tab"); // omit the default -> cleaner URLs that still round-trip, same convention as sort/dir
+    const qs = p.toString();
+    history.replaceState(null, "", (qs ? "?" + qs : window.location.pathname) + window.location.hash);
+  }
+  function applyActiveTab(tab, { persist } = { persist: true }) {
+    for (const btn of document.querySelectorAll("#console-tabs .tab-btn")) {
+      btn.setAttribute("aria-selected", btn.dataset.tab === tab ? "true" : "false");
+    }
+    document.getElementById("tab-plan-panel").hidden = tab !== "plan";
+    if (persist) writeTabToUrl(tab);
+  }
+  document.getElementById("console-tabs").addEventListener("click", (e) => {
+    const btn = e.target.closest(".tab-btn");
+    if (!btn) return;
+    applyActiveTab(btn.dataset.tab);
+  });
+  // Restore the active tab from the URL BEFORE first paint, same reasoning as FIND above: a
+  // shared/reloaded ?tab= link renders that exact view with no interaction. persist:false --
+  // reading state must never itself rewrite the URL.
+  applyActiveTab(readTabFromUrl(), { persist: false });
 
   // ── cmd+K COMMAND PALETTE — global, reachable from every view ──────────────────────────────
   // Each action fires through the EXACT existing button (one implementation of each action, never
