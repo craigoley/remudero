@@ -4,6 +4,7 @@ import { loadDefaultPolicy } from "./policy.js";
 import { cappedOverrideFromLedger, decideAutoMergeArm, postedArmFactsFromLedger } from "./review.js";
 import type { ArmDecision, CriterionVerdict } from "./review.js";
 import type { QuestionEntry } from "./worker.js";
+import type { AskType } from "./escalate.js";
 
 /**
  * lib/sweep.ts — the level-triggered PR-pipeline reconciler (W1-T77, ratifies
@@ -2931,6 +2932,15 @@ export interface EscalationReconcileCandidate {
   issueUrl: string;
   issueNumber?: number;
   taskId: string;
+  /**
+   * W1-T347: the W1-T346 ask-type classification for this issue, when the caller can supply
+   * it (read back off the issue's `needs-question`/`needs-action` label). `"question"` routes
+   * a terminal-referent close through {@link renderMootedCloseComment} instead of {@link
+   * renderReconcileCloseComment} — see the guard in {@link runEscalationReconcile}. `"action"`
+   * OR omitted (the untyped, pre-W1-T346 corpus) keeps today's close path byte-identical: this
+   * is the legacy default and MUST NOT change behavior.
+   */
+  askType?: AskType;
   /** The referent's state, derived by the caller via the #737/#741-corrected deriveStatus. */
   derived: {
     merged: boolean;
@@ -3001,6 +3011,41 @@ export function renderReconcileCloseComment(c: EscalationReconcileCandidate): st
 }
 
 /**
+ * W1-T347 — the guard {@link renderReconcileCloseComment} above does NOT apply to: a
+ * `needs-question` issue whose referent went terminal is MOOTED, not resolved, and closing it
+ * in {@link renderReconcileCloseComment}'s voice ("is now merged, resolved by") claims an
+ * answer nobody gave. The measured cost: 50 of 151 reconciler auto-closes carried question-form
+ * titles, and #1200 ("needs a scope decision, not another retry") auto-closed 9 minutes after
+ * an unrelated PR merged, citing the merge as if it had answered the question.
+ *
+ * Names the mooting event (the same PR the resolved-close cites) but states PLAINLY that the
+ * question was never answered — only mooted by the referent going terminal — and tells the
+ * reader where to re-raise it if it still stands. Starts with a FIXED, DISTINCT prefix ("MOOTED
+ * by the escalation-lifecycle reconciler") so a later sweep/census can tell a mooted close from
+ * a resolved one by exact string match, never by parsing prose (design clause iii).
+ *
+ * Pure + exported for a direct assertion, mirroring {@link renderReconcileCloseComment}.
+ */
+export function renderMootedCloseComment(c: EscalationReconcileCandidate): string {
+  const pr = c.derived.prNumber !== undefined ? `#${c.derived.prNumber}` : (c.derived.prUrl ?? "its PR");
+  const link = c.derived.prUrl ? ` (${c.derived.prUrl})` : "";
+  const via = c.derived.source ? ` — derived via \`${c.derived.source}\`` : "";
+  const event = c.derived.merged
+    ? `${pr}${link} merged${via}`
+    : `${pr}${link} closed without merging${via}`;
+  return [
+    "MOOTED by the escalation-lifecycle reconciler (fb-1784756088300-6a481e).",
+    "",
+    `The referenced task **${c.taskId}**'s blocking PR ${event}, so this issue no longer blocks anything and is being closed.`,
+    "",
+    "**This did NOT answer the question this issue raised.** No human weighed in — the referent simply went " +
+      "terminal on its own, mooting the question rather than resolving it.",
+    "",
+    "_If the question still stands, re-raise it: reopen this issue, or file a fresh one against the task above._",
+  ].join("\n");
+}
+
+/**
  * Reconcile OPEN needs-human issues against their referent's CURRENT derived state. Separate
  * entry point mirroring {@link runCreditBackfill}: its input domain is one OPEN issue per
  * candidate (the caller lists them and derives each referent), disjoint from runSweep's OPEN
@@ -3044,7 +3089,10 @@ export async function runEscalationReconcile(
       results.push({ issueUrl: c.issueUrl, taskId: c.taskId, outcome: "closed" });
       continue;
     }
-    const comment = renderReconcileCloseComment(c);
+    // W1-T347: a question-typed issue is MOOTED by a terminal referent, never resolved by
+    // one — nobody answered it. Action-typed and untyped (`askType` omitted, the legacy
+    // pre-W1-T346 corpus) issues keep today's resolved-close comment byte-identical.
+    const comment = c.askType === "question" ? renderMootedCloseComment(c) : renderReconcileCloseComment(c);
     try {
       deps.closeIssue(c.issueUrl, comment);
     } catch (e) {
