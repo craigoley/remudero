@@ -1,0 +1,85 @@
+- id: W1-T376
+  title: "the Plan tab shows no per-section breakdown of MASTER-PLAN, so `where does each subject stand` is unanswerable — render filed-vs-merged COUNTS per section, never a percentage, from data the route already fetches"
+  repo: remudero
+  depends_on: [W1-T375]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "MEASURED AT 8ea4921. The Plan tab renders progress (done/in-flight/queued) for the
+    WHOLE plan plus a frontier, and nothing between those two scales: there is no way to see that
+    the control panel has 60 filed tasks while Design Review has one.
+    THE MAPPING EXISTS AND RESOLVES. 346 of 402 tasks (86.1%) carry a non-empty `plan_refs`, and a
+    recon implemented the join and tested it: every section-shaped ref resolved, ZERO unresolved.
+    IT IS FREE, WHICH IS WHY IT IS WORTH DOING AT ALL. `buildPlanViewRoute` already makes ONE
+    `projectPlan()` call for the whole plan — the same projection GET /v1/status and
+    GET /v1/drain/preview use, and its own header states it is 'never a second per-task read'.
+    plan/plan-index.json is a COMMITTED file and plan_refs is already parsed. This view adds ZERO
+    new GitHub calls and zero new fetches: it is a regroup of data the tab already holds. That
+    matters because the board fetch is the console's dominant cost and the reason to keep the tab
+    closed — a GraphQL exhaustion on 2026-08-05 killed a completed run at `gh pr create`."
+  design: |
+    THE JOIN IS NON-OBVIOUS AND IS THE REAL WORK.
+    (i) `plan_refs` IS POLYMORPHIC. Across 660 values: 474 section refs in `§5C` form, 116 TASK-ID
+    refs (`W1-T325` — a task pointing at another task, not at the plan), and 70 "other" which splits
+    into a THIRD section spelling (`MASTER-PLAN#5C`), retro proposals (`P22`) and workstreams
+    (`WS-7`). A consumer MUST normalise both section spellings and MUST ignore the three non-section
+    kinds. Counting a task-id ref as a section would fabricate sections that do not exist.
+    (ii) plan/plan-index.json has 38 entries keyed by HEADING TEXT, and ZERO of them contain a `§`.
+    The headings carry the number as a text prefix ("5C. Task pre-flight: the plan gate"), so the
+    join is: strip the `§` (or the `MASTER-PLAN#` prefix), then match the heading's leading number
+    token before the `.`. One ref is word-shaped (`§Self-improvement`) and prefix-matches
+    "Self-improvement: flywheel, retros, knowledge & the commons", so the fallback is a
+    case-insensitive heading-prefix match. Bind plan-index.ts's existing reader rather than
+    re-parsing MASTER-PLAN.md.
+    (iii) RENDER A PAIR, NEVER A BARE PERCENTAGE. "12 of 14 filed tasks merged", not "86%". THE
+    REASON IS CONCRETE, NOT stylistic: `7C. Design Review` has exactly ONE filed task. If it merges
+    the section reads 100% while `5C. Task pre-flight` with 74 filed tasks might sit at 80% and be
+    vastly more built out. A percentage therefore RANKS THIN SECTIONS ABOVE THICK ONES, inverting
+    the truth. The pair makes the denominator part of the claim, so a section reading "1 of 1 filed"
+    reads as thin evidence rather than as finished. The label must also say FILED, because that is
+    what is measured — filing coverage, not subject completeness.
+    (iv) "DONE" COMES FROM projectPlan(), NEVER FROM `status:`. 335 of 402 tasks read `queued`
+    while many are merged, by documented design; computePlanProgress's own header says a task whose
+    yaml status says `queued` while its PR is merged "counts as DONE here, never off that decorative
+    field". W1-T367 exists because three readers got this wrong. Reuse the SAME projection the route
+    already resolved — never a second read, and never the plan's own field.
+    (v) DARKNESS PARITY. `PlanProgress` already carries `unknown`/`asOf`/`unavailableReason` and the
+    "unknown, never a fabricated 0" rule. The per-section counts ride the SAME reading: under a
+    GitHub outage they must render UNKNOWN with the age, never a zero that reads as "nothing merged".
+    (vi) FALSIFIER, BOTH DIRECTIONS. A fixture whose plan_refs mix all five kinds must produce
+    counts keyed only on real headings, with task-id/`Pnn`/`WS-n` refs contributing nothing; and a
+    section with one filed, one merged task must render "1 of 1 filed tasks merged" rather than any
+    percentage — assert the ABSENCE of a percent sign in the rendered row, positively.
+    NOT IN SCOPE: the refinement / needs-refinement view — 27 of 38 sections have tasks and of the
+    11 without, 8 are not task-bearing by nature (Mission, NET STATE, SHIPPED log, FIELD FINDINGS,
+    Banked queue), leaving 3 that are deliberately empty; the operator ruled it a wall of green with
+    three false positives and it is NOT to be filed. Also out: any change to the frontier (W1-T375),
+    and any new GitHub call.
+  acceptance:
+    - claim: "section counts key only on headings plan-index resolves, with task-id and proposal and workstream refs contributing nothing"
+      proof: "unit test: test/plan-view.test.ts"
+    - claim: "done is taken from the merged projection the route already resolved, so a task whose yaml status reads queued while merged counts as merged"
+      proof: "unit test: test/plan-view.test.ts"
+    - claim: "a rendered section row states the filed-versus-merged pair and contains no percent sign"
+      proof: "unit test: test/plan-sections-render.test.ts"
+  risk: high
+  origin: oper#recon-plan-tab-overview-2026-08-05
+  plan_refs: ["§7", "W1-T315", "W1-T375"]
+  files: [src/lib/panel-graph.ts, src/lib/serve.ts, test/plan-view.test.ts, test/plan-sections-render.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — a pure reduction plus a renderer, both assertable without a browser.
+    risk:high — set by Rule 19's span, not blast radius: the change must exist end-to-end (normalise
+    refs and resolve them in panel-graph.ts, render the pair in serve.ts) across two subsystems, and
+    serve.ts's client script is a backtick template where a stray backtick breaks the esbuild parse.
+    budget_usd 60 — the join is the work: five ref kinds, two section spellings, one word-shaped ref,
+    plus the darkness path.
+    THIRD PROOF IS A FORWARD REFERENCE TO A PATH, deliberately: test/plan-sections-render.test.ts
+    does not exist yet and is declared in files: so the scope guard admits it. Forward-referencing a
+    PATH is safe; the first two proofs name test/plan-view.test.ts, which EXECUTES TODAY, so this
+    task is not resting on an unexecutable set. Per CLAUDE.md the render assertion gets its OWN file
+    rather than being appended to an existing suite.
+    depends_on W1-T375 IS ORDERING, NOT MECHANISM: both touch panel-graph.ts's plan-view surface and
+    sequencing them keeps two workers off one file. W1-T375 also decides what the tab's most
+    prominent list contains, which is the frame this breakdown sits beside."

@@ -1,0 +1,89 @@
+- id: W1-T375
+  title: "the Plan tab's frontier spends its whole 8-row budget on permanently-parked `verify: human` tasks, so the one list that answers `what runs next` structurally cannot show anything that runs — stop parked rows consuming the budget"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: "MEASURED AT 8ea4921. `buildPlanFrontier` (panel-graph.ts) walks FILE ORDER and takes
+    up to `DEFAULT_FRONTIER_LIMIT` (8) rows, and a HELD row consumes that budget exactly as a
+    runnable one does. The eight rows the operator actually sees are seven `verify: human` tasks
+    plus one `blocked` auto task — W12-T1, W2-T2, W3-T3, W3-T4, W1-T7B, W3-T7, W1-T10, W1-T12d —
+    sitting at indices 105-167 of plan/tasks.yaml's 269 tasks. Everything ahead of them is merged
+    and skipped, so they fill all eight slots before the walk reaches anything runnable.
+    THE SKEW IS STRUCTURAL, NOT INCIDENTAL: only 24 of 402 tasks are `verify: human` (6%), yet they
+    hold 7 of 8 slots. An auto task merges and leaves; a human one never can, so the parked set
+    accumulates permanently at whatever file position it occupies. Compounding it, plan/tasks.d
+    shards sort LAST and the shards are where current work lives — the daemon dispatched
+    W1-T345/346/347/348 from there.
+    W1-T315's design promised every frontier row states WHY IT IS NEXT. For a parked `verify: human`
+    task the true answer is `it is not, and it never will be`, which the row cannot say because the
+    frontier's whole framing is next-ness. The list is not merely noisy; it is answering a different
+    question than the one it poses.
+    THEY ARE ALREADY SURFACED CORRECTLY, ELSEWHERE ON THE SAME PAGE: idle-reasons-panel.ts's
+    `IDLE_REASON_ORDER` carries `verify-not-auto` labelled `need you (verify != auto)`, rendered by
+    `renderIdleReasonsHtml` and spliced server-side into the shell as `idleReasonsHtml` — in the
+    PINNED HEADER, above the tab bar. So the Plan tab duplicates the same tasks beneath a surface
+    that already frames them properly."
+  design: |
+    THE FIX IS ONE PREDICATE ON A DISCRIMINATOR THAT ALREADY EXISTS.
+    (i) `FrontierReasonKind` (panel-graph.ts) ALREADY has a distinct `verify-human` member,
+    alongside `file-order`, `unmet-dependency`, `circuit-breaker` and `blocked`. Nothing new has to
+    be derived or classified: the row already knows which kind it is by the time it is built.
+    (ii) MAKE THE CHOICE, DO NOT LEAVE IT OPEN. Exclude `verify-human` rows from the frontier
+    entirely rather than merely de-prioritising them within the budget. Reason: they are ALREADY
+    rendered, with a better label, by renderIdleReasonsHtml on the same page — so keeping them is
+    duplication, and merely re-ordering them still lets a long parked run crowd the list on a day
+    when few tasks are runnable. `buildPlanFrontier` already has the precedent: `frontierFilterReason`
+    returns `undefined` for `already-merged`, and its own doc says the caller "excludes [it] from the
+    frontier entirely (a DONE task is not part of 'what's next')". A permanently-parked task is the
+    same shape of fact — not part of "what's next" — and should take the same treatment.
+    (iii) PRESERVE THE HELD-ROW DESIGN FOR TEMPORARILY HELD ROWS. "NOT-RUNNABLE IS INFORMATION, NOT
+    ABSENCE" was written for rows that can become runnable on their own: `unmet-dependency` (the dep
+    merges), `circuit-breaker` (resets on a fresh owned PR), `blocked` (unblocks). Those MUST keep
+    rendering with their reasons. A fix that dropped all declined rows would discard real
+    information and is explicitly wrong. The discriminator is exactly "can this row's own reason
+    stop being true without the operator acting on THIS task".
+    (iv) DO NOT ROUTE THESE THROUGH THE NEEDS-ME ARC, AND SAY SO IN THE CODE so a later reader does
+    not undo it. `classifyAsk` (escalate.ts) takes an `Escalation`; a task filtered at dispatch never
+    becomes one. daemon.ts calls `verify-not-auto` "permanently needs a human, waiting never helps"
+    and excludes it from idle escalation DELIBERATELY, as does auto-triage.ts. Re-including them
+    would raise 24 asks at once, which is why the exclusion exists.
+    (v) FALSIFIER, BOTH DIRECTIONS. A plan whose file-order head is a run of `verify: human` tasks
+    followed by runnable ones must yield a frontier of the RUNNABLE ones (the case that fails today);
+    and a plan containing an `unmet-dependency` or `blocked` row must STILL render that row with its
+    reason (the case a careless fix breaks). One without the other is not evidence.
+    NOTE FOR THE IMPLEMENTER: the serve.* suites assert the shell's structure through W1-T335's
+    shared harness, and W1-T156's DOM-stable in-place patching must survive — a tab switch must not
+    re-create rows or drop a text selection. This task changes what the ROUTE returns, not the
+    shell's DOM shape, so that property should hold by construction; confirm it rather than assume.
+    NOT IN SCOPE: the per-section breakdown (W1-T376); DEFAULT_FRONTIER_LIMIT's value; any change to
+    idle-reasons-panel.ts or to the pinned header's contents.
+  acceptance:
+    - claim: "a frontier built from a plan whose file-order head is parked verify:human tasks returns the runnable tasks behind them rather than the parked ones"
+      proof: "unit test: test/plan-view.test.ts"
+    - claim: "a temporarily-held row (unmet dependency, blocked, circuit-breaker) still renders with its own derived reason, so the not-runnable-is-information design survives"
+      proof: "unit test: test/plan-view.test.ts"
+  risk: high
+  origin: oper#recon-plan-tab-overview-2026-08-05
+  plan_refs: ["§7", "W1-T315"]
+  files: [src/lib/panel-graph.ts, test/plan-view.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — the whole change is one predicate in a pure function with an existing test file.
+    risk:high IS SET BY RULE 19's SPAN, NOT BY BLAST RADIUS, and the distinction is recorded so a
+    later reader does not over-read it. The linter scores `files:` as two concerns (panel-graph,
+    plan-view) and offers raise-or-decompose; DECOMPOSING IS WRONG HERE — the change is one
+    predicate and its own falsifier, and a predicate cannot ship without the test that proves it
+    bites in both directions. The real blast radius is one route's RESPONSE BODY: no dispatch
+    behaviour changes, `runnableCandidates` is untouched, nothing writes, and the failure direction
+    is visible (a frontier that shows too little). What genuinely earns caution is that this is the
+    Plan tab's most prominent list and a careless fix silently discards the temporarily-held rows
+    that carry real information — which is what design item (iii) and the second criterion exist for.
+    budget_usd 45 — the edit is small; the work is the two-direction falsifier and confirming the
+    idle-reasons duplication rather than taking it on trust.
+    WHY EXCLUSION AND NOT RE-ORDERING, recorded so the decision is not relitigated: the parked rows
+    already render under `need you (verify != auto)` in the pinned header, so keeping them in the
+    frontier is duplication with a worse label; and re-ordering alone still lets them crowd the list
+    on a quiet day. `already-merged` already takes exactly this treatment for the same reason."
