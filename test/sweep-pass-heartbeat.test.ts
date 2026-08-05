@@ -25,7 +25,7 @@
 // its position are production code.
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -187,6 +187,7 @@ test("the heartbeat is emitted before any disposition, so it cannot depend on th
 /** Keeps the temp dirs from accumulating across the run. */
 test("fixture hygiene: temp ledgers are removable", () => {
   const p = ledgerPath();
-  rmSync(join(p, ".."), { recursive: true, force: true });
-  assert.ok(true);
+  const dir = join(p, "..");
+  rmSync(dir, { recursive: true, force: true });
+  assert.equal(existsSync(dir), false, "the temp ledger dir is gone after cleanup, not merely attempted");
 });
