@@ -1,0 +1,38 @@
+id: fb-1785936611284-5cd6cf
+ts: 2026-08-05T13:30:11.284Z
+raw: "A WRAPPED CLAIM SILENTLY HALVES A PR'S ACCEPTANCE CRITERIA — third member
+  of a family, all line-based parsers meeting wrapped text, all failing by
+  returning FEWER things rather than erroring. parseAcceptanceBlock treats any
+  indented line that is not proof: as the END of the block, so a claim wrapping
+  onto a second line pushes criterion 1 with an EMPTY proof and DISCARDS the
+  rest. Reproduced locally before touching anything: the wrapped body parsed to
+  1 criterion with proof=\"\", the flat body to 2 with both proofs intact — and
+  the rendered PR description truncated at exactly the wrap point. #1338 failed
+  remudero-review on this with all 22 CI checks green; the reviewer was RIGHT
+  ('INDETERMINATE — no mechanical anchors in proof text'). Separately #1342
+  shipped with no ## Acceptance block at all — a ## Validation section was
+  written instead — and parseAcceptanceBlock returned [] so the review failed
+  closed, also correctly. TWO OF FIVE HAND-OPENED PRs IN ONE SESSION HIT THIS.
+  THE CAUSE IS STRUCTURAL, NOT CARELESSNESS: GraphQL exhaustion forces PRs to be
+  opened over REST (gh pr create is GraphQL and killed a completed run at that
+  exact point), and a REST-opened PR bypasses the orchestrator path that emits
+  the house Acceptance block, so the body is hand-authored markdown. Every
+  REST-opened PR is a candidate. THE FAMILY: (1) this; (2) a grep: proof whose
+  pattern wraps across a YAML line matches nothing, since grep is line-based;
+  (3) a grep: pattern that is case-mismatched returns 0 the same way. All three
+  return zero or fewer rather than raising. RECON: establish whether a pre-push
+  check is feasible — run parseAcceptanceBlock over the body about to be posted
+  and refuse if the parsed criterion count does not match the bullets written,
+  or if any parsed proof is empty. Establish where it would live so it covers a
+  hand-opened REST PR and not only the orchestrator path. Then say whether the
+  parser should instead REJECT a wrapped claim loudly rather than silently
+  truncating — a parser that returns 1 criterion where 3 were written is the
+  same overloaded-zero problem as the grep traps. Falsifying check: if the
+  orchestrator's body builder is reusable from a hand-opened PR path, the fix is
+  to use it rather than to add a check, and the pre-push validation is
+  redundant."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null

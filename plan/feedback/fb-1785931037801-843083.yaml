@@ -1,0 +1,32 @@
+id: fb-1785931037801-843083
+ts: 2026-08-05T11:57:17.801Z
+raw: "TWO grep: PROOF TRAPS, both silent, both hit while filing #1336. (1) A
+  VERBATIM STRING THAT WRAPS ACROSS A YAML LINE MATCHES NOTHING. grep is
+  line-based; YAML folding breaks a long design phrase across two lines, so a
+  proof quoting it returns 0 hits — which reads as 'the work is not done yet'
+  rather than 'this proof can never match'. This is the concatenation-seam trap
+  CLAUDE.md already records for TEST TITLES, and nothing says it applies to
+  shard prose too. Fixed by anchoring to a phrase that fits on one line. (2)
+  grep IS CASE-SENSITIVE and a lowercase pattern against a capitalised shard
+  phrase returns 0 the same way. Both failures are indistinguishable from a
+  legitimate forward reference. THE UNDERLYING PROBLEM IS THAT ZERO IS
+  OVERLOADED: for a task whose deliverable is ADDING text or a file, a proof
+  either forward-references it (0 hits today, resolves on the work — legitimate)
+  or already matches main (executed_stale, discriminates nothing). There is no
+  third option, so a filer cannot distinguish 'correct forward reference' from
+  'pattern that can never match' at filing time. That is how W1-T229 shipped
+  with proofs matching zero tests and sat queued 13 days unable to certify
+  whoever ran it. RECON: establish whether rmd check-proof can tell a filer WHY
+  a pattern returned zero — no such file, file exists but no line matches,
+  pattern spans a newline, case mismatch — rather than a bare hit count. Then
+  say whether a filing-time warning is feasible for the class 'this pattern
+  cannot match any single line of the file it names'. Note the constraint: a
+  legitimate forward reference must stay legitimate, so the check cannot simply
+  fail on zero. Falsifying check: if check-proof already distinguishes these
+  cases and the filer only read the hit count, the fix is in how the result is
+  reported to the caller, not in the checker."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null
