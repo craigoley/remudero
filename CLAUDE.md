@@ -148,11 +148,28 @@ forensic detail, so the narrative does not need to live here.
 
 ## Ledger and evidence discipline
 
-- **Any "N occurrences in the ledger" measurement must union `state/ledger.ndjson` with its
-  rotations — the live file is lossy.** A `review.posted` count read 212 live and 912 over the union
-  of the live file plus all 658 archives: a ~4x undercount. Claims of the form "N occurrences", and
-  especially "zero in the entire history", are unsupportable without the archives.
-  *(recon-AE, `state/recon-AE-dispatch-certifiability.md` §0)*
+- **The archives are GZIPPED, so `ledger.*.ndjson` matches ZERO files and answers from the live file
+  alone — SILENTLY. Use `zgrep` over `ledger.*.ndjson.gz` PLUS the live file, and prove the archives
+  were read.** Every rotation is `state/ledger.<ts>.ndjson.gz` (666 of them; `find` returns **zero**
+  uncompressed rotations), so the long-standing `grep -h … state/ledger.*.ndjson state/ledger.ndjson`
+  idiom is broken in the worst way: under `bash` the non-matching glob passes through literally,
+  `grep` fails on it into `2>/dev/null`, and you get a live-file-only number that looks right. Under
+  `zsh` it errors outright. Measured the same night, same pattern: `run.start` reads **223 live and
+  696 over the union — a 3.1x undercount**; `dispatch.indeterminate` reads **0 live**. THE ONLY
+  SANCTIONED FORM, which also streams and never materialises a union to a file:
+  `zgrep -h '<pat>' state/ledger.*.ndjson.gz state/ledger.ndjson | sort -u`.
+  **Run a POSITIVE CONTROL that proves an ARCHIVE matched, not merely that the count is non-zero** —
+  a live-only answer is non-zero too, which is exactly why this went unnoticed.
+  **Nothing in `src/` reads or writes `.gz`** (zero matches across `src/` and `scripts/`), and
+  `readLedgerLines` (`status.ts`) opens exactly ONE path — no glob, no `readdir` — so no shipped
+  code unions anything; the union is always yours to build.
+  **And the archives are NOT cumulative snapshots.** `rotateLedger` keeps only
+  `MAX_RETAINED_LINES_PER_STEP = 200` newest per step and archives the rest ("Newest-N survive;
+  older ones archive"), so **63% of `run.start` history exists ONLY in older archives** — deleting
+  any of them destroys unique data, and the newest archive does not subsume the others.
+  Claims of the form "N occurrences", and especially "zero in the entire history", are unsupportable
+  without the archives. *(recon-AE §0 — 212 live vs 912 union; re-derived 2026-08-05,
+  `state/recon-state-retention.md`)*
 - **A new ledger step that any DECISION reads must be added to `DECISION_RELEVANT_LEDGER_STEPS`
   (`src/lib/ledger.ts`) in the same PR.** `priorActionsFromLedger` enforces `ABSENT_REPUSH_CAP` by
   COUNTING `sweep.absent_repush` lines, so a rotation archiving them resets the count to zero and
