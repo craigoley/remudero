@@ -1,0 +1,32 @@
+id: fb-1785954511635-a6c209
+ts: 2026-08-05T18:28:31.635Z
+raw: "ADDENDUM to fb-1785954227448-7b2bb0 — THE FALSIFYING CHECK IS ANSWERED AND
+  THE MECHANISM IS NARROWER. The deploy path DID run — twice, at 18:24:23Z and
+  18:26:24Z — and neither marker cleared, because 'up to date' is a SKIP, not a
+  success. The skip reason is verbatim: 'up-to-date (install HEAD ==
+  origin/main, daemon alive and running it)', install fe5558925, origin
+  fe5558925. It does not read DEPLOY_REQUESTED and does not compare failedHead
+  against the running sha. SO: an rmd deploy request is UNCONSUMABLE and a
+  DEPLOY_FAILED marker is UNSUPERSEDABLE whenever HEAD already equals origin —
+  which is exactly the situation in which an operator reaches for rmd deploy to
+  clear a stale latch. The verb's own output promises 'the supervisor will
+  fast-forward + kickstart the daemon at the next idle gap'; it will not,
+  because there is nothing to fast-forward, and it says nothing about that.
+  DEPLOY_REQUESTED sat unconsumed from 18:22:58Z across two skip ticks;
+  DEPLOY_FAILED sat from 14:18:47Z across four hours and every deploy since.
+  Both had to be removed by hand — the second time today that state needed
+  hand-clearing. THE CHEAP FIX IS ALREADY AVAILABLE IN THE DATA: the marker
+  carries failedHead, and daemon.boot carries head_sha. If the daemon has booted
+  on a sha that is a DESCENDANT of failedHead, the failure is by definition
+  superseded and the marker should retract itself — no deploy required, and the
+  skip path is the natural place to evaluate it since it runs every ~2 minutes.
+  Same for DEPLOY_REQUESTED: a skip that finds nothing to do has satisfied the
+  request and should consume it, or say plainly that it cannot. Falsifying
+  check: if some other path DOES clear these on a successful deploy and today's
+  instance only persisted because no real deploy occurred in four hours, then
+  the gap is exactly the skip path and nothing else needs changing."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null
