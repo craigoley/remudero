@@ -601,6 +601,15 @@ export interface DaemonDeps {
    * Never consulted from `deps.sweep`/`deps.sweepLight` — drainage of already-open PRs is a
    * separate code path this predicate is never wired into (see `checkCostGovernor`'s own doc:
    * "stranding in-flight work to save money is a worse failure than the spend itself").
+   *
+   * W1-T342: consulted a SECOND time — immediately before the actual dispatch (`runOne` below),
+   * not only here at the top of the tick — via `checkDispatchGovernors`, which wraps this call
+   * (and `checkQueueGovernor`'s) in a try/catch: a throw is now treated as a deferral (`kind:
+   * "unreadable"`), never left to propagate and crash the loop the way a bare call used to. See
+   * `checkDispatchGovernors`'s own doc for why a SECOND, freshly-taken reading matters once a
+   * batch can hold more than one lane (W1-T343): a reading taken before lane 1 was admitted
+   * cannot see lane 1's own (still in-flight, not yet ledgered) spend, so lane 2 needs its own
+   * call, never lane 1's cached verdict.
    */
   checkCostGovernor?: (dailyCostCeilingUsd?: number) => CostGovernorResult | undefined;
   /**
@@ -638,6 +647,10 @@ export interface DaemonDeps {
    * report it. Optional — omitted, dispatch behaves exactly as before this governor existed. Never
    * consulted from `deps.sweep`/`deps.sweepLight` — drainage of already-open PRs is a separate code
    * path this predicate is never wired into (see `checkQueueGovernor`'s own asymmetry note).
+   *
+   * W1-T342: see `checkCostGovernor`'s own W1-T342 paragraph immediately above — this predicate
+   * is wrapped by the SAME `checkDispatchGovernors` seam, consulted a second time immediately
+   * before dispatch, and fails closed on a throw exactly the same way.
    */
   checkQueueGovernor?: () => QueueGovernorResult | undefined;
   /**
@@ -1272,6 +1285,68 @@ export function daemonBoot(
   return assertion;
 }
 
+/** W1-T342: discriminates which governor (if either) is deferring THIS dispatch, and why. */
+export type DispatchGovernorVerdict =
+  | { kind: "cost"; result: CostGovernorResult }
+  | { kind: "queue"; result: QueueGovernorResult }
+  | { kind: "unreadable"; source: "cost" | "queue"; error: string };
+
+/**
+ * W1-T342 — THE PER-DISPATCH GOVERNOR GATE (design (i)/(ii)/(iv)).
+ *
+ * `checkCostGovernor`/`checkQueueGovernor` used to be consulted exactly ONCE, at the top of the
+ * tick, and that single reading silently stood in for every dispatch-shaped action the REST of
+ * the tick could still take — the retro trigger, the idle branch's auto-triage rung, and (once
+ * W1-T343 wires a per-lane loop over `nextRunnable`'s pick) every lane in a multi-lane batch. A
+ * ceiling that trips BETWEEN two dispatches in that batch would never be seen: the second lane
+ * spends against a reading taken before the first lane's own (still in-flight, not yet ledgered)
+ * cost could possibly show up in it.
+ *
+ * THE FIX: every dispatch-shaped action gets its OWN, freshly-taken reading. `runDaemon` below
+ * still calls this once at the top of the tick (gating retro/auto-triage/kicks/`nextRunnable`
+ * exactly as the single call used to) AND calls it again immediately before the actual dispatch
+ * (`runOne`) — see that second call site's own comment. At N=1 (today; W1-T343's lane loop is
+ * explicitly out of THIS task's scope) nothing async runs between the two calls in a dispatching
+ * tick, so the second call always agrees with the first — a provable no-op change in observable
+ * behaviour until lanes exist. It becomes load-bearing the moment a batch can hold more than one
+ * lane: W1-T343's loop must call THIS function again per lane it admits, never hoist a single
+ * call above the loop the way the tick-top call alone would.
+ *
+ * FAIL-CLOSED ON AN UNREADABLE OBSERVATION (design (iv)): `deps.checkCostGovernor`/
+ * `deps.checkQueueGovernor` are pure, non-throwing predicates in sweep.ts's OWN contract, but the
+ * real wiring (`costGovernorGateFor`/`queueGovernorGateFor`, run-task.ts) reads a ledger file /
+ * live PR count on every call — so a LATER dispatch in a batch can hit a transient read failure
+ * the first dispatch didn't. Unlike every OTHER per-tick consultation in `runDaemon` (`reloadPlan`,
+ * `reloadDailyCostCeilingUsd`, `sweep`, `checkAutoTriage`, `checkRetroTrigger` all already catch
+ * and degrade), these two calls were previously bare: a throw propagated straight out of
+ * `runDaemon` — a full-process crash, never a deferral. The safe answer to "the reading could not
+ * be taken" is the SAME as a confirmed-over-ceiling reading — admit no further dispatch this
+ * batch (`kind: "unreadable"`) — never a silent fall-through to "admitted" because the check
+ * errored.
+ */
+export function checkDispatchGovernors(
+  deps: Pick<DaemonDeps, "checkCostGovernor" | "checkQueueGovernor">,
+  dailyCostCeilingUsd: number | undefined,
+): DispatchGovernorVerdict | undefined {
+  let costGoverned: CostGovernorResult | undefined;
+  try {
+    costGoverned = deps.checkCostGovernor?.(dailyCostCeilingUsd);
+  } catch (e) {
+    return { kind: "unreadable", source: "cost", error: e instanceof Error ? e.message : String(e) };
+  }
+  if (costGoverned) return { kind: "cost", result: costGoverned };
+
+  let queueGoverned: QueueGovernorResult | undefined;
+  try {
+    queueGoverned = deps.checkQueueGovernor?.();
+  } catch (e) {
+    return { kind: "unreadable", source: "queue", error: e instanceof Error ? e.message : String(e) };
+  }
+  if (queueGoverned) return { kind: "queue", result: queueGoverned };
+
+  return undefined;
+}
+
 /**
  * The daemon's scheduler loop. Deterministic; no LLM decisions. Each tick:
  * check STOP → check PAUSE → check headroom → pick the next runnable (DAG
@@ -1294,6 +1369,34 @@ export async function runDaemon(
 ): Promise<DaemonSummary> {
   const pollIntervalMs = opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   const log = deps.log ?? (() => {});
+  // W1-T342: shared by BOTH `checkDispatchGovernors` call sites below (the tick-top one and the
+  // per-dispatch one immediately before `runOne`) — same three log shapes either call site can
+  // produce, so the two sites cannot silently drift into different field names for the same verdict.
+  const logDispatchGovernorDefer = (verdict: DispatchGovernorVerdict, tick: number): void => {
+    if (verdict.kind === "cost") {
+      log("daemon.cost_governor", {
+        tick,
+        observed_day_cost_usd: verdict.result.observedDayCostUsd,
+        daily_cost_ceiling_usd: verdict.result.ceilingUsd,
+        poll_interval_ms: pollIntervalMs,
+      });
+    } else if (verdict.kind === "queue") {
+      log("daemon.queue_governor", {
+        tick,
+        observed_open_count: verdict.result.observedOpenCount,
+        wip_limit: verdict.result.wipLimit,
+        poll_interval_ms: pollIntervalMs,
+      });
+    } else {
+      log("daemon.governor_check_failed", {
+        tick,
+        source: verdict.source,
+        error: verdict.error,
+        poll_interval_ms: pollIntervalMs,
+        note: "governor observation unreadable — failing closed, admitting no further dispatch this batch",
+      });
+    }
+  };
   const attempted: string[] = [];
   const merged: string[] = [];
   // W1-T331: THE SNAPSHOT `deps.reloadDailyCostCeilingUsd` (top of the loop, below) writes into
@@ -1692,45 +1795,31 @@ export async function runDaemon(
       }
     }
 
-    // DAILY COST CEILING (W1-T317, wiring `checkCostGovernor`/sweep.ts): a global gate, not a
-    // per-task one, so — unlike `isCircuitTripped`/`isLifetimeCapExceeded` below — it is checked
-    // directly here, right after headroom and before the retro trigger (a fired retro spawns a
-    // real, budget-costing run too — same reasoning the retro trigger's own comment already gives
-    // for running after headroom). UNLIKE drain.ts's bounded pass (which stops outright), this
-    // daemon is PERSISTENT: a deferral is an in-process idle heartbeat, identical in shape to
-    // headroom's own `enforcingIdle` branch just above, so the loop resumes automatically once
-    // the observed day-cost drops back under the ceiling.
-    // W1-T331: threads THIS tick's own snapshot (reloaded above, top of tick) through — never a
-    // fresh read here and never the frozen default unless the reload itself never populated one.
-    const costGoverned = deps.checkCostGovernor?.(dailyCostCeilingUsd);
-    if (costGoverned) {
+    // DAILY COST CEILING (W1-T317, wiring `checkCostGovernor`/sweep.ts) + QUEUE GOVERNOR / WIP
+    // CEILING (W1-T321, wiring `checkQueueGovernor`/sweep.ts, the W1-T121 23-open-PR incident):
+    // both global gates, not per-task ones, so — unlike `isCircuitTripped`/`isLifetimeCapExceeded`
+    // below — they are checked directly here, right after headroom and before the retro trigger (a
+    // fired retro spawns a real, budget-costing run too — same reasoning the retro trigger's own
+    // comment already gives for running after headroom) and before the idle branch's auto-triage
+    // rung (same reasoning again — auto-triage also spawns a real, budget-costing run). UNLIKE
+    // drain.ts's bounded pass (which stops outright), this daemon is PERSISTENT: a deferral is an
+    // in-process idle heartbeat, identical in shape to headroom's own `enforcingIdle` branch just
+    // above, so the loop resumes automatically once the observed reading drops back under the
+    // ceiling/limit.
+    // W1-T331: threads THIS tick's own ceiling snapshot (reloaded above, top of tick) through —
+    // never a fresh read here and never the frozen default unless the reload itself never
+    // populated one.
+    // W1-T342: this is the TICK-WIDE gate — it still runs exactly ONCE per tick, guarding
+    // whichever ONE dispatch-shaped action (retro fire, auto-triage fire, or the normal task
+    // dispatch below) this tick can still take, unchanged in effect from before this task. It is
+    // NOT, by itself, the per-dispatch gate a multi-lane batch needs — see `checkDispatchGovernors`'s
+    // own doc, and the SECOND consultation immediately before `runOne` below: this call alone
+    // would let a second lane in one batch spend against a reading taken before the first lane's
+    // own cost could show up in it.
+    const tickGovernor = checkDispatchGovernors(deps, dailyCostCeilingUsd);
+    if (tickGovernor) {
       ticks++;
-      log("daemon.cost_governor", {
-        tick: ticks,
-        observed_day_cost_usd: costGoverned.observedDayCostUsd,
-        daily_cost_ceiling_usd: costGoverned.ceilingUsd,
-        poll_interval_ms: pollIntervalMs,
-      });
-      await deps.sleep(pollIntervalMs);
-      continue;
-    }
-
-    // QUEUE GOVERNOR / WIP CEILING (W1-T321, wiring `checkQueueGovernor`/sweep.ts, the W1-T121
-    // 23-open-PR incident): a global gate, not a per-task one, so — like the cost governor just
-    // above — it is checked directly here, right after it and before the retro trigger (a fired
-    // retro spawns a real, budget-costing run too). UNLIKE drain.ts's bounded pass (which stops
-    // outright), this daemon is PERSISTENT: a deferral is an in-process idle heartbeat, identical
-    // in shape to the cost governor's own branch just above, so the loop resumes automatically
-    // once the observed open-PR count drops back under the limit.
-    const queueGoverned = deps.checkQueueGovernor?.();
-    if (queueGoverned) {
-      ticks++;
-      log("daemon.queue_governor", {
-        tick: ticks,
-        observed_open_count: queueGoverned.observedOpenCount,
-        wip_limit: queueGoverned.wipLimit,
-        poll_interval_ms: pollIntervalMs,
-      });
+      logDispatchGovernorDefer(tickGovernor, ticks);
       await deps.sleep(pollIntervalMs);
       continue;
     }
@@ -2035,6 +2124,21 @@ export async function runDaemon(
 
     // A dispatchable task ends any starvation episode — re-arm so a LATER one escalates again.
     starvationEscalated = false;
+
+    // W1-T342 — THE PER-DISPATCH GATE (see `checkDispatchGovernors`'s doc). Re-observes both
+    // governors FRESH, immediately before THIS dispatch, rather than trusting the tick-wide
+    // reading taken above (before retro/auto-triage/kicks/`nextRunnable` ran). This is the exact
+    // call site a future multi-lane batch (W1-T343) must repeat once per lane — never hoisting a
+    // single call above its loop, which is exactly the defect this task exists to close. At N=1
+    // (today) nothing async runs between the tick-wide check above and here, so this call always
+    // agrees with it — a provable no-op change in observable behaviour until lanes exist.
+    const dispatchGovernor = checkDispatchGovernors(deps, dailyCostCeilingUsd);
+    if (dispatchGovernor) {
+      ticks++;
+      logDispatchGovernorDefer(dispatchGovernor, ticks);
+      await deps.sleep(pollIntervalMs);
+      continue;
+    }
 
     log("daemon.iteration", { task: next.id, attempted: attempted.length + 1, max: opts.max ?? null });
     attempted.push(next.id);
