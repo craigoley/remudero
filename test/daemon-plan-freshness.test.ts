@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
+import { runDaemon, type DaemonDeps, type DaemonOpts } from "../src/lib/daemon.js";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { type MergedSet } from "../src/lib/drain.js";
 import { planReloader } from "../src/run-task.js";
@@ -669,4 +669,101 @@ test("recon-GM: a real change still reports plan_changed, and does not re-emit t
   assert.ok(r(), "a moved tree sha still yields a reload");
   assert.deepEqual(logged, ["daemon.plan_unchanged", "daemon.plan_changed"],
     "heartbeat once at boot, then the real change — the heartbeat never repeats");
+});
+
+// ── W1-T343: SHIP DARK — laneCount<=1 is BYTE-IDENTICAL to before this task existed ──────────
+//
+// The safety property that lets `runDaemon` adopt drain's lane machinery before an operator has
+// raised `sweep.dispatchLanes`: at `laneCount` omitted (default 1) or explicit `1`, the tick's
+// dispatch-set construction (`runnableCandidates(plan, isMerged, 1, …)` + `partitionByFileOverlap`
+// on a <=1-length list) must select the SAME single task `nextRunnable` always did, and none of
+// the NEW lane-only ledger steps this task adds may ever fire.
+
+function overlappingTrioPlan(): Plan {
+  const dir = mkdtempSync(join(tmpdir(), "fz-lane1-lock-"));
+  const f = join(dir, "tasks.yaml");
+  writeFileSync(
+    f,
+    "- id: A\n  title: a\n  repo: remudero\n  type: implement\n  depends_on: []\n  status: queued\n  files: [src/shared.ts]\n" +
+      "- id: B\n  title: b\n  repo: remudero\n  type: implement\n  depends_on: []\n  status: queued\n  files: [src/shared.ts]\n" +
+      "- id: C\n  title: c\n  repo: remudero\n  type: implement\n  depends_on: []\n  status: queued\n",
+  );
+  return loadPlan(f);
+}
+
+test("W1-T343 acceptance 1: laneCount omitted and laneCount:1 dispatch the IDENTICAL sequence, with ZERO lane-only ledger lines — even against tasks whose declared files overlap", async () => {
+  const run = async (laneOpt: Pick<DaemonOpts, "laneCount">): Promise<{ ran: string[]; steps: string[] }> => {
+    const merged = new Set<string>();
+    const ran: string[] = [];
+    const steps: string[] = [];
+    let ticks = 0;
+    await runDaemon(
+      overlappingTrioPlan(),
+      {
+        refreshMerged: () => (id: string) => merged.has(id),
+        checkStop: () => (++ticks > 8 ? "tick cap" : undefined),
+        runOne: async (id: string) => {
+          ran.push(id);
+          merged.add(id);
+          return okResult(id);
+        },
+        sleep: async () => {},
+        log: (step: string) => steps.push(step),
+      } as unknown as DaemonDeps,
+      { max: 3, ...laneOpt },
+    );
+    return { ran, steps };
+  };
+  const omitted = await run({});
+  const explicit1 = await run({ laneCount: 1 });
+
+  assert.equal(omitted.ran.length, 3, "the comparison would be vacuous if nothing dispatched");
+  assert.deepEqual(explicit1.ran, omitted.ran, "laneCount omitted and laneCount:1 must dispatch the identical sequence — A, B (overlapping files:) and C (no files:) never interact at N<=1");
+
+  const laneOnlySteps = ["dispatch.concurrent_set", "dispatch.lane_governed", "dispatch.serialized", "dispatch.wip_deferred"];
+  for (const steps of [omitted.steps, explicit1.steps]) {
+    for (const s of laneOnlySteps) {
+      assert.ok(!steps.includes(s), `laneCount<=1 must never emit '${s}' — that ledger step did not exist before W1-T343`);
+    }
+  }
+});
+
+test("W1-T343 REACHABILITY: daemonCommand hands the SAME sweep.dispatchLanes/wipLimit policy row rmd drain already reads, plus an openPrCount closure, to runDaemon", async () => {
+  const { daemonCommand } = await import("../src/run-task.js");
+  const { DEFAULT_SWEEP_POLICY } = await import("../src/lib/sweep.js");
+  const home = mkdtempSync(join(tmpdir(), "fz-lanes-wiring-"));
+  const root = join(home, "Remudero");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  mkdirSync(join(root, "state"), { recursive: true });
+  const planPath = join(home, "tasks.yaml");
+  writeFileSync(planPath, "[]\n");
+
+  const prevHome = process.env.HOME;
+  process.env.HOME = home;
+  let capturedDeps: DaemonDeps | undefined;
+  let capturedOpts: DaemonOpts | undefined;
+  try {
+    await (daemonCommand as unknown as (a: string[], d: unknown) => Promise<number>)(
+      ["--allow-self-target", "--plan", planPath, "--max", "0"],
+      {
+        runDaemon: async (_plan: unknown, deps: DaemonDeps, opts: DaemonOpts) => {
+          capturedDeps = deps;
+          capturedOpts = opts;
+          return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+        },
+      },
+    );
+  } finally {
+    process.env.HOME = prevHome;
+  }
+  assert.ok(capturedOpts, "runDaemon was reached and its opts captured");
+  assert.equal(
+    capturedOpts!.laneCount,
+    DEFAULT_SWEEP_POLICY.dispatchLanes,
+    "ONE threshold home (sweep.dispatchLanes) — never a second constant duplicated here",
+  );
+  assert.equal(capturedOpts!.wipLimit, DEFAULT_SWEEP_POLICY.wipLimit, "the SAME wipLimit row a >=2-lane batch sizes itself against");
+  assert.equal(typeof capturedDeps!.openPrCount, "function", "the lane budget's other input (openPrCount) is wired too, never a second GitHub read path");
+  rmSync(home, { recursive: true, force: true });
 });

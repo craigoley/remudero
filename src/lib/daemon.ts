@@ -35,12 +35,19 @@ import { assertCleanBoot, type BootAssertion } from "./env.js";
 import { INITIAL_RETRY_STATE, reasonAboutBlock, type RetryState } from "./block-reason.js";
 import {
   nextRunnable,
+  runnableCandidates,
+  laneDispatchBudget,
   type MergedSet,
+  type NextRunnableOpts,
   type OpenPrCheck,
   tallyDispatchFilters,
   type IdleReasonBucket,
   IDLE_REASON_ID_CAP,
 } from "./drain.js";
+// W1-T343 (ADOPT DRAIN'S LANE MACHINERY, NEVER A SECOND IMPLEMENTATION): the SAME pure
+// overlap partition `runDrainLanes` (drain.ts) already composes with `runnableCandidates`/
+// `laneDispatchBudget` above — reused here verbatim rather than re-derived.
+import { partitionByFileOverlap, serializedLedgerPayload } from "./dispatch-overlap.js";
 import { HEADROOM_LIMIT_PCT, RESET_UNKNOWN, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
 import type { CostGovernorResult, QueueGovernorResult } from "./sweep.js";
@@ -476,6 +483,39 @@ export interface DaemonOpts {
    * source change.
    */
   maxSpawnInfraBackoffMs?: number;
+  /**
+   * W1-T343 (ADOPT DRAIN'S EXISTING LANE MACHINERY, NEVER A SECOND IMPLEMENTATION): the
+   * width this tick's dispatch batch may hold — `SweepPolicy.dispatchLanes` (POLICY DATA,
+   * rule 2; ONE threshold home, the same row `rmd drain` already reads), resolved by the
+   * real command and threaded straight through, never re-derived here.
+   *
+   * SHIP DARK. Default 1 (also the floor — a value below 1 is clamped up to 1, never down
+   * to 0). At 1 (or omitted), the tick below computes a dispatch set of AT MOST one task via
+   * `runnableCandidates(plan, isMerged, 1, …)`, which returns the SAME task {@link
+   * nextRunnable} would — see that function's own doc: both apply the identical
+   * `isDispatchEligible` chain, in the identical `dispatchOrder` walk, stopping at the same
+   * point — and a one-or-zero-element candidate list can never collide with itself under
+   * `partitionByFileOverlap` (nothing is yet placed to overlap against). So this tick's
+   * OBSERVABLE behaviour — which task dispatches, which callbacks fire, which ledger lines
+   * are written — is BYTE-IDENTICAL to before this parameter existed. That equivalence is
+   * the safety property that lets this merge before an operator has decided to run two; W1-
+   * T344 owns raising the policy row that actually flips it.
+   */
+  laneCount?: number;
+  /**
+   * `SweepPolicy.wipLimit` (W1-T121) — threaded through ONLY to SIZE a `laneCount >= 2`
+   * batch, via {@link laneDispatchBudget} (drain.ts), exactly as `runDrainLanes` already
+   * does. Distinct from `DaemonDeps.checkQueueGovernor` above: that gate STOPS new dispatch
+   * outright for the whole tick when at/over the ceiling (unchanged by this field); this is
+   * the finer-grained "how many of `laneCount` lanes still fit under it right now" input —
+   * without it a >=2-lane batch could admit more concurrent dispatches than the remaining
+   * WIP headroom, overshooting the ceiling by up to `laneCount - 1` before the NEXT tick's
+   * `checkQueueGovernor` catches it. Never consulted when `laneCount <= 1` (or
+   * `deps.openPrCount` is omitted) — the single-lane tick's budget is `1`, unconditionally,
+   * which is exactly what preserves the byte-identical property `laneCount`'s own doc above
+   * states.
+   */
+  wipLimit?: number;
 }
 
 /**
@@ -668,6 +708,15 @@ export interface DaemonDeps {
   onIndeterminate?: (task: Task) => void;
   /** Run ONE task through the existing run-task path (default = runTask). */
   runOne: (taskId: string) => Promise<RunResult>;
+  /**
+   * W1-T343: `laneDispatchBudget`'s other input (alongside `DaemonOpts.wipLimit`) — the
+   * SAME `openPrCount` closure the real wiring already builds for `checkQueueGovernor`
+   * (run-task.ts), never a second GitHub read path. Consulted ONLY when `laneCount >= 2`,
+   * to size that batch exactly as `runDrainLanes` (drain.ts) already does. Optional —
+   * omitted, a >=2-lane batch is bounded by `laneCount` alone (unbounded by the governor),
+   * the same "un-wired site behaves as before" contract every optional guard here carries.
+   */
+  openPrCount?: () => number;
   /** Read current /usage; `undefined` ⇒ unavailable (headroom check is skipped). */
   readUsage?: () => UsageSnapshot | undefined;
   /**
@@ -1431,11 +1480,125 @@ export async function runDaemon(
   const headroomEnabled = opts.headroomEnabled ?? true;
   const unreadableDegradedLimit = opts.unreadableDegradedLimit ?? DEFAULT_UNREADABLE_DEGRADED_LIMIT;
   const now = deps.now ?? (() => new Date());
+  // W1-T343: resolved ONCE, for this process's whole lifetime — `DaemonOpts` is the daemon's
+  // frozen-at-boot configuration (see `wipLimit`'s own doc on why a running daemon does not
+  // live-reload `sweep.dispatchLanes`; that gap is W1-T331's, deliberately not this task's).
+  // Floored at 1, never 0: a misconfigured `laneCount: 0` must never mean "dispatch nothing"
+  // silently — {@link laneDispatchBudget} already floors its OWN `laneCount` input this same
+  // way, so a value below 1 clamps up here rather than producing two disagreeing floors.
+  const laneCount = Math.max(1, opts.laneCount ?? 1);
 
   const summary = (stopReason: DaemonStopReason, stopDetail?: string): DaemonSummary => {
     const s: DaemonSummary = { attempted, merged, stopReason, stopDetail, costUsd, ticks };
     log("daemon.summary", { ...s });
     return s;
+  };
+
+  // W1-T343: ONE per-task block-reasoning processor, shared by the single-task tick
+  // (`laneCount <= 1`) and the multi-lane batch (`laneCount >= 2`) below — the SAME "never a
+  // second implementation" discipline this task applies to lane partitioning also applies to
+  // judging a lane's verdict: a fork between "how a solo dispatch's result is judged" and "how
+  // one lane's result in a batch is judged" is exactly the drift-prone duplication this task
+  // exists to close. Extracted VERBATIM from the pre-W1-T343 single-task loop body — every log
+  // line, field and ordering decision below is byte-identical to before this function existed,
+  // just callable once per task instead of inlined once per tick. `planForBatch` is threaded in
+  // as a parameter (never closed over) because it is rebound every tick (see its own doc above);
+  // a closure captured once, above the loop, would freeze it at tick 1 forever.
+  //
+  // Returns a disposition rather than returning out of the whole loop directly, so a caller
+  // processing several lanes' results in one batch can finish EVERY sibling's own bookkeeping —
+  // its retry-state update, its fix dispatch, its independent-failure flag, its merge — before
+  // deciding whether to halt the daemon (LANE-LOCAL BLOCK SEMANTICS: see `runDrainLanes`' own
+  // doc, drain.ts). At `laneCount <= 1` there is only ever one caller per tick, so this is a
+  // provable no-op restructuring: same inputs, same log lines, same return value threaded
+  // straight back into a `return summary("blocked", …)` exactly as before.
+  const processDispatchResult = async (
+    planForBatch: Plan,
+    task: Task,
+    result: RunResult,
+  ): Promise<{ kind: "merged" } | { kind: "continue" } | { kind: "genuine_blocker"; detail: string }> => {
+    if (!result.merged) {
+      // BLOCK-REASONING (W1-T46, supersedes v1's blunt stop-on-block): reuse
+      // W1-T7's transient/strike taxonomy + the plan's DAG (block-reason.ts)
+      // instead of halting on ANY non-merged verdict.
+      const state = blockRetryStates.get(task.id) ?? INITIAL_RETRY_STATE;
+      const disposition = reasonAboutBlock(planForBatch, task.id, result.verdict, state);
+
+      if (disposition.kind === "retry_transient") {
+        // TRANSIENT: no strike. `nextRunnable` naturally retries the SAME
+        // task next tick (it is still un-merged and its deps are unchanged) —
+        // no separate re-dispatch mechanism needed.
+        blockRetryStates.set(task.id, disposition.state);
+        log("daemon.block.transient_retry", {
+          task: task.id,
+          verdict: result.verdict,
+          transient_retries: disposition.state.transientRetries,
+        });
+        return { kind: "continue" };
+      }
+      if (disposition.kind === "fixable_blocker" && deps.dispatchFix) {
+        // W1-T174 (drain/sweep PARITY): the SAME blocked_ci/blocked_review
+        // evidence the W1-T77 sweep routes to the W1-T76 fix rung gets a
+        // bounded fix attempt here too, BEFORE halting — strike-capped by
+        // `reasonAboutBlock` via the SAME classify.ts primitive every
+        // strike in this module already uses (never a separate, unbounded
+        // loop — the W1-T168 anti-regression guard: exhausting the bound
+        // falls through to `genuine_blocker` on a LATER tick and escalates
+        // for re-judgment, it does not fix-loop forever). Keep the retry
+        // state threaded across ticks — dropped only once resolved
+        // (merged, flagged, or escalated) below.
+        blockRetryStates.set(task.id, disposition.state);
+        log("daemon.block.fixable_dispatch", {
+          task: task.id,
+          verdict: result.verdict,
+          dependents: disposition.dependents,
+          strikes: disposition.state.strikes,
+        });
+        await deps.dispatchFix({ task, result, dependents: disposition.dependents });
+        return { kind: "continue" };
+      }
+
+      blockRetryStates.delete(task.id); // resolved one way or another below
+
+      if (disposition.kind === "independent_failure") {
+        // INDEPENDENT-FAILURE: nothing in the plan transitively depends on
+        // this task, so skipping it cannot leave a dependent building on a
+        // gap. Flag it — flip the in-memory `status` so `nextRunnable` never
+        // reconsiders it this run — and keep draining everything else.
+        task.status = "blocked";
+        log("daemon.block.independent_failure", {
+          task: task.id,
+          verdict: result.verdict,
+          pr_url: result.prUrl,
+        });
+        return { kind: "continue" };
+      }
+
+      // GENUINE BLOCKER: real downstream work transitively needs this task
+      // merged — "never continue into the gap" is absolute here. Halt and
+      // escalate, exactly as v1's stop-on-block halted, but now the
+      // dependents it protects are named. Reached by a `genuine_blocker`
+      // disposition (no fixable signal at all, or a `fixable_blocker` whose
+      // strike bound `reasonAboutBlock` already exhausted) AND by a
+      // `fixable_blocker` with no `dispatchFix` wired (W1-T174: never a
+      // silent stall on a fixable block this daemon has no rung to act on —
+      // the SAME halt+escalate a genuine blocker always got).
+      log("daemon.blocked", {
+        task: task.id,
+        verdict: result.verdict,
+        pr_url: result.prUrl,
+        dependents: disposition.dependents,
+      });
+      if (deps.escalateBlock) {
+        await deps.escalateBlock({ task, result, dependents: disposition.dependents });
+      }
+      return {
+        kind: "genuine_blocker",
+        detail: `${task.id} → ${result.verdict}${result.prUrl ? ` (${result.prUrl})` : ""} — blocks ${disposition.dependents.join(", ")}`,
+      };
+    }
+    merged.push(task.id);
+    return { kind: "merged" };
   };
 
   for (;;) {
@@ -1861,7 +2024,7 @@ export async function runDaemon(
     // `idleReasons`'s `DispatchFilterReason` tally (see drain.ts's doc) — collected here, per
     // tick, so the starvation census below can name it alongside `blocked`/`unmet-deps`.
     const circuitBrokenThisTick: string[] = [];
-    const next = forcedNext ?? nextRunnable(planForBatch, isMerged, {
+    const dispatchOpts: NextRunnableOpts = {
       isOpenPr: deps.isOpenPr,
       onFiltered: idleReasons.onFiltered,
       // IN-FLIGHT (W1-T80): a legible skip on console + ledger; the daemon
@@ -1932,8 +2095,52 @@ export async function runDaemon(
           }
         }
       },
-    });
-    if (!next) {
+    };
+
+    // W1-T343 — THE DISPATCH SET (ADOPTS drain.ts's LANE MACHINERY, NEVER A SECOND
+    // IMPLEMENTATION). A console kick (`forcedNext`) always dispatches ALONE, bypassing
+    // candidate selection entirely — it already ran the gauntlet (`assertRunnable`, above)
+    // `isDispatchEligible` exists to apply, and folding a human's explicit "run this now" into
+    // a concurrent batch alongside whatever the DAG scan would otherwise pick is a DIFFERENT
+    // feature this task does not build.
+    //
+    // Otherwise: `runnableCandidates(plan, isMerged, budget, dispatchOpts)` applies the EXACT
+    // SAME `isDispatchEligible` chain `nextRunnable` does (the two are factored so they can
+    // never drift — see drain.ts), and `partitionByFileOverlap` is the SAME pure predicate
+    // `runDrainLanes` already composes it with (dispatch-overlap.ts) — neither is reimplemented
+    // here. At `laneCount <= 1` (the SHIP-DARK default), `budget` is `1` UNCONDITIONALLY —
+    // never sized by `wipLimit`/`openPrCount` — so `runnableCandidates` returns the SAME single
+    // task `nextRunnable` would, via the SAME walk, firing the SAME callbacks in the SAME
+    // order; and `partitionByFileOverlap` on a <=1-length list can never defer anything
+    // (nothing is yet placed in `dispatch` to overlap against — see that function's own doc).
+    // `dispatchSet` below is therefore BYTE-IDENTICAL, at `laneCount <= 1`, to `next` from
+    // before this task, wrapped in an array — the safety property `DaemonOpts.laneCount`'s own
+    // doc states.
+    let dispatchSet: Task[];
+    if (forcedNext) {
+      dispatchSet = [forcedNext];
+    } else {
+      const budget =
+        laneCount <= 1
+          ? laneCount
+          : laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.() });
+      if (laneCount >= 2 && budget <= 0) {
+        // Mirrors `runDrainLanes`' `dispatch.wip_deferred` (drain.ts) — runnable work may well
+        // exist, held back by the governor rather than absent, distinct from an ordinary idle
+        // tick below. Never reached at `laneCount <= 1` (`budget` is `1` there, unconditionally).
+        log("dispatch.wip_deferred", {
+          lane_count: laneCount,
+          wip_limit: opts.wipLimit ?? null,
+          observed_open_count: deps.openPrCount?.() ?? null,
+        });
+      }
+      const candidates = runnableCandidates(planForBatch, isMerged, budget, dispatchOpts);
+      const partition = partitionByFileOverlap(candidates);
+      for (const d of partition.serialized) log("dispatch.serialized", serializedLedgerPayload(d));
+      dispatchSet = partition.dispatch;
+    }
+
+    if (dispatchSet.length === 0) {
       // UNLIKE drain.ts (where `no_runnable` is a terminal stop): the daemon is
       // PERSISTENT — new work can land later, so it paces itself with the
       // injected clock and keeps polling rather than exiting.
@@ -2082,29 +2289,59 @@ export async function runDaemon(
     // A dispatchable task ends any starvation episode — re-arm so a LATER one escalates again.
     starvationEscalated = false;
 
-    // W1-T342 — THE PER-DISPATCH GATE (see `checkDispatchGovernors`'s doc). Re-observes both
-    // governors FRESH, immediately before THIS dispatch, rather than trusting the tick-wide
-    // reading taken above (before retro/auto-triage/kicks/`nextRunnable` ran). This is the exact
-    // call site a future multi-lane batch (W1-T343) must repeat once per lane — never hoisting a
-    // single call above its loop, which is exactly the defect this task exists to close. At N=1
-    // (today) nothing async runs between the tick-wide check above and here, so this call always
-    // agrees with it — a provable no-op change in observable behaviour until lanes exist.
-    const dispatchGovernor = checkDispatchGovernors(deps, dailyCostCeilingUsd);
-    if (dispatchGovernor) {
+    // W1-T342/W1-T343 — THE PER-LANE GOVERNOR GATE, adopted verbatim from `runDrainLanes`
+    // (drain.ts, see its own doc). A SEQUENTIAL loop that takes its OWN fresh
+    // `checkDispatchGovernors` reading per candidate — never one reading admitting the whole
+    // batch — so a ceiling crossed between lane 1 and lane 2 refuses lane 2 without touching
+    // lane 1 (`break` stops ADMITTING; it never revokes a lane already admitted). At
+    // `dispatchSet.length === 1` (every `laneCount <= 1` tick) this loop runs exactly once,
+    // taking exactly the one reading the pre-W1-T343 loop always took at this exact point in
+    // the tick — the SAME provable no-op change in observable behaviour W1-T342 already
+    // documented here, now discharged rather than merely promised.
+    const admitted: Task[] = [];
+    let deferredVerdict: DispatchGovernorVerdict | undefined;
+    for (const t of dispatchSet) {
+      const verdict = checkDispatchGovernors(deps, dailyCostCeilingUsd);
+      if (verdict) {
+        deferredVerdict = verdict;
+        if (dispatchSet.length > 1) {
+          // A DISTINCT step from `dispatch.wip_deferred` above (a governor SIZING the batch
+          // before any candidate was even selected): this is a governor refusing admission
+          // MID-BATCH, after some lanes already got in. Never logged at `laneCount <= 1` — a
+          // solo dispatch's deferral is `logDispatchGovernorDefer`'s line, unchanged, below.
+          log("dispatch.lane_governed", {
+            task: t.id,
+            admitted: admitted.length,
+            of: dispatchSet.length,
+            lane_count: laneCount,
+          });
+        }
+        break;
+      }
+      admitted.push(t);
+    }
+    if (admitted.length === 0) {
       ticks++;
-      logDispatchGovernorDefer(dispatchGovernor, ticks);
+      logDispatchGovernorDefer(deferredVerdict!, ticks);
       await deps.sleep(pollIntervalMs);
       continue;
     }
 
-    log("daemon.iteration", { task: next.id, attempted: attempted.length + 1, max: opts.max ?? null });
-    attempted.push(next.id);
+    if (dispatchSet.length > 1) {
+      // Mirrors `runDrainLanes`' `dispatch.concurrent_set` — the evidence trail P19's banked
+      // rung 2 needs. Never fires at `laneCount <= 1` (today's tick never had this line).
+      log("dispatch.concurrent_set", { tasks: admitted.map((t) => t.id), lane_count: laneCount });
+    }
+    for (const t of admitted) {
+      log("daemon.iteration", { task: t.id, attempted: attempted.length + 1, max: opts.max ?? null });
+      attempted.push(t.id);
+    }
 
-    // W1-T254 (the #707 fix) — LIGHT-SWEEP TICKER: while THIS `runOne` is
+    // W1-T254 (the #707 fix) — LIGHT-SWEEP TICKER: while admitted lanes are
     // unbounded and in flight, tick the restricted light sweep on the SAME
     // injected clock/cadence idle polling uses, so a PR that goes
-    // green-but-review-absent mid-run re-posts within one poll interval
-    // instead of sitting invisible until runOne finally returns. See
+    // green-but-review-absent mid-batch re-posts within one poll interval
+    // instead of sitting invisible until every lane finally returns. See
     // `DaemonDeps.sweepLight`'s doc for the full rationale.
     let tickerActive = true;
     const ticker = deps.sweepLight
@@ -2120,135 +2357,109 @@ export async function runDaemon(
           }
         })()
       : undefined;
-    // Cleared once runOne settles, on EVERY exit path (success, a fatal throw,
-    // or a degraded spawn-infra throw) — never left running past it, and never
-    // aborted mid-call (a sweepLight() already in flight is allowed to finish
-    // before the ticker stops).
+    // Cleared once every admitted lane settles, on EVERY exit path (success, a fatal
+    // throw, or a degraded spawn-infra throw) — never left running past it, and never
+    // aborted mid-call (a sweepLight() already in flight is allowed to finish before
+    // the ticker stops).
     const stopTicker = async () => {
       tickerActive = false;
       if (ticker) await ticker;
     };
 
-    let result: RunResult;
-    try {
-      result = await deps.runOne(next.id);
-    } catch (e) {
-      await stopTicker();
-      if (!isSpawnInfraBlocked(e)) {
-        return summary("error", `${next.id}: ${String((e as Error)?.message ?? e)}`);
-      }
-      // DEGRADE, DON'T DIE (W1-T113 part iii, the vanished-binary incident): a
-      // spawn-INFRASTRUCTURE failure is never a fatal crash — the pre-fix shape
-      // was error -> process exit -> launchd KeepAlive restart -> the identical
-      // failure again, five consecutive polls, zero escalations, zero backoff.
-      // Escalate ONCE per distinct cause (content-keyed, W1-T104 discipline),
-      // back off the failing dispatch, and `continue` — sweep/status work above
-      // already ran this tick and runs again next tick, so the loop stays alive
-      // and useful even while dispatch itself is degraded.
-      const reason = e.message;
-      consecutiveSpawnInfraFailures++;
-      log("daemon.spawn_infra_blocked", { task: next.id, reason, consecutive: consecutiveSpawnInfraFailures });
-      if (!toolchainEscalated.has(reason)) {
-        toolchainEscalated.add(reason);
-        try {
-          await deps.onSpawnInfraBlocked?.({ task: next, reason });
-        } catch (escErr) {
-          log("daemon.escalation.failed", { task: next.id, error: String((escErr as Error)?.message ?? escErr) });
+    // CONCURRENT DISPATCH (W1-T343, mirrors `runDrainLanes` exactly): `allSettled`, never
+    // `all` — a sibling lane's rejection must never abort another lane already in flight;
+    // every lane's outcome is recorded below BEFORE this tick decides anything
+    // (LANE-LOCAL BLOCK SEMANTICS). At `admitted.length === 1` this is
+    // `Promise.allSettled([deps.runOne(next.id)])`, which settles on the exact same
+    // schedule a bare `await deps.runOne(next.id)` inside a `try`/`catch` would — no
+    // observable timing change from before this task.
+    const settled = await Promise.allSettled(admitted.map((t) => deps.runOne(t.id)));
+    await stopTicker();
+
+    // CLASSIFY EVERY LANE'S SETTLEMENT before this tick decides anything — mirrors
+    // `runDrainLanes`' own "every sibling's outcome is recorded before the pass decides"
+    // discipline. A GENUINE (non-spawn-infra) throw is fatal for the whole daemon, exactly
+    // as it always was for the lone dispatch; a spawn-infra throw degrades (backoff, never a
+    // crash); a normal settlement is queued for the SAME block-reasoning every dispatch has
+    // always gone through, via `processDispatchResult` above.
+    let fatalError: { taskId: string; message: string } | undefined;
+    let spawnInfraSeenThisTick = false;
+    const toProcess: Array<{ task: Task; result: RunResult }> = [];
+    for (let i = 0; i < admitted.length; i++) {
+      const t = admitted[i];
+      const outcome = settled[i];
+      if (outcome.status === "rejected") {
+        const err = outcome.reason;
+        if (!isSpawnInfraBlocked(err)) {
+          // First-observed wins the summary detail — mirrors `runDrainLanes`' identical choice
+          // for `drain.lane_error`. Every OTHER already-settled lane is still classified and
+          // (below) processed before this tick returns.
+          if (!fatalError) fatalError = { taskId: t.id, message: String((err as Error)?.message ?? err) };
+          continue;
         }
+        // DEGRADE, DON'T DIE (W1-T113 part iii, the vanished-binary incident): a
+        // spawn-INFRASTRUCTURE failure is never a fatal crash — the pre-fix shape
+        // was error -> process exit -> launchd KeepAlive restart -> the identical
+        // failure again, five consecutive polls, zero escalations, zero backoff.
+        // Escalate ONCE per distinct cause (content-keyed, W1-T104 discipline) —
+        // counted ONCE per TICK (not per lane) below, so a batch where two lanes hit
+        // the SAME toolchain outage in the SAME tick backs off like one bad tick, not
+        // two, preserving the backoff curve's "consecutive TICKS" meaning.
+        spawnInfraSeenThisTick = true;
+        const reason = err.message;
+        log("daemon.spawn_infra_blocked", { task: t.id, reason, consecutive: consecutiveSpawnInfraFailures + 1 });
+        if (!toolchainEscalated.has(reason)) {
+          toolchainEscalated.add(reason);
+          try {
+            await deps.onSpawnInfraBlocked?.({ task: t, reason });
+          } catch (escErr) {
+            log("daemon.escalation.failed", { task: t.id, error: String((escErr as Error)?.message ?? escErr) });
+          }
+        }
+        continue;
       }
+      const result = outcome.value;
+      costUsd += result.costUsd;
+      toProcess.push({ task: t, result });
+    }
+
+    if (fatalError) {
+      return summary("error", `${fatalError.taskId}: ${fatalError.message}`);
+    }
+
+    // A successful (non-throwing) lane — including one that returns a non-spawn-infra
+    // blocked verdict — clears the backoff streak, exactly as the lone dispatch always did.
+    if (toProcess.length > 0) consecutiveSpawnInfraFailures = 0;
+
+    // BLOCK-REASONING, PER LANE — `processDispatchResult` (defined above) is the SAME
+    // function whether this tick held one lane or several; see its own doc for why it
+    // returns a disposition instead of returning out of the loop directly. First-observed
+    // genuine blocker wins the summary detail (mirrors `fatalError`'s choice above and
+    // `runDrainLanes`' stop-on-block-at-pass-granularity doctrine) — but every lane's own
+    // bookkeeping (retry state, fix dispatch, independent-failure flag, merge) still runs.
+    let blockedDetail: string | undefined;
+    for (const { task, result } of toProcess) {
+      const outcome = await processDispatchResult(planForBatch, task, result);
+      if (outcome.kind === "genuine_blocker" && blockedDetail === undefined) {
+        blockedDetail = outcome.detail;
+      }
+    }
+    if (blockedDetail !== undefined) {
+      return summary("blocked", blockedDetail);
+    }
+
+    if (spawnInfraSeenThisTick && toProcess.length === 0) {
+      // The WHOLE tick was spawn-infra trouble and nothing else progressed — back off
+      // exactly as the lone dispatch always did. A tick that mixes spawn-infra with real
+      // progress (`toProcess.length > 0`) does NOT back off: the toolchain evidently still
+      // works for at least one lane, so the counter was already reset above and this tick
+      // falls through to loop again immediately, same as an all-progress tick would.
       ticks++;
+      consecutiveSpawnInfraFailures++;
       const backoffMs = Math.min(pollIntervalMs * 2 ** (consecutiveSpawnInfraFailures - 1), maxSpawnInfraBackoffMs);
       log("daemon.spawn_infra_backoff", { tick: ticks, backoff_ms: backoffMs, consecutive: consecutiveSpawnInfraFailures });
       await deps.sleep(backoffMs);
-      continue;
     }
-    // A successful (non-throwing) runOne — including one that returns a
-    // non-spawn-infra blocked verdict — clears the backoff streak.
-    consecutiveSpawnInfraFailures = 0;
-    await stopTicker();
-    costUsd += result.costUsd;
-
-    if (!result.merged) {
-      // BLOCK-REASONING (W1-T46, supersedes v1's blunt stop-on-block): reuse
-      // W1-T7's transient/strike taxonomy + the plan's DAG (block-reason.ts)
-      // instead of halting on ANY non-merged verdict.
-      const state = blockRetryStates.get(next.id) ?? INITIAL_RETRY_STATE;
-      const disposition = reasonAboutBlock(planForBatch, next.id, result.verdict, state);
-
-      if (disposition.kind === "retry_transient") {
-        // TRANSIENT: no strike. `nextRunnable` naturally retries the SAME
-        // task next tick (it is still un-merged and its deps are unchanged) —
-        // no separate re-dispatch mechanism needed.
-        blockRetryStates.set(next.id, disposition.state);
-        log("daemon.block.transient_retry", {
-          task: next.id,
-          verdict: result.verdict,
-          transient_retries: disposition.state.transientRetries,
-        });
-        continue;
-      }
-      if (disposition.kind === "fixable_blocker" && deps.dispatchFix) {
-        // W1-T174 (drain/sweep PARITY): the SAME blocked_ci/blocked_review
-        // evidence the W1-T77 sweep routes to the W1-T76 fix rung gets a
-        // bounded fix attempt here too, BEFORE halting — strike-capped by
-        // `reasonAboutBlock` via the SAME classify.ts primitive every
-        // strike in this module already uses (never a separate, unbounded
-        // loop — the W1-T168 anti-regression guard: exhausting the bound
-        // falls through to `genuine_blocker` on a LATER tick and escalates
-        // for re-judgment, it does not fix-loop forever). Keep the retry
-        // state threaded across ticks — dropped only once resolved
-        // (merged, flagged, or escalated) below.
-        blockRetryStates.set(next.id, disposition.state);
-        log("daemon.block.fixable_dispatch", {
-          task: next.id,
-          verdict: result.verdict,
-          dependents: disposition.dependents,
-          strikes: disposition.state.strikes,
-        });
-        await deps.dispatchFix({ task: next, result, dependents: disposition.dependents });
-        continue;
-      }
-
-      blockRetryStates.delete(next.id); // resolved one way or another below
-
-      if (disposition.kind === "independent_failure") {
-        // INDEPENDENT-FAILURE: nothing in the plan transitively depends on
-        // this task, so skipping it cannot leave a dependent building on a
-        // gap. Flag it — flip the in-memory `status` so `nextRunnable` never
-        // reconsiders it this run — and keep draining everything else.
-        next.status = "blocked";
-        log("daemon.block.independent_failure", {
-          task: next.id,
-          verdict: result.verdict,
-          pr_url: result.prUrl,
-        });
-        continue;
-      }
-
-      // GENUINE BLOCKER: real downstream work transitively needs this task
-      // merged — "never continue into the gap" is absolute here. Halt and
-      // escalate, exactly as v1's stop-on-block halted, but now the
-      // dependents it protects are named. Reached by a `genuine_blocker`
-      // disposition (no fixable signal at all, or a `fixable_blocker` whose
-      // strike bound `reasonAboutBlock` already exhausted) AND by a
-      // `fixable_blocker` with no `dispatchFix` wired (W1-T174: never a
-      // silent stall on a fixable block this daemon has no rung to act on —
-      // the SAME halt+escalate a genuine blocker always got).
-      log("daemon.blocked", {
-        task: next.id,
-        verdict: result.verdict,
-        pr_url: result.prUrl,
-        dependents: disposition.dependents,
-      });
-      if (deps.escalateBlock) {
-        await deps.escalateBlock({ task: next, result, dependents: disposition.dependents });
-      }
-      return summary(
-        "blocked",
-        `${next.id} → ${result.verdict}${result.prUrl ? ` (${result.prUrl})` : ""} — blocks ${disposition.dependents.join(", ")}`,
-      );
-    }
-    merged.push(next.id);
   }
 }
 

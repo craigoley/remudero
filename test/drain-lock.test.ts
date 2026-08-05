@@ -9,6 +9,10 @@ import {
   readDrainLock,
   withDrainLock,
 } from "../src/lib/drain-lock.js";
+// W1-T343: NOT `drain-lock.ts` (the whole-process single-instance guard above) — the per-TASK
+// backstop the daemon's multi-lane batch relies on is `inflight-lock.ts`'s create-or-fail
+// `acquireInflightLock`, imported separately below for the test at the bottom of this file.
+import { acquireInflightLock, InflightLockError } from "../src/lib/inflight-lock.js";
 
 function tmp(): string {
   return mkdtempSync(join(tmpdir(), "rmd-drainlock-"));
@@ -114,6 +118,49 @@ test("release() is idempotent and removes the file", () => {
     h.release();
     assert.ok(!existsSync(path));
     h.release(); // no throw on double release
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T343: TWO LANES OFFERED THE SAME TASK — exactly one dispatch ──────────────────────────
+//
+// `runDaemon`'s own candidate selection (`runnableCandidates`, drain.ts) cannot itself offer the
+// same task id to two lanes in one pass — it walks each plan task once — so this scenario only
+// arises ACROSS processes/ticks: two daemon/drain instances, or a stale cached in-flight read
+// that let the same task through twice. The task's own design note is explicit that this must be
+// PROVEN, not assumed: "nothing may assume exactly one lock exists." The backstop is
+// `acquireInflightLock` (inflight-lock.ts) — create-or-fail (`openSync(lockPath, "wx")`, no TOCTOU
+// gap) — which `deps.runOne`'s real wiring (`runTask`) already calls for every dispatch, at N=1
+// exactly as it always has. This test exercises that backstop directly, in the SAME shape two
+// concurrent `Promise.allSettled(admitted.map(t => deps.runOne(t.id)))` lanes racing for one
+// task id would produce.
+
+test("W1-T343: TWO LANES OFFERED THE SAME TASK — acquireInflightLock admits exactly one, the second is REFUSED (not silently double-dispatched)", () => {
+  const dir = tmp();
+  try {
+    // Lane 1 (the first `.map` iteration) acquires the lock for this dispatch.
+    const lane1 = acquireInflightLock(dir, "W1-T7", { run_id: "lane-1", isPidAlive: () => true });
+
+    // Lane 2, offered the IDENTICAL task id in the SAME pass, must be refused — never a second,
+    // silently concurrent worker on the same task.
+    let lane2Err: unknown;
+    try {
+      acquireInflightLock(dir, "W1-T7", { run_id: "lane-2", isPidAlive: () => true });
+    } catch (e) {
+      lane2Err = e;
+    }
+    assert.ok(lane2Err instanceof InflightLockError, "the second lane offered the same task is REFUSED, not silently admitted");
+    assert.match((lane2Err as InflightLockError).message, /W1-T7/, "the refusal names the collided task");
+    assert.match((lane2Err as InflightLockError).message, /lane-1/, "the refusal names the run that already holds it");
+
+    lane1.release();
+
+    // Proof the refusal was real exclusion, not a permanent jam: once lane 1's dispatch settles
+    // and releases, a LATER lane for the same task id (the NEXT pass, once this one clears) is
+    // admitted normally.
+    const lane3 = acquireInflightLock(dir, "W1-T7", { run_id: "lane-3", isPidAlive: () => true });
+    lane3.release();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
