@@ -30,7 +30,14 @@
     THE ROUND TRIP IS THE POINT, NOT A NICETY: an expansion the operator never sees launders his
     intent through a model — the decision-authority audit's exact failure shape, one layer down. The
     console already owns the idiom: arm-then-confirm with the read-back IN the armed control
-    (fleet-control STOP, the W1-T193 APPROVE button — 'never a bare Confirm?'), server-enforced.
+    (fleet-control STOP, the W1-T193 APPROVE button — 'never a bare Confirm?').
+    CORRECTED 2026-08-05, verified from source: arm-then-confirm is a CLIENT-SIDE mis-click guard, never
+    an authorization control. The arm timers and armed labels live in serve.ts's CLIENT script, and no
+    confirm nonce or two-phase check exists in panel-actions.ts, panel-graph.ts, service.ts or
+    fleet-control.ts — so any caller speaking HTTP directly bypasses the arm entirely. THE WRITE TOKEN IS
+    WHAT AUTHORISES. This task must take its authority from the write-scoped route and use the arm only
+    for the READ-BACK it exists to show; an implementer who treats the arm as a security boundary would
+    be building on a guarantee the server does not make.
     COST, STATED (filing rule): one cheap-mount call per console submission, operator-initiated —
     single-digit calls per day, cents; seconds of latency inside an interactive compose flow.
     FAILURE, STATED: expander error or timeout leaves plain raw submission working unchanged —

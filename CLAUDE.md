@@ -32,8 +32,12 @@ forensic detail, so the narrative does not need to live here.
 - **Verify every PR-body claim about your own diff against `git diff --numstat`, and RE-VERIFY after
   each follow-up commit.** The `remudero-review` keyword floor matches the BODY and never opens the
   diff, so a body contradicting its own changeset still merges on a `success` status. #974 merged
-  claiming "exactly one file: MASTER-PLAN.md" while carrying three, including `docs/ORIENTATION.md`
-  — which sits outside `isInPlanScope` and cost the PR its `planOnly` carve-out. *(#974, #984)*
+  claiming "exactly one file: MASTER-PLAN.md" while carrying three, including `docs/ORIENTATION.md`.
+  THE LESSON IS THE BODY/DIFF MISMATCH, NOT SCOPE — ORIENTATION_DOC is inside isInPlanScope
+  (`src/lib/plan-architect.ts`), whose own doc calls it *the single regenerated doc*: it returns true
+  for `MASTER-PLAN.md`, for `ORIENTATION_DOC`, and for any `plan/` path, so a diff of exactly those
+  three keeps its `planOnly` carve-out. An earlier revision of this bullet asserted the opposite and
+  was wrong. *(#974, #984)*
 
 ## Writing proofs and acceptance criteria
 
