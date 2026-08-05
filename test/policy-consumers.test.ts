@@ -73,11 +73,12 @@ test("W1-T253: sweep.ts's DEFAULT_SWEEP_POLICY.staleDays/strikeCap/wipLimit read
   assert.equal(DEFAULT_SWEEP_POLICY.wipLimit, 10);
 });
 
-// W1-T325: dispatchLanes joins its three siblings above — a relocation of the pre-existing
-// source literal, not a retune (the value is asserted unchanged at 2).
-test("W1-T325: sweep.ts's DEFAULT_SWEEP_POLICY.dispatchLanes reads plan/policy.yaml's sweep.dispatchLanes row, not a source literal, and the shipped value is 1", () => {
+// W1-T325 relocated dispatchLanes out of DEFAULT_SWEEP_POLICY (a relocation, not a retune, at the
+// time). W1-T344 is the deliberate retune that follows: the row moves 1 -> 2 after the observation
+// window plan/policy.yaml's own comment records, so the shipped value asserted below is now 2.
+test("W1-T325/W1-T344: sweep.ts's DEFAULT_SWEEP_POLICY.dispatchLanes reads plan/policy.yaml's sweep.dispatchLanes row, not a source literal, and the shipped value is 2", () => {
   assert.equal(DEFAULT_SWEEP_POLICY.dispatchLanes, SHIPPED.values.sweep.dispatchLanes);
-  assert.equal(DEFAULT_SWEEP_POLICY.dispatchLanes, 1);
+  assert.equal(DEFAULT_SWEEP_POLICY.dispatchLanes, 2);
 });
 
 // W1-T330: dailyCostCeilingUsd joins its siblings above — a relocation of the pre-existing
