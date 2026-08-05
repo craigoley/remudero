@@ -1,0 +1,100 @@
+- id: W1-T369
+  title: "39 OPEN tasks carry proofs that cannot execute, so each one dispatches, implements correctly, and still posts CAPPED — the run is spent before the proof is ever consulted"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  rationale: "RE-DERIVED AT cdf885a from `rmd lint-plan --all` output, not inherited.
+    THE POPULATION, MEASURED AND SPLIT. 175 tasks carry a BLOCKING (✗) lint violation. Cross-referenced
+    against the merge record (merged PRs naming a task id, positive control W1-T339 -> #1329, negative
+    control a nonexistent id -> 0), they split 136 MERGED / 39 UNMERGED. This task is the 39 — the ones
+    that can still be dispatched. Their 103 violations are 61 [proof-dialect] and 42
+    [proof-resolvability]. The 136 merged are W1-T370 and are deliberately NOT mixed in: their proofs
+    certify work that already shipped, which is a different question with a different answer.
+    WHY THE 39 ARE THE URGENT HALF. `preDispatchLint` demotes proof-resolvability to `warn`, so these
+    tasks ARE dispatchable — only `proof-dialect` blocks at dispatch. A task with an unexecutable proof
+    therefore runs to completion and the review lands CAPPED at `proof_exec: 0/N`, which will not arm
+    auto-merge. CLAUDE.md already records the shape twice: #1194 posted 0/3 that way, and #1189 MERGED
+    at 2/4 with only its two grep proofs ever running and nothing saying so. The budget is spent, the
+    work may be perfect, and the verdict is unfalsifiable either way.
+    THE DEBT IS LEGACY AND BOUNDED, WHICH IS THE ARGUMENT FOR FIXING IT RATHER THAN LIVING WITH IT.
+    ALL 39 live in plan/tasks.yaml, the pre-shard monolith; ZERO live in plan/tasks.d/. Shard-filed
+    tasks lint clean, so the dialect gate is working on everything filed since. This is a fixed
+    historical pool that cannot grow, not an ongoing leak.
+    COVERED-BY: PARTIAL, AND NAMED. W1-T358 wires `planHealthSweep` into the retro gather so this debt
+    is SURFACED and batched per class by the Architect stage — its own design says the first sweep will
+    flag the whole open queue at once. It REPORTS and files nothing; the shipped separation is
+    deliberate and is not reopened here. W1-T367 converts that sweep to a derived projection so it stops
+    re-grading merged work. Neither FIXES a proof. This task is the fix, and it is filed so the
+    correction is a stated intention with a measured population rather than an improvisation the
+    Architect stage has to invent under time pressure."
+  design: |
+    ONE FILE, PER CLASS, IN BULK — NOT ONE TASK PER PR.
+    CLAUDE.md's measured anti-pattern is explicit: five separate PRs rewrote proofs one at a time, and
+    a refused task is re-selected and re-refused every tick, silently. W1-T358's design says the same
+    thing from the other side — batch corrective proposals per CLASS. Both point one way.
+
+    (i) FIX BY CLASS, NOT BY TASK. [proof-dialect] (61) is a proof with no `unit test:`/`grep:` prefix
+    or a body that reads as narrative; [proof-resolvability] (42) is a prefixed proof naming an artifact
+    that resolves to nothing. They have different remedies and should be separate passes over the same
+    file, each independently reviewable.
+
+    (ii) EVERY REWRITTEN PROOF MUST BE VERIFIED THROUGH `rmd check-proof` BEFORE THE PR OPENS, and the
+    PR body must report the parse kind and candidate count for each. That is the reviewer's own parser
+    and executor; a proof that lint-passes but resolves to zero candidates is exactly the state being
+    fixed and must not be re-created. `candidates: absent` is a failure, not a pass.
+
+    (iii) A FORWARD REFERENCE IS LEGITIMATE AND MUST NOT BE "FIXED" INTO A GUESS. These are
+    unimplemented tasks, so the named test does not exist yet. Forward-referencing a PATH is safe;
+    forward-referencing a SYMBOL NAME is a guess that will resolve to zero. Prefer the pure-path form
+    `unit test: test/<file>.test.ts`, which lint-passes and executes the whole file.
+
+    (iv) DO NOT REWRITE PROOFS ON `verify: human` TASKS. `isDispatchEligible` refuses them at
+    `t.verify !== "auto"` BEFORE the linter is consulted, so their dialect debt can never stall the
+    queue. Forcing chaos drills, device recordings and live deploys into `unit test:` yields proofs that
+    parse, match zero tests, and cap the review — the exact theatre the gate exists to stop. Report them
+    as needing a proof kind the dialect lacks, and exclude them from the population with a count.
+
+    (v) THE LOCK IS THE DELIVERABLE THAT OUTLIVES THE FIX. Add a regression lock asserting the
+    open-and-unmerged blocking-violation count cannot grow, so this pool cannot silently refill. A
+    RATCHET is the idiom this repo already uses for exactly this shape
+    (scripts/learnings-budget-ratchet.mjs, scripts/diff-coverage.mjs) and it needs no network, which
+    matters because `rmd lint-plan` is deliberately offline and deterministic (W1-T367 design (iii)).
+    Write the lock FIRST and watch it fail at today's count (tdd:strict).
+
+    (vi) THE POPULATION IS COMPUTED, NOT FIXED. It drifts as tasks merge and land. The implementer must
+    RE-DERIVE it at implementation time rather than trusting the 39 here, and state the number they
+    actually found. If it has moved materially, say so in the PR body rather than quietly fixing a
+    different set.
+
+    NOT IN SCOPE: the 136 merged tasks (W1-T370); changing what the linter checks; converting
+    `isOpenLintTask` to a derived projection (W1-T367 ruled on that deliberately and it stands);
+    and the retro sweep's wiring (W1-T358).
+  acceptance:
+    - claim: "every open, unmerged task in plan/tasks.yaml carries a proof that parses to an executable dialect and resolves to at least one candidate"
+      proof: "unit test: test/plan-proof-debt.test.ts"
+    - claim: "a ratchet fails when the open unmerged blocking-violation count rises above its recorded ceiling, so the pool cannot silently refill"
+      proof: "unit test: test/plan-proof-debt.test.ts"
+    - claim: "verify:human tasks are excluded from the rewrite and reported with a count rather than forced into a dialect that would cap their reviews"
+      proof: "unit test: test/plan-proof-debt.test.ts"
+  risk: medium
+  origin: oper#proof-debt-arc-2026-08-05
+  plan_refs: ["W1-T358", "W1-T367", "W1-T370"]
+  files: [plan/tasks.yaml, test/plan-proof-debt.test.ts]
+  status: queued
+  attempts: 0
+  note: "FILED as the head of the proof-debt arc, with W1-T370 as its merged-population sibling.
+    risk:medium rather than high: the blast radius is one plan file and a lock, no gate or daemon
+    semantics move, and the failure mode of a bad rewrite is a capped review — visible, not silent.
+    It is not risk:low because a proof rewritten into a plausible-but-unresolvable form re-creates the
+    defect while LOOKING fixed, which is why (ii) makes check-proof verification acceptance-level.
+    budget_usd 80 — the cost is 103 individually-verified proof rewrites plus the ratchet, not a
+    straight-line diff. Above W1-T289's 75 on volume alone.
+    verify:auto — 'does every open task's proof resolve' is decidable offline by the linter's own
+    parser, which is what the lock will call.
+    NO depends_on. It does not need W1-T358 or W1-T367 to land: those change what SURFACES the debt and
+    what re-grades it, neither of which the rewrites wait on. Landing them first would make the retro
+    stop proposing corrections for shipped work, which is a reason to sequence them ahead — stated here
+    as a preference, not encoded as an edge that would stall this."
