@@ -13,7 +13,7 @@ import type { AddressInfo } from "node:net";
 import { chromium, type Browser, type Page } from "playwright";
 import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
 import { isPaused } from "../src/lib/fleet-control.js";
-import { shellBootReady } from "./setup/open-shell.js";
+import { reachSection, shellBootReady } from "./setup/open-shell.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import type { GitHub, PrRef } from "../src/lib/status.js";
 import type { TraceGithub } from "../src/lib/trace.js";
@@ -189,6 +189,7 @@ async function restListIds(page: Page): Promise<string[]> {
  *  exactly what failed that task's density/one-click bars against a realistic, mostly-queued
  *  fleet), so this no longer assumes a fixed starting state -- it only acts when collapsed. */
 async function expandFind(page: Page): Promise<void> {
+  await reachSection(page, "rest"); // the FIND layer is an enhancement of #rest (see serve.test.ts)
   const hidden = await page.getAttribute("#rest-detail", "hidden");
   if (hidden !== null) await page.click("#rest-toggle");
   await page.waitForSelector('#find-facets button[data-group="status"]');
@@ -302,6 +303,7 @@ test("W1-T157 (3): cmd+K opens from multiple states and jumps to a task (expand 
     await page.waitForSelector("#cmdk-overlay", { state: "hidden" });
 
     // reachable from a DIFFERENT view too: explicitly COLLAPSED, scrolled to the bottom
+    await reachSection(page, "rest"); // #rest-toggle lives in the "rest" section
     await page.click("#rest-toggle"); // collapse (starts expanded — see above)
     // NOTE: a plain `page.waitForSelector("#rest-detail[hidden]")` defaults to state "visible",
     // which a `hidden`-attributed element can never satisfy (the UA stylesheet makes it

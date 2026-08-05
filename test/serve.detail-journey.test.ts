@@ -26,7 +26,7 @@ import { after, before, test } from "node:test";
 import type { AddressInfo } from "node:net";
 import { chromium, type Browser, type Page } from "playwright";
 import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
-import { shellBootReady } from "./setup/open-shell.js";
+import { reachSection, shellBootReady } from "./setup/open-shell.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import type { GitHub, PrRef } from "../src/lib/status.js";
 import type { TraceGithub } from "../src/lib/trace.js";
@@ -205,6 +205,7 @@ test("clicking a task row expands its own card INLINE, directly beneath that row
   await withShell(fixtureDeps(root), async (base) => {
     const page = await openShell(base);
     try {
+      await reachSection(page, "recent"); // this whole suite's rows all live in "recent"
       await page.waitForFunction(() => (document.querySelector("#recent-list")?.textContent ?? "").includes("W1-T2"));
 
       const rowTopBefore = await page.evaluate(
@@ -275,6 +276,7 @@ test("a blocked task's Journey lazy-loads INSIDE its already-open card (never fe
       if (req.url().includes("/v1/trace")) traceRequests.push(req.url());
     });
     try {
+      await reachSection(page, "recent");
       await page.waitForFunction(() => (document.querySelector("#recent-list")?.textContent ?? "").includes("W1-T3"));
       await page.click('#recent-list li[data-task-id="W1-T3"] .task-id');
       await page.waitForFunction(() => (document.querySelector(".row-detail")?.textContent ?? "").includes("the blocked task"));
@@ -320,6 +322,7 @@ test("every task row is itself a one-click expand affordance (a chevron, never a
   await withShell(fixtureDeps(root), async (base) => {
     const page = await openShell(base);
     try {
+      await reachSection(page, "recent");
       await page.waitForFunction(() => (document.querySelector("#recent-list")?.textContent ?? "").includes("W1-T2"));
 
       const state = await page.evaluate(() => ({
@@ -369,6 +372,7 @@ test("?task=<id> opens the shell with that row already expanded and scrolled int
   await withShell(fixtureDeps(root), async (base) => {
     const page = await openShell(base, READ_TOKEN, "&task=W1-T2");
     try {
+      await reachSection(page, "recent"); // the deep-linked row's own scroll-into-view check needs the section on-screen
       await page.waitForFunction(
         () => document.querySelector('#recent-list li[data-task-id="W1-T2"]')?.getAttribute("aria-expanded") === "true",
         null,
@@ -406,6 +410,7 @@ test("W1-T184: a RECENT row carries the verb, task id AND title, a PR link with 
   await withShell(fixtureDeps(root), async (base) => {
     const page = await openShell(base);
     try {
+      await reachSection(page, "recent");
       await page.waitForFunction(() => (document.querySelector("#recent-list")?.textContent ?? "").includes("W1-T2"));
 
       const row = await page.evaluate(() => {
@@ -459,6 +464,7 @@ test("W1-T144: a #task=<id> hash deep-link opens that task's card inline (the di
       // The link consoleCardUrl builds: <base>/#task=<id>, on the operator's own token URL.
       await page.goto(`${base}/?token=${READ_TOKEN}#task=W1-T2`);
       await page.waitForFunction(shellBootReady);
+      await reachSection(page, "recent");
       await page.waitForFunction(
         () => document.querySelector('#recent-list li[data-task-id="W1-T2"]')?.getAttribute("aria-expanded") === "true",
         null,
@@ -488,6 +494,7 @@ test("W1-T144 planted-probe: a #task=<absent-id> hash deep-link is REJECTED — 
     try {
       await page.goto(`${base}/?token=${READ_TOKEN}#task=W1-DOES-NOT-EXIST`);
       await page.waitForFunction(shellBootReady);
+      await reachSection(page, "recent");
       // Let the board settle through a full paint so a real target WOULD have expanded by now.
       await page.waitForFunction(() => (document.querySelector("#recent-list")?.textContent ?? "").includes("W1-T2"));
       await page.waitForTimeout(500);

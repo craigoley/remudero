@@ -15,6 +15,7 @@ import { after, before, test } from "node:test";
 import type { AddressInfo } from "node:net";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
+import { reachSection } from "./setup/open-shell.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import type { GitHub, PrRef } from "../src/lib/status.js";
 import type { TraceGithub } from "../src/lib/trace.js";
@@ -291,6 +292,7 @@ test("W1-T222: expanding a row shows a skeleton ONLY before its card's data arri
     });
     await page.goto(`${base}/?token=${READ_TOKEN}`);
     await page.waitForFunction(() => (document.querySelector("#now-list .detail")?.textContent ?? "").includes("phase:"));
+    await reachSection(page, "now"); // the row about to be clicked lives in "now"
     await page.click('#now-list li[data-task-id="W1-T1"] .task-id');
 
     // Well within the 800ms delay: the card must show a skeleton, never blank, never real content yet.
