@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import {
   NEEDS_HUMAN_LABEL,
+  classifyAsk,
   escalate,
   escalationCause,
   tryEscalate,
@@ -54,7 +55,9 @@ test("escalate opens a needs-human labeled issue and logs the ledger line", () =
 
   assert.equal(url, "https://github.com/craigoley/remudero/issues/99");
   assert.equal(issues.calls.length, 1);
-  assert.deepEqual(issues.calls[0].labels, [NEEDS_HUMAN_LABEL, "escalation-blocked"]);
+  // W1-T346: the default fixture's options (retry/abandon) name no operator-only act, so
+  // this classifies "question" — needs-question rides beside needs-human/escalation-blocked.
+  assert.deepEqual(issues.calls[0].labels, [NEEDS_HUMAN_LABEL, "escalation-blocked", "needs-question"]);
   assert.match(issues.calls[0].title, /^\[BLOCKED\] W1-TX: two strikes exhausted$/);
 
   const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l));
@@ -70,9 +73,12 @@ test("each escalation class maps to its own label alongside needs-human", () => 
   escalate(escalation({ class: "MANUAL" }), { issues, ledgerPath: ledgerPath(), runId: "RUN-1" });
   escalate(escalation({ class: "HARD_STOP" }), { issues, ledgerPath: ledgerPath(), runId: "RUN-1" });
   escalate(escalation({ class: "GRILL" }), { issues, ledgerPath: ledgerPath(), runId: "RUN-1" });
-  assert.deepEqual(issues.calls[0].labels, [NEEDS_HUMAN_LABEL, "escalation-manual"]);
-  assert.deepEqual(issues.calls[1].labels, [NEEDS_HUMAN_LABEL, "escalation-hard-stop"]);
-  assert.deepEqual(issues.calls[2].labels, [NEEDS_HUMAN_LABEL, "escalation-grill"]);
+  // W1-T346: MANUAL is action-by-definition; GRILL is question-by-definition; the default
+  // fixture's options (retry/abandon) name no operator-only act, so HARD_STOP falls to the
+  // options-shape test and lands on "question" too.
+  assert.deepEqual(issues.calls[0].labels, [NEEDS_HUMAN_LABEL, "escalation-manual", "needs-action"]);
+  assert.deepEqual(issues.calls[1].labels, [NEEDS_HUMAN_LABEL, "escalation-hard-stop", "needs-question"]);
+  assert.deepEqual(issues.calls[2].labels, [NEEDS_HUMAN_LABEL, "escalation-grill", "needs-question"]);
 });
 
 test("GRILL (the intake triage's async grill, W1-T42) opens a needs-human issue exactly like every other class — no second mechanism", () => {
@@ -108,6 +114,99 @@ test("renderIssueBody lists every option AND calls out the recommendation", () =
   assert.match(body, /\*\*retry\*\* — resume the run with a fresh worker/);
   assert.match(body, /\*\*abandon\*\* — drop the task and re-plan/);
   assert.match(body, /## Recommendation\nretry/);
+});
+
+// ── W1-T346: classifyAsk — every needs-me item is an ACTION or a QUESTION ───────────────
+// MANUAL/GRILL are definitional; BLOCKED/HARD_STOP fall to the options-shape test: does any
+// option name an operator-only act (an override credential, a hand-merge, a host command)?
+// Fixtures below are the corpus's own two BLOCKED families named in the rationale — the
+// CAPPED-verdict override escape hatch (#5163-5176 of run-task.ts) and the clarification
+// rung's re-dispatch/revise-spec pair (sweep.ts's renderClarificationQuestion) — verbatim.
+
+test("classifyAsk: MANUAL classifies action and GRILL classifies question, definitionally, regardless of options shape", () => {
+  assert.equal(classifyAsk(escalation({ class: "MANUAL" })), "action");
+  assert.equal(classifyAsk(escalation({ class: "GRILL" })), "question");
+});
+
+test("classifyAsk: a CAPPED-verdict options pair classifies action — the 'override' option names the operator-only --override-capped-by escape hatch", () => {
+  const cappedOverride = escalation({
+    class: "BLOCKED",
+    summary: "CAPPED verdict — auto-merge refused unattended",
+    options: [
+      {
+        label: "add-proof",
+        detail:
+          "push executable proof (a whitelisted `grep:`/`unit test:` dialect proof) so the review " +
+          "executes and certifies the diff for real, then re-drain.",
+      },
+      {
+        label: "override",
+        detail: "`rmd review 123 --override-capped-by <name> --override-capped-reason <text>`, then re-drain to arm.",
+      },
+    ],
+    recommendation: "add-proof",
+  });
+  assert.equal(classifyAsk(cappedOverride), "action");
+});
+
+test("classifyAsk: a risk-judge options pair classifies action — its one option is a 'merge it by hand' act", () => {
+  const riskJudge = escalation({
+    class: "BLOCKED",
+    summary: "risk judge ESCALATED",
+    options: [{ label: "review-manually", detail: "read the diff and either merge it by hand or push a follow-up fix, then re-drain." }],
+    recommendation: "review-manually",
+  });
+  assert.equal(classifyAsk(riskJudge), "action");
+});
+
+test("classifyAsk: a clarification-rung options pair classifies question — both options are machine-executable once the operator answers, neither names an operator-only act", () => {
+  const clarification = escalation({
+    class: "BLOCKED",
+    summary: "PR needs a clarification",
+    options: [
+      {
+        label: "re-dispatch-with-constraint",
+        detail:
+          "re-arm the W1-T76 fix rung on the same branch, carrying the operator's answer as an added " +
+          "constraint on the next prompt (strike-counter reset is config policy).",
+      },
+      {
+        label: "revise-spec",
+        detail:
+          "the acceptance criterion's own spec text is wrong or unattainable as written — file a task-edit " +
+          "PROPOSAL (a plan-only PR); the rung itself never self-edits tasks.yaml (rule 15).",
+      },
+    ],
+    recommendation: "re-dispatch-with-constraint",
+  });
+  assert.equal(classifyAsk(clarification), "question");
+});
+
+test("classifyAsk: TOTAL — defaults action when the options-shape test cannot decide (empty options), never leaves an ask unclassified", () => {
+  assert.equal(classifyAsk(escalation({ options: [] })), "action");
+});
+
+test("escalate: carries the ask type as an ADDITIONAL label beside needs-human/the class label — a MANUAL escalation gets needs-action, a clarification-shaped BLOCKED escalation gets needs-question", () => {
+  const manualIssues = fakeIssues();
+  escalate(escalation({ class: "MANUAL" }), { issues: manualIssues, ledgerPath: ledgerPath(), runId: "RUN-1" });
+  assert.ok(manualIssues.calls[0].labels.includes("needs-action"));
+  assert.ok(!manualIssues.calls[0].labels.includes("needs-question"));
+
+  const clarificationIssues = fakeIssues();
+  escalate(
+    escalation({
+      options: [
+        {
+          label: "re-dispatch-with-constraint",
+          detail: "re-arm the W1-T76 fix rung on the same branch, carrying the operator's answer as an added constraint.",
+        },
+        { label: "revise-spec", detail: "file a task-edit PROPOSAL (a plan-only PR); the rung never self-edits tasks.yaml." },
+      ],
+    }),
+    { issues: clarificationIssues, ledgerPath: ledgerPath(), runId: "RUN-1" },
+  );
+  assert.ok(clarificationIssues.calls[0].labels.includes("needs-question"));
+  assert.ok(!clarificationIssues.calls[0].labels.includes("needs-action"));
 });
 
 // ── PAYLOAD (not plumbing): the issue body the gateway RECEIVES from escalate()
@@ -222,15 +321,19 @@ function fakeIssuesWithLabels(
 test("escalate: ensureLabel is called for every wanted label BEFORE create", () => {
   const issues = fakeIssuesWithLabels(() => true);
   escalate(escalation(), { issues, ledgerPath: ledgerPath(), runId: "RUN-1" });
-  assert.deepEqual(issues.ensured, [NEEDS_HUMAN_LABEL, "escalation-blocked"]);
-  assert.deepEqual(issues.calls[0].labels, [NEEDS_HUMAN_LABEL, "escalation-blocked"], "both labels provisioned -> both attached");
+  assert.deepEqual(issues.ensured, [NEEDS_HUMAN_LABEL, "escalation-blocked", "needs-question"]);
+  assert.deepEqual(
+    issues.calls[0].labels,
+    [NEEDS_HUMAN_LABEL, "escalation-blocked", "needs-question"],
+    "all three labels provisioned -> all three attached",
+  );
 });
 
 test("escalate: a gateway with no ensureLabel behaves exactly as before (back-compat)", () => {
   const issues = fakeIssues();
   const url = escalate(escalation(), { issues, ledgerPath: ledgerPath(), runId: "RUN-1" });
   assert.equal(url, "https://github.com/craigoley/remudero/issues/99");
-  assert.deepEqual(issues.calls[0].labels, [NEEDS_HUMAN_LABEL, "escalation-blocked"]);
+  assert.deepEqual(issues.calls[0].labels, [NEEDS_HUMAN_LABEL, "escalation-blocked", "needs-question"]);
 });
 
 test("escalate: the canonical 2026-07-17 shape — a label whose provisioning HARD-FAILS degrades, it never loses the escalation", () => {
@@ -241,8 +344,9 @@ test("escalate: the canonical 2026-07-17 shape — a label whose provisioning HA
   // No throw escaped — the escalation still delivered:
   assert.equal(url, "https://github.com/craigoley/remudero/issues/99");
   assert.equal(issues.calls.length, 1);
-  // The degraded label is DROPPED from the attached set, not silently kept:
-  assert.deepEqual(issues.calls[0].labels, [NEEDS_HUMAN_LABEL], "the unprovisionable label is left off create()");
+  // The degraded label is DROPPED from the attached set, not silently kept — the other two
+  // (needs-human, needs-question) still provisioned fine:
+  assert.deepEqual(issues.calls[0].labels, [NEEDS_HUMAN_LABEL, "needs-question"], "the unprovisionable label is left off create()");
   // The drop is noted in the body the human actually reads — the payload survives:
   assert.match(issues.calls[0].body, /Degraded.*escalation-blocked/s);
   // ...and on the ledger line, so it's legible without opening GitHub:
