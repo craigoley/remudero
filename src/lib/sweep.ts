@@ -4,7 +4,7 @@ import { loadDefaultPolicy } from "./policy.js";
 import { cappedOverrideFromLedger, decideAutoMergeArm, postedArmFactsFromLedger } from "./review.js";
 import type { ArmDecision, CriterionVerdict } from "./review.js";
 import type { QuestionEntry } from "./worker.js";
-import type { AskType } from "./escalate.js";
+import { FLEET_NOTICE_LABEL, NEEDS_HUMAN_LABEL, type AskType, type IssueGateway, type OpenIssue } from "./escalate.js";
 
 /**
  * lib/sweep.ts — the level-triggered PR-pipeline reconciler (W1-T77, ratifies
@@ -2926,6 +2926,38 @@ export async function runCreditBackfill(
 /** How many stale escalations one reconcile pass may close — bounds the write burst so a
  *  large backlog (the observed 94-open shape) drains across several sweeps, never one. */
 export const MAX_ESCALATION_CLOSES_PER_CYCLE = 20;
+
+/**
+ * QUEUE LABELS this reconciler retires issues from (W1-T349): `needs-human` (unchanged) plus
+ * `fleet-notice` — a residual-escalation-judge demotion (escalate.ts's `escalateWithJudge`)
+ * leaves the NEEDS ME board, which keys on `needs-human`, but the design's own promise —
+ * "recovery is relabelling — nothing is deleted, nothing is unfiled" — only holds if THIS
+ * reconciler can still find and retire it once its referent resolves. Below this point nothing
+ * else changes: {@link EscalationReconcileCandidate} carries no label field at all, so {@link
+ * runEscalationReconcile} already treats a fleet-notice-sourced candidate identically to a
+ * needs-human one — by construction, not by an added branch.
+ */
+export const RETIRABLE_ESCALATION_LABELS: readonly string[] = [NEEDS_HUMAN_LABEL, FLEET_NOTICE_LABEL];
+
+/**
+ * List every OPEN issue across {@link RETIRABLE_ESCALATION_LABELS}, deduped by issue number (an
+ * issue cannot carry both queue labels by construction — escalate.ts's `escalate()`/
+ * `escalateWithJudge()` create with exactly ONE queue label — but the dedup costs nothing and
+ * protects against a future producer that double-labels). Same fail-soft contract as a single
+ * `listOpen` call: a read failure on ANY label aborts the WHOLE list (never a partial result the
+ * caller could mistake for "nothing else is open") — the caller's existing catch already treats
+ * that as "do nothing this cycle, never a confident zero open" (run-task.ts's
+ * `buildEscalationReconcileCandidates`).
+ */
+export function listRetirableEscalationIssues(issues: IssueGateway): OpenIssue[] {
+  const seen = new Map<number, OpenIssue>();
+  for (const label of RETIRABLE_ESCALATION_LABELS) {
+    for (const issue of issues.listOpen?.(label) ?? []) {
+      seen.set(issue.number, issue);
+    }
+  }
+  return [...seen.values()];
+}
 
 /** One open needs-human issue paired with its referenced task's CURRENT derived state. */
 export interface EscalationReconcileCandidate {

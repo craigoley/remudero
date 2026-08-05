@@ -4,6 +4,9 @@ import { dirname, join } from "node:path";
 import { appendLedger } from "./ledger.js";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
 import { validateDecisionSummary, type DecisionSummary, type SummarizeDeps } from "./feedback.js";
+import type { Mount, Mounts } from "./mounts.js";
+import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
+import { resolveRiskJudgeMount } from "./risk-judge.js";
 
 /**
  * Escalations as GitHub issues (W1-T8, MASTER-PLAN §4 "Escalation taxonomy").
@@ -306,6 +309,17 @@ export function classifyAsk(e: Escalation): AskType {
 /** The label every escalation issue carries — the queue the control panel reads (§4). */
 export const NEEDS_HUMAN_LABEL = "needs-human";
 
+/**
+ * The DEMOTED queue label (W1-T349, residual-escalation-judge): a fleet-notice issue is
+ * exactly a needs-human issue that {@link judgeEscalation} decided did not need the
+ * operator's real-time attention. It carries every other label ({@link CLASS_LABEL}, the
+ * ask-type label) and the full rendered body UNCHANGED — only the queue label differs, so it
+ * leaves the NEEDS ME board (which keys on {@link NEEDS_HUMAN_LABEL}) but remains open,
+ * durable, searchable, and listable. Nothing is deleted, nothing is unfiled; recovery is
+ * relabelling. See {@link escalateWithJudge}.
+ */
+export const FLEET_NOTICE_LABEL = "fleet-notice";
+
 // ── OPERATOR PRESENCE (P34 clause (e), MASTER-PLAN §7B/§4; ratified round iii) ──────────────
 //
 // An operator presence signal keys ONLY escalation DELIVERY — never dispatch. Round iii killed
@@ -366,6 +380,235 @@ export function setPresenceMode(root: string, mode: PresenceMode): void {
  */
 export function deliversRealtime(root: string): boolean {
   return presenceMode(root) === "attended";
+}
+
+// ── RESIDUAL ESCALATION JUDGE (W1-T349, MASTER-PLAN §4B) ───────────────────────────────────
+//
+// Routing-only, downstream of the deterministic stack (the reconciler above, referent-coverage,
+// W1-T114's wait disposition, W1-T345's dedup): the reconciler already retires most historical
+// volume by watching a referenced PR resolve; this judge is for the RESIDUE it cannot see —
+// items with no referent, or whose referent IS the unresolved thing. It sees the full typed
+// {@link Escalation} at the one choke point every producer already crosses ({@link escalate}) and
+// returns demote|deliver with a one-line reason. It never runs on a duplicate ({@link
+// escalateWithJudge} judges only AFTER the same dedup search {@link escalate} itself uses), and
+// it never runs at all for MANUAL/GRILL — those are operator-owned by rule (see {@link
+// classifyAsk}'s own doc: MANUAL is action-by-definition, only a human hand can do the thing;
+// GRILL is question-by-definition, an ambiguous feedback item IS a human call) — {@link
+// isEscalationJudgeExempt} is checked BEFORE {@link judgeEscalation} ever calls the judge
+// dependency, so an exempt class is delivered by never being asked, not by trusting a possibly-
+// wrong answer to override.
+//
+// THE ASYMMETRY THAT GOVERNS EVERYTHING HERE, and why this module's fail behavior is the MIRROR
+// image of risk-judge.ts's/flight-judge.ts's: there, a false POSITIVE (proceeding on real risk)
+// is the costly direction, so an unreadable verdict fails CLOSED to escalate. HERE, a false
+// NEGATIVE (demoting something the operator actually needed) hides work he cannot know to look
+// for — THAT is the costly direction — while a false positive (delivering something that turns
+// out not to matter) costs him one skim. So this judge may only DEMOTE, never drop or suppress
+// content, and {@link judgeEscalation} fails OPEN to `deliver` on every unreadable-verdict path:
+// a spawn error, a timeout, an unparseable response, or a governor refusal all resolve to exactly
+// today's needs-human delivery, never silently to demote.
+
+/** What {@link judgeEscalation} decides for one escalation. Demote-only by construction — there
+ *  is no third value that could mean "drop"; the type itself cannot express suppression. */
+export type EscalationJudgeDecision = "demote" | "deliver";
+
+/** The judge's verdict. `reason` is ledgered verbatim and, on a demotion, becomes the FIRST
+ *  comment on the fleet-notice issue (design clause ii) — so the demotion is never silent. */
+export interface EscalationJudgeVerdict {
+  decision: EscalationJudgeDecision;
+  reason: string;
+}
+
+/**
+ * Classes exempt from judgement ENTIRELY — MANUAL and GRILL are operator-owned by rule (see the
+ * module-section doc above), and anything the operator's own CLI escalated is exempt STRUCTURALLY
+ * rather than by a field this function reads: `escalateCommand` (run-task.ts) calls {@link
+ * escalate} directly, never {@link escalateWithJudge}, so a CLI escalation never reaches this
+ * module's judge machinery at all — the same "cannot, not merely told not to" discipline
+ * flight-judge.ts's empty tool list uses for read-only.
+ */
+export function isEscalationJudgeExempt(e: Escalation): boolean {
+  return e.class === "MANUAL" || e.class === "GRILL";
+}
+
+/**
+ * Render the judge's prompt — the FULL typed {@link Escalation} (class, taskId, summary, detail,
+ * options, recommendation, cause, askType) at the one choke point every producer already crosses.
+ * Carries the asymmetry explicitly: WHEN IN DOUBT, DELIVER.
+ */
+export function buildEscalationJudgePrompt(e: Escalation): string {
+  const options = e.options.map((o, i) => `  ${i + 1}. ${o.label} — ${o.detail}`).join("\n") || "  (none)";
+  const lines = [
+    `You are the RESIDUAL ESCALATION JUDGE (MASTER-PLAN §4B, W1-T349) — a ROUTING-ONLY judge`,
+    `deciding whether ONE already-created needs-human escalation is worth the operator's REAL-TIME`,
+    `attention right now, or can wait as a lower-priority fleet notice instead.`,
+    ``,
+    `YOU MAY ONLY DEMOTE, NEVER DROP. A demoted item still opens as a GitHub issue — it is never`,
+    `suppressed, never deleted, never silenced. It only moves off the operator's real-time board`,
+    `into a durable, searchable, listable "fleet notice" queue; recovery is a relabel away.`,
+    ``,
+    `THE ASYMMETRY THAT GOVERNS THIS DECISION: a FALSE NEGATIVE (demoting something the operator`,
+    `actually needed) hides work he cannot know to look for — this is the COSTLY direction. A FALSE`,
+    `POSITIVE (delivering something that turns out not to matter) costs him one skim — cheap.`,
+    `WHEN IN DOUBT, DELIVER.`,
+    ``,
+    `CLASS: ${e.class}`,
+    `TASK: ${e.taskId}`,
+    `ASK TYPE: ${classifyAsk(e)}`,
+    e.cause ? `CAUSE: ${e.cause}` : undefined,
+    `SUMMARY: ${e.summary}`,
+    ``,
+    `DETAIL:`,
+    e.detail || "(none)",
+    ``,
+    `OPTIONS:`,
+    options,
+    ``,
+    `RECOMMENDATION: ${e.recommendation}`,
+    ``,
+    `Decide — exactly one of:`,
+    `  deliver  — this needs the operator's real-time attention now`,
+    `  demote   — this can wait; file it as a fleet notice instead`,
+    ``,
+    `MACHINE-READABLE OUTPUT (required, in addition to any prose): emit exactly one of each of`,
+    `these lines, and nothing else on the line:`,
+    `  ESCALATION_JUDGE_DECISION: <deliver|demote>`,
+    `  ESCALATION_JUDGE_REASON: <one concrete, specific reason — this becomes the first comment`,
+    `    on the issue if demoted>`,
+  ];
+  return lines.filter((l): l is string => l !== undefined).join("\n");
+}
+
+const VALID_JUDGE_DECISIONS = new Set<EscalationJudgeDecision>(["demote", "deliver"]);
+
+/**
+ * FAIL-OPEN default (the acceptance criterion, stated): a spawn error, a timeout, an unparseable
+ * verdict, or a governor refusal all resolve to exactly this — needs-human, unchanged, as today.
+ * The OPPOSITE polarity from risk-judge.ts's/flight-judge.ts's fail-CLOSED defaults, because the
+ * costly direction here is silently HIDING work, not silently proceeding past risk.
+ */
+const FAIL_OPEN_JUDGE_VERDICT: EscalationJudgeVerdict = {
+  decision: "deliver",
+  reason:
+    "judge output carried no parseable ESCALATION_JUDGE_DECISION — failing open to deliver " +
+    "(never silently hide work from the operator)",
+};
+
+/**
+ * Parse the judge's `ESCALATION_JUDGE_DECISION`/`ESCALATION_JUDGE_REASON` lines into an {@link
+ * EscalationJudgeVerdict}. Missing/unrecognized decision fails OPEN ({@link
+ * FAIL_OPEN_JUDGE_VERDICT} — `deliver`, never `demote`). Case-insensitive, tolerant of
+ * surrounding prose.
+ */
+export function parseEscalationJudgeVerdict(text: string): EscalationJudgeVerdict {
+  const decisionMatch = text.match(/ESCALATION_JUDGE_DECISION:\s*(\w+)/i);
+  const decision = decisionMatch?.[1]?.toLowerCase() as EscalationJudgeDecision | undefined;
+  if (!decision || !VALID_JUDGE_DECISIONS.has(decision)) {
+    return { ...FAIL_OPEN_JUDGE_VERDICT };
+  }
+  const reasonMatch = text.match(/ESCALATION_JUDGE_REASON:\s*(.+)/i);
+  const reason = reasonMatch?.[1]?.trim() || "(no reason stated)";
+  return { decision, reason };
+}
+
+/** Injectable judge dependency — real callers wire this to {@link realEscalationJudge}; tests
+ *  inject a fake, exactly as risk-judge.ts's `RiskJudgeDeps.judge`/flight-judge.ts's
+ *  `FlightJudgeDeps.judge`. */
+export interface EscalationJudgeDeps {
+  judge: (e: Escalation) => Promise<EscalationJudgeVerdict>;
+}
+
+/**
+ * Decide demote|deliver for ONE escalation. EXEMPT classes (MANUAL, GRILL) are delivered WITHOUT
+ * ever calling `deps.judge` — the exemption is enforced by never asking, so a judge stub that
+ * WOULD demote a MANUAL item (the falsifier, design clause iv) cannot influence the outcome even
+ * if it tried.
+ *
+ * JUDGE-UNAVAILABLE (a spawn error, a timeout, a thrown rejection) is caught HERE and fails OPEN
+ * to `deliver` — the cannot-observe -> DELIVER polarity (the mirror of risk-judge.ts's
+ * cannot-observe -> ESCALATE, because here silence is the dangerous direction, not action). Every
+ * reuse site gets this guarantee for free; a caller cannot forget to handle it.
+ */
+export async function judgeEscalation(e: Escalation, deps: EscalationJudgeDeps): Promise<EscalationJudgeVerdict> {
+  if (isEscalationJudgeExempt(e)) {
+    return { decision: "deliver", reason: `${e.class} is operator-owned by rule — exempt from judgement` };
+  }
+  try {
+    return await deps.judge(e);
+  } catch (err) {
+    return {
+      decision: "deliver",
+      reason: `judge unavailable (${err instanceof Error ? err.message : String(err)}) — failing open to ` +
+        "deliver, never silently hiding work from the operator",
+    };
+  }
+}
+
+// ── The real spawn (read-only BY CONSTRUCTION — no tools at all, mirrors risk-judge.ts) ────────
+
+/** The judge's SDK tool allowlist — EMPTY by construction, same rationale as risk-judge.ts's
+ *  `RISK_JUDGE_TOOLS`/flight-judge.ts's `JUDGE_TOOLS`: everything it needs is already baked into
+ *  the prompt, so it has no need (and no ability) to explore the worktree or take any action. */
+export const ESCALATION_JUDGE_TOOLS: string[] = [];
+
+/** Build the {@link SpawnWorkerArgs} for a real escalation-judge spawn — a pure function so the
+ *  "no tools, cheapest mount" contract is unit-testable without a spawn. */
+export function buildEscalationJudgeSpawnArgs(opts: {
+  escalation: Escalation;
+  mount: Mount;
+  cwd: string;
+  settingsFile: string;
+}): SpawnWorkerArgs {
+  return {
+    cwd: opts.cwd,
+    permissionMode: "bypassPermissions",
+    settingsFile: opts.settingsFile,
+    prompt: buildEscalationJudgePrompt(opts.escalation),
+    model: opts.mount.model,
+    effort: opts.mount.effort,
+    maxTurns: opts.mount.maxTurns,
+    tools: ESCALATION_JUDGE_TOOLS,
+  };
+}
+
+/** Spawn the real judge and parse its verdict. Untested by unit (it shells out via the SDK, same
+ *  as every other real spawn in worker.ts) — {@link buildEscalationJudgeSpawnArgs} and {@link
+ *  parseEscalationJudgeVerdict} carry the testable contract. */
+export async function spawnEscalationJudgeWorker(opts: {
+  escalation: Escalation;
+  mount: Mount;
+  cwd: string;
+  settingsFile: string;
+  spawn?: typeof spawnWorker;
+}): Promise<WorkerResult> {
+  const spawn = opts.spawn ?? spawnWorker;
+  return spawn(buildEscalationJudgeSpawnArgs(opts));
+}
+
+/**
+ * Build a `judge` function ({@link EscalationJudgeDeps.judge}) wired to a real spawn on the
+ * CHEAPEST configured mount — the filing's "one cheap-mount call per delivered escalation".
+ * Reuses risk-judge.ts's {@link resolveRiskJudgeMount} rather than re-deriving the same
+ * routing-table walk here: that resolver's logic (lowest tier/effort rank across every
+ * configured mount) is generic, never risk-specific, despite its name.
+ */
+export function realEscalationJudge(opts: {
+  mounts: Mounts;
+  cwd: string;
+  settingsFile: string;
+  spawn?: typeof spawnWorker;
+}): (e: Escalation) => Promise<EscalationJudgeVerdict> {
+  const mount = resolveRiskJudgeMount(opts.mounts);
+  return async (e: Escalation) => {
+    const result = await spawnEscalationJudgeWorker({
+      escalation: e,
+      mount,
+      cwd: opts.cwd,
+      settingsFile: opts.settingsFile,
+      spawn: opts.spawn,
+    });
+    return parseEscalationJudgeVerdict(result.text);
+  };
 }
 
 /**
@@ -583,77 +826,100 @@ function matchesOptionalDimension(wanted: string | undefined, candidate: string 
  * never silent: it's noted both in the issue body and on this escalation's ledger
  * line as `degraded_labels`.
  */
-export function escalate(e: Escalation, deps: EscalateDeps): string {
-  if (e.options.length === 0) {
-    throw new Error(`escalation for ${e.taskId} has no options — every escalation needs an actionable choice`);
+/**
+ * Search OPEN `needs-human` issues for a duplicate of `e` — extracted from {@link escalate} so
+ * {@link escalateWithJudge} can run the IDENTICAL search once, up front, to decide whether the
+ * judge should even be asked (design clause i: "never judging a duplicate"). Returns the matched
+ * {@link OpenIssue}, or `undefined` when no gateway `listOpen`, a failed read, or no match — the
+ * SAME best-effort, fail-open-to-"no dup found" contract {@link escalate} always had.
+ */
+function findDuplicateEscalation(e: Escalation, deps: EscalateDeps): OpenIssue | undefined {
+  if (!deps.issues.listOpen) return undefined;
+  let open: OpenIssue[];
+  try {
+    open = deps.issues.listOpen(NEEDS_HUMAN_LABEL);
+  } catch {
+    return undefined; // best-effort dedup: a failed read must never block the escalation itself
   }
-
   const prRef = extractPrRef(`${e.summary}\n${e.detail}`);
-  // The rendered title for THIS escalation — used below both as the dedup search's
-  // W1-T345 referent-less fallback discriminator and (unchanged) as the create() title.
   const title = `[${e.class}] ${e.taskId}: ${e.summary}`;
-  if (deps.issues.listOpen) {
-    let open: OpenIssue[];
-    try {
-      open = deps.issues.listOpen(NEEDS_HUMAN_LABEL);
-    } catch {
-      open = []; // best-effort dedup: a failed read must never block the escalation itself
+  return open.find((issue) => {
+    const body = issue.body ?? "";
+    if (TASK_LINE_RE.exec(body)?.[1] !== e.taskId) return false;
+    if (prRef) {
+      // W1-T195: the composite key. taskId + PR are REQUIRED matches (unchanged
+      // from W1-T104). headSha/cause are matched via matchesOptionalDimension — a
+      // dimension only vetoes the match when BOTH this escalation and the
+      // candidate issue carry a value and they disagree, so a caller that never
+      // sets headSha/cause (every caller except the two rungs this task wires)
+      // keeps today's (taskId, PR) dedup exactly as before. A caller that DOES set
+      // both, on the other hand, gets the real fix: a new push (new headSha) or a
+      // different cause on the same sha each open their OWN issue rather than
+      // being silently suppressed by a stale one.
+      if (extractPrRef(`${issue.title ?? ""}\n${body}`) !== prRef) return false;
+      if (!matchesOptionalDimension(e.headSha, HEAD_SHA_LINE_RE.exec(body)?.[1])) return false;
+      if (!matchesOptionalDimension(e.cause, CAUSE_LINE_RE.exec(body)?.[1])) return false;
+      return true;
     }
-    const dup = open.find((issue) => {
-      const body = issue.body ?? "";
-      if (TASK_LINE_RE.exec(body)?.[1] !== e.taskId) return false;
-      if (prRef) {
-        // W1-T195: the composite key. taskId + PR are REQUIRED matches (unchanged
-        // from W1-T104). headSha/cause are matched via matchesOptionalDimension — a
-        // dimension only vetoes the match when BOTH this escalation and the
-        // candidate issue carry a value and they disagree, so a caller that never
-        // sets headSha/cause (every caller except the two rungs this task wires)
-        // keeps today's (taskId, PR) dedup exactly as before. A caller that DOES set
-        // both, on the other hand, gets the real fix: a new push (new headSha) or a
-        // different cause on the same sha each open their OWN issue rather than
-        // being silently suppressed by a stale one.
-        if (extractPrRef(`${issue.title ?? ""}\n${body}`) !== prRef) return false;
-        if (!matchesOptionalDimension(e.headSha, HEAD_SHA_LINE_RE.exec(body)?.[1])) return false;
-        if (!matchesOptionalDimension(e.cause, CAUSE_LINE_RE.exec(body)?.[1])) return false;
-        return true;
-      }
-      // W1-T345: no PR resolves — dedup on (taskId, class, cause) instead of
-      // skipping the search outright. class is REQUIRED equal (it is always
-      // rendered, never optional). cause is matched permissively, same discipline
-      // as the PR-keyed branch above: distinct causes on the same (taskId, class)
-      // still open separately. When neither side names a cause, fall back to
-      // comparing the rendered title verbatim — its summary segment is a fixed,
-      // per-producer-constant phrase, so two different referent-less producers
-      // sharing one (taskId, class) never collide into each other's issue while the
-      // SAME producer's repeated firing (the storm shape) does dedup.
-      if (CLASS_LINE_RE.exec(body)?.[1] !== e.class) return false;
-      const candidateCause = CAUSE_LINE_RE.exec(body)?.[1];
-      if (e.cause !== undefined || candidateCause !== undefined) {
-        return matchesOptionalDimension(e.cause, candidateCause);
-      }
-      return (issue.title ?? "") === title;
-    });
-    if (dup) {
-      const observedKey = prRef
-        ? `task ${e.taskId}, PR #${prRef}`
-        : `task ${e.taskId}, class ${e.class}${e.cause ? `, cause ${e.cause}` : ""}`;
-      deps.issues.comment?.(
-        dup.url,
-        `Another escalation observed the same condition (${observedKey}) while this issue ` +
-          `was already open — appending rather than opening a sibling (W1-T104/W1-T345).\n\n${renderIssueBody(e)}`,
-      );
-      appendLedger(deps.ledgerPath, {
-        run_id: deps.runId,
-        task_id: e.taskId,
-        step: "escalation.deduped",
-        class: e.class,
-        issue_url: dup.url,
-      });
-      return dup.url;
+    // W1-T345: no PR resolves — dedup on (taskId, class, cause) instead of
+    // skipping the search outright. class is REQUIRED equal (it is always
+    // rendered, never optional). cause is matched permissively, same discipline
+    // as the PR-keyed branch above: distinct causes on the same (taskId, class)
+    // still open separately. When neither side names a cause, fall back to
+    // comparing the rendered title verbatim — its summary segment is a fixed,
+    // per-producer-constant phrase, so two different referent-less producers
+    // sharing one (taskId, class) never collide into each other's issue while the
+    // SAME producer's repeated firing (the storm shape) does dedup.
+    if (CLASS_LINE_RE.exec(body)?.[1] !== e.class) return false;
+    const candidateCause = CAUSE_LINE_RE.exec(body)?.[1];
+    if (e.cause !== undefined || candidateCause !== undefined) {
+      return matchesOptionalDimension(e.cause, candidateCause);
     }
-  }
+    return (issue.title ?? "") === title;
+  });
+}
 
-  const wanted = [NEEDS_HUMAN_LABEL, CLASS_LABEL[e.class], ASK_TYPE_LABEL[classifyAsk(e)]];
+/**
+ * Append the DEDUP comment + `escalation.deduped` ledger line for an already-found duplicate —
+ * extracted from {@link escalate} so {@link escalateWithJudge} shares the exact same behavior on
+ * its own dedup path (never a second `listOpen` read: both callers pass the SAME {@link
+ * findDuplicateEscalation} result in).
+ */
+function recordDuplicateEscalation(e: Escalation, dup: OpenIssue, deps: EscalateDeps): string {
+  const prRef = extractPrRef(`${e.summary}\n${e.detail}`);
+  const observedKey = prRef
+    ? `task ${e.taskId}, PR #${prRef}`
+    : `task ${e.taskId}, class ${e.class}${e.cause ? `, cause ${e.cause}` : ""}`;
+  deps.issues.comment?.(
+    dup.url,
+    `Another escalation observed the same condition (${observedKey}) while this issue ` +
+      `was already open — appending rather than opening a sibling (W1-T104/W1-T345).\n\n${renderIssueBody(e)}`,
+  );
+  appendLedger(deps.ledgerPath, {
+    run_id: deps.runId,
+    task_id: e.taskId,
+    step: "escalation.deduped",
+    class: e.class,
+    issue_url: dup.url,
+  });
+  return dup.url;
+}
+
+/**
+ * Ensure labels, render the body, create the issue, and ledger it — extracted from {@link
+ * escalate} so {@link escalateWithJudge} can create a FLEET-NOTICE-labelled issue (W1-T349)
+ * through the exact same label-provisioning/degrade-don't-lose machinery (W1-T99) instead of a
+ * second, drifting copy. `opts.queueLabel` is the only thing that varies between a needs-human
+ * open and a demoted one — everything else (title, class label, ask-type label, body, degrade
+ * behavior) is byte-identical either way.
+ */
+function createEscalationIssue(
+  e: Escalation,
+  deps: EscalateDeps,
+  opts: { queueLabel: string; step: string; firstComment?: string; extra?: Record<string, unknown> },
+): string {
+  const title = `[${e.class}] ${e.taskId}: ${e.summary}`;
+  const wanted = [opts.queueLabel, CLASS_LABEL[e.class], ASK_TYPE_LABEL[classifyAsk(e)]];
   const labels: string[] = [];
   const degradedLabels: string[] = [];
   for (const label of wanted) {
@@ -670,16 +936,68 @@ export function escalate(e: Escalation, deps: EscalateDeps): string {
       `this issue was opened without them so the escalation itself is never lost (W1-T99)._`;
   }
   const url = deps.issues.create(title, body, labels);
+  if (opts.firstComment) {
+    // W1-T349 design clause (ii): a demoted item's judge reason rides as the FIRST comment —
+    // posted immediately after create(), before anything else can land on the issue.
+    deps.issues.comment?.(url, opts.firstComment);
+  }
   appendLedger(deps.ledgerPath, {
     run_id: deps.runId,
     task_id: e.taskId,
     ...(degradedLabels.length > 0 ? { degraded_labels: degradedLabels } : {}),
-    step: "escalation.issue_opened",
+    step: opts.step,
     class: e.class,
     issue_url: url,
     labels,
+    ...opts.extra,
   });
   return url;
+}
+
+export function escalate(e: Escalation, deps: EscalateDeps): string {
+  if (e.options.length === 0) {
+    throw new Error(`escalation for ${e.taskId} has no options — every escalation needs an actionable choice`);
+  }
+  const dup = findDuplicateEscalation(e, deps);
+  if (dup) return recordDuplicateEscalation(e, dup, deps);
+  return createEscalationIssue(e, deps, { queueLabel: NEEDS_HUMAN_LABEL, step: "escalation.issue_opened" });
+}
+
+/**
+ * W1-T349: THE JUDGED CHOKE POINT — {@link escalate} plus the residual escalation judge. Producers
+ * that want judge routing call this instead of {@link escalate}; a producer that doesn't (every
+ * producer this task does not wire — NOT IN SCOPE per this task's own design clause) keeps calling
+ * {@link escalate}/{@link tryEscalate} directly and gets exactly today's needs-human behavior,
+ * unjudged — the same opt-in shape {@link escalateWithSummary} already established for W1-T348.
+ *
+ * ORDER MATTERS: dedup runs FIRST via the exact same {@link findDuplicateEscalation} search
+ * `escalate()` itself uses — the judge NEVER sees a duplicate (design clause i). Only once dedup
+ * finds nothing does {@link judgeEscalation} run (which itself never asks the judge dependency for
+ * an exempt class, MANUAL/GRILL — see that function's own doc). A `demote` verdict opens the issue
+ * FLEET-NOTICE-labelled with the judge's reason as the first comment (design clause ii); anything
+ * else — `deliver`, an exempt class, or a judge failure (fail-open) — opens it needs-human-labelled,
+ * byte-identical to {@link escalate}.
+ */
+export async function escalateWithJudge(
+  e: Escalation,
+  deps: EscalateDeps & EscalationJudgeDeps,
+): Promise<string> {
+  if (e.options.length === 0) {
+    throw new Error(`escalation for ${e.taskId} has no options — every escalation needs an actionable choice`);
+  }
+  const dup = findDuplicateEscalation(e, deps);
+  if (dup) return recordDuplicateEscalation(e, dup, deps);
+
+  const verdict = await judgeEscalation(e, deps);
+  if (verdict.decision === "demote") {
+    return createEscalationIssue(e, deps, {
+      queueLabel: FLEET_NOTICE_LABEL,
+      step: "escalation.demoted",
+      firstComment: verdict.reason,
+      extra: { judge_reason: verdict.reason },
+    });
+  }
+  return createEscalationIssue(e, deps, { queueLabel: NEEDS_HUMAN_LABEL, step: "escalation.issue_opened" });
 }
 
 /**
