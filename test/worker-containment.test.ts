@@ -9,6 +9,9 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { test } from "node:test";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   buildContainedSpawnFn,
   defaultListCandidates,
@@ -25,6 +28,8 @@ import {
   workerMarkerEnv,
   type ContainedProcess,
 } from "../src/lib/worker-containment.js";
+import { daemonCommand, ledgerPathFor } from "../src/run-task.js";
+import type { DaemonSummary } from "../src/lib/daemon.js";
 
 /**
  * Cleanup-backstop kill for a test's `finally` block, swallowing EVERY error
@@ -288,10 +293,9 @@ test("spawnDetachedGroup: a synchronous spawn failure (no pid ever assigned) fai
   );
 });
 
-// ── Real-world default deps (ps-based) — the CLI-layer wiring that plugs
-// these into a live daemon is out of scope for this task (see the REPORT's
-// Follow-ups); these prove the ps-parsing logic itself against REAL `ps`
-// output, no injection.
+// ── Real-world default deps (ps-based) — these prove the ps-parsing logic
+// itself against REAL `ps` output, no injection. The CLI-layer wiring that
+// plugs these into a live daemon (W1-T356) is proven separately, below.
 
 test("defaultListCandidates: a real `ps` scan finds THIS test process's own pid with a non-empty cmdline", () => {
   const rows = defaultListCandidates();
@@ -366,4 +370,78 @@ test("listProcessGroupMembers: a listFn failure (e.g. no `ps` on this host) degr
     throw new Error("ps: command not found");
   };
   assert.deepEqual(listProcessGroupMembers(123, listFn), []);
+});
+
+// ── W1-T356: the orphan sweep WIRED into the REAL daemonCommand ────────────
+// `sweepOrphanWorkers` (above) and `defaultListCandidates`/`defaultReadMarkers` (above) each
+// pass in isolation — that already held true while the real `daemonBoot` call site passed
+// `undefined` for the whole feature (this task's own rationale: "the production default has
+// never run"). This section drives the REAL `daemonCommand` end to end, injecting ONLY the
+// existing `runDaemon` loop-stub seam (the same seam test/daemon-crashloop-wiring.test.ts
+// uses for the crash-loop escalation wiring) — never a hand-built `OrphanSweepDeps` fixture —
+// so a pass here proves the PRODUCTION DEFAULT (the module's own exported
+// defaultListCandidates/defaultReadMarkers/killProcessGroup, composed in run-task.ts)
+// actually kills a real stray, not that a fixture would have.
+//
+// THE FALSIFIER (design part v): restoring the boot slot's `undefined` makes the spawned
+// stray process survive `daemonCommand` and leaves no `worker_orphan_killed` ledger line —
+// this test fails loudly on that regression, by name.
+
+function fixtureHome(): { home: string; root: string; planPath: string } {
+  const home = mkdtempSync(join(tmpdir(), "rmd-daemon-orphan-boot-wiring-"));
+  const root = join(home, "Remudero");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  mkdirSync(join(root, "state"), { recursive: true });
+  const planPath = join(home, "tasks.yaml");
+  writeFileSync(planPath, "[]\n"); // an explicit --plan skips the git self-sync entirely
+  return { home, root, planPath };
+}
+
+function ledgerLines(root: string): Array<Record<string, unknown>> {
+  return readFileSync(ledgerPathFor({ root } as never), "utf8")
+    .split("\n")
+    .filter((l) => l.trim().length > 0)
+    .map((l) => JSON.parse(l) as Record<string, unknown>);
+}
+
+test("W1-T356 wiring: the REAL daemonCommand boots with the orphan sweep wired from the module's own exported defaults — a marker-carrying stray from an ended run is killed and ledgered (worker_orphan_killed), a marker-less process is left alone, alive, and reported (daemon.orphan_sweep)", async () => {
+  const { home, root, planPath } = fixtureHome();
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  const strayEnv = { ...process.env, [RUN_ID_ENV]: "run-ended-w1-t356", [TASK_ID_ENV]: "W1-T356-fixture" };
+  const stray = spawnDetachedGroup({ command: "/bin/sh", args: ["-c", "sleep 300"], env: strayEnv });
+  const unrelated = spawnDetachedGroup({ command: "/bin/sh", args: ["-c", "sleep 300"], env: { PATH: process.env.PATH } });
+  try {
+    // `ps eww` needs a beat after spawn to reliably reflect a brand-new pid on some hosts —
+    // same discipline as the direct defaultReadMarkers test above.
+    await new Promise((r) => setTimeout(r, 100));
+    const loopStub = async (): Promise<DaemonSummary> => ({ attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 });
+    const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], { runDaemon: loopStub });
+    assert.equal(code, 0);
+
+    await waitUntilDead(stray.pid);
+    assert.throws(
+      () => process.kill(stray.pid, 0),
+      /ESRCH/,
+      "the real daemonCommand's boot-time sweep (daemonBoot's own sweepOrphanWorkers param) must have killed the attributed stray",
+    );
+    assert.equal(isPidAlive(unrelated.pid), true, "a marker-less process must never be signalled, no matter how suspicious it looks");
+
+    const lines = ledgerLines(root);
+    const killedLine = lines.find((l) => l.step === "worker_orphan_killed" && l.pid === stray.pid);
+    assert.ok(killedLine, "the real production ledger dep must record the kill");
+    assert.equal(killedLine!.run_id, "run-ended-w1-t356");
+    assert.equal(killedLine!.task_id, "W1-T356-fixture");
+
+    const sweepLine = lines.find((l) => l.step === "daemon.orphan_sweep");
+    assert.ok(sweepLine, "daemonBoot must log the sweep's own summary — the wired param reached it");
+    assert.ok(Number(sweepLine!.killed) >= 1, "the summary count must reflect the real kill");
+  } finally {
+    safeKillGroup(stray.pid);
+    safeKillGroup(unrelated.pid);
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    rmSync(home, { recursive: true, force: true });
+  }
 });

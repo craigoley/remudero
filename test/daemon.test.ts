@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadPlan, type Plan, type Task } from "../src/lib/plan.js";
-import type { RunResult } from "../src/run-task.js";
+import { daemonCommand, ledgerPathFor, type RunResult } from "../src/run-task.js";
 import { HEADROOM_LIMIT_PCT, type UsageSnapshot } from "../src/lib/headroom.js";
 import {
   DEFAULT_MAX_SPAWN_INFRA_BACKOFF_MS,
@@ -23,6 +23,7 @@ import {
   runDaemon,
   type DaemonDeps,
   type DaemonStopReason,
+  type DaemonSummary,
   type HeadroomPolicy,
   type OrphanedRun,
 } from "../src/lib/daemon.js";
@@ -30,6 +31,7 @@ import { resolveHeadroomEnabled } from "../src/lib/config.js";
 import { pauseDetail, requestPause, requestStop, resumeFleet, stopDetail } from "../src/lib/fleet-control.js";
 import type { MergedSet, OpenPrCheck } from "../src/lib/drain.js";
 import { deriveStatus, type GitHub, type PrRef } from "../src/lib/status.js";
+import { RUN_ID_ENV, TASK_ID_ENV, isPidAlive, killProcessGroup, spawnDetachedGroup } from "../src/lib/worker-containment.js";
 
 // A small linear-ish plan: A → B → C (chain) + D (independent), all auto.
 const YAML = `
@@ -1965,6 +1967,98 @@ test("runDaemon: with no sweepOrphans injected, the loop behaves exactly as befo
     log: (step) => lines.push({ step }),
   });
   assert.equal(lines.filter((l) => l.step.startsWith("daemon.orphan_sweep")).length, 0);
+});
+
+// ── W1-T356: DaemonDeps.sweepOrphans WIRED into the REAL production deps ───
+// The two tests above lock runDaemon's OWN consumption of `deps.sweepOrphans` against a
+// hand-built fixture — that already passed while the real daemonCommand never set the field
+// at all (zero production calls, per this task's own rationale). This section instead drives
+// the REAL `daemonCommand`, injecting only the existing `runDaemon` loop-stub seam (the SAME
+// seam test/daemon-command-retro-wiring.test.ts uses for the retro hooks), and proves the
+// CAPTURED `deps.sweepOrphans` is the real production closure — not merely present, but
+// functionally identical to the boot-time half: it kills+ledgers a marker-carrying stray from
+// an ended run and leaves a marker-less process alone, alive, and unsignalled.
+
+function fixtureHome(): { home: string; root: string; planPath: string } {
+  const home = mkdtempSync(join(tmpdir(), "rmd-daemon-orphan-poll-wiring-"));
+  const root = join(home, "Remudero");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  mkdirSync(join(root, "state"), { recursive: true });
+  const planPath = join(home, "tasks.yaml");
+  writeFileSync(planPath, "[]\n"); // an explicit --plan skips the git self-sync entirely
+  return { home, root, planPath };
+}
+
+function ledgerLines(root: string): Array<Record<string, unknown>> {
+  return readFileSync(ledgerPathFor({ root } as never), "utf8")
+    .split("\n")
+    .filter((l) => l.trim().length > 0)
+    .map((l) => JSON.parse(l) as Record<string, unknown>);
+}
+
+async function waitUntilDead(pid: number, timeoutMs = 5000): Promise<void> {
+  const start = Date.now();
+  while (isPidAlive(pid)) {
+    if (Date.now() - start > timeoutMs) throw new Error(`pid ${pid} still alive after ${timeoutMs}ms`);
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
+
+test("W1-T356 wiring: the REAL daemonCommand sets DaemonDeps.sweepOrphans to the SAME production closure daemonBoot uses — calling the CAPTURED dep kills+ledgers an ended-run stray and leaves an unattributable process alone", async () => {
+  const { home, root, planPath } = fixtureHome();
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  const strayEnv = { ...process.env, [RUN_ID_ENV]: "run-ended-poll-1", [TASK_ID_ENV]: "W1-T356-poll-fixture" };
+  const stray = spawnDetachedGroup({ command: "/bin/sh", args: ["-c", "sleep 300"], env: strayEnv });
+  const unrelated = spawnDetachedGroup({ command: "/bin/sh", args: ["-c", "sleep 300"], env: { PATH: process.env.PATH } });
+  let captured: DaemonDeps | undefined;
+  try {
+    // `ps eww` needs a beat after spawn to reliably reflect a brand-new pid on some hosts —
+    // same discipline as worker-containment.test.ts's own defaultReadMarkers test.
+    await new Promise((r) => setTimeout(r, 100));
+    const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+      runDaemon: async (_plan, deps): Promise<DaemonSummary> => {
+        captured = deps;
+        return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+      },
+    });
+    assert.equal(code, 0, "the injected runDaemon returns a clean 'stopped' summary -> exit 0");
+    assert.ok(captured, "runDaemon was reached and its DaemonDeps captured");
+    assert.equal(typeof captured!.sweepOrphans, "function", "the per-poll half must be set, not left undefined");
+
+    // The boot-time half already ran during this SAME daemonCommand call (daemonBoot's own
+    // sweepOrphanWorkers param) and may have already reaped the stray — call the CAPTURED
+    // per-poll dep too, so this test proves the per-poll field independently, not merely that
+    // boot ran first. Either call reaching it is a pass: the assertion is on the OUTCOME
+    // (killed + ledgered), not on which of the two wired call sites did it.
+    const report = await captured!.sweepOrphans!();
+    assert.ok(report, "the per-poll dep, called directly, must return a real OrphanSweepReport");
+
+    await waitUntilDead(stray.pid);
+    assert.throws(() => process.kill(stray.pid, 0), /ESRCH/, "the attributed stray must be dead via one of the two wired call sites");
+    assert.equal(isPidAlive(unrelated.pid), true, "a marker-less process must never be signalled, no matter how suspicious it looks");
+
+    const lines = ledgerLines(root);
+    const killedLine = lines.find((l) => l.step === "worker_orphan_killed" && l.pid === stray.pid);
+    assert.ok(killedLine, "the real production ledger dep must record the kill");
+    assert.equal(killedLine!.run_id, "run-ended-poll-1");
+    assert.equal(killedLine!.task_id, "W1-T356-poll-fixture");
+  } finally {
+    try {
+      killProcessGroup(stray.pid);
+    } catch {
+      // best-effort cleanup only
+    }
+    try {
+      killProcessGroup(unrelated.pid);
+    } catch {
+      // best-effort cleanup only
+    }
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 // ── W1-T254 (the #707 fix): the restricted LIGHT-SWEEP TICKER ──────────────
