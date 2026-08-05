@@ -1,0 +1,101 @@
+- id: W1-T378
+  title: "reapStaleWorktrees age-gates on the worktree ROOT DIRECTORY's mtime, which never advances while a worker edits files inside it — so a healthy long run is 2 minutes from being reaped the moment its lock read stops saying live"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 65.00
+  rationale: "OBSERVED AT SOURCE at 3d8ddc8, with one measured incident attached.
+    THE INCIDENT (2026-08-05, task W1-T350): reapStaleWorktrees destroyed run-W1-T350-1785957031821's
+    worktree at 20:01:40, 40m41s after worktree.add at 19:20:59. THE RUN WAS ALIVE AND PRODUCTIVE — it
+    committed a00b15e at 20:03:37, opened PR #1377 at 20:08:02, wrote a ledger row at 20:11:33, and was
+    still adding test coverage at 20:52:35, 51 minutes after being declared terminal. Its sibling
+    run-W1-T349-1785956770849, which STARTED EARLIER, was kept in the same pass — so the decision was not
+    age-ordered and the reaper was not simply sweeping old debris.
+    THE PREDICATE, verbatim from worker.ts's reapStaleWorktrees. Three gates in order: (1) KEEP if
+    `readRunLock(entryPath).kind === 'live' && isPidAlive(lock.info.pid)`; (2) KEEP if the registered branch
+    `branchIsLiveUpstream`; (3) otherwise REAP once `now() - statSync(entryPath).mtimeMs >= maxAgeMs`.
+    GATE 2 CANNOT SAVE A RUN THAT HAS NOT PUSHED YET. This run's first commit was 20:03:37 and its PR
+    20:08:02 — both AFTER the 20:01:40 reap — so at decision time no branch existed upstream to be live.
+    Gate 2 protects the back half of a run's life and nothing before the first push, which is precisely the
+    long stretch when a worker is thinking and editing.
+    GATE 3 IS NOT THE GRACE PERIOD IT READS AS, and this is the defect. `pruneGraceMs` is 120000 — TWO
+    MINUTES (plan/policy.yaml, origin lifted:src/lib/worker.ts DEFAULT_PRUNE_GRACE_MS). And it is measured
+    against the mtime of the worktree ROOT DIRECTORY. A directory's mtime advances only when an ENTRY is
+    added to or removed from that directory — never when a file nested inside it is modified. A worker
+    editing src/lib/feedback.ts touches src/lib/'s mtime, not the root's; `git commit` in a worktree writes
+    to <parent>/.git/worktrees/<name>/index, not into the tree at all. So the root's mtime is effectively
+    FROZEN AT CHECKOUT, every run is 'stale' two minutes in, and gate 3 degrades to 'reap unconditionally'.
+    The 40 minutes this run survived is therefore attributable to gate 1 alone; when the lock read stopped
+    saying live, there was no grace left to spend.
+    WHAT I CANNOT ESTABLISH POST-HOC, said plainly: WHY gate 1 stopped holding at 20:01:40. The lock file
+    was removed by the reap itself (removeRunLock runs inside the successful branch), so its state at
+    decision time is unrecoverable from here. Either the lock read non-live or the pid probe returned dead.
+    Whichever it was, gate 3 is what turned that single soft signal into an immediate destruction, and gate
+    3 is decidable from source today.
+    THE DOWNSTREAM COST IS NOT THE LOST TREE. This run survived the reap; what it lost was its LEDGER
+    IDENTITY — it never wrote pr.opened, so W1-T350 read dispatchable and re-built itself as #1378 (see
+    W1-T377, which closes that arm independently). The reaper is the upstream trigger, not the same defect.
+    COVERED-BY: NO, and the near-miss is worth naming. W1-T175 BUILT reapStaleWorktrees and its rationale
+    reasons entirely about DEBRIS — a 453M orphan, an ENOSPC, dirs git no longer registers. It chose
+    `readdirSync` over git's registry deliberately and added the live-pid keep-guard. It never considered
+    the case where the liveness signal is WRONG about a run that is still working, and its age gate is the
+    one it inherited. No shard in plan/tasks.d and nothing in plan/tasks.yaml names the root-mtime arm."
+  design: |
+    ONE CONCERN: make the age gate measure something that actually advances while a run works. Not a
+    rewrite of the reaper, and not the liveness signal itself.
+
+    WRITE THE FALSIFYING TEST FIRST (tdd:strict): a worktree whose ROOT mtime is old, whose lock does not
+    read live, and in which a file NESTED several directories deep was modified seconds ago, must be KEPT.
+    That test fails today and is the deliverable that outlives the fix. Force every input by injection —
+    a test that passes because the run happened to be quick certifies the bug.
+
+    THE MECHANISM IS THE IMPLEMENTER'S CALL. Each candidate must state what it actually proves:
+      (a) DEEPEST-MTIME WALK. Take the newest mtime found under the tree rather than the root's. Directly
+          measures 'is anyone still working here'. Cost is a recursive stat per candidate on every pass —
+          bound it (skip node_modules and .git, cap depth or entries) and say what the bound costs.
+      (b) THE LEDGER AS THE CLOCK. The run's own last ledger line is already the liveness signal
+          deriveStatus uses (livenessBoundMs, DEFAULT_LIVENESS_BOUND_MS = 30 min). Reusing it makes the
+          reaper agree with the console instead of holding a private opinion, which is worth more than
+          either bound alone. But note the measurement already in DeriveDeps.inflightHolder's doc: 96 of
+          664 runs contain an intra-run ledger gap longer than 30 minutes, so this signal alone would still
+          reap 14.5% of healthy runs. Necessary, NOT sufficient.
+      (c) RAISE pruneGraceMs. Cheapest, and honest only if paired with (a) or (b): against a frozen clock,
+          any ceiling is eventually crossed by a long run, so this changes how long the bug takes to fire
+          rather than whether it fires. If chosen at all it belongs in plan/policy.yaml as data (the
+          W1-T330 precedent), justified against MEASURED run durations from the unioned ledger.
+    Prefer (a) or (b) — ideally the disjunction, since they fail in different directions.
+
+    WHATEVER LANDS, THE FAIL DIRECTION MUST FLIP. Today an ambiguous signal destroys a live worktree. It
+    should keep it: a kept orphan costs disk and is swept next pass, a reaped live run costs a whole
+    dispatch. W1-T175's own ENOSPC motivation is real, so state the disk bound the new predicate leaves
+    rather than dropping the age gate entirely.
+
+    NOT IN SCOPE: the lock-liveness predicate itself (W1-T368 owns pid identity); making a reaped run write
+    a terminal ledger record; the missing-pr.opened dispatch arm (W1-T377); and the widowed-lock pass, which
+    is correct and needs no age gate.
+  acceptance:
+    - claim: "a worktree with an old ROOT mtime whose nested files were modified seconds ago is KEPT, not reaped"
+      proof: "unit test: test/worktree-reap-liveness.test.ts"
+    - claim: "genuine debris — no live lock, no live branch, and no recent activity anywhere in the tree — is still reaped, so W1-T175's ENOSPC guarantee survives"
+      proof: "unit test: test/worktree-reap-liveness.test.ts"
+    - claim: "an ambiguous liveness signal keeps the worktree rather than destroying it, and the pass ledgers what it kept and why"
+      proof: "unit test: test/worktree-reap-liveness.test.ts"
+    - claim: "the existing reaper contract is unchanged for the widowed-lock pass and for unreadable roots"
+      proof: "unit test: test/worker.test.ts"
+  risk: high
+  origin: oper#duplicate-dispatch-W1-T350-2026-08-05
+  plan_refs: ["W1-T175", "W1-T377", "W1-T368", "W1-T179"]
+  files: [src/lib/worker.ts, plan/policy.yaml, test/worktree-reap-liveness.test.ts, test/worker.test.ts]
+  status: queued
+  attempts: 0
+  note: "FILED, NOT BUILT, deliberately: W1-T377 closes the arm that actually cost the duplicate build and
+    is the one concern that PR carries. This is the upstream trigger and a separate predicate with its own
+    fail-direction argument to make — one concern per PR.
+    risk:high because the failure destroys live work in progress and is SILENT to the run it hits: the
+    worker gets no signal, and the reaper's own ledger line reports a clean reap.
+    budget_usd 65 — the fix is small but the deterministic fixture (nested mtimes, injected clock, injected
+    lock state) and the disk-bound argument are the real work.
+    NO depends_on. Independent of W1-T377 by construction: either fix alone prevents this incident's
+    duplicate build, which is why they are filed as two."

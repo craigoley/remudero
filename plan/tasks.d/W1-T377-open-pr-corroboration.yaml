@@ -1,0 +1,89 @@
+- id: W1-T377
+  title: "an OPEN PR whose pr.opened ledger line never landed is invisible to every deriveStatus rung, so the task reads dispatchable and re-builds itself — corroborate an open PR by head branch, as W1-T256 already does for merged"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  rationale: "MEASURED INCIDENT, not inferred (2026-08-05, task W1-T350, PRs #1377/#1378).
+    THE TIMELINE, from the unioned ledger (667 files, 4,267,207 lines read, 388,308 unique) plus the GitHub
+    REST API: run W1-T350-1785957031821 started 19:20:10 and wrote 12 ledger steps, the last at 19:22:14
+    (anchor.built). reapStaleWorktrees destroyed its worktree at 20:01:40. The run was NEVER DEAD — it
+    committed a00b15e at 20:03:37, opened PR #1377 at 20:08:02, wrote a ledger row at 20:11:33, and was
+    still adding test coverage at 20:52:35. But it never wrote `pr.opened`. At 20:11:02 — three minutes
+    AFTER #1377 existed on GitHub — W1-T350 was dispatched a SECOND time, rebuilt the whole task as #1378,
+    and merged it at 21:01:59. #1377 was left green, reviewed PASS, auto-merge armed, and permanently
+    conflicting with its own successor. One full high-risk run (budget_usd 85) spent on work that existed.
+    THE DEFECT IS ONE LINE OF REACHABILITY, established from source at 3d8ddc8. drain.ts's
+    isDispatchEligible has the in-flight guard — `const openPrNumber = opts.isOpenPr?.(t.id)` — and it is
+    correct. run-task.ts feeds it from `lastProj.get(id)?.prState === 'OPEN'`. And deriveStatus's ONLY
+    route to prState 'OPEN' is rung (a): `lastPrOpened(ledgerLines, task.id)`, the ledger. Rung (b) needs a
+    hand-set `pr:` field. Rungs (c)/(c2)/(correction) are all gated on MERGED — (c2)'s own candidate filter
+    is `pr.state.toUpperCase() === 'MERGED'`. So the head-branch corroboration that exists PRECISELY to
+    survive a ledger miss (W1-T256, four spurious 07-24 re-dispatches) is structurally blind to an open PR.
+    No `pr.opened` line, no in-flight guard, guaranteed duplicate build.
+    THE ASYMMETRY IS THE WHOLE BUG. W1-T256/W1-T257 established that a ledger-only merge credit is
+    unsafe and gave merged-ness a deterministic second source. The in-flight credit — which gates dispatch
+    just as hard, and whose failure costs a whole duplicate run rather than a stale row — was left with one
+    source and no corroboration.
+    COVERED-BY: NO. Checked every plan/tasks.d shard and plan/tasks.yaml at 3d8ddc8. W1-T80 filed the
+    open-PR-means-in-flight rule itself (merged) and W1-T177 added the live re-read that stands a STALE open
+    down; both assume the association exists. W1-T356 is orphan PROCESSES; W1-T175 built the reaper. Nothing
+    names the missing-pr.opened arm."
+  design: |
+    ONE CONCERN: give the OPEN credit the same deterministic second source the MERGED credit already has.
+    Anything about why the ledger line went missing is a different task (see W1-T378).
+
+    MIRROR (c2) EXACTLY rather than inventing a rung. Match the STRUCTURED head ref, never the
+    eventually-consistent body full-text index — reintroducing that index restores the failure W1-T256
+    exists to prevent. RE-ASSERT ownership with `ownsBranch` on every candidate before crediting, because
+    the batched index groups on a loose `run-(.+)-\d+` capture and can hand the rung another task's PR.
+
+    PRECEDENCE IS THE LOAD-BEARING PART, and it is strictly BELOW everything. The rung runs only after
+    every merged path has declined AND rung (a)/(b) produced no association of their own, so it can fill a
+    hole and never displace a credit. A rung that outranked a MERGED credit would re-open settled tasks; one
+    that outranked `ownResult` would discard the ledger's own provenance. Both exits that conclude
+    `source: "none"` need it — the main fallback and the trailer-rejection early return — or the gap closes
+    on one path and stays open on the other.
+
+    FAIL DIRECTION, deliberately asymmetric: a false OPEN credit DEFERS a dispatch, a missed one DUPLICATES
+    a build. Deferral is the cheaper error and is not even terminal, because W1-T177's `readLiveState`
+    re-read stands a stale OPEN back down on the next tick.
+
+    COST MUST BE ZERO ON THE DAEMON'S PATH. buildBatchedGithub already fetches `--state all` and merely
+    filters to MERGED, so the open rows are already in the index — the open slice is free. ghGateway pays
+    one `gh pr list --state open`. Batch in projectPlan the same way W1-T257 batched the merged index, so
+    the cost is per-PROJECTION, never per-task.
+
+    NULL vs [] MUST STAY DISTINGUISHABLE, as everywhere else in this file: null is a failed read and skips
+    the rung so readFailed()/W1-T119 defers; [] is a genuine "no open PR". Collapsing them would convert a
+    GitHub outage into "this task has no open PR" — the exact W1-T181 defect.
+
+    DO NOT widen StatusSource. `prState: "OPEN"` already distinguishes the credit, and adding a member
+    ripples into every board renderer and fixture for no decision-making gain.
+
+    NOT IN SCOPE: the reaper's staleness predicate (W1-T378); making a reaped run write a terminal record;
+    changing isDispatchEligible's guard, which was correct throughout.
+  acceptance:
+    - claim: "an OPEN PR on the task's own run-branch is credited with no pr.opened ledger line present, so isOpenPr sees it"
+      proof: "unit test: test/open-pr-corroboration.test.ts"
+    - claim: "the duplicate dispatch is refused end to end through the real nextRunnable, and withholding the rung's input re-dispatches"
+      proof: "unit test: test/open-pr-corroboration.test.ts"
+    - claim: "the rung is strictly below every merged rung and below the ledger's own association, and a foreign or closed branch never credits"
+      proof: "unit test: test/open-pr-corroboration.test.ts"
+    - claim: "the open slice costs zero extra fetches on the batched gateway, and a failed read returns null rather than an empty list"
+      proof: "unit test: test/open-pr-corroboration.test.ts"
+  risk: high
+  origin: oper#duplicate-dispatch-W1-T350-2026-08-05
+  plan_refs: ["W1-T80", "W1-T177", "W1-T256", "W1-T257", "W1-T181"]
+  files: [src/lib/status.ts, test/open-pr-corroboration.test.ts]
+  status: queued
+  attempts: 0
+  note: "risk:high because the rung GATES DISPATCH — this file's own header says a false credit here is
+    worse than no credit. Graded on the blast radius of being wrong, not on the size of the change.
+    budget_usd 55, below W1-T256's own, because the corroboration shape, the batching shape and the
+    ownership predicate all already exist and are being mirrored rather than designed.
+    verify:auto — every claim is decidable against an injected gateway; the two REAL gateways are driven
+    through their own injection seams (fetchAll, exec) rather than shelled out to.
+    NO depends_on: the rung reads only what deriveStatus already has in hand."
