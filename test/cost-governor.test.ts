@@ -18,7 +18,7 @@ import { readLedgerLines, type GitHub } from "../src/lib/status.js";
 import { appendLedger } from "../src/lib/ledger.js";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { runDrain, type DrainDeps, type DrainSummary, type MergedSet } from "../src/lib/drain.js";
-import { runDaemon, type DaemonDeps, type DaemonSummary } from "../src/lib/daemon.js";
+import { runDaemon, checkDispatchGovernors, type DaemonDeps, type DaemonSummary } from "../src/lib/daemon.js";
 import type { Config } from "../src/lib/config.js";
 import { drainCommand, daemonCommand, dailyCostCeilingReloader } from "../src/run-task.js";
 import { loadDefaultPolicy, type Policy } from "../src/lib/policy.js";
@@ -635,9 +635,16 @@ test("W1-T331: reloadDailyCostCeilingUsd failing on tick 2+ holds tick 1's ceili
     },
   );
   assert.ok(reloadCalls >= 3, `the reload must be retried every tick despite failing — got ${reloadCalls} calls`);
-  assert.deepEqual(
-    received,
-    [42, 42, 42],
+  // W1-T342: A is never merged (`NONE_MERGED`), so every tick dispatches — and a dispatching
+  // tick now makes TWO governor consultations (tick-wide + the fresh per-dispatch one
+  // immediately before `runOne`, see daemon.ts's `checkDispatchGovernors`), never one. Every
+  // element must still be 42 regardless of count — that is the property this test protects.
+  assert.ok(
+    received.length >= 6 && received.length % 2 === 0,
+    `expected 3 dispatching ticks x 2 consultations each — got ${JSON.stringify(received)}`,
+  );
+  assert.ok(
+    received.every((v) => v === 42),
     `every tick's governor consultation must see the LAST KNOWN-GOOD ceiling, never undefined, despite ticks 2+ failing to reload — got ${JSON.stringify(received)}`,
   );
 });
@@ -734,4 +741,93 @@ test("W1-T317: runDaemon IDLES (never dispatches) while checkCostGovernor defers
   assert.equal(summary.stopReason, "stopped");
   assert.deepEqual(dispatched, ["A"], "exactly one dispatch, only AFTER the governor stopped deferring");
   assert.ok(governorCalls >= 3, "the governor must be re-consulted on every idle tick, not cached past the first defer");
+});
+
+// ── W1-T342: THE PER-DISPATCH GOVERNOR GATE — governors were consulted ONCE per tick, before
+// dispatch, so two dispatches admitted in one batch would both pass a single reading. The fix
+// (daemon.ts's `checkDispatchGovernors`) gives every dispatch its OWN, freshly-taken reading.
+//
+// `runDaemon` cannot yet be driven through two dispatches inside ONE tick — there is no
+// multi-lane loop to admit a second lane (W1-T343, explicitly out of THIS task's scope) — so
+// these tests drive the exported seam DIRECTLY: the same seam `runDaemon`'s per-dispatch call
+// site uses today, and the same seam a future lane loop must call once per lane. Calling it
+// TWICE, explicitly, is the whole falsifier: a caller that (wrongly) took one reading and reused
+// it for two "dispatches" would never see the second call at all, so a mock whose behaviour
+// changes between calls would go unnoticed. These tests would not catch that mistake by driving
+// `runDaemon` over two SEPARATE ticks either — the old per-tick call was already fresh across
+// ticks; the defect only exists WITHIN one batch, which is exactly what calling the seam twice
+// in a row, with no tick boundary between the calls, reproduces.
+
+test("W1-T342 acceptance 1: a governor that trips BETWEEN the first and second dispatch of one batch refuses the second — never the first lane's cached reading", () => {
+  let calls = 0;
+  const deps: Pick<DaemonDeps, "checkCostGovernor" | "checkQueueGovernor"> = {
+    checkCostGovernor: () => {
+      calls++;
+      // Dispatch 1's reading: under the ceiling. Dispatch 2's reading — the SAME batch, one
+      // dispatch later — is now AT the ceiling: the exact "a ceiling that just fired for the
+      // first time ever" shape this task's rationale names (the $152.28/$150 incident).
+      return calls === 1 ? undefined : { deferred: true, observedDayCostUsd: 150, ceilingUsd: 150 };
+    },
+  };
+  const first = checkDispatchGovernors(deps, 150);
+  assert.equal(first, undefined, "dispatch 1 is admitted — the ceiling had not tripped yet");
+  const second = checkDispatchGovernors(deps, 150);
+  assert.ok(second, "dispatch 2 must be refused — it has to see the ceiling that tripped after dispatch 1 was admitted");
+  assert.equal(second!.kind, "cost");
+  assert.equal(calls, 2, "each dispatch called the seam fresh — never a single cached reading reused for both");
+});
+
+test("W1-T342 acceptance 1 (queue governor): the SAME shape holds for the WIP ceiling — a trip between dispatch 1 and 2 refuses the second", () => {
+  let calls = 0;
+  const deps: Pick<DaemonDeps, "checkCostGovernor" | "checkQueueGovernor"> = {
+    checkQueueGovernor: () => {
+      calls++;
+      return calls === 1 ? undefined : { deferred: true, observedOpenCount: 20, wipLimit: 20 };
+    },
+  };
+  const first = checkDispatchGovernors(deps, undefined);
+  assert.equal(first, undefined, "dispatch 1 is admitted — the WIP limit had not tripped yet");
+  const second = checkDispatchGovernors(deps, undefined);
+  assert.ok(second, "dispatch 2 must be refused — it has to see the WIP limit that tripped after dispatch 1 was admitted");
+  assert.equal(second!.kind, "queue");
+  assert.equal(calls, 2);
+});
+
+test("W1-T342 acceptance 2: an unreadable governor observation (a throw) admits NO further dispatch in that batch — never a silent fall-through to admitted", () => {
+  let calls = 0;
+  const deps: Pick<DaemonDeps, "checkCostGovernor" | "checkQueueGovernor"> = {
+    checkCostGovernor: () => {
+      calls++;
+      if (calls === 1) return undefined; // dispatch 1: readable, genuinely under the ceiling
+      throw new Error("ledger read failed"); // dispatch 2: the SAME batch, now unreadable
+    },
+  };
+  const first = checkDispatchGovernors(deps, 150);
+  assert.equal(first, undefined, "dispatch 1 is admitted — a genuinely readable, under-ceiling verdict");
+  const second = checkDispatchGovernors(deps, 150);
+  assert.ok(second, "dispatch 2 must be refused — an unreadable observation fails CLOSED, never falls through to admitted");
+  assert.equal(second!.kind, "unreadable");
+  if (second!.kind === "unreadable") {
+    assert.equal(second.source, "cost");
+    assert.equal(second.error, "ledger read failed", "the unreadable verdict carries the real failure, never swallowed");
+  }
+});
+
+test("W1-T342 acceptance 2 (queue governor): an unreadable QUEUE observation also fails closed, independently of the cost governor", () => {
+  const deps: Pick<DaemonDeps, "checkCostGovernor" | "checkQueueGovernor"> = {
+    checkCostGovernor: () => undefined, // cost side is genuinely readable and under ceiling
+    checkQueueGovernor: () => {
+      throw new Error("gh pr list failed");
+    },
+  };
+  const verdict = checkDispatchGovernors(deps, undefined);
+  assert.ok(verdict, "an unreadable queue observation must also defer, never fall through to admitted");
+  assert.equal(verdict!.kind, "unreadable");
+  if (verdict!.kind === "unreadable") assert.equal(verdict.source, "queue");
+});
+
+test("W1-T342: omitting BOTH governors entirely still admits every dispatch — unchanged behaviour for a caller that never wired either", () => {
+  const deps: Pick<DaemonDeps, "checkCostGovernor" | "checkQueueGovernor"> = {};
+  assert.equal(checkDispatchGovernors(deps, 150), undefined);
+  assert.equal(checkDispatchGovernors(deps, undefined), undefined);
 });

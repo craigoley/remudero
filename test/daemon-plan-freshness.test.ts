@@ -378,7 +378,14 @@ function ceilingOnDisk(initial: number) {
 }
 
 test("W1-T331: a tick sees ONE consistent cost ceiling even if the policy value changes mid-tick", async () => {
-  const p = planOnDisk(["A"]);
+  // W1-T342: the governor is now consulted TWICE per DISPATCHING tick — once tick-wide (before
+  // retro/auto-triage/kicks/`nextRunnable`) and once again immediately before `runOne`, so a
+  // future multi-lane batch can re-check per lane (see daemon.ts's `checkDispatchGovernors`
+  // doc). Both consultations within the SAME tick must still agree — that is exactly what this
+  // test proves. Two tasks (never one) keep BOTH ticks dispatching — with only one task, tick 2
+  // goes idle the instant tick 1 merges it, and an idle tick makes no per-dispatch consultation
+  // at all (there is nothing to dispatch), which would silently drop this test's tick-2 sample.
+  const p = planOnDisk(["A", "B"]);
   const c = ceilingOnDisk(100);
   const merged = new Set<string>();
   const receivedByGovernor: Array<number | undefined> = [];
@@ -387,7 +394,7 @@ test("W1-T331: a tick sees ONE consistent cost ceiling even if the policy value 
     p.plan(),
     {
       refreshMerged: () => (id: string) => merged.has(id),
-      checkStop: () => (++ticks > 3 ? "tick cap" : undefined),
+      checkStop: () => (++ticks > 2 ? "tick cap" : undefined),
       reloadDailyCostCeilingUsd: c.read,
       checkCostGovernor: (ceilingUsd?: number) => {
         receivedByGovernor.push(ceilingUsd);
@@ -402,12 +409,16 @@ test("W1-T331: a tick sees ONE consistent cost ceiling even if the policy value 
     } as unknown as DaemonDeps,
   );
   assert.ok(
-    receivedByGovernor.length >= 2,
-    `the governor was consulted on more than one tick — got ${JSON.stringify(receivedByGovernor)}`,
+    receivedByGovernor.length >= 4,
+    `expected 2 dispatching ticks x 2 consultations each — got ${JSON.stringify(receivedByGovernor)}`,
   );
-  assert.equal(receivedByGovernor[0], 100, "tick 1's governor saw the ceiling reloaded at the TOP of tick 1, before runOne ran");
+  assert.deepEqual(
+    receivedByGovernor.slice(0, 2),
+    [100, 100],
+    "tick 1's BOTH consultations saw the ceiling reloaded at the TOP of tick 1, before runOne ran",
+  );
   assert.ok(
-    receivedByGovernor[1]! >= 999,
+    receivedByGovernor.slice(2, 4).every((v) => v! >= 999),
     "the mid-tick rewrite is visible only from the NEXT tick's reload — no tick straddled two ceilings",
   );
   p.cleanup();
@@ -440,6 +451,52 @@ test("W1-T331: a THROWING reloadDailyCostCeilingUsd is caught and never takes th
   assert.ok(
     logged.includes("daemon.cost_ceiling_reload_failed"),
     `the failure is ledgered — got ${JSON.stringify(logged.slice(0, 8))}`,
+  );
+  p.cleanup();
+});
+
+// ── W1-T342 acceptance 3: a governed batch still defers as an in-process heartbeat and resumes
+// on its own, never aborting the daemon or escalating. Mirrors the THROWING reloadDailyCostCeilingUsd
+// test immediately above exactly, one layer further in: here it is `checkCostGovernor` ITSELF
+// throwing (an unreadable observation, design (iv)) rather than the ceiling reload — proving the
+// NEW fail-closed wrapping (`checkDispatchGovernors`, daemon.ts) degrades exactly like every
+// other per-tick consultation in this loop, never propagating out and crashing the process the
+// way a bare (pre-W1-T342) call used to.
+
+test("W1-T342 acceptance 3: a THROWING checkCostGovernor fails CLOSED as an in-process heartbeat — never aborts the daemon, and resumes dispatch on its own once readable again", async () => {
+  const p = planOnDisk(["A"]);
+  const logged: string[] = [];
+  const merged = new Set<string>();
+  const ran: string[] = [];
+  let calls = 0;
+  const s = await runDaemon(
+    p.plan(),
+    {
+      refreshMerged: () => (id: string) => merged.has(id),
+      // Terminates the otherwise-infinite loop right after the one real dispatch happens — the
+      // SAME idiom the existing "runDaemon IDLES … dispatches the SAME real task" tests use.
+      checkStop: () => (ran.length > 0 ? "test done" : undefined),
+      checkCostGovernor: () => {
+        calls++;
+        // The first two consultations (this test's tick-wide AND per-dispatch call sites both
+        // route through the SAME seam) are unreadable; the third recovers.
+        if (calls <= 2) throw new Error("ledger read failed");
+        return undefined;
+      },
+      log: (step: string) => logged.push(step),
+      runOne: async (id: string) => { ran.push(id); merged.add(id); return okResult(id); },
+      sleep: async () => {},
+    } as unknown as DaemonDeps,
+  );
+  assert.equal(s.stopReason, "stopped", "the throw never aborted or crashed the loop — it returned normally");
+  assert.deepEqual(ran, ["A"], "dispatch resumed on its own the moment the governor stopped throwing");
+  assert.ok(
+    logged.filter((step) => step === "daemon.governor_check_failed").length >= 2,
+    `each throw is ledgered as a heartbeat, never silently swallowed — got ${JSON.stringify(logged)}`,
+  );
+  assert.ok(
+    !logged.includes("daemon.escalation.failed") && !logged.some((step) => step.includes("escalat")),
+    "a governor fail-closed heartbeat is never an escalation — same discipline as a confirmed-over-ceiling deferral",
   );
   p.cleanup();
 });
