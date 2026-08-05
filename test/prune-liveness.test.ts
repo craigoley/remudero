@@ -426,10 +426,11 @@ test("W1-T175 cadence: buildSweepHook (the daemon's per-poll sweep) reaps a stal
     mkdirSync(worktreesRoot, { recursive: true });
     const staleDir = join(worktreesRoot, "sweep-STALE-1784000000000");
     // Not a real git worktree (git-invisible), dead pid, and backdated well past
-    // DEFAULT_PRUNE_GRACE_MS (2 min) — unambiguous debris.
+    // DEFAULT_WORKTREE_REAP_GRACE_MS (W1-T378: 30 min, this reaper's own ceiling — no longer
+    // pruneGraceMs's 2 min) — unambiguous debris.
     mkdirSync(staleDir, { recursive: true });
     writeRunLock(staleDir, { pid: 999999, run_id: "STALE", startedAt: "2026-07-01T00:00:00Z" });
-    const past = new Date(Date.now() - 10 * 60 * 1000);
+    const past = new Date(Date.now() - 90 * 60 * 1000); // W1-T378: past the 30-min reaper ceiling
     utimesSync(staleDir, past, past);
 
     const ledgerPath = join(root, "ledger.ndjson");
@@ -476,7 +477,7 @@ test("W1-T175 cadence: `rmd sweep` reaps a stale worktree directory on the SAME 
     const staleDir = join(worktreesRoot, "sweep-STALE-CLI-1784000000000");
     mkdirSync(staleDir, { recursive: true });
     writeRunLock(staleDir, { pid: 999999, run_id: "STALE", startedAt: "2026-07-01T00:00:00Z" });
-    const past = new Date(Date.now() - 10 * 60 * 1000);
+    const past = new Date(Date.now() - 90 * 60 * 1000); // W1-T378: past the 30-min reaper ceiling
     utimesSync(staleDir, past, past);
 
     const code = await sweepCommand(["--repo", "remudero-sandbox"]);
@@ -515,7 +516,7 @@ test("W1-T175 cadence: `rmd sweep --dry-run` does NOT reap — matches every oth
     const staleDir = join(worktreesRoot, "sweep-STALE-DRY-1784000000000");
     mkdirSync(staleDir, { recursive: true });
     writeRunLock(staleDir, { pid: 999999, run_id: "STALE", startedAt: "2026-07-01T00:00:00Z" });
-    const past = new Date(Date.now() - 10 * 60 * 1000);
+    const past = new Date(Date.now() - 90 * 60 * 1000); // W1-T378: past the 30-min reaper ceiling
     utimesSync(staleDir, past, past);
 
     const code = await sweepCommand(["--repo", "remudero-sandbox", "--dry-run"]);

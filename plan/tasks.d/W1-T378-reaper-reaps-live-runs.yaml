@@ -75,6 +75,14 @@
     NOT IN SCOPE: the lock-liveness predicate itself (W1-T368 owns pid identity); making a reaped run write
     a terminal ledger record; the missing-pr.opened dispatch arm (W1-T377); and the widowed-lock pass, which
     is correct and needs no age gate.
+
+    ALSO DELIBERATELY NOT CHANGED, and this is the residual to re-file if it ever bites: pruneStaleRuns
+    carries the SAME root-mtime gate (`lockRead.kind !== "live" && graceMs > 0` → `now() - statSync(curPath)
+    .mtimeMs < graceMs`). It is NOT fixed here because keeping more is not free there: pruneStaleRuns runs at
+    RUN START to reclaim a colliding worktree name, so an entry it declines to remove BLOCKS the run that
+    needs the name, whereas a cadence-reaper keep costs only disk. Its exposure is also much narrower — the
+    age guard applies only to a LOCKLESS or CORRUPT lock, and a "live" lock naming a dead pid skips it
+    entirely. Changing it needs its own argument about what a blocked dispatch is worth, which is a task.
   acceptance:
     - claim: "a worktree with an old ROOT mtime whose nested files were modified seconds ago is KEPT, not reaped"
       proof: "unit test: test/worktree-reap-liveness.test.ts"
@@ -83,11 +91,12 @@
     - claim: "an ambiguous liveness signal keeps the worktree rather than destroying it, and the pass ledgers what it kept and why"
       proof: "unit test: test/worktree-reap-liveness.test.ts"
     - claim: "the existing reaper contract is unchanged for the widowed-lock pass and for unreadable roots"
-      proof: "unit test: test/worker.test.ts"
+      proof: "unit test: test/prune-liveness.test.ts"
   risk: high
   origin: oper#duplicate-dispatch-W1-T350-2026-08-05
   plan_refs: ["W1-T175", "W1-T377", "W1-T368", "W1-T179"]
-  files: [src/lib/worker.ts, plan/policy.yaml, test/worktree-reap-liveness.test.ts, test/worker.test.ts]
+  files: [src/lib/worker.ts, src/lib/policy.ts, plan/policy.yaml, test/worktree-reap-liveness.test.ts,
+    test/prune-liveness.test.ts, test/policy.test.ts, test/config-reader-seams.test.ts]
   status: queued
   attempts: 0
   note: "FILED, NOT BUILT, deliberately: W1-T377 closes the arm that actually cost the duplicate build and

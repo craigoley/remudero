@@ -49,6 +49,25 @@ pruneGraceMs:
   min: 30000
   max: 900000
 
+# W1-T378: the CADENCE reaper's own age ceiling, deliberately NOT pruneGraceMs above.
+# pruneGraceMs is consumed by six pruneStaleRuns call sites at RUN START, where it guards a
+# narrow create-before-lock race and a longer value delays reclaiming a colliding worktree
+# name. reapStaleWorktrees runs on a cadence with no such urgency, so its ceiling is a
+# separate dial and raising it costs only disk.
+#
+# 1800000 (30 min) is MEASURED, not picked. Over the unioned ledger (667 files incl. 666
+# gzipped rotations, 4,268,018 lines read, 389,119 unique, 541 runs that reached a verdict,
+# 11,059 intra-run gaps): p50 0.0 min, p90 1.5 min, p95 4.4 min, p99 29.7 min. At the old
+# 120000, 8.55% of quiet stretches inside a HEALTHY run already exceeded the ENTIRE grace.
+# 30 min covers p99 and is deliberately the SAME number as status.ts's
+# DEFAULT_LIVENESS_BOUND_MS, so the reaper and the console agree about when a quiet run stops
+# counting as live instead of each holding a private opinion.
+worktreeReapGraceMs:
+  value: 1800000
+  origin: "net-new"
+  min: 120000
+  max: 7200000
+
 pollIntervalMs:
   value: 60000
   origin: "lifted:src/lib/daemon.ts:87 (DEFAULT_POLL_INTERVAL_MS)"

@@ -46,6 +46,9 @@ export interface PolicyHeadroomRung {
 export interface PolicyValues {
   proofTimeoutMs: number;
   pruneGraceMs: number;
+  /** W1-T378: the CADENCE worktree reaper's age ceiling — separate from {@link
+   *  PolicyValues.pruneGraceMs}, which six run-start `pruneStaleRuns` call sites consume. */
+  worktreeReapGraceMs: number;
   pollIntervalMs: number;
   fixStrikeCap: number;
   sweep: {
@@ -147,6 +150,7 @@ export class PolicyError extends Error {
 const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   proofTimeoutMs: "lifted",
   pruneGraceMs: "lifted",
+  worktreeReapGraceMs: "net-new",
   pollIntervalMs: "lifted",
   fixStrikeCap: "lifted",
   "sweep.staleDays": "lifted",
@@ -330,6 +334,7 @@ export function validatePolicy(raw: unknown): Policy {
 
   const proofTimeoutMs = numberField("proofTimeoutMs", raw.proofTimeoutMs, origin);
   const pruneGraceMs = numberField("pruneGraceMs", raw.pruneGraceMs, origin);
+  const worktreeReapGraceMs = numberField("worktreeReapGraceMs", raw.worktreeReapGraceMs, origin);
   const pollIntervalMs = numberField("pollIntervalMs", raw.pollIntervalMs, origin);
   const fixStrikeCap = numberField("fixStrikeCap", raw.fixStrikeCap, origin);
 
@@ -385,6 +390,7 @@ export function validatePolicy(raw: unknown): Policy {
     values: {
       proofTimeoutMs,
       pruneGraceMs,
+      worktreeReapGraceMs,
       pollIntervalMs,
       fixStrikeCap,
       sweep: { staleDays, strikeCap: sweepStrikeCap, wipLimit, tmpMaxAgeMs, dispatchLanes, dailyCostCeilingUsd },

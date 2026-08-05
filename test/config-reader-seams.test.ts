@@ -115,6 +115,15 @@ const ALLOWED: ReadonlyArray<{ file: string; symbol: string; reason: string }> =
       "test/worker-run-lock.test.ts drives pruneStaleRuns with an explicit graceMs, which is the seam " +
       "that actually matters here.",
   },
+  {
+    file: "src/lib/worker.ts",
+    symbol: "DEFAULT_WORKTREE_REAP_GRACE_MS",
+    reason:
+      "W1-T378, and allowlisted for exactly its sibling DEFAULT_PRUNE_GRACE_MS's reason: evaluated at " +
+      "MODULE LOAD, so no per-call seam could arm in time, and already passed as an argument — " +
+      "reapStaleWorktrees takes opts.maxAgeMs, which test/worktree-reap-liveness.test.ts drives " +
+      "explicitly (and also asserts the shipped default's VALUE, so a silent policy drift still fails).",
+  },
 ];
 
 interface Reader {
@@ -179,8 +188,12 @@ test("CALIBRATION: the detection finds the readers recon-EJ measured, and no mor
   // ELEVENTH consumer, also SEAMED (`deps.policy ?? loadDefaultPolicy()`), reading the daily cost
   // ceiling's committed default for the ACCOUNT strip's provenance render. Raising this number is
   // the correct response to a new reader ONLY when that reader also passes test 2; a bare new
-  // reader must fail there first.
-  assert.equal(readers.length, 12, `expected 12 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
+  // reader must fail there first. THIRTEEN since `DEFAULT_WORKTREE_REAP_GRACE_MS` (worker.ts,
+  // W1-T378) landed — a TWELFTH consumer, module-load and therefore UNSEAMED, so it is ALLOWLISTED
+  // rather than seamed, for its sibling DEFAULT_PRUNE_GRACE_MS's reason (the argument seam that
+  // matters is reapStaleWorktrees' own `opts.maxAgeMs`). It failed test 2 first, as this comment
+  // requires, and was allowlisted only after.
+  assert.equal(readers.length, 13, `expected 13 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
 
   // `symbolise` labels the LAST bare `const policy = loadPolicy(...)` as daemonCommand's, because that
   // reader carries no distinctive identifier of its own. Today exactly ONE such line survives —
