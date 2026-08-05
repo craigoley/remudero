@@ -1,0 +1,34 @@
+id: fb-1785969218105-99834b
+ts: 2026-08-05T22:33:38.105Z
+raw: "THE FEEDBACK PREVIEW GIVES NO SIGNAL DURING THE MODEL CALL, SO THE BUTTON
+  READS AS DEAD — first real operator use of W1-T347's console feedback path,
+  2026-08-05 evening. The operator pasted the write token, submitted, got NO
+  immediate response, clicked again several times, and eventually saw 'Preview
+  generated — nothing is filed yet. Review it, then submit again to confirm and
+  file.' His words: 'bad ux… I have no idea if I still need to address this
+  feedback in some way or not.' TWO DEFECTS, and the second is worse. (1) NO
+  PENDING STATE. The interpreter makes a model call; nothing tells the operator
+  it is working, so the gap between click and banner is indistinguishable from a
+  broken button. A spinner, a disabled button, or a 'thinking…' line is the
+  whole fix. (2) THE CONFIRMATION SEMANTICS ARE NOT SELF-EVIDENT. 'Submit again
+  to confirm and file' is correct and was still ambiguous in use — after
+  multiple clicks the operator could not tell whether he had filed once, several
+  times, or not at all. Establish what repeated clicks actually do: whether each
+  regenerates a preview (a model call each, at cost), whether the second click
+  files, and whether double-filing is possible. The arm-then-confirm idiom
+  elsewhere in the console is CLIENT-SIDE ONLY with no server nonce, so
+  idempotency cannot be assumed. RECON: read the console feedback path end to
+  end and establish the click-to-file state machine, then say what a first-time
+  user should see at each step. Note the design constraint from W1-T347: the
+  operator must see and be able to correct the interpreter's expansion before it
+  files, so the confirmation step is deliberate and must not be removed — the
+  fix is making the state legible, not skipping it. Falsifying check: if a
+  pending state already renders and simply did not appear because the model call
+  returned faster than the operator's second click, the defect is only the
+  ambiguity after the banner and not the missing signal."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null
+expansion: null

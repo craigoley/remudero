@@ -1,0 +1,35 @@
+id: fb-1785969338913-dc3d0f
+ts: 2026-08-05T22:35:38.913Z
+raw: "THE CONSOLE FEEDBACK PATH FILES ON EVERY CLICK WHILE THE BANNER SAYS
+  NOTHING IS FILED — measured, not inferred. Two byte-identical entries landed
+  five seconds apart from the operator's clicks: fb-1785969044581-c341bd at
+  22:30:44.584Z and fb-1785969049475-f40327 at 22:30:49.475Z, both origin: ui,
+  both carrying the same raw text. The banner he saw AFTER those clicks read
+  'Preview generated — nothing is filed yet. Review it, then submit again to
+  confirm and file.' It had already filed twice. THIS IS WORSE THAN THE UX
+  COMPLAINT FILED ALONGSIDE IT (fb-1785969218105-99834b): that entry described a
+  missing pending state and ambiguous confirmation semantics. The actual defect
+  is that the write is not gated by the confirmation at all, or each click both
+  files and previews — so the banner's central claim is FALSE and an operator
+  who clicks twice because nothing appeared has silently double-filed. One
+  duplicate has been withdrawn by hand. RECON: read the console feedback route
+  end to end and establish the click-to-file state machine — specifically
+  whether the preview and the file are the same request, whether the
+  confirmation is enforced server-side or is a client-only affordance like
+  arm-then-confirm (which has NO server nonce in panel-actions.ts,
+  panel-graph.ts, service.ts or fleet-control.ts), and whether an id or nonce
+  makes a repeat click idempotent. W1-T347's design constraint stands: the
+  operator must SEE and be able to CORRECT the interpreter's expansion before it
+  files, so the confirmation step is deliberate — but a confirmation that does
+  not gate the write is worse than none, because it tells the operator a false
+  thing about what happened. Note both entries carry expansion: null, so the
+  interpreter did not populate it on either write. Falsifying check: if the two
+  entries came from two genuinely separate submissions rather than double-clicks
+  on one, the banner is honest and the defect is only the missing pending
+  state."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null
+expansion: null
