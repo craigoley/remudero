@@ -19,6 +19,7 @@ import type { RunResult } from "./run-result.js";
 import { headroomExhausted, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
 import type { CostGovernorResult, QueueGovernorResult } from "./sweep.js";
+import { checkDispatchGovernors, governorDeferPayload } from "./dispatch-governor.js";
 import { unmetDependencies, type Plan, type Task } from "./plan.js";
 import { partitionByFileOverlap, serializedLedgerPayload } from "./dispatch-overlap.js";
 
@@ -1299,7 +1300,55 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
     if (dispatchSet.length === 0) return summary("no_runnable");
 
     log("dispatch.concurrent_set", { tasks: dispatchSet.map((t) => t.id), lane_count: laneCount });
+
+    // W1-T342's PER-DISPATCH GOVERNOR GATE, APPLIED PER LANE (the half that fix did not reach).
+    //
+    // The pass-level `checkCostGovernor`/`checkQueueGovernor` reads far above STOP the whole pass.
+    // They are not the same thing as this: one reading taken before any lane was admitted stood in
+    // for EVERY lane in the batch, so a ceiling that trips between lane 1 and lane 2 admitted lane 2
+    // anyway. `checkDispatchGovernors`' own doc names this exact call site: "W1-T343's loop must call
+    // THIS function again per lane it admits, never hoist a single call above the loop."
+    //
+    // WHERE THE CHECK SITS, AND WHY IT IS HERE RATHER THAN INSIDE THE `.map`. A check inside
+    // `dispatchSet.map(...)` would LOOK per-lane and not be: `.map`'s callback runs SYNCHRONOUSLY
+    // for every element, so all N readings would be taken in the same tick of the event loop, before
+    // any lane has done any work — one reading wearing N hats. Admission therefore happens in this
+    // SEQUENTIAL loop, each iteration taking its own fresh reading, and only the admitted subset is
+    // handed to `allSettled`.
+    //
+    // WHAT THAT DOES AND DOES NOT BUY, stated rather than overclaimed: because lanes run
+    // concurrently, lane 1's own spend is still un-ledgered when lane 2 is admitted, so this does
+    // NOT let lane 2 see lane 1's cost. What it does catch is a ceiling crossed by ANY OTHER writer
+    // between readings (a previous batch's late-ledgered cost, the sweep, a second process) and an
+    // observation that becomes UNREADABLE for a later lane — both of which the single reading
+    // silently admitted through. That is the same value W1-T342 bought in runDaemon.
+    //
+    // A MID-PASS REFUSAL MUST NOT ABORT THE PASS. `break` stops ADMITTING; it never touches lanes
+    // already admitted, and the pass proceeds to dispatch them and record every outcome exactly as
+    // before. Refusing lane 2 is a deferral of lane 2, not a failure of lane 1.
+    const admitted: Task[] = [];
     for (const t of dispatchSet) {
+      const verdict = checkDispatchGovernors(deps, undefined);
+      if (verdict) {
+        // A DISTINCT step from the pass-level `drain.cost_governor`/`drain.queue_governor` above,
+        // deliberately: "the pass never started" and "lane 3 of 4 was refused after 2 were admitted"
+        // are different events, and collapsing them would make a partial batch unreadable.
+        log("dispatch.lane_governed", {
+          task: t.id,
+          admitted: admitted.length,
+          of: dispatchSet.length,
+          lane_count: laneCount,
+          ...governorDeferPayload(verdict),
+        });
+        break;
+      }
+      admitted.push(t);
+    }
+    // Every lane refused ⇒ nothing dispatches, and the pass says so rather than reporting
+    // "no_runnable" (there WERE runnable tasks; a governor deferred them).
+    if (admitted.length === 0) return summary("cost_governor_deferred", "every lane deferred by a governor re-checked at dispatch");
+
+    for (const t of admitted) {
       attempted.push(t.id);
       log("drain.iteration", { task: t.id, attempted: attempted.length, max, lane: true });
     }
@@ -1307,12 +1356,12 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
     // CONCURRENT LANES: `allSettled`, never `all` — see this function's own
     // doc. Every sibling's outcome is recorded below BEFORE the pass decides
     // whether to stop.
-    const settled = await Promise.allSettled(dispatchSet.map((t) => deps.runOne(t.id)));
+    const settled = await Promise.allSettled(admitted.map((t) => deps.runOne(t.id)));
 
     let blocked: { taskId: string; result: RunResult } | undefined;
     let failure: { taskId: string; message: string } | undefined;
-    for (let i = 0; i < dispatchSet.length; i++) {
-      const t = dispatchSet[i];
+    for (let i = 0; i < admitted.length; i++) {
+      const t = admitted[i];
       const outcome = settled[i];
       if (outcome.status === "rejected") {
         const message = String((outcome.reason as Error)?.message ?? outcome.reason);

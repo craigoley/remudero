@@ -44,6 +44,9 @@ import {
 import { HEADROOM_LIMIT_PCT, RESET_UNKNOWN, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
 import type { CostGovernorResult, QueueGovernorResult } from "./sweep.js";
+// VALUE import (W1-T342's gate moved to its own pure module so drain.ts can share it — see that
+// module's header for why neither daemon.ts nor sweep.ts could host it). Pure, no filesystem.
+import { checkDispatchGovernors, type DispatchGovernorVerdict } from "./dispatch-governor.js";
 import { assertRunnable, PlanError, type MergedResolver, type Plan, type Task } from "./plan.js";
 import type { StatusProjection } from "./status.js";
 // Type-only (erased at build, same discipline as StatusProjection above) — W1-T160's
@@ -1285,67 +1288,21 @@ export function daemonBoot(
   return assertion;
 }
 
-/** W1-T342: discriminates which governor (if either) is deferring THIS dispatch, and why. */
-export type DispatchGovernorVerdict =
-  | { kind: "cost"; result: CostGovernorResult }
-  | { kind: "queue"; result: QueueGovernorResult }
-  | { kind: "unreadable"; source: "cost" | "queue"; error: string };
-
 /**
- * W1-T342 — THE PER-DISPATCH GOVERNOR GATE (design (i)/(ii)/(iv)).
+ * W1-T342's PER-DISPATCH GOVERNOR GATE now lives in sweep.ts, RE-EXPORTED here unchanged.
  *
- * `checkCostGovernor`/`checkQueueGovernor` used to be consulted exactly ONCE, at the top of the
- * tick, and that single reading silently stood in for every dispatch-shaped action the REST of
- * the tick could still take — the retro trigger, the idle branch's auto-triage rung, and (once
- * W1-T343 wires a per-lane loop over `nextRunnable`'s pick) every lane in a multi-lane batch. A
- * ceiling that trips BETWEEN two dispatches in that batch would never be seen: the second lane
- * spends against a reading taken before the first lane's own (still in-flight, not yet ledgered)
- * cost could possibly show up in it.
+ * WHY IT MOVED. `runDrainLanes` (drain.ts) must call the SAME function per lane it admits — this
+ * function's own doc says so in as many words ("W1-T343's loop must call THIS function again per
+ * lane it admits, never hoist a single call above the loop"). But daemon.ts already imports
+ * `nextRunnable` FROM drain.ts, so drain.ts importing it from here would close an import cycle.
+ * sweep.ts is the only home that avoids that: it already owns `CostGovernorResult` and
+ * `QueueGovernorResult`, it imports neither daemon nor drain, and BOTH already import it.
  *
- * THE FIX: every dispatch-shaped action gets its OWN, freshly-taken reading. `runDaemon` below
- * still calls this once at the top of the tick (gating retro/auto-triage/kicks/`nextRunnable`
- * exactly as the single call used to) AND calls it again immediately before the actual dispatch
- * (`runOne`) — see that second call site's own comment. At N=1 (today; W1-T343's lane loop is
- * explicitly out of THIS task's scope) nothing async runs between the two calls in a dispatching
- * tick, so the second call always agrees with the first — a provable no-op change in observable
- * behaviour until lanes exist. It becomes load-bearing the moment a batch can hold more than one
- * lane: W1-T343's loop must call THIS function again per lane it admits, never hoist a single
- * call above the loop the way the tick-top call alone would.
- *
- * FAIL-CLOSED ON AN UNREADABLE OBSERVATION (design (iv)): `deps.checkCostGovernor`/
- * `deps.checkQueueGovernor` are pure, non-throwing predicates in sweep.ts's OWN contract, but the
- * real wiring (`costGovernorGateFor`/`queueGovernorGateFor`, run-task.ts) reads a ledger file /
- * live PR count on every call — so a LATER dispatch in a batch can hit a transient read failure
- * the first dispatch didn't. Unlike every OTHER per-tick consultation in `runDaemon` (`reloadPlan`,
- * `reloadDailyCostCeilingUsd`, `sweep`, `checkAutoTriage`, `checkRetroTrigger` all already catch
- * and degrade), these two calls were previously bare: a throw propagated straight out of
- * `runDaemon` — a full-process crash, never a deferral. The safe answer to "the reading could not
- * be taken" is the SAME as a confirmed-over-ceiling reading — admit no further dispatch this
- * batch (`kind: "unreadable"`) — never a silent fall-through to "admitted" because the check
- * errored.
+ * The alternative was a second copy of the predicate in drain.ts, which is the defect this repo
+ * has paid for twice. Re-exported rather than relocated-and-rewired so every existing importer
+ * (test/cost-governor.test.ts among them) keeps working byte-for-byte.
  */
-export function checkDispatchGovernors(
-  deps: Pick<DaemonDeps, "checkCostGovernor" | "checkQueueGovernor">,
-  dailyCostCeilingUsd: number | undefined,
-): DispatchGovernorVerdict | undefined {
-  let costGoverned: CostGovernorResult | undefined;
-  try {
-    costGoverned = deps.checkCostGovernor?.(dailyCostCeilingUsd);
-  } catch (e) {
-    return { kind: "unreadable", source: "cost", error: e instanceof Error ? e.message : String(e) };
-  }
-  if (costGoverned) return { kind: "cost", result: costGoverned };
-
-  let queueGoverned: QueueGovernorResult | undefined;
-  try {
-    queueGoverned = deps.checkQueueGovernor?.();
-  } catch (e) {
-    return { kind: "unreadable", source: "queue", error: e instanceof Error ? e.message : String(e) };
-  }
-  if (queueGoverned) return { kind: "queue", result: queueGoverned };
-
-  return undefined;
-}
+export { checkDispatchGovernors, type DispatchGovernorVerdict } from "./dispatch-governor.js";
 
 /**
  * The daemon's scheduler loop. Deterministic; no LLM decisions. Each tick:
