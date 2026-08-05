@@ -1,0 +1,72 @@
+- id: W1-T348
+  title: "the operator-facing translator SHIPPED and nobody calls it — summarizeEscalation, proposeFeedbackWithSummary and the console's decisionSummaryHtml renderer all exist with ZERO generation call sites; wire summary generation at escalation creation and at triage-proposal time"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  rationale: "RE-DERIVED AT c2a96cd, from source. WHAT EXISTS: W1-T313/#1249 merged the full
+    translation surface — DecisionSummary (src/lib/feedback.ts: a bounded, validated card — headline
+    <= 15 words, what_happened, an imperative decision, 2-3 labelled options whose text is COPIED
+    from the escalation's own options, never paraphrased), summarizeEscalation (src/lib/escalate.ts:
+    async, fail-open — any throw returns null and rendering degrades to the raw body),
+    validateDecisionSummary (the bounds gate), renderIssueBody's summary-above-raw layout, and
+    serve.ts's decisionSummaryHtml console card. WHAT IS MISSING: a caller. grep at c2a96cd:
+    summarizeEscalation has zero call sites outside its own module and docs; the feedback-side
+    proposeFeedbackWithSummary and the realDecisionSummarizer seam are equally uncalled. Every
+    escalation the operator has ever seen rendered raw agent-register text because generation is
+    never invoked — the exact ships-unwired class W1-T322's advisory floor now flags.
+    THE OPERATOR'S DIRECTION (oper#needs-me-filings-2026-08-04): 'that gets processed through a model
+    first that will translate what the agent is requesting into something I will understand how to
+    answer, or the exact steps on the actions I need to take.'
+    COST, STATED (filing rule): needs-human volume measured 2026-08-05 is ~10-19 escalations/day
+    (149 in the reconciler era from 2026-07-28; 39 since 2026-08-01). One cheap-mount summarizer call
+    per escalation plus one per triage proposal is cents per day at current volume, and the call sits
+    on the escalation path — already a slow, terminal path — never on the dispatch hot loop.
+    FAILURE, STATED: fail-open is already the built contract — summarizer throw/timeout => null =>
+    raw-body issue and raw console card, never a lost or delayed escalation."
+  design: |
+    WIRE THE EXISTING SEAMS; INVENT NOTHING.
+    (i) AT ESCALATION CREATION: the caller awaits summarizeEscalation and passes the result as
+    Escalation.decisionSummary before invoking the deliberately-sync escalate()/tryEscalate — the
+    wiring shape W1-T313's own comments sanction. Establish FROM SOURCE whether one shared async
+    wrapper at the choke point serves the producers or whether the main producers wire individually;
+    state the choice and why in the PR body. Producers that cannot await (if any) pass null and lose
+    nothing — that is the fail-open default.
+    (ii) AT TRIAGE-PROPOSAL TIME: wire proposeFeedbackWithSummary so a proposal writes the validated
+    summary onto the feedback entry — W1-T313's first acceptance criterion, now with a live caller.
+    (iii) THE MODEL SEAM AND MOUNT: reuse the existing realDecisionSummarizer seam and the cheapest
+    mount resolution the repo already uses for judge-class calls; do not mint a new model-call idiom.
+    (iv) OPTIONS ARE SACRED: the summary's options must remain the escalation's own, verbatim —
+    validateDecisionSummary enforces the bounds and the tests must assert the pass-through, because a
+    paraphrased option is the confidently-mistranslated failure the operator cannot detect. The raw
+    payload stays byte-identical and reachable behind the summary everywhere it renders.
+    (v) FALSIFIER, BOTH DIRECTIONS: a wired producer's escalation carries a validated summary whose
+    options match the escalation's verbatim; a summarizer that throws still opens the issue with the
+    raw body and no summary. The first must FAIL against current source (nothing generates today).
+    NOT IN SCOPE: the ask-type split (W1-T346 — the summary renders either way); the residual judge
+    (W1-T349); enriching thin producers' payloads (the circuit-break/lifetime-cap boilerplate is a
+    follow-up once summaries expose how thin they are); the feedback interpreter (W1-T350).
+  acceptance:
+    - claim: "an escalation created through a wired producer carries a validated decisionSummary whose options are the escalation's own verbatim, and a summarizer failure still opens the issue with the raw body"
+      proof: "unit test: test/escalate.test.ts"
+    - claim: "a triage proposal writes the validated summary onto the feedback entry it proposes from"
+      proof: "unit test: test/triage.test.ts"
+  risk: high
+  origin: oper#needs-me-filings-2026-08-04
+  plan_refs: ["W1-T313", "W1-T322", "§7B"]
+  files: [src/run-task.ts, src/lib/escalate.ts, src/lib/triage.ts, test/escalate.test.ts, test/triage.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — summary presence, option pass-through and fail-open arms all assert in-process
+    against injected summarizer deps, plus one wiring test against the real default seam.
+    risk:high — a model call joins the escalation path (spend + latency on a path that pages the
+    operator), and a wrong wiring could lose escalations; the fail-open arm is therefore an acceptance
+    criterion, not a nice-to-have.
+    budget_usd 70 — the seams exist; the cost is auditing ~20 producers for the await-capable wiring
+    point and the two-direction falsifier.
+    NO depends_on: renders value alone — every needs-me card and issue body improves the day it lands,
+    typed or not.
+    ONE CONCERN: generation gets a caller. The card's design, bounds and renderers merged with
+    W1-T313 and are not reopened here."

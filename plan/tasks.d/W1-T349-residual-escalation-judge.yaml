@@ -1,0 +1,86 @@
+- id: W1-T349
+  title: "an LLM judge between a needs-me candidate and the operator's board — routing-only (needs-human vs a demoted fleet-notice label), fail-open to needs-human, never suppressing content, and ACCEPTED only by replay against the recorded historical corpus: zero demotions of items that historically needed the operator"
+  repo: remudero
+  depends_on: [W1-T345, W1-T346]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 90.00
+  rationale: "RE-DERIVED AT c2a96cd. THE OPERATOR'S DIRECTION (oper#needs-me-filings-2026-08-04):
+    'some sort of an LLM as a judge that sits between the task for a needs-me and the actual
+    implementation of putting that on the console as a needs-me.' The pending feedback entry
+    fb-1785882211812-bafd8f names the same territory and this task is its consumer.
+    THE MEASURED CASE, WHICH ALSO SIZES THE JOB HONESTLY: of 369 historical needs-human issues (read
+    2026-08-05), ~80% needed no operator — but the DETERMINISTIC stack already retires most of that:
+    the reconciler auto-closed 62% of reconciler-era volume, referent-coverage fixes (#1041, #1084)
+    removed the un-retirable class, W1-T114's wait disposition removed the checks-pending class at
+    source, and W1-T345 removes the duplicate storms. The residue measured over the reconciler era is
+    ~10% — items with no referent or whose referent IS the unresolved thing. THE JUDGE'S JOB IS THAT
+    RESIDUE, not the 80%: deciding whether a deterministically-unretirable item is worth the
+    operator's attention NOW. An earlier console measurement (fb-1784756096314-a6f58b, triaged
+    already-decided) found 26 of 31 open needs-me items stale — the noise this judge exists to keep
+    off the board while the deterministic stack cannot yet see it.
+    THE ASYMMETRY THAT SHAPES EVERYTHING: a FALSE NEGATIVE (demoting something the operator needed)
+    hides work he cannot know to look for; a FALSE POSITIVE costs him one skim. So the judge may only
+    DEMOTE, never drop; demotion must be recoverable and visible; and every failure mode must deliver
+    the item as needs-human unchanged.
+    COST, STATED (filing rule): one cheap-mount call per delivered escalation after W1-T345's dedup —
+    ~10-19/day measured => cents per day; on the escalation slow path, never the dispatch loop.
+    FAILURE, STATED: model error, timeout, unparseable verdict, or governor refusal => the item files
+    as needs-human exactly as today. Fail-open is an acceptance criterion."
+  design: |
+    ROUTING ONLY, DOWNSTREAM OF THE DETERMINISTIC STACK.
+    (i) THE JUDGE SEES the full typed Escalation (class, taskId, summary, detail, options,
+    recommendation, cause, askType) at the one choke point every producer already crosses. It returns
+    demote | deliver with a one-line reason. It runs AFTER dedup (W1-T345) — never judging a
+    duplicate — and never runs at all for classes that are operator-owned by rule: MANUAL and GRILL
+    are exempt and always deliver, as is anything the operator's own CLI escalated.
+    (ii) DEMOTION IS A LABEL, NOT SILENCE: a demoted item still opens its GitHub issue, labelled
+    fleet-notice instead of needs-human, with the judge's reason as the first comment. It leaves the
+    NEEDS ME board (which keys on needs-human) but remains durable, searchable, and listable — the
+    suppression surface is the label query itself, and the console may render a collapsed
+    'N fleet notices' count without paging. Recovery is relabelling — nothing is deleted, nothing is
+    unfiled. The reconciler must treat fleet-notice issues exactly as it treats needs-human ones so
+    demoted items still self-retire.
+    (iii) THE HOLDOUT IS THE ACCEPTANCE, NOT A NICE-TO-HAVE: build a checked-in fixture from the
+    historical corpus (issue number, class, title, options, and a mechanically-derived outcome label —
+    operator-acted vs machine-resolved — from each issue's recorded closure: verified override/
+    hand-fix/ruling comments vs reconciler/stale/bulk closes). Replaying the judge over that fixture
+    must show ZERO demotions among operator-acted items and a stated demotion floor among
+    machine-resolved items that the deterministic stack would not already have retired. State both
+    numbers in the shipped test. The fixture derivation is mechanical from GitHub's own record — no
+    measurement anyone must invent.
+    (iv) FALSIFIER, BOTH DIRECTIONS: a judge stub returning demote on a MANUAL item must be
+    overridden by the exemption rule (delivered anyway); a judge dep that throws must deliver
+    needs-human unchanged. Both must FAIL against a naive wiring.
+    NOT IN SCOPE: retiring items (the reconciler's job); the ask-type classifier (W1-T346); summary
+    generation (W1-T348); any change to producers.
+  acceptance:
+    - claim: "a judge failure, timeout, or unparseable verdict delivers the escalation as needs-human unchanged, and MANUAL, GRILL and operator-CLI escalations are exempt from judgement entirely"
+      proof: "unit test: test/escalate.test.ts"
+    - claim: "replaying the judge over the checked-in historical corpus fixture demotes zero operator-acted items and meets the stated demotion floor on machine-resolved items, with both numbers asserted in the test"
+      proof: "unit test: test/escalate.test.ts"
+    - claim: "a demoted item still opens its issue under the fleet-notice label with the judge's reason, and the reconciler retires fleet-notice issues exactly as it retires needs-human ones"
+      proof: "unit test: test/sweep.test.ts"
+  risk: high
+  origin: oper#needs-me-filings-2026-08-04
+  plan_refs: ["W1-T345", "W1-T346", "W1-T313", "§4B"]
+  files: [src/lib/escalate.ts, src/run-task.ts, src/lib/sweep.ts, test/escalate.test.ts, test/sweep.test.ts, test/fixtures/needs-human-corpus.json]
+  status: queued
+  attempts: 0
+  note: "verify:auto — routing decisions over injected judge deps plus a corpus-replay fixture, all
+    in-process; the fixture build is a one-time mechanical derivation from the GitHub record.
+    risk:high — an LLM sits between the fleet and the operator's attention: the false-negative
+    direction hides work from a human, which is why demote-only, exemptions, fail-open and the
+    zero-demotion holdout line are all acceptance-level, not advisory.
+    budget_usd 90 — the largest in the arc: the judge itself is small but the corpus fixture and the
+    two-direction falsifiers are the deliverable.
+    depends_on IS REAL, BOTH EDGES: W1-T345 so the judge never spends on duplicates and the residue it
+    sees matches the residue it was sized for; W1-T346 so demotion routing has the label vocabulary
+    and the exemption rule has a typed field to key on.
+    SEQUENCED LAST IN THE ARC DELIBERATELY: the deterministic stack (reconciler + referent coverage +
+    W1-T114 + W1-T345) retires ~90% of historical volume without a model; this judge earns its spend
+    only on what remains, and its own holdout replay is the evidence either way. If the residue after
+    the deterministic stack proves too small to justify a model call, that is a finding for the
+    operator to rule on — recorded as a question, never as a filed-away no (the decision-authority
+    audit's rule)."

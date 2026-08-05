@@ -1,0 +1,67 @@
+- id: W1-T345
+  title: "escalate()'s dedup is gated on a PR reference, so a PR-LESS escalation never dedups — one daemon condition opened EIGHT byte-identical queue-starved issues; dedup referent-less escalations on (taskId, class, cause) with the second observer APPENDING"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  rationale: "RE-DERIVED AT c2a96cd, from source and the full issue corpus (369 needs-human issues read
+    2026-08-05). THE GATE: escalate()'s duplicate search (src/lib/escalate.ts) begins from a PR number
+    scraped out of summary/detail text, and the whole dedup block is skipped when none is found — so
+    every escalation whose subject is a DAEMON or QUEUE condition rather than a PR files fresh every
+    time its producer fires. W1-T195 widened the dedup KEY (headSha, cause) but never removed the
+    PR-reference gate, so its discipline protects exactly the escalations that least need it.
+    THE MEASURED COST: issue #1220 ('daemon: dispatch queue starved') was followed by SEVEN
+    byte-identical siblings (#1223/#1233/#1241/#1261/#1264/#1266/#1271) — one per daemon tick for as
+    long as the condition held, because the starved-queue escalation names no PR. The blocked-transitive
+    family shows the same shape per task: W1-T152 collected 6 near-identical filings, W1-T314 collected
+    4 plus a breaker issue — 5 open issues today all carrying ONE pending decision. Referent-less
+    producers are the growing class: escalateStarvation (W1-T298), escalateCrashLoop (W1-T215),
+    escalateLifetimeCapExceeded (W1-T316), escalateCircuitBreak (P29(ii)), escalateHeadroomReserve
+    (W1-T249) all escalate daemon-level conditions with no PR to scrape.
+    WHY THIS IS FIRST IN THE OPERATOR'S NEEDS-ME ARC: ~80% of the historical corpus needed no operator
+    (measured; 297 of 369), and duplicates are the purest slice of that noise — retiring them is
+    deterministic, model-free, and shrinks every downstream judgement's workload."
+  design: |
+    EXTEND THE EXISTING DEDUP, DO NOT ADD A SECOND ONE.
+    (i) WHEN NO PR REFERENCE RESOLVES, dedup against open needs-human issues on (taskId, class, cause)
+    — cause is the W1-T195 field and is optional, so the fallback key when a producer sets no cause is
+    (taskId, class) plus the rendered title's fixed summary phrase, which is per-producer constant.
+    Verify escalate()'s current search shape FROM SOURCE before editing; the W1-T104 comment already
+    argues the choke-point placement: every caller inherits a fix inside escalate() by construction.
+    (ii) THE SECOND OBSERVER APPENDS, NEVER DROPS SILENTLY: on a referent-less duplicate hit, append
+    the same 'Another escalation observed the same condition' comment the PR-keyed path already writes,
+    so the issue thread carries the recurrence evidence and the ledger line records outcome
+    deduped rather than opened. The condition staying live must remain visible in the thread.
+    (iii) DISTINCT CAUSES STILL OPEN SEPARATELY — the W1-T195 discipline extends, it does not collapse:
+    a crash-loop and a lifetime-cap on the same DAEMON task id are different operator asks.
+    (iv) FAIL-OPEN ON UNREADABLE STATE: if the open-issue listing cannot be read, escalate() must file
+    rather than suppress — the module's own dedup precedent states a failed read must never block the
+    escalation itself. Cover this arm.
+    (v) FALSIFIER, BOTH DIRECTIONS: the storm fixture (same taskId+class+cause, issue already open)
+    must produce exactly one open issue plus an appended comment; the distinct-cause fixture must
+    produce two issues. A test that passes both before and after the change proves nothing — the storm
+    fixture must FAIL against current escalate().
+    NOT IN SCOPE: the ask-type split (W1-T346); any producer's payload content; the reconciler.
+  acceptance:
+    - claim: "a PR-less escalation whose (taskId, class, cause) matches an open needs-human issue appends to that issue instead of opening a second, and the ledger records the dedup outcome"
+      proof: "unit test: test/escalate.test.ts"
+    - claim: "distinct causes on the same task still open separately, and an unreadable open-issue listing files rather than suppresses"
+      proof: "unit test: test/escalate.test.ts"
+  risk: high
+  origin: oper#needs-me-filings-2026-08-04
+  plan_refs: ["W1-T195", "W1-T104", "§4"]
+  files: [src/lib/escalate.ts, test/escalate.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — dedup decisions over injected gateways, fully machine-checkable.
+    risk:high — it touches the escalation transport: wrong in the permissive direction it keeps the
+    storm; wrong in the restrictive direction it silently drops a live escalation, which is the worse
+    failure and why (iv) fail-open is a stated arm.
+    budget_usd 55 — one gate widening, an append arm, and a two-direction falsifier in the existing
+    suite.
+    NO depends_on: deterministic, model-free, and independently valuable — the queue-starved storm
+    shape recurs whenever any referent-less producer's condition persists across ticks.
+    ONE CONCERN: the dedup gate only. The ask-type split, the judge and the translator are
+    W1-T346/W1-T349/W1-T348."
