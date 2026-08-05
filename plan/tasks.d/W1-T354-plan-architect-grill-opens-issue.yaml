@@ -1,0 +1,70 @@
+- id: W1-T354
+  title: "the plan-architect lane computes a GRILL verdict and throws it away — planCommand logs plan.verdict, removes the worktree and returns 0, opening NO needs-human issue, while GRILL is the one channel that has carried a genuine operator question end to end; wire the grill branch to escalate()"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  rationale: "RE-DERIVED AT da30616, from source. THE GAP, verbatim from src/run-task.ts's
+    planCommand grill branch: 'if (decision.action === \"grill\") { log(\"plan.verdict\", { action:
+    \"grill\", detail: decision.detail }); say(formatPlanVerdictLine(mode, decision));
+    worktreeRemove(repoDir, worktreePath); return 0; }' — a ledger line, a console line, cleanup,
+    exit. No issue, no needs-human label, no operator surface. The parse side exists and works:
+    parsePlanVerdict (src/lib/plan-architect.ts) matches '^GRILL:' lines and decidePlanArchitect
+    returns { action: \"grill\" }, erroring if GRILL was emitted alongside file changes — the
+    Architect prompt instructs 'GRILL — a real ambiguity needs a human call this pass cannot safely
+    make alone. Touch NO files. End with a line starting exactly GRILL: naming the open question.'
+    THE CONTRAST LANE: triageCommand wires the SAME verdict class through buildGrillEscalation
+    (src/lib/triage.ts) to escalate() — 'the async needs-human GitHub issue that IS the grill' —
+    and that path produced the ONE escalation in the 369-issue corpus that demonstrably carried a
+    genuine operator question to a ruling (#1182, 'Ruled 2026-08-04').
+    THE SHAPE: 'correct on its designed input, silent otherwise' — a lane computing a
+    needs-a-human verdict and discarding it is the same class as every unwired organ this week's
+    audits surfaced, except this one discards a HUMAN QUESTION."
+  design: |
+    WIRE THE EXISTING BRANCH TO THE EXISTING TRANSPORT; INVENT NOTHING.
+    (i) IN THE GRILL BRANCH, build an Escalation (class GRILL) from the decision's own detail — the
+    open question the Architect named — and deliver it via the same tryEscalate discipline the
+    daemon-side producers use: the marker/ledger step records the outcome whether or not delivery
+    succeeds, and a failed delivery never turns the grill into a crash (the plan pass still exits 0;
+    fail-open toward the ledger line that already exists).
+    (ii) OPTIONS ARE THE ARCHITECT'S OWN when it stated them, and a minimal real pair when it did
+    not — mirror buildGrillEscalation's shape (triage.ts) rather than minting a third grill idiom;
+    establish FROM SOURCE whether that builder generalizes (it is feedback-shaped today) or whether
+    the plan lane needs its own thin builder with the same fields.
+    (iii) DEDUP RIDES THE EXISTING KEY: GRILL escalations from the plan lane carry the plan pass's
+    identity so a re-run of the same undecided pass appends rather than reopening (the W1-T345
+    referent-less discipline if that lands first; the W1-T104 key regardless — verify which is in
+    tree at implement time).
+    (iv) FALSIFIER, BOTH DIRECTIONS: a plan pass whose worker emits GRILL opens exactly one
+    needs-human issue carrying the question and still exits 0 with the worktree removed; a
+    non-grill plan verdict opens nothing and the branch's current behavior is byte-identical.
+    A delivery failure still logs plan.verdict and exits 0.
+    NOT IN SCOPE: the triage lane (already wired); AskUserQuestion interactive grills (W1-T42's
+    remaining scope); the ask-type classifier (W1-T346 — GRILL is question-typed by definition
+    there and needs nothing from this task).
+  acceptance:
+    - claim: "a plan-architect GRILL verdict opens a needs-human issue carrying the Architect's stated question and the pass still exits 0, while a non-grill verdict opens nothing"
+      proof: "unit test: test/plan-architect.test.ts"
+    - claim: "a grill delivery failure degrades to today's behavior — the plan.verdict ledger line and a clean exit — never a crash and never a silent drop of the ledger record"
+      proof: "unit test: test/escalate.test.ts"
+  risk: high
+  origin: oper#followups-2026-08-05
+  plan_refs: ["W1-T42", "§4", "§7B"]
+  files: [src/run-task.ts, src/lib/plan-architect.ts, test/plan-architect.test.ts, test/escalate.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — verdict-to-escalation wiring over injected gateways, in-process.
+    risk:high — set by Rule 19's span (escalate, plan-architect, run-task), not blast radius: the
+    wiring must name the verdict source, the builder and the call site to be one deliverable, and
+    splitting them orphans the call site (Standing rule 14). Behaviorally additive: failure
+    directions are a missed issue (today's exact behavior) or a duplicate (bounded by dedup).
+    budget_usd 55 — one branch, one builder reuse-or-mirror decision, two-direction falsifier.
+    OVERLAP, cited not duplicated: W1-T42 (queued) specified the GRILL machinery — its triage half
+    shipped; this wires the plan-architect half W1-T42's own text names, and the implementing PR
+    should say whether W1-T42's remaining criteria are thereby satisfied rather than silently
+    overlapping (Standing rule 16 discipline).
+    files: lists plan-architect.ts because the builder-or-mirror decision (design ii) may add the
+    thin builder there; if the implementation leaves it untouched, declaring it costs nothing —
+    omitting a written path is what refused five dispatches this week."

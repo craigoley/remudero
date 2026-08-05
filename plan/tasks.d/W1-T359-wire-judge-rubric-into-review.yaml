@@ -1,0 +1,62 @@
+- id: W1-T359
+  title: "judgeRubric — the reviewer's second-layer rubric (one concern per PR, callers audited, test theater, refactor honesty) — has zero references beyond its definition while the review flow computes verdicts right where its inputs sit; wire it as ADVISORY input at the judgeReview site, never a second gate"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 65.00
+  rationale: "RE-DERIVED AT da30616. THE ORGAN: judgeRubric (src/lib/review.ts) encodes MASTER-PLAN
+    §5's enforcement layer 2 — the rubric questions the deterministic floor cannot ask: one concern
+    per PR, all callers audited, test theater, refactor-phase honesty. Census: ZERO references
+    beyond its own definition and doc mentions.
+    THE WIRING POINT IS ALREADY HOLDING ITS INPUTS: run-task.ts's review flow computes the binding
+    verdict at judgeReview(criteria, {...}) with the diff and report in hand — the census names
+    that exact site. The rubric was built to ADVISE beside that verdict (Standing rule 3B: the
+    GitHub-enforced gate DECIDES; rubric items advise), and instead advises nothing.
+    THE GOVERNING CONSTRAINT, stated so the implementing worker cannot drift: Standing rules 2 and
+    12 — trust is a deterministic predicate; an LLM may RECOMMEND, only code ENFORCES. judgeRubric's
+    output must land as advisory fields on the posted review (visible to the operator and the fix
+    rung), NEVER as a new pass/fail condition — turning it into a gate would put judgment in the
+    merge decision, the exact forbidden shape §4B names.
+    W1-T322's floor cannot surface this organ (pre-existing export, no diff ever re-adds it) —
+    the floor works on NEW exports (it fired on PR #1312, per fb-1785896975009-9f6c88) but the
+    tail predates it."
+  design: |
+    ADVISORY WIRING AT THE EXISTING SITE.
+    (i) At the judgeReview call site in run-task.ts's review flow, invoke judgeRubric over the same
+    diff/report/planOnly inputs and attach its findings to the posted review body as a clearly
+    ADVISORY section — rubric observations, never verdict-bearing lines the keyword floor or arm
+    logic could misread. Verify judgeRubric's actual signature and return shape FROM SOURCE first;
+    this note is a snapshot.
+    (ii) FAIL-OPEN AND CHEAP: a rubric failure or timeout posts the review exactly as today —
+    the binding verdict path must be structurally unable to consume rubric output (assert the
+    verdict object is computed before and independent of the rubric call). If the rubric involves a
+    model call, state the mount and per-review cost in the implementing PR; if it is deterministic,
+    say so — the census left this open and the source decides.
+    (iii) FALSIFIER, BOTH DIRECTIONS: a review over a fixture diff with an obvious rubric finding
+    (two unrelated concerns in one diff) posts the advisory section naming it, and the verdict is
+    byte-identical with the rubric stubbed out; a rubric throw still posts today's review.
+    NOT IN SCOPE: the instrument-entanglement floor (W1-T297 owns that concern in the same files —
+    the implementing PR must not touch its checks); any change to verdict computation, CAPPED
+    logic, or arming.
+  acceptance:
+    - claim: "a posted review carries the rubric's advisory findings for a diff exhibiting a rubric violation, while the binding verdict is computed independently and is byte-identical with the rubric stubbed out"
+      proof: "unit test: test/review.test.ts"
+    - claim: "a rubric failure degrades to exactly today's review post — advisory absence, never a blocked or altered verdict"
+      proof: "unit test: test/review.test.ts"
+  risk: high
+  origin: oper#followups-2026-08-05
+  plan_refs: ["W1-T297", "§5", "§12"]
+  files: [src/run-task.ts, src/lib/review.ts, test/review.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — advisory-section assembly and independence assertions, in-process.
+    risk:high — it touches the review flow that gates every merge: the acceptance's independence
+    clause exists because the catastrophic failure direction is rubric output leaking into the
+    binding verdict (Standing rule 2's line).
+    budget_usd 65 — one advisory wiring, an independence proof, fail-open arm.
+    FILE-OVERLAP, cited not duplicated: W1-T297 (queued) shares files [src/lib/review.ts,
+    src/run-task.ts] with a DIFFERENT concern (instrument entanglement) — a dispatch-lane overlap
+    the fail-closed partition already handles; the concerns do not intersect and neither task
+    edits the other's checks."

@@ -1,0 +1,72 @@
+- id: W1-T355
+  title: "FIVE operator rulings live only as free text in plan/feedback/ — a draining queue — while DECISIONS.md entries cite them as authority; re-record all five into DECISIONS.md verbatim with the feedback id as provenance, and the operator judges the transcription"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: "RE-DERIVED AT da30616 by a full sweep of plan/feedback/ (109+ entries): exactly FIVE
+    are true ruling-records — text that self-labels as operator authority and issues binding
+    direction rather than reporting a defect:
+    fb-1784894405468-a4153e ('HEADROOM GOVERNOR BECOMES A FLAG, DEFAULT OFF — OPERATOR RULING
+    2026-07-24'; status: new; cited as authority by DECISIONS.md's 2026-07-28 operator entry),
+    fb-1784988460437-9daa9b ('CONSOLE WRITE-ACTIONS ON UP NEXT — operator ruling 2026-07-25';
+    accepted), fb-1785858048118-50fab8 ('RUNTIME CONFIG BELONGS IN A CONFIG STORE WITH A DASHBOARD,
+    NOT IN SOURCE — operator ruling 2026-08-04'; status: new), fb-1784770111145-cf7c24 ('CONSOLE
+    MUST TRANSLATE, SUMMARIZE, AND SEPARATE — operator directive 2026-07-22'; accepted), and
+    fb-1785882211812-bafd8f ('AN AGENT MAY RECOMMEND NO BUT MAY NEVER RECORD IT — operator ruling';
+    status: new). The known-four count from the earlier audit was LOW BY ONE — bafd8f joins the set.
+    One borderline is EXCLUDED with reasoning: fb-1784756096314-a6f58b relays operator complaints
+    but is agent-authored, never self-labels as authority, and sits rejected.
+    THE OPERATOR'S RULING ON SHAPE governs this task: the feedback schema does NOT gain a ruling
+    status — feedback is a queue that drains; a ruling is permanent, and standing rulings in a
+    draining queue is how one gets lost (a4153e sat at status:new for twelve days while cited as
+    authority). Re-record into DECISIONS.md, original text VERBATIM, feedback id as provenance."
+  design: |
+    ONE DECISIONS.md ENTRY PER RULING, TRANSCRIPTION NOT EDITING.
+    (i) Each entry: an operator-attribution header dated with the RULING's own date (not the
+    transcription date prominently — the ruling ruled when it ruled), the feedback entry's raw text
+    QUOTED VERBATIM — byte-identical, fenced — and a provenance line naming the feedback id and
+    carrying the literal phrase 're-recorded from plan/feedback' (load-bearing text: the first
+    acceptance proof greps for it, chosen because the a4153e id ALREADY appears in DECISIONS.md's
+    2026-07-28 SUPERSEDES header and would go executed_stale as a pattern). Nothing is reworded,
+    summarized, or dropped.
+    (ii) THE FEEDBACK FILES ARE NOT DELETED and their status fields are NOT edited by this task —
+    the queue's own lifecycle owns them; this task only makes the permanent record exist where
+    DECISIONS.md's readers already look. (The a4153e citation in the 2026-07-28 entry then resolves
+    inside the same file.)
+    (iii) COMPLY WITH THE PROVENANCE FLOOR by construction: every added entry carries the operator
+    attribution form — this task is the first filed under the W1-T353 rule and is verify:human for
+    exactly that reason; the operator's review of the PR IS the ratification that the transcription
+    is faithful.
+    (iv) FALSIFIER: a diff-check that each of the five raw texts appears byte-identical inside
+    DECISIONS.md (the fenced quote equals the feedback file's raw field) — state the comparison in
+    the PR body with the five ids.
+    NOT IN SCOPE: ruling on anything new; editing feedback statuses; the sixth-and-beyond candidates
+    (none found — if the implementing pass finds another self-labelled ruling, it says so and the
+    operator decides whether it joins).
+  acceptance:
+    - claim: "DECISIONS.md carries five re-recorded operator rulings, each quoting its feedback entry verbatim under a provenance line naming its feedback id"
+      proof: "grep: re-recorded from plan/feedback in DECISIONS.md"
+    - claim: "the recommend-no ruling is among them, so the decision-authority convention's own authority is in the permanent record"
+      proof: "grep: fb-1785882211812-bafd8f in DECISIONS.md"
+  risk: medium
+  origin: oper#followups-2026-08-05
+  plan_refs: ["W1-T352", "W1-T353", "§4"]
+  files: [DECISIONS.md]
+  status: queued
+  attempts: 0
+  note: "verify:human — this is a ruling-shaped task (files: [DECISIONS.md]) and the deliverable is
+    the permanent record of OPERATOR authority; the operator judges the transcription's fidelity.
+    isDispatchEligible parks it (verify-not-auto) until he runs it — that parking is the design,
+    not a defect (the W1-T326 counter-example).
+    risk:medium — transcription of existing text; the failure mode is an unfaithful quote, which
+    the byte-identity falsifier and the human verify both catch.
+    budget_usd 45 — five verbatim transcriptions and a comparison; the work is care, not derivation.
+    PROOF NOTE: both grep patterns MISS the merge-base today (verified: 0 hits each) and hit after
+    the work, so they discriminate (W1-T273). The a4153e ID was deliberately NOT used as a pattern —
+    it already appears twice in DECISIONS.md (the 2026-07-28 SUPERSEDES header) and would downgrade
+    to executed_stale. Plain words, hyphens and digits only — no BRE metacharacters.
+    NO depends_on: W1-T353's lint, when it lands, accepts this task as-is (already verify:human) —
+    the ordering edge is not real in either direction."

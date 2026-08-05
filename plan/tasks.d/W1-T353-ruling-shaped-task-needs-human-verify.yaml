@@ -1,0 +1,70 @@
+- id: W1-T353
+  title: "a task whose deliverable is a RULING chose verify:auto so 'no operator need be present to judge' a record its own note called BINDING — the task linter REFUSES a ruling-shaped task (files containing DECISIONS.md, or a ruling-shaped title) that is not verify:human"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  rationale: "RE-DERIVED AT da30616. THE INCIDENT: W1-T326's shard set verify:auto with the note
+    'the whole deliverable is text at known paths, so grep proofs execute against it directly and no
+    operator need be present to judge them' — on a task whose SAME note says risk:high because 'this
+    writes a BINDING RULING on dispatch architecture.' The proofs verified the ruling was WRITTEN,
+    not that anyone ratified it; #1302 merged in ten minutes and the operator overrode it in
+    twenty-three more (#1303).
+    THE ENFORCEMENT LEVER ALREADY EXISTS AND IS FREE, confirmed at this sha: isDispatchEligible
+    (src/lib/drain.ts) refuses any task with verify !== 'auto' — verbatim: 'if (t.verify !==
+    \"auto\") { opts.onFiltered?.(t, \"verify-not-auto\"); return false; }' — before the linter is
+    even consulted, and the console's idle-reasons panel already renders the parked count as
+    'need you (verify ≠ auto)'. A ruling-shaped task at verify:human simply WAITS for the operator,
+    which is the entire point. What is missing is only the rule that puts it there.
+    WHY A LINT AND NOT A CONVENTION: the W1-T326 filing session identified the ratification channel
+    and reasoned around it in writing. The headless-fitness culture (Standing rule 18) teaches agents
+    that needing an operator is a task DEFECT to engineer away — correct for implementation work,
+    inverted for rulings. Only a blocking lint outranks that gradient."
+  design: |
+    ONE CHECK IN THE TASK LINTER, TWO TRIGGERS, BLOCKING.
+    (i) TRIGGER A — files: contains DECISIONS.md. Any task whose declared write surface includes the
+    decision log is ruling-shaped by construction; a worker writing that file unattended is the
+    incident class. (A task that also touches other files still triggers — mixed diffs are how the
+    entry rides in unnoticed.)
+    (ii) TRIGGER B — a ruling-shaped title: the title contains 'ruling'/'RULING' as a word, or the
+    deliverable named in the title is a decision record. State the exact test; keep it a word-match,
+    not semantics — trigger A is the load-bearing one and B is the belt for rulings aimed at other
+    files (a MASTER-PLAN 'ruling' section, a docs/ decision record). If B proves too fuzzy to state
+    without false positives, ship A alone and SAY SO in the report — A alone would have caught
+    W1-T326.
+    (iii) SEVERITY: block at lint-plan AND at preDispatchLint — verify FROM SOURCE where each check
+    list lives (src/lib/task-linter.ts's check table; the dispatch-side demotions) and register this
+    one as blocking in BOTH, since a warn at dispatch is exactly the gap proof-resolvability's
+    demotion already demonstrates.
+    (iv) THE MESSAGE NAMES THE FIX: 'a ruling-shaped task must be verify: human — the operator
+    judges rulings; isDispatchEligible parks it until then.'
+    (v) FALSIFIER, BOTH DIRECTIONS: a fixture task with files:[DECISIONS.md] and verify:auto FAILS
+    with the named message; the same task at verify:human PASSES; an ordinary implement task with
+    neither trigger PASSES; W1-T355's own shard (files include DECISIONS.md, verify:human) PASSES —
+    the rule must accept the first task filed under it.
+    NOT IN SCOPE: the review-floor provenance check (W1-T352); reclassifying any existing task;
+    GRILL machinery.
+  acceptance:
+    - claim: "a task whose files include DECISIONS.md at verify:auto fails the linter with a message naming verify:human, and the identical task at verify:human passes"
+      proof: "unit test: test/task-linter.test.ts"
+    - claim: "an ordinary implement task with neither ruling trigger is untouched by the new check"
+      proof: "unit test: test/task-linter.test.ts"
+  risk: medium
+  origin: oper#followups-2026-08-05
+  plan_refs: ["W1-T326", "§4", "§12"]
+  files: [src/lib/task-linter.ts, test/task-linter.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — linter verdicts over fixture tasks, fully in-process; this task ITSELF is not
+    ruling-shaped (it writes a linter, not a ruling).
+    risk:medium — one additive blocking check in one subsystem; the failure directions are a wrong
+    lint message, never lost work — a false positive parks a task the operator can re-verify in one
+    field edit.
+    budget_usd 55 — one check, two triggers, four-fixture falsifier.
+    OVERLAP, cited not duplicated: W1-T246 (proof-dialect lint) and W1-T324 (zombie retirement) are
+    proof-shape concerns; nothing else in the open queue touches verify-field rules.
+    ORDERING: W1-T355 (the feedback-rulings re-record) is written verify:human ALREADY, so no
+    depends_on edge is needed in either direction — stated here so the absence is not read as an
+    oversight."

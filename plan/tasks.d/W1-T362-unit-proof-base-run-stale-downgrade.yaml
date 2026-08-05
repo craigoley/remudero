@@ -1,0 +1,67 @@
+- id: W1-T362
+  title: "a unit-test proof that ALSO passes at the merge-base proves the diff changed nothing — extend W1-T273's executed_stale downgrade from grep proofs to unit-test proofs by running the named test against the base checkout the reviewer already maintains, re-arming the falsifier convention headlessly"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 75.00
+  rationale: "RE-DERIVED AT da30616. THE CONVENTION'S BIOGRAPHY, from the operator-committed quality
+    audit: the 'revert and watch it fail' falsifier was the repo's single most defect-catching
+    convention — measured as catching more than six static instruments combined — and it was then
+    correctly lint-banned on auto-verify tasks (workers burned 122 turns trying to perform operator
+    actions). Its mechanical replacement covers ONE slice: W1-T273 downgrades a grep: proof matching
+    the MERGE-BASE to executed_stale, because a pattern present before the diff discriminates
+    nothing. Unit-test proofs have NO such check: a test that passes at head AND at base is scored
+    executed_pass, though it proves the diff changed nothing the test observes — the unit-test
+    analog of the exact defect W1-T273 closed for greps.
+    THE MACHINERY IS ALREADY IN PLACE: the reviewer maintains base and head state for the stale
+    check today (the W1-T273 implementation greps the merge-base), and the proof executor already
+    resolves and runs named tests (parseTestTarget / resolveNameFilteredCandidates /
+    execWhitelistedProof, src/lib/review.ts). What is missing is one more execution against the
+    base tree and one comparison.
+    SIZED HONESTLY: the base run doubles proof-execution wall-clock for unit proofs and a base tree
+    may not even CONTAIN the named test (the common, healthy case for new tests — that is maximal
+    discrimination, not staleness). The design must treat absent-at-base as PASS-discriminating,
+    not as an error."
+  design: |
+    ONE MORE EXECUTION, THREE OUTCOMES, FAIL TOWARD TODAY'S SCORING.
+    (i) After a unit-test proof passes at HEAD, execute the same resolved proof against the
+    MERGE-BASE checkout the reviewer already holds for the W1-T273 grep check — verify FROM SOURCE
+    how that base tree is materialized and reuse it; do not construct a second checkout idiom.
+    (ii) OUTCOMES: test absent at base, or present and FAILING at base => the proof DISCRIMINATES —
+    keep executed_pass and record the base outcome on the verdict; present and PASSING at base =>
+    downgrade to executed_stale exactly as W1-T273 does for greps, with the same non-arming
+    consequence. An ERROR running the base (unresolvable tree, infra failure) keeps today's scoring
+    and records base_unknown — the downgrade must never fire on infrastructure noise (fail toward
+    today's behavior, the same discipline as every floor in this file).
+    (iii) COST CONTROL: base execution applies to unit-test proofs only on the PATHS the proof
+    names (the executor already scopes the run); state the measured wall-clock delta on a typical
+    PR in the implementing report.
+    (iv) FALSIFIER, BOTH DIRECTIONS: a proof whose named test passes at head and base is downgraded
+    with the base evidence on the verdict; a proof whose test is new at head (absent at base) keeps
+    executed_pass and records the discrimination; a base-tree error keeps executed_pass with
+    base_unknown. All three fixtures, or the matrix is unproven.
+    NOT IN SCOPE: grep proofs (W1-T273, shipped); the keyword floor; re-arming any interactive
+    falsifier form (Rule 18 stands — this is the HEADLESS re-arm, the cheapest one the audit named).
+  acceptance:
+    - claim: "a unit-test proof passing at head AND at the merge-base is downgraded to executed_stale with the base outcome recorded, and the downgrade carries W1-T273's non-arming consequence"
+      proof: "unit test: test/review.test.ts"
+    - claim: "a test absent at base or failing at base keeps executed_pass with the discrimination recorded, and a base-tree execution error keeps today's scoring with base_unknown — the downgrade never fires on infra noise"
+      proof: "unit test: test/review.test.ts"
+  risk: high
+  origin: oper#followups-2026-08-05
+  plan_refs: ["W1-T273", "W1-T65", "§5E"]
+  files: [src/lib/review.ts, test/review.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — three-outcome matrix over fixture trees, in-process.
+    risk:high — it changes proof SCORING on the path that arms merges: wrong in the eager direction
+    it downgrades honest new-test proofs (why absent-at-base is explicitly discriminating), wrong
+    in the lazy direction it is today's vacuous pass.
+    budget_usd 75 — a base execution reusing the W1-T273 tree, a three-outcome matrix, and the
+    wall-clock measurement.
+    OVERLAP, cited not duplicated: W1-T65/W1-T72 built the executor this extends; W1-T273 (blocked
+    in place, needs crediting per its own record) is the grep-side precedent this completes;
+    W1-T305 (merged) made unexecutable proofs loud — different slice. Nothing in the open queue
+    runs proofs against the base tree."

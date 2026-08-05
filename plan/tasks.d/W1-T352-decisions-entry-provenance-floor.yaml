@@ -1,0 +1,75 @@
+- id: W1-T352
+  title: "a DECISIONS.md entry that names its own author class is the convention that saved one ruling and its absence is how another shipped unratified — the review floor REFUSES a diff adding an entry that carries neither the auto-choose stamp nor an operator-attribution line, blocking from day one"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 65.00
+  rationale: "RE-DERIVED AT da30616. THE INCIDENT: PR #1302 appended '## 2026-08-04 — RULING: daemon
+    parallelism stays at N=1' with NEITHER of the file's two provenance genres — no
+    'Chosen (RECOMMENDED, auto)' stamp, no operator-attribution line — a bare RULING header that
+    pattern-matches the operator genre. No human ruled; the operator overrode it within the hour
+    (#1303). THE COUNTER-CASE that proves the convention works where applied: the headroom ruling was
+    correctly attributed by every later reader BECAUSE its own text carries 'OPERATOR RULING
+    2026-07-24' (plan/feedback/fb-1784894405468-a4153e.yaml). And the agent that wrote #1302's entry
+    UNDERSTOOD the channels — W1-T326's design chose DECISIONS.md over a P-series proposal because
+    'proposals are things to RATIFY... filing it as a proposal inverts its meaning and invites later
+    ratification.' A prose rule does not survive an agent that argues; a review floor does.
+    WHY BLOCKING FROM DAY ONE, against the W1-T322 advisory precedent — argued, not assumed:
+    (i) VOLUME: DECISIONS.md gains ~2 entries per week (35 entries over three weeks), versus the
+    ~50-PRs/day surface W1-T322's floor faces; a false positive here costs one PR round-trip on a
+    rare, deliberate act, not a fleet-wide tax that gets routed around.
+    (ii) DETERMINISM: this is a string-presence test over a closed vocabulary on ONE file, not a
+    reachability heuristic — the false-positive modes W1-T322 ships advisory to measure do not exist.
+    (iii) ASYMMETRY: the harm case is a single binding entry slipping through ONCE — it then
+    propagates (MASTER-PLAN cited #1302's ruling as settled within the hour, and two recons this
+    week started from an inherited false sentence). An advisory window would have passed #1302
+    exactly as it happened. An entry in neither genre is precisely what a human should look at:
+    the flag IS the feature."
+  design: |
+    A REVIEW-FLOOR CHECK ON DIFFS THAT ADD DECISIONS.md ENTRIES — never the historical corpus.
+    (i) SCOPE: fire only when the PR diff ADDS an entry header ('## ' line) to DECISIONS.md. Existing
+    unmarked entries (the 2026-07-20 menu-bar deferral; #1303's own amendment) never fire — the check
+    reads the DIFF, not the file.
+    (ii) THE ACCEPTED VOCABULARY IS DERIVED FROM THE CORPUS, NOT INVENTED: (a) the machine stamp —
+    'Chosen (RECOMMENDED, auto)'; (b) the hand-record line — 'Operator-authored'/'Operator direction
+    record'/'OPERATOR-RULED... recorded at the operator's instruction'; (c) an explicit operator
+    attribution sentence (the #1303 amendment's 'The operator has overridden' form). Read the corpus
+    before fixing the exact patterns; state them as named constants the tests pin.
+    (iii) NO SEMANTIC CLASSIFICATION: the check does NOT try to distinguish direction-closing entries
+    from descriptive ones — requiring the one-line mark on EVERY new entry is simpler, deterministic,
+    and makes the distinction moot. This is the answer to the scoping question, stated so it is not
+    re-derived: content classification would be heuristic and gameable; presence-of-provenance is
+    neither.
+    (iv) THE REFUSAL RIDES THE EXISTING IDIOM: same hard-fail shape as bodyContradictsDiff — the
+    verdict names the entry header and the two accepted genres. Verify judgeReview's diff access and
+    the bodyContradictsDiff plumbing FROM SOURCE before wiring.
+    (v) FALSIFIER, BOTH DIRECTIONS: a diff adding an unmarked entry FAILS with the entry named; a
+    diff adding a stamped machine entry, a marked operator entry, and a diff touching DECISIONS.md
+    without adding any entry header all PASS unchanged.
+    NOT IN SCOPE: the task-linter rule for ruling-shaped tasks (W1-T353); re-recording feedback
+    rulings (W1-T355); any edit to existing DECISIONS.md content.
+  acceptance:
+    - claim: "a diff adding a DECISIONS.md entry with neither the auto-choose stamp nor an operator-attribution form fails review naming the unmarked entry, while stamped machine entries and marked operator entries pass"
+      proof: "unit test: test/review.test.ts"
+    - claim: "the floor reads the diff, not the file — a PR touching DECISIONS.md without adding an entry header never fires, and the historical unmarked entries alone never fire"
+      proof: "unit test: test/review.test.ts"
+  risk: high
+  origin: oper#followups-2026-08-05
+  plan_refs: ["W1-T322", "§4", "§12"]
+  files: [src/lib/review.ts, test/review.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — diff-shaped fixtures through the real judgeReview, in-process.
+    risk:high — it adds a BLOCKING review condition; wrong in the permissive direction it misses the
+    next unratified ruling, wrong in the restrictive direction it blocks legitimate entries — which
+    is why the vocabulary is corpus-derived and pinned by tests, and why (v) requires the pass arm.
+    budget_usd 65 — one floor check, corpus-derived constants, two-direction falsifier.
+    BLOCKING FROM DAY ONE is this task's argued position (rationale i-iii); if review data later
+    shows false positives, the demotion to advisory is a one-line severity change and the evidence
+    will be in the review ledger — the reverse of shipping advisory and hoping someone remembers to
+    promote it.
+    OVERLAPS, cited not duplicated: W1-T32 (decision-record hygiene — WHICH auto-choices get
+    recorded; shipped in part as shouldRecordDecision) governs record volume, not provenance;
+    W1-T191 (blocked/retired) was the commit bridge. Neither checks authorship marks."

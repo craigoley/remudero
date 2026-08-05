@@ -1,0 +1,70 @@
+- id: W1-T364
+  title: "the operator still cannot change the daily cost ceiling without a PR and a deploy — the entire premise of the override store — give the console a write control (arm-then-confirm, bounds-refused server-side) over writeDailyCostCeilingOverride and its clear"
+  repo: remudero
+  depends_on: [W1-T363]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 75.00
+  rationale: "RE-DERIVED AT da30616. THE PREMISE is the operator's own standing ruling
+    (fb-1785858048118-50fab8, 2026-08-04): 'RUNTIME CONFIG BELONGS IN A CONFIG STORE WITH A
+    DASHBOARD, NOT IN SOURCE' — runtime-tunable values adjustable from the console, not behind a
+    PR, CI and a deploy. W1-T332 built the store to that ruling; verified at this sha, the ONLY
+    thing that can write state/DAILY_COST_CEILING_OVERRIDE is the store's own unit test. The
+    ceiling fired for the first time ever at $152.28 this week and stopped dispatch for ~40
+    minutes — the value the operator most plausibly wants to move under pressure is the one he
+    still cannot move without a deploy.
+    WHY CONSOLE AND NOT AN rmd VERB, decided here so it is not re-litigated: the ruling's own words
+    say dashboard; the console already owns the write idiom (arm-then-confirm with read-back,
+    server-enforced — the STOP/APPROVE discipline) and the write-scoped route pattern
+    (panel-graph.ts); a verb can follow as a thin caller of the same route if wanted, and its
+    absence blocks nothing the ruling asked for.
+    WHY IT DEPENDS ON W1-T363, a REAL edge: a write surface over a value nothing enforces is worse
+    than none — the operator believes he changed the ceiling and dispatch ignores him, the exact
+    display-vs-enforcement lie the vertical slice exists to close. The store must be READ (T363)
+    before it is WRITABLE."
+  design: |
+    ONE ROUTE, ONE CONTROL, THE STORE'S OWN VALIDATION.
+    (i) A write-scoped POST route (panel-graph.ts, beside the existing write actions) calling
+    writeDailyCostCeilingOverride — which already validates against the committed row's bounds and
+    refuses out-of-range at write time — and a clear action calling clearDailyCostCeilingOverride.
+    The route ADDS NO validation of its own: the store's refusal is the contract (assert the 4xx
+    maps from PolicyError, never a duplicated bounds check that can drift).
+    (ii) THE CONTROL rides the house idiom verbatim: arm-then-confirm with the read-back IN the
+    armed label — the new value, its provenance consequence, and the restart caveat (a RUNNING
+    daemon holds its boot value until restart unless W1-T331's live read covers this path — verify
+    which applies at implement time from how T363 landed, and say the truth in the label).
+    Never a bare Confirm.
+    (iii) RENDER THE CURRENT STATE beside the control from resolveDailyCostCeiling's own
+    provenance — committed default vs overridden, the store's provenance field, never a second
+    derivation.
+    (iv) FALSIFIER, BOTH DIRECTIONS: an in-bounds write through the route lands the override file
+    and the rendered state flips to overridden with the value; an out-of-bounds write is refused
+    with the store's own error, no file written, rendered state unchanged; clear reverts to the
+    committed default. Route auth: the write scope refuses an unscoped token (the existing
+    write-route discipline — assert it, don't re-derive it).
+    NOT IN SCOPE: any second policy value (the store is single-value by design until W1-T333's
+    lineage generalizes it); W1-T333's audit/provenance ledger work; an rmd verb (a welcome thin
+    follow-up, not this concern).
+  acceptance:
+    - claim: "an in-bounds console write lands the override through the store's own writer and the rendered state shows overridden with the value, while an out-of-bounds write is refused by the store's validation with no file written"
+      proof: "unit test: test/panel-graph.test.ts"
+    - claim: "the control is the arm-then-confirm read-back idiom carrying the new value and the restart caveat, and clear reverts the rendered state to the committed default"
+      proof: "unit test: test/serve.write-ack.test.ts"
+  risk: high
+  origin: oper#followups-2026-08-05
+  plan_refs: ["W1-T332", "W1-T363", "§7"]
+  files: [src/lib/panel-graph.ts, src/lib/serve.ts, test/panel-graph.test.ts, test/serve.write-ack.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — route and control behavior over the real store against fixture roots,
+    in-process.
+    risk:high — an operator-facing write path over the fleet's spend ceiling; the guards are the
+    store's own bounds refusal (asserted, not duplicated) and the confirm idiom.
+    budget_usd 75 — a route, a control, provenance rendering, and a three-arm falsifier.
+    depends_on W1-T363 IS HARD (rationale): writable-before-enforced is the display-vs-enforcement
+    lie in its worst form.
+    OVERLAP, cited not duplicated: W1-T333 (in flight) owns override PROVENANCE/AUDIT rendering
+    (ledger + glance strip); this task owns the WRITE control and reads provenance only for the
+    adjacent state line. fb-50fab8 is consumed as this task's origin authority and W1-T355
+    re-records that ruling into DECISIONS.md independently."

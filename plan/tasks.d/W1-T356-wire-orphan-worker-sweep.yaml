@@ -1,0 +1,68 @@
+- id: W1-T356
+  title: "sweepOrphanWorkers shipped for the W1-T117 orphaned-process incident and nothing calls it — daemonBoot's slot reads 'undefined, // sweepOrphanWorkers — not wired at this call site' and DaemonDeps.sweepOrphans is never set; wire BOTH designed halves with the module's own exported defaults"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  rationale: "RE-DERIVED AT da30616. THE ORGAN: sweepOrphanWorkers (src/lib/worker-containment.ts),
+    doc verbatim: 'Daemon boot + poll orphan sweep (W1-T117 design ii/iv): terminate stray processes
+    ATTRIBUTABLE to an ENDED run, ledger each; an UNATTRIBUTABLE process is reported but NEVER
+    signalled.' Attribution precedes every signal.
+    THE WIRING STATE: zero production calls. daemon.ts imports only the TYPE. Both designed
+    injection points are inert: daemonBoot's optional sweepOrphanWorkers param — the only production
+    caller passes 'undefined, // sweepOrphanWorkers — not wired at this call site' verbatim — and
+    runDaemon's per-poll DaemonDeps.sweepOrphans, which the real deps construction never sets.
+    reachability.ts's own module doc names it as the canonical seam-default example. 18 tests pass
+    against fixtures; the production default has never run.
+    THE COST OF STAYING UNWIRED: the W1-T117 incident class — the orphaned gh pr create process
+    (PID 87119) discovered AFTER its run ended — is covered only at normal run teardown
+    (withWorkerGroupTeardown); strays surviving a kill -9 or a crashed daemon are never reaped.
+    This is the same shipped-dark shape as crashLoopCheck was before #1278, at the SAME call site,
+    and the wiring mold is identical.
+    W1-T322's advisory floor cannot catch this: it flags NEW unreached exports in diffs — and it
+    demonstrably works there (unwired_export FIRED on PR #1312's consumer-less override store,
+    2026-08-05, per fb-1785896975009-9f6c88's correction) — but a PRE-EXISTING organ never crosses
+    it. Individual wiring is the only path for the tail."
+  design: |
+    THE #1278 MOLD, BOTH HALVES, PRODUCTION DEFAULTS.
+    (i) BOOT HALF: replace the undefined positional arg at src/run-task.ts's daemonBoot call with a
+    closure composing the module's own exported defaults — defaultListCandidates, defaultReadMarkers,
+    killProcessGroup — plus an isRunActive fed from the SAME inflight-lock reads run-task.ts already
+    performs, and a ledger arm appending the sweep's report line. daemonBoot already owns the
+    'if (sweepOrphanWorkers)' branch and the daemon.orphan_sweep log.
+    (ii) POLL HALF: set DaemonDeps.sweepOrphans in the same deps construction (daemon.ts's own
+    comment: boot runs it once, deps.sweepOrphans is the each-poll half). Same closure, shared.
+    (iii) LEDGER RETENTION: if the sweep's kill line (worker_orphan_killed or the report step) is
+    read by any DECISION, it joins DECISION_RELEVANT_LEDGER_STEPS in the SAME PR (the #977 rule;
+    test/ledger-rotation.test.ts re-derives the set from consumer source); a render-only step joins
+    RENDER_RELEVANT_LEDGER_STEPS instead. Establish which FROM SOURCE and declare accordingly.
+    (iv) THE REGRESSION LOCK ASSERTS THE DEP OBJECT THE COMMAND ACTUALLY BUILDS — the W1-T316 rule
+    and the #1278 precedent: drive the real daemonCommand with only the existing runDaemon loop-stub
+    seam injected, seed a stray attributable process fixture, and assert the sweep ran, ledgered,
+    and never signalled the unattributable control. A fixture-only assertion is how this organ
+    shipped dark in the first place.
+    (v) FALSIFIER, BOTH DIRECTIONS: unwiring the boot slot (restoring undefined) must fail the
+    wiring test by name; an unattributable process is reported and never killed.
+    NOT IN SCOPE: resolveClaudeExecutable's neighbouring slot (W1-T357); the containment logic
+    itself (shipped, 18 tests); autoupdater hardening (W1-T236).
+  acceptance:
+    - claim: "the real daemonCommand boots with the orphan sweep wired from the module's exported defaults — a stray attributable to an ended run is signalled and ledgered, an unattributable one is reported and never signalled"
+      proof: "unit test: test/worker-containment.test.ts"
+    - claim: "the per-poll half is set in the production DaemonDeps so the sweep runs on the poll cadence, not only at boot"
+      proof: "unit test: test/daemon.test.ts"
+  risk: high
+  origin: oper#followups-2026-08-05
+  plan_refs: ["W1-T117", "W1-T322", "§4A"]
+  files: [src/run-task.ts, src/lib/ledger.ts, test/worker-containment.test.ts, test/daemon.test.ts, test/ledger-rotation.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — real-command wiring locks over process fixtures, in-process.
+    risk:high — this arms a path that SIGNALS PROCESSES: wrong in the permissive direction it kills
+    a live worker (why attribution-precedes-signal is an acceptance clause), wrong in the
+    restrictive direction it stays today's no-op.
+    budget_usd 70 — two halves, a retention-set decision, and a real-command lock.
+    files: DECLARES src/lib/ledger.ts and test/ledger-rotation.test.ts because design (iii) may
+    register the step; if the implementation finds the step render-only or already registered,
+    declaring them costs nothing — omitting a written path refused five dispatches this week."
