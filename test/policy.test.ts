@@ -87,7 +87,7 @@ function goodRaw(): Record<string, unknown> {
       strikeCap: { value: 2, origin: "lifted:src/lib/sweep.ts:255 (DEFAULT_SWEEP_POLICY.strikeCap)", min: 1, max: 10 },
       wipLimit: { value: 10, origin: "lifted:src/lib/sweep.ts:257 (DEFAULT_SWEEP_POLICY.wipLimit)", min: 1, max: 50 },
       tmpMaxAgeMs: { value: 3_600_000, origin: "net-new", min: 60_000, max: 86_400_000 },
-      dispatchLanes: { value: 3, origin: "lifted:src/lib/sweep.ts:359 (DEFAULT_SWEEP_POLICY.dispatchLanes)", min: 1, max: 4 },
+      dispatchLanes: { value: 2, origin: "lifted:src/lib/sweep.ts:359 (DEFAULT_SWEEP_POLICY.dispatchLanes)", min: 1, max: 4 },
       dailyCostCeilingUsd: { value: 500, origin: "lifted:src/lib/sweep.ts:365 (DEFAULT_SWEEP_POLICY.dailyCostCeilingUsd)", min: 100, max: 2500 },
     },
     drain: {
@@ -143,7 +143,7 @@ test("the SHIPPED plan/policy.yaml loads and lifts the current source values", (
     strikeCap: 2,
     wipLimit: 10,
     tmpMaxAgeMs: 3_600_000,
-    dispatchLanes: 3,
+    dispatchLanes: 2,
     dailyCostCeilingUsd: 500,
   });
   assert.equal(p.values.drain.max, 10);
