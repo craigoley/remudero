@@ -5,10 +5,12 @@ import {
   daemonIsIdle,
   decideDeployTrigger,
   describeFailureKind,
+  evaluateIdleGate,
   readLatestBootSha,
   sameCommit,
   runDeployCycle,
   treeFfSafe,
+  DEPLOY_IDLE_DEFER_CEILING_MS,
   type DeployDeps,
   type HealthInputs,
   type IdleProbe,
@@ -130,6 +132,10 @@ interface Recorder {
   deps: DeployDeps;
   headRef: { value: string };
   alerts: string[];
+  /** Every log() call, WITH its data — `calls` only records the step name. */
+  logs: Array<{ step: string; data?: Record<string, unknown> }>;
+  /** The persisted W1-T341 deferral clock, so a test can pre-seed it or read it back after a cycle. */
+  deferredSinceRef: { value: number | undefined };
 }
 
 function makeDeps(o: {
@@ -145,10 +151,16 @@ function makeDeps(o: {
   idle?: IdleProbe | IdleProbe[]; // one value, or a sequence consumed per probeIdle() call
   health?: HealthInputs;
   consoleUp?: boolean;
+  /** W1-T341: what `now()` reports this cycle (default 1000, matching the pre-existing tests). */
+  nowMs?: number;
+  /** W1-T341: pre-seed the persisted "deferred since" clock (undefined = none tracked yet). */
+  deferredSinceMs?: number;
 }): Recorder {
   const calls: string[] = [];
   const alerts: string[] = [];
+  const logs: Array<{ step: string; data?: Record<string, unknown> }> = [];
   const headRef = { value: o.installHead ?? "old-head" };
+  const deferredSinceRef: { value: number | undefined } = { value: o.deferredSinceMs };
   const idleSeq = Array.isArray(o.idle) ? [...o.idle] : undefined;
   const idleOne = Array.isArray(o.idle) ? undefined : (o.idle ?? { workers: 0, inflightLocks: 0, worktreeLocks: 0 });
   const deps: DeployDeps = {
@@ -159,8 +171,20 @@ function makeDeps(o: {
     consolePid: () => 4242,
     waitConsoleUp: () => o.consoleUp ?? true,
     alertConsoleOnly: (m) => alerts.push(`console:${m}`),
-    log: (step) => calls.push(`log:${step}`),
-    now: () => 1000,
+    log: (step, data) => {
+      calls.push(`log:${step}`);
+      logs.push({ step, data });
+    },
+    now: () => o.nowMs ?? 1000,
+    deferredSince: () => deferredSinceRef.value,
+    setDeferredSince: (ms) => {
+      calls.push(`setDeferredSince:${ms}`);
+      deferredSinceRef.value = ms;
+    },
+    clearDeferredSince: () => {
+      calls.push("clearDeferredSince");
+      deferredSinceRef.value = undefined;
+    },
     fetch: () => calls.push("fetch"),
     installHead: () => headRef.value,
     runningHead: () => o.runningHead ?? headRef.value,
@@ -197,7 +221,7 @@ function makeDeps(o: {
     },
     clearMarker: () => calls.push("clearMarker"),
   };
-  return { calls, deps, headRef, alerts };
+  return { calls, deps, headRef, alerts, logs, deferredSinceRef };
 }
 
 test("cycle #1 — trigger gating: no marker + behind ⇒ NO deploy, NO pull, NO kickstart", () => {
@@ -256,6 +280,142 @@ test("cycle #3 — health-check + rollback: unhealthy boot ⇒ reset to prior HE
   assert.ok(r.calls.includes("resetHard:good-old"), "rolled back");
   assert.equal(r.calls.filter((c) => c === "kickstart").length, 2, "kickstart twice: the failed deploy, then restore the known-good daemon");
   assert.ok(r.calls.some((c) => c.startsWith("alert:bad-new")), "alerts the operator with the failed HEAD");
+});
+
+// ── W1-T341: the deferral ceiling ────────────────────────────────────────────────
+
+test("evaluateIdleGate: idle ⇒ proceed, never forced, regardless of how long it was deferred", () => {
+  const g = evaluateIdleGate({ workers: 0, inflightLocks: 0, worktreeLocks: 0 }, 0, DEPLOY_IDLE_DEFER_CEILING_MS * 10, DEPLOY_IDLE_DEFER_CEILING_MS);
+  assert.deepEqual(g, { idle: true, proceed: true, forced: false, waitedMs: DEPLOY_IDLE_DEFER_CEILING_MS * 10 });
+});
+
+test("evaluateIdleGate: busy AND under the ceiling ⇒ do not proceed", () => {
+  const g = evaluateIdleGate({ workers: 1, inflightLocks: 0, worktreeLocks: 0 }, 0, DEPLOY_IDLE_DEFER_CEILING_MS - 1, DEPLOY_IDLE_DEFER_CEILING_MS);
+  assert.equal(g.proceed, false);
+  assert.equal(g.forced, false);
+  assert.equal(g.waitedMs, DEPLOY_IDLE_DEFER_CEILING_MS - 1);
+});
+
+test("evaluateIdleGate: busy AND at/over the ceiling ⇒ proceed, forced", () => {
+  const g = evaluateIdleGate({ workers: 1, inflightLocks: 0, worktreeLocks: 0 }, 0, DEPLOY_IDLE_DEFER_CEILING_MS, DEPLOY_IDLE_DEFER_CEILING_MS);
+  assert.equal(g.proceed, true);
+  assert.equal(g.forced, true);
+});
+
+test("evaluateIdleGate: no deferral tracked (undefined) ⇒ waitedMs 0, never forced by itself", () => {
+  const g = evaluateIdleGate({ workers: 1, inflightLocks: 0, worktreeLocks: 0 }, undefined, 999_999_999, DEPLOY_IDLE_DEFER_CEILING_MS);
+  assert.equal(g.waitedMs, 0);
+  assert.equal(g.forced, false);
+  assert.equal(g.proceed, false);
+});
+
+test("idle ceiling: a fleet that NEVER goes idle still deploys once the ceiling elapses (falsifier, direction 1)", () => {
+  const ceilingMs = 1000;
+  const r = makeDeps({
+    markerPresent: true,
+    installHead: "old",
+    originMain: "new",
+    idle: { workers: 3, inflightLocks: 0, worktreeLocks: 0 }, // never idle, on every probe
+    deferredSinceMs: 500,
+    nowMs: 500 + ceilingMs, // exactly at the ceiling
+  });
+  const out = runDeployCycle(r.deps, { idleDeferCeilingMs: ceilingMs });
+  assert.equal(out.deployed, true, "the ceiling fired — deploy proceeds despite a busy fleet");
+  assert.ok(r.calls.includes("kickstart"), "the restart actually happened, not just the pull");
+  assert.ok(
+    r.logs.some((l) => l.step === "deploy.idle_ceiling_forced" && l.data?.phase === "pre-pull"),
+    "the forced deploy is named in the ledger, distinct from a genuinely idle one",
+  );
+  assert.equal(r.deferredSinceRef.value, undefined, "the deferral clock clears once the ceiling has carried the deploy");
+});
+
+test("idle ceiling: under the ceiling, a busy fleet still just defers (not yet forced)", () => {
+  const ceilingMs = 1000;
+  const r = makeDeps({
+    markerPresent: true,
+    installHead: "old",
+    originMain: "new",
+    idle: { workers: 3, inflightLocks: 0, worktreeLocks: 0 },
+    deferredSinceMs: 500,
+    nowMs: 500 + ceilingMs - 1, // one ms short of the ceiling
+  });
+  const out = runDeployCycle(r.deps, { idleDeferCeilingMs: ceilingMs });
+  assert.equal(out.deployed, false);
+  assert.match(out.reason, /not-idle/);
+  assert.ok(!r.calls.includes("pullFf"), "still deferring — never pulls before the ceiling");
+  assert.ok(!r.logs.some((l) => l.step === "deploy.idle_ceiling_forced"), "not forced yet");
+});
+
+test("idle ceiling: once genuinely idle, deploys immediately — never waits out the rest of the ceiling (falsifier, direction 2)", () => {
+  const r = makeDeps({
+    markerPresent: true,
+    installHead: "old",
+    originMain: "new",
+    idle: { workers: 0, inflightLocks: 0, worktreeLocks: 0 }, // idle right now
+    deferredSinceMs: 100,
+    nowMs: 200, // only 100ms elapsed — nowhere near the (default 30-minute) ceiling
+  });
+  const out = runDeployCycle(r.deps);
+  assert.equal(out.deployed, true, "an idle fleet deploys at once — the ceiling never had to fire");
+  assert.ok(!r.logs.some((l) => l.step === "deploy.idle_ceiling_forced"), "not a forced deploy — it was genuinely idle");
+  assert.equal(r.deferredSinceRef.value, undefined, "the deferral marker clears once the deploy proceeds");
+});
+
+test("idle ceiling: a not-yet-forced deferral is observable — how long it has waited, and which counter is holding it", () => {
+  const r = makeDeps({
+    markerPresent: true,
+    installHead: "old",
+    originMain: "new",
+    idle: { workers: 0, inflightLocks: 2, worktreeLocks: 0 }, // inflight locks are the blocker, not workers
+    deferredSinceMs: 1000,
+    nowMs: 1000 + 5 * 60_000, // 5 minutes in, well under the 30-minute default ceiling
+  });
+  const out = runDeployCycle(r.deps);
+  assert.equal(out.deployed, false);
+  const line = r.logs.find((l) => l.step === "deploy.not_idle" && l.data?.phase === "pre-pull");
+  assert.ok(line, "the deferral is logged BEFORE the ceiling fires, not only once it trips");
+  assert.equal(line!.data!.waited_ms, 5 * 60_000, "how long it has waited");
+  assert.equal(line!.data!.workers, 0);
+  assert.equal(line!.data!.inflight_locks, 2, "names which counter is non-zero");
+  assert.equal(line!.data!.worktree_locks, 0);
+  assert.ok((line!.data!.waited_ms as number) < (line!.data!.ceiling_ms as number), "still under the ceiling — not yet forced");
+});
+
+test("idle ceiling: first deferral starts the persisted clock at this cycle's now()", () => {
+  const r = makeDeps({
+    markerPresent: true,
+    installHead: "old",
+    originMain: "new",
+    idle: { workers: 1, inflightLocks: 0, worktreeLocks: 0 },
+    nowMs: 4242, // deferredSinceMs left unset ⇒ no prior deferral tracked
+  });
+  runDeployCycle(r.deps);
+  assert.equal(r.deferredSinceRef.value, 4242, "starts the clock at this cycle's now(), not some earlier or later time");
+});
+
+test("idle ceiling: without persistence wired, the wait can never be measured — degrades to today's unbounded wait, never a surprise forced deploy", () => {
+  const r = makeDeps({
+    markerPresent: true,
+    installHead: "old",
+    originMain: "new",
+    idle: { workers: 1, inflightLocks: 0, worktreeLocks: 0 },
+    nowMs: 10_000_000, // an enormous "now" — meaningless without a deferredSince to diff against
+  });
+  const deps: DeployDeps = { ...r.deps, deferredSince: undefined, setDeferredSince: undefined, clearDeferredSince: undefined };
+  const out = runDeployCycle(deps);
+  assert.equal(out.deployed, false, "a caller that never wires persistence cannot be regressed into an unannounced forced deploy");
+  assert.ok(!r.calls.includes("kickstart"));
+});
+
+test("idle ceiling: an unrelated skip (no trigger) clears any stale deferred-since marker", () => {
+  const r = makeDeps({
+    markerPresent: false, // no trigger at all this cycle
+    installHead: "old",
+    originMain: "new",
+    deferredSinceMs: 500, // left over from a PRIOR deploy attempt's deferral
+  });
+  runDeployCycle(r.deps);
+  assert.equal(r.deferredSinceRef.value, undefined, "nothing is being deferred when there is no deploy trigger");
 });
 
 test("cycle #4 — clean-tree guard: a conflicting dirty file ⇒ abort, alert, HEAD untouched, no pull/kickstart", () => {
