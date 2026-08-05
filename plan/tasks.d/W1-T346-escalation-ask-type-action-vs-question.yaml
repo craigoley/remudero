@@ -1,0 +1,71 @@
+- id: W1-T346
+  title: "every needs-me item is one of two asks — an ACTION the operator must perform or a QUESTION the operator must answer — and the type is DERIVABLE from fields the escalation already carries; classify at escalate(), carry it as a label, and render the two asks with distinct affordances"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 65.00
+  rationale: "RE-DERIVED AT c2a96cd. THE OPERATOR'S DIRECTION (oper#needs-me-filings-2026-08-04):
+    'We should probably separate needs me into those two categories' — actions I must take vs
+    questions I must answer.
+    THE SPLIT IS DERIVABLE — NO PRODUCER MIGRATION NEEDED. Measured over all 369 historical
+    needs-human issues (read 2026-08-05): the class label plus the options' own shape decides it
+    mechanically. MANUAL is ACTION by definition (secrets, deps, disk — #1311 is the corpus's
+    cleanest). GRILL is QUESTION by definition (a human call between stated options — #1182, the one
+    escalation in the corpus that worked end-to-end as designed). For BLOCKED, the options are fixed
+    strings per producer, so the test 'does any option embed an operator-only act (an override
+    credential like --override-capped-by <name>, a hand-merge, a host command) vs are all options
+    machine-executable once the operator answers' classifies each family constantly: CAPPED-verdict
+    and risk-judge items are ACTIONS; clarification-rung and scope-decision items are QUESTIONS.
+    Because options within a family are constant, the classifier is a deterministic function over the
+    typed Escalation — Standing rule 2 holds, no LLM anywhere.
+    WHAT THIS BUYS DOWNSTREAM: the reconciler's decision-loss guard (W1-T347) needs the type to know
+    which closes moot a standing question; the residual judge (W1-T349) needs the vocabulary to route;
+    the translator (W1-T348) renders 'here is what to do' vs 'here is what to decide' differently.
+    THE CONSOLE PRECEDENT TO EXTEND, NOT REPLACE: W1-T182 already dispatches needs-me rows by item
+    type (escalation vs feedback vs ratification). This adds ask-type WITHIN the escalation rows."
+  design: |
+    A DETERMINISTIC CLASSIFIER AT THE CHOKE POINT, A LABEL, AND A ROW AFFORDANCE.
+    (i) classifyAsk(e: Escalation): "action" | "question" in src/lib/escalate.ts — pure, deterministic,
+    total (every input classifies; when genuinely undecidable, default "action": presenting a question
+    as an action costs the operator a read, presenting an action as a question hides work). Rules from
+    the rationale: class MANUAL => action; class GRILL => question; else the options-shape test.
+    (ii) CARRY IT ON THE ISSUE as an additional label (needs-action / needs-question) beside
+    needs-human — labels degrade exactly like the existing per-class labels (escalate.ts already
+    drops a label that fails provisioning without losing the escalation; reuse that discipline).
+    Existing unlabeled issues stay valid: every consumer must treat absent-type as today's behavior.
+    (iii) RENDER THE TWO ASKS DISTINCTLY in the existing NEEDS ME list: extend W1-T182's row
+    type-dispatch so an action row leads with what-to-do and a question row leads with the options.
+    DO NOT restructure sections or add tabs — W1-T334/W1-T336 own the console's tab IA and their
+    Decisions tab will render whatever this task's rows already are; a section-level split filed here
+    would collide with their declared scope. New DOM assertions should follow the shared section-reach
+    helper pattern W1-T335 is landing rather than direct id lookup.
+    (iv) FALSIFIER: fixtures for each family — MANUAL, GRILL, a CAPPED-verdict options pair, a
+    clarification options pair — assert the four classifications; a legacy row with no type renders
+    byte-identical to today.
+    NOT IN SCOPE: suppressing or demoting anything (W1-T349); the reconciler's close behavior
+    (W1-T347); tab-level console IA (W1-T334/W1-T336); producer payload enrichment.
+  acceptance:
+    - claim: "classifyAsk is deterministic over the typed escalation: MANUAL classifies action, GRILL classifies question, a CAPPED-override options pair classifies action, a clarification options pair classifies question"
+      proof: "unit test: test/escalate.test.ts"
+    - claim: "the NEEDS ME list renders action rows and question rows with distinct affordances while an untyped legacy item keeps today's row"
+      proof: "unit test: test/serve.test.ts"
+  risk: high
+  origin: oper#needs-me-filings-2026-08-04
+  plan_refs: ["W1-T182", "W1-T313", "§7B"]
+  files: [src/lib/escalate.ts, src/lib/serve.ts, test/escalate.test.ts, test/serve.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — a pure classifier plus rendered HTML, both assertable in-process.
+    risk:high — set by Rule 19's span, not blast radius: the type must exist end-to-end (classify in
+    escalate, render in serve) to be one deliverable, and splitting it would orphan the call site
+    (Standing rule 14). Behaviorally it stays additive: an optional label plus a row affordance, no
+    dispatch path, no spend, absent-type degrades to today's rendering everywhere.
+    budget_usd 65 — the classifier is small; the cost is the per-family fixtures and the serve-side
+    affordance with the W1-T335 helper discipline.
+    NO depends_on: derivable from carried fields, so no producer migration precedes it. W1-T347 and
+    W1-T349 depend on THIS, not the reverse.
+    PRIOR ART, not collisions: W3-T5's 'answer questions (QUESTION contract)' clause names this
+    territory with pre-dialect prose proofs and no overlap in files; W1-T336's Decisions tab renders
+    the rows this task types. ONE CONCERN: the ask type existing end-to-end (classify, carry, render)."

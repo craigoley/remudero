@@ -1,0 +1,86 @@
+- id: W1-T350
+  title: "the feedback interpreter with a visible round trip — expand the operator's short console feedback into the four-section filing skeleton (CLAIM / EVIDENCE / RECON / FALSIFYING CHECK), push every unverified specific into RECON directives, and land it only through the console's own arm-then-confirm read-back"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 85.00
+  rationale: "RE-DERIVED AT c2a96cd. THE OPERATOR'S DIRECTION (oper#needs-me-filings-2026-08-04):
+    'Whenever I submit feedback in the console, it probably needs to go through an interpreter — that
+    will translate my simple feedback into an actual prompt that can be sent to the agent.'
+    THE TARGET STRUCTURE IS ALREADY RUNNING, MEASURED OVER THE PRECEDENT CORPUS: 14 feedback entries
+    landed 2026-08-03/04 were each written by an assistant from a short operator observation, and the
+    literal markers 'RECON:' and 'Falsifying check:' appear in 14/14 and 13/14 respectively. The
+    recurring skeleton: a CAPS headline CLAIM stated falsifiably; MEASURED EVIDENCE with verbatim
+    figures, symbol names and PR numbers; a RECON directive naming what the downstream pass must
+    establish; a FALSIFYING CHECK naming what retires the entry. The skeleton is template-regular
+    (four named sections a validator can check) while the register between the markers is prose
+    calibrated by examples — so the interpreter needs BOTH: named slots plus few-shot from recent
+    entries. validateDecisionSummary (src/lib/feedback.ts) is the in-repo precedent for bounding a
+    structured card before anything trusts it.
+    THE HONESTY CONSTRAINT (the operator's own): the interpreter must not INVENT evidence. The
+    precedent entries carry verbatim figures because a human and an assistant measured them; an
+    interpreter expanding 'the console doesn't show me when spend is blocked' has no figures. The
+    corpus itself demonstrates the honest form: every not-yet-established specific becomes a RECON
+    directive ('establish whether...'), never a stated fact — expansion option (c),
+    expand-and-mark-unverified, chosen over (a) bare expansion (loses the structure's value) and (b)
+    gather-evidence-first (an agent, not a translator: minutes of latency and tool access inside an
+    interactive compose flow).
+    THE ROUND TRIP IS THE POINT, NOT A NICETY: an expansion the operator never sees launders his
+    intent through a model — the decision-authority audit's exact failure shape, one layer down. The
+    console already owns the idiom: arm-then-confirm with the read-back IN the armed control
+    (fleet-control STOP, the W1-T193 APPROVE button — 'never a bare Confirm?'), server-enforced.
+    COST, STATED (filing rule): one cheap-mount call per console submission, operator-initiated —
+    single-digit calls per day, cents; seconds of latency inside an interactive compose flow.
+    FAILURE, STATED: expander error or timeout leaves plain raw submission working unchanged —
+    fail-open, the capture path's own ASYNC-CAPTURE doctrine (the operator is never blocked)."
+  design: |
+    A PREVIEW SEAM, A CONFIRM ARM, AND A BYTE-IDENTICAL RAW.
+    (i) A PREVIEW ENDPOINT on the console's write surface runs the expander over the operator's draft
+    and returns the four-section expansion WITHOUT filing anything. The expander prompt carries the
+    four named sections plus few-shot drawn from recent plan/feedback entries; every specific the
+    operator did not state lands under RECON as a directive, never as an asserted fact.
+    (ii) THE SUBMIT CONTROL BECOMES ARM-THEN-CONFIRM WITH READ-BACK: the armed state shows the
+    expansion (or its headline + section presence) and the confirm files it — reuse the existing
+    data-confirming/reset discipline verbatim, never a second confirm pattern. The operator can edit
+    the draft and re-preview before confirming.
+    (iii) RAW STAYS BYTE-IDENTICAL AND AUTHORITATIVE: captureFeedback's raw field carries what the
+    operator typed, unmodified; the expansion is stored ALONGSIDE it (establish from source whether a
+    new field beside summary or a marked appended block serves the triage reader better — state the
+    choice and why). Triage consumes the richer entry through its existing path — this UPGRADES the
+    capture->triage pipeline and must never become a second, racing feedback-to-task path.
+    (iv) THE ESCAPE STAYS: a file-raw path remains one deliberate action away for the operator, but
+    the DEFAULT flow runs the preview — optional-without-skipped means the confirm step is structural
+    (the button is the confirm), not a checkbox that defaults off.
+    (v) FALSIFIER, BOTH DIRECTIONS: an expansion of a draft containing an unmeasured claim places that
+    claim under RECON and not under EVIDENCE; an expander that throws leaves the plain submission path
+    filing exactly today's entry.
+    NOT IN SCOPE: triage's own verdict logic and cadence; the ratification inbox; W1-T164's
+    task-scoped operator_note store (a different store for steering a TASK, not filing feedback —
+    named here so the two are never conflated); auto-filing anything without the confirm.
+  acceptance:
+    - claim: "the preview endpoint returns a four-section expansion in which every specific the operator did not state appears under RECON as a directive, and an expander failure leaves plain submission filing today's entry unchanged"
+      proof: "unit test: test/panel-graph.test.ts"
+    - claim: "a confirmed submission stores the operator's raw text byte-identical alongside the expansion, and the file-raw escape still files without an expansion"
+      proof: "unit test: test/feedback.test.ts"
+    - claim: "the console submit is the arm-then-confirm read-back idiom — the armed control shows the expansion before anything files, never a single-click submit of an unseen rewrite"
+      proof: "unit test: test/serve.test.ts"
+  risk: high
+  origin: oper#needs-me-filings-2026-08-04
+  plan_refs: ["W1-T313", "W1-T243", "§7B"]
+  files: [src/lib/feedback.ts, src/lib/panel-graph.ts, src/lib/serve.ts, test/feedback.test.ts, test/panel-graph.test.ts, test/serve.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — expansion shape, RECON placement, raw byte-identity and the confirm idiom all
+    assert in-process with an injected expander; the few-shot register needs no operator to judge.
+    risk:high — this rewrites the operator's words on an operator-facing write path: the laundering
+    failure (filing an unseen rewrite) is the audit-class hazard, which is why the read-back confirm
+    is acceptance-level; and a model call joins an interactive flow.
+    budget_usd 85 — three surfaces (expander seam, route, console control) held to one concern by the
+    existing idioms; the cost is the falsifiers and the few-shot prompt.
+    NO depends_on: the operator->machine direction is independent of the escalation-side arc and
+    lands value alone.
+    ONE CONCERN: the round trip — expand, show, confirm, store. Triage's consumption of richer
+    entries needs no change to accept it; making triage EXPLOIT the structure (e.g. auto-running
+    RECON directives) is a follow-up once entries carrying the skeleton exist."

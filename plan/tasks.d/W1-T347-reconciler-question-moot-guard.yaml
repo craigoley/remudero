@@ -1,0 +1,61 @@
+- id: W1-T347
+  title: "the escalation-lifecycle reconciler closes on referent-terminality alone, so a standing QUESTION is silently mooted when any PR merges — 50 of its 151 closes had question-form titles and #1200's scope decision was never answered; a question-typed issue must close as MOOTED, naming what mooted it"
+  repo: remudero
+  depends_on: [W1-T346]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: "RE-DERIVED AT c2a96cd. THE MECHANISM: runEscalationReconcile (src/lib/sweep.ts) closes an
+    open needs-human issue when deriveStatus reports its referent TERMINAL (merged, or PR closed
+    without merging). That condition is right for stall-notices and wrong for questions: it answers
+    'is the blocker gone', never 'was the question answered'.
+    THE MEASURED DECISION-LOSS: across all 151 reconciler auto-closes, 50 carried question-form titles
+    (26 of 92 in the post-2026-07-28 era). The canonical case is #1200 — titled 'needs a scope
+    decision, not another retry' — auto-closed 9 minutes after PR #1215 merged, citing the merge; the
+    scope question was never answered by anyone, only mooted by an 8th dispatch happening to land. The
+    reconciler's sole safeguard is boilerplate ('If the decision this issue raised is still open,
+    reopen it') and nothing has ever reopened one.
+    WHY THIS IS A GUARD, NOT A REDESIGN: most question-form closes ARE legitimately mooted — the
+    clarification asked which way to push a PR that then merged on its own. The defect is not closing;
+    it is closing in a voice that claims resolution. A close that says MOOTED, names the mooting
+    event, and is distinguishable in the record costs one branch and preserves the reconciler's whole
+    value (it retired ~62% of reconciler-era volume, measured)."
+  design: |
+    ONE BRANCH IN THE CLOSE PATH, KEYED ON THE W1-T346 ASK TYPE.
+    (i) WHEN THE ISSUE CARRIES needs-question AND the referent went terminal, close with a distinct
+    MOOTED comment: name the mooting event (which PR merged/closed, when), state explicitly that the
+    question was NOT answered, and name where the question can be re-raised if it still stands. The
+    close still happens — the board must still clear — but the record stops claiming resolution.
+    (ii) ACTION-TYPED AND UNTYPED ISSUES KEEP TODAY'S CLOSE PATH BYTE-IDENTICAL. Absent-type is the
+    legacy default and must not change behavior — the reconciler-era corpus is untyped.
+    (iii) THE MOOTED CLOSE MUST BE MECHANICALLY DISTINGUISHABLE from the resolved close (a fixed
+    comment prefix), so a later sweep, census, or judge-holdout build can count decision-loss without
+    reading prose. Verify the reconciler's current close-comment shape FROM SOURCE before editing.
+    (iv) FALSIFIER, BOTH DIRECTIONS: a question-typed issue with a terminal referent closes with the
+    MOOTED comment naming the event; an action-typed issue with the same referent closes with today's
+    comment. The first must FAIL against current sweep.ts.
+    NOT IN SCOPE: keeping question issues open past referent-terminality (a policy change with a
+    board-hygiene cost — if wanted later it is its own evidenced decision); the classifier itself
+    (W1-T346); reopening machinery.
+  acceptance:
+    - claim: "a question-typed issue whose referent went terminal closes with a mooted comment that names the mooting event and states the question was not answered"
+      proof: "unit test: test/sweep.test.ts"
+    - claim: "an action-typed or untyped issue with a terminal referent keeps today's close comment unchanged"
+      proof: "unit test: test/sweep.test.ts"
+  risk: medium
+  origin: oper#needs-me-filings-2026-08-04
+  plan_refs: ["W1-T346", "W1-T104"]
+  files: [src/lib/sweep.ts, test/sweep.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — close-comment selection over injected referent states, assertable in-process.
+    risk:medium — one branch in an existing close path; the failure directions are a wrong comment,
+    never a lost close.
+    budget_usd 45 — smallest in the arc: one branch, one comment shape, a two-direction falsifier.
+    depends_on W1-T346 IS REAL: the guard keys on the needs-question label that task mints; without a
+    type there is nothing deterministic to guard on (title regexes over question-form prose is the
+    fragile alternative this dependency avoids).
+    ONE CONCERN: the reconciler's close VOICE for questions. Whether questions should outlive their
+    referents at all is deliberately not decided here — that is an operator call to raise with data
+    once mooted-closes are countable, which (iii) makes them."
