@@ -211,6 +211,7 @@ import {
 } from "./lib/task-id-reservation.js";
 import {
   applyPlanProposalCommit,
+  buildPlanGrillEscalation,
   decidePlanArchitect,
   unreservedFiledIds,
   diffCitesResearchSource,
@@ -13326,8 +13327,39 @@ export async function planCommand(
     }
 
     if (decision.action === "grill") {
+      // THE GRILL (W1-T42/W1-T354): the ledger line above is written UNCONDITIONALLY, before any
+      // escalation attempt, so a delivery failure below degrades to exactly today's behavior
+      // (ledger + console line + clean exit) rather than losing the record — see this task's
+      // twin, triageCommand's THE GRILL block a few hundred lines up.
       log("plan.verdict", { action: "grill", detail: decision.detail });
       say(formatPlanVerdictLine(mode, decision));
+      try {
+        const issueUrl = await escalateWithSummary(buildPlanGrillEscalation({ decision, mode, brief, taskId, runId }), {
+          issues: ghIssueGateway(owner, repo),
+          ledgerPath,
+          runId,
+          summarize: realDecisionSummarizer({
+            mount: resolveDecisionSummaryMount(mountsTable),
+            cwd: worktreePath,
+            settingsFile,
+            spawn,
+          }),
+        });
+        log("plan.grill_opened", { issue_url: issueUrl });
+        say(`grill opened (needs-human): ${issueUrl}`);
+      } catch (err) {
+        // FAIL-OPEN (tryEscalate's discipline, inlined here since escalateWithSummary is async
+        // and tryEscalate is not): a failed delivery never turns the grill into a crash — the
+        // plan.verdict ledger line above already recorded the outcome, so this is a missed
+        // issue, not a missed record.
+        appendLedger(ledgerPath, {
+          run_id: runId,
+          task_id: taskId,
+          step: "escalation.failed",
+          class: "GRILL",
+          error: String((err as Error)?.message ?? err),
+        });
+      }
       worktreeRemove(repoDir, worktreePath);
       return 0;
     }

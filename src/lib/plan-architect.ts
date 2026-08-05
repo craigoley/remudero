@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { shapeCommitMessage } from "./commit-message.js";
 import { ACCEPTANCE_PROOF_GRAMMAR } from "./proof-grammar.js";
+import type { Escalation } from "./escalate.js";
 
 /**
  * `rmd plan --mode=create|clarify|expand` — the unified Architect PLAN skill (MASTER-PLAN
@@ -468,6 +469,63 @@ export function formatPlanVerdictLine(mode: PlanMode, decision: PlanDecision): s
   }
   if (decision.action === "propose") return `--mode=${mode}: PROPOSED — ${decision.detail}`;
   return `--mode=${mode}: ERROR — ${decision.reason}`;
+}
+
+// ── THE GRILL: the needs-human escalation payload (W1-T42, wired by W1-T354) ────────────────
+
+/**
+ * Build the `Escalation` (lib/escalate.ts) for a plan-architect GRILL verdict — the SAME async
+ * needs-human GitHub issue triage's {@link "./triage.js".buildGrillEscalation} already opens for
+ * an ambiguous feedback item (★ VERIFIED the only viable mechanism: AskUserQuestion auto-resolves
+ * empty with no TTY, and every Architect worker runs headless via spawnWorker — LEARNINGS.md
+ * "AskUserQuestion neither works headlessly nor stalls").
+ *
+ * NOT a reuse of `buildGrillEscalation` itself: that builder is feedback-shaped (it requires a
+ * `FeedbackEntry` for `entry.id`/`entry.raw`, which this lane has no equivalent of — it has a
+ * `mode`/`brief` instead) and its `decision.options`/`decision.recommendation` come from
+ * `TriageDecision`'s grill arm, which `decideTriage` enforces carries >= 2 real `OPTION:` lines
+ * parsed off the worker's own output. `decidePlanArchitect`'s grill arm carries no such thing —
+ * the Architect prompt (see {@link planArchitectPrompt}) asks only for a single `GRILL: <question>`
+ * line, never `OPTION:`/`RECOMMENDATION:` lines — so there is nothing of the Architect's own to
+ * carry over. This is the "minimal real pair" design point (ii) calls for instead: the two actual
+ * choices a human has for ANY plan-lane grill, regardless of what the question is about.
+ *
+ * Pure — mirrors how `buildGrillEscalation`/`planCommitMessage` stay pure while `run-task.ts`'s
+ * `planCommand` owns the real `escalate()`/`ghIssueGateway()` I/O.
+ */
+export function buildPlanGrillEscalation(opts: {
+  decision: Extract<PlanDecision, { action: "grill" }>;
+  mode: PlanMode;
+  brief: string;
+  taskId: string;
+  runId: string;
+}): Escalation {
+  const { decision, mode, brief, taskId, runId } = opts;
+  const focus = brief ? ` (focus: ${brief})` : "";
+  const rerun = `rmd plan --mode=${mode}${brief ? ` ${brief}` : ""}`;
+  return {
+    class: "GRILL",
+    taskId,
+    runId,
+    summary: `rmd plan --mode=${mode}${focus} needs a human call: ${decision.detail}`,
+    detail: [
+      `Mode: ${mode}`,
+      `Brief: ${brief || "(none given — the Architect considered the whole plan)"}`,
+      "",
+      `Open question: ${decision.detail}`,
+    ].join("\n"),
+    options: [
+      {
+        label: "answer-and-rerun",
+        detail: `Answer the open question, then rerun \`${rerun}\` so the Architect can proceed with it settled.`,
+      },
+      {
+        label: "leave-as-is",
+        detail: "Leave the plan unchanged for now — no rerun needed yet.",
+      },
+    ],
+    recommendation: "answer-and-rerun",
+  };
 }
 
 // ── Commit message authorship (harness-owned, deterministic) ────────────────
