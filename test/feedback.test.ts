@@ -8,6 +8,8 @@ import {
   FEEDBACK_ORIGINS,
   FEEDBACK_STATUSES,
   FeedbackError,
+  buildFeedbackExpansionPrompt,
+  buildFeedbackExpansionSpawnArgs,
   buildFeedbackFewShot,
   captureFeedback,
   expandFeedbackDraft,
@@ -17,11 +19,15 @@ import {
   listFeedback,
   parseFeedbackAddArgs,
   readFeedbackEntry,
+  realFeedbackExpander,
+  resolveFeedbackExpansionMount,
   setFeedbackStatus,
   validateFeedbackExpansion,
   type FeedbackEntry,
   type FeedbackExpansion,
 } from "../src/lib/feedback.js";
+import { validateMounts, type Mount } from "../src/lib/mounts.js";
+import type { WorkerResult, spawnWorker } from "../src/lib/worker.js";
 
 function root(): string {
   return mkdtempSync(join(tmpdir(), "rmd-feedback-"));
@@ -376,4 +382,119 @@ test("captureFeedback re-validates a passed expansion defensively — a malforme
   const entry = captureFeedback(r, { raw: "still lands", expansion: { claim: "only a claim" } as unknown as FeedbackExpansion });
   assert.equal(entry.raw, "still lands");
   assert.equal(entry.expansion, null);
+});
+
+// ── The real feedback-expansion rung: mirrors test/decision-summary.test.ts's own split exactly
+// (buildFeedbackExpansionPrompt/buildFeedbackExpansionSpawnArgs are pure and fully unit-tested;
+// realFeedbackExpander is exercised with an INJECTED fake spawn, never a real shell-out, covering
+// its success, no-JSON-found, and malformed-JSON branches) ──────────────────────────────────────
+
+function goodMounts() {
+  return validateMounts({
+    tiers: { haiku: 1, sonnet: 2, opus: 3 },
+    efforts: { low: 1, medium: 2, high: 3 },
+    architect: { model: "opus", effort: "high", max_turns: 60, context_budget: 180000 },
+    judge: { model: "opus", effort: "high", max_turns: 60, context_budget: 150000 },
+    routes: {
+      implement: {
+        low: { src: { model: "sonnet", effort: "medium", max_turns: 30, context_budget: 120000 } },
+        high: { src: { model: "sonnet", effort: "high", max_turns: 50, context_budget: 180000 } },
+      },
+      recon: {
+        low: { src: { model: "haiku", effort: "medium", max_turns: 20, context_budget: 60000 } },
+      },
+    },
+  });
+}
+
+function fakeWorkerResult(text: string): WorkerResult {
+  return {
+    sessionId: "s-feedback-expansion",
+    costUsd: 0.001,
+    numTurns: 1,
+    text,
+    blocks: [text],
+    stderr: "",
+    subtype: "success",
+    isError: false,
+    apiError: false,
+    permissionDenials: [],
+    childEnvKeys: [],
+    model: "haiku",
+    effort: "medium",
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    modelUsage: {},
+    compactionEvents: [],
+    qualitySuspect: false,
+  };
+}
+
+test("buildFeedbackExpansionPrompt embeds the draft, the honesty constraint, and (when given) the few-shot register", () => {
+  const withoutFewShot = buildFeedbackExpansionPrompt({ draft: "the digest fired twice", fewShot: "" });
+  assert.match(withoutFewShot, /the digest fired twice/);
+  assert.match(withoutFewShot, /ONLY a JSON object/);
+  assert.match(withoutFewShot, /claim/);
+  assert.match(withoutFewShot, /recon/);
+  assert.match(withoutFewShot, /falsifying_check/);
+  assert.match(withoutFewShot, /HONESTY CONSTRAINT/);
+  assert.doesNotMatch(withoutFewShot, /RECENT PRECEDENT/);
+
+  const withFewShot = buildFeedbackExpansionPrompt({ draft: "x", fewShot: "EXAMPLE:\nsome precedent entry" });
+  assert.match(withFewShot, /RECENT PRECEDENT/);
+  assert.match(withFewShot, /some precedent entry/);
+});
+
+test("buildFeedbackExpansionSpawnArgs carries an EMPTY tool list and the resolved mount's model/effort/maxTurns — the expander cannot write/edit, by construction", () => {
+  const mount: Mount = { model: "haiku", effort: "medium", maxTurns: 20, contextBudget: 60000 };
+  const input = { draft: "some draft", fewShot: "" };
+  const args = buildFeedbackExpansionSpawnArgs({ input, mount, cwd: "/tmp/x", settingsFile: "/tmp/settings.json" });
+
+  assert.deepEqual(args.tools, []);
+  assert.equal(args.model, "haiku");
+  assert.equal(args.effort, "medium");
+  assert.equal(args.maxTurns, 20);
+  assert.equal(args.cwd, "/tmp/x");
+  assert.equal(args.settingsFile, "/tmp/settings.json");
+  assert.equal(args.permissionMode, "bypassPermissions");
+  assert.equal(args.prompt, buildFeedbackExpansionPrompt(input));
+});
+
+test("realFeedbackExpander parses a JSON object out of the worker's response text and returns it", async () => {
+  const mount: Mount = { model: "haiku", effort: "medium", maxTurns: 20, contextBudget: 60000 };
+  const calls: unknown[] = [];
+  const responseObject = validExpansion();
+  const spawn = (async (args: unknown) => {
+    calls.push(args);
+    return fakeWorkerResult(`Here is the JSON:\n${JSON.stringify(responseObject)}\nthanks`);
+  }) as typeof spawnWorker;
+
+  const expand = realFeedbackExpander({ mount, cwd: "/tmp/x", settingsFile: "/tmp/settings.json", spawn });
+  const out = await expand({ draft: "raw text", fewShot: "" });
+
+  assert.equal(calls.length, 1, "calls the injected spawn exactly once");
+  assert.deepEqual(
+    calls[0],
+    buildFeedbackExpansionSpawnArgs({ input: { draft: "raw text", fewShot: "" }, mount, cwd: "/tmp/x", settingsFile: "/tmp/settings.json" }),
+  );
+  assert.deepEqual(out, responseObject);
+});
+
+test("realFeedbackExpander returns null when the worker's response contains no JSON object at all", async () => {
+  const mount: Mount = { model: "haiku", effort: "medium", maxTurns: 20, contextBudget: 60000 };
+  const spawn = (async () => fakeWorkerResult("sorry, I could not expand this")) as typeof spawnWorker;
+  const expand = realFeedbackExpander({ mount, cwd: "/tmp/x", settingsFile: "/tmp/settings.json", spawn });
+  assert.equal(await expand({ draft: "raw text", fewShot: "" }), null);
+});
+
+test("realFeedbackExpander returns null when the extracted braces are not valid JSON", async () => {
+  const mount: Mount = { model: "haiku", effort: "medium", maxTurns: 20, contextBudget: 60000 };
+  const spawn = (async () => fakeWorkerResult("{not: valid, json}")) as typeof spawnWorker;
+  const expand = realFeedbackExpander({ mount, cwd: "/tmp/x", settingsFile: "/tmp/settings.json", spawn });
+  assert.equal(await expand({ draft: "raw text", fewShot: "" }), null);
+});
+
+test("resolveFeedbackExpansionMount resolves the CHEAPEST configured tier — reused from risk-judge.ts, never a hard-coded model id", () => {
+  const mount = resolveFeedbackExpansionMount(goodMounts());
+  assert.equal(mount.model, "haiku");
+  assert.deepEqual(mount, { model: "haiku", effort: "medium", maxTurns: 20, contextBudget: 60000 });
 });
