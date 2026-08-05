@@ -831,3 +831,34 @@ test("W1-T342: omitting BOTH governors entirely still admits every dispatch — 
   assert.equal(checkDispatchGovernors(deps, 150), undefined);
   assert.equal(checkDispatchGovernors(deps, undefined), undefined);
 });
+
+test("W1-T342: runDaemon's per-dispatch call site (immediately before runOne) genuinely defers on its OWN reading, independently of the tick-wide check having already passed", async () => {
+  const plan = onePlan();
+  const dispatched: string[] = [];
+  let calls = 0;
+  const deps: DaemonDeps = {
+    refreshMerged: () => NONE_MERGED,
+    runOne: async (id) => {
+      dispatched.push(id);
+      return { taskId: id, runId: "R", merged: true, costUsd: 0, verdict: "merged" };
+    },
+    // ODD calls are the tick-wide site (before retro/kicks/nextRunnable) — always clear.
+    // EVEN calls are the per-dispatch site (immediately before runOne) — deferred on tick 1
+    // only. This is the exact "the tick-wide reading already passed, but THIS dispatch's own
+    // fresh reading must still be consulted on its own merits" shape design (i) requires.
+    checkCostGovernor: () => {
+      calls++;
+      if (calls % 2 === 0 && calls <= 2) return { deferred: true, observedDayCostUsd: 150, ceilingUsd: 150 };
+      return undefined;
+    },
+    checkStop: () => (dispatched.length > 0 ? "test done" : undefined),
+    sleep: async () => {},
+  };
+  const summary = await runDaemon(plan, deps);
+  assert.equal(summary.stopReason, "stopped");
+  assert.deepEqual(dispatched, ["A"], "dispatched only once the PER-DISPATCH consultation also cleared, not merely the tick-wide one");
+  assert.ok(
+    calls >= 3,
+    `expected the tick-wide pass, the per-dispatch defer, and at least one later successful pair — got ${calls} calls`,
+  );
+});
