@@ -1,13 +1,16 @@
 import assert from "node:assert/strict";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import fs, { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
   WORKER_HOME_RC_FILES,
   WORKER_HOME_SYMLINKS,
+  ensureWorkerKeychain,
+  keychainProvisionLockPath,
   materializeWorkerHome,
   workerHomePlan,
+  workerKeychainPaths,
 } from "../src/lib/worker-home.js";
 
 function tmp(): string {
@@ -155,5 +158,55 @@ test("materializeWorkerHome: self-heals a symlink pointing at a STALE real-HOME 
     rmSync(workerHome, { recursive: true, force: true });
     rmSync(realHome, { recursive: true, force: true });
     rmSync(staleTarget, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T339: the steady-state ensureWorkerKeychain path stays LOCK-FREE ─────
+//
+// The provisioning branch (absent/identity-changed/expired store) is what W1-T339
+// serializes with an exclusive lock -- see test/worker-keychain-account.test.ts for
+// that. This is the OTHER half of the claim: a call that finds a present,
+// identity-matching, unexpired store must take NO lock at all, so the overwhelming
+// majority of dispatches never pay for a mutex they don't need.
+
+const STEADY_STATE_LOGIN = "/Users/operator/Library/Keychains/login.keychain-db";
+
+test("W1-T339: the steady-state path (present, identity-matching, unexpired store) stays LOCK-FREE — no provisioning lock file is ever opened, and no credential is read", (t) => {
+  const root = tmp();
+  try {
+    const paths = workerKeychainPaths(join(root, "state"));
+    mkdirSync(join(root, "state"), { recursive: true });
+    // A store a PRIOR call already provisioned: present, identity recorded, and a
+    // far-future expiry -- exactly the steady-state gate this claim is about. No
+    // ensureWorkerKeychain call is made to set this up, so the ONLY call under test
+    // is the steady-state one whose lock-freedom is being asserted.
+    writeFileSync(paths.keychainPath, "not a real keychain database, just needs to exist\n");
+    writeFileSync(paths.identityPath, "acct-1", { mode: 0o600 });
+    writeFileSync(paths.expiryPath, String(Date.now() + 24 * 60 * 60 * 1000), { mode: 0o600 });
+
+    const openSyncSpy = t.mock.method(fs, "openSync");
+    const strictRunner = (argv: string[]): string => {
+      assert.notEqual(argv[0], "find-generic-password", "the steady-state path must never re-read the login keychain");
+      return "";
+    };
+
+    const summary = ensureWorkerKeychain({
+      ...paths,
+      loginKeychainPath: STEADY_STATE_LOGIN,
+      runner: strictRunner,
+      accountId: "acct-1",
+    });
+
+    assert.equal(summary.provisioned, false, "a matching store never re-provisions");
+    assert.equal(summary.reason, "skipped");
+
+    const lockPath = keychainProvisionLockPath(paths.keychainPath);
+    assert.ok(
+      !openSyncSpy.mock.calls.some((c) => String(c.arguments[0]) === lockPath),
+      "the provisioning lock file must never be opened on the steady-state path",
+    );
+    assert.ok(!existsSync(lockPath), "no provisioning lock file is left behind");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });

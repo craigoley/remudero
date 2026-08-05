@@ -1,9 +1,11 @@
 import { execFileSync } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import {
+  closeSync,
   existsSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
   readlinkSync,
@@ -12,8 +14,11 @@ import {
   symlinkSync,
   unlinkSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
+import { defaultIsPidAlive } from "./drain-lock.js";
+import { reclaimStaleLock } from "./fs-race-safe.js";
 
 /**
  * GENERAL SHELL-ISOLATION MECHANISM (W1-T18 / OSS blocker).
@@ -584,6 +589,187 @@ export function classifyCredentialSidecar(
 const MAX_CREDENTIAL_RECOVERY_ATTEMPTS = 1;
 const credentialRecoveryFailures = new Map<string, { count: number; lastReasonClass: WorkerKeychainReasonClass }>();
 
+// ── W1-T339: serialize ONLY the provisioning branch, not the whole function ────
+//
+// WHAT IS SAFE ALREADY (unaffected by this section): the password write above is
+// atomic (`wx`) and converges losers onto the winner's password; the steady-state
+// read path (present, identity-matching, unexpired store) costs one fs read and two
+// IDEMPOTENT `security` calls (`unlock-keychain`/`set-keychain-settings`) that never
+// touch this lock at all.
+//
+// WHAT IS NOT SAFE: the provisioning branch DELETES and recreates the keychain store
+// (`rmSync` + `create-keychain` + `add-generic-password`). Two concurrent daemon
+// lanes that BOTH decide to (re-)provision the SAME store — a cold-boot racing a
+// spawn, or two lanes hitting an identity/expiry change together — would otherwise
+// have one lane's `rmSync` pull the store out from under the other mid-write, which
+// presents as flaky auth rather than as a lock bug.
+//
+// SAME SHAPE AS `acquireInflightLock`/`acquireDrainLock` (create-or-fail `wx`, no
+// TOCTOU gap, stale-holder reclaim via the shared `reclaimStaleLock` identity check —
+// W1-T289) with ONE deliberate difference: those two THROW when a live holder is
+// found, because "another instance of the same thing is already running" is meant to
+// abort the caller. Here a live holder means "a peer is provisioning THIS keychain
+// right now" — the correct action is to WAIT for it and converge on its result, never
+// throw and never proceed uncoordinated (this task's design point (iv)). So this lock
+// polls instead of failing fast on EEXIST-with-a-live-holder.
+
+/** `<keychainPath>.provision.lock` — co-located with the store it guards, so the lock
+ *  is scoped per keychain (a labelled per-account store never serializes against an
+ *  unrelated one) and is discoverable next to the file it protects. */
+export function keychainProvisionLockPath(keychainPath: string): string {
+  return `${keychainPath}.provision.lock`;
+}
+
+interface KeychainProvisionLockInfo {
+  pid: number;
+  startedAt: string;
+}
+
+function parseKeychainProvisionLockInfo(raw: string): KeychainProvisionLockInfo | null {
+  try {
+    const o = JSON.parse(raw);
+    return typeof o?.pid === "number" ? (o as KeychainProvisionLockInfo) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Blocking synchronous sleep (`ensureWorkerKeychain` is fully synchronous end to
+ *  end, so the wait loop below cannot `await`). `Atomics.wait` on a throwaway
+ *  `SharedArrayBuffer` is the standard Node idiom for this — no native dependency,
+ *  no busy-spin burning CPU between polls. */
+function defaultSleepSyncMs(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** How often a waiting loser re-checks whether the provisioning lock has freed up. */
+const KEYCHAIN_PROVISION_LOCK_POLL_MS = 20;
+
+export interface KeychainProvisionLockHandle {
+  readonly path: string;
+  /** Idempotent — safe from a `finally`. */
+  release(): void;
+}
+
+/**
+ * Acquire the exclusive provisioning lock for `keychainPath`, WAITING (never
+ * throwing, never letting the caller proceed uncoordinated) while a live peer holds
+ * it. A stale lock — its holder's pid no longer alive, or its file unreadable/garbage
+ * — is reclaimed via the same identity-safe {@link reclaimStaleLock} every other lock
+ * in this repo uses, so a crashed provisioner's abandoned lock cannot wedge every
+ * later dispatch (this task's design point (v)): the very next call to reach EEXIST
+ * on it takes it over.
+ */
+function acquireKeychainProvisionLock(
+  keychainPath: string,
+  opts: { isPidAlive?: (pid: number) => boolean; sleepSyncMs?: (ms: number) => void } = {},
+): KeychainProvisionLockHandle {
+  const isAlive = opts.isPidAlive ?? defaultIsPidAlive;
+  const sleep = opts.sleepSyncMs ?? defaultSleepSyncMs;
+  const lockPath = keychainProvisionLockPath(keychainPath);
+  const info: KeychainProvisionLockInfo = { pid: process.pid, startedAt: new Date().toISOString() };
+  mkdirSync(dirname(lockPath), { recursive: true });
+
+  for (;;) {
+    try {
+      const fd = openSync(lockPath, "wx"); // create-or-fail; no TOCTOU gap
+      writeSync(fd, JSON.stringify(info, null, 2));
+      closeSync(fd);
+      break;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      const result = reclaimStaleLock(lockPath, {
+        parseHolder: parseKeychainProvisionLockInfo,
+        isStale: (held) => !isAlive(held.pid),
+      });
+      if (result.outcome === "live") {
+        // A live peer is provisioning THIS store right now — WAIT and re-check,
+        // never throw and never proceed alongside it. Its own release (or, if it
+        // crashes, the next pass reclaiming its now-stale lock) is what ends this.
+        sleep(KEYCHAIN_PROVISION_LOCK_POLL_MS);
+        continue;
+      }
+      // "missing" | "reclaimed" | "lost" → loop back and retry the atomic create.
+    }
+  }
+
+  let released = false;
+  return {
+    path: lockPath,
+    release() {
+      if (released) return;
+      released = true;
+      try {
+        unlinkSync(lockPath);
+      } catch {
+        // already gone — idempotent
+      }
+    },
+  };
+}
+
+/** What {@link deriveProvisionGate} decided, read-only — never mutates anything. */
+interface ProvisionGate {
+  identityChanged: boolean;
+  credentialExpired: boolean;
+  credentialSidecarBroken: boolean;
+  treatAsAbsent: boolean;
+  needsProvisioning: boolean;
+}
+
+/**
+ * Pure(ish) — reads `identityPath`/`expiryPath` but writes nothing — extraction of
+ * the W1-T265 identity gate + W1-T293 expiry gate so it can be evaluated TWICE
+ * (W1-T339): once before the provisioning lock (to decide whether this call needs the
+ * lock at all — the steady-state majority never does), and again immediately after
+ * acquiring it, because a concurrent winner may have already (re-)provisioned while
+ * this call was waiting. The second evaluation is what lets a loser CONVERGE on the
+ * winner's result instead of redundantly re-provisioning on top of it.
+ */
+function deriveProvisionGate(opts: EnsureWorkerKeychainOpts, storeExists: boolean): ProvisionGate {
+  let identityChanged = false;
+  if (storeExists && opts.accountId !== undefined) {
+    let recordedId: string | undefined;
+    try {
+      recordedId = readFileSync(opts.identityPath, "utf8");
+    } catch {
+      recordedId = undefined;
+    }
+    identityChanged = recordedId !== opts.accountId;
+  }
+
+  let credentialExpired = false;
+  let credentialSidecarBroken = false;
+  if (storeExists && !identityChanged) {
+    if (opts.priorSpawnCredentialExpired) {
+      credentialExpired = true;
+    } else {
+      let recorded: string | undefined;
+      try {
+        recorded = readFileSync(opts.expiryPath, "utf8");
+      } catch {
+        recorded = undefined; // no sidecar — predates this feature, or the credential carried no expiry field
+      }
+      const verdict = classifyCredentialSidecar(recorded, {
+        nowMs: (opts.now ?? Date.now)(),
+        skewMs: opts.credentialExpirySkewMs ?? DEFAULT_CREDENTIAL_EXPIRY_SKEW_MS,
+      });
+      if (verdict === "expired") credentialExpired = true;
+      else if (verdict === "broken") credentialSidecarBroken = true; // present-but-empty/unparseable never reads as healthy
+    }
+  }
+  // A broken sidecar means THIS store cannot be trusted — the same remedy as never
+  // having provisioned it at all.
+  const treatAsAbsent = !storeExists || credentialSidecarBroken;
+  return {
+    identityChanged,
+    credentialExpired,
+    credentialSidecarBroken,
+    treatAsAbsent,
+    needsProvisioning: treatAsAbsent || identityChanged || credentialExpired,
+  };
+}
+
 /**
  * Guarantee the dedicated worker keychain exists, holds the credential item,
  * never auto-locks, and is UNLOCKED — the invariant a headless spawn needs.
@@ -622,60 +808,18 @@ export function ensureWorkerKeychain(opts: EnsureWorkerKeychainOpts): WorkerKeyc
   let provisioned = false;
   const storeExists = exists(opts.keychainPath);
 
-  // W1-T265 IDENTITY-AWARE GATE. Opt-in: only runs when the caller supplies
-  // `accountId`, so a caller that never does (every pre-W1-T265 call site) sees
-  // byte-for-byte the old `!exists` gate. A store with NO recorded identity —
-  // absent `identityPath`, e.g. one provisioned before this option existed —
-  // counts as a mismatch: the safer failure here is an extra re-provision, never
-  // a silent skip that keeps spending whichever account happened to provision
-  // first (this task's whole rationale).
-  let identityChanged = false;
-  if (storeExists && opts.accountId !== undefined) {
-    let recordedId: string | undefined;
-    try {
-      recordedId = readFileSync(opts.identityPath, "utf8");
-    } catch {
-      recordedId = undefined;
-    }
-    identityChanged = recordedId !== opts.accountId;
-  }
-
-  // W1-T293 arms (2)+(3): EXPIRY-AWARE, at the seam W1-T265 already built. Only
-  // worth asking when identity alone hasn't already decided to re-provision. Arm
-  // (2) reads ONLY the small `expiryPath` sidecar (a NAME-like numeric timestamp
-  // recorded at provisioning time — never the credential secret itself, and never
-  // a `security` call), so the steady-state (fresh, matching) spawn path costs one
-  // fs read: no credential read, no extra unlock. Arm (3) is the caller's hint that
-  // the PRIOR spawn died on the expiry-named preflight reason — forces a
-  // re-provision even when arm (2) alone saw nothing wrong (a token that expired
-  // mid-run, after the last check).
-  let credentialExpired = false;
-  let credentialSidecarBroken = false;
-  if (storeExists && !identityChanged) {
-    if (opts.priorSpawnCredentialExpired) {
-      credentialExpired = true;
-    } else {
-      let recorded: string | undefined;
-      try {
-        recorded = readFileSync(opts.expiryPath, "utf8");
-      } catch {
-        recorded = undefined; // no sidecar — predates this feature, or the credential carried no expiry field
-      }
-      const verdict = classifyCredentialSidecar(recorded, {
-        nowMs: (opts.now ?? Date.now)(),
-        skewMs: opts.credentialExpirySkewMs ?? DEFAULT_CREDENTIAL_EXPIRY_SKEW_MS,
-      });
-      if (verdict === "expired") credentialExpired = true;
-      else if (verdict === "broken") credentialSidecarBroken = true; // present-but-empty/unparseable never reads as healthy
-    }
-  }
-  // A broken sidecar means THIS store cannot be trusted — the same remedy as never
-  // having provisioned it at all.
-  const treatAsAbsent = !storeExists || credentialSidecarBroken;
+  // W1-T265 identity gate + W1-T293 expiry gate, both folded into `deriveProvisionGate`
+  // (W1-T339) — see its doc for why this is evaluated TWICE. This FIRST evaluation is
+  // read-only and lock-free: the overwhelming majority of calls (steady state — a
+  // present, identity-matching, unexpired store) find `needsProvisioning: false` right
+  // here and never touch the provisioning lock below at all.
+  let gate = deriveProvisionGate(opts, storeExists);
 
   // Arm (6): fail fast, without touching the login keychain again, once a
   // credential-expiry recovery has already failed once this boot for this path.
-  if (credentialExpired) {
+  // Checked before the lock — a cheap in-memory read — so a permanently-dead login
+  // token throws immediately instead of queueing behind the provisioning lock first.
+  if (gate.credentialExpired) {
     const prior = credentialRecoveryFailures.get(opts.keychainPath);
     if (prior && prior.count >= MAX_CREDENTIAL_RECOVERY_ATTEMPTS) {
       throw new WorkerKeychainError(
@@ -688,102 +832,123 @@ export function ensureWorkerKeychain(opts: EnsureWorkerKeychainOpts): WorkerKeyc
     }
   }
 
-  if (treatAsAbsent || identityChanged || credentialExpired) {
-    // A mismatch/staleness verdict means a LIVE keychain file may be sitting at
-    // this path already — `create-keychain` refuses to overwrite one, so it must
-    // go first. Nothing to remove when the store was simply absent.
-    if (storeExists) {
-      try {
-        rmSync(opts.keychainPath, { force: true });
-      } catch {
-        // best-effort; a real removal failure surfaces below as provision-failed
-        // when create-keychain hits the file it couldn't clear.
-      }
-    }
-    // Read the item (attributes, then secret) BEFORE creating anything, so a
-    // locked/missing credential leaves no half-provisioned keychain behind. The
-    // `acct` attribute is copied over UNCHANGED, exactly as before W1-T265 —
-    // account-usage.ts measured it to be the OS username, identical across an
-    // Anthropic account switch, so it is preserved here as informational
-    // provenance only. It is NEVER used for the identity comparison above,
-    // which compares `opts.accountId` against `identityPath`'s own sidecar
-    // record instead — a separate, purpose-built value.
-    let attrs: string;
-    let secret: string;
+  // W1-T339: SERIALIZE ONLY THE PROVISIONING BRANCH. A call whose gate above already
+  // says "nothing to do" never acquires this lock — the steady-state path stays
+  // exactly as lock-free as it was before this task.
+  if (gate.needsProvisioning) {
+    const lock = acquireKeychainProvisionLock(opts.keychainPath);
     try {
-      attrs = runner(["find-generic-password", "-s", WORKER_KEYCHAIN_SERVICE, opts.loginKeychainPath]);
-      secret = runner([
-        "find-generic-password",
-        "-s",
-        WORKER_KEYCHAIN_SERVICE,
-        "-w",
-        opts.loginKeychainPath,
-      ]).replace(/\n$/, "");
-    } catch (err) {
-      const reasonClass = classifyLoginReadError(err);
-      if (credentialExpired) {
-        credentialRecoveryFailures.set(opts.keychainPath, {
-          count: (credentialRecoveryFailures.get(opts.keychainPath)?.count ?? 0) + 1,
-          lastReasonClass: reasonClass,
-        });
+      // RE-DERIVE, now holding the lock: a concurrent winner may have finished
+      // (re-)provisioning this exact store while this call was waiting for it. A
+      // loser that skipped this re-check would redundantly re-provision on top of
+      // what its peer just wrote — the exact hazard this lock exists to prevent.
+      gate = deriveProvisionGate(opts, exists(opts.keychainPath));
+
+      if (gate.needsProvisioning) {
+        // A mismatch/staleness verdict means a LIVE keychain file may be sitting at
+        // this path already — `create-keychain` refuses to overwrite one, so it
+        // must go first. Nothing to remove when the store was simply absent.
+        if (exists(opts.keychainPath)) {
+          try {
+            rmSync(opts.keychainPath, { force: true });
+          } catch {
+            // best-effort; a real removal failure surfaces below as provision-failed
+            // when create-keychain hits the file it couldn't clear.
+          }
+        }
+        // Read the item (attributes, then secret) BEFORE creating anything, so a
+        // locked/missing credential leaves no half-provisioned keychain behind. The
+        // `acct` attribute is copied over UNCHANGED, exactly as before W1-T265 —
+        // account-usage.ts measured it to be the OS username, identical across an
+        // Anthropic account switch, so it is preserved here as informational
+        // provenance only. It is NEVER used for the identity comparison above,
+        // which compares `opts.accountId` against `identityPath`'s own sidecar
+        // record instead — a separate, purpose-built value.
+        let attrs: string;
+        let secret: string;
+        try {
+          attrs = runner(["find-generic-password", "-s", WORKER_KEYCHAIN_SERVICE, opts.loginKeychainPath]);
+          secret = runner([
+            "find-generic-password",
+            "-s",
+            WORKER_KEYCHAIN_SERVICE,
+            "-w",
+            opts.loginKeychainPath,
+          ]).replace(/\n$/, "");
+        } catch (err) {
+          const reasonClass = classifyLoginReadError(err);
+          if (gate.credentialExpired) {
+            credentialRecoveryFailures.set(opts.keychainPath, {
+              count: (credentialRecoveryFailures.get(opts.keychainPath)?.count ?? 0) + 1,
+              lastReasonClass: reasonClass,
+            });
+          }
+          throw new WorkerKeychainError(
+            reasonClass,
+            `worker-keychain provisioning could not read the '${WORKER_KEYCHAIN_SERVICE}' item from the login keychain ` +
+              `(${reasonClass}): ${String((err as Error)?.message ?? err)}. ` +
+              `Provision while the login keychain is unlocked (an interactive session), then headless spawns no longer need it.`,
+          );
+        }
+        const account = attrs.match(/"acct"<blob>="([^"]*)"/)?.[1] ?? "";
+        try {
+          runner(["create-keychain", "-p", password, opts.keychainPath]);
+          // No -l (lock on sleep) / no -u (lock after timeout): never auto-locks.
+          runner(["set-keychain-settings", opts.keychainPath]);
+          const grants = (opts.grantApps ?? []).flatMap((app) => ["-T", app]);
+          runner([
+            "add-generic-password",
+            "-a",
+            account,
+            "-s",
+            WORKER_KEYCHAIN_SERVICE,
+            "-w",
+            secret,
+            ...grants,
+            opts.keychainPath,
+          ]);
+          provisioned = true;
+        } catch (err) {
+          if (gate.credentialExpired) {
+            credentialRecoveryFailures.set(opts.keychainPath, {
+              count: (credentialRecoveryFailures.get(opts.keychainPath)?.count ?? 0) + 1,
+              lastReasonClass: "provision-failed",
+            });
+          }
+          throw new WorkerKeychainError(
+            "provision-failed",
+            `worker-keychain provisioning failed while creating/populating ${opts.keychainPath}: ` +
+              String((err as Error)?.message ?? err),
+          );
+        }
+        if (gate.credentialExpired) credentialRecoveryFailures.delete(opts.keychainPath); // a successful recovery clears the boot-scoped cap
+        if (opts.accountId !== undefined) {
+          mkdirSync(dirname(opts.identityPath), { recursive: true });
+          writeFileSync(opts.identityPath, opts.accountId, { mode: 0o600 });
+        }
+        // W1-T293: record the freshly-copied secret's OWN expiry (never the secret
+        // itself) for the NEXT call's cheap arm-2 read. No parseable
+        // `claudeAiOauth.expiresAt` on this credential ⇒ clear any stale sidecar from a
+        // PREVIOUS copy rather than misattributing its timestamp to this one — arm (2)
+        // then correctly reports "unknown" (arm (3) remains available).
+        const expiresAtMs = extractCredentialExpiryMs(secret);
+        if (expiresAtMs !== undefined) {
+          writeFileSync(opts.expiryPath, String(expiresAtMs), { mode: 0o600 });
+        } else {
+          try {
+            unlinkSync(opts.expiryPath);
+          } catch {
+            // already absent — fine
+          }
+        }
       }
-      throw new WorkerKeychainError(
-        reasonClass,
-        `worker-keychain provisioning could not read the '${WORKER_KEYCHAIN_SERVICE}' item from the login keychain ` +
-          `(${reasonClass}): ${String((err as Error)?.message ?? err)}. ` +
-          `Provision while the login keychain is unlocked (an interactive session), then headless spawns no longer need it.`,
-      );
-    }
-    const account = attrs.match(/"acct"<blob>="([^"]*)"/)?.[1] ?? "";
-    try {
-      runner(["create-keychain", "-p", password, opts.keychainPath]);
-      // No -l (lock on sleep) / no -u (lock after timeout): never auto-locks.
-      runner(["set-keychain-settings", opts.keychainPath]);
-      const grants = (opts.grantApps ?? []).flatMap((app) => ["-T", app]);
-      runner([
-        "add-generic-password",
-        "-a",
-        account,
-        "-s",
-        WORKER_KEYCHAIN_SERVICE,
-        "-w",
-        secret,
-        ...grants,
-        opts.keychainPath,
-      ]);
-      provisioned = true;
-    } catch (err) {
-      if (credentialExpired) {
-        credentialRecoveryFailures.set(opts.keychainPath, {
-          count: (credentialRecoveryFailures.get(opts.keychainPath)?.count ?? 0) + 1,
-          lastReasonClass: "provision-failed",
-        });
-      }
-      throw new WorkerKeychainError(
-        "provision-failed",
-        `worker-keychain provisioning failed while creating/populating ${opts.keychainPath}: ` +
-          String((err as Error)?.message ?? err),
-      );
-    }
-    if (credentialExpired) credentialRecoveryFailures.delete(opts.keychainPath); // a successful recovery clears the boot-scoped cap
-    if (opts.accountId !== undefined) {
-      mkdirSync(dirname(opts.identityPath), { recursive: true });
-      writeFileSync(opts.identityPath, opts.accountId, { mode: 0o600 });
-    }
-    // W1-T293: record the freshly-copied secret's OWN expiry (never the secret
-    // itself) for the NEXT call's cheap arm-2 read. No parseable
-    // `claudeAiOauth.expiresAt` on this credential ⇒ clear any stale sidecar from a
-    // PREVIOUS copy rather than misattributing its timestamp to this one — arm (2)
-    // then correctly reports "unknown" (arm (3) remains available).
-    const expiresAtMs = extractCredentialExpiryMs(secret);
-    if (expiresAtMs !== undefined) {
-      writeFileSync(opts.expiryPath, String(expiresAtMs), { mode: 0o600 });
-    } else {
-      try {
-        unlinkSync(opts.expiryPath);
-      } catch {
-        // already absent — fine
-      }
+      // else: a concurrent peer already (re-)provisioned this exact store while this
+      // call waited for the lock — CONVERGE on its result rather than redoing the
+      // work. `gate` was just re-derived against the now-current store, so the
+      // `reason` computed below correctly reports the peer's outcome (typically
+      // "skipped": present, identity-matching, unexpired).
+    } finally {
+      lock.release();
     }
   }
 
@@ -805,11 +970,11 @@ export function ensureWorkerKeychain(opts: EnsureWorkerKeychainOpts): WorkerKeyc
     provisioned,
     unlocked: true,
     account_label: opts.accountId,
-    reason: treatAsAbsent
+    reason: gate.treatAsAbsent
       ? "absent"
-      : identityChanged
+      : gate.identityChanged
         ? "identity-changed"
-        : credentialExpired
+        : gate.credentialExpired
           ? "credential-expired"
           : "skipped",
   };
