@@ -15,6 +15,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import { dirname } from "node:path";
 import type { Plan, Task, TaskStatus } from "./plan.js";
+import { defaultIsPidAlive } from "./drain-lock.js";
 import { labelledIssuesRestArgs, NEEDS_HUMAN_LABEL, parseLabelledIssuesRest } from "./escalate.js";
 import { type BoardPrRest, fetchBoardPrsRest } from "./open-prs-rest.js";
 
@@ -458,6 +459,43 @@ export interface DeriveDeps {
    * sleep (mirrors {@link DeriveDeps.now}). Defaults to {@link DEFAULT_LIVENESS_BOUND_MS}.
    */
   livenessBoundMs?: number;
+  /**
+   * THE INFLIGHT-LOCK ANCHOR (the third disjunct beside `hasOpenPr`/`recentActivity`): the
+   * task's current in-flight lock holder, or `null` when no lock is held. ABSENT ⇒ SKIP —
+   * omitting it degrades this rung to exactly the pre-existing two-disjunct behaviour, the
+   * same "absent ⇒ skip" contract {@link DeriveDeps.mergedHeadBranches} already uses, so
+   * every call site that predates this is unaffected.
+   *
+   * WHY A LOCK AND NOT ANOTHER LEDGER STEP. {@link DeriveDeps.livenessBoundMs} infers
+   * liveness from ledger CHATTER, which a genuinely-live run can stop producing: measured
+   * over the unioned ledger, 96 of 664 runs (14.5%) contain an intra-run gap longer than the
+   * 30-minute bound, so a working run that goes quiet renders as not-running. The lock is
+   * OBSERVED STATE rather than an event, so it covers the quiet stretch that no start/terminal
+   * step table can — and terminals cannot be enumerated their way out of it: of 143 runs with
+   * a `run.start` and no `verdict`, 106 end at `settings.validated`, an EARLY step, because
+   * the process died and wrote no terminal at all.
+   *
+   * NOT TRUSTED ALONE, DELIBERATELY. A lock file outlives its process: `withInflightLock`
+   * releases in a `finally`, and there are NO signal handlers anywhere in src/, so SIGKILL —
+   * and SIGTERM, which Node's default terminates on without unwinding — both leave the file
+   * behind (`sweepStaleInflightLocks`' own doc records `W1-T1.lock` holding a pid dead for two
+   * days). It is therefore paired with {@link DeriveDeps.isPidAlive} below, which is the same
+   * `isStale` predicate `reclaimStaleLock` already conditions its own reclaim on.
+   */
+  inflightHolder?: (taskId: string) => { pid: number } | null;
+  /**
+   * Liveness probe for {@link DeriveDeps.inflightHolder}'s pid; defaults to
+   * {@link defaultIsPidAlive} (`kill(pid, 0)`, treating `EPERM` as alive). Injectable so a
+   * test can assert the dead-holder arm without spawning a process.
+   *
+   * ITS LIMIT, STATED RATHER THAN DISCOVERED: `kern.maxproc` is 4000 on the fleet host, so the
+   * pid space wraps often and a recycled pid makes a dead holder read as live. The lock's own
+   * `startedAt` is never compared against a ceiling and its `host` is never compared at all
+   * (both are recorded, neither is read) — so this disjunct is a REASON TO BELIEVE a run is
+   * live, never proof, which is exactly why it is a third disjunct beside the other two and
+   * never a replacement for them.
+   */
+  isPidAlive?: (pid: number) => boolean;
 }
 
 /**
@@ -1570,7 +1608,15 @@ export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
       const livenessBoundMs = deps.livenessBoundMs ?? DEFAULT_LIVENESS_BOUND_MS;
       const recentActivity =
         runState.lastActivityTs !== undefined && now() - Date.parse(runState.lastActivityTs) <= livenessBoundMs;
-      if (hasOpenPr || recentActivity) {
+      // THE THIRD DISJUNCT (see DeriveDeps.inflightHolder): a HELD lock whose recorded pid is
+      // STILL ALIVE. Both halves are required and neither is sufficient — the lock alone
+      // survives its own process (no signal handlers exist, so SIGKILL and SIGTERM both strand
+      // the file), and a pid alone names nothing about this task. Absent `inflightHolder` the
+      // whole disjunct is skipped, leaving the prior two-disjunct behaviour byte-for-byte.
+      const holder = deps.inflightHolder?.(task.id) ?? null;
+      const isPidAlive = deps.isPidAlive ?? defaultIsPidAlive;
+      const hasLiveLock = holder !== null && isPidAlive(holder.pid);
+      if (hasOpenPr || recentActivity || hasLiveLock) {
         projection.status = "running";
         projection.phase = runState.phase;
         if (runState.startedAt) {
@@ -1578,8 +1624,10 @@ export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
           projection.elapsedMs = Math.max(0, now() - Date.parse(runState.startedAt));
         }
       } else {
-        // Dispatched, no terminal verdict, no open PR, no recent activity: unknown/orphaned,
-        // never running (the falsifier: an orphaned dispatch rendered as running).
+        // Dispatched, no terminal verdict, no open PR, no recent activity, and no live lock:
+        // unknown/orphaned, never running (the falsifier: an orphaned dispatch rendered as
+        // running). A lock held by a DEAD pid lands here too, which is the point — a stale
+        // lock must not resurrect the very defect this rung exists to prevent.
         projection.orphaned = true;
       }
     }
