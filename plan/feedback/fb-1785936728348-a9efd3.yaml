@@ -1,0 +1,29 @@
+id: fb-1785936728348-a9efd3
+ts: 2026-08-05T13:32:08.348Z
+raw: "THE SWEEP STARVES NEWER PRs WHILE RE-ATTEMPTING OLDER ONES — distinct from
+  the retry storm #1348 fixes. Measured 2026-08-05: #1344, #1346 and #1348 have
+  ZERO sweep.post_review rows of any kind, ever — never attempted — while in the
+  same window the sweep cycled #1339, #1340, #1341 and #1342 repeatedly, with
+  #1341 and #1342 failing on the GraphQL rate limit before getting through at
+  13:03-13:04. All three unattempted PRs were merged by hand. So the sweep spent
+  its budget re-attempting a handful of older PRs and never reached the newer
+  ones. THIS IS ORDERING, NOT BURN RATE: #1348 (merged, a7eaa77) moves one gh pr
+  view --json read to REST and frees budget, but it does not change which PRs
+  are reached first, so a saturated sweep would still starve the tail. Note the
+  interaction — the queue never drains because the reads that would drain it are
+  what exhaust the budget, and a PR that is never attempted also never leaves
+  the queue, so it is re-read next tick forever. RECON: establish the sweep's
+  iteration order over open PRs and whether it is bounded per tick; whether an
+  unattempted PR is distinguishable in the ledger from an attempted-and-failed
+  one (today the only signal is ABSENCE, which is why this went unnoticed); and
+  whether freeing budget alone drains the tail or whether fairness needs an
+  explicit change. MEASURE AFTER #1348 DEPLOYS, not before — if the tail drains
+  on its own once budget is available, this is not a separate defect and the
+  entry should be closed. Falsifying check: if every open PR is attempted every
+  tick and these three were skipped for a specific reason (a label, an author, a
+  mergeable state), the gap is in that filter and not in ordering."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null
