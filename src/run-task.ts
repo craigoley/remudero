@@ -280,6 +280,7 @@ import {
 import { regenerateOrientation } from "./lib/orientation.js";
 import {
   buildPlanPrBody,
+  bodyNeedsAcceptanceRepair,
   ensureJudgeableBody,
   filingAcceptanceCriteria,
   regeneratePlanIndexAndCommit,
@@ -5654,6 +5655,66 @@ export async function withMaterializedWorktree<T>(
  * one) because that is the contract's own phrasing. No anchored trailer at all ⇒ `undefined`,
  * unchanged from before — the caller falls through to the PR body's `Acceptance:` block.
  */
+/**
+ * THE RETRO'S ACCEPTANCE-BLOCK REPAIR RUNG, extracted so the DECISION is reachable by a test.
+ *
+ * It was inline in `retroCommand`, which meant the trigger — the thing this change fixes — could
+ * only be pinned by source text and earned zero coverage. diff-coverage flagged it as a wiring line
+ * with `DA:0`, which is this repo's "seam built but never called" hazard pointed at the exact
+ * predicate being widened. Extracting it is the honest answer to that, not a wider lcov.
+ *
+ * Deps are injected LAST and default to the real bindings by object-spread (never `??`, which V8
+ * instruments as a branch and would leave the untaken real side permanently uncovered).
+ *
+ * Best-effort by contract: `retroCommand` must never fail because a repair attempt failed, so every
+ * throw is caught and ledgered as `acceptance.repair.error` rather than propagating.
+ */
+export function repairRetroAcceptanceBlock(
+  prUrl: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  deps: {
+    fetchBody?: (url: string) => string;
+    editBody?: (url: string, body: string) => void;
+  } = {},
+): "repaired" | "healthy" | "error" {
+  const { fetchBody, editBody } = {
+    fetchBody: defaultRetroFetchBody,
+    editBody: defaultRetroEditBody,
+    ...deps,
+  };
+  try {
+    const body = fetchBody(prUrl);
+    // The SAME predicate ensureJudgeableBody itself uses (bodyNeedsAcceptanceRepair,
+    // plan-pr-emitter.ts) — this call site used to carry its own `=== 0` copy, which meant widening
+    // the repair would have left the duplicate here still declining to fire on a body that parses
+    // to one criterion with an empty proof. One definition, two consumers.
+    if (!bodyNeedsAcceptanceRepair(body)) return "healthy";
+    const repaired = ensureJudgeableBody(body, [
+      {
+        claim: "the retro's plan-only sync PR is gate-compliant",
+        proof:
+          "SHIPPED-log/NET-STATE/calibration-table updates and the COMPRESSION deletion are in this diff; " +
+          "docs/ORIENTATION.md and plan/plan-index.json are harness-regenerated separately in this same PR",
+      },
+    ]);
+    editBody(prUrl, repaired);
+    log("acceptance.repaired", { pr_url: prUrl });
+    return "repaired";
+  } catch (e) {
+    log("acceptance.repair.error", { error: String((e as Error)?.message ?? e) });
+    return "error";
+  }
+}
+
+function defaultRetroFetchBody(url: string): string {
+  const view = ghJson(["pr", "view", url, "--json", "body"]) as { body?: string };
+  return view.body ?? "";
+}
+
+function defaultRetroEditBody(url: string, body: string): void {
+  execFileSync("gh", ["pr", "edit", url, "--body", body], { stdio: "pipe" });
+}
+
 export function reviewTaskIdFromBody(body: string): string | undefined {
   const matches = [...body.matchAll(/^Remudero-Task:\s*(\S+)\s*$/gm)];
   return matches.length ? matches[matches.length - 1][1] : undefined;
@@ -7544,24 +7605,7 @@ async function retroCommand(
     // parseAcceptanceBlock never recognizes) — this harness-side pass is the
     // deterministic backstop so a worker's shape mistake doesn't fail the whole retro
     // CLOSED at remudero-review. Best-effort: never lets this crash an otherwise-fine retro.
-    try {
-      const view = ghJson(["pr", "view", prUrl, "--json", "body"]) as { body?: string };
-      const body = view.body ?? "";
-      if (parseAcceptanceBlock(body).length === 0) {
-        const repaired = ensureJudgeableBody(body, [
-          {
-            claim: "the retro's plan-only sync PR is gate-compliant",
-            proof:
-              "SHIPPED-log/NET-STATE/calibration-table updates and the COMPRESSION deletion are in this diff; " +
-              "docs/ORIENTATION.md and plan/plan-index.json are harness-regenerated separately in this same PR",
-          },
-        ]);
-        execFileSync("gh", ["pr", "edit", prUrl, "--body", repaired], { stdio: "pipe" });
-        log("acceptance.repaired", { pr_url: prUrl });
-      }
-    } catch (e) {
-      log("acceptance.repair.error", { error: String((e as Error)?.message ?? e) });
-    }
+    repairRetroAcceptanceBlock(prUrl, log);
 
     // DETERMINISTIC GUARD: a retro is PLAN-ONLY. If the diff touches src/ or test/,
     // fail closed (the retro may never carry code — one concern).

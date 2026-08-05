@@ -25,8 +25,9 @@
  *
  *   1. Acceptance-block RENDERING — {@link renderAcceptanceBlock} — the missing
  *      counterpart to `parseAcceptanceBlock`, guaranteed to round-trip through it.
- *   2. "Ensure judgeable" REPAIR — {@link ensureJudgeableBody} — never clobbers a real
- *      Acceptance block, only appends a fallback when there is none (the #394 backstop).
+ *   2. "Ensure judgeable" REPAIR — {@link ensureJudgeableBody} — never clobbers a HEALTHY
+ *      Acceptance block; repairs one that is absent OR present-but-unparseable (a criterion
+ *      resolving with an empty proof — see {@link bodyNeedsAcceptanceRepair}).
  *   3. Filing-PR Acceptance auto-authorship — {@link filingAcceptanceCriteria} — a PR
  *      that FILES a new task cannot cite that task's own (not-yet-existing) acceptance
  *      criteria, so it needs criteria about the filing itself.
@@ -91,18 +92,85 @@ export function renderAcceptanceBlock(criteria: AcceptanceCriterion[]): string {
 // ── 2. "Ensure judgeable" repair (the #394 backstop) ─────────────────────────────────────────
 
 /**
- * Given an arbitrary PR body (e.g. what a retro's LLM worker produced), leave it
- * COMPLETELY untouched if `parseAcceptanceBlock` already resolves at least one
- * criterion — this NEVER clobbers a caller's or an LLM's real Acceptance block, even a
- * differently-formatted but still-parseable one. Otherwise, APPEND a rendered fallback
- * block (see {@link renderAcceptanceBlock}) built from `fallbackCriteria`, so the result
- * is always judgeable. This is the harness-side repair pass that keeps a worker's #394-shaped
- * mistake (an Acceptance header the parser doesn't recognize) from sinking an otherwise-fine PR.
+ * Given an arbitrary PR body (e.g. what a retro's LLM worker produced), leave it COMPLETELY
+ * untouched when {@link bodyNeedsAcceptanceRepair} says it is healthy — this NEVER clobbers a
+ * caller's or an LLM's real Acceptance block, even a differently-formatted but still-judgeable one,
+ * and the regression lock for that matters more than the repair itself. Otherwise demote the
+ * defective header (if any) and APPEND a rendered fallback block (see
+ * {@link renderAcceptanceBlock}) built from `fallbackCriteria`, so the result actually PARSES
+ * judgeably rather than merely gaining a block the parser never reaches.
+ *
+ * The harness-side backstop for a worker's shape mistake — originally #394's unrecognised header,
+ * and now also the far more common empty-proof shape that header-only trigger walked past.
  */
+/**
+ * TRUE when a body's Acceptance block needs the repair below — the single definition of
+ * "defective", so the repair and its callers can never drift apart on what triggers it.
+ *
+ * WHY THIS IS NOT `parseAcceptanceBlock(body).length === 0`. That was the original trigger, and it
+ * is OFF BY ONE from the defect it exists to catch. `parseAcceptanceBlock` ends the block at the
+ * first indented line that is not `proof:`, so a bullet whose text wraps — or one written in the
+ * `- **"claim"** — prose` shape with no `|` separator and no `proof:` continuation — pushes ONE
+ * criterion with an EMPTY proof and silently discards every bullet after it. Parsed length is 1,
+ * not 0, so the repair declined to fire on exactly the shape it was built for.
+ *
+ * MEASURED over the 100 most recent PRs at 5ea9172: 67 carry a healthy block, 11 carry no block at
+ * all (the only case the old trigger caught), and **22 parse to a criterion with an empty proof** —
+ * every one of them `parsed=1 empty=1`. The missed shape is twice as common as the caught one.
+ *
+ * AN EMPTY PROOF IS THE WHOLE SIGNAL, DELIBERATELY. "Fewer criteria than were written" would be a
+ * stronger check but has no basis at the only production call site: the body there comes from
+ * `gh pr view --json body` (an LLM worker's output), so {@link renderAcceptanceBlock} never
+ * produced it and no emitter count exists to compare against — `fallbackCriteria` is the block to
+ * APPEND, not a record of what was written. Inventing a count would mean guessing at the author's
+ * intent from the text, which is what the parser already refuses to do. An empty proof needs no
+ * basis: a criterion with nothing to execute is malformed however many were intended.
+ *
+ * {@link parseAcceptanceBlock} is NOT changed. It must stay permissive — making it throw would fail
+ * bodies that merge today (any with trailing prose under the block) and move a hard failure into the
+ * gate, where the author is already gone. The parser keeps its contract; the repair widens.
+ */
+export function bodyNeedsAcceptanceRepair(body: string): boolean {
+  const parsed = parseAcceptanceBlock(body);
+  if (parsed.length === 0) return true;
+  return parsed.some((c) => c.proof.trim().length === 0);
+}
+
+/**
+ * The header regex {@link parseAcceptanceBlock} matches, mirrored here for ONE purpose: to demote a
+ * defective header so the parser walks PAST it to the repaired block appended below. It requires the
+ * line to be ONLY the header, so appending a suffix is sufficient to stop it matching — no content is
+ * removed and the author's original text stays verbatim and readable.
+ *
+ * WHY THE REPAIR NEEDS THIS AT ALL, which is the half the trigger widening exposed. `ensureJudgeableBody`
+ * APPENDS its fallback, and the parser stops at the FIRST header it finds. That is fine for the case the
+ * repair was built for — a body with NO block, where there is nothing earlier to stop at. It is NOT fine
+ * for a body whose block is PRESENT BUT DEFECTIVE: the parser reaches the broken bullets first, resolves
+ * the same empty-proof criterion, and never sees the appended block. Widening the trigger without this
+ * would have produced a guard that edits a PR body, logs `acceptance.repaired`, and leaves the body
+ * exactly as unjudgeable as before — worse than not firing, because it claims a repair that did not
+ * happen. Verified before writing this: the appended-only form returned
+ * `[{claim:"…wraps it onto a second", proof:""}]` from the REPAIRED body.
+ */
+const ACCEPTANCE_HEADER_RE = /^(\s*#{0,6}\s*\**\s*acceptance(\s+criteria)?\b\s*\**\s*:?\s*\**\s*)$/i;
+
+/** The suffix that demotes a superseded header. Prose, not a marker — nothing parses it. */
+export const SUPERSEDED_HEADER_SUFFIX = " (superseded — unparseable, see the repaired block below)";
+
 export function ensureJudgeableBody(body: string, fallbackCriteria: AcceptanceCriterion[]): string {
-  if (parseAcceptanceBlock(body).length > 0) return body;
+  if (!bodyNeedsAcceptanceRepair(body)) return body;
   const block = renderAcceptanceBlock(fallbackCriteria);
-  const trimmed = body.replace(/\s*$/, "");
+  // Demote ONLY the first matching header — the one the parser would have stopped at. A body with no
+  // header is unaffected, so the original no-block behaviour is byte-for-byte what it always was.
+  let demoted = false;
+  const lines = body.split("\n").map((line) => {
+    if (demoted) return line;
+    const m = ACCEPTANCE_HEADER_RE.exec(line);
+    if (!m) return line;
+    demoted = true;
+    return `${m[1].replace(/\s+$/, "")}${SUPERSEDED_HEADER_SUFFIX}`;
+  });
+  const trimmed = lines.join("\n").replace(/\s*$/, "");
   return trimmed.length > 0 ? `${trimmed}\n\n${block}\n` : `${block}\n`;
 }
 
