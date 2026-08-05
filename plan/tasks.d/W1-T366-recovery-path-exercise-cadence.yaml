@@ -1,0 +1,103 @@
+- id: W1-T366
+  title: "a recovery path with no exercise cadence is untested however green its coverage — the deploy rollback ran 0-for-7 the first time it mattered, after 130 successful deploys never needed it: drill the recovery paths on a schedule, before an emergency does"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  rationale: "OPERATOR RULING on state/recon-production-path-proofs.md, 2026-08-05. The recon
+    recommended a narrow proof rule (W1-T365) and stated plainly that it does NOT reach this class;
+    this task is that gap, filed deliberately rather than left implied. RE-DERIVED AT a6d160d.
+    THE CLASS. Shape 3 in the recon's taxonomy: code that is WIRED, CALLED, and never executed in
+    anger. It is invisible to every static instrument the repo has. SHIPS-UNWIRED asks 'does anything
+    call this?' and the answer is yes. W1-T365 asks 'does production decline to use it?' and the
+    answer is no. Coverage asks 'did a test run this line?' and the answer is yes. All three pass, and
+    the path has still never run for real. 'This branch has never executed in production' is a
+    RUNTIME FACT ABOUT PRODUCTION, not a property of any changeset, so no proof rule reaches it.
+    THE INCIDENT, ASSUMED not derived — this container has no state/ledger.ndjson and no rotations, so
+    the figures are the operator's and are NOT re-verified here: the deploy rollback restored the
+    broken commit seven times and left the fleet down 53 minutes, having never run across 130
+    successful deploys. The CLASS does not rest on those numbers; the reasoning above stands on the
+    taxonomy alone.
+    WHY 'IT IS TESTED' IS NOT AN ANSWER. A rollback covered only by tests that inject their own git
+    seam proves the bookkeeping and not the recovery. The repo has already paid for this exact
+    distinction twice — the preflight spawn's default implementation went unexercised because every
+    test supplied its own spawn, and the keychain provisioning race was unreachable from any
+    single-process test. A recovery path is the case where the gap between 'covered' and 'exercised'
+    is most expensive, because it is discovered only when something else has already gone wrong."
+  design: |
+    A SCHEDULED DRILL, FOLLOWING THE CLOCK-SWEEP PATTERN RATHER THAN A NEW ONE.
+    (i) READ `.github/workflows/clock-sweep.yml` AND `scripts/clock-sweep.mjs` FIRST AND FOLLOW THEM.
+    That instrument exists for the same reason — a condition production rarely reaches, exercised on
+    a cadence — and its own comments already argue the polarity this task needs:
+      - WEEKLY cron, off-peak, deliberately NOT on :00/:30 (it cites codeql.yml's scheduling note).
+      - NOT a required check and NOT a PR trigger, 'the same polarity mutation-nightly establishes' —
+        a drill on every PR would multiply CI cost for a defect that surfaces every few months, and a
+        red drill on an unrelated PR 'is exactly the noise that gets a check disabled'. It must be
+        deliberately ABSENT from ci-gate.yml.
+      - ALSO triggered by changes to the instrument itself, because 'a broken probe reports universal
+        immunity — a false clean, which is worse than no check'. That clause is load-bearing here too.
+      - Output an operator can act on months later with NO context.
+    Do not invent a second scheduling idiom; if this task's needs genuinely differ from clock-sweep's,
+    say where and why in the PR body.
+    (ii) ESTABLISH THE POPULATION FROM SOURCE, and state the criterion rather than listing paths from
+    this note. A path qualifies when it (a) exists to recover from a failure, (b) is not exercised by
+    the ordinary success path, and (c) has an observable outcome that can be asserted. The candidates
+    the ruling names are the deploy ROLLBACK, the circuit breaker's RESET, the stale-lock RECLAIM
+    (`reclaimStaleLock`, whose own comment records an ext4 inode-reuse TOCTOU it had to close), and
+    the keychain RE-PROVISION path. Confirm each against (a)-(c); a candidate that fails (c) is a
+    finding to report, not a path to drill blindly.
+    (iii) DEFINE 'EXERCISED' PER PATH, AND IT MUST NOT ENDANGER A LIVE FLEET. This is the task's
+    hardest requirement. A drill that performs a real rollback on the real install, or really expires
+    the real keychain, trades one outage class for another. State per path whether the drill runs
+    against a THROWAWAY FIXTURE (a scratch checkout, a temp state dir) or against production, and
+    default to the fixture. Where a fixture cannot reproduce the failure the path exists for, SAY SO —
+    a drill that only exercises the easy half is the false clean clause (i) warns about.
+    (iv) A DRILL THAT CANNOT RUN MUST BE LOUD. The failure mode this task exists to prevent is silent
+    untestedness, so a drill that errors, skips, or finds its path unreachable must report distinctly
+    from a drill that ran and passed. 'No output' must never be the success signal.
+    (v) FALSIFIER: a deliberately BROKEN recovery path is caught by the drill. Assert both directions —
+    a healthy path reports healthy, and a path sabotaged in the fixture reports failure. A drill proven
+    only against a healthy path proves nothing, which is precisely the defect being fixed.
+    NOT IN SCOPE, AND EXPLICITLY: fixing the deploy rollback itself — a separate PR already has the
+    anchor. This task is about the CLASS, not that instance, and it must not absorb the fix.
+    Also out of scope: making any drill a required check; W1-T365's proof rule; the ledger-side
+    measurement of how often these paths run in production.
+    VERIFY clock-sweep's workflow and script, and each candidate path's current shape, FROM SOURCE
+    before building.
+  acceptance:
+    - claim: "a scheduled drill exercises each qualifying recovery path against a throwaway fixture and reports per-path health an operator can read months later with no context"
+      proof: "unit test: test/recovery-drill.test.ts"
+    - claim: "a recovery path sabotaged in the fixture is reported as failed, and a healthy one as healthy — the drill discriminates rather than always reporting clean"
+      proof: "unit test: test/recovery-drill.test.ts"
+    - claim: "a drill that cannot run its path reports that distinctly from a drill that ran and passed, so no output is never read as success"
+      proof: "unit test: test/recovery-drill.test.ts"
+    - claim: "the new drill workflow is on the review floor's docs-awareness surface, so a later change that weakens or deletes it cannot clear that rung silently"
+      proof: "unit test: test/awareness-surface-ratchet.test.ts"
+  risk: high
+  origin: oper#ruling-production-path-proofs-2026-08-05
+  plan_refs: ["§5", "§5D", "W1-T212"]
+  files: [.github/workflows/recovery-drill.yml, scripts/recovery-drill.mjs, test/recovery-drill.test.ts, test/awareness-surface-ratchet.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — every claim is an assertion over a drill's own output against a fixture, with no
+    operator present. NOT ruling-shaped: it builds an instrument and touches no DECISIONS.md, so
+    W1-T353's verify:human requirement does not apply (contrast W1-T365, which is a ruling).
+    risk:high — Rule 19 counts the workflow, the script and the test surface as distinct subsystems,
+    and a drill that touches production recovery machinery can cause the outage it exists to prevent.
+    Design (iii) is where that risk is actually managed.
+    budget_usd 80 — a scheduler, a per-path exercise definition, a two-direction falsifier and the
+    awareness-surface wiring. Higher than the clock-sweep it copies because the population must be
+    established rather than given.
+    files: DECLARES test/awareness-surface-ratchet.test.ts because that suite drives
+    `checkDocsAwareness` against diffs touching `.github/workflows/` — adding a workflow puts it on
+    that surface, and the fourth criterion asserts exactly that. Omitting a written path is what
+    refused five dispatches in one week.
+    ON THE PROOFS. Three of the four name test/recovery-drill.test.ts, which does not exist yet:
+    `rmd check-proof` reports 0 hits for it today. That is a FORWARD REFERENCE TO A PATH, which
+    CLAUDE.md records as safe (unlike forward-referencing a symbol name, which is a guess), and the
+    path is declared in files: so the worker creates it. The fourth criterion deliberately names an
+    EXISTING suite so at least one proof executes at filing time — 70 hits, verified.
+    NO depends_on: independent of W1-T365. That is the point of filing both — one closes the shape a
+    changeset can reveal, this one closes the shape only running the code can."

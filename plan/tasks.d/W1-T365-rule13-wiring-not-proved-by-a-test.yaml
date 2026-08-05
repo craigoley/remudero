@@ -1,0 +1,103 @@
+- id: W1-T365
+  title: "standing rule 13 offers a MENU — 'a grep of the call site, a passing test' — and the passing test is always cheaper, so the option that does not prove wiring is the one taken: remove the cheap option where it is known to lie, and refuse the shape at review"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  rationale: "OPERATOR RULING on state/recon-production-path-proofs.md, 2026-08-05: adopt the NARROW
+    rule, BLOCKING from day one, as an AMENDMENT TO RULE 13 — not a new instrument. RE-DERIVED AT
+    a6d160d.
+    THE DIAGNOSIS IS THE DESIGN, and it is not 'the bar is too low'. Rule 13 already requires
+    OBSERVABLE SYSTEM STATE and already names 'a grep of the call site' as an acceptable proof. It
+    also names 'a passing test' in the same breath, as an ALTERNATIVE. A passing test is always the
+    cheaper of the two to produce, so it is the one produced — and it is the one that cannot
+    distinguish wired from unwired. THE DEFECT IS THE MENU, NOT THE STANDARD.
+    THE RULE AGAINST THIS ALREADY EXISTS AND ALREADY FAILED. Rule 14 states 'the wiring is a
+    deliverable, not a seam', earned from PR #12/#13 where 'the reviewer was fully-tested dead code
+    for two PRs'. That is this exact class. The plan nonetheless carries at least NINE task titles
+    whose whole subject is the same shape — the two governor 'has no caller' tasks, the
+    dispatchLanes wiring, the resolveClaudeBin slot, the flight-signals stack, reconstructState, the
+    diagnose dispatch (whose title cites rule 14 by number), and the two SHIPS-UNWIRED tasks. A prose
+    convention that has been in force since PR #13 and has been violated nine times is not going to
+    be fixed by restating it.
+    THE CHECKABLE FORM IS AN INVERSION, and it is what makes this filable at all. Not 'does the test
+    exercise production' — a test that imports a function and calls it DOES exercise it, so that
+    phrasing decides nothing. The decidable question is the other way round: DOES PRODUCTION DECLINE
+    TO USE THE THING THE TEST EXERCISED? That is a property of the diff and the call graph, not of
+    the test's intent, and it needs no judgement about what the author meant.
+    THE LIVE INSTANCES, DERIVED BY GREP AT a6d160d: exactly TWO call sites in src/ carry the explicit
+    marker — `undefined, // sweepOrphanWorkers — not wired at this call site` and
+    `undefined, // resolveClaudeBin — default`. A nonsense-pattern positive control returns 0."
+  design: |
+    TWO DELIVERABLES, ONE CONCERN: the wiring claim can no longer be satisfied by a passing test
+    alone, in the rule text AND at the gate. Splitting them would ship a rule nothing enforces or a
+    gate no rule authorises.
+    (i) AMEND RULE 13 IN MASTER-PLAN §12. Keep everything it already says; remove the ALTERNATIVE
+    where it is known to lie. For a task whose deliverable is WIRING, a passing test is not an
+    acceptable substitute for evidence of the production call site. Rule 14 is the neighbouring
+    statement of the same idea and must be left intact — this amendment makes rule 13 stop offering
+    the escape hatch rule 14 already warned about.
+    THE LOAD-BEARING TEXT: the amended rule must contain the literal string
+    `wiring is not proved by a passing test`, because that is what this task's acceptance greps for.
+    Write the rule to read naturally WITH it; never bolt it on.
+    (ii) REFUSE THE SHAPE AT REVIEW, BLOCKING FROM DAY ONE. The refused shape is narrow and stated
+    positively: a diff that ADDS an injectable parameter which NO non-test call site supplies. That
+    is the `sweepOrphanWorkers` shape caught at the moment it is introduced.
+    (iii) WHY BLOCKING RATHER THAN ADVISORY, and this is the W1-T352 argument rather than the
+    W1-T322 one. The shape's population is TWO in the entire tree, against 191 src-touching PRs a
+    week (DERIVED: 343 merges on origin/main over 7 days, 191 touching src/, all 191 also touching
+    test/). An advisory window would take months to accumulate a rate, and every harm case would pass
+    by construction while it did. W1-T322's floor was advisory because its population was large and
+    its false-positive rate unknown; this one's population is two and both are known-real.
+    (iv) NAME THE COST RATHER THAN LET IT BE DISCOVERED. This taxes a DELIBERATE idiom this codebase
+    uses and documents: the append-last defaulted parameter, added in one PR and wired in the next —
+    `idleReasonsHtml` in the shell renderer and the preflight spawn seam are both live examples, each
+    with a comment explaining that defaulting it leaves every existing caller unaffected. THE RULING:
+    require BOTH HALVES IN ONE CHANGE, or an explicit stated reason in the PR body naming the task or
+    PR that will supply the caller. Not a silent exemption, and not a refusal that cannot be answered.
+    (v) IT COMPOSES WITH THE SHIPS-UNWIRED FLOOR AND DOES NOT REPLACE IT. That floor is STATIC
+    REACHABILITY ON NEW EXPORTS: `scanUnreachedExports` parses the diff for added `export function`
+    lines and asks whether any non-test file references them. It cannot see `sweepOrphanWorkers` —
+    an OLD export, referenced elsewhere, so it reads as reachable — and it cannot see the deploy
+    rollback, because reachability is not execution. The two answer different questions and both are
+    wanted: 'does anything call this?' and 'does production decline to use it?'
+    (vi) WHAT THIS DOES NOT REACH, stated so nobody believes otherwise: code that is wired, called,
+    and never executed in anger. The rollback that went 0-for-7 would still ship. That is W1-T366's
+    concern and no proof rule reaches it.
+    NOT IN SCOPE: the SHIPS-UNWIRED floor's own advisory/blocking status; rule 14's text; the two
+    known live instances (each is its own already-known work); DECISIONS.md, which is the operator's
+    record to write.
+    VERIFY rule 13's current wording, `scanUnreachedExports`'s semantics and the review floor's
+    existing refusal shapes FROM SOURCE before editing.
+  acceptance:
+    - claim: "rule 13 no longer offers a passing test as an alternative to call-site evidence for a task whose deliverable is wiring, and says so in terms a reader can check"
+      proof: "grep: wiring is not proved by a passing test in MASTER-PLAN.md"
+    - claim: "a diff adding an injectable parameter that no non-test call site supplies is refused at review, and one whose caller is supplied in the same change passes"
+      proof: "unit test: test/ships-unwired-floor.test.ts"
+    - claim: "the refusal is answerable — a PR body naming the task or PR that will supply the caller clears it, so the deliberate append-last idiom is taxed rather than forbidden"
+      proof: "unit test: test/ships-unwired-floor.test.ts"
+  risk: high
+  origin: oper#ruling-production-path-proofs-2026-08-05
+  plan_refs: ["§12", "W1-T322", "W1-T352", "W1-T353"]
+  files: [MASTER-PLAN.md, src/lib/reachability.ts, src/lib/review.ts, test/ships-unwired-floor.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:human REQUIRED BY W1-T353, not chosen for convenience: this task's deliverable is a
+    RULING — an amendment to a standing rule — and W1-T353's linter refuses a ruling-shaped task that
+    is not verify:human. The gate half is machine-checkable; the rule half is a judgement about what
+    the fleet is permitted to accept as proof, and that is the operator's to confirm.
+    risk:high — it changes what the review floor REFUSES, on a shape with a population of two. Too
+    broad and it fires on the append-last idiom the codebase uses deliberately; too narrow and it
+    catches neither live instance.
+    budget_usd 70 — a rule amendment, one refusal shape, an answerable exemption and its tests.
+    ON THE GREP PROOF BEING A FORWARD REFERENCE. `rmd check-proof` reports 0 hits for it TODAY,
+    because the amended rule text does not exist yet. That is unavoidable and is not the W1-T229
+    dead-proof class: for a task whose deliverable is ADDING text, a grep either forward-references
+    the new text (0 today, resolves on the work) or matches text already on main (executed_stale,
+    which discriminates nothing). There is no third option. This is the same construction W1-T326
+    used and merged on, which is why the load-bearing string is declared in design (i) rather than
+    left to the implementer to invent.
+    NO depends_on: nothing blocks it. The two live instances are separate known work and this task
+    does not fix them — it stops the third."
