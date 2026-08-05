@@ -427,6 +427,27 @@ export interface ReviewVerdict {
    */
   unwiredAdvisories?: UnwiredAdvisory[];
   /**
+   * W1-T352 (DECISIONS.md ENTRY PROVENANCE FLOOR): the header text of every entry this diff ADDS
+   * to DECISIONS.md (a `## …` line) that carries, among that SAME entry's own added lines,
+   * NEITHER the machine auto-choose stamp NOR an operator-attribution line — see {@link
+   * decisionsEntryProvenanceViolations} for the exact closed vocabulary and the diff-only scope.
+   * `[]` when every newly-added entry is marked, or the diff adds no new entry header at all —
+   * DECISIONS.md's own 35+ historical unmarked entries never fire, because only ADDED lines are
+   * read (the incident this task closes: PR #1302 appended a bare `## … RULING:` header in
+   * neither genre, and the operator overrode it within the hour, #1303).
+   *
+   * Non-empty FORCES `state`/`floorState` to `"failure"` exactly like `criteriaTampered`/
+   * `changesetContradictions`/`instrumentEntangled`: this is a structural, diff-derived fact,
+   * never a semantic reviewer opinion, so — like them — never suppressible by {@link
+   * applyVerdictStability}. UNLIKE {@link unwiredAdvisories} above (W1-T322's deliberately
+   * ADVISORY-ONLY precedent), this floor BLOCKS from day one: the task's rationale argues the
+   * asymmetry directly — DECISIONS.md gains a couple of entries a week, not a ~50-PR/day surface;
+   * the check is a deterministic string-presence test over ONE file, not a reachability
+   * heuristic; and the harm of one unmarked binding entry slipping through propagates (MASTER-PLAN
+   * cited PR #1302's ruling as settled within the hour, before the override landed).
+   */
+  unprovenancedDecisionsEntries?: string[];
+  /**
    * W1-T166 (the reward-hacking measurement): visible-pass-rate minus
    * holdout-pass-rate, over this verdict's own criteria — `(visible criteria
    * met / visible criteria count) − (holdout criteria met / holdout criteria
@@ -2396,6 +2417,90 @@ function unwiredAdvisoriesFor(
   return out;
 }
 
+// ── DECISIONS.md entry provenance floor (W1-T352) ──────────────────────────
+
+/** The one file this floor watches — never any other markdown file's headers. */
+const DECISIONS_MD_PATH = "DECISIONS.md";
+
+/** An added entry header: DECISIONS.md's own convention is a level-2 ATX header
+ *  (`## <date> — <title>`) per entry; a deeper header (`### …`) is prose inside
+ *  one entry, not the start of a new one. */
+const DECISIONS_ENTRY_HEADER_RE = /^##\s+/;
+
+/**
+ * THE CLOSED VOCABULARY (design (ii)), derived from the corpus itself — never invented — matched
+ * case-insensitively as a plain substring over an entry's OWN added lines:
+ *   (a) the machine auto-choose stamp, e.g. "Chosen (RECOMMENDED, auto): `docs/spike-hello.md`";
+ *   (b) the hand-record line's surface forms actually in use in DECISIONS.md — "*Operator-authored,
+ *       not a machine auto-choose resolution…*", "Operator direction record (not an auto-choose
+ *       resolution)…", and "*Operator-ruled closure, recorded at the operator's instruction…*"
+ *       (whose header parenthetical reads "OPERATOR-RULED");
+ *   (c) an explicit operator-attribution sentence — the #1303 amendment's own words: "**The
+ *       operator has overridden the N=1 ruling.**".
+ * Pinned by test/review.test.ts so a future edit to this list is a deliberate, reviewed change,
+ * never a silent narrowing/widening of what counts as provenance.
+ */
+const DECISIONS_PROVENANCE_MARKERS: readonly string[] = [
+  "chosen (recommended, auto)",
+  "operator-authored",
+  "operator direction record",
+  "operator-ruled",
+  "the operator has overridden",
+];
+
+/** True when at least one of an entry's own added lines carries a {@link DECISIONS_PROVENANCE_MARKERS} marker. */
+function decisionsEntryHasProvenance(addedLines: readonly string[]): boolean {
+  const joined = addedLines.join("\n").toLowerCase();
+  return DECISIONS_PROVENANCE_MARKERS.some((marker) => joined.includes(marker));
+}
+
+/**
+ * DECISIONS.md ENTRY PROVENANCE FLOOR (W1-T352): every entry header (`## …`) a diff ADDS to
+ * DECISIONS.md must carry, among that SAME entry's own added lines, either the machine stamp or
+ * an operator-attribution line — see {@link DECISIONS_PROVENANCE_MARKERS}. Returns the header
+ * text of every offending new entry (`[]` when every new entry is marked, or the diff adds none).
+ *
+ * READS THE DIFF, NOT THE FILE (design (i)): only lines this diff itself ADDS are consulted — via
+ * {@link walkDiff}, the same diff-walker every other structural check in this file already uses —
+ * so DECISIONS.md's own historical unmarked entries (e.g. the 2026-07-20 menu-bar deferral) never
+ * fire, and a PR that edits DECISIONS.md without adding a NEW `## ` header (a typo fix, a
+ * rollback-pointer amendment to an existing entry) never fires either: nothing here is ADDED. An
+ * existing header line that merely surfaces as unchanged CONTEXT around an edit is not an ADD
+ * line either, for the same reason.
+ *
+ * An entry's own added-line SPAN runs from its `## ` header to the next added `## ` header (or the
+ * end of the diff's DECISIONS.md hunk) — the natural unit a single `DECISION_REQUEST` resolution
+ * or a hand-recorded ruling occupies, matching how the corpus itself is laid out.
+ *
+ * NO SEMANTIC CLASSIFICATION (design (iii)): this never asks whether an entry IS a binding ruling
+ * — only whether it carries ONE of the two provenance genres. A descriptive/no-op entry that adds
+ * the stamp passes exactly like a genuine ruling that adds it; requiring the mark on every new
+ * entry is what makes the distinction moot.
+ */
+export function decisionsEntryProvenanceViolations(diff: string): string[] {
+  const lines = walkDiff(diff).filter((l) => l.file === DECISIONS_MD_PATH);
+  const violations: string[] = [];
+  let header: string | null = null;
+  let added: string[] = [];
+  const flush = () => {
+    if (header !== null && !decisionsEntryHasProvenance(added)) violations.push(header);
+    header = null;
+    added = [];
+  };
+  for (const l of lines) {
+    if (l.kind !== "add") continue;
+    if (DECISIONS_ENTRY_HEADER_RE.test(l.text)) {
+      flush();
+      header = l.text.trim();
+      added = [l.text];
+      continue;
+    }
+    if (header !== null) added.push(l.text);
+  }
+  flush();
+  return violations;
+}
+
 /**
  * The pure verdict function (acceptance #2). Given the acceptance criteria and
  * the evidence (diff + report [+ optional semantic verdicts]), roll up a single
@@ -2439,6 +2544,11 @@ export function judgeReview(
   const instrumentEntanglement = detectInstrumentEntanglement(diffFiles);
   const instrumentEntangled = instrumentEntanglement.entangled;
 
+  // W1-T352 (DECISIONS.md entry provenance floor): see {@link
+  // ReviewVerdict.unprovenancedDecisionsEntries}'s doc for the full design — BLOCKING, unlike the
+  // W1-T322 advisory floor computed right below it.
+  const unprovenancedDecisionsEntries = decisionsEntryProvenanceViolations(evidence.diff);
+
   // W1-T322 (SHIPS-UNWIRED advisory floor): computed alongside the structural checks above but
   // folded into NEITHER `state` NOR `floorState` below — see {@link ReviewVerdict.unwiredAdvisories}'s
   // doc for why (ADVISORY ONLY, by design, until W1-T323's measured flip).
@@ -2459,7 +2569,8 @@ export function judgeReview(
     testTheater ||
     criteriaTampered ||
     changesetContradictions.length > 0 ||
-    instrumentEntangled
+    instrumentEntangled ||
+    unprovenancedDecisionsEntries.length > 0
       ? "failure"
       : "success";
 
@@ -2489,7 +2600,8 @@ export function judgeReview(
     testTheater ||
     criteriaTampered ||
     changesetContradictions.length > 0 ||
-    instrumentEntangled
+    instrumentEntangled ||
+    unprovenancedDecisionsEntries.length > 0
       ? "failure"
       : "success";
 
@@ -2580,6 +2692,7 @@ export function judgeReview(
           unmet.length - visibleCriteria(unmet).length,
           changesetContradictions,
           instrumentEntangled ? instrumentEntanglement : undefined,
+          unprovenancedDecisionsEntries,
         );
 
   return {
@@ -2598,6 +2711,7 @@ export function judgeReview(
     instrumentEntanglementPaths: instrumentEntangled
       ? { instrumentPaths: instrumentEntanglement.instrumentPaths, srcPaths: instrumentEntanglement.srcPaths }
       : undefined,
+    unprovenancedDecisionsEntries,
     unwiredAdvisories,
     rewardHackingGap,
     unexecutableCount,
@@ -3514,6 +3628,13 @@ const FAIL_PREFIX = "remudero-review: FAIL — ";
  * (W1-T186 emitter discipline) AND STATES THE RESOLUTION — split the PR (land
  * the instrument change alone, then rebase) or revert the instrument hunk —
  * because a rule that only refuses re-teaches nothing and gets worked around.
+ *
+ * `unprovenancedDecisionsEntries` (W1-T352) takes priority right after
+ * `instrumentEntanglement` — the same reasoning again: a structural,
+ * diff-derived fact over the DECISIONS.md entries this PR itself adds. The
+ * message NAMES the unmarked entry's own header and STATES the two accepted
+ * genres (the machine stamp, an operator-attribution line) so the fix is a
+ * one-line addition, not a guessing game.
  */
 export function failSummary(
   unmetClaims: string[],
@@ -3523,6 +3644,7 @@ export function failSummary(
   hiddenUnmetCount = 0,
   changesetContradictions: ChangesetClaimContradiction[] = [],
   instrumentEntanglement?: { instrumentPaths: string[]; srcPaths: string[] },
+  unprovenancedDecisionsEntries: string[] = [],
 ): string {
   if (noCriteria) return `${FAIL_PREFIX}no acceptance criteria to judge (fail closed)`;
   if (criteriaTampered) {
@@ -3542,6 +3664,15 @@ export function failSummary(
       `${FAIL_PREFIX}entangled: instrument path(s) ${instrumentEntanglement.instrumentPaths.join(", ")} changed ` +
       `alongside src/ path(s) ${instrumentEntanglement.srcPaths.join(", ")} in the same PR — split it: land the ` +
       `instrument change in its own PR, then rebase this one onto it (or revert the instrument hunk here)`
+    );
+  }
+  if (unprovenancedDecisionsEntries.length > 0) {
+    const first = unprovenancedDecisionsEntries[0];
+    const more =
+      unprovenancedDecisionsEntries.length > 1 ? ` (+${unprovenancedDecisionsEntries.length - 1} more)` : "";
+    return (
+      `${FAIL_PREFIX}DECISIONS.md entry added with no provenance mark: "${first}"${more} — needs ` +
+      `"Chosen (RECOMMENDED, auto)" or an operator-attribution line (e.g. "Operator-authored")`
     );
   }
   if (unmetClaims.length === 0 && hiddenUnmetCount > 0) {
