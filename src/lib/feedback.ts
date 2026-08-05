@@ -99,6 +99,20 @@ export interface FeedbackEntry {
    * gains this ONE field, every existing consumer of the other fields is untouched).
    */
   summary?: DecisionSummary | null;
+  /**
+   * W1-T350: the CLAIM/EVIDENCE/RECON/FALSIFYING CHECK expansion of `raw`, computed by the
+   * console's own preview call (POST /v1/feedback/preview) BEFORE the operator ever confirms —
+   * never re-derived here, never a live artifact reference. A NEW FIELD BESIDE `raw` (the
+   * design's own open question), not a marked block appended into `raw` itself: `raw` is the
+   * byte-identical record of what the operator actually typed (this module's oldest promise,
+   * predating this task), so growing it with generated prose would make "byte-identical" a lie
+   * the very moment an expansion attaches. A sibling field keeps `raw` untouched and lets a
+   * triage reader (or any future consumer) render the richer entry additively — read `expansion`
+   * when present, fall back to `raw` alone when it's `null`, exactly `summary`'s own contract.
+   * `null` for every entry captured before this task, for the file-raw escape (design (iv)), and
+   * for any entry whose preview call failed/was skipped — fail-open, never lossy.
+   */
+  expansion?: FeedbackExpansion | null;
 }
 
 // ── Decision summaries (W1-T313) ─────────────────────────────────────────────
@@ -295,6 +309,207 @@ export function resolveDecisionSummaryMount(mounts: Mounts): Mount {
   return resolveRiskJudgeMount(mounts);
 }
 
+// ── Feedback expansion (W1-T350) — CLAIM / EVIDENCE / RECON / FALSIFYING CHECK ──────────────
+//
+// "Whenever I submit feedback in the console, it probably needs to go through an interpreter —
+// that will translate my simple feedback into an actual prompt that can be sent to the agent"
+// (operator direction, oper#needs-me-filings-2026-08-04). THE TARGET STRUCTURE IS ALREADY
+// RUNNING, measured over the precedent corpus: 14 feedback entries landed 2026-08-03/04 each
+// carry a CAPS-headline CLAIM, MEASURED EVIDENCE, and the literal markers "RECON:"/"Falsifying
+// check:" (14/14 and 13/14 of them respectively) — see this task's own rationale for the count.
+//
+// THE HONESTY CONSTRAINT (the operator's own): an expander must not INVENT evidence. Every
+// specific the operator's draft did not itself state belongs under RECON as a directive
+// ("establish whether...") for a later pass to establish, never asserted as EVIDENCE. This
+// module validates SHAPE only (bounded, non-empty prose in all four slots) — same discipline as
+// {@link validateDecisionSummary} above — and leaves the honesty constraint to the PROMPT
+// ({@link buildFeedbackExpansionPrompt}) plus few-shot register ({@link buildFeedbackFewShot});
+// no runtime check can verify "is this evidence actually in the draft" without re-deriving a
+// second, weaker copy of the model's own judgment.
+
+/** One four-section expansion of an operator's short console draft — the filing skeleton the
+ *  plan/feedback precedent corpus already uses. Every field is bounded prose (never a nested
+ *  structure); {@link validateFeedbackExpansion} is the ONE gate anything downstream (a route
+ *  response, a stored {@link FeedbackEntry.expansion}) trusts. */
+export interface FeedbackExpansion {
+  /** A falsifiable, headline-style claim — what the operator is asserting, never a question. */
+  claim: string;
+  /** ONLY what the draft itself stated — verbatim figures/symbols/PR numbers the operator gave;
+   *  an expander must never add one the draft didn't carry (the honesty constraint). */
+  evidence: string;
+  /** What a downstream pass must ESTABLISH — every specific the operator did NOT state, as a
+   *  directive ("establish whether..."), never as an asserted fact. */
+  recon: string;
+  /** What retires this entry — the check that would prove the claim wrong. */
+  falsifying_check: string;
+}
+
+const FEEDBACK_EXPANSION_MAX = { claim: 240, evidence: 800, recon: 800, falsifying_check: 400 } as const;
+
+/**
+ * Validate an UNTRUSTED value (a raw expander response, or a value read back off disk) against
+ * the {@link FeedbackExpansion} bounds — four non-empty, bounded-length string fields. Returns
+ * `null` on ANY violation rather than throwing — the fail-open gate every producer/consumer of
+ * an expansion routes through (mirrors {@link validateDecisionSummary} exactly). Trims
+ * whitespace on the way out so a validated expansion is always render-ready.
+ */
+export function validateFeedbackExpansion(x: unknown): FeedbackExpansion | null {
+  if (typeof x !== "object" || x === null) return null;
+  const o = x as Record<string, unknown>;
+  if (!isBoundedString(o.claim, FEEDBACK_EXPANSION_MAX.claim)) return null;
+  if (!isBoundedString(o.evidence, FEEDBACK_EXPANSION_MAX.evidence)) return null;
+  if (!isBoundedString(o.recon, FEEDBACK_EXPANSION_MAX.recon)) return null;
+  if (!isBoundedString(o.falsifying_check, FEEDBACK_EXPANSION_MAX.falsifying_check)) return null;
+  return {
+    claim: (o.claim as string).trim(),
+    evidence: (o.evidence as string).trim(),
+    recon: (o.recon as string).trim(),
+    falsifying_check: (o.falsifying_check as string).trim(),
+  };
+}
+
+/** What a feedback-expansion rung reads: the operator's own draft plus a few-shot register drawn
+ *  from recent precedent entries (see {@link buildFeedbackFewShot}) — prose calibration only,
+ *  never source material the expander may cite as evidence. */
+export interface ExpandFeedbackInput {
+  draft: string;
+  fewShot: string;
+}
+
+/**
+ * Injected feedback-expansion dependency (mirrors {@link SummarizeDeps} exactly): receives ONLY
+ * the already-assembled {@link ExpandFeedbackInput}, returns an UNTRUSTED value this module
+ * validates before ever trusting it. Real callers wire {@link realFeedbackExpander}; tests
+ * inject a canned return (or a throw) so every criterion is assertable with no network and no
+ * model call.
+ */
+export interface ExpandFeedbackDeps {
+  expand: (input: ExpandFeedbackInput) => unknown | Promise<unknown>;
+}
+
+/**
+ * Expand ONE operator draft into a {@link FeedbackExpansion}, FAIL-OPEN: a throw, a rejected
+ * promise, or a response that fails {@link validateFeedbackExpansion} all resolve to `null` —
+ * never propagate — so an expander outage (or timeout) can never block the plain, unexpanded
+ * submission from filing (this task's own stated failure mode: "expander error or timeout
+ * leaves plain raw submission working unchanged — fail-open, the capture path's own
+ * ASYNC-CAPTURE doctrine").
+ */
+export async function expandFeedbackDraft(draft: string, deps: ExpandFeedbackDeps, fewShot = ""): Promise<FeedbackExpansion | null> {
+  try {
+    const out = await deps.expand({ draft, fewShot });
+    return validateFeedbackExpansion(out);
+  } catch {
+    return null;
+  }
+}
+
+const FEEDBACK_FEWSHOT_RECON_MARKER = /RECON:/i;
+const FEEDBACK_FEWSHOT_FALSIFYING_MARKER = /Falsifying check:/i;
+
+/**
+ * The few-shot register half of this task's design ("named slots plus few-shot from recent
+ * entries" — named slots alone lose the register the precedent corpus writes in). Pure — no
+ * I/O — so it is unit-testable on a plain array; callers pass {@link listFeedback}'s own result.
+ * Picks the `limit` MOST RECENT entries whose `raw` carries BOTH the "RECON:" and "Falsifying
+ * check:" markers (the corpus's own self-identifying skeleton, measured in this task's
+ * rationale), oldest-of-the-picked-set first so the prompt reads front-to-back as a normal
+ * transcript. Entries carrying neither marker (pre-skeleton, or this task's own capture-only
+ * entries) are excluded — they would teach the WRONG register. Returns `""` when no precedent
+ * exists yet, so {@link buildFeedbackExpansionPrompt} degrades to named-slots-only, never a
+ * dangling "RECENT PRECEDENT:" header with nothing under it.
+ */
+export function buildFeedbackFewShot(entries: FeedbackEntry[], limit = 3): string {
+  const examples = entries
+    .filter((e) => FEEDBACK_FEWSHOT_RECON_MARKER.test(e.raw) && FEEDBACK_FEWSHOT_FALSIFYING_MARKER.test(e.raw))
+    .slice(-limit);
+  if (!examples.length) return "";
+  return examples.map((e) => `EXAMPLE:\n${e.raw}`).join("\n\n");
+}
+
+// ── Real feedback-expansion rung — routed via mounts.yaml, never a hard-coded model id ───────
+//
+// Mirrors the decision-summary rung above (and risk-judge.ts) exactly: a pure prompt builder +
+// a pure spawn-args builder are unit-tested; the actual spawn ({@link realFeedbackExpander}) is
+// untested by unit, like every other real spawn in worker.ts.
+
+export function buildFeedbackExpansionPrompt(input: ExpandFeedbackInput): string {
+  return [
+    "You are expanding an operator's short console feedback draft into the four-section filing",
+    "skeleton this project's plan/feedback inbox uses. Respond with ONLY a JSON object — no",
+    "prose, no markdown fence — shaped EXACTLY:",
+    '{"claim": string (a falsifiable, headline-style claim, never a question),',
+    ' "evidence": string (ONLY what the draft itself states — verbatim figures/symbols/PR',
+    '   numbers the operator gave you; never invent one),',
+    ' "recon": string (an "establish whether..." directive naming every specific the operator',
+    '   did NOT state — anything not directly in the draft belongs here, never under evidence),',
+    ' "falsifying_check": string (what retires this entry — the check that would prove the',
+    '   claim wrong)}',
+    "",
+    "THE HONESTY CONSTRAINT: you have no tools and no access to the codebase — only the draft",
+    "text below. Anything you cannot verify from that text alone MUST go under recon as a",
+    "directive for a later pass to establish. Never state it under evidence.",
+    input.fewShot ? `\nRECENT PRECEDENT (register/style only, never source material):\n${input.fewShot}\n` : "",
+    "OPERATOR'S DRAFT:",
+    input.draft,
+  ].join("\n");
+}
+
+/** Build the real spawn args for a feedback-expansion rung — pure, so the "no write tool,
+ *  cheapest mount" contract is unit-testable with no spawn (mirrors
+ *  `buildDecisionSummarySpawnArgs`). */
+export function buildFeedbackExpansionSpawnArgs(opts: {
+  input: ExpandFeedbackInput;
+  mount: Mount;
+  cwd: string;
+  settingsFile: string;
+}): SpawnWorkerArgs {
+  return {
+    cwd: opts.cwd,
+    permissionMode: "bypassPermissions",
+    settingsFile: opts.settingsFile,
+    prompt: buildFeedbackExpansionPrompt(opts.input),
+    model: opts.mount.model,
+    effort: opts.mount.effort,
+    maxTurns: opts.mount.maxTurns,
+    tools: [], // everything it needs is in the prompt — no exploration, mirrors RISK_JUDGE_TOOLS
+  };
+}
+
+/** Wire a real {@link ExpandFeedbackDeps.expand} to an actual worker spawn — the production
+ *  wiring for {@link expandFeedbackDraft}. Untested by unit (it shells out via the SDK, same as
+ *  every other real spawn in worker.ts). NOT YET CALLED FROM ANY PRODUCTION SITE — see
+ *  panel-graph.ts's `PanelGraphDeps.expand` doc for why that mirrors `realDecisionSummarizer`'s
+ *  own precedent (built, unit-tested, wiring into a live `rmd serve`/`rmd triage` call site left
+ *  as explicitly-named follow-up work rather than folded into this one concern). */
+export function realFeedbackExpander(opts: {
+  mount: Mount;
+  cwd: string;
+  settingsFile: string;
+  spawn?: typeof spawnWorker;
+}): (input: ExpandFeedbackInput) => Promise<unknown> {
+  const spawn = opts.spawn ?? spawnWorker;
+  return async (input: ExpandFeedbackInput) => {
+    const result: WorkerResult = await spawn(
+      buildFeedbackExpansionSpawnArgs({ input, mount: opts.mount, cwd: opts.cwd, settingsFile: opts.settingsFile }),
+    );
+    const match = /\{[\s\S]*\}/.exec(result.text);
+    if (!match) return null;
+    try {
+      return JSON.parse(match[0]);
+    } catch {
+      return null;
+    }
+  };
+}
+
+/** The cheapest configured mount for a feedback-expansion rung — same reuse rationale as
+ *  {@link resolveDecisionSummaryMount}: a feedback expansion is the same shape of cheap,
+ *  structured, no-tool judgment call the risk judge already is. */
+export function resolveFeedbackExpansionMount(mounts: Mounts): Mount {
+  return resolveRiskJudgeMount(mounts);
+}
+
 export class FeedbackError extends Error {
   constructor(message: string) {
     super(message);
@@ -436,6 +651,18 @@ export interface CaptureFeedbackOptions {
    * bare "origin".
    */
   land?: LandFeedbackOpts;
+  /**
+   * W1-T350: the {@link FeedbackExpansion} the console's own preview call already computed and
+   * the operator already confirmed (never re-derived here — this module makes no LLM call).
+   * RE-VALIDATED through {@link validateFeedbackExpansion} regardless of caller — a wire-origin
+   * value is never trusted structurally sight-unseen, the same "never trust the network" posture
+   * `origin` gets a few lines below. `undefined` (the default — every pre-W1-T350 caller, and
+   * the file-raw escape) and an object that fails validation both land as `null`: "no expansion
+   * configured/supplied" and "a malformed one was supplied" degrade identically, by
+   * construction, never a special case. `raw` above is UNCHANGED either way — byte-identical to
+   * what the operator typed, this module's oldest promise.
+   */
+  expansion?: FeedbackExpansion | null;
 }
 
 /**
@@ -473,6 +700,7 @@ export function captureFeedback(root: string, opts: CaptureFeedbackOptions): Fee
     status: "new",
     proposal_pr: null,
     summary: null,
+    expansion: validateFeedbackExpansion(opts.expansion),
   };
   writeFileSync(feedbackEntryPath(root, id), stringifyYaml(entry));
   try {

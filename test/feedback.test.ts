@@ -8,7 +8,9 @@ import {
   FEEDBACK_ORIGINS,
   FEEDBACK_STATUSES,
   FeedbackError,
+  buildFeedbackFewShot,
   captureFeedback,
+  expandFeedbackDraft,
   feedbackAttachmentsDir,
   feedbackEntryPath,
   isValidFeedbackOrigin,
@@ -16,6 +18,9 @@ import {
   parseFeedbackAddArgs,
   readFeedbackEntry,
   setFeedbackStatus,
+  validateFeedbackExpansion,
+  type FeedbackEntry,
+  type FeedbackExpansion,
 } from "../src/lib/feedback.js";
 
 function root(): string {
@@ -253,4 +258,122 @@ test("setFeedbackStatus rejects a status outside the closed enum", () => {
 
 test("setFeedbackStatus throws on an unknown id", () => {
   assert.throws(() => setFeedbackStatus(root(), "fb-nope", "proposed"), FeedbackError);
+});
+
+// ── Feedback expansion (W1-T350): CLAIM / EVIDENCE / RECON / FALSIFYING CHECK ───────────────
+
+function validExpansion(): FeedbackExpansion {
+  return {
+    claim: "THE DIGEST FIRED TWICE for the same window",
+    evidence: "the operator's draft names one duplicate firing",
+    recon: "establish whether the digest's own dedup key includes the window boundary",
+    falsifying_check: "a single digest run for the window with no duplicate log line retires this",
+  };
+}
+
+test("validateFeedbackExpansion accepts a well-formed four-section expansion and trims whitespace", () => {
+  const raw = {
+    claim: "  THE DIGEST FIRED TWICE  ",
+    evidence: "  one duplicate log line  ",
+    recon: "  establish whether the dedup key covers this  ",
+    falsifying_check: "  one clean run retires it  ",
+  };
+  assert.deepEqual(validateFeedbackExpansion(raw), {
+    claim: "THE DIGEST FIRED TWICE",
+    evidence: "one duplicate log line",
+    recon: "establish whether the dedup key covers this",
+    falsifying_check: "one clean run retires it",
+  });
+});
+
+test("validateFeedbackExpansion FAILS LOUD (returns null) on a missing/empty/oversized section, or a non-object", () => {
+  assert.equal(validateFeedbackExpansion(null), null);
+  assert.equal(validateFeedbackExpansion("a string"), null);
+  assert.equal(validateFeedbackExpansion([]), null);
+  const base = validExpansion();
+  for (const key of ["claim", "evidence", "recon", "falsifying_check"] as const) {
+    assert.equal(validateFeedbackExpansion({ ...base, [key]: undefined }), null, `missing ${key} must fail`);
+    assert.equal(validateFeedbackExpansion({ ...base, [key]: "   " }), null, `blank ${key} must fail`);
+    assert.equal(validateFeedbackExpansion({ ...base, [key]: "x".repeat(5000) }), null, `oversized ${key} must fail`);
+  }
+});
+
+test("expandFeedbackDraft is FAIL-OPEN: a throwing expander, a rejected promise, and an invalid-shape response all resolve to null — never propagate", async () => {
+  await assert.doesNotReject(async () => {
+    const out = await expandFeedbackDraft(
+      "the digest fired twice",
+      {
+        expand: () => {
+          throw new Error("mount unavailable");
+        },
+      },
+    );
+    assert.equal(out, null);
+  });
+  assert.equal(
+    await expandFeedbackDraft("draft", { expand: () => Promise.reject(new Error("timeout")) }),
+    null,
+  );
+  assert.equal(await expandFeedbackDraft("draft", { expand: () => ({ claim: "only one field" }) }), null);
+});
+
+test("expandFeedbackDraft passes through a VALID expander response unchanged, and carries the draft + fewShot into the injected deps", async () => {
+  let seen: { draft: string; fewShot: string } | undefined;
+  const expansion = validExpansion();
+  const out = await expandFeedbackDraft("the digest fired twice", {
+    expand: (input) => {
+      seen = input;
+      return expansion;
+    },
+  }, "EXAMPLE:\nsome precedent entry");
+  assert.deepEqual(out, expansion);
+  assert.deepEqual(seen, { draft: "the digest fired twice", fewShot: "EXAMPLE:\nsome precedent entry" });
+});
+
+function feedbackEntryWithRaw(raw: string): FeedbackEntry {
+  return { id: "fb-1", ts: new Date().toISOString(), raw, attachments: [], origin: "cli", status: "new", proposal_pr: null };
+}
+
+test("buildFeedbackFewShot: keeps only entries carrying BOTH the RECON: and Falsifying check: markers, most-recent-first-picked, capped at the limit", () => {
+  const withMarkers = feedbackEntryWithRaw("CLAIM: x\nRECON: establish y\nFalsifying check: z");
+  const noMarkers = feedbackEntryWithRaw("just a note, no skeleton");
+  const reconOnly = feedbackEntryWithRaw("CLAIM: x\nRECON: establish y");
+  const fewShot = buildFeedbackFewShot([noMarkers, reconOnly, withMarkers]);
+  assert.equal(fewShot, `EXAMPLE:\n${withMarkers.raw}`);
+});
+
+test("buildFeedbackFewShot returns an empty string when no precedent entry carries both markers (never a dangling header)", () => {
+  assert.equal(buildFeedbackFewShot([feedbackEntryWithRaw("no markers here")]), "");
+  assert.equal(buildFeedbackFewShot([]), "");
+});
+
+test("buildFeedbackFewShot caps at `limit`, keeping the MOST RECENT (last-in-array) matching entries", () => {
+  const marked = (n: number) => feedbackEntryWithRaw(`CLAIM: entry ${n}\nRECON: establish\nFalsifying check: check`);
+  const entries = [marked(1), marked(2), marked(3), marked(4)];
+  const fewShot = buildFeedbackFewShot(entries, 2);
+  assert.equal(fewShot, `EXAMPLE:\n${entries[2].raw}\n\nEXAMPLE:\n${entries[3].raw}`);
+});
+
+test("captureFeedback: a confirmed submission stores the operator's raw text BYTE-IDENTICAL alongside the validated expansion", () => {
+  const r = root();
+  const expansion = validExpansion();
+  const entry = captureFeedback(r, { raw: "the digest fired twice", expansion });
+  assert.equal(entry.raw, "the digest fired twice"); // byte-identical, untouched by the expansion
+  assert.deepEqual(entry.expansion, expansion);
+  const onDisk = parseYaml(readFileSync(feedbackEntryPath(r, entry.id), "utf8"));
+  assert.deepEqual(onDisk, entry);
+});
+
+test("captureFeedback: the file-raw escape (no expansion passed) still files, with expansion null — never blocked on a missing preview", () => {
+  const r = root();
+  const entry = captureFeedback(r, { raw: "raw, unexpanded" });
+  assert.equal(entry.raw, "raw, unexpanded");
+  assert.equal(entry.expansion, null);
+});
+
+test("captureFeedback re-validates a passed expansion defensively — a malformed one is dropped to null, never written half-formed, raw is still filed unchanged", () => {
+  const r = root();
+  const entry = captureFeedback(r, { raw: "still lands", expansion: { claim: "only a claim" } as unknown as FeedbackExpansion });
+  assert.equal(entry.raw, "still lands");
+  assert.equal(entry.expansion, null);
 });

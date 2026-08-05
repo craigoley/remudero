@@ -1006,6 +1006,80 @@ test("W1-T193: a DRAFTING proposal renders a distinct state carrying its spawn t
   assert.match(html, /renderNeedsMe\(tasks, latestFeedbackEntries, latestInboxReady, latestInboxDrafting\)/);
 });
 
+// ── W1-T350: the feedback interpreter's visible round trip — the console submit is
+// ARM-THEN-CONFIRM WITH READ-BACK, never a single-click submit of an unseen rewrite (acceptance
+// 3). String/regex proof over the served shell's inline script, the SAME instrument the
+// STOP/APPROVE arm-then-confirm tests above already use for this exact class of claim.
+
+test("W1-T350: the feedback compose control starts UNARMED (data-confirming=false) and carries a distinct, single-click file-raw escape", () => {
+  const html = renderShellHtml();
+  const composeFn = html.match(/function feedbackComposeHtml\(\) \{[\s\S]*?\n  \}/)?.[0];
+  assert.ok(composeFn, "feedbackComposeHtml must exist");
+  assert.match(composeFn, /id="feedback-submit-btn" data-confirming="false"/, "the submit control starts UNARMED, not mid-confirm");
+  assert.match(composeFn, /id="feedback-file-raw-btn"/, "design (iv): the file-raw escape must exist as its own control");
+  assert.match(composeFn, /<textarea id="feedback-draft"/, "the operator's draft is captured verbatim in a textarea, never a link to a terminal");
+});
+
+test("W1-T350: the compose control only renders for a write-scoped session — a read-only token gets no write affordance at all", () => {
+  const html = renderShellHtml();
+  const feedbackBtnHandler = html.match(/getElementById\("feedback-btn"\)\.addEventListener\("click", async \(\) => \{([\s\S]*?)\n  \}\);/)?.[1];
+  assert.ok(feedbackBtnHandler, "no feedback-btn click handler found");
+  assert.match(feedbackBtnHandler, /if \(hasWriteScope\) document\.getElementById\("panel-controls"\)\.innerHTML = feedbackComposeHtml\(\);/);
+});
+
+test("W1-T350: the FIRST click on File feedback only PREVIEWS (POST /v1/feedback/preview) and ARMS — it never files, mirroring STOP's/APPROVE's own arm-then-confirm structurally (the filing POST is unreachable before the early return)", () => {
+  const html = renderShellHtml();
+  const clickHandler = html.match(/getElementById\("panel-controls"\)\.addEventListener\("click", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
+  assert.ok(clickHandler, "no panel-controls click handler found");
+
+  const firstClickBranch = /if \(submitBtn\.dataset\.confirming !== "true"\) \{([\s\S]*?)\n      return;\n    \}/.exec(clickHandler);
+  assert.ok(firstClickBranch, "no 'not yet confirming' branch found (or it never returns before the handler continues)");
+  assert.match(firstClickBranch[1], /postJson\("\/v1\/feedback\/preview", \{ draft \}\)/, "the arming click must preview, not file");
+  assert.doesNotMatch(firstClickBranch[1], /postJson\("\/v1\/feedback", /, "the arming click must NEVER file — that is the laundering hazard this task exists to close");
+  assert.match(firstClickBranch[1], /setTimeout\(\(\) => resetFeedbackSubmitButton\(submitBtn\), 8000\)/, "must reset after 8s, the SAME window STOP/APPROVE use");
+});
+
+test("W1-T350: the armed read-back renders the expansion's CLAIM in the button label and all four named sections in the preview panel, BEFORE the second (confirming) click can ever fire", () => {
+  const html = renderShellHtml();
+  const clickHandler = html.match(/getElementById\("panel-controls"\)\.addEventListener\("click", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
+  assert.ok(clickHandler);
+  assert.match(clickHandler, /submitBtn\.textContent = expansion \? `Confirm: \$\{expansion\.claim\}` : "Confirm \(no preview available\)";/);
+  assert.match(clickHandler, /<strong>CLAIM<\/strong>/);
+  assert.match(clickHandler, /<strong>EVIDENCE<\/strong>/);
+  assert.match(clickHandler, /<strong>RECON<\/strong>/);
+  assert.match(clickHandler, /<strong>FALSIFYING CHECK<\/strong>/);
+});
+
+test("W1-T350: the SECOND click (already confirming) is the ONLY branch that POSTs /v1/feedback, and it carries the ALREADY-PREVIEWED expansion rather than re-deriving one", () => {
+  const html = renderShellHtml();
+  const clickHandler = html.match(/getElementById\("panel-controls"\)\.addEventListener\("click", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
+  assert.ok(clickHandler);
+  assert.match(clickHandler, /const expansionToFile = armedFeedbackExpansion;/);
+  assert.match(clickHandler, /postJson\("\/v1\/feedback", \{ text: draft, expansion: expansionToFile \}\)/);
+  // exactly one call site posts the confirmed filing -- the raw escape is a SEPARATE branch with
+  // its own distinct call, never the same code path (checked in the next test).
+  assert.equal((clickHandler.match(/postJson\("\/v1\/feedback", \{ text: draft, expansion: expansionToFile \}\)/g) ?? []).length, 1);
+});
+
+test("W1-T350: the file-raw escape POSTs /v1/feedback with NO expansion field at all, in its own branch, before any preview call — a single deliberate click, never the arm-then-confirm path", () => {
+  const html = renderShellHtml();
+  const clickHandler = html.match(/getElementById\("panel-controls"\)\.addEventListener\("click", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
+  assert.ok(clickHandler);
+  const rawBranch = /if \(rawBtn\) \{([\s\S]*?)\n      return;\n    \}/.exec(clickHandler);
+  assert.ok(rawBranch, "no rawBtn branch found");
+  assert.match(rawBranch[1], /postJson\("\/v1\/feedback", \{ text: draft \}\)/);
+  assert.doesNotMatch(rawBranch[1], /expansion/, "the raw escape must never carry an expansion field");
+  assert.doesNotMatch(rawBranch[1], /\/v1\/feedback\/preview/, "the raw escape must never call preview");
+});
+
+test("W1-T350: editing the draft after arming resets the confirm state — an armed read-back must never survive the text it described", () => {
+  const html = renderShellHtml();
+  const inputHandler = html.match(/getElementById\("panel-controls"\)\.addEventListener\("input", \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
+  assert.ok(inputHandler, "no panel-controls input handler found");
+  assert.match(inputHandler, /e\.target\.id !== "feedback-draft"/);
+  assert.match(inputHandler, /resetFeedbackSubmitButton\(btn\)/);
+});
+
 // ── W1-T182: the row template proven over its ACTUAL RENDERED OUTPUT, not just its source
 // text — a browser-driven DOM proof already exists (test/serve.live-state.test.ts), but that
 // requires launching a real headless browser; this test proves the exact same claim (the

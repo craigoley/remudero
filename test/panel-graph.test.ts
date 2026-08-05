@@ -9,6 +9,7 @@ import { createService } from "../src/lib/service.js";
 import {
   buildDrainPreviewRoute,
   buildFeedbackInboxRoute,
+  buildFeedbackPreviewRoute,
   buildPanelGraphRoutes,
   buildProposalDecisionRoute,
   buildSubmitFeedbackRoute,
@@ -20,7 +21,15 @@ import {
   type RatifyCliGateway,
 } from "../src/lib/panel-graph.js";
 import { bearerTokenId } from "../src/lib/panel-actions.js";
-import { captureFeedback, feedbackEntryPath, readFeedbackEntry, setFeedbackStatus, type FeedbackEntry } from "../src/lib/feedback.js";
+import {
+  captureFeedback,
+  feedbackEntryPath,
+  readFeedbackEntry,
+  setFeedbackStatus,
+  type ExpandFeedbackDeps,
+  type FeedbackEntry,
+  type FeedbackExpansion,
+} from "../src/lib/feedback.js";
 import { appendLedger } from "../src/lib/ledger.js";
 import type { TraceGithub, TracePrView } from "../src/lib/trace.js";
 import type { GitHub } from "../src/lib/status.js";
@@ -68,6 +77,14 @@ function tmpRoot(): string {
 
 function ledgerPathFor(root: string): string {
   return join(root, "state", "ledger.ndjson");
+}
+
+/** Every `plan/feedback/*.yaml` filename under `root` -- the literal "filed nothing" proof for
+ *  the preview route (W1-T350), which must never write an entry no matter what it returns. */
+function listFeedbackFiles(root: string): string[] {
+  const dir = join(root, "plan", "feedback");
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir).filter((f) => f.endsWith(".yaml"));
 }
 
 function readLedgerLines(path: string): Array<Record<string, unknown>> {
@@ -121,8 +138,31 @@ function fakeRatifyGateway(): RatifyCliGateway & { approved: string[]; reframed:
   };
 }
 
-function depsFor(root: string, planPath: string, github: TraceGithub = fakeGithub()): PanelGraphDeps {
-  return { root, inboxRoot: root, planPath, ledgerPath: ledgerPathFor(root), github, statusGithub: fakeStatusGithub(), ratify: fakeRatifyGateway() };
+function depsFor(
+  root: string,
+  planPath: string,
+  github: TraceGithub = fakeGithub(),
+  expand?: ExpandFeedbackDeps["expand"],
+): PanelGraphDeps {
+  return {
+    root,
+    inboxRoot: root,
+    planPath,
+    ledgerPath: ledgerPathFor(root),
+    github,
+    statusGithub: fakeStatusGithub(),
+    ratify: fakeRatifyGateway(),
+    expand,
+  };
+}
+
+function fullExpansion(): FeedbackExpansion {
+  return {
+    claim: "THE DRAIN RETRY BANNER OVERLAPS THE STATUS PILL",
+    evidence: "the operator's draft names the banner and the status pill",
+    recon: "establish whether this reproduces at every viewport width or only the narrow one",
+    falsifying_check: "a screenshot at the reported width with no overlap retires this",
+  };
 }
 
 async function withService<T>(deps: PanelGraphDeps, fn: (baseUrl: string) => Promise<T>): Promise<T> {
@@ -155,7 +195,7 @@ const writerId = bearerTokenId({ headers: { authorization: `Bearer ${WRITE_TOKEN
 
 // ── scope enforcement ────────────────────────────────────────────────────────
 
-test("GET /v1/feedback, GET /v1/trace are read-scoped; POST /v1/feedback, POST /v1/feedback/decision are write-scoped", async () => {
+test("GET /v1/feedback, GET /v1/trace are read-scoped; POST /v1/feedback, POST /v1/feedback/decision, POST /v1/feedback/preview are write-scoped", async () => {
   const root = tmpRoot();
   const planPath = emptyPlanPath(root);
   await withService(depsFor(root, planPath), async (base) => {
@@ -166,6 +206,8 @@ test("GET /v1/feedback, GET /v1/trace are read-scoped; POST /v1/feedback, POST /
     assert.equal(readOnPost.status, 403);
     const readOnDecision = await post(base, "/v1/feedback/decision", READ_TOKEN, { id: "x", decision: "accept" });
     assert.equal(readOnDecision.status, 403);
+    const readOnPreview = await post(base, "/v1/feedback/preview", READ_TOKEN, { draft: "x" });
+    assert.equal(readOnPreview.status, 403);
   });
 });
 
@@ -398,6 +440,151 @@ test("POST /v1/feedback: an http(s) attachment is accepted and stored verbatim",
     assert.equal(res.status, 200);
     const body = (await res.json()) as { entry: FeedbackEntry };
     assert.deepEqual(body.entry.attachments, ["https://example.com/shot.png"]);
+  });
+});
+
+// ── POST /v1/feedback/preview (W1-T350, acceptance 1) ────────────────────────
+
+test("POST /v1/feedback/preview: returns the four-section expansion from the injected expander, WITHOUT filing anything", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  const expansion = fullExpansion();
+  await withService(depsFor(root, planPath, fakeGithub(), () => expansion), async (base) => {
+    const res = await post(base, "/v1/feedback/preview", WRITE_TOKEN, { draft: "the drain retry banner overlaps the status pill" });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { expansion });
+  });
+  // WITHOUT filing anything -- no plan/feedback/*.yaml written, no ledger line at all.
+  assert.deepEqual(listFeedbackFiles(root), []);
+  assert.equal(readLedgerLines(ledgerPathFor(root)).length, 0);
+});
+
+test("POST /v1/feedback/preview: every specific the operator did not state comes back under recon as a directive, not evidence -- proven over the injected expander's own shape, plumbed through unmodified", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  const expansion: FeedbackExpansion = {
+    claim: "THE CONSOLE NEVER SHOWS SPEND WHILE BLOCKED",
+    evidence: "the operator's draft states the console gives no spend indicator while blocked",
+    recon: "establish whether this reproduces on every blocked task or only ones with a live run",
+    falsifying_check: "a blocked task with a visible spend figure retires this",
+  };
+  await withService(depsFor(root, planPath, fakeGithub(), () => expansion), async (base) => {
+    const res = await post(base, "/v1/feedback/preview", WRITE_TOKEN, { draft: "the console doesn't show me when spend is blocked" });
+    const body = (await res.json()) as { expansion: FeedbackExpansion };
+    assert.match(body.expansion.recon, /^establish whether/i);
+    assert.doesNotMatch(body.expansion.evidence, /every blocked task|only ones with a live run/);
+  });
+});
+
+test("POST /v1/feedback/preview: an expander that THROWS resolves { expansion: null } (never a 500), and a plain POST /v1/feedback afterwards still files today's entry unchanged (acceptance 1's fail-open half)", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  const throwingExpand: ExpandFeedbackDeps["expand"] = () => {
+    throw new Error("mount unavailable");
+  };
+  const deps = depsFor(root, planPath, fakeGithub(), throwingExpand);
+  let entryId = "";
+  await withService(deps, async (base) => {
+    const previewRes = await post(base, "/v1/feedback/preview", WRITE_TOKEN, { draft: "the drain loop hung" });
+    assert.equal(previewRes.status, 200);
+    assert.deepEqual(await previewRes.json(), { expansion: null });
+
+    // plain submission, no expansion in the body -- exactly today's (pre-W1-T350) shape.
+    const submitRes = await post(base, "/v1/feedback", WRITE_TOKEN, { text: "the drain loop hung" });
+    assert.equal(submitRes.status, 200);
+    const body = (await submitRes.json()) as { entry: FeedbackEntry };
+    assert.equal(body.entry.raw, "the drain loop hung");
+    assert.equal(body.entry.expansion, null);
+    entryId = body.entry.id;
+  });
+  const onDisk = readFeedbackEntry(root, entryId);
+  assert.equal(onDisk.raw, "the drain loop hung");
+  assert.equal(onDisk.expansion, null);
+});
+
+test("POST /v1/feedback/preview: no expander configured at all (deps.expand omitted) degrades IDENTICALLY to a throwing one -- { expansion: null }, 200, never a 500", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  await withService(depsFor(root, planPath), async (base) => {
+    const res = await post(base, "/v1/feedback/preview", WRITE_TOKEN, { draft: "no expander wired yet" });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { expansion: null });
+  });
+});
+
+test("POST /v1/feedback/preview: missing/blank draft -> 400, expander never called", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  let called = false;
+  await withService(
+    depsFor(root, planPath, fakeGithub(), () => {
+      called = true;
+      return fullExpansion();
+    }),
+    async (base) => {
+      assert.equal((await post(base, "/v1/feedback/preview", WRITE_TOKEN, {})).status, 400);
+      assert.equal((await post(base, "/v1/feedback/preview", WRITE_TOKEN, { draft: "   " })).status, 400);
+    },
+  );
+  assert.equal(called, false);
+});
+
+test("POST /v1/feedback/preview: passes the few-shot register built from RECON:/Falsifying check:-marked precedent entries into the expander", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  captureFeedback(root, { raw: "CLAIM: precedent one\nRECON: establish x\nFalsifying check: y", origin: "cli" });
+  let seenFewShot = "";
+  await withService(
+    depsFor(root, planPath, fakeGithub(), (input) => {
+      seenFewShot = input.fewShot;
+      return fullExpansion();
+    }),
+    async (base) => {
+      await post(base, "/v1/feedback/preview", WRITE_TOKEN, { draft: "a new draft" });
+    },
+  );
+  assert.match(seenFewShot, /precedent one/);
+});
+
+// ── POST /v1/feedback: an already-previewed expansion is stored alongside raw (acceptance 2's route half) ──
+
+test("POST /v1/feedback: a valid `expansion` in the body is re-validated and stored alongside raw, byte-identical raw", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  const expansion = fullExpansion();
+  await withService(depsFor(root, planPath), async (base) => {
+    const res = await post(base, "/v1/feedback", WRITE_TOKEN, { text: "the drain retry banner overlaps the status pill", expansion });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { entry: FeedbackEntry };
+    assert.equal(body.entry.raw, "the drain retry banner overlaps the status pill");
+    assert.deepEqual(body.entry.expansion, expansion);
+  });
+  const lines = readLedgerLines(ledgerPathFor(root));
+  assert.equal(lines[0].expanded, true);
+});
+
+test("POST /v1/feedback: a MALFORMED `expansion` in the body degrades to null -- never blocks the submission, raw still files unchanged (the honesty/fail-open falsifier)", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  await withService(depsFor(root, planPath), async (base) => {
+    const res = await post(base, "/v1/feedback", WRITE_TOKEN, { text: "still lands", expansion: { claim: "only one field" } });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { entry: FeedbackEntry };
+    assert.equal(body.entry.raw, "still lands");
+    assert.equal(body.entry.expansion, null);
+  });
+  const lines = readLedgerLines(ledgerPathFor(root));
+  assert.equal(lines[0].expanded, false);
+});
+
+test("POST /v1/feedback: the file-raw escape (no `expansion` field at all) still files, expansion null -- unchanged from pre-W1-T350 behavior", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  await withService(depsFor(root, planPath), async (base) => {
+    const res = await post(base, "/v1/feedback", WRITE_TOKEN, { text: "raw escape" });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { entry: FeedbackEntry };
+    assert.equal(body.entry.expansion, null);
   });
 });
 
@@ -683,6 +870,8 @@ test("individual route builders each return their own exact-match route", () => 
   assert.equal(buildFeedbackInboxRoute(deps).path, "/v1/feedback");
   assert.equal(buildFeedbackInboxRoute(deps).method, "GET");
   assert.equal(buildSubmitFeedbackRoute(deps).method, "POST");
+  assert.equal(buildFeedbackPreviewRoute(deps).path, "/v1/feedback/preview");
+  assert.equal(buildFeedbackPreviewRoute(deps).method, "POST");
   assert.equal(buildTraceRoute(deps).path, "/v1/trace");
   assert.equal(buildProposalDecisionRoute(deps).path, "/v1/feedback/decision");
   assert.equal(buildDrainPreviewRoute(deps).path, "/v1/drain/preview");

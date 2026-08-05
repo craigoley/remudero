@@ -13,10 +13,13 @@
  * createService() instance) is later work, same split every prior W3-T* panel task's header
  * documents.
  *
- * FIVE ROUTES:
+ * SIX ROUTES:
  *   - GET  /v1/feedback           — the inbox list (read-scoped).
  *   - POST /v1/feedback           — submit feedback, ALWAYS origin=ui (write-scoped). See
- *     `buildSubmitFeedbackRoute`'s doc comment for how this doubles as "answer a grill".
+ *     `buildSubmitFeedbackRoute`'s doc comment for how this doubles as "answer a grill", and
+ *     (W1-T350) how it accepts an already-previewed `expansion` alongside the raw text.
+ *   - POST /v1/feedback/preview   — expand a draft into the four-section filing skeleton
+ *     WITHOUT filing anything (write-scoped, W1-T350). See `buildFeedbackPreviewRoute`'s own doc.
  *   - GET  /v1/trace              — the plan→task→PR provenance graph for one id, task or
  *     feedback (read-scoped). Mirrors `rmd trace <id>`'s own two-entry-point resolution
  *     (run-task.ts's `traceCommand`) exactly, over the SAME lib/trace.ts primitives.
@@ -66,12 +69,17 @@ import {
 } from "./status.js";
 import { buildDrainPreview, dispatchOrder, runnableCandidates, type DrainOpts, type DispatchFilterReason, type MergedSet } from "./drain.js";
 import {
+  buildFeedbackFewShot,
   captureFeedback,
+  expandFeedbackDraft,
   FEEDBACK_STATUSES,
   listFeedback,
   readFeedbackEntry,
   setFeedbackStatus,
+  validateFeedbackExpansion,
+  type ExpandFeedbackDeps,
   type FeedbackEntry,
+  type FeedbackExpansion,
   type FeedbackStatus,
 } from "./feedback.js";
 import type { LandFeedbackOpts } from "./feedback-landing.js";
@@ -141,6 +149,19 @@ export interface PanelGraphDeps {
    * bridge fires with real git/gh.
    */
   feedbackLand?: LandFeedbackOpts;
+  /**
+   * W1-T350: the feedback-expansion rung POST /v1/feedback/preview calls — injected exactly like
+   * `ratify`/`statusGithub` above, so a test never spawns a real worker. OPTIONAL: mirrors
+   * feedback.ts's own `realDecisionSummarizer` precedent (built, unit-tested, its production
+   * spawn-wiring left as explicitly-named follow-up rather than folded into this one concern —
+   * `rmd serve` has no mounts.yaml/settingsFile/cwd resolution machinery anywhere else in this
+   * module today, and adding it is a second concern this task's own budget note declines to
+   * absorb). A caller that omits this gets a safe no-op that always resolves `null` — "no
+   * expander configured" and "an expander threw" degrade IDENTICALLY, by construction (see
+   * {@link buildFeedbackPreviewRoute}), which is exactly this feature's own fail-open contract:
+   * a missing/broken expander never blocks the plain, unexpanded submission from filing.
+   */
+  expand?: ExpandFeedbackDeps["expand"];
 }
 
 // ── GET /v1/feedback — the inbox list ───────────────────────────────────────
@@ -226,6 +247,10 @@ interface SubmitFeedbackInput {
   text: string;
   attachments: string[];
   replyTo?: string;
+  /** W1-T350: the expansion the console's OWN preview call already produced and the operator
+   *  already confirmed via the arm-then-confirm read-back — see {@link buildSubmitFeedbackRoute}'s
+   *  doc for why this route re-validates it rather than trusting the wire shape. */
+  expansion?: unknown;
 }
 
 /**
@@ -253,7 +278,11 @@ function validateSubmitFeedback(body: unknown): { error: string } | SubmitFeedba
   if (body.replyTo !== undefined && (typeof body.replyTo !== "string" || !body.replyTo.trim())) {
     return { error: "replyTo must be a non-empty string when present" };
   }
-  return { text: body.text, attachments, replyTo: body.replyTo as string | undefined };
+  // `expansion` is intentionally NOT shape-checked here — an ill-shaped value is a normal,
+  // expected case (the console's read-back arm never had one to show, e.g. the file-raw escape,
+  // or the preview call failed) and is re-validated (never trusted) below via
+  // `validateFeedbackExpansion`, the SAME gate the preview route itself uses.
+  return { text: body.text, attachments, replyTo: body.replyTo as string | undefined, expansion: body.expansion };
 }
 
 /**
@@ -266,6 +295,16 @@ function validateSubmitFeedback(body: unknown): { error: string } | SubmitFeedba
  * this is "answer a grill" v1 (see this module's header for why): the answer is captured as a
  * FRESH feedback entry, prefixed with a back-reference so the next triage pass can see what it's
  * answering, and re-enters the same capture → triage pipeline every other feedback item does.
+ *
+ * W1-T350: `expansion`, when given, is the four-section expansion the console's OWN arm-then-
+ * confirm read-back already showed the operator before this request was ever sent (see
+ * {@link buildFeedbackPreviewRoute}) — THIS ROUTE NEVER CALLS THE EXPANDER ITSELF, exactly one
+ * cheap-mount call per submission, at preview time, not twice. `expansion` is RE-VALIDATED here
+ * (never trusted merely because the wire shape looks right — a caller bypassing the console's
+ * own UI entirely could hand this route anything) via the SAME {@link validateFeedbackExpansion}
+ * gate the preview route uses; a value that fails validation degrades to `null`, so a
+ * malformed/absent expansion NEVER blocks the plain submission from filing — the file-raw
+ * escape (design (iv)) is simply "no `expansion` in the body" and needs no separate code path.
  */
 export function buildSubmitFeedbackRoute(deps: PanelGraphDeps): Route {
   return {
@@ -290,13 +329,63 @@ export function buildSubmitFeedbackRoute(deps: PanelGraphDeps): Route {
         }
       }
       const raw = input.replyTo !== undefined ? `[answer to feedback#${input.replyTo}] ${input.text}` : input.text;
-      const entry = captureFeedback(deps.root, { raw, attachments: input.attachments, origin: "ui" });
+      const expansion = validateFeedbackExpansion(input.expansion);
+      const entry = captureFeedback(deps.root, { raw, attachments: input.attachments, origin: "ui", expansion });
       const origin = bearerTokenId(req);
       appendPanelLedger(deps.ledgerPath, "panel.feedback_submitted", entry.id, origin, {
         origin_field: entry.origin,
         reply_to: input.replyTo ?? null,
+        expanded: expansion !== null,
       });
       sendJson(res, 200, { ok: true, entry });
+    }),
+  };
+}
+
+// ── POST /v1/feedback/preview — expand a draft WITHOUT filing anything ─────────────────────
+
+interface PreviewFeedbackInput {
+  draft: string;
+}
+
+function validatePreviewFeedback(body: unknown): { error: string } | PreviewFeedbackInput {
+  if (!isRecord(body)) return { error: "body must be a JSON object" };
+  if (typeof body.draft !== "string" || !body.draft.trim()) return { error: "draft is required" };
+  return { draft: body.draft };
+}
+
+/**
+ * POST /v1/feedback/preview — write-scoped (same authority tier as the submission it previews,
+ * per this task's own corrected rationale: the arm/confirm idiom is a client-side mis-click
+ * guard, never the authorization boundary — the write-scoped route token is what authorizes,
+ * here as everywhere else on this surface). Runs the expander over the operator's DRAFT and
+ * returns the four-section {@link FeedbackExpansion} WITHOUT filing anything — the seam the
+ * console's arm-then-confirm control calls on its FIRST click (the "arm" half) to fetch the
+ * read-back it then shows before a second click ever files (see serve.ts's feedback-submit
+ * control). Files NOTHING, ever — no `captureFeedback` call on this path at all.
+ *
+ * FAIL-OPEN, STRUCTURALLY: `deps.expand` is optional ({@link PanelGraphDeps.expand}'s own doc);
+ * when absent, or when it throws/rejects/returns an invalid shape, {@link expandFeedbackDraft}
+ * resolves `null` and THIS ROUTE STILL RETURNS 200 `{ expansion: null }` — never a 500, never a
+ * blocked preview. The console's own control degrades to "no preview available, confirm files
+ * the plain draft" on that response, which is this task's stated failure mode verbatim: "an
+ * expander error or timeout leaves plain raw submission working unchanged."
+ *
+ * The few-shot register ({@link buildFeedbackFewShot}) is drawn HERE, not inside feedback.ts,
+ * because only this route holds `deps.root` (feedback.ts's expansion primitives are pure/
+ * injected and must not read the filesystem themselves — same split `resolveFeedbackExpansionMount`
+ * documents for the mount-routing half).
+ */
+export function buildFeedbackPreviewRoute(deps: PanelGraphDeps): Route {
+  return {
+    method: "POST",
+    path: "/v1/feedback/preview",
+    scope: "write",
+    handler: jsonAction(validatePreviewFeedback, async (input, _req, res) => {
+      const expand = deps.expand ?? (() => null);
+      const fewShot = buildFeedbackFewShot(listFeedback(deps.root, {}));
+      const expansion: FeedbackExpansion | null = await expandFeedbackDraft(input.draft, { expand }, fewShot);
+      sendJson(res, 200, { expansion });
     }),
   };
 }
@@ -1016,6 +1105,7 @@ export function buildPanelGraphRoutes(deps: PanelGraphDeps): Route[] {
   return [
     buildFeedbackInboxRoute(deps),
     buildSubmitFeedbackRoute(deps),
+    buildFeedbackPreviewRoute(deps),
     buildTraceRoute(deps),
     buildProposalDecisionRoute(deps),
     buildDrainPreviewRoute(deps),

@@ -603,6 +603,9 @@ export function renderShellHtml(
      as STOP's own .confirming (an unmissable state change), a distinct (non-danger) accent since
      approving is not a destructive action the way STOP is. */
   button.proposal-approve-btn.confirming { background: var(--accent); color: #04101f; border-color: var(--accent); }
+  /* W1-T350: the feedback compose control's arm-then-confirm state -- same non-destructive
+     accent language as APPROVE (filing feedback is not a destructive action either). */
+  #feedback-submit-btn.confirming { background: var(--accent); color: #04101f; border-color: var(--accent); }
   /* fb-…9daa9b: the UP NEXT write-actions (per-row Run + Drain now) — same arm-then-confirm
      visual language as APPROVE (a non-destructive accent), sized to sit inside a task row. */
   .up-next-run-btn { padding: 0.15rem 0.5rem; font-size: 0.8rem; margin-left: 0.4rem; flex: 0 0 auto; }
@@ -1187,7 +1190,10 @@ export function renderShellHtml(
     "/v1/feedback/decision": { kind: "done", text: "Decision recorded — the entry moves out of NEEDS ME on the next refresh." },
     "/v1/inbox/approve": { kind: "done", text: "Proposal approved — the drafted tasks are filed." },
     "/v1/inbox/reframe": { kind: "done", text: "Reframe recorded — your wording is saved against the proposal." },
-    "/v1/feedback": { kind: "done", text: "Answer recorded." },
+    // W1-T350: this path now also files a compose-panel draft (raw escape or confirmed
+    // expansion), not only a grill answer -- the wording covers both without naming either.
+    "/v1/feedback": { kind: "done", text: "Feedback recorded." },
+    "/v1/feedback/preview": { kind: "requested", text: "Preview generated — nothing is filed yet. Confirm to submit." },
     "/v1/control/pause": { kind: "done", text: "Fleet PAUSED — no new task will be dispatched until you resume." },
     "/v1/control/resume": { kind: "done", text: "Fleet RESUMED — dispatch is live again." },
     "/v1/control/stop": { kind: "done", text: "Fleet STOPPED — dispatch is halted until you resume." },
@@ -3224,8 +3230,36 @@ export function renderShellHtml(
     document.getElementById("panel").hidden = false;
     document.getElementById("panel-body").textContent = "loading…";
   }
+  // ── W1-T350: the feedback interpreter's visible round trip — ARM-THEN-CONFIRM WITH READ-BACK.
+  // "Whenever I submit feedback in the console, it probably needs to go through an interpreter"
+  // (operator direction, oper#needs-me-filings-2026-08-04). THE ROUND TRIP IS THE POINT: an
+  // expansion the operator never SEES launders his intent through a model, one layer down from
+  // the decision-authority audit's exact failure shape — so the submit control renders the
+  // four-section expansion BEFORE anything files, reusing the SAME data-confirming/8s-reset
+  // discipline STOP (below) and APPROVE (above) already use VERBATIM, never a second confirm
+  // pattern. CORRECTED FROM AN EARLIER ASSUMPTION (verified from source, 2026-08-05): arm-then-
+  // confirm is a CLIENT-SIDE mis-click guard here, same as everywhere else on this surface —
+  // never the authorization boundary (POST /v1/feedback's write-scoped token is what
+  // authorizes) — so this control exists only to show the read-back, not to gate access.
+  function feedbackComposeHtml() {
+    return (
+      '<div id="feedback-compose">' +
+      '<label for="feedback-draft">File feedback</label>' +
+      '<textarea id="feedback-draft" rows="2" placeholder="what did you notice?"></textarea>' +
+      '<div class="btn-row">' +
+      '<button type="button" id="feedback-submit-btn" data-confirming="false" aria-pressed="false">File feedback</button>' +
+      '<button type="button" id="feedback-file-raw-btn">File raw (skip expansion)</button>' +
+      "</div>" +
+      '<div id="feedback-expansion-preview" class="detail" hidden></div>' +
+      "</div>"
+    );
+  }
   document.getElementById("feedback-btn").addEventListener("click", async () => {
     openPanel("Feedback inbox");
+    // design (iv): the DEFAULT flow runs the preview — this compose control (not a checkbox
+    // defaulting off) is what a write-scoped operator always sees; a read-only session renders
+    // no write affordance at all (W1-T202's own discipline), so there is nothing to confirm.
+    if (hasWriteScope) document.getElementById("panel-controls").innerHTML = feedbackComposeHtml();
     const body = document.getElementById("panel-body");
     try {
       const data = await getJson("/v1/feedback");
@@ -3236,6 +3270,88 @@ export function renderShellHtml(
     } catch (e) {
       body.textContent = \`panel fetch failed: \${e}\`;
     }
+  });
+  // one confirm-arm timer for the compose control, mirroring approveConfirmTimers'/
+  // stopConfirmTimer's own 8s-reset shape; armedFeedbackExpansion carries the ALREADY-PREVIEWED
+  // expansion from the arming click to the confirming one, so confirm never re-derives it (one
+  // cheap-mount call per submission, at preview time, never twice).
+  let feedbackConfirmTimer;
+  let armedFeedbackExpansion = null;
+  function resetFeedbackSubmitButton(btn) {
+    btn.dataset.confirming = "false";
+    btn.setAttribute("aria-pressed", "false");
+    btn.classList.remove("confirming");
+    btn.textContent = "File feedback";
+    btn.disabled = false;
+    clearTimeout(feedbackConfirmTimer);
+    feedbackConfirmTimer = undefined;
+    armedFeedbackExpansion = null;
+    const preview = document.getElementById("feedback-expansion-preview");
+    if (preview) preview.hidden = true;
+  }
+  // editing the draft after arming resets the arm — design: "the operator can edit the draft and
+  // re-preview before confirming" (an armed read-back must never survive the text it read back).
+  document.getElementById("panel-controls").addEventListener("input", (e) => {
+    if (e.target.id !== "feedback-draft") return;
+    const btn = document.getElementById("feedback-submit-btn");
+    if (btn && btn.dataset.confirming === "true") resetFeedbackSubmitButton(btn);
+  });
+  document.getElementById("panel-controls").addEventListener("click", async (e) => {
+    const submitBtn = e.target.closest("#feedback-submit-btn");
+    const rawBtn = e.target.closest("#feedback-file-raw-btn");
+    if (!submitBtn && !rawBtn) return;
+    const draftEl = document.getElementById("feedback-draft");
+    const draft = draftEl.value.trim();
+    if (!draft) return;
+    if (rawBtn) {
+      // design (iv): the escape stays — ONE deliberate action away (this distinctly-labeled
+      // control, never the default), filing exactly today's plain entry, no preview call at all.
+      draftEl.value = "";
+      await postJson("/v1/feedback", { text: draft });
+      document.getElementById("feedback-btn").click();
+      return;
+    }
+    if (submitBtn.dataset.confirming !== "true") {
+      // FIRST CLICK: PREVIEW ONLY — never files. Arms the control and shows the four-section
+      // expansion as the read-back, exactly like APPROVE's data-read-back but computed live
+      // (mirrors STOP's/APPROVE's own data-confirming shape, never a second confirm pattern).
+      submitBtn.disabled = true;
+      let expansion = null;
+      try {
+        // postJson resolves the raw Response (never parses the body itself, see its own doc) —
+        // .ok gates the parse; a non-2xx or a malformed body both fall through to null below,
+        // same fail-open contract the route itself already guarantees server-side.
+        const res = await postJson("/v1/feedback/preview", { draft });
+        if (res && res.ok) expansion = (await res.json()).expansion ?? null;
+      } catch {
+        expansion = null; // fail-open: no preview available, confirm still files the plain draft.
+      }
+      submitBtn.disabled = false;
+      armedFeedbackExpansion = expansion;
+      submitBtn.dataset.confirming = "true";
+      submitBtn.setAttribute("aria-pressed", "true");
+      submitBtn.classList.add("confirming");
+      submitBtn.textContent = expansion ? \`Confirm: \${expansion.claim}\` : "Confirm (no preview available)";
+      const preview = document.getElementById("feedback-expansion-preview");
+      if (preview) {
+        preview.hidden = !expansion;
+        preview.innerHTML = expansion
+          ? \`<p><strong>CLAIM</strong> \${escapeHtml(expansion.claim)}</p>\` +
+            \`<p><strong>EVIDENCE</strong> \${escapeHtml(expansion.evidence)}</p>\` +
+            \`<p><strong>RECON</strong> \${escapeHtml(expansion.recon)}</p>\` +
+            \`<p><strong>FALSIFYING CHECK</strong> \${escapeHtml(expansion.falsifying_check)}</p>\`
+          : "";
+      }
+      clearTimeout(feedbackConfirmTimer);
+      feedbackConfirmTimer = setTimeout(() => resetFeedbackSubmitButton(submitBtn), 8000);
+      return;
+    }
+    // SECOND CLICK, within the window: CONFIRM — files, carrying the already-previewed expansion.
+    const expansionToFile = armedFeedbackExpansion;
+    resetFeedbackSubmitButton(submitBtn);
+    draftEl.value = "";
+    await postJson("/v1/feedback", { text: draft, expansion: expansionToFile });
+    document.getElementById("feedback-btn").click();
   });
   // ── W1-T222 INLINE DETAIL layer: the row-click task CARD, now a sibling <li> DIRECTLY BENEATH
   // the row that opened it -- never a scroll-away section. title/rationale/acceptance criteria/
