@@ -276,6 +276,30 @@ test("runCiParity: a step whose spawn THROWS (binary missing) is caught and repo
   assert.ok(result.steps.some((s) => s.name === "depcruise"));
 });
 
+test("runCiParity: a spawn that fails for a non-exit reason (status: null, e.g. ENOBUFS) is reported as a spawn failure naming what happened, never as a bare red step with empty output (W1-T338)", () => {
+  const spawn: PreflightSpawn = (file, args) => {
+    if (args.some((a) => a.includes("leak-grep.sh"))) {
+      // This is exactly the shape spawnSync returns when the child never produced an exit
+      // status — killed for exceeding a buffer ceiling, ENOENT, etc: `status: null`, and
+      // typically thin-to-empty stdout/stderr, with `error` naming why.
+      return { status: null, stdout: "", stderr: "", error: "spawnSync bash ENOBUFS" };
+    }
+    return { status: 0, stdout: "", stderr: "" };
+  };
+  const result = runCiParity(REPO_ROOT, { spawn });
+
+  const leakGrep = result.steps.find((s) => s.name === "leak-grep")!;
+  assert.equal(leakGrep.ok, false, "a spawn that never exited must never read as a passing step");
+  assert.doesNotMatch(
+    leakGrep.detail,
+    /^leak-grep: FAIL —/,
+    "a non-exit spawn failure must not be rendered as an ordinary red test step (that is the ENOBUFS-as-bare-FAIL bug)",
+  );
+  assert.match(leakGrep.detail, /SPAWN FAILURE/, "the detail must name that the SPAWN failed, distinct from a real test failure");
+  assert.match(leakGrep.detail, /ENOBUFS/, "the detail must say WHY — not present empty output as an unexplained failure");
+  assert.equal(result.ok, false);
+});
+
 test("runCiParity: an entry whose run() ITSELF throws (not just a leaf's spawn inside runStep) is caught by the TOP-LEVEL catch and reported as '<job>:error', never aborting the run", () => {
   // lint-plan's run() calls `spawn("git", ["rev-parse", ...])` directly, OUTSIDE any runStep —
   // a throw there must be caught by runCiParity's own try/catch around entry.run!(), not just

@@ -216,6 +216,21 @@ test("defaultPreflightSpawn really shells out — status, stdout and stderr come
   assert.equal(defaultPreflightSpawn("cat", [], { input: "piped-in" }).stdout, "piped-in", "opts.input is written to the child's stdin");
 });
 
+test("defaultPreflightSpawn: a child writing MORE than the OLD 1MB spawnSync default to stdout still returns its true exit status and complete output (W1-T338 — the ci:test ENOBUFS this fix closes)", () => {
+  // `test:ci`'s own TAP output is ~1.7MB; this drives the REAL spawnSync leaf (no injected
+  // PreflightSpawn) past the OLD 1.0MB default so a dropped `maxBuffer` fails this test rather
+  // than merely a note. 1.5MB is comfortably past the old ceiling and comfortably under the new
+  // one, so this doubles as the regression lock for that ceiling.
+  const byteCount = 1.5 * 1024 * 1024;
+  // `process.exit()` right after a large `write()` to a piped stdout can race the async flush
+  // and truncate the very output this test means to prove survives intact — exiting from the
+  // write's own callback (fired once the data is actually flushed) avoids that race.
+  const script = `process.stdout.write("x".repeat(${byteCount}), () => process.exit(0));`;
+  const res = defaultPreflightSpawn(process.execPath, ["-e", script]);
+  assert.equal(res.status, 0, "a child that exits 0 after writing past the old 1MB default must report status 0, never null (ENOBUFS)");
+  assert.equal(res.stdout.length, byteCount, "the full output must come back — not truncated, not swallowed");
+});
+
 test("typecheckStep catches a throwing spawn and reports its OWN failure rather than aborting the run", () => {
   const spawn: PreflightSpawn = () => {
     throw new Error("EACCES: tsc is not executable");

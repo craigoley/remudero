@@ -250,15 +250,43 @@ export type PreflightSpawn = (
   file: string,
   args: string[],
   opts?: { cwd?: string; input?: string },
-) => { status: number | null; stdout: string; stderr: string };
+) => {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+  /** Set only when the child never produced an exit status at all (killed by a signal, a
+   *  buffer ceiling hit, ENOENT, ...) — i.e. exactly when `status` is `null`. A caller must
+   *  treat this as a distinct "the spawn itself failed" outcome, never as an ordinary nonzero
+   *  exit whose output happens to be empty. */
+  error?: string;
+};
+
+// `npm run test:ci` alone currently writes ~1.7MB of TAP output to stdout (no --test-reporter
+// override, so node --test's default verbose writer). `spawnSync`'s default `maxBuffer` is
+// Node's own default of 1MB, so that command — and any other step whose output grows past 1MB —
+// was killed for exceeding it: `status` came back `null` (ENOBUFS), which every caller in this
+// file and lib/ci-parity.ts reads as a bare, unexplained FAIL. 64MB is a CEILING against runaway
+// output, not a target: comfortably clear of today's ~1.7MB with a lot of room for the suite to
+// keep growing, while still catching a genuinely stuck/looping child.
+const PREFLIGHT_SPAWN_MAX_BUFFER = 64 * 1024 * 1024;
 
 export function defaultPreflightSpawn(
   file: string,
   args: string[],
   opts: { cwd?: string; input?: string } = {},
-): { status: number | null; stdout: string; stderr: string } {
-  const res = spawnSync(file, args, { cwd: opts.cwd, input: opts.input, encoding: "utf8" });
-  return { status: res.status, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
+): { status: number | null; stdout: string; stderr: string; error?: string } {
+  const res = spawnSync(file, args, {
+    cwd: opts.cwd,
+    input: opts.input,
+    encoding: "utf8",
+    maxBuffer: PREFLIGHT_SPAWN_MAX_BUFFER,
+  });
+  return {
+    status: res.status,
+    stdout: res.stdout ?? "",
+    stderr: res.stderr ?? "",
+    error: res.error ? res.error.message : undefined,
+  };
 }
 
 /** One preflight step's outcome — named in BOTH directions (fixture 3: a failure legible
