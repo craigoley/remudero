@@ -1,0 +1,93 @@
+- id: W1-T380
+  title: "a DRY-RUN deploy clears the persisted 30-minute ceiling clock without ever kickstarting, so the bound that guarantees a merged change lands disarms itself and the fleet keeps running stale code — clear the clock only when a cycle actually restarts"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: "OBSERVED END-TO-END IN PRODUCTION 2026-08-05, not reasoned about. `runDeployCycle`
+    (deployer.ts) calls `deps.clearDeferredSince?.()` — under the comment 'Either genuinely idle or
+    the ceiling carried it — the deferral episode is over either way' — and only THEN checks
+    `if (opts.dryRun)`, whose branch logs `deploy.dry_run` and RETURNS before `deps.kickstart()` is
+    ever reached. So a dry-run cycle that wins the race to the ceiling ends the deferral episode
+    while restarting nothing.
+    THE LIVE SEQUENCE, five rows, one second apart:
+      22:43:42.457  deploy.idle_ceiling_forced  phase=pre-pull       waited_ms=1843684 >= 1800000
+      22:43:42.481  deploy.pulled               from 3d8ddc806 to 3d8ddc806
+      22:43:42.504  deploy.idle_ceiling_forced  phase=pre-kickstart  waited_ms=1843732
+      22:43:42.505  deploy.dry_run              would_kickstart=true to=3d8ddc806
+      22:43:58.633  deploy.not_idle             waited_ms=0          <- clock reset, nothing restarted
+    THE CEILING WORKED PERFECTLY AND STILL DELIVERED NOTHING. W1-T341 built it precisely so a merged
+    change lands 'even if the fleet is never fully quiet, at the cost of a forced restart'. It waited
+    30.7 minutes, refused to starve, carried the deploy through — and the dry-run branch threw the
+    result away while consuming the entitlement that would have forced the next one.
+    THE COST WAS REAL AND MEASURED. A change merged at 22:11Z had still not reached the running
+    daemon 39 minutes later; the daemon held its boot sha across the entire window while a SECOND
+    deferral episode climbed from zero (1.2m at 22:45, 8.2m at 22:53). That is a starvation LOOP,
+    not a bounded wait: each ceiling a dry-run consumes buys another 30 minutes of staleness.
+    THE FAILURE IS INVISIBLE FROM THE OUTSIDE. `deploy.dry_run` carries `would_kickstart: true`, which
+    reads like success; the daemon simply keeps running old code and no row says the delivery was
+    dropped."
+  design: |
+    THE FIX IS AN ORDERING CONSTRAINT, AND IT MUST BE STATED AS ONE.
+    (i) A DEFERRAL EPISODE IS ENDED ONLY BY A CYCLE THAT ACTUALLY RESTARTS. Move
+    `deps.clearDeferredSince?.()` BELOW the `if (opts.dryRun)` branch so the dry-run path returns
+    with the persisted clock INTACT, and the next real cycle inherits the accumulated wait rather
+    than starting from zero. The two earlier `clearDeferredSince` call sites — 'nothing being
+    deferred, no active deploy attempt' and 'blocked by the tree, not the idle gate' — are CORRECT
+    and must not move: neither is a deferral the ceiling is counting.
+    (ii) PRESERVE THE EXISTING PULL BEHAVIOUR. A dry-run already pulls before this point
+    (`deploy.pulled` fires in the observed sequence), and that is deliberate — deployer.ts's own
+    reasoning is that 'the pull is already safe and inert; only the RESTART is dangerous'. This task
+    changes WHEN THE CLOCK IS CLEARED, nothing about pulling, and must not turn a dry-run into a
+    no-op that also skips the pull.
+    (iii) THE ADJACENT PATH IS ALREADY RIGHT, AND IS THE MODEL TO COPY. The
+    `not-idle-at-kickstart — pulled, restart deferred` return sits ABOVE the clear and carries
+    `pulledPendingRestart: true`; it correctly leaves the clock running. Dry-run should behave the
+    same way, for the same reason.
+    (iv) FALSIFIER, BOTH DIRECTIONS, AND ONE WITHOUT THE OTHER IS NOT EVIDENCE. A dry-run cycle at or
+    past the ceiling must leave `deployIdleDeferredSincePath`'s persisted value UNCHANGED — assert
+    the stored timestamp is byte-identical before and after, not merely that the function was not
+    called. A REAL cycle that reaches `deps.kickstart()` must still clear it, or the fix trades a
+    starvation loop for a clock that never resets and forces a deploy every cycle forever.
+    (v) THE ROW SHOULD SAY WHAT HAPPENED. `deploy.dry_run` logging `would_kickstart: true` reads as
+    success while a delivery was dropped. Carry the retained wait on the row (the deferred-since
+    value it did NOT clear) so a reader can see the episode is still open.
+    NOT IN SCOPE, and deliberately: WHICH PROCESS ran `deploy-run --dry-run` at 22:43:42. The
+    launchd supervisor (`com.remudero.supervisor`, StartInterval 120) passes NO `--dry-run` — the
+    plist file and `launchctl print` of the LOADED job agree — its own log contains no dry-run line,
+    and its cycles report `DEPLOYED: deployed + healthy`. `runDeployCycle` has exactly one caller in
+    src/ (`deployRunCommand`). The caller was NOT identified and guessing at one would be worse than
+    naming the gap; file it separately if it recurs. THE ORDERING DEFECT IS REAL AND WORTH FIXING
+    WHOEVER THE CALLER IS — a dry-run must never be able to consume a real deploy's entitlement.
+    ALSO NOT IN SCOPE: the ceiling's VALUE (1800000), `daemonIsIdle`'s conjunction, and the separate
+    finding that quiet windows have become rare at dispatchLanes >= 2.
+  acceptance:
+    - claim: "a dry-run cycle at or past the idle ceiling leaves the persisted deferred-since value byte-identical, so the next real cycle inherits the accumulated wait"
+      proof: "unit test: test/deployer.test.ts"
+    - claim: "a real cycle that reaches the kickstart still clears the persisted deferred-since value, so the clock cannot become one that never resets"
+      proof: "unit test: test/deployer.test.ts"
+    - claim: "the dry-run ledger row carries the wait it retained, so a dropped delivery does not read as success"
+      proof: "unit test: test/deployer.test.ts"
+  risk: high
+  origin: oper#n3-watch-2026-08-05
+  plan_refs: ["§4B", "W1-T341"]
+  files: [src/lib/deployer.ts, test/deployer.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — the whole thing asserts in-process against an injected DeployDeps with a fake
+    clock and a temp state root; `runDeployCycle` is already fully seam-injected and
+    test/deployer.test.ts already covers the idle gate and the ceiling.
+    risk:high — NOT Rule 19 span this time: it is two files and one concern. The band is BLAST
+    RADIUS. This is the code path that decides whether a merged change ever reaches the running
+    fleet, and the failure directions are both bad and both quiet — leave the clear too early and
+    deliveries keep being dropped invisibly; move it too far and the clock never resets, forcing a
+    SIGKILL restart every cycle into `reconstructOrphan`, a path never exercised in production. That
+    is why criterion 2 exists and why the falsifier is specified in both directions.
+    budget_usd 45 — the edit is a few lines; the cost is the two-direction falsifier against the
+    PERSISTED value (not a spy on the function) plus reading the three `clearDeferredSince` call
+    sites carefully enough to move exactly one.
+    WHY THIS OUTRANKS THE LANE QUESTION IT WAS FOUND UNDER: the N=3 experiment could not run because
+    its own flip could not be delivered. A fleet that cannot deploy itself cannot be measured, and
+    every future timing conclusion rests on this path working."
