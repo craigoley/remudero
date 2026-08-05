@@ -1,5 +1,5 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 
@@ -112,11 +112,24 @@ export interface PolicyFieldOrigin {
   raw: string;
 }
 
+/** One numeric field's committed `[min, max]`, as recorded on load. */
+export interface PolicyFieldBounds {
+  min: number;
+  max: number;
+}
+
 /** The fully loaded/validated policy: plain values plus per-field provenance. */
 export interface Policy {
   values: PolicyValues;
   /** Dotted field path -> its recorded origin. */
   origin: Record<string, PolicyFieldOrigin>;
+  /**
+   * Dotted field path -> its committed `min`/`max` bounds, for every bounded numeric field.
+   * A CONSUMER (W1-T332's `state/`-resident daily-cost-ceiling override, currently the only
+   * one) validates a runtime write against THESE, never a second, hand-copied `{min, max}` —
+   * the committed row in `plan/policy.yaml` stays the one schema.
+   */
+  bounds: Record<string, PolicyFieldBounds>;
 }
 
 export class PolicyError extends Error {
@@ -197,11 +210,15 @@ export function parseOrigin(path: string, raw: unknown): PolicyFieldOrigin {
   return { path, kind, raw };
 }
 
-/** Read+validate one bounded numeric field's `{value, origin, min, max}` row. */
+/** Read+validate one bounded numeric field's `{value, origin, min, max}` row. `bounds`, when
+ *  passed, records the row's validated `[min, max]` under `path` — the projection {@link Policy}
+ *  carries forward so a runtime write (the override store) reads the committed bound from here
+ *  rather than a second, hand-copied literal. */
 function numberField(
   path: string,
   raw: unknown,
   origins: Record<string, PolicyFieldOrigin>,
+  bounds?: Record<string, PolicyFieldBounds>,
 ): number {
   if (!isPlainObject(raw)) {
     throw new PolicyError(`policy.yaml: '${path}' must be a mapping with 'value'/'origin'/'min'/'max'.`);
@@ -232,6 +249,7 @@ function numberField(
     );
   }
   origins[path] = parseOrigin(path, origin);
+  if (bounds) bounds[path] = { min, max };
   return value;
 }
 
@@ -305,6 +323,10 @@ export function validatePolicy(raw: unknown): Policy {
   if (!isPlainObject(raw)) throw new PolicyError("policy.yaml must be a mapping.");
 
   const origin: Record<string, PolicyFieldOrigin> = {};
+  // Populated ONLY for `sweep.dailyCostCeilingUsd` today (the one field a runtime consumer,
+  // W1-T332's override store, validates a write against) — see numberField's/Policy.bounds's
+  // doc for why this is a projection of the committed row, not a second copy of it.
+  const bounds: Record<string, PolicyFieldBounds> = {};
 
   const proofTimeoutMs = numberField("proofTimeoutMs", raw.proofTimeoutMs, origin);
   const pruneGraceMs = numberField("pruneGraceMs", raw.pruneGraceMs, origin);
@@ -318,7 +340,7 @@ export function validatePolicy(raw: unknown): Policy {
   const wipLimit = numberField("sweep.wipLimit", sweepRaw.wipLimit, origin);
   const tmpMaxAgeMs = numberField("sweep.tmpMaxAgeMs", sweepRaw.tmpMaxAgeMs, origin);
   const dispatchLanes = numberField("sweep.dispatchLanes", sweepRaw.dispatchLanes, origin);
-  const dailyCostCeilingUsd = numberField("sweep.dailyCostCeilingUsd", sweepRaw.dailyCostCeilingUsd, origin);
+  const dailyCostCeilingUsd = numberField("sweep.dailyCostCeilingUsd", sweepRaw.dailyCostCeilingUsd, origin, bounds);
 
   const drainRaw = raw.drain;
   if (!isPlainObject(drainRaw)) throw new PolicyError("policy.yaml: 'drain' must be a mapping.");
@@ -374,6 +396,7 @@ export function validatePolicy(raw: unknown): Policy {
       scratchReap: { enabled: scratchReapEnabled, maxAgeHours: scratchReapMaxAgeHours },
     },
     origin,
+    bounds,
   };
 }
 
@@ -421,4 +444,179 @@ let cachedDefaultPolicy: Policy | undefined;
 export function loadDefaultPolicy(): Policy {
   if (!cachedDefaultPolicy) cachedDefaultPolicy = loadPolicy(installPolicyPath());
   return cachedDefaultPolicy;
+}
+
+// ── DAILY-COST-CEILING OVERRIDE STORE (W1-T332) ─────────────────────────────────────────────
+//
+// OPERATOR RULING 2026-08-04: a runtime-tunable value belongs in a store the console can write
+// at runtime, not in `plan/policy.yaml` behind a PR and a deploy — a console write TO the
+// committed file must commit to survive, which reintroduces the PR the ruling removes, and an
+// UNCOMMITTED edit is actively destroyed by the deploy's `pull --ff-only` (it happened this
+// week, and took an operator kill switch with it).
+//
+// THE PRECEDENT: `fleet-control.ts`'s `state/PAUSE` — a flag file under `<root>/state/`,
+// outside git (`.gitignore` carries `state/`), surviving every `pull --ff-only`. This reuses
+// that exact mechanism for one value: the daily cost ceiling.
+//
+// ONE VALUE, ONE STORE, ONE PRECEDENCE RULE: an override under `state/` wins; its ABSENCE means
+// the committed `plan/policy.yaml` default — no merging, no partial objects. Bounds are never
+// duplicated: a write is validated against `policy.bounds["sweep.dailyCostCeilingUsd"]`, the
+// SAME committed row `validatePolicy` already parsed, never a second hand-copied `{min, max}`.
+// A malformed/unreadable override (bad JSON, missing/non-numeric `usd`, or a value the
+// committed row no longer bounds — the row itself can change bound on a later PR) FALLS BACK to
+// the committed default and REPORTS why, via {@link EffectiveDailyCostCeiling.fallback} — never
+// silently read as zero, unbounded, or absent-and-fine.
+//
+// THE DISAPPEARANCE CASE (design note v): `state/` is deliberately outside git, so a wiped
+// state root reverts every override to its committed default with NO error and NO missing-file
+// surprise — that is by design (absence IS the "at default" case). But it means "at default
+// because never overridden" and "at default because a real override just vanished" are NOT
+// representable by THIS store alone — both read back identically here, `provenance: "default"`
+// with no `fallback`. Distinguishing them is deliberately W1-T333's job: THE LEDGER, not this
+// file, is where "was this ever overridden" survives a `state/` wipe, because `state/` is
+// exactly the thing that can disappear.
+
+/** One provenance-carrying read of the daily cost ceiling — see this section's header. */
+export type DailyCostCeilingProvenance = "overridden" | "default";
+
+/** Why a stored override was not used; present only when one existed but was refused. */
+export interface DailyCostCeilingFallback {
+  reason: string;
+}
+
+/** The daily cost ceiling as a live reader should use it: never the bare number. */
+export interface EffectiveDailyCostCeiling {
+  usd: number;
+  provenance: DailyCostCeilingProvenance;
+  /** `policy.values.sweep.dailyCostCeilingUsd` — carried alongside so an overridden reading
+   *  shows both the effective figure and what it was overridden FROM. */
+  committedDefaultUsd: number;
+  /** Set only when an on-disk override existed but was malformed/unreadable/out of bound —
+   *  `usd`/`provenance` above already fell back to the committed default when this is set. */
+  fallback?: DailyCostCeilingFallback;
+}
+
+/** One written override, as persisted under `state/`. */
+export interface DailyCostCeilingOverrideRecord {
+  usd: number;
+  setAt: string;
+}
+
+/** `state/PAUSE`-shaped in location and lifetime (fleet-control.ts) — outside git, survives
+ *  every `pull --ff-only`. Carries the daily cost ceiling ONLY (design note (i)): this is not
+ *  a general key-value store. */
+export function dailyCostCeilingOverridePath(root: string): string {
+  return join(root, "state", "DAILY_COST_CEILING_OVERRIDE");
+}
+
+/**
+ * Write the `state/`-resident override. Validated against `policy.bounds`'s committed
+ * `sweep.dailyCostCeilingUsd` row — an out-of-bound (or non-finite) value is REFUSED here,
+ * at write time, throwing {@link PolicyError} and performing NO write, rather than being
+ * clamped, accepted, or left to fail later at read time (design note (iii)).
+ */
+export function writeDailyCostCeilingOverride(root: string, usd: number, policy: Policy): DailyCostCeilingOverrideRecord {
+  if (typeof usd !== "number" || !Number.isFinite(usd)) {
+    throw new PolicyError(`daily cost ceiling override must be a finite number, got ${JSON.stringify(usd)}.`);
+  }
+  const bound = policy.bounds["sweep.dailyCostCeilingUsd"];
+  if (!bound) {
+    throw new PolicyError(
+      "daily cost ceiling override: policy carries no 'sweep.dailyCostCeilingUsd' bound to validate against " +
+        "(is this a Policy from validatePolicy(), not a hand-built object?).",
+    );
+  }
+  if (usd < bound.min || usd > bound.max) {
+    throw new PolicyError(
+      `daily cost ceiling override ${usd} is out of the committed plan/policy.yaml bound ` +
+        `[${bound.min}, ${bound.max}] — refused at write time, never clamped or accepted.`,
+    );
+  }
+  const record: DailyCostCeilingOverrideRecord = { usd, setAt: new Date().toISOString() };
+  const path = dailyCostCeilingOverridePath(root);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify(record, null, 2));
+  return record;
+}
+
+/** Clear a written override (revert to the committed default). Idempotent — clearing an
+ *  already-absent override is not an error, mirroring fleet-control.ts's `clearFlag`. */
+export function clearDailyCostCeilingOverride(root: string): boolean {
+  const path = dailyCostCeilingOverridePath(root);
+  if (!existsSync(path)) return false;
+  try {
+    unlinkSync(path);
+    return true;
+  } catch {
+    return false; // another actor cleared it concurrently — treat as already-clear
+  }
+}
+
+/**
+ * Resolve the EFFECTIVE daily cost ceiling: the `state/` override if one exists, is
+ * well-formed, and is within the committed row's CURRENT bound; the committed
+ * `plan/policy.yaml` default otherwise. This is the one function a live reader (the daemon's
+ * per-tick reload, W1-T331; the console render, W1-T333) should call — never a raw read of
+ * the override file, so the fallback-and-report and provenance rules above cannot be bypassed.
+ */
+export function resolveDailyCostCeiling(root: string, policy: Policy): EffectiveDailyCostCeiling {
+  const committedDefaultUsd = policy.values.sweep.dailyCostCeilingUsd;
+  const path = dailyCostCeilingOverridePath(root);
+
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      // No override was ever written (or one was written and the state/ root vanished) — the
+      // ABSENCE case (design note ii): reads as the committed default, no fallback report,
+      // because absence is not a malformed override — it is the precedence rule's other arm.
+      return { usd: committedDefaultUsd, provenance: "default", committedDefaultUsd };
+    }
+    return {
+      usd: committedDefaultUsd,
+      provenance: "default",
+      committedDefaultUsd,
+      fallback: { reason: `override file at ${path} could not be read (${code ?? String(err)}) — falling back to the committed default` },
+    };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    return {
+      usd: committedDefaultUsd,
+      provenance: "default",
+      committedDefaultUsd,
+      fallback: { reason: `override file at ${path} is not valid JSON (${String(err)}) — falling back to the committed default` },
+    };
+  }
+
+  const usd = isPlainObject(parsed) ? parsed.usd : undefined;
+  if (typeof usd !== "number" || !Number.isFinite(usd)) {
+    return {
+      usd: committedDefaultUsd,
+      provenance: "default",
+      committedDefaultUsd,
+      fallback: {
+        reason: `override file at ${path} is malformed — 'usd' must be a finite number, got ${JSON.stringify(usd)} — falling back to the committed default`,
+      },
+    };
+  }
+
+  const bound = policy.bounds["sweep.dailyCostCeilingUsd"];
+  if (bound && (usd < bound.min || usd > bound.max)) {
+    return {
+      usd: committedDefaultUsd,
+      provenance: "default",
+      committedDefaultUsd,
+      fallback: {
+        reason: `override ${usd} at ${path} is out of the committed bound [${bound.min}, ${bound.max}] — falling back to the committed default`,
+      },
+    };
+  }
+
+  return { usd, provenance: "overridden", committedDefaultUsd };
 }

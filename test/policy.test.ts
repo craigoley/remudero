@@ -5,11 +5,15 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import {
+  clearDailyCostCeilingOverride,
+  dailyCostCeilingOverridePath,
   loadPolicy,
   parseOrigin,
   policyPath,
   PolicyError,
+  resolveDailyCostCeiling,
   validatePolicy,
+  writeDailyCostCeilingOverride,
   type Policy,
 } from "../src/lib/policy.js";
 import { lintPlanCommand } from "../src/run-task.js";
@@ -595,4 +599,248 @@ test("loadPolicy REJECTS a file that is not valid YAML, naming the path", () => 
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── W1-T332: the state/-resident daily-cost-ceiling override store ─────────────────────────
+//
+// A fresh `<root>/state/` per test (mkdtempSync), never the real repo's `state/` — that
+// directory is fleet-control's live PAUSE/STOP surface and must never be touched by a test.
+// `SHIPPED_POLICY` supplies the real committed row (`sweep.dailyCostCeilingUsd`: min 100,
+// max 2500) so bound checks below exercise the ACTUAL committed bound, not a fixture's.
+
+const SHIPPED_POLICY: Policy = loadPolicy(SHIPPED);
+
+function overrideRoot(): string {
+  return mkdtempSync(join(REPO_ROOT, "test", ".tmp-w1-t332-override-"));
+}
+
+// acceptance 1 — override wins; absence yields the committed default; one rule, no merging.
+
+test("W1-T332 acceptance 1 — a written override takes precedence over the committed default", () => {
+  const root = overrideRoot();
+  try {
+    writeDailyCostCeilingOverride(root, 1_200, SHIPPED_POLICY);
+    const effective = resolveDailyCostCeiling(root, SHIPPED_POLICY);
+    assert.equal(effective.usd, 1_200);
+    assert.equal(effective.committedDefaultUsd, SHIPPED_POLICY.values.sweep.dailyCostCeilingUsd);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T332 acceptance 1 — no override file at all yields the committed default, not a merge/partial value", () => {
+  const root = overrideRoot();
+  try {
+    assert.equal(existsOverride(root), false);
+    const effective = resolveDailyCostCeiling(root, SHIPPED_POLICY);
+    assert.equal(effective.usd, SHIPPED_POLICY.values.sweep.dailyCostCeilingUsd);
+    assert.equal(effective.usd, effective.committedDefaultUsd);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T332 acceptance 1 — clearing a written override reverts resolution to the committed default", () => {
+  const root = overrideRoot();
+  try {
+    writeDailyCostCeilingOverride(root, 900, SHIPPED_POLICY);
+    assert.equal(resolveDailyCostCeiling(root, SHIPPED_POLICY).usd, 900);
+    assert.equal(clearDailyCostCeilingOverride(root), true);
+    assert.equal(resolveDailyCostCeiling(root, SHIPPED_POLICY).usd, SHIPPED_POLICY.values.sweep.dailyCostCeilingUsd);
+    assert.equal(clearDailyCostCeilingOverride(root), false, "clearing an absent override is idempotent, not an error");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function existsOverride(root: string): boolean {
+  try {
+    readFileSync(dailyCostCeilingOverridePath(root), "utf8");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// acceptance 2 — an out-of-bound write is REFUSED at write time (never clamped/accepted), and
+// the bound consulted is the committed row's own (`policy.bounds`), not a second copy.
+
+test("W1-T332 acceptance 2 — REJECTS a write above the committed row's max, performing no write", () => {
+  const root = overrideRoot();
+  try {
+    assert.throws(
+      () => writeDailyCostCeilingOverride(root, 99_999, SHIPPED_POLICY),
+      (e: unknown) => e instanceof PolicyError && /out of the committed plan\/policy\.yaml bound/.test((e as Error).message),
+    );
+    assert.equal(existsOverride(root), false, "a refused write must leave no file behind");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T332 acceptance 2 — REJECTS a write below the committed row's min, performing no write", () => {
+  const root = overrideRoot();
+  try {
+    assert.throws(
+      () => writeDailyCostCeilingOverride(root, 1, SHIPPED_POLICY),
+      (e: unknown) => e instanceof PolicyError && /out of the committed plan\/policy\.yaml bound/.test((e as Error).message),
+    );
+    assert.equal(existsOverride(root), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T332 acceptance 2 — the bound enforced is the LIVE committed row, not a hardcoded copy: a fixture policy with a tighter bound refuses a value the shipped policy would accept", () => {
+  const root = overrideRoot();
+  const raw = goodRaw();
+  (raw.sweep as Record<string, Record<string, unknown>>).dailyCostCeilingUsd = {
+    value: 300, origin: "lifted:src/lib/sweep.ts:365 (DEFAULT_SWEEP_POLICY.dailyCostCeilingUsd)", min: 100, max: 300,
+  };
+  const tighterPolicy = validatePolicy(raw);
+  try {
+    // 1200 is within the SHIPPED bound [100, 2500] but outside this fixture's [100, 300] —
+    // proving the check reads whichever Policy's bounds it is handed, never a fixed literal.
+    assert.throws(() => writeDailyCostCeilingOverride(root, 1_200, tighterPolicy), PolicyError);
+    assert.doesNotThrow(() => writeDailyCostCeilingOverride(root, 1_200, SHIPPED_POLICY));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T332 acceptance 2 — REJECTS a non-finite override value at write time", () => {
+  const root = overrideRoot();
+  try {
+    assert.throws(() => writeDailyCostCeilingOverride(root, NaN, SHIPPED_POLICY), PolicyError);
+    assert.throws(() => writeDailyCostCeilingOverride(root, Infinity, SHIPPED_POLICY), PolicyError);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T332 — writeDailyCostCeilingOverride REJECTS a hand-built Policy carrying no 'sweep.dailyCostCeilingUsd' bound (the defensive guard, distinct from an out-of-range value)", () => {
+  const root = overrideRoot();
+  const handBuiltPolicy: Policy = { ...SHIPPED_POLICY, bounds: {} };
+  try {
+    assert.throws(
+      () => writeDailyCostCeilingOverride(root, 1_000, handBuiltPolicy),
+      (e: unknown) => e instanceof PolicyError && /policy carries no 'sweep\.dailyCostCeilingUsd' bound/.test((e as Error).message),
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T332 — clearDailyCostCeilingOverride returns false (not throw) when the path exists but cannot be unlinked (e.g. a directory occupies it)", () => {
+  const root = overrideRoot();
+  try {
+    const path = dailyCostCeilingOverridePath(root);
+    mkdirSync(path, { recursive: true }); // unlinkSync on a directory refuses (EPERM/EISDIR), unlike a plain file
+    assert.equal(clearDailyCostCeilingOverride(root), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// acceptance 3 — a malformed or unreadable override falls back to the committed default and
+// REPORTS why, never as zero or unbounded.
+
+test("W1-T332 acceptance 3 — malformed JSON in the override file falls back to the committed default and reports it", () => {
+  const root = overrideRoot();
+  try {
+    const path = dailyCostCeilingOverridePath(root);
+    mkdirSync(join(root, "state"), { recursive: true });
+    writeFileSync(path, "{ not valid json", "utf8");
+    const effective = resolveDailyCostCeiling(root, SHIPPED_POLICY);
+    assert.equal(effective.usd, SHIPPED_POLICY.values.sweep.dailyCostCeilingUsd);
+    assert.equal(effective.provenance, "default");
+    assert.ok(effective.fallback, "a malformed override must set a fallback report");
+    assert.match(effective.fallback!.reason, /not valid JSON/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T332 acceptance 3 — an override file missing/non-numeric 'usd' falls back and reports, never reading as zero", () => {
+  const root = overrideRoot();
+  try {
+    const path = dailyCostCeilingOverridePath(root);
+    mkdirSync(join(root, "state"), { recursive: true });
+    writeFileSync(path, JSON.stringify({ usd: "not-a-number" }), "utf8");
+    const effective = resolveDailyCostCeiling(root, SHIPPED_POLICY);
+    assert.equal(effective.usd, SHIPPED_POLICY.values.sweep.dailyCostCeilingUsd);
+    assert.notEqual(effective.usd, 0);
+    assert.equal(effective.provenance, "default");
+    assert.match(effective.fallback!.reason, /malformed/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T332 acceptance 3 — an override whose value falls outside the CURRENT committed bound (e.g. the plan/policy.yaml row tightened since it was written) falls back and reports, never reading as unbounded", () => {
+  const root = overrideRoot();
+  try {
+    writeDailyCostCeilingOverride(root, 2_000, SHIPPED_POLICY);
+    // Simulate the committed row tightening below the previously-written override.
+    const raw = goodRaw();
+    (raw.sweep as Record<string, Record<string, unknown>>).dailyCostCeilingUsd = {
+      value: 300, origin: "lifted:src/lib/sweep.ts:365 (DEFAULT_SWEEP_POLICY.dailyCostCeilingUsd)", min: 100, max: 300,
+    };
+    const tightenedPolicy = validatePolicy(raw);
+    const effective = resolveDailyCostCeiling(root, tightenedPolicy);
+    assert.equal(effective.usd, tightenedPolicy.values.sweep.dailyCostCeilingUsd);
+    assert.equal(effective.provenance, "default");
+    assert.match(effective.fallback!.reason, /out of the committed bound/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T332 acceptance 3 — an override file that cannot be read at all (e.g. a directory in its place) falls back and reports, distinct from ordinary absence", () => {
+  const root = overrideRoot();
+  try {
+    const path = dailyCostCeilingOverridePath(root);
+    mkdirSync(path, { recursive: true }); // a directory, not a file — readFileSync fails EISDIR
+    const effective = resolveDailyCostCeiling(root, SHIPPED_POLICY);
+    assert.equal(effective.usd, SHIPPED_POLICY.values.sweep.dailyCostCeilingUsd);
+    assert.equal(effective.provenance, "default");
+    assert.ok(effective.fallback, "an unreadable (not merely absent) override must report a fallback");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// acceptance 4 — the effective value carries its provenance: "at default" is distinguishable
+// from "overridden", and ordinary absence carries NO fallback report (it is not a malformed
+// case — see the precedence rule in acceptance 1).
+
+test("W1-T332 acceptance 4 — provenance is 'default' with no fallback when nothing was ever written", () => {
+  const root = overrideRoot();
+  try {
+    const effective = resolveDailyCostCeiling(root, SHIPPED_POLICY);
+    assert.equal(effective.provenance, "default");
+    assert.equal(effective.fallback, undefined, "ordinary absence is not a fallback case");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T332 acceptance 4 — provenance is 'overridden' when a valid override is in effect, distinguishable from 'default'", () => {
+  const root = overrideRoot();
+  try {
+    writeDailyCostCeilingOverride(root, 1_000, SHIPPED_POLICY);
+    const overridden = resolveDailyCostCeiling(root, SHIPPED_POLICY);
+    assert.equal(overridden.provenance, "overridden");
+    clearDailyCostCeilingOverride(root);
+    const atDefault = resolveDailyCostCeiling(root, SHIPPED_POLICY);
+    assert.equal(atDefault.provenance, "default");
+    assert.notEqual(overridden.provenance, atDefault.provenance);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T332 — the override path is state/-resident, matching fleet-control.ts's <root>/state/ location", () => {
+  const root = "/tmp/does-not-need-to-exist-for-this-check";
+  assert.equal(dailyCostCeilingOverridePath(root), join(root, "state", "DAILY_COST_CEILING_OVERRIDE"));
 });
