@@ -1,0 +1,39 @@
+id: fb-1785958099820-862db0
+ts: 2026-08-05T19:28:19.820Z
+raw: "NOW'S LIVENESS DISJUNCT IS ORDERED SO THE PID PROBE NEVER RUNS FOR AN
+  OPEN-PR RUN — from state/recon-now-ci-polling.md. The headline is good news: a
+  ci.polling run renders running honestly and cannot flip to orphaned, because
+  three disjuncts each suffice and the first two read GitHub and the lock file
+  rather than the ledger, so neither can be starved by retention. Measured:
+  2,188 poll rows across 431 runs (control 688 run.start, 0 fabricated), poll
+  span median 2.2m, p90 11.8m, max 335.7m; 12 of 431 runs and 8 individual gaps
+  exceed the 30-minute liveness bound, longest ~2h. The bound WOULD fire on a
+  healthy long wait if it were the only test — it never does, because hasOpenPr
+  reaches it first. THE ORDERING IS THE FINDING: hasOpenPr sits FIRST in the OR,
+  so a run whose PROCESS HAS DIED renders running for as long as its PR stays
+  open, and hasLiveLock — the disjunct built by PR #1341 (commit cf5ed1c)
+  precisely to refuse a dead pid — is never consulted for that population. 427
+  runs reach pr.opened; 75 have no verdict; 74 of those reached ci.polling. So
+  the false-live risk is concentrated exactly where the ordering makes the pid
+  probe unreachable. Today's exposure is small and I am stating it accurately
+  rather than alarmingly: deriveStatus returns early on base.merged and only 2
+  PRs are open. This is a disjunct-ordering property, not a retention one, and
+  it is the same shape that once rendered W1-T314 as 'running, 10h25m, $27.75'
+  ten hours after its run was refused. A NAMING TRAP WORTH RECORDING: every
+  W1-T341 reference in src/ is in deployer.ts — that is the deploy-deferral
+  CEILING. The lock-liveness disjunct is PR #1341, a PR number colliding with an
+  unrelated TASK id. Both are real and merged, in different files, so anyone
+  grepping the task id finds only deployer.ts and concludes the disjunct does
+  not exist. Two sessions have now been misled by this. RECON: establish whether
+  evaluating hasLiveLock BEFORE hasOpenPr is safe, or whether the ordering is
+  deliberate — an open PR may be the cheaper read, or the intended authority. If
+  reordering is unsafe, say whether a dead-pid run with an open PR should render
+  differently from a live one at all. Falsifying check: if hasOpenPr is
+  genuinely authoritative — a run with an open PR is 'live' by definition
+  regardless of its process — then the ordering is correct and only the rendered
+  label is wrong."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null
