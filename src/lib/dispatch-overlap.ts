@@ -165,3 +165,48 @@ export function partitionByFileOverlap(candidates: readonly Task[]): OverlapPart
 export function serializedLedgerPayload(d: SerializedDeferral): Record<string, unknown> {
   return { task: d.task, blocked_by: d.blockedBy, reason: "file-overlap", paths: d.paths };
 }
+
+/**
+ * The `dispatch.settled_set` ledger payload — the SETTLED COUNTERPART to
+ * `dispatch.concurrent_set`.
+ *
+ * WHY THIS EXISTS. `dispatch.concurrent_set` records the set of lanes a pass STARTED
+ * (`{tasks, lane_count}`). Nothing records the set that CONCLUDED. At N >= 2 a lane that dies
+ * mid-pass is therefore detectable only as a set-difference someone must think to compute — the
+ * same shape as the blind sweep, where a missing `sweep.summary` took two undetected 22-minute
+ * episodes to find by hand. With this row, "dispatched 2, concluded 1 fulfilled and 1 rejected" is
+ * a LINE rather than an inference.
+ *
+ * COUNTS AND OUTCOMES, NOT A BARE PULSE. `Promise.allSettled` yields `fulfilled` or `rejected` per
+ * element, and that distinction is the whole signal: a pass that dispatched 2 and had one lane
+ * reject is a different event from one that dispatched 1 and it fulfilled, and only the per-task
+ * outcome separates them. Task ids are carried in the SAME positional order as `admitted`, which is
+ * the order `allSettled` preserves, so each id is paired with its own settlement.
+ *
+ * A PURE FORMATTER, for the reason {@link serializedLedgerPayload} above already states: the ledger
+ * shape gets exactly one definition instead of being re-derived at each call site. That matters more
+ * here than usual — there are TWO call sites, `runDrainLanes` (drain.ts) and `runDaemon`'s own lane
+ * path (daemon.ts), because W1-T343 MIRRORED the lane machinery rather than reusing it. Two
+ * hand-written payloads would drift, which is the duplicated-predicate defect this repo has paid for
+ * twice.
+ *
+ * CALLERS MUST EMIT THIS IMMEDIATELY AFTER `allSettled` RESOLVES, before classifying outcomes.
+ * `Promise.allSettled` itself never rejects, so a row written there is guaranteed reachable once
+ * dispatch happened; both call sites then run a classification loop with EARLY RETURNS (drain's
+ * `if (failure) return summary("error", ...)`, the daemon's fatal-error path), so a row emitted
+ * after that loop would be skipped in exactly the failure cases it exists to report.
+ */
+export function settledSetPayload(
+  admitted: ReadonlyArray<{ id: string }>,
+  settled: ReadonlyArray<PromiseSettledResult<unknown>>,
+  laneCount: number,
+): Record<string, unknown> {
+  const tasks = admitted.map((t, i) => ({ id: t.id, status: settled[i]?.status ?? "missing" }));
+  return {
+    tasks,
+    dispatched: admitted.length,
+    fulfilled: tasks.filter((t) => t.status === "fulfilled").length,
+    rejected: tasks.filter((t) => t.status === "rejected").length,
+    lane_count: laneCount,
+  };
+}
