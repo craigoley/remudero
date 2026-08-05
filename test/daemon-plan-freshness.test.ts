@@ -8,6 +8,7 @@ import { runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { type MergedSet } from "../src/lib/drain.js";
 import { planReloader } from "../src/run-task.js";
+import { reasonAboutBlock, INITIAL_RETRY_STATE } from "../src/lib/block-reason.js";
 
 // ── impl-FZ: the daemon's plan must reflect tasks filed during its lifetime ──────────────
 //
@@ -154,6 +155,135 @@ test("impl-FZ: a tick sees ONE consistent plan even if the file changes mid-tick
   assert.equal(observed[0], 1, "tick 1 saw only the 1-task plan it started with");
   assert.ok(observed[1] >= 4, "the mid-tick rewrite is visible only from the NEXT tick — no tick straddled two plans");
   p.cleanup();
+});
+
+// ── W1-T340: one plan snapshot per dispatch batch ─────────────────────────────────────
+//
+// `runDaemon` reloads the plan at most once per tick, at the TOP, before any dispatch decision.
+// Everything below that point in the tick — the kick check, `nextRunnable`'s selection,
+// `reasonAboutBlock`'s post-hoc judgment of whatever `runOne` returned — is now threaded through
+// ONE `const planForBatch`, captured immediately after the reload settles, rather than each
+// reading the mutable `plan` binding by name. `plan = fresh` reassigns that binding, not the Plan
+// object itself, so at N=1 (today: one lane, one dispatch per tick) this makes no observable
+// difference — nothing else in the tick body ever reassigns `plan`, so a bare read and a `const`
+// snapshot always resolve to the identical object. The distinction becomes load-bearing the moment
+// a batch holds more than one lane (W1-T343, out of scope here): a lane whose OWN later reasoning
+// closed over `plan` by name would be judged against whatever the MOST RECENT reload produced,
+// never necessarily the blob it was actually dispatched under.
+
+test("W1-T340: a task's own post-hoc block judgment is judged against the SAME plan it was dispatched under, even though a mid-tick rewrite is real and detectable", async () => {
+  // X has a genuine dependent, D, in the plan this tick dispatches from. `runOne` rewrites the
+  // plan ON DISK — dropping D's dependency on X — DURING its own execution, and the reloader below
+  // uses REAL content-hash change detection (mirrors `diskReloader` above), so that rewrite is not
+  // vacuous: a reload consulted AFTER it would genuinely see X as dependent-free. The daemon must
+  // still classify X as a GENUINE BLOCKER (dependents: ["D"]) — the value `reasonAboutBlock` is
+  // judged against is the batch's OWN captured snapshot, taken before `runOne` ran, never a later
+  // read of the (by-then-stale) live binding. This is exactly what "do not move the reload, do not
+  // add a read barrier" (W1-T340's design) rules out as the fix: the invariant must hold from the
+  // ORIGINAL top-of-tick reload alone.
+  const dir = mkdtempSync(join(tmpdir(), "w1t340-batch-"));
+  const file = join(dir, "tasks.yaml");
+  const withDependent =
+    "- id: X\n  title: x\n  repo: r\n  type: implement\n  depends_on: []\n  status: queued\n" +
+    "- id: D\n  title: d\n  repo: r\n  type: implement\n  depends_on: [X]\n  status: queued\n";
+  const withoutDependent =
+    "- id: X\n  title: x\n  repo: r\n  type: implement\n  depends_on: []\n  status: queued\n" +
+    "- id: D\n  title: d\n  repo: r\n  type: implement\n  depends_on: []\n  status: queued\n";
+  writeFileSync(file, withDependent);
+
+  let last = "";
+  const reloadPlan = (): Plan | null => {
+    const fresh = loadPlan(file);
+    const sig = JSON.stringify(fresh.tasks.map((t) => [t.id, t.depends_on]));
+    if (sig === last) return null;
+    last = sig;
+    return fresh;
+  };
+
+  const merged = new Set<string>();
+  let ticks = 0;
+  const s = await runDaemon(
+    loadPlan(file),
+    {
+      refreshMerged: () => (id: string) => merged.has(id),
+      checkStop: () => (++ticks > 3 ? "tick cap" : undefined),
+      reloadPlan,
+      runOne: async (id: string) => {
+        // THE MID-TICK REWRITE. Real, on-disk, and the reloader above would genuinely observe it
+        // — proven by the next test in this section, which drives the SAME reloader twice back to
+        // back and shows the second call really does return a fresh, dependent-free plan.
+        writeFileSync(file, withoutDependent);
+        return { taskId: id, runId: "r1", merged: false, costUsd: 0, verdict: "blocked" } as never;
+      },
+      sleep: async () => {},
+    } as unknown as DaemonDeps,
+    { max: 1 },
+  );
+  assert.equal(s.stopReason, "blocked", `expected a genuine-blocker halt, got ${JSON.stringify(s)}`);
+  assert.ok(
+    s.stopDetail?.includes("blocks D"),
+    `X must still be judged as blocking D — its OWN batch's snapshot, not the rewritten plan — got ${s.stopDetail}`,
+  );
+});
+
+test("W1-T340 FALSIFIER: reading a live/reloaded binding instead of the batch's own snapshot silently flips the verdict", () => {
+  // This is the "must fail against a mutable-binding implementation" proof the design note asks
+  // for, driven directly against an injected `reloadPlan` seam (disclosed per the design note's own
+  // allowance) rather than through `runDaemon` itself: today's loop is still N=1, one dispatch per
+  // tick, so it cannot by itself manifest two decisions straddling a reload — that hazard only
+  // becomes REACHABLE once a batch holds more than one lane (W1-T343). What IS provable today,
+  // without lanes, is the consequence: given the exact two plan blobs one lane's dispatch and a
+  // LATER, mid-batch reload would produce, judging that lane's own post-hoc reasoning against its
+  // OWN captured snapshot (the fix `runDaemon` now applies, `const planForBatch`) and against the
+  // live/reloaded value (the bug a bare `plan` read reproduces) must disagree — otherwise the
+  // snapshot buys nothing and this whole task is a no-op.
+  const dir = mkdtempSync(join(tmpdir(), "w1t340-seam-"));
+  const file = join(dir, "tasks.yaml");
+  const withDependent =
+    "- id: X\n  title: x\n  repo: r\n  type: implement\n  depends_on: []\n  status: queued\n" +
+    "- id: D\n  title: d\n  repo: r\n  type: implement\n  depends_on: [X]\n  status: queued\n";
+  writeFileSync(file, withDependent);
+
+  let last = "";
+  const reloadPlan = (): Plan | null => {
+    const fresh = loadPlan(file);
+    const sig = JSON.stringify(fresh.tasks.map((t) => [t.id, t.depends_on]));
+    if (sig === last) return null;
+    last = sig;
+    return fresh;
+  };
+
+  // Lane A's own batch snapshot — captured ONCE, at dispatch time, exactly as `const planForBatch`
+  // does in `runDaemon`.
+  const planForBatch = reloadPlan();
+  assert.ok(planForBatch, "the first reload is never null — it is this batch's boot plan");
+
+  // A reload "lands mid-batch": a sibling lane's own batch resolving (the N>1 case this task
+  // exists for), or — proven immediately above — the SAME rewrite `runOne` performs mid-tick,
+  // consulted a tick too early by a hypothetical "read barrier" implementation.
+  writeFileSync(
+    file,
+    "- id: X\n  title: x\n  repo: r\n  type: implement\n  depends_on: []\n  status: queued\n" +
+      "- id: D\n  title: d\n  repo: r\n  type: implement\n  depends_on: []\n  status: queued\n",
+  );
+  const liveBinding = reloadPlan();
+  assert.ok(liveBinding, "the mid-batch reload really did observe a change — not a vacuous rewrite");
+  assert.notEqual(liveBinding, planForBatch, "and it is a genuinely different Plan object");
+
+  const fixed = reasonAboutBlock(planForBatch!, "X", "blocked", INITIAL_RETRY_STATE);
+  assert.equal(
+    fixed.kind,
+    "genuine_blocker",
+    "judged against its OWN batch snapshot, X still names D as a dependent",
+  );
+
+  const buggy = reasonAboutBlock(liveBinding!, "X", "blocked", INITIAL_RETRY_STATE);
+  assert.equal(
+    buggy.kind,
+    "independent_failure",
+    "…and THIS is the silent divergence a mutable-binding (re-)read produces — proving the snapshot " +
+      "is load-bearing, not a no-op",
+  );
 });
 
 // ── the reloader's own change detection ───────────────────────────────────────────────
