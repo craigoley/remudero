@@ -296,6 +296,15 @@ export function gatePrewarmOnClients(
  * Fleet control (Pause/Resume/STOP/quiet-hours) and an auxiliary "more tools" panel (submit
  * feedback, plan→task→PR graph) follow below the five sections.
  *
+ * W1-T336: the priority order above is now expressed by WHICH TAB a section renders under
+ * (Decisions/Now/Plan/Feed), not by its position on one continuous scroll — NEEDS ME is
+ * Decisions' whole content; NOW/UP NEXT/Fleet control sit together under Now; RECENT/everything-
+ * else/the "more tools" panel sit together under Feed. See SECTION_TAB_OWNER (this shell's own
+ * script) for the exact table, and each section's own \`data-owner-tab\` attribute in the
+ * template for the concrete rendering of it — DOCUMENT ORDER stays exactly as listed above
+ * (test/serve.test.ts's own structural check polices it), ownership is expressed purely by that
+ * attribute, never by moving a section into a per-tab container.
+ *
  * SCOPE NOTE (W1-T110/W1-T111 split): a READY inbox proposal's "action" is the exact `rmd
  * approve`/`rmd reframe` command text, not a button — `approveProposal`/`reframeProposal`
  * (lib/inbox.ts) need a real git/gh `RatifyGateway`, and wiring that as a WRITE route is its
@@ -472,14 +481,14 @@ export function renderShellHtml(
     margin: 0.4rem 0 0; padding: 0.3rem 0.6rem; border-radius: 6px; font-size: 0.85rem; font-weight: 600;
     background: rgba(255, 107, 107, 0.14); color: var(--status-blocked); border: 1px solid var(--status-blocked);
   }
-  /* W1-T334: the four-tab console SCAFFOLD's tab bar -- pinned directly under the glance strip
-     (the header block, above), a plain role="tablist" of role="tab" buttons. Purely presentational
-     chrome for now: the bar governs no section's visibility (see the script's own note by
-     #console-tabs) except its own new, still-empty Plan panel. Sized like FIND's own .sort-header
-     buttons (line 601-ish), not the default toolbar button chrome -- W1-T183's own hard-won
-     lesson, recorded right above the .row rules, is that TOOLBAR CHROME (not row height) is what
-     determines how many rows clear the fold, so a new toolbar row here keeps that same compact
-     footprint rather than reintroducing the cost that lesson exists to avoid. */
+  /* W1-T336: the four-tab console bar -- pinned directly under the glance strip (the header
+     block, above), a plain role="tablist" of role="tab" buttons that is now AUTHORITATIVE: every
+     one of the nine \`[data-owner-tab]\` sections below is hidden by the script's own
+     applyActiveTab whenever its owner isn't the active tab (see SECTION_TAB_OWNER). Sized like
+     FIND's own .sort-header buttons (line 601-ish), not the default toolbar button chrome --
+     W1-T183's own hard-won lesson, recorded right above the .row rules, is that TOOLBAR CHROME
+     (not row height) is what determines how many rows clear the fold, so this toolbar row keeps
+     that same compact footprint rather than reintroducing the cost that lesson exists to avoid. */
   .console-tabs { display: flex; flex-wrap: wrap; gap: 0.25rem; margin: 0; }
   .tab-btn { font-size: 0.65rem; line-height: 1; padding: 0 0.35rem; border: none; }
   .tab-btn[aria-selected="true"] { background: var(--accent); color: #04101f; }
@@ -790,19 +799,29 @@ export function renderShellHtml(
   <div id="aria-announcer" class="sr-only" role="status" aria-live="polite"></div>
 </header>
 
-<!-- W1-T334: the four-tab console SCAFFOLD -- FIRST of three shards split out of W1-T314 (see
-     that task's rationale). ADD, REMOVE NOTHING: the full existing single-scroll stack below
-     (recap/now/needs-me/accepted/up-next/recent/rest/controls/more) keeps rendering exactly where
-     it does today, unhidden, unmoved, unfiltered -- this bar does not govern any of it yet. Binding
-     a section to a tab (filtering Decisions, the Now view, the cross-tab needs-me badge) is
-     W1-T336's job; this shard only introduces the seam. The GLANCE STRIP -- the whole pinned
-     header block closed just above (glance/daemon-health/account-usage/console-version, plus the
-     write-state/connection/staleness status line) -- stays OUTSIDE and ABOVE this bar, never
-     inside a tab: it is the cross-tab "is anything on fire" answer. Exactly four tabs, named
-     exactly Decisions/Now/Plan/Feed, none hidden when empty (W1-T314's "a missing tab reads as a
-     missing capability"). The one exception to "governs nothing": Plan gets its own panel below,
-     rendered as an honest "not built yet" (W1-T315 fills it in) using the SAME present-but-hidden
-     shape \`recap\` above already ships -- toggled by the script's applyActiveTab, never fetched. -->
+<!-- W1-T336: THE TABS ARE NOW AUTHORITATIVE -- third and last shard split out of W1-T314.
+     W1-T334 built this bar as a scaffold that governed nothing but its own (still-empty) Plan
+     panel; W1-T335 gave every serve suite a shared reachSection helper that tolerates either
+     shape. This shard is what makes the bar real: every one of the nine sections below carries
+     a \`data-owner-tab\` naming which tab governs it, and the script's own applyActiveTab hides
+     every section whose owner isn't the active tab -- never a second copy, never rebuilt, never
+     re-fetched. SECTION_TAB_OWNER (this shell's own script, near SECTION_IDS) is the single
+     table this markup is a rendering of.
+     DOCUMENT ORDER IS DELIBERATELY UNCHANGED from the pre-tab flat shell (still NOW, NEEDS ME,
+     ACCEPTED, UP NEXT, RECENT, rest, controls, more -- test/serve.test.ts's own structural check
+     polices this order and is NOT one of this task's own files to edit) -- ownership is
+     expressed by the attribute below, never by re-parenting a section into a per-tab container,
+     which is also why NOW and UP NEXT can sit on the SAME tab while NEEDS ME (a DIFFERENT tab)
+     still renders between them in the markup.
+     THE GLANCE STRIP -- the whole pinned header block closed just above (glance/daemon-health/
+     account-usage/console-version, plus the write-state/connection/staleness status line) --
+     stays OUTSIDE and ABOVE this bar, never inside a tab: it is the cross-tab "is anything on
+     fire" answer, unmoved by this shard (design note "what does not move").
+     A SECTION'S OWN visibility logic is UNTOUCHED: \`recap\`'s own \`hidden\` (set once, for
+     "nothing to recap") is a SEPARATE concern from tab ownership -- see applyRecapVisibility,
+     below, which combines the two without either ever overwriting the other. Every section
+     below is the EXACT node W1-T156 already patches in place -- nothing here moves it, splits
+     it, or wraps it in new DOM. -->
 <div id="console-tabs" class="console-tabs" role="tablist" aria-label="Console view">
   <button type="button" class="tab-btn" id="tab-decisions" role="tab" data-tab="decisions" aria-selected="true">Decisions</button>
   <button type="button" class="tab-btn" id="tab-now" role="tab" data-tab="now" aria-selected="false">Now</button>
@@ -813,12 +832,12 @@ export function renderShellHtml(
   <p class="empty">Plan view — not built yet.</p>
 </section>
 
-<section id="recap" class="panel-section" aria-label="Since you last checked" hidden>
+<section id="recap" class="panel-section" aria-label="Since you last checked" data-owner-tab="feed" hidden>
   <h2><span>Since you last checked</span></h2>
   <ul id="recap-list" class="row-list"></ul>
 </section>
 
-<section id="now" class="panel-section" aria-label="Now">
+<section id="now" class="panel-section" aria-label="Now" data-owner-tab="now">
   <h2><button type="button" class="section-header" id="now-toggle" aria-expanded="true" aria-controls="now-body">
     <span>Now</span><span class="section-summary" id="now-summary">…</span><span class="section-chevron" aria-hidden="true">›</span>
   </button></h2>
@@ -827,7 +846,13 @@ export function renderShellHtml(
   </div>
 </section>
 
-<section id="needs-me" class="panel-section" aria-label="Needs me">
+<!-- DECISIONS: the needs-me set alone -- W1-T257's merged-proposal reconciler and the
+     escalation-lifecycle reconciler already run ahead of this render (GET /v1/feedback,
+     status.ts's deriveStatus), so an item they have already resolved never reaches
+     renderNeedsMe's own needsHuman/grilling/proposed filter in the first place. This tab adds
+     NO third staleness rule of its own -- it renders exactly the set those two verdicts leave
+     pending, same as today, just gated to its own tab now instead of the flat stack. -->
+<section id="needs-me" class="panel-section" aria-label="Needs me" data-owner-tab="decisions">
   <h2><button type="button" class="section-header" id="needs-me-toggle" aria-expanded="true" aria-controls="needs-me-body">
     <span>Needs me</span><span class="section-summary" id="needs-me-summary">…</span><span class="section-chevron" aria-hidden="true">›</span>
   </button></h2>
@@ -842,8 +867,10 @@ export function renderShellHtml(
      filter and vanished with no downstream trace. This section is that consumer: it renders the
      SAME latestFeedbackEntries NEEDS ME already receives (never a second, parallel fetch), so an
      entry accepted by the button and one accepted by a merge are indistinguishable here -- both are
-     just status === "accepted" rows off the one feed. -->
-<section id="accepted" class="panel-section" aria-label="Accepted">
+     just status === "accepted" rows off the one feed. Owned by FEED, not Decisions: a resolved
+     decision is archaeology, and Decisions' own criterion is that a resolved item is FILTERED OUT,
+     never merely sorted into a sibling section of the same tab. -->
+<section id="accepted" class="panel-section" aria-label="Accepted" data-owner-tab="feed">
   <h2><button type="button" class="section-header" id="accepted-toggle" aria-expanded="true" aria-controls="accepted-body">
     <span>Accepted</span><span class="section-summary" id="accepted-summary">…</span><span class="section-chevron" aria-hidden="true">›</span>
   </button></h2>
@@ -852,7 +879,7 @@ export function renderShellHtml(
   </div>
 </section>
 
-<section id="up-next" class="panel-section" aria-label="Up next">
+<section id="up-next" class="panel-section" aria-label="Up next" data-owner-tab="now">
   <h2><button type="button" class="section-header" id="up-next-toggle" aria-expanded="true" aria-controls="up-next-body">
     <span>Up next</span><span class="section-summary" id="up-next-summary">…</span><span class="section-chevron" aria-hidden="true">›</span>
   </button></h2>
@@ -864,7 +891,7 @@ export function renderShellHtml(
   </div>
 </section>
 
-<section id="recent" class="panel-section" aria-label="Recent">
+<section id="recent" class="panel-section" aria-label="Recent" data-owner-tab="feed">
   <h2><button type="button" class="section-header" id="recent-toggle" aria-expanded="true" aria-controls="recent-body">
     <span>Recent</span><span class="section-summary" id="recent-summary">…</span><span class="section-chevron" aria-hidden="true">›</span>
   </button></h2>
@@ -873,7 +900,7 @@ export function renderShellHtml(
   </div>
 </section>
 
-<section id="rest" class="panel-section" aria-label="Everything else">
+<section id="rest" class="panel-section" aria-label="Everything else" data-owner-tab="feed">
   <h2><button type="button" class="section-header" id="rest-toggle" aria-expanded="true" aria-controls="rest-detail">
     <span>Everything else</span><span class="section-summary" id="rest-summary">…</span><span class="section-chevron" aria-hidden="true">›</span>
   </button></h2>
@@ -905,7 +932,7 @@ export function renderShellHtml(
   </div>
 </section>
 
-<section id="controls" class="panel-section" aria-label="Fleet control">
+<section id="controls" class="panel-section" aria-label="Fleet control" data-owner-tab="now">
   <h2>Fleet control</h2>
   <!-- W1-T202: the write token lives HERE, client-side only (sessionStorage), never in the URL --
        the bookmark's own \`?token=\` carries only the read token (see this shell's bootstrap,
@@ -934,7 +961,7 @@ export function renderShellHtml(
   <p id="controls-status" role="status" aria-live="polite" class="counts"></p>
 </section>
 
-<section id="more" class="panel-section" aria-label="More tools">
+<section id="more" class="panel-section" aria-label="More tools" data-owner-tab="feed">
   <h2>More tools</h2>
   <div class="btn-row">
     <!-- IN-SHELL PANELS, not page hops: a browser NAVIGATION to a header-only /v1 route cannot
@@ -1578,6 +1605,12 @@ export function renderShellHtml(
     for (const id of SECTION_IDS) {
       const body = document.getElementById(SECTION_BODY_ID[id]);
       if (body && body.contains(el)) {
+        // W1-T336: the section's own collapse state is only HALF of "reveal" now -- its whole
+        // panel can also be behind a tab that isn't active. applyActiveTab is defined below this
+        // function (hoisted); SECTION_TAB_OWNER is declared further down too, both safe to
+        // reference here since every call into revealSectionOf happens well after boot.
+        const tab = SECTION_TAB_OWNER[id];
+        if (tab) applyActiveTab(tab);
         if (body.hidden) setSectionCollapsed(id, false, { persist: false });
         return;
       }
@@ -2283,16 +2316,29 @@ export function renderShellHtml(
       : escapeHtml(e.taskId);
     return \`<li>\${escapeHtml(label)}: \${name}\${detail} · \${escapeHtml(formatAgo(e.ts))}</li>\`;
   }
-  function renderRecapSection(recap) {
+  // W1-T336: "recap" is hidden for TWO independent reasons that must never overwrite each
+  // other -- its OWN content decision (recapWantsShow, set ONLY here, exactly as before this
+  // task) and tab ownership (currentActiveTab, set only by applyActiveTab, below). Both are
+  // combined here rather than either handler touching \`hidden\` alone, so a tab switch can hide
+  // a genuinely-populated recap without lying about its content, and a later empty recap can
+  // still hide itself even while its own tab is active.
+  let recapWantsShow = false;
+  function applyRecapVisibility() {
     const section = document.getElementById("recap");
+    if (!section) return;
+    section.hidden = !recapWantsShow || SECTION_TAB_OWNER.recap !== currentActiveTab;
+  }
+  function renderRecapSection(recap) {
     const list = document.getElementById("recap-list");
-    if (!section || !list) return;
+    if (!document.getElementById("recap") || !list) return;
     if (!Array.isArray(recap) || recap.length === 0) {
-      section.hidden = true;
+      recapWantsShow = false;
+      applyRecapVisibility();
       return;
     }
     list.innerHTML = recap.map(recapRowHtml).join("");
-    section.hidden = false;
+    recapWantsShow = true;
+    applyRecapVisibility();
   }
 
   // ── everything else — the FIND layer (W1-T157): fuzzy search + faceted filters + sort ─────
@@ -2561,18 +2607,44 @@ export function renderShellHtml(
   renderSortHeaders();
   if (findHasUrlState()) expandRest();
 
-  // ── W1-T334: the four-tab console SCAFFOLD's OWN url state ───────────────────────────────
+  // ── W1-T336: the four-tab console bar is now AUTHORITATIVE -- its OWN url state ────────────
   // Same idiom as FIND's round-trip just above -- URLSearchParams read fresh off
   // window.location.search, one key set, history.replaceState preserving token + every other
   // existing param -- a SEPARATE key ("tab") riding the page's ONE existing view-state
-  // mechanism, never a second channel (no localStorage, no custom event). The tab itself governs
-  // NOTHING but its own Plan panel (W1-T336 wires real sections to a tab later); selecting one
-  // issues no fetch, poll or gateway call.
+  // mechanism, never a second channel (no localStorage, no custom event). Selecting a tab still
+  // issues no fetch, poll or gateway call -- it only flips each owned section's own \`hidden\`;
+  // every section's own data keeps flowing (and its own badge/title effects keep firing)
+  // regardless of which sections are currently shown.
   const CONSOLE_TABS = ["decisions", "now", "plan", "feed"];
+  // Which tab owns each section, now that the tabs govern layout -- the single table the markup
+  // above is a concrete rendering of (each owned section carries the SAME value as its own
+  // data-owner-tab attribute). Kept here (not inferred from the DOM) so a reveal path
+  // (jumpToTask/focusAndExpandTask, revealSectionOf, applyRecapVisibility, above) can look up a
+  // section's owning tab without walking the tree.
+  const SECTION_TAB_OWNER = {
+    "needs-me": "decisions",
+    now: "now",
+    "up-next": "now",
+    controls: "now",
+    recap: "feed",
+    accepted: "feed",
+    recent: "feed",
+    rest: "feed",
+    more: "feed",
+  };
+  // The single source of truth for "which tab is active right now" -- read by applyRecapVisibility
+  // (above) so recap's own content-hidden decision and tab ownership never fight over one
+  // attribute. Written ONLY by applyActiveTab, immediately below.
+  let currentActiveTab = "decisions";
   function readTabFromUrl() {
     const p = new URLSearchParams(window.location.search);
     const t = p.get("tab");
-    return CONSOLE_TABS.includes(t) ? t : "decisions";
+    if (CONSOLE_TABS.includes(t)) return t;
+    // A bare FIND deep link (search/facet/sort, no explicit ?tab=) used to render its target row
+    // directly in the flat shell; #rest now lives under Feed, so an old-style FIND link must
+    // default there too -- this task's own falsifier is "any firehose row reachable today that
+    // cannot be reached after the change," and a bookmarked search is exactly such a row.
+    return findHasUrlState() ? "feed" : "decisions";
   }
   function writeTabToUrl(tab) {
     const p = new URLSearchParams(window.location.search); // preserve token + anything else already there
@@ -2582,10 +2654,17 @@ export function renderShellHtml(
     history.replaceState(null, "", (qs ? "?" + qs : window.location.pathname) + window.location.hash);
   }
   function applyActiveTab(tab, { persist } = { persist: true }) {
+    currentActiveTab = tab;
     for (const btn of document.querySelectorAll("#console-tabs .tab-btn")) {
       btn.setAttribute("aria-selected", btn.dataset.tab === tab ? "true" : "false");
     }
     document.getElementById("tab-plan-panel").hidden = tab !== "plan";
+    for (const [id, owner] of Object.entries(SECTION_TAB_OWNER)) {
+      if (id === "recap") continue; // recap's own content decision combines with tab ownership in applyRecapVisibility, never here directly
+      const el = document.getElementById(id);
+      if (el) el.hidden = owner !== tab;
+    }
+    applyRecapVisibility();
     if (persist) writeTabToUrl(tab);
   }
   document.getElementById("console-tabs").addEventListener("click", (e) => {
@@ -2676,6 +2755,12 @@ export function renderShellHtml(
   /** "Jump to" a task: expand the section, filter the FIND search to its id, scroll + highlight. */
   function jumpToTask(taskId) {
     cmdkClose();
+    // W1-T336: jumpToTask always lands in the rest/FIND corpus (the whole board, regardless of
+    // which OTHER section a task also appears in) -- that corpus is owned by Feed, so the jump
+    // must activate that tab too, or expandRest below clears #rest-detail's own hidden while
+    // #rest itself stays hidden (its OWN owner-tab mismatch) and the row it "reveals" is
+    // invisible anyway.
+    applyActiveTab(SECTION_TAB_OWNER.rest);
     expandRest();
     findState.q = taskId;
     document.getElementById("find-search").value = taskId;
