@@ -236,6 +236,73 @@ const CLASS_LABEL: Record<EscalationClass, string> = {
   GRILL: "escalation-grill",
 };
 
+/**
+ * Every needs-me item is one of two asks (W1-T346, oper#needs-me-filings-2026-08-04): an
+ * ACTION the operator must PERFORM, or a QUESTION the operator must ANSWER. See
+ * {@link classifyAsk}.
+ */
+export type AskType = "action" | "question";
+
+/** Beside the per-class label, alongside `needs-human` — the ask-type queue split. */
+const ASK_TYPE_LABEL: Record<AskType, string> = {
+  action: "needs-action",
+  question: "needs-question",
+};
+
+/**
+ * Does this ONE option's own text name something only the OPERATOR can do — grant an
+ * override credential, merge/act by hand, or run a host command themselves — as opposed
+ * to something the MACHINE carries out once the operator merely picks a label?
+ *
+ * The three idioms are lifted straight from the corpus {@link classifyAsk} is derived from
+ * (measured 2026-08-05 over all 369 historical needs-human issues, W1-T346's rationale):
+ * the CAPPED-verdict escalation's own `--override-capped-by <name>` escape hatch, the risk
+ * judge's "merge it by hand" option, and the circuit-breaker/crash-loop family's backtick
+ * host commands (`` `rmd fix` ``, `` `rmd correct` ``, `` `launchctl bootout` ``). The
+ * clarification rung's own options (re-dispatch-with-constraint / revise-spec) name NONE
+ * of these — both are things THIS codebase's own machinery carries out once the operator
+ * answers — which is exactly what keeps that family classifying as a question below.
+ */
+function namesOperatorOnlyAct(option: EscalationOption): boolean {
+  const text = `${option.label} ${option.detail}`;
+  return (
+    /--override[-\w]*\b/i.test(text) ||
+    /\bby hand\b|\bhand-merge\b/i.test(text) ||
+    /`(?:rmd|gh|git|launchctl|npm|node|bash|sh)\b[^`]*`/.test(text)
+  );
+}
+
+/**
+ * Classify ONE escalation as an ACTION the operator must perform, or a QUESTION the
+ * operator must answer (W1-T346; MASTER-PLAN §4, oper#needs-me-filings-2026-08-04) —
+ * DERIVABLE from fields the escalation already carries, never a producer-side field, and
+ * never an LLM call: PURE, deterministic, and TOTAL (every input classifies).
+ *
+ * Rules, straight off the rationale's 369-issue read:
+ *  - `MANUAL` is ACTION by definition — the whole class exists because only a human hand
+ *    can do the thing (secrets, deps, disk, deploys — see this module's header).
+ *  - `GRILL` is QUESTION by definition — an ambiguous feedback item is, definitionally, a
+ *    human CALL between named options (MASTER-PLAN §7B); it is never a task the operator
+ *    executes themselves.
+ *  - `BLOCKED`/`HARD_STOP` fall to the OPTIONS-SHAPE test: if ANY option names an
+ *    operator-only act (see {@link namesOperatorOnlyAct}) — the CAPPED-verdict override
+ *    escape hatch, the risk judge's manual-merge option, the circuit-breaker's `rmd fix` —
+ *    it's an ACTION. If EVERY option is something the MACHINE carries out once the
+ *    operator merely picks a label (the clarification rung's re-dispatch/revise-spec
+ *    pair), it's a QUESTION.
+ *
+ * Defaults ACTION whenever the options-shape test cannot decide (no options at
+ * classify-time, ahead of {@link escalate}'s own zero-options refusal) — presenting a
+ * QUESTION as an ACTION costs the operator one wasted read; presenting an ACTION as a
+ * QUESTION hides real work behind an answer the operator wrongly believes settles it.
+ */
+export function classifyAsk(e: Escalation): AskType {
+  if (e.class === "MANUAL") return "action";
+  if (e.class === "GRILL") return "question";
+  if (e.options.length > 0 && e.options.every((o) => !namesOperatorOnlyAct(o))) return "question";
+  return "action";
+}
+
 /** The label every escalation issue carries — the queue the control panel reads (§4). */
 export const NEEDS_HUMAN_LABEL = "needs-human";
 
@@ -586,7 +653,7 @@ export function escalate(e: Escalation, deps: EscalateDeps): string {
     }
   }
 
-  const wanted = [NEEDS_HUMAN_LABEL, CLASS_LABEL[e.class]];
+  const wanted = [NEEDS_HUMAN_LABEL, CLASS_LABEL[e.class], ASK_TYPE_LABEL[classifyAsk(e)]];
   const labels: string[] = [];
   const degradedLabels: string[] = [];
   for (const label of wanted) {

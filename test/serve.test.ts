@@ -1026,12 +1026,15 @@ test("W1-T182: needsMeTaskRowHtml's ACTUAL rendered output shows the issue's rea
     // reason attributes a read-only session's write affordances carry) -- pulled in here too so
     // this isolated eval has the same closure the real served script does.
     writeGateAttrs: html.match(/function writeGateAttrs\(\) \{[\s\S]*?\n  \}/)?.[0],
+    // W1-T346: needsMeTaskRowHtml now calls askTypeFromEscalationTitle() -- pulled in here too
+    // so this isolated eval has the same closure the real served script does.
+    askTypeFromEscalationTitle: html.match(/function askTypeFromEscalationTitle\(title\) \{[\s\S]*?\n  \}/)?.[0],
     needsMeTaskRowHtml: html.match(/function needsMeTaskRowHtml\(t\) \{[\s\S]*?\n  \}/)?.[0],
   };
   for (const [name, src] of Object.entries(parts)) assert.ok(src, `${name} must exist in the shell's inline script`);
 
   const renderRow = new Function(
-    `let hasWriteScope = false;\n${parts.STATUS_LABELS}\n${parts.escapeHtml}\n${parts.statusBadge}\n${parts.prLink}\n${parts.rowChevronHtml}\n${parts.writeGateAttrs}\n${parts.needsMeTaskRowHtml}\nreturn needsMeTaskRowHtml(arguments[0]);`,
+    `let hasWriteScope = false;\n${parts.STATUS_LABELS}\n${parts.escapeHtml}\n${parts.statusBadge}\n${parts.prLink}\n${parts.rowChevronHtml}\n${parts.writeGateAttrs}\n${parts.askTypeFromEscalationTitle}\n${parts.needsMeTaskRowHtml}\nreturn needsMeTaskRowHtml(arguments[0]);`,
   ) as (t: Record<string, unknown>) => string;
 
   // A CONFIRMED-open escalation, live issue title flowing through escalationTitle.
@@ -1055,6 +1058,73 @@ test("W1-T182: needsMeTaskRowHtml's ACTUAL rendered output shows the issue's rea
   assert.match(unverifiedRow, /unverified/i);
   assert.doesNotMatch(unverifiedRow, /view issue/i, "no issue url to join against -> no link rendered");
   assert.doesNotMatch(unverifiedRow, /<input\b/i);
+});
+
+// ── W1-T346: the NEEDS ME list renders an ACTION ask and a QUESTION ask with distinct
+// affordances, while an untyped legacy item (no escalationTitle at all) keeps today's row
+// byte-identical — the same "extracted, evaluated, asserted on real output" discipline as
+// the W1-T182 test directly above.
+test("W1-T346: askTypeFromEscalationTitle is deterministic over the title's own [CLASS] prefix — GRILL is a question, every other named class defaults to action, no prefix classifies nothing", () => {
+  const html = renderShellHtml();
+  const src = html.match(/function askTypeFromEscalationTitle\(title\) \{[\s\S]*?\n  \}/)?.[0];
+  assert.ok(src, "askTypeFromEscalationTitle must exist in the shell's inline script");
+  const askType = new Function(`${src}\nreturn askTypeFromEscalationTitle(arguments[0]);`) as (
+    title: string | undefined,
+  ) => string | undefined;
+
+  assert.equal(askType("[MANUAL] W1-T1: rotate the deploy key"), "action");
+  assert.equal(askType("[GRILL] TRIAGE-fb-1: cli flag or config default?"), "question");
+  assert.equal(askType("[BLOCKED] W1-T1: needs a decision"), "action", "no options data reaches this row — defaults action");
+  assert.equal(askType("[HARD_STOP] daemon: weekly headroom reserve reached"), "action");
+  assert.equal(askType(undefined), undefined, "no title at all classifies nothing — never a badge on a row with no data");
+  assert.equal(askType("needs human attention (escalated)"), undefined, "no recognizable [CLASS] prefix classifies nothing either");
+});
+
+test("W1-T346: needsMeTaskRowHtml renders an ACTION row and a QUESTION row with DISTINCT affordances, while a legacy (untyped) row stays byte-identical to before this task", () => {
+  const html = renderShellHtml();
+  const parts: Record<string, string | undefined> = {
+    STATUS_LABELS: html.match(/const STATUS_LABELS = \{[\s\S]*?\};/)?.[0],
+    escapeHtml: html.match(/function escapeHtml\(text\) \{[\s\S]*?\n  \}/)?.[0],
+    statusBadge: html.match(/function statusBadge\(key\) \{[\s\S]*?\n  \}/)?.[0],
+    prLink: html.match(/function prLink\(t\) \{[\s\S]*?\n  \}/)?.[0],
+    rowChevronHtml: html.match(/function rowChevronHtml\(\) \{[\s\S]*?\n  \}/)?.[0],
+    writeGateAttrs: html.match(/function writeGateAttrs\(\) \{[\s\S]*?\n  \}/)?.[0],
+    askTypeFromEscalationTitle: html.match(/function askTypeFromEscalationTitle\(title\) \{[\s\S]*?\n  \}/)?.[0],
+    needsMeTaskRowHtml: html.match(/function needsMeTaskRowHtml\(t\) \{[\s\S]*?\n  \}/)?.[0],
+  };
+  for (const [name, part] of Object.entries(parts)) assert.ok(part, `${name} must exist in the shell's inline script`);
+
+  const renderRow = new Function(
+    `let hasWriteScope = false;\n${parts.STATUS_LABELS}\n${parts.escapeHtml}\n${parts.statusBadge}\n${parts.prLink}\n${parts.rowChevronHtml}\n${parts.writeGateAttrs}\n${parts.askTypeFromEscalationTitle}\n${parts.needsMeTaskRowHtml}\nreturn needsMeTaskRowHtml(arguments[0]);`,
+  ) as (t: Record<string, unknown>) => string;
+
+  // ACTION row (MANUAL — action by definition): leads with a "Do" affordance.
+  const actionRow = renderRow({
+    taskId: "W1-T1",
+    needsHuman: true,
+    escalationTitle: "[MANUAL] W1-T1: rotate the deploy key",
+    escalationIssueUrl: "https://github.com/o/r/issues/1",
+  });
+  assert.match(actionRow, /class="ask-type-badge ask-type-action"/);
+  assert.match(actionRow, />Do</);
+
+  // QUESTION row (GRILL — question by definition): leads with a "Decide" affordance,
+  // a DISTINCT class/text from the action row above.
+  const questionRow = renderRow({
+    taskId: "TRIAGE-fb-1",
+    needsHuman: true,
+    escalationTitle: "[GRILL] TRIAGE-fb-1: cli flag or config default?",
+    escalationIssueUrl: "https://github.com/o/r/issues/2",
+  });
+  assert.match(questionRow, /class="ask-type-badge ask-type-question"/);
+  assert.match(questionRow, />Decide</);
+  assert.doesNotMatch(questionRow, /ask-type-action/, "the two affordances never share a class");
+
+  // LEGACY row — no escalationTitle at all (predates any classification, or unresolved) —
+  // renders with NO ask-type badge whatsoever, byte-identical to today's row.
+  const legacyRow = renderRow({ taskId: "W1-T2", needsHuman: true, escalationUnverified: true });
+  assert.doesNotMatch(legacyRow, /ask-type-badge/, "an untyped legacy item carries no ask-type affordance at all");
+  assert.match(legacyRow, /needs human attention \(escalated\)/);
 });
 
 // ── resolveServeHost: exposure must be typed, never inherited (R-4) ─────────

@@ -505,6 +505,19 @@ export function renderShellHtml(
     background: rgba(87, 214, 140, 0.14); color: var(--status-merged); border-color: var(--status-merged);
   }
   .write-state-badge[data-write-state="unknown"] { opacity: 0.7; }
+  /* W1-T346: the NEEDS ME ask-type badge -- an ACTION row (something to DO) reads distinctly
+     from a QUESTION row (something to DECIDE); colour is a secondary cue only, the text itself
+     ("Do"/"Decide") states the ask outright. */
+  .ask-type-badge {
+    display: inline-block; margin-right: 0.35em; padding: 0.05rem 0.4rem; border-radius: 999px;
+    font-size: 0.7rem; font-weight: 700; border: 1px solid transparent; vertical-align: middle;
+  }
+  .ask-type-badge.ask-type-action {
+    background: rgba(255, 184, 77, 0.16); color: var(--status-needs-human); border-color: var(--status-needs-human);
+  }
+  .ask-type-badge.ask-type-question {
+    background: rgba(87, 214, 140, 0.14); color: var(--status-merged); border-color: var(--status-merged);
+  }
   #stale-badge {
     display: inline-block; margin: 0.25rem 0 0; padding: 0.15rem 0.5rem; border-radius: 999px;
     font-size: 0.75rem; font-weight: 600; background: var(--status-needs-human); color: #241a02;
@@ -2078,8 +2091,31 @@ export function renderShellHtml(
   // here: "approve" has no defined verb for an escalation of any class -- that word is reserved
   // for a P## ratification-inbox proposal (needsMeInboxHtml, below), the one item type it is
   // actually defined for.
+  //
+  // W1-T346: every escalation is one of two ASKS -- an ACTION the operator must PERFORM, or a
+  // QUESTION the operator must ANSWER (escalate.ts's classifyAsk, MASTER-PLAN §4). This row
+  // reads the CLASS straight off escalationTitle's own "[CLASS] taskId: summary" prefix --
+  // escalate.ts has rendered that prefix on every issue since W1-T8, so no new plumbing is
+  // needed to reach it here. GRILL classifies "question" (definitional, matching classifyAsk
+  // exactly); every other named class (MANUAL, BLOCKED, HARD_STOP) defaults to "action" here --
+  // this row never sees the options a BLOCKED/HARD_STOP escalation carries (classifyAsk's own
+  // options-shape test lives at escalate() time, off a full Escalation; this render path only
+  // ever gets the class), so it applies classifyAsk's OWN documented default for an
+  // undecidable case: presenting a question as an action costs one wasted read, while
+  // presenting an action as a question hides real work. A row with no recognizable class (no
+  // escalationTitle at all -- the generic-ask fallback below) renders NO badge at all, BYTE-
+  // IDENTICAL to before this task.
+  function askTypeFromEscalationTitle(title) {
+    const m = title ? /^\\[(\\w+)\\]/.exec(title) : null;
+    if (!m) return undefined;
+    return m[1] === "GRILL" ? "question" : "action";
+  }
   function needsMeTaskRowHtml(t) {
     const ask = t.escalationTitle ? escapeHtml(t.escalationTitle) : "needs human attention (escalated)";
+    const askType = askTypeFromEscalationTitle(t.escalationTitle);
+    const askTypeBadge = askType
+      ? \`<span class="ask-type-badge ask-type-\${askType}">\${askType === "question" ? "Decide" : "Do"}</span>\`
+      : "";
     const unverifiedNote = t.escalationUnverified ? " · issue state unverified (showing to be safe)" : "";
     const viewIssueLink = t.escalationIssueUrl
       ? \`<a href="\${escapeHtml(t.escalationIssueUrl)}" target="_blank" rel="noopener noreferrer">view issue</a>\`
@@ -2088,7 +2124,7 @@ export function renderShellHtml(
       ? \`<button type="button" class="needs-me-mark-handled"\${writeGateAttrs()} data-task-id="\${escapeHtml(t.taskId)}" data-issue-url="\${escapeHtml(t.escalationIssueUrl)}">Mark handled</button>\`
       : "";
     return (
-      \`\${statusBadge("needs-human")}<span class="task-id">\${escapeHtml(t.taskId)}</span><span class="detail">\${ask}\${unverifiedNote}\${prLink(t)}</span>\` +
+      \`\${statusBadge("needs-human")}\${askTypeBadge}<span class="task-id">\${escapeHtml(t.taskId)}</span><span class="detail">\${ask}\${unverifiedNote}\${prLink(t)}</span>\` +
       rowChevronHtml() +
       (viewIssueLink || markHandledBtn ? \`<span class="btn-row">\${viewIssueLink}\${markHandledBtn}</span>\` : "")
     );
