@@ -118,6 +118,7 @@ import { createLastSeenStore, hashToken, lastSeenPath } from "./lib/last-seen.js
 import {
   deliversRealtime,
   escalate,
+  escalateWithSummary,
   escalationCause,
   ghIssueGateway,
   NEEDS_HUMAN_LABEL,
@@ -160,10 +161,14 @@ import {
   captureFeedback,
   feedbackEntryPath,
   parseFeedbackAddArgs,
+  proposeFeedbackWithSummary,
   readFeedbackEntry,
+  realDecisionSummarizer,
+  resolveDecisionSummaryMount,
   setFeedbackStatus,
   FeedbackError,
   type FeedbackEntry,
+  type SummarizeDeps,
 } from "./lib/feedback.js";
 import { findPendingLandingPr, recordDecision } from "./lib/feedback-landing.js";
 import { ghTraceGateway, renderTraceChain, traceForward, traceReverse } from "./lib/trace.js";
@@ -12819,6 +12824,22 @@ async function triageCommandLocked(
   // Liveness token so a concurrent drain's prune skips this triage worktree.
   writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
 
+  // W1-T348: the decision-summary rung, resolved ONCE and reused at both sites this run may
+  // reach a human/operator — the GRILL escalation below and the proposal write further down.
+  // Reuses risk-judge.ts's cheapest-mount scanner (via resolveDecisionSummaryMount, feedback.ts)
+  // rather than a new mounts.yaml row, and the SAME cwd/settingsFile/spawn this run already
+  // resolved for the Architect worker — no second model-call idiom invented. Constructing this
+  // is free (no spawn happens until `.summarize()` is actually called by a grill/propose branch
+  // below); a run that ends CLEAR/ALREADY_DECIDED never spends on it.
+  const summarizeDeps: SummarizeDeps = {
+    summarize: realDecisionSummarizer({
+      mount: resolveDecisionSummaryMount(mountsTable),
+      cwd: worktreePath,
+      settingsFile,
+      spawn,
+    }),
+  };
+
   // Declared OUTSIDE the try so the finally releases it on EVERY exit — success, throw, or the
   // catch arm's rethrow. A reservation that outlived its run would burn the id permanently, which
   // is the phantom-id class this must not add to (W1-T199/224/247/263 already exist).
@@ -12966,10 +12987,14 @@ async function triageCommandLocked(
     // below so the commit/PR body can cite the real issue URL.
     let grillIssueUrl: string | undefined;
     if (decision.action === "grill") {
-      grillIssueUrl = escalate(buildGrillEscalation({ entry, decision, taskId, runId }), {
+      // W1-T348: wired at escalation creation via the escalate.ts choke point — the issue opens
+      // with a validated decisionSummary when the summarizer succeeds, and degrades to exactly
+      // today's raw-body issue (fail-open) on any summarizer failure.
+      grillIssueUrl = await escalateWithSummary(buildGrillEscalation({ entry, decision, taskId, runId }), {
         issues: ghIssueGateway(owner, repo),
         ledgerPath,
         runId,
+        ...summarizeDeps,
       });
       log("triage.grill_opened", { issue_url: grillIssueUrl, options: decision.options.length, recommendation: decision.recommendation });
       say(`grill opened (needs-human, ${decision.options.length} options + a recommendation): ${grillIssueUrl}`);
@@ -13024,7 +13049,10 @@ async function triageCommandLocked(
     // URL only exists after the first push) — a second small commit onto the SAME open PR,
     // exactly the pattern retro's post-worker orientation commit already established.
     if (decision.action === "propose") {
-      setFeedbackStatus(worktreePath, feedbackId, "proposed", { proposalPr: prUrl });
+      // W1-T348: writes the validated decision summary onto the feedback entry it proposes
+      // from, in the SAME write as the `proposed` status transition (never half-written) —
+      // fail-open to `summary: null` on any summarizer failure, exactly as before this task.
+      await proposeFeedbackWithSummary(worktreePath, feedbackId, summarizeDeps, { proposalPr: prUrl });
       execFileSync("git", ["-C", worktreePath, "add", "-A", "--", "plan/feedback/"], { stdio: "inherit" });
       execFileSync(
         "git",
