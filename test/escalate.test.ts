@@ -8,6 +8,7 @@ import {
   NEEDS_HUMAN_LABEL,
   classifyAsk,
   escalate,
+  escalateWithSummary,
   escalationCause,
   tryEscalate,
   renderIssueBody,
@@ -15,6 +16,7 @@ import {
   type Escalation,
   type IssueGateway,
 } from "../src/lib/escalate.js";
+import type { SummarizeDeps } from "../src/lib/feedback.js";
 
 function ledgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-escalate-")), "ledger.ndjson");
@@ -1031,4 +1033,69 @@ test("ghIssueGateway.closeWithComment: closes the issue with the citation commen
   assert.deepEqual(calls, [
     ["issue", "close", "https://github.com/craigoley/remudero/issues/44", "--repo", "craigoley/remudero", "--comment", "resolved by #574"],
   ]);
+});
+
+// ── escalateWithSummary (W1-T348: the choke point a wired producer calls) ───────────────────
+//
+// The seams (summarizeEscalation, DecisionSummary, validateDecisionSummary, renderIssueBody's
+// summary-above-raw layout) merged with W1-T313 and are NOT reopened here — only their caller.
+// These tests are the FALSIFIER, both directions: a wired producer's escalation carries a
+// validated summary whose options are the escalation's own verbatim (this MUST fail against
+// pre-W1-T348 source, where no production caller exists at all), and a summarizer failure still
+// opens the issue with the raw body, never a lost or delayed escalation.
+
+function validSummaryPayload() {
+  return {
+    headline: "Decide how to resolve the exhausted retry",
+    what_happened: "The diagnose-armed retry still failed CI after two strikes.",
+    decision: "Choose retry or abandon.",
+  };
+}
+
+function fakeSummarizeDeps(result: unknown): SummarizeDeps {
+  return { summarize: async () => result };
+}
+
+function throwingSummarizeDeps(): SummarizeDeps {
+  return {
+    summarize: async () => {
+      throw new Error("summarizer unavailable");
+    },
+  };
+}
+
+test("escalateWithSummary: a wired producer's escalation opens WITH a validated decisionSummary whose options are the escalation's own, verbatim — never a paraphrase", async () => {
+  const issues = fakeIssues();
+  const url = await escalateWithSummary(escalation(), {
+    issues,
+    ledgerPath: ledgerPath(),
+    runId: "RUN-1",
+    ...fakeSummarizeDeps(validSummaryPayload()),
+  });
+
+  assert.equal(url, "https://github.com/craigoley/remudero/issues/99");
+  assert.equal(issues.calls.length, 1);
+  const body = issues.calls[0].body;
+  assert.match(body, /## Decision Summary/);
+  assert.match(body, /Decide how to resolve the exhausted retry/);
+  // The options rendered below (## Options) are escalation().options verbatim — summarizeEscalation
+  // NEVER takes options from the summarizer's own response (see that function's own doc) — this is
+  // the code guarantee, asserted here against a REAL caller, not merely a prompt instruction.
+  assert.match(body, /\*\*retry\*\* — resume the run with a fresh worker/);
+  assert.match(body, /\*\*abandon\*\* — drop the task and re-plan/);
+});
+
+test("escalateWithSummary: a THROWING summarizer still opens the issue with the raw body — fail-open, never a lost or delayed escalation", async () => {
+  const issues = fakeIssues();
+  const url = await escalateWithSummary(escalation(), {
+    issues,
+    ledgerPath: ledgerPath(),
+    runId: "RUN-1",
+    ...throwingSummarizeDeps(),
+  });
+
+  assert.equal(url, "https://github.com/craigoley/remudero/issues/99");
+  const body = issues.calls[0].body;
+  assert.doesNotMatch(body, /## Decision Summary/, "no summary block — degrades to exactly today's raw-only body");
+  assert.match(body, /the diagnose-armed retry still failed CI\./, "the raw detail is still present, byte-identical");
 });

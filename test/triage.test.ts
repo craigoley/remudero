@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import {
   COMMIT_BODY_MAX_LINE,
@@ -20,8 +22,13 @@ import {
 } from "../src/lib/triage.js";
 import type { FeedbackEntry } from "../src/lib/feedback.js";
 import { parseAcceptanceBlock } from "../src/lib/review.js";
-import { TRIAGE_WORKER_TOOLS } from "../src/run-task.js";
+import { TRIAGE_WORKER_TOOLS, triageCommand } from "../src/run-task.js";
 import { escalate, renderIssueBody, type IssueGateway } from "../src/lib/escalate.js";
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import type { WorkerResult } from "../src/lib/worker.js";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = join(__dirname, "..");
 
 function tempLedgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-triage-grill-")), "ledger.ndjson");
@@ -811,4 +818,295 @@ test("the triage prompt instructs shard-inclusive id selection — max across pl
   assert.match(p, /plan\/tasks\.d\/\*\.yaml/, "the id-selection rule must name the shards");
   assert.match(p, /highest id across the\s+monolith AND every shard/i);
   assert.match(p, /never the monolith alone/i);
+});
+
+// ── W1-T348: the triage-proposal wiring — proposeFeedbackWithSummary gets a REAL caller ──────
+//
+// FALSIFIER, both directions (the task's design note v): a triage PROPOSE that reaches the
+// write below carries a validated decisionSummary on the feedback entry it proposes from —
+// this MUST fail against pre-W1-T348 source, where the write is a bare `setFeedbackStatus`
+// with no summarizer call at all. Drives the REAL `triageCommand` end to end (mirroring
+// test/triage-plan-deps-seam.test.ts's "all the way to the git push" proof) with an injected
+// `spawn` that plays BOTH roles a real run makes: the Architect worker (nonempty `tools`) and
+// the decision-summary rung (`tools: []`, {@link buildDecisionSummarySpawnArgs}) — the SAME
+// discriminator `realDecisionSummarizer`'s own spawn args use, so no new seam is invented here.
+
+const T348_GIT_ENV = {
+  ...process.env,
+  GIT_AUTHOR_NAME: "t",
+  GIT_AUTHOR_EMAIL: "t@t",
+  GIT_COMMITTER_NAME: "t",
+  GIT_COMMITTER_EMAIL: "t@t",
+};
+
+function t348FakeWorker(text: string): WorkerResult {
+  return {
+    sessionId: "T348-SESSION",
+    costUsd: 0,
+    numTurns: 1,
+    text,
+    blocks: [text],
+    stderr: "",
+    subtype: "success",
+    isError: false,
+    apiError: false,
+    model: "claude-opus-5",
+    effort: "high",
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    totalCostUsd: 0,
+    billingMode: "subscription",
+    verdict: "success",
+    qualitySuspect: false,
+    compactionEvents: [],
+    childEnvKeys: [],
+  } as unknown as WorkerResult;
+}
+
+/** The DECISION_SUMMARY JSON payload {@link buildDecisionSummaryPrompt} asks the rung for —
+ *  distinct headline/decision text from the Architect's own PROPOSED verdict, so the test can
+ *  tell the two spawn roles apart in its assertions, not just in the fake's own routing. */
+const T348_SUMMARY_PAYLOAD = {
+  headline: "File a new plan task from this feedback",
+  what_happened: "The triage Architect proposed a plan-only change for the fixture feedback item.",
+  decision: "Review and merge the proposal PR.",
+  options: [
+    { label: "merge", consequence: "the proposed task enters the plan" },
+    { label: "reject", consequence: "the feedback is filed away with no new task" },
+  ],
+};
+
+test("W1-T348: a triage PROPOSE writes a validated decisionSummary onto the feedback entry it proposes from", async () => {
+  const feedbackId = `fb-t348-propose-${Date.now()}`;
+
+  const bare = mkdtempSync(join(tmpdir(), "t348-origin-"));
+  execFileSync("git", ["init", "--quiet", "--bare", "-b", "main", bare], { encoding: "utf8", env: T348_GIT_ENV });
+  const seed = mkdtempSync(join(tmpdir(), "t348-seed-"));
+  execFileSync("git", ["init", "--quiet", "-b", "main", seed], { encoding: "utf8", env: T348_GIT_ENV });
+  mkdirSync(join(seed, "plan", "tasks.d"), { recursive: true });
+  mkdirSync(join(seed, "plan", "feedback"), { recursive: true });
+  writeFileSync(
+    join(seed, "plan", "tasks.yaml"),
+    ["- id: W1-T4", '  title: "a seed task the plan loader accepts"', "  repo: remudero", "  depends_on: []", "  type: implement", "  verify: auto", "  status: queued", "  attempts: 0", ""].join("\n"),
+  );
+  writeFileSync(
+    join(seed, "plan", "feedback", `${feedbackId}.yaml`),
+    [`id: ${feedbackId}`, "ts: '2026-08-05T00:00:00.000Z'", "raw: fixture entry for the W1-T348 proposal-summary wiring proof", "attachments: []", "origin: cli", "status: new", "proposal_pr: null", ""].join("\n"),
+  );
+  execFileSync("git", ["-C", seed, "add", "-A"], { encoding: "utf8" });
+  execFileSync("git", ["-C", seed, "commit", "--quiet", "-m", "chore: seed plan"], { encoding: "utf8", env: T348_GIT_ENV });
+  execFileSync("git", ["-C", seed, "remote", "add", "origin", bare], { encoding: "utf8" });
+  execFileSync("git", ["-C", seed, "push", "--quiet", "origin", "main"], { encoding: "utf8", env: T348_GIT_ENV });
+  rmSync(seed, { recursive: true, force: true });
+
+  const home = mkdtempSync(join(tmpdir(), "t348-home-"));
+  const configRoot = mkdtempSync(join(tmpdir(), "t348-root-"));
+  const shimDir = mkdtempSync(join(tmpdir(), "t348-ghshim-"));
+  const savedHome = process.env.HOME;
+  const savedPath = process.env.PATH;
+  try {
+    mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+    writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/usr/bin/true", root: configRoot }, null, 2));
+    process.env.HOME = home;
+
+    const originUrl = execFileSync("git", ["-C", REPO_ROOT, "config", "--get", "remote.origin.url"], { encoding: "utf8" }).trim();
+    const repoName = originUrl.match(/[/:]([^/:]+)\/([^/]+?)(?:\.git)?$/)![2];
+    const repoDir = join(configRoot, "repos", repoName);
+    mkdirSync(dirname(repoDir), { recursive: true });
+    execFileSync("git", ["clone", "--quiet", bare, repoDir], { encoding: "utf8", env: T348_GIT_ENV });
+    execFileSync("git", ["-C", repoDir, "config", "user.name", "remudero-test"], { encoding: "utf8" });
+    execFileSync("git", ["-C", repoDir, "config", "user.email", "test@remudero.invalid"], { encoding: "utf8" });
+
+    // The gh shim plays a REAL PR round-trip far enough to reach the proposal write: `pr create`
+    // succeeds with a URL, and `pr view --json headRefName` answers from the bare origin's OWN
+    // pushed `run-*` branch (read live off disk, never hardcoded) so the run-ownership guard
+    // (checkPrOwnership, W1-T62) passes for real rather than being bypassed.
+    writeFileSync(
+      join(shimDir, "gh"),
+      [
+        "#!/bin/sh",
+        'case "$*" in',
+        '  *"pr list"*) echo "[]" ;;',
+        '  *"pr create"*) echo "https://github.com/craigoley/remudero/pull/999" ;;',
+        `  *"--json headRefName"*) git -C ${bare} for-each-ref --format='{"headRefName":"%(refname:short)"}' refs/heads/run-* | tail -1 ;;`,
+        "  *\"--json body\"*) echo '{\"body\":\"\"}' ;;",
+        '  *"pr diff"*) echo "" ;;',
+        "  *) exit 0 ;;",
+        "esac",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    process.env.PATH = `${shimDir}:${savedPath}`;
+
+    await withLiveWritesAllowed(() =>
+      triageCommand([feedbackId], {
+        spawn: async (args: { cwd: string; prompt: string; tools?: string[] }) => {
+          if ((args.tools ?? []).length === 0) {
+            // The decision-summary rung's own spawn shape (buildDecisionSummarySpawnArgs).
+            return t348FakeWorker(JSON.stringify(T348_SUMMARY_PAYLOAD));
+          }
+          // The Architect triage worker: file a clean plan task under the RESERVED id and
+          // return a PROPOSED verdict so decideTriage takes the propose branch.
+          const id = /USE EXACTLY `(W\d+-T\d+)`/.exec(args.prompt)?.[1];
+          assert.ok(id, `triage prompt must name the reserved id; got: ${args.prompt.slice(0, 200)}`);
+          const dir = join(args.cwd, "plan", "tasks.d");
+          mkdirSync(dir, { recursive: true });
+          writeFileSync(
+            join(dir, `${id}-fixture.yaml`),
+            [
+              `- id: ${id}`,
+              `  title: "a clean task filed for the W1-T348 proposal-summary wiring proof"`,
+              "  repo: remudero",
+              "  origin: architect",
+              `  depends_on: []`,
+              "  type: implement",
+              "  verify: auto",
+              "  status: queued",
+              "  attempts: 0",
+              "  acceptance:",
+              '    - claim: "the thing holds"',
+              '      proof: "unit test: test/triage.test.ts"',
+              "",
+            ].join("\n"),
+          );
+          return t348FakeWorker(`PROPOSED: file ${id} for feedback#${feedbackId}`);
+        },
+      }),
+    ).catch(() => undefined); // the diff-provenance check after the write we care about has no real gh diff here
+
+    // THE PROOF: read the PROPOSAL WRITE back off the bare origin's pushed run branch — the
+    // second commit ("record proposal_pr") this task's write sits inside.
+    const runBranch = execFileSync("git", ["-C", bare, "for-each-ref", "--format=%(refname:short)", "refs/heads/run-*"], {
+      encoding: "utf8",
+    })
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .pop();
+    assert.ok(runBranch, "triageCommand pushed its own run branch to the bare origin");
+    const entryYaml = execFileSync("git", ["-C", bare, "show", `${runBranch}:plan/feedback/${feedbackId}.yaml`], {
+      encoding: "utf8",
+    });
+    assert.match(entryYaml, /status: proposed/);
+    assert.match(entryYaml, /proposal_pr: https:\/\/github\.com\/craigoley\/remudero\/pull\/999/);
+    assert.match(entryYaml, /headline: File a new plan task from this feedback/, "the WIRED summarizer's headline landed on the entry");
+    assert.match(entryYaml, /decision: Review and merge the proposal PR\./);
+    assert.match(entryYaml, /label: merge/, "the summary's options round-trip too");
+  } finally {
+    process.env.HOME = savedHome;
+    process.env.PATH = savedPath;
+    for (const d of [bare, home, configRoot, shimDir]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("W1-T348: a THROWING decision-summary rung still writes the `proposed` transition — fail-open, summary: null, never blocks the proposal", async () => {
+  const feedbackId = `fb-t348-failopen-${Date.now()}`;
+
+  const bare = mkdtempSync(join(tmpdir(), "t348-origin-"));
+  execFileSync("git", ["init", "--quiet", "--bare", "-b", "main", bare], { encoding: "utf8", env: T348_GIT_ENV });
+  const seed = mkdtempSync(join(tmpdir(), "t348-seed-"));
+  execFileSync("git", ["init", "--quiet", "-b", "main", seed], { encoding: "utf8", env: T348_GIT_ENV });
+  mkdirSync(join(seed, "plan", "tasks.d"), { recursive: true });
+  mkdirSync(join(seed, "plan", "feedback"), { recursive: true });
+  writeFileSync(
+    join(seed, "plan", "tasks.yaml"),
+    ["- id: W1-T4", '  title: "a seed task the plan loader accepts"', "  repo: remudero", "  depends_on: []", "  type: implement", "  verify: auto", "  status: queued", "  attempts: 0", ""].join("\n"),
+  );
+  writeFileSync(
+    join(seed, "plan", "feedback", `${feedbackId}.yaml`),
+    [`id: ${feedbackId}`, "ts: '2026-08-05T00:00:00.000Z'", "raw: fixture entry for the W1-T348 fail-open proof", "attachments: []", "origin: cli", "status: new", "proposal_pr: null", ""].join("\n"),
+  );
+  execFileSync("git", ["-C", seed, "add", "-A"], { encoding: "utf8" });
+  execFileSync("git", ["-C", seed, "commit", "--quiet", "-m", "chore: seed plan"], { encoding: "utf8", env: T348_GIT_ENV });
+  execFileSync("git", ["-C", seed, "remote", "add", "origin", bare], { encoding: "utf8" });
+  execFileSync("git", ["-C", seed, "push", "--quiet", "origin", "main"], { encoding: "utf8", env: T348_GIT_ENV });
+  rmSync(seed, { recursive: true, force: true });
+
+  const home = mkdtempSync(join(tmpdir(), "t348-home-"));
+  const configRoot = mkdtempSync(join(tmpdir(), "t348-root-"));
+  const shimDir = mkdtempSync(join(tmpdir(), "t348-ghshim-"));
+  const savedHome = process.env.HOME;
+  const savedPath = process.env.PATH;
+  try {
+    mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+    writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/usr/bin/true", root: configRoot }, null, 2));
+    process.env.HOME = home;
+
+    const originUrl = execFileSync("git", ["-C", REPO_ROOT, "config", "--get", "remote.origin.url"], { encoding: "utf8" }).trim();
+    const repoName = originUrl.match(/[/:]([^/:]+)\/([^/]+?)(?:\.git)?$/)![2];
+    const repoDir = join(configRoot, "repos", repoName);
+    mkdirSync(dirname(repoDir), { recursive: true });
+    execFileSync("git", ["clone", "--quiet", bare, repoDir], { encoding: "utf8", env: T348_GIT_ENV });
+    execFileSync("git", ["-C", repoDir, "config", "user.name", "remudero-test"], { encoding: "utf8" });
+    execFileSync("git", ["-C", repoDir, "config", "user.email", "test@remudero.invalid"], { encoding: "utf8" });
+
+    writeFileSync(
+      join(shimDir, "gh"),
+      [
+        "#!/bin/sh",
+        'case "$*" in',
+        '  *"pr list"*) echo "[]" ;;',
+        '  *"pr create"*) echo "https://github.com/craigoley/remudero/pull/999" ;;',
+        `  *"--json headRefName"*) git -C ${bare} for-each-ref --format='{"headRefName":"%(refname:short)"}' refs/heads/run-* | tail -1 ;;`,
+        "  *\"--json body\"*) echo '{\"body\":\"\"}' ;;",
+        '  *"pr diff"*) echo "" ;;',
+        "  *) exit 0 ;;",
+        "esac",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    process.env.PATH = `${shimDir}:${savedPath}`;
+
+    await withLiveWritesAllowed(() =>
+      triageCommand([feedbackId], {
+        spawn: async (args: { cwd: string; prompt: string; tools?: string[] }) => {
+          if ((args.tools ?? []).length === 0) {
+            throw new Error("decision-summary rung unavailable"); // the summarizer outage this proof exists for
+          }
+          const id = /USE EXACTLY `(W\d+-T\d+)`/.exec(args.prompt)?.[1];
+          assert.ok(id, `triage prompt must name the reserved id; got: ${args.prompt.slice(0, 200)}`);
+          const dir = join(args.cwd, "plan", "tasks.d");
+          mkdirSync(dir, { recursive: true });
+          writeFileSync(
+            join(dir, `${id}-fixture.yaml`),
+            [
+              `- id: ${id}`,
+              `  title: "a clean task filed for the W1-T348 fail-open proof"`,
+              "  repo: remudero",
+              "  origin: architect",
+              `  depends_on: []`,
+              "  type: implement",
+              "  verify: auto",
+              "  status: queued",
+              "  attempts: 0",
+              "  acceptance:",
+              '    - claim: "the thing holds"',
+              '      proof: "unit test: test/triage.test.ts"',
+              "",
+            ].join("\n"),
+          );
+          return t348FakeWorker(`PROPOSED: file ${id} for feedback#${feedbackId}`);
+        },
+      }),
+    ).catch(() => undefined);
+
+    const runBranch = execFileSync("git", ["-C", bare, "for-each-ref", "--format=%(refname:short)", "refs/heads/run-*"], {
+      encoding: "utf8",
+    })
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .pop();
+    assert.ok(runBranch, "triageCommand pushed its own run branch to the bare origin even though the summarizer threw");
+    const entryYaml = execFileSync("git", ["-C", bare, "show", `${runBranch}:plan/feedback/${feedbackId}.yaml`], {
+      encoding: "utf8",
+    });
+    assert.match(entryYaml, /status: proposed/, "the proposal transition itself is NEVER blocked by a summarizer outage");
+    assert.match(entryYaml, /summary: null/, "fail-open — no half-written entry, no invented content");
+  } finally {
+    process.env.HOME = savedHome;
+    process.env.PATH = savedPath;
+    for (const d of [bare, home, configRoot, shimDir]) rmSync(d, { recursive: true, force: true });
+  }
 });

@@ -718,6 +718,31 @@ export function tryEscalate(e: Escalation, deps: EscalateDeps): string | null {
   }
 }
 
+/** {@link EscalateDeps} plus the one extra dependency {@link escalateWithSummary} needs. */
+export interface EscalateWithSummaryDeps extends EscalateDeps, SummarizeDeps {}
+
+/**
+ * W1-T348: THE CHOKE POINT — compose {@link summarizeEscalation} + {@link escalate} into the
+ * ONE call an await-capable producer makes at escalation-creation time, mirroring why dedup
+ * itself lives inside `escalate()` rather than being reimplemented per caller (see that
+ * function's own doc above): a caller that switches to this wrapper inherits summary
+ * generation "by construction" instead of hand-composing the two calls (and risking forgetting
+ * the `decisionSummary` attach `summarizeEscalation`'s own doc describes). Fail-open is
+ * inherited unchanged from `summarizeEscalation` — a throw, a rejected promise, or an invalid
+ * response resolve to `null`, so a summarizer outage degrades to exactly today's raw-body
+ * issue, never a lost or delayed escalation.
+ *
+ * NOT every producer switches to this: the handful of SYNCHRONOUS dispatch-loop breaker
+ * callbacks (`escalateCircuitBreak` and its siblings, run-task.ts) cannot await without
+ * making their callback interface async, so they keep calling `escalate`/`tryEscalate`
+ * directly and simply never attach a decisionSummary — the documented fail-open default,
+ * since `Escalation.decisionSummary` is optional.
+ */
+export async function escalateWithSummary(e: Escalation, deps: EscalateWithSummaryDeps): Promise<string> {
+  const decisionSummary = await summarizeEscalation(e, deps);
+  return escalate({ ...e, decisionSummary }, deps);
+}
+
 /**
  * Real gateway: `gh issue create`, scoped to `owner/repo`. Runs outside the sandbox
  * (gh is documented to fail TLS verification under Seatbelt, §4A) but still inside
