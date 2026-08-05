@@ -21,7 +21,7 @@ import { chromium, type Browser, type Page } from "playwright";
 import { AxeBuilder } from "@axe-core/playwright";
 import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
 import { isStopped } from "../src/lib/fleet-control.js";
-import { shellBootReady } from "./setup/open-shell.js";
+import { reachSection, shellBootReady } from "./setup/open-shell.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import type { GitHub, PrRef } from "../src/lib/status.js";
 import type { TraceGithub } from "../src/lib/trace.js";
@@ -261,6 +261,7 @@ test("STOP: a single click does NOT stop the fleet; a second ('Confirm STOP') cl
   await withShell(fixtureDeps(root), async (base) => {
     const page = await openShell(base, WRITE_TOKEN);
     try {
+      await reachSection(page, "controls"); // #stop-btn lives in the "controls" section
       await page.click("#stop-btn");
       const textAfterFirstClick = await page.textContent("#stop-btn");
       assert.match(textAfterFirstClick ?? "", /Confirm STOP/);
@@ -288,6 +289,7 @@ test("W1-T222: Enter and Space toggle a row's inline card, aria-expanded reflect
   await withShell(deps, async (base) => {
     const page = await openShell(base);
     try {
+      await reachSection(page, "now"); // the row this test focuses/toggles lives in "now"
       await page.waitForFunction(() => (document.querySelector("#now-list .detail")?.textContent ?? "").includes("phase:"));
       const rowSel = '#now-list li[data-task-id="W1-T3"]';
       await page.locator(rowSel).focus();
@@ -367,6 +369,7 @@ test("W1-T222: a read-only bookmark's inline card renders NO write affordance (M
         // unrelated PRs. Wait for the probe-resolved marker so the expand always renders against
         // the settled scope; the button state is then deterministic, no fixed timeout needed.
         await page.waitForFunction(() => document.body.dataset.writeScopeResolved === "1");
+        await reachSection(page, "needs-me"); // the row about to be clicked lives in "needs-me"
         await page.click('#needs-me-list li[data-task-id="W1-T9"] .task-id');
         await page.waitForFunction(
           () => document.querySelector('#needs-me-list li[data-task-id="W1-T9"]')?.getAttribute("aria-expanded") === "true",
@@ -466,6 +469,7 @@ test("W1-T223: collapse state persists across a reload, and the persisted state 
   await withShell(deps, async (base) => {
     const page = await openShell(base);
     try {
+      await reachSection(page, "recent"); // #recent-toggle lives in the "recent" section
       await page.waitForFunction(() => document.getElementById("recent-toggle")?.getAttribute("aria-expanded") === "true");
       await page.click("#recent-toggle");
       await page.waitForFunction(() => document.getElementById("recent-toggle")?.getAttribute("aria-expanded") === "false");
@@ -493,6 +497,7 @@ test("W1-T223: the section header is the whole click/keyboard toggle target -- t
   await withShell(deps, async (base) => {
     const page = await openShell(base);
     try {
+      await reachSection(page, "recent"); // #recent-toggle lives in the "recent" section
       await page.waitForFunction(() => document.getElementById("recent-toggle")?.getAttribute("aria-expanded") === "true");
 
       await page.click("#recent-toggle");
@@ -560,6 +565,7 @@ test("the write token is never written into the URL, a ledger line, or a log lin
     try {
       assert.doesNotMatch(page.url(), new RegExp(WRITE_TOKEN), "the write token must never appear in the navigated URL");
 
+      await reachSection(page, "controls"); // the write-token form and #pause-btn both live in "controls"
       // paste the write token into the shell's own entry form -- the ONLY sanctioned channel.
       await page.fill("#write-token-input", WRITE_TOKEN);
       await page.click("#write-token-form button[type=submit]");
@@ -598,6 +604,7 @@ test("clearing the stored write token returns the console to the read-only rende
       // the revert below happens live, client-side, with no round trip to GET /.
       await page.evaluate(() => { (window as unknown as { __t202Marker: string }).__t202Marker = "still-here"; });
 
+      await reachSection(page, "controls"); // #write-token-clear-btn lives in "controls"
       await page.click("#write-token-clear-btn");
       await page.waitForFunction(() => (document.getElementById("pause-btn") as HTMLButtonElement)?.disabled === true);
 
@@ -690,4 +697,70 @@ test("console tab bar: the active tab is URL-persisted, deep-linkable, and survi
       await page.context().close();
     }
   });
+});
+
+// ── W1-T335: the shared "reach a section" helper the eight serve.* suites now route through ──
+
+test("W1-T335 reachSection: a true no-op against today's flat shell -- every real section is already reachable, so activating one selects no tab at all", async () => {
+  const root = tmpRoot();
+  await withShell(fixtureDeps(root), async (base) => {
+    const page = await openShell(base);
+    try {
+      for (const id of ["now", "needs-me", "accepted", "up-next", "recent", "rest", "controls", "more"]) {
+        await reachSection(page, id);
+      }
+      // still on the default tab (Decisions) -- reachSection never had to click, because every
+      // one of today's sections is already a direct, always-visible sibling of <main>.
+      assert.equal(await page.$eval("#tab-decisions", (el) => el.getAttribute("aria-selected")), "true");
+      for (const tab of ["tab-now", "tab-plan", "tab-feed"]) {
+        assert.equal(await page.$eval(`#${tab}`, (el) => el.getAttribute("aria-selected")), "false");
+      }
+    } finally {
+      await page.context().close();
+    }
+  });
+});
+
+test("W1-T335 reachSection: activates the owning tab when a section genuinely IS tab-owned, proven against a fixture that presents the tabbed shape (independent of today's flat shell, which owns none of its sections yet)", async () => {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  try {
+    // A minimal stand-in for the shape W1-T336 introduces: a tablist plus two panels, each
+    // hidden unless its own tab is selected -- NOT today's real shell, which nests nothing
+    // inside a tab panel yet (see the no-op test above). Proving reachSection against this
+    // fixture, rather than only against today's shell, is what makes criterion 1 falsifiable:
+    // a helper that silently no-ops under a tabbed shape too would still pass the test above.
+    await page.setContent(`
+      <div id="console-tabs" role="tablist" aria-label="Console view">
+        <button type="button" class="tab-btn" id="tab-a" role="tab" data-tab="a" aria-selected="true">A</button>
+        <button type="button" class="tab-btn" id="tab-b" role="tab" data-tab="b" aria-selected="false">B</button>
+      </div>
+      <section id="panel-a"><ul id="owned-by-a"><li>a-row</li></ul></section>
+      <section id="panel-b" hidden><ul id="owned-by-b"><li>b-row</li></ul></section>
+      <script>
+        document.getElementById("console-tabs").addEventListener("click", (e) => {
+          const btn = e.target.closest(".tab-btn");
+          if (!btn) return;
+          for (const b of document.querySelectorAll(".tab-btn")) b.setAttribute("aria-selected", b === btn ? "true" : "false");
+          document.getElementById("panel-a").hidden = btn.dataset.tab !== "a";
+          document.getElementById("panel-b").hidden = btn.dataset.tab !== "b";
+        });
+      </script>
+    `);
+    assert.equal(await page.$eval("#owned-by-b", (el) => (el as HTMLElement).offsetParent !== null), false, "fixture precondition: panel B starts hidden");
+
+    await reachSection(page, "owned-by-b");
+
+    assert.equal(await page.$eval("#owned-by-b", (el) => (el as HTMLElement).offsetParent !== null), true, "reachSection must activate tab B to reveal the section it owns");
+    assert.equal(await page.$eval("#tab-b", (el) => el.getAttribute("aria-selected")), "true");
+    assert.equal(await page.$eval("#tab-a", (el) => el.getAttribute("aria-selected")), "false");
+
+    // and calling it again for the OTHER panel's section switches back -- proving this is a real
+    // per-call activation, not a one-shot fluke.
+    await reachSection(page, "owned-by-a");
+    assert.equal(await page.$eval("#owned-by-a", (el) => (el as HTMLElement).offsetParent !== null), true);
+    assert.equal(await page.$eval("#tab-a", (el) => el.getAttribute("aria-selected")), "true");
+  } finally {
+    await context.close();
+  }
 });

@@ -29,7 +29,7 @@ import { after, before, test } from "node:test";
 import type { AddressInfo } from "node:net";
 import { chromium, type Browser, type Page } from "playwright";
 import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
-import { shellBootReady } from "./setup/open-shell.js";
+import { reachSection, shellBootReady } from "./setup/open-shell.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import type { GitHub, PrRef } from "../src/lib/status.js";
 import type { TraceGithub } from "../src/lib/trace.js";
@@ -159,6 +159,7 @@ test("a successful write renders a visible acknowledgement naming what happened"
     // Before the click there is nothing to see — otherwise the assertion below proves nothing.
     assert.equal((await ack(page)).hidden, true, "the banner starts hidden");
 
+    await reachSection(page, "controls"); // #pause-btn lives in the "controls" section
     await page.click("#pause-btn"); // -> POST /v1/control/pause, a route the service completes itself
     await page.waitForFunction(() => document.getElementById("write-ack-banner")?.hidden === false);
 
@@ -187,6 +188,7 @@ test("a failed write still surfaces its failure and shows no acknowledgement", a
       route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "boom" }) }),
     );
 
+    await reachSection(page, "controls"); // #pause-btn lives in the "controls" section
     await page.click("#pause-btn");
     await page.waitForFunction(() => document.getElementById("write-error-banner")?.hidden === false);
 
@@ -211,6 +213,7 @@ test("a write the service only RECORDS is worded as pending, never as done", asy
   await withShell(deps, async (base) => {
     const page = await openShellWithWrite(base);
 
+    await reachSection(page, "up-next"); // #drain-now-btn lives in the "up-next" section
     // Drain now is arm-then-confirm: the first click arms, the second acts.
     await page.click("#drain-now-btn");
     await page.waitForFunction(() => document.getElementById("drain-now-btn")?.dataset.confirming === "true");
@@ -248,6 +251,7 @@ test("POLICY acknowledge-and-name-where-to-look: a control whose effect never sh
   const deps = fixtureDeps();
   await withShell(deps, async (base) => {
     const page = await openShellWithWrite(base);
+    await reachSection(page, "up-next"); // #drain-now-btn lives in the "up-next" section
     await page.click("#drain-now-btn");
     await page.waitForFunction(() => document.getElementById("drain-now-btn")?.dataset.confirming === "true");
     await page.click("#drain-now-btn");

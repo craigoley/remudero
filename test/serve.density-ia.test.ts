@@ -16,7 +16,7 @@ import { after, before, test } from "node:test";
 import type { AddressInfo } from "node:net";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { buildServeServer, DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS, type ServeDeps } from "../src/lib/serve.js";
-import { shellBootReady } from "./setup/open-shell.js";
+import { reachSection, shellBootReady } from "./setup/open-shell.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import type { GitHub, PrRef } from "../src/lib/status.js";
 import type { TraceGithub } from "../src/lib/trace.js";
@@ -270,6 +270,7 @@ test("one-click drill: a task reachable only via the 'everything else' corpus op
   await withShell(deps, async (base) => {
     const { context, page } = await openShell(base);
     try {
+      await reachSection(page, "rest");
       await page.waitForFunction(() => document.querySelectorAll("#rest-list li[data-key]").length === 1);
       // the section must already be visible -- no expand click before the row is even clickable.
       assert.equal(await page.evaluate(() => (document.getElementById("rest-detail") as HTMLElement)?.hidden), false);
@@ -342,6 +343,7 @@ test("one-click drill: clicking a dense NOW row opens W1-T158's task card direct
   await withShell(deps, async (base) => {
     const { context, page } = await openShell(base);
     try {
+      await reachSection(page, "now");
       await page.waitForFunction(() => (document.querySelector("#now-list .detail")?.textContent ?? "").includes("phase: recon"));
       assert.equal(await page.evaluate(() => document.querySelector(".row-detail") !== null), false);
 
@@ -403,6 +405,10 @@ test("one-click drill: a click on a row in EVERY section (NOW/NEEDS ME/UP NEXT/R
         { list: "rest-list", taskId: "W1-T5", title: "rest section target" },
       ];
       for (const s of sections) {
+        // the row's OWNING SECTION is its list id with the "-list" suffix stripped ("now-list" ->
+        // "now", "needs-me-list" -> "needs-me", ...) -- reach it before the click below needs it
+        // to be interactable, whatever shape the shell is currently in.
+        await reachSection(page, s.list.replace(/-list$/, ""));
         await page.waitForFunction((sel) => !!document.querySelector(sel), `#${s.list} li[data-task-id="${s.taskId}"]`, { timeout: 5000 });
         // ONE click, on the row's own task-id, scoped to THIS section (rows can legitimately also
         // appear in the "everything else" FIND corpus, which searches the whole board -- scoping

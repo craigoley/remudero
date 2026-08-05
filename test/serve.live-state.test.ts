@@ -22,7 +22,7 @@ import type { AddressInfo } from "node:net";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
 import { isPaused } from "../src/lib/fleet-control.js";
-import { shellBootReady } from "./setup/open-shell.js";
+import { reachSection, shellBootReady } from "./setup/open-shell.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import type { GitHub, PrRef } from "../src/lib/status.js";
 import type { TraceGithub } from "../src/lib/trace.js";
@@ -284,6 +284,7 @@ test("W1-T222: a background update to a DIFFERENT row in the same list does not 
       await page.waitForFunction(() => document.querySelectorAll("#now-list li[data-key]").length === 2);
 
       // Open W1-T1's card, focus a control INSIDE it, and select text inside its title.
+      await reachSection(page, "now");
       await page.click('#now-list li[data-key="W1-T1"] .task-id');
       await page.waitForFunction(
         () => document.querySelector('#now-list li[data-key="W1-T1"]')?.getAttribute("aria-expanded") === "true",
@@ -658,6 +659,7 @@ test("W1-T223: a NEEDS ME item arriving while the section is collapsed adds head
       assert.equal(await page.evaluate(() => document.getElementById("needs-me-toggle")?.getAttribute("aria-expanded")), "false");
       assert.equal(await page.evaluate(() => (document.getElementById("needs-me-body") as HTMLElement)?.hidden), true);
 
+      await reachSection(page, "needs-me");
       await page.click("#needs-me-toggle");
       await page.waitForFunction(() => document.getElementById("needs-me-toggle")?.getAttribute("aria-expanded") === "true");
       assert.equal(
@@ -683,6 +685,7 @@ test("W1-T182: clicking 'Mark handled' closes the issue via the real route, and 
   await withShell(deps, async (base) => {
     const { context, page } = await openShell(base, { token: WRITE_TOKEN });
     try {
+      await reachSection(page, "needs-me");
       await page.waitForFunction(() => (document.getElementById("needs-me-list")?.textContent ?? "").includes("force-push"));
       await page.click("#needs-me-list button:has-text('Mark handled')");
       await page.waitForFunction(() => (document.getElementById("needs-me-list")?.textContent ?? "").includes("nothing needs you"), null, {
@@ -829,6 +832,7 @@ test("a write action issued with a client-held write token succeeds while the UR
       assert.equal(isPaused(root), false);
 
       // the operator pastes the write token into the shell's OWN entry form -- never the URL.
+      await reachSection(page, "controls"); // the write-token form and #pause-btn both live in "controls"
       await page.fill("#write-token-input", WRITE_TOKEN);
       await page.click("#write-token-form button[type=submit]");
       await page.waitForFunction(() => (document.getElementById("pause-btn") as HTMLButtonElement).disabled === false);

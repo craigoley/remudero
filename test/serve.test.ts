@@ -1,3 +1,12 @@
+// test/serve.test.ts — W1-T335 NOTE: this suite asserts structurally against the rendered HTML
+// STRING (renderShellHtml's own output) and the wiring embedded in it (e.g. the
+// getElementById("pause-btn").click() regex checks below) -- it never opens a live Playwright
+// page, so it has no notion of which tab is currently active and cannot be "tab-hidden" the way
+// the other seven serve.* suites' live-DOM assertions can. A section moving under a tab (W1-T336)
+// changes nothing this file reads: the section's markup, ids and inline script text still exist
+// in the rendered string regardless of which tab shows it. Deliberately routed through NO
+// runtime helper (test/setup/open-shell.ts's reachSection) for exactly that reason -- there is no
+// `page` here to reach a section on.
 import assert from "node:assert/strict";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
