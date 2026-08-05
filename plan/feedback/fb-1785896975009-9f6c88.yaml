@@ -1,0 +1,40 @@
+id: fb-1785896975009-9f6c88
+ts: 2026-08-05T02:29:35.009Z
+raw: "CORRECTION TO fb-1785870873355-d91fc2 — THE SHIPS-UNWIRED FLOOR IS WORKING
+  AND MY DENOMINATOR WAS WRONG. That entry claimed the floor's zero was
+  uninformative and cited 266 review.posted rows as the base. Both wrong.
+  unwired_export FIRED on PR #1312 (W1-T332) at 2026-08-05T00:59:10Z, naming
+  three symbols: policy.ts::writeDailyCostCeilingOverride,
+  ::clearDailyCostCeilingOverride, ::resolveDailyCostCeiling — an override store
+  nothing reads, which is exactly the class the floor exists to catch. THE REAL
+  DENOMINATOR WAS 3 PRs / 6 EXPORTS, not 266 reviews: across the whole
+  post-deploy window only #1304, #1310 and #1312 added a src/ export function at
+  all, and the scan was correct on all six. It flagged three dead and stayed
+  silent on dailyCostCeilingOverridePath because siblings call it — intra-PR
+  discrimination that a blanket-firing scan could not produce. I also cited
+  W1-T325 as a post-deploy src/ PR; it added zero exports and was never a
+  candidate. STRUCTURAL CORRECTION: advisories never land on review.posted —
+  they are written to a separate step, review.unwired_advisory, one line per
+  reason code, emitted only when something fires. All-time total is 3 lines: 1
+  unwired_export, 2 inverse_scope (both also correct). THE URGENT PART:
+  review.unwired_advisory is in NO retention category — not DECISION_RELEVANT,
+  not health/deploy, not render-relevant. W1-T322 deferred that registration to
+  W1-T323(iii). The last rotation was 2026-08-03T20:52Z, before the deploy, so
+  the live file happens to be complete right now — but the FIRST ROTATION AFTER
+  NOW strips every advisory line from it, while W1-T323 is the task that must
+  read them. Archives are cumulative so nothing is lost permanently, but any
+  measurement grepping state/ledger.ndjson alone will report a false zero on a
+  three-line dataset. ALSO FOR W1-T323: its 5% false-positive threshold is
+  operating as a ZERO-TOLERANCE test, not a 5% test. At the observed rate (1
+  firing per 18 merged PRs) the window closes on the 100-PR limb in roughly two
+  days with ~5-6 firings, and at n=5 the achievable rates are 0%, 20%, 40% — a
+  single false positive lands at 20% and forces the do-not-flip branch. The
+  threshold cannot be met any other way below n=20 and the shard should say so.
+  The residual concern from the original filing survives but narrowed: the zero
+  case is still unobservable, so silence conflates 'scanned 4, cleared 4' with
+  'scanned 0'. That is an observability gap, not a correctness gap."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null
