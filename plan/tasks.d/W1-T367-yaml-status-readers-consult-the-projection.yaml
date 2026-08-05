@@ -1,0 +1,99 @@
+- id: W1-T367
+  title: "the decorative yaml `status:` field has live readers — the retro's already-shipped skip clears 2 of 250 and lints 248 merged tasks every run, and the open-id set it feeds the SHIPS-UNWIRED floor wrongly reads 248 merged ids as open"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 75.00
+  rationale: "RE-DERIVED AT cdf885a. THE FIELD IS DECORATIVE BY DOCUMENTED DESIGN AND THAT IS NOT THE
+    DEFECT — plan/tasks.yaml's own header says it: '`status:` is DECORATIVE / initial-state only. The
+    runner NEVER writes it back', because 'a YAML round-trip would destroy these comments and a
+    machine writer would race the human editor'. That decision stands. This task does not add a
+    writer, does not sweep the shards, and does not weaken the header.
+    THE MEASUREMENT. 248 of 359 tasks (69%) carry `status: queued` while their PR is MERGED, derived
+    from the merge record — 348 merged PRs carrying a `Remudero-Task:` trailer, cross-referenced
+    against every shard, with a positive control (W1-T339 -> #1329 found) and a negative control (a
+    nonexistent id -> 0). That is not eleven stale rows; it is every task that has ever merged.
+    THREE SESSIONS HAVE NOW INFERRED A HAZARD FROM THIS FIELD THAT DOES NOT EXIST, so the refutation
+    is recorded here to stop a fourth:
+      - IT IS NOT A DISPATCH HAZARD. `isDispatchEligible` (drain.ts) reads `t.status` ONLY for
+        `=== \"blocked\"`, and its FIRST filter is `isMerged(t.id)` -> `already-merged` -> false, ahead
+        of any status check. `isMerged` resolves through `projectPlan`/`derivePrPrecedence`, which
+        never reads `task.status` at all. None of the 248 can be selected.
+      - THE CONSOLE DOES NOT DISAGREE WITH ITSELF. `BoardRow extends StatusProjection`, so board.ts's
+        and serve.ts's `t.status` reads are the DERIVED status, not the shard field.
+      - `yamlStatusMerged` (plan.ts) LOOKS like a yaml-trusting merge resolver but is a default
+        parameter its own doc scopes to 'pure unit tests over fixtures'; all six production call
+        sites of `unmetDependencies`/`assertRunnable` pass an explicit derived resolver.
+    WHAT IS ACTUALLY WRONG is narrower and was missed by all three: two readers treat an
+    INITIAL-STATE field as CURRENT state, and both degrade a gate rather than a display."
+  design: |
+    DECIDE PER READER. Do not blanket-convert — one of the four is right as it stands, and the
+    reason it is right must be written down rather than left to the next reader to re-derive.
+    (i) `planHealthSweep` (retro.ts) — CONVERT. It guards its loop with
+    `if (CLOSED_TASK_STATUSES.has(task.status)) continue; // out of scope — already shipped`.
+    MEASURED at cdf885a: the yaml says merged/done for exactly 2 tasks, so the skip clears 2 and the
+    sweep lints 357 every retro — 248 of them already merged. The skip is ~99% ineffective at the one
+    thing it exists to do. This is not only cost: the loop builds `correctiveTasks`, so the retro is
+    proposing corrective work for tasks that ALREADY SHIPPED. Feed it the same derived projection the
+    dispatch path uses.
+    (ii) `openTaskIdsFromPlan` (run-task.ts) — CONVERT, and this is the one that weakens a gate.
+    It returns the ids whose status is not merged/done, and that set reaches `judgeReview` as
+    `openTaskIds` -> `knownOpenIds`, which decides whether a `SHIPS-UNWIRED: <task-id>` marker names a
+    REAL OPEN task and is therefore honoured. With 248 merged ids wrongly present, a marker naming a
+    long-merged task is honoured instead of flagged — W1-T322's second criterion is exactly
+    'SHIPS-UNWIRED naming a missing/merged task id still flags', and this set is what makes that
+    judgement. A decorative field is currently deciding whether an unwired-export exemption is
+    granted.
+    (iii) `isOpenLintTask` (run-task.ts) — LEAVE IT, AND SAY WHY IN A COMMENT. `rmd lint-plan` is an
+    OFFLINE, DETERMINISTIC linter; the projection needs a GitHub read. Converting it would make a pure
+    linter network-dependent and non-deterministic, and would swing the standing whole-plan signal
+    from ~360 open tasks to ~112 with no gate strengthened — W1-T324/#1299 shipped the open-only
+    default precisely to make that signal readable, and initial-state is a defensible scope for a
+    linter that must run with no network. The comment must name the header's own decision and state
+    that this reader relies on it DELIBERATELY.
+    (iv) `task-card.ts`'s `status: projection?.status ?? task.status` — CONFIRM OR COMMENT. That is
+    already the right shape (projection first, yaml as a stated fallback); if it survives review
+    unchanged it must still carry the why, so a later reader does not "fix" it into a bare yaml read.
+    NOT A DEFECT, AND MUST NOT BE CHANGED: every `=== \"blocked\"` reader (drain.ts, plan.ts).
+    `blocked` is OPERATOR-SET initial state that no projection derives — the withdrawal convention
+    (W1-T229) depends on it, and converting it would make retirement records dispatchable.
+    (v) NO NEW GITHUB READS ON A HOT PATH. Both conversions must consume a projection the caller
+    ALREADY has, never open a second read path — `projectPlan` batches one pass over the plan and that
+    is the pass to reuse. If a call site has no projection in hand, say so rather than adding a fetch.
+    (vi) DEGRADE HONESTLY. When the projection is unavailable (GitHub unreachable), state per reader
+    what happens. For the SHIPS-UNWIRED set, failing toward FLAGGING is safe and failing toward
+    honouring is not; say which you chose and cover it.
+    NOT IN SCOPE: correcting the 248 shards (explicitly refused — it contradicts the documented design
+    and would be stale again next merge); adding any writer for the field; the header's decision.
+    VERIFY the reader set FROM SOURCE first — it was three at one sha and five two hours later.
+  acceptance:
+    - claim: "the retro's already-shipped skip is decided by the derived projection, so a task whose PR merged is skipped rather than linted and proposed for corrective work"
+      proof: "unit test: test/retro.test.ts"
+    - claim: "the open-task id set the review floor consumes excludes ids whose PRs have merged, so a SHIPS-UNWIRED marker naming a merged task is flagged rather than honoured"
+      proof: "unit test: test/ships-unwired-floor.test.ts"
+    - claim: "lint scoping still reads the yaml field and carries a comment stating that it relies on the documented initial-state decision deliberately, so lint-plan stays offline and deterministic"
+      proof: "unit test: test/lint-plan-open-only.test.ts"
+    - claim: "an unavailable projection degrades toward flagging rather than toward honouring an unwired-export exemption"
+      proof: "unit test: test/ships-unwired-floor.test.ts"
+  risk: high
+  origin: oper#status-readers-ruling-2026-08-05
+  plan_refs: ["W1-T322", "W1-T324", "§12"]
+  files: [src/lib/retro.ts, src/run-task.ts, src/lib/task-card.ts, test/retro.test.ts, test/ships-unwired-floor.test.ts, test/lint-plan-open-only.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — every claim is an assertion over a projection-fed decision, machine-checkable.
+    risk:high — Rule 19 counts retro, run-task and task-card as distinct subsystems, and (ii) changes
+    what a REVIEW FLOOR exempts. Converted in the wrong direction it would honour every SHIPS-UNWIRED
+    marker; left alone it keeps granting exemptions off a decorative field.
+    budget_usd 75 — two conversions, one deliberate non-conversion with its comment, one confirmation,
+    and a degradation path.
+    files: DECLARES src/lib/task-card.ts for clause (iv) even though it may end up comment-only — a
+    path the worker writes must be declared, and omitting one is what refused five dispatches in a
+    week. All three test files EXIST and all three proofs execute today (502, 67 and 178 hits), so no
+    criterion here is a forward reference.
+    THE COUNTS ARE MEASURED, NOT ESTIMATED: 248/359 stale, 2 skipped by the retro, 357 linted per
+    retro run. Re-derive with the trailer method before trusting them — they move with every merge.
+    NO depends_on: nothing blocks this, and it does not block the 248 shards, which are deliberately
+    left alone."
