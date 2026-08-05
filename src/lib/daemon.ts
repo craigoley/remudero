@@ -47,7 +47,7 @@ import {
 // W1-T343 (ADOPT DRAIN'S LANE MACHINERY, NEVER A SECOND IMPLEMENTATION): the SAME pure
 // overlap partition `runDrainLanes` (drain.ts) already composes with `runnableCandidates`/
 // `laneDispatchBudget` above — reused here verbatim rather than re-derived.
-import { partitionByFileOverlap, serializedLedgerPayload } from "./dispatch-overlap.js";
+import { partitionByFileOverlap, serializedLedgerPayload, settledSetPayload } from "./dispatch-overlap.js";
 import { HEADROOM_LIMIT_PCT, RESET_UNKNOWN, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
 import type { CostGovernorResult, QueueGovernorResult } from "./sweep.js";
@@ -2374,6 +2374,11 @@ export async function runDaemon(
     // schedule a bare `await deps.runOne(next.id)` inside a `try`/`catch` would — no
     // observable timing change from before this task.
     const settled = await Promise.allSettled(admitted.map((t) => deps.runOne(t.id)));
+    // THE SETTLED COUNTERPART to `dispatch.concurrent_set` above. Emitted BEFORE `stopTicker()` and
+    // before the classification loop: that loop's fatal-error path returns, and `stopTicker` is
+    // itself awaited work that could throw, so anything later would be lost in precisely the
+    // failure cases this row exists to report. `allSettled` never rejects. See `settledSetPayload`.
+    log("dispatch.settled_set", settledSetPayload(admitted, settled, laneCount));
     await stopTicker();
 
     // CLASSIFY EVERY LANE'S SETTLEMENT before this tick decides anything — mirrors

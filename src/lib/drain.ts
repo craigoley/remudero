@@ -21,7 +21,7 @@ import type { UsageSnapshot } from "./headroom.js";
 import type { CostGovernorResult, QueueGovernorResult } from "./sweep.js";
 import { checkDispatchGovernors, governorDeferPayload } from "./dispatch-governor.js";
 import { unmetDependencies, type Plan, type Task } from "./plan.js";
-import { partitionByFileOverlap, serializedLedgerPayload } from "./dispatch-overlap.js";
+import { partitionByFileOverlap, serializedLedgerPayload, settledSetPayload } from "./dispatch-overlap.js";
 
 /** A merged predicate — DERIVED FROM GITHUB in the real runner (status.ts). */
 export type MergedSet = (taskId: string) => boolean;
@@ -1357,6 +1357,11 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
     // doc. Every sibling's outcome is recorded below BEFORE the pass decides
     // whether to stop.
     const settled = await Promise.allSettled(admitted.map((t) => deps.runOne(t.id)));
+    // THE SETTLED COUNTERPART to `dispatch.concurrent_set` above, emitted HERE and not after the
+    // classification loop below: that loop ends in `if (failure) return` / `if (blocked) return`, so
+    // a row written after it would be skipped in exactly the cases it exists to report. `allSettled`
+    // never rejects, so this line is reachable whenever dispatch happened. See `settledSetPayload`.
+    log("dispatch.settled_set", settledSetPayload(admitted, settled, laneCount));
 
     let blocked: { taskId: string; result: RunResult } | undefined;
     let failure: { taskId: string; message: string } | undefined;
