@@ -70,6 +70,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Route } from "./service.js";
 import { sendJson } from "./panel-actions.js";
+import type { EffectiveDailyCostCeiling } from "./policy.js";
 import { readLedgerLines, type LedgerReader } from "./status.js";
 
 /**
@@ -118,6 +119,28 @@ export type UsageUnknownReason = "unreadable" | "no-cache" | "account-mismatch" 
 
 /** Whether the headroom governor is enforcing, per the fleet's own newest heartbeat. */
 export type GovernorState = "armed" | "telemetry-only" | "unknown";
+
+/**
+ * W1-T333: the daily cost ceiling's rendered provenance — the SAME "never collapse an absence
+ * into a healthy-looking default" discipline {@link GovernorState} already holds itself to,
+ * reused rather than reinvented (this task's own design note).
+ *
+ *   - "overridden": `state/DAILY_COST_CEILING_OVERRIDE` (policy.ts) currently holds a live,
+ *     valid override — the effective figure differs from the committed default by operator
+ *     choice, right now.
+ *   - "default": reads the committed `plan/policy.yaml` value, AND the ledger's own audit
+ *     trail (see {@link deriveCostCeilingAudit}) either has never seen a console write to this
+ *     value or its newest one was a "cleared" — this really is "never touched" (or touched and
+ *     deliberately reverted).
+ *   - "default-vanished": ALSO reads the committed default, but the newest console write the
+ *     ledger has ever recorded was a "set", never followed by a "cleared" — the override did
+ *     not revert on purpose. policy.ts's own resolver cannot distinguish this from "default"
+ *     above: `state/` is deliberately outside git, so a wiped state root reverts silently, and
+ *     both cases read back `provenance: "default"` with no `fallback` from that store alone
+ *     (see `EffectiveDailyCostCeiling`'s doc). THE LEDGER is the only place "was this ever
+ *     overridden" survives that wipe — which is the entire reason this task exists.
+ */
+export type CostCeilingProvenance = "overridden" | "default" | "default-vanished";
 
 /**
  * Whether a DISPATCH-DEFERRING governor (the cost ceiling or the WIP/queue ceiling) is currently
@@ -203,6 +226,34 @@ export interface AccountUsageSnapshot {
   queueGovernorWipLimit?: number;
   /** The scope note, carried in the payload so the render can never drop it. */
   measures: string;
+  /** W1-T333: the daily cost ceiling's EFFECTIVE value — policy.ts's `resolveDailyCostCeiling`,
+   *  the SAME resolver a live reader (the daemon's per-tick reload, this console) should call.
+   *  Absent iff the route was never wired with a `resolveCostCeiling` reader (see
+   *  {@link AccountUsageDeps}) — never a fabricated number. */
+  costCeilingUsd?: number;
+  /** `policy.values.sweep.dailyCostCeilingUsd` — carried alongside the effective figure so an
+   *  overridden reading shows BOTH what is in effect and what it was overridden FROM. */
+  costCeilingCommittedDefaultUsd?: number;
+  /** See {@link CostCeilingProvenance}'s doc for the three states this distinguishes. */
+  costCeilingProvenance?: CostCeilingProvenance;
+  /** Set only when an on-disk override exists but was refused (malformed/unreadable/out of the
+   *  committed bound) — policy.ts's `EffectiveDailyCostCeiling.fallback.reason`, surfaced so an
+   *  operator sees WHY a value they expect to be overridden reads as the committed default. */
+  costCeilingFallbackReason?: string;
+  /** The newest console write to the ceiling this panel has a LEDGER record of, regardless of
+   *  whether it is still in effect (see {@link deriveCostCeilingAudit}) — WHO/WHEN/FROM/TO, the
+   *  operator's stated audit trail. Absent iff no `panel.cost_ceiling_override_set`/
+   *  `_cleared` line has ever been seen. */
+  costCeilingAuditAction?: "set" | "cleared";
+  /** `origin` off that same line — panel-actions.ts's stable, non-reversible bearer-token id
+   *  (the "who"), never the raw credential. */
+  costCeilingAuditOrigin?: string;
+  /** `ts` off that same line (the "when"). */
+  costCeilingAuditAsOf?: string;
+  /** `from_usd` off that same line (the "from"). */
+  costCeilingAuditFromUsd?: number;
+  /** `to_usd` off that same line (the "to"). */
+  costCeilingAuditToUsd?: number;
 }
 
 /** Carried in the payload rather than hardcoded client-side, so the honesty travels with the data. */
@@ -229,6 +280,7 @@ export function deriveAccountUsage(
   input: AccountUsageInput,
   lines: ReadonlyArray<Record<string, unknown>>,
   nowMs: number,
+  ceiling?: EffectiveDailyCostCeiling,
 ): AccountUsageSnapshot {
   const governor = deriveGovernorPosture(lines);
   const costGovernor = deriveCostGovernorDeferral(lines);
@@ -258,6 +310,30 @@ export function deriveAccountUsage(
   if (input.email !== undefined) base.accountEmail = input.email;
   if (input.uuid !== undefined) base.accountUuid = input.uuid;
   if (input.org !== undefined) base.accountOrg = input.org;
+
+  // W1-T333: the ceiling's effective value + provenance, and the ledger's own audit trail.
+  // BEFORE the usage-unknown early return below, deliberately — the ceiling is a wholly
+  // separate observable from the usage-cache staleness/account-mismatch check, so a too-old
+  // cache or a switched account must never also hide it.
+  if (ceiling) {
+    base.costCeilingUsd = ceiling.usd;
+    base.costCeilingCommittedDefaultUsd = ceiling.committedDefaultUsd;
+    if (ceiling.fallback) base.costCeilingFallbackReason = ceiling.fallback.reason;
+    const audit = deriveCostCeilingAudit(lines);
+    if (audit) {
+      base.costCeilingAuditAction = audit.action;
+      base.costCeilingAuditAsOf = audit.ts;
+      if (audit.origin !== undefined) base.costCeilingAuditOrigin = audit.origin;
+      if (audit.fromUsd !== undefined) base.costCeilingAuditFromUsd = audit.fromUsd;
+      if (audit.toUsd !== undefined) base.costCeilingAuditToUsd = audit.toUsd;
+    }
+    // THE DISAPPEARANCE CASE — see CostCeilingProvenance's own doc. policy.ts's resolver alone
+    // cannot tell "never overridden" from "was overridden, state/ then vanished"; the ledger's
+    // newest audit action is the tiebreaker: "set" with no later "cleared" means it did not
+    // revert on purpose.
+    base.costCeilingProvenance =
+      ceiling.provenance === "overridden" ? "overridden" : audit?.action === "set" ? "default-vanished" : "default";
+  }
 
   const reason = usageUnknownReason(input, nowMs);
   if (reason) return { ...base, usageUnknownReason: reason };
@@ -378,6 +454,59 @@ function deriveQueueGovernorDeferral(lines: ReadonlyArray<Record<string, unknown
   return out;
 }
 
+/** One console write to the daily cost ceiling override, as {@link deriveCostCeilingAudit} reads
+ *  it off the ledger — see {@link CostCeilingProvenance}'s doc for why this exists at all. */
+interface CostCeilingAudit {
+  action: "set" | "cleared";
+  /** `ts` of the newest matching line. */
+  ts: string;
+  /** `origin` off that line — panel-actions.ts's stable bearer-token id, the "who". Absent iff
+   *  the line predates that field or was written by something other than panel-actions.ts. */
+  origin?: string;
+  fromUsd?: number;
+  toUsd?: number;
+}
+
+/**
+ * W1-T333: the daily cost ceiling's own console-write audit trail, from the NEWEST
+ * `panel.cost_ceiling_override_set`/`panel.cost_ceiling_override_cleared` ledger line — same
+ * "read the newest line by parsed `ts`, never by ledger order" shape {@link deriveGovernorPosture}
+ * and the two dispatch-deferral readers above already use, deliberately, so a fourth ledger
+ * reader in this file does not invent a fifth way to answer "what happened most recently".
+ *
+ * Two step names, not one, so "the operator explicitly reverted it" (`_cleared`) is
+ * distinguishable from "an override is still the newest thing we know about" (`_set`) —
+ * {@link deriveAccountUsage} uses exactly that distinction to detect W1-T332's disappearance
+ * case (a `state/` wipe that silently reverts an override with no error). `panel.*` matches
+ * panel-actions.ts's own naming convention for every other console write; NOTHING IN THIS
+ * CHECKOUT EMITS EITHER STEP YET — the write route is this task's own deliberately unfiled
+ * follow-up (see ledger.ts's `RENDER_RELEVANT_LEDGER_STEPS` doc for the full cross-reference) —
+ * so this reader is exercised by directly-constructed ledger lines in tests until that route
+ * lands, the same shape every other reader in this module already gets from a fixture line.
+ */
+function deriveCostCeilingAudit(lines: ReadonlyArray<Record<string, unknown>>): CostCeilingAudit | undefined {
+  let best: CostCeilingAudit | undefined;
+  let bestParsed = -Infinity;
+  for (const line of lines) {
+    let action: "set" | "cleared";
+    if (line.step === "panel.cost_ceiling_override_set") action = "set";
+    else if (line.step === "panel.cost_ceiling_override_cleared") action = "cleared";
+    else continue;
+    const ts = typeof line.ts === "string" ? line.ts : undefined;
+    const parsed = ts ? Date.parse(ts) : NaN;
+    if (!Number.isFinite(parsed) || parsed < bestParsed) continue;
+    bestParsed = parsed;
+    best = {
+      action,
+      ts: ts as string,
+      origin: typeof line.origin === "string" ? line.origin : undefined,
+      fromUsd: typeof line.from_usd === "number" && Number.isFinite(line.from_usd) ? line.from_usd : undefined,
+      toUsd: typeof line.to_usd === "number" && Number.isFinite(line.to_usd) ? line.to_usd : undefined,
+    };
+  }
+  return best;
+}
+
 /** The shape {@link readAccountUsageFile} narrows `~/.claude.json` down to. Nothing else in that
  *  file is touched, and no other key is ever named in this module. */
 interface ClaudeJsonShape {
@@ -458,6 +587,13 @@ export interface AccountUsageDeps {
   /** Injectable projection — a test supplies a captured reading without any filesystem at all. */
   readAccount?: () => AccountUsageInput;
   now?: () => number;
+  /** W1-T333: resolves the daily cost ceiling's EFFECTIVE value + provenance — policy.ts's
+   *  `resolveDailyCostCeiling`, the SAME resolver a live reader (the daemon's per-tick reload)
+   *  should call. Injectable so a test drives a captured reading without a real `state/`
+   *  override file or `plan/policy.yaml` on disk. Absent (never wired) means the ceiling
+   *  fields are simply absent from the payload — never a fabricated number, the same
+   *  discipline every other field in this route already holds. */
+  resolveCostCeiling?: () => EffectiveDailyCostCeiling;
 }
 
 /**
@@ -474,7 +610,7 @@ export function buildAccountUsageRoute(deps: AccountUsageDeps): Route {
       const now = deps.now ?? Date.now;
       const readLedger = deps.readLedger ?? readLedgerLines;
       const readAccount = deps.readAccount ?? (() => readAccountUsageFile(deps.accountFilePath));
-      sendJson(res, 200, deriveAccountUsage(readAccount(), readLedger(deps.ledgerPath), now()));
+      sendJson(res, 200, deriveAccountUsage(readAccount(), readLedger(deps.ledgerPath), now(), deps.resolveCostCeiling?.()));
     },
   };
 }

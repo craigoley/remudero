@@ -425,6 +425,28 @@ export const HEALTH_STEP_RETENTION_WINDOW_MS = 15 * 60 * 1000;
  *   src/lib/board.ts's `OPERATOR_ACTION_STEPS` / `classifyLine` read `console.kick_refused` and
  *     `console.kick_dispatched` for the RECENT feed's operator-action row (`case "console.kick_refused":` /
  *     `case "console.kick_dispatched":`).
+ *   src/lib/account-usage.ts `deriveCostCeilingAudit` (W1-T333) reads the NEWEST
+ *     `panel.cost_ceiling_override_set`/`panel.cost_ceiling_override_cleared` line for the
+ *     ACCOUNT strip's cost-ceiling provenance (`line.step === "panel.cost_ceiling_override_set"` /
+ *     `line.step === "panel.cost_ceiling_override_cleared"` guards) — the WHO/WHEN/FROM/TO/
+ *     resulting-effective-value audit trail of every console write to the daily cost ceiling
+ *     override (src/lib/policy.ts's W1-T332 `state/`-resident store). `panel.*` matches
+ *     panel-actions.ts's own naming convention for every other console write
+ *     (`panel.pause_requested`, `panel.quiet_hours_toggled`, ...); THE WRITE ROUTE THAT WOULD
+ *     ACTUALLY EMIT THESE TWO LINES IS OUT OF SCOPE for the task that added this entry (W1-T333
+ *     — "the console WRITE control itself" is its own, deliberately unfiled follow-up), so
+ *     nothing in this checkout emits them yet. This membership and account-usage.ts's read
+ *     exist so that follow-up route is a drop-in emitter into an already-render/already-
+ *     retained shape, never a retention or render redesign, when it lands — the same
+ *     "protect the shape before the emitter exists" precedent `daemon.headroom.degraded`/
+ *     `.unavailable` above already set, except here the CONSUMER (not just the membership) is
+ *     real and already exercised by test/ledger-render-retention.test.ts's derivation lock.
+ *     RENDER, NOT DECISION, for the identical reason the two lines above are — and for a
+ *     second, W1-T333-specific reason too: `state/DAILY_COST_CEILING_OVERRIDE` (policy.ts) IS
+ *     the current override and is what a live decision reads; this ledger line is HISTORY —
+ *     "was this ever overridden" surviving a `state/` wipe, which policy.ts's own resolver
+ *     documents it cannot answer alone (see `EffectiveDailyCostCeiling`'s doc: a wipe and a
+ *     "never touched" value both read back `provenance: "default"` with no `fallback`).
  *
  * `test/ledger-render-retention.test.ts` re-derives this set from account-usage.ts's and
  * board.ts's own source on every run — the same "derived from consumers, not hardcoded"
@@ -510,6 +532,11 @@ export const RENDER_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // the same shape `deriveGovernorPosture`'s own guard above uses).
   "daemon.cost_governor",
   "daemon.queue_governor",
+  // W1-T333: the daily-cost-ceiling override's own console-write audit trail — see this Set's
+  // doc block above for the full account-usage.ts/panel-actions.ts cross-reference and why the
+  // emitter is a deliberate follow-up rather than part of this entry.
+  "panel.cost_ceiling_override_set",
+  "panel.cost_ceiling_override_cleared",
 ]);
 
 /** True for any step in {@link RENDER_RELEVANT_LEDGER_STEPS}. */

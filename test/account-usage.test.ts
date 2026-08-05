@@ -14,6 +14,7 @@ import {
   type AccountUsageInput,
   type AccountUsageSnapshot,
 } from "../src/lib/account-usage.js";
+import type { EffectiveDailyCostCeiling } from "../src/lib/policy.js";
 import { renderShellHtml } from "../src/lib/serve.js";
 
 /**
@@ -304,5 +305,125 @@ test("GET /v1/account-usage answers 200 from its real defaults — the real file
   // The age policy runs end-to-end through the route, not just in the unit.
   assert.equal(parsed.usageUnknownReason, "too-old");
   assert.equal(parsed.fiveHour, undefined, "and a too-old reading is still withheld through the route, not just in the unit");
+  // W1-T333: resolveCostCeiling was NOT injected — the ceiling fields must be absent, never a
+  // fabricated number, the same discipline every other field on this route already holds.
+  assert.equal(parsed.costCeilingUsd, undefined);
+  assert.equal(parsed.costCeilingProvenance, undefined);
+});
+
+// ── W1-T333 (an override with no surface is a value overridden invisibly): the effective daily
+// cost ceiling must render WITH its provenance, never the bare number — an overridden value
+// shows the effective figure AND its committed default together, and a value at the committed
+// default must be distinguishable from one never overridden (W1-T332's disappearance case, made
+// observable). See account-usage.ts's CostCeilingProvenance doc for the full tri-state.
+
+/** A console write to the daily-cost-ceiling override, ledger-shaped exactly the way a future
+ *  console WRITE route (panel-actions.ts's own `panel.*` convention — out of scope for this
+ *  task) would emit it: who (origin), from, to, and the resulting effective value. */
+function costCeilingAuditLine(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    ts: "2026-08-04T10:00:00.000Z",
+    run_id: "PANEL-1785900000000",
+    task_id: "PANEL",
+    step: "panel.cost_ceiling_override_set",
+    origin: "3f1a9c7b2e",
+    from_usd: 500,
+    to_usd: 900,
+    effective_usd: 900,
+    ...over,
+  };
+}
+
+test("the cost ceiling renders its provenance — an OVERRIDDEN value shows the effective figure and its committed default together", () => {
+  const input = readAccountUsageFile(FIXTURE);
+  const ceiling: EffectiveDailyCostCeiling = { usd: 900, provenance: "overridden", committedDefaultUsd: 500 };
+  const snap = deriveAccountUsage(input, [], CAPTURED_AT, ceiling);
+  assert.equal(snap.costCeilingUsd, 900, "the EFFECTIVE figure, never the bare committed default");
+  assert.equal(snap.costCeilingCommittedDefaultUsd, 500, "and what it was overridden FROM, alongside it");
+  assert.equal(snap.costCeilingProvenance, "overridden");
+});
+
+test("a ceiling at its committed default with NO ledger audit history reads 'default' — genuinely never overridden", () => {
+  const input = readAccountUsageFile(FIXTURE);
+  const ceiling: EffectiveDailyCostCeiling = { usd: 500, provenance: "default", committedDefaultUsd: 500 };
+  const snap = deriveAccountUsage(input, [], CAPTURED_AT, ceiling);
+  assert.equal(snap.costCeilingUsd, 500);
+  assert.equal(snap.costCeilingProvenance, "default");
+});
+
+test("a ceiling reading DEFAULT while the ledger's newest audit action is a 'set' (never cleared) reads DISTINCTLY from one never touched — W1-T332's disappearance case made observable", () => {
+  const input = readAccountUsageFile(FIXTURE);
+  // policy.ts's own resolver cannot tell these apart — `state/` is outside git, so a wipe
+  // reverts silently and both read back provenance "default" with no fallback. The ledger's
+  // audit trail is the only place "was this ever overridden" survives that wipe.
+  const ceiling: EffectiveDailyCostCeiling = { usd: 500, provenance: "default", committedDefaultUsd: 500 };
+  const neverTouched = deriveAccountUsage(input, [], CAPTURED_AT, ceiling);
+  const vanished = deriveAccountUsage(input, [costCeilingAuditLine()], CAPTURED_AT, ceiling);
+  assert.equal(neverTouched.costCeilingProvenance, "default");
+  assert.equal(vanished.costCeilingProvenance, "default-vanished");
+  assert.notEqual(vanished.costCeilingProvenance, neverTouched.costCeilingProvenance);
+  // WHO/WHEN/FROM/TO survive onto the snapshot, even though the override is no longer in effect.
+  assert.equal(vanished.costCeilingAuditAction, "set");
+  assert.equal(vanished.costCeilingAuditOrigin, "3f1a9c7b2e");
+  assert.equal(vanished.costCeilingAuditAsOf, "2026-08-04T10:00:00.000Z");
+  assert.equal(vanished.costCeilingAuditFromUsd, 500);
+  assert.equal(vanished.costCeilingAuditToUsd, 900);
+});
+
+test("a CLEARED override reads plain 'default', not vanished — the newest audit action wins, by parsed ts not ledger order", () => {
+  const input = readAccountUsageFile(FIXTURE);
+  const ceiling: EffectiveDailyCostCeiling = { usd: 500, provenance: "default", committedDefaultUsd: 500 };
+  const cleared = costCeilingAuditLine({
+    ts: "2026-08-04T11:00:00.000Z",
+    step: "panel.cost_ceiling_override_cleared",
+    from_usd: 900,
+    to_usd: 500,
+    effective_usd: 500,
+  });
+  // The clear is NEWER but appended FIRST — proves ordering is by parsed ts, never ledger order.
+  const snap = deriveAccountUsage(input, [cleared, costCeilingAuditLine()], CAPTURED_AT, ceiling);
+  assert.equal(snap.costCeilingProvenance, "default", "an explicit revert must never read as a vanished override");
+  assert.equal(snap.costCeilingAuditAction, "cleared");
+});
+
+test("a fallback (an on-disk override that exists but was refused) surfaces its reason, so an operator sees WHY", () => {
+  const input = readAccountUsageFile(FIXTURE);
+  const ceiling: EffectiveDailyCostCeiling = {
+    usd: 500,
+    provenance: "default",
+    committedDefaultUsd: 500,
+    fallback: { reason: "override 9999 at /state/DAILY_COST_CEILING_OVERRIDE is out of the committed bound [100, 2500]" },
+  };
+  const snap = deriveAccountUsage(input, [], CAPTURED_AT, ceiling);
+  assert.match(snap.costCeilingFallbackReason ?? "", /out of the committed bound/);
+});
+
+test("no resolveCostCeiling wired (the ceiling parameter omitted) — every ceiling field is absent, never fabricated", () => {
+  const input = readAccountUsageFile(FIXTURE);
+  const snap = deriveAccountUsage(input, [costCeilingAuditLine()], CAPTURED_AT);
+  assert.equal(snap.costCeilingUsd, undefined);
+  assert.equal(snap.costCeilingProvenance, undefined);
+  assert.equal(snap.costCeilingCommittedDefaultUsd, undefined);
+});
+
+test("GET /v1/account-usage renders the ceiling through the route when resolveCostCeiling is wired", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "account-usage-ceiling-route-"));
+  const ledgerPath = join(dir, "ledger.ndjson");
+  writeFileSync(ledgerPath, `${JSON.stringify(costCeilingAuditLine())}\n`);
+  const route = buildAccountUsageRoute({
+    ledgerPath,
+    accountFilePath: FIXTURE,
+    now: () => CAPTURED_AT,
+    resolveCostCeiling: () => ({ usd: 900, provenance: "overridden", committedDefaultUsd: 500 }),
+  });
+
+  let body = "";
+  const res = { writeHead() {}, end(chunk: string) { body = chunk; } } as unknown as ServerResponse;
+  await route.handler({} as never, res, { params: {} });
+
+  const parsed = JSON.parse(body) as AccountUsageSnapshot;
+  assert.equal(parsed.costCeilingUsd, 900);
+  assert.equal(parsed.costCeilingCommittedDefaultUsd, 500);
+  assert.equal(parsed.costCeilingProvenance, "overridden");
 });
 

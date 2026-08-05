@@ -411,6 +411,135 @@ test("RENDER_RELEVANT_LEDGER_STEPS includes daemon.cost_governor and daemon.queu
   assert.ok(RENDER_RELEVANT_LEDGER_STEPS.has("daemon.queue_governor"));
 });
 
+// ── W1-T333 (an override with no surface is a value overridden invisibly): the daily cost
+// ceiling's own console-write audit trail. `panel.cost_ceiling_override_set`/`_cleared` carry
+// WHO (origin)/WHEN (ts)/FROM/TO/the resulting effective value -- the operator's stated audit
+// requirement -- and, like daemon.headroom/console.kick_refused above, RENDER not DECISION: the
+// live override lives in policy.ts's state/ store; this line is HISTORY, so a rotation must not
+// erase it (the falsifier this task names explicitly: "a rotation that would previously have
+// erased the audit line now leaves it readable"). NOTHING IN THIS CHECKOUT EMITS THESE STEPS
+// YET -- the write route is this task's own deliberately unfiled follow-up -- so these tests
+// drive directly-constructed lines, the same shape every other test in this file already uses.
+
+test("RENDER RETENTION — a fresh panel.cost_ceiling_override_set line survives rotation with who/from/to/effective intact, and the ACCOUNT strip's audit reading is real", () => {
+  const dir = tmpDir();
+  try {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    const nowMs = Date.now();
+    const freshMs = nowMs - 60_000;
+
+    const lines: string[] = [
+      rawLine("panel.cost_ceiling_override_set", "PANEL", freshMs, {
+        origin: "3f1a9c7b2e",
+        from_usd: 500,
+        to_usd: 900,
+        effective_usd: 900,
+      }),
+    ];
+    for (let i = 0; i < 300; i++) lines.push(noiseLine(i, freshMs));
+    writeFileSync(ledgerPath, lines.join("\n") + "\n");
+
+    const ceiling = 2000;
+    assert.ok(ledgerExceedsRotationCeiling(ledgerPath, ceiling), "sanity: padded past the ceiling");
+
+    const result = rotateLedger(ledgerPath, { ceilingBytes: ceiling, now: () => new Date(nowMs) });
+    assert.equal(result.rotated, true);
+
+    const liveContent = readFileSync(ledgerPath, "utf8");
+    assert.ok(liveContent.includes("panel.cost_ceiling_override_set"), "the fresh audit line survives rotation");
+    assert.ok(liveContent.includes("3f1a9c7b2e"), "who (origin) survives verbatim, not just the step name");
+
+    // The REAL consumer, not a string check: account-usage.ts's own deriveAccountUsage reading
+    // the post-rotation live ledger, with a ceiling that currently reads "default" (the
+    // disappearance case) -- the surviving audit line is what makes it read "default-vanished"
+    // rather than "default", the whole point of retaining it through rotation.
+    const input: AccountUsageInput = { unreadable: true };
+    const postRotationLines = readLedgerLines(ledgerPath);
+    const ceilingReading = { usd: 500, provenance: "default" as const, committedDefaultUsd: 500 };
+    const snapshot = deriveAccountUsage(input, postRotationLines, nowMs, ceilingReading);
+    assert.equal(snapshot.costCeilingProvenance, "default-vanished", "the surviving audit line must still be read post-rotation");
+    assert.equal(snapshot.costCeilingAuditOrigin, "3f1a9c7b2e");
+    assert.equal(snapshot.costCeilingAuditFromUsd, 500);
+    assert.equal(snapshot.costCeilingAuditToUsd, 900);
+    assert.ok(snapshot.costCeilingAuditAsOf, "the audit's own ts must survive rotation and be read back");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("RENDER RETENTION — a panel.cost_ceiling_override_set line older than RENDER_STEP_RETENTION_WINDOW_MS is archived, not retained forever", () => {
+  const dir = tmpDir();
+  try {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    const nowMs = Date.now();
+    const staleMs = nowMs - (RENDER_STEP_RETENTION_WINDOW_MS + 60_000);
+    const freshMarkerMs = nowMs - 60_000;
+
+    const lines: string[] = [
+      rawLine("panel.cost_ceiling_override_set", "PANEL", staleMs, { origin: "aaaa1111", from_usd: 500, to_usd: 1_200, effective_usd: 1_200 }),
+    ];
+    for (let i = 0; i < 300; i++) lines.push(noiseLine(i, freshMarkerMs));
+    writeFileSync(ledgerPath, lines.join("\n") + "\n");
+
+    const ceiling = 2000;
+    assert.ok(ledgerExceedsRotationCeiling(ledgerPath, ceiling), "sanity: padded past the ceiling");
+
+    const result = rotateLedger(ledgerPath, { ceilingBytes: ceiling, now: () => new Date(nowMs) });
+    assert.equal(result.rotated, true);
+
+    const liveContent = readFileSync(ledgerPath, "utf8");
+    assert.ok(
+      !liveContent.includes("aaaa1111"),
+      "an audit line long outside the render window is archived — bounded by recency, not kept forever",
+    );
+
+    const archiveContent = readFileSync(result.archivePath as string, "utf8");
+    assert.ok(archiveContent.includes("aaaa1111"), "the archived (never deleted) roll still holds the stale audit line verbatim");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("RENDER RETENTION — a fresh panel.cost_ceiling_override_cleared line survives rotation too, and reads as a deliberate revert (never 'vanished')", () => {
+  const dir = tmpDir();
+  try {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    const nowMs = Date.now();
+    const freshMs = nowMs - 60_000;
+
+    const lines: string[] = [
+      rawLine("panel.cost_ceiling_override_cleared", "PANEL", freshMs, { origin: "bbbb2222", from_usd: 900, to_usd: 500, effective_usd: 500 }),
+    ];
+    for (let i = 0; i < 300; i++) lines.push(noiseLine(i, freshMs));
+    writeFileSync(ledgerPath, lines.join("\n") + "\n");
+
+    const ceiling = 2000;
+    assert.ok(ledgerExceedsRotationCeiling(ledgerPath, ceiling), "sanity: padded past the ceiling");
+
+    const result = rotateLedger(ledgerPath, { ceilingBytes: ceiling, now: () => new Date(nowMs) });
+    assert.equal(result.rotated, true);
+
+    const liveContent = readFileSync(ledgerPath, "utf8");
+    assert.ok(liveContent.includes("panel.cost_ceiling_override_cleared"), "the fresh cleared-audit line survives rotation");
+
+    const input: AccountUsageInput = { unreadable: true };
+    const postRotationLines = readLedgerLines(ledgerPath);
+    const ceilingReading = { usd: 500, provenance: "default" as const, committedDefaultUsd: 500 };
+    const snapshot = deriveAccountUsage(input, postRotationLines, nowMs, ceilingReading);
+    assert.equal(snapshot.costCeilingProvenance, "default", "an explicit clear must never read as a vanished override");
+    assert.equal(snapshot.costCeilingAuditAction, "cleared");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── Sanity: RENDER_RELEVANT_LEDGER_STEPS itself names the two cost-ceiling audit steps (this
+// task's own literal ask), matching the analogous sanity tests above for W1-T275/W1-T329.
+test("RENDER_RELEVANT_LEDGER_STEPS includes panel.cost_ceiling_override_set and panel.cost_ceiling_override_cleared", () => {
+  assert.ok(RENDER_RELEVANT_LEDGER_STEPS.has("panel.cost_ceiling_override_set"));
+  assert.ok(RENDER_RELEVANT_LEDGER_STEPS.has("panel.cost_ceiling_override_cleared"));
+});
+
 test("sanity: an absent ledger never exceeds anything and RENDER_RELEVANT_LEDGER_STEPS is unaffected by that path", () => {
   const dir = tmpDir();
   try {

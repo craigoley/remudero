@@ -67,6 +67,7 @@ import { buildAddOperatorNoteRoute, buildListOperatorNotesRoute } from "./operat
 import { createLastSeenStore, lastSeenPath, type LastSeenStore } from "./last-seen.js";
 import { buildDaemonHealthRoute, type DaemonHealthDeps } from "./daemon-health.js";
 import { buildAccountUsageRoute, type AccountUsageDeps } from "./account-usage.js";
+import { loadDefaultPolicy, resolveDailyCostCeiling } from "./policy.js";
 import { resolveFreshness } from "./console-freshness.js";
 import { readIdleReasons, renderIdleReasonsHtml } from "./idle-reasons-panel.js";
 import { readLedgerLines } from "./status.js";
@@ -741,6 +742,11 @@ export function renderShellHtml(
          "that is the surface that already answers 'may the fleet work'". -->
     <span class="glance-item"><span class="glance-label">cost governor</span><span class="glance-value" id="au-cost-governor">…</span></span>
     <span class="glance-item"><span class="glance-label">queue governor</span><span class="glance-value" id="au-queue-governor">…</span></span>
+    <!-- W1-T333: the daily cost ceiling's EFFECTIVE value, never the bare number -- an
+         overridden value renders alongside its committed default, and a value AT the default
+         renders distinguishably from one that was overridden and vanished (state/ wiped without
+         an explicit revert). See account-usage.ts's CostCeilingProvenance doc. -->
+    <span class="glance-item"><span class="glance-label">cost ceiling</span><span class="glance-value" id="au-cost-ceiling">…</span></span>
     <span class="glance-item"><span class="glance-label">usage as of</span><span class="glance-value" id="au-as-of">…</span></span>
     <span class="glance-item glance-scope"><span class="glance-label" id="au-measures"></span></span>
   </section>
@@ -1813,11 +1819,32 @@ export function renderShellHtml(
         ? \`\${a.queueGovernorObservedOpenCount} of \${a.queueGovernorWipLimit} open · \${formatRelative(a.queueGovernorAgeMs)}\`
         : "unknown",
     );
+    setGlanceValue("au-cost-ceiling", costCeilingLabel(a));
     setGlanceValue(
       "au-as-of",
       a.usageUnknownReason ? \`unknown (\${a.usageUnknownReason})\` : formatTimestamp(a.usageAsOf),
     );
     setGlanceValue("au-measures", a.measures || "");
+  }
+
+  /** W1-T333: the daily cost ceiling's effective figure WITH its provenance, so an override
+   *  never changes spend behavior invisibly -- see account-usage.ts's CostCeilingProvenance doc
+   *  for the three states this distinguishes (overridden / default / default-vanished).
+   *  "unknown" only when the route was never wired with a resolveCostCeiling reader -- never a
+   *  fabricated number. */
+  function costCeilingLabel(a) {
+    if (typeof a.costCeilingUsd !== "number") return "unknown";
+    const effective = costLabel(a.costCeilingUsd);
+    if (a.costCeilingFallbackReason) {
+      return \`\${effective} (default — override refused: \${a.costCeilingFallbackReason})\`;
+    }
+    if (a.costCeilingProvenance === "overridden") {
+      return \`\${effective} (overridden from \${costLabel(a.costCeilingCommittedDefaultUsd)})\`;
+    }
+    if (a.costCeilingProvenance === "default-vanished") {
+      return \`\${effective} (default — an override was set and is no longer in effect)\`;
+    }
+    return \`\${effective} (default)\`;
   }
 
   /** The cache-restore path (W1-T154): ingest the cached snapshot's tasks/side-data and paint
@@ -3738,7 +3765,17 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
     defaultPollIntervalMs: deps.daemonHealth?.defaultPollIntervalMs,
   };
 
-  const accountUsageDeps: AccountUsageDeps = { ...deps.accountUsage, ledgerPath: deps.ledgerPath };
+  // W1-T333: the real default reads policy.ts's own memoized committed policy (a deploy-time
+  // constant) against `deps.fleetControlRoot`'s `state/` override file (always read fresh, per
+  // request — resolveDailyCostCeiling never caches that half) — the same resolver a live reader
+  // (the daemon's per-tick reload) uses, so the console and the daemon can never disagree about
+  // what "effective" means.
+  const accountUsageDeps: AccountUsageDeps = {
+    ...deps.accountUsage,
+    ledgerPath: deps.ledgerPath,
+    resolveCostCeiling:
+      deps.accountUsage?.resolveCostCeiling ?? (() => resolveDailyCostCeiling(deps.fleetControlRoot, loadDefaultPolicy())),
+  };
 
   return [
     buildStatusRoute(deps.board, lastSeen),

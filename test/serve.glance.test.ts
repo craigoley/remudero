@@ -479,3 +479,101 @@ test("ACCOUNT strip: a deferring cost/queue governor renders the observed figure
     }
   });
 });
+
+// ── W1-T333 (an override with no surface is a value overridden invisibly): the effective daily
+// cost ceiling must render WITH its provenance, in a REAL browser -- not only in a string
+// builder -- and a value at the committed default must be distinguishable from one never
+// overridden (W1-T332's disappearance case, made observable).
+
+function minimalAccountUsageReading() {
+  return {
+    email: "operator@example.com",
+    uuid: "00000000-1111-2222-3333-444444444444",
+    cacheUuid: "00000000-1111-2222-3333-444444444444",
+    cacheFetchedAtMs: Date.now(),
+    fiveHour: { percentUsed: 3, resetsAt: "2026-08-04T20:49:59.000Z" },
+    sevenDay: { percentUsed: 0, resetsAt: "2026-08-05T04:59:59.000Z" },
+  };
+}
+
+test("ACCOUNT strip: an OVERRIDDEN cost ceiling renders the effective value and its committed default together, from a real browser", async () => {
+  const root = tmpRoot();
+  const deps = fixtureDeps(root, [task({ id: "W1-T1" })], {
+    accountUsage: {
+      readAccount: minimalAccountUsageReading,
+      resolveCostCeiling: () => ({ usd: 900, provenance: "overridden", committedDefaultUsd: 500 }),
+    },
+  });
+
+  await withShell(deps, async (base) => {
+    const { context, page } = await openShell(base);
+    try {
+      await page.waitForFunction(() => (document.getElementById("au-account")?.textContent ?? "…") !== "…", null, { timeout: 5000 });
+      const ceilingText = await glanceText(page, "au-cost-ceiling");
+      assert.match(ceilingText, /\$900/, "the EFFECTIVE figure renders, never the bare committed default");
+      assert.match(ceilingText, /\$500/, "the committed default renders alongside it, so a reader sees what it was overridden FROM");
+      assert.match(ceilingText, /overridden/, "the provenance itself renders, in words, not just as two numbers");
+    } finally {
+      await context.close();
+    }
+  });
+});
+
+test("ACCOUNT strip: a cost ceiling at its committed default with NO ledger history renders 'default' -- distinguishable from an override that vanished", async () => {
+  const root = tmpRoot();
+  const deps = fixtureDeps(root, [task({ id: "W1-T1" })], {
+    accountUsage: {
+      readAccount: minimalAccountUsageReading,
+      resolveCostCeiling: () => ({ usd: 500, provenance: "default", committedDefaultUsd: 500 }),
+    },
+  });
+
+  await withShell(deps, async (base) => {
+    const { context, page } = await openShell(base);
+    try {
+      await page.waitForFunction(() => (document.getElementById("au-account")?.textContent ?? "…") !== "…", null, { timeout: 5000 });
+      const ceilingText = await glanceText(page, "au-cost-ceiling");
+      assert.match(ceilingText, /\$500/);
+      assert.match(ceilingText, /default/);
+      assert.equal(/overridden|vanished/.test(ceilingText), false, "a genuinely never-touched value must not read as overridden or vanished");
+    } finally {
+      await context.close();
+    }
+  });
+});
+
+test("ACCOUNT strip: a cost ceiling reading DEFAULT while the ledger's own audit trail shows a 'set' never cleared renders as VANISHED, not as never-overridden -- W1-T332's disappearance case, in a real browser", async () => {
+  const root = tmpRoot();
+  const deps = fixtureDeps(root, [task({ id: "W1-T1" })], {
+    accountUsage: {
+      readAccount: minimalAccountUsageReading,
+      // policy.ts's own resolver cannot tell "never overridden" from "state/ vanished" --
+      // both read back provenance "default" here. The ledger's audit line below is what makes
+      // the strip say "vanished" instead of "default", the whole point of this task.
+      resolveCostCeiling: () => ({ usd: 500, provenance: "default", committedDefaultUsd: 500 }),
+    },
+  });
+  appendFileSync(
+    deps.board.ledgerPath,
+    ledgerLine({
+      ts: new Date(Date.now() - 30_000).toISOString(),
+      step: "panel.cost_ceiling_override_set",
+      origin: "3f1a9c7b2e",
+      from_usd: 500,
+      to_usd: 1_200,
+      effective_usd: 1_200,
+    }),
+  );
+
+  await withShell(deps, async (base) => {
+    const { context, page } = await openShell(base);
+    try {
+      await page.waitForFunction(() => (document.getElementById("au-account")?.textContent ?? "…") !== "…", null, { timeout: 5000 });
+      const ceilingText = await glanceText(page, "au-cost-ceiling");
+      assert.match(ceilingText, /\$500/, "the CURRENT effective value (the committed default) still renders");
+      assert.match(ceilingText, /no longer in effect|vanished/i, "the vanished-override note renders, distinguishing this from never-touched");
+    } finally {
+      await context.close();
+    }
+  });
+});
