@@ -443,6 +443,7 @@ import { join } from "node:path";
 import {
   deployAutoPath,
   deployFailedAlertPath,
+  deployIdleDeferredSincePath,
   deployLastFailedPath,
   deployMarkerPath,
   realDeployDeps,
@@ -579,6 +580,50 @@ test("realDeployDeps: alert writes DEPLOY_FAILED + DEPLOY_LAST_FAILED; clearMark
     deps.clearMarker();
     assert.equal(deps.markerPresent(), false);
     deps.clearMarker(); // idempotent when already gone
+  });
+});
+
+test("realDeployDeps: deferredSince/setDeferredSince/clearDeferredSince round-trip through state/DEPLOY_IDLE_DEFERRED_SINCE", () => {
+  withTemp((root) => {
+    const deps = realDeployDeps({
+      installPath: "/inst",
+      stateRoot: root,
+      daemonLabel: "d",
+      serveLabel: "s",
+      servePort: 4317,
+      uid: 1,
+      ledgerPath: join(root, "l"),
+      log: () => {},
+      execFile: () => "",
+      sleep: () => {},
+    });
+    assert.equal(deps.deferredSince!(), undefined, "nothing tracked yet");
+    deps.setDeferredSince!(1234567);
+    assert.equal(deps.deferredSince!(), 1234567, "round-trips through the state file");
+    assert.match(readFileSync(deployIdleDeferredSincePath(root), "utf8"), /1234567/);
+    deps.clearDeferredSince!();
+    assert.equal(deps.deferredSince!(), undefined, "cleared");
+    deps.clearDeferredSince!(); // idempotent when already gone
+  });
+});
+
+test("realDeployDeps: an unparseable DEPLOY_IDLE_DEFERRED_SINCE reads as no deferral tracked, not a crash", () => {
+  withTemp((root) => {
+    const deps = realDeployDeps({
+      installPath: "/inst",
+      stateRoot: root,
+      daemonLabel: "d",
+      serveLabel: "s",
+      servePort: 4317,
+      uid: 1,
+      ledgerPath: join(root, "l"),
+      log: () => {},
+      execFile: () => "",
+      sleep: () => {},
+    });
+    mkdirSync(join(root, "state"), { recursive: true });
+    writeFileSync(deployIdleDeferredSincePath(root), "not-a-number");
+    assert.equal(deps.deferredSince!(), undefined);
   });
 });
 
