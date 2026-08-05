@@ -115,6 +115,16 @@ const ALLOWED: ReadonlyArray<{ file: string; symbol: string; reason: string }> =
       "test/worker-run-lock.test.ts drives pruneStaleRuns with an explicit graceMs, which is the seam " +
       "that actually matters here.",
   },
+  {
+    file: "src/lib/serve.ts",
+    symbol: "resolveCostCeiling",
+    reason:
+      "The DEFAULT only, one level up: buildServeRoutes reaches this loadDefaultPolicy read ONLY " +
+      "when deps.accountUsage?.resolveCostCeiling is absent, so any test injecting resolveCostCeiling " +
+      "(as test/serve.glance.test.ts and test/account-usage.test.ts both do) bypasses this line " +
+      "entirely — the same DEFAULT-only shape review.ts's proofTimeoutMs entry above already " +
+      "documents, just wrapped in a closure this file's HAS_SEAM regex does not parse into.",
+  },
 ];
 
 interface Reader {
@@ -175,9 +185,12 @@ test("CALIBRATION: the detection finds the readers recon-EJ measured, and no mor
   // is counted here because the detector counts every unredirectable READ, seamed or not, and the
   // seam question is test 2's job. ELEVEN since `dailyCostCeilingReloader` (run-task.ts, W1-T331)
   // landed — a TENTH consumer, also SEAMED (`deps.policy ?? loadPolicy(...)`), so it passes test 2
-  // the same way. Raising this number is the correct response to a new reader ONLY when that
-  // reader also passes test 2; a bare new reader must fail there first.
-  assert.equal(readers.length, 11, `expected 11 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
+  // the same way. TWELVE since the ACCOUNT strip's cost-ceiling render (serve.ts, W1-T333) landed —
+  // an ELEVENTH consumer, ALLOWLISTED (its seam is `deps.accountUsage?.resolveCostCeiling ??`, one
+  // line up from the loadDefaultPolicy call this detector finds, wrapped in a closure HAS_SEAM does
+  // not parse into — see that entry's reason). Raising this number is the correct response to a new
+  // reader ONLY when that reader also passes test 2; a bare new reader must fail there first.
+  assert.equal(readers.length, 12, `expected 12 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
 
   // `symbolise` labels the LAST bare `const policy = loadPolicy(...)` as daemonCommand's, because that
   // reader carries no distinctive identifier of its own. Today exactly ONE such line survives —
@@ -196,6 +209,7 @@ test("CALIBRATION: the detection finds the readers recon-EJ measured, and no mor
     "src/lib/launchd.ts",
     "src/lib/policy.ts",
     "src/lib/review.ts",
+    "src/lib/serve.ts",
     "src/lib/sweep.ts",
     "src/lib/worker.ts",
     "src/run-task.ts",
