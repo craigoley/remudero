@@ -1,0 +1,132 @@
+- id: W1-T372
+  title: "an exhausted API quota is fleet-stopping and nothing on the daemon's tick observes it — the only quota read is a pull-only display value on the CORE bucket, while GraphQL is the bucket that actually hits zero and discards finished work"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 85.00
+  rationale: "SCOPED BY THE SESSION THAT BUILT #1349 (the post-review stall detector) AND DELIBERATELY
+    KEPT OUT OF IT: a different trigger class. #1349 fires on a REPEATED DOWNSTREAM SYMPTOM — post-review
+    having failed N times. This fires on a LEADING INDICATOR, before anything has failed, and it catches
+    consumers #1349's detector never sees. Folding them together would have meant two triggers, two dedup
+    keys and two thresholds inside one concern.
+    THE COST, RE-DERIVED AT a2b904d RATHER THAN INHERITED. `gh pr create` is GraphQL. Run
+    W1-T333-1785895930303 finished its implement work and then died at the push boundary: a `run.error`
+    line at 2026-08-05T02:54:07.579Z carries, verbatim, `Command failed: gh pr create --repo
+    craigoley/remudero --base main --head run-W1-T333-1785895930303 --title test(config-reader-seams):
+    allowlist the cost ceiling default reader (W1-T333) --fill` followed by the GraphQL rate-limit
+    message. Roughly forty minutes of completed risk:high work was discarded and re-dispatched, and the
+    orphaned branch survived with no PR pointing at it. (Positive control: 19 ledger rows carry that
+    run_id; a fabricated run_id returns 0.) The same exhaustion blocked the sweep's own recovery verb 91
+    times — see #1349 — and an operator hit it twice in one day, once mid-task.
+    THE PREMISE THAT NEEDED CORRECTING. It is NOT true that nothing reads the quota.
+    `readGhRateLimitRemaining` (`src/lib/daemon-health.ts`) already shells `gh api rate_limit`. What is
+    true is narrower and worse: it reads `resources.core.remaining` ONLY — CORE, not GraphQL, by an
+    explicit and once-reasonable decision recorded in that module's header (the board's own `gh pr
+    view`/`pr list`/`issue view` reads spend core). GraphQL is the bucket that has actually been sitting
+    at 0/5000 this week while core held roughly 4,600 unused. And its single caller is
+    `buildDaemonHealthRoute`, registered as an HTTP route in `serve.ts` — so the value is PULL-ONLY,
+    produced when somebody asks, and `src/lib/daemon.ts` contains no quota read at all. Nothing detects
+    a transition, and nothing escalates."
+  design: |
+    ONE CONCERN: the daemon's health tick observes BOTH quota buckets and surfaces an exhaustion once
+    per reset window. Nothing else.
+
+    (i) BOTH BUCKETS, TREATED INDEPENDENTLY. REST/core and GraphQL are separate budgets with separate
+    resets and different consumers, so they get separate readings, separate transitions and separate
+    escalations. Core exhaustion degrades the board's reads; GraphQL exhaustion kills `gh pr create`,
+    `gh pr view --json` and therefore `rmd review` — it discards finished work at a push boundary. A
+    single merged "quota" number would hide exactly the distinction that matters. Extend
+    `readGhRateLimitRemaining` (daemon-health.ts) rather than adding a second `gh api rate_limit` call:
+    one probe already returns both buckets in one payload, and its `exec` seam is already injectable
+    for tests. Preserve its existing fail-soft contract — `undefined` on any read/parse error, never a
+    fabricated number.
+
+    (ii) BESIDE `daemon.headroom`, NOT AS A NEW RUNG — and this is a positive finding, not a guess.
+    `runDaemon` already logs `daemon.headroom` every tick with `percent_used`, `limit_pct`, `resets_at`
+    and `enforced`. That is the per-tick health rung, it already carries a reset timestamp, and
+    `resets_at` is the exact field shape this escalation's episode key needs. Put the quota reading on
+    the same tick. Do NOT invent a second cadence.
+
+    (iii) A STATE TRANSITION, NOT A VALUE CHECK. `remaining === 0` is TRUE on every tick until the
+    hourly reset, so a value check re-alerts every tick for up to an hour. What is being surfaced is
+    the CROSSING — a bucket that had budget and now has none. The escalation must fire on the
+    transition into exhaustion and stay silent while it persists. Every monitor an overnight session
+    wrote failed precisely this way; treat a value test as the defect.
+
+    (iv) DEDUP ON THE BUCKET'S RESET TIMESTAMP, WHICH IS NOT OPTIONAL. `escalate()` gates its entire
+    dedup block on `if (prRef && deps.issues.listOpen)` — an escalation naming NO PR skips dedup
+    altogether and opens a fresh issue every call. That produced eight identical "dispatch queue
+    starved" issues. This escalation names no PR, so it must carry its own episode key, exactly as
+    `escalateHeadroomReserveBreach` does: it skips iff a prior `daemon.headroom_reserve.escalated` line
+    has `l.resets_at === info.resetsAt`. Reuse that discipline verbatim, keyed per bucket so a GraphQL
+    exhaustion and a core exhaustion in the same hour are not collapsed into one notice.
+
+    (v) SAY WHAT HAPPENS WHEN IT CLEARS. A quota exhaustion is self-clearing on the hour, so a notice
+    that requires a human close is a notice that is stale before it is read — and a decision-authority
+    audit measured roughly 80% of 369 needs-human issues as things the machine resolved itself and
+    never retracted. RETRACTION IS THE RIGHT DEFAULT: when the bucket recovers, the notice should close
+    itself, citing the recovery. W1-T345 is the filed retraction work; NOTE THE RELATIONSHIP BUT DO NOT
+    DEPEND ON IT — if the retraction mechanism is not available when this lands, the notice must at
+    minimum state its own expiry (the reset timestamp) in its body so a human reading it later knows it
+    is self-clearing without checking anything.
+
+    (vi) REGISTER ANY LEDGER STEP THE DETECTOR DECIDES ON, AND MIND WHERE THE GUARD CAN SEE IT.
+    `test/ledger-rotation.test.ts` re-derives the decision-relevant step set from consumer sources and
+    fails when a deciding reader consults an unregistered step. That guard caught #1349's detector
+    inheriting the exact defect it was built to fix — its own counted steps were rotatable, so a
+    rotation mid-stall would have reset the count and re-silenced it. The same trap applies here to the
+    escalation marker, and to any prior-reading used to detect the transition across a daemon restart.
+    TWO PRACTICAL CONSEQUENCES: put the escalator in `run-task.ts`, beside
+    `escalateHeadroomReserveBreach`, because that file IS in the guard's `consumerFiles` list; and note
+    that `src/lib/daemon.ts` and `src/lib/daemon-health.ts` are NOT in that list, so a deciding read
+    placed in either is invisible to the guard and the implementer must add the file to `consumerFiles`
+    in the same change.
+
+    (vii) NOT IN SCOPE: a warning threshold above zero, changing what any existing consumer spends,
+    migrating any call from GraphQL to REST, and retrying or queueing work when a bucket is empty. This
+    task OBSERVES and SURFACES; it does not govern. A pre-exhaustion warning is a second threshold and
+    therefore a second concern — see this task's note.
+  acceptance:
+    - claim: "the daemon's health tick reads both the REST/core and GraphQL buckets each tick and records them independently, so an exhaustion of either is visible without anyone requesting a page"
+      proof: "unit test: test/quota-exhaustion-escalation.test.ts"
+    - claim: "a bucket crossing from having budget to having none escalates once, and remains silent on every later tick while it is still exhausted"
+      proof: "unit test: test/quota-exhaustion-escalation.test.ts"
+    - claim: "a second exhaustion after the bucket has reset escalates again, and an exhaustion of one bucket never suppresses the other"
+      proof: "unit test: test/quota-exhaustion-escalation.test.ts"
+    - claim: "every ledger step the detector or escalator reads to decide something is retained across rotation, so a rotation cannot re-open one notice per tick"
+      proof: "unit test: test/ledger-rotation.test.ts"
+  status: queued
+  attempts: 0
+  note: "verify:auto — every claim is an assertion over injected quota readings and a fixture ledger,
+    with no operator present. It builds a mechanism and touches no DECISIONS.md, so W1-T353's
+    verify:human requirement for ruling-shaped tasks does not apply.
+    risk:high — Rule 19 counts the health tick, the escalation path and the ledger retention set as
+    distinct subsystems, and a notice that fires per tick is worse than no notice: it is the escalation
+    inversion the audit measured. Design (iii) and (iv) are where that risk is managed.
+    budget_usd 85 — a two-bucket reader change, a transition detector, an escalator with a per-bucket
+    episode key, the retention registration, and a falsifier that must prove ONCE-not-per-tick.
+    files: DECLARES test/ledger-rotation.test.ts because the fourth criterion asserts the retention
+    property and, per design (vi), that suite's `consumerFiles` list must gain src/lib/daemon.ts or
+    src/lib/daemon-health.ts if a deciding read lands in either — the guard is blind to those files
+    today. It DECLARES src/lib/ledger.ts because the escalation marker must join
+    DECISION_RELEVANT_LEDGER_STEPS. Omitting a written path is what refused five dispatches in one week.
+    ON THE PROOFS. Three name test/quota-exhaustion-escalation.test.ts, which does not exist yet:
+    `rmd check-proof` reports 0 candidates for it today. That is a FORWARD REFERENCE TO A PATH, which
+    CLAUDE.md records as safe — unlike forward-referencing a symbol name, which is a guess — and the
+    path is declared in files: so the worker creates it. The fourth names test/ledger-rotation.test.ts,
+    an EXISTING suite, so at least one proof executes at filing time. That fourth is a GUARD criterion
+    and passes at the merge-base BY DESIGN: its claim is that the retention property holds, which must
+    be true both before and after. `unit test:` proofs are structurally exempt from the executed_stale
+    downgrade, which applies to `grep:` proofs only; no `grep:` proof is used here, so the line-based
+    and basic-regex traps do not arise.
+    A WARNING THRESHOLD IS DELIBERATELY EXCLUDED — see design (vii). Reported alongside this filing:
+    a warning at, say, 10% remaining would let in-flight work finish rather than discovering exhaustion
+    at a push boundary, which is exactly how W1-T333 lost forty minutes. It is a genuinely good idea and
+    it is a SECOND threshold with a second dedup question (how often may a warning repeat as the budget
+    drains?), so it belongs in its own task filed after this one has data."
+  risk: high
+  origin: oper#ruling-quota-check-2026-08-05
+  plan_refs: ["§5D", "W1-T249", "W1-T345"]
+  files: [src/lib/daemon-health.ts, src/lib/daemon.ts, src/run-task.ts, src/lib/ledger.ts, test/quota-exhaustion-escalation.test.ts, test/ledger-rotation.test.ts]
