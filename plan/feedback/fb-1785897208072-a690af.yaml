@@ -1,0 +1,46 @@
+id: fb-1785897208072-a690af
+ts: 2026-08-05T02:33:28.073Z
+raw: "THE DAILY-CEILING OVERRIDE STORE HAS NO READERS AND NO WRITERS — verified
+  from source at a8e11cb, not from the ledger. W1-T332 (#1312) shipped
+  writeDailyCostCeilingOverride, clearDailyCostCeilingOverride,
+  resolveDailyCostCeiling and dailyCostCeilingOverridePath, with bounds
+  validation, refusal-at-write, malformed-file fallback and provenance. Every
+  reference to all four, across src/ test/ bin/ scripts/ *.yaml *.md, is the
+  definition plus its own unit test. EffectiveDailyCostCeiling is referenced by
+  neither. state/DAILY_COST_CEILING_OVERRIDE does not exist on this host, there
+  is no rmd verb for the ceiling (grep -niE ceiling over bin/ and
+  fleet-control.ts returns zero), and no filed task creates one. Controls:
+  loadDefaultPolicy resolves to 11 files; a fabricated symbol to 0. THE ORDERING
+  IS THE CAUSE AND IT IS A NEW SHAPE: resolveDailyCostCeiling's docstring names
+  'the daemon's per-tick reload, W1-T331' as its live reader — but W1-T331
+  merged as #1310 at 23:43Z, ONE HOUR SIXTEEN MINUTES BEFORE W1-T332 created the
+  store, and was never amended. The consumer shipped before the thing it was
+  supposed to consume, so the depends_on edge points the wrong way for this
+  wiring. dailyCostCeilingReloader (run-task.ts) reads
+  loadPolicy(policyPath(repoRoot)).values.sweep.dailyCostCeilingUsd per tick and
+  never consults the override. W1-T331 DID fix the import-time freeze, so the
+  daemon re-reads live — it re-reads the wrong file. The chain therefore
+  delivers neither live nor next-restart adjustment. THE WRITE SURFACE WAS
+  DEFERRED BY EVERY TASK AND THEN LEFT UNFILED: W1-T332 says 'NOT IN SCOPE: the
+  console write surface itself'; W1-T333 says 'NOT IN SCOPE: the console WRITE
+  control itself... this task makes the write visible and auditable, not the
+  button' and lists it among items 'NAMED AND DELIBERATELY NOT FILED'. W1-T333's
+  files: list carries no policy.ts, sweep.ts, daemon.ts or run-task.ts, so it
+  cannot wire the write path even if it wanted to. LATENT HAZARD, ACT BEFORE
+  W1-T333 LANDS: if it renders the effective ceiling from
+  resolveDailyCostCeiling (override-aware) while the governor keeps enforcing
+  reloadDailyCostCeilingUsd (override-blind), the console will display one
+  number while dispatch enforces another — in the subsystem whose own rationale
+  is closing the gap between what the fleet is believed to do and what it does.
+  Latent only because nothing can write the file. TWO TASKS ARE MISSING: (1)
+  point the daemon's per-tick read at resolveDailyCostCeiling so the governor
+  honours an override, which must land BEFORE any renderer shows an
+  override-aware number; (2) a write surface — a console control or an rmd verb
+  — so the operator can actually set it, which was the entire premise of the
+  config work. Falsifying check: if W1-T333 as dispatched turns out to wire the
+  daemon read after all, (1) is moot and only the write surface is missing."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null
