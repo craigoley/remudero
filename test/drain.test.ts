@@ -26,6 +26,12 @@ import {
 } from "../src/lib/drain.js";
 import { pauseDetail, requestPause, requestStop, stopDetail } from "../src/lib/fleet-control.js";
 import { deriveStatus, type GitHub } from "../src/lib/status.js";
+// W1-T343: runDaemon ADOPTS this file's own lane machinery (runnableCandidates,
+// partitionByFileOverlap via drain.ts) rather than a second implementation — these tests drive
+// the DAEMON'S tick, at laneCount >= 2, proving the WIRING; the underlying partition/candidate
+// predicates are proven in isolation by the tests above (and in test/parallel-dispatch.test.ts,
+// runDrain's own multi-lane pass) and are never re-derived here.
+import { runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
 
 // A small linear-ish plan: A → B → C (chain) + D (independent), all auto.
 const YAML = `
@@ -1225,4 +1231,135 @@ test("idle reasons: the signature is stable for an unchanged picture and moves w
   const c = tallyDispatchFilters();
   runnableCandidates(plan, mergedSetOf("MERGED_ONE", "ELIGIBLE"), 99, { onFiltered: c.onFiltered });
   assert.notEqual(c.signature(), a.signature(), "a changed picture MUST emit");
+});
+
+// ── W1-T343: runDaemon ADOPTS drain's lane machinery (laneCount >= 2) ───────────────────────
+// The daemon's tick loop, not runDrain — proving `runDaemon` reaches the SAME
+// `runnableCandidates`/`partitionByFileOverlap` composition `runDrainLanes` already uses,
+// never a second dispatch-set implementation for the persistent loop.
+
+function twoDisjointFilesPlan(): Plan {
+  const dir = mkdtempSync(join(tmpdir(), "daemon-lanes-"));
+  const f = join(dir, "tasks.yaml");
+  writeFileSync(
+    f,
+    "- id: A\n  title: a\n  repo: remudero\n  type: implement\n  depends_on: []\n  status: queued\n  files: [src/a.ts]\n" +
+      "- id: B\n  title: b\n  repo: remudero\n  type: implement\n  depends_on: []\n  status: queued\n  files: [src/b.ts]\n",
+  );
+  return loadPlan(f);
+}
+
+test("W1-T343 acceptance: runDaemon at laneCount 2 dispatches two DISJOINT-files tasks CONCURRENTLY through drain's existing lane machinery — both started before either resolves, and dispatch.concurrent_set names the co-dispatched pair", async () => {
+  const merged = new Set<string>();
+  const started: string[] = [];
+  const deferreds = new Map<string, { resolve: (r: RunResult) => void }>();
+  const steps: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const runOne = (id: string) =>
+    new Promise<RunResult>((resolve) => {
+      started.push(id);
+      deferreds.set(id, { resolve });
+    });
+
+  const daemonPromise = runDaemon(
+    twoDisjointFilesPlan(),
+    {
+      refreshMerged: () => (id: string) => merged.has(id),
+      log: (step: string, extra?: Record<string, unknown>) => steps.push({ step, extra }),
+      runOne,
+      sleep: async () => {},
+    } as unknown as DaemonDeps,
+    { max: 2, laneCount: 2 },
+  );
+
+  // Let the tick's synchronous dispatch-set construction (the `.map` that calls `runOne` for
+  // every admitted lane) run before either lane's promise settles — the SAME idiom
+  // test/parallel-dispatch.test.ts's own W1-T172 acceptance 1 uses for runDrainLanes.
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(started.sort(), ["A", "B"], "both admitted lanes are started before either resolves — true concurrency, not a sequential tick");
+
+  deferreds.get("A")!.resolve(okResult("A"));
+  deferreds.get("B")!.resolve(okResult("B"));
+  const s = await daemonPromise;
+  assert.deepEqual(s.merged.sort(), ["A", "B"]);
+  const concurrentSet = steps.find((l) => l.step === "dispatch.concurrent_set");
+  assert.ok(concurrentSet, "the co-dispatched set is ledgered — the evidence trail P19's banked rung 2 needs");
+  assert.deepEqual((concurrentSet!.extra as { tasks: string[] }).tasks.sort(), ["A", "B"]);
+});
+
+test("W1-T343 acceptance: runDaemon at laneCount 2 NEVER co-batches a file-overlapping pair, or a task declaring NO files at all (fail-closed) — each dispatches on its own later pass instead", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "daemon-lanes-overlap-"));
+  const f = join(dir, "tasks.yaml");
+  writeFileSync(
+    f,
+    "- id: A\n  title: a\n  repo: remudero\n  type: implement\n  depends_on: []\n  status: queued\n  files: [src/a.ts]\n" +
+      "- id: C\n  title: c\n  repo: remudero\n  type: implement\n  depends_on: []\n  status: queued\n  files: [src/a.ts]\n" +
+      "- id: D\n  title: d\n  repo: remudero\n  type: implement\n  depends_on: []\n  status: queued\n",
+  );
+  const plan = loadPlan(f);
+  const merged = new Set<string>();
+  const ran: string[] = [];
+  const concurrentSets: string[][] = [];
+  const serialized: Array<{ task: string; blocked_by: string }> = [];
+  let ticks = 0;
+  const summary = await runDaemon(
+    plan,
+    {
+      refreshMerged: () => (id: string) => merged.has(id),
+      checkStop: () => (++ticks > 6 ? "tick cap" : undefined),
+      log: (step: string, extra?: Record<string, unknown>) => {
+        if (step === "dispatch.concurrent_set") concurrentSets.push((extra as { tasks: string[] }).tasks);
+        if (step === "dispatch.serialized") serialized.push(extra as { task: string; blocked_by: string });
+      },
+      runOne: async (id: string) => {
+        ran.push(id);
+        merged.add(id);
+        return okResult(id);
+      },
+      sleep: async () => {},
+    } as unknown as DaemonDeps,
+    { max: 3, laneCount: 2 },
+  );
+  assert.equal(summary.merged.length, 3, "all three eventually dispatch — deferred, never dropped");
+  assert.deepEqual(ran, ["A", "C", "D"], "each dispatches on its OWN pass, never co-batched with its collision");
+  assert.equal(concurrentSets.length, 0, "no pass EVER held more than one of these three — each collided with the other two");
+  const blockedIds = serialized.map((s) => s.task);
+  assert.ok(blockedIds.includes("C"), "C (files: overlapping A's) was deferred at least once (dispatch.serialized)");
+  assert.ok(blockedIds.includes("D"), "D (declares NO files: at all — fail-closed) was deferred at least once (dispatch.serialized)");
+});
+
+test("W1-T343: laneCount 2 with ZERO WIP headroom this tick ledgers dispatch.wip_deferred and dispatches NOTHING — distinct from an ordinary idle tick, since runnable work exists and is only held back", async () => {
+  const merged = new Set<string>();
+  const ran: string[] = [];
+  const steps: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  // == wipLimit ⇒ laneDispatchBudget({ laneCount: 2, wipLimit: 4, openPrCount: 4 }) === 0.
+  let openCount = 4;
+  let sleepCalls = 0;
+  let ticks = 0;
+  const summary = await runDaemon(
+    twoDisjointFilesPlan(),
+    {
+      refreshMerged: () => (id: string) => merged.has(id),
+      openPrCount: () => openCount,
+      checkStop: () => (++ticks > 5 ? "tick cap" : undefined),
+      log: (step: string, extra?: Record<string, unknown>) => steps.push({ step, extra }),
+      runOne: async (id: string) => {
+        ran.push(id);
+        merged.add(id);
+        return okResult(id);
+      },
+      sleep: async () => {
+        sleepCalls++;
+        // Headroom frees up between this deferred tick and the next — the SAME runnable work
+        // (A, B) must dispatch then, proving the governor only HELD it back, never dropped it.
+        if (sleepCalls === 1) openCount = 0;
+      },
+    } as unknown as DaemonDeps,
+    { max: 2, laneCount: 2, wipLimit: 4 },
+  );
+  const deferred = steps.find((l) => l.step === "dispatch.wip_deferred");
+  assert.ok(deferred, "the governor-sized-to-zero tick ledgers dispatch.wip_deferred");
+  assert.deepEqual(deferred!.extra, { lane_count: 2, wip_limit: 4, observed_open_count: 4 });
+  assert.deepEqual(ran.sort(), ["A", "B"], "once headroom frees up, the SAME runnable work dispatches");
+  assert.deepEqual(summary.merged.sort(), ["A", "B"]);
 });

@@ -9073,6 +9073,13 @@ export async function daemonCommand(
     max: maxIdx >= 0 ? Number(rest[maxIdx + 1]) : undefined,
     pollIntervalMs: pollIdx >= 0 ? Number(rest[pollIdx + 1]) : policy.values.pollIntervalMs,
     headroomPolicy: headroomPolicyFromCurve(policy.values.headroom.curve),
+    // W1-T343 (ADOPT drain's EXISTING LANE MACHINERY, SHIP DARK): the SAME SweepPolicy row
+    // `drainCommand` already reads for `rmd drain` (ONE threshold home, never a second) —
+    // raising either is a policy-data edit (plan/policy.yaml), never a CLI flag or a second
+    // constant here. Default 1 keeps this call BYTE-IDENTICAL to before this task — see
+    // `DaemonOpts.laneCount`'s own doc for the proof.
+    laneCount: DEFAULT_SWEEP_POLICY.dispatchLanes,
+    wipLimit: DEFAULT_SWEEP_POLICY.wipLimit,
   };
   const config = loadConfig();
   // Headroom governor switch (operator ruling fb-1784894405468-a4153e; default clause
@@ -9391,6 +9398,7 @@ export async function daemonCommand(
         // 23-open-PR incident): the SAME `openPrCount` closure just defined above, never a second
         // GitHub read path — see queueGovernorGateFor's doc.
         checkQueueGovernor: queueGovernorGateFor(openPrCount, ledgerPath, runId),
+        openPrCount, // W1-T343: laneDispatchBudget's other input on the multi-lane path, mirroring drainCommand.
         runOne: (taskId) =>
           runTask(taskId, {
             planPath: target.planPath,
