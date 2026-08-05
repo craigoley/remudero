@@ -335,6 +335,26 @@ export interface GitHub {
    */
   listMergedHeadBranches?(): PrRef[] | null;
   /**
+   * The OPEN twin of {@link listMergedHeadBranches} (W1-T377): every OPEN PR carrying its
+   * `headRefName`, so {@link projectPlan} can match `run-<taskId>-*` CLIENT-SIDE and credit a
+   * task with an open PR that the ledger never recorded.
+   *
+   * WHY THIS IS NEEDED AT ALL. The ONLY route to an OPEN association is rung (a)'s ledger
+   * `pr.opened` line — rungs (c)/(c2) are gated on `state === "MERGED"` and answer a different
+   * question. So a run that opens a PR but never ledgers the line leaves its task looking
+   * dispatchable, and `isDispatchEligible`'s in-flight guard (drain.ts) cannot fire. MEASURED
+   * (2026-08-05, W1-T350): run 1785957031821 had its worktree reaped mid-run at 20:01:40, opened
+   * PR #1377 at 20:08:02, and never wrote `pr.opened`; the task re-dispatched at 20:11:02, built
+   * the whole thing a second time as #1378, merged that, and left #1377 a conflicting duplicate.
+   * A full high-risk run (budget_usd 85) spent on work that already existed.
+   *
+   * COST: ZERO extra calls on the batched path — {@link buildBatchedGithub} already fetches
+   * `--state all` and merely filters to MERGED, so the open rows are sitting in the same index.
+   * OPTIONAL, like its merged twin: omitted ⇒ the corroboration is skipped and derivation behaves
+   * exactly as before. Returns null if the read FAILED (→ readFailed()/W1-T119), never [].
+   */
+  listOpenHeadBranches?(): PrRef[] | null;
+  /**
    * The PR's head branch name, or undefined if it cannot be resolved. Backs
    * rung (c)'s ownership-assert (MASTER-PLAN P16 / W1-T69) — mirrors
    * run-task.ts's `PrHeadGateway` and retro.ts's `ShippedGithub.headRefName`.
@@ -452,6 +472,18 @@ export interface DeriveDeps {
    * #737 — the same fail-soft discipline every other optional dependency here follows.
    */
   mergedHeadBranches?: (taskId: string) => PrRef[] | null;
+  /**
+   * The OPEN twin of {@link DeriveDeps.mergedHeadBranches} (W1-T377): this task's OPEN PRs
+   * whose head branch is `run-<taskId>-*`, from {@link projectPlan}'s one batched fetch. Backs
+   * the (c3) rung — the only thing in this file that can see an open PR the ledger never
+   * recorded (see {@link GitHub.listOpenHeadBranches} for the measured incident).
+   *
+   * SAME "ABSENT ⇒ SKIP" CONTRACT every other optional dependency here follows: `undefined`
+   * (no batched index provided) falls back to the per-task {@link GitHub.listOpenHeadBranches},
+   * and `null` (the batched read FAILED) skips the rung entirely so `readFailed()`/W1-T119 does
+   * the deferring rather than this rung inventing an absence.
+   */
+  openHeadBranches?: (taskId: string) => PrRef[] | null;
   /**
    * LIVENESS BOUND (W1-T179 design (ii)): how many milliseconds of ledger silence a
    * dispatched, unresolved run tolerates before it is no longer "running" absent an open
@@ -1251,6 +1283,36 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
       : undefined;
   };
 
+  /**
+   * (c3) OPEN HEAD-BRANCH CORROBORATION (W1-T377) — the LAST rung, consulted only once every
+   * merged path above has declined and (a)/(b) produced no association of their own.
+   *
+   * THE GAP IT CLOSES: rung (a) is the only route to an OPEN credit, and it reads the LEDGER.
+   * (c2) corroborates a ledger miss deterministically by head branch, but only for MERGED — so
+   * an open PR whose `pr.opened` line never landed is invisible to every rung, and the task reads
+   * dispatchable while a real PR is in flight. Mirrors (c2)'s shape exactly: match the STRUCTURED
+   * head ref, never the eventually-consistent body index, and RE-ASSERT ownership with `ownsBranch`
+   * on each candidate before crediting.
+   *
+   * NEWEST WINS on a multi-hit: a task with two open run-branches has been dispatched twice
+   * already (the very thing this rung exists to stop), and the newest is the one still working.
+   *
+   * FAIL DIRECTION, deliberately: a false OPEN credit DEFERS a dispatch; a missed one DUPLICATES a
+   * build. Deferral is the cheaper error, and it is not even terminal — `isDispatchEligible`'s
+   * W1-T177 `readLiveState` re-read stands a stale OPEN back down on the very next tick, so this
+   * rung cannot strand a task the way a false MERGED credit could.
+   */
+  const corroborateOpenByBranch = (): StatusProjection | undefined => {
+    const cands = deps.openHeadBranches?.(task.id) ?? deps.github.listOpenHeadBranches?.();
+    if (!cands) return undefined; // null (read failed → W1-T119) or method absent (fixture) — skip
+    const hit = cands
+      .filter((pr) => pr.state.toUpperCase() === "OPEN" && ownsBranch(pr.headRefName, task.id))
+      .sort((a, b) => b.number - a.number)[0];
+    return hit
+      ? { taskId: task.id, source: "head-branch", ...fromPrState(hit.state), prNumber: hit.number, prUrl: hit.url, prState: hit.state }
+      : undefined;
+  };
+
   const trailerPr = deps.github.findMergedByTrailer(task.id);
   if (trailerPr && !debunkedTrailerUrls(ledgerLines, task.id).has(trailerPr.url)) {
     const head = deps.github.headRefName(trailerPr.url);
@@ -1267,6 +1329,12 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
     if (!ownResult) {
       const branchCredit = corroborateByBranch();
       if (branchCredit) return branchCredit;
+      // (c3) here too — this early return is a SECOND exit that concludes `source: "none"`, and a
+      // task whose only trailer hit was foreign/unanchored is exactly as dispatchable-looking as
+      // one with no hit at all. Leaving the rung out of this branch would close the gap on one path
+      // and leave it open on the other.
+      const openHere = corroborateOpenByBranch();
+      if (openHere) return openHere;
       // Reason mirrors `creditsByAnchoredTrailer`'s OWN order of refusal, so a rejection
       // never names a cause the accept test did not actually act on: the trailer is
       // checked first there, so an unanchored body reports that regardless of branch.
@@ -1295,6 +1363,12 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
   // No merged sibling credit found: fall back to (a)/(b)'s own (non-merged)
   // resolution, unchanged from before this fix.
   if (ownResult) return ownResult;
+
+  // (c3) Nothing merged anywhere and NO association of this task's own — the one state in which an
+  // open PR the ledger never recorded is the best evidence available. Strictly BELOW `ownResult`
+  // and every merged rung above, so this can only ever fill a hole, never displace a credit.
+  const openCredit = corroborateOpenByBranch();
+  if (openCredit) return openCredit;
 
   // No GitHub evidence: not merged. The yaml `status:` is decorative, not trusted.
   // EXCEPT (W1-T119) when that "no evidence" is actually "GitHub could not be read" —
@@ -1735,6 +1809,29 @@ export function projectPlan(
       mergedHeadBranches: captured ? (taskId: string) => captured.get(taskId) ?? [] : () => null,
     };
   }
+  // BATCHED rung (c3) CORROBORATION (W1-T377) — the same batch-once shape as the merged index
+  // directly above, over the OPEN slice of the SAME fetch. Free on `buildBatchedGithub`; a single
+  // extra `gh pr list --state open` on `ghGateway`. A FAILED read yields `null` for every task, so
+  // the rung skips and `readFailed()`/W1-T119 does the deferring — never a false "no open PR".
+  const allOpen = effectiveDeps.github.listOpenHeadBranches?.();
+  if (allOpen !== undefined) {
+    let openByTask: Map<string, PrRef[]> | null = null;
+    if (allOpen !== null) {
+      openByTask = new Map<string, PrRef[]>();
+      for (const pr of allOpen) {
+        const owner = /^run-(.+)-\d+$/.exec(pr.headRefName ?? "");
+        if (!owner) continue;
+        const existing = openByTask.get(owner[1]);
+        if (existing) existing.push(pr);
+        else openByTask.set(owner[1], [pr]);
+      }
+    }
+    const capturedOpen = openByTask;
+    effectiveDeps = {
+      ...effectiveDeps,
+      openHeadBranches: capturedOpen ? (taskId: string) => capturedOpen.get(taskId) ?? [] : () => null,
+    };
+  }
   const byId = new Map<string, StatusProjection>();
   for (const task of plan.tasks) byId.set(task.id, deriveStatus(task, effectiveDeps));
   // TASK-LESS ESCALATIONS (W1-T283): the loop above is a function of plan.tasks ALONE, so an
@@ -1914,6 +2011,16 @@ export function ghGateway(owner: string, repo: string, opts: { exec?: (args: str
       // eventually-consistent body full-text index. null on a `gh` FAILURE (→ readFailed()/W1-T119).
       return tryJson<PrRef[]>([
         "pr", "list", "--repo", slug, "--state", "merged",
+        "--json", "number,url,state,headRefName", "--limit", "1000",
+      ]);
+    },
+    listOpenHeadBranches() {
+      // W1-T377: the OPEN twin of listMergedHeadBranches — one list of every open PR's head ref,
+      // matched `run-<taskId>-*` CLIENT-SIDE by projectPlan. Deterministic LIST API, never the
+      // body full-text index. null on a `gh` FAILURE (→ readFailed()/W1-T119), [] on genuinely
+      // no open PRs — the two must stay distinguishable.
+      return tryJson<PrRef[]>([
+        "pr", "list", "--repo", slug, "--state", "open",
         "--json", "number,url,state,headRefName", "--limit", "1000",
       ]);
     },
@@ -2186,6 +2293,8 @@ export function buildBatchedGithub(
     byUrl: Map<string, BatchedPr>;
     byNum: Map<string, BatchedPr>;
     mergedNewestFirst: BatchedPr[];
+    /** W1-T377: the OPEN slice of the SAME fetch, for `listOpenHeadBranches`. */
+    openNewestFirst: BatchedPr[];
   }
   let cache: Index | undefined;
   const index = (): Index => {
@@ -2229,6 +2338,7 @@ export function buildBatchedGithub(
         byNum: new Map(all.map((p) => [String(p.number), p])),
         // Higher PR number = more recent; mirrors ghGateway's search "newest first".
         mergedNewestFirst: all.filter((p) => p.state === "MERGED").sort((a, b) => b.number - a.number),
+        openNewestFirst: all.filter((p) => p.state === "OPEN").sort((a, b) => b.number - a.number),
       };
     }
     return cache;
@@ -2262,6 +2372,14 @@ export function buildBatchedGithub(
       // run-<taskId>-* client-side. null on a fetch failure (→ readFailed()/W1-T119), never [].
       const idx = index();
       return lastFetchFailed ? null : idx.mergedNewestFirst.map(asRef);
+    },
+    listOpenHeadBranches() {
+      // W1-T377: ZERO extra `gh`/REST calls — `fetchAll()` already returns `--state all` and the
+      // index merely filtered it to MERGED, so the open rows were always in hand. Same null-on-
+      // failure contract as the merged twin, so a fetch failure defers via W1-T119 instead of
+      // reading as "this task has no open PR".
+      const idx = index();
+      return lastFetchFailed ? null : idx.openNewestFirst.map(asRef);
     },
     headRefName(prUrl) {
       return index().byUrl.get(prUrl)?.headRefName;
