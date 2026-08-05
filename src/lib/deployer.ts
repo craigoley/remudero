@@ -185,6 +185,77 @@ export function daemonIsIdle(p: IdleProbe): boolean {
 }
 
 /**
+ * W1-T341 — THE CEILING. `daemonIsIdle` conjoins GLOBAL fleet counters, so more concurrent
+ * lanes make a common quiet window rarer without bounding how long the deploy path may keep
+ * skipping while it waits for one. At N=1 that was tolerable (the daemon is idle roughly 60%
+ * of the time — 20 consecutive dispatch gaps of 45-90 minutes against ~25-minute runs), so a
+ * quiet window always arrived on its own; parallelism spends exactly that slack, so the same
+ * gate that was merely slow at N=1 can defer indefinitely once lanes are dense.
+ *
+ * 30 MINUTES: comfortably above a typical single-lane run (~25 minutes, the operator's own
+ * measurement), so the ceiling essentially never interrupts a lane finishing on its own
+ * schedule — while staying a full order of magnitude below the "wait for ALL lanes to go
+ * quiet" behaviour this replaces, so a merged fix is bounded to roughly one run's worth of
+ * latency instead of an unbounded one. Too short would abort real work mid-run for no gain
+ * (the pull is already safe and inert; only the RESTART is dangerous); too long reproduces
+ * today's defect exactly.
+ *
+ * A forced deploy is not free: the kickstart SIGKILLs whatever is still running (the daemon
+ * dispatches IN-PROCESS — see this file's banner), and that is only survivable because of a
+ * mechanism this task does NOT add: daemon.ts's boot-time crash-recovery pass
+ * (`reconstructState`/`reconstructOrphan`, W1-T12c) runs unconditionally on every daemon boot,
+ * resumes any orphaned run that already has an open PR, and safely re-dispatches (via
+ * `nextRunnable`) anything that does not — so the abandoned run is re-dispatched, never
+ * silently lost. Silently losing paid work would be unacceptable; this ceiling is only correct
+ * BECAUSE that recovery path already exists and runs on every boot, kickstart included.
+ *
+ * THE CONDITION AT N>1 IS UNCHANGED — this is a deliberate, minimal-scope choice: `daemonIsIdle`
+ * still means "every lane is quiet" (lane-scoped thresholds are W1-T343's concern, out of scope
+ * here). The bound alone carries the N>1 case: at any lane count the deploy still fires within
+ * `ceilingMs` even if the fleet is never fully quiet, at the cost of a forced restart under
+ * those (rare, bounded) circumstances instead of a lane-aware quiet check.
+ */
+export const DEPLOY_IDLE_DEFER_CEILING_MS = 30 * 60_000;
+
+export interface IdleGateResult {
+  /** The raw {@link daemonIsIdle} reading this cycle. */
+  idle: boolean;
+  /** The deploy should proceed now — either genuinely idle, or the ceiling elapsed. */
+  proceed: boolean;
+  /** `proceed && !idle`: the ceiling fired over a fleet that is still busy. */
+  forced: boolean;
+  /** ms since this deferral began; 0 when nothing is tracked yet (a fresh deferral, or a
+   *  caller that never wired persistence — see {@link DeployDeps.deferredSince}). */
+  waitedMs: number;
+}
+
+/**
+ * {@link daemonIsIdle} WITH a ceiling (W1-T341's falsifier, both directions):
+ *  - a fleet that NEVER goes idle still gets `proceed: true` once `waitedMs >= ceilingMs`
+ *    (`forced: true`) — the unbounded-wait defect this replaces.
+ *  - a fleet that goes idle BEFORE the ceiling proceeds immediately (`forced: false`) — the
+ *    ceiling is a maximum wait, never a delay imposed on every deploy.
+ *
+ * `deferredSinceMs === undefined` (no deferral tracked yet — including a caller that never
+ * wires {@link DeployDeps.deferredSince}/`setDeferredSince`) reads as a FRESH deferral:
+ * `waitedMs = 0`, which can never alone reach the ceiling. A caller that does not wire
+ * persistence therefore cannot be regressed into a surprise forced deploy — it degrades to
+ * exactly today's unbounded wait, never the other direction.
+ */
+export function evaluateIdleGate(
+  p: IdleProbe,
+  deferredSinceMs: number | undefined,
+  nowMs: number,
+  ceilingMs: number = DEPLOY_IDLE_DEFER_CEILING_MS,
+): IdleGateResult {
+  const idle = daemonIsIdle(p);
+  const waitedMs = deferredSinceMs === undefined ? 0 : Math.max(0, nowMs - deferredSinceMs);
+  if (idle) return { idle: true, proceed: true, forced: false, waitedMs };
+  const forced = waitedMs >= ceilingMs;
+  return { idle: false, proceed: forced, forced, waitedMs };
+}
+
+/**
  * The two ways a deploy can fail and poison the auto-retry. They are NOT interchangeable: one is a
  * checkout-state problem the operator fixes locally, the other is bad code that was rolled back.
  */
@@ -426,6 +497,20 @@ export interface DeployDeps {
   /** Consume the operator marker after a terminal outcome (success or rollback). */
   clearMarker: () => void;
 
+  // ── DEFERRAL CEILING (W1-T341) ───────────────────────────────────────────────
+  // `runDeployCycle` runs as a fresh launchd one-shot every ~120s (see this file's banner) —
+  // no in-memory continuity across cycles — so bounding the idle-gate wait needs its OWN
+  // persisted "since when has this deploy been deferred" clock. All three are OPTIONAL: a
+  // caller that omits them degrades to `waitedMs` always reading 0 (see {@link evaluateIdleGate}),
+  // i.e. exactly today's unbounded wait — never the other direction.
+  /** When this deploy attempt's deferral began, or `undefined` if none is tracked. */
+  deferredSince?: () => number | undefined;
+  /** Record the start of a new deferral (only called when none is tracked yet). */
+  setDeferredSince?: (ms: number) => void;
+  /** Clear the deferral clock once it stops applying (no trigger, a conflict abort, or the
+   *  idle gate — genuinely or by ceiling — let the deploy proceed). */
+  clearDeferredSince?: () => void;
+
   // ── CONSOLE RESTART (the gap impl-BW/impl-BX both reported) ────────────────────
   // `rmd serve` loads its code ONCE via tsx, so the running console keeps executing
   // whatever was on disk when it last started. The console was commissioned 2026-07-29
@@ -451,6 +536,9 @@ export interface DeployOpts {
   /** When true, run the WHOLE sequence but skip the real kickstart (validation). */
   dryRun?: boolean;
   health?: HealthOpts;
+  /** Override {@link DEPLOY_IDLE_DEFER_CEILING_MS} (tests only; production always uses the
+   *  named default). */
+  idleDeferCeilingMs?: number;
 }
 
 export interface DeployResult {
@@ -527,6 +615,7 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
   deps.fetch();
   const fromHead = deps.installHead();
   const origin = deps.originMain();
+  const ceilingMs = opts.idleDeferCeilingMs ?? DEPLOY_IDLE_DEFER_CEILING_MS;
 
   const decision = decideDeployTrigger({
     markerPresent: deps.markerPresent(),
@@ -540,6 +629,7 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     runningHead: deps.runningHead(),
   });
   if (!decision.deploy) {
+    deps.clearDeferredSince?.(); // nothing being deferred — no active deploy attempt
     deps.log("deploy.skip", { reason: decision.reason, install: short(fromHead), origin: short(origin) });
     return { deployed: false, reason: decision.reason, fromHead };
   }
@@ -551,6 +641,7 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     sameAsIncoming: deps.sameAsIncoming ? (p) => deps.sameAsIncoming!(p, origin) : undefined,
   });
   if (!tree.ok) {
+    deps.clearDeferredSince?.(); // blocked by the tree, not the idle gate — a distinct condition
     const msg = `deploy aborted: locally-modified files conflict with the fast-forward: ${tree.conflicting.join(", ")}`;
     deps.log("deploy.abort_dirty_tree", { conflicting: tree.conflicting });
     deps.alert(msg, origin, "dirty-tree-conflict");
@@ -565,11 +656,31 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     deps.log("deploy.discarded_identical", { paths: tree.discardable, count: tree.discardable.length });
   }
 
-  // Idle gate — the pull is safe anytime, but hold if a task is in flight so we don't
-  // pull-then-fail-to-restart repeatedly; retry next interval.
-  if (!daemonIsIdle(deps.probeIdle())) {
-    deps.log("deploy.not_idle", { phase: "pre-pull" });
+  // Idle gate, WITH A DEFERRAL CEILING (W1-T341) — the pull is safe anytime, but hold if a
+  // task is in flight so we don't pull-then-fail-to-restart repeatedly UNLESS the deferral has
+  // outlasted `ceilingMs`, in which case we proceed anyway rather than defer indefinitely. See
+  // evaluateIdleGate / DEPLOY_IDLE_DEFER_CEILING_MS for the falsifier both directions cover.
+  const probe1 = deps.probeIdle();
+  const deferredSince1 = deps.deferredSince?.();
+  const nowMs1 = deps.now();
+  const gate1 = evaluateIdleGate(probe1, deferredSince1, nowMs1, ceilingMs);
+  const gate1Fields = {
+    waited_ms: gate1.waitedMs,
+    ceiling_ms: ceilingMs,
+    workers: probe1.workers,
+    inflight_locks: probe1.inflightLocks,
+    worktree_locks: probe1.worktreeLocks,
+  };
+  if (!gate1.proceed) {
+    if (deferredSince1 === undefined) deps.setDeferredSince?.(nowMs1); // start the clock, once
+    deps.log("deploy.not_idle", { phase: "pre-pull", ...gate1Fields });
     return { deployed: false, reason: "not-idle (task in flight) — retry next interval", fromHead };
+  }
+  if (gate1.forced) {
+    // Not a quiet fleet — the ceiling fired. Honest about what that costs: the kickstart below
+    // (once we get there) SIGKILLs any in-flight worker; see DEPLOY_IDLE_DEFER_CEILING_MS's doc
+    // for why that is survivable (daemon.ts's boot-time crash-recovery pass, W1-T12c).
+    deps.log("deploy.idle_ceiling_forced", { phase: "pre-pull", ...gate1Fields });
   }
 
   deps.pullFf();
@@ -579,11 +690,33 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
   // RE-CHECK idle in the same breath as the kickstart (poll-race mitigation): a task
   // may have dispatched since the pre-pull check. The pull is already on disk but
   // INERT (daemon still on old code), so aborting here is safe — retry the restart
-  // next tick.
-  if (!daemonIsIdle(deps.probeIdle())) {
-    deps.log("deploy.not_idle", { phase: "pre-kickstart", note: "pulled but NOT restarted — inert until a later idle tick" });
+  // next tick. Same persisted clock: it is one continuous deferral regardless of which
+  // check catches it.
+  const probe2 = deps.probeIdle();
+  const deferredSince2 = deps.deferredSince?.();
+  const nowMs2 = deps.now();
+  const gate2 = evaluateIdleGate(probe2, deferredSince2, nowMs2, ceilingMs);
+  const gate2Fields = {
+    waited_ms: gate2.waitedMs,
+    ceiling_ms: ceilingMs,
+    workers: probe2.workers,
+    inflight_locks: probe2.inflightLocks,
+    worktree_locks: probe2.worktreeLocks,
+  };
+  if (!gate2.proceed) {
+    if (deferredSince2 === undefined) deps.setDeferredSince?.(nowMs2); // start the clock, once
+    deps.log("deploy.not_idle", {
+      phase: "pre-kickstart",
+      note: "pulled but NOT restarted — inert until a later idle tick",
+      ...gate2Fields,
+    });
     return { deployed: false, reason: "not-idle-at-kickstart — pulled, restart deferred", fromHead, toHead, pulledPendingRestart: true };
   }
+  if (gate2.forced) {
+    deps.log("deploy.idle_ceiling_forced", { phase: "pre-kickstart", ...gate2Fields });
+  }
+  // Either genuinely idle or the ceiling carried it — the deferral episode is over either way.
+  deps.clearDeferredSince?.();
 
   if (opts.dryRun) {
     deps.log("deploy.dry_run", { would_kickstart: true, to: short(toHead) });
@@ -660,6 +793,12 @@ export function deployLastFailedPath(stateRoot: string): string {
 /** Operator-facing failure alert. */
 export function deployFailedAlertPath(stateRoot: string): string {
   return join(stateRoot, "state", "DEPLOY_FAILED");
+}
+/** W1-T341: since when THIS deploy attempt has been deferred by the idle gate — the
+ *  cross-cycle clock {@link evaluateIdleGate}'s ceiling measures against (each `deploy-run`
+ *  cycle is a fresh launchd one-shot, so this cannot live in memory). */
+export function deployIdleDeferredSincePath(stateRoot: string): string {
+  return join(stateRoot, "state", "DEPLOY_IDLE_DEFERRED_SINCE");
 }
 
 /** `rmd deploy` — request a deploy at the next idle gap. */
@@ -935,6 +1074,30 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
     clearMarker: () => {
       try {
         unlinkSync(deployMarkerPath(o.stateRoot));
+      } catch {
+        /* already gone */
+      }
+    },
+    // W1-T341's ceiling clock, persisted because a fresh process cannot remember it between
+    // `deploy-run` cycles (see this file's banner). A missing/unparseable record reads as
+    // "no deferral tracked" (undefined), which evaluateIdleGate treats as a fresh deferral —
+    // never as an already-elapsed one.
+    deferredSince: () => {
+      try {
+        const raw = readFileSync(deployIdleDeferredSincePath(o.stateRoot), "utf8").trim();
+        const ms = Number(raw);
+        return Number.isFinite(ms) ? ms : undefined;
+      } catch {
+        return undefined;
+      }
+    },
+    setDeferredSince: (ms) => {
+      mkdirSync(join(o.stateRoot, "state"), { recursive: true });
+      writeFileSync(deployIdleDeferredSincePath(o.stateRoot), String(ms));
+    },
+    clearDeferredSince: () => {
+      try {
+        unlinkSync(deployIdleDeferredSincePath(o.stateRoot));
       } catch {
         /* already gone */
       }
