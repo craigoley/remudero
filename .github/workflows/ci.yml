@@ -72,6 +72,9 @@ jobs:
     # right messages.
     name: commitlint
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read # W1-T351: `gh pr view` below needs this to read the live PR title
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -79,10 +82,27 @@ jobs:
           node-version-file: .nvmrc
       - name: Install (clean, from lockfile)
         run: npm ci
-      - name: commitlint (the PR title — the artifact that survives the squash merge)
+      - name: commitlint (the PR title — read LIVE via `gh pr view`, not the opened-event payload snapshot)
+        # W1-T351: github.event.pull_request.title is a SNAPSHOT taken at opened/synchronize/
+        # reopened (this workflow has no `types:` override, so `edited` is excluded) -- a title
+        # corrected after `opened` was invisible to the linter, and re-running the job replayed
+        # the same stale payload; only a new push (synchronize) ever refreshed it. `gh pr view
+        # --json title` queries the API at job time instead, so a corrected title is linted as it
+        # stands with no push required. An EMPTY read (API/auth failure) is reported distinctly
+        # from a non-conventional title, rather than reaching commitlint as a blank string and
+        # surfacing as "subject may not be empty" + "type may not be empty" -- the signature that
+        # cost three separate investigations before this was recognised as a stale-payload read
+        # rather than a malformed title. See test/ci-title-lint.test.ts for the falsifier proof.
         env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
-        run: printf '%s\n' "$PR_TITLE" | npx commitlint --config commitlint.config.mjs --verbose
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          PR_TITLE="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json title --jq .title)"
+          if [ -z "$PR_TITLE" ]; then
+            echo "::error::commitlint: gh pr view returned an EMPTY title for PR #$PR_NUMBER -- this is an empty read (API/auth failure), distinct from a non-conventional title. Do not edit the title to fix this; investigate the gh call."
+            exit 1
+          fi
+          printf '%s\n' "$PR_TITLE" | npx commitlint --config commitlint.config.mjs --verbose
 
   leak-grep:
     # Plaintext-secret tripwire (MASTER-PLAN §5 TIER 1) — runs on every PR,
