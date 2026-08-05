@@ -1,0 +1,102 @@
+- id: W1-T374
+  title: "a policy row was moved into plan/policy.yaml so retuning it would be reviewed plan DATA, but eighteen hand-written literals still assert the shipped figures — so a one-line retune is a three-file code change and cannot be plan-only"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "MEASURED AT db8c532, ON TWO REAL RETUNES. #1361 set `sweep.dispatchLanes` from 2 to 1 —
+    one line of plan/policy.yaml — and failed `ci`, `coverage-ratchet` and `ci-gate` on two assertions
+    that pin the literal: `not ok 2694 ... the value is unchanged at 2` (expected 2, actual 1) and
+    `not ok 2703 - the SHIPPED plan/policy.yaml loads and lifts the current source values`. The fix
+    was to hand-edit both, so a plan-DATA change became a three-file change touching test/.
+    IT HAS HAPPENED BEFORE AND WILL AGAIN. #1307 (W1-T330, the 150 -> 500 ceiling relocation) touched
+    the same two files for the same reason. The population, counted at db8c532: SEVEN
+    invariant-plus-literal pin PAIRS in test/policy-consumers.test.ts (proofTimeoutMs 60_000,
+    DEFAULT_PRUNE_GRACE_MS 120_000, staleDays 14, dispatchLanes 1, dailyCostCeilingUsd 500,
+    DEFAULT_POLL_INTERVAL_MS 60_000, DEFAULT_MAX 10) and ELEVEN literals in test/policy.test.ts's
+    shipped-values snapshot. Eighteen hand-written figures; two have already cost a hand-edit.
+    WHY THIS DEFEATS THE POINT OF THE RELOCATION. plan/policy.yaml's own header records the intent:
+    retuning a threshold should be a REVIEWED PLAN-DATA PR rather than a src/ edit plus CI plus a
+    deploy. A test that hard-codes the shipped figure reimposes exactly the cost the relocation
+    removed, on every future retune of every relocated row.
+    THE PINS WERE RIGHT WHEN WRITTEN, AND THAT IS THE POINT. Each was added by its own relocation PR
+    to prove a RELOCATION AND NOT A RETUNE — a real, valuable, ONE-TIME fact about that changeset. It
+    is the standing assertion that has outlived its evidence."
+  design: |
+    ONE CONCERN: the policy test suites stop asserting particular values and keep asserting the
+    properties that actually matter.
+
+    (i) SEPARATE THE TWO ASSERTIONS, BECAUSE ONLY ONE OF THEM IS AN INVARIANT. Each pin pair in
+    test/policy-consumers.test.ts is two lines:
+      - `assert.equal(<consumer>, SHIPPED.values.<path>)` — THE INVARIANT. The consumer reads the
+        policy row rather than a source literal. True at every value. KEEP THIS, unchanged.
+      - `assert.equal(<consumer>, <number>)` — THE SNAPSHOT. True only until someone retunes.
+    The snapshot is what blocks a retune. Removing it loses nothing the invariant does not already
+    carry, because if the consumer equals the row and the row is what shipped, the value is correct
+    by construction.
+
+    (ii) THE SHIPPED-VALUES SNAPSHOT IN test/policy.test.ts SHOULD BE DERIVED, NOT DELETED. That test
+    (`the SHIPPED plan/policy.yaml loads and lifts the current source values`) does carry a real
+    property — that the file PARSES and every row resolves — and its eleven literals are how it says
+    so today. Rewrite it to assert SHAPE and BOUNDS rather than figures: every expected key is
+    present, each value is a number of the right type, and each sits inside its own row's declared
+    `min`/`max`. That keeps a malformed or missing row failing while letting a legitimate retune pass.
+
+    (iii) DO NOT WEAKEN THE BOUNDS CHECK — IT IS THE REAL SAFETY NET. `PolicyError` throws at load on
+    an out-of-range value, and a daemon that throws at boot is a dead fleet rather than a rejected
+    setting. Whatever replaces the literals must still fail an out-of-range row. Prove it with a
+    fixture whose value sits outside `min`/`max`, not only with the shipped file, which is in range by
+    definition and therefore cannot discriminate.
+
+    (iv) THE FALSIFIER MUST BITE IN BOTH DIRECTIONS, because a check that stops failing is worse than
+    the pin it replaced. Prove that a legitimate in-range retune PASSES (the case #1361 failed) and
+    that a malformed or out-of-range row still FAILS (the case the pins were guarding). One without
+    the other is not evidence.
+
+    (v) KEEP THE HISTORICAL FACT WHERE IT BELONGS. Each relocation PR proved its own
+    relocation-not-retune claim at the time, and the ledger and those PRs are where that fact lives.
+    A comment naming the relocating task and its original figure is the right memorial; a standing
+    assertion is not.
+
+    (vi) NOT IN SCOPE: changing any policy VALUE, changing src/lib/policy.ts's parsing or bounds
+    machinery, and the plan/policy.yaml file itself. This task changes what the tests assert, nothing
+    about what the system does. A diff that touches a value is out of scope by construction.
+  acceptance:
+    - claim: "a legitimate in-range retune of any relocated policy row passes the policy suites without a test edit"
+      proof: "unit test: test/policy-consumers.test.ts"
+    - claim: "each consumer is still asserted to read its policy row rather than a source literal"
+      proof: "unit test: test/policy-consumers.test.ts"
+    - claim: "a row that is missing, malformed or outside its declared min and max still fails"
+      proof: "unit test: test/policy.test.ts"
+    - claim: "the shipped policy file is asserted by shape and bounds rather than by hand-written figures"
+      proof: "unit test: test/policy.test.ts"
+  status: queued
+  attempts: 0
+  note: "verify:auto — every claim is an assertion over the policy loader against the shipped file and
+    fixtures, with no operator present. It touches no DECISIONS.md, so W1-T353's verify:human
+    requirement for ruling-shaped tasks does not apply.
+    risk:high — set by Rule 19's counting AND by a real asymmetry, and both are worth stating.
+    `lint-plan` scores this at TWO distinct subsystems (policy, policy-consumers) and offers
+    raise-or-decompose; decomposing is wrong here because a retune must pass BOTH suites, so fixing
+    one file alone leaves the defect intact and the next retune still edits test/. The asymmetry is
+    the substantive reason: the blast radius is two test files and the loader is untouched, but a
+    rewrite that over-relaxes stops catching a malformed row — exactly the class PolicyError exists
+    to stop. Design (iii) and (iv) are where that is managed, and (iv) is why a one-direction
+    falsifier is not acceptable here.
+    budget_usd 60 — two test rewrites, a bounds fixture, and a two-direction falsifier. No src/ change.
+    files: DECLARES only the two test files. src/lib/policy.ts is deliberately NOT declared: the
+    loader and its bounds machinery are correct and out of scope (vi). plan/policy.yaml is NOT
+    declared either — a diff touching a value would be a retune, which this task must not be.
+    ON THE PROOFS. Both named suites EXIST today, so `rmd check-proof` reports non-zero candidates for
+    each and both execute at filing time. They pass at the merge-base as well, which is expected and
+    not a defect: this task changes what those suites ASSERT rather than adding a new file, so the
+    proof is that the suite is green after the rewrite, and criteria 1 and 3 are what make green mean
+    something different than it does today. `unit test:` proofs are structurally exempt from the
+    executed_stale downgrade, which applies to `grep:` only; no `grep:` proof is used here, so the
+    line-based and basic-regex traps do not arise."
+  risk: high
+  origin: oper#ruling-policy-pin-derivation-2026-08-05
+  plan_refs: ["§5C", "W1-T325", "W1-T330"]
+  files: [test/policy-consumers.test.ts, test/policy.test.ts]
