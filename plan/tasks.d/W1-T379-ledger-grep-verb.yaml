@@ -1,0 +1,89 @@
+- id: W1-T379
+  title: "every historical ledger count is built by hand from a glob that silently matches nothing — `ledger.*.ndjson` finds ZERO of the 666 gzipped archives and answers from the live file; give the union one verb that FAILS LOUDLY when no archive was read"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  rationale: "MEASURED 2026-08-05 (state/recon-state-retention.md). Every rotation is
+    `state/ledger.<ts>.ndjson.gz` — 666 of them, and `find` returns ZERO uncompressed rotations
+    anywhere under state/. So the idiom every operator brief and agent session has used,
+    `grep -h '<pat>' state/ledger.*.ndjson state/ledger.ndjson | sort -u`, matches NOTHING.
+    IT FAILS IN THE WORST AVAILABLE WAY. Under bash the non-matching glob is passed through
+    LITERALLY, grep fails to open it into `2>/dev/null`, and the caller gets a live-file-only number
+    that looks entirely plausible. Under zsh it errors outright, so the same command is either
+    silently wrong or loudly broken depending on which shell ran it.
+    THE GAP IS NOT SMALL: `run.start` reads 223 live against 696 over the true union — a 3.1x
+    undercount — and `dispatch.indeterminate` reads 0 live. Counts of this shape have already been
+    published in this repo's own reports and had to be retracted the night they were measured.
+    A POSITIVE CONTROL AS USUALLY WRITTEN DOES NOT CATCH IT. The convention is 'run a positive
+    control for every count', but a live-only answer is NON-ZERO too, so a control that merely
+    checks 'did I get a plausible number' passes while the archives went unread. The control that
+    actually discriminates is 'did an ARCHIVE FILE match', and nobody writes it by hand.
+    NOTHING IN src/ CAN HELP TODAY: `readLedgerLines` (status.ts) opens exactly ONE path — no glob,
+    no readdir — and zero files across src/ and scripts/ read or write .gz. The union is always the
+    caller's to build, by hand, with a glob that does not work."
+  design: |
+    ONE VERB WHOSE FAILURE MODE IS AN ERROR, NOT A WRONG NUMBER.
+    (i) `rmd ledger-grep <pattern>` streams the union: every `<stateRoot>/ledger.*.ndjson.gz` plus
+    the live `ledger.ndjson`, deduplicated, to stdout. STREAM AND DEDUPE — it must never
+    materialise the union to a temp file, which is the standing rule the manual idiom also carries.
+    (ii) THE WHOLE POINT: it EXITS NON-ZERO when ZERO archive files were read, naming the directory
+    it globbed. That is the hand-written positive control, automated. A run that finds the live file
+    and no archives is the exact silent failure this task exists to kill, so it must be an error and
+    never a result. Print the archive count on success too, so the control is visible rather than
+    implied.
+    (iii) PUT THE PURE PART IN A LIB MODULE (`src/lib/ledger-grep.ts`), exporting
+    `resolveLedgerUnion` — the archive-discovery plus the zero-archive verdict — so both are
+    unit-testable without spawning anything; `run-task.ts` owns only the CLI surface and the process
+    exit, and MUST call `resolveLedgerUnion(` rather than re-deriving the glob. Follow
+    `checkProofCommand`'s shape — a read-only verb that prints what it resolved before it prints
+    results. THE CALL SITE IS A CRITERION, not an implementation detail: eleven modules in this repo
+    have merged green and unreached, and a lib that nothing calls is the W1-T348 defect
+    (`summarizeEscalation` shipped with zero generation call sites) repeated.
+    (iv) IT NEVER DELETES, MOVES OR REWRITES ANYTHING. Read-only by construction: the archives are
+    the only copy of most history (rotateLedger keeps `MAX_RETAINED_LINES_PER_STEP = 200` newest per
+    step and archives the rest, so ~63% of `run.start` exists ONLY in archives). No flag may be
+    added that mutates state/.
+    (v) A NEW VERB FORCES `docs/cli-reference.md`. `scripts/generate-cli-reference.mjs --check` is a
+    required gate and reports 'Drifted command(s)' for any COMMANDS entry missing from the
+    generated doc — this blocked a PR twice before. Regenerate it in the same change; it is declared
+    in files: for exactly this reason.
+    (vi) FALSIFIER, AND IT MUST BITE ON THE SILENT CASE. Point the verb at a state root containing a
+    live ledger and NO archives: it must EXIT NON-ZERO and print nothing that could be mistaken for
+    a count — not return the live-file matches. Assert the exit code and the ABSENCE of a result
+    line, positively. The mirror case (archives present) must report the archive count and the
+    deduplicated matches. One direction without the other is not evidence: a verb that always errors
+    would also pass the first half.
+    NOT IN SCOPE: changing rotation or compression; teaching `readLedgerLines` to union (it is
+    deliberately one-path and consumers depend on that); any retention, deletion or archiving
+    policy; decompressing the archives on disk.
+  acceptance:
+    - claim: "the verb streams the deduplicated union of the gzipped archives and the live ledger for a pattern that occurs in both"
+      proof: "unit test: test/ledger-grep.test.ts"
+    - claim: "a state root with a live ledger but no archives exits non-zero and emits no result line, rather than answering from the live file alone"
+      proof: "unit test: test/ledger-grep.test.ts"
+    - claim: "the CLI verb calls the lib resolver rather than re-deriving the archive glob, so the new module is reached"
+      proof: "grep: resolveLedgerUnion( in src/run-task.ts"
+    - claim: "the generated CLI reference lists the new command, so the drift gate passes"
+      proof: "grep: ledger-grep in docs/cli-reference.md"
+  risk: high
+  origin: oper#recon-state-retention-2026-08-05
+  plan_refs: ["§8A", "§5D"]
+  files: [src/lib/ledger-grep.ts, src/run-task.ts, docs/cli-reference.md, test/ledger-grep.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — both directions of the falsifier assert in-process against a temp state root;
+    no network, no model call, nothing spawned.
+    risk:high IS RULE 19's SPAN, NOT BLAST RADIUS, recorded so a later reader does not over-read it.
+    The verb is read-only and additive: it deletes nothing, changes no existing command, and cannot
+    regress an existing count because nothing calls it yet. What earns the band is that the change
+    must exist end-to-end across four files (lib, CLI, generated doc, test) and that a new COMMANDS
+    entry drifts a REQUIRED gate if the doc is not regenerated with it.
+    budget_usd 55 — the logic is small; the cost is the two-direction falsifier plus the
+    cli-reference regeneration that has blocked this shape of PR twice.
+    WHY A VERB AND NOT JUST A DOC FIX: the doc fix (CLAUDE.md, filed separately the same night) tells
+    a reader the right command. It cannot make the WRONG command fail. Only a verb that refuses to
+    answer when it read no archives converts a silent wrong number into an error, and the silent
+    wrong number is the failure that actually occurred."
