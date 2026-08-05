@@ -997,6 +997,61 @@ test("W1-T193: REFRAME submits the textarea's value VERBATIM to POST /v1/inbox/r
   assert.match(submitHandler, /postJson\("\/v1\/inbox\/reframe", \{ proposalId, feedback \}\)/);
 });
 
+// ── W1-T350: the feedback interpreter's visible round trip — the Answer control becomes
+// arm-then-confirm with a preview read-back, "File raw" stays a one-click escape ─────────────
+//
+// Acceptance criterion 3: "the console submit is the arm-then-confirm read-back idiom — the
+// armed control shows the expansion before anything files, never a single-click submit of an
+// unseen rewrite." Structural proof over the row template + the two event-delegated handler
+// BODIES, the same discipline W1-T193's own APPROVE tests above use for the identical idiom.
+
+test("W1-T350: the Answer control renders UNARMED, with a 'File raw' escape one click away", () => {
+  const html = renderShellHtml();
+  const grillFn = html.match(/function needsMeGrillHtml\(e\) \{[\s\S]*?\n  \}/)?.[0];
+  assert.ok(grillFn, "needsMeGrillHtml must exist");
+  assert.match(grillFn, /class="needs-me-answer-submit" data-confirming="false"/, "the Answer button starts UNARMED");
+  assert.match(grillFn, /class="needs-me-answer-raw"/, "a File-raw escape must render one click away");
+});
+
+test("W1-T350: the FIRST Answer submit PREVIEWS the expansion (POST /v1/feedback/preview) before anything files", () => {
+  const html = renderShellHtml();
+  const submitHandler = html.match(/getElementById\("needs-me-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
+  assert.ok(submitHandler, "no needs-me-list submit handler found");
+  assert.match(submitHandler, /needs-me-answer-submit/);
+  assert.match(submitHandler, /postJson\("\/v1\/feedback\/preview", \{ text: answer, replyTo \}\)/, "must preview before the confirmed file");
+});
+
+test("W1-T350: a SECOND submit while armed files WITH the previewed expansion, reading its claim back in the button label — never a bare 'Confirm?'", () => {
+  const html = renderShellHtml();
+  const submitHandler = html.match(/getElementById\("needs-me-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
+  assert.ok(submitHandler);
+  assert.match(submitHandler, /submitBtn\.dataset\.confirming === "true"/, "a second submit must be distinguished from the first");
+  assert.match(submitHandler, /postJson\("\/v1\/feedback", \{ text: answer, replyTo, expansion \}\)/, "the confirmed submit must file WITH the previewed expansion");
+  assert.match(submitHandler, /submitBtn\.textContent = `Confirm: \$\{expansion\.claim\}/, "the armed label must read back the expansion");
+  assert.match(submitHandler, /setTimeout\(\(\) => resetAnswerButton\(submitBtn\), 8000\)/, "must reset after 8s, the same window as STOP/APPROVE");
+});
+
+test("W1-T350: an expander failure/outage (nothing to show) leaves the FIRST click filing the plain submission, unchanged from before this task", () => {
+  const html = renderShellHtml();
+  const submitHandler = html.match(/getElementById\("needs-me-list"\)\.addEventListener\("submit", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
+  assert.ok(submitHandler);
+  const noExpansionBranch = submitHandler.match(/if \(!expansion\) \{([\s\S]*?)return;\s*\n\s*\}/)?.[1];
+  assert.ok(noExpansionBranch, "no `if (!expansion)` fallback branch found");
+  assert.match(noExpansionBranch, /postJson\("\/v1\/feedback", \{ text: answer, replyTo \}\)/, "must file WITHOUT an expansion key, exactly the pre-W1-T350 request shape");
+  assert.doesNotMatch(noExpansionBranch, /expansion,/, "the fallback file must never send a null/undefined expansion field either");
+});
+
+test("W1-T350: 'File raw' ALWAYS skips the preview and files immediately — never armed, never a second click", () => {
+  const html = renderShellHtml();
+  const clickHandler = html.match(/getElementById\("needs-me-list"\)\.addEventListener\("click", async \(e\) => \{([\s\S]*?)\n  \}\);/)?.[1];
+  assert.ok(clickHandler, "no needs-me-list click handler found");
+  assert.match(clickHandler, /needs-me-answer-raw/);
+  const rawBranch = clickHandler.match(/if \(rawBtn\) \{([\s\S]*?)\n\s*\} else if/)?.[1];
+  assert.ok(rawBranch, "no rawBtn branch found");
+  assert.doesNotMatch(rawBranch, /\/v1\/feedback\/preview/, "File raw must never call the preview endpoint");
+  assert.match(rawBranch, /postJson\("\/v1\/feedback", \{ text: answer, replyTo \}\)/, "File raw files WITHOUT an expansion, exactly today's pre-W1-T350 shape");
+});
+
 test("W1-T193: a DRAFTING proposal renders a distinct state carrying its spawn timestamp, never nothing", () => {
   const html = renderShellHtml();
   const draftingFn = html.match(/function needsMeDraftingHtml\(p\) \{[\s\S]*?\n  \}/)?.[0];

@@ -8,15 +8,27 @@ import {
   FEEDBACK_ORIGINS,
   FEEDBACK_STATUSES,
   FeedbackError,
+  buildFeedbackExpansionPrompt,
+  buildFeedbackExpansionSpawnArgs,
   captureFeedback,
+  expandFeedbackDraft,
   feedbackAttachmentsDir,
   feedbackEntryPath,
   isValidFeedbackOrigin,
   listFeedback,
   parseFeedbackAddArgs,
   readFeedbackEntry,
+  realFeedbackExpander,
+  recentFeedbackFewShot,
+  resolveFeedbackExpansionMount,
   setFeedbackStatus,
+  validateFeedbackExpansion,
+  type FeedbackExpanderDeps,
+  type FeedbackExpansion,
 } from "../src/lib/feedback.js";
+import type { Mount, Mounts } from "../src/lib/mounts.js";
+import { validateMounts } from "../src/lib/mounts.js";
+import type { spawnWorker, WorkerResult } from "../src/lib/worker.js";
 
 function root(): string {
   return mkdtempSync(join(tmpdir(), "rmd-feedback-"));
@@ -253,4 +265,280 @@ test("setFeedbackStatus rejects a status outside the closed enum", () => {
 
 test("setFeedbackStatus throws on an unknown id", () => {
   assert.throws(() => setFeedbackStatus(root(), "fb-nope", "proposed"), FeedbackError);
+});
+
+// ── W1-T350: the feedback interpreter — validateFeedbackExpansion ───────────────────────────
+
+function validExpansionPayload(over: Partial<FeedbackExpansion> = {}): unknown {
+  return {
+    claim: "the drain retry banner overlaps the status pill",
+    evidence: "screenshot attached, 1280x720, banner z-index 5 over pill z-index 4",
+    recon: ["establish whether this reproduces at other viewport widths"],
+    falsifying_check: "if the overlap does not reproduce on a fresh reload, this is a one-off render glitch",
+    ...over,
+  };
+}
+
+test("validateFeedbackExpansion: a well-formed record round-trips with whitespace trimmed", () => {
+  const out = validateFeedbackExpansion(validExpansionPayload({ claim: "  a claim  " }));
+  assert.ok(out);
+  assert.equal(out.claim, "a claim");
+  assert.deepEqual(out.recon, ["establish whether this reproduces at other viewport widths"]);
+});
+
+test("validateFeedbackExpansion: an EMPTY evidence string is ACCEPTED — a short note may carry no measured specific at all", () => {
+  const out = validateFeedbackExpansion(validExpansionPayload({ evidence: "" }));
+  assert.ok(out);
+  assert.equal(out.evidence, "");
+});
+
+test("validateFeedbackExpansion: an EMPTY recon array is ACCEPTED — nothing was left unverified", () => {
+  const out = validateFeedbackExpansion(validExpansionPayload({ recon: [] }));
+  assert.ok(out);
+  assert.deepEqual(out.recon, []);
+});
+
+test("validateFeedbackExpansion: missing claim is rejected", () => {
+  assert.equal(validateFeedbackExpansion(validExpansionPayload({ claim: "" })), null);
+});
+
+test("validateFeedbackExpansion: missing falsifying_check is rejected", () => {
+  assert.equal(validateFeedbackExpansion(validExpansionPayload({ falsifying_check: "" })), null);
+});
+
+test("validateFeedbackExpansion: recon must be an array", () => {
+  assert.equal(validateFeedbackExpansion(validExpansionPayload({ recon: "establish whether x" as never })), null);
+});
+
+test("validateFeedbackExpansion: more than 10 recon directives is rejected", () => {
+  const recon = Array.from({ length: 11 }, (_, i) => `establish whether item ${i}`);
+  assert.equal(validateFeedbackExpansion(validExpansionPayload({ recon })), null);
+});
+
+test("validateFeedbackExpansion: a recon directive over the per-item bound is rejected", () => {
+  const recon = ["establish whether " + "x".repeat(300)];
+  assert.equal(validateFeedbackExpansion(validExpansionPayload({ recon })), null);
+});
+
+test("validateFeedbackExpansion: a bare string (free prose) is rejected — never stored as free prose", () => {
+  assert.equal(validateFeedbackExpansion("CLAIM: whatever. RECON: something. Falsifying check: something else."), null);
+});
+
+test("validateFeedbackExpansion: null/undefined/non-object input is rejected", () => {
+  assert.equal(validateFeedbackExpansion(null), null);
+  assert.equal(validateFeedbackExpansion(undefined), null);
+  assert.equal(validateFeedbackExpansion(42), null);
+});
+
+// ── W1-T350: expandFeedbackDraft — fail-open (throw/reject/invalid -> null, never propagate) ──
+
+function fakeExpanderDeps(behavior: { throw: unknown }): FeedbackExpanderDeps {
+  return {
+    expand: async () => {
+      throw behavior.throw;
+    },
+  };
+}
+
+test("expandFeedbackDraft: a valid expander response validates and is returned, called with {draft, fewShot}", async () => {
+  const calls: unknown[] = [];
+  const deps: FeedbackExpanderDeps = {
+    expand: async (input) => {
+      calls.push(input);
+      return validExpansionPayload();
+    },
+  };
+  const out = await expandFeedbackDraft("the console doesn't show me when spend is blocked", ["example one"], deps);
+  assert.ok(out);
+  assert.equal(out.claim, "the drain retry banner overlaps the status pill");
+  assert.deepEqual(calls, [{ draft: "the console doesn't show me when spend is blocked", fewShot: ["example one"] }]);
+});
+
+test("expandFeedbackDraft: a throw resolves to null, never propagates (this task's stated failure mode)", async () => {
+  const deps = fakeExpanderDeps({ throw: new Error("expander unavailable") });
+  assert.equal(await expandFeedbackDraft("x", [], deps), null);
+});
+
+test("expandFeedbackDraft: a rejected promise resolves to null", async () => {
+  const deps: FeedbackExpanderDeps = { expand: async () => Promise.reject(new Error("boom")) };
+  assert.equal(await expandFeedbackDraft("x", [], deps), null);
+});
+
+test("expandFeedbackDraft: a response that fails FeedbackExpansion validation resolves to null", async () => {
+  const deps: FeedbackExpanderDeps = { expand: async () => ({ claim: "" }) };
+  assert.equal(await expandFeedbackDraft("x", [], deps), null);
+});
+
+// ── W1-T350: recentFeedbackFewShot — only entries carrying BOTH precedent markers ───────────
+
+test("recentFeedbackFewShot: only entries with BOTH 'RECON:' and 'Falsifying check:' markers qualify, most recent last, capped at limit", () => {
+  const r = root();
+  captureFeedback(r, { raw: "no markers here at all" });
+  captureFeedback(r, { raw: "RECON: only, no falsifying marker" });
+  const c = captureFeedback(r, { raw: "FIRST MARKED ENTRY. RECON: establish x. Falsifying check: if y." });
+  const d = captureFeedback(r, { raw: "SECOND MARKED ENTRY. RECON: establish z. Falsifying check: if w." });
+
+  const fewShot = recentFeedbackFewShot(r, 5);
+  assert.deepEqual(fewShot, [c.raw, d.raw]);
+});
+
+test("recentFeedbackFewShot: caps at `limit`, keeping the MOST RECENT entries", () => {
+  const r = root();
+  const marked = (n: number) => captureFeedback(r, { raw: `entry ${n}. RECON: x. Falsifying check: y.` });
+  const entries = [1, 2, 3].map(marked);
+  const fewShot = recentFeedbackFewShot(r, 2);
+  assert.deepEqual(fewShot, [entries[1].raw, entries[2].raw]);
+});
+
+test("recentFeedbackFewShot: an empty/unmarked inbox returns []", () => {
+  const r = root();
+  captureFeedback(r, { raw: "nothing marked" });
+  assert.deepEqual(recentFeedbackFewShot(r), []);
+});
+
+// ── W1-T350: buildFeedbackExpansionPrompt (pure) ────────────────────────────────────────────
+
+test("buildFeedbackExpansionPrompt embeds the draft, the four named JSON fields, and the honesty constraint", () => {
+  const prompt = buildFeedbackExpansionPrompt({ draft: "the console doesn't show me when spend is blocked", fewShot: [] });
+  assert.match(prompt, /the console doesn't show me when spend is blocked/);
+  assert.match(prompt, /ONLY a JSON object/);
+  assert.match(prompt, /"claim"/);
+  assert.match(prompt, /"evidence"/);
+  assert.match(prompt, /"recon"/);
+  assert.match(prompt, /"falsifying_check"/);
+  assert.match(prompt, /NEVER invent one/);
+  assert.doesNotMatch(prompt, /RECENT EXAMPLES/);
+});
+
+test("buildFeedbackExpansionPrompt renders a few-shot block only when fewShot is non-empty", () => {
+  const prompt = buildFeedbackExpansionPrompt({ draft: "x", fewShot: ["EXAMPLE ENTRY ONE"] });
+  assert.match(prompt, /RECENT EXAMPLES/);
+  assert.match(prompt, /EXAMPLE ENTRY ONE/);
+  assert.match(prompt, /tone\/calibration ONLY/);
+});
+
+// ── W1-T350: buildFeedbackExpansionSpawnArgs / realFeedbackExpander / resolveFeedbackExpansionMount ──
+
+function goodMounts(): Mounts {
+  return validateMounts({
+    tiers: { haiku: 1, sonnet: 2, opus: 3 },
+    efforts: { low: 1, medium: 2, high: 3 },
+    architect: { model: "opus", effort: "high", max_turns: 60, context_budget: 180000 },
+    judge: { model: "opus", effort: "high", max_turns: 60, context_budget: 150000 },
+    routes: {
+      implement: {
+        low: { src: { model: "sonnet", effort: "medium", max_turns: 30, context_budget: 120000 } },
+        high: { src: { model: "sonnet", effort: "high", max_turns: 50, context_budget: 180000 } },
+      },
+      recon: {
+        low: { src: { model: "haiku", effort: "medium", max_turns: 20, context_budget: 60000 } },
+      },
+    },
+  });
+}
+
+function fakeWorkerResult(text: string): WorkerResult {
+  return {
+    sessionId: "s-feedback-expansion",
+    costUsd: 0.001,
+    numTurns: 1,
+    text,
+    blocks: [text],
+    stderr: "",
+    subtype: "success",
+    isError: false,
+    apiError: false,
+    permissionDenials: [],
+    childEnvKeys: [],
+    model: "haiku",
+    effort: "medium",
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    modelUsage: {},
+    compactionEvents: [],
+    qualitySuspect: false,
+  };
+}
+
+test("buildFeedbackExpansionSpawnArgs carries an EMPTY tool list and the resolved mount's model/effort/maxTurns — the rung cannot write/edit, by construction", () => {
+  const mount: Mount = { model: "haiku", effort: "medium", maxTurns: 20, contextBudget: 60000 };
+  const input = { draft: "some draft", fewShot: [] };
+  const args = buildFeedbackExpansionSpawnArgs({ input, mount, cwd: "/tmp/x", settingsFile: "/tmp/settings.json" });
+
+  assert.deepEqual(args.tools, []);
+  assert.equal(args.model, "haiku");
+  assert.equal(args.effort, "medium");
+  assert.equal(args.maxTurns, 20);
+  assert.equal(args.cwd, "/tmp/x");
+  assert.equal(args.settingsFile, "/tmp/settings.json");
+  assert.equal(args.permissionMode, "bypassPermissions");
+  assert.equal(args.prompt, buildFeedbackExpansionPrompt(input));
+});
+
+test("realFeedbackExpander parses a JSON object out of the worker's response text and returns it", async () => {
+  const mount: Mount = { model: "haiku", effort: "medium", maxTurns: 20, contextBudget: 60000 };
+  const calls: unknown[] = [];
+  const responseObject = validExpansionPayload();
+  const spawn = (async (args: unknown) => {
+    calls.push(args);
+    return fakeWorkerResult(`Here is the JSON:\n${JSON.stringify(responseObject)}\nthanks`);
+  }) as typeof spawnWorker;
+
+  const expand = realFeedbackExpander({ mount, cwd: "/tmp/x", settingsFile: "/tmp/settings.json", spawn });
+  const out = await expand({ draft: "raw text", fewShot: [] });
+
+  assert.equal(calls.length, 1, "calls the injected spawn exactly once");
+  assert.deepEqual(
+    calls[0],
+    buildFeedbackExpansionSpawnArgs({ input: { draft: "raw text", fewShot: [] }, mount, cwd: "/tmp/x", settingsFile: "/tmp/settings.json" }),
+  );
+  assert.deepEqual(out, responseObject);
+});
+
+test("realFeedbackExpander returns null when the worker's response contains no JSON object at all", async () => {
+  const mount: Mount = { model: "haiku", effort: "medium", maxTurns: 20, contextBudget: 60000 };
+  const spawn = (async () => fakeWorkerResult("sorry, I could not expand this")) as typeof spawnWorker;
+  const expand = realFeedbackExpander({ mount, cwd: "/tmp/x", settingsFile: "/tmp/settings.json", spawn });
+  assert.equal(await expand({ draft: "raw text", fewShot: [] }), null);
+});
+
+test("realFeedbackExpander returns null when the extracted braces are not valid JSON", async () => {
+  const mount: Mount = { model: "haiku", effort: "medium", maxTurns: 20, contextBudget: 60000 };
+  const spawn = (async () => fakeWorkerResult("{not: valid, json}")) as typeof spawnWorker;
+  const expand = realFeedbackExpander({ mount, cwd: "/tmp/x", settingsFile: "/tmp/settings.json", spawn });
+  assert.equal(await expand({ draft: "raw text", fewShot: [] }), null);
+});
+
+test("resolveFeedbackExpansionMount resolves the CHEAPEST configured tier — reused from risk-judge.ts, never a hard-coded model id", () => {
+  const mount = resolveFeedbackExpansionMount(goodMounts());
+  assert.equal(mount.model, "haiku");
+  assert.deepEqual(mount, { model: "haiku", effort: "medium", maxTurns: 20, contextBudget: 60000 });
+});
+
+// ── W1-T350 acceptance criterion 2: captureFeedback stores raw byte-identical alongside the ──
+// expansion, and the file-raw escape (no expansion given) still files unchanged ──────────────
+
+test("captureFeedback: an entry captured WITH an expansion stores it alongside raw, byte-identical", () => {
+  const r = root();
+  const expansion = validateFeedbackExpansion(validExpansionPayload())!;
+  const entry = captureFeedback(r, { raw: "the drain retry banner overlaps the status pill", expansion });
+  assert.equal(entry.raw, "the drain retry banner overlaps the status pill");
+  assert.deepEqual(entry.expansion, expansion);
+
+  // the literal proof artifact: plan/feedback/<id>.yaml carries BOTH fields on disk.
+  const onDisk = readFeedbackEntry(r, entry.id);
+  assert.equal(onDisk.raw, "the drain retry banner overlaps the status pill");
+  assert.deepEqual(onDisk.expansion, expansion);
+});
+
+test("captureFeedback: the file-raw escape (no expansion given) captures exactly as before this task — expansion is null", () => {
+  const r = root();
+  const entry = captureFeedback(r, { raw: "just file this as-is" });
+  assert.equal(entry.raw, "just file this as-is");
+  assert.equal(entry.expansion, null);
+});
+
+test("captureFeedback: an explicit null expansion (a confirm whose preview never produced one) files with expansion null, never throws", () => {
+  const r = root();
+  const entry = captureFeedback(r, { raw: "x", expansion: null });
+  assert.equal(entry.expansion, null);
 });
