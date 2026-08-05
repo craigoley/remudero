@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1104,6 +1104,133 @@ test("W1-T348: a THROWING decision-summary rung still writes the `proposed` tran
     });
     assert.match(entryYaml, /status: proposed/, "the proposal transition itself is NEVER blocked by a summarizer outage");
     assert.match(entryYaml, /summary: null/, "fail-open — no half-written entry, no invented content");
+  } finally {
+    process.env.HOME = savedHome;
+    process.env.PATH = savedPath;
+    for (const d of [bare, home, configRoot, shimDir]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T348's OTHER wiring: the GRILL path ───────────────────────────────────────────────────
+//
+// WHY THIS EXISTS. This task wires the decision-summary rung at TWO places — proposal time and
+// GRILL time — and only the proposal half was driven. CI's diff-coverage blocked the PR naming the
+// two uncovered lines, both inside `if (decision.action === "grill")`: the `escalateWithSummary(...)`
+// call and its `...summarizeDeps` spread. `escalateWithSummary` itself is covered in
+// test/escalate.test.ts, but in ISOLATION — a leaf proven and a wiring never reached is this repo's
+// documented "seam built but never called" hazard, and it is exactly what the gate caught.
+//
+// WHAT THIS DRIVES: `triageCommand` for real, with the same fixture the proposal test uses (real
+// bare origin, real config root, real gh shim). The Architect spawn returns an AMBIGUOUS verdict
+// with two OPTIONs and a matching RECOMMENDATION and changes NO files, which is what `decideTriage`
+// requires to take the grill branch. The summarizer spawn is the same injected one. The PROOF is
+// read off the gh shim's own recorded argv, so it asserts what actually reached `gh`.
+
+test("W1-T348: a triage GRILL opens its needs-human issue WITH a validated decisionSummary in the body", async () => {
+  const feedbackId = `fb-t348-grill-${Date.now()}`;
+
+  const bare = mkdtempSync(join(tmpdir(), "t348g-origin-"));
+  execFileSync("git", ["init", "--quiet", "--bare", "-b", "main", bare], { encoding: "utf8", env: T348_GIT_ENV });
+  const seed = mkdtempSync(join(tmpdir(), "t348g-seed-"));
+  execFileSync("git", ["init", "--quiet", "-b", "main", seed], { encoding: "utf8", env: T348_GIT_ENV });
+  mkdirSync(join(seed, "plan", "tasks.d"), { recursive: true });
+  mkdirSync(join(seed, "plan", "feedback"), { recursive: true });
+  writeFileSync(
+    join(seed, "plan", "tasks.yaml"),
+    ["- id: W1-T4", '  title: "a seed task the plan loader accepts"', "  repo: remudero", "  depends_on: []", "  type: implement", "  verify: auto", "  status: queued", "  attempts: 0", ""].join("\n"),
+  );
+  writeFileSync(
+    join(seed, "plan", "feedback", `${feedbackId}.yaml`),
+    [`id: ${feedbackId}`, "ts: '2026-08-05T00:00:00.000Z'", "raw: fixture entry for the W1-T348 GRILL-summary wiring proof", "attachments: []", "origin: cli", "status: new", "proposal_pr: null", ""].join("\n"),
+  );
+  execFileSync("git", ["-C", seed, "add", "-A"], { encoding: "utf8" });
+  execFileSync("git", ["-C", seed, "commit", "--quiet", "-m", "chore: seed plan"], { encoding: "utf8", env: T348_GIT_ENV });
+  execFileSync("git", ["-C", seed, "remote", "add", "origin", bare], { encoding: "utf8" });
+  execFileSync("git", ["-C", seed, "push", "--quiet", "origin", "main"], { encoding: "utf8", env: T348_GIT_ENV });
+  rmSync(seed, { recursive: true, force: true });
+
+  const home = mkdtempSync(join(tmpdir(), "t348g-home-"));
+  const configRoot = mkdtempSync(join(tmpdir(), "t348g-root-"));
+  const shimDir = mkdtempSync(join(tmpdir(), "t348g-ghshim-"));
+  const argvLog = join(shimDir, "argv.txt");
+  const savedHome = process.env.HOME;
+  const savedPath = process.env.PATH;
+  try {
+    mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+    writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/usr/bin/true", root: configRoot }, null, 2));
+    process.env.HOME = home;
+
+    const originUrl = execFileSync("git", ["-C", REPO_ROOT, "config", "--get", "remote.origin.url"], { encoding: "utf8" }).trim();
+    const repoName = originUrl.match(/[/:]([^/:]+)\/([^/]+?)(?:\.git)?$/)![2];
+    const repoDir = join(configRoot, "repos", repoName);
+    mkdirSync(dirname(repoDir), { recursive: true });
+    execFileSync("git", ["clone", "--quiet", bare, repoDir], { encoding: "utf8", env: T348_GIT_ENV });
+    execFileSync("git", ["-C", repoDir, "config", "user.name", "remudero-test"], { encoding: "utf8" });
+    execFileSync("git", ["-C", repoDir, "config", "user.email", "test@remudero.invalid"], { encoding: "utf8" });
+
+    // Records EVERY argv so the assertion can read what really reached `gh`, rather than trusting a
+    // return value. `issue create` answers with a URL so the grill path completes.
+    writeFileSync(
+      join(shimDir, "gh"),
+      [
+        "#!/bin/sh",
+        `printf '%s\\n' "$*" >> ${JSON.stringify(argvLog)}`,
+        'case "$*" in',
+        '  *"pr list"*) echo "[]" ;;',
+        '  *"issue create"*) echo "https://github.com/craigoley/remudero/issues/777" ;;',
+        '  *"issue list"*) echo "[]" ;;',
+        "  *\"--json body\"*) echo '{\"body\":\"\"}' ;;",
+        '  *"pr diff"*) echo "" ;;',
+        "  *) exit 0 ;;",
+        "esac",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    process.env.PATH = `${shimDir}:${savedPath}`;
+
+    await withLiveWritesAllowed(() =>
+      triageCommand([feedbackId], {
+        spawn: async (args: { cwd: string; prompt: string; tools?: string[] }) => {
+          if ((args.tools ?? []).length === 0) {
+            // The decision-summary rung's own spawn shape — the SAME injected summarizer the
+            // proposal test uses, so this proves the wiring and not a second summarizer.
+            return t348FakeWorker(JSON.stringify(T348_SUMMARY_PAYLOAD));
+          }
+          // AMBIGUOUS + two OPTIONs + a matching RECOMMENDATION and NO changed files is exactly
+          // what decideTriage requires to return { action: "grill" } — see its own guards.
+          //
+          // `blocks: []`, NOT `blocks: [text]`, and that is load-bearing: run-task.ts parses the
+          // verdict from `[worker.text, worker.blocks.join("\n")].join("\n")`, so a fixture that
+          // puts the SAME string in both makes every OPTION line appear TWICE. Four options exceeds
+          // `DECISION_SUMMARY_MAX_OPTIONS` (3), `validateDecisionSummary` returns null, and the
+          // grill fails open to a raw body — which looks exactly like the wiring being absent.
+          // Measured while writing this test; the shared `t348FakeWorker` helper duplicates that way.
+          const verdictText = [
+            "GROUND: no existing task covers this.",
+            "OPTION: cli-flag|add a --foo flag to the relevant command",
+            "OPTION: config-default|add a config default instead, no new flag",
+            "RECOMMENDATION: cli-flag",
+            "AMBIGUOUS: does this want a CLI flag or a config default?",
+          ].join("\n");
+          // Reuse the shared helper (it supplies every WorkerResult field the run reads, `usage`
+          // included) and override ONLY `blocks` — a hand-built literal is missing fields the run
+          // dereferences.
+          return { ...t348FakeWorker(verdictText), blocks: [] };
+        },
+      }),
+    ).catch(() => undefined); // bookkeeping after the issue open is not what this asserts
+
+    const argv = readFileSync(argvLog, "utf8");
+    assert.match(argv, /issue create/, "the grill path reached gh issue create");
+    assert.match(argv, /--label needs-human/, "and filed it on the needs-human lane");
+    // THE PROOF that `escalateWithSummary` — not the bare `escalate` — served this path: the
+    // WIRED summarizer's own headline is in the issue body. A raw-body issue would not carry it.
+    assert.match(
+      argv,
+      /File a new plan task from this feedback/,
+      "the wired summarizer's headline reached the issue body, so escalateWithSummary served the grill path",
+    );
   } finally {
     process.env.HOME = savedHome;
     process.env.PATH = savedPath;
