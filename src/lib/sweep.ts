@@ -2642,6 +2642,87 @@ export function logCostGovernorDeferral(
   });
 }
 
+/**
+ * How many CONSECUTIVE `sweep.post_review.failed` lines — with no intervening `.done` — mean the
+ * post-review path has STALLED rather than hiccupped.
+ *
+ * DERIVED FROM THE LEDGER, NOT PICKED. Over the live file unioned with every rotation, the
+ * consecutive-failure runs (a success resets the count) were: one run of 1, two runs of 4, one run
+ * of 5, and one run of 77. The short runs recovered in 2.6–3.5 minutes; the run of 77 spanned 32.5
+ * minutes and was still going when an operator found it by hand. The observed transient maximum is
+ * 5 and the observed stall is 77, with NO observation between — so 8 sits inside an empty gap, with
+ * ~60% margin over the worst transient and far below the stall. Raise this only against new data.
+ */
+export const POST_REVIEW_STALL_THRESHOLD = 8;
+
+/** {@link detectPostReviewStall}'s verdict. */
+export interface PostReviewStallVerdict {
+  /** true ⇒ the run of consecutive failures has reached {@link POST_REVIEW_STALL_THRESHOLD}. */
+  stalled: boolean;
+  /** Length of the CURRENT consecutive-failure run (0 when the newest outcome was a success). */
+  consecutiveFailures: number;
+  /** `ts` of the newest failure in the run — the EPISODE KEY the escalator dedups on. */
+  newestFailureTs?: string;
+  /** `ts` of the oldest failure in the run, so the escalation can state how long it has been going. */
+  oldestFailureTs?: string;
+  /**
+   * The run's error text with digit runs replaced by `<N>`. NORMALISATION IS LOAD-BEARING: the 91
+   * observed failures carried 10 DISTINCT raw error strings and exactly ONE normalised string,
+   * because the text embeds the PR number (`gh pr view 1339 …` vs `gh pr view 1340 …`). Grouping on
+   * the RAW text would split one systematic stall into ten unrelated-looking groups and defeat the
+   * whole point of noticing that a failure repeats.
+   */
+  normalisedError?: string;
+  /**
+   * true when every failure in the run is an API quota exhaustion. Carried so the escalation can say
+   * so — a quota failure is fleet-stopping but self-clearing at a known reset, which asks something
+   * different of the operator than a persistent bug does. It deliberately does NOT gate
+   * {@link PostReviewStallVerdict.stalled}: a systematic stall is worth surfacing whatever its cause,
+   * and gating on a recognised error string would make the detector blind to every unrecognised one.
+   */
+  rateLimited: boolean;
+}
+
+/** Digit runs → `<N>`, so a per-PR error text collapses to one group. See `normalisedError`. */
+function normaliseErrorText(s: string): string {
+  return s.replace(/\d+/g, "<N>");
+}
+
+/**
+ * Is the sweep's post-review path stalled? Pure over ledger lines, oldest-first.
+ *
+ * THE DEFECT THIS EXISTS FOR (measured 2026-08-05): `sweep.post_review.failed` had fired 91 times —
+ * every one a GraphQL rate-limit — across a week, and NOTHING SURFACED IT. Green PRs sat unreviewed
+ * while the sweep retried each tick and logged another identical line. The operator found it by
+ * hand. A transport fix removes THIS cause; it does not remove the class, because the next
+ * systematic post-review failure for a different reason would be equally silent.
+ *
+ * COUNTS THE CURRENT RUN ONLY, and any `.done` resets it — the question is "is it stalled NOW",
+ * not "has it ever failed a lot". A lifetime count would latch permanently after the first bad day.
+ */
+export function detectPostReviewStall(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  threshold: number = POST_REVIEW_STALL_THRESHOLD,
+): PostReviewStallVerdict {
+  const run: Record<string, unknown>[] = [];
+  for (const l of lines) {
+    if (l.step === "sweep.post_review.done") run.length = 0;
+    else if (l.step === "sweep.post_review.failed") run.push(l);
+  }
+  if (run.length === 0) return { stalled: false, consecutiveFailures: 0, rateLimited: false };
+  const errs = run.map((l) => (typeof l.error === "string" ? l.error : ""));
+  const newest = run[run.length - 1];
+  const oldest = run[0];
+  return {
+    stalled: run.length >= threshold,
+    consecutiveFailures: run.length,
+    newestFailureTs: typeof newest?.ts === "string" ? newest.ts : undefined,
+    oldestFailureTs: typeof oldest?.ts === "string" ? oldest.ts : undefined,
+    normalisedError: normaliseErrorText(errs[errs.length - 1] ?? ""),
+    rateLimited: errs.length > 0 && errs.every((e) => /rate limit/i.test(e)),
+  };
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // W1-T150 — the LEVEL-TRIGGERED CREDIT BACKFILL rung (ratifies P30, the
 // identical P22 argument applied to the MERGE EVENT rather than open-PR

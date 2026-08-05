@@ -379,6 +379,23 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // PR another empty commit — an unbounded re-push loop, which is precisely the failure the
   // cap exists to prevent. The line IS the bound; it must survive rotation.
   "sweep.absent_repush",
+  // `escalatePostReviewStall` (run-task.ts) COUNTS these back to decide whether the CURRENT
+  // post-review stall has already been escalated — the episode key, exactly the shape
+  // `daemon.crashloop.escalated` above uses. The line IS the dedup: `escalate()` skips its whole
+  // dedup block when the escalation names no PR (`if (prRef && deps.issues.listOpen)`), and a
+  // post-review stall is a fleet-wide condition with no single PR to name, so a rotation archiving
+  // this marker would re-open one needs-human issue PER SWEEP TICK — the same unbounded shape that
+  // produced eight identical "dispatch queue starved" issues.
+  "sweep.post_review.stalled.escalated",
+  // `detectPostReviewStall` (lib/sweep.ts) COUNTS the current consecutive run of `.failed` lines and
+  // RESETS that count on a `.done` — so both are deciding reads, and both must survive rotation.
+  // Without them the stall detector would inherit the very defect it exists to fix: a rotation
+  // mid-stall would archive the failures, reset the run to zero, and the stall would go unnoticed
+  // again — the #977 (`sweep.absent_repush`) class, applied to this feature. Bounded like every
+  // other member by MAX_RETAINED_LINES_PER_STEP (200 newest per step), which is far above the
+  // detector's threshold of 8, so this costs a fixed and small amount of retained history.
+  "sweep.post_review.done",
+  "sweep.post_review.failed",
 ]);
 
 /** Steps matched by PREFIX rather than enumerated — currently only `deploy.*` (`deploy.skip`,
