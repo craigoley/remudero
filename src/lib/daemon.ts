@@ -1401,13 +1401,9 @@ export async function runDaemon(
     // 106 minutes; 64% of filings waited over an hour, 40% over three. With auto-triage now filing
     // unattended, that is a task queue the running fleet cannot see.
     //
-    // PLACED HERE DELIBERATELY, and the position is the in-flight safety argument:
+    // PLACED HERE DELIBERATELY, and the position is the batch safety argument:
     //   - AFTER `checkStop`, so a deliberately halted fleet never does I/O to reload.
-    //   - At the TOP of the tick, before any dispatch decision reads `plan`. Everything below in
-    //     this iteration therefore sees ONE consistent plan; a file changing mid-tick cannot
-    //     produce two different answers within the same tick, because it is only ever observed
-    //     here. `runOne` is awaited to completion before the loop returns, so a reload can never
-    //     land under an in-flight task either.
+    //   - At the TOP of the tick, before any dispatch decision reads the plan.
     //
     // The dep returns null when nothing changed, so the caller owns change detection and the
     // common case costs no parse. It must re-read from the SAME source the boot used
@@ -1426,6 +1422,26 @@ export async function runDaemon(
         log("daemon.plan_reload_failed", { reason: e instanceof Error ? e.message : String(e) });
       }
     }
+    // ONE SNAPSHOT PER DISPATCH BATCH (W1-T340; MASTER-PLAN §4B; narrows W1-T326 blocker (2)).
+    // `plan` above is a MUTABLE local binding — reassigned by the reload block on every tick it
+    // fires — so a piece of code that closes over the NAME `plan` reads whatever the MOST RECENT
+    // reload produced, not necessarily the value that was live when its own dispatch decision was
+    // made. That distinction was invisible before this line existed: `runDaemon` picks and awaits
+    // exactly one task per tick (N=1), so nothing ever ran between one reload and the next that
+    // could observe the difference. It stops being invisible the moment a batch holds more than
+    // one lane (W1-T343): lane A can be dispatched from this tick's plan, the tick can then reload
+    // for lane B, and if lane A's OWN later reasoning (its post-hoc block judgment, an overlap
+    // partition, a retry) reads the live `plan` binding instead of what it was dispatched under, it
+    // is silently re-judged against a blob it never saw — no throw, no ledger line, two disagreeing
+    // answers. `plan = fresh` reassigns the BINDING, never mutates the Plan object itself (JS
+    // reference semantics), so the fix is a value capture, not a lock: `planForBatch` is bound ONCE,
+    // right here, immediately after this tick's reload has settled, and is the ONLY plan value every
+    // lane and every decision below — the kick check, `nextRunnable`'s selection,
+    // `reasonAboutBlock`'s post-hoc judgment — may consult for the REST of this tick. `plan` itself
+    // is free to be reassigned again on the NEXT tick; `planForBatch` never is. This holds at N=1 too
+    // (a single-lane batch is a batch of one, and the discipline is identical), which is what makes
+    // it landable and provable before any lane exists rather than speculative scaffolding.
+    const planForBatch = plan;
     // DAILY COST CEILING FRESHNESS (W1-T331): mirrors `reloadPlan` immediately above — SAME
     // placement (top of the tick, before any dispatch decision, so everything below sees ONE
     // consistent ceiling), SAME "a throw is caught and ledgered, never fatal" contract. UNLIKE
@@ -1773,11 +1789,11 @@ export async function runDaemon(
           deps.clearKick?.(kick.taskId);
           log("console.kick_refused", { task: kick.taskId, origin: kick.origin, reason });
         };
-        const task = plan.byId.get(kick.taskId);
+        const task = planForBatch.byId.get(kick.taskId);
         if (!task) { refuse("unknown task id"); continue; }
         if (isMerged(kick.taskId)) { refuse("already merged — stale kick"); continue; }
         try {
-          assertRunnable(plan, task, mergedTask);
+          assertRunnable(planForBatch, task, mergedTask);
         } catch (e) {
           refuse(e instanceof PlanError ? e.message : String((e as Error)?.message ?? e));
           continue;
@@ -1799,7 +1815,7 @@ export async function runDaemon(
     // `idleReasons`'s `DispatchFilterReason` tally (see drain.ts's doc) — collected here, per
     // tick, so the starvation census below can name it alongside `blocked`/`unmet-deps`.
     const circuitBrokenThisTick: string[] = [];
-    const next = forcedNext ?? nextRunnable(plan, isMerged, {
+    const next = forcedNext ?? nextRunnable(planForBatch, isMerged, {
       isOpenPr: deps.isOpenPr,
       onFiltered: idleReasons.onFiltered,
       // IN-FLIGHT (W1-T80): a legible skip on console + ledger; the daemon
@@ -2096,7 +2112,7 @@ export async function runDaemon(
       // W1-T7's transient/strike taxonomy + the plan's DAG (block-reason.ts)
       // instead of halting on ANY non-merged verdict.
       const state = blockRetryStates.get(next.id) ?? INITIAL_RETRY_STATE;
-      const disposition = reasonAboutBlock(plan, next.id, result.verdict, state);
+      const disposition = reasonAboutBlock(planForBatch, next.id, result.verdict, state);
 
       if (disposition.kind === "retry_transient") {
         // TRANSIENT: no strike. `nextRunnable` naturally retries the SAME
