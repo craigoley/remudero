@@ -1,0 +1,40 @@
+id: fb-1785959546878-97abfb
+ts: 2026-08-05T19:52:26.878Z
+raw: "A RED COVERAGE-RATCHET IS THE MOST ACTIONABLE FAILURE THE FLEET PRODUCES
+  AND NOTHING CONSUMES IT — three gaps, measured on #1372 (W1-T348, merged
+  8ea4921 at 19:46:31Z). The machine did almost everything: pr.opened,
+  automerge.armed, review.reviewer, review.posted success, risk_judge.decision
+  low — then verdict blocked_ci. It stopped at one red check it cannot fix,
+  because fixing it means writing a test and the run had ended. (1) NO FIX RUNG
+  FOR A RED RATCHET. A review failure has a fix rung; a coverage-ratchet failure
+  ends the run as blocked_ci with no re-dispatch. Yet the ratchet's output is
+  MORE mechanically actionable than most review failures — it named two exact
+  lines: src/run-task.ts:12993 and :12997, both inside if (decision.action ===
+  'grill'). Nothing consumed that. (2) THE FAILURE WAS INVISIBLE IN THE LEDGER.
+  sweep.post_review.failed = 0 for this PR; automerge.armed carries no pr_number
+  to filter on; nothing recorded 'coverage-ratchet red on 1372'. The only local
+  signal was 29 sweep.disposed rows saying nothing actionable. The two line
+  numbers had to be found by reading an 8,394-line GitHub Actions job log. (3) A
+  NEW HEAD SILENTLY DROPS THE REVIEW. After a push, remudero-review was ABSENT
+  on 78013bf (contexts []) while auto-merge stayed ARMED — so the PR would have
+  sat armed-but-blocked until the sweep happened to re-review it. That is the
+  W1-T225 orphaned-review shape, and it makes 'push a fix to a worker's PR' a
+  two-step manual operation rather than one. THE ENCOURAGING HALF: once the
+  ratchet went green the armed auto-merge fired on its own, unassisted. The
+  merge path works end to end; what is missing is the loop from 'the ratchet
+  named two uncovered lines' to 'dispatch a run that covers them', and the
+  ledger line that would have said the ratchet was the blocker without opening a
+  CI log. RECON: establish what already parses CI check output — the fix rung
+  reads ci-log for review failures, so a parser may exist and only need a second
+  caller. Then say whether a blocked_ci verdict naming a ratchet failure should
+  re-dispatch, and what bounds it (a strike cap exists for the review fix rung;
+  reuse it rather than inventing one). Cheapest first: the LEDGER LINE. A row
+  carrying pr_number and the failing check name would have saved the log read
+  even with no fix rung at all. Falsifying check: if some step already records
+  the failing check name and it simply is not rendered or filtered on, the gap
+  is in the consumer and the producer needs nothing."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null
