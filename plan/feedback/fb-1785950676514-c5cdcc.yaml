@@ -1,0 +1,38 @@
+id: fb-1785950676514-c5cdcc
+ts: 2026-08-05T17:24:36.514Z
+raw: "A LANES OVERRIDE MUST NEVER LOWER — standing constraint recorded from
+  state/recon-lanes-override.md, which recommended NOT building the override
+  yet. Not a task; a condition on one if it is ever built. THE ASYMMETRY: a
+  wiped state/ silently reverts every override to its committed default, and
+  that fails SAFE only in one direction. Committed row today is dispatchLanes
+  value 1, min 1, max 4 — so a wipe reverts to 1: fewer lanes, less spend, safe.
+  But if the row were ever committed at 2 with an override LOWERING to 1, a wipe
+  would silently revert to 2 — more concurrency and more spend, with no signal
+  at all. So the rule is: the committed row is the floor and an override may
+  only RAISE it. WHY IT IS NOT A TASK: the override was recommended against on
+  measurement. Restart is 1.2s median (148 kickstart-to-boot pairs, control 794
+  boots) against a PR-to-merge median of 12.2m and p90 64.9m, so the override
+  saves the PR and not the restart. And the emergency path already exists and is
+  wired: rmd pause writes state/PAUSE, runDaemon consults it once per tick
+  between iterations only, so it halts new dispatch within the 60s poll without
+  interrupting in-flight work, without a PR, without a restart, and it survives
+  the deploy's pull --ff-only. The override's real saving is idle-minutes during
+  a flip-back, in a scenario that has never occurred — dispatch.concurrent_set 0
+  rows, drain.pause and daemon.paused 0 rows, control run.start 682. A live
+  RELOADER is separately wrong: it would save 1.2 seconds against W1-T343's
+  explicit design that DaemonOpts is 'resolved ONCE, for this process's whole
+  lifetime', and would reintroduce the mid-run question the frozen design
+  avoids. ALSO RECORD, for whoever generalises the store: it is NOT
+  parameterised. dailyCostCeilingOverridePath returns a literal
+  state/DAILY_COST_CEILING_OVERRIDE, and both write and resolve read
+  policy.bounds['sweep.dailyCostCeilingUsd'] as a literal key — so reuse means
+  generalising by row key plus filename, plus lane-specific semantics (integers
+  not floats, the floor-at-1-never-0 that laneDispatchBudget and runDaemon both
+  already apply). 4-6 files. Falsifying check: if the store is generalised for
+  some other row first, this constraint applies to that generalisation and the
+  lanes-specific half is moot."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null
