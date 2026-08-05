@@ -46,12 +46,21 @@ async function commitlintJobBody(): Promise<string> {
 
 // ── CI wiring: the linted object is now the PR title, not the branch-commit range ──
 
-test("commitlint CI wiring: the job lints github.event.pull_request.title, not a base..head commit range", async () => {
+test("commitlint CI wiring: the job lints the PR title, not a base..head commit range", async () => {
   const jobBody = await commitlintJobBody();
+  // W1-T351: the job must read the title LIVE via `gh pr view` at job time, not trust the
+  // opened/synchronize/reopened event-payload snapshot (github.event.pull_request.title), which
+  // goes stale the moment a title is corrected without a subsequent push. See
+  // test/ci-title-lint.test.ts for the staleness falsifier.
   assert.match(
     jobBody,
+    /gh pr view .*--json title/,
+    "the commitlint job must read the PR title live via `gh pr view`, not an event-payload snapshot",
+  );
+  assert.doesNotMatch(
+    jobBody,
     /PR_TITLE:\s*\$\{\{\s*github\.event\.pull_request\.title\s*\}\}/,
-    "the commitlint job must feed the PR title into the linter",
+    "the job must no longer feed the linter directly from the opened-event payload snapshot -- that is the stale-read defect W1-T351 fixed",
   );
   assert.doesNotMatch(
     jobBody,
