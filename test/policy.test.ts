@@ -718,6 +718,30 @@ test("W1-T332 acceptance 2 — REJECTS a non-finite override value at write time
   }
 });
 
+test("W1-T332 — writeDailyCostCeilingOverride REJECTS a hand-built Policy carrying no 'sweep.dailyCostCeilingUsd' bound (the defensive guard, distinct from an out-of-range value)", () => {
+  const root = overrideRoot();
+  const handBuiltPolicy: Policy = { ...SHIPPED_POLICY, bounds: {} };
+  try {
+    assert.throws(
+      () => writeDailyCostCeilingOverride(root, 1_000, handBuiltPolicy),
+      (e: unknown) => e instanceof PolicyError && /policy carries no 'sweep\.dailyCostCeilingUsd' bound/.test((e as Error).message),
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T332 — clearDailyCostCeilingOverride returns false (not throw) when the path exists but cannot be unlinked (e.g. a directory occupies it)", () => {
+  const root = overrideRoot();
+  try {
+    const path = dailyCostCeilingOverridePath(root);
+    mkdirSync(path, { recursive: true }); // unlinkSync on a directory refuses (EPERM/EISDIR), unlike a plain file
+    assert.equal(clearDailyCostCeilingOverride(root), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // acceptance 3 — a malformed or unreadable override falls back to the committed default and
 // REPORTS why, never as zero or unbounded.
 
