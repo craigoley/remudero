@@ -484,14 +484,27 @@ export function renderShellHtml(
   /* W1-T336: the four-tab console bar -- pinned directly under the glance strip (the header
      block, above), a plain role="tablist" of role="tab" buttons that is now AUTHORITATIVE: every
      one of the nine \`[data-owner-tab]\` sections below is hidden by the script's own
-     applyActiveTab whenever its owner isn't the active tab (see SECTION_TAB_OWNER). Sized like
-     FIND's own .sort-header buttons (line 601-ish), not the default toolbar button chrome --
-     W1-T183's own hard-won lesson, recorded right above the .row rules, is that TOOLBAR CHROME
-     (not row height) is what determines how many rows clear the fold, so this toolbar row keeps
-     that same compact footprint rather than reintroducing the cost that lesson exists to avoid. */
+     applyActiveTab whenever its owner isn't the active tab (see SECTION_TAB_OWNER).
+     SIZING, REVISED -- W1-T183's lesson is KEPT, its application here is corrected. The rule
+     above this one used to read \`font-size: 0.65rem; line-height: 1; padding: 0 0.35rem;
+     border: none\`, and its comment said it was "Sized like FIND's own .sort-header buttons".
+     IT WAS NOT: .facet-btn/.sort-header are \`font-size: 0.8rem; padding: 0.2rem 0.5rem\` and
+     inherit the base \`button\` border, so the tab bar was substantially SMALLER than the idiom
+     it named -- measured headlessly, a 10.41px-tall bar carrying the console's only navigation
+     between its four views, under a 339.86px pinned header, at a font 76% of the .glance-item
+     labels above it. W1-T183's point -- that TOOLBAR CHROME, not row height, decides how many
+     rows clear the fold -- is real and is why this stays a compact toolbar idiom rather than
+     becoming default button chrome (\`padding: 0.4rem 0.75rem\`). What that lesson never
+     licensed is chrome so small it stops reading as a control: the fold discipline was applied
+     to these four buttons and not to the 21 metric fields pinned above them, so the bar was
+     compressed to save space the header then spent many times over. This adopts .sort-header's
+     ACTUAL metrics and matches .glance-item's font size exactly, so the navigation is no longer
+     smaller than the labels it navigates. MEASURED COST, headlessly, not estimated: the bar goes
+     10.41px -> 27.41px, +17.00px of chrome ONCE for the whole page (the pinned header above it is
+     unchanged at 339.86px, and no section moves tabs). */
   .console-tabs { display: flex; flex-wrap: wrap; gap: 0.25rem; margin: 0; }
-  .tab-btn { font-size: 0.65rem; line-height: 1; padding: 0 0.35rem; border: none; }
-  .tab-btn[aria-selected="true"] { background: var(--accent); color: #04101f; }
+  .tab-btn { font-size: 0.85rem; padding: 0.2rem 0.5rem; }
+  .tab-btn[aria-selected="true"] { background: var(--accent); color: #04101f; border-color: var(--accent); }
   /* impl-DY: the header write-state badge. Colour is a SECONDARY cue only -- the text states the
      capability outright, so this reads correctly to a colour-blind operator and in a screenshot. */
   .write-state-badge {
