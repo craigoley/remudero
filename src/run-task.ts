@@ -129,7 +129,15 @@ import {
   type IssueGateway,
   type OpenIssue,
   type PresenceMode, prReferentFromIssueText,} from "./lib/escalate.js";
-import { fetchOpenPrsRest, fetchSinglePrRest, hydrateMergeStates, type GhApiFetcher } from "./lib/open-prs-rest.js";
+import {
+  fetchOpenPrsRest,
+  fetchSinglePrRest,
+  hydrateMergeStates,
+  mapRestPr,
+  singlePrRestArgs,
+  type GhApiFetcher,
+  type RestPullRow,
+} from "./lib/open-prs-rest.js";
 import { imessageChannel, notify, type NotifyChannel } from "./lib/notify.js";
 import {
   alertOriginId,
@@ -5654,6 +5662,58 @@ interface ReviewCommandDeps {
   runReview?: typeof runReview;
 }
 
+/**
+ * The PR NUMBER `prArg` names, or `undefined` when it names something REST cannot address.
+ *
+ * `gh pr view` accepts a number, a URL, OR a bare branch name; `GET /repos/{o}/{r}/pulls/{n}`
+ * accepts only a number. So the transport swap below is conditional on this resolving, and the
+ * branch-name form deliberately keeps its existing `gh pr view` path — see
+ * {@link reviewViewArgs}. The sweep is unaffected either way: its `reviewRunner` passes
+ * `String(prNumber)`, so it always takes the REST arm.
+ */
+export function reviewPrNumber(prArg: string): number | undefined {
+  const bare = /^#?(\d+)$/.exec(prArg.trim());
+  if (bare) return Number(bare[1]);
+  // A github.com PR URL, the other form an operator pastes. Anchored on `/pull/<n>` so a branch
+  // literally named "pull/7" cannot be mistaken for one.
+  const url = /^https?:\/\/[^\s]*\/pull\/(\d+)(?:[/?#].*)?$/.exec(prArg.trim());
+  return url ? Number(url[1]) : undefined;
+}
+
+/**
+ * THE ARGV `reviewCommand` READS A PR WITH — REST when the PR is addressable by number,
+ * `gh pr view` otherwise.
+ *
+ * WHY THIS EXISTS AS ITS OWN EXPORTED FUNCTION rather than inline at the call site: the defect
+ * being fixed is WHICH ARGV gets built, so that is the thing a falsifier has to be able to assert
+ * directly. An inline ternary would only be observable through a stubbed fetcher's recorded
+ * calls, which is the shape the ci-parity suites already use and precisely why several defects
+ * in this path survived.
+ *
+ * THE DEFECT. `gh`'s `--json` flag is implemented over GitHub's GraphQL API, so this read — the
+ * FIRST call `reviewCommand` makes — sat on the GraphQL point budget. Measured over the unioned
+ * ledger at 493656b: `sweep.post_review` attempted 382, succeeded 292, and failed 87, and ALL 87
+ * carry the identical error, verbatim: `Command failed: gh pr view <n> --repo craigoley/remudero
+ * --json headRefOid,headRefName,body,url,number` / `GraphQL: API rate limit already exceeded for
+ * user ID 4397075`. 77 of those 87 are from a single day. The loop is self-reinforcing: the sweep
+ * cannot post the review that would let a green PR merge, so the PR stays open and is re-read
+ * next tick, burning the budget that would have cleared it. At filing, GraphQL sat at 0/5000
+ * while REST core had 4,569 of 5,000 unused.
+ *
+ * THIS IS W1-T265's MIGRATION, APPLIED TO ONE MORE READ. It reuses that task's own
+ * {@link singlePrRestArgs} and {@link mapRestPr} rather than re-deriving a mapping, so the four
+ * load-bearing translations (html_url→url, `body` null→"", headRefName ""-not-undefined,
+ * auto_merge passthrough) are the ones already proven and tested there.
+ *
+ * TRANSPORT ONLY. The fields handed to the reviewer are identical, so what is judged, how proofs
+ * execute, and how a status is posted are all untouched.
+ */
+export function reviewViewArgs(owner: string, repo: string, prArg: string): string[] {
+  const n = reviewPrNumber(prArg);
+  if (n !== undefined) return singlePrRestArgs(owner, repo, n);
+  return ["pr", "view", prArg, "--repo", `${owner}/${repo}`, "--json", "headRefOid,headRefName,body,url,number"];
+}
+
 async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCommandDeps = {}): Promise<number> {
   const {
     fetchView,
@@ -5668,10 +5728,14 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   // `gh pr view` resolves the PR in the CWD — so a sandbox PR could never be gated. The lib
   // layer (runReview / postReviewStatus) already takes owner+repo; only the CLI was pinned.
   const { owner, repo } = resolveReviewTarget(resolveOwnerRepo(), rest);
-  const slug = `${owner}/${repo}`;
-  const view = fetchView([
-    "pr", "view", prArg, "--repo", slug, "--json", "headRefOid,headRefName,body,url,number",
-  ]) as {
+  // W1-T265's REST transport, applied to this read — see reviewViewArgs for the 87 measured
+  // failures this closes. The REST arm returns a raw pull row and is normalised by that task's
+  // own `mapRestPr`; the `gh pr view` arm (a bare branch name, which REST cannot address) already
+  // returns the `gh --json` shape and passes through untouched. Both arms yield the SAME five
+  // fields, so nothing downstream of `body` can tell which transport served it.
+  const args = reviewViewArgs(owner, repo, prArg);
+  const raw = fetchView(args);
+  const view = (reviewPrNumber(prArg) !== undefined ? mapRestPr(raw as RestPullRow) : raw) as {
     headRefOid: string;
     headRefName: string;
     body: string;
