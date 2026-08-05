@@ -451,7 +451,13 @@ import {
 import { CI_LOG_FENCE_CLOSE, CI_LOG_FENCE_OPEN, FIX_WORKER_TOOLS, neutralizeFenceMarkers } from "./lib/fix-fence.js";
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock, type DrainLockHandle } from "./lib/drain-lock.js";
 import { checkCliFreshness, checkServiceFreshness } from "./lib/self-sync.js";
-import { acquireInflightLock, InflightLockError, readInflightLock, sweepStaleInflightLocks } from "./lib/inflight-lock.js";
+import {
+  acquireInflightLock,
+  InflightLockError,
+  readInflightLock,
+  sweepStaleInflightLocks,
+  type InflightSweepResult,
+} from "./lib/inflight-lock.js";
 import { classifyFailure, MAX_TRANSIENT_RETRIES, type FailureSignal } from "./lib/classify.js";
 import { shouldRecordDecision } from "./lib/risk-score.js";
 import { assertLiveWriteAllowed } from "./lib/live-write-guard.js";
@@ -4229,8 +4235,17 @@ async function runTask(
   // ── PER-TASK IN-FLIGHT LOCK (guard 1, DIAGNOSIS.md diag/drain-sequential-await).
   // No two runs of the SAME task may overlap — whatever launched them (two drains, or a
   // manual run-task beside a running drain). A LIVE holder ⇒ REFUSE this run (naming the
-  // holder); a stale (dead-pid) lock ⇒ reclaim. Released on EVERY terminal path via the
-  // finally below, so a crash never leaves a permanent stale lock.
+  // holder); a stale (dead-pid) lock ⇒ reclaim.
+  //
+  // RELEASED ON EVERY *UNWOUND* PATH — return OR throw — via the finally below. THAT IS NOT
+  // "every terminal path", and the difference is the whole reason the sweep rung exists: a
+  // `finally` only runs if the stack unwinds. There are NO signal handlers anywhere in src/,
+  // so SIGKILL (unhandleable) AND SIGTERM/SIGINT (Node's default terminates without unwinding)
+  // both leave the lock file behind — as does an OOM-kill or power loss. An earlier revision of
+  // this comment claimed "a crash never leaves a permanent stale lock"; that was false, and
+  // `sweepStaleInflightLocks`' own doc already contradicted it with an observed case
+  // (`W1-T1.lock` holding pid 65304, dead two days, still present). Stale locks are REAL,
+  // EXPECTED, and cleared by the next acquire of this same task or by the sweep rung.
   const inflightDir = join(config.root, "state", "inflight");
   let inflightLock;
   try {
@@ -10171,7 +10186,14 @@ export async function serveCommand(
   // serve.log error lines) is why this exists; see buildBatchedGithub's own doc for detail.
   const boardGithub = buildBatchedGithub(self.owner, self.repo, { log });
   const server = buildServeServer({
-    board: { plan, ledgerPath, github: boardGithub },
+    // `inflightHolder` wires deriveStatus's THIRD liveness disjunct (lib/status.ts) to the real
+    // lock directory — the same `<config.root>/state/inflight` path `acquireInflightLock` writes
+    // and the sweep rung reaps, never a second notion of where locks live. Without this the
+    // console keeps the pre-existing two-disjunct behaviour, so this line IS the wiring: a
+    // genuinely-live run that has been quiet longer than the 30-minute ledger bound renders as
+    // running here and as nothing without it. `isPidAlive` is left to its `defaultIsPidAlive`
+    // default; only tests override it.
+    board: { plan, ledgerPath, github: boardGithub, inflightHolder: (taskId) => readInflightLock(join(config.root, "state", "inflight"), taskId) },
     // panel-graph.ts reloads plan/tasks.yaml fresh on every GET /v1/trace (its own header) --
     // planPath alone is enough, no snapshot needed here the way board.ts's does.
     // `statusGithub` backs GET /v1/drain/preview's (W1-T140) merged-set derivation --
@@ -11571,6 +11593,49 @@ export async function sweepEscalationReconcile(
  * Best-effort: `sweepStaleTempDirs` itself never throws, but this wrapper still degrades to a
  * logged error rather than ever escaping into the sweep composite around it.
  */
+/**
+ * THE PER-POLL RUNG FOR THE IN-FLIGHT LOCK SWEEP — the exact shape W1-T320 gave the tmp-dir
+ * backstop in {@link runTmpSweepRung} below, applied to the same boot-only cadence bug in
+ * `sweepStaleInflightLocks` (lib/inflight-lock.ts).
+ *
+ * THE HOLE THIS CLOSES. That sweep is wired ONCE, in `daemonCommand`'s boot rung list, and its
+ * own doc explains why a stale lock otherwise never clears: a lock is reclaimed by the NEXT
+ * acquire of that same task, so a task that is never re-dispatched — circuit-broken, blocked,
+ * withdrawn — keeps a dead holder's lock until the daemon happens to restart. The observed case
+ * in that doc (`W1-T1.lock`, pid 65304, dead two days) is exactly that population. Riding the
+ * daemon's poll cadence means a healthy long-lived daemon clears it without needing a restart,
+ * which is the same failure mode W1-T320 recorded for tmp dirs ("a healthy daemon between boots
+ * never re-ran it at all").
+ *
+ * IT MATTERS MORE NOW THAN IT DID. `deriveStatus` reads these locks as its third liveness
+ * disjunct (see DeriveDeps.inflightHolder, lib/status.ts). A stale lock is still refused there —
+ * the pid probe is what refuses it — but a lock left lying around is a standing invitation for a
+ * recycled pid to make a dead run read as live, and `kern.maxproc` is 4000 on this host. Sweeping
+ * on the poll cadence shrinks that window from "until the next daemon restart" to one poll.
+ *
+ * Logs `daemon.inflight_sweep` with reaped/kept COUNTS plus the reaped task ids (bounded), so
+ * "kept 0 because nothing was held" reads differently from "kept N live holders". Best-effort:
+ * degrades to a logged error rather than escaping into the sweep composite around it, the same
+ * discipline as the reap and tmp rungs it sits beside.
+ */
+export function runInflightLockSweepRung(
+  config: Config,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): InflightSweepResult {
+  try {
+    const swept = sweepStaleInflightLocks(join(config.root, "state", "inflight"));
+    log("daemon.inflight_sweep", {
+      reaped: swept.reaped.length,
+      kept: swept.kept.length,
+      reaped_ids: swept.reaped.slice(0, 10),
+    });
+    return swept;
+  } catch (e) {
+    log("daemon.inflight_sweep", { error: String((e as Error)?.message ?? e) });
+    return { reaped: [], kept: [] };
+  }
+}
+
 export function runTmpSweepRung(
   log: (step: string, extra?: Record<string, unknown>) => void,
   opts: TempSweepOpts = {},
@@ -11638,6 +11703,10 @@ export function buildSweepHook(
       // composite so it re-fires on a long-running healthy daemon, not only at boot. Own
       // try/catch (folded into runTmpSweepRung), same discipline as the reap rung above.
       runTmpSweepRung(log, tmpMaxAgeMs !== undefined ? { maxAgeMs: tmpMaxAgeMs } : {});
+      // The in-flight lock sweep's PER-POLL rung — same argument as the tmp rung immediately
+      // above (boot-only never re-fires on a healthy long-lived daemon), and now load-bearing
+      // for `deriveStatus`'s lock-based liveness disjunct. Own try/catch inside the rung.
+      runInflightLockSweepRung(config, log);
     } catch (e) {
       log("sweep.error", { error: String((e as Error)?.message ?? e) });
     }
