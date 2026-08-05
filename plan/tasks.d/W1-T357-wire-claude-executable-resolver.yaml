@@ -1,0 +1,56 @@
+- id: W1-T357
+  title: "daemonBoot's resolveClaudeBin slot is the last remaining 'undefined, // — default' at the call site — wire the built executable resolver so boot records which binary the fleet actually runs, the smallest item in the organ census"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: "RE-DERIVED AT da30616. daemonBoot (src/lib/daemon.ts) accepts an optional
+    resolveClaudeBin dependency; the only production caller (src/run-task.ts's daemonCommand)
+    passes 'undefined, // resolveClaudeBin — default' — the slot the crashLoopCheck wiring (#1278)
+    sat beside and deliberately did not widen into. The census at this sha confirms the resolver
+    machinery exists with zero production calls of the boot-slot form: config.ts carries a
+    non-exported resolveClaudeBin and the exported executable-resolution path
+    (resolveClaudeExecutable and its cache) is invoked by spawn-time code but never by boot, so
+    the boot record never states which binary the daemon resolved — the observability gap the slot
+    was designed to close (a deploy is only observable if the daemon records what it booted on;
+    the #1054 rule, applied to the binary instead of the sha).
+    VERIFY THE EXACT EXPORT NAMES FROM SOURCE BEFORE WIRING — the census found TWO distinct bearers
+    of the resolveClaudeBin name and symbol names drift; the note in this shard is a snapshot,
+    not the contract.
+    WHY IT IS ITS OWN TASK AND NOT A RIDER ON W1-T356: one organ per task — the orphan sweep
+    signals processes (risk:high); this records a path (risk:low-by-nature). Bundling them puts a
+    trivial observability win behind a process-killing review."
+  design: |
+    THE #1278 MOLD, ONE SLOT.
+    (i) Replace the undefined positional arg at daemonCommand's daemonBoot call with a closure over
+    the existing exported resolver (the spawn path's own resolution function and cache — reuse, do
+    not duplicate; establish the export from src source at implement time).
+    (ii) daemonBoot already owns whatever branch consumes the dependency — change NOTHING in
+    daemon.ts; if the slot's consumption logs a boot field, assert it; if it feeds a check, assert
+    the check ran. Read the branch before writing the test.
+    (iii) FALSIFIER: unwiring the slot (restoring undefined) must fail the wiring test by name;
+    the wired boot must record a resolution consistent with what the spawn path would use — the
+    same binary, not a second derivation.
+    NOT IN SCOPE: the autoupdater mid-run-swap hazard (W1-T236 owns it, files src/lib/env.ts);
+    checkBinaryPin (its recorded side does not exist yet — reported to the operator, not filed);
+    the orphan sweep (W1-T356).
+  acceptance:
+    - claim: "the real daemonCommand boots with the executable resolver wired — the boot record carries the resolved binary from the same resolution path the spawn side uses, and unwiring the slot fails the test by name"
+      proof: "unit test: test/daemon.test.ts"
+  risk: high
+  origin: oper#followups-2026-08-05
+  plan_refs: ["W1-T236", "W1-T215", "§4A"]
+  files: [src/run-task.ts, test/daemon.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — a boot-record assertion through the real daemonCommand, loop-stub seam only.
+    risk:high — set by Rule 19's span (daemon, run-task), not blast radius: the slot lives in
+    daemon.ts and its production caller in run-task.ts, one deliverable. Behaviorally additive
+    observability; the failure directions are a wrong recorded path or today's absent record.
+    budget_usd 40 — one slot, one closure, one falsifier; the census called it 'near-trivial, the
+    smallest item'.
+    OVERLAP, cited not duplicated: W1-T236 (queued, files src/lib/env.ts) hardens the spawned
+    binary against mid-run auto-update swaps — a spawn-env concern; this task only records what
+    boot resolves. The implementing PR must not drift into env.ts."

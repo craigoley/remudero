@@ -1,0 +1,59 @@
+- id: W1-T361
+  title: "reconstructState was eaten piecemeal by machinery that IS wired — runRecoverability mirrors its resume/clean split from the live ledger — so the dead export is deleted with a pointer to its successor, retiring an organ instead of wiring a duplicate"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: "RE-DERIVED AT da30616. THE ORGAN: reconstructState (src/lib/daemon.ts) — zero calls
+    anywhere; outside daemon.ts the name appears nowhere in src.
+    THE SUCCESSOR IS LIVE, in its own words: run-task.ts's runRecoverability doc says verbatim it
+    'mirrors daemon.ts's reconstructOrphan resume/clean split, but read strai[ght from the live
+    ledger]' — the recovery duty reconstructState was built for is performed today by wired
+    machinery. Wiring reconstructState now would create the second implementation of one concern —
+    the exact defect class the parallelism amendment refused for lanes ('the daemon adopts drain's
+    existing machinery rather than growing a second implementation').
+    WHY RETIRE IS THE HONEST RULING HERE AND NOT A RECON: both the census's evidence and the
+    successor's own doc establish supersession from source; there is no open question to
+    investigate, only dead weight to remove. The operator's stated posture governs: 'the repo
+    doesn't need more organs — it needs the ones it has to demonstrably run.'
+    WHAT IS LOST BY RETIRING, stated for the record: nothing behavioral — the export has never
+    run in production; the loss is the hypothetical of wiring it INSTEAD of runRecoverability,
+    which the successor's liveness already refutes. Reversal is a git revert."
+  design: |
+    DELETE, POINT, PROVE.
+    (i) Remove the reconstructState export and its dead internals from src/lib/daemon.ts; where its
+    doc carried design intent the successor lacks, move that intent into runRecoverability's doc
+    (or reconstructOrphan's, whichever the source says owns the split) with a one-line note that
+    reconstructState was folded here — superseded by runRecoverability. Verify the exact ownership
+    FROM SOURCE; the census's mirror-quote is the map, not the territory.
+    (ii) RETARGET OR REMOVE its tests: a test asserting the dead export's behavior retires with it;
+    a test asserting the RECOVERY BEHAVIOR moves to the successor's suite if not already covered
+    there. Nothing behavioral may lose coverage — state the before/after test census in the PR.
+    (iii) FALSIFIER: the suite passes with the export gone (tsc catches any missed reference), and
+    the successor's doc carries the fold note so a future reader searching for the name finds the
+    pointer, not a void.
+    NOT IN SCOPE: changing runRecoverability's behavior; the orphan-sweep wiring (W1-T356);
+    reconstructOrphan itself if it remains load-bearing — establish that before deleting anything
+    adjacent.
+  acceptance:
+    - claim: "the daemon suite passes with reconstructState deleted and the successor's doc carries the fold note naming what superseded it"
+      proof: "grep: superseded by runRecoverability in src/lib/daemon.ts"
+    - claim: "no recovery behavior lost coverage — the resume/clean split the dead export encoded is asserted in the successor's own tests"
+      proof: "unit test: test/daemon.test.ts"
+  risk: high
+  origin: oper#followups-2026-08-05
+  plan_refs: ["§4B", "W1-T322"]
+  files: [src/lib/daemon.ts, src/run-task.ts, test/daemon.test.ts, test/run-task.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — a deletion proven by compilation, suite passage and the fold-note grep.
+    risk:high — set by Rule 19's span (daemon, run-task): the deletion lives in daemon.ts and the
+    fold-note may land on run-task.ts's successor doc, one deliverable. The deleted code has zero
+    callers, so the real hazard is collateral edits, bounded by (iii)'s suite gate.
+    budget_usd 45 — a deletion, a doc fold, a coverage census.
+    PROOF NOTE: 'superseded by runRecoverability' is NEW text this task adds — it misses the
+    merge-base and discriminates (the bare successor name would match base and go executed_stale).
+    files: DECLARES src/run-task.ts because the fold note may belong on runRecoverability's own
+    doc there (design i lets source decide); test/run-task.test.ts likewise for moved coverage."

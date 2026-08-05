@@ -1,0 +1,67 @@
+- id: W1-T360
+  title: "flight-signals and flight-judge — §4B Layers 1 and 2 — are one unwired stack with one open question the census could not answer from source: can the worker stream be evaluated MID-RUN at all, and is in-flight supervision still wanted beside the newer post-hoc machinery; recon and RECOMMEND wire-or-retire, the operator rules"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "RE-DERIVED AT da30616. THE STACK: flight-signals (src/lib/flight-signals.ts —
+    evaluateFlightSignals, extractTurnSnapshots, six deterministic predicates) and flight-judge
+    (src/lib/flight-judge.ts — runFlightJudge and its controller planJudgeAction) have ZERO
+    production calls for every function export; the only cross-file production reference is a
+    type-only import. Tests exist (test/flight-signals.test.ts, test/spiral-golden.test.ts) and
+    pass against fixtures. The judge's sole sanctioned trigger is a Layer-1 trip that never fires,
+    so wiring either alone is meaningless — one disposition covers both.
+    WHY RECON RATHER THAN A WIRE TASK, from the census's own analysis: (a) the only sanctioned
+    wiring point is per-turn evaluation over the worker's stream — extractTurnSnapshots was built
+    for the raw message array collectWorkerResult (src/lib/worker.ts) consumes, but whether the
+    current spawn shape ever SEES messages mid-run or only the completed array is unestablished,
+    and post-hoc evaluation defeats a tripwire; (b) whether §4B in-flight supervision is still
+    wanted is a REAL question — the newer post-hoc machinery (risk-score.ts / risk-judge.ts)
+    pattern-mirrors it and runs today, and every run is already bounded by max_turns and
+    budget_usd; (c) W1-T21 and W1-T22 sit open in the plan claiming this territory, so any
+    disposition must resolve their standing too.
+    WHY verify:human: the deliverable is a wire-or-retire RECOMMENDATION on a MASTER-PLAN
+    subsystem — ruling-shaped, and per the operator's rule an agent may recommend a retirement but
+    may never record one. The recon writes the evidence and the recommendation; the operator rules."
+  design: |
+    ESTABLISH THREE FACTS, THEN RECOMMEND — docs/flight-control-disposition.md is the deliverable.
+    (i) THE STREAM FACT: from src/lib/worker.ts's spawn/collect shape, establish whether per-turn
+    message access exists mid-run today (streaming consumption) or only post-completion. Quote the
+    consuming code. If mid-run access requires restructuring the spawn loop, size that
+    restructuring honestly — it is the real cost of wiring.
+    (ii) THE REDUNDANCY FACT: enumerate what Layer 1's six predicates would catch that the LIVE
+    guards (max_turns, budget_usd, the strike ladder, risk-judge at the arm gate) do not, against
+    the recorded incident classes (the W1-T9/W1-T12 max_turns burns; the #968-981 four-PR
+    escalation-of-commitment chain §5E's table cites). If the honest answer is 'little, post-hoc',
+    say so — that is the retire case.
+    (iii) THE PLAN FACT: state what happens to open tasks W1-T21/W1-T22 under each disposition
+    (wire: they become the implementing tasks; retire: they are withdrawn under the #1239
+    convention with criteria preserved), so the operator's ruling lands with its plan consequences
+    priced.
+    (iv) THE RECOMMENDATION, clearly marked as a recommendation, with what is LOST under each
+    branch: retiring kills §4B mid-flight supervision permanently (a spiraling worker is caught
+    only at run end); wiring commits to a streaming spawn restructure plus a per-trip judge spend.
+    NOT IN SCOPE: performing the wiring or the retirement; editing W1-T21/W1-T22; touching
+    MASTER-PLAN §4B (the ruling's transcription is the operator's, after he rules).
+  acceptance:
+    - claim: "the disposition record establishes the mid-run stream fact from worker.ts source, the redundancy comparison against live guards, and the W1-T21/W1-T22 consequences under each branch"
+      proof: "grep: flight-control disposition in docs/flight-control-disposition.md"
+    - claim: "the record closes with a clearly-marked RECOMMENDATION and states what is lost under both branches, so the operator rules with the costs priced"
+      proof: "grep: RECOMMENDATION in docs/flight-control-disposition.md"
+  risk: medium
+  origin: oper#followups-2026-08-05
+  plan_refs: ["W1-T20", "W1-T21", "W1-T22", "§4B"]
+  files: [docs/flight-control-disposition.md]
+  status: queued
+  attempts: 0
+  note: "verify:human — ruling-shaped by the W1-T353 rule's own logic (the deliverable recommends a
+    subsystem's fate); isDispatchEligible parks it for the operator, which is the design.
+    risk:medium — a document; the hazard is a wrong recommendation, which the human verify exists
+    to catch.
+    budget_usd 60 — three source-derived facts and a priced recommendation; no code.
+    PROOF NOTE: both grep patterns are new text in a new file — they miss the merge-base and
+    discriminate; plain words and a hyphen, no BRE metacharacters. The proofs parse and execute
+    against the path once the doc exists; verify:human means no headless dispatch ever runs them
+    unattended, which is intended."

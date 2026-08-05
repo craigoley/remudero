@@ -1,0 +1,65 @@
+- id: W1-T363
+  title: "the daily-ceiling override store shipped consumer-less — dailyCostCeilingReloader re-reads the COMMITTED policy.yaml per tick and never consults resolveDailyCostCeiling, so state/DAILY_COST_CEILING_OVERRIDE is inert; point the governor's per-tick read at the resolver BEFORE any renderer shows an override-aware number"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "RE-DERIVED AT da30616, from source. THE STORE: W1-T332 (#1312) shipped
+    writeDailyCostCeilingOverride, clearDailyCostCeilingOverride, resolveDailyCostCeiling and
+    dailyCostCeilingOverridePath (src/lib/policy.ts) with bounds validation, refusal-at-write,
+    malformed-file fallback and provenance. Verified at this sha: ZERO references to all four
+    across src/ bin/ scripts/ outside policy.ts itself — the only writer is the store's own unit
+    test; nothing anywhere reads state/DAILY_COST_CEILING_OVERRIDE.
+    THE CONSUMER THAT PREDATES ITS SUPPLIER: dailyCostCeilingReloader (src/run-task.ts) is wired
+    per tick — verbatim: 'return () => (deps.policy ?? loadPolicy(policyPath(repoRoot))).values.sweep.dailyCostCeilingUsd;'
+    — W1-T331 (#1310) fixed the import-time freeze so the daemon re-reads live, but it merged
+    1h16m BEFORE #1312 created the store and was never amended: the daemon re-reads the WRONG FILE.
+    resolveDailyCostCeiling's own docstring names W1-T331 as its live reader; the reader never came.
+    THE ORDERING CONSTRAINT THAT MAKES THIS URGENT: W1-T333 (open, in flight, files
+    ledger/account-usage/serve) renders override provenance. If a renderer ships reading
+    resolveDailyCostCeiling while the governor enforces the committed value, the console displays
+    one ceiling while dispatch enforces another — in the subsystem whose own rationale is closing
+    exactly that display-vs-enforcement gap. W1-T333's files: cannot wire this (no policy.ts, no
+    run-task.ts, no daemon.ts — verified); this task must land first."
+  design: |
+    POINT THE EXISTING READ AT THE EXISTING RESOLVER; CHANGE ONE DERIVATION.
+    (i) dailyCostCeilingReloader returns resolveDailyCostCeiling(root, policy).usd instead of the
+    raw committed row — same per-tick liveness (W1-T331's fix stands), same throw-through on
+    unreadable policy.yaml (runDaemon's reload step already holds last-known-good; do not add a
+    second catch). The resolver's malformed-OVERRIDE fallback already returns the committed
+    default with provenance — assert that arm, never re-implement it.
+    (ii) THE SEAM: the reloader's deps.policy injection exists because repoRoot is a module-level
+    const no test can redirect (the config-reader-seams discipline, quoted in the reloader's own
+    doc). resolveDailyCostCeiling also needs the ROOT for the override path — extend the seam so a
+    test can point BOTH the policy and the state-root at fixtures; verify the resolver's exact
+    signature FROM SOURCE and keep production's no-args construction identical in shape.
+    (iii) FALSIFIER, BOTH DIRECTIONS: with a valid override written, the per-tick reading equals
+    the override and the governor defers against IT; with no override (or a malformed one), the
+    reading equals the committed row — byte-identical to today. The first must FAIL against
+    current source (nothing reads the override today).
+    NOT IN SCOPE: the write surface (W1-T364); W1-T333's provenance rendering; the governor's
+    admission point (W1-T342's per-dispatch concern); any second policy value.
+  acceptance:
+    - claim: "with a valid override in state/, the governor's per-tick ceiling reading equals the override value, and the cost governor defers against it rather than the committed row"
+      proof: "unit test: test/cost-governor.test.ts"
+    - claim: "with no override or a malformed one, the reading equals the committed row through the resolver's own fallback — behavior byte-identical to today"
+      proof: "unit test: test/policy.test.ts"
+  risk: high
+  origin: oper#followups-2026-08-05
+  plan_refs: ["W1-T331", "W1-T332", "W1-T333"]
+  files: [src/run-task.ts, test/cost-governor.test.ts, test/policy.test.ts, test/config-reader-seams.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — reloader readings over fixture roots and policies, in-process.
+    risk:high — it changes what value gates the fleet's daily spend; wrong in either direction is
+    money (enforcing a stale committed ceiling the operator raised, or honoring a malformed
+    override the resolver should have refused — the resolver's tested fallback carries that arm).
+    budget_usd 60 — one derivation change, one seam extension, a two-direction falsifier.
+    files: DECLARES test/config-reader-seams.test.ts because the seam extension (design ii) is
+    exactly what its structural check pins; if the implementation leaves it untouched, declaring
+    costs nothing.
+    ORDERING: no depends_on — nothing gates it; the URGENCY is that W1-T333 (in flight) must not
+    beat it to a renderer. Stated as sequencing pressure, not an edge, because W1-T333 does not
+    depend on this either."

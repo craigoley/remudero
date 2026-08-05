@@ -1,0 +1,61 @@
+- id: W1-T358
+  title: "planHealthSweep is Standing rule 20's executable duty and nothing executes it — the retro gather path never calls it and renderPlanHealth's promised --dry-run output never renders; wire the sweep into the gather so rules stop being forward-only"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "RE-DERIVED AT da30616. THE ORGAN: planHealthSweep (src/lib/retro.ts), doc verbatim:
+    'RE-GRADE every OPEN task against every standing rule the deterministic linter encodes
+    (sizing/Rule 19, headless-fitness/Rule 18, proof-shape, provenance/Rules 16-17) — the
+    forward-only gap Standing rule 20 names.' Pure, no I/O; corrective tasks are PROPOSALS the
+    retro's Architect stage files.
+    THE WIRING STATE: zero calls. run-task.ts's import block from ./lib/retro.js (buildGather,
+    renderGather, gatherRuns, ...) does not include planHealthSweep or renderPlanHealth; the
+    companion renderPlanHealth's own doc claims it is 'printed by --dry-run and fed to the
+    Architect' — neither happens. Tests exist and pass against fixtures.
+    THE COST, from the rule's own biography: Standing rule 20 exists because W1-T12 pre-existed
+    rules 18/19, violated both, reached a worker and burned 81 turns / $10.27 — the fourth
+    max_turns event — because rules were enforced forward-only. The duty was then built and never
+    executed: every rule added since protects only tasks authored after it, which is the exact
+    condition the rule exists to end."
+  design: |
+    WIRE INTO THE GATHER, RENDER WHERE PROMISED.
+    (i) In src/run-task.ts's retro gather path (the code calling buildGather/renderGather and
+    advancing the marker): loadPlan is already in hand — call planHealthSweep(plan.tasks) and
+    append renderPlanHealth(report) to the gather markdown fed to the Architect stage, and print it
+    under --dry-run, exactly as renderPlanHealth's own doc promises. Verify the gather assembly
+    shape FROM SOURCE first.
+    (ii) THE FIRST REAL SWEEP WILL FLAG THE WHOLE OPEN QUEUE'S PRE-EXISTING DEBT AT ONCE — state
+    this in the implementing PR and let the Architect stage batch corrective proposals per CLASS,
+    not per task (the CLAUDE.md bulk-fix rule; five one-at-a-time proof rewrites is the measured
+    anti-pattern). The sweep REPORTS; it files nothing itself — that separation is the shipped
+    design and is not reopened here.
+    (iii) FALSIFIER, BOTH DIRECTIONS: a gather over a fixture plan containing one open Rule-19
+    violator carries the plan-health section naming it; a gather over a clean fixture plan carries
+    the section with zero flags (present but empty — absence of the SECTION is the unwired state
+    and must fail).
+    NOT IN SCOPE: changing what the sweep checks (retro.ts's rule set is the linter's);
+    auto-filing corrective tasks (the Architect stage's judgment); the retro trigger cadence
+    (W1-T160, live).
+  acceptance:
+    - claim: "the retro gather carries a plan-health section produced by the real sweep — an open rule-violating task is named in it, and a clean plan yields the section with zero flags rather than no section"
+      proof: "unit test: test/retro.test.ts"
+    - claim: "--dry-run prints the plan-health render, closing renderPlanHealth's own unmet promise"
+      proof: "unit test: test/retro.test.ts"
+  risk: high
+  origin: oper#followups-2026-08-05
+  plan_refs: ["W1-T20d", "§5C", "§12"]
+  files: [src/run-task.ts, test/retro.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — gather assembly over fixture plans, in-process.
+    risk:high — set by Rule 19's span (retro, run-task), not blast radius: the sweep lives in
+    retro.ts and the gather assembly in run-task.ts, one deliverable (splitting orphans the call
+    site, Standing rule 14). Behaviorally additive reporting; the failure directions are a missing
+    section (today's state) or a noisy first sweep, which design (ii) prepares the reader for.
+    budget_usd 60 — one wiring, one render, a two-direction falsifier, and the batching note.
+    OVERLAP, cited not duplicated: W1-T179/W1-T180 mention planHealthSweep without modifying it;
+    W1-T246 (proof-dialect lint) shares the linter substrate, not this wiring. The retro fires
+    unattended (W1-T160/#853), so this lands the duty on the live cadence with no new trigger."
