@@ -368,7 +368,12 @@ test("W1-T104: distinct PRs for one task escalate separately, never deduped agai
   assert.equal(issues.comments.length, 0, "no comment fires — these are genuinely separate escalations");
 });
 
-test("W1-T104: an escalation naming no PR (task-level, e.g. the dispatch circuit breaker) never dedup-searches at all", () => {
+test("W1-T345 (formerly W1-T104): an escalation naming no PR still dedup-searches — a DIFFERENT summary phrase on the same (taskId, class) still opens its own issue", () => {
+  // Pre-W1-T345, escalate() skipped the dedup search entirely whenever no PR resolved
+  // — this test used to assert that. It still asserts two issues here, but now for a
+  // different reason: the search DOES run, it just finds no match because the two
+  // summaries are distinct phrases (see the storm-fixture test below for the case
+  // where the phrase repeats and DOES dedup).
   const issues = fakeIssueStore();
   const path = ledgerPath();
 
@@ -383,8 +388,9 @@ test("W1-T104: an escalation naming no PR (task-level, e.g. the dispatch circuit
     runId: "RUN-2",
   });
 
-  assert.notEqual(second, first, "with no PR reference in either escalation, each creates its own issue");
+  assert.notEqual(second, first, "distinct summary phrases on the same (taskId, class) each get their own issue");
   assert.equal(issues.calls.length, 2);
+  assert.equal(issues.comments.length, 0, "no comment fires — these read as genuinely separate escalations");
 });
 
 test("W1-T104: a gateway with no listOpen behaves exactly as before (back-compat) — no dedup, no throw", () => {
@@ -661,6 +667,128 @@ test("W1-T195: an un-migrated caller (no headSha/cause set) keeps W1-T104's (tas
   assert.equal(second, first, "a caller that never sets headSha/cause still dedupes on (taskId, PR) alone");
   assert.equal(issues.calls.length, 1);
   assert.equal(issues.comments.length, 1);
+});
+
+// ── W1-T345: referent-less dedup on (taskId, class, cause) ─────────────────────────
+//
+// escalate()'s dedup gate used to require a PR reference to resolve out of
+// summary/detail before the search ran at all — so a daemon/queue-level escalation
+// (escalateStarvation, escalateCrashLoop, escalateCircuitBreak, ...) never dedup-
+// searched, however many times it fired for the identical condition. THE MEASURED
+// COST: issue #1220 ("dispatch queue starved") was followed by SEVEN byte-identical
+// siblings, one per daemon tick the condition held. This section is the falsifier
+// (design point v): the storm fixture below FAILS against the pre-W1-T345 gate (no
+// PR named -> dedup skipped outright -> two issues, not one) and PASSES after.
+
+test("W1-T345: the storm fixture — same (taskId, class), no PR, no cause, IDENTICAL summary fired twice yields ONE open issue plus an appended comment", () => {
+  const issues = fakeIssueStore();
+  const path = ledgerPath();
+
+  // Two ticks of escalateStarvation's own shape: same class, same taskId ("daemon"),
+  // no PR anywhere in the text, no cause set, byte-identical summary/detail.
+  const first = escalate(
+    escalation({
+      taskId: "daemon",
+      summary: "dispatch queue starved — zero dispatchable, 1 recoverable class(es) blocking",
+      detail: "circuit-broken: 1 (W1-T50)",
+    }),
+    { issues, ledgerPath: path, runId: "RUN-1" },
+  );
+  const second = escalate(
+    escalation({
+      taskId: "daemon",
+      summary: "dispatch queue starved — zero dispatchable, 1 recoverable class(es) blocking",
+      detail: "circuit-broken: 1 (W1-T50)",
+    }),
+    { issues, ledgerPath: path, runId: "RUN-2" },
+  );
+
+  assert.equal(second, first, "the second call returns the SAME issue url — no sibling issue");
+  assert.equal(issues.calls.length, 1, "exactly one create() across both ticks");
+  assert.equal(issues.comments.length, 1, "the second observer appends a comment instead of opening one");
+  assert.equal(issues.comments[0].url, first);
+
+  const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.equal(lines.filter((l) => l.step === "escalation.issue_opened").length, 1);
+  assert.equal(lines.filter((l) => l.step === "escalation.deduped").length, 1);
+  assert.equal(lines.find((l) => l.step === "escalation.deduped").issue_url, first);
+});
+
+test("W1-T345: distinct causes on the same referent-less (taskId, class) still open separately", () => {
+  const issues = fakeIssueStore();
+  const path = ledgerPath();
+
+  const first = escalate(
+    escalation({ taskId: "DAEMON", cause: "ci", summary: "daemon condition observed" }),
+    { issues, ledgerPath: path, runId: "RUN-1" },
+  );
+  const second = escalate(
+    escalation({ taskId: "DAEMON", cause: "conflict", summary: "daemon condition observed" }),
+    { issues, ledgerPath: path, runId: "RUN-2" },
+  );
+
+  assert.notEqual(second, first, "a different cause on the same (taskId, class) opens its own issue");
+  assert.equal(issues.calls.length, 2);
+  assert.equal(issues.comments.length, 0, "no comment fires — these are genuinely separate escalations");
+});
+
+test("W1-T345: a referent-less escalation still dedupes against an issue that DOES set a matching cause (permissive on the missing side)", () => {
+  const issues = fakeIssueStore();
+  const path = ledgerPath();
+
+  const first = escalate(escalation({ taskId: "DAEMON", cause: "ci", summary: "daemon condition observed" }), {
+    issues,
+    ledgerPath: path,
+    runId: "RUN-1",
+  });
+  // Second observer never sets cause at all — matchesOptionalDimension treats the
+  // missing dimension as permissive, same discipline as the PR-keyed path.
+  const second = escalate(escalation({ taskId: "DAEMON", summary: "daemon condition observed" }), {
+    issues,
+    ledgerPath: path,
+    runId: "RUN-2",
+  });
+
+  assert.equal(second, first, "a caller that never sets cause still dedupes against a cause-carrying issue");
+  assert.equal(issues.calls.length, 1);
+  assert.equal(issues.comments.length, 1);
+});
+
+test("W1-T345: distinct classes on the same taskId, no PR, never dedup against each other", () => {
+  const issues = fakeIssueStore();
+  const path = ledgerPath();
+
+  const first = escalate(escalation({ class: "BLOCKED", taskId: "DAEMON", summary: "daemon condition observed" }), {
+    issues,
+    ledgerPath: path,
+    runId: "RUN-1",
+  });
+  const second = escalate(escalation({ class: "MANUAL", taskId: "DAEMON", summary: "daemon condition observed" }), {
+    issues,
+    ledgerPath: path,
+    runId: "RUN-2",
+  });
+
+  assert.notEqual(second, first, "a different class on the same taskId is a different operator ask");
+  assert.equal(issues.calls.length, 2);
+});
+
+test("W1-T345: a listOpen read failure files rather than suppresses, for a referent-less escalation exactly as it already does for a PR-keyed one", () => {
+  const path = ledgerPath();
+  const store = fakeIssueStore();
+  const boom: IssueGateway = {
+    ...store,
+    listOpen() {
+      throw new Error("gh: HTTP 502");
+    },
+  };
+  const url = escalate(escalation({ taskId: "daemon", summary: "dispatch queue starved" }), {
+    issues: boom,
+    ledgerPath: path,
+    runId: "RUN-1",
+  });
+  assert.ok(url, "an unreadable open-issue listing still files the escalation rather than suppressing it");
+  assert.equal(store.calls.length, 1, "the failed read falls through to create(), never a silent drop");
 });
 
 test("ghIssueGateway.comment: posts a plain comment without closing the issue", () => {

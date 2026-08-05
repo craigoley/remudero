@@ -431,6 +431,11 @@ function extractPrRef(text: string): string | undefined {
  *  regex the escalation-lifecycle reconciler (run-task.ts) already reads task ids with. */
 const TASK_LINE_RE = /^\*\*Task:\*\*\s*(\S+)\s*$/m;
 
+/** The `**Class:** <class>` line {@link renderIssueBody} writes UNCONDITIONALLY on every issue
+ *  (never optional, unlike Head/Cause below) — the second dimension of the W1-T345 referent-less
+ *  dedup key, read back exactly like {@link TASK_LINE_RE}. */
+const CLASS_LINE_RE = /^\*\*Class:\*\*\s*(\S+)\s*$/m;
+
 /** The `**Head:** <sha>` line {@link renderIssueBody} writes ONLY when {@link Escalation.headSha}
  *  is set (W1-T195) — absent on every issue predating this task or opened by an un-migrated caller. */
 const HEAD_SHA_LINE_RE = /^\*\*Head:\*\*\s*(\S+)\s*$/m;
@@ -460,21 +465,41 @@ function matchesOptionalDimension(wanted: string | undefined, candidate: string 
  * each open their own issue, because each caller deduped only against ITS OWN prior
  * actions (different title templates, different ledger keys) and never saw the
  * other's issue. The fix is a single content-keyed check inside `escalate()` itself,
- * so EVERY caller inherits it by construction rather than re-implementing it:
- *   - key = (this escalation's taskId, the PR number found in its summary/detail,
- *     and — W1-T195 — {@link Escalation.headSha}/{@link Escalation.cause} when the
- *     caller set them). No PR reference found -> skip the check entirely (create as
- *     always). headSha/cause are matched permissively (see
+ * so EVERY caller inherits it by construction rather than re-implementing it. TWO
+ * matching modes, chosen by whether a PR reference resolves out of this escalation's
+ * own summary/detail text:
+ *
+ *   PR-KEYED (unchanged since W1-T195): key = (taskId, the PR number found in
+ *     summary/detail, and {@link Escalation.headSha}/{@link Escalation.cause} when the
+ *     caller set them). headSha/cause are matched permissively (see
  *     {@link matchesOptionalDimension}): they veto a match only when BOTH sides carry
  *     a value and disagree, so an un-migrated caller's dedup is unchanged (taskId + PR
  *     only) while the two rungs that DO set them (the fix rung's strike-exhaustion
  *     escalate and the clarification rung's blocked-ambiguous escalate) get the real
- *     fix this task exists for: a new push (new headSha) or a different cause on the
+ *     fix W1-T195 exists for: a new push (new headSha) or a different cause on the
  *     same sha each open their own issue instead of being silenced by a stale one.
+ *
+ *   REFERENT-LESS (W1-T345 — the #1220 "dispatch queue starved" storm, SEVEN
+ *     byte-identical siblings #1223-#1271, one per daemon tick the condition held):
+ *     no PR resolves for a daemon/queue-level escalation (escalateStarvation,
+ *     escalateCrashLoop, escalateCircuitBreak, escalateLifetimeCapExceeded,
+ *     escalateHeadroomReserve — none of these name a PR), so key = (taskId, class,
+ *     cause). class is matched EXACTLY, never permissively — it is always rendered
+ *     (never optional, unlike headSha/cause) so every candidate carries a value.
+ *     cause is matched permissively exactly like the PR-keyed path — DISTINCT causes
+ *     on the same (taskId, class) still open separately (W1-T195's discipline
+ *     extends, it does not collapse). When NEITHER side sets a cause (every current
+ *     referent-less producer), the fallback discriminator is the rendered title's
+ *     summary text: it is a fixed, per-producer-constant phrase (escalateStarvation's
+ *     "dispatch queue starved…" vs escalateCrashLoop's "daemon crash-loop…"), so two
+ *     DIFFERENT producers sharing one (taskId, class) — e.g. "DAEMON"/BLOCKED for
+ *     both crash-loop and post-review-stall — never collide into each other's issue,
+ *     while the SAME producer's repeated firing (the storm shape) does dedup.
+ *
+ *   Both modes:
  *   - search OPEN `needs-human` issues (never closed ones — a closed issue recorded a
  *     human's resolution, and a fresh escalation on a recurrence must NOT be silenced
- *     by it) for one whose `**Task:**` line matches and whose title+body names the
- *     SAME PR number.
+ *     by it) whose `**Task:**` line matches this escalation's taskId.
  *   - found -> append THIS caller's own summary/detail as a comment (never dropped —
  *     the second observer often knows something the first did not) and ledger
  *     `escalation.deduped` instead of creating a sibling.
@@ -497,34 +522,58 @@ export function escalate(e: Escalation, deps: EscalateDeps): string {
   }
 
   const prRef = extractPrRef(`${e.summary}\n${e.detail}`);
-  if (prRef && deps.issues.listOpen) {
+  // The rendered title for THIS escalation — used below both as the dedup search's
+  // W1-T345 referent-less fallback discriminator and (unchanged) as the create() title.
+  const title = `[${e.class}] ${e.taskId}: ${e.summary}`;
+  if (deps.issues.listOpen) {
     let open: OpenIssue[];
     try {
       open = deps.issues.listOpen(NEEDS_HUMAN_LABEL);
     } catch {
       open = []; // best-effort dedup: a failed read must never block the escalation itself
     }
-    // W1-T195: the composite key. taskId + PR are REQUIRED matches (unchanged from
-    // W1-T104). headSha/cause are matched via matchesOptionalDimension — a dimension
-    // only vetoes the match when BOTH this escalation and the candidate issue carry a
-    // value and they disagree, so a caller that never sets headSha/cause (every caller
-    // except the two rungs this task wires) keeps today's (taskId, PR) dedup exactly as
-    // before. A caller that DOES set both, on the other hand, gets the real fix: a new
-    // push (new headSha) or a different cause on the same sha each open their OWN issue
-    // rather than being silently suppressed by a stale one.
     const dup = open.find((issue) => {
       const body = issue.body ?? "";
       if (TASK_LINE_RE.exec(body)?.[1] !== e.taskId) return false;
-      if (extractPrRef(`${issue.title ?? ""}\n${body}`) !== prRef) return false;
-      if (!matchesOptionalDimension(e.headSha, HEAD_SHA_LINE_RE.exec(body)?.[1])) return false;
-      if (!matchesOptionalDimension(e.cause, CAUSE_LINE_RE.exec(body)?.[1])) return false;
-      return true;
+      if (prRef) {
+        // W1-T195: the composite key. taskId + PR are REQUIRED matches (unchanged
+        // from W1-T104). headSha/cause are matched via matchesOptionalDimension — a
+        // dimension only vetoes the match when BOTH this escalation and the
+        // candidate issue carry a value and they disagree, so a caller that never
+        // sets headSha/cause (every caller except the two rungs this task wires)
+        // keeps today's (taskId, PR) dedup exactly as before. A caller that DOES set
+        // both, on the other hand, gets the real fix: a new push (new headSha) or a
+        // different cause on the same sha each open their OWN issue rather than
+        // being silently suppressed by a stale one.
+        if (extractPrRef(`${issue.title ?? ""}\n${body}`) !== prRef) return false;
+        if (!matchesOptionalDimension(e.headSha, HEAD_SHA_LINE_RE.exec(body)?.[1])) return false;
+        if (!matchesOptionalDimension(e.cause, CAUSE_LINE_RE.exec(body)?.[1])) return false;
+        return true;
+      }
+      // W1-T345: no PR resolves — dedup on (taskId, class, cause) instead of
+      // skipping the search outright. class is REQUIRED equal (it is always
+      // rendered, never optional). cause is matched permissively, same discipline
+      // as the PR-keyed branch above: distinct causes on the same (taskId, class)
+      // still open separately. When neither side names a cause, fall back to
+      // comparing the rendered title verbatim — its summary segment is a fixed,
+      // per-producer-constant phrase, so two different referent-less producers
+      // sharing one (taskId, class) never collide into each other's issue while the
+      // SAME producer's repeated firing (the storm shape) does dedup.
+      if (CLASS_LINE_RE.exec(body)?.[1] !== e.class) return false;
+      const candidateCause = CAUSE_LINE_RE.exec(body)?.[1];
+      if (e.cause !== undefined || candidateCause !== undefined) {
+        return matchesOptionalDimension(e.cause, candidateCause);
+      }
+      return (issue.title ?? "") === title;
     });
     if (dup) {
+      const observedKey = prRef
+        ? `task ${e.taskId}, PR #${prRef}`
+        : `task ${e.taskId}, class ${e.class}${e.cause ? `, cause ${e.cause}` : ""}`;
       deps.issues.comment?.(
         dup.url,
-        `Another escalation observed the same condition (task ${e.taskId}, PR #${prRef}) while this issue ` +
-          `was already open — appending rather than opening a sibling (W1-T104).\n\n${renderIssueBody(e)}`,
+        `Another escalation observed the same condition (${observedKey}) while this issue ` +
+          `was already open — appending rather than opening a sibling (W1-T104/W1-T345).\n\n${renderIssueBody(e)}`,
       );
       appendLedger(deps.ledgerPath, {
         run_id: deps.runId,
@@ -537,7 +586,6 @@ export function escalate(e: Escalation, deps: EscalateDeps): string {
     }
   }
 
-  const title = `[${e.class}] ${e.taskId}: ${e.summary}`;
   const wanted = [NEEDS_HUMAN_LABEL, CLASS_LABEL[e.class]];
   const labels: string[] = [];
   const degradedLabels: string[] = [];
