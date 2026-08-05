@@ -1,4 +1,4 @@
-- id: W1-T345
+- id: W1-T351
   title: "the commitlint job lints `github.event.pull_request.title` — an event-payload SNAPSHOT — so a title set after the `opened` event can never pass, and re-running the job replays the same empty string"
   repo: remudero
   depends_on: []
@@ -49,5 +49,10 @@
       proof: "unit test: test/ci-title-lint.test.ts"
     - claim: "an empty title input is reported as an empty read, distinctly from a non-conventional title"
       proof: "unit test: test/ci-title-lint.test.ts"
+  # RENUMBERED from W1-T345 on 2026-08-04: PR #1315 filed W1-T345..W1-T350 as one arc
+  # concurrently with #1314. `rmd next-task-id` could not see a PR that did not exist yet
+  # when this was minted. A duplicate id makes the WHOLE plan unreadable — `rmd status`
+  # reported "plan/tasks.yaml is unreadable" and dispatch eligibility could not resolve at
+  # all — so the single task moves, not the six-task arc.
   origin: oper#commitlint-stale-payload-2026-08-04
   plan_refs: ["§5C"]
