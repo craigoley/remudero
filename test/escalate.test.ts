@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { planCommand } from "../src/run-task.js";
 import {
   ESCALATION_JUDGE_TOOLS,
   FLEET_NOTICE_LABEL,
@@ -308,6 +310,175 @@ test("tryEscalate: a SUCCESSFUL delivery is byte-identical to escalate() (no beh
   const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l));
   assert.equal(lines.filter((l) => l.step === "escalation.issue_opened").length, 1);
   assert.equal(lines.filter((l) => l.step === "escalation.failed").length, 0);
+});
+
+// ── planCommand's GRILL branch (W1-T354): a failed delivery degrades, never crashes ─────────
+// The plan lane's grill branch (run-task.ts) wires its own `buildPlanGrillEscalation`
+// (lib/plan-architect.ts) through `escalateWithSummary` — async, so it cannot use the
+// synchronous `tryEscalate` above, but the SAME discipline is required: the `plan.verdict`
+// ledger line is written BEFORE the escalation attempt, and a delivery failure is caught and
+// ledgered on its own `escalation.failed` step rather than propagating out of `planCommand`.
+//
+// Driven through the REAL `planCommand`, offline (a bare git origin in TMPDIR, a `gh` shim on
+// PATH, an injected spawn) — same harness shape as test/plan-lane-mint.test.ts and
+// test/live-write-guard-command-sites.test.ts. Deliberately NOT wrapped in
+// `withLiveWritesAllowed`: `gh issue create` is a live-write-guarded boundary
+// (lib/live-write-guard.ts), and under the test runner that guard throws
+// `LiveWriteBlockedError` BEFORE `gh` is ever invoked — a real, deterministic transport
+// failure with no shim cooperation needed, exercising exactly the "delivery fails" falsifier
+// design point (i) asks for. The happy path (the guard exempted, the issue actually opens) is
+// this test's twin in test/plan-architect.test.ts.
+
+const GRILL_FAIL_GIT_ENV = {
+  ...process.env,
+  GIT_AUTHOR_NAME: "t",
+  GIT_AUTHOR_EMAIL: "t@t",
+  GIT_COMMITTER_NAME: "t",
+  GIT_COMMITTER_EMAIL: "t@t",
+};
+
+function grillFailGit(dir: string, ...args: string[]): string {
+  return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", env: GRILL_FAIL_GIT_ENV });
+}
+
+function grillFailFakeWorker(text: string): WorkerResult {
+  return {
+    sessionId: "GRILL-FAIL-SESSION",
+    costUsd: 0,
+    numTurns: 1,
+    text,
+    blocks: [text],
+    stderr: "",
+    subtype: "success",
+    isError: false,
+    apiError: false,
+    model: "claude-opus-5",
+    effort: "high",
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    totalCostUsd: 0,
+    billingMode: "subscription",
+    verdict: "success",
+    qualitySuspect: false,
+    compactionEvents: [],
+    childEnvKeys: [],
+  } as unknown as WorkerResult;
+}
+
+function grillFailMakeOrigin(): string {
+  const bare = mkdtempSync(join(tmpdir(), "grillfail-origin-"));
+  execFileSync("git", ["init", "--quiet", "--bare", "-b", "main", bare], { encoding: "utf8", env: GRILL_FAIL_GIT_ENV });
+  const seed = mkdtempSync(join(tmpdir(), "grillfail-seed-"));
+  execFileSync("git", ["init", "--quiet", "-b", "main", seed], { encoding: "utf8", env: GRILL_FAIL_GIT_ENV });
+  mkdirSync(join(seed, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(join(seed, "plan", "tasks.yaml"), "tasks:\n  - id: W1-T4\n    title: a seed task the plan loader accepts\n");
+  writeFileSync(join(seed, "MASTER-PLAN.md"), "# MASTER PLAN\n\nfixture\n");
+  grillFailGit(seed, "add", "-A");
+  grillFailGit(seed, "commit", "--quiet", "-m", "chore: seed plan");
+  grillFailGit(seed, "remote", "add", "origin", bare);
+  grillFailGit(seed, "push", "--quiet", "origin", "main");
+  rmSync(seed, { recursive: true, force: true });
+  return bare;
+}
+
+/** A `gh` shim answering every OTHER subcommand a grill run makes before it ever reaches the
+ *  guarded `issue create` call — `ensureLabel`'s `label create` calls and the dedup search's
+ *  `gh api` read both happen first, and both must succeed (or fail soft) for the run to reach
+ *  the guarded call at all. */
+function grillFailWriteGhShim(dir: string): void {
+  writeFileSync(
+    join(dir, "gh"),
+    [
+      "#!/bin/sh",
+      'case "$*" in',
+      '  *"pr list"*) echo "[]" ;;',
+      '  *"headRefName"*) printf \'{"headRefName":"%s"}\\n\' "${RMD_SHIM_BRANCH:-main}" ;;',
+      '  *"--json body"*) echo \'{"body":""}\' ;;',
+      '  *"pr diff"*) echo "" ;;',
+      "  *) exit 0 ;;",
+      "esac",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+}
+
+async function withGrillFailHarness(
+  body: (ctx: { setBranch: (b: string) => void }) => Promise<void>,
+): Promise<Array<Record<string, unknown>>> {
+  const bare = grillFailMakeOrigin();
+  const home = mkdtempSync(join(tmpdir(), "grillfail-home-"));
+  const configRoot = mkdtempSync(join(tmpdir(), "grillfail-root-"));
+  const shimDir = mkdtempSync(join(tmpdir(), "grillfail-shim-"));
+  const savedHome = process.env.HOME;
+  const savedPath = process.env.PATH;
+  const savedBranch = process.env.RMD_SHIM_BRANCH;
+  const __dirname = dirname(fileURLToPath(import.meta.url));
+  const REPO_ROOT = join(__dirname, "..");
+  try {
+    mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+    writeFileSync(
+      join(home, ".config", "remudero", "config.json"),
+      JSON.stringify({ claudeBin: "/usr/bin/true", root: configRoot }, null, 2),
+    );
+    process.env.HOME = home;
+
+    const originUrl = execFileSync("git", ["-C", REPO_ROOT, "config", "--get", "remote.origin.url"], {
+      encoding: "utf8",
+    }).trim();
+    const repoName = originUrl.match(/[/:]([^/:]+)\/([^/]+?)(?:\.git)?$/)![2];
+    const repoDir = join(configRoot, "repos", repoName);
+    mkdirSync(dirname(repoDir), { recursive: true });
+    execFileSync("git", ["clone", "--quiet", bare, repoDir], { encoding: "utf8", env: GRILL_FAIL_GIT_ENV });
+    execFileSync("git", ["-C", repoDir, "config", "user.name", "remudero-test"], { encoding: "utf8" });
+    execFileSync("git", ["-C", repoDir, "config", "user.email", "test@remudero.invalid"], { encoding: "utf8" });
+
+    grillFailWriteGhShim(shimDir);
+    process.env.PATH = `${shimDir}:${savedPath}`;
+
+    await body({
+      setBranch: (b) => {
+        process.env.RMD_SHIM_BRANCH = b;
+      },
+    });
+
+    const p = join(configRoot, "state", "ledger.ndjson");
+    return existsSync(p)
+      ? readFileSync(p, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>)
+      : [];
+  } finally {
+    process.env.HOME = savedHome;
+    process.env.PATH = savedPath;
+    if (savedBranch === undefined) delete process.env.RMD_SHIM_BRANCH;
+    else process.env.RMD_SHIM_BRANCH = savedBranch;
+    for (const d of [bare, home, configRoot, shimDir]) rmSync(d, { recursive: true, force: true });
+  }
+}
+
+test("GRILL WIRING (W1-T354): a grill delivery failure degrades to today's behaviour — plan.verdict survives, exit stays 0, never a crash", async () => {
+  const question = "does the plan lane onboard remudero-sandbox too, or this repo only?";
+  let code = -1;
+  const ledger = await withGrillFailHarness(async ({ setBranch }) => {
+    setBranch("run-PLAN-clarify");
+    // NOT wrapped in withLiveWritesAllowed — see the section doc above.
+    code = await planCommand(["--mode=clarify", "W1-T90"], {
+      spawn: async () => grillFailFakeWorker(`GRILL: ${question}`),
+    });
+  });
+
+  assert.equal(code, 0, "a failed grill delivery still exits 0 — the pass never crashes");
+  const verdictLines = ledger.filter((l) => l.step === "plan.verdict" && l.action === "grill");
+  assert.equal(verdictLines.length, 1, "the plan.verdict ledger line survives the failed delivery");
+  assert.equal(verdictLines[0].detail, question);
+  assert.equal(
+    ledger.filter((l) => l.step === "plan.grill_opened").length,
+    0,
+    "no issue_url is ever claimed opened when delivery actually failed",
+  );
+  const failed = ledger.filter((l) => l.step === "escalation.failed");
+  assert.equal(failed.length, 1, "the failure itself is legible on its own ledger step, never silently dropped");
+  assert.equal(failed[0].class, "GRILL");
+  assert.equal(failed[0].task_id, "PLAN-clarify");
+  assert.match(String(failed[0].error), /live-write-guard/i, "the actual transport refusal is carried, not swallowed");
 });
 
 // ── ENSURE-LABELS + DEGRADE DON'T LOSE (W1-T99) ─────────────────────────────

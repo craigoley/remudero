@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   applyPlanProposalCommit,
+  buildPlanGrillEscalation,
   decidePlanArchitect,
   diffCitesResearchSource,
   formatPlanVerdictLine,
@@ -19,6 +20,9 @@ import {
   planCommitMessage,
   type PlanDecision,
 } from "../src/lib/plan-architect.js";
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { planCommand } from "../src/run-task.js";
+import type { WorkerResult } from "../src/lib/worker.js";
 
 /**
  * A real, throwaway git repo seeded with a baseline `plan/tasks.yaml` + `MASTER-PLAN.md` and
@@ -560,4 +564,248 @@ test("REAL RUN: --mode=expand proposes a gap-filling task that cites a research 
       commitMessage,
     ].join("\n"),
   );
+});
+
+// ── THE GRILL WIRED TO escalate() (W1-T354) ──────────────────────────────────────────
+// Until this task, planCommand's grill branch logged a ledger line, printed a console line,
+// removed the worktree and returned 0 — no needs-human issue, no operator surface. This wires
+// it to the SAME async needs-human-issue transport triage's grill already uses (lib/escalate.ts),
+// via a new plan-lane-shaped builder (`buildPlanGrillEscalation`) rather than reusing
+// `buildGrillEscalation` directly — that builder is `FeedbackEntry`-shaped and its
+// options/recommendation come off `TriageDecision`'s grill arm, which `decideTriage` enforces
+// carries >= 2 real `OPTION:` lines; `decidePlanArchitect`'s grill arm carries only the bare
+// question (the Architect prompt asks for a single `GRILL: <question>` line, never
+// `OPTION:`/`RECOMMENDATION:`), so there is nothing of the Architect's own to carry over —
+// design point (ii)'s "minimal real pair" instead.
+
+test("buildPlanGrillEscalation: builds a GRILL-class Escalation carrying the Architect's stated question, with a minimal real option pair", () => {
+  const decision: Extract<PlanDecision, { action: "grill" }> = {
+    action: "grill",
+    detail: "does W1-T90's 'the daemon' mean rmd daemon specifically, or rmd drain too?",
+  };
+  const e = buildPlanGrillEscalation({
+    decision,
+    mode: "clarify",
+    brief: "W1-T90",
+    taskId: "PLAN-clarify",
+    runId: "PLAN-clarify-1700000400000",
+  });
+  assert.equal(e.class, "GRILL");
+  assert.equal(e.taskId, "PLAN-clarify");
+  assert.equal(e.runId, "PLAN-clarify-1700000400000");
+  assert.match(e.summary, /does W1-T90's 'the daemon' mean rmd daemon specifically, or rmd drain too\?/);
+  assert.match(e.detail, /Brief: W1-T90/);
+  assert.match(e.detail, /Open question: does W1-T90's 'the daemon' mean rmd daemon specifically, or rmd drain too\?/);
+  // decidePlanArchitect's grill arm carries no OPTION:/RECOMMENDATION: lines (unlike triage's),
+  // so this is the "minimal real pair" design point (ii) calls for, not a reuse of the
+  // Architect's own stated choices (it never states any).
+  assert.equal(e.options.length, 2);
+  assert.ok(
+    e.options.some((o) => o.label === e.recommendation),
+    "the recommendation names one of the two options — the same invariant escalate() enforces",
+  );
+});
+
+test("buildPlanGrillEscalation: an omitted brief (clarify/expand's whole-plan default) still renders a real detail line, never a blank", () => {
+  const decision: Extract<PlanDecision, { action: "grill" }> = { action: "grill", detail: "which repo?" };
+  const e = buildPlanGrillEscalation({ decision, mode: "expand", brief: "", taskId: "PLAN-expand", runId: "PLAN-expand-1" });
+  assert.match(e.detail, /Brief: \(none given/);
+});
+
+const GRILL_WIRE_GIT_ENV = {
+  ...process.env,
+  GIT_AUTHOR_NAME: "t",
+  GIT_AUTHOR_EMAIL: "t@t",
+  GIT_COMMITTER_NAME: "t",
+  GIT_COMMITTER_EMAIL: "t@t",
+};
+
+function grillWireGit(dir: string, ...args: string[]): string {
+  return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", env: GRILL_WIRE_GIT_ENV });
+}
+
+function grillWireFakeWorker(text: string): WorkerResult {
+  return {
+    sessionId: "GRILL-WIRE-SESSION",
+    costUsd: 0,
+    numTurns: 1,
+    text,
+    blocks: [text],
+    stderr: "",
+    subtype: "success",
+    isError: false,
+    apiError: false,
+    model: "claude-opus-5",
+    effort: "high",
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    totalCostUsd: 0,
+    billingMode: "subscription",
+    verdict: "success",
+    qualitySuspect: false,
+    compactionEvents: [],
+    childEnvKeys: [],
+  } as unknown as WorkerResult;
+}
+
+function grillWireMakeOrigin(): string {
+  const bare = mkdtempSync(join(tmpdir(), "grillwire-origin-"));
+  execFileSync("git", ["init", "--quiet", "--bare", "-b", "main", bare], { encoding: "utf8", env: GRILL_WIRE_GIT_ENV });
+  const seed = mkdtempSync(join(tmpdir(), "grillwire-seed-"));
+  execFileSync("git", ["init", "--quiet", "-b", "main", seed], { encoding: "utf8", env: GRILL_WIRE_GIT_ENV });
+  mkdirSync(join(seed, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(join(seed, "plan", "tasks.yaml"), "tasks:\n  - id: W1-T4\n    title: a seed task the plan loader accepts\n");
+  writeFileSync(join(seed, "MASTER-PLAN.md"), "# MASTER PLAN\n\nfixture\n");
+  grillWireGit(seed, "add", "-A");
+  grillWireGit(seed, "commit", "--quiet", "-m", "chore: seed plan");
+  grillWireGit(seed, "remote", "add", "origin", bare);
+  grillWireGit(seed, "push", "--quiet", "origin", "main");
+  rmSync(seed, { recursive: true, force: true });
+  return bare;
+}
+
+/** A `gh` shim answering every subcommand a real `planCommand` grill run makes. `issue create`
+ *  is the interesting case: it logs the invocation's argv to `GH_CALL_LOG` (so the test can
+ *  read back the real title/body/labels `gh` was actually invoked with) and echoes a fake
+ *  issue URL, exactly the shape `ghIssueGateway.create` expects on stdout. */
+function grillWireWriteGhShim(dir: string): void {
+  writeFileSync(
+    join(dir, "gh"),
+    [
+      "#!/bin/sh",
+      'if [ "$1" = "issue" ] && [ "$2" = "create" ]; then',
+      '  echo "$@" >> "$GH_CALL_LOG"',
+      '  echo "https://github.com/craigoley/remudero/issues/9001"',
+      "  exit 0",
+      "fi",
+      'case "$*" in',
+      '  *"pr list"*) echo "[]" ;;',
+      '  *"pr create"*) echo "https://github.com/craigoley/remudero/pull/4343" ;;',
+      '  *"headRefName"*) printf \'{"headRefName":"%s"}\\n\' "${RMD_SHIM_BRANCH:-main}" ;;',
+      '  *"--json body"*) echo \'{"body":""}\' ;;',
+      '  *"pr diff"*) echo "" ;;',
+      "  *) exit 0 ;;",
+      "esac",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+}
+
+async function withGrillWireHarness(
+  body: (ctx: { setBranch: (b: string) => void; ghCallLog: string }) => Promise<void>,
+): Promise<Array<Record<string, unknown>>> {
+  const bare = grillWireMakeOrigin();
+  const home = mkdtempSync(join(tmpdir(), "grillwire-home-"));
+  const configRoot = mkdtempSync(join(tmpdir(), "grillwire-root-"));
+  const shimDir = mkdtempSync(join(tmpdir(), "grillwire-shim-"));
+  const ghCallLog = join(mkdtempSync(join(tmpdir(), "grillwire-log-")), "gh-calls.log");
+  writeFileSync(ghCallLog, "");
+  const savedHome = process.env.HOME;
+  const savedPath = process.env.PATH;
+  const savedBranch = process.env.RMD_SHIM_BRANCH;
+  const savedLog = process.env.GH_CALL_LOG;
+  const __dirname = dirname(fileURLToPath(import.meta.url));
+  const REPO_ROOT = join(__dirname, "..");
+  try {
+    mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+    writeFileSync(
+      join(home, ".config", "remudero", "config.json"),
+      JSON.stringify({ claudeBin: "/usr/bin/true", root: configRoot }, null, 2),
+    );
+    process.env.HOME = home;
+    process.env.GH_CALL_LOG = ghCallLog;
+
+    const originUrl = execFileSync("git", ["-C", REPO_ROOT, "config", "--get", "remote.origin.url"], {
+      encoding: "utf8",
+    }).trim();
+    const repoName = originUrl.match(/[/:]([^/:]+)\/([^/]+?)(?:\.git)?$/)![2];
+    const repoDir = join(configRoot, "repos", repoName);
+    mkdirSync(dirname(repoDir), { recursive: true });
+    execFileSync("git", ["clone", "--quiet", bare, repoDir], { encoding: "utf8", env: GRILL_WIRE_GIT_ENV });
+    execFileSync("git", ["-C", repoDir, "config", "user.name", "remudero-test"], { encoding: "utf8" });
+    execFileSync("git", ["-C", repoDir, "config", "user.email", "test@remudero.invalid"], { encoding: "utf8" });
+
+    grillWireWriteGhShim(shimDir);
+    process.env.PATH = `${shimDir}:${savedPath}`;
+
+    await body({
+      setBranch: (b) => {
+        process.env.RMD_SHIM_BRANCH = b;
+      },
+      ghCallLog,
+    });
+
+    const p = join(configRoot, "state", "ledger.ndjson");
+    return existsSync(p)
+      ? readFileSync(p, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>)
+      : [];
+  } finally {
+    process.env.HOME = savedHome;
+    process.env.PATH = savedPath;
+    if (savedBranch === undefined) delete process.env.RMD_SHIM_BRANCH;
+    else process.env.RMD_SHIM_BRANCH = savedBranch;
+    if (savedLog === undefined) delete process.env.GH_CALL_LOG;
+    else process.env.GH_CALL_LOG = savedLog;
+    for (const d of [bare, home, configRoot, shimDir]) rmSync(d, { recursive: true, force: true });
+  }
+}
+
+// REAL RUN, end to end, through the actual `planCommand` (offline: a bare git origin in
+// TMPDIR, a `gh` shim on PATH, an injected spawn — same harness shape as
+// test/plan-lane-mint.test.ts / test/live-write-guard-command-sites.test.ts). `gh issue
+// create` is the ONE live-write-guarded boundary this task adds, so the drive is wrapped in
+// `withLiveWritesAllowed` exactly like the existing guarded-push tests already do — what
+// happens WITHOUT that wrap (a failed delivery) is this test's twin in test/escalate.test.ts.
+test("GRILL WIRING (W1-T354): a GRILL verdict opens exactly one needs-human issue carrying the Architect's question, and the pass still exits 0", async () => {
+  const question = "does the plan lane onboard remudero-sandbox too, or this repo only?";
+  let code = -1;
+  let ghCallLogPath = "";
+  const ledger = await withGrillWireHarness(async ({ setBranch, ghCallLog }) => {
+    setBranch("run-PLAN-clarify");
+    ghCallLogPath = ghCallLog;
+    code = await withLiveWritesAllowed(() =>
+      planCommand(["--mode=clarify", "W1-T90"], {
+        spawn: async () => grillWireFakeWorker(`GRILL: ${question}`),
+      }),
+    );
+  });
+
+  assert.equal(code, 0, "a GRILL verdict still exits 0 — nothing failed, there is simply no PR");
+  const grillOpened = ledger.filter((l) => l.step === "plan.grill_opened");
+  assert.equal(
+    grillOpened.length,
+    1,
+    `expected exactly one plan.grill_opened line; steps=${JSON.stringify(ledger.map((l) => l.step))}`,
+  );
+  assert.equal(grillOpened[0].issue_url, "https://github.com/craigoley/remudero/issues/9001");
+
+  // The shim's `echo "$@"` reproduces the `--body`'s own embedded newlines verbatim, so a
+  // naive line-split over-counts one real invocation as many — count INVOCATIONS by the
+  // sentinel every one starts with instead.
+  const ghCalls = readFileSync(ghCallLogPath, "utf8");
+  const createCallCount = (ghCalls.match(/^issue create --repo /gm) ?? []).length;
+  assert.equal(createCallCount, 1, `gh issue create was invoked exactly once; raw log:\n${ghCalls}`);
+  assert.match(
+    ghCalls,
+    new RegExp(question.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+    "the issue body carries the Architect's actual question",
+  );
+  assert.match(ghCalls, /escalation-grill/, "labelled with the GRILL class, same taxonomy as every other escalation");
+});
+
+test("GRILL WIRING (W1-T354): a non-grill (CLEAR) verdict opens no needs-human issue — the branch's other behavior is unchanged", async () => {
+  let code = -1;
+  let ghCallLogPath = "";
+  const ledger = await withGrillWireHarness(async ({ setBranch, ghCallLog }) => {
+    setBranch("run-PLAN-clarify");
+    ghCallLogPath = ghCallLog;
+    code = await planCommand(["--mode=clarify", "W1-T90"], {
+      spawn: async () => grillWireFakeWorker("CLEAR: W1-T90 is already unambiguous — no human call needed"),
+    });
+  });
+
+  assert.equal(code, 0);
+  assert.equal(ledger.filter((l) => l.step === "plan.verdict" && l.action === "no_action").length, 1);
+  assert.equal(ledger.filter((l) => l.step === "plan.grill_opened").length, 0, "no issue is opened for a non-grill verdict");
+  assert.equal(readFileSync(ghCallLogPath, "utf8").trim(), "", "gh was never asked to create an issue");
 });
