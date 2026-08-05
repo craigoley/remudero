@@ -828,8 +828,21 @@ export function renderShellHtml(
   <button type="button" class="tab-btn" id="tab-plan" role="tab" data-tab="plan" aria-selected="false" aria-controls="tab-plan-panel">Plan</button>
   <button type="button" class="tab-btn" id="tab-feed" role="tab" data-tab="feed" aria-selected="false">Feed</button>
 </div>
+<!-- W1-T315: progress (done/in-flight/queued, GitHub-derived, never plan/tasks.yaml's own
+     decorative status field) + the frontier (the next candidates in the SAME order the
+     dispatcher would take them, each carrying a machine-derived reason). One fetch,
+     GET /v1/plan/view -- see renderPlanView's own doc below for the full contract. -->
 <section id="tab-plan-panel" class="panel-section" aria-label="Plan" hidden>
-  <p class="empty">Plan view — not built yet.</p>
+  <h2><span>Plan</span></h2>
+  <section id="plan-progress" class="daemon-health" aria-label="Progress">
+    <span class="glance-item"><span class="glance-label">done</span><span class="glance-value" id="plan-progress-done">…</span></span>
+    <span class="glance-item"><span class="glance-label">in-flight</span><span class="glance-value" id="plan-progress-inflight">…</span></span>
+    <span class="glance-item"><span class="glance-label">queued</span><span class="glance-value" id="plan-progress-queued">…</span></span>
+    <span class="glance-item"><span class="glance-label">as of</span><span class="glance-value" id="plan-progress-asof">…</span></span>
+  </section>
+  <div id="plan-progress-unknown" class="gh-banner" hidden role="status" aria-live="polite"></div>
+  <h3>Frontier <span id="plan-frontier-summary" class="section-summary"></span></h3>
+  <ol id="plan-frontier-list" class="row-list"></ol>
 </section>
 
 <section id="recap" class="panel-section" aria-label="Since you last checked" data-owner-tab="feed" hidden>
@@ -1476,6 +1489,7 @@ export function renderShellHtml(
   let latestNeedsMeRows = []; // set by renderNeedsMe -- the SAME combined NEEDS ME rows the section itself renders
   let latestDaemonHealth = null; // GET /v1/daemon-health's body
   let latestAccountUsage = null; // GET /v1/account-usage's body (account-usage.ts's AccountUsageSnapshot)
+  let latestPlanView = null; // GET /v1/plan/view's body (panel-graph.ts's { progress, frontier }, W1-T315)
   const BASE_TITLE = document.title;
   const NEEDS_ME_STALE_MS = 24 * 60 * 60 * 1000; // criterion 3's ">24h" anomaly-emphasis bound
 
@@ -1920,6 +1934,45 @@ export function renderShellHtml(
       a.usageUnknownReason ? \`unknown (\${a.usageUnknownReason})\` : formatTimestamp(a.usageAsOf),
     );
     setGlanceValue("au-measures", a.measures || "");
+  }
+
+  /** Renders GET /v1/plan/view's body (W1-T315): PROGRESS (done/in-flight/queued, GitHub-
+   *  derived, never plan/tasks.yaml's own decorative \`status:\` field) + the FRONTIER (the next
+   *  candidates in the SAME order the dispatcher would take them, each carrying a machine-
+   *  derived reason). \`v.progress.unknown\` renders the LAST-known counts (never a fabricated
+   *  0) with a stated banner naming why and how stale -- the same "unknown, never zero"
+   *  discipline \`renderDaemonHealth\`/\`renderAccountUsage\` already follow for their own fields.
+   *  A held frontier row (\`runnable: false\`) renders WITH its reason, never omitted -- "not-
+   *  runnable is information, not absence" (this task's own design). */
+  function renderPlanView(v) {
+    if (!v) return;
+    const p = v.progress || {};
+    setGlanceValue("plan-progress-done", p.done != null ? String(p.done) : "unknown");
+    setGlanceValue("plan-progress-inflight", p.inFlight != null ? String(p.inFlight) : "unknown");
+    setGlanceValue("plan-progress-queued", p.queued != null ? String(p.queued) : "unknown");
+    setGlanceValue("plan-progress-asof", p.asOf ? formatTimestamp(p.asOf) : "unknown");
+    const unknownBanner = document.getElementById("plan-progress-unknown");
+    if (unknownBanner) {
+      if (p.unknown) {
+        unknownBanner.hidden = false;
+        unknownBanner.textContent = \`UNKNOWN — GitHub could not be read (\${p.unavailableReason || "unknown reason"})\${p.asOf ? \`; showing the last known counts, as of \${formatTimestamp(p.asOf)}\` : " and no prior reading exists yet"}\`;
+      } else {
+        unknownBanner.hidden = true;
+      }
+    }
+    const rows = v.frontier || [];
+    const list = document.getElementById("plan-frontier-list");
+    if (list) {
+      list.innerHTML = rows.length
+        ? rows
+            .map(
+              (r) =>
+                \`<li class="row plan-frontier-row"\${r.runnable ? "" : ' data-held="true"'}>\${statusBadge(r.runnable ? "queued" : "blocked")}<span class="task-id">\${escapeHtml(r.id)}</span><span class="detail">\${escapeHtml(r.title)} — \${escapeHtml(r.reason)}</span></li>\`,
+            )
+            .join("")
+        : '<li class="empty">nothing queued</li>';
+    }
+    setGlanceValue("plan-frontier-summary", rows.length ? \`\${rows.length} shown\` : "empty");
   }
 
   /** The cache-restore path (W1-T154): ingest the cached snapshot's tasks/side-data and paint
@@ -3545,7 +3598,7 @@ export function renderShellHtml(
     }
 
     try {
-      const [recentSnap, upNextSnap, feedbackSnap, inboxSnap, controlStatus, daemonHealth, accountUsage] = await Promise.all([
+      const [recentSnap, upNextSnap, feedbackSnap, inboxSnap, controlStatus, daemonHealth, accountUsage, planView] = await Promise.all([
         getJson("/v1/recent").catch(() => ({ entries: [] })),
         getJson("/v1/drain/preview?max=5").catch(() => ({ cards: [] })),
         getJson("/v1/feedback").catch(() => ({ entries: [] })),
@@ -3559,6 +3612,10 @@ export function renderShellHtml(
         // catch-and-degrade convention as every sibling above: a failure here leaves the strip
         // showing its last-known values (or "…" pre-first-success) and never breaks the refresh.
         getJson("/v1/account-usage").catch(() => null),
+        // W1-T315: the Plan tab's one fetch -- same catch-and-degrade convention as every
+        // sibling above; a failure here leaves the tab showing its last-known values (or "…"
+        // pre-first-success) and never breaks the rest of the refresh.
+        getJson("/v1/plan/view").catch(() => null),
       ]);
       latestFeedbackEntries = feedbackSnap.entries ?? [];
       latestInboxReady = inboxSnap.ready ?? [];
@@ -3572,6 +3629,10 @@ export function renderShellHtml(
       if (accountUsage) {
         latestAccountUsage = accountUsage;
         renderAccountUsage(accountUsage);
+      }
+      if (planView) {
+        latestPlanView = planView;
+        renderPlanView(planView);
       }
       // W1-T223: ONLY here (never off the status-only pass above) -- see finishSectionRender's
       // own doc for why defaulting/summarizing off still-empty feedback/inbox/up-next/recent

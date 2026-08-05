@@ -54,9 +54,17 @@
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
-import { loadPlan, parseTasksFromYaml, PlanError, type MergedResolver } from "./plan.js";
-import { projectPlan, readLedgerLines, type GitHub } from "./status.js";
-import { buildDrainPreview, type DrainOpts } from "./drain.js";
+import { loadPlan, parseTasksFromYaml, PlanError, unmetDependencies, type MergedResolver, type Plan, type Task } from "./plan.js";
+import {
+  projectPlan,
+  readLedgerLines,
+  isDispatchBreakerTripped,
+  dispatchesWithoutNewOwnedPr,
+  DEFAULT_MAX_TASK_DISPATCHES,
+  type GitHub,
+  type StatusProjection,
+} from "./status.js";
+import { buildDrainPreview, dispatchOrder, runnableCandidates, type DrainOpts, type DispatchFilterReason, type MergedSet } from "./drain.js";
 import {
   captureFeedback,
   FEEDBACK_STATUSES,
@@ -451,6 +459,256 @@ export function buildDrainPreviewRoute(deps: PanelGraphDeps): Route {
   };
 }
 
+// ── GET /v1/plan/view — progress (done/in-flight/queued) + frontier (W1-T315) ─────────────────
+//
+// PROGRESS is derived from projectPlan's SAME GitHub-derived projection GET /v1/drain/preview
+// (just above) and GET /v1/status already use — a task whose yaml `status:` still says
+// `queued` while its PR is merged counts as DONE here, never off that decorative field
+// (W1-T280's own harvest: W1-T279 read `queued`/`attempts: 0` while PR #1062 had already
+// merged). A gateway that could not be read (`github.readFailed()`) never renders a zero: the
+// LAST successfully-observed reading rides forward from an in-memory cache, stamped UNKNOWN
+// with the age it was last true (W1-T262's "unknown, never zero" rule) — resolved through the
+// ONE `projectPlan()` call the route below makes for the whole plan, never a second per-task
+// read (see `computePlanProgress`'s own doc for why it cannot become one, however it's called).
+//
+// FRONTIER binds drain.ts's OWN `runnableCandidates` (the exact selector the dispatcher itself
+// calls) rather than re-deriving file-order/eligibility here — a board that computed its own
+// order could disagree with the daemon, and a frontier that disagrees with what runs next is
+// worse than none. Every row states a reason DERIVED from the same predicate that classified
+// it (file-order head / a NAMED unmet dependency / the streak breaker's own reset condition) —
+// never a hand-written blurb that can drift. A held task renders AS held, with its reason,
+// rather than being silently omitted (design: "NOT-RUNNABLE IS INFORMATION, NOT ABSENCE").
+//
+// OUT OF SCOPE, OWNED ELSEWHERE (this task's own design): live run rows / daemon / deploy state
+// (the Now tab, status-board.ts) and any write action on a frontier row (W1-T260's Run button)
+// — this view only ever RENDERS, never dispatches.
+
+/** Aggregate task counts for the workstream, derived from GitHub — never from the plan's own
+ *  decorative `status:` field (see this section's header). */
+export interface PlanProgress {
+  /**
+   * Present unless this is the FIRST-EVER reading and it happened to land during an outage
+   * (nothing to fall back on yet) — sparse, the same "absent means unknown, never a fabricated
+   * 0" convention every other darkness-fallback field in this codebase (status.ts's
+   * `githubUnobservableSince`) already follows.
+   */
+  done?: number;
+  inFlight?: number;
+  queued?: number;
+  total?: number;
+  /**
+   * True when THIS reading is a carried-forward last-known value because the GitHub gateway
+   * could not be read this cycle — `unavailableReason` names why, `asOf` names when the
+   * numbers were last actually true.
+   */
+  unknown: boolean;
+  /**
+   * ISO-8601 timestamp the counts are current as of — the fresh derivation time when `unknown`
+   * is false, or the LAST successful derivation's own timestamp when `unknown` is true, so a
+   * caller can render "last known Ns ago" rather than an age-less number.
+   */
+  asOf?: string;
+  unavailableReason?: string;
+}
+
+/**
+ * The single {@link PlanProgress} reading a caller last SUCCESSFULLY observed — a long-lived
+ * server's in-memory snapshot, the aggregate-level counterpart to status.ts's
+ * `DeriveDeps.previousProjection` (which carries the same "last known, under darkness" fact
+ * per task). One instance per `rmd serve` process lifetime, created once by the route builder
+ * and closed over by its handler — never persisted to disk: a process restart starting with no
+ * last-known reading (falling back to `unknown` with no numbers at all) is the same fail-soft
+ * direction every other in-memory-only cache in this codebase already takes (status.ts's
+ * `DispatchBreakerCache`).
+ */
+export interface PlanProgressCache {
+  last?: { done: number; inFlight: number; queued: number; total: number; asOf: string };
+}
+
+export function createPlanProgressCache(): PlanProgressCache {
+  return {};
+}
+
+/**
+ * Compute {@link PlanProgress} from an ALREADY-DERIVED projection (the caller's ONE
+ * `projectPlan()` call — see this section's header) — this function itself makes NO GitHub
+ * call beyond consulting `github.readFailed()`/`readFailureReason()`, so it cannot become a
+ * second per-task fetch path however it is called, satisfying "the counts resolve through ONE
+ * batched call rather than one per task" by construction rather than by convention.
+ */
+export function computePlanProgress(
+  plan: Plan,
+  projection: Map<string, StatusProjection>,
+  github: Pick<GitHub, "readFailed" | "readFailureReason">,
+  cache: PlanProgressCache,
+  now: () => number = Date.now,
+): PlanProgress {
+  if (github.readFailed?.()) {
+    const unavailableReason = github.readFailureReason?.() ?? "unknown";
+    if (!cache.last) return { unknown: true, unavailableReason }; // no last-known reading yet — UNKNOWN with no numbers, never a fabricated 0
+    return { ...cache.last, unknown: true, unavailableReason };
+  }
+  let done = 0;
+  let inFlight = 0;
+  let queued = 0;
+  for (const task of plan.tasks) {
+    const p = projection.get(task.id);
+    if (p?.merged) done++;
+    else if (p?.status === "running") inFlight++;
+    else queued++;
+  }
+  const total = plan.tasks.length;
+  const asOf = new Date(now()).toISOString();
+  cache.last = { done, inFlight, queued, total, asOf };
+  return { done, inFlight, queued, total, unknown: false, asOf };
+}
+
+/** Why a frontier row is where it is — the shapes acceptance names (file-order head / a named
+ *  unmet dependency / a named blocker with breaker ETA) plus the two further NOT-RUNNABLE
+ *  holds the design's own prose names (a `blocked` task, a `verify:human` parking) — never a
+ *  hand-written catch-all beyond these five. */
+export type FrontierReasonKind = "file-order" | "unmet-dependency" | "circuit-breaker" | "blocked" | "verify-human";
+
+export interface FrontierRow {
+  id: string;
+  title: string;
+  runnable: boolean;
+  reasonKind: FrontierReasonKind;
+  /** Machine-derived, built from the SAME fact that classified this row — never a hand-written
+   *  blurb that can drift from it (see this section's header). */
+  reason: string;
+}
+
+/**
+ * Reason text for a task {@link runnableCandidates} declined via one of the four named {@link
+ * DispatchFilterReason}s — `undefined` for `"already-merged"`, which the caller excludes from
+ * the frontier entirely (a DONE task is not part of "what's next", it is `PlanProgress.done`).
+ * `unmetDependencies` is re-consulted here (a pure DAG walk, never a GitHub read) to NAME which
+ * id(s) — the same primitive `isDispatchEligible` itself already called to produce this exact
+ * verdict, so this only re-derives WHICH ids it would name, never the verdict itself.
+ */
+function frontierFilterReason(
+  plan: Plan,
+  task: Task,
+  reason: DispatchFilterReason,
+  isMerged: MergedSet,
+): { kind: FrontierReasonKind; reason: string } | undefined {
+  if (reason === "already-merged") return undefined;
+  if (reason === "verify-not-auto") {
+    return { kind: "verify-human", reason: `verify:${task.verify} — parked for a human, never auto-dispatched` };
+  }
+  if (reason === "blocked") {
+    return { kind: "blocked", reason: task.note ? `blocked — ${task.note}` : `${task.id}'s own status is blocked` };
+  }
+  // "unmet-deps"
+  const merged: MergedResolver = (t) => isMerged(t.id);
+  const ids = unmetDependencies(plan, task, merged);
+  return {
+    kind: "unmet-dependency",
+    reason: `blocked on unmet dependenc${ids.length === 1 ? "y" : "ies"}: ${ids.join(", ") || "(none resolved)"}`,
+  };
+}
+
+/** How many frontier rows GET /v1/plan/view renders absent an explicit `?frontier=<n>`. */
+export const DEFAULT_FRONTIER_LIMIT = 8;
+
+/**
+ * The next `limit` frontier rows in the SAME order the dispatcher would actually take them:
+ * binds `runnableCandidates` (drain.ts) for BOTH the ordering and the eligibility verdict —
+ * this function never re-derives either. A row that IS the next runnable candidate carries
+ * `runnable: true` with a `"file-order"` reason naming its rank; a row `runnableCandidates`
+ * declined is rendered too (`runnable: false`), never omitted, with the reason the SAME
+ * eligibility chain actually stopped it for (design: "NOT-RUNNABLE IS INFORMATION, NOT
+ * ABSENCE"). DONE tasks (`"already-merged"`) are excluded entirely — the frontier answers
+ * "what's next", not "what already landed" (that's `PlanProgress.done`). A task neither
+ * eligible nor named by one of the four filter reasons (e.g. in-flight under an open PR, or an
+ * indeterminate GitHub read) is Now-tab territory — live run/deploy state is explicitly out of
+ * THIS view's scope (this section's header) — and is skipped here, never guessed at.
+ */
+export function buildPlanFrontier(
+  plan: Plan,
+  isMerged: MergedSet,
+  limit: number,
+  ledgerLines: ReadonlyArray<Record<string, unknown>>,
+  maxDispatches: number = DEFAULT_MAX_TASK_DISPATCHES,
+): FrontierRow[] {
+  const heldReasons = new Map<string, { kind: FrontierReasonKind; reason: string }>();
+  const isCircuitTripped = (id: string) => isDispatchBreakerTripped(ledgerLines, id, maxDispatches);
+  // A LARGE limit (never the caller's `limit`): this ONE `runnableCandidates` call must
+  // classify EVERY non-merged task so the dispatchOrder walk below can find each one's verdict,
+  // however many held rows sit ahead of the runnable ones the caller asked to see — ordering
+  // and eligibility are never re-derived a second time for the truncated view.
+  const eligible = runnableCandidates(plan, isMerged, plan.tasks.length, {
+    onFiltered: (task, reason) => {
+      const r = frontierFilterReason(plan, task, reason, isMerged);
+      if (r) heldReasons.set(task.id, r);
+    },
+    isCircuitTripped,
+    onCircuitBreak: (task) => {
+      const dispatches = dispatchesWithoutNewOwnedPr(ledgerLines, task.id);
+      heldReasons.set(task.id, {
+        kind: "circuit-breaker",
+        reason: `dispatch circuit tripped (${dispatches}/${maxDispatches} dispatches since the last owned PR) — resets only on a fresh owned PR for ${task.id}`,
+      });
+    },
+  });
+  const eligibleIds = new Set(eligible.map((t) => t.id));
+
+  const rows: FrontierRow[] = [];
+  let rank = 0;
+  for (const task of dispatchOrder(plan.tasks)) {
+    if (rows.length >= limit) break;
+    if (isMerged(task.id)) continue; // done — not part of "what's next"
+    if (eligibleIds.has(task.id)) {
+      rank++;
+      rows.push({
+        id: task.id,
+        title: task.title,
+        runnable: true,
+        reasonKind: "file-order",
+        reason: rank === 1 ? "head of file order — the dispatcher's next pick" : `file order, ${rank - 1} runnable task${rank - 1 === 1 ? "" : "s"} ahead of it`,
+      });
+      continue;
+    }
+    const held = heldReasons.get(task.id);
+    if (held) rows.push({ id: task.id, title: task.title, runnable: false, reasonKind: held.kind, reason: held.reason });
+  }
+  return rows;
+}
+
+/**
+ * GET /v1/plan/view[?frontier=<n>] — read-scoped. The Plan tab's one fetch: `progress`
+ * (done/in-flight/queued, {@link computePlanProgress}) and `frontier` (the next candidates,
+ * {@link buildPlanFrontier}) — off ONE fresh plan load and ONE `projectPlan()` call, exactly
+ * like {@link buildDrainPreviewRoute} just above. `progressCache` is created ONCE per route
+ * (this function's own closure), so it persists for the life of the `rmd serve` process —
+ * never per-request, or every reading would look like a first-ever one.
+ */
+export function buildPlanViewRoute(deps: PanelGraphDeps): Route {
+  const progressCache = createPlanProgressCache();
+  return {
+    method: "GET",
+    path: "/v1/plan/view",
+    scope: "read",
+    handler: (req, res) => {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const rawLimit = url.searchParams.get("frontier");
+      const limit = rawLimit !== null ? Number(rawLimit) : DEFAULT_FRONTIER_LIMIT;
+      if (!Number.isFinite(limit) || limit <= 0) {
+        sendJson(res, 400, { error: "invalid_request", detail: "frontier must be a positive number" });
+        return;
+      }
+      const plan = loadPlan(deps.planPath);
+      const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub });
+      const isMerged: MergedSet = (id) => projection.get(id)?.merged ?? false;
+      const progress = computePlanProgress(plan, projection, deps.statusGithub, progressCache);
+      const ledgerLines = readLedgerLines(deps.ledgerPath);
+      const frontier = buildPlanFrontier(plan, isMerged, limit, ledgerLines);
+      sendJson(res, 200, { progress, frontier });
+    },
+  };
+}
+
 // ── GET /v1/inbox — W1-T110's READY ratification proposals (NEEDS ME section) ──────────────
 
 /** Best-effort read; a missing/unreadable file is `undefined` — an inbox with no registry yet is the normal pre-population state (mirrors inbox.ts's own `parseProposalRegistry(undefined) -> []`). */
@@ -761,6 +1019,7 @@ export function buildPanelGraphRoutes(deps: PanelGraphDeps): Route[] {
     buildTraceRoute(deps),
     buildProposalDecisionRoute(deps),
     buildDrainPreviewRoute(deps),
+    buildPlanViewRoute(deps),
     buildInboxRoute(deps),
     buildApproveProposalRoute(deps),
     buildReframeProposalRoute(deps),

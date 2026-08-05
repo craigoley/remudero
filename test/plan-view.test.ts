@@ -1,0 +1,395 @@
+import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test } from "node:test";
+import type { AddressInfo } from "node:net";
+import { loadPlan, type Plan } from "../src/lib/plan.js";
+import { isDispatchBreakerTripped, DEFAULT_MAX_TASK_DISPATCHES, type GitHub, type StatusProjection } from "../src/lib/status.js";
+import { runnableCandidates, type MergedSet } from "../src/lib/drain.js";
+import { createService } from "../src/lib/service.js";
+import {
+  buildPlanFrontier,
+  buildPlanViewRoute,
+  computePlanProgress,
+  createPlanProgressCache,
+  DEFAULT_FRONTIER_LIMIT,
+  type PanelGraphDeps,
+  type PlanProgressCache,
+  type RatifyCliGateway,
+} from "../src/lib/panel-graph.js";
+import type { TraceGithub } from "../src/lib/trace.js";
+
+// ── W1-T315: the Plan tab's progress (done/in-flight/queued) + frontier (next candidates, each
+// carrying WHY) -- proves the FOUR acceptance claims in plan/tasks.d/W1-T315-*.yaml. ──────────
+
+function tmpRoot(): string {
+  return mkdtempSync(join(tmpdir(), "rmd-plan-view-"));
+}
+
+/** Writes plan/tasks.yaml under `root` and returns its path -- the root must not already carry
+ *  one (mirrors test/panel-graph.test.ts's own `writePlan`, `wx` so a double-write is a loud
+ *  test bug, never a silent overwrite). */
+function writePlan(root: string, yamlBody: string): string {
+  const planPath = join(root, "plan", "tasks.yaml");
+  mkdirSync(join(root, "plan"), { recursive: true });
+  writeFileSync(planPath, yamlBody, { flag: "wx" });
+  return planPath;
+}
+
+function fixturePlan(root: string, yamlBody: string): Plan {
+  return loadPlan(writePlan(root, yamlBody));
+}
+
+const NONE_MERGED: MergedSet = () => false;
+function mergedSetOf(...ids: string[]): MergedSet {
+  const s = new Set(ids);
+  return (id) => s.has(id);
+}
+
+/** A readFailed()/readFailureReason() stub that counts how many times readFailed() is
+ *  consulted -- backs the "ONE batched call, never one per task" acceptance claim. */
+function countingGithub(opts: { failed?: boolean; reason?: string } = {}): Pick<GitHub, "readFailed" | "readFailureReason"> & { calls: number } {
+  let calls = 0;
+  return {
+    get calls() {
+      return calls;
+    },
+    readFailed() {
+      calls += 1;
+      return Boolean(opts.failed);
+    },
+    readFailureReason() {
+      return opts.failed ? ((opts.reason ?? "unknown") as any) : undefined;
+    },
+  };
+}
+
+// ── acceptance (1): progress counts are GitHub-derived, never off the yaml `status:` field ───
+
+test("computePlanProgress: a task whose yaml status is 'queued' but whose projection is merged counts as DONE -- the falsifier is a count read off yaml status", () => {
+  const root = tmpRoot();
+  const plan = fixturePlan(
+    root,
+    ["- id: A", "  title: a", "  repo: remudero", "  type: implement", "  depends_on: []", "  status: queued", ""].join("\n"),
+  );
+  const projection = new Map<string, StatusProjection>([["A", { taskId: "A", status: "merged", merged: true, source: "trailer" }]]);
+  const progress = computePlanProgress(plan, projection, countingGithub(), createPlanProgressCache());
+  assert.equal(progress.done, 1, "merged in the PROJECTION, despite yaml status: queued");
+  assert.equal(progress.inFlight, 0);
+  assert.equal(progress.queued, 0);
+  assert.equal(progress.unknown, false);
+});
+
+test("computePlanProgress: done/in-flight/queued bucket a mixed plan correctly, off status.ts's own projection vocabulary", () => {
+  const root = tmpRoot();
+  const plan = fixturePlan(
+    root,
+    [
+      "- id: A",
+      "  title: a",
+      "  repo: remudero",
+      "  type: implement",
+      "  depends_on: []",
+      "- id: B",
+      "  title: b",
+      "  repo: remudero",
+      "  type: implement",
+      "  depends_on: []",
+      "- id: C",
+      "  title: c",
+      "  repo: remudero",
+      "  type: implement",
+      "  depends_on: []",
+      "",
+    ].join("\n"),
+  );
+  const projection = new Map<string, StatusProjection>([
+    ["A", { taskId: "A", status: "merged", merged: true, source: "trailer" }],
+    ["B", { taskId: "B", status: "running", merged: false, source: "pr-field" }],
+    // C has no projection entry at all -- the ordinary "never observed yet" absence, buckets queued.
+  ]);
+  const progress = computePlanProgress(plan, projection, countingGithub(), createPlanProgressCache());
+  assert.equal(progress.done, 1);
+  assert.equal(progress.inFlight, 1);
+  assert.equal(progress.queued, 1);
+  assert.equal(progress.total, 3);
+});
+
+// ── acceptance (2): an unreadable gateway renders UNKNOWN with the last-known value + age, never
+// a zero, through ONE batched call ────────────────────────────────────────────────────────────
+
+test("computePlanProgress: github.readFailed() true with NO prior reading -> unknown:true and no fabricated numbers (never a 0)", () => {
+  const root = tmpRoot();
+  const plan = fixturePlan(root, ["- id: A", "  title: a", "  repo: remudero", "  type: implement", "  depends_on: []", ""].join("\n"));
+  const github = countingGithub({ failed: true, reason: "rate_limit" });
+  const progress = computePlanProgress(plan, new Map(), github, createPlanProgressCache());
+  assert.equal(progress.unknown, true);
+  assert.equal(progress.unavailableReason, "rate_limit");
+  assert.equal(progress.done, undefined, "never a fabricated 0 -- absent, since nothing was ever successfully observed");
+  assert.equal(progress.inFlight, undefined);
+  assert.equal(progress.queued, undefined);
+});
+
+test("computePlanProgress: github.readFailed() true WITH a prior successful reading -> unknown:true, counts + asOf CARRY FORWARD the last-known reading verbatim (never a zero, never a shrunk denominator)", () => {
+  const root = tmpRoot();
+  const plan = fixturePlan(
+    root,
+    ["- id: A", "  title: a", "  repo: remudero", "  type: implement", "  depends_on: []", "- id: B", "  title: b", "  repo: remudero", "  type: implement", "  depends_on: []", ""].join(
+      "\n",
+    ),
+  );
+  const cache: PlanProgressCache = createPlanProgressCache();
+  const okGithub = countingGithub({ failed: false });
+  const firstReading = computePlanProgress(
+    plan,
+    new Map([["A", { taskId: "A", status: "merged", merged: true, source: "trailer" } as StatusProjection]]),
+    okGithub,
+    cache,
+    () => 1_000_000,
+  );
+  assert.equal(firstReading.unknown, false);
+
+  const failingGithub = countingGithub({ failed: true, reason: "transport" });
+  const outageReading = computePlanProgress(plan, new Map(), failingGithub, cache, () => 2_000_000);
+  assert.equal(outageReading.unknown, true);
+  assert.equal(outageReading.unavailableReason, "transport");
+  assert.equal(outageReading.done, firstReading.done, "the LAST-KNOWN done count, never 0");
+  assert.equal(outageReading.inFlight, firstReading.inFlight);
+  assert.equal(outageReading.queued, firstReading.queued);
+  assert.equal(outageReading.total, firstReading.total);
+  // The AGE: asOf stays the LAST successful reading's own timestamp, never the outage's clock --
+  // a caller renders "last known Ns ago" off exactly this field.
+  assert.equal(outageReading.asOf, firstReading.asOf);
+});
+
+test("computePlanProgress: consults readFailed() exactly ONCE per call, however many tasks the plan carries -- the 'ONE batched call, never one per task' acceptance claim, proven as an upper-bound call count rather than assumed", () => {
+  const root = tmpRoot();
+  const lines = ["repo: remudero", "type: implement", "depends_on: []"];
+  const yaml = Array.from({ length: 25 }, (_, i) => [`- id: T${i}`, `  title: t${i}`, ...lines.map((l) => `  ${l}`)].join("\n")).join("\n") + "\n";
+  const plan = fixturePlan(root, yaml);
+  const projection = new Map<string, StatusProjection>();
+  const github = countingGithub({ failed: false });
+  computePlanProgress(plan, projection, github, createPlanProgressCache());
+  assert.equal(github.calls, 1, "one readFailed() consultation for a 25-task plan, not 25");
+});
+
+// ── acceptance (3) + (4): the frontier binds runnableCandidates for ordering/eligibility, and
+// every row (runnable or held) states a machine-derived reason ────────────────────────────────
+
+const FRONTIER_YAML = [
+  "- id: P1", // no deps, verify auto, not blocked, not merged -> RUNNABLE, head of file order
+  "  title: alpha",
+  "  repo: remudero",
+  "  type: implement",
+  "  depends_on: []",
+  "- id: P2", // task.status: blocked -> HELD, named blocker
+  "  title: beta",
+  "  repo: remudero",
+  "  type: implement",
+  "  depends_on: []",
+  "  status: blocked",
+  '  note: "waiting on ops"',
+  "- id: P3", // depends on P1, which is not merged -> HELD, named unmet dependency
+  "  title: gamma",
+  "  repo: remudero",
+  "  type: implement",
+  "  depends_on: [P1]",
+  "- id: P4", // verify: human -> HELD, verify-human parking
+  "  title: delta",
+  "  repo: remudero",
+  "  type: implement",
+  "  verify: human",
+  "  depends_on: []",
+  "- id: P5", // circuit-tripped via the ledger below -> HELD, named blocker with breaker ETA
+  "  title: epsilon",
+  "  repo: remudero",
+  "  type: implement",
+  "  depends_on: []",
+  "- id: P6", // MERGED -> excluded entirely (that's PlanProgress.done, not the frontier)
+  "  title: zeta",
+  "  repo: remudero",
+  "  type: implement",
+  "  depends_on: []",
+  "",
+].join("\n");
+
+function circuitTrippedLedger(taskId: string, n: number = DEFAULT_MAX_TASK_DISPATCHES): Array<Record<string, unknown>> {
+  return Array.from({ length: n }, (_, i) => ({ ts: new Date(i).toISOString(), run_id: `${taskId}-run-${i}`, task_id: taskId, step: "run.start" }));
+}
+
+test("buildPlanFrontier: the RUNNABLE rows are in the EXACT SAME order runnableCandidates itself returns -- binding the existing selector, never a second ordering", () => {
+  const root = tmpRoot();
+  const plan = fixturePlan(root, FRONTIER_YAML);
+  const isMerged = mergedSetOf("P6");
+  const ledgerLines = circuitTrippedLedger("P5");
+
+  const frontier = buildPlanFrontier(plan, isMerged, 10, ledgerLines);
+  const runnableIds = frontier.filter((r) => r.runnable).map((r) => r.id);
+
+  const isCircuitTripped = (id: string) => isDispatchBreakerTripped(ledgerLines, id);
+  const expected = runnableCandidates(plan, isMerged, 10, { isCircuitTripped }).map((t) => t.id);
+  assert.deepEqual(runnableIds, expected, "frontier's runnable subset must equal runnableCandidates' own verdict+order exactly");
+  assert.deepEqual(runnableIds, ["P1"]);
+});
+
+test("buildPlanFrontier: every NOT-RUNNABLE task renders AS HELD with a machine-derived reason -- never silently omitted -- naming the unmet dependency, the blocked note, the verify:human parking, and the circuit breaker's own reset condition", () => {
+  const root = tmpRoot();
+  const plan = fixturePlan(root, FRONTIER_YAML);
+  const isMerged = mergedSetOf("P6");
+  const ledgerLines = circuitTrippedLedger("P5");
+
+  const frontier = buildPlanFrontier(plan, isMerged, 10, ledgerLines);
+  const byId = new Map(frontier.map((r) => [r.id, r]));
+
+  // P6 is DONE (merged) -- excluded from the frontier entirely, it is not "what's next".
+  assert.equal(byId.has("P6"), false);
+
+  const p1 = byId.get("P1")!;
+  assert.equal(p1.runnable, true);
+  assert.equal(p1.reasonKind, "file-order");
+  assert.match(p1.reason, /head of file order/);
+
+  const p2 = byId.get("P2")!;
+  assert.equal(p2.runnable, false);
+  assert.equal(p2.reasonKind, "blocked");
+  assert.match(p2.reason, /waiting on ops/, "the task's own note is the named reason, not a generic blurb");
+
+  const p3 = byId.get("P3")!;
+  assert.equal(p3.runnable, false);
+  assert.equal(p3.reasonKind, "unmet-dependency");
+  assert.match(p3.reason, /P1/, "names WHICH dependency is unmet");
+
+  const p4 = byId.get("P4")!;
+  assert.equal(p4.runnable, false);
+  assert.equal(p4.reasonKind, "verify-human");
+  assert.match(p4.reason, /verify:human/);
+
+  const p5 = byId.get("P5")!;
+  assert.equal(p5.runnable, false);
+  assert.equal(p5.reasonKind, "circuit-breaker");
+  assert.match(p5.reason, new RegExp(`${DEFAULT_MAX_TASK_DISPATCHES}/${DEFAULT_MAX_TASK_DISPATCHES}`), "names the breaker's own dispatch tally");
+  assert.match(p5.reason, /resets only on a fresh owned PR/, "the breaker's own reset condition -- its ETA");
+});
+
+test("buildPlanFrontier: a smaller limit still counts HELD rows toward it (not just runnable ones) -- 'not-runnable is information, not absence'", () => {
+  const root = tmpRoot();
+  const plan = fixturePlan(root, FRONTIER_YAML);
+  const isMerged = mergedSetOf("P6");
+  const ledgerLines = circuitTrippedLedger("P5");
+
+  const frontier = buildPlanFrontier(plan, isMerged, 2, ledgerLines);
+  assert.deepEqual(
+    frontier.map((r) => r.id),
+    ["P1", "P2"],
+    "P2 is HELD, not runnable -- it still occupies a frontier slot rather than being skipped past",
+  );
+});
+
+test("buildPlanFrontier: file-order rank text distinguishes the head from later runnable candidates", () => {
+  const root = tmpRoot();
+  const plan = fixturePlan(
+    root,
+    ["- id: Q1", "  title: q1", "  repo: remudero", "  type: implement", "  depends_on: []", "- id: Q2", "  title: q2", "  repo: remudero", "  type: implement", "  depends_on: []", ""].join(
+      "\n",
+    ),
+  );
+  const frontier = buildPlanFrontier(plan, NONE_MERGED, 10, []);
+  assert.deepEqual(frontier.map((r) => r.id), ["Q1", "Q2"]);
+  assert.match(frontier[0].reason, /head of file order/);
+  assert.match(frontier[1].reason, /1 runnable task ahead/);
+});
+
+test("buildPlanFrontier: an empty plan yields an empty frontier, not an error", () => {
+  const root = tmpRoot();
+  const plan = fixturePlan(root, "[]\n");
+  assert.deepEqual(buildPlanFrontier(plan, NONE_MERGED, 10, []), []);
+});
+
+// ── GET /v1/plan/view — the route wiring: one fetch for the whole tab ──────────────────────────
+
+function fakeGithub(): TraceGithub {
+  return { prView: () => null };
+}
+
+function fakeRatifyGateway(): RatifyCliGateway {
+  return { approve() {}, reframe() {} };
+}
+
+function statusGithubOf(prState: Record<string, string>, opts: { failRead?: boolean } = {}): GitHub {
+  return {
+    prByRef(ref: string | number) {
+      const state = prState[String(ref)];
+      return state ? { number: 1, url: String(ref), state } : null;
+    },
+    findMergedByTrailer: () => null,
+    headRefName: () => undefined,
+    prBody: () => undefined,
+    readFailed: () => Boolean(opts.failRead),
+    readFailureReason: () => (opts.failRead ? "unknown" : undefined),
+  };
+}
+
+function routeDeps(root: string, planPath: string, statusGithub: GitHub): PanelGraphDeps {
+  return {
+    root,
+    inboxRoot: root,
+    planPath,
+    ledgerPath: join(root, "state", "ledger.ndjson"),
+    github: fakeGithub(),
+    statusGithub,
+    ratify: fakeRatifyGateway(),
+  };
+}
+
+async function withRoute<T>(deps: PanelGraphDeps, fn: (baseUrl: string) => Promise<T>): Promise<T> {
+  const server = createService({ tokens: { read: "read-token", write: "write-token" }, routes: [buildPlanViewRoute(deps)] });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    return await fn(`http://127.0.0.1:${port}`);
+  } finally {
+    server.close();
+  }
+}
+
+test("GET /v1/plan/view: renders { progress, frontier } off ONE plan load + ONE projectPlan() call, defaulting the frontier to DEFAULT_FRONTIER_LIMIT rows", async () => {
+  const root = tmpRoot();
+  const planPath = writePlan(root, FRONTIER_YAML);
+  const deps = routeDeps(root, planPath, statusGithubOf({}));
+  await withRoute(deps, async (base) => {
+    const res = await fetch(`${base}/v1/plan/view`, { headers: { Authorization: "Bearer read-token" } });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { progress: { done: number; unknown: boolean }; frontier: Array<{ id: string }> };
+    assert.equal(body.progress.unknown, false);
+    assert.ok(body.frontier.length <= DEFAULT_FRONTIER_LIMIT);
+    assert.ok(body.frontier.some((r) => r.id === "P1"));
+  });
+});
+
+test("GET /v1/plan/view: ?frontier=<n> bounds the row count; a non-numeric/non-positive value -> 400", async () => {
+  const root = tmpRoot();
+  const planPath = writePlan(root, FRONTIER_YAML);
+  const deps = routeDeps(root, planPath, statusGithubOf({}));
+  await withRoute(deps, async (base) => {
+    const bounded = await fetch(`${base}/v1/plan/view?frontier=2`, { headers: { Authorization: "Bearer read-token" } });
+    const body = (await bounded.json()) as { frontier: Array<{ id: string }> };
+    assert.equal(body.frontier.length, 2);
+
+    assert.equal((await fetch(`${base}/v1/plan/view?frontier=bogus`, { headers: { Authorization: "Bearer read-token" } })).status, 400);
+    assert.equal((await fetch(`${base}/v1/plan/view?frontier=0`, { headers: { Authorization: "Bearer read-token" } })).status, 400);
+  });
+});
+
+test("GET /v1/plan/view: an unreadable statusGithub -> 200 with progress.unknown:true (never a throw, never a fabricated zero)", async () => {
+  const root = tmpRoot();
+  const planPath = writePlan(root, FRONTIER_YAML);
+  const deps = routeDeps(root, planPath, statusGithubOf({}, { failRead: true }));
+  await withRoute(deps, async (base) => {
+    const res = await fetch(`${base}/v1/plan/view`, { headers: { Authorization: "Bearer read-token" } });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { progress: { unknown: boolean; done?: number } };
+    assert.equal(body.progress.unknown, true);
+    assert.equal(body.progress.done, undefined);
+  });
+});
