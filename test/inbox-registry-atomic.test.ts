@@ -160,7 +160,29 @@ test("W1-T240 claim 2: two 'concurrent' updateProposalRegistry calls -- B's read
           // thrown from inside this `sleep` hook, not from B's outer wait above). Give it
           // the same generous budget for the same reason -- this call's own genuine
           // deadlock path is exercised separately by the two sibling tests below.
-          updateProposalRegistry(registryPath, (current) => [...current, proposal("A")], { maxWaitMs: 60_000 });
+          //
+          // W1-T337: `isPidAlive: () => false` is NOT optional generosity, it is the actual
+          // fix for the remaining intermittent failure. Without it, A's reclaim of the
+          // pre-planted pid-111 lock above went through updateProposalRegistry's REAL,
+          // un-injected defaultIsPidAlive -- a genuine `process.kill(111, 0)` against
+          // whatever the OS's actual pid 111 is at that instant. Pid 111 is fake and
+          // "unreachable" only by assumption, never by construction: under CI's
+          // coverage-instrumented, multi-process test run (many worker/child processes
+          // churning through the low pid space), pid 111 can transiently belong to a real,
+          // live process, in which case defaultIsPidAlive(111) truthfully reports "alive"
+          // and A falls into the SAME poll-and-wait branch as a genuine live holder --
+          // burning its own maxWaitMs budget on the REAL defaultRegistryLockSleep before
+          // either succeeding late or timing out loud with "held by pid 111". That is this
+          // test's own choreography being racy against real OS pid state, not a defect in
+          // updateProposalRegistry's locking (O_EXCL acquire + atomic tmp-then-rename write
+          // + finally-released lock all hold up under inspection -- see src/lib/inbox.ts
+          // updateProposalRegistry, lines 974-1032). The two prior fixes here only widened
+          // maxWaitMs (2000ms -> 60_000ms) on both calls, which shrinks the odds of hitting
+          // the OS-dependent window inside a budget but never removes it. Forcing
+          // `isPidAlive: () => false` here, matching what B's own outer call already does
+          // at `isPidAlive: () => !aDone` above, makes A's reclaim of the fake pid-111 lock
+          // unconditional and OS-independent, closing the remaining race deterministically.
+          updateProposalRegistry(registryPath, (current) => [...current, proposal("A")], { maxWaitMs: 60_000, isPidAlive: () => false });
           aDone = true;
         },
       },
