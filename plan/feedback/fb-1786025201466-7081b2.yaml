@@ -1,0 +1,41 @@
+id: fb-1786025201466-7081b2
+ts: 2026-08-06T14:06:41.466Z
+raw: "A UNIT TEST REACHED THE REAL AUTO-MERGE ARM, AND ONLY AN EMPTY CI CONFIG
+  REVEALED IT — found on the #1431 humanAuthored branch. Three runReview tests
+  failed in ci and coverage-ratchet with 'SyntaxError: Unexpected end of JSON
+  input' at JSON.parse in loadConfig, via ledgerLines, armAutoMerge,
+  armIfVerdictPermits, runReview. THE MECHANISM: the tests were built so the
+  BINDING verdict passes — necessary, because that is what leaves the advisory
+  as the only thing posted — and a passing verdict carries runReview on into
+  armIfVerdictPermits, which at its DEFAULT runs the real armAutoMerge.
+  realArmDeps().ledgerLines calls readLedgerLines(ledgerPathFor(loadConfig())),
+  reading and JSON-parsing the MACHINE'S OWN CONFIG, and would then run gh pr
+  merge --auto against a stubbed gh. TWO DEFECTS IN ONE: a unit test reaching
+  operator-gated merge machinery, and a fixture depending on state outside
+  itself. It passed locally only because this box has a valid config; CI's was
+  empty. So the test's outcome depended on ambient machine state on BOTH
+  machines — it was never testing what it claimed, it merely failed louder on
+  one. THE FALSIFIER, which is the part worth copying: the author EMPTIED THIS
+  MACHINE'S CONFIG to recreate CI's condition, reproduced 'not ok 1, 2, 3 / ok
+  4, ok 5' — an exact match for CI's failure set — then restored it
+  byte-identically (72 bytes, re-read and re-checked). Reproducing the remote
+  environment locally beats inferring from a stack trace. FIXED with the
+  arm/disarm seams that exist for exactly this ('Exists so a unit test can
+  assert the withdrawal is ISSUED rather than mocking gh'), both running
+  strictly after the rubric is computed and posted, so nothing under test is
+  stubbed. RECON: establish how many other tests drive a code path that falls
+  through to armIfVerdictPermits, armAutoMerge, or any other operator-gated
+  action at its production default. The question is not whether they currently
+  pass — it is whether a passing verdict in a test carries execution into
+  machinery that spends money, merges code, or reads machine-local state. Then
+  establish whether the default should require an explicit arm seam rather than
+  defaulting to the real one, so reaching it is opt-in. Falsifying check: if
+  armIfVerdictPermits already refuses without an explicit token and these three
+  tests supplied one inadvertently, the default is safe and the defect is only
+  in the fixture."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null
+expansion: null
