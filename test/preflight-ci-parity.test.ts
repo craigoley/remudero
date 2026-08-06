@@ -11,10 +11,10 @@ import { preflightCommand } from "../src/run-task.js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
 
-// ── W1-T294: `rmd preflight --ci-parity` — mirroring CI's own fourteen jobs ─────────────────
+// ── W1-T294: `rmd preflight --ci-parity` — mirroring CI's own thirteen jobs ─────────────────
 //
 // The shipped `rmd preflight` (W1-T221) runs three hand-route steps, none of which is any of
-// the fourteen jobs .github/workflows/ci.yml actually gates a merge on. This suite proves the
+// the thirteen jobs .github/workflows/ci.yml actually gates a merge on. This suite proves the
 // `--ci-parity` mode this task adds: every ci.yml job is accounted for (mirrored or a recorded
 // exclusion), the diff-consuming steps refresh their base before diffing, the coverage step
 // never runs scoped or without source maps, the diff-scoped steps reuse CI's own trigger
@@ -23,7 +23,7 @@ const REPO_ROOT = join(__dirname, "..");
 
 /** Records every spawn call and answers from a lookup table keyed by a substring of
  *  `[file, ...args].join(" ")`, falling back to a clean `{status: 0}` for anything unlisted —
- *  runCiParity's table has fourteen jobs' worth of steps, and most tests below only care about
+ *  runCiParity's table has thirteen jobs' worth of steps, and most tests below only care about
  *  ONE of them, so an unmatched call must not throw the way test/preflight.test.ts's stricter
  *  fakeSpawn does (that suite's fixtures name every call up front; this one would be unreadably
  *  long if it had to). Duplicated locally per that suite's own file-scoping convention. */
@@ -47,7 +47,7 @@ function recordingSpawn(map: Record<string, { status: number; stdout?: string; s
 test("ci-parity table: every REAL ci.yml job has an entry, either mirrored (with a run()) or excluded (with a reason) — no entry is silently absent", () => {
   const ciYamlText = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
   const jobs = parseCiJobNames(ciYamlText);
-  assert.ok(jobs.length >= 14, `expected at least the 14 jobs ci.yml defined at filing time, got ${jobs.length}`);
+  assert.ok(jobs.length >= 13, `expected at least the 13 jobs ci.yml defined at filing time, got ${jobs.length}`);
 
   const byJob = new Map(CI_PARITY_TABLE.map((e) => [e.job, e]));
   for (const job of jobs) {

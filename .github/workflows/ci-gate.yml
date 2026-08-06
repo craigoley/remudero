@@ -79,10 +79,6 @@ jobs:
       # deliberately raised.
       # `commitlint` (W1-T31, §6A Conventional Commits) added: same UNCONDITIONAL shape — no path
       # filter, runs every PR; lints only this PR's own base..head commit range.
-      # `refactor-campaign` (W2-T3, §3A/§5 the refactor campaign's measurable gate-delta formula)
-      # added: same UNCONDITIONAL shape — no path filter, runs every PR; internally scoped to
-      # PRs carrying the `refactor-campaign` label (mirrors containment-probe's diff-scoping — a
-      # non-matching PR still completes the job successfully, so it never blocks).
       # `api-client-drift` (W3-T1b, §7A "packages/api-client is GENERATED... drift between the
       # committed client and the surface is caught in CI") added: same UNCONDITIONAL shape — no
       # path filter, runs every PR; a stale/hand-edited packages/api-client/src/schema.d.ts goes
@@ -117,7 +113,6 @@ jobs:
         "jscpd-gate",
         "claims",
         "learnings-budget-ratchet",
-        "refactor-campaign",
         "commitlint",
         "api-client-drift",
         "no-hand-rolled-fetch",

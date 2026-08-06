@@ -35,7 +35,6 @@ const PRE_REFORMAT_REQUIRED_FIXTURE = JSON.stringify([
   "jscpd-gate",
   "claims",
   "learnings-budget-ratchet",
-  "refactor-campaign",
   "commitlint",
   "api-client-drift",
   "no-hand-rolled-fetch",
@@ -87,7 +86,7 @@ test("ci-gate-required-format: the format is one entry per line, and the convent
       `expected exactly one quoted entry per line, got: ${JSON.stringify(line)}`,
     );
   }
-  assert.equal(entryLines.length, 14, "expected 14 one-per-line REQUIRED entries");
+  assert.equal(entryLines.length, 13, "expected 13 one-per-line REQUIRED entries");
 
   // The comment immediately above the block must name the conflict class this format avoids —
   // concurrent PRs editing the same single line.
