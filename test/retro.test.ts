@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import {
   aggregateByClass,
@@ -56,6 +59,9 @@ import {
 } from "../src/lib/retro.js";
 import type { Task } from "../src/lib/plan.js";
 import { selectLearnings, type LearningEntry } from "../src/lib/learnings.js";
+import { configPath } from "../src/lib/config.js";
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { planHealthSweepSectionFor, retroCommand } from "../src/run-task.js";
 
 // A recorded ledger fixture: two implement runs (one merged, one budget-blocked)
 // and a recon run, exactly as run-task.ts writes them.
@@ -396,6 +402,81 @@ test("renderPlanHealth names the flagged task and its corrective task when the q
   const rendered = renderPlanHealth(report);
   assert.match(rendered, /W1-T-SEED/);
   assert.match(rendered, /Plan-health: fix W1-T-SEED/);
+});
+
+// ── W1-T358: the sweep is wired INTO the retro gather, not just callable in isolation ──
+//
+// planHealthSweep/renderPlanHealth were fully implemented and unit-tested above as PURE
+// functions, but nothing in run-task.ts ever called them — the forward-only gap Standing
+// rule 20 itself names (a task is graded once, at filing time, and never re-graded against
+// a rule added or tightened afterward). These two tests close that: one drives the real
+// exported `planHealthSweepSectionFor(repoRoot)` helper directly against a fixture
+// `plan/tasks.yaml`, the other drives the REAL `retroCommand(["--dry-run"])` end to end and
+// asserts the rendered section is actually IN the printed report — the exact promise
+// `renderPlanHealth`'s own doc comment makes ("printed by --dry-run").
+
+test("planHealthSweepSectionFor: renders the plan-health section from a repoRoot's plan/tasks.yaml, and degrades to '' when the file is absent (W1-T358)", () => {
+  const root = mkdtempSync(join(tmpdir(), "plan-health-section-"));
+  try {
+    // Absent plan/tasks.yaml: degrades to no section, never a throw — same discipline as
+    // netStateAdvisorySectionFor's absent-MASTER-PLAN.md branch.
+    assert.equal(planHealthSweepSectionFor(root), "");
+
+    // A dirty queue: the SAME sizing (Rule 19) trigger the pure planHealthSweep test above
+    // uses (files: [src/lib/foo.ts] + acceptance text naming the daemon/launchd subsystems
+    // ⇒ 3 distinct subsystems at risk:medium ⇒ blocking sizing violation).
+    mkdirSync(join(root, "plan"), { recursive: true });
+    const yaml = [
+      "- id: W1-T-SEED",
+      "  title: plan-health integration probe",
+      "  repo: remudero",
+      "  type: implement",
+      "  verify: auto",
+      "  risk: medium",
+      "  status: queued",
+      "  origin: architect",
+      "  files: [src/lib/foo.ts]",
+      "  acceptance:",
+      "    - claim: the daemon does X",
+      "      proof: unit test asserts X",
+      "    - claim: launchctl loads the unit",
+      "      proof: unit test asserts the unit",
+      "",
+    ].join("\n");
+    writeFileSync(join(root, "plan", "tasks.yaml"), yaml);
+    const section = planHealthSweepSectionFor(root);
+    assert.match(section, /## Plan-health sweep/);
+    assert.match(section, /W1-T-SEED/);
+    assert.match(section, /Plan-health: fix W1-T-SEED/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("retroCommand: --dry-run's printed report carries the plan-health sweep section (W1-T358)", async (t) => {
+  const fakeHome = mkdtempSync(join(tmpdir(), "rmd-retro-planhealth-home-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-retro-planhealth-root-"));
+
+  const savedHome = process.env.HOME;
+  process.env.HOME = fakeHome;
+  const cfgPath = configPath();
+  mkdirSync(join(fakeHome, ".config", "remudero"), { recursive: true });
+  writeFileSync(cfgPath, JSON.stringify({ claudeBin: "/bin/true", root }, null, 2) + "\n");
+
+  const logSpy = t.mock.method(console, "log", () => {});
+  try {
+    const exitCode = await withLiveWritesAllowed(() => retroCommand(["--dry-run"]));
+    assert.equal(exitCode, 0, "--dry-run never fails a genuinely-first-ever retro");
+    const printed = logSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n");
+    assert.match(
+      printed,
+      /## Plan-health sweep/,
+      "the retro's --dry-run report must carry the plan-health sweep section renderPlanHealth's own doc comment promises",
+    );
+  } finally {
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+  }
 });
 
 // ── Mining overruns for a CLASS-level fix (Standing rule 20) ───────────────
