@@ -1,0 +1,98 @@
+- id: W1-T381
+  title: "reapStaleWorktrees lets `recent-activity` rescue a worktree whose own lock names a DEAD pid, so a finished run's tree and its widowed lock survive and hold the deploy gate open — a dead pid must outrank a file mtime, which cannot attribute a write"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: "OBSERVED LIVE 2026-08-06 (state/daemon-watch-2026-08-06T0035Z.md). W1-T378 (merged
+    4ce4388) correctly replaced the worktree ROOT's mtime with `newestActivityMs`, a deepest-mtime
+    walk, because the root's mtime never advances while a worker edits files nested inside it. That
+    fix is right and is not in question. THE RESIDUE IS THAT AN MTIME CANNOT ATTRIBUTE A WRITE.
+    `reapStaleWorktrees` reads the lock first and keeps on `lockRead.kind === 'live' &&
+    isPidAlive(...)` (reason `live-pid`). A lock naming a DEAD pid falls THROUGH that guard — and is
+    then still eligible to be rescued further down by `keep(name, 'recent-activity')`. So the
+    strongest available evidence that a run is over (its own lock names a process that no longer
+    exists) is overridden by the weakest (a file changed recently, by anyone).
+    MEASURED: run W1-T357-1785973739363 died at 23:54:34 (pid 17925 gone, `ps -p` empty, zero live
+    workers). At 00:26:42 something wrote `plan/questions.ndjson` INSIDE that dead run's worktree.
+    The activity guard read that as work in progress and kept the tree, and with it the sibling
+    `run-W1-T357-1785973739363.lock`.
+    THE COST IS DELIVERY, NOT DISK. `countLocks` counts `*.lock` files in the worktrees dir and
+    `daemonIsIdle` conjoins `workers === 0 && inflightLocks === 0 && worktreeLocks === 0`. From
+    00:33 to 00:37 the fleet was genuinely idle — zero workers, zero inflight locks — and the ONLY
+    non-zero counter was that widowed lock. A pending deploy could have completed in that window
+    with nothing running and nothing at risk. Instead it deferred to the 30-minute ceiling and
+    forced at 01:01:23.
+    WHAT WROTE THAT FILE IS NOT ESTABLISHED. The watch could not identify it; it was NOT the run,
+    which was dead by 23:54. That gap is declared here rather than papered over with a guess — the
+    fix does not depend on knowing the writer, because the point is that the reaper must not have to."
+  design: |
+    ONE RULE, AND IT ONLY EVER REMOVES A RESCUE.
+    (i) THE RULE: recent activity may rescue a tree whose lock is ABSENT, or whose lock names a LIVE
+    pid. It may NEVER rescue a tree whose lock names a DEAD pid. Ordering, not a new signal — the
+    reaper already computes everything it needs.
+    (ii) WHY IT IS SAFE, and this is the fail-direction argument W1-T378's whole design turned on.
+    The change can only ever WITHDRAW a rescue that the activity guard would have granted; it grants
+    none. So it cannot newly destroy a tree whose run is alive: a live run holds a lock with a LIVE
+    pid and is already kept by the `live-pid` guard ABOVE, which this does not touch. The population
+    it newly reaps is exactly "lock present, pid dead" — a run that has already exited.
+    (iii) REUSE THE PREDICATE, DO NOT REIMPLEMENT IT. `defaultIsPidAlive` (drain-lock.ts) is ALREADY
+    resolved on this path as `opts.isPidAlive ?? defaultIsPidAlive`, so no new import and no new
+    injection point is needed. `reclaimStaleLock`'s own staleness test is literally
+    `isStale: (held) => !isAlive(held.pid)` — the same shape, used identically by drain-lock.ts,
+    inflight-lock.ts and review.ts. Match it rather than inventing a fourth spelling.
+    (iv) KEEP `activity-unknown` AS A KEEP. When `newestActivity` cannot read the tree at all the
+    answer is unknown, not dead, and unknown must still keep — that is a different question from
+    "the lock names a corpse" and conflating them would widen the change beyond one concern.
+    (v) `pruneStaleRuns` IS OUT OF SCOPE and must not be touched. It carries the same root-mtime
+    gate and W1-T378 deliberately left it: there, declining to remove BLOCKS the run that needs the
+    worktree name, so keeping more is not free. Different economics, its own argument, and that
+    reasoning is already recorded on main. Changing it here would be a second concern.
+    (vi) FALSIFIER, BOTH DIRECTIONS, AND ONE WITHOUT THE OTHER IS NOT EVIDENCE.
+      - BITES: a tree whose lock names a DEAD pid and whose deepest nested mtime is seconds old must
+        be REAPED, and its sibling `.lock` removed with it. That test fails today — it is the
+        observed incident, reduced.
+      - HOLDS: a tree whose lock names a LIVE pid and whose nested mtime is old must still be KEPT
+        (`live-pid`), and a tree with NO lock and recent activity must still be KEPT
+        (`recent-activity`). Without these, the change reads as "reap more" rather than "rank the
+        evidence", and W1-T378's fix would be silently undone.
+    Force every input by injection — `isPidAlive`, `newestActivity` and `now` are all already
+    injectable on `WorktreeReapOpts`, so a test that passes because a real pid happened to be dead
+    certifies nothing.
+    NOT IN SCOPE: `pruneStaleRuns` (v); `newestActivityMs` itself, its skip-list or its entry cap;
+    `branchIsLiveUpstream`; the deploy gate's own conjunction in `daemonIsIdle`; and identifying
+    what wrote into the dead tree.
+  acceptance:
+    - claim: "a worktree whose lock names a dead pid is reaped even when its deepest nested mtime is seconds old, and its sibling lock is removed with it"
+      proof: "unit test: test/worktree-reap-liveness.test.ts"
+    - claim: "a worktree whose lock names a live pid is still kept despite an old mtime, so the live-pid guard is untouched"
+      proof: "unit test: test/worktree-reap-liveness.test.ts"
+    - claim: "a worktree with no lock at all is still rescued by recent activity, so W1-T378's fix is not undone"
+      proof: "unit test: test/worktree-reap-liveness.test.ts"
+  risk: high
+  origin: oper#daemon-watch-2026-08-06
+  plan_refs: ["§4A", "W1-T378", "W1-T175"]
+  files: [src/lib/worker.ts, test/worktree-reap-liveness.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — `WorktreeReapOpts` already injects `isPidAlive`, `newestActivity` and `now`,
+    so both directions assert in-process against a temp dir with no real process and no clock skew.
+    risk:high IS SET BY RULE 19's SPAN, NOT BY BLAST RADIUS, and the distinction is recorded so a
+    later reader does not over-read it. The linter scores `files:` as two concerns (worker,
+    worktree-reap-liveness) and offers raise-or-decompose; DECOMPOSING IS WRONG HERE — the change is
+    one ordering constraint and the three-direction falsifier that proves it, and an ordering
+    constraint cannot ship without the test showing it bites one way and holds the other two.
+    THE ACTUAL BLAST RADIUS IS NARROW, by the fail-direction argument: this only ever WITHDRAWS a
+    rescue the activity guard would have granted — it grants none, and it does not touch the
+    `live-pid` keep above it. The population it newly reaps is exactly `lock present, pid dead`,
+    i.e. runs that have already exited. What genuinely earns caution is that it deletes directories
+    and the predecessor task here (W1-T378) exists precisely because a reaper destroyed live work —
+    which is what falsifier directions 2 and 3 are for.
+    budget_usd 40 — the edit is an ordering constraint of a few lines; the cost is the
+    three-direction falsifier and reading the reap block carefully enough to move exactly one gate.
+    WHY THIS IS NOT A W1-T378 REGRESSION: W1-T378 flipped the fail direction to KEEP and that was
+    correct. This does not flip it back. It says only that a lock naming a dead process is stronger
+    evidence than a file mtime, because an mtime records THAT a write happened and never WHO made
+    it — which is exactly the ambiguity the observed incident turned on."
