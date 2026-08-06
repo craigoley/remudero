@@ -61,6 +61,30 @@ test("awareness-surface-ratchet: editing another workflow file (.github/workflow
   assert.equal(noDocs.pass, false);
 });
 
+// W1-T366: the recovery-drill scheduled instrument (.github/workflows/recovery-drill.yml) lands
+// on this surface via the same generic `^\.github/workflows/` prefix every workflow already
+// trips — so a later PR that weakens or deletes the drill (e.g. narrowing what it exercises, or
+// removing the falsifier that proves it discriminates healthy from sabotaged) cannot clear the
+// docs-awareness rung silently. This is the fourth acceptance criterion's proof: it names this
+// EXISTING suite specifically because USER_VISIBLE_SURFACE_RE already covers the whole
+// `.github/workflows/` tree, so no change to review.ts's regex was needed — only this dedicated
+// case, so the coverage is asserted by name rather than left implicit in the generic ci.yml case.
+test("awareness-surface-ratchet: editing the recovery-drill workflow (.github/workflows/recovery-drill.yml) with no docs update FAILS; a doc update PASSES", () => {
+  const noDocs = checkDocsAwareness(
+    surfaceDiffNoDocs(".github/workflows/recovery-drill.yml"),
+    "Narrowed which recovery paths the drill exercises.",
+  );
+  assert.equal(noDocs.pass, false);
+  assert.match(noDocs.reason, /docs/i);
+  assert.equal(
+    checkDocsAwareness(
+      surfaceDiffWithDocs(".github/workflows/recovery-drill.yml"),
+      "Narrowed which recovery paths the drill exercises.",
+    ).pass,
+    true,
+  );
+});
+
 test("awareness-surface-ratchet: lowering a ratchet baseline (scripts/coverage-baseline.json) with no docs update FAILS; a doc update PASSES", () => {
   const noDocs = checkDocsAwareness(
     surfaceDiffNoDocs("scripts/coverage-baseline.json", '+  "linesPct": 10.0,'),

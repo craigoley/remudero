@@ -1,0 +1,94 @@
+name: Recovery Drill
+
+# W1-T366 (MASTER-PLAN §5/§5D, oper#ruling-production-path-proofs-2026-08-05): a recovery path
+# with no exercise cadence is untested however green its coverage. The deploy rollback ran 0-for-7
+# the first time it mattered, after 130 successful deploys never needed it (2026-08-05, seven
+# consecutive `deploy.unhealthy_rollback` ledger rows, the fleet down 53 minutes) — every static
+# instrument this repo has (SHIPS-UNWIRED, W1-T365's proof rule, coverage itself) passes on code
+# that has never run in anger, because "this branch has never executed in production" is a runtime
+# fact ABOUT PRODUCTION, not a property of any changeset. This is the SAME shape clock-sweep.yml
+# exists for — a condition production rarely reaches, exercised on a cadence, before an emergency
+# forces the first real exercise — so it follows that workflow's pattern rather than inventing a
+# second scheduling idiom. See scripts/recovery-drill.mjs's own header for the drilled population
+# and how each exercise stays a throwaway fixture that never touches the live fleet.
+#
+# NOT A REQUIRED CHECK, AND NOT AN ORDINARY PR TRIGGER — the same polarity clock-sweep.yml and
+# mutation-nightly.yml both establish. A drill on every PR would multiply CI cost for a defect
+# class that surfaces only in an emergency, and a red drill on an unrelated PR is exactly the noise
+# that gets a check disabled. Deliberately absent from ci-gate.yml.
+#
+# ALSO triggered by changes to the instrument itself (scripts/recovery-drill.mjs,
+# test/recovery-drill.test.ts, this file): a broken drill that reports universal immunity is a
+# false clean, worse than no drill at all — that clause is load-bearing here too.
+#
+# WEEKLY, off-peak, deliberately not on :00/:30 (clock-sweep.yml's own scheduling note, itself
+# citing codeql.yml), and staggered from clock-sweep (Monday 05:23 UTC) and mutation-nightly
+# (03:31 UTC daily) so the three scheduled instruments never contend for the same runner window.
+on:
+  schedule:
+    - cron: "17 6 * * 3"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "scripts/recovery-drill.mjs"
+      - "test/recovery-drill.test.ts"
+      - ".github/workflows/recovery-drill.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  recovery-drill:
+    name: recovery-drill (throwaway fixtures, real recovery code, no live fleet touched)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # DELIVERY. Without this the job's only output is a red badge on a page nobody opens — the
+      # same discipline clock-sweep.yml's own header names.
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Install (clean, from lockfile)
+        run: npm ci
+
+      # The instrument's own falsifier runs FIRST and gates the drill, mirroring clock-sweep.yml's
+      # "probe self-check before sweeping" step: a drill that reports "healthy" regardless of
+      # input — never catching a sabotaged fixture — is worse than no drill, because it reads as
+      # coverage that does not exist.
+      - name: Drill self-check (a drill that cannot discriminate healthy from sabotaged reports false immunity — fail before drilling)
+        run: node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/recovery-drill.test.ts
+
+      # `set -o pipefail` is load-bearing here for the SAME reason clock-sweep.yml's own step
+      # comment gives: a `run:` block with no explicit `shell:` executes under `bash -e {0}`, which
+      # does not set pipefail on its own — without it `tee` returns 0 and a nonzero drill exit is
+      # discarded, so the step goes green on exactly the drift this drill exists to catch.
+      - name: Drill each recovery path against a throwaway fixture (healthy + sabotaged)
+        id: drill
+        run: |
+          set -o pipefail
+          node --import tsx scripts/recovery-drill.mjs | tee drill-report.txt
+
+      - name: Open or update a needs-human issue on drift
+        if: failure() && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_WHEN: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          test -s drill-report.txt || echo "(no report captured -- the run failed before the drill produced output)" > drill-report.txt
+          node scripts/needs-human-issue.mjs \
+            --source recovery-drill \
+            --title "recovery-drill: a recovery path stopped discriminating healthy from sabotaged" \
+            --body-file drill-report.txt
+
+      - name: Upload the drill report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: recovery-drill-report
+          path: drill-report.txt
+          if-no-files-found: warn
