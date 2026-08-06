@@ -38,7 +38,7 @@ const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", impo
 
 // ── review.ts: proof timeout ────────────────────────────────────────────────────────────
 
-test("W1-T253: execWhitelistedProof's DEFAULT timeout reads plan/policy.yaml's proofTimeoutMs (60000) — an explicit override still wins, and it is never the stale 30000 literal", () => {
+test("W1-T253: execWhitelistedProof's DEFAULT timeout reads plan/policy.yaml's proofTimeoutMs — an explicit override still wins, and it is never the stale 30000 literal", () => {
   const wp: WhitelistedProof = { kind: "grep", command: "grep", args: ["-n", "x", "f.txt"], label: "x in f.txt" };
   let observed: number | undefined;
   const capturingSpawner: ProofSpawner = (_cmd, _args, _cwd, timeoutMs) => {
@@ -47,8 +47,10 @@ test("W1-T253: execWhitelistedProof's DEFAULT timeout reads plan/policy.yaml's p
   };
 
   execWhitelistedProof(wp, "/tmp", undefined, capturingSpawner);
+  // W1-T374: the INVARIANT (the default equals the LOADED policy's proofTimeoutMs) is what this
+  // test exists for and holds at any legitimately retuned value — the standing literal pin this
+  // line used to also carry (asserting the shipped figure directly) is gone, on purpose.
   assert.equal(observed, SHIPPED.values.proofTimeoutMs, "the default must equal the LOADED policy's proofTimeoutMs");
-  assert.equal(observed, 60_000);
   assert.notEqual(observed, 30_000, "the pre-existing 30000/DEFAULT_PROOF_TIMEOUT_MS literal must never gate this");
 
   execWhitelistedProof(wp, "/tmp", 12_345, capturingSpawner);
@@ -57,9 +59,8 @@ test("W1-T253: execWhitelistedProof's DEFAULT timeout reads plan/policy.yaml's p
 
 // ── worker.ts: prune grace ──────────────────────────────────────────────────────────────
 
-test("W1-T253: worker.ts's DEFAULT_PRUNE_GRACE_MS reads plan/policy.yaml's pruneGraceMs (120000), not a source literal", () => {
+test("W1-T253: worker.ts's DEFAULT_PRUNE_GRACE_MS reads plan/policy.yaml's pruneGraceMs, not a source literal", () => {
   assert.equal(DEFAULT_PRUNE_GRACE_MS, SHIPPED.values.pruneGraceMs);
-  assert.equal(DEFAULT_PRUNE_GRACE_MS, 120_000);
 });
 
 // ── sweep.ts: staleDays / strikeCap / wipLimit / dispatchLanes / dailyCostCeilingUsd ────
@@ -68,28 +69,27 @@ test("W1-T253: sweep.ts's DEFAULT_SWEEP_POLICY.staleDays/strikeCap/wipLimit read
   assert.equal(DEFAULT_SWEEP_POLICY.staleDays, SHIPPED.values.sweep.staleDays);
   assert.equal(DEFAULT_SWEEP_POLICY.strikeCap, SHIPPED.values.sweep.strikeCap);
   assert.equal(DEFAULT_SWEEP_POLICY.wipLimit, SHIPPED.values.sweep.wipLimit);
-  assert.equal(DEFAULT_SWEEP_POLICY.staleDays, 14);
-  assert.equal(DEFAULT_SWEEP_POLICY.strikeCap, 2);
-  assert.equal(DEFAULT_SWEEP_POLICY.wipLimit, 10);
 });
 
 // W1-T325 relocated dispatchLanes out of DEFAULT_SWEEP_POLICY (a relocation, not a retune, at the
-// time). W1-T344 retuned it 1 -> 2; the 2026-08-05 evening flip retunes it 2 -> 3 after the N=2
-// measurements plan/policy.yaml's own comment records, so the shipped value asserted below is 3.
-// ONLY THE PIN MOVES. The assertion above it — that the consumer equals SHIPPED.values, i.e. the
-// value is LIFTED rather than a source literal — is what this test exists for and holds at ANY
-// value; it is deliberately untouched by every retune.
-test("W1-T325/W1-T344: sweep.ts's DEFAULT_SWEEP_POLICY.dispatchLanes reads plan/policy.yaml's sweep.dispatchLanes row, not a source literal, and the shipped value is 2", () => {
+// time it moved) — see plan/policy.yaml's own sweep.dispatchLanes row for the retune history
+// since (W1-T344, and the operator-directed N=3 experiment and revert). W1-T374 removed the
+// standing literal pin this test used to also carry: the assertion below is the INVARIANT — the
+// consumer equals SHIPPED.values, i.e. the value is LIFTED rather than a source literal — and it
+// holds at ANY value, so it is untouched by every future retune. The row's current figure lives
+// in plan/policy.yaml and its own history comment, never here.
+test("W1-T325/W1-T344: sweep.ts's DEFAULT_SWEEP_POLICY.dispatchLanes reads plan/policy.yaml's sweep.dispatchLanes row, not a source literal", () => {
   assert.equal(DEFAULT_SWEEP_POLICY.dispatchLanes, SHIPPED.values.sweep.dispatchLanes);
-  assert.equal(DEFAULT_SWEEP_POLICY.dispatchLanes, 2);
 });
 
 // W1-T330: dailyCostCeilingUsd joins its siblings above — a relocation of the pre-existing
-// source literal, not a retune (the value is asserted unchanged at 500 — the figure raised
-// from 150 to 500 on 2026-08-04, the day the cost governor first fired in production).
-test("W1-T330: sweep.ts's DEFAULT_SWEEP_POLICY.dailyCostCeilingUsd reads plan/policy.yaml's sweep.dailyCostCeilingUsd row, not a source literal, and the value is unchanged at 500", () => {
+// source literal, not a retune at the time it moved (the figure was raised from 150 to 500 on
+// 2026-08-04, the day the cost governor first fired in production — see plan/policy.yaml's own
+// row for that history). W1-T374 removed the standing literal pin this test used to also carry:
+// the assertion below is the INVARIANT and holds at any value, so a later plan-data retune of
+// this row no longer requires a test edit.
+test("W1-T330: sweep.ts's DEFAULT_SWEEP_POLICY.dailyCostCeilingUsd reads plan/policy.yaml's sweep.dailyCostCeilingUsd row, not a source literal", () => {
   assert.equal(DEFAULT_SWEEP_POLICY.dailyCostCeilingUsd, SHIPPED.values.sweep.dailyCostCeilingUsd);
-  assert.equal(DEFAULT_SWEEP_POLICY.dailyCostCeilingUsd, 500);
 });
 
 // ── launchd.ts: ThrottleInterval (net-new — emission-from-policy, not literal-removal) ──
@@ -116,12 +116,10 @@ test("W1-T253: generateLaunchdPlist's ThrottleInterval reads plan/policy.yaml's 
 
 test("W1-T253: daemon.ts's DEFAULT_POLL_INTERVAL_MS (its fs-free fallback) still matches the shipped policy's pollIntervalMs", () => {
   assert.equal(DEFAULT_POLL_INTERVAL_MS, SHIPPED.values.pollIntervalMs);
-  assert.equal(DEFAULT_POLL_INTERVAL_MS, 60_000);
 });
 
 test("W1-T253: drain.ts's DEFAULT_MAX (its fs-free fallback) still matches the shipped policy's drain.max", () => {
   assert.equal(DEFAULT_MAX, SHIPPED.values.drain.max);
-  assert.equal(DEFAULT_MAX, 10);
 });
 
 test("W1-T253: daemonCommand reads pollIntervalMs + the headroom curve FROM the loaded policy, never daemon.ts's fs-free literal defaults", () => {
@@ -180,8 +178,12 @@ test("W1-T253: headroomPolicyFromCurve converts the SHIPPED policy's curve (null
 // design note: "unsatisfiable piecewise"). ─────────────────────────────────────────────
 
 test("W1-T253 GUARD: no collected operating constant resolves from a source literal — every site above reads the loaded policy", () => {
+  // review.ts's proofTimeoutMs is deliberately ABSENT from this table: W1-T253 removed its
+  // source-level DEFAULT_PROOF_TIMEOUT_MS literal entirely in favour of a read of the policy
+  // itself, so there is no independent consumer constant left to enumerate here — the real
+  // "reads the policy, not a literal" proof for that site is the capturing-spawner test above,
+  // which observes the EXECUTOR's effective timeout directly rather than a second copy of it.
   const sites: Array<{ site: string; actual: unknown; expected: unknown }> = [
-    { site: "review.ts proofTimeoutMs", actual: SHIPPED.values.proofTimeoutMs, expected: 60_000 },
     { site: "worker.ts pruneGraceMs", actual: DEFAULT_PRUNE_GRACE_MS, expected: SHIPPED.values.pruneGraceMs },
     { site: "daemon.ts pollIntervalMs (fs-free fallback)", actual: DEFAULT_POLL_INTERVAL_MS, expected: SHIPPED.values.pollIntervalMs },
     { site: "sweep.ts staleDays", actual: DEFAULT_SWEEP_POLICY.staleDays, expected: SHIPPED.values.sweep.staleDays },
