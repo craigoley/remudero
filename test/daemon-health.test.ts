@@ -20,7 +20,13 @@ import { test } from "node:test";
 import type { AddressInfo } from "node:net";
 import { createService } from "../src/lib/service.js";
 import { DEFAULT_POLL_INTERVAL_MS } from "../src/lib/daemon.js";
-import { buildDaemonHealthRoute, deriveLastPoll, readDiskFreeBytes, readGhRateLimitRemaining } from "../src/lib/daemon-health.js";
+import {
+  buildDaemonHealthRoute,
+  deriveLastPoll,
+  readDiskFreeBytes,
+  readGhRateLimitBuckets,
+  readGhRateLimitRemaining,
+} from "../src/lib/daemon-health.js";
 
 const READ_TOKEN = "daemon-health-read-token";
 const WRITE_TOKEN = "daemon-health-write-token";
@@ -87,6 +93,46 @@ test("W1-T159: readGhRateLimitRemaining returns undefined (never a fake number) 
     throw new Error("rate limited");
   });
   assert.equal(remaining, undefined);
+});
+
+// ── readGhRateLimitBuckets (W1-T372): BOTH buckets off ONE exec call, each independently fail-soft ──
+
+test("W1-T372: readGhRateLimitBuckets parses REST/core AND GraphQL off a single gh api rate_limit call, converting each bucket's Unix-epoch reset to ISO-8601", () => {
+  let execCalls = 0;
+  const exec = (args: string[]) => {
+    execCalls++;
+    assert.deepEqual(args, ["api", "rate_limit"]);
+    return JSON.stringify({
+      resources: {
+        core: { limit: 5000, remaining: 4600, reset: 1785900000 },
+        graphql: { limit: 5000, remaining: 0, reset: 1785900060 },
+      },
+    });
+  };
+  const buckets = readGhRateLimitBuckets(exec);
+  assert.equal(execCalls, 1, "one exec call reads BOTH buckets -- never a second gh api rate_limit shell-out");
+  assert.deepEqual(buckets.core, { remaining: 4600, resetsAt: new Date(1785900000 * 1000).toISOString() });
+  assert.deepEqual(buckets.graphql, { remaining: 0, resetsAt: new Date(1785900060 * 1000).toISOString() });
+});
+
+test("W1-T372: readGhRateLimitBuckets returns {} (never a fabricated reading) when the injected exec throws", () => {
+  const buckets = readGhRateLimitBuckets(() => {
+    throw new Error("rate limited");
+  });
+  assert.deepEqual(buckets, {});
+});
+
+test("W1-T372: readGhRateLimitBuckets returns {} (never a fabricated reading) when the payload is not valid JSON", () => {
+  const buckets = readGhRateLimitBuckets(() => "not json at all");
+  assert.deepEqual(buckets, {});
+});
+
+test("W1-T372: readGhRateLimitBuckets leaves ONE bucket undefined when only ITS sub-object is missing/malformed, the other still reads real", () => {
+  const exec = () =>
+    JSON.stringify({ resources: { core: { limit: 5000, remaining: 4600, reset: 1785900000 } /* graphql absent entirely */ } });
+  const buckets = readGhRateLimitBuckets(exec);
+  assert.deepEqual(buckets.core, { remaining: 4600, resetsAt: new Date(1785900000 * 1000).toISOString() });
+  assert.equal(buckets.graphql, undefined, "an absent sub-object never fabricates a graphql reading of its own");
 });
 
 // ── the real route, end to end ──────────────────────────────────────────────────────────────

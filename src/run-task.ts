@@ -108,6 +108,10 @@ import {
   type StarvationCensus,
   priorUnrecognisedResetStrings,
 } from "./lib/daemon.js";
+// W1-T372: the daemon-tick counterpart to daemon-health.ts's own pull-only rate-limit display
+// (readGhRateLimitRemaining, unrelated cadence, unchanged) — reads BOTH gh api rate_limit
+// buckets off one exec call for runDaemon's own `readGhQuota` dep, wired below.
+import { readGhRateLimitBuckets } from "./lib/daemon-health.js";
 // W1-T117/W1-T356: the orphan sweep's own exported defaults — see the shared `sweepOrphans`
 // closure below (daemonCommand), wired into BOTH daemonBoot's boot-time param and
 // DaemonDeps.sweepOrphans.
@@ -8579,6 +8583,84 @@ export function escalateHeadroomReserve(
 }
 
 /**
+ * W1-T372: the daemon's `onQuotaExhausted` hook, called when a `gh api rate_limit` bucket
+ * (REST/core or GraphQL — read independently, `daemon.ts`'s tick) first crosses from having
+ * budget to having none. UNLIKE `escalateHeadroomReserve` immediately above, dispatch is NOT
+ * paused by the time this fires — W1-T372 is observe-and-surface only (this task's design
+ * (vii): no threshold change, no governing action) — so this notice exists purely so an
+ * operator is not the one who discovers the exhaustion by watching `gh pr create` die at a
+ * push boundary (the a2b904d recon this task cites: W1-T333 lost ~40 minutes of completed
+ * work that way, silently, because nothing observed the crossing).
+ *
+ * CROSS-BOOT DEDUP keyed on (bucket, resetsAt) — the SAME "episode key = the window's own
+ * reset instant" discipline `escalateHeadroomReserve` documents just above, kept PER BUCKET
+ * (design (iv)) so a core exhaustion and a GraphQL exhaustion in the same hour each get their
+ * own notice rather than one suppressing the other, and so a bucket that exhausts again after
+ * its own reset (a genuinely new episode) escalates again rather than staying silenced by a
+ * stale marker from the PRIOR window.
+ *
+ * SELF-CLEARING, STATED IN THE BODY ITSELF (design (v)): a quota exhaustion clears on its own
+ * bucket's hourly reset, so this notice names its own expiry (`resetsAt`) rather than asking
+ * for a human close — W1-T345 is the filed retraction mechanism this notice does not depend
+ * on; until it lands (or if it never does), the reset timestamp alone tells a human reading
+ * this later that no action closes it.
+ */
+export function escalateQuotaExhaustion(
+  info: { bucket: "core" | "graphql"; remaining: number; resetsAt: string },
+  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
+): void {
+  const already = readLedgerLines(ctx.ledgerPath).some(
+    (l) => l.step === "daemon.quota_exhausted.escalated" && l.bucket === info.bucket && l.resets_at === info.resetsAt,
+  );
+  if (already) return;
+  const spent =
+    info.bucket === "graphql"
+      ? "`gh pr create`, `gh pr view --json`, and therefore `rmd review` — a run that finishes its work and " +
+        "then cannot open or update its own PR at this bucket's exhaustion loses that work silently, exactly " +
+        "as W1-T333 did"
+      : "the board's own `gh pr view`/`pr list`/`issue view` reads (status.ts's `ghGateway`/`buildBatchedGithub`)";
+  const issueUrl = tryEscalate(
+    {
+      class: "HARD_STOP",
+      taskId: "daemon",
+      runId: ctx.runId,
+      summary: `gh api rate_limit ${info.bucket} bucket exhausted — resets ${info.resetsAt}`,
+      detail:
+        `W1-T372: the daemon's tick observed the ${info.bucket} bucket cross from having budget to ${info.remaining} ` +
+        `remaining. This bucket backs ${spent}. This is a NOTICE, not a hold: dispatch is not paused and no ` +
+        `existing consumer's behavior changed — the bucket refills on its own at ${info.resetsAt}, and this notice ` +
+        `is self-clearing at that instant with no action required; a human reading this after that time can close ` +
+        `it on sight.`,
+      options: [
+        {
+          label: "wait for reset",
+          detail: `The bucket refills on its own at ${info.resetsAt} — no action needed.`,
+        },
+        {
+          label: "check what spent it",
+          detail: "`gh api rate_limit` shows the live figure; a runaway caller against this bucket is the thing worth finding, not this notice.",
+        },
+      ],
+      recommendation: "wait for reset",
+    },
+    {
+      issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo),
+      ledgerPath: ctx.ledgerPath,
+      runId: ctx.runId,
+    },
+  );
+  appendLedger(ctx.ledgerPath, {
+    run_id: ctx.runId,
+    task_id: "daemon",
+    step: "daemon.quota_exhausted.escalated",
+    bucket: info.bucket,
+    resets_at: info.resetsAt,
+    issue_url: issueUrl,
+    delivered: issueUrl !== null,
+  });
+}
+
+/**
  * Recon oper#queue-starvation-2026-08-03: the daemon's `onStarvation` hook, called on an idle
  * tick whose dispatch-filter census names at least one RECOVERABLE-class blocker (circuit-
  * broken, blocked, or unmet-deps — see daemon.ts's `StarvationCensus`/starvation predicate)
@@ -9757,6 +9839,12 @@ export async function daemonCommand(
         // P34 clause (c), W1-T249: the reserve gate's notification — dispatch is
         // already paused (runDaemon's own in-process idle) by the time this fires.
         onHeadroomBreach: (info) => escalateHeadroomReserve(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
+        // W1-T372: both gh api rate_limit buckets, read fresh each tick alongside readUsage's
+        // own headroom reading immediately above — never a second gh api rate_limit call.
+        readGhQuota: () => readGhRateLimitBuckets(),
+        // W1-T372: observe-and-surface only — dispatch is NOT paused by this hook (unlike
+        // onHeadroomBreach above); see escalateQuotaExhaustion's own doc for why.
+        onQuotaExhausted: (info) => escalateQuotaExhaustion(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
         // oper#queue-starvation-2026-08-03: the idle rung's starvation notification — dispatch
         // is already idle (runDaemon's own in-process bound, `starvationEscalated`) by the time
         // this fires.
