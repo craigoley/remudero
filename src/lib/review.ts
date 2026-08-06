@@ -4541,6 +4541,29 @@ export function judgeRubric(input: RubricInput): RubricResult {
   return { items, failures, pass: failures.length === 0 };
 }
 
+/**
+ * W1-T359: render {@link judgeRubric}'s failing items as a clearly-labeled
+ * ADVISORY section for the posted review — `undefined` when the rubric has no
+ * failures, so a clean rubric adds nothing to the review body. The header
+ * spells out, in the text itself, that this section never changes
+ * `remudero-review`'s verdict (Standing rules 2/12: an LLM/heuristic may
+ * RECOMMEND, only code ENFORCES) — the one property the acceptance's
+ * falsifier checks structurally at the call site (independence from
+ * `judgeReview`'s inputs/output), this doc note checks in the rendered text
+ * itself so a reader of the PR comment never mistakes it for a gate.
+ */
+export function rubricAdvisorySection(rubric: RubricResult): string | undefined {
+  if (rubric.failures.length === 0) return undefined;
+  const lines = rubric.failures.map((f) => `- **${f.key}**: ${f.reason}`);
+  return (
+    `**Rubric (advisory — does not affect remudero-review's verdict)**\n\n` +
+    `Layer-2 judgment items MASTER-PLAN §5 asks that no acceptance criterion can: ` +
+    `one concern per PR, callers audited, test theater, refactor-phase honesty, docs/` +
+    `troubleshooting awareness, and the satisfied_by guard. These are observations for the ` +
+    `operator and the fix rung — never a blocking condition.\n\n${lines.join("\n")}`
+  );
+}
+
 // ── reviewer_outcome (W1-T63/P10-a — the reviewer stops walling silently) ──
 
 /**

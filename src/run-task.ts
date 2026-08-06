@@ -369,6 +369,8 @@ import {
   floorDegradedAnnotation,
   isTddStrict,
   judgeReview,
+  judgeRubric,
+  rubricAdvisorySection,
   keywordOnlyAnnotation,
   acceptanceBlockDiagnostics,
   parseAcceptanceBlock,
@@ -1852,6 +1854,22 @@ async function runReview(args: {
     openTaskIds: args.openTaskIds,
   });
 
+  // W1-T359: ADVISORY rubric layer — invoked AFTER `computed` above, over the
+  // SAME `diff`/`report` the binding verdict just judged, and consulted by
+  // NOTHING downstream of it: `computed`/`verdict`/the arm decision are already
+  // fixed values by the time this runs, so a rubric finding can never change
+  // them (the falsifier this satisfies: the verdict is byte-identical with the
+  // rubric stubbed out). `judgeRubric` is deterministic string/regex analysis
+  // over `diff`/`report` — no model call, no mount, no extra spawn cost — so a
+  // throw here (there should never be one) is caught and degrades to exactly
+  // today's review: no advisory section, the binding verdict/post unaffected.
+  let rubric: ReturnType<typeof judgeRubric> | undefined;
+  try {
+    rubric = judgeRubric({ diff, report, planOnly: computed.planOnly });
+  } catch (e) {
+    log("review.rubric.error", { error: String((e as Error)?.message ?? e) });
+  }
+
   // W1-T178 (verdict stability): a re-review of an UNCHANGED head sha whose
   // deterministic floor still passes may not render a verdict WORSE than its
   // predecessor — see applyVerdictStability's doc comment (lib/review.ts) for
@@ -2047,14 +2065,31 @@ async function runReview(args: {
   if (verdict.keywordOnly && !verdict.capped) {
     say(keywordOnlyAnnotation());
   }
-  if (verdict.state !== "success" && (unmetClaims.length > 0 || verdict.testTheater)) {
-    // Post the full unmet list as a PR comment so a blocked PR names its gap in one
-    // place a human (or the next run) reads. Best-effort — never blocks the verdict.
-    const body =
-      `**remudero-review=failure** — the following acceptance ${unmetClaims.length === 1 ? "criterion is" : "criteria are"} unmet:\n\n` +
-      unmetClaims.map((c, i) => `${i + 1}. ${c}\n   - ${reasons[i]}`).join("\n") +
-      (verdict.testTheater ? `\n\n_Also: test theater — added tests assert nothing._` : "") +
-      `\n\nAdd the missing work (or escalate). Do NOT edit the acceptance criteria to match the diff.`;
+  const hasUnmet = verdict.state !== "success" && (unmetClaims.length > 0 || verdict.testTheater);
+  // W1-T359: the rubric's advisory section — present whenever `judgeRubric` found
+  // something, INDEPENDENT of `verdict.state` (a rubric concern, e.g. two unrelated
+  // things in one PR, can surface on an otherwise-passing review). Folded into the
+  // SAME best-effort PR comment as the unmet-criteria block below rather than a
+  // second `gh pr comment` call, so a rubric finding never gets its own separate
+  // network path to fail on.
+  const rubricSection = rubric ? rubricAdvisorySection(rubric) : undefined;
+  if (hasUnmet || rubricSection) {
+    // Post the full unmet list (+ the advisory rubric section, if any) as a PR
+    // comment so a blocked PR — or one with a rubric concern — names its gap in
+    // one place a human (or the next run) reads. Best-effort — never blocks the
+    // verdict: `rubricSection` is pure text, appended below the binding verdict's
+    // own block, never merged into or read by verdict/arm logic.
+    const parts: string[] = [];
+    if (hasUnmet) {
+      parts.push(
+        `**remudero-review=failure** — the following acceptance ${unmetClaims.length === 1 ? "criterion is" : "criteria are"} unmet:\n\n` +
+          unmetClaims.map((c, i) => `${i + 1}. ${c}\n   - ${reasons[i]}`).join("\n") +
+          (verdict.testTheater ? `\n\n_Also: test theater — added tests assert nothing._` : "") +
+          `\n\nAdd the missing work (or escalate). Do NOT edit the acceptance criteria to match the diff.`,
+      );
+    }
+    if (rubricSection) parts.push(rubricSection);
+    const body = parts.join("\n\n---\n\n");
     try {
       execFileSync("gh", ["pr", "comment", prUrl, "--body", body], { stdio: "pipe" });
     } catch {

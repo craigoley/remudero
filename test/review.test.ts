@@ -43,6 +43,7 @@ import {
   reviewerOutcome,
   reviewerVerdictContract,
   reviewLedgerLegibilityFields,
+  rubricAdvisorySection,
   interpolatedTitleStaticChunks,
   type PriorReviewVerdict,
   type ProofExecutor,
@@ -1252,6 +1253,69 @@ test("judgeRubric: each falsifier trips its own item and fails the whole rubric"
 
   const sneaky = judgeRubric({ diff: SATISFIED_BY_DIFF, report: "unblock myself" });
   assert.ok(sneaky.failures.some((f) => f.key === "satisfied-by-guard"));
+});
+
+// ── rubricAdvisorySection (W1-T359 — wire judgeRubric into the review flow) ─
+// judgeRubric had zero references beyond its own definition/tests; the review
+// flow already computes the binding verdict right where the rubric's inputs
+// (diff, report, planOnly) sit. rubricAdvisorySection is the pure formatter
+// that turns a RubricResult into the ADVISORY section runReview appends to
+// the posted PR comment — never a verdict-bearing line.
+
+test("rubricAdvisorySection: a clean rubric (no failures) renders nothing", () => {
+  const clean = judgeRubric({ diff: CLEAN_DIFF, report: CLEAN_REPORT });
+  assert.equal(rubricAdvisorySection(clean), undefined);
+});
+
+test("rubricAdvisorySection: a diff exhibiting a rubric violation (two unrelated concerns) names it in a section clearly marked advisory", () => {
+  const violating = judgeRubric({ diff: TWO_CONCERN_DIFF, report: "two things at once" });
+  const section = rubricAdvisorySection(violating);
+  assert.ok(section, "expected a rendered advisory section");
+  assert.match(section!, /advisory/i);
+  assert.match(section!, /does not affect remudero-review's verdict/i);
+  assert.match(section!, /one-concern/);
+});
+
+// ── W1-T359 wiring: judgeRubric at the judgeReview call site, advisory-only ─
+// Source-text assertions on run-task.ts itself (the pattern test/review.test.ts
+// already uses for other run-task.ts wiring, e.g. the resolveAutoMergeArm/
+// armAndLogOutcome call-site checks above) — runReview shells out to `gh` and
+// spawns a worker, so its wiring is proven structurally rather than by
+// invoking the function end-to-end.
+test("W1-T359 wiring: runReview calls judgeRubric + rubricAdvisorySection, strictly after and independent of the binding judgeReview verdict, fail-open", () => {
+  const runReviewStart = runTaskSrc.indexOf("async function runReview(");
+  const runReviewEnd = runTaskSrc.indexOf("// ── THE blocked_review FIX RUNG");
+  assert.ok(runReviewStart > -1 && runReviewEnd > runReviewStart, "could not locate runReview's body in run-task.ts");
+  const runReviewSrc = runTaskSrc.slice(runReviewStart, runReviewEnd);
+
+  assert.match(runReviewSrc, /judgeRubric\(/, "runReview must invoke judgeRubric");
+  assert.match(runReviewSrc, /rubricAdvisorySection\(/, "runReview must render the rubric's advisory section");
+
+  // INDEPENDENCE (the falsifier's binding half): judgeReview's own call — the
+  // BINDING verdict — never references the rubric.
+  const judgeReviewCallIdx = runReviewSrc.indexOf("const computed = judgeReview(");
+  assert.ok(judgeReviewCallIdx > -1, "could not locate the judgeReview call site");
+  const judgeReviewCallEnd = runReviewSrc.indexOf("});", judgeReviewCallIdx) + 3;
+  const judgeReviewArgs = runReviewSrc.slice(judgeReviewCallIdx, judgeReviewCallEnd);
+  assert.doesNotMatch(judgeReviewArgs, /\brubric\b/i, "judgeReview's inputs must never reference the rubric");
+
+  // ORDER: judgeRubric is invoked strictly AFTER judgeReview's call completes —
+  // it consults `computed` (judgeReview's own output), never the reverse.
+  const judgeRubricCallIdx = runReviewSrc.indexOf("judgeRubric(");
+  assert.ok(judgeRubricCallIdx > judgeReviewCallEnd, "judgeRubric must be invoked after judgeReview's call completes");
+
+  // FAIL-OPEN: the judgeRubric call sits inside a try/catch, so a throw can
+  // only drop the advisory section — the binding verdict/post above is already
+  // a fixed value by the time this executes and cannot be touched.
+  const tryIdx = runReviewSrc.lastIndexOf("try {", judgeRubricCallIdx);
+  const catchIdx = runReviewSrc.indexOf("catch", judgeRubricCallIdx);
+  assert.ok(tryIdx > -1 && tryIdx < judgeRubricCallIdx, "judgeRubric's call must be inside a try block");
+  assert.ok(catchIdx > judgeRubricCallIdx, "judgeRubric's call must be followed by a catch");
+
+  // The advisory section posts regardless of verdict.state (a rubric concern
+  // can surface on an otherwise-passing review) — never folded into the
+  // unmet-criteria condition that gates the rest of the failure comment.
+  assert.match(runReviewSrc, /if\s*\(hasUnmet \|\| rubricSection\)/);
 });
 
 // ── reviewer_outcome (W1-T63/P10-a — the reviewer stops walling silently) ───
