@@ -16,9 +16,33 @@
  * footer (`renderFixPrompt`, run-task.ts) — never restated as a second copy of the same text.
  */
 import assert from "node:assert/strict";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { ciParityContractLines, outputContractLines, renderAnchorBlock } from "../src/lib/compaction.js";
+import { CI_PARITY_TABLE, runCiParity } from "../src/lib/ci-parity.js";
+import type { PreflightSpawn } from "../src/lib/commit-message.js";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = join(__dirname, "..");
+
+/** Records every spawn call, falling back to a clean `{status: 0}` for anything unlisted —
+ *  duplicated locally per test/preflight-ci-parity.test.ts's own file-scoping convention. */
+function recordingSpawn(map: Record<string, { status: number; stdout?: string; stderr?: string }> = {}) {
+  const calls: { file: string; args: string[]; opts?: { cwd?: string; input?: string } }[] = [];
+  const spawn: PreflightSpawn = (file, args, opts) => {
+    calls.push({ file, args, opts });
+    const key = [file, ...args].join(" ");
+    for (const [needle, result] of Object.entries(map)) {
+      if (key.includes(needle)) {
+        return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+      }
+    }
+    return { status: 0, stdout: "", stderr: "" };
+  };
+  return { spawn, calls };
+}
 
 // ── (1) the requirement is stated, and it is stated at turn 0 ────────────────
 
@@ -93,4 +117,52 @@ test("outputContractLines and the fix rung compose ciParityContractLines() — n
   for (const text of [implement, fix]) {
     assert.ok(text.includes(contract.join("\n")), "byte-identical composition, both prompts");
   }
+});
+
+// ── (5) W1-T373 design (v): cli-reference:check is a ci-parity entry — ONE LIST, ONE TRUTH ──
+//
+// cli-reference:check was missing from lib/ci-parity.ts entirely — it is asserted from INSIDE
+// test/cli-reference.test.ts, which is only reached by the `ci` job's `npm run test:ci` step,
+// so a failure there surfaced as a numbered TAP line (#1352's `not ok 449 - generate-cli-
+// reference --check`) rather than a named --ci-parity step. This closes that gap: the `ci`
+// job's table entry now runs a DEDICATED `ci:cli-reference-check` step, so --ci-parity is
+// actually at parity with CI on this check instead of only accidentally exercising it.
+
+test("CI_PARITY_TABLE: the 'ci' job entry runs a DEDICATED ci:cli-reference-check step — cli-reference:check is no longer missing from lib/ci-parity.ts", () => {
+  const { spawn } = recordingSpawn();
+  const ciEntry = CI_PARITY_TABLE.find((e) => e.job === "ci")!;
+  assert.ok(ciEntry && ciEntry.mirrored, "the 'ci' job must be a mirrored entry");
+  const steps = ciEntry.run!(REPO_ROOT, spawn);
+  const cliRefStep = steps.find((s) => s.name === "ci:cli-reference-check");
+  assert.ok(cliRefStep, "expected a 'ci:cli-reference-check' step in the 'ci' job entry's run()");
+});
+
+test("CI_PARITY_TABLE: ci:cli-reference-check invokes `npm run --silent cli-reference:check` — the same script the task's own measurement (0.69s) and package.json name", () => {
+  const { spawn, calls } = recordingSpawn();
+  const ciEntry = CI_PARITY_TABLE.find((e) => e.job === "ci")!;
+  ciEntry.run!(REPO_ROOT, spawn);
+
+  const call = calls.find((c) => c.file === "npm" && c.args.join(" ") === "run --silent cli-reference:check");
+  assert.ok(call, "expected an `npm run --silent cli-reference:check` call from the 'ci' job entry");
+});
+
+test("CI_PARITY_TABLE: ci:cli-reference-check FAILS INDEPENDENTLY of ci:test — a stale docs/cli-reference.md is named as its own step, not buried inside ci:test's output", () => {
+  const { spawn } = recordingSpawn({ "cli-reference:check": { status: 1, stderr: "Drifted command(s): check-acceptance" } });
+  const result = runCiParity(REPO_ROOT, { spawn });
+
+  const cliRefStep = result.steps.find((s) => s.name === "ci:cli-reference-check")!;
+  assert.equal(cliRefStep.ok, false, "a stale committed cli-reference.md must fail its own named step");
+  assert.match(cliRefStep.detail, /Drifted command\(s\)/, "the step's own detail carries the drift reason, not a bare FAIL");
+
+  // ci:test still ran and reported independently — one failing step never blocks another.
+  const ciTestStep = result.steps.find((s) => s.name === "ci:test")!;
+  assert.equal(ciTestStep.ok, true, "ci:test's own (stubbed-clean) verdict is unaffected by ci:cli-reference-check's failure");
+  assert.equal(result.ok, false);
+});
+
+test("CI_PARITY_TABLE: adding ci:cli-reference-check does not turn the ci-parity:drift step red — 'ci' is still a real ci.yml job, only its step LIST grew", () => {
+  const { spawn } = recordingSpawn();
+  const result = runCiParity(REPO_ROOT, { spawn });
+  const drift = result.steps.find((s) => s.name === "ci-parity:drift")!;
+  assert.equal(drift.ok, true, "the drift step only checks for ci.yml jobs missing a table entry — the 'ci' entry still exists and is unchanged as a job");
 });
