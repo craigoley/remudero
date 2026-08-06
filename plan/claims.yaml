@@ -102,3 +102,20 @@
     docs/review-gate.md."
   plan_section: "docs/review-gate.md#ci-gate-aggregator-w1-t24"
   assertion: '! test -f docs/ci-gate.md'
+
+# Added by W1-T387: CLAUDE.md told every author `rmd check-proof` was "the reviewer's own parser
+# and executor" while it only ever shared the PARSER -- it ran its own hand-rolled exit-code check
+# past that, which read a name-filtered proof resolving to a file but matching no real test title
+# as a green PASS (measured: exit 0, hits 17) while the reviewer's own execWhitelistedProof, which
+# reads the TAP stream rather than the exit code, reported no-match. Registering the correction as
+# a claim (rather than only fixing the sentence) is the point: a future edit that reintroduces a
+# second hand-rolled verdict path -- or that lets check-proof's OWN raw exit code decide the CLI's
+# exit code again -- turns this claim red instead of silently drifting the plan back to lying.
+
+- id: check-proof-collapsed-onto-review-executor
+  claim: "rmd check-proof judges a proof's verdict by calling execWhitelistedProof, the SAME
+    executor the reviewer runs at PR time -- not a second, hand-rolled exit-code check of its own
+    -- so a name-filtered proof that resolves to a file but matches no real test title can no
+    longer read GREEN locally while the reviewer judges it no-match."
+  plan_section: "CLAUDE.md#writing-proofs-and-acceptance-criteria"
+  assertion: 'node --test --import tsx --import ./test/setup/tmp-hygiene.ts --test-name-pattern "ACCEPTANCE #1: check-proof reports the SAME no-match verdict" test/check-proof-executor-parity.test.ts'

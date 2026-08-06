@@ -47,9 +47,13 @@ forensic detail, so the narrative does not need to live here.
   executor feeds the whole string to `--test-name-pattern` and matches zero tests. In a **plan
   shard**, use the pure-path form `unit test: test/foo.test.ts`: it lint-passes and executes the
   whole file. **Verify every proof through `rmd check-proof '<proof>'` before opening the PR** — it
-  is the reviewer's own parser and executor, and prints the parse kind, the resolved candidates and
-  the exit code. Require `candidates: 1 file(s)` and the REAL test name in the TAP output; a
-  zero-match returns `candidates: absent`. *(#766, #773, #777, #1189, #1194)*
+  is the reviewer's own parser AND executor (W1-T387: it now judges the run through
+  `execWhitelistedProof` itself, not a second hand-rolled exit-code check), and prints the parse
+  kind, the resolved candidates, the exact argv, the verdict and a hit count. Read the `verdict:`
+  line, never the raw `exit:` line — a name-filtered proof that resolves to a file but names no real
+  test title exits 0 and looks green (`exit: 0`, `hits: 17` is a MEASURED real example) while its
+  `verdict:` correctly reads `no-match`; `rmd check-proof --help` states the full verdict→exit-code
+  mapping. *(#766, #773, #777, #1189, #1194)*
 - **Require a verbatim `grep -rlF -- '<substring>' test/` hit — a passing scoped test run is NOT
   evidence the proof resolves.** `resolveNameFilteredCandidates` greps the SOURCE with a fixed
   string, so a title assembled from `" + "`-joined literals exists verbatim in no file: a proof

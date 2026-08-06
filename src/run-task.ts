@@ -1,4 +1,4 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type Server } from "node:http";
@@ -399,6 +399,9 @@ import {
   parseWhitelistedProof,
   resolveNameFilteredCandidates,
   narrowNameFilteredArgs,
+  execWhitelistedProof,
+  defaultProofSpawner,
+  type ProofSpawner,
   type CappedOverride,
   type CriterionVerdict,
   type ReviewVerdict,
@@ -6598,9 +6601,9 @@ export function describeMintWithHistory(mint: MintedTaskIdWithHistory): string {
  * exit 0 (the history scan still runs offline — it is a local git read, not a network one).
  */
 /**
- * `rmd check-proof <proof>` — run ONE acceptance proof through the REVIEWER'S OWN code and print
- * what it will do, so an author never has to hand-roll a verification that differs from the thing
- * that actually runs.
+ * `rmd check-proof <proof>` — run ONE acceptance proof through the REVIEWER'S OWN parser AND
+ * executor and print what it did, so an author never has to hand-roll a verification that
+ * differs from the thing that actually runs.
  *
  * WHY THIS EXISTS. The recurring cost is not that authors are careless — it is that local
  * verification and remote execution are two different programs. PR #1071's author checked a
@@ -6608,8 +6611,32 @@ export function describeMintWithHistory(mint: MintedTaskIdWithHistory): string {
  * The `[call-site]` in the pattern was a character class to one and a literal to the other, so the
  * local check said green and the review said fail. Measured across the unioned ledger, 1,952
  * verdicts carry a failed grep proof. This verb removes the gap BY CONSTRUCTION rather than by
- * asking people to remember a rule nothing states: it calls `parseWhitelistedProof` and prints the
- * exact argv, then spawns that argv itself.
+ * asking people to remember a rule nothing states: it calls `parseWhitelistedProof`, prints the
+ * exact argv, and — W1-T387 — judges the run through {@link "./lib/review.js".execWhitelistedProof}
+ * itself, the SAME function `judgeCriterion` calls at review time, rather than a second hand-rolled
+ * exit-code check of its own.
+ *
+ * W1-T387 (THE PARSER/EXECUTOR SPLIT THIS CLOSES). Before this, `checkProofCommand` shared only
+ * `parseWhitelistedProof` with the reviewer; past that it ran its OWN raw `spawnSync` and judged
+ * PASS/FAIL purely by `status === 0`. For a name-filtered `unit test:` proof that is unsound:
+ * `node --test --test-name-pattern` exits 0 and emits its file's own trivial TAP wrapper line even
+ * when ZERO named tests matched — MEASURED live, `unit test: fixHeadAcceptable` (resolves to
+ * `test/fix-rung-no-task.test.ts`) reads `exit: 0, hits: 17` here while
+ * {@link "./lib/review.js".execWhitelistedProof}, which reads the TAP stream instead of the exit
+ * code, reports `no-match`. An author trusted "the reviewer's own executor" and shipped a proof the
+ * reviewer would cap. Calling the real executor removes that gap the same way it removed the
+ * grep-matcher gap: BY CONSTRUCTION, not by a second implementation kept in sync by hand.
+ *
+ * DIAGNOSTICS SURVIVE THE COLLAPSE. `execWhitelistedProof` returns only a three-value verdict
+ * (`"pass" | "fail" | "no-match"`, or throws) — no stdout, no exit code, no signal. This verb still
+ * prints all three, by handing `execWhitelistedProof` a {@link "./lib/review.js".ProofSpawner} that
+ * wraps the real one and records what it observed on the side; the VERDICT is still decided
+ * entirely inside `execWhitelistedProof`, this file never re-derives it from the exit code.
+ *
+ * EXIT CODE IS THE VERDICT, MAPPED — see {@link CHECK_PROOF_EXIT}. `no-match` and `fail` used to
+ * share exit 1; they no longer do, because they mean different things to the reviewer (`no-match`
+ * degrades to the keyword floor, `fail` overrides it to UNMET) and a local check that conflated
+ * them could not tell an author which one to expect.
  *
  * STRICTLY READ-ONLY. It writes no cache, no ledger line, and no state file — deliberately unlike
  * `rmd next-task-id`, which looks like a reader and writes a history cache into the SHARED git
@@ -6625,6 +6652,37 @@ export function describeMintWithHistory(mint: MintedTaskIdWithHistory): string {
 /** Opt-in for the one `check-proof` path that would otherwise run the ENTIRE suite — see the
  *  `unresolvable` branch in {@link checkProofCommand}. */
 export const CHECK_PROOF_FULL_SUITE_FLAG = "--allow-full-suite";
+
+/**
+ * `rmd check-proof`'s verdict/refusal → exit-code contract (W1-T387 design (v)). A VERDICT and a
+ * REFUSAL are different claims and must never share a code:
+ *   - `pass`      (0) — executed, and {@link "./lib/review.js".execWhitelistedProof} says the
+ *                       named check holds. Same code as before.
+ *   - `fail`      (1) — executed, and it does not hold — a genuine failing test or grep miss.
+ *                       Same code as before.
+ *   - `refused`   (2) — NOTHING executed: bad usage, an unparseable proof, or a name-filtered
+ *                       proof whose candidate resolution was `unresolvable` and
+ *                       `--allow-full-suite` was not given. Unchanged from before.
+ *   - `noMatch`   (3) — NEW. Executed (or fast-failed on positive evidence of absence) and ZERO
+ *                       named tests matched — review.ts DEGRADES this to the keyword floor, never
+ *                       a failure, so it must never read the same as `fail`. Before W1-T387 this
+ *                       shared exit 1 with `fail`, which is the exact gap this task closes: a
+ *                       proof that reads GREEN locally (`exit 0`) could be `no-match` at review,
+ *                       and a local check that then reported the SAME code as `fail` would not
+ *                       even let an author tell the two verdicts apart once they knew to look.
+ *   - `execError` (4) — NEW. The run did not reach a clean pass/fail/no-match verdict at all: a
+ *                       timeout, a spawn failure, or (grep only) exit 2 — "could not even look",
+ *                       distinct from exit 1's "looked, found nothing" (W1-T219). Inconclusive,
+ *                       not evidence either way — review.ts also degrades this to the keyword
+ *                       floor, so it must not read as `fail` either.
+ */
+export const CHECK_PROOF_EXIT = {
+  pass: 0,
+  fail: 1,
+  refused: 2,
+  noMatch: 3,
+  execError: 4,
+} as const;
 
 /** Fallback when plan/policy.yaml cannot be read: that file's own documented floor for
  *  `proofTimeoutMs`, so this verb is never less bounded than the reviewer. */
@@ -6858,7 +6916,7 @@ export function checkProofCommand(rest: string[]): number {
   const proof = rest.filter((t) => t !== CHECK_PROOF_FULL_SUITE_FLAG).join(" ").trim();
   if (!proof) {
     console.error("rmd check-proof: give me a proof, e.g. `rmd check-proof 'grep: foo in src/lib/bar.ts'`\n" + USAGE);
-    return 2;
+    return CHECK_PROOF_EXIT.refused;
   }
   const w = parseWhitelistedProof(proof);
   if (!w) {
@@ -6869,7 +6927,7 @@ export function checkProofCommand(rest: string[]): number {
         "            test path or title. A proof wrapped in markdown backticks parses since #1063, but a\n" +
         "            proof with no dialect prefix at all is prose and never executes.",
     );
-    return 2;
+    return CHECK_PROOF_EXIT.refused;
   }
   console.log(`proof:      ${proof}`);
   console.log(`parse:      OK — kind=${w.kind}${w.nameFiltered ? " (name-filtered)" : ""}`);
@@ -6884,7 +6942,7 @@ export function checkProofCommand(rest: string[]): number {
       console.log(`candidates: ${r.status}${"reason" in r ? ` — ${r.reason}` : ""}`);
       if (r.status === "absent") {
         console.log("verdict:    no-match — the executor fast-fails here and never spawns node.");
-        return 1;
+        return CHECK_PROOF_EXIT.noMatch;
       }
       // UNRESOLVABLE ⇒ `narrowNameFilteredArgs` returns the args UNCHANGED, still carrying
       // TEST_GLOB — so executing here runs the ENTIRE SUITE. That fallback is defensible inside
@@ -6912,24 +6970,80 @@ export function checkProofCommand(rest: string[]): number {
             "            same proofTimeoutMs the reviewer uses), or name a test/<file>.test.ts path —\n" +
             "            the path form runs exactly one file.",
         );
-        return 2;
+        return CHECK_PROOF_EXIT.refused;
       }
     }
   }
   console.log(`argv:       ${w.command} ${args.join(" ")}`);
 
-  const res = spawnSync(w.command, args as string[], { encoding: "utf8", timeout: checkProofTimeoutMs() });
-  const stdout = res.stdout ?? "";
-  const hits = stdout.split("\n").filter((l) => l.trim() !== "").length;
-  console.log(`exit:       ${res.status === null ? `killed by ${res.signal}` : res.status}`);
-  console.log(`hits:       ${hits}`);
-  if (stdout.trim()) console.log(stdout.trimEnd().split("\n").slice(0, 10).join("\n"));
-  if (w.kind === "grep" && res.status !== 0)
+  // W1-T387: THE COLLAPSE. Everything above this line is UNCHANGED diagnostics (parse kind,
+  // candidate resolution, the exact argv) — the whole point is that they survive. From here down,
+  // the VERDICT is decided by execWhitelistedProof itself, the SAME function judgeCriterion calls
+  // at review time, never by this file re-deriving pass/fail from a raw exit code again.
+  //
+  // execWhitelistedProof returns only "pass" | "fail" | "no-match" (or throws) — no stdout, no
+  // exit code, no signal. `capturingSpawn` wraps the REAL spawner (review.ts's own
+  // `defaultProofSpawner`, the identical primitive execWhitelistedProof would use by default) and
+  // records what it observed on the side, purely so the diagnostics below (`exit:`, `hits:`) can
+  // still be printed — this file never reads `diag` to decide the verdict.
+  let diag: { stdout: string; status: number | null; signal: NodeJS.Signals | null } | undefined;
+  const capturingSpawn: ProofSpawner = (command, spawnArgs, spawnCwd, spawnTimeoutMs) => {
+    try {
+      const out = defaultProofSpawner(command, spawnArgs, spawnCwd, spawnTimeoutMs);
+      diag = { stdout: out, status: 0, signal: null };
+      return out;
+    } catch (e) {
+      const err = e as NodeJS.ErrnoException & {
+        status?: number | null;
+        signal?: NodeJS.Signals | null;
+        stdout?: string | Buffer | null;
+      };
+      diag = {
+        stdout: typeof err.stdout === "string" ? err.stdout : (err.stdout?.toString("utf8") ?? ""),
+        status: typeof err.status === "number" ? err.status : null,
+        signal: err.signal ?? null,
+      };
+      throw e;
+    }
+  };
+
+  let outcome: "pass" | "fail" | "no-match";
+  try {
+    outcome = execWhitelistedProof(w, process.cwd(), checkProofTimeoutMs(), capturingSpawn);
+  } catch (e) {
+    // exec_error: a timeout, a spawn failure, or (grep only) exit 2 — "could not even look",
+    // never treated as evidence of a failing proof (W1-T219). Same class of run the reviewer
+    // degrades to the keyword floor rather than an executed_fail.
+    if (diag) {
+      console.log(`exit:       ${diag.status === null ? `killed by ${diag.signal}` : diag.status}`);
+      const hits = diag.stdout.split("\n").filter((l) => l.trim() !== "").length;
+      console.log(`hits:       ${hits}`);
+      if (diag.stdout.trim()) console.log(diag.stdout.trimEnd().split("\n").slice(0, 10).join("\n"));
+    }
+    console.log(`verdict:    exec_error — ${String((e as Error)?.message ?? e)}`);
+    if (w.kind === "grep")
+      console.log(
+        "note:       a `grep:` pattern is a BASIC REGULAR EXPRESSION, not a literal — `[`, `*`, `^`, `$`\n" +
+          "            are metacharacters. Do NOT re-check this with `grep -F`; that is a different matcher.",
+      );
+    return CHECK_PROOF_EXIT.execError;
+  }
+
+  if (diag) {
+    console.log(`exit:       ${diag.status === null ? `killed by ${diag.signal}` : diag.status}`);
+    const hits = diag.stdout.split("\n").filter((l) => l.trim() !== "").length;
+    console.log(`hits:       ${hits}`);
+    if (diag.stdout.trim()) console.log(diag.stdout.trimEnd().split("\n").slice(0, 10).join("\n"));
+  }
+  console.log(`verdict:    ${outcome}`);
+  if (w.kind === "grep" && outcome !== "pass")
     console.log(
       "note:       a `grep:` pattern is a BASIC REGULAR EXPRESSION, not a literal — `[`, `*`, `^`, `$`\n" +
         "            are metacharacters. Do NOT re-check this with `grep -F`; that is a different matcher.",
     );
-  return res.status === 0 ? 0 : 1;
+  if (outcome === "pass") return CHECK_PROOF_EXIT.pass;
+  if (outcome === "fail") return CHECK_PROOF_EXIT.fail;
+  return CHECK_PROOF_EXIT.noMatch;
 }
 
 export async function nextTaskIdCommand(rest: string[]): Promise<number> {
@@ -15836,7 +15950,7 @@ const COMMANDS: readonly CommandSpec[] = [
   {
     name: "check-proof",
     usage:
-      "rmd check-proof <proof> [--allow-full-suite]   # run ONE acceptance proof through the REVIEWER'S OWN parser and executor and print what it does: parse kind, resolved candidate file(s), the exact argv, exit code and hit count. A `grep:` pattern is a BASIC REGULAR EXPRESSION (`[ * ^ $` are metacharacters) — verifying with `grep -F` is a DIFFERENT matcher and reports a false green (PR #1071). A `unit test:` proof naming a TITLE rather than a test/<file>.test.ts PATH is resolved to its file first; when it resolves to none, the run is REFUSED rather than falling back to the whole-suite glob (--allow-full-suite overrides, time-boxed). READ-ONLY: writes no cache, no ledger line, no state file",
+      "rmd check-proof <proof> [--allow-full-suite]   # run ONE acceptance proof through the REVIEWER'S OWN parser and executor and print what it does: parse kind, resolved candidate file(s), the exact argv, the verdict, exit code and hit count. A `grep:` pattern is a BASIC REGULAR EXPRESSION (`[ * ^ $` are metacharacters) — verifying with `grep -F` is a DIFFERENT matcher and reports a false green (PR #1071). A `unit test:` proof naming a TITLE rather than a test/<file>.test.ts PATH is resolved to its file first; when it resolves to none, the run is REFUSED rather than falling back to the whole-suite glob (--allow-full-suite overrides, time-boxed). EXIT CODE IS THE VERDICT: 0 pass, 1 fail (genuinely unmet — overrides the keyword floor), 2 refused (nothing executed — bad usage, an unparseable proof, or an unresolved name run declined), 3 no-match (ran and named nothing — degrades to the keyword floor, NEVER read as fail), 4 exec_error (a timeout/spawn failure/grep-exit-2 — inconclusive, also degrades). READ-ONLY: writes no cache, no ledger line, no state file",
   },
   {
     name: "check-acceptance",
