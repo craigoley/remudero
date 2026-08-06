@@ -132,30 +132,74 @@ function throwsPolicyError(fn: () => unknown, msgRe: RegExp): void {
   );
 }
 
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/**
+ * Recursively walk a RAW (parsed-YAML) policy tree, asserting every leaf `{value, origin, ...}`
+ * row's value is the right TYPE and — when the row declares numeric `min`/`max` — sits inside
+ * ITS OWN committed bound, read from the row itself. This is a SHAPE+BOUNDS check, never a
+ * hand-written figure: it holds at any legitimately retuned value, because the bound it checks
+ * against travels with the row rather than being pinned separately here (W1-T374). It does not
+ * use `Policy.bounds` — that projection currently records only `sweep.dailyCostCeilingUsd` (the
+ * one field a runtime consumer validates against; see policy.ts's `Policy.bounds` doc) — so the
+ * raw file's own declared `min`/`max` is what every OTHER field's bound is checked against here.
+ */
+function assertRowsInBounds(node: unknown, path: string): void {
+  if (!isPlainObject(node)) return;
+  if ("value" in node) {
+    const { value, min, max } = node as Record<string, unknown>;
+    if (typeof value === "number") {
+      assert.ok(Number.isFinite(value), `${path}.value must be a finite number, got ${JSON.stringify(value)}`);
+      if (min !== undefined || max !== undefined) {
+        assert.equal(typeof min, "number", `${path}.min must be a number`);
+        assert.equal(typeof max, "number", `${path}.max must be a number`);
+        assert.ok(
+          value >= (min as number) && value <= (max as number),
+          `${path}.value (${value}) must sit inside its own declared bound [${min}, ${max}]`,
+        );
+      }
+    } else if (typeof value === "boolean") {
+      // headroom.enabled / autoTriage.enabled / scratchReap.enabled — a boolean has no range.
+    } else if (Array.isArray(value)) {
+      // headroom.curve — each rung's own bounds (limitPct in [0, 100], etc.) are enforced by
+      // validateHeadroomCurve at load; only the shape is re-checked here.
+      assert.ok(value.length > 0, `${path}.value must be a non-empty array`);
+      for (const rung of value) {
+        assert.ok(
+          isPlainObject(rung) && "maxHoursToReset" in rung && "limitPct" in rung,
+          `${path}.value entries must be {maxHoursToReset, limitPct} mappings`,
+        );
+      }
+    } else {
+      assert.fail(`${path}.value has unexpected type ${typeof value}`);
+    }
+    return; // a row is a leaf — 'origin'/'min'/'max' are not sub-tables to recurse into.
+  }
+  for (const [key, child] of Object.entries(node)) {
+    assertRowsInBounds(child, path ? `${path}.${key}` : key);
+  }
+}
+
 // ── acceptance 1: lifts the CURRENT source values, rejects the 30000 regression ────────────
 
-test("the SHIPPED plan/policy.yaml loads and lifts the current source values", () => {
+test("the SHIPPED plan/policy.yaml loads, and every row's value sits within its OWN declared bound — shape and bounds, never a hand-written figure (W1-T374)", () => {
   const p = loadPolicy(SHIPPED);
-  assert.equal(p.values.proofTimeoutMs, 60_000);
-  assert.equal(p.values.pruneGraceMs, 120_000);
-  assert.equal(p.values.pollIntervalMs, 60_000);
-  assert.equal(p.values.fixStrikeCap, 2);
-  assert.deepEqual(p.values.sweep, {
-    staleDays: 14,
-    strikeCap: 2,
-    wipLimit: 10,
-    tmpMaxAgeMs: 3_600_000,
-    dispatchLanes: 2,
-    dailyCostCeilingUsd: 500,
-  });
-  assert.equal(p.values.drain.max, 10);
-  assert.deepEqual(p.values.retro, { mergesThreshold: 25, daysThreshold: 7 });
-  assert.deepEqual(p.values.headroom.curve, [
-    { maxHoursToReset: 24, limitPct: 100 },
-    { maxHoursToReset: null, limitPct: 95 },
-  ]);
-  assert.equal(p.values.headroom.reservePct, 95);
-  assert.equal(p.values.headroom.enabled, true);
+  // SHAPE: every section this policy is documented to carry is actually present — a missing one
+  // would already have thrown inside loadPolicy, so this asserts the positive fact directly
+  // rather than only trusting the absence of a throw.
+  const expectedTopLevelKeys = [
+    "proofTimeoutMs", "pruneGraceMs", "worktreeReapGraceMs", "pollIntervalMs", "fixStrikeCap",
+    "sweep", "drain", "retro", "autoTriage", "headroom", "launchd", "scratchReap",
+  ];
+  assert.deepEqual(Object.keys(p.values).sort(), expectedTopLevelKeys.sort());
+
+  // BOUNDS: every numeric row's value sits inside its own committed [min, max], read from the
+  // raw shipped file itself — see assertRowsInBounds's doc for why this walks the raw YAML
+  // rather than trusting a hand-written figure or Policy.bounds (populated for one field today).
+  const raw = parseYaml(readFileSync(SHIPPED, "utf8")) as Record<string, unknown>;
+  assertRowsInBounds(raw, "");
 });
 
 // ── the DRIFT LOCK (W1-T252 follow-up) ─────────────────────────────────────────────────────
