@@ -4067,7 +4067,25 @@ export interface RubricItemResult {
 export interface RubricPrMeta {
   /** The PR touches ONLY plan/docs (no product code) — an Architect plan PR. */
   planOnly?: boolean;
-  /** The PR is authored by a human/Architect, not a worker session. */
+  /**
+   * The PR is NOT a dispatched worker run editing its own task — the exemption half
+   * of {@link checkSatisfiedByGuard}.
+   *
+   * DERIVED FROM THE HEAD REF, never asserted: `runReview` sets it from `headRefName`
+   * via {@link "../run-task.js".isDispatchedRunBranch} — a dispatched run always pushes
+   * to `run-<taskId>-<epochMs>`, and no hand-opened branch takes that shape. That is the
+   * only authorship signal the review path actually holds, so it is the only one claimed.
+   *
+   * ABSENT ⇒ FALSE, never "unknown-so-allow". The one call site that cannot supply a head
+   * ref is `runFixRung`'s, which is BY CONSTRUCTION a dispatched run amending its own run
+   * branch — the exact case the exemption must not cover — so failing closed there is both
+   * safe and correct rather than merely conservative.
+   *
+   * Until W1-T385 NOTHING IN THE TREE SET THIS FIELD. It was permanently `undefined`, so
+   * the exemption could never fire and the advisory reported a worker-authored edit on
+   * hand-opened plan-only PRs — the opposite of the truth, on the one rule where a false
+   * authorship claim is most misleading.
+   */
   humanAuthored?: boolean;
 }
 
@@ -4560,15 +4578,24 @@ export function checkSatisfiedByGuard(diff: string, meta: RubricPrMeta = {}): Ru
     return {
       key: "satisfied-by-guard",
       pass: true,
-      reason: "criterion field added/edited in a plan-only, human-authored PR (Architect-only — allowed)",
+      reason: "criterion field added/edited in a plan-only PR off a non-run branch (Architect-only — allowed)",
     };
   }
+  // NAME THE CONDITION THAT FAILED, NEVER GUESS THE AUTHOR (W1-T385). This message is
+  // ADVISORY and reaches the operator verbatim, so a claim it cannot substantiate costs
+  // a re-derivation: the single old wording asserted "worker-authored … outside a
+  // plan-only human PR" on every refusal, which was false in BOTH directions on a
+  // plan-only hand-opened PR — it named an author the review path could not know AND
+  // denied a plan-only property the same call had just computed as true.
+  const edit =
+    "plan/tasks.yaml's acceptance criteria were added/edited (an added satisfied_by, or an edited/removed " +
+    "claim/proof/satisfied_by field)";
   return {
     key: "satisfied-by-guard",
     pass: false,
-    reason:
-      "worker-authored edit to plan/tasks.yaml's acceptance criteria (an added satisfied_by, or an edited/removed " +
-      "claim/proof/satisfied_by field) outside a plan-only human PR is editing the criteria to match the diff (Standing rule 15)",
+    reason: meta.planOnly
+      ? `${edit} on a dispatched run branch — a worker editing its own criteria to match the diff (Standing rule 15)`
+      : `${edit} in a PR that is not plan-only, so the Architect carve-out does not apply (Standing rule 15)`,
   };
 }
 

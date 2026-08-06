@@ -1920,7 +1920,20 @@ async function runReview(args: {
   // today's review: no advisory section, the binding verdict/post unaffected.
   let rubric: ReturnType<typeof judgeRubric> | undefined;
   try {
-    const rubricInput = { diff, report, planOnly: computed.planOnly };
+    // W1-T385: `humanAuthored` had NO producer anywhere in the tree, so the guard's
+    // `planOnly && humanAuthored` exemption could never fire and its refusal asserted a
+    // worker author on hand-opened plan-only PRs. Derived here from the head ref — the
+    // only authorship signal this path holds — rather than left undefined: `reviewCommand`
+    // (the operator's `rmd review` AND the sweep's post-review lane) passes `headRefName`
+    // straight from `gh pr view`. `runFixRung`'s call site passes none, and that is a
+    // dispatched run amending its own run branch, so `undefined ⇒ false` is the correct
+    // answer there and not merely the safe one.
+    const rubricInput = {
+      diff,
+      report,
+      planOnly: computed.planOnly,
+      humanAuthored: args.headRefName !== undefined && !isDispatchedRunBranch(args.headRefName),
+    };
     // The default branch keeps the literal `judgeRubric(...)` call — this task's own structural
     // test asserts that text is present in runReview's body, and the seam must not weaken it.
     rubric = args.judgeRubricFn ? args.judgeRubricFn(rubricInput) : judgeRubric(rubricInput);
@@ -11861,6 +11874,23 @@ export function fixRungTaskFor(
  * This never widens WHICH PRs are fixable — the disposition set is untouched — only whether the
  * rung can act on one the sweep has already classified.
  */
+/**
+ * Is `head` ANY dispatched run's own branch — `run-<taskId>-<epochMs>`, the shape every
+ * worker push takes (`const branch = \`run-${runId}\``)? TASK-AGNOSTIC, unlike status.ts's
+ * `ownsBranch`/`isBareRunBranch`, which answer "does this head claim THIS task".
+ *
+ * It is the only authorship signal the review path holds, and W1-T385 wires it to the one
+ * consumer that needs it: `runReview` derives `humanAuthored` (see {@link
+ * "./lib/review.js".RubricPrMeta.humanAuthored}) as "a head ref exists AND is not this
+ * shape". Absent head ⇒ `false` here, so that consumer fails CLOSED.
+ *
+ * The regex is unchanged from `fixHeadAcceptable`'s own inline copy, which now calls this
+ * so the shape has ONE home rather than two that can drift apart.
+ */
+export function isDispatchedRunBranch(head: string | undefined): boolean {
+  return head !== undefined && /^run-.+-\d+$/.test(head);
+}
+
 export function fixHeadAcceptable(head: string | undefined, taskId: string, synthetic: boolean): boolean {
   if (!head) return false;
   const ownRunBranch = new RegExp(`^run-${taskId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-\\d+$`).test(head);
@@ -11870,7 +11900,7 @@ export function fixHeadAcceptable(head: string | undefined, taskId: string, synt
   // PRs in the measured trail). The lane PR's own `run-<id>-<ts>` head is legitimately its own, so
   // accept it; refuse only a head claiming a DIFFERENT task, which means mis-trailered, not
   // task-less, and amending it would push onto another task's run branch.
-  return ownRunBranch || !/^run-.+-\d+$/.test(head);
+  return ownRunBranch || !isDispatchedRunBranch(head);
 }
 
 export function buildSweepEffects(
