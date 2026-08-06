@@ -22,9 +22,13 @@ import type { AcceptanceCriterion } from "../src/lib/plan.js";
 // and falls back to the keyword floor, recorded under its own outcome name
 // (`executed_stale`) rather than reusing `failure` or `exec_error`.
 //
-// `unit test:` proofs are explicitly OUT OF SCOPE: a forward-referencing test
-// path legitimately matches nothing before the work and everything after, so
-// the same rule does not generalize to them by analogy.
+// `unit test:` proofs were explicitly OUT OF SCOPE for W1-T273 itself — a
+// forward-referencing test path legitimately matches nothing before the work
+// and everything after, so the same rule did not generalize to them by
+// analogy. W1-T362 (below, and test/review.test.ts) closes that gap: a
+// `unit test:` proof that is ABSENT or FAILS at the base still discriminates
+// (unaffected here), but one that PASSES identically at head AND base is now
+// downgraded exactly like a stale `grep:` proof.
 
 const HEAD_DIR = "/fake/head/checkout";
 const BASE_DIR = "/fake/base/checkout";
@@ -105,10 +109,12 @@ test("W1-T273: absent baseCheckoutDir never runs the check — a grep proof that
   assert.equal(v.criteria[0].met, true);
 });
 
-test("W1-T273: a `unit test:` proof is never flagged stale, even when it 'passes' on both the head and the base checkout", () => {
-  // EXPLICITLY OUT OF SCOPE (design): a forward-referencing test path
-  // legitimately matches nothing before the work and everything after — the
-  // same rule must not be extended to it by analogy.
+test("W1-T362: a `unit test:` proof that ALSO passes on the merge-base is now flagged stale, exactly like a grep proof", () => {
+  // SUPERSEDES the pre-W1-T362 "explicitly out of scope" behaviour: a test
+  // that passes identically at head AND base proves the diff changed nothing
+  // the test observes — the unit-test analog of the grep defect W1-T273 closed.
+  // Full matrix (absent-at-base, failing-at-base, base-run error) lives in
+  // test/review.test.ts, this task's declared acceptance proof.
   const criteria: AcceptanceCriterion[] = [
     { claim: "the widget is frobnicated", proof: "unit test: test/widget.test.ts" },
   ];
@@ -120,8 +126,26 @@ test("W1-T273: a `unit test:` proof is never flagged stale, even when it 'passes
     baseCheckoutDir: BASE_DIR,
     execProof: alwaysPass,
   });
+  assert.equal(v.criteria[0].proof_exec, "executed_stale");
+  assert.match(v.criteria[0].reason, /non-discriminating/);
+});
+
+test("W1-T362: a `unit test:` proof absent/failing at the base still discriminates and stays executed_pass", () => {
+  const criteria: AcceptanceCriterion[] = [
+    { claim: "the widget is frobnicated", proof: "unit test: test/widget.test.ts" },
+  ];
+  // Forward-referencing test: passes on head, does not exist / does not pass on base.
+  const headOnly: ProofExecutor = (_wp, cwd) => (cwd === BASE_DIR ? "no-match" : "pass");
+  const v = judgeReview(criteria, {
+    diff: "",
+    report: "REPORT — unrelated cleanup, no mention of the criterion above.",
+    headCheckoutDir: HEAD_DIR,
+    baseCheckoutDir: BASE_DIR,
+    execProof: headOnly,
+  });
   assert.equal(v.criteria[0].proof_exec, "executed_pass");
   assert.equal(v.criteria[0].met, true);
+  assert.match(v.criteria[0].reason, /discriminates/);
 });
 
 test("W1-T273: a base-checkout re-run that THROWS degrades to not-stale (executed_pass stands) instead of hard-failing", () => {
