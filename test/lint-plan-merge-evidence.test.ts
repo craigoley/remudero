@@ -85,9 +85,21 @@ test("classifier: an empty dump classifies every id as without evidence", () => 
 
 // ── (ii) the real default reader ─────────────────────────────────────────────────────────────
 
-test("defaultMergeEvidenceLog: the REAL reader returns this repo's history with the ref named", () => {
-  // No fake: this shells actual git against the checkout running the test. The repo's history
-  // is guaranteed to carry at least one Remudero-Task trailer (the dominant merge idiom here).
+test("defaultMergeEvidenceLog: the REAL reader — full history yields the dump, a shallow checkout the named refusal", () => {
+  // No fake: this shells actual git against the checkout running the test — and that checkout's
+  // depth is the environment's, not the test's, to choose. CI's `ci` job checks out SHALLOW
+  // (default fetch-depth) while `lint-plan`/`coverage-ratchet` fetch full history, so this test
+  // asserts the arm THIS environment can prove: a full clone must yield the dump with its
+  // invariants; a shallow one must hit the named refusal — the same contract, both arms real.
+  const shallow =
+    execFileSync("git", ["rev-parse", "--is-shallow-repository"], { cwd: REPO_ROOT, encoding: "utf8" }).trim() ===
+    "true";
+  if (shallow) {
+    assert.throws(() => defaultMergeEvidenceLog(REPO_ROOT), /shallow/, "a shallow checkout must refuse by name");
+    return;
+  }
+  // The repo's history is guaranteed to carry at least one Remudero-Task trailer (the dominant
+  // merge idiom here).
   const { dump, ref } = defaultMergeEvidenceLog(REPO_ROOT);
   assert.equal(ref, "origin/main");
   assert.ok(dump.includes("\x01"), "dump must be %x01-delimited");
