@@ -60,6 +60,7 @@
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
+import type { IncomingMessage } from "node:http";
 import { loadPlan, parseTasksFromYaml, PlanError, unmetDependencies, type MergedResolver, type Plan, type Task } from "./plan.js";
 import {
   projectPlan,
@@ -89,6 +90,15 @@ import type { LandFeedbackOpts } from "./feedback-landing.js";
 import { renderTraceChain, traceForward, traceReverse, type TraceChain, type TraceGithub } from "./trace.js";
 import type { Route } from "./service.js";
 import { appendPanelLedger, bearerTokenId, isRecord, jsonAction, sendJson } from "./panel-actions.js";
+import { appendDailyCostCeilingOverrideAudit } from "./ledger.js";
+import {
+  clearDailyCostCeilingOverride,
+  loadDefaultPolicy,
+  PolicyError,
+  resolveDailyCostCeiling,
+  writeDailyCostCeilingOverride,
+  type Policy,
+} from "./policy.js";
 import {
   classifyProposal,
   gitGrepAnchorTrue,
@@ -162,6 +172,17 @@ export interface PanelGraphDeps {
    * "outage" read identically to the console.
    */
   expandFeedback?: FeedbackExpanderDeps["expand"];
+  /**
+   * W1-T364: injectable `Policy` for POST /v1/policy/daily-cost-ceiling(/clear) — the SAME
+   * `deps.policy ??` seam `account-usage.ts`'s `AccountUsageDeps.policy` and run-task.ts's
+   * `dailyCostCeilingReloader` already offer (test/config-reader-seams.test.ts's structural
+   * lock), so a test supplies a fixture `Policy` (e.g. a tightened `sweep.dailyCostCeilingUsd`
+   * bound) without touching the installed `plan/policy.yaml`. Defaults to
+   * {@link import("./policy.js").loadDefaultPolicy} when omitted — the SAME memoized load
+   * `buildAccountUsageRoute` defaults to, so the console's read and write surfaces never disagree
+   * about the committed bound within one `rmd serve` process.
+   */
+  policy?: Policy;
 }
 
 // ── GET /v1/feedback — the inbox list ───────────────────────────────────────
@@ -1118,6 +1139,122 @@ export function buildReframeProposalRoute(deps: PanelGraphDeps): Route {
   };
 }
 
+// ── POST /v1/policy/daily-cost-ceiling, POST /v1/policy/daily-cost-ceiling/clear ────────────
+// W1-T364: THE OPERATOR'S OWN WRITE CONTROL over the daily-cost-ceiling override (W1-T332's
+// store) — before this route existed, the ONLY writer of `state/DAILY_COST_CEILING_OVERRIDE`
+// was the store's own unit test, so the value the operator most plausibly wants to move under
+// pressure (it fired for the first time ever this week and stopped dispatch for ~40 minutes)
+// still required a PR and a deploy, the exact thing OPERATOR RULING 2026-08-04 (policy.ts's own
+// header) exists to end.
+//
+// GATED ON W1-T363 (now shipped, #1410, verified from source): `dailyCostCeilingReloader`
+// (run-task.ts) resolves the EFFECTIVE ceiling through `resolveDailyCostCeiling` freshly on
+// EVERY tick, never a cached/boot-time value, so a write through this route takes effect on the
+// daemon's very next tick — no restart required. Landing this route before W1-T363 would have
+// been a write surface over a value nothing enforced, the display-vs-enforcement lie this task's
+// own design note names.
+//
+// ONE ROUTE, ONE CONTROL, THE STORE'S OWN VALIDATION (design note i): neither handler below
+// duplicates `writeDailyCostCeilingOverride`'s bounds check — a `PolicyError` it throws maps
+// straight to a 400 carrying its own message, never a second hand-rolled range check that could
+// drift from the committed `policy.bounds["sweep.dailyCostCeilingUsd"]` row.
+//
+// `deps.root` (never `inboxRoot`) is the SAME `repoRoot` `dailyCostCeilingReloader` resolves
+// `state/` against — the same root every other route in this module already reads/writes
+// against, never a second, independently-resolved root for this one store.
+
+interface SetDailyCostCeilingInput {
+  usd: number;
+}
+
+function validateSetDailyCostCeiling(body: unknown): { error: string } | SetDailyCostCeilingInput {
+  if (!isRecord(body)) return { error: "body must be a JSON object" };
+  if (typeof body.usd !== "number") return { error: "usd must be a number" };
+  return { usd: body.usd };
+}
+
+/**
+ * Ledgers the who/from/to/effective audit trail for one console write to the daily-cost-ceiling
+ * override (ledger.ts's `appendDailyCostCeilingOverrideAudit`, W1-T333's `console.
+ * ceiling_override_written` step, the primitive that function's own doc names THIS route as the
+ * intended caller of) — shared by the set and clear handlers below so the two routes can never
+ * record it two different ways. `fromUsd` is the EFFECTIVE value immediately before this write
+ * (never the raw override-file content), so a write that follows a fallback-from-malformed read
+ * still records an accurate "from". `taskId: "_console"` matches the sentinel
+ * test/ledger-render-retention.test.ts's own coverage of this primitive already uses; `who` is
+ * the SAME `bearerTokenId` hash every other panel write route ledgers as `origin`.
+ */
+function ledgerCeilingAudit(deps: Pick<PanelGraphDeps, "ledgerPath">, req: IncomingMessage, fromUsd: number, toUsd: number, effectiveUsd: number): void {
+  appendDailyCostCeilingOverrideAudit(deps.ledgerPath, {
+    runId: `CEILING-${Date.now()}`,
+    taskId: "_console",
+    who: bearerTokenId(req),
+    fromUsd,
+    toUsd,
+    effectiveUsd,
+  });
+}
+
+/** Shared by both handlers below so the `deps.policy ??` seam (test/config-reader-seams.test.ts's
+ *  structural lock) appears exactly ONCE in this file's source, never duplicated per route. */
+function ceilingPolicy(deps: Pick<PanelGraphDeps, "policy">): Policy {
+  return deps.policy ?? loadDefaultPolicy();
+}
+
+/**
+ * POST /v1/policy/daily-cost-ceiling — write-scoped. Sets `state/DAILY_COST_CEILING_OVERRIDE` to
+ * `{usd}` via the store's own writer (policy.ts's `writeDailyCostCeilingOverride`), which
+ * validates against the committed row's bounds and refuses out-of-range at write time — this
+ * route adds NO bounds check of its own (design note i above). Responds with the RESOLVED
+ * effective ceiling (never the raw input echoed back), so a write the store could not honor is
+ * never misreported as having taken hold.
+ */
+export function buildSetDailyCostCeilingRoute(deps: PanelGraphDeps): Route {
+  return {
+    method: "POST",
+    path: "/v1/policy/daily-cost-ceiling",
+    scope: "write",
+    handler: jsonAction(validateSetDailyCostCeiling, (input, req, res) => {
+      const policy = ceilingPolicy(deps);
+      const before = resolveDailyCostCeiling(deps.root, policy);
+      try {
+        writeDailyCostCeilingOverride(deps.root, input.usd, policy);
+      } catch (err) {
+        if (err instanceof PolicyError) {
+          sendJson(res, 400, { error: "invalid_request", detail: err.message });
+          return;
+        }
+        throw err;
+      }
+      const after = resolveDailyCostCeiling(deps.root, policy);
+      ledgerCeilingAudit(deps, req, before.usd, input.usd, after.usd);
+      sendJson(res, 200, { ok: true, usd: after.usd, provenance: after.provenance, committedDefaultUsd: after.committedDefaultUsd });
+    }),
+  };
+}
+
+/**
+ * POST /v1/policy/daily-cost-ceiling/clear — write-scoped, no body required. Clears
+ * `state/DAILY_COST_CEILING_OVERRIDE` via the store's own `clearDailyCostCeilingOverride`
+ * (idempotent — clearing an already-absent override is not an error), reverting the effective
+ * ceiling to the committed `plan/policy.yaml` default.
+ */
+export function buildClearDailyCostCeilingRoute(deps: PanelGraphDeps): Route {
+  return {
+    method: "POST",
+    path: "/v1/policy/daily-cost-ceiling/clear",
+    scope: "write",
+    handler: async (req, res) => {
+      const policy = ceilingPolicy(deps);
+      const before = resolveDailyCostCeiling(deps.root, policy);
+      clearDailyCostCeilingOverride(deps.root);
+      const after = resolveDailyCostCeiling(deps.root, policy);
+      ledgerCeilingAudit(deps, req, before.usd, after.committedDefaultUsd, after.usd);
+      sendJson(res, 200, { ok: true, usd: after.usd, provenance: after.provenance, committedDefaultUsd: after.committedDefaultUsd });
+    },
+  };
+}
+
 /** Every panel graph route, for a caller registering the full set at once (`rmd serve` wiring). */
 export function buildPanelGraphRoutes(deps: PanelGraphDeps): Route[] {
   return [
@@ -1131,5 +1268,7 @@ export function buildPanelGraphRoutes(deps: PanelGraphDeps): Route[] {
     buildInboxRoute(deps),
     buildApproveProposalRoute(deps),
     buildReframeProposalRoute(deps),
+    buildSetDailyCostCeilingRoute(deps),
+    buildClearDailyCostCeilingRoute(deps),
   ];
 }

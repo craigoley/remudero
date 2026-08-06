@@ -12,6 +12,7 @@ import type { Plan } from "../src/lib/plan.js";
 import type { GitHub } from "../src/lib/status.js";
 import type { TraceGithub } from "../src/lib/trace.js";
 import type { RatifyCliGateway } from "../src/lib/panel-graph.js";
+import { dailyCostCeilingOverridePath } from "../src/lib/policy.js";
 
 // ── WHAT THIS SUITE ADDS, AND WHY IT IS NOT test/route-registration.test.ts AGAIN.
 //
@@ -59,8 +60,12 @@ const WRITE_TOKEN = "route-wiring-write-token";
 //   4. POST /v1/drain/kick                dispatches a task: real spend, or a dead button
 //   5. POST /v1/drain/run                 same, fleet-wide
 //   6. POST /v1/questions/answer          the MEASURED misrooting hazard; a blocked worker never unblocks
+//   7. POST /v1/policy/daily-cost-ceiling(/clear)   W1-T364: the operator believes he moved the spend
+//      ceiling; a misrooted write leaves dailyCostCeilingReloader (run-task.ts, repoRoot-scoped)
+//      never seeing it — the exact display-vs-enforcement lie the task's own design note names, the
+//      same asymmetry class as #6 (a THIRD route rooted at questionsRoot, not fleetControlRoot).
 //
-// Covered here: all six. Deliberately deferred (see COVERAGE_DEBT below): the lower-consequence
+// Covered here: all seven. Deliberately deferred (see COVERAGE_DEBT below): the lower-consequence
 // write routes, which either need a plan/inbox fixture or cannot strand the fleet.
 
 /** Write routes not yet wiring-tested, each with the reason. The ledger test below fails when a NEW
@@ -87,6 +92,8 @@ const COVERED: ReadonlySet<string> = new Set([
   "POST /v1/drain/kick",
   "POST /v1/drain/run",
   "POST /v1/questions/answer",
+  "POST /v1/policy/daily-cost-ceiling",
+  "POST /v1/policy/daily-cost-ceiling/clear",
 ]);
 
 // ── Production-shaped assembly ───────────────────────────────────────────────
@@ -327,6 +334,52 @@ test("POST /v1/questions/answer writes questions.ndjson under questionsRoot, not
     const steps = ledgerSteps(h.ledgerPath).filter((s) => s.step === "panel.question_answered");
     assert.equal(steps.length, 1);
     assert.equal(steps[0].recorded_to_question_store, true);
+  });
+});
+
+// ── 7. W1-T364 — the daily-cost-ceiling override write control ──────────────
+
+test("POST /v1/policy/daily-cost-ceiling writes state/DAILY_COST_CEILING_OVERRIDE under panelGraph.root (questionsRoot here, repoRoot in production), not fleetControlRoot", async () => {
+  await withProductionServer(async (h) => {
+    const res = await post(h.base, "/v1/policy/daily-cost-ceiling", { usd: 900 });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { provenance: string; usd: number };
+    assert.equal(body.provenance, "overridden");
+    assert.equal(body.usd, 900);
+
+    // THE ASYMMETRY THAT MATTERS, same class as POST /v1/questions/answer above:
+    // dailyCostCeilingReloader (run-task.ts, W1-T363) resolves state/DAILY_COST_CEILING_OVERRIDE
+    // against `repoRoot` on every daemon tick, and panelGraph.root IS repoRoot in production (this
+    // route's own header). A write landing at fleetControlRoot instead would report ok:true to the
+    // operator while the daemon's governor never saw it -- the exact display-vs-enforcement lie
+    // W1-T364's own design note exists to close.
+    assert.ok(existsSync(dailyCostCeilingOverridePath(h.questionsRoot)), "the override must be written under panelGraph.root (questionsRoot here)");
+    assert.ok(
+      !existsSync(dailyCostCeilingOverridePath(h.fleetRoot)),
+      "the override must NOT be written under fleetControlRoot — that is the misrooting this asserts against",
+    );
+
+    const steps = ledgerSteps(h.ledgerPath).filter((s) => s.step === "console.ceiling_override_written");
+    assert.equal(steps.length, 1);
+    assert.equal(steps[0].to_usd, 900);
+    assert.equal(steps[0].effective_usd, 900);
+  });
+});
+
+test("POST /v1/policy/daily-cost-ceiling/clear removes state/DAILY_COST_CEILING_OVERRIDE under panelGraph.root, reverting to the committed default", async () => {
+  await withProductionServer(async (h) => {
+    const set = await post(h.base, "/v1/policy/daily-cost-ceiling", { usd: 900 });
+    assert.equal(set.status, 200);
+    assert.ok(existsSync(dailyCostCeilingOverridePath(h.questionsRoot)));
+
+    const res = await post(h.base, "/v1/policy/daily-cost-ceiling/clear", {});
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { provenance: string };
+    assert.equal(body.provenance, "default");
+    assert.ok(!existsSync(dailyCostCeilingOverridePath(h.questionsRoot)), "the override file must be removed under panelGraph.root");
+
+    const steps = ledgerSteps(h.ledgerPath).filter((s) => s.step === "console.ceiling_override_written");
+    assert.equal(steps.length, 2, "one line for the set, one for the clear");
   });
 });
 
