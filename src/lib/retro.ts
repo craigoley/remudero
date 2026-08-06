@@ -1219,10 +1219,23 @@ export function renderGather(g: RetroGather): string {
 // PR's own edit) and turns every violation into a named corrective-task
 // proposal for the Architect's plan-only PR to act on.
 
-/** Statuses that mean a task has already shipped — everything else is OPEN
- *  and in scope for the plan-health sweep (mirrors plan.ts's own merged set,
- *  kept local since plan.ts does not export it). */
+/** Statuses that mean a task has already shipped, READ FROM THE DECORATIVE yaml `status:`
+ *  field — plan/tasks.yaml's own header ("STATUS MODEL") is explicit that this field is
+ *  initial-state only and the runner never writes it back; real merge-state is DERIVED FROM
+ *  GITHUB. Scoped to {@link yamlMergedFallback}, itself scoped to pure unit tests over
+ *  fixtures ONLY (mirrors plan.ts's own `yamlStatusMerged`/`MergedResolver` convention
+ *  exactly — see that module's `unmetDependencies`/`assertRunnable`). W1-T367 MEASURED why a
+ *  production reader must never trust this set: at cdf885a the yaml credited only 2 of 359
+ *  tasks merged/done, so a skip keyed on it cleared 2 and left the sweep re-linting 357 tasks
+ *  a run, 248 of them already shipped. {@link planHealthSweep}'s real caller
+ *  (`planHealthSweepSectionFor`, run-task.ts) always passes an explicit derived `isMerged`. */
 const CLOSED_TASK_STATUSES = new Set(["merged", "done"]);
+
+/** See {@link CLOSED_TASK_STATUSES}'s doc — the pure-unit-test-only default {@link planHealthSweep}
+ *  falls back to when no derived `isMerged` is supplied. */
+function yamlMergedFallback(task: Task): boolean {
+  return CLOSED_TASK_STATUSES.has(task.status);
+}
 
 /** One OPEN task the sweep found in violation, with its BLOCKING violations only
  *  (a WARN, e.g. budget-sanity, is visibility-only and never files a corrective task). */
@@ -1256,15 +1269,28 @@ export interface PlanHealthReport {
  * nothing). Pure: no I/O, no plan/tasks.yaml write — the corrective tasks are
  * PROPOSALS the retro's Architect stage files, same discipline as the
  * `learnings/` corpus shards never being hand-edited outside a reviewed PR.
+ *
+ * W1-T367: "already shipped" is decided by `isMerged`, NEVER by reading the decorative yaml
+ * `status:` field in production — see {@link CLOSED_TASK_STATUSES}'s doc for the measured
+ * defect (248/359 merged tasks re-linted every run) a yaml-trusting skip produced. `isMerged`
+ * defaults to {@link yamlMergedFallback} ONLY so this stays callable from a pure unit test
+ * over a plain fixture with no GitHub/projection in hand; the real caller
+ * (`planHealthSweepSectionFor`, run-task.ts) always passes an explicit resolver derived from
+ * `projectPlan`'s batched GitHub read — the same derived merge-state the dispatch path gates
+ * on (src/run-task.ts's `runTask`). An indeterminate/unresolved read is safe to leave IN
+ * scope here (worst case: one extra advisory-only corrective-task proposal for the Architect
+ * to see and discard — never an auto-applied action), unlike the SHIPS-UNWIRED floor's
+ * opposite direction (see `openTaskIdsFromPlan`'s doc).
  */
 export function planHealthSweep(
   tasks: Task[],
   optsFor: (task: Task) => LintOpts = () => ({}),
+  isMerged: (task: Task) => boolean = yamlMergedFallback,
 ): PlanHealthReport {
   const flags: PlanHealthFlag[] = [];
   const correctiveTasks: CorrectiveTaskProposal[] = [];
   for (const task of tasks) {
-    if (CLOSED_TASK_STATUSES.has(task.status)) continue; // out of scope — already shipped
+    if (isMerged(task)) continue; // out of scope — already shipped (derived; see doc above)
     const { violations } = lintTask(task, optsFor(task));
     const blocking = violations.filter((v) => v.severity === "block");
     if (blocking.length === 0) continue; // clean, or WARN-only — nothing to file

@@ -106,6 +106,13 @@ export function buildTaskCard(task: Task, projection: StatusProjection | undefin
     rationale: task.rationale,
     acceptance: task.acceptance ?? [],
     dependsOn: task.depends_on,
+    // W1-T367 CONFIRMED this shape unchanged: `projection` (derived from GitHub) is read FIRST,
+    // and the decorative yaml `status:` field is a stated FALLBACK only, used when no projection
+    // resolved for this task at all (e.g. a task id absent from `state/status.json`'s cache) —
+    // never the other way around. A later reader must not "simplify" this to a bare `task.status`
+    // read: that is exactly the yaml-trusting shape W1-T367 found and fixed in
+    // `planHealthSweep`/`openTaskIdsFromPlan`, both of which wrongly treated a DECORATIVE,
+    // initial-state-only field as CURRENT state.
     status: projection?.status ?? task.status,
     merged: projection?.merged ?? false,
     prNumber: projection?.prNumber,
