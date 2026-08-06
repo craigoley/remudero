@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -20,8 +20,14 @@ import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { runDrain, type DrainDeps, type DrainSummary, type MergedSet } from "../src/lib/drain.js";
 import { runDaemon, checkDispatchGovernors, type DaemonDeps, type DaemonSummary } from "../src/lib/daemon.js";
 import type { Config } from "../src/lib/config.js";
-import { drainCommand, daemonCommand, dailyCostCeilingReloader } from "../src/run-task.js";
-import { loadDefaultPolicy, type Policy } from "../src/lib/policy.js";
+import { drainCommand, daemonCommand, dailyCostCeilingReloader, resolveRepoRoot } from "../src/run-task.js";
+import {
+  loadDefaultPolicy,
+  writeDailyCostCeilingOverride,
+  clearDailyCostCeilingOverride,
+  dailyCostCeilingOverridePath,
+  type Policy,
+} from "../src/lib/policy.js";
 
 // ── W1-T148 COST GOVERNOR — a daily spend ceiling as policy data; new
 // DISPATCH waits (ledgered dispatch_deferred_budget) when the day's ledgered
@@ -555,6 +561,42 @@ test("W1-T331: dailyCostCeilingReloader resolves its ceiling from the CURRENT in
 test("W1-T331: dailyCostCeilingReloader with no injected policy reads the REAL checked-in plan/policy.yaml (repoRoot-scoped), the same value DEFAULT_SWEEP_POLICY carries", () => {
   const reload = dailyCostCeilingReloader();
   assert.equal(reload(), DEFAULT_SWEEP_POLICY.dailyCostCeilingUsd);
+});
+
+// ── W1-T363: the daily-ceiling override store (W1-T332) is a CONSUMER of dailyCostCeilingReloader,
+// not just of the console's provenance render (W1-T333) — a `state/DAILY_COST_CEILING_OVERRIDE`
+// written for the repo the daemon actually reads from must move the SAME reloader's return value,
+// on the very next call, with no restart. Before this task the reloader read
+// `policy.values.sweep.dailyCostCeilingUsd` directly and this override was inert to it.
+test("W1-T363: dailyCostCeilingReloader picks up a written state/DAILY_COST_CEILING_OVERRIDE on its very next call — the override store is no longer inert to the governor", () => {
+  const policy = loadDefaultPolicy();
+  const root = resolveRepoRoot(process.argv.slice(2), process.cwd()); // SAME construction run-task.ts's module-level `repoRoot` uses
+  const overridePath = dailyCostCeilingOverridePath(root);
+  const hadPriorOverride = existsSync(overridePath);
+  const priorOverrideContents = hadPriorOverride ? readFileSync(overridePath, "utf8") : undefined;
+  try {
+    const reload = dailyCostCeilingReloader();
+    const committedDefault = reload();
+    assert.notEqual(committedDefault, 137, "fixture value must differ from whatever the committed default happens to be");
+
+    writeDailyCostCeilingOverride(root, 137, policy);
+    assert.equal(
+      reload(),
+      137,
+      "the SAME reloader, called again after an override was written, returns the OVERRIDDEN value — proving " +
+        "the governor's per-tick read now goes through resolveDailyCostCeiling instead of the raw committed row",
+    );
+
+    clearDailyCostCeilingOverride(root);
+    assert.equal(
+      reload(),
+      committedDefault,
+      "clearing the override reverts the reloader's next call to the committed default, matching resolveDailyCostCeiling's precedence rule",
+    );
+  } finally {
+    if (hadPriorOverride) writeFileSync(overridePath, priorOverrideContents!);
+    else clearDailyCostCeilingOverride(root);
+  }
 });
 
 // ── W1-T331 acceptance 1: the ceiling is resolved from the loaded policy PER CONSULTATION,
