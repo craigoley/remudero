@@ -1,0 +1,30 @@
+id: fb-1786006232525-6d94d8
+ts: 2026-08-06T08:50:32.525Z
+raw: "THREE CORRECTIONS FROM THE 07:25Z MONITOR, TWO OF THEM TO CLAIMS I
+  PROPAGATED. (1) rmd IS NOT A PURE READER. checkCliFreshness in
+  src/lib/self-sync.ts runs git merge --ff-only origin/main on a
+  clean-and-behind checkout, so ANY rmd verb — including status, lint-plan and
+  check-proof — mutates the checkout by fast-forwarding it. Every operator brief
+  this week called those three pure readers and permitted them under a live
+  worker; that was wrong, and a verb run at the wrong moment takes a pull the
+  deploy owns. RMD_SELF_SYNC_DONE=1 is the read-only form and should be the
+  documented idiom. (2) NOTHING HAND-RAN deploy-run --dry-run AT 22:43Z. The
+  scheduled loop reached its own dry-run branch after the idle ceiling forced
+  it. Only TWO deploy.dry_run lines exist in all history, archive-controlled.
+  Two feedback entries (fb-1785954227448-7b2bb0 and W1-T380's shard) record an
+  unexplained caller; there is none, and that gap should be closed rather than
+  left open. (3) #1392 DID NOT FIRE AT 01:01Z. That was a real forced deploy
+  that kickstarted. Its observable retained_wait_ms has ZERO occurrences in the
+  union — the fix remains UNEXERCISED in production, and my earlier report of
+  'confirmed in production' was wrong. RECON: for (1), establish every
+  operator-facing doc and prompt template that calls an rmd verb a pure reader,
+  and whether the fast-forward should be opt-in rather than opt-out for read
+  verbs — a linter that moves your HEAD is a surprising instrument. Falsifying
+  check for (3): if a dry-run occurs after #1392 merged and retained_wait_ms is
+  non-zero, the fix is confirmed and only the earlier claim was premature."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null
+expansion: null
