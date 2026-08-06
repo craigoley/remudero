@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
@@ -49,6 +49,35 @@ test("acquireInflightLock: a 2nd run of the SAME task with a LIVE holder REFUSES
     assert.match(de.message, /W1-T7-1784074904419/, "names the holder run_id");
 
     h1.release();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// W1-T368: the strengthened isHolderStale predicate must still honour a GENUINELY live
+// holder — same host as this process, and a real start time that precedes the lock's own
+// startedAt — not merely one that survives via the host-mismatch short-circuit the other
+// fixtures in this file lean on (their placeholder "boxA"/"boxB" hosts).
+test("acquireInflightLock: a lock whose holder is on THIS host with a start time PRECEDING the lock is honoured — refuses a 2nd acquire", () => {
+  const dir = tmp();
+  try {
+    const lockStart = "2026-08-01T12:00:00.000Z";
+    const earlierStart = "2026-08-01T00:00:00.000Z"; // the holder started BEFORE writing the lock
+    acquireInflightLock(dir, "W1-T7", {
+      run_id: "genuine",
+      info: { pid: 4242, host: hostname(), startedAt: lockStart },
+    });
+    let err: unknown;
+    try {
+      acquireInflightLock(dir, "W1-T7", {
+        run_id: "second",
+        isPidAlive: () => true,
+        getProcessStartTime: (pid) => (pid === 4242 ? Date.parse(earlierStart) : null),
+      });
+    } catch (e) {
+      err = e;
+    }
+    assert.ok(err instanceof InflightLockError, "the genuine holder's lock must still refuse a 2nd acquire");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

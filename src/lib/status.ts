@@ -17,6 +17,7 @@ import { dirname } from "node:path";
 import type { Plan, Task, TaskStatus } from "./plan.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { labelledIssuesRestArgs, NEEDS_HUMAN_LABEL, parseLabelledIssuesRest } from "./escalate.js";
+import { isHolderStale } from "./fs-race-safe.js";
 import { type BoardPrRest, fetchBoardPrsRest } from "./open-prs-rest.js";
 
 /**
@@ -514,20 +515,29 @@ export interface DeriveDeps {
    * days). It is therefore paired with {@link DeriveDeps.isPidAlive} below, which is the same
    * `isStale` predicate `reclaimStaleLock` already conditions its own reclaim on.
    */
-  inflightHolder?: (taskId: string) => { pid: number } | null;
+  inflightHolder?: (taskId: string) => { pid: number; host?: string; startedAt?: string } | null;
   /**
    * Liveness probe for {@link DeriveDeps.inflightHolder}'s pid; defaults to
    * {@link defaultIsPidAlive} (`kill(pid, 0)`, treating `EPERM` as alive). Injectable so a
    * test can assert the dead-holder arm without spawning a process.
    *
-   * ITS LIMIT, STATED RATHER THAN DISCOVERED: `kern.maxproc` is 4000 on the fleet host, so the
-   * pid space wraps often and a recycled pid makes a dead holder read as live. The lock's own
-   * `startedAt` is never compared against a ceiling and its `host` is never compared at all
-   * (both are recorded, neither is read) — so this disjunct is a REASON TO BELIEVE a run is
-   * live, never proof, which is exactly why it is a third disjunct beside the other two and
-   * never a replacement for them.
+   * W1-T368: no longer the WHOLE story. `kern.maxproc` is 4000 on the fleet host, so the pid
+   * space wraps often and a recycled pid used to make a dead holder read as live forever — this
+   * probe alone never distinguished "some process owns this number" from "the process that wrote
+   * the lock owns it". `deriveStatus` now runs it through the same {@link isHolderStale} every
+   * `reclaimStaleLock` caller shares (paired with {@link DeriveDeps.getProcessStartTime} below),
+   * so a holder whose `host`/`startedAt` don't check out is judged stale even while this probe
+   * alone would still say alive. It remains a REASON TO BELIEVE a run is live, never proof —
+   * which is exactly why it is a third disjunct beside the other two and never a replacement.
    */
   isPidAlive?: (pid: number) => boolean;
+  /**
+   * Process-start-time probe for {@link DeriveDeps.inflightHolder}'s `startedAt` comparison —
+   * forwarded to {@link isHolderStale}. Defaults to
+   * {@link import("./fs-race-safe.js").defaultGetProcessStartTime}. Injectable so a test can
+   * assert the pid-reuse arm without a real subprocess or a real pid wrap.
+   */
+  getProcessStartTime?: (pid: number) => number | null;
 }
 
 /**
@@ -1682,14 +1692,18 @@ export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
       const livenessBoundMs = deps.livenessBoundMs ?? DEFAULT_LIVENESS_BOUND_MS;
       const recentActivity =
         runState.lastActivityTs !== undefined && now() - Date.parse(runState.lastActivityTs) <= livenessBoundMs;
-      // THE THIRD DISJUNCT (see DeriveDeps.inflightHolder): a HELD lock whose recorded pid is
-      // STILL ALIVE. Both halves are required and neither is sufficient — the lock alone
-      // survives its own process (no signal handlers exist, so SIGKILL and SIGTERM both strand
-      // the file), and a pid alone names nothing about this task. Absent `inflightHolder` the
-      // whole disjunct is skipped, leaving the prior two-disjunct behaviour byte-for-byte.
+      // THE THIRD DISJUNCT (see DeriveDeps.inflightHolder): a HELD lock whose recorded holder
+      // is judged STILL ALIVE by isHolderStale (W1-T368: pid liveness alone is not enough — a
+      // recycled pid must not count). Both halves are required and neither is sufficient — the
+      // lock alone survives its own process (no signal handlers exist, so SIGKILL and SIGTERM
+      // both strand the file), and a live pid alone names nothing about this task. Absent
+      // `inflightHolder` the whole disjunct is skipped, leaving the prior two-disjunct behaviour
+      // byte-for-byte.
       const holder = deps.inflightHolder?.(task.id) ?? null;
       const isPidAlive = deps.isPidAlive ?? defaultIsPidAlive;
-      const hasLiveLock = holder !== null && isPidAlive(holder.pid);
+      const hasLiveLock =
+        holder !== null &&
+        !isHolderStale(holder, { isPidAlive, getProcessStartTime: deps.getProcessStartTime });
       if (hasOpenPr || recentActivity || hasLiveLock) {
         projection.status = "running";
         projection.phase = runState.phase;

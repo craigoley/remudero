@@ -1,4 +1,6 @@
+import { execFileSync } from "node:child_process";
 import { closeSync, fstatSync, openSync, readFileSync, statSync, unlinkSync } from "node:fs";
+import { hostname } from "node:os";
 
 /**
  * The `js/file-system-race`-safe idiom this repo has now shipped for a state file that is
@@ -281,4 +283,141 @@ export function reclaimStaleLock<Holder>(
     return { outcome: "lost" };
   }
   return { outcome: "reclaimed" };
+}
+
+// ── isHolderStale: THE ONE PREDICATE for "does this lock still name a real holder?" ──
+//
+// W1-T368. A bare `!isAlive(held.pid)` (the `isStale` every `reclaimStaleLock` call site
+// used before this) answers "is SOME process currently using this number", never "is it the
+// SAME process that wrote the lock". The pid space wraps (measured on the fleet host:
+// kern.maxproc 4000, kern.maxprocperuid 2666), so a dead holder's number gets reissued in the
+// ordinary course of things — and when that happens the recycled pid reads as LIVE forever,
+// which both refuses every future acquire of the task it names (acquireInflightLock throws)
+// and renders a dead run as RUNNING on the console (deriveStatus's third disjunct). Neither
+// other field the lock already carries was ever compared: `host` not at all, `startedAt` never
+// against anything.
+
+/** The identity a lock file already records for its holder — the subset every consumer's
+ *  parsed holder type (`InflightLockInfo`, `DrainLockInfo`, ...) structurally satisfies. */
+export interface HolderIdentity {
+  pid: number;
+  /** `os.hostname()` of the process that wrote the lock, when the caller's holder shape
+   *  records one. Absent ⇒ the host check below is skipped (pre-W1-T368 behaviour). */
+  host?: string;
+  /** ISO timestamp the holder wrote when it created the lock. Absent ⇒ the start-time check
+   *  below is skipped (pre-W1-T368 behaviour). */
+  startedAt?: string;
+}
+
+export interface IsHolderStaleOpts {
+  /** True when `held.pid` names a process that exists RIGHT NOW — says nothing about whether
+   *  it is the process that wrote the lock. Required: every call site already has one (its own
+   *  `defaultIsPidAlive` or an injected test double). */
+  isPidAlive: (pid: number) => boolean;
+  /** Epoch ms `held.pid` actually started, or `null` when indeterminate (probe failed, `held.pid`
+   *  is already dead, platform mechanism unavailable). Defaults to {@link defaultGetProcessStartTime}. */
+  getProcessStartTime?: (pid: number) => number | null;
+  /** This host's own identity, for comparison against `held.host`. Defaults to `os.hostname()`;
+   *  injectable so a test can simulate "the lock names a different host" without controlling the
+   *  real machine name. */
+  hostname?: () => string;
+}
+
+/** A live pid's start time is trusted to within this many ms of the lock's own `startedAt`
+ *  before the gap counts as reuse rather than probe noise. `ps -o etime=` only has whole-second
+ *  resolution, while `startedAt` is an ISO timestamp with milliseconds — NOT a clock-skew
+ *  allowance (the host check already refuses to compare start times across hosts at all). */
+const STALE_START_TOLERANCE_MS = 2000;
+
+/**
+ * Is `held` stale — safe to reclaim, sweep, or treat as not-running — rather than a genuinely
+ * live holder? The ONE predicate every `reclaimStaleLock` caller and `deriveStatus`'s own
+ * inflight-lock disjunct now share (previously each kept its own copy of the weaker
+ * pid-only check).
+ *
+ * THREE RUNGS, in order, each ANSWERING what it can and DEFERRING what it can't:
+ *   1. `held.pid` is dead ⇒ stale. Unchanged from before this task — the common case.
+ *   2. `held.pid` is alive, but `held.host` names a DIFFERENT host than this one: a pid is only
+ *      ever meaningful on the host that assigned it, so `isPidAlive`'s answer describes an
+ *      unrelated number in OUR process table, not the recorded holder's. Unresolvable from
+ *      here ⇒ NOT judged stale (never reap a lock this process cannot actually verify —
+ *      the same direction of caution `reclaimStaleLock`'s own "lost" outcome already takes).
+ *   3. `held.pid` is alive on OUR host: compare its ACTUAL start time against `held.startedAt`.
+ *      A pid reused by a new process necessarily starts AFTER the original holder wrote the
+ *      lock (the original had to be running, and write the file, before it could die and free
+ *      the number) — so "this pid started later than the lock claims" is exactly the reuse
+ *      signal, decidable without waiting for a real wrap. If the start time can't be determined
+ *      (probe failure — the pid could have died in the gap between rungs 1 and 3, `ps` missing,
+ *      unparseable output), that is NOT evidence of staleness, so this rung defers too.
+ *
+ * HONEST ABOUT THE REMAINING WINDOW: this is still a REASON TO BELIEVE the holder is alive,
+ * never proof. A cross-host lock is trusted with no verification at all (rung 2), and a
+ * same-host reused pid that starts within `STALE_START_TOLERANCE_MS` of the original is
+ * indistinguishable from the original (rung 3's whole-second `ps` resolution).
+ */
+export function isHolderStale(held: HolderIdentity, opts: IsHolderStaleOpts): boolean {
+  if (!opts.isPidAlive(held.pid)) return true;
+
+  if (held.host !== undefined) {
+    const myHost = (opts.hostname ?? hostname)();
+    if (held.host !== myHost) return false; // rung 2: unverifiable from here, so not stale
+  }
+
+  if (held.startedAt !== undefined) {
+    const getStart = opts.getProcessStartTime ?? defaultGetProcessStartTime;
+    const liveStart = getStart(held.pid);
+    if (liveStart !== null) {
+      const lockStart = Date.parse(held.startedAt);
+      if (!Number.isNaN(lockStart) && liveStart - lockStart > STALE_START_TOLERANCE_MS) {
+        return true; // rung 3: this pid started AFTER the lock — a different, newer process
+      }
+    }
+  }
+
+  return false;
+}
+
+/** The one syscall {@link defaultGetProcessStartTime} makes, injectable so a test can drive
+ *  its parsing/error handling without a real subprocess (mirrors {@link FsRaceSyscalls}). */
+export interface ProcessStartTimeSyscalls {
+  execFileSync: typeof execFileSync;
+}
+
+const defaultProcessStartTimeSyscalls: ProcessStartTimeSyscalls = { execFileSync };
+
+/** `ps -o etime=`'s `[[DD-]HH:]MM:SS` elapsed-time format, in ms — or `null` for anything that
+ *  doesn't match (never thrown: an unrecognized shape is indeterminate, not an error). */
+function parseEtimeToMs(etime: string): number | null {
+  const m = etime.trim().match(/^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$/);
+  if (!m) return null;
+  const days = m[1] ? parseInt(m[1], 10) : 0;
+  const hours = m[2] ? parseInt(m[2], 10) : 0;
+  const minutes = parseInt(m[3], 10);
+  const seconds = parseInt(m[4], 10);
+  return (((days * 24 + hours) * 60 + minutes) * 60 + seconds) * 1000;
+}
+
+/**
+ * Default {@link IsHolderStaleOpts.getProcessStartTime}: shells out to `ps -o etime=`, whose
+ * `[[DD-]HH:]MM:SS` elapsed-time column is the ONE process-age mechanism common to this repo's
+ * two real platforms — verified directly rather than assumed: BSD `ps` (macOS, the dev host)
+ * and GNU `ps` (`ubuntu-latest`, this repo's CI) both accept `-o etime=`, while GNU-only
+ * `etimes`/`lstart` formatting differs enough between the two that elapsed time (this process's
+ * age, computed against `Date.now()`) was chosen over wall-clock start time (which would need
+ * locale-safe parsing of BSD's `lstart` string) to stay portable. Returns `null` — indeterminate,
+ * NOT "dead" — for a pid `ps` can't find, a `ps` binary that isn't on PATH, or output this
+ * doesn't recognize; {@link isHolderStale} already treats `null` as "no evidence either way".
+ */
+export function defaultGetProcessStartTime(
+  pid: number,
+  sysImpl: ProcessStartTimeSyscalls = defaultProcessStartTimeSyscalls,
+): number | null {
+  let raw: string;
+  try {
+    raw = sysImpl.execFileSync("ps", ["-o", "etime=", "-p", String(pid)], { encoding: "utf8" }) as string;
+  } catch {
+    return null;
+  }
+  const elapsedMs = parseEtimeToMs(raw);
+  return elapsedMs === null ? null : Date.now() - elapsedMs;
 }

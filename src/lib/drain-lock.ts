@@ -1,7 +1,7 @@
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname } from "node:path";
-import { reclaimStaleLock } from "./fs-race-safe.js";
+import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
 
 /**
  * Single-instance guard for `rmd drain`.
@@ -47,6 +47,9 @@ export interface AcquireDrainLockOpts {
   info?: Partial<DrainLockInfo>;
   /** Injectable liveness probe (tests). Defaults to {@link defaultIsPidAlive}. */
   isPidAlive?: (pid: number) => boolean;
+  /** Injectable process-start-time probe, forwarded to {@link isHolderStale} (tests). Defaults
+   *  to {@link import("./fs-race-safe.js").defaultGetProcessStartTime}. */
+  getProcessStartTime?: (pid: number) => number | null;
   /** Called when a reclaim attempt loses the race (see {@link reclaimStaleLock}). Defaults
    *  to a `console.error` trace; tests override it to observe the event directly. */
   onLostReclaim?: (detail: { lockPath: string; reason: string }) => void;
@@ -113,7 +116,7 @@ export function acquireDrainLock(lockPath: string, opts: AcquireDrainLockOpts = 
       // reclaimer's fresh live lock is never mistaken for the dead one this call read.
       const result = reclaimStaleLock(lockPath, {
         parseHolder: parseDrainLockInfo,
-        isStale: (held) => !isAlive(held.pid),
+        isStale: (held) => isHolderStale(held, { isPidAlive: isAlive, getProcessStartTime: opts.getProcessStartTime }),
         onLostReclaim: opts.onLostReclaim,
         beforeDelete: opts.__beforeReclaimDelete,
       });
