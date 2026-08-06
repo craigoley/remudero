@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadPlan, type Plan, type Task } from "../src/lib/plan.js";
 import { daemonCommand, ledgerPathFor, type RunResult } from "../src/run-task.js";
+import { CLAUDE_BIN_ENV_OVERRIDE, claudeExecutableCache } from "../src/lib/worker.js";
 import { HEADROOM_LIMIT_PCT, type UsageSnapshot } from "../src/lib/headroom.js";
 import {
   DEFAULT_MAX_SPAWN_INFRA_BACKOFF_MS,
@@ -2264,6 +2265,69 @@ test("daemonBoot: with no resolveClaudeBin injected, no daemon.claude_bin line i
   const lines: Array<{ step: string }> = [];
   daemonBoot((step) => lines.push({ step }), { PATH: "/usr/bin" });
   assert.equal(lines.filter((l) => l.step === "daemon.claude_bin").length, 0);
+});
+
+// ── daemonCommand wiring: W1-T357 — the resolveClaudeBin slot is no longer `undefined` ─────
+//
+// The tests above drive `daemonBoot` in isolation with a hand-built `resolveClaudeBin`; they
+// prove the PARAMETER works but not that the real command ever supplies one. This test drives
+// the REAL `daemonCommand` (the only injection is the existing `runDaemon` loop stub, same seam
+// as daemon-crashloop-wiring.test.ts) and reads the ledger it writes — proving daemonCommand's
+// boot rung now passes `() => resolveClaudeExecutable(claudeExecutableCache)` in the slot that
+// used to be `undefined, // resolveClaudeBin — default`, resolving through the SAME shared,
+// per-process cache `spawnWorker` reuses (worker.ts), never a private or second resolution.
+
+function claudeWiringFixtureHome(): { home: string; root: string; planPath: string } {
+  const home = mkdtempSync(join(tmpdir(), "rmd-daemon-claude-wiring-"));
+  const root = join(home, "Remudero");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  mkdirSync(join(root, "state"), { recursive: true });
+  const planPath = join(home, "tasks.yaml");
+  writeFileSync(planPath, "[]\n"); // an explicit --plan skips the git self-sync entirely
+  return { home, root, planPath };
+}
+
+function claudeWiringLedgerLines(root: string): Array<Record<string, unknown>> {
+  return readFileSync(ledgerPathFor({ root } as never), "utf8")
+    .split("\n")
+    .filter((l) => l.trim().length > 0)
+    .map((l) => JSON.parse(l) as Record<string, unknown>);
+}
+
+test("W1-T357 wiring: daemonCommand wires the REAL resolveClaudeExecutable + shared cache into daemonBoot — daemon.claude_bin logs the SAME path spawnWorker would resolve", async () => {
+  const { home, root, planPath } = claudeWiringFixtureHome();
+  const oldHome = process.env.HOME;
+  const oldOverride = process.env[CLAUDE_BIN_ENV_OVERRIDE];
+  const priorResolved = claudeExecutableCache.resolved;
+  process.env.HOME = home;
+  // The env override is resolveClaudeExecutable's FIRST candidate — pinning it to the node
+  // binary this test is already running under keeps resolution deterministic across hosts,
+  // with no dependency on a real `claude` on PATH.
+  process.env[CLAUDE_BIN_ENV_OVERRIDE] = process.execPath;
+  claudeExecutableCache.resolved = undefined; // force a fresh resolution for THIS boot
+  try {
+    const loopStub = async () => ({ attempted: [], merged: [], stopReason: "stopped" as const, costUsd: 0, ticks: 0 });
+    const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], { runDaemon: loopStub });
+    assert.equal(code, 0);
+    const lines = claudeWiringLedgerLines(root);
+    const line = lines.find((l) => l.step === "daemon.claude_bin");
+    assert.ok(line, "daemonCommand's real daemonBoot call must resolve+log daemon.claude_bin — the undefined default this task replaces logged nothing at all");
+    assert.equal(line!.blocked, false);
+    assert.equal(line!.path, process.execPath, "the wired resolver honors the SAME env override resolveClaudeExecutable/spawnWorker would");
+    assert.equal(
+      claudeExecutableCache.resolved,
+      process.execPath,
+      "daemonCommand must resolve through the SHARED per-process cache spawnWorker reuses, never a second, private resolution",
+    );
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    if (oldOverride === undefined) delete process.env[CLAUDE_BIN_ENV_OVERRIDE];
+    else process.env[CLAUDE_BIN_ENV_OVERRIDE] = oldOverride;
+    claudeExecutableCache.resolved = priorResolved;
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 // ── daemonBoot: W1-T117 part (ii) — the boot-time orphan sweep ─────────────
