@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runReview, isDispatchedRunBranch } from "../src/run-task.js";
+import { runReview, isDispatchedRunBranch, type ArmOutcome } from "../src/run-task.js";
 import { checkSatisfiedByGuard } from "../src/lib/review.js";
 import type { Config } from "../src/lib/config.js";
 import type { Mount } from "../src/lib/mounts.js";
@@ -33,7 +33,8 @@ import type { WorkerResult } from "../src/lib/worker.js";
  * `reviewCommand` already passes from `gh pr view` — and the assertion is made on the ADVISORY
  * TEXT the real code renders and hands to `gh pr comment`. Nothing between the argument and
  * the observation is stubbed: `judgeReview`, `judgeRubric`, `checkSatisfiedByGuard` and
- * `rubricAdvisorySection` all really run.
+ * `rubricAdvisorySection` all really run. What IS stubbed sits strictly AFTER the observation —
+ * the post-verdict `arm`/`disarm`, for the reason spelled out at their call site below.
  *
  * LEFT UNPROVEN, NAMED RATHER THAN GLOSSED: that `reviewCommand` passes `headRefName` from a
  * LIVE `gh pr view` is read from source (`reviewViewArgs` requests the field and the
@@ -118,6 +119,21 @@ async function advisoryFor(headRefName: string | undefined): Promise<string> {
       spawnReviewer: false,
       reviewerMount: MOUNT,
       headRefName,
+      // THE POST-VERDICT ARM IS STUBBED, AND IT MUST BE. These cases are built so the binding
+      // verdict PASSES (one substantiated criterion) — which is what leaves the advisory as the
+      // only thing posted — and a passing verdict carries `runReview` on into
+      // `armIfVerdictPermits`. Left to its default that runs the REAL `armAutoMerge`, whose
+      // `realArmDeps().ledgerLines` calls `readLedgerLines(ledgerPathFor(loadConfig()))`: it reads
+      // the MACHINE's own config file, `JSON.parse`s it, and would then `gh pr merge --auto`
+      // against the stub. A unit test must never reach the operator-gated arm, and depending on a
+      // parseable config outside the fixture makes the test environment-dependent — it passed
+      // locally on a valid config and died on CI with `SyntaxError: Unexpected end of JSON input`.
+      // `arm`/`disarm` are the seams declared for exactly this ("Exists so a unit test can assert
+      // the withdrawal is ISSUED rather than mocking `gh`"). NOTHING under test is stubbed here:
+      // both run strictly AFTER `rubric` is computed and posted, so the advisory this file asserts
+      // on is unaffected. Neither is asserted — they are silenced, not observed.
+      arm: (): ArmOutcome => "ledger-refused",
+      disarm: () => {},
       ledgerPath,
       runId: "REVIEW-W1-T385",
     });
