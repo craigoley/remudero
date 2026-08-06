@@ -1,0 +1,130 @@
+- id: W1-T387
+  title: "CLAUDE.md tells every author that `rmd check-proof` is `the reviewer's own parser and executor` — it is the reviewer's PARSER and a DIFFERENT EXECUTOR, so a proof reading `exit: 0, hits: 17` locally is judged `no-match` at review: collapse checkProofCommand onto execWhitelistedProof"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 90.00
+  rationale: "OPERATOR RULING on state/recon-codebase-debt.md, 2026-08-06. RE-DERIVED AT 946f281 —
+    that report is unreadable from a fresh clone (state/ is gitignored), so the divergence below was
+    re-measured from source and by execution rather than inherited.
+    THE TWO EXECUTORS SHARE A PARSER AND NOTHING ELSE. Both call `parseWhitelistedProof`. After that
+    `execWhitelistedProof` (src/lib/review.ts) runs `ensureDeps`, `ensureBrowsersOnce`,
+    `narrowNameFilteredArgs`, and decides via `nameFilteredOutcome` — which reads the TAP STREAM for
+    the named test's own result line, explicitly `never from the process exit code` — while treating
+    a `grep` exit 2 as exec_error rather than evidence (W1-T219). `checkProofCommand` (src/run-task.ts)
+    runs a raw `spawnSync` and prints the exit code and a line count.
+    THE DIVERGENCE IS NOT THEORETICAL — MEASURED ON ONE PROOF AT THIS SHA. For `unit test:
+    fixHeadAcceptable`, which resolves to `test/fix-rung-no-task.test.ts`:
+      check-proof  -> candidates: 1 file(s) | exit: 0 | hits: 17   (reads GREEN to an author)
+      review       -> no-match                                      (CAPS the verdict, will not arm)
+    The cause is structural, not a corner case: `node --test --test-name-pattern` exits 0 and emits
+    its file wrapper line even when ZERO tests match, so an exit code cannot distinguish `the named
+    test passed` from `the named test does not exist`. `nameFilteredOutcome` skips the wrapper via
+    `isFileWrapperResultName` and returns `no-match`; the exit code cannot see the difference.
+    THE POPULATION AT RISK, measured over OPEN tasks at this sha: 969 parseable proofs — 60 `grep:`,
+    592 pure-path `unit test:`, and 317 NAME-FILTERED `unit test:`. Of those 317, 251 resolve to
+    `absent` (both executors agree: no-match) and 66 RESOLVE TO FILES. Those 66 are the exact
+    population where a raw exit code and a TAP verdict can disagree, and every one of them is
+    currently verified by authors against the wrong program.
+    WHY THIS IS WORSE THAN AN ORDINARY DUPLICATE. CLAUDE.md instructs every author to verify through
+    check-proof and calls it the reviewer's own executor. Authors have complied. The instruction was
+    false, so compliance produced false confidence — the one failure mode a verification tool must
+    not have."
+  design: |
+    THE FIX IS ONE CALL: `checkProofCommand` invokes `execWhitelistedProof` and reports its verdict.
+    But the ORDER below is the task — a collapse that quietly changes what a local check reports is
+    worse than today's divergence, because authors would then trust the new agreement.
+
+    (i) ESTABLISH THE DIVERGENCE EXHAUSTIVELY FIRST, IN BOTH DIRECTIONS, AND WRITE IT DOWN BEFORE
+    CHANGING A LINE. Enumerate from source every behaviour `execWhitelistedProof` has that
+    check-proof lacks — at least: `ensureDeps`, `ensureBrowsersOnce`, `narrowNameFilteredArgs`,
+    TAP-line verdicts on BOTH the success path and a thrown nonzero exit's attached stdout, `grep`
+    exit 2 raised as exec_error, and a signal/spawn-error raised rather than reported. AND THE
+    REVERSE, which the fix must not destroy: check-proof prints the parse kind, the resolved
+    candidate list, the exact argv, a hit count, the first lines of stdout, an explicit
+    `no-match` explanation when resolution is `absent`, its own `checkProofTimeoutMs`, and a
+    `--allow-full-suite` escape hatch. Those are DIAGNOSTICS, not verdicts, and every one must
+    survive: the verb's value to an author is that it shows its working.
+
+    (ii) SURVEY THE 66 BEFORE SHIPPING, AND REPORT RATHER THAN BREAK. Run both executors over every
+    open-task name-filtered proof that RESOLVES to a file, and classify each: agree-pass,
+    agree-no-match, or DISAGREE (check-proof green, review no-match). If the disagreeing set is
+    non-empty — and the one-proof measurement above says it will be — THAT IS A FINDING OF ITS OWN
+    and belongs in the PR body as a named list, not silently converted into a wall of newly-red local
+    checks. Surfacing them is the point; hiding them is the failure. Do NOT rewrite any task's proofs
+    to make the survey come out clean — that is a Standing rule 15 edit and a different PR.
+
+    (iii) THE REGRESSION LOCK IS THE DELIVERABLE THAT OUTLIVES THE COLLAPSE. Assert that a
+    name-filtered proof resolving to a real file but matching NO test title reports the same verdict
+    from both paths — the exact case measured in the rationale. Write it FIRST and watch it fail
+    (tdd:strict). A lock that only proves the two agree on a PASSING proof proves nothing: the
+    divergence lives entirely in the not-passing directions.
+
+    (iv) DO NOT MAKE check-proof SLOWER THAN AN AUTHOR WILL TOLERATE. `ensureDeps` and
+    `ensureBrowsersOnce` exist because the review path runs on a cold PR-head worktree; an author's
+    checkout is usually warm. If either turns a two-second local check into a two-minute one, say so
+    and gate it behind a flag rather than accepting the regression silently — a verification tool
+    nobody runs is worth as little as one that lies. Measure before deciding; do not assume either way.
+
+    (v) EXIT CODE SEMANTICS ARE PART OF THE CONTRACT. check-proof currently exits with the child's
+    status. Under the collapse it must map a VERDICT to an exit code, and `no-match` must be
+    distinguishable from `fail` — they mean different things to the reviewer (`no-match` degrades to
+    the keyword floor; `fail` is `executed_fail` and OVERRIDES keyword coverage). State the mapping
+    explicitly in the verb's own help text.
+
+    (vi) MAKE THE DOC'S CLAIM ENFORCEABLE, NOT JUST TRUE. Correcting the sentence is necessary and
+    not sufficient — prose drifts back. Register it in `plan/claims.yaml`, whose gate
+    (`scripts/claims-check.mjs`, W1-T29) runs each claim's `assertion` as a command that must exit 0
+    and whose own header says a red claim means THE PLAN IS LYING ABOUT THE SYSTEM. That is exactly
+    this defect's shape, and it is the difference between fixing the sentence and fixing the class.
+
+    (vii) CORRECT CLAUDE.md IN THIS SAME PR. The false claim is the sentence calling check-proof the
+    reviewer's own parser and executor. It becomes true when this ships, so the edit belongs here and
+    nowhere else. CLAUDE.md sits OUTSIDE `isInPlanScope`, so bundling it with a src/ change forfeits
+    nothing — this PR is not plan-scoped and has no carve-out to lose. It must NOT be bundled with a
+    plan shard, where the same file would destroy that PR's `planOnly` exemption (W1-T384's class).
+
+    NOT IN SCOPE: changing what the REVIEW executor does — this collapses the author-facing verb onto
+    it, never the reverse; rewriting any filed proof; and the wider `parseWhitelistedProof` dialect.
+  acceptance:
+    - claim: "a name-filtered proof that resolves to a file but matches no test title reports the same verdict from check-proof as from the review executor, rather than a green exit code"
+      proof: "unit test: test/check-proof-executor-parity.test.ts"
+    - claim: "check-proof still prints parse kind, resolved candidates, the exact argv and a hit count, so collapsing the executor costs the author no diagnostics"
+      proof: "unit test: test/check-proof-executor-parity.test.ts"
+    - claim: "no-match and fail map to distinguishable exit codes and the verb's help text states the mapping, so a degrade is never read as a failure"
+      proof: "unit test: test/check-proof-executor-parity.test.ts"
+    - claim: "the doc's claim is registered as a falsifiable plan claim whose assertion goes red if the two executors ever diverge again, so the correction is enforced rather than merely written"
+      proof: "unit test: test/claims-check.test.ts"
+  risk: high
+  origin: oper#ruling-codebase-debt-2026-08-06
+  plan_refs: ["W1-T219", "W1-T227", "W1-T183", "W1-T384"]
+  files: [src/run-task.ts, src/lib/review.ts, CLAUDE.md, plan/claims.yaml, test/check-proof-executor-parity.test.ts, test/claims-check.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — every claim is an assertion over two executors' agreement on fixture proofs,
+    decidable in-process with no operator present.
+    risk:high, and NOT because the diff is large. This changes what the verb every author trusts
+    REPORTS. Get it wrong in the permissive direction and authors keep shipping capped proofs while
+    believing the tool agrees with the reviewer — the exact defect being fixed, re-created with a
+    louder claim to correctness behind it. Design (ii) and (iii) are where that risk is managed.
+    budget_usd 90 — the cost is the survey of 66 proofs and the both-directions divergence inventory,
+    not the one-line call. Above W1-T386's 70 on investigation depth.
+    files: DECLARES src/lib/review.ts even though the collapse may end up read-only there — the
+    diagnostics in design (i) may need `execWhitelistedProof` to expose what it observed rather than
+    only a three-value verdict, and a path a worker writes must be declared. Also declares CLAUDE.md
+    per design (vii), which is legal here precisely because this PR carries src/ already, and
+    plan/claims.yaml per design (vi). Declaring plan/claims.yaml does NOT trip W1-T384's proposed
+    filing-time refusal: that trigger is the literal entry plan/tasks.yaml, not any plan-scoped path.
+    ON THE PROOFS. Three name test/check-proof-executor-parity.test.ts, which does not exist yet:
+    that is a FORWARD REFERENCE TO A PATH, which CLAUDE.md records as safe (unlike forward-referencing
+    a symbol name, which is a guess), and the path is declared in files: so the worker creates it. The
+    fourth names an EXISTING file so at least one proof executes at filing time, and
+    test/claims-check.test.ts is DECLARED because that proof names it — a proof pointing outside
+    files: is a warning now and a scope-guard REFUSAL after the work is done.
+    THE MEASUREMENTS ARE AT 946f281: 969 open-task parseable proofs (60 grep, 592 pure-path, 317
+    name-filtered), of which 66 resolve to files and 251 to absent; and the fixHeadAcceptable proof
+    reading exit 0 / hits 17 locally against no-match at review. Re-derive before acting — the
+    population moves with every filing.
+    NO depends_on: independent of W1-T386. They share only the ruling that filed them."

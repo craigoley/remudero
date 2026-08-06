@@ -1,0 +1,120 @@
+- id: W1-T386
+  title: "the tech-debt ranker is itself the debt — scripts/refactor-campaign.mjs has never once executed to a verdict (its own doc's `exits 0 always` dry-run exits 1 on a report path that does not exist), its label has been applied to ZERO PRs, and its ranking would be wrong if it ever ran: RETIRE it and both CI wirings"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  rationale: "OPERATOR RULING on state/recon-codebase-debt.md, 2026-08-06, accepting its recommendation
+    to retire this instrument. RE-DERIVED AT 946f281 BY EXECUTION, not inherited from the recon — that
+    report is not readable from a fresh clone (state/ is gitignored), so every figure below was
+    re-measured from source at this sha.
+    IT CANNOT RUN, AND NEVER HAS. `main` calls `buildDeltas` BEFORE it branches on mode, so the
+    dry-run arm its own header promises `exits 0 always (a dry-run is advisory, never a gate)` is
+    UNREACHABLE. Executed at this sha: `node scripts/refactor-campaign.mjs dry-run --config
+    plan/campaigns/refactor.yaml` prints `ENOENT: no such file or directory, open
+    'reports/mutation/mutation.json'` and EXITS 1. `reports/` does not exist in the tree at all.
+    EXACTLY ONE COMMIT has ever touched the script — a402e02 (#242), its own filing. The
+    `refactor-campaign` label has been applied to ZERO issues or PRs (searched at this sha:
+    total_count 0), and `check` mode runs only behind that label, so the CI job registers a check run
+    on every PR and does nothing on every PR.
+    AND ITS RANKING WOULD BE WRONG IF IT DID RUN. `stripCommentsAndStrings` matches template literals
+    with a NON-NESTING regex, so one nested backtick flips parity and swallows real code. Measured at
+    this sha over the actual tree: src/run-task.ts survives at 5.6% of its bytes with its 629 `if`
+    tokens reduced to 81; src/lib/serve.ts survives at 4.8%. The aggregate it would report is 6253
+    against a recorded `complexity-baseline.json` of 1870 — a 3.34x gap on a ratchet whose own
+    `_comment` promises a complexity-INCREASING PR goes CI-red. It ranks the 16,450-line run-task.ts
+    EIGHTH, behind seven files all under 3,500 lines; strip only comments and the same file ranks
+    FIRST. The instrument inverts the very ordering it exists to produce.
+    THE CLASS, and this is the sharpest instance the repo has: BUILT, TESTED, MERGED, NEVER CALLED —
+    a tech-debt ranker that is itself the debt, and unfalsifiable precisely because nothing ever ran
+    it. Its test suite passes against fixtures while the real CLI cannot reach a verdict on the real
+    repo. That is what a dark organ costs when the organ's job is measurement."
+  design: |
+    DELETE THE INSTRUMENT AND EVERY REFERENCE THAT WOULD OUTLIVE IT. Retirement, not repair — see
+    the declined alternative below.
+
+    (i) THE RETIREMENT SET, established by `git grep -l` at this sha rather than assumed. Delete
+    `scripts/refactor-campaign.mjs`, `plan/campaigns/refactor.yaml`, `docs/refactor-campaign.md`,
+    `test/refactor-campaign.test.ts` and its `test/fixtures/refactor-campaign/` tree.
+
+    (ii) EXACTLY FOUR BASELINES GO, AND TWO MUST SURVIVE — the trap in this task. The campaign config
+    names SIX baseline files, and two of them are load-bearing for OTHER, LIVE gates:
+    `scripts/mutation-baseline.json` is also read by `scripts/mutation-ratchet.mjs`,
+    `.github/workflows/mutation-nightly.yml` and `ci.yml`; `scripts/coverage-baseline.json` is also
+    read by `scripts/coverage-ratchet.mjs` and `ci.yml`. DELETING EITHER BREAKS A GATE THAT WORKS.
+    Only `complexity`, `dup`, `cve` and `fitness` are campaign-exclusive. Re-derive that split with
+    `git grep -l` per file before deleting any of them; do not trust this list.
+
+    (iii) BOTH CI WIRINGS, AND THE ORDER MATTERS. `.github/workflows/ci.yml` carries the
+    `refactor-campaign` JOB; `.github/workflows/ci-gate.yml` carries `"refactor-campaign"` in its
+    REQUIRED-MEMBERS list plus an explanatory comment block. Removing the job while the name stays in
+    the required list DEADLOCKS ci-gate forever on a check that will never register — the synthwatch
+    #102 class that ci-gate's own comment says it exists to avoid. Remove the required-list entry in
+    the SAME commit, and say in the PR body which order you took.
+
+    (iv) TWO REFERENCES THE OBVIOUS FILE LIST MISSES, both verified present at this sha. FIRST:
+    `src/lib/ci-parity.ts` holds a `{ job: "refactor-campaign", mirrored: false, reason: … }` parity
+    entry, because W1-T294's `ci-parity:drift` step fails when a ci.yml job has no entry. Delete the
+    job and that entry describes a job that no longer exists — remove it and re-run
+    `rmd preflight --ci-parity` to prove drift is clean in both directions. SECOND:
+    `test/ci-gate-required-format.test.ts` carries `"refactor-campaign"` in its EXPECTED required
+    list and will fail the moment the workflow drops it.
+    Two further test files — `test/ci-gate-dedupe.test.ts` and `test/ci-gate-reaggregate.test.ts` —
+    use the string only as ARBITRARY FIXTURE DATA for the dedupe/re-aggregation logic, so they
+    should need no edit. VERIFY that rather than assuming it; if either does depend on the real
+    member list, treat it as (iv) too. `test/awareness-surface-ratchet.test.ts` lists the four
+    campaign baselines on the docs-awareness surface and must lose exactly those four.
+    `.gitignore` carries a `reports/` comment naming the script — cosmetic, but it is the kind of
+    reference that makes a later reader hunt for a deleted instrument.
+
+    (v) THE ALTERNATIVE, RECORDED SO NOBODY RE-FILES IT. The obvious cheaper move is to fix only
+    `stripCommentsAndStrings` (a nesting-aware scanner) and re-capture `complexity-baseline.json`.
+    IT WAS CONSIDERED AND DECLINED: re-capturing turns the recorded 1870 into ~6253 and hands the
+    fleet a 3.34x regression against a ratchet nobody is prepared to act on, on an instrument that
+    has produced exactly zero verdicts in its lifetime. Fixing a ranker nobody runs, so that it can
+    block PRs on a number nobody has agreed to, is a worse outcome than deleting it. If the capability
+    is ever wanted again, it should be re-filed as a NEW instrument with a measured population, not
+    resurrected from this one.
+
+    (vi) WHAT THIS DOES NOT TOUCH, deliberately: the mutation ratchet, the coverage ratchet, jscpd,
+    depcruise and the learnings-budget ratchet all stay exactly as they are. This retires ONE
+    instrument, not the gate stack. Nothing about `plan/tasks.yaml` or any other task's records is
+    edited — W1-T294's shard mentions the campaign in prose and is left alone.
+  acceptance:
+    - claim: "the refactor-campaign job is gone from the workflow and from ci-gate's required-members list, so no required check can register absent and deadlock the gate"
+      proof: "unit test: test/ci-gate-required-format.test.ts"
+    - claim: "no ci-parity entry survives for a job that no longer exists, and the drift step is clean in both directions"
+      proof: "unit test: test/ci-parity-contract.test.ts"
+    - claim: "the four campaign-exclusive baselines leave the docs-awareness surface while the mutation and coverage baselines that other live gates read are untouched"
+      proof: "unit test: test/awareness-surface-ratchet.test.ts"
+  risk: high
+  origin: oper#ruling-codebase-debt-2026-08-06
+  plan_refs: ["W2-T3", "W1-T294", "§3A", "§5"]
+  files: [scripts/refactor-campaign.mjs, plan/campaigns/refactor.yaml, docs/refactor-campaign.md, scripts/complexity-baseline.json, scripts/dup-baseline.json, scripts/cve-baseline.json, scripts/fitness-baseline.json, .github/workflows/ci.yml, .github/workflows/ci-gate.yml, .gitignore, src/lib/ci-parity.ts, test/refactor-campaign.test.ts, test/ci-gate-required-format.test.ts, test/ci-parity-contract.test.ts, test/awareness-surface-ratchet.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — every claim is a deterministic assertion over workflow/parity/surface contents,
+    decidable offline with no operator present.
+    risk:high is Rule 19's SPAN, not blast radius, and the band is raised deliberately rather than
+    shipped as a violation: the file set crosses scripts/, plan/campaigns/, docs/, .github/workflows/,
+    .gitignore, src/lib/ and test/. The blast radius is genuinely LOW — the thing being removed has
+    never executed to a verdict — but Rule 19 counts subsystems spanned, and pretending this is
+    risk:medium would ship a sizing violation to save a word.
+    budget_usd 70 — the work is a wide, careful deletion plus two non-obvious reference removals
+    (design (iv)), not a straight-line diff. Below W1-T324's 100 because there is no per-entry
+    archaeology.
+    files: DECLARES `test/fixtures/refactor-campaign/**` implicitly through
+    `test/refactor-campaign.test.ts`'s own tree — the worker deletes the fixture directory alongside
+    its suite; a path a worker writes must be declared and omitting one is what refused five
+    dispatches in a week, so if the scope guard objects, add the fixture root explicitly rather than
+    working around it. It does NOT declare scripts/mutation-baseline.json or
+    scripts/coverage-baseline.json, and that omission is the point of design (ii).
+    All three proofs name EXISTING suites and execute today, so no criterion is a forward reference.
+    test/ci-parity-contract.test.ts is DECLARED because criterion 2's proof names it: a proof pointing
+    outside files: is a proof-scope warning at filing and a scope-guard REFUSAL after the work is done.
+    THE FIGURES ARE MEASURED AT 946f281 BY EXECUTION — the dry-run's exit 1, the 5.6%/4.8% survival,
+    6253 vs 1870, the eighth-place ranking, the zero-use label. Re-derive before acting: a stripper
+    that gets fixed elsewhere, or a baseline recapture, would move all of them.
+    NO depends_on: nothing blocks this and it blocks nothing."
