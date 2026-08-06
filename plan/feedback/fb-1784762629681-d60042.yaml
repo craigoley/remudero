@@ -10,5 +10,5 @@ raw: "TRIAGE AUTO-ARM NEEDS POLICY CONTROL (P41 ANCHOR) — rmd triage arms
   option: a --no-arm path on triage."
 attachments: []
 origin: cli
-status: grilling
+status: accepted
 proposal_pr: null
