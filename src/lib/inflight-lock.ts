@@ -2,7 +2,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, 
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { defaultIsPidAlive } from "./drain-lock.js";
-import { reclaimStaleLock } from "./fs-race-safe.js";
+import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
 
 /**
  * PER-TASK IN-FLIGHT LOCK (DIAGNOSIS.md, diag/drain-sequential-await).
@@ -68,6 +68,9 @@ export interface AcquireInflightOpts {
   info?: Partial<Omit<InflightLockInfo, "run_id">>;
   /** Injectable liveness probe (tests). Defaults to {@link defaultIsPidAlive}. */
   isPidAlive?: (pid: number) => boolean;
+  /** Injectable process-start-time probe, forwarded to {@link isHolderStale} (tests). Defaults
+   *  to {@link import("./fs-race-safe.js").defaultGetProcessStartTime}. */
+  getProcessStartTime?: (pid: number) => number | null;
   /** Called when a reclaim attempt loses the race (see {@link reclaimStaleLock}). Defaults
    *  to a `console.error` trace; tests override it to observe the event directly. */
   onLostReclaim?: (detail: { lockPath: string; reason: string }) => void;
@@ -118,7 +121,7 @@ export function acquireInflightLock(
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
       const result = reclaimStaleLock(lockPath, {
         parseHolder: parseInflightLockInfo,
-        isStale: (held) => !isAlive(held.pid),
+        isStale: (held) => isHolderStale(held, { isPidAlive: isAlive, getProcessStartTime: opts.getProcessStartTime }),
         onLostReclaim: opts.onLostReclaim,
         beforeDelete: opts.__beforeReclaimDelete,
       });
@@ -194,6 +197,8 @@ export function sweepStaleInflightLocks(
   inflightDir: string,
   opts: {
     isPidAlive?: (pid: number) => boolean;
+    /** Injectable process-start-time probe, forwarded to {@link isHolderStale} (tests). */
+    getProcessStartTime?: (pid: number) => number | null;
     onLostReclaim?: (detail: { lockPath: string; reason: string }) => void;
     /** TEST-ONLY seam forwarded to {@link reclaimStaleLock}'s `beforeDelete`. */
     __beforeReclaimDelete?: () => void;
@@ -209,7 +214,7 @@ export function sweepStaleInflightLocks(
     const lockPath = inflightLockPath(inflightDir, taskId);
     const reclaim = reclaimStaleLock(lockPath, {
       parseHolder: parseInflightLockInfo,
-      isStale: (held) => !isAlive(held.pid),
+      isStale: (held) => isHolderStale(held, { isPidAlive: isAlive, getProcessStartTime: opts.getProcessStartTime }),
       onLostReclaim: opts.onLostReclaim,
       beforeDelete: opts.__beforeReclaimDelete,
     });
