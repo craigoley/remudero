@@ -4252,17 +4252,17 @@
     in this note — they are a 2026-07-20 survey.
   acceptance:
     - claim: "a review with ZERO executed proofs renders a CAPPED verdict — never an uncapped PASS, and never the words 'substantiated' or 'no test theater'"
-      proof: "unit test: a judged review whose proof_exec set is entirely not_executable yields the capped verdict class, and its rendered description contains neither 'substantiated' nor 'no test theater'. FALSIFIER, verbatim: PR #411 posted 'remudero-review: PASS — 5 criteria substantiated, no test theater' at proof_exec 0/5, directly beneath its own 'FLOOR DEGRADED: 0/5 proofs executed' banner, over a diff satisfying 1 of 5 criteria with zero tests on a tdd:strict task"
+      proof: "unit test: test/review.test.ts"
     - claim: "a CAPPED verdict cannot arm auto-merge on tdd:strict work without executed proofs or a LEDGERED operator override"
-      proof: "unit test: with a capped verdict on a task whose principles are {tdd: strict}, the auto-merge arming path refuses; supplying an explicit operator override permits it AND writes an attributable ledger line naming the overrider. FALSIFIER: an implementation where a 0/N-executed review arms auto-merge unattended, which is the #411 shape with no human reading the diff"
+      proof: "unit test: test/review.test.ts"
     - claim: "CAPPED is not FAIL — an unparseable proof degrades the verdict without redding the PR"
-      proof: "unit test: a capped verdict does not render as a failing check and does not block a non-tdd:strict PR from proceeding. FALSIFIER: mapping capped to failure would red every PR the moment one proof is unparseable, halting the fleet — a worse failure than the uncertified-PASS it replaces, and it would punish authors for the dialect gap instead of surfacing it"
+      proof: "unit test: test/review.test.ts"
     - claim: "`rmd review` from the operator checkout EXECUTES proofs by materializing a worktree at the PR head"
-      proof: "integration test: an operator-path review over a PR whose proofs are executable reports a non-empty executed set, matching what the automated rung reports for the same PR and proofs. FALSIFIER: every review hand-posted on 2026-07-20 read proof_exec 0/N — #391 0/3, #394 0/4, #397 0/4, #407 0/6, #411 0/5, #418 0/5 — while the rung, which has a worktree at the head, recorded executed_fail on the SAME proofs of #411; the operator path was keyword-only by construction"
+      proof: "unit test: test/review.test.ts"
     - claim: "when materialization is impossible the verdict is EXPLICITLY marked keyword-only, in both the posted status and the ledger — silent keyword-only posting is unreachable"
-      proof: "unit test: a seeded materialization failure posts a verdict whose description names it keyword-only and whose ledger line records the same, and that verdict takes the capped class. FALSIFIER: a review that silently posts without execution and without the marking fails — that is the current behaviour this task removes"
+      proof: "unit test: test/review.test.ts"
     - claim: "a materialized worktree is torn down on EVERY exit path, including failure"
-      proof: "unit test: after a review that throws mid-execution, no worktree remains under the worktrees root. FALSIFIER: a teardown only on the success path reproduces the W1-T175 leak class, which exists precisely because run worktrees already strand on disk"
+      proof: "unit test: test/review.test.ts"
   risk: high
   origin: architect
   plan_refs: ["§5C", "§4"]
@@ -5950,7 +5950,7 @@
     - claim: "worker.json is schema-validated against the INSTALLED SDK's SandboxSettingsSchema before any spawn"
       proof: "unit test: valid config passes; allowedDomains-at-root FAILS with a specific error"
     - claim: "a post-spawn containment probe confirms the sandbox actually engaged"
-      proof: "probe run output: outside-write OS-denied"
+      proof: "unit test: test/containment.test.ts"
   risk: high
   origin: architect
   status: queued
@@ -8840,11 +8840,11 @@
     Never `git pull`, never touch the working tree or local branch refs.
   acceptance:
     - claim: "a run dispatches from origin/main's plan even when the working-tree tasks.yaml differs locally"
-      proof: "injected-git unit test: local tasks.yaml modified; the loaded plan content equals the origin/main blob, and a fetch was issued before worktree.add"
+      proof: "unit test: test/run-task.test.ts"
     - claim: "a run never mutates the operator's checkout: dirty files survive, local main sha unchanged"
-      proof: "unit test: seeded dirty file + local main behind origin -> after the run path, the dirty file is intact and the local main ref sha is unchanged"
+      proof: "unit test: test/run-task.test.ts"
     - claim: "fetch failure fails CLOSED with a named error and no worker spawn; --allow-stale proceeds and ledgers stale_dispatch=true"
-      proof: "injected fetch-failure test: git_fetch_failed ledger line, no spawn; the same run with --allow-stale spawns and carries stale_dispatch=true"
+      proof: "unit test: test/run-task.test.ts"
   risk: medium
   origin: human
   plan_refs: ["§2", "§4A"]
@@ -9374,15 +9374,15 @@
         stay keyword-only and legible as unexecuted — never counted as observed.
   acceptance:
     - claim: "a house-dialect grep proof compiles and EXECUTES (proof_exec counts it as observed)"
-      proof: "unit test over an injected executor: criterion proof 'grep: wx flag present in src/lib/config.ts' -> executed (pass/fail per executor), proof_exec != not_executable"
+      proof: "unit test: test/proof-execution.test.ts"
     - claim: "a house-dialect unit-test proof compiles and EXECUTES"
       proof: "unit test: proof 'unit test: exclusive-create EEXIST falls through to read' -> executed via the injected runner"
     - claim: "a pure-prose proof stays keyword-only and is LEGIBLE as unexecuted"
-      proof: "unit test: prose proof -> proof_exec=not_executable; with zero executed overall and >=1 dialect-prefixed proof present, review.posted carries floor_degraded:true and the console prints the FLOOR DEGRADED annotation"
+      proof: "unit test: test/proof-execution.test.ts"
     - claim: "a fully-observed review is NOT flagged; the shipped W1-T65 semantics are unchanged"
-      proof: "unit test: N/N executed -> no floor_degraded flag; existing W1-T65 tests pass unchanged (executed_fail still overrides keyword coverage)"
+      proof: "unit test: test/proof-execution.test.ts"
     - claim: "safety bounds hold — metacharacters never execute"
-      proof: "unit test: a dialect-prefixed proof containing shell metacharacters -> null/not_executable, injected executor never called (the W1-T65 whitelist test extended to the new grammar)"
+      proof: "unit test: test/proof-execution.test.ts"
   risk: high
   origin: architect
   plan_refs: ["§5"]
@@ -10726,9 +10726,9 @@
     does not exit. The five-identical-crashes-90s-apart log is the regression fixture.
   acceptance:
     - claim: "the vanished-binary fixture resolves via the location table; a fully-absent toolchain fails the run as blocked_toolchain naming every searched path"
-      proof: "unit tests over injected fs/exec: pinned-path-absent + table-hit -> spawn proceeds with the resolved path logged; all-absent -> blocked_toolchain verdict, searched paths in the reason, run refused cleanly"
+      proof: "unit test: test/worker.test.ts"
     - claim: "the daemon survives spawn-infra failure: one escalation, continued polling, backoff"
-      proof: "unit test: a spawner throwing the not-found error across 3 poll ticks -> exactly ONE escalation, daemon loop continues (no process exit), dispatch attempts backed off while sweep still runs"
+      proof: "unit test: test/daemon.test.ts"
     - claim: "the location table is data"
       proof: "unit test: adding a location row resolves a seeded path with zero resolution-code changes"
   risk: high
@@ -12073,11 +12073,11 @@
     convention (learnings.ts), and a write-scoped console route from source first (distrust this note).
   acceptance:
     - claim: "a stamped operator_note on task A is injected into task A's recon/implement prompt, provenance rendered"
-      proof: "unit test: a provenance-stamped operator_note (author + timestamp) on task A appears VERBATIM in task A's assembled recon/implement prompt with its author+timestamp; the note is scoped to A"
+      proof: "unit test: test/operator-notes.test.ts"
     - claim: "a note on task A never appears in task B's prompt (the falsifier)"
       proof: "unit test: an operator_note on task A is NOT present in task B's assembled prompt — cross-task leakage FAILS"
     - claim: "an UNSTAMPED note is not injected (provenance rule)"
-      proof: "unit test: a note lacking author/timestamp provenance is REFUSED at injection (not rendered into any prompt) — an unstamped note injected FAILS (the falsifier)"
+      proof: "unit test: test/operator-notes.test.ts"
   risk: high
   origin: architect
   plan_refs: ["§8B", "§7"]
