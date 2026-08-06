@@ -1,0 +1,32 @@
+id: fb-1786014552648-2aa351
+ts: 2026-08-06T11:09:12.648Z
+raw: "rmd status WARNS ABOUT A CIRCUIT BREAKER ON A TASK THAT CANNOT DISPATCH —
+  W1-T314 reads status: blocked in its shard (verified at today's sha), and
+  isDispatchEligible refuses a blocked status BEFORE any dependency or breaker
+  check. So it can never re-dispatch. Yet BLOCKERS BY CLASS has rendered
+  'circuit-broken : W1-T314 — resets only on a fresh owned PR — 6/5 dispatches
+  since the last one' with 'next action: investigate before it re-dispatches
+  again' for two days. The next action is impossible and the investigation is
+  one grep. THE MECHANISM: the breaker's state is real history — six PR-less
+  dispatches did happen before the task was withdrawn — but the renderer reports
+  it without asking whether the task is still dispatchable. A latch that
+  outlives its own possibility is the same shape as DEPLOY_FAILED persisting
+  after its cause passed (fb-1785954227448-7b2bb0), and as the escalations a
+  decision-authority audit measured at ~80%
+  machine-resolved-and-never-retracted. CONTEXT SO A READER DOES NOT RE-DERIVE
+  IT: W1-T314 was the four-tab console restructure, decomposed into
+  W1-T334/T335/T336 after six dispatches and roughly $45 produced nothing. All
+  three decomposition tasks have merged; none of them credits W1-T314, which is
+  why its own breaker state was never reset. RECON: establish whether BLOCKERS
+  BY CLASS should filter on dispatchability, or whether the breaker state should
+  clear when a task is withdrawn — those are different fixes with different
+  blast radius, and the second touches the breaker which guards real spend.
+  Falsifying check: if some other consumer reads the breaker state for a
+  withdrawn task and needs it preserved, the fix is display-only and the state
+  must stay."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null
+expansion: null
