@@ -97,8 +97,18 @@ export interface Config {
    * PRECEDENCE, both in `rmd serve` and in the generated unit: `--host`/`--port` flag >
    * `RMD_SERVE_HOST` env > this field > loopback/{@link DEFAULT_SERVE_PORT}. Absent, nothing
    * changes: the console binds 127.0.0.1:4317 exactly as before.
+   *
+   * `identityCapability` (W1-T371) opts the console into ADDITIVE tailnet-identity auth: the
+   * Tailscale ACL app-capability name (e.g. `"example.com/cap/console-write"`) an allowlisted
+   * node must be granted to authenticate with no bearer token at all — see
+   * {@link resolveServeIdentity} (serve.ts) and service.ts's `IdentityAuth` for the two gates
+   * enforced. No flag/env override, unlike host/port: it's a per-install constant chosen once
+   * against the operator's own Tailscale ACL, not something a single invocation varies. Absent
+   * (the default): identity is never consulted and the bearer token authenticates exactly as
+   * it always has — a Tailscale failure (or simply never opting in) degrades to the token
+   * rather than locking the operator out.
    */
-  serve?: { host?: string; port?: number };
+  serve?: { host?: string; port?: number; identityCapability?: string };
   /**
    * Headroom governor switch (operator ruling fb-1784894405468-a4153e, 2026-07-24,
    * amending P34(c)/W1-T249, extending W1-T252 — its DEFAULT clause reversed by the
