@@ -1,0 +1,113 @@
+- id: W1-T382
+  title: "the worker's check-wait bound is an ITERATION COUNT, not a wall clock, and every one of the 21 PRs it has ever booked as `timeout waiting for checks` later MERGED — stop on absence of PROGRESS, never on elapsed polls"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  rationale: "MEASURED OVER THE UNIONED LEDGER (archives + live, deduped; archive-proving control:
+    659 .gz files match `timeout waiting for checks`; negative control on a fabricated string: 0).
+    215 `blocked_ci` verdicts exist. 21 read `timeout waiting for checks (pending treated as
+    blocked)` and a further 17 read `ci timeout before review` — so 38 of 215 (17.7%) are
+    TIMEOUT-shaped rather than red-check-shaped.
+    THE FIGURE THAT DECIDES THIS TASK: of the 21 distinct PRs ever booked as a check-wait timeout,
+    ALL 21 LATER MERGED. Zero were closed unmerged. The bound has a 100% false-positive rate and has
+    never once caught a genuinely stuck PR.
+    THE INSTRUMENT MEASURES THE WRONG THING. `waitForCiGreen` and `pollToGate` (run-task.ts) are
+    both `maxIters = 60, everySec = 6` — AN ITERATION COUNT, NOT A WALL CLOCK. Each iteration also
+    pays a `gh pr view` round trip, so the real bound drifts with API latency: ~6 minutes nominal,
+    ~8-13 observed. Against that, open-to-merge for those same 21 PRs (an UPPER bound on check
+    duration, since it includes review and merge) is min 11.1m, p50 18.2m, p90 1047.5m, max 1216.0m.
+    EVEN THE FASTEST OF THE 21 EXCEEDED THE NOMINAL BOUND.
+    THE COST IS WHY THIS IS NOT TUNING. `runTask` returns `verdict: blocked_ci` and leaves the PR
+    OPEN — the run ENDS and its spend is lost, with no retry. The sweep then picks the PR up through
+    `isBlockedCi`, which routes it to the ci-log fix rung and DISPATCHES BOUNDED FIX WORKERS AGAINST
+    A PR THAT WAS NEVER BROKEN, until strikes exhaust and it escalates to the operator as
+    `blocked-ambiguous`. ONE FALSE BLOCK MANUFACTURES SEVERAL DOWNSTREAM RUNS AND A NEEDS-HUMAN ITEM.
+    THE FAMILY, AND THIS IS THE THIRD INSTANCE: W1-T312 found the same shape one layer up, in
+    ci-gate's own wait cap sized shorter than this repo's required-check wall-clock. W1-T380 found a
+    deploy bound that consumed its own entitlement without delivering. A BOUND THAT FIRES ON A
+    HEALTHY CONDITION is this repo's recurring defect, and this is its worker-loop instance."
+  design: |
+    A DERIVATIVE, NOT A DEADLINE. Give up only when NO PROGRESS is observable.
+
+    (i) DO NOT PROPOSE A LARGER TIMEOUT, AND THE REASON IS NOT CAUTION — THERE IS NO THRESHOLD TO
+    DERIVE. A separating number can only be fitted when two populations are separated by a gap.
+    #1349's threshold was derivable precisely because transient and stall sat either side of an
+    empty gap in the observed distribution. HERE THE `stuck` POPULATION IS EMPTY: 21 of 21 merged,
+    so nothing has ever been observed on the far side. Any number chosen would be fitted to noise
+    and would move the false-positive rate without ever making it correct. An implementer who
+    reaches for `maxIters = 200` has not fixed the defect, only deferred it.
+
+    (ii) THE PREDICATE: stop when the rollup shows no forward motion — the PENDING SET IS NOT
+    SHRINKING and NO required check has CHANGED STATE since the previous poll. A check still
+    `IN_PROGRESS` is slow; a rollup byte-identical across N consecutive polls while nothing
+    completes is stuck. That is a comparison between successive readings, so it needs no threshold
+    fitted to a population that has never occurred. It needs only an N for "how many identical
+    readings before concluding stalled", which is a property of the POLL CADENCE, not of CI duration
+    — a categorically easier number, and one whose failure direction is "wait longer" rather than
+    "abandon a healthy PR".
+
+    (iii) IT COSTS ZERO EXTRA API CALLS — ESTABLISH THIS RATHER THAN ASSUME IT, BUT IT HOLDS TODAY.
+    `waitForCiGreen` already issues `gh pr view <url> --json statusCheckRollup` on EVERY iteration,
+    and `pollToGate` the same with `--json state,statusCheckRollup`. `RollupEntry` already carries
+    `name`, `context`, `status`, `conclusion` and `state` per check. So both the pending set and
+    every check's state are ALREADY IN HAND each poll; the derivative is computed by comparing this
+    iteration's rollup to the last one that was already fetched. NO additional request per poll.
+    That matters concretely: GraphQL exhaustion killed a completed run at `gh pr create` on
+    2026-08-05, so a fix that added a request per poll would trade one failure mode for another.
+
+    (iv) PUT THE PREDICATE BESIDE `ciGateFromRollup`, WHICH IS ALREADY EXPORTED FROM run-task.ts AND
+    ALREADY UNIT-TESTED. Same file, same shape, same inputs — a pure function over
+    `RollupEntry[]`. NOT a new module: nothing here needs one, and a new module would need its own
+    call-site proof. Its TEST, however, goes in its OWN file: `test/run-task.test.ts` intermittently
+    crashes at FILE level under `--experimental-test-coverage`, which would make a
+    coverage-load-bearing test nondeterministically lose its own coverage.
+
+    (v) FALSIFIER, THREE DIRECTIONS, AND NO TWO OF THEM ARE THE SAME TEST.
+      - BITES: a rollup that is byte-identical across the stall window, with checks still pending,
+        must conclude stalled. This is the only direction that ends a wait.
+      - HOLDS (the defect, reduced): a rollup where a pending check FLIPS to success — or where the
+        pending set shrinks by one — must KEEP WAITING even after many polls. That is the case all
+        21 historical PRs were in, and it must never conclude.
+      - HOLDS: a rollup where a required check goes red must still return red IMMEDIATELY, unchanged
+        from today. The derivative must not delay a real failure.
+
+    (vi) THE VERDICT TEXT MUST STOP LYING. `timeout waiting for checks (pending treated as blocked)`
+    describes an elapsed-time decision. Whatever replaces it must name the observation that ended
+    the wait — which required checks were pending and for how many identical readings — so the next
+    reader of a `blocked_ci` row can tell a stall from a slow build without re-deriving it from the
+    ledger, which is what this task cost.
+
+    NOT IN SCOPE: ci-gate's own wait cap (W1-T312's territory, one layer up); the sweep's
+    `isBlockedCi` routing or the ci-log fix rung; `everySec`; and any change to what counts as a
+    REQUIRED check.
+  acceptance:
+    - claim: "a rollup unchanged across the stall window with checks still pending concludes stalled and says which checks were pending"
+      proof: "unit test: test/check-wait-progress.test.ts"
+    - claim: "a rollup whose pending set shrinks, or whose check flips state, keeps waiting however many polls have elapsed"
+      proof: "unit test: test/check-wait-progress.test.ts"
+    - claim: "a required check going red still returns red immediately, so the derivative never delays a real failure"
+      proof: "unit test: test/check-wait-progress.test.ts"
+  risk: high
+  origin: oper#daemon-watch-2026-08-06
+  plan_refs: ["§4B", "W1-T312", "W1-T380"]
+  files: [src/run-task.ts, test/check-wait-progress.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — the predicate is pure over `RollupEntry[]`, so all three directions assert
+    in-process with no network, no clock and nothing spawned.
+    risk:high IS SET BY RULE 19's SPAN AND BY BLAST RADIUS BOTH, unusually. Rule 19 scores `files:`
+    as two concerns (run-task, check-wait-progress) and decomposing would be wrong — a predicate
+    cannot ship without the falsifier that proves it bites once and holds twice. But the radius is
+    genuinely wide too: this decides whether a run abandons a PR, and the failure directions are
+    asymmetric — too eager abandons healthy work (today's defect, 21 for 21), too patient leaves a
+    worker polling a genuinely stuck PR until its own budget cap. Direction 1 of the falsifier is
+    what stops the fix overshooting into never-concluding.
+    budget_usd 55 — the predicate is small; the cost is the three-direction falsifier plus wiring it
+    into BOTH `waitForCiGreen` and `pollToGate`, which carry the same bound and the same defect.
+    WHY A NUMBER IS THE WRONG DELIVERABLE HERE, restated so it is not relitigated: the recon
+    measured 21 of 21 booked PRs later merging. There is no observed `stuck` population, so there is
+    no gap and no threshold. Raising `maxIters` changes how often the bug fires, not whether it is a
+    bug — the same distinction W1-T380 had to draw about raising `pruneGraceMs`."
