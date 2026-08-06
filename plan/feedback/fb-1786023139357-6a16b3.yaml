@@ -1,0 +1,34 @@
+id: fb-1786023139357-6a16b3
+ts: 2026-08-06T13:32:19.357Z
+raw: "bodyContradictsDiff HAS THREE PARSING EDGES, ALL FOUND BY WRITING BODIES
+  AGAINST IT — and since changesetContradictions FORCES a failure verdict, each
+  one fails a review on a body that is truthful. (1) IT READS THE HYPHENATED
+  PLAN-SCOPE ADJECTIVE AS A CHANGESET CLAIM WHEREVER IT APPEARS — including as
+  ordinary domain vocabulary in a body ABOUT plan scoping. A PR whose subject is
+  the plan-scope predicate cannot describe itself without tripping the checker
+  that reads its description. Two contradictions were caught this way in one
+  draft on #1431. (2) THE DIRECTORY-ABSENCE ARM IS INCONSISTENT BY FORMATTING:
+  it FIRES on the backticked form of a no-such-directory claim and stays SILENT
+  on the bare-prose form. That inverts what was reported on #1428, where a
+  deliberately false bare-prose absence claim passed — so the arm's behaviour
+  depends on markup, not meaning, and a false claim survives in whichever form
+  the checker does not read. (3) MARKDOWN TABLES ARE NOT STRIPPED; FENCED BLOCKS
+  ARE. So a table cell is scanned as prose while the same text in a code fence
+  is not. RECON: establish whether the changeset-claim matcher can require a
+  claim SUBJECT — the existing subject anchor already correctly ignores 'exactly
+  ONE filed task' as a count about tasks rather than files — and whether the
+  same anchor can distinguish the plan-scope adjective used as a claim from the
+  same words used as vocabulary. Then decide the absence arm deliberately:
+  either it reads both forms or neither, but not one by accident of backticks.
+  Note the doc's stated contract, 'anything this cannot decide is silence' —
+  silence is the right default, so the fix is to widen what it can DECIDE, never
+  to widen what it FAILS. Falsifying check: if the hyphenated-adjective hits
+  were genuinely claims about the changeset rather than vocabulary, the checker
+  was right and the defect is only that a body about plan scope must be phrased
+  around it."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null
+expansion: null
