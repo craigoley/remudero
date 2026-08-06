@@ -198,6 +198,37 @@ test("a second exhaustion after the bucket has reset escalates again, and an exh
   );
 });
 
+// ── an onQuotaExhausted that THROWS is caught and ledgered, never taking the daemon down ───
+
+test("an onQuotaExhausted that THROWS is caught and ledgered — the escalation hook can never take the daemon down with it", async () => {
+  const plan = fixturePlan("throw");
+  const merged = new Set(["M"]);
+  const root = mkdtempSync(join(tmpdir(), "quota-exhaustion-throw-root-"));
+  const clock = pollingClock(root, 2);
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+
+  const s = await runDaemon(plan, {
+    refreshMerged: () => (id) => merged.has(id),
+    runOne: async (id) => neverRunOne(id),
+    readGhQuota: () => ({ graphql: { remaining: 0, resetsAt: "2026-08-06T02:00:00.000Z" } }),
+    log: (step, extra = {}) => lines.push({ step, extra }),
+    onQuotaExhausted: async () => {
+      throw new Error("gh: API rate limit already exceeded");
+    },
+    checkStop: () => stopDetail(root),
+    sleep: clock.sleep,
+  });
+
+  assert.equal(s.stopReason, "stopped", "the loop survived the throwing hook and ended only on the operator's STOP");
+  const failed = lines.filter((l) => l.step === "daemon.escalation.failed");
+  assert.equal(failed.length, 1, "the failure is ledgered exactly once — the episode latch still holds after a throw");
+  assert.match(String(failed[0].extra.error), /rate limit already exceeded/, "the underlying message is preserved, not swallowed");
+  assert.ok(
+    lines.filter((l) => l.step === "daemon.quota" && l.extra.bucket === "graphql").length >= 2,
+    "the per-tick recording kept going through the throw, exactly as daemon.headroom's own heartbeat does",
+  );
+});
+
 // ── escalateQuotaExhaustion: the real onQuotaExhausted wiring (run-task.ts) ─────────────────
 
 test("escalateQuotaExhaustion: opens an escalation and durably dedups on (bucket, resetsAt) across process boots", () => {
