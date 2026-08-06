@@ -192,8 +192,14 @@ test("CALIBRATION: the detection finds the readers recon-EJ measured, and no mor
   // W1-T378) landed — a TWELFTH consumer, module-load and therefore UNSEAMED, so it is ALLOWLISTED
   // rather than seamed, for its sibling DEFAULT_PRUNE_GRACE_MS's reason (the argument seam that
   // matters is reapStaleWorktrees' own `opts.maxAgeMs`). It failed test 2 first, as this comment
-  // requires, and was allowlisted only after.
-  assert.equal(readers.length, 13, `expected 13 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
+  // requires, and was allowlisted only after. FOURTEEN since `ceilingPolicy` (panel-graph.ts,
+  // W1-T364) landed — a THIRTEENTH consumer, also SEAMED (`deps.policy ?? loadDefaultPolicy()`),
+  // backing the console's OWN write control over the daily cost ceiling override (POST
+  // /v1/policy/daily-cost-ceiling(/clear)) — the same bound `buildAccountUsageRoute`'s reader
+  // already reads for the ACCOUNT strip's render, now also consulted at write time so a write
+  // never validates against a hardcoded copy of the committed row. ONE line, shared by both
+  // routes, rather than the seam appearing twice.
+  assert.equal(readers.length, 14, `expected 14 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
 
   // `symbolise` labels the LAST bare `const policy = loadPolicy(...)` as daemonCommand's, because that
   // reader carries no distinctive identifier of its own. Today exactly ONE such line survives —
@@ -211,6 +217,7 @@ test("CALIBRATION: the detection finds the readers recon-EJ measured, and no mor
   assert.deepEqual(files, [
     "src/lib/account-usage.ts",
     "src/lib/launchd.ts",
+    "src/lib/panel-graph.ts",
     "src/lib/policy.ts",
     "src/lib/review.ts",
     "src/lib/sweep.ts",

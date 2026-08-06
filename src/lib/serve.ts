@@ -998,6 +998,22 @@ export function renderShellHtml(
     </label>
   </div>
   <p id="controls-status" role="status" aria-live="polite" class="counts"></p>
+  <!-- W1-T364: the operator's own write control over the daily cost ceiling override (W1-T332's
+       state/DAILY_COST_CEILING_OVERRIDE store), gated on W1-T363 (shipped, #1410) so a write here
+       is actually enforced by the daemon's very next tick, never a display-only value. Arm-then-
+       confirm like STOP/Drain now above -- never a bare Confirm (design note ii) -- and the
+       read-back in the armed label states the restart truth verified from source: the daemon's
+       reloader re-resolves the ceiling fresh every tick, so no restart is needed. The current
+       effective value renders beside the control from GET /v1/account-usage's own
+       resolveDailyCostCeiling-derived payload (renderCostCeilingControl, below) -- never a second
+       derivation (design note iii); the ACCOUNT strip above shows the SAME fields. -->
+  <label for="cost-ceiling-input">Daily cost ceiling ($)</label>
+  <div class="btn-row" id="cost-ceiling-row">
+    <input id="cost-ceiling-input" type="number" step="0.01" min="0" disabled title="Read-only — enter a write token to enable this action" />
+    <button id="cost-ceiling-set-btn" type="button" data-confirming="false" aria-pressed="false" disabled title="Read-only — enter a write token to enable this action">Set ceiling</button>
+    <button id="cost-ceiling-clear-btn" type="button" data-confirming="false" aria-pressed="false" disabled title="Read-only — enter a write token to enable this action">Clear override</button>
+  </div>
+  <p id="cost-ceiling-status" role="status" aria-live="polite" class="counts"></p>
 </section>
 
 <section id="more" class="panel-section" aria-label="More tools" data-owner-tab="feed">
@@ -1197,6 +1213,12 @@ export function renderShellHtml(
     "/v1/quiet-hours": { kind: "done", text: "Quiet hours updated." },
     "/v1/drain/kick": { kind: "requested", text: "Run REQUESTED — not started yet. The daemon picks this up at its next poll and can still refuse it (for example a task that is not runnable). Watch RECENT for the outcome." },
     "/v1/drain/run": { kind: "requested", text: "Drain REQUESTED — not started yet. The daemon runs one dispatch cycle at its next poll. Watch RECENT for the outcome." },
+    // W1-T364: the store's write completes synchronously (writeDailyCostCeilingOverride runs
+    // before the route replies) and dailyCostCeilingReloader re-resolves it fresh every tick
+    // (W1-T363) -- "done" is accurate, and the wording states the no-restart truth rather than
+    // leaving the operator to guess whether a live daemon needs a restart to see it.
+    "/v1/policy/daily-cost-ceiling": { kind: "done", text: "Daily cost ceiling updated — effective on the daemon's next tick, no restart needed." },
+    "/v1/policy/daily-cost-ceiling/clear": { kind: "done", text: "Daily cost ceiling override cleared — reverted to the committed default, effective on the daemon's next tick, no restart needed." },
   };
   // Long enough to read a two-line message without hunting for it, short enough that it never
   // becomes furniture the operator stops seeing. Cleared by the next write either way.
@@ -1963,6 +1985,25 @@ export function renderShellHtml(
       a.usageUnknownReason ? \`unknown (\${a.usageUnknownReason})\` : formatTimestamp(a.usageAsOf),
     );
     setGlanceValue("au-measures", a.measures || "");
+  }
+
+  /** W1-T364: the daily-cost-ceiling WRITE control's own current-state readout, in the "Fleet
+   *  control" panel beside the Set/Clear buttons (design note iii) -- driven off the SAME GET
+   *  /v1/account-usage payload renderAccountUsage above already rendered into the ACCOUNT strip,
+   *  never a second fetch or a second derivation. Kept deliberately separate from
+   *  renderAccountUsage itself (rather than folded in) so a caller that only wants the ACCOUNT
+   *  strip's read side is unaffected by this control's own DOM ids. */
+  function renderCostCeilingControl(a) {
+    const el = document.getElementById("cost-ceiling-status");
+    if (!el) return;
+    if (a.dailyCostCeilingUsd == null) {
+      el.textContent = "current ceiling: unknown";
+      return;
+    }
+    el.textContent =
+      a.dailyCostCeilingProvenance === "overridden"
+        ? \`current: \${costLabel(a.dailyCostCeilingUsd)} (overridden, default \${costLabel(a.dailyCostCeilingDefaultUsd)})\`
+        : \`current: \${costLabel(a.dailyCostCeilingUsd)} (default)\`;
   }
 
   /** Renders GET /v1/plan/view's body (W1-T315): PROGRESS (done/in-flight/queued, GitHub-
@@ -3130,6 +3171,71 @@ export function renderShellHtml(
     postJson("/v1/drain/run").then(refreshAll);
   });
 
+  // ── W1-T364: the daily-cost-ceiling WRITE control -- arm-then-confirm like STOP/Drain now
+  // above (design note ii: "never a bare Confirm"), the read-back IN the armed label carrying the
+  // new value, what it was, and the restart truth verified from source at implement time:
+  // dailyCostCeilingReloader (run-task.ts) re-resolves the ceiling fresh on EVERY daemon tick
+  // (W1-T363), so a write here needs no restart -- unlike a committed plan/policy.yaml edit,
+  // which loadDefaultPolicy memoizes for the process lifetime (plan/policy.yaml's own comment on
+  // that row). Set RE-ARMS (rather than confirming stale) if the input value changes between the
+  // two clicks, so editing the number after arming can never fire the earlier figure.
+  let ceilingSetConfirmTimer;
+  function resetCeilingSetButton() {
+    const btn = document.getElementById("cost-ceiling-set-btn");
+    btn.dataset.confirming = "false";
+    btn.dataset.armedUsd = "";
+    btn.setAttribute("aria-pressed", "false");
+    btn.classList.remove("confirming");
+    btn.textContent = "Set ceiling";
+    clearTimeout(ceilingSetConfirmTimer);
+  }
+  document.getElementById("cost-ceiling-set-btn").addEventListener("click", () => {
+    if (!hasWriteScope) return; // W1-T202 defense-in-depth alongside this button's own 'disabled'
+    const btn = document.getElementById("cost-ceiling-set-btn");
+    const input = document.getElementById("cost-ceiling-input");
+    const raw = input.value.trim();
+    const usd = Number(raw);
+    if (!raw || !Number.isFinite(usd)) return; // nothing typed / not a number -- never arm on garbage
+    if (btn.dataset.confirming !== "true" || btn.dataset.armedUsd !== String(usd)) {
+      btn.dataset.confirming = "true";
+      btn.dataset.armedUsd = String(usd);
+      btn.setAttribute("aria-pressed", "true");
+      btn.classList.add("confirming");
+      const was = latestAccountUsage && latestAccountUsage.dailyCostCeilingUsd != null ? costLabel(latestAccountUsage.dailyCostCeilingUsd) : "unknown";
+      btn.textContent = \`Confirm: set ceiling to \${costLabel(usd)} (was \${was}) — effective next tick, no restart?\`;
+      clearTimeout(ceilingSetConfirmTimer);
+      ceilingSetConfirmTimer = setTimeout(() => resetCeilingSetButton(), 8000);
+      return;
+    }
+    resetCeilingSetButton();
+    postJson("/v1/policy/daily-cost-ceiling", { usd }).then(refreshAll);
+  });
+  let ceilingClearConfirmTimer;
+  function resetCeilingClearButton() {
+    const btn = document.getElementById("cost-ceiling-clear-btn");
+    btn.dataset.confirming = "false";
+    btn.setAttribute("aria-pressed", "false");
+    btn.classList.remove("confirming");
+    btn.textContent = "Clear override";
+    clearTimeout(ceilingClearConfirmTimer);
+  }
+  document.getElementById("cost-ceiling-clear-btn").addEventListener("click", () => {
+    if (!hasWriteScope) return; // W1-T202 defense-in-depth alongside this button's own 'disabled'
+    const btn = document.getElementById("cost-ceiling-clear-btn");
+    if (btn.dataset.confirming !== "true") {
+      btn.dataset.confirming = "true";
+      btn.setAttribute("aria-pressed", "true");
+      btn.classList.add("confirming");
+      const def = latestAccountUsage && latestAccountUsage.dailyCostCeilingDefaultUsd != null ? costLabel(latestAccountUsage.dailyCostCeilingDefaultUsd) : "the committed default";
+      btn.textContent = \`Confirm: clear override — reverts to \${def} — effective next tick, no restart?\`;
+      clearTimeout(ceilingClearConfirmTimer);
+      ceilingClearConfirmTimer = setTimeout(() => resetCeilingClearButton(), 8000);
+      return;
+    }
+    resetCeilingClearButton();
+    postJson("/v1/policy/daily-cost-ceiling/clear").then(refreshAll);
+  });
+
   // ── fleet control READ-BACK (W1-T153): render the ACTIVE mode, never stateless buttons ──
   // W1-T202: ALSO the write-lock read-back for these five controls -- 'locked' composes with the
   // mode-derived disable so a write-scope flip (probeWriteScope, below) and a mode flip (a real
@@ -3141,6 +3247,11 @@ export function renderShellHtml(
     const stopBtn = document.getElementById("stop-btn");
     const quietHours = document.getElementById("quiet-hours");
     const drainBtn = document.getElementById("drain-now-btn");
+    // W1-T364: the ceiling control's own three write-gated elements, on the SAME static
+    // fleet-control row gating surface as pause/resume/stop/quiet-hours/drain above.
+    const ceilingInput = document.getElementById("cost-ceiling-input");
+    const ceilingSetBtn = document.getElementById("cost-ceiling-set-btn");
+    const ceilingClearBtn = document.getElementById("cost-ceiling-clear-btn");
     const locked = !hasWriteScope;
     const lockTitle = "Read-only — enter a write token to enable this action";
     pauseBtn.setAttribute("aria-pressed", String(status.paused));
@@ -3154,11 +3265,17 @@ export function renderShellHtml(
     quietHours.disabled = locked;
     quietHours.checked = status.quietHours;
     if (drainBtn) drainBtn.disabled = locked;
+    if (ceilingInput) ceilingInput.disabled = locked;
+    if (ceilingSetBtn) ceilingSetBtn.disabled = locked;
+    if (ceilingClearBtn) ceilingClearBtn.disabled = locked;
     pauseBtn.title = locked ? lockTitle : "";
     resumeBtn.title = locked ? lockTitle : "";
     stopBtn.title = locked ? lockTitle : "";
     quietHours.title = locked ? lockTitle : "";
     if (drainBtn) drainBtn.title = locked ? lockTitle : "";
+    if (ceilingInput) ceilingInput.title = locked ? lockTitle : "";
+    if (ceilingSetBtn) ceilingSetBtn.title = locked ? lockTitle : "";
+    if (ceilingClearBtn) ceilingClearBtn.title = locked ? lockTitle : "";
     // W1-T288: THREE states, not two. STOP/PAUSE still win over liveness exactly as before --
     // but with neither flag set, 'fleet is running' is now gated on status.daemonLive (a real
     // ledger heartbeat GET /v1/control/status now carries), never inferred from the mere
@@ -3765,6 +3882,7 @@ export function renderShellHtml(
       if (accountUsage) {
         latestAccountUsage = accountUsage;
         renderAccountUsage(accountUsage);
+        renderCostCeilingControl(accountUsage);
       }
       if (planView) {
         latestPlanView = planView;

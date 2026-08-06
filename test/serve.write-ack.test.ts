@@ -268,6 +268,86 @@ test("POLICY acknowledge-and-name-where-to-look: a control whose effect never sh
   });
 });
 
+// ── 9. W1-T364: the daily-cost-ceiling WRITE control ──────────────────────────────────
+//
+// Acceptance 2 (plan/tasks.d/W1-T364-ceiling-override-write-surface.yaml): "the control is the
+// arm-then-confirm read-back idiom carrying the new value and the restart caveat, and clear
+// reverts the rendered state to the committed default." Chromium/real-click, not a route-level
+// assertion, because the control IS the click sequence -- an armed label only a second click
+// fires (learnings#probe-must-exercise-the-real-consuming-client: the consuming client here is
+// the operator's own two clicks, not a bare fetch).
+
+test("W1-T364: Set ceiling is arm-then-confirm, the armed label carries the new value and the no-restart truth (W1-T363 shipped), and a successful write is acknowledged as done with the current-state readout updated", async () => {
+  const deps = fixtureDeps();
+  await withShell(deps, async (base) => {
+    const page = await openShellWithWrite(base);
+    await reachSection(page, "controls"); // #cost-ceiling-set-btn lives in the "controls" section, beside pause/stop
+
+    await page.waitForFunction(() => document.getElementById("cost-ceiling-status")?.textContent?.includes("current"));
+
+    await page.fill("#cost-ceiling-input", "900");
+    await page.click("#cost-ceiling-set-btn"); // click 1: ARMS, does not write yet
+    await page.waitForFunction(() => document.getElementById("cost-ceiling-set-btn")?.dataset.confirming === "true");
+    const armed = await page.textContent("#cost-ceiling-set-btn");
+    assert.match(armed ?? "", /Confirm: set ceiling to \$900\.000/, "the new value rides the armed label — never a bare Confirm");
+    assert.match(armed ?? "", /no restart/i, "the restart truth (verified from source: the reloader re-resolves every tick) rides the armed label too");
+
+    await page.click("#cost-ceiling-set-btn"); // click 2: fires POST /v1/policy/daily-cost-ceiling
+    await page.waitForFunction(() => document.getElementById("write-ack-banner")?.hidden === false);
+
+    const a = await ack(page);
+    assert.equal(a.kind, "done", "the store's write completes synchronously, before the route replies");
+    assert.match(a.text, /Daily cost ceiling updated/);
+    assert.match(a.text, /no restart needed/);
+    assert.equal((await errBanner(page)).hidden, true, "no error banner on a successful write");
+
+    // The falsifier's FIRST direction (design note iv): the rendered state flips to overridden
+    // with the value, off the SAME GET /v1/account-usage payload -- never a second derivation.
+    await page.waitForFunction(() => document.getElementById("cost-ceiling-status")?.textContent?.includes("overridden"));
+    const status = await page.textContent("#cost-ceiling-status");
+    assert.match(status ?? "", /\$900\.000/);
+    await page.close();
+  });
+});
+
+test("W1-T364: Clear override is arm-then-confirm and reverts the rendered current-state readout to the committed default", async () => {
+  const deps = fixtureDeps();
+  await withShell(deps, async (base) => {
+    const page = await openShellWithWrite(base);
+    await reachSection(page, "controls");
+    await page.waitForFunction(() => document.getElementById("cost-ceiling-status")?.textContent?.includes("current"));
+
+    // Arm and confirm an override first (same two-click idiom as the Set test above), so Clear
+    // has something real to revert.
+    await page.fill("#cost-ceiling-input", "700");
+    await page.click("#cost-ceiling-set-btn");
+    await page.waitForFunction(() => document.getElementById("cost-ceiling-set-btn")?.dataset.confirming === "true");
+    await page.click("#cost-ceiling-set-btn");
+    await page.waitForFunction(() => document.getElementById("cost-ceiling-status")?.textContent?.includes("overridden"));
+
+    await page.click("#cost-ceiling-clear-btn"); // click 1: ARMS
+    await page.waitForFunction(() => document.getElementById("cost-ceiling-clear-btn")?.dataset.confirming === "true");
+    const armed = await page.textContent("#cost-ceiling-clear-btn");
+    assert.match(armed ?? "", /Confirm: clear override/, "never a bare Confirm");
+
+    await page.click("#cost-ceiling-clear-btn"); // click 2: fires POST /v1/policy/daily-cost-ceiling/clear
+    // The banner is ALREADY visible from the Set write above (WRITE_ACK_MS has not elapsed), so
+    // waiting on hidden===false alone would resolve instantly on the stale text — wait for the
+    // CLEAR route's own wording to land instead.
+    await page.waitForFunction(() => document.getElementById("write-ack-banner")?.textContent?.includes("cleared"));
+
+    const a = await ack(page);
+    assert.equal(a.kind, "done");
+    assert.match(a.text, /cleared/i);
+    assert.match(a.text, /committed default/i);
+
+    // The falsifier's SECOND direction (design note iv): clear reverts the rendered state to the
+    // committed default.
+    await page.waitForFunction(() => document.getElementById("cost-ceiling-status")?.textContent?.includes("(default)"));
+    await page.close();
+  });
+});
+
 // ── the shared-helper contract: one place covers all twelve ──────────────────────────
 
 test("the acknowledgement lives in the shared postJson helper so every write control inherits it", () => {

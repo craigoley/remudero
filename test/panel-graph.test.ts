@@ -7,11 +7,13 @@ import { test } from "node:test";
 import type { AddressInfo } from "node:net";
 import { createService } from "../src/lib/service.js";
 import {
+  buildClearDailyCostCeilingRoute,
   buildDrainPreviewRoute,
   buildFeedbackInboxRoute,
   buildPanelGraphRoutes,
   buildPreviewFeedbackRoute,
   buildProposalDecisionRoute,
+  buildSetDailyCostCeilingRoute,
   buildSubmitFeedbackRoute,
   buildTraceRoute,
   draftedTaskSummaries,
@@ -35,6 +37,7 @@ import {
 import { appendLedger } from "../src/lib/ledger.js";
 import type { TraceGithub, TracePrView } from "../src/lib/trace.js";
 import type { GitHub } from "../src/lib/status.js";
+import { dailyCostCeilingOverridePath, loadDefaultPolicy, resolveDailyCostCeiling, type Policy } from "../src/lib/policy.js";
 import {
   decideTriage,
   diffCitesFeedback,
@@ -1356,4 +1359,140 @@ test("ratifyCliGateway.approve: the SAME real detached bin/rmd spawn, distinct C
 test("panel-graph ledger origin is a stable hash, never the raw bearer token", () => {
   assert.doesNotMatch(writerId, new RegExp(WRITE_TOKEN));
   assert.equal(writerId, createHash("sha256").update(WRITE_TOKEN).digest("hex").slice(0, 12));
+});
+
+// ── POST /v1/policy/daily-cost-ceiling, POST /v1/policy/daily-cost-ceiling/clear (W1-T364) ──
+//
+// Acceptance (plan/tasks.d/W1-T364-ceiling-override-write-surface.yaml):
+//   (1) an in-bounds console write lands the override through the store's own writer and the
+//       rendered state shows overridden with the value; an out-of-bounds write is refused by the
+//       store's validation with no file written.
+//   (2) the control is the arm-then-confirm read-back idiom (proven client-side, test/
+//       serve.write-ack.test.ts); clear reverts the rendered state to the committed default.
+// Both routes read/write `deps.root`, never `inboxRoot` -- the same repoRoot
+// dailyCostCeilingReloader (run-task.ts) resolves `state/` against (W1-T363).
+
+/** A fixture Policy with a DELIBERATELY TIGHTER `sweep.dailyCostCeilingUsd` bound than the
+ *  shipped `plan/policy.yaml` row -- proves the route reads whichever Policy it is handed, never
+ *  a hardcoded range, the same falsifier test/policy.test.ts's own W1-T332 acceptance-2 test
+ *  uses for `writeDailyCostCeilingOverride` directly. */
+function tighterCeilingPolicy(): Policy {
+  const base = loadDefaultPolicy();
+  return { ...base, bounds: { ...base.bounds, "sweep.dailyCostCeilingUsd": { min: 100, max: 300 } } };
+}
+
+test("POST /v1/policy/daily-cost-ceiling, POST /v1/policy/daily-cost-ceiling/clear are write-scoped", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  await withService(depsFor(root, planPath), async (base) => {
+    assert.equal((await post(base, "/v1/policy/daily-cost-ceiling", READ_TOKEN, { usd: 1000 })).status, 403);
+    assert.equal((await post(base, "/v1/policy/daily-cost-ceiling/clear", READ_TOKEN, {})).status, 403);
+  });
+});
+
+test("POST /v1/policy/daily-cost-ceiling: an in-bounds write lands the override through writeDailyCostCeilingOverride and resolveDailyCostCeiling reads it back overridden with the value (falsifier direction 1)", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  const policy = tighterCeilingPolicy();
+  await withService({ ...depsFor(root, planPath), policy }, async (base) => {
+    const res = await post(base, "/v1/policy/daily-cost-ceiling", WRITE_TOKEN, { usd: 250 });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { ok: true, usd: 250, provenance: "overridden", committedDefaultUsd: policy.values.sweep.dailyCostCeilingUsd });
+  });
+  // Proven through the SAME resolver the daemon's own reloader calls (policy.ts), never a
+  // second, independent read of the override file.
+  const effective = resolveDailyCostCeiling(root, policy);
+  assert.equal(effective.usd, 250);
+  assert.equal(effective.provenance, "overridden");
+
+  const lines = readLedgerLines(ledgerPathFor(root));
+  const line = lines.find((l) => l.step === "console.ceiling_override_written");
+  assert.ok(line, "must ledger console.ceiling_override_written (W1-T333's audit primitive)");
+  assert.equal(line!.who, writerId);
+  assert.equal(line!.from_usd, policy.values.sweep.dailyCostCeilingUsd);
+  assert.equal(line!.to_usd, 250);
+  assert.equal(line!.effective_usd, 250);
+});
+
+test("POST /v1/policy/daily-cost-ceiling: an out-of-bounds write is REFUSED by the store's own validation (PolicyError -> 400), no override file written, no ledger line (falsifier direction 2)", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  const policy = tighterCeilingPolicy(); // bound [100, 300]
+  await withService({ ...depsFor(root, planPath), policy }, async (base) => {
+    const res = await post(base, "/v1/policy/daily-cost-ceiling", WRITE_TOKEN, { usd: 1_200 }); // in the SHIPPED bound, outside this fixture's
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.equal(body.error, "invalid_request");
+    assert.match(body.detail, /out of the committed plan\/policy\.yaml bound/);
+  });
+  assert.equal(existsSync(dailyCostCeilingOverridePath(root)), false, "no file written on refusal");
+  const lines = readLedgerLines(ledgerPathFor(root));
+  assert.ok(!lines.some((l) => l.step === "console.ceiling_override_written"), "no audit line on a refused write");
+});
+
+test("POST /v1/policy/daily-cost-ceiling: a non-number usd -> 400, no route-level bounds check duplicated (the store's own refusal is the only 400 reason for a valid number)", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  await withService(depsFor(root, planPath), async (base) => {
+    const res = await post(base, "/v1/policy/daily-cost-ceiling", WRITE_TOKEN, { usd: "not a number" });
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.equal(body.error, "invalid_request");
+    assert.match(body.detail, /usd must be a number/);
+  });
+  assert.equal(existsSync(dailyCostCeilingOverridePath(root)), false);
+});
+
+test("POST /v1/policy/daily-cost-ceiling/clear: reverts the rendered state to the committed default and ledgers the audit trail", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  const policy = loadDefaultPolicy();
+  await withService({ ...depsFor(root, planPath), policy }, async (base) => {
+    const set = await post(base, "/v1/policy/daily-cost-ceiling", WRITE_TOKEN, { usd: 900 });
+    assert.equal(set.status, 200);
+    assert.equal(resolveDailyCostCeiling(root, policy).provenance, "overridden");
+
+    const res = await post(base, "/v1/policy/daily-cost-ceiling/clear", WRITE_TOKEN, {});
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), {
+      ok: true,
+      usd: policy.values.sweep.dailyCostCeilingUsd,
+      provenance: "default",
+      committedDefaultUsd: policy.values.sweep.dailyCostCeilingUsd,
+    });
+  });
+  const effective = resolveDailyCostCeiling(root, policy);
+  assert.equal(effective.usd, policy.values.sweep.dailyCostCeilingUsd);
+  assert.equal(effective.provenance, "default");
+
+  const lines = readLedgerLines(ledgerPathFor(root));
+  const auditLines = lines.filter((l) => l.step === "console.ceiling_override_written");
+  assert.equal(auditLines.length, 2, "one line for the set, one for the clear");
+  const clearLine = auditLines[1];
+  assert.equal(clearLine.from_usd, 900);
+  assert.equal(clearLine.to_usd, policy.values.sweep.dailyCostCeilingUsd);
+  assert.equal(clearLine.effective_usd, policy.values.sweep.dailyCostCeilingUsd);
+});
+
+test("POST /v1/policy/daily-cost-ceiling/clear: idempotent -- clearing an already-absent override still 200s at the committed default, mirroring clearDailyCostCeilingOverride's own idempotence", async () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  const policy = loadDefaultPolicy();
+  await withService({ ...depsFor(root, planPath), policy }, async (base) => {
+    const res = await post(base, "/v1/policy/daily-cost-ceiling/clear", WRITE_TOKEN, {});
+    assert.equal(res.status, 200);
+    assert.equal((await res.json()).provenance, "default");
+  });
+});
+
+test("individual route builders each return their own exact-match route (W1-T364 additions)", () => {
+  const root = tmpRoot();
+  const planPath = emptyPlanPath(root);
+  const deps = depsFor(root, planPath);
+  assert.equal(buildSetDailyCostCeilingRoute(deps).path, "/v1/policy/daily-cost-ceiling");
+  assert.equal(buildSetDailyCostCeilingRoute(deps).method, "POST");
+  assert.equal(buildSetDailyCostCeilingRoute(deps).scope, "write");
+  assert.equal(buildClearDailyCostCeilingRoute(deps).path, "/v1/policy/daily-cost-ceiling/clear");
+  assert.equal(buildClearDailyCostCeilingRoute(deps).method, "POST");
+  assert.equal(buildClearDailyCostCeilingRoute(deps).scope, "write");
 });
