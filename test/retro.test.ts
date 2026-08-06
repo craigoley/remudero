@@ -381,6 +381,38 @@ test("planHealthSweep: a MERGED/DONE task is out of scope even if it would other
   assert.deepEqual(report.correctiveTasks, []);
 });
 
+// ── W1-T367: "already shipped" is decided by the DERIVED projection, not the decorative
+// yaml `status:` field — the whole point of this task. MEASURED: at cdf885a the yaml
+// credited only 2 of 359 tasks merged/done, so the pre-fix skip (keyed on `task.status`
+// directly) cleared 2 and re-linted 357 tasks a run, 248 of them already shipped. These two
+// tests drive the new `isMerged` parameter directly and prove BOTH directions: a stale yaml
+// `queued` status no longer prevents the skip when the projection says merged, and a stale
+// yaml `merged` status no longer forces a skip when the projection says NOT merged.
+test("planHealthSweep: a task whose yaml status still says 'queued' is skipped when the derived isMerged says it already merged", () => {
+  const staleQueued = task({
+    id: "W1-T-STALE-MERGED",
+    status: "queued", // the decorative field never caught up — this is the measured 248/359 shape
+    files: ["src/lib/foo.ts"],
+    acceptance: [{ claim: "the daemon does X", proof: "unit test asserts X" }],
+  });
+  const report = planHealthSweep([staleQueued], () => ({}), (t) => t.id === "W1-T-STALE-MERGED");
+  assert.deepEqual(report.flags, [], "the derived projection says merged, so it is out of scope despite yaml 'queued'");
+  assert.deepEqual(report.correctiveTasks, []);
+});
+
+test("planHealthSweep: a task whose yaml status says 'merged' is still linted when the derived isMerged says it is NOT merged", () => {
+  const staleMerged = task({
+    id: "W1-T-STALE-OPEN",
+    status: "merged", // a hand-edited/stale yaml row — must not be trusted over the projection
+    files: ["src/lib/foo.ts"],
+    acceptance: [{ claim: "the daemon does X", proof: "unit test asserts X" }],
+  });
+  const report = planHealthSweep([staleMerged], () => ({}), () => false);
+  assert.equal(report.flags.length, 1, "the derived projection says NOT merged, so it stays in scope despite yaml 'merged'");
+  assert.equal(report.flags[0]!.taskId, "W1-T-STALE-OPEN");
+  assert.equal(report.correctiveTasks.length, 1);
+});
+
 test("planHealthSweep: a WARN-only violation (budget-sanity) is never filed as a corrective task", () => {
   const t = task({ id: "W1-T-WARN" });
   const report = planHealthSweep([t], () => ({ mountMaxTurns: 10, calibration: { avgTurns: 45.2 } }));
@@ -448,6 +480,42 @@ test("planHealthSweepSectionFor: renders the plan-health section from a repoRoot
     assert.match(section, /## Plan-health sweep/);
     assert.match(section, /W1-T-SEED/);
     assert.match(section, /Plan-health: fix W1-T-SEED/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("planHealthSweepSectionFor: an explicit derived isMerged overrides the yaml status (W1-T367)", () => {
+  const root = mkdtempSync(join(tmpdir(), "plan-health-section-projection-"));
+  try {
+    mkdirSync(join(root, "plan"), { recursive: true });
+    // Same violating shape as above, but yaml says `queued` (the measured stale shape) while
+    // the caller's derived isMerged says it already merged — the section must render CLEAN.
+    const yaml = [
+      "- id: W1-T-SEED",
+      "  title: plan-health integration probe",
+      "  repo: remudero",
+      "  type: implement",
+      "  verify: auto",
+      "  risk: medium",
+      "  status: queued",
+      "  origin: architect",
+      "  files: [src/lib/foo.ts]",
+      "  acceptance:",
+      "    - claim: the daemon does X",
+      "      proof: unit test asserts X",
+      "    - claim: launchctl loads the unit",
+      "      proof: unit test asserts the unit",
+      "",
+    ].join("\n");
+    writeFileSync(join(root, "plan", "tasks.yaml"), yaml);
+
+    const withoutProjection = planHealthSweepSectionFor(root);
+    assert.match(withoutProjection, /W1-T-SEED/, "no isMerged given: falls back to yaml 'queued', still flagged");
+
+    const withProjection = planHealthSweepSectionFor(root, () => true);
+    assert.doesNotMatch(withProjection, /W1-T-SEED/, "derived isMerged says merged: skipped despite yaml 'queued'");
+    assert.match(withProjection, /No violations/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

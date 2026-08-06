@@ -1573,13 +1573,46 @@ export function scopeGuardOutOfScopeFiles(
 }
 
 /**
- * W1-T322: task ids currently OPEN in `plan` (status not `merged`/`done`) — the set a report's
- * `SHIPS-UNWIRED: <id>` marker is checked against before it can honour an unreached export (see
- * {@link "./lib/review.js".ReviewEvidence.openTaskIds}'s doc). PURE — no I/O, reads only the
- * already-loaded `plan` every real caller already has in scope by the time it reviews a PR.
+ * W1-T322: task ids currently OPEN in `plan` — the set a report's `SHIPS-UNWIRED: <id>` marker
+ * is checked against before it can honour an unreached export (see
+ * {@link "./lib/review.js".ReviewEvidence.openTaskIds}'s doc). PURE — no I/O, reads only
+ * `plan` and an already-resolved `projection` every real caller either already has in scope
+ * (never a second, independently-opened GitHub read path) or explicitly does not.
+ *
+ * W1-T367: "open" used to mean "yaml `status:` is not `merged`/`done`" — the DECORATIVE field
+ * plan/tasks.yaml's own header says the runner never writes back. MEASURED at cdf885a: 248 of
+ * 359 tasks carry a stale `queued` status despite a long-merged PR, so that reading credited
+ * 248 wrongly-open ids to this set — a `SHIPS-UNWIRED: <one of those ids>` marker was honoured
+ * instead of flagged, exactly the false exemption W1-T322's own second acceptance criterion
+ * exists to catch. `projection` is now the ONLY source of "open": a task counts as open ONLY
+ * when `projectPlan` resolved it, NON-merged, AND NOT `indeterminate` (a GitHub read that
+ * genuinely failed) — every other case (missing from `projection`, merged, indeterminate) is
+ * EXCLUDED, so a marker naming it is FLAGGED. This is the safe direction (design (vi)): unlike
+ * {@link planHealthSweep}'s cost-only skip, honouring a SHIPS-UNWIRED marker is a real
+ * exemption, so uncertainty must fail toward flagging, never toward honouring.
+ *
+ * `projection` is OPTIONAL and deliberately has NO GitHub-backed default (design (v): "if a
+ * call site has no projection in hand, say so rather than adding a fetch") — omitting it
+ * degrades to the EMPTY set, i.e. every id is treated as not-open, so every marker at that call
+ * site is flagged rather than honoured. This is the SAME safe default `judgeReview` already
+ * applies one layer up (`openTaskIds ?? new Set()`, lib/review.ts) — a caller with no
+ * projection in hand (the manual `rmd review` CLI path, and the fix-rung's sweep dispatch,
+ * neither of which has one already computed nearby) gets the identical safe behavior whether
+ * it calls this function or skips it, so both are left calling it plainly for a single,
+ * documented source of truth. The one caller that DOES already hold a projection (`runTask`'s
+ * dispatch path, computed for `assertRunnable`'s own `isMerged` just above) passes it through —
+ * the SAME batched `projectPlan` pass, never a second one.
  */
-export function openTaskIdsFromPlan(plan: Plan): Set<string> {
-  return new Set(plan.tasks.filter((t) => t.status !== "merged" && t.status !== "done").map((t) => t.id));
+export function openTaskIdsFromPlan(plan: Plan, projection?: ReadonlyMap<string, StatusProjection>): Set<string> {
+  if (!projection) return new Set();
+  return new Set(
+    plan.tasks
+      .filter((t) => {
+        const p = projection.get(t.id);
+        return p !== undefined && !p.merged && !p.indeterminate;
+      })
+      .map((t) => t.id),
+  );
 }
 
 interface GateOutcome {
@@ -4224,9 +4257,6 @@ async function runTask(
     plan = synced.plan;
   }
   const task = selectTask(plan, taskId);
-  // W1-T322: computed once per run off the SAME plan already loaded above — the SHIPS-UNWIRED
-  // marker verification set both `runReviewFn` and `runFixRung` below consult.
-  const openTaskIds = openTaskIdsFromPlan(plan);
 
   // ── Merge-state is DERIVED FROM GITHUB, never from the yaml `status:` field
   // (MASTER-PLAN v2.1). Project the whole plan against GitHub, cache it to a
@@ -4239,6 +4269,13 @@ async function runTask(
   const github = opts.github ?? ghGateway(owner, task.repo);
   const projection = projectPlan(plan, { ledgerPath: ledgerPathFor(config), github }, statusPath);
   const isMerged = (t: Task): boolean => projection.get(t.id)?.merged ?? false;
+  // W1-T322/W1-T367: computed once per run off the SAME plan+projection already built above —
+  // the SHIPS-UNWIRED marker verification set both `runReviewFn` and `runFixRung` below consult.
+  // Feeding `openTaskIdsFromPlan` the derived `projection` (never the plan alone) is the W1-T367
+  // fix — see that function's own doc for why the yaml `status:` field wrongly credited 248
+  // merged tasks as open. No second GitHub read: this is the SAME `projectPlan` pass `isMerged`
+  // above already paid for.
+  const openTaskIds = openTaskIdsFromPlan(plan, projection);
 
   // ── ALREADY-MERGED BY-ID REFUSAL (W1-T319, fb-1784773321502-86793d): `isMerged` above is
   // handed to `assertRunnable` next, which spends it ENTIRELY on the target's DEPENDENCIES —
@@ -5924,6 +5961,14 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
           `read: ${formatReadIdentity(reviewPlanPath, reviewPlanRaw)}`;
       }
       taskDeclaredFiles = t?.files;
+      // W1-T367 (design (v)): this manual `rmd review` path has no derived projection in hand
+      // here (unlike `runTask`'s dispatch path, which builds one for `assertRunnable` and
+      // passes it straight through) — computing one would be a second, independent GitHub read
+      // this reviewer does not otherwise need. `openTaskIdsFromPlan(plan)` with no projection
+      // argument degrades to the EMPTY set (documented on that function), so every
+      // `SHIPS-UNWIRED:` marker at this call site is FLAGGED rather than wrongly honoured — the
+      // safe direction (design (vi)), never the pre-W1-T367 yaml read that credited 248 merged
+      // tasks as open.
       openTaskIds = openTaskIdsFromPlan(plan);
     } catch {
       // A bad/absent plan is not the reviewer's concern; fall through to the body.
@@ -6293,7 +6338,20 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
  *  computes via `projectPlan` (that read is scoped + network-backed and stays exactly
  *  where it is); this is the cheap, always-available filter the whole-plan default needs.
  *  Kept LOCAL to run-task.ts, not lifted into lib/plan.ts — W1-T324's declared `files:` is
- *  [plan/tasks.yaml, src/run-task.ts, test/lint-plan-open-only.test.ts] only. */
+ *  [plan/tasks.yaml, src/run-task.ts, test/lint-plan-open-only.test.ts] only.
+ *
+ *  W1-T367 RE-EXAMINED this exact reader (the third of three "yaml `status:` has live readers"
+ *  sites re-derived from source) and RULED: LEAVE IT, deliberately. plan/tasks.yaml's own
+ *  header ("STATUS MODEL") names `status:` DECORATIVE / initial-state only, and `rmd lint-plan`
+ *  (this reader's caller) is that decision's one INTENDED consumer: an OFFLINE, DETERMINISTIC
+ *  linter that must run with no network — converting it to `projectPlan`'s derived status would
+ *  make a pure linter GitHub-dependent and non-deterministic, and would swing the standing
+ *  whole-plan open-task signal from ~360 to ~112 with no gate strengthened (W1-T324/#1299
+ *  shipped the open-only default precisely to keep that signal readable). This reader relies on
+ *  the header's initial-state scoping DELIBERATELY, not by oversight — the two readers that
+ *  WERE wrong (`planHealthSweep`/lib/retro.ts, `openTaskIdsFromPlan`/this file) both degraded a
+ *  GATE by trusting stale yaml; this one only SCOPES a display count, and staying yaml-based is
+ *  what keeps it deterministic. */
 const NON_OPEN_LINT_STATUSES = new Set<TaskStatus>(["blocked", "merged", "done"]);
 
 /** See {@link NON_OPEN_LINT_STATUSES}. */
@@ -7506,15 +7564,28 @@ export function netStateAdvisorySectionFor(repoRoot: string): string {
  * against the SAME `repoRoot`-relative `plan/tasks.yaml` `netStateAdvisorySectionFor` above
  * already reads, with the SAME best-effort/silent-on-failure discipline: a missing or corrupt
  * plan file degrades to no section rather than aborting the retro.
+ *
+ * `isMerged` (W1-T367): the derived-from-GitHub resolver `retroCommand` builds once (a single
+ * batched `projectPlan` pass over this SAME plan file) and passes in, so "already shipped" is
+ * decided the same way the dispatch path decides it — never the decorative yaml `status:`
+ * field `planHealthSweep`'s own doc measures as 248/359 wrong. Optional and undocumented-away
+ * (not silently defaulted to a fetch here): omitting it — a caller with no projection in hand
+ * — falls through to `planHealthSweep`'s own pure yaml-based default, the same degrade this
+ * function already had before this task, so an isolated caller (this function's direct unit
+ * tests below) keeps working unchanged.
  */
-export function planHealthSweepSectionFor(repoRoot: string): string {
+export function planHealthSweepSectionFor(repoRoot: string, isMerged?: (task: Task) => boolean): string {
   try {
     const tasksYamlPath = join(repoRoot, "plan", "tasks.yaml");
     if (!existsSync(tasksYamlPath)) return "";
     const { tasks } = loadPlan(tasksYamlPath);
-    const report = planHealthSweep(tasks, () => ({
-      moduleExists: (rel: string) => existsSync(join(repoRoot, rel)),
-    }));
+    const report = planHealthSweep(
+      tasks,
+      () => ({
+        moduleExists: (rel: string) => existsSync(join(repoRoot, rel)),
+      }),
+      isMerged,
+    );
     return `\n\n${renderPlanHealth(report)}`;
   } catch (e) {
     console.error(`### [retro] plan_health_sweep — scan failed, degrading to none: ${String((e as Error)?.message ?? e)}`);
@@ -7643,10 +7714,40 @@ async function retroCommand(
   // on failure, the SAME non-fatal discipline `openProposalLines`/`openTaskTitles` above already
   // follow: a read/scan hiccup degrades to "nothing to advise" rather than aborting the retro.
   const netStateAdvisorySection = netStateAdvisorySectionFor(repoRoot);
+  // W1-T367: a single batched `projectPlan` pass over the SAME `repoRoot`/plan/tasks.yaml the
+  // plan-health sweep reads below, so its "already shipped" skip is decided the SAME way the
+  // dispatch path decides it — never the decorative yaml `status:` field (MEASURED: 248/359
+  // tasks carry a stale non-merged status despite a long-merged PR, so the yaml-trusting skip
+  // cleared 2 of 359 and re-linted 357 every run). One `ghGateway`/`projectPlan` call, here,
+  // not a second independent read path: nothing above this point in `retroCommand` has already
+  // projected the plan (the orientation section further down does its own, later, off the
+  // freshly-cloned worktree's copy — a separate purpose this does not touch or duplicate).
+  // Best-effort + silent-on-failure, the SAME non-fatal discipline every other section above
+  // follows: a missing plan, unreachable GitHub, or any other read hiccup degrades `isTaskMerged`
+  // to `undefined`, which makes `planHealthSweepSectionFor` fall back to its own pure
+  // yaml-based default — the sweep still runs (just without this fix) rather than the whole
+  // retro aborting over a `gh` outage.
+  let isTaskMerged: ((task: Task) => boolean) | undefined;
+  try {
+    const planHealthPlanPath = join(repoRoot, "plan", "tasks.yaml");
+    if (existsSync(planHealthPlanPath)) {
+      const planHealthPlan = loadPlan(planHealthPlanPath);
+      const planHealthProjection = projectPlan(
+        planHealthPlan,
+        { ledgerPath, github: ghGateway(owner, repo) },
+        join(config.root, "state", "status.json"),
+      );
+      isTaskMerged = (task) => planHealthProjection.get(task.id)?.merged ?? false;
+    }
+  } catch (e) {
+    console.error(
+      `### [retro] plan_health_sweep.projection — scan failed, degrading to yaml status: ${String((e as Error)?.message ?? e)}`,
+    );
+  }
   // W1-T358 (Standing rule 20): the plan-health sweep re-grades the OPEN queue against
   // every standing rule the linter encodes — rides EVERY retro report (dry-run and real
   // alike), same as the net-state advisory section above.
-  const planHealthSection = planHealthSweepSectionFor(repoRoot);
+  const planHealthSection = planHealthSweepSectionFor(repoRoot, isTaskMerged);
   const report =
     [renderGather(gather), "", renderRatifyTelemetry(ratifyTelemetry(parseLedger(ledgerNdjson)))].join("\n") +
     planHealthSection +
@@ -11931,6 +12032,12 @@ export function buildSweepEffects(
           }),
           // W1-T322: same plan this sweep already loaded (`fixRungTaskFor(plan, …)` above) — see
           // runTask's own `openTaskIds` comment for what this set is and why it's computed once.
+          // W1-T367 (design (v)): the sweep has no derived projection in hand at this call site
+          // either (it only ever loads `plan` — see `sweepCommand` — never `projectPlan`s it), so
+          // this stays a plain `openTaskIdsFromPlan(plan)` call: no projection argument means no
+          // second GitHub read gets opened here. That degrades to the EMPTY set (documented on
+          // the function), so a SHIPS-UNWIRED marker on a PR this rung fixes is FLAGGED rather
+          // than honoured off stale yaml — the safe direction.
           openTaskIds: openTaskIdsFromPlan(plan),
           deps: {
             // Fresh-spawn adapter: an empty resumeSessionId (cold PR) becomes a

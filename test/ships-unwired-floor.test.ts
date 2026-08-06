@@ -3,13 +3,14 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
+import type { AcceptanceCriterion, Plan, Task } from "../src/lib/plan.js";
 import { judgeReview } from "../src/lib/review.js";
 import { findExportDefinition, isExportReachable, scanUnreachedExports } from "../src/lib/reachability.js";
 import { netStateCapabilityAdvisories, renderNetStateUnwiredAdvisories } from "../src/lib/retro.js";
-import { netStateAdvisorySectionFor, runReview, scopeGuardOutOfScopeFiles } from "../src/run-task.js";
+import { netStateAdvisorySectionFor, openTaskIdsFromPlan, runReview, scopeGuardOutOfScopeFiles } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
 import type { WorkerResult } from "../src/lib/worker.js";
+import type { StatusProjection } from "../src/lib/status.js";
 
 // W1-T322 — SHIPS-UNWIRED advisory floor. ONE reachability scan (lib/reachability.ts),
 // consumed at review time (judgeReview's `unwiredAdvisories`, ADVISORY ONLY — never touches
@@ -137,6 +138,110 @@ diff --git a/src/lib/orphan.ts b/src/lib/orphan.ts
     });
     assert.equal(honoured.unwiredAdvisories?.length ?? 0, 0);
     assert.equal(honoured.state, "success");
+  } finally {
+    rmSync(checkoutDir, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T367 ──────────────────────────────────────────────────────────────────────────────
+// "the open-task id set the review floor consumes excludes ids whose PRs have merged, so a
+// SHIPS-UNWIRED marker naming a merged task is flagged rather than honoured" AND "an
+// unavailable projection degrades toward flagging rather than toward honouring an
+// unwired-export exemption". `openTaskIdsFromPlan` (run-task.ts) used to read the DECORATIVE
+// yaml `status:` field directly — MEASURED at cdf885a: 248 of 359 tasks carry a stale
+// non-merged status despite a long-merged PR, so that reading wrongly credited 248 merged
+// tasks as "open", which meant a `SHIPS-UNWIRED:` marker naming any one of them was HONOURED
+// instead of flagged. These tests drive the real exported function directly against a
+// synthetic `Plan` + `StatusProjection` map — no GitHub, no fixture repo.
+
+/** A minimal, otherwise-valid Task fixture. */
+function planTask(id: string, status: Task["status"] = "queued"): Task {
+  return {
+    id,
+    title: id,
+    repo: "remudero",
+    depends_on: [],
+    type: "implement",
+    verify: "auto",
+    risk: "medium",
+    status,
+    attempts: 0,
+  };
+}
+
+/** A minimal StatusProjection fixture — only the fields `openTaskIdsFromPlan` reads. */
+function proj(taskId: string, over: Partial<StatusProjection> = {}): StatusProjection {
+  return { taskId, status: "queued", merged: false, source: "none", ...over };
+}
+
+function planOf(tasks: Task[]): Plan {
+  return { tasks, byId: new Map(tasks.map((t) => [t.id, t])) };
+}
+
+test("openTaskIdsFromPlan: a task whose yaml status is still 'queued' but whose projection says merged is EXCLUDED (the measured 248/359 defect)", () => {
+  const plan = planOf([planTask("W1-T-STALE-MERGED", "queued")]);
+  const projection = new Map([["W1-T-STALE-MERGED", proj("W1-T-STALE-MERGED", { merged: true, status: "merged" })]]);
+  const open = openTaskIdsFromPlan(plan, projection);
+  assert.deepEqual([...open], [], "the projection says merged — never trust the stale yaml 'queued' over it");
+});
+
+test("openTaskIdsFromPlan: a task whose yaml status says 'merged' but whose projection says NOT merged is INCLUDED (open)", () => {
+  const plan = planOf([planTask("W1-T-STALE-OPEN", "merged")]);
+  const projection = new Map([["W1-T-STALE-OPEN", proj("W1-T-STALE-OPEN", { merged: false })]]);
+  const open = openTaskIdsFromPlan(plan, projection);
+  assert.deepEqual([...open], ["W1-T-STALE-OPEN"], "the projection says NOT merged — the yaml 'merged' row is never trusted either");
+});
+
+test("openTaskIdsFromPlan: an INDETERMINATE (github-unreachable) task is EXCLUDED — degrades toward flagging, never honouring", () => {
+  const plan = planOf([planTask("W1-T-DOWN", "queued")]);
+  const projection = new Map([
+    ["W1-T-DOWN", proj("W1-T-DOWN", { merged: false, indeterminate: true, unavailableReason: "transport" })],
+  ]);
+  const open = openTaskIdsFromPlan(plan, projection);
+  assert.deepEqual(
+    [...open],
+    [],
+    "merged=false but indeterminate=true (a genuinely failed GitHub read) must NOT be treated as a confirmed-open id",
+  );
+
+  // Contrast: the SAME task resolved cleanly to merged:false (no outage) IS open.
+  const resolved = new Map([["W1-T-DOWN", proj("W1-T-DOWN", { merged: false })]]);
+  assert.deepEqual([...openTaskIdsFromPlan(plan, resolved)], ["W1-T-DOWN"]);
+});
+
+test("openTaskIdsFromPlan: with NO projection supplied at all, degrades to the EMPTY set (no call site may fall back to the yaml field)", () => {
+  const plan = planOf([planTask("W1-T-ANY", "queued"), planTask("W1-T-OTHER", "merged")]);
+  assert.deepEqual([...openTaskIdsFromPlan(plan)], [], "no projection in hand ⇒ nothing is known open ⇒ every marker flags");
+});
+
+test("openTaskIdsFromPlan: a task id absent from the projection map entirely is EXCLUDED, same safe direction as indeterminate", () => {
+  const plan = planOf([planTask("W1-T-MISSING", "queued")]);
+  const emptyProjection = new Map<string, StatusProjection>();
+  assert.deepEqual([...openTaskIdsFromPlan(plan, emptyProjection)], []);
+});
+
+test("W1-T367 end-to-end: judgeReview flags a SHIPS-UNWIRED marker naming a task the yaml says 'queued' but the projection says merged", () => {
+  const checkoutDir = mkdtempSync(join(tmpdir(), "ships-unwired-w1t367-"));
+  try {
+    writeFile(checkoutDir, "src/lib/orphan.ts", "export function orphanFn(): number {\n  return 1;\n}\n");
+    const diff = `
+diff --git a/src/lib/orphan.ts b/src/lib/orphan.ts
++++ b/src/lib/orphan.ts
+@@
++export function orphanFn(): number {
++  return 1;
++}
+`.trim();
+    // W1-T322 is (simulated) merged despite carrying yaml status 'queued' — the exact
+    // W1-T367 shape. The plan's own `openTaskIdsFromPlan(plan, projection)` output feeds
+    // `judgeReview` here, mirroring exactly what runTask's dispatch path wires through.
+    const plan = planOf([planTask("W1-T322", "queued")]);
+    const projection = new Map([["W1-T322", proj("W1-T322", { merged: true, status: "merged" })]]);
+    const openTaskIds = openTaskIdsFromPlan(plan, projection);
+
+    const report = `${SIMPLE_REPORT}\n\nSHIPS-UNWIRED: W1-T322`;
+    const v = judgeReview(SIMPLE_CRITERIA, { diff, report, headCheckoutDir: checkoutDir, openTaskIds });
+    assert.equal(v.unwiredAdvisories?.length, 1, "a merged task's marker is flagged, never honoured, despite its yaml status");
   } finally {
     rmSync(checkoutDir, { recursive: true, force: true });
   }
