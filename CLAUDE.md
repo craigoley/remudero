@@ -256,3 +256,44 @@ forensic detail, so the narrative does not need to live here.
   client script (`new Function(<largest <script> block of renderShellHtml()>)`). serve.ts DOM
   behavior is covered by REAL Playwright/Chromium tests (`test/serve.*.test.ts`) — run them for any
   client change. *(#777)*
+
+## Lessons from 2026-08-06
+
+- **Before trusting `diff-coverage: OK`, prove the lcov INSTRUMENTS the changed files —
+  `grep -c '^SF:<path>$' <lcov>` must be non-zero for every source file in the diff.** A scoped run
+  whose suites never import a changed file emits no records for it, so "every added source line lcov
+  instruments is covered" is trivially true over an EMPTY SET. This is the vacuous-pass family, not
+  a coverage result. *(#1399 — an `OK` with zero `SF:` records for both `src/run-task.ts` and
+  `src/lib/review.ts` while CI's coverage-ratchet was failing on 10 uncovered lines)*
+- **Build the lcov and the diff from the SAME tree — commit before measuring.** An lcov from a dirty
+  working tree measured against `git diff origin/main...HEAD` (which excludes uncommitted work)
+  misaligns line numbers and reports untouched pre-existing code as newly uncovered.
+  *(#1399 — two phantom "uncovered" lines that were the pre-existing `floorDegraded` branch)*
+- **`diff-coverage` flags ADDED lines, so restructuring an untested region inherits its debt at the
+  gate — measure MAIN's coverage of that region before assuming the PR caused it.** Rewriting a
+  block converts a silent pre-existing gap into a blocking failure. *(#1399 — every line of the
+  comment-assembly block scored 0 hits on origin/main; the PR only moved it)*
+- **A CONFLICTING PR registers ZERO check runs. `total: 0` reads as "still queued" but means
+  `mergeable_state: dirty` — check mergeability before waiting on CI.** *(#1399 — a full CI cycle
+  spent waiting on checks that were never going to start)*
+- **When two PRs append tests to the same file's TAIL, the conflict region can cut just before a
+  SHARED closing `});`** — keeping both sides then leaves one block unclosed, and esbuild reports
+  `Unexpected end of file` rather than naming the merge. Close the ours-side block explicitly.
+  *(#1399 vs #1404 — resolved by emitting `});` where the `=======` marker was)*
+- **`rmd next-task-id` reads the LOCAL checkout — `git pull` first or it returns an id you filed
+  minutes ago.** It DOES account for open PRs once the checkout is current (`max 381 … open PRs
+  381`). *(it returned W1-T379 immediately after W1-T379 was filed in #1388; true tree max was 380)*
+- **A shard whose `files:` spans two concerns fails Rule 19 sizing at `risk:medium` — set
+  `risk:high` UP FRONT and record in the note that the band is Rule 19's SPAN, not blast radius.**
+  Decomposing a predicate from its own falsifier is not a real decomposition. *(#1400 shipped the
+  violation and pushed open-failing 176→177; #1401 pre-empted it and stayed at 176)*
+- **If a suite dies with `Cannot find package 'tsx'`, check the canonical `node_modules` is
+  NON-EMPTY before diagnosing the code.** `bin/rmd` execs `$DIR/node_modules/.bin/tsx`, so an
+  emptied `node_modules` kills every rmd verb and the launchd supervisor while the already-running
+  daemon keeps working from resident memory — the fleet looks alive and cannot restart.
+  *(2026-08-06 — 52 consecutive supervisor failures; last good DEPLOY row 9s before the dir mtime)*
+- **A bound that fires on a HEALTHY condition is this repo's recurring defect — before tuning the
+  number, check the population it is meant to separate has ever been observed.** Three instances:
+  ci-gate's wait cap sized under the real check wall-clock, a deploy ceiling consumed by a dry-run
+  that delivered nothing, and a check-wait bound where 21 of 21 booked PRs later merged.
+  *(W1-T312, W1-T380/#1392, W1-T382/#1401)*
