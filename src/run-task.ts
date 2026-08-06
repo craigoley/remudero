@@ -196,6 +196,7 @@ import {
   listenWithReapWait,
   offMainNotice,
   resolveServeHosts,
+  resolveServeIdentity,
   resolveServePort,
   resolveServiceTokens,
   SERVE_EXPECTED_BRANCH,
@@ -10939,6 +10940,9 @@ export async function serveCommand(
     fleetControlRoot: config.root,
     questionsRoot: repoRoot,
     tokens,
+    // W1-T371: additive tailnet-identity auth, opt-in via config.serve.identityCapability.
+    // Undefined on an unconfigured install -- identity is never consulted, exactly as before.
+    identity: resolveServeIdentity(config.serve?.identityCapability),
     log,
   });
 

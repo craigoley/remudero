@@ -173,6 +173,43 @@ test("service surface: an unknown path -> 404, even with a valid token", async (
   });
 });
 
+// W1-T371 guard: the read/write scope boundary this whole suite proves must hold whether or
+// not a service has additive tailnet-identity auth configured at all (test/tailnet-identity-
+// scope.test.ts is the falsifier for identity's OWN two gates). Wiring `identity` into
+// createService must never loosen what a bearer token can do when identity doesn't apply.
+test("service surface: a read-scope token is still 403 on a WRITE route even when identity auth is configured", async () => {
+  const server = createService({
+    tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
+    identity: { trustedLocalAddress: "127.0.0.1", capability: "example.com/cap/console-write" },
+    routes: [
+      {
+        method: "POST",
+        path: "/control/pause",
+        scope: "write",
+        handler: (_req, res) => {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ paused: true }));
+        },
+      },
+    ],
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    // Read token, NO identity header at all -- unchanged 403, same as the token-only suite above.
+    const res = await fetch(`http://127.0.0.1:${port}/control/pause`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${READ_TOKEN}` },
+    });
+    assert.equal(res.status, 403);
+    // No token AND no identity header -- unchanged 401 (who are you), not a bypass.
+    const anon = await fetch(`http://127.0.0.1:${port}/control/pause`, { method: "POST" });
+    assert.equal(anon.status, 401);
+  } finally {
+    server.close();
+  }
+});
+
 test("service surface: a handler that throws -> 500, never crashes the server", async () => {
   await withService(async (base, svc) => {
     // register a throwing route on a FRESH service instance sharing the same tokens,

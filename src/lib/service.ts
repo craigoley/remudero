@@ -99,8 +99,59 @@ export interface ServiceTokens {
   write: string;
 }
 
+/**
+ * Tailnet-identity auth, ADDITIVE to the bearer tokens above (W1-T371, MASTER-PLAN §7's
+ * auth-endgame — the "preferred" half of W1-T202, token-paste-once being the "acceptable"
+ * half that shipped in #892). Consulted BEFORE the bearer token, but only ever ADDS a grant —
+ * when it doesn't apply, {@link grantedScopes} falls through to the token check unchanged, so
+ * a Tailscale failure degrades to the token rather than locking the operator out.
+ *
+ * Two independent gates, both required, because they close two different holes:
+ *
+ * 1. INTERFACE. `trustedLocalAddress` is the interface Tailscale Serve's local proxy target
+ *    actually binds — Tailscale's own guidance is "it's best practice to only have the service
+ *    listen on localhost" when trusting these headers, because "any user that can call your
+ *    service directly (rather than with the Serve URL) could trivially provide their own
+ *    values for these HTTP headers" (https://tailscale.com/kb/1312/serve, "Identity headers").
+ *    A request landing on any OTHER bound interface — e.g. the tailnet IP this service also
+ *    binds directly (RMD_SERVE_HOST) for callers that skip Serve entirely — never reaches the
+ *    capability check below, however the header reads: that traffic did not pass through
+ *    Serve's own header-spoofing guard ("If Serve finds [identity headers] on an incoming
+ *    request, it will remove them for security reasons, to avoid header spoofing"), so nothing
+ *    on that interface backs the header's claim. This does not defend against a process
+ *    already running ON the trusted machine that dials the trusted address directly — the same
+ *    residual trust boundary the bearer-token file (0600, local disk) already accepts.
+ *
+ * 2. ALLOWLIST. `capability` names a Tailscale ACL app-capability. Serve forwards granted
+ *    capabilities as JSON in the `Tailscale-App-Capabilities` header ("If a user or tagged node
+ *    that makes a request has been granted any of the app capabilities specified, Serve will
+ *    convert them into serialised JSON and forward them" — same doc, "App capabilities
+ *    header"). THIS is the allowlist a plain `Tailscale-User-Login` check couldn't be: that
+ *    header carries the tailnet account's login, which every device signed in under one
+ *    account shares — a phone AND an unattended appliance both read `craigoley@…`. An ACL
+ *    grant is evaluated per NODE, not per account, so the phone can be granted the capability
+ *    while the appliance is not, and an unlisted node's request simply has no entry for it —
+ *    however loudly its `Tailscale-User-Login` claims the same human owns it — and grants
+ *    nothing here. (Funnel traffic carries neither header at all — "Funnel traffic, which is
+ *    publicly available, does not include identity headers" and app capabilities are
+ *    explicitly "not available for Funnel traffic" — so exposing this service over Funnel,
+ *    which nothing in this codebase does, would fail closed to the token path, not open.)
+ */
+export interface IdentityAuth {
+  /**
+   * Local address (`req.socket.localAddress`) identity headers are honored on. Production
+   * wiring (serve.ts) passes the loopback address the Tailscale Serve target binds; a request
+   * landing anywhere else never consults `capability` below, forged header or not.
+   */
+  trustedLocalAddress: string;
+  /** The Tailscale ACL app-capability name an allowlisted node/user must be granted — see this interface's own doc. */
+  capability: string;
+}
+
 export interface ServiceOptions {
   tokens: ServiceTokens;
+  /** Additive tailnet-identity auth — see {@link IdentityAuth}. Omitted: identity is never consulted, byte-for-byte the pre-W1-T371 behavior. */
+  identity?: IdentityAuth;
   routes?: Route[];
   sse?: SseRoute[];
   /** One ledger line per auth decision / SSE lifecycle event / handler error. */
@@ -138,16 +189,48 @@ function queryToken(req: IncomingMessage): string | undefined {
 }
 
 /**
- * Scopes granted by the request's bearer token; `undefined` = missing/unrecognized (401, not 403).
- * The header is the ONLY credential source unless `allowQuery` is set (true only for the shell
- * document route), in which case a `?token=` query param is accepted as a fallback for a client
- * that cannot send headers (browser navigation) — never for `/v1/*`.
+ * Scopes granted by tailnet identity — {@link IdentityAuth}'s two gates, both required.
+ * `undefined` whenever either gate fails, which is deliberately indistinguishable from
+ * "no identity option configured at all": either way {@link grantedScopes} falls through to
+ * the bearer token unchanged, which is exactly the additive-not-a-replacement contract.
+ */
+function identityGrantedScopes(identity: IdentityAuth | undefined, req: IncomingMessage): ReadonlySet<Scope> | undefined {
+  if (!identity) return undefined;
+  // Gate 1: INTERFACE. See IdentityAuth's own doc for why a header arriving on any other bound
+  // address (e.g. the tailnet IP this service may also bind directly) is never trusted.
+  if (req.socket.localAddress !== identity.trustedLocalAddress) return undefined;
+  // Gate 2: ALLOWLIST. Serve forwards the connecting node's granted ACL app-capabilities as
+  // JSON in this header; an unlisted node's request has no entry for `identity.capability`.
+  const raw = req.headers["tailscale-app-capabilities"];
+  const header = Array.isArray(raw) ? raw[0] : raw;
+  if (!header) return undefined;
+  let capabilities: unknown;
+  try {
+    capabilities = JSON.parse(header);
+  } catch {
+    return undefined; // malformed header -- never a grant, never a crash.
+  }
+  if (typeof capabilities !== "object" || capabilities === null) return undefined;
+  if (!Object.prototype.hasOwnProperty.call(capabilities, identity.capability)) return undefined;
+  return READ_WRITE;
+}
+
+/**
+ * Scopes granted by the request; `undefined` = missing/unrecognized (401, not 403). Tailnet
+ * identity (see {@link IdentityAuth}) is tried FIRST but is purely additive — when it doesn't
+ * apply, this falls through to the bearer token exactly as before W1-T371. The token header is
+ * the ONLY credential source unless `allowQuery` is set (true only for the shell document
+ * route), in which case a `?token=` query param is accepted as a fallback for a client that
+ * cannot send headers (browser navigation) — never for `/v1/*`.
  */
 function grantedScopes(
   tokens: ServiceTokens,
+  identity: IdentityAuth | undefined,
   req: IncomingMessage,
   allowQuery: boolean,
 ): ReadonlySet<Scope> | undefined {
+  const identityGrant = identityGrantedScopes(identity, req);
+  if (identityGrant) return identityGrant;
   const token = bearerToken(req) ?? (allowQuery ? queryToken(req) : undefined);
   if (!token) return undefined;
   if (safeEqual(token, tokens.write)) return READ_WRITE;
@@ -209,7 +292,7 @@ export function createService(opts: ServiceOptions): Server {
       // Query-param auth is honored ONLY for a plain route that opted in (the HTML shell) — never
       // for an SSE stream or an API route, where a `?token=` would leak via Referer/logs.
       const allowQuery = !sseRoute && (route?.allowQueryToken ?? false);
-      const granted = grantedScopes(opts.tokens, req, allowQuery);
+      const granted = grantedScopes(opts.tokens, opts.identity, req, allowQuery);
       if (!granted) {
         log("service.unauthorized", { method, path });
         sendJson(res, 401, { error: "unauthorized" });

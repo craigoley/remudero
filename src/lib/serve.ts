@@ -159,6 +159,15 @@ export interface ServeDeps {
    * rest of the page.
    */
   accountUsage?: Omit<AccountUsageDeps, "ledgerPath">;
+  /**
+   * W1-T371: additive tailnet-identity auth — forwarded verbatim to `createService`'s
+   * `identity` option (see service.ts's {@link IdentityAuth} for the two gates it enforces).
+   * OPTIONAL and omitted by default: an install that never sets `config.serve.identityCapability`
+   * (see serveCommand, run-task.ts) gets identity never consulted at all — byte-for-byte the
+   * pre-W1-T371 token-only behavior, so a Tailscale failure (or simply never opting in) degrades
+   * to the token rather than locking the operator out.
+   */
+  identity?: ServiceOptions["identity"];
 }
 
 /** Matches {@link buildBatchedGithub}'s own default `ttlMs` (status.ts) — kept as one named
@@ -4336,6 +4345,7 @@ export function buildServeServer(deps: ServeDeps): Server {
   );
   const server = createService({
     tokens: deps.tokens,
+    identity: deps.identity,
     routes: buildServeRoutes(deps),
     sse: [prewarm.route],
     log: deps.log,
@@ -4412,6 +4422,28 @@ export function resolveServeHosts(rest: string[], env: NodeJS.ProcessEnv = proce
  */
 export function resolveServeHost(rest: string[], env: NodeJS.ProcessEnv = process.env): string {
   return resolveServeHosts(rest, env)[0] as string;
+}
+
+/**
+ * W1-T371: resolve the additive tailnet-identity option, or `undefined` when the operator
+ * hasn't opted in. `identityCapability` (config.json's `serve.identityCapability`) is the ONLY
+ * source — no `--flag`/env override, unlike port/host: the ACL app-capability name is an
+ * install-level constant chosen once against the operator's own Tailscale policy, not
+ * something a single invocation varies. Undefined input (the default, unconfigured install)
+ * returns `undefined` — identity is never consulted, byte-for-byte the pre-W1-T371 behavior.
+ *
+ * `trustedLocalAddress` is always {@link DEFAULT_SERVE_HOST} (loopback) — matching Tailscale's
+ * own documented guidance that a backend trusting Serve's identity headers should listen ONLY
+ * on localhost ("it's best practice to only have the service listen on localhost... [otherwise]
+ * any user that can call your service directly... could trivially provide their own values for
+ * these HTTP headers", https://tailscale.com/kb/1312/serve). This is independent of whatever
+ * `rmd serve` itself binds via `RMD_SERVE_HOST`/`resolveServeHosts` — those are this Node
+ * process's own direct-connection interfaces, not `tailscale serve`'s proxy target, which is
+ * operator-machine deployment config (com.remudero.serve.plist) outside this repo.
+ */
+export function resolveServeIdentity(identityCapability: string | undefined): ServiceOptions["identity"] {
+  if (!identityCapability) return undefined;
+  return { trustedLocalAddress: DEFAULT_SERVE_HOST, capability: identityCapability };
 }
 
 function assertBindableHost(host: string, raw: string): void {
