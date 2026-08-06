@@ -6902,7 +6902,69 @@ export type LintPlanStatusDeps = {
   resolveOwnerRepo?: () => { owner: string; repo: string };
   ghGateway?: typeof ghGateway;
   projectPlan?: typeof projectPlan;
+  readMergeEvidenceLog?: typeof defaultMergeEvidenceLog;
 };
+
+/** Filing-family subjects are citations ABOUT a task (minting it, triaging it, renumbering it),
+ *  never evidence its implementation merged. This one boundary is the failing-split classifier's
+ *  whole judgment surface — moving it swung the recon's count 47 → 156 → 167
+ *  (state/recon-open-failing-composition.md) — which is why the printed summary names the rule
+ *  and not just the counts. */
+export const LINT_FILING_SUBJECT_RE = /^(chore\(plan\)|chore\(triage\)|chore\(feedback\)|docs\(plan\))/i;
+
+/** Splits lint-plan's failing tasks by MERGE EVIDENCE in a `git log` dump (`%s%x00%b%x01`
+ *  format): a task "has a merged implementation" when any non-filing commit carries its id as a
+ *  `Remudero-Task:` trailer or cites it in the subject. Pure over its inputs — the impure read
+ *  lives in {@link defaultMergeEvidenceLog}, supplied by the verb exactly like `moduleExists`.
+ *  Id matching is case-insensitive (history carries `w1-t52` and `W1-T52` alike) and delimiter-
+ *  bounded so W1-T25 never matches a commit citing W1-T250. */
+export function classifyFailingMergeEvidence(
+  failingIds: string[],
+  gitLogDump: string,
+): { withImpl: string[]; without: string[] } {
+  const nonFiling = gitLogDump
+    .split("\x01")
+    .map((entry) => entry.split("\x00"))
+    .filter((parts) => parts[0]?.trim() && !LINT_FILING_SUBJECT_RE.test(parts[0].trim()));
+  const subjects = nonFiling.map((parts) => ` ${parts[0].toLowerCase()} `);
+  const bodies = nonFiling.map((parts) => (parts[1] ?? "").toLowerCase());
+  const withImpl: string[] = [];
+  const without: string[] = [];
+  for (const id of failingIds) {
+    const t = id.toLowerCase();
+    const escaped = t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const subjectRe = new RegExp(`[(\\s,:]${escaped}[)\\s,:.]`);
+    const trailer = `remudero-task: ${t}`;
+    const hit =
+      subjects.some((s) => subjectRe.test(s)) ||
+      bodies.some((b) => b.includes(`${trailer}\n`) || b.trimEnd().endsWith(trailer));
+    (hit ? withImpl : without).push(id);
+  }
+  return { withImpl, without };
+}
+
+/** The failing-split's only I/O: the evidence ref's history from the LOCAL object store — never
+ *  the network, so lint-plan's default mode stays offline and deterministic at a given ref. A
+ *  shallow clone is REFUSED BY NAME rather than scanned: its truncated history would read
+ *  "absent from history" as "no evidence" — a silent undercount, the exact naked-zero shape the
+ *  split exists to correct. The verb prints the refusal; it never prints a split built on it. */
+export function defaultMergeEvidenceLog(cwd: string): { dump: string; ref: string } {
+  const shallow = execFileSync("git", ["rev-parse", "--is-shallow-repository"], {
+    cwd,
+    encoding: "utf8",
+  }).trim();
+  if (shallow === "true")
+    throw new Error("shallow clone — truncated history would misread absent commits as absent evidence");
+  const ref = "origin/main";
+  const dump = execFileSync("git", ["log", "--format=%s%x00%b%x01", ref], {
+    cwd,
+    encoding: "utf8",
+    // Same rationale as the `git show` above: the default 1 MiB maxBuffer dies on a history this
+    // size long before the machine does.
+    maxBuffer: 1 << 28,
+  });
+  return { dump, ref };
+}
 
 export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps = {}): Promise<number> {
   const badArg = unknownArgError("lint-plan", rest, ["--plan", "--base"], ["--all"]);
@@ -7033,6 +7095,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   let failing = 0;
   let warned = 0;
   let checked = 0;
+  const failingTaskIds: string[] = [];
   for (const task of plan.tasks) {
     if (scope && !scope.has(task.id)) continue;
     if (wholePlanScope && !wholePlanScope.has(task.id)) continue;
@@ -7068,6 +7131,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     const soft = violations.filter((v) => v.severity === "warn");
     if (blocking.length) {
       failing++;
+      failingTaskIds.push(task.id);
       console.error(`✗ ${task.id}: ${blocking.length} violation(s)`);
       for (const v of blocking) console.error(`    [${v.check}] ${v.message}`);
     }
@@ -7105,11 +7169,34 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   // wording, with the same count named so a reader who passed --all can see how much of what
   // they're looking at is retired/landed.
   let summary: string;
+  // The failing-split (state/recon-open-failing-composition.md): the bare failing count is a
+  // technically-true aggregate that misleads — measured 2026-08-06, 167 of 176 failing tasks had
+  // merged implementations and could never re-dispatch, yet the headline priced them all as open
+  // work. So the DEFAULT mode's headline carries the split, and the classifier's rule prints
+  // beside the number (a split whose rule is invisible is the same defect one level down).
+  // Display only: the exit code and every pre-existing summary substring are unchanged, and the
+  // split can only qualify the count, never alter it. On ANY evidence failure the line says so
+  // explicitly — a wrong split is worse than no split.
+  let evidenceRuleLine = "";
+  let failingSplit = "";
+  if (wholePlanScope && failingTaskIds.length > 0) {
+    try {
+      const { dump, ref } = (deps.readMergeEvidenceLog ?? defaultMergeEvidenceLog)(repoRoot);
+      const { withImpl, without } = classifyFailingMergeEvidence(failingTaskIds, dump);
+      failingSplit = ` (${withImpl.length} with a merged implementation, ${without.length} with none)`;
+      evidenceRuleLine =
+        `\n  failing-split evidence: a Remudero-Task trailer or commit-subject citation on ${ref}, ` +
+        `with chore(plan)/chore(triage)/chore(feedback)/docs(plan) filing subjects excluded — ` +
+        `a filing cites a task; it does not implement it`;
+    } catch (e) {
+      failingSplit = ` (merge-evidence unavailable: ${(e as Error).message})`;
+    }
+  }
   if (scope) {
     summary = `${checked} task(s) checked (${scope.size} new/changed vs ${baseRef}) — ${failing} failing, ${warned} warning(s)`;
   } else if (wholePlanScope) {
     summary =
-      `${checked} task(s) checked (open tasks only) — ${failing} open failing, ${warned} warning(s); ` +
+      `${checked} task(s) checked (open tasks only) — ${failing} open failing${failingSplit}, ${warned} warning(s); ` +
       `${nonOpenRecordCount} merged-task record(s) behind --all`;
   } else {
     summary =
@@ -7119,7 +7206,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   // W1-T120: the READ-IDENTITY ASSERTION — the abs path + content hash of the plan file
   // ACTUALLY opened, so a wrong-file run (a false green pointed at the wrong tree) is
   // legible in the gate's own output, not merely inferable from cwd.
-  console.log(`\nrmd lint-plan: ${summary}\n  read: ${formatReadIdentity(planPath, planRaw)}`);
+  console.log(`\nrmd lint-plan: ${summary}${evidenceRuleLine}\n  read: ${formatReadIdentity(planPath, planRaw)}`);
   return failing > 0 ? 1 : 0;
 }
 
