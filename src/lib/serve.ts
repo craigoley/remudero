@@ -876,6 +876,12 @@ export function renderShellHtml(
     <span class="glance-item"><span class="glance-label">as of</span><span class="glance-value" id="plan-progress-asof">…</span></span>
   </section>
   <div id="plan-progress-unknown" class="gh-banner" hidden role="status" aria-live="polite"></div>
+  <!-- W1-T376: per-section filed/merged COUNTS, joined off the SAME plan_refs the route already
+       resolved -- rendered as a filed-versus-merged PAIR, deliberately never a percentage (a
+       1-task section reading 100% the moment it merges would rank above a 74-task section still
+       building out; see panel-graph.ts's computePlanSectionCounts doc for the full rationale). -->
+  <h3>Sections <span id="plan-sections-summary" class="section-summary"></span></h3>
+  <ol id="plan-sections-list" class="row-list"></ol>
   <h3>Frontier <span id="plan-frontier-summary" class="section-summary"></span></h3>
   <ol id="plan-frontier-list" class="row-list"></ol>
 </section>
@@ -1133,6 +1139,17 @@ export function renderShellHtml(
 
   function escapeHtml(text) {
     return String(text ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+
+  /** One Sections row (W1-T376): "<heading> — N of M filed tasks merged", NEVER a percentage
+   *  (design note (iii): a 1-task section reading 100% the moment its single task merges would
+   *  rank above a 74-task section still building out, inverting the truth -- see
+   *  panel-graph.ts's computePlanSectionCounts doc). Pure string-building, no DOM beyond
+   *  escapeHtml just above -- pulled out of the rendered shell and eval'd directly by
+   *  test/plan-sections-render.test.ts, the same technique test/account-usage.test.ts already
+   *  proved for usageWindowLabel. */
+  function planSectionRowHtml(s) {
+    return \`<li class="row plan-section-row"><span class="task-id">\${escapeHtml(s.heading)}</span><span class="detail">\${s.merged} of \${s.filed} filed tasks merged</span></li>\`;
   }
 
   // W1-T189: an OPTIONAL client-side timeout. Plain fetch has none of its own, so a backend
@@ -1549,7 +1566,7 @@ export function renderShellHtml(
   let latestNeedsMeRows = []; // set by renderNeedsMe -- the SAME combined NEEDS ME rows the section itself renders
   let latestDaemonHealth = null; // GET /v1/daemon-health's body
   let latestAccountUsage = null; // GET /v1/account-usage's body (account-usage.ts's AccountUsageSnapshot)
-  let latestPlanView = null; // GET /v1/plan/view's body (panel-graph.ts's { progress, frontier }, W1-T315)
+  let latestPlanView = null; // GET /v1/plan/view's body (panel-graph.ts's { progress, sections, frontier }, W1-T315 + W1-T376)
   const BASE_TITLE = document.title;
   const NEEDS_ME_STALE_MS = 24 * 60 * 60 * 1000; // criterion 3's ">24h" anomaly-emphasis bound
 
@@ -2015,14 +2032,17 @@ export function renderShellHtml(
         : \`current: \${costLabel(a.dailyCostCeilingUsd)} (default)\`;
   }
 
-  /** Renders GET /v1/plan/view's body (W1-T315): PROGRESS (done/in-flight/queued, GitHub-
-   *  derived, never plan/tasks.yaml's own decorative \`status:\` field) + the FRONTIER (the next
-   *  candidates in the SAME order the dispatcher would take them, each carrying a machine-
-   *  derived reason). \`v.progress.unknown\` renders the LAST-known counts (never a fabricated
-   *  0) with a stated banner naming why and how stale -- the same "unknown, never zero"
-   *  discipline \`renderDaemonHealth\`/\`renderAccountUsage\` already follow for their own fields.
-   *  A held frontier row (\`runnable: false\`) renders WITH its reason, never omitted -- "not-
-   *  runnable is information, not absence" (this task's own design). */
+  /** Renders GET /v1/plan/view's body (W1-T315 + W1-T376): PROGRESS (done/in-flight/queued,
+   *  GitHub-derived, never plan/tasks.yaml's own decorative \`status:\` field) + SECTIONS
+   *  (per-section filed/merged COUNTS, never a percentage -- see \`planSectionRowHtml\`'s own
+   *  doc) + the FRONTIER (the next candidates in the SAME order the dispatcher would take them,
+   *  each carrying a machine-derived reason). \`v.progress.unknown\` renders the LAST-known
+   *  counts (never a fabricated 0) with a stated banner naming why and how stale -- the same
+   *  "unknown, never zero" discipline \`renderDaemonHealth\`/\`renderAccountUsage\` already
+   *  follow for their own fields; \`v.sections\` rides the SAME reading (panel-graph.ts's
+   *  computePlanSectionCounts), so it goes stale in lockstep with \`v.progress\` rather than
+   *  independently. A held frontier row (\`runnable: false\`) renders WITH its reason, never
+   *  omitted -- "not-runnable is information, not absence" (this task's own design). */
   function renderPlanView(v) {
     if (!v) return;
     const p = v.progress || {};
@@ -2039,6 +2059,12 @@ export function renderShellHtml(
         unknownBanner.hidden = true;
       }
     }
+    const sections = v.sections || [];
+    const sectionsList = document.getElementById("plan-sections-list");
+    if (sectionsList) {
+      sectionsList.innerHTML = sections.length ? sections.map(planSectionRowHtml).join("") : '<li class="empty">no section data yet</li>';
+    }
+    setGlanceValue("plan-sections-summary", sections.length ? \`\${sections.length} shown\` : "empty");
     const rows = v.frontier || [];
     const list = document.getElementById("plan-frontier-list");
     if (list) {
