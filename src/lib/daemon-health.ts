@@ -17,12 +17,21 @@
  *     (`daemon.ts`'s `DEFAULT_POLL_INTERVAL_MS`) when the winning line carries none.
  *   - DISK FREE: `fs.statfsSync(path).bavail * bsize` (real, injectable for tests — the SAME
  *     injectable-implementation shape `ghGateway`'s `exec` option already uses in status.ts).
- *   - RATE-LIMIT REMAINING: `gh api rate_limit`'s `resources.core.remaining` — CORE, not
- *     GraphQL: status.ts's `ghGateway`/`buildBatchedGithub` (the board's own GitHub reads) both
- *     shell real `gh` subcommands (`pr view`/`pr list`/`issue view`), which spend the REST/core
- *     budget, so core is the budget an operator glancing at fleet health actually cares about.
- *     Read via an INJECTABLE `exec: (args: string[]) => string`, mirroring `ghGateway`'s own
- *     pattern (status.ts) so this is unit-testable without a real network call.
+ *   - RATE-LIMIT REMAINING (this widget's own display value): `gh api rate_limit`'s
+ *     `resources.core.remaining` — CORE, not GraphQL: status.ts's `ghGateway`/
+ *     `buildBatchedGithub` (the board's own GitHub reads) both shell real `gh` subcommands
+ *     (`pr view`/`pr list`/`issue view`), which spend the REST/core budget, so core is the
+ *     budget an operator glancing at fleet health actually cares about. Read via an
+ *     INJECTABLE `exec: (args: string[]) => string`, mirroring `ghGateway`'s own pattern
+ *     (status.ts) so this is unit-testable without a real network call.
+ *
+ * W1-T372 (the daemon's TICK, not this widget's pull-only display): the CORE-only choice
+ * above was correct for a GLANCE widget but left the daemon itself blind to the OTHER bucket
+ * — GraphQL, which `gh pr create`/`gh pr view --json` actually spend, and which has sat at
+ * 0/5000 while core held thousands unused. {@link readGhRateLimitBuckets} reads BOTH buckets
+ * off the SAME `gh api rate_limit` payload {@link readGhRateLimitRemaining} already fetches
+ * (never a second exec call for the second number) and is consulted from `runDaemon`'s tick
+ * (daemon.ts), not from this route.
  */
 
 import { statfsSync } from "node:fs";
@@ -109,6 +118,58 @@ export function readGhRateLimitRemaining(exec: (args: string[]) => string = defa
 
 function defaultGhExec(args: string[]): string {
   return execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+}
+
+/** One bucket's reading — {@link readGhRateLimitBuckets}. */
+export interface GhRateLimitBucket {
+  remaining: number;
+  /** ISO-8601, converted from `gh api rate_limit`'s Unix-epoch-seconds `reset` field — the
+   *  same string shape `daemon.headroom`'s own `resets_at` already carries, so a quota
+   *  exhaustion's dedup episode key (W1-T372) is built the identical way. */
+  resetsAt: string;
+}
+
+/** Both buckets `gh api rate_limit` reports off ONE payload — {@link readGhRateLimitBuckets}.
+ *  Each bucket independently absent (never a fabricated reading) when its own sub-object
+ *  could not be read/parsed. */
+export interface GhRateLimitBuckets {
+  core?: GhRateLimitBucket;
+  graphql?: GhRateLimitBucket;
+}
+
+interface RawGhRateLimitPayload {
+  resources?: {
+    core?: { remaining?: number; reset?: number };
+    graphql?: { remaining?: number; reset?: number };
+  };
+}
+
+function parseGhRateLimitBucket(raw: { remaining?: number; reset?: number } | undefined): GhRateLimitBucket | undefined {
+  if (!raw || typeof raw.remaining !== "number" || typeof raw.reset !== "number") return undefined;
+  return { remaining: raw.remaining, resetsAt: new Date(raw.reset * 1000).toISOString() };
+}
+
+/**
+ * `gh api rate_limit`'s REST/core AND GraphQL buckets, off a SINGLE exec call — never a
+ * second `gh api rate_limit` shell-out to get the second number (this module's header,
+ * W1-T372). GraphQL is the bucket `gh pr create`/`gh pr view --json` actually spend, and the
+ * one {@link readGhRateLimitRemaining} above never reads — this is the daemon-tick counterpart
+ * to that pull-only display value, consulted from `runDaemon` (daemon.ts), never from this
+ * route. `exec` is injectable exactly like {@link readGhRateLimitRemaining}'s own seam. Fails
+ * soft: `{}` on any read/parse error of the WHOLE payload, and each bucket independently
+ * `undefined` (never a fabricated number) when only its own sub-object is missing/malformed —
+ * the same discipline `readGhRateLimitRemaining` already applies to `core` alone.
+ */
+export function readGhRateLimitBuckets(exec: (args: string[]) => string = defaultGhExec): GhRateLimitBuckets {
+  try {
+    const parsed = JSON.parse(exec(["api", "rate_limit"])) as RawGhRateLimitPayload;
+    return {
+      core: parseGhRateLimitBucket(parsed.resources?.core),
+      graphql: parseGhRateLimitBucket(parsed.resources?.graphql),
+    };
+  } catch {
+    return {};
+  }
 }
 
 /** {@link buildDaemonHealthRoute}'s dependencies. */

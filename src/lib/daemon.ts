@@ -52,6 +52,12 @@ import {
 import { partitionByFileOverlap, serializedLedgerPayload, settledSetPayload } from "./dispatch-overlap.js";
 import { HEADROOM_LIMIT_PCT, RESET_UNKNOWN, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
+// W1-T372: TYPE ONLY (erased at build — no runtime edge added to daemon-health.ts, which
+// already imports a VALUE from this module; a value import here would be a real cycle, a
+// type-only one is not). See daemon-health.ts's `readGhRateLimitBuckets` for the reader this
+// shape belongs to — this pure module never shells `gh` itself, exactly as it never touches
+// the filesystem (this file's own header).
+import type { GhRateLimitBuckets } from "./daemon-health.js";
 import type { CostGovernorResult, QueueGovernorResult } from "./sweep.js";
 // VALUE import (W1-T342's gate moved to its own pure module so drain.ts can share it — see that
 // module's header for why neither daemon.ts nor sweep.ts could host it). Pure, no filesystem.
@@ -757,6 +763,36 @@ export interface DaemonDeps {
     resetsAt: string;
   }) => void | Promise<void>;
   /**
+   * W1-T372: `gh api rate_limit`'s REST/core and GraphQL buckets, read fresh each tick —
+   * `undefined` per bucket (or the whole call returning `{}`) means unreadable, never rendered
+   * as an exhaustion (the same fail-soft-never-fabricated contract `readUsage` above already
+   * carries). Consulted on the SAME per-tick cadence as `readUsage`'s headroom block,
+   * immediately after it in `runDaemon` below — never a second cadence, and this is the ONLY
+   * daemon-tick read of either bucket, so no second `gh api rate_limit` call is ever made per
+   * tick. Optional — omitted, the quota tick is skipped exactly as `readUsage` omitted skips
+   * the headroom block.
+   */
+  readGhQuota?: () => GhRateLimitBuckets;
+  /**
+   * W1-T372: called AT MOST ONCE per bucket per exhaustion episode, on the tick a bucket's OWN
+   * `remaining` first crosses from having budget to having none — never on a bare
+   * `remaining === 0` VALUE check, which would re-fire on every tick for up to an hour until
+   * the bucket resets (see `runDaemon`'s own per-bucket latch, mirroring `onHeadroomBreach`'s
+   * `headroomReserveEscalated` discipline exactly, just keyed per bucket so a core exhaustion
+   * and a GraphQL exhaustion in the same hour never suppress each other).
+   *
+   * UNLIKE `onHeadroomBreach`, this hook never pauses or idles dispatch — W1-T372 OBSERVES and
+   * SURFACES a quota exhaustion, it does not govern one; no `continue` is taken on its account.
+   * The real command wires escalate.ts's `escalate()` naming the bucket, with its OWN
+   * cross-boot ledger dedup keyed on (bucket, resetsAt) — mirroring `escalateHeadroomReserve`'s
+   * durable dedup, since this in-process latch alone resets to empty on every daemon restart.
+   * Wrapped in the caller's own try/catch (same discipline as `onHeadroomBreach`/
+   * `onCircuitBreak`) so a failed notification costs one logged line, never the daemon's
+   * liveness. Optional — omitted, the exhaustion is still visible via the `daemon.quota` line
+   * logged every tick a read succeeds, it just opens no issue.
+   */
+  onQuotaExhausted?: (info: { bucket: "core" | "graphql"; remaining: number; resetsAt: string }) => void | Promise<void>;
+  /**
    * QUEUE STARVATION (recon oper#queue-starvation-2026-08-03): called on an idle tick whose
    * dispatch-filter census names at least one RECOVERABLE-class blocker — see {@link
    * StarvationCensus} and the predicate right above where this fires in the idle rung. Fires
@@ -1455,6 +1491,14 @@ export async function runDaemon(
   // episode) escalates again rather than staying silenced for the rest of
   // this process's life.
   let headroomReserveEscalated = false;
+  // QUOTA EXHAUSTION ESCALATION DEDUP (W1-T372): the SAME per-episode-latch shape
+  // `headroomReserveEscalated` applies just above, kept PER BUCKET (core, graphql) rather than
+  // one flag — each bucket is read, records, and escalates independently (design (i)/(iv)), so
+  // a core exhaustion must never suppress a GraphQL one in the same hour or vice versa. Cleared
+  // the moment a bucket's own read reports positive remaining again, so a LATER exhaustion (a
+  // new episode, after that bucket's own reset) escalates again rather than staying silenced
+  // for the rest of this process's life.
+  const quotaExhaustedEscalated: Record<"core" | "graphql", boolean> = { core: false, graphql: false };
   // QUEUE STARVATION ESCALATION DEDUP (recon oper#queue-starvation-2026-08-03): the SAME
   // per-episode bound `headroomReserveEscalated`/`circuitEscalated` apply above — the census is
   // re-derived fresh every idle tick, so without this the notification hook would fire on
@@ -1914,6 +1958,43 @@ export async function runDaemon(
         // escalation counter, no headroom line. Dispatch proceeds; reset the counter
         // so a later enable starts from a clean slate.
         consecutiveUnreadable = 0;
+      }
+    }
+
+    // QUOTA (W1-T372): BESIDE `daemon.headroom` immediately above, on the SAME tick — never a
+    // new cadence (design (ii)). Both `gh api rate_limit` buckets are read together
+    // (`readGhQuota`'s own doc: one exec call, never two) and RECORDED INDEPENDENTLY every tick
+    // a read succeeds, so an exhaustion of either bucket is visible on the ledger without
+    // anyone requesting the pull-only `/v1/daemon-health` page. THIS IS OBSERVE-AND-SURFACE
+    // ONLY (design (vii)): unlike headroom's own enforcement branch above, no `continue` is
+    // taken here and dispatch is never paused on a bucket's account.
+    if (deps.readGhQuota) {
+      const quota = deps.readGhQuota();
+      for (const bucket of ["core", "graphql"] as const) {
+        const reading = quota[bucket];
+        if (!reading) continue;
+        log("daemon.quota", {
+          bucket,
+          remaining: reading.remaining,
+          resets_at: reading.resetsAt,
+          poll_interval_ms: pollIntervalMs,
+        });
+        // A STATE TRANSITION, NOT A VALUE CHECK (design (iii)): `remaining === 0` holds every
+        // tick until the bucket's own reset, so alerting on the raw value would re-fire up to
+        // once a minute for an hour. The latch fires the hook only on the tick this bucket
+        // FIRST reads exhausted, and clears the instant it reads positive again — the same
+        // discipline `headroomReserveEscalated` applies above, kept per bucket here.
+        if (reading.remaining > 0) {
+          quotaExhaustedEscalated[bucket] = false;
+          continue;
+        }
+        if (quotaExhaustedEscalated[bucket]) continue;
+        quotaExhaustedEscalated[bucket] = true;
+        try {
+          await deps.onQuotaExhausted?.({ bucket, remaining: reading.remaining, resetsAt: reading.resetsAt });
+        } catch (e) {
+          log("daemon.escalation.failed", { error: String((e as Error)?.message ?? e) });
+        }
       }
     }
 

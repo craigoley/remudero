@@ -339,6 +339,12 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // needs-human issue per boot, roughly one a MINUTE for as long as the storm lasts.
   "daemon.crashloop.escalated",
   "daemon.headroom_reserve.escalated",
+  // W1-T372: escalateQuotaExhaustion's (run-task.ts) own dedup marker, read per bucket
+  // (`l.bucket === info.bucket && l.resets_at === info.resetsAt`) — the SAME "written whether
+  // or not delivery succeeds" discipline as `daemon.headroom_reserve.escalated` immediately
+  // above. A rotation dropping it re-opens one duplicate quota-exhaustion notice per tick for
+  // as long as the bucket stays exhausted.
+  "daemon.quota_exhausted.escalated",
   "dispatch.starvation.escalated",
   "verdict",
   "verdict.merged",
