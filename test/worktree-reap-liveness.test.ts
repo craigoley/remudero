@@ -29,7 +29,19 @@
  * Its own file per CLAUDE.md's coverage rule — never appended to test/run-task.test.ts.
  */
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -39,6 +51,7 @@ import {
   DEFAULT_WORKTREE_REAP_GRACE_MS,
   newestActivityMs,
   reapStaleWorktrees,
+  runLockPath,
   runWorktreeReapRung,
   writeRunLock,
 } from "../src/lib/worker.js";
@@ -148,6 +161,64 @@ test("REGRESSION LOCK: a live pid still outranks everything, and a live branch s
     writeRunLock(f.entry, { pid: process.pid, run_id: "W1-T900", startedAt: "2026-07-20T00:00:00Z" });
     const s = reapStaleWorktrees(f.root, { branchIsLiveUpstream: () => false });
     assert.deepEqual(s.keptReasons, [{ name: f.entryName, reason: "live-pid" }], "live pid wins, and says so");
+  } finally {
+    f.cleanup();
+  }
+});
+
+// ── W1-T381: A DEAD PID OUTRANKS RECENT ACTIVITY ──────────────────────────────────────────────
+//
+// THE INCIDENT (2026-08-06): run W1-T357-1785973739363's pid (17925) exited at 23:54:34. At
+// 00:26:42 something UNRELATED wrote `plan/questions.ndjson` inside that already-dead run's
+// worktree, and `recent-activity` read that write as work in progress and rescued the tree — and
+// with it the widowed `.lock`, which held the deploy gate open. An mtime records THAT a write
+// happened, never WHO made it, so it cannot outrank the lock's own, stronger claim that the run
+// is over. Three directions, and one without the others is not evidence (isPidAlive is FORCED by
+// injection throughout, never left to a real process happening to be free or busy).
+
+test("W1-T381 BITES: a lock naming a DEAD pid is not rescued by fresh nested activity — reaped, sibling lock removed too", () => {
+  const f = fixture("run-W1-T357-1785973739363");
+  try {
+    writeRunLock(f.entry, { pid: 17925, run_id: "W1-T357", startedAt: "2026-08-05T23:40:00Z" });
+    // Same shape as the incident: ancient root, ONE nested file written seconds ago — exactly what
+    // `recent-activity` used to rescue.
+    backdateAllButDeepFile(f.entry, 90);
+    assert.equal(existsSync(runLockPath(f.entry)), true, "the lock exists before the pass");
+
+    const s = reapStaleWorktrees(f.root, { isPidAlive: () => false, branchIsLiveUpstream: () => false });
+
+    assert.deepEqual(s.reaped, [f.entryName], "the dead pid's own lock outranks the fresh nested write");
+    assert.deepEqual(s.kept, [], "recent-activity must not fire for a confirmed-dead lock");
+    assert.equal(existsSync(runLockPath(f.entry)), false, "the sibling lock goes with the tree, not left widowed");
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("W1-T381 HOLDS (1): a lock naming a LIVE pid is still kept despite an old mtime — the live-pid guard is untouched", () => {
+  const f = fixture("run-W1-T358-live");
+  try {
+    writeRunLock(f.entry, { pid: 4242, run_id: "W1-T358", startedAt: "2026-08-06T00:00:00Z" });
+    backdateAllButDeepFile(f.entry, 90); // same ancient-root/fresh-file shape — activity is irrelevant here either way
+
+    const s = reapStaleWorktrees(f.root, { isPidAlive: () => true, branchIsLiveUpstream: () => false });
+
+    assert.deepEqual(s.reaped, [], "a live pid must never be reaped");
+    assert.deepEqual(s.keptReasons, [{ name: f.entryName, reason: "live-pid" }], "and the live-pid guard, not recent-activity, is why");
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("W1-T381 HOLDS (2): a worktree with NO lock at all is still rescued by recent activity — W1-T378 is not undone", () => {
+  const f = fixture("run-W1-T359-nolock");
+  try {
+    backdateAllButDeepFile(f.entry, 90); // no writeRunLock call — lockRead.kind is "absent"
+
+    const s = reapStaleWorktrees(f.root, { isPidAlive: () => false, branchIsLiveUpstream: () => false });
+
+    assert.deepEqual(s.reaped, [], "an absent lock is not a dead pid — recent activity still rescues");
+    assert.deepEqual(s.keptReasons, [{ name: f.entryName, reason: "recent-activity" }]);
   } finally {
     f.cleanup();
   }

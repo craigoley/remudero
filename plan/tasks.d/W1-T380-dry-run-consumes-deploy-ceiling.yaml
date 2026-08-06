@@ -75,8 +75,19 @@
   plan_refs: ["§4B", "W1-T341"]
   files: [src/lib/deployer.ts, test/deployer.test.ts]
   status: queued
+  pr: 1392                 # merged PR #1392 (a1f067c) already implements this fix; deriveStatus
+                            # rung (b) — see plan/tasks.yaml header and src/lib/status.ts:1228.
   attempts: 0
-  note: "verify:auto — the whole thing asserts in-process against an injected DeployDeps with a fake
+  note: "LINKED VIA `pr:` FIELD, NOT THE TRAILER: #1392 (a1f067c, merged 2026-08-05T23:46:39Z) already
+    moves `clearDeferredSince?.()` below the `if (opts.dryRun)` return and carries `retained_wait_ms`
+    on the `deploy.dry_run` row — src/lib/deployer.ts:732-742, test/deployer.test.ts:357/378/399, all
+    57 passing. Its body has no `Remudero-Task: W1-T380` line (only `(W1-T380)` in the title), so
+    deriveStatus's rung (c) trailer search misses it, and its head branch
+    (`fix/dry-run-must-not-consume-deploy-ceiling`) does not match `run-W1-T380-*`, so rung (c2)'s
+    head-branch corroboration misses it too. This `pr: 1392` field is rung (b), the documented
+    hand-linkage path (plan/tasks.yaml header; precedent W1-T1's `pr: 2`), added so a re-dispatch of
+    this already-shipped fix does not happen. No src/ or test/ file is touched by this edit.
+    verify:auto — the whole thing asserts in-process against an injected DeployDeps with a fake
     clock and a temp state root; `runDeployCycle` is already fully seam-injected and
     test/deployer.test.ts already covers the idle gate and the ceiling.
     risk:high — NOT Rule 19 span this time: it is two files and one concern. The band is BLAST
