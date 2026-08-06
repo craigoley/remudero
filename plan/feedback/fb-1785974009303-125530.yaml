@@ -1,0 +1,35 @@
+id: fb-1785974009303-125530
+ts: 2026-08-05T23:53:29.303Z
+raw: "THE CONSOLE'S ANSWER BUTTON FILES A REPLY AND NEVER CLOSES THE QUESTION —
+  panel-graph.ts builds the reply as: input.replyTo !== undefined ? '[answer to
+  feedback#' + replyTo + '] ' + input.text : input.text. That is the ENTIRE
+  linkage. A text prefix. No answers: field, no replyTo persisted on either
+  entry, and NO STATUS TRANSITION on the original. So the operator answers a
+  needs-me question, a new entry is filed, and the original stays exactly where
+  it was — still on the board, still asking. He then has no way to tell whether
+  he has answered it or not. Measured: fb-1784762629681-d60042 (the triage
+  auto-arm question, 14 days old) still reads status: grilling after being
+  answered at 22:30Z. GRILLING IS A DEAD-END STATUS: across 131 entries the
+  distribution is 79 new, 28 rejected, 23 accepted, and exactly ONE grilling —
+  this one. Nothing transitions out of it, and it is not in the closed set, so
+  it stays on NEEDS ME indefinitely. THIS IS THE THIRD DEFECT FROM ONE
+  INTERACTION, all filed tonight: the preview banner said 'nothing is filed yet'
+  while filing on every click (fb-1785969338913-dc3d0f, two byte-identical
+  entries five seconds apart), there was no pending state during the model call
+  (fb-1785969218105-99834b), and now the answer does not close the question.
+  RECON: establish what the Answer affordance is SUPPOSED to do — whether
+  replyTo is meant to transition the original and the transition is simply
+  unwired, or whether the design never included one. Then establish what status
+  an answered question should take: 'accepted' means the feedback was accepted
+  for work, which is not the same as 'the operator answered the question asked
+  of him', so a new value may be needed rather than reusing one. Finally
+  establish why 'grilling' has no exit — one entry has been stuck in it for 14
+  days and nothing in the corpus has ever left it. Falsifying check: if a lane
+  consumes replyTo and closes the original on its next pass, the linkage exists
+  and the gap is only that it had not run yet."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null
+expansion: null
