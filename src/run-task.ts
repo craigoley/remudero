@@ -280,10 +280,12 @@ import {
   loadMastMapping,
   netStateCapabilityAdvisories,
   parseLedger,
+  planHealthSweep,
   probeGithubThrottle,
   recordFollowupHarvest,
   renderGather,
   renderNetStateUnwiredAdvisories,
+  renderPlanHealth,
   resolveMarkerForGather,
   saveMarker,
   shippedSince,
@@ -7352,6 +7354,32 @@ export function netStateAdvisorySectionFor(repoRoot: string): string {
   }
 }
 
+/**
+ * W1-T358 (Standing rule 20): `planHealthSweep`/`renderPlanHealth` (lib/retro.ts) re-grade
+ * every OPEN task against every standing rule the deterministic linter encodes — the
+ * FORWARD-only gap the rule names (a task is graded once, at filing time; nothing re-checks
+ * it against a rule added or tightened afterward). Both were fully implemented and covered
+ * by unit tests but never CALLED from anywhere real, so the sweep never ran and
+ * `renderPlanHealth`'s doc-promised "printed by --dry-run" output never rendered. Wired here,
+ * against the SAME `repoRoot`-relative `plan/tasks.yaml` `netStateAdvisorySectionFor` above
+ * already reads, with the SAME best-effort/silent-on-failure discipline: a missing or corrupt
+ * plan file degrades to no section rather than aborting the retro.
+ */
+export function planHealthSweepSectionFor(repoRoot: string): string {
+  try {
+    const tasksYamlPath = join(repoRoot, "plan", "tasks.yaml");
+    if (!existsSync(tasksYamlPath)) return "";
+    const { tasks } = loadPlan(tasksYamlPath);
+    const report = planHealthSweep(tasks, () => ({
+      moduleExists: (rel: string) => existsSync(join(repoRoot, rel)),
+    }));
+    return `\n\n${renderPlanHealth(report)}`;
+  } catch (e) {
+    console.error(`### [retro] plan_health_sweep — scan failed, degrading to none: ${String((e as Error)?.message ?? e)}`);
+    return "";
+  }
+}
+
 async function retroCommand(
   rest: string[],
   opts: {
@@ -7473,7 +7501,14 @@ async function retroCommand(
   // on failure, the SAME non-fatal discipline `openProposalLines`/`openTaskTitles` above already
   // follow: a read/scan hiccup degrades to "nothing to advise" rather than aborting the retro.
   const netStateAdvisorySection = netStateAdvisorySectionFor(repoRoot);
-  const report = [renderGather(gather), "", renderRatifyTelemetry(ratifyTelemetry(parseLedger(ledgerNdjson)))].join("\n") + netStateAdvisorySection;
+  // W1-T358 (Standing rule 20): the plan-health sweep re-grades the OPEN queue against
+  // every standing rule the linter encodes — rides EVERY retro report (dry-run and real
+  // alike), same as the net-state advisory section above.
+  const planHealthSection = planHealthSweepSectionFor(repoRoot);
+  const report =
+    [renderGather(gather), "", renderRatifyTelemetry(ratifyTelemetry(parseLedger(ledgerNdjson)))].join("\n") +
+    planHealthSection +
+    netStateAdvisorySection;
 
   if (dryRun) {
     console.log(report);
