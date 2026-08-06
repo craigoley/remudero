@@ -37,6 +37,7 @@ import {
   parseAcceptanceBlock,
   parseReviewerVerdicts,
   parseWhitelistedProof,
+  preexistingProofHits,
   priorReviewVerdictFromLedger,
   resolveAutoMergeArm,
   resolveNameFilteredCandidates,
@@ -2672,4 +2673,115 @@ test("fast-fail: a proof naming a test that DOES exist still resolves, still nar
     ["not ok 1 - a genuinely present title for the happy path", "# duration_ms 4"].join("\n"),
   );
   assert.equal(execWhitelistedProof(wp!, dir, 60_000, failing.spawner), "fail");
+});
+
+// ── W1-T362: extend W1-T273's executed_stale downgrade to `unit test:` proofs ──
+//
+// THE GAP W1-T273 LEFT: a `grep:` proof matching the merge-base is downgraded to
+// `executed_stale` (proves nothing — it would have exited 0 before the work
+// landed). A `unit test:` proof that passes IDENTICALLY at head AND base is the
+// same defect, unit-test shaped: the diff changed nothing the test observes, yet
+// it was recorded `executed_pass` regardless. THE FIX, three outcomes over ONE
+// re-run against the base (never two, per classifyBaseProofOutcome's own doc):
+//   pass at base       -> "stale"         -> executed_stale (this task's core case)
+//   absent/fail at base -> "discriminates" -> executed_pass, base outcome noted
+//   base run THROWS     -> "base_unknown"  -> executed_pass, never a downgrade
+// (design: plan/tasks.d/W1-T362-unit-proof-base-run-stale-downgrade.yaml)
+
+const BASE_DIR = "/fake/merge-base/checkout";
+
+test("W1-T362 (i): a `unit test:` proof passing at HEAD and IDENTICALLY at the merge-base is downgraded to executed_stale, with the base outcome recorded", () => {
+  const criterion = { claim: "the widget is frobnicated", proof: "unit test: test/widget.test.ts" };
+  // Report never pastes the proof's keywords — without the positive override the
+  // mechanical floor alone is UNMET, exactly like the grep W1-T273 fixture.
+  const v = judgeCriterion(criterion, new Set(["unrelated", "tokens"]), undefined, {
+    cwd: "/tmp/head",
+    baseCwd: BASE_DIR,
+    exec: () => "pass", // passes identically on head AND base
+  });
+  assert.equal(v.proof_exec, "executed_stale");
+  assert.equal(v.met, false, "a non-discriminating pass must not force met=true (W1-T273's own non-arming rule)");
+  assert.match(v.reason, /non-discriminating/);
+  assert.match(v.reason, /merge-base/);
+});
+
+test("W1-T362 (ii-a): a `unit test:` proof ABSENT at the base (forward-referencing TDD, the common healthy case) keeps executed_pass, discrimination recorded", () => {
+  const criterion = { claim: "the widget is frobnicated", proof: "unit test: test/widget.test.ts" };
+  const v = judgeCriterion(criterion, new Set(), undefined, {
+    cwd: "/tmp/head",
+    baseCwd: BASE_DIR,
+    exec: (_wp, cwd) => (cwd === BASE_DIR ? "no-match" : "pass"), // the test does not exist yet at the base
+  });
+  assert.equal(v.proof_exec, "executed_pass", "absent-at-base is the OPPOSITE of stale — it discriminates maximally");
+  assert.equal(v.met, true);
+  assert.match(v.reason, /discriminates/);
+});
+
+test("W1-T362 (ii-b): a `unit test:` proof that FAILS at the base keeps executed_pass, discrimination recorded", () => {
+  const criterion = { claim: "the widget is frobnicated", proof: "unit test: test/widget.test.ts" };
+  const v = judgeCriterion(criterion, new Set(), undefined, {
+    cwd: "/tmp/head",
+    baseCwd: BASE_DIR,
+    exec: (_wp, cwd) => (cwd === BASE_DIR ? "fail" : "pass"), // present but genuinely failing pre-work
+  });
+  assert.equal(v.proof_exec, "executed_pass");
+  assert.equal(v.met, true);
+  assert.match(v.reason, /discriminates/);
+});
+
+test("W1-T362 (iii): a base-tree execution error (unresolvable/unrunnable base checkout) keeps today's scoring, recorded as base_unknown — the downgrade never fires on infra noise", () => {
+  const criterion = { claim: "the widget is frobnicated", proof: "unit test: test/widget.test.ts" };
+  const v = judgeCriterion(criterion, new Set(), undefined, {
+    cwd: "/tmp/head",
+    baseCwd: BASE_DIR,
+    exec: (_wp, cwd) => {
+      if (cwd === BASE_DIR) throw new Error("base checkout cannot run node --test (no node_modules)");
+      return "pass";
+    },
+  });
+  assert.equal(v.proof_exec, "executed_pass", "an environment gap must never manufacture a downgrade");
+  assert.equal(v.met, true);
+  assert.match(v.reason, /base_unknown/);
+});
+
+test("W1-T362: absent baseCwd never runs the base check for a `unit test:` proof — byte-identical to pre-task behaviour", () => {
+  const criterion = { claim: "the widget is frobnicated", proof: "unit test: test/widget.test.ts" };
+  const v = judgeCriterion(criterion, new Set(), undefined, {
+    cwd: "/tmp/head",
+    // no baseCwd at all
+    exec: () => "pass",
+  });
+  assert.equal(v.proof_exec, "executed_pass");
+  assert.equal(v.met, true);
+  assert.doesNotMatch(v.reason, /merge-base|base_unknown|discriminates/);
+});
+
+test("preexistingProofHits: now answers for kind=test too (W1-T362 lifts the grep-only restriction), true only when the base run itself passes", () => {
+  const wp = parseWhitelistedProof("unit test: test/widget.test.ts")!;
+  assert.equal(preexistingProofHits(wp, () => "pass", BASE_DIR), true, "pass at base ⇒ stale");
+  assert.equal(preexistingProofHits(wp, () => "no-match", BASE_DIR), false, "absent at base ⇒ not stale");
+  assert.equal(preexistingProofHits(wp, () => "fail", BASE_DIR), false, "failing at base ⇒ not stale");
+  assert.equal(
+    preexistingProofHits(
+      wp,
+      () => {
+        throw new Error("unreadable base checkout");
+      },
+      BASE_DIR,
+    ),
+    false,
+    "a thrown base run ⇒ not stale (degrades exactly like exec_error elsewhere)",
+  );
+  assert.equal(preexistingProofHits(wp, () => "pass", undefined), false, "no baseCwd at all ⇒ never stale");
+});
+
+test("W1-T362: grep proofs are UNCHANGED — the executed_pass reason carries no base-outcome note (only `unit test:` proofs get the new discriminates/base_unknown annotations)", () => {
+  const criterion = { claim: "the flag is present", proof: "grep: wx flag present in src/lib/config.ts" };
+  const v = judgeCriterion(criterion, new Set(), undefined, {
+    cwd: "/tmp/head",
+    baseCwd: BASE_DIR,
+    exec: (_wp, cwd) => (cwd === BASE_DIR ? "no-match" : "pass"), // discriminates — stays executed_pass
+  });
+  assert.equal(v.proof_exec, "executed_pass");
+  assert.equal(v.reason, `proof executed and PASSED on the PR head (grep: wx flag present in src/lib/config.ts)`);
 });
