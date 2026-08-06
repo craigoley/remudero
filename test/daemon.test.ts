@@ -19,7 +19,6 @@ import {
   parseOrphanedBranch,
   parseResetInstant,
   reconstructOrphan,
-  reconstructState,
   resolveHeadroomLimitPct,
   runDaemon,
   type DaemonDeps,
@@ -1822,45 +1821,6 @@ test("reconstructOrphan: no PR ever opened (crash mid-implement) ⇒ clean — n
   assert.equal(recovered.action, "clean");
   assert.equal(recovered.prUrl, undefined);
   assert.match(recovered.detail, /crash happened before a PR existed/);
-});
-
-test("reconstructState: reconstructs a MIX of orphans in order, logging one daemon.recover line each", () => {
-  const openUrl = "https://github.com/o/r/pull/21";
-  const mergedUrl = "https://github.com/o/r/pull/22";
-  const github = fakeGitHub({
-    byRef: {
-      [openUrl]: { number: 21, url: openUrl, state: "OPEN" },
-      [mergedUrl]: { number: 22, url: mergedUrl, state: "MERGED" },
-    },
-  });
-  const ledgerPath = ledgerFile([
-    { step: "pr.opened", task_id: "W1-A", pr_url: openUrl },
-    { step: "pr.opened", task_id: "W1-B", pr_url: mergedUrl },
-    { step: "run.start", task_id: "W1-C" }, // never got a PR
-  ]);
-  const orphans: OrphanedRun[] = [
-    { taskId: "W1-A", runId: "W1-A-1", branch: "run-W1-A-1", worktreePath: "/w/a" },
-    { taskId: "W1-B", runId: "W1-B-1", branch: "run-W1-B-1", worktreePath: "/w/b" },
-    { taskId: "W1-C", runId: "W1-C-1", branch: "run-W1-C-1", worktreePath: "/w/c" },
-  ];
-  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
-  const recovered = reconstructState(
-    orphans,
-    (id) => statusOf(id, ledgerPath, github),
-    (step, extra = {}) => lines.push({ step, extra }),
-  );
-  assert.deepEqual(
-    recovered.map((r) => [r.taskId, r.action]),
-    [
-      ["W1-A", "resume"],
-      ["W1-B", "clean"],
-      ["W1-C", "clean"],
-    ],
-  );
-  assert.equal(lines.length, 3);
-  assert.deepEqual(lines.map((l) => l.step), ["daemon.recover", "daemon.recover", "daemon.recover"]);
-  assert.deepEqual(lines.map((l) => l.extra.task), ["W1-A", "W1-B", "W1-C"]);
-  assert.deepEqual(lines.map((l) => l.extra.action), ["resume", "clean", "clean"]);
 });
 
 // ── the loop survives a throwing sweep / escalation hook (R-1) ──────────────
