@@ -1,0 +1,34 @@
+id: fb-1785984602111-18ffd8
+ts: 2026-08-06T02:50:02.111Z
+raw: "A REFACTOR OF UNTESTED CODE INHERITS ITS COVERAGE DEBT AT THE GATE —
+  observed on #1399 (judgeRubric advisory wiring, merged 64e5d4c).
+  coverage-ratchet failed on 10 uncovered lines in run-task.ts. Those lines were
+  ALREADY UNCOVERED ON origin/main — an lcov built on main scored the entire 'if
+  (hasUnmet)' comment block at 0 hits — and the PR only RESTRUCTURED that block.
+  diff-coverage flags ADDED lines, so moving or rewriting a pre-existing
+  untested region converts a SILENT gap into a BLOCKING failure, and the author
+  is penalised for touching code nobody had ever covered. THIS IS A STRUCTURAL
+  PROPERTY, NOT AN INCIDENT: any refactor of an untested region inherits its
+  debt at the gate, so the gate systematically discourages the refactoring it
+  should reward. The rational response is to leave dead regions alone, which is
+  the opposite of what the repo wants. The #1399 author fixed it properly — the
+  first test to drive runReview into that branch, with gh stubbed onto PATH so
+  nothing touches the network, plus a judgeRubricFn seam making the fail-open
+  catch arm reachable at all — but that was a real cost imposed by touching, not
+  by breaking. RECON: establish whether diff-coverage can distinguish a line
+  that is NEW from one that MOVED, using the three-dot diff it already computes
+  — a pure relocation has an identical counterpart at the merge-base. If it can,
+  say what it would cost. If it cannot, say whether an explicit escape (a marked
+  pre-existing-debt annotation, the way '// diff-cov: process-boundary' already
+  works for glue lines) is the honest alternative, and what stops it becoming a
+  routine bypass. Note the asymmetry to preserve: the gate exists because
+  untested new code is how this repo shipped eleven unreached modules, so any
+  relaxation must not admit genuinely new uncovered lines. Falsifying check: if
+  the 10 lines were genuinely new rather than moved, the gate behaved correctly
+  and this is only a documentation gap about what a refactor costs."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null
+expansion: null
