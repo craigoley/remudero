@@ -329,7 +329,15 @@ import {
   type LintOpts,
 } from "./lib/task-linter.js";
 import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount } from "./lib/mounts.js";
-import { loadDefaultPolicy, loadPolicy, policyPath, PolicyError, type Policy, type PolicyHeadroomRung } from "./lib/policy.js";
+import {
+  loadDefaultPolicy,
+  loadPolicy,
+  policyPath,
+  PolicyError,
+  resolveDailyCostCeiling,
+  type Policy,
+  type PolicyHeadroomRung,
+} from "./lib/policy.js";
 import {
   attributeVerbs,
   deriveCliVerbs,
@@ -8654,8 +8662,17 @@ function costGovernorGateFor(
 
 /**
  * W1-T331: builds `DaemonDeps.reloadDailyCostCeilingUsd` — the daemon's LIVE, per-tick read of
- * `plan/policy.yaml`'s `sweep.dailyCostCeilingUsd`, which `runDaemon` snapshots once at the top
- * of each tick and threads into {@link costGovernorGateFor}'s returned closure (see both docs).
+ * the EFFECTIVE daily cost ceiling, which `runDaemon` snapshots once at the top of each tick and
+ * threads into {@link costGovernorGateFor}'s returned closure (see both docs).
+ *
+ * W1-T363: resolved through `policy.ts`'s `resolveDailyCostCeiling`, never the committed
+ * `plan/policy.yaml` row alone — that function is the one place the `state/
+ * DAILY_COST_CEILING_OVERRIDE` precedence rule (an operator-written override wins when present,
+ * well-formed, and in bound; the committed default otherwise) is allowed to live, so a governor
+ * read that bypassed it would silently ignore an operator's live override every tick. Before
+ * this, the reloader read `policy.values.sweep.dailyCostCeilingUsd` directly, which made the
+ * override store (W1-T332) inert to the daemon even though `resolveDailyCostCeiling` already
+ * existed and was already wired into the console's own provenance render (W1-T333).
  *
  * `deps.policy` is the SAME injection seam `retroTriggerCheck`/`autoTriageCheck` already offer
  * (test/config-reader-seams.test.ts's structural check, recon-EJ: `repoRoot` is a MODULE-LEVEL
@@ -8663,14 +8680,19 @@ function costGovernorGateFor(
  * UNREDIRECTABLE — a test could only ever pin the shipped default, never prove a policy edit
  * actually moves the decision). Production passes none, so the daemon reads the checked-in
  * `plan/policy.yaml` via the SAME `loadPolicy(policyPath(repoRoot))` construction those two
- * already use; a test injects a fixture `Policy` to prove the live ceiling changes with it.
+ * already use; a test injects a fixture `Policy` to prove the live ceiling changes with it. The
+ * `state/` override lookup itself is scoped to the SAME `repoRoot`, matching the console
+ * renderer's own root (W1-T333, account-usage.ts).
  *
  * A throw (unreadable/malformed `policy.yaml`) is deliberately left uncaught here — `runDaemon`'s
  * own reload step (daemon.ts) catches it and holds the last known-good ceiling; catching it here
  * too would just be a second, redundant discipline.
  */
 export function dailyCostCeilingReloader(deps: { policy?: Policy } = {}): () => number {
-  return () => (deps.policy ?? loadPolicy(policyPath(repoRoot))).values.sweep.dailyCostCeilingUsd;
+  return () => {
+    const policy = deps.policy ?? loadPolicy(policyPath(repoRoot));
+    return resolveDailyCostCeiling(repoRoot, policy).usd;
+  };
 }
 
 /**
