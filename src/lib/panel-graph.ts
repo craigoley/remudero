@@ -692,9 +692,12 @@ export function computePlanProgress(
 }
 
 /** Why a frontier row is where it is — the shapes acceptance names (file-order head / a named
- *  unmet dependency / a named blocker with breaker ETA) plus the two further NOT-RUNNABLE
- *  holds the design's own prose names (a `blocked` task, a `verify:human` parking) — never a
- *  hand-written catch-all beyond these five. */
+ *  unmet dependency / a named blocker with breaker ETA) plus the one further NOT-RUNNABLE hold
+ *  the design's own prose names (a `blocked` task) — never a hand-written catch-all beyond these
+ *  four. `"verify-human"` remains a member of this type (nothing new to classify — {@link
+ *  frontierFilterReason} already told them apart) but never reaches a {@link FrontierRow}:
+ *  `verify:human` tasks are PERMANENTLY parked, not temporarily held, so they are excluded from
+ *  the frontier entirely rather than rendered — see {@link buildPlanFrontier}'s own doc. */
 export type FrontierReasonKind = "file-order" | "unmet-dependency" | "circuit-breaker" | "blocked" | "verify-human";
 
 export interface FrontierRow {
@@ -709,11 +712,17 @@ export interface FrontierRow {
 
 /**
  * Reason text for a task {@link runnableCandidates} declined via one of the four named {@link
- * DispatchFilterReason}s — `undefined` for `"already-merged"`, which the caller excludes from
- * the frontier entirely (a DONE task is not part of "what's next", it is `PlanProgress.done`).
- * `unmetDependencies` is re-consulted here (a pure DAG walk, never a GitHub read) to NAME which
- * id(s) — the same primitive `isDispatchEligible` itself already called to produce this exact
- * verdict, so this only re-derives WHICH ids it would name, never the verdict itself.
+ * DispatchFilterReason}s — `undefined` for `"already-merged"` AND for `"verify-not-auto"`, both
+ * excluded from the frontier entirely by the caller. A DONE task is not part of "what's next" (it
+ * is `PlanProgress.done`); a `verify:human` task is PERMANENTLY parked — it never becomes
+ * runnable on its own, an operator must act on it directly, and it already renders under `need
+ * you (verify != auto)` in the pinned header (idle-reasons-panel.ts) — so keeping it here too is
+ * duplication with a worse label, and it is deliberately never routed through the needs-me/
+ * escalation arc either (daemon.ts, auto-triage.ts exclude it from idle escalation for the same
+ * reason: "permanently needs a human, waiting never helps"). `unmetDependencies` is re-consulted
+ * here (a pure DAG walk, never a GitHub read) to NAME which id(s) — the same primitive
+ * `isDispatchEligible` itself already called to produce this exact verdict, so this only
+ * re-derives WHICH ids it would name, never the verdict itself.
  */
 function frontierFilterReason(
   plan: Plan,
@@ -722,9 +731,7 @@ function frontierFilterReason(
   isMerged: MergedSet,
 ): { kind: FrontierReasonKind; reason: string } | undefined {
   if (reason === "already-merged") return undefined;
-  if (reason === "verify-not-auto") {
-    return { kind: "verify-human", reason: `verify:${task.verify} — parked for a human, never auto-dispatched` };
-  }
+  if (reason === "verify-not-auto") return undefined;
   if (reason === "blocked") {
     return { kind: "blocked", reason: task.note ? `blocked — ${task.note}` : `${task.id}'s own status is blocked` };
   }
@@ -745,12 +752,16 @@ export const DEFAULT_FRONTIER_LIMIT = 8;
  * binds `runnableCandidates` (drain.ts) for BOTH the ordering and the eligibility verdict —
  * this function never re-derives either. A row that IS the next runnable candidate carries
  * `runnable: true` with a `"file-order"` reason naming its rank; a row `runnableCandidates`
- * declined is rendered too (`runnable: false`), never omitted, with the reason the SAME
- * eligibility chain actually stopped it for (design: "NOT-RUNNABLE IS INFORMATION, NOT
- * ABSENCE"). DONE tasks (`"already-merged"`) are excluded entirely — the frontier answers
- * "what's next", not "what already landed" (that's `PlanProgress.done`). A task neither
- * eligible nor named by one of the four filter reasons (e.g. in-flight under an open PR, or an
- * indeterminate GitHub read) is Now-tab territory — live run/deploy state is explicitly out of
+ * declined for a TEMPORARY reason (`unmet-dependency`, `circuit-breaker`, `blocked`) is rendered
+ * too (`runnable: false`), never omitted, with the reason the SAME eligibility chain actually
+ * stopped it for (design: "NOT-RUNNABLE IS INFORMATION, NOT ABSENCE"). Two kinds are excluded
+ * from the frontier's row budget entirely, never merely de-prioritised within it: DONE tasks
+ * (`"already-merged"` — the frontier answers "what's next", not "what already landed", that's
+ * `PlanProgress.done`) and PERMANENTLY-parked `verify:human` tasks (`"verify-not-auto"` — they
+ * never become runnable on their own, and already render, with a better label, under `need you
+ * (verify != auto)` in the pinned header; see {@link frontierFilterReason}). A task neither
+ * eligible nor named by one of the remaining filter reasons (e.g. in-flight under an open PR, or
+ * an indeterminate GitHub read) is Now-tab territory — live run/deploy state is explicitly out of
  * THIS view's scope (this section's header) — and is skipped here, never guessed at.
  */
 export function buildPlanFrontier(

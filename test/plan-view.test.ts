@@ -195,7 +195,7 @@ const FRONTIER_YAML = [
   "  repo: remudero",
   "  type: implement",
   "  depends_on: [P1]",
-  "- id: P4", // verify: human -> HELD, verify-human parking
+  "- id: P4", // verify: human -> EXCLUDED entirely (permanently parked, not "what's next")
   "  title: delta",
   "  repo: remudero",
   "  type: implement",
@@ -233,7 +233,7 @@ test("buildPlanFrontier: the RUNNABLE rows are in the EXACT SAME order runnableC
   assert.deepEqual(runnableIds, ["P1"]);
 });
 
-test("buildPlanFrontier: every NOT-RUNNABLE task renders AS HELD with a machine-derived reason -- never silently omitted -- naming the unmet dependency, the blocked note, the verify:human parking, and the circuit breaker's own reset condition", () => {
+test("buildPlanFrontier: every TEMPORARILY-held task renders AS HELD with a machine-derived reason -- never silently omitted -- naming the unmet dependency, the blocked note, and the circuit breaker's own reset condition; PERMANENTLY-parked verify:human and DONE tasks are excluded from the frontier entirely", () => {
   const root = tmpRoot();
   const plan = fixturePlan(root, FRONTIER_YAML);
   const isMerged = mergedSetOf("P6");
@@ -244,6 +244,11 @@ test("buildPlanFrontier: every NOT-RUNNABLE task renders AS HELD with a machine-
 
   // P6 is DONE (merged) -- excluded from the frontier entirely, it is not "what's next".
   assert.equal(byId.has("P6"), false);
+
+  // P4 is verify:human -- PERMANENTLY parked, excluded from the frontier entirely (never
+  // becomes runnable on its own; it already renders, with a better label, under "need you
+  // (verify != auto)" in the pinned header -- see idle-reasons-panel.ts).
+  assert.equal(byId.has("P4"), false);
 
   const p1 = byId.get("P1")!;
   assert.equal(p1.runnable, true);
@@ -260,16 +265,58 @@ test("buildPlanFrontier: every NOT-RUNNABLE task renders AS HELD with a machine-
   assert.equal(p3.reasonKind, "unmet-dependency");
   assert.match(p3.reason, /P1/, "names WHICH dependency is unmet");
 
-  const p4 = byId.get("P4")!;
-  assert.equal(p4.runnable, false);
-  assert.equal(p4.reasonKind, "verify-human");
-  assert.match(p4.reason, /verify:human/);
-
   const p5 = byId.get("P5")!;
   assert.equal(p5.runnable, false);
   assert.equal(p5.reasonKind, "circuit-breaker");
   assert.match(p5.reason, new RegExp(`${DEFAULT_MAX_TASK_DISPATCHES}/${DEFAULT_MAX_TASK_DISPATCHES}`), "names the breaker's own dispatch tally");
   assert.match(p5.reason, /resets only on a fresh owned PR/, "the breaker's own reset condition -- its ETA");
+});
+
+test("buildPlanFrontier: FALSIFIER -- a file-order head of parked verify:human tasks does not spend the row budget; the frontier surfaces the runnable tasks behind them instead", () => {
+  const root = tmpRoot();
+  const plan = fixturePlan(
+    root,
+    [
+      "- id: H1", // verify: human, head of file order -> parked, must NOT occupy a frontier slot
+      "  title: h1",
+      "  repo: remudero",
+      "  type: implement",
+      "  verify: human",
+      "  depends_on: []",
+      "- id: H2", // verify: human, also ahead of the runnable tasks -> same
+      "  title: h2",
+      "  repo: remudero",
+      "  type: implement",
+      "  verify: human",
+      "  depends_on: []",
+      "- id: R1", // no deps, verify auto -> RUNNABLE, sits behind H1/H2 in file order
+      "  title: r1",
+      "  repo: remudero",
+      "  type: implement",
+      "  depends_on: []",
+      "- id: R2", // ditto
+      "  title: r2",
+      "  repo: remudero",
+      "  type: implement",
+      "  depends_on: []",
+      "",
+    ].join("\n"),
+  );
+
+  // A budget of 2: were parked rows still counted, both slots would go to H1/H2 and neither
+  // runnable task would ever appear -- exactly the bug this task fixes.
+  const frontier = buildPlanFrontier(plan, NONE_MERGED, 2, []);
+  assert.deepEqual(frontier.map((r) => r.id), ["R1", "R2"], "the two runnable tasks fill the budget, not the two parked ones ahead of them");
+  assert.ok(
+    frontier.every((r) => r.runnable),
+    "every row the budget spends here is runnable -- none of it went to a permanently-parked row",
+  );
+
+  // Even with room for everyone, H1/H2 never appear -- they are excluded, not merely
+  // de-prioritised within the budget.
+  const wideFrontier = buildPlanFrontier(plan, NONE_MERGED, 10, []);
+  const wideIds = wideFrontier.map((r) => r.id);
+  assert.deepEqual(wideIds, ["R1", "R2"], "verify:human rows are absent from the frontier at any limit, not just squeezed out by a small one");
 });
 
 test("buildPlanFrontier: a smaller limit still counts HELD rows toward it (not just runnable ones) -- 'not-runnable is information, not absence'", () => {
