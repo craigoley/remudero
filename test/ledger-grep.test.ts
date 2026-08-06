@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { test } from "node:test";
+import { configPath, type Config } from "../src/lib/config.js";
 import { resolveLedgerUnion } from "../src/lib/ledger-grep.js";
 import { ledgerGrepCommand } from "../src/run-task.js";
 
@@ -129,6 +130,72 @@ test("FALSIFIER: zero archives exits non-zero and prints no result line — the 
     console.log = realLog;
     console.error = realErr;
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── ledgerGrepCommand's default `stateDir` resolution (opts.stateDir omitted) ──────────────
+//
+// Every test above passes `{ stateDir: dir }` explicitly, which never runs the
+// `opts.stateDir ?? (() => { try { … loadConfig() … } catch { … } })()` seam itself — the
+// SAME pattern emissionsCommand's own default-resolution arm needs a dedicated test for
+// (test/emissions.test.ts). Both arms below drive it through a real HOME override, exactly
+// like config.test.ts's W1-T67 EEXIST-fallback test, so neither shells `which claude`.
+
+test("ledgerGrepCommand with no opts.stateDir resolves it from loadConfig().root", () => {
+  const home = mkdtempSync(join(tmpdir(), "rmd-ledger-grep-cfg-ok-"));
+  const savedHome = process.env.HOME;
+  process.env.HOME = home;
+  const logs: string[] = [];
+  const errs: string[] = [];
+  const realLog = console.log;
+  const realErr = console.error;
+  console.log = (...a: unknown[]) => void logs.push(a.map(String).join(" "));
+  console.error = (...a: unknown[]) => void errs.push(a.map(String).join(" "));
+  try {
+    const p = configPath();
+    mkdirSync(dirname(p), { recursive: true });
+    const cfg: Config = { claudeBin: "/opt/homebrew/bin/claude", root: join(home, "Remudero") };
+    writeFileSync(p, JSON.stringify(cfg, null, 2) + "\n");
+
+    const code = ledgerGrepCommand(["run\\.start"]);
+
+    assert.equal(code, 1, "the config-derived state dir has no archives on a fresh HOME");
+    assert.match(logs.join("\n"), new RegExp(`state dir:\\s+${join(cfg.root, "state").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+    assert.match(errs.join("\n"), /ZERO archive files matched/);
+  } finally {
+    console.log = realLog;
+    console.error = realErr;
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("ledgerGrepCommand with no opts.stateDir and an unreadable config reports 'cannot resolve', never a throw", () => {
+  const home = mkdtempSync(join(tmpdir(), "rmd-ledger-grep-cfg-bad-"));
+  const savedHome = process.env.HOME;
+  process.env.HOME = home;
+  const errs: string[] = [];
+  const realErr = console.error;
+  const realLog = console.log;
+  console.error = (...a: unknown[]) => void errs.push(a.map(String).join(" "));
+  console.log = () => {};
+  try {
+    const p = configPath();
+    mkdirSync(dirname(p), { recursive: true });
+    // Present but not valid JSON: loadConfig()'s JSON.parse throws, exercising the catch arm.
+    writeFileSync(p, "not json");
+
+    const code = ledgerGrepCommand(["run\\.start"]);
+
+    assert.equal(code, 1);
+    assert.match(errs.join("\n"), /rmd ledger-grep: cannot resolve a state dir — unreadable config/);
+  } finally {
+    console.error = realErr;
+    console.log = realLog;
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+    rmSync(home, { recursive: true, force: true });
   }
 });
 
