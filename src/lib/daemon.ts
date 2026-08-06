@@ -3,10 +3,12 @@
  *
  * W1-T12 (Daemonize) was split along the machine/human boundary (DIAGNOSIS.md,
  * Rule 16): this is the headless, unit-testable LOGIC half. Launchd unit
- * generation is W1-T12b (lib/launchd.ts); crash-recovery reconstruction is
- * W1-T12c (`reconstructState`, below); actually loading the plist on a real
- * session, an overnight drain, and a live kill-and-recover are the
- * verify:human commissioning steps of W1-T12d — none of that is here.
+ * generation is W1-T12b (lib/launchd.ts); crash-recovery's resume/clean split
+ * is W1-T12c (`reconstructOrphan`, below — its batch driver `reconstructState`
+ * was retired, W1-T361: superseded by runRecoverability in src/run-task.ts, which
+ * performs the same split read straight from the live ledger); actually loading
+ * the plist on a real session, an overnight drain, and a live kill-and-recover
+ * are the verify:human commissioning steps of W1-T12d — none of that is here.
  *
  * `rmd drain` (drain.ts) is a bounded, one-shot pass a human kicks off by hand:
  * DAG-select → dispatch → repeat, until `--max`/`--until`/a block/no more work.
@@ -2578,30 +2580,4 @@ export function reconstructOrphan(
     prUrl: projection.prUrl,
     detail: `${orphan.taskId}: ${why} — orphaned worktree/branch is stale debris, safe to discard`,
   };
-}
-
-/**
- * The daemon's boot-time recovery pass (W1-T12c): reconstruct every orphaned
- * local run's fate, in order, logging one `daemon.recover` ledger line each.
- * Pure over its injected `deriveTaskStatus` — no filesystem, no git, no
- * GitHub call lives in this module (same discipline as the rest of daemon.ts);
- * the CLI wiring supplies the orphan list (a `git worktree list` walk) and a
- * `status.ts`-backed `deriveTaskStatus`, and owns the actual worktree/branch
- * cleanup that `action: "clean"` recommends.
- */
-export function reconstructState(
-  orphans: OrphanedRun[],
-  deriveTaskStatus: (taskId: string) => StatusProjection,
-  log?: (step: string, extra?: Record<string, unknown>) => void,
-): RecoveredTask[] {
-  return orphans.map((orphan) => {
-    const recovered = reconstructOrphan(orphan, deriveTaskStatus);
-    log?.("daemon.recover", {
-      task: recovered.taskId,
-      run_id: recovered.runId,
-      action: recovered.action,
-      detail: recovered.detail,
-    });
-    return recovered;
-  });
 }
