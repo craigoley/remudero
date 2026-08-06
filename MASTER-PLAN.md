@@ -585,8 +585,9 @@ made on the cumulative figure.
 
 ## Retro proposals (PROPOSALS ONLY; NOT yet in plan/tasks.yaml)
 
-**★ LIVE RANKING (the ONE place open proposals are ordered).** `P29 > P47 > P38 > P43 > P33 > P42 >
-P40 > P46 > P39 > P45 > P44 > P17 > P26`. Every proposal has exactly ONE canonical entry below, updated IN PLACE with each cycle's
+**★ LIVE RANKING (the ONE place open proposals are ordered).** `P29 > P47 > P38 > P48 > P43 > P33 >
+P42 > P40 > P46 > P39 > P45 > P44 > P17 > P26` *(P48 rank PROPOSED by its session-mined entry below,
+pending ratification)*. Every proposal has exactly ONE canonical entry below, updated IN PLACE with each cycle's
 evidence — a retro that adds a second entry restating a proposal it did not change has failed the
 HARNESS-COMPRESSION bar. **P28 and P41 are RETIRED** (tombstones only, full prose deleted);
 **P35 is FOLDED into P38** and has no entry of its own. R15's moves, each with its number:
@@ -664,6 +665,64 @@ BELOW: candidates are ratified by the Architect via a tasks.yaml PR — rule 15,
   emits the race warning rather than the PR. DEPENDENCY: build (i) BEFORE P33's quarantine list — a
   list drained by hand against a cause that refills it is the half-fix P9 already taught this plan not
   to ship twice.
+
+- **★ P48 (plan + golden; NEW — session-mined `oper#outcome-proposal-2026-08-05`, NOT a retro mint,
+  PENDING RATIFICATION: an agent may RECOMMEND a direction but may never RECORD one — the operator
+  ratifies) — ZERO IS OVERLOADED: A BOUNDARY READ'S EMPTY ANSWER MUST SAY WHICH EMPTY IT IS, AND NO
+  NAKED ZERO ENTERS A DECISION WITHOUT A POSITIVE CONTROL.** GROUND TRUTH (mechanical, from the
+  2026-08-05 census in state/research-laws-and-gaps-2026-08-05.md, re-derived at 0332dd0): **21
+  recorded instances** across six mechanism classes of one defect shape — a reader whose only
+  vocabulary for trouble is the count itself, so "empty because absent", "empty because my query was
+  malformed", and "empty because the source moved or died" are indistinguishable. Four instances
+  landed in the last 24 hours; THREE measurements were retracted in one day when the gzip event made
+  every `ledger.*.ndjson` glob silently answer from the live file (~2.8% of history). The class has
+  three faces: undercount-as-answer (21 of 23 rows); **self-hiding observability** — guards and
+  ledger lines gated on `count > 0` write NOTHING in the zero case, so every census discovery was a
+  human doing arithmetic and NONE was a gate; and absence-as-success, the inverse sign (a zero
+  name-filter match once ran the WHOLE suite, #1111). PREDICTION the proposal is judged against: the
+  next instance is triggered by an environment shift a query predates — format change, quota, rename
+  — not by a code edit. WHY THIS IS NOT AN EXISTING NUMBER: **P38** is the dead-CONSUMER class (an
+  organ that merged and may not RUN); P48 is the live-READER class — a wired, running, calm-weather
+  reader answering WRONGLY, which P38's liveness proofs would score healthy. **P46** is a premise
+  wrong at FILING time; P48's readers were right when written and falsified later by the world.
+  **P43** governs how RETRO metrics are read; P48's instances blinded PRODUCTION decisions
+  (re-dispatches, review verdicts, dedup) as much as measurements. Every remedy that stuck in this
+  repo already has P48's shape, built locally four times: `indeterminate`/`readFailed` (status),
+  throw-on-gateway-failure (the reconciler fix), `base_unknown` (W1-T362's design), fallback
+  provenance (`PolicyError`). PROPOSE, two clauses — **and (ii) is the load-bearing one: a type
+  alone still permits a caller to collapse `absent` into `found: []`; the control requirement is
+  what stops it. A ratification that ships only clause (i) satisfies the letter and fixes nothing.**
+  **(i) THE OUTCOME TYPE** — a boundary read returns
+  `found | absent | query_invalid | source_unreachable`, never a bare count or collection.
+  **(ii) NO NAKED ZERO** — any zero or empty that feeds a decision (a guard, a dedup, a verdict, a
+  published figure) must be accompanied by a positive control proving the reader CAN see: a control
+  pattern that must match, a `zgrep -l` naming an archive, a seeded fixture the query must find.
+  FIRST TRANCHE, scoped by a stated criterion — **a boundary qualifies when it has a RECORDED census
+  instance AND no second channel at head** (everything else WAITS for an instance; this proposal
+  REPLACES the per-instance patch treadmill and forbids further bespoke silent-zero filings outside
+  the criterion): (1) `parseAcceptanceBlock` (src/lib/review.ts — still returns a bare
+  `AcceptanceCriterion[]` at 0332dd0; truncation is indistinguishable from a one-criterion body);
+  (2) the proof resolver's zero-candidate path (`resolveNameFilteredCandidates`, partially channeled
+  by #1111's three-answer refusal); (3) the ledger union — **W1-T379 (open, filed 2026-08-05) is
+  this tranche's member, not a duplicate**: one verb that FAILS LOUDLY when no archive was read;
+  (4) the sweep-survey truthiness gates (the `if (actionable.length)` class — the clone-reap survey
+  instance is census-recorded; its current gate state UNVERIFIED at 0332dd0). The two
+  already-converted GitHub-read boundaries (reconciler, status) are the pattern's existence proof,
+  not tranche members. **THE FALSIFIER THIS PROPOSAL MUST CARRY IS ITS OWN ADOPTION RISK — Law 2
+  eats Proposal 1**: an Outcome type is precisely the shape that ships, tests green, and is never
+  consumed — one new organ (`resolveFeedbackExpansionMount`) shipped through the advisory floor THE
+  DAY THIS WAS WRITTEN. Therefore every tranche task MUST carry a call-site criterion in the
+  linter's own demanded form (`grep: <symbol>( in <consumer path>` — `callSiteViolations`,
+  src/lib/task-linter.ts) AND a falsifier proving a caller DISTINGUISHES the cases — a fixture where
+  `absent` and `query_invalid` produce DIFFERENT downstream behavior — never merely that the type
+  compiles. GOLDEN (fixture-only, no live dep): a seeded body whose Acceptance block truncates
+  mid-claim yields `query_invalid`-class output a caller visibly refuses, while a genuine
+  one-criterion body yields `found`; a seeded ledger read against a directory of gzipped-only
+  archives either names an archive in its control or FAILS, never answers live-only; a converted
+  boundary's caller test fails when `absent` is collapsed into `found: []`. PROPOSED RANK 4
+  (`P29 > P47 > P38 > P48 > P43 > …`), argued not assigned: above P43 because these instances
+  blinded production paths, not only retro readings; below P38, five-cycles-priced and whose TASK A
+  is the narrowest standing fix — the next retro or the operator confirms or moves it.
 
 - **★ EVERYTHING ELSE R15 MINED IS EVIDENCE, NOT A PROPOSAL, AND IS FILED IN PLACE — no bullet
   restates it here.** The seventeen-worker rediscovery of one preflight defect and the fifth frozen

@@ -59,8 +59,9 @@ export type ReviewState = "success" | "failure";
  *                     keyword floor verdict computed alongside it, verbatim —
  *                     an environment hiccup must never silently hard-fail or
  *                     stall the fleet (Standing rule: no absent-check deadlock).
- *   executed_stale — (W1-T273) a `grep:` proof matched on the head, but the
- *                     SAME pattern ALSO matches the PR's MERGE-BASE — i.e. it
+ *   executed_stale — (W1-T273, extended to `unit test:` proofs by W1-T362) a
+ *                     proof matched/passed on the head, but the SAME check
+ *                     ALSO matches/passes on the PR's MERGE-BASE — i.e. it
  *                     would have exited 0 before the task's work ever landed,
  *                     so it discriminates nothing (W1-T267's fifth criterion,
  *                     verbatim: `workerKeychainPaths` matched two unrelated
@@ -71,10 +72,11 @@ export type ReviewState = "success" | "failure";
  *                     keyword floor verbatim, exactly like `exec_error`
  *                     degrades, but recorded under its own name because the
  *                     cause is a proof-authoring gap, not an environment
- *                     hiccup. `unit test:` proofs never produce this outcome
- *                     (design, explicitly out of scope — a forward-
- *                     referencing test path legitimately matches nothing
- *                     before the work and everything after).
+ *                     hiccup. A `unit test:` proof that is simply ABSENT at
+ *                     the base (the common, healthy TDD case — the whole
+ *                     point of a forward-referencing test) or that fails
+ *                     there is the OPPOSITE of this: it discriminates and
+ *                     stays `executed_pass`, per W1-T362.
  */
 /**
  * WHY a criterion produced no executed outcome. Diagnostic only — it never affects `met`, `state`,
@@ -1635,33 +1637,44 @@ export interface ProofExecContext {
 }
 
 /**
- * (W1-T273) Does a `grep:` proof's pattern ALSO match on the PR's MERGE-BASE —
- * i.e. would it have exited 0 before the task's own work ever landed? THE
- * LIVE DEFECT THIS CLOSES: W1-T267's fifth criterion carried
+ * (W1-T273, extended to `unit test:` proofs by W1-T362) Does a proof that just
+ * PASSED on the PR head ALSO pass on the PR's MERGE-BASE — i.e. would it have
+ * exited 0 before the task's own work ever landed? THE LIVE DEFECT THIS
+ * CLOSES (grep side): W1-T267's fifth criterion carried
  * `grep: workerKeychainPaths in src/run-task.ts`; run against the commit
  * BEFORE #1026 implemented the task, that pattern already returned two hits
  * (an import line, an unrelated daemon rung) and exited 0 — the review
  * executed criterion 5 and recorded it `executed_pass` on completely unbuilt
  * work. A proof is supposed to discriminate between done and not-done; one
- * that ALSO matches the merge-base discriminates nothing, and `executed_pass`
- * POSITIVELY OVERRIDES the keyword floor, so a non-discriminating proof is
- * strictly worse than a prose one (it certifies with more confidence than the
- * floor it replaces, on strictly less evidence).
+ * that ALSO matches/passes at the merge-base discriminates nothing, and
+ * `executed_pass` POSITIVELY OVERRIDES the keyword floor, so a
+ * non-discriminating proof is strictly worse than a prose one (it certifies
+ * with more confidence than the floor it replaces, on strictly less
+ * evidence). THE SAME DEFECT, unit-test shape (W1-T362): a `unit test:`
+ * proof that passes identically at head AND base proves the diff changed
+ * nothing the test observes — recorded `executed_pass` regardless, exactly
+ * as the grep case was before W1-T273.
  *
- * ONLY `kind: "grep"` is checked — EXPLICITLY NOT `kind: "test"` (design,
- * load-bearing): a `unit test:` proof legitimately names a test file/name
- * that does not exist yet at the merge-base (that is the whole point of TDD —
- * the test is written FORWARD-referencing the work), so it is expected and
- * correct for such a proof to match nothing before the work and everything
- * after. Applying this rule there by analogy would flag every legitimate
- * forward-referencing test proof as "stale", which is exactly backwards.
+ * `kind: "test"` needs one more distinction `kind: "grep"` does not: a
+ * `unit test:` proof legitimately names a test file/name that does not exist
+ * yet at the merge-base (that is the whole point of TDD — the test is
+ * written FORWARD-referencing the work). {@link classifyBaseProofOutcome}
+ * treats "the base run did not pass" (absent, no-match, or a genuine
+ * failure) as `"discriminates"` — the OPPOSITE of stale — never conflating
+ * "did not exist before" with "already matched/passed before"; only the
+ * second is the defect. A `kind: "grep"` proof's forward-reference case
+ * (a path the branch itself creates) already falls out of the same rule:
+ * `grep` simply finds no match on a path absent at the base.
  *
  * Returns `false` (never stale) whenever no `baseCwd` was supplied — this
  * check is purely additive and never runs, let alone downgrades anything, for
  * a caller that predates W1-T273's wiring — and whenever the base checkout
- * itself throws (an unreadable/absent merge-base checkout is an environment
- * gap, not a finding; degrades to "not stale" exactly like `exec_error`
- * degrades elsewhere in this module — never a silent hard-fail).
+ * itself throws (an unreadable/absent merge-base checkout, or — the common
+ * case for a `unit test:` proof today, since {@link materialiseBaseProofBlobs}
+ * only ever populates the base dir for `grep:` proofs — a base tree that
+ * simply cannot run a `node --test` invocation at all) is an environment gap,
+ * not a finding; degrades to "not stale" exactly like `exec_error` degrades
+ * elsewhere in this module — never a silent hard-fail.
  */
 /**
  * Materialise, into a throwaway directory, ONLY the base-revision blobs a review's `grep:` proofs
@@ -1710,17 +1723,38 @@ export function materialiseBaseProofBlobs(
   return written;
 }
 
+/**
+ * (W1-T362) The three ways a proof that already PASSED on the PR head can land when
+ * {@link preexistingProofHits}/{@link judgeCriterion} re-run it against the PR's merge-base:
+ *   "stale"         — the base run ALSO exits pass; the proof discriminates nothing (downgrade).
+ *   "discriminates" — the base run exits anything else (fail / no-match / absent) — the proof
+ *                      genuinely tells done from not-done; `executed_pass` stands.
+ *   "base_unknown"  — the base run itself threw (unreadable/absent merge-base checkout, a
+ *                      `unit test:` proof's base tree that cannot even run `node --test`, …) — an
+ *                      environment gap, never evidence either way; `executed_pass` stands, exactly
+ *                      like `exec_error` degrades elsewhere in this module.
+ * A SINGLE execution against `baseCwd` answers both "is it stale" and "why not, if not" — a second
+ * base run would double this check's own cost on top of the base-run cost W1-T273 already pays.
+ */
+function classifyBaseProofOutcome(
+  whitelisted: WhitelistedProof,
+  exec: ProofExecutor,
+  baseCwd: string,
+): "stale" | "discriminates" | "base_unknown" {
+  try {
+    return exec(whitelisted, baseCwd) === "pass" ? "stale" : "discriminates";
+  } catch {
+    return "base_unknown";
+  }
+}
+
 export function preexistingProofHits(
   whitelisted: WhitelistedProof,
   exec: ProofExecutor,
   baseCwd: string | undefined,
 ): boolean {
-  if (whitelisted.kind !== "grep" || baseCwd === undefined) return false;
-  try {
-    return exec(whitelisted, baseCwd) === "pass";
-  } catch {
-    return false;
-  }
+  if (baseCwd === undefined) return false;
+  return classifyBaseProofOutcome(whitelisted, exec, baseCwd) === "stale";
 }
 
 /** Verdict one criterion against its proof, given the report + optional semantic. */
@@ -1801,11 +1835,16 @@ export function judgeCriterion(
       try {
         const outcome = exec(whitelisted, execCtx.cwd);
         if (outcome === "pass") {
-          if (preexistingProofHits(whitelisted, exec, execCtx.baseCwd)) {
-            // W1-T273: the SAME pattern also matches the PR's MERGE-BASE — it
+          // W1-T273 (grep) / W1-T362 (extended to `unit test:`): re-run the SAME
+          // whitelisted check against the PR's merge-base — one execution answers
+          // both "is this stale" and, if not, why not (see classifyBaseProofOutcome).
+          const baseOutcome =
+            execCtx.baseCwd !== undefined ? classifyBaseProofOutcome(whitelisted, exec, execCtx.baseCwd) : undefined;
+          if (baseOutcome === "stale") {
+            // The SAME check also matches/passes on the PR's MERGE-BASE — it
             // would have exited 0 before this task's work ever landed, so
             // its exit-0 here discriminates nothing. See
-            // {@link preexistingProofHits}'s doc for the full design; `met`/
+            // {@link classifyBaseProofOutcome}'s doc for the full design; `met`/
             // `reason` are LEFT UNTOUCHED (the keyword floor computed above
             // stands, verbatim) — the proof's positive override is withdrawn,
             // never converted into a failure.
@@ -1818,6 +1857,18 @@ export function judgeCriterion(
             proofExec = "executed_pass";
             met = true;
             reason = `proof executed and PASSED on the PR head (${whitelisted.kind}: ${whitelisted.label})`;
+            // W1-T362: record the base-run outcome on the verdict for a `unit test:`
+            // proof specifically (grep's reason text stays byte-identical to its
+            // shipped W1-T273 shape — that check is not in this task's scope).
+            if (whitelisted.kind === "test" && baseOutcome === "discriminates") {
+              reason +=
+                ` — NOTE: also re-run against the PR's merge-base and did NOT pass there ` +
+                `(absent, no-match, or a genuine failure); the proof discriminates, executed_pass stands`;
+            } else if (whitelisted.kind === "test" && baseOutcome === "base_unknown") {
+              reason +=
+                ` — NOTE: re-run against the PR's merge-base for staleness could not complete ` +
+                `(base_unknown, an environment gap); executed_pass stands, downgrade withheld`;
+            }
           }
         } else if (outcome === "no-match") {
           // ZERO tests matched the proof's name pattern (the run completed — see
