@@ -1,0 +1,100 @@
+- id: W1-T383
+  title: "MASTER-PLAN's lanes sentence changed truth FOUR TIMES in one day and was false again by nightfall of its own correction — derivable capability claims move into a generated, drift-gated CAPABILITY SNAPSHOT block on the generate-cli-reference mold; intent and rationale stay hand-written"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 75.00
+  rationale: "RE-DERIVED AT 1ccfca2, from state/research-laws-and-gaps-2026-08-05.md Part 2a. THE
+    EVIDENCE IS THE ARGUMENT: the daemon-lanes sentence was hand-corrected on 2026-08-05 morning and
+    the truth changed FOUR TIMES that same day (lanes wired dark #1363 -> dispatchLanes 2 #1365 ->
+    3 #1383 -> back to 2 #1394); at this sha the sentence STILL reads 'dispatches ONE task at a
+    time' while the daemon runs two lanes live. The same file previously carried the false
+    'dispatches two lanes' claim (born in retro #974, inherited by two recons), a false ORIENTATION
+    scope note, three source literals described as policy rows, and a nextRunnable ordering claim
+    that an R15 retro sync RE-CARRIED four days after #1072 falsified it. This is not a
+    documentation-discipline failure; it is a CATEGORY ERROR — hand-maintained present-tense prose
+    about a system merging 50-70 PRs/day. Three hand corrections in one week is the treadmill this
+    task replaces.
+    THE PRECEDENT IS IN-TREE AND HAS TEETH: scripts/generate-cli-reference.mjs renders
+    docs/cli-reference.md from the COMMANDS registry, content-only and byte-stable, with a --check
+    staleness gate ('cli-reference:check' in package.json) — the shape to FOLLOW, not reinvent.
+    THE BOUNDARY, PROPOSED not assumed (the worker verifies each claim's source): GENERATABLE = a
+    present-tense capability claim derivable from ONE authoritative source — the lane count
+    (sweep.dispatchLanes via loadPolicy), the daily cost ceiling and its override provenance
+    (resolveDailyCostCeiling), the recon turn cap (RECON_MAX_TURNS), the required-check roster
+    (ci-gate's REQUIRED array). HAND-WRITTEN stays hand-written: intent, rationale, history,
+    proposals, rulings — a generator has no authority over WHY.
+    THE LAW-1/P48 CLAUSE, load-bearing: a registered claim whose generator CANNOT determine the
+    answer renders an explicit UNDETERMINED(<reason>) line — never a silent omission — and the
+    check FAILS on count mismatch between registered claims and rendered lines. A generator that
+    silently drops what it cannot read is the exact naked-zero shape P48 (ratified #1402) forbids."
+  design: |
+    ONE FENCED BLOCK, ONE GENERATOR, ONE CHECK — the cli-reference mold applied to MASTER-PLAN.
+    (i) A marker-fenced CAPABILITY SNAPSHOT block in MASTER-PLAN's NET STATE region (begin/end
+    HTML-comment markers; everything between is machine-owned). First tranche: the four claims in
+    the rationale, each rendered as one line naming its VALUE and its SOURCE symbol — e.g. the lane
+    count from the same loadPolicy read production uses, never a parallel literal. The load-bearing
+    string `CAPABILITY SNAPSHOT` must appear in the block header — the first acceptance proof greps
+    for it (0 hits at 1ccfca2, verified; the W1-T326/W1-T365 forward-reference construction: for a
+    task whose deliverable is ADDING text there is no third option between a forward grep and an
+    executed_stale match).
+    (ii) scripts/generate-capability-snapshot.mjs — content-only, byte-stable when sources are
+    unchanged, rewriting ONLY between the markers. Because rewriting can change MASTER-PLAN's line
+    count, THE SAME INVOCATION regenerates plan/plan-index.json (the index stores line numbers; a
+    generator that rewrites prose without regenerating it hands the next reader a stale map — the
+    36-entry reflow already bit once this week). A hand edit INSIDE the markers is drift by
+    definition and the check catches it.
+    (iii) `capability-snapshot` + `capability-snapshot:check` npm scripts in package.json, the
+    check wired beside cli-reference:check so CI runs it — same discipline, same failure mode
+    (exit 1 on staleness), byte-compare like the precedent.
+    (iv) UNDETERMINED IS AN ANSWER: each registered claim resolver returns a value or a reason;
+    the renderer emits UNDETERMINED(<reason>) for the latter and the check asserts rendered-line
+    count equals registered-claim count. Silent omission must be UNREPRESENTABLE in the renderer's
+    shape, not merely discouraged.
+    (v) THE HAND-PROSE SEAM: the sentence classes this tranche absorbs (the lanes sentence, the
+    ceiling figure, the recon cap, the gate roster) are REMOVED from the surrounding hand prose in
+    the same PR, replaced by a pointer to the block — one source of truth, or the drift just moves
+    ten lines up. Claims OUTSIDE the tranche are untouched; widening the block is follow-on work
+    per claim, each with its source named, never a bulk conversion.
+    (vi) FALSIFIER, BOTH DIRECTIONS: with a policy fixture at lanes=3 the generated block says 3
+    and the committed file (still saying 2) FAILS the check; with sources unchanged the generator
+    is byte-stable across two runs; a resolver made to throw yields UNDETERMINED with the reason,
+    never a missing line — and the count assertion catches a dropped claim.
+    NOT IN SCOPE: converting intent/rationale/proposal prose (never generatable); the Retro
+    proposals section; DECISIONS.md; ORIENTATION (its own doc, its own follow-up if this holds);
+    any src/ change — the generator imports existing exported readers only, and if a needed reader
+    is unexported, THAT is reported as a follow-up rather than smuggled into this diff.
+  acceptance:
+    - claim: "MASTER-PLAN carries the machine-owned block and its generator + drift check exist on the cli-reference mold, wired into package.json"
+      proof: "grep: CAPABILITY SNAPSHOT in MASTER-PLAN.md"
+    - claim: "the check scripts are registered so CI catches a stale committed block, same discipline as the cli-reference gate"
+      proof: "grep: capability-snapshot:check in package.json"
+    - claim: "an unresolvable registered claim renders as UNDETERMINED with its reason rather than being silently omitted, and the renderer's count parity makes omission unrepresentable"
+      proof: "grep: UNDETERMINED( in scripts/generate-capability-snapshot.mjs"
+  risk: high
+  origin: oper#laws-filings-2026-08-06
+  plan_refs: ["P48", "§8A", "W1-T48"]
+  files: [MASTER-PLAN.md, plan/plan-index.json, scripts/generate-capability-snapshot.mjs, package.json, test/capability-snapshot.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — the deliverable is a generator, a block, and a byte-compare gate; every proof
+    greps text the task creates. NOT ruling-shaped: no DECISIONS.md, no rule amendment — the block
+    carries derived FACTS with named sources, and what qualifies as generatable is bounded to the
+    four-claim tranche the operator sees in this shard.
+    risk:high — set by Rule 19's span (MASTER-PLAN + scripts + package.json + the index), one
+    deliverable: a generator without its gate is drift with extra steps, and a gate without the
+    block gates nothing. Splitting any piece orphans a call site (Standing rule 14).
+    budget_usd 75 — a generator on an existing mold, four resolvers, the index co-regeneration, and
+    a three-direction falsifier.
+    PROOF NOTES: all three greps are forward references to text this task creates — 0 hits each at
+    1ccfca2 (verified, with the cli-reference:check line as the positive control that the grep can
+    see package.json) — the sanctioned no-third-option construction; none is a substring of an
+    existing line (the colon-suffixed script name and the open-paren UNDETERMINED( are chosen
+    precisely so they cannot substring-match prose). files: covers every proof path and the index
+    implication.
+    WHAT THIS REPLACES: the truth-audit treadmill — three hand corrections to MASTER-PLAN
+    capability prose in one week, one stale by nightfall. Future capability-claim corrections
+    inside the tranche become `npm run capability-snapshot` instead of a filing.
+    NO depends_on: the mold, the sources and the block are all in-tree today."
