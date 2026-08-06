@@ -1,0 +1,139 @@
+- id: W1-T384
+  title: "two dispatches were spent on tasks a review guard will always refuse — a task declaring plan/tasks.yaml alongside a path outside isInPlanScope can never be plan-only, so criteriaTampered fires on work that is correct: the linter REFUSES that shape at FILING, where the fix is one field edit"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "OPERATOR RULING on state/recon-rule15-class.md, 2026-08-06. The ruling adopts the
+    by-hand practice as standing, DECLINES an Architect route, and asks for this refusal. RE-DERIVED
+    AT 77565e9.
+    THE INCIDENT, TWICE IN THREE DAYS. #1295 (W1-T324's dispatched run, branch run-W1-T324-…) went
+    GREEN ON 23 CHECKS and was refused by `remudero-review` on Standing rule 15; #1416 (W1-T369's,
+    branch run-W1-T369-…) was refused the same way with 18 deleted `proof:` lines. Both closed
+    unmerged. Both were recovered by SPLITTING into a plan-only PR plus a code/test PR — #1298+#1299
+    and #1418+#1420 — each recovery merging in about a quarter of an hour. The work was correct both
+    times; only the PACKAGING was impossible.
+    THE MECHANISM, verified from source at this sha. `judgeReview` computes
+    `planOnly = diffFiles.length > 0 && diffFiles.every(isInPlanScope)` and then
+    `criteriaTampered = !planOnly && criterionFieldTampered(evidence.diff)`. Withdrawing or repairing
+    a record NECESSARILY removes a `claim:`/`proof:` line, which is exactly what
+    `criterionFieldTampered` fires on. So the moment ONE declared path falls outside `isInPlanScope`,
+    the carve-out is gone and the PR is refused however good the work is. A dispatched worker gets one
+    PR per run and therefore cannot produce the split that makes this mergeable.
+    IT IS A FILING DECISION, AND THE COUNTER-EXAMPLE PROVES IT. W1-T370 was filed in the SAME SESSION
+    as W1-T369, from the SAME `origin: oper#proof-debt-arc-2026-08-05`, on the SAME concern — as
+    `files: [plan/tasks.yaml]`, `verify: human`. It has never been refused and carries zero blocking
+    violations. Its twin bundled a test file at `verify: auto` and lost a dispatch, minutes apart. The
+    information that separates them was on the page when they were written.
+    THE DIAGNOSIS WAS ALREADY ON RECORD AND DID NOT STOP THE SECOND LOSS. #1298's merged body, two
+    days before #1416: 'the task's scoping, not the work, is what made it unmergeable.' A convention
+    nobody is stopped from breaking is what produced the ruling this task files."
+  design: |
+    FOLLOW `rulingVerifyViolation` (src/lib/task-linter.ts, W1-T353) EXACTLY. It is the same shape —
+    a literal path in `files:` plus a `verify:` mismatch — and its module comment records the lesson
+    this task must not relearn: it shipped TRIGGER A ALONE and deliberately dropped a title-word
+    trigger B because B false-positived on the very task introducing it. Do not invent a second
+    trigger here either.
+
+    (i) THE TRIGGER, one condition in three clauses, all readable from the task record:
+    `files:` contains the LITERAL entry `plan/tasks.yaml`, AND at least one entry in `files:` is not
+    `isInPlanScope`, AND `verify !== "human"`. Any clause false → no violation. Otherwise BLOCK,
+    with a message that names the split remedy (file it as two tasks, or set `verify: human`) rather
+    than merely reporting the shape.
+
+    (ii) WHY THE TRIGGER IS A LITERAL PATH AND NOT "ANY PLAN-SCOPE PATH" — MEASURED, because
+    CLAUDE.md requires the population a bound separates to have been observed. Across ALL 411 task
+    records, FOUR declare `plan/tasks.yaml`: two are plan-scope-only and clean (W1-T202, W1-T370) and
+    two are MIXED at `verify: auto` (W1-T324, W1-T369) — exactly the two that lost dispatches. ZERO
+    false positives. Broadening the first clause to "any `isInPlanScope` path" instead fires on 15
+    OPEN tasks, 14 of them `verify: auto`, every one legitimate: `plan/policy.yaml` beside
+    `src/lib/policy.ts` is an ordinary config-plus-reader pairing (W1-T252, W1-T264, W1-T318, W1-T320,
+    W1-T325, W1-T330, W1-T344, W1-T378 among them) and none of them touches an acceptance criterion.
+    `plan/policy.yaml` is in plan scope only because it starts with `plan/`. Re-derive both numbers
+    before building; if the narrow trigger has gained a false positive, report it rather than widening.
+
+    (iii) IT GATES STRICTLY EARLIER THAN THE REVIEW GUARD, WHICH IS WHY IT NEEDS NO REASONING ABOUT
+    GAMING. `criteriaTampered` keeps working byte-identically on everything that reaches review; this
+    adds a refusal BEFORE dispatch and changes nothing about what the reviewer does. It is purely
+    additive to rule 15's strength — there is no path by which it lets something through that rule 15
+    previously caught. State that in the PR body; it is the property that makes the change safe to
+    adopt without re-deriving the review gate.
+
+    (iv) ONE WIRING POINT BUYS BOTH HALVES. `lintTask` is called by CI's changed-tasks `lint-plan`
+    AND by `runTask`'s `assertLintClean(task, preDispatchLint)`, and `preDispatchLint` demotes only
+    `proofResolvability` — so a new BLOCK-severity check added to `lintTask` blocks at lint and parks
+    at dispatch with no second call site. Do not add one.
+
+    (v) A RETIRED RECORD MUST NOT BE RE-REFUSED, AND THIS IS THE CLAUSE MOST EASILY MISSED. A
+    withdrawal under the W1-T229 convention PRESERVES the record, `files:` included, so W1-T324's and
+    W1-T369's mixed `files:` survive retirement forever. Without a status exclusion, the operator
+    plan-only PR that withdraws W1-T324 would be blocked by the very check W1-T324 earned. EXCLUDE
+    non-open records (`blocked`/`merged`/`done`). `isOpenLintTask` is unexported and local to
+    run-task.ts; W1-T369's own lock re-declared the three-value set locally with a written reason
+    rather than exporting it, and that precedent governs — a 3-literal Set carries none of the drift
+    risk a re-implemented algorithm would.
+
+    (vi) FALSIFIER, FOUR DIRECTIONS. The mixed shape at `verify: auto` FAILS; the identical record at
+    `verify: human` PASSES (W1-T370's shape); a record declaring ONLY plan-scope paths PASSES at
+    either verify value (W1-T202's shape — the by-hand repair route the ruling adopts must never be
+    refused); and a record with no `plan/tasks.yaml` entry at all is UNTOUCHED however many
+    out-of-scope files it declares (the 15-task population in (ii)). A check proven only in the
+    failing direction proves nothing.
+
+    (vii) THIS TASK'S OWN `files:` MUST NOT TRIP THE RULE IT PROPOSES, and they do not — it declares
+    `src/lib/task-linter.ts` and `test/task-linter.test.ts`, neither of which is `plan/tasks.yaml`.
+    Say so in the PR body; a rule that refuses its own filing is the self-reference failure W1-T353's
+    trigger B was dropped for.
+
+    KNOWN HOLES, NAMED AND DELIBERATELY OUT OF SCOPE. This refusal does not close them and must not
+    grow to: `criterionFieldTampered` filters on `/(^|\/)plan\/tasks\.yaml$/`, so it is SILENT on any
+    criteria edit in a `plan/tasks.d/` shard, and SILENT on APPENDING a new `claim:`+`proof:` pair
+    even in the monolith (#1295's worker found and used that second one). Meanwhile
+    `monolithFilingViolations` blocks new tasks from the monolith entirely, so the review guard now
+    protects a frozen archive while every recently-filed task's criteria are unprotected. ALSO OUT OF
+    SCOPE, and declined by the ruling rather than merely unscheduled: replacing `planOnly` with a
+    task-identity check. It would be a better predicate — `runReview` already holds the task and
+    passes `taskDeclaredFiles` — but the two holes mean the gate needs re-deriving over every
+    shard-filed task in the plan, which is a far larger population than this one.
+
+    ALSO NOT IN SCOPE: withdrawing W1-T324 (an operator plan-only change — see the note for the
+    ordering), changing what `criterionFieldTampered` reads, and any Architect lane or task type.
+  acceptance:
+    - claim: "a task declaring plan/tasks.yaml alongside a path outside isInPlanScope at verify:auto fails the linter with a message naming the remedy, and the identical record at verify:human passes"
+      proof: "unit test: test/task-linter.test.ts"
+    - claim: "a task declaring only plan-scope paths passes at either verify value, so the by-hand plan-only repair route the ruling adopts is never refused"
+      proof: "unit test: test/task-linter.test.ts"
+    - claim: "a task with no plan/tasks.yaml entry is untouched however many out-of-scope paths it declares, so the ordinary config-plus-reader pairing keeps linting clean"
+      proof: "unit test: test/task-linter.test.ts"
+    - claim: "a retired record is excluded, so a plan-only withdrawal preserving a mixed files list is not refused by the check that record earned"
+      proof: "unit test: test/task-linter.test.ts"
+  risk: medium
+  origin: oper#ruling-rule15-class-2026-08-06
+  plan_refs: ["W1-T353", "W1-T324", "W1-T369", "W1-T370"]
+  files: [src/lib/task-linter.ts, test/task-linter.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — every claim is a linter verdict over a fixture task, decided in-process with no
+    operator present and no network. This task is NOT ruling-shaped: it writes a linter, not a ruling,
+    and declares no DECISIONS.md, so W1-T353's own rule does not apply to it.
+    risk:medium, calibrated against W1-T353 (the same two files, the same subsystem, the same additive
+    blocking check): one concern, one wiring point, and the failure directions cost a wrong lint
+    message rather than lost work — a false positive parks a task the operator clears with one field
+    edit, which is the cheap direction to be wrong in.
+    budget_usd 60 — one trigger, a four-direction falsifier and a status exclusion. Five above
+    W1-T353's 55 for clause (v), which that task had no equivalent of.
+    files: DECLARES both paths the worker writes and nothing more. `lintTask` is the single wiring
+    point (design (iv)), so no third file is needed; omitting a written path is what refused five
+    dispatches in one week. Both files EXIST and all four proofs execute today — `rulingVerifyViolation`
+    is already tested in test/task-linter.test.ts — so no criterion here is a forward reference.
+    THE ONE COST OF SHIPPING THIS, stated rather than discovered later: W1-T324 is `status: queued`
+    today and carries the refusable shape, so the check makes it a NEW open-failing task — a
+    signal-truthfulness cost of exactly one, on a record that genuinely cannot be dispatched as filed.
+    Its work merged as #1298 + #1299 and the right correction is to withdraw it, which is an operator
+    plan-only change outside this task's declared files.
+    ORDERING, a preference and deliberately NOT a depends_on edge so it cannot stall this: landing
+    W1-T324's withdrawal first would leave the open-failing count unmoved. Stated here so the absent
+    edge is not read as an oversight (W1-T353's own convention).
+    NO depends_on: nothing blocks this."
