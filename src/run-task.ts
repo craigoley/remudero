@@ -455,6 +455,8 @@ import {
   pruneStaleRuns,
   removeRunLock,
   renderWorkerSettings,
+  resolveClaudeExecutable,
+  claudeExecutableCache,
   runWorktreeReapRung,
   spawnWorker,
   cacheTokenLedgerFields,
@@ -9367,7 +9369,12 @@ export async function daemonCommand(
       onBreach: (verdict: CrashLoopVerdict) =>
         escalateCrashLoop(verdict, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
     },
-    undefined, // resolveClaudeBin — default
+    // W1-T357: wire the SAME resolver/cache spawnWorker uses (worker.ts's
+    // resolveClaudeExecutable against its shared, per-process
+    // claudeExecutableCache) so daemon.claude_bin logs the exact binary the
+    // fleet will actually run at spawn time, never a second, possibly
+    // different resolution.
+    () => resolveClaudeExecutable(claudeExecutableCache),
     // §9 overflow valve (W1-T258): make the daemon.boot billing_mode canary
     // report `api` iff this daemon deliberately drains on API credits, matching
     // what its workers will actually bill (the key must ALSO be in the env).
