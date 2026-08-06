@@ -12,12 +12,16 @@ import {
   buildPlanFrontier,
   buildPlanViewRoute,
   computePlanProgress,
+  computePlanSectionCounts,
   createPlanProgressCache,
+  createPlanSectionCache,
   DEFAULT_FRONTIER_LIMIT,
   type PanelGraphDeps,
   type PlanProgressCache,
+  type PlanSectionCache,
   type RatifyCliGateway,
 } from "../src/lib/panel-graph.js";
+import type { PlanIndex } from "../src/lib/plan-index.js";
 import type { TraceGithub } from "../src/lib/trace.js";
 
 // ── W1-T315: the Plan tab's progress (done/in-flight/queued) + frontier (next candidates, each
@@ -353,6 +357,152 @@ test("buildPlanFrontier: an empty plan yields an empty frontier, not an error", 
   assert.deepEqual(buildPlanFrontier(plan, NONE_MERGED, 10, []), []);
 });
 
+// ── W1-T376: per-section filed/merged COUNTS, joined off plan_refs against plan-index.json ─────
+//
+// acceptance (1): "section counts key only on headings plan-index resolves, with task-id and
+// proposal and workstream refs contributing nothing" -- and the exact-token join must not let a
+// bare "§5" ref falsely match a DIFFERENT, longer heading ("5C. ...").
+// acceptance (2): "done is taken from the merged projection the route already resolved, so a
+// task whose yaml status reads queued while merged counts as merged".
+
+/** A small, hand-built plan-index fixture -- deliberately including a bare "5." heading NEXT TO
+ *  "5C. ..." (proves the join is an EXACT leading-token match, never a prefix match: a "§5" ref
+ *  must resolve to "5. Principles engine" only, never fall through to "5C. Task pre-flight...")
+ *  and a word-shaped, no-digit heading (the "§Self-improvement" fallback case, design (ii)). */
+function fixtureIndex(): PlanIndex {
+  return {
+    source: "MASTER-PLAN.md",
+    entries: [
+      { heading: "5. Principles engine", line: 10, summary: "" },
+      { heading: "5C. Task pre-flight: the plan gate", line: 20, summary: "" },
+      { heading: "7. The control panel — ONE web app, three shells", line: 30, summary: "" },
+      { heading: "Self-improvement: flywheel, retros, knowledge & the commons", line: 40, summary: "" },
+    ],
+  };
+}
+
+const PLAN_REFS_YAML = [
+  "- id: A", // §5C -- resolves, merged
+  "  title: a",
+  "  repo: remudero",
+  "  type: implement",
+  "  depends_on: []",
+  "- id: B", // MASTER-PLAN#5C -- the SAME heading via the second spelling, not merged
+  "  title: b",
+  "  repo: remudero",
+  "  type: implement",
+  "  depends_on: []",
+  "- id: C", // a TASK-ID ref -- must contribute to no section
+  "  title: c",
+  "  repo: remudero",
+  "  type: implement",
+  "  depends_on: []",
+  "- id: D", // a RETRO PROPOSAL ref -- must contribute to no section
+  "  title: d",
+  "  repo: remudero",
+  "  type: implement",
+  "  depends_on: []",
+  "- id: E", // a WORKSTREAM ref -- must contribute to no section
+  "  title: e",
+  "  repo: remudero",
+  "  type: implement",
+  "  depends_on: []",
+  "- id: F", // §Self-improvement -- word-shaped, resolves via the case-insensitive prefix fallback
+  "  title: f",
+  "  repo: remudero",
+  "  type: implement",
+  "  depends_on: []",
+  "- id: G", // §5 -- must resolve to "5. Principles engine" EXACTLY, never "5C. ..."
+  "  title: g",
+  "  repo: remudero",
+  "  type: implement",
+  "  depends_on: []",
+  "- id: H", // yaml status: queued, but the PROJECTION says merged -- W1-T280's own rule
+  "  title: h",
+  "  repo: remudero",
+  "  type: implement",
+  "  depends_on: []",
+  "  status: queued",
+  "",
+].join("\n");
+
+function planRefsFixture(): Map<string, string[]> {
+  return new Map([
+    ["A", ["§5C"]],
+    ["B", ["MASTER-PLAN#5C"]],
+    ["C", ["W1-T999"]],
+    ["D", ["P22"]],
+    ["E", ["WS-7"]],
+    ["F", ["§Self-improvement"]],
+    ["G", ["§5"]],
+    ["H", ["§7"]],
+  ]);
+}
+
+test("computePlanSectionCounts: section counts key only on headings plan-index resolves -- task-id/retro-proposal/workstream refs contribute NOTHING, and an exact-token join never lets a bare ref fall through to a longer, unrelated heading", () => {
+  const root = tmpRoot();
+  const plan = fixturePlan(root, PLAN_REFS_YAML);
+  const projection = new Map<string, StatusProjection>([
+    ["A", { taskId: "A", status: "merged", merged: true, source: "trailer" }],
+    ["F", { taskId: "F", status: "merged", merged: true, source: "trailer" }],
+  ]);
+  const cache: PlanSectionCache = createPlanSectionCache();
+  const sections = computePlanSectionCounts(plan, projection, planRefsFixture(), fixtureIndex(), false, cache);
+
+  const byHeading = new Map(sections.map((s) => [s.heading, s]));
+  // A (§5C) + B (MASTER-PLAN#5C, the SAME heading via the second spelling) -- both spellings join
+  // to ONE section; C/D/E's task-id/proposal/workstream refs contribute NOTHING to it.
+  assert.deepEqual(byHeading.get("5C. Task pre-flight: the plan gate"), { heading: "5C. Task pre-flight: the plan gate", filed: 2, merged: 1 });
+  // G (§5) resolves to the DISTINCT "5." heading, never "5C." -- the falsifier for a prefix-match bug.
+  assert.deepEqual(byHeading.get("5. Principles engine"), { heading: "5. Principles engine", filed: 1, merged: 0 });
+  // F (§Self-improvement) resolves via the word-shaped, case-insensitive prefix fallback.
+  assert.deepEqual(byHeading.get("Self-improvement: flywheel, retros, knowledge & the commons"), {
+    heading: "Self-improvement: flywheel, retros, knowledge & the commons",
+    filed: 1,
+    merged: 1,
+  });
+  // H (§7) -- present with its own row, unmerged in THIS test's projection.
+  assert.deepEqual(byHeading.get("7. The control panel — ONE web app, three shells"), {
+    heading: "7. The control panel — ONE web app, three shells",
+    filed: 1,
+    merged: 0,
+  });
+  // Exactly FOUR sections total: C/D/E's task-id/proposal/workstream refs never fabricated a fifth/sixth/seventh.
+  assert.equal(sections.length, 4);
+});
+
+test("computePlanSectionCounts: 'merged' comes from the PROJECTION, never plan/tasks.yaml's own decorative status: field -- a task reading status: queued while its projection says merged counts as merged", () => {
+  const root = tmpRoot();
+  const plan = fixturePlan(root, PLAN_REFS_YAML);
+  const task = plan.byId.get("H")!;
+  assert.equal(task.status, "queued", "the fixture's own yaml status is queued -- the falsifier a naive reader would trip on");
+  const projection = new Map<string, StatusProjection>([["H", { taskId: "H", status: "merged", merged: true, source: "trailer" }]]);
+  const sections = computePlanSectionCounts(plan, projection, planRefsFixture(), fixtureIndex(), false, createPlanSectionCache());
+  const section = sections.find((s) => s.heading === "7. The control panel — ONE web app, three shells")!;
+  assert.equal(section.filed, 1);
+  assert.equal(section.merged, 1, "merged in the PROJECTION despite yaml status: queued");
+});
+
+test("computePlanSectionCounts: darkness parity -- progressUnknown:true carries the LAST-known sections forward (or none, on a first-ever outage), never a fresh/fabricated read", () => {
+  const root = tmpRoot();
+  const plan = fixturePlan(root, PLAN_REFS_YAML);
+  const projection = new Map<string, StatusProjection>([["A", { taskId: "A", status: "merged", merged: true, source: "trailer" }]]);
+  const cache: PlanSectionCache = createPlanSectionCache();
+
+  // First-ever outage: nothing cached yet -- empty, never a fabricated count.
+  assert.deepEqual(computePlanSectionCounts(plan, projection, planRefsFixture(), fixtureIndex(), true, cache), []);
+
+  // A successful reading populates the cache...
+  const fresh = computePlanSectionCounts(plan, projection, planRefsFixture(), fixtureIndex(), false, cache);
+  assert.ok(fresh.length > 0);
+
+  // ...and a SUBSEQUENT outage carries that exact reading forward, even though the (unused)
+  // projection argument below would produce a DIFFERENT answer if it were consulted.
+  const emptyProjection = new Map<string, StatusProjection>();
+  const outage = computePlanSectionCounts(plan, emptyProjection, planRefsFixture(), fixtureIndex(), true, cache);
+  assert.deepEqual(outage, fresh, "the last-known reading, verbatim -- never re-derived under darkness");
+});
+
 // ── GET /v1/plan/view — the route wiring: one fetch for the whole tab ──────────────────────────
 
 function fakeGithub(): TraceGithub {
@@ -438,5 +588,41 @@ test("GET /v1/plan/view: an unreadable statusGithub -> 200 with progress.unknown
     const body = (await res.json()) as { progress: { unknown: boolean; done?: number } };
     assert.equal(body.progress.unknown, true);
     assert.equal(body.progress.done, undefined);
+  });
+});
+
+// ── W1-T376, end-to-end: the route reads plan_refs off the REAL tasks.yaml + a REAL
+// plan/plan-index.json sitting next to it (never a new GitHub call) and returns `sections`. ────
+
+test("GET /v1/plan/view: `sections` is derived off the real plan/plan-index.json sitting next to planPath -- a task's plan_refs joins to its heading with NO percent anywhere in the payload's shape", async () => {
+  const root = tmpRoot();
+  const planPath = writePlan(
+    root,
+    [
+      "- id: A",
+      "  title: a",
+      "  repo: remudero",
+      "  type: implement",
+      "  depends_on: []",
+      '  plan_refs: ["§5C"]',
+      "- id: B",
+      "  title: b",
+      "  repo: remudero",
+      "  type: implement",
+      "  depends_on: []",
+      '  plan_refs: ["W1-T999"]', // a task-id ref -- must contribute nothing
+      "",
+    ].join("\n"),
+  );
+  writeFileSync(
+    join(root, "plan", "plan-index.json"),
+    JSON.stringify({ source: "MASTER-PLAN.md", entries: [{ heading: "5C. Task pre-flight: the plan gate", line: 1, summary: "" }] }),
+  );
+  const deps = routeDeps(root, planPath, statusGithubOf({}));
+  await withRoute(deps, async (base) => {
+    const res = await fetch(`${base}/v1/plan/view`, { headers: { Authorization: "Bearer read-token" } });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { sections: Array<{ heading: string; filed: number; merged: number }> };
+    assert.deepEqual(body.sections, [{ heading: "5C. Task pre-flight: the plan gate", filed: 1, merged: 0 }]);
   });
 });

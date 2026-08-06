@@ -57,11 +57,13 @@
  * deferred siblings (lib/triage.ts's grill mechanics, lib/board.ts's un-rendered design panels).
  */
 
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { parse as parseYaml } from "yaml";
 import type { IncomingMessage } from "node:http";
 import { loadPlan, parseTasksFromYaml, PlanError, unmetDependencies, type MergedResolver, type Plan, type Task } from "./plan.js";
+import { loadPlanIndex, type PlanIndex, type PlanIndexEntry } from "./plan-index.js";
 import {
   projectPlan,
   readLedgerLines,
@@ -815,16 +817,183 @@ export function buildPlanFrontier(
   return rows;
 }
 
+// ── Per-section filed/merged counts (W1-T376) ──────────────────────────────────────────────
+//
+// plan_refs IS POLYMORPHIC (design (i)): a task's plan_refs entries are one of FIVE kinds --
+// section refs (`§5C`), a second section spelling (`MASTER-PLAN#5C`), task-id refs pointing at
+// ANOTHER task (`W1-T325`), retro proposals (`P22`), and workstreams (`WS-7`). Only the two
+// section-shaped kinds carry a heading to resolve; the other three must contribute NOTHING to a
+// section's counts, or a task-id ref would fabricate a section that does not exist.
+//
+// plan.ts's `Task` type does NOT carry `plan_refs` (it is declarative, architect-only provenance
+// metadata -- see plan.ts's own header on `origin`/`rationale`), and this task's own `files:`
+// scope does not include plan.ts, so `readPlanRefs` below re-parses the SAME already-local
+// tasks.yaml + tasks.d/*.yaml files {@link loadPlan} just read, pulling ONLY `id` and
+// `plan_refs` -- never a new GitHub call, never a plan.ts schema change.
+
+/** `id -> plan_refs` for every task in `planPath` (tasks.yaml + its `tasks.d/*.yaml` shards, the
+ *  SAME files {@link loadPlan} reads) -- a narrow, best-effort SECOND parse of local files just
+ *  for this one declarative field (see this section's header for why it cannot come from {@link
+ *  Task} itself). A file that fails to read or parse is skipped, never thrown -- this is a
+ *  rendering aid layered on top of the load-bearing validation {@link loadPlan} already did. */
+function readPlanRefs(planPath: string): Map<string, string[]> {
+  const refs = new Map<string, string[]>();
+  const ingest = (text: string) => {
+    let raw: unknown;
+    try {
+      raw = parseYaml(text);
+    } catch {
+      return;
+    }
+    if (!Array.isArray(raw)) return;
+    for (const entry of raw) {
+      if (typeof entry !== "object" || entry === null) continue;
+      const e = entry as Record<string, unknown>;
+      if (typeof e.id !== "string" || !Array.isArray(e.plan_refs)) continue;
+      refs.set(
+        e.id,
+        (e.plan_refs as unknown[]).filter((r): r is string => typeof r === "string"),
+      );
+    }
+  };
+  try {
+    ingest(readFileSync(planPath, "utf8"));
+  } catch {
+    return refs;
+  }
+  const shardDir = join(dirname(planPath), "tasks.d");
+  let shardFiles: string[];
+  try {
+    shardFiles = readdirSync(shardDir).filter((f) => f.endsWith(".yaml") || f.endsWith(".yml"));
+  } catch {
+    shardFiles = [];
+  }
+  for (const file of shardFiles) {
+    try {
+      ingest(readFileSync(join(shardDir, file), "utf8"));
+    } catch {
+      // best-effort, per this function's own header -- loadPlan() already validated these files loudly.
+    }
+  }
+  return refs;
+}
+
+type PlanRefKind = "section" | "task-id" | "retro-proposal" | "workstream" | "unrecognized";
+
+/** Classify one `plan_refs` entry into the five kinds design note (i) documents. Only
+ *  `"section"` carries a `token` -- the ref text with its `§`/`MASTER-PLAN#` prefix stripped --
+ *  for {@link resolveSectionHeading} to join against plan-index.json's headings. */
+function classifyPlanRef(ref: string): { kind: PlanRefKind; token?: string } {
+  if (ref.startsWith("§")) return { kind: "section", token: ref.slice(1) };
+  if (ref.startsWith("MASTER-PLAN#")) return { kind: "section", token: ref.slice("MASTER-PLAN#".length) };
+  if (/^W\d+-T\d+$/.test(ref)) return { kind: "task-id" };
+  if (/^P\d+$/.test(ref)) return { kind: "retro-proposal" };
+  if (/^WS-\d+$/.test(ref)) return { kind: "workstream" };
+  return { kind: "unrecognized" };
+}
+
+/** Resolve a stripped section token ("5C", "7", "Self-improvement") to its plan-index.json
+ *  heading (design (ii)). plan-index.json's headings carry the number as a TEXT PREFIX ("5C.
+ *  Task pre-flight: the plan gate") with no `§` anywhere in the file, so the primary join
+ *  matches the heading's own leading token -- everything before its FIRST `.` -- against the
+ *  (already-stripped) ref token, EXACTLY, never a prefix match (a prefix match here would let
+ *  token "5" wrongly match heading "5C. ..."). One ref is word-shaped ("§Self-improvement", no
+ *  leading digit, so it has no leading-token-before-a-dot to match at all) -- the fallback is a
+ *  case-insensitive heading-PREFIX match, tried only once the exact-token pass finds nothing. */
+function resolveSectionHeading(token: string, entries: readonly PlanIndexEntry[]): string | undefined {
+  for (const e of entries) {
+    const m = /^(\S+?)\./.exec(e.heading);
+    if (m && m[1] === token) return e.heading;
+  }
+  const lower = token.toLowerCase();
+  for (const e of entries) {
+    if (e.heading.toLowerCase().startsWith(lower)) return e.heading;
+  }
+  return undefined;
+}
+
+/** One MASTER-PLAN section's filed/merged breakdown -- rendered as a PAIR, never a percentage
+ *  (design (iii): a percentage ranks a 1-task section above a 74-task one the moment its single
+ *  task merges, inverting the truth). */
+export interface PlanSectionCount {
+  heading: string;
+  filed: number;
+  merged: number;
+}
+
+/** The last-computed {@link PlanSectionCount}s -- the per-section counterpart of {@link
+ *  PlanProgressCache}, carried forward under the SAME darkness reading (design (v)): a caller
+ *  passes {@link computePlanProgress}'s own `unknown` flag in rather than re-deriving it, so the
+ *  sections never attempt a fresh read the whole-plan progress itself could not make. */
+export interface PlanSectionCache {
+  last?: PlanSectionCount[];
+}
+
+export function createPlanSectionCache(): PlanSectionCache {
+  return {};
+}
+
+/**
+ * Per-section filed/merged counts (W1-T376), derived from the SAME `projection` the caller
+ * already resolved (never a second GitHub read) and gated by `progressUnknown` -- the SAME
+ * darkness flag {@link computePlanProgress} just computed off the SAME projection, so a GitHub
+ * outage renders the LAST-known section breakdown (or none, on a first-ever outage), never a
+ * fabricated zero (design (v)). A task's "done" comes from `projection`, never from its own
+ * decorative `status:` field (design (iv), the SAME rule {@link computePlanProgress} follows).
+ * Falsifier (design (vi)): a task-id/`Pnn`/`WS-n` ref contributes to no section, and a task
+ * resolving to two distinct sections increments BOTH.
+ */
+export function computePlanSectionCounts(
+  plan: Plan,
+  projection: Map<string, StatusProjection>,
+  planRefs: ReadonlyMap<string, readonly string[]>,
+  index: PlanIndex | null,
+  progressUnknown: boolean,
+  cache: PlanSectionCache,
+): PlanSectionCount[] {
+  if (progressUnknown) return cache.last ?? [];
+  const entries = index?.entries ?? [];
+  const counts = new Map<string, { filed: number; merged: number }>();
+  for (const task of plan.tasks) {
+    const refs = planRefs.get(task.id);
+    if (!refs || refs.length === 0) continue;
+    const headings = new Set<string>();
+    for (const ref of refs) {
+      const cls = classifyPlanRef(ref);
+      if (cls.kind !== "section") continue;
+      const heading = resolveSectionHeading(cls.token!, entries);
+      if (heading) headings.add(heading);
+    }
+    if (headings.size === 0) continue;
+    const merged = projection.get(task.id)?.merged ?? false;
+    for (const heading of headings) {
+      const c = counts.get(heading) ?? { filed: 0, merged: 0 };
+      c.filed += 1;
+      if (merged) c.merged += 1;
+      counts.set(heading, c);
+    }
+  }
+  const sections: PlanSectionCount[] = [];
+  for (const e of entries) {
+    const c = counts.get(e.heading);
+    if (c) sections.push({ heading: e.heading, filed: c.filed, merged: c.merged });
+  }
+  cache.last = sections;
+  return sections;
+}
+
 /**
  * GET /v1/plan/view[?frontier=<n>] — read-scoped. The Plan tab's one fetch: `progress`
- * (done/in-flight/queued, {@link computePlanProgress}) and `frontier` (the next candidates,
+ * (done/in-flight/queued, {@link computePlanProgress}), `sections` (per-section filed/merged
+ * counts, {@link computePlanSectionCounts}, W1-T376), and `frontier` (the next candidates,
  * {@link buildPlanFrontier}) — off ONE fresh plan load and ONE `projectPlan()` call, exactly
- * like {@link buildDrainPreviewRoute} just above. `progressCache` is created ONCE per route
- * (this function's own closure), so it persists for the life of the `rmd serve` process —
- * never per-request, or every reading would look like a first-ever one.
+ * like {@link buildDrainPreviewRoute} just above. `progressCache`/`sectionCache` are created
+ * ONCE per route (this function's own closure), so they persist for the life of the `rmd serve`
+ * process — never per-request, or every reading would look like a first-ever one.
  */
 export function buildPlanViewRoute(deps: PanelGraphDeps): Route {
   const progressCache = createPlanProgressCache();
+  const sectionCache = createPlanSectionCache();
   return {
     method: "GET",
     path: "/v1/plan/view",
@@ -841,9 +1010,12 @@ export function buildPlanViewRoute(deps: PanelGraphDeps): Route {
       const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub });
       const isMerged: MergedSet = (id) => projection.get(id)?.merged ?? false;
       const progress = computePlanProgress(plan, projection, deps.statusGithub, progressCache);
+      const planRefs = readPlanRefs(deps.planPath);
+      const planIndex = loadPlanIndex(join(dirname(deps.planPath), "plan-index.json"));
+      const sections = computePlanSectionCounts(plan, projection, planRefs, planIndex, progress.unknown, sectionCache);
       const ledgerLines = readLedgerLines(deps.ledgerPath);
       const frontier = buildPlanFrontier(plan, isMerged, limit, ledgerLines);
-      sendJson(res, 200, { progress, frontier });
+      sendJson(res, 200, { progress, sections, frontier });
     },
   };
 }
