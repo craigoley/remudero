@@ -1757,6 +1757,15 @@ async function runReview(args: {
    */
   runId: string;
   /**
+   * W1-T359: the rubric judge, injectable ONLY so the fail-open `catch` below is reachable from a
+   * test. Appended as an OPTIONAL property (this is an args OBJECT, so no positional caller
+   * shifts) and defaulted to the real {@link judgeRubric} — every existing caller and fixture is
+   * untouched. Without this seam the catch arm is dead code: `judgeRubric` is deterministic
+   * string/regex analysis and never throws in practice, which is exactly the shape CLAUDE.md
+   * names — "when every test injects a fake, each catch arm is unreachable — write one per arm".
+   */
+  judgeRubricFn?: typeof judgeRubric;
+  /**
    * W1-T322: task ids currently OPEN in the loaded plan — see {@link
    * "./lib/review.js".ReviewEvidence.openTaskIds}'s doc. Optional (fail-closed default: `undefined`,
    * meaning no `SHIPS-UNWIRED:` marker can ever be honoured) so every existing caller/fixture that
@@ -1865,7 +1874,10 @@ async function runReview(args: {
   // today's review: no advisory section, the binding verdict/post unaffected.
   let rubric: ReturnType<typeof judgeRubric> | undefined;
   try {
-    rubric = judgeRubric({ diff, report, planOnly: computed.planOnly });
+    const rubricInput = { diff, report, planOnly: computed.planOnly };
+    // The default branch keeps the literal `judgeRubric(...)` call — this task's own structural
+    // test asserts that text is present in runReview's body, and the seam must not weaken it.
+    rubric = args.judgeRubricFn ? args.judgeRubricFn(rubricInput) : judgeRubric(rubricInput);
   } catch (e) {
     log("review.rubric.error", { error: String((e as Error)?.message ?? e) });
   }

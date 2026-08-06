@@ -2737,3 +2737,158 @@ test("fast-fail: a proof naming a test that DOES exist still resolves, still nar
   );
   assert.equal(execWhitelistedProof(wp!, dir, 60_000, failing.spawner), "fail");
 });
+
+// ── W1-T359 coverage: the PR-comment branch, which was dead to the suite BEFORE this task ──
+// `diff-coverage` flags ADDED lines, so rewriting a block nobody covered turns a silent
+// pre-existing gap into a blocking failure. Measured on origin/main: every line of the
+// `if (hasUnmet)` comment block scored 0 hits, so the block this task restructured was already
+// unreachable from the tests. This drives `runReview` all the way into it — the first test that
+// does — with `gh` stubbed onto PATH so nothing touches the network.
+test("W1-T359: runReview posts the unmet-criteria PR comment, and folds the advisory rubric into the SAME comment", async () => {
+  const { runReview } = await import("../src/run-task.js");
+  const root = mkdtempSync(join(tmpdir(), "rmd-rubric-comment-"));
+  const binDir = mkdtempSync(join(tmpdir(), "rmd-rubric-gh-"));
+  const oldPath = process.env.PATH;
+  try {
+    mkdirSync(join(root, "state"), { recursive: true });
+    const ledgerPath = join(root, "state", "ledger.ndjson");
+    writeFileSync(join(root, "settings.json"), "{}", "utf8");
+    const commentFile = join(root, "comment.txt");
+
+    // Two unrelated concerns in one diff — a rubric finding — AND acceptance criteria the
+    // report never substantiates, so BOTH `hasUnmet` and `rubricSection` are non-empty.
+    const diff = [
+      "diff --git a/src/lib/alpha.ts b/src/lib/alpha.ts",
+      "+++ b/src/lib/alpha.ts",
+      "@@",
+      "+export function alpha(): number {",
+      "+  return 1;",
+      "+}",
+      "diff --git a/src/lib/beta.ts b/src/lib/beta.ts",
+      "+++ b/src/lib/beta.ts",
+      "@@",
+      "+export function beta(): number {",
+      "+  return 2;",
+      "+}",
+    ].join("\n");
+
+    writeFileSync(
+      join(binDir, "gh"),
+      `#!/bin/sh
+case "$1 $2" in
+  "pr view")
+    case "$*" in
+      *headRefOid*) echo '{"headRefOid":"cafebabe0001"}' ;;
+      *state*) echo '{"state":"OPEN"}' ;;
+      *) echo '{}' ;;
+    esac ;;
+  "pr diff") cat <<'DIFF'
+${diff}
+DIFF
+    ;;
+  "pr comment")
+    # record the posted body so the test can assert on it -- never a network call
+    shift 3
+    printf '%s' "$2" > ${commentFile}
+    ;;
+  *) exit 0 ;;
+esac
+`,
+      { mode: 0o755 },
+    );
+    process.env.PATH = `${binDir}:${oldPath}`;
+
+    await runReview({
+      owner: "acme",
+      repo: "remudero",
+      prUrl: "https://github.com/acme/remudero/pull/1399",
+      task: {
+        id: "W1-T359",
+        acceptance: [{ claim: "a claim the report never substantiates", proof: "unit test: no-such-test-title-xyzzy" }],
+      },
+      report: "This report deliberately substantiates nothing.",
+      settingsFile: join(root, "settings.json"),
+      config: { claudeBin: "/bin/true", root } as never,
+      log: () => {},
+      say: () => {},
+      account: (r: never) => r,
+      spawnReviewer: false,
+      reviewerMount: { model: "sonnet", effort: "medium", maxTurns: 400, contextBudget: 120000 },
+      ledgerPath,
+      runId: "REVIEW-RUBRIC-1",
+    } as never);
+
+    const posted = readFileSync(commentFile, "utf8");
+    assert.match(posted, /remudero-review=failure/, "the unmet-criteria block is posted");
+    assert.match(posted, /Rubric \(advisory/, "and the rubric section rides in the SAME comment");
+    assert.match(posted, /does not affect remudero-review's verdict/, "labelled advisory in the text itself");
+  } finally {
+    process.env.PATH = oldPath;
+  }
+});
+
+// The fail-open catch arm. `judgeRubric` is deterministic string/regex analysis and never throws
+// in practice, so without an injected thrower this arm is dead code — the exact "every test
+// injects a fake, so each catch arm is unreachable" shape CLAUDE.md names. The property is
+// OPTIONAL and defaults to the real judge, so no existing caller or fixture changes.
+test("W1-T359: a throwing rubric judge degrades to today's review — no advisory section, verdict unaffected", async () => {
+  const { runReview } = await import("../src/run-task.js");
+  const root = mkdtempSync(join(tmpdir(), "rmd-rubric-throw-"));
+  const binDir = mkdtempSync(join(tmpdir(), "rmd-rubric-throw-gh-"));
+  const oldPath = process.env.PATH;
+  try {
+    mkdirSync(join(root, "state"), { recursive: true });
+    const ledgerPath = join(root, "state", "ledger.ndjson");
+    writeFileSync(join(root, "settings.json"), "{}", "utf8");
+    const commentFile = join(root, "comment.txt");
+    writeFileSync(
+      join(binDir, "gh"),
+      `#!/bin/sh
+case "$1 $2" in
+  "pr view")
+    case "$*" in
+      *headRefOid*) echo '{"headRefOid":"cafebabe0002"}' ;;
+      *state*) echo '{"state":"OPEN"}' ;;
+      *) echo '{}' ;;
+    esac ;;
+  "pr diff") echo "diff --git a/src/lib/alpha.ts b/src/lib/alpha.ts" ;;
+  "pr comment") shift 3; printf '%s' "$2" > ${commentFile} ;;
+  *) exit 0 ;;
+esac
+`,
+      { mode: 0o755 },
+    );
+    process.env.PATH = `${binDir}:${oldPath}`;
+
+    const steps: string[] = [];
+    await runReview({
+      owner: "acme",
+      repo: "remudero",
+      prUrl: "https://github.com/acme/remudero/pull/1399",
+      task: {
+        id: "W1-T359",
+        acceptance: [{ claim: "a claim the report never substantiates", proof: "unit test: no-such-test-title-xyzzy" }],
+      },
+      report: "This report deliberately substantiates nothing.",
+      settingsFile: join(root, "settings.json"),
+      config: { claudeBin: "/bin/true", root } as never,
+      log: (step: string) => void steps.push(step),
+      say: () => {},
+      account: (r: never) => r,
+      spawnReviewer: false,
+      reviewerMount: { model: "sonnet", effort: "medium", maxTurns: 400, contextBudget: 120000 },
+      ledgerPath,
+      runId: "REVIEW-RUBRIC-THROW-1",
+      judgeRubricFn: () => {
+        throw new Error("rubric exploded");
+      },
+    } as never);
+
+    assert.ok(steps.includes("review.rubric.error"), "the throw is ledgered, never swallowed silently");
+    const posted = readFileSync(commentFile, "utf8");
+    assert.match(posted, /remudero-review=failure/, "the binding unmet-criteria block still posts");
+    assert.doesNotMatch(posted, /Rubric \(advisory/, "and no advisory section rides along when the judge threw");
+  } finally {
+    process.env.PATH = oldPath;
+  }
+});
