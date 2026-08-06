@@ -44,6 +44,7 @@ import {
   reviewerOutcome,
   reviewerVerdictContract,
   reviewLedgerLegibilityFields,
+  rubricAdvisorySection,
   interpolatedTitleStaticChunks,
   type PriorReviewVerdict,
   type ProofExecutor,
@@ -1253,6 +1254,69 @@ test("judgeRubric: each falsifier trips its own item and fails the whole rubric"
 
   const sneaky = judgeRubric({ diff: SATISFIED_BY_DIFF, report: "unblock myself" });
   assert.ok(sneaky.failures.some((f) => f.key === "satisfied-by-guard"));
+});
+
+// ── rubricAdvisorySection (W1-T359 — wire judgeRubric into the review flow) ─
+// judgeRubric had zero references beyond its own definition/tests; the review
+// flow already computes the binding verdict right where the rubric's inputs
+// (diff, report, planOnly) sit. rubricAdvisorySection is the pure formatter
+// that turns a RubricResult into the ADVISORY section runReview appends to
+// the posted PR comment — never a verdict-bearing line.
+
+test("rubricAdvisorySection: a clean rubric (no failures) renders nothing", () => {
+  const clean = judgeRubric({ diff: CLEAN_DIFF, report: CLEAN_REPORT });
+  assert.equal(rubricAdvisorySection(clean), undefined);
+});
+
+test("rubricAdvisorySection: a diff exhibiting a rubric violation (two unrelated concerns) names it in a section clearly marked advisory", () => {
+  const violating = judgeRubric({ diff: TWO_CONCERN_DIFF, report: "two things at once" });
+  const section = rubricAdvisorySection(violating);
+  assert.ok(section, "expected a rendered advisory section");
+  assert.match(section!, /advisory/i);
+  assert.match(section!, /does not affect remudero-review's verdict/i);
+  assert.match(section!, /one-concern/);
+});
+
+// ── W1-T359 wiring: judgeRubric at the judgeReview call site, advisory-only ─
+// Source-text assertions on run-task.ts itself (the pattern test/review.test.ts
+// already uses for other run-task.ts wiring, e.g. the resolveAutoMergeArm/
+// armAndLogOutcome call-site checks above) — runReview shells out to `gh` and
+// spawns a worker, so its wiring is proven structurally rather than by
+// invoking the function end-to-end.
+test("W1-T359 wiring: runReview calls judgeRubric + rubricAdvisorySection, strictly after and independent of the binding judgeReview verdict, fail-open", () => {
+  const runReviewStart = runTaskSrc.indexOf("async function runReview(");
+  const runReviewEnd = runTaskSrc.indexOf("// ── THE blocked_review FIX RUNG");
+  assert.ok(runReviewStart > -1 && runReviewEnd > runReviewStart, "could not locate runReview's body in run-task.ts");
+  const runReviewSrc = runTaskSrc.slice(runReviewStart, runReviewEnd);
+
+  assert.match(runReviewSrc, /judgeRubric\(/, "runReview must invoke judgeRubric");
+  assert.match(runReviewSrc, /rubricAdvisorySection\(/, "runReview must render the rubric's advisory section");
+
+  // INDEPENDENCE (the falsifier's binding half): judgeReview's own call — the
+  // BINDING verdict — never references the rubric.
+  const judgeReviewCallIdx = runReviewSrc.indexOf("const computed = judgeReview(");
+  assert.ok(judgeReviewCallIdx > -1, "could not locate the judgeReview call site");
+  const judgeReviewCallEnd = runReviewSrc.indexOf("});", judgeReviewCallIdx) + 3;
+  const judgeReviewArgs = runReviewSrc.slice(judgeReviewCallIdx, judgeReviewCallEnd);
+  assert.doesNotMatch(judgeReviewArgs, /\brubric\b/i, "judgeReview's inputs must never reference the rubric");
+
+  // ORDER: judgeRubric is invoked strictly AFTER judgeReview's call completes —
+  // it consults `computed` (judgeReview's own output), never the reverse.
+  const judgeRubricCallIdx = runReviewSrc.indexOf("judgeRubric(");
+  assert.ok(judgeRubricCallIdx > judgeReviewCallEnd, "judgeRubric must be invoked after judgeReview's call completes");
+
+  // FAIL-OPEN: the judgeRubric call sits inside a try/catch, so a throw can
+  // only drop the advisory section — the binding verdict/post above is already
+  // a fixed value by the time this executes and cannot be touched.
+  const tryIdx = runReviewSrc.lastIndexOf("try {", judgeRubricCallIdx);
+  const catchIdx = runReviewSrc.indexOf("catch", judgeRubricCallIdx);
+  assert.ok(tryIdx > -1 && tryIdx < judgeRubricCallIdx, "judgeRubric's call must be inside a try block");
+  assert.ok(catchIdx > judgeRubricCallIdx, "judgeRubric's call must be followed by a catch");
+
+  // The advisory section posts regardless of verdict.state (a rubric concern
+  // can surface on an otherwise-passing review) — never folded into the
+  // unmet-criteria condition that gates the rest of the failure comment.
+  assert.match(runReviewSrc, /if\s*\(hasUnmet \|\| rubricSection\)/);
 });
 
 // ── reviewer_outcome (W1-T63/P10-a — the reviewer stops walling silently) ───
@@ -2675,6 +2739,160 @@ test("fast-fail: a proof naming a test that DOES exist still resolves, still nar
   assert.equal(execWhitelistedProof(wp!, dir, 60_000, failing.spawner), "fail");
 });
 
+// ── W1-T359 coverage: the PR-comment branch, which was dead to the suite BEFORE this task ──
+// `diff-coverage` flags ADDED lines, so rewriting a block nobody covered turns a silent
+// pre-existing gap into a blocking failure. Measured on origin/main: every line of the
+// `if (hasUnmet)` comment block scored 0 hits, so the block this task restructured was already
+// unreachable from the tests. This drives `runReview` all the way into it — the first test that
+// does — with `gh` stubbed onto PATH so nothing touches the network.
+test("W1-T359: runReview posts the unmet-criteria PR comment, and folds the advisory rubric into the SAME comment", async () => {
+  const { runReview } = await import("../src/run-task.js");
+  const root = mkdtempSync(join(tmpdir(), "rmd-rubric-comment-"));
+  const binDir = mkdtempSync(join(tmpdir(), "rmd-rubric-gh-"));
+  const oldPath = process.env.PATH;
+  try {
+    mkdirSync(join(root, "state"), { recursive: true });
+    const ledgerPath = join(root, "state", "ledger.ndjson");
+    writeFileSync(join(root, "settings.json"), "{}", "utf8");
+    const commentFile = join(root, "comment.txt");
+
+    // Two unrelated concerns in one diff — a rubric finding — AND acceptance criteria the
+    // report never substantiates, so BOTH `hasUnmet` and `rubricSection` are non-empty.
+    const diff = [
+      "diff --git a/src/lib/alpha.ts b/src/lib/alpha.ts",
+      "+++ b/src/lib/alpha.ts",
+      "@@",
+      "+export function alpha(): number {",
+      "+  return 1;",
+      "+}",
+      "diff --git a/src/lib/beta.ts b/src/lib/beta.ts",
+      "+++ b/src/lib/beta.ts",
+      "@@",
+      "+export function beta(): number {",
+      "+  return 2;",
+      "+}",
+    ].join("\n");
+
+    writeFileSync(
+      join(binDir, "gh"),
+      `#!/bin/sh
+case "$1 $2" in
+  "pr view")
+    case "$*" in
+      *headRefOid*) echo '{"headRefOid":"cafebabe0001"}' ;;
+      *state*) echo '{"state":"OPEN"}' ;;
+      *) echo '{}' ;;
+    esac ;;
+  "pr diff") cat <<'DIFF'
+${diff}
+DIFF
+    ;;
+  "pr comment")
+    # record the posted body so the test can assert on it -- never a network call
+    shift 3
+    printf '%s' "$2" > ${commentFile}
+    ;;
+  *) exit 0 ;;
+esac
+`,
+      { mode: 0o755 },
+    );
+    process.env.PATH = `${binDir}:${oldPath}`;
+
+    await runReview({
+      owner: "acme",
+      repo: "remudero",
+      prUrl: "https://github.com/acme/remudero/pull/1399",
+      task: {
+        id: "W1-T359",
+        acceptance: [{ claim: "a claim the report never substantiates", proof: "unit test: no-such-test-title-xyzzy" }],
+      },
+      report: "This report deliberately substantiates nothing.",
+      settingsFile: join(root, "settings.json"),
+      config: { claudeBin: "/bin/true", root } as never,
+      log: () => {},
+      say: () => {},
+      account: (r: never) => r,
+      spawnReviewer: false,
+      reviewerMount: { model: "sonnet", effort: "medium", maxTurns: 400, contextBudget: 120000 },
+      ledgerPath,
+      runId: "REVIEW-RUBRIC-1",
+    } as never);
+
+    const posted = readFileSync(commentFile, "utf8");
+    assert.match(posted, /remudero-review=failure/, "the unmet-criteria block is posted");
+    assert.match(posted, /Rubric \(advisory/, "and the rubric section rides in the SAME comment");
+    assert.match(posted, /does not affect remudero-review's verdict/, "labelled advisory in the text itself");
+  } finally {
+    process.env.PATH = oldPath;
+  }
+});
+
+// The fail-open catch arm. `judgeRubric` is deterministic string/regex analysis and never throws
+// in practice, so without an injected thrower this arm is dead code — the exact "every test
+// injects a fake, so each catch arm is unreachable" shape CLAUDE.md names. The property is
+// OPTIONAL and defaults to the real judge, so no existing caller or fixture changes.
+test("W1-T359: a throwing rubric judge degrades to today's review — no advisory section, verdict unaffected", async () => {
+  const { runReview } = await import("../src/run-task.js");
+  const root = mkdtempSync(join(tmpdir(), "rmd-rubric-throw-"));
+  const binDir = mkdtempSync(join(tmpdir(), "rmd-rubric-throw-gh-"));
+  const oldPath = process.env.PATH;
+  try {
+    mkdirSync(join(root, "state"), { recursive: true });
+    const ledgerPath = join(root, "state", "ledger.ndjson");
+    writeFileSync(join(root, "settings.json"), "{}", "utf8");
+    const commentFile = join(root, "comment.txt");
+    writeFileSync(
+      join(binDir, "gh"),
+      `#!/bin/sh
+case "$1 $2" in
+  "pr view")
+    case "$*" in
+      *headRefOid*) echo '{"headRefOid":"cafebabe0002"}' ;;
+      *state*) echo '{"state":"OPEN"}' ;;
+      *) echo '{}' ;;
+    esac ;;
+  "pr diff") echo "diff --git a/src/lib/alpha.ts b/src/lib/alpha.ts" ;;
+  "pr comment") shift 3; printf '%s' "$2" > ${commentFile} ;;
+  *) exit 0 ;;
+esac
+`,
+      { mode: 0o755 },
+    );
+    process.env.PATH = `${binDir}:${oldPath}`;
+
+    const steps: string[] = [];
+    await runReview({
+      owner: "acme",
+      repo: "remudero",
+      prUrl: "https://github.com/acme/remudero/pull/1399",
+      task: {
+        id: "W1-T359",
+        acceptance: [{ claim: "a claim the report never substantiates", proof: "unit test: no-such-test-title-xyzzy" }],
+      },
+      report: "This report deliberately substantiates nothing.",
+      settingsFile: join(root, "settings.json"),
+      config: { claudeBin: "/bin/true", root } as never,
+      log: (step: string) => void steps.push(step),
+      say: () => {},
+      account: (r: never) => r,
+      spawnReviewer: false,
+      reviewerMount: { model: "sonnet", effort: "medium", maxTurns: 400, contextBudget: 120000 },
+      ledgerPath,
+      runId: "REVIEW-RUBRIC-THROW-1",
+      judgeRubricFn: () => {
+        throw new Error("rubric exploded");
+      },
+    } as never);
+
+    assert.ok(steps.includes("review.rubric.error"), "the throw is ledgered, never swallowed silently");
+    const posted = readFileSync(commentFile, "utf8");
+    assert.match(posted, /remudero-review=failure/, "the binding unmet-criteria block still posts");
+    assert.doesNotMatch(posted, /Rubric \(advisory/, "and no advisory section rides along when the judge threw");
+  } finally {
+    process.env.PATH = oldPath;
+  }
+});
 // ── W1-T362: extend W1-T273's executed_stale downgrade to `unit test:` proofs ──
 //
 // THE GAP W1-T273 LEFT: a `grep:` proof matching the merge-base is downgraded to
