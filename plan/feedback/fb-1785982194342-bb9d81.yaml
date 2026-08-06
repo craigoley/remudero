@@ -1,0 +1,38 @@
+id: fb-1785982194342-bb9d81
+ts: 2026-08-06T02:09:54.342Z
+raw: "THE SHARED node_modules WAS EMPTIED UNDER TWO LIVE WORKERS AND THE CAUSE
+  IS UNRESOLVED — 2026-08-05T21:54 local.
+  /Users/craigoleyagent/Remudero/remudero/node_modules became an EMPTY
+  DIRECTORY, breaking every rmd verb with 'node_modules/.bin/tsx: No such file
+  or directory'. Two runs were in flight: W1-T361 and W1-T362, the latter alive
+  at 41 minutes and reaching pr.polling normally. THE TWO WORKTREES DISAGREE,
+  which is the finding: run-W1-T361's node_modules is a SYMLINK to the shared
+  install (correct, the designed arrangement), while run-W1-T362's is a REAL
+  DIRECTORY with 286 entries created at 21:55 — ONE MINUTE AFTER the shared
+  directory emptied. The shared install now holds 291 (post-repair it reported
+  403 packages added, so the three counts do not reconcile and no conclusion
+  should be drawn from them alone). NO npm STEP APPEARS IN THE LEDGER for
+  W1-T362 — its 21 steps are entirely ordinary — so if a worker ran an install
+  it did so as an unledgered shell command inside the implement phase. THIS IS
+  THE 2026-07-29 ACCIDENT'S SHAPE, recorded in the reaper's own source as 'the
+  accident that emptied the shared node_modules under a live daemon', and it is
+  why reclaimStaleLock -L-verifies before every rm. A worker that installs
+  inside a symlinked worktree writes THROUGH the link. THE STATE IS NOW
+  UNRECOVERABLE: the operator ran npm ci to restore service, which destroyed the
+  evidence distinguishing 'emptied by a worker' from 'emptied by something
+  else'. RECON: establish whether the worker contract forbids npm ci and whether
+  anything ENFORCES it — every operator brief this week forbids it explicitly,
+  but a documented constraint is not a control (Law 4: a convention binds only
+  where compliance is verifiable at the moment of invocation, and you cannot
+  revert a promise). Then establish whether a worktree's node_modules symlink
+  can be made write-protected against a follow-through, or whether the worker's
+  env should point elsewhere. Falsifying check: if W1-T362's worktree
+  node_modules was created by the operator's own npm ci propagating through the
+  symlink rather than by the worker, the direction is reversed and the defect is
+  only that a repair can produce a real directory where a symlink belonged."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null
+expansion: null
