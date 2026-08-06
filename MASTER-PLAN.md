@@ -2,7 +2,9 @@
 
 **FOCUS — THE FIRST PRE-REGISTERED PREDICTION THIS HARNESS HAS EVER CONFIRMED, AND THE ONE ORGAN IT
 STILL WILL NOT BUILD. 36 runs → 25 tasks / 25 merged PRs at $6.201/run** ($8.327 → $6.201; per
-SHIPPED task **$15.66 → $8.930**). **(1) R15-1 SCORES `HIT`.** R15 predicted `implement` avg turns
+SHIPPED task **$15.66 → $8.930**). *(An **ORGAN** is an exported capability that merged with no
+production call site — built, tested, shipped, never called; **DARK** while it stays that way. Defined
+here because R16-2 below tracks it as a metric.)* **(1) R15-1 SCORES `HIT`.** R15 predicted `implement` avg turns
 **< 90** if W1-T338/#1327's preflight `maxBuffer` fix was the cause of the turn inflation; observed
 **83.083** (126.0 → 83.1, **−34%**), while cost per turn moved **+4%** ($0.0716 → $0.0746). The whole
 saving is LENGTH, it was predicted in advance with a stated falsifier, and it is **the first `HIT` in
@@ -218,7 +220,7 @@ KICK ORDER (mirrored as a comment atop plan/tasks.yaml).
 | # | metric | prediction | condition |
 |---|---|---|---|
 | R16-1 | `implement` avg turns (now **83.083**) | **stays < 100** | Nothing further shipped to move it; R15-1's saving must PERSIST to be a fix rather than a one-cycle artifact. A rise above 100 falsifies R15-1 retroactively and the inflation must be re-mined. |
-| R16-2 | dark organs shipped per cycle (now **4**, by PR self-admission) | **≤ 1** | ONLY if P38(i)'s call-site lint rung ships. If it does not ship, any fall is **UNATTRIBUTED**; this is the first cycle the count was measured at all, so R17 must also state whether the count is still derivable. |
+| R16-2 | exported capabilities merged with no production call site — "dark organs" — shipped per cycle (now **4**, by PR self-admission) | **≤ 1** | ONLY if P38(i)'s call-site lint rung ships. If it does not ship, any fall is **UNATTRIBUTED**; this is the first cycle the count was measured at all, so R17 must also state whether the count is still derivable. |
 | R16-3 | LEARNINGS entries (now **74**) | **> 74** | ONLY if P38's TASK A ships. Otherwise the flag stands and must be reported as a SEVENTH frozen cycle. Re-registered UNCHANGED from R15-3, deliberately: an unscored prediction is not a retired one. |
 | R16-4 | runs-per-shipped-task among multi-run tasks (now **16 runs / 6 tasks = 2.67**) | **< 2.0** | ONLY if a recon-carryover artifact (P38, TASK B below) ships. Recorded because parallel lanes (T343/T344) went live THIS cycle and will raise run counts for reasons unrelated to recon re-buy — so a RISE is likewise unattributable to the defect. |
 
