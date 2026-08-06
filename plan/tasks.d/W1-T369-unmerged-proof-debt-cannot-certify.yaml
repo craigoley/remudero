@@ -6,7 +6,36 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 80.00
-  rationale: "RE-DERIVED AT cdf885a from `rmd lint-plan --all` output, not inherited.
+  rationale: "WITHDRAWN AS ALREADY SATISFIED 2026-08-06 (operator-authored plan change at b285a59).
+    ITS WORK MERGED AS A TWO-PR SPLIT, not as a dispatched run: #1418 (78e6c75, `fix(plan): rewrite
+    unexecutable proofs on open unmerged tasks (plan-only half)`) rewrote the proofs, and #1420
+    (780256c, `test(plan): lock the proof-debt ratchet for open unmerged tasks (W1-T369)`) added the
+    lock. Only #1420 carries the `Remudero-Task: W1-T369` trailer, so the derived projection already
+    reports this task MERGED while the shard still read `status: queued` — dispatchable, and dispatched
+    would be refused (see the design note below).
+    THE POPULATION IS NOW EMPTY, RE-DERIVED AT b285a59 THROUGH THE SHIPPED CLASSIFIER rather than by
+    re-reading lint output: `deriveProofDebtPopulation` (test/plan-proof-debt.test.ts) fed the dump from
+    `defaultMergeEvidenceLog` (src/run-task.ts — the same offline reader `lintPlanCommand`'s whole-plan
+    split uses) over an UNSHALLOWED checkout. 378 open tasks; 169 carry a BLOCKING
+    proof-dialect/proof-resolvability violation; the merge-evidence split is 164 MERGED-elsewhere
+    (W1-T370's population, deliberately untouched) and 5 UNMERGED. All five of those are `verify: human`.
+    THE MUST-FIX SET — open AND unmerged AND `verify: auto` — IS EMPTY, which is exactly the state
+    `PROOF_DEBT_CEILING = 0` locks.
+    CRITERION BY CRITERION, against the shipped state rather than by assertion. (1) every open, unmerged
+    task parses and resolves: SATISFIED for the population this task owns — `autoBlockingIds` is empty,
+    and `proofResolvesToCandidate` checks resolution through the reviewer's own `parseWhitelistedProof`
+    /`resolveNameFilteredCandidates`, so it is filesystem fact and not lint shape. (2) a ratchet fails
+    above its recorded ceiling: SATISFIED by `evaluateProofDebtRatchet` against `PROOF_DEBT_CEILING = 0`.
+    (3) verify:human excluded and reported with a count: SATISFIED by `humanBlockingIds`, whose live-plan
+    test additionally asserts every reported id is genuinely `verify: human`.
+    THE ACCEPTANCE BLOCK BELOW IS LEFT BYTE-IDENTICAL, and that is the verbatim preservation this record
+    owes. It is also the only SAFE form here: the derived projection reports this task merged, so
+    `postMergeAmendmentViolations` would BLOCK any added or changed criterion under Standing rule 21 —
+    measured, not assumed (see the note). Retiring satisfied criteria into a note would trade a true
+    record for a blocking violation, so W1-T269's move-to-note shape is deliberately NOT copied: that
+    shape exists for criteria abandoned UNBUILT, and none of these three is.
+    ORIGINAL FILING RATIONALE BELOW, unchanged, as the record of what was diagnosed.
+    RE-DERIVED AT cdf885a from `rmd lint-plan --all` output, not inherited.
     THE POPULATION, MEASURED AND SPLIT. 175 tasks carry a BLOCKING (✗) lint violation. Cross-referenced
     against the merge record (merged PRs naming a task id, positive control W1-T339 -> #1329, negative
     control a nonexistent id -> 0), they split 136 MERGED / 39 UNMERGED. This task is the 39 — the ones
@@ -31,6 +60,39 @@
     correction is a stated intention with a measured population rather than an improvisation the
     Architect stage has to invent under time pressure."
   design: |
+    NOT TO BE BUILT. Withdrawn as already satisfied (#1418 + #1420). Left in the plan as a RECORD of
+    the withdrawal, not a work item. status: blocked so nextRunnable/assertRunnable never dispatch it —
+    `isDispatchEligible` (drain.ts) refuses `status === "blocked"` before any dependency or breaker
+    check, and that is the one reader of the decorative yaml field W1-T367 rules must NOT be converted,
+    precisely so retirement records stay undispatchable.
+
+    WHY IT COULD NEVER HAVE MERGED AS A DISPATCHED TASK, recorded so a fourth session does not re-file
+    this shape. Its `files:` are `[plan/tasks.yaml, test/plan-proof-debt.test.ts]`. The test file sits
+    OUTSIDE `isInPlanScope`, so a single PR touching both makes `planOnly` FALSE. Rewriting a proof
+    necessarily DELETES a `proof:` line, so `criterionFieldTampered(diff)` fires, and
+    `criteriaTampered = !planOnly && criterionFieldTampered(diff)` (Standing rule 15, W1-T58) refuses
+    the PR. #1416 carried both halves and was refused on exactly that, with 18 deleted `proof:` lines;
+    the split into #1418 (plan-only, carve-out intact) and #1420 (test-only, nothing to tamper with) is
+    what made it mergeable. A dispatched worker gets ONE PR per run and therefore cannot produce that
+    split. THE GUARD IS SHAPE-BASED, NOT CONTENT-BASED: any task whose deliverable edits acceptance
+    criteria AND ships a test in the same changeset is unmergeable as filed, however correct the work.
+    Third occurrence in three days — W1-T324, #1334, #1416 — so the lesson is the FILING RULE, not the
+    individual PRs: a criteria-editing task must be filed as two tasks, or as an operator plan change.
+
+    WHAT REMAINS OPEN IN THIS AREA, stated rather than quietly absorbed. Five open, unmerged
+    `verify: human` tasks carry 11 blocking `proof-dialect` violations between them — W2-T2 (1),
+    W3-T4 (2), W12-T1 (2), W3-T7 (3), W1-T147 (3) — every one free prose. Design note (iv) below
+    excluded them from the rewrite and that exclusion was right at the time, but its stated REASON is
+    now stale and must not be inherited: it says to report them as needing "a proof kind the dialect
+    lacks", and the dialect no longer lacks it. W1-T277 shipped `demonstration: <what the operator must
+    do>` for exactly this class — a chaos drill, a device recording, a live deploy — legal and
+    lint-clean on `verify: human`, refused outright on `verify: auto`. Their debt is therefore FIXABLE
+    and is a separate filing against those five shards, not a permanent gap. It is not done here: it is
+    outside this task's own scope by (iv), and it would touch five further shards, each of which CI's
+    changed-tasks-only lint would then re-grade in full.
+
+    ORIGINAL DESIGN BELOW, unchanged, as the record of what was intended.
+
     ONE FILE, PER CLASS, IN BULK — NOT ONE TASK PER PR.
     CLAUDE.md's measured anti-pattern is explicit: five separate PRs rewrote proofs one at a time, and
     a refused task is re-selected and re-refused every tick, silently. W1-T358's design says the same
@@ -83,9 +145,29 @@
   origin: oper#proof-debt-arc-2026-08-05
   plan_refs: ["W1-T358", "W1-T367", "W1-T370"]
   files: [plan/tasks.yaml, test/plan-proof-debt.test.ts]
-  status: queued
+  status: blocked
   attempts: 0
-  note: "FILED as the head of the proof-debt arc, with W1-T370 as its merged-population sibling.
+  note: "WITHDRAWAL RECORD, 2026-08-06, operator-authored plan change at b285a59.
+    THE THREE ACCEPTANCE CRITERIA ARE PRESERVED VERBATIM IN PLACE, in the acceptance: block above,
+    rather than copied down here. That is a DELIBERATE departure from W1-T269/W1-T270's move-to-note
+    shape and the reason is measurable both ways. (a) All three are TRUE of the shipped state, so there
+    is nothing to retire — the note shape exists for criteria abandoned UNBUILT. (b) #1420 merged
+    carrying `Remudero-Task: W1-T369` in its PR BODY, so `lintPlanCommand`'s --base mode resolves
+    `proj.merged` TRUE for this task and builds a `postMergeAmendment` ctx around it; with `merged`
+    true and a non-empty `criteriaAdded` delta, `postMergeAmendmentViolations` emits a BLOCK under
+    Standing rule 21 whose only escape hatch is filing a follow-up task that carries the added
+    criterion. Replacing the block with a `this task is withdrawn` criterion would therefore have
+    manufactured a blocking violation on a task that has NONE today, and discharged it by filing dead
+    work. Leaving the block byte-identical makes `criteriaAdded` empty and the check silent.
+    MEASURED BEFORE AND AFTER, since CI lints CHANGED TASKS ONLY and touching a task promotes its own
+    pre-existing violations to blocking: W1-T369 lints 0 BLOCK / 0 WARN before this edit and 0 BLOCK /
+    0 WARN after it. No task gains a violation from being touched, because exactly one task is touched.
+    THE POPULATION AT WITHDRAWAL, through the shipped classifier over an unshallowed checkout: 378 open,
+    169 with blocking proof debt, split 164 merged-elsewhere / 5 unmerged, and all 5 unmerged are
+    `verify: human`. autoBlockingIds is EMPTY. The 164 are W1-T370's population and are NOT widened into
+    here — including the subject-only citations, which this task never owned.
+    ORIGINAL FILING NOTE BELOW, unchanged.
+    FILED as the head of the proof-debt arc, with W1-T370 as its merged-population sibling.
     risk:medium rather than high: the blast radius is one plan file and a lock, no gate or daemon
     semantics move, and the failure mode of a bad rewrite is a capped review — visible, not silent.
     It is not risk:low because a proof rewritten into a plausible-but-unresolvable form re-creates the
