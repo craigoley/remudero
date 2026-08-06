@@ -244,6 +244,13 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
         const step = typecheckStep(repoRoot, spawn);
         return { ok: step.ok, detail: step.detail.replace(/^typecheck: /, "") };
       }),
+      // W1-T373: cli-reference:check is the "ci" job's own gate on docs/cli-reference.md
+      // staleness (test/cli-reference.test.ts, run as part of `npm run test:ci` below) — but
+      // buried inside that full-suite step it surfaces only as a numbered TAP line (#1352's
+      // `not ok 449 - generate-cli-reference --check`), never as a named parity step. This is
+      // the parity fix (design v): give it its OWN step here, one list, one truth, rather than
+      // leaving it discoverable only by reading ci:test's raw output.
+      runStep("ci:cli-reference-check", () => shellOut(spawn, "npm run --silent cli-reference:check", "npm", ["run", "--silent", "cli-reference:check"], { cwd: repoRoot })),
       runStep("ci:test", () => shellOut(spawn, "npm run test:ci", "npm", ["run", "test:ci"], { cwd: repoRoot })),
     ],
   },
@@ -437,5 +444,112 @@ export function runCiParity(repoRoot: string, deps: CiParityDeps = {}): CiParity
   });
 
   const steps = [driftStep, ...jobSteps];
+  return { steps, ok: steps.every((s) => s.ok) };
+}
+
+// ── `rmd preflight --fast` (W1-T373) — deterministic npm-script gates, nothing else ──────────
+//
+// THE GAP THIS CLOSES. `--ci-parity`'s `ci` job entry shells `npm run test:ci`, the FULL
+// `test/**/*.test.ts` glob — so the only way to reach a two-second check like `claims`, or the
+// now-added `ci:cli-reference-check` above, is to run everything else too. `--ci-parity` cannot
+// be run habitually (test/mounts-wiring.test.ts alone has MEASURED $1.42 of real worker spend
+// per run of that suite); a mode that cannot be run habitually does not make its cheap checks
+// reachable. This is a THIRD, ADDITIVE mode on the same `preflight` verb (never a second verb,
+// following `--ci-parity`'s own precedent): it runs ONLY the curated list below.
+//
+// THE CURATION CRITERION (design ii) — stated here because `FAST_GATE_STEPS` below IS its
+// enforcement, not a preference next to it. A step qualifies ONLY if it is deterministic, runs
+// in seconds, needs no network, and has demonstrably blocked a PR (or is the identical shape as
+// one that has). `required-core` marks the two steps #1352 itself was blocked by; `same-class`
+// marks the rest, admitted because each is the identical shape (a deterministic npm-script gate
+// CI runs unconditionally) and costs well under half a second.
+//
+// WHAT THIS MUST NOT BECOME (design iii): `npm test`. Growing this list to include anything
+// that spawns `node --test`, touches the network, or is not sub-second-to-low-single-digit-
+// second is the ONE mistake this mode exists to prevent — it would make the fast mode the
+// expensive mode wearing a cheaper name, and the habit it exists to create unaffordable.
+// `runPreflightFast` below never shells `npm run test:ci` (or any bare `npm test`) — it only
+// ever invokes `npm run --silent <script>` for a script named in `FAST_GATE_STEPS`.
+export const FAST_GATE_STEPS: { job: string; script: string; reason: string }[] = [
+  {
+    job: "cli-reference",
+    script: "cli-reference:check",
+    reason: "required-core — absent from lib/ci-parity.ts and from every workflow file until this task; blocked #1352 (design iv)",
+  },
+  {
+    job: "claims",
+    script: "claims",
+    reason: "required-core — already a --ci-parity entry but unreachable without shelling test:ci; blocked #1352 twice in one sitting (design iv)",
+  },
+  {
+    job: "learnings-budget-ratchet",
+    script: "learnings-budget-ratchet",
+    reason: "same-class — deterministic npm-script gate ci.yml's learnings-budget-ratchet job runs unconditionally, measured 0.16s",
+  },
+  {
+    job: "jscpd",
+    script: "jscpd",
+    reason: "same-class — deterministic npm-script gate ci.yml's jscpd-gate job runs unconditionally, measured 0.17s",
+  },
+  {
+    job: "depcruise",
+    script: "depcruise",
+    reason: "same-class — deterministic npm-script gate ci.yml's depcruise job runs unconditionally, measured 0.48s",
+  },
+  {
+    job: "api-client-drift",
+    script: "api-client:check",
+    reason: "same-class — deterministic npm-script gate ci.yml's api-client-drift job runs unconditionally, measured 0.17s",
+  },
+  {
+    job: "no-hand-rolled-fetch",
+    script: "no-hand-rolled-fetch:check",
+    reason: "same-class — deterministic npm-script gate ci.yml's no-hand-rolled-fetch job runs unconditionally, measured 0.14s",
+  },
+];
+
+/** The `package.json` "scripts" object's key set — read once per `runPreflightFast` call so a
+ *  step whose script has been renamed or removed can be told apart from one that ran and
+ *  failed (design vi), without ever spawning `npm` to find that out. `packageJsonText` is a
+ *  test seam (a falsifier can hand a synthetic package.json missing one script), mirroring
+ *  `CiParityDeps.ciYamlText`'s already-established pattern above; production reads the repo's
+ *  real file. */
+function fastGateScriptNames(repoRoot: string, packageJsonText?: string): Set<string> {
+  const text = packageJsonText ?? readFileSync(join(repoRoot, "package.json"), "utf8");
+  const pkg = JSON.parse(text) as { scripts?: Record<string, string> };
+  return new Set(Object.keys(pkg.scripts ?? {}));
+}
+
+export interface PreflightFastDeps {
+  spawn?: PreflightSpawn;
+  /** Test seam — production reads the repo's real package.json. */
+  packageJsonText?: string;
+}
+
+export interface PreflightFastResult {
+  steps: CiParityStepResult[];
+  ok: boolean;
+}
+
+/**
+ * `rmd preflight --fast`'s engine. One step per `FAST_GATE_STEPS` entry, run and reported
+ * independently (same discipline as {@link runCiParity} and
+ * {@link import("./commit-message.js").runPreflight}: one failure never blocks a later step's
+ * chance to report, and `ok` is the AND of all of them). A script that is not in
+ * `package.json`'s "scripts" is reported as `SCRIPT MISSING` — distinct from `FAIL`, which
+ * means the script ran and its gate failed — so a renamed or removed script goes loud, never
+ * quiet (design vi).
+ */
+export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {}): PreflightFastResult {
+  const spawn = deps.spawn ?? defaultPreflightSpawn;
+  const scriptNames = fastGateScriptNames(repoRoot, deps.packageJsonText);
+  const steps = FAST_GATE_STEPS.map(({ job, script }) =>
+    runStep(job, () => {
+      if (!scriptNames.has(script)) {
+        return { ok: false, detail: `SCRIPT MISSING — "${script}" is not defined in package.json's "scripts"; this step did not run` };
+      }
+      return shellOut(spawn, `npm run --silent ${script}`, "npm", ["run", "--silent", script], { cwd: repoRoot });
+    }),
+  );
   return { steps, ok: steps.every((s) => s.ok) };
 }
