@@ -16,6 +16,7 @@ import {
   createPlanProgressCache,
   createPlanSectionCache,
   DEFAULT_FRONTIER_LIMIT,
+  readPlanRefs,
   type PanelGraphDeps,
   type PlanProgressCache,
   type PlanSectionCache,
@@ -501,6 +502,45 @@ test("computePlanSectionCounts: darkness parity -- progressUnknown:true carries 
   const emptyProjection = new Map<string, StatusProjection>();
   const outage = computePlanSectionCounts(plan, emptyProjection, planRefsFixture(), fixtureIndex(), true, cache);
   assert.deepEqual(outage, fresh, "the last-known reading, verbatim -- never re-derived under darkness");
+});
+
+// ── readPlanRefs: the best-effort SECOND parse of tasks.yaml + tasks.d/*.yaml for plan_refs ────
+
+test("readPlanRefs: merges plan_refs across tasks.yaml AND its tasks.d/*.yaml shards, keyed by id", () => {
+  const root = tmpRoot();
+  const planPath = writePlan(root, ["- id: A", "  title: a", "  repo: remudero", "  type: implement", "  depends_on: []", '  plan_refs: ["§5C"]', ""].join("\n"));
+  const shardDir = join(root, "plan", "tasks.d");
+  mkdirSync(shardDir, { recursive: true });
+  writeFileSync(
+    join(shardDir, "shard-1.yaml"),
+    ["- id: B", "  title: b", "  repo: remudero", "  type: implement", "  depends_on: []", '  plan_refs: ["§7", "W1-T999"]', ""].join("\n"),
+  );
+  const refs = readPlanRefs(planPath);
+  assert.deepEqual(refs.get("A"), ["§5C"]);
+  assert.deepEqual(refs.get("B"), ["§7", "W1-T999"]);
+});
+
+test("readPlanRefs: an unreadable planPath -> empty map, never a throw", () => {
+  const refs = readPlanRefs(join(tmpRoot(), "plan", "does-not-exist.yaml"));
+  assert.deepEqual(refs, new Map());
+});
+
+test("readPlanRefs: malformed YAML in tasks.yaml, or a malformed shard, is skipped -- never a throw, and a GOOD sibling shard still contributes", () => {
+  const root = tmpRoot();
+  const planPath = join(root, "plan", "tasks.yaml");
+  mkdirSync(join(root, "plan"), { recursive: true });
+  writeFileSync(planPath, "not: [valid, yaml", { flag: "wx" }); // unterminated flow sequence -- parseYaml throws
+  const shardDir = join(root, "plan", "tasks.d");
+  mkdirSync(shardDir, { recursive: true });
+  writeFileSync(join(shardDir, "bad.yaml"), "not: [valid, yaml", { flag: "wx" });
+  writeFileSync(
+    join(shardDir, "good.yaml"),
+    ["- id: C", "  title: c", "  repo: remudero", "  type: implement", "  depends_on: []", '  plan_refs: ["P22"]', ""].join("\n"),
+    { flag: "wx" },
+  );
+  const refs = readPlanRefs(planPath);
+  assert.equal(refs.size, 1, "only the well-formed shard contributed -- the malformed root file and the malformed shard both skipped silently");
+  assert.deepEqual(refs.get("C"), ["P22"]);
 });
 
 // ── GET /v1/plan/view — the route wiring: one fetch for the whole tab ──────────────────────────

@@ -836,7 +836,7 @@ export function buildPlanFrontier(
  *  for this one declarative field (see this section's header for why it cannot come from {@link
  *  Task} itself). A file that fails to read or parse is skipped, never thrown -- this is a
  *  rendering aid layered on top of the load-bearing validation {@link loadPlan} already did. */
-function readPlanRefs(planPath: string): Map<string, string[]> {
+export function readPlanRefs(planPath: string): Map<string, string[]> {
   const refs = new Map<string, string[]>();
   const ingest = (text: string) => {
     let raw: unknown;
