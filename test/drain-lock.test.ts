@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
@@ -56,11 +56,11 @@ test("acquireDrainLock: a STALE lock (holder pid DEAD) is RECLAIMED, not refused
   const path = join(dir, "state", "drain.lock");
   try {
     // A crashed prior drain left a lock naming a now-dead pid (acquire creates state/).
-    acquireDrainLock(path, { info: { pid: 9999, host: "boxA", startedAt: "t0" }, isPidAlive: () => true });
+    acquireDrainLock(path, { info: { pid: 9999, host: hostname(), startedAt: "t0" }, isPidAlive: () => true });
     assert.equal(readDrainLock(path)?.pid, 9999);
 
     const deadPid = (p: number) => p !== 9999; // 9999 is dead, everything else alive
-    const h = acquireDrainLock(path, { info: { pid: 123, host: "boxB", startedAt: "t1" }, isPidAlive: deadPid });
+    const h = acquireDrainLock(path, { info: { pid: 123, host: hostname(), startedAt: "t1" }, isPidAlive: deadPid });
     assert.equal(readDrainLock(path)?.pid, 123, "the stale lock was reclaimed by the new holder");
     h.release();
   } finally {
@@ -74,7 +74,7 @@ test("acquireDrainLock: an UNREADABLE/garbage lock is treated as stale and recla
   try {
     acquireDrainLock(path, { isPidAlive: () => true }).release(); // create state dir
     writeFileSync(path, "}{ not json");
-    const h = acquireDrainLock(path, { info: { pid: 7, host: "h", startedAt: "t" }, isPidAlive: () => true });
+    const h = acquireDrainLock(path, { info: { pid: 7, host: hostname(), startedAt: "t" }, isPidAlive: () => true });
     assert.equal(readDrainLock(path)?.pid, 7);
     h.release();
   } finally {
