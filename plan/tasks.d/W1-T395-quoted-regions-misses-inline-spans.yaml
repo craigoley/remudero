@@ -1,0 +1,101 @@
+- id: W1-T395
+  title: "`stripQuotedRegions` blanks fenced blocks and blockquote LINES but not INLINE backtick spans, so `bodyContradictsDiff` cannot tell quoting a claim from making one — a PR body describing this class of failure fails on the string it is describing"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  rationale: "MEASURED ON PR #1451, 2026-08-07, and re-derived from source at 94ea7d2.
+    THE MECHANISM, exactly. `stripQuotedRegions` (src/lib/review.ts) splits the body into LINES and
+    blanks a line only when it opens/closes a triple-backtick fence, sits inside one, or begins with
+    a blockquote marker. An INLINE backtick span is never blanked, so every predicate downstream —
+    the count/enumeration arm and the absence arm of `bodyContradictsDiff` — scans quoted text as
+    though the body were asserting it.
+    THE INCIDENT. #1451's body quoted the verdict string that had blocked #1441 in order to explain
+    the defect being fixed. `bodyContradictsDiff` read the quotation as this PR's own changeset
+    claim and reported a contradiction. The body had to be PARAPHRASED to describe the bug — a
+    checker that forbids naming its own failure mode in prose.
+    WHY THIS IS NOT COSMETIC. The failure lands on the ONE population most likely to quote a
+    verdict verbatim: a PR fixing the reviewer. It is also silent about its own cause, because the
+    reported `claim` is a real substring of the body and reads as authored rather than cited.
+    THE CONTRACT THIS MUST NOT BREAK, from the function's own doc: ANYTHING THIS CANNOT DECIDE IS
+    SILENCE, NOT A VERDICT. This task widens what the checker can DECIDE — it must never widen what
+    it FAILS. Every change here removes a false failure or does nothing."
+  design: |
+    (i) EXTEND THE STRIP TO INLINE SPANS, LENGTH-PRESERVING. `stripQuotedRegions` is documented as
+    length- and newline-preserving so every downstream index still lines up with the original body;
+    W1-T308 built it that way deliberately. Blank the span, do not delete it. Decide and record how
+    an UNCLOSED backtick is treated — the safe reading is to blank nothing rather than swallow the
+    rest of a line, because swallowing could hide a real claim and that is the one direction this
+    function must never move. Handle multi-backtick delimiters (``…``) or state plainly that they
+    are out of scope and why.
+
+    (ii) ESTABLISH WHETHER ONE STRIP FIXES ALL THREE REPORTED SYMPTOMS, and report per symptom
+    rather than assuming. Symptom A is the inline-quoted count/enumeration claim above. Symptom B:
+    the hyphenated plan-scope adjective is read as a changeset claim wherever it appears, including
+    as ordinary vocabulary in a body ABOUT plan scoping — that is a VOCABULARY collision, and a
+    strip fix only helps when the phrase happens to be backticked, so it is probably a separate
+    anchoring question. Symptom C: the directory-absence arm fires on the backticked form while
+    staying silent on the bare-prose form, so its behaviour currently depends on MARKUP rather than
+    MEANING — a strip fix makes it consistently silent on both, which is the correct direction but
+    must be stated as a deliberate narrowing, not a side effect. If B needs its own change, SAY SO
+    and file nothing here for it; this task is one concern.
+
+    (iii) THE REGRESSION LOCK IS THE #1451 BODY SHAPE. Write it FIRST and watch it fail
+    (tdd:strict): a body that QUOTES a count claim inside inline backticks while making no such
+    claim of its own must report zero contradictions. Pair it with the falsifier that must keep
+    failing — the same claim UNQUOTED and false — so the fix is proven to have narrowed nothing but
+    quotation. A lock that only proves the quoted case passes would also pass if the predicate were
+    deleted.
+
+    (iv) PROVE THE STRIP DOES NOT MOVE THE OTHER CONSUMERS. `stripQuotedRegions` feeds every arm of
+    `bodyContradictsDiff`. Enumerate them from source and assert each is unchanged on a body with no
+    inline spans at all, so the change is scoped to the quoting case rather than to the checker's
+    general sensitivity.
+
+    NOT IN SCOPE: the `exactly N files` grammar, the enumeration-item punctuation cleanup, the
+    acceptance-criteria parser, and `changedFiles`' deletion-blindness (W1-T389). This is one
+    function's notion of what counts as quoted.
+  acceptance:
+    - claim: "a body that quotes a changeset claim inside inline backticks while asserting no such claim of its own reports zero contradictions"
+      proof: "unit test: test/review-inline-quoted-claims.test.ts"
+    - claim: "the same claim unquoted and contradicting the diff still fails, so quoting is narrowed without weakening the predicate"
+      proof: "unit test: test/review-inline-quoted-claims.test.ts"
+    - claim: "the strip stays length-preserving so a body with no inline spans produces the identical verdict it produced before"
+      proof: "unit test: test/review-inline-quoted-claims.test.ts"
+  risk: high
+  origin: session-review#1451-inline-quoting-2026-08-07
+  plan_refs: ["W1-T274", "W1-T288", "W1-T304", "W1-T308"]
+  files: [src/lib/review.ts, test/review-inline-quoted-claims.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — every claim is a pure string-in/verdict-out assertion over
+    stripQuotedRegions and bodyContradictsDiff, decidable in-process with no operator and no network.
+    risk:high is Rule 19's SPAN, not blast radius. Filed at medium first and corrected before push
+    rather than shipped as a violation: the sizing check reads files: as two concerns (review,
+    review-inline-quoted-claims) and refuses medium on that basis alone. THE ACTUAL BLAST RADIUS IS
+    LOW, and bounded in the SAFE direction: every reachable outcome of this change turns a FAILURE
+    into SILENCE, never the reverse, because blanking text can only remove matches. The function's
+    own doc makes that the governing contract, and design (iii)'s falsifier is what holds it. Do not
+    read the band as danger.
+    RULE 25 CHECKED BEFORE FILING: files: contains no INSTRUMENT_SURFACE path, so
+    `detectInstrumentEntanglement` has nothing to refuse.
+    budget_usd 55 — below W1-T394's 70: no ledger population to derive, and the consumer inventory
+    is one function's arms rather than a routing predicate's fleet-wide readers.
+    THE BOOTSTRAP TRAP, AND IT WILL BITE THE IMPLEMENTER OF THIS VERY TASK: until this fix ships,
+    a PR body cannot QUOTE the failing string it is describing, because inline backtick spans are
+    exactly what is not blanked. So the PR that fixes this must PARAPHRASE every verdict string and
+    every `exactly N files`-shaped phrase it discusses, or it fails its own review on the defect it
+    is removing. Validate the body through `bodyContradictsDiff` before pushing, with a deliberately
+    falsified file list as a positive control so an empty result is the checker engaging rather than
+    idling. (Raised in review on the filing PR; recorded here so the implementer meets it as an
+    instruction rather than as a surprise.)
+    ON THE PROOFS. All three name test/review-inline-quoted-claims.test.ts, which does not exist
+    yet: a FORWARD REFERENCE TO A PATH, safe per CLAUDE.md, declared in files: so the worker creates
+    it. Pure-path form is deliberate — it lint-passes and executes the whole file, unlike the
+    test/foo.test.ts::title form that satisfies lint-plan and then matches zero tests.
+    THE INCIDENT IS REPRODUCIBLE WITHOUT THE PR: hand bodyContradictsDiff a body whose only count
+    claim sits inside inline backticks, together with a diff that contradicts it. Re-derive that
+    before acting rather than trusting this note.
+    NO depends_on: independent of W1-T394 and W1-T389."
