@@ -59,24 +59,40 @@ export function truncateBody(body, max = MAX_BODY) {
 
 // Pure. Body carries the marker (identity), the numbers (so the issue is actionable without
 // opening the run), and the run URL (so it is not a dead end).
+//
+// THE LOG IS TRIMMED, NOT THE BODY, and that distinction is load-bearing. truncateBody() keeps the
+// TAIL, and the marker sits at the HEAD -- so trimming the ASSEMBLED body drops the marker first,
+// and a delivered issue whose body has no marker is invisible to decideDelivery(). The next run
+// would then find no existing thread and OPEN A NEW ISSUE, every run, which is precisely the
+// 365-issues-a-year failure this script's header says it exists to prevent. That is not
+// hypothetical for this caller: MEASURED at ~276 bytes of Stryker clear-text output per surviving
+// mutant, and mutation-nightly reports over 27,000 survivors -- its captured log is orders of
+// magnitude past MAX_BODY, so the FIRST truncated delivery would have broken idempotency. Trimming
+// the log alone keeps the envelope -- marker, headline, run URL -- intact at any log size.
 export function buildBody({ source, marker, runUrl, log, when }) {
-  const parts = [
-    marker,
-    `**\`${source}\` failed** on its scheduled run${when ? ` (${when})` : ''}.`,
-    '',
-    'This is the delivery of record for a job with no PR to attach to -- it is not a duplicate of a check you have already seen.',
-    '',
-    `Run: ${runUrl || '(unknown)'}`,
-    '',
-    '<details><summary>Captured output (stdout + stderr)</summary>',
-    '',
-    '```',
-    (log ?? '').trimEnd() || '(no output captured)',
-    '```',
-    '',
-    '</details>',
-  ];
-  return truncateBody(parts.join('\n'));
+  const render = (logText) =>
+    [
+      marker,
+      `**\`${source}\` failed** on its scheduled run${when ? ` (${when})` : ''}.`,
+      '',
+      'This is the delivery of record for a job with no PR to attach to -- it is not a duplicate of a check you have already seen.',
+      '',
+      `Run: ${runUrl || '(unknown)'}`,
+      '',
+      '<details><summary>Captured output (stdout + stderr)</summary>',
+      '',
+      '```',
+      logText,
+      '```',
+      '',
+      '</details>',
+    ].join('\n');
+
+  const room = MAX_BODY - render('').length;
+  const logText = truncateBody((log ?? '').trimEnd() || '(no output captured)', Math.max(0, room));
+  // The outer call is a belt, not the mechanism: it only ever bites if the envelope itself were
+  // grown past MAX_BODY, which no caller controls.
+  return truncateBody(render(logText));
 }
 
 function ghJson(args, exec) {

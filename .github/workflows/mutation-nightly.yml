@@ -34,9 +34,17 @@ name: Mutation Nightly
 # Same night-index always yields the same sample: deterministic, auditable, never flaky.
 #
 # LOUD FAILURE, never a silent pass: `--nightly-ratchet` (run after Stryker) blocks this workflow
-# on a below-baseline sampled score, an unreadable/corrupt report, or a missing "nightly" baseline
-# section -- there is no code path that reaches a green run without a real, valid, at-or-above-
-# baseline comparison (the W1-T130 degrade-loudly polarity).
+# on an INVALID run, a below-baseline sampled score, an unreadable/corrupt report, or a missing
+# "nightly" baseline section -- there is no code path that reaches a green run without a real,
+# valid, at-or-above-baseline comparison (the W1-T130 degrade-loudly polarity).
+#
+# INVALID RUN is the newest of those and is a VALIDITY check, NOT a quality floor. The `mutate`
+# glob this workflow overrides is wider than stryker.conf.json's `commandRunner.command`, so this
+# job can mutate files no test in its own runner imports -- nothing can kill those mutants by
+# construction, and the score then describes the RUNNER rather than the suite. The guard refuses a
+# report in which a mutated file caught nothing at all, naming each such file. Passing it means the
+# runner reached the mutated files and means NOTHING about test quality: it is not evidence for
+# raising scripts/mutation-baseline.json's `nightly.scorePct`, which remains a bootstrap zero.
 #
 # This workflow intentionally does NOT auto-commit an updated scripts/mutation-baseline.json --
 # ratcheting the nightly floor up is a deliberate, reviewed change, the same convention every
@@ -108,13 +116,19 @@ jobs:
         run: |
           set -o pipefail
           npx stryker run --mutate "${{ steps.scope.outputs.mutate }}" 2>&1 | tee -a nightly-failure.log
-      - name: Nightly mutation ratchet (blocks LOUDLY on a below-baseline sample or a missing/broken report)
+      # `--mutate-scope` hands the ratchet THIS run's sampled file list (the same string the
+      # `scope` step above fed to `--mutate`), which is what the run-validity guard judges. Scoping
+      # it to tonight's sample rather than to the whole report is deliberate: Stryker's
+      # `incremental: true` cache makes the report ACCUMULATE across nights, so a whole-report
+      # predicate would keep judging files this run never touched.
+      - name: Nightly mutation ratchet (blocks LOUDLY on an invalid run, a below-baseline sample, or a missing/broken report)
         id: ratchet
         run: |
           set -o pipefail
           node scripts/mutation-ratchet.mjs --nightly-ratchet \
             --report reports/mutation/mutation.json \
-            --baseline scripts/mutation-baseline.json 2>&1 | tee -a nightly-failure.log
+            --baseline scripts/mutation-baseline.json \
+            --mutate-scope "${{ steps.scope.outputs.mutate }}" 2>&1 | tee -a nightly-failure.log
 
       # Delivery. `if: failure()` so a green night stays silent -- a notifier that also fires on
       # success is one the reader learns to filter, which is the same gap again.
