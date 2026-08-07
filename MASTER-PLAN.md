@@ -1127,8 +1127,28 @@ P42 or W1-T271 and is folded there rather than given an id.
 `blocked_ci`×25, `no_pr`×17, `incomplete`×12, `pr_attribution_failed`×12, `blocked_containment`×6,
 `failed`×6, `blocked_isolation`×1, `blocked_transient`×1, 49 rejected trailers).
 
-- **★ P38 (plan + golden; rank 3, PRICED BY R15) — THE DEAD-CONSUMER CLASS: ORGANS MERGE,
-  PASS THEIR GATE, AND CANNOT BE SHOWN TO RUN.** GROUND TRUTH, R11 (mechanical): LEARNINGS held at 74
+- **★ P38 (plan + golden; rank 2 as of 2026-08-07, PRICED BY R15) — THE DEAD-CONSUMER CLASS: ORGANS
+  MERGE, PASS THEIR GATE, AND CANNOT BE SHOWN TO RUN.**
+  **★ 2026-08-07 — CLAUSE (i)'s CALL-SITE LINT RUNG IS BUILT, RUNNING, AND PERMANENTLY AT `warn`; THE
+  CHECK THAT EXISTS TO CATCH DARK ORGANS IS ITSELF HALF-DARK.** Established from source:
+  `callSiteViolations` (`src/lib/task-linter.ts`) refuses a task that creates a new `src/**.ts` module
+  without an acceptance criterion proving a CALL SITE — `grep: <symbol>( in <a file that is not the
+  new module>`, the open paren required because a bare symbol name passes on a comment. It is wired
+  into `lintTask`, and `run-task.ts` supplies its `moduleExists` predicate at TWO real call sites, so
+  it genuinely runs. **But `opts.callSite` defaults to `"warn"` and NOTHING IN THE TREE EVER PASSES
+  IT** — zero occurrences of `callSite:` outside the linter — so it has never once blocked anything,
+  and `lintTask` returns ok on a warn by construction. Its own message reads *"Eleven modules have
+  merged green and unreached; this is the check that would have"* caught them. So the plan listing
+  *"then the call-site lint rung"* as FUTURE work is wrong in the same direction as the W1-T149
+  record, and R16-2's antecedent — *"ONLY if P38(i)'s call-site lint rung ships"* — is arguably
+  already satisfied while the prediction it guards (dark organs ≤ 1) cannot possibly be moved by a
+  check that only warns. **THE REMAINING WORK IS THEREFORE A RETROFIT AND A SEVERITY FLIP, NOT A
+  BUILD** — the default's own comment says *"see the report's retrofit count"*, i.e. the backlog of
+  existing tasks that would fail on the flip is the actual cost, and that is an operator call because
+  it tightens a gate against filed work. This is EVIDENCE IN PLACE, not a new number: it is P38's own
+  headline — *the harness cannot tell itself whether what it BUILT is running* — observed for the
+  third time in one session, on P38's own instrument.
+  GROUND TRUTH, R11 (mechanical): LEARNINGS held at 74
   entries, ZERO added across 147 runs, while W1-T86/#631 (utility A/B), T87/#687 (procedural-success
   mining) and T88/#689 (contradiction detection) all merged INTO that corpus; the follow-up harvest
   stated THREE times that `checkCostGovernor`/`logCostGovernorDeferral` (T148/#839) and the T121 queue

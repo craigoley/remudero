@@ -8,12 +8,21 @@
   budget_usd: 45.00
   rationale: "MEASURED 2026-08-07 from issue #1444 and read from source at deadef6.
     `status: blocked` CARRIES TWO UNRELATED MEANINGS AND THE CENSUS CANNOT TELL THEM APART.
-    (1) A RETIREMENT RECORD. Eleven shards in plan/tasks.d set `status: blocked` to mean WITHDRAWN,
-    and say so in as many words — W1-T369's note is representative: `RECORD of the withdrawal, not a
+    (1) A RETIREMENT RECORD, AND IT IS THE OVERWHELMING MAJORITY. Counted 2026-08-07 over the FULLY
+    LOADED plan (plan/tasks.yaml plus every plan/tasks.d shard, 420 tasks): **32 tasks carry
+    `status: blocked`, and 31 of the 32 are withdrawal or retirement records** — only W1-T10 is
+    anything else. Ten live in tasks.d (W1-T191, W1-T269, W1-T270, W1-T273, W1-T286, W1-T291,
+    W1-T292, W1-T293, W1-T314, W1-T369); the rest are inline, and they run back to the earliest
+    tasks in the plan (W1-T3, W1-T5, W1-T8, W1-T9a/b/c, W1-T11, W1-T14, W1-T37, W1-T53, W1-T61 …).
+    They say so in as many words — W1-T369's note is representative: `RECORD of the withdrawal, not a
     work item. status: blocked so nextRunnable/assertRunnable never dispatch it`, with the reason
-    given verbatim as `withdrawn is not one of plan.ts's TASK_STATUSES`. W1-T269, W1-T270, W1-T314,
-    W1-T191, W1-T273, W1-T286, W1-T291, W1-T292, W1-T293, W1-T324 and W1-T369 all borrow the field
-    this way, citing each other as precedent. These are PERMANENT by design.
+    given verbatim as `withdrawn is not one of plan.ts's TASK_STATUSES`. They cite each other as
+    precedent. These are PERMANENT by design.
+    WHY #1444 REPORTS 14 AND NOT 32, WHICH THE IMPLEMENTER MUST NOT MISREAD AS A DISCREPANCY:
+    `tallyDispatchFilters` is FIRST-MATCH and `isDispatchEligible` tests `isMerged` BEFORE
+    `status === 'blocked'`, so every tombstone whose task also derives MERGED is counted under
+    `already-merged` instead. The 14 is the residue — tombstones that are NOT merged — and it will
+    drift as credit changes. Size the fix to the 31, never to the 14.
     (2) A RUNTIME FLAG. daemon.ts's independent-failure path sets `task.status = 'blocked'` IN MEMORY
     so `nextRunnable` stops reconsidering the task this run; status.ts's own comment contrasts it as
     the flip that `resets every time a fresh process starts`. Nothing is written to disk.
@@ -100,6 +109,9 @@
     through its readers.
     verify:auto — every claim is decidable in-process against a seeded plan and an injected escalation
     gateway. Nothing spawned, no network.
-    THE ELEVEN-SHARD COUNT was taken by grepping plan/tasks.d for `status: blocked` at deadef6 and
-    reading each hit's own note; #1444's `14` also includes ids from plan/tasks.yaml, which was not
-    enumerated. Confirm the real number from the loaded plan before quoting it in the PR."
+    THE COUNTS IN THE RATIONALE ARE MEASURED, NOT GREPPED. An earlier draft of this shard said
+    `eleven shards in plan/tasks.d` — that was wrong twice over (the real tasks.d count is TEN; it
+    wrongly included W1-T324, which reads `status: queued`) and it understated the population by
+    two thirds, because it never loaded plan/tasks.yaml. The figures now quoted come from parsing
+    BOTH files into one 420-task list and filtering. The lesson is this shard's own: a count taken
+    over the file you happened to open is not a count over the plan."
