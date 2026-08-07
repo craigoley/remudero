@@ -1110,6 +1110,35 @@ function isBareRunBranch(head: string, taskId: string): boolean {
 }
 
 /**
+ * The SLUG run-branch form: `run-<taskId>-<anything>` — the task's own branch under a
+ * descriptive name rather than an `-<epochMs>` stamp. Third accepted claim form, added
+ * for the same reason {@link isBareRunBranch} was: the 2026-07-30 relaxation's own doc
+ * records that the old strict rule refused merged, correctly-trailered PRs whose branches
+ * "lacked only the `-<epochMs>` suffix", and that named group was never handled. A merged
+ * PR on `run-W1-T377-open-pr-corroboration` matched neither accepted form, was therefore
+ * judged to claim a DIFFERENT task, and vetoed its own credit — permanently, since the
+ * head ref of a merged PR never changes.
+ *
+ * THE TRAILING `-` IS THE ENTIRE PREFIX-COLLISION GUARD (TRAP 1, the reason
+ * {@link ownsBranch} anchors on `-\d+$`). A bare `startsWith(taskId)` would let `W1-T15`
+ * credit from `run-W1-T152-1785348476091`; requiring the boundary character makes both
+ * directions veto, because neither id is a prefix of the other *followed by a hyphen*.
+ *
+ * SUBSUMPTION IS DELIBERATE AND NOT A REDUNDANCY BUG: a digit stamp is a slug, so this
+ * also matches every {@link ownsBranch} form. {@link branchClaimsOtherTask} still names
+ * all three predicates, because the strict ones remain the gate elsewhere (rung (c2), rung
+ * (c3), the non-merged path) and reading the veto as "unless it claims this task in one of
+ * the three legitimate forms" is what keeps those call sites visible to the next reader.
+ *
+ * KEPT OUT OF `ownsBranch`, exactly as `isBareRunBranch` is: widening `ownsBranch` would
+ * reach the (c2)/(c3) corroboration rungs and the non-merged path, granting credit the
+ * 2026-07-30 ruling deliberately refused.
+ */
+function isOwnedSlugBranch(head: string, taskId: string): boolean {
+  return head.startsWith(`run-${taskId}-`);
+}
+
+/**
  * RUNG (c) FOREIGN-BRANCH VETO (operator ruling 2026-07-30, supersedes the
  * head-branch NAME veto for MERGED PRs — see {@link creditsByAnchoredTrailer}).
  *
@@ -1119,10 +1148,14 @@ function isBareRunBranch(head: string, taskId: string): boolean {
  * under the ruling, the exactly-anchored trailer on a merged PR is the evidence,
  * and the branch's NAME may not overrule it.
  *
- * PREFIX COLLISION (TRAP 1, the reason `ownsBranch`'s `-\d+$` anchor exists) is
- * structurally impossible here because this function never PREFIX-matches an id.
- * It asks only "does this run-branch claim THIS task, in either legitimate form?"
- * and vetoes every other `run-*`. So both directions are safe:
+ * PREFIX COLLISION (TRAP 1, the reason `ownsBranch`'s `-\d+$` anchor exists) is held
+ * off by the BOUNDARY CHARACTER, not by avoiding prefix matching. An earlier revision of
+ * this comment said prefix collision was "structurally impossible here because this
+ * function never PREFIX-matches an id"; {@link isOwnedSlugBranch} does prefix-match, and
+ * requiring the id to be followed by `-` is what makes that safe — neither of two
+ * colliding ids is a prefix of the other *plus a hyphen*. The question asked is "does
+ * this run-branch claim THIS task, in any of the three legitimate forms?", vetoing every
+ * other `run-*`. So both directions are safe:
  *   - head `run-W1-T152-1785348476091`, taskId `W1-T15`  → claims neither form of
  *     W1-T15 → VETO (correct: that branch is W1-T152's).
  *   - head `run-W1-T15-1785348476091`,  taskId `W1-T152` → VETO (correct, reverse).
@@ -1132,7 +1165,7 @@ function isBareRunBranch(head: string, taskId: string): boolean {
 function branchClaimsOtherTask(head: string | undefined, taskId: string): boolean {
   if (!head) return false; // unresolved head ref carries no claim — cannot veto
   if (!head.startsWith("run-")) return false; // no task claim encoded at all
-  return !ownsBranch(head, taskId) && !isBareRunBranch(head, taskId);
+  return !ownsBranch(head, taskId) && !isBareRunBranch(head, taskId) && !isOwnedSlugBranch(head, taskId);
 }
 
 /**
