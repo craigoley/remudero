@@ -167,7 +167,15 @@ test("END TO END: spawnWorker itself refuses at the real boundary, with NOTHING 
         },
       },
       // Non-darwin, so the keychain gate is skipped entirely — no `security(1)` call of any kind.
-      keychain: { platform: "linux", runner: () => "", exists: () => false },
+      keychain: {
+        platform: "linux",
+        runner: () => "",
+        exists: () => false,
+        // recon-cloud-workers-spike stop 6: the non-darwin credential rung is stubbed for the
+        // SAME reason `runner`/`exists` above already are — this suite's subject is the live-spawn
+        // guard, not the credential, and an unstubbed rung would refuse before the guard is reached.
+        readCredentialFile: () => JSON.stringify({ claudeAiOauth: { accessToken: "stub", expiresAt: 4102444800000 } }),
+      },
     });
   } catch (e) {
     err = e;

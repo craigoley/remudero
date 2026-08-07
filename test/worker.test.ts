@@ -770,7 +770,13 @@ function e2eSpawnWorkerArgs(dir: string, extra: Record<string, unknown> = {}) {
     },
     // Force past the darwin-only keychain gate without touching the real
     // `security(1)` binary — same escape hatch the keychain test above uses.
-    keychain: { platform: "linux" as NodeJS.Platform },
+    keychain: {
+      platform: "linux" as NodeJS.Platform,
+      // recon-cloud-workers-spike stop 6: stub the non-darwin credential rung, exactly as the
+      // darwin cases above stub `runner`/`exists`. These end-to-end cases are about teardown and
+      // env propagation; the credential is a dependency they declare, not their subject.
+      readCredentialFile: () => JSON.stringify({ claudeAiOauth: { accessToken: "stub", expiresAt: 4102444800000 } }),
+    },
     ...extra,
   };
 }

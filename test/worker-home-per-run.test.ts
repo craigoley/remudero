@@ -331,7 +331,12 @@ function e2eSpawnWorkerArgs(dir: string, runId: string, extra: Record<string, un
       deps: { env: { [CLAUDE_BIN_ENV_OVERRIDE]: "/fake/claude" }, home: dir, exists: () => true, canExecute: () => true, locations: [] },
     },
     // Force past the darwin-only keychain gate without touching a real keychain.
-    keychain: { platform: "linux" as NodeJS.Platform },
+    keychain: {
+      platform: "linux" as NodeJS.Platform,
+      // recon-cloud-workers-spike stop 6: stub the non-darwin credential rung — this suite's
+      // subject is the per-run worker-home lifecycle, not the credential.
+      readCredentialFile: () => JSON.stringify({ claudeAiOauth: { accessToken: "stub", expiresAt: 4102444800000 } }),
+    },
     ...extra,
   };
 }
