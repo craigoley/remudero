@@ -104,7 +104,7 @@
 import { appendFileSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
-import { dirname, join, posix, relative, resolve as resolvePath } from 'node:path';
+import { dirname, join, posix, resolve as resolvePath } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 // DATA, not control flow, and not even embedded in THIS script (W1-T108): the exhaustive set of
