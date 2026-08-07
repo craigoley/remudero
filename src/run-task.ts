@@ -915,7 +915,7 @@ export function lastCommitSubject(worktreePath: string): string | undefined {
  * test drives EVERY branch (incl. the clean-status direct-merge fallback) with
  * fakes; the real defaults are the same gh calls the function always made. */
 export interface ArmDeps {
-  /** `gh pr view --json headRefOid` for this PR. */
+  /** The PR's live head sha — read over REST via {@link readHeadShaRest}, never `gh --json`. */
   headSha: (prUrl: string) => string;
   /** The ledger lines the W1-T230 verdict gate reads. */
   ledgerLines: () => Array<Record<string, unknown>>;
@@ -930,7 +930,7 @@ export interface ArmDeps {
 
 export function realArmDeps(): ArmDeps {
   return {
-    headSha: (prUrl) => (ghJson(["pr", "view", prUrl, "--json", "headRefOid"]) as { headRefOid: string }).headRefOid,
+    headSha: (prUrl) => readHeadShaRest(prUrl),
     ledgerLines: () => readLedgerLines(ledgerPathFor(loadConfig())),
     armAuto: (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `arming auto-merge on ${prUrl}`);
@@ -1824,8 +1824,7 @@ async function runReview(args: {
   openTaskIds?: ReadonlySet<string>;
 }): Promise<ReviewVerdict & { headSha: string; reviewerOutcome: string }> {
   const { owner, repo, prUrl, task, report, log, say } = args;
-  const view = ghJson(["pr", "view", prUrl, "--json", "headRefOid"]) as { headRefOid: string };
-  const headSha = view.headRefOid;
+  const headSha = readHeadShaRest(prUrl);
   const diff = execFileSync("gh", ["pr", "diff", prUrl], { encoding: "utf8", maxBuffer: 1 << 26 });
   const criteria = task.acceptance ?? [];
 
@@ -5924,6 +5923,72 @@ export function reviewViewArgs(owner: string, repo: string, prArg: string): stri
   const n = reviewPrNumber(prArg);
   if (n !== undefined) return singlePrRestArgs(owner, repo, n);
   return ["pr", "view", prArg, "--repo", `${owner}/${repo}`, "--json", "headRefOid,headRefName,body,url,number"];
+}
+
+/**
+ * OWNER, REPO AND NUMBER FROM A PR URL — the three things REST addressing needs, all of which a
+ * github.com PR URL already carries.
+ *
+ * WHY PARSING AND NOT THREADING, established before writing rather than assumed. The two
+ * remaining `--json headRefOid` reads both receive a URL and nothing else:
+ * {@link ArmDeps.headSha} is typed `(prUrl: string) => string`, and its real implementation comes
+ * from {@link realArmDeps}, which takes NO arguments and is evaluated as `armAutoMerge`'s own
+ * default parameter — so there is no call site to thread an owner/repo from without changing
+ * three exported signatures and every caller of them. A URL is
+ * `https://github.com/<owner>/<repo>/pull/<n>` and yields all three unambiguously.
+ *
+ * ANCHORED ON `/pull/<n>`, exactly as {@link reviewPrNumber} is, so a branch literally named
+ * `pull/7` cannot be mistaken for a PR reference. Returns `undefined` — never a guess — on
+ * anything that is not a PR URL.
+ */
+export function prUrlTarget(prUrl: string): { owner: string; repo: string; number: number } | undefined {
+  const m = /^https?:\/\/[^/\s]+\/([^/\s]+)\/([^/\s]+)\/pull\/(\d+)(?:[/?#].*)?$/.exec(prUrl.trim());
+  return m ? { owner: m[1], repo: m[2], number: Number(m[3]) } : undefined;
+}
+
+/**
+ * THE ARGV THE HEAD-SHA READ USES — REST, always, or a loud refusal.
+ *
+ * THE DEFECT, and why this is not {@link reviewViewArgs} copied. Both remaining
+ * `gh pr view <URL> --json headRefOid` reads sit in the POST-REVIEW path, where a GraphQL
+ * rate-limit error blocks the whole review lane: `post_review`'s FIRST call is this read, so the
+ * sweep cannot post the review that would clear the very PR whose re-reads are burning the
+ * budget. `--json` is implemented over GraphQL; `GET /repos/{o}/{r}/pulls/{n}` is REST, a
+ * separate quota.
+ *
+ * NO SILENT FALLBACK, AND THAT IS THE WHOLE POINT. {@link reviewViewArgs} legitimately falls back
+ * to `gh pr view` because its input may be a BARE BRANCH NAME, which REST cannot address at all.
+ * These two callers are given a URL. A URL that does not parse is a broken caller, not a branch —
+ * so this THROWS rather than reaching for the GraphQL argv. A fallback here would reproduce the
+ * exhaustion under the exact conditions the migration exists to survive, while reading as fixed.
+ *
+ * Reuses {@link singlePrRestArgs} rather than re-deriving the path, per W1-T265 and #1348.
+ */
+export function headShaRestArgs(prUrl: string): string[] {
+  const target = prUrlTarget(prUrl);
+  if (!target) {
+    throw new Error(
+      `head-sha read: cannot resolve owner/repo/number from ${JSON.stringify(prUrl)} — refusing to fall back ` +
+        "to `gh pr view --json`, whose GraphQL budget exhaustion is the defect this read was migrated off",
+    );
+  }
+  return singlePrRestArgs(target.owner, target.repo, target.number);
+}
+
+/**
+ * Read a PR's live head sha over REST.
+ *
+ * REFUSES AN EMPTY SHA. {@link mapRestPr} maps `headRefOid` from `row.head?.sha ?? ""`, so a
+ * response missing `head.sha` yields `""` rather than throwing. Handing that back would be WORSE
+ * than the rate-limit failure this replaces: the caller would judge and post a verdict against an
+ * empty head instead of failing. So an absent sha is raised here, where it is attributable.
+ */
+export function readHeadShaRest(prUrl: string, fetch: GhApiFetcher = ghJson): string {
+  const sha = mapRestPr(fetch(headShaRestArgs(prUrl)) as RestPullRow).headRefOid;
+  if (!sha) {
+    throw new Error(`head-sha read: ${prUrl} returned no head sha — refusing to report an empty head`);
+  }
+  return sha;
 }
 
 async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCommandDeps = {}): Promise<number> {
