@@ -80,6 +80,7 @@ import { readlineAsk, type GitRunner, materializeOriginShards, escalateCommand, 
   type AlertFixDispatchDeps,
   runTask,
   buildOpenPrViews,
+  STALL_WINDOW,
 } from "../src/run-task.js";
 import { requestStop } from "../src/lib/fleet-control.js";
 import { LaunchdPlistError } from "../src/lib/launchd.js";
@@ -1735,6 +1736,95 @@ test("BEHAVIORAL (W1-T268): a real runTask run all the way to a real MERGED verd
     assert.ok(verdict, "the merged verdict is ledgered");
     assert.equal(verdict.billing_mode, "subscription");
     assert.equal(verdict.account_label, "acct-merged", "the IMPLEMENT worker's accountLabel, never the risk judge's");
+  } finally {
+    dateNowSpy.mock.restore();
+    process.env.PATH = savedPath;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("BEHAVIORAL (W1-T382): a real runTask run whose merge poll never moves reaches blocked_ci via pollToGate's OWN stall branch, naming the still-pending check", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "runtask-pollgate-stall-root-"));
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(planPath, FOLLOWUP_FIXTURE_PLAN);
+  const config: Config = { claudeBin: "/bin/true", root };
+  followupGitFixture(root);
+
+  const FIXED_TS = 1785000000015;
+  const branch = `run-T-FOLLOWUP-${FIXED_TS}`;
+  const dateNowSpy = t.mock.method(Date, "now", () => FIXED_TS);
+
+  // `pollSeq`'s single entry repeats forever (statefulFakeGh's own per-field counter) —
+  // the PR sits OPEN with `ci` still IN_PROGRESS on every read, byte-identical, so
+  // `pollToGate`'s OWN checkWaitStalled integration (not just the pure predicate,
+  // covered separately in test/check-wait-progress.test.ts) must conclude stalled after
+  // STALL_WINDOW consecutive polls and return blocked, never merged.
+  const fakeBinDir = statefulFakeGh({
+    branch,
+    ciSeq: [[{ name: "ci", conclusion: "SUCCESS" }]],
+    pollSeq: [{ state: "OPEN", statusCheckRollup: [{ name: "ci", conclusion: "IN_PROGRESS" }] }],
+  });
+  // pollToGate's own poll cadence (everySec, not injectable from a runTask caller) is real
+  // seconds — stub `sleep` too so this test costs no wall-clock time instead of
+  // (STALL_WINDOW - 1) * 6s of real waiting.
+  writeFileSync(join(fakeBinDir, "sleep"), ["#!/bin/bash", "exit 0", ""].join("\n"));
+  chmodSync(join(fakeBinDir, "sleep"), 0o755);
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${fakeBinDir}:${savedPath}`;
+
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const spawn: typeof spawnWorker = async (args) => {
+    spawnCalls.push(args);
+    if (spawnCalls.length === 1) {
+      return result({
+        sessionId: "s-recon",
+        text: "RECON REPORT\nOBSERVED: nothing\nINFERRED: nothing\nCOULDN'T-VERIFY: nothing\n",
+      });
+    }
+    if (spawnCalls.length === 2) {
+      return result({
+        sessionId: "s-implement",
+        accountLabel: "acct-pollstall",
+        text: "REPORT\nPR_URL: https://github.com/acme/remudero/pull/601\n",
+      });
+    }
+    return result({
+      sessionId: "s-risk-judge",
+      text: "RISK_VERDICT: low\nRISK_CONFIDENCE: 0.95\nRISK_REASON: a small, well-tested fixture change\n",
+    });
+  };
+
+  try {
+    const res = await withLiveWritesAllowed(() =>
+      runTask("T-FOLLOWUP", {
+        skipGitSync: true,
+        planPath,
+        config,
+        github: FOLLOWUP_OFFLINE_GITHUB,
+        spawn,
+        containmentExec: followupHoldingContainmentExec,
+        isolationExec: followupCleanIsolationExec,
+        runReview: async () => fakeReview("success", []),
+      }),
+    );
+
+    assert.equal(res.verdict, "blocked_ci", "a merge poll that never moves must never resolve as merged");
+    assert.equal(res.merged, false);
+
+    const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
+    const stalledLog = ledger.find((l) => l.step === "pr.stalled");
+    assert.ok(stalledLog, "pollToGate's stall branch must itself log pr.stalled, not just return silently");
+    assert.deepEqual(stalledLog.pending, ["ci"], "names the check that was still pending, not just STALL_WINDOW elapsed");
+    const verdict = ledger.find((l) => l.step === "verdict" && l.verdict === "blocked_ci");
+    assert.ok(verdict, "the blocked_ci verdict is ledgered");
+    assert.match(
+      verdict.reason,
+      new RegExp(`no progress for ${STALL_WINDOW} consecutive polls`),
+      "the blocked reason names the stall, never an elapsed-poll count",
+    );
   } finally {
     dateNowSpy.mock.restore();
     process.env.PATH = savedPath;
@@ -5644,14 +5734,23 @@ test("realArmDeps: the real gh/config wiring executes against a PATH-stubbed gh 
   const bin = mkdtempSync(join(tmpdir(), "gh-stub-"));
   writeFileSync(
     join(bin, "gh"),
-    '#!/bin/sh\ncase "$2" in view) echo "{\\"headRefOid\\":\\"stub1234\\"}";; *) exit 0;; esac\n',
+    // `headSha` reads over REST now (`gh api repos/{o}/{r}/pulls/{n}`), so the stub answers on
+    // $1=api and in REST's own shape — mapRestPr reads head.sha. `pr merge` still falls through
+    // to the exit-0 arm below, exactly as before.
+    '#!/bin/sh\ncase "$1" in api) echo "{\\"number\\":1,\\"html_url\\":\\"u\\",\\"updated_at\\":\\"t\\",\\"head\\":{\\"ref\\":\\"b\\",\\"sha\\":\\"stub1234\\"}}";; *) exit 0;; esac\n',
     { mode: 0o755 },
   );
   const oldPath = process.env.PATH;
   process.env.PATH = `${bin}:${oldPath}`;
   try {
     const d = realArmDeps();
-    assert.equal(d.headSha("url/x"), "stub1234", "headSha parses gh pr view --json headRefOid");
+    // A REAL PR URL: the REST path resolves owner/repo/number from it, and refuses anything it
+    // cannot address rather than falling back to a gh --json read.
+    assert.equal(
+      d.headSha("https://github.com/craigoley/remudero/pull/1"),
+      "stub1234",
+      "headSha reads head.sha off the REST single-PR response",
+    );
     // These three reach `gh pr merge` for real, against the PATH-stubbed `gh` written above —
     // never the live repo. Each is exempted individually because the guard checks the CALL,
     // not the destination, and running the real dep body IS the assertion.

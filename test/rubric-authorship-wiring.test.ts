@@ -63,6 +63,14 @@ const CRITERION_EDIT_DIFF = [
 function writeGhStub(binDir: string, commentFile: string): void {
   const script = `#!/bin/sh
 case "$1 $2" in
+  "api "*)
+    # runReview's head-sha read is REST now (\`gh api repos/{o}/{r}/pulls/{n}\`), not
+    # \`pr view --json headRefOid\` — answered in REST's own shape, since mapRestPr reads
+    # head.sha. Same sha as the pr-view arm below so every assertion here is unchanged.
+    case "$*" in
+      *pulls/*) echo '{"number":1,"html_url":"https://github.com/o/r/pull/1","updated_at":"t","body":"","head":{"ref":"b","sha":"abc1234def5678"}}' ;;
+      *) echo '{}' ;;
+    esac ;;
   "pr view")
     case "$*" in
       *headRefOid*) echo '{"headRefOid":"abc1234def5678"}' ;;

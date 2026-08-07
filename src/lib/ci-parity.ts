@@ -10,7 +10,7 @@ import { defaultPreflightSpawn, typecheckStep, type PreflightSpawn } from "./com
  *
  * THE GAP THIS CLOSES. The shipped `rmd preflight` (W1-T221) runs three hand-route steps —
  * commitlint, `tsc --noEmit`, the emitter's header/body checks — none of which is any of the
- * fourteen jobs .github/workflows/ci.yml actually gates a merge on. Everything a coverage,
+ * thirteen jobs .github/workflows/ci.yml actually gates a merge on. Everything a coverage,
  * plan-lint, claims, fitness or drift job would say is discoverable only after a push. This
  * module is a SECOND, ADDITIVE mode on the same verb (never a second command, never a change to
  * the default no-flag behaviour): `runCiParity` mirrors CI's own check set, one named step per
@@ -350,14 +350,6 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
   },
   npmScriptEntry("learnings-budget-ratchet", "learnings-budget-ratchet"),
   npmScriptEntry("jscpd-gate", "jscpd"),
-  {
-    job: "refactor-campaign",
-    mirrored: false,
-    reason:
-      "this job is scoped to a `refactor-campaign` GitHub PR label (github.event.pull_request.labels), which does not exist " +
-      "until the PR is opened and labeled — there is no local diff-based proxy for it, and running its bundle (stryker + jscpd " +
-      "+ depcruise + npm audit) unconditionally would defeat preflight's own point of staying fast",
-  },
   npmScriptEntry("claims", "claims"),
   {
     job: "lint-plan",

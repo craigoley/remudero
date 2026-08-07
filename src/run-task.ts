@@ -915,7 +915,7 @@ export function lastCommitSubject(worktreePath: string): string | undefined {
  * test drives EVERY branch (incl. the clean-status direct-merge fallback) with
  * fakes; the real defaults are the same gh calls the function always made. */
 export interface ArmDeps {
-  /** `gh pr view --json headRefOid` for this PR. */
+  /** The PR's live head sha — read over REST via {@link readHeadShaRest}, never `gh --json`. */
   headSha: (prUrl: string) => string;
   /** The ledger lines the W1-T230 verdict gate reads. */
   ledgerLines: () => Array<Record<string, unknown>>;
@@ -930,7 +930,7 @@ export interface ArmDeps {
 
 export function realArmDeps(): ArmDeps {
   return {
-    headSha: (prUrl) => (ghJson(["pr", "view", prUrl, "--json", "headRefOid"]) as { headRefOid: string }).headRefOid,
+    headSha: (prUrl) => readHeadShaRest(prUrl),
     ledgerLines: () => readLedgerLines(ledgerPathFor(loadConfig())),
     armAuto: (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `arming auto-merge on ${prUrl}`);
@@ -1631,16 +1631,19 @@ interface GateOutcome {
 
 /**
  * Poll a PR to a terminal gate decision. Returns merged only on state MERGED.
- * A red required check short-circuits to blocked; a timeout with checks still
- * pending is ALSO blocked (pending is never treated as pass).
+ * A red required check short-circuits to blocked. Otherwise this polls until
+ * {@link checkWaitStalled} sees no forward motion (pending is never treated as
+ * pass) — an ITERATION COUNT never ends the wait on its own (W1-T382: 21 of 21
+ * PRs this repo ever booked as a check-wait timeout later merged, so a bound
+ * on ELAPSED POLLS was firing on a healthy PR every single time it fired).
  */
 async function pollToGate(
   prUrl: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
-  maxIters = 60,
   everySec = 6,
 ): Promise<GateOutcome> {
-  for (let i = 0; i < maxIters; i++) {
+  const readings: (RollupEntry[] | undefined)[] = [];
+  for (let i = 0; ; i++) {
     const v = ghJson(["pr", "view", prUrl, "--json", "state,statusCheckRollup"]) as {
       state: string;
       statusCheckRollup?: RollupEntry[];
@@ -1653,6 +1656,19 @@ async function pollToGate(
       log("pr.checks", { conclusion: "red", check: red.name ?? red.context ?? "unknown" });
       return { merged: false, reason: `required check red: ${red.name ?? red.context ?? "unknown"}` };
     }
+    readings.push(roll);
+    if (readings.length > STALL_WINDOW) readings.shift(); // checkWaitStalled only ever looks at the last STALL_WINDOW
+    const stall = checkWaitStalled(readings);
+    if (stall.stalled) {
+      log("pr.stalled", { pending: stall.pending, identicalPolls: STALL_WINDOW });
+      return {
+        merged: false,
+        reason:
+          stall.pending.length > 0
+            ? `no progress for ${STALL_WINDOW} consecutive polls — still pending: ${stall.pending.join(", ")}`
+            : `no progress for ${STALL_WINDOW} consecutive polls`,
+      };
+    }
     if (i === 0 || i % 5 === 0) {
       log("pr.polling", {
         state: v.state,
@@ -1661,7 +1677,6 @@ async function pollToGate(
     }
     execFileSync("sleep", [String(everySec)]);
   }
-  return { merged: false, reason: "timeout waiting for checks (pending treated as blocked)" };
 }
 
 /**
@@ -1688,32 +1703,105 @@ export function ciGateFromRollup(rollup: RollupEntry[] | undefined): "green" | "
 }
 
 /**
+ * W1-T382: how many consecutive IDENTICAL poll readings {@link checkWaitStalled} requires
+ * before it concludes a check-wait has stalled. This is a property of the POLL CADENCE
+ * (`everySec` in `pollToGate`/`waitForCiGreen`) — how many times we have re-asked the same
+ * question and gotten the same answer — NOT of CI duration. That distinction is the whole
+ * fix: recon measured 21 of 21 PRs ever booked as a check-wait timeout later merging (0
+ * closed unmerged), so there is no observed "stuck" population to fit an elapsed-time bound
+ * against. Any such bound is fitted to noise and only changes how often the false block
+ * fires, never whether it is wrong to fire. "5 identical readings in a row" needs no such
+ * fit — it only says a wait that has stopped moving for a while is worth ending.
+ */
+export const STALL_WINDOW = 5;
+
+/** Order-independent fingerprint of a rollup's per-check state, used by
+ *  {@link checkWaitStalled} to tell "nothing changed" from "something moved" between two
+ *  polls without caring whether GitHub happens to reorder entries between requests. */
+function rollupSignature(rollup: RollupEntry[] | undefined): string {
+  return (rollup ?? [])
+    .map((c) => `${c.name ?? c.context ?? "unknown"}:${c.conclusion ?? c.status ?? c.state ?? ""}`)
+    .sort()
+    .join("|");
+}
+
+/**
+ * W1-T382: THE DERIVATIVE, NOT THE DEADLINE. `pollToGate` and `waitForCiGreen` call this
+ * every poll (after their own immediate terminal checks — merged/closed/red — have already
+ * been ruled out) with the full sequence of rollups read so far for the CURRENT wait,
+ * OLDEST FIRST, and get back whether to give up. Give up ONLY when there has been no
+ * forward motion: the last `STALL_WINDOW` readings are byte-identical (via
+ * {@link rollupSignature}) — no required check's conclusion/status/state changed, and the
+ * pending set did not shrink (a shrink IS a state change, so one comparison covers both,
+ * per the task design). Fewer than `STALL_WINDOW` readings so far is never enough evidence
+ * to conclude stalled, so a fresh wait always keeps waiting.
+ *
+ * Pure — no I/O, no clock, nothing spawned — so it costs ZERO extra API calls: both callers
+ * already fetch `statusCheckRollup` on every iteration for their own red/green checks; this
+ * only compares readings already in hand.
+ *
+ * Returns which checks were still pending when the stall was concluded, so a `blocked_ci`
+ * verdict can NAME the observation that ended the wait instead of just asserting elapsed
+ * time passed.
+ */
+export function checkWaitStalled(readings: ReadonlyArray<RollupEntry[] | undefined>): {
+  stalled: boolean;
+  pending: string[];
+} {
+  if (readings.length < STALL_WINDOW) return { stalled: false, pending: [] };
+  const window = readings.slice(-STALL_WINDOW);
+  const signatures = window.map(rollupSignature);
+  if (!signatures.every((s) => s === signatures[0])) return { stalled: false, pending: [] };
+  const last = window[window.length - 1] ?? [];
+  const pending = last
+    .filter((c) => {
+      const state = String(c.conclusion ?? c.status ?? c.state ?? "");
+      return !RED_CONCLUSIONS.has(state) && state !== "SUCCESS";
+    })
+    .map((c) => c.name ?? c.context ?? "unknown");
+  return { stalled: true, pending };
+}
+
+/**
  * Poll the PR's `ci` check to a terminal state BEFORE the review runs (Standing
  * rule 4: the reviewer judges ACCEPTANCE only once the code is proven to typecheck
  * and its tests pass). Returns "green" on ci success, "red" on any red conclusion,
- * "timeout" if ci never resolves — pending is never treated as pass. The scan
- * ignores `remudero-review`'s OWN pinned status ({@link ciGateFromRollup}) so a
- * body-only fix strike (unchanged head sha) is never blocked by the review
- * verdict it is itself about to replace.
+ * "timeout" if the wait STALLS — {@link checkWaitStalled} sees no forward motion — pending
+ * is never treated as pass. The scan ignores `remudero-review`'s OWN pinned status
+ * ({@link ciGateFromRollup}) so a body-only fix strike (unchanged head sha) is never
+ * blocked by the review verdict it is itself about to replace.
+ *
+ * W1-T382: this used to give up after a fixed ITERATION COUNT regardless of whether `ci`
+ * was still moving — the same defect {@link pollToGate} had, and measured against the same
+ * ledger (21 of 21 PRs this repo ever booked as a check-wait timeout later merged). It now
+ * polls until the rollup itself shows no forward motion, logging which check(s) were still
+ * pending when it gave up (`ci.stalled`) so a `blocked_ci` reader can tell a stall from a
+ * slow build without re-deriving it.
  */
 async function waitForCiGreen(
   prUrl: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
-  maxIters = 60,
   everySec = 6,
 ): Promise<"green" | "red" | "timeout"> {
-  for (let i = 0; i < maxIters; i++) {
+  const readings: (RollupEntry[] | undefined)[] = [];
+  for (let i = 0; ; i++) {
     const v = ghJson(["pr", "view", prUrl, "--json", "statusCheckRollup"]) as {
       statusCheckRollup?: RollupEntry[];
     };
     const state = ciGateFromRollup(v.statusCheckRollup);
     if (state === "red") return "red";
     if (state === "green") return "green";
+    readings.push(v.statusCheckRollup ?? []);
+    if (readings.length > STALL_WINDOW) readings.shift(); // checkWaitStalled only ever looks at the last STALL_WINDOW
+    const stall = checkWaitStalled(readings);
     const ci = (v.statusCheckRollup ?? []).find((c) => (c.name ?? c.context) === "ci");
     if (i === 0 || i % 5 === 0) log("ci.polling", { ci: String(ci?.conclusion ?? ci?.status ?? "pending") });
+    if (stall.stalled) {
+      log("ci.stalled", { pending: stall.pending, identicalPolls: STALL_WINDOW });
+      return "timeout";
+    }
     execFileSync("sleep", [String(everySec)]);
   }
-  return "timeout";
 }
 
 /**
@@ -1824,8 +1912,7 @@ async function runReview(args: {
   openTaskIds?: ReadonlySet<string>;
 }): Promise<ReviewVerdict & { headSha: string; reviewerOutcome: string }> {
   const { owner, repo, prUrl, task, report, log, say } = args;
-  const view = ghJson(["pr", "view", prUrl, "--json", "headRefOid"]) as { headRefOid: string };
-  const headSha = view.headRefOid;
+  const headSha = readHeadShaRest(prUrl);
   const diff = execFileSync("gh", ["pr", "diff", prUrl], { encoding: "utf8", maxBuffer: 1 << 26 });
   const criteria = task.acceptance ?? [];
 
@@ -5924,6 +6011,72 @@ export function reviewViewArgs(owner: string, repo: string, prArg: string): stri
   const n = reviewPrNumber(prArg);
   if (n !== undefined) return singlePrRestArgs(owner, repo, n);
   return ["pr", "view", prArg, "--repo", `${owner}/${repo}`, "--json", "headRefOid,headRefName,body,url,number"];
+}
+
+/**
+ * OWNER, REPO AND NUMBER FROM A PR URL — the three things REST addressing needs, all of which a
+ * github.com PR URL already carries.
+ *
+ * WHY PARSING AND NOT THREADING, established before writing rather than assumed. The two
+ * remaining `--json headRefOid` reads both receive a URL and nothing else:
+ * {@link ArmDeps.headSha} is typed `(prUrl: string) => string`, and its real implementation comes
+ * from {@link realArmDeps}, which takes NO arguments and is evaluated as `armAutoMerge`'s own
+ * default parameter — so there is no call site to thread an owner/repo from without changing
+ * three exported signatures and every caller of them. A URL is
+ * `https://github.com/<owner>/<repo>/pull/<n>` and yields all three unambiguously.
+ *
+ * ANCHORED ON `/pull/<n>`, exactly as {@link reviewPrNumber} is, so a branch literally named
+ * `pull/7` cannot be mistaken for a PR reference. Returns `undefined` — never a guess — on
+ * anything that is not a PR URL.
+ */
+export function prUrlTarget(prUrl: string): { owner: string; repo: string; number: number } | undefined {
+  const m = /^https?:\/\/[^/\s]+\/([^/\s]+)\/([^/\s]+)\/pull\/(\d+)(?:[/?#].*)?$/.exec(prUrl.trim());
+  return m ? { owner: m[1], repo: m[2], number: Number(m[3]) } : undefined;
+}
+
+/**
+ * THE ARGV THE HEAD-SHA READ USES — REST, always, or a loud refusal.
+ *
+ * THE DEFECT, and why this is not {@link reviewViewArgs} copied. Both remaining
+ * `gh pr view <URL> --json headRefOid` reads sit in the POST-REVIEW path, where a GraphQL
+ * rate-limit error blocks the whole review lane: `post_review`'s FIRST call is this read, so the
+ * sweep cannot post the review that would clear the very PR whose re-reads are burning the
+ * budget. `--json` is implemented over GraphQL; `GET /repos/{o}/{r}/pulls/{n}` is REST, a
+ * separate quota.
+ *
+ * NO SILENT FALLBACK, AND THAT IS THE WHOLE POINT. {@link reviewViewArgs} legitimately falls back
+ * to `gh pr view` because its input may be a BARE BRANCH NAME, which REST cannot address at all.
+ * These two callers are given a URL. A URL that does not parse is a broken caller, not a branch —
+ * so this THROWS rather than reaching for the GraphQL argv. A fallback here would reproduce the
+ * exhaustion under the exact conditions the migration exists to survive, while reading as fixed.
+ *
+ * Reuses {@link singlePrRestArgs} rather than re-deriving the path, per W1-T265 and #1348.
+ */
+export function headShaRestArgs(prUrl: string): string[] {
+  const target = prUrlTarget(prUrl);
+  if (!target) {
+    throw new Error(
+      `head-sha read: cannot resolve owner/repo/number from ${JSON.stringify(prUrl)} — refusing to fall back ` +
+        "to `gh pr view --json`, whose GraphQL budget exhaustion is the defect this read was migrated off",
+    );
+  }
+  return singlePrRestArgs(target.owner, target.repo, target.number);
+}
+
+/**
+ * Read a PR's live head sha over REST.
+ *
+ * REFUSES AN EMPTY SHA. {@link mapRestPr} maps `headRefOid` from `row.head?.sha ?? ""`, so a
+ * response missing `head.sha` yields `""` rather than throwing. Handing that back would be WORSE
+ * than the rate-limit failure this replaces: the caller would judge and post a verdict against an
+ * empty head instead of failing. So an absent sha is raised here, where it is attributable.
+ */
+export function readHeadShaRest(prUrl: string, fetch: GhApiFetcher = ghJson): string {
+  const sha = mapRestPr(fetch(headShaRestArgs(prUrl)) as RestPullRow).headRefOid;
+  if (!sha) {
+    throw new Error(`head-sha read: ${prUrl} returned no head sha — refusing to report an empty head`);
+  }
+  return sha;
 }
 
 async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCommandDeps = {}): Promise<number> {
