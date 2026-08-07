@@ -4123,7 +4123,19 @@ function walkDiff(diff: string): DiffLine[] {
       continue;
     }
     if (raw.startsWith("+++ ")) {
-      file = raw.replace(/^\+\+\+\s+(?:b\/)?/, "").trim();
+      // W1-T389: a DELETED file's `+++` line is `+++ /dev/null`, and letting it overwrite
+      // `file` tagged every removed line `/dev/null` — which `changedFiles` then filtered
+      // out, so a pure deletion contributed NOTHING to the reviewer's changed-file list.
+      // The `diff --git a/<path> b/<path>` header one branch above already set the real
+      // path, so KEEP IT rather than clobbering it with the sentinel. Fixed here, in the
+      // walker, rather than at each consumer: there are four, and patching them one at a
+      // time is how the next one inherits the bug.
+      //
+      // The `---` direction needs no equivalent: an ADDED file's `--- /dev/null` is skipped
+      // by the branch below rather than assigned, so additions were never affected. That is
+      // asserted rather than assumed — see test/review-deletion-blind.test.ts.
+      const plus = raw.replace(/^\+\+\+\s+(?:b\/)?/, "").trim();
+      if (plus !== "/dev/null") file = plus;
       continue;
     }
     if (raw.startsWith("--- ") || raw.startsWith("@@")) continue;
