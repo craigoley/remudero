@@ -1,0 +1,118 @@
+- id: W1-T390
+  title: "a merged PR on the task's OWN `run-<id>-<slug>` branch is refused credit forever — `ownsBranch` requires `-<epochMs>$` and `branchClaimsOtherTask` reads every other `run-` form as a FOREIGN claim, so W1-T377 and W1-T378 are done and permanently uncredited"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  rationale: "MEASURED 2026-08-07 against the live GitHub API and read from source at deadef6; it is
+    the cause of BOTH currently-open escalations.
+    THE THREE PREDICATES, verbatim from src/lib/status.ts. `ownsBranch` is
+    `new RegExp('^run-' + escapeRegExp(taskId) + '-\\\\d+$')`. `isBareRunBranch` is `head === 'run-' + taskId`.
+    `branchClaimsOtherTask` returns `head.startsWith('run-')` AND NOT ownsBranch AND NOT isBareRunBranch.
+    `creditsByAnchoredTrailer`, for a MERGED PR, returns `!branchClaimsOtherTask(head, taskId)`.
+    So a head of `run-<taskId>-<non-numeric-slug>` — the task's OWN branch, under a descriptive name —
+    matches neither accepted form, is judged to claim a DIFFERENT task, and VETOES its own credit.
+    THE TWO LIVE CASTS, both merged, both still uncredited 32+ hours later:
+    PR #1386 `run-W1-T377-open-pr-corroboration`, merged 2026-08-05T23:06:20Z, body trailer
+    `Remudero-Task: W1-T377`, 4 criteria. PR #1391 `run-W1-T378-reaper-activity-gate`, merged
+    2026-08-05T23:46:50Z, trailer `Remudero-Task: W1-T378`. THE CONTROL, same window, same gateway:
+    PR #1436 `run-W1-T379-1786028670354` merged 2026-08-07T02:02:08Z and CREDITS NORMALLY — the only
+    difference between the credited and uncredited branches is whether the suffix is digits.
+    THE COST IS NOT HYPOTHETICAL. Issue #1448 is W1-T377's dispatch circuit breaker tripping —
+    `repeated dispatch with no new owned PR` — on a task whose PR merged two days ago; issue #1444
+    names W1-T377 and W1-T378 among the blockers starving the queue. The task is re-selected every
+    drain, re-dispatched, and can NEVER earn the credit that would stop it, because the credit path
+    structurally refuses its branch. This is the W1-T1 storm shape with a new cause.
+    IT IS THE UNFIXED HALF OF THE 2026-07-30 RELAXATION. `creditsByAnchoredTrailer`'s own doc records
+    that the old strict rule `refused SEVEN merged, correctly-trailered PRs because their branches were
+    hand-named (feat-*, fix/*) or LACKED ONLY THE -<epochMs> SUFFIX`. The relaxation fixed the first
+    group — a `feat-*` head does not start with `run-`, so it vetoes nothing — and added
+    `isBareRunBranch` for the exact `run-<taskId>` form. The named `lacked only the suffix` case, which
+    is the MOST obviously-owned shape of the three, was never handled. Half-fix, per P9.
+    COVERED-BY: NO. P29(i) is SIBLING credit and shipped (#349) — its sibling branches are valid
+    `-<epochMs>` forms and pass `ownsBranch`, so it cannot reach this. P47 governs FOREIGN branches and
+    would refuse these at creation, which is the opposite of the correct answer: these branches are
+    OWNED and should credit. P33's quarantine list is a manual drain and does not change the predicate.
+    W1-T377 itself is about an OPEN PR with no ledger line and is MERGED-orthogonal."
+  design: |
+    ONE PREDICATE, ONE BOUNDARY CHARACTER. Teach `branchClaimsOtherTask` that a head whose remainder
+    is this task's id followed by `-` (or by nothing) claims THIS task, not another one.
+
+    (i) THE FIX BELONGS IN `branchClaimsOtherTask`, NOT IN `ownsBranch`. `ownsBranch` is ALSO the
+    assert for rung (c2)'s head-branch corroboration, whose own doc says it `must stay strict`, and
+    for the non-merged path in `creditsByAnchoredTrailer` (TRAP 2). Widening it would grant credit on
+    UNMERGED PRs, which the 2026-07-30 ruling deliberately refused. `isBareRunBranch` is already
+    precedent for exactly this: a second accepted form, kept OUT of `ownsBranch` so (c2) is unaffected.
+    Follow that shape rather than inventing one.
+
+    (ii) THE `-` IS LOAD-BEARING AND IS THE WHOLE PREFIX-COLLISION GUARD. Accept when the remainder
+    equals the id, or starts with the id followed by `-`. A bare `startsWith(taskId)` would credit
+    W1-T15 from `run-W1-T152-1785348476091`, which is TRAP 1 and is the reason `ownsBranch` anchors on
+    `-\d+$` in the first place. Both directions must be asserted, not just the one this task noticed.
+
+    (iii) SCOPE IS MERGED-ONLY, INHERITED NOT RE-ARGUED. `creditsByAnchoredTrailer` already gates the
+    widened path behind `state === MERGED` and already fails closed on an unreadable head. Neither
+    changes. A CLOSED-unmerged or OPEN PR on a slug branch must still not credit, and that is a
+    falsifier, not an assumption.
+
+    (iv) THE ANCHORED TRAILER STILL DOES THE WORK. This does not make a slug branch self-crediting —
+    `hasAnchoredTrailer` is checked first and unchanged. What changes is only that an owned branch
+    stops being mistaken for a foreign one. A PR with NO trailer credits nothing, before and after.
+
+    (v) FALSIFIER, BOTH DIRECTIONS, AGAINST THE REAL FUNCTION. Seed `deriveStatus` with a merged PR on
+    `run-<id>-<slug>` carrying the anchored trailer: it must credit. Seed the prefix-collision pair in
+    BOTH orders (`run-W1-T15-*` against taskId `W1-T152`, and `run-W1-T152-*` against taskId `W1-T15`):
+    both must still VETO. Seed a genuinely foreign `run-<otherId>-<slug>`: must still VETO. Reverting
+    the predicate must fail the first and pass the rest, so the test discriminates the change rather
+    than the module.
+
+    (vi) THE TWO STRANDED TASKS ARE EVIDENCE, NOT SCOPE. Crediting W1-T377/W1-T378 retroactively is
+    `rmd correct` (P9/W1-T75) or falls out of the next projection once this lands; it is not this
+    task's work and must not be scripted here.
+
+    NOT IN SCOPE: `ownsBranch` itself; rung (c2); the non-merged path; P47's emission discipline
+    (which governs who may WRITE a trailer, upstream of this and complementary to it); the branch
+    NAMING convention — this task makes the reader correct rather than making every writer conform,
+    because the writers include humans and there will always be one more.
+  acceptance:
+    - claim: "a merged PR on the task's own run-branch with a descriptive suffix and an anchored trailer credits the task"
+      proof: "unit test: test/owned-branch-slug-credit.test.ts"
+    - claim: "the prefix-collision pair still vetoes in both directions, so a shorter id never credits from a longer one"
+      proof: "unit test: test/owned-branch-slug-credit.test.ts"
+    - claim: "a genuinely foreign run-branch and every non-merged state still refuse credit"
+      proof: "unit test: test/owned-branch-slug-credit.test.ts"
+    - claim: "rung c2 corroboration and the non-merged path keep the strict ownsBranch assert unchanged"
+      proof: "unit test: test/owned-branch-slug-credit.test.ts"
+  risk: high
+  origin: oper#uncreditable-owned-branch-2026-08-07
+  plan_refs: ["W1-T64", "W1-T69", "W1-T149", "W1-T256", "P29", "P33", "P47"]
+  files: [src/lib/status.ts, test/owned-branch-slug-credit.test.ts]
+  status: queued
+  attempts: 0
+  note: "risk:high on BLAST RADIUS, not span — two files, one predicate. The band is inherited from
+    W1-T377's own note: this rung GATES DISPATCH, and status.ts's header states that a false credit
+    here is worse than no credit. A predicate that wrongly credits re-opens the false-credit inversion
+    R5 found, so the prefix-collision falsifier is not optional colour.
+    budget_usd 55 — the change is small and the shape is mirrored from `isBareRunBranch`; the cost is
+    the four-way falsifier and re-reading the three call sites of `ownsBranch` to prove none moved.
+    EVIDENCE GRADE, STATED PRECISELY BECAUSE THE TWO HALVES DIFFER. The three predicates were
+    transcribed VERBATIM from status.ts at deadef6 into a standalone script and EXECUTED against the
+    real head refs: `run-W1-T377-open-pr-corroboration` and `run-W1-T378-reaper-activity-gate` both
+    evaluate to VETOED, while `run-W1-T379-1786028670354` and `run-W1-T377`'s own control
+    `run-W1-T149-1784553391268` both CREDIT — so the discriminator is the digit suffix and nothing
+    else, demonstrated rather than argued. Both prefix-collision directions were run and both stay
+    VETOED, which is the constraint the fix must preserve. WHAT IS STILL NOT EXECUTED is
+    `deriveStatus` END TO END: its rung precedence could in principle credit these tasks by another
+    route. `rmd status W1-T377` remains the first implementation step, and if it credits, this task is
+    WITHDRAWN and the real cause of #1448 is still open.
+    BLAST RADIUS — MEASURED, AND SMALLER THAN THE SYMPTOM SUGGESTS. Over the 100 most recent closed
+    PRs (#1341-#1451) there are 37 merged `run-*` branches and exactly TWO are slug-form: these two,
+    merged 40 minutes apart on 2026-08-05. So the shape is RARE (~5%) and CLUSTERED — one actor, one
+    session — not an ambient condition. DO NOT let this task be justified as an explanation for the
+    credit-artifact band: the plan's 0%-64% ledger-credit range across nine cycles is NOT accounted
+    for by two PRs, and claiming otherwise would be exactly the unattributed-cause error P43(ii)
+    forbids. The justification is the FAILURE MODE, not the frequency — when it happens the task
+    becomes permanently uncreditable with no self-correcting path, and both of the daemon's currently
+    open escalations trace to this one occurrence."
