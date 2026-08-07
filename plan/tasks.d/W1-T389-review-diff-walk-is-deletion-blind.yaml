@@ -1,0 +1,111 @@
+- id: W1-T389
+  title: "the reviewer's own changed-file list DROPS EVERY DELETED FILE — `walkDiff` tags a deletion's lines `/dev/null` from its `+++ /dev/null` header and `changedFiles` filters exactly that, so a 48-file retirement PR reads as 7 and the `planOnly` exemption on the Standing rule 15 guard can be won by deleting src/ instead of editing it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "FOUND ON PR #1441 (W1-T386) 2026-08-07, measured against that PR's real diff, after a
+    FIRST HYPOTHESIS WAS WRONG AND WAS FALSIFIED — recorded because the falsification is the
+    evidence. The first theory was a moving merge base (a two-dot `origin/main..HEAD` range growing
+    as main moves). The fix rung tested it independently: commit 0f0c0ca is `merge origin/main to
+    refresh the diff base for W1-T386`, and the re-review returned a BYTE-IDENTICAL verdict. The base
+    was never the cause.
+    THE MECHANISM, from source. `walkDiff` (src/lib/review.ts) sets the current file from the diff's
+    `+++` line: `file = raw.replace(/^\\+\\+\\+\\s+(?:b\\/)?/, \"\").trim()`. A DELETED file's `+++`
+    line is `+++ /dev/null`, so every one of its removed lines is tagged `/dev/null`. `changedFiles`
+    then filters precisely that: it keeps a line only when `l.file && l.file !== \"/dev/null\"`. A
+    pure deletion therefore contributes NOTHING to the changed-file list.
+    MEASURED ON THE REAL DIFF: PR #1441 carries 48 files — `deleted file mode` 41, `+++ /dev/null`
+    41, `+++ b/<path>` 7. `changedFiles(walkDiff(diff))` yields 7. The posted verdict named three
+    files and `+3 more`-style truncation totalling seven, and read
+    `FAIL — body contradicts its own diff: claimed \"exactly 48 files\"` against a body whose claim
+    was TRUE (GitHub reports changed_files: 48). Reproduced in-process: the same body reports one
+    contradiction against the reviewer's 7-file list and ZERO against the true 48-file list.
+    THE BODY CHECK IS THE SYMPTOM. THE GUARD IS THE DEFECT. Three lines later the SAME list decides
+    the Standing rule 15 exemption:
+      const diffFiles = changedFiles(walkDiff(evidence.diff));
+      const planOnly = diffFiles.length > 0 && diffFiles.every(isInPlanScope);
+      const criteriaTampered = !planOnly && criterionFieldTampered(evidence.diff);
+    `criterionFieldTampered` reads the RAW diff and can see deletions; only the exemption is blind.
+    So a PR that DELETES files under src/ while modifying one plan-scoped file computes `diffFiles`
+    as plan-scoped-only, wins `planOnly`, and is EXEMPTED from the guard that exists to stop a worker
+    editing its own acceptance criteria. That consequence is derived from these three lines and is
+    NOT yet demonstrated against a live PR — design (i) exists to prove or refute it before anything
+    is changed.
+    WHY THIS CLASS KEEPS RECURRING HERE: an instrument reporting something untrue about the work,
+    with nothing downstream able to tell. Same family as W1-T387 (check-proof disagreeing with the
+    review executor) and W1-T388 (an advisory report inverted by a dead field)."
+  design: |
+    (i) DECIDE THE GUARD QUESTION FIRST, BY FIXTURE, BEFORE TOUCHING THE WALKER. Build a diff that
+    DELETES a file under src/ and MODIFIES one plan-scoped file, run it through the real
+    `judgeReview` path, and record what `planOnly` and `criteriaTampered` come out as. If the
+    exemption is won, that is the finding and it belongs in the PR body as its own named result. IF
+    IT IS NOT WON, SAY SO PLAINLY AND NARROW THIS TASK to the changed-file list — do not quietly
+    keep the larger claim because it was filed. The rationale states this consequence as derived,
+    not measured, precisely so it can be refuted here.
+
+    (ii) THE FIX IS IN THE WALKER, NOT AT THE CALL SITES. `walkDiff` already sees the real path: the
+    `diff --git a/<path> b/<path>` header is parsed one branch above and sets `file` correctly, and
+    the `+++ /dev/null` line then OVERWRITES it. Prefer keeping the header's path when the `+++`
+    line is `/dev/null` over special-casing each consumer — there are several
+    (`bodyContradictsDiff`, `planOnly`, `detectInstrumentEntanglement`, the one-concern rubric), and
+    fixing them one at a time is how the next consumer inherits the bug. Check the `--- /dev/null`
+    direction too: an ADDED file's `---` line is `/dev/null`, and that path is skipped rather than
+    assigned, so confirm additions were never affected rather than assuming symmetry.
+
+    (iii) INVENTORY EVERY CONSUMER BEFORE CHANGING THE SHARED FUNCTION, because widening the list
+    CHANGES VERDICTS. `planOnly` becomes correctly false on some PRs that previously won the
+    carve-out; the one-concern rubric will see more concerns; `detectInstrumentEntanglement` will see
+    deleted instruments. Enumerate them from source, state per consumer whether the change is
+    intended, and name any PR-shape that would newly fail. A silent verdict change is the same defect
+    in the other direction.
+
+    (iv) THE REGRESSION LOCK IS A DELETION-HEAVY DIFF, and it must assert the COUNT, not merely that
+    the call returns something. Write it first and watch it fail (tdd:strict). A lock built only from
+    a modification-only diff proves nothing — that case already works, which is why this survived.
+
+    (v) DO NOT EDIT ANY PR BODY TO MAKE A VERDICT AGREE. #1441's body was corrected by an operator to
+    withdraw its count claim rather than restate the changeset inaccurately; the mechanical
+    `deriveChangesetClaimUpdate` path would instead have rewritten a TRUE `48` to a FALSE `7` and
+    merged a body that lies about its own diff. Once the walker is right, re-check that rung against
+    a deletion-heavy diff and confirm it now computes the true count.
+
+    NOT IN SCOPE: the `exactly N files` grammar itself, `stripQuotedRegions`, the enumeration-item
+    cleanup, and the acceptance-criteria parser. This is one wrong list, not the body-claim feature.
+  acceptance:
+    - claim: "a diff whose files are deleted rather than modified is counted in the reviewer's changed-file list rather than dropped, so a truthful file count is no longer failed"
+      proof: "unit test: test/review-deletion-blind.test.ts"
+    - claim: "the plan-scope exemption is decided from a file list that includes deletions, so it cannot be won by deleting a source file instead of editing it"
+      proof: "unit test: test/review-deletion-blind.test.ts"
+    - claim: "every consumer of the shared changed-file list is enumerated and its verdict change is stated rather than shipped silently"
+      proof: "unit test: test/review-deletion-blind.test.ts"
+  risk: high
+  origin: pr#1441-deletion-blind-changedfiles-2026-08-07
+  plan_refs: ["W1-T58", "W1-T205", "W1-T274", "W1-T297", "W1-T386", "W1-T387"]
+  files: [src/lib/review.ts, test/review-deletion-blind.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — every claim is an in-process assertion over walkDiff/changedFiles and the
+    judge's own rollup against synthetic diffs, decidable with no operator present.
+    risk:high is NOT the diff size — the walker fix is plausibly two lines. It is that this function
+    feeds a SECURITY-SHAPED GUARD (Standing rule 15's planOnly exemption) and several verdict
+    predicates at once, so widening its output changes what merges. Design (iii) is where that risk
+    is managed, and getting it wrong in the permissive direction re-creates the bypass with a louder
+    claim to correctness behind it.
+    budget_usd 60 — the cost is design (i)'s guard fixture and design (iii)'s consumer inventory,
+    not the edit.
+    ON THE PROOFS. All three name test/review-deletion-blind.test.ts, which does not exist yet: a
+    FORWARD REFERENCE TO A PATH, which CLAUDE.md records as safe, and the path is declared in files:
+    so the worker creates it. The pure-path form is used deliberately — it lint-passes and the
+    executor runs the whole file, unlike the test/foo.test.ts::title form which satisfies lint-plan
+    and then matches zero tests.
+    THE MEASUREMENTS ARE FROM PR #1441's REAL DIFF: 48 files, 41 `+++ /dev/null`, 7 `+++ b/`, and a
+    reproduced one-vs-zero contradiction count against the 7-file and 48-file lists respectively.
+    Re-derive before acting — if #1441 merges, its diff is still readable by sha, but the live PR
+    body has since been corrected and no longer carries the failing claim.
+    THE FIRST HYPOTHESIS WAS WRONG AND THE RECORD SAYS SO on purpose: a moving merge base was
+    proposed, the fix rung's 0f0c0ca base-refresh falsified it, and the note keeps that so nobody
+    re-opens the two-dot theory from the same symptom.
+    NO depends_on: independent of W1-T386 and W1-T387; it only needs main."
