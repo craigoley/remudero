@@ -75,14 +75,36 @@
 // (ci.yml's mutation-ratchet job) invokes the default --report/--baseline mode, whose behaviour is
 // unchanged.
 //
+// Usage (nightly PLAN mode -- W1-T133 runner fix, decides which files tonight can HONESTLY
+// measure and emits one Stryker config per file):
+//   node scripts/mutation-ratchet.mjs --nightly-plan --files <candidate-list-path>
+//     --night-index <n> --plan-dir <dir> [--scope-config <json-file>]
+//
+// The nightly used to override `--mutate` while leaving stryker.conf.json's `commandRunner.command`
+// alone, so it mutated files no test in that command imports. Plan mode fixes that by deriving,
+// per mutated file, the test files that DIRECTLY import it, and writing a Stryker config whose
+// command runs exactly those. Stryker gives no per-file command hook -- `commandRunner.command` is
+// one command for a whole run -- so this necessarily means one `npx stryker run` per file, and one
+// report per file for --report-dir below to merge.
+//
+// Usage (nightly ratchet mode -- W1-T133, run AFTER the nightly Stryker run(s) complete):
+//   node scripts/mutation-ratchet.mjs --nightly-ratchet [--report <path> | --report-dir <dir>]
+//     [--baseline <path>] [--mutate-scope <comma-separated file list>]
+//
+// `--report-dir` merges every per-file report plan mode produced. The merge is a DISJOINT UNION of
+// the reports' `files` maps and never flattens to a single score, because the run-validity guard
+// reads per-file outcome distributions and is the only thing currently keeping this job honest.
+//
 // The pure functions below (parseMutationTotals, tallyMutants, evaluateReportValidity,
-// evaluateRatchet, evaluatePathFilter, resolveMutateScope, sampleForNight) are exported so the
-// falsifier fixture test can exercise the CLI process directly (spawn + exit code) as well as the
+// evaluateRatchet, evaluatePathFilter, resolveMutateScope, sampleForNight, deriveDirectImporters,
+// planNightlyRun, buildNightlyStrykerConfig, mergeReports) are exported so the falsifier fixture
+// test can exercise the CLI process directly (spawn + exit code) as well as the
 // parsing/comparison/scope-resolution logic in isolation.
 
-import { appendFileSync, readFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
-import { dirname, join } from 'node:path';
+import { dirname, join, posix, relative, resolve as resolvePath } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 // DATA, not control flow, and not even embedded in THIS script (W1-T108): the exhaustive set of
@@ -396,6 +418,198 @@ export function evaluateReportValidity(report, mutateScope) {
   return { ok: unreached.length === 0, scopeSource, judged, unreached, noMutants };
 }
 
+// ── The per-file test mapping: which tests can kill a mutant in which module ───────────────
+//
+// THE PROBLEM IT SOLVES. Stryker's `commandRunner.command` is ONE command for a whole run, with no
+// per-file hook, so a single invocation cannot run a different test set per mutated file. The
+// nightly's old shape -- one run, a wide `--mutate`, a two-file command -- therefore mutated files
+// nothing in its own command imports. The fix is one invocation per mutated file, each with a
+// command derived from that file's own test importers.
+//
+// THE CONVENTION IS ALREADY LATENT, NOT DECLARED. MEASURED over this tree: of 109 non-test modules
+// under src/**, 107 (98%) have at least one test file that imports them DIRECTLY; the median is 3
+// importers and 64% have 5 or fewer. Only src/lib/dispatch-governor.ts and src/spike.ts have none.
+// So nothing needs a new naming rule -- the import graph already answers the question.
+//
+// DIRECT IMPORTS ONLY, AND THE COST IS REAL. A mutant killed by a test that reaches the module
+// INDIRECTLY registers as surviving here, which deflates the score. Following transitive edges
+// instead is not an option: MEASURED, the median module is transitively reachable from 166 of the
+// 358 test files (median gap of 159 over direct), so a transitive mapping IS the full suite and
+// re-inherits the arithmetic that killed the naive design. **The nightly's score under this
+// mapping is therefore a LOWER BOUND on the true mutation score**, and that is stated in the
+// workflow header and in this mode's own output rather than left for a reader to discover.
+
+const RELATIVE_IMPORT_RE = /from\s+["'](\.[^"']*)["']/g;
+
+/**
+ * Resolve a relative import specifier written in `fromFile` to a member of `knownModules`.
+ * TypeScript source imports its own siblings with a `.js` suffix (NodeNext), so the suffix is
+ * rewritten before matching. Returns undefined for anything outside the known set.
+ * @param {string} spec
+ * @param {string} fromFile POSIX-style repo-relative path
+ * @param {ReadonlySet<string>} knownModules
+ */
+export function resolveImportTarget(spec, fromFile, knownModules) {
+  const joined = posix.normalize(posix.join(posix.dirname(fromFile), spec));
+  const candidate = joined.endsWith('.js') ? `${joined.slice(0, -3)}.ts` : joined.endsWith('.ts') ? joined : `${joined}.ts`;
+  return knownModules.has(candidate) ? candidate : undefined;
+}
+
+/**
+ * Build the module -> direct test importers map by parsing every test file's relative imports.
+ * PURE apart from the injected reader, so a test can drive it against a synthetic tree instead of
+ * this repo's real one.
+ * @param {readonly string[]} srcModules repo-relative paths of the mutable modules
+ * @param {readonly string[]} testFiles repo-relative paths of the test files
+ * @param {(path: string) => string} readFile
+ * @returns {Map<string, string[]>} module -> sorted importer list (absent when nothing imports it)
+ */
+export function deriveDirectImporters(srcModules, testFiles, readFile) {
+  const known = new Set(srcModules);
+  const out = new Map();
+  for (const testFile of testFiles) {
+    let source;
+    try {
+      source = readFile(testFile);
+    } catch {
+      // An unreadable test file contributes no edges. It cannot silently shrink the mapping into a
+      // false pass: a module left with no importers is EXCLUDED and named by planNightlyRun below.
+      continue;
+    }
+    const seen = new Set();
+    for (const match of source.matchAll(RELATIVE_IMPORT_RE)) {
+      const target = resolveImportTarget(match[1], testFile, known);
+      if (target) seen.add(target);
+    }
+    for (const target of seen) {
+      const list = out.get(target) ?? [];
+      list.push(testFile);
+      out.set(target, list);
+    }
+  }
+  for (const [, list] of out) list.sort();
+  return out;
+}
+
+/**
+ * Decide which of tonight's sampled files this run can honestly measure, and why each excluded one
+ * was dropped.
+ *
+ * THE BUDGET IS A COST CEILING, NOT A DETECTOR, and the distinction matters because this repo has
+ * repeatedly shipped bounds that fired on healthy conditions (W1-T312, W1-T380, W1-T382). Nothing
+ * here classifies a file as good or bad; it decides only what fits in a night. With the command
+ * runner, a file costs `mutants x command-wall-clock / concurrency`, so the command's wall clock is
+ * the whole cost driver.
+ *
+ * IT MEASURES RATHER THAN COUNTING IMPORTERS, and that is an evidence-driven choice, not a
+ * preference. MEASURED on this tree, importer count barely predicts command time -- real sets of 3,
+ * 4, 5, 6, 7, 8 and 11 importers timed at 15.6s, 1.3s, 16.4s, 2.8s, 19.2s, 16.9s and 6.4s. `node
+ * --test` runs files concurrently, so the cost is dominated by the SLOWEST file in the set, not by
+ * how many there are. An importer-count cap would therefore exclude cheap modules and admit
+ * expensive ones. Measuring the command once per candidate, killed at the budget, costs at most
+ * `fileCap x commandBudgetMs` per night and answers the real question.
+ *
+ * NO SILENT CAPS: every exclusion is returned with a named reason and printed by the caller.
+ *
+ * @param {readonly string[]} sample tonight's sampled modules
+ * @param {Map<string, string[]>} importers from deriveDirectImporters
+ * @param {{commandBudgetMs: number, measure: (testFiles: readonly string[]) => {ms: number, ok: boolean, timedOut: boolean}}} opts
+ * @returns {{included: Array<{file: string, testFiles: string[], ms: number}>, excluded: Array<{file: string, reason: string}>}}
+ */
+export function planNightlyRun(sample, importers, opts) {
+  const included = [];
+  const excluded = [];
+  for (const file of sample) {
+    const testFiles = importers.get(file) ?? [];
+    if (testFiles.length === 0) {
+      excluded.push({ file, reason: 'no test file imports it directly — nothing could kill a mutant in it' });
+      continue;
+    }
+    const result = opts.measure(testFiles);
+    if (result.timedOut) {
+      excluded.push({
+        file,
+        reason:
+          `its ${testFiles.length} direct importer(s) exceed the ${opts.commandBudgetMs}ms per-file command budget ` +
+          '— every mutant pays that command again, so this file does not fit in a night',
+      });
+      continue;
+    }
+    if (!result.ok) {
+      excluded.push({
+        file,
+        reason: `its ${testFiles.length} direct importer(s) do not pass on unmutated source, so no mutant verdict from them would mean anything`,
+      });
+      continue;
+    }
+    included.push({ file, testFiles, ms: result.ms });
+  }
+  return { included, excluded };
+}
+
+/**
+ * The Stryker config for one mutated file. PURE -- returns the object, writes nothing.
+ *
+ * `incremental` is deliberately ABSENT (Stryker defaults it off). The old single-run nightly set
+ * `incremental: true` with a restored cache, which made its report ACCUMULATE across nights: the
+ * valid-mutant count grew 25,223 -> 27,017 over two nights of a supposedly rotating sample, so the
+ * number was neither a sample score nor a tree score. Under per-file invocations it would be worse
+ * still, since each file's run would carry the others' state. What is lost is the cache that let a
+ * night finish in ~2 minutes by re-running almost nothing -- which was only ever cheap because it
+ * was measuring almost nothing. The PR gate's own stryker.conf.json keeps its incremental cache;
+ * it is a required check with a real wall-clock ceiling and a single fixed scope, so accumulation
+ * cannot distort it the same way.
+ * @param {string} file
+ * @param {readonly string[]} testFiles
+ * @param {{reportPath: string, tempDirName: string}} opts
+ */
+export function buildNightlyStrykerConfig(file, testFiles, opts) {
+  return {
+    packageManager: 'npm',
+    testRunner: 'command',
+    commandRunner: {
+      command: `node --test --import tsx --import ./test/setup/tmp-hygiene.ts ${testFiles.join(' ')}`,
+    },
+    mutate: [file],
+    tsconfigFile: 'tsconfig.stryker-unused.json',
+    disableTypeChecks: '{src,test}/**/*.ts',
+    reporters: ['clear-text', 'json'],
+    jsonReporter: { fileName: opts.reportPath },
+    tempDirName: opts.tempDirName,
+    cleanTempDir: true,
+    timeoutMS: 15000,
+  };
+}
+
+/**
+ * Merge per-file Stryker reports into one report the ratchet can read.
+ *
+ * A DISJOINT UNION of the `files` maps, NEVER a flattened score. evaluateReportValidity() judges
+ * per-file outcome distributions, and that guard is the only thing currently stopping this job
+ * certifying a run in which nothing was tested — so collapsing the reports into a single number
+ * here would quietly delete it. A path appearing in two reports is a real defect in the plan (each
+ * file is meant to be mutated exactly once), so it is returned as a named collision rather than
+ * silently overwritten.
+ * @param {ReadonlyArray<{files?: Record<string, unknown>}>} reports
+ * @returns {{files: Record<string, unknown>, schemaVersion: string, collisions: string[]}}
+ */
+export function mergeReports(reports) {
+  const files = {};
+  const collisions = [];
+  let schemaVersion = '1.0';
+  for (const report of reports) {
+    if (report?.schemaVersion) schemaVersion = report.schemaVersion;
+    for (const [path, entry] of Object.entries(report?.files ?? {})) {
+      if (Object.prototype.hasOwnProperty.call(files, path)) {
+        collisions.push(path);
+        continue;
+      }
+      files[path] = entry;
+    }
+  }
+  return { files, schemaVersion, collisions };
+}
+
 /**
  * Compare an actual mutation score against a recorded baseline.
  * @returns {string[]} human-readable violations; empty means the ratchet is satisfied.
@@ -419,12 +633,16 @@ function main(argv) {
       'changed-files': { type: 'string' },
       'relevant-paths': { type: 'string' },
       'nightly-scope': { type: 'boolean', default: false },
+      'nightly-plan': { type: 'boolean', default: false },
       'nightly-ratchet': { type: 'boolean', default: false },
       'resolve-scope': { type: 'boolean', default: false },
       files: { type: 'string' },
+      'test-files': { type: 'string' },
       'night-index': { type: 'string' },
       'scope-config': { type: 'string' },
       'mutate-scope': { type: 'string' },
+      'plan-dir': { type: 'string' },
+      'report-dir': { type: 'string' },
       config: { type: 'string' },
     },
   });
@@ -492,6 +710,100 @@ function main(argv) {
     return;
   }
 
+  // Nightly PLAN mode: derive the per-file test mapping, decide what tonight can honestly measure,
+  // and emit one Stryker config per included file. This is the half that fixes the runner; it
+  // never reads a report and never compares a score.
+  if (values['nightly-plan']) {
+    if (!values.files || !values['test-files'] || !values['plan-dir']) {
+      console.error(
+        'mutation-ratchet: --nightly-plan requires --files <src-candidate-list>, --test-files <test-file-list> and --plan-dir <dir>',
+      );
+      process.exitCode = 1;
+      return;
+    }
+    const readList = (p) =>
+      readFileSync(p, 'utf8')
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean);
+    const candidates = readList(values.files);
+    const testFiles = readList(values['test-files']);
+    const scopeConfig = loadNightlyScopeConfig(values['scope-config']);
+    const matched = resolveMutateScope(candidates, scopeConfig.mutate ?? []);
+    const cap = typeof scopeConfig.fileCap === 'number' ? scopeConfig.fileCap : matched.length;
+    const nightIndex = Number.parseInt(values['night-index'] ?? '0', 10);
+    const { sample, groupCount, groupIndex } = sampleForNight(matched, cap, nightIndex);
+    const commandBudgetMs =
+      typeof scopeConfig.commandBudgetMs === 'number' ? scopeConfig.commandBudgetMs : 20000;
+
+    const repoRoot = resolvePath(__dirname, '..');
+    const importers = deriveDirectImporters(matched, testFiles, (p) =>
+      readFileSync(join(repoRoot, p), 'utf8'),
+    );
+
+    // The measurement is a REAL run of the candidate's own test command on unmutated source, killed
+    // at the budget. That is also Stryker's dry run in all but name, so nothing is spent twice.
+    const measure = (files) => {
+      const started = Date.now();
+      const result = spawnSync(
+        process.execPath,
+        ['--test', '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', ...files],
+        { cwd: repoRoot, timeout: commandBudgetMs, stdio: 'ignore' },
+      );
+      return {
+        ms: Date.now() - started,
+        timedOut: result.signal !== null || result.error?.code === 'ETIMEDOUT',
+        ok: result.status === 0,
+      };
+    };
+
+    const plan = planNightlyRun(sample, importers, { commandBudgetMs, measure });
+
+    console.log(
+      `mutation-nightly-plan: night-index ${nightIndex} -> group ${groupIndex + 1}/${groupCount} -- ` +
+        `${sample.length} sampled from ${matched.length} matched (cap ${cap}, command budget ${commandBudgetMs}ms)`,
+    );
+    console.log(
+      `mutation-nightly-plan: ${plan.included.length} file(s) this run can honestly measure, ${plan.excluded.length} excluded`,
+    );
+    // No silent caps: every exclusion is named with its reason, so what the nightly did NOT measure
+    // is as visible in the log as what it did.
+    for (const e of plan.excluded) console.log(`  - EXCLUDED ${e.file}: ${e.reason}`);
+
+    mkdirSync(values['plan-dir'], { recursive: true });
+    const configPaths = [];
+    for (const entry of plan.included) {
+      const slug = entry.file.replace(/[^A-Za-z0-9]+/g, '-').replace(/^-|-$/g, '');
+      const reportPath = posix.join(values['report-dir'] ?? 'reports/mutation/nightly', `${slug}.json`);
+      const configPath = join(values['plan-dir'], `${slug}.stryker.json`);
+      writeFileSync(
+        configPath,
+        `${JSON.stringify(
+          buildNightlyStrykerConfig(entry.file, entry.testFiles, {
+            reportPath,
+            tempDirName: `.stryker-tmp-${slug}`,
+          }),
+          null,
+          2,
+        )}\n`,
+      );
+      configPaths.push(configPath);
+      console.log(`  - ${entry.file}: ${entry.testFiles.length} importer(s), command ${entry.ms}ms -> ${configPath}`);
+    }
+
+    const out = process.env.GITHUB_OUTPUT;
+    if (out) {
+      appendFileSync(out, `configs=${configPaths.join(' ')}\n`);
+      // `mutate` carries the INCLUDED files only, so the run-validity guard judges exactly what was
+      // actually run rather than failing on files this plan already declined to measure.
+      appendFileSync(out, `mutate=${plan.included.map((e) => e.file).join(',')}\n`);
+      appendFileSync(out, `included=${plan.included.length}\n`);
+    }
+
+    process.exitCode = 0;
+    return;
+  }
+
   // Nightly ratchet mode (W1-T133): compares a completed nightly Stryker run against the
   // "nightly" section of scripts/mutation-baseline.json (a SIBLING of the PR-gate's root-level
   // fields -- reading/writing this section never touches the fields the PR-gate ratchet reads).
@@ -521,15 +833,62 @@ function main(argv) {
     }
 
     let report;
-    try {
-      report = JSON.parse(readFileSync(values.report, 'utf8'));
-    } catch (err) {
-      console.error(
-        `mutation-ratchet: NIGHTLY BLOCKED -- Stryker report absent or unreadable at ${values.report} (${err.message}) -- ` +
-          'treating an errored/missing run as a failure, never a silent pass',
+    if (values['report-dir']) {
+      // Per-file plan mode produces N reports. Merge them into the shape the rest of this mode
+      // already reads -- a disjoint union that PRESERVES per-file outcome distributions, because
+      // the validity guard below is computed from them.
+      let reportFiles;
+      try {
+        reportFiles = readdirSync(values['report-dir'])
+          .filter((n) => n.endsWith('.json'))
+          .sort()
+          .map((n) => join(values['report-dir'], n));
+      } catch (err) {
+        console.error(
+          `mutation-ratchet: NIGHTLY BLOCKED -- report directory absent or unreadable at ${values['report-dir']} (${err.message}) -- ` +
+            'treating an errored/missing run as a failure, never a silent pass',
+        );
+        process.exitCode = 1;
+        return;
+      }
+      const parsed = [];
+      for (const path of reportFiles) {
+        try {
+          parsed.push(JSON.parse(readFileSync(path, 'utf8')));
+        } catch (err) {
+          console.error(
+            `mutation-ratchet: NIGHTLY BLOCKED -- per-file report unreadable at ${path} (${err.message})`,
+          );
+          process.exitCode = 1;
+          return;
+        }
+      }
+      const merged = mergeReports(parsed);
+      if (merged.collisions.length > 0) {
+        console.error(
+          'mutation-ratchet: NIGHTLY BLOCKED -- two per-file reports claim the same mutated file, so one ' +
+            'run\'s outcome would have silently replaced the other\'s: ' +
+            merged.collisions.join(', '),
+        );
+        process.exitCode = 1;
+        return;
+      }
+      console.log(
+        `mutation-ratchet: NIGHTLY merged ${parsed.length} per-file report(s) from ${values['report-dir']} -- ` +
+          `${Object.keys(merged.files).length} mutated file(s)`,
       );
-      process.exitCode = 1;
-      return;
+      report = merged;
+    } else {
+      try {
+        report = JSON.parse(readFileSync(values.report, 'utf8'));
+      } catch (err) {
+        console.error(
+          `mutation-ratchet: NIGHTLY BLOCKED -- Stryker report absent or unreadable at ${values.report} (${err.message}) -- ` +
+            'treating an errored/missing run as a failure, never a silent pass',
+        );
+        process.exitCode = 1;
+        return;
+      }
     }
 
     const actual = parseMutationTotals(report);
@@ -553,6 +912,20 @@ function main(argv) {
         `${validity.judged.length} file(s) judged, ${validity.unreached.length} with ZERO caught mutants, ` +
         `${validity.noMutants.length} with no valid mutants to judge`,
     );
+    // A run that judged NOTHING is a vacuous pass, not a pass. Under the per-file plan every
+    // sampled file can be excluded (no importer, over budget, red on unmutated source), which
+    // leaves zero reports and a report-wide score of 100% over an empty set -- the same shape as a
+    // diff-coverage OK with no instrumented records. Refuse it by name.
+    if (validity.judged.length === 0) {
+      console.error(
+        'mutation-ratchet: NIGHTLY BLOCKED -- VACUOUS RUN: not one mutated file carried a single valid ' +
+          'mutant, so every statement this job could make is true over an empty set. A score computed ' +
+          'from nothing is not a smaller measurement, it is no measurement.',
+      );
+      process.exitCode = 1;
+      return;
+    }
+
     if (!validity.ok) {
       console.error(
         'mutation-ratchet: NIGHTLY BLOCKED -- INVALID RUN, not a low score. The file(s) below were ' +
