@@ -11,10 +11,10 @@ import { preflightCommand } from "../src/run-task.js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
 
-// ── W1-T294: `rmd preflight --ci-parity` — mirroring CI's own fourteen jobs ─────────────────
+// ── W1-T294: `rmd preflight --ci-parity` — mirroring CI's own thirteen jobs ─────────────────
 //
 // The shipped `rmd preflight` (W1-T221) runs three hand-route steps, none of which is any of
-// the fourteen jobs .github/workflows/ci.yml actually gates a merge on. This suite proves the
+// the thirteen jobs .github/workflows/ci.yml actually gates a merge on. This suite proves the
 // `--ci-parity` mode this task adds: every ci.yml job is accounted for (mirrored or a recorded
 // exclusion), the diff-consuming steps refresh their base before diffing, the coverage step
 // never runs scoped or without source maps, the diff-scoped steps reuse CI's own trigger
@@ -23,7 +23,7 @@ const REPO_ROOT = join(__dirname, "..");
 
 /** Records every spawn call and answers from a lookup table keyed by a substring of
  *  `[file, ...args].join(" ")`, falling back to a clean `{status: 0}` for anything unlisted —
- *  runCiParity's table has fourteen jobs' worth of steps, and most tests below only care about
+ *  runCiParity's table has thirteen jobs' worth of steps, and most tests below only care about
  *  ONE of them, so an unmatched call must not throw the way test/preflight.test.ts's stricter
  *  fakeSpawn does (that suite's fixtures name every call up front; this one would be unreadably
  *  long if it had to). Duplicated locally per that suite's own file-scoping convention. */
@@ -42,12 +42,14 @@ function recordingSpawn(map: Record<string, { status: number; stdout?: string; s
   return { spawn, calls };
 }
 
+const RETIRING_JOBS = new Set<string>(["refactor-campaign"]);
+
 // ── acceptance 1: every ci.yml job has a parity entry, mirrored or excluded-with-reason ─────
 
 test("ci-parity table: every REAL ci.yml job has an entry, either mirrored (with a run()) or excluded (with a reason) — no entry is silently absent", () => {
   const ciYamlText = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
   const jobs = parseCiJobNames(ciYamlText);
-  assert.ok(jobs.length >= 14, `expected at least the 14 jobs ci.yml defined at filing time, got ${jobs.length}`);
+  assert.ok(jobs.length >= 13, `expected at least the 13 jobs ci.yml defined at filing time, got ${jobs.length}`);
 
   const byJob = new Map(CI_PARITY_TABLE.map((e) => [e.job, e]));
   for (const job of jobs) {
@@ -65,7 +67,23 @@ test("ci-parity table: carries no entry for a job ci.yml does not define (the ta
   const ciYamlText = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
   const jobs = new Set(parseCiJobNames(ciYamlText));
   for (const entry of CI_PARITY_TABLE) {
+    // TEMPORARY CARVE-OUT (W1-T386, operator ruling 2026-08-07). Retiring a ci.yml job needs
+    // its parity entry removed in the SAME commit, but ci.yml is INSTRUMENT_SURFACE and
+    // lib/ci-parity.ts is a product path, so one commit doing both is refused by Standing
+    // rule 25. The instrument half lands first; the follow-up PR removes the entry AND the
+    // test below, which goes red the moment the entry is gone.
+    if (RETIRING_JOBS.has(entry.job)) continue;
     assert.ok(jobs.has(entry.job), `CI_PARITY_TABLE names '${entry.job}', which ci.yml does not define`);
+  }
+});
+
+test("the retiring-job carve-out cannot outlive the retirement it exists for", () => {
+  const tableJobs = new Set(CI_PARITY_TABLE.map((e) => e.job));
+  for (const job of RETIRING_JOBS) {
+    assert.ok(
+      tableJobs.has(job),
+      `RETIRING_JOBS names '${job}', which CI_PARITY_TABLE no longer carries — delete the carve-out`,
+    );
   }
 });
 

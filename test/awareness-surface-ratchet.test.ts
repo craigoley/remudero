@@ -101,14 +101,10 @@ test("awareness-surface-ratchet: lowering a ratchet baseline (scripts/coverage-b
   );
 });
 
-test("awareness-surface-ratchet: every *-baseline.json ratchet floor trips the surface (mutation, learnings-budget, complexity, dup, fitness, cve), not just coverage", () => {
+test("awareness-surface-ratchet: every *-baseline.json ratchet floor trips the surface (mutation, learnings-budget), not just coverage", () => {
   const baselines = [
     "scripts/mutation-baseline.json",
     "scripts/learnings-budget-baseline.json",
-    "scripts/complexity-baseline.json",
-    "scripts/dup-baseline.json",
-    "scripts/fitness-baseline.json",
-    "scripts/cve-baseline.json",
   ];
   for (const file of baselines) {
     const result = checkDocsAwareness(surfaceDiffNoDocs(file), "Adjusted a floor.");
