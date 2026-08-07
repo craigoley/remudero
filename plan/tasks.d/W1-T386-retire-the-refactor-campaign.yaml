@@ -93,9 +93,35 @@
   origin: oper#ruling-codebase-debt-2026-08-06
   plan_refs: ["W2-T3", "W1-T294", "§3A", "§5"]
   files: [scripts/refactor-campaign.mjs, plan/campaigns/refactor.yaml, docs/refactor-campaign.md, scripts/complexity-baseline.json, scripts/dup-baseline.json, scripts/cve-baseline.json, scripts/fitness-baseline.json, .github/workflows/ci.yml, .github/workflows/ci-gate.yml, .gitignore, src/lib/ci-parity.ts, test/refactor-campaign.test.ts, test/ci-gate-required-format.test.ts, test/ci-parity-contract.test.ts, test/awareness-surface-ratchet.test.ts]
-  status: queued
+  status: blocked
   attempts: 0
-  note: "verify:auto — every claim is a deterministic assertion over workflow/parity/surface contents,
+  note: "RETIREMENT RECORD, 2026-08-07 — THIS WORK IS DONE, and the shard is retired because it is
+    finished rather than because it was wrong. Everything below is preserved verbatim so a future
+    reader needs no archaeology.
+    WHAT LANDED, and where: #1441 (ad5de23, `chore(ci): retire the never-run refactor-campaign
+    instrument and both wirings`) shipped this shard's entire scope on 2026-07-26 — 47 files,
+    1224 deletions. Its own commit body enumerates the same set this shard declares: it deletes
+    scripts/refactor-campaign.mjs, plan/campaigns/refactor.yaml, docs/refactor-campaign.md,
+    test/refactor-campaign.test.ts and its fixture tree, and the four campaign-exclusive baselines;
+    removes the ci.yml job and the ci-gate.yml required-members entry together so neither wiring
+    outlives the other; removes the dangling ci-parity.ts entry and the .gitignore comment; and
+    updates the four dependent tests. Verified at eab4baa: EIGHT of this shard's fourteen declared
+    files no longer exist.
+    WHY IT WAS STILL BEING OFFERED, which is the durable lesson: #1441 carries NO `Remudero-Task:`
+    trailer and no subject citation for this id, so the merged-evidence rule
+    (classifyFailingMergeEvidence, and the trailer scan every frontier check uses) cannot credit it.
+    isDispatchEligible therefore kept returning true and runnableCandidates kept offering a worker a
+    job whose subject had been deleted twelve days earlier. This is the SECOND measured instance in
+    one week of a task surviving its own completion because the merging PR did not cite it —
+    W1-T369 was the first — which makes it a class, not an incident. A PR that implements a filed
+    task must carry its trailer; nothing else can see the connection.
+    THE FILING-SHAPE OBJECTION also stood and is recorded for completeness: the files: list spans
+    INSTRUMENT_SURFACE (.github/workflows/, scripts/*-baseline.json) and a src/ product path
+    (src/lib/ci-parity.ts), which detectInstrumentEntanglement refuses unconditionally, while the
+    two halves were coupled in both directions and so could not be split either. That is moot now
+    and is kept only so a re-filing does not rediscover it.
+    ORIGINAL NOTE, UNCHANGED, follows.
+    verify:auto — every claim is a deterministic assertion over workflow/parity/surface contents,
     decidable offline with no operator present.
     risk:high is Rule 19's SPAN, not blast radius, and the band is raised deliberately rather than
     shipped as a violation: the file set crosses scripts/, plan/campaigns/, docs/, .github/workflows/,
