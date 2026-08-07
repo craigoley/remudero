@@ -589,10 +589,38 @@ const realLedgerFs: LedgerFsDeps = {
 export type LedgerLines = Array<Record<string, unknown>> & {
   /** Count of unparseable/torn lines dropped THIS read (0 when every line parsed clean). */
   readonly torn: number;
+  /**
+   * Whether the ledger FILE existed for this read. `false` is the ONLY thing that distinguishes
+   * "there is no ledger at this path" from "the ledger is there and has nothing to say" — both
+   * of which return an empty array, and which no consumer could previously tell apart.
+   *
+   * THIS IS THE SAME DEFECT `torn` WAS ADDED FOR (W1-T206, above): an absence that fabricates
+   * itself into a legitimate-looking empty result leaves no audience — human or consumer — able
+   * to learn that anything was missing. `GET /v1/control/status` is where it bit: a dead daemon
+   * (ledger present, last poll stale) and a ledger that is not there at all rendered the same
+   * `daemonLive: undefined`, so the console could decline to say the fleet was alive but could
+   * never say it was dead. See `deriveDaemonLiveness` (lib/panel-actions.ts) for the taxonomy
+   * this field makes expressible.
+   *
+   * NON-ENUMERABLE for exactly `torn`'s reason — every `assert.deepEqual` against a plain array
+   * literal across the existing suite keeps working, and the ~50 call sites that type this as a
+   * bare `Array<Record<string, unknown>>` are structurally unaffected. A consumer that wants the
+   * answer reads `.present` by direct property access.
+   *
+   * NOT SET BY AN INJECTED READER. `LedgerReader` is `(path) => Array<Record<string, unknown>>`,
+   * so a test fake returns a plain array whose `.present` is `undefined`. That is deliberate and
+   * must stay readable as "this reader did not report presence", never as "absent" — a consumer
+   * may only act on an explicit `false`. `deriveDaemonLiveness` follows that rule.
+   */
+  readonly present: boolean;
 };
 
-function withTornCount(out: Array<Record<string, unknown>>, torn: number): LedgerLines {
+/** Attach {@link LedgerLines}' non-enumerable read metadata. Both properties describe THIS read,
+ *  never the file's contents, which is why they ride the returned array rather than a wrapper
+ *  object no existing call site could consume. */
+function withReadMeta(out: Array<Record<string, unknown>>, torn: number, present: boolean): LedgerLines {
   Object.defineProperty(out, "torn", { value: torn, enumerable: false, configurable: true });
+  Object.defineProperty(out, "present", { value: present, enumerable: false, configurable: true });
   return out as LedgerLines;
 }
 
@@ -612,7 +640,9 @@ function withTornCount(out: Array<Record<string, unknown>>, torn: number): Ledge
  * a genuinely uneventful line. */
 export function readLedgerLines(path: string, ledgerFs: LedgerFsDeps = realLedgerFs): LedgerLines {
   const out: Array<Record<string, unknown>> = [];
-  if (!ledgerFs.existsSync(path)) return withTornCount(out, 0);
+  // `present: false` is the whole point of this early return carrying metadata at all — see
+  // LedgerLines.present. The empty array itself is unchanged, so no existing consumer moves.
+  if (!ledgerFs.existsSync(path)) return withReadMeta(out, 0, false);
   let torn = 0;
   for (const raw of ledgerFs.readFileSync(path, "utf8").split("\n")) {
     const l = raw.trim();
@@ -624,7 +654,7 @@ export function readLedgerLines(path: string, ledgerFs: LedgerFsDeps = realLedge
       console.error(`ledger: dropping unparseable line in ${path}: ${l}`);
     }
   }
-  return withTornCount(out, torn);
+  return withReadMeta(out, torn, true);
 }
 
 /**

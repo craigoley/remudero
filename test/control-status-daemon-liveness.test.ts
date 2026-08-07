@@ -80,14 +80,21 @@ test("W1-T288: with NO daemon.* ledger line at all and no stop/pause flag, GET /
   });
 });
 
-test("W1-T288: a STALE daemon.* heartbeat (older than the liveness bound) also omits daemonLive -- 'cannot observe' covers a dead daemon too, not just an empty ledger", async () => {
+// SUPERSEDED BY recon-blackout rec-2, and the original title is kept below as the record of what
+// changed: this test used to assert that a stale heartbeat "also omits daemonLive", folding a
+// CRASHED DAEMON into the same non-answer as an empty ledger. W1-T288's own wording ("'cannot
+// observe' covers a dead daemon too") is precisely the collapse — the route could decline to say
+// the fleet was alive but could never say it was dead. A stale heartbeat is EVIDENCE, so it now
+// resolves `false` with a reason, and the two states have separate answers.
+test("a STALE daemon.* heartbeat is reported as daemonLive FALSE with its reason -- a crashed daemon is evidence, not an absence of it", async () => {
   const root = tmpRoot();
   const now = () => Date.parse("2026-08-03T12:00:00.000Z");
   const staleTs = new Date(now() - (DEFAULT_LIVENESS_BOUND_MS + 60_000)).toISOString();
   const ledgerPath = ledgerFile([{ ts: staleTs, step: "daemon.idle", tick: 1 }]);
   await withControlStatusService({ root, ledgerPath, now }, async (base) => {
     const status = await getStatus(base);
-    assert.equal(status.daemonLive, undefined, "a heartbeat older than the liveness bound is exactly the crashed-daemon case -- not live");
+    assert.equal(status.daemonLive, false, "a heartbeat older than the liveness bound is exactly the crashed-daemon case");
+    assert.equal(status.daemonLiveReason, "last-poll-stale");
   });
 });
 
@@ -113,7 +120,9 @@ test("W1-T288: an injected livenessBoundMs is honoured (never a second, differen
     assert.equal((await getStatus(base)).daemonLive, true, "5s old, 10s bound -- inside");
   });
   await withControlStatusService({ root, ledgerPath, now, livenessBoundMs: 1_000 }, async (base) => {
-    assert.equal((await getStatus(base)).daemonLive, undefined, "5s old, 1s bound -- outside");
+    // recon-blackout rec-2: outside the bound is now FALSE, not undefined — the heartbeat exists
+    // and has aged out, which is a verdict rather than a failure to observe one.
+    assert.equal((await getStatus(base)).daemonLive, false, "5s old, 1s bound -- outside");
   });
 });
 
@@ -232,8 +241,44 @@ test("W1-T288: a fleet whose liveness cannot be observed renders as UNOBSERVED t
 
 test("W1-T288: a live daemon with a recent heartbeat (daemonLive: true) still renders 'fleet is running'", () => {
   const h = harness();
-  h.apply({ paused: false, stopped: false, quietHours: false, daemonLive: true });
+  h.apply({ paused: false, stopped: false, quietHours: false, daemonLive: true, daemonLiveReason: "fresh-poll" });
   assert.equal(h.text(), "fleet is running");
+});
+
+// recon-blackout rec-2: the rendered distinction, at the client function itself. The two tests
+// above establish that a status carrying NO reason still renders the legacy sentence, which is the
+// compatibility half; these are the new half — each reason gets its own sentence, and the two
+// states this task exists to separate never read the same.
+test("a stale heartbeat and an absent ledger render DIFFERENT sentences, and only one of them claims the daemon is down", () => {
+  const stale = harness();
+  stale.apply({ paused: false, stopped: false, quietHours: false, daemonLive: false, daemonLiveReason: "last-poll-stale" });
+  const absent = harness();
+  absent.apply({ paused: false, stopped: false, quietHours: false, daemonLiveReason: "ledger-absent" });
+
+  assert.match(stale.text() ?? "", /DOWN/);
+  assert.match(absent.text() ?? "", /unknown/i);
+  assert.match(absent.text() ?? "", /ledger/i, "an unknown that does not name its cause is the defect, not the fix");
+  assert.notEqual(stale.text(), absent.text(), "these two rendered identically before this change");
+});
+
+test("every reason the route can send renders its own distinct sentence -- no two collapse", () => {
+  const reasons = ["fresh-poll", "last-poll-stale", "no-daemon-activity", "ledger-empty", "ledger-absent", "ledger-unreadable"];
+  const rendered = reasons.map((daemonLiveReason) => {
+    const h = harness();
+    h.apply({ paused: false, stopped: false, quietHours: false, daemonLiveReason });
+    return h.text();
+  });
+  assert.equal(new Set(rendered).size, reasons.length, `two reasons share a sentence: ${JSON.stringify(rendered)}`);
+  assert.ok(
+    rendered.every((t) => (t ?? "").length > 0),
+    "a reason with no sentence would silently fall back and re-collapse the states",
+  );
+});
+
+test("a status carrying NO reason at all still renders the pre-change sentence -- an older server must not blank the panel", () => {
+  const h = harness();
+  h.apply({ paused: false, stopped: false, quietHours: false });
+  assert.equal(h.text(), "fleet liveness not observed");
 });
 
 test("W1-T288: STOP still wins over liveness exactly as today -- even with daemonLive: true, a stopped fleet shows its stopDetail, never 'fleet is running'", () => {
