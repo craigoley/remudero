@@ -233,3 +233,135 @@ test("the REAL committed MASTER-PLAN.md carries the CAPABILITY SNAPSHOT block, a
   assert.ok(!text.includes("`sweep.dispatchLanes` flipped 1 → 2"));
   assert.ok(!text.includes("`sweep.dispatchLanes` is 2 (T344)"));
 });
+
+// ── Failure arms ──────────────────────────────────────────────────────────────────────────────
+//
+// The tests above prove the happy paths. Every arm below is a guard that only fires on bad input,
+// and each was flagged by diff-coverage as an added source line with zero covering tests. They are
+// driven through `spawnSync` like the rest of this suite (the script is a plain .mjs outside
+// tsconfig's include that imports .ts modules), and each asserts the MESSAGE the guard emits, not
+// merely that the exit code moved -- a guard whose text is wrong is a guard nobody can act on.
+
+/** A synthetic --root carrying only a crafted ci-gate.yml. The other three claim resolvers read
+ *  the real repo, so under this root they render UNDETERMINED -- one line each, which keeps the
+ *  claim-count parity check satisfied and isolates the ci-gate resolver's own arms. */
+function rootWithCiGate(dir: string, ciGateYaml: string): string {
+  mkdirSync(join(dir, ".github", "workflows"), { recursive: true });
+  writeFileSync(join(dir, ".github", "workflows", "ci-gate.yml"), ciGateYaml);
+  return dir;
+}
+
+function generateInto(dir: string, rootArgs: string[]) {
+  const mp = join(dir, "MASTER-PLAN.md");
+  const idx = join(dir, "plan-index.json");
+  writeFileSync(mp, FIXTURE_MASTER_PLAN);
+  return { mp, idx, res: run([...rootArgs, "--master-plan", mp, "--plan-index", idx]) };
+}
+
+test("ci-gate claim: a ci-gate.yml with no jobs.ci-gate.env.REQUIRED string renders UNDETERMINED naming that key, never a silent omission", () => {
+  const dir = mkdtempSync(join(tmpdir(), "capability-snapshot-noreq-"));
+  try {
+    rootWithCiGate(dir, "name: CI gate\njobs:\n  ci-gate:\n    env: {}\n");
+    const { mp, res } = generateInto(dir, ["--root", dir]);
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    const block = extractBlock(readFileSync(mp, "utf8"));
+    assert.match(block, /has no jobs\.ci-gate\.env\.REQUIRED string/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ci-gate claim: a REQUIRED that is not JSON renders UNDETERMINED naming the parse failure", () => {
+  const dir = mkdtempSync(join(tmpdir(), "capability-snapshot-badjson-"));
+  try {
+    rootWithCiGate(dir, "name: CI gate\njobs:\n  ci-gate:\n    env:\n      REQUIRED: 'not json at all'\n");
+    const { mp, res } = generateInto(dir, ["--root", dir]);
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    assert.match(extractBlock(readFileSync(mp, "utf8")), /did not parse as JSON/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ci-gate claim: a REQUIRED that parses to JSON but not to a string array renders UNDETERMINED naming that", () => {
+  const dir = mkdtempSync(join(tmpdir(), "capability-snapshot-notstrings-"));
+  try {
+    rootWithCiGate(dir, "name: CI gate\njobs:\n  ci-gate:\n    env:\n      REQUIRED: '[1, 2, 3]'\n");
+    const { mp, res } = generateInto(dir, ["--root", dir]);
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    assert.match(extractBlock(readFileSync(mp, "utf8")), /did not parse to a string array/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("FALSIFIER: a resolved value spanning two lines trips the claim-count parity guard and exits non-zero — a silently dropped claim is refused", () => {
+  // The parity guard's whole purpose: one rendered line per registered claim. A REQUIRED entry
+  // carrying an embedded newline makes one claim render TWO lines, which is the only way the
+  // block's line count can disagree with CLAIMS.length from outside the module.
+  const dir = mkdtempSync(join(tmpdir(), "capability-snapshot-parity-"));
+  try {
+    rootWithCiGate(dir, 'name: CI gate\njobs:\n  ci-gate:\n    env:\n      REQUIRED: \'["first\\nsecond"]\'\n');
+    const { res } = generateInto(dir, ["--root", dir]);
+    assert.equal(res.status, 1, res.stdout + res.stderr);
+    assert.match(res.stderr, /capability line\(s\) but .* claim\(s\) are registered/);
+    assert.match(res.stderr, /a claim was silently dropped/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("FALSIFIER: a master plan carrying TWO marker pairs is refused, naming the counts rather than splicing the wrong one", () => {
+  const dir = mkdtempSync(join(tmpdir(), "capability-snapshot-dupemarkers-"));
+  try {
+    const mp = join(dir, "MASTER-PLAN.md");
+    writeFileSync(mp, `${FIXTURE_MASTER_PLAN}\n${FIXTURE_MASTER_PLAN}`);
+    const res = run(["--master-plan", mp, "--plan-index", join(dir, "plan-index.json")]);
+    assert.equal(res.status, 1, res.stdout + res.stderr);
+    assert.match(res.stderr, /must carry exactly one BEGIN\/END marker pair, found 2\/2/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("FALSIFIER: an END marker preceding its BEGIN is refused rather than slicing a negative range", () => {
+  const dir = mkdtempSync(join(tmpdir(), "capability-snapshot-reversed-"));
+  try {
+    const mp = join(dir, "MASTER-PLAN.md");
+    writeFileSync(mp, "# Title\n\n<!-- CAPABILITY SNAPSHOT:END -->\n\n<!-- CAPABILITY SNAPSHOT:BEGIN -->\n");
+    const res = run(["--master-plan", mp, "--plan-index", join(dir, "plan-index.json")]);
+    assert.equal(res.status, 1, res.stdout + res.stderr);
+    assert.match(res.stderr, /END marker precedes its BEGIN marker/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("--check: an ABSENT plan index is red and names the command that creates it, never silently green", () => {
+  const dir = mkdtempSync(join(tmpdir(), "capability-snapshot-noindex-"));
+  try {
+    const { mp, idx, res: gen } = generateInto(dir, []);
+    assert.equal(gen.status, 0, gen.stdout + gen.stderr);
+    rmSync(idx, { force: true });
+    const res = run(["--master-plan", mp, "--plan-index", idx, "--check"]);
+    assert.equal(res.status, 1, res.stdout + res.stderr);
+    assert.match(res.stderr, /does not exist -- run 'npm run capability-snapshot'/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("--check: a STALE plan index is red and names it as stale relative to a fresh regeneration", () => {
+  const dir = mkdtempSync(join(tmpdir(), "capability-snapshot-staleindex-"));
+  try {
+    const { mp, idx, res: gen } = generateInto(dir, []);
+    assert.equal(gen.status, 0, gen.stdout + gen.stderr);
+    // A committed index that parses but no longer matches what a fresh run would emit.
+    writeFileSync(idx, JSON.stringify({ source: "MASTER-PLAN.md", entries: [] }, null, 2));
+    const res = run(["--master-plan", mp, "--plan-index", idx, "--check"]);
+    assert.equal(res.status, 1, res.stdout + res.stderr);
+    assert.match(res.stderr, /is STALE relative to a fresh/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
