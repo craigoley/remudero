@@ -1,0 +1,221 @@
+name: Fleet Heartbeat Watch
+
+# THE OTHER HALF OF scripts/fleet-heartbeat.sh. That script makes the mini say "I am still here"
+# on a cadence; this job is the thing that NOTICES WHEN IT STOPS. A heartbeat nobody watches is
+# not a heartbeat — and the watcher has to live somewhere the machine cannot take down with it,
+# which is why this runs on GitHub's runners and reads the signal over the wire rather than
+# anywhere on the host it is judging.
+#
+# A FOURTH CALLER OF AN EXISTING MECHANISM, not a new one. Delivery goes through
+# scripts/needs-human-issue.mjs exactly as clock-sweep.yml, recovery-drill.yml and
+# mutation-nightly.yml already do, for the reason that script's own header gives: "a scheduled job
+# that fails produces a red badge on a page nobody opens." It is idempotent by construction — it
+# COMMENTS on an existing open issue carrying the `<!-- needs-human:fleet-heartbeat -->` marker and
+# OPENS one only when none exists, so an hourly cron cannot produce a wall of duplicates; identity
+# rides that marker rather than the title, so retitling during triage does not fork a thread; and
+# it exits 1 when delivery itself failed, because a failure to notify must be loud.
+#
+# NOT A REQUIRED CHECK AND NOT AN ORDINARY PR TRIGGER — the same polarity clock-sweep.yml,
+# recovery-drill.yml and mutation-nightly.yml all establish, and deliberately absent from
+# ci-gate.yml. It is also not a ci.yml job, so it needs no CI_PARITY_TABLE entry: `runCiParity`'s
+# drift check (src/lib/ci-parity.ts) parses ci.yml's own top-level job keys and nothing else.
+#
+# ── BRANCH ABSENT MEANS NOT INSTALLED, AND IS SILENT ──────────────────────────────────────────
+# The single most important behaviour here. The beat script is committed to the repo but INSTALLED
+# on the mini separately, so between this workflow merging and that installation there is a window
+# — possibly days — in which the `heartbeat` branch does not exist at all. Firing then would open a
+# needs-human issue every hour about a machine nobody has armed yet, which is precisely how a
+# label gets trained into noise and then ignored. So: no branch => NOT INSTALLED => exit 0 with a
+# message. Only a branch that EXISTS and has gone quiet is a finding. This is the same bound-fires-
+# on-a-healthy-condition trap W1-T312, W1-T380 and W1-T382 were each filed for, in a new guise.
+#
+# ── THE THRESHOLD, AND WHERE THE NUMBER COMES FROM ────────────────────────────────────────────
+# STALE_AFTER_MINUTES = 30, which is SIX TIMES the beat script's documented five-minute install
+# cadence. The multiple is what needs justifying, so:
+#
+#   * The threshold must clear the largest gap a HEALTHY fleet can produce. Note what does NOT
+#     enter that: this job's own hourly cadence affects DETECTION LATENCY, not the measured age —
+#     the age is `now - last beat commit`, so a healthy reading is one beat interval plus jitter
+#     whenever this happens to run. The only healthy sources of a gap are a transiently failed
+#     `git push` (network blip, a GitHub 5xx) and launchd/cron jitter on the mini.
+#   * The distribution of those transient failures is UNMEASURED. It cannot be sampled today —
+#     the machine is down — and this repo's recurring defect is a bound sized against a population
+#     nobody has observed, which then fires on healthy conditions (ci-gate's wait cap under the
+#     real check wall-clock, W1-T312; a deploy ceiling consumed by a dry run, W1-T380; a check-wait
+#     bound where 21 of 21 booked PRs later merged, W1-T382). With the population unmeasured the
+#     correct move is to size GENEROUSLY and let operation measure it, not to fit to intuition.
+#   * Six tolerates five consecutive missed beats — twenty-five minutes in which `git push` alone
+#     failed repeatedly, which is a real problem in its own right and deserves the issue anyway.
+#   * The cost of that generosity is bounded and small: worst-case detection moves from about five
+#     minutes to about thirty, plus this job's hourly cadence — against a status quo of hours, or
+#     never.
+#   * REFINEMENT IS BUILT IN. Every beat carries `since_prev_beat_s`, the gap the MACHINE itself
+#     observed since its own last published beat, so after a few weeks the real distribution is
+#     readable off the beats and this multiple can be fitted to data instead of to caution. Do not
+#     tighten it before that data exists.
+#
+# ── WHAT THIS JOB DOES NOT COVER ──────────────────────────────────────────────────────────────
+# Its own silence. GitHub's scheduled workflows are best-effort and can be delayed or dropped on a
+# low-activity repository, and nothing here notices if this job stops running. A watcher-of-the-
+# watcher is an infinite regress; the honest statement is that this closes the machine-goes-dark
+# gap and not the GitHub-drops-our-cron gap.
+#
+# HOURLY at :37 — off :00/:30 for the reason clock-sweep.yml's own scheduling note gives, and off
+# the minutes clock-sweep (:23), mutation-nightly (:31) and recovery-drill (:17) already occupy, so
+# the four scheduled instruments never contend for the same runner window.
+on:
+  schedule:
+    - cron: "37 * * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "scripts/fleet-heartbeat.sh"
+      - ".github/workflows/fleet-heartbeat-watch.yml"
+
+permissions:
+  contents: read
+
+env:
+  HEARTBEAT_BRANCH: heartbeat
+  STALE_AFTER_MINUTES: "30"
+
+jobs:
+  heartbeat-watch:
+    name: heartbeat-watch (reads the beat branch off-machine; silent until the beat is installed)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # DELIVERY. Without this the job's only output is a red badge on a page nobody opens — the
+      # same discipline clock-sweep.yml and recovery-drill.yml both name in their own headers.
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+
+      # No `npm ci`, unlike the three sibling workflows — a deliberate subtraction, not an
+      # oversight. scripts/needs-human-issue.mjs imports only node builtins (node:fs,
+      # node:child_process, node:url, node:util) and the checks below are bash, so nothing here
+      # needs the dependency tree. That also means this watcher keeps working on a day `npm ci`
+      # itself is broken, which is not a hypothetical failure mode for this repo.
+
+      # SELF-CHECK FIRST, gating the live read — the same "probe self-check before sweeping"
+      # discipline clock-sweep.yml and recovery-drill.yml both open with. A watcher that reports
+      # health regardless of input is worse than no watcher, because it reads as coverage that does
+      # not exist. Both halves are exercised: the staleness predicate must DISCRIMINATE, and the
+      # real beat script must produce the three verdicts it exists to distinguish. This is inline
+      # rather than a third file because the changeset is deliberately two files; if it grows,
+      # promote it to scripts/ and give it a test/ falsifier.
+      - name: Self-check (a watcher that cannot separate fresh from stale reports false health — fail before watching)
+        run: |
+          set -euo pipefail
+          fail() { echo "SELF-CHECK FAILED: $*" >&2; exit 1; }
+          threshold_s=$(( STALE_AFTER_MINUTES * 60 ))
+
+          # (i) the predicate discriminates, in both directions, at its own boundary.
+          is_stale() { [ "$1" -gt "$threshold_s" ]; }
+          is_stale $(( threshold_s + 60 )) || fail "an age one minute PAST the threshold was judged fresh"
+          ! is_stale $(( threshold_s - 60 )) || fail "an age one minute INSIDE the threshold was judged stale"
+          echo "self-check: staleness predicate discriminates at ${STALE_AFTER_MINUTES}m"
+
+          # (ii) the beat script parses, and reports the three states it exists to separate.
+          bash -n scripts/fleet-heartbeat.sh || fail "scripts/fleet-heartbeat.sh does not parse"
+          work=$(mktemp -d)
+          iso_ago() { date -u -d "-$1 seconds" +%Y-%m-%dT%H:%M:%S.000Z; }
+          seed() { # seed <name> <daemon-age-s> <install-healthy?>
+            mkdir -p "$work/$1/root/state" "$work/$1/install/scripts"
+            cp scripts/fleet-heartbeat.sh "$work/$1/install/scripts/"
+            printf '{"ts":"%s","step":"daemon.boot","env_clean":true,"head_sha":"0123456789abcdef0123456789abcdef01234567"}\n' "$(iso_ago 9000)" \
+              > "$work/$1/root/state/ledger.ndjson"
+            printf '{"ts":"%s","step":"daemon.idle","tick":7,"poll_interval_ms":60000}\n' "$(iso_ago "$2")" \
+              >> "$work/$1/root/state/ledger.ndjson"
+            if [ "$3" = "healthy" ]; then
+              mkdir -p "$work/$1/install/node_modules/.bin"
+              printf '#!/bin/sh\n' > "$work/$1/install/node_modules/.bin/tsx"
+              chmod +x "$work/$1/install/node_modules/.bin/tsx"
+            else
+              mkdir -p "$work/$1/install/node_modules"
+            fi
+          }
+          beat() { RMD_HEARTBEAT_DRY_RUN=1 RMD_ROOT="$work/$1/root" bash "$work/$1/install/scripts/fleet-heartbeat.sh"; }
+
+          seed healthy 45 healthy
+          beat healthy | grep -q '^daemon_verdict=live$' || fail "a fresh daemon line did not read as live"
+          beat healthy | grep -q '^rmd_verdict=ok$'      || fail "a present tsx did not read as ok"
+
+          seed deaddaemon 8040 healthy
+          beat deaddaemon | grep -q '^daemon_verdict=STALE' || fail "a two-hour-old daemon line did not read as STALE"
+          beat deaddaemon | grep -q '^rmd_verdict=ok$'      || fail "a healthy install was misreported while the daemon was stale"
+
+          seed brokeninstall 45 broken
+          beat brokeninstall | grep -q '^tsx_present=no$'      || fail "a missing tsx was not detected"
+          beat brokeninstall | grep -q '^rmd_verdict=BROKEN'   || fail "an emptied node_modules did not read as BROKEN"
+          # THE CASE THE WHOLE DESIGN TURNS ON: an emptied node_modules kills every rmd verb while
+          # the running daemon keeps ticking from resident memory. A heartbeat written as a verb
+          # goes silent here and reads identically to a power cut; this one must still report.
+          beat brokeninstall | grep -q '^daemon_verdict=live$' || fail "the broken-install beat lost the daemon signal it must still carry"
+          echo "self-check: the beat script separates healthy / dead-daemon / broken-install"
+
+      - name: Read the beat branch and judge its age
+        # Skipped on `pull_request`: a PR touching these two files is exercising the SELF-CHECK
+        # above, and must not go red merely because the operator's machine happens to be off.
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          threshold_s=$(( STALE_AFTER_MINUTES * 60 ))
+
+          if [ -z "$(git ls-remote --heads origin "$HEARTBEAT_BRANCH")" ]; then
+            echo "no '$HEARTBEAT_BRANCH' branch on origin — the beat is NOT INSTALLED on the host yet."
+            echo "Silent by design: see this workflow's header. Install scripts/fleet-heartbeat.sh"
+            echo "on a five-minute cadence and this watcher arms itself on the first beat."
+            exit 0
+          fi
+
+          git fetch --no-tags --depth=1 origin "+refs/heads/${HEARTBEAT_BRANCH}:refs/remotes/origin/${HEARTBEAT_BRANCH}"
+          beat_epoch=$(git log -1 --format=%ct "origin/${HEARTBEAT_BRANCH}")
+          age_s=$(( $(date -u +%s) - beat_epoch ))
+          age_m=$(( age_s / 60 ))
+          subject=$(git log -1 --format=%s "origin/${HEARTBEAT_BRANCH}")
+          payload=$(git show "origin/${HEARTBEAT_BRANCH}:heartbeat.txt" 2>/dev/null || echo "(no heartbeat.txt on the branch)")
+
+          # THE LAST BEAT'S PAYLOAD, NOT JUST ITS AGE. "No beat for 71 minutes" is half an answer;
+          # "and the last one said the daemon had not polled in two hours", or "and the last one
+          # said node_modules was empty", is the whole one — and it is the difference between
+          # knowing the machine is gone and knowing which part of it is.
+          {
+            echo "Last beat was ${age_m} minute(s) ago (threshold: ${STALE_AFTER_MINUTES}m)."
+            echo "Last beat subject: ${subject}"
+            echo
+            echo "Last beat payload:"
+            echo "$payload"
+          } > heartbeat-report.txt
+          cat heartbeat-report.txt
+
+          if [ "$age_s" -gt "$threshold_s" ]; then
+            echo "heartbeat-watch: STALE — no beat for ${age_m} minute(s)." >&2
+            exit 1
+          fi
+          echo "heartbeat-watch: fresh — beat is ${age_m} minute(s) old."
+
+      - name: Open or update a needs-human issue when the beat has stopped
+        if: failure() && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_WHEN: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          test -s heartbeat-report.txt || echo "(no report captured -- the run failed before it could read the beat branch)" > heartbeat-report.txt
+          node scripts/needs-human-issue.mjs \
+            --source fleet-heartbeat \
+            --title "fleet-heartbeat: the machine has stopped reporting" \
+            --body-file heartbeat-report.txt
+
+      - name: Upload the beat report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: heartbeat-report
+          path: heartbeat-report.txt
+          if-no-files-found: ignore
