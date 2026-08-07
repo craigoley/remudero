@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { relative, sep } from "node:path";
-import type { AcceptanceCriterion, Plan, Task } from "./plan.js";
+import type { AcceptanceCriterion, Plan, Task, TaskStatus } from "./plan.js";
+import { isInPlanScope } from "./plan-architect.js";
 import { isDemonstrationProof, isDialectPrefixed, parseWhitelistedProof, type WhitelistedProof } from "./review.js";
 
 /**
@@ -61,7 +62,8 @@ export type LintCheck =
   | "call-site"
   | "monolith-filing"
   | "budget-sanity"
-  | "ruling-verify";
+  | "ruling-verify"
+  | "rule15-filing";
 export type LintSeverity = "block" | "warn";
 
 export interface LintViolation {
@@ -1105,6 +1107,85 @@ export function rulingVerifyViolation(task: Task): LintViolation | undefined {
   };
 }
 
+// ── RULE-15 FILING (W1-T384 — a filing shape the review guard can only refuse) ─
+//
+// THE INCIDENT, TWICE IN THREE DAYS. #1295 (W1-T324's dispatched run) went green on
+// 23 checks and was refused by `remudero-review` on Standing rule 15; #1416
+// (W1-T369's) was refused the same way with 18 deleted `proof:` lines. Both closed
+// unmerged; both were recovered by SPLITTING into a plan-only PR plus a code/test PR
+// (#1298+#1299 and #1418+#1420), each recovery merging in about a quarter of an hour.
+// The work was correct both times — only the PACKAGING was impossible.
+//
+// THE MECHANISM. `judgeReview` computes `planOnly = diffFiles.length > 0 &&
+// diffFiles.every(isInPlanScope)`, then `criteriaTampered = !planOnly &&
+// criterionFieldTampered(evidence.diff)`. Withdrawing or repairing a record
+// NECESSARILY removes a `claim:`/`proof:` line, which is exactly what
+// `criterionFieldTampered` fires on. So the moment ONE declared path falls outside
+// `isInPlanScope`, the carve-out is gone and the PR is refused however good the work
+// is. A dispatched worker gets one PR per run and cannot produce the split.
+//
+// WHY A LITERAL PATH AND NOT "ANY PLAN-SCOPE PATH" — MEASURED, per CLAUDE.md's rule
+// that a bound must have observed the population it separates. Re-derived over all
+// 425 task records at 1e952fc: FOUR declare `plan/tasks.yaml`. Two are plan-scope-only
+// and clean (W1-T202, W1-T370 — W1-T370 also verify:human); two are MIXED at
+// verify:auto (W1-T324, W1-T369) — exactly the two that lost dispatches. ZERO false
+// positives. Broadening the first clause to "any `isInPlanScope` path" instead fires
+// on 18 open records, 17 of them verify:auto, every one legitimate: `plan/policy.yaml`
+// beside `src/lib/policy.ts` is an ordinary config-plus-reader pairing (W1-T252,
+// W1-T264, W1-T318, W1-T320, W1-T325, W1-T330, W1-T344, W1-T378 among them) and none
+// touches an acceptance criterion. `plan/policy.yaml` is in plan scope only because it
+// starts with `plan/`. The narrow trigger is the one the evidence supports.
+//
+// IT GATES STRICTLY EARLIER THAN THE REVIEW GUARD, which is why it needs no reasoning
+// about gaming. `criteriaTampered` keeps working byte-identically on everything that
+// reaches review; this adds a refusal BEFORE dispatch and changes nothing about what
+// the reviewer does. It is purely additive to rule 15's strength — there is no path by
+// which it lets through something rule 15 previously caught.
+//
+// ONE TRIGGER ONLY, following {@link rulingVerifyViolation}'s own lesson: that check
+// shipped trigger A alone and dropped a title-word trigger B because B false-positived
+// on the very task introducing it. No second trigger is invented here either.
+
+/** The exact repo-relative path this repo's task monolith lives at — the literal
+ *  `files:` entry {@link rule15FilingViolation} keys on. Mirrors
+ *  {@link DECISIONS_LOG_PATH}'s root-relative convention. */
+const TASKS_MONOLITH_PATH = "plan/tasks.yaml";
+
+/** Retired or landed records, excluded from {@link rule15FilingViolation}.
+ *
+ *  A withdrawal under the W1-T229 convention PRESERVES the record, `files:` included,
+ *  so W1-T324's and W1-T369's mixed `files:` survive retirement forever. Without this
+ *  exclusion the operator plan-only PR that withdraws W1-T324 would be blocked by the
+ *  very check W1-T324 earned. `isOpenLintTask` is unexported and local to run-task.ts;
+ *  W1-T369's own lock (test/plan-proof-debt.test.ts) re-declared the three-value set
+ *  locally with a written reason rather than exporting it, and that precedent governs
+ *  — a 3-literal Set carries none of the drift risk a re-implemented algorithm would. */
+const NON_OPEN_FILING_STATUSES = new Set<TaskStatus>(["blocked", "merged", "done"]);
+
+/** A task that declares the task monolith alongside a path outside plan scope, at a
+ *  `verify` the operator will not be asked to judge — W1-T324's and W1-T369's exact
+ *  shape, which `remudero-review` can only ever refuse. See the module comment above
+ *  for the measured population and why the trigger keys on a literal path. */
+export function rule15FilingViolation(task: Task): LintViolation | undefined {
+  if (NON_OPEN_FILING_STATUSES.has(task.status)) return undefined;
+  if (task.verify === "human") return undefined;
+  const files = task.files ?? [];
+  if (!files.includes(TASKS_MONOLITH_PATH)) return undefined;
+  const outOfScope = files.filter((f) => !isInPlanScope(f));
+  if (outOfScope.length === 0) return undefined;
+  return {
+    check: "rule15-filing",
+    severity: "block",
+    message:
+      `task ${task.id} declares ${TASKS_MONOLITH_PATH} alongside ${outOfScope.join(", ")} at ` +
+      `verify:${task.verify} — editing a task record removes a claim:/proof: line, and with a path ` +
+      "outside plan scope the reviewer's planOnly carve-out is gone, so criteriaTampered refuses the " +
+      "PR however good the work is. A dispatched worker gets ONE PR and cannot split it. Remedy: " +
+      "file it as two tasks (a plan-only record edit, and the code/test work), or set verify: human " +
+      "so the operator makes the edit by hand.",
+  };
+}
+
 // ── BUDGET-SANITY (soft) ─────────────────────────────────────────────────────
 //
 // A WARNING (never blocks) when a task's resolved mount turn-budget sits below
@@ -1310,6 +1391,8 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   if (prov) violations.push(prov);
   const ruling = rulingVerifyViolation(task);
   if (ruling) violations.push(ruling);
+  const rule15 = rule15FilingViolation(task);
+  if (rule15) violations.push(rule15);
   if (opts.mountMaxTurns !== undefined) {
     const warn = budgetSanityWarning(opts.mountMaxTurns, opts.calibration);
     if (warn) violations.push(warn);
