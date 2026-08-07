@@ -1,0 +1,147 @@
+- id: W1-T398
+  title: "tailnet-identity auth trusts a header whose only protection is that Tailscale Serve strips it, but `resolveServeIdentity` hardcodes the trusted loopback address and nothing anywhere establishes WHICH proxy terminates there — so putting any other reverse proxy on that address turns gate 1 into a no-op and gate 2 into a forgeable grant of all 20 write routes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  rationale: "FOUND IN state/recon-blackout-and-hosted-console.md Q2, 2026-08-07, and re-derived
+    from source at d15de0b. NOT A LIVE DEFECT TODAY. It is a trap armed for the first person who
+    hosts this console, and it is filed now precisely because that person is likely to be a future
+    session with less context than this one.
+    CORRECTION TO A WIDELY-REPEATED PREMISE, established before anything else here: W1-T371 is
+    BUILT, not unbuilt. `IdentityAuth`, `identityGrantedScopes` and the `identity` option on
+    `ServiceOptions` all exist in src/lib/service.ts; `buildServeServer` forwards `deps.identity`
+    into `createService`; `resolveServeIdentity` (src/lib/serve.ts) resolves it from
+    `config.serve.identityCapability` (src/lib/config.ts). It is OPT-IN and OFF BY DEFAULT —
+    `resolveServeIdentity` returns undefined when that field is absent, so an install that never
+    sets it never consults identity at all. Whether the operator's own install sets it is
+    UNMEASURED: that value lives in a config file on a machine this analysis could not reach.
+    GATE 1 IS MISLEADINGLY NAMED. `identityGrantedScopes` refuses unless the request's own
+    `socket.localAddress` equals `identity.trustedLocalAddress`. That is not a tailnet check and it
+    cannot be one — it is a came-through-the-loopback-proxy check, and the address it compares
+    against is supplied by `resolveServeIdentity` as the module's `DEFAULT_SERVE_HOST` constant,
+    never by the operator. So the install never states which proxy it means.
+    GATE 2 IS SOUND ONLY BECAUSE OF SOMETHING OUTSIDE THIS PROCESS. It requires the ACL
+    app-capability name to appear as a key in the forwarded capabilities header. The interface's own
+    doc records why that is trustworthy: Tailscale Serve REMOVES those headers from inbound requests
+    before forwarding, so a client cannot supply its own. The soundness is entirely the stripper's,
+    and nothing in this codebase observes the stripper — a search of src/ finds the word Tailscale
+    only in comments, doc text and a config field name, and ZERO executions of a tailscale binary.
+    THE HAZARD. Terminate any other reverse proxy on the trusted loopback address — nginx, Caddy, a
+    cloud load balancer's local target — and gate 1 still passes (the request genuinely arrived on
+    loopback) while gate 2 loses the only thing that made it safe, because nothing is stripping the
+    header any more. A publicly addressed console in that shape grants READ_WRITE to anyone who
+    sets one HTTP header.
+    WHAT READ_WRITE IS, so the severity is not abstract: 20 write-scoped surfaces, re-counted from
+    source at this sha. Among them, two drain routes that spawn work and spend money, a skills-run
+    route that executes a skill against the operator's own checkout, two approve routes that move
+    code toward merge, and the stop route that halts the fleet.
+    FUNNEL IS NOT THE ESCAPE HATCH. The same interface doc records that Funnel traffic carries
+    neither identity header, so a Funnel-exposed console fails CLOSED to the bearer token — which is
+    a read credential carried in a URL and a write credential pasted into a browser, now on the
+    public internet. That is a different exposure, not a mitigation of this one.
+    THE FAMILY. This is Law 4 from state/research-laws-and-gaps-2026-08-05.md: conventions bind
+    where compliance is verifiable at the moment of invocation. The constraint here lives in a
+    comment advising that the service should listen only on localhost. This repo has measured that
+    class of convention failing more than once, including against its own author, which is the whole
+    reason a comment is not accepted as a control."
+  design: |
+    (i) RE-DERIVE BOTH GATES FIRST, from `identityGrantedScopes` and `resolveServeIdentity`. If
+    either has moved since d15de0b, say so and re-scope rather than guarding a shape that is gone.
+
+    (ii) REJECT THE OBVIOUS GUARD, AND UNDERSTAND WHY — this is the load-bearing part of the task.
+    The tempting rule is "refuse at startup when `identityCapability` is set and the bind list holds
+    a non-loopback address." IT TARGETS THE WRONG VARIABLE, IN BOTH DIRECTIONS.
+      - IT FIRES ON A HEALTHY, DOCUMENTED CONFIG. The operator guide's own worked example binds
+        loopback AND a tailnet address together so the console is reachable from a phone. That is
+        SAFE with identity on: gate 1 already refuses identity for anything arriving on the tailnet
+        address, so those requests fall through to the bearer token exactly as they always did.
+        Refusing it would break a shipped, documented setup to prevent nothing.
+      - IT MISSES THE ACTUAL HAZARD. The dangerous shape is a foreign proxy terminating ON the
+        trusted loopback address while the console binds loopback ONLY — where a bind-list check
+        never fires at all and the trap is fully armed.
+    A bound that fires on a healthy condition and misses the unhealthy one is this repo's recurring
+    defect, named three times in the record. Do not ship it.
+
+    (iii) ACCEPT WHAT IS ACTUALLY UNKNOWABLE HERE. The fact that must hold — that the process on the
+    other end of the trusted loopback address is Tailscale Serve — is NOT OBSERVABLE FROM INSIDE
+    THIS PROCESS. A socket peer on loopback identifies no proxy; shelling a tailscale binary would
+    prove a daemon is running, never that it is the listener in question, and would add a dependency
+    this codebase deliberately does not have. Any design claiming to VERIFY the topology is wrong,
+    and a task that shipped one would be worse than this task not existing.
+
+    (iv) THE RECOMMENDED GUARD: CONVERT A SILENT DEFAULT INTO A REFUSED-UNLESS-DECLARED INTENT.
+    Today `resolveServeIdentity` takes only the capability and supplies the trusted address itself,
+    so enabling identity silently inherits a trust assumption the operator never wrote down. Make
+    the assumption a required, explicit companion field in the same config block, and REFUSE AT
+    STARTUP when the capability is set and that field is absent — the same fail-closed posture the
+    wildcard refusal in the bind-list resolver already takes, in the same command where both values
+    are already resolved side by side.
+    WHY THIS ONE PASSES THE LAW 4 TEST WHERE A COMMENT DOES NOT: presence of a config field is
+    decidable at the moment of invocation, by the process itself, with no cooperation from the
+    operator's memory. Whether they wrote the truth is not decidable; whether they were made to
+    write anything at all is.
+    THE DECLARED VALUE ALSO CARRIES THE ADDRESS, which fixes a second, quieter problem: a proxy
+    terminating on a different loopback alias currently produces a silent identity refusal that
+    looks exactly like a Tailscale outage. Declared, it becomes a stated value that can be checked
+    and reported.
+    THE NAMED OPT-OUT: an operator who genuinely fronts this with something else must be able to
+    say so. Accept a distinct declared value for that, and REFUSE IT for now with a message naming
+    what would have to be true — a stripping guarantee equivalent to Serve's — rather than silently
+    accepting a configuration nobody has reasoned about. An opt-out that refuses is still an
+    opt-out: it moves the decision from inherited to requested.
+
+    (v) SAY PLAINLY WHAT THIS FORECLOSES AND WHAT IT DOES NOT, in the PR body, without softening.
+    FORECLOSES: silent enablement, and only that. Every configuration that works today keeps
+    working once the field is declared; nothing that is safe today becomes refused.
+    DOES NOT FORECLOSE: an operator who declares Tailscale and then puts nginx on that address. No
+    check inside this process can catch that, per (iii). The guard converts an inherited assumption
+    into a stated one; it does not verify the world.
+    NOT A REDESIGN: do not touch the two gates' logic, the bearer-token path, the scope model, or
+    which routes are write-scoped.
+
+    (vi) THE REGRESSION LOCK IS THE OFF-BY-DEFAULT PATH. An install that sets no capability must
+    behave byte-for-byte as it does today: identity never consulted, no new refusal, no new required
+    field. That is the overwhelming majority of installs, and a guard that made the default path
+    fail would be far worse than the hazard it closes. Write that test first and watch it fail.
+
+    NOT IN SCOPE: hosting the console anywhere (assessed and ranked LAST — a hosted console renders
+    the plan, the PR graph and merge history perfectly from the repo plus GitHub, and would have
+    shown a healthy board on a night the machine was dark, because every panel that knows the
+    machine is dark is machine-side); Funnel; the read-token-in-a-URL bootstrap; and any change to
+    what the write routes themselves do.
+  acceptance:
+    - claim: "enabling the capability without declaring the trusted proxy is refused at startup rather than silently inheriting a default"
+      proof: "unit test: test/serve-identity-declaration.test.ts"
+    - claim: "an install that enables no capability keeps today's behaviour exactly, with no new required field and no new refusal"
+      proof: "unit test: test/serve-identity-default-path.test.ts"
+    - claim: "a declared non-Tailscale proxy is refused with a message naming the stripping guarantee it would have to provide"
+      proof: "unit test: test/serve-identity-optout.test.ts"
+  risk: high
+  origin: recon#blackout-and-hosted-console-2026-08-07
+  plan_refs: []
+  files: [src/lib/serve.ts, src/lib/config.ts, src/run-task.ts, test/serve-identity-declaration.test.ts, test/serve-identity-default-path.test.ts, test/serve-identity-optout.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — every claim is decidable in-process. The refusals are pure resolution-time
+    checks over a config object, and the default-path claim is an assertion that a resolver returns
+    undefined. No second machine, no Tailscale, no network.
+    risk:high IS RULE 19'S SPAN, SET UP FRONT rather than shipped as a violation, exactly as W1-T396
+    did: files: reads as several concerns (the resolver, the config schema, the command that
+    assembles them, three test files). The diff is plausibly small. What is genuinely risky is
+    design (vi) — a guard on an opt-in path that accidentally reaches the default path would break
+    every install that never wanted identity at all, which is nearly all of them.
+    RULE 25 CHECKED BEFORE FILING: files: contains no INSTRUMENT_SURFACE path — no
+    .github/workflows/ entry, no ratchet script, no baseline, no mutation-scope config — so
+    detectInstrumentEntanglement finds no instrument half and has nothing to refuse.
+    ON THE PROOFS. Three distinct paths, one per claim, none a substring of another, all pure-path
+    form. That form lint-passes and executes the whole file, unlike the path-plus-title form which
+    satisfies the linter and then matches zero tests. All three are FORWARD REFERENCES TO PATHS,
+    which is safe; none forward-references a symbol name, which would be a guess. Each is declared
+    in files: so the worker creates it.
+    THIS IS A GUARD, NOT A REDESIGN, and design (ii) is the part most likely to be skipped: the
+    obvious bind-list refusal is wrong in both directions and the task exists partly to stop a
+    future session shipping it.
+    NO depends_on: the two gates exist and are reachable today; nothing has to land first."
