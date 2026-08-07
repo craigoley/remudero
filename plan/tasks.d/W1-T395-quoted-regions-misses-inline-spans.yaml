@@ -83,6 +83,14 @@
     `detectInstrumentEntanglement` has nothing to refuse.
     budget_usd 55 — below W1-T394's 70: no ledger population to derive, and the consumer inventory
     is one function's arms rather than a routing predicate's fleet-wide readers.
+    THE BOOTSTRAP TRAP, AND IT WILL BITE THE IMPLEMENTER OF THIS VERY TASK: until this fix ships,
+    a PR body cannot QUOTE the failing string it is describing, because inline backtick spans are
+    exactly what is not blanked. So the PR that fixes this must PARAPHRASE every verdict string and
+    every `exactly N files`-shaped phrase it discusses, or it fails its own review on the defect it
+    is removing. Validate the body through `bodyContradictsDiff` before pushing, with a deliberately
+    falsified file list as a positive control so an empty result is the checker engaging rather than
+    idling. (Raised in review on the filing PR; recorded here so the implementer meets it as an
+    instruction rather than as a surprise.)
     ON THE PROOFS. All three name test/review-inline-quoted-claims.test.ts, which does not exist
     yet: a FORWARD REFERENCE TO A PATH, safe per CLAUDE.md, declared in files: so the worker creates
     it. Pure-path form is deliberate — it lint-passes and executes the whole file, unlike the
