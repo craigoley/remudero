@@ -69,7 +69,7 @@
     NOT IN SCOPE: running or widening Stryker; changing `mutation-ratchet`'s config, file scope or
     required status; W1-T133's nightly run; resolving D-10 itself.
   acceptance:
-    - claim: "the rung reports lifetime killed, survived and escape counts for the mutation gate alongside the run count it read"
+    - claim: "the rung reports lifetime mutant totals, survivors and escapes alongside the run count it read"
       proof: "unit test: test/mutation-gate-lifetime.test.ts"
     - claim: "a history containing a failing gate run reports a non-zero escape count and names that run"
       proof: "unit test: test/mutation-gate-lifetime.test.ts"
@@ -77,16 +77,18 @@
       proof: "unit test: test/mutation-gate-lifetime.test.ts"
     - claim: "the rung is reached from the retro gather rather than merged unwired"
       proof: "unit test: test/mutation-gate-lifetime.test.ts"
-  risk: medium
+  risk: high
   origin: oper#d10-measurement-2026-08-07
   plan_refs: ["§11 D-10", "§5E", "P38", "P48", "W1-T108", "W1-T133", "W1-T358"]
   files: [src/lib/retro.ts, test/mutation-gate-lifetime.test.ts]
   status: queued
   attempts: 0
-  note: "risk:medium — two files, one concern, one subsystem (the retro gather), and the rung is
-    read-only and advisory. It cannot change a verdict, gate a PR or alter dispatch. Rule 19's span
-    test is satisfied without the high band, unlike its siblings W1-T390/391/392 which each cross
-    subsystems; recorded explicitly so the difference is not read as inconsistency.
+  note: "risk:high IS RULE 19'S SPAN, NOT BLAST RADIUS — recorded so a later reader does not over-read
+    it. The rung is read-only and advisory: it cannot change a verdict, gate a PR or alter dispatch,
+    and by blast radius alone this is the mildest of the four tasks filed this session. What earns the
+    band is only that `files:` names two distinct concerns (`retro`, `mutation-gate-lifetime`), which
+    Rule 19 refuses at risk:medium. FILED AT medium FIRST AND CORRECTED BY CI — the standing rule says
+    to set the band UP FRONT for exactly this shape, and this shard shipped the violation anyway.
     budget_usd 50 — the logic is a fold over records; the cost is clause (iv)'s branch, because the
     implementer may discover mid-task that no durable history exists and must then also ship the
     emission. If that branch is taken, expect the upper end.
