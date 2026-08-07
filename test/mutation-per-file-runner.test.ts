@@ -289,6 +289,20 @@ test("a run that judged no file at all is refused as vacuous rather than scored"
   assert.match(r.stderr.toString(), /VACUOUS RUN/);
 });
 
+test("two per-file reports claiming the same mutated file are refused rather than merged over", () => {
+  // The plan is meant to mutate each file exactly once, so a duplicate means the plan or the
+  // report directory is wrong -- and taking whichever landed second would hide one run's outcome
+  // from the validity guard entirely.
+  const dir = mkdtempSync(join(tmpdir(), "mutation-merge-dup-"));
+  const body = readFileSync(join(FIXTURES, "real-runner-reached.json"), "utf8");
+  writeFileSync(join(dir, "a.json"), body);
+  writeFileSync(join(dir, "b.json"), body);
+  const r = runNightly(["--report-dir", dir, "--mutate-scope", "src/lib/classify.ts"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr.toString(), /claim the same mutated file/);
+  assert.match(r.stderr.toString(), /src\/lib\/classify\.ts/);
+});
+
 test("an absent report directory is a named failure, never a pass", () => {
   const r = runNightly(["--report-dir", join(tmpdir(), "definitely-not-here-mutation")]);
   assert.notEqual(r.status, 0);
@@ -296,6 +310,14 @@ test("an absent report directory is a named failure, never a pass", () => {
 });
 
 // ── The plan, run against this repo's real tree ───────────────────────────────────────────────
+
+test("planning without its required inputs refuses by name instead of planning nothing quietly", () => {
+  // A plan step that silently produced zero configs would hand the ratchet an empty report
+  // directory, and "no files to judge" is not the same fact as "the arguments were missing".
+  const r = spawnSync(process.execPath, [SCRIPT, "--nightly-plan", "--night-index", "0"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr.toString(), /--nightly-plan requires --files/);
+});
 
 test("planning against the real tree emits a config whose command imports the file it mutates", () => {
   // Not a synthetic mapping: this drives --nightly-plan over the repo's own src/ and test/ files
@@ -307,19 +329,35 @@ test("planning against the real tree emits a config whose command imports the fi
   writeFileSync(filesList, "src/lib/runbook-coverage.ts\n");
   writeFileSync(testList, readdirSync(join(__dirname)).filter((n) => n.endsWith(".test.ts")).map((n) => `test/${n}`).join("\n"));
 
-  const r = spawnSync(process.execPath, [
-    SCRIPT,
-    "--nightly-plan",
-    "--files",
-    filesList,
-    "--test-files",
-    testList,
-    "--night-index",
-    "0",
-    "--plan-dir",
-    planDir,
-  ]);
+  // GITHUB_OUTPUT is pinned to a temp file rather than inherited: on a CI runner the real one is
+  // set, and a subprocess writing into the live step output would be a side effect this test has
+  // no business having. It also makes the workflow handoff below assertable off a runner.
+  const outFile = join(planDir, "github-output.txt");
+  const r = spawnSync(
+    process.execPath,
+    [
+      SCRIPT,
+      "--nightly-plan",
+      "--files",
+      filesList,
+      "--test-files",
+      testList,
+      "--night-index",
+      "0",
+      "--plan-dir",
+      planDir,
+    ],
+    { env: { ...process.env, GITHUB_OUTPUT: outFile } },
+  );
   assert.equal(r.status, 0, r.stdout?.toString() + r.stderr?.toString());
+
+  // The workflow's run loop reads `configs`, and the ratchet's validity scope reads `mutate` --
+  // which must carry the INCLUDED files only, or the guard would fail on files the plan already
+  // declined to measure and named.
+  const outputs = readFileSync(outFile, "utf8");
+  assert.match(outputs, /^configs=.*\.stryker\.json$/m);
+  assert.match(outputs, /^mutate=src\/lib\/runbook-coverage\.ts$/m);
+  assert.match(outputs, /^included=1$/m);
 
   const configs = readdirSync(planDir).filter((n) => n.endsWith(".stryker.json"));
   assert.equal(configs.length, 1, `expected one generated config, got ${configs.join(",")}`);
