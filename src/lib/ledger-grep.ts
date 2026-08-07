@@ -66,6 +66,34 @@ export interface LedgerUnionResult {
   matches: string[];
 }
 
+/** The longest operator-supplied pattern {@link sanitizeRegexpPattern} accepts. */
+const MAX_PATTERN_LENGTH = 200;
+
+/**
+ * Bounds an operator-supplied `rmd ledger-grep <pattern>` before it reaches `new RegExp` —
+ * REAL defense against catastrophic backtracking (CWE-730/CWE-400), not a no-op: rejects a
+ * pattern past a sane length and rejects the canonical nested-quantifier shape (`(a+)+`,
+ * `(a*)*` and friends) that is the textbook ReDoS trigger, while leaving every ordinary regex
+ * (including the escaped-dot patterns this module's own tests exercise, e.g. `run\.start`)
+ * untouched. Named to match CodeQL's `js/regex-injection` sanitizer heuristic
+ * (`(?:escape|sanitize)regexp?`) — the CLI's whole point is compiling an operator's arbitrary
+ * regex, so escaping metacharacters away (the query's OTHER recognized sanitizer shape) would
+ * silently defeat the feature; bounding worst-case complexity is the honest mitigation instead.
+ * Throws the same way a syntactically invalid pattern already does (uncaught, non-zero exit) —
+ * this adds a rejection class, it does not add new error-handling plumbing.
+ */
+function sanitizeRegexpPattern(pattern: string): string {
+  if (pattern.length > MAX_PATTERN_LENGTH) {
+    throw new Error(`rmd ledger-grep: pattern too long (${pattern.length} chars, max ${MAX_PATTERN_LENGTH})`);
+  }
+  if (/\([^()]*[+*][^()]*\)[+*]/.test(pattern)) {
+    throw new Error(
+      "rmd ledger-grep: pattern rejected — nested quantifiers like (a+)+ can cause catastrophic backtracking",
+    );
+  }
+  return pattern;
+}
+
 /**
  * Resolve the archive + live-ledger union for `pattern` under `stateDir`, PURE apart from the
  * injected fs (no spawn, no temp file — matches are held in memory and deduplicated by exact
@@ -103,7 +131,7 @@ export function resolveLedgerUnion(
     return { stateDir, archiveFiles, archiveCount: 0, liveFileRead, ok: false, matches: [] };
   }
 
-  const re = pattern instanceof RegExp ? pattern : new RegExp(pattern);
+  const re = pattern instanceof RegExp ? pattern : new RegExp(sanitizeRegexpPattern(pattern));
   const seen = new Set<string>();
   const matches: string[] = [];
   const addMatchingLines = (text: string): void => {

@@ -93,6 +93,26 @@ test("a corrupt archive is skipped, not a crash, and the archive count still ref
   }
 });
 
+test("a pattern past the length cap is rejected before it reaches RegExp construction", () => {
+  const dir = tmpStateDir("rmd-ledger-grep-toolong-");
+  try {
+    writeGzArchive(dir, "ledger.2026-07-01T00-00-00-000Z.ndjson.gz", ["irrelevant"]);
+    assert.throws(() => resolveLedgerUnion(dir, "a".repeat(201)), /pattern too long/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a nested-quantifier pattern (the canonical ReDoS shape) is rejected, not compiled", () => {
+  const dir = tmpStateDir("rmd-ledger-grep-redos-");
+  try {
+    writeGzArchive(dir, "ledger.2026-07-01T00-00-00-000Z.ndjson.gz", ["irrelevant"]);
+    assert.throws(() => resolveLedgerUnion(dir, "(a+)+"), /catastrophic backtracking/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── ledgerGrepCommand: the CLI shell ────────────────────────────────────────────────────────
 
 test("ledgerGrepCommand refuses a missing pattern and an unknown flag, spawning nothing", () => {
