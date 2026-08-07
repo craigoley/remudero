@@ -20,6 +20,7 @@ import {
   proofResolvabilityViolations,
   proofShapeViolations,
   provenanceViolation,
+  rule15FilingViolation,
   rulingVerifyViolation,
   sizingViolation,
   SPAWN_OWNERSHIP_CUE,
@@ -911,6 +912,116 @@ test("FALSIFIER: W1-T355's own shape (files include DECISIONS.md, verify:human) 
   });
   assert.equal(rulingVerifyViolation(t), undefined);
   assert.equal(lintTask(t).ok, true);
+});
+
+// ── RULE-15 FILING (W1-T384 — a shape the review guard can only ever refuse) ──
+//
+// Each test isolates ONE clause of the trigger against the SAME otherwise-identical
+// record, so a pass proves the clause discriminates rather than that the check is
+// simply quiet. The `files:` list is the only variable except where verify/status is
+// named as the variable under test.
+
+test("ACCEPTANCE 1: plan/tasks.yaml alongside an out-of-scope path at verify:auto is FLAGGED, and the message names the remedy", () => {
+  const t = task({
+    id: "FIX-RULE15-MIXED-AUTO",
+    verify: "auto",
+    files: ["plan/tasks.yaml", "src/run-task.ts", "test/lint-plan-open-only.test.ts"],
+  });
+  const v = rule15FilingViolation(t);
+  assert.ok(v, "expected a rule15-filing violation on W1-T324's exact shape");
+  assert.equal(v?.severity, "block");
+  assert.equal(v?.check, "rule15-filing");
+  // The remedy, not merely the shape — both routes must be named.
+  assert.match(v!.message, /two tasks/i);
+  assert.match(v!.message, /verify:\s*human/);
+  // The message must name the offending path(s), so the operator does not have to re-derive them.
+  assert.match(v!.message, /src\/run-task\.ts/);
+  const res = lintTask(t);
+  assert.equal(res.ok, false);
+  assert.ok(res.violations.some((x) => x.check === "rule15-filing"));
+});
+
+test("ACCEPTANCE 1 (contrast): the IDENTICAL record at verify:human PASSES — W1-T370's shape, the route the ruling adopts", () => {
+  const mixedAuto = task({
+    id: "FIX-RULE15-VERIFY-VAR",
+    verify: "auto",
+    files: ["plan/tasks.yaml", "src/run-task.ts"],
+  });
+  const mixedHuman = task({ ...mixedAuto, verify: "human" });
+  // POSITIVE CONTRAST: the ONLY difference is `verify`, and it flips the verdict.
+  assert.ok(rule15FilingViolation(mixedAuto), "the auto side must fire, or the human side proves nothing");
+  assert.equal(rule15FilingViolation(mixedHuman), undefined);
+  assert.equal(lintTask(mixedHuman).ok, true);
+});
+
+test("ACCEPTANCE 2: a record declaring ONLY plan-scope paths PASSES at either verify value — the by-hand repair route is never refused", () => {
+  for (const verify of ["auto", "human"] as const) {
+    const t = task({
+      id: `FIX-RULE15-PLANONLY-${verify}`,
+      verify,
+      files: ["plan/tasks.yaml", "plan/tasks.d/W1-T999-some-shard.yaml", "MASTER-PLAN.md"],
+    });
+    assert.equal(rule15FilingViolation(t), undefined, `plan-only must pass at verify:${verify}`);
+  }
+  // POSITIVE CONTRAST with the variable isolated: adding ONE out-of-scope path to the
+  // verify:auto case flips it, so the pass above is about scope and not about quietness.
+  const flipped = task({
+    id: "FIX-RULE15-PLANONLY-FLIP",
+    verify: "auto",
+    files: ["plan/tasks.yaml", "plan/tasks.d/W1-T999-some-shard.yaml", "MASTER-PLAN.md", "src/lib/review.ts"],
+  });
+  assert.ok(rule15FilingViolation(flipped), "one out-of-scope path must flip the same record");
+});
+
+test("ACCEPTANCE 3: a record with NO plan/tasks.yaml entry is untouched however many out-of-scope paths it declares", () => {
+  // The measured 17-task config-plus-reader population: plan/policy.yaml beside its reader.
+  const t = task({
+    id: "FIX-RULE15-CONFIG-READER",
+    verify: "auto",
+    files: ["plan/policy.yaml", "src/lib/policy.ts", "test/policy.test.ts", "docs/cli-reference.md"],
+  });
+  assert.equal(rule15FilingViolation(t), undefined);
+  assert.ok(!lintTask(t).violations.some((x) => x.check === "rule15-filing"));
+  // POSITIVE CONTRAST: swapping plan/policy.yaml for the literal monolith path fires.
+  const swapped = task({ ...t, id: "FIX-RULE15-CONFIG-SWAP", files: ["plan/tasks.yaml", "src/lib/policy.ts"] });
+  assert.ok(rule15FilingViolation(swapped), "the literal monolith path is what the trigger keys on");
+});
+
+test("ACCEPTANCE 4: a RETIRED record is excluded, so a plan-only withdrawal preserving a mixed files: is not refused by the check it earned", () => {
+  const mixed = ["plan/tasks.yaml", "test/plan-proof-debt.test.ts"];
+  // W1-T369's real post-withdrawal shape: the record survives, files: included.
+  for (const status of ["blocked", "merged", "done"] as const) {
+    const t = task({ id: `FIX-RULE15-RETIRED-${status}`, verify: "auto", status, files: mixed });
+    assert.equal(rule15FilingViolation(t), undefined, `a ${status} record must be excluded`);
+  }
+  // POSITIVE CONTRAST: the SAME record while still open fires — so the exclusion is
+  // doing the work, not the files: list.
+  const open = task({ id: "FIX-RULE15-RETIRED-OPEN", verify: "auto", status: "queued", files: mixed });
+  assert.ok(rule15FilingViolation(open), "the identical record at status:queued must fire");
+});
+
+test("rule15-filing is wired into lintTask and blocks — one wiring point, no second call site", () => {
+  const t = task({
+    id: "FIX-RULE15-WIRED",
+    verify: "auto",
+    files: ["plan/tasks.yaml", "src/run-task.ts"],
+  });
+  // Drives the PRODUCTION default: lintTask with no opts, exactly as CI's lint-plan and
+  // runTask's assertLintClean call it (preDispatchLint demotes only proofResolvability).
+  const res = lintTask(t);
+  assert.equal(res.ok, false, "a blocking violation must flip ok=false at the aggregator's default");
+  const v = res.violations.find((x) => x.check === "rule15-filing");
+  assert.ok(v, "lintTask must surface the check without any opt being passed");
+  assert.equal(v?.severity, "block");
+});
+
+test("W1-T384's OWN files: do not trip the rule it proposes — a rule that refuses its own filing is the self-reference failure", () => {
+  const t = task({
+    id: "W1-T384",
+    verify: "auto",
+    files: ["src/lib/task-linter.ts", "test/task-linter.test.ts"],
+  });
+  assert.equal(rule15FilingViolation(t), undefined);
 });
 
 test("SELF-REFERENCE: W1-T353's own ruling-shaped TITLE (word 'ruling' appears repeatedly) never trips this check — trigger A is files-only, no title trigger is implemented", () => {
