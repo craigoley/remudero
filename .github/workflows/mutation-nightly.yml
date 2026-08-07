@@ -47,7 +47,11 @@ name: Mutation Nightly
 #   * A file no test imports directly is EXCLUDED -- nothing could kill a mutant in it.
 #   * A file whose direct importers exceed the per-file command budget is EXCLUDED. Every mutant
 #     pays that command again, so the hot modules (plan.ts, run-task.ts, status.ts and the rest of
-#     the ~45-to-116-importer set) do not fit in a night and are not pretended over.
+#     the ~45-to-116-importer set) do not fit in a night and are not pretended over. MEASURED
+#     across all 109 modules at the shipped budget: 67 (61%) are eligible, 2 have no direct test
+#     importer at all, and the remainder overrun.
+#   * A file whose own importers do not pass on UNMUTATED source is EXCLUDED -- no mutant verdict
+#     drawn from a red suite would mean anything.
 #   * The reported score is a LOWER BOUND, not the true score: the mapping follows DIRECT imports
 #     only, so a mutant killed by a test that reaches the module indirectly registers as surviving.
 #     Following transitive edges was measured and rejected -- the median module is transitively
