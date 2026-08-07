@@ -93,6 +93,30 @@ test("buildBody carries the marker, the run URL and the captured log", () => {
   assert.ok(body.length <= MAX_BODY);
 });
 
+test("buildBody keeps the marker when the log is far too big, so idempotency survives truncation", () => {
+  // The falsifier for idempotency itself. truncateBody keeps the TAIL and the marker sits at the
+  // HEAD, so trimming the ASSEMBLED body drops the marker first -- and a delivered body with no
+  // marker is invisible to decideDelivery, which would then open a fresh issue every single run.
+  // mutation-nightly's captured log really is this size: its report carries over 27,000 surviving
+  // mutants and Stryker prints each one.
+  const marker = markerFor("mutation-nightly");
+  const body = buildBody({
+    source: "mutation-nightly",
+    marker,
+    runUrl: "https://example.invalid/run/2",
+    log: `${"x".repeat(MAX_BODY * 8)}\nmutation-ratchet: NIGHTLY BLOCKED -- INVALID RUN`,
+    when: "schedule",
+  });
+  assert.ok(body.length <= MAX_BODY, `expected <=${MAX_BODY}, got ${body.length}`);
+  assert.ok(body.includes(marker), "the marker must survive, or every run opens a new issue");
+  assert.deepEqual(decideDelivery([{ number: 3, body, title: "renamed by a human" }], marker), {
+    action: "comment",
+    number: 3,
+  });
+  assert.ok(body.includes("INVALID RUN"), "the tail diagnosis must still reach the reader");
+  assert.ok(body.includes("https://example.invalid/run/2"), "the envelope must survive too");
+});
+
 test("deliver creates a labelled issue when none exists, and never sends a bare `gh issue create` without the label", () => {
   const calls: string[][] = [];
   const exec = (_file: string, args: string[]): string => {

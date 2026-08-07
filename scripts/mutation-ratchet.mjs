@@ -60,16 +60,25 @@
 //
 // Usage (nightly ratchet mode -- W1-T133, run AFTER the nightly Stryker run completes):
 //   node scripts/mutation-ratchet.mjs --nightly-ratchet [--report <path>] [--baseline <path>]
+//     [--mutate-scope <comma-separated file list>]
 //
 // Compares the nightly Stryker report against the "nightly" section of scripts/mutation-
 // baseline.json (a sibling of the PR-gate's own root-level fields -- untouched by this mode).
 // Degrades LOUDLY on every failure path (missing/non-numeric nightly baseline section, unreadable
 // or corrupt report, below-baseline score) -- never a silent pass.
 //
-// The pure functions below (parseMutationTotals, evaluateRatchet, evaluatePathFilter,
-// resolveMutateScope, sampleForNight) are exported so the falsifier fixture test can exercise the
-// CLI process directly (spawn + exit code) as well as the parsing/comparison/scope-resolution
-// logic in isolation.
+// `--mutate-scope` is the RUN-VALIDITY guard's input: the files this run asked Stryker to mutate
+// (the nightly passes its own --nightly-scope output straight through). Before comparing any
+// score, this mode refuses a report in which a mutated file caught NOTHING -- see the
+// "Run-validity guard" section comment further down for why that is a validity check and
+// emphatically NOT a quality floor. This guard runs in --nightly-ratchet mode ONLY; the PR gate
+// (ci.yml's mutation-ratchet job) invokes the default --report/--baseline mode, whose behaviour is
+// unchanged.
+//
+// The pure functions below (parseMutationTotals, tallyMutants, evaluateReportValidity,
+// evaluateRatchet, evaluatePathFilter, resolveMutateScope, sampleForNight) are exported so the
+// falsifier fixture test can exercise the CLI process directly (spawn + exit code) as well as the
+// parsing/comparison/scope-resolution logic in isolation.
 
 import { appendFileSync, readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
@@ -224,11 +233,54 @@ export function sampleForNight(files, cap, nightIndex) {
 }
 
 /**
+ * Tally one file's mutant statuses. The SINGLE home for this project's reading of Stryker's
+ * status vocabulary -- both parseMutationTotals() (whole-report score) and
+ * evaluateReportValidity() (per-file reachability) accumulate over this, so "what counts as
+ * caught" and "what counts as valid" cannot drift between the score and the guard.
+ *
+ * Killed and Timeout are CAUGHT (a test noticed). Survived and NoCoverage are valid-but-uncaught.
+ * CompileError/RuntimeError/Ignored are not valid mutants and are excluded from both, matching
+ * Stryker's own scoring convention -- they are not a statement about test-suite quality.
+ * @param {ReadonlyArray<{status?: string}>} mutants
+ */
+export function tallyMutants(mutants) {
+  let killed = 0;
+  let timeout = 0;
+  let survived = 0;
+  let noCoverage = 0;
+  for (const mutant of mutants ?? []) {
+    switch (mutant.status) {
+      case 'Killed':
+        killed += 1;
+        break;
+      case 'Timeout':
+        timeout += 1;
+        break;
+      case 'Survived':
+        survived += 1;
+        break;
+      case 'NoCoverage':
+        noCoverage += 1;
+        break;
+      default:
+        // CompileError / RuntimeError / Ignored -- not a valid mutant, excluded.
+        break;
+    }
+  }
+  return {
+    killed,
+    timeout,
+    survived,
+    noCoverage,
+    caught: killed + timeout,
+    validTotal: killed + timeout + survived + noCoverage,
+  };
+}
+
+/**
  * Sum mutant statuses across every file in a Stryker JSON report and derive the overall
- * mutation score. Statuses: Killed, Timeout (both count as "caught"); Survived, NoCoverage
- * (both count as valid-but-uncaught); CompileError/RuntimeError/Ignored are excluded from the
- * denominator entirely (matching Stryker's own scoring convention -- they are not a statement
- * about test-suite quality).
+ * mutation score -- see tallyMutants() for the status vocabulary this shares with the validity
+ * guard.
  * @param {{files?: Record<string, {mutants?: Array<{status?: string}>}>}} report
  */
 export function parseMutationTotals(report) {
@@ -238,26 +290,11 @@ export function parseMutationTotals(report) {
   let noCoverage = 0;
   const files = report.files ?? {};
   for (const filePath of Object.keys(files)) {
-    const mutants = files[filePath].mutants ?? [];
-    for (const mutant of mutants) {
-      switch (mutant.status) {
-        case 'Killed':
-          killed += 1;
-          break;
-        case 'Timeout':
-          timeout += 1;
-          break;
-        case 'Survived':
-          survived += 1;
-          break;
-        case 'NoCoverage':
-          noCoverage += 1;
-          break;
-        default:
-          // CompileError / RuntimeError / Ignored -- not a valid mutant, excluded.
-          break;
-      }
-    }
+    const tally = tallyMutants(files[filePath].mutants ?? []);
+    killed += tally.killed;
+    timeout += tally.timeout;
+    survived += tally.survived;
+    noCoverage += tally.noCoverage;
   }
   const validTotal = killed + timeout + survived + noCoverage;
   return {
@@ -268,6 +305,95 @@ export function parseMutationTotals(report) {
     noCoverage,
     validTotal,
   };
+}
+
+// ── Run-validity guard: did the test command REACH the files this run mutated? ─────────────
+//
+// THIS IS A VALIDITY GUARD, NOT A QUALITY FLOOR, and the distinction is the whole point. It needs
+// no measured baseline to justify, which is exactly why it can ship while the nightly's runner is
+// still wrong. Passing it says ONLY that the test command exercised the mutated files at all; it
+// says NOTHING about how good the tests are. The floor is scripts/mutation-baseline.json's
+// `nightly.scorePct`, it is a bootstrap zero with `capturedAt: null`, and a run that passes THIS
+// guard is still not evidence for setting it.
+//
+// THE DEFECT IT REFUSES TO CERTIFY. .github/workflows/mutation-nightly.yml overrides Stryker's
+// `--mutate` glob (a rotating sample from all of src/**) but NOT stryker.conf.json's
+// `commandRunner.command`, which runs two test files. So the nightly mutates files no test in its
+// own runner imports, nothing can kill those mutants by construction, and the resulting score
+// describes the runner rather than the suite. Nine scheduled runs concluded `success` that way.
+//
+// WHY THE PREDICATE IS PER-FILE AND NOT PER-MUTANT. The obvious per-mutant field does not exist
+// here. MEASURED against real Stryker 9.6.1 output from this repo's own command runner: in a run
+// whose mutated file NO test imports, every mutant still carries `testsCompleted: 1` (the command
+// runner counts the whole command as one test), `coveredBy` and `killedBy` are absent entirely,
+// and `NoCoverage` is never emitted -- the nightly's own log reads `0 no-coverage` beside 27,017
+// survived. So no schema field distinguishes "reached by a test" from "no test ran against this
+// file at all"; the only observable that does is the file's OUTCOME distribution.
+//
+// CATEGORICAL, NOT A RATIO. A file with at least one valid mutant and ZERO caught ones (nothing
+// killed, nothing timed out) is UNREACHED. That is a categorical fact with no threshold to fit --
+// deliberately, because a bound fitted to one observed population is this repo's most-repeated
+// defect (W1-T312, W1-T380, W1-T382) and here only the BROKEN population has ever been observed.
+//
+// THE ONE THING IT CANNOT DISTINGUISH, stated rather than hidden: a legitimately equivalent
+// mutant -- one with no observable behaviour -- also survives, and this guard cannot tell a file
+// whose mutants are ALL equivalent from a file no test reached. Nothing in the report can, given
+// the absent coverage fields above. What that costs is bounded: the misjudged file would have to
+// have every one of its mutants equivalent, and the consequence is a spurious issue on a workflow
+// that is deliberately NOT a required check, never a blocked PR. The refusal names each file and
+// its mutant count so a human can settle it in seconds.
+//
+// SCOPED TO THIS RUN'S MUTATE LIST, which is also what makes it immune to Stryker's `incremental:
+// true` accumulation: the nightly's report carries files from earlier nights (it grew 25,223 ->
+// 27,017 valid mutants across two nights of a supposedly rotating 15-file sample), so a
+// whole-report predicate would judge stale files forever. Judging only the files this run declared
+// it was mutating keeps the guard reading tonight's sample. The accumulation remains a real defect
+// for the SCORE -- untouched here, and out of scope for this one concern.
+
+/**
+ * Normalize a report key / mutate-scope entry to one comparable form.
+ * @param {string} p
+ */
+function normalizeReportPath(p) {
+  return p.trim().replace(/\\/g, '/').replace(/^\.\//, '');
+}
+
+/**
+ * Decide whether a Stryker report is a VALID measurement -- i.e. whether the test command
+ * actually reached the files this run mutated. See the section comment above for why this is not
+ * a quality floor and what it deliberately cannot distinguish.
+ *
+ * @param {{files?: Record<string, {mutants?: Array<{status?: string}>}>}} report
+ * @param {readonly string[] | undefined} mutateScope the files this run asked Stryker to mutate.
+ *   When omitted, every file in the report is judged instead -- reported as `scopeSource` rather
+ *   than assumed, because under `incremental: true` those are not the same set.
+ * @returns {{ok: boolean, scopeSource: 'declared'|'report', judged: Array<{file: string, validTotal: number, caught: number}>, unreached: Array<{file: string, validTotal: number}>, noMutants: string[]}}
+ */
+export function evaluateReportValidity(report, mutateScope) {
+  const files = report.files ?? {};
+  const byPath = new Map(Object.keys(files).map((k) => [normalizeReportPath(k), files[k]]));
+
+  const declared = (mutateScope ?? []).map(normalizeReportPath).filter(Boolean);
+  const scopeSource = declared.length > 0 ? 'declared' : 'report';
+  const candidates = scopeSource === 'declared' ? [...new Set(declared)] : [...byPath.keys()];
+
+  const judged = [];
+  const unreached = [];
+  const noMutants = [];
+  for (const file of candidates) {
+    const tally = tallyMutants(byPath.get(file)?.mutants ?? []);
+    if (tally.validTotal === 0) {
+      // Absent from the report, or present with nothing valid to judge (a types-only module
+      // yields no mutants). Not a reachability verdict either way -- counted separately so it is
+      // visible rather than silently folded into "fine".
+      noMutants.push(file);
+      continue;
+    }
+    judged.push({ file, validTotal: tally.validTotal, caught: tally.caught });
+    if (tally.caught === 0) unreached.push({ file, validTotal: tally.validTotal });
+  }
+
+  return { ok: unreached.length === 0, scopeSource, judged, unreached, noMutants };
 }
 
 /**
@@ -298,6 +424,7 @@ function main(argv) {
       files: { type: 'string' },
       'night-index': { type: 'string' },
       'scope-config': { type: 'string' },
+      'mutate-scope': { type: 'string' },
       config: { type: 'string' },
     },
   });
@@ -406,12 +533,47 @@ function main(argv) {
     }
 
     const actual = parseMutationTotals(report);
-    const violations = evaluateRatchet(actual, nightlyBaseline);
 
     console.log(
       `mutation-ratchet: NIGHTLY score ${actual.scorePct.toFixed(2)}% (baseline ${nightlyBaseline.scorePct.toFixed(2)}%) -- ` +
         `${actual.killed} killed, ${actual.timeout} timeout, ${actual.survived} survived, ${actual.noCoverage} no-coverage`,
     );
+
+    // Validity BEFORE the score comparison: if the test command never reached the mutated files,
+    // the number above describes the runner, not the suite, and comparing it to any floor is
+    // meaningless. Refuse by name rather than passing on a smaller/emptier answer -- the same
+    // polarity as `rmd ledger-grep`'s zero-archive verdict.
+    const mutateScope = (values['mutate-scope'] ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const validity = evaluateReportValidity(report, mutateScope);
+    console.log(
+      `mutation-ratchet: NIGHTLY validity -- scope from ${validity.scopeSource}, ` +
+        `${validity.judged.length} file(s) judged, ${validity.unreached.length} with ZERO caught mutants, ` +
+        `${validity.noMutants.length} with no valid mutants to judge`,
+    );
+    if (!validity.ok) {
+      console.error(
+        'mutation-ratchet: NIGHTLY BLOCKED -- INVALID RUN, not a low score. The file(s) below were ' +
+          'mutated but NOTHING in them was caught (no mutant killed, none timed out), which means the ' +
+          'configured test command never exercised them. A score computed over files no test reached ' +
+          'measures the RUNNER, not the suite, so this is an error rather than a smaller number:',
+      );
+      for (const u of validity.unreached) {
+        console.error(`  - ${u.file} -- ${u.validTotal} valid mutant(s), 0 caught`);
+      }
+      console.error(
+        'mutation-ratchet: this is a VALIDITY guard, NOT a quality floor -- passing it says the runner ' +
+          'reached the mutated files and says nothing about test quality. Fix stryker.conf.json\'s ' +
+          "commandRunner.command so it runs tests that import the mutated files. Do NOT set " +
+          "scripts/mutation-baseline.json's nightly.scorePct from a run that fails this.",
+      );
+      process.exitCode = 1;
+      return;
+    }
+
+    const violations = evaluateRatchet(actual, nightlyBaseline);
 
     if (violations.length > 0) {
       console.error(
