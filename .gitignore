@@ -16,6 +16,8 @@ coverage/
 # own scratch sandbox directory
 reports/mutation/
 .stryker-tmp/
+.stryker-tmp-*/
+.stryker-plan/
 
 # Stryker's incremental-mode cache (W1-T108: restored/saved by ci.yml's mutation-ratchet job
 # via actions/cache, never committed — a stale local copy must never be mistaken for CI's)

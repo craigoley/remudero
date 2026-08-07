@@ -25,26 +25,49 @@ name: Mutation Nightly
 # scripts/mutation-ratchet.mjs's resolveMutateScope() hard-excludes `test/**` unconditionally
 # regardless of what that config says.
 #
-# BOUNDED, not exhaustive, per run: mutating every one of src/**'s ~84 files with the command
-# runner would reproduce the same ~4-hour cost this workflow exists to avoid off the PR path (a
-# nightly run still shouldn't run forever). scripts/mutation-ratchet.mjs's `--nightly-scope` mode
+# BOUNDED, not exhaustive, per run: mutating every one of src/**'s files with the command runner
+# would reproduce the same ~4-hour cost this workflow exists to avoid off the PR path (a nightly
+# run still shouldn't run forever). scripts/mutation-ratchet.mjs's `--nightly-plan` mode
 # deterministically samples a `fileCap`-sized subset (scripts/mutation-nightly-scope.json) keyed
 # on the day-of-year, so a bounded, reproducible sample runs each night and the sample ROTATES --
-# the whole matched tree is covered once every N nights (N = ceil(matched-file-count / fileCap)).
+# the whole matched tree is visited once every N nights (N = ceil(matched-file-count / fileCap)).
 # Same night-index always yields the same sample: deterministic, auditable, never flaky.
 #
-# LOUD FAILURE, never a silent pass: `--nightly-ratchet` (run after Stryker) blocks this workflow
-# on an INVALID run, a below-baseline sampled score, an unreadable/corrupt report, or a missing
-# "nightly" baseline section -- there is no code path that reaches a green run without a real,
-# valid, at-or-above-baseline comparison (the W1-T130 degrade-loudly polarity).
+# ONE STRYKER RUN PER MUTATED FILE, which is the shape this job has to have. Stryker's
+# `commandRunner.command` is ONE command for a whole run and there is no per-file hook, so a single
+# invocation physically cannot run a different test set per mutated file. This workflow previously
+# overrode `--mutate` while leaving that command alone, and therefore mutated files no test in its
+# own command imports: nothing could kill those mutants by construction, and nine scheduled runs
+# reported `success` at a mutation score of 0.50%. `--nightly-plan` now derives each sampled file's
+# DIRECT test importers from the import graph and emits one Stryker config per file.
 #
-# INVALID RUN is the newest of those and is a VALIDITY check, NOT a quality floor. The `mutate`
-# glob this workflow overrides is wider than stryker.conf.json's `commandRunner.command`, so this
-# job can mutate files no test in its own runner imports -- nothing can kill those mutants by
-# construction, and the score then describes the RUNNER rather than the suite. The guard refuses a
-# report in which a mutated file caught nothing at all, naming each such file. Passing it means the
-# runner reached the mutated files and means NOTHING about test quality: it is not evidence for
-# raising scripts/mutation-baseline.json's `nightly.scorePct`, which remains a bootstrap zero.
+# WHAT THIS JOB NOW HONESTLY CLAIMS, which is less than its name suggests and is stated rather than
+# implied. It measures the files it can measure and NAMES the ones it cannot, every night, in this
+# job's log and in the failure issue:
+#   * A file no test imports directly is EXCLUDED -- nothing could kill a mutant in it.
+#   * A file whose direct importers exceed the per-file command budget is EXCLUDED. Every mutant
+#     pays that command again, so the hot modules (plan.ts, run-task.ts, status.ts and the rest of
+#     the ~45-to-116-importer set) do not fit in a night and are not pretended over. MEASURED
+#     across all 109 modules at the shipped budget: 67 (61%) are eligible, 2 have no direct test
+#     importer at all, and the remainder overrun.
+#   * A file whose own importers do not pass on UNMUTATED source is EXCLUDED -- no mutant verdict
+#     drawn from a red suite would mean anything.
+#   * The reported score is a LOWER BOUND, not the true score: the mapping follows DIRECT imports
+#     only, so a mutant killed by a test that reaches the module indirectly registers as surviving.
+#     Following transitive edges was measured and rejected -- the median module is transitively
+#     reachable from 166 of 358 test files, which is the full suite by another name.
+#
+# LOUD FAILURE, never a silent pass: `--nightly-ratchet` (run after the Stryker runs) blocks this
+# workflow on a VACUOUS run, an INVALID run, a below-baseline sampled score, an unreadable/corrupt
+# report, or a missing "nightly" baseline section -- there is no code path that reaches a green run
+# without a real, valid, at-or-above-baseline comparison (the W1-T130 degrade-loudly polarity).
+#
+# INVALID RUN is a VALIDITY check, NOT a quality floor: it refuses a report in which a mutated file
+# caught nothing at all, naming each such file. VACUOUS RUN refuses a report that judged no file at
+# all -- a score over an empty set is not a smaller measurement. Passing either means the runner
+# reached the mutated files and means NOTHING about test quality: neither is evidence for raising
+# scripts/mutation-baseline.json's `nightly.scorePct`, which remains a bootstrap zero and must be
+# set from runs of the FIXED job.
 #
 # This workflow intentionally does NOT auto-commit an updated scripts/mutation-baseline.json --
 # ratcheting the nightly floor up is a deliberate, reviewed change, the same convention every
@@ -93,42 +116,48 @@ jobs:
         run: npm ci
       - name: List this run's mutate candidates (all of src/**; test/** is never produced by this glob)
         run: find src -type f \( -name '*.ts' -o -name '*.tsx' \) | sort > nightly-candidates.txt
-      - name: Resolve tonight's deterministic sample (day-of-year seed, fileCap-bounded, rotates over N nights)
-        id: scope
+      - name: List the test files the per-file mapping is derived from
+        run: find test -maxdepth 1 -type f -name '*.test.ts' | sort > nightly-test-files.txt
+      # PLAN, not just scope. Stryker's `commandRunner.command` is ONE command for a whole run with
+      # no per-file hook, so a single invocation cannot run a different test set per mutated file --
+      # which is exactly why the old shape mutated files nothing in its command imported. This step
+      # derives each sampled file's DIRECT test importers, drops the ones this run cannot honestly
+      # measure (naming each and why), and writes one Stryker config per surviving file.
+      - name: Plan tonight's per-file runs (direct test importers, budget-bounded, exclusions named)
+        id: plan
         run: |
-          set -euo pipefail
-          node scripts/mutation-ratchet.mjs --nightly-scope \
+          set -o pipefail
+          node scripts/mutation-ratchet.mjs --nightly-plan \
             --files nightly-candidates.txt \
-            --night-index "$(date -u +%j)"
-      - name: Restore Stryker incremental cache (nightly's OWN cache namespace -- never shared with the PR gate's)
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: reports/stryker-incremental.json
-          key: mutation-nightly-incremental-${{ github.run_id }}
-          restore-keys: |
-            mutation-nightly-incremental-
-      # Both runs tee into one log so the failure issue can carry the real diagnosis instead of
-      # "it failed, go look". `set -o pipefail` is what keeps the step's own exit code authoritative
-      # through the pipe -- without it `tee` would return 0 and a below-baseline night would PASS,
-      # turning the delivery fix into a correctness regression.
-      - name: Stryker mutation run (tonight's sampled scope -- see the `scope` step above)
+            --test-files nightly-test-files.txt \
+            --night-index "$(date -u +%j)" \
+            --plan-dir .stryker-plan \
+            --report-dir reports/mutation/nightly 2>&1 | tee -a nightly-failure.log
+      # One `npx stryker run` per mutated file, each with its own command. A file that errors does
+      # NOT abort the loop -- the remaining files still produce reports, and the failure is carried
+      # to the end and re-raised, so one bad file cannot silently shrink the night into a smaller
+      # (and passing) measurement. Every run tees into the same log the failure issue carries.
+      - name: Stryker mutation runs (one per file -- see the `plan` step above)
         id: stryker
         run: |
           set -o pipefail
-          npx stryker run --mutate "${{ steps.scope.outputs.mutate }}" 2>&1 | tee -a nightly-failure.log
-      # `--mutate-scope` hands the ratchet THIS run's sampled file list (the same string the
-      # `scope` step above fed to `--mutate`), which is what the run-validity guard judges. Scoping
-      # it to tonight's sample rather than to the whole report is deliberate: Stryker's
-      # `incremental: true` cache makes the report ACCUMULATE across nights, so a whole-report
-      # predicate would keep judging files this run never touched.
-      - name: Nightly mutation ratchet (blocks LOUDLY on an invalid run, a below-baseline sample, or a missing/broken report)
+          rc=0
+          for cfg in ${{ steps.plan.outputs.configs }}; do
+            echo "=== stryker run $cfg ===" | tee -a nightly-failure.log
+            npx stryker run "$cfg" 2>&1 | tee -a nightly-failure.log || rc=1
+          done
+          exit "$rc"
+      # `--report-dir` merges the per-file reports as a disjoint union; `--mutate-scope` carries the
+      # files the plan actually INCLUDED, so the run-validity guard judges what was really run
+      # rather than failing on files the plan already declined to measure and named.
+      - name: Nightly mutation ratchet (blocks LOUDLY on a vacuous or invalid run, a below-baseline sample, or a missing/broken report)
         id: ratchet
         run: |
           set -o pipefail
           node scripts/mutation-ratchet.mjs --nightly-ratchet \
-            --report reports/mutation/mutation.json \
+            --report-dir reports/mutation/nightly \
             --baseline scripts/mutation-baseline.json \
-            --mutate-scope "${{ steps.scope.outputs.mutate }}" 2>&1 | tee -a nightly-failure.log
+            --mutate-scope "${{ steps.plan.outputs.mutate }}" 2>&1 | tee -a nightly-failure.log
 
       # Delivery. `if: failure()` so a green night stays silent -- a notifier that also fires on
       # success is one the reader learns to filter, which is the same gap again.
@@ -156,5 +185,5 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: mutation-nightly-report
-          path: reports/mutation/mutation.json
+          path: reports/mutation/nightly
           retention-days: 14
