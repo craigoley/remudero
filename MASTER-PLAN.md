@@ -65,6 +65,21 @@ COMMODITY BOUNDARY (2026-07-16): parallel-worktree session management is now tab
 
 ## NET STATE
 
+### CAPABILITY SNAPSHOT
+
+Derived present-tense capability facts (lane count, cost ceiling, recon cap, ci-gate roster),
+machine-owned below — regenerate with `npm run capability-snapshot` after touching a source;
+`capability-snapshot:check` (REQUIRED CI check) gates staleness, the generate-cli-reference.mjs
+mold (W1-T48) applied here (W1-T383). Intent, rationale and history stay hand-written outside
+this block — a generator has no authority over WHY.
+
+<!-- CAPABILITY SNAPSHOT:BEGIN -->
+- **Daemon dispatch lanes**: 2 — source: `sweep.dispatchLanes` via `loadPolicy(policyPath(root))` (src/lib/policy.ts, plan/policy.yaml)
+- **Daily cost ceiling**: $500 (committed default, no state/ override) — source: `resolveDailyCostCeiling(root, policy)` (src/lib/policy.ts)
+- **Recon turn cap**: 20 — source: `RECON_MAX_TURNS` (src/run-task.ts)
+- **ci-gate REQUIRED checks**: 13 — ci, lint-plan, depcruise, containment-probe, coverage-ratchet, mutation-ratchet, jscpd-gate, claims, learnings-budget-ratchet, commitlint, api-client-drift, no-hand-rolled-fetch, scan-pr / osv-scan — source: `REQUIRED` (.github/workflows/ci-gate.yml, job `ci-gate`)
+<!-- CAPABILITY SNAPSHOT:END -->
+
 ★ **WS-1 COMPLETE + L2 LIVE (2026-07-15) — FOLDED, because the SHIPPED log carries every PR and the
 claims have been true for fourteen retro-cycles.** The self-hosting exit criterion is MET: `rmd daemon`,
 launchctl-loaded, drained SBX-T1/T2/T3 unattended → merged PRs #6/#7/#8, booting ANTHROPIC-clean, then
@@ -80,8 +95,9 @@ so §5A's "the harness eats first" is FACT on the security tier. As of R11 the d
 36 runs → 25 tasks / 25 merged PRs at $6.201/run.** Four arcs landed; ids, PRs and costs are in the
 SHIPPED log and are NOT restated here. **THE DAEMON-LANE ARC (T339–T344)** — the keychain race, the
 plan-snapshot staleness, a bounded deploy-deferral ceiling and per-DISPATCH (not per-tick) governor
-admission all landed, then `runDaemon` was wired to lanes and `sweep.dispatchLanes` flipped 1 → 2:
-**P19's parallel dispatch is LIVE for the first time**, six tasks after the N=1 ruling was overridden.
+admission all landed, then `runDaemon` was wired to lanes and `sweep.dispatchLanes` flipped off its
+dark-ship value (current lane count: CAPABILITY SNAPSHOT above) — **P19's parallel dispatch is LIVE
+for the first time**, six tasks after the N=1 ruling was overridden.
 **ESCALATION QUALITY (T345–T350, T354)** — referent-less escalations dedup, asks classify
 `needs-question`/`needs-action`, decision summaries get a translator, a holdout-scored judge decides
 whether a condition deserves a human, feedback expands with byte-identical raw storage behind an
@@ -171,9 +187,10 @@ surface T363/T364's dependency); the §5 gate stack polices its own integrity en
 refuses an unprovenanced DECISIONS.md entry (T352), blocks auto-verify on ruling tasks (T353), reads
 the LIVE PR title in commitlint (T351) and downgrades a proof that already passes on the BASE tree
 (T362); the daemon fires its own retro (W1-T160/#853), consults every governor it shipped **at
-DISPATCH time rather than per tick** (T342), and — **new this cycle — DISPATCHES TWO TASKS AT ONCE**:
-`runDaemon` is wired to lanes (T343) and `sweep.dispatchLanes` is 2 (T344), which is **P19's parallel
-dispatch live for the first time**, under the DECISIONS.md 2026-08-04 amendment that overrode the
+DISPATCH time rather than per tick** (T342), and — **new this cycle — DISPATCHES MULTIPLE TASKS AT
+ONCE** (current lane count: CAPABILITY SNAPSHOT above): `runDaemon` is wired to lanes (T343) and
+`sweep.dispatchLanes` moved off 1 (T344), which is **P19's parallel dispatch live for the first
+time**, under the DECISIONS.md 2026-08-04 amendment that overrode the
 W1-T326 N=1 ruling. Escalation now classifies its own asks (`needs-question`/`needs-action`, T346),
 dedups referent-less conditions (T345) and can route through a holdout-scored judge (T349, no live
 producer yet). The SHIPPED log is the record (rule 13); no PR-by-PR restatement lives here.
