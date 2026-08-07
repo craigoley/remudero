@@ -1,117 +1,125 @@
 - id: W1-T391
-  title: "the starvation census counts deliberate RETIREMENT RECORDS as recoverable blockers, so the escalation tells the operator to lift a plan mark that must never be lifted — and can never itself be satisfied"
+  title: "the starvation census counts deliberate RETIREMENT RECORDS as recoverable blockers — but NOTHING RECORDED distinguishes a retirement from an operator block, both are `status: blocked` on disk, so the fix needs a plan ruling on what `withdrawn` means before any discriminator can be written"
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
+  verify: human
   principles: {tdd: strict}
   budget_usd: 45.00
-  rationale: "MEASURED 2026-08-07 from issue #1444 and read from source at deadef6.
-    `status: blocked` CARRIES TWO UNRELATED MEANINGS AND THE CENSUS CANNOT TELL THEM APART.
-    (1) A RETIREMENT RECORD, AND IT IS THE OVERWHELMING MAJORITY. Counted 2026-08-07 over the FULLY
-    LOADED plan (plan/tasks.yaml plus every plan/tasks.d shard, 420 tasks): **32 tasks carry
-    `status: blocked`, and 31 of the 32 are withdrawal or retirement records** — only W1-T10 is
-    anything else. Ten live in tasks.d (W1-T191, W1-T269, W1-T270, W1-T273, W1-T286, W1-T291,
-    W1-T292, W1-T293, W1-T314, W1-T369); the rest are inline, and they run back to the earliest
-    tasks in the plan (W1-T3, W1-T5, W1-T8, W1-T9a/b/c, W1-T11, W1-T14, W1-T37, W1-T53, W1-T61 …).
-    They say so in as many words — W1-T369's note is representative: `RECORD of the withdrawal, not a
-    work item. status: blocked so nextRunnable/assertRunnable never dispatch it`, with the reason
-    given verbatim as `withdrawn is not one of plan.ts's TASK_STATUSES`. They cite each other as
-    precedent. These are PERMANENT by design.
-    WHY #1444 REPORTS 14 AND NOT 32, WHICH THE IMPLEMENTER MUST NOT MISREAD AS A DISCREPANCY:
-    `tallyDispatchFilters` is FIRST-MATCH and `isDispatchEligible` tests `isMerged` BEFORE
-    `status === 'blocked'`, so every tombstone whose task also derives MERGED is counted under
-    `already-merged` instead. The 14 is the residue — tombstones that are NOT merged — and it will
-    drift as credit changes. Size the fix to the 31, never to the 14.
-    (2) A RUNTIME FLAG. daemon.ts's independent-failure path sets `task.status = 'blocked'` IN MEMORY
-    so `nextRunnable` stops reconsidering the task this run; status.ts's own comment contrasts it as
-    the flip that `resets every time a fresh process starts`. Nothing is written to disk.
-    THE CENSUS POOLS BOTH. drain.ts's `isDispatchEligible` files every `t.status === 'blocked'` under
-    one `DispatchFilterReason`, `tallyDispatchFilters` gives it one bucket, and daemon.ts's
-    `StarvationCensus` classes that bucket RECOVERABLE — its doc defines recoverable as the classes
-    that `could clear on their own without the plan itself ever changing`.
-    THE OBSERVED CONSEQUENCE, quoted from issue #1444: `blocked: 14 (W3-T3, W1-T269, W1-T270, W1-T314,
-    W1-T377, W1-T378, W1-T379, W1-T380, +6 more)` with the recommendation `a blocked: task needs the
-    plan mark lifted`. That instruction is wrong for BOTH populations and in OPPOSITE ways. For the
-    retirement records there is a plan mark and lifting it would re-dispatch work the Architect
-    deliberately withdrew. For the runtime flips there is NO plan mark to lift — an operator who opens
-    W1-T377's shard finds `status: queued` and has been sent to look at nothing.
-    AND IT CAN NEVER BE SATISFIED. The retirement records are permanent, so the bucket is permanently
-    non-empty, so `recoverable > 0` holds forever and this escalation re-fires for as long as the
-    daemon runs. That is the FOURTH instance of a bound firing on a HEALTHY condition in this repo —
-    after ci-gate's wait cap (W1-T312), the dry-run deploy ceiling (W1-T380/#1392) and the check-wait
-    bound where 21 of 21 booked PRs merged (W1-T382/#1401).
+  rationale: "THE DEFECT IS REAL AND RE-DERIVED AT 3c63dd9. THE ORIGINAL DESIGN WAS WRONG AND IS
+    WITHDRAWN. A session implemented it fully before the flaw surfaced; this shard now carries the
+    flaw, the evidence, and the question — not a design.
+    THE DEFECT, UNCHANGED AND STILL TRUE. `isDispatchEligible` (drain.ts) files every
+    `t.status === 'blocked'` task under one `DispatchFilterReason`; `tallyDispatchFilters` gives it
+    one bucket; `StarvationCensus` (daemon.ts) classes that bucket RECOVERABLE, where its own doc
+    defines recoverable as the classes that could clear on their own without the plan itself ever
+    changing. Retirement records can never clear, so the bucket is permanently non-empty and the
+    escalation re-fires forever on a healthy plan. Re-measured over the fully loaded plan (monolith
+    plus every shard, 427 tasks at this sha): 32 tasks are `status: blocked` and 31 carry
+    withdrawal/retirement language. That is the fourth bound in this repo observed firing on a
+    HEALTHY condition, after ci-gate's wait cap (W1-T312), the dry-run deploy ceiling (W1-T380) and
+    the check-wait bound (W1-T382).
+    WHY THE ORIGINAL DESIGN CANNOT WORK. It proposed discriminating ON-DISK from IN-MEMORY: a
+    retirement record is `blocked` in the file as parsed, a runtime flip is applied afterwards. But
+    the same filing's own clause on the escalation text says the instruction to lift a plan mark is
+    correct FOR A TASK AN OPERATOR BLOCKED INTENDING TO UNBLOCK IT LATER — and that case is ALSO ON
+    DISK. So the discriminator separates permanent-record-or-operator-block from runtime-flip. It
+    does not separate permanent from recoverable, which is the split the census actually needs.
+    PROVEN, NOT ARGUED. `test/queue-starvation.test.ts`'s first claim seeds a task whose title
+    states it is an explicitly blocked task — the legitimate operator-block. The implemented
+    discriminator reclassified it as withdrawn and that test FAILED. The failure is the proof: the
+    two populations are indistinguishable to an on-disk test, and the suite already contains a
+    fixture of the case the design would misfile.
+    THE 31-OF-32 FIGURE IS A STATISTICAL REGULARITY THAT THE FILING READ AS A STRUCTURAL ONE. That
+    almost every on-disk `blocked` task happens to be a retirement record today says nothing about
+    what the field MEANS, and a predicate built on it silently misfiles the thirty-second — which is
+    exactly what happened. Saying this plainly is the point of the re-scope.
+    THE INFORMATION DOES NOT EXIST TODAY, AND THAT IS THE FINDING THAT SIZES THE WORK. Loading the
+    plan and taking the union of every field present across all 32 blocked tasks: acceptance,
+    attempts, budget_usd, context, depends_on, files, hand_built, id, note, origin, pr, principles,
+    prompt, rationale, repo, risk, status, title, type, verify. THERE IS NO FIELD THAT COULD
+    DISTINGUISH A WITHDRAWAL FROM AN OPERATOR BLOCK. No `withdrawn`, no `retired`, no `superseded`,
+    no reason code. `note` and `rationale` are prose, and a lexicon over prose is the same
+    statistical guess in a different costume. `plan.ts`'s `TASK_STATUSES` is queued, recon, prompted,
+    running, review, fixing, diagnosing, blocked, merged, done — `withdrawn` is not among them, which
+    is precisely why the retirement records use `blocked` and say so in their notes.
+    SO THIS IS A PLAN-SCHEMA QUESTION, NOT A SMALL CHANGE, and that is why it is now `verify: human`:
+    `isDispatchEligible` refuses a non-auto task before the linter is consulted, so it can no longer
+    be handed to a worker who will rediscover this wall.
     COVERED-BY: NO. W1-T298 built the census and is the thing being corrected. W1-T345 dedups
-    referent-less escalations, so it makes this fire ONCE rather than per tick — it does not make the
-    firing correct, and a permanently-open wrong issue is the worse failure. W1-T367 ruled the yaml
-    `status:` field decorative and named `isDispatchEligible` as the ONE reader that must keep
-    honouring `blocked`; this task does not touch that."
+    referent-less escalations, so it makes this fire ONCE rather than per tick — a permanently-open
+    wrong issue is the worse failure. W1-T367 ruled the yaml `status:` field decorative and named
+    `isDispatchEligible` as the ONE reader that must keep honouring `blocked`; nothing here changes
+    that."
   design: |
-    SEPARATE THE POPULATIONS AT THE ONLY POINT THAT CAN STILL TELL THEM APART — PLAN LOAD.
+    THIS SHARD POSES A QUESTION. It deliberately carries no discriminator design, because the
+    previous one was inferred from a regularity and shipped a misfiling.
 
-    (i) THE DISCRIMINATOR IS ON-DISK vs IN-MEMORY, AND IT IS FREE. A retirement record is `blocked` in
-    the file as parsed; a runtime flip is applied after. Capture the withdrawn set once when the plan
-    is loaded, before any dispatch loop can mutate a Task. No schema change, no new yaml field, and no
-    migration of the eleven existing shards — which matters, because W1-T367 already ruled that field
-    decorative and a second reader of it would be a step backwards.
+    (i) THE RULING NEEDED, stated as narrowly as it can be. Both populations are `status: blocked`
+    on disk and nothing recorded tells them apart. Either (a) a retirement record gets a recorded
+    marker of its own so the two become mechanically separable, or (b) the census stops treating
+    `blocked` as recoverable at all and the escalation's wording carries the ambiguity instead, or
+    (c) the operator-block case is declared not to exist in practice and `blocked`-on-disk is
+    DEFINED as withdrawal — in which case the existing test fixture named above is wrong and must
+    change with the ruling, not quietly around it. Each of these is a different amount of work and
+    only (a) touches the schema.
 
-    (ii) SPLIT THE BUCKET, DO NOT JUST FILTER IT. `DispatchFilterReason` gains a `withdrawn` member
-    alongside `blocked`, so the idle-reasons line an operator actually reads names the two separately.
-    Filtering withdrawn tasks out silently would fix the alarm and DELETE the information — the
-    operator would lose the ability to see that eleven tasks are retired, which is a real thing to
-    know about a plan. This is P48's clause applied to a non-zero value: the count is not wrong, the
-    VOCABULARY is, and collapsing rather than naming is the defect.
+    (ii) WHAT AN IMPLEMENTER MUST NOT DO. Do not infer the discriminator from note or rationale
+    prose. Do not re-derive the 31-of-32 count and treat a larger majority as a stronger argument;
+    the count is not the question. Do not add a status value without the ruling — the retirement
+    records chose `blocked` precisely because `withdrawn` is not a valid status, so introducing one
+    touches every reader of the field.
 
-    (iii) ONLY `blocked` STAYS RECOVERABLE. `StarvationCensus`'s recoverable set drops `withdrawn`.
-    A plan whose only non-dispatchable tasks are withdrawn or merged is DONE, not starved — the same
-    distinction the census already draws for `already-merged` and `verify-not-auto`, extended to the
-    class that actually fits it.
+    (iii) TWO FINDINGS FROM THE STOPPED IMPLEMENTATION, PRESERVED BECAUSE THEY SURVIVE ANY RULING.
+    First: whichever way the split is drawn, the new bucket must be added back into
+    `autoTriageCensus`'s `depth` AND its `allMerged` guard, or the auto-triage rung's cadence changes
+    as an unasked-for side effect — withdrawn ids currently land in the blocked bucket, so they
+    already count toward depth and already keep `allMerged` false. Second: `buildPlanFrontier`
+    (panel-graph.ts) does NOT pass the discriminator, so a fail-soft default leaves the console
+    frontier rendering a blocked task with its own note unchanged. That was MEASURED, not assumed,
+    and it is what keeps the change inside drain.ts and daemon.ts rather than spilling into
+    panel-graph.ts.
 
-    (iv) THE ESCALATION MUST STOP GIVING THE WRONG INSTRUCTION. `a blocked: task needs the plan mark
-    lifted` is only ever correct for a task an operator blocked intending to unblock it later. Say
-    that, and say separately what a runtime flip means (it clears on the next process; look at the
-    verdict, not the yaml). If neither population is present the escalation must not fire at all,
-    which is clause (iii) doing its job.
+    (iv) THE ESCALATION TEXT LIVES OUTSIDE BOTH DECLARED FILES — `escalateStarvation` is in
+    run-task.ts. Any ruling that changes what the escalation SAYS therefore widens this task's
+    `files:`, and that widening must be ratified before it is made, not disclosed afterwards.
 
-    (v) FALSIFIER, AND IT MUST BITE ON THE ALARM ITSELF. A plan of exactly one withdrawn task and
-    nothing else runnable must produce ZERO starvation escalations, and the same plan plus one
-    genuinely-blocked task must produce exactly one naming ONLY that task. One direction alone proves
-    nothing: a census that never fires would also pass the first half. Assert the withdrawn id is
-    ABSENT from the escalation body, positively, rather than asserting a count.
-
-    NOT IN SCOPE: adding `withdrawn` to `TASK_STATUSES` (a schema change touching every reader, and
-    unnecessary once the discriminator is load-time); changing `isDispatchEligible`'s refusal of
-    `blocked`, which is correct and is the one sanctioned reader of the decorative field; the
-    circuit-breaker bucket, which is already reported separately and is not part of this defect;
-    W1-T390's credit bug, which is why two of #1444's named ids are stuck in the first place.
+    NOT IN SCOPE UNTIL THE RULING LANDS: any predicate, any enum member, any schema change.
   acceptance:
-    - claim: "a plan whose only non-dispatchable tasks are withdrawn raises no starvation escalation at all"
+    - claim: "the starvation census classes a permanently-non-dispatchable task under a reason it treats as non-recoverable, so an idle plan with no recoverable blocker escalates nothing"
       proof: "unit test: test/blocked-bucket-populations.test.ts"
-    - claim: "a withdrawn task and a genuinely blocked task are tallied under distinct reasons rather than one bucket"
+    - claim: "the auto-triage census reports the same depth and the same all-merged verdict as it did before the split, so its cadence is unchanged"
       proof: "unit test: test/blocked-bucket-populations.test.ts"
-    - claim: "the escalation body names the blocked task and never names the withdrawn one"
-      proof: "unit test: test/blocked-bucket-populations.test.ts"
-    - claim: "isDispatchEligible still refuses every task marked blocked on disk, withdrawn or not"
+    - claim: "isDispatchEligible still refuses every task marked blocked on disk, whichever reason it is filed under"
       proof: "unit test: test/blocked-bucket-populations.test.ts"
   risk: high
   origin: oper#blocked-overload-2026-08-07
   plan_refs: ["§4", "§5D", "P48", "W1-T298", "W1-T345", "W1-T367"]
   files: [src/lib/drain.ts, src/lib/daemon.ts, test/blocked-bucket-populations.test.ts]
-  status: queued
+  status: blocked
   attempts: 0
-  note: "risk:high IS RULE 19'S SPAN, NOT BLAST RADIUS — recorded up front so a later reader does not
-    over-read it. The change is small and strictly additive to a reporting path, and it cannot alter
-    which tasks dispatch: clause (v)'s fourth criterion exists to prove exactly that. What earns the
-    band is that the reason enum lives in drain.ts while the recoverable predicate and the escalation
-    text live in daemon.ts, so the change cannot be made in one file.
-    budget_usd 45 — below W1-T390's, because there is no new predicate to design and no
-    prefix-collision trap; the cost is the two-direction falsifier and threading one new enum member
-    through its readers.
-    verify:auto — every claim is decidable in-process against a seeded plan and an injected escalation
-    gateway. Nothing spawned, no network.
-    THE COUNTS IN THE RATIONALE ARE MEASURED, NOT GREPPED. An earlier draft of this shard said
-    `eleven shards in plan/tasks.d` — that was wrong twice over (the real tasks.d count is TEN; it
-    wrongly included W1-T324, which reads `status: queued`) and it understated the population by
-    two thirds, because it never loaded plan/tasks.yaml. The figures now quoted come from parsing
-    BOTH files into one 420-task list and filtering. The lesson is this shard's own: a count taken
-    over the file you happened to open is not a count over the plan."
+  note: "verify:human AND status:blocked, BOTH DELIBERATE AND BOTH LOAD-BEARING. verify:human is
+    what stops `isDispatchEligible` handing this to a worker — it refuses a non-auto task before the
+    linter is even consulted, so the wall cannot be hit a second time. status:blocked keeps it out of
+    `nextRunnable` as well. Neither is a retirement: this task is WAITING ON A RULING and should
+    return to verify:auto with a real design once the ruling lands.
+    THE IRONY IS DELIBERATE AND WORTH LEAVING ON THE RECORD: this shard is now itself a
+    `status: blocked` task that is NOT a retirement record — the thirty-third member of the very
+    population whose ambiguity it exists to resolve, and a live counter-example to reading the
+    31-of-32 regularity as structural.
+    THE PROOFS ARE DELIBERATELY LEFT IN THE EXECUTABLE DIALECT AND DELIBERATELY NOT RE-AIMED AT THE
+    RULING. A first pass at this re-scope wrote them as `operator ruling:` proofs naming the artifact
+    the ruling produces; `proof-dialect` refused both, correctly — there is no such dialect, and
+    CLAUDE.md's rule is that a verify:human task's proofs should not be forced into a shape the
+    dialect lacks OR invented around it. What they name instead is the set of properties that hold
+    under EVERY option in design (i): whatever the split turns out to mean, an idle plan with no
+    recoverable blocker must escalate nothing, auto-triage's cadence must be unmoved, and every
+    on-disk `blocked` task must still be refused dispatch. Those are testable today and survive the
+    ruling, so nothing here needs rewriting when the task returns to verify:auto.
+    RULE 25 CHECKED: files: contains no INSTRUMENT_SURFACE path.
+    budget_usd 45 is carried forward UNCHANGED and is now a placeholder — it was sized for the
+    original design and cannot be re-sized until the ruling picks among options (a), (b) and (c),
+    which differ by roughly an order of magnitude in scope.
+    THE COUNTS ARE MEASURED, NOT GREPPED, and re-measured at this sha over BOTH plan/tasks.yaml and
+    every plan/tasks.d shard parsed into one list. An earlier draft counted over the one file it
+    happened to open and understated the population by two thirds."

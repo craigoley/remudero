@@ -1,101 +1,114 @@
 - id: W1-T395
-  title: "`stripQuotedRegions` blanks fenced blocks and blockquote LINES but not INLINE backtick spans, so `bodyContradictsDiff` cannot tell quoting a claim from making one — a PR body describing this class of failure fails on the string it is describing"
+  title: "`noClaimIsAboutChangeset`'s forward anchor is defeated by ANY closing delimiter — a `no <path>` claim followed by a backtick, paren or quote takes the \"the token IS the claim\" branch and fires, while the identical claim followed by an ordinary word is correctly suppressed, so the absence arm's behaviour turns on punctuation rather than meaning"
   repo: remudero
   depends_on: []
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 55.00
-  rationale: "MEASURED ON PR #1451, 2026-08-07, and re-derived from source at 94ea7d2.
-    THE MECHANISM, exactly. `stripQuotedRegions` (src/lib/review.ts) splits the body into LINES and
-    blanks a line only when it opens/closes a triple-backtick fence, sits inside one, or begins with
-    a blockquote marker. An INLINE backtick span is never blanked, so every predicate downstream —
-    the count/enumeration arm and the absence arm of `bodyContradictsDiff` — scans quoted text as
-    though the body were asserting it.
-    THE INCIDENT. #1451's body quoted the verdict string that had blocked #1441 in order to explain
-    the defect being fixed. `bodyContradictsDiff` read the quotation as this PR's own changeset
-    claim and reported a contradiction. The body had to be PARAPHRASED to describe the bug — a
-    checker that forbids naming its own failure mode in prose.
-    WHY THIS IS NOT COSMETIC. The failure lands on the ONE population most likely to quote a
-    verdict verbatim: a PR fixing the reviewer. It is also silent about its own cause, because the
-    reported `claim` is a real substring of the body and reads as authored rather than cited.
-    THE CONTRACT THIS MUST NOT BREAK, from the function's own doc: ANYTHING THIS CANNOT DECIDE IS
-    SILENCE, NOT A VERDICT. This task widens what the checker can DECIDE — it must never widen what
-    it FAILS. Every change here removes a false failure or does nothing."
+  budget_usd: 45.00
+  rationale: "RE-SCOPED 2026-08-07 ON AN OPERATOR RULING. The original filing proposed extending
+    `stripQuotedRegions` to inline backtick spans. THAT IS WITHDRAWN — see the ruling below — and
+    what remains is a narrower, sharper defect measured at 3c63dd9 while re-deriving the withdrawal.
+    THE RULING, AND ITS REASONING, RECORDED SO IT IS NOT RE-ARGUED. `stripQuotedRegions`'s own doc
+    forbids the widening in as many words: it is DELIBERATELY NARROW, only blockquote lines and
+    fences, because widening the exclusion to inline code spans would let a real contradiction hide
+    behind a single backtick — strictly worse than today's over-firing. The operator ruled to keep
+    the current behaviour: A FALSE FAILURE COSTS A REDRAFT; A FALSE PASS MERGES A BODY THAT LIES
+    ABOUT ITS OWN DIFF. The two error costs are not symmetric and the checker is tuned accordingly.
+    THE ORIGINAL FILING CITED THE WRONG DOC AS ITS AUTHORITY, which is why the conflict was not
+    caught at filing. It justified the widening with `bodyContradictsDiff`'s contract that anything
+    the checker cannot decide is silence rather than a verdict. That is a DIFFERENT FUNCTION'S doc.
+    The function actually being changed carries the prohibition, and it governs.
+    THE REGRESSION IS MEASURED, NOT PREDICTED. Simulating the proposed strip against the real
+    predicate: a body reading `this pull request changes` followed by a backticked count that
+    contradicts its diff FIRES today and goes SILENT after the strip. That is exactly the hole the
+    prohibition names. The strip also cannot tell that case apart from a legitimate CITATION — both
+    go silent — which is why no amount of care inside the strip resolves it.
+    WHAT ACTUALLY SURVIVES, AND IT IS NOT A MARKUP PROBLEM. Re-deriving the third reported symptom
+    against `noClaimIsAboutChangeset` and its caller (the `no <path>` arm of `bodyContradictsDiff`)
+    showed the trigger is not backticks at all — it is ANY CLOSING DELIMITER. Measured, one variable
+    moved, same diff of one src file: a claim followed by a backtick FIRES, by a paren FIRES, by a
+    double quote FIRES, and the identical claim followed by an ordinary word is SILENT. The anchor
+    is documented to look forward for the next word token and return true when it finds punctuation,
+    end of line or end of input — on the reading that the token IS the claim. A closing delimiter
+    hits that branch, so the anchor never evaluates and the claim is admitted unanchored.
+    THE ANCHOR IS OTHERWISE CORRECT AND MUST NOT BE WEAKENED. The same claim followed by a genuine
+    changeset word FIRES, correctly. And the sibling count arm correctly ignores a count about
+    something other than files — a body stating it adds exactly one filed task stays silent. The
+    defect is only that a delimiter is read as the end of the sentence.
+    DIRECTION OF THE FIX, WHICH IS THE SAFE ONE. Teaching the anchor to look past a closing
+    delimiter makes the delimited forms behave like the bare form: SILENT where the sentence is not
+    about the changeset. That REMOVES false failures and adds none, so it sits inside the ruling
+    rather than against it, and it touches neither `stripQuotedRegions` nor what counts as quoted."
   design: |
-    (i) EXTEND THE STRIP TO INLINE SPANS, LENGTH-PRESERVING. `stripQuotedRegions` is documented as
-    length- and newline-preserving so every downstream index still lines up with the original body;
-    W1-T308 built it that way deliberately. Blank the span, do not delete it. Decide and record how
-    an UNCLOSED backtick is treated — the safe reading is to blank nothing rather than swallow the
-    rest of a line, because swallowing could hide a real claim and that is the one direction this
-    function must never move. Handle multi-backtick delimiters (``…``) or state plainly that they
-    are out of scope and why.
+    (i) DO NOT TOUCH `stripQuotedRegions`. Not as a simplification, not as a side effect, not to
+    make a test easier to write. Its narrowness is a ruling, and this task exists in its current
+    form because the previous scope contradicted it. The fix belongs entirely inside
+    `noClaimIsAboutChangeset`.
 
-    (ii) ESTABLISH WHETHER ONE STRIP FIXES ALL THREE REPORTED SYMPTOMS, and report per symptom
-    rather than assuming. Symptom A is the inline-quoted count/enumeration claim above. Symptom B:
-    the hyphenated plan-scope adjective is read as a changeset claim wherever it appears, including
-    as ordinary vocabulary in a body ABOUT plan scoping — that is a VOCABULARY collision, and a
-    strip fix only helps when the phrase happens to be backticked, so it is probably a separate
-    anchoring question. Symptom C: the directory-absence arm fires on the backticked form while
-    staying silent on the bare-prose form, so its behaviour currently depends on MARKUP rather than
-    MEANING — a strip fix makes it consistently silent on both, which is the correct direction but
-    must be stated as a deliberate narrowing, not a side effect. If B needs its own change, SAY SO
-    and file nothing here for it; this task is one concern.
+    (ii) SKIP CLOSING DELIMITERS, NOT ALL PUNCTUATION. The anchor's "punctuation means the token IS
+    the claim" branch is right for a sentence that genuinely ends — a full stop, a semicolon, end of
+    input. It is wrong only for a CLOSING delimiter, which ends a span and not a sentence. Enumerate
+    which characters qualify and say why each one is in or out; a blanket "skip all punctuation"
+    would swallow the sentence-end case and turn a true positive into silence, which is the ruling's
+    forbidden direction.
 
-    (iii) THE REGRESSION LOCK IS THE #1451 BODY SHAPE. Write it FIRST and watch it fail
-    (tdd:strict): a body that QUOTES a count claim inside inline backticks while making no such
-    claim of its own must report zero contradictions. Pair it with the falsifier that must keep
-    failing — the same claim UNQUOTED and false — so the fix is proven to have narrowed nothing but
-    quotation. A lock that only proves the quoted case passes would also pass if the predicate were
-    deleted.
+    (iii) BOTH DIRECTIONS, OR THE TEST PROVES NOTHING. A delimited claim in a sentence NOT about the
+    changeset must go silent; a delimited claim in a sentence that IS about the changeset must still
+    fire. One direction alone is satisfied by a predicate that never fires at all.
 
-    (iv) PROVE THE STRIP DOES NOT MOVE THE OTHER CONSUMERS. `stripQuotedRegions` feeds every arm of
-    `bodyContradictsDiff`. Enumerate them from source and assert each is unchanged on a body with no
-    inline spans at all, so the change is scoped to the quoting case rather than to the checker's
-    general sensitivity.
+    (iv) THE OPENING DELIMITER IS A SEPARATE QUESTION — establish it, do not assume it. The measured
+    cases all carry the delimiter AFTER the claim, because that is where the anchor looks. Whether an
+    OPENING delimiter before the claim also matters is unmeasured here; check it and report, and if
+    it does, say whether it belongs in this task or a follow-up.
 
-    NOT IN SCOPE: the `exactly N files` grammar, the enumeration-item punctuation cleanup, the
-    acceptance-criteria parser, and `changedFiles`' deletion-blindness (W1-T389). This is one
-    function's notion of what counts as quoted.
+    (v) PROVE THE COUNT ARM AND THE HOUSE-SHORTHAND ARMS ARE UNMOVED. `bodyContradictsDiff` has
+    several arms and only the `no <path>` one consults this anchor. Assert the others produce
+    identical verdicts on bodies with and without delimiters, so the change is scoped to the anchor
+    rather than to the checker's general sensitivity.
+
+    NOT IN SCOPE, AND EXPLICITLY SO: extending the quoted-region strip in any form; the plan-scope
+    adjective's vocabulary collision (see the note — a separate concern, deliberately not filed);
+    the enumeration-item punctuation cleanup; the acceptance-criteria parser.
   acceptance:
-    - claim: "a body that quotes a changeset claim inside inline backticks while asserting no such claim of its own reports zero contradictions"
-      proof: "unit test: test/review-inline-quoted-claims.test.ts"
-    - claim: "the same claim unquoted and contradicting the diff still fails, so quoting is narrowed without weakening the predicate"
-      proof: "unit test: test/review-inline-quoted-claims.test.ts"
-    - claim: "the strip stays length-preserving so a body with no inline spans produces the identical verdict it produced before"
-      proof: "unit test: test/review-inline-quoted-claims.test.ts"
+    - claim: "a no-path claim followed by a closing delimiter is judged by the same forward anchor as the bare form, so a sentence that is not about the changeset stays silent in both"
+      proof: "unit test: test/review-absence-anchor-delimiter.test.ts"
+    - claim: "a no-path claim in a sentence that IS about the changeset still fires whether or not a delimiter follows it, so the anchor is narrowed without being weakened"
+      proof: "unit test: test/review-absence-anchor-delimiter.test.ts"
+    - claim: "the count arm and the house-shorthand arms return identical verdicts before and after, so the change is confined to the absence anchor"
+      proof: "unit test: test/review-absence-anchor-delimiter.test.ts"
   risk: high
   origin: session-review#1451-inline-quoting-2026-08-07
-  plan_refs: ["W1-T274", "W1-T288", "W1-T304", "W1-T308"]
-  files: [src/lib/review.ts, test/review-inline-quoted-claims.test.ts]
+  plan_refs: ["W1-T274", "W1-T288", "W1-T304", "W1-T308", "W1-T328"]
+  files: [src/lib/review.ts, test/review-absence-anchor-delimiter.test.ts]
   status: queued
   attempts: 0
   note: "verify:auto — every claim is a pure string-in/verdict-out assertion over
-    stripQuotedRegions and bodyContradictsDiff, decidable in-process with no operator and no network.
-    risk:high is Rule 19's SPAN, not blast radius. Filed at medium first and corrected before push
-    rather than shipped as a violation: the sizing check reads files: as two concerns (review,
-    review-inline-quoted-claims) and refuses medium on that basis alone. THE ACTUAL BLAST RADIUS IS
-    LOW, and bounded in the SAFE direction: every reachable outcome of this change turns a FAILURE
-    into SILENCE, never the reverse, because blanking text can only remove matches. The function's
-    own doc makes that the governing contract, and design (iii)'s falsifier is what holds it. Do not
-    read the band as danger.
-    RULE 25 CHECKED BEFORE FILING: files: contains no INSTRUMENT_SURFACE path, so
-    `detectInstrumentEntanglement` has nothing to refuse.
-    budget_usd 55 — below W1-T394's 70: no ledger population to derive, and the consumer inventory
-    is one function's arms rather than a routing predicate's fleet-wide readers.
-    THE BOOTSTRAP TRAP, AND IT WILL BITE THE IMPLEMENTER OF THIS VERY TASK: until this fix ships,
-    a PR body cannot QUOTE the failing string it is describing, because inline backtick spans are
-    exactly what is not blanked. So the PR that fixes this must PARAPHRASE every verdict string and
-    every `exactly N files`-shaped phrase it discusses, or it fails its own review on the defect it
-    is removing. Validate the body through `bodyContradictsDiff` before pushing, with a deliberately
-    falsified file list as a positive control so an empty result is the checker engaging rather than
-    idling. (Raised in review on the filing PR; recorded here so the implementer meets it as an
-    instruction rather than as a surprise.)
-    ON THE PROOFS. All three name test/review-inline-quoted-claims.test.ts, which does not exist
+    `bodyContradictsDiff`, decidable in-process with no operator and no network.
+    risk:high is Rule 19's SPAN, not blast radius: files: reads as two concerns (review,
+    review-absence-anchor-delimiter). The blast radius is low and bounded in the SAFE direction —
+    every reachable outcome turns a FAILURE into SILENCE, and design (iii) is what holds that to the
+    unanchored case only. Do not read the band as danger.
+    RULE 25 CHECKED: files: contains no INSTRUMENT_SURFACE path.
+    budget_usd 45, down from 55: the scope is one predicate rather than a strip plus a three-symptom
+    survey, and two of those three symptoms are now resolved (one withdrawn, one moved out).
+    THE SEPARATE CONCERN, RECORDED AND DELIBERATELY NOT FILED. The plan-scope adjective fires on a
+    body ABOUT plan scoping whether the phrase is delimited or bare — measured both ways at 3c63dd9
+    — so it is a VOCABULARY collision and no anchor change here reaches it. What it needs is a
+    claim-SUBJECT anchor, the way the count arm already declines a count whose subject is filed tasks
+    rather than files. It is not filed because this shard no longer carries any design for it, so
+    nothing here is left undeliverable by its absence; file it when someone is ready to design the
+    subject anchor.
+    THE BOOTSTRAP TRAP IS GONE WITH THE OLD SCOPE, and the reason is worth keeping: the previous
+    filing warned that its own PR body could not quote the string it was describing. Since the strip
+    is no longer being widened, that constraint never applied to this version — but a body for THIS
+    task still must not write an unquoted false changeset claim, and should be validated through
+    `bodyContradictsDiff` with a deliberately falsified file list as a positive control so an empty
+    result is the checker engaging rather than idling.
+    ON THE PROOFS. All three name test/review-absence-anchor-delimiter.test.ts, which does not exist
     yet: a FORWARD REFERENCE TO A PATH, safe per CLAUDE.md, declared in files: so the worker creates
-    it. Pure-path form is deliberate — it lint-passes and executes the whole file, unlike the
-    test/foo.test.ts::title form that satisfies lint-plan and then matches zero tests.
-    THE INCIDENT IS REPRODUCIBLE WITHOUT THE PR: hand bodyContradictsDiff a body whose only count
-    claim sits inside inline backticks, together with a diff that contradicts it. Re-derive that
-    before acting rather than trusting this note.
-    NO depends_on: independent of W1-T394 and W1-T389."
+    it. Pure-path form is deliberate — it lint-passes and executes the whole file.
+    THE DEFECT IS REPRODUCIBLE WITHOUT THE PR: hand `bodyContradictsDiff` a body claiming a path is
+    absent, once with a closing delimiter immediately after the claim and once with an ordinary word
+    after it, against a diff that touches that path. Re-derive that before acting rather than
+    trusting this note."
