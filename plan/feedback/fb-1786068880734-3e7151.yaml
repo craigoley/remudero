@@ -1,0 +1,36 @@
+id: fb-1786068880734-3e7151
+ts: 2026-08-07T02:14:40.734Z
+raw: "node_modules EMPTIED TWICE IN 24 HOURS AND THE FLEET LOOKS ALIVE WHILE IT
+  CANNOT RESTART — second occurrence, 2026-08-06 evening, after
+  2026-08-05T21:54. bin/rmd execs node_modules/.bin/tsx, so every rmd verb AND
+  the launchd supervisor die instantly, while the ALREADY-RUNNING daemon keeps
+  serving from resident memory. The result is the worst possible presentation:
+  the fleet appears healthy, dispatches nothing new that needs a fresh process,
+  and cannot restart itself. deploy-supervisor was 7h26m overdue before anyone
+  noticed. Recovery is npm ci in the canonical checkout only (403 packages),
+  then a redeploy. CAUSE STILL UNESTABLISHED, both times. The first instance
+  left one worktree with a REAL node_modules directory of 286 entries created
+  one minute after the shared install emptied, while its sibling held the
+  correct symlink — a worker installing inside a symlinked worktree writes
+  THROUGH the link. That remains the leading hypothesis and remains unproven; no
+  npm step appears in any worker's ledger, so an install would have to be an
+  unledgered shell command inside the implement phase. THE DETECTABLE CONDITION
+  IS THE POINT, independent of cause: node_modules/.bin/tsx missing is a single
+  stat call, it is checked by nothing, and it silently disables every control
+  surface the operator has for diagnosing it. RECON: establish whether the
+  daemon's own health tick can assert the presence of node_modules/.bin/tsx and
+  escalate — noting the irony that an escalation path written in TypeScript
+  cannot run once it fires, so the check must live somewhere that survives, or
+  must write a marker the console reads. Then establish whether the launchd
+  supervisor's death is itself detectable: it went 7h26m overdue with nothing
+  reporting it, and 'the supervisor has not ticked in N minutes' is a cheaper
+  signal than the cause. Falsifying check: if some existing boot-time or
+  tick-time check already asserts the install and simply did not run because it
+  too is written in TypeScript, the fix is where the check lives, not whether it
+  exists."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null
+expansion: null

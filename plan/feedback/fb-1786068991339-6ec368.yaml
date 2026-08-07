@@ -1,0 +1,37 @@
+id: fb-1786068991339-6ec368
+ts: 2026-08-07T02:16:31.339Z
+raw: "DELETION BLINDNESS DEFEATS planOnly, NOT JUST THE FILE COUNT — confirming
+  W1-T389's derived-not-demonstrated claim from source at today's sha. review.ts
+  changedFiles adds a path only when the line has a file AND that file is not
+  /dev/null, and a deleted file's +++ line IS /dev/null, so deletions never
+  enter diffFiles. planOnly is diffFiles.length greater than 0 AND
+  diffFiles.every(isInPlanScope) over that same filtered list. THEREFORE a PR
+  that DELETES a src/ file while editing acceptance criteria computes planOnly:
+  true — the deleted path never reaches every(), and criteriaTampered, which is
+  NOT-planOnly AND criterionFieldTampered(diff), short-circuits to false.
+  Standing rule 15's guard is defeated by deleting rather than editing. Both
+  halves verified by reading review.ts, not by constructing such a PR. THE
+  MEASURED HALF IS ALREADY KNOWN: on #1441, 48 files with 41 deletions rendered
+  as 7, and a TRUE body claim was failed. THE SCOPE HALF IS THE SERIOUS ONE and
+  W1-T389's shard should say which is load-bearing — a miscount fails an honest
+  author; a defeated planOnly admits a dishonest one. NOTE WHAT STILL HOLDS:
+  W1-T384's filing-time refusal reads the task's declared files: rather than the
+  diff, so it is unaffected — the two guards now protect different things and
+  only the review-time one has this hole. Also note the family:
+  criterionFieldTampered was already measured SILENT on shard criteria edits and
+  on appending a claim plus proof pair in the monolith, and
+  monolithFilingViolations freezes the monolith, so the review guard protects an
+  archive. This is a third hole in the same predicate. RECON for the
+  implementer: establish whether including deletions in diffFiles breaks any
+  other consumer of changedFiles — the count is used by the changeset-claim
+  checker and by scope reporting, and a body claiming exactly 7 files would
+  suddenly be wrong against 48. That is a correction, not a regression, but it
+  will fail bodies that pass today and the task must say so. Falsifying check:
+  if some caller re-derives the file list from the diff independently and
+  planOnly reads THAT, the exemption is safe and only the count is wrong."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null
+expansion: null
