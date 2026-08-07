@@ -13,8 +13,11 @@
 // spawned — so all three falsifier directions below assert in-process.
 
 import assert from "node:assert/strict";
+import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
-import { checkWaitStalled, STALL_WINDOW } from "../src/run-task.js";
+import { checkWaitStalled, STALL_WINDOW, waitForCiGreen } from "../src/run-task.js";
 
 /** `STALL_WINDOW` identical copies of `reading` — the minimum a real caller would have
  *  accumulated before {@link checkWaitStalled} has enough evidence to conclude stalled. */
@@ -97,4 +100,51 @@ test("HOLDS (W1-T382): a required check going red is never reported as merely pe
   const allRed = checkWaitStalled(identicalWindow(wentRed));
   assert.equal(allRed.stalled, true, "a persisted rollup is still a stall by the pure signature comparison");
   assert.deepEqual(allRed.pending, [], "a red check must never be named in `pending` — it already failed, it is not waiting");
+});
+
+// The three tests above cover `checkWaitStalled` PURELY, but W1-T382 also rewired its TWO
+// real callers (`pollToGate`/`waitForCiGreen` in src/run-task.ts) to accumulate readings
+// and act on the derivative INSTEAD of a `maxIters` bound. `waitForCiGreen` is the exported
+// one of the two (`pollToGate` is only reachable through a full `runTask` run, covered
+// separately in test/run-task.test.ts), so this drives it for real — a PATH-stubbed `gh`
+// answering the identical pending rollup on every poll, `everySec: 0` so the loop's own
+// `execFileSync("sleep", ...)` calls cost nothing — to prove the integration itself (the
+// readings array, the `checkWaitStalled` call, and the `stalled` branch's `"timeout"`
+// return + `ci.stalled` log line) actually executes, not just the pure predicate it calls.
+test("BEHAVIORAL (W1-T382): the real waitForCiGreen stalls on an unmoving rollup and returns timeout, logging which check(s) were still pending", async () => {
+  const fakeBinDir = mkdtempSync(join(tmpdir(), "wait-ci-green-stall-bin-"));
+  writeFileSync(
+    join(fakeBinDir, "gh"),
+    [
+      "#!/bin/bash",
+      "if [[ \"$1\" == 'pr' && \"$2\" == 'view' ]]; then",
+      '  echo \'{"statusCheckRollup":[{"name":"ci","status":"IN_PROGRESS"},{"name":"lint","status":"QUEUED"}]}\'',
+      "  exit 0",
+      "fi",
+      "exit 1",
+      "",
+    ].join("\n"),
+  );
+  chmodSync(join(fakeBinDir, "gh"), 0o755);
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${fakeBinDir}:${savedPath}`;
+
+  const logs: { step: string; extra?: Record<string, unknown> }[] = [];
+  try {
+    const outcome = await waitForCiGreen(
+      "https://github.com/acme/remudero/pull/1",
+      (step, extra) => logs.push({ step, extra }),
+      0,
+    );
+    assert.equal(outcome, "timeout", "an unmoving rollup must conclude timeout via the stall derivative");
+    const stalledLog = logs.find((l) => l.step === "ci.stalled");
+    assert.ok(stalledLog, "the stalled branch must log ci.stalled, not just return silently");
+    assert.deepEqual(
+      new Set(stalledLog?.extra?.pending as string[]),
+      new Set(["ci", "lint"]),
+      "the timeout names every check that was still pending when the wait gave up",
+    );
+  } finally {
+    process.env.PATH = savedPath;
+  }
 });
