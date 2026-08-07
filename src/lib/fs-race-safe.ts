@@ -336,12 +336,25 @@ const STALE_START_TOLERANCE_MS = 2000;
  * pid-only check).
  *
  * THREE RUNGS, in order, each ANSWERING what it can and DEFERRING what it can't:
- *   1. `held.pid` is dead ⇒ stale. Unchanged from before this task — the common case.
- *   2. `held.pid` is alive, but `held.host` names a DIFFERENT host than this one: a pid is only
- *      ever meaningful on the host that assigned it, so `isPidAlive`'s answer describes an
- *      unrelated number in OUR process table, not the recorded holder's. Unresolvable from
- *      here ⇒ NOT judged stale (never reap a lock this process cannot actually verify —
- *      the same direction of caution `reclaimStaleLock`'s own "lost" outcome already takes).
+ *   1. `held.host` names a DIFFERENT host than this one ⇒ NOT stale, whatever the local
+ *      process table says. A pid is only ever meaningful on the host that assigned it, so
+ *      every probe below answers a question about OUR machine that says nothing about the
+ *      recorded holder. Unresolvable from here ⇒ never reap (the same direction of caution
+ *      `reclaimStaleLock`'s own "lost" outcome already takes).
+ *
+ *      W1-T396 MOVED THIS RUNG, and the order is the correctness property. It previously sat
+ *      BELOW the pid probe, where it could only ever be reached when a foreign pid number
+ *      happened to collide with a live LOCAL process — it guarded the coincidence and not the
+ *      case it was written for. The ordinary cross-host reading is that the foreign pid is
+ *      ABSENT here, so the pid rung answered "dead ⇒ stale" and the lock was RECLAIMED while
+ *      its real holder was still running: two workers on one task, with no error on either
+ *      side. Note the shape rather than only the fix — a guard ordered behind a check that
+ *      claims its case first is this repo's second instance in two days (W1-T394 is the same
+ *      defect in the sweep's rung table).
+ *   2. `held.pid` is dead ⇒ stale. The common case, and the ONLY thing that recovers a killed
+ *      run: `run-task.ts`'s SIGINT/SIGTERM handlers release the DRAIN lock only, never a
+ *      per-task inflight lock, so a signalled run strands its inflight lock and an uncatchable
+ *      kill strands both. Reclamation must stay reachable for every same-host holder.
  *   3. `held.pid` is alive on OUR host: compare its ACTUAL start time against `held.startedAt`.
  *      A pid reused by a new process necessarily starts AFTER the original holder wrote the
  *      lock (the original had to be running, and write the file, before it could die and free
@@ -351,17 +364,33 @@ const STALE_START_TOLERANCE_MS = 2000;
  *      unparseable output), that is NOT evidence of staleness, so this rung defers too.
  *
  * HONEST ABOUT THE REMAINING WINDOW: this is still a REASON TO BELIEVE the holder is alive,
- * never proof. A cross-host lock is trusted with no verification at all (rung 2), and a
+ * never proof. A cross-host lock is trusted with no verification at all (rung 1), and a
  * same-host reused pid that starts within `STALE_START_TOLERANCE_MS` of the original is
  * indistinguishable from the original (rung 3's whole-second `ps` resolution).
+ *
+ * AND HONEST ABOUT WHAT RUNG 1 NOW COSTS, since it is reached far more often than before: a
+ * foreign-host lock is now unreclaimable by this process in EVERY case, not just when its pid
+ * collides locally. That is the correct direction — the alternative is stealing a live holder's
+ * task — but it makes `host`'s STABILITY load-bearing. It is written as `os.hostname()` by
+ * every acquire path (`inflight-lock`, `drain-lock`, `review`, `task-id-reservation`) and
+ * compared against the same `os.hostname()` default here, so the two agree by construction. A
+ * machine whose hostname CHANGES between acquire and reclaim would, however, see its own older
+ * locks as foreign and therefore permanently unreclaimable, recoverable only by deleting the
+ * lock file. Recording a stable per-machine identity instead of a hostname would remove that
+ * exposure; it is deliberately not done here because it changes what four writers RECORD rather
+ * than how this predicate READS, which is a different concern and a different changeset.
  */
 export function isHolderStale(held: HolderIdentity, opts: IsHolderStaleOpts): boolean {
-  if (!opts.isPidAlive(held.pid)) return true;
-
+  // RUNG 1 — HOST FIRST, and the order is the whole point (W1-T396). Every rung below
+  // reasons about THIS machine's process table, which describes the recorded holder only
+  // when the recorded holder ran here. Asking any of them about a foreign pid answers a
+  // question nobody posed.
   if (held.host !== undefined) {
     const myHost = (opts.hostname ?? hostname)();
-    if (held.host !== myHost) return false; // rung 2: unverifiable from here, so not stale
+    if (held.host !== myHost) return false; // unverifiable from here, so not stale
   }
+
+  if (!opts.isPidAlive(held.pid)) return true; // rung 2
 
   if (held.startedAt !== undefined) {
     const getStart = opts.getProcessStartTime ?? defaultGetProcessStartTime;
