@@ -1,0 +1,111 @@
+- id: W1-T388
+  title: "`rmd ledger-grep` compiles its CLI argument with a bare `new RegExp(pattern)` that is UNGUARDED and sits AFTER the zero-archive early return — so a malformed pattern is a clean error on a fresh checkout and an unhandled SyntaxError on a host with archives: guard the compile and bound the match"
+  repo: remudero
+  depends_on: ["W1-T379"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: "FOUND ON PR #1436 (W1-T379) BY CodeQL, then re-derived by execution at 1d5a2cb.
+    CodeQL posted `js/regex-injection` (HIGH) on src/lib/ledger-grep.ts, exactly one line:
+    `const re = pattern instanceof RegExp ? pattern : new RegExp(pattern);`, with the annotation
+    `This regular expression is constructed from a command-line argument`.
+    THE SECURITY FRAMING IS THE WEAKEST PART OF THE FINDING, AND THIS TASK DOES NOT REST ON IT.
+    `rmd ledger-grep <pattern>` is a local operator verb whose entire contract is to accept a regex
+    from the person typing it; that person already has a shell. No privilege boundary is crossed.
+    Filed on the TWO REAL DEFECTS the alert happens to sit on top of, both measured, not argued:
+    (1) THE COMPILE THROWS AND NOTHING CATCHES IT. Measured: `new RegExp('[')` raises
+    `SyntaxError: Invalid regular expression: /[/: Unterminated character class`. That escapes
+    `resolveLedgerUnion`, escapes `ledgerGrepCommand`, and escapes main()'s
+    `process.exit(ledgerGrepCommand(rest))` as an unhandled exception with a stack trace — in a
+    function that is otherwise meticulous about this, returning 2 for a usage error and 1 for an
+    unresolvable state dir, each with its own named message. One typo bypasses all of it.
+    (2) THE MATCH IS UNBOUNDED. Measured in this container: the pattern `^(a+)+$` against a
+    29-character subject took 10861 ms. `resolveLedgerUnion` runs `re.test(line)` per line across
+    every archive; this host carries 666 of them. A catastrophic pattern does not fail, it hangs.
+    THE ASYMMETRY IS WHY THIS SURVIVED REVIEW, and it is the sharpest thing about it: the compile
+    sits BELOW the `archiveFiles.length === 0` early return, so on a state root with no archives
+    the pattern is never compiled at all. The defect is UNREACHABLE exactly where the tests point
+    and fires only on a host with real archives — invisible in CI, live in production.
+    THE SUITE ALREADY STATES THE INVARIANT IT MISSES. test/ledger-grep.test.ts carries two tests
+    whose own titles end `never a throw` — for the unreadable state dir and the unreadable config.
+    Every one of its eight tests passes a VALID pattern (`run\\.start`, `anything`). The no-throw
+    discipline was deliberate and the regex compile is the one path nobody wrote a case for."
+  design: |
+    (i) WRITE THE FALSIFIER FIRST AND WATCH IT FAIL (tdd:strict). The case is a state root WITH at
+    least one archive — a malformed pattern against an archive-less root proves nothing, because the
+    early return means the compile never happens. That single detail is what the existing suite got
+    wrong by omission, so the regression lock has to encode it or it locks nothing.
+
+    (ii) GUARD THE COMPILE, DO NOT ESCAPE THE PATTERN. Escaping would make the argument a literal
+    string and destroy the verb: `rmd ledger-grep 'run\.(start|end)'` is the intended usage, and
+    CLAUDE.md's own rule about the review executor's grep being a BASIC REGEX exists because pattern
+    semantics here are load-bearing. Wrap the compile, and on failure return a NAMED error in the
+    same shape as the two errors this function already returns — the invalid pattern echoed back and
+    the engine's own message, which is specific enough to fix a typo from ("Unterminated character
+    class"). Choose the exit code deliberately: a malformed pattern is a USAGE error (2), not the
+    zero-archive verdict (1), and those two must stay distinguishable to a caller.
+
+    (iii) BOUND THE MATCH, AND SAY WHAT THE BOUND IS FOR. The 10861 ms measurement is the
+    justification; pick the mechanism on evidence rather than reflex. A length cap on the pattern
+    does NOT bound backtracking — `^(a+)+$` is nine characters. Options worth weighing in the PR
+    body: a per-line time budget, a linear-time engine, or a rejection of the nested-quantifier
+    shapes that actually backtrack. Whichever is chosen, state in the code WHY the number is the
+    number. A bound that fires on a healthy condition is this repo's recurring defect (W1-T312,
+    W1-T380, W1-T382) — so demonstrate the bound does NOT trip on the ordinary patterns the verb's
+    own tests and CLAUDE.md's ledger rules already use, and record that check in the body.
+
+    (iv) THE CodeQL ALERT MAY NOT CLEAR, AND THIS TASK DOES NOT PROMISE THAT IT WILL. `js/regex-injection`
+    is satisfied by treating the input as a literal, which (ii) deliberately refuses to do. Report in
+    the PR body what the alert reads AFTER the fix rather than asserting a green scanner up front. If
+    it still fires, that is a dismissal decision for the operator on a verb whose contract is to take a
+    regex — NOT a reason to break the verb, and NOT a reason to reach for a suppression comment without
+    saying so out loud. Do not silence the scanner as a side effect of the fix.
+
+    NOT IN SCOPE: the union semantics, the zero-archive verdict, the archive glob, and the CLI's
+    output shape — all of W1-T379's actual subject, all working, none of it this task's business.
+  acceptance:
+    - claim: "a malformed pattern against a state root that HAS archives returns a named usage error instead of an unhandled SyntaxError, the case the existing suite cannot reach"
+      proof: "unit test: test/ledger-grep.test.ts"
+    - claim: "a catastrophic-backtracking pattern is refused or bounded rather than hanging the union across every archive"
+      proof: "unit test: test/ledger-grep.test.ts"
+    - claim: "the malformed-pattern exit code stays distinguishable from the zero-archive verdict, so a caller can still tell a typo from a missing archive set"
+      proof: "unit test: test/ledger-grep.test.ts"
+    - claim: "the guarded verb is still reached from the CLI dispatch rather than being a module nothing calls"
+      proof: "grep: ledgerGrepCommand( in src/run-task.ts"
+  risk: high
+  origin: codeql#1436-js-regex-injection-2026-08-06
+  plan_refs: ["W1-T379", "W1-T312", "W1-T380", "W1-T382"]
+  files: [src/lib/ledger-grep.ts, src/run-task.ts, test/ledger-grep.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — every claim is an in-process assertion over resolveLedgerUnion and
+    ledgerGrepCommand against a synthetic state root, decidable with no operator present.
+    risk:high is Rule 19's SPAN, NOT blast radius, and the distinction is the whole of it. The
+    sizing check reads files: as two concerns (ledger-grep, run-task) and refuses medium — filed at
+    medium first and corrected before push rather than shipped as a violation. The actual blast
+    radius is LOW twice over: the diff is one guard plus one bound, and the verb is not on main yet,
+    so a defect here cannot regress anything currently shipping. Do not read the band as danger.
+    DECOMPOSING WOULD BE FAKE. Splitting the guard from the exit code it returns separates a
+    predicate from the only place its result is observable — the same non-decomposition CLAUDE.md
+    records from PR #1400.
+    src/run-task.ts IS DECLARED DELIBERATELY, not defensively. Design (ii) puts the malformed-pattern
+    exit code in ledgerGrepCommand, which lives there — a path a worker writes must be declared, and
+    omitting one is what refused five dispatches in a week. It is also what criterion 4's call-site
+    proof names, and a proof pointing outside files: is a warning now and a scope-guard REFUSAL after
+    the work is done.
+    depends_on W1-T379 IS LOAD-BEARING, not bookkeeping. src/lib/ledger-grep.ts does not exist on
+    main — PR #1436 adds it. Dispatching this before that merges gives a worker a files: entry with
+    no file behind it. If #1436 is ever abandoned rather than merged, this task should be withdrawn
+    with it, not re-pointed at something else.
+    budget_usd 45 — below W1-T386's 70: the diff is one guard and one bound in a single module. The
+    cost is design (iii), choosing a backtracking bound on evidence and proving it does not fire on
+    healthy patterns, not the edit.
+    ON THE PROOFS. All three use the pure-path form against test/ledger-grep.test.ts, which EXISTS
+    today on #1436's branch and is declared in files:. Pure-path is the shard-legal form CLAUDE.md
+    names: it lint-passes and the executor runs the whole file, unlike the
+    test/foo.test.ts::title form which satisfies lint-plan and then matches zero tests.
+    THE MEASUREMENTS ARE FROM THIS CONTAINER at 1d5a2cb: the SyntaxError text verbatim from
+    new RegExp('['), and 10861 ms for ^(a+)+$ over a 29-character subject. Re-derive the timing
+    before setting any bound — it is hardware-dependent and a threshold copied from this note
+    would be a number nobody measured on the host that runs it."
