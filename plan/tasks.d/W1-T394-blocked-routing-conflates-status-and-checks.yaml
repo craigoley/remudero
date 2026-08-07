@@ -1,0 +1,102 @@
+- id: W1-T394
+  title: "a red `remudero-review` COMMIT STATUS is indistinguishable from a red CHECK RUN — `checksStateFromRollup` folds both into one `checksState`, so `isBlockedCi` sends every review-failing PR to the ci-log fix rung, which has no log to read, and the row written for a review-shaped block is unreachable"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  rationale: "MEASURED ON PR #1441, 2026-08-07, and re-derived from source at 94ea7d2.
+    THE INCIDENT. #1441 was dispositioned `blocked-fixable` with the reason `required checks red —
+    ci-log fix, strike 1/2` while ALL 21 OF ITS CHECK RUNS WERE GREEN. The only red on that head was
+    the `remudero-review` COMMIT STATUS, whose failure text was a body-claim contradiction. A ci-log
+    rung reads a failing job's log; there was no failing job, so the rung had nothing to read and
+    could only burn strikes.
+    THE MECHANISM, from source and not inferred. `isBlockedCi` (src/lib/sweep.ts) is exactly
+    `pr.checksState === \"red\"`. `checksState` comes from `checksStateFromRollup`, which reads
+    `statusCheckRollup` — a set that contains COMMIT STATUSES ALONGSIDE CHECK RUNS — filters it to
+    the REQUIRED contexts, and returns `red` the moment any one of them is a failure state.
+    `remudero-review` IS a required context. So a review failure sets `checksState: red` by
+    construction, and the predicate that is supposed to mean `a required CHECK is failing` cannot
+    tell the two apart.
+    THE DEAD ROW IS THE PROOF. The rung table carries, in order: row 5
+    `when: (pr) => isBlockedCi(pr)` → `required checks red — ci-log fix`, PROMOTED AHEAD of the
+    review-failing rows by W1-T138; then row 6, whose own comment reads `Reached only when checks
+    are NOT red (row 5 above already claimed that case) — a pure review-shaped block`, guarded by
+    `pr.reviewState === \"failure\" && pr.unmetCriteria.length > 0`. Because a review failure is
+    itself sufficient to make `isBlockedCi` true, ROW 6 CAN NEVER FIRE FOR A REVIEW FAILURE. The
+    row written for exactly this case is unreachable in exactly this case.
+    THE SECOND-ORDER COST, also observed on #1441. The ci-log rung's remaining tool is the
+    body-claim rewriter, and on a deletion-heavy diff `changedFiles` is deletion-blind (W1-T389),
+    so it would have rewritten a TRUE `48 files` claim into a FALSE `7` and merged a body that
+    misstates its own changeset. A rung routed to the wrong failure is not merely idle."
+  design: |
+    (i) ESTABLISH THE POPULATION BEFORE CHANGING THE PREDICATE, and report it. How many strikes
+    have been spent by a ci-log rung on a PR whose check runs were all green? That number is the
+    cost of this defect and it is derivable from the ledger — which is GZIP-ARCHIVED, so use the
+    union (`find … -name 'ledger*.ndjson*' -print0 | xargs -0 zgrep -h …`) and prove an ARCHIVE
+    matched with `zgrep -l`. The live file is a fraction of history and a live-only count is the
+    silent undercount that idiom exists to kill. If the population is zero, SAY SO and narrow this
+    task to the dead row.
+
+    (ii) SPLIT THE SIGNAL, DO NOT JUST REORDER THE ROWS. Reordering row 6 ahead of row 5 would
+    trade one misroute for the mirror one — a PR with BOTH a red check and a failed review would
+    then go to the review rung and never see its failing job. What is missing is that
+    `checksState` answers one question for two populations. Derive the check-run half separately
+    from the commit-status half, so a caller can ask which is red. Keep `checksState` itself
+    intact unless every consumer is migrated in the same change; there are several, and a silent
+    change of meaning is worse than the current misroute.
+
+    (iii) INVENTORY EVERY CONSUMER OF `isBlockedCi` AND OF `checksState` FIRST, and state per
+    consumer whether the change is intended. `isBlockedCi` is read by at least the exhaustion row,
+    the fixable row, the escalation reason (`describeCiFailures`), and the evidence-shape branch
+    that populates `ciFailures`. A consumer that starts seeing `green` where it used to see `red`
+    changes what escalates and what merges. Name any disposition that flips.
+
+    (iv) THE REGRESSION LOCK IS A PR WITH GREEN CHECK RUNS AND A RED REVIEW STATUS. Write it FIRST
+    and watch it fail (tdd:strict). It must assert the DISPOSITION and its REASON TEXT, not merely
+    that some row matched: the defect is legible only in the reason a rung gives for acting. Add
+    the mirror fixture — a red check run with a passing review — and the both-red case, and state
+    which rung each is expected to reach and why.
+
+    (v) DO NOT WIDEN INTO WHAT THE REVIEW RUNG THEN DOES. Routing a review failure to a
+    review-shaped rung is this task; whether that rung can repair a body-claim contradiction, and
+    whether it should ever rewrite a claim it cannot verify, is W1-T389's territory and a separate
+    decision.
+
+    NOT IN SCOPE: `checksStateFromRollup`'s required-context filtering, the rollup's own transport,
+    and the strike cap's size. The cap is not the defect; spending it on a rung with nothing to do is.
+  acceptance:
+    - claim: "a PR whose check runs are all green but whose remudero-review status is red is not dispositioned as required-checks-red, and its reason does not name a ci-log fix"
+      proof: "unit test: test/sweep-blocked-routing.test.ts"
+    - claim: "the review-shaped block row is reachable for a review failure rather than being claimed first by the checks-red row"
+      proof: "unit test: test/sweep-blocked-routing.test.ts"
+    - claim: "a genuinely red check run still routes to the ci-log rung, so splitting the signal withdraws no correct routing"
+      proof: "unit test: test/sweep-blocked-routing.test.ts"
+  risk: high
+  origin: session-review#1441-blocked-routing-2026-08-07
+  plan_refs: ["W1-T100", "W1-T138", "W1-T186", "W1-T389"]
+  files: [src/lib/sweep.ts, test/sweep-blocked-routing.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — every claim is an in-process assertion over the rung table against synthetic
+    OpenPrView fixtures, decidable with no operator present and no network.
+    risk:high is Rule 19's SPAN, not blast radius, and is set UP FRONT rather than shipped as a
+    violation: the sizing check reads files: as two concerns (sweep, sweep-blocked-routing). The
+    diff is plausibly small. What makes it genuinely risky is design (iii): `isBlockedCi` decides
+    what ESCALATES and what gets a fix strike, so widening or narrowing it changes which PRs the
+    fleet acts on and how.
+    RULE 25 CHECKED BEFORE FILING: files: contains no INSTRUMENT_SURFACE path (no .github/workflows/,
+    no scripts/*-ratchet.mjs, no scripts/*-baseline.json), so `detectInstrumentEntanglement` has
+    nothing to refuse. W1-T386 cost three PRs and an operator ruling by tripping that at review time.
+    budget_usd 70 — the cost is design (i)'s ledger population and design (iii)'s consumer
+    inventory, not the predicate edit.
+    ON THE PROOFS. All three name test/sweep-blocked-routing.test.ts, which does not exist yet:
+    a FORWARD REFERENCE TO A PATH, which CLAUDE.md records as safe, and the path is declared in
+    files: so the worker creates it. The pure-path form is deliberate — it lint-passes and the
+    executor runs the whole file, unlike the test/foo.test.ts::title form which satisfies lint-plan
+    and then matches zero tests.
+    THE FIGURES ARE FROM #1441 AT 94ea7d2: 21 check runs green, 0 bad, the sole red being the
+    remudero-review commit status. Re-derive before acting.
+    NO depends_on: independent of W1-T389, which fixes the deletion-blind list this rung's remaining
+    tool would misuse. They compound but neither blocks the other."
