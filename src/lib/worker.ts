@@ -2011,6 +2011,12 @@ export function reapStaleWorktrees(root: string, opts: WorktreeReapOpts = {}): W
       keep(name, "live-pid"); // LIVE pid — never reaped, the same guard pruneStaleRuns applies
       continue;
     }
+    // W1-T381: the lock's OWN pid, confirmed dead by the same predicate the live-pid guard above
+    // just used, is stronger evidence than anything the activity probe below can produce — an
+    // mtime records THAT a write happened, never WHO made it, so it cannot vouch for a run whose
+    // own lock says it is over. Reused, not reinvented: `!isPidAlive(pid)` is the same staleness
+    // shape as drain-lock.ts's `reclaimStaleLock` (`isStale: (held) => !isAlive(held.pid)`).
+    const lockNamesDeadPid = lockRead.kind === "live" && !isPidAlive(lockRead.info.pid);
 
     // Not a live-pid worktree. A registered branch still live upstream (an open,
     // unmerged PR) is fail-closed KEPT regardless of age — the sweep-W1-T154
@@ -2028,13 +2034,19 @@ export function reapStaleWorktrees(root: string, opts: WorktreeReapOpts = {}): W
     // merged-or-deleted upstream. Age-gate before acting on any of them.
     // AGE GATE, W1-T378: measured against the newest mtime ANYWHERE IN THE TREE, not the root
     // directory's own — see {@link newestActivityMs} for why the root's is frozen at checkout and
-    // what that cost. An INCOMPLETE probe means liveness is unknown, and an ambiguous signal keeps.
+    // what that cost. An INCOMPLETE probe means liveness is unknown, and an ambiguous signal keeps
+    // — that holds regardless of `lockNamesDeadPid`: "unknown" and "confirmed dead" are different
+    // questions, and only the latter overrides the rescue below (W1-T381).
     const activity = newestActivity(entryPath);
     if (!activity.complete) {
       keep(name, "activity-unknown");
       continue;
     }
-    if (now() - activity.mtimeMs < maxAgeMs) {
+    // W1-T381: recent activity may rescue a tree whose lock is ABSENT or names a LIVE pid — never
+    // one whose own lock names a pid already confirmed dead above. This only ever WITHDRAWS a
+    // rescue the guard below would otherwise have granted; it grants none, so it cannot newly reap
+    // a tree whose run is alive (that run already holds a live-pid lock and was kept above).
+    if (!lockNamesDeadPid && now() - activity.mtimeMs < maxAgeMs) {
       keep(name, "recent-activity");
       continue;
     }

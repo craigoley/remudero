@@ -1089,8 +1089,11 @@ let browserPreflightDone = false;
  * spawns the runner at all; timing that would only prove it was quick. */
 export type ProofSpawner = (command: string, args: readonly string[], cwd: string, timeoutMs: number) => string;
 
-/** Production {@link ProofSpawner}: no shell, stdout captured, hard timeout. */
-const defaultProofSpawner: ProofSpawner = (command, args, cwd, timeoutMs) =>
+/** Production {@link ProofSpawner}: no shell, stdout captured, hard timeout. Exported (W1-T387)
+ *  so `checkProofCommand` (src/run-task.ts) can wrap it to CAPTURE the raw stdout/exit status
+ *  {@link execWhitelistedProof} observes — for its own diagnostics (argv, exit code, hit count)
+ *  only, never for the verdict, which stays exactly what execWhitelistedProof decides. */
+export const defaultProofSpawner: ProofSpawner = (command, args, cwd, timeoutMs) =>
   execFileSync(command, args as string[], {
     cwd,
     stdio: ["ignore", "pipe", "ignore"],

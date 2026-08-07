@@ -206,7 +206,10 @@ test("rmd check-proof reports a `unit test:` title that matches NO test as absen
   // string, so any sentinel written as one literal would be found in THIS file and resolve rather
   // than being absent — the test would then assert the opposite of what it claims.
   const sentinel = ["no test title", "matches this", "xy" + "zzy"].join(" ");
-  assert.equal(checkProofCommand([`unit test: ${sentinel}`]), 1);
+  // W1-T387: no-match is no longer folded into the SAME exit code as a genuine fail (1) — the
+  // reviewer degrades no-match to the keyword floor and overrides on fail, so a local check that
+  // could not tell the two apart was reporting the wrong one of the two. See CHECK_PROOF_EXIT.
+  assert.equal(checkProofCommand([`unit test: ${sentinel}`]), 3);
   const out = lines.join("\n");
   assert.match(out, /candidates:\s+absent/);
   assert.match(out, /never spawns node/, "the fast path is reported, not silently taken");

@@ -236,16 +236,20 @@ test("reapStaleWorktrees: REAPS a worktree once its branch is confirmed merged-o
   }
 });
 
-test("reapStaleWorktrees: PROTECTS a git-invisible, dead-pid directory within the age gate (mirrors pruneStaleRuns' create-before-lock grace)", () => {
+test("reapStaleWorktrees: REAPS a git-invisible, dead-pid directory even freshly created — W1-T381 flipped this from a grace-window keep, because the lock's own dead pid outranks any age gate", () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "rmd-reap-grace-")));
   try {
     const entryPath = join(root, "sweep-fresh-1");
     mkdirSync(entryPath, { recursive: true });
     writeRunLock(entryPath, { pid: 97514, run_id: "X", startedAt: new Date().toISOString() });
-    // Dead pid, but freshly created (real clock/mtime) — still inside the default age gate.
+    // Dead pid, freshly created (real clock/mtime). Before W1-T381 this fell through to the
+    // recent-activity age gate and was KEPT — see the incident that this closed, replayed in
+    // worktree-reap-liveness.test.ts's "W1-T381 BITES" test. A dead pid is stronger evidence
+    // that the run is over than an mtime can ever be (an mtime records THAT a write happened,
+    // never WHO made it), so the age gate no longer protects a confirmed-dead lock at all.
     const summary = reapStaleWorktrees(root, { isPidAlive: () => false });
-    assert.ok(existsSync(entryPath), "a just-created entry is not reaped inside the default age gate");
-    assert.ok(summary.kept.includes("sweep-fresh-1"));
+    assert.ok(!existsSync(entryPath), "a dead pid's own lock outranks freshness — no age gate protects it");
+    assert.ok(summary.reaped.includes("sweep-fresh-1"));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
