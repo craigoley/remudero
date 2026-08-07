@@ -1,0 +1,98 @@
+- id: W1-T393
+  title: "D-10 has been unanswerable for SEVEN cycles because its standing demand was written as prose in a decision entry and never built as a gather rung — emit the mutation gate's lifetime kill/survive record so the decision can actually resolve"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 50.00
+  rationale: "MASTER-PLAN §11's D-10 entry diagnoses itself, and this task is that diagnosis ratified.
+    THE DECISION. `mutation-ratchet` is a REQUIRED check that mutation-tests ONLY `src/lib/classify.ts`
+    (261 lines); the other ~15k lines of `src/**` have ZERO mutation coverage, and every sampled run
+    since it went live concluded SUCCESS. Cost is measured and small (~18-24s warm/diff-scoped since
+    W1-T108), so cost is NOT the open question — VALUE is. The disposition on record: the gate
+    justifies itself with data or gets its scope cut into the nightly full-scope run (W1-T133), with
+    the PR gate staying the fast diff-only check.
+    THE DEMAND, quoted from the entry: `THE RETRO MUST REPORT, WITH DATA: mutants killed vs survived
+    over the gate's LIFETIME, and whether it has EVER caught a real escape`.
+    THE DEFECT, in the entry's own words: `no gather has ever carried that column, because the
+    instruction was written as prose in a decision entry rather than built as a gather rung ... the
+    decision cannot resolve until someone ships the measurement, so D-10's real blocker is a task, not
+    a judgement.` Seven cycles of retros have each re-read that instruction and none has executed it,
+    because prose in §11 is not wired to anything that runs.
+    THIS IS THE SAME CLASS AS W1-T392, ONE LAYER UP. W1-T392 gates the plan's prose claims about task
+    STATE; this one converts a standing prose DEMAND into an instrument. Both are P38's shape — a
+    thing the plan asked for that nothing executes — and neither is a new P-number for that reason.
+    WHY IT IS NOT SIMPLY A SCOPE DECISION SOMEONE COULD MAKE TODAY: the honest answer to `has it EVER
+    caught a real escape` is currently UNKNOWN, not `no`. Cutting the gate's scope on an unknown is
+    the same error as keeping it on one, and the entry says so.
+    COVERED-BY: NO. W1-T108 made the gate fast and W1-T133 built the nightly full-scope run; neither
+    reports what the PR gate CAUGHT. `planHealthSweep` (W1-T358) re-grades tasks against the linter,
+    not gates against their own history."
+  design: |
+    ONE GATHER RUNG THAT ANSWERS THE QUESTION D-10 ASKS, IN D-10'S OWN TERMS.
+
+    (i) READ THE GATE'S OWN HISTORY, DO NOT RE-RUN IT. The measurement is over runs that already
+    happened — killed vs survived mutants per run, and whether any run ever concluded FAILURE. Never
+    execute Stryker inside the gather: that would be a fresh reading of the CURRENT tree, which is a
+    different question and an expensive one. Source the record from what the gate already emits; if
+    the answer is that it emits nothing durable, THAT IS THE FINDING and clause (iv) is the fix.
+
+    (ii) THE HEADLINE IS BINARY AND MUST BE STATED AS SUCH: has `mutation-ratchet` EVER concluded
+    FAILURE on a PR. `killed/survived` totals are the supporting column; the escape count is the
+    decision variable, because a gate that has never once failed is a gate with no demonstrated value
+    regardless of how many mutants it killed. Report both, and never let the totals stand in for the
+    escape count.
+
+    (iii) NO NAKED ZERO — THIS IS P48 AND IT IS THE MOST LIKELY WAY THIS TASK SHIPS WRONG. `zero
+    escapes observed` and `zero runs found` must render differently and must be impossible to confuse.
+    A history read that finds no records has NOT answered D-10; it has failed to measure. Emit the
+    run count alongside every total, and require a POSITIVE CONTROL that the reader matched at least
+    one real gate run before any zero is reported as a result.
+
+    (iv) IF THE HISTORY IS NOT DURABLY RECORDED, EMIT IT GOING FORWARD AND SAY SO. A gate whose
+    verdicts are only in expired CI logs cannot answer a LIFETIME question retroactively. In that case
+    this task ships the emission plus a gather rung reading it, and reports the lifetime answer as
+    `starts now, N=0` — explicitly, as a stated limitation, never as an empty result. Adding a step
+    name any decision reads means adding it to `DECISION_RELEVANT_LEDGER_STEPS` in the SAME change
+    (the `sweep.absent_repush` precedent; test/ledger-rotation.test.ts re-derives that set).
+
+    (v) THE RUNG REPORTS; IT DOES NOT DECIDE. D-10 is the operator's call and stays open until he
+    makes it. This task must not cut the gate's scope, change its file list, or move it to the
+    nightly run — doing any of that pre-empts the decision this exists to inform.
+
+    (vi) FALSIFIER, BOTH DIRECTIONS. A seeded history containing a FAILURE run must report a non-zero
+    escape count naming it; a seeded history of only SUCCESS runs must report zero escapes AND a
+    non-zero run count; an EMPTY history must fail the positive control rather than report zero
+    escapes. The third case is the one that matters and is the one a rushed implementation drops.
+
+    NOT IN SCOPE: running or widening Stryker; changing `mutation-ratchet`'s config, file scope or
+    required status; W1-T133's nightly run; resolving D-10 itself.
+  acceptance:
+    - claim: "the rung reports lifetime killed, survived and escape counts for the mutation gate alongside the run count it read"
+      proof: "unit test: test/mutation-gate-lifetime.test.ts"
+    - claim: "a history containing a failing gate run reports a non-zero escape count and names that run"
+      proof: "unit test: test/mutation-gate-lifetime.test.ts"
+    - claim: "an empty history fails the positive control instead of reporting zero escapes as a result"
+      proof: "unit test: test/mutation-gate-lifetime.test.ts"
+    - claim: "the rung is reached from the retro gather rather than merged unwired"
+      proof: "unit test: test/mutation-gate-lifetime.test.ts"
+  risk: medium
+  origin: oper#d10-measurement-2026-08-07
+  plan_refs: ["§11 D-10", "§5E", "P38", "P48", "W1-T108", "W1-T133", "W1-T358"]
+  files: [src/lib/retro.ts, test/mutation-gate-lifetime.test.ts]
+  status: queued
+  attempts: 0
+  note: "risk:medium — two files, one concern, one subsystem (the retro gather), and the rung is
+    read-only and advisory. It cannot change a verdict, gate a PR or alter dispatch. Rule 19's span
+    test is satisfied without the high band, unlike its siblings W1-T390/391/392 which each cross
+    subsystems; recorded explicitly so the difference is not read as inconsistency.
+    budget_usd 50 — the logic is a fold over records; the cost is clause (iv)'s branch, because the
+    implementer may discover mid-task that no durable history exists and must then also ship the
+    emission. If that branch is taken, expect the upper end.
+    verify:auto — every claim is decidable in-process over a seeded history fixture. Nothing spawned,
+    no Stryker invocation, no network.
+    CLAUSE (iv) IS A REAL FORK, NOT A HEDGE. Establish FIRST whether the gate's verdicts survive
+    anywhere durable, and record that finding in the PR body before writing the rung — the answer
+    determines whether this task reports a lifetime or merely starts one, and a reader six months from
+    now needs to know which of the two they are looking at."

@@ -212,11 +212,16 @@ plausibly a second breaker bought because the first was invisible. The evidence 
 settle which, and it should not be asserted either way without checking.
 
 **Still PLANNED, not shipped** (the honest remainder): **P33's trailer quarantine list, now eleven `(pr, task)` pairs**;
-P17's receipts task (W1-T71) — **its EU AI Act Art. 50 machine-readable-disclosure date is 2026-08,
-i.e. NOW, and it has been NOW for four cycles**; the remaining fleet tasks (W1-T25/T28, W2-T2
+P17's receipts task (W1-T71) — **held on its INTEROP merit alone as of 2026-08-07; the Art. 50 clock
+that ranked it for five cycles is struck, because no cycle ever checked whether the obligation reaches
+a US operator (see P17's entry)**; the remaining fleet tasks (W1-T25/T28, W2-T2
 dry-run); **the four organs this cycle shipped DARK by their own admission** (`askType`'s producer,
 `escalateWithJudge`'s caller, `expandFeedback` in `rmd serve`, a real base checkout for `unit test:`
-proofs); **19 dead proofs across 6 open tasks**, named by the plan-health sweep's first reading; and
+proofs); ~~19 dead proofs across 6 open tasks~~ **CLEARED 2026-08-07 — all 19 were on `verify: human`
+tasks and are now written in the `demonstration:` dialect (W1-T277), which lints clean because it
+declares on the record a proof the harness will never execute. The standing rule already forbade
+rewriting them as `unit test:`; R16's proposed corrective batch is REFUSED, not deferred, and the
+residual defect is that `planHealthSweep` flags free prose on a task it can never dispatch**; and
 the follow-up chain this cycle's harvest names but rule 15 forbids auto-filing (six `tasks.d` shards
 reading `status: queued` while merged — T273, T326, T345, T346, T348, T356; `src/lib/deployer.ts`'s
 comment still naming the RETIRED `reconstructState` as live boot recovery).
@@ -1386,11 +1391,19 @@ P42 or W1-T271 and is folded there rather than given an id.
   *"what the shape would predict"* while declining to credit one. **They were describing #349's
   breaker.** The honest re-reading, recorded once: that fall is the most plausible EFFECT of clause
   (ii), it was observable from the merged PR at any point, and P43(ii)'s bar was met by evidence
-  nobody thought to look for. WHAT REPLACES THE LOG, and it is the only open question P29 leaves:
-  clause (ii) is ALSO credited to W1-T271/#1040 as a lifetime cap no ledger step can reset. Two
-  breakers exist. Whether the second is a deliberate hardening against rotation or a duplicate bought
-  because the first was invisible is **not settled by anything in this plan**, and W1-T392's gate is
-  what would have made the question unnecessary. Prior text, for provenance: R11 — 49 credit rejections,
+  nobody thought to look for. **★ THE TWO-BREAKER QUESTION, RAISED AND SETTLED THE SAME DAY: DELIBERATE
+  HARDENING, NOT DUPLICATE SPEND.** Clause (ii) is also credited here to W1-T271/#1040, so two
+  breakers exist — and W1-T271's own shard proves it knew: it quotes #349's counter at
+  `src/lib/status.ts:746-760` line by line, observes that *"the P29(ii) circuit breaker was armed the
+  whole time and never fired"* through W1-T254's five dispatches in eighty minutes, and diagnoses why
+  — **the streak counter resets to zero on every `pr.opened`, so it measures FAILURE and is blind by
+  construction to a loop that SUCCEEDS** by merging a no-op PR each pass. It therefore *"ADDS a
+  second, independent counter rather than editing the existing one"*, with *"changing the existing
+  per-streak breaker's reset, its threshold, or its escalation"* explicitly out of scope. The two are
+  complementary and both are needed. **What the plan got wrong is only the ATTRIBUTION**: clause (ii)
+  shipped in #349, and #1040 is a THIRD mechanism the plan had no name for — so P29's ledger recorded
+  #1040 against clause (ii) because clause (ii) had no recorded owner, which is the same missing-ship
+  record this correction is about, showing up a second way. Prior text, for provenance: R11 — 49 credit rejections,
   ~39 sibling. R12 — 25 rejections, 20 sibling, across 13 tasks; the ONLY ratified-and-unbuilt item
   left in the plan (FALSE — it had shipped 9 days earlier). R13 — 3. R14 — 23. R15 — 10. R16 — 6.**
   The one R16 observation that OUTLIVES the deletion, because it is about a different proposal and is
@@ -1479,10 +1492,28 @@ tasks.yaml PR — never auto-filed, never worker-edited (rule 15).
   assembled from ledger ground truth, plus the byte-equal drift golden; Sigstore + the WS-12 schema publish
   deferred to v2). Design prose DELETED per RATIFY-OR-KILL — the task is the record. STILL UNBUILT.** The
   claim it makes literal is WS-12's: the ledger proves our runs to US and nothing proves them to anyone
-  else. **★ THE DEADLINE IS PAST, NOT APPROACHING:** the EU AI Act Art. 50 machine-readable-disclosure
-  date was **2026-08**; it is now **2026-08-06** and W1-T71 is unbuilt through a FOURTH retro since R13
-  said so. P17 moves on the calendar alone; nothing about the harness has changed, and no further
-  cycle may record this as "arriving".
+  else. **★ 2026-08-07 — THE COMPLIANCE CLOCK IS STRUCK FROM THIS ENTRY'S RATIONALE, AND THE REASON IS
+  THE POINT.** The DATE was right: EU AI Act (Reg. (EU) 2024/1689) Art. 50's transparency obligations
+  apply from **2026-08-02**, so five retros correctly read the calendar. **What no cycle ever wrote
+  down is the APPLICABILITY CHAIN** — whether those obligations reach THIS operator, who is US-based
+  and runs remudero privately. The chain has at least three unexamined links, and each could break it:
+  (1) Art. 2 reaches a provider only when a system is placed on the EU market or its output is used in
+  the Union — remudero is public under Apache-2.0, so the question is real, but "public repo" is not
+  the same as "placed on the market"; (2) Art. 2(12)'s free-and-open-source exemption pointedly does
+  NOT cover Art. 50 systems, so open-sourcing is not itself a defence and the plan never noted that
+  either; (3) remudero orchestrates Claude rather than generating text itself, which makes this
+  operator look like a DEPLOYER of an AI system rather than a PROVIDER of one — and Art. 50's
+  machine-readable-marking duty in 50(2) falls on providers of generative systems. **NONE OF THIS IS A
+  LEGAL OPINION AND THIS PLAN MAY NOT RECORD ONE.** The finding is narrower and is entirely inside the
+  plan's own remit: **P17 has been ranked, and re-ranked, for five cycles on an external premise nobody
+  ever checked.** That is W1-T392's defect with the audience changed from an internal fact to a world
+  fact — an unexamined premise driving a ranking — and it is the second instance found in one day.
+  **THE DISPOSITION.** W1-T71 keeps its real justification, which was always the stronger one and needs
+  no deadline: the ledger proves our runs to US and nothing proves them to anyone else, and the
+  in-toto/SLSA vocabulary is the interop play the commodity field cannot follow without this
+  substrate. **P17 no longer moves on the calendar at all** — a future retro that reports it as
+  "overdue" has re-imported the unchecked premise. If the operator ever wants the regulatory question
+  ANSWERED rather than assumed, that is a lawyer's job and a `verify: human` task, not a retro line.
 - **P26 — HELD; TRIGGER FIRED 2026-07-29 (W1-T105 shipped #744). GITHUB ISSUES AS A PROJECTION AND INTAKE
   SURFACE, NEVER THE PLAN BACKEND.** The backend swap stays REJECTED, and the reasons are recorded so it is
   not casually relitigated: issues are schemaless prose with no birth gate — no lint-plan at creation, no
