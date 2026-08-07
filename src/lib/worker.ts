@@ -36,10 +36,12 @@ import { validateWorkerSettingsFile } from "./settings.js";
 import { DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS, reapWorkerScratch, sweepStaleWorkerScratch } from "./worker-scratch.js";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
 import {
+  assertWorkerCredentialFile,
   ensureWorkerKeychain,
   materializeWorkerHome,
   perRunWorkerHomeDir,
   reapWorkerHome,
+  workerCredentialFilePath,
   workerKeychainPaths,
   type SecurityRunner,
 } from "./worker-home.js";
@@ -601,6 +603,13 @@ export interface SpawnWorkerArgs {
     runner?: SecurityRunner;
     exists?: (path: string) => boolean;
     /**
+     * recon-cloud-workers-spike stop 6: injectable reader for the NON-DARWIN credential file,
+     * mirroring `runner`/`exists` above. Omitted (the production default) reads the real file
+     * with `readFileSync` — and the suite drives that default against real fixture files, because
+     * a test that only ever supplies its own reader proves nothing about the shipping path.
+     */
+    readCredentialFile?: (path: string) => string;
+    /**
      * W1-T265: the active Anthropic account identity for THIS spawn — an
      * `accountUuid`/`emailAddress` NAME, never a secret — forwarded to
      * `ensureWorkerKeychain`'s `accountId` opt so an account switch under the
@@ -737,6 +746,23 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         accountId,
         priorSpawnCredentialExpired: args.keychain?.priorSpawnCredentialExpired,
       }).keychainPath;
+    } else {
+      // recon-cloud-workers-spike stop 6: the SAME refusal contract, one rung later in the
+      // taxonomy and one platform over. The darwin branch above is untouched — this is an
+      // `else`, so nothing in production behaviour moves.
+      //
+      // WHY IT IS WORTH A RUNG AT ALL, since a credential-dead worker is already caught: the
+      // containment probe (`probeContainment`) catches it on every platform, but by SPAWNING
+      // and reading the death. Here the same fact costs one file read, before anything runs.
+      // `assertWorkerCredentialFile` throws `WorkerKeychainError` with a named reason class,
+      // exactly as the keychain rung does, so the failure stays queryable rather than prose.
+      //
+      // It refuses only what is unambiguously unusable — absent, unreadable, malformed, or
+      // carrying no Claude credential at all. An EXPIRED token is reported and allowed through:
+      // there is nothing to re-provision from on this platform, the CLI maintains its own
+      // refresh, and refusing there would be a bound firing on a healthy condition. See
+      // worker-home.ts's note above `workerCredentialFilePath` for the full argument.
+      assertWorkerCredentialFile(workerCredentialFilePath(realHome), args.keychain?.readCredentialFile);
     }
     materializeWorkerHome({ workerHome, realHome, workerKeychainPath });
 

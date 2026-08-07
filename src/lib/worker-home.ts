@@ -377,12 +377,20 @@ export function sweepStaleWorkerHomes(root: string, opts: WorkerHomeSweepOpts = 
 /** The generic-password service name Claude Code stores its OAuth token under. */
 export const WORKER_KEYCHAIN_SERVICE = "Claude Code-credentials";
 
-/** Named failure classes for the credential rung — queryable, not prose. */
+/** Named failure classes for the credential rung — queryable, not prose.
+ *
+ * The first four are the macOS keychain rung's own (W1-T235). The last two are the
+ * NON-DARWIN file store's (recon-cloud-workers-spike, stop 6): a keychain either yields a
+ * secret or does not, but a file has more ways to be wrong than that, and collapsing them
+ * would put this rung back in the position the whole taxonomy exists to avoid. See
+ * {@link classifyWorkerCredentialFile} for which observation earns which class. */
 export type WorkerKeychainReasonClass =
   | "login-keychain-locked"
   | "credential-item-missing"
   | "worker-keychain-unlock-failed"
-  | "provision-failed";
+  | "provision-failed"
+  | "credential-file-unreadable"
+  | "credential-file-malformed";
 
 /**
  * A credential-NAMED failure out of the worker-keychain rung. Thrown BEFORE
@@ -577,6 +585,109 @@ export function classifyCredentialSidecar(
   const expiresAt = Number(trimmed);
   if (!Number.isFinite(expiresAt)) return "broken";
   return opts.nowMs + opts.skewMs >= expiresAt ? "expired" : "fresh";
+}
+
+// ── recon-cloud-workers-spike stop 6: the NON-DARWIN credential rung ────────────────────────
+//
+// WHAT THIS CLOSES, stated precisely, because the obvious framing is wrong. A credential-dead
+// worker is NOT silent on Linux today: `probeContainment` (containment.ts) is a once-per-run
+// preflight on EVERY platform, and it already classifies the death as `spawn_credential_expired`
+// or `spawn_credential_failure`. What Linux lacks is the DARWIN rung's timing and its cost —
+// `ensureWorkerKeychain` reads the credential BEFORE anything spawns, so a broken one costs a
+// file read; without it the same fact is bought with a probe worker, on every dispatch attempt,
+// forever, because nothing upstream ever learns.
+//
+// EXPIRY IS DELIBERATELY NOT A FAILURE HERE, and this is the load-bearing decision. On darwin an
+// expired credential TRIGGERS RE-PROVISIONING from the login keychain — it is a repair path, not
+// a refusal. On Linux the file IS the source; there is nothing to re-provision from, and the CLI
+// maintains its own refresh. Throwing on `expiresAt` in the past would therefore be a bound
+// firing on a condition that may be perfectly healthy, which is this repo's most-repeated defect
+// (W1-T312, W1-T380, W1-T382). A genuinely dead token is still caught, loudly and by name, by
+// the containment probe that already runs. This rung refuses only what is UNAMBIGUOUSLY unusable.
+
+/** Where the non-darwin credential store lives — the path the CLI documents, and the SAME
+ *  directory `WORKER_HOME_SYMLINKS` already grants into every per-run worker HOME (measured
+ *  at spawn time: the grant materialises and the file is readable from inside the worker). */
+export function workerCredentialFilePath(realHome: string): string {
+  return join(realHome, ".claude", ".credentials.json");
+}
+
+/** {@link classifyWorkerCredentialFile}'s verdict. `usable` carries the expiry when the file
+ *  states one — `undefined` means the file simply does not say, which is NOT a failure (see
+ *  {@link extractCredentialExpiryMs}'s own "never invent a field" contract). */
+export type WorkerCredentialFileVerdict =
+  | { kind: "usable"; expiresAtMs?: number }
+  | { kind: "unusable"; reasonClass: WorkerKeychainReasonClass; detail: string };
+
+/**
+ * PURE (given a reader): classify the non-darwin credential file. Four observations, four
+ * answers, none of them collapsed — the same null/empty discipline `readLedgerLines`' `present`
+ * and `GitHub.readFailed` already keep elsewhere in this codebase:
+ *
+ *  - the reader throws ENOENT      → `credential-item-missing`, the SAME class the darwin rung
+ *                                    uses for "no credential item", because it is the same fact.
+ *  - the reader throws anything else → `credential-file-unreadable` (EACCES, EISDIR, EIO). A
+ *                                    permissions problem is not an absence and must not read as one.
+ *  - the bytes are not JSON        → `credential-file-malformed`.
+ *  - the JSON parses but carries no `claudeAiOauth` object → `credential-file-malformed`, with a
+ *                                    detail naming the missing block. THIS IS NOT HYPOTHETICAL: a
+ *                                    real `.credentials.json` was observed carrying only an
+ *                                    `mcpOAuth` section and no Claude credential at all, which a
+ *                                    file-exists check would wave straight through.
+ *
+ * Anything else is `usable`. Expiry is reported, never refused — see the note above.
+ */
+export function classifyWorkerCredentialFile(read: () => string): WorkerCredentialFileVerdict {
+  let raw: string;
+  try {
+    raw = read();
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    return code === "ENOENT"
+      ? { kind: "unusable", reasonClass: "credential-item-missing", detail: "no credential file at that path" }
+      : { kind: "unusable", reasonClass: "credential-file-unreadable", detail: `read failed (${code ?? "unknown"})` };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { kind: "unusable", reasonClass: "credential-file-malformed", detail: "file is not valid JSON" };
+  }
+  const oauth = (parsed as { claudeAiOauth?: unknown } | null)?.claudeAiOauth;
+  if (typeof oauth !== "object" || oauth === null) {
+    return {
+      kind: "unusable",
+      reasonClass: "credential-file-malformed",
+      detail: "file parses but carries no claudeAiOauth section — it holds no Claude credential",
+    };
+  }
+  // REUSED, never re-derived: the SAME extractor the darwin sidecar path already runs against the
+  // keychain secret, which its own doc records as byte-identical in shape to this file.
+  return { kind: "usable", expiresAtMs: extractCredentialExpiryMs(raw) };
+}
+
+/**
+ * The non-darwin analogue of {@link ensureWorkerKeychain}'s refusal half: throw
+ * {@link WorkerKeychainError} with a named class BEFORE any worker spawns, so an unusable
+ * credential costs a file read rather than a probe worker. Returns the expiry the file states
+ * (or `undefined`) so a caller can carry it without re-reading.
+ *
+ * `read` is injectable for unit tests, but the production default is the real `readFileSync`
+ * and the suite drives THAT against real fixture files — a test that only ever supplies its own
+ * reader would prove nothing about the path that actually ships.
+ */
+export function assertWorkerCredentialFile(
+  path: string,
+  read: (p: string) => string = (p) => readFileSync(p, "utf8"),
+): number | undefined {
+  const verdict = classifyWorkerCredentialFile(() => read(path));
+  if (verdict.kind === "unusable") {
+    throw new WorkerKeychainError(
+      verdict.reasonClass,
+      `worker credential: ${verdict.detail} (${path}) — refusing to spawn a credential-dead worker`,
+    );
+  }
+  return verdict.expiresAtMs;
 }
 
 // W1-T293 arm (6): NO HOT LOOP. A daemon whose LOGIN token is itself dead must not
