@@ -24,6 +24,14 @@ const MOUNT: Mount = { model: "sonnet", effort: "medium", maxTurns: 400, context
 function writeGhStub(binDir: string): void {
   const script = `#!/bin/sh
 case "$1 $2" in
+  "api "*)
+    # runReview reads the head sha over REST now, not pr view --json headRefOid.
+    # Answered in REST's own shape (mapRestPr reads head.sha), same sha as below.
+    # No backticks in here: this script sits inside a JS template literal.
+    case "$*" in
+      *pulls/*) echo '{"number":1,"html_url":"https://github.com/o/r/pull/1","updated_at":"t","body":"","head":{"ref":"b","sha":"abc1234def5678"}}' ;;
+      *) echo '{}' ;;
+    esac ;;
   "pr view")
     case "$*" in
       *headRefOid*) echo '{"headRefOid":"abc1234def5678"}' ;;

@@ -2777,6 +2777,11 @@ test("W1-T359: runReview posts the unmet-criteria PR comment, and folds the advi
       join(binDir, "gh"),
       `#!/bin/sh
 case "$1 $2" in
+  "api "*)
+    case "$*" in
+      *pulls/*) echo '{"number":1,"html_url":"https://github.com/o/r/pull/1","updated_at":"t","body":"","head":{"ref":"b","sha":"cafebabe0001"}}' ;;
+      *) echo '{}' ;;
+    esac ;;
   "pr view")
     case "$*" in
       *headRefOid*) echo '{"headRefOid":"cafebabe0001"}' ;;
@@ -2846,6 +2851,11 @@ test("W1-T359: a throwing rubric judge degrades to today's review — no advisor
       join(binDir, "gh"),
       `#!/bin/sh
 case "$1 $2" in
+  "api "*)
+    case "$*" in
+      *pulls/*) echo '{"number":1,"html_url":"https://github.com/o/r/pull/1","updated_at":"t","body":"","head":{"ref":"b","sha":"cafebabe0002"}}' ;;
+      *) echo '{}' ;;
+    esac ;;
   "pr view")
     case "$*" in
       *headRefOid*) echo '{"headRefOid":"cafebabe0002"}' ;;

@@ -5644,14 +5644,23 @@ test("realArmDeps: the real gh/config wiring executes against a PATH-stubbed gh 
   const bin = mkdtempSync(join(tmpdir(), "gh-stub-"));
   writeFileSync(
     join(bin, "gh"),
-    '#!/bin/sh\ncase "$2" in view) echo "{\\"headRefOid\\":\\"stub1234\\"}";; *) exit 0;; esac\n',
+    // `headSha` reads over REST now (`gh api repos/{o}/{r}/pulls/{n}`), so the stub answers on
+    // $1=api and in REST's own shape — mapRestPr reads head.sha. `pr merge` still falls through
+    // to the exit-0 arm below, exactly as before.
+    '#!/bin/sh\ncase "$1" in api) echo "{\\"number\\":1,\\"html_url\\":\\"u\\",\\"updated_at\\":\\"t\\",\\"head\\":{\\"ref\\":\\"b\\",\\"sha\\":\\"stub1234\\"}}";; *) exit 0;; esac\n',
     { mode: 0o755 },
   );
   const oldPath = process.env.PATH;
   process.env.PATH = `${bin}:${oldPath}`;
   try {
     const d = realArmDeps();
-    assert.equal(d.headSha("url/x"), "stub1234", "headSha parses gh pr view --json headRefOid");
+    // A REAL PR URL: the REST path resolves owner/repo/number from it, and refuses anything it
+    // cannot address rather than falling back to a gh --json read.
+    assert.equal(
+      d.headSha("https://github.com/craigoley/remudero/pull/1"),
+      "stub1234",
+      "headSha reads head.sha off the REST single-PR response",
+    );
     // These three reach `gh pr merge` for real, against the PATH-stubbed `gh` written above —
     // never the live repo. Each is exempted individually because the guard checks the CALL,
     // not the destination, and running the real dep body IS the assertion.
