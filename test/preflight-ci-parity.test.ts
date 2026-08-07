@@ -42,8 +42,6 @@ function recordingSpawn(map: Record<string, { status: number; stdout?: string; s
   return { spawn, calls };
 }
 
-const RETIRING_JOBS = new Set<string>(["refactor-campaign"]);
-
 // ── acceptance 1: every ci.yml job has a parity entry, mirrored or excluded-with-reason ─────
 
 test("ci-parity table: every REAL ci.yml job has an entry, either mirrored (with a run()) or excluded (with a reason) — no entry is silently absent", () => {
@@ -67,23 +65,7 @@ test("ci-parity table: carries no entry for a job ci.yml does not define (the ta
   const ciYamlText = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
   const jobs = new Set(parseCiJobNames(ciYamlText));
   for (const entry of CI_PARITY_TABLE) {
-    // TEMPORARY CARVE-OUT (W1-T386, operator ruling 2026-08-07). Retiring a ci.yml job needs
-    // its parity entry removed in the SAME commit, but ci.yml is INSTRUMENT_SURFACE and
-    // lib/ci-parity.ts is a product path, so one commit doing both is refused by Standing
-    // rule 25. The instrument half lands first; the follow-up PR removes the entry AND the
-    // test below, which goes red the moment the entry is gone.
-    if (RETIRING_JOBS.has(entry.job)) continue;
     assert.ok(jobs.has(entry.job), `CI_PARITY_TABLE names '${entry.job}', which ci.yml does not define`);
-  }
-});
-
-test("the retiring-job carve-out cannot outlive the retirement it exists for", () => {
-  const tableJobs = new Set(CI_PARITY_TABLE.map((e) => e.job));
-  for (const job of RETIRING_JOBS) {
-    assert.ok(
-      tableJobs.has(job),
-      `RETIRING_JOBS names '${job}', which CI_PARITY_TABLE no longer carries — delete the carve-out`,
-    );
   }
 });
 
