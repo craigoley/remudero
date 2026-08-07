@@ -679,6 +679,19 @@ proposals from one root cause, the accretion failure mode P8 named. They route t
 line, never a new bullet. *(The series now spans NINE cycles and ranges 0%–64% with no monotone trend
 — read it as a NOISE BAND, not a trajectory. That is P43(ii), and it is why R14 refused to call 40% a
 regression, R15 refused to call 56% a fix, and R16 refuses to call 48% anything at all.)*
+  **★ 2026-08-07 — A BOUND ON THE NEW DEFECT, RECORDED SO IT IS NOT MIS-CITED AS THIS BAND'S CAUSE.**
+  The uncreditable-branch defect W1-T390 files is **RARE AND CLUSTERED, not ambient**: over the 100
+  most recent closed PRs (#1341–#1451) there are **37 merged `run-*` branches and exactly TWO are
+  slug-form** — #1386 and #1391, merged 40 minutes apart on 2026-08-05, one actor in one session. It
+  therefore **does NOT explain this band**, and no retro may cite it as such: two PRs cannot account
+  for nine cycles of spread, and saying otherwise is precisely the unattributed-cause error P43(ii)
+  exists to forbid. What earns that task is the FAILURE MODE, not the frequency — the credit is lost
+  PERMANENTLY with no self-correcting path, and this single occurrence produced BOTH escalations open
+  on 2026-08-07. The same discipline applies to the W1-T149 correction's own root: the SHIPPED log
+  records `T145/#360`, `T146/#371`, `T148/#839`, `T150/#358` and `T151/#845`, with **T149 the only gap
+  in that run** (T150 is P30, W1-T149's own sibling, merged a day later) — **ONE dropped entry, not a
+  broken log.** Both bounds are stated because the standing temptation with a vivid defect is to
+  promote it into an explanation for everything unexplained nearby.
 
 **RETRO-1785992364048 (R16, this cycle)** — mined from 36 runs / 25 shipped tasks / 25 merged PRs / 12
 ledger credits (`blocked_ci`×9, `incomplete`×7, `no_pr`×7, `pr_attribution_failed`×1, **`failed`×0**,

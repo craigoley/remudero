@@ -97,8 +97,22 @@
     R5 found, so the prefix-collision falsifier is not optional colour.
     budget_usd 55 — the change is small and the shape is mirrored from `isBareRunBranch`; the cost is
     the four-way falsifier and re-reading the three call sites of `ownsBranch` to prove none moved.
-    TRACED FROM SOURCE, NOT EXECUTED. The predicate chain above was read at deadef6 and the two PR
-    head refs and merge states came from the live REST API; the conclusion that `deriveStatus` returns
-    uncredited for W1-T377 was NOT confirmed by running `rmd status W1-T377`. First implementation
-    step is to confirm it, and to record the observed output in the PR — if it credits, this task is
-    WITHDRAWN and the real cause of #1448 is still open."
+    EVIDENCE GRADE, STATED PRECISELY BECAUSE THE TWO HALVES DIFFER. The three predicates were
+    transcribed VERBATIM from status.ts at deadef6 into a standalone script and EXECUTED against the
+    real head refs: `run-W1-T377-open-pr-corroboration` and `run-W1-T378-reaper-activity-gate` both
+    evaluate to VETOED, while `run-W1-T379-1786028670354` and `run-W1-T377`'s own control
+    `run-W1-T149-1784553391268` both CREDIT — so the discriminator is the digit suffix and nothing
+    else, demonstrated rather than argued. Both prefix-collision directions were run and both stay
+    VETOED, which is the constraint the fix must preserve. WHAT IS STILL NOT EXECUTED is
+    `deriveStatus` END TO END: its rung precedence could in principle credit these tasks by another
+    route. `rmd status W1-T377` remains the first implementation step, and if it credits, this task is
+    WITHDRAWN and the real cause of #1448 is still open.
+    BLAST RADIUS — MEASURED, AND SMALLER THAN THE SYMPTOM SUGGESTS. Over the 100 most recent closed
+    PRs (#1341-#1451) there are 37 merged `run-*` branches and exactly TWO are slug-form: these two,
+    merged 40 minutes apart on 2026-08-05. So the shape is RARE (~5%) and CLUSTERED — one actor, one
+    session — not an ambient condition. DO NOT let this task be justified as an explanation for the
+    credit-artifact band: the plan's 0%-64% ledger-credit range across nine cycles is NOT accounted
+    for by two PRs, and claiming otherwise would be exactly the unattributed-cause error P43(ii)
+    forbids. The justification is the FAILURE MODE, not the frequency — when it happens the task
+    becomes permanently uncreditable with no self-correcting path, and both of the daemon's currently
+    open escalations trace to this one occurrence."

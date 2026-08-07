@@ -52,6 +52,19 @@
     catches the document contradicting itself. It did not fire for W1-T149 because #349 was never
     added to the SHIPPED log at all: the entry was simply MISSING, and a consistency check over two
     lists cannot see an id absent from both.
+    THE EXTRACTOR MUST READ BOTH NOTATIONS, AND THIS IS THE MOST LIKELY WAY (i) SHIPS BROKEN.
+    MEASURED over the SHIPPED log at deadef6: it carries **282 short-form `T<n>/#<pr>` pairs against
+    only 93 long-form `W1-T<n>` mentions**, because the log's house style is the compressed
+    `T339/#1329` pair. A regex written for the long form alone reads a THIRD of the log and reports a
+    clean result over the part it could see — the vacuous pass again, and clause (iii)'s positive
+    control is what must catch it. Resolve the short form against the plan's own id set rather than
+    assuming the `W1-` prefix, because the log also carries `W2-`/`W3-`/`W12-` tasks.
+    THE SHIPPED-LOG GAP IS A SINGLE DROPPED ENTRY, NOT A SYSTEMIC LOGGING FAILURE — established
+    2026-08-07 and recorded so this task is not over-scoped into a log rebuild. The log records
+    `T145/#360`, `T146/#371`, `T148/#839`, `T150/#358` and `T151/#845`; **T149 is the only gap in that
+    run**, and T150 is P30, W1-T149's own sibling task, merged one day after it. The defect is that
+    ONE missing entry went unnoticed for six cycles because nothing compares the log to GitHub — which
+    is clause (ii), not a completeness audit of the log.
 
     (ii) EXTERNAL TRUTH, AT RETRO GATHER TIME, WHERE GITHUB IS ALREADY IN HAND. The gather already
     runs a batched `projectPlan` and already passes a derived `isMerged` into `planHealthSweep`. Add a
