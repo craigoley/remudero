@@ -679,8 +679,27 @@ export function classifyWorkerCredentialFile(read: () => string): WorkerCredenti
 export function assertWorkerCredentialFile(
   path: string,
   read: (p: string) => string = (p) => readFileSync(p, "utf8"),
+  envToken: string | undefined = process.env.CLAUDE_CODE_OAUTH_TOKEN,
 ): number | undefined {
   const verdict = classifyWorkerCredentialFile(() => read(path));
+  // A TOKEN IS A CREDENTIAL TOO (impl-ED). This guard exists because a credential-dead worker makes
+  // zero writes and its $0 death reads as containment UNPROVEN rather than as an auth failure — that
+  // reasoning is untouched and the refusal below still fires when NEITHER credential exists. What was
+  // wrong was the guard's REACH, not the guard: it tested only for the `/login` file, so it refused
+  // every container authenticated the one way a container can be. The CLI's own documented precedence
+  // ranks this env var ABOVE the `/login` credential, so a worker holding it is authenticated
+  // whatever the file says.
+  //
+  // EXPIRY IS A KNOWN GAP AND IS DELIBERATELY NOT SOLVED HERE. A bare token carries no
+  // `claudeAiOauth.expiresAt`, so {@link extractCredentialExpiryMs} cannot read one and `undefined`
+  // is the honest answer rather than a guess. The consequence, stated so it is not rediscovered: the
+  // fleet's expiry machinery is BLIND to a token-authenticated worker — it runs for a year and then
+  // every dispatch fails at once, with no advance warning from the sidecar classifier or the
+  // re-provision path. `apiKeyHelper` is the vendor-documented seam if unattended recovery is ever
+  // wanted; building rotation here would be a second concern.
+  if (verdict.kind === "unusable" && typeof envToken === "string" && envToken.length > 0) {
+    return undefined;
+  }
   if (verdict.kind === "unusable") {
     throw new WorkerKeychainError(
       verdict.reasonClass,
