@@ -308,6 +308,7 @@ import {
   regeneratePlanIndexFile,
 } from "./lib/plan-pr-emitter.js";
 import { appendLedger, isSpawnInfraBlockedError, LEDGER_COST_TAG_INFRA } from "./lib/ledger.js";
+import { resolveLedgerUnion } from "./lib/ledger-grep.js";
 import {
   assertRunnable,
   loadPlan,
@@ -6906,6 +6907,66 @@ export function emissionsCommand(rest: string[], opts: { stateDir?: string } = {
   console.log("");
   console.log(`  UNAUDITABLE (no ledger step carries the verb's name): ${unauditable.join(", ")}`);
   console.log("  Unauditable is not unused — it means this instrument cannot see the verb at all.");
+  return 0;
+}
+
+/**
+ * `rmd ledger-grep <pattern>` — the deduplicated union of every `state/ledger.*.ndjson.gz`
+ * archive and the live `state/ledger.ndjson`, for `pattern`. Replaces the manual
+ * `grep -h '<pat>' state/ledger.*.ndjson state/ledger.ndjson | sort -u` idiom, which glob-matches
+ * ZERO of this host's gzipped archives and silently answers from the live file alone — see
+ * lib/ledger-grep.ts's module doc for the measured 3.1x undercount that shape produced.
+ *
+ * MIRRORS `checkProofCommand`'s shape: prints what it resolved (pattern, state dir, archive
+ * count) BEFORE printing any match, so the positive control is visible rather than implied by
+ * the presence of output. READ-ONLY — writes no ledger line, no state file, and never
+ * deletes/moves an archive (they are the only copy of most history; see rotateLedger's
+ * MAX_RETAINED_LINES_PER_STEP retention).
+ *
+ * THE WHOLE POINT: exits non-zero, naming the globbed directory, when ZERO archive files were
+ * read, rather than falling back to a live-file-only match count — the automated form of the
+ * positive control nobody writes by hand for this idiom.
+ */
+export function ledgerGrepCommand(rest: string[], opts: { stateDir?: string } = {}): number {
+  const pattern = rest[0];
+  const badArg = unknownArgError("ledger-grep", rest.slice(1), [], []);
+  if (!pattern || badArg) {
+    if (badArg) console.error(badArg);
+    console.error(`usage: ${commandSyntax("ledger-grep")}\n` + USAGE);
+    return 2;
+  }
+
+  // Injected LAST and defaulted, so no positional caller shifts — same seam emissionsCommand's
+  // `opts.stateDir` uses, and for the same reason: a test drives both the "archives present" and
+  // "zero archives" branches against a synthetic state root instead of this host's real one.
+  const stateDir =
+    opts.stateDir ??
+    (() => {
+      try {
+        return join(loadConfig().root, "state");
+      } catch {
+        return undefined;
+      }
+    })();
+  if (stateDir === undefined) {
+    console.error("rmd ledger-grep: cannot resolve a state dir — unreadable config");
+    return 1;
+  }
+
+  console.log(`pattern:    ${pattern}`);
+  console.log(`state dir:  ${stateDir}`);
+  const result = resolveLedgerUnion(stateDir, pattern);
+  console.log(`archives:   ${result.archiveCount} matched`);
+  if (!result.ok) {
+    console.error(
+      `rmd ledger-grep: ZERO archive files matched ${join(stateDir, "ledger.*.ndjson.gz")} — refusing to ` +
+        "answer from the live ledger alone. A count from the live file only is the exact silent " +
+        "undercount this verb exists to kill, so it is an error, never a smaller result.",
+    );
+    return 1;
+  }
+  console.log(`matches:    ${result.matches.length}`);
+  for (const line of result.matches) console.log(line);
   return 0;
 }
 
@@ -15953,6 +16014,11 @@ const COMMANDS: readonly CommandSpec[] = [
       "rmd check-proof <proof> [--allow-full-suite]   # run ONE acceptance proof through the REVIEWER'S OWN parser and executor and print what it does: parse kind, resolved candidate file(s), the exact argv, the verdict, exit code and hit count. A `grep:` pattern is a BASIC REGULAR EXPRESSION (`[ * ^ $` are metacharacters) — verifying with `grep -F` is a DIFFERENT matcher and reports a false green (PR #1071). A `unit test:` proof naming a TITLE rather than a test/<file>.test.ts PATH is resolved to its file first; when it resolves to none, the run is REFUSED rather than falling back to the whole-suite glob (--allow-full-suite overrides, time-boxed). EXIT CODE IS THE VERDICT: 0 pass, 1 fail (genuinely unmet — overrides the keyword floor), 2 refused (nothing executed — bad usage, an unparseable proof, or an unresolved name run declined), 3 no-match (ran and named nothing — degrades to the keyword floor, NEVER read as fail), 4 exec_error (a timeout/spawn failure/grep-exit-2 — inconclusive, also degrades). READ-ONLY: writes no cache, no ledger line, no state file",
   },
   {
+    name: "ledger-grep",
+    usage:
+      "rmd ledger-grep <pattern>   # the deduplicated union of every state/ledger.*.ndjson.gz archive and the live state/ledger.ndjson, matched against <pattern>. Replaces the manual `grep -h '<pat>' state/ledger.*.ndjson state/ledger.ndjson | sort -u` idiom, which glob-matches ZERO gzipped archives on this host and silently answers from the live file alone (a measured 3.1x undercount). Prints the pattern, state dir and archive count BEFORE any match, then EXITS NON-ZERO, naming the globbed directory, when ZERO archive files were read — never falling back to a live-file-only count. READ-ONLY: writes no ledger line, no state file, deletes/moves nothing",
+  },
+  {
     name: "check-acceptance",
     usage:
       "rmd check-acceptance <body-file>   # read a PR body from a file and report what the REVIEWER'S OWN parseAcceptanceBlock actually resolves from it, against what was written: header found, bullets written, criteria parsed, empty proofs. Exits non-zero when they disagree. A claim WRAPPED onto a second line silently truncates the block (any indented line that is not `proof:` ends it), and a `## Validation` heading is not an Acceptance header — both ship a body that says less than its author wrote. Run this before opening a PR over REST, which bypasses the orchestrator's house-block emitter. READ-ONLY: writes no ledger line, no state file",
@@ -16430,6 +16496,10 @@ export async function main(
   }
   if (cmd === "check-proof") {
     process.exit(checkProofCommand(rest));
+  }
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(ledgerGrepCommand(rest)) cannot carry a DA hit without forking the process; ledgerGrepCommand's own logic — arg validation, the archive glob, the zero-archive verdict, and the deduplicated match render — is unit-tested in test/ledger-grep.test.ts (same irreducible-glue shape as the sibling check-proof/emissions dispatch cases).
+  if (cmd === "ledger-grep") {
+    process.exit(ledgerGrepCommand(rest));
   }
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(checkAcceptanceCommand(rest)) cannot carry a DA hit without forking the process; checkAcceptanceCommand's own logic — the usage refusal, the unreadable-file refusal, the truncation report, the missing-header report and the clean pass — is unit-tested in test/acceptance-block-diagnostics.test.ts (same irreducible-glue shape as the sibling check-proof/emissions dispatch cases).
   if (cmd === "check-acceptance") {
