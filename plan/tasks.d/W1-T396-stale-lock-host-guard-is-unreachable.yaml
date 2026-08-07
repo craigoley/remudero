@@ -1,0 +1,94 @@
+- id: W1-T396
+  title: "`isHolderStale` probes a lock holder's pid against the LOCAL process table BEFORE it consults `host`, so the cross-host guard is reachable only on a coincidental pid collision and a genuine foreign-host holder is judged stale and reclaimed — two workers can hold the same task"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "FOUND IN state/recon-portability-and-upstream.md, 2026-08-07, and re-derived from
+    source at 94ea7d2. THIS IS A LIVE DEFECT INDEPENDENT OF MULTI-INSTANCE — it is filed first for
+    that reason, not because portability is imminent.
+    THE ORDERING, verbatim in behaviour from `isHolderStale` (src/lib/fs-race-safe.ts). Rung 1 is
+    `if (!opts.isPidAlive(held.pid)) return true;` — unconditional, and `isPidAlive` consults THIS
+    machine's process table. Rung 2 reads `held.host` and returns NOT-stale when it names a
+    different machine. Rung 3 compares the live process start time against `startedAt` to catch pid
+    reuse.
+    WHY THE GUARD CANNOT DO ITS JOB. For a holder on another machine, its pid number means nothing
+    here and will usually be absent from the local table. Rung 1 therefore returns STALE and rung 2
+    NEVER EXECUTES. The host guard is reached only when a foreign pid number happens to collide with
+    a live LOCAL process — it protects the coincidence and not the case it was written for.
+    THE MODULE'S OWN DOC IS HALF-CANDID. It states that a cross-host lock is trusted with no
+    verification at all, describing rung 2's permissive direction. It does not state the inverse and
+    dangerous one: a cross-host lock whose pid is absent locally is RECLAIMED. That is the silent
+    failure — two workers holding the same task, with no error on either side.
+    THE FAMILY, and this is the SECOND INSTANCE IN TWO DAYS: a guard written for a case, ordered
+    behind a check that claims the case first. W1-T394 is the same shape in the sweep's rung table,
+    where the review-shaped row is unreachable because the checks-red row matches first. Two
+    independent occurrences make this worth naming as a class rather than fixing twice in isolation.
+    TODAY'S BLAST RADIUS IS ZERO because there is one host, and `host` is written but never compared
+    to any effect. That is exactly why it is cheap to fix now and expensive to discover later."
+  design: |
+    (i) RE-DERIVE THE ORDERING FIRST. If the rungs have moved since 94ea7d2, say so and re-scope
+    rather than applying a fix to a shape that no longer exists.
+
+    (ii) THE FIX IS AN ORDERING CONSTRAINT, NOT A NEW PREDICATE. Consult `host` BEFORE the pid
+    probe, and treat a foreign host as NOT-stale regardless of what the local process table says —
+    the same direction of caution rung 2 already takes, applied where it can actually be reached.
+    Establish what `host` is recorded as (`hostname()` at acquire time) and whether it is stable
+    enough to compare: a machine that renames itself, or a container whose hostname is
+    per-invocation, would make every one of its own locks look foreign and therefore unreclaimable.
+    If that risk is real, say so and state the mitigation rather than shipping the reorder alone.
+
+    (iii) THE REGRESSION LOCK MATTERS MORE THAN THE FIX. A same-host DEAD holder must STILL be
+    reclaimable. A change that makes locks permanent is strictly worse than the bug, because
+    reclamation is the only thing that recovers a killed run. Write BOTH directions first and watch
+    them fail (tdd:strict): a foreign-host holder with a locally-absent pid must be NOT stale, and a
+    same-host holder with a dead pid must remain stale. Add the pid-reuse case so rung 3 is proven
+    still reachable.
+
+    (iv) HOW RUNS ACTUALLY LEAVE LOCKS BEHIND — CORRECTED, because the obvious premise is wrong.
+    src/run-task.ts DOES register `process.once("SIGINT", …)` and `process.once("SIGTERM", …)`, but
+    that handler releases the DRAIN lock only; it does not touch a per-task inflight lock. So a
+    signalled run still strands its inflight lock, and SIGKILL strands both. The conclusion holds,
+    the stated reason does not. A comment in src/run-task.ts asserts there are no signal handlers
+    anywhere in src/ — that assertion is FALSE at this sha, in the same file that contradicts it.
+    REPORT that; do not fix it here (different file, different concern).
+
+    (v) REUSE `reclaimStaleLock`'s EXISTING IDENTITY CHECK — it compares device+inode AND the file
+    bytes, because ext4 was measured reusing a just-freed inode. Do not write a fourth comparison;
+    the defect is the ORDER of the staleness rungs, not the identity predicate that follows them.
+
+    NOT IN SCOPE: replacing the filesystem lock with a cross-machine primitive (that is the
+    portability question, and it is deliberately later in the sequence), the ledger, and the drain
+    or triage locks except insofar as they share `isHolderStale`.
+  acceptance:
+    - claim: "a lock held by a different host is not judged stale even when its pid is absent from this machine's process table"
+      proof: "unit test: test/stale-lock-host-ordering.test.ts"
+    - claim: "a same-host holder whose pid is dead is still judged stale, so an abandoned lock remains reclaimable"
+      proof: "unit test: test/stale-lock-host-ordering.test.ts"
+    - claim: "the same-host pid-reuse rung still fires, so reordering withdraws no detection that exists today"
+      proof: "unit test: test/stale-lock-host-ordering.test.ts"
+  risk: high
+  origin: recon#portability-and-upstream-2026-08-07
+  plan_refs: ["W1-T394"]
+  files: [src/lib/fs-race-safe.ts, test/stale-lock-host-ordering.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — every claim is a pure predicate assertion over isHolderStale with injected
+    isPidAlive/hostname/getProcessStartTime probes, decidable in-process with no second machine.
+    risk:high is Rule 19's SPAN, set UP FRONT rather than shipped as a violation: the sizing check
+    reads files: as two concerns (fs-race-safe, stale-lock-host-ordering). The diff is plausibly
+    three lines. What is genuinely risky is the DIRECTION of error: design (iii) exists because a
+    reorder that over-corrects makes every lock permanent, and a permanent lock is worse than an
+    occasionally-reclaimed one — it stalls a task forever with no error.
+    RULE 25 CHECKED BEFORE FILING: files: contains no INSTRUMENT_SURFACE path, so
+    detectInstrumentEntanglement has nothing to refuse.
+    budget_usd 60 — the cost is design (ii)'s hostname-stability question and design (iii)'s
+    both-directions lock, not the reorder.
+    ON THE PROOFS. All three name test/stale-lock-host-ordering.test.ts, which does not exist yet:
+    a FORWARD REFERENCE TO A PATH, safe per CLAUDE.md, declared in files: so the worker creates it.
+    Pure-path form is deliberate — it lint-passes and executes the whole file, unlike the
+    test/foo.test.ts::title form that satisfies lint-plan and then matches zero tests.
+    REPORTED, NOT FIXED HERE: the false no-signal-handlers comment in src/run-task.ts (design iv).
+    NO depends_on: independent of W1-T394, which is the same defect SHAPE in a different subsystem."

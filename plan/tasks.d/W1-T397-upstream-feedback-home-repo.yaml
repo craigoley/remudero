@@ -1,0 +1,111 @@
+- id: W1-T397
+  title: "`rmd feedback` always writes the LOCAL checkout's plan/feedback/, so an instance working on another codebase files rmd's own bugs where no rmd maintainer will read them: give it a home-repo pointer and a transport home"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  rationale: "OPERATOR RULING on state/recon-portability-and-upstream.md, 2026-08-07, accepting its
+    sequence. Re-derived from source at 94ea7d2.
+    THERE IS NO ROUTER, AND NOT A PARTIAL ONE. `feedbackCommand` (src/run-task.ts) calls
+    `captureFeedback(repoRoot, parsed)`, where `repoRoot` is a MODULE-LEVEL CONSTANT resolved once
+    from argv and cwd. `feedbackDir(root)` (src/lib/feedback.ts) is `join(root, \"plan\",
+    \"feedback\")` and is the only path function. There is no destination parameter anywhere in the
+    feedback path, and a search for a home-repo pointer across the feedback modules and
+    managed-repos returns nothing. So an instance working on another codebase that finds a defect in
+    rmd ITSELF files that defect into that other codebase's plan/feedback/, where nobody who
+    maintains rmd will ever read it. That is the entire gap.
+    THE FLEET ALREADY DISTINGUISHES SELF FROM OTHER, BUT IN THE WRONG SUBSYSTEM. The drain target
+    resolver carries `isSelf: boolean` commented as `repo === the daemon's OWN source repo`, logs
+    `self_host`, and prints a self-hosting banner when draining its own source. That distinction
+    answers `may this daemon target itself` for DISPATCH; it is not available to, and says nothing
+    about, where a FILING belongs.
+    WHY THIS IS CHEAP, AND THE REASON IS STRUCTURAL. A feedback entry is ALREADY ONE STANDALONE YAML
+    FILE with a unique id under plan/feedback/, and the module's own doc states the position:
+    feedback is an artifact, not a command. One file per entry, id-named, additive — the same shape
+    plan/tasks.d/ uses to avoid contention on plan/tasks.yaml. Upstreaming needs no protocol, no
+    queue and no service. It needs a pointer, a credential, and a pull request.
+    AND IT NEEDS NO ARBITER AT ALL. An instance that only reports never dispatches, so it takes no
+    lock and writes no ledger. That is the whole reason this is days rather than the quarter the
+    ledger and lock work would cost — see the recon's Part 3."
+  design: |
+    (i) THE POINTER. Add configuration naming the home repository, mirroring the existing
+    `.remudero/managed-repos.json` shape that `loadManagedRepos` already validates and fails loud
+    on. That file answers WHICH REPOS THIS INSTANCE IS RESPONSIBLE FOR; this is its inverse — the
+    one repo it reports TO. Reuse that validation discipline rather than inventing a second one, and
+    decide explicitly what an ABSENT pointer means. Recommendation to argue, not assume: absent
+    should mean `file locally, as today`, so nothing regresses for the home instance itself.
+
+    (ii) THE TRANSPORT — ARGUE IT, DO NOT ASSUME IT. A pull request against the home repo adding one
+    file under plan/feedback/ inherits the operator's existing gate, which is probably right: the
+    value of a report from a remote instance is that it is attributable and durable, and a PR is
+    both, while the fleet cannot act on it until a human reads it. An issue is lighter but lands
+    OUTSIDE plan/feedback/, which forfeits the diffable-artifact property that makes this cheap and
+    splits the inbox in two. State the choice and its cost. Note the load consequence honestly: at N
+    instances the home repo receives N feedback PRs, each needing a gate — a review-load question,
+    not a correctness one, and the first thing that will feel expensive.
+
+    (iii) WHAT HAPPENS WHEN HOME IS UNREACHABLE. This must be decided, not left to a throw. The
+    instance is mid-run on someone else's codebase; losing the observation is the worst outcome and
+    blocking the run is the second worst. Recommendation to argue: capture LOCALLY first — the entry
+    is a file, and writing it costs nothing — then attempt the upstream push, and on failure leave
+    the local artifact plus a named, greppable record that it did not reach home. Never silently
+    drop, and never fail the run that produced it.
+
+    (iv) DO NOT SELF-TARGET. When the local checkout IS the home repo, upstreaming must be a no-op
+    that files locally exactly as today, or the home instance will open pull requests against itself
+    for every entry. The drain resolver's `isSelf` notion is the precedent for the comparison, not
+    the implementation to reuse — it answers a dispatch question and is not reachable from here.
+
+    (v) SCOPE — FEEDBACK ONLY. Learnings are the NEXT step in the accepted sequence and want
+    one-file-per-learning FIRST: learnings/ is currently a small set of shared TOPIC SHARDS mutated
+    in place, size-capped by a CI job on every PR, and last written 2026-07-23. A shared file at N
+    contributors is a merge-conflict machine, and the fix is the shape plan/tasks.d/ and
+    plan/feedback/ already use. Name it as the follow-on. Do NOT build it here, and do not let
+    CLAUDE.md become writable by a remote instance — it is curated by compression and should stay
+    single-writer.
+
+    WHAT THIS MUST NOT DO, and saying so is the point: it must not dispatch, must not take any lock,
+    and must not write to the home repo's ledger. A reporting-only instance needs no arbiter, and
+    every one of those would reintroduce the cost this step exists to avoid.
+
+    NOT IN SCOPE: learnings, CLAUDE.md, shared dispatch, the ledger, and any change to how the home
+    fleet processes an entry once it lands — a feedback PR is already a shape it knows.
+  acceptance:
+    - claim: "with a home-repo pointer configured, a feedback entry is directed at the home repository rather than the local checkout"
+      proof: "unit test: test/upstream-feedback-routing.test.ts"
+    - claim: "with no pointer configured, and when the local checkout is itself the home repo, the entry files locally exactly as today"
+      proof: "unit test: test/upstream-feedback-routing.test.ts"
+    - claim: "an unreachable home repo leaves the entry captured locally and a named record that it did not reach home, and never fails the run that produced it"
+      proof: "unit test: test/upstream-feedback-routing.test.ts"
+    - claim: "the reporting path takes no lock and writes no ledger, so a reporting-only instance needs no arbiter"
+      proof: "unit test: test/upstream-feedback-routing.test.ts"
+  risk: high
+  origin: oper#ruling-portability-recon-2026-08-07
+  plan_refs: ["W1-T40", "W1-T396"]
+  files: [src/lib/feedback.ts, src/run-task.ts, test/upstream-feedback-routing.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — every claim is decidable in-process against a synthetic checkout with an
+    injected transport; no second machine and no live push are required to prove routing.
+    risk:high is Rule 19's SPAN, set UP FRONT: files: crosses src/lib/feedback.ts, src/run-task.ts
+    and a new suite, which the sizing check reads as several concerns. The band is NOT a claim that
+    this is dangerous — the recon rates it days, not weeks, precisely because a reporting-only path
+    needs no lock and no shared ledger. The genuine risk is scope creep INTO those, which is why the
+    design names them as forbidden rather than merely out of scope.
+    RULE 25 CHECKED BEFORE FILING: files: contains no INSTRUMENT_SURFACE path (no .github/workflows/,
+    no scripts/*-ratchet.mjs, no scripts/*-baseline.json), so detectInstrumentEntanglement has
+    nothing to refuse. W1-T386 cost three PRs and an operator ruling by tripping that at review time.
+    budget_usd 80 — above W1-T396's 60: three design questions must be ARGUED rather than
+    implemented (transport, unreachable-home behaviour, absent-pointer default), and each changes
+    what an operator lives with.
+    CREDENTIALS, ESTABLISHED SO THE SEQUENCING IS NOT GUESSED AT: worker credentials go through
+    `ensureWorkerKeychain`/`unlockWorkerKeychain` — a macOS keychain copied per worker and stamped
+    from the login keychain. That is machine-bound by construction and does not travel. It does NOT
+    block this task: a reporting-only instance needs a GitHub push credential, not the Claude
+    keychain, which is a materially smaller provisioning problem than a dispatching instance's.
+    ON THE PROOFS. All four name test/upstream-feedback-routing.test.ts, which does not exist yet:
+    a FORWARD REFERENCE TO A PATH, safe per CLAUDE.md, declared in files: so the worker creates it.
+    NO depends_on: independent of W1-T396. They are the first two steps of one sequence but neither
+    blocks the other."
