@@ -1,0 +1,110 @@
+- id: W1-T402
+  title: "`INSTRUMENT_SURFACE` was hand-enumerated against one day's tree and missed the rule files of five REQUIRED jobs — `.jscpd.json`'s threshold, `.dependency-cruiser.cjs`'s rules and `scripts/claims-check.mjs` can all be loosened beside the product change they would otherwise fail, and the only thing asking anyone to re-check membership is a comment"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  rationale: "RECON 2026-08-07 (state/recon-guard-reach.md), RE-MEASURED AT 1d3c892 — AND THE
+    RECON'S OWN DIAGNOSIS WAS REFUTED IN THE PROCESS, which is why this shard leads with the
+    correction rather than repeating it.
+    THE GAP, MEASURED. Importing the real exported constant and testing it against `git ls-files`:
+    22 of 50 gate-bearing tracked files match. Eleven that do not are the enforcement logic of jobs
+    in ci-gate's REQUIRED roster — `.jscpd.json` (the duplication threshold itself),
+    `.dependency-cruiser.cjs` (the fitness rules), `scripts/claims-check.mjs`,
+    `scripts/no-hand-rolled-fetch-check.mjs`, `.github/scripts/leak-grep.sh`,
+    `.github/scripts/containment-diff-trigger.ts`, `commitlint.config.mjs`,
+    `.github/codeql/codeql-config.yml`, `scripts/learnings-assert-check.mjs`,
+    `scripts/mutation-nightly-scope.json`, `package.json`. So the WORKFLOW that schedules a gate is
+    protected and the RULE that gate enforces is not.
+    THE RECON SAID THE LIST STOPPED GROWING. IT DID NOT — the list was incomplete on day one, and
+    the difference matters because it changes the fix. `INSTRUMENT_SURFACE` shipped at 33ceb3b
+    (2026-08-03, W1-T297/#1179). Every one of the eleven PREDATES it, by two to three weeks:
+    package.json 07-14, leak-grep.sh 07-15, .dependency-cruiser.cjs and containment-diff-trigger.ts
+    07-17, .jscpd.json / claims-check.mjs / learnings-assert-check.mjs 07-18,
+    no-hand-rolled-fetch-check.mjs and commitlint.config.mjs 07-19, codeql-config.yml 07-20,
+    mutation-nightly-scope.json 07-29. Not one arrived after. So this is not decay to be caught by a
+    growth alarm; it is a hand enumeration that was never completeness-checked.
+    THE CONSTANT'S OWN DOC ASKS FOR EXACTLY THIS AND HAS NO MECHANISM BEHIND THE ASK: 'Membership
+    verified against the live tree at filing (2026-08-03 — verify again before trusting it)'. Four
+    days later that re-verification has now been performed once, by hand, and found eleven misses.
+    A comment is the wrong carrier for an instruction that must run.
+    THE INTENT PLAINLY COVERS THEM, so this is a miss and not a carve-out: the same doc defines the
+    surface as paths a diff can touch to change WHAT a CI gate measures, rather than what the gate
+    concludes. A duplication threshold, a fitness ruleset and a gate script are what their gates
+    measure, by that definition.
+    NOT A DUPLICATE of W1-T297, which built the predicate and the isolation verdict correctly. The
+    predicate is fine. The membership is short, and nothing re-derives it."
+  design: |
+    (i) DERIVATION WAS TESTED AND FAILS IN BOTH DIRECTIONS — recorded so it is not attempted again.
+    Harvesting path-like tokens from every workflow file plus package.json's scripts, restricted to
+    non-product paths, and following one level into the config files those scripts read: it ADDS 24
+    entries, recovering all eleven gaps, but also `package-lock.json` — a false positive, since a
+    dependency bump beside any src change would become entangled. It LOSES 10 the list covers today:
+    nine workflow files, which no command names because a workflow is what RUNS commands, plus
+    `scripts/mutation-relevant-paths.json`. An unrestricted harvest is far worse — it pulls in
+    src/run-task.ts and src/lib/review.ts, which would make rule 25 fire on nearly every product PR.
+    RECORD THE TOKENISER TRAP, because it produced a confidently wrong first answer: an alternation
+    ordered `js` before `json` truncates `.jscpd.json` to `.jscpd.js`, which is untracked and gets
+    dropped silently — so the first run reported the clearest instrument in the repo as underivable.
+    Order alternatives longest-first and anchor the end.
+
+    (ii) THEREFORE THE SHAPE IS DECLARED-PLUS-DERIVED, AND THE ASYMMETRY IS THE DESIGN.
+    `INSTRUMENT_SURFACE` stays the DECLARED, blocking authority. The derivation drives only a
+    COMPLETENESS ALARM that fails when a derived candidate is neither covered nor explicitly
+    excluded. The two failure modes are not symmetric and that is why the roles split: a wrong
+    derivation in the ALARM costs one exclusion entry and a human minute; a wrong derivation in the
+    BLOCKING SET refuses legitimate PRs and cannot be cleared by the author. Never let the
+    derivation decide what blocks.
+
+    (iii) THE PRECEDENT IS IN-REPO, TWICE — do not invent a third shape. `runCiParity`
+    (src/lib/ci-parity.ts) prepends a `ci-parity:drift` step that parses ci.yml's job names and goes
+    red the moment a job has no CI_PARITY_TABLE entry, with `mirrored: false` plus a REQUIRED
+    `reason` as the sanctioned exclusion. And `test/ledger-rotation.test.ts` already re-derives an
+    expected set from every consumer's source inside a test. PREFER THE TEST: it needs no new CI job
+    and no new workflow file — and a new workflow file would itself be an INSTRUMENT_SURFACE path,
+    which is a real constraint and not merely a neat observation.
+
+    (iv) EVERY EXCLUSION CARRIES A REASON. A bare exclusion list rebuilds the same silent gap one
+    level up, which is precisely how the current membership went four days unexamined behind a
+    comment that asked to be checked.
+
+    (v) BOUND THE BLAST RADIUS BEFORE WIDENING. Adding eleven paths widens a BLOCKING verdict.
+    Measure how many recently merged PRs would newly report entangled — a PR touching src/ plus a
+    gate script is a shape this repo produces often, and if the count is large, propose the staging
+    rather than shipping a verdict that parks the queue. That measurement can change the task.
+
+    NOT IN SCOPE: `detectInstrumentEntanglement`'s predicate, `USER_VISIBLE_SURFACE_RE`'s non-
+    instrument arms, ci-gate's REQUIRED roster, and every other row of the guard-reach recon.
+  acceptance:
+    - claim: "a gate whose rules live outside the declared instrument surface is reported by a completeness check rather than passing unnoticed"
+      proof: "unit test: test/instrument-surface-completeness.test.ts"
+    - claim: "a deliberate exclusion is honoured only when it carries a recorded reason, so the check cannot be silenced by an unexplained entry"
+      proof: "unit test: test/instrument-surface-completeness.test.ts"
+    - claim: "the declared list remains the sole authority for the blocking verdict, so a wrong derivation can never itself refuse a pull request"
+      proof: "unit test: test/instrument-surface-completeness.test.ts"
+  risk: high
+  origin: recon#guard-reach-2026-08-07
+  plan_refs: ["W1-T212", "W1-T294", "W1-T297"]
+  files: [src/lib/review.ts, test/instrument-surface-completeness.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — every claim is decidable in-process against the repo's own tracked file list
+    and the exported constant; no worker spawn, no network, no second machine.
+    risk:high IS RULE 19'S SPAN, set up front rather than shipped as a violation: files: reads as two
+    concerns (review, instrument-surface-completeness). The band is NOT diff size. It is that
+    `INSTRUMENT_SURFACE` feeds two consumers at once — `detectInstrumentEntanglement`'s blocking
+    isolation verdict and `USER_VISIBLE_SURFACE_RE`'s docs-awareness arm — so every path added here
+    widens a merge gate AND a rubric in one edit, which is exactly the coupling the constant was
+    exported to guarantee.
+    RULE 25 CHECKED BEFORE FILING, AND THE ANSWER IS NOT THE OBVIOUS ONE: files: names
+    src/lib/review.ts, which is where the surface is DEFINED but is not itself ON it — no declared
+    path matches, so detectInstrumentEntanglement has nothing to refuse. Worth stating because a task
+    about the instrument surface reads as though it must trip it.
+    budget_usd 80 — above its sibling because clause (v) requires measuring real merged diffs and
+    clause (i)'s derivation has to be rebuilt and checked in both directions rather than trusted from
+    this note.
+    ON THE PROOFS: all three name test/instrument-surface-completeness.test.ts, which does not exist
+    yet — a forward reference to a PATH, safe per CLAUDE.md, declared in files: so the worker creates
+    it."

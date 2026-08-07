@@ -1,0 +1,102 @@
+- id: W1-T401
+  title: "`scopeGuardOutOfScopeFiles` is wired at ONE of nine `gitPushRunBranch` sites and nowhere at review time, so the `files:` discipline every brief treats as load-bearing is enforced by convention on the path that actually runs — while `judgeReview` already holds both inputs and spends them on the opposite, advisory direction"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 75.00
+  rationale: "RECON 2026-08-07 (state/recon-guard-reach.md), RE-DERIVED AT 1d3c892 rather than
+    carried over — the recon's companion diagnosis for the sibling finding did not survive
+    re-measurement, so nothing here is reported unmeasured.
+    THE WIRING. `scopeGuardOutOfScopeFiles` (src/run-task.ts) is correct and pure: diff files minus
+    declared files, empty when clean, everything when nothing is declared. It has ONE call site, and
+    that site sits inside `if (!branchOnOrigin)` — the orchestrator's fallback push, taken only when
+    the worker's branch is absent from origin. `gitPushRunBranch` is called at NINE sites in the same
+    file; the guard precedes exactly one of them.
+    WHY IT IS FALLBACK-ONLY — ESTABLISHED, NOT ASSUMED, BECAUSE IT DECIDES THE TASK. This is NOT
+    drift. W1-T142's rationale is the `reset --soft` phantom-revert near-miss, and its design says to
+    wire the guard 'at the branch push/refresh site (runTask's git push)'. The implementation landed
+    at the one push this process performs. The ordinary push happens inside the worker's own sandbox,
+    in another process, so there is no in-process site to wire — the narrowing is a consequence of
+    where a push is observable, not a decision to protect less. That reason is load-bearing and this
+    task must address it rather than route around it: a second push-site caller may not exist to be
+    written.
+    THE REVIEW PATH ALREADY HOLDS BOTH HALVES. `judgeReview` receives `taskDeclaredFiles`, whose own
+    doc reads: used ONLY for the inverse-scope advisory, the direction `scopeGuardOutOfScopeFiles`
+    cannot see — that guard flags a diff touching an UNDECLARED file; this flags a declared file the
+    diff never touched at all — advisory only, never affects state. So the declared set and the diff
+    are already in one place at review time, and the direction that matters is the one deliberately
+    left out. This bounds the change: no new plumbing, no new data source.
+    THE CORROBORATION IS THE ARGUMENT, RE-DERIVED. W1-T396 declared
+    [src/lib/fs-race-safe.ts, test/stale-lock-host-ordering.test.ts]. PR #1464 merged SEVEN files;
+    the five undeclared ones are test/drain-lock.test.ts, test/inflight-liveness-anchor.test.ts,
+    test/inflight-lock.test.ts, test/inflight-sweep-rung.test.ts and test/lock-reclaim-race.test.ts.
+    Nothing mechanical raised it. The only record is a paragraph the session wrote by hand into the
+    PR body, and the widening was ratified in conversation. That is the current enforcement model.
+    NOT A DUPLICATE. W1-T322 built the inverse direction and marked it advisory on purpose;
+    `proof-scope` warns at filing about a proof naming an undeclared path and defers the block to the
+    guard above, which is the guard that mostly does not run."
+  design: |
+    (i) RE-DERIVE THE WIRING BEFORE PROPOSING A SITE. Confirm the single guarded call site and the
+    nine `gitPushRunBranch` sites at HEAD, and — this is the clause that can change the task —
+    establish whether the worker's own push is observable from this process at all. If it is not,
+    then a second push-site caller cannot be written and the review path is the only viable site;
+    say so plainly rather than shipping a caller that never runs, which is the exact defect this
+    task exists to close.
+
+    (ii) REFUSE OR ESCALATE IS THE WHOLE DESIGN QUESTION, AND THE FALSE-POSITIVE POPULATION MUST BE
+    MEASURED FIRST. A worker legitimately discovers an adjacent file it must touch: a fixture whose
+    shape the change invalidates, a moved import, a generated doc. Today it discloses and the
+    operator judges. SIX generator gates FORCE late file additions BY DESIGN — `cli-reference:check`,
+    `plan-index:check`, `learnings-index:check`, `api-client:check`, `capability-snapshot:check` and
+    `claims` each fail a PR whose committed artefact does not match a fresh regeneration, so a task
+    that adds a CLI verb MUST also commit docs/cli-reference.md whether or not it declared it. Count
+    how many recently merged PRs would newly fail before choosing a severity. A guard that cannot
+    accommodate those fires on healthy runs.
+
+    (iii) THE RECOMMENDATION TO TEST, NOT TO ASSUME: escalate rather than refuse. A refusal at the
+    push site kills a run AFTER the work is done and the money is spent, which is the W1-T386 shape
+    that cost three PRs; a blocking review verdict names the paths and leaves the operator a
+    decision. If the measurement in (ii) shows the out-of-scope population is small and almost
+    entirely illegitimate, refusal becomes defensible — but that is a finding to report, not the
+    starting assumption.
+
+    (iv) REUSE THE CHANNEL THAT EXISTS. `UnwiredReasonCode` already carries `inverse_scope` through
+    `unwiredAdvisories`. Whatever severity (ii) settles on, the new direction belongs beside its
+    mirror image rather than in a second, hand-maintained reporting path — the same one-path-set
+    argument `INSTRUMENT_SURFACE` makes for itself.
+
+    (v) NAME THE PATHS. A verdict that says 'out of scope' without listing the offending files
+    repeats the W1-T186 emitter defect and cannot be acted on.
+
+    NOT IN SCOPE: `proof-scope`'s warn default, the inverse advisory's own severity,
+    `scopeGuardOutOfScopeFiles`'s internals (it is correct), and any change to what a task DECLARES.
+  acceptance:
+    - claim: "a diff touching a file outside the task's declared scope is reported at review time rather than only on the fallback push path"
+      proof: "unit test: test/scope-guard-review-direction.test.ts"
+    - claim: "a diff confined to the declared scope is unaffected, and a task declaring nothing is not treated as declaring everything"
+      proof: "unit test: test/scope-guard-review-direction.test.ts"
+    - claim: "the offending paths are named in the verdict rather than reported as an unattributed count"
+      proof: "unit test: test/scope-guard-review-direction.test.ts"
+  risk: high
+  origin: recon#guard-reach-2026-08-07
+  plan_refs: ["W1-T142", "W1-T322", "W1-T386", "W1-T396"]
+  files: [src/lib/review.ts, test/scope-guard-review-direction.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — every claim is a predicate assertion over synthetic diffs and a declared file
+    list, decidable in-process with no worker spawn and no network.
+    risk:high IS RULE 19'S SPAN, set up front rather than shipped as a violation: files: reads as two
+    concerns (review, scope-guard-review-direction). The diff is plausibly small. What earns the band
+    is direction of error — this adds a verdict to a MERGE GATE, and a version that fires on the six
+    generator gates in clause (ii) parks the queue, while a version pitched too soft restores the
+    convention-only status quo with a louder claim to correctness behind it.
+    RULE 25 CHECKED BEFORE FILING: files: contains no INSTRUMENT_SURFACE path, so
+    detectInstrumentEntanglement has nothing to refuse.
+    budget_usd 75 — the cost is clause (ii)'s measurement over real merged PRs and clause (i)'s
+    push-observability question, either of which can change the task. Not the predicate.
+    THE IRONY IS DELIBERATE AND WORTH LEAVING ON THE RECORD: this shard declares a files: list that
+    nothing will check against its own eventual diff, which is the defect it describes.
+    ON THE PROOFS: all three name test/scope-guard-review-direction.test.ts, which does not exist yet
+    — a forward reference to a PATH, safe per CLAUDE.md, declared in files: so the worker creates it."
