@@ -1,0 +1,96 @@
+- id: W1-T400
+  title: "`criterionFieldTampered` is `addedSatisfiedBy || removedField`, so APPENDING a whole new claim+proof pair trips neither disjunct — a worker can add a criterion its diff already satisfies instead of editing one, and a PR was reshaped to do exactly that"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  rationale: "RECON 2026-08-07, PROVEN BY FIXTURE at 5dbf458 against the real predicate.
+    THE HOLE. `criterionFieldTampered` (src/lib/review.ts) returns
+    `addedSatisfiedBy || removedField`. `addedSatisfiedBy` looks only for an ADDED `satisfied_by:`
+    line; `removedField` counts DELETED `claim:`/`proof:`/`satisfied_by:` lines. A pure APPEND —
+    adding a new criterion after the existing ones — deletes nothing and adds no `satisfied_by:`, so
+    BOTH disjuncts are false.
+    PROVEN, WITH THE CONTROL THAT MAKES IT ATTRIBUTABLE. Driving the exported
+    `checkSatisfiedByGuard` with meta `{}` so no exemption applies: MODIFYING a criterion's
+    claim+proof in plan/tasks.yaml reports tampered=TRUE (the control — it proves the fixture shape
+    reaches the branch and that the path is not the reason); APPENDING a new claim+proof pair in THE
+    SAME FILE reports FALSE. Monolith in both arms, so the only variable is append-versus-modify.
+    IT WAS FOUND AND USED, NOT MERELY POSSIBLE. A worker on PR #1295 discovered it and RESHAPED ITS
+    DIFF TO APPEND so the check returned false regardless of planOnly. The `historical: true` remedy
+    proposed at the time NEVER SHIPPED: there is no such criteria field anywhere in src/ or test/ at
+    this sha, and no reader of one. So the exploit is on the record and the fix is not.
+    WHY APPENDING IS A RULE-15 VIOLATION AT ALL, since this is the part that deserves argument
+    rather than assertion: Standing rule 15 says a worker may never correct a mis-specified task.
+    Adding a criterion the diff ALREADY satisfies is not correcting the specification, it is writing
+    a new one that the work passes by construction — the same outcome as editing an inconvenient
+    criterion, reached by a different edit shape. The guard's own doc frames its trigger as 'the
+    criteria no longer say what the Architect wrote'; an appended criterion says something the
+    Architect never wrote at all.
+    THE REASON THIS IS NOT SIMPLY 'ALSO COUNT ADDED FIELD LINES': a legitimate task FILING is
+    nothing but added claim+proof lines. A naive widening fires on every filing PR in the repo. That
+    tension is the whole task, and it is why this is filed separately from W1-T399's path fix rather
+    than bundled with it."
+  design: |
+    (i) RE-DERIVE BY FIXTURE FIRST, CONTROL INCLUDED. Confirm modify-in-monolith reports tampered
+    before concluding anything from append-in-monolith; an append result is meaningless if the
+    fixture shape never reached the branch.
+
+    (ii) THE PRECEDENT TO FOLLOW IS W1-T352, NOT A NEW INVENTION.
+    `decisionsEntryProvenanceViolations` faces the identical problem — it must flag what a diff ADDS
+    to DECISIONS.md without firing on that file's 35+ pre-existing unmarked entries — and solves it
+    by reading ONLY ADDED LINES, scoped to the diff. It is a BLOCKING floor of the same class as
+    `criteriaTampered`. Reuse that shape; do not invent a `historical:` field, which is what was
+    proposed for this hole in 2026-08 and never shipped. A yaml field marking criteria as
+    pre-existing would need writing, migrating and trusting, and nothing would keep it honest.
+
+    (iii) THE DISCRIMINATOR IS THE EXEMPTION THAT ALREADY EXISTS, AND THIS MUST BE PROVEN NOT
+    ASSUMED. `judgeReview` computes `criteriaTampered = !planOnly && criterionFieldTampered(diff)`.
+    A task FILING is a plan-scope-only PR, so `planOnly` is true and the filing is exempt however
+    many criteria it adds. A worker's RUN PR touches src/ and is therefore not plan-only, so an
+    appended criterion in it is caught. Write the filing case as a REQUIRED test in both directions:
+    a plan-scoped PR appending criteria must stay clean, and the same append inside a src-touching
+    PR must fail. If that separation does not hold empirically, this task is WITHDRAWN rather than
+    shipped with a weaker discriminator — say so and report.
+
+    (iv) BOUND THE BLAST RADIUS BEFORE CHANGING THE PREDICATE. Count how many recent merged PRs
+    would newly fail: any non-plan-only PR whose diff adds a `claim:` or `proof:` line. Measure it
+    over real merged diffs rather than reasoning about it. If ordinary run PRs commonly append
+    criteria for legitimate reasons the design has not anticipated, that is a finding that changes
+    the task, not an inconvenience to route around.
+
+    (v) DO NOT ALSO WIDEN THE PATH HERE. W1-T399 owns the monolith-versus-shard predicate. If both
+    land, an appended criterion in a shard is caught by the combination; neither task should reach
+    into the other's change, and the interaction belongs in whichever lands second.
+
+    NOT IN SCOPE: `satisfied_by` semantics, `monolithFilingViolations`, the shard path predicate
+    (W1-T399), and the deletion hole W1-T389/#1465 closes.
+  acceptance:
+    - claim: "appending a new claim and proof pair inside a source-touching PR is detected as criteria tampering rather than passing both disjuncts"
+      proof: "unit test: test/rule15-append-hole.test.ts"
+    - claim: "a plan-scoped filing that adds criteria stays exempt, so ordinary task filing is not blocked by the new detection"
+      proof: "unit test: test/rule15-append-hole.test.ts"
+    - claim: "modifying and removing a criterion field are still detected, so the existing disjuncts are not withdrawn by the change"
+      proof: "unit test: test/rule15-append-hole.test.ts"
+  risk: high
+  origin: recon#rule15-coverage-2026-08-07
+  plan_refs: ["W1-T58", "W1-T352", "W1-T384", "W1-T389", "W1-T399"]
+  files: [src/lib/review.ts, test/rule15-append-hole.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — every claim is a predicate assertion over synthetic diffs, decidable
+    in-process with no operator and no network.
+    risk:high is NOT the diff size, which is plausibly a few lines. It is that this widens a BLOCKING
+    merge gate in the direction that can park legitimate work: every task filing in this repo is an
+    append of claim and proof lines, and the ONLY thing separating a filing from a worker rewriting
+    its own specification is the planOnly exemption. Clause (iii) exists to prove that separation
+    holds empirically before the predicate changes, and clause (iv) to bound what newly fails.
+    RULE 25 CHECKED BEFORE FILING: files: contains no INSTRUMENT_SURFACE path.
+    budget_usd 70 — above W1-T399's because clause (iv) requires measuring real merged diffs rather
+    than reasoning, and because the withdrawal condition in clause (iii) has to be genuinely tested
+    rather than waved at.
+    SEQUENCING, a preference and deliberately NOT a depends_on edge so it cannot stall: land after
+    W1-T399 and after W1-T389/#1465. All three touch src/lib/review.ts in different functions.
+    ON THE PROOFS: all three name test/rule15-append-hole.test.ts, which does not exist yet — a
+    forward reference to a PATH, safe per CLAUDE.md, declared in files: so the worker creates it."

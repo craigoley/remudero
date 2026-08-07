@@ -1,0 +1,102 @@
+- id: W1-T399
+  title: "BOTH rule-15 guards key on the LITERAL `plan/tasks.yaml` path, so neither can see a criteria edit in a `plan/tasks.d/` shard — and every task filed since the monolith froze is a shard, so the review-time guard and the filing-time refusal share one blind spot rather than covering for each other"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 65.00
+  rationale: "RECON 2026-08-07, PROVEN BY FIXTURE at 5dbf458 — every claim below was demonstrated
+    against the real predicates, not read off source, because a source reading of this exact area
+    misled a session two days ago (W1-T389's first fixture edited a shard, where the check is silent
+    BY CONSTRUCTION, so both arms read false and the concern nearly got refuted).
+    HOLE, PROVEN. `planTasksCriterionFieldLines` (src/lib/review.ts) filters on
+    `/(^|\\/)plan\\/tasks\\.yaml$/`. Driving the exported `checkSatisfiedByGuard` with meta `{}` so no
+    exemption applies: a diff MODIFYING a criterion's claim+proof in plan/tasks.yaml reports
+    tampered=TRUE; THE BYTE-IDENTICAL DIFF with only the path changed to
+    plan/tasks.d/W1-T999-x.yaml reports FALSE. The control is what makes the result attributable —
+    it proves the fixture shape reaches the branch, so the shard result is about the PATH and not
+    about an unreachable fixture. A second control (adding a `satisfied_by:` line in the monolith)
+    reports TRUE, proving the other disjunct is live too.
+    THE FILING-TIME REFUSAL HAS THE SAME BLIND SPOT, and this is the finding that decides the task.
+    W1-T384's `rule15FilingViolation` (src/lib/task-linter.ts, merged #1462) triggers on
+    `files.includes(TASKS_MONOLITH_PATH)` where that constant is the literal `plan/tasks.yaml`.
+    Driven directly: a task declaring [plan/tasks.yaml, src/lib/thing.ts] is REFUSED at filing; a
+    task declaring [plan/tasks.d/W1-T999-x.yaml, src/lib/thing.ts] is ALLOWED. So the argument that
+    the two guards protect different things and are jointly sufficient DOES NOT HOLD — they key on
+    the same literal path and are blind in the same place.
+    THE EXPOSURE IS THE WHOLE POINT. `monolithFilingViolations` has blocked new tasks from the
+    monolith since PR #1060, so the monolith is frozen: its highest task number is W1-T280 while
+    shards run to W1-T398. Measured over merged implementation commits carrying a `Remudero-Task`
+    trailer (filing subjects excluded): 102 total, 69 monolith / 29 shard by lifetime — but OF THE
+    LAST TWENTY, NINETEEN WORKED A SHARD TASK. The guard's coverage of the population it exists to
+    protect is not 68%, it is approaching zero and falling, because the only tasks it can see are
+    ones no longer being filed.
+    WHY THE GUARD EXISTS: Standing rule 15 — a worker may never edit its own acceptance criteria to
+    match what it built. That is a live concern for the task a worker is DISPATCHED onto, which is
+    by construction a recent task, which is by construction a shard.
+    NOT A DUPLICATE OF W1-T389/#1465: that closed a different hole in the same guard (a DELETED file
+    vanished from `changedFiles`, so `planOnly` was won by deleting rather than editing). This is the
+    PATH predicate, not the file list, and #1465 does not touch it."
+  design: |
+    (i) RE-DERIVE BOTH FIXTURES FIRST, WITH THEIR CONTROLS. Do not start from the regex. Build the
+    monolith-modify control and confirm it reports tampered; only then is a shard result meaningful.
+    The same discipline applies to the filing-time half: drive `rule15FilingViolation` with a
+    monolith-declaring task (must refuse) before concluding anything from a shard-declaring one.
+
+    (ii) THE DIFF ALREADY CARRIES ENOUGH — no parsed task form is needed, and this is worth stating
+    because it bounds the change. A shard's diff hunk carries the path `plan/tasks.d/<id>-<slug>.yaml`
+    and the field lines themselves; the existing `/^\s*(claim|proof|satisfied_by)\s*:/` text test is
+    unchanged and already matches a shard's `      proof: "..."` line exactly as it matches the
+    monolith's. Only the PATH predicate is wrong. Widen it in BOTH places rather than one, or the
+    remaining half keeps the bypass open with a louder claim to correctness behind it.
+
+    (iii) FALSE-POSITIVE RISK IS LOW AND MUST BE DEMONSTRATED, NOT ASSUMED. `judgeReview`'s exemption
+    is `planOnly` ALONE, so a hand-authored plan-scope-only criteria repair — which is exactly what
+    W1-T384 forces a repair to become — is exempt whatever path it edits. Prove that: a plan-scoped
+    diff editing a SHARD's criteria must still compute `criteriaTampered: false`. Without that test
+    this change re-creates the deadlock W1-T386 cost three PRs to escape.
+
+    (iv) THE FILING-TIME HALF NEEDS ITS OWN CARE. `rule15FilingViolation` keys on a task DECLARING
+    the monolith. Widening it to shards means a task declaring its own shard alongside src/ paths is
+    refused — which is the correct outcome and also the SHAPE MOST TASKS NOW HAVE. Measure how many
+    OPEN tasks would newly fail before changing it, exactly as W1-T384's own clause (ii) required,
+    and if the count is large say so and propose the staging rather than shipping a refusal that
+    parks the queue. A refusal that blocks the ordinary filing shape is worse than the hole.
+
+    (v) NOT A REGEX WIDENED BY GUESS. `plan/tasks.d/` is a real directory with a stable convention;
+    match it structurally (a `plan/tasks.d/` prefix and a `.yaml` suffix) rather than by a glob that
+    would also admit `plan/tasks.d/README.md` or a nested path the loader never reads.
+
+    NOT IN SCOPE: the APPEND hole (W1-T400 — a different technique and a different false-positive
+    profile), the `satisfied_by` semantics, `monolithFilingViolations`, and the deletion hole
+    W1-T389/#1465 already closes.
+  acceptance:
+    - claim: "a criteria edit inside a plan/tasks.d shard is detected by the review-time guard exactly as the same edit in the monolith is"
+      proof: "unit test: test/rule15-shard-path.test.ts"
+    - claim: "a task declaring a shard alongside an out-of-scope path is refused at filing, closing the matching blind spot in the filing-time rule"
+      proof: "unit test: test/rule15-shard-path.test.ts"
+    - claim: "a plan-scoped criteria repair editing a shard is still exempt, so the hand-authored repair route is not deadlocked"
+      proof: "unit test: test/rule15-shard-path.test.ts"
+  risk: high
+  origin: recon#rule15-coverage-2026-08-07
+  plan_refs: ["W1-T58", "W1-T384", "W1-T389", "W1-T386"]
+  files: [src/lib/review.ts, src/lib/task-linter.ts, test/rule15-shard-path.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — every claim is a predicate assertion over synthetic diffs and task records,
+    decidable in-process with no operator and no network.
+    risk:high IS RULE 19'S SPAN, set up front rather than shipped as a violation: files: names three
+    concerns (review, task-linter, rule15-shard-path). The edit is small. What earns the band is that
+    both changed predicates GATE MERGES — one is Standing rule 15's review-time guard and the other
+    refuses dispatch — so widening either in the permissive direction is invisible and widening
+    either too far parks the queue. Clause (iv) is where that second risk is managed.
+    RULE 25 CHECKED BEFORE FILING: files: contains no INSTRUMENT_SURFACE path.
+    budget_usd 65 — the cost is clause (iv)'s newly-failing-task measurement and clause (iii)'s
+    exemption proof, not the predicate change.
+    SEQUENCING, a preference and deliberately NOT a depends_on edge: land after W1-T389/#1465, which
+    touches src/lib/review.ts's walker. The two do not overlap textually (walkDiff versus
+    planTasksCriterionFieldLines) but the evidence here was gathered on a tree without #1465, and a
+    reviewer comparing them should see them in order.
+    ON THE PROOFS: all three name test/rule15-shard-path.test.ts, which does not exist yet — a
+    forward reference to a PATH, safe per CLAUDE.md, declared in files: so the worker creates it."
