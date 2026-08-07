@@ -171,7 +171,6 @@ test("the two new classes are distinct from every macOS class, so a Linux failur
  *  reaper trap entirely: the verdict is the error TYPE, never a directory read after teardown. */
 async function spawnAgainst(realHome: string, platform?: NodeJS.Platform): Promise<{ reachedSpawn: boolean; err?: unknown }> {
   const { spawnWorker, renderWorkerSettings } = await import("../src/lib/worker.js");
-  const { loadConfig } = await import("../src/lib/config.js");
   const root = mkdtempSync(join(tmpdir(), "rmd-cred-root-"));
   const settingsFile = renderWorkerSettings({
     templatePath: new URL("../settings/worker.json", import.meta.url).pathname,
@@ -188,7 +187,21 @@ async function spawnAgainst(realHome: string, platform?: NodeJS.Platform): Promi
       prompt: "never executed",
       runId: "CRED-PREFLIGHT",
       taskId: "W1-CRED",
-      config: { ...loadConfig(), root },
+      // `resolveClaudeExecutable` runs BEFORE the credential rung, so without this the toolchain
+      // gate decides these tests instead of the thing under test — and it decides differently per
+      // machine: this container has a `claude` on PATH and the CI runner does not, which is how a
+      // fully green local glob still went red in CI. Injected here for the same reason the keychain
+      // seams are injected elsewhere: it is a dependency these tests declare, not their subject.
+      claudeExecutable: {
+        cache: {},
+        deps: { which: () => "/nonexistent/claude", canExecute: () => true, exists: () => true },
+      },
+      // A STUB CONFIG, not `loadConfig()`, and the reason is a real trap this suite walked into:
+      // `loadConfig` falls back to shelling `which claude` when it finds no installed config, and
+      // throws a bare Error when the binary is absent. Under the redirected HOME there IS no
+      // config, and a CI runner has neither — so calling it here let config resolution decide a
+      // test whose subject is the credential rung. The stub carries only what spawnWorker reads.
+      config: { root, claudeBin: "/nonexistent/claude", repos: {} },
       ...(platform ? { keychain: { platform } } : {}),
     } as never);
     return { reachedSpawn: true };
@@ -205,7 +218,10 @@ async function spawnAgainst(realHome: string, platform?: NodeJS.Platform): Promi
 test("spawnWorker REFUSES before spawning when the credential file is absent", async () => {
   const { reachedSpawn, err } = await spawnAgainst(homeWith());
   assert.equal(reachedSpawn, false, "the rung must fire BEFORE the spawn attempt, not after");
-  assert.ok(err instanceof WorkerKeychainError, `expected WorkerKeychainError, got ${(err as Error)?.constructor?.name}`);
+  assert.ok(
+    err instanceof WorkerKeychainError,
+    `expected WorkerKeychainError, got ${(err as Error)?.constructor?.name}: ${String((err as Error)?.message).slice(0, 300)}`,
+  );
   assert.equal((err as WorkerKeychainError).reasonClass, "credential-item-missing");
 });
 
