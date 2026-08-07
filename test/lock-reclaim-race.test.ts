@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { closeSync, fstatSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { reclaimStaleLock } from "../src/lib/fs-race-safe.js";
@@ -130,7 +130,7 @@ test(
     const dir = tmp();
     const path = join(dir, "state", "drain.lock");
     try {
-      acquireDrainLock(path, { info: { pid: 999999, host: "h", startedAt: "t" }, isPidAlive: () => true });
+      acquireDrainLock(path, { info: { pid: 999999, host: hostname(), startedAt: "t" }, isPidAlive: () => true });
       const isAlive = (p: number) => p !== 999999;
 
       let aHandle: ReturnType<typeof acquireDrainLock> | undefined;
@@ -138,10 +138,10 @@ test(
       let bHandle: ReturnType<typeof acquireDrainLock> | undefined;
       try {
         bHandle = acquireDrainLock(path, {
-          info: { pid: 222, host: "hB", startedAt: "t" },
+          info: { pid: 222, host: hostname(), startedAt: "t" },
           isPidAlive: isAlive,
           __beforeReclaimDelete: () => {
-            aHandle = acquireDrainLock(path, { info: { pid: 111, host: "hA", startedAt: "t" }, isPidAlive: isAlive });
+            aHandle = acquireDrainLock(path, { info: { pid: 111, host: hostname(), startedAt: "t" }, isPidAlive: isAlive });
           },
         });
       } catch (e) {

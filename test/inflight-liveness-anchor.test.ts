@@ -15,7 +15,7 @@
  */
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
@@ -142,7 +142,7 @@ function writeLock(root: string, taskId: string, pid: number): void {
   mkdirSync(dir, { recursive: true });
   writeFileSync(
     join(dir, `${taskId}.lock`),
-    JSON.stringify({ pid, run_id: "r-quiet", host: "test", startedAt: new Date().toISOString() }, null, 2),
+    JSON.stringify({ pid, run_id: "r-quiet", host: hostname(), startedAt: new Date().toISOString() }, null, 2),
   );
 }
 

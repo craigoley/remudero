@@ -12,7 +12,7 @@
  */
 import assert from "node:assert/strict";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { buildSweepHook, runInflightLockSweepRung } from "../src/run-task.js";
@@ -25,7 +25,7 @@ function rootWithLocks(locks: Array<{ taskId: string; pid: number }>): string {
   for (const { taskId, pid } of locks) {
     writeFileSync(
       join(dir, `${taskId}.lock`),
-      JSON.stringify({ pid, run_id: `${taskId}-r`, host: "test", startedAt: new Date().toISOString() }, null, 2),
+      JSON.stringify({ pid, run_id: `${taskId}-r`, host: hostname(), startedAt: new Date().toISOString() }, null, 2),
     );
   }
   return root;
