@@ -761,7 +761,11 @@ test("GET /v1/control/status (assembled server): reads back the REAL fleet-contr
   await withServeServer(depsFor(root, planOf([task()])), async (base) => {
     const before = await get(base, "/v1/control/status", READ_TOKEN);
     assert.equal(before.status, 200);
-    assert.deepEqual(await before.json(), { paused: false, stopped: false, quietHours: false });
+    // recon-blackout rec-2: `daemonLiveReason` is ALWAYS carried, so it appears here too. This
+    // fixture's ledger is a real, present, empty file, which is exactly `ledger-empty` — present
+    // and readable with nothing to say either way, distinct from both a dead daemon and a missing
+    // ledger. `daemonLive` itself stays absent, so the assembled body is otherwise unchanged.
+    assert.deepEqual(await before.json(), { paused: false, stopped: false, quietHours: false, daemonLiveReason: "ledger-empty" });
 
     await post(base, "/v1/control/pause", WRITE_TOKEN, { reason: "taste iteration" });
     const afterPause = (await (await get(base, "/v1/control/status", READ_TOKEN)).json()) as {

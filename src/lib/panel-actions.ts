@@ -185,8 +185,92 @@ export interface FleetControlStatus {
    * ⇒ liveness is simply not observed"). The three flags above are a CLAIM ("no one asked me to
    * stop"); this field is EVIDENCE of activity — a crashed daemon leaves no stop flag behind, so
    * without this field the flags alone render identically for "running" and "crashed".
+   *
+   * recon-blackout rec-2: `false` IS NOW A REAL ANSWER. It used to be `true`-or-omitted, which meant a dead
+   * daemon and a missing ledger were one indistinguishable state — see {@link
+   * deriveDaemonLiveness} for the evidence each verdict now requires. Omitted still means "not
+   * observed", but {@link FleetControlStatus.daemonLiveReason} always says WHY.
    */
   daemonLive?: boolean;
+  /**
+   * recon-blackout rec-2: the EVIDENCE behind `daemonLive`, always present — including on the `true` path, so
+   * a reader never has to infer which branch produced the verdict. This is what stops an
+   * unobserved liveness from rendering as a bare shrug: every unknown names its own cause, the
+   * shape `rmd status` already uses when it prints "unknown — GitHub gateway unreachable" beside
+   * a next action rather than an empty section. See {@link DaemonLivenessReason}.
+   */
+  daemonLiveReason: DaemonLivenessReason;
+}
+
+/**
+ * recon-blackout rec-2: why {@link FleetControlStatus.daemonLive} says what it says. THE POINT IS THAT THREE
+ * FORMERLY-IDENTICAL STATES ARE NOW THREE ANSWERS — a stale poll is evidence the daemon is DOWN,
+ * whereas an absent or unreadable ledger is evidence of NOTHING, and the operator needs both.
+ *
+ *  - `fresh-poll`         → live TRUE.  A `daemon.*` line inside the liveness bound.
+ *  - `last-poll-stale`    → live FALSE. A `daemon.*` line exists and has aged past the bound:
+ *                           the daemon ran and stopped. This is the verdict that did not exist.
+ *  - `no-daemon-activity` → live FALSE. The ledger is present, readable and NON-EMPTY, yet holds
+ *                           no `daemon.*` line at all. `ledger.ndjson` is `NEVER_ROTATE_FILENAME`
+ *                           and `rotateLedger` retains up to MAX_RETAINED_LINES_PER_STEP newest
+ *                           lines PER STEP, so a daemon that had ever polled would still be
+ *                           represented here — its total absence beside other traffic is real
+ *                           evidence, not a gap.
+ *  - `ledger-empty`       → live UNDEFINED. Present and readable but with no lines at all: a
+ *                           fresh install has nothing to say either way, so claiming FALSE here
+ *                           would be inventing evidence.
+ *  - `ledger-absent`      → live UNDEFINED. No file at `ledgerPath` — a wrong/unmounted path or
+ *                           an install that has never run. Says nothing about the daemon.
+ *  - `ledger-unreadable`  → live UNDEFINED. The file is there and the read THREW (permissions,
+ *                           I/O). Previously this escaped the handler and became a 500 through
+ *                           `createService`'s catch, so the panel showed nothing at all.
+ */
+export type DaemonLivenessReason =
+  | "fresh-poll"
+  | "last-poll-stale"
+  | "no-daemon-activity"
+  | "ledger-empty"
+  | "ledger-absent"
+  | "ledger-unreadable";
+
+/** {@link deriveDaemonLiveness}'s verdict: the answer AND the evidence, never one without the other. */
+export interface DaemonLivenessVerdict {
+  live?: boolean;
+  reason: DaemonLivenessReason;
+}
+
+/**
+ * recon-blackout rec-2: the liveness taxonomy, split out as a PURE function so the three-way distinction is
+ * falsifiable without standing up a server — the handler below is then only wiring plus the one
+ * thing a pure function cannot model, a read that throws.
+ *
+ * PRESENCE IS READ DEFENSIVELY, and that is load-bearing. `readLedgerLines` attaches a
+ * non-enumerable `present` (status.ts), but `LedgerReader` — the injectable seam every test and
+ * several production callers use — is typed `(path) => Array<Record<string, unknown>>`, so an
+ * injected reader's result has `present === undefined`. Only an EXPLICIT `false` may be read as
+ * "absent"; `undefined` means the reader did not report presence, and the verdict then rests on
+ * the lines themselves exactly as it did before this change. That is what keeps every existing
+ * injected-fake test asserting the same verdicts it always did.
+ *
+ * `deriveLastPoll` is imported from daemon-health.ts, not reimplemented — the same discipline
+ * W1-T288 established, so this route and GET /v1/daemon-health can never disagree about which
+ * ledger line counts as a heartbeat or how recent "recent" is.
+ */
+export function deriveDaemonLiveness(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  nowMs: number,
+  livenessBoundMs: number,
+): DaemonLivenessVerdict {
+  if ((lines as { present?: boolean }).present === false) return { reason: "ledger-absent" };
+  const poll = deriveLastPoll(lines);
+  if (poll.lastPollTs) {
+    const ageMs = Math.max(0, nowMs - Date.parse(poll.lastPollTs));
+    return ageMs <= livenessBoundMs ? { live: true, reason: "fresh-poll" } : { live: false, reason: "last-poll-stale" };
+  }
+  // No heartbeat. Whether that is EVIDENCE or merely SILENCE turns on whether the ledger had
+  // anything else to say — see DaemonLivenessReason for why a non-empty ledger with no `daemon.*`
+  // line is a real negative rather than a gap.
+  return lines.length === 0 ? { reason: "ledger-empty" } : { live: false, reason: "no-daemon-activity" };
 }
 
 /** {@link buildControlStatusRoute}'s dependencies. */
@@ -226,16 +310,27 @@ export function buildControlStatusRoute(deps: ControlStatusDeps): Route {
       const now = deps.now ?? Date.now;
       const readLedger = deps.readLedger ?? readLedgerLines;
       const livenessBoundMs = deps.livenessBoundMs ?? DEFAULT_LIVENESS_BOUND_MS;
-      const poll = deriveLastPoll(readLedger(deps.ledgerPath));
-      const lastPollAgeMs = poll.lastPollTs ? Math.max(0, now() - Date.parse(poll.lastPollTs)) : undefined;
-      const daemonLive = lastPollAgeMs !== undefined && lastPollAgeMs <= livenessBoundMs ? true : undefined;
+      // recon-blackout rec-2: a read that THROWS (permissions, I/O) used to escape this handler and become a
+      // 500 through createService's catch, so the whole panel vanished over one unreadable file.
+      // Caught HERE rather than inside `readLedgerLines`, deliberately: that reader has ~50 call
+      // sites including the dispatch circuit breaker, where swallowing an I/O error would silently
+      // reset a bound instead of failing loudly. This is a RENDERING concern and stays local to
+      // the rendering route — the same split `buildShellRoute`'s idle panel already draws when it
+      // degrades its own read to UNKNOWN rather than to zero.
+      let verdict: DaemonLivenessVerdict;
+      try {
+        verdict = deriveDaemonLiveness(readLedger(deps.ledgerPath), now(), livenessBoundMs);
+      } catch {
+        verdict = { reason: "ledger-unreadable" };
+      }
       const status: FleetControlStatus = {
         paused: isPaused(deps.root),
         pauseDetail: pauseDetail(deps.root),
         stopped: isStopped(deps.root),
         stopDetail: stopDetail(deps.root),
         quietHours: isQuietHours(deps.root),
-        daemonLive,
+        daemonLive: verdict.live,
+        daemonLiveReason: verdict.reason,
       };
       sendJson(res, 200, status);
     },

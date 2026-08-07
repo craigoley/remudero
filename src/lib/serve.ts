@@ -3276,6 +3276,27 @@ export function renderShellHtml(
   // mode-derived disable so a write-scope flip (probeWriteScope, below) and a mode flip (a real
   // GET /v1/control/status fetch) never fight over the same '.disabled' bit.
   function applyControlStatus(status) {
+    // recon-blackout rec-2: THREE FORMERLY-IDENTICAL STATES, THREE SENTENCES. A stale heartbeat is
+    // evidence the daemon is DOWN; an absent or unreadable ledger is evidence of nothing at all.
+    // Both used to print "fleet liveness not observed", so the console could decline to say the
+    // fleet was alive but could never say it was dead, and could never say why. Keyed off the
+    // reason the route now always sends (panel-actions.ts's DaemonLivenessReason), never
+    // re-derived here. Every unknown names its own cause — the shape rmd status already uses when
+    // it prints an unknown section beside the reason it could not compute it, not an empty one.
+    //
+    // DECLARED INSIDE THIS FUNCTION, DELIBERATELY. test/control-status-daemon-liveness.test.ts
+    // lifts applyControlStatus out of the rendered HTML by regex (its clientFn helper) and evaluates
+    // that ONE function in a sandbox, so anything it reads from an enclosing scope is a
+    // ReferenceError there — three of that suite's tests went red on exactly that when this table
+    // sat one scope out. A helper an extracted function needs must live inside it.
+    const LIVENESS_TEXT = {
+      "fresh-poll": "fleet is running",
+      "last-poll-stale": "fleet is DOWN — no daemon heartbeat inside the liveness bound",
+      "no-daemon-activity": "fleet is DOWN — the ledger records no daemon activity at all",
+      "ledger-empty": "fleet liveness unknown — the ledger is empty, so there is no evidence either way",
+      "ledger-absent": "fleet liveness unknown — no ledger file at the configured path",
+      "ledger-unreadable": "fleet liveness unknown — the ledger could not be read",
+    };
     lastControlStatus = status;
     const pauseBtn = document.getElementById("pause-btn");
     const resumeBtn = document.getElementById("resume-btn");
@@ -3311,20 +3332,21 @@ export function renderShellHtml(
     if (ceilingInput) ceilingInput.title = locked ? lockTitle : "";
     if (ceilingSetBtn) ceilingSetBtn.title = locked ? lockTitle : "";
     if (ceilingClearBtn) ceilingClearBtn.title = locked ? lockTitle : "";
-    // W1-T288: THREE states, not two. STOP/PAUSE still win over liveness exactly as before --
-    // but with neither flag set, 'fleet is running' is now gated on status.daemonLive (a real
-    // ledger heartbeat GET /v1/control/status now carries), never inferred from the mere
+    // W1-T288: STOP/PAUSE win over liveness. With neither flag set, 'fleet is running' is gated
+    // on a real ledger heartbeat GET /v1/control/status carries, never inferred from the mere
     // absence of a stop/pause flag file -- a crashed daemon leaves no stop flag behind, so that
-    // absence alone used to render identically to a healthy fleet. status.daemonLive undefined
-    // means liveness could not be observed at all (no heartbeat, or one stale past the liveness
-    // bound) -- a real third answer, never silently downgraded to "running".
+    // absence alone used to render identically to a healthy fleet.
+    //
+    // recon-blackout rec-2 refines that: W1-T288's "third answer" was still ONE bucket holding two unlike
+    // things -- 'the daemon ran and stopped' and 'I have no ledger to look at' both landed on the
+    // same sentence. The reason code splits them, so DOWN is now sayable and every unknown names
+    // its cause. The trailing || keeps the pre-recon-blackout rec-2 sentence for a response carrying no reason
+    // at all, so a client loaded against an older server degrades to what it always said.
     const detail = status.stopped
       ? status.stopDetail
       : status.paused
         ? status.pauseDetail
-        : status.daemonLive
-          ? "fleet is running"
-          : "fleet liveness not observed";
+        : LIVENESS_TEXT[status.daemonLiveReason] || "fleet liveness not observed";
     document.getElementById("controls-status").textContent =
       detail ?? (status.stopped ? "stopped" : status.paused ? "paused" : status.daemonLive ? "running" : "unobserved");
   }
