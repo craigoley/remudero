@@ -187,8 +187,31 @@ disproven**, and the standing rule holds: **do not re-base a mount on a row that
 at n≤4.** The one durable read from R15's contrast survives unchanged — the docs/plan population
 EXISTS and is merely tiny, which retires R14's "unmeasurable by construction".
 
-**Still PLANNED, not shipped** (the honest remainder): **W1-T149 — P29(i) sibling credit, ratified
-eight cycles ago and unbuilt**; **P33's trailer quarantine list, now eleven `(pr, task)` pairs**;
+★ **CORRECTION (2026-08-07, operator-ratified) — THE RANK-1 ITEM WAS BUILT BEFORE ITS OWN EVIDENCE
+LOG OPENED, AND SIX RETROS RE-ASSERTED OTHERWISE.** **W1-T149 SHIPPED: PR #349, merged
+2026-07-20T14:16:23Z**, head `run-W1-T149-1784553391268`, body trailer `Remudero-Task: W1-T149`, all
+three acceptance criteria checked — *"fix(W1-T149): sibling-run credit liveness + per-task dispatch
+circuit breaker"*. It is not merely merged but RUNNING: the `ownResult` stash that IS P29(i)'s
+mechanism is live at `src/lib/status.ts` (rungs (a)/(b) stash a non-merged resolution instead of
+returning it, so a merged owned-branch trailer at rung (c) can still credit), and clause (ii)'s
+breaker is what fired issue #1448. P29's own entry dates the ratification to 2026-07-20 — **the same
+day #349 merged** — so the plan recorded the FILING and never the SHIP, and every entry in P29's
+evidence log (R11 onward) was written against a fix that was already in `main`. THE COMPOUNDING COST,
+which is the part that matters: R14/R15/R16 each scored a pre-registration **UNRESOLVABLE** on the
+antecedent *"W1-T149 did not ship"*, and the standing rule *"the plan does not re-rank on
+unattributed moves"* then froze rank 1 in place — so the sibling-rejection fall **23 → 10 → 6** was
+called UNATTRIBUTED for three consecutive cycles against a live fix that is its most obvious cause.
+R15 and R16 both wrote that a working per-task cap is *"what the shape would predict"* and both
+declined to credit it for want of a telemetry line; the credit was available all along from the
+merged PR. **THE CLASS, and it is new:** `plan/claims.yaml` gates prose claims about CODE, and
+nothing gates prose claims about TASK STATE — so an "unbuilt" assertion is hand-maintained,
+re-read each cycle, and self-confirming. W1-T392 files the gate. Worth a second look while doing it:
+clause (ii) is credited in P29's entry to W1-T271/#1040 (a lifetime cap no ledger step can reset)
+when #349 had already shipped a per-task breaker — plausibly a deliberate hardening against rotation,
+plausibly a second breaker bought because the first was invisible. The evidence here does not
+settle which, and it should not be asserted either way without checking.
+
+**Still PLANNED, not shipped** (the honest remainder): **P33's trailer quarantine list, now eleven `(pr, task)` pairs**;
 P17's receipts task (W1-T71) — **its EU AI Act Art. 50 machine-readable-disclosure date is 2026-08,
 i.e. NOW, and it has been NOW for four cycles**; the remaining fleet tasks (W1-T25/T28, W2-T2
 dry-run); **the four organs this cycle shipped DARK by their own admission** (`askType`'s producer,
@@ -198,20 +221,25 @@ the follow-up chain this cycle's harvest names but rule 15 forbids auto-filing (
 reading `status: queued` while merged — T273, T326, T345, T346, T348, T356; `src/lib/deployer.ts`'s
 comment still naming the RETIRED `reconstructState` as live boot recovery).
 
-**NEXT (L2) — kick order, graded against R16's data:** **(1) W1-T149 / P29(i) — sibling credit,
-ratified-and-unbuilt for an EIGHTH cycle, and still 6 of this cycle's 10 rejections. It holds rank 1
-under the standing rule: the plan does not re-rank on unattributed moves. (2) P47 — trailer emission
-is unowned, and this cycle proved the class is not about repair actors: the poisoning branch was the
-PLAN-SYNC LANE'S OWN (#1361), costing W1-T343 four dispatches. (3) P38 — the LEARNINGS WRITE PATH,
-priced twice now: seventeen rediscoveries of one defect (R15) and 10 duplicated recon runs across six
-tasks (R16), against a corpus frozen at 74 for SIX cycles. Then the call-site lint rung, then the
-effect assertion. (4) P48 — no naked zero, whose shape this cycle demonstrated in the affirmative:
-`base_unknown` (T362) is exactly its clause (i). (5) P43's pre-registration — it just produced this
-plan's FIRST scored `HIT`, and is the only reason R16 can claim a cause for anything. (6) P33 — the
-quarantine list, 10 → 11 pairs.** The binding constraint is unchanged and now has six cycles of
-evidence: **"the harness cannot tell itself whether what it BUILT is running"** — with R16's
-amendment: **the one instrument built to watch for that (SHIPS-UNWIRED) can only see organs the plan
-has already boasted about, so it read CLEAN in a cycle that shipped four dark organs.**
+**NEXT (L2) — kick order, RE-RANKED 2026-08-07 by the correction above (W1-T149 left the list because
+it shipped, and everything below moves up one; nothing was re-ranked on a metric, so the standing
+rule against re-ranking on unattributed moves is not engaged):** **(1) P47 — trailer emission is
+unowned, and R16 proved the class is not about repair actors: the poisoning branch was the PLAN-SYNC
+LANE'S OWN (#1361), costing W1-T343 four dispatches. It inherits rank 1 on the vacancy, and W1-T390
+below is now the sharpest evidence for it — a branch the harness itself named is uncreditable
+FOREVER. (2) P38 — the LEARNINGS WRITE PATH, priced twice now: seventeen rediscoveries of one defect
+(R15) and 10 duplicated recon runs across six tasks (R16), against a corpus frozen at 74 for SIX
+cycles. Then the call-site lint rung, then the effect assertion. (3) P48 — no naked zero, whose shape
+R16 demonstrated in the affirmative: `base_unknown` (T362) is exactly its clause (i), and W1-T391's
+`blocked` bucket is its non-zero twin — one value, three populations, three opposite correct actions.
+(4) P43's pre-registration — it produced this plan's FIRST scored `HIT`; note that the correction
+above RETRACTS three of its UNRESOLVABLE scorings, whose antecedent was false in the other direction.
+(5) P33 — the quarantine list, 10 → 11 pairs.** The binding constraint is unchanged and now has seven
+cycles of evidence: **"the harness cannot tell itself whether what it BUILT is running"** — with the
+2026-08-07 amendment, which is the sharpest reading of it yet: **the harness could not tell itself
+that the very fix for THAT constraint had been running for eighteen days.** R16's amendment stands
+alongside it: the one instrument built to watch for this (SHIPS-UNWIRED) can only see organs the plan
+has already boasted about, so it read CLEAN in a cycle that shipped four dark organs.
 NOTE: `nextRunnable` (drain.ts:31 `plan.tasks.find`) is DECLARATION-ORDERED; this is the authoritative
 KICK ORDER (mirrored as a comment atop plan/tasks.yaml).
 
@@ -611,11 +639,16 @@ adjudication it drove stands regardless, because it was made on the cumulative f
 
 ## Retro proposals (PROPOSALS ONLY; NOT yet in plan/tasks.yaml)
 
-**★ LIVE RANKING (the ONE place open proposals are ordered).** `P29 > P47 > P38 > P48 > P43 > P33 >
+**★ LIVE RANKING (the ONE place open proposals are ordered).** `P47 > P38 > P48 > P43 > P33 >
 P42 > P40 > P46 > P39 > P45 > P44 > P17 > P26` *(P48 rank PROPOSED by its session-mined entry below,
-pending ratification)*. Every proposal has exactly ONE canonical entry below, updated IN PLACE with each cycle's
+pending ratification)*. **★ 2026-08-07: P29 LEFT THE RANKING — BOTH CLAUSES ARE SHIPPED, AND (i) HAD
+BEEN SINCE 2026-07-20** (PR #349; see NET STATE's correction). It held rank 1 through six retros on a
+false premise, so P47 inherits rank 1 by vacancy — **this is not a re-rank on a metric**, and the
+standing rule against re-ranking on unattributed moves is therefore not engaged. Every proposal has
+exactly ONE canonical entry below, updated IN PLACE with each cycle's
 evidence — a retro that adds a second entry restating a proposal it did not change has failed the
 HARNESS-COMPRESSION bar. **P28 and P41 are RETIRED** (tombstones only, full prose deleted);
+**P29 is CLOSED — shipped, not abandoned** (tombstone below, keeping only the durable lessons);
 **P35 is FOLDED into P38** and has no entry of its own. **R16 MOVES NOTHING AND MINTS NOTHING** — the
 first cycle in the plan's history with no re-rank and no new P-number, and both are deliberate.
 **No re-rank:** every metric that moved this cycle (foreign rejections 12 → 4, sibling 10 → 6,
@@ -1327,52 +1360,44 @@ P42 or W1-T271 and is folded there rather than given an id.
 (`incomplete`×111, `no_pr`×42, `blocked_ci`×21, `pr_attribution_failed`×12, `blocked`×5,
 `blocked_containment`×2, `blocked_isolation`×2).
 
-- **★ P29 — RATIFIED 2026-07-20 -> W1-T149 (sibling-run credit liveness + a per-task dispatch circuit
-  breaker; the ownership-assert PRESERVED). Design prose DELETED per RATIFY-OR-KILL — the task is the
-  record, and it has been the record for four retros without being built.** THE HISTORY, kept in one
-  line because every retro re-reads it: W1-T1 dispatched ~130 times over ~10 hours at ~$130 because its
+- **★ P29 — CLOSED 2026-08-07: BOTH CLAUSES SHIPPED. Clause (i) sibling-run credit liveness AND
+  clause (ii) the per-task dispatch circuit breaker merged TOGETHER in PR #349 on 2026-07-20**, head
+  `run-W1-T149-1784553391268`, trailer `Remudero-Task: W1-T149`, 3/3 criteria — and the `ownResult`
+  stash that IS clause (i) is live in `src/lib/status.ts` today. **THE ENTRY BELOW IS A TOMBSTONE.**
+  Six retros (R11–R16) wrote evidence-log entries reasoning from *"W1-T149 has not shipped"*, which
+  was false the whole time; those entries are DELETED rather than preserved, per the compression bar
+  — a per-cycle restatement of a false premise is not history worth carrying, and NET STATE's
+  correction holds the one paragraph that explains how it happened. What survives, because it is
+  still true and still load-bearing: **(a) the ownership-assert is CORRECT and must not be loosened**
+  — it stopped R5's false-credit inversion and still does; **(b) a fail-closed integrity guard needs
+  a LIVENESS counterpart, or the system pays for its own correctness forever.** P39 is its
+  dispatch-side half and stays OPEN. **★ THE STING, and it is the reason W1-T390 exists:** lesson (b)
+  is now proven twice over, because the ownership-assert this proposal deliberately preserved is
+  ALSO what makes a `run-<taskId>-<slug>` branch permanently uncreditable — clause (i) taught the
+  assert to accept a SIBLING run, and nobody taught it to accept the task's OWN branch under a
+  descriptive name. THE HISTORY, kept in one line because it is what earned the proposal: W1-T1 dispatched ~130 times over ~10 hours at ~$130 because its
   own merged PR #255 could not credit a SIBLING run of the same task; W1-T29 ×10; and this cycle 49
-  credit rejections, ~39 of them the same shape. TWO durable lessons: **(a) the ownership-assert is
-  CORRECT and must not be loosened** — it stopped R5's false-credit inversion and still does; **(b) a
-  fail-closed integrity guard needs a LIVENESS counterpart, or the system pays for its own correctness
-  forever.** P39 is its dispatch-side half. **★ EVIDENCE LOG (in place): R11 — 49 credit rejections,
+  credit rejections, ~39 of them the same shape. **★ EVIDENCE LOG — DELETED 2026-08-07, NOT FOLDED.**
+  R11 through R16 each appended a paragraph reasoning from *"(i) is unbuilt"*: R13 demoted P29 on one
+  extreme reading (3 sibling rejections) and R14 reversed it within a cycle (23), which was correctly
+  mined as P43(ii)'s regression control and is the ONE thing worth keeping from those six paragraphs
+  — it is true independent of the false premise, and it lives in P43's entry, not here. R15 and R16
+  then read the fall 23 → 10 → 6 as UNATTRIBUTED and twice wrote that a working per-task cap is
+  *"what the shape would predict"* while declining to credit one. **They were describing #349's
+  breaker.** The honest re-reading, recorded once: that fall is the most plausible EFFECT of clause
+  (ii), it was observable from the merged PR at any point, and P43(ii)'s bar was met by evidence
+  nobody thought to look for. WHAT REPLACES THE LOG, and it is the only open question P29 leaves:
+  clause (ii) is ALSO credited to W1-T271/#1040 as a lifetime cap no ledger step can reset. Two
+  breakers exist. Whether the second is a deliberate hardening against rotation or a duplicate bought
+  because the first was invisible is **not settled by anything in this plan**, and W1-T392's gate is
+  what would have made the question unnecessary. Prior text, for provenance: R11 — 49 credit rejections,
   ~39 sibling. R12 — 25 rejections, 20 sibling, across 13 tasks; the ONLY ratified-and-unbuilt item
-  left in the plan. ★ R13 — THE SIBLING CASE COLLAPSED, 20 → 3** (W1-T254/#1016, W1-T275/#1050,
-  W1-T277/#1052; total rejections 25 → 6), **and clause (ii) SHIPPED: W1-T271/#1040 is the per-task
-  lifetime dispatch cap that no ledger step can reset.** So P29 splits: **(ii) is BUILT** and its
-  effect is next retro's pre-committed test; **(i) sibling credit stays unbuilt for a SIXTH cycle on
-  an evidence base that shrank 85% in one cycle.** R13 therefore RE-RANKS P29(i) DOWN — the plan
-  should stop calling it "THE backlog" — while keeping it OPEN, because the ownership-assert it
-  complements is still correct and the liveness lesson (b) is still unpaid.
-  **★ R14 — THE DEMOTION WAS WRONG WITHIN ONE CYCLE, AND P29(i) RETURNED TO RANK 1.** Sibling
-  rejections rebounded **3 → 23**, concentrated in three tasks consuming **19 of 48 runs**
-  (W1-T295 ×8, T288 ×6, T292 ×5) at ~**$21.9** uncredited. Two durable lessons: **(1)** R13 demoted
-  this item on a single extreme reading and the metric reverted immediately — **P43(ii)'s regression
-  control, demonstrated on this plan's own ranking decision**; **(2)** clause (ii) SHIPPED as
-  W1-T271/#1040 and did **not** halt an 8-dispatch task, and nothing says whether it evaluated them —
-  P38(ii)'s missing telemetry line, not a reason to loosen the cap.
-  **★ R15 — SIBLING REJECTIONS 23 → 10, AND P29(i) HOLDS RANK 1 ANYWAY.** W1-T149 **did not ship**, so
-  R14's pre-registration scores **UNRESOLVABLE** (see NET STATE) and the fall is **UNATTRIBUTED**. The
-  ranking decision follows directly from R13's mistake: **this plan no longer re-ranks on an
-  unattributed move**, in either direction, and R15 applies the same discipline to P42 and P46, which
-  are demoted on urgency while explicitly recorded as not-disproven. What the cycle DID add: the
-  sibling shape is now the SMALLER half of the credit hole (10 rejections against P47's 12 foreign),
-  and W1-T312 ×4, W1-T331 ×2, W1-T317/T319/T333/T338 ×1 each show it is no longer concentrated in a
-  few pathological tasks but spread thin across six — which is the shape a per-task circuit breaker
-  (clause ii, SHIPPED) would be expected to produce, and the first evidence in seven cycles that
-  W1-T271/#1040 may in fact be executing. **That is a hypothesis, not a credit**: nothing in the
-  gather names it, and it is exactly what clause (ii)'s standing telemetry line exists to answer.
-  **★ R16 — SIBLING REJECTIONS 10 → 6, AND R15's HYPOTHESIS GETS A SECOND READING.** W1-T149 still did
-  not ship (**EIGHTH cycle**), so the fall is again **UNATTRIBUTED** and rank 1 holds under the
-  standing rule. The 6 are W1-T342 ×2 and T349/T350/T353/T356 ×1 each — **spread thinner still, across
-  five tasks, none above two**, a second consecutive cycle behaving exactly as a working per-task cap
-  would predict. It stays a hypothesis for the same reason as last cycle: **nothing in the gather names
-  it**, and two cycles of suggestive shape is what P38(ii)'s standing telemetry line would convert into
-  a fact for the price of one log line — and what P43(ii) forbids treating as one without it. **What
-  R16 adds:** every one of the 6 sibling-rejected runs belongs to a task that ALSO paid a duplicated
-  recon (P38 TASK B), so the credit hole and the recon re-buy are billed against the SAME runs. Fixing
-  either alone still leaves the other paying for them — which is the first time these two items have
-  been shown to share a denominator rather than merely a cycle.
+  left in the plan (FALSE — it had shipped 9 days earlier). R13 — 3. R14 — 23. R15 — 10. R16 — 6.**
+  The one R16 observation that OUTLIVES the deletion, because it is about a different proposal and is
+  unaffected by the false premise: every one of R16's 6 sibling-rejected runs belongs to a task that
+  ALSO paid a duplicated recon, so the credit hole and P38's recon re-buy are billed against the SAME
+  runs — the first time those two items were shown to share a denominator rather than merely a cycle.
+  That evidence now belongs to **P38**, and P38's entry is where a future retro adds to it.
 - **★ P30 — RATIFIED 2026-07-20 -> W1-T150, which SHIPPED 2026-07-21 (#358: the `rmd sweep` reconciler
   gains a level-triggered rung appending a `verdict.merged` correction for any task whose owned PR merged
   but is uncredited). Full prose DELETED per RATIFY-OR-KILL — the task and its PR are the record.** TWO

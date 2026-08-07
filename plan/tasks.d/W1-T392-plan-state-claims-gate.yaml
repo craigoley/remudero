@@ -1,0 +1,112 @@
+- id: W1-T392
+  title: "`plan/claims.yaml` gates every prose claim about CODE and nothing gates a prose claim about TASK STATE — so `W1-T149 is unbuilt` survived six retros while its PR sat in main, and the ranking it froze was rank 1"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  rationale: "MEASURED 2026-08-07 against the live GitHub API; the incident is recorded in NET STATE's
+    2026-08-07 correction and P29's tombstone.
+    THE INCIDENT. PR #349 — `fix(W1-T149): sibling-run credit liveness + per-task dispatch circuit
+    breaker` — merged 2026-07-20T14:16:23Z on head `run-W1-T149-1784553391268` with body trailer
+    `Remudero-Task: W1-T149` and 3/3 acceptance criteria. Its mechanism is live in src/lib/status.ts
+    today (the `ownResult` stash). MASTER-PLAN nevertheless listed W1-T149 under `Still PLANNED, not
+    shipped` and ranked it `(1) ... ratified-and-unbuilt for an EIGHTH cycle` until this correction.
+    THE COST IS NOT THE WRONG LINE, IT IS WHAT THE WRONG LINE DECIDED. R14, R15 and R16 each scored a
+    pre-registration UNRESOLVABLE on the antecedent `W1-T149 did not ship`; the standing rule `the plan
+    does not re-rank on unattributed moves` then held rank 1 in place for three further cycles, and the
+    sibling-rejection fall 23 -> 10 -> 6 was declared UNATTRIBUTED against what is now its most
+    plausible cause. R15 and R16 both wrote that the shape is `what a working per-task cap would
+    predict` and both declined to credit one — while describing #349's own breaker. Six retro cycles
+    of ranking, scoring and prose compounded on a fact that one API call falsifies.
+    WHY NOTHING CAUGHT IT. `plan/claims.yaml` exists for precisely this failure and its own header says
+    so: `Plan prose is unverifiable; a FALSIFIABLE claim with a command that must exit 0 is not ... a
+    red claim means THE PLAN IS LYING ABOUT THE SYSTEM — caught in CI, naming the false claim, not by a
+    human noticing months later.` Every one of its seeded entries asserts a fact about CODE
+    (`DEFAULT_BUDGET_USD is 100`, `buildWorkerEnv strips ANTHROPIC_*`). NOT ONE asserts a fact about
+    TASK STATE. So `unbuilt`, `not shipped` and `still PLANNED` are hand-maintained prose, re-read by
+    the next retro as its own input, and self-confirming — the one claim class with no falsifier is the
+    class that drives the kick order.
+    THE REPO ALREADY OWNS BOTH HALVES AND HAS NEVER CONNECTED THEM: `findMergedByTrailer` /
+    `buildCreditCandidates` derive merged-ness from trailers, and claims-check.mjs is a required CI job
+    that fails naming the false claim. This task is the wire between them.
+    COVERED-BY: NO. P38 is the DEAD-ORGAN class — code that merged and may not RUN; here the code both
+    merged and ran, and the PLAN was wrong about it. P48 is the live-READER class over a boundary's
+    empty answer; this reader is a human re-reading prose, with no query to return zero. P46 is a
+    premise wrong at FILING time; this premise was TRUE when written (2026-07-20 morning) and was
+    falsified hours later by a merge. W1-T358's plan-health sweep re-grades open tasks against the
+    LINTER, never against merge state, and it correctly SKIPPED W1-T149 because `isMerged` already
+    knew — which is the sharpest evidence available that the projection and the prose disagreed and
+    nothing compared them."
+  design: |
+    TWO CLAUSES, AND (ii) IS THE LOAD-BEARING ONE. Clause (i) is cheap, offline and ships inside
+    claims.yaml's existing constraints; it would NOT have caught this incident. A change that ships
+    only (i) satisfies the letter and fixes nothing — stated here in advance so the reviewer can
+    refuse that outcome.
+
+    (i) INTERNAL CONSISTENCY, OFFLINE, IN claims.yaml. No task id may appear BOTH in the SHIPPED log
+    and in a not-shipped assertion (`Still PLANNED`, `not shipped`, `unbuilt`, `did not ship`). Pure
+    text over one file, no network, no wall clock — which is claims.yaml's stated contract for an
+    assertion (`Keep it cheap, offline, and deterministic — no network, no live GitHub state`). This
+    catches the document contradicting itself. It did not fire for W1-T149 because #349 was never
+    added to the SHIPPED log at all: the entry was simply MISSING, and a consistency check over two
+    lists cannot see an id absent from both.
+
+    (ii) EXTERNAL TRUTH, AT RETRO GATHER TIME, WHERE GITHUB IS ALREADY IN HAND. The gather already
+    runs a batched `projectPlan` and already passes a derived `isMerged` into `planHealthSweep`. Add a
+    rung that extracts every task id asserted unbuilt in MASTER-PLAN and re-derives each against that
+    SAME resolver. A contradiction is a BLOCKING finding on the retro-sync, not advisory colour —
+    advisory is what the plan-health sweep is, and this class outranks it because it decides the kick
+    order rather than one task's proofs.
+
+    (iii) A POSITIVE CONTROL IS REQUIRED, NOT OPTIONAL. The extractor is a regex over prose and its
+    failure mode is matching NOTHING, which reads as `no contradictions` — the vacuous pass. So the
+    rung must assert it extracted a non-empty id set AND that at least one extracted id resolved
+    through the merge resolver at all, and must FAIL LOUDLY when either is empty. `zero contradictions
+    found` and `zero claims examined` must never render the same. That is P48 applied to this organ.
+
+    (iv) NAME THE FALSE CLAIM, NOT THE COUNT. claims-check.mjs's own value is that a red claim prints
+    which fact is false; mirror it — report the id, the asserted state, the derived state and the
+    crediting PR. `1 contradiction` sends a reader back to a 262k-line file.
+
+    (v) FALSIFIER, SEEDED ON THE REAL INCIDENT. A fixture MASTER-PLAN asserting `W1-T149 ... unbuilt`
+    against a resolver that reports W1-T149 merged by #349 must FAIL and name both; the same fixture
+    with the assertion removed must PASS; and a fixture with the assertion present against a resolver
+    reporting it UNMERGED must PASS — that third case is what proves the rung discriminates the
+    CLAIM's truth rather than merely detecting the phrase.
+
+    NOT IN SCOPE: auto-editing MASTER-PLAN (rule 15 — the Architect writes the plan; this reports);
+    re-scoring the three UNRESOLVABLE pre-registrations, which NET STATE's correction already records
+    by hand; widening claims.yaml's contract to permit network assertions, which is why (ii) lives at
+    gather time instead; the SHIPPED log's own completeness, which is the next task if (i) proves it
+    is missing more than one entry.
+  acceptance:
+    - claim: "an id asserted unbuilt in the plan while the merge resolver reports it merged fails and names both"
+      proof: "unit test: test/plan-state-claims.test.ts"
+    - claim: "the same assertion passes when the resolver agrees the id is unmerged, so the check reads truth not phrasing"
+      proof: "unit test: test/plan-state-claims.test.ts"
+    - claim: "an extractor that matches no ids fails loudly rather than reporting zero contradictions"
+      proof: "unit test: test/plan-state-claims.test.ts"
+    - claim: "an id appearing in both the shipped log and a not-shipped assertion is refused offline"
+      proof: "unit test: test/plan-state-claims.test.ts"
+  risk: high
+  origin: oper#plan-state-claims-2026-08-07
+  plan_refs: ["§8A", "§12A", "§5E", "P29", "P38", "P43", "P48"]
+  files: [plan/claims.yaml, scripts/plan-state-claims.mjs, src/lib/retro.ts, test/plan-state-claims.test.ts]
+  status: queued
+  attempts: 0
+  note: "risk:high IS RULE 19'S SPAN, NOT BLAST RADIUS. The change adds a reporting rung and one
+    offline assertion; it writes nothing, dispatches nothing and cannot alter a verdict. What earns
+    the band is that it must exist end-to-end across four files — a claims entry, its runner, the
+    gather rung and the test — and that a new claims.yaml entry makes a REQUIRED CI job red if the
+    assertion is written wrong, which is the same drift-gate exposure W1-T379's cli-reference clause
+    carried.
+    budget_usd 70 — above its siblings because clause (ii) touches the retro gather, and because the
+    positive control in clause (iii) is the part most likely to be skipped and then re-litigated.
+    verify:auto — every claim is decidable in-process against a fixture plan file and an injected
+    merge resolver. No network, nothing spawned; the real GitHub read is the caller's, not the rung's.
+    ON WHY THIS IS NOT A NEW P-NUMBER: filed directly as a task per the operator ruling of 2026-08-07.
+    Minting one would restate P38's and P48's shared motive with the audience changed, which is the
+    accretion failure P8 names — the same reasoning R16 applied when it refused a fourth number for
+    the recon re-buy."
