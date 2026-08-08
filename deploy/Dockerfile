@@ -342,10 +342,68 @@ USER node
 #   daemon → `--restart=on-failure`   (launchd `KeepAlive={SuccessfulExit:false}`)
 #   serve  → `--restart=unless-stopped` (launchd `KeepAlive=<true/>`, unconditional)
 # Using `always`/`unless-stopped` for the DAEMON would turn a deliberate clean stop into a crash
-# loop, because exit(0) is how the daemon is stopped on purpose. See the report for why systemd is
-# the faithful counterpart and docker's `--restart` is not: `ThrottleInterval` (60s, from
-# plan/policy.yaml `launchd.throttleIntervalS`) has an exact systemd analogue in `RestartSec=` and
-# no exact docker one.
+# loop, because exit(0) is how the daemon is stopped on purpose.
+#
+# THE MAPPING IS NOW VERIFIED FROM SOURCE RATHER THAN ASSERTED, and it is exact.
+# `daemonExitCode` (src/lib/daemon.ts) is the whole rule: `stopped` and `max_reached` return 0 —
+# "the only exits meaning this was deliberate, nothing to see" — and `blocked`, `error` and `stale`
+# return nonzero. Under `SuccessfulExit: false` a zero exit counts as successful and launchd leaves
+# the job DOWN; `--restart=on-failure` restarts only on nonzero. Same predicate, so the port holds.
+# The independent confirmation is in launchd.ts's SERVE section, which contrasts the two directly:
+# `rmd serve` returns 0 on a clean shutdown, and under `SuccessfulExit: false` that would leave the
+# console down exactly when someone SIGTERM'd it — which is why serve gets UNCONDITIONAL KeepAlive.
+# The two policies are genuinely different and must not be collapsed onto one container.
+#
+# `stale` REQUIRES THE RESTART, it does not merely tolerate it. `DaemonStopReason`'s doc calls
+# staleness "a REQUEST to exit, because launchd's KeepAlive{SuccessfulExit:false} is the only
+# mechanism that can get a long-running daemon off code it loaded once at boot and onto a fix merged
+# since" (W1-T126). Drop the restart policy and the daemon loses its self-update path.
+#
+# TWO STATES MUST NEVER REACH AN EXIT, AND THIS IMAGE INHERITS THAT FOR FREE. `headroom_exhausted`
+# and `paused` are deliberately absent from `DaemonStopReason`: returning `paused` used to exit,
+# launchd relaunched, the fresh boot re-read the same flag and exited again — the 2026-07-22
+# relaunch storm. Both are now in-process idle states that re-poll via the injected clock. That is a
+# property of the daemon's own loop, not of the supervisor, so no container flag can break it.
+#
+# ── THE PART THAT DOES *NOT* PORT, AND IT IS THE REASON THE DAEMON IS NOT RUN HERE YET ───────
+# `ThrottleInterval` (60s, plan/policy.yaml `launchd.throttleIntervalS`) has NO docker analogue.
+# docker's `--restart=on-failure` backs off exponentially from roughly 100ms; there is no flag that
+# sets a floor. So a crash loop in a container cycles hundreds of times faster than the 60s floor
+# this repo earned from a measured 438-boots-in-two-days storm. `--restart=on-failure:N` caps the
+# COUNT, which launchd cannot do — but a count is not a rate.
+#
+# The daemon's own crash-loop detector DOES survive a container restart (its `priorBoots` are
+# re-derived from the ledger, and `daemon.boot`'s 15-minute health retention comfortably exceeds the
+# detector's 10-minute window) — but it only ESCALATES, opening a needs-human issue. Unattended,
+# that is a bound in name. The full argument was written to state/recon-container-supervision.md,
+# which is GITIGNORED (`state/` is derived, append-only) and therefore does NOT survive the
+# container that wrote it — so its load-bearing conclusions are recorded HERE instead of behind a
+# citation that will not resolve. Two of them:
+#
+#   THE DEPLOY SUPERVISOR JOB IS REDUNDANT IN THIS IMAGE. `com.remudero.supervisor` is NOT KeepAlive
+#   — it is a periodic one-shot running `rmd deploy-run` every 120s, whose two jobs are getting new
+#   code onto the machine and externally kickstarting the daemon onto it. Here deploy/entrypoint.sh
+#   clones or fast-forwards on every boot, and deploy/host-update.sh replaces the image wholesale.
+#   Nothing needs porting; that is a third of the supervision problem that simply disappears.
+#
+#   THE OPERATOR'S OFF SWITCH ALREADY WORKS FROM OUTSIDE, and it is the strongest result of that
+#   recon. `fleet-control.ts` resolves `<root>/state/PAUSE` and `<root>/state/STOP`, and `root` is
+#   `$HOME/Remudero` — the bind mount. Writing PAUSE halts new dispatch within the poll while
+#   in-flight work finishes, and the daemon idles IN PROCESS rather than exiting. Writing STOP
+#   yields the `stopped` reason, exit 0, so `--restart=on-failure` leaves the container DOWN; the
+#   flag auto-consumes, so it can never block a future start. No exec and no console needed.
+#
+# NOTE A CONTRADICTION IN THE SOURCE, flagged rather than edited from here: `DaemonStopReason`'s doc
+# contains the parenthetical "SuccessfulExit:false reads ANY exit, zero or not, as worth restarting
+# on this unit". That is the opposite of `daemonExitCode`'s own doc and of launchd.ts's serve
+# section. Two of the three readings agree; the parenthetical is the outlier and is not needed by
+# the argument around it. It matters here because a container's restart flag gets chosen from
+# exactly these comments.
+#
+# NOTHING IN THIS IMAGE STARTS A DAEMON. `CMD` is still `./bin/rmd status`, the entrypoint runs the
+# clone bootstrap and then the command it was given, and no restart policy is applied anywhere.
+# `deploy/host-update.sh --print-daemon-run` prints the invocation an operator WOULD use, and runs
+# nothing.
 
 # ── REQ 9: THE SANDBOX'S RUNTIME PERMISSIONS ARE NOT SET HERE EITHER ─────────────────────────
 # Same category as REQ 5: these are `docker run` flags and an image cannot carry them. Recorded
