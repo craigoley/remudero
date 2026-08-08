@@ -127,6 +127,40 @@ ENV DISABLE_AUTOUPDATER=1
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
  && claude --version
 
+# ── REQ 8: THE SANDBOX BINARIES — bubblewrap AND socat ───────────────────────────────────────
+# These are NOT optional hardening. `validateWorkerSettings` (src/lib/settings.ts) THROWS unless
+# `sandbox.enabled === true` AND `sandbox.failIfUnavailable === true`, with the messages "workers
+# are never unsandboxed" and "never silently run unsandboxed". `bwrapPath` and `socatPath` are keys
+# of the SDK's own SandboxSettingsSchema, pinned in that same file — bubblewrap IS the Linux
+# filesystem/process sandbox and socat IS its network side.
+#
+# So an image without these does not degrade, it REFUSES: `failIfUnavailable` is the whole point.
+# That is the same shape as the missing `claude` binary — a total, clean failure — arriving one
+# step later and reading as a containment problem rather than a packaging one.
+#
+# MEASURED: the first working run on the VM had to `apt-get install -y bubblewrap socat` at RUN
+# time, inside the container, before it could start a task. Baking them makes that unnecessary,
+# and removes a chain of consequences with it: the runtime apt fetch (which needs network and a
+# working mirror at the worst possible moment), the `--user 0:0` that existed ONLY so apt could
+# run, and the `su node` that starting as root then forced.
+#
+# That `su` is not free, and its cost is instructive. Preserving the credential across it needs
+# `--preserve-environment`, which then keeps ROOT's `HOME` — so the command must also
+# `export HOME=/home/node` by hand or the worker looks in the wrong home for its config and
+# credentials. Two coupled workarounds, both downstream of installing packages at run time.
+# Starting as `--user node` instead gets the right `HOME` from /etc/passwd for free.
+#
+# Verified in-layer for the same reason REQ 7 is: a missing sandbox binary should fail the build
+# here, not a worker later.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      bubblewrap socat \
+ && rm -rf /var/lib/apt/lists/* \
+ && bwrap --version \
+ && socat -V >/dev/null
+# NOTE the `>/dev/null` above rather than `| head -1`: `A && B | C` parses as `A && (B | C)` and a
+# pipeline's status is its LAST stage, so `socat -V | head -1` would return head's zero even with
+# socat absent — the check would pass for a missing binary. Written that way first, caught here.
+
 WORKDIR /app
 COPY package.json package-lock.json ./
 
@@ -149,6 +183,33 @@ COPY . .
 # the faithful counterpart and docker's `--restart` is not: `ThrottleInterval` (60s, from
 # plan/policy.yaml `launchd.throttleIntervalS`) has an exact systemd analogue in `RestartSec=` and
 # no exact docker one.
+
+# ── REQ 9: THE SANDBOX'S RUNTIME PERMISSIONS ARE NOT SET HERE EITHER ─────────────────────────
+# Same category as REQ 5: these are `docker run` flags and an image cannot carry them. Recorded
+# here because REQ 8 installs bubblewrap, and bubblewrap without them fails at run time in a way
+# that reads as a containment defect rather than a missing flag.
+#
+# bwrap creates user and mount namespaces, which Docker's DEFAULT seccomp and AppArmor profiles
+# restrict. The invocation measured working on the VM passes:
+#   --cap-add SYS_ADMIN --security-opt apparmor=unconfined --security-opt seccomp=unconfined
+#
+# TREAT THAT AS THE MEASURED-WORKING SET, NOT THE MINIMAL ONE. It was arrived at by getting a run
+# to work, and no one has since removed one flag at a time to find which are actually load-bearing
+# — so it is very likely wider than necessary, and `--cap-add SYS_ADMIN` in particular is a large
+# grant to hand a container on the strength of "the run succeeded". Narrowing it is real work and
+# wants its own measurement; until someone does that, this comment should not pretend the set is
+# tight.
+#
+# NOTE ALSO: this image sets no `USER`, so it runs as root by default. With REQ 8 baked in there
+# is no longer any reason to start as root — nothing needs apt at run time — so prefer
+# `--user node`, which drops the `su`, its `--preserve-environment`, and the manual
+# `export HOME=/home/node` that `--preserve-environment` makes necessary (it keeps ROOT's HOME).
+# Pass CLAUDE_CODE_OAUTH_TOKEN with `-e` and let the process inherit it; keep the surrounding
+# `bash -c` single-quoted so the value is never interpolated into a command string.
+#
+# THE STATE MOUNT MUST THEN BE WRITABLE BY THAT UID. `-v ~/rmd-state:/home/node/Remudero` is the
+# measured mount, and under `--user node` the host directory has to be owned by node's uid (1000
+# in this base) rather than by root. UNVERIFIED — the `--user node` form has not been run.
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["./bin/rmd", "status"]

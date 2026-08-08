@@ -132,6 +132,13 @@ docker run --rm --entrypoint /bin/sh "${REF}" -c '
   check "node"      node --version
   check "gh"        gh --version
   check "git"       git --version
+  # bwrap and socat are the Linux sandbox. validateWorkerSettings refuses to run a worker unless
+  # sandbox.enabled AND sandbox.failIfUnavailable are both true, so a missing one of these does
+  # not degrade the run - it refuses it, later and less legibly than a missing claude binary.
+  # `bwrap --version` here only proves the BINARY is present; whether the kernel lets it create
+  # namespaces depends on run-time flags this probe does not pass (see REQ 9 in the Dockerfile).
+  check "bwrap"     bwrap --version
+  check "socat"     socat -V
   # RMD_SELF_SYNC_DONE=1 is REQUIRED, not tidiness: checkCliFreshness runs `git merge --ff-only
   # origin/main` before the verb, so there are no read-only rmd verbs — `--help` would try to
   # fast-forward the checkout baked into this image, over the network, from a probe.
