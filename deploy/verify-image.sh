@@ -204,10 +204,53 @@ docker run --rm --entrypoint /bin/sh "${REF}" -c '
     fi
   done
 
+  # THE BOOTSTRAP ENTRYPOINT. The image clones a real work tree at startup because the snapshot at
+  # /app has no .git; if this file is missing or not executable the container falls back to running
+  # the snapshot, which is the arrangement that made three separate diagnoses blame the wrong
+  # checkout. Presence and the exec bit are what this probe can prove; whether the clone SUCCEEDS
+  # needs a token and is the operator check below.
+  if [ -x /usr/local/bin/rmd-entrypoint ]; then
+    printf "  PASS  %-22s /usr/local/bin/rmd-entrypoint\n" "bootstrap entrypoint"
+  else
+    printf "  FAIL  %-22s (missing or not executable — the container would run the /app snapshot)\n" "bootstrap entrypoint"
+    fail=1
+  fi
+
+  # THE SNAPSHOT IS EXPECTED TO HAVE NO .git, and saying so keeps the reason for the clone visible.
+  # If this ever starts reporting a work tree, the upload path changed and the whole bootstrap may
+  # be reconsiderable - that is a finding, not a failure, so it does not set the fail flag.
+  if [ -e /app/.git ]; then
+    printf "  NOTE  %-22s /app IS a work tree — the premise behind the startup clone has changed\n" "snapshot"
+  else
+    printf "  PASS  %-22s /app has no .git, as expected (hence the startup clone)\n" "snapshot"
+  fi
+
   exit $fail
 '
 RC=$?
 set -e
+
+# ── 6. THE ENTRYPOINT ITSELF, EXERCISED RATHER THAN INSPECTED ────────────────────────────────
+# The probe above deliberately overrides the entrypoint, so it proves nothing about whether the
+# entrypoint RUNS. This one goes through it for real, with the bootstrap skipped so no credentials
+# are needed: it proves tini still starts, the script is reached, and `exec "$@"` hands off to the
+# command. A broken entrypoint makes every invocation fail, so it is worth one extra container.
+echo
+echo "verify-image: entrypoint exec path (bootstrap skipped — no token needed)"
+if out="$(docker run --rm -e RMD_SKIP_BOOTSTRAP=1 "${REF}" \
+           sh -c 'echo entrypoint-reached' 2>&1)"; then
+  if printf '%s' "$out" | grep -q 'entrypoint-reached'; then
+    echo "  PASS  entrypoint runs and execs the command"
+  else
+    echo "  FAIL  entrypoint ran but the command did not execute:" >&2
+    printf '%s\n' "$out" | sed 's/^/        /' >&2
+    RC=1
+  fi
+else
+  echo "  FAIL  the entrypoint did not start:" >&2
+  printf '%s\n' "$out" | sed 's/^/        /' >&2
+  RC=1
+fi
 
 echo
 if [ "${RC}" -eq 0 ]; then

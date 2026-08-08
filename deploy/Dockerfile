@@ -341,10 +341,39 @@ USER node
 # network and no credentials, which makes it the right thing for `CMD ["./bin/rmd", "status"]` and
 # for any smoke test of the image itself. Keep it for that; do not run work from it.
 #
-# NOT IMPLEMENTED HERE, deliberately. Cloning at startup is an ENTRYPOINT change, and an entrypoint
-# that cannot be tested from an agent container — no docker daemon anywhere here — is the wrong
-# thing to ship blind on top of three other unverified fixes. It wants its own change, after one
-# build proves this one.
+# NOW IMPLEMENTED, in deploy/entrypoint.sh — the deferral above has been taken up. Each of the four
+# costs named there is answered rather than rediscovered, and two of them turned out to be smaller
+# than they looked because this codebase already owns the mechanism:
+#
+#   DIGEST↔CODE IDENTITY — recovered by `RMD_REF`, which accepts a branch, tag or sha, and by the
+#   entrypoint printing the RESOLVED commit on every boot. The default is `main` rather than a
+#   pinned sha, because a sha default can only be moved by editing this file and rebuilding, which
+#   is the exact cost being removed, and a stale default runs old code while looking pinned.
+#
+#   ITS OWN `npm ci` — mostly already solved. `ensureInstallFresh` (src/run-task.ts) hashes the two
+#   install inputs against a marker inside node_modules and its own doc says a matching hash is "a
+#   total no-op — no redundant install, ever". The entrypoint therefore installs on ONE condition
+#   only: `node_modules/.bin/tsx` is missing. That is the bootstrap `bin/rmd` cannot perform for
+#   itself, since it execs tsx to run at all.
+#
+#   CREDENTIALS AT BOOT — a credential helper reading GH_TOKEN at call time, so no token is written
+#   to the volume. `gh auth setup-git` was measured refusing with only GH_TOKEN set.
+#
+#   RESTART — fetch and fast-forward when clean, REFUSE when dirty, following the deployer's
+#   "abort (never force) on a conflicting dirty tree". Deliberately stricter than that guard, and
+#   the entrypoint says so rather than implying parity.
+#
+# THE /app SNAPSHOT STAYS, FOR NOW, AND THE ENTRYPOINT NEVER FALLS BACK TO IT. Two source trees in
+# one container is a real hazard — a stale /app that still answers `bin/rmd` is precisely the shape
+# that made a `tsx: No such file` diagnosis blame the wrong checkout — so the entrypoint `cd`s into
+# the clone and FAILS LOUDLY if the clone cannot be made, rather than quietly running the snapshot.
+# Removing /app is a separate change and should be argued on its own: it is still the only tree that
+# needs no network and no credentials, which is what makes it usable for smoking the image itself.
+# REPORTED, NOT DECIDED HERE, as the brief asked.
 
-ENTRYPOINT ["/usr/bin/tini", "--"]
+# ENTRYPOINT keeps tini as PID 1 (REQ 1 — the reaper) and inserts the bootstrap after it, so the
+# clone happens before any command and `exec "$@"` leaves the real process as tini's child. The CMD
+# is unchanged in text but now runs INSIDE THE CLONE rather than the snapshot, which is the point.
+COPY --chown=node:node deploy/entrypoint.sh /usr/local/bin/rmd-entrypoint
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/rmd-entrypoint"]
 CMD ["./bin/rmd", "status"]
