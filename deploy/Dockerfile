@@ -127,6 +127,59 @@ ENV DISABLE_AUTOUPDATER=1
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
  && claude --version
 
+# ── REQ 8: THE SANDBOX BINARIES — bubblewrap AND socat ───────────────────────────────────────
+# These are NOT optional hardening. `validateWorkerSettings` (src/lib/settings.ts) THROWS unless
+# `sandbox.enabled === true` AND `sandbox.failIfUnavailable === true`, with the messages "workers
+# are never unsandboxed" and "never silently run unsandboxed". `bwrapPath` and `socatPath` are keys
+# of the SDK's own SandboxSettingsSchema, pinned in that same file — bubblewrap IS the Linux
+# filesystem/process sandbox and socat IS its network side.
+#
+# So an image without these does not degrade, it REFUSES: `failIfUnavailable` is the whole point.
+# That is the same shape as the missing `claude` binary — a total, clean failure — arriving one
+# step later and reading as a containment problem rather than a packaging one.
+#
+# MEASURED: the first working run on the VM had to `apt-get install -y bubblewrap socat` at RUN
+# time, inside the container, before it could start a task. Baking them makes that unnecessary,
+# and removes a chain of consequences with it: the runtime apt fetch (which needs network and a
+# working mirror at the worst possible moment), the `--user 0:0` that existed ONLY so apt could
+# run, and the `su node` that starting as root then forced.
+#
+# That `su` is not free, and its cost is instructive. Preserving the credential across it needs
+# `--preserve-environment`, which then keeps ROOT's `HOME` — so the command must also set HOME by
+# hand or the worker looks in the wrong home for its config and credentials. Two coupled
+# workarounds, both downstream of installing packages at run time.
+#
+# A CORRECTION TO A CLAIM MADE HERE FIRST: starting as `--user node` does NOT get the right HOME
+# "from /etc/passwd for free". Docker does not consult /etc/passwd for a `--user` override at all.
+# That is why REQ 10 sets HOME in the image — which is the actual fix, and makes the flag
+# unnecessary rather than merely moving it.
+#
+# Verified in-layer for the same reason REQ 7 is: a missing sandbox binary should fail the build
+# here, not a worker later.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      bubblewrap socat \
+ && rm -rf /var/lib/apt/lists/* \
+ && bwrap --version \
+ && socat -V >/dev/null
+# NOTE the `>/dev/null` above rather than `| head -1`: `A && B | C` parses as `A && (B | C)` and a
+# pipeline's status is its LAST stage, so `socat -V | head -1` would return head's zero even with
+# socat absent — the check would pass for a missing binary. Written that way first, caught here.
+
+# ── REQ 10: HOME MUST BE SET IN THE IMAGE, OR THE STATE MOUNT IS SILENTLY IGNORED ────────────
+# MEASURED, and this is the quietest failure in the file. `loadConfig` (src/lib/config.ts) derives
+# `root` as `join(homedir(), "Remudero")`, and `configPath()` is `join(homedir(), ".config", ...)`.
+# Node's `os.homedir()` returns `$HOME` when it is set and only falls back to the passwd entry when
+# it is NOT. Docker does not derive HOME from /etc/passwd for a `--user` override — it uses the
+# image's ENV or defaults to `/`. So with HOME unset here, a `--user 1000:1000` run gets `HOME=/`,
+# `config.root` becomes `/Remudero`, and a `-v ...:/home/node/Remudero` mount IS NEVER TOUCHED:
+# every ledger line, lock and token goes to a container-local path and disappears with `--rm`.
+# Verified by evaluation: HOME=/ resolves homedir() to `/` and root to `/Remudero`.
+#
+# Nothing errors in that state. The run looks normal and the volume stays empty, which is why this
+# is set here rather than left to a flag the caller must remember. Passing `-e HOME=/home/node`
+# anyway is harmless and belt-and-braces; NOT passing it is now also correct.
+ENV HOME=/home/node
+
 WORKDIR /app
 COPY package.json package-lock.json ./
 
@@ -149,6 +202,37 @@ COPY . .
 # the faithful counterpart and docker's `--restart` is not: `ThrottleInterval` (60s, from
 # plan/policy.yaml `launchd.throttleIntervalS`) has an exact systemd analogue in `RestartSec=` and
 # no exact docker one.
+
+# ── REQ 9: THE SANDBOX'S RUNTIME PERMISSIONS ARE NOT SET HERE EITHER ─────────────────────────
+# Same category as REQ 5: these are `docker run` flags and an image cannot carry them. Recorded
+# here because REQ 8 installs bubblewrap, and bubblewrap without them fails at run time in a way
+# that reads as a containment defect rather than a missing flag.
+#
+# bwrap creates user and mount namespaces, which Docker's DEFAULT seccomp and AppArmor profiles
+# restrict, and socat's network sandbox wants to configure interfaces. The invocation measured
+# working on the VM passes:
+#   --cap-add SYS_ADMIN --cap-add NET_ADMIN
+#   --security-opt apparmor=unconfined --security-opt seccomp=unconfined
+#
+# TREAT THAT AS THE MEASURED-WORKING SET, NOT THE MINIMAL ONE. It was arrived at by getting a run
+# to work, and no one has since removed one flag at a time to find which are actually load-bearing
+# — so it is very likely wider than necessary, and TWO added capabilities, one of which is
+# SYS_ADMIN, is a large grant to hand a container on the strength of "the run succeeded".
+# Narrowing it is real work and wants its own measurement; until someone does that, this comment
+# should not pretend the set is tight. NET_ADMIN was added to this list after a first draft
+# recorded only SYS_ADMIN — the working command had moved on, which is exactly why the set is
+# transcribed from a run rather than reasoned about.
+#
+# NOTE ALSO: this image sets no `USER`, so it runs as root by default. With REQ 8 baked in there
+# is no longer any reason to start as root — nothing needs apt at run time — so prefer
+# `--user node`, which drops the `su`, its `--preserve-environment`, and the manual
+# `export HOME=/home/node` that `--preserve-environment` makes necessary (it keeps ROOT's HOME).
+# Pass CLAUDE_CODE_OAUTH_TOKEN with `-e` and let the process inherit it; keep the surrounding
+# `bash -c` single-quoted so the value is never interpolated into a command string.
+#
+# THE STATE MOUNT MUST THEN BE WRITABLE BY THAT UID. `-v ~/rmd-state:/home/node/Remudero` is the
+# measured mount, and under `--user node` the host directory has to be owned by node's uid (1000
+# in this base) rather than by root. UNVERIFIED — the `--user node` form has not been run.
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["./bin/rmd", "status"]
