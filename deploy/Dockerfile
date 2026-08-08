@@ -91,6 +91,55 @@ RUN curl -sSL -o /tmp/gh.tgz \
 # anyway is harmless and belt-and-braces; NOT passing it is now also correct.
 ENV HOME=/home/node
 
+# ── REQ 14: SHIP NO npm CACHE AT ALL — AND WHY REQ 10 ABOVE IS THE CAUSE ─────────────────────
+# MEASURED ON THE PUBLISHED IMAGE (digest 255b65bd, built from #1482 + #1483): `/home/node/.npm`
+# ships PARTIALLY root-owned — the directory itself is node-owned, entries inside it are not — and
+# the entrypoint bootstrap install then dies on EACCES as the runtime user.
+#
+# THE CAUSE IS THE LINE DIRECTLY ABOVE, WHICH IS WORTH SAYING PLAINLY. `ENV HOME=/home/node` is set
+# for the WHOLE BUILD, and every layer up to `USER node` runs as ROOT. npm resolves its cache to
+# `$HOME/.npm`, so from here down root does not write into ROOT's home — it writes into the RUNTIME
+# USER's home. REQ 10 is still correct and stays where it is (it must precede the browser layer, or
+# the browsers land somewhere the worker cannot reach), but it hands root a home that is not its
+# own, and this requirement is the other half of that trade.
+#
+# WHICH LAYER RECREATES IT, established from the layer order rather than assumed. Three layers
+# below run npm or npx as root: the browser install, the global `claude` install, and `npm ci` at
+# /app. The first two are REPAIRED by `RUN chown -R node:node /home/node` (REQ 11) — but `npm ci`
+# runs AFTER that chown, so it is the one that recreates root-owned entries inside a directory the
+# chown has already made node-owned. That is exactly the "partially" in the symptom: a node-owned
+# top level with root-owned content-addressed entries under `_cacache`.
+#
+# REPRODUCED OUTSIDE DOCKER, since no agent container has a docker daemon. A cache populated by uid
+# 1000 and then written to by root reports `distinct owners: root ubuntu`, top dir `ubuntu`, and
+# 170 root-owned entries inside; a subsequent uid-1000 install fails with
+# `npm error code EACCES / syscall mkdir / path .../_cacache/index-v5/f2/8d`, and npm even names the
+# condition itself: "Your cache folder contains root-owned files".
+#
+# THE FIX IS TO SHIP NO CACHE, NOT TO RE-CHOWN ONE. A chown after `npm ci` would fix the ownership
+# and still leave the artefact, and an artefact that only has to be owned correctly is one a future
+# layer can silently break again. An npm cache in an image is dead weight in any case: it is a
+# download accelerator for installs that already happened. So every root npm/npx layer below points
+# its cache at a throwaway path and deletes it IN THE SAME RUN, which means `/home/node/.npm` is
+# never created in any layer and there is no ownership question to get wrong. The runtime user then
+# creates it fresh, as itself, on the first bootstrap install.
+#
+# MEASURED that this actually redirects everything, for both verbs, with HOME left completely empty
+# afterwards: `npm_config_cache=<dir> npm install` and `npm_config_cache=<dir> npx --yes <pkg>` put
+# `_cacache`, `_logs`, `_update-notifier-last-checked` and (for npx) `_npx` under <dir>, and `find`
+# over HOME returns HOME alone.
+#
+# WHY NOT SIMPLY RUN `npm ci` AS `node`, which was the other candidate fix. It would need /app made
+# node-owned first, and it fixes only the ownership of a cache it would still SHIP — the other two
+# root layers write one regardless, and being node-owned does not make hundreds of megabytes of
+# download cache worth carrying. One mechanism applied to all three layers is smaller than two
+# mechanisms applied to one each, and it removes the artefact instead of relabelling it.
+#
+# THE BUILD ASSERTS THIS RATHER THAN TRUSTING IT — see the check at the end of the `npm ci` layer.
+# Same discipline as `claude --version` and `bwrap --version`: a future layer that reintroduces the
+# cache fails the build on the build fleet, loudly, instead of shipping an image whose only symptom
+# is that the bootstrap install cannot run.
+
 # ── THE BROWSERS WERE INSTALLED AND STILL UNREACHABLE. THE PATH WAS THE BUG. ─────────────────
 # MEASURED on the published image: `ls ~/.cache/ms-playwright` is EMPTY, and five browser suites
 # fail, so `rmd preflight --ci-parity` never goes green. One self-hosting run spent over 90 minutes
@@ -117,7 +166,11 @@ ENV HOME=/home/node
 # this exact defect at a different path — a relocated cache reachable only through a stripped
 # variable. It also carries `ARG NODE_VERSION=24`, a major bump from the node 22 this repo tests
 # on. The swap fixes nothing here and costs a runtime change; declined on both counts.
-RUN npx --yes playwright install --with-deps chromium
+#
+# `npm_config_cache` + `rm -rf` in the same RUN is REQ 14: npx caches the package it fetches under
+# the npm cache (`_npx`), which with HOME set above would land in the runtime user root-owned.
+RUN npm_config_cache=/tmp/npm-build-cache npx --yes playwright install --with-deps chromium \
+ && rm -rf /tmp/npm-build-cache
 
 # ── REQ 7: THE CLAUDE CODE CLI — WITHOUT IT NO WORKER CAN SPAWN ──────────────────────────────
 # MEASURED on the first real image built from this file and run on an Azure VM: `./bin/rmd --help`
@@ -161,7 +214,14 @@ RUN npx --yes playwright install --with-deps chromium
 # — rather than shipping an image whose only symptom is that no worker can ever spawn.
 ARG CLAUDE_CODE_VERSION=2.1.220
 ENV DISABLE_AUTOUPDATER=1
-RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+#
+# `npm_config_cache` + `rm -rf` in the same RUN is REQ 14. This layer is the one the earlier note in
+# REQ 11 blamed for the shipped root-owned cache; it does create one, but the chown below repairs it,
+# so it was never the layer that survived to the image. It is fixed here anyway — the throwaway cache
+# also stops the chown having to rewrite the whole tree into a second layer.
+RUN npm_config_cache=/tmp/npm-build-cache \
+      npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+ && rm -rf /tmp/npm-build-cache \
  && claude --version
 
 # ── REQ 8: THE SANDBOX BINARIES — bubblewrap AND socat ───────────────────────────────────────
@@ -209,6 +269,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 #
 #   `/home/node/.npm` IS ROOT-OWNED — the global `claude` install (REQ 7) populated npm's cache as
 #   root, so a later non-root `npm ci` inside the container dies on EACCES against it. Observed.
+#   THAT ATTRIBUTION IS WRONG AND THE SYMPTOM OUTLIVED THIS FIX. The chown below does repair what
+#   REQ 7 wrote; what it cannot repair is the `npm ci` layer that runs AFTER it, which is why the
+#   image built from this change still shipped a PARTIALLY root-owned cache — node-owned at the top,
+#   root-owned inside. Corrected in place rather than deleted, because the shape of the mistake is
+#   the useful part: a `chown -R` is only as good as its position, and naming the wrong layer made
+#   the defect look fixed. REQ 14 removes the artefact instead of re-owning it.
 #
 #   THE IMAGE DEFAULTS TO ROOT, and `claude` REFUSES `--permission-mode bypassPermissions` when it
 #   is uid 0. That refusal is a bare exit 1 with stderr swallowed, which cost an hour to diagnose
@@ -216,8 +282,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 #   correct invocation requires a flag nobody is told about is not a runnable image.
 #
 # The chown also covers `/home/node/.cache/ms-playwright`, written by root in the browser layer.
-# One `chown -R` fixes all three, and it must come AFTER the last root-writing layer or it fixes a
-# directory that is about to be rewritten.
+# That is now its ONLY remaining job: with REQ 14 in force no layer writes `/home/node/.npm` at all,
+# so this line no longer has a cache to re-own and no longer duplicates one into a fresh layer.
+# It must still come AFTER the last root-writing layer or it fixes a directory that is about to be
+# rewritten — and with the cache gone, the browser install is the last such layer.
 #
 # `USER node` then makes the correct invocation the DEFAULT rather than a flag. `--user 1000:1000`
 # stays valid and identical — the node user in this base is uid 1000 — so nothing that works today
@@ -227,8 +295,15 @@ RUN chown -R node:node /home/node
 
 WORKDIR /app
 # `--chown` rather than a later `chown -R /app`: the recursive form would duplicate the whole tree
-# into a second layer. This costs nothing and leaves the app tree writable by the runtime user, so
-# an in-container `npm ci` is possible at all.
+# into a second layer. This costs nothing and leaves the COPIED FILES owned by the runtime user.
+#
+# IT DOES NOT MAKE AN IN-CONTAINER `npm ci` AT /app POSSIBLE, which this comment used to claim.
+# `--chown` only touches what the COPY writes: `/app` itself is created by `WORKDIR` as root, and
+# `/app/node_modules` is written by the root `npm ci` below, so both ship root-owned and a runtime
+# user cannot install into them. REPORTED, NOT FIXED HERE — nothing runs an install at /app. The
+# entrypoint installs into the CLONE under `$HOME/Remudero/remudero`, which the runtime user does
+# own, and REQ 4 is explicit that the two trees must not share a `node_modules`. Correcting the
+# claim rather than acting on it, because acting on it would widen this change to a second concern.
 COPY --chown=node:node package.json package-lock.json ./
 
 # ── REQ 4: node_modules PER CONTAINER, NEVER SHARED ──────────────────────────────────────────
@@ -237,7 +312,25 @@ COPY --chown=node:node package.json package-lock.json ./
 # is nothing to share. run-task.ts already stores its install hash INSIDE node_modules and notes it
 # is "naturally invalidated if node_modules is ever wiped wholesale", so the code already treats
 # this directory as disposable. Do NOT mount a volume over /app/node_modules.
-RUN npm ci --omit=dev || npm ci
+#
+# THIS IS THE LAYER THAT SHIPPED THE ROOT-OWNED CACHE (REQ 14). It runs as root, and it runs AFTER
+# `chown -R node:node /home/node`, so before this change it wrote root-owned entries into a cache
+# the chown had just handed to the runtime user — leaving the top level node-owned and the contents
+# not, which is why an ownership check on the DIRECTORY reported everything was fine.
+#
+# The assertion below is the point of the layer as much as the install is. It runs after the last
+# root npm invocation in the file, so it fails the build on the build fleet if any layer above
+# reintroduces the cache, rather than shipping an image whose only symptom is that the entrypoint
+# bootstrap install cannot run. `ls -la` is there so the failure names what appeared, not just that
+# something did.
+RUN export npm_config_cache=/tmp/npm-build-cache \
+ && { npm ci --omit=dev || npm ci; } \
+ && rm -rf /tmp/npm-build-cache \
+ && { [ ! -e /home/node/.npm ] || { \
+        echo "BUILD ASSERTION FAILED (REQ 14): /home/node/.npm exists after the last root npm layer."; \
+        echo "  A build layer wrote an npm cache into the runtime user HOME. It will ship partially"; \
+        echo "  root-owned and the entrypoint bootstrap install will EACCES as uid 1000."; \
+        ls -la /home/node/.npm; exit 1; }; }
 
 COPY --chown=node:node . .
 
@@ -374,6 +467,23 @@ USER node
 # ENTRYPOINT keeps tini as PID 1 (REQ 1 — the reaper) and inserts the bootstrap after it, so the
 # clone happens before any command and `exec "$@"` leaves the real process as tini's child. The CMD
 # is unchanged in text but now runs INSIDE THE CLONE rather than the snapshot, which is the point.
+#
+# ── REPORTED, NOT FIXED: THE ENTRYPOINT RUNS BEFORE ANY `docker run` COMMAND, INCLUDING PROBES ───
+# A consequence rather than a defect, but it costs real time when the image is being diagnosed, so
+# it is written down here. `docker run <image> ls -la /home/node/.npm` does NOT list a directory: it
+# clones the repository first, which needs GH_TOKEN and network, and a failure there aborts before
+# the command is ever reached. Every question about the image's CONTENTS is therefore answered
+# through the bootstrap unless it is deliberately stepped around. The two ways to step around it,
+# both already used by deploy/verify-image.sh:
+#   docker run --rm --entrypoint bash --user 1000:1000 <image> -lc '<probe>'   # skip it entirely
+#   docker run --rm -e RMD_SKIP_BOOTSTRAP=1 <image> <probe>                    # go through it, no clone
+#
+# NOT FIXED DELIBERATELY. The obvious fix — have the entrypoint recognise "diagnostic-looking"
+# commands and skip the bootstrap for them — is a heuristic that guesses the caller's intent, and it
+# fails in the expensive direction: a real task that happened to match the heuristic would run
+# against a stale or absent work tree, which is the exact failure the bootstrap exists to remove.
+# An explicit flag the operator passes is the right shape; it just needs to be documented, which is
+# what this note is.
 COPY --chown=node:node deploy/entrypoint.sh /usr/local/bin/rmd-entrypoint
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/rmd-entrypoint"]
 CMD ["./bin/rmd", "status"]
