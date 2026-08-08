@@ -45,6 +45,8 @@
 # USAGE
 #   ./deploy/host-update.sh                    # reclaim, then pull :latest
 #   ./deploy/host-update.sh --dry-run          # report only — reclaims nothing, pulls nothing
+#   ./deploy/host-update.sh --print-daemon-run # PRINT the daemon-mode invocation and exit; starts
+#                                              # nothing, and touches docker not at all
 #   ./deploy/host-update.sh --tag <sha>        # a specific tag instead of :latest
 #   REGISTRY=... IMAGE=... ./deploy/host-update.sh          # retarget without editing this file
 #   RMD_STATE_DIR=/path ./deploy/host-update.sh            # if the bind mount is not ~/rmd-state
@@ -55,6 +57,7 @@ REGISTRY="${REGISTRY:-synthwatcholey0620}"
 IMAGE="${IMAGE:-remudero}"
 TAG="${TAG:-latest}"
 DRY_RUN=0
+PRINT_DAEMON_RUN=0
 
 # The HOST side of the state bind mount. The CONTAINER side is /home/node/Remudero (config.root
 # derives from HOME — see REQ 10 in deploy/Dockerfile), and the measured invocation binds
@@ -71,6 +74,7 @@ while [ $# -gt 0 ]; do
     --registry) REGISTRY="${2:?--registry needs a value}"; shift 2 ;;
     --image)    IMAGE="${2:?--image needs a value}"; shift 2 ;;
     --dry-run)  DRY_RUN=1; shift ;;
+    --print-daemon-run) PRINT_DAEMON_RUN=1; shift ;;
     -h|--help)  sed -n '1,60p' "$0"; exit 0 ;;
     *) echo "host-update: unknown argument '$1' (try --help)" >&2; exit 2 ;;
   esac
@@ -78,6 +82,68 @@ done
 
 REPO_REF="${REGISTRY}.azurecr.io/${IMAGE}"
 REF="${REPO_REF}:${TAG}"
+
+# ── --print-daemon-run: PRINT THE INVOCATION, RUN NOTHING ────────────────────────────────────
+# This branch exists so the daemon-mode command lives somewhere an operator can find it, rather
+# than in a chat message. IT DELIBERATELY STARTS NOTHING and exits before this script touches
+# docker at all — no pull, no prune, no `docker info`. Copy what it prints, read the caveats, and
+# decide; the script will not decide for you.
+#
+# THE DAEMON IS NOT READY TO RUN UNATTENDED, and the reason is stated here rather than left in a
+# report nobody opens: launchd's 60s ThrottleInterval has no docker equivalent, so a crash loop
+# cycles far faster in a container than the floor this repo earned from a measured restart storm.
+# The daemon's own crash-loop detector survives a restart but only opens a needs-human issue, which
+# is not a bound when nobody is reading. The full recon was written under `state/`, which is
+# GITIGNORED and does not survive the container that wrote it — so REQ 5 in deploy/Dockerfile
+# carries the conclusions instead, and this block carries the command.
+if [ "${PRINT_DAEMON_RUN}" -eq 1 ]; then
+  cat <<PRINTED
+host-update: DAEMON-MODE INVOCATION — printed only. Nothing has been started and nothing was run.
+
+  # THE DAEMON. --restart=on-failure matches launchd KeepAlive{SuccessfulExit:false}: exit 0 means
+  # a deliberate stop (daemonExitCode maps 'stopped' and 'max_reached' to 0) and must NOT restart;
+  # nonzero includes 'stale', which REQUIRES the restart to pick up merged code (W1-T126).
+  # The :5 retry cap is the only rate protection docker offers, and it caps the COUNT, not the rate.
+  docker run -d --name remudero-daemon \\
+    --restart=on-failure:5 \\
+    --privileged \\
+    --user 1000:1000 \\
+    -e GH_TOKEN="\$GH_TOKEN" -e CLAUDE_CODE_OAUTH_TOKEN="\$CLAUDE_CODE_OAUTH_TOKEN" \\
+    -v ${STATE_DIR}:${STATE_MOUNT_DEST} \\
+    ${REF} \\
+    ./bin/rmd daemon
+
+  # THE CONSOLE, IF WANTED, IS A SEPARATE CONTAINER WITH A DIFFERENT POLICY. serve returns 0 on a
+  # clean shutdown and must come back from EVERY exit, so it takes unless-stopped, not on-failure.
+  # launchd.ts records daemon-independence as a requirement: stopping the fleet must never blind
+  # the operator, which is why this is not folded into the container above.
+  docker run -d --name remudero-serve \\
+    --restart=unless-stopped \\
+    --user 1000:1000 \\
+    -v ${STATE_DIR}:${STATE_MOUNT_DEST} \\
+    ${REF} \\
+    ./bin/rmd serve
+
+  # STOPPING IT FROM OUTSIDE — no exec, no console, works from a phone. Both are plain files under
+  # the state root, which is the host side of the bind mount above.
+  #   PAUSE  (soft) new dispatch halts within the poll, in-flight work finishes, container keeps
+  #          running. Persistent until cleared.
+  touch ${STATE_DIR}/state/PAUSE     # and: rm ${STATE_DIR}/state/PAUSE  to resume
+  #   STOP   (hard) the daemon exits 0, so --restart=on-failure does NOT restart it and the
+  #          container stays down. The flag auto-consumes, so it cannot block a future start.
+  touch ${STATE_DIR}/state/STOP
+
+  # VERIFY THE MOUNT rather than trusting ${STATE_DIR} above — the source directory has changed once
+  # already, and a PAUSE written to the wrong path is a lever that silently does nothing:
+  docker inspect -f '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{end}}' remudero-daemon
+
+  # THE DEPLOY SUPERVISOR HAS NO CONTAINER EQUIVALENT AND NEEDS NONE. Its two jobs are getting new
+  # code onto the machine and restarting the daemon onto it; here the entrypoint clones or
+  # fast-forwards on every boot, and this script's own pull replaces the image wholesale.
+PRINTED
+  exit 0
+fi
+
 echo "host-update: target ${REF}"
 [ "${DRY_RUN}" -eq 1 ] && echo "host-update: DRY RUN — nothing will be reclaimed and nothing pulled"
 
