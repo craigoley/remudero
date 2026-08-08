@@ -108,12 +108,21 @@ function sanitizeRegExp(pattern: string): string {
  * `matches` array without opening the live file's contents for pattern-matching at all — the
  * caller (`ledgerGrepCommand`) exits non-zero naming `stateDir` rather than printing a
  * live-file-only result that could be mistaken for a real count.
+ *
+ * `pattern` is validated and compiled FIRST, before the archive count is even inspected — a
+ * malformed, over-long, or ReDoS-shaped pattern throws the same way regardless of whether
+ * `stateDir` has any archives. Validating after the zero-archive check would make a rejected
+ * pattern indistinguishable from the zero-archive verdict on an archive-less root (both would
+ * quietly report `ok: false, archiveCount: 0`) while the identical pattern threw on a host with
+ * archives — a caller-visible inconsistency this ordering avoids.
  */
 export function resolveLedgerUnion(
   stateDir: string,
   pattern: string | RegExp,
   fsDeps: LedgerGrepFsDeps = realLedgerGrepFs,
 ): LedgerUnionResult {
+  const re = pattern instanceof RegExp ? pattern : new RegExp(sanitizeRegExp(pattern));
+
   let names: string[];
   try {
     names = fsDeps.readdirSync(stateDir);
@@ -134,7 +143,6 @@ export function resolveLedgerUnion(
     return { stateDir, archiveFiles, archiveCount: 0, liveFileRead, ok: false, matches: [] };
   }
 
-  const re = pattern instanceof RegExp ? pattern : new RegExp(sanitizeRegExp(pattern));
   const seen = new Set<string>();
   const matches: string[] = [];
   const addMatchingLines = (text: string): void => {
