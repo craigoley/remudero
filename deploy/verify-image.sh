@@ -293,6 +293,127 @@ else
   RC=1
 fi
 
+# ── 7. THE BOOTSTRAP LANDS ON THE TIP — DRIVEN AGAINST A THROWAWAY ORIGIN, OFFLINE ───────────
+# THE CHECK THAT WOULD HAVE CAUGHT THE 2026-08-08 STALE-CHECKOUT DEFECT. A boot reported
+# "can be fast-forwarded" and then checked out the OLDER sha, so the next dispatch branched from
+# stale code — and every later boot repeated it, pinning the container at its first-ever checkout
+# while printing a clean line each time.
+#
+# TWO EARLIER DRAFTS OF THIS CHECK WERE VACUOUS, AND BOTH WERE CAUGHT BY RUNNING THEM AGAINST THE
+# BROKEN ENTRYPOINT RATHER THAN BY READING THEM. Recorded because the same mistake has now been made
+# three times in this file, and the lesson is the method, not the instance.
+#   DRAFT 1 — boot twice against the REAL repository and assert HEAD equals the remote tip. The
+#   defect only shows when the remote MOVES between two boots on one volume, and a verifier cannot
+#   make craigoley/remudero gain a commit on cue. A check that can only fail on someone else's
+#   timing is not a check.
+#   DRAFT 2 — manufacture the origin locally so the remote definitely moves. MEASURED: this passes
+#   on the BROKEN entrypoint. Its walk-back-then-merge does reach the tip whenever the merge
+#   succeeds, which in a clean tree it does. Asserting the happy-path outcome cannot discriminate,
+#   because both versions produce it.
+#
+# WHAT ACTUALLY DISCRIMINATES IS THE FAILURE THE OPERATOR HIT: an UNTRACKED file at a path an
+# incoming commit also adds. The tracked-only dirty guard correctly calls that tree clean, git
+# refuses to overwrite the file, and the old code — which silenced the only step that moved HEAD
+# forward — left the container on a stale sha and reported a normal boot. Phase 3 below is that
+# scenario, and it is the one assertion here that fails on the broken image. Phases 2 and 4 are
+# honest regression guards for the happy path and the sha pin; they are NOT the discriminator and
+# are not claimed to be.
+#
+# The origin is MANUFACTURED INSIDE THE CONTAINER, so this needs NO token, NO network and NO
+# registry — everything happens on a throwaway path in a throwaway container, and it runs on every
+# verification rather than only when credentials are around.
+#
+# The scratch repo commits a dummy `node_modules/.bin/tsx` so the entrypoint takes its
+# "node_modules present" branch and skips the bootstrap install; this section is testing the
+# CHECKOUT resolution, and an npm run would only add a network dependency it does not need.
+echo
+echo "verify-image: bootstrap currency (offline, against a throwaway origin — no token needed)"
+set +e
+out="$(docker run --rm --entrypoint /bin/sh "${REF}" -c '
+  set -e
+  export GIT_AUTHOR_NAME=v GIT_AUTHOR_EMAIL=v@v GIT_COMMITTER_NAME=v GIT_COMMITTER_EMAIL=v@v
+  root=$(mktemp -d)
+  origin="$root/origin"
+  export HOME="$root/home"
+  mkdir -p "$origin" "$HOME"
+  git init -q -b main "$origin"
+  cd "$origin"
+  mkdir -p node_modules/.bin
+  printf "#!/bin/sh\n" > node_modules/.bin/tsx
+  chmod +x node_modules/.bin/tsx
+  echo one > f.txt
+  git add -A && git commit -qm c1
+  # BOOT 1 — clones. Runs the real entrypoint, not a reimplementation of it.
+  RMD_REPO_URL="$origin" RMD_REF=main /usr/local/bin/rmd-entrypoint true >/dev/null 2>&1
+  # THE REMOTE MOVES. This is the step the real-repository version of this check cannot arrange.
+  cd "$origin"
+  echo two > f.txt
+  git add -A && git commit -qm c2
+  # BOOT 2 — must land on the NEW commit, not walk back to the frozen local branch.
+  RMD_REPO_URL="$origin" RMD_REF=main /usr/local/bin/rmd-entrypoint true >/dev/null 2>&1
+  tree="$HOME/Remudero/remudero"
+  head=$(git -C "$tree" rev-parse HEAD)
+  tip=$(git -C "$tree" rev-parse origin/main)
+  if [ "$head" = "$tip" ]; then printf "CURRENT %s\n" "$head"; else printf "STALE head=%s tip=%s\n" "$head" "$tip"; fi
+
+  # PHASE 3 — THE DISCRIMINATOR. An untracked file at a path the incoming commit also adds. A boot
+  # here must either advance or REFUSE LOUDLY; what it must never do is stay on the old sha and
+  # report success, because the next dispatch then branches from stale code.
+  cd "$origin"
+  echo upstream > collide.txt
+  git add -A && git commit -qm c3
+  echo local > "$tree/collide.txt"
+  if RMD_REPO_URL="$origin" RMD_REF=main /usr/local/bin/rmd-entrypoint true >/dev/null 2>&1; then
+    after=$(git -C "$tree" rev-parse HEAD)
+    if [ "$after" = "$(git -C "$tree" rev-parse origin/main)" ]; then
+      printf "COLLIDE-ADVANCED %s\n" "$after"
+    else
+      printf "COLLIDE-SILENT-STALE head=%s tip=%s\n" "$after" "$(git -C "$tree" rev-parse origin/main)"
+    fi
+  else
+    printf "COLLIDE-REFUSED\n"
+  fi
+  rm -f "$tree/collide.txt"
+
+  # PHASE 4 — A SHA REF MUST STILL PIN EXACTLY: the other half of what RMD_REF means, and the half
+  # a fix that simply always took the tip would silently break.
+  first=$(git -C "$tree" rev-parse "origin/main~1")
+  RMD_REPO_URL="$origin" RMD_REF="$first" /usr/local/bin/rmd-entrypoint true >/dev/null 2>&1
+  pinned=$(git -C "$tree" rev-parse HEAD)
+  if [ "$pinned" = "$first" ]; then printf "PINNED %s\n" "$pinned"; else printf "UNPINNED got=%s want=%s\n" "$pinned" "$first"; fi
+' 2>&1)"
+BOOT_RC=$?
+set -e
+if [ "${BOOT_RC}" -ne 0 ]; then
+  echo "  FAIL  the bootstrap-currency probe did not complete:" >&2
+  printf '%s\n' "$out" | sed 's/^/        /' >&2
+  RC=1
+else
+  if printf '%s' "$out" | grep -q '^CURRENT '; then
+    echo "  PASS  a second boot lands on the moved remote tip, not the frozen local branch"
+  else
+    echo "  FAIL  the second boot did NOT land on the remote tip — a dispatch would branch from stale code:" >&2
+    printf '%s\n' "$out" | sed 's/^/        /' >&2
+    RC=1
+  fi
+  # THE DISCRIMINATING ASSERTION. Advancing and refusing are both correct; only staying stale while
+  # reporting success is a failure, and that is precisely what the broken entrypoint did.
+  if printf '%s' "$out" | grep -qE '^COLLIDE-(ADVANCED|REFUSED)'; then
+    echo "  PASS  an untracked-file collision either advances or refuses loudly — never silently stale"
+  else
+    echo "  FAIL  a boot stayed on the old sha and reported success — the next dispatch branches stale:" >&2
+    printf '%s\n' "$out" | sed 's/^/        /' >&2
+    RC=1
+  fi
+  if printf '%s' "$out" | grep -q '^PINNED '; then
+    echo "  PASS  a sha ref still pins exactly, so RMD_REF keeps both meanings"
+  else
+    echo "  FAIL  a sha ref did NOT pin exactly:" >&2
+    printf '%s\n' "$out" | sed 's/^/        /' >&2
+    RC=1
+  fi
+fi
+
 echo
 if [ "${RC}" -eq 0 ]; then
   echo "verify-image: OK — every check passed on ${AFTER}"

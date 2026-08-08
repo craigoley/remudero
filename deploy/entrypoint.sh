@@ -78,14 +78,65 @@ else
   log "GH_TOKEN is not set — a private fetch or clone will fail"
 fi
 
+# ── RESOLVING THE REF: A BRANCH MEANS THE TIP AT BOOT, A SHA MEANS EXACTLY THAT ──────────────
+# MEASURED ON AZURE 2026-08-08, AND REPRODUCED HERE AGAINST A REAL GIT ORIGIN. A boot printed
+# "Your branch is behind 'origin/main' by 3 commits, and can be fast-forwarded" and then
+# "checkout: 354f20c" — the OLDER sha — and reported a successful boot. The next dispatch then
+# branched from stale code, which is W1-T405's scenario arriving one layer upstream.
+#
+# THE CAUSE WAS A TWO-PART COMPOUND, AND NEITHER HALF IS OBVIOUS FROM READING THE OLD CODE.
+#   1. `git checkout --detach main` RESOLVES THE LOCAL BRANCH, AND `git fetch` NEVER MOVES IT.
+#      The default fetch refspec updates `refs/remotes/origin/*` only, so after the initial clone
+#      the local `main` is frozen at the clone-time sha forever. Detaching onto it therefore walks
+#      HEAD BACKWARD on every single boot — measured: a tree already correctly at the newest commit
+#      was moved back to the clone-time sha before anything tried to bring it forward again.
+#   2. THE ONLY THING THAT CLIMBED BACK UP WAS SILENCED. `git merge --ff-only origin/$REF
+#      2>/dev/null || true` discarded both the error text and the exit code, so any failure left
+#      HEAD at the regressed sha and the boot still printed a clean "checkout:" line. Reproduced by
+#      giving the tree an untracked file that an incoming commit also adds — the tracked-only dirty
+#      guard above correctly sees a CLEAN tree, git refuses to overwrite the untracked file, and the
+#      container silently regressed from a good sha to the clone-time one. Once there it stays
+#      there: every later boot repeats the same walk-back and the same silent failure, so the
+#      container is pinned at its first-ever checkout while reporting success each time. That is the
+#      identical shape this script already fixed once, when counting untracked files as dirt made
+#      boot 2 refuse to sync forever.
+#
+# SO THE REF IS RESOLVED ONCE, HERE, AND CHECKED OUT IN ONE STEP. `origin/$REF` is tried FIRST, so
+# a BRANCH name means "the tip as of the fetch that just ran" — which is what a user passing `main`
+# expects and what the old code was already trying to reach, less reliably, via the merge. Anything
+# that is not a branch on the remote — a sha, a tag — has no `refs/remotes/origin/<x>` and falls
+# through to the exact form, so a pin still means exactly what it says. That distinction is the
+# whole point of RMD_REF and it now holds in both directions.
+#
+# NOTHING IS SILENCED. A checkout that cannot proceed DIES, loudly, rather than continuing on
+# whatever HEAD happened to be. Proceeding is the expensive direction: it costs a full run against
+# stale code and then a scope-guard refusal whose message names a different cause.
+resolve_target() {
+  # A branch on the remote — the freshly-fetched tip.
+  if git -C "$TREE" rev-parse --verify --quiet "refs/remotes/origin/$REF^{commit}"; then return 0; fi
+  # Otherwise an exact object: a sha, a tag, anything else git can name.
+  if git -C "$TREE" rev-parse --verify --quiet "$REF^{commit}"; then return 0; fi
+  return 1
+}
+
+checkout_target() {
+  TARGET="$(resolve_target)" || die "ref not found: $REF (tried origin/$REF, then $REF as an exact object)"
+  if ! out="$(git -C "$TREE" checkout --detach "$TARGET" 2>&1)"; then
+    log "CHECKOUT FAILED — refusing to run on whatever HEAD happens to be:"
+    printf '%s\n' "$out" | sed 's/^/  /' >&2
+    log "  A common cause is an UNTRACKED file at a path an incoming commit also adds: the"
+    log "  tracked-only dirty guard sees a clean tree, and git will not overwrite it. Remove the"
+    log "  file, or start with RMD_SKIP_BOOTSTRAP=1 to inspect the tree by hand."
+    die "cannot check out $REF ($TARGET)"
+  fi
+}
+
 # ── CLONE, OR SYNC WHAT IS ALREADY THERE ─────────────────────────────────────────────────────
 if [ ! -e "$TREE/.git" ]; then
   log "no work tree at $TREE — cloning $REPO_URL"
   mkdir -p "$CONFIG_ROOT"
   git clone "$REPO_URL" "$TREE" || die "clone failed — check GH_TOKEN and RMD_REPO_URL"
-  git -C "$TREE" checkout --detach "$REF" 2>/dev/null \
-    || git -C "$TREE" checkout "$REF" \
-    || die "ref not found: $REF"
+  checkout_target
 else
   log "work tree present at $TREE"
   git -C "$TREE" fetch --prune origin || log "fetch FAILED — continuing on the tree as it stands"
@@ -115,12 +166,11 @@ else
     log "  This is deliberately stricter than the deployer, which conflicts only on files the"
     log "  fast-forward would touch. Commit or stash, or run with RMD_SKIP_BOOTSTRAP=1."
   else
-    git -C "$TREE" checkout --detach "$REF" 2>/dev/null \
-      || git -C "$TREE" checkout "$REF" \
-      || die "ref not found: $REF"
-    # --ff-only, never a merge commit and never a reset: if the ref moved in a way that is not a
-    # fast-forward, that is a fact worth surfacing, not something to paper over.
-    git -C "$TREE" merge --ff-only "origin/$REF" 2>/dev/null || true
+    # ONE STEP, NOT CHECKOUT-THEN-MERGE. The old pair walked HEAD down to the frozen local branch
+    # and then relied on a silenced `merge --ff-only` to climb back — see the resolver above for the
+    # measured regression that produced. There is no merge here because there is nothing to merge:
+    # the target IS the freshly-fetched tip, so a single detach lands on it directly.
+    checkout_target
   fi
 fi
 
