@@ -49,8 +49,28 @@ RUN curl -sSL -o /tmp/gh.tgz \
 # therefore bake the browsers at BUILD time (when the CDN is reachable) or the review verb
 # degrades — its own message says "browser proofs may report exec_error". Kept as a separate,
 # clearly-labelled layer so it can be dropped if review is not run in-container.
+#
+# NOW ENABLED, because the reason it was commented out does not apply to the build path this
+# image is actually built on. `az acr build` (.github/workflows/acr-build.yml) runs the build as
+# an ACR Task on Azure's fleet, where cdn.playwright.dev is reachable; the 403 recorded above was
+# this repo's agent container refusing the host, not a property of the Dockerfile. If a future
+# build environment cannot reach the CDN, comment this line again rather than letting the layer
+# fail — `rmd review` degrades but everything else works.
+#
+# WHY NOT `mcr.microsoft.com/playwright:v1.62.1-noble`, which bakes the browsers into the base and
+# is what craigoley/synthwatch's runner/Dockerfile does. Two facts, both measured, and they point
+# opposite ways:
+#   FOR — the tag EXISTS and matches exactly. This repo's package-lock resolves `playwright` and
+#   `playwright-core` to 1.62.1, and `v1.62.1-noble` is published on MCR (confirmed against
+#   mcr.microsoft.com/v2/playwright/tags/list). SynthWatch's own comment insists the base tag match
+#   the npm dependency exactly, and here it would.
+#   AGAINST — the node version inside that image is UNMEASURED, and package.json requires
+#   `node >= 22.22.3`. Swapping the base trades a reachable-CDN assumption for an unverified
+#   runtime-version assumption, and only one of those fails loudly at build time.
+# So the base stays `node:22-bookworm-slim` and the browsers are installed. Revisit if the install
+# layer proves slow or flaky — the alternative is real and is one line.
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
-# RUN npx --yes playwright install --with-deps chromium   # enable where cdn.playwright.dev is reachable
+RUN npx --yes playwright install --with-deps chromium
 
 WORKDIR /app
 COPY package.json package-lock.json ./
