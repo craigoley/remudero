@@ -113,6 +113,20 @@ test("a nested-quantifier pattern (the canonical ReDoS shape) is rejected, not c
   }
 });
 
+test("a rejected pattern throws the SAME way on a zero-archive root as it does with archives present", () => {
+  const dir = tmpStateDir("rmd-ledger-grep-noarchive-badpattern-");
+  try {
+    // No archives written at all — the exact root shape the zero-archive verdict handles for a
+    // VALID pattern. A malformed pattern must still throw here, not be swallowed into a plain
+    // `ok: false, archiveCount: 0` that would be indistinguishable from "no archives, fine
+    // pattern" — see the module doc on `resolveLedgerUnion`.
+    assert.throws(() => resolveLedgerUnion(dir, "a".repeat(201)), /pattern too long/);
+    assert.throws(() => resolveLedgerUnion(dir, "(a+)+"), /catastrophic backtracking/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── ledgerGrepCommand: the CLI shell ────────────────────────────────────────────────────────
 
 test("ledgerGrepCommand refuses a missing pattern and an unknown flag, spawning nothing", () => {
