@@ -1,0 +1,39 @@
+id: fb-1786227830949-6dd95a
+ts: 2026-08-08T22:23:50.949Z
+raw: "AN IMPLEMENT WORKER REPORTED subtype success WITH AN EMPTY DIFF — measured
+  in a container on Azure, 2026-08-08. W1-T388 is type: implement, verify: auto,
+  status: queued. The run completed every phase: containment and isolation
+  probes passed, worktree created, recon ran and declared followups, prompt
+  linted, anchor built, then implement.done with subtype success, 30 turns,
+  cost_usd 1.29, api_error false, permission_denials 0. Verdict no_pr. THE
+  BRANCH SURVIVED AND CARRIES NOTHING: git log
+  origin/main..run-W1-T388-1786226014206 is empty and git diff --stat against
+  origin/main is empty. The worker wrote no code and said the run succeeded.
+  WHAT MAKES THIS HARD TO SEE: implement.done with subtype success and an empty
+  diff is indistinguishable from a healthy run in every aggregate. The no_pr
+  verdict is the only signal, and no_pr runs at roughly 15.9 percent of all
+  runs, so this shape is inside the noise. THE RECON PHASE WORKED CORRECTLY and
+  is the evidence: its followups say the task is ready and name the work
+  precisely — move the sanitizeRegExp plus new RegExp compile above the
+  zero-archive early return, add a named usage-error return distinguishable from
+  the zero-archive verdict, wire a distinguishable exit code in
+  ledgerGrepCommand, and add TDD-first failing cases covering all three throw
+  classes against both an archive-present and an archive-absent state root. It
+  then adds: this is the actual work item this recon was scoped to precede. So
+  the recon believed it was preceding implementation rather than being the
+  implementation, on a task typed implement. RECON: establish whether an empty
+  diff at implement.done is detectable at the point the verdict is computed — a
+  git diff against the merge base costs nothing and the run already holds the
+  worktree. Then establish whether subtype success should be reachable at all
+  with no commits, or whether that combination deserves its own named subtype so
+  it stops hiding inside no_pr. Falsifying check: if the worker legitimately
+  concluded the work was already satisfied, an ALREADY_SATISFIED exit exists for
+  exactly that and was not used — so establish whether the contract was
+  available to it and it chose not to, or whether the contract has no exit for
+  the state it was actually in."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null
+expansion: null

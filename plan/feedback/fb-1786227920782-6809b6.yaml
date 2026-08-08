@@ -1,0 +1,32 @@
+id: fb-1786227920782-6809b6
+ts: 2026-08-08T22:25:20.782Z
+raw: "THE PREFLIGHT LOOP IS MEASURED NOW, AND IT STRANDS PROCESSES — evidence
+  for W1-T373, filed and unbuilt. In a container where the full suite could not
+  go green, an implement worker ran rmd preflight --ci-parity repeatedly for
+  over 90 minutes without converging, and the operator stopped it. MEASURED
+  DURING: two separate test-with-retry invocations in flight AT ONCE with
+  different parents, each spawning per-file node --test processes; 238 PIDs; 197
+  percent CPU; 10.9 GB of block I/O. FOUR STRANDED rmd serve PROCESSES on
+  different ports, one per suite attempt, still alive — 18:23, 18:32, 18:44,
+  21:03 in one run. So a suite that cannot pass does not merely waste turns;
+  each attempt LEAKS A SERVER, and the leak is invisible because the run is
+  still nominally working. THE CAUSE OF THE UNPASSABLE SUITE WAS ENVIRONMENTAL
+  and is now fixed — Playwright browsers were installed at a non-default path
+  and PLAYWRIGHT_BROWSERS_PATH is stripped by buildWorkerEnv ALLOWLIST, so a
+  worker looked in an empty directory. But the LOOP is not environmental: any
+  condition that keeps the suite red produces it, and W1-T373 exists because the
+  cheap deterministic gates are reachable ONLY through --ci-parity, which shells
+  the full glob. THE COST IS NOW CONCRETE rather than argued: the fast-mode task
+  was filed as a convenience and it is a containment measure. RECON: establish
+  whether the serve leak is a test-teardown gap or a consequence of the harness
+  killing a suite mid-run, and whether test-with-retry has a cap on attempts —
+  two concurrent invocations suggests the retry overlapped a fresh preflight
+  call rather than replacing it. Falsifying check: if the stranded servers are
+  reaped by an existing sweep on a longer cadence than the run, they are untidy
+  rather than leaked and the finding is only about turns."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null
+expansion: null
