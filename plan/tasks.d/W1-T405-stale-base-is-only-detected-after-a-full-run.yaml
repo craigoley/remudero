@@ -1,0 +1,94 @@
+- id: W1-T405
+  title: "a run on a stale base is only detected AFTER recon, implement and commit, by a scope guard whose message asserts the rarer of several causes that produce an identical diff — nothing asserts base currency at dispatch, where refusing costs a re-run instead of a full run"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "MEASURED ON AZURE 2026-08-08, RE-DERIVED FROM SOURCE AT 5d1dc93. A run-task dispatch
+    produced a worktree whose diff appeared to ADD two files that had merged upstream. The scope
+    guard REFUSED the push — correctly — but only after recon, implement and commit had all run, at
+    a measured cost of about two dollars, and its message named a forged merge-base as the likely
+    cause when the base was merely behind.
+    THE BRIEF'S CAUSAL STORY DOES NOT SURVIVE THE SOURCE, AND SAYING SO IS PART OF THIS FILING.
+    The story was: the target clone sat one commit behind, so the worktree carried a stale base.
+    But `worktreeAdd` (src/lib/worker.ts) runs `git fetch origin` and then creates the worktree from
+    `origin/main` — the freshly-fetched REMOTE-TRACKING ref, not the clone's local branch — and
+    EVERY run-task dispatch path calls it with exactly that base. A stale local `main` therefore
+    cannot by itself produce the observed diff. The fetch is also fail-closed: it is an
+    `execFileSync`, so a failed fetch throws and aborts rather than proceeding on stale refs.
+    SO THE MECHANISM IS UNMEASURED. For the symptom to occur the fetch must have not taken effect,
+    and this container cannot establish which path allowed that — the ledger is UNREACHABLE (the
+    mini is down) and no run log survives here. THIS TASK IS DELIBERATELY NOT PREDICATED ON THAT
+    MECHANISM. It is predicated on what IS established from source and is true regardless of it.
+    WHAT IS ESTABLISHED, EACH RE-DERIVED AT THIS SHA:
+    (1) The target clone is created clone-once-if-absent — `if (!existsSync(repoDir))` guards a
+    `gh repo clone`, at every one of its call sites in src/run-task.ts. NOTHING ever updates that
+    clone's LOCAL branches afterwards. Only remote-tracking refs move, and only via the fetch inside
+    `worktreeAdd`.
+    (2) The base is never ASSERTED and never RECORDED. `worktreeAdd` fetches and creates the
+    worktree, but nothing checks that the resulting base is the current remote head, and no ledger
+    line carries the base sha. So when a run does land on a stale base, by whatever route, there is
+    no artefact that says so and no cheap signal before the money is spent.
+    (3) The only detection is terminal. The scope guard computes its diff as `origin/main..HEAD`
+    inside the worktree, and fires in the orchestrator-initiated push fallback — after the worker
+    has finished. It fails closed, which is right, and it fails LATE, which is the cost.
+    THE FAIL-DIRECTION ASYMMETRY IS THE WHOLE ARGUMENT. Refusing at dispatch costs a re-run and a
+    message that names the condition. Proceeding costs a full run plus a refusal the operator must
+    diagnose from a guard naming a cause that was not the cause. The cheap check is available before
+    any spend: compare the base the worktree was created from against the remote head the fetch just
+    observed. That comparison is two ref reads.
+    WHY THE MAC MINI HAS NOT SEEN THIS, AND WHY THAT IS NOT REASSURING. `checkCliFreshness`
+    (src/lib/self-sync.ts) fast-forwards the INSTALL ROOT at every CLI entry and the deploy
+    supervisor fast-forwards on merge, so the operator's own checkout is never stale. Neither
+    touches the target clone, which is a DIFFERENT repository under the state root. The mini is
+    protected by the freshness of a tree that is not the one the run is built from — so the gap is
+    latent there too rather than container-specific, and a daemonless one-shot dispatch is merely
+    what made it visible."
+  acceptance:
+    - claim: "a dispatch whose worktree base is behind the remote head refuses before any worker runs, and the message names being behind rather than a forged base"
+      proof: "unit test: test/worktree-base-currency.test.ts"
+    - claim: "a dispatch whose base matches the remote head proceeds untouched, so the check cannot fire on a healthy run"
+      proof: "unit test: test/worktree-base-currency-healthy.test.ts"
+    - claim: "an unreadable remote head proceeds with a warning rather than refusing, so an unreachable forge cannot block dispatch"
+      proof: "unit test: test/worktree-base-currency-unreadable.test.ts"
+    - claim: "the base commit is recorded when the worktree is created, so a later refusal can be attributed without re-deriving it"
+      proof: "unit test: test/worktree-base-recorded.test.ts"
+  risk: high
+  origin: azure-run-2026-08-08#stale-base
+  plan_refs: ["§8A"]
+  files: [src/lib/worker.ts, src/run-task.ts, test/worktree-base-currency.test.ts, test/worktree-base-currency-healthy.test.ts, test/worktree-base-currency-unreadable.test.ts, test/worktree-base-recorded.test.ts]
+  status: queued
+  attempts: 0
+  note: "FOUR DESIGN QUESTIONS, DECIDED HERE RATHER THAN LEFT TO THE IMPLEMENTER.
+    (i) ASSERT-AND-REFUSE, NOT FAST-FORWARD, and the fleet's two precedents do not conflict once the
+    subject is named. `checkCliFreshness` auto-fast-forwards a LONG-LIVED checkout the operator
+    owns; the deployer refuses on a dirty tree rather than mutating uncommitted work. A run worktree
+    is neither — it is EPHEMERAL and created fresh from a remote ref each dispatch, so there is
+    nothing to fast-forward and nothing of the operator's to protect. The right action is to assert
+    and refuse. Nothing in this task may mutate a checkout.
+    (ii) STALE MEANS BEHIND BY ANY COMMIT, measured as the created base differing from the remote
+    head observed by the same fetch. The more precise question — behind in a way that AFFECTS THE
+    DIFF — is strictly better and is rejected anyway, because computing it needs the diff, which
+    needs the run, which is the cost being avoided. A cheap over-approximation evaluated before the
+    spend beats an exact one evaluated after it.
+    (iii) IT MUST NOT FIRE ON A HEALTHY RUN, and this repo has earned that caution four times over:
+    ci-gate's wait cap sized under the real check wall-clock, a deploy ceiling consumed by a dry run
+    that delivered nothing, a check-wait bound where every booked PR later merged, and the idle-gate
+    ceiling. So when the remote head cannot be read — an unreachable forge, a transport error — the
+    dispatch PROCEEDS WITH A WARNING. Refusing on an unmeasurable condition would convert a network
+    blip into a stalled queue, which is the exact failure this repo keeps re-learning.
+    (iv) ANY DIRTINESS CHECK MUST USE THE TRACKED-ONLY FORM. Measured in an adjacent context on
+    2026-08-08: counting untracked files as dirt made a tree permanently unsyncable the moment
+    anything created node_modules, because every later check saw the same untracked directory and
+    refused. Untracked files also cannot conflict with a fast-forward. If this task grows a
+    dirtiness predicate at all, it compares tracked modifications only.
+    RISK:HIGH IS RULE 19's SPAN, NOT BLAST RADIUS. The file set crosses two src/ modules — the
+    worktree helper where the assertion belongs and the dispatcher where the ledger line belongs —
+    plus their tests. The behaviour change itself is a refusal before work starts, which is the
+    cheapest possible failure.
+    NOT IN SCOPE, AND REPORTED SEPARATELY: the scope guard's MESSAGE. It names a forged merge-base
+    for a diff shape that a stale base produces identically, and it cannot distinguish them — but it
+    could say so rather than asserting the rarer cause. That is a wording change to an existing
+    refusal, not a predicate change, and folding it in here would put two concerns in one shard."
