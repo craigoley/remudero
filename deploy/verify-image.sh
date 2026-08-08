@@ -144,12 +144,65 @@ docker run --rm --entrypoint /bin/sh "${REF}" -c '
   # fast-forward the checkout baked into this image, over the network, from a probe.
   check "rmd"       env RMD_SELF_SYNC_DONE=1 ./bin/rmd --help
 
-  if [ -d /opt/pw-browsers ] && [ -n "$(ls -A /opt/pw-browsers 2>/dev/null)" ]; then
-    printf "  PASS  %-22s %s\n" "playwright browsers" "$(ls /opt/pw-browsers | tr "\n" " ")"
+  # THE BROWSER CHECK RESOLVES ITS PATH THE WAY THE CODE DOES, and that is the whole point of it.
+  # This probe previously hardcoded /opt/pw-browsers — the path the image INSTALLED to — so it
+  # reported PASS on an image whose browser suites could not run, because the code looks somewhere
+  # else. Checking where the installer WROTE proves the installer ran; checking where the CONSUMER
+  # READS proves the browsers are usable. Only the second is worth reporting.
+  #
+  # IT DELIBERATELY IGNORES PLAYWRIGHT_BROWSERS_PATH, and that is not an oversight. Honouring the
+  # override would make this probe agree with the broken image: this shell HAS the image env, so it
+  # would resolve to the relocated cache and report PASS, while a worker resolves somewhere else and
+  # fails. The allowlist in src/lib/env.ts carries PATH, HOME, TMPDIR, LANG, USER and the Claude
+  # token and nothing more, so a worker NEVER sees that variable. The only path worth asking about
+  # is therefore the one a stripped environment computes: the linux default under HOME.
+  #
+  # INSTALLATION_COMPLETE is the marker because it is exactly what the isInstalled helper in
+  # review.ts tests. A directory that exists is not an installed browser.
+  worker_root="${HOME:-/root}/.cache/ms-playwright"
+  installed=""
+  for d in "$worker_root"/*/; do
+    [ -f "${d}INSTALLATION_COMPLETE" ] && installed="$installed $(basename "$d")"
+  done
+  if [ -n "$installed" ]; then
+    printf "  PASS  %-22s %s ->%s\n" "playwright browsers" "$worker_root" "$installed"
   else
-    printf "  FAIL  %-22s (/opt/pw-browsers empty or absent — rmd review will degrade)\n" "playwright browsers"
     fail=1
+    printf "  FAIL  %-22s no INSTALLATION_COMPLETE under %s\n" "playwright browsers" "$worker_root"
+    printf "        %-22s  the five browser suites cannot pass, so preflight --ci-parity never goes\n" ""
+    printf "        %-22s  green and test-with-retry reruns the suite until the turn budget dies\n" ""
+    # Name the relocation explicitly when it is the cause: it is the difference between "install
+    # the browsers" and "install them where the consumer looks", and those are not the same fix.
+    relocated="${PLAYWRIGHT_BROWSERS_PATH:-}"
+    case "$relocated" in ""|0) relocated="" ;; esac
+    if [ -n "$relocated" ] && [ -d "$relocated" ] && [ -n "$(ls -A "$relocated" 2>/dev/null)" ]; then
+      printf "        %-22s  BUT they ARE present at %s, reachable only via PLAYWRIGHT_BROWSERS_PATH,\n" "" "$relocated"
+      printf "        %-22s  which the worker env strips. Relocate the install, do not repeat it.\n" ""
+    fi
   fi
+
+  # THE RUNTIME USER. `claude` refuses --permission-mode bypassPermissions as uid 0, and the
+  # refusal is a bare exit 1 with stderr swallowed, so this is worth failing loudly and early.
+  uid="$(id -u)"
+  if [ "$uid" = "0" ]; then
+    printf "  FAIL  %-22s (running as root — claude refuses bypassPermissions as uid 0)\n" "runtime user"
+    fail=1
+  else
+    printf "  PASS  %-22s uid=%s %s\n" "runtime user" "$uid" "$(id -un 2>/dev/null)"
+  fi
+
+  # CACHE OWNERSHIP. Root-owned caches under HOME are what made a non-root `npm ci` die on EACCES.
+  # Writability is the property that actually matters, so test that rather than parsing an owner.
+  for c in "${HOME}/.npm" "${HOME}/.cache"; do
+    if [ ! -e "$c" ]; then
+      printf "  PASS  %-22s %s absent (nothing to own)\n" "cache writable" "$c"
+    elif [ -w "$c" ]; then
+      printf "  PASS  %-22s %s\n" "cache writable" "$c"
+    else
+      printf "  FAIL  %-22s (%s not writable by uid %s — a non-root npm ci will EACCES)\n" "cache writable" "$c" "$uid"
+      fail=1
+    fi
+  done
 
   exit $fail
 '
