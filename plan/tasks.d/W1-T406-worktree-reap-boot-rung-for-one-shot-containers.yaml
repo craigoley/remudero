@@ -1,0 +1,129 @@
+- id: W1-T406
+  title: "reapStaleWorktrees never runs on a one-shot container dispatch — both its call sites need a daemon or a PR-disposition verb, and the pid probe that would gate it answers in a pid namespace that restarts with every container"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "MEASURED ON AZURE 2026-08-08, RE-DERIVED FROM SOURCE AT 0ff3e8f. One state directory
+    on the container host accumulated 3.0 GB across a day of one-shot dispatches, several of which
+    left orphaned worktrees behind after failing — including runs killed mid-implement, whose trees
+    survive carrying uncommitted work. #1486 (deploy/host-update.sh) recommended this shard and
+    deliberately did not file it.
+    BOTH CALL SITES ESTABLISHED, EXHAUSTIVELY. `runWorktreeReapRung` (src/lib/worker.ts) is called
+    from exactly two places in src/run-task.ts — the daemon's per-poll sweep hook, and
+    `sweepCommand`. Neither is reachable from `docker run ... rmd run-task <id>`:
+    (1) THE DAEMON POLL requires a running daemon, and a one-shot container has none.
+    (2) `rmd sweep` IS NOT A DISK VERB. Its own registered usage string names its primary action as
+    arming auto-merge on mergeable PRs and closing stale ones, so running it to reclaim disk would
+    take PR actions as a side effect. The obvious dodge does not exist either: `sweepCommand` guards
+    the reap with `if (!dryRun)`, so `rmd sweep --dry-run` takes no reap at all.
+    BUT IT IS NOT TRUE THAT NOTHING REAPS ON THE RUN PATH, AND SAYING SO PRECISELY IS PART OF THIS
+    FILING. `pruneStaleRuns` IS called inside `runTask` (and inside `retroCommand` and
+    `triageCommandLocked`). It enumerates git's own `worktree list --porcelain` and removes
+    registered `run-*` worktrees whose runs are not live. What a one-shot container never runs is
+    `reapStaleWorktrees`, and the difference is exactly the three holes run-task.ts's own sweep-rung
+    comment names: git-INVISIBLE directories (never registered, or whose registration was lost),
+    detached-HEAD `sweep-*` orphans that write no lock at all, and WIDOWED `.lock` files whose
+    worktree directory is already gone. Those three are what accumulate.
+    THE PRECEDENT IS THE SHAPE, NOT THE CALL SITE — AND THE BRIEF THAT PROPOSED IT HAS THIS HALF
+    WRONG. `logCloneReapSurvey` is described as a boot rung and IS one, but its only call site is
+    inside `daemonCommand`. So it is a DAEMON boot rung and is ALSO unreachable from a one-shot
+    container. Following `reapStaleClones`' wiring therefore CANNOT mean calling this from where
+    that one is called. What transfers is its SHAPE, which this task adopts point for point:
+    best-effort with a try/catch returning null so it never blocks boot, injectable deps appended
+    LAST so no positional caller shifts, one ledger line summarising what it found, and DRY BY
+    DEFAULT behind a policy flag. What changes is the call site: the one-shot dispatch path, beside
+    the `pruneStaleRuns` call that already runs there.
+    THE CADENCE ARGUMENT IS THE WHOLE JUSTIFICATION. On the mini a poll loop supplies the cadence.
+    In a one-shot container world every container start IS the cadence — the rung fires exactly as
+    often as work happens, needs no operator, and needs no daemon."
+  acceptance:
+    - claim: "a one-shot run-task dispatch runs the worktree reap rung at boot, so the three coverage holes pruneStaleRuns leaves are closed without a daemon"
+      proof: "unit test: test/worktree-reap-boot-rung.test.ts"
+    - claim: "a run lock naming a pid that is alive only because the container pid namespace restarted is judged stale, using the startedAt the lock already records"
+      proof: "unit test: test/worktree-reap-pid-reuse.test.ts"
+    - claim: "the rung deletes nothing while its policy flag is off, surveying and ledgering what it would reclaim"
+      proof: "unit test: test/worktree-reap-boot-survey.test.ts"
+    - claim: "a failure anywhere in the rung is caught and never blocks the dispatch that invoked it"
+      proof: "unit test: test/worktree-reap-boot-nonblocking.test.ts"
+  risk: high
+  origin: azure-container-2026-08-08#worktree-accumulation
+  plan_refs: ["§8A"]
+  files: [src/lib/worker.ts, src/run-task.ts, src/lib/policy.ts, plan/policy.yaml, test/worktree-reap-boot-rung.test.ts, test/worktree-reap-pid-reuse.test.ts, test/worktree-reap-boot-survey.test.ts, test/worktree-reap-boot-nonblocking.test.ts]
+  status: queued
+  attempts: 0
+  note: "FOUR DECISIONS, MADE HERE RATHER THAN LEFT TO THE IMPLEMENTER.
+    (i) IT MUST NOT RE-IMPLEMENT AN AGE CHECK — IT CALLS THE EXISTING REAPER. `reapStaleWorktrees`
+    age-gates on `newestActivityMs`, the W1-T378 DEEPEST-ACTIVITY walk, and the reason is measured:
+    a directory's mtime advances only when an entry is added to or removed from THAT directory, and
+    `git commit` in a linked worktree writes to `<parent>/.git/worktrees/<name>/index` — outside the
+    tree entirely. So the root's mtime is frozen at checkout and a root-mtime age gate degrades to
+    'reap unconditionally'. W1-T350 measured the cost: a run that was actively committing had its
+    worktree destroyed 40 minutes in. This rung is a CALL SITE. It introduces no age arithmetic of
+    its own and no new destruction criterion; the only thing it changes is WHEN the existing
+    predicate runs.
+    (ii) THE LOCK IS THE AUTHORITY — AND THE HAZARD IS THE OPPOSITE OF THE ONE PROPOSED. The brief
+    for this filing warned that `isHolderStale`'s host-first rung (W1-T396) would make a boot rung
+    see the previous boot's locks as foreign and unreclaimable, because a container's hostname
+    changes on every restart. THAT RUNG IS STRUCTURALLY INAPPLICABLE HERE. `reapStaleWorktrees`
+    never calls `isHolderStale`; it calls `isPidAlive` directly. And `RunLockInfo` (src/lib/worker.ts)
+    is `{pid, run_id, startedAt}` with NO host field at all, so there is nothing for a host rung to
+    read. The host-first rung governs `HolderIdentity`, whose `host` is written by the inflight,
+    drain, review and task-id-reservation locks — a different lock family.
+    THE REAL CONTAINER HAZARD RUNS THE OTHER WAY AND IS WORSE THAN THE ONE FEARED. `defaultIsPidAlive`
+    (src/lib/drain-lock.ts) is `process.kill(pid, 0)`, which answers in THIS container's pid
+    namespace. Every container boot restarts pids at 1, so a previous boot's lock naming a low pid
+    will very often find that pid ALIVE as an entirely unrelated process — and `reapStaleWorktrees`
+    then takes the `live-pid` keep branch and never reaps it. The failure is not destruction, it is
+    PERMANENT NON-RECLAMATION, which is exactly the shape of the 3.0 GB that accumulated.
+    THE DISCRIMINATOR ALREADY EXISTS AND IS ALREADY RECORDED. `RunLockInfo.startedAt` is written on
+    every acquire and `reapStaleWorktrees` ignores it. `isHolderStale`'s third rung is precisely
+    this comparison: a pid that started AFTER the lock claims cannot be the holder that wrote it.
+    So this task threads a start-time-aware liveness predicate into the reap opts rather than
+    inventing one, and the comparison is STRONGER in a container than on the mini — every process
+    in a fresh boot started after any previous boot's lock was written, so the question is almost
+    always decidable rather than almost always deferred.
+    DO NOT ADD A `host` FIELD TO `RunLockInfo` AS PART OF THIS. It would import the exact hazard the
+    brief feared instead of fixing it: `isHolderStale`'s own doc states that a machine whose
+    hostname changes between acquire and reclaim sees its OWN older locks as foreign and therefore
+    permanently unreclaimable, recoverable only by deleting the lock file. A container's hostname is
+    its container id by default and changes on every `docker run`, so recording one here would
+    convert a decidable question into an undecidable one. If a stable identity is ever wanted, that
+    is the separate changeset `isHolderStale`'s doc already describes.
+    UNMEASURED: the actual value of `os.hostname()` inside this image, because no agent container
+    has a docker daemon. It is not needed for the decision above — that rests on `RunLockInfo`
+    having no host field at all — but what would settle it is two runs of
+    `docker run --rm --entrypoint bash --user 1000:1000 <image> -lc 'hostname'` compared against
+    each other, and against the same command with `--hostname` passed.
+    (iii) IT MUST NOT FIRE ON A HEALTHY RESTART, AND THE ANSWER IS TO SHIP IT DRY. This repo has
+    four bounds that fired on healthy conditions — ci-gate's wait cap sized under the real check
+    wall-clock (W1-T312), a deploy ceiling consumed by a dry run that delivered nothing (W1-T380), a
+    check-wait bound where every booked PR later merged (W1-T382), and the idle-gate ceiling. A
+    reaper that fires wrongly does not merely stall a queue; it destroys uncommitted work.
+    WHAT 'LEGITIMATELY HOLDS WORK' MEANS WHEN THE PREVIOUS PROCESS IS DEFINITELY GONE: the existing
+    predicate already answers it and this rung must not weaken any part of it. A registered branch
+    still live upstream is kept regardless of age; an incomplete activity probe keeps as
+    `activity-unknown` because an ambiguous signal must never destroy; and recent activity rescues a
+    tree unless its own lock names a pid confirmed dead (W1-T381). Those keeps stay exactly as they
+    are.
+    ON TOP OF THAT, THE RUNG SHIPS SURVEY-ONLY, following `logCloneReapSurvey`, whose flag is false
+    by default so it ledgers what it WOULD reclaim and deletes nothing. The ledger line is what
+    earns the flag being turned on: an operator can read several boots' worth of dispositions before
+    anything is destroyed. A reaper that has never been observed deciding is not ready to delete.
+    (iv) THE LEDGER IS NOT IN SCOPE, AND NO REAPER MAY EVER TOUCH IT. `state/ledger*` — the live
+    file and every gzipped rotation — is outside this task and outside any successor. `rotateLedger`
+    keeps only the newest 200 lines per step in the live file and archives the rest, so roughly 63%
+    of `run.start` history exists ONLY inside those archives and there is no second copy. Deleting
+    any of them destroys unique evidence. This rung reaps WORKTREES under the worktrees root and
+    widowed `.lock` siblings, and nothing else under the state root.
+    RISK:HIGH IS RULE 19's SPAN, NOT BLAST RADIUS. The file set crosses the reaper's own module, the
+    dispatcher that gains the call site, and the policy pair that carries the flag — plus their
+    tests. The behaviour change while the flag is off is a ledger line and nothing else, which is
+    the cheapest possible failure.
+    REPORTED, NOT FILED: deploy/host-update.sh deliberately does NOT clean state, and its header
+    carries a standing instruction not to add it. IF THIS RUNG LANDS, THAT INSTRUCTION STAYS
+    CORRECT and the two must not grow into each other — the fleet reaps its own state from inside,
+    where the live-pid, live-branch and activity predicates are available; the operator script
+    reclaims DOCKER's disk from outside, where none of them are."
