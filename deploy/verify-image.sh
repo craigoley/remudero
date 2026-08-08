@@ -111,6 +111,15 @@ fi
 # unchanged and untested by this, which is correct — this asks "is the toolchain present", not
 # "does the daemon boot". Each check reports independently and none aborts the others, so one
 # missing tool does not hide the state of the rest.
+#
+# THE OVERRIDE IS ALSO WHAT MAKES THESE CHECKS POSSIBLE AT ALL, and that is worth knowing for
+# ad-hoc diagnosis too. The image's entrypoint clones a work tree BEFORE running any command, so a
+# plain `docker run <image> ls -la /home/node/.npm` needs GH_TOKEN and network and can fail before
+# it reaches `ls`. To ask a question about the image's contents by hand, step around it the same way
+# this does — `--entrypoint bash --user 1000:1000` — or go through it with `-e RMD_SKIP_BOOTSTRAP=1`.
+#
+# NOTE what is NOT overridden: the USER. The probe runs as the image's runtime user, and the cache
+# ownership check below is only meaningful because of that.
 echo
 echo "verify-image: checks inside ${AFTER}"
 set +e
@@ -191,18 +200,50 @@ docker run --rm --entrypoint /bin/sh "${REF}" -c '
     printf "  PASS  %-22s uid=%s %s\n" "runtime user" "$uid" "$(id -un 2>/dev/null)"
   fi
 
-  # CACHE OWNERSHIP. Root-owned caches under HOME are what made a non-root `npm ci` die on EACCES.
-  # Writability is the property that actually matters, so test that rather than parsing an owner.
-  for c in "${HOME}/.npm" "${HOME}/.cache"; do
-    if [ ! -e "$c" ]; then
-      printf "  PASS  %-22s %s absent (nothing to own)\n" "cache writable" "$c"
-    elif [ -w "$c" ]; then
-      printf "  PASS  %-22s %s\n" "cache writable" "$c"
-    else
-      printf "  FAIL  %-22s (%s not writable by uid %s — a non-root npm ci will EACCES)\n" "cache writable" "$c" "$uid"
-      fail=1
+  # CACHE OWNERSHIP, AND THIS CHECK USED TO BE VACUOUS IN EXACTLY THE WAY THE BROWSER CHECK WAS.
+  # It tested `[ -w "$c" ]` on the TOP DIRECTORY only. The image ships /home/node/.npm with a
+  # node-owned top level and root-owned entries INSIDE it, because `chown -R node:node /home/node`
+  # runs BEFORE the root `npm ci` that repopulates the cache. MEASURED on a reproduction of that
+  # state: the old one-line test printed PASS, and a real install by the same uid then failed with
+  # `npm error code EACCES / syscall mkdir / .../_cacache/index-v5/f2/8d`. A check that passes on
+  # the broken image is worse than no check, so this one descends.
+  #
+  # TWO PROPERTIES ARE LOAD-BEARING AND BOTH ARE STATED RATHER THAN ASSUMED.
+  #   RECURSIVE — `find ! -writable` reaches the entries the top-level test cannot see.
+  #   RUN AS THE RUNTIME USER — uid 0 can write anything, so as root this check CANNOT fail and
+  #   would certify the broken image. This probe inherits the image USER (node, uid 1000), which is
+  #   what makes the result mean something; if that ever stops being true the check says so and
+  #   reports nothing rather than reporting a pass it did not earn.
+  if [ "$uid" = "0" ]; then
+    printf "  NOTE  %-22s NOT CHECKED as uid 0 — root can write anything, so this cannot fail\n" "cache ownership"
+    printf "        %-22s  re-run with --user 1000:1000 for a result that means something\n" ""
+  else
+    for c in "${HOME}/.npm" "${HOME}/.cache"; do
+      if [ ! -e "$c" ]; then
+        # For .npm this is the DESIRED state, not merely an acceptable one: the image ships no npm
+        # cache at all, so the runtime user creates it as itself on the first bootstrap install.
+        printf "  PASS  %-22s %s absent (nothing shipped, so nothing to own)\n" "cache ownership" "$c"
+        continue
+      fi
+      blockers="$(find "$c" ! -writable 2>/dev/null)"
+      n="$(printf "%s" "$blockers" | grep -c . || true)"
+      if [ "$n" = "0" ]; then
+        printf "  PASS  %-22s %s writable throughout by uid %s\n" "cache ownership" "$c" "$uid"
+      else
+        fail=1
+        printf "  FAIL  %-22s %s has %s entries NOT writable by uid %s\n" "cache ownership" "$c" "$n" "$uid"
+        printf "        %-22s  a bootstrap install will die on EACCES against them, and npm names\n" ""
+        printf "        %-22s  the condition itself: your cache folder contains root-owned files\n" ""
+        printf "%s\n" "$blockers" | head -3 | sed "s/^/          /"
+      fi
+    done
+    # The npm cache is asserted ABSENT rather than merely writable. A writable one still works, but
+    # it means a build layer put it back and the REQ 14 build assertion did not stop it, so it is
+    # worth naming as a finding even when nothing is broken yet.
+    if [ -e "${HOME}/.npm" ]; then
+      printf "  NOTE  %-22s %s/.npm exists — the build asserts it should not (REQ 14)\n" "npm cache shipped" "$HOME"
     fi
-  done
+  fi
 
   # THE BOOTSTRAP ENTRYPOINT. The image clones a real work tree at startup because the snapshot at
   # /app has no .git; if this file is missing or not executable the container falls back to running
