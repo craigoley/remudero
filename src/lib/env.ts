@@ -40,7 +40,23 @@ import { join } from "node:path";
  * "Not logged in · Please run /login" (verified: SDK 0.3.209 / CLI 2.1.209).
  * `LOGNAME` alone is NOT sufficient. None of these carry secrets.
  */
-const ALLOWLIST = ["PATH", "HOME", "TMPDIR", "LANG", "USER"] as const;
+// `CLAUDE_CODE_OAUTH_TOKEN` (impl-ED) is AMBIENT CONTAINER IDENTITY, the same class as the five
+// above, and it is the ONLY credential a container can hold: `claude setup-token` writes nothing to
+// disk — it prints a year-long string to the terminal and the vendor documentation says to set it as
+// this variable wherever you want to authenticate. Before this line the codebase had no awareness of
+// it at all and a token-authenticated worker was impossible.
+//
+// WHY THE ALLOWLIST AND NOT AN OPT-IN, since `ANTHROPIC_API_KEY` sets the opposite precedent. That
+// key is opt-in (`opts.allowApiKey`) because it FLIPS BILLING MODE: {@link billingMode} returns
+// `"api"` when and only when it survives. This token does not — it authenticates the same
+// subscription the `/login` credential does, so `billingMode` still reads `"subscription"` and the
+// reason the valve is gated does not apply here. It also does not match {@link ANTHROPIC_KEY}
+// (verified, not assumed), so the leak assertion below is unweakened.
+//
+// AND THE FAILURE DIRECTIONS ARE NOT SYMMETRIC. Threading it through `extra` would need every one of
+// the three spawn paths to opt in; a missed one yields a silently UNAUTHENTICATED worker, which is
+// the failure this fleet is worst at seeing. On the allowlist it cannot be missed.
+const ALLOWLIST = ["PATH", "HOME", "TMPDIR", "LANG", "USER", "CLAUDE_CODE_OAUTH_TOKEN"] as const;
 
 /** Any key matching this is a billing-boundary violation and must not survive… */
 const ANTHROPIC_KEY = /^ANTHROPIC_/i;
