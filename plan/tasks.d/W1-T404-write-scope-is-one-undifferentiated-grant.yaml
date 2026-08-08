@@ -1,0 +1,129 @@
+- id: W1-T404
+  title: "one `write` grant reaches all 20 write-scoped routes, so the credential that adds an operator note is the credential that spends the daily budget, executes a skill against the operator's checkout and halts the fleet — and the obvious second factor does not exist server-side"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 95.00
+  rationale: "RECON 2026-08-07 (state/recon-hosted-console-auth.md), RE-DERIVED AT 8a2f3eb.
+    THAT RECON ESTABLISHED THE ORDER for a hosted console — move the fleet, differentiate write
+    scope, build the verifier, bind publicly. This is step 2, and it is the ONLY one buildable now:
+    the verifier needs an identity-provider decision, binding needs both, and the fleet move needs a
+    credential. This step needs neither.
+    AND IT IS WORTH DOING WITHOUT ANY OF THAT, which is the part a reader should not skip. On the
+    tailnet TODAY, one grant covers everything: the same credential adds a note, raises the spend
+    ceiling, dispatches paid work, executes a skill against the operator's own checkout, and stops
+    the fleet. Hosting is what makes this urgent; it is not what makes it wrong.
+    THE FOUR MEASURED FACTS, EACH RE-DERIVED AT THIS SHA:
+    (1) `Scope` is exactly the union of read and write, with TWO grant sets — a read-only set and a
+    read-plus-write set. There is no third tier and no per-route capability.
+    (2) 22 scope declarations across 20 DISTINCT write-scoped route paths.
+    (3) `grantedScopes` has EXACTLY ONE call site, inside `createService`'s dispatcher, with
+    enforcement two lines later — a missing grant answers 401 and an insufficient one answers 403.
+    It already composes identity-then-bearer with a documented fall-through, and BOTH branches
+    return the same optional scope-set type. So a tier check has ONE place to live and a new
+    credential source would slot in beside the existing two rather than replace them.
+    (4) THE OBVIOUS SECOND FACTOR DOES NOT EXIST. Searching `panel-actions.ts`, `panel-graph.ts`,
+    `service.ts` and `fleet-control.ts` for a nonce, a confirm token, a challenge, a reauth or a
+    step-up returns ZERO files for every one of those terms. The arm-then-confirm interaction is
+    CLIENT-SIDE ONLY: it is a mis-click guard, and anything speaking HTTP directly bypasses it. It
+    cannot be promoted to a second factor, it has to be built.
+    THE POPULATION DOES NOT SPLIT CLEANLY, AND THAT IS THE FINDING. Classified by CONSEQUENCE —
+    what is the worst outcome of one unintended call — rather than by verb:
+      POLE A, spends money or moves code, five routes: drain run, drain kick, skills run, manual
+      approve, inbox approve. Costly or effectively irreversible.
+      POLE B, bookkeeping, nine routes: operator-notes add, feedback, feedback decision, feedback
+      preview, questions answer, escalation mark-handled, drain feedback, inbox reframe, and the
+      auth scope probe. Trivially reversible.
+      THE CONTESTED MIDDLE, six routes: control stop, pause and resume, quiet hours, and the two
+      daily-cost-ceiling routes. Every one is REVERSIBLE — a stop can be resumed, a ceiling can be
+      lowered again — but every one is either disruptive or a force multiplier for pole A. Raising
+      the ceiling does not spend anything; it removes the thing that would have stopped the
+      spending.
+    So this is NOT a continuum and NOT a clean two-way split: it is two clear poles with a third of
+    the population genuinely arguable between them. That is why the tier model is posed as options
+    below rather than asserted.
+    ONE ROUTE MAY SIMPLY BE MIS-SCOPED TODAY, recorded because it is cheap to check and would
+    shrink the surface: the auth scope route is declared write-scoped but its only job is to answer
+    whether the caller HAS write scope — the shell probes it to decide whether to render write
+    controls at all. Whether it needs write to answer that question is worth settling in passing."
+  design: "(i) THE TIER MODEL IS AN OPERATOR RULING AND IS POSED AS OPTIONS, NOT INFERRED. Three
+    tasks this week died because an implementer inferred a design the plan had not recorded, so the
+    trade is named and the decision is left where it belongs:
+      (a) TWO TIERS with the contested middle assigned to the HIGH tier. Safest; makes pausing the
+          fleet from a phone as ceremonious as spending money, which the operator may find
+          intolerable in exactly the moment he most wants to stop something.
+      (b) TWO TIERS with the contested middle assigned to the LOW tier. Best ergonomics; leaves the
+          spend ceiling — the control that ENABLES pole A — behind the ordinary credential.
+      (c) THREE TIERS, separating reversible-but-disruptive from both poles. Most faithful to the
+          measured population and the most machinery, and it needs a rule for what a fourth tier
+          would be before anyone adds one.
+    (ii) TIERS MUST BE DECLARED, NOT DERIVED — established rather than assumed. Consequence is not
+    recoverable from the handler: a single module declares routes at BOTH poles (inbox approve and
+    feedback preview and the cost ceiling all come from the same one), so any module-level or
+    grep-shaped signal scores them identically. Declaring is therefore the only honest option.
+    (iii) BUT A DECLARED LIST MUST BE COMPLETENESS-CHECKED AGAINST THE LIVE ROUTE TABLE, or it
+    becomes the hand-enumeration defect W1-T402 is filed for, where a list written against one
+    day's tree covered fewer than half the files it should. The precedent that keeps a list honest
+    is the ci-parity drift check, which FAILS on a job with no entry rather than skipping it. The
+    routes here are assembled into ONE array inside the service builder and every entry already
+    carries its path and its scope, so the same shape is available: walk the real assembled table,
+    fail on any write-scoped route with no tier. A new route must be unable to default quietly.
+    (iv) THE SECOND FACTOR MUST BE SERVER-ENFORCED OR IT IS THEATRE, and the ergonomics constraint
+    is measured rather than assumed: the operator already re-pastes the write token constantly
+    because paste-once lives in session storage and dies with the tab. A design that adds a SECOND
+    thing to paste makes a known friction worse. Options, with that constraint applied:
+      (a) A SEPARATELY-ISSUED HIGH-TIER TOKEN. Simplest server-side; worst ergonomically, because it
+          is exactly the second paste the friction finding argues against.
+      (b) TIME-BOXED ELEVATION. One credential, exchanged at an elevate endpoint for a short-lived
+          high-tier grant. Good ergonomics; needs server-side session state the service does not
+          have today, and a decision about what expiry means for an SSE stream already open.
+      (c) A SERVER-ISSUED, ACTION-BOUND CONFIRM NONCE. The server issues a nonce naming the specific
+          action, and the write is refused without it. No new secret to store or paste, binds to the
+          action rather than to a window, and is the true version of the affordance the client
+          already pretends to offer. Costs one round trip per high-tier action.
+    (v) THE MIGRATION MUST DEFAULT TO THE LOW TIER, and this is the sharpest requirement in the
+    task. Every existing client holds one write token; if an existing token defaults to the HIGH
+    tier, the change ships as a no-op that silently grants everything and nobody notices for months.
+    Defaulting LOW is a deliberate, visible break: the existing credential keeps bookkeeping and
+    loses the dangerous routes until the operator does something about it.
+    (vi) THE BLAST RADIUS IS SMALL AND WAS MEASURED. The console shell holds the token in session
+    storage and already PROBES its own scope before rendering write controls, so a tier-aware probe
+    has an existing seam to slot into; the console-url verb prints the write token for pasting. NO
+    SCRIPT UNDER scripts/ POSTS TO THE API AT ALL, so there is no script fleet to migrate."
+  acceptance:
+    - claim: "a high-consequence route refuses a credential that carries only the ordinary write grant, and says which tier it required"
+      proof: "unit test: test/write-tier-enforcement.test.ts"
+    - claim: "a bookkeeping route still accepts the ordinary write grant, so the common path is not made ceremonious"
+      proof: "unit test: test/write-tier-low-path.test.ts"
+    - claim: "every write-scoped route in the real assembled route table carries a tier, and a route added without one fails rather than defaulting"
+      proof: "unit test: test/write-tier-completeness.test.ts"
+    - claim: "the second factor is checked by the server, so a request made outside the console cannot skip it"
+      proof: "unit test: test/write-tier-second-factor.test.ts"
+    - claim: "an existing write credential resolves to the LOW tier, so the change cannot ship as a silent grant of everything"
+      proof: "unit test: test/write-tier-migration-defaults-low.test.ts"
+  risk: high
+  origin: recon#hosted-console-auth-2026-08-07
+  plan_refs: ["§7", "§8"]
+  files: [src/lib/service.ts, src/lib/serve.ts, src/lib/panel-actions.ts, src/lib/panel-graph.ts, src/lib/panel-skill-run.ts, src/lib/operator-notes.ts, test/write-tier-enforcement.test.ts, test/write-tier-low-path.test.ts, test/write-tier-completeness.test.ts, test/write-tier-second-factor.test.ts, test/write-tier-migration-defaults-low.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:human, and the reason is design (i) and (iv), not the work. A scope model is an
+    OPERATOR RULING — which of three tier shapes, and which of three second factors — and
+    `isDispatchEligible` refuses a task whose verify is not auto BEFORE the linter is consulted, so
+    parking it prevents a worker rediscovering the W1-T391 wall. Flip to auto once both are
+    answered; every acceptance claim above holds under all three tier options and all three second
+    factors, so nothing needs rewriting when it flips.
+    risk:high is Rule 19's SPAN, not blast radius — the file set crosses src/ and test/ and touches
+    the single authorization choke point. The band is raised deliberately rather than shipped as a
+    sizing violation, which is the W1-T400 lesson.
+    The four panel modules are declared because option (ii) puts a tier on each route ENTRY, and the
+    entries live in the modules that build them. Under a variant that keeps the table entirely in
+    the service module they would be untouched — declaring them costs nothing, whereas omitting one
+    would have the scope guard refuse the branch AFTER the work was done.
+    All five proofs are forward references to PATHS, never to symbols: a path forward-reference is
+    safe, a symbol one is a guess, and a grep proof naming an existing symbol would match the merge
+    base as well as the head and be downgraded to a stale proof that discriminates nothing.
+    The ledger is UNMEASURED throughout — the host is down and no figure in this shard is read from
+    it. Every count here is from source at 8a2f3eb."
