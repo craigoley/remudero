@@ -1,0 +1,135 @@
+name: Build image (ACR)
+
+# Build `deploy/Dockerfile` into an Azure Container Registry, on Azure's build fleet.
+#
+# THIS BUILDS. IT DEPLOYS NOTHING. There is no `az containerapp` anything here, deliberately:
+# the persistent-volume question for rmd's state directory is unsettled (rmd's inflight lock is
+# an O_EXCL create and its ledger rotation ends in an atomic rename, neither of which an SMB
+# share reliably provides), and provisioning before that is settled would be premature.
+#
+# WHY THIS SHAPE. Copied from craigoley/synthwatch's `.github/workflows/deploy.yml`, which has
+# been building that project's runner image this way in production: `azure/login` with an OIDC
+# federated credential, then `az acr build` inside the `azure/cli` action. Its header states the
+# property that makes this worth copying — "no Azure secrets stored in the repo; only the
+# non-sensitive client/tenant/subscription IDs are repo vars".
+#
+# `az acr build` is an ACR TASK: the build runs on Azure's fleet from an uploaded source context.
+# NO LOCAL DOCKER DAEMON IS INVOLVED ANYWHERE. That matters because `deploy/Dockerfile` has never
+# been built — no agent container has a docker daemon, which is exactly the obstacle this path
+# does not have.
+#
+# ─── TWO OPERATOR PREREQUISITES. THIS WORKFLOW FAILS AT LOGIN UNTIL BOTH EXIST, AND THAT
+#     FAILURE LOOKS LIKE A WORKFLOW BUG IF YOU DO NOT KNOW TO EXPECT IT. ───────────────────────
+#
+#   1. A FEDERATED CREDENTIAL SUBJECT FOR **THIS** REPO. SynthWatch's app registration federates
+#      subjects scoped to `craigoley/synthwatch`. A subject naming `craigoley/remudero` must be
+#      added to the same app registration (or a new one) before `azure/login` can succeed. For a
+#      `workflow_dispatch` run on the default branch the subject is
+#      `repo:craigoley/remudero:ref:refs/heads/main`.
+#   2. `AcrPush` ON THE TARGET REGISTRY for that principal. Reusing SynthWatch's registry is the
+#      cheapest option and needs only this role assignment; a separate registry is also fine and
+#      changes only the `registry` input below.
+#
+#   Both are portal actions and both can be done from a phone. UNMEASURED from CI: whether either
+#   already exists — the Azure CLI is not available to the session that wrote this file, so no
+#   read-only query was possible and neither could be confirmed.
+#
+# TRIGGER: `workflow_dispatch` ONLY. Not `push`, not `schedule`. This repo merges on the order of
+# tens of PRs a day and an image build on every merge would be pure waste; the operator triggers
+# this from the Actions tab, including from a phone.
+
+on:
+  workflow_dispatch:
+    inputs:
+      registry:
+        description: "ACR name (not the login server) — e.g. the existing SynthWatch registry"
+        required: true
+        default: synthwatcholey0620
+      image:
+        description: "Image repository name within the registry"
+        required: true
+        default: remudero
+      tag_latest:
+        description: "Also tag the build as :latest"
+        type: boolean
+        required: false
+        default: true
+
+# Serialize builds; a newer dispatch cancels an in-flight older one so two dispatches cannot race
+# to publish the same `latest` tag out of order. Same shape as SynthWatch's `deploy-main` group.
+concurrency:
+  group: acr-build
+  cancel-in-progress: true
+
+# Least privilege, matching SynthWatch's block exactly: `id-token: write` is what lets
+# `azure/login` mint the OIDC assertion, and `contents: read` is what lets checkout read the tree.
+# Nothing here writes to the repo.
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build:
+    name: az acr build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Azure login (OIDC)
+        uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # THE BUILD CONTEXT IS THE REPO ROOT, NOT `deploy/`. SynthWatch passes `runner` because its
+      # Dockerfile's COPY paths are relative to that directory; rmd's `COPY package.json
+      # package-lock.json ./` and `COPY . .` are relative to the ROOT, so the context is `.` and
+      # the Dockerfile is named with `-f`. Getting this backwards fails at the first COPY.
+      #
+      # `.dockerignore` is what keeps that context honest — without it the whole `.git` history
+      # and any local `state/` would be uploaded AND baked in by `COPY . .`, and on a real host
+      # `state/` holds the ledger and the console's bearer tokens.
+      - name: Build and push (ACR)
+        uses: azure/cli@9eb25b8360668fb0ecbafa808d40e2197b2f5f52 # v3.0.0
+        with:
+          azcliversion: latest
+          inlineScript: |
+            set -euo pipefail
+            TAGS=(-t "${IMAGE}:${GITHUB_SHA}")
+            if [ "${TAG_LATEST}" = "true" ]; then TAGS+=(-t "${IMAGE}:latest"); fi
+            az acr build -r "${REGISTRY}" "${TAGS[@]}" -f deploy/Dockerfile .
+        env:
+          REGISTRY: ${{ inputs.registry }}
+          IMAGE: ${{ inputs.image }}
+          TAG_LATEST: ${{ inputs.tag_latest }}
+
+      # Report what landed, including the size — a build that "succeeded" but produced something
+      # implausibly small is worth seeing without opening the portal.
+      - name: Show the published tag and size
+        uses: azure/cli@9eb25b8360668fb0ecbafa808d40e2197b2f5f52 # v3.0.0
+        with:
+          azcliversion: latest
+          inlineScript: |
+            set -euo pipefail
+            az acr repository show-manifests -n "${REGISTRY}" --repository "${IMAGE}" \
+              --orderby time_desc --top 1 -o table || \
+            az acr manifest list-metadata -r "${REGISTRY}" -n "${IMAGE}" --orderby time_desc --top 1 -o table
+        env:
+          REGISTRY: ${{ inputs.registry }}
+          IMAGE: ${{ inputs.image }}
+
+      - name: Write build summary
+        run: |
+          {
+            echo "### Image built"
+            echo ""
+            echo "- **Registry:** \`${REGISTRY}\`"
+            echo "- **Image:** \`${IMAGE}:${GITHUB_SHA}\`"
+            echo "- **Built by:** \`az acr build\` (ACR Task, on Azure's build fleet — no local daemon)"
+            echo "- **Deployed:** nothing. This workflow builds only."
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          REGISTRY: ${{ inputs.registry }}
+          IMAGE: ${{ inputs.image }}

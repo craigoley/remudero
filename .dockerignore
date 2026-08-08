@@ -1,0 +1,37 @@
+# Build context for `deploy/Dockerfile`. That Dockerfile ends in `COPY . .`, so anything not
+# excluded here is BAKED INTO THE IMAGE — and `az acr build` uploads the whole context to Azure
+# before the build starts, so anything not excluded is also transferred.
+#
+# `state/` IS THE ONE THAT MATTERS. On a real host it holds the ledger, `inflight/`, `drain.lock`
+# and `service-tokens.json` — the console's bearer tokens, written 0600. Baking that directory
+# into a published image would publish those tokens. It is gitignored, so it is absent from a CI
+# checkout, but this file is what makes that safe rather than incidental.
+state/
+reports/
+.stryker-tmp/
+.stryker-tmp-*/
+.stryker-plan/
+
+# node_modules is installed inside the image by `npm ci`, per the Dockerfile's own REQ 4: it is
+# per-container by construction and must never be shared or copied in from a host.
+node_modules
+
+# Local editor/OS noise and any stray env file.
+.DS_Store
+*.log
+.env
+.env.*
+
+# ── DELIBERATELY NOT EXCLUDED, BOTH VERIFIED FROM SOURCE BEFORE THIS FILE WAS WRITTEN ─────────
+#
+# `.git` — rmd needs its OWN git metadata at runtime, not just at build time. `resolveOwnerRepo`
+# (src/run-task.ts) shells `git -C <repoRoot> config --get remote.origin.url` to derive the owner
+# and repo, and `resolveRepoRoot`'s fallback rung is `git rev-parse --show-toplevel`. An image
+# without `.git` fails at the first verb that resolves its own identity. It is the bulk of the
+# upload and of the image, and that cost is accepted rather than optimised into a broken image.
+#
+# `.github` — read at RUNTIME, not only by CI. `src/lib/ci-parity.ts` reads
+# `.github/workflows/ci.yml` and executes `.github/scripts/leak-grep.sh` and
+# `.github/scripts/containment-diff-trigger.ts`, which is what `rmd preflight` runs.
+#
+# Both were nearly excluded here on the assumption that they were build-time-only. They are not.
