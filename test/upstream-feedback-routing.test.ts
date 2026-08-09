@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
@@ -211,4 +212,79 @@ test("loadHomeRepoPointer parses a valid {\"repo\": \"owner/repo\"} pointer", ()
   const r = root();
   seedHomePointer(r, "acme/upstream");
   assert.deepEqual(loadHomeRepoPointer(r), { owner: "acme", repo: "upstream" });
+});
+
+// ── THE DEFAULT SEAMS AND THE CATCH ARMS (impl-EE) ──────────────────────────────────────
+//
+// Every test above injects both `git` and `gh`, so the seams' DEFAULT implementations and two
+// error arms were unreachable and CI's diff-coverage blocked on six lines. This is the shape
+// CLAUDE.md already records against a different seam: "when every test injects a fake, the
+// seam's DEFAULT implementation and each catch arm are unreachable — write one test that really
+// shells out, and one per catch arm." Each test below moves ONE variable off the fake.
+
+test("loadHomeRepoPointer rejects a pointer that is valid JSON but the WRONG SHAPE, not merely an unparseable one", () => {
+  // The two existing malformed cases reach different arms: "{ not json" fails JSON.parse, and
+  // {repo:"not-a-slash-pair"} fails the owner/repo regex. A file that PARSES but carries no
+  // string `repo` reaches neither — that is the arm this covers.
+  for (const body of [JSON.stringify({ repo: 123 }), JSON.stringify({}), JSON.stringify([]), JSON.stringify("acme/x")]) {
+    const r = root();
+    mkdirSync(join(r, ".remudero"), { recursive: true });
+    writeFileSync(homeRepoPath(r), body);
+    assert.throws(() => loadHomeRepoPointer(r), FeedbackError, `shape ${body} must fail loud`);
+  }
+  // PAIRED POSITIVE, one variable moved: the correctly-shaped file still parses, so the block
+  // above is the shape check rather than a predicate that rejects everything.
+  const ok = root();
+  mkdirSync(join(ok, ".remudero"), { recursive: true });
+  writeFileSync(homeRepoPath(ok), JSON.stringify({ repo: "acme/home" }));
+  assert.deepEqual(loadHomeRepoPointer(ok), { owner: "acme", repo: "home" });
+});
+
+test("an undeterminable current repo skips upstreaming, so a checkout whose git read THROWS is treated as self", () => {
+  const r = root();
+  seedHomePointer(r, "acme/home");
+  // fakeGit(null) throws on the remote read — the arm that resolves the current repo to null.
+  const { git } = fakeGit(null);
+  const entry = captureFeedback(r, { raw: "no discoverable identity", upstream: { git, gh: unreachableGh() } });
+
+  // Design point iv's safe side: an unknown identity must NOT open a PR (a home instance
+  // spamming itself is the worse failure), and the entry is still captured locally.
+  assert.equal("upstream" in entry, false, "no upstream attempt is recorded at all");
+  assert.equal(entry.raw, "no discoverable identity", "and the local capture is untouched");
+});
+
+test("the DEFAULT git seam really shells out: an uninjected git reads this checkout's own origin remote", () => {
+  const r = root();
+  // A REAL git repo with a REAL origin remote, so the default seam has something true to read.
+  const g = (args: string[]) => execFileSync("git", ["-C", r, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  g(["init", "--quiet"]);
+  g(["remote", "add", "origin", "https://github.com/someone-else/otherrepo.git"]);
+  seedHomePointer(r, "acme/home");
+
+  // `git` is NOT injected — this exercises defaultUpstreamGit. `gh` still is, so exactly one
+  // variable moves and a failure here cannot be blamed on the network.
+  const { gh, calls } = fakeGhSuccess("acme/home", "https://github.com/acme/home/pull/7");
+  const entry = captureFeedback(r, { raw: "default git seam", upstream: { gh } });
+
+  // The real read resolved someone-else/otherrepo, which is NOT the home repo, so routing
+  // proceeded. That is only possible if the default seam ran and returned the true remote.
+  assert.equal(entry.upstream?.status, "landed");
+  assert.ok(calls.length > 0, "and the gh double was reached, which requires the git read to have succeeded");
+});
+
+test("the DEFAULT gh seam really shells out: an uninjected gh is invoked and its failure is recorded, never thrown", () => {
+  const r = root();
+  // A home repo that cannot exist, so a real `gh` — authenticated or not, present or not —
+  // can only fail. Nothing is created anywhere by this test.
+  seedHomePointer(r, "acme/remudero-nonexistent-fixture-repo-xyzzy");
+  const { git } = fakeGit("https://github.com/someone-else/otherrepo.git");
+
+  // `gh` is NOT injected — this exercises defaultUpstreamGh.
+  const entry = captureFeedback(r, { raw: "default gh seam", upstream: { git } });
+
+  // The capture survives regardless, and the failure is recorded rather than thrown — the
+  // property the whole routing step promises.
+  assert.equal(entry.raw, "default gh seam", "the local capture is durable whatever gh did");
+  assert.equal(entry.upstream?.status, "unreachable", "and the failed attempt is recorded honestly");
+  assert.ok(String(entry.upstream?.error ?? "").length > 0, "with a stated reason rather than an empty field");
 });
