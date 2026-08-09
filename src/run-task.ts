@@ -8055,6 +8055,25 @@ async function retroCommand(
      * by a human and keeps its existing behavior unchanged.
      */
     automated?: { reason: "merges" | "days"; mergesSinceMarker: number; daysSinceMarker: number };
+    /**
+     * Injectable GitHub gateway for this command's two {@link projectPlan} passes (the plan-health
+     * sweep and the orientation section) — the same shape `spawn` above already uses, and the
+     * asymmetry it completes: a test could substitute the spawner but NOT the network.
+     *
+     * WHY IT EXISTS. `projectPlan` always took its gateway as a dep (`DeriveDeps.github`); this
+     * function was hardcoding `ghGateway(owner, repo)` at both call sites, and `ghGateway`'s
+     * `findMergedByTrailer` shells ONE `gh pr list --search` PER TASK. MEASURED: a single
+     * `retroCommand(["--dry-run"])` against 439 task records made `test/retro.test.ts` take 453
+     * SECONDS for 87 passing tests, and `test/retro-marker-atomic.test.ts` drives the same command
+     * 23 more times. The batched `buildBatchedGithub` is what the serve path switched to for
+     * exactly this cost; production here is deliberately left on `ghGateway`, unchanged.
+     *
+     * DEFAULTED PER CALL SITE, NOT ONCE. Omitted, each site constructs its OWN `ghGateway` exactly
+     * as before — the gateway closes over mutable `failed`/`failureReason` state, so collapsing the
+     * two into one shared instance would let a failure on the first pass leak into the second.
+     * Production behaviour with this field absent is byte-identical.
+     */
+    github?: GitHub;
   } = {},
 ): Promise<number> {
   const dryRun = rest.includes("--dry-run");
@@ -8178,7 +8197,7 @@ async function retroCommand(
       const planHealthPlan = loadPlan(planHealthPlanPath);
       const planHealthProjection = projectPlan(
         planHealthPlan,
-        { ledgerPath, github: ghGateway(owner, repo) },
+        { ledgerPath, github: opts.github ?? ghGateway(owner, repo) },
         join(config.root, "state", "status.json"),
       );
       isTaskMerged = (task) => planHealthProjection.get(task.id)?.merged ?? false;
@@ -8279,7 +8298,11 @@ async function retroCommand(
   let nextTask: Task | undefined;
   try {
     const orientationPlan = loadPlan(join(worktreePath, "plan", "tasks.yaml"));
-    const proj = projectPlan(orientationPlan, { ledgerPath, github: ghGateway(owner, repo) }, statusPath);
+    const proj = projectPlan(
+      orientationPlan,
+      { ledgerPath, github: opts.github ?? ghGateway(owner, repo) },
+      statusPath,
+    );
     const isMerged: MergedSet = (id) => proj.get(id)?.merged ?? false;
     const isOpenPr: OpenPrCheck = (id) => {
       const p = proj.get(id);
