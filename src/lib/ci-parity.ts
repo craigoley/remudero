@@ -124,7 +124,13 @@ const TMP_HYGIENE_IMPORT = "./test/setup/tmp-hygiene.ts";
 /** An ordinary leaf: run a command, PASS iff it exits 0, and only echo its output on FAIL —
  *  the shape every straightforward job (leak-grep, the npm-script jobs, the coverage/lint-plan
  *  sub-steps) uses. */
-function shellOut(spawn: PreflightSpawn, label: string, file: string, args: string[], opts?: { cwd?: string; input?: string }): CiParityLeafResult {
+function shellOut(
+  spawn: PreflightSpawn,
+  label: string,
+  file: string,
+  args: string[],
+  opts?: { cwd?: string; input?: string; stream?: boolean },
+): CiParityLeafResult {
   const res = spawn(file, args, opts);
   if (res.status === null) {
     // The child never produced an exit status at all — a signal kill, a buffer ceiling hit,
@@ -136,7 +142,13 @@ function shellOut(spawn: PreflightSpawn, label: string, file: string, args: stri
     return { ok: false, detail: `SPAWN FAILURE — ${label}: ${why}` };
   }
   const ok = res.status === 0;
-  return { ok, detail: ok ? `PASS — ${label}` : `FAIL — ${label}\n${(res.stdout + res.stderr).trim()}` };
+  if (ok) return { ok, detail: `PASS — ${label}` };
+  // A STREAMED step has no captured text to quote — its output already went to the terminal, in
+  // order, as it happened. Say so rather than rendering `FAIL — <label>` followed by an empty
+  // line, which is the shape that made an ENOBUFS read as a real red test with no visible cause.
+  const captured = (res.stdout + res.stderr).trim();
+  const body = opts?.stream ? "(output streamed above as it ran — not re-captured here)" : captured;
+  return { ok, detail: `FAIL — ${label}\n${body}` };
 }
 
 /**
@@ -251,7 +263,13 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
       // the parity fix (design v): give it its OWN step here, one list, one truth, rather than
       // leaving it discoverable only by reading ci:test's raw output.
       runStep("ci:cli-reference-check", () => shellOut(spawn, "npm run --silent cli-reference:check", "npm", ["run", "--silent", "cli-reference:check"], { cwd: repoRoot })),
-      runStep("ci:test", () => shellOut(spawn, "npm run test:ci", "npm", ["run", "test:ci"], { cwd: repoRoot })),
+      // `stream: true` — this is the multi-minute step, and the one that produced an HOUR of
+      // total silence in a container. `npm run test:ci` routes through scripts/test-with-retry.mjs,
+      // which ALREADY tees (`stdio: ["inherit","pipe","pipe"]`, writing each chunk to
+      // process.stdout while accumulating it); the only thing swallowing that stream was this
+      // process capturing it. Its `FLAKE-RETRY:` line — the record that a second full pass began —
+      // was invisible for the same reason.
+      runStep("ci:test", () => shellOut(spawn, "npm run test:ci", "npm", ["run", "test:ci"], { cwd: repoRoot, stream: true })),
     ],
   },
   {
@@ -306,7 +324,12 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
             TMP_HYGIENE_IMPORT,
             "test/**/*.test.ts",
           ],
-          { cwd: repoRoot },
+          // `stream: true` — the second multi-minute step. This one already asks for
+          // `--test-reporter=spec --test-reporter-destination=stdout` EXPLICITLY, so it has been
+          // writing per-file progress lines the whole time and this process was buffering every
+          // one of them. Nothing reads this step's stdout as data: the lcov it produces goes to
+          // `lcovPath` on disk, which the ratchet and diff-coverage steps below read from there.
+          { cwd: repoRoot, stream: true },
         );
       });
       const ratchet = runStep("coverage-ratchet:ratchet", () =>
