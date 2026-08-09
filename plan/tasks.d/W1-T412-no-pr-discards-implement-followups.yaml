@@ -1,0 +1,118 @@
+- id: W1-T412
+  title: "an early return on the no_pr verdict skips the implement worker's follow-up harvest, so the ONE report that says why a task could not be built is discarded — and the harvest it skips already declares prUrl OPTIONAL and already runs PR-less at the recon call site"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: "DERIVED FROM SOURCE AT 9af20b2. Filed out of state/recon-unbuildable-exit.md, which was
+    asked whether a worker needs a new contract exit for `I cannot build this` and concluded NO —
+    twice over — but found this on the way, and this is the part the evidence supports.
+    DERIVED — THE ORDERING DEFECT, WHICH IS THE WHOLE TASK. `runTask` (src/run-task.ts) reaches
+    `noPrVerdict(impl, costUsd, ...)`, removes the worktree, logs the verdict and RETURNS. The
+    implement phase's own `harvestFollowupsFromReport(fullText(impl), {label: implement, prUrl, ...})`
+    sits AFTER that return and is never reached. The recon phase's call to the same helper runs
+    EARLIER in the same function and is unaffected, which is why a no_pr run still shows recon
+    follow-ups and never implement ones.
+    DERIVED — AND THE HELPER IS ALREADY BUILT FOR THE PR-LESS CASE, so this is an ordering fix and not
+    a capability. `harvestFollowupsFromReport` declares `prUrl?: string` OPTIONAL and emits the
+    `pr_url` field only when it is present. The recon call site passes NO prUrl at all, so the
+    PR-less shape is exercised on every single run in production today. Nothing needs to be taught to
+    work without a PR; one call has to happen before a return that currently precedes it.
+    WHAT IS LOST, SPECIFICALLY. The output contract (`outputContractLines`, src/lib/compaction.ts)
+    asks every worker to put anything out of scope into a `## Follow-ups` section as typed entries —
+    `research:`, `task:` or `action:`. `parseFollowups` accepts them, `report.followups` carries them,
+    and `mineFollowups` (src/lib/retro.ts) turns them into cited proposal candidates. On a no_pr
+    verdict that whole chain is skipped for the implement phase. A worker that spent a full run
+    discovering WHY a task cannot be built writes that finding exactly where the contract tells it to,
+    and the finding is dropped.
+    THE POPULATION, AND ITS PROVENANCE. Four empty-diff `no_pr` results are reported across W1-T388,
+    W1-T392 twice, and W1-T393. THOSE RUN OUTCOMES ARE THE OPERATOR'S REPORT AND ARE NOT RE-DERIVED
+    HERE: the mini is down, so the ledger is UNREACHABLE and no `verdict` or `report.followups` row
+    was read for this filing — UNMEASURED. What IS derived from source is that the harvest cannot run
+    on that path, which holds independently of how many times the path has been taken.
+    WHY THIS AND NOT A NEW CONTRACT EXIT. The recon tested that question against the repo's own
+    standard, set by W1-T272's comment in this same file: an exit is granted only when the claim
+    behind it is MECHANICALLY VERIFIED, because `an unverifiable claim is worse than none`. A worker
+    asserting `this task cannot be built inside its own scope` is asserting design intent, which the
+    fleet cannot check — three candidate mechanical checks were run over the live queue and all three
+    failed, two by firing on 21% and 63% of healthy tasks and one by having a live population of
+    zero. Preserving a report the worker already wrote has NO assertable surface at all: there is
+    nothing here a worker can claim wrongly, which is exactly the property the exit lacked."
+  design: |
+    MOVE ONE CALL SO IT CANNOT BE SKIPPED. No new ledger step, no new parser, no contract change.
+
+    (i) THE FIX IS THE ORDERING. The implement phase's follow-up harvest must run on EVERY terminal
+    path out of the implement phase, not only the one that opened a PR. Hoisting it above the no_pr
+    return is the smallest change that achieves this; a `finally`-style arrangement covering the
+    implement phase is also acceptable. What must NOT happen is a second, parallel call site — one
+    helper, reached once per phase, or the ledger gains duplicate `report.followups` lines for the
+    same run and `mineFollowups`'s dedup is doing work the caller should not have created.
+
+    (ii) `prUrl` IS ABSENT ON THIS PATH AND THAT IS ALREADY HANDLED. The helper spreads `pr_url` in
+    only when defined. Pass nothing rather than an empty string: an empty `pr_url` would render as a
+    present-but-blank field and is worse than an absent one. The recon call site is the precedent to
+    copy verbatim.
+
+    (iii) THE LABEL MUST STAY DISTINCT. The recon and implement calls are distinguished by `label`,
+    and a reader of the harvest needs to know which phase declared an entry — a recon follow-up is a
+    scouting note, an implement follow-up on a no_pr run is a report from someone who tried and could
+    not. Keep `implement` as the label on the hoisted call.
+
+    (iv) DO NOT ADD `report.followups` TO `DECISION_RELEVANT_LEDGER_STEPS`. Nothing decides anything
+    from it — the retro mines it into candidates for a human to rank — so a rotation archiving it
+    changes no behaviour. Adding it would make the fleet carry the line forever for no consumer,
+    which is the inverse of the `sweep.absent_repush` case where the count IS the bound.
+
+    (v) THE OTHER TERMINAL PATHS OUT OF THE IMPLEMENT PHASE MUST BE CHECKED, NOT ASSUMED. `no_pr` is
+    the one this task was filed for, but it is reached through more than one route — a refused
+    ALREADY_SATISFIED claim falls through to it, and there are sibling early returns nearby. Enumerate
+    the returns between the implement worker finishing and the existing harvest call, and state in the
+    PR body which ones now reach the harvest and which deliberately do not.
+
+    (vi) THE FREE-FORM REMAINDER IS OUT OF SCOPE, DELIBERATELY. `noPrVerdict` records cost, turns,
+    subtype and model but never `r.text`, so the prose outside a `## Follow-ups` section is still
+    dropped. Persisting whole worker reports is a different concern with a different risk profile —
+    report bodies are unbounded and the ledger carries a size ceiling — and it should be argued on its
+    own evidence rather than smuggled in behind an ordering fix. This task moves ONE call.
+
+    NOT IN SCOPE: any new contract exit; any change to `no_pr` being drain-halting, which is correct
+    and deliberate; the fix rung's own harvest call, which is on a different path and already runs.
+  acceptance:
+    - claim: "a run that ends without opening a PR still harvests the implement worker's declared follow-ups, so a finding written where the contract asks for it survives the run"
+      proof: "unit test: test/no-pr-followups-harvested.test.ts"
+    - claim: "the harvested line carries no blank pull-request field when there is no pull request, matching the earlier phase's existing shape"
+      proof: "unit test: test/no-pr-followups-harvested.test.ts"
+    - claim: "a run that does open a pull request still harvests exactly once, so the change adds no duplicate entry for the same run"
+      proof: "unit test: test/no-pr-followups-harvested.test.ts"
+    - claim: "the phase label distinguishes a scouting note from a report by a worker that tried and could not finish"
+      proof: "unit test: test/no-pr-followups-harvested.test.ts"
+  risk: high
+  origin: recon-unbuildable-exit#implement-followups-discarded
+  plan_refs: ["§8A", "P38"]
+  files: [src/run-task.ts, test/no-pr-followups-harvested.test.ts]
+  status: queued
+  attempts: 0
+  note: "risk:high IS RULE 19'S SPAN, NOT BLAST RADIUS, set up front rather than raised after a lint.
+    `subsystemsOf` counts two concerns — the dispatcher and its suite — so risk:medium would fail
+    sizing immediately. The blast radius is as small as this repo gets: one call hoisted above one
+    return, on a path that currently does nothing.
+    ONE CONCERN. The task moves a single call so an existing helper is reached on a path it already
+    supports. Design (vi) explicitly refuses the adjacent, larger concern of persisting whole worker
+    reports, because that one has an unbounded-size risk this does not and deserves its own evidence.
+    THIS IS AN ORDERING DEFECT, WHICH IS A KNOWN CLASS HERE. CLAUDE.md already records a gate that
+    read the ledger for a record the same function wrote LATER, and four PRs rewrote that path in
+    three hours without fixing it. Same family: the policy is right, the sequence is wrong. Verify by
+    reading the control flow between the implement worker returning and the existing harvest call —
+    not by reasoning about what the code intends.
+    verify:auto — every criterion is decidable in-process with an injected log recorder and a fake
+    worker result. Nothing spawned, no network, no operator present.
+    files: declares the suite because a proof naming a path outside files: is a proof-scope warning at
+    filing and a scope-guard REFUSAL after the work is done.
+    budget_usd 40, the lowest of this week's filings: no new predicate, no policy pair, no new ledger
+    step, and the helper already exists and is already exercised PR-less.
+    THE RUN OUTCOMES THAT MOTIVATED THIS ARE THE OPERATOR'S REPORT, NOT RE-DERIVED — the ledger is
+    UNREACHABLE. The source-level claim stands on its own and should be re-derived before acting:
+    confirm the no_pr return still precedes the implement harvest, because a refactor that hoists it
+    for another reason would make this task already satisfied."
