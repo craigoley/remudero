@@ -56,7 +56,37 @@ import { join } from "node:path";
 // AND THE FAILURE DIRECTIONS ARE NOT SYMMETRIC. Threading it through `extra` would need every one of
 // the three spawn paths to opt in; a missed one yields a silently UNAUTHENTICATED worker, which is
 // the failure this fleet is worst at seeing. On the allowlist it cannot be missed.
-const ALLOWLIST = ["PATH", "HOME", "TMPDIR", "LANG", "USER", "CLAUDE_CODE_OAUTH_TOKEN"] as const;
+// `GH_TOKEN` is PARITY RESTORATION, not a widening — and that distinction is the whole
+// justification, so it is worth stating precisely.
+//
+// THE WORKER IS DESIGNED TO PUSH AND OPEN ITS OWN PR. Three independent places say so: the
+// implement prompt instructs it to `git push origin HEAD` and `gh pr create --fill --base main`;
+// `settings/worker.json` carries `excludedCommands: ["gh *"]`, an exclusion that exists ONLY so a
+// worker's `gh` runs outside Seatbelt (it fails TLS verification under it); and the orchestrator's
+// own push is commented as "the ONE orchestrator-initiated push in this file (the worker itself
+// normally pushes from inside its own sandbox)" — a FALLBACK, not the route.
+//
+// AND THE WORKER ALREADY HOLDS THIS CREDENTIAL ON MACOS. `WORKER_HOME_SYMLINKS` (worker-home.ts)
+// grants `.config/gh` into every per-run worker HOME, with the reason recorded verbatim as "gh CLI
+// auth token, so a worker can open/merge PRs". A container simply stores the same secret in a
+// VARIABLE instead of a FILE — and the isolation boundary treats those two forms oppositely: the
+// file is symlinked in, the variable is stripped out. Measured with a fake token, `GH_TOKEN`
+// reaches the child env as `false`. So the container worker is the ONLY configuration in which the
+// fleet's own stated intent does not hold.
+//
+// WHY THE ALLOWLIST AND NOT THREADING, the same argument `CLAUDE_CODE_OAUTH_TOKEN` records
+// directly above: threading needs all three spawn paths to opt in, and a missed one yields a
+// silently UNAUTHENTICATED worker — the failure this fleet is worst at seeing. Here that failure
+// is not hypothetical, it is the observed one: the container's workers fail their push, the
+// orchestrator's fallback quietly recovers it, and the only trace is a `fallback:` line.
+//
+// IT DOES NOT WEAKEN THE BILLING BOUNDARY. `GH_TOKEN` does not match {@link ANTHROPIC_KEY}
+// (VERIFIED by running the pattern, not by reading it), so the leak assertion below is unchanged,
+// and {@link billingMode} keys off `SANCTIONED_KEY` alone so a GitHub token cannot flip a run to
+// `api`. `GITHUB_TOKEN` is deliberately NOT added: `gh` prefers `GH_TOKEN`, and the container's git
+// credential helper expands `$GH_TOKEN` specifically, so a second name would be scope creep on a
+// credential surface for no reachable caller.
+const ALLOWLIST = ["PATH", "HOME", "TMPDIR", "LANG", "USER", "CLAUDE_CODE_OAUTH_TOKEN", "GH_TOKEN"] as const;
 
 /** Any key matching this is a billing-boundary violation and must not survive… */
 const ANTHROPIC_KEY = /^ANTHROPIC_/i;
