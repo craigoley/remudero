@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   aggregateByClass,
   aggregateByType,
@@ -61,6 +62,7 @@ import type { Task } from "../src/lib/plan.js";
 import { selectLearnings, type LearningEntry } from "../src/lib/learnings.js";
 import { configPath } from "../src/lib/config.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { offlineGithub } from "./setup/offline-github.js";
 import { planHealthSweepSectionFor, retroCommand } from "../src/run-task.js";
 
 // A recorded ledger fixture: two implement runs (one merged, one budget-blocked)
@@ -532,8 +534,12 @@ test("retroCommand: --dry-run's printed report carries the plan-health sweep sec
   writeFileSync(cfgPath, JSON.stringify({ claudeBin: "/bin/true", root }, null, 2) + "\n");
 
   const logSpy = t.mock.method(console, "log", () => {});
+  // OFFLINE GATEWAY. Without it this test's single retroCommand call ran projectPlan twice over
+  // 439 task records with the per-task `ghGateway`, one `gh pr list --search` each: 453 SECONDS
+  // for this file's 87 tests. Nothing below asserts merge state, so the network buys nothing.
+  const github = offlineGithub();
   try {
-    const exitCode = await withLiveWritesAllowed(() => retroCommand(["--dry-run"]));
+    const exitCode = await withLiveWritesAllowed(() => retroCommand(["--dry-run"], { github }));
     assert.equal(exitCode, 0, "--dry-run never fails a genuinely-first-ever retro");
     const printed = logSpy.mock.calls.map((c) => String(c.arguments[0])).join("\n");
     assert.match(
@@ -541,10 +547,28 @@ test("retroCommand: --dry-run's printed report carries the plan-health sweep sec
       /## Plan-health sweep/,
       "the retro's --dry-run report must carry the plan-health sweep section renderPlanHealth's own doc comment promises",
     );
+    // THE FAKE WAS REACHED. Injecting a dep the production path ignores looks identical to one it
+    // honours — both go green — so the assertion that discriminates them is that THIS object was
+    // consulted. Without it, the two projectPlan passes would have opened real `ghGateway`s.
+    assert.ok(github.calls.length > 0, `the injected gateway must be consulted, got ${github.calls.length} calls`);
   } finally {
     if (savedHome === undefined) delete process.env.HOME;
     else process.env.HOME = savedHome;
   }
+});
+
+test("retroCommand's gateway defaults to the real ghGateway at BOTH projectPlan sites when none is injected", () => {
+  // PRODUCTION MUST BE UNCHANGED. The test above only proves the INJECTED path; it would pass just
+  // as happily on a change that broke the default and left every real retro without a gateway. This
+  // reads the source — the same discipline arm-at-open.test.ts uses for its own wiring claim.
+  //
+  // DEFAULTED PER SITE, NOT ONCE: `ghGateway` closes over mutable `failed`/`failureReason`, so two
+  // independent instances is the pre-existing behaviour and collapsing them would leak a failure
+  // from the plan-health pass into the orientation pass.
+  const src = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+  const code = src.split("\n").filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join("\n");
+  const defaults = [...code.matchAll(/github: opts\.github \?\? ghGateway\(owner, repo\)/g)];
+  assert.equal(defaults.length, 2, "both retroCommand projectPlan sites must default to the real gateway");
 });
 
 // ── Mining overruns for a CLASS-level fix (Standing rule 20) ───────────────
