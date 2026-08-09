@@ -78,6 +78,57 @@ else
   log "GH_TOKEN is not set — a private fetch or clone will fail"
 fi
 
+# ── THE COMMIT IDENTITY. WITHOUT IT A WORKER WRITES FILES AND COMMITS NOTHING. ────────────────
+# MEASURED on the published image, as uid 1000 with this entrypoint bypassed:
+#   git config --global --list
+#   → fatal: unable to read config file '/home/node/.gitconfig': No such file or directory
+# and from a real `preflight --ci-parity` in a container:
+#   Author identity unknown
+#   fatal: unable to auto-detect email address (got 'node@817837271c3e.(none)')
+#
+# GIT CANNOT AUTO-DETECT HERE, and the `.(none)` in that message is exactly why: git will fall back
+# to `user@host` only when the hostname looks fully qualified. A container's hostname is a bare
+# container id, so the fallback is refused and `git commit` fails outright.
+#
+# THIS IS THE SAME ASYMMETRY AS THE gh CREDENTIAL AND PLAYWRIGHT_BROWSERS_PATH — a FILE that exists
+# on the operator's Mac and simply does not exist here. `WORKER_HOME_SYMLINKS` (src/lib/worker-home.ts)
+# grants `.gitconfig` into every per-run worker HOME with the reason recorded verbatim as "git author
+# identity for commits the worker makes", and `materializeWorkerHome` SKIPS a grant whose source is
+# absent. So on darwin the worker inherits the operator's identity and in a container it silently
+# inherits nothing. Writing $HOME/.gitconfig here is what makes that existing grant resolve — no
+# change to src/ is needed, and both the worker AND the orchestrator's own commit sites
+# (plan-architect, plan-pr-emitter, orientation, the triage/approve paths, none of which passes
+# `-c user.name`) are covered by the one write.
+#
+# WHY THE ENTRYPOINT AND NOT THE IMAGE. The identity that 63 of 64 merged `Remudero-Task:` commits
+# actually carry is `Craig Oley <craigoley@gmail.com>` — the OPERATOR'S OWN, straight out of their
+# `~/.gitconfig`. That is a person, and a person does not belong baked into a published image: it is
+# not the fleet's to assert, it changes, and the image is shared. So the identity is configurable
+# here, defaulting to a purpose-scoped bot in the same shape this repo already uses twice
+# (`rmd-feedback-bridge@users.noreply.github.com` in src/lib/feedback-landing.ts, and
+# `${GIT_AUTHOR_NAME:-remudero-heartbeat}` in scripts/fleet-heartbeat.sh — defaulted but
+# overridable). TO KEEP HISTORY CONSISTENT WITH THOSE 63 COMMITS, run the container with
+# `-e RMD_GIT_AUTHOR_NAME='Craig Oley' -e RMD_GIT_AUTHOR_EMAIL=craigoley@gmail.com`.
+#
+# `--replace-all` rather than a bare set, so a re-boot onto an existing volume cannot accumulate
+# duplicate keys; and the values are only written when git does not already resolve one, so an
+# operator who mounted their own gitconfig keeps it.
+# `git -C /` ON THE PROBE, and it is load-bearing rather than tidy. A bare `git config --get`
+# resolves LOCAL config too, so if this script's cwd happens to sit inside a repository, that
+# repository's own `.git/config` can answer the question — and the worker does not commit there, it
+# commits in a worktree under $HOME/Remudero. Probing from `/`, which is not a repository, restricts
+# the answer to the system and global scopes, i.e. exactly the ones a commit anywhere in this
+# container would inherit. (Found by running this block, not by reading it: the first draft reported
+# "already configured" off the checkout's own local config.) A SYSTEM identity still satisfies it —
+# that is deliberate, since one would make commits work without this write.
+if git -C / config --get user.email >/dev/null 2>&1 && git -C / config --get user.name >/dev/null 2>&1; then
+  log "git identity: already configured ($(git -C / config --get user.name) <$(git -C / config --get user.email)>) — left alone"
+else
+  git config --global --replace-all user.name "${RMD_GIT_AUTHOR_NAME:-remudero-worker}"
+  git config --global --replace-all user.email "${RMD_GIT_AUTHOR_EMAIL:-remudero-worker@users.noreply.github.com}"
+  log "git identity: $(git config --get user.name) <$(git config --get user.email)> (override with RMD_GIT_AUTHOR_NAME/RMD_GIT_AUTHOR_EMAIL)"
+fi
+
 # ── RESOLVING THE REF: A BRANCH MEANS THE TIP AT BOOT, A SHA MEANS EXACTLY THAT ──────────────
 # MEASURED ON AZURE 2026-08-08, AND REPRODUCED HERE AGAINST A REAL GIT ORIGIN. A boot printed
 # "Your branch is behind 'origin/main' by 3 commits, and can be fast-forwarded" and then
