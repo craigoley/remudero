@@ -1,0 +1,31 @@
+id: fb-1786243339042-197a65
+ts: 2026-08-09T02:42:19.042Z
+raw: "DRAIN CRASHES ON LINUX AFTER COMPLETING — notify.ts shells osascript,
+  which does not exist off macOS. Measured in a container on Azure 2026-08-08: a
+  two-lane drain ran to completion, printed its summary and post-drain rundown,
+  then threw spawnSync osascript ENOENT from notify via sendRundown via
+  pushDrainRundown at the end of drainCommand. The drain WORK was unaffected —
+  both lanes finished and their verdicts are recorded — but the process exits
+  non-zero on a successful drain, which under a restart policy would read as a
+  crash and re-run. NO run-task INVOCATION EVER HITS THIS, because
+  pushDrainRundown is on the drain path only, which is why weeks of container
+  work did not surface it. TWO MORE DEFECTS IN THE SAME OUTPUT, reported here
+  rather than filed separately. FIRST: the post-drain rundown attributes W1-T392
+  blocked to W1-T201 no_pr — one task blocked, the other task verdict, in the
+  same row. Both lanes are named but the reason string is shared. SECOND:
+  W1-T392 was REFUSED by the scope guard for touching src/run-task.ts,
+  test/retro.test.ts and two fixtures outside its declared files — and the drain
+  had branched from 0ecf1e6 while origin advanced to ac6d079 during the run, so
+  whether that is a genuine scope violation or W1-T405 stale-base drift is
+  UNMEASURED and worth establishing before the task is re-dispatched. RECON:
+  establish whether notify should degrade to a no-op off darwin the way
+  ensureWorkerKeychain does, or whether the whole notification path should be
+  platform-gated at a higher rung — and note escalate --class MANUAL and
+  HARD_STOP also fire iMessage, so a container cannot escalate to a human at all
+  today, which matters more than the crash."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null
+expansion: null
