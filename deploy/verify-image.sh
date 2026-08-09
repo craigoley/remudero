@@ -120,6 +120,17 @@ fi
 #
 # NOTE what is NOT overridden: the USER. The probe runs as the image's runtime user, and the cache
 # ownership check below is only meaningful because of that.
+#
+# ── NO APOSTROPHE MAY APPEAR BELOW, INCLUDING IN A COMMENT ───────────────────────────────────
+# Every probe in this file is ONE single-quoted `-c` argument, so the first `'` inside it ENDS the
+# argument. MEASURED on the published image: the word `version's` in a comment truncated this probe
+# from 194 lines to 76, handed docker two stray positional arguments, and left everything after the
+# apostrophe running ON THE HOST. Three results were then false — `playwright pin` and `bootstrap
+# entrypoint` FAILED because the HOST has no /opt/pw-pin and no /usr/local/bin/rmd-entrypoint, and
+# `runtime user` PASSED reporting the host operator's own username. `bash -n` stayed CLEAN
+# throughout, because the stray quotes re-balanced; the file was never syntactically broken, only
+# addressed to the wrong machine. The host also EXECUTED a backtick pair from that same comment.
+# test/verify-image-probes.test.ts now enforces delivery, since reading for this has failed twice.
 echo
 echo "verify-image: checks inside ${AFTER}"
 set +e
@@ -198,7 +209,7 @@ docker run --rm --entrypoint /bin/sh "${REF}" -c '
   # claims and the old check only ever tested the first.
   #
   # `/opt/pw-pin` is written by the REQ 15 build layer: the version it resolved from the lockfile,
-  # and the directory names that version's own `browsers.json` declares.
+  # and the directory names declared by the browsers.json shipped with that version.
   #
   # THE DISCRIMINATING ASSERTION IS THE VERSION COMPARISON, not the directory listing. Re-deriving
   # the wanted dirs from whatever is installed would agree with itself on any image; comparing the
