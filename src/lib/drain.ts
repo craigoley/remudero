@@ -39,6 +39,9 @@ export type OpenPrCheck = (taskId: string) => number | undefined;
 export interface NextRunnableOpts {
   /** Returns the open PR number for a task whose latest PR is currently OPEN. */
   isOpenPr?: OpenPrCheck;
+  /** Task ids this drain already continued past ({@link NON_HALTING_VERDICTS}) — never offered
+   *  again in the same pass. Omit ⇒ no exclusion, exactly as before this existed. */
+  excludeIds?: ReadonlySet<string>;
   /** Called once per task excluded because of an open PR — for ledger/console legibility. */
   onSkip?: (task: Task, prNumber: number) => void;
   /**
@@ -190,7 +193,7 @@ export function nextRunnable(plan: Plan, isMerged: MergedSet, opts: NextRunnable
  * silently — every later filter (indeterminate, circuit, lifetime cap, open PR) already ledgers
  * itself. Order matters and is the filter's own: see {@link tallyDispatchFilters} on first-match.
  */
-export type DispatchFilterReason = "already-merged" | "verify-not-auto" | "blocked" | "unmet-deps";
+export type DispatchFilterReason = "already-merged" | "verify-not-auto" | "blocked" | "unmet-deps" | "continued-this-pass";
 
 /** How many ids each bucket names before truncating — a count tells the operator something is
  *  wrong, ids tell him WHICH, and 8 keeps the line readable against today's largest bucket (18). */
@@ -213,7 +216,7 @@ export type IdleReasonTally = Record<DispatchFilterReason, IdleReasonBucket>;
  * that is the condition that actually stopped it. Evaluating all four to give a "fuller" picture
  * would mean running `unmetDependencies` (a graph walk) on tasks the filter never needed to test,
  * on the hot path, to report a reason that was not the blocking one. The buckets therefore sum to
- * the number of tasks declined by these four conditions, never to something larger.
+ * the number of tasks declined by these conditions, never to something larger.
  */
 export function tallyDispatchFilters(): {
   onFiltered: (task: Task, reason: DispatchFilterReason) => void;
@@ -225,6 +228,7 @@ export function tallyDispatchFilters(): {
     "verify-not-auto": [],
     blocked: [],
     "unmet-deps": [],
+    "continued-this-pass": [],
   };
   const snapshot = (): IdleReasonTally =>
     (Object.keys(seen) as DispatchFilterReason[]).reduce((acc, r) => {
@@ -256,6 +260,16 @@ function isDispatchEligible(plan: Plan, t: Task, isMerged: MergedSet, opts: Next
   // used by the filters further down, which have always been legible.
   if (isMerged(t.id)) {
     opts.onFiltered?.(t, "already-merged");
+    return false;
+  }
+  // CONTINUED THIS PASS (NON_HALTING_VERDICTS): a task the drain already ran and continued past
+  // is unmerged with an OPEN PR, so every later selection would offer it again — an unbounded
+  // re-dispatch of one task inside a single drain, which is strictly worse than the halt this
+  // change removes. `isOpenPr` would usually catch it, but that dep is OPTIONAL and a caller that
+  // omits it would get the loop; this guard needs no reads and cannot be omitted. Checked FIRST,
+  // ahead of every probe, because it is free and it is unconditional.
+  if (opts.excludeIds?.has(t.id)) {
+    opts.onFiltered?.(t, "continued-this-pass");
     return false;
   }
   if (t.verify !== "auto") {
@@ -497,11 +511,78 @@ export const DEFAULT_MAX = 10;
 export interface DrainSummary {
   attempted: string[];
   merged: string[];
+  /**
+   * Tasks that did NOT merge and did NOT halt the drain — see {@link NON_HALTING_VERDICTS}.
+   *
+   * SEPARATE FROM `merged` ON PURPOSE. A continued task's work is pushed but NOT merged, so
+   * crediting it here would make its dependents dispatchable against work that has not landed —
+   * the exact hazard stop-on-block exists to prevent. This list records what happened; it grants
+   * nothing.
+   *
+   * OPTIONAL, and the reason is diff hygiene rather than semantics: both production `summary()`
+   * helpers always populate it, but making it required forced a `continued: []` into ten existing
+   * fixtures across five test files that have nothing to do with the halt rule. Every reader
+   * defaults it to empty, and "absent" and "empty" mean the same thing to all of them.
+   */
+  continued?: Array<{ taskId: string; verdict: string; prUrl?: string }>;
   stopReason: StopReason;
   /** Human detail: the blocked task + verdict, the reset time, the error, etc. */
   stopDetail?: string;
   costUsd: number;
   resumeCommand: string;
+}
+
+/**
+ * Verdicts that are NOT `merged` and yet must NOT stop the drain.
+ *
+ * THE ARGUMENT IS THIS MODULE'S OWN HEADER, WHICH JUSTIFIES STOP-ON-BLOCK AS: "a blocked task's
+ * DEPENDENTS would build on missing work, so continuing risks compounding a gap." That is exactly
+ * right for a real block — and it is FALSE for `blocked_ci`. A `blocked_ci` run has pushed its
+ * branch, opened its PR and done the work; the only thing outstanding is CI's own verdict. Its
+ * dependents would build on work that exists and is about to land. MEASURED: #1492 and #1495 both
+ * returned `blocked_ci` and both merged afterwards, unchanged.
+ *
+ * SO THE HALT WAS A CORRECT RULE APPLIED TO A CASE IT WAS NEVER ARGUED FOR, and the cost is real:
+ * the drain stops at the first non-merged verdict, so one CI stall ends a `--max 6` budget after
+ * one task with five dispatches unspent.
+ *
+ * NOTHING IS CREDITED BY BEING HERE. Membership means "keep going", never "this task is done" —
+ * `continued` is deliberately not `merged`, and the dependency filter is unchanged.
+ *
+ * WHY NO OTHER VERDICT JOINS THIS SET, verdict by verdict. `blocked`, `blocked_review`,
+ * `blocked_containment`, `blocked_isolation`, `blocked_illformed`, `failed` and
+ * `pr_attribution_failed` all leave the work unfinished or unattributable, so the header's
+ * argument applies unchanged. `no_pr` is the silent no-op — nothing was produced at all, which is
+ * strictly worse than a block, and its own doc argues the halt explicitly ("a blind auto-retry
+ * carries NO new information"). `blocked_budget`, `blocked_transient` and `blocked_git_fetch` are
+ * environmental and say nothing about this task alone: the next dispatch would meet the same
+ * condition, so continuing burns runs rather than making progress. `blocked_inflight` means
+ * another holder owns the task right now. `task_already_merged` is non-merged but arguably
+ * mis-halting for a different reason (nothing ran, nothing was spent) — deliberately left alone
+ * here, because it is a separate concern and this change is scoped to one verdict.
+ * `already_satisfied` never reaches this predicate: it returns `merged: true` and behaves as
+ * forward progress.
+ *
+ * NOT FIXED HERE, AND NOT LOST: the reason `blocked_ci` fires on healthy PRs at all is that
+ * `checkWaitStalled`'s window is a 30-second elapsed bound (five identical polls at six seconds)
+ * measured against a `ci` job that needs minutes, so a long healthy job reads as a stall. Teaching
+ * that predicate to count a still-running check as forward motion is the right second fix and a
+ * different concern; this change makes the misfire cheap rather than making it rarer.
+ */
+export const NON_HALTING_VERDICTS: ReadonlySet<string> = new Set(["blocked_ci"]);
+
+/**
+ * Should this result stop the drain? `merged` never does; a non-merged verdict does UNLESS it is
+ * in {@link NON_HALTING_VERDICTS}.
+ *
+ * Extracted rather than inlined at the two loop sites (single-lane and parallel-lane) so both
+ * decide with ONE predicate — the single-lane and multi-lane paths having drifted apart is a
+ * documented hazard in this file, and a halt rule that differed between them would be invisible
+ * until a lane count changed.
+ */
+export function haltsDrain(result: { merged: boolean; verdict: string }): boolean {
+  if (result.merged) return false;
+  return !NON_HALTING_VERDICTS.has(result.verdict);
 }
 
 /**
@@ -693,10 +774,20 @@ export function buildRundown(summary: DrainSummary, ledgerLines: ReadonlyArray<R
       escalationByTask.set(l.task_id, { issueUrl: l.issue_url, class: String(l.class ?? "?") });
     }
   }
+  // A CONTINUED TASK MUST CARRY ITS OWN DETAIL, NEVER THE DRAIN'S `stopDetail`. Before
+  // NON_HALTING_VERDICTS existed this could not go wrong: only the LAST attempted id could be
+  // non-merged, so `stopDetail` always described that id. Now an earlier id can be non-merged too,
+  // and blindly attaching `stopDetail` would print one task's line against a DIFFERENT task's
+  // verdict — a self-contradicting record, which is worse than a terse one.
+  const continuedByTask = new Map((summary.continued ?? []).map((c) => [c.taskId, c] as const));
   return summary.attempted.map((taskId): RundownLine => {
     if (merged.has(taskId)) return { taskId, outcome: "merged" };
     const escalation = escalationByTask.get(taskId);
     if (escalation) return { taskId, outcome: "escalated", escalation };
+    const cont = continuedByTask.get(taskId);
+    if (cont) {
+      return { taskId, outcome: "blocked", detail: `${cont.verdict}${cont.prUrl ? ` (${cont.prUrl})` : ""} — drain continued` };
+    }
     return { taskId, outcome: "blocked", detail: summary.stopDetail };
   });
 }
@@ -851,6 +942,10 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
   const log = deps.log ?? (() => {});
   const attempted: string[] = [];
   const merged: string[] = [];
+  /** Non-merged, non-halting outcomes (NON_HALTING_VERDICTS) — recorded, never credited. */
+  const continued: NonNullable<DrainSummary["continued"]> = [];
+  /** The same ids as a set — the selection guard's input, so a continued task is never re-offered. */
+  const continuedIds = new Set<string>();
   let costUsd = 0;
   // W1-T290: the daemon's bounded-degraded ceiling, ported — CONSECUTIVE
   // unreadable `/usage` reads, not any-unreadable. Reset to 0 on any
@@ -875,7 +970,7 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
   const lifetimeCapEscalated = new Set<string>();
 
   const summary = (stopReason: StopReason, stopDetail?: string): DrainSummary => {
-    const s: DrainSummary = { attempted, merged, stopReason, stopDetail, costUsd, resumeCommand: resumeCommand(opts) };
+    const s: DrainSummary = { attempted, merged, continued, stopReason, stopDetail, costUsd, resumeCommand: resumeCommand(opts) };
     log("drain.summary", { ...s });
     return s;
   };
@@ -1043,6 +1138,9 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
           deps.onLifetimeCapExceeded?.(t);
         }
       },
+      // Never re-offer a task this pass already continued past — see the guard in
+      // isDispatchEligible for why this cannot rely on `isOpenPr` alone.
+      excludeIds: continuedIds,
     };
     // CURATION (W1-T140): a curated selection overrides the natural DAG scan
     // entirely — dispatch honors EXACTLY the operator's list and order, never
@@ -1062,10 +1160,19 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
     }
     costUsd += result.costUsd;
 
-    if (!result.merged) {
+    if (haltsDrain(result)) {
       // STOP-ON-BLOCK: a blocked task's dependents would build on missing work.
       log("drain.blocked", { task: next.id, verdict: result.verdict, pr_url: result.prUrl });
       return summary("blocked", `${next.id} → ${result.verdict}${result.prUrl ? ` (${result.prUrl})` : ""}`);
+    }
+    if (!result.merged) {
+      // CONTINUED, NOT CREDITED (see NON_HALTING_VERDICTS): the work is pushed and its PR is open,
+      // so the drain keeps its remaining budget — but the task is NOT added to `merged`, so the
+      // dependency filter still refuses its dependents until the PR actually lands.
+      continued.push({ taskId: next.id, verdict: result.verdict, prUrl: result.prUrl });
+      continuedIds.add(next.id);
+      log("drain.continued", { task: next.id, verdict: result.verdict, pr_url: result.prUrl });
+      continue;
     }
     merged.push(next.id);
     if (opts.until && next.id === opts.until) return summary("until_reached", opts.until);
@@ -1138,6 +1245,10 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
   const log = deps.log ?? (() => {});
   const attempted: string[] = [];
   const merged: string[] = [];
+  /** Non-merged, non-halting outcomes (NON_HALTING_VERDICTS) — recorded, never credited. */
+  const continued: NonNullable<DrainSummary["continued"]> = [];
+  /** The same ids as a set — the selection guard's input, so a continued task is never re-offered. */
+  const continuedIds = new Set<string>();
   let costUsd = 0;
   // Same escalation-dedup contract as the single-lane loop (see its own
   // comment): bounds the CALLBACK to this drain's first observation of each
@@ -1154,7 +1265,7 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
   const unreadableDegradedLimit = opts.unreadableDegradedLimit ?? UNREADABLE_DEGRADED_LIMIT;
 
   const summary = (stopReason: StopReason, stopDetail?: string): DrainSummary => {
-    const s: DrainSummary = { attempted, merged, stopReason, stopDetail, costUsd, resumeCommand: resumeCommand(opts) };
+    const s: DrainSummary = { attempted, merged, continued, stopReason, stopDetail, costUsd, resumeCommand: resumeCommand(opts) };
     log("drain.summary", { ...s });
     return s;
   };
@@ -1283,6 +1394,10 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
           deps.onLifetimeCapExceeded?.(t);
         }
       },
+      // PARITY WITH THE SINGLE-LANE LOOP: a task this drain already continued past is never
+      // re-offered on a later pass. Wiring this into one loop and not the other is exactly the
+      // single-lane/multi-lane drift this module warns about.
+      excludeIds: continuedIds,
     };
 
     const candidates = runnableCandidates(plan, isMerged, passSize, skipOpts);
@@ -1376,11 +1491,19 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
       }
       const result = outcome.value;
       costUsd += result.costUsd;
-      if (!result.merged) {
+      if (haltsDrain(result)) {
         // STOP-ON-BLOCK, at pass granularity — LANE-LOCAL: this task took its
         // normal blocked path; it never touched a sibling still in flight.
         log("drain.blocked", { task: t.id, verdict: result.verdict, pr_url: result.prUrl });
         if (!blocked) blocked = { taskId: t.id, result };
+        continue;
+      }
+      if (!result.merged) {
+        // CONTINUED, NOT CREDITED — the same rule the single-lane loop applies, through the SAME
+        // predicate, so the two paths can never disagree about what halts.
+        continued.push({ taskId: t.id, verdict: result.verdict, prUrl: result.prUrl });
+        continuedIds.add(t.id);
+        log("drain.continued", { task: t.id, verdict: result.verdict, pr_url: result.prUrl });
         continue;
       }
       merged.push(t.id);
