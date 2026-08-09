@@ -1,0 +1,109 @@
+- id: W1-T407
+  title: "the silent-no-op guard computes the commit count, branches on it, and throws it away — so the verdict row it writes cannot afterwards distinguish a worker that declined from one that burned thirty turns and produced nothing"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: "MEASURED ON AZURE 2026-08-08, RE-DERIVED FROM SOURCE AT 0ecf1e6. An implement worker
+    ran 30 turns, spent $1.29, reported subtype success with no api error and no permission denials,
+    and produced NO CODE — the run branch survived with an empty diff against the merge base.
+    Verdict no_pr. A later run of the same task succeeded and opened a PR, so the failure is
+    INTERMITTENT.
+    THIS TASK CHANGES NO BEHAVIOUR, AND THAT IS THE POINT. THE DETECTION IS NOT MISSING. runTask
+    (src/run-task.ts) carries a guard its own comment calls the SILENT NO-OP GUARD: it fires when
+    the worker reported no PR AND `commitsAhead(worktreePath, \"origin/main\")` is zero, and
+    `commitsAhead` shells `git rev-list --count` and returns 0 on any throw — fail-closed toward
+    nothing-to-PR. `no_pr` IS that detection's output. `noPrVerdict`'s own doc names the precedent
+    it was built for: run W1-T12a-1784117152056, subtype success, num_turns 10, no pr.opened. The
+    guard worked, refused to credit the run, removed the worktree, and halted the drain rather than
+    looping — every one of those is the designed behaviour and none of it is in scope here.
+    WHAT IS IN SCOPE IS WHAT THE ROW REMEMBERS. Three facts exist at that moment and none is
+    written down.
+    (1) THE COMMIT COUNT IS COMPUTED AND DISCARDED. The guard calls `commitsAhead` purely as a
+    predicate. No ledger step anywhere in src/ carries a commit count — grep for one returns only
+    the two call sites and the test export. So a row cannot separate WROTE NOTHING from WROTE
+    SOMETHING THAT COULD NOT BE PUSHED without re-deriving it from a worktree that `worktreeRemove`
+    has already deleted by the time anyone reads the row.
+    (2) THE REASON IS A FIXED STRING. `noPrVerdict` sets `reason` to the same sentence on every
+    no_pr it has ever written. It is true and it discriminates nothing.
+    (3) THE WORKER'S OWN REPORT IS IN SCOPE AND UNUSED. A local `fullText` closure over the
+    worker result is already built at that site and already parsed three times — for a decision
+    request, for a PR url, and for an already-satisfied claim. The text that might have said WHY is
+    read and dropped.
+    THE BUCKET IS PURER THAN IT LOOKS, WHICH IS WHY THE MISSING FIELDS MATTER RATHER THAN A NEW
+    CLASSIFIER. Three of the four benign explanations never reach this row at all: a decision
+    request is auto-chosen to the recommended option and the worker is RESUMED; a verified
+    already-satisfied claim gets its own credited verdict and returns merged; a non-success subtype
+    returns earlier through the worker-error path. Only an UNVERIFIED already-satisfied claim falls
+    through, and it leaves its own refusal marker on the way past. So what remains under no_pr is
+    close to two populations — a correct decline and a silent no-op — separable today only by
+    inference from turns and cost, which is a query nobody runs rather than a field anyone reads."
+  acceptance:
+    - claim: "the no_pr verdict row carries the commit count the guard already computed, so a reader can tell an empty branch from an unpushed one without the worktree"
+      proof: "unit test: test/no-pr-verdict-commit-count.test.ts"
+    - claim: "the no_pr reason distinguishes a worker that declined from one that produced nothing, instead of one fixed sentence for both"
+      proof: "unit test: test/no-pr-verdict-reason.test.ts"
+    - claim: "the worker's own closing report rides the row as a capped excerpt, and is absent rather than empty when there is nothing to carry"
+      proof: "unit test: test/no-pr-verdict-report-excerpt.test.ts"
+    - claim: "every new field is appended so no existing positional caller shifts, and the row stays within the never-rotated retention class"
+      proof: "unit test: test/no-pr-verdict-shape.test.ts"
+  risk: high
+  origin: azure-run-2026-08-08#empty-diff-success
+  plan_refs: ["§8A"]
+  files: [src/run-task.ts, src/lib/worker.ts, test/no-pr-verdict-commit-count.test.ts, test/no-pr-verdict-reason.test.ts, test/no-pr-verdict-report-excerpt.test.ts, test/no-pr-verdict-shape.test.ts]
+  status: queued
+  attempts: 0
+  note: "ALL THREE FIELDS GO ON THE VERDICT ROW, AND THE OBVIOUS PLACE FOR THE FIRST ONE IS WRONG.
+    The brief that produced this task named `implement.done` as the row missing the commit count.
+    That is where the count would naturally go and it must NOT go there. `implement.done` is
+    DELIBERATELY EXCLUDED from the never-rotated decision-relevant ledger set, and the exclusion is
+    argued rather than incidental: the set's own doc lists it among the steps read ONLY to label a
+    cosmetic phase and elapsed time for the board, and states those never gate a real decision. So
+    a count written there is subject to ordinary rotation, which keeps only the newest lines per
+    step and archives the rest — the forensic answer would evaporate exactly as history accumulates,
+    which is the one condition under which anyone wants it. Adding the step to the retained set to
+    compensate would contradict that set's stated rationale and force a cosmetic phase transition
+    into the never-rotated core.
+    The verdict step is already IN that set, so a field written there survives indefinitely. That
+    settles both the placement and the scope: all three facts belong on ONE ledger write, produced
+    by ONE function, at ONE call site.
+    SCOPE, ARGUED RATHER THAN ASSUMED. The candidate split was to make the report capture its own
+    task, on the grounds that it introduces a new KIND of payload — free-form model text with a size
+    surface the other two do not have. That argument is answered by precedent rather than waved off:
+    the size question is already solved in this codebase. A failed spawn's stderr is persisted
+    through a named cap constant and a helper that returns UNDEFINED for a clean spawn, with the
+    explicit reasoning that a clean spawn must not spam the ledger with an empty excerpt. The report
+    excerpt is that mechanism applied to a different string, not a new design problem. Against that,
+    splitting would put the SAME verdict-shaping function into two shards that a concurrent drain
+    could dispatch at once, which is the merge-conflict shape this repo has already paid for.
+    ONE TASK. THE CONDITION THAT WOULD CHANGE THAT: if the report text needed REDACTION beyond a
+    length cap — a secret-shaped scan, or a policy about model prose in a committed record — that is
+    a genuinely separate concern with its own falsifiers, and it should be split out at that point
+    rather than absorbed here.
+    THE PRECEDENT SAYS THIS IS CHEAP, AND NAMES THE SHAPE. An earlier task threaded the child's env
+    key list and the account label through the worker result purely so that a blocked verdict could
+    DERIVE its billing mode instead of hardcoding a literal — no behaviour change, a strictly better
+    record, and the new parameters appended LAST so no existing positional caller shifted. That is
+    the same change at the same layer, and the same append-last discipline applies here.
+    DO NOT ADD A NEW CONTRACT EXIT, AND THE REASONING IS RECORDED HERE SO IT IS NOT RELITIGATED. It
+    is tempting to give a worker a sanctioned way to say I RAN AND PRODUCED NOTHING, beside the
+    existing decision-request and already-satisfied exits. It should not exist. A contract exit is a
+    way for a worker to SAY something, and a worker that produced nothing has nothing to convey
+    beyond that it did not manage the task. An exit for it would let a worker DECLARE ITS OWN NO-OP
+    LEGITIMATE, which is strictly worse than the fleet catching it mechanically and refusing to
+    credit it — the arrangement that already works. Neither existing exit fits either: the
+    already-satisfied exit asserts the acceptance is already true upstream, which is false here and
+    would be refused by the verifying gateway anyway, and the decision-request exit asserts a choice
+    is needed, which auto-chooses and RESUMES rather than exiting.
+    A DIFFERENT HOLE, NOTED AND NOT FILED HERE: a separate feedback item argues there is no exit for
+    WORK DONE BUT PREFLIGHT WILL NOT GO GREEN. That shape has a REAL ARTIFACT that cannot be
+    certified, and any exit for it would carry a diff and ask for a human judgement about the gate.
+    This one has no artifact at all. One exit could not serve both, and folding them together would
+    lose the distinction that makes either tractable.
+    RISK HIGH IS THE SIZING RULE'S SPAN, NOT BLAST RADIUS. The file set crosses the dispatcher that
+    shapes the verdict and the worker module where the capped-excerpt helper's sibling already
+    lives, plus their tests. The behaviour change is nil by construction: the guard's predicate, the
+    verdict it returns, the worktree removal and the drain halt are all untouched, and a reviewer
+    should treat any diff that alters them as out of scope for this task."
