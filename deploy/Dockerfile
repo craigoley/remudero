@@ -256,13 +256,44 @@ RUN npm_config_cache=/tmp/npm-build-cache \
 # Verified in-layer for the same reason REQ 7 is: a missing sandbox binary should fail the build
 # here, not a worker later.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      bubblewrap socat \
+      bubblewrap socat procps lsof \
  && rm -rf /var/lib/apt/lists/* \
  && bwrap --version \
- && socat -V >/dev/null
+ && socat -V >/dev/null \
+ && ps -eo pid= >/dev/null \
+ && pgrep --version >/dev/null \
+ && lsof -v >/dev/null 2>&1
 # NOTE the `>/dev/null` above rather than `| head -1`: `A && B | C` parses as `A && (B | C)` and a
 # pipeline's status is its LAST stage, so `socat -V | head -1` would return head's zero even with
 # socat absent — the check would pass for a missing binary. Written that way first, caught here.
+#
+# PROCESS INSPECTION (procps, lsof) — MEASURED ABSENT FROM THE PUBLISHED IMAGE as uid 1000 with the
+# entrypoint bypassed: `ps`, `lsof`, `pgrep`, `pkill`, `top` and `free` all MISS, and a direct
+# `spawnSync ps` reports ENOENT. `kill` and `df` are shell builtins/coreutils and were already fine.
+#
+# WHY IT MATTERS: the sweeps that shell these binaries do not fail — they report SUCCESS on an empty
+# result, which is this repo's recurring "zero is overloaded" shape. `defaultListCandidates`
+# (lib/worker-containment.ts) catches and returns [], so `sweepOrphanWorkers` finds no candidates,
+# kills nothing, and reports a clean sweep. `listProcessGroupMembers` catches and returns [], so a
+# group kill reports zero survivors. `probeIdle` (lib/deployer.ts) catches and sets `workers = 0`,
+# so the fleet reads as IDLE. `defaultGetProcessStartTime` (lib/fs-race-safe.ts) catches and returns
+# null, which SILENTLY DISABLES `isHolderStale`'s third rung — the start-time comparison that is the
+# only defence against a container PID namespace recycling a low pid. That last one is the subtle
+# case: the syscall-based `isPidAlive` keeps working, so liveness LOOKS healthy while its corrective
+# rung is gone.
+#
+# NOT EVERY CALLER IS BROKEN THE SAME WAY, and the difference is worth keeping: `defaultOpenFileCount`
+# (lib/clone-reaper.ts) FAILS CLOSED by design — with `lsof` absent it returns 1 ("something holds
+# it"), so the clone reaper reclaims nothing rather than deleting something live. Safe, still a
+# no-op sweep.
+#
+# WHAT IS INSTALLED AND WHY: `procps` for `ps` (four call sites) and `pgrep` (one); `lsof` for three.
+# `pkill`, `top` and `free` have ZERO callers — `pkill` appears only as a string in
+# `CLAUDE_CODE_TOOL_WRAPPERS` (lib/isolation.ts), not a call — and are installed only because procps
+# bundles them. Cost is 1800 KB + 475 KB installed (707 KB + 247 KB to fetch) on a 4+ GB image.
+#
+# VERIFIED IN-LAYER by RUNNING each binary, not by `command -v`: presence on disk is not
+# executability, and this file has been corrected before for exactly that class of check.
 
 
 # ── REQ 11: HAND /home/node TO THE RUNTIME USER, AND RUN AS THAT USER ────────────────────────

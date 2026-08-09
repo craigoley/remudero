@@ -31,7 +31,7 @@
 import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
 import { mkdtempSync, openSync, readFileSync } from "node:fs";
-import { createServer } from "node:net";
+import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -80,6 +80,45 @@ function serversOn(port: number): number[] {
     .filter((n) => Number.isFinite(n));
 }
 
+/**
+ * Is anything accepting TCP on `127.0.0.1:port`?
+ *
+ * THE LIVENESS PREDICATE, and it is deliberately NOT `serversOn`. That helper decides "running" by
+ * matching THREE substrings on a `ps` line — `run-task.ts serve`, `--port <n>`, and
+ * `tsx/dist/loader.mjs` — and returns `[]` on ANY failure, including `ps` itself erroring. So a
+ * server that IS running reads as absent whenever the environment differs in any of four unrelated
+ * ways: a `ps` that rejects those flags or truncates a ~250-char command line (`--port` sits at the
+ * END of it), a tsx that does not interpose a child, a different tsx layout, or simple absence. All
+ * four render identically, which is why the failure it produces says only "not running".
+ *
+ * MEASURED: this file's live tests pass on the GitHub runner and in this agent's container, and the
+ * precondition assertion FAILED in the operator's Azure container — the same environment-dependence
+ * #1509 hit one layer up, when its first negative control asserted the leak itself. A port bind is
+ * the process's OWN readiness signal and depends on none of the four.
+ */
+function listeningOn(port: number, timeoutMs = 500): Promise<boolean> {
+  return new Promise((resolve) => {
+    const sock = connect({ host: "127.0.0.1", port });
+    const done = (up: boolean) => {
+      sock.destroy();
+      resolve(up);
+    };
+    sock.setTimeout(timeoutMs, () => done(false));
+    sock.once("connect", () => done(true));
+    sock.once("error", () => done(false));
+  });
+}
+
+/** Poll {@link listeningOn} until the server answers, or the deadline passes. */
+async function waitForListening(port: number, timeoutMs = 45_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await listeningOn(port)) return true;
+    if (Date.now() > deadline) return false;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
 async function waitForServer(port: number, timeoutMs = 45_000): Promise<number[]> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
@@ -107,13 +146,19 @@ test("killing the process GROUP reaps the serve process the tsx wrapper spawned"
   t.after(() => killProcessGroup(child.pid!));
 
   // REACHING THE SPAWN IS ASSERTED FIRST — a teardown test that never started a process proves
-  // nothing at all, which is the trap this whole file exists around.
-  const running = await waitForServer(port);
-  assert.ok(running.length > 0, "the serve process must actually be running before teardown is judged");
+  // nothing at all, which is the trap this whole file exists around. The signal is the PORT, not a
+  // `ps` line: the server binds it, so a successful connect is the process's own readiness report
+  // and is independent of `ps`, of tsx interposition, and of command-line formatting.
+  assert.ok(
+    await waitForListening(port),
+    `nothing accepted a connection on 127.0.0.1:${port} within 45s — the serve process never started`,
+  );
 
   killProcessGroup(child.pid!);
   await new Promise((r) => setTimeout(r, 1500));
-  assert.deepEqual(serversOn(port), [], "no serve process may survive a group kill");
+  // THE PORT IS THE STRONGER CLAIM. "No `ps` line matches" only says a pattern stopped matching;
+  // "nothing is listening" says the server is genuinely gone, which is what the group kill promises.
+  assert.equal(await listeningOn(port), false, "no serve process may survive a group kill");
 });
 
 test("the suite that spawns a real serve uses the detached-group shape, not a bare pid kill", () => {
@@ -144,8 +189,29 @@ test("the spawned pid is the tsx wrapper, not the server — which is why a bare
   const child = startServe(port);
   t.after(() => killProcessGroup(child.pid!));
 
-  const running = await waitForServer(port);
-  assert.ok(running.length > 0, "the serve process must actually be running before anything is judged");
+  // THE SERVER MUST BE UP BEFORE ANYTHING IS JUDGED, and that is decided by the PORT — the one
+  // signal every environment agrees on.
+  assert.ok(
+    await waitForListening(port),
+    `nothing accepted a connection on 127.0.0.1:${port} within 45s — the serve process never started`,
+  );
+
+  // THIS TEST NEEDS A PID, SO IT NEEDS `ps` — AND THAT IS WHERE IT SKIPS RATHER THAN FAILS.
+  // `serversOn` returns [] for four unrelated reasons (see `listeningOn`), only one of which is
+  // "the fix is broken". The server is PROVEN UP by the port above, so an empty enumeration here is
+  // a statement about this host's `ps`/tsx, not about the code — and #1509's own lesson is that a
+  // test whose PRECONDITION is environment-dependent is the same defect as one whose ASSERTION is.
+  // MEASURED: this assertion failed in the operator's Azure container while passing on the GitHub
+  // runner and in the agent's container. The shape is still guarded EVERYWHERE by the source-
+  // inspection test above, which needs no live process at all.
+  const running = serversOn(port);
+  if (running.length === 0) {
+    t.skip(
+      "ps enumerated no tsx-spawned serve process while the port WAS listening — this host cannot " +
+        "observe the wrapper/child split, so the pid precondition is unobservable here rather than false",
+    );
+    return;
+  }
 
   // THE LOAD-BEARING PRECONDITION, and the reason `detached` is not cargo: the process actually
   // serving is a DIFFERENT pid from the one `spawn` handed back. While that holds, a teardown built

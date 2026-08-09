@@ -518,6 +518,45 @@ else
   fi
 fi
 
+# ── PROCESS-INSPECTION BINARIES, EXECUTABLE AS UID 1000 ─────────────────────────────────────
+#
+# MEASURED ABSENT on the published image: ps, lsof, pgrep, pkill, top and free all MISS as uid 1000
+# with the entrypoint bypassed, and `spawnSync ps` reports ENOENT. Nothing failed loudly — the
+# sweeps that shell them catch and return an empty result, so an absent binary reads as "nothing to
+# reap" and the sweep reports success.
+#
+# EXECUTED, NOT MERELY PRESENT. This file has been corrected five times for vacuous checks, so this
+# one RUNS each binary as the runtime user rather than testing `-x` or `command -v`: a file can be
+# on PATH and on disk and still be unrunnable for uid 1000. `--user 1000:1000` is the whole point —
+# a root probe would pass on an image the runtime user cannot use.
+#
+# `pkill`, `top` and `free` are NOT asserted. They have zero callers in src/ and scripts/ (`pkill`
+# appears only as a string in CLAUDE_CODE_TOOL_WRAPPERS, lib/isolation.ts), so requiring them would
+# be asserting more than the fleet needs. They ride along with procps either way.
+echo
+echo "verify-image: process-inspection binaries run as uid 1000 (ps/pgrep for the sweeps, lsof for the reapers)"
+set +e
+out="$(docker run --rm --entrypoint /bin/sh --user 1000:1000 "${REF}" -c '
+  fail=0
+  # Each binary is INVOKED. Exit codes verified against Debian bookworm: `ps -eo pid=` is 0,
+  # `pgrep --version` is 0, `lsof -v` is 0. A bare `pgrep <pattern>` would be 1 on no match, which
+  # is why the version form is used for that one — a "no match" must not read as "missing".
+  ps -eo pid= >/dev/null 2>&1     || { echo "MISS ps";     fail=1; }
+  pgrep --version >/dev/null 2>&1 || { echo "MISS pgrep";  fail=1; }
+  lsof -v >/dev/null 2>&1         || { echo "MISS lsof";   fail=1; }
+  [ "$fail" -eq 0 ] && echo ALL_RUNNABLE
+' 2>&1)"
+set -e
+if printf '%s\n' "${out}" | grep -q '^ALL_RUNNABLE$'; then
+  echo "  OK    ps, pgrep and lsof all executed as uid 1000"
+else
+  echo "  FAIL  a process-inspection binary is missing or unrunnable as uid 1000:" >&2
+  printf '%s\n' "${out}" | sed 's/^/        /' >&2
+  echo "        Every sweep that shells one of these reports SUCCESS on an empty result," >&2
+  echo "        so this failing silently is what it looks like when it is not checked." >&2
+  RC=1
+fi
+
 echo
 if [ "${RC}" -eq 0 ]; then
   echo "verify-image: OK — every check passed on ${AFTER}"
