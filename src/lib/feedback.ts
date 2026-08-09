@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, relative, resolve, sep } from "node:path";
@@ -107,6 +108,23 @@ export interface FeedbackEntry {
    * own file-raw escape) — `raw` stays byte-identical and renderable either way.
    */
   expansion?: FeedbackExpansion | null;
+  /**
+   * Present ONLY when a home-repo pointer (W1-T397, `.remudero/home-repo.json`) is configured
+   * AND this checkout is not itself the home repo — the no-pointer case and the
+   * local-checkout-IS-home case both leave this key ABSENT, so the entry stays byte-identical
+   * to a pre-W1-T397 capture either way (design point iv: upstreaming a self-target must be a
+   * true no-op). `status: "landed"` once a PR against the home repo carries this entry;
+   * `"unreachable"` when the attempt failed for any reason (network, `gh`, or even a
+   * malformed pointer file) — the entry is captured LOCALLY either way, never dropped, and
+   * `error` names why so a failure is greppable straight out of the entry file.
+   */
+  upstream?: {
+    /** "owner/repo" of the configured home repo. */
+    home: string;
+    status: "landed" | "unreachable";
+    pr_url?: string;
+    error?: string;
+  };
 }
 
 // ── Decision summaries (W1-T313) ─────────────────────────────────────────────
@@ -611,6 +629,166 @@ export function parseFeedbackAddArgs(rest: string[]): ParsedFeedbackAdd | { erro
   return { raw, attachments, origin };
 }
 
+// ── Upstream home-repo routing (W1-T397) ─────────────────────────────────────
+//
+// "an instance working on another codebase that finds a defect in rmd ITSELF files that
+// defect into that other codebase's plan/feedback/, where nobody who maintains rmd will ever
+// read it" (task rationale). `.remudero/home-repo.json` names the ONE repo `rmd feedback`
+// reports upstream TO — the inverse of `.remudero/managed-repos.json` (WHICH repos this
+// instance is responsible FOR). It reuses that file's validation discipline (fail loud on a
+// malformed pointer, {@link loadHomeRepoPointer}) and its safe-empty default: a MISSING file
+// means no pointer is configured, which resolves to today's local-only behavior — nothing
+// regresses for the home instance itself, which never needs to ship this file at all.
+//
+// TRANSPORT (design point ii) is a pull request against the home repo adding this ONE entry's
+// YAML under `plan/feedback/`, built entirely via `gh api` against the home repo's GitHub
+// remote — never a local clone of it, since this checkout may share no git history with home
+// at all. It NEVER blocks or fails capture (design point iii): the entry is always written to
+// THIS checkout's own `plan/feedback/` first (unchanged from today); the upstream attempt only
+// ever adds an `upstream` field to that same local entry recording what happened, success or
+// failure, and is never allowed to escape {@link captureFeedback} as a thrown error.
+
+/** One `owner/repo` GitHub target. */
+export interface UpstreamFeedbackTarget {
+  owner: string;
+  repo: string;
+}
+
+export function homeRepoPath(root: string): string {
+  return join(root, ".remudero", "home-repo.json");
+}
+
+/**
+ * Load + validate `.remudero/home-repo.json` — `{"repo": "owner/repo"}`. Missing file -> `null`
+ * (no pointer configured — design point i's recommendation: absent means "file locally, as
+ * today", so nothing regresses for the home instance itself). A present but malformed file
+ * FAILS LOUD, mirroring {@link "./managed-repos.js".loadManagedRepos}'s exact discipline for
+ * the inverse config (Standing rule: validate before any consumer trusts it).
+ */
+export function loadHomeRepoPointer(root: string): UpstreamFeedbackTarget | null {
+  const path = homeRepoPath(root);
+  if (!existsSync(path)) return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8"));
+  } catch (err) {
+    throw new FeedbackError(`.remudero/home-repo.json is not valid JSON: ${String(err)}`);
+  }
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    Array.isArray(parsed) ||
+    typeof (parsed as Record<string, unknown>).repo !== "string"
+  ) {
+    throw new FeedbackError('.remudero/home-repo.json must be shaped {"repo": "owner/repo"}');
+  }
+  const entry = (parsed as { repo: string }).repo;
+  if (!/^[^/\s]+\/[^/\s]+$/.test(entry)) {
+    throw new FeedbackError(`.remudero/home-repo.json: invalid repo entry ${JSON.stringify(entry)} — expected "owner/repo"`);
+  }
+  const [owner, repo] = entry.split("/");
+  return { owner, repo };
+}
+
+type UpstreamGitExec = (args: string[]) => string;
+type UpstreamGhExec = (args: string[]) => string;
+
+function defaultUpstreamGit(root: string): UpstreamGitExec {
+  return (args) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+}
+
+function defaultUpstreamGh(): UpstreamGhExec {
+  return (args) => execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+}
+
+/**
+ * `root`'s OWN owner/repo, parsed from its git origin remote — the same regex as
+ * run-task.ts's `resolveOwnerRepo()`, deliberately duplicated rather than imported (run-task.ts
+ * imports FROM this module, never the reverse). `null` when it cannot be determined (no git
+ * repo, no origin remote) rather than throwing — see {@link isUpstreamSelfTarget} for why an
+ * undeterminable "self" resolves to the safe side.
+ */
+function resolveCurrentRepoFromGit(git: UpstreamGitExec): UpstreamFeedbackTarget | null {
+  try {
+    const url = git(["config", "--get", "remote.origin.url"]).trim();
+    const m = url.match(/[/:]([^/:]+)\/([^/]+?)(?:\.git)?$/);
+    return m ? { owner: m[1], repo: m[2] } : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * True when this checkout IS the configured home repo — design point iv: "when the local
+ * checkout IS the home repo, upstreaming must be a no-op... or the home instance will open
+ * pull requests against itself for every entry." An UNDETERMINABLE current repo
+ * (`current === null` — no git repo, no origin remote) resolves to `true` (treat as self, skip
+ * upstreaming) rather than `false`: the worse failure mode is a home instance spamming itself
+ * with PRs, not a checkout with no discoverable identity missing one upstream attempt — the
+ * entry is still captured locally either way, never dropped.
+ */
+function isUpstreamSelfTarget(current: UpstreamFeedbackTarget | null, home: UpstreamFeedbackTarget): boolean {
+  if (current === null) return true;
+  return current.owner === home.owner && current.repo === home.repo;
+}
+
+/**
+ * Open a pull request against the home repo adding `plan/feedback/<id>.yaml` with `content` —
+ * pure `gh api` plumbing (repo lookup -> branch ref -> file write -> PR open), no local clone of
+ * the home repo required. NEVER throws: every step is wrapped, and any failure resolves to
+ * `{ error }` rather than propagating — {@link captureFeedback} never fails because of this.
+ */
+function openUpstreamFeedbackPr(
+  home: UpstreamFeedbackTarget,
+  entryId: string,
+  content: string,
+  gh: UpstreamGhExec,
+): { prUrl?: string; error?: string } {
+  const slug = `${home.owner}/${home.repo}`;
+  try {
+    const repoInfo = JSON.parse(gh(["api", `repos/${slug}`])) as { default_branch: string };
+    const base = repoInfo.default_branch;
+    const baseRef = JSON.parse(gh(["api", `repos/${slug}/git/ref/heads/${base}`])) as { object: { sha: string } };
+    const branch = `feedback/${entryId}`;
+    try {
+      gh(["api", `repos/${slug}/git/refs`, "-f", `ref=refs/heads/${branch}`, "-f", `sha=${baseRef.object.sha}`]);
+    } catch {
+      // The branch may already exist from a prior attempt at the SAME entry id — reuse it
+      // rather than fail; the content write below is what actually matters.
+    }
+    const path = `plan/feedback/${entryId}.yaml`;
+    gh([
+      "api",
+      `repos/${slug}/contents/${path}`,
+      "--method",
+      "PUT",
+      "-f",
+      `message=chore(feedback): upstream ${entryId} from a remote instance`,
+      "-f",
+      `content=${Buffer.from(content, "utf8").toString("base64")}`,
+      "-f",
+      `branch=${branch}`,
+    ]);
+    const prOut = gh([
+      "api",
+      `repos/${slug}/pulls`,
+      "-f",
+      `title=chore(feedback): upstream ${entryId}`,
+      "-f",
+      `head=${branch}`,
+      "-f",
+      `base=${base}`,
+      "-f",
+      `body=Filed by an rmd instance working on a different codebase — plan/feedback/${entryId}.yaml`,
+    ]);
+    const pr = JSON.parse(prOut) as { html_url: string };
+    return { prUrl: pr.html_url };
+  } catch (e) {
+    return { error: String((e as Error)?.message ?? e) };
+  }
+}
+
 // ── Capture (I/O) ────────────────────────────────────────────────────────────
 
 /**
@@ -668,6 +846,13 @@ export interface CaptureFeedbackOptions {
    * PREVIEW-time concern, never something a plain capture call triggers on its own.
    */
   expansion?: FeedbackExpansion | null;
+  /**
+   * W1-T397 test seam ONLY — injectable `git`/`gh` for the home-repo self-check and the
+   * upstream PR attempt. Real callers never set this, so they get the actual `git`/`gh` calls;
+   * a test injects fakes so the routing decision (self vs. not) and the PR-open attempt are
+   * both assertable with no real subprocess and no live GitHub call.
+   */
+  upstream?: { git?: UpstreamGitExec; gh?: UpstreamGhExec };
 }
 
 /**
@@ -683,6 +868,17 @@ export interface CaptureFeedbackOptions {
  * throws: a failure here (offline, no `gh`, no network) never fails the capture — the write
  * above already is the durable record; landing merely gets it onto `origin/main` sooner so
  * `rmd triage` can act on it without a human hand-landing it first.
+ *
+ * After the local write and the local landing attempt, this ALSO checks for a home-repo
+ * pointer (W1-T397, {@link loadHomeRepoPointer}) and, when one is configured and this checkout
+ * is not itself the home repo, attempts to open a pull request against the home repo carrying
+ * this same entry ({@link openUpstreamFeedbackPr}) — so an instance working on a DIFFERENT
+ * codebase files an rmd defect where an rmd maintainer will actually read it, instead of into
+ * that codebase's own `plan/feedback/`. Like landing, this is best-effort and NEVER throws:
+ * any failure (no pointer, self-target, network, `gh`, even a malformed pointer file) leaves
+ * the entry captured locally with an `upstream` field recording what happened — never dropped,
+ * never blocking the run that produced it. This step takes no lock and writes nothing outside
+ * this one entry file: a reporting-only instance needs no arbiter.
  */
 export function captureFeedback(root: string, opts: CaptureFeedbackOptions): FeedbackEntry {
   const raw = opts.raw.trim();
@@ -696,7 +892,7 @@ export function captureFeedback(root: string, opts: CaptureFeedbackOptions): Fee
   const id = opts.id ?? generateFeedbackId();
   mkdirSync(feedbackDir(root), { recursive: true });
   const attachments = resolveAttachments(root, id, opts.attachments ?? []);
-  const entry: FeedbackEntry = {
+  let entry: FeedbackEntry = {
     id,
     ts: new Date().toISOString(),
     raw,
@@ -713,6 +909,31 @@ export function captureFeedback(root: string, opts: CaptureFeedbackOptions): Fee
   } catch {
     // landFeedback already swallows its own failures — this is a defensive second layer so
     // NOTHING landing-related can ever turn a successful capture into a thrown error.
+  }
+  try {
+    const home = loadHomeRepoPointer(root);
+    if (home) {
+      const git = opts.upstream?.git ?? defaultUpstreamGit(root);
+      const current = resolveCurrentRepoFromGit(git);
+      if (!isUpstreamSelfTarget(current, home)) {
+        const gh = opts.upstream?.gh ?? defaultUpstreamGh();
+        const { prUrl, error } = openUpstreamFeedbackPr(home, id, stringifyYaml(entry), gh);
+        entry = {
+          ...entry,
+          upstream: prUrl
+            ? { home: `${home.owner}/${home.repo}`, status: "landed", pr_url: prUrl }
+            : { home: `${home.owner}/${home.repo}`, status: "unreachable", error: error ?? "unknown error" },
+        };
+        writeFileSync(feedbackEntryPath(root, id), stringifyYaml(entry));
+      }
+    }
+  } catch (e) {
+    // Anything here — a malformed .remudero/home-repo.json, an unexpected throw from an
+    // injected test double — is the SAME failure class as an unreachable home repo: the entry
+    // is already durably captured locally above, so this defensive layer only records what
+    // went wrong rather than letting it turn a successful capture into a thrown error.
+    entry = { ...entry, upstream: { home: "unknown", status: "unreachable", error: String((e as Error)?.message ?? e) } };
+    writeFileSync(feedbackEntryPath(root, id), stringifyYaml(entry));
   }
   return entry;
 }

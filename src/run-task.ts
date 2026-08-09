@@ -13448,6 +13448,14 @@ async function notifyCommand(rest: string[]): Promise<number> {
  * `plan/feedback/<id>.yaml` entry with `status: new` and returns immediately (plain filesystem
  * I/O — no network, no LLM call). Fails loud (exit 2, writes nothing) on a bad flag, an
  * unreadable `--attach` path, or empty text; never falls through to a silent no-op.
+ *
+ * `repoRoot` here is THIS checkout — the codebase this command is running against, which may
+ * be a fork/clone with no relation to rmd's own repo. `captureFeedback` (W1-T397) separately
+ * checks `repoRoot`'s own `.remudero/home-repo.json` and, when it names a different repo,
+ * routes an upstream PR there in addition to this local write — so an instance working on
+ * another codebase files an rmd defect where an rmd maintainer will read it, rather than into
+ * that other codebase's own inbox. No pointer configured (the default) leaves this command's
+ * behavior unchanged from before W1-T397.
  */
 async function feedbackCommand(rest: string[]): Promise<number> {
   const parsed = parseFeedbackAddArgs(rest);
