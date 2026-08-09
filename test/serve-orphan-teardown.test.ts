@@ -109,14 +109,66 @@ function listeningOn(port: number, timeoutMs = 500): Promise<boolean> {
   });
 }
 
-/** Poll {@link listeningOn} until the server answers, or the deadline passes. */
+/**
+ * Is the server up, by EITHER independent observation?
+ *
+ * NEITHER SIGNAL IS PORTABLE ALONE, AND THAT IS MEASURED, NOT HEDGED.
+ *   `ps` works on the GitHub runner — the ps-only predicate passed there for this file's whole
+ *   history — and is ABSENT in the operator's Azure container, where `ps`, `lsof` and `pgrep` are
+ *   all missing from the image (fixed for future images in #1515, but a probe cannot assume it).
+ *   THE PORT answers in that container and, MEASURED, does NOT answer within 45s on the GitHub
+ *   runner: replacing ps with the port alone turned this file's two live tests red there, twice
+ *   including the flake retry. I do not yet know WHY the runner never accepts the connection, and
+ *   am not going to assert a cause I have not established — the point here is that the two
+ *   observations fail in DIFFERENT environments, so requiring either one alone makes the suite
+ *   depend on which machine it lands on.
+ *
+ * So "up" is the DISJUNCTION and "gone" is the CONJUNCTION. That is not a weakening: the
+ * post-teardown claim gets STRICTER than either version of this file has ever asserted — nothing
+ * may be listening AND no process may remain — while the precondition stops being a statement
+ * about the host.
+ */
+async function upBy(port: number): Promise<{ port: boolean; ps: boolean; up: boolean }> {
+  const byPort = await listeningOn(port);
+  const byPs = serversOn(port).length > 0;
+  return { port: byPort, ps: byPs, up: byPort || byPs };
+}
+
+/** Poll {@link upBy} until either signal reports the server, or the deadline passes. */
 async function waitForListening(port: number, timeoutMs = 45_000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    if (await listeningOn(port)) return true;
+    if ((await upBy(port)).up) return true;
     if (Date.now() > deadline) return false;
     await new Promise((r) => setTimeout(r, 100));
   }
+}
+
+/**
+ * What the server itself said, for a failure message that can be acted on.
+ *
+ * THE FAILURE THIS REPLACES SAID ONLY "never started", which is the same
+ * four-way-indistinguishable verdict this file was rewritten to eliminate one layer up. A probe
+ * that cannot say WHY is how #1515 shipped a red suite: the runner reported a bare precondition
+ * failure and the cause had to be guessed. The server's own log is the evidence.
+ */
+function serveDiagnostics(home: string, port: number): string {
+  let log = "(no serve log)";
+  try {
+    log = readFileSync(join(home, "serve.out.log"), "utf8").trim() || "(serve log empty)";
+  } catch (e) {
+    log = `(serve log unreadable: ${String(e)})`;
+  }
+  let psSaw = "(ps unavailable)";
+  try {
+    psSaw = execFileSync("ps", ["-eo", "pid=,command="], { encoding: "utf8" })
+      .split("\n")
+      .filter((l) => l.includes("run-task.ts serve"))
+      .join("\n") || "(ps ran, matched no serve process)";
+  } catch {
+    /* ps itself is missing — leave the placeholder, which is itself the finding */
+  }
+  return `\n--- serve log (port ${port}) ---\n${log}\n--- ps saw ---\n${psSaw}\n`;
 }
 
 async function waitForServer(port: number, timeoutMs = 45_000): Promise<number[]> {
@@ -132,33 +184,49 @@ async function waitForServer(port: number, timeoutMs = 45_000): Promise<number[]
 function startServe(port: number) {
   const home = mkdtempSync(join(tmpdir(), "serve-orphan-home-"));
   const out = openSync(join(home, "serve.out.log"), "a", 0o600);
-  return spawn(join(repoRoot, "bin", "rmd"), ["serve", "--port", String(port), "--host", "127.0.0.1"], {
+  const child = spawn(join(repoRoot, "bin", "rmd"), ["serve", "--port", String(port), "--host", "127.0.0.1"], {
     stdio: ["ignore", out, out],
-    env: { ...process.env, HOME: home },
+    env: {
+      ...process.env,
+      HOME: home,
+      // REQUIRED, NOT TIDINESS, and this file was violating the repo's own rule. `bin/rmd` runs
+      // `checkCliFreshness` before the verb, which does `git merge --ff-only origin/main` on the
+      // checkout — a network git operation, from a test, against whatever ref CI happens to have
+      // fetched. `SELF_SYNC_GUARD_ENV` is the documented escape and the only safe form for a
+      // spawn that is not deliberately syncing.
+      RMD_SELF_SYNC_DONE: "1",
+    },
     detached: true,
   });
+  return { child, home };
 }
 
 test("killing the process GROUP reaps the serve process the tsx wrapper spawned", async (t) => {
   const port = await freePort();
-  const child = startServe(port);
+  const { child, home } = startServe(port);
   // Belt and braces: whatever this test asserts, nothing survives it.
   t.after(() => killProcessGroup(child.pid!));
 
   // REACHING THE SPAWN IS ASSERTED FIRST — a teardown test that never started a process proves
-  // nothing at all, which is the trap this whole file exists around. The signal is the PORT, not a
-  // `ps` line: the server binds it, so a successful connect is the process's own readiness report
-  // and is independent of `ps`, of tsx interposition, and of command-line formatting.
+  // nothing at all, which is the trap this whole file exists around. EITHER observation satisfies
+  // it, because the two fail on different machines (see `upBy`), and the failure carries the
+  // server's own log so a red run names its cause instead of requiring one to be guessed.
   assert.ok(
     await waitForListening(port),
-    `nothing accepted a connection on 127.0.0.1:${port} within 45s — the serve process never started`,
+    `neither the port nor ps saw a serve process for 127.0.0.1:${port} within 45s${serveDiagnostics(home, port)}`,
   );
 
   killProcessGroup(child.pid!);
   await new Promise((r) => setTimeout(r, 1500));
-  // THE PORT IS THE STRONGER CLAIM. "No `ps` line matches" only says a pattern stopped matching;
-  // "nothing is listening" says the server is genuinely gone, which is what the group kill promises.
-  assert.equal(await listeningOn(port), false, "no serve process may survive a group kill");
+  // BOTH SIGNALS MUST GO QUIET, which is stricter than any earlier revision of this file: "no `ps`
+  // line matches" alone only says a pattern stopped matching, and "nothing is listening" alone
+  // would accept a process that survived with its socket closed. The group kill promises neither.
+  const after = await upBy(port);
+  assert.equal(
+    after.up,
+    false,
+    `no serve process may survive a group kill (listening=${after.port}, ps=${after.ps})${serveDiagnostics(home, port)}`,
+  );
 });
 
 test("the suite that spawns a real serve uses the detached-group shape, not a bare pid kill", () => {
@@ -186,14 +254,14 @@ test("the suite that spawns a real serve uses the detached-group shape, not a ba
 
 test("the spawned pid is the tsx wrapper, not the server — which is why a bare pid kill cannot reach it", async (t) => {
   const port = await freePort();
-  const child = startServe(port);
+  const { child, home } = startServe(port);
   t.after(() => killProcessGroup(child.pid!));
 
-  // THE SERVER MUST BE UP BEFORE ANYTHING IS JUDGED, and that is decided by the PORT — the one
-  // signal every environment agrees on.
+  // THE SERVER MUST BE UP BEFORE ANYTHING IS JUDGED, by either observation — see `upBy` for why
+  // neither the port nor `ps` is portable on its own.
   assert.ok(
     await waitForListening(port),
-    `nothing accepted a connection on 127.0.0.1:${port} within 45s — the serve process never started`,
+    `neither the port nor ps saw a serve process for 127.0.0.1:${port} within 45s${serveDiagnostics(home, port)}`,
   );
 
   // THIS TEST NEEDS A PID, SO IT NEEDS `ps` — AND THAT IS WHERE IT SKIPS RATHER THAN FAILS.
