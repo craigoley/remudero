@@ -1,0 +1,35 @@
+id: fb-1786274365208-a7d8bc
+ts: 2026-08-09T11:19:25.208Z
+raw: "THE EMPTY-DIFF no_pr HAS NOW REPRODUCED ON A SECOND TASK —
+  state/recon-empty-diff-success.md concluded model outcome rather than fleet
+  defect on the reasoning that a fleet defect reproduces. It has reproduced. TWO
+  OCCURRENCES, DIFFERENT TASKS, BOTH IN A CONTAINER ON AZURE: W1-T388 on
+  2026-08-08, 30 turns, cost_usd 1.29, subtype success, api_error false,
+  permission_denials 0, git rev-list --count origin/main..run-branch = 0.
+  W1-T392 on 2026-08-09, 86 turns, notional cost 6.67, same verdict, same zero
+  count, confirmed by executing rev-list against the surviving branch. IN BOTH
+  CASES THE RECON PHASE WORKED and declared followups naming the work precisely;
+  the implement phase produced no commits and the SDK envelope reported success.
+  W1-T388 later SUCCEEDED on a re-dispatch and opened a PR, so the failure is
+  not deterministic per task. TWO FURTHER FACTS FROM THE SECOND RUN. The
+  worktree removal FAILED — error: failed to delete run-W1-T392-1786245496644:
+  Directory not empty — leaving an orphan on the volume, which is the leak class
+  ranked third in state/recon-mini-assumptions.md and which nothing reaps in a
+  one-shot container. And the drain HALTED after one dispatch of a --max 6
+  budget, because a blocked verdict stops the loop; the same halt ended the
+  prior two-lane drain after two. So one no_pr costs the whole drain, not one
+  slot. RECON: re-open the question the prior recon closed. Establish what
+  distinguishes the runs that produce nothing from the ones that produce a PR on
+  the same task — turns, model, effort, mount, and the recon followup shape are
+  all on rows already written. And establish whether the silent-no-op guard
+  should retry once in-process rather than ending the run, given a re-dispatch
+  of the identical task succeeded. Falsifying check: if the two runs differ in
+  some input the fleet chose rather than the model — a different mount, a
+  truncated prompt, a missing anchor — then it is a fleet defect after all and
+  the model-outcome conclusion was drawn from a sample of one."
+attachments: []
+origin: cli
+status: new
+proposal_pr: null
+summary: null
+expansion: null
