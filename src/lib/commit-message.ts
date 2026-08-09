@@ -249,7 +249,34 @@ export function shapeCommitMessage(
 export type PreflightSpawn = (
   file: string,
   args: string[],
-  opts?: { cwd?: string; input?: string },
+  opts?: {
+    cwd?: string;
+    input?: string;
+    /**
+     * STREAM this child's output to the operator's terminal instead of capturing it.
+     *
+     * THE DEFECT THIS EXISTS FOR: `spawnSync` below pipes stdout/stderr into a buffer, so NOTHING
+     * reaches the terminal until the child exits. Measured in a container: `preflight --ci-parity`
+     * ran for OVER AN HOUR and produced ZERO output, and the operator resorted to `docker top`
+     * three times to learn what a single line would have told him. An hour of silence is
+     * indistinguishable from a hang.
+     *
+     * OPT-IN PER CALL, NEVER GLOBAL, and that is the whole reason this is a flag rather than a
+     * change of default. Most callers here spawn `git diff`/`git merge-base` and READ the captured
+     * stdout as data (`mergeBaseDiffText`, `changedFilesListPath`, `triggerLeaf`'s
+     * `/REQUIRED/.test`); streaming those would both spew diffs at the operator and break the
+     * parse. Only the two multi-minute test steps set this.
+     *
+     * WHAT IT COSTS, STATED PLAINLY: `spawnSync` cannot tee. With `stdio` inherited the child
+     * writes straight to the terminal and `res.stdout`/`res.stderr` come back `null`, so a
+     * streaming call trades the captured TEXT for live output. The VERDICT is unaffected — it is
+     * `status`, which `spawnSync` still reports correctly on an inherited child (verified, both
+     * zero and nonzero) — and the text is not lost, it is on screen. A true in-process tee needs
+     * an ASYNC spawn, which would ripple through every entry in `CI_PARITY_TABLE` and both callers
+     * in this file; that is a refactor, not this fix.
+     */
+    stream?: boolean;
+  },
 ) => {
   status: number | null;
   stdout: string;
@@ -273,13 +300,25 @@ const PREFLIGHT_SPAWN_MAX_BUFFER = 64 * 1024 * 1024;
 export function defaultPreflightSpawn(
   file: string,
   args: string[],
-  opts: { cwd?: string; input?: string } = {},
+  opts: { cwd?: string; input?: string; stream?: boolean } = {},
 ): { status: number | null; stdout: string; stderr: string; error?: string } {
   const res = spawnSync(file, args, {
     cwd: opts.cwd,
     input: opts.input,
     encoding: "utf8",
     maxBuffer: PREFLIGHT_SPAWN_MAX_BUFFER,
+    // `stdio[0]` stays a pipe in BOTH modes so `opts.input` keeps working; only the output
+    // streams change. Inheriting also retires the `maxBuffer` ceiling for these steps — the
+    // ENOBUFS that once read as an unexplained red `ci:test` cannot happen to a child whose
+    // output never passes through this process at all.
+    //
+    // A SECOND EFFECT WORTH NAMING, because it is what actually meets the operator's need:
+    // `node --test` picks its default reporter by whether stdout is a TTY — TAP when piped,
+    // spec when not. `parseFailingTestNames` (scripts/test-with-retry.mjs) states exactly that.
+    // So an inherited run in a real terminal prints per-test spec lines live, and the
+    // coverage step (which passes `--test-reporter=spec --test-reporter-destination=stdout`
+    // explicitly) streams its per-file lines in either case. No reporter flag changes here.
+    ...(opts.stream ? { stdio: ["pipe", "inherit", "inherit"] as const } : {}),
   });
   return {
     status: res.status,
