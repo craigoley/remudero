@@ -4473,12 +4473,23 @@ export function resolveServeHost(rest: string[], env: NodeJS.ProcessEnv = proces
 }
 
 /**
- * W1-T371: resolve the additive tailnet-identity option, or `undefined` when the operator
- * hasn't opted in. `identityCapability` (config.json's `serve.identityCapability`) is the ONLY
- * source — no `--flag`/env override, unlike port/host: the ACL app-capability name is an
- * install-level constant chosen once against the operator's own Tailscale policy, not
- * something a single invocation varies. Undefined input (the default, unconfigured install)
- * returns `undefined` — identity is never consulted, byte-for-byte the pre-W1-T371 behavior.
+ * The only `serve.trustedProxy` value {@link resolveServeIdentity} accepts today: the operator
+ * declaring that Tailscale Serve (see service.ts's `IdentityAuth` doc) is the process
+ * terminating on the trusted loopback address. Any other declared value names a proxy this
+ * codebase cannot verify strips identity headers the way Serve does, so it is refused rather
+ * than silently trusted (W1-T398).
+ */
+export const TRUSTED_PROXY_TAILSCALE = "tailscale";
+
+/**
+ * W1-T371/W1-T398: resolve the additive tailnet-identity option, or `undefined` when the
+ * operator hasn't opted in. `identityCapability` (config.json's `serve.identityCapability`) is
+ * the ONLY source for the capability name — no `--flag`/env override, unlike port/host: the ACL
+ * app-capability name is an install-level constant chosen once against the operator's own
+ * Tailscale policy, not something a single invocation varies. Undefined input (the default,
+ * unconfigured install) returns `undefined` REGARDLESS of `trustedProxy` — identity is never
+ * consulted, byte-for-byte the pre-W1-T371 behavior, and the off-by-default path gains no new
+ * required field.
  *
  * `trustedLocalAddress` is always {@link DEFAULT_SERVE_HOST} (loopback) — matching Tailscale's
  * own documented guidance that a backend trusting Serve's identity headers should listen ONLY
@@ -4488,9 +4499,48 @@ export function resolveServeHost(rest: string[], env: NodeJS.ProcessEnv = proces
  * `rmd serve` itself binds via `RMD_SERVE_HOST`/`resolveServeHosts` — those are this Node
  * process's own direct-connection interfaces, not `tailscale serve`'s proxy target, which is
  * operator-machine deployment config (com.remudero.serve.plist) outside this repo.
+ *
+ * W1-T398: enabling `identityCapability` used to inherit that loopback-trust assumption
+ * silently — nothing recorded WHICH proxy the operator meant to be listening there, so pointing
+ * any OTHER reverse proxy (nginx, Caddy, a cloud load balancer's local target) at the same
+ * address turns gate 1 (service.ts's interface check) into a no-op while gate 2's header check
+ * loses the only thing that made it safe (Serve stripping client-supplied headers). Whether the
+ * process on that address really is Serve is NOT OBSERVABLE from inside this one — shelling a
+ * `tailscale` binary would prove a daemon is running, never that it's the listener in question
+ * — so this cannot VERIFY the topology, only require the operator to STATE it:
+ *   - `trustedProxy` absent while `identityCapability` is set: REFUSED at startup. A config that
+ *     never declares which proxy it trusts no longer silently inherits one.
+ *   - `trustedProxy === "tailscale"` ({@link TRUSTED_PROXY_TAILSCALE}): the declared, supported
+ *     case — resolves exactly as it did before W1-T398.
+ *   - any other `trustedProxy` value: a named opt-out, REFUSED for now, naming what would have
+ *     to be true (a header-stripping guarantee equivalent to Serve's) for it to be safe.
+ * An install that never sets `identityCapability` never reaches any of this: this function
+ * still returns `undefined` for it without ever inspecting `trustedProxy`.
  */
-export function resolveServeIdentity(identityCapability: string | undefined): ServiceOptions["identity"] {
+export function resolveServeIdentity(
+  identityCapability: string | undefined,
+  trustedProxy: string | undefined,
+): ServiceOptions["identity"] {
   if (!identityCapability) return undefined;
+  if (!trustedProxy) {
+    throw new Error(
+      `config serve.identityCapability is set ("${identityCapability}") but serve.trustedProxy is ` +
+        `not. Tailnet-identity auth trusts whichever process is terminating on the loopback address ` +
+        `gate 1 checks against, and nothing declares which one this install means. Add ` +
+        `"trustedProxy": "${TRUSTED_PROXY_TAILSCALE}" next to identityCapability in config.json if ` +
+        `Tailscale Serve is that process (the supported, documented case).`,
+    );
+  }
+  if (trustedProxy !== TRUSTED_PROXY_TAILSCALE) {
+    throw new Error(
+      `config serve.trustedProxy ${JSON.stringify(trustedProxy)} is not a supported value. Only ` +
+        `"${TRUSTED_PROXY_TAILSCALE}" is accepted today — gate 2 (service.ts's capability check) is ` +
+        `only as sound as its assumption that the process on the trusted loopback address strips ` +
+        `client-supplied identity headers the way Tailscale Serve does, and nothing in this codebase ` +
+        `can verify that of a different proxy. Front this with Tailscale Serve, or unset ` +
+        `identityCapability and rely on the bearer token instead.`,
+    );
+  }
   return { trustedLocalAddress: DEFAULT_SERVE_HOST, capability: identityCapability };
 }
 
