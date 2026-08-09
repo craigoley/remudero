@@ -23,8 +23,42 @@ set -euo pipefail
 log() { printf 'rmd-entrypoint: %s\n' "$*" >&2; }
 die() { log "$*"; exit 1; }
 
+# ── GIT IDENTITY IS NOT PART OF THE BOOTSTRAP, SO IT MUST NOT BE SKIPPED WITH IT ─────────────
+# THIS BLOCK USED TO SIT BELOW THE SKIP, AND THE SKIP `exec`s — it never returns. So
+# `RMD_SKIP_BOOTSTRAP=1` left the container with NO identity at all, and MEASURED on the published
+# image that is exactly what verify-image.sh's uid-1000 commit probe hit:
+# `fatal: unable to auto-detect email address (got 'node@<container>.(none)')`.
+#
+# WHICH SIDE WAS WRONG, since the probe could equally have been retargeted. Three reasons it is
+# this file:
+#   1. The skip's OWN log line enumerates what it skips — "no clone, no fetch, no install". An
+#      identity is none of those three. It was filed inside a block whose stated scope excludes it.
+#   2. The skip is this script's DOCUMENTED RECOVERY PATH: two failure messages below tell an
+#      operator to re-run with RMD_SKIP_BOOTSTRAP=1 to inspect a broken tree by hand. Someone
+#      salvaging uncommitted work is precisely who needs to be able to commit, and that was the one
+#      path with no identity.
+#   3. It costs two local `git config` calls — no network, no token, no clone — so making it
+#      unconditional keeps the verifier's check token-free and runnable on every verification,
+#      rather than only when credentials happen to be around.
+# The honest counter-argument, recorded rather than buried: a WORKER never sets
+# RMD_SKIP_BOOTSTRAP=1, and on the normal path this write already happened BEFORE the clone. So
+# production was never broken, and the probe's "every worker commits NOTHING" wording overstates
+# what it measured. That is a defect in the message, not a reason to leave the recovery path unable
+# to commit.
+#
+# `mkdir -p` first: `git config --global` writes $HOME/.gitconfig and FAILS OUTRIGHT if HOME does
+# not exist (the same trap recorded further down).
+mkdir -p "${HOME:?HOME must be set — git config --global writes \$HOME/.gitconfig and cannot without it}"
+if git -C / config --get user.email >/dev/null 2>&1 && git -C / config --get user.name >/dev/null 2>&1; then
+  log "git identity: already configured ($(git -C / config --get user.name) <$(git -C / config --get user.email)>) — left alone"
+else
+  git config --global --replace-all user.name "${RMD_GIT_AUTHOR_NAME:-remudero-worker}"
+  git config --global --replace-all user.email "${RMD_GIT_AUTHOR_EMAIL:-remudero-worker@users.noreply.github.com}"
+  log "git identity: $(git config --get user.name) <$(git config --get user.email)> (override with RMD_GIT_AUTHOR_NAME/RMD_GIT_AUTHOR_EMAIL)"
+fi
+
 if [ "${RMD_SKIP_BOOTSTRAP:-}" = "1" ]; then
-  log "RMD_SKIP_BOOTSTRAP=1 — no clone, no fetch, no install"
+  log "RMD_SKIP_BOOTSTRAP=1 — no clone, no fetch, no install (the identity above is already written)"
   exec "$@"
 fi
 
@@ -121,13 +155,12 @@ fi
 # container would inherit. (Found by running this block, not by reading it: the first draft reported
 # "already configured" off the checkout's own local config.) A SYSTEM identity still satisfies it —
 # that is deliberate, since one would make commits work without this write.
-if git -C / config --get user.email >/dev/null 2>&1 && git -C / config --get user.name >/dev/null 2>&1; then
-  log "git identity: already configured ($(git -C / config --get user.name) <$(git -C / config --get user.email)>) — left alone"
-else
-  git config --global --replace-all user.name "${RMD_GIT_AUTHOR_NAME:-remudero-worker}"
-  git config --global --replace-all user.email "${RMD_GIT_AUTHOR_EMAIL:-remudero-worker@users.noreply.github.com}"
-  log "git identity: $(git config --get user.name) <$(git config --get user.email)> (override with RMD_GIT_AUTHOR_NAME/RMD_GIT_AUTHOR_EMAIL)"
-fi
+#
+# THE WRITE ITSELF NOW RUNS ABOVE THE RMD_SKIP_BOOTSTRAP BLOCK, not here — everything above this
+# line is WHY the identity exists and what it must be; the argument for WHERE it runs is at the top
+# of this file. It moved because the skip block `exec`s and never returns, so the skip path had no
+# identity at all, which is what the published image's uid-1000 commit probe measured. Nothing about
+# the normal path changed: this write already happened before the clone, and still does.
 
 # ── RESOLVING THE REF: A BRANCH MEANS THE TIP AT BOOT, A SHA MEANS EXACTLY THAT ──────────────
 # MEASURED ON AZURE 2026-08-08, AND REPRODUCED HERE AGAINST A REAL GIT ORIGIN. A boot printed

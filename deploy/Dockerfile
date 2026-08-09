@@ -388,6 +388,17 @@ COPY --chown=node:node package.json package-lock.json ./
 # layer below still runs AFTER this one, so it continues to guard this layer's npm usage too. The
 # explicit `chown` is required because `chown -R node:node /home/node` (REQ 11) is ABOVE this line,
 # so the cache this writes would otherwise ship root-owned.
+#
+# THE CHOWN TARGETS `/home/node/.cache`, NOT `/home/node/.cache/ms-playwright`, AND THAT ONE WORD IS
+# THE WHOLE OF THE SECOND DEFECT. `playwright install` runs as root and creates BOTH directories,
+# because REQ 11's chown is above this layer and `.cache` did not exist when it ran. Chowning only
+# the child repaired what the install WROTE and left the directory it CREATED alone. MEASURED on the
+# published image:
+#     drwxr-xr-x 3 root root  /home/node/.cache
+#     drwxr-xr-x 6 node node  /home/node/.cache/ms-playwright
+# Contents readable, parent unwritable — so anything creating a NEW entry under `.cache` fails as
+# uid 1000, which is every tool that caches under XDG defaults. Same shape as REQ 14's root-owned
+# `.npm`: a repair aimed one level too deep.
 RUN set -eu; \
     PW_VERSION="$(node -p "require('/app/package-lock.json').packages['node_modules/playwright-core'].version")"; \
     echo "REQ 15: package-lock.json pins playwright-core@${PW_VERSION} — installing browsers for THAT version"; \
@@ -398,7 +409,7 @@ RUN set -eu; \
     printf '%s\n' "${PW_VERSION}" > /opt/pw-pin/version; \
     /tmp/pw-pin/node_modules/.bin/playwright install --with-deps chromium; \
     rm -rf /tmp/pw-pin /tmp/npm-build-cache; \
-    chown -R node:node /home/node/.cache/ms-playwright /opt/pw-pin; \
+    chown -R node:node /home/node/.cache /opt/pw-pin; \
     node -e ' \
       const {readFileSync, existsSync} = require("fs"); \
       const j = JSON.parse(readFileSync("/opt/pw-pin/browsers.json", "utf8")); \
@@ -442,7 +453,14 @@ RUN export npm_config_cache=/tmp/npm-build-cache \
         echo "BUILD ASSERTION FAILED (REQ 14): /home/node/.npm exists after the last root npm layer."; \
         echo "  A build layer wrote an npm cache into the runtime user HOME. It will ship partially"; \
         echo "  root-owned and the entrypoint bootstrap install will EACCES as uid 1000."; \
-        ls -la /home/node/.npm; exit 1; }; }
+        ls -la /home/node/.npm; exit 1; }; } \
+ && { [ ! -e /home/node/.cache ] || [ -z "$(find /home/node/.cache ! -user node -print -quit)" ] || { \
+        echo "BUILD ASSERTION FAILED (REQ 14b): /home/node/.cache holds an entry not owned by node."; \
+        echo "  A root layer created or repopulated it after REQ 11's chown. The published image"; \
+        echo "  shipped exactly this: a root-owned .cache DIRECTORY with node-owned contents, so"; \
+        echo "  reads worked and creating any NEW entry failed as uid 1000."; \
+        echo "  Fix the layer that wrote it by chowning the DIRECTORY, not only what it wrote inside."; \
+        find /home/node/.cache ! -user node -exec ls -ld {} + | head -5; exit 1; }; }
 
 COPY --chown=node:node . .
 
