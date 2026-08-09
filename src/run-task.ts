@@ -11272,11 +11272,16 @@ export async function serveCommand(
   const config = loadConfig();
   let port: number;
   let hosts: string[];
+  let identity: ReturnType<typeof resolveServeIdentity>;
   try {
     // Config is the LAST fallback (flag > RMD_SERVE_HOST > config.serve.* > loopback:4317), so
     // the launchd unit's baked env and a hand-run `rmd serve` land on the same interfaces.
     port = resolveServePort(rest, config.serve?.port);
     hosts = resolveServeHosts(rest, process.env, config.serve?.host);
+    // W1-T398: resolved here, side by side with host/port, so an install that enables identity
+    // without declaring which proxy it trusts fails the SAME way an invalid --host does — a
+    // clean startup refusal, not a silent inherited default discovered later at request time.
+    identity = resolveServeIdentity(config.serve?.identityCapability, config.serve?.trustedProxy);
   } catch (e) {
     console.error(`### rmd serve — ${(e as Error).message}\n${USAGE}`);
     return 2;
@@ -11360,9 +11365,10 @@ export async function serveCommand(
     fleetControlRoot: config.root,
     questionsRoot: repoRoot,
     tokens,
-    // W1-T371: additive tailnet-identity auth, opt-in via config.serve.identityCapability.
-    // Undefined on an unconfigured install -- identity is never consulted, exactly as before.
-    identity: resolveServeIdentity(config.serve?.identityCapability),
+    // W1-T371/W1-T398: additive tailnet-identity auth, opt-in via config.serve.identityCapability
+    // and resolved (with serve.trustedProxy) above, side by side with host/port -- undefined on
+    // an unconfigured install, identity is never consulted, exactly as before.
+    identity,
     log,
   });
 

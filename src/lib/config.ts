@@ -107,8 +107,18 @@ export interface Config {
    * (the default): identity is never consulted and the bearer token authenticates exactly as
    * it always has — a Tailscale failure (or simply never opting in) degrades to the token
    * rather than locking the operator out.
+   *
+   * `trustedProxy` (W1-T398) is the REQUIRED companion to `identityCapability`: it names which
+   * process the operator means to be terminating on the loopback address gate 1
+   * (`identityGrantedScopes`, service.ts) checks against, since nothing else in this config
+   * states that. Setting `identityCapability` with `trustedProxy` absent is REFUSED at startup
+   * — silently inheriting that trust assumption is exactly the hazard this field closes. The
+   * only accepted value today is `"tailscale"` ({@link resolveServeIdentity}'s
+   * `TRUSTED_PROXY_TAILSCALE`); any other value is a named opt-out that is also refused, with a
+   * message naming the header-stripping guarantee it would have to provide. Irrelevant, and
+   * never read, when `identityCapability` is absent.
    */
-  serve?: { host?: string; port?: number; identityCapability?: string };
+  serve?: { host?: string; port?: number; identityCapability?: string; trustedProxy?: string };
   /**
    * Headroom governor switch (operator ruling fb-1784894405468-a4153e, 2026-07-24,
    * amending P34(c)/W1-T249, extending W1-T252 — its DEFAULT clause reversed by the
