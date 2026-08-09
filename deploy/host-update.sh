@@ -243,8 +243,21 @@ human_kb() { awk -v k="${1:-0}" 'BEGIN{ split("KB MB GB TB",u," "); i=1; while(k
 digest_of() {
   docker image inspect --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}' "$1" 2>/dev/null || true
 }
+# PRESENCE IS A DIFFERENT QUESTION FROM REGISTRY IDENTITY, and conflating them is a measured defect.
+# `digest_of` reads `RepoDigests`, which is EMPTY for an image that was never pulled from a registry
+# — a locally built tag, or one loaded from a file. So "the digest is empty" was being read as "the
+# host had no image", and after the reclaim removed a perfectly real local image the run reported
+# `FIRST PULL` for something byte-identical to what it had just deleted. That reads as progress when
+# nothing changed, which is the exact class of false verdict this script exists to remove.
+#
+# The image ID answers presence and nothing else, and it is captured HERE — before the reclaim —
+# alongside the digest, so the distinction costs no new information, only the asking.
+id_of() {
+  docker image inspect --format '{{.Id}}' "$1" 2>/dev/null || true
+}
 
 BEFORE_DIGEST="$(digest_of "${REF}")"
+BEFORE_ID="$(id_of "${REF}")"
 BEFORE_FREE="$(free_kb "${DOCKER_ROOT}")"
 echo
 echo "host-update: BEFORE"
@@ -343,6 +356,7 @@ fi
 
 # ── 6. MEASURE AFTER, AND SAY WHETHER ANYTHING ACTUALLY CHANGED ──────────────────────────────
 AFTER_DIGEST="$(digest_of "${REF}")"
+AFTER_ID="$(id_of "${REF}")"
 AFTER_FREE="$(free_kb "${DOCKER_ROOT}")"
 echo
 echo "host-update: AFTER"
@@ -375,8 +389,24 @@ elif [ "${PULL_RC}" -ne 0 ]; then
   # unchanged because nothing was fetched, and that is a different fact with a different remedy.
   echo "    UNCHANGED, BUT THE PULL FAILED — this is the pre-existing image, not a verdict on the tag"
   echo "      ${AFTER_DIGEST}"
-elif [ -z "${BEFORE_DIGEST}" ]; then
+elif [ -z "${BEFORE_ID}" ]; then
+  # GENUINELY FIRST — no image of any kind was on the host when this run started. `BEFORE_ID`, not
+  # `BEFORE_DIGEST`, decides this: see `id_of`. Both were captured before the reclaim, so neither is
+  # describing a state this script created.
   echo "    FIRST PULL   ${AFTER_DIGEST}"
+elif [ -z "${BEFORE_DIGEST}" ]; then
+  # THE HOST HAD AN IMAGE, IT JUST CARRIED NO REGISTRY DIGEST — a locally built tag, most often
+  # `rmd-local:latest` from the measured runs. This is NOT a first pull, and saying so would be the
+  # false-progress report this branch exists to prevent. The IDs still answer whether the bits moved.
+  if [ "${BEFORE_ID}" = "${AFTER_ID}" ]; then
+    echo "    RE-FETCHED, IDENTICAL — the host had a local image with no registry digest, and the"
+    echo "    pull returned the same bits. Nothing changed; this was NOT a first pull."
+    echo "      ${AFTER_DIGEST}"
+  else
+    echo "    REPLACED a local image that carried no registry digest (so no from/to digest pair exists)"
+    echo "      local before  ${BEFORE_ID}"
+    echo "      pulled now    ${AFTER_DIGEST}"
+  fi
 elif [ "${BEFORE_DIGEST}" = "${AFTER_DIGEST}" ]; then
   # A no-op pull must not read as a successful update. This is the same trap deploy/verify-image.sh
   # was built around: a command that appears to have done something, on an artefact that predates
