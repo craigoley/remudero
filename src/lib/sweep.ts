@@ -1,7 +1,7 @@
 import { appendLedger } from "./ledger.js";
 import { readLedgerLines } from "./status.js";
 import { loadDefaultPolicy } from "./policy.js";
-import { cappedOverrideFromLedger, decideAutoMergeArm, postedArmFactsFromLedger } from "./review.js";
+import { cappedOverrideFromLedger, decideAutoMergeArm, postedArmFactsFromLedger, REVIEW_CONTEXT } from "./review.js";
 import type { ArmDecision, CriterionVerdict } from "./review.js";
 import type { QuestionEntry } from "./worker.js";
 import { FLEET_NOTICE_LABEL, NEEDS_HUMAN_LABEL, type AskType, type IssueGateway, type OpenIssue } from "./escalate.js";
@@ -683,12 +683,29 @@ const REQUIRED_CHECK_FAIL = new Set([
  * leniency above is itself part of THIS fix, so it does not apply when we
  * can't confirm which contexts are actually required) — fail-closed: an
  * unreadable protection rule must never manufacture a false green.
+ *
+ * `remudero-review` is EXCLUDED from the gate unconditionally (W1-T394, the
+ * PR #1441 blocked-routing fix) — even when it IS a required context and even
+ * in the unreadable-protection fallback above. `statusCheckRollup` mixes CHECK
+ * RUNS (a CI job's own verdict) with COMMIT STATUSES, and `remudero-review` is
+ * posted as a commit status carrying the REVIEW verdict, not a check run — it
+ * already has its own dedicated derivation ({@link reviewStateFromRollup} in
+ * run-task.ts, surfaced as `OpenPrView.reviewState`). Counting it here too made
+ * a red review indistinguishable from a red required CI check: `isBlockedCi`
+ * (below) went true on a review failure alone, routing the PR to the ci-log fix
+ * rung — which has no failing job to read — and made the review-shaped
+ * DISPOSITION_RULES row (`reviewState === "failure"`) unreachable, since the
+ * checks-red row is ordered ahead of it and claimed every review failure too.
+ * Every OTHER commit status (there is no second one this codebase tracks
+ * separately) still counts — this exclusion is specific to the ONE context
+ * that already has its own signal, never a general check-run/commit-status
+ * split (that split is NOT in scope here — see the task's design note).
  */
 export function checksStateFromRollup(
   rollup: RollupCheckEntry[] | undefined,
   requiredContexts: Iterable<string> | undefined,
 ): OpenPrView["checksState"] {
-  const all = rollup ?? [];
+  const all = (rollup ?? []).filter((c) => c.name !== REVIEW_CONTEXT && c.context !== REVIEW_CONTEXT);
   if (all.length === 0) return "none";
   const required = new Set(requiredContexts ?? []);
   const knownRequired = required.size > 0;
@@ -734,6 +751,15 @@ const MS_PER_DAY = 86_400_000;
  * `runFixRung`'s own mid-rung mode re-check — imports this ONE definition
  * rather than hand-copying the check, which would silently drift the moment
  * this predicate is refined again.
+ *
+ * `pr.checksState` is `"red"` ONLY for a required CHECK RUN failure (W1-T394,
+ * the PR #1441 fix) — {@link checksStateFromRollup} excludes the
+ * `remudero-review` commit status from the gate that derives it, so a red
+ * review alone can never make this true. A review failure is read off
+ * `pr.reviewState` instead, by DISPOSITION_RULES' separate review-shaped row.
+ * This keeps `isBlockedCi`'s own contract exactly as documented above ("a
+ * required check is red — the failing signal IS the CI log") true by
+ * construction, for every caller listed here.
  */
 export function isBlockedCi(pr: OpenPrView): boolean {
   return pr.checksState === "red";
@@ -1205,7 +1231,11 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
   },
   {
     // Reached only when checks are NOT red (row 5 above already claimed that
-    // case) — a pure review-shaped block.
+    // case) — a pure review-shaped block. Genuinely REACHABLE for a review
+    // failure (W1-T394): `isBlockedCi`/`pr.checksState` never go true off a
+    // red `remudero-review` alone (checksStateFromRollup excludes it from the
+    // checks gate), so a checks-green PR whose review is failing lands here
+    // instead of being claimed by row 5 above.
     disposition: "blocked-fixable",
     when: (pr) => pr.reviewState === "failure" && pr.unmetCriteria.length > 0,
     reason: (pr, policy) =>
