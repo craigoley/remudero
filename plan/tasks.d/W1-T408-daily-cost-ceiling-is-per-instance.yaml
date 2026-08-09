@@ -1,0 +1,96 @@
+- id: W1-T408
+  title: "the daily cost ceiling is derived from the LOCAL ledger, so N instances spend N times it — and from inside either one everything looks correct, because each knows only its own spend and nothing self-corrects"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: "RE-DERIVED FROM SOURCE AT e2bdc55. `checkCostGovernor` (src/lib/sweep.ts) defers a
+    dispatch when the observed day cost reaches `policy.dailyCostCeilingUsd`, and the observed
+    figure reaches it from `costGovernorGateFor` (src/run-task.ts), which reads the LOCAL ledger
+    file and sums each run's `verdict` line for the current UTC day. plan/policy.yaml sets the
+    ceiling to 500.
+    SO THE CEILING IS PER INSTANCE, NOT PER ACCOUNT. Two containers each stop politely at 500 and
+    the bill is 1000. Each one is reading its own ledger correctly, refusing at exactly the
+    configured number, and reporting a healthy fleet. THE CORE SENTENCE OF THIS FILING IS THAT
+    NOTHING LOOKS WRONG FROM INSIDE EITHER CONTAINER — there is no error, no warning, and no
+    reading either instance could take that would reveal the other. It is not a race and not a
+    drift; it is an arithmetic assumption that was true while there was one machine.
+    NOT HYPOTHETICAL FOR LONG. The stated direction is N containers on N codebases, and that shape
+    is available today: the unit of isolation is the INSTANCE, keyed off HOME, so separate
+    containers share no state directory — and therefore share no ceiling either. The isolation is
+    correct and is not what this task changes.
+    IT IS THE DAILY CEILING, NOT THE PER-RUN BUDGET, AND THEY ARE DIFFERENT MECHANISMS. The per-run
+    cap travels as `maxBudgetUsd` into each worker spawn and is enforced by the SDK against that one
+    spawn; the fleet's own comment calls dollars the real backstop and max-turns the runaway-loop
+    guard. It is per-task and per-spawn, it composes correctly across instances because each spawn
+    is genuinely separate work, and THIS TASK DOES NOT TOUCH IT. Only the day-scoped, ledger-derived
+    ceiling is in scope."
+  acceptance:
+    - claim: "the day-scoped ceiling is configurable per instance, so an operator running several can divide one number between them"
+      proof: "unit test: test/cost-ceiling-per-instance.test.ts"
+    - claim: "the effective ceiling and the instance it belongs to are visible before it trips, not only in the line written when it defers"
+      proof: "unit test: test/cost-ceiling-visibility.test.ts"
+    - claim: "an instance with no explicit share behaves exactly as it does today, so a single-instance operator sees no change"
+      proof: "unit test: test/cost-ceiling-default-unchanged.test.ts"
+    - claim: "the per-spawn budget is untouched by this change, and a test pins the two mechanisms apart"
+      proof: "unit test: test/cost-ceiling-not-per-run-budget.test.ts"
+  risk: high
+  origin: recon-mini-assumptions-2026-08-09#per-instance-ceiling
+  plan_refs: ["§8A"]
+  files: [src/lib/sweep.ts, src/run-task.ts, src/lib/policy.ts, plan/policy.yaml, test/cost-ceiling-per-instance.test.ts, test/cost-ceiling-visibility.test.ts, test/cost-ceiling-default-unchanged.test.ts, test/cost-ceiling-not-per-run-budget.test.ts]
+  status: queued
+  attempts: 0
+  note: "THERE IS NO SHARED DOLLAR FIGURE ANYWHERE, AND THAT IS ESTABLISHED FROM SOURCE RATHER THAN
+    ASSUMED. It is the decisive fact, because it removes the option that looks best on paper.
+    The fleet does already trust two things across machines. GitHub decides what merged, which is
+    authoritative and shared — but GitHub knows nothing about dollars. And the account usage read
+    is genuinely shared: it probes the real account, so a second instance's spend is already
+    reflected in it. That is why the headroom ceiling merely OVERSHOOTS and then converges, while
+    this one does not.
+    BUT THE ACCOUNT SURFACE CANNOT SERVE THIS CEILING, for two independent reasons, and either
+    alone is sufficient. FIRST, THE UNIT IS WRONG: the usage snapshot carries a percent-consumed
+    figure per window and nothing else — the whole module contains no dollar quantity of any kind.
+    SECOND, THE WINDOW IS WRONG: it reports a five-hour rolling session and weekly caps, while this
+    ceiling is dollars over a UTC day. Neither can be converted into the other, because a percent
+    of an opaque quota is not a price.
+    SO A SHARED READ IS NOT AVAILABLE, AND BUILDING ONE WOULD BE CROSS-INSTANCE COORDINATION, WHICH
+    IS OUT OF SCOPE BY CONSTRUCTION. The ledger is an append log with tailers rather than a shared
+    database, and one-instance-per-volume is the intended shape. This task is about A NUMBER BEING
+    PER-INSTANCE. It is not about instances talking to each other, and an implementation that makes
+    them do so should be refused at review.
+    THE FIX IS THE SMALLER ONE, AND IT IS ENOUGH — ARGUED, NOT ASSUMED. A configured share that the
+    OPERATOR divides, plus making the effective number visible. Three reasons it is sufficient:
+    (i) IT MAKES THE ARITHMETIC TRUE AGAIN. Two instances at 250 each spend what one at 500 spent.
+    The operator already knows how many instances exist — that is the one fact no instance can
+    discover and the operator cannot avoid knowing.
+    (ii) IT CHANGES NO DISTRIBUTED STATE, so it cannot introduce a coordination failure, a lock, or
+    a consensus question. The ceiling keeps reading the local ledger, which is always readable.
+    (iii) IT MAKES THE ERROR VISIBLE RATHER THAN SILENT. Today the effective ceiling appears NOWHERE
+    until it trips: the deferral line carries the observed cost and the ceiling, but it is written
+    only at the moment of refusal, and no board or status surface renders the number at all. An
+    operator running two instances at the default has no reading that would tell them so.
+    THE FAILURE DIRECTION IS DECIDED BY THE FIX RATHER THAN BY A JUDGEMENT CALL, AND THAT IS THE
+    STRONGEST ARGUMENT FOR IT. The hard question was what a ceiling should do when a shared figure
+    cannot be read — refusing would halt a healthy fleet on a network blip, and this repo has FOUR
+    bounds that fired on healthy conditions; proceeding would be today's behaviour with extra steps
+    and more moving parts. A configured share HAS NO SHARED FIGURE TO BE UNREADABLE, so the dilemma
+    does not arise at all. Removing a hazard beats choosing which way to fail into it.
+    AN UNSET SHARE MUST BEHAVE EXACTLY AS TODAY. A single-instance operator must see no change of
+    any kind, which is why one acceptance criterion exists solely to pin that. The new knob is a
+    DIVISION the operator opts into, never a new default.
+    WHAT IS NOT ENOUGH, AND SHOULD BE SAID SO IT IS NOT MISTAKEN FOR VICTORY: this makes the
+    arithmetic correct and visible. It does not make it ENFORCED. Nothing stops an operator setting
+    two instances to 500 each, and nothing detects that they did. That residue is real and is the
+    honest price of not coordinating; it should be recorded in the implementation rather than
+    quietly hoped away.
+    RISK HIGH IS THE SIZING RULE'S SPAN, NOT BLAST RADIUS. The file set crosses the governor's own
+    module, the dispatcher that feeds it, and the policy pair carrying the knob, plus tests. The
+    behaviour change with the knob unset is nil by construction.
+    RECORDED FOR THE NEXT READER, AND DELIBERATELY NOT BUNDLED HERE: the same recon that ranked this
+    first also found that FIVE MORE crash-recovery sweeps are daemon-only beyond worktrees — stray
+    orphans, worker scratch, abandoned review clones, temp dirs, inflight locks and per-spawn worker
+    homes. The code's own comments cite 5866 MiB of abandoned clones and a 26,711-directory ENOSPC
+    as the measured precedents. W1-T406 covers WORKTREES ONLY. That is a separate task with a
+    separate shape and must not be folded into this one."
