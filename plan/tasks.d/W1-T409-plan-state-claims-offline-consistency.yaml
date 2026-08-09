@@ -1,0 +1,119 @@
+- id: W1-T409
+  title: "HALF THE FIX, and labelled as such: an offline claims.yaml assertion refusing a task id that appears BOTH in the SHIPPED log and in a not-shipped assertion — and whose extractor must read the log's compressed pair notation, which carries 197 of the 284 ids a long-form regex cannot see"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: "SPLIT FROM W1-T392 along the seam that shard's own design note draws between its clause
+    (i) and its clause (ii). W1-T392 is retired to a record naming this task and W1-T410 as its two
+    successors; the incident, the six compounding retro cycles and the reason nothing caught them are
+    preserved there and are NOT restated here.
+    THIS TASK IS THE HALF THAT WOULD NOT HAVE CAUGHT THE INCIDENT, and the split exists so that fact
+    is legible from the shard rather than buried in a clause. W1-T392's design note says it in as many
+    words: clause (i) is cheap, offline, ships inside claims.yaml's existing constraints, and would
+    NOT have caught this incident. The reason is re-verified at 0503802 by execution: the SHIPPED log
+    section of MASTER-PLAN.md records T145/#360, T146/#371, T148/#839, T150/#358 and T151/#845, and
+    a search for T149 anywhere in that section returns NOTHING. The entry was never written. A
+    consistency check over two lists cannot see an id absent from both, so this assertion would have
+    read green through all six cycles. It is filed anyway because a document that contradicts itself
+    is a real defect with a real gate available; it is filed SEPARATELY so that shipping it cannot be
+    mistaken for closing the incident.
+    THE EXTRACTOR IS WHERE THIS SHIPS BROKEN, AND THE MARGIN IS WIDER THAN W1-T392 RECORDED.
+    Re-measured at 0503802 over the SHIPPED log section rather than inherited: 284 distinct task
+    NUMBERS appear in that section. A long-form W<n>-T<n> regex reaches 87 of them. The other 197 —
+    69 percent — appear ONLY as the house-style compressed pair T<n>/#<pr>. W1-T392 carried 282
+    against 93, measured at deadef6; the same measurement today reads 332 against 109. BOTH figures
+    moved in the weeks between, which is itself the argument for locking a behaviour rather than a
+    number: any acceptance criterion that froze the count would already be stale.
+    THE PREFIX ASSUMPTION IS ALSO WRONG. The section carries W1, W2 and W3 long-form ids, so
+    reconstructing an id by prepending W1- to a short-form number is a guess. Resolve the number
+    against the plan's own id set instead. W1-T392's design note additionally named a W12- prefix;
+    that is re-checked and REFUTED at this sha — W12-T appears 4 times in MASTER-PLAN.md and 0 times
+    inside the SHIPPED log section.
+    THE LOG GAP IS ONE DROPPED ENTRY, NOT A LOGGING FAILURE, and this is recorded so the task is not
+    over-scoped into a log rebuild: T149 is the only gap in an otherwise unbroken run of its
+    neighbours, and T150 is its own sibling task, merged one day later."
+  design: |
+    ONE OFFLINE ASSERTION, ONE RUNNER, ONE FALSIFIER SUITE. Nothing here touches the retro, GitHub,
+    or the wall clock. claims.yaml's own contract is the boundary and it is quoted in that file's
+    header: keep it cheap, offline, and deterministic — no network, no live GitHub state. That
+    contract is the reason the external-truth half is a separate task rather than a second clause.
+
+    (i) WHAT IS REFUSED. A task id that appears BOTH in the SHIPPED log section of MASTER-PLAN.md AND
+    in a not-shipped assertion elsewhere in the same file. The not-shipped vocabulary is the one
+    W1-T392 established: Still PLANNED, not shipped, unbuilt, did not ship. A hit means the document
+    asserts a task both landed and did not land, which is decidable from the file alone.
+
+    (ii) THE EXTRACTOR MUST READ BOTH NOTATIONS, AND A LONG-FORM-ONLY EXTRACTOR IS THE EXPECTED
+    FAILURE. See the rationale for the measured 197-of-284 blind spot. The short form is a number
+    with no workstream prefix, so resolve it against the id set in plan/tasks.yaml and plan/tasks.d/
+    rather than assuming W1-. An id the plan does not know is not a match and must not be invented.
+
+    (iii) A POSITIVE CONTROL IS REQUIRED, NOT OPTIONAL — this is the vacuous-pass family and the
+    runner's natural failure mode is matching nothing, which renders identically to a clean result.
+    The runner must report how many ids it examined on BOTH sides and exit non-zero when either side
+    is empty. Zero contradictions found and zero claims examined must never print the same text.
+
+    (iv) NAME THE FALSE CLAIM, NOT THE COUNT. claims-check.mjs's whole value is that a red claim
+    prints which fact is false; mirror it. Report the id, the SHIPPED-log line that records it as
+    landed, and the line that asserts it did not. A bare count sends a reader into a very large file.
+
+    (v) THE FALSIFIER SUITE DRIVES THE REAL RUNNER AS A SUBPROCESS, the shape test/claims-check.test.ts
+    already uses for this gate. Fixtures, never the live MASTER-PLAN.md, so the suite does not go red
+    when the plan is edited: a fixture asserting an id both landed and did not must FAIL and name it;
+    the same fixture with the assertion removed must PASS; a fixture recording the id ONLY in the
+    compressed pair notation must still FAIL, which is what proves clause (ii) rather than assuming
+    it; and a fixture with an empty SHIPPED log must fail as unexamined rather than pass as clean.
+
+    (vi) THE claims.yaml ENTRY IS THE WIRING, and it makes a REQUIRED CI job red if written wrong.
+    The `claims` job runs unconditionally on every PR and is a required member of ci-gate, so a
+    malformed assertion blocks the repo rather than just this task. Add the entry in the same change
+    as the runner it invokes, and give it the four required fields the file's header schema names.
+
+    NOT IN SCOPE, deliberately: comparing the plan to GITHUB, which is W1-T410 and cannot live here
+    because claims.yaml forbids live GitHub state; auto-editing MASTER-PLAN.md, which rule 15 reserves
+    to the Architect; the SHIPPED log's own completeness, which the rationale establishes is a single
+    dropped entry rather than a systemic gap; and resolving proposal ids, which is W1-T410's problem
+    because it is the not-shipped side that carries them.
+  acceptance:
+    - claim: "a task id recorded as landed in the shipped log while another line asserts it did not land is refused offline, naming the id and both lines"
+      proof: "unit test: test/plan-state-claims.test.ts"
+    - claim: "an id recorded only in the compressed pair notation is still matched, so the extractor is not blind to the log's house style"
+      proof: "unit test: test/plan-state-claims.test.ts"
+    - claim: "an examined set that is empty on either side exits non-zero as unexamined rather than rendering as a clean result"
+      proof: "unit test: test/plan-state-claims.test.ts"
+    - claim: "a short-form number the plan does not know is not resolved into an id, so no contradiction is invented"
+      proof: "unit test: test/plan-state-claims.test.ts"
+  risk: medium
+  origin: oper#split-w1t392-2026-08-09
+  plan_refs: ["§8A", "§12A", "P43", "P48"]
+  files: [plan/claims.yaml, scripts/plan-state-claims.mjs, test/plan-state-claims.test.ts]
+  status: queued
+  attempts: 0
+  note: "THIS IS HALF THE FIX AND MUST NOT BE REPORTED AS THE WHOLE ONE. Its acceptance criteria are
+    deliberately written about DOCUMENT SELF-CONSISTENCY and say nothing about the incident W1-T392
+    was filed for, because this half cannot detect it — the rationale re-derives why at 0503802.
+    W1-T410 is the half that can. A reviewer reading a PR body on this task that claims to close the
+    plan-state gap should refuse it on that ground alone.
+    DEPENDENCY DIRECTION: NONE, established rather than assumed. This task reads MASTER-PLAN.md
+    against ITSELF; W1-T410 reads MASTER-PLAN.md against GitHub merge state. Neither consumes the
+    other's output and neither needs the other to be correct, so both carry depends_on: [] and either
+    may ship first. There IS a shared piece — the small phrase extractor for the not-shipped
+    vocabulary — and the obligation on whichever ships SECOND is to reuse the first's exported
+    extractor rather than duplicate it. That is a reuse obligation, not an ordering constraint, and
+    encoding it as depends_on would park a dispatchable task behind an unrelated one.
+    RECOMMENDED ORDER, which is not a dependency: W1-T410 first, because it is the half that closes
+    the incident. If only one of the two ever ships, shipping this one leaves the gap open.
+    risk:medium is honest here rather than defensive. Rule 19 counts concerns and this shard spans
+    exactly one: plan/claims.yaml is discounted as a plan-data artifact by isDataArtifact, and the
+    runner and its suite share a module id. The sibling W1-T410 is risk:high for the opposite reason,
+    stated in its own note.
+    budget_usd 45 — below W1-T392's 70 because the retro half and its measurement work leave with
+    W1-T410, and below its sibling because everything here is pure text over one file with no
+    resolver, no injection seam and no live state.
+    verify:auto — every criterion is decidable in-process against a fixture plan file. No network,
+    nothing spawned, no operator present.
+    files: declares the suite because a proof naming a path outside files: is a proof-scope warning at
+    filing and a scope-guard REFUSAL after the work is done."

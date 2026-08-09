@@ -1,0 +1,132 @@
+- id: W1-T410
+  title: "THE HALF THAT CLOSES THE GAP: a retro-gather rung re-deriving every task id the plan asserts unbuilt against the merge resolver the gather ALREADY holds — and whose extractor must bind an assertion to its subject, because 5 of the 6 ids a line-scoped one yields today are false"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  rationale: "SPLIT FROM W1-T392 along the seam that shard's own design note draws, and this is the
+    clause it called THE LOAD-BEARING ONE. The incident, the six compounding retro cycles and the
+    reason nothing caught them are preserved in W1-T392's retirement record and are NOT restated here.
+    The sibling W1-T409 carries the offline half and its own shard says plainly that it cannot detect
+    the incident. This one can.
+    THE TRUTH SOURCE IS ALREADY IN HAND AT EXACTLY THE POINT THE RUNG WOULD SIT, re-verified at
+    0503802 by reading the call site rather than inherited: retroCommand in src/run-task.ts runs a
+    single batched projectPlan over plan/tasks.yaml, derives isTaskMerged from that projection, and
+    passes it into planHealthSweepSectionFor. The rung needs no new network call, no new gateway and
+    no new read path — the resolver is a local already computed a few lines above.
+    AND THE FIELD IT MUST NOT USE IS RECORDED AS WRONG AT THAT SAME CALL SITE: the comment above the
+    projection states the decorative yaml status: field is stale for 248 of 359 tasks despite a
+    long-merged PR. That figure is run-task.ts's own recorded measurement, not one re-derived here —
+    re-deriving it needs a live GitHub projection over the whole plan and the ledger and daemon are
+    UNREACHABLE at filing time. Treat it as a pointer to the defect class, not as a current number.
+    THE EXTRACTOR IS THE HARD PART AND ITS REACH IS FAR NARROWER THAN W1-T392 ASSUMED. Measured at
+    0503802 over MASTER-PLAN.md: 23 lines carry one of the not-shipped phrases (Still PLANNED, not
+    shipped, unbuilt, did not ship). Of those 23, only THREE contain a task id at all. Thirteen carry
+    only a PROPOSAL id, and seven carry neither. The plan asserts unbuiltness about proposals far more
+    often than about tasks, so a task-id extractor over this corpus yields almost nothing — which is
+    precisely the vacuous pass that renders as a clean result.
+    THE FALSE POSITIVES ARE WORSE THAN THE THIN YIELD, AND THEY ARE MEASURED RATHER THAN FEARED. A
+    line-scoped extractor over those 23 lines yields six distinct ids: T342, T349, T350, T353, T356
+    and W1-T149. FIVE OF THE SIX COME FROM A SINGLE LINE whose unbuilt subject is the proposal
+    P29(i) — the task ids on it are a list of sibling REJECTION counts, and every one of them is
+    recorded landed in the SHIPPED log (T342/#1340, T349/#1379, T350/#1378, T353/#1389, T356/#1393).
+    So the naive rung would open its life reporting five contradictions that are not contradictions,
+    against one that is. That is this repo's recurring defect — a bound that fires on a HEALTHY
+    condition — and it is the reason this shard requires a negative control alongside the positive one."
+  design: |
+    ONE RUNG, ADDED WHERE THE RESOLVER ALREADY LIVES. The extraction and comparison are pure and
+    belong in src/lib/retro.ts, exported, so they are testable without the command. src/run-task.ts
+    carries only the wiring: call the rung with the isTaskMerged it already derived, concatenate the
+    section onto the report the way netStateAdvisorySectionFor already is.
+
+    (i) BIND THE ASSERTION TO ITS SUBJECT. A line-scoped extractor is refuted by measurement, not by
+    argument — see the rationale for the five-false-positives-on-one-line result. An id counts as
+    ASSERTED UNBUILT only when the not-shipped phrase is predicated OF THAT ID, not merely present in
+    the same line. The line that refutes the naive shape is the one whose subject is a proposal and
+    whose task ids are rejection counts. Whatever discriminator is chosen, that line must yield ZERO.
+
+    (ii) PROPOSAL IDS ARE THE MAJORITY OF THE CORPUS AND MUST BE HANDLED EXPLICITLY, one way or the
+    other. Thirteen of the twenty-three phrase-bearing lines carry only a P-number. EITHER resolve a
+    proposal to the task ids that implement it and re-derive those, OR state in the rendered section
+    that proposal-subject assertions are outside the rung's reach and report how many were skipped.
+    What is NOT acceptable is silently dropping them, because that is indistinguishable from finding
+    nothing wrong. Choose one and say which in the PR body.
+
+    (iii) A POSITIVE CONTROL AND A NEGATIVE CONTROL, BOTH BLOCKING. The positive: the rung must assert
+    it extracted a non-empty id set AND that at least one extracted id resolved through the merge
+    resolver at all, and must fail loudly when either is empty. The negative: the rung must report
+    zero findings on the proposal-subject line above. A rung with only the positive control passes by
+    over-matching; a rung with only the negative passes by matching nothing.
+
+    (iv) A CONTRADICTION IS A BLOCKING FINDING ON THE RETRO-SYNC, not advisory colour. The plan-health
+    sweep beside it is advisory; this class outranks it because it decides the KICK ORDER rather than
+    one task's proofs. Six cycles of ranking compounded on the last one.
+
+    (v) NAME THE FALSE CLAIM, NOT THE COUNT: the id, the state the plan asserts, the state the
+    resolver derives, and the PR that credits it. A bare count sends a reader into a very large file.
+
+    (vi) THE FALSIFIER SUITE, SEEDED ON THE REAL INCIDENT AND ON THE REAL FALSE POSITIVE. Fixtures,
+    never the live MASTER-PLAN.md, so the suite does not go red when the plan is edited. A fixture
+    asserting an id unbuilt against a resolver reporting it merged must FAIL and name both; the same
+    fixture with the assertion removed must PASS; the same fixture against a resolver reporting it
+    UNMERGED must PASS, which is what proves the rung reads the claim's TRUTH rather than detecting a
+    phrase; a fixture carrying the proposal-subject line must yield zero findings; and a fixture whose
+    extraction yields nothing must fail as unexamined rather than pass as clean.
+
+    (vii) DEGRADE THE WAY EVERY NEIGHBOURING SECTION DEGRADES. The existing rung wraps its projection
+    in a try and falls back rather than aborting the retro over an unreachable gateway. Match that:
+    an absent resolver means the rung reports itself UNAVAILABLE, which must render differently from
+    both a clean result and a finding. Three states, three renderings.
+
+    NOT IN SCOPE, deliberately: the offline self-consistency assertion, which is W1-T409; auto-editing
+    MASTER-PLAN.md, which rule 15 reserves to the Architect — this rung REPORTS; re-scoring the three
+    pre-registrations the incident spoiled, which the plan's own correction already records by hand;
+    and widening claims.yaml to permit live GitHub state, which is the whole reason this half lives at
+    gather time instead of in CI.
+  acceptance:
+    - claim: "an id the plan asserts unbuilt while the merge resolver reports it merged becomes a blocking finding naming the id, both states and the crediting PR"
+      proof: "unit test: test/plan-state-truth-rung.test.ts"
+    - claim: "the same assertion yields no finding when the resolver agrees the id is unmerged, so the rung reads the claim's truth rather than its phrasing"
+      proof: "unit test: test/plan-state-truth-rung.test.ts"
+    - claim: "ids that merely co-occur on a line whose unbuilt subject is a proposal yield zero findings"
+      proof: "unit test: test/plan-state-truth-rung.test.ts"
+    - claim: "an extraction yielding no ids fails loudly and reports the size of the set it examined, so an empty scan cannot render as a clean result"
+      proof: "unit test: test/plan-state-truth-rung.test.ts"
+    - claim: "an absent merge resolver renders as unavailable, distinct from both a clean result and a finding, and the retro still completes"
+      proof: "unit test: test/plan-state-truth-rung.test.ts"
+  risk: high
+  origin: oper#split-w1t392-2026-08-09
+  plan_refs: ["§8A", "§12A", "§5E", "P29", "P43", "P48"]
+  files: [src/lib/retro.ts, src/run-task.ts, test/plan-state-truth-rung.test.ts]
+  status: queued
+  attempts: 0
+  note: "risk:high IS RULE 19'S SPAN, NOT BLAST RADIUS, and the band is set UP FRONT rather than
+    shipped as a violation and raised later. subsystemsOf counts three concerns here — retro,
+    run-task and the suite — and none of them is discounted, so risk:medium would fail sizing on the
+    first lint. The blast radius is genuinely low: the rung reports, writes nothing, dispatches
+    nothing and cannot alter a verdict. Splitting the pure half from its own wiring is not a real
+    decomposition, so the band is the honest answer rather than a further split.
+    DEPENDENCY DIRECTION: NONE, established rather than assumed. This task reads MASTER-PLAN.md
+    against GitHub merge state; W1-T409 reads MASTER-PLAN.md against ITSELF. Neither consumes the
+    other's output, so both carry depends_on: [] and either may ship first. The one shared piece is
+    the small phrase extractor for the not-shipped vocabulary, and the obligation on whichever ships
+    SECOND is to reuse the first's exported extractor rather than duplicate it — a reuse obligation,
+    not an ordering constraint. THIS IS THE HALF THAT CLOSES THE GAP; if only one ever ships, it
+    should be this one.
+    budget_usd 70, unchanged from W1-T392, because this half inherited the retro wiring, the
+    resolver seam and both controls. The pair now totals 115 against the original 70: that is not
+    inflation, it is the original figure having been sized for a single dispatch which W1-T392's own
+    design note predicted would ship the cheap clause and stop.
+    verify:auto — every criterion is decidable in-process against a fixture plan file and an INJECTED
+    merge resolver. No network, nothing spawned; the real GitHub read belongs to the caller.
+    THE MEASUREMENTS ARE RE-DERIVED AT 0503802 AND WILL DRIFT — the 23 phrase-bearing lines, the
+    three-with-a-task-id split, the six ids and the five false positives are all counts over a file
+    that is edited every retro. They are recorded as the SHAPE of the problem, not as a target. Do
+    not freeze any of them into a criterion; the acceptance above deliberately locks behaviours
+    instead, and W1-T392's own frozen 282-against-93 had already moved to 332-against-109 by the time
+    this split was written.
+    files: declares src/run-task.ts because the wiring lives there and a path a worker writes must be
+    declared; it declares the suite because a proof naming a path outside files: is a proof-scope
+    warning at filing and a scope-guard REFUSAL after the work is done."

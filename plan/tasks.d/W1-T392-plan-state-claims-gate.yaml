@@ -107,9 +107,46 @@
   origin: oper#plan-state-claims-2026-08-07
   plan_refs: ["§8A", "§12A", "§5E", "P29", "P38", "P43", "P48"]
   files: [plan/claims.yaml, scripts/plan-state-claims.mjs, src/lib/retro.ts, test/plan-state-claims.test.ts]
-  status: queued
+  status: blocked
   attempts: 0
-  note: "risk:high IS RULE 19'S SPAN, NOT BLAST RADIUS. The change adds a reporting rung and one
+  note: "RETIREMENT RECORD, 2026-08-09 — THIS SHARD IS SUPERSEDED, and it is retired because it was
+    UNDISPATCHABLE AS FILED rather than because it was wrong or because the work is done. The work is
+    NOT done. Everything below is preserved verbatim so a future reader needs no archaeology.
+    SUPERSEDED BY W1-T409 AND W1-T410, split along the seam this shard's OWN design note draws:
+    W1-T409 is clause (i), the offline claims.yaml self-consistency assertion; W1-T410 is clause (ii),
+    the retro-gather rung that re-derives asserted-unbuilt ids against the merge resolver. Both are
+    filed queued with depends_on: [] and neither depends on the other. W1-T410 is the half that closes
+    the gap; W1-T409's own shard states in its note that it cannot detect the incident.
+    WHY IT COULD NOT BE WORKED AS ONE TASK, which is the durable lesson and the reason this record
+    exists at all. The shard names two clauses and then tells the reviewer to refuse the cheap one on
+    its own: a change that ships only (i) satisfies the letter and fixes nothing — stated here in
+    advance so the reviewer can refuse that outcome. That is a shard that has pre-declared its own
+    likely outcome a REFUSAL. A dispatched worker gets ONE PR and cannot split it, so every honest
+    path through this task was expensive and the cheap path was pre-refused. The operator reports
+    THREE runs consumed against it for no merged change, at a cost given as roughly 14 dollars.
+    THAT COST FIGURE IS THE OPERATOR'S, NOT RE-DERIVED — the ledger is UNREACHABLE at the time of
+    writing, so the run count and the dollar amount are UNMEASURED here and are recorded on the
+    operator's report. What IS verifiable from this file is corroborating and sharper: attempts: 0
+    stands unincremented above, so the runs left NO trace in the task record. A future reader
+    computing effort-spent from this shard would read zero.
+    THE SIZING WAS ALSO EVIDENCE, IN PLAIN SIGHT AND UNREAD. The original note argues risk:high is
+    earned because the change must exist end-to-end across four files — a claims entry, its runner,
+    the gather rung and the test. Rule 19's band is a SPAN measure, and a span that wide across two
+    independently-shippable halves is the decomposition signal itself. Raising the band answered the
+    linter and left the dispatch problem untouched.
+    WHAT THE SPLIT ALSO CORRECTED, so the successors are not merely halves of the same filing. Two of
+    this shard's measured figures were re-derived at 0503802 and had moved or were wrong: the SHIPPED
+    log's notation counts read 332 short-form against 109 long-form today, not the 282 against 93
+    recorded here at deadef6; and the W12- prefix this shard tells the worker to expect appears ZERO
+    times inside that section. A third figure is entirely new and reshapes clause (ii): of the 23
+    lines in MASTER-PLAN.md carrying a not-shipped phrase, only three carry a task id at all, and a
+    line-scoped extractor over them yields six ids of which FIVE are false — all from one line whose
+    unbuilt subject is a proposal. Clause (ii) as written here would have shipped that defect.
+    DO NOT RE-FILE THIS SHARD. If the plan-state gap is still open, the successors are W1-T409 and
+    W1-T410; re-deriving the measurements before acting is required in both, because every count in
+    this family is taken over a file that is edited every retro.
+    ORIGINAL NOTE, UNCHANGED, follows.
+    risk:high IS RULE 19'S SPAN, NOT BLAST RADIUS. The change adds a reporting rung and one
     offline assertion; it writes nothing, dispatches nothing and cannot alter a verdict. What earns
     the band is that it must exist end-to-end across four files — a claims entry, its runner, the
     gather rung and the test — and that a new claims.yaml entry makes a REQUIRED CI job red if the
