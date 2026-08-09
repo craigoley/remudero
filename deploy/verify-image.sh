@@ -190,6 +190,56 @@ docker run --rm --entrypoint /bin/sh "${REF}" -c '
     fi
   fi
 
+  # ── THE VERSION, NOT JUST THE PRESENCE (REQ 15) ────────────────────────────────────────────
+  # THE CHECK ABOVE PASSES ON A BROKEN IMAGE, and that is why this one exists. It accepts ANY
+  # directory carrying the marker, so an image holding `chromium_headless_shell-1194` while the
+  # pinned Playwright wants `-1234` reports PASS — which is exactly what shipped: browsers present,
+  # 51 suite failures, no worker ever reaching a green preflight. Presence and correctness are two
+  # claims and the old check only ever tested the first.
+  #
+  # `/opt/pw-pin` is written by the REQ 15 build layer: the version it resolved from the lockfile,
+  # and the directory names that version's own `browsers.json` declares.
+  #
+  # THE DISCRIMINATING ASSERTION IS THE VERSION COMPARISON, not the directory listing. Re-deriving
+  # the wanted dirs from whatever is installed would agree with itself on any image; comparing the
+  # version the BUILD used against the version the SHIPPED lockfile pins is the only step here that
+  # can catch a browser layer built against a different Playwright than the repo declares.
+  #
+  # `node -p` with the paths passed through the ENVIRONMENT is deliberate: this whole probe is a
+  # single-quoted -c argument, so a literal single quote cannot appear anywhere inside it, and
+  # `require("...")` with an inline path would need one.
+  PKGLOCK=/app/package-lock.json
+  PWKEY=node_modules/playwright-core
+  export PKGLOCK PWKEY
+  pin_ver="$(cat /opt/pw-pin/version 2>/dev/null)" || pin_ver=""
+  lock_ver="$(node -p "require(process.env.PKGLOCK).packages[process.env.PWKEY].version" 2>/dev/null)" || lock_ver=""
+  if [ -z "$pin_ver" ]; then
+    fail=1
+    printf "  FAIL  %-22s /opt/pw-pin/version absent — image predates the REQ 15 pinned install\n" "playwright pin"
+    printf "        %-22s  the browser build number is whatever the registry served at build time\n" ""
+  elif [ -z "$lock_ver" ]; then
+    fail=1
+    printf "  FAIL  %-22s could not read playwright-core version from %s\n" "playwright pin" "$PKGLOCK"
+  elif [ "$pin_ver" != "$lock_ver" ]; then
+    fail=1
+    printf "  FAIL  %-22s browsers built for playwright-core@%s, lockfile pins @%s\n" "playwright pin" "$pin_ver" "$lock_ver"
+    printf "        %-22s  REBUILD. A stale browser layer is the 51-failure suite.\n" ""
+  else
+    # Only now is a directory listing worth anything: the version is right, so the names this
+    # asserts are the names the suite will look for.
+    missing=""
+    while IFS= read -r want_dir; do
+      [ -n "$want_dir" ] || continue
+      [ -f "$worker_root/$want_dir/INSTALLATION_COMPLETE" ] || missing="$missing $want_dir"
+    done < /opt/pw-pin/required-dirs
+    if [ -n "$missing" ]; then
+      fail=1
+      printf "  FAIL  %-22s playwright-core@%s wants%s — not COMPLETE under %s\n" "playwright pin" "$pin_ver" "$missing" "$worker_root"
+    else
+      printf "  PASS  %-22s playwright-core@%s, builds match the lockfile\n" "playwright pin" "$pin_ver"
+    fi
+  fi
+
   # THE RUNTIME USER. `claude` refuses --permission-mode bypassPermissions as uid 0, and the
   # refusal is a bare exit 1 with stderr swallowed, so this is worth failing loudly and early.
   uid="$(id -u)"

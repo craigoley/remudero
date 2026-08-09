@@ -167,10 +167,12 @@ ENV HOME=/home/node
 # variable. It also carries `ARG NODE_VERSION=24`, a major bump from the node 22 this repo tests
 # on. The swap fixes nothing here and costs a runtime change; declined on both counts.
 #
-# `npm_config_cache` + `rm -rf` in the same RUN is REQ 14: npx caches the package it fetches under
-# the npm cache (`_npx`), which with HOME set above would land in the runtime user root-owned.
-RUN npm_config_cache=/tmp/npm-build-cache npx --yes playwright install --with-deps chromium \
- && rm -rf /tmp/npm-build-cache
+# THE INSTALL ITSELF MOVED, AND THE REASON IS A SECOND, DIFFERENT DEFECT — see REQ 15 below the
+# `COPY package.json package-lock.json` line. In short: this layer ran a BARE `npx --yes playwright`,
+# which resolves whatever version the registry currently serves, NOT the one this repo pins. It
+# cannot do better from here, because at this point in the file there is no `/app` and no lockfile
+# to pin against. Installing browsers is now downstream of the lockfile COPY for exactly that
+# reason; nothing is installed at this layer.
 
 # ── REQ 7: THE CLAUDE CODE CLI — WITHOUT IT NO WORKER CAN SPAWN ──────────────────────────────
 # MEASURED on the first real image built from this file and run on an Azure VM: `./bin/rmd --help`
@@ -305,6 +307,85 @@ WORKDIR /app
 # own, and REQ 4 is explicit that the two trees must not share a `node_modules`. Correcting the
 # claim rather than acting on it, because acting on it would widen this change to a second concern.
 COPY --chown=node:node package.json package-lock.json ./
+
+# ── REQ 15: THE BROWSER BUILD NUMBER MUST FOLLOW THE LOCKFILE, NOT THE BUILD DATE ────────────
+# MEASURED in a container: a full-glob run produced 51 FAILURES, ALL ONE CAUSE — Playwright looked
+# for `chromium_headless_shell-1234` and the image carried `chromium_headless_shell-1194`. So the
+# browsers were installed (that was the previous defect, and the path fix above is unchanged and
+# still right) but at the WRONG BUILD.
+#
+# NEITHER NUMBER IS WRITTEN DOWN ANYWHERE, AND THAT IS THE POINT. Nothing in `src/` or `test/`
+# hardcodes a revision: `requiredChromiumDirs` (src/lib/review.ts) parses the revision out of the
+# INSTALLED Playwright's own `browsers.json` and derives the directory names from it, applying
+# Playwright's `-`→`_` on-disk convention. The `-1234` occurrences in the tree are one doc comment
+# and one test FIXTURE constant, neither of which the runtime consults. So the expectation follows
+# the lockfile by construction and the repo side is correct — 1234 is simply what
+# `playwright-core@1.62.1`, which `package-lock.json` pins, declares.
+#
+# THE IMAGE IS THE SIDE THAT DRIFTED. The old layer ran `npx --yes playwright install`, and a bare
+# `npx` resolves whatever the registry serves at BUILD TIME — a version this repo never asked for.
+# 1194 is OLDER than 1234, so the observed image was built against a Playwright predating the pin;
+# the direction does not matter, because a build number tied to the calendar rather than the
+# lockfile is wrong in both.
+#
+# WHY IT IS NOT COSMETIC: `rmd preflight --ci-parity` shells the full suite, so 51 failures mean no
+# worker can ever reach a green preflight — the condition that had one run cycling preflight for
+# over 90 minutes and stranding an `rmd serve` per attempt. `ensureBrowsers` (src/lib/review.ts)
+# self-heals a missing build, but it runs only ahead of a `test` proof inside review; the browser
+# suites launch Chromium directly and get no such rung.
+#
+# THE FIX IS TO PIN, AND THE PIN IS READ RATHER THAN TYPED. `PW_VERSION` is resolved from
+# `/app/package-lock.json` — COPYed on the line directly above, which is the whole reason this
+# layer lives here instead of where the old one did. A literal version here would be a second
+# source of truth that drifts silently; there is exactly one, and it is the lockfile.
+#
+# WHY NOT `./node_modules/.bin/playwright`, which would be the obvious way to "use the repo's own
+# Playwright": `playwright` is a devDependency, and the REQ 4 layer below prefers `npm ci
+# --omit=dev`, so `/app/node_modules` may legitimately carry no Playwright at all. Resolving the
+# version from the lockfile and fetching THAT gets the identical build number without depending on
+# which dependency set the image happens to bake.
+#
+# LAYER CACHING FALLS OUT CORRECTLY AND IS NOT A COINCIDENCE. This layer's cache key is the
+# lockfile COPY above it, so the browsers are re-fetched when and only when the pin moves — which
+# is exactly when the build number must change.
+#
+# `/opt/pw-pin` IS THE PROVENANCE RECORD, and it exists so the verifier can ask a question it
+# otherwise cannot: the version actually used, and the `browsers.json` that version declares.
+# Without it a verifier can only re-read whatever is installed and agree with itself.
+#
+# `npm_config_cache` + `rm -rf` in the same RUN is REQ 14, unchanged; the REQ 14 assertion in the
+# layer below still runs AFTER this one, so it continues to guard this layer's npm usage too. The
+# explicit `chown` is required because `chown -R node:node /home/node` (REQ 11) is ABOVE this line,
+# so the cache this writes would otherwise ship root-owned.
+RUN set -eu; \
+    PW_VERSION="$(node -p "require('/app/package-lock.json').packages['node_modules/playwright-core'].version")"; \
+    echo "REQ 15: package-lock.json pins playwright-core@${PW_VERSION} — installing browsers for THAT version"; \
+    export npm_config_cache=/tmp/npm-build-cache; \
+    npm install --no-save --no-audit --no-fund --prefix /tmp/pw-pin "playwright@${PW_VERSION}"; \
+    mkdir -p /opt/pw-pin; \
+    cp /tmp/pw-pin/node_modules/playwright-core/browsers.json /opt/pw-pin/browsers.json; \
+    printf '%s\n' "${PW_VERSION}" > /opt/pw-pin/version; \
+    /tmp/pw-pin/node_modules/.bin/playwright install --with-deps chromium; \
+    rm -rf /tmp/pw-pin /tmp/npm-build-cache; \
+    chown -R node:node /home/node/.cache/ms-playwright /opt/pw-pin; \
+    node -e ' \
+      const {readFileSync, existsSync} = require("fs"); \
+      const j = JSON.parse(readFileSync("/opt/pw-pin/browsers.json", "utf8")); \
+      const want = (j.browsers || []) \
+        .filter((b) => b.installByDefault === true && (b.name === "chromium" || b.name === "chromium-headless-shell")) \
+        .map((b) => `${b.name.replace(/-/g, "_")}-${b.revision}`); \
+      if (!want.length) { console.error("BUILD ASSERTION FAILED (REQ 15): browsers.json named no default Chromium build."); process.exit(1); } \
+      const root = "/home/node/.cache/ms-playwright"; \
+      require("fs").writeFileSync("/opt/pw-pin/required-dirs", want.join("\n") + "\n"); \
+      const missing = want.filter((d) => !existsSync(`${root}/${d}/INSTALLATION_COMPLETE`)); \
+      if (missing.length) { \
+        console.error("BUILD ASSERTION FAILED (REQ 15): the pinned Playwright wants " + want.join(", ")); \
+        console.error("  but these are not COMPLETE under " + root + ": " + missing.join(", ")); \
+        console.error("  Shipping this image reproduces the 51-failure suite and no worker reaches a green preflight."); \
+        process.exit(1); \
+      } \
+      console.log("REQ 15 OK: " + want.join(", ") + " installed under " + root); \
+    '
 
 # ── REQ 4: node_modules PER CONTAINER, NEVER SHARED ──────────────────────────────────────────
 # The shared-symlink arrangement is what let one install empty node_modules under a running daemon
