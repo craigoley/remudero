@@ -251,22 +251,30 @@ test("fetchSinglePrRest carries the uppercase state token routeFix gates on alon
 // invents an entry from the combined endpoint's top-level state still produces a plausible-looking
 // array — and every one of those bugs is caught here and nowhere else.
 
+// W1-T394: NOT `remudero-review` here — `checksStateFromRollup` now excludes that ONE context
+// from grading unconditionally (it is a review-verdict commit status with its own dedicated
+// `reviewState` derivation, never a CI check), so it can no longer stand in for "the commit-status
+// half" this falsifier exists to catch. `codecov/project` is an ordinary required commit status —
+// still folded into checksState like any other — so dropping IT from the composition is still a
+// real transport bug this test must keep catching.
+const REQUIRED_WITH_OTHER_STATUS = ["ci", "codecov/project"];
+
 test("falsifier — dropping the commit-status half of the REST composition manufactures a FALSE green, because checksStateFromRollup grades only the required contexts actually PRESENT", () => {
   const runs = [{ name: "ci", status: "completed", conclusion: "success" }];
-  const statuses = [{ context: "remudero-review", state: "failure" }];
+  const statuses = [{ context: "codecov/project", state: "failure" }];
 
-  // The honest composition sees remudero-review FAILING -> red.
+  // The honest composition sees codecov/project FAILING -> red.
   const whole = rollupFromRest(runs, statuses);
-  assert.equal(checksStateFromRollup(whole, REQUIRED), "red");
+  assert.equal(checksStateFromRollup(whole, REQUIRED_WITH_OTHER_STATUS), "red");
 
   // A mapper that read only /check-runs would emit an array that still looks plausible, but
-  // remudero-review vanishes from it entirely — and an ABSENT required context is not graded,
+  // codecov/project vanishes from it entirely — and an ABSENT required context is not graded,
   // so the failing gate reads as green. This is the specific mis-derivation the two-endpoint
   // composition exists to prevent.
   const runsOnly = rollupFromRest(runs, []);
-  assert.equal(runsOnly.some((c) => (c.name ?? c.context) === "remudero-review"), false);
-  assert.equal(checksStateFromRollup(runsOnly, REQUIRED), "green");
-  assert.equal(whole.some((c) => c.context === "remudero-review" && c.state === "FAILURE"), true);
+  assert.equal(runsOnly.some((c) => (c.name ?? c.context) === "codecov/project"), false);
+  assert.equal(checksStateFromRollup(runsOnly, REQUIRED_WITH_OTHER_STATUS), "green");
+  assert.equal(whole.some((c) => c.context === "codecov/project" && c.state === "FAILURE"), true);
 });
 
 test("falsifier — a failing required check derives checksState red through the REST composition", () => {
