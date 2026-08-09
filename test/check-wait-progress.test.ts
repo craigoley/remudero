@@ -21,26 +21,36 @@ import { checkWaitStalled, STALL_WINDOW, waitForCiGreen } from "../src/run-task.
 
 /** `STALL_WINDOW` identical copies of `reading` — the minimum a real caller would have
  *  accumulated before {@link checkWaitStalled} has enough evidence to conclude stalled. */
-function identicalWindow(reading: { name: string; conclusion?: string; status?: string }[]) {
+function identicalWindow(
+  reading: { name?: string; context?: string; conclusion?: string; status?: string; state?: string }[],
+) {
   return Array.from({ length: STALL_WINDOW }, () => reading);
 }
 
-test("BITES (W1-T382): a rollup unchanged across the stall window with checks still pending concludes stalled and names which checks were pending", () => {
+// AMENDED, DELIBERATELY. This assertion originally used a rollup with `ci` IN_PROGRESS and
+// asserted it concluded stalled — i.e. it pinned, as correct, exactly the behaviour now
+// identified as the defect: a job actively running for its normal duration read as a stall.
+// The case it MEANT to cover — the detector bites on an unmoving rollup — is preserved here on
+// a QUIESCENT one, which is the population the window was always sound for. The running case
+// now has its own falsifier in test/check-wait-running-is-motion.test.ts.
+test("BITES: a QUIESCENT rollup unchanged across the stall window concludes stalled and names which checks were pending", () => {
   const pending = [
-    { name: "ci", status: "IN_PROGRESS" },
-    { name: "lint", status: "QUEUED" },
+    { name: "lint", status: "QUEUED" }, // queued behind a runner that never arrives
+    { name: "remudero-review", state: "PENDING" }, // a required status nobody will ever post
   ];
   const result = checkWaitStalled(identicalWindow(pending));
-  assert.equal(result.stalled, true, "STALL_WINDOW identical pending readings must conclude stalled");
+  assert.equal(result.stalled, true, "STALL_WINDOW identical readings with NOTHING running must conclude stalled");
   assert.deepEqual(
     new Set(result.pending),
-    new Set(["ci", "lint"]),
+    new Set(["lint", "remudero-review"]),
     "the stalled verdict names every still-pending check, not just one",
   );
 });
 
 test("BITES (W1-T382): fewer than STALL_WINDOW identical readings is never enough evidence to conclude stalled", () => {
-  const pending = [{ name: "ci", status: "IN_PROGRESS" }];
+  // QUIESCENT on purpose: an IN_PROGRESS rollup here would now return false via the
+  // running-check guard, so this would pass with the length guard deleted and prove nothing.
+  const pending = [{ name: "lint", status: "QUEUED" }];
   const short = Array.from({ length: STALL_WINDOW - 1 }, () => pending);
   const result = checkWaitStalled(short);
   assert.equal(result.stalled, false, "one poll short of the window must keep waiting");
@@ -118,7 +128,10 @@ test("BEHAVIORAL (W1-T382): the real waitForCiGreen stalls on an unmoving rollup
     [
       "#!/bin/bash",
       "if [[ \"$1\" == 'pr' && \"$2\" == 'view' ]]; then",
-      '  echo \'{"statusCheckRollup":[{"name":"ci","status":"IN_PROGRESS"},{"name":"lint","status":"QUEUED"}]}\'',
+      // QUIESCENT, and it must stay that way: with any check IN_PROGRESS this fake answers the
+      // same running rollup forever, and the wait would (correctly, now) never give up — an
+      // infinite loop in the suite rather than a failing assertion.
+      '  echo \'{"statusCheckRollup":[{"name":"lint","status":"QUEUED"},{"name":"remudero-review","state":"PENDING"}]}\'',
       "  exit 0",
       "fi",
       "exit 1",
@@ -141,7 +154,7 @@ test("BEHAVIORAL (W1-T382): the real waitForCiGreen stalls on an unmoving rollup
     assert.ok(stalledLog, "the stalled branch must log ci.stalled, not just return silently");
     assert.deepEqual(
       new Set(stalledLog?.extra?.pending as string[]),
-      new Set(["ci", "lint"]),
+      new Set(["lint", "remudero-review"]),
       "the timeout names every check that was still pending when the wait gave up",
     );
   } finally {
