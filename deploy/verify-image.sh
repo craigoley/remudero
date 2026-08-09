@@ -343,6 +343,60 @@ else
   RC=1
 fi
 
+# ── 6b. A COMMIT ACTUALLY SUCCEEDS AS uid 1000 ───────────────────────────────────────────────
+# ASSERTS THE OUTCOME, NOT THE CONFIG, and that distinction is the whole point of this check.
+# `git config --get user.email` returning something proves nothing: an EMPTY value is a legal
+# config entry and git still refuses the commit ("empty ident name not allowed"). The only
+# question worth asking is whether a commit lands, so this makes one.
+#
+# THE DEFECT IT CATCHES, measured on the published image: no /home/node/.gitconfig exists at all,
+# and a real container run died with "Author identity unknown" and "unable to auto-detect email
+# address", the auto-detected value being node-at-container-id with no domain. A worker in that
+# image writes files, tries to commit, and is refused — which is indistinguishable from a worker
+# that did nothing.
+#
+# (Those two lines carried a backtick pair spanning a line break in the first draft, which made
+# BOTH `sh -n` and `bash -n` fail on this file. Caught by running the linter, not by reading it —
+# the same lesson section 7 records about its own two vacuous drafts.)
+#
+# THREE THINGS MAKE THIS NON-VACUOUS, each of which a lazier version would get wrong:
+#   1. IT GOES THROUGH THE ENTRYPOINT (no `--entrypoint` override), because the entrypoint is what
+#      writes the identity. The section-5 probe deliberately bypasses it and would correctly find
+#      nothing. `RMD_SKIP_BOOTSTRAP=1` keeps it token-free and offline.
+#   2. IT SETS NO `GIT_AUTHOR_*`/`GIT_COMMITTER_*` ENV. Section 7's probe does set them — correctly,
+#      for its own purpose — and doing so here would supply the very identity under test and pass on
+#      a broken image. This one must inherit whatever the image and entrypoint provide, and nothing
+#      else.
+#   3. IT RUNS AS uid 1000 EXPLICITLY. The image already declares `USER node`, but a check that
+#      passed as root on a broken image is exactly how a previous defect shipped, so the runtime
+#      user is pinned here rather than assumed.
+echo
+echo "verify-image: a commit succeeds as uid 1000 (through the entrypoint, no GIT_* env)"
+set +e
+out="$(docker run --rm -e RMD_SKIP_BOOTSTRAP=1 --user 1000:1000 "${REF}" sh -c '
+  set -e
+  d=$(mktemp -d)
+  cd "$d"
+  git init -q -b main .
+  echo probe > f.txt
+  git add f.txt
+  git commit -qm "identity probe"
+  git log -1 --format="COMMITTED-AS %an <%ae>"
+' 2>&1)"
+rc=$?
+set -e
+if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '^COMMITTED-AS .* <.*@.*>$'; then
+  printf "  PASS  %-22s %s\n" "commit identity" "$(printf '%s' "$out" | grep '^COMMITTED-AS ' | sed 's/^COMMITTED-AS //')"
+else
+  RC=1
+  printf "  FAIL  %-22s a commit could NOT be made as uid 1000\n" "commit identity"
+  printf "        %-22s  every worker in this image writes files and commits NOTHING — the run ends\n" ""
+  printf "        %-22s  with zero commits and reads as a silent no-op, not as a failure.\n" ""
+  printf "        %-22s  Set RMD_GIT_AUTHOR_NAME/RMD_GIT_AUTHOR_EMAIL, or rebuild with an entrypoint\n" ""
+  printf "        %-22s  that writes \$HOME/.gitconfig (deploy/entrypoint.sh).\n" ""
+  printf '%s\n' "$out" | sed 's/^/        /' >&2
+fi
+
 # ── 7. THE BOOTSTRAP LANDS ON THE TIP — DRIVEN AGAINST A THROWAWAY ORIGIN, OFFLINE ───────────
 # THE CHECK THAT WOULD HAVE CAUGHT THE 2026-08-08 STALE-CHECKOUT DEFECT. A boot reported
 # "can be fast-forwarded" and then checked out the OLDER sha, so the next dispatch branched from
