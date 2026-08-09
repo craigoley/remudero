@@ -200,6 +200,15 @@ if [ -n "${LIVE}" ]; then
   echo "  Reclaiming under a live run risks discarding a worktree mid-implement, which costs the" >&2
   echo "  whole run and shows up later as an empty tree rather than as an error here." >&2
   echo "  Stop it first ('docker stop <id>'), then re-run. Nothing has been changed." >&2
+  # THE DILEMMA THIS REFUSAL USED TO CREATE, and the answer to it. An operator with an
+  # eight-minute `preflight --ci-parity` in that container faced a choice between keeping a result
+  # he could not read and reclaiming disk — the run's only artifact was a terminal buffer, and
+  # `docker rm` takes `docker logs` with it. `preflightCommand` now writes its verdict to
+  # coverage/preflight-summary.json inside the checkout, which lives on the mounted state volume,
+  # so the result survives the container. Say so here rather than leaving it to be rediscovered.
+  echo "  If that container is running a preflight, its verdict is written to" >&2
+  echo "    <state-volume>/remudero/coverage/preflight-summary.json" >&2
+  echo "  and SURVIVES removal — you do not have to choose between the result and the disk." >&2
   exit 1
 fi
 echo "host-update: no fleet container running"

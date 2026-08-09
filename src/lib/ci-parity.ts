@@ -58,6 +58,81 @@ export interface CiParityStepResult {
   detail: string;
 }
 
+/**
+ * Where a preflight run writes its verdict so the RESULT SURVIVES THE CONTAINER THAT PRODUCED IT.
+ *
+ * MEASURED, twice in one day: an operator ran `preflight --ci-parity` in a container, watched it
+ * reach test 5,371 of ~5,600, and then LOST THE RESULT — the container was removed before its
+ * summary was read. Eight minutes of measurement whose only artifact was a terminal buffer, and
+ * `host-update.sh` correctly refused to reclaim disk while that container was alive, so the choice
+ * was between keeping a result that could not be read and reclaiming the disk.
+ *
+ * `<repoRoot>/coverage/` rather than the ledger or a new config key, and each of those is a
+ * deliberate NO:
+ *  - NOT THE LEDGER. `preflightCommand` is a hand-route verb with no log function wired into it,
+ *    and the ledger exists for fleet DECISIONS. A preflight verdict decides nothing; it informs a
+ *    human. (Rotation would not have been the obstacle, incidentally: `rotateLedger` keeps the 200
+ *    NEWEST rows per step, and "what did my last run say" is a newest-row question. The
+ *    `DECISION_RELEVANT_LEDGER_STEPS` requirement bites steps whose COUNT is load-bearing, which a
+ *    verdict is not — so the retention argument does not force the set membership here, and adding
+ *    it there would misrepresent what that set means.)
+ *  - NOT `config.root`, tempting though it is as "the state volume". `loadConfig` CREATES its
+ *    config file and calls `resolveClaudeBin()`, which throws where no claude binary exists — a
+ *    preflight that is meant to run anywhere must not acquire that dependency.
+ *  - `coverage/` IS ALREADY THE PERSISTENCE PATH ON THIS ROUTE. The coverage-ratchet step already
+ *    writes `coverage/lcov.info` there, the directory is gitignored, and in a container the
+ *    checkout itself lives under the mounted state volume (`TREE="$CONFIG_ROOT/remudero"` in
+ *    deploy/entrypoint.sh), so a file written here outlives `docker rm` with no new mount, no new
+ *    flag to remember, and no new config surface.
+ */
+export function preflightSummaryPath(repoRoot: string): string {
+  return join(repoRoot, "coverage", "preflight-summary.json");
+}
+
+/** One preflight run's machine-readable verdict — every field the terminal already showed. */
+export interface PreflightSummary {
+  ok: boolean;
+  /** ISO timestamp, stamped by the caller so this stays pure. */
+  finishedAt: string;
+  durationMs: number;
+  /** The head sha the run measured, or `"unknown"` when it could not be read. */
+  headSha: string;
+  /** The argv the operator actually passed, so a summary names the run that produced it. */
+  args: string[];
+  passed: number;
+  failed: number;
+  /** Every step, in order — the failing ones are the reason to keep this file at all. */
+  steps: CiParityStepResult[];
+}
+
+/**
+ * Build the durable summary. PURE — no clock, no filesystem, no process state — so a test can
+ * assert the shape without running an eight-minute suite, and so the caller stamps the one piece
+ * of ambient data (the time) rather than this reaching for it.
+ *
+ * WRITTEN IN BOTH DIRECTIONS BY CONSTRUCTION: nothing here is conditional on `ok`. A FAILING run's
+ * summary is the one an operator most needs to survive, so there is no branch that could skip it.
+ */
+export function buildPreflightSummary(input: {
+  steps: CiParityStepResult[];
+  finishedAt: string;
+  durationMs: number;
+  headSha: string;
+  args: string[];
+}): PreflightSummary {
+  const failed = input.steps.filter((s) => !s.ok);
+  return {
+    ok: failed.length === 0,
+    finishedAt: input.finishedAt,
+    durationMs: input.durationMs,
+    headSha: input.headSha,
+    args: input.args,
+    passed: input.steps.length - failed.length,
+    failed: failed.length,
+    steps: input.steps,
+  };
+}
+
 /** A step leaf's outcome before it is named — `matched` is set only by a trigger leaf (see
  *  {@link triggerLeaf}), and ignored by every ordinary leaf. */
 interface CiParityLeafResult {
