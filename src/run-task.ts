@@ -185,7 +185,7 @@ import {
 import { findPendingLandingPr, recordDecision } from "./lib/feedback-landing.js";
 import { ghTraceGateway, renderTraceChain, traceForward, traceReverse } from "./lib/trace.js";
 import { runPreflight, type PreflightDeps } from "./lib/commit-message.js";
-import { runCiParity, runPreflightFast } from "./lib/ci-parity.js";
+import { buildPreflightSummary, preflightSummaryPath, runCiParity, runPreflightFast } from "./lib/ci-parity.js";
 import { ghIssueCloser } from "./lib/panel-actions.js";
 import {
   buildServeServer,
@@ -7710,7 +7710,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
 }
 
 /**
- * `rmd preflight [--from <ref>] [--to <ref>] [--ci-parity] [--fast]` — W1-T221's hand-route
+ * `rmd preflight [--from <ref>] [--to <ref>] [--ci-parity] [--fast] [--summary-file <path>]` — W1-T221's hand-route
  * commit gate. Runs {@link runPreflight}'s three independent steps (commitlint, `tsc --noEmit`,
  * and lib/commit-message.ts's own header/body checks) over the commit range not yet on
  * `origin/main`, prints every step's own pass/fail line UNCONDITIONALLY (never only on
@@ -7732,11 +7732,12 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
  * the shipped hand route byte-for-byte unchanged.
  */
 export async function preflightCommand(rest: string[], deps: PreflightDeps = {}): Promise<number> {
-  const badArg = unknownArgError("preflight", rest, ["--from", "--to"], ["--ci-parity", "--fast"]);
+  const badArg = unknownArgError("preflight", rest, ["--from", "--to", "--summary-file"], ["--ci-parity", "--fast"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
   }
+  const startedAtMs = Date.now();
   const from = flagValue(rest, "--from");
   const to = flagValue(rest, "--to");
   const range = deps.range ?? (from !== undefined || to !== undefined ? { from: from ?? "origin/main", to: to ?? "HEAD" } : undefined);
@@ -7764,7 +7765,52 @@ export async function preflightCommand(rest: string[], deps: PreflightDeps = {})
       ? "\n### rmd preflight: PASS — commitlint, typecheck, and emitter checks are all clean; the push may proceed"
       : "\n### rmd preflight: FAIL — see the named step(s) above; do not push until every step passes",
   );
+
+  // ── THE RESULT MUST SURVIVE THE CONTAINER THAT PRODUCED IT (see preflightSummaryPath's doc).
+  // An eight-minute `--ci-parity` run whose only artifact is a terminal buffer is lost the moment
+  // the container is removed, and that happened twice in one day. The verdict is ALREADY computed
+  // here — `ok` and every step's `name`/`ok`/`detail` — so persisting it costs one write.
+  //
+  // UNCONDITIONAL, and deliberately so: this sits BELOW the summary line and outside any `ok`
+  // branch, because a FAILING run's summary is the one most worth keeping. A write failure is
+  // reported and never changes the exit code — the verdict belongs to the checks, not to whether
+  // a file could be written.
+  const summaryPath = flagValue(rest, "--summary-file") ?? preflightSummaryPath(repoRoot);
+  const summary = buildPreflightSummary({
+    steps: [...result.steps, ...(fast?.steps ?? []), ...(ciParity?.steps ?? [])],
+    finishedAt: new Date().toISOString(),
+    durationMs: Date.now() - startedAtMs,
+    headSha: readHeadShaForSummary(),
+    args: rest,
+  });
+  try {
+    mkdirSync(dirname(summaryPath), { recursive: true });
+    writeFileSync(summaryPath, JSON.stringify(summary, null, 2) + "\n", "utf8");
+    console.log(`### summary written: ${summaryPath} (${summary.passed} passed, ${summary.failed} failed, ${Math.round(summary.durationMs / 1000)}s)`);
+  } catch (e) {
+    console.error(`### summary NOT written to ${summaryPath}: ${String((e as Error)?.message ?? e)}`);
+  }
   return ok ? 0 : 1;
+}
+
+/**
+ * The head sha for a preflight summary, or `"unknown"` — a summary must never fail to be written
+ * because a sha could not be read (a no-git host is not a preflight failure).
+ *
+ * `exec` is injectable and appended LAST so no existing caller shifts. It exists because the
+ * `catch` arm below is otherwise unreachable: `git rev-parse HEAD` always succeeds inside this
+ * repo, so a test that did not inject would leave the failure path uncovered — the seam-default /
+ * catch-arm trap this repo has hit before. The DEFAULT really shells out, and one test drives each
+ * arm.
+ */
+export function readHeadShaForSummary(
+  exec: (file: string, args: string[]) => string = (file, args) => execFileSync(file, args, { encoding: "utf8" }),
+): string {
+  try {
+    return exec("git", ["-C", repoRoot, "rev-parse", "HEAD"]).trim() || "unknown";
+  } catch {
+    return "unknown";
+  }
 }
 
 /** Best-effort read for the follow-up harvest's dedup source (W1-T105 design iv):
@@ -16273,7 +16319,7 @@ const COMMANDS: readonly CommandSpec[] = [
   {
     name: "preflight",
     usage:
-      "rmd preflight [--from <ref>] [--to <ref>] [--ci-parity] [--fast]   # W1-T221: the HAND route's commit gate — runs commitlint, `tsc --noEmit`, and lib/commit-message.ts's own header/body checks as three INDEPENDENT steps (each names its own pass/fail, never chained with &&) over the commit range not yet on origin/main; --from/--to override the default origin/main..HEAD range; --ci-parity (W1-T294) ADDS one or more named steps per .github/workflows/ci.yml job (lib/ci-parity.ts), computed against a freshly refreshed origin/main and CI's own coverage/diff-scoping flags, with a dedicated ci-parity:drift step that fails if a ci.yml job has no parity entry, but shells the FULL test:ci suite as part of its `ci` job mirror; --fast (W1-T373) ADDS the curated, seconds-fast, network-free deterministic npm-script gates instead (cli-reference:check, claims, learnings-budget-ratchet, jscpd, depcruise, api-client:check, no-hand-rolled-fetch:check — FAST_GATE_STEPS, lib/ci-parity.ts) and NEVER shells the test suite, so it is the mode a worker can run habitually; either or both flags may be passed; exits non-zero if any step fails, after every step has run and reported",
+      "rmd preflight [--from <ref>] [--to <ref>] [--ci-parity] [--fast]   # W1-T221: the HAND route's commit gate — runs commitlint, `tsc --noEmit`, and lib/commit-message.ts's own header/body checks as three INDEPENDENT steps (each names its own pass/fail, never chained with &&) over the commit range not yet on origin/main; --from/--to override the default origin/main..HEAD range; --ci-parity (W1-T294) ADDS one or more named steps per .github/workflows/ci.yml job (lib/ci-parity.ts), computed against a freshly refreshed origin/main and CI's own coverage/diff-scoping flags, with a dedicated ci-parity:drift step that fails if a ci.yml job has no parity entry, but shells the FULL test:ci suite as part of its `ci` job mirror; --fast (W1-T373) ADDS the curated, seconds-fast, network-free deterministic npm-script gates instead (cli-reference:check, claims, learnings-budget-ratchet, jscpd, depcruise, api-client:check, no-hand-rolled-fetch:check — FAST_GATE_STEPS, lib/ci-parity.ts) and NEVER shells the test suite, so it is the mode a worker can run habitually; either or both flags may be passed; exits non-zero if any step fails, after every step has run and reported. EVERY run also writes a machine-readable verdict to `<repoRoot>/coverage/preflight-summary.json` (override with --summary-file <path>) — ok, the head sha, duration, pass/fail counts and every step — so an eight-minute result survives the container that produced it; written on FAIL as well as PASS, and a write failure never changes the exit code",
   },
   {
     name: "next-task-id",
