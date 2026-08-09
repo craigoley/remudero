@@ -22,6 +22,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { killProcessGroup } from "../src/lib/worker-containment.js";
 
 const repoRoot = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 
@@ -51,9 +52,23 @@ test("serve's startup banner is readable in a redirected log BEFORE the process 
     // `--host` above is also the end-to-end proof of its own arg-validator fix: before W1-T152
     // it exited 2 as an "unexpected argument" despite being documented in USAGE.
     env: { ...process.env, HOME: home },
+    // OWN PROCESS GROUP, so teardown can reach the WHOLE tree. `bin/rmd` `exec`s
+    // `node_modules/.bin/tsx`, and the tsx CLI then SPAWNS A CHILD `node` that is the process
+    // actually running `src/run-task.ts serve`. `child.pid` is tsx's, not the server's, so
+    // `child.kill()` killed the wrapper and left the grandchild alive — re-parented to PID 1 and
+    // still holding its port. MEASURED before this fix: one orphaned
+    // `node ... src/run-task.ts serve --port <n>` survived every single invocation of this suite,
+    // on the PASSING path, and nothing reaps it: the daemon's `sweepOrphanWorkers` requires both
+    // REMUDERO_RUN_ID and REMUDERO_TASK_ID markers (`defaultReadMarkers`) and deliberately leaves
+    // an unattributable process alone.
+    detached: true,
   });
+  // Kill the GROUP, not the pid — `killProcessGroup` is the same helper the daemon's orphan sweep
+  // uses, and it tolerates ESRCH so a child that already exited is not an error. `t.after` runs on
+  // the failure path as well as the success path, which is why both are asserted in
+  // test/serve-orphan-teardown.test.ts.
   t.after(() => {
-    child.kill("SIGKILL");
+    killProcessGroup(child.pid!);
   });
 
   let banner = "";
