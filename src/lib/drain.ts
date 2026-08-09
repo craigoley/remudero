@@ -549,12 +549,49 @@ export interface DrainSummary {
  * NOTHING IS CREDITED BY BEING HERE. Membership means "keep going", never "this task is done" —
  * `continued` is deliberately not `merged`, and the dependency filter is unchanged.
  *
+ * `no_pr` JOINS THE SET TOO, and this REVERSES what the paragraph below used to say — recorded
+ * rather than quietly edited, because the earlier reasoning was explicit and deserves an explicit
+ * answer. It ran: "nothing was produced at all, which is strictly worse than a block, and its own
+ * doc argues the halt explicitly (`a blind auto-retry carries NO new information`)."
+ *
+ * THAT IS TRUE ABOUT THE RUN AND IRRELEVANT TO THE HALT. "Strictly worse" ranks how much VALUE a
+ * run delivered; the halt exists for a different question — whether continuing would COMPOUND a
+ * gap. The header's own justification is that "a blocked task's DEPENDENTS would build on missing
+ * work". A `no_pr` run produced nothing and advanced nothing, so its dependents face exactly the
+ * state they started from. And they cannot be selected regardless: `isDispatchEligible` (this
+ * file) filters any task with `unmetDependencies(...).length > 0` as `unmet-deps`, and it is the
+ * SINGLE predicate behind both `nextRunnable` and `runnableCandidates`. Dependents are protected
+ * by the dependency machinery, not by the halt.
+ *
+ * THE HALT ALSO DOES NOT DO THE THING THE RETRY ARGUMENT WANTS. It never prevents the `no_pr` task
+ * being dispatched again — a later pass re-offers it either way. All it prevents is OTHER,
+ * UNRELATED tasks running now. And within a pass there is no blind retry to fear: `excludeIds`
+ * means a continued-past task is never offered again in the same pass.
+ *
+ * RE-DISPATCH REMAINS BOUNDED, and by the instrument built for exactly this shape.
+ * `isDispatchBreakerTripped` (status.ts) counts `dispatchesWithoutNewOwnedPr`, which resets ONLY
+ * on a `pr.opened` line — and a `no_pr` run never writes one, so for this verdict the counter is
+ * monotonic and trips at the streak cap. `isLifetimeDispatchCapExceeded` is the second backstop
+ * and never resets at all. Both read the running config's ledger, so they are PER-HOST and a fresh
+ * container starts from zero; the task's own yaml `attempts:` field bounds nothing, since
+ * `parseTasksFromYaml` defaults it to 0 and nothing in `src/` ever writes it back.
+ *
+ * THE COST WAS MEASURED, on the container path where the header's OTHER justification — "a human
+ * kicked it off by hand and is watching it" — is simply false, because the drain IS the unattended
+ * path there. Four dispatches ended `no_pr` in one day (W1-T388, W1-T392 twice, W1-T393), each
+ * confirmed by `git rev-list --count origin/main..<run-branch>` = 0, and one drain reported
+ * `stopped: blocked — W1-T393 → no_pr` after two dispatches of a `--max 6` budget. That is four
+ * budgeted runs surrendered to protect nothing.
+ *
+ * BOTH SHAPES INSIDE `no_pr` ARE TREATED THE SAME, deliberately: a worker that produced nothing,
+ * and a worker whose `ALREADY_SATISFIED` claim failed to verify and fell through (run-task.ts's
+ * `resolveAlreadySatisfied`). Neither opened a PR, neither committed, neither advanced the task —
+ * the halt decision cannot tell them apart and has no reason to.
+ *
  * WHY NO OTHER VERDICT JOINS THIS SET, verdict by verdict. `blocked`, `blocked_review`,
  * `blocked_containment`, `blocked_isolation`, `blocked_illformed`, `failed` and
  * `pr_attribution_failed` all leave the work unfinished or unattributable, so the header's
- * argument applies unchanged. `no_pr` is the silent no-op — nothing was produced at all, which is
- * strictly worse than a block, and its own doc argues the halt explicitly ("a blind auto-retry
- * carries NO new information"). `blocked_budget`, `blocked_transient` and `blocked_git_fetch` are
+ * argument applies unchanged. `blocked_budget`, `blocked_transient` and `blocked_git_fetch` are
  * environmental and say nothing about this task alone: the next dispatch would meet the same
  * condition, so continuing burns runs rather than making progress. `blocked_inflight` means
  * another holder owns the task right now. `task_already_merged` is non-merged but arguably
@@ -569,7 +606,7 @@ export interface DrainSummary {
  * that predicate to count a still-running check as forward motion is the right second fix and a
  * different concern; this change makes the misfire cheap rather than making it rarer.
  */
-export const NON_HALTING_VERDICTS: ReadonlySet<string> = new Set(["blocked_ci"]);
+export const NON_HALTING_VERDICTS: ReadonlySet<string> = new Set(["blocked_ci", "no_pr"]);
 
 /**
  * Should this result stop the drain? `merged` never does; a non-merged verdict does UNLESS it is

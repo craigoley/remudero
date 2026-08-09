@@ -5110,6 +5110,25 @@ async function runTask(
     // "worker error: success" (run W1-T12a-1784117152056) and NOT a gh-pr-create throw on an
     // empty branch. Only reached when there's no PR to gate.
     if (!prUrl && commitsAhead(worktreePath, "origin/main") === 0) {
+      // W1-T412: HARVEST BEFORE THIS BLOCK'S RETURNS, because every path out of it returns and
+      // the implement phase's own harvest call sits far BELOW, after `gh pr create`/`pr.opened`
+      // — placed there because that is where `prUrl` becomes known on the orchestrator-fallback
+      // path. The consequence, measured across four empty-diff runs (W1-T388, W1-T392 twice,
+      // W1-T393): recon follow-ups survive and IMPLEMENT follow-ups are discarded on exactly the
+      // verdict where a worker most needs to say something. This is a call that never happens,
+      // not a verdict that needs changing — nothing below is altered.
+      //
+      // NOT A SECOND, PARALLEL CALL SITE: this block returns on EVERY path (already_satisfied
+      // and no_pr alike), so the call below is unreachable from here and no run can harvest
+      // twice. That disjointness is what makes one-harvest-per-phase hold by construction
+      // rather than by a flag, and `test/no-pr-followups-harvested.test.ts` locks BOTH
+      // directions — the PR-bearing run still harvests exactly once, with its pr_url intact.
+      //
+      // `prUrl` is deliberately NOT passed: this run opened no PR, and
+      // `harvestFollowupsFromReport` spreads `pr_url` in only when defined, so the line carries
+      // no blank field. That is the SAME shape the recon call site already emits on every
+      // dispatch — the PR-less path is long-proven, not new code.
+      harvestFollowupsFromReport(fullText(impl), { label: "implement", log, say });
       // W1-T272: the THIRD exit — before falling to the drain-halting `no_pr`, check whether
       // the worker instead claimed ALREADY_SATISFIED and, if so, whether that claim actually
       // verifies against the board gateway. A claim that fails to verify is deliberately NOT
