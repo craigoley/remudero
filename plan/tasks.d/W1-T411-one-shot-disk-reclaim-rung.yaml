@@ -1,0 +1,161 @@
+- id: W1-T411
+  title: "three UNBOUNDED disk leaks have call sites only inside daemonCommand, so a one-shot container reclaims none of them: give stale temp dirs, per-spawn worker homes and abandoned review clones the same start-of-run rung pruneStaleRuns already occupies"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  rationale: "DERIVED FROM SOURCE AT 60cdb5b by resolving every call site mechanically rather than by
+    reading names. state/recon-mini-assumptions.md ranked the daemon-only sweeps third of eight by
+    cost-when-it-fires; this shard files the part of that finding the evidence actually supports and
+    says which part it does not.
+    DERIVED — THE REACHABILITY VERDICT, EXHAUSTIVE. `buildSweepHook` (src/run-task.ts) is called from
+    exactly one place, `daemonCommand`, so BOTH rungs beneath it inherit that: `runTmpSweepRung` and
+    `runInflightLockSweepRung` are daemon-only despite looking like general rungs.
+    `logCloneReapSurvey` is likewise called only from `daemonCommand`, and `reapStaleClones` has NO
+    other invocation anywhere in src/, bin/ or scripts/ — it is reachable ONLY through that survey.
+    `sweepStaleWorkerHomes` has a single call site, in `daemonCommand`. `sweepOrphanWorkers` is
+    reachable only from `daemonBoot` and `daemonCommand`.
+    DERIVED — AND ONE OF THE SIX NAMED IN THE BRIEF IS ALREADY COVERED, which is why this shard files
+    three rather than five. `sweepStaleWorkerScratch` is NOT daemon-only: it is called unconditionally
+    at the end of `worktreeRemove` (src/lib/worker.ts), which `runTask` itself calls, and that call's
+    own comment describes it as orchestrator-side and surviving a killed worker. Worker scratch
+    already has a one-shot path. Filing it would have been a bound on a healthy condition.
+    DERIVED — THE TWO RECORDED INCIDENTS, QUOTED FROM THE CODE THAT CARRIES THEM. clone-reaper.ts's
+    header records: 36 abandoned review clones surviving across the scratch roots, `totalling 5866
+    MiB — the single largest reclaimable consumer on this host`, each carrying `a REAL node_modules
+    of ~463 MiB`, on a host where `nothing has ever removed one`. tmp.ts's header records the other:
+    `26,711 leaked dirs accumulated under /tmp/claude-502`, with `/System/Volumes/Data` dropping to
+    `526Mi free of 228Gi`, `ENOSPC-corrupting validation runs and breaking the Bash tool`.
+    DERIVED — BOUNDED VERSUS UNBOUNDED, WHICH IS THE WHOLE SELECTION CRITERION. Three grow once per
+    unit of work, forever, with no in-run reap on the one-shot path: review clones (one per review),
+    rmd-owned temp dirs (one or more per invocation), and per-spawn worker homes (one per spawn,
+    reaped by `reapWorkerHome` on a normal exit and left behind on every abnormal one). Two do not.
+    `sweepStaleInflightLocks` reclaims at most one small lock file per task id — bounded by the id
+    space and measured in bytes, not a disk leak. `sweepOrphanWorkers` reclaims PROCESSES rather
+    than disk, and in a one-shot container the process tree dies with the container, so there is
+    nothing left for it to reclaim.
+    DERIVED — THE PID-NAMESPACE HAZARD W1-T406 SURFACED DOES NOT APPLY TO THESE THREE, and this was
+    checked per sweep rather than inherited. None of `reapStaleClones`, `sweepStaleTempDirs` or
+    `sweepStaleWorkerHomes` calls `isPidAlive` or `process.kill` at all: the first gates on an
+    open-file probe plus an age ceiling, and the other two on directory mtime plus a name prefix.
+    The bare-pid hazard belongs to `reapStaleWorktrees` and `pruneStaleRuns`, which do call
+    `defaultIsPidAlive` directly. `sweepStaleInflightLocks` also uses it, but through `isHolderStale`,
+    whose third rung already compares the live pid's start time against the lock's own `startedAt` —
+    so the hazard is defeated there too, and is a second reason that sweep is not this task's.
+    DERIVED — AND A STALE COMMENT TO DISTRUST WHILE WORKING HERE. Two source comments state the clone
+    reap is dry-run until an operator opts in; `plan/policy.yaml` records `scratchReap.enabled` as
+    `value: true`, flipped on by #1250 on 2026-08-03 and live since. The policy file is the truth and
+    the comments are stale. All three of these sweeps are ALREADY ARMED where they run, which is why
+    this task needs no new flag — see the design.
+    UNMEASURED: the container's own accumulation. The mini is down and the ledger is unreachable, so
+    no `daemon.tmp_sweep`, `daemon.worker_home_sweep` or `daemon.clone_reap` row was read for this
+    filing, and no figure here comes from one. The 3.0 GB state volume and the orphaned worktree
+    after `Directory not empty` are the operator's report, not a re-derivation."
+  design: |
+    ONE RUNG, THREE EXISTING SWEEPS, NO NEW PREDICATE. This is a CALL SITE change in the same sense
+    W1-T406's is: it introduces no age arithmetic, no liveness probe and no destruction criterion of
+    its own. Every reap decision stays inside the sweep that already owns it.
+
+    (i) WHERE IT GOES, AND WHY THE POINT ALREADY EXISTS. `runTask` (src/run-task.ts) already calls
+    `pruneStaleRuns` under a comment describing it as reclaiming debris from crashed prior runs,
+    placed deliberately BEFORE the run adds its own worktree so leftovers cannot block it. That is
+    the same moment, the same justification and the same failure posture these three want. Put the
+    rung beside it. Every container start is the cadence, so the rung fires exactly as often as work
+    happens and needs neither an operator nor a poll loop.
+
+    (ii) NO NEW POLICY FLAG, AND THIS IS THE DELIBERATE DIVERGENCE FROM W1-T406. That task ships its
+    reaper survey-only because `reapStaleWorktrees` has a measured destruction history and can
+    destroy uncommitted work. These three have neither property: all three ALREADY RUN ARMED
+    wherever they run today, each is guarded by a name prefix plus a 24h-class age ceiling, and the
+    clone reaper additionally requires an open-file probe to come back clean. Calling an armed,
+    unchanged predicate at a new TIME is not a new destruction criterion, and adding a flag that
+    ships false would reproduce the dark-organ shape — a reaper that is wired but reclaims nothing.
+    If the reviewer disagrees, the cheap answer is a flag defaulting TRUE, not one defaulting false.
+
+    (iii) EACH SWEEP IS INDEPENDENTLY GUARDED AND MUST STAY THAT WAY. A throw inside any one of the
+    three must not block the dispatch and must not prevent the other two from running. Follow
+    `logCloneReapSurvey`'s shape: best-effort, its own try/catch, never rethrows. Three separate
+    guards, not one wrapping all three — a single try means the first failure silently cancels the
+    rest, which is the accumulation this task exists to stop.
+
+    (iv) READ THE ROOTS THE SWEEPS THEMSELVES DEFINE, never a second notion of where things live.
+    `cloneReapRoots()`, `tmpdir()` via the sweep's own default, and `workerHomeDir(config)`. The
+    clone reap additionally reads `scratchReap` from policy, exactly as `logCloneReapSurvey` does;
+    reuse that helper rather than opening a second read path to the same policy field.
+
+    (v) ONE LEDGER LINE, SUMMARISING WHAT THE RUNG RECLAIMED. Follow the daemon's existing steps
+    rather than inventing a shape. This line is NOT a decision input, so it must not be added to
+    `DECISION_RELEVANT_LEDGER_STEPS` — nothing reads it to decide anything, and adding it would make
+    every rotation carry it forever for no consumer.
+
+    (vi) THE LEDGER IS UNTOUCHABLE, AND THE GUARDS THAT MAKE THAT TRUE ARE ALREADY PRESENT — verify
+    them rather than adding new ones. `state/ledger.ndjson` and its gzipped rotations hold history
+    that exists nowhere else; `rotateLedger` keeps only the newest entries per step in the live file
+    and archives the remainder, so a large majority of the record survives only in those archives and
+    deleting one destroys unique evidence. None of the three can reach them: `sweepStaleTempDirs`
+    skips any entry not starting with the rmd prefix AND any entry that is not a directory;
+    `sweepStaleWorkerHomes` scans the worker-home root's PARENT but skips any entry not starting with
+    the worker-home prefix and any non-directory; `reapStaleClones` scans only the scratch roots and
+    requires a standalone git clone of this repo. Ledger files fail every one of those tests twice
+    over — wrong name, and a file rather than a directory. Assert it rather than asserting it is
+    obvious.
+
+    (vii) COORDINATE WITH W1-T406 RATHER THAN RACING IT. That task adds its own rung at this same
+    call site and also edits `src/run-task.ts`. There is NO ordering dependency — this task needs
+    none of its policy flag, none of its start-time liveness work, and touches neither
+    `src/lib/worker.ts` nor `src/lib/policy.ts`. Whichever lands second folds into the first's rung
+    rather than adding a second adjacent one. That is a merge obligation, not a `depends_on`.
+
+    DELIBERATELY LEFT OUT, each with its reason, so a reader does not re-file them:
+      - `sweepStaleInflightLocks` — BOUNDED (one small lock file per task id, measured in bytes) and
+        its staleness test is already start-time aware through `isHolderStale`. Not a disk leak.
+      - `sweepOrphanWorkers` — reclaims PROCESSES, not disk, and needs injected candidate/kill/
+        run-active deps the dispatch path does not have. In a one-shot container the process tree
+        dies with the container, so the leak it addresses does not exist there.
+      - `sweepStaleWorkerScratch` — ALREADY on the one-shot path via `worktreeRemove`. Not a leak.
+      - `reapStaleWorktrees` — W1-T406's subject, and its pid-liveness and destruction history make
+        it a genuinely different mechanism. Bundling it here is the shape W1-T392 died of.
+  acceptance:
+    - claim: "a one-shot dispatch reclaims stale temp dirs, per-spawn worker homes and abandoned review clones before it materialises its own worktree"
+      proof: "unit test: test/one-shot-disk-reclaim-rung.test.ts"
+    - claim: "the rung introduces no age arithmetic and no removal criterion of its own, delegating every decision to the sweep that already owns it"
+      proof: "unit test: test/one-shot-disk-reclaim-rung.test.ts"
+    - claim: "a throw inside any one sweep is caught, leaves the dispatch running, and still lets the other two reclaim"
+      proof: "unit test: test/one-shot-disk-reclaim-rung.test.ts"
+    - claim: "no ledger file or gzipped rotation is a removal candidate under any root the rung passes, failing both the name test and the directory test"
+      proof: "unit test: test/one-shot-disk-reclaim-rung.test.ts"
+    - claim: "what the rung reclaimed is summarised in one line that no decision reads"
+      proof: "unit test: test/one-shot-disk-reclaim-rung.test.ts"
+  risk: high
+  origin: recon-mini-assumptions#daemon-only-sweeps
+  plan_refs: ["§8A", "§4A"]
+  files: [src/run-task.ts, test/one-shot-disk-reclaim-rung.test.ts]
+  status: queued
+  attempts: 0
+  note: "risk:high IS RULE 19'S SPAN, NOT BLAST RADIUS, set up front rather than shipped as a
+    violation. `subsystemsOf` counts two concerns here — the dispatcher gaining the call site and its
+    suite — so risk:medium would fail sizing on the first lint. The blast radius is small and
+    bounded: three already-armed, already-guarded sweeps run at a new time, and the worst failure is
+    a caught exception plus a ledger line.
+    ONE CONCERN, AND THE COUNT OF SWEEPS IS NOT THE COUNT OF MECHANISMS. All three are pure
+    age-ceilinged filesystem scans with no pid test, no injected process deps, no ordering between
+    them and no shared state. They differ only in which root they walk. Bundling them is ONE call
+    site for ONE mechanism applied three times; the design lists four sweeps deliberately excluded
+    precisely because each of those IS a different mechanism.
+    NO depends_on, established rather than assumed — see design (vii). W1-T406 touches
+    src/lib/worker.ts, src/lib/policy.ts and plan/policy.yaml, none of which appear here; the only
+    overlap is src/run-task.ts and it is a merge obligation, not an ordering constraint.
+    verify:auto — every criterion is decidable in-process with injected roots and injected sweep
+    doubles. Nothing spawned, no network, no operator present.
+    files: declares the suite because a proof naming a path outside files: is a proof-scope warning
+    at filing and a scope-guard REFUSAL after the work is done. It does NOT declare plan/policy.yaml
+    or src/lib/policy.ts, and that omission is the point of design (ii).
+    budget_usd 55, below W1-T406's 60: no new predicate, no policy pair, no start-time liveness work
+    — three call sites and their guards.
+    RE-DERIVE THE REACHABILITY BEFORE ACTING. Every call-site claim here was resolved at 60cdb5b by
+    walking each file and attributing each hit to its enclosing function; a first attempt using a
+    `src/**/*.ts` pathspec silently dropped `src/run-task.ts`, which sits one level up, and reported
+    several sweeps as having no invocation at all. If a later reader re-runs that check, assert the
+    file index contains src/run-task.ts before believing any negative result."
