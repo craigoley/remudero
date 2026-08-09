@@ -34,6 +34,16 @@ forensic detail, so the narrative does not need to live here.
   diff, so a body contradicting its own changeset still merges on a `success` status. #974 merged
   claiming "exactly one file: MASTER-PLAN.md" while carrying three, including `docs/ORIENTATION.md`
   — which sits outside `isInPlanScope` and cost the PR its `planOnly` carve-out. *(#974, #984)*
+- **A test run with no `# tests` summary line is NOT A RESULT — check for the summary, never the
+  failure count.** A killed or timed-out run prints every assertion it reached and no totals, so its
+  failure set is a SUBSET BY CONSTRUCTION and reads as "fewer failures on this side". One session
+  recorded 3436 assertions with no summary and was about to diff it against a complete 5660-test run,
+  which would have manufactured a four-file regression that does not exist. This COMPOUNDS the
+  compare-both-sides discipline rather than being covered by it: comparing failure SETS instead of
+  counts does not save you when one side is truncated, because the truncated set is a subset either
+  way. Require `# tests` / `# pass` / `# fail` on BOTH sides before diffing them, and normalise paths
+  first when the sides ran in different trees. *(2026-08-09 — the run was truncated by the session's
+  own `pkill -f`, the self-match rule under "Operating this host")*
 
 ## Writing proofs and acceptance criteria
 
@@ -270,6 +280,15 @@ forensic detail, so the narrative does not need to live here.
   ci-gate's wait cap sized under the real check wall-clock, a deploy ceiling consumed by a dry-run
   that delivered nothing, and a check-wait bound where 21 of 21 booked PRs later merged.
   *(W1-T312, W1-T380/#1392, W1-T382/#1401)*
+- **This host's `awk` is mawk, which SILENTLY IGNORES `\s` and `\b` — an awk probe returning nothing
+  has not proved absence.** Measured here: over a file containing `  let b = 2;`, the pattern
+  `/^[[:space:]]+(let|const)/` matches 1 and `/^\s+(let|const)/` matches 0. Neither errors. One
+  session's declaration scan used the `\s` form and reported an EMPTY declaration list, and its
+  companion `\b<name>\b` scan reported a row of zeros; both read as measurements and both had matched
+  nothing, and the conclusion drawn from them (that a refactor was scope-safe) was reached on no
+  evidence at all. Use POSIX classes (`[[:space:]]`) or `grep -E`/`grep -w`, and before believing any
+  ZERO, run the pattern against a line you KNOW matches. *(2026-08-09 — a control caught it; reading
+  the pattern did not, twice)*
 
 ## Operating this host
 
@@ -314,6 +333,17 @@ forensic detail, so the narrative does not need to live here.
   effect. Under a live worker that silently takes a pull the deploy owns, on a tree someone else is
   mid-task in. `SELF_SYNC_GUARD_ENV` is the documented escape and is the only safe form for an agent
   that is not deliberately syncing. *(established 2026-08-06; contradicts every brief written before it)*
+- **NEVER match on command TEXT to kill a process — `pkill -f` and `pgrep -f` SELF-MATCH.** The
+  pattern you are searching for appears in the command line of the shell running the search, so that
+  shell is inside its own match set and dies mid-command; the harness reports exit 144 and every
+  later step in the same invocation is silently skipped. One session hit this TWICE IN ONE EVENING,
+  the second time while cleaning up after the first, and another killed its shell with
+  `pkill -f "main-pristine"` days earlier. "Use a more careful pattern" is too weak a rule — it asks
+  for care where a DIFFERENT MECHANISM is available: use the harness's own task id and its stop
+  mechanism, or a pid captured at spawn (`child.pid`, a pidfile). Do not grep the process table to
+  find something to kill. When you must reach a whole tree, spawn it `detached` and use
+  `killProcessGroup` (`src/lib/worker-containment.ts`), which is pid-based and ESRCH-tolerant.
+  *(2026-08-09 ×2; the `main-pristine` kill days earlier)*
 
 ## Code traps
 
