@@ -1710,8 +1710,22 @@ export function ciGateFromRollup(rollup: RollupEntry[] | undefined): "green" | "
  * fix: recon measured 21 of 21 PRs ever booked as a check-wait timeout later merging (0
  * closed unmerged), so there is no observed "stuck" population to fit an elapsed-time bound
  * against. Any such bound is fitted to noise and only changes how often the false block
- * fires, never whether it is wrong to fire. "5 identical readings in a row" needs no such
- * fit — it only says a wait that has stopped moving for a while is worth ending.
+ * fires, never whether it is wrong to fire.
+ *
+ * THE SENTENCE THAT USED TO END THIS DOC — *"'5 identical readings in a row' needs no such
+ * fit"* — WAS FALSE, and is corrected here rather than deleted, because the correction is the
+ * whole of {@link rollupHasRunningCheck}. `STALL_WINDOW × everySec` IS an elapsed-time bound:
+ * 5 × 6s = THIRTY SECONDS. W1-T382 replaced a deadline with a derivative and then sampled the
+ * derivative far faster than the signal changes. A healthy nine-minute `ci` job has a
+ * derivative of EXACTLY ZERO by construction — `IN_PROGRESS` is a constant string, so
+ * "nothing changed" is what a correct long run looks like, not evidence of a stall. Measured
+ * on a live PR: after ~90s of fast gates completing, silent stretches of 7m20s and 5m22s, so
+ * a 30s bound concludes "stalled" about seven minutes before `ci` goes green, every time.
+ *
+ * The number is therefore NOT the defect and is deliberately UNCHANGED — raising it would only
+ * change how often the false block fires, which is the very reasoning above. What changed is
+ * the predicate: a check that is RUNNING is now motion in its own right, so the window only
+ * ever governs a QUIESCENT rollup, which is the population it was always sound for.
  */
 export const STALL_WINDOW = 5;
 
@@ -1723,6 +1737,42 @@ function rollupSignature(rollup: RollupEntry[] | undefined): string {
     .map((c) => `${c.name ?? c.context ?? "unknown"}:${c.conclusion ?? c.status ?? c.state ?? ""}`)
     .sort()
     .join("|");
+}
+
+/**
+ * Rollup `status` values meaning a check is ACTIVELY EXECUTING at this instant.
+ *
+ * Exactly one value, and the omissions are the point. GitHub's `statusCheckRollup` is a union
+ * of two node kinds and only one of them has a lifecycle: a CheckRun carries
+ * `status: QUEUED | IN_PROGRESS | COMPLETED` alongside its `conclusion`, while a StatusContext
+ * carries only `state` and no status at all. So `IN_PROGRESS` is the ONLY value that is
+ * positive evidence of a machine doing work right now.
+ *
+ * `QUEUED` is deliberately NOT here, and neither is a StatusContext's `PENDING`. Both are
+ * "waiting for something that may never come" — a check queued behind a runner that never
+ * arrives, or a required status nobody will ever post, are the two shapes of a REAL stall.
+ * Counting them as motion would make {@link checkWaitStalled} unfireable and reintroduce the
+ * unbounded wait W1-T382 was careful to bound.
+ */
+const RUNNING_STATUSES = new Set(["IN_PROGRESS"]);
+
+/**
+ * Is any check in this rollup actually RUNNING? — the correction to W1-T382's derivative.
+ *
+ * Reads `status` and ONLY `status`, never `conclusion`. On the wire `IN_PROGRESS` is a status
+ * value and never a conclusion (a completed run reports `status: COMPLETED` with the outcome in
+ * `conclusion`), so consulting the conclusion could only ever match a shape GitHub does not
+ * emit. Uppercased because REST spells these lowercase where GraphQL spells them upper —
+ * `gh pr view --json` (both live callers) is GraphQL, but `rollupFromRest` composes the same
+ * shape from REST, and a predicate that silently depended on which door the data came through
+ * is the kind of thing that reads correct and is not.
+ *
+ * A rollup with a running check is EXCLUDED from the stall verdict entirely: it is not evidence
+ * that we should wait a bit longer, it is evidence that the question "has anything moved?" is
+ * being asked too early to have an answer.
+ */
+export function rollupHasRunningCheck(rollup: RollupEntry[] | undefined): boolean {
+  return (rollup ?? []).some((c) => RUNNING_STATUSES.has(String(c.status ?? "").toUpperCase()));
 }
 
 /**
@@ -1743,6 +1793,23 @@ function rollupSignature(rollup: RollupEntry[] | undefined): string {
  * Returns which checks were still pending when the stall was concluded, so a `blocked_ci`
  * verdict can NAME the observation that ended the wait instead of just asserting elapsed
  * time passed.
+ *
+ * A RUNNING CHECK IS MOTION, and outranks the signature comparison entirely
+ * ({@link rollupHasRunningCheck}). "No state changed" and "nothing is happening" are different
+ * claims, and only the second is a stall — a nine-minute job holds `IN_PROGRESS` constant for
+ * nine minutes while working perfectly, so the byte-identical signature it produces is a
+ * property of the sampling rate rather than a property of the build. The guard is checked
+ * BEFORE the signatures precisely because it does not depend on them: whatever the last five
+ * readings say about each other, a machine currently executing a job is forward motion.
+ *
+ * WHAT STILL BOUNDS THE WAIT, since this only ever makes the predicate MORE permissive. Three
+ * things, none of them this function: (1) `IN_PROGRESS` is provider-bounded — GitHub cancels an
+ * over-running job, and a CANCELLED/TIMED_OUT conclusion is in `RED_CONCLUSIONS`, which both
+ * callers short-circuit on before they ever reach this predicate; (2) `ci-gate`'s own
+ * `WAIT_CAP_SECONDS` (2400s, `.github/workflows/ci-gate.yml`) fails that required check when a
+ * required check never registers, which again surfaces here as RED; (3) this predicate itself,
+ * unchanged, for a QUIESCENT rollup — nothing running and nothing changing is still a stall and
+ * is still caught. So the exemption is scoped to a state that is transient by construction.
  */
 export function checkWaitStalled(readings: ReadonlyArray<RollupEntry[] | undefined>): {
   stalled: boolean;
@@ -1750,9 +1817,10 @@ export function checkWaitStalled(readings: ReadonlyArray<RollupEntry[] | undefin
 } {
   if (readings.length < STALL_WINDOW) return { stalled: false, pending: [] };
   const window = readings.slice(-STALL_WINDOW);
+  const last = window[window.length - 1] ?? [];
+  if (rollupHasRunningCheck(last)) return { stalled: false, pending: [] };
   const signatures = window.map(rollupSignature);
   if (!signatures.every((s) => s === signatures[0])) return { stalled: false, pending: [] };
-  const last = window[window.length - 1] ?? [];
   const pending = last
     .filter((c) => {
       const state = String(c.conclusion ?? c.status ?? c.state ?? "");
