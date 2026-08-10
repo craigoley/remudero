@@ -82,7 +82,8 @@ test("haltsDrain: a no_pr result no longer halts, while every genuinely blocking
     "blocked_review",
     "blocked_containment",
     "blocked_isolation",
-    "blocked_illformed",
+    // `blocked_illformed` LEFT this list when it joined NON_HALTING_VERDICTS: the pre-dispatch
+    // linter refuses it before any lock, worktree or spawn, at `costUsd: 0`. See that set's doc.
     "blocked_budget",
     "blocked_transient",
     "blocked_git_fetch",
@@ -92,7 +93,11 @@ test("haltsDrain: a no_pr result no longer halts, while every genuinely blocking
   ]) {
     assert.equal(haltsDrain({ merged: false, verdict: v }), true, `${v} must still halt`);
   }
-  assert.deepEqual([...NON_HALTING_VERDICTS].sort(), ["blocked_ci", "no_pr"], "the exempt set is exactly this pair");
+  assert.deepEqual(
+    [...NON_HALTING_VERDICTS].sort(),
+    ["blocked_ci", "blocked_illformed", "no_pr"],
+    "the exempt set is exactly these three",
+  );
 });
 
 test("runDrain CONTINUES past a no_pr and spends the rest of its budget on other work", async () => {
