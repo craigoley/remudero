@@ -111,7 +111,7 @@ import {
 // W1-T372: the daemon-tick counterpart to daemon-health.ts's own pull-only rate-limit display
 // (readGhRateLimitRemaining, unrelated cadence, unchanged) — reads BOTH gh api rate_limit
 // buckets off one exec call for runDaemon's own `readGhQuota` dep, wired below.
-import { readGhRateLimitBuckets } from "./lib/daemon-health.js";
+import { isBucketExhausted, readGhRateLimitBuckets, type GhRateLimitBuckets } from "./lib/daemon-health.js";
 // W1-T117/W1-T356: the orphan sweep's own exported defaults — see the shared `sweepOrphans`
 // closure below (daemonCommand), wired into BOTH daemonBoot's boot-time param and
 // DaemonDeps.sweepOrphans.
@@ -9217,6 +9217,69 @@ export function escalateQuotaExhaustion(
 }
 
 /**
+ * The drain's end-of-run quota check: when a drain stopped with NOTHING RUNNABLE and at least one
+ * candidate was declined as INDETERMINATE, ask whether a `gh api rate_limit` bucket is the reason
+ * and escalate if it is.
+ *
+ * WHY THIS EXISTS AT ALL. `escalateQuotaExhaustion` had exactly ONE caller — `runDaemon`'s tick.
+ * A drain run by hand or by a wrapper never went near it, so the one path an operator watches
+ * live was the one path that could exhaust the GraphQL bucket and say only `no_runnable`. The
+ * exhaustion was observable to the fleet and invisible to the person in front of it.
+ *
+ * NO SECOND DETECTOR, and the sharing is structural rather than asserted: the reader is
+ * `readGhRateLimitBuckets` (the daemon's own, one exec, both buckets), the predicate is
+ * `isBucketExhausted` (shared, see its doc for the cycle that keeps the daemon's copy inline),
+ * and the escalation is `escalateQuotaExhaustion` itself — whose (bucket, resetsAt) dedup is read
+ * off the LEDGER, so a drain and a daemon observing the same window open ONE notice between them
+ * rather than one each. Nothing here decides what an exhaustion means.
+ *
+ * INDETERMINATE IS THE TRIGGER, NOT THE CLAIM. `projectPlan` sets `indeterminate` on any failed
+ * read (W1-T119) — throttle, network, auth, all of them — so a non-zero count is a reason to LOOK,
+ * never a finding. The bucket read is what decides, and a healthy bucket escalates nothing: this
+ * repo has four separate bounds that fired on healthy conditions, and a report that always blames
+ * the quota would be worse than the silence it replaces.
+ *
+ * GATED SO A HEALTHY DRAIN SPENDS NOTHING. No declines, or any stop reason other than
+ * `no_runnable`, and the `gh` call is never made. FAIL-SOFT throughout — this is reporting, and a
+ * reporting path that can change a drain's exit code is a defect, not a feature.
+ */
+export function reportDrainQuotaExhaustion(
+  summary: { stopReason: string; indeterminateDeclines?: number },
+  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
+  deps: {
+    readGhQuota?: () => GhRateLimitBuckets;
+    escalate?: typeof escalateQuotaExhaustion;
+    log?: (step: string, extra?: Record<string, unknown>) => void;
+  } = {},
+): void {
+  if (summary.stopReason !== "no_runnable") return;
+  if ((summary.indeterminateDeclines ?? 0) <= 0) return;
+  const log = deps.log ?? (() => {});
+  const escalate = deps.escalate ?? escalateQuotaExhaustion;
+  let quota: GhRateLimitBuckets;
+  try {
+    quota = (deps.readGhQuota ?? (() => readGhRateLimitBuckets()))();
+  } catch (e) {
+    log("drain.quota_check.failed", { error: String((e as Error)?.message ?? e) });
+    return;
+  }
+  for (const bucket of ["core", "graphql"] as const) {
+    const reading = quota[bucket];
+    if (!reading) continue;
+    log("drain.quota", { bucket, remaining: reading.remaining, resets_at: reading.resetsAt });
+    if (!isBucketExhausted(reading)) continue;
+    try {
+      escalate({ bucket, remaining: reading.remaining, resetsAt: reading.resetsAt }, ctx);
+    } catch (e) {
+      // Mirrors the daemon tick's own catch around this same hook: an escalation that throws is
+      // ledgered and swallowed. The drain has already finished its work by this point; losing the
+      // whole run's exit status to a failed issue-open would invert the priority completely.
+      log("drain.escalation.failed", { bucket, error: String((e as Error)?.message ?? e) });
+    }
+  }
+}
+
+/**
  * Recon oper#queue-starvation-2026-08-03: the daemon's `onStarvation` hook, called on an idle
  * tick whose dispatch-filter census names at least one RECOVERABLE-class blocker (circuit-
  * broken, blocked, or unmet-deps — see daemon.ts's `StarvationCensus`/starvation predicate)
@@ -9525,6 +9588,11 @@ async function drainCommand(
      *  builds — the lifetime-cap predicate/callback included — is provable without spawning a
      *  real, unbounded drain. Production never passes this. */
     runDrain?: typeof runDrain;
+    /** Injectable seams for {@link reportDrainQuotaExhaustion} — a behavioral test supplies a
+     *  recording `readGhQuota`/`escalate` so the END-OF-DRAIN quota check is provable without a
+     *  `gh` round-trip or a real issue. Production passes nothing and gets the real reader,
+     *  the real predicate and the real escalator. */
+    quotaCheck?: { readGhQuota?: () => GhRateLimitBuckets; escalate?: typeof escalateQuotaExhaustion };
   } = {},
 ): Promise<number> {
   // FAIL LOUD on junk args BEFORE touching config/locks/spawns (a malformed control command
@@ -9769,6 +9837,11 @@ async function drainCommand(
       opts,
     );
     console.log("\n" + renderSummary(summary));
+    // UNREADABLE FRONTIER vs EMPTY QUEUE: `no_runnable` with indeterminate declines means the
+    // drain could not SEE the frontier, and a quota exhaustion is the reason worth ruling in or
+    // out. Runs AFTER the summary is printed so the operator's own terminal is never held on a
+    // `gh` call, and does nothing at all on a healthy stop — see the function's own doc.
+    reportDrainQuotaExhaustion(summary, { owner, repo, ledgerPath, runId }, { log, ...(deps.quotaCheck ?? {}) });
     // POST-DRAIN RUNDOWN (W1-T141): one classified merged/blocked/escalated line per attempted
     // task — "what happened" at task grain, not just the aggregate summary above. Re-reads the
     // ledger fresh so a same-run escalation (BLOCKED class, two-strikes-exhausted) is visible to
