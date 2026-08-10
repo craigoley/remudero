@@ -5232,9 +5232,20 @@ async function runTask(
       // FRESH from this worktree, never a cached list, and BEFORE the push —
       // a forged merge-base (the `reset --soft` near-miss) must never reach
       // origin. Fail closed: an unreadable diff refuses rather than assumes clean.
+      //
+      // THREE-DOT, AND THIS WAS A REAL DEFECT RATHER THAN A STYLE PREFERENCE. Two-dot
+      // `origin/main..HEAD` diffs the two TIPS, so every file merged to main AFTER this worktree
+      // was cut reads as something this branch changed. MEASURED: a drain booted at 3147755
+      // dispatched W1-T395, #1533 merged mid-run, and the guard refused the push naming
+      // `src/run-task.ts` and `test/drain-gateway-batched.test.ts` — #1533's files, which the
+      // worker never opened. A merge to main must not break a running drain.
+      //
+      // `origin/main...HEAD` diffs against the MERGE BASE — what THIS BRANCH changed relative to
+      // where it started — which is the question the guard is actually asking, and is already the
+      // convention `lib/ci-parity.ts` uses at both of its own diff sites.
       let diffFiles: string[];
       try {
-        diffFiles = execFileSync("git", ["-C", worktreePath, "diff", "--name-only", "origin/main..HEAD"], {
+        diffFiles = execFileSync("git", ["-C", worktreePath, "diff", "--name-only", "origin/main...HEAD"], {
           encoding: "utf8",
         })
           .split("\n")
@@ -5251,10 +5262,16 @@ async function runTask(
       const outOfScope = scopeGuardOutOfScopeFiles(diffFiles, task.files);
       if (outOfScope.length > 0) {
         log("scope_guard.refused", { out_of_scope: outOfScope, declared_files: task.files ?? [] });
+        // THE MESSAGE NAMES WHAT IT OBSERVED, NOT A CAUSE IT CANNOT SEE. It used to assert
+        // "likely a forged merge-base / phantom revert (the reset --soft near-miss)" — the RAREST
+        // of several causes producing an identical file list, and the one a reader then spends an
+        // hour chasing. The stale-base cause is gone as of the three-dot fix above, so what remains
+        // really is more likely to be a genuine scope problem; the honest phrasing says which two
+        // things it compared and leaves the diagnosis to whoever can see more than a file list.
         say(
-          `REFUSED: branch ${branch}'s diff touches file(s) outside task ${taskId}'s declared scope — ` +
-            `likely a forged merge-base / phantom revert (the reset --soft near-miss); NOT pushing: ` +
-            `${outOfScope.join(", ")}`,
+          `REFUSED: branch ${branch}'s diff against its merge base with origin/main touches file(s) ` +
+            `outside task ${taskId}'s declared scope — either the work genuinely went out of scope or ` +
+            `the task under-declares files:; NOT pushing: ${outOfScope.join(", ")}`,
         );
         return { taskId, runId, merged: false, costUsd, verdict: "failed" };
       }
