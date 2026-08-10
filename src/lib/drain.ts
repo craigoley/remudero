@@ -588,8 +588,35 @@ export interface DrainSummary {
  * `resolveAlreadySatisfied`). Neither opened a PR, neither committed, neither advanced the task —
  * the halt decision cannot tell them apart and has no reason to.
  *
+ * `blocked_illformed` JOINS THEM, AND THE ARGUMENT IS STRONGER HERE THAN FOR EITHER PREDECESSOR.
+ * The header justifies stop-on-block as "a blocked task's DEPENDENTS would build on missing work,
+ * so continuing risks compounding a gap". For `blocked_ci` the work was pushed and a PR is open;
+ * for `no_pr` a worker ran and produced nothing. FOR THIS ONE THE LINTER REFUSED BEFORE DISPATCH.
+ * `runTask` (run-task.ts) returns it from a `catch (TaskLintError)` whose own comment reads
+ * "linter-failing task BEFORE the inflight lock is even taken — no lock, no worktree, no worker
+ * ever spawns", and the returned result carries `costUsd: 0`. No process started, no branch was
+ * cut, no state changed. There is nothing to compound, and nothing was spent discovering it.
+ *
+ * THE HEADER'S OTHER JUSTIFICATION IS FALSE WHERE THIS BITES. It says `rmd drain` "keeps its blunt
+ * stop-on-block on purpose: a human kicked it off by hand and is watching it." In a container the
+ * drain IS the unattended path — nobody is watching, and a surrendered budget is simply lost.
+ *
+ * MEASURED: one `--max 6` drain dispatched W1-T393 (merged), W1-T399 (`no_pr`, correctly continued),
+ * then W1-T24 — refused pre-dispatch with three `proof-dialect` violations — and HALTED, giving up
+ * three remaining dispatches to protect nothing. The population is not marginal: `lint-plan` reports
+ * 472 `proof-dialect` violations plan-wide. The frontier is clean, so a drain only meets one once it
+ * works past the recent shards — which is exactly what a drain does. (How often this has already
+ * happened is UNMEASURED: the mini is down and the ledger is unreachable.)
+ *
+ * THE REFUSAL IS NOT SWALLOWED, which is the precondition for skipping it. `runTask` `say`s
+ * "REFUSED: task <id> failed the pre-dispatch linter" with every violation enumerated, and ledgers
+ * `lint.blocked` carrying them; the drain then ledgers `drain.continued`, and `buildRundown` (this
+ * file) gives the task its OWN line — `blocked : <id> — blocked_illformed — drain continued` —
+ * rather than the drain's `stopDetail`. A skipped ill-formed task is louder after this change than
+ * a halted one was, because the drain no longer stops at the first.
+ *
  * WHY NO OTHER VERDICT JOINS THIS SET, verdict by verdict. `blocked`, `blocked_review`,
- * `blocked_containment`, `blocked_isolation`, `blocked_illformed`, `failed` and
+ * `blocked_containment`, `blocked_isolation`, `failed` and
  * `pr_attribution_failed` all leave the work unfinished or unattributable, so the header's
  * argument applies unchanged. `blocked_budget`, `blocked_transient` and `blocked_git_fetch` are
  * environmental and say nothing about this task alone: the next dispatch would meet the same
@@ -606,7 +633,7 @@ export interface DrainSummary {
  * that predicate to count a still-running check as forward motion is the right second fix and a
  * different concern; this change makes the misfire cheap rather than making it rarer.
  */
-export const NON_HALTING_VERDICTS: ReadonlySet<string> = new Set(["blocked_ci", "no_pr"]);
+export const NON_HALTING_VERDICTS: ReadonlySet<string> = new Set(["blocked_ci", "no_pr", "blocked_illformed"]);
 
 /**
  * Should this result stop the drain? `merged` never does; a non-merged verdict does UNLESS it is
@@ -1203,9 +1230,13 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
       return summary("blocked", `${next.id} → ${result.verdict}${result.prUrl ? ` (${result.prUrl})` : ""}`);
     }
     if (!result.merged) {
-      // CONTINUED, NOT CREDITED (see NON_HALTING_VERDICTS): the work is pushed and its PR is open,
-      // so the drain keeps its remaining budget — but the task is NOT added to `merged`, so the
-      // dependency filter still refuses its dependents until the PR actually lands.
+      // CONTINUED, NOT CREDITED (see NON_HALTING_VERDICTS): the drain keeps its remaining budget,
+      // but the task is NOT added to `merged`, so the dependency filter still refuses its
+      // dependents. HOW FAR THE TASK GOT VARIES BY VERDICT and this comment used to name only the
+      // `blocked_ci` shape ("the work is pushed and its PR is open"), which is untrue for the other
+      // two: `no_pr` ran a worker that produced nothing, and `blocked_illformed` never dispatched at
+      // all. What they share is the only thing this branch needs — none of them advanced the task,
+      // so none of them may credit it.
       continued.push({ taskId: next.id, verdict: result.verdict, prUrl: result.prUrl });
       continuedIds.add(next.id);
       log("drain.continued", { task: next.id, verdict: result.verdict, pr_url: result.prUrl });
