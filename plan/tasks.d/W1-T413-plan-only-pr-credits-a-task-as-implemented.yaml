@@ -1,0 +1,133 @@
+- id: W1-T413
+  title: "a MERGED PLAN-ONLY PR carrying a `Remudero-Task:` trailer is credited by `deriveStatus` as that task's implementation, so the task reads merged forever and can never be dispatched again — `lint-plan` already excludes filing subjects for exactly this reason, and the dispatch path does not"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  rationale: "RECON 2026-08-10, DERIVED FROM SOURCE AND ONE LIVE INSTANCE. THE CREDIT PATH.
+    `deriveStatus` (src/lib/status.ts) rung (c) calls `findMergedByTrailer`, then gates the hit on
+    `creditsByAnchoredTrailer(state, head, body, taskId)`. For a MERGED PR that gate is: the body
+    carries the exact anchored `Remudero-Task: <id>` line, the head ref is readable, and
+    `branchClaimsOtherTask(head, taskId)` is false. `branchClaimsOtherTask` returns FALSE for any
+    head that does not start with `run-` — its own line reads `no task claim encoded at all` — so a
+    hand-named branch cannot veto. NOTHING IN THAT CHAIN LOOKS AT WHAT THE PR CHANGED.
+    THE LIVE INSTANCE, and it is a task the fleet still needs. PR #1471, branch
+    `claude/shard-corrections-t395-t391-t388`, subject `chore(plan): apply the operator rulings to
+    W1-T395, W1-T391 and W1-T388`, is MERGED, changed THREE FILES ALL UNDER `plan/`, and its body's
+    last line is `Remudero-Task: W1-T395`. Every clause of `creditsByAnchoredTrailer` is satisfied:
+    the branch does not start with `run-`, so it claims nothing; the trailer is exactly anchored;
+    the PR is merged. W1-T395 therefore reads MERGED. It is not: its shard is `status: queued`,
+    `verify: auto`, lint-clean at dispatch, and the test its three acceptance criteria all name —
+    `test/review-absence-anchor-delimiter.test.ts` — DOES NOT EXIST on origin/main. The work #1471
+    performed on W1-T395 was to RE-SCOPE its shard after an operator ruling, which is the opposite
+    of implementing it.
+    THE REPO ALREADY HOLDS THE PRINCIPLE, IN THE OTHER ORGAN. `rmd lint-plan` prints its own
+    failing-split evidence rule verbatim: `a Remudero-Task trailer or commit-subject citation on
+    origin/main, with chore(plan)/chore(triage)/chore(feedback)/docs(plan) filing subjects excluded
+    — a filing cites a task; it does not implement it`. So the linter refuses to treat a filing as
+    an implementation and the DISPATCH path credits one. This is not a new policy; it is one organ
+    disagreeing with another.
+    THE EMITTER ALREADY INTENDS THE OMISSION. `src/lib/plan-pr-emitter.ts` documents that its body
+    carries a `Remudero-Task:` trailer ONLY when a taskId is given, and says to OMIT it for a
+    plan-FILING PR. The convention exists; nothing enforces it, and #1471 was hand-authored.
+    THE POPULATION IS SMALL AND ENUMERABLE, WHICH IS WHY THIS IS FIXABLE RATHER THAN A REWRITE.
+    Over every merge commit on origin/main carrying an anchored trailer, the ones whose subject is
+    `chore(plan)` are dominated by TRIAGE-* ids crediting their own triage task (legitimate), plus
+    a handful naming a W1-T id: two filings that credit the task they file (W1-T403, W1-T404 — both
+    `verify: human`, so parked for an unrelated reason), one split-and-withdraw (W1-T314), and FIVE
+    deliberate `close … as already-satisfied` closures, all W1-T254. Re-derive that set before
+    changing anything: it is the false-positive population and design clause (iv) turns on it.
+    #1471 itself is INVISIBLE to that local scan — its squash commit does not carry the trailer,
+    only its PR BODY does, which is what `findMergedByTrailer` reads. So the local count is a
+    FLOOR, and the real remedy must be measured against GitHub bodies, not commits.
+    NOT RE-OPENING THE OWNERSHIP RULING. The operator's 2026-07-30 ruling removed the head-branch
+    NAME's veto over a correctly-anchored trailer, and that ruling stands untouched here: this task
+    adds no branch-name test. It adds a question the ruling never considered — whether the PR
+    changed anything outside the plan — which is orthogonal to who owns the branch.
+    THE LEDGER IS UNMEASURED. The Mac mini is down. No run, verdict or dispatch figure is read; the
+    live instance is established entirely from source and from #1471's own merged body and diff."
+  design: |
+    (i) RE-DERIVE THE INSTANCE FIRST, WITH ITS CONTROL, BEFORE TOUCHING THE PREDICATE. Drive the
+    real `deriveStatus` with an injected `GitHub` fixture shaped like #1471 — MERGED, body ending
+    in an anchored `Remudero-Task: W1-T395`, head `claude/shard-corrections-t395-t391-t388` — and
+    confirm it returns `source: "trailer"`, merged. THEN the control: the byte-identical fixture
+    with one changed file outside `plan/` must ALSO credit today. Without that control a later
+    result says nothing, because it cannot distinguish "the fixture reached the branch" from "the
+    fixture was malformed". This is the discipline W1-T399's own clause (i) states and the reason
+    a session nearly refuted a real concern two days before it was filed.
+
+    (ii) THE DISCRIMINATOR IS THE CHANGED FILE LIST, AND THE PREDICATE FOR IT ALREADY EXISTS.
+    `isInPlanScope` (src/lib/plan-architect.ts) already decides whether one path is plan scope, and
+    `outOfPlanScopeFiles` already folds it over a list. CALL them; do not re-derive a second notion
+    of what "plan-only" means, and do not edit them — a second definition is how the two organs
+    drifted apart in the first place. A merged PR every one of whose changed files is in plan scope
+    is a FILING, and a filing cites a task rather than implementing it.
+
+    (iii) THE GATEWAY NEEDS ONE NEW OPTIONAL READ, AND OPTIONAL IS LOAD-BEARING. `GitHub`
+    (src/lib/status.ts) has no way to ask what a PR changed. Add one, OPTIONAL and fail-soft, in
+    the same shape and for the same stated reason as `autoMergeArmed`, `warm` and `readFailed`
+    already carry there: omitted ⇒ derivation behaves EXACTLY as before, so no existing fixture
+    across the suite breaks and no caller is forced to grow a read it cannot serve. `ghGateway` and
+    `buildBatchedGithub` both live in this same file, so the wiring costs no second file.
+
+    (iv) THE DELIBERATE CREDITS ARE A REAL POPULATION AND MUST NOT BE BROKEN — MEASURE BEFORE
+    CHOOSING. Five merged `chore(plan): close W1-T254 … as already-satisfied` PRs are plan-only and
+    carry the trailer ON PURPOSE, to record a closure; a blunt refusal silently re-opens a task
+    closed five times. Count the plan-only trailered credits over GitHub BODIES (not commits — the
+    instance that motivates this task is invisible in commits) and report the split between
+    deliberate closures and accidental filings. IF THE DELIBERATE POPULATION IS NOT SEPARABLE BY
+    SOMETHING ALREADY RECORDED, do not invent a marker: report that and stop at the refusal's
+    LEGIBILITY half, which is clause (v). A refusal that un-closes real closures is worse than the
+    credit it prevents.
+
+    (v) REUSE THE REJECTION CHANNEL THAT EXISTS; DO NOT BUILD A SECOND ONE. `deriveStatus` already
+    returns `rejected_candidates: [{ pr, reason }]` for trailer hits it declines, and its own doc
+    calls that surfacing discipline the point — `a false trailer in the wild is thereby VISIBLE,
+    not silently dropped`. A plan-only refusal belongs there, with its own reason string, beside
+    `trailer-not-anchored` and `branch-claims-other-task`. The operator then has the existing
+    debunk route; nothing new needs inventing for the remedy.
+
+    (vi) UNREADABLE IS NOT PLAN-ONLY. If the changed-file read fails or returns nothing, CREDIT AS
+    TODAY. `creditsByAnchoredTrailer` already fails closed on an unreadable head, and that direction
+    is right there because an absent head cannot be evidence; here the safe direction is the
+    OPPOSITE, because a failed read that silently un-merges a long-merged task would re-dispatch
+    finished work and spend money on it. State which way each read fails and why they differ.
+
+    NOT IN SCOPE: the head-branch ownership ruling and `branchClaimsOtherTask` (untouched — see the
+    rationale); `lint-plan`'s own failing-split rule, which is already correct; emitting or refusing
+    the trailer at PR-authoring time; and any change to what `isInPlanScope` considers plan scope.
+  acceptance:
+    - claim: "a merged PR whose every changed file is plan scope no longer credits its trailered task, and the refusal is named in rejected_candidates rather than dropped"
+      proof: "unit test: test/trailer-credit-plan-only.test.ts"
+    - claim: "a merged PR touching any path outside plan scope credits exactly as it does today, so the ownership ruling is untouched"
+      proof: "unit test: test/trailer-credit-plan-only.test.ts"
+    - claim: "a gateway that cannot report a changed-file list credits exactly as today, so an unreadable read never silently un-merges finished work"
+      proof: "unit test: test/trailer-credit-plan-only.test.ts"
+  risk: high
+  origin: recon#empty-frontier-2026-08-10
+  plan_refs: ["W1-T69", "W1-T119", "W1-T256"]
+  files: [src/lib/status.ts, test/trailer-credit-plan-only.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — every claim is decidable in-process against an injected `GitHub` fixture. No
+    network, nothing spawned, no operator present: `deriveStatus`'s gateway is already an interface
+    with fixtures across the suite, which is why the new read is OPTIONAL. risk:high IS RULE 19'S
+    SPAN, NOT BLAST RADIUS, and it is set up front rather than shipped as a violation: files: names
+    two concerns (status, trailer-credit-plan-only). The blast radius is real but narrow — this
+    changes what counts as MERGED, which decides dispatch, so clause (vi)'s fail-direction is the
+    part most worth reviewing. RULE 25 CHECKED BEFORE FILING: neither path is INSTRUMENT_SURFACE
+    (no workflow, no *-ratchet.mjs, no diff-coverage.mjs, no *-baseline.json, no
+    mutation-relevant-paths.json, no stryker.conf.json). FILES: CAN CONTAIN THE DESIGN, checked
+    deliberately because two tasks this week could not: the predicate (`deriveStatus`,
+    `creditsByAnchoredTrailer`), the `GitHub` interface, `ghGateway` and `buildBatchedGithub` all
+    live in src/lib/status.ts, and `isInPlanScope`/`outOfPlanScopeFiles` are CALLED, not edited —
+    their current signatures already take a path and a path list, so no caller needs re-threading.
+    That last check is the one W1-T392 failed. budget_usd 55 — the cost is clause (iv)'s
+    measurement over GitHub bodies and clause (i)'s control, not the predicate. ON THE PROOFS: all
+    three use the pure-path form against test/trailer-credit-plan-only.test.ts, which does not
+    exist yet — a forward reference to a PATH, safe per CLAUDE.md, and declared in files: so the
+    worker creates it. SEQUENCING, a preference and deliberately NOT a depends_on edge: nothing
+    blocks this, but a reviewer should know W1-T395 is the live instance and will read as merged
+    until this lands or its trailer is debunked."
