@@ -55,6 +55,36 @@
     how many recently merged PRs would newly fail before choosing a severity. A guard that cannot
     accommodate those fires on healthy runs.
 
+    (ii-a) THE MEASUREMENT IS LOCAL. THERE IS NO GITHUB CALL, AND THIS SENTENCE EXISTS BECAUSE ITS
+    ABSENCE STOPPED TWO RUNS. `merged PRs` above does NOT mean the GitHub API. This repo
+    squash-merges, so a squash commit on `origin/main` IS the merged PR: its message carries the
+    `Remudero-Task: <id>` trailer, `git show --name-only <sha>` gives the changed files, and `plan/`
+    holds that task's declared `files:`. Comparing the two is the whole measurement, over the
+    checkout you are already standing in. Nothing here needs the network, a token, or an API quota,
+    and the sibling task that shipped (W1-T399) measured over open tasks in `plan/` for exactly this
+    reason.
+
+    (ii-b) AND THE ANSWER IS ALREADY KNOWN, INCLUDING THE COMPOSITION, WHICH IS THE LOAD-BEARING
+    HALF. A recon ran this over the last 120 commits on `origin/main`: 13 carry a `Remudero-Task:`
+    trailer, all 13 declare `files:`, 6 are fully inside their declared scope, and SEVEN OF THIRTEEN
+    — 54 percent — would be flagged out of scope. What those seven are matters more than the count:
+    `docs/cli-reference.md` on W1-T387, which is exactly the generator-gate class this clause names;
+    a task's OWN SHARD on W1-T403 and W1-T404, which is STRUCTURAL and recurs forever because a
+    task's shard is never listed in its own `files:`; W1-T413's four extra files, grown on explicit
+    operator instruction; and W1-T412's three, disclosed in the PR body and ratified in review.
+    Per CLAUDE.md's name-the-query rule that figure is a claim about the day it was taken; the query
+    is what is durable, and re-running it is a short script over `git log` plus `plan/`.
+
+    (ii-c) SO CLAUSE (iii)'S CONDITIONAL IS SETTLED, AND SETTLED AGAINST REFUSAL. Clause (iii) says
+    refusal becomes defensible IF the out-of-scope population turns out to be small and almost
+    entirely illegitimate. Measured, it is the MAJORITY and it is overwhelmingly LEGITIMATE — a
+    generator artifact, a structural shard reference, an operator-instructed widening, a
+    review-ratified one. A refusal at this severity would fire on more than half of recent
+    trailer-bearing merges. Build the direction clause (iii) already recommends: an ADVISORY beside
+    `inverse_scope`, folded into NEITHER `state` NOR `floorState`, exactly as its mirror image is.
+    This does not change what the task asks for; it records which of the two severities the design
+    already offered is the one the evidence chose.
+
     (iii) THE RECOMMENDATION TO TEST, NOT TO ASSUME: escalate rather than refuse. A refusal at the
     push site kills a run AFTER the work is done and the money is spent, which is the W1-T386 shape
     that cost three PRs; a blocking review verdict names the paths and leaves the operator a
