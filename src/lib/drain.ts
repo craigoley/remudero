@@ -638,11 +638,54 @@ export interface DrainSummary {
  * argument applies unchanged. `blocked_budget`, `blocked_transient` and `blocked_git_fetch` are
  * environmental and say nothing about this task alone: the next dispatch would meet the same
  * condition, so continuing burns runs rather than making progress. `blocked_inflight` means
- * another holder owns the task right now. `task_already_merged` is non-merged but arguably
- * mis-halting for a different reason (nothing ran, nothing was spent) — deliberately left alone
- * here, because it is a separate concern and this change is scoped to one verdict.
+ * another holder owns the task right now.
  * `already_satisfied` never reaches this predicate: it returns `merged: true` and behaves as
  * forward progress.
+ *
+ * `task_already_merged` NOW JOINS THE SET, AND ITS ARGUMENT IS THE STRONGEST OF THE FOUR. The
+ * sentence that used to sit in the paragraph above left it alone as "a separate concern"; that
+ * concern is now MEASURED, so the deferral is spent and the sentence is replaced rather than
+ * quietly dropped.
+ *
+ * Put the four side by side against the header's own justification — "a blocked task's DEPENDENTS
+ * would build on missing work, so continuing risks compounding a gap":
+ *
+ *   - `blocked_ci`          — the work was pushed and the PR left open.
+ *   - `no_pr`               — the task did not advance.
+ *   - `blocked_illformed`   — the linter refused BEFORE dispatch.
+ *   - `task_already_merged` — THE TASK IS DONE.
+ *
+ * The first three each argue that nothing was LOST. This one argues something stronger: its
+ * dependents CAN build on it, because that is what merged MEANS. There is no gap to compound —
+ * the gap is filled, by a merged PR the projection can name. Halting to protect dependents from
+ * work that is already finished inverts the rule it is applying.
+ *
+ * AND IT COSTS NOTHING TO DISCOVER. `runTask`'s refusal (run-task.ts, the W1-T319 guard) fires
+ * before `assertRunnable`, before the §5C linter, before the inflight lock, before worktree
+ * materialization and before any spawn — its own comment says "zero cost beyond the map lookup" —
+ * and the result it returns carries `costUsd: 0`.
+ *
+ * MEASURED: a `--max 6` drain attempted ONE task and stopped at $0.00 —
+ * `REFUSED: W1-T24 is already merged (…/pull/75) — pass --rerun to dispatch anyway`, then
+ * `stopped : blocked — W1-T24 → task_already_merged`. Five live tasks sat behind it (W1-T395,
+ * W1-T399, W1-T400, W1-T401, W1-T402): five budgeted dispatches surrendered to protect work that
+ * was already merged.
+ *
+ * WHY THE TASK WAS OFFERED AT ALL IS A SEPARATE DEFECT, NOT FIXED HERE — AND THIS CHANGE IS NOT
+ * MERELY ITS SYMPTOM. Rung 1 of `isDispatchEligible` DID run, and returned false: `drainCommand`
+ * builds its projection from `ghGateway` while `runTask` builds its own from
+ * `buildBatchedGithub` (changed the same day, #1529) — two gateways answering one question at two
+ * points of a single dispatch, which is the "never a second read path" rule `drainCommand`'s own
+ * comments repeat. Aligning them would make this verdict RARE. It cannot make it impossible: a
+ * task can merge in the window BETWEEN the drain's selection and the runner's refusal, and that
+ * window survives any gateway alignment. The halt would still be wrong whenever it fired.
+ *
+ * THE REFUSAL IS NOT SWALLOWED, the same precondition the three predecessors needed. `runTask`
+ * `say`s `REFUSED: <id> is already merged (<pr_url>) — pass --rerun to dispatch anyway` and
+ * ledgers `dispatch.refused_already_merged` carrying that PR url; the drain then ledgers
+ * `drain.continued`, and `buildRundown` (this file) gives the task its OWN line rather than the
+ * drain's `stopDetail`. A drain that silently skipped merged tasks would hide a stale plan; this
+ * one names every one it skipped.
  *
  * NOT FIXED HERE, AND NOT LOST: the reason `blocked_ci` fires on healthy PRs at all is that
  * `checkWaitStalled`'s window is a 30-second elapsed bound (five identical polls at six seconds)
@@ -650,7 +693,7 @@ export interface DrainSummary {
  * that predicate to count a still-running check as forward motion is the right second fix and a
  * different concern; this change makes the misfire cheap rather than making it rarer.
  */
-export const NON_HALTING_VERDICTS: ReadonlySet<string> = new Set(["blocked_ci", "no_pr", "blocked_illformed"]);
+export const NON_HALTING_VERDICTS: ReadonlySet<string> = new Set(["blocked_ci", "no_pr", "blocked_illformed", "task_already_merged"]);
 
 /**
  * Should this result stop the drain? `merged` never does; a non-merged verdict does UNLESS it is

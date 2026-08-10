@@ -84,6 +84,8 @@ test("haltsDrain: a no_pr result no longer halts, while every genuinely blocking
     "blocked_isolation",
     // `blocked_illformed` LEFT this list when it joined NON_HALTING_VERDICTS: the pre-dispatch
     // linter refuses it before any lock, worktree or spawn, at `costUsd: 0`. See that set's doc.
+    // `task_already_merged` LEFT it next, on the strongest argument of the four: the task is DONE,
+    // so its dependents CAN build on it and there is no gap to compound. See that set's doc.
     "blocked_budget",
     "blocked_transient",
     "blocked_git_fetch",
@@ -95,8 +97,8 @@ test("haltsDrain: a no_pr result no longer halts, while every genuinely blocking
   }
   assert.deepEqual(
     [...NON_HALTING_VERDICTS].sort(),
-    ["blocked_ci", "blocked_illformed", "no_pr"],
-    "the exempt set is exactly these three",
+    ["blocked_ci", "blocked_illformed", "no_pr", "task_already_merged"],
+    "the exempt set is exactly these four",
   );
 });
 

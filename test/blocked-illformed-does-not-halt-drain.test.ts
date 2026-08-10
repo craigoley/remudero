@@ -85,7 +85,11 @@ test("haltsDrain: blocked_illformed no longer halts, while every genuinely block
     "blocked_transient",
     "blocked_git_fetch",
     "blocked_inflight",
-    "task_already_merged",
+    // `task_already_merged` LEFT this list when it joined NON_HALTING_VERDICTS. When THIS file was
+    // written it was the strongest remaining candidate and was named here deliberately; the
+    // measured `--max 6` drain that stopped at $0.00 on W1-T24 spent that deferral. Its argument is
+    // stronger than this file's own: `blocked_illformed` never dispatched, whereas an already-merged
+    // task is FINISHED — its dependents can build on it, so there is no gap to compound.
     "pr_attribution_failed",
     "failed",
   ]) {
@@ -93,8 +97,8 @@ test("haltsDrain: blocked_illformed no longer halts, while every genuinely block
   }
   assert.deepEqual(
     [...NON_HALTING_VERDICTS].sort(),
-    ["blocked_ci", "blocked_illformed", "no_pr"],
-    "the exempt set is exactly these three — not two, and not everything",
+    ["blocked_ci", "blocked_illformed", "no_pr", "task_already_merged"],
+    "the exempt set is exactly these four — not three, and not everything",
   );
   assert.equal(haltsDrain({ merged: true, verdict: "merged" }), false, "a merged result never halts");
 });
