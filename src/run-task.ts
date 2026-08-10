@@ -13860,13 +13860,37 @@ export const TRIAGE_WORKER_TOOLS = ["Read", "Write", "Edit", "Grep", "Glob", "We
  * disjoint by definition and a future third source must not double-report. Detection runs BEFORE
  * the harness's bookkeeping commit, which is exactly why staging cannot be assumed.
  */
+/**
+ * The MERGE BASE of `origin/main` and this worktree's HEAD — the only base a "what did THIS branch
+ * change" question may use.
+ *
+ * WHY A BARE `origin/main` IS WRONG HERE, and this is MEASURED rather than reasoned: `git diff
+ * origin/main` compares the CURRENT TIP to the working tree, so the moment `origin/main` moves it
+ * reports every file the incoming commits touched as though this worktree had changed it. #1535
+ * fixed the same defect in `scopeGuardOutOfScopeFiles` by moving two-dot to three-dot; this is its
+ * third form, and it needs an explicit merge base rather than a dot because there is no three-dot
+ * spelling that compares against the WORKING TREE — and the working tree is exactly what
+ * {@link worktreeChangedFiles} must see, since detection runs before the bookkeeping commit.
+ *
+ * AND THE REF MOVES WITHOUT ANYONE MERGING BY HAND. A git worktree shares refs with its parent
+ * clone, so ANY fetch anywhere in the checkout moves `origin/main` for every worktree at once — and
+ * `refreshOriginMain` (`src/lib/ci-parity.ts`) runs `git fetch origin main` INSIDE the worker's own
+ * `preflight --ci-parity`, for the express purpose of refreshing the base. The fleet moves this ref
+ * on itself; a human merging merely supplies the commits that fetch then picks up.
+ */
+function worktreeMergeBase(worktreePath: string): string {
+  return execFileSync("git", ["-C", worktreePath, "merge-base", "origin/main", "HEAD"], { encoding: "utf8" }).trim();
+}
+
 export function worktreeChangedFiles(worktreePath: string): string[] {
   const run = (args: string[]): string[] =>
     execFileSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" })
       .split("\n")
       .map((s) => s.trim())
       .filter(Boolean);
-  return [...new Set([...run(["diff", "--name-only", "origin/main"]), ...run(["ls-files", "--others", "--exclude-standard"])])];
+  return [
+    ...new Set([...run(["diff", "--name-only", worktreeMergeBase(worktreePath)]), ...run(["ls-files", "--others", "--exclude-standard"])]),
+  ];
 }
 
 /**
@@ -14456,7 +14480,10 @@ export async function planCommand(
     // OUTPUT VALIDATION (impl-DV): did the worker actually FILE under the ids we reserved? Reserving
     // is half a contract; this is the other half. Report-only on purpose — see `unreservedFiledIds`.
     if (decision.action === "propose") {
-      const planDiff = execFileSync("git", ["-C", worktreePath, "diff", "origin/main", "--", "plan"], {
+      // MERGE BASE, not the moving tip — see `worktreeMergeBase`. A bare `origin/main` here made a
+      // plan shard landed by SOMEONE ELSE's PR read as an id THIS worker filed, so the unreserved-id
+      // warning named ids the run never touched.
+      const planDiff = execFileSync("git", ["-C", worktreePath, "diff", worktreeMergeBase(worktreePath), "--", "plan"], {
         encoding: "utf8",
         maxBuffer: 64 * 1024 * 1024,
       });
