@@ -133,6 +133,66 @@ export function buildPreflightSummary(input: {
   };
 }
 
+/**
+ * The worker's OWN preflight verdict, read back out of the worktree it ran in — or `undefined`
+ * when there is nothing worth saying.
+ *
+ * WHY THE ORCHESTRATOR READS A FILE. A worker that runs `rmd preflight` and is refused prints the
+ * failing step into ITS transcript and nowhere else. The orchestrator sees only the terminal
+ * verdict — `no_pr`, `failed` — so the single most diagnostic fact about the run ("commitlint
+ * rejected the header", "coverage-ratchet blocked 10 lines") never reaches the phase log or the
+ * ledger, and an operator reconstructs it by hand. {@link preflightSummaryPath} already persists
+ * exactly that verdict, written UNCONDITIONALLY on fail as well as pass, so surfacing it costs one
+ * read.
+ *
+ * READING IT IS SAFE BECAUSE THE WORKTREE OUTLIVES THE SPAWN. `runTask` calls `worktreeAdd` before
+ * its try block and `worktreeRemove` only inside a verdict branch — `failOnWorkerError`,
+ * `blocked_transient`, `already_satisfied`, `no_pr`, `merged`, and the `run.error` catch — every one
+ * of which is BELOW the implement dispatch. The `finally` drops the run lock only. `spawnWorker`'s
+ * own `finally` reaps its per-spawn HOME, never `args.cwd`. So at the moment the implement spawn
+ * returns, the worktree is still on disk on every exit path.
+ *
+ * AND THE FILE CANNOT BE STALE. `coverage/` is gitignored and the worktree is cut fresh from
+ * `origin/main`, so a summary found there was written by THIS worker. Several preflight runs
+ * overwrite one another, which is the wanted semantics: a worker that failed, fixed it and re-ran
+ * leaves an `ok` summary and this stays silent.
+ *
+ * SILENT IN THREE CASES, and all three are "nothing to report" rather than errors: the worker never
+ * ran preflight (no file), the file is unreadable or not JSON, or the run PASSED. Only a failure
+ * speaks, because a phase line on every dispatch is noise that gets filtered out and then missed.
+ *
+ * `readFile` is injectable and appended LAST so no positional caller shifts; the default really
+ * reads the filesystem.
+ */
+export function preflightFailureNotice(
+  repoRoot: string,
+  readFile: (path: string) => string = (p) => readFileSync(p, "utf8"),
+): string | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFile(preflightSummaryPath(repoRoot)));
+  } catch {
+    // No summary, or one that cannot be read/parsed. A worker is not required to run preflight,
+    // so absence is the ordinary case and must never become an exception on the dispatch path.
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== "object") return undefined;
+  const summary = parsed as Partial<PreflightSummary>;
+  const steps = Array.isArray(summary.steps) ? summary.steps : [];
+  const failedSteps = steps.filter((s): s is CiParityStepResult => !!s && typeof s === "object" && s.ok === false);
+  // `ok === false` is honoured even with no failing step recorded — a run that called itself failed
+  // is reported as failed, never silently dropped for want of a name to print.
+  if (summary.ok !== false && failedSteps.length === 0) return undefined;
+
+  const names = failedSteps.map((s) => (typeof s.name === "string" && s.name ? s.name : "(unnamed step)"));
+  const total = steps.length;
+  const sha = typeof summary.headSha === "string" && summary.headSha ? summary.headSha : "unknown";
+  const argv = Array.isArray(summary.args) && summary.args.length ? ` (rmd preflight ${summary.args.join(" ")})` : "";
+  const named = names.length ? `: ${names.join(", ")}` : "";
+  const counted = total ? `${names.length || summary.failed || "?"} of ${total} step(s) failed` : "the run reported FAIL";
+  return `worker preflight FAILED at ${sha} — ${counted}${named}${argv}`;
+}
+
 /** A step leaf's outcome before it is named — `matched` is set only by a trigger leaf (see
  *  {@link triggerLeaf}), and ignored by every ordinary leaf. */
 interface CiParityLeafResult {
