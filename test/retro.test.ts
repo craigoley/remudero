@@ -557,18 +557,30 @@ test("retroCommand: --dry-run's printed report carries the plan-health sweep sec
   }
 });
 
-test("retroCommand's gateway defaults to the real ghGateway at BOTH projectPlan sites when none is injected", () => {
-  // PRODUCTION MUST BE UNCHANGED. The test above only proves the INJECTED path; it would pass just
+test("retroCommand's gateway defaults to the real BATCHED gateway at BOTH projectPlan sites when none is injected", () => {
+  // PRODUCTION MUST BE WIRED. The test above only proves the INJECTED path; it would pass just
   // as happily on a change that broke the default and left every real retro without a gateway. This
   // reads the source — the same discipline arm-at-open.test.ts uses for its own wiring claim.
   //
-  // DEFAULTED PER SITE, NOT ONCE: `ghGateway` closes over mutable `failed`/`failureReason`, so two
-  // independent instances is the pre-existing behaviour and collapsing them would leak a failure
-  // from the plan-health pass into the orientation pass.
+  // THE CONSTRUCTOR MOVED, THE PROPERTY DID NOT. This asserted `ghGateway` until the retro's two
+  // passes were swapped to `buildBatchedGithub` — `ghGateway.findMergedByTrailer` spends one
+  // GraphQL `pr list --search` PER TASK, twice per retro over a 441-task plan, on a cadence that
+  // fires unattended. What this test is really about is unchanged and is still asserted below:
+  // production is wired, and it is wired PER SITE.
+  //
+  // DEFAULTED PER SITE, NOT ONCE — and the reason SURVIVES the swap rather than being an artefact
+  // of the old gateway. `ghGateway` closed over mutable `failed`/`failureReason`;
+  // `buildBatchedGithub` closes over the same shape (`lastFetchFailed`/`lastIssueFetchFailed`,
+  // surfaced by `readFailed()`/`readFailureReason()`), so collapsing the two into one shared
+  // instance would still leak a failure from the plan-health pass into the orientation pass.
+  // `test/retro-gateway-batched.test.ts` proves that isolation behaviourally, on two real
+  // instances, rather than by reading this source.
   const src = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
   const code = src.split("\n").filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join("\n");
-  const defaults = [...code.matchAll(/github: opts\.github \?\? ghGateway\(owner, repo\)/g)];
+  const defaults = [...code.matchAll(/github: opts\.github \?\? buildBatchedGithub\(owner, repo\)/g)];
   assert.equal(defaults.length, 2, "both retroCommand projectPlan sites must default to the real gateway");
+  const unbatched = [...code.matchAll(/github: opts\.github \?\? ghGateway\(owner, repo\)/g)];
+  assert.equal(unbatched.length, 0, "neither may fall back to the per-task search gateway");
 });
 
 // ── Mining overruns for a CLASS-level fix (Standing rule 20) ───────────────
