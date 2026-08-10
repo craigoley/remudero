@@ -2196,11 +2196,35 @@ export function claimsChangesetContext(report: string, index: number): boolean {
  * silence — not bare "was needed." alone, which still reads as a direct (if oddly phrased) claim
  * about the diff. This is deliberately narrow, not a general parse: it targets the one construction
  * observed to misfire, and nothing wider.
+ *
+ * A CLOSING DELIMITER RIGHT AFTER THE TOKEN IS NOT END-OF-SENTENCE (W1-T395). The rule above says
+ * "punctuation … the token IS the claim", but that was measured for punctuation that genuinely ENDS
+ * a sentence — comma, period, semicolon, end of line, end of input. A closing delimiter ends a SPAN,
+ * not a sentence, and real prose keeps going after it on the same line: "the docs say `no code` was
+ * ever generated automatically" is no more a direct claim than "no code duplication anywhere" is —
+ * both have an ordinary word right after the token, one of them just has a backtick in between.
+ * Before this fix the backtick alone hit the "punctuation ends it" branch and the claim fired
+ * unanchored; measured the same way with a paren or a straight quote in the backtick's place.
+ * {@link NEXT_WORD_RE} therefore skips a closing delimiter (and the horizontal whitespace around
+ * it) before testing for a following word, so a delimited claim is judged by the exact same
+ * word-or-sentence-end test as the bare form — narrower, not weaker: a changeset word after the
+ * delimiter still fires, same as it always did.
  */
 const NEED_CLAUSE_RE = /^\s+(?:was|is|were|are)\s+(?:needed|required|necessary)\s+(?:for|to)\b/i;
 
+// Enumerated, not "skip all punctuation" — a blanket skip would swallow the sentence-end case
+// (comma, period, semicolon, end of line/input) that the "punctuation ends it" branch below still
+// needs, turning a true positive into silence. Each character here CLOSES A SPAN rather than a
+// sentence, so what follows it can still be the real continuation of the same claim:
+//   `        closes inline code             ("no code` was clean")
+//   " and '  close a quotation              ("no code" was clean / 'no code' was clean)
+//   )        closes a parenthetical aside   ("no code) was clean")
+// Left out: ] and } — unmeasured, no fixture exercises a claim inside a bracket/brace span; add
+// them if a real one turns up rather than guessing now.
+const NEXT_WORD_RE = /^[ \t`"')]*([A-Za-z][A-Za-z0-9_-]*)/;
+
 export function noClaimIsAboutChangeset(rest: string): boolean {
-  const next = /^[ \t]*([A-Za-z][A-Za-z0-9_-]*)/.exec(rest);
+  const next = NEXT_WORD_RE.exec(rest);
   if (!next) return true; // punctuation, end of line, or end of input — the token IS the claim
   if (!CHANGESET_CONTEXT_RE.test(next[1])) return false;
   // The head noun alone says "about the changeset" — but see whether it is itself the subject of a
