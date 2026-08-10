@@ -80,14 +80,25 @@ test("UNSAFE: `no <path>` followed by a changeset word, where the path IS in the
   assert.ok(hits.some((h) => h.files.some((f) => f.startsWith("src/"))));
 });
 
-test("UNSAFE: the two hyphenated shorthands fire ANYWHERE, whatever the subject — exactly as the contract warns", () => {
-  // THE PART A WORKER MOST NEEDS. Unlike the other two shapes these are UNANCHORED: a bare
-  // /\bplan-only\b/i over the whole body. A session had to RENAME a test to avoid quoting one.
+test("the two hyphenated shorthands are SUBJECT-ANCHORED like the other two shapes, not matched anywhere", () => {
+  // THIS TEST USED TO ASSERT THE OPPOSITE, and its own comment recorded the cost: "A session had
+  // to RENAME a test to avoid quoting one." That hazard is now fixed rather than documented. The
+  // contract's stated principle was always "the rule is about a SENTENCE'S SUBJECT, never a word
+  // blacklist"; shape (3) was the one arm that contradicted it, and this locks the agreement.
   const a = accepted("The lane's scope guard is what makes a triage PR plan-only by construction.");
-  assert.ok(a.length >= 1, "no subject anchoring — it fires on a sentence about the LANE, not this diff");
+  assert.equal(a.length, 0, "a sentence about the LANE is not a claim about this diff");
 
   const b = accepted("Prior art: PR #1025 described its revert as data-only.");
-  assert.ok(b.length >= 1, "and on a sentence about ANOTHER PR");
+  assert.equal(b.length, 0, "nor is a sentence about ANOTHER PR");
+
+  // The measured case that forced this: a required proof path that merely CONTAINS the token.
+  const c = accepted("proof: unit test: test/trailer-credit-plan-only.test.ts");
+  assert.equal(c.length, 0, "a path is not a claim");
+
+  // AND THE CHECK STILL BITES — three subject forms, so the anchor cannot have silenced it.
+  assert.ok(accepted("This is plan-only.").length >= 1, "predicated with a linking verb");
+  assert.ok(accepted("Plan-only: one shard added.").length >= 1, "used as a label");
+  assert.ok(accepted("The diff is data-only.").length >= 1, "the sibling shorthand, same rule");
 });
 
 // ── (6) THE REPLAY: the two real incidents are still rejected ────────────────

@@ -2208,6 +2208,49 @@ export function noClaimIsAboutChangeset(rest: string): boolean {
   return !NEED_CLAUSE_RE.test(rest.slice(next[0].length));
 }
 
+/**
+ * Is a house-shorthand claim (`plan-only` / `data-only`) at `index` ABOUT THE CHANGESET?
+ *
+ * BOTH DIRECTIONS, WITHIN THE SENTENCE — and each half is load-bearing, established by fixtures
+ * that fail without it rather than by symmetry:
+ *   BACKWARD, because a body states it as a predicate: "this PR is plan-only", "the diff is
+ *     data-only". That is {@link claimsChangesetContext}'s exact shape, so it is reused, not
+ *     re-derived.
+ *   FORWARD, because the house style also LEADS with it: "Plan-only: one shard added, no source
+ *     touched." Backward alone reports nothing there — the token opens the sentence — and three
+ *     existing fixtures in test/body-contradicts-diff.test.ts catch precisely that loss.
+ *
+ * NOT {@link noClaimIsAboutChangeset}, though it is the obvious forward sibling. Its contract
+ * treats "no next word at all" as "the token IS the claim", which is right for `no <token>` and
+ * exactly wrong here: a path like `test/trailer-credit-plan-only.test.ts` continues with `.test.ts`
+ * rather than a word, so that helper reports TRUE and the filename fires. Sentence-scoped on both
+ * sides, a path carries no changeset word and stays silent while a real claim still fires.
+ */
+function shorthandIsAboutChangeset(report: string, index: number, length: number): boolean {
+  if (claimsChangesetContext(report, index)) return true;
+  const rest = report.slice(index + length);
+  // THE LABEL FORM IS A CLAIM, and it is the one the house style actually writes: `data-only: no
+  // code.` (#1025's own body) and `**Plan-only**: one file added`. A colon immediately after the
+  // shorthand — through any markdown emphasis — makes it the SUBJECT of the line rather than a
+  // word inside one, and that is decidable without guessing at the elaboration that follows, which
+  // often carries no changeset verb at all ("no code", "no src"). A path never continues with a
+  // colon, so `test/trailer-credit-plan-only.test.ts` stays silent.
+  if (/^[*_`\s]*:/.test(rest)) return true;
+  // THE COPULAR FORM IS A CLAIM: "This is plan-only.", "The diff is data-only." A linking verb
+  // immediately before the shorthand makes it the PREDICATE of whatever the sentence is about, and
+  // in a PR body that subject is the change. Deliberately IMMEDIATE rather than anywhere-in-
+  // sentence, which is what separates it from the two shapes that must stay silent: "makes a
+  // triage PR plan-only by construction" (about the LANE) and "described its revert as data-only"
+  // (about ANOTHER PR) both name the concept without predicating it of this diff.
+  // The SUBJECT must be this change, not any noun that happens to precede a linking verb: "a
+  // merged PR is plan-only" explains the predicate, it does not claim it of this diff.
+  if (/\b(?:this|it|these\s+changes|the\s+(?:diff|change|changeset|pr))\s+(?:is|are|was|were)\s+[*_`]*$/i.test(report.slice(0, index))) {
+    return true;
+  }
+  const end = rest.search(/[.!?\n]/);
+  return CHANGESET_CONTEXT_RE.test(end === -1 ? rest : rest.slice(0, end));
+}
+
 /** Does `file` fall under the claimed-absent `path` (an exact file, or a directory prefix)? */
 function fileUnderClaimedPath(file: string, path: string): boolean {
   const normalized = path.replace(/\/$/, "");
@@ -2372,13 +2415,33 @@ export function bodyContradictsDiff(report: string, diffFiles: string[]): Change
     }
     if (violators.length > 0) out.push({ claim: m[0].trim(), files: violators });
   }
-  if (/\bplan-only\b/i.test(scan)) {
+  // THE HOUSE SHORTHANDS NEED THE SAME SUBJECT ANCHOR THE COUNT CLAIM GOT, and for the same
+  // reason: `/\bplan-only\b/i.test(scan)` has no SUBJECT, so it fires on the WORD wherever it
+  // appears — including inside a path. MEASURED on this very PR: the test file W1-T413's own
+  // acceptance criteria name is `test/trailer-credit-plan-only.test.ts`, and `\b` matches around
+  // `plan-only` between the `-` and the `.`, so merely quoting the required proof made the body
+  // "claim" its src-touching diff was plan-only and forced `state: "failure"`. Writing ABOUT the
+  // concept did the same. That is the guess-at-natural-language this function's own doc forbids.
+  //
+  // ANCHORED BACKWARD, with {@link claimsChangesetContext} — the count claim's helper, not a third
+  // notion. These shorthands carry their context BEFORE them the way a count does ("this PR is
+  // plan-only", "the diff is data-only"), which is the opposite of a `no <token>` claim and why
+  // {@link noClaimIsAboutChangeset} is the wrong sibling to reuse here.
+  //
+  // BOTH ARMS, deliberately. `data-only` is the identical shape one line down; fixing only the arm
+  // that bit today would leave its twin to bite next, which is the one-organ-disagreeing-with-
+  // another pattern this repo keeps paying for.
+  for (const m of scan.matchAll(/\bplan-only\b/gi)) {
+    if (!shorthandIsAboutChangeset(scan, m.index ?? 0, m[0].length)) continue;
     const violators = diffFiles.filter((f) => !isInPlanScope(f));
     if (violators.length > 0) out.push({ claim: "plan-only", files: violators });
+    break; // one contradiction per claim kind, exactly as the unanchored test produced
   }
-  if (/\bdata-only\b/i.test(scan)) {
+  for (const m of scan.matchAll(/\bdata-only\b/gi)) {
+    if (!shorthandIsAboutChangeset(scan, m.index ?? 0, m[0].length)) continue;
     const violators = diffFiles.filter((f) => f.startsWith("src/") || isTestPath(f));
     if (violators.length > 0) out.push({ claim: "data-only", files: violators });
+    break;
   }
 
   return out;
