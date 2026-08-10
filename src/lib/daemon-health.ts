@@ -129,6 +129,26 @@ export interface GhRateLimitBucket {
   resetsAt: string;
 }
 
+/**
+ * Is this bucket out of budget?
+ *
+ * THE SAME QUESTION `runDaemon`'s quota tick asks, written down once so the drain's end-of-run
+ * report cannot come to a different answer about the same reading. `<= 0` rather than `=== 0`
+ * mirrors that tick exactly (it clears its latch on `remaining > 0` and escalates otherwise), so
+ * a negative reading off a malformed payload keeps reading as exhausted rather than as healthy.
+ *
+ * THE DAEMON TICK STILL CARRIES ITS OWN INLINE BRANCH, and that is a constraint rather than an
+ * oversight: `daemon.ts` imports this module TYPE-ONLY on purpose, because this module imports a
+ * VALUE from it (`DEFAULT_POLL_INTERVAL_MS`) — a value import back would be a genuine cycle, which
+ * that file's own comment says in as many words. Rewiring it was rejected as scope for a drain
+ * reporting change. What guards the drift instead is an EQUIVALENCE TEST that drives the real
+ * `runDaemon` tick and the real drain reporter over one shared table of readings and asserts they
+ * escalate the same buckets — so tuning either side alone goes red.
+ */
+export function isBucketExhausted(reading: GhRateLimitBucket): boolean {
+  return reading.remaining <= 0;
+}
+
 /** Both buckets `gh api rate_limit` reports off ONE payload — {@link readGhRateLimitBuckets}.
  *  Each bucket independently absent (never a fabricated reading) when its own sub-object
  *  could not be read/parsed. */

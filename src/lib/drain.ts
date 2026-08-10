@@ -528,6 +528,23 @@ export interface DrainSummary {
   stopReason: StopReason;
   /** Human detail: the blocked task + verdict, the reset time, the error, etc. */
   stopDetail?: string;
+  /**
+   * How many candidates the FINAL selection declined as INDETERMINATE (W1-T119) — a gateway that
+   * could not ANSWER, never a task that is genuinely ineligible. Reset each pass, deliberately:
+   * see the reset's own comment in `runDrain` for why a lifetime total would mislead.
+   *
+   * WHY A NUMBER AND NOT PROSE. `stopDetail` is for the operator; this is for `drainCommand`,
+   * which decides whether to look at the rate-limit buckets. A caller forced to regex a sentence
+   * to learn what happened is how a reporting field becomes load-bearing by accident.
+   *
+   * `zero is overloaded`, MEASURED five times in this repo. A `no_runnable` with this at 0 is a
+   * genuinely empty frontier; the same verdict with it non-zero is a fleet that could not SEE.
+   * The two were byte-identical before this field existed, and an operator had to run
+   * `gh api rate_limit` BY HAND to tell them apart. The dispatch PREDICATE was already correct —
+   * rung 6 declines on unknown distinctly from rung 1's not-merged — so nothing here changes what
+   * is dispatched, only what the terminal is able to say about it.
+   */
+  indeterminateDeclines?: number;
   costUsd: number;
   resumeCommand: string;
 }
@@ -647,6 +664,42 @@ export const NON_HALTING_VERDICTS: ReadonlySet<string> = new Set(["blocked_ci", 
 export function haltsDrain(result: { merged: boolean; verdict: string }): boolean {
   if (result.merged) return false;
   return !NON_HALTING_VERDICTS.has(result.verdict);
+}
+
+/**
+ * The `stopDetail` for a `no_runnable` stop: whether the frontier was READ AND EMPTY, or merely
+ * UNREADABLE.
+ *
+ * Both end the drain with the same `stopReason`, and until this existed they printed the same
+ * single word. The operator's recourse was to run `gh api rate_limit` BY HAND and infer which of
+ * the two had happened — from outside the process that already knew.
+ *
+ * A COUNT, NOT A SHARE, and the reason is worth stating rather than leaving as an omission: the
+ * drain loops do not wire `onFiltered`, so there is no denominator here — and wiring one would not
+ * help, because `DispatchFilterReason` has no indeterminate bucket. `tallyDispatchFilters` counts
+ * the four ORDINARY declines; rung 6 has always reported through `onIndeterminate` instead. So
+ * "N declined as indeterminate" is the strongest true statement available without changing the
+ * dispatch predicate, and it is the one that distinguishes the two cases.
+ *
+ * ALWAYS RETURNS A SENTENCE, INCLUDING FOR ZERO. Returning `undefined` on the healthy path would
+ * leave the terminal printing the pre-existing bare `no_runnable`, and an operator could not tell
+ * a build that counts from a frontier that was clean. The zero case is a positive claim — the
+ * frontier was read — not the absence of one.
+ *
+ * NO FILE-OVERLAP ARM, AND THAT IS A CORRECTION RATHER THAN AN OMISSION. The lanes loop's third
+ * `no_runnable` sits AFTER `partitionByFileOverlap`, so the obvious reading is that a stop there
+ * means candidates were found and then serialized away — and an earlier draft of this function
+ * said so. It cannot happen: that partition's first candidate meets an EMPTY `dispatch` array, so
+ * `dispatch.find(...)` returns undefined and it is placed unconditionally. `dispatch` is therefore
+ * empty only when `candidates` was, which the guard one branch earlier already returned on. A
+ * sentence for a population that cannot be observed is the same defect as a bound that fires on a
+ * healthy condition, so it is not written.
+ */
+export function noRunnableDetail(counts: { indeterminate: number }): string {
+  if (counts.indeterminate > 0) {
+    return `${counts.indeterminate} candidate(s) declined as INDETERMINATE: the frontier could not be READ (the GitHub gateway did not answer), so this is not evidence of an empty queue`;
+  }
+  return "frontier read cleanly: 0 candidates declined as indeterminate, so the queue is genuinely empty";
 }
 
 /**
@@ -1011,6 +1064,13 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
   /** The same ids as a set — the selection guard's input, so a continued task is never re-offered. */
   const continuedIds = new Set<string>();
   let costUsd = 0;
+  /**
+   * How many candidates the CURRENT pass declined as indeterminate — a gateway that could not
+   * ANSWER (W1-T119 sets `indeterminate` on `readFailed()`), never a task that is genuinely
+   * ineligible. Counted so the terminal can say WHY it stopped: a throttled gateway and an empty
+   * frontier both end in `no_runnable`, and without this they are the same sentence.
+   */
+  let indeterminateDeclines = 0;
   // W1-T290: the daemon's bounded-degraded ceiling, ported — CONSECUTIVE
   // unreadable `/usage` reads, not any-unreadable. Reset to 0 on any
   // successful read; escalates past `unreadableDegradedLimit` (see the
@@ -1034,7 +1094,11 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
   const lifetimeCapEscalated = new Set<string>();
 
   const summary = (stopReason: StopReason, stopDetail?: string): DrainSummary => {
-    const s: DrainSummary = { attempted, merged, continued, stopReason, stopDetail, costUsd, resumeCommand: resumeCommand(opts) };
+    // `indeterminateDeclines` is emitted ALWAYS, including as 0 — omitting it when zero would put
+    // the ambiguity straight back: an absent field would mean either "nothing was indeterminate" or
+    // "this build does not count". An explicit 0 is the statement that the frontier was READ and
+    // found empty.
+    const s: DrainSummary = { attempted, merged, continued, stopReason, stopDetail, indeterminateDeclines, costUsd, resumeCommand: resumeCommand(opts) };
     log("drain.summary", { ...s });
     return s;
   };
@@ -1175,6 +1239,9 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
       // everything else still dispatchable.
       onIndeterminate: (t) => {
         log("dispatch.indeterminate", { task: t.id });
+        // COUNTED, not merely logged. This ledger line has always existed; what did not exist was
+        // any way for the TERMINAL to say the frontier was unreadable rather than empty.
+        indeterminateDeclines++;
         deps.onIndeterminate?.(t);
       },
       isCircuitTripped: deps.isCircuitTripped,
@@ -1209,10 +1276,16 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
     // CURATION (W1-T140): a curated selection overrides the natural DAG scan
     // entirely — dispatch honors EXACTLY the operator's list and order, never
     // falling back to nextRunnable's plan-file-order walk.
+    // RESET PER SELECTION, NOT ACCUMULATED OVER THE DRAIN. `onIndeterminate` fires only from the
+    // selection call below, and the question the terminal has to answer is about the pass that
+    // actually GAVE UP — not about a gateway hiccup three passes ago that has since cleared.
+    // A lifetime counter would report an unreadable frontier on a stop whose final pass read
+    // perfectly, which is the always-blames-the-quota failure this change exists to avoid.
+    indeterminateDeclines = 0;
     const next = opts.curated
       ? nextCurated(plan, opts.curated, attempted, isMerged, skipOpts)
       : nextRunnable(plan, isMerged, skipOpts);
-    if (!next) return summary("no_runnable");
+    if (!next) return summary("no_runnable", noRunnableDetail({ indeterminate: indeterminateDeclines }));
 
     log("drain.iteration", { task: next.id, attempted: attempted.length + 1, max });
     attempted.push(next.id);
@@ -1318,6 +1391,13 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
   /** The same ids as a set — the selection guard's input, so a continued task is never re-offered. */
   const continuedIds = new Set<string>();
   let costUsd = 0;
+  /**
+   * How many candidates the CURRENT pass declined as indeterminate — a gateway that could not
+   * ANSWER (W1-T119 sets `indeterminate` on `readFailed()`), never a task that is genuinely
+   * ineligible. Counted so the terminal can say WHY it stopped: a throttled gateway and an empty
+   * frontier both end in `no_runnable`, and without this they are the same sentence.
+   */
+  let indeterminateDeclines = 0;
   // Same escalation-dedup contract as the single-lane loop (see its own
   // comment): bounds the CALLBACK to this drain's first observation of each
   // tripped task id, across every pass — `isCircuitTripped` itself is still
@@ -1333,7 +1413,11 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
   const unreadableDegradedLimit = opts.unreadableDegradedLimit ?? UNREADABLE_DEGRADED_LIMIT;
 
   const summary = (stopReason: StopReason, stopDetail?: string): DrainSummary => {
-    const s: DrainSummary = { attempted, merged, continued, stopReason, stopDetail, costUsd, resumeCommand: resumeCommand(opts) };
+    // `indeterminateDeclines` is emitted ALWAYS, including as 0 — omitting it when zero would put
+    // the ambiguity straight back: an absent field would mean either "nothing was indeterminate" or
+    // "this build does not count". An explicit 0 is the statement that the frontier was READ and
+    // found empty.
+    const s: DrainSummary = { attempted, merged, continued, stopReason, stopDetail, indeterminateDeclines, costUsd, resumeCommand: resumeCommand(opts) };
     log("drain.summary", { ...s });
     return s;
   };
@@ -1444,6 +1528,9 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
       isIndeterminate: deps.isIndeterminate,
       onIndeterminate: (t) => {
         log("dispatch.indeterminate", { task: t.id });
+        // COUNTED, not merely logged. This ledger line has always existed; what did not exist was
+        // any way for the TERMINAL to say the frontier was unreadable rather than empty.
+        indeterminateDeclines++;
         deps.onIndeterminate?.(t);
       },
       isCircuitTripped: deps.isCircuitTripped,
@@ -1468,8 +1555,14 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
       excludeIds: continuedIds,
     };
 
+    // RESET PER SELECTION, NOT ACCUMULATED OVER THE DRAIN. `onIndeterminate` fires only from the
+    // selection call below, and the question the terminal has to answer is about the pass that
+    // actually GAVE UP — not about a gateway hiccup three passes ago that has since cleared.
+    // A lifetime counter would report an unreadable frontier on a stop whose final pass read
+    // perfectly, which is the always-blames-the-quota failure this change exists to avoid.
+    indeterminateDeclines = 0;
     const candidates = runnableCandidates(plan, isMerged, passSize, skipOpts);
-    if (candidates.length === 0) return summary("no_runnable");
+    if (candidates.length === 0) return summary("no_runnable", noRunnableDetail({ indeterminate: indeterminateDeclines }));
 
     // PRE-DISPATCH OVERLAP CHECK (W1-T171), ACROSS the co-dispatched set: a
     // deferred task is simply absent from THIS pass — it is re-considered
@@ -1480,7 +1573,11 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
     const partition = partitionByFileOverlap(candidates);
     for (const d of partition.serialized) log("dispatch.serialized", serializedLedgerPayload(d));
     const dispatchSet = partition.dispatch;
-    if (dispatchSet.length === 0) return summary("no_runnable");
+    // DEFENSIVE, NOT A DISTINCT CAUSE: `partitionByFileOverlap` places its first candidate against
+    // an empty `dispatch` unconditionally, so this is empty only when `candidates` was — already
+    // returned on above. Kept (it predates this change) and given the SAME detail as the other two
+    // rather than an overlap-flavoured one, because the overlap story is unreachable here.
+    if (dispatchSet.length === 0) return summary("no_runnable", noRunnableDetail({ indeterminate: indeterminateDeclines }));
 
     log("dispatch.concurrent_set", { tasks: dispatchSet.map((t) => t.id), lane_count: laneCount });
 
