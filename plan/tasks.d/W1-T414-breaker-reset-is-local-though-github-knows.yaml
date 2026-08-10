@@ -1,0 +1,131 @@
+- id: W1-T414
+  title: "the dispatch breaker's COUNT is necessarily per-host but its RESET is local for no reason the design requires — `dispatchesWithoutNewOwnedPr` forgives a task only when THIS host's ledger holds a `pr.opened`, while the branch that line records is a `run-<taskId>-<epochMs>` ref GitHub already serves to every host"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "RECON 2026-08-10 (state/recon-frontier-decline-reasons.md), RE-DERIVED AT 295d2d3 —
+    every symbol named below was confirmed to live where this shard says it does, because a filing
+    that names a moved symbol sends its worker looking for something that is not there.
+    WHAT IS CORRECT AND MUST NOT BE CHANGED. `isDispatchBreakerTripped` (src/lib/status.ts) counts
+    `dispatchesWithoutNewOwnedPr` over the RUNNING CONFIG'S ledger, and drain.ts's own header states
+    the consequence plainly: both counters read the running config's ledger, so they are PER-HOST
+    and a fresh container starts from zero. That is not a defect to fix. This fleet keeps an
+    append-only log with tailers rather than a shared database, and the breaker's whole value is
+    that it PERSISTS ACROSS PROCESS RESTARTS — the W1-T1 storm spanned many separate invocations
+    over roughly ten hours, and an in-memory flag resets every time a process starts. A global
+    COUNT would need cross-instance state this fleet deliberately does not have.
+    WHAT IS ASYMMETRIC. The RESET is local too, and nothing requires it to be.
+    `dispatchesWithoutNewOwnedPr` zeroes on a `pr.opened` line, and that line's own doc explains why
+    it needs no ownership check: run-task.ts logs it only after ITS OWN worker pushes ITS OWN
+    `run-<taskId>-<epochMs>` branch. So the reset's evidence is a statement about a BRANCH NAME —
+    and branch names are GitHub's, visible identically from every host. A task that opened a PR on
+    the mini therefore stays penalised in a container purely because the proof of its success was
+    written to a different log file.
+    THE PREDICATES ALREADY EXIST, IN THE SAME FILE, AND WERE RE-CONFIRMED AT THIS SHA:
+    `listOpenHeadBranches`, `ownsBranch`, `isBareRunBranch` and `isOwnedSlugBranch` are all in
+    src/lib/status.ts, alongside `isDispatchBreakerTripped` itself. `listOpenHeadBranches` is
+    already a BATCHED read — `buildBatchedGithub` answers it client-side off the one fetch it has
+    already made, with zero extra calls, and returns null on a fetch FAILURE as distinct from an
+    empty array. So the data and the ownership tests are in hand; only the wiring is missing.
+    IT ADDS NO LAXITY, AND THAT IS THE ARGUMENT. The LOCAL reset already forgives a PR that never
+    merges — its own doc says a fresh PR, even one that does not merge, resets the count to zero,
+    because the shape it guards is dispatch after dispatch producing NOTHING NEW. Reading GitHub for
+    the same question makes the breaker behave across hosts exactly as it already behaves on one.
+    And the LIFETIME CAP is untouched: `isLifetimeDispatchCapExceeded` counts every `run.start` and
+    is reset by nothing, which is precisely why W1-T271 built it as a second independent
+    measurement rather than editing the streak counter. The backstop stays.
+    THE EVIDENCE THIS IS WORTH BUILDING. A drain reported `no_runnable` while a live cohort sat
+    unbuilt and lint-clean. On the host that ran it the dispatch counts ruled exhaustion OUT — the
+    highest was THREE against a breaker that trips at five. Two of that cohort were explained by the
+    false-merge defect (W1-T413, built as #1527). The other eleven are UNMEASURED, and per-host
+    counters are the leading remaining candidate. THE LEDGER IS UNREACHABLE: the Mac mini is down,
+    the count figures above are the operator's report and are NOT re-derived here.
+    AN OPERATOR OVERRIDE ALREADY EXISTS AND THIS IS NOT ABOUT IT. A kick marker
+    (`state/KICK_REQUESTED-<taskId>`, `requestKick`/`pendingKicks` in src/lib/fleet-control.ts)
+    grants one dispatch and is cleared on use, and the daemon's kick path consults neither
+    `isCircuitTripped` nor `isLifetimeCapExceeded`. This task is about the UNATTENDED path, where no
+    operator is present to place one."
+  design: |
+    (i) THE RESET BECOMES CORROBORATED, THE COUNT STAYS LOCAL. Do not touch
+    `dispatchesWithoutNewOwnedPr`'s counting, and do not attempt a shared counter. The single
+    change is that a task whose OWN run branch carries a PR anywhere GitHub can see is treated as
+    having forward progress, exactly as a local `pr.opened` line already treats it. Ownership is
+    decided by the predicates that already exist — a head ref this task owns in any of the three
+    accepted forms — never by a fresh notion of what a run branch looks like.
+
+    (ii) ONE BATCHED READ PER SELECTION PASS, AND THIS BOUND IS THE DESIGN. `isDispatchBreakerTripped`
+    is consulted during candidate selection, over the eligible set, so a PER-TASK GitHub call here
+    would reproduce the defect removed from `retroCommand` this week, where per-task searches turned
+    a nine-minute suite into an hour. `listOpenHeadBranches` is already batched and already answers
+    the whole question for every task at once. Resolve it ONCE where the per-invocation cache is
+    already built — `breakerGateFor` (src/run-task.ts) constructs one `DispatchBreakerCache` per
+    drain/daemon invocation and memoises per (taskId, tick) — and pass the resolved answer down.
+    MEASURE AND STATE the call count the change adds; if it is not zero-or-one per pass, the design
+    is wrong and the finding outranks the change.
+
+    (iii) UNREADABLE FALLS BACK TO THE LOCAL COUNT — never to "dispatch anyway", never to "refuse".
+    `buildShellRoute`'s rule is the fleet's: a read failure degrades to UNKNOWN, never to zero. Here
+    UNKNOWN means the breaker behaves EXACTLY as it does today. Refusing to dispatch on a network
+    blip would make this the fifth bound in this repo to fire on a healthy condition (W1-T312's
+    wait cap, W1-T380's deploy ceiling, W1-T382's check-wait bound, the idle-gate ceiling), and
+    crediting forward progress on an unreadable read would let a genuine runaway through. The
+    distinction `listOpenHeadBranches` already draws — null for a FAILED read, an empty array for
+    genuinely no branches — is what carries this, so consume it rather than collapsing both to
+    "nothing found".
+
+    (iv) THE LIFETIME CAP IS OUT OF SCOPE AND MUST STAY ARMED. `isLifetimeDispatchCapExceeded` never
+    resets, by design; a corroborated streak reset must not reach it, or the backstop that bounds
+    this change disappears with it. Assert that in a test rather than in a comment: a task with a
+    corroborating branch and a lifetime count over the cap must still be refused.
+
+    (v) FALSIFIER, BOTH DIRECTIONS AND THE FAILURE ARM. A task at the streak threshold whose own run
+    branch carries a PR on GitHub becomes dispatchable; the SAME task with no such branch stays
+    tripped; and the same task with an UNREADABLE branch read stays tripped, because that is the
+    local count speaking. The middle case is the one that proves the change discriminates rather
+    than simply forgiving everything, and the third is the one a rushed implementation drops.
+
+    NOT IN SCOPE: the per-host COUNT (argued above and deliberately kept), the lifetime cap,
+    `evaluateDispatchBreaker`'s regression/indeterminate semantics (W1-T206's, unchanged), the kick
+    path, and any change to what `pr.opened` records or when run-task writes it.
+  acceptance:
+    - claim: "a task at the streak threshold whose own run branch carries a pull request on GitHub is no longer treated as making no progress"
+      proof: "unit test: test/breaker-reset-corroborated.test.ts"
+    - claim: "the same task with no such branch stays tripped, so the corroboration discriminates rather than forgiving every task"
+      proof: "unit test: test/breaker-reset-corroborated.test.ts"
+    - claim: "an unreadable branch read leaves the breaker deciding on the local count alone, so a network failure never changes a dispatch decision"
+      proof: "unit test: test/breaker-reset-corroborated.test.ts"
+    - claim: "the lifetime cap still refuses a task over its ceiling even when a corroborating branch exists"
+      proof: "unit test: test/breaker-reset-corroborated.test.ts"
+  risk: high
+  origin: recon#frontier-decline-reasons-2026-08-10
+  plan_refs: ["W1-T1", "W1-T206", "W1-T271", "W1-T119"]
+  files: [src/lib/status.ts, src/run-task.ts, test/breaker-reset-corroborated.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — every claim is decidable in-process against a seeded ledger file and an
+    injected branch resolver. No network, nothing spawned, no operator present.
+    risk:high IS RULE 19'S SPAN, SET UP FRONT rather than shipped as a violation: files: names three
+    concerns (status, run-task, breaker-reset-corroborated). The blast radius is real and is the
+    part worth reviewing — this changes what the DISPATCH GATE forgives, so a version that forgives
+    too readily re-opens the W1-T1 storm the breaker exists to bound, while a version that consults
+    GitHub on the hot path per task reproduces a cost defect removed this week. Design (ii) and (iv)
+    are where those two are managed.
+    RULE 25 CHECKED BEFORE FILING: files: contains no INSTRUMENT_SURFACE path — no workflow, no
+    *-ratchet.mjs, no diff-coverage.mjs, no *-baseline.json, no mutation-relevant-paths.json, no
+    stryker.conf.json. src/run-task.ts is USER_VISIBLE_SURFACE, which gates the cli-reference drift
+    check; this adds no CLI verb and no flag, so nothing there should move, and if it does the
+    regenerated doc must be committed with the change rather than discovered by CI.
+    FILES: CAN CONTAIN THE DESIGN, checked deliberately because two tasks this week could not.
+    `isDispatchBreakerTripped`, `dispatchesWithoutNewOwnedPr`, `evaluateDispatchBreaker`,
+    `listOpenHeadBranches` and the three ownership predicates all live in src/lib/status.ts; the
+    per-invocation wiring and the one batched resolution live in `breakerGateFor` (src/run-task.ts).
+    Both are declared. Nothing else needs editing — drain.ts and daemon.ts consume the gate through
+    fields they already pass and are deliberately NOT declared.
+    budget_usd 60 — the cost is design (ii)'s call-count measurement and design (iii)'s failure
+    arm, not the predicate, which is a few lines.
+    ON THE PROOFS: all four use the pure-path form against test/breaker-reset-corroborated.test.ts,
+    which does not exist yet — a forward reference to a PATH, safe per CLAUDE.md, and declared in
+    files: so the worker creates it."
