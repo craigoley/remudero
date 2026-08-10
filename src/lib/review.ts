@@ -4438,14 +4438,26 @@ export function checkRefactorHonesty(diff: string, report?: string): RubricItemR
  * USER_VISIBLE_SURFACE_RE}'s instrument arm (W1-T212's docs-awareness rung)
  * and {@link detectInstrumentEntanglement} (this task's BINDING isolation
  * gate) are both DERIVED FROM THIS constant so the two surfaces can never
- * drift apart into a second, hand-maintained copy. Membership verified
- * against the live tree at filing (2026-08-03 — verify again before trusting
- * it): `.github/workflows/` (CI measurement wiring), every
- * `scripts/*-ratchet.mjs` (ratchet gate scripts), `scripts/diff-coverage.mjs`
- * (coverage's own text-awareness carve-outs — the W1-T210 fixture this
- * task's rationale names), every `scripts/*-baseline.json` (recorded
- * floors/caps), `scripts/mutation-relevant-paths.json` (mutation-ratchet's
- * diff-scoping config), and `stryker.conf.json` (mutation scope/config).
+ * drift apart into a second, hand-maintained copy. Membership: `.github/
+ * workflows/` (CI measurement wiring), every `scripts/*-ratchet.mjs` (ratchet
+ * gate scripts), `scripts/diff-coverage.mjs` (coverage's own text-awareness
+ * carve-outs — the W1-T210 fixture this task's rationale names), every
+ * `scripts/*-baseline.json` (recorded floors/caps),
+ * `scripts/mutation-relevant-paths.json` (mutation-ratchet's diff-scoping
+ * config), and `stryker.conf.json` (mutation scope/config). STAYS the SOLE
+ * BLOCKING authority for {@link detectInstrumentEntanglement} — a wrong or
+ * incomplete derivation must never itself refuse a PR.
+ *
+ * THIS LIST IS HAND-ENUMERATED, and a hand enumeration goes stale (W1-T402:
+ * it shipped missing eleven gate-rule files' worth of coverage, found only by
+ * a one-time hand re-check four days later). Rather than a comment ASKING a
+ * human to re-verify membership — the carrier that failed here — {@link
+ * INSTRUMENT_SURFACE_EXCLUSIONS} plus
+ * test/instrument-surface-completeness.test.ts derive candidate gate-rule
+ * paths from the live tree on every run and fail loudly the moment one is
+ * neither covered here NOR excused there. That alarm never blocks a PR by
+ * itself (only this constant does); it only stops a future gap from going as
+ * unexamined as this one did.
  */
 export const INSTRUMENT_SURFACE: readonly string[] = [
   "^\\.github/workflows/",
@@ -4457,6 +4469,73 @@ export const INSTRUMENT_SURFACE: readonly string[] = [
 ];
 
 const INSTRUMENT_SURFACE_RE = new RegExp(INSTRUMENT_SURFACE.join("|"));
+
+/**
+ * Deliberate exclusions from the {@link INSTRUMENT_SURFACE} completeness
+ * alarm (test/instrument-surface-completeness.test.ts, W1-T402) — every
+ * candidate that alarm's tree-derivation can find which is NOT covered by
+ * {@link INSTRUMENT_SURFACE} above, mapped to the reason it earns a pass
+ * rather than a report. A bare path list would rebuild the exact silent gap
+ * this alarm exists to close (clause (iv) of W1-T402's design) — the reason
+ * is what a reviewer actually reads, and the alarm itself refuses to honour
+ * an entry whose reason is empty or whitespace-only. NEVER READ BY {@link
+ * detectInstrumentEntanglement} — this map informs the alarm only; the
+ * BLOCKING verdict is decided by {@link INSTRUMENT_SURFACE} alone.
+ *
+ * Two shapes of reason:
+ *  - VERIFIED NON-INSTRUMENT: the candidate is real but is not gate-
+ *    measurement logic — data/content a gate validates (not the rule that
+ *    validates it), a generated artifact, a lockfile, ops/dev tooling no CI
+ *    job invokes, or a fixture whose own falsifier test would catch tampering.
+ *  - KNOWN GAP, WIDENING DEFERRED: the candidate genuinely IS gate-rule logic
+ *    (recon guard-reach-2026-08-07 found eleven of these; this alarm's own
+ *    derivation found three more it missed: generate-api-client.mjs,
+ *    test-with-retry.mjs, tsconfig.json). Adding these to the BLOCKING
+ *    INSTRUMENT_SURFACE list widens what refuses a PR, which W1-T402's design
+ *    (clause v) requires measuring against real merged diffs first — a
+ *    follow-up, not silently skipped here.
+ */
+export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
+  // ── verified non-instrument: content/data a gate validates, not the rule that validates it ──
+  "openapi/daemon.yaml":
+    "the daemon's API schema (content) — scripts/generate-api-client.mjs is the enforcement logic and is tracked below",
+  "plan/claims.yaml": "claim DATA the claims gate validates, not the checker's rule logic",
+  "plan/tasks.yaml": "plan/task DATA, not gate logic",
+  "plan/plan-index.json": "a generated index artifact, and its :check mode is not wired into any CI workflow",
+  "package-lock.json": "a dependency lockfile, not gate logic",
+  // ── verified non-instrument: ops/dev tooling with no CI-gate role ──
+  "scripts/check.mjs": "local dev convenience (`npm run check`), never invoked by any CI workflow",
+  "scripts/clock-shift.mjs": "clock-drift ops tool for clock-sweep.yml, not a quality gate",
+  "scripts/clock-sweep.mjs": "clock-drift ops tool for clock-sweep.yml, not a quality gate",
+  "scripts/fleet-heartbeat.sh": "monitoring script for fleet-heartbeat-watch.yml, not a quality gate",
+  "scripts/needs-human-issue.mjs": "issue-filing ops tool, not a quality gate",
+  "scripts/recovery-drill.mjs": "ops drill script for recovery-drill.yml, not a quality/measurement gate",
+  "scripts/generate-capability-snapshot.mjs": "its :check mode is not wired into any CI workflow",
+  "scripts/generate-cli-reference.mjs": "its :check mode is not wired into any CI workflow",
+  "scripts/generate-learnings-index.mjs": "its :check mode is not wired into any CI workflow",
+  "scripts/generate-plan-index.mjs": "its :check mode is not wired into any CI workflow",
+  // ── verified non-instrument: self-falsifying fixture ──
+  "scripts/strict-probe.ts":
+    "a fixture consumed only by its own falsifier test/strict-probe.test.ts; removing its deliberate " +
+    "violation flips that test's own assertion, so it cannot silently loosen tsconfig.json's strict gate",
+  // ── known instrument-surface gaps: widening the BLOCKING list deferred pending a blast-radius
+  //    measurement against real merged diffs (W1-T402 design clause v), not silently missed ──
+  ".dependency-cruiser.cjs": "dependency-cruiser fitness rules (depcruise job) — widening deferred, see above",
+  ".github/codeql/codeql-config.yml": "CodeQL scan config — widening deferred, see above",
+  ".github/scripts/containment-diff-trigger.ts": "the containment probe's trigger logic — widening deferred, see above",
+  ".github/scripts/leak-grep.sh": "the leak-grep secret tripwire — widening deferred, see above",
+  ".jscpd.json": "the duplication threshold (jscpd-gate job) — widening deferred, see above",
+  "commitlint.config.mjs": "commitlint's own rule config — widening deferred, see above",
+  "package.json": "defines every `npm run <script>` a gate job invokes — widening deferred, see above",
+  "scripts/claims-check.mjs": "the claims gate script — widening deferred, see above",
+  "scripts/generate-api-client.mjs": "api-client-drift's regeneration + comparison logic — widening deferred, see above",
+  "scripts/learnings-assert-check.mjs": "the learnings-assert gate script — widening deferred, see above",
+  "scripts/mutation-nightly-scope.json": "mutation-nightly's sampling scope config — widening deferred, see above",
+  "scripts/no-hand-rolled-fetch-check.mjs": "the no-hand-rolled-fetch gate script — widening deferred, see above",
+  "scripts/test-with-retry.mjs":
+    "wraps the ci/coverage-ratchet jobs' actual test pass/fail determination — widening deferred, see above",
+  "tsconfig.json": "the TS strict-mode config the Typecheck step compiles against — widening deferred, see above",
+};
 
 const USER_VISIBLE_SURFACE_RE = new RegExp(
   [
