@@ -70,14 +70,14 @@ test("haltsDrain: a blocked_ci result does NOT halt", () => {
 });
 
 test("haltsDrain: a genuinely blocking verdict DOES halt — the set is a named few, not a hole", () => {
-  // `no_pr` and later `blocked_illformed` BOTH LEFT this list when they joined
-  // NON_HALTING_VERDICTS — see that set's own doc for each reversal and its argument. Every verdict
-  // below still halts, and the size assertion is what stops the set being emptied wholesale by a
-  // later change.
+  // `no_pr`, then `blocked_illformed`, then `task_already_merged` EACH LEFT this list when they
+  // joined NON_HALTING_VERDICTS — see that set's own doc for each reversal and its argument. Every
+  // verdict below still halts, and the size assertion is what stops the set being emptied wholesale
+  // by a later change.
   for (const v of ["blocked", "blocked_review", "failed", "blocked_budget", "blocked_containment"]) {
     assert.equal(haltsDrain({ merged: false, verdict: v }), true, `${v} must still halt`);
   }
-  assert.equal(NON_HALTING_VERDICTS.size, 3, "exactly three verdicts are exempt");
+  assert.equal(NON_HALTING_VERDICTS.size, 4, "exactly four verdicts are exempt");
 });
 
 test("runDrain CONTINUES past a blocked_ci and spends its remaining budget", async () => {
