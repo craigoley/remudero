@@ -8159,12 +8159,22 @@ async function retroCommand(
      * `retroCommand(["--dry-run"])` against 439 task records made `test/retro.test.ts` take 453
      * SECONDS for 87 passing tests, and `test/retro-marker-atomic.test.ts` drives the same command
      * 23 more times. The batched `buildBatchedGithub` is what the serve path switched to for
-     * exactly this cost; production here is deliberately left on `ghGateway`, unchanged.
+     * exactly this cost.
      *
-     * DEFAULTED PER CALL SITE, NOT ONCE. Omitted, each site constructs its OWN `ghGateway` exactly
-     * as before — the gateway closes over mutable `failed`/`failureReason` state, so collapsing the
-     * two into one shared instance would let a failure on the first pass leak into the second.
-     * Production behaviour with this field absent is byte-identical.
+     * PRODUCTION NOW DEFAULTS TO THE BATCHED GATEWAY TOO — this line used to read "production here
+     * is deliberately left on `ghGateway`, unchanged", and that deferral has been taken up. The
+     * retro fires UNATTENDED (`evaluateRetroTrigger`, on the merges-or-days cadence
+     * `plan/policy.yaml` sets), so the per-task search was spending a GraphQL budget with nobody
+     * watching: ~441 searches per projection here, twice, against 5000/hour. `runTask`'s identical
+     * swap is the precedent (#1529), and the equivalence is asserted the same way — both gateway
+     * shapes driven over one corpus, required to return the same verdict.
+     *
+     * DEFAULTED PER CALL SITE, NOT ONCE — UNCHANGED, AND THE REASON SURVIVES THE SWAP. Omitted,
+     * each site constructs its OWN gateway. `ghGateway` closes over mutable `failed`/
+     * `failureReason`; `buildBatchedGithub` closes over the SAME SHAPE of state
+     * (`lastFetchFailed`/`lastIssueFetchFailed`, surfaced by `readFailed()`/`readFailureReason()`),
+     * so collapsing the two into one shared instance would still let a failure on the plan-health
+     * pass leak into the orientation pass. Two instances, exactly as before.
      */
     github?: GitHub;
   } = {},
@@ -8290,7 +8300,7 @@ async function retroCommand(
       const planHealthPlan = loadPlan(planHealthPlanPath);
       const planHealthProjection = projectPlan(
         planHealthPlan,
-        { ledgerPath, github: opts.github ?? ghGateway(owner, repo) },
+        { ledgerPath, github: opts.github ?? buildBatchedGithub(owner, repo) },
         join(config.root, "state", "status.json"),
       );
       isTaskMerged = (task) => planHealthProjection.get(task.id)?.merged ?? false;
@@ -8393,7 +8403,7 @@ async function retroCommand(
     const orientationPlan = loadPlan(join(worktreePath, "plan", "tasks.yaml"));
     const proj = projectPlan(
       orientationPlan,
-      { ledgerPath, github: opts.github ?? ghGateway(owner, repo) },
+      { ledgerPath, github: opts.github ?? buildBatchedGithub(owner, repo) },
       statusPath,
     );
     const isMerged: MergedSet = (id) => proj.get(id)?.merged ?? false;
