@@ -746,6 +746,38 @@ export function noRunnableDetail(counts: { indeterminate: number }): string {
 }
 
 /**
+ * The `headroom_degraded` stop detail — the sentence an operator reads when a drain surrenders the
+ * rest of its budget.
+ *
+ * IT NO LONGER SAYS "unreadable", BECAUSE THIS CODE CANNOT SEE THAT. `readUsage` is
+ * `() => readUsageSnapshot(config)` at both drain call sites (src/run-task.ts), and that function
+ * fails in TWO ways it deliberately keeps apart: `UsageProbeFailureStage` is `"spawn" | "parse"`,
+ * and its own comment records that conflating them "cost this fleet its headroom read for hours on
+ * 2026-07-31" — the probe had returned a perfect 1015-byte reading and only the PARSER threw.
+ * Both branches then return `undefined`, so by the time the value reaches here the stage is gone
+ * and only one bit survives. Asserting "unreadable" over that bit is a claim this function cannot
+ * substantiate, and it points an operator at a broken API when the real fault may be a parser.
+ *
+ * SO IT NAMES THE ROW THAT DOES KNOW. `ledgerUsageProbeFailure` (src/run-task.ts) already writes
+ * `usage.probe_failed` DURABLY with the stage and the reason, on every failed probe, precisely so
+ * the next surprise names itself on the first tick. The detail below is a pointer to evidence that
+ * already exists rather than a second, weaker guess at it. The RETURN POLARITY and the BOUND are
+ * untouched: the read genuinely failed, and the bound behaved correctly on a true input.
+ *
+ * ONE BUILDER, TWO CALL SITES. `runDrain`'s single-lane loop and `runDrainLanes`' multi-lane pass
+ * both stop this way, and W1-T290 shipped the ceiling to both precisely so the `--lanes` path did
+ * not stay a latent fail-open. A hand-copied sentence at each site is the drift this repo argues
+ * against everywhere else (`INSTRUMENT_SURFACE`'s own one-path-set note), so the wording lives here
+ * once and both sites call it.
+ */
+export function headroomDegradedDetail(consecutive: number, limit: number): string {
+  return (
+    `usage probe failed ${consecutive}x consecutively (limit ${limit}) — ` +
+    `see the usage.probe_failed ledger rows for the stage (spawn or parse) and the reason`
+  );
+}
+
+/**
  * The ordered plan of what a drain WOULD run (for `--dry-run`), assuming each task
  * merges. Simulates the merge set forward so sequencing/deps are honoured, bounded
  * by `max` and `until`. Runs nothing.
@@ -1193,17 +1225,17 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
           log("drain.headroom.degraded", {
             consecutive_unreadable: consecutiveUnreadable,
             degraded_limit: unreadableDegradedLimit,
-            note: "usage unreadable beyond the bounded allowance — stopping, not dispatching",
+            note: "usage probe failed beyond the bounded allowance — stopping, not dispatching; see usage.probe_failed for the stage",
           });
           return summary(
             "headroom_degraded",
-            `usage unreadable ${consecutiveUnreadable}x consecutively (limit ${unreadableDegradedLimit})`,
+            headroomDegradedDetail(consecutiveUnreadable, unreadableDegradedLimit),
           );
         }
         log("drain.headroom.unavailable", {
           consecutive_unreadable: consecutiveUnreadable,
           degraded_limit: unreadableDegradedLimit,
-          note: "usage unreadable — bounded degraded-mode allowance, still dispatching",
+          note: "usage probe failed — bounded degraded-mode allowance, still dispatching; see usage.probe_failed for the stage",
         });
       } else {
         // GOVERNOR DISABLED (operator ruling fb-1784894405468-a4153e): an
@@ -1495,17 +1527,17 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
           log("drain.headroom.degraded", {
             consecutive_unreadable: consecutiveUnreadable,
             degraded_limit: unreadableDegradedLimit,
-            note: "usage unreadable beyond the bounded allowance — stopping, not dispatching",
+            note: "usage probe failed beyond the bounded allowance — stopping, not dispatching; see usage.probe_failed for the stage",
           });
           return summary(
             "headroom_degraded",
-            `usage unreadable ${consecutiveUnreadable}x consecutively (limit ${unreadableDegradedLimit})`,
+            headroomDegradedDetail(consecutiveUnreadable, unreadableDegradedLimit),
           );
         }
         log("drain.headroom.unavailable", {
           consecutive_unreadable: consecutiveUnreadable,
           degraded_limit: unreadableDegradedLimit,
-          note: "usage unreadable — bounded degraded-mode allowance, still dispatching",
+          note: "usage probe failed — bounded degraded-mode allowance, still dispatching; see usage.probe_failed for the stage",
         });
       } else {
         // GOVERNOR DISABLED — see the single-lane loop's identical branch.

@@ -145,7 +145,12 @@ test("single-lane: BEYOND the allowance the drain stops with a distinguishable r
   assert.equal(s.stopReason, "headroom_degraded");
   assert.notEqual(s.stopReason, "headroom_exhausted", "unreadable-too-long is distinct from a confirmed at-limit reading");
   assert.deepEqual(s.merged, ["A", "B"], "dispatched exactly through the allowance (limit 2), never a 3rd task");
-  assert.match(s.stopDetail ?? "", /unreadable 3x consecutively \(limit 2\)/);
+  // The COUNTS are this assertion's subject and are unchanged. The word "unreadable" was dropped
+  // from the detail because the drain cannot distinguish a failed spawn from a failed parse —
+  // `headroomDegradedDetail` (drain.ts) now points at the `usage.probe_failed` row that can.
+  // Retargeted rather than deleted: what this test exists to prove is that the stop is
+  // distinguishable and carries its counts, and both still hold.
+  assert.match(s.stopDetail ?? "", /3x consecutively \(limit 2\)/);
   assert.match(s.resumeCommand, /^rmd drain/, "a terminal StopReason still carries the existing resumeCommand");
   assert.ok(lines.includes("drain.headroom.degraded"), "the escalation is ledgered distinctly");
 });
