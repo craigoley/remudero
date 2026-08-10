@@ -4469,9 +4469,26 @@ async function runTask(
   // runner NEVER writes tasks.yaml.
   const statusPath = join(config.root, "state", "status.json");
   // Hoisted (was inline) so runTaskBody's SILENT NO-OP GUARD (W1-T272) can reuse the SAME
-  // gateway instance for its ALREADY_SATISFIED evidence check, rather than opening a second
-  // one — zero behavior change for every existing caller (still `opts.github ?? ghGateway(...)`).
-  const github = opts.github ?? ghGateway(owner, task.repo);
+  // gateway instance for its ALREADY_SATISFIED evidence check, rather than opening a second one.
+  //
+  // BATCHED, NOT `ghGateway` — the dispatch path was the last O(N)-GraphQL surface. The line
+  // below feeds `projectPlan(plan, …)` on the very next line, which is the WHOLE plan (441 tasks
+  // at this sha), and `ghGateway.findMergedByTrailer` spends ONE `gh pr list --search
+  // '"Remudero-Task: <id>" in:body'` per task — a GraphQL search each. So a single dispatch could
+  // cost ~441 of the account's 5000/hour, and a two-lane drain doubled it: MEASURED exhaustion at
+  // 5661/5000 while REST sat untouched at 5000/5000, with a drain reporting `no_runnable` at
+  // $0.00. `buildBatchedGithub` answers the same question client-side off ONE `fetchBoardPrsRest`
+  // pass (steady state 2 REST calls), which is the same batch-once-amortize-over-N-tasks shape
+  // `projectPlan` already applies to the ledger read and to rung (c2)'s head-branch corroboration.
+  //
+  // THE CREDIT IS UNCHANGED, and that is the load-bearing claim rather than the cost. The batched
+  // `findMergedByTrailer` matches the ANCHORED `^Remudero-Task: <id>$` line — the SAME regex
+  // `hasAnchoredTrailer` re-verifies with before `creditsByAnchoredTrailer` may credit — whereas
+  // the search form is documented fuzzy and returns candidates the caller then rejects. Same
+  // credits, strictly fewer rejected candidates. Coverage is not lost either: the REST walk is
+  // bounded at 50 pages x 100 per state (5000 open + 5000 closed) against ~1.5k PRs in this repo,
+  // and it reports `truncated` rather than silently dropping a tail.
+  const github = opts.github ?? buildBatchedGithub(owner, task.repo);
   const projection = projectPlan(plan, { ledgerPath: ledgerPathFor(config), github }, statusPath);
   const isMerged = (t: Task): boolean => projection.get(t.id)?.merged ?? false;
   // W1-T322/W1-T367: computed once per run off the SAME plan+projection already built above —
