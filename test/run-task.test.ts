@@ -972,7 +972,7 @@ test("scopeGuardOutOfScopeFiles: an EMPTY diff is always clean, even with an und
 // ── FIXTURE: a REAL git repro of the `reset --soft` phantom-revert near-miss itself —
 // a stale worktree's `git reset --soft origin/main` forges a merge-base whose diff
 // silently reverts a file an unrelated, already-merged PR had touched. The guard is fed
-// the REAL `git diff --name-only origin/main..HEAD` this produces (never a hand-typed
+// the REAL `git diff --name-only origin/main...HEAD` this produces (never a hand-typed
 // fixture), proving it catches the actual failure shape, not just a synthetic one. ────
 test("scopeGuardOutOfScopeFiles: fed the REAL diff from a reconstructed reset --soft phantom-revert branch, refuses and names the reverted file", () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-scope-guard-phantom-revert-"));
@@ -1012,7 +1012,11 @@ test("scopeGuardOutOfScopeFiles: fed the REAL diff from a reconstructed reset --
   g(worker, ["reset", "--soft", "origin/main"]);
   g(worker, ["commit", "--quiet", "-m", "refresh: collapsed onto origin/main"]);
 
-  const diffFiles = g(worker, ["diff", "--name-only", "origin/main..HEAD"])
+  // THREE-DOT, mirroring production after the merge-base fix. The phantom revert is STILL caught:
+  // `reset --soft origin/main` makes origin/main the parent, hence the merge base, so the two dot
+  // forms agree here — which is exactly why the fix does not weaken the case the guard was built
+  // for. This assertion passing under three-dot is that proof.
+  const diffFiles = g(worker, ["diff", "--name-only", "origin/main...HEAD"])
     .split("\n")
     .map((f) => f.trim())
     .filter(Boolean);
