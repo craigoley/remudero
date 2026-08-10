@@ -1,0 +1,180 @@
+- id: W1-T416
+  title: "`emitter-checks` certifies commit messages the sibling `commitlint` step in the SAME preflight run rejects — `checkCommitMessage` implements THREE of config-conventional's TEN error-level rules, and `readRangeCommitMessages` drops any message that trims to empty before either judgement is reached"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: "RECON 2026-08-10, RE-DERIVED AT 9b6687b — every symbol named below was confirmed to
+    live where this shard says it does, because a filing that names a moved symbol sends its worker
+    looking for something that is not there.
+    THE DIVERGENCE, MEASURED NOT ASSUMED. `@commitlint/config-conventional` enforces TEN
+    error-level (severity 2) rules, read out of the installed package rather than from its README:
+    body-max-line-length, footer-max-line-length, header-max-length, header-trim, subject-case,
+    subject-empty, subject-full-stop, type-case, type-empty, type-enum. `checkCommitMessage`
+    (src/lib/commit-message.ts) implements THREE: header-max-length, subject-case,
+    body-max-line-length. So the two diverge BY CONSTRUCTION over an ordinary message, not on an
+    edge case, and `emitterChecksStep` can report PASS on the very commit `commitlintStep` reports
+    FAIL on — in the SAME `runPreflight` steps array, over the SAME range, in the same run.
+    WHAT THE MODULE ACTUALLY CLAIMS, STATED PRECISELY RATHER THAN OVERSTATED. `emitterChecksStep`'s
+    doc says the rules are CALLED rather than restated so the two can never drift apart. Read
+    exactly, that promise is about the HAND lane and the MACHINE lanes both entering the same
+    function, and it is kept — plan-pr-emitter.ts, plan-architect.ts and triage.ts all call
+    `shapeCommitMessage`, none reimplements a rule. The promise it does NOT make, and that a reader
+    of a step sitting beside `commitlint` in one printed list will infer anyway, is parity with the
+    gate. The CALLING cannot drift. The COVERAGE already has. `shapeCommitMessage`'s own doc makes
+    the stronger claim outright — shape a machine-built commit message so it passes commitlint —
+    while guaranteeing three of ten.
+    WHY THE MACHINE LANES HAVE NOT BEEN BITTEN, WHICH IS WHY THIS LOOKS SAFER THAN IT IS. Every
+    machine call site passes a LITERAL prefix (chore(plan), chore(<scope>)), so type-enum, type-case
+    and type-empty are satisfied by construction there and by luck rather than by check. A lane that
+    ever interpolates a type, or trims a subject to nothing, would ship a message commitlint rejects
+    and `emitter-checks` certifies.
+    THE COST, AND AN HONEST CORRECTION TO HOW IT WAS FIRST ATTRIBUTED. A drain worker committed
+    correct work, failed preflight on commitlint, and spent 40+ minutes running the full test suite
+    trying to make preflight green — the failing step is not a test. The operator stopped the drain
+    and recovered the commit by hand: one drain slot, one hour. That incident is a DIAGNOSIS failure,
+    and commitlint caught the defect correctly; #1539 shipped `preflightFailureNotice` so the failing
+    step is now named to the orchestrator. This task must NOT claim that incident as its own cost.
+    Its own cost is different and unmeasured: a contradictory report, and a shaper whose promise its
+    checker cannot back.
+    THE LEDGER IS UNREACHABLE — the Mac mini is down, so the 40-minute figure is the operator's
+    report, named as such. Every rule count, symbol and call site above is from source at 9b6687b."
+  design: |
+    (i) WHICH SEVEN ARE MISSING, NAMED INDIVIDUALLY WITH WHAT EACH CATCHES. A later implementer
+    needs the list, not a count, and needs to know that two of the seven are already covered by a
+    different mechanism so they are not re-implemented redundantly.
+
+    GENUINE ESCAPES — a message that passes `checkCommitMessage` today and fails the real CLI:
+      - type-enum: the type must be one of build, chore, ci, docs, feat, fix, perf, refactor,
+        revert, style, test. `checkCommitMessage`'s header regex accepts ANY lower-case word as a
+        type, so `wip: tidy up` and `update: bump` pass.
+      - type-empty: a header with no `type:` at all. The regex simply fails to match, the whole
+        header is then treated as the subject, and it passes if it starts lower-case — so
+        `just fixing things` is certified.
+      - subject-empty: `fix(scope):` with nothing after the colon. Skipped DELIBERATELY today by
+        the `subject !== ""` guard, which is exactly the case the CLI rejects.
+      - subject-full-stop: a subject ending in `.`. `shapeCommitMessage` strips it when BUILDING a
+        message and `checkCommitMessage` does not flag it when CHECKING one — an asymmetry inside
+        one module.
+      - header-trim: leading or trailing whitespace on the header. Not examined at all.
+
+    ALREADY COVERED BY ANOTHER MECHANISM — name them, do not re-implement them:
+      - type-case: the type must be lower-case. A capitalised type fails the header regex's
+        `^[a-z]` anchor, falls into the whole-header-as-subject fallback, and is then rejected by
+        subject-case. Incidentally caught, and the parity test in (iv) is what keeps it caught.
+      - footer-max-line-length: the CLI budgets body and footer separately at 100 each;
+        `checkCommitMessage` applies its 100-char budget to EVERY line after the header, footers
+        included. Behaviourally equivalent, nominally absent.
+
+    (ii) DO NOT SHELL THE CLI FROM `emitterChecksStep`, AND THE REASON IS NOT COST. The question is
+    whether that step could delegate to the real linter rather than reimplement rules. It could:
+    `commitlintStep` in the SAME `runPreflight` steps array already spawns
+    `<repoRoot>/node_modules/.bin/commitlint --config <repoRoot>/commitlint.config.mjs --from
+    <range.from> --to <range.to>`. So the CLI is provably available at worker preflight time — not
+    inferred from the module header's claim that a test pins the limits against it, but because the
+    sibling step runs it there on every preflight and its catch arm would name a missing binary as
+    its own failure. The cost of delegating is therefore ZERO additional spawns.
+    The reason to refuse anyway: `checkCommitMessage` exists so `shapeCommitMessage` can SHAPE
+    without spawning — a builder deciding where to trim a subject cannot shell a linter per
+    candidate — and deleting the checking half would leave the shaping half with no test of its own
+    rules. The correct move is to make the reimplementation TRUE and keep it honest by construction
+    (iv), not to delete it and not to duplicate the spawn.
+
+    (iii) THE RANGE HALF, AND WHY IT IS THE SAME TASK RATHER THAN A SECOND ONE.
+    `readRangeCommitMessages` splits `git log --format=%x00%B` on NUL, then `.trim()`s each piece
+    and `.filter(s => s !== "")`. A commit whose message trims to empty therefore VANISHES from
+    `emitter-checks` while `commitlint` still lints it — a divergence in the POPULATION on top of
+    the divergence in the RULES.
+    ARGUED, NOT ASSERTED: these are not separable, because NEITHER FIX ALONE CATCHES AN EMPTY
+    COMMIT MESSAGE. Add subject-empty and type-empty but keep the filter, and the message is dropped
+    before any rule sees it. Remove the filter but keep today's three rules, and the empty message
+    reaches `checkCommitMessage`, which finds a zero-length header inside the 100-char budget, fails
+    its regex, treats the empty header as the subject, and skips subject-case on the
+    `subject !== ""` guard — zero violations. They are two halves of ONE escape, so splitting them
+    would ship two PRs neither of which closes anything. Rule 19 agrees for a different reason: both
+    functions live in src/lib/commit-message.ts, one subsystem.
+    Preserve the NUL split's real purpose — a body containing blank lines must not be mistaken for a
+    message boundary — while keeping empty entries. A pure exported splitter is the seam that makes
+    that testable without a `git log`.
+
+    (iv) THE DURABLE FIX IS THE PARITY TEST, NOT THE RULE LIST. A hand-added rule can drift again
+    the moment config-conventional changes; a corpus driven through BOTH the real CLI and
+    `checkCommitMessage`, asserting they AGREE on every entry, cannot. test/commit-message.test.ts
+    already has the subprocess harness this needs (a `lint()` helper piping a message to the real
+    binary with the project config) and already exists to stop this module drifting from the gate,
+    so the corpus belongs there rather than in a new file. The corpus must contain at least one
+    message per rule in (i) and at least one VALID message, or agreement is trivially satisfied by
+    a checker that rejects everything.
+    RECORD THE COVERAGE AS DATA. Which config-conventional rules this module implements must be a
+    table, not something a reader infers from counting branches — that inference is what let a
+    3-of-10 checker sit beside a 10-of-10 linter unnoticed.
+
+    (v) THE PR-TITLE HALF IS ANSWERED, AND THE ANSWER IS THAT CLOSING THE RULE GAP DOES HELP.
+    CI's `commitlint` job lints ONLY the PR title, read live via `gh pr view --json title` — an
+    artifact that does not exist at preflight time, so no local step can check it directly. But
+    W1-T327 already closed the gap in the common case: `ghPrCreateFillCommand` (src/run-task.ts)
+    emits an explicit `--title` alongside `--fill`, and the implement and retro call sites pass
+    `lastCommitSubject(worktreePath)` — its doc states the title is the SAME string the commit used
+    and never a re-derivation. So for a worker-opened PR the title IS the worktree's last commit
+    subject, and linting that subject locally IS predictive of the check that gates the merge.
+    RESIDUAL, STATED SO IT IS NOT MISTAKEN FOR CLOSED: when no title is available the builder falls
+    back to `--fill` alone (its own documented decision), and a hand-opened or later-retitled PR is
+    outside this entirely. This task does not change that and must not claim to.
+
+    (vi) THE SIBLING SHAPE, ALREADY DOCUMENTED BY #1538, IS NOT IN SCOPE. header-max-length is 100,
+    but GitHub appends ` (#NNNN)` at squash AFTER commitlint has run, so the budget that actually
+    binds is about 92. Same family — a gate measuring a pre-image of the artifact it governs — and
+    deliberately left where #1538 put it. Do not fold it in.
+
+    NOT IN SCOPE: `shapeCommitMessage`'s trimming behaviour (it already strips a full stop and
+    lower-cases a subject; only the CHECKER is wrong), the CI workflow, the ~92 budget, the PR-title
+    read, and any change to `commitlintStep`.
+  acceptance:
+    - claim: "the config-conventional rules this module implements are recorded as data rather than inferred by counting branches"
+      proof: "grep: CONVENTIONAL_RULE_COVERAGE in src/lib/commit-message.ts"
+    - claim: "one corpus is driven through both the real commitlint binary and the emitter's own checker and the two must agree"
+      proof: "grep: EMITTER_COMMITLINT_PARITY in test/commit-message.test.ts"
+    - claim: "the range splitter keeps a message that trims to empty instead of dropping it before any rule is applied"
+      proof: "grep: splitRangeCommitMessages in src/lib/commit-message.ts"
+    - claim: "an empty commit message fails the emitter checks, which today neither half can catch alone"
+      proof: "unit test: test/commit-message.test.ts"
+  risk: medium
+  origin: recon#emitter-commitlint-rule-coverage-2026-08-10
+  plan_refs: ["W1-T136", "W1-T137", "W1-T221", "W1-T327"]
+  files: [src/lib/commit-message.ts, test/commit-message.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — every claim is decidable in-process. The parity assertion spawns the
+    project's own commitlint binary, which test/commit-message.test.ts already does today; nothing
+    reaches the network and no operator is present.
+    RULE 19 SIZING CHECKED BEFORE FILING, and this is why the test lives in an EXISTING file.
+    `moduleIdFromPath` folds a `.test` suffix away, so src/lib/commit-message.ts and
+    test/commit-message.test.ts both resolve to the module id `commit-message` — ONE subsystem, so
+    risk:medium is honest rather than a band that will be raised at the gate. A new
+    test/commitlint-parity.test.ts would have resolved to a SECOND id and forced risk:high for a
+    change confined to one module, which is why it is not declared. `SUBSYSTEM_LEXICON` adds
+    nothing here: no criterion names a daemon, launchd or crash-recovery concern.
+    RULE 25 CHECKED BEFORE FILING: neither declared path is an INSTRUMENT_SURFACE entry (no
+    workflow, no *-ratchet.mjs, no diff-coverage.mjs, no *-baseline.json, no
+    mutation-relevant-paths.json, no stryker.conf.json), and src/lib/commit-message.ts is not in
+    USER_VISIBLE_SURFACE_RE either — that regex names bin/, run-task, spike, config/settings/mounts,
+    review/task-linter, run-result/status/ledger/flight-judge, plus the instrument arm. So this
+    change trips neither the entanglement gate nor the cli-reference drift check.
+    FILES: CAN CONTAIN THE DESIGN, checked deliberately because tasks this week could not.
+    `checkCommitMessage`, `shapeCommitMessage`, `CONVENTIONAL_LIMITS`, `readRangeCommitMessages`,
+    `emitterChecksStep`, `commitlintStep` and `runPreflight` ALL live in src/lib/commit-message.ts;
+    the real-CLI harness lives in test/commit-message.test.ts. Both are declared and nothing else
+    needs editing. src/run-task.ts is named in design (v) as EVIDENCE about the PR title and is
+    deliberately NOT declared — nothing there changes.
+    ON THE PROOFS. Three are `grep:` with an explicit path, and each names a symbol that does NOT
+    exist anywhere in src/ or test/ today, so none can match the merge base and be downgraded to
+    executed_stale. Those three names are therefore BINDING on the implementer rather than a guess
+    about what it will call things: CONVENTIONAL_RULE_COVERAGE for the rule table,
+    EMITTER_COMMITLINT_PARITY for the shared corpus, splitRangeCommitMessages for the pure splitter.
+    None of the three patterns contains a regex metacharacter or the ` in ` sequence that
+    `parseDialectGrep` splits on. The fourth is the pure-path `unit test:` form against an existing
+    file, which lint-passes and executes the whole file.
+    budget_usd 45 — the cost is design (iv)'s corpus, which must contain a case per rule in (i) plus
+    a valid control, not the rule table itself."
