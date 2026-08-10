@@ -1,0 +1,156 @@
+- id: W1-T415
+  title: "a TRUNCATED board fetch presents as a COMPLETE short list — `fetchBoardPrsRest` returns `truncated`, `buildBatchedGithub` logs it into `board_gateway.fetch_bytes` and then returns the rows anyway with `lastFetchFailed` still false, so every consumer reads a partial view as the whole repo"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  rationale: "RECON 2026-08-10, DERIVED AT a99d380 — every symbol below was confirmed to live where
+    this shard says it does, because a filing that names a moved symbol sends its worker looking for
+    something that is not there.
+    THE DEFECT, DERIVED. `fetchBoardPrsRest` (src/lib/open-prs-rest.ts) returns a result carrying
+    `truncated`, set when the walk hits `BOARD_MAX_PAGES` on either half. Its own doc calls that
+    field a truncated view, never silent. `buildBatchedGithub` (src/lib/status.ts) then records it
+    into the `board_gateway.fetch_bytes` ledger line and executes `return fetched.rows` — leaving
+    `lastFetchFailed` FALSE. So `readFailed()` answers false, `projectPlan` marks nothing
+    indeterminate, and a partial view is consumed as the complete state of the repository.
+    THIS IS THE null-versus-empty CONTRACT THIS REPO HONOURS EVERYWHERE ELSE. `listMergedHeadBranches`
+    and `listOpenHeadBranches` already return null for a failed read and an empty array for
+    genuinely none. `readFailed`/`readFailureReason` exist for exactly this distinction, W1-T119's
+    indeterminate skip is the same family, and `buildShellRoute` states the rule outright: a read
+    failure degrades to UNKNOWN, never to zero. A truncated fetch is a PARTIAL read, and a partial
+    read presenting as complete is that same defect one step milder. The FAILURE path is already
+    correct here — a throwing fetch sets `lastFetchFailed` and its own comment explains that a bare
+    empty array is what turned an outage into GitHub says there are zero PRs. Only truncation is
+    silent.
+    IT CAN ONLY CAUSE FALSE NEGATIVES, AND THAT IS DERIVED, NOT ASSUMED. `fetchBoardPrsRest`'s own
+    doc states that rows the walk never reaches keep their cached values, and the walk only ever
+    inserts into its output map. Truncation therefore OMITS rows; it never fabricates or alters one.
+    So a task the truncated view credits is still correctly credited — only a task it fails to find
+    is unsound. That asymmetry is what makes the fix narrow and is the whole of design (ii).
+    THE BLAST RADIUS IS EIGHT CONSTRUCTION SITES, NOT FOUR. DERIVED by enumerating
+    `buildBatchedGithub(` in src/: `runTask`, `retroCommand` twice, `drainCommand`, `daemonCommand`,
+    `serveCommand`, `buildCreditCandidates` and `buildEscalationReconcileCandidates`. Three of those
+    arrived TODAY — #1529 moved runTask, #1531 moved retro, #1533 moved the drain — so the dispatch
+    path, the retro and the drain all now consume this gateway where none of them did yesterday.
+    PER CONSUMER, DERIVED FROM WHAT EACH DOES WITH A SHORT LIST.
+    runTask: the W1-T319 already-merged refusal keys on the projection, so a task whose crediting PR
+    fell outside the window reads not merged, no refusal fires, and a full paid run is spent
+    rebuilding finished work — the run then most likely ends `pr_attribution_failed` claiming the old
+    PR, which is the exact incident W1-T319 was built to stop.
+    drainCommand and daemonCommand: the selector offers that task. AND #1533 REMOVED THE ACCIDENTAL
+    CROSS-CHECK — before it, the drain asked `ghGateway` and runTask asked the batched one, so a
+    disagreement surfaced as a `task_already_merged` refusal, which is how W1-T24 was caught. Now
+    both sides share one gateway shape and truncate identically, so they AGREE and nothing refuses.
+    This finding is therefore quieter after today's work, not louder.
+    retroCommand: both passes undercount merges, so the retro misreports the cadence it exists to
+    measure.
+    serveCommand: the board renders a merged task as queued to a human.
+    buildCreditCandidates: the credit-backfill rung declines to credit a task that is done.
+    buildEscalationReconcileCandidates: an escalation whose referent merged is not retracted.
+    REACHABILITY — AND THIS IS WHERE THE PRIOR FRAMING WAS WRONG. Two sessions reported this as
+    unreachable, one estimating that a repo three years older would hit it. DERIVED from local git
+    log with no GitHub call: main carries 1080 PR-numbered merge commits between 2026-07-14 and
+    2026-08-10, a span of 27 days — about 40 merged PRs a day, with PR numbers running #3 to #1533.
+    The binding bound is the COLD half in FULL mode, `BOARD_MAX_PAGES` 50 times
+    `BOARD_FULL_PAGE_SIZE` 100 = 5000 closed PRs. From 1080 at 40 a day that is roughly 98 days —
+    about three MONTHS, not three years, and the closed population also grows by closed-unmerged PRs
+    this count omits. ASSUMED: that the rate persists; it is an agent fleet with a daemon, so it may
+    rise or the repo may be retired. Even at a quarter of the rate this is inside a year.
+    FULL MODE IS THE MODE THAT MATTERS, DERIVED. `fetchBoardPrsRest` picks full mode whenever its
+    `known` map is empty, and `knownBoardPrs` is a fresh closure variable per `buildBatchedGithub`.
+    Every per-invocation consumer therefore fetches in full mode — and `drainCommand` constructs a
+    NEW gateway per PASS, so it never reaches delta mode at all. Delta mode's own bound is lower
+    (`BOARD_DELTA_PAGE_SIZE` 30 times 50 = 1500 per state) but its cold half breaks early on
+    `reachedKnown` and its hot half is bounded by the queue governor's WIP ceiling, so it is not the
+    binding case.
+    THE LEDGER IS UNREACHABLE — the Mac mini is down. Whether any `board_gateway.fetch_bytes` line
+    has ever carried `truncated: true` is UNMEASURED, and this shard does not claim it has."
+  design: |
+    (i) TRUNCATION IS ITS OWN FACT AND NEEDS ITS OWN SIGNAL. A fetch that FAILED and a fetch that
+    SUCCEEDED PARTIALLY are different, and routing truncation into `lastFetchFailed` would commit
+    the same collapse this task exists to remove, one level up. Consumers read `readFailed()` and
+    `readFailureReason()`, so the gateway needs a THIRD accessor rather than a new value smuggled
+    into `GhFailureReason`. Declare it optional on the `GitHub` interface exactly as `readFailed`
+    and `warm` already are, so every existing fixture and the unbatched `ghGateway` — which cannot
+    truncate, having no walk — behave precisely as they do today with it omitted.
+
+    (ii) DEFER ONLY THE ABSENCES, NEVER THE CREDITS — THE NAIVE FIX IS WORSE THAN THE DEFECT.
+    Because truncation can only omit rows (rationale, derived), a task the truncated view credits is
+    still correctly credited. So the ONLY unsound conclusion is no GitHub evidence. Make the arm of
+    `deriveStatus` that already defers on `readFailed()` — the one whose comment reads that no
+    evidence is actually GitHub could not be read — ALSO defer when the view was truncated, and
+    change nothing else. Marking the whole projection indeterminate on truncation would flip every
+    correctly credited task to unknown at once, which under W1-T119 makes every one of them
+    undispatchable and idles the fleet on a condition that affects only the tail. State that
+    rejection in the code, not only here.
+
+    (iii) DO NOT RAISE THE BOUND INSTEAD. `BOARD_MAX_PAGES` could be raised and the cliff would
+    move; the silence would not. This repo has four bounds that fired on healthy conditions
+    (W1-T312's wait cap, W1-T380's deploy ceiling, W1-T382's check-wait bound, the idle-gate
+    ceiling), and the lesson each taught is that an unobserved bound is the hazard rather than its
+    numeric value. A raise MAY accompany the signal but must not substitute for it, and if it is
+    made the new number needs the same reachability arithmetic the rationale shows.
+
+    (iv) THE HOT HALF AND THE COLD HALF TRUNCATE INDEPENDENTLY AND MUST BE DISTINGUISHABLE IN THE
+    TEST. `fetchBoardPrsRest` sets its flag from either loop. A fixture that only ever truncates the
+    open walk would leave the cold path — the binding one, per the rationale — unexercised, and a
+    fixture that truncates both at once cannot tell which loop set the flag. Drive them separately.
+
+    (v) FALSIFIER, BOTH DIRECTIONS. A truncated view that does NOT contain a task's crediting PR
+    must leave that task indeterminate rather than not-merged; a truncated view that DOES contain it
+    must still credit it, unchanged; and an untruncated view must behave exactly as today. The
+    middle case is the one that proves the fix discriminates instead of deferring everything, and it
+    is the one a rushed implementation drops. Prove the fixture REACHES truncation — assert the flag
+    is actually set on the result the gateway consumed, because a fixture whose page count never
+    reaches the bound tests nothing and reads identically to one that does.
+
+    NOT IN SCOPE: the failure path (already correct), delta-mode page sizing, `ghGateway` (no walk,
+    cannot truncate), the eight call sites in src/run-task.ts (they consume `deriveStatus` and need
+    no edit — if one does, the design is wrong), and any change to what `board_gateway.fetch_bytes`
+    records, which already carries the flag and is the only reason this was findable at all.
+  acceptance:
+    - claim: "a task whose crediting pull request falls outside a truncated view is left indeterminate rather than reported not merged"
+      proof: "unit test: test/board-gateway-truncation.test.ts"
+    - claim: "a task the truncated view does contain is still credited, so truncation defers only the absences"
+      proof: "unit test: test/board-gateway-truncation.test.ts"
+    - claim: "an untruncated fetch behaves exactly as it does today, and a failed fetch keeps reporting through readFailed"
+      proof: "unit test: test/board-gateway-truncation.test.ts"
+    - claim: "the open walk and the closed walk each set the truncation signal on their own, proved separately"
+      proof: "unit test: test/board-gateway-truncation.test.ts"
+  risk: high
+  origin: recon#board-fetch-truncation-2026-08-10
+  plan_refs: ["W1-T119", "W1-T179", "W1-T181", "W1-T265"]
+  files: [src/lib/open-prs-rest.ts, src/lib/status.ts, test/board-gateway-truncation.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — every claim is decidable in-process against an injected `fetch` that returns
+    synthetic pages. No network, nothing spawned, no operator present.
+    risk:high IS RULE 19'S SPAN, SET UP FRONT rather than shipped as a violation: files: names two
+    src concerns — the REST walk that PRODUCES the signal (src/lib/open-prs-rest.ts) and the gateway
+    plus derivation that CONSUME it (src/lib/status.ts) — and decomposing a signal from its only
+    consumer is not a real decomposition. The blast radius is smaller than the band suggests and the
+    part worth reviewing is design (ii): a version that defers the whole projection idles the fleet,
+    which is worse than the defect it fixes.
+    RULE 25 CHECKED BEFORE FILING: files: contains no INSTRUMENT_SURFACE path — no workflow, no
+    *-ratchet.mjs, no diff-coverage.mjs, no *-baseline.json, no mutation-relevant-paths.json, no
+    stryker.conf.json. Neither src/lib path is USER_VISIBLE_SURFACE, so no CLI reference regenerates.
+    FILES: CAN CONTAIN THE DESIGN, checked deliberately because two tasks this week could not.
+    `fetchBoardPrsRest`, `BOARD_MAX_PAGES`, `BOARD_FULL_PAGE_SIZE` and `BOARD_DELTA_PAGE_SIZE` are
+    all in src/lib/open-prs-rest.ts. `buildBatchedGithub`, the `GitHub` interface, `readFailed`,
+    `readFailureReason`, `projectPlan` and `deriveStatus` are all in src/lib/status.ts. Both are
+    declared. The eight `buildBatchedGithub` construction sites in src/run-task.ts consume
+    `deriveStatus` and are deliberately NOT declared — if the implementation finds it must edit them,
+    that is evidence design (ii) was not followed.
+    budget_usd 55 — the cost is design (iv)'s two independent truncation fixtures and design (v)'s
+    middle case, not the accessor, which is a few lines.
+    ON THE PROOFS: all four use the pure-path form against test/board-gateway-truncation.test.ts,
+    which does not exist yet — a forward reference to a PATH, safe per CLAUDE.md, and declared in
+    files: so the worker creates it. No `grep:` proof is used: every symbol this task would name
+    already exists, and a grep proof naming an existing symbol passes before the work is done.
+    WHY THIS WAS FILED RATHER THAN LEFT AS A COMMENT, since two prior sessions chose the comment.
+    Both recorded it as unreachable, one estimating three years of growth. That estimate is wrong by
+    roughly an order of magnitude — the rationale derives about three months from this repo's own
+    git log — and the population it guards has never been observed only because the bound has never
+    been approached, not because it cannot be."
