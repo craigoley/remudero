@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { runTask } from "../src/run-task.js";
+import { runTask, taskRecordContextLine } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
 import type { GitHub } from "../src/lib/status.js";
 import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/worker.js";
@@ -380,25 +380,95 @@ test("BEHAVIORAL: a degraded implement prompt NAMES the task's own record path a
   assert.match(prompt, /unit test: the widget bears load/, "including each criterion's proof");
 });
 
-test("BEHAVIORAL: a NON-degraded implement prompt gets no record note — recon already relayed it", async (t) => {
-  // THE OTHER DIRECTION. A worker holding real recon context must not start receiving a redundant
-  // note, and the record lookup must not run on the healthy path at all.
+// ── AND SO IS THE HEALTHY ONE ────────────────────────────────────────────────────────────────
+// This assertion USED TO READ THE OTHER WAY — "a NON-degraded implement prompt gets no record
+// note — recon already relayed it" — and #1525's call-site comment gave that as the reason. The
+// premise is false at any sha, and the code says so three ways:
+//   (1) recon is NEVER TOLD WHICH TASK it is reconning: the spawn passes
+//       `renderReconPrompt(planIndexBlock, operatorNotesBlock)` — no task id, no title, no path,
+//       and `operatorNotesBlock` is "" for a task with no console notes;
+//   (2) only `OBSERVED:` survives `reconObservedToContext`, so a recon that reads the shard and
+//       summarises the design under INFERRED has it dropped;
+//   (3) that section can be EMPTY, yielding the silently-empty CONTEXT block the degraded note's
+//       own doc says must never happen.
+// So the pointer was injected exactly when recon FAILED and withheld whenever it worked — while
+// the healthy path is the one that runs on every dispatch.
+test("BEHAVIORAL: a NON-degraded implement prompt ALSO names the task's own record path", async (t) => {
   const spawnCalls: SpawnWorkerArgs[] = [];
   const spawn: typeof spawnWorker = async (args) => {
     spawnCalls.push(args);
     if (spawnCalls.length === 1) {
-      return result({ sessionId: "s-recon", text: "OBSERVED: the repo has a README.md [src: recon#T-RECON-DEGRADE]" });
+      // A REAL report shape. `parseReconReport` returns null unless the text contains
+      // "RECON REPORT", so the bare `OBSERVED:` line this fixture used before parsed to NOTHING —
+      // meaning the healthy-path test that preceded this one never actually had recon context to
+      // be redundant with. The empty-OBSERVED case is now its own test below, deliberately.
+      return result({
+        sessionId: "s-recon",
+        text: "RECON REPORT\nOBSERVED: the repo has a README.md\nINFERRED: it is a node project\n",
+      });
     }
     return result({ sessionId: "s-implement", text: "REPORT\nPR_URL: https://github.com/acme/remudero/pull/1\n" });
   };
 
   const { ledger, planPath } = await runFixture(t, spawn, FIXTURE_PLAN_WITH_ACCEPTANCE);
 
+  // THE FIXTURE MUST REACH THE HEALTHY BRANCH — asserted before anything is concluded from the
+  // prompt. A run that degraded would also contain the record path, via the other arm entirely.
   assert.equal(spawnCalls.length, 2, "recon succeeded first time — fixture reached implement without degrading");
   assert.equal(ledger.filter((l) => l.step === "recon.degraded").length, 0, "nothing degraded");
 
   const prompt = String(spawnCalls[1].prompt);
-  assert.doesNotMatch(prompt, /RECON CONTEXT ABSENT/, "no absence note on the healthy path");
-  assert.doesNotMatch(prompt, /YOUR TASK'S OWN RECORD IS AT/, "and no record note either");
-  assert.ok(!prompt.includes(planPath), "the healthy prompt does not name the record path at all");
+  assert.doesNotMatch(prompt, /RECON CONTEXT ABSENT/, "still no absence note on the healthy path");
+  assert.ok(prompt.includes(planPath), `the healthy prompt names the record path too (${planPath})`);
+  assert.match(prompt, /YOUR TASK'S OWN RECORD IS AT/, "with the same READ IT FIRST instruction");
+  assert.match(prompt, /the repo has a README\.md/, "and recon's OBSERVED lines are still relayed");
+
+  // CRITERIA DO NOT TRAVEL HERE. The pointer costs one line; the criteria cost N, recon may
+  // already have relayed them, and the record itself carries the design that criteria alone
+  // would not give. This is the one asymmetry between the two arms that IS deliberate.
+  assert.doesNotMatch(prompt, /Acceptance criteria, verbatim from that record/, "no criteria block");
+  assert.doesNotMatch(prompt, /the widget is load-bearing/, "the criteria themselves stay out");
+});
+
+test("BEHAVIORAL: the healthy path names the record even when recon's OBSERVED section is EMPTY", async (t) => {
+  // THE CASE THAT KILLS THE OLD RATIONALE OUTRIGHT. "recon already relayed all of this" assumed
+  // recon produced something; an unparseable report yields `parsed?.observed ?? ""` → a CONTEXT
+  // block with nothing in it. Before this change that worker got a title and no pointer, without
+  // ever tripping the degrade branch that exists to make exactly that absence explicit.
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const spawn: typeof spawnWorker = async (args) => {
+    spawnCalls.push(args);
+    if (spawnCalls.length === 1) return result({ sessionId: "s-recon", text: "no report shape at all, just prose" });
+    return result({ sessionId: "s-implement", text: "REPORT\nPR_URL: https://github.com/acme/remudero/pull/1\n" });
+  };
+
+  const { ledger, planPath } = await runFixture(t, spawn, FIXTURE_PLAN_WITH_ACCEPTANCE);
+
+  assert.equal(spawnCalls.length, 2, "recon 'succeeded' — no degrade, so the healthy arm rendered");
+  assert.equal(ledger.filter((l) => l.step === "recon.degraded").length, 0, "nothing degraded");
+  assert.ok(String(spawnCalls[1].prompt).includes(planPath), "the pointer is there even with no OBSERVED lines");
+});
+
+test("the record line is omitted, not thrown, when the record cannot be resolved", () => {
+  // FAIL-SOFT, the property #1525 built `taskRecordPath` for: an advisory line must never turn one
+  // unresolvable plan record into a failed run. This branch is unreachable behaviourally — a plan
+  // that does not hold the task cannot dispatch it — so the helper is exported and driven directly,
+  // the same reason `softBudgetWarning` next to it is.
+  assert.equal(
+    taskRecordContextLine("T-NOT-IN-ANY-PLAN", undefined, [{ claim: "unreachable", proof: "unit test: unreachable" }]),
+    "",
+    "an unresolved record renders nothing at all — no bullet, no criteria, no throw",
+  );
+
+  // AND THE CITED SHAPE, since `assertProvenance` is what a malformed line would kill the run at.
+  const line = taskRecordContextLine("T-X", "/plan/tasks.d/T-X.yaml");
+  assert.match(line, /^- YOUR TASK'S OWN RECORD IS AT \/plan\/tasks\.d\/T-X\.yaml/, "one bullet, path named");
+  assert.match(line, /\[src: plan#T-X\]$/, "cited with an ACCEPTED_KIND, on the block's last line");
+
+  // Criteria render as NON-BULLET continuation lines: `contextBlocks` absorbs them into this same
+  // block, so they never open uncited blocks of their own.
+  const withCriteria = taskRecordContextLine("T-X", "/plan/tasks.d/T-X.yaml", [{ claim: "c1", proof: "p1" }]);
+  for (const l of withCriteria.split("\n").slice(1)) {
+    assert.doesNotMatch(l, /^\s*[-*+]\s/, `continuation line must not be a bullet: ${JSON.stringify(l)}`);
+  }
 });

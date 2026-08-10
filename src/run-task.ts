@@ -4092,15 +4092,77 @@ function commitsAhead(worktreePath: string, base: string): number {
   }
 }
 
-function reconObservedToContext(recon: WorkerResult, taskId: string): string {
+/**
+ * SAY WHERE — the one CONTEXT bullet naming the task's own record on disk, shared by BOTH
+ * context paths so neither can drift and the degraded path cannot gain a duplicate.
+ *
+ * `recordPath` is {@link taskRecordPath}'s output and is `undefined` when the record cannot be
+ * resolved (unreadable/unparseable plan file); that yields `""` here, so an advisory line can
+ * never turn one malformed plan file into a failed run. The bullet carries `plan#<taskId>` —
+ * an ACCEPTED_KIND for `assertProvenance` — and renders any criteria as NON-BULLET continuation
+ * lines, which `contextBlocks` absorbs into this same block rather than opening uncited ones.
+ */
+export function taskRecordContextLine(
+  taskId: string,
+  recordPath: string | undefined,
+  criteria: ReadonlyArray<AcceptanceCriterion> = [],
+): string {
+  if (!recordPath) return "";
+  const rendered = criteria.map(
+    (c, i) => `    (${String.fromCharCode(97 + i)}) ${c.claim}\n        proof: ${c.proof}`,
+  );
+  return (
+    `- YOUR TASK'S OWN RECORD IS AT ${recordPath} — READ IT FIRST. It carries the design, ` +
+    "rationale and acceptance criteria that recon would otherwise have relayed, and nothing " +
+    `else in this prompt contains them. ${citation(`plan#${taskId}`)}` +
+    (rendered.length ? `\n    Acceptance criteria, verbatim from that record:\n${rendered.join("\n")}` : "")
+  );
+}
+
+/**
+ * The CONTEXT block injected when recon SUCCEEDED: recon's OBSERVED lines, each a cited claim.
+ *
+ * IT NAMES THE RECORD TOO, and the comment this replaced said it need not — "the non-degraded
+ * path does no extra reads and receives no extra note, since recon already relayed all of this".
+ * That premise does not hold at any sha, and the code says so three ways:
+ *
+ *   (1) RECON IS NEVER TOLD WHICH TASK IT IS RECONNING. `renderReconPrompt` takes only a plan
+ *       index and an operator-notes block — no task id, no title, no record path — and the notes
+ *       block is `""` for any task with no console notes. So "recon already relayed all of this"
+ *       is not a guarantee the code can make, only an outcome it may get. (Deliberately DESCRIBED
+ *       rather than quoted: `test/recon-mount-routing.test.ts` locates the recon spawn with
+ *       `SRC.indexOf` on that call's exact text, so a second verbatim copy above it silently
+ *       redirects the test's 1400-character window into this comment. It did, and the suite
+ *       caught it.)
+ *   (2) ONLY `OBSERVED:` SURVIVES. This function keeps `parsed?.observed` alone, while
+ *       `renderReconPrompt` also asks for INFERRED and COULDN'T-VERIFY — so a recon that reads
+ *       the shard and summarises the design under INFERRED has that text dropped here.
+ *   (3) IT CAN BE EMPTY. An unparseable report or an empty OBSERVED yields `""` — a silently
+ *       empty CONTEXT block, precisely what {@link reconDegradedContextNote}'s doc says must
+ *       never happen.
+ *
+ * So the pointer used to be injected EXACTLY WHEN RECON FAILED and withheld whenever it worked,
+ * which is backwards: the healthy path is the one that runs on every dispatch.
+ *
+ * CRITERIA DELIBERATELY DO NOT TRAVEL HERE, unlike the degraded path. There, nothing else in the
+ * prompt carries the specification at all, so criteria are the difference between a title and a
+ * spec. Here recon may well have relayed content, the worker is one `Read` away from the whole
+ * record — design included, which criteria alone would not give it — and the pointer costs one
+ * line against N. Same reason the plan body is not shipped to workers (see `renderReconPrompt`'s
+ * doc on `planIndexBlock`): name the retrievable thing, do not copy it.
+ */
+function reconObservedToContext(recon: WorkerResult, taskId: string, recordPath?: string): string {
   const parsed = parseReconReport([recon.text, recon.blocks.join("\n")].join("\n"));
   const observed = parsed?.observed ?? "";
   const lines = observed
     .split("\n")
     .map((l) => l.trim())
     .filter((l) => l.length > 0);
-  // Each OBSERVED line becomes a cited CONTEXT claim (provenance from recon).
-  return lines.map((l) => `- ${l} ${citation(`recon#${taskId}`)}`).join("\n");
+  // Each OBSERVED line becomes a cited CONTEXT claim (provenance from recon). The record line
+  // leads: it is stable per task, while recon's output is per-run (cache-aware ordering, W1-T35).
+  return [taskRecordContextLine(taskId, recordPath), ...lines.map((l) => `- ${l} ${citation(`recon#${taskId}`)}`)]
+    .filter((s) => s.length > 0)
+    .join("\n");
 }
 
 /**
@@ -4135,17 +4197,11 @@ function reconDegradedContextNote(
   // relays it, which makes recon the sole transport for the task's own text rather than a
   // research phase. When recon degrades that transport is gone: MEASURED on W1-T399, implement
   // burned 138 turns and produced zero commits from a one-line title.
-  if (recordPath) {
-    const criteria = acceptance.map(
-      (c, i) => `    (${String.fromCharCode(97 + i)}) ${c.claim}\n        proof: ${c.proof}`,
-    );
-    lines.push(
-      `- YOUR TASK'S OWN RECORD IS AT ${recordPath} — READ IT FIRST. It carries the design, ` +
-        "rationale and acceptance criteria that recon would otherwise have relayed, and nothing " +
-        `else in this prompt contains them. ${citation(`plan#${taskId}`)}` +
-        (criteria.length ? `\n    Acceptance criteria, verbatim from that record:\n${criteria.join("\n")}` : ""),
-    );
-  }
+  // The bullet itself now lives in {@link taskRecordContextLine}, shared with the HEALTHY path —
+  // extracted rather than copied so the two cannot drift and this path cannot gain a second copy.
+  // Output here is byte-identical to before the extraction; only the criteria travel on this side.
+  const recordLine = taskRecordContextLine(taskId, recordPath, acceptance);
+  if (recordLine) lines.push(recordLine);
   return lines.join("\n");
 }
 
@@ -4973,11 +5029,16 @@ async function runTask(
     });
 
     // ── Render + provenance-lint the prompt.
-    // The record path is resolved ONLY on the degraded branch — the non-degraded path does no
-    // extra reads and receives no extra note, since recon already relayed all of this.
+    // The record path is resolved for BOTH branches. It used to be resolved only on the degraded
+    // one, "since recon already relayed all of this" — but recon is never told WHICH TASK it is
+    // reconning (`renderReconPrompt` takes no task argument), only its `OBSERVED:` section
+    // survives `reconObservedToContext`, and that section can be empty. See that function's doc.
+    // ONE lookup, both arms: `taskRecordPath` is fail-soft and yields `undefined` rather than
+    // throwing, and the helper renders nothing for an undefined path.
+    const recordPath = taskRecordPath(planPath, taskId);
     const reconContext = reconDegradedSubtype
-      ? reconDegradedContextNote(reconDegradedSubtype, taskId, taskRecordPath(planPath, taskId), task.acceptance ?? [])
-      : reconObservedToContext(recon, taskId);
+      ? reconDegradedContextNote(reconDegradedSubtype, taskId, recordPath, task.acceptance ?? [])
+      : reconObservedToContext(recon, taskId, recordPath);
     const prompt = renderImplementPrompt(task, reconContext, runId, matchedLearnings, operatorNotesBlock);
     assertProvenance(prompt); // throws ProvenanceError on any uncited CONTEXT claim
     log("prompt.linted", { provenance: "clean" });
