@@ -294,4 +294,64 @@ else
 fi
 
 cd "$TREE"
-exec "$@"
+
+# ── RESTART RATE LIMIT: THE CONTAINER COUNTERPART OF launchd's ThrottleInterval ───────────────
+# `generateLaunchdPlist` (src/lib/launchd.ts) gives the mini `KeepAlive {SuccessfulExit: false}`
+# plus `ThrottleInterval` (plan/policy.yaml's `launchd.throttleIntervalS`, 60). Docker's
+# `--restart=on-failure:N` caps the COUNT, not the RATE — so the container half of that pair is
+# missing, and the measured precedent is a duplicate task id making the plan unreadable and
+# crash-looping the daemon at ~5 restarts/minute.
+#
+# THIS SLEEPS BEFORE EXITING; IT DOES NOT LOOP. That inversion is the whole design, and the reason
+# is `stale`. A daemon that finds itself on superseded code stops with DaemonStopReason `stale`,
+# which daemon.ts's own comment calls the path that "WANTS exactly that restart (it is how a
+# long-running daemon reaches merged code)". The clone/fetch/checkout above runs ONCE, before this
+# line — so an in-container retry loop would re-run the daemon against the SAME tree forever and
+# `stale` would never clear. Only a CONTAINER restart re-enters this script and re-fetches.
+# Sleeping before exit therefore keeps docker's restart as the mechanism and merely rate-limits it.
+#
+# IT ALSO LEAVES `--restart=on-failure:N` INTACT, which an internal loop would render inert: the
+# container still exits non-zero once per attempt, so N still counts attempts and still parks the
+# container after N. Rate here, count there — the two compose instead of overriding each other.
+#
+# EXIT 0 IS NEVER THROTTLED. `daemonExitCode` maps stopped/max_reached to 0, and a `STOP` file
+# yields `stopped` — so an operator stopping the fleet from the host gets an immediate clean exit
+# and `on-failure` leaves the container down. Sleeping there would delay a requested stop by a
+# minute for no reason.
+#
+# THE INTERVAL COMES FROM THE ENVIRONMENT, NEVER FROM THE REPO. plan/policy.yaml is read by
+# `generateLaunchdPlist` at PLIST-GENERATION time and baked into static XML; launchd never reads
+# the repo at crash time. Reading it here instead would need the plan loadable at exactly the
+# moment an unloadable plan is what is crashing the daemon — the measured incident. So the value
+# is supplied at `docker run` and read from the environment, which is the same bake-it-once shape.
+#
+# OPT-IN, so the default path is byte-for-byte what it was: unset, this script still `exec`s.
+# That matters because `exec "$@"` serves every container invocation, not just the daemon, and a
+# one-shot verb must not acquire a minute of latency on a non-zero exit.
+RESTART_THROTTLE_S="${RMD_RESTART_THROTTLE_S:-0}"
+case "$RESTART_THROTTLE_S" in
+  '' | *[!0-9]*)
+    log "RMD_RESTART_THROTTLE_S is not a whole number of seconds — ignoring it and exec'ing normally"
+    RESTART_THROTTLE_S=0
+    ;;
+esac
+
+if [ "$RESTART_THROTTLE_S" -eq 0 ]; then
+  exec "$@"
+fi
+
+log "restart throttle: a NON-ZERO exit will sleep ${RESTART_THROTTLE_S}s before exiting, so docker restarts at that rate"
+# CAPTURE THE CODE IN THE SAME COMMAND THAT RUNS IT. `if "$@"; then ...; fi; rc=$?` reads $? from
+# the COMPOUND, which is 0 when the condition merely tested false — so a crashing daemon exited 0,
+# docker's `on-failure` saw a success, and the container stayed down through exactly the crash it
+# is meant to restart. Caught by the non-zero-direction test below, which asserted the propagated
+# code rather than only the sleep; the sleep and both log lines were already correct.
+rc=0
+"$@" || rc=$?
+if [ "$rc" -eq 0 ]; then
+  log "exited 0 — not throttled (a STOP is a clean stop; --restart=on-failure leaves the container down)"
+  exit 0
+fi
+log "exited $rc — sleeping ${RESTART_THROTTLE_S}s before exiting so the restart is rate-limited, not just counted"
+sleep "$RESTART_THROTTLE_S"
+exit "$rc"

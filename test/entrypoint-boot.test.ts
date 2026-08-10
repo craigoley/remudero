@@ -341,6 +341,100 @@ test("a HOME that does not exist yet is created, rather than dying in git config
   assert.ok(existsSync(join(home, ".gitconfig")), "and the identity must land in the HOME it created");
 });
 
+// ── THE RESTART RATE LIMIT (the container counterpart of launchd's ThrottleInterval) ────────
+//
+// `generateLaunchdPlist` gives the mini KeepAlive{SuccessfulExit:false} + ThrottleInterval 60.
+// Docker's `--restart=on-failure:N` caps the COUNT, not the RATE. These prove the substitute:
+// a non-zero exit WAITS, an exit 0 does not, and the default path is untouched.
+//
+// The throttle SLEEPS BEFORE EXITING rather than looping, because the clone/fetch runs once per
+// container: only a container restart re-fetches, and `stale` is the daemon's only path onto
+// merged code. A loop would re-run the daemon against the same tree forever.
+
+/** A command stub that records each invocation and exits with a chosen code. */
+function writeCmdStub(dir: string, rec: string, name: string, code: number): void {
+  const body = [
+    "#!/usr/bin/env bash",
+    `printf '%s\\n' "$(date +%s)" >> "${rec}/${name}"`,
+    `exit ${code}`,
+    "",
+  ].join("\n");
+  writeFileSync(join(dir, name), body, { mode: 0o755 });
+  chmodSync(join(dir, name), 0o755);
+}
+
+/** Boot with a stubbed command whose exit code we choose, timing the whole run. */
+function bootTimed(
+  home: string,
+  origin: string,
+  exitCode: number,
+  env: Record<string, string>,
+): { status: number; stderr: string; elapsedMs: number; calls: number } {
+  const stubs = mkdtempSync(join(tmpdir(), "entrypoint-stub-"));
+  const rec = mkdtempSync(join(tmpdir(), "entrypoint-rec-"));
+  writeNpmStub(stubs, rec);
+  writeCmdStub(stubs, rec, "rmd-fake", exitCode);
+  const started = Date.now();
+  const r = spawnSync("bash", [SCRIPT, "rmd-fake", "daemon"], {
+    encoding: "utf8",
+    cwd: REPO_ROOT,
+    env: {
+      ...process.env,
+      PATH: `${stubs}:${process.env.PATH ?? ""}`,
+      HOME: home,
+      RMD_REPO_URL: origin,
+      RMD_REF: "main",
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_TERMINAL_PROMPT: "0",
+      ...env,
+    },
+  });
+  const elapsedMs = Date.now() - started;
+  let calls = 0;
+  try {
+    calls = readFileSync(join(rec, "rmd-fake"), "utf8").split("\n").filter(Boolean).length;
+  } catch {
+    calls = 0;
+  }
+  return { status: r.status ?? -1, stderr: r.stderr ?? "", elapsedMs, calls };
+}
+
+test("a NON-ZERO exit sleeps the throttle interval before exiting, so docker restarts at that rate", () => {
+  const run = bootTimed(freshHome(), makeOrigin(), 7, { RMD_RESTART_THROTTLE_S: "2" });
+  // REACHED THE CODE: the stubbed command really ran, exactly once — the throttle must not loop,
+  // because looping would re-run the daemon without re-running the clone/fetch above it.
+  assert.equal(run.calls, 1, "the command runs ONCE per container; the restart is docker's job");
+  assert.equal(run.status, 7, "the command's own exit code is propagated, not swallowed");
+  assert.ok(run.elapsedMs >= 2000, `must have slept ~2s before exiting, took ${run.elapsedMs}ms`);
+  assert.match(run.stderr, /restart throttle: a NON-ZERO exit will sleep 2s/);
+  assert.match(run.stderr, /exited 7 — sleeping 2s/);
+});
+
+test("an exit 0 is NEVER throttled, so a STOP file stops the fleet immediately", () => {
+  // `daemonExitCode` maps stopped/max_reached to 0, and a STOP file yields `stopped`. Sleeping
+  // there would delay a requested stop by the throttle for no reason, and `--restart=on-failure`
+  // leaves the container down either way.
+  const run = bootTimed(freshHome(), makeOrigin(), 0, { RMD_RESTART_THROTTLE_S: "5" });
+  assert.equal(run.calls, 1);
+  assert.equal(run.status, 0);
+  assert.ok(run.elapsedMs < 5000, `an exit 0 must not sleep, took ${run.elapsedMs}ms`);
+  assert.match(run.stderr, /exited 0 — not throttled/);
+});
+
+test("with the throttle UNSET the script still execs, so one-shot verbs keep today's latency", () => {
+  const run = bootTimed(freshHome(), makeOrigin(), 3, {});
+  assert.equal(run.status, 3, "the exit code still propagates through exec");
+  assert.ok(run.elapsedMs < 2000, `the default path must not sleep, took ${run.elapsedMs}ms`);
+  assert.doesNotMatch(run.stderr, /restart throttle/, "and must not announce a throttle it is not applying");
+});
+
+test("a non-numeric throttle is refused loudly and falls back to exec rather than dying", () => {
+  const run = bootTimed(freshHome(), makeOrigin(), 3, { RMD_RESTART_THROTTLE_S: "60s" });
+  assert.equal(run.status, 3);
+  assert.match(run.stderr, /not a whole number of seconds/);
+  assert.ok(run.elapsedMs < 2000, "a rejected value must not sleep");
+});
+
 // ── MUTANTS: each reproduces a defect that actually shipped ─────────────────────────────────
 
 function mutate(find: string, replace: string): string {
