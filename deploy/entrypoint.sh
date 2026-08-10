@@ -54,7 +54,14 @@ if git -C / config --get user.email >/dev/null 2>&1 && git -C / config --get use
 else
   git config --global --replace-all user.name "${RMD_GIT_AUTHOR_NAME:-remudero-worker}"
   git config --global --replace-all user.email "${RMD_GIT_AUTHOR_EMAIL:-remudero-worker@users.noreply.github.com}"
-  log "git identity: $(git config --get user.name) <$(git config --get user.email)> (override with RMD_GIT_AUTHOR_NAME/RMD_GIT_AUTHOR_EMAIL)"
+  # `git -C /` HERE TOO, for the same reason the guard above uses it — and it was missed the first
+  # time. A bare `git config --get` resolves LOCAL config, so when the cwd happens to be inside a
+  # repository this line reports THAT repository's identity rather than the global one just written.
+  # MEASURED by a test booting from a checkout: it wrote `remudero-worker` and then announced
+  # `Claude <noreply@anthropic.com>`, the checkout's own committer. The write was always correct;
+  # the REPORT was not, which is the worse half — a boot log that names an identity the commits will
+  # not use is how you diagnose the wrong thing for an hour.
+  log "git identity: $(git -C / config --get user.name) <$(git -C / config --get user.email)> (override with RMD_GIT_AUTHOR_NAME/RMD_GIT_AUTHOR_EMAIL)"
 fi
 
 if [ "${RMD_SKIP_BOOTSTRAP:-}" = "1" ]; then
