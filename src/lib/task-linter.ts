@@ -1145,11 +1145,34 @@ export function rulingVerifyViolation(task: Task): LintViolation | undefined {
 // ONE TRIGGER ONLY, following {@link rulingVerifyViolation}'s own lesson: that check
 // shipped trigger A alone and dropped a title-word trigger B because B false-positived
 // on the very task introducing it. No second trigger is invented here either.
+//
+// W1-T399 — THE MONOLITH-ONLY TRIGGER WENT BLIND AS THE MONOLITH FROZE. PR #1060 stopped
+// routing new filings into `plan/tasks.yaml`; a task now stores its record in its own
+// `plan/tasks.d/<id>-<slug>.yaml` shard (of the last twenty merged implementation PRs,
+// nineteen worked a shard task). The literal-path trigger above never saw any of them —
+// a task declaring its OWN shard alongside an out-of-scope path has the identical
+// `criteriaTampered` exposure as W1-T324/W1-T369 did declaring the monolith, but passed
+// this check silently. Widened to also match a shard path — NOT to "any plan-scope path"
+// (the measured rejection above still holds; `plan/policy.yaml` beside `src/lib/policy.ts`
+// remains legitimate and untouched). Re-measured over all 442 task records at 9b6687b with
+// the widened trigger: the monolith clause alone still fires once (unchanged); the shard
+// clause adds ZERO newly-failing open records — no staging is needed.
 
 /** The exact repo-relative path this repo's task monolith lives at — the literal
- *  `files:` entry {@link rule15FilingViolation} keys on. Mirrors
- *  {@link DECISIONS_LOG_PATH}'s root-relative convention. */
+ *  `files:` entry {@link rule15FilingViolation} keys on, alongside {@link
+ *  TASKS_SHARD_PATH_RE}. Mirrors {@link DECISIONS_LOG_PATH}'s root-relative convention. */
 const TASKS_MONOLITH_PATH = "plan/tasks.yaml";
+
+/** A `plan/tasks.d/<id>-<slug>.yaml` shard — the ONLY other place a task record lives
+ *  (W1-T399). Matched structurally (a `plan/tasks.d/` prefix, one path segment, a `.yaml`
+ *  suffix) rather than a loose glob, mirroring `src/lib/review.ts`'s `isTaskRecordPath`. */
+const TASKS_SHARD_PATH_RE = /^plan\/tasks\.d\/[^/]+\.yaml$/;
+
+/** True for the monolith or a shard — the two places {@link rule15FilingViolation} treats
+ *  as "declares a task record". */
+function isTaskRecordFile(f: string): boolean {
+  return f === TASKS_MONOLITH_PATH || TASKS_SHARD_PATH_RE.test(f);
+}
 
 /** Retired or landed records, excluded from {@link rule15FilingViolation}.
  *
@@ -1162,22 +1185,24 @@ const TASKS_MONOLITH_PATH = "plan/tasks.yaml";
  *  — a 3-literal Set carries none of the drift risk a re-implemented algorithm would. */
 const NON_OPEN_FILING_STATUSES = new Set<TaskStatus>(["blocked", "merged", "done"]);
 
-/** A task that declares the task monolith alongside a path outside plan scope, at a
- *  `verify` the operator will not be asked to judge — W1-T324's and W1-T369's exact
- *  shape, which `remudero-review` can only ever refuse. See the module comment above
- *  for the measured population and why the trigger keys on a literal path. */
+/** A task that declares a task record (the monolith OR its own shard, W1-T399) alongside a
+ *  path outside plan scope, at a `verify` the operator will not be asked to judge —
+ *  W1-T324's and W1-T369's exact shape, which `remudero-review` can only ever refuse. See
+ *  the module comment above for the measured population and why the trigger keys on a
+ *  structural path match rather than "any plan-scope path". */
 export function rule15FilingViolation(task: Task): LintViolation | undefined {
   if (NON_OPEN_FILING_STATUSES.has(task.status)) return undefined;
   if (task.verify === "human") return undefined;
   const files = task.files ?? [];
-  if (!files.includes(TASKS_MONOLITH_PATH)) return undefined;
+  const recordFile = files.find(isTaskRecordFile);
+  if (!recordFile) return undefined;
   const outOfScope = files.filter((f) => !isInPlanScope(f));
   if (outOfScope.length === 0) return undefined;
   return {
     check: "rule15-filing",
     severity: "block",
     message:
-      `task ${task.id} declares ${TASKS_MONOLITH_PATH} alongside ${outOfScope.join(", ")} at ` +
+      `task ${task.id} declares ${recordFile} alongside ${outOfScope.join(", ")} at ` +
       `verify:${task.verify} — editing a task record removes a claim:/proof: line, and with a path ` +
       "outside plan scope the reviewer's planOnly carve-out is gone, so criteriaTampered refuses the " +
       "PR however good the work is. A dispatched worker gets ONE PR and cannot split it. Remedy: " +

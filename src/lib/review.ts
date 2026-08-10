@@ -4634,10 +4634,25 @@ export function checkTroubleshootingCoverage(diff: string, report?: string): Rub
 
 // ── The GUARD: no worker-authored criteria edit (rule 15) ──────────────────
 
-/** plan/tasks.yaml lines belonging to a criterion's own field, of the given diff kind. */
+/**
+ * True for `plan/tasks.yaml` itself OR a `plan/tasks.d/<id>-<slug>.yaml` shard (W1-T399): every
+ * task record lives in one of the two, `loadPlan` (plan.ts) merges both into one view, and the
+ * monolith has been frozen to new filings since PR #1060 — of the last twenty merged
+ * implementation PRs, nineteen worked a shard task. A predicate keyed on the monolith path alone
+ * is therefore blind to nearly the whole population Standing rule 15 exists to protect. Matched
+ * STRUCTURALLY (a `plan/tasks.d/` prefix, exactly one path segment, a `.yaml` suffix) rather than
+ * a loose glob, so it does not also admit a `plan/tasks.d/README.md` or a nested path {@link
+ * loadPlan}'s own shard reader (`listShardFiles`) never recurses into.
+ */
+function isTaskRecordPath(file: string): boolean {
+  return /(^|\/)plan\/tasks\.yaml$/.test(file) || /(^|\/)plan\/tasks\.d\/[^/]+\.yaml$/.test(file);
+}
+
+/** plan/tasks.yaml OR plan/tasks.d/*.yaml lines belonging to a criterion's own field, of the
+ *  given diff kind. */
 function planTasksCriterionFieldLines(lines: DiffLine[], kind: "add" | "del"): DiffLine[] {
   return lines.filter(
-    (l) => l.kind === kind && /(^|\/)plan\/tasks\.yaml$/.test(l.file) && /^\s*(claim|proof|satisfied_by)\s*:/.test(l.text),
+    (l) => l.kind === kind && isTaskRecordPath(l.file) && /^\s*(claim|proof|satisfied_by)\s*:/.test(l.text),
   );
 }
 
