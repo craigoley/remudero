@@ -275,6 +275,41 @@ function listShardFiles(shardDir: string): string[] {
  *
  * Throws {@link PlanError} on any problem.
  */
+/**
+ * Which FILE holds `taskId`'s record — the monolith or one of the shards — or `undefined`.
+ *
+ * WHY THIS IS DERIVED RATHER THAN CONSTRUCTED. `plan/tasks.d/<id>-<slug>.yaml` is the convention,
+ * but it is only a convention: the slug is not recoverable from the id, and tasks still live in
+ * `plan/tasks.yaml` (measured: 4 of them). A constructed string would be wrong for both cases and
+ * wrong SILENTLY — it would name a path that does not exist and send a worker looking for it.
+ *
+ * IT REUSES `parseTasksFromYaml`, NOT A REGEX, so the answer is the one {@link loadPlan} would
+ * resolve. A text scan for `- id: <taskId>` would also match a commented-out line, a `depends_on`
+ * entry, or a mention in prose; the parser matches on the record the loader actually builds.
+ *
+ * FAIL-SOFT BY CONSTRUCTION: every read is guarded and an unreadable or unparseable file is simply
+ * not the answer. The only caller renders an advisory prompt line, so a throw here would turn a
+ * missing plan file into a failed RUN — strictly worse than the omission it is fixing.
+ */
+export function taskRecordPath(planPath: string, taskId: string): string | undefined {
+  const holdsTask = (p: string): boolean => {
+    try {
+      return parseTasksFromYaml(readFileSync(p, "utf8"), p).some((t) => t.id === taskId);
+    } catch {
+      return false;
+    }
+  };
+  // Monolith first, then shards — the same order `loadPlan` merges in. Ids are unique across the
+  // merged view (it throws on a duplicate), so the order cannot change which file is returned.
+  if (holdsTask(planPath)) return planPath;
+  const shardDir = join(dirname(planPath), "tasks.d");
+  for (const file of listShardFiles(shardDir)) {
+    const shardPath = join(shardDir, file);
+    if (holdsTask(shardPath)) return shardPath;
+  }
+  return undefined;
+}
+
 export function loadPlan(path: string): Plan {
   let text: string;
   try {

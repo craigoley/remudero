@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { loadPlan, PlanError } from "../src/lib/plan.js";
+import { loadPlan, PlanError, taskRecordPath } from "../src/lib/plan.js";
 
 /**
  * test/plan-sharding.test.ts — W1-T122: PLAN SHARDING (plan/tasks.d/).
@@ -112,4 +112,62 @@ test("a shard can depend on a task declared in the base tasks.yaml (merged-view 
 
   const plan = loadPlan(join(dir, "tasks.yaml"));
   assert.deepEqual(plan.byId.get("DEP")?.depends_on, ["BASE"]);
+});
+
+// ── taskRecordPath: WHICH FILE holds a task's record ─────────────────────────────────────────
+// Added for the degraded-recon prompt note, which names this path so a worker that lost recon
+// knows where its own specification lives. It must be DERIVED: `plan/tasks.d/<id>-<slug>.yaml` is
+// only a convention, the slug is unrecoverable from the id, and 4 tasks still live in the
+// monolith — a constructed string would be wrong for both cases and wrong silently.
+
+/** A record with every field `parseTasksFromYaml` requires — the helper reuses the REAL
+ *  parser, so a record the loader would reject is correctly reported as not found. */
+function taskYaml(id: string): string {
+  return [`- id: ${id}`, "  title: t", "  repo: remudero", "  type: implement",
+    "  verify: auto", "  risk: low", "  status: queued", ""].join("\n");
+}
+
+function planFixture(): { planPath: string; shardDir: string } {
+  const root = mkdtempSync(join(tmpdir(), "task-record-path-"));
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(planPath, taskYaml("T-IN-MONOLITH"));
+  const shardDir = join(root, "tasks.d");
+  mkdirSync(shardDir, { recursive: true });
+  return { planPath, shardDir };
+}
+
+test("taskRecordPath finds a task in the MONOLITH", () => {
+  const { planPath } = planFixture();
+  assert.equal(taskRecordPath(planPath, "T-IN-MONOLITH"), planPath);
+});
+
+test("taskRecordPath finds a task in a SHARD, whatever the file is named", () => {
+  // THE FILENAME DELIBERATELY DOES NOT FOLLOW `<id>-<slug>.yaml`. A constructed path would look
+  // for `T-IN-SHARD-*.yaml` and miss this entirely; deriving from the parsed record cannot.
+  const { planPath, shardDir } = planFixture();
+  const oddly = join(shardDir, "zzz-nothing-like-the-id.yaml");
+  writeFileSync(oddly, taskYaml("T-IN-SHARD"));
+  assert.equal(taskRecordPath(planPath, "T-IN-SHARD"), oddly);
+});
+
+test("taskRecordPath returns undefined for an id no plan file holds", () => {
+  const { planPath } = planFixture();
+  assert.equal(taskRecordPath(planPath, "T-NOWHERE"), undefined);
+});
+
+test("taskRecordPath SKIPS an unparseable shard rather than throwing — it may not refuse a run", () => {
+  // THE CATCH ARM, driven for real. The only caller renders an advisory prompt line, so a throw
+  // here would turn one malformed plan file into a FAILED RUN — strictly worse than the omission
+  // this helper exists to fix. The good shard after it must still be found.
+  const { planPath, shardDir } = planFixture();
+  writeFileSync(join(shardDir, "aaa-broken.yaml"), "{{{ not yaml at all\n");
+  const good = join(shardDir, "bbb-good.yaml");
+  writeFileSync(good, taskYaml("T-AFTER-BROKEN"));
+  assert.equal(taskRecordPath(planPath, "T-AFTER-BROKEN"), good, "a broken sibling must not hide it");
+  assert.equal(taskRecordPath(planPath, "T-NOWHERE"), undefined, "and the miss is still a clean undefined");
+});
+
+test("taskRecordPath tolerates a missing plan file entirely", () => {
+  // An unreadable MONOLITH is the same fail-soft case as an unparseable shard.
+  assert.equal(taskRecordPath(join(tmpdir(), "no-such-plan-dir-xyzzy", "tasks.yaml"), "T-ANY"), undefined);
 });
