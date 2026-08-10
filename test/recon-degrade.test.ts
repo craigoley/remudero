@@ -137,10 +137,18 @@ function fakeGh(branch: string): string {
 async function runFixture(
   t: import("node:test").TestContext,
   spawn: typeof spawnWorker,
-): Promise<{ res: Awaited<ReturnType<typeof runTask>>; ledger: Array<Record<string, unknown>> }> {
+  // `planText` and the returned `planPath` exist for the record-path tests at the end of this
+  // file, which need a task record carrying acceptance criteria AND need to assert on the exact
+  // path the prompt names. Defaulted, so every test above is untouched.
+  planText: string = FIXTURE_PLAN,
+): Promise<{
+  res: Awaited<ReturnType<typeof runTask>>;
+  ledger: Array<Record<string, unknown>>;
+  planPath: string;
+}> {
   const root = mkdtempSync(join(tmpdir(), "runtask-recon-degrade-root-"));
   const planPath = join(root, "tasks.yaml");
-  writeFileSync(planPath, FIXTURE_PLAN);
+  writeFileSync(planPath, planText);
   const config: Config = { claudeBin: "/bin/true", root };
 
   gitFixture(root);
@@ -169,7 +177,7 @@ async function runFixture(
       .split("\n")
       .filter(Boolean)
       .map((l) => JSON.parse(l));
-    return { res, ledger };
+    return { res, ledger, planPath };
   } finally {
     dateNowSpy.mock.restore();
     process.env.PATH = savedPath;
@@ -310,4 +318,87 @@ test("BEHAVIORAL: a recon budget breach on the SECOND (retry) attempt is still F
   assert.equal(verdicts.length, 1, "the retry's budget breach is ledgered as the run's one terminal verdict");
   assert.equal(verdicts[0].verdict, "blocked_budget");
   assert.equal(verdicts[0].subtype, "error_max_budget_usd");
+});
+
+// ── THE DEGRADED WORKER IS TOLD WHERE TO LOOK ────────────────────────────────────────────────
+// `reconDegradedContextNote` has always ended "rely only on the CONTEXT/TASK below and your own
+// read-only inspection" and never said WHERE. Nothing else in the prompt carries the task's own
+// text: `renderImplementPrompt` renders `task.prompt ?? task.title` (MEASURED: zero of 425 task
+// records carry `prompt:`), `.design` has ZERO reads anywhere in src/, and `task.acceptance` is
+// consumed by `runReview` — the REVIEWER. So recon is the sole transport for the specification,
+// and a degraded run loses it entirely. MEASURED on W1-T399: 138 turns, zero commits.
+//
+// THESE ARE BEHAVIOURAL ON PURPOSE. Asserting the string exists in the note function would prove
+// nothing about what a worker receives — the degraded path could render a different template, or
+// the provenance linter could reject the added CONTEXT block and kill the run. Both tests drive
+// the REAL runTask degrade and assert on `spawnCalls[2].prompt`, the bytes implement is handed.
+
+const FIXTURE_PLAN_WITH_ACCEPTANCE = [
+  "- id: T-RECON-DEGRADE",
+  "  title: recon-degrade wiring probe",
+  "  repo: remudero",
+  "  type: implement",
+  "  verify: auto",
+  "  risk: medium",
+  "  files: [src/lib/daemon.ts]",
+  "  origin: architect",
+  "  status: queued",
+  "  acceptance:",
+  '    - claim: "the widget is load-bearing"',
+  '      proof: "unit test: the widget bears load"',
+  '    - claim: "the second criterion is also carried"',
+  '      proof: "grep: WIDGET in src/lib/daemon.ts"',
+  "",
+].join("\n");
+
+test("BEHAVIORAL: a degraded implement prompt NAMES the task's own record path and carries its acceptance criteria", async (t) => {
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const spawn: typeof spawnWorker = async (args) => {
+    spawnCalls.push(args);
+    if (spawnCalls.length <= 2) {
+      return result({ sessionId: `s-recon-${spawnCalls.length}`, subtype: "error_max_turns", isError: true, numTurns: 20 });
+    }
+    return result({ sessionId: "s-implement", text: "REPORT\nPR_URL: https://github.com/acme/remudero/pull/1\n" });
+  };
+
+  const { ledger, planPath } = await runFixture(t, spawn, FIXTURE_PLAN_WITH_ACCEPTANCE);
+
+  // THE FIXTURE MUST REACH THE DEGRADE BRANCH — asserted before anything is concluded from the
+  // prompt. A run that never degraded would also "not contain a wrong note".
+  assert.equal(spawnCalls.length, 3, "recon, retry, implement — the fixture reached the degrade");
+  assert.equal(ledger.filter((l) => l.step === "recon.degraded").length, 1, "the degrade branch actually ran");
+
+  const prompt = String(spawnCalls[2].prompt);
+  assert.match(prompt, /RECON CONTEXT ABSENT/, "the pre-existing absence note is still there");
+  assert.ok(
+    prompt.includes(planPath),
+    `the prompt must name the EXACT record path the loader would resolve (${planPath})`,
+  );
+  assert.match(prompt, /READ IT FIRST/, "and tell the worker to open it before anything else");
+  assert.match(prompt, /the widget is load-bearing/, "the acceptance criteria travel with it");
+  assert.match(prompt, /the second criterion is also carried/, "every criterion, not just the first");
+  assert.match(prompt, /unit test: the widget bears load/, "including each criterion's proof");
+});
+
+test("BEHAVIORAL: a NON-degraded implement prompt gets no record note — recon already relayed it", async (t) => {
+  // THE OTHER DIRECTION. A worker holding real recon context must not start receiving a redundant
+  // note, and the record lookup must not run on the healthy path at all.
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const spawn: typeof spawnWorker = async (args) => {
+    spawnCalls.push(args);
+    if (spawnCalls.length === 1) {
+      return result({ sessionId: "s-recon", text: "OBSERVED: the repo has a README.md [src: recon#T-RECON-DEGRADE]" });
+    }
+    return result({ sessionId: "s-implement", text: "REPORT\nPR_URL: https://github.com/acme/remudero/pull/1\n" });
+  };
+
+  const { ledger, planPath } = await runFixture(t, spawn, FIXTURE_PLAN_WITH_ACCEPTANCE);
+
+  assert.equal(spawnCalls.length, 2, "recon succeeded first time — fixture reached implement without degrading");
+  assert.equal(ledger.filter((l) => l.step === "recon.degraded").length, 0, "nothing degraded");
+
+  const prompt = String(spawnCalls[1].prompt);
+  assert.doesNotMatch(prompt, /RECON CONTEXT ABSENT/, "no absence note on the healthy path");
+  assert.doesNotMatch(prompt, /YOUR TASK'S OWN RECORD IS AT/, "and no record note either");
+  assert.ok(!prompt.includes(planPath), "the healthy prompt does not name the record path at all");
 });

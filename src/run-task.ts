@@ -322,6 +322,7 @@ import {
   type Task,
   type TaskStatus,
   parseTasksFromYaml,
+  taskRecordPath,
 } from "./lib/plan.js";
 import {
   assertLintClean,
@@ -4106,13 +4107,40 @@ function reconObservedToContext(recon: WorkerResult, taskId: string): string {
  * `recon#<taskId>` citation so the provenance linter (assertProvenance) treats "recon produced
  * nothing" as a claim like any other, not an omission that slips past unlinted.
  */
-function reconDegradedContextNote(subtype: string, taskId: string): string {
-  return (
+function reconDegradedContextNote(
+  subtype: string,
+  taskId: string,
+  recordPath?: string,
+  acceptance: ReadonlyArray<AcceptanceCriterion> = [],
+): string {
+  const lines = [
     `- RECON CONTEXT ABSENT: the recon worker errored twice in a row (${subtype}) and the ` +
-    "bounded retry was exhausted, so no OBSERVED lines are available for this run — do not " +
-    "assume recon ran cleanly; rely only on the CONTEXT/TASK below and your own read-only " +
-    `inspection. ${citation(`recon#${taskId}`)}`
-  );
+      "bounded retry was exhausted, so no OBSERVED lines are available for this run — do not " +
+      "assume recon ran cleanly; rely only on the CONTEXT/TASK below and your own read-only " +
+      `inspection. ${citation(`recon#${taskId}`)}`,
+  ];
+
+  // ── SAY WHERE. The note above has always told a degraded worker to rely on "your own read-only
+  // inspection" and never said WHERE to look — and nothing else in the prompt carries the task's
+  // own text. `renderImplementPrompt` renders `task.prompt ?? task.title` (MEASURED: zero task
+  // records carry `prompt:`, so it is always the title), `design:` is read by nothing in src/ at
+  // all, and `task.acceptance` is consumed by `runReview` — the REVIEWER, not the worker. The
+  // specification therefore reaches a worker ONLY because recon opens the record from disk and
+  // relays it, which makes recon the sole transport for the task's own text rather than a
+  // research phase. When recon degrades that transport is gone: MEASURED on W1-T399, implement
+  // burned 138 turns and produced zero commits from a one-line title.
+  if (recordPath) {
+    const criteria = acceptance.map(
+      (c, i) => `    (${String.fromCharCode(97 + i)}) ${c.claim}\n        proof: ${c.proof}`,
+    );
+    lines.push(
+      `- YOUR TASK'S OWN RECORD IS AT ${recordPath} — READ IT FIRST. It carries the design, ` +
+        "rationale and acceptance criteria that recon would otherwise have relayed, and nothing " +
+        `else in this prompt contains them. ${citation(`plan#${taskId}`)}` +
+        (criteria.length ? `\n    Acceptance criteria, verbatim from that record:\n${criteria.join("\n")}` : ""),
+    );
+  }
+  return lines.join("\n");
 }
 
 /**
@@ -4922,8 +4950,10 @@ async function runTask(
     });
 
     // ── Render + provenance-lint the prompt.
+    // The record path is resolved ONLY on the degraded branch — the non-degraded path does no
+    // extra reads and receives no extra note, since recon already relayed all of this.
     const reconContext = reconDegradedSubtype
-      ? reconDegradedContextNote(reconDegradedSubtype, taskId)
+      ? reconDegradedContextNote(reconDegradedSubtype, taskId, taskRecordPath(planPath, taskId), task.acceptance ?? [])
       : reconObservedToContext(recon, taskId);
     const prompt = renderImplementPrompt(task, reconContext, runId, matchedLearnings, operatorNotesBlock);
     assertProvenance(prompt); // throws ProvenanceError on any uncited CONTEXT claim
