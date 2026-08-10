@@ -60,9 +60,39 @@
     criteria for legitimate reasons the design has not anticipated, that is a finding that changes
     the task, not an inconvenience to route around.
 
+    (iv-a) THE MEASUREMENT IS LOCAL. THERE IS NO GITHUB CALL, AND THIS SENTENCE EXISTS BECAUSE ITS
+    ABSENCE STOPPED THREE RUNS. `merged PRs` above does NOT mean the GitHub API. This repo
+    squash-merges, so a squash commit on `origin/main` IS the merged PR: `git log` walks them,
+    `git show --name-only <sha>` gives the changed files, `git show -p <sha> -- plan/tasks.yaml
+    plan/tasks.d/` gives the added lines, and `plan/` holds every declared scope. The whole count is
+    a shell loop over the checkout you are already standing in. Nothing here needs the network, a
+    token, or an API quota, and the sibling task that shipped (W1-T399) measured over open tasks in
+    `plan/` for exactly this reason.
+
+    (iv-b) AND THE ANSWER IS ALREADY KNOWN — RE-DERIVE IT IF YOU LIKE, BUT DO NOT TREAT IT AS A
+    BLOCKING PRECONDITION. A recon ran clause (iv) over the last 60 commits on `origin/main`: 46
+    were non-plan-only, and the number of those adding a `claim:` or `proof:` line to
+    `plan/tasks.yaml` or `plan/tasks.d/` was ZERO. The blast radius is EMPTY. Clause (iii)'s
+    withdrawal condition is therefore NOT met and this task is safe to build. Per CLAUDE.md's
+    name-the-query rule that figure is a claim about the day it was taken, not a standing fact — but
+    re-running it is a two-minute shell loop, and a run that cannot re-run it should proceed on the
+    recorded result and say so rather than stopping.
+
     (v) DO NOT ALSO WIDEN THE PATH HERE. W1-T399 owns the monolith-versus-shard predicate. If both
     land, an appended criterion in a shard is caught by the combination; neither task should reach
     into the other's change, and the interaction belongs in whichever lands second.
+
+    (vi) FOLD IN THE STALE WORDING #1542 LEFT BEHIND — it sits in `src/lib/review.ts`, which this
+    task already declares, and it describes the very predicate being changed. W1-T399 shipped as
+    #1542 and widened the PATH predicate to shards: `isTaskRecordPath` and
+    `planTasksCriterionFieldLines` now match `plan/tasks.d/<name>.yaml` as well as
+    `plan/tasks.yaml`, and BOTH of those symbols' own docs were updated correctly. What was NOT
+    updated still says `plan/tasks.yaml` alone: `criterionFieldTampered`'s doc,
+    `checkSatisfiedByGuard`'s doc, and — this is the part that reaches a human —
+    `checkSatisfiedByGuard`'s PASS reason string and its FAIL text, plus `failSummary`'s rule-15
+    line and `ReviewVerdict.criteriaTampered`'s doc. An operator reading `no criterion field added
+    or edited in plan/tasks.yaml` on a shard-only PR is being told something false about what was
+    checked. Correct the wording in the same change; do not alter any predicate while doing it.
 
     NOT IN SCOPE: `satisfied_by` semantics, `monolithFilingViolations`, the shard path predicate
     (W1-T399), and the deletion hole W1-T389/#1465 closes.
