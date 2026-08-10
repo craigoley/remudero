@@ -22,15 +22,24 @@
  * exactly what makes a `child.pid`-based teardown aim at the wrong process.
  *
  * The LEAK ITSELF is not asserted. An earlier revision did assert it, and it failed on CI twice
- * (including the flake retry) while passing locally: the grandchild survives a wrapper kill on this
- * project's Linux containers, and does not on the GitHub runner. A suite that asserts a bug still
- * reproduces depends on the defect surviving everywhere it runs, which is backwards.
+ * (including the flake retry) while passing locally. A suite that asserts a bug still reproduces
+ * depends on the defect surviving everywhere it runs, which is backwards, so the precondition above
+ * is the right thing to lock either way.
+ *
+ * BUT THE REASON THAT REVISION FAILED WAS MISATTRIBUTED, AND THE CORRECTION MATTERS MORE THAN THE
+ * CONCLUSION IT SUPPORTED. This header used to state that "the grandchild survives a wrapper kill on
+ * this project's Linux containers, and does not on the GitHub runner." That was inferred from a red
+ * CI run whose real cause is now established: the server NEVER STARTED on the runner at all, because
+ * `startServe` gave it a fresh HOME and `loadConfig` died on `which claude`. Nothing about the
+ * runner's process semantics was ever measured. That claim is WITHDRAWN as unsupported — it is not
+ * known whether the grandchild survives a wrapper kill there, and no assertion in this file depends
+ * on the answer.
  *
  * Every process this file starts is reaped in its own `after`.
  */
 import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
-import { mkdtempSync, openSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -91,10 +100,15 @@ function serversOn(port: number): number[] {
  * END of it), a tsx that does not interpose a child, a different tsx layout, or simple absence. All
  * four render identically, which is why the failure it produces says only "not running".
  *
- * MEASURED: this file's live tests pass on the GitHub runner and in this agent's container, and the
- * precondition assertion FAILED in the operator's Azure container — the same environment-dependence
- * #1509 hit one layer up, when its first negative control asserted the leak itself. A port bind is
- * the process's OWN readiness signal and depends on none of the four.
+ * A PORT BIND IS THE PROCESS'S OWN READINESS SIGNAL and depends on none of the four. It is also
+ * unforgeable in the direction that matters: a process that is crashing cannot accept a connection,
+ * whereas it CAN carry a matching `ps` line for about a second while it dies.
+ *
+ * THE OLD NOTE HERE CLAIMED these live tests "pass on the GitHub runner". They did — and vacuously,
+ * which is worse than failing. MEASURED with `claude` hidden from PATH, reproducing the runner: the
+ * port NEVER binds inside 30s and the log reads `Error: Command failed: which claude`, yet the
+ * ps-disjunct revision reported 3/3 green. The seed in {@link startServe} removes the cause, so this
+ * predicate can now be the port alone without depending on which machine ran it.
  */
 function listeningOn(port: number, timeoutMs = 500): Promise<boolean> {
   return new Promise((resolve) => {
@@ -110,35 +124,38 @@ function listeningOn(port: number, timeoutMs = 500): Promise<boolean> {
 }
 
 /**
- * Is the server up, by EITHER independent observation?
+ * Is the server GONE — by BOTH observations?
  *
- * NEITHER SIGNAL IS PORTABLE ALONE, AND THAT IS MEASURED, NOT HEDGED.
- *   `ps` works on the GitHub runner — the ps-only predicate passed there for this file's whole
- *   history — and is ABSENT in the operator's Azure container, where `ps`, `lsof` and `pgrep` are
- *   all missing from the image (fixed for future images in #1515, but a probe cannot assume it).
- *   THE PORT answers in that container and, MEASURED, does NOT answer within 45s on the GitHub
- *   runner: replacing ps with the port alone turned this file's two live tests red there, twice
- *   including the flake retry. I do not yet know WHY the runner never accepts the connection, and
- *   am not going to assert a cause I have not established — the point here is that the two
- *   observations fail in DIFFERENT environments, so requiring either one alone makes the suite
- *   depend on which machine it lands on.
+ * "GONE" IS THE CONJUNCTION AND STAYS ONE. Nothing may be listening AND no process may remain:
+ * that is stricter than either signal alone and stricter than any earlier revision of this file
+ * asserted, and neither half can be satisfied by the wrong machine.
  *
- * So "up" is the DISJUNCTION and "gone" is the CONJUNCTION. That is not a weakening: the
- * post-teardown claim gets STRICTER than either version of this file has ever asserted — nothing
- * may be listening AND no process may remain — while the precondition stops being a statement
- * about the host.
+ * "UP" IS THE PORT ALONE — see {@link listeningOn}. The disjunction this used to compute for the
+ * UP-check was the fourth revision's defect: MEASURED by a later recon, `ps` matches the DOOMED
+ * process in 22 of 60 polls while it dies, so on a runner where the server never binds, "port OR
+ * ps" is satisfied by a process that is already exiting. Both live tests went green on a machine
+ * where the server had never once started. The disjunction was adopted to make a red CI green
+ * without knowing why it was red; the cause is now known and fixed at its source (see
+ * {@link startServe}), so the honest predicate is back.
  */
-async function upBy(port: number): Promise<{ port: boolean; ps: boolean; up: boolean }> {
+async function goneBy(port: number): Promise<{ port: boolean; ps: boolean; gone: boolean }> {
   const byPort = await listeningOn(port);
   const byPs = serversOn(port).length > 0;
-  return { port: byPort, ps: byPs, up: byPort || byPs };
+  return { port: byPort, ps: byPs, gone: !byPort && !byPs };
 }
 
-/** Poll {@link upBy} until either signal reports the server, or the deadline passes. */
+/**
+ * Poll until the PORT answers, or the deadline passes.
+ *
+ * THE PORT ALONE, DELIBERATELY. A bound port cannot be faked by a process that is crashing: only a
+ * server that reached its `listen` can accept a connection. That is the whole property this file
+ * needs before it judges a teardown, and it is the one signal that does not vary by host now that
+ * the config seed removes the reason the server failed to start in CI.
+ */
 async function waitForListening(port: number, timeoutMs = 45_000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    if ((await upBy(port)).up) return true;
+    if (await listeningOn(port)) return true;
     if (Date.now() > deadline) return false;
     await new Promise((r) => setTimeout(r, 100));
   }
@@ -183,6 +200,27 @@ async function waitForServer(port: number, timeoutMs = 45_000): Promise<number[]
 
 function startServe(port: number) {
   const home = mkdtempSync(join(tmpdir(), "serve-orphan-home-"));
+
+  // ── SEED THE CONFIG, OR THE SERVER NEVER STARTS IN CI ──────────────────────────────────────
+  // HOME points at a FRESH temp dir, so `loadConfig` (src/lib/config.ts) finds no config and takes
+  // its CREATE path — which calls `resolveClaudeBin()`, which shells `which claude` and THROWS.
+  // Every GitHub runner lacks that binary; this container and the operator's Mac have it. That is
+  // the whole reason this file passed locally and failed in CI, deterministically, on both the
+  // attempt and the retry — and it went undiagnosed through four revisions.
+  //
+  // MEASURED here with `claude` hidden from PATH: without this seed the port NEVER binds inside 30s
+  // and the log reads `Error: Command failed: which claude`; with it, the port binds in ~2.8s.
+  //
+  // THE PATH IS DELIBERATELY NONEXISTENT. Nothing in this file executes `claudeBin` — `rmd serve`
+  // only needs the field present so the READ path is taken. Seeding a REAL binary (the sibling
+  // test/serve-service-boot.test.ts uses `/bin/true`) would put a host dependency straight back in,
+  // which is the exact class of defect this change exists to remove.
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(
+    join(home, ".config", "remudero", "config.json"),
+    JSON.stringify({ claudeBin: "/nonexistent/claude-not-installed", root: join(home, "Remudero") }),
+  );
+
   const out = openSync(join(home, "serve.out.log"), "a", 0o600);
   const child = spawn(join(repoRoot, "bin", "rmd"), ["serve", "--port", String(port), "--host", "127.0.0.1"], {
     stdio: ["ignore", out, out],
@@ -208,12 +246,13 @@ test("killing the process GROUP reaps the serve process the tsx wrapper spawned"
   t.after(() => killProcessGroup(child.pid!));
 
   // REACHING THE SPAWN IS ASSERTED FIRST — a teardown test that never started a process proves
-  // nothing at all, which is the trap this whole file exists around. EITHER observation satisfies
-  // it, because the two fail on different machines (see `upBy`), and the failure carries the
-  // server's own log so a red run names its cause instead of requiring one to be guessed.
+  // nothing at all, which is the trap this whole file exists around. THE PORT IS THE SIGNAL: only a
+  // server that reached `listen` can accept a connection, so a crashing process cannot satisfy it.
+  // The failure carries the server's own log, because "never started" without a reason is what
+  // turned one defect into four revisions.
   assert.ok(
     await waitForListening(port),
-    `neither the port nor ps saw a serve process for 127.0.0.1:${port} within 45s${serveDiagnostics(home, port)}`,
+    `nothing accepted a connection on 127.0.0.1:${port} within 45s${serveDiagnostics(home, port)}`,
   );
 
   killProcessGroup(child.pid!);
@@ -221,10 +260,10 @@ test("killing the process GROUP reaps the serve process the tsx wrapper spawned"
   // BOTH SIGNALS MUST GO QUIET, which is stricter than any earlier revision of this file: "no `ps`
   // line matches" alone only says a pattern stopped matching, and "nothing is listening" alone
   // would accept a process that survived with its socket closed. The group kill promises neither.
-  const after = await upBy(port);
+  const after = await goneBy(port);
   assert.equal(
-    after.up,
-    false,
+    after.gone,
+    true,
     `no serve process may survive a group kill (listening=${after.port}, ps=${after.ps})${serveDiagnostics(home, port)}`,
   );
 });
@@ -257,11 +296,12 @@ test("the spawned pid is the tsx wrapper, not the server — which is why a bare
   const { child, home } = startServe(port);
   t.after(() => killProcessGroup(child.pid!));
 
-  // THE SERVER MUST BE UP BEFORE ANYTHING IS JUDGED, by either observation — see `upBy` for why
-  // neither the port nor `ps` is portable on its own.
+  // THE SERVER MUST BE UP BEFORE ANYTHING IS JUDGED, and that is the PORT — see
+  // {@link waitForListening} for why a `ps` disjunct made this precondition satisfiable by a
+  // process that was crashing.
   assert.ok(
     await waitForListening(port),
-    `neither the port nor ps saw a serve process for 127.0.0.1:${port} within 45s${serveDiagnostics(home, port)}`,
+    `nothing accepted a connection on 127.0.0.1:${port} within 45s${serveDiagnostics(home, port)}`,
   );
 
   // THIS TEST NEEDS A PID, SO IT NEEDS `ps` — AND THAT IS WHERE IT SKIPS RATHER THAN FAILS.
