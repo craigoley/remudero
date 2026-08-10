@@ -940,6 +940,171 @@ export function renderInfrastructure(events: InfrastructureEvent[], recurrence: 
   ].join("\n");
 }
 
+// ── Mutation gate lifetime (W1-T393, MASTER-PLAN §11 D-10) ────────────────
+//
+// D-10 has stood OPEN for seven retro cycles on a standing prose demand — "report, WITH DATA,
+// mutants killed vs survived over `mutation-ratchet`'s LIFETIME, and whether it has EVER caught a
+// real escape" — that no gather rung ever executed, because it was written as prose in a decision
+// entry rather than built as one. Design clause (i): READ THE GATE'S OWN HISTORY, never re-run
+// Stryker here. That history turns out not to exist anywhere durable: `scripts/mutation-
+// ratchet.mjs` only ever compares a fresh Stryker report against `scripts/mutation-baseline.json`
+// (a single current FLOOR, not a per-run log) and exits — it never writes the ledger, in ANY of
+// its seven documented modes (grepped: zero `appendLedger`/ledger references in that file). The
+// CI job (`.github/workflows/ci.yml`'s `mutation-ratchet`) doesn't either. The closest existing
+// ledger traffic — `pr.checks`/`pr.polling` (src/run-task.ts's `pollToGate`) — is explicitly
+// documented rotation-fodder (test/ledger-rotation.test.ts's "no-decision-consequence traffic"),
+// names only the FIRST red check per poll (so a red mutation-ratchet sitting behind another red
+// check is never named), and carries no mutant counts at all. THAT IS THE FINDING clause (i)
+// asks for: nothing durable records this gate's per-run verdict today.
+//
+// Design clause (iv) is therefore the live fork: ship the emission (below) plus a gather rung
+// reading it, and report the lifetime answer as "starts now, N=0" — a stated limitation, never an
+// empty result. `MUTATION_GATE_VERDICT_STEP` is added to `DECISION_RELEVANT_LEDGER_STEPS`
+// (src/lib/ledger.ts) in this SAME change, the `sweep.absent_repush` precedent clause (iv) names —
+// a "lifetime" count that ledger rotation could silently reset would recreate the exact defect
+// this task exists to close. What this change does NOT do — and NOT IN SCOPE forbids — is touch
+// `scripts/mutation-ratchet.mjs` or `ci.yml` to wire the actual write call site after a real
+// `npx stryker run`; that edits the gate's own file/config, out of THIS task's `files:` scope.
+// Until that follow-up lands, `mutationGateLifetime` correctly reads zero records and reports the
+// NO-POSITIVE-CONTROL state below — never a false "zero escapes" — which is the honest state of
+// the world today, not a bug in this rung.
+
+/** The ledger step this task registers for `mutation-ratchet`'s PR-gate verdict, going forward —
+ *  see the module comment above for why nothing durable recorded this before now. One line per
+ *  REAL Stryker run (a diff-scoped skip never calls {@link mutationGateVerdictLine} — there is no
+ *  report to summarize). */
+export const MUTATION_GATE_VERDICT_STEP = "mutation.ratchet_verdict";
+
+/** The per-run fields {@link mutationGateVerdictLine} carries — the Stryker totals
+ *  `scripts/mutation-ratchet.mjs`'s own `parseMutationTotals`/`tallyMutants` already compute
+ *  in-process, plus the binary conclusion clause (ii) says must never be stood in for by the
+ *  totals alone. */
+export interface MutationGateVerdictInput {
+  /** Identifies this CI run (e.g. the head sha or GitHub Actions run id) — the gate has no
+   *  Remudero `run_id` of its own; it is a required check on every PR, not an `rmd`-dispatched
+   *  run. */
+  runId: string;
+  taskId?: string;
+  prUrl?: string;
+  /** Whether `scripts/mutation-ratchet.mjs`'s ratchet comparison passed or failed THIS run —
+   *  clause (ii)'s decision variable; never let `killed`/`survived` stand in for this. */
+  conclusion: "success" | "failure";
+  killed: number;
+  survived: number;
+  timeout: number;
+  noCoverage: number;
+}
+
+/** Build (never write) the ledger line for one mutation-ratchet verdict — pure, same
+ *  builder/writer split as {@link mineFollowups}/{@link recordFollowupHarvest} below. */
+export function mutationGateVerdictLine(input: MutationGateVerdictInput): LedgerLine {
+  return {
+    run_id: input.runId,
+    task_id: input.taskId ?? "mutation-ratchet",
+    step: MUTATION_GATE_VERDICT_STEP,
+    ...(input.prUrl ? { pr_url: input.prUrl } : {}),
+    conclusion: input.conclusion,
+    killed: input.killed,
+    survived: input.survived,
+    timeout: input.timeout,
+    no_coverage: input.noCoverage,
+  };
+}
+
+/** Dependencies for {@link recordMutationGateVerdict} — same injectable-writer shape as
+ *  {@link FollowupHarvestDeps} (a test spies on `writeLedger` instead of touching disk). */
+export interface MutationGateVerdictDeps {
+  ledgerPath: string;
+  writeLedger?: typeof appendLedger;
+}
+
+/** Append one {@link mutationGateVerdictLine}. UNWIRED in this change (see the module comment
+ *  above) — no production call site invokes this yet, because that call site lives inside
+ *  `scripts/mutation-ratchet.mjs`/`ci.yml`, both out of this task's scope. Shipped now so the
+ *  step's shape and its rotation-survival land in the SAME change, never split across two. */
+export function recordMutationGateVerdict(input: MutationGateVerdictInput, deps: MutationGateVerdictDeps): void {
+  const writeLedger = deps.writeLedger ?? appendLedger;
+  writeLedger(deps.ledgerPath, mutationGateVerdictLine(input));
+}
+
+/** One PR on which `mutation-ratchet` concluded FAILURE — clause (ii)'s escape count, named. */
+export interface MutationGateEscape {
+  runId: string;
+  prUrl?: string;
+}
+
+/**
+ * The rung D-10 asks for, folded over `MUTATION_GATE_VERDICT_STEP` lines. `positiveControl` is
+ * design clause (iii)'s P48 guard: `false` means zero verdict records were found at all — an
+ * UNMEASURED history, never to be rendered or read as "zero escapes" — versus `true` with
+ * `escapeCount: 0`, a genuine zero-escapes-over-N-runs result. The two must never be confused;
+ * see {@link renderMutationGateLifetime} for how each renders.
+ */
+export interface MutationGateLifetimeReport {
+  positiveControl: boolean;
+  runCount: number;
+  killed: number;
+  survived: number;
+  escapeCount: number;
+  escapes: MutationGateEscape[];
+}
+
+/**
+ * READ ONLY — clause (i): never runs Stryker, never touches disk; folds whatever
+ * `MUTATION_GATE_VERDICT_STEP` lines the ledger already carries. Called over the FULL `records`
+ * (never marker-scoped), the same "a lifetime figure must survive past the marker window" choice
+ * {@link mineFollowups} already makes for follow-ups — a marker-scoped read would silently
+ * truncate "lifetime" into "since last retro", the opposite of what D-10 asked for.
+ */
+export function mutationGateLifetime(records: LedgerRecord[]): MutationGateLifetimeReport {
+  const verdicts = records.filter((r) => r.step === MUTATION_GATE_VERDICT_STEP);
+  if (verdicts.length === 0) {
+    return { positiveControl: false, runCount: 0, killed: 0, survived: 0, escapeCount: 0, escapes: [] };
+  }
+  let killed = 0;
+  let survived = 0;
+  const escapes: MutationGateEscape[] = [];
+  for (const r of verdicts) {
+    killed += typeof r.killed === "number" ? r.killed : 0;
+    survived += typeof r.survived === "number" ? r.survived : 0;
+    if (r.conclusion === "failure") {
+      escapes.push({
+        runId: String(r.run_id ?? "?"),
+        ...(typeof r.pr_url === "string" ? { prUrl: r.pr_url } : {}),
+      });
+    }
+  }
+  return { positiveControl: true, runCount: verdicts.length, killed, survived, escapeCount: escapes.length, escapes };
+}
+
+/** Render the mutation-gate-lifetime section (markdown) — printed by `--dry-run` and fed to the
+ *  Architect; THE section D-10 has been waiting seven cycles for. */
+export function renderMutationGateLifetime(r: MutationGateLifetimeReport): string {
+  if (!r.positiveControl) {
+    return [
+      "## Mutation gate lifetime (D-10, W1-T393) — NO POSITIVE CONTROL: 0 verdicts recorded",
+      "",
+      "This is NOT \"zero escapes\" — it is an unmeasured history (P48: no naked zero). No " +
+        `\`${MUTATION_GATE_VERDICT_STEP}\` ledger line has ever been recorded — this rung starts ` +
+        "now, N=0, a stated limitation, never an empty result. The CI-side emission call site " +
+        "(inside `scripts/mutation-ratchet.mjs`/`ci.yml`, after a real `npx stryker run`) is a " +
+        "follow-up, not yet wired (out of this task's scope).",
+    ].join("\n");
+  }
+  const escapeLines = r.escapes.length
+    ? r.escapes.map((e) => `- ${e.runId}${e.prUrl ? ` → ${e.prUrl}` : ""}`)
+    : ["- (none)"];
+  return [
+    `## Mutation gate lifetime (D-10, W1-T393): ${r.runCount} run(s) recorded`,
+    "",
+    `Has \`mutation-ratchet\` EVER concluded FAILURE on a PR: ${r.escapeCount > 0 ? "YES" : "NO"} (${r.escapeCount} escape(s))`,
+    `Killed ${r.killed} / survived ${r.survived} (supporting totals — never a stand-in for the escape count above)`,
+    "",
+    "Escapes:",
+    ...escapeLines,
+  ].join("\n");
+}
+
 export interface RetroGather {
   sinceTs?: string;
   totalRuns: number;
@@ -1001,6 +1166,9 @@ export interface RetroGather {
    *  mined over the FULL ledger (never marker-scoped — a discovery from three
    *  retros ago is still worth surfacing) and deduped against `opts.openTitles`. */
   followups: FollowupHarvest;
+  /** W1-T393/D-10: `mutation-ratchet`'s LIFETIME kill/survive/escape record, folded over the
+   *  FULL ledger (never `scoped` — see {@link mutationGateLifetime}'s doc for why). */
+  mutationGateLifetime: MutationGateLifetimeReport;
 }
 
 /**
@@ -1095,6 +1263,10 @@ export function buildGather(opts: {
     // marker window (idempotency comes from the followup.harvested/deduped marks
     // mineFollowups reads back, not from marker-scoping).
     followups: mineFollowups(records, opts.openTitles ?? []),
+    // W1-T393/D-10: the FULL `records`, never `scoped` — same "must survive past the marker
+    // window" reasoning as `followups` immediately above, because a LIFETIME figure truncated to
+    // one retro cycle is not a lifetime figure.
+    mutationGateLifetime: mutationGateLifetime(records),
   };
 }
 
@@ -1199,6 +1371,8 @@ export function renderGather(g: RetroGather): string {
     // this section is the dedicated per-guard/check view PLUS the per-task
     // defect exclusion the retro's own defect stats must honor.
     renderInfrastructure(g.infrastructureEvents, g.infrastructureRecurrence),
+    "",
+    renderMutationGateLifetime(g.mutationGateLifetime),
     "",
     renderDegradedSuccess(g.degradedSuccess),
     "",

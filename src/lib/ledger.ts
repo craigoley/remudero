@@ -402,6 +402,15 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // detector's threshold of 8, so this costs a fixed and small amount of retained history.
   "sweep.post_review.done",
   "sweep.post_review.failed",
+  // W1-T393 (MASTER-PLAN §11 D-10): `mutationGateLifetime` (src/lib/retro.ts) folds this step
+  // into `mutation-ratchet`'s LIFETIME kill/survive/escape record — the exact "sweep.
+  // absent_repush" shape clause (iv) of that task's design names: a rotation archiving this line
+  // away would silently reset a LIFETIME figure back to zero every time the ledger rotates,
+  // reproducing the very defect ("no gather ever carried that column, because nothing recorded
+  // it durably") this task exists to close. Registered here in the SAME change that adds the
+  // step (retro.ts's `MUTATION_GATE_VERDICT_STEP`), before anything writes it in production —
+  // see that constant's doc for why the write call site itself is a follow-up, not this change.
+  "mutation.ratchet_verdict",
 ]);
 
 /** Steps matched by PREFIX rather than enumerated — currently only `deploy.*` (`deploy.skip`,
