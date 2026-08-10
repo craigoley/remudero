@@ -30,7 +30,34 @@ import { join } from "node:path";
  * a limit fails the test rather than silently diverging.
  */
 
-/** Limits mirroring `@commitlint/config-conventional` (see commitlint.config.mjs). */
+/**
+ * Limits mirroring `@commitlint/config-conventional` (see commitlint.config.mjs).
+ *
+ * `headerMaxLength` 100 GOVERNS A PRE-IMAGE, NOT WHAT LANDS, and that is worth knowing here rather
+ * than rediscovering from a history scan. This repo squash-merges, so `main`'s header is the PR
+ * TITLE with GitHub's ` (#NNNN)` appended AFTER every gate has run:
+ *
+ *   - `ci.yml`'s commitlint job lints the PR title (`gh pr view --json title`), pre-suffix;
+ *   - `hooks/commit-msg` lints the branch commit, which the squash discards;
+ *   - no workflow fires on `push: branches: [main]` except the four security scanners
+ *     (codeql, osv-scanner, scorecard, semgrep), none of which reads a header.
+ *
+ * So NOTHING lints the header that actually ships, and the budget an author is really working
+ * against is `100 - suffix`. The suffix is digit-dependent, MEASURED over origin/main at 41ce295:
+ * +5 (5 commits), +6 (81), +7 (542), +8 (456). At four-digit PR numbers that is **92**; it becomes
+ * 91 from #10000.
+ *
+ * THE TAX IS REAL AND SMALL, which is why this is a comment and not a check: of 1084 suffixed
+ * commits, 30 titles already exceeded 100 (pre-gate history) and **56 passed the gate and landed
+ * over 100** — 5.2%. 30 + 56 = 86, which reconciles exactly with the 86 landed headers over 100.
+ * The consequence is a truncated title in a list view, not a broken build.
+ *
+ * DELIBERATELY NOT ENFORCED AT 92, in either direction. Failing there would refuse a header the
+ * stated limit permits — the fifth bound in this repo to fire on a healthy condition. Warning there
+ * would measure the COMMIT header, which under squash-merge is not what lands; it coincides with
+ * the title only when GitHub defaults the squash title to a lone commit's subject, which nothing
+ * here enforces. A warning that is right by coincidence is worse than a number written down.
+ */
 export const CONVENTIONAL_LIMITS = {
   headerMaxLength: 100,
   bodyMaxLineLength: 100,
