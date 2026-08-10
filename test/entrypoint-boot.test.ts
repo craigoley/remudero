@@ -149,6 +149,24 @@ function freshHome(): string {
   return mkdtempSync(join(tmpdir(), "entrypoint-home-"));
 }
 
+/**
+ * A repository carrying an EXPLICIT LOCAL identity, for use as a boot cwd.
+ *
+ * Mutant 5 turns on local-vs-global config resolution, so the two readings have to provably
+ * disagree. Booting from this repo's own checkout looked like it supplied that — and does here,
+ * where `.git/config` names a committer — but a GitHub runner's checkout has no local identity, so
+ * the bare read falls through to the global one the script just wrote, both readings agree, and the
+ * mutant test fails on CI while passing locally. It did exactly that. The condition belongs to the
+ * fixture, not to whichever tree the suite happens to be running in.
+ */
+function makeCwdRepo(): string {
+  const repo = mkdtempSync(join(tmpdir(), "entrypoint-cwd-"));
+  git(repo, ["init", "-q", "-b", "main"]);
+  git(repo, ["config", "--local", "user.name", "CwdRepo"]);
+  git(repo, ["config", "--local", "user.email", "cwd@example.invalid"]);
+  return repo;
+}
+
 // ── DEFECT 3: A BRANCH MEANS THE TIP AS OF THIS BOOT ────────────────────────────────────────
 
 test("a BRANCH ref lands on the freshly-fetched tip, and a SECOND boot ADVANCES when the remote moved", () => {
@@ -344,20 +362,18 @@ test("MUTANT (defect 5): a bare git config --get makes the boot log report the C
     "$(git -C / config --get user.name) <$(git -C / config --get user.email)> (override with",
     "$(git config --get user.name) <$(git config --get user.email)> (override with",
   );
-  const run = boot(freshHome(), makeOrigin(), {
-    script: mutant,
-    env: { RMD_SKIP_BOOTSTRAP: "1" },
-    // Boot from inside a repository whose committer differs from the default — which is the
-    // condition that makes the two readings disagree at all.
-    cwd: REPO_ROOT,
-  });
-  assert.doesNotMatch(
+  // Boot from a repository carrying a LOCAL identity of its own — the fixture owns that condition
+  // rather than borrowing it from this checkout, which has one here and none on a CI runner.
+  const cwd = makeCwdRepo();
+  const run = boot(freshHome(), makeOrigin(), { script: mutant, env: { RMD_SKIP_BOOTSTRAP: "1" }, cwd });
+  assert.match(
     run.stderr,
-    /git identity: remudero-worker/,
-    "the mutant must report something other than what it wrote — otherwise this proves nothing",
+    /git identity: CwdRepo/,
+    "the mutant must report the CWD repo's committer, not the identity it just wrote",
   );
-  // And the real script must name the identity it actually configured.
-  const real = boot(freshHome(), makeOrigin(), { env: { RMD_SKIP_BOOTSTRAP: "1" }, cwd: REPO_ROOT });
+  assert.doesNotMatch(run.stderr, /git identity: remudero-worker/);
+  // And the real script must name the identity it actually configured, from that same cwd.
+  const real = boot(freshHome(), makeOrigin(), { env: { RMD_SKIP_BOOTSTRAP: "1" }, cwd });
   assert.match(real.stderr, /git identity: remudero-worker/);
 });
 
