@@ -120,8 +120,10 @@ export function bodyVsDiffContractLines(): string[] {
     "  equal your real file count and every file you name must be in the diff. (2) `no <path>` —",
     "  read when the next word on that line is a changeset word, OR when nothing follows it on that",
     "  line; that path must really be absent ('no bugs' is ignored — not a path). (3) the hyphenated",
-    "  shorthands `plan-only`/`data-only` — matched ANYWHERE whatever the subject, so never write",
-    "  either unless it is literally true of your diff.",
+    "  shorthands `plan-only`/`data-only` — read as a claim when they are the SUBJECT of the line:",
+    "  used as a label (`Plan-only: …`), predicated with a linking verb (`this is plan-only`), or",
+    "  beside a changeset word in the same sentence. Naming one inside a path, or describing another",
+    "  PR with it, is ignored — but if you predicate it of YOUR diff it must be literally true.",
     "  RE-CHECK AFTER EVERY PUSH — a body written against an earlier diff goes stale silently.",
   ];
 }

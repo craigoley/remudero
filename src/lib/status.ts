@@ -19,6 +19,7 @@ import { defaultIsPidAlive } from "./drain-lock.js";
 import { labelledIssuesRestArgs, NEEDS_HUMAN_LABEL, parseLabelledIssuesRest } from "./escalate.js";
 import { isHolderStale } from "./fs-race-safe.js";
 import { type BoardPrRest, fetchBoardPrsRest } from "./open-prs-rest.js";
+import { isInPlanScope } from "./plan-architect.js";
 
 /**
  * Derived task status (MASTER-PLAN v2.1 decision, implemented here).
@@ -368,6 +369,24 @@ export interface GitHub {
    * EXACT `Remudero-Task: <id>` line before it may be credited.
    */
   prBody(prUrl: string): string | undefined;
+  /**
+   * The PR's changed-file paths (repo-relative), or `undefined` when they cannot be resolved.
+   * Backs rung (c)'s PLAN-ONLY refusal (W1-T413): a MERGED, correctly-trailered PR that changed
+   * NOTHING outside plan scope filed or re-scoped a task rather than implementing it, and must not
+   * credit it as done.
+   *
+   * `undefined` MEANS UNAVAILABLE AND KEEPS TODAY'S ANSWER — never "no files". A read failure must
+   * not flip a task's merge state (buildShellRoute's own rule: "A read failure degrades to UNKNOWN,
+   * never to zero"), and here the safe direction is the OPPOSITE of {@link
+   * creditsByAnchoredTrailer}'s unreadable-head rule: an absent head cannot be evidence FOR a
+   * credit, whereas silently WITHDRAWING a long-standing credit would re-dispatch finished work and
+   * spend money on it. So an unreadable head fails closed and an unreadable file list fails open.
+   *
+   * OPTIONAL, like {@link autoMergeArmed}/{@link warm}/{@link readFailed} and for the same stated
+   * reason — every pre-existing fixture across the suite predates it, so omitted ⇒ derivation
+   * behaves exactly as it did before this existed.
+   */
+  changedFiles?(prUrl: string): string[] | undefined;
   /**
    * Is GitHub auto-merge already armed on this PR? OPTIONAL (added W1-T155, after every
    * pre-existing {@link GitHub} fixture across the test suite was already written) so no
@@ -1218,6 +1237,41 @@ function creditsByAnchoredTrailer(
  * hit is a first pass only; this is the authoritative local check that the body
  * carries the trailer as its own exact, anchored line.
  */
+/**
+ * RUNG (c) PLAN-ONLY REFUSAL (W1-T413) — does this changeset prove NOTHING was implemented?
+ *
+ * True iff `files` is non-empty and EVERY path is in plan scope ({@link isInPlanScope}, CALLED
+ * rather than re-derived: `plan/**`, `MASTER-PLAN.md`, `docs/ORIENTATION.md`). A merged PR that
+ * changed only those filed, split, re-scoped or closed a task — it did not build one.
+ *
+ * EMPTY IS FALSE, deliberately. An empty list is what an unreadable or truncated read looks like,
+ * and "every element of nothing is in plan scope" is the vacuous pass this repo keeps re-learning.
+ * Only a list with something in it can carry this claim.
+ *
+ * THE REPO ALREADY HOLDS THIS RULE IN THE OTHER ORGAN: `rmd lint-plan` prints its own failing-split
+ * evidence as "a Remudero-Task trailer or commit-subject citation on origin/main, with
+ * chore(plan)/chore(triage)/chore(feedback)/docs(plan) filing subjects excluded — a filing cites a
+ * task; it does not implement it", and `plan-pr-emitter.ts` documents carrying the trailer ONLY
+ * when a taskId is given, omitting it for a plan-FILING PR. This is those rules reaching the
+ * dispatch path, not a new policy.
+ *
+ * DELETIONS COUNT (the #1465 lesson): whatever the caller's `changedFiles` reports as changed is
+ * tested, so a PR that DELETES a `src/` file while editing plan files is not plan-only.
+ */
+export function isPlanOnlyChangeset(files: readonly string[]): boolean {
+  return files.length > 0 && files.every((f) => isInPlanScope(f));
+}
+
+/**
+ * Is `head` this task's OWN run branch, in any of the three accepted forms? A free, in-hand test
+ * that lets rung (c) credit a worker's own PR without ever reading its file list — the pre-filter
+ * that keeps {@link isPlanOnlyChangeset}'s read off the hot path (see `deriveStatus`'s use).
+ */
+function ownsOwnRunBranch(head: string | undefined, taskId: string): boolean {
+  if (!head) return false;
+  return ownsBranch(head, taskId) || isBareRunBranch(head, taskId) || isOwnedSlugBranch(head, taskId);
+}
+
 function hasAnchoredTrailer(body: string | undefined, taskId: string): boolean {
   if (!body) return false;
   return new RegExp(`^Remudero-Task:\\s*${escapeRegExp(taskId)}\\s*$`, "m").test(body);
@@ -1390,7 +1444,22 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
   if (trailerPr && !debunkedTrailerUrls(ledgerLines, task.id).has(trailerPr.url)) {
     const head = deps.github.headRefName(trailerPr.url);
     const body = deps.github.prBody(trailerPr.url);
-    if (creditsByAnchoredTrailer(trailerPr.state, head, body, task.id)) {
+    // W1-T413: the PLAN-ONLY refusal, checked only for a hit that would otherwise credit.
+    // ORDER IS THE COST CONTROL, not a style choice. `ownsOwnRunBranch` is free — the head ref is
+    // already in hand — and a worker's own `run-<taskId>-*` PR is an implementation by
+    // construction, so it credits without ever reading a file list. Only the residual case pays:
+    // a merged, anchored-trailer PR on a HAND-NAMED branch, which is exactly the population the
+    // 2026-07-30 ruling admitted (seven merged PRs whose branches were `feat-*`/`fix/*`) and
+    // exactly where a filing PR lands. That bound is what keeps this off the O(N) path the retro
+    // gather was measured paying — see `changedFiles`'s own doc for the fail-open direction.
+    const planOnlyRefusal =
+      creditsByAnchoredTrailer(trailerPr.state, head, body, task.id) && !ownsOwnRunBranch(head, task.id)
+        ? (() => {
+            const files = deps.github.changedFiles?.(trailerPr.url);
+            return files !== undefined && isPlanOnlyChangeset(files);
+          })()
+        : false;
+    if (!planOnlyRefusal && creditsByAnchoredTrailer(trailerPr.state, head, body, task.id)) {
       return { taskId: task.id, source: "trailer", ...fromPrState(trailerPr.state), prNumber: trailerPr.number, prUrl: trailerPr.url, prState: trailerPr.state };
     }
     // Rejected: a branch claiming ANOTHER task, a non-merged PR off a foreign branch,
@@ -1411,11 +1480,13 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
       // Reason mirrors `creditsByAnchoredTrailer`'s OWN order of refusal, so a rejection
       // never names a cause the accept test did not actually act on: the trailer is
       // checked first there, so an unanchored body reports that regardless of branch.
-      const reason = !hasAnchoredTrailer(body, task.id)
-        ? "trailer-not-anchored"
-        : branchClaimsOtherTask(head, task.id)
-          ? "branch-claims-other-task"
-          : "trailer-pr-not-merged";
+      const reason = planOnlyRefusal
+        ? "plan-only-changeset"
+        : !hasAnchoredTrailer(body, task.id)
+          ? "trailer-not-anchored"
+          : branchClaimsOtherTask(head, task.id)
+            ? "branch-claims-other-task"
+            : "trailer-pr-not-merged";
       return {
         taskId: task.id,
         status: "queued",
@@ -2109,6 +2180,18 @@ export function ghGateway(owner: string, repo: string, opts: { exec?: (args: str
       const view = tryJson<{ body?: string }>(["pr", "view", prUrl, "--json", "body"]);
       return view?.body;
     },
+    changedFiles(prUrl) {
+      // W1-T413. `--json files` on the SAME `pr view` transport this gateway already pays per
+      // call for `headRefName` and `prBody`, so the residual hand-named-branch case costs one
+      // more read on a gateway that is per-task by construction. `tryJson` returns undefined on
+      // a `gh` failure, which is the UNAVAILABLE signal the caller keeps today's answer for.
+      const view = tryJson<{ files?: Array<{ path?: string }> }>(["pr", "view", prUrl, "--json", "files"]);
+      if (!view?.files) return undefined;
+      const paths = view.files.map((f) => f.path).filter((p): p is string => typeof p === "string");
+      // A row set that parsed but yielded no usable path is a MALFORMED read, not an empty PR —
+      // report it as unavailable rather than as a changeset that touches nothing.
+      return paths.length > 0 ? paths : undefined;
+    },
     autoMergeArmed(prUrl) {
       const view = tryJson<{ autoMergeRequest?: unknown }>(["pr", "view", prUrl, "--json", "autoMergeRequest"]);
       return view?.autoMergeRequest != null;
@@ -2266,6 +2349,9 @@ export function buildBatchedGithub(
   // turn one transient failure into a permanent cold re-walk. Untouched on a throw, so a recovery
   // costs 2 requests rather than 8.
   let knownBoardPrs: Map<number, BoardPrRest> | undefined;
+  /** W1-T413: per-URL changed-file memo for {@link GitHub.changedFiles}. `null` records a read
+   *  that FAILED, so one unreachable PR is read once per gateway rather than once per task. */
+  const changedFilesByUrl = new Map<string, string[] | null>();
   const fetchAll =
     opts.fetchAll ??
     (() => {
@@ -2463,6 +2549,35 @@ export function buildBatchedGithub(
     },
     prBody(prUrl) {
       return index().byUrl.get(prUrl)?.body;
+    },
+    changedFiles(prUrl) {
+      // W1-T413, AND THE O(N) QUESTION ANSWERED RATHER THAN DODGED. The batched fetch is the REST
+      // PR *list* (`fetchBoardPrsRest`), and that endpoint does not carry changed files at any
+      // page size — files live only on `pulls/{n}/files`. So this cannot ride the one fetch the
+      // way `body`/`headRefName`/`title` do, and pretending otherwise would be the vacuous fix.
+      //
+      // WHY IT IS STILL NOT THE RETRO'S DEFECT (24 x O(N) `gh pr list --search`, a 9-minute suite
+      // for an hour): this is O(1) per PR that actually reaches the refusal, it is MEMOISED for
+      // the gateway's lifetime, and `deriveStatus` pre-filters on the free `ownsOwnRunBranch`
+      // test — so a projection over N tasks pays nothing for every task whose credit comes from
+      // its own `run-<taskId>-*` branch, which is every ordinary implementation. The reads that
+      // remain are bounded by the hand-named-branch population.
+      const cached = changedFilesByUrl.get(prUrl);
+      if (cached !== undefined) return cached ?? undefined;
+      const number = prUrl.match(/\/pull\/(\d+)/)?.[1];
+      if (!number) return undefined;
+      let paths: string[] | undefined;
+      try {
+        const raw = run(["api", "--paginate", `repos/${owner}/${repo}/pulls/${number}/files`, "--jq", ".[].filename"]);
+        const lines = raw.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+        paths = lines.length > 0 ? lines : undefined;
+      } catch {
+        paths = undefined; // UNAVAILABLE — the caller keeps today's answer, never withdraws a credit.
+      }
+      // Cache the failure too (as null), so one unreachable PR cannot be re-read once per task in
+      // the same projection — the exact multiplication this method exists to avoid.
+      changedFilesByUrl.set(prUrl, paths ?? null);
+      return paths;
     },
     autoMergeArmed(prUrl) {
       return index().byUrl.get(prUrl)?.autoMergeRequest != null;
