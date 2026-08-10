@@ -9683,11 +9683,41 @@ async function drainCommand(
   // --repo overrides it explicitly. The plan itself is unaffected — drain always dispatches
   // from THIS checkout's origin/main (git self-sync below); only the status gateway moves.
   const repo = flagValue(rest, "--repo") ?? self.repo;
-  const githubFactory = deps.githubFactory ?? ghGateway;
 
   const runId = `DRAIN-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "DRAIN", step, ...extra });
+
+  // BATCHED, NOT `ghGateway` — `drainCommand` was the LAST dispatch-path holdout, after #1529
+  // moved `runTask` and #1531 moved `retroCommand`. `daemonCommand` (below) has always built its
+  // factory exactly this way; this line is now byte-for-byte its twin, which is the point: the
+  // two commands share `refreshMerged`/`isOpenPr`/`openPrCount`/`isIndeterminate` verbatim, and a
+  // gateway that differed between them was drift hiding in the one line they did not share.
+  //
+  // THE DISAGREEMENT IS THE REASON, NOT THE COST. #1532 measured the SELECTOR asking `ghGateway`
+  // and getting "not merged" while `runTask` — batched since #1529 — asked about the SAME task in
+  // the same second and got "merged": a `task_already_merged` refusal that halted a `--max 6`
+  // drain at $0.00 with five live tasks behind it. Two gateways answering one question at two
+  // points of a single dispatch is the "never a second read path" rule this function's own
+  // comments repeat about `isOpenPr`, `openPrCount` and `isIndeterminate`.
+  //
+  // THE SWAP CANNOT WITHDRAW A CREDIT, which is what makes it safe to make under a running drain.
+  // Rung (c) of `deriveStatus` re-verifies EVERY `findMergedByTrailer` hit with
+  // `creditsByAnchoredTrailer` before crediting, so the search's fuzziness never credited
+  // anything on its own. The only behavioural difference is `--limit 1`: `ghGateway` asks GitHub
+  // for ONE candidate and, when that candidate fails the anchored re-verify, has no second — a
+  // FALSE NOT-MERGED. `buildBatchedGithub` applies the identical anchored regex across every
+  // merged PR in one fetch. So the change can only ADD merged credits, never remove one, and the
+  // dispatch consequence is strictly "fewer tasks offered", never "more".
+  //
+  // DEFAULTED PER CALL, NOT ONCE — the factory is invoked INSIDE `refreshMerged` (below), so each
+  // pass gets a FRESH instance. That is not incidental: `buildBatchedGithub` closes over mutable
+  // `lastFetchFailed`/`lastIssueFetchFailed` exactly as `ghGateway` closes over `failed`/
+  // `failureReason`, so hoisting one instance out of the closure would let a single pass's outage
+  // mark every later pass of the same drain indeterminate. The drain needs N instances for N
+  // passes, and already has them; unlike `retroCommand` (#1531) it has only ONE projection site,
+  // so it never needed two instances for two passes of differing scope.
+  const githubFactory = deps.githubFactory ?? ((o: string, r: string) => buildBatchedGithub(o, r, { log }));
 
   // ── GIT SELF-SYNC (W1-T60): dispatch from the origin/main plan blob, never the operator's
   // working tree — see runTask's identical gate for the full rationale. FAILS CLOSED (no
