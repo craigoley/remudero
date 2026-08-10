@@ -185,7 +185,13 @@ import {
 import { findPendingLandingPr, recordDecision } from "./lib/feedback-landing.js";
 import { ghTraceGateway, renderTraceChain, traceForward, traceReverse } from "./lib/trace.js";
 import { runPreflight, type PreflightDeps } from "./lib/commit-message.js";
-import { buildPreflightSummary, preflightSummaryPath, runCiParity, runPreflightFast } from "./lib/ci-parity.js";
+import {
+  buildPreflightSummary,
+  preflightFailureNotice,
+  preflightSummaryPath,
+  runCiParity,
+  runPreflightFast,
+} from "./lib/ci-parity.js";
 import { ghIssueCloser } from "./lib/panel-actions.js";
 import {
   buildServeServer,
@@ -5058,6 +5064,19 @@ async function runTask(
       say(`verdict: blocked_transient — repeated transient API error, not a task failure`);
       return { taskId, runId, merged: false, costUsd, verdict: "blocked_transient" };
     }
+    // ── The worker's OWN preflight verdict, surfaced before any verdict branch consumes the run.
+    // `rmd preflight` writes `<repoRoot>/coverage/preflight-summary.json` in the worktree it ran
+    // in — and that worktree is still on disk here, because every `worktreeRemove` in this
+    // function sits inside a verdict branch BELOW this line and the `finally` drops only the run
+    // lock. Read it now, above `failOnWorkerError`, so a worker that hit its turn cap while
+    // fighting a failing check still reports WHICH check. Silent when preflight passed, when the
+    // worker never ran it, and when the file cannot be read — see `preflightFailureNotice`.
+    const preflightNotice = preflightFailureNotice(worktreePath);
+    if (preflightNotice) {
+      log("preflight.failed", { detail: preflightNotice, worktree: worktreePath });
+      say(preflightNotice);
+    }
+
     const implFail = failOnWorkerError(impl, "implement");
     if (implFail) return implFail;
 
