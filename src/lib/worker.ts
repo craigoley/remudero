@@ -1458,12 +1458,164 @@ export function excludeNodeModulesFromGit(
   }
 }
 
+/**
+ * Thrown by {@link assertWorktreeBaseCurrent} (and so by `worktreeAdd`) when the base a
+ * worktree was just created from differs from an independently-observed remote head.
+ * Named so a caller can catch it specifically — see `run-task.ts`'s `runTask`, which turns
+ * it into a `blocked_stale_base` verdict rather than letting it propagate as a bare crash.
+ *
+ * W1-T405: the message names what was OBSERVED — behind — never a cause it cannot see. The
+ * out-of-scope scope guard (`scopeGuardOutOfScopeFiles` in run-task.ts) used to assert a
+ * "forged merge-base" for a diff shape that a merely-stale base produces identically; that
+ * guard cannot tell the two apart because by the time it runs (after recon, implement, and
+ * commit) the distinguishing evidence — what the base actually was at creation time — is
+ * long gone. This error exists so staleness is caught, and named for what it is, before
+ * that guard ever gets a chance to guess.
+ */
+export class WorktreeBaseStaleError extends Error {
+  constructor(
+    public readonly base: string,
+    public readonly remoteHead: string,
+    public readonly ref: string,
+  ) {
+    super(
+      `worktree base ${base} is BEHIND ${ref}'s remote head ${remoteHead} — the base is stale ` +
+        "— refusing before any worker runs",
+    );
+    this.name = "WorktreeBaseStaleError";
+  }
+}
+
+/**
+ * Assert-and-refuse (W1-T405 design note (i)): compare the base a worktree was just
+ * created from against the remote head an INDEPENDENT read observes right now, and throw
+ * {@link WorktreeBaseStaleError} when they differ.
+ *
+ * WHY INDEPENDENT. `worktreeAdd`'s own `git fetch` already moves the local `origin/<ref>`
+ * tracking ref before the worktree is cut, so in the ordinary case this can never fire —
+ * that is the point; every one of `worktreeAdd`'s six call sites already fetches before
+ * creating. It exists for the failure mode source review cannot rule out (W1-T405's own
+ * rationale): a fetch that exits zero without the worktree actually landing on the ref that
+ * fetch believed it moved. Re-reading the remote here — never the just-fetched local ref,
+ * which is exactly the thing in question — catches that regardless of which path let it
+ * through, without this function having to name the path.
+ *
+ * STALE MEANS BEHIND BY ANY COMMIT (design note (ii)) — a deliberate over-approximation:
+ * the precise question ("behind in a way that affects the diff") needs the diff, which
+ * needs the run, which is the spend this check exists to avoid paying before finding out.
+ *
+ * UNREADABLE WARNS, NEVER REFUSES (design note (iii)): `deps.readRemoteHead` throwing (an
+ * unreachable forge, a transport error) is treated as "cannot be measured", not "is stale"
+ * — refusing on an unmeasurable condition would convert a network blip into a stalled
+ * queue, the exact failure this repo keeps re-learning (ci-gate's wait cap, a deploy
+ * ceiling burned by a dry run, a check-wait bound, the idle-gate ceiling). The warning
+ * still surfaces so an operator can tell the check ran and could not measure, rather than
+ * silently skipping it.
+ *
+ * PURE aside from the two injected callbacks — no git/network call of its own — so a test
+ * drives every branch (stale / current / unreadable) without a second real remote.
+ */
+export function assertWorktreeBaseCurrent(
+  base: string,
+  ref: string,
+  deps: {
+    readRemoteHead: () => string;
+    warn?: (message: string) => void;
+  },
+): void {
+  let remoteHead: string;
+  try {
+    remoteHead = deps.readRemoteHead();
+  } catch (e) {
+    (deps.warn ?? ((m: string) => console.error(m)))(
+      `worktree base currency: remote head for ${ref} could not be read ` +
+        `(${String((e as Error)?.message ?? e)}) — proceeding without the check rather than ` +
+        "refusing on an unmeasurable condition",
+    );
+    return;
+  }
+  if (remoteHead !== base) {
+    throw new WorktreeBaseStaleError(base, remoteHead, ref);
+  }
+}
+
+/**
+ * Sibling path recording the commit a worktree was created from — OUTSIDE the working
+ * tree, same convention as {@link runLockPath}'s liveness token — so it is never committed
+ * and a later refusal can name the base without re-deriving it via `git merge-base`.
+ */
+export function worktreeBasePath(worktreePath: string): string {
+  return `${worktreePath}.base`;
+}
+
+/**
+ * Record the base a worktree was just created from (W1-T405 acceptance (4)). `worktreeAdd`
+ * calls this for every worktree it creates, BEFORE the currency check below can throw, so a
+ * stale-base refusal still leaves an attributable sibling file even though the worktree
+ * itself is about to be abandoned.
+ */
+export function recordWorktreeBase(worktreePath: string, base: string): void {
+  writeFileSync(worktreeBasePath(worktreePath), `${base}\n`);
+}
+
+/**
+ * Read a previously-recorded base (see {@link recordWorktreeBase}). `null` when absent or
+ * unreadable — never throws, so a missing record (a worktree predating W1-T405, or one
+ * whose sibling file was cleaned up) degrades to "unknown" rather than blocking whatever
+ * wanted to attribute a refusal.
+ */
+export function readWorktreeBase(worktreePath: string): string | null {
+  try {
+    return readFileSync(worktreeBasePath(worktreePath), "utf8").trim();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Drop a worktree's sibling base record. The record's lifetime is its worktree's: it exists
+ * so a refusal can be attributed while the corpse is still on disk, and it must die when the
+ * corpse does — a removal that leaves it behind fails the guard suite's "cleans up" contract
+ * (the approve refusal path found exactly that residue) and would hand the reaper one orphaned
+ * file per pass. Guarded, never throws: a worktree predating W1-T405 has no record to drop.
+ */
+export function removeWorktreeBase(worktreePath: string): void {
+  try {
+    fs.unlinkSync(worktreeBasePath(worktreePath));
+  } catch {
+    /* absent or unreadable — removal owes nothing here */
+  }
+}
+
+/** Real (non-test) {@link assertWorktreeBaseCurrent} remote read: a fresh `git ls-remote`
+ *  against `origin`, independent of whatever the fetch inside `worktreeAdd` just did. */
+function defaultReadRemoteHead(repoDir: string, ref: string): string {
+  const out = execFileSync(
+    "git",
+    ["-C", repoDir, "ls-remote", "--exit-code", "origin", `refs/heads/${ref}`],
+    { encoding: "utf8" },
+  );
+  const sha = out.split(/\s+/)[0]?.trim();
+  if (!sha) throw new Error(`empty ls-remote output for refs/heads/${ref}`);
+  return sha;
+}
+
 /** `git worktree add` a fresh branch off origin/<base> for a repo checkout. */
 export function worktreeAdd(
   repoDir: string,
   worktreePath: string,
   branch: string,
   base = "origin/main",
+  deps: {
+    /** Reads the CURRENT remote head for `ref` (the branch name `base` names, e.g.
+     *  "main"), independent of the fetch just above — see {@link assertWorktreeBaseCurrent}.
+     *  Default: a fresh `git ls-remote`. Injectable so a test can simulate stale / current /
+     *  unreachable without standing up a second real remote. */
+    readRemoteHead?: (repoDir: string, ref: string) => string;
+    /** Surfaces the "remote head unreadable, proceeding anyway" warning (design note
+     *  (iii)). Default: `console.error`. */
+    warn?: (message: string) => void;
+  } = {},
 ): void {
   execFileSync("git", ["-C", repoDir, "fetch", "origin", "--quiet"], { stdio: "inherit" });
   execFileSync(
@@ -1471,6 +1623,18 @@ export function worktreeAdd(
     ["-C", repoDir, "worktree", "add", "-b", branch, worktreePath, base],
     { stdio: "inherit" },
   );
+  // W1-T405: record the base BEFORE the currency check below — a refusal throws out of
+  // this function with no return value, so the record must already be on disk for it to
+  // be attributable at all. See recordWorktreeBase's own doc.
+  const createdBase = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], {
+    encoding: "utf8",
+  }).trim();
+  recordWorktreeBase(worktreePath, createdBase);
+  const ref = base.replace(/^origin\//, "");
+  assertWorktreeBaseCurrent(createdBase, ref, {
+    readRemoteHead: () => (deps.readRemoteHead ?? defaultReadRemoteHead)(repoDir, ref),
+    warn: deps.warn,
+  });
   // W1-T137: point this worktree at the repo's tracked hooks/ dir so its real git
   // commit-msg hook (hooks/commit-msg) fires on every commit the worker authors
   // itself — the only backstop PR #407 explicitly left unbuilt (it shaped only the
@@ -1501,6 +1665,7 @@ export function worktreeRemove(repoDir: string, worktreePath: string): void {
   execFileSync("git", ["-C", repoDir, "worktree", "remove", "--force", worktreePath], {
     stdio: "inherit",
   });
+  removeWorktreeBase(worktreePath); // the sibling base record dies with its worktree
   // Accumulation control (orchestrator-side, survives a killed worker): also reap
   // STALE ORPHAN scratch under the same claude-<uid> root — the `rmd-*` test fixtures
   // a SIGKILL'd `npm test` leaves behind (its own finally + tmp-hygiene's exit handler
@@ -2079,6 +2244,7 @@ export function reapStaleWorktrees(root: string, opts: WorktreeReapOpts = {}): W
     try {
       fs.rmSync(entryPath, { recursive: true, force: true });
       removeRunLock(entryPath); // clear the sibling lock so it can't linger widowed
+      removeWorktreeBase(entryPath); // same for the W1-T405 base record — one orphan per reap otherwise
       reaped.push(name);
     } catch {
       keep(name, "removal-failed"); // best-effort: a removal hiccup never blocks the rest of the pass

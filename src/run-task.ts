@@ -493,6 +493,7 @@ import {
   worktreeRemove,
   worktreesDir,
   writeRunLock,
+  WorktreeBaseStaleError,
   type SpawnWorkerArgs,
   type WorkerResult,
   type WorktreeReapSummary,
@@ -4856,7 +4857,27 @@ async function runTask(
 
   const branch = `run-${runId}`;
   const worktreePath = join(worktreesDir(config), branch);
-  worktreeAdd(repoDir, worktreePath, branch, "origin/main");
+  // W1-T405: worktreeAdd itself asserts base currency and throws WorktreeBaseStaleError
+  // before this run touches recon/implement/commit -- catch it HERE, at dispatch, rather
+  // than let a stale base surface only after a full run as the out-of-scope scope guard's
+  // "forged merge-base" misdiagnosis (the cost/misattribution this task exists to avoid).
+  // Verdict stays "failed" -- the SAME terminal verdict the scope guard's own out-of-scope
+  // refusal already returns for this identical condition (see its `outOfScope.length > 0`
+  // branch below); this task moves WHEN that refusal fires and WHAT it says, not what verdict
+  // it carries, so drain.ts's existing halt/continue classification needs no new case.
+  try {
+    worktreeAdd(repoDir, worktreePath, branch, "origin/main");
+  } catch (e) {
+    if (e instanceof WorktreeBaseStaleError) {
+      log("worktree.stale_base", { base: e.base, remote_head: e.remoteHead, ref: e.ref });
+      say(
+        `REFUSED: worktree base ${e.base} is behind origin/${e.ref}'s remote head ${e.remoteHead} — ` +
+          "refusing before recon/implement/commit spend anything",
+      );
+      return { taskId, runId, merged: false, costUsd: 0, verdict: "failed" };
+    }
+    throw e;
+  }
   log("worktree.add", { branch, worktreePath });
   // LIVENESS TOKEN: mark this worktree ALIVE so a concurrent pruneStaleRuns (another
   // drain, a manual run-task) skips it instead of `--force`-removing it mid-run. The
