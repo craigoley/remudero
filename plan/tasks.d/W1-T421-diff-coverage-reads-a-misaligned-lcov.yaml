@@ -1,0 +1,144 @@
+- id: W1-T421
+  title: "`diff-coverage.mjs` blocks on lines the full-suite lcov reports as `,0` while their straight-line NEIGHBOURS report 17 — the input is misaligned, not the code untested, and the gate has been wrong on pre-existing lines invisibly because only a diff touching that window surfaces it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  rationale: "MEASURED 2026-08-11 while PR #1553 was blocked, and re-derived at b99ae5e.
+    THE CONTRADICTION, QUOTED FROM THE FULL-GLOB LCOV over src/lib/commit-message.ts. These are
+    consecutive statements in ONE straight-line block inside `commitlintStep`:
+      const bin = join(repoRoot, `node_modules`, `.bin`, `commitlint`);   -> 17 hits
+      const config = join(repoRoot, `commitlint.config.mjs`);             ->  0 hits
+      const res = spawn(process.execPath, [bin, ...], { cwd: repoRoot }); ->  0 hits
+      });                                                                ->  0 hits
+      const spawnFailed = spawnFailureDetail(`commitlint`, res);         ->  0 hits  <- the added line
+      if (spawnFailed) return { name: `commitlint`, ok: false, ... };    -> 17 hits
+      const ok = res.status === 0;                                       -> 17 hits
+    STRAIGHT-LINE STATEMENTS CANNOT RUN ZERO TIMES WHILE BOTH THEIR NEIGHBOURS RUN 17. The middle
+    lines are PRE-EXISTING and untouched — `git diff` returns zero matches for them — so this is not
+    a property of the change under review. The lcov's line numbers are misaligned for this file, the
+    added line falls inside the misreported window, and the gate blocks on it.
+    A NOTE ON THE FILE, BECAUSE A WRONG PATH SENDS A WORKER TO THE WRONG PLACE: the operator brief
+    that commissioned this filing attributed the quoted lines to src/lib/ci-parity.ts. They are in
+    src/lib/commit-message.ts — `grep -l` for the `commitlint.config.mjs` join returns that file and
+    ci-parity.ts contains no such line. Corrected here rather than carried forward.
+    THE PRE-EXISTING LINES ABSORB THE SAME DEFECT INVISIBLY, because they appear in no diff. The gate
+    has been wrong on this file for some time and only a change touching that window surfaces it —
+    which is why the sweep in design (ii) matters more than the one PR.
+    COUNTER-EVIDENCE THAT THE CODE IS FINE, so nobody re-litigates it: under a SCOPED run the same
+    lines report 51 hits, and in the FULL run the exercising tests print a passing mark. The tests
+    execute the lines; the record does not say so.
+    NONDETERMINISM IS PART OF THE SIGNATURE. Across three full-glob reproductions the ENTIRE
+    `commitlintStep` read zero in the first run — including `try {` and the `const bin` line that
+    read 17 in the next — while a later run reported 17 for part of it. Same code, same tree.
+    THE SAME LCOV CARRIES 23 CHILD-PROCESS RECORDS from temp directories
+    (`../../../tmp/commitmsg-run-*/worktrees/run-b/...`, `../../../tmp/fixrung-gh-bin-*/...`).
+    `scripts/coverage-ratchet.mjs` EXCLUDES them and says so in its output; whether
+    `scripts/diff-coverage.mjs` does is exactly what design (i) must establish. This is a NAMED
+    CANDIDATE, not a conclusion.
+    THE BLOCKING RELATIONSHIP: PR #1553 cannot pass `coverage-ratchet` until this is fixed or the
+    operator lands it another way. Its AGGREGATE step PASSED (83.75% lines against an 82.75%
+    baseline) — only the diff-coverage step inside that job blocked, on 10 lines.
+    THE CALIBRATION CAVEAT, STATED HONESTLY: CLAUDE.md's prescribed calibration was run and PASSED,
+    but against #1538 — a docs-only change to the same file that added no executable lines. It does
+    not exercise this condition and is evidence NEITHER WAY. Do not cite it as clearance.
+    THE LEDGER IS UNREACHABLE — the Mac mini is down. Every figure above is from lcov files and
+    `git diff` in this checkout, and from the CI job log of PR #1553; none is inferred from a ledger."
+  design: |
+    (i) MEASURE WHICH LAYER PRODUCES THE MISALIGNMENT BEFORE CHANGING ANYTHING. A fix aimed at the
+    wrong layer is the exact shape this repo spent 2026-08-10 correcting. Candidates to MEASURE, and
+    deliberately NOT ranked here:
+      - node's `--experimental-test-coverage` lcov reporter and how it merges per-process records;
+      - `tsx`'s transform and the source maps `--enable-source-maps` translates through;
+      - the `--test-coverage-exclude="test/**"` interaction;
+      - CHILD-PROCESS RECORDS merging under a colliding relative key — the 23 temp-dir records above,
+        which `coverage-ratchet.mjs` already excludes and `diff-coverage.mjs` may not;
+      - `diff-coverage.mjs`'s own mapping from diff hunk line numbers to lcov `DA:` records.
+    The deliverable of this clause is a NAMED layer with the measurement that fingered it, written
+    into the PR body. If the measurement is inconclusive, say so and stop rather than shipping a
+    guess at the gate.
+
+    (ii) ESTABLISH WHETHER IT IS FILE-SPECIFIC OR GENERAL, MECHANICALLY. src/lib/commit-message.ts is
+    the observed case; it is not established as the only one. The anomaly has a machine-checkable
+    signature: a `DA:` record reporting ZERO between two non-zero records whose source lines are
+    consecutive straight-line statements in the same block. Sweep the full-suite lcov for it and
+    report the count and the files. IF IT IS GENERAL, the gate's verdicts are unreliable everywhere
+    and that finding OUTRANKS the fix — report it and let the operator decide the order.
+
+    (iii) HOW A FIX IS PROVEN, AND IT IS NOT "THE GATE STOPS BLOCKING". The discriminator is the
+    scoped-versus-full discrepancy: a correct fix makes the FULL-run lcov agree with a SCOPED run on
+    lines that demonstrably execute. State it that way in the acceptance, because "the gate stops
+    blocking" is also satisfied by a loosened threshold, which is the failure this filing exists to
+    prevent.
+
+    (iv) DO NOT RAISE, WAIVE OR THRESHOLD AWAY THE GATE. The gate is doing what it was told; the
+    INPUT is wrong. Any change that weakens the ratchet, adds a per-file exemption, or lowers a
+    floor to unblock a PR is refused at review however green it makes things — and would be the
+    sixth bound-or-gate in this repo mis-tuned on a healthy condition rather than fixed at source.
+
+    (v) RULE 25 IS ANSWERED, AND ONE CHANGESET CAN HOLD THIS. `scripts/diff-coverage.mjs` IS an
+    INSTRUMENT_SURFACE entry, but `detectInstrumentEntanglement` (src/lib/review.ts) requires an
+    instrument path AND a PRODUCT path, and `isProductPath` is `startsWith("src/") && !isTestPath`
+    — its own doc says `test/` must not count "or an instrument-only PR could never carry the
+    fixture that proves it", naming test/diff-coverage.test.ts for exactly this purpose. So
+    instrument + its own test does NOT entangle. If the measurement in (i) lands the fix in
+    .github/workflows/ci.yml instead, that is ALSO instrument-only and the same holds. What would
+    force a split is a fix needing a src/ change; if that happens, say so and file the src half
+    separately rather than carrying both.
+
+    (vi) FALSIFIER, BOTH DIRECTIONS. A fixture lcov carrying the impossible zero-window must be
+    detected and must NOT block a diff whose lines demonstrably execute; and a genuinely uncovered
+    added line — one with no covering test at all — must STILL block. The second is the one a fix
+    aimed at unblocking drops, and it is the whole value of the gate.
+
+    ALREADY TESTED AND DISPROVED — DO NOT REPEAT IT: relocating the added function on a
+    source-map-offset theory (the hypothesis that a long JSDoc above a new function shifts its
+    records). The zeros MOVED WITH IT. Recorded so the next worker spends its budget elsewhere.
+
+    NOT IN SCOPE: the aggregate ratchet and its baseline (it passes and is not implicated), any
+    threshold or exemption, and PR #1553's own content.
+  acceptance:
+    - claim: "the layer producing the misalignment is named with the measurement that identified it, rather than inferred from the symptom"
+      proof: "grep: MISALIGNMENT SOURCE in scripts/diff-coverage.mjs"
+    - claim: "the impossible zero window between two non-zero straight-line neighbours is detected mechanically and swept across the whole lcov"
+      proof: "grep: lcovLineAlignmentAnomalies in scripts/diff-coverage.mjs"
+    - claim: "a full run agrees with a scoped run on lines that demonstrably execute, which a loosened threshold would not satisfy"
+      proof: "grep: SCOPED_AGREEMENT in scripts/diff-coverage.mjs"
+    - claim: "a genuinely uncovered added line still blocks, so the fix removes no enforcement"
+      proof: "grep: STILL_BLOCKS_UNCOVERED in scripts/diff-coverage.mjs"
+  risk: high
+  origin: recon#diff-coverage-misalignment-2026-08-11
+  plan_refs: ["W1-T25", "W1-T212", "W1-T297", "W1-T220"]
+  files: [scripts/diff-coverage.mjs, test/diff-coverage.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — every deliverable is decidable over fixture lcov documents and fixture diffs,
+    in-process, with no network and no operator. The one live measurement clause (i) needs is a
+    full-suite coverage run, which is a local command.
+    RULE 19: both declared paths resolve to the module id `diff-coverage` (moduleIdFromPath folds a
+    `.test` suffix away), so `subsystemsOf` sees ONE subsystem and there is no sizing violation.
+    risk:high is BLAST RADIUS, NOT SPAN, and that distinction is the point: this changes a REQUIRED
+    merge gate, and a version that mis-corrects it lets untested code through every future PR while
+    looking greener than before. Design (vi)'s second arm is where that risk is managed.
+    RULE 25 CHECKED BEFORE FILING and answered in design (v) rather than left as a hazard:
+    scripts/diff-coverage.mjs IS an INSTRUMENT_SURFACE entry, but the entanglement predicate needs a
+    PRODUCT path too and `isProductPath` excludes `test/` by design. Instrument + its own test does
+    not entangle, so one changeset holds this.
+    FILES: CAN CONTAIN THE DESIGN. The mapping from diff hunks to `DA:` records lives in
+    scripts/diff-coverage.mjs, and test/diff-coverage.test.ts already exists as that instrument's
+    fixture home — the file W1-T212 shipped for precisely this purpose. `.github/workflows/ci.yml`
+    is named in design (i)/(v) as a CANDIDATE and deliberately NOT declared: if the measurement
+    lands there, that is a re-scope with evidence rather than a path quietly held in reserve.
+    budget_usd 80 — the cost is clause (i)'s layer measurement and clause (ii)'s sweep, either of
+    which can change the task. The mapping fix itself is likely small.
+    ON THE PROOFS: all four are `grep:` with an explicit path into scripts/diff-coverage.mjs, which
+    EXISTS — so each returns a clean no-match today rather than the `exec_error` a grep at a
+    not-yet-existing path produces, which a session measured on 2026-08-10 and which is why no proof
+    here points at a file that does not exist. Each names a string absent from src/, test/ and
+    scripts/ at filing, so none can match the merge base and be downgraded to executed_stale, and
+    none names an existing symbol. The four names are BINDING on the implementer rather than a
+    guess: MISALIGNMENT SOURCE for the named layer, lcovLineAlignmentAnomalies for the sweep,
+    SCOPED_AGREEMENT for the discriminator in design (iii), STILL_BLOCKS_UNCOVERED for the
+    enforcement arm in design (vi)."
