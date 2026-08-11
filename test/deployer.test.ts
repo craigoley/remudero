@@ -549,7 +549,11 @@ test("realDeployDeps: git/pgrep/launchctl route through the injected exec with t
       if (args.includes("rev-parse") && args.includes("origin/main")) return "bbb222\n";
       if (args.includes("status")) return " M DECISIONS.md\n?? new.ts\n";
       if (args.includes("diff")) return "src/x.ts\nsrc/y.ts\n";
-      if (cmd === "pgrep") throw new Error("exit 1: no matches"); // no live workers
+      // THE SHAPE `execFileSync` ACTUALLY THROWS, not a bare Error whose message merely SAYS
+      // "exit 1". pgrep documents exit 1 as no-processes-matched, and `probeIdle` now reads
+      // `status` to tell that TRUE ZERO apart from a pgrep that could not run at all — so a
+      // fixture without `status` was modelling neither case (see test/deploy-idle-unknown.test.ts).
+      if (cmd === "pgrep") throw Object.assign(new Error("exit 1: no matches"), { status: 1 });
       return "";
     };
     const deps = realDeployDeps({
@@ -580,12 +584,13 @@ test("realDeployDeps: git/pgrep/launchctl route through the injected exec with t
     assert.ok(calls.some((c) => c.join(" ") === "git -C /inst reset --hard aaa111"));
     assert.ok(calls.some((c) => c.join(" ") === "launchctl kickstart -k gui/502/com.remudero.daemon"), "kickstarts the daemon job");
 
-    // probeIdle: pgrep threw ⇒ 0 workers; lock counts come from the real temp fs.
+    // probeIdle: pgrep exited 1 (a TRUE zero) ⇒ 0 workers and NOTHING unreadable; lock counts
+    // come from the real temp fs, so both directories exist and both reads succeed.
     mkdirSync(join(root, "state", "inflight"), { recursive: true });
     writeFileSync(join(root, "state", "inflight", "W1-T1.lock"), "{}");
     mkdirSync(join(root, "worktrees"), { recursive: true });
     writeFileSync(join(root, "worktrees", "run-x.lock"), "{}");
-    assert.deepEqual(deps.probeIdle(), { workers: 0, inflightLocks: 1, worktreeLocks: 1 });
+    assert.deepEqual(deps.probeIdle(), { workers: 0, inflightLocks: 1, worktreeLocks: 1, unreadable: [] });
   });
 });
 

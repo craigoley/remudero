@@ -173,6 +173,22 @@ export interface IdleProbe {
   inflightLocks: number;
   /** `<name>.lock` files beside a run worktree (an active build). */
   worktreeLocks: number;
+  /**
+   * The signals whose READ FAILED, named — never folded into the counts above.
+   *
+   * THIS REPO'S OWN LAW, stated in `buildShellRoute`: "A read failure degrades to UNKNOWN, never
+   * to zero." Every one of the three reads below used to catch into `0`, and all three of those
+   * zeros feed {@link daemonIsIdle}, whose TRUE answer is the gate that lets a deploy kickstart
+   * the daemon. A probe that cannot see the daemon must not be able to report that the daemon is
+   * quiet.
+   *
+   * OPTIONAL and ABSENT-MEANS-EVERYTHING-WAS-READ, so every existing {@link IdleProbe} literal is
+   * unchanged and a genuinely idle fleet still reads idle byte-identically. The spelling follows
+   * the house one — `listMergedHeadBranches` returns null for a FAILED read and `[]` for
+   * genuinely-none — applied to three signals at once, which is why it names them rather than
+   * being a bare boolean: the ledger line should say WHICH read failed.
+   */
+  unreadable?: readonly string[];
 }
 
 /**
@@ -181,7 +197,35 @@ export interface IdleProbe {
  * we must never interrupt is a WORKER or a claimed task.
  */
 export function daemonIsIdle(p: IdleProbe): boolean {
+  // UNKNOWN IS NOT IDLE. Deferring costs a bounded delay — {@link DEPLOY_IDLE_DEFER_CEILING_MS}
+  // forces the deploy through after 30 minutes and LEDGERS it as forced, so an unreadable signal
+  // can never wedge the fleet. Deploying into a live daemon costs a SIGKILLed worker. Those are
+  // not symmetric, and the ceiling is what makes the safe direction affordable.
+  if (p.unreadable !== undefined && p.unreadable.length > 0) return false;
   return p.workers === 0 && p.inflightLocks === 0 && p.worktreeLocks === 0;
+}
+
+/**
+ * Does this `pgrep` failure mean "nothing matched" — a TRUE zero — or "the read did not happen"?
+ *
+ * `pgrep` documents exit 1 as no-processes-matched, and the original catch cited exactly that.
+ * What it also swallowed: exit 127 / ENOENT, which is the binary being ABSENT — the state this
+ * image shipped in until `ps`/`pgrep` were added — and pgrep's own fatal exits (2 = syntax, 3 =
+ * fatal). Those are reads that produced no answer, and calling them zero workers is the defect.
+ */
+export function pgrepFailureMeansZero(e: unknown): boolean {
+  return typeof e === "object" && e !== null && (e as { status?: unknown }).status === 1;
+}
+
+/**
+ * Does this `readdirSync` failure mean the directory genuinely holds no locks?
+ *
+ * ENOENT does: a lock directory that has never been created holds no locks, and reporting zero is
+ * correct. EACCES, ENOTDIR, EIO and EMFILE do not — the directory may be full of locks nobody
+ * could count.
+ */
+export function lockReadFailureMeansZero(e: unknown): boolean {
+  return typeof e === "object" && e !== null && (e as { code?: unknown }).code === "ENOENT";
 }
 
 /**
@@ -670,6 +714,7 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     workers: probe1.workers,
     inflight_locks: probe1.inflightLocks,
     worktree_locks: probe1.worktreeLocks,
+    unreadable: probe1.unreadable,
   };
   if (!gate1.proceed) {
     if (deferredSince1 === undefined) deps.setDeferredSince?.(nowMs1); // start the clock, once
@@ -702,6 +747,7 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     workers: probe2.workers,
     inflight_locks: probe2.inflightLocks,
     worktree_locks: probe2.worktreeLocks,
+    unreadable: probe2.unreadable,
   };
   if (!gate2.proceed) {
     if (deferredSince2 === undefined) deps.setDeferredSince?.(nowMs2); // start the clock, once
@@ -991,23 +1037,30 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       git(["reset", "--hard", ref]);
     },
     probeIdle: () => {
+      // ALL THREE READS DISCRIMINATE a true zero from a read that did not happen; see
+      // {@link IdleProbe.unreadable}. Every one of them used to catch into 0, and 0 on all three
+      // is precisely what {@link daemonIsIdle} calls quiet.
+      const unreadable: string[] = [];
       let workers = 0;
       try {
         workers = exec("pgrep", ["-f", "claude --output-format"]).split("\n").filter(Boolean).length;
-      } catch {
+      } catch (err) {
+        if (!pgrepFailureMeansZero(err)) unreadable.push("workers");
         workers = 0; // pgrep exits 1 when there are no matches
       }
-      const countLocks = (dir: string): number => {
+      const countLocks = (dir: string, signal: string): number => {
         try {
           return readdirSync(dir).filter((n) => n.endsWith(".lock")).length;
-        } catch {
+        } catch (err) {
+          if (!lockReadFailureMeansZero(err)) unreadable.push(signal);
           return 0;
         }
       };
       return {
         workers,
-        inflightLocks: countLocks(join(o.stateRoot, "state", "inflight")),
-        worktreeLocks: countLocks(join(o.stateRoot, "worktrees")),
+        inflightLocks: countLocks(join(o.stateRoot, "state", "inflight"), "inflightLocks"),
+        worktreeLocks: countLocks(join(o.stateRoot, "worktrees"), "worktreeLocks"),
+        unreadable,
       };
     },
     kickstartConsole: () => {
