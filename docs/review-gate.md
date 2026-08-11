@@ -424,6 +424,43 @@ positions. Two consequences, both deliberate:
   comment, which used to false-block any new file that opens with one. A genuinely uncovered
   added *code* line still blocks (fixture-proven in `test/diff-coverage.test.ts`).
 
+### Coverage floor re-based after the mutant-copy measurement fix (2026-08-11, W1-T421)
+
+`scripts/coverage-baseline.json` moves from **lines 82.75 / branches 88.55** to **lines 95.62 /
+branches 90.44**. The old floor had stopped describing this suite, and the ratchet was permitting a
+~13-point regression without noticing. Two causes, and only one of them is a defect:
+
+- **Staleness.** The floor was set 2026-07-22 and was never ratcheted through three weeks of
+  coverage work.
+- **A measurement defect, 2026-08-10 to 2026-08-11.** Two falsifier suites wrote a mutated module
+  copy to `os.tmpdir()` and imported it; the copy's graph re-entered the real `src/lib` from outside
+  the project root, a synthetic `SF:src/lib/<define:import.meta>` record appeared, and the aggregate
+  read 84.19% instead of 96.18%. #1564 fixed it by writing the copy under `test/` instead
+  (`writeMutantModule`, `test/helpers/mutant-module.ts`).
+
+**The floor was honest when it was set.** The construct's first appearance anywhere in `test/` is
+`295d2d3` (2026-08-10) — 19 days after the floor — established by running #1564's
+`tmpdirModuleImports` detector over the tree at all 422 commits that touched `test/` since the
+baseline commit. This is drift plus a one-day defect, not a floor that was never real.
+
+**Three readings, same tree (`b6d13e3`), same flags:** lines 96.1814 / 96.1927 / 96.1814, branches
+90.5924 / 90.5864 / 90.5460 — an 0.011pt lines spread and an 0.046pt branches spread, so ~96.18 is
+stable rather than one post-fix reading.
+
+**The margin follows the 2026-07-22 convention rather than inventing one.** That floor sat 0.08
+(lines) / 0.06 (branches) under the *lower* of its two contemporaneous readings and 0.56 / 0.10
+under the *higher*, explicitly so a cross-environment delta never reads as a regression. All three
+readings here are local — no CI reading was obtainable — so the **worst-case** margin the old floor
+carried is applied to the **lowest** local reading: 96.1814 − 0.56 → 95.62, 90.5460 − 0.10 → 90.44.
+The margin is load-bearing rather than decorative: `evaluateRatchet` compares at `epsilon = 1e-9`,
+so a hundredth of a point below the floor is a red gate.
+
+**It is ~24x tighter, not looser.** At `LF 88436` the remaining slack is 496 covered lines
+(the gate needs `LH >= 84563`; today's `LH` is 85059), against ~11,877 lines under the old floor.
+Measured both directions against the real gate and the real floor: a degraded lcov at 95.6093%
+BLOCKS with `delta -0.01pts` while 95.65% is ACCEPTED, and branches at 90.4287% BLOCKS
+independently of lines.
+
 ### coverage-ratchet: out-of-repo temp-dir records excluded (2026-07-23, W1-T220)
 
 `scripts/coverage-ratchet.mjs`'s `parseLcovTotals` now counts a coverage record only
