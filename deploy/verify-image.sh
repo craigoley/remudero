@@ -131,10 +131,22 @@ fi
 # throughout, because the stray quotes re-balanced; the file was never syntactically broken, only
 # addressed to the wrong machine. The host also EXECUTED a backtick pair from that same comment.
 # test/verify-image-probes.test.ts now enforces delivery, since reading for this has failed twice.
+# THE DECLARED PIN, read HOST-SIDE so the probe stays one clean single-quoted argument.
+# deploy/Dockerfile is the single place this repo declares which CLI its workers run, and
+# src/lib/env.ts parseDeclaredClaudeVersion reads THE SAME LINE at runtime - one declaration, two
+# consumers, nothing to keep in sync. Empty when the file is absent (this script is documented to
+# run on a host with no checkout), and empty means the probe reports UNKNOWN rather than a verdict.
+EXPECT_CLAUDE_VERSION="$(sed -n 's/^[[:space:]]*ARG[[:space:]]\{1,\}CLAUDE_CODE_VERSION[[:space:]]*=[[:space:]]*"\{0,1\}\([^"[:space:]#]\{1,\}\).*/\1/p' "$(dirname "$0")/Dockerfile" 2>/dev/null | head -1)"
+if [ -n "${EXPECT_CLAUDE_VERSION}" ]; then
+  echo "verify-image: deploy/Dockerfile declares claude ${EXPECT_CLAUDE_VERSION}"
+else
+  echo "verify-image: no CLAUDE_CODE_VERSION found in deploy/Dockerfile - version VALUE will not be compared"
+fi
+
 echo
 echo "verify-image: checks inside ${AFTER}"
 set +e
-docker run --rm --entrypoint /bin/sh "${REF}" -c '
+docker run --rm -e EXPECT_CLAUDE_VERSION="${EXPECT_CLAUDE_VERSION}" --entrypoint /bin/sh "${REF}" -c '
   fail=0
   # `if out="$(cmd)"` tests CMD, which piping into head would not: a pipeline reports the LAST
   # stage, so `cmd | head` returns head status and a missing binary would read as a pass. The
@@ -149,6 +161,25 @@ docker run --rm --entrypoint /bin/sh "${REF}" -c '
     fi
   }
   check "claude"    claude --version
+  # BEGIN claude-version-value
+  # `check` above passes on EXIT STATUS: it proves a claude binary exists and runs, and says
+  # NOTHING about which one. That is the vacuous shape this file has been corrected for six times,
+  # and a binary of the wrong version is exactly the failure it would certify green - the image
+  # pins the CLI against the SDK version in package-lock.json, and an unpaired combination is
+  # untested. So compare the VALUE against the pin the Dockerfile declares.
+  # THREE STATES. An absent expectation is UNKNOWN and prints WARN without failing, because a read
+  # that did not happen must never render as a match - the same rule src/lib/env.ts readBinaryPin
+  # follows. Only a REAL disagreement fails.
+  got_claude="$(claude --version 2>&1 | head -1 | cut -d" " -f1)"
+  if [ -z "${EXPECT_CLAUDE_VERSION:-}" ]; then
+    printf "  WARN  %-22s installed %s, no declared pin to compare against\n" "claude version" "${got_claude}"
+  elif [ "${got_claude}" = "${EXPECT_CLAUDE_VERSION}" ]; then
+    printf "  PASS  %-22s %s matches the declared pin\n" "claude version" "${got_claude}"
+  else
+    printf "  FAIL  %-22s image has %s but deploy/Dockerfile declares %s\n" "claude version" "${got_claude}" "${EXPECT_CLAUDE_VERSION}"
+    fail=1
+  fi
+  # END claude-version-value
   check "node"      node --version
   check "gh"        gh --version
   check "git"       git --version

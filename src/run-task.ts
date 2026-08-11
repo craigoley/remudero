@@ -23,7 +23,7 @@ import {
   type Config,
 } from "./lib/config.js";
 import { readFileIfExists } from "./lib/fs-race-safe.js";
-import { buildWorkerEnv, billingMode, type BillingMode } from "./lib/env.js";
+import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
 import { bodyVsDiffContractLines, outputContractLines, renderAnchorBlock, commitMessageContractLines, ciParityContractLines } from "./lib/compaction.js";
 import {
   lintFiledTasks,
@@ -534,6 +534,24 @@ import {
   resumeFleet,
   stopDetail,
 } from "./lib/fleet-control.js";
+
+/**
+ * The REAL reads behind the binary-pin rung, as one object so the wiring is a single argument and
+ * this default is itself exercisable (test/binary-pin-rung.test.ts drives it against the live
+ * binary rather than only through the injected seam).
+ *
+ * `deploy/Dockerfile` is located relative to THIS MODULE, never `process.cwd()`: the daemon, the
+ * CLI and a worker all run from different directories, and only the module path is stable across
+ * them. Neither read is guarded here — {@link readBinaryPin} catches both and renders `unknown`,
+ * which is the point of it having three states.
+ */
+export function defaultBinaryPinDeps(claudeBin: string): Parameters<typeof readBinaryPin>[0] {
+  return {
+    readDockerfile: () => readFileSync(fileURLToPath(new URL("../deploy/Dockerfile", import.meta.url)), "utf8"),
+    runClaudeVersion: () => execFileSync(claudeBin, ["--version"], { encoding: "utf8" }),
+  };
+}
+
 
 // ── The proto-runner (WS-1 T1). Reads ONE tasks.yaml entry and runs the loop:
 // recon → provenance-linted prompt → implement → PR → merge → verdict, ledgering
@@ -4473,6 +4491,10 @@ async function runTask(
      *  `containmentExec` above, driving the REAL blocked_isolation catch branch. Default: the
      *  real spawn-backed executor. */
     isolationExec?: IsolationProbeExecutor;
+    /** Injectable reads for the BINARY-PIN rung. Default: {@link defaultBinaryPinDeps} over the
+     *  resolved `config.claudeBin` — a test drives a chosen version pair through this seam without
+     *  a real binary, and test/binary-pin-rung.test.ts separately exercises the DEFAULT for real. */
+    binaryPinDeps?: Parameters<typeof readBinaryPin>[0];
     /** Injectable review judge for the PRIMARY (post-CI-green) review call — the same
      *  shape `runFixRung`'s own `deps.runReview` already exposes. Default: the real
      *  {@link runReview}. W1-T125: lets a behavioral test drive a REAL runTask() through
@@ -4766,6 +4788,30 @@ async function runTask(
   validateWorkerSettingsFile(settingsFile); // throws WorkerSettingsError if invalid
   log("settings.validated", { settingsFile });
   say("worker settings validated against pinned SandboxSettingsSchema");
+
+  // ── BINARY-PIN RUNG (wires checkBinaryPin, which shipped with no production caller).
+  //
+  // WHY HERE. It runs on the WORKER'S HOST, once per run, in the same preflight block as the two
+  // probes below — the mismatch bites where a worker spawns, not in CI, and the granularity that
+  // is right for containment is right for this: the binary is constant across every spawn in a run.
+  // It is placed FIRST because it is the cheapest reading that could explain either probe failing.
+  //
+  // LOUD AND NON-BLOCKING, and that is checkBinaryPin's OWN stated contract, not a softening
+  // invented here: it "returns {drift: true, reason} naming both versions, so a caller can LEDGER
+  // the drift and CONTINUE rather than hard-fail: the operator still updates the CLI deliberately,
+  // so this makes a swap VISIBLE and INTENTIONAL, never impossible". Two facts agree with it. The
+  // fleet has been running on a mismatch (declared 2.1.220, operator host 2.1.227) and merging PRs
+  // throughout, so a mismatch is demonstrably not fatal. And a refusal here would be the FIFTH
+  // bound in this repo measured firing on a healthy condition — it would meet the operator at the
+  // door on a host that is mismatched TODAY.
+  const binaryPin = readBinaryPin(opts.binaryPinDeps ?? defaultBinaryPinDeps(config.claudeBin));
+  log("preflight.binary_pin", {
+    status: binaryPin.status,
+    declared_version: binaryPin.declaredVersion,
+    observed_version: binaryPin.observedVersion,
+    reason: binaryPin.reason,
+  });
+  if (binaryPin.status !== "match") say(`binary pin ${binaryPin.status.toUpperCase()} — ${binaryPin.reason}`);
 
   // ── Post-spawn CONTAINMENT PREFLIGHT (W1-T2 #2 / WS-0 verdict 7 / Standing rule
   // 11). Validation proves the file is WELL-FORMED; it does NOT prove the sandbox

@@ -110,6 +110,9 @@ function writeStubs(dir: string): void {
     'printf %s\\\\n "$probe" >> "$STUB_REC/probes"',
     'case "$probe" in',
     '  checks)     [ "$STUB_MODE" = checks-fail ] && { echo "  FAIL  claude (not found)"; exit 1; }',
+    // The version-VALUE defect is its own subject: the binary is present and runs, and is the
+    // WRONG ONE. That is precisely the shape `check "claude" claude --version` certified green.
+    '              [ "$STUB_MODE" = claude-version-mismatch ] && { echo "  FAIL  claude version  image has 2.1.227 but deploy/Dockerfile declares 2.1.220"; exit 1; }',
     '              echo "  PASS  claude 1.2.3"; exit 0 ;;',
     '  entrypoint) [ "$STUB_MODE" = entrypoint-silent ] && { echo "tini: exec failed"; exit 0; }',
     "              echo entrypoint-reached; exit 0 ;;",
@@ -208,6 +211,19 @@ function deliveryDefects(run: Run): string[] {
       );
     }
   }
+
+  // A PROBE THAT NEVER ARRIVED IS THE LOUDEST DELIVERY DEFECT, AND THIS FUNCTION USED TO BE BLIND
+  // TO IT — it iterates the runs that HAPPENED, so zero runs yielded zero defects, which is the
+  // vacuous shape this whole suite exists to prevent, one level up. MEASURED, not theorised: with
+  // the version-value check added below the anchor, the same injected apostrophe stopped the host
+  // BEFORE the first `docker run` instead of truncating it, and every assertion here went silent
+  // while reporting a clean delivery. Missing probes are named individually so the report says
+  // WHICH sections never ran, the way the sixth defect made four of them vanish.
+  for (const p of EXPECTED_PROBES) {
+    if (!runs.some((argv) => (argv[argv.indexOf("-c") + 1] ?? "").includes(p.identifiedBy))) {
+      defects.push(`probe "${p.key}" NEVER REACHED docker at all`);
+    }
+  }
   return defects;
 }
 
@@ -257,9 +273,67 @@ test("MUTANT: one apostrophe in a probe comment breaks delivery, and the deliver
   const defects = deliveryDefects(runVerifier("good", path));
   assert.ok(defects.length > 0, "the delivery check must FAIL on the mutant — if it passes, it is measuring nothing");
   assert.ok(
-    defects.some((d) => d.includes("TRUNCATED") || d.includes("stray argument")),
-    `the defect must be named as truncation or stray argv, got: ${JSON.stringify(defects)}`,
+    defects.some((d) => d.includes("TRUNCATED") || d.includes("stray argument") || d.includes("NEVER REACHED")),
+    `the defect must be named as truncation, stray argv, or a probe that never arrived, got: ${JSON.stringify(defects)}`,
   );
+});
+
+// ── THE VERSION-VALUE CHECK, EXECUTED RATHER THAN READ ───────────────────────────────────────
+//
+// The stub above REPLAYS canned probe output, so the verdict tests prove the script's exit-code
+// arithmetic and NOT that the comparison inside the probe is correct — a limit this file's own
+// header states. `check "claude" claude --version` passed on EXIT STATUS and never compared the
+// VALUE, which is the seventh instance of the vacuous shape this file has been corrected for; a
+// test asserting only that a MATCHED version passes would be the eighth. So the real block is
+// lifted out and run, in every direction, against a `claude` whose version this test chooses.
+
+/** The version-value block, lifted from the real script between its own sentinels. */
+function versionValueBlock(): string {
+  const src = readFileSync(SCRIPT, "utf8");
+  const begin = src.indexOf("# BEGIN claude-version-value");
+  const end = src.indexOf("# END claude-version-value");
+  assert.ok(begin >= 0 && end > begin, "the sentinels must exist, or this test is executing nothing");
+  const block = src.slice(begin, end);
+  assert.ok(block.split("\n").length > 5, "the extracted block must be substantive, not an empty pair of markers");
+  return block;
+}
+
+/** Run the real block with a `claude` that prints `version`, and a chosen declared pin. */
+function runVersionCheck(installed: string, declared: string): { out: string; fail: string } {
+  const dir = mkdtempSync(join(tmpdir(), "verify-image-claude-"));
+  writeFileSync(join(dir, "claude"), `#!/bin/sh\necho "${installed} (Claude Code)"\n`, { mode: 0o755 });
+  chmodSync(join(dir, "claude"), 0o755);
+  const r = spawnSync("sh", ["-c", `fail=0\n${versionValueBlock()}\nprintf "FAILVAR=%s" "$fail"`], {
+    encoding: "utf8",
+    env: { ...process.env, PATH: `${dir}:${process.env.PATH ?? ""}`, EXPECT_CLAUDE_VERSION: declared },
+  });
+  const out = (r.stdout ?? "") + (r.stderr ?? "");
+  return { out, fail: /FAILVAR=(\S*)/.exec(out)?.[1] ?? "?" };
+}
+
+test("the version-value check FAILS when the installed binary is not the declared pin", () => {
+  // THE DIRECTION THAT MATTERS. A binary that exists, runs, and is the WRONG ONE is exactly what
+  // the old exit-status check certified green.
+  const r = runVersionCheck("2.1.227", "2.1.220");
+  assert.match(r.out, /FAIL\s+claude version/, "a mismatch must be named as a FAIL");
+  assert.match(r.out, /2\.1\.227/, "and must name what is installed…");
+  assert.match(r.out, /2\.1\.220/, "…and what was declared");
+  assert.equal(r.fail, "1", "and it must set the failure flag the script exits on");
+});
+
+test("the version-value check PASSES when the installed binary matches the declared pin", () => {
+  const r = runVersionCheck("2.1.220", "2.1.220");
+  assert.match(r.out, /PASS\s+claude version/);
+  assert.equal(r.fail, "0", "a matching image must not be failed");
+});
+
+test("an ABSENT declared pin is UNKNOWN — it warns, and must never render as a match", () => {
+  // The script is documented to run on a host with no checkout, where the Dockerfile cannot be
+  // read. A read that did not happen must not produce a verdict in either direction.
+  const r = runVersionCheck("2.1.227", "");
+  assert.match(r.out, /WARN\s+claude version/);
+  assert.doesNotMatch(r.out, /PASS\s+claude version/, "unknown must not be reported as a match");
+  assert.equal(r.fail, "0", "and it must not fail the image either");
 });
 
 test("a correct subject exits 0", () => {
@@ -282,6 +356,7 @@ const BROKEN: ReadonlyArray<{ mode: string; why: string; says: RegExp }> = [
   { mode: "unpinned", why: "a sha ref stops pinning exactly", says: /sha ref did NOT pin exactly/ },
   { mode: "boot-crash", why: "the bootstrap probe itself dies", says: /bootstrap-currency probe did not complete/ },
   { mode: "binaries-missing", why: "a process-inspection binary is absent for the runtime user", says: /process-inspection binary is missing or unrunnable/ },
+  { mode: "claude-version-mismatch", why: "claude runs but is not the version the Dockerfile declares", says: /FAILURES above/ },
 ];
 
 for (const { mode, why, says } of BROKEN) {
