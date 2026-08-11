@@ -216,14 +216,15 @@ export interface ReviewEvidence {
 
 /** See {@link ReviewVerdict.unwiredAdvisories}'s doc for what each code means and why
  *  `net_state_claim` never appears here (retro-time only). */
-export type UnwiredReasonCode = "unwired_export" | "inverse_scope" | "net_state_claim";
+export type UnwiredReasonCode = "unwired_export" | "inverse_scope" | "scope_violation" | "net_state_claim";
 
 /** One SHIPS-UNWIRED advisory line (W1-T322) — see {@link ReviewVerdict.unwiredAdvisories}. */
 export interface UnwiredAdvisory {
   reasonCode: UnwiredReasonCode;
   /** The offending symbol(s)/path(s), rendered `file::symbol` for `unwired_export`, bare repo
-   *  paths for `inverse_scope` — never a bare "flagged" with nothing named (W1-T186 emitter
-   *  discipline, the same one {@link ReviewVerdict.instrumentEntanglementPaths} follows). */
+   *  paths for `inverse_scope`/`scope_violation` — never a bare "flagged" with nothing named
+   *  (W1-T186 emitter discipline, the same one {@link ReviewVerdict.instrumentEntanglementPaths}
+   *  follows). */
   symbols: string[];
   /** Human-readable detail — the exact text the ledger line and any console annotation render. */
   detail: string;
@@ -421,17 +422,33 @@ export interface ReviewVerdict {
    * flips severity once a measured false-positive rate clears a stated threshold). This field
    * NEVER folds into `state`/`floorState`/`capped` — unlike every other structural field on this
    * interface (`criteriaTampered`, `changesetContradictions`, `instrumentEntangled`), which all
-   * force `state` to `"failure"`. Empty array when nothing to advise. Two reason codes fire here
-   * (a third, `net_state_claim`, is retro-time only — see {@link "./retro.js".netStateCapabilityAdvisories}):
-   *   - `unwired_export`  — the diff adds an `export function` {@link scanUnreachedExports}
-   *                         cannot find a real caller for, and the report carries neither a
-   *                         `WIRED-AT: <file>::<symbol>` marker naming it nor a `SHIPS-UNWIRED:
-   *                         <task-id>` marker naming a real, open task (see {@link
-   *                         ReviewEvidence.openTaskIds}).
-   *   - `inverse_scope`   — the task's declared `files:` scope (see {@link
-   *                         ReviewEvidence.taskDeclaredFiles}) names a file this diff never
-   *                         touched — the direction {@link "../run-task.js".scopeGuardOutOfScopeFiles}
-   *                         (diff-touches-undeclared) cannot see.
+   * force `state` to `"failure"`. Empty array when nothing to advise. THREE reason codes fire here
+   * (a fourth, `net_state_claim`, is retro-time only — see {@link "./retro.js".netStateCapabilityAdvisories}):
+   *   - `unwired_export`   — the diff adds an `export function` {@link scanUnreachedExports}
+   *                          cannot find a real caller for, and the report carries neither a
+   *                          `WIRED-AT: <file>::<symbol>` marker naming it nor a `SHIPS-UNWIRED:
+   *                          <task-id>` marker naming a real, open task (see {@link
+   *                          ReviewEvidence.openTaskIds}).
+   *   - `inverse_scope`    — the task's declared `files:` scope (see {@link
+   *                          ReviewEvidence.taskDeclaredFiles}) names a file this diff never
+   *                          touched — the direction {@link "../run-task.js".scopeGuardOutOfScopeFiles}
+   *                          (diff-touches-undeclared) cannot see.
+   *   - `scope_violation`  — (W1-T401) the MIRROR direction: the diff touches a file OUTSIDE the
+   *                          task's declared `files:` scope — the same comparison {@link
+   *                          "../run-task.js".scopeGuardOutOfScopeFiles} makes, but that guard sits
+   *                          behind exactly one of `gitPushRunBranch`'s nine call sites (the
+   *                          orchestrator's fallback push, taken only when the worker's branch is
+   *                          absent from origin) so it never runs on the ordinary path. This
+   *                          advisory runs on EVERY review instead. ADVISORY, not a refusal
+   *                          (design (ii)/(iii) — a measured majority of recent declared-scope
+   *                          "violations" are legitimate: generator-gate artifacts, a task's own
+   *                          plan shard, operator-instructed or review-ratified widenings), and
+   *                          FAIL-CLOSED in the safe direction like `inverse_scope`: an absent or
+   *                          empty declared scope has nothing to compare, so it never fires — unlike
+   *                          {@link "../run-task.js".scopeGuardOutOfScopeFiles}, which treats "no
+   *                          declared files" as "everything is out of scope" for its own (blocking,
+   *                          fallback-only) purpose, a task declaring nothing is never treated here
+   *                          as declaring everything.
    * The caller (run-task.ts) ledgers each entry as a `review.unwired_advisory` line naming the
    * PR, the reason code and the symbols — the dataset W1-T323's measurement reads.
    */
@@ -2517,12 +2534,36 @@ function inverseScopeUntouchedFiles(diffFiles: readonly string[], declaredFiles:
 }
 
 /**
+ * SCOPE-VIOLATION (W1-T401, design (i)-(iv)): the same comparison {@link
+ * "../run-task.js".scopeGuardOutOfScopeFiles} makes (diff → declared, flagging a file the diff
+ * touches that the task never declared) but run at REVIEW TIME, where every PR is seen — not just
+ * the one push site (behind `if (!branchOnOrigin)`) that guard actually runs at. ADVISORY, not a
+ * refusal (see {@link ReviewVerdict.unwiredAdvisories}'s doc for why: a measured majority of
+ * recent trailer-bearing merges would have widened past their declared scope for legitimate
+ * reasons — a generator-gate artifact, a task's own plan shard, an operator-instructed or
+ * review-ratified widening).
+ *
+ * DELIBERATELY DIFFERENT FROM {@link "../run-task.js".scopeGuardOutOfScopeFiles} ON ONE POINT:
+ * that guard treats an absent/empty declared scope as "everything is out of scope" (a REFUSE-by-
+ * default posture that fits its own narrow, blocking purpose). This advisory does not — an absent
+ * or empty declared scope has nothing to compare, so it never fires, matching {@link
+ * inverseScopeUntouchedFiles}'s own fail-closed direction. A task declaring nothing is not treated
+ * as declaring everything.
+ */
+function scopeViolationFiles(diffFiles: readonly string[], declaredFiles: readonly string[] | undefined): string[] {
+  if (!declaredFiles || declaredFiles.length === 0) return [];
+  const declared = new Set(declaredFiles);
+  return diffFiles.filter((f) => !declared.has(f));
+}
+
+/**
  * Assemble this review's {@link UnwiredAdvisory} list (design (ii)) — ADVISORY ONLY, never
  * consulted by `state`. `checkoutDir` mirrors {@link ReviewEvidence.headCheckoutDir}'s own
  * "absent ⇒ skip" contract: the `unwired_export` reason needs real files to read, so it is
  * silently skipped (not a false "nothing to advise") when no checkout was supplied — exactly the
  * degradation {@link judgeCriterion}'s own `execCtx` already applies to proof execution.
- * `inverse_scope` needs no checkout (a pure diff-files/declared-files comparison) and always runs.
+ * `inverse_scope`/`scope_violation` need no checkout (each is a pure diff-files/declared-files
+ * comparison, just opposite directions) and always run.
  */
 function unwiredAdvisoriesFor(
   diff: string,
@@ -2560,6 +2601,15 @@ function unwiredAdvisoriesFor(
       reasonCode: "inverse_scope",
       symbols: untouched,
       detail: `task declares file(s) this diff never touched: ${untouched.join(", ")}`,
+    });
+  }
+
+  const violating = scopeViolationFiles(diffFiles, taskDeclaredFiles);
+  if (violating.length > 0) {
+    out.push({
+      reasonCode: "scope_violation",
+      symbols: violating,
+      detail: `diff touches file(s) outside the task's declared scope: ${violating.join(", ")}`,
     });
   }
 
