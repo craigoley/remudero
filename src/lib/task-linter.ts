@@ -1441,6 +1441,48 @@ export function lintPlan(plan: Plan, optsFor: (task: Task) => LintOpts = () => (
  * of pre-existing debt — re-grading the WHOLE open queue is the retro's
  * separate, periodic plan-health sweep (W1-T20d), not every PR's gate.
  */
+/**
+ * W1-T428: split a raw plan yaml corpus into per-task RECORD blocks, keyed by id. A block runs
+ * from its `- id:` line to the next one (or EOF), trimmed of trailing whitespace so a record
+ * moved to a file's tail never differs by its final newline alone. Pure over the supplied text —
+ * no disk, no git, the same contract as every other function in this file.
+ */
+export function splitTaskRecordBlocks(text: string): Map<string, string> {
+  const blocks = new Map<string, string>();
+  const starts = [...text.matchAll(/^- id:[ \t]*(\S+)/gm)];
+  for (let i = 0; i < starts.length; i++) {
+    const from = starts[i].index!;
+    const to = i + 1 < starts.length ? starts[i + 1].index! : text.length;
+    blocks.set(starts[i][1], text.slice(from, to).trimEnd());
+  }
+  return blocks;
+}
+
+/**
+ * W1-T428: ids whose RAW record text differs between two corpora — the companion the parsed
+ * {@link changedTaskIds} below cannot replace and must not be replaced by. The parser DROPS six
+ * fields the corpus uses (design, plan_refs, queue_note, amendment_note, cycle_residual,
+ * fixture_forensics — measured at the filing sha), so a design-only edit is INVISIBLE to the
+ * parsed comparison: #1544 measured `0 task(s) checked` on exactly that diff, and the next
+ * dispatched worker acted on instructions no gate re-checked. Comparing record BYTES catches
+ * every dropped field, present and future, by construction; the parsed side still owns semantic
+ * equivalence. The gate consumes the UNION. Ids present on exactly one side are reported too —
+ * the same new/changed semantics the parsed comparison uses, and the union dedups.
+ */
+export function rawChangedTaskIds(oldTexts: readonly string[], newTexts: readonly string[]): Set<string> {
+  const merge = (texts: readonly string[]): Map<string, string> => {
+    const all = new Map<string, string>();
+    for (const t of texts) for (const [id, block] of splitTaskRecordBlocks(t)) all.set(id, block);
+    return all;
+  };
+  const oldBlocks = merge(oldTexts);
+  const newBlocks = merge(newTexts);
+  const changed = new Set<string>();
+  for (const [id, block] of newBlocks) if (oldBlocks.get(id) !== block) changed.add(id);
+  for (const id of oldBlocks.keys()) if (!newBlocks.has(id)) changed.add(id);
+  return changed;
+}
+
 export function changedTaskIds(oldTasks: Task[], newTasks: Task[]): Set<string> {
   const oldById = new Map(oldTasks.map((t) => [t.id, t]));
   const changed = new Set<string>();
