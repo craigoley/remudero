@@ -39,7 +39,7 @@
   risk: high
   origin: recon-mini-assumptions-2026-08-09#per-instance-ceiling
   plan_refs: ["§8A"]
-  files: [src/lib/sweep.ts, src/run-task.ts, src/lib/policy.ts, plan/policy.yaml, test/cost-ceiling-per-instance.test.ts, test/cost-ceiling-visibility.test.ts, test/cost-ceiling-default-unchanged.test.ts, test/cost-ceiling-not-per-run-budget.test.ts]
+  files: [src/lib/sweep.ts, src/run-task.ts, src/lib/policy.ts, plan/policy.yaml, test/cost-ceiling-per-instance.test.ts, test/cost-ceiling-visibility.test.ts, test/cost-ceiling-default-unchanged.test.ts, test/cost-ceiling-not-per-run-budget.test.ts, test/policy.test.ts, test/cost-governor.test.ts, test/policy-consumers.test.ts, test/panel-graph.test.ts, test/account-usage.test.ts]
   status: queued
   attempts: 0
   note: "THERE IS NO SHARED DOLLAR FIGURE ANYWHERE, AND THAT IS ESTABLISHED FROM SOURCE RATHER THAN
