@@ -1,0 +1,91 @@
+- id: W1-T425
+  title: "the global learnings layer ships with 'transport is deferred' — build the transport: opt-in, redacted, hash-pinned export and import, so one instance's earned lessons can teach another without leaking anyone's tree"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 90.00
+  rationale: "FILED FROM OPERATOR BRIEF (plan review + direction, 2026-08-11), evidence re-derived
+    at 3b18d95. THE RECEIVING SIDE ALREADY EXISTS AND IS ALREADY DEFENDED: the injection path
+    (runTask's promptsmith block, P32/W1-T145) reads THREE layers — project, user-overall, and an
+    RMD-GLOBAL layer that is 'a hash-pinned artifact — a tampered/missing one contributes zero
+    entries and is logged, never silently trusted' — and the call-site comment states plainly
+    that on a fresh instance the global artifact does not exist because '§6 transport is
+    deferred'. The SENDING side is the whole gap: no verb produces an exportable artifact, so the
+    layer that was built to let one instance learn from another has never carried a byte.
+    THIS IS THE OPERATOR'S DIRECTIVE MADE LITERAL: 'learns and improves from anyone who uses it'
+    is, mechanically, entries earned in one tree becoming injectable in another. The commons
+    section already stakes the governance ('the public commons is Apache-2.0 forever'; hosted
+    org-brain sync is the Pro variant) — so the open transport is core roadmap, not scope creep.
+    WHY THE PRIVACY SHAPE MUST BE FIELD-LEVEL OPT-IN, NOT A REDACTION PASS: learnings facts
+    routinely name hosts, paths, PR numbers and operator workflow (the platform shard is 19
+    entries of exactly that). A scrubber that guesses what is sensitive will be wrong once, and
+    once is a leak. So exportability is DECLARED per entry (`share: public`), default absent =
+    private forever; the exporter refuses undeclared entries by construction, and the leak-grep
+    tripwire runs over the produced bundle as a second, independent floor — the §6 build-in-the-
+    open hygiene applied to knowledge."
+  design: |
+    TWO VERBS AND A FIELD, RIDING MACHINERY THAT ALREADY EXISTS — the pinning, refusal and
+    injection sides are all on main; this task builds only the bundle in between.
+    (i) THE FIELD: `share: public` on a learning entry (src/lib/learnings.ts's LearningEntry,
+    optional; any other value or absence means private). The budget ratchet ignores it (extra
+    fields verified tolerated in the W1-T419 filing). Zero entries are stamped by this task —
+    sharing is the OPERATOR's per-entry act, exactly like ratification.
+    (ii) `rmd learnings export <out>`: collects ACTIVE entries carrying `share: public` across
+    the project layer, renders them into a bundle (same yaml shard shape the loaders already
+    parse), stamps provenance (source repo, sha, export date) and the content hash the import
+    side pins. REFUSALS ARE THE FEATURE: zero shared entries exports nothing and says so (never
+    an empty-but-valid bundle — the vacuous-export twin of the naked zero); a bundle line
+    matching the leak-grep tripwire patterns aborts the export naming the entry, so the
+    independent floor catches a mis-stamped secret before it leaves the tree.
+    (iii) `rmd learnings import <file>`: verifies the bundle hash against the operator-supplied
+    pin, writes it into the RMD-GLOBAL layer location the injector already reads, and defers ALL
+    trust enforcement to the existing refusal path — import never bypasses or reimplements the
+    tamper check, it just puts the artifact where the guard already looks. An import overwrites
+    only its own prior bundle, never the project or user layers.
+    (iv) PRECEDENCE IS ALREADY SETTLED: the injector merges layers in precedence order with the
+    project layer first — an imported fact never outranks a local one, so bad imported advice is
+    displaced by the first local lesson that contradicts it, and W1-T419's citation loop will
+    measure whether imported entries ever earn injection (the adoption question, made
+    answerable).
+    (v) Wire both verbs into COMMANDS with help text stating the privacy contract in one line
+    each; regenerate docs/cli-reference.md in the same PR.
+    (vi) FALSIFIER: an unstamped entry never appears in a bundle (the privacy direction); a
+    stamped entry round-trips export→import→selectLearnings visibility in a fixture tree (the
+    transport direction); a bundle edited after export is refused by the EXISTING guard (proving
+    no bypass was built); and a planted tripwire-matching fact aborts the export by name.
+    NOT IN SCOPE: any hosted registry or sync (Pro's separate repo per §6A); stamping any real
+    entry; cross-instance identity or signing beyond the existing hash pin (real signatures are
+    a follow-on the provenance stamp leaves room for); the user-overall layer (project-layer
+    export first — one layer proves the loop).
+  acceptance:
+    - claim: "an entry without the explicit opt-in never leaves the tree, and a tripwire match aborts the export naming the entry"
+      proof: "unit test: test/learnings-commons.test.ts"
+    - claim: "a stamped entry round-trips through export and import into real injection visibility, with tampering still refused by the existing guard"
+      proof: "unit test: test/learnings-commons.test.ts"
+    - claim: "the opt-in field is parsed by the entry loader, so exportability is data on the entry rather than a list beside it"
+      proof: "grep: share: public in src/lib/learnings.ts"
+    - claim: "both verbs are documented with their privacy contract, so the transport is an operator surface"
+      proof: "grep: learnings export in docs/cli-reference.md"
+  risk: high
+  origin: oper#plan-review-direction-2026-08-11
+  plan_refs: ["§6", "§6A", "§Self-improvement", "W1-T419"]
+  files: [src/lib/learnings.ts, src/run-task.ts, docs/cli-reference.md, test/learnings-commons.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — opt-in filtering, round-trip visibility, tamper refusal and the tripwire
+    abort are all fixture-decidable; the one judgment (WHAT to share) stays a per-entry operator
+    act this task deliberately does not automate.
+    risk:high — this is the first verb that writes tree content INTENDED to leave the machine;
+    the default-private field, the refuse-empty export, and the independent leak-grep floor are
+    the three-layer containment, and the falsifier's privacy direction is written first
+    (tdd:strict).
+    budget_usd 90 — two verbs, a bundle format the existing loaders parse, and the four-direction
+    falsifier; highest in this filing because the failure mode is a leak, not a wrong number.
+    PROOF NOTES: two unit criteria share the forward PATH proof (declared in files:); both greps
+    target EXISTING files (0 hits at 3b18d95, verified). `share: public` is delimiter-exact and
+    cannot substring-collide (verified zero hits repo-wide in src/lib/learnings.ts).
+    NO depends_on: the receiving guard, the layers and the leak-grep patterns are all on main;
+    composes with W1-T419 (citation counts answer whether imports earn their keep) without
+    needing it."
