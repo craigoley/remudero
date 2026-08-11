@@ -156,6 +156,49 @@ export function ciParityContractLines(): string[] {
   ];
 }
 
+/**
+ * THE ROLE SENTENCE — the one thing `renderImplementPrompt` never said.
+ *
+ * MEASURED (state/recon-implement-acts-as-recon.md, re-derived at db4e110): `renderReconPrompt`'s
+ * FIRST SENTENCE is "You are a RECON worker. Do NOT modify anything." The implement prompt opened
+ * with the literal string "# CONTEXT" and contained no role assignment anywhere — no "implement",
+ * no "build", no "you". There is no system prompt on either spawn (`systemPrompt`/
+ * `appendSystemPrompt` have zero occurrences in run-task.ts and worker.ts), so the prompt text was
+ * the ONLY thing distinguishing the two roles, and it did not.
+ *
+ * WHAT THE WORKER SAW INSTEAD. `# TASK` renders `task.prompt ?? task.title`, and zero task records
+ * carry `prompt:`, so it is always the title — which for a well-written shard is a DIAGNOSIS in the
+ * same register a recon report is written in. Above it, the CONTEXT block is recon's own OBSERVED
+ * lines, each stamped `[src: recon#<taskId>]`. A worker reading top-down met a colleague's findings
+ * and a statement of a defect, and was never addressed as the one who fixes it. Five dispatches
+ * across the two best-specified tasks in the plan ended in recon reports; one filed its own
+ * assignment as a `task:` follow-up, which is the only output grammar the contract actually teaches
+ * (`parseFollowups` accepts exactly research|task|action — there is no type meaning "I did it").
+ *
+ * WHY IT LIVES HERE rather than in run-task.ts. This module is where the literal text SHARED
+ * between the turn-0 prompt and the post-compaction anchor lives, and the role has to survive a
+ * compaction: the runs that failed ran 43-109 turns, which is the regime where the anchor exists to
+ * matter at all. ONE constant, rendered at the head of {@link renderAnchorBlock} and at the head of
+ * `renderImplementPrompt` — so the two can never drift, exactly as the output contract already
+ * cannot.
+ *
+ * IT IS NOT RENDERED BY RECON. `outputContractLines` and `renderAnchorBlock` have exactly two
+ * consumers between them, both on the implement path; `renderReconPrompt` renders neither. That
+ * asymmetry IS the fix — a role sentence both spawns carried would distinguish nothing.
+ *
+ * DELIBERATELY BEFORE `# CONTEXT` in the prompt. `extractContext` (lib/provenance.ts) scans from
+ * the first `CONTEXT` heading to the next heading, so text above it is outside the provenance
+ * linter's region and needs no `[src:]` — while a bullet added INSIDE that block would need one on
+ * every block, and `assertProvenance` throws at render time.
+ */
+export const IMPLEMENT_ROLE_LINES: readonly string[] = [
+  "You are an IMPLEMENT worker: YOU write the code in this run.",
+  "The change described under TASK is yours to MAKE NOW — not to investigate, summarise, or file as",
+  "follow-up work for someone else to do. Recon has already run; anything under CONTEXT is its",
+  "report TO you, not your assignment. A run that ends in a report with no diff has FAILED, however",
+  "accurate the report.",
+];
+
 export function outputContractLines(taskId: string): string[] {
   return [
     "# OUTPUT CONTRACT",
@@ -230,6 +273,8 @@ export function renderAnchorBlock(
     .map((c: AcceptanceCriterion) => `- claim: ${c.claim}\n  proof: ${c.proof}`)
     .join("\n");
   return [
+    ...IMPLEMENT_ROLE_LINES,
+    "",
     "# ANCHOR (re-injected verbatim after compaction — MASTER-PLAN §8B)",
     "",
     "## GOAL",

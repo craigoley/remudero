@@ -20,6 +20,7 @@ import {
 } from "../src/lib/learnings.js";
 import { assertProvenance, lintPrompt } from "../src/lib/provenance.js";
 import { renderImplementPrompt } from "../src/run-task.js";
+import { IMPLEMENT_ROLE_LINES } from "../src/lib/compaction.js";
 import type { Task } from "../src/lib/plan.js";
 
 const REPO_ROOT = join(new URL("..", import.meta.url).pathname);
@@ -161,7 +162,12 @@ test("the stable prefix (# CONTEXT + doctrine preamble) is BYTE-IDENTICAL across
     "RUN-2",
     renderMatchedLearnings(selectLearnings(CORPUS, ["src/lib/worker.ts"]).selected),
   );
-  const stablePrefix = ["# CONTEXT", renderDoctrinePreamble()].join("\n");
+  // THE ROLE LINES JOINED THE STABLE PREFIX, and that is the point rather than an exception:
+  // IMPLEMENT_ROLE_LINES is a constant, so putting it FIRST lengthens the cacheable prefix instead
+  // of displacing it. This test caught the move — it pinned the prefix as literally starting at
+  // "# CONTEXT" — and the invariant it exists for (byte-identical across two different tasks) is
+  // unchanged and now covers more bytes.
+  const stablePrefix = [...IMPLEMENT_ROLE_LINES, "", "# CONTEXT", renderDoctrinePreamble()].join("\n");
   assert.equal(promptA.slice(0, stablePrefix.length), stablePrefix);
   assert.equal(promptB.slice(0, stablePrefix.length), stablePrefix);
   assert.equal(

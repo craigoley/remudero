@@ -24,7 +24,7 @@ import {
 } from "./lib/config.js";
 import { readFileIfExists } from "./lib/fs-race-safe.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
-import { bodyVsDiffContractLines, outputContractLines, renderAnchorBlock, commitMessageContractLines, ciParityContractLines } from "./lib/compaction.js";
+import { bodyVsDiffContractLines, IMPLEMENT_ROLE_LINES, outputContractLines, renderAnchorBlock, commitMessageContractLines, ciParityContractLines } from "./lib/compaction.js";
 import {
   lintFiledTasks,
   newMonolithIdsAgainstBase,
@@ -4336,6 +4336,12 @@ export function renderImplementPrompt(
     .split("${TASK_ID}").join(task.id);
 
   return [
+    // THE ROLE, FIRST — mirroring `renderReconPrompt`, whose own first sentence is "You are a RECON
+    // worker." Above `# CONTEXT` on purpose: `extractContext` starts at that heading, so this text
+    // is outside the provenance linter's region and carries no citation, while the recon relay
+    // below it stays a cited CONTEXT claim exactly as before.
+    ...IMPLEMENT_ROLE_LINES,
+    "",
     "# CONTEXT",
     renderDoctrinePreamble(),
     contextClaims,
