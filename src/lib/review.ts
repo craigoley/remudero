@@ -5079,6 +5079,44 @@ export function rubricAdvisorySection(rubric: RubricResult): string | undefined 
   );
 }
 
+/**
+ * W1-T434: render this review's `scope_violation` advisory — the one {@link scopeViolationFiles}
+ * already computed for {@link ReviewVerdict.unwiredAdvisories} — as a PR-comment section, so a
+ * declared-scope overrun reaches the human gate instead of only the ledger. `undefined` when the
+ * diff stayed inside the task's declared `files:` (or the task declared nothing), so a clean PR
+ * adds nothing to the comment.
+ *
+ * READS THE ADVISORY, NEVER RECOMPUTES IT. The comparison has exactly one home
+ * ({@link scopeViolationFiles}); this is a formatter over its result, the same relationship
+ * {@link rubricAdvisorySection} has to {@link judgeRubric}. A second walk here could drift from
+ * the one the ledger's `review.unwired_advisory` line reports, and then the PR comment and the
+ * ledger would disagree about the same PR.
+ *
+ * WHY THIS EXISTS AT ALL, AND WHY IT IS ADVISORY. Until W1-T434 the push-site guard ({@link
+ * "../run-task.js".scopeGuardOutOfScopeFiles}) answered an overrun by REFUSING the push: the
+ * branch never reached origin and died with the reaped worktree, so the evidence an operator
+ * would need to tell a phantom revert from an under-declared `files:` was destroyed by the same
+ * action that reported it. The branch is now pushed and the overrun flagged — here, and on the
+ * `scope_guard.overrun` ledger line. ADVISORY because a measured majority of declared-scope
+ * widenings are legitimate (W1-T401's settlement: generator-gate artifacts, a task's own plan
+ * shard, operator-instructed or review-ratified widenings); like {@link rubricAdvisorySection}
+ * the header says so in the rendered text itself, so no reader mistakes it for a gate.
+ */
+export function scopeAdvisorySection(advisories: readonly UnwiredAdvisory[] | undefined): string | undefined {
+  const paths = (advisories ?? []).filter((a) => a.reasonCode === "scope_violation").flatMap((a) => a.symbols);
+  if (paths.length === 0) return undefined;
+  return (
+    `**Declared scope (advisory — does not affect remudero-review's verdict)**\n\n` +
+    `This diff touches ${paths.length === 1 ? "a file" : "files"} the task's \`files:\` list does not ` +
+    `declare. That is not by itself a fault — a generator-gate artifact, the task's own plan shard, ` +
+    `and an operator-instructed or review-ratified widening all look identical here. It is flagged ` +
+    `so the overrun is visible at the gate rather than only in the ledger, and never blocks:\n\n` +
+    `${paths.map((p) => `- \`${p}\``).join("\n")}\n\n` +
+    `If the widening is legitimate, add the path(s) to the task's \`files:\`. If it is not, this is ` +
+    `where a reverted-by-accident file (the \`reset --soft\` shape W1-T142 was built for) shows up.`
+  );
+}
+
 // ── reviewer_outcome (W1-T63/P10-a — the reviewer stops walling silently) ──
 
 /**

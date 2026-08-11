@@ -393,6 +393,7 @@ import {
   judgeReview,
   judgeRubric,
   rubricAdvisorySection,
+  scopeAdvisorySection,
   keywordOnlyAnnotation,
   acceptanceBlockDiagnostics,
   parseAcceptanceBlock,
@@ -2334,7 +2335,15 @@ async function runReview(args: {
   // second `gh pr comment` call, so a rubric finding never gets its own separate
   // network path to fail on.
   const rubricSection = rubric ? rubricAdvisorySection(rubric) : undefined;
-  if (hasUnmet || rubricSection) {
+  // W1-T434: the declared-scope overrun's own section, folded into the SAME best-effort comment
+  // for the same reason the rubric is — a scope finding never gets its own network path to fail
+  // on. Reads `verdict.unwiredAdvisories`, which the loop above has already ledgered, so the PR
+  // comment and the `review.unwired_advisory` line cannot disagree about one PR. Present
+  // INDEPENDENT of `verdict.state`: an overrun is normal on an otherwise-passing review (that is
+  // W1-T401's measured majority), and it is exactly the passing case where nothing else would
+  // ever mention it.
+  const scopeSection = scopeAdvisorySection(verdict.unwiredAdvisories);
+  if (hasUnmet || rubricSection || scopeSection) {
     // Post the full unmet list (+ the advisory rubric section, if any) as a PR
     // comment so a blocked PR — or one with a rubric concern — names its gap in
     // one place a human (or the next run) reads. Best-effort — never blocks the
@@ -2350,6 +2359,7 @@ async function runReview(args: {
       );
     }
     if (rubricSection) parts.push(rubricSection);
+    if (scopeSection) parts.push(scopeSection);
     const body = parts.join("\n\n---\n\n");
     try {
       execFileSync("gh", ["pr", "comment", prUrl, "--body", body], { stdio: "pipe" });
@@ -5428,13 +5438,38 @@ async function runTask(
       branchOnOrigin = false;
     }
     if (!branchOnOrigin) {
-      // W1-T142 SCOPE GUARD — the ONE orchestrator-initiated push in this file
-      // (the worker itself normally pushes from inside its own sandbox; this
-      // fallback runs on whatever the worktree holds, which is exactly the
-      // shape a refreshed/collapsed/squashed branch would have). Computed
-      // FRESH from this worktree, never a cached list, and BEFORE the push —
-      // a forged merge-base (the `reset --soft` near-miss) must never reach
-      // origin. Fail closed: an unreadable diff refuses rather than assumes clean.
+      // W1-T142 SCOPE GUARD, W1-T434 PUSH-AND-FLAG — the ONE orchestrator-initiated push in this
+      // file (the worker itself normally pushes from inside its own sandbox; this fallback runs on
+      // whatever the worktree holds, which is exactly the shape a refreshed/collapsed/squashed
+      // branch would have). Computed FRESH from this worktree, never a cached list, and BEFORE the
+      // push, so the ledger line is written against the diff that is about to reach origin.
+      //
+      // THE ANSWER TO AN OVERRUN IS NO LONGER A REFUSAL (W1-T434). It used to return verdict
+      // "failed" with no push, and that answer DESTROYED ITS OWN EVIDENCE: the branch never
+      // reached origin and died with the reaped worktree, so nobody could afterwards tell a
+      // phantom revert from an under-declared `files:` — the two shapes produce an identical file
+      // list, and the refusal deleted the only artifact that separates them. Four refusals in one
+      // week cost roughly $29 of already-completed work each time it fired (operator report,
+      // UNMEASURED here), while the very class it exists to contain merged anyway through the
+      // worker's own sandbox push (W1-T393's implementation, #1521, touching src/lib/ledger.ts
+      // beyond its declared files) — because this guard reaches ONE of gitPushRunBranch's nine
+      // call sites and only when the branch is ABSENT from origin. It could punish the fallback
+      // path after the money was spent; it could never contain a worker.
+      //
+      // WHAT IS GIVEN UP, STATED RATHER THAN GLOSSED. The DETECTION is unchanged — the detector
+      // below is untouched and still names exactly the same paths — but the BLOCK becomes a FLAG,
+      // and `unwiredAdvisories` folds into neither `state` nor `floorState` (lib/review.ts), while
+      // `armAutoMergeAtOpen` arms the instant the PR exists. So on this one path a phantom revert
+      // that passes CI and the review floor can now merge carrying the revert, where before it
+      // could not reach origin at all. That is accepted because real containment is the merge gate
+      // (Standing rule 3B), because the branch surviving is what lets a human adjudicate at all,
+      // and because a guard covering one push site was never the containment it read as.
+      //
+      // AND ONE CASE GOES QUIET RATHER THAN SOFT: `scopeGuardOutOfScopeFiles` treats an
+      // absent/empty declared scope as "everything is out of scope", but review-side
+      // `scopeViolationFiles` deliberately does the opposite and never fires on an empty scope. A
+      // task declaring no `files:` therefore still ledgers `scope_guard.overrun` here — the
+      // detector is untouched — but earns NO PR advisory. The ledger keeps it; the comment does not.
       //
       // THREE-DOT, AND THIS WAS A REAL DEFECT RATHER THAN A STYLE PREFERENCE. Two-dot
       // `origin/main..HEAD` diffs the two TIPS, so every file merged to main AFTER this worktree
@@ -5446,7 +5481,7 @@ async function runTask(
       // `origin/main...HEAD` diffs against the MERGE BASE — what THIS BRANCH changed relative to
       // where it started — which is the question the guard is actually asking, and is already the
       // convention `lib/ci-parity.ts` uses at both of its own diff sites.
-      let diffFiles: string[];
+      let diffFiles: string[] | undefined;
       try {
         diffFiles = execFileSync("git", ["-C", worktreePath, "diff", "--name-only", "origin/main...HEAD"], {
           encoding: "utf8",
@@ -5455,16 +5490,39 @@ async function runTask(
           .map((f) => f.trim())
           .filter(Boolean);
       } catch (e) {
-        log("scope_guard.diff_unreadable", { error: String((e as Error)?.message ?? e) });
+        // W1-T434: an unreadable diff no longer refuses either, and the reason is NOT merely
+        // symmetry with the overrun arm below — an orchestrator-side `git diff` that will not run
+        // is a fact about THIS WORKTREE'S git, not about the work the worker did. Failing closed
+        // here answered a question about the tooling by throwing away the branch. The line carries
+        // no `out_of_scope` key at all rather than an empty one: nothing was compared, and an
+        // empty list would read as "compared, found nothing" (the W1-T186 emitter discipline, and
+        // the same unknown-is-not-zero law `probeIdle` was corrected to follow).
+        log("scope_guard.diff_unreadable", {
+          error: String((e as Error)?.message ?? e),
+          declared_files: task.files ?? [],
+          reason:
+            "pushing unflagged rather than refusing: an unreadable orchestrator-side diff says nothing " +
+            "about the work, and the scope comparison is re-run per PR at review time",
+        });
         say(
-          `REFUSED: branch ${branch}'s diff against origin/main could not be read — refusing to push rather ` +
-            `than assuming it is in scope`,
+          `branch ${branch}'s diff against origin/main could not be read — pushing anyway and leaving the ` +
+            `declared-scope comparison to the review, rather than discarding completed work over a diff ` +
+            `this worktree could not produce`,
         );
-        return { taskId, runId, merged: false, costUsd, verdict: "failed" };
+        diffFiles = undefined;
       }
-      const outOfScope = scopeGuardOutOfScopeFiles(diffFiles, task.files);
+      const outOfScope = diffFiles === undefined ? [] : scopeGuardOutOfScopeFiles(diffFiles, task.files);
       if (outOfScope.length > 0) {
-        log("scope_guard.refused", { out_of_scope: outOfScope, declared_files: task.files ?? [] });
+        // THE REASON IS THIS DECISION'S OWN (the #981 rule — a ledger line carries the reason from
+        // the decision that produced its outcome, never from a neighbouring gate).
+        log("scope_guard.overrun", {
+          out_of_scope: outOfScope,
+          declared_files: task.files ?? [],
+          reason:
+            "pushed and flagged rather than refused: the branch is the only evidence that separates a " +
+            "phantom revert from an under-declared files:, and a refusal reaped it — W1-T401's review-side " +
+            "advisory carries the overrun to the human gate instead",
+        });
         // THE MESSAGE NAMES WHAT IT OBSERVED, NOT A CAUSE IT CANNOT SEE. It used to assert
         // "likely a forged merge-base / phantom revert (the reset --soft near-miss)" — the RAREST
         // of several causes producing an identical file list, and the one a reader then spends an
@@ -5472,11 +5530,10 @@ async function runTask(
         // really is more likely to be a genuine scope problem; the honest phrasing says which two
         // things it compared and leaves the diagnosis to whoever can see more than a file list.
         say(
-          `REFUSED: branch ${branch}'s diff against its merge base with origin/main touches file(s) ` +
+          `SCOPE OVERRUN: branch ${branch}'s diff against its merge base with origin/main touches file(s) ` +
             `outside task ${taskId}'s declared scope — either the work genuinely went out of scope or ` +
-            `the task under-declares files:; NOT pushing: ${outOfScope.join(", ")}`,
+            `the task under-declares files:; pushing and flagging on the PR: ${outOfScope.join(", ")}`,
         );
-        return { taskId, runId, merged: false, costUsd, verdict: "failed" };
       }
       say("fallback: pushing branch from orchestrator (outside sandbox)");
       gitPushRunBranch(worktreePath);
