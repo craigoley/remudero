@@ -1,0 +1,93 @@
+- id: W1-T423
+  title: "the commons section promises 'regressions in the harness's judgment become red CI, not vibes' and nothing delivers it — a golden-verdict suite over the deterministic reviewer, with planted violations that must stay caught"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 85.00
+  rationale: "FILED FROM OPERATOR BRIEF (plan review + direction validation, 2026-08-11), evidence
+    re-derived at 3b18d95. MASTER-PLAN's Self-improvement section specifies a 'Golden-task eval
+    suite … including planted violations (TDD skip, scope creep, test theater, provenance-free
+    prompt) … Regressions in the harness's judgment become red CI, not vibes. This is
+    mutation-testing discipline applied to the orchestrator.' MEASURED: no golden suite exists —
+    no fixture corpus, no CI assertion over known-good verdicts; the reviewer's judgment is
+    covered by unit tests of its PARTS, and nothing pins the END-TO-END verdict a canned PR
+    should receive. The cost is already visible in history: the reviewer merged fully-tested dead
+    code for two PRs (#12/#13, Standing rule 14's origin), #1189 MERGED at 2/4 proof execution
+    with nothing saying so, and the last month of review-floor churn (W1-T273 staleness, W1-T362
+    base-runs, W1-T387 executor collapse, W1-T400/T401 criterion tampering and scope advice)
+    changed judgment behavior repeatedly WITH no fixed points proving the old catches still
+    catch. Every one of those merged green — which is the gap: green meant 'the parts work', never
+    'the judgment stands'.
+    WHY NOW, AND WHY THIS IS THE PRODUCT DIRECTION: the operator's brief re-aims rmd at broad
+    adoption, and 2026 field consensus is that TRUST VERIFICATION, not capability, decides
+    adoption of agentic tooling — teams 'pair aggressive adoption with equally aggressive
+    review'. A harness whose own judgment is regression-locked is the credible version of that
+    story; one whose judgment drifts silently is the trust paradox restated.
+    SCOPED HONESTLY: v1 covers the DETERMINISTIC judgment path only — judgeReview,
+    judgeRubric, the proof executor, criterion tampering and scope guards over canned inputs.
+    Live-worker golden RUNS (spawning real models over a sandbox repo) stay deferred exactly as
+    the commons section sketches them; a deterministic core that CI can run on every PR is worth
+    shipping while a priced, flaky live harness is not yet."
+  design: |
+    FIXTURES ARE VERDICTS, NOT SNAPSHOTS — each golden pins WHAT THE JUDGMENT MUST CONCLUDE, in
+    the judge's own vocabulary, so refactors that preserve judgment pass and ones that change it
+    fail loudly.
+    (i) test/fixtures/golden-verdicts/: a corpus of canned cases, each a directory holding the
+    judge's real inputs (diff, PR body/report, task row, proof set) plus a golden.yaml naming the
+    REQUIRED verdict facts: met/unmet per criterion, proof_exec outcomes, arm/refuse decision,
+    and the named violation it plants. First tranche, one per documented judgment class: TEST
+    THEATER (tests injecting fakes around the changed seam, Standing rule 13/14 class), SCOPE
+    CREEP (diff touching undeclared files, the W1-T401 advice path), PROVENANCE-FREE (a body
+    whose claims contradict its own changeset, the #974 bodyContradictsDiff class), TAMPERED
+    CRITERION (the W1-T400 appended-criterion catch), DEAD PROOF (a name-filtered proof matching
+    no test, the W1-T387 no-match class), and one HEALTHY control that must arm — a suite of
+    catches with no must-pass control would reward a reviewer that refuses everything.
+    (ii) test/golden-verdicts.test.ts drives the REAL judges (judgeReview, judgeRubric, the
+    whitelisted proof executor, bodyContradictsDiff — never reimplementations) over each case and
+    asserts the golden facts. One test per case, titled by its violation, so a judgment
+    regression names the exact catch it lost.
+    (iii) CI: the suite rides the existing test glob — no new job, no path filter (a
+    conditionally-skipped judgment lock is the synthwatch #102 deadlock class §ci-gate exists to
+    avoid). Runtime budget stated in the suite header; every case is in-process and offline.
+    (iv) THE MUTATION DISCIPLINE, applied once at authoring: for each planted case, the worker
+    demonstrates in the PR body that WEAKENING the relevant judge (one named line each) flips
+    that case red — proving the golden discriminates rather than coincides. The healthy control
+    proves the other direction.
+    (v) GROWTH RULE, stated in the corpus README: every future judgment-changing PR adds or
+    updates a golden naming what changed — enforced socially first; a lint hook is follow-on
+    once the corpus exists to point at.
+    NOT IN SCOPE: live-worker golden runs (priced, deferred per the commons section); verdict
+    CALIBRATION against post-merge reality (W1-T424's concern); freezing today's judgment as
+    CORRECT where it is already known-wrong (a golden encodes intent, and each case cites the
+    rule or task that makes its verdict the intended one).
+  acceptance:
+    - claim: "each planted violation case fails under its weakened judge and passes under the real one, so the goldens discriminate judgment rather than coincide with it"
+      proof: "unit test: test/golden-verdicts.test.ts"
+    - claim: "the healthy control arms, so the suite rewards correct acceptance and not blanket refusal"
+      proof: "unit test: test/golden-verdicts.test.ts"
+    - claim: "the suite drives the real judges over canned inputs rather than reimplementing them, so it cannot drift from the gate"
+      proof: "unit test: test/golden-verdicts.test.ts"
+  risk: high
+  origin: oper#plan-review-direction-2026-08-11
+  plan_refs: ["§Self-improvement", "W1-T400", "W1-T401", "W1-T387"]
+  files: [test/golden-verdicts.test.ts, test/fixtures/golden-verdicts/README.md]
+  status: queued
+  attempts: 0
+  note: "verify:auto — every assertion is a deterministic judge over canned inputs.
+    risk:high — NOT blast radius (zero src/ lines change) but consequence: these goldens become
+    the fixed points every future review-floor PR must satisfy, so a golden encoding the WRONG
+    intended verdict would block correct work; design (iv)'s per-case discrimination proof and
+    the per-case rule citation are the containment.
+    budget_usd 85 — six fixture cases each needing real-input construction plus the weakened-judge
+    demonstrations; the test driver itself is small.
+    PROOF NOTES: all three criteria share the forward PATH proof (the W1-T387-merged shape; the
+    file is declared in files:, and fixtures land beside it under the declared README's
+    directory). No grep proofs: the only existing file this task touches is none — a grep at a
+    not-yet-existing path is exec_error, measured in the W1-T418 filing session, so the path
+    proof carries the load alone.
+    files: NOTE — test/fixtures/golden-verdicts/README.md stands for the fixture DIRECTORY in
+    files: (the scope guard matches prefixes by path; the README is the directory's anchor file
+    and the growth rule's home).
+    NO depends_on: the judges it locks are all on main."

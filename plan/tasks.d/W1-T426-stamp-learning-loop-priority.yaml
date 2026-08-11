@@ -1,0 +1,45 @@
+- id: W1-T426
+  title: "stamp the learning-loop arc as the priority field's first consumers — the plan-only half of the W1-T422 split the rule15-filing lint prescribes"
+  repo: remudero
+  depends_on: [W1-T422]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  rationale: "FILED FROM OPERATOR BRIEF (plan review + triage, 2026-08-11), paired with W1-T422.
+    The operator's directive re-affirmed the learning-system direction, and the arc that
+    implements it (W1-T418 rule efficacy, W1-T419 citation loop, W1-T420 intake dedup) sits
+    queued behind ~35 lower-id dispatch-eligible tasks with no way to be fronted. W1-T422 ships
+    the `priority:` field; this task is the stamp — split from it because the rule15-filing lint
+    refuses shard edits beside src/ at verify:auto (a dispatched worker's single PR would forfeit
+    the planOnly carve-out and be refused by criteriaTampered however good the work), and a
+    field that merges with zero consumers is Standing rule 14's warning wearing a schema."
+  design: |
+    THREE ONE-LINE EDITS, NOTHING ELSE: add `priority: 1` to the task rows of W1-T418, W1-T419
+    and W1-T420 in their shards. No criterion line is added, removed or altered, so the plan-only
+    carve-out applies cleanly. CHANGED-TASKS PROMOTION acknowledged: touching the rows promotes
+    their pre-existing violations to blocking — all three measured clean at filing time (zero
+    violations, zero warnings at 3b18d95), so the promotion is a no-op unless they rot first, in
+    which case this task's worker clears what it finds per the touched-row rule.
+    FALSIFIER: after the edit, dispatchOrder over the live plan ranks all three ahead of every
+    unstamped queued task (assert via the selector, not by reading the yaml back).
+    NOT IN SCOPE: prioritizing anything else — the operator ranks; this stamps the three the
+    directive named.
+  acceptance:
+    - claim: "the first arc task carries the stamp"
+      proof: "grep: priority: 1 in plan/tasks.d/W1-T418-repeat-incident-rate-rule-efficacy.yaml"
+    - claim: "the second arc task carries the stamp"
+      proof: "grep: priority: 1 in plan/tasks.d/W1-T419-learnings-citation-loop.yaml"
+    - claim: "the third arc task carries the stamp"
+      proof: "grep: priority: 1 in plan/tasks.d/W1-T420-duplicate-closure-at-knowledge-intake.yaml"
+  risk: low
+  origin: oper#plan-review-triage-2026-08-11
+  plan_refs: ["W1-T422", "W1-T418", "W1-T419", "W1-T420"]
+  files: [plan/tasks.d/W1-T418-repeat-incident-rate-rule-efficacy.yaml, plan/tasks.d/W1-T419-learnings-citation-loop.yaml, plan/tasks.d/W1-T420-duplicate-closure-at-knowledge-intake.yaml]
+  status: queued
+  attempts: 0
+  note: "verify:auto — three greps and a selector assertion. risk:low — plan-only, three lines,
+    carve-out intact by construction. budget_usd 25 — the smallest lawful unit of wiring.
+    PROOF NOTES: all three greps are forward references into EXISTING shard files (0 hits each at
+    3b18d95, verified in the W1-T422 filing pass). depends_on W1-T422: a stamp before the
+    comparator exists is inert yaml — the dependency states the truth."
