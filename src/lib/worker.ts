@@ -1572,6 +1572,21 @@ export function readWorktreeBase(worktreePath: string): string | null {
   }
 }
 
+/**
+ * Drop a worktree's sibling base record. The record's lifetime is its worktree's: it exists
+ * so a refusal can be attributed while the corpse is still on disk, and it must die when the
+ * corpse does — a removal that leaves it behind fails the guard suite's "cleans up" contract
+ * (the approve refusal path found exactly that residue) and would hand the reaper one orphaned
+ * file per pass. Guarded, never throws: a worktree predating W1-T405 has no record to drop.
+ */
+export function removeWorktreeBase(worktreePath: string): void {
+  try {
+    fs.unlinkSync(worktreeBasePath(worktreePath));
+  } catch {
+    /* absent or unreadable — removal owes nothing here */
+  }
+}
+
 /** Real (non-test) {@link assertWorktreeBaseCurrent} remote read: a fresh `git ls-remote`
  *  against `origin`, independent of whatever the fetch inside `worktreeAdd` just did. */
 function defaultReadRemoteHead(repoDir: string, ref: string): string {
@@ -1650,6 +1665,7 @@ export function worktreeRemove(repoDir: string, worktreePath: string): void {
   execFileSync("git", ["-C", repoDir, "worktree", "remove", "--force", worktreePath], {
     stdio: "inherit",
   });
+  removeWorktreeBase(worktreePath); // the sibling base record dies with its worktree
   // Accumulation control (orchestrator-side, survives a killed worker): also reap
   // STALE ORPHAN scratch under the same claude-<uid> root — the `rmd-*` test fixtures
   // a SIGKILL'd `npm test` leaves behind (its own finally + tmp-hygiene's exit handler
@@ -2228,6 +2244,7 @@ export function reapStaleWorktrees(root: string, opts: WorktreeReapOpts = {}): W
     try {
       fs.rmSync(entryPath, { recursive: true, force: true });
       removeRunLock(entryPath); // clear the sibling lock so it can't linger widowed
+      removeWorktreeBase(entryPath); // same for the W1-T405 base record — one orphan per reap otherwise
       reaped.push(name);
     } catch {
       keep(name, "removal-failed"); // best-effort: a removal hiccup never blocks the rest of the pass

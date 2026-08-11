@@ -1,10 +1,16 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { readWorktreeBase, recordWorktreeBase, worktreeAdd, worktreeBasePath } from "../src/lib/worker.js";
+import {
+  readWorktreeBase,
+  recordWorktreeBase,
+  worktreeAdd,
+  worktreeBasePath,
+  worktreeRemove,
+} from "../src/lib/worker.js";
 
 // W1-T405 acceptance (4): the base commit is recorded when the worktree is created, so a
 // later refusal can be attributed without re-deriving it. `worktreeAdd` never asserted or
@@ -54,6 +60,39 @@ test("worktreeAdd records the base it actually created, on the healthy path", ()
     worktreeAdd(clone, wt, "run-record-probe", "origin/main");
     const actualHead = execFileSync("git", ["-C", wt, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
     assert.equal(readWorktreeBase(wt), actualHead);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("worktreeRemove drops the sibling record with the worktree — a removed run leaves NO residue", () => {
+  // The record's lifetime is its worktree's. The guard suite's approve-refusal test asserts
+  // the worktrees dir is EMPTY after cleanup; a surviving `<name>.base` fails that contract
+  // and would hand the reaper one orphaned file per pass.
+  const root = tmp("rmd-wt-record-remove-");
+  const clone = join(root, "clone");
+  const wt = join(root, "wt");
+  try {
+    seedClone(clone);
+    worktreeAdd(clone, wt, "run-record-remove-probe", "origin/main");
+    assert.ok(existsSync(worktreeBasePath(wt)), "precondition: the record exists after create");
+    worktreeRemove(clone, wt);
+    assert.ok(!existsSync(worktreeBasePath(wt)), "the sibling record must die with its worktree");
+    assert.equal(readWorktreeBase(wt), null);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("worktreeRemove tolerates an already-absent record — a pre-W1-T405 worktree removes clean", () => {
+  const root = tmp("rmd-wt-record-remove-absent-");
+  const clone = join(root, "clone");
+  const wt = join(root, "wt");
+  try {
+    seedClone(clone);
+    worktreeAdd(clone, wt, "run-record-remove-absent-probe", "origin/main");
+    unlinkSync(worktreeBasePath(wt)); // simulate a worktree created before the record existed
+    assert.doesNotThrow(() => worktreeRemove(clone, wt));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
