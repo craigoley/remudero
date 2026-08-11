@@ -313,6 +313,26 @@ export type PreflightSpawn = (
    *  treat this as a distinct "the spawn itself failed" outcome, never as an ordinary nonzero
    *  exit whose output happens to be empty. */
   error?: string;
+  /**
+   * The signal that terminated the child, when one did — `spawnSync`'s own `signal` field,
+   * which this seam previously dropped on the floor.
+   *
+   * WHY IT IS ITS OWN FIELD AND NOT FOLDED INTO `error`. MEASURED against the real
+   * `spawnSync` (SIGKILL/SIGSEGV/SIGTERM self-kills, a `maxBuffer` breach, and a `timeout`):
+   * a child KILLED by a signal reports `status: null`, `signal` set, and **no `error` at
+   * all** — so before this field existed, a policy kill was indistinguishable from a spawn
+   * that never happened, and {@link spawnFailureDetail} could only say "no exit status and no
+   * error message". That is the gap #1553 left.
+   *
+   * THE TWO ARE NOT EXCLUSIVE, WHICH DECIDES THE REPORTING ORDER: a `maxBuffer` breach
+   * reports `error: spawnSync … ENOBUFS` **and** `signal: SIGTERM`, and a `timeout` reports
+   * `ETIMEDOUT` **and** `SIGTERM`. In both, the errno is the CAUSE and the SIGTERM is merely
+   * how the runtime carried it out — so `spawnFailureDetail` leads with the errno and mentions
+   * the signal second. Leading with the signal would report the ENOBUFS this file's own
+   * `PREFLIGHT_SPAWN_MAX_BUFFER` exists to prevent as a bare "killed by SIGTERM", losing the
+   * ceiling story entirely.
+   */
+  signal?: string;
 };
 
 // `npm run test:ci` alone currently writes ~1.7MB of TAP output to stdout (no --test-reporter
@@ -328,7 +348,7 @@ export function defaultPreflightSpawn(
   file: string,
   args: string[],
   opts: { cwd?: string; input?: string; stream?: boolean } = {},
-): { status: number | null; stdout: string; stderr: string; error?: string } {
+): { status: number | null; stdout: string; stderr: string; error?: string; signal?: string } {
   const res = spawnSync(file, args, {
     cwd: opts.cwd,
     input: opts.input,
@@ -352,6 +372,9 @@ export function defaultPreflightSpawn(
     stdout: res.stdout ?? "",
     stderr: res.stderr ?? "",
     error: res.error ? res.error.message : undefined,
+    // `spawnSync` types this `NodeJS.Signals | null`; normalised to `undefined` so it reads the
+    // same way as `error` above — absent means absent, never a null a caller has to special-case.
+    signal: res.signal ?? undefined,
   };
 }
 
@@ -387,10 +410,26 @@ const DEFAULT_PREFLIGHT_RANGE: PreflightRange = { from: "origin/main", to: "HEAD
  */
 export function spawnFailureDetail(
   step: string,
-  res: { status: number | null; error?: string },
+  res: { status: number | null; error?: string; signal?: string },
 ): string | undefined {
   if (res.status !== null) return undefined;
-  const why = res.error ?? "the child produced no exit status and no error message";
+  // THREE STATES, KEPT APART BECAUSE THEIR REMEDIES DIFFER. All three were MEASURED against the
+  // real `spawnSync` rather than reasoned about (see `signal`'s doc on PreflightSpawn):
+  //   (a) errno  — ENOENT means the path is not there from the CHILD's view (a linking problem);
+  //       EACCES/EPERM means it IS there and execution was refused (sandbox policy). Opposite
+  //       fixes, so the errno is quoted verbatim rather than paraphrased.
+  //   (b) signal with NO errno — the child STARTED and was terminated. SIGKILL under a sandbox is
+  //       a policy kill; SIGSEGV is a crash. Before this branch existed both landed in (c).
+  //   (c) neither — now genuinely rare, and worth saying so, because a reader who sees it should
+  //       suspect the seam rather than assume a cause.
+  // ORDER IS LOAD-BEARING: `maxBuffer`/`timeout` breaches set errno AND `SIGTERM`, so (a) is
+  // tested first and mentions the signal second. Leading with the signal would report an ENOBUFS
+  // as "killed by SIGTERM" and lose the ceiling this file's own PREFLIGHT_SPAWN_MAX_BUFFER names.
+  const why = res.error
+    ? `${res.error}${res.signal ? `, and the runtime then terminated it with ${res.signal}` : ""}`
+    : res.signal
+      ? `the child was KILLED by ${res.signal} — it started and was terminated, rather than never starting`
+      : "the child produced no exit status, no signal and no error message";
   return `${step}: SPAWN FAILURE — ${why}; the check did NOT run, so this is not a result about the code`;
 }
 

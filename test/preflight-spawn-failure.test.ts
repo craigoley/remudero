@@ -63,7 +63,10 @@ test("spawnFailureDetail speaks ONLY when the child produced no exit status", ()
 test("a null status with NO error message still speaks, rather than falling through silently", () => {
   const d = spawnFailureDetail("typecheck", { status: null });
   assert.ok(d);
-  assert.match(d, /no exit status and no error message/);
+  // The fallback now also reports the ABSENCE of a signal: `defaultPreflightSpawn` propagates
+  // `spawnSync`'s `signal`, so "no signal either" is a measured fact rather than an unasked
+  // question, and this state is the residual after errno and signal are both ruled out.
+  assert.match(d, /no exit status, no signal and no error message/);
 });
 
 // ── commitlint: both directions ──────────────────────────────────────────────
