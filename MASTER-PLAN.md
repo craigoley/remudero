@@ -877,6 +877,42 @@ BELOW: candidates are ratified by the Architect via a tasks.yaml PR — rule 15,
   (`P29 > P47 > P38 > P48 > P43 > …`), argued not assigned: above P43 because these instances
   blinded production paths, not only retro readings; below P38, five-cycles-priced and whose TASK A
   is the narrowest standing fix — the next retro or the operator confirms or moves it.
+  **THE CENSUS IS GONE, AND THE 21 CANNOT BE RE-DERIVED FROM THIS ENTRY — established 2026-08-11,
+  re-verified at d767c16, recorded HERE because the evidence must not rest on a `state/` path
+  (CLAUDE.md).**
+  `state/research-laws-and-gaps-2026-08-05.md` is unrecoverable: no mounted state volume in a fresh
+  container, **never committed on any ref** (`git log --all -- state/` returns 0 commits, and
+  `rev-list --all --objects` 0 objects by that name), and no tracked copy, backup or `.gz`. This
+  entry is now its only carrier, and it carries the CONCLUSION but not the METHOD — the six
+  mechanism classes are never enumerated, no predicate that selects an instance is stated, and the
+  23-row denominator behind "21 of 23" is unexplained. **So FIRST TRANCHE's own criterion is
+  inoperable**: "a boundary qualifies when it has a RECORDED census instance" cannot be evaluated
+  against a census nobody can read. Ratifying this as written would ratify an uncheckable number.
+  WHAT IS STILL CHECKABLE — the four named tranche members, re-verified at d767c16, which is what
+  this entry can support on its own text: (1) `parseAcceptanceBlock` STILL returns a bare
+  `AcceptanceCriterion[]` — unchanged since 0332dd0, OPEN; (2) `resolveNameFilteredCandidates` is
+  CONVERTED — it now returns `NameFilterResolution = resolved | absent | unresolvable`, clause (i)'s
+  exact shape, its own comment drawing the line ("Zero hits. Everything below decides whether that
+  is EVIDENCE or IGNORANCE"); (3) the ledger union SHIPPED — W1-T379 merged as `rmd ledger-grep`
+  (#1436, `src/lib/ledger-grep.ts`), so "open, filed 2026-08-05" above is STALE; (4) the sweep-survey
+  gate, recorded UNVERIFIED above, is VERIFIED STILL OPEN — `if (actionable.length)` wraps the ONLY
+  `log("daemon.clone_reap", …)` in run-task.ts, so a reaper that ran and found nothing and a reaper
+  that never ran are identical in the ledger. Face 2 ("self-hiding observability") IS specified
+  enough to sweep, and re-run over `src/**/*.ts` at d767c16: **83 guards of the form
+  `if (<coll>.length …)`, of which 10 are emptiness guards whose consequent is LOG-ONLY** (12 match
+  log-only; 2 test `> 1` and are semantic, not emptiness). CONTROL — 62 same-shaped guards whose
+  consequent carries a non-log effect, so the predicate is not vacuous — and it independently finds
+  the one instance this entry names by hand, the clone-reap gate. The other two faces have no stated
+  predicate and were NOT swept.
+  AND THE CLASS IS STILL BEING ADDED, WHICH BEARS ON RATIFICATION MORE THAN THE BACKLOG DOES. That
+  count was 9 the same day and is 10 now: `if (outOfScope.length > 0)` gating the only log on the
+  new push-and-flag path arrived with #1585, hours before this was written. Note what that does to
+  the PREDICTION above — "the next instance is triggered by an environment shift a query predates …
+  not by a code edit". This one WAS a code edit, on a path built to improve observability. Recorded
+  as an observation, not scored as a refutation: the prediction speaks of a census-class boundary
+  READ and this is a guard, so whether it counts is the operator's call, not a session's.
+  **TO BECOME RATIFIABLE this entry needs the six classes enumerated and the selecting predicate
+  written down, here; the 21 is otherwise a number with no method.**
 
 - **★ EVERYTHING ELSE R16 MINED IS EVIDENCE, NOT A PROPOSAL, AND IS FILED IN PLACE — no bullet
   restates it here.** The four organs shipped dark (T347/T349/T350/T362), the sixth frozen LEARNINGS
