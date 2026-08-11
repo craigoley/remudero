@@ -1,0 +1,72 @@
+- id: W1-T422
+  title: "dispatch order's own comment names the missing instrument — 'an explicit priority: field would be the honest successor' to the positional signal impl-DQ deliberately discarded: ship the field, the comparator key and the lint"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 65.00
+  rationale: "FILED FROM OPERATOR BRIEF (plan review + triage, 2026-08-11), evidence re-derived at
+    3b18d95. THE GAP IS SELF-DOCUMENTED: dispatchOrder's impl-DQ comment (src/lib/drain.ts) records
+    that dispatch priority USED to be file placement in plan/tasks.yaml, that the id-order sort
+    deliberately discarded it ('an implicit signal that only half the plan can express, and that
+    silently starves the other half, is worse than a uniform one'), and closes with the exact
+    sentence this task implements: 'it is a real loss and an explicit `priority:` field would be
+    the honest successor.' Since then the operator has NO mechanism to front a task: with 377
+    queued and ~50 merges/day, a task filed today at W1-T42x waits behind every lower id that is
+    dispatch-eligible, however stale its motivation. The operator's brief today asked to 'triage
+    in priority tasks' — and the triage instrument does not exist.
+    THE FIRST CONSUMERS ARE NAMED, NOT HYPOTHETICAL: the learning-loop arc (W1-T418 rule
+    efficacy, W1-T419 citation loop, W1-T420 intake dedup) was filed from the operator's own
+    learning-system directive and sits queued behind ~35 lower-id eligible tasks; today's brief
+    re-affirms that direction ('learns and improves from anyone who uses it'). Stamping those
+    three is W1-T426's plan-only diff, filed WITH this task and depending on it — the linter's
+    rule15-filing check refuses shard edits beside src/ at verify:auto (a worker's one PR would
+    lose the planOnly carve-out), so the pair is the lawful form of Standing rule 14's
+    wiring-is-a-deliverable here."
+  design: |
+    SMALL, TOTAL, AND HONEST ABOUT TIES — a priority scheme that reorders nondeterministically
+    is worse than none.
+    (i) SCHEMA: optional `priority: <int>` on a task (lower dispatches sooner; absent means the
+    default tier). The Task type (src/lib/plan.ts) gains the optional field; parsing tolerates
+    absence everywhere, so 400+ existing tasks are untouched.
+    (ii) ORDER: dispatchOrder (src/lib/drain.ts) sorts by (priority ?? +Infinity) FIRST, then the
+    existing numeric-then-lexicographic id order as the total tiebreak — determinism is preserved
+    because the comparator still reads only committed content, exactly the impl-DQ contract. The
+    impl-DQ comment's closing sentence is UPDATED in place to record that the successor now
+    exists (the comment that asked for it must not keep asking).
+    (iii) LINT: a `dispatch-priority` check (src/lib/task-linter.ts) WARNS on a priority outside
+    [0, 99] and on a priority on a non-open task (a gravestone with a priority is noise), so the
+    field cannot silently rot; blocking is not warranted — a bad value degrades to odd ordering,
+    never to a wrong verdict.
+    (iv) FIRST CONSUMERS arrive via W1-T426 (plan-only, depends_on this task) — the split the
+    rule15-filing lint prescribes for a schema field whose consumers are task rows.
+    (v) FALSIFIER: with a fixture plan of ids T1<T2<T3 where T3 carries priority 1, dispatchOrder
+    yields T3 first and T1,T2 in id order after; two tasks sharing priority 1 order by id
+    (determinism); a priority on a blocked task draws the lint warn; and REVERTING the comparator
+    change makes the ordering test fail while the tie test still passes — the discriminating pair.
+    NOT IN SCOPE: renumbering or re-prioritizing any other existing task (the operator ranks;
+    this ships the dial); consuming priority anywhere but dispatchOrder (status boards may want
+    it later — follow-on per surface).
+  acceptance:
+    - claim: "a task carrying a lower priority dispatches before lower-id tasks without one, and equal priorities preserve the deterministic id order"
+      proof: "unit test: test/dispatch-priority.test.ts"
+    - claim: "the linter warns on an out-of-range or non-open-task priority so the field cannot silently rot"
+      proof: "grep: dispatch-priority in src/lib/task-linter.ts"
+  risk: high
+  origin: oper#plan-review-triage-2026-08-11
+  plan_refs: ["§5D", "W1-T418", "W1-T419", "W1-T420"]
+  files: [src/lib/drain.ts, src/lib/plan.ts, src/lib/task-linter.ts, test/dispatch-priority.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — ordering, tiebreak and lint behavior are all fixture-decidable.
+    risk:high — it changes WHAT DISPATCHES NEXT for the whole fleet; the determinism falsifier in
+    design (v) is the containment, and absent-field behavior is byte-identical to today by
+    construction (priority ?? +Infinity).
+    budget_usd 65 — a comparator key, a schema field, one warn check, and the
+    discriminating test pair.
+    PROOF NOTES: the unit proof is a forward PATH reference (declared in files:); the grep
+    targets an EXISTING file where its load-bearing string must land (0 hits at 3b18d95,
+    verified — the exec_error-at-absent-path trap is why no grep points at a new file).
+    NO depends_on: W1-T426 depends on THIS task, not the reverse — the comparator is meaningful
+    the moment it ships, and the stamps follow."

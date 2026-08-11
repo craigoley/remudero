@@ -1,0 +1,93 @@
+- id: W1-T418
+  title: "every rule cites the PR that earned it and nothing measures whether it PREVENTS — a repeat-incident rate over the unioned ledger, with rules that repeat escalating to instrument proposals instead of being restated louder"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  rationale: "FILED FROM OPERATOR BRIEF (learning-system research, 2026-08-10), evidence re-derived
+    at db22bd8. THE GAP: this repo's knowledge machinery writes rules superbly and measures their
+    effect not at all. CLAUDE.md rules cite earning PRs; learnings carry `src: PR#N`; retros mint
+    both — and the MEASURED condition is SRE's 'postmortems producing documentation, not learning':
+    the diff-coverage lesson was earned THREE times (#768, #773, #777 — cited in CLAUDE.md's own
+    Before-you-push rule), the bound-fires-on-healthy-condition class recurred THREE times after
+    being named (W1-T312, W1-T380/#1392, W1-T382/#1401 — the Investigation-discipline rule lists
+    them), and the wiring-not-proved shape accumulated NINE task titles after Standing rule 14
+    stated it (W1-T365's own census). Google SRE's answer is the REPEAT-INCIDENT RATE: the fraction
+    of incidents sharing a root-cause class with a prior one — tracked as the postmortem program's
+    PRIMARY outcome metric (healthy <5%; >30% means the writing is not working). Nothing here
+    computes it, so nobody can say whether the rules corpus is a fence or a diary.
+    THE PIECES ALREADY EXIST: lib/ledger-grep.ts owns the sanctioned gz-union read (the archives
+    hold ~99.7% of history and rotations are NOT cumulative — W1-T388's territory guards its
+    pattern compile); refusal and failure classes are ledger step names (`blocked_ci`,
+    `blocked_illformed`, `dispatch.indeterminate`, `usage.probe_failed`, ...); rules carry their
+    earning citation and therefore their EFFECTIVE DATE. Recurrence-after-date is a join, not a
+    judgment.
+    THE ESCALATION IS THE INNOVATION, and it is this repo's own doctrine mechanized: prose is not
+    a gate (P48 lineage), and a rule that has demonstrably failed to prevent twice has earned
+    promotion to an instrument. Today that promotion happens only when an operator brief notices —
+    weeks of recurrences later. The inbox already exists to receive exactly such proposals."
+  design: |
+    A HOST-SIDE VERB, NOT A CI GATE — the ledger lives on the daemon host and nothing in CI can
+    read it; a gate that greps an absent file green is the vacuous-pass family.
+    (i) src/lib/rule-efficacy.ts, entry export ruleEfficacyReport (the name is load-bearing —
+    the call-site criterion greps for it): a signature table mapping rule ids (CLAUDE.md section anchors and
+    learnings ids) to LEDGER-VISIBLE failure classes — step-name patterns plus reason substrings,
+    each with the rule's effective date parsed from its earning citation. The table is DATA in the
+    module, reviewed like policy; a rule with no ledger-visible class is listed as UNMEASURABLE
+    (<why>) — never silently omitted, the P48 no-naked-zero clause. Start with the classes whose
+    recurrences are already documented (the three named in the rationale) plus every `blocked_*`
+    step; widening the table is follow-on work per class.
+    (ii) The metric: for each measurable rule, count same-class ledger rows strictly AFTER its
+    effective date, over the UNION read via lib/ledger-grep.ts's machinery — never the live file
+    alone (the live file is ~0.28% of history; a live-only count is the exact undercount the
+    zgrep-union rule exists to stop). Output: per-rule post-rule recurrence count and the corpus
+    `repeat-incident rate` headline, each rule's verdict one of PREVENTING (0 since),
+    REPEATING (n since, dates), or UNMEASURABLE (why).
+    (iii) THE ESCALATION: a rule at >= 2 post-rule recurrences drafts ONE promote-to-instrument
+    proposal into the ACTIVE-proposal registry through updateProposalRegistry (src/lib/inbox.ts,
+    the W1-T240 single-writer helper — never a hand-rolled JSON write), idempotent by rule id so
+    reruns never duplicate, carrying the recurrence dates as evidence. The inbox's own tiering
+    then owns its fate — this verb PROPOSES, the operator RATIFIES; auto-filing tasks from a
+    metric would be the laundering shape Law 5 forbids.
+    (iv) Wire `rmd rule-efficacy` into the COMMANDS registry (help text states it reads the
+    ledger union and is meaningless off-host), regenerate docs/cli-reference.md in the same PR —
+    the drift gate fails otherwise — and run it read-only except for the registry write in (iii).
+    (v) FALSIFIER, both directions: a fixture ledger with two post-rule rows for a fixture rule
+    yields REPEATING and exactly one drafted proposal across two runs; the same rows dated BEFORE
+    the rule's citation yield PREVENTING and no proposal; an empty signature table renders every
+    rule UNMEASURABLE rather than a 0% headline — a rate over nothing must refuse to print.
+    NOT IN SCOPE: CI-failure-class signatures (need GitHub reads — follow-on); editing any rule's
+    text; auto-filing tasks; the failure->fix retrieval corpus (named as follow-on in the PR).
+  acceptance:
+    - claim: "the verb reports per-rule recurrence with an explicit UNMEASURABLE arm and a corpus repeat-incident rate, over the unioned ledger rather than the live file"
+      proof: "unit test: test/rule-efficacy.test.ts"
+    - claim: "a rule with two post-rule recurrences drafts exactly one promote-to-instrument proposal through the registry's single-writer helper, idempotently"
+      proof: "unit test: test/rule-efficacy.test.ts"
+    - claim: "the headline names the metric so the operator reads a rate, not a raw count"
+      proof: "grep: repeat-incident in docs/cli-reference.md"
+    - claim: "the verb wiring actually calls the module, so the metric cannot merge as fully-tested dead code"
+      proof: "grep: ruleEfficacyReport( in src/run-task.ts"
+  risk: high
+  origin: oper#learning-system-research-2026-08-10
+  plan_refs: ["§8A", "P48", "W1-T388", "W1-T240"]
+  files: [src/lib/rule-efficacy.ts, src/run-task.ts, docs/cli-reference.md, test/rule-efficacy.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — every deliverable is a function over fixture ledgers and a registry write,
+    decidable in-process; the operator's judgment enters at the INBOX, where it already lives.
+    risk:high — the escalation writes to the proposal registry, and a wrong signature table
+    manufactures evidence against innocent rules; the falsifier's before/after-date arms are where
+    that risk is managed. Rule 19 span (src + docs + test) is one concern: a metric, its verb, and
+    the reference the verb regenerates.
+    budget_usd 80 — the signature table's initial population and the idempotent-escalation tests
+    are the cost; the join is small.
+    PROOF NOTES: two criteria share the forward PATH proof (the W1-T387-merged shape; the file is
+    declared in files:); the grep forward-references the metric name into docs/cli-reference.md —
+    an EXISTING file where the regenerated help line must land, 0 hits at db22bd8 (verified), the
+    no-third-option form. A grep at a not-yet-existing path is exec_error, not a forward
+    reference — measured while filing, which is why none is used here. LEDGER UNREACHABILITY NOTE: filed while the daemon host is down —
+    every ledger figure in the rationale cites prior measured reports, and the worker needs no
+    live ledger (fixtures drive every test).
+    NO depends_on: lib/ledger-grep.ts and the inbox helper are both on main."

@@ -275,3 +275,54 @@ test("main() dispatches `rmd preflight` to preflightCommand — the CLI wiring, 
     else process.env.RMD_SELF_SYNC_DONE = originalGuard;
   }
 });
+
+// ── W1-T??? (the spawn-vs-lint distinction): a child that NEVER STARTED is not a verdict ──────
+//
+// These live HERE, alongside the other step-reporting tests, and NOT only in
+// test/preflight-spawn-failure.test.ts, for a measured reason. Under the FULL suite with
+// `--experimental-test-coverage`, the coverage record contributed by that dedicated file did not
+// land: two consecutive full-glob runs reported `commitlintStep`'s own pre-existing lines as
+// `DA:...,0` — in the first run the ENTIRE function read zero, including `try {` and `const bin` —
+// while a scoped run of the same tests showed 12-51 hits on the same lines. That is the
+// file-level-record-loss class CLAUDE.md already records for test/run-task.test.ts, and it made
+// diff-coverage block on added lines that a passing, asserting test demonstrably executes.
+// This suite's record does land, so the load-bearing assertions are duplicated here deliberately.
+// The dedicated file keeps the full behavioural set and the falsifier.
+
+test("commitlint: a child that never produced an exit status is reported as a SPAWN FAILURE, not a lint verdict", () => {
+  const spawn: PreflightSpawn = () => ({ status: null, stdout: "", stderr: "", error: "spawnSync ENOENT" });
+  const r = commitlintStep("/repo", { from: "origin/main", to: "HEAD" }, spawn);
+  assert.equal(r.ok, false);
+  assert.match(r.detail, /SPAWN FAILURE/);
+  assert.match(r.detail, /ENOENT/);
+  assert.match(r.detail, /did NOT run/);
+});
+
+test("commitlint: a GENUINE violation is still reported verbatim, so the spawn guard removes no detection", () => {
+  const spawn: PreflightSpawn = () => ({
+    status: 1,
+    stdout: "✖   header must not be longer than 100 characters, current length is 106 [header-max-length]",
+    stderr: "",
+  });
+  const r = commitlintStep("/repo", { from: "origin/main", to: "HEAD" }, spawn);
+  assert.equal(r.ok, false);
+  assert.match(r.detail, /header-max-length/);
+  assert.doesNotMatch(r.detail, /SPAWN FAILURE/);
+});
+
+test("typecheck: a child that never started is a SPAWN FAILURE, while a real tsc diagnostic still reports itself", () => {
+  const dead: PreflightSpawn = () => ({ status: null, stdout: "", stderr: "", error: "spawnSync EACCES" });
+  assert.match(typecheckStep("/repo", dead).detail, /SPAWN FAILURE — spawnSync EACCES/);
+  const real: PreflightSpawn = () => ({ status: 1, stdout: "src/x.ts(1,1): error TS2304: Cannot find name 'foo'.", stderr: "" });
+  const r = typecheckStep("/repo", real);
+  assert.match(r.detail, /TS2304/);
+  assert.doesNotMatch(r.detail, /SPAWN FAILURE/);
+});
+
+test("emitter-checks: a git log that never ran FAILS instead of passing over zero messages", () => {
+  const dead: PreflightSpawn = () => ({ status: null, stdout: "", stderr: "", error: "spawnSync git ENOENT" });
+  const r = emitterChecksStep("/repo", { from: "origin/main", to: "HEAD" }, dead);
+  assert.equal(r.ok, false, "an unrun check must never report PASS over an empty set");
+  assert.match(r.detail, /SPAWN FAILURE/);
+  assert.doesNotMatch(r.detail, /0 commit message\(s\)/);
+});

@@ -313,6 +313,26 @@ export type PreflightSpawn = (
    *  treat this as a distinct "the spawn itself failed" outcome, never as an ordinary nonzero
    *  exit whose output happens to be empty. */
   error?: string;
+  /**
+   * The signal that terminated the child, when one did — `spawnSync`'s own `signal` field,
+   * which this seam previously dropped on the floor.
+   *
+   * WHY IT IS ITS OWN FIELD AND NOT FOLDED INTO `error`. MEASURED against the real
+   * `spawnSync` (SIGKILL/SIGSEGV/SIGTERM self-kills, a `maxBuffer` breach, and a `timeout`):
+   * a child KILLED by a signal reports `status: null`, `signal` set, and **no `error` at
+   * all** — so before this field existed, a policy kill was indistinguishable from a spawn
+   * that never happened, and {@link spawnFailureDetail} could only say "no exit status and no
+   * error message". That is the gap #1553 left.
+   *
+   * THE TWO ARE NOT EXCLUSIVE, WHICH DECIDES THE REPORTING ORDER: a `maxBuffer` breach
+   * reports `error: spawnSync … ENOBUFS` **and** `signal: SIGTERM`, and a `timeout` reports
+   * `ETIMEDOUT` **and** `SIGTERM`. In both, the errno is the CAUSE and the SIGTERM is merely
+   * how the runtime carried it out — so `spawnFailureDetail` leads with the errno and mentions
+   * the signal second. Leading with the signal would report the ENOBUFS this file's own
+   * `PREFLIGHT_SPAWN_MAX_BUFFER` exists to prevent as a bare "killed by SIGTERM", losing the
+   * ceiling story entirely.
+   */
+  signal?: string;
 };
 
 // `npm run test:ci` alone currently writes ~1.7MB of TAP output to stdout (no --test-reporter
@@ -328,7 +348,7 @@ export function defaultPreflightSpawn(
   file: string,
   args: string[],
   opts: { cwd?: string; input?: string; stream?: boolean } = {},
-): { status: number | null; stdout: string; stderr: string; error?: string } {
+): { status: number | null; stdout: string; stderr: string; error?: string; signal?: string } {
   const res = spawnSync(file, args, {
     cwd: opts.cwd,
     input: opts.input,
@@ -352,6 +372,9 @@ export function defaultPreflightSpawn(
     stdout: res.stdout ?? "",
     stderr: res.stderr ?? "",
     error: res.error ? res.error.message : undefined,
+    // `spawnSync` types this `NodeJS.Signals | null`; normalised to `undefined` so it reads the
+    // same way as `error` above — absent means absent, never a null a caller has to special-case.
+    signal: res.signal ?? undefined,
   };
 }
 
@@ -374,6 +397,44 @@ export interface PreflightRange {
 const DEFAULT_PREFLIGHT_RANGE: PreflightRange = { from: "origin/main", to: "HEAD" };
 
 /**
+ * A step whose subprocess NEVER STARTED, named as its own outcome — or `undefined` when the child
+ * did produce an exit status and the ordinary pass/fail reading applies.
+ *
+ * ENFORCES THE CONTRACT {@link PreflightSpawn}'s `error` FIELD ALREADY DECLARES and the three
+ * hand-route steps below then broke: `status: null` is "the spawn itself failed", NEVER an ordinary
+ * nonzero exit whose output happens to be empty. `shellOut` (lib/ci-parity.ts) honours it; these did
+ * not, so three drain runs read `commitlint: FAIL` on compliant 71/75/81-char subjects with an empty
+ * body, and the run's summary recorded `durationMs: 1` for the WHOLE preflight. A millisecond is not
+ * a lint. The full reasoning, the measurements and both falsifiers live in
+ * test/preflight-spawn-failure.test.ts, which is where the long form belongs.
+ */
+export function spawnFailureDetail(
+  step: string,
+  res: { status: number | null; error?: string; signal?: string },
+): string | undefined {
+  if (res.status !== null) return undefined;
+  // THREE STATES, KEPT APART BECAUSE THEIR REMEDIES DIFFER. All three were MEASURED against the
+  // real `spawnSync` rather than reasoned about (see `signal`'s doc on PreflightSpawn):
+  //   (a) errno  — ENOENT means the path is not there from the CHILD's view (a linking problem);
+  //       EACCES/EPERM means it IS there and execution was refused (sandbox policy). Opposite
+  //       fixes, so the errno is quoted verbatim rather than paraphrased.
+  //   (b) signal with NO errno — the child STARTED and was terminated. SIGKILL under a sandbox is
+  //       a policy kill; SIGSEGV is a crash. Before this branch existed both landed in (c).
+  //   (c) neither — now genuinely rare, and worth saying so, because a reader who sees it should
+  //       suspect the seam rather than assume a cause.
+  // ORDER IS LOAD-BEARING: `maxBuffer`/`timeout` breaches set errno AND `SIGTERM`, so (a) is
+  // tested first and mentions the signal second. Leading with the signal would report an ENOBUFS
+  // as "killed by SIGTERM" and lose the ceiling this file's own PREFLIGHT_SPAWN_MAX_BUFFER names.
+  const why = res.error
+    ? `${res.error}${res.signal ? `, and the runtime then terminated it with ${res.signal}` : ""}`
+    : res.signal
+      ? `the child was KILLED by ${res.signal} — it started and was terminated, rather than never starting`
+      : "the child produced no exit status, no signal and no error message";
+  return `${step}: SPAWN FAILURE — ${why}; the check did NOT run, so this is not a result about the code`;
+}
+
+
+/**
  * Step 1/3 — commitlint over the range, via the SAME binary + config CI uses
  * (`node_modules/.bin/commitlint --config commitlint.config.mjs`), so a local PASS means
  * the same thing a CI PASS does. Independent of the other two steps: a thrown spawn (the
@@ -391,6 +452,8 @@ export function commitlintStep(
     const res = spawn(process.execPath, [bin, "--config", config, "--from", range.from, "--to", range.to], {
       cwd: repoRoot,
     });
+    const spawnFailed = spawnFailureDetail("commitlint", res);
+    if (spawnFailed) return { name: "commitlint", ok: false, detail: spawnFailed };
     const ok = res.status === 0;
     return {
       name: "commitlint",
@@ -415,6 +478,8 @@ export function typecheckStep(repoRoot: string, spawn: PreflightSpawn = defaultP
   try {
     const tsc = join(repoRoot, "node_modules", ".bin", "tsc");
     const res = spawn(tsc, ["-p", "tsconfig.json", "--noEmit"], { cwd: repoRoot });
+    const spawnFailed = spawnFailureDetail("typecheck", res);
+    if (spawnFailed) return { name: "typecheck", ok: false, detail: spawnFailed };
     const ok = res.status === 0;
     return {
       name: "typecheck",
@@ -436,6 +501,11 @@ export function readRangeCommitMessages(
   spawn: PreflightSpawn = defaultPreflightSpawn,
 ): string[] {
   const res = spawn("git", ["log", "--format=%x00%B", `${range.from}..${range.to}`], { cwd: repoRoot });
+  // A `git log` that never ran returns an EMPTY stdout, which the filter below turns into ZERO
+  // messages — and zero messages is a PASS over an empty set, the vacuous-pass family. Throw
+  // instead; `emitterChecksStep`'s existing catch names it as that step's own failure.
+  const spawnFailed = spawnFailureDetail("emitter-checks", res);
+  if (spawnFailed) throw new Error(spawnFailed);
   return res.stdout
     .split("\0")
     .map((s) => s.trim())

@@ -1,0 +1,86 @@
+- id: W1-T420
+  title: "the same lesson was earned three times and the same defect shape filed nine tasks because nothing at intake asks 'do we already know this' — duplicate-closure with an answerable pointer, blocking for learnings and advisory for task titles"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  rationale: "FILED FROM OPERATOR BRIEF (learning-system research, 2026-08-10), evidence re-derived
+    at db22bd8. STACK OVERFLOW'S DUPLICATE CLOSURE — 'possible duplicate of <canonical>', close
+    with a pointer, reopenable by argument — is the mechanism that kept ten million questions
+    usable. The naive port fails here (this repo has no search visitors), but the INVERSION is
+    stronger: this corpus's only reader is the INJECTION ENGINE, so a duplicate learning costs
+    double context-tax against the knowledge budget AND splits whatever citation signal W1-T419
+    starts collecting across two ids — a duplicate is strictly worse here than on a search-driven
+    site, where Atwood at least argued duplicates multiplied keyword reach.
+    THE RECURRENCE EVIDENCE IS THIS REPO'S OWN: the diff-coverage lesson earned three times
+    (#768/#773/#777); the wiring-not-proved shape accumulating NINE task titles after Standing
+    rule 14 already stated it (W1-T365's census); the bound-fires-healthy class named and then
+    re-instanced twice (W1-T312 lineage). Each repeat means the knowledge existed and intake did
+    not consult it. Retros compress AFTER the fact (§8A); nothing checks AT FILING.
+    WHY DETERMINISTIC AND NOT SEMANTIC: an embedding check is a model call inside a lint path —
+    nondeterministic, priced, and unfalsifiable at review. Token-shingle overlap (normalized
+    words, k-shingles, Jaccard) is offline, reproducible, and its misses are a known shape
+    (paraphrase evades it) — a detector that catches verbatim-and-near re-learning is worth
+    shipping while catching paraphrase is not yet, and the miss shape must be stated in the
+    check's own doc rather than discovered."
+  design: |
+    ONE PURE MODULE, TWO CONSUMERS, TWO SEVERITIES — matched to population size and false-positive
+    cost, the W1-T352-vs-W1-T322 calibration argument applied at filing time.
+    (i) src/lib/knowledge-dedup.ts, entry export bestNearDuplicate (the name is load-bearing —
+    the call-site criterion greps for it): normalize (lowercase, strip punctuation and stopwords),
+    k-shingle, Jaccard against a supplied corpus; returns the best match with its score and id.
+    Pure over its inputs — consumers supply the corpus, the module never reads disk (the
+    task-linter purity contract, same seam discipline as moduleExists).
+    (ii) MEASURE BEFORE CHOOSING THE CUTOFF — the bound-fires-on-healthy-condition trap
+    (W1-T312/T380/T382) applies to thresholds exactly: the worker's FIRST deliverable is the
+    pairwise score distribution over the CURRENT active learnings corpus and the current open
+    task titles, written into the PR body; the cutoff is then chosen ABOVE the observed healthy
+    population's ceiling with the margin stated. A threshold asserted without that measurement is
+    refused at review by the task's own acceptance.
+    (iii) LEARNINGS INTAKE — BLOCKING: a diff adding an active entry whose fact scores above
+    cutoff against an existing ACTIVE entry fails with `possible duplicate of <id>` naming score
+    and threshold. Population: single-digit additions per week against ~38 active entries — tiny,
+    and every catch saves permanent double context-tax. ANSWERABLE, the W1-T365 exemption shape:
+    a PR body naming the existing id and stating the distinction clears it — a refusal that
+    cannot be answered would just relocate the judgment it replaces.
+    (iv) TASK-TITLE INTAKE — ADVISORY: a new task whose title scores above cutoff against an open
+    task's title gets a WARN naming the candidate — never blocking, because title similarity is
+    legitimately high for sibling tasks in an arc (the W1-T369/T370 pair would rightly score
+    high) and a false block at filing costs a whole re-file cycle. The warn is the pointer; the
+    author decides. Escalation to blocking is follow-on work gated on a measured false-positive
+    rate, W1-T322's advisory-first posture.
+    (v) FALSIFIER: a fixture pair that is the same lesson reworded scores above cutoff and blocks
+    with the pointer; the W1-T369/T370-shaped sibling pair warns and does not block; a corpus of
+    one entry never matches itself; and the distinction-statement exemption clears the block.
+    NOT IN SCOPE: semantic/embedding similarity; retroactive dedup of the existing corpus (that
+    is §8A compression work, already governed); closing any currently-open task as a duplicate.
+  acceptance:
+    - claim: "a near-duplicate active learning is refused with a pointer naming the existing id and the measured score, and a stated distinction clears it"
+      proof: "unit test: test/knowledge-dedup.test.ts"
+    - claim: "the module is pure over supplied corpora and both consumers pass theirs in, so the linter's purity contract survives"
+      proof: "unit test: test/knowledge-dedup.test.ts"
+    - claim: "sibling task titles warn without blocking, so an arc of related filings is taxed with a pointer rather than forbidden"
+      proof: "unit test: test/knowledge-dedup.test.ts"
+    - claim: "the linter consumer actually calls the module, so the check cannot merge as fully-tested dead code"
+      proof: "grep: bestNearDuplicate( in src/lib/task-linter.ts"
+  risk: high
+  origin: oper#learning-system-research-2026-08-10
+  plan_refs: ["§8A", "W1-T322", "W1-T352", "W1-T365"]
+  files: [src/lib/knowledge-dedup.ts, src/lib/task-linter.ts, test/knowledge-dedup.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — similarity scores, refusal messages and severity routing are all
+    fixture-decidable; the one judgment (the cutoff) is bound by design (ii) to a measurement the
+    PR must carry, which the operator reviews like any calibration.
+    risk:high — it changes what intake refuses. Too low a cutoff and it fires on the healthy
+    sibling-title population (the trap design (ii) exists for); too high and it catches neither
+    live recurrence class. The blocking/advisory split is the containment.
+    budget_usd 70 — a small pure module, two consumer wirings, and the distribution measurement.
+    PROOF NOTES: all three criteria share the forward PATH proof (the W1-T387-merged shape; the
+    file is declared in files: and design (v)'s falsifier asserts the pointer message inside it).
+    `possible duplicate of` deliberately echoes Stack Overflow's close-reason phrasing and stays
+    the load-bearing string, asserted by test rather than by grep because the module it lands in
+    does not exist at filing time — a grep at a not-yet-existing path is exec_error, measured.
+    NO depends_on: strengthens W1-T419 (unsplit citation signal) but needs nothing from it."

@@ -5,9 +5,12 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 import {
+  commitlintStep,
   CONVENTIONAL_LIMITS,
   normalizeSubjectCase,
   shapeCommitMessage,
+  spawnFailureDetail,
+  typecheckStep,
   wrapBodyLines,
 } from "../src/lib/commit-message.js";
 import { commitMessageContractLines, outputContractLines } from "../src/lib/compaction.js";
@@ -178,4 +181,47 @@ test("the contract states the NO-acronym-exemption rule the real gate enforces",
   for (const bad of ["SSE stream severed", "URL round-trips"]) {
     assert.notEqual(lint(`feat(serve): ${bad}\n`).status, 0, `gate must reject: ${bad}`);
   }
+});
+
+// ── Redundant coverage for the spawn-failure contract (companion to
+// test/preflight-spawn-failure.test.ts, which owns the full falsifier table). These three
+// exist because CI's coverage job merged an lcov in which ONLY the spawn-failure lines read
+// zero while this module's other lines were covered and every test passed — the documented
+// zeroing class where a single file's coverage contribution can vanish nondeterministically
+// under --experimental-test-coverage. Living in THIS suite, whose contribution demonstrably
+// survives, they keep the contract's lines covered independently of that file's fate. ──
+
+test("spawnFailureDetail speaks only on a null status, and names the runtime's reason", () => {
+  assert.equal(spawnFailureDetail("commitlint", { status: 0 }), undefined);
+  assert.equal(spawnFailureDetail("commitlint", { status: 1 }), undefined);
+  const detail = spawnFailureDetail("commitlint", { status: null, error: "spawn ENOENT" });
+  assert.match(detail ?? "", /SPAWN FAILURE/);
+  assert.match(detail ?? "", /spawn ENOENT/);
+  assert.match(
+    spawnFailureDetail("typecheck", { status: null }) ?? "",
+    /no exit status, no signal and no error message/,
+    "a null status with no error message still speaks — and now reports that no signal was seen either",
+  );
+  // The state this residual was previously swallowing: a child KILLED by a signal reports a null
+  // status with NO error, so before `signal` was propagated it rendered identically to the line
+  // above. Duplicated into this suite for the same reason the block's header comment gives.
+  assert.match(
+    spawnFailureDetail("typecheck", { status: null, signal: "SIGKILL" }) ?? "",
+    /KILLED by SIGKILL/,
+    "a killed child names its signal rather than falling into the residual",
+  );
+});
+
+test("commitlintStep routes a never-started child to SPAWN FAILURE, not a verdict about the commits", () => {
+  const res = commitlintStep(REPO_ROOT, undefined, () => ({ status: null, stdout: "", stderr: "", error: "spawn ENOENT" }));
+  assert.equal(res.ok, false);
+  assert.match(res.detail, /SPAWN FAILURE/);
+  assert.doesNotMatch(res.detail, /FAIL — /, "the bare range-FAIL shape is the misdiagnosis this contract removes");
+});
+
+test("typecheckStep routes a never-started child to SPAWN FAILURE, not a type verdict", () => {
+  const res = typecheckStep(REPO_ROOT, () => ({ status: null, stdout: "", stderr: "", error: "EACCES" }));
+  assert.equal(res.ok, false);
+  assert.match(res.detail, /SPAWN FAILURE/);
+  assert.match(res.detail, /EACCES/);
 });

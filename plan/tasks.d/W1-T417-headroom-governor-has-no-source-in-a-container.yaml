@@ -1,0 +1,135 @@
+- id: W1-T417
+  title: "the headroom governor has NO working source in a container: `claude -p \"/usage\"` no longer emits an account panel, `cachedUsageUtilization` is absent from `~/.claude.json`, and `daemon.headroom` needs a daemon — so the drain stops a healthy run at its fourth miss and no credential change fixes it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  rationale: "SUPERSEDES THIS SHARD'S ORIGINAL PREMISE, WHICH WAS WRONG AND IS CORRECTED HERE
+    RATHER THAN QUIETLY EDITED. As filed (#1546) this task claimed the probe FAILS TO AUTHENTICATE
+    because `buildWorkerEnv`'s ALLOWLIST strips the container's credential vars. THE LEDGER REFUTES
+    THAT, twice: `{step: usage.probe_failed, stage: parse, reason: no 'Current session:' line in
+    /usage output}`. `stage` is PARSE, not SPAWN. `readUsageSnapshot`'s spawn arm is an
+    `execFileSync` that throws on a non-zero exit, so reaching the parse arm PROVES the probe ran and
+    exited 0. And the probe was re-run in the image WITH A REAL TOKEN and still returned no panel, so
+    the credential is not the cause by direct measurement rather than by inference. The ALLOWLIST
+    finding stands as an observation and is NOT a defect this task should act on.
+    WHAT `-p` ACTUALLY RETURNS, quoted from the image: `Total cost: $0.0000`, `Total duration (API):
+    0s`, `Total code changes: 0 lines added`, `Usage: 0 input, 0 output` — Claude Code's session cost
+    footer, with NO assistant text and NO account-window panel at all.
+    THE PARSER WAS NOT WRONG WHEN WRITTEN. lib/headroom.ts's header says it is the parser for
+    `claude -p \"/usage\"`, CONFIRMED MACHINE-READABLE HEADLESS IN WS-0, and
+    test/fixtures/usage/usage-resetless-weekly.txt is a real captured panel carrying `Current
+    session:`, both weekly windows and the contributing-usage section. So `-p \"/usage\"` DID emit
+    the panel once. It no longer does. The image pins CLAUDE_CODE_VERSION 2.1.220 (deploy/Dockerfile).
+    THIS IS A CLIENT BEHAVIOUR CHANGE, NOT A MODE DIFFERENCE THAT WAS ALWAYS TRUE.
+    SO NO PARSER CHANGE HELPS. Accepting a second format is impossible when the second output
+    contains none of the required information — there is no window figure in it to read.
+    AND THE TWO FALLBACK SOURCES ARE ALSO DEAD HERE, both measured in the container:
+    `~/.claude.json` HAS NO `cachedUsageUtilization` KEY AT ALL (its `oauthAccount` is present, so
+    the file is a real config, not a stub); account-usage.ts's own header explains why — the block is
+    a CACHE only Claude Code writes, nothing in remudero can force it, and a host whose Claude Code
+    activity never refreshes it never gets one. `USAGE_CACHE_MAX_AGE_MS` is 30 minutes, so even a
+    populated block would be refused most of the time here.
+    `daemon.headroom` rows in this container's ledger: ZERO. It is written per TICK and a container
+    runs one-shot drains with no daemon, so a freshness-bounded read of it returns nothing rather
+    than something stale — the two objections account-usage.ts already records (it freezes when the
+    daemon sleeps, and a 77% line survived a switch to a 2% account) are not even reached.
+    THE COST: THREE consecutive drains stopped `headroom_degraded`, each surrendering a `--max 6`
+    budget after three or four dispatches.
+    THE LEDGER IS OTHERWISE UNREACHABLE — the Mac mini is down. The two `usage.probe_failed` rows and
+    the `-p` output above are the operator's report, named as such; every source-level fact is
+    re-derived at db22bd8. WHETHER THE PROBE STILL WORKS ON THE MINI IS UNMEASURED, not established."
+  design: |
+    THIS IS NOW A RULING, NOT AN IMPLEMENTATION, WHICH IS WHY `verify: human`. Every source the
+    governor could read has been measured dead in this mode, so what remains is a policy choice that
+    belongs to the operator. `isDispatchEligible` (src/lib/drain.ts) declines a task at
+    `verify !== "auto"` BEFORE the linter is consulted, so this parks safely while a drain runs
+    rather than dispatching a worker at a problem no code change in its declared scope can solve.
+
+    (i) THE OPTION THAT NEEDS NO CODE. `opts.headroomEnabled` already exists in the drain, and the
+    operator ruling behind it (fb-1784894405468-a4153e) already says that with the governor DISABLED
+    an unreadable read is ABSENT TELEMETRY, never a hold — the counter is reset and dispatch
+    proceeds. If the answer is that a container should run with the governor off, that is a
+    configuration decision available today and this task closes with no diff. Weigh it against what
+    is lost: the drain still has `--max` and the per-task budget tripwire, but nothing watching the
+    account window.
+
+    (ii) IF THE GOVERNOR MUST WORK, FIND A SOURCE FIRST — DO NOT WRITE A PARSER. The precondition is
+    an invocation that actually emits window figures headlessly on the pinned client. Establish that
+    BEFORE any code: if none exists, no amount of parsing helps and (i) or (iii) is the answer.
+    DO NOT spend account quota sweeping invocations; one measured attempt, reported.
+
+    (iii) THE DISTINCTION THE BOUND CANNOT MAKE, and it is a real defect independent of the source.
+    `consecutiveUnreadable` starts at zero every invocation, so a host where the signal has NEVER
+    been available is indistinguishable at the bound from a host that had readings and lost them.
+    The first is a governor that does not exist in this mode; the second is a governor in trouble.
+    A drain that has never once read the signal is not degrading — it is unmonitored, and stopping
+    at the fourth miss forever is the shape this repo has hit four times (W1-T312's wait cap,
+    W1-T380's deploy ceiling, W1-T382's check-wait bound, the idle-gate ceiling). Whether that
+    warrants different behaviour is the ruling; naming the distinction is not.
+
+    (iv) WHAT MUST NOT CHANGE, WHATEVER IS RULED. `readUsageSnapshot`'s no-signal polarity is
+    ratified and is not this task's to change. The `headroom_degraded` MESSAGE was corrected
+    separately (#1545) and needs no further work.
+
+    NOT IN SCOPE, AND EXPLICITLY WITHDRAWN FROM THIS TASK: the `buildWorkerEnv` ALLOWLIST widening
+    this shard originally asked for. The premise was refuted — the probe authenticates — so widening
+    a credential surface would spend a security decision on a non-defect. If a container worker turns
+    out to need those vars for some OTHER reason, that is a new task with its own evidence.
+  acceptance:
+    - claim: "the ruling names which option the fleet takes when the headroom governor has no readable source in a mode"
+      proof: "grep: W1-T417 in DECISIONS.md"
+    - claim: "the ruling records whether a never-available signal is treated differently from one that degraded mid-run"
+      proof: "grep: never-available in DECISIONS.md"
+  risk: high
+  origin: recon#headroom-degraded-2026-08-10
+  plan_refs: ["W1-T290", "W1-T267", "W1-T18"]
+  files: [DECISIONS.md]
+  status: blocked
+  attempts: 0
+  note: "verify:human — THIS IS A RULING, and it was verify:auto until the premise was refuted.
+    `isDispatchEligible` (src/lib/drain.ts) declines at `verify !== \"auto\"` BEFORE the linter runs,
+    so the task parks safely while a drain is running rather than sending a worker at a problem no
+    change inside its old declared scope could solve.
+    WHY THE SCOPE COLLAPSED TO ONE FILE. The original files: named src/lib/env.ts and a new test,
+    because the task was going to widen the ALLOWLIST. That premise is refuted, so the code scope is
+    withdrawn rather than kept warm: DECISIONS.md is the artifact a ruling produces, and declaring a
+    source file this task may well never touch would invite exactly the speculative widening the
+    refutation removes. If the ruling calls for code, the follow-up task declares it with the
+    ruling's own evidence behind it.
+    RULE 19: one declared path, one concern — no sizing violation, and risk:high is kept on merit
+    because the ruling governs whether a fleet dispatches unmonitored, not because of span.
+    RULE 25 CHECKED AGAIN AFTER THE RESCOPE: DECISIONS.md is not an INSTRUMENT_SURFACE entry (no
+    workflow, no *-ratchet.mjs, no diff-coverage.mjs, no *-baseline.json, no
+    mutation-relevant-paths.json, no stryker.conf.json) and is not in USER_VISIBLE_SURFACE_RE, so
+    neither the entanglement gate nor the cli-reference drift check is tripped. Note W1-T326's
+    lesson, which is why verify:human and DECISIONS.md go together: `ruling-verify` blocks a task
+    declaring DECISIONS.md at verify:auto, because the operator judges rulings.
+    ON THE PROOFS: both are `grep:` with an explicit path against DECISIONS.md, naming strings that
+    do not appear there today — forward references that PARSE now and become checkable the moment
+    the ruling is written. Neither names an existing symbol, so neither can match the merge base and
+    be downgraded to executed_stale. This is deliberately NOT a `unit test:` proof: there is no test
+    that can assert an operator made a decision, and forcing one would yield a proof that parses,
+    matches zero tests and caps the review — the theatre the dialect gate exists to stop.
+    STATUS RESTORED TO `blocked`, 2026-08-11, AND WHY IT REGRESSED — recorded because the agreement
+    between the two corrections is stronger evidence than either one alone. TWO PRs corrected this
+    same task TWO MINUTES APART tonight, from sessions that never saw each other: #1548 (merged
+    46d692a) retired it with `status: blocked` and a retirement record; #1549 (merged c321a08)
+    re-scoped it to this ruling and RENAMED the file. The rename won the modify/delete merge, which
+    silently discarded #1548's status — a rename cannot carry a field edit made to the path it
+    replaces. Nothing was wrong with either change; the loss is a property of the merge shape.
+    BOTH AGREED ON THE FINDING THAT MATTERS: the filing premise is REFUTED. The `/usage` probe
+    AUTHENTICATES and runs — `usage.probe_failed` carries `stage: parse`, and `readUsageSnapshot`
+    (src/run-task.ts) reaches its parse arm only once the subprocess has returned — so the credential
+    is not the cause and the ALLOWLIST widening is withdrawn. They differed only on DISPOSITION:
+    retire versus park for a ruling. This shard keeps #1549's disposition, which is the better
+    measured one — it names the client-behaviour change and establishes that BOTH fallback sources
+    are empty here, including `cachedUsageUtilization`, which #1548's retirement record had pointed
+    at as the replacement candidate without knowing the key is absent.
+    THE STATUS WAS NEVER THE THING BLOCKING DISPATCH, so this is a correctness fix and not an urgent
+    one: `isDispatchEligible` (src/lib/drain.ts) tests `verify !== \"auto\"` BEFORE it tests
+    `status === \"blocked\"`, so `verify: human` alone has parked this task throughout. Restoring the
+    status makes the record say what both corrections concluded rather than leaving it reading
+    `queued` — a task nothing will ever run should not describe itself as waiting to run."

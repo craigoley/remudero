@@ -1,0 +1,86 @@
+- id: W1-T424
+  title: "verdicts are never compared against what happened next — a calibration verb joining each armed merge to post-merge reality (reverts and follow-up fixes), so 'the reviewer is working' becomes a measured claim"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  rationale: "FILED FROM OPERATOR BRIEF (plan review + direction validation, 2026-08-11), evidence
+    re-derived at 3b18d95. MASTER-PLAN's Self-improvement section specifies 'Verdict calibration:
+    reviewer verdicts log confidence + rubric scores; a periodic job compares them against
+    post-merge reality (revert rate, follow-up-fix rate within N days) and files tuning tasks
+    when calibration drifts.' MEASURED: nothing computes it. The verdict side EXISTS — every
+    armed merge has its review verdict in the ledger and its PR body on origin/main — and the
+    reality side EXISTS — reverts and fix-commits naming the same files or task are ordinary git
+    history (the last 36h alone carried 28 fix-typed merges) — but the JOIN has never been built,
+    so no one can say whether a full-PASS verdict predicts stability better than a
+    keyword-floor-only merge, or whether the review floor's month of hardening (W1-T273, T362,
+    T387, T400, T401) moved outcomes at all.
+    THIS COMPLETES THE MEASUREMENT TRIAD the learning loop needs: W1-T418 measures whether RULES
+    prevent; W1-T423 locks what JUDGMENT concludes; this measures whether judgment PREDICTS.
+    Together they are the SRE outcome-metric discipline applied to all three layers of the
+    harness's own quality story — and the adoption argument writes itself: a harness that can
+    SHOW 'full-PASS verdicts revert at X%, degraded merges at Y%' is making the trust-paradox
+    case with its own ledger, which no amount of feature prose can."
+  design: |
+    A HOST-SIDE VERB, LIKE W1-T418 AND FOR THE SAME REASON — the ledger lives on the daemon host;
+    the git side is local history; neither needs the network beyond an ordinary fetch.
+    (i) src/lib/verdict-calibration.ts, entry export verdictCalibrationReport (the name is
+    load-bearing — the call-site criterion greps for it): pure over its two supplied corpora —
+    (a) VERDICT ROWS mined from the unioned ledger via lib/ledger-grep.ts's read (never the live
+    file alone; it is ~0.3% of history), each carrying the armed PR, verdict class (full PASS /
+    keyword floor / degraded arm) and merge sha; (b) a GIT EVENT dump (the %s%x00%b%x01 shape the
+    failing-split classifier proved out) from which post-merge REVERTS (revert-typed subjects or
+    `This reverts commit` bodies naming the merge) and FOLLOW-UP FIXES (fix-typed merges within N
+    days whose changed files overlap the verdict's PR files, or whose subject cites its task id)
+    are classified per verdict.
+    (ii) OUTPUT: per verdict-class revert rate and follow-up-fix rate over a stated window, each
+    denominator NAMED (x of N armed merges), with UNMEASURABLE(<why>) for rows whose PR files or
+    merge sha cannot be recovered — the P48 no-naked-zero clause; a rate over a silently shrunken
+    denominator is the exact lie this verb exists to end. A minimum-population floor: below M
+    rows in a class the verb prints the count and REFUSES the rate (a percentage over 3 merges is
+    an anecdote wearing a metric).
+    (iii) FOLLOW-UP FIX ATTRIBUTION IS THE JUDGMENT CALL, so it is DATA: the overlap rule (file
+    intersection, task-id citation, and the N-day window) lives in one exported policy object the
+    report cites in its own output — moving the boundary is a reviewed diff, not a hidden
+    constant, the failing-split classifier's rule-travels-with-the-figure discipline.
+    (iv) Wire `rmd verdict-calibration` into COMMANDS (help: reads the ledger union, meaningless
+    off-host), regenerate docs/cli-reference.md in the same PR; read-only — this verb files
+    nothing and proposes nothing in v1 (the commons section's 'files tuning tasks' escalation
+    composes with W1-T418's inbox machinery as follow-on, once the metric has a baseline).
+    (v) FALSIFIER, both directions: a fixture ledger+git pair where a full-PASS merge is reverted
+    inside the window classifies as a miss; the same revert dated OUTSIDE the window does not; a
+    fix-typed merge with zero file overlap and no id citation attributes to NOTHING (the
+    over-attribution direction — a busy repo fixes things near everything); and an empty verdict
+    corpus prints counts and refuses rates.
+    NOT IN SCOPE: changing any verdict; auto-filing tuning tasks (follow-on via the inbox);
+    confidence scores the verdicts do not yet log (the commons sketch includes them — logging
+    them is its own small task once this join proves the read side).
+  acceptance:
+    - claim: "revert and follow-up rates are reported per verdict class with named denominators and an UNMEASURABLE arm, over the unioned ledger"
+      proof: "unit test: test/verdict-calibration.test.ts"
+    - claim: "the attribution window and overlap rule print with the figures, so the metric travels with its rule"
+      proof: "unit test: test/verdict-calibration.test.ts"
+    - claim: "the verb is registered and documented, so the metric is an operator surface rather than a buried function"
+      proof: "grep: verdict-calibration in docs/cli-reference.md"
+    - claim: "the verb wiring actually calls the module, so the metric cannot merge as fully-tested dead code"
+      proof: "grep: verdictCalibrationReport( in src/run-task.ts"
+  risk: high
+  origin: oper#plan-review-direction-2026-08-11
+  plan_refs: ["§Self-improvement", "P48", "W1-T418", "W1-T423"]
+  files: [src/lib/verdict-calibration.ts, src/run-task.ts, docs/cli-reference.md, test/verdict-calibration.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — the join, the rates, the refusal floors and both falsifier directions are
+    all fixture-decidable offline.
+    risk:high — a wrong attribution rule manufactures evidence against a healthy reviewer (the
+    over-attribution arm in design (v) is the trap: fix-typed merges land hourly here); the
+    policy-as-data rule and the minimum-population floor are the containment.
+    budget_usd 80 — the two miners and the attribution fixtures are the cost; the arithmetic is
+    trivial.
+    PROOF NOTES: two unit criteria share the forward PATH proof (W1-T387-merged shape, file
+    declared in files:); both greps target EXISTING files where their strings must land (0 hits
+    at 3b18d95, verified) — never a not-yet-existing path (exec_error, measured).
+    NO depends_on: composes with W1-T418 (shared ledger idiom) and W1-T423 (the goldens lock what
+    this measures the prediction quality OF), but needs neither merged first."
