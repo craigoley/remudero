@@ -1,0 +1,88 @@
+id: fb-deny-floor-never-probed-2026-08-11
+ts: 2026-08-11T18:30:00.000Z
+raw: |-
+  THE DENY FLOOR IS THE SOLE CONTROL OVER THE `gh` SURFACE, AND IT IS PROVEN NEVER.
+
+  This is the FIFTH recon to name it. The previous four reported it as adjacent to something
+  else, so it kept being inherited as a footnote. It is written here, on its own, because the
+  reason it matters is not the reason those four gave.
+
+  RE-DERIVED AT 9b8736a, all three claims:
+    - `evaluateDenyFloor` (src/lib/worker.ts) is referenced from `src/spike.ts` ONLY. Nothing on
+      the dispatch path calls it.
+    - `probeContainment` (src/lib/containment.ts) is wired into src/run-task.ts at three call
+      sites and FAILS CLOSED.
+    - `validateWorkerSettings` (src/lib/settings.ts) reads `sandbox` (existence, `enabled`,
+      `failIfUnavailable`, plus `checkKeys` allowlists on `sandbox.network` /
+      `sandbox.filesystem`) and `permissions.ask` (must be empty). It NEVER reads `hooks`, and
+      NEVER reads `permissions.deny`.
+
+  IT IS NOT DEFENCE IN DEPTH, AND THAT IS THE CORRECTION THIS FINDING MAKES. The previous
+  framing assumed the OS sandbox covers the same ground. It does not, and settings/worker.json
+  says so in one line:
+
+      "excludedCommands": ["gh *"]
+
+  `gh` IS DELIBERATELY EXCLUDED FROM THE SANDBOX. So for the entire `gh` surface, the deny-floor
+  hook is not a second layer -- it is the ONLY layer. hooks/deny-floor.sh's own comment states
+  it: "`gh` runs outside the OS sandbox with the operator's own ambient credential".
+
+  WHAT ONLY THE DENY FLOOR BLOCKS (hooks/deny-floor.sh, five rules):
+    1. `git push --force` to main/master -- the sandbox does not police git semantics.
+    2. `gh auth login|logout|refresh|token|setup-git` -- outside the sandbox by construction.
+    3. the planted `FORBIDDEN_PROBE` marker.
+    4. `gh api -X POST repos/*/statuses` -- THE FORGE ATTACK (W1-T203). A spawned worker could
+       otherwise post its own `remudero-review=success` and SATISFY ITS OWN MERGE GATE. This is
+       a self-approval path into the required review gate, not a file-permission nicety.
+    5. the operator's machine-specific `~/.config/remudero/deny.local` paths.
+
+  WHAT probeContainment PROVES, AND ITS LIMIT: that an outside-cwd WRITE is OS-denied under the
+  sandbox (`assessContainment`). It proves nothing about reads of the credential dirs, nothing
+  about network egress, and -- by construction -- nothing about any `gh` invocation. The two
+  controls do not overlap on rule 4 at all.
+
+  ONE OVERLAP WORTH RECORDING SO IT IS NOT RE-LITIGATED: `permissions.deny` lists exactly the
+  three globs `sandbox.filesystem.denyRead` lists (`~/.ssh/**`, `~/.aws/**`,
+  `~/.config/remudero/**`). THAT pair really is defence in depth -- but neither arm is probed
+  either, since probeContainment tests a write, not a read.
+
+  HOW IT COULD SILENTLY STOP APPLYING (the failure mode, established rather than feared):
+  `checkKeys` is an ALLOWLIST guard, so an ADDED upstream key fails loud -- which is what the
+  earlier measurement of the 0.3.209-pin vs 0.3.220-installed drift found (two keys added,
+  none removed). The REMOVED/RENAMED direction is not symmetric: nothing asserts any required
+  key beyond `sandbox.enabled` / `sandbox.failIfUnavailable`, and `hooks` is not validated at
+  all. So a settings file with the whole `hooks` block MISSING passes validation today, and a
+  worker would spawn with no deny floor and a green containment probe. An upstream rename of
+  `hooks` or `PreToolUse` produces the same outcome. At an eleven-version lag this is a
+  question of when, not whether.
+
+  WHY NO FIX IS PROPOSED HERE, STATED PLAINLY RATHER THAN LEFT AS A GAP.
+  A behavioural probe of the deny floor is possible in two shapes and neither is narrow:
+    (a) SCRIPT-LEVEL. hooks/deny-floor.sh reads tool-call JSON on stdin and exits 2, so it can
+        be driven directly with no worker at all -- cheap and genuinely behavioural. But it
+        proves the SCRIPT, not the WIRING: it would pass whether or not Claude Code invokes the
+        hook, which is precisely the DECLARED-vs-ENGAGED gap this finding is about. Shipping it
+        would close the ticket and leave the hole.
+    (b) ENGAGEMENT-LEVEL. Prove a real spawned worker's Bash call is refused. That is the only
+        shape that answers the question, and it means changing probeContainment's executor
+        prompt, `ContainmentEvidence`, and `assessContainment` to carry a second, independent
+        verdict -- inside a fail-closed safety gate on the dispatch path. That is a task, not a
+        patch, and a half-done version of it is worse than the gap.
+  A THIRD OPTION WAS CONSIDERED AND REJECTED: extending `validateWorkerSettings` to require the
+  hooks block. It would ride the per-run fail-closed path for free (probeContainment's GATE 1
+  already calls `validateWorkerSettingsFile`) and would catch the silent-REMOVAL direction
+  above. But it is static, it cannot see a rename it does not already know about, and shipping
+  it alone would read as the gap being closed.
+
+  THE COST QUESTION, ANSWERED FOR WHOEVER FILES THIS: probeContainment already spends one spawn
+  per dispatch, so shape (b) needs no NEW spawn -- the deny probe can ride the existing one by
+  asking the same worker to attempt one blocked command and asserting the refusal. That is what
+  makes (b) affordable, and it is the strongest argument for doing it properly rather than
+  cheaply.
+
+  THE LEDGER IS UNREACHABLE (the Mac mini is down), so nothing above is inferred from it. Every
+  claim is from source at 9b8736a.
+attachments: []
+origin: recon#deny-floor-never-probed-2026-08-11
+status: new
+proposal_pr: null
