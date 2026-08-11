@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 
-import { defaultPreflightSpawn, typecheckStep, type PreflightSpawn } from "./commit-message.js";
+import { defaultPreflightSpawn, spawnFailureDetail, typecheckStep, type PreflightSpawn } from "./commit-message.js";
 
 /**
  * lib/ci-parity.ts — `rmd preflight --ci-parity` (W1-T294, MASTER-PLAN §5/§5C).
@@ -259,7 +259,7 @@ const TMP_HYGIENE_IMPORT = "./test/setup/tmp-hygiene.ts";
 /** An ordinary leaf: run a command, PASS iff it exits 0, and only echo its output on FAIL —
  *  the shape every straightforward job (leak-grep, the npm-script jobs, the coverage/lint-plan
  *  sub-steps) uses. */
-function shellOut(
+export function shellOut(
   spawn: PreflightSpawn,
   label: string,
   file: string,
@@ -267,15 +267,20 @@ function shellOut(
   opts?: { cwd?: string; input?: string; stream?: boolean },
 ): CiParityLeafResult {
   const res = spawn(file, args, opts);
-  if (res.status === null) {
-    // The child never produced an exit status at all — a signal kill, a buffer ceiling hit,
-    // ENOENT, etc. This is NOT an ordinary test failure, and rendering it as `FAIL — <label>`
-    // with whatever (often empty/truncated) output happened to come back is exactly how a
-    // ci:test ENOBUFS previously read as a real red test with no visible cause. Name the spawn
-    // failure as its own outcome instead.
-    const why = res.error ?? "spawn produced no exit status and no error message";
-    return { ok: false, detail: `SPAWN FAILURE — ${label}: ${why}` };
-  }
+  // A child that produced NO exit status is not an ordinary failure, and rendering it as
+  // `FAIL — <label>` with whatever (often empty) output came back is how a ci:test ENOBUFS once
+  // read as a real red test with no visible cause.
+  //
+  // DELEGATED to {@link spawnFailureDetail} rather than read here, and that is the point of this
+  // change. The comment this replaced claimed the reading covered "a signal kill" — it did not:
+  // the old code rendered `res.error ?? "…no exit status and no error message"`, and a signalled
+  // child reports `status: null` with NO error, so every kill landed in that fallback unnamed. A
+  // second, independent implementation of the same three-state logic is exactly what drifts
+  // (measured in this repo: emitter-checks versus commitlint, documented as unable to drift and
+  // already diverged), so this now calls the ONE implementation. It returns `undefined` precisely
+  // when `status !== null`, which is the guard this block used to spell out.
+  const spawnFailed = spawnFailureDetail(label, res);
+  if (spawnFailed) return { ok: false, detail: spawnFailed };
   const ok = res.status === 0;
   if (ok) return { ok, detail: `PASS — ${label}` };
   // A STREAMED step has no captured text to quote — its output already went to the terminal, in
