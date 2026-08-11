@@ -333,6 +333,7 @@ import {
 import {
   assertLintClean,
   changedTaskIds,
+  rawChangedTaskIds,
   criteriaAdded,
   followUpCarriesCriteria,
   formatReadIdentity,
@@ -7714,8 +7715,31 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       // absent from the base monolith and trips, while the RIGHT migration (monolith -> shard) simply
       // leaves the set and never does.
       const baseMonolithIds = new Set(parseTasksFromYaml(oldRaw, `${baseRef}:${relPath}`).map((t) => t.id));
-      const headMonolithIds = parseTasksFromYaml(readFileSync(planPath, "utf8"), planPath).map((t) => t.id);
+      const headMonolithRaw = readFileSync(planPath, "utf8");
+      const headMonolithIds = parseTasksFromYaml(headMonolithRaw, planPath).map((t) => t.id);
       newMonolithIds = new Set(headMonolithIds.filter((id) => !baseMonolithIds.has(id)));
+      // W1-T428: the RAW-TEXT union. `changedTaskIds` above compares PARSED tasks, and the parser
+      // drops six fields the corpus uses — `design:` among them — so an instructions-only edit
+      // re-linted ZERO tasks (#1544 measured exactly that and had to call its own run vacuous).
+      // Compare each task's raw RECORD text too and union the ids into scope: the parsed side
+      // still owns semantic equivalence (a whitespace-only reorder stays invisible to it), the
+      // raw side catches every dropped field by construction. This MUST run here, inside the
+      // try: both raw trees exist only until the finally below removes tmpDir.
+      const readShardTexts = (dir: string): string[] => {
+        try {
+          return readdirSync(dir)
+            .filter((f) => f.endsWith(".yaml") || f.endsWith(".yml"))
+            .sort()
+            .map((f) => readFileSync(join(dir, f), "utf8"));
+        } catch {
+          return [];
+        }
+      };
+      const rawChanged = rawChangedTaskIds(
+        [oldRaw, ...readShardTexts(join(tmpDir, "tasks.d"))],
+        [headMonolithRaw, ...readShardTexts(join(dirname(planPath), "tasks.d"))],
+      );
+      for (const id of rawChanged) scope.add(id);
     } catch (e) {
       console.error(`### rmd lint-plan: cannot resolve --base ${baseRef}: ${(e as Error).message}`);
       return 2;
