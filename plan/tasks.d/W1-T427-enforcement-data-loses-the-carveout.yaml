@@ -1,0 +1,89 @@
+- id: W1-T427
+  title: "the plan-only carve-out spans the enforcement data it exempts — a PR blunting a claims.yaml assertion skips the very floor that would catch it, and the claims gate then certifies the blunted check green forever: deny the carve-out to an ENFORCEMENT_DATA category"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  rationale: "FILED FROM state/recon-guard-complements.md (operator-directed, 2026-08-11), evidence
+    re-derived at e127bf9. NO INSTANCE EXISTS — this is filed ASSUMED, deliberately, because it is
+    the one mapped gap that QUIETS ITS OWN ALARM: every other complement fails loudly eventually
+    (an out-of-scope file shows in a diff; a bad design produces a PR someone reads), but a
+    weakened self-check reports success ever after, and nothing looks again.
+    THE MECHANISM, DERIVED: isInPlanScope (src/lib/plan-architect.ts) is `MASTER-PLAN.md ||
+    ORIENTATION || plan/**`, and judgeReview's planOnly carve-out exempts a plan-scope-only diff
+    from the proof-execution floor. But plan/ is not all paperwork — MEASURED CENSUS at e127bf9,
+    FOUR enforcement-data files live under it: plan/claims.yaml (the falsifiable self-checks
+    scripts/claims-check.mjs runs on every PR), plan/policy.yaml (thresholds the fleet OBEYS —
+    loadPolicy feeds dispatch lanes and governors), plan/alert-policy.yaml, and
+    plan/mast-mapping.yaml (whose own header says 'this table is the classifier'). Larger than
+    two files, so the fix is a CATEGORY, not an exclusion pair.
+    THE META-FINDING THIS CLOSES AN ARM OF: 'two surfaces documented to agree, quietly
+    disagreeing' is now FIVE measured instances — emitter-checks vs commitlint (3 of 10 rules,
+    W1-T416), check-proof vs the review executor (fixed, #1442), the queue board vs the
+    dispatcher (2 of 9 callbacks), the changed-tasks gate vs the parser's field set (W1-T428's
+    concern), and the commit-status API vs check-runs. IN EVERY CASE THE DOCUMENTATION CHECKED
+    THE MECHANISM AND NOT THE COVERAGE — the call is shared, the inputs are not. Here the shared
+    call is 'plan scope'; the unshared input is what KIND of file plan scope contains."
+  design: |
+    THE ARGUED SHAPE: KEEP isInPlanScope EXACTLY AS IT IS, and make the CARVE-OUT — not the scope
+    — refuse the category. Removing claims/policy from plan scope was weighed and REJECTED on
+    measured churn: plan/policy.yaml carries 20 commits in local history with the latest TODAY
+    (claims.yaml 3, alert-policy.yaml 1, mast-mapping.yaml 3), and plan scope feeds more than the
+    carve-out (triage, filing rules, scope classification) — reclassifying a file every consumer
+    reads to fix ONE consumer's blind spot is the wide fix. The narrow one: a diff that touches
+    ENFORCEMENT_DATA is not planOnly, whatever else it touches.
+    (i) ENFORCEMENT_DATA: a readonly path list in src/lib/review.ts beside INSTRUMENT_SURFACE,
+    same idiom and same reviewed-data discipline — the four files above, each entry carrying a
+    one-line reason string (what the file enforces), because a reviewer reads reasons, not lists.
+    (ii) THE PREDICATE: the planOnly computation treats a diff touching any ENFORCEMENT_DATA path
+    as NOT plan-only — it keeps every other plan-scope property and pays the full proof floor.
+    An edit to a self-check must clear the bar the self-check exists to hold up.
+    (iii) THE COMPLETENESS ALARM, the W1-T402 precedent applied on day one rather than
+    retrofitted: a test derives enforcement-data candidates from the tree (yaml files under
+    plan/ that src/ or scripts/ READ by path — the derivation names its rule) and fails when a
+    candidate is neither in ENFORCEMENT_DATA nor in a stated-exclusion map. A hand list whose
+    membership only a comment polices is the exact shape W1-T402 just closed for instruments.
+    (iv) COST, NAMED FROM THE MEASUREMENT: ~27 historical edits across the four files would have
+    paid the full floor under this rule. That is the point, not a regression — policy edits
+    change what the fleet OBEYS and claims edits change what the plan can PROVE; both deserve
+    the scrutiny an src/ line gets. Routine tasks.yaml/tasks.d filings are UNTOUCHED and keep
+    the carve-out whole.
+    (v) FALSIFIER, both directions: a fixture diff editing only plan/claims.yaml is NOT planOnly
+    and the reason names the file and the category; a fixture diff editing only
+    plan/tasks.d/<shard>.yaml IS planOnly, byte-identical to today; a diff touching both pays
+    the floor; and the alarm goes red when a planted plan/fake-gate.yaml is read by a planted
+    script and listed nowhere.
+    NOT IN SCOPE: changing isInPlanScope or any other consumer of plan scope; the claims gate
+    itself (scripts/claims-check.mjs is correct — it runs what it is given; this task fixes what
+    can be given to it silently); W1-T428's parser-blindness gap (same map, different seam —
+    Rule 25 checked: no shared files, no shared symbols).
+  acceptance:
+    - claim: "a diff touching any enforcement-data path loses the plan-only carve-out with the category named in the reason, while a pure shard filing keeps it byte-identically"
+      proof: "unit test: test/enforcement-data-carveout.test.ts"
+    - claim: "the category is data with per-entry reasons and a tree-derived completeness alarm, so membership is policed by a test rather than a comment"
+      proof: "unit test: test/enforcement-data-carveout.test.ts"
+    - claim: "the category list lands beside the instrument surface in the reviewer, so the two reviewed-data disciplines read as one idiom"
+      proof: "grep: ENFORCEMENT_DATA in src/lib/review.ts"
+  risk: high
+  origin: oper#guard-complements-2026-08-11
+  plan_refs: ["W1-T402", "W1-T29", "P48"]
+  files: [src/lib/review.ts, test/enforcement-data-carveout.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — the predicate, the reasons and the alarm are all fixture-decidable.
+    risk:high — it changes what the reviewer EXEMPTS, and too wide a category taxes routine plan
+    work (the churn measurement in design (iv) is the calibration); the both-directions falsifier
+    is the containment. Rule 19: two files, one concern — the predicate and its alarm are one
+    deliverable (a category nothing polices is a comment). Rule 25: src/lib/review.ts IS
+    instrument surface — this diff is a deliberate instrument change and must be filed alone,
+    never entangled with unrelated src/, which its two-file files: enforces by construction.
+    FILED ASSUMED, NOT MEASURED: no blunting incident exists; the shard says so plainly because
+    implying an incident would be manufacturing evidence, and the reason to close it NOW is that
+    an incident in this gap is self-concealing — the first one would not announce itself.
+    PROOF NOTES: two criteria share the forward PATH proof (declared in files:); the grep names a
+    NEW load-bearing symbol string at an EXISTING file — 0 hits at e127bf9, case-sensitively
+    verified; a grep at a not-yet-existing path is exec_error, measured, so none is used.
+    LEDGER: UNMEASURED (the mini is down); nothing here needs it.
+    NO depends_on: the carve-out, the census and the W1-T402 alarm idiom are all on main."

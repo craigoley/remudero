@@ -1,0 +1,96 @@
+- id: W1-T428
+  title: "the changed-tasks gate compares PARSED tasks and the parser drops SIX fields including design — rewriting a task's instructions re-lints zero tasks: hash the raw shard text per id so every dropped field, present and future, registers as a change"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 75.00
+  rationale: "FILED FROM state/recon-guard-complements.md (operator-directed, 2026-08-11), evidence
+    re-derived at e127bf9. MEASURED TWICE, ROUTINE BOTH TIMES: #1544 reported `0 task(s) checked`
+    on a design-only shard edit and had to flag its own gate run as vacuous rather than passing;
+    W1-T421's filing session hit the same wall from the other side. The mechanism, DERIVED:
+    changedTaskIds (src/lib/task-linter.ts) JSON-compares tasks built by parseTasksFromYaml
+    (src/lib/plan.ts), and the corpus uses SIX keys the Task type does not carry — measured at
+    e127bf9 by diffing the type's fields against every key in plan/tasks.yaml + plan/tasks.d/:
+    `design`, `plan_refs`, `queue_note`, `amendment_note`, `cycle_residual`, `fixture_forensics`.
+    THE ASYMMETRY IS THE FINDING: `note` and `rationale` ARE parsed, so the gate sees a task's
+    JUSTIFICATION change — while `design`, the field carrying the worker's actual INSTRUCTIONS,
+    is invisible. A dispatched worker then acts on text no gate re-checked, which is the
+    highest-ranked gap in the map precisely because it is a quiet-afternoon shard tidy-up, not an
+    attack.
+    THE META-FINDING THIS CLOSES AN ARM OF: 'two surfaces documented to agree, quietly
+    disagreeing' is now FIVE measured instances — emitter-checks vs commitlint (3 of 10 rules,
+    W1-T416), check-proof vs the review executor (fixed, #1442), the queue board vs the
+    dispatcher (2 of 9 callbacks), THIS gate vs the parser's field set, and the commit-status API
+    vs check-runs. IN EVERY CASE THE DOCUMENTATION CHECKED THE MECHANISM AND NOT THE COVERAGE —
+    the call is shared, the inputs are not. Here the shared call is 'compare the tasks'; the
+    unshared input is which fields survive parsing."
+  design: |
+    THE ARGUED SHAPE: HASH THE RAW TEXT, do not widen the type. Carrying six more fields onto
+    Task was weighed and REJECTED: it ripples through every Task consumer, and it closes only the
+    CURRENT six — the next convention-born key (three of the six were born as conventions, not
+    schema) reopens the gap silently. A raw-text comparison catches every dropped field by
+    construction, forever, and touches nothing that consumes parsed tasks.
+    (i) rawChangedTaskIds (src/lib/task-linter.ts): given the old and new RAW yaml corpora, split
+    each into per-task-id text blocks (the `- id:` boundary the corpus already guarantees) and
+    report ids whose block bytes differ. Pure over supplied strings — the task-linter purity
+    contract; no disk, no git.
+    (ii) THE CONSUMER: lintPlanCommand's --base mode (src/run-task.ts) already materializes BOTH
+    raw trees — the base monolith via `git show` and base shards via materializeOriginShards —
+    so the union of changedTaskIds and rawChangedTaskIds becomes the lint scope with no new git
+    plumbing. The parsed comparison STAYS: it is what preDispatchLint and every other caller
+    consume, and the union means a parse-visible change never regresses.
+    (iii) THE SECOND-ORDER EFFECT, STATED AS THE INTENDED CONSEQUENCE: a design edit now re-lints
+    its task, which PROMOTES the task's pre-existing violations to blocking — the touched-row
+    rule that already governs title and criterion edits, extended to instructions. Three
+    sessions this week stopped on that trap, so the answer to 'what happens to the ~165
+    open-failing tasks' is stated here rather than discovered: NOTHING until a shard is touched
+    (no mass promotion — the whole-plan run's scope is unchanged); when one IS touched, the
+    editor clears what they touch, exactly as a title edit demands today. For a gravestone whose
+    violations are not worth clearing, the already-governed exits are crediting or withdrawal
+    (#1239 convention) — editing a rotten row's instructions without owning its rot was never a
+    supported operation; it was an invisible one.
+    (iv) FALSIFIER, both directions: a design-only fixture edit yields that id from
+    rawChangedTaskIds and a NON-ZERO checked count through the --base path (the #1544 shape, now
+    a regression lock); a byte-identical corpus yields the empty set; a parsed-field edit is
+    reported by BOTH comparisons (the union never double-counts); and reordering two whole task
+    blocks WITHOUT editing either yields ids from neither comparison — block identity is the id,
+    not the position.
+    NOT IN SCOPE: widening the Task type; changing preDispatchLint's scope (dispatch eligibility
+    reads parsed fields; a design edit cannot make a task dispatch-ineligible and need not);
+    W1-T427's carve-out gap (same map, different seam — Rule 25 checked: no shared files beyond
+    none, no shared symbols).
+  acceptance:
+    - claim: "a design-only shard edit registers its task id and the gate reports a non-zero checked count, locking the measured vacuous-result shape out"
+      proof: "unit test: test/changed-tasks-raw-text.test.ts"
+    - claim: "a byte-identical corpus registers nothing and a moved-but-unedited block registers nothing, so the raw comparison keys on content rather than position"
+      proof: "unit test: test/changed-tasks-raw-text.test.ts"
+    - claim: "the raw comparison lives beside the parsed one and the gate consumes their union, so a parse-visible change never regresses"
+      proof: "grep: rawChangedTaskIds in src/run-task.ts"
+  risk: high
+  origin: oper#guard-complements-2026-08-11
+  plan_refs: ["W1-T421", "W1-T246", "W1-T324"]
+  files: [src/lib/task-linter.ts, src/run-task.ts, test/changed-tasks-raw-text.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — block splitting, union scope and both falsifier directions are all
+    fixture-decidable offline.
+    risk:high — it changes WHAT THE GATE RE-LINTS, and the second-order promotion in design (iii)
+    is a real workflow change the shard states rather than lets be discovered; the
+    moved-not-edited falsifier is the false-positive containment (a shard reorder must not
+    promote every row it slides past).
+    budget_usd 75 — the block splitter, the union wiring through the --base path, and the
+    four-direction falsifier.
+    Rule 19: three files, one concern — a comparator, its one consumer, its tests; splitting the
+    comparator from its consumer is the seam-without-caller shape Standing rule 14 forbids.
+    Rule 25: touches src/run-task.ts (instrument-adjacent) with NOTHING else entangled — the
+    files: list is the containment.
+    THE DROPPED SET, named so the next reader need not re-derive it: design, plan_refs,
+    queue_note, amendment_note, cycle_residual, fixture_forensics (measured at e127bf9); note and
+    rationale are parsed, which is the asymmetry the rationale names.
+    PROOF NOTES: two criteria share the forward PATH proof (declared in files:); the grep names
+    the NEW comparator at its EXISTING consumer file — 0 hits at e127bf9 in both src files,
+    case-sensitively verified; naming it at the CONSUMER doubles as the call-site discipline.
+    LEDGER: UNMEASURED (the mini is down); nothing here needs it.
+    NO depends_on: the --base path already materializes both raw trees (W1-T246)."
