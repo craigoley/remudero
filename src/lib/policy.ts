@@ -102,6 +102,15 @@ export interface PolicyValues {
     enabled: boolean;
     maxAgeHours: number;
   };
+  /** W1-T406: the one-shot `rmd run-task` boot rung for {@link reapStaleWorktrees} — same
+   *  ship-off posture as {@link PolicyValues.scratchReap}, and for the same reason: it
+   *  DELETES, so it begins OFF, surveying and ledgering what it would reclaim until an
+   *  operator has read enough boots' worth of dispositions to arm it. No age field of its
+   *  own — the rung reuses {@link DEFAULT_WORKTREE_REAP_GRACE_MS} (`worktreeReapGraceMs`
+   *  above), the SAME ceiling the daemon poll / `rmd sweep` call sites already use. */
+  worktreeReapBoot: {
+    enabled: boolean;
+  };
 }
 
 /** One field's provenance, as recorded on load — see this module's header. */
@@ -174,6 +183,7 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   "launchd.throttleIntervalS": "net-new",
   "scratchReap.enabled": "net-new",
   "scratchReap.maxAgeHours": "lifted",
+  "worktreeReapBoot.enabled": "net-new",
 };
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
@@ -386,6 +396,12 @@ export function validatePolicy(raw: unknown): Policy {
   const scratchReapEnabled = booleanField("scratchReap.enabled", scratchReapRaw.enabled, origin);
   const scratchReapMaxAgeHours = numberField("scratchReap.maxAgeHours", scratchReapRaw.maxAgeHours, origin);
 
+  const worktreeReapBootRaw = raw.worktreeReapBoot;
+  if (!isPlainObject(worktreeReapBootRaw)) {
+    throw new PolicyError("policy.yaml: 'worktreeReapBoot' must be a mapping.");
+  }
+  const worktreeReapBootEnabled = booleanField("worktreeReapBoot.enabled", worktreeReapBootRaw.enabled, origin);
+
   return {
     values: {
       proofTimeoutMs,
@@ -400,6 +416,7 @@ export function validatePolicy(raw: unknown): Policy {
       headroom: { curve, reservePct, enabled: headroomEnabled },
       launchd: { throttleIntervalS },
       scratchReap: { enabled: scratchReapEnabled, maxAgeHours: scratchReapMaxAgeHours },
+      worktreeReapBoot: { enabled: worktreeReapBootEnabled },
     },
     origin,
     bounds,
