@@ -51,7 +51,22 @@ test("serve's startup banner is readable in a redirected log BEFORE the process 
     stdio: ["ignore", out, out],
     // `--host` above is also the end-to-end proof of its own arg-validator fix: before W1-T152
     // it exited 2 as an "unexpected argument" despite being documented in USAGE.
-    env: { ...process.env, HOME: home },
+    env: {
+      ...process.env,
+      HOME: home,
+      // REQUIRED, NOT TIDINESS — the sibling test/serve-orphan-teardown.test.ts earned this
+      // guard for `checkCliFreshness`'s network git and this file never got it back-ported.
+      // For a `serve` child the stake is higher than a network git op: without the guard the
+      // child runs `serviceFreshnessGate` → the REAL `ensureInstallFresh`, and on a missing or
+      // stale `.rmd-install-hash` marker, a REAL UNATTENDED `npm ci` in this checkout — whose
+      // clear phase follows a worktree's `node_modules` symlink and EMPTIES THE SHARED
+      // CANONICAL TREE (measured forensically 2026-08-11; the 2026-07-29 daemon-outage
+      // mechanism, and the likely cause of every unexplained node_modules wipe since). The
+      // guarded early return is proven BEHAVIORALLY — not by this env var's presence — in
+      // test/install-symlink-refusal.test.ts, where an identical child WITHOUT the guard
+      // visibly reaches the install path and one WITH it visibly does not.
+      RMD_SELF_SYNC_DONE: "1",
+    },
     // OWN PROCESS GROUP, so teardown can reach the WHOLE tree. `bin/rmd` `exec`s
     // `node_modules/.bin/tsx`, and the tsx CLI then SPAWNS A CHILD `node` that is the process
     // actually running `src/run-task.ts serve`. `child.pid` is tsx's, not the server's, so
