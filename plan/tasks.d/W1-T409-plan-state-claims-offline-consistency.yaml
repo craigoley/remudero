@@ -86,10 +86,10 @@
       proof: "unit test: test/plan-state-claims.test.ts"
     - claim: "a short-form number the plan does not know is not resolved into an id, so no contradiction is invented"
       proof: "unit test: test/plan-state-claims.test.ts"
-  risk: medium
+  risk: high
   origin: oper#split-w1t392-2026-08-09
   plan_refs: ["§8A", "§12A", "P43", "P48"]
-  files: [plan/claims.yaml, scripts/plan-state-claims.mjs, test/plan-state-claims.test.ts]
+  files: [plan/claims.yaml, scripts/plan-state-claims.mjs, test/plan-state-claims.test.ts, test/fixtures/plan-state-claims/contradiction.md, test/fixtures/plan-state-claims/removed-assertion.md, test/fixtures/plan-state-claims/compressed-only.md, test/fixtures/plan-state-claims/empty-shipped-log.md, test/fixtures/plan-state-claims/empty-not-shipped.md, test/fixtures/plan-state-claims/unresolvable-short-form.md, test/fixtures/plan-state-claims/tasks.yaml, test/fixtures/plan-state-claims/tasks.d/shard.yaml]
   status: queued
   attempts: 0
   note: "THIS IS HALF THE FIX AND MUST NOT BE REPORTED AS THE WHOLE ONE. Its acceptance criteria are
