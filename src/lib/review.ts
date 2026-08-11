@@ -338,21 +338,29 @@ export interface ReviewVerdict {
   planOnly: boolean;
   /**
    * W1-T58 (ratifies P3 via P8/RETRO-1784058021334, Standing rule 15 — "a worker
-   * may never [edit its own criteria]"): true when the diff ITSELF adds a
-   * `satisfied_by:` line or removes an existing criterion field (`claim:`/
-   * `proof:`/`satisfied_by:`) in `plan/tasks.yaml` — see {@link
+   * may never [edit its own criteria]"): true when the diff ITSELF adds or
+   * removes a criterion field (`claim:`/`proof:`/`satisfied_by:`) in
+   * `plan/tasks.yaml` or a `plan/tasks.d/*.yaml` shard (W1-T399) — see {@link
    * checkSatisfiedByGuard}, the same diff-derived predicate — while ALSO
    * touching something outside `plan/**` (`!planOnly`; the only Architect-vs-
    * worker signal this pure function has — a worker's own task diff is never
    * plan-only in this codebase, only `rmd plan` produces one, and that path
    * never reaches this field's consequence — see run-task.ts's `runFixRung`).
-   * FORCES `state`/`floorState` to `"failure"` exactly like `testTheater`: the
-   * tampering itself is the violation, independent of whether any NAMED
-   * criterion mechanically passes (a worker could edit `plan/tasks.yaml` to
-   * match its diff and still have every original criterion read "met"). Never
-   * suppressible by {@link applyVerdictStability} (folded into `floorState`
-   * too) — this is a deterministic diff fact, not a semantic reviewer opinion.
-   * A genuine Architect correction (plan-only) never trips it.
+   * An ADDED field line trips this whether it grows an EXISTING criterion (a
+   * `satisfied_by:`) or appends a WHOLE NEW criterion after the existing ones
+   * (W1-T400 — PR #1295 reshaped its diff to append a criterion its own diff
+   * already satisfied, and a pure append deleted nothing and grew no existing
+   * field, so it tripped neither the original add-only `satisfied_by` check
+   * nor the removed-field one). FORCES `state`/`floorState` to `"failure"`
+   * exactly like `testTheater`: the tampering itself is the violation,
+   * independent of whether any NAMED criterion mechanically passes (a worker
+   * could edit its task record to match its diff and still have every
+   * original criterion read "met"). Never suppressible by {@link
+   * applyVerdictStability} (folded into `floorState` too) — this is a
+   * deterministic diff fact, not a semantic reviewer opinion. A genuine
+   * Architect correction (plan-only) never trips it, and neither does an
+   * ordinary task filing — itself nothing but added claim/proof lines — for
+   * the same reason: filing a task is plan-only.
    */
   criteriaTampered?: boolean;
   /**
@@ -3789,7 +3797,7 @@ export function failSummary(
 ): string {
   if (noCriteria) return `${FAIL_PREFIX}no acceptance criteria to judge (fail closed)`;
   if (criteriaTampered) {
-    return `${FAIL_PREFIX}diff edits plan/tasks.yaml's own acceptance criteria — Standing rule 15 (a worker may never)`;
+    return `${FAIL_PREFIX}diff edits plan/tasks.yaml's (or a plan/tasks.d/ shard's) own acceptance criteria — Standing rule 15 (a worker may never)`;
   }
   if (changesetContradictions.length > 0) {
     const first = changesetContradictions[0];
@@ -4737,38 +4745,55 @@ function planTasksCriterionFieldLines(lines: DiffLine[], kind: "add" | "del"): D
 
 /**
  * RULE 15's shared diff-derived predicate (W1-T58, ratifies P3 via P8/
- * RETRO-1784058021334; originally W1-T3E's narrower `satisfied_by`-only check):
- * true when a diff either ADDS a `satisfied_by:` line, or REMOVES an existing
- * criterion field line (`claim:`/`proof:`/`satisfied_by:`), in `plan/tasks.yaml`.
- * A removed field line is present whether the field's TEXT changed (an edit) or
- * the whole criterion was deleted — both read as "the criteria no longer say
+ * RETRO-1784058021334; originally W1-T3E's narrower `satisfied_by`-only check;
+ * W1-T400 widened the ADD side from `satisfied_by`-only to any criterion
+ * field): true when a diff either ADDS a `claim:`/`proof:`/`satisfied_by:`
+ * line, or REMOVES an existing one, in `plan/tasks.yaml` or a
+ * `plan/tasks.d/*.yaml` shard (W1-T399).
+ *
+ * A removed field line is present whether the field's TEXT changed (an edit)
+ * or the whole criterion was deleted. An added field line is present whether
+ * an EXISTING criterion gained a field (e.g. a `satisfied_by:`) or a WHOLE
+ * NEW criterion — a fresh `claim:`/`proof:` pair — was APPENDED after the
+ * existing ones: a pure append deletes nothing and, before W1-T400, added no
+ * `satisfied_by:` either, so it tripped neither disjunct and let a diff add a
+ * criterion its own changes already satisfied instead of editing one (PR
+ * #1295 did exactly this). Both shapes read as "the criteria no longer say
  * what the Architect wrote". Diff-derived ONLY: callers apply their OWN
  * exemption on top ({@link checkSatisfiedByGuard}: `planOnly && humanAuthored`;
- * {@link judgeReview}: `planOnly` alone — the one signal that pure function has).
+ * {@link judgeReview}: `planOnly` alone — the one signal that pure function
+ * has, and the reason this widening does not also catch an ordinary task
+ * filing: a filing is nothing but added claim/proof lines, but it is
+ * plan-only, so the exemption — not this predicate — is what keeps it clean).
  */
 function criterionFieldTampered(diff: string): boolean {
   const lines = walkDiff(diff);
-  const addedSatisfiedBy = planTasksCriterionFieldLines(lines, "add").some((l) =>
-    /^\s*satisfied_by\s*:/.test(l.text),
-  );
+  const addedField = planTasksCriterionFieldLines(lines, "add").length > 0;
   const removedField = planTasksCriterionFieldLines(lines, "del").length > 0;
-  return addedSatisfiedBy || removedField;
+  return addedField || removedField;
 }
 
 /**
  * THE RULE-15 GUARD: `satisfied_by` and criteria text are Architect-only
  * (plan.ts / Standing rule 15 — "a worker may never [correct a mis-specified
- * task]"). A diff that ADDS a `satisfied_by:` line, OR EDITS/REMOVES an
- * existing criterion's `claim:`/`proof:`/`satisfied_by:` field, in
- * `plan/tasks.yaml` FAILS unless the PR is plan-only AND human-authored — a
- * worker doing either to its own blocking criterion is "editing the criteria
- * to match the diff", a failed task, not a merge. W1-T58 broadens this from
- * W1-T3E's original add-only `satisfied_by` check to cover the full "edits its
- * criteria" shape the rule actually names.
+ * task]"). A diff that ADDS a `claim:`/`proof:`/`satisfied_by:` field — an
+ * EXISTING criterion gaining one, or a WHOLE NEW criterion appended after the
+ * existing ones (W1-T400) — OR EDITS/REMOVES an existing criterion's field, in
+ * `plan/tasks.yaml` or a `plan/tasks.d/*.yaml` shard (W1-T399), FAILS unless
+ * the PR is plan-only AND human-authored — a worker doing any of these to its
+ * own blocking criteria is "editing the criteria to match the diff", a failed
+ * task, not a merge, whether the edit shape is a modification or an append
+ * that passes by construction. W1-T58 broadened this from W1-T3E's original
+ * add-only `satisfied_by` check to cover the full "edits its criteria" shape
+ * the rule actually names; W1-T400 closed the remaining append gap.
  */
 export function checkSatisfiedByGuard(diff: string, meta: RubricPrMeta = {}): RubricItemResult {
   if (!criterionFieldTampered(diff)) {
-    return { key: "satisfied-by-guard", pass: true, reason: "no criterion field added or edited in plan/tasks.yaml" };
+    return {
+      key: "satisfied-by-guard",
+      pass: true,
+      reason: "no criterion field added or edited in plan/tasks.yaml or a plan/tasks.d/ shard",
+    };
   }
   if (meta.planOnly && meta.humanAuthored) {
     return {
@@ -4784,8 +4809,9 @@ export function checkSatisfiedByGuard(diff: string, meta: RubricPrMeta = {}): Ru
   // plan-only hand-opened PR — it named an author the review path could not know AND
   // denied a plan-only property the same call had just computed as true.
   const edit =
-    "plan/tasks.yaml's acceptance criteria were added/edited (an added satisfied_by, or an edited/removed " +
-    "claim/proof/satisfied_by field)";
+    "plan/tasks.yaml's (or a plan/tasks.d/ shard's) acceptance criteria were added/edited (an added " +
+    "claim/proof/satisfied_by field — including a whole new criterion appended after the existing ones — " +
+    "or an edited/removed one)";
   return {
     key: "satisfied-by-guard",
     pass: false,
