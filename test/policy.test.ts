@@ -503,6 +503,18 @@ test("REJECTS a policy missing 'sweep' entirely", () => {
   throwsPolicyError(() => validatePolicy(raw), /'sweep' must be a mapping/);
 });
 
+test("REJECTS a policy missing 'worktreeReapBoot' entirely (W1-T406)", () => {
+  const raw = goodRaw();
+  delete (raw as Record<string, unknown>).worktreeReapBoot;
+  throwsPolicyError(() => validatePolicy(raw), /'worktreeReapBoot' must be a mapping/);
+});
+
+test("REJECTS worktreeReapBoot.enabled when it is not a boolean (W1-T406)", () => {
+  const raw = goodRaw();
+  (raw.worktreeReapBoot as Record<string, Record<string, unknown>>).enabled.value = "yes";
+  throwsPolicyError(() => validatePolicy(raw), /worktreeReapBoot\.enabled\.value.*must be a boolean/);
+});
+
 test("REJECTS a non-numeric value where a number is required", () => {
   const raw = goodRaw();
   (raw.fixStrikeCap as Record<string, unknown>).value = "two";
