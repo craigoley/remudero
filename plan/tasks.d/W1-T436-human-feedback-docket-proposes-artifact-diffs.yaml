@@ -1,0 +1,89 @@
+- id: W1-T436
+  title: "the harness collects human feedback in five places and consumes it in none — reframe texts, one-tap verdicts with ZERO recorded uses, rejection reasons, question answers, operator notes: a weekly docket that gathers what humans actually said and proposes ONE human-gated diff to the governing artifact it indicts"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 90
+  rationale: "FILED FROM the operator's Warp-podcast brief (oper#warp-podcast-2026-08-11) —
+    'their feedback mechanism sounds similar to the one I've been building towards' —
+    evidence re-derived at afb12dd. WHAT THE OPERATOR HAS BUILT TOWARD, INVENTORIED:
+    `reframeProposal` captures operator words verbatim into the next draft (W1-T194);
+    W1-T141's one-tap operator verdicts ship a POST route and an operator_feedback ledger
+    record — with a historical use count of ZERO and no consumer wired; rejected feedback
+    carries reasons (28 rejected of 146 entries); question answers persist in
+    plan/questions.ndjson; operator notes (W1-T164) steer single tasks. FIVE CAPTURE
+    SURFACES, NO SYNTHESIS: nothing reads across them, so the same correction gets typed
+    into reframes forever — the artifact that caused it never changes. THE PRACTICE THIS
+    ADOPTS, verified in Warp's production repo (update-pr-review-local.yml: cron Mondays
+    09:00 UTC, 7-day lookback, regenerates the review skill from the week's human feedback;
+    blog 'agents need feedback loops, not perfect prompts' and the Anthropic webinar on
+    self-improving agents): an observer synthesizes the week's HUMAN feedback and opens a PR
+    diffing the governing skill file — showing what feedback it read, what principle should
+    change, and the exact diff — 'and a human reviews it like any other change.' THE
+    RMD-NATIVE SHAPE: the gather-and-render half is deterministic (Standing rule 2); the
+    synthesis half is an Architect leg exactly like triage's (the existing single-writer,
+    lock-serialized, plan-only-PR shape); the output is a HUMAN-GATED plan PR proposing one
+    diff to ONE artifact — a CLAUDE.md rule, a learnings entry, or a review-rubric line —
+    which honors §6A's published promise (knowledge moves only via human-gated PRs) by
+    construction. THE COMPLEMENT, NOT DUPLICATE: W1-T418 measures whether RULES PREVENT
+    (repeat-incident rate escalating to instrument proposals); this task mines what HUMANS
+    SAID and proposes the edit — T418 is the efficacy meter, this is the intake pump; both
+    feed the same registry discipline. W1-T420's duplicate-closure applies to the docket's
+    proposals like any other intake. LEDGER: UNMEASURED for live counts (mini down) — the
+    zero-use figure for operator_feedback is the inventory's full-union scan, dated
+    2026-08-11; capture-surface counts are tree-derived at afb12dd."
+  design: |
+    (i) buildFeedbackDocket (src/lib/feedback-docket.ts): deterministic gather over the
+    lookback window — reframe texts from inbox drafts, operator_feedback ledger lines
+    (W1-T141's missing consumer), rejected-feedback reasons from plan/feedback/, question
+    answers, operator notes — each item normalized to {source, ts, verbatim, referent} and
+    the docket rendered with counts per source, EMPTY SOURCES NAMED (a docket that omits a
+    silent channel reads as coverage — the vacuous-pass family). Pure over injected
+    readers; no LLM. The name is load-bearing — the call-site criterion greps its consumer.
+    (ii) the synthesis leg rides triage's existing shape (src/lib/triage.ts precedent): a
+    scheduled rung gathers the docket, and an Architect run proposes AT MOST ONE artifact
+    diff per cycle as a plan-only PR — the PR body carries the docket excerpt it acted on,
+    the principle it believes should change, and the exact diff; empty-docket cycles
+    propose NOTHING and ledger docket.empty (a loop that must emit weekly manufactures
+    drift — the no-op path is first-class).
+    (iii) the target artifact set is CLOSED for v0: a CLAUDE.md rule, a learnings/ entry,
+    or a review-rubric line — never src/, never plan shards (those are W1-T418's
+    instrument-proposal lane), never MASTER-PLAN prose.
+    (iv) every proposal cites its docket items verbatim with sources, so the human gate
+    reads evidence, not vibes — and the docket line for each consumed item is ledgered
+    (docket.consumed) so W1-T419's citation loop can later count whether feedback that was
+    gathered ever changed anything.
+    (v) FALSIFIER, both directions: a fixture docket with three reframe texts indicting the
+    same rule yields exactly one proposal whose body quotes all three verbatim (deleting
+    the synthesis input plumbing fails this), AND an empty-window fixture yields NO
+    proposal and a docket.empty ledger line (an unconditional weekly emitter fails this).
+    (vi) NOT IN SCOPE: PR review comments as a docket source (W1-T435 builds that reader;
+    the docket gains it as an additive input once both are on main); auto-merging any
+    proposal (human-gated forever, §6A); rule-efficacy measurement (W1-T418); changing any
+    capture surface.
+  acceptance:
+    - claim: "a window with three reframes indicting one rule yields exactly one artifact-diff proposal quoting all three, and an empty window yields none"
+      proof: "unit test: test/feedback-docket.test.ts"
+    - claim: "the docket gather is one named deterministic seam consumed by the scheduled rung, not an LLM prompt"
+      proof: "grep: buildFeedbackDocket( in src/run-task.ts"
+  risk: high
+  origin: oper#warp-podcast-2026-08-11
+  plan_refs: ["W1-T418", "W1-T419", "W1-T141", "W1-T194"]
+  files: [src/run-task.ts, src/lib/feedback-docket.ts, test/feedback-docket.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — the gather is pure over injected readers, both falsifier directions
+    are fixture-decidable, and the Architect leg reuses triage's already-tested
+    single-writer shape. risk:high — the files: span (new docket module, run-task rung
+    wiring, their test) is Rule 19's SPAN, not blast radius; the behavioral containment is
+    the empty-window no-op direction. Rule 25: touches src/run-task.ts (instrument-adjacent)
+    with nothing else entangled. budget_usd 90 — five reader integrations, docket renderer,
+    the scheduled rung, triage-shaped Architect leg, two-direction fixtures. PROOF NOTES:
+    `buildFeedbackDocket` is 0 hits across src/ AND plan/ at afb12dd (measured,
+    case-sensitive); the open-paren form greps the CONSUMER (src/run-task.ts), distinct from
+    the defining module, per the call-site lint; unit-test proof is the pure-path form
+    against a declared file. LEDGER: UNMEASURED (mini down). NO depends_on: every v0 docket
+    source exists on main at afb12dd; W1-T435's comment reader is a named ADDITIVE input,
+    not a prerequisite."

@@ -2656,6 +2656,16 @@ The mechanism behind L3, the answer to "verdicting is where this succeeds or die
 Craig's directive — the thing that makes every project on this harness self-improving, with a path
 to a shared brain across all of them:
 
+> **The human-feedback loop and the autonomy dial (oper#warp-podcast-2026-08-11).** Two practices
+> adopted from Warp's published factory discipline, both rmd-native rather than imitative: the
+> harness's five human-feedback capture surfaces (reframes, one-tap verdicts, rejection reasons,
+> question answers, operator notes) gain a weekly SYNTHESIS that proposes one human-gated
+> artifact diff per cycle (W1-T436 — the intake pump beside W1-T418's efficacy meter), human PR
+> comments become fix-rung evidence (W1-T435 — the producer W1-T78's re-arm has waited for), and
+> autonomy becomes a MEASURED dial: the zero-touch merge rate and its cost, split by verdict
+> class so the ratchet moves where proofs are strong first (W1-T437, beside W1-T424's
+> correctness join). The operator turns every dial; the harness only reports it (P48).
+
 - **Flywheel analyzer** (nightly, Haiku/Sonnet): reads the run ledger + task transcripts, mines for
   patterns — repeated transient causes, prompts that needed fix rounds, gates that never fire,
   reviewer misses (merged PRs later reverted/re-fixed) — and files evidence-cited improvement tasks
