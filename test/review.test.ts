@@ -1316,7 +1316,20 @@ test("W1-T359 wiring: runReview calls judgeRubric + rubricAdvisorySection, stric
   // The advisory section posts regardless of verdict.state (a rubric concern
   // can surface on an otherwise-passing review) — never folded into the
   // unmet-criteria condition that gates the rest of the failure comment.
-  assert.match(runReviewSrc, /if\s*\(hasUnmet \|\| rubricSection\)/);
+  //
+  // W1-T434 WIDENED THIS GATE, AND THE INVARIANT DID NOT BREAK — only this test's literal
+  // encoding of it did. The gate was `if (hasUnmet || rubricSection)`; a second advisory
+  // (the declared-scope overrun) is now a further DISJUNCT, which can only make the comment
+  // post in strictly more cases and never fewer. So the assertion now pins what W1-T359
+  // actually owns — `rubricSection` is a top-level disjunct of the comment gate, alongside
+  // `hasUnmet` and independent of `verdict.state` — rather than the exact operand list, which
+  // any later advisory would break again for no reason.
+  const gate = runReviewSrc.match(/if \(hasUnmet \|\| ([^)]*)\) \{/);
+  assert.ok(gate, "the comment gate must still open on hasUnmet");
+  assert.ok(
+    gate[1].split("||").map((d) => d.trim()).includes("rubricSection"),
+    `rubricSection must remain a disjunct of the comment gate — found: ${gate[1]}`,
+  );
 });
 
 // ── reviewer_outcome (W1-T63/P10-a — the reviewer stops walling silently) ───
