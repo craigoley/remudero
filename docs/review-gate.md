@@ -461,6 +461,44 @@ Measured both directions against the real gate and the real floor: a degraded lc
 BLOCKS with `delta -0.01pts` while 95.65% is ACCEPTED, and branches at 90.4287% BLOCKS
 independently of lines.
 
+### Branch floor corrected the same day (2026-08-11): 90.44 → 90.40
+
+The re-base above set the branch floor 0.10 under its lowest reading, on the strength of an 0.046pt
+spread it attributed to the **flaky-test count** — the idea being that a test failing early executes
+fewer branches. **That attribution is wrong in both direction and mechanism**, and four fresh runs on
+one tree (`09c7bda`) show it:
+
+| run | fail | BRH | BRF | branches |
+|---|---|---|---|---|
+| 1 | 11 | 12178 | 13445 | 90.5764% |
+| 2 | 10 | 12178 | 13454 | **90.5158%** |
+| 3 | 10 | 12176 | 13443 | 90.5750% |
+| 4 | 10 | 12177 | 13439 | **90.6094%** |
+
+**Three runs at an identical fail count spread 0.0936pt** — wider than the entire 0.046pt spread that
+flake count was blamed for — so flake count explains none of it, and the *highest* reading came from a
+run with the *fewest* failures, the opposite of the claim. The driver is the **denominator**: across
+those four runs `BRH` moves by 2 and `BRF` by 15. A run that loads fewer modules discovers fewer
+branches, and since the undiscovered ones are mostly uncovered, dropping them *raises* the ratio.
+
+**The margin was smaller than the noise it exists to absorb.** 90.5158 − 90.44 = 0.0758pt against a
+measured 0.0936pt spread — 0.81x. `evaluateRatchet` compares at `epsilon = 1e-9`, so that gate was
+sitting three quarters of a noise band away from a healthy run: the fifth bound in this repo to be
+set where a healthy condition could trip it, and the first set by the operator rather than inherited.
+
+**90.40** sits 0.1158pt under the lowest of eight local readings — 1.24x the measured spread — and
+gives up ~16 branches out of `BRF 13445`. Measured both directions against the real gate: 90.3895%
+(17 branches removed) BLOCKS at `-0.01pts`, 90.4043% (15 removed) is ACCEPTED, and 89.8989% BLOCKS at
+`-0.50pts`; the control proves the block is the floor and not the fixture.
+
+**The line floor is not touched and needs no correction** — its margin is 0.5569pt against an 0.0135pt
+spread, 41x. The same arithmetic that condemns the branch margin exonerates the line one.
+
+**This is not chasing a CI red.** #1566's own coverage-ratchet job has since printed the first current
+CI reading — `lines 96.25% / branches 90.59%`, both above the floors it was tested against. CI reads
+*higher* than local, so the correction buys headroom against **local** noise, which is where the whole
+margin is consumed.
+
 ### coverage-ratchet: out-of-repo temp-dir records excluded (2026-07-23, W1-T220)
 
 `scripts/coverage-ratchet.mjs`'s `parseLcovTotals` now counts a coverage record only
