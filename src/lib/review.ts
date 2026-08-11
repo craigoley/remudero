@@ -216,14 +216,15 @@ export interface ReviewEvidence {
 
 /** See {@link ReviewVerdict.unwiredAdvisories}'s doc for what each code means and why
  *  `net_state_claim` never appears here (retro-time only). */
-export type UnwiredReasonCode = "unwired_export" | "inverse_scope" | "net_state_claim";
+export type UnwiredReasonCode = "unwired_export" | "inverse_scope" | "scope_violation" | "net_state_claim";
 
 /** One SHIPS-UNWIRED advisory line (W1-T322) — see {@link ReviewVerdict.unwiredAdvisories}. */
 export interface UnwiredAdvisory {
   reasonCode: UnwiredReasonCode;
   /** The offending symbol(s)/path(s), rendered `file::symbol` for `unwired_export`, bare repo
-   *  paths for `inverse_scope` — never a bare "flagged" with nothing named (W1-T186 emitter
-   *  discipline, the same one {@link ReviewVerdict.instrumentEntanglementPaths} follows). */
+   *  paths for `inverse_scope`/`scope_violation` — never a bare "flagged" with nothing named
+   *  (W1-T186 emitter discipline, the same one {@link ReviewVerdict.instrumentEntanglementPaths}
+   *  follows). */
   symbols: string[];
   /** Human-readable detail — the exact text the ledger line and any console annotation render. */
   detail: string;
@@ -338,21 +339,29 @@ export interface ReviewVerdict {
   planOnly: boolean;
   /**
    * W1-T58 (ratifies P3 via P8/RETRO-1784058021334, Standing rule 15 — "a worker
-   * may never [edit its own criteria]"): true when the diff ITSELF adds a
-   * `satisfied_by:` line or removes an existing criterion field (`claim:`/
-   * `proof:`/`satisfied_by:`) in `plan/tasks.yaml` — see {@link
+   * may never [edit its own criteria]"): true when the diff ITSELF adds or
+   * removes a criterion field (`claim:`/`proof:`/`satisfied_by:`) in
+   * `plan/tasks.yaml` or a `plan/tasks.d/*.yaml` shard (W1-T399) — see {@link
    * checkSatisfiedByGuard}, the same diff-derived predicate — while ALSO
    * touching something outside `plan/**` (`!planOnly`; the only Architect-vs-
    * worker signal this pure function has — a worker's own task diff is never
    * plan-only in this codebase, only `rmd plan` produces one, and that path
    * never reaches this field's consequence — see run-task.ts's `runFixRung`).
-   * FORCES `state`/`floorState` to `"failure"` exactly like `testTheater`: the
-   * tampering itself is the violation, independent of whether any NAMED
-   * criterion mechanically passes (a worker could edit `plan/tasks.yaml` to
-   * match its diff and still have every original criterion read "met"). Never
-   * suppressible by {@link applyVerdictStability} (folded into `floorState`
-   * too) — this is a deterministic diff fact, not a semantic reviewer opinion.
-   * A genuine Architect correction (plan-only) never trips it.
+   * An ADDED field line trips this whether it grows an EXISTING criterion (a
+   * `satisfied_by:`) or appends a WHOLE NEW criterion after the existing ones
+   * (W1-T400 — PR #1295 reshaped its diff to append a criterion its own diff
+   * already satisfied, and a pure append deleted nothing and grew no existing
+   * field, so it tripped neither the original add-only `satisfied_by` check
+   * nor the removed-field one). FORCES `state`/`floorState` to `"failure"`
+   * exactly like `testTheater`: the tampering itself is the violation,
+   * independent of whether any NAMED criterion mechanically passes (a worker
+   * could edit its task record to match its diff and still have every
+   * original criterion read "met"). Never suppressible by {@link
+   * applyVerdictStability} (folded into `floorState` too) — this is a
+   * deterministic diff fact, not a semantic reviewer opinion. A genuine
+   * Architect correction (plan-only) never trips it, and neither does an
+   * ordinary task filing — itself nothing but added claim/proof lines — for
+   * the same reason: filing a task is plan-only.
    */
   criteriaTampered?: boolean;
   /**
@@ -413,17 +422,33 @@ export interface ReviewVerdict {
    * flips severity once a measured false-positive rate clears a stated threshold). This field
    * NEVER folds into `state`/`floorState`/`capped` — unlike every other structural field on this
    * interface (`criteriaTampered`, `changesetContradictions`, `instrumentEntangled`), which all
-   * force `state` to `"failure"`. Empty array when nothing to advise. Two reason codes fire here
-   * (a third, `net_state_claim`, is retro-time only — see {@link "./retro.js".netStateCapabilityAdvisories}):
-   *   - `unwired_export`  — the diff adds an `export function` {@link scanUnreachedExports}
-   *                         cannot find a real caller for, and the report carries neither a
-   *                         `WIRED-AT: <file>::<symbol>` marker naming it nor a `SHIPS-UNWIRED:
-   *                         <task-id>` marker naming a real, open task (see {@link
-   *                         ReviewEvidence.openTaskIds}).
-   *   - `inverse_scope`   — the task's declared `files:` scope (see {@link
-   *                         ReviewEvidence.taskDeclaredFiles}) names a file this diff never
-   *                         touched — the direction {@link "../run-task.js".scopeGuardOutOfScopeFiles}
-   *                         (diff-touches-undeclared) cannot see.
+   * force `state` to `"failure"`. Empty array when nothing to advise. THREE reason codes fire here
+   * (a fourth, `net_state_claim`, is retro-time only — see {@link "./retro.js".netStateCapabilityAdvisories}):
+   *   - `unwired_export`   — the diff adds an `export function` {@link scanUnreachedExports}
+   *                          cannot find a real caller for, and the report carries neither a
+   *                          `WIRED-AT: <file>::<symbol>` marker naming it nor a `SHIPS-UNWIRED:
+   *                          <task-id>` marker naming a real, open task (see {@link
+   *                          ReviewEvidence.openTaskIds}).
+   *   - `inverse_scope`    — the task's declared `files:` scope (see {@link
+   *                          ReviewEvidence.taskDeclaredFiles}) names a file this diff never
+   *                          touched — the direction {@link "../run-task.js".scopeGuardOutOfScopeFiles}
+   *                          (diff-touches-undeclared) cannot see.
+   *   - `scope_violation`  — (W1-T401) the MIRROR direction: the diff touches a file OUTSIDE the
+   *                          task's declared `files:` scope — the same comparison {@link
+   *                          "../run-task.js".scopeGuardOutOfScopeFiles} makes, but that guard sits
+   *                          behind exactly one of `gitPushRunBranch`'s nine call sites (the
+   *                          orchestrator's fallback push, taken only when the worker's branch is
+   *                          absent from origin) so it never runs on the ordinary path. This
+   *                          advisory runs on EVERY review instead. ADVISORY, not a refusal
+   *                          (design (ii)/(iii) — a measured majority of recent declared-scope
+   *                          "violations" are legitimate: generator-gate artifacts, a task's own
+   *                          plan shard, operator-instructed or review-ratified widenings), and
+   *                          FAIL-CLOSED in the safe direction like `inverse_scope`: an absent or
+   *                          empty declared scope has nothing to compare, so it never fires — unlike
+   *                          {@link "../run-task.js".scopeGuardOutOfScopeFiles}, which treats "no
+   *                          declared files" as "everything is out of scope" for its own (blocking,
+   *                          fallback-only) purpose, a task declaring nothing is never treated here
+   *                          as declaring everything.
    * The caller (run-task.ts) ledgers each entry as a `review.unwired_advisory` line naming the
    * PR, the reason code and the symbols — the dataset W1-T323's measurement reads.
    */
@@ -2509,12 +2534,36 @@ function inverseScopeUntouchedFiles(diffFiles: readonly string[], declaredFiles:
 }
 
 /**
+ * SCOPE-VIOLATION (W1-T401, design (i)-(iv)): the same comparison {@link
+ * "../run-task.js".scopeGuardOutOfScopeFiles} makes (diff → declared, flagging a file the diff
+ * touches that the task never declared) but run at REVIEW TIME, where every PR is seen — not just
+ * the one push site (behind `if (!branchOnOrigin)`) that guard actually runs at. ADVISORY, not a
+ * refusal (see {@link ReviewVerdict.unwiredAdvisories}'s doc for why: a measured majority of
+ * recent trailer-bearing merges would have widened past their declared scope for legitimate
+ * reasons — a generator-gate artifact, a task's own plan shard, an operator-instructed or
+ * review-ratified widening).
+ *
+ * DELIBERATELY DIFFERENT FROM {@link "../run-task.js".scopeGuardOutOfScopeFiles} ON ONE POINT:
+ * that guard treats an absent/empty declared scope as "everything is out of scope" (a REFUSE-by-
+ * default posture that fits its own narrow, blocking purpose). This advisory does not — an absent
+ * or empty declared scope has nothing to compare, so it never fires, matching {@link
+ * inverseScopeUntouchedFiles}'s own fail-closed direction. A task declaring nothing is not treated
+ * as declaring everything.
+ */
+function scopeViolationFiles(diffFiles: readonly string[], declaredFiles: readonly string[] | undefined): string[] {
+  if (!declaredFiles || declaredFiles.length === 0) return [];
+  const declared = new Set(declaredFiles);
+  return diffFiles.filter((f) => !declared.has(f));
+}
+
+/**
  * Assemble this review's {@link UnwiredAdvisory} list (design (ii)) — ADVISORY ONLY, never
  * consulted by `state`. `checkoutDir` mirrors {@link ReviewEvidence.headCheckoutDir}'s own
  * "absent ⇒ skip" contract: the `unwired_export` reason needs real files to read, so it is
  * silently skipped (not a false "nothing to advise") when no checkout was supplied — exactly the
  * degradation {@link judgeCriterion}'s own `execCtx` already applies to proof execution.
- * `inverse_scope` needs no checkout (a pure diff-files/declared-files comparison) and always runs.
+ * `inverse_scope`/`scope_violation` need no checkout (each is a pure diff-files/declared-files
+ * comparison, just opposite directions) and always run.
  */
 function unwiredAdvisoriesFor(
   diff: string,
@@ -2552,6 +2601,15 @@ function unwiredAdvisoriesFor(
       reasonCode: "inverse_scope",
       symbols: untouched,
       detail: `task declares file(s) this diff never touched: ${untouched.join(", ")}`,
+    });
+  }
+
+  const violating = scopeViolationFiles(diffFiles, taskDeclaredFiles);
+  if (violating.length > 0) {
+    out.push({
+      reasonCode: "scope_violation",
+      symbols: violating,
+      detail: `diff touches file(s) outside the task's declared scope: ${violating.join(", ")}`,
     });
   }
 
@@ -3789,7 +3847,7 @@ export function failSummary(
 ): string {
   if (noCriteria) return `${FAIL_PREFIX}no acceptance criteria to judge (fail closed)`;
   if (criteriaTampered) {
-    return `${FAIL_PREFIX}diff edits plan/tasks.yaml's own acceptance criteria — Standing rule 15 (a worker may never)`;
+    return `${FAIL_PREFIX}diff edits plan/tasks.yaml's (or a plan/tasks.d/ shard's) own acceptance criteria — Standing rule 15 (a worker may never)`;
   }
   if (changesetContradictions.length > 0) {
     const first = changesetContradictions[0];
@@ -4737,38 +4795,55 @@ function planTasksCriterionFieldLines(lines: DiffLine[], kind: "add" | "del"): D
 
 /**
  * RULE 15's shared diff-derived predicate (W1-T58, ratifies P3 via P8/
- * RETRO-1784058021334; originally W1-T3E's narrower `satisfied_by`-only check):
- * true when a diff either ADDS a `satisfied_by:` line, or REMOVES an existing
- * criterion field line (`claim:`/`proof:`/`satisfied_by:`), in `plan/tasks.yaml`.
- * A removed field line is present whether the field's TEXT changed (an edit) or
- * the whole criterion was deleted — both read as "the criteria no longer say
+ * RETRO-1784058021334; originally W1-T3E's narrower `satisfied_by`-only check;
+ * W1-T400 widened the ADD side from `satisfied_by`-only to any criterion
+ * field): true when a diff either ADDS a `claim:`/`proof:`/`satisfied_by:`
+ * line, or REMOVES an existing one, in `plan/tasks.yaml` or a
+ * `plan/tasks.d/*.yaml` shard (W1-T399).
+ *
+ * A removed field line is present whether the field's TEXT changed (an edit)
+ * or the whole criterion was deleted. An added field line is present whether
+ * an EXISTING criterion gained a field (e.g. a `satisfied_by:`) or a WHOLE
+ * NEW criterion — a fresh `claim:`/`proof:` pair — was APPENDED after the
+ * existing ones: a pure append deletes nothing and, before W1-T400, added no
+ * `satisfied_by:` either, so it tripped neither disjunct and let a diff add a
+ * criterion its own changes already satisfied instead of editing one (PR
+ * #1295 did exactly this). Both shapes read as "the criteria no longer say
  * what the Architect wrote". Diff-derived ONLY: callers apply their OWN
  * exemption on top ({@link checkSatisfiedByGuard}: `planOnly && humanAuthored`;
- * {@link judgeReview}: `planOnly` alone — the one signal that pure function has).
+ * {@link judgeReview}: `planOnly` alone — the one signal that pure function
+ * has, and the reason this widening does not also catch an ordinary task
+ * filing: a filing is nothing but added claim/proof lines, but it is
+ * plan-only, so the exemption — not this predicate — is what keeps it clean).
  */
 function criterionFieldTampered(diff: string): boolean {
   const lines = walkDiff(diff);
-  const addedSatisfiedBy = planTasksCriterionFieldLines(lines, "add").some((l) =>
-    /^\s*satisfied_by\s*:/.test(l.text),
-  );
+  const addedField = planTasksCriterionFieldLines(lines, "add").length > 0;
   const removedField = planTasksCriterionFieldLines(lines, "del").length > 0;
-  return addedSatisfiedBy || removedField;
+  return addedField || removedField;
 }
 
 /**
  * THE RULE-15 GUARD: `satisfied_by` and criteria text are Architect-only
  * (plan.ts / Standing rule 15 — "a worker may never [correct a mis-specified
- * task]"). A diff that ADDS a `satisfied_by:` line, OR EDITS/REMOVES an
- * existing criterion's `claim:`/`proof:`/`satisfied_by:` field, in
- * `plan/tasks.yaml` FAILS unless the PR is plan-only AND human-authored — a
- * worker doing either to its own blocking criterion is "editing the criteria
- * to match the diff", a failed task, not a merge. W1-T58 broadens this from
- * W1-T3E's original add-only `satisfied_by` check to cover the full "edits its
- * criteria" shape the rule actually names.
+ * task]"). A diff that ADDS a `claim:`/`proof:`/`satisfied_by:` field — an
+ * EXISTING criterion gaining one, or a WHOLE NEW criterion appended after the
+ * existing ones (W1-T400) — OR EDITS/REMOVES an existing criterion's field, in
+ * `plan/tasks.yaml` or a `plan/tasks.d/*.yaml` shard (W1-T399), FAILS unless
+ * the PR is plan-only AND human-authored — a worker doing any of these to its
+ * own blocking criteria is "editing the criteria to match the diff", a failed
+ * task, not a merge, whether the edit shape is a modification or an append
+ * that passes by construction. W1-T58 broadened this from W1-T3E's original
+ * add-only `satisfied_by` check to cover the full "edits its criteria" shape
+ * the rule actually names; W1-T400 closed the remaining append gap.
  */
 export function checkSatisfiedByGuard(diff: string, meta: RubricPrMeta = {}): RubricItemResult {
   if (!criterionFieldTampered(diff)) {
-    return { key: "satisfied-by-guard", pass: true, reason: "no criterion field added or edited in plan/tasks.yaml" };
+    return {
+      key: "satisfied-by-guard",
+      pass: true,
+      reason: "no criterion field added or edited in plan/tasks.yaml or a plan/tasks.d/ shard",
+    };
   }
   if (meta.planOnly && meta.humanAuthored) {
     return {
@@ -4784,8 +4859,9 @@ export function checkSatisfiedByGuard(diff: string, meta: RubricPrMeta = {}): Ru
   // plan-only hand-opened PR — it named an author the review path could not know AND
   // denied a plan-only property the same call had just computed as true.
   const edit =
-    "plan/tasks.yaml's acceptance criteria were added/edited (an added satisfied_by, or an edited/removed " +
-    "claim/proof/satisfied_by field)";
+    "plan/tasks.yaml's (or a plan/tasks.d/ shard's) acceptance criteria were added/edited (an added " +
+    "claim/proof/satisfied_by field — including a whole new criterion appended after the existing ones — " +
+    "or an edited/removed one)";
   return {
     key: "satisfied-by-guard",
     pass: false,
