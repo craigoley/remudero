@@ -1,0 +1,105 @@
+- id: W1-T434
+  title: "the scope guard refuses the PUSH after the work is done — four refusals this week, evidence destroyed each time, while a bypassed instance merged anyway: push the branch, ledger the overrun, and flag it on the PR through the advisory channel W1-T401 already built"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 85
+  rationale: "FILED FROM the operator's scope-guard brief (oper#scope-guard-refusal-2026-08-11),
+    evidence re-derived at 07d2d65. THE MECHANISM, QUOTED FROM SOURCE:
+    scopeGuardOutOfScopeFiles (src/run-task.ts) is `const declared = new Set(declaredFiles);
+    return diffFiles.filter((f) => !declared.has(f));` — EXACT string equality, no prefix, no
+    glob (W1-T423's note asserts prefix matching; the corpus itself misbelieves this). AND the
+    sizing rule squeezes the filer from the other side: moduleIdFromPath (src/lib/task-linter.ts)
+    is basename-minus-extension (`path.match(/([^/\\\\]+)\\.[A-Za-z0-9]+$/)` with `.test`
+    folded), isDataArtifact discounts ONLY plan/, config/, settings/ prefixes — so every fixture
+    path mints a distinct subsystem and sizingViolation blocks at >= 2 below risk:high. THE
+    FILER IS STRUCTURALLY PUSHED TOWARD EITHER A REFUSED PUSH OR A LINT VIOLATION. FOUR
+    INSTANCES THIS WEEK, WITH COSTS: W1-T392 refused for src/run-task.ts, test/retro.test.ts
+    and two fixtures (~$14 over three runs, operator report; retired), W1-T393 counted by
+    #1570's own body among the week's refusals — AND ITS IMPLEMENTATION MERGED ANYWAY via
+    #1521 touching src/lib/ledger.ts beyond its declared files, because the worker's sandbox
+    push bypasses the guard entirely — W1-T407 (three dispatches, ~$15, closed by #1570
+    hand-declaring test/run-task.test.ts and test/already-satisfied-exit.test.ts, a file
+    matching NO naming convention), and W1-T409, whose design DELEGATES a fixture corpus that
+    did not exist at filing: declaring the eight paths measured 0 violations -> 1, open-failing
+    165 -> 166, and the in-flight #1577 resolves it by DEFENSIVE RISK INFLATION (medium ->
+    high). THE REACH FACT THAT DECIDES THE REMEDY: the guard sits at ONE of gitPushRunBranch's
+    NINE call sites — runTask's fallback push, reached only when the branch is ABSENT from
+    origin — so it cannot contain a worker (W1-T393 measured), only punish the fallback path
+    after the money is spent, and a refusal never reaches origin: the branch dies with the
+    reaped worktree, which is why every refused run branch this week is GONE. REMEDY (c),
+    ARGUED AGAINST THE OTHER TWO: (a) a filing-time sufficiency grep catches only files that
+    exist (W1-T409's corpus did not) and only names a convention can find (already-satisfied-
+    exit matched none) — a check that catches half the class and reads as closure is worse
+    than none; (b) prefix/glob support in files: widens a containment declaration (a declared
+    src/lib/ admits any lib file) AND opens a sizing bypass (an extensionless prefix mints NO
+    subsystem in moduleIdFromPath, evading Rule 19 entirely) while still not covering the
+    W1-T407 existing-tests variant short of declaring test/ wholesale; (c) push-and-flag
+    punishes nobody, preserves the evidence, and the recon already argued it — 54 percent of
+    recent trailer-bearing merges would flag out of scope, overwhelmingly legitimately
+    (state/recon-guard-reach.md 2026-08-07, quoted in W1-T401's shard: 'escalate rather than
+    refuse'), and W1-T401/#1552 SETTLED the review side on advisory over refusal with
+    scopeViolationFiles already computing the exact comparison per PR. Real containment is the
+    merge gate (Standing rule 3B), not a fallback-path push refusal. LEDGER: UNMEASURED for
+    refusal counts and dollar figures (the mini is down) — costs above are from operator
+    reports and #1570's commit body; the mechanisms are source-derived at 07d2d65."
+  design: |
+    (i) at the ONE guarded site (runTask's implement-rung fallback push, src/run-task.ts): a
+    non-empty scopeGuardOutOfScopeFiles result no longer returns verdict "failed" — the
+    branch is PUSHED, and the ledger records scope_guard.overrun carrying out_of_scope,
+    declared_files and a reason string from this decision (a ledger line carries the reason
+    from the decision that produced its outcome — the #981 rule). The detector itself is
+    UNTOUCHED: exact match stays, W1-T401's 'it is correct' settlement stands; what changes
+    is only what the answer does.
+    (ii) the diff-unreadable arm softens identically: scope_guard.diff_unreadable logs and
+    the push proceeds — an unreadable orchestrator-side diff says nothing about the work.
+    (iii) the overrun is FLAGGED ON THE PR: scopeAdvisorySection (src/lib/review.ts), a
+    sibling of rubricAdvisorySection, renders scopeViolationFiles' existing per-PR result;
+    runReview's gh-pr-comment path includes it whenever the advisory is non-empty, so the
+    overrun reaches the human gate instead of dying in a reaped worktree. The name is
+    load-bearing — the call-site criterion greps it at its consumer.
+    (iv) no decision consumes the new step: scope_guard.overrun is advisory, so
+    DECISION_RELEVANT_LEDGER_STEPS (src/lib/ledger.ts) is deliberately NOT extended — the
+    W1-T240/#977 rule cuts both ways, and test/ledger-rotation.test.ts re-derives the set
+    from consumers, which will prove the omission is correct.
+    (v) FALSIFIER, both directions: with an injected push recorder, an out-of-scope diff
+    PUSHES and ledgers scope_guard.overrun with the offending paths (restoring the old
+    refusal fails this), AND an in-scope diff pushes with NO overrun line and NO advisory
+    section (a guard that flags everything fails this — the false-positive containment).
+    (vi) NOT IN SCOPE: scopeGuardOutOfScopeFiles' comparison semantics (stays exact — no
+    prefix, no glob); Rule 19 / moduleIdFromPath (W1-T409's #1577 handles the instance);
+    filing-time sufficiency checks (rejected as remedy (a)); the other eight
+    gitPushRunBranch sites (non-run-branch verbs, never guarded); re-litigating W1-T401's
+    review-side settlement (this ADOPTS it at the push site).
+  acceptance:
+    - claim: "an out-of-scope diff is pushed and ledgered as an overrun with its paths, while an in-scope diff pushes with no overrun line and no advisory"
+      proof: "unit test: test/scope-guard-overrun.test.ts"
+    - claim: "the overrun step name exists at the push site, so the refusal arm is gone from the wire"
+      proof: "grep: scope_guard\\.overrun in src/run-task.ts"
+    - claim: "the PR comment path consumes the advisory section, so the overrun reaches the human gate"
+      proof: "grep: scopeAdvisorySection( in src/run-task.ts"
+  risk: high
+  origin: oper#scope-guard-refusal-2026-08-11
+  plan_refs: ["W1-T401", "W1-T405", "W1-T409"]
+  files: [src/run-task.ts, src/lib/review.ts, test/scope-guard-overrun.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — the push-site behavior is fixture-decidable with an injected push
+    recorder, and the advisory section is a pure renderer. risk:high — the files: span
+    (run-task push site, review advisory renderer, their test) is Rule 19's SPAN, not blast
+    radius; the behavioral containment is falsifier direction two, the in-scope no-flag case.
+    Rule 25: touches src/run-task.ts and src/lib/review.ts (instrument-adjacent) with nothing
+    else entangled — the files: list is the containment. budget_usd 85 — the push-site
+    rewiring, both ledger arms, the advisory section and its comment wiring, two-direction
+    fixtures. PROOF NOTES: `scope_guard.overrun` (grepped with the dot ESCAPED, so the BRE names
+    the literal step) and `scopeAdvisorySection` are each 0 hits
+    across src/ AND plan/ at 07d2d65 (measured, case-sensitive), so both greps discriminate
+    head from base and name no existing symbol; both target EXISTING paths, so neither can
+    land exec_error; the open-paren form on scopeAdvisorySection( greps the CONSUMER
+    (src/run-task.ts), a path distinct from the defining module, per the call-site lint; the
+    unit-test proof is the pure-path form against a file declared in files:. LEDGER:
+    UNMEASURED (mini down) — stated where the rationale leans on cost figures. NO depends_on:
+    scopeGuardOutOfScopeFiles, scopeViolationFiles, rubricAdvisorySection and the runReview
+    comment path are all on main at 07d2d65."
