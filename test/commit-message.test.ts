@@ -199,8 +199,16 @@ test("spawnFailureDetail speaks only on a null status, and names the runtime's r
   assert.match(detail ?? "", /spawn ENOENT/);
   assert.match(
     spawnFailureDetail("typecheck", { status: null }) ?? "",
-    /no exit status and no error message/,
-    "a null status with no error message still speaks",
+    /no exit status, no signal and no error message/,
+    "a null status with no error message still speaks — and now reports that no signal was seen either",
+  );
+  // The state this residual was previously swallowing: a child KILLED by a signal reports a null
+  // status with NO error, so before `signal` was propagated it rendered identically to the line
+  // above. Duplicated into this suite for the same reason the block's header comment gives.
+  assert.match(
+    spawnFailureDetail("typecheck", { status: null, signal: "SIGKILL" }) ?? "",
+    /KILLED by SIGKILL/,
+    "a killed child names its signal rather than falling into the residual",
   );
 });
 
