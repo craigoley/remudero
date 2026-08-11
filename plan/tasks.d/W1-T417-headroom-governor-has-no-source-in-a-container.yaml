@@ -87,7 +87,7 @@
   origin: recon#headroom-degraded-2026-08-10
   plan_refs: ["W1-T290", "W1-T267", "W1-T18"]
   files: [DECISIONS.md]
-  status: queued
+  status: blocked
   attempts: 0
   note: "verify:human — THIS IS A RULING, and it was verify:auto until the premise was refuted.
     `isDispatchEligible` (src/lib/drain.ts) declines at `verify !== \"auto\"` BEFORE the linter runs,
@@ -112,4 +112,24 @@
     the ruling is written. Neither names an existing symbol, so neither can match the merge base and
     be downgraded to executed_stale. This is deliberately NOT a `unit test:` proof: there is no test
     that can assert an operator made a decision, and forcing one would yield a proof that parses,
-    matches zero tests and caps the review — the theatre the dialect gate exists to stop."
+    matches zero tests and caps the review — the theatre the dialect gate exists to stop.
+    STATUS RESTORED TO `blocked`, 2026-08-11, AND WHY IT REGRESSED — recorded because the agreement
+    between the two corrections is stronger evidence than either one alone. TWO PRs corrected this
+    same task TWO MINUTES APART tonight, from sessions that never saw each other: #1548 (merged
+    46d692a) retired it with `status: blocked` and a retirement record; #1549 (merged c321a08)
+    re-scoped it to this ruling and RENAMED the file. The rename won the modify/delete merge, which
+    silently discarded #1548's status — a rename cannot carry a field edit made to the path it
+    replaces. Nothing was wrong with either change; the loss is a property of the merge shape.
+    BOTH AGREED ON THE FINDING THAT MATTERS: the filing premise is REFUTED. The `/usage` probe
+    AUTHENTICATES and runs — `usage.probe_failed` carries `stage: parse`, and `readUsageSnapshot`
+    (src/run-task.ts) reaches its parse arm only once the subprocess has returned — so the credential
+    is not the cause and the ALLOWLIST widening is withdrawn. They differed only on DISPOSITION:
+    retire versus park for a ruling. This shard keeps #1549's disposition, which is the better
+    measured one — it names the client-behaviour change and establishes that BOTH fallback sources
+    are empty here, including `cachedUsageUtilization`, which #1548's retirement record had pointed
+    at as the replacement candidate without knowing the key is absent.
+    THE STATUS WAS NEVER THE THING BLOCKING DISPATCH, so this is a correctness fix and not an urgent
+    one: `isDispatchEligible` (src/lib/drain.ts) tests `verify !== \"auto\"` BEFORE it tests
+    `status === \"blocked\"`, so `verify: human` alone has parked this task throughout. Restoring the
+    status makes the record say what both corrections concluded rather than leaving it reading
+    `queued` — a task nothing will ever run should not describe itself as waiting to run."
