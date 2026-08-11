@@ -82,7 +82,7 @@ test("a child that never started reports its errno and is NOT described as kille
 });
 
 // ── ORDER: both can be set, and the errno is the cause ───────────────────────────────────────
-test("a buffer-ceiling breach leads with the errno and mentions the signal second", () => {
+test("a bounded child leads with the errno and mentions the signal second", () => {
   // MEASURED: `maxBuffer` and `timeout` breaches set errno AND SIGTERM. This is why the branch
   // order is load-bearing — leading with the signal would report the very ENOBUFS that
   // PREFLIGHT_SPAWN_MAX_BUFFER exists to prevent as a bare "killed by SIGTERM".
@@ -94,7 +94,13 @@ test("a buffer-ceiling breach leads with the errno and mentions the signal secon
   // exactly as `defaultPreflightSpawn` maps them, which its own body shows is a straight forward.
   // An earlier draft passed `maxBuffer` through the wrapper instead; the precondition below caught
   // that it was silently ignored and the child exited 0, so the test would have proved nothing.
-  const raw = spawnSync("/bin/sh", ["-c", "yes | head -c 100000"], { encoding: "utf8", maxBuffer: 16 });
+  // FLAKE FIXED: this used `spawnSync(… { maxBuffer: 16 })` over `yes | head -c 100000`, which
+  // FAILED TO BREACH 2 times in 200 on an idle container — a real race between the child exiting
+  // and the ceiling being enforced — and it fired on main in a full-suite run, where the
+  // precondition below caught it as `0 !== null`. A `sleep 5` against a 120ms timeout cannot race:
+  // load only ever makes the child slower. Measured 40/40. It proves the identical property —
+  // errno AND signal both set, errno leading.
+  const raw = spawnSync("/bin/sh", ["-c", "sleep 5"], { encoding: "utf8", timeout: 120 });
   const res = {
     status: raw.status,
     error: raw.error ? raw.error.message : undefined,
@@ -102,15 +108,15 @@ test("a buffer-ceiling breach leads with the errno and mentions the signal secon
   };
 
   assert.equal(res.status, null, "precondition: a breach yields no exit status");
-  assert.match(String(res.error), /ENOBUFS/, "precondition: the errno is the cause");
+  assert.match(String(res.error), /ETIMEDOUT/, "precondition: the errno is the cause");
   assert.equal(res.signal, "SIGTERM", "precondition: AND a signal is set — both, not either");
 
   const detail = spawnFailureDetail("commitlint", res);
   assert.ok(detail);
-  assert.match(detail, /ENOBUFS/, "the cause leads");
+  assert.match(detail, /ETIMEDOUT/, "the cause leads");
   assert.match(detail, /SIGTERM/, "the signal is still reported, not swallowed");
   assert.ok(
-    detail.indexOf("ENOBUFS") < detail.indexOf("SIGTERM"),
+    detail.indexOf("ETIMEDOUT") < detail.indexOf("SIGTERM"),
     "the errno must come FIRST — it is the cause; the signal is only how the runtime carried it out",
   );
 });
