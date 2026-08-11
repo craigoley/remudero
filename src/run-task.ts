@@ -490,6 +490,7 @@ import {
   runWorktreeReapRung,
   spawnWorker,
   cacheTokenLedgerFields,
+  noPrReportExcerpt,
   workerLedgerFields,
   worktreeAdd,
   worktreeLockIsPidAlive,
@@ -3901,6 +3902,22 @@ export interface NoPrVerdict {
     /** W1-T35 named columns — see {@link cacheTokenLedgerFields}. */
     cache_read_input_tokens: number;
     cache_creation_input_tokens: number;
+    /**
+     * W1-T407: commits on HEAD ahead of `origin/main` at verdict time — the SILENT NO-OP
+     * GUARD's own predicate (`commitsAhead`, above), threaded through instead of computed and
+     * discarded. Appended LAST so no existing positional `noPrVerdict` caller shifted. Lets a
+     * reader separate WROTE NOTHING from WROTE SOMETHING THAT COULD NOT BE PUSHED without
+     * re-deriving it from a worktree `worktreeRemove` has already deleted by the time anyone
+     * reads this row.
+     */
+    commits_ahead: number;
+    /**
+     * W1-T407: the worker's own closing report — `text` + `blocks`, already parsed three
+     * times at this call site (decision request, PR url, already-satisfied claim) before
+     * being dropped — riding the row as a capped excerpt ({@link noPrReportExcerpt}).
+     * `undefined`, never an empty string, when the worker left nothing to carry.
+     */
+    report_excerpt?: string;
   };
 }
 
@@ -3917,8 +3934,21 @@ export interface NoPrVerdict {
  * auto-retry carries NO new information, so under the unattended daemon it risks an unbounded
  * no-op loop; halting with a DISTINCT verdict is safer than silent retry. The distinct label
  * is exactly what the future block-reasoner (W1-T46) needs to later classify retry-vs-escalate.
+ *
+ * `commitsAheadCount` (W1-T407) is the SAME value the SILENT NO-OP GUARD's own predicate just
+ * computed at the call site — appended LAST, after `stage`, so no existing positional caller
+ * shifted (`test/no-pr-verdict-shape.test.ts`). `reason` distinguishes a worker that left its
+ * own account of why (a report to read, riding the row via {@link noPrReportExcerpt} as
+ * `report_excerpt`) from one that said nothing at all — the fixed sentence this function used
+ * to return unconditionally is now reserved for the genuinely silent case.
  */
-export function noPrVerdict(r: WorkerResult, costUsd: number, stage: string): NoPrVerdict {
+export function noPrVerdict(
+  r: WorkerResult,
+  costUsd: number,
+  stage: string,
+  commitsAheadCount: number,
+): NoPrVerdict {
+  const reportExcerpt = noPrReportExcerpt(r);
   return {
     verdict: "no_pr",
     ledger: {
@@ -3929,11 +3959,16 @@ export function noPrVerdict(r: WorkerResult, costUsd: number, stage: string): No
       cost_usd: costUsd,
       billing_mode: billingMode(r.childEnvKeys),
       account_label: r.accountLabel,
-      reason: "worker completed without opening a PR",
+      reason:
+        reportExcerpt !== undefined
+          ? "worker completed without opening a PR — left its own account, see report_excerpt"
+          : "worker completed without opening a PR",
       model: r.model,
       effort: r.effort,
       tokens: r.tokens,
       ...cacheTokenLedgerFields(r.tokens),
+      commits_ahead: commitsAheadCount,
+      ...(reportExcerpt !== undefined ? { report_excerpt: reportExcerpt } : {}),
     },
   };
 }
@@ -5319,7 +5354,12 @@ async function runTask(
     // opened no PR, it produced nothing to merge — an honest `no_pr` verdict, NOT a failed
     // "worker error: success" (run W1-T12a-1784117152056) and NOT a gh-pr-create throw on an
     // empty branch. Only reached when there's no PR to gate.
-    if (!prUrl && commitsAhead(worktreePath, "origin/main") === 0) {
+    //
+    // Computed ONCE and held in `commitCount` (W1-T407) rather than re-called inline: the guard's
+    // predicate is unchanged (still `=== 0`), but the same value now also rides the `no_pr`
+    // ledger row below instead of being thrown away after deciding the branch.
+    const commitCount = commitsAhead(worktreePath, "origin/main");
+    if (!prUrl && commitCount === 0) {
       // W1-T412: HARVEST BEFORE THIS BLOCK'S RETURNS, because every path out of it returns and
       // the implement phase's own harvest call sits far BELOW, after `gh pr create`/`pr.opened`
       // — placed there because that is where `prUrl` becomes known on the orchestrator-fallback
@@ -5365,7 +5405,7 @@ async function runTask(
         });
         say(`ALREADY_SATISFIED claim ("${claim.ref}") did not verify against the board gateway — falling to no_pr`);
       }
-      const v = noPrVerdict(impl, costUsd, "implement");
+      const v = noPrVerdict(impl, costUsd, "implement", commitCount);
       try {
         worktreeRemove(repoDir, worktreePath);
         log("worktree.remove", { on: "no_pr" });

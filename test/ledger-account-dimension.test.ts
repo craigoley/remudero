@@ -93,7 +93,7 @@ test("workerErrorVerdict: billing_mode reads 'api' when the child spawned WITH t
 
 test("noPrVerdict: the ledger payload carries account_label alongside the DERIVED billing_mode", () => {
   const r = fixtureResult({ accountLabel: "acct-uuid-c", childEnvKeys: [] });
-  const v = noPrVerdict(r, 3.3, "implement");
+  const v = noPrVerdict(r, 3.3, "implement", 0);
   assert.equal(v.ledger.account_label, "acct-uuid-c");
   assert.equal(v.ledger.billing_mode, "subscription");
 });
