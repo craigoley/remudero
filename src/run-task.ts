@@ -481,6 +481,7 @@ import {
   parseReconReport,
   parseReport,
   pruneStaleRuns,
+  reapStaleWorktrees,
   removeRunLock,
   renderWorkerSettings,
   resolveClaudeExecutable,
@@ -490,10 +491,12 @@ import {
   cacheTokenLedgerFields,
   workerLedgerFields,
   worktreeAdd,
+  worktreeLockIsPidAlive,
   worktreeRemove,
   worktreesDir,
   writeRunLock,
   WorktreeBaseStaleError,
+  type RunLockInfo,
   type SpawnWorkerArgs,
   type WorkerResult,
   type WorktreeReapSummary,
@@ -4854,6 +4857,12 @@ async function runTask(
         (pruned.skipped.length ? `; SKIPPED ${pruned.skipped.length} live worktree(s)` : ""),
     );
   }
+  // W1-T406: pruneStaleRuns (above) only reclaims what git's OWN worktree registry still
+  // names — it leaves three coverage holes (git-invisible dirs, detached-HEAD `sweep-*`
+  // orphans, widowed `.lock` files) that only reapStaleWorktrees closes, and this one-shot
+  // dispatch never reaches the daemon poll or `rmd sweep` call site that would otherwise run
+  // it. Best-effort and ships dry (`worktreeReapBoot.enabled`) — see logWorktreeReapBootSurvey.
+  logWorktreeReapBootSurvey(config, log);
 
   const branch = `run-${runId}`;
   const worktreePath = join(worktreesDir(config), branch);
@@ -10132,6 +10141,73 @@ export function logCloneReapSurvey(
     return summary;
   } catch {
     return null; // best-effort, exactly like the sibling boot sweeps — never blocks boot
+  }
+}
+
+/**
+ * W1-T406 — the worktree-reap RUNG for a ONE-SHOT `rmd run-task` dispatch, called from inside
+ * {@link runTask} beside its existing `pruneStaleRuns` call. NEITHER of `reapStaleWorktrees`'s
+ * two existing call sites (the daemon's per-poll sweep hook, or `rmd sweep`'s `sweepCommand` —
+ * which anyway guards the reap behind `!dryRun`) is reachable from `docker run ... rmd run-task
+ * <id>`: one needs a running daemon, the other is a PR-disposition verb, not a disk verb. A
+ * one-shot container therefore never runs reapStaleWorktrees at all — only the narrower
+ * `pruneStaleRuns`, which leaves three coverage holes (git-invisible dirs, detached-HEAD
+ * `sweep-*` orphans, widowed `.lock` files) that only reapStaleWorktrees closes. Every
+ * container boot IS the cadence here — it needs no operator and no daemon.
+ *
+ * SAME SHAPE as {@link logCloneReapSurvey}, point for point: best-effort (any failure is caught
+ * and this returns `null`, never blocking the dispatch that invoked it), injectable deps
+ * appended LAST so no positional caller shifts, one ledger line summarising what the pass
+ * found, and DRY BY DEFAULT behind `worktreeReapBoot.enabled` — while off, this only surveys
+ * and ledgers what it would reclaim (reapStaleWorktrees's own `dryRun` opt), deleting nothing.
+ *
+ * `isPidAlive` defaults to {@link worktreeLockIsPidAlive}, NOT `reapStaleWorktrees`'s own
+ * `defaultIsPidAlive`: a container's pid namespace restarts at 1 on every boot, so a bare
+ * `process.kill(pid, 0)` against a PREVIOUS boot's lock routinely finds an unrelated LOCAL
+ * process holding that number and keeps the worktree forever (permanent non-reclamation, the
+ * shape of the 3.0 GB this task was filed against — not destruction). worktreeLockIsPidAlive
+ * compares the live process's own start time against the lock's recorded `startedAt`, reusing
+ * `isHolderStale`'s rung 3 exactly as written. No age arithmetic of any kind is added here —
+ * reapStaleWorktrees's own `maxAgeMs`/activity gate is untouched, so every existing keep
+ * (live-pid, live-branch, recent-activity, activity-unknown) still applies unchanged.
+ */
+export function logWorktreeReapBootSurvey(
+  config: Config,
+  log: (step: string, fields: Record<string, unknown>) => void,
+  deps: {
+    root?: () => string;
+    reap?: typeof reapStaleWorktrees;
+    policy?: () => { enabled: boolean };
+    isPidAlive?: (pid: number, info: RunLockInfo) => boolean;
+  } = {},
+): WorktreeReapSummary | null {
+  try {
+    const readPolicy =
+      deps.policy ?? (() => loadPolicy(policyPath(config.root)).values.worktreeReapBoot);
+    const { enabled } = readPolicy();
+    const reap = deps.reap ?? reapStaleWorktrees;
+    const root = (deps.root ?? (() => worktreesDir(config)))();
+    const summary = reap(root, {
+      dryRun: !enabled,
+      isPidAlive: deps.isPidAlive ?? worktreeLockIsPidAlive,
+    });
+    if (summary.reaped.length || summary.reapedLocks.length) {
+      log("worktree.reap_boot", {
+        dry_run: !enabled,
+        reaped: summary.reaped.length,
+        reaped_locks: summary.reapedLocks.length,
+      });
+    }
+    // W1-T378's own doctrine, unchanged: an `activity-unknown` keep is the reaper declining to
+    // decide, and it is what bounds disk growth now that an ambiguous signal keeps rather than
+    // destroys — so it earns its own row exactly as runWorktreeReapRung's does.
+    const undecidable = (summary.keptReasons ?? []).filter((k) => k.reason === "activity-unknown");
+    if (undecidable.length) {
+      log("worktree.reap_boot.undecidable", { kept: undecidable.map((k) => k.name) });
+    }
+    return summary;
+  } catch {
+    return null; // best-effort, exactly like the sibling boot sweeps — never blocks the dispatch
   }
 }
 

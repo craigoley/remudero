@@ -400,3 +400,23 @@ scratchReap:
     origin: "lifted:src/lib/worker-scratch.ts (DEFAULT_SCRATCH_SWEEP_MAX_AGE_MS = 24h)"
     min: 4
     max: 168
+
+# W1-T406: the worktree cadence reaper's (reapStaleWorktrees) BOOT RUNG for a one-shot
+# `rmd run-task` container dispatch. Neither existing call site — the daemon's per-poll
+# sweep hook, or `rmd sweep` (sweepCommand, which anyway guards the reap behind
+# `!dryRun`) — is reachable from `docker run ... rmd run-task <id>`, so a one-shot
+# container never runs reapStaleWorktrees at all; only pruneStaleRuns' narrower run-start
+# prune does, and it leaves three coverage holes (git-invisible dirs, detached-HEAD
+# `sweep-*` orphans, widowed `.lock` files) that only reapStaleWorktrees closes. One state
+# directory accumulated 3.0 GB across a day of one-shot dispatches on Azure (2026-08-08).
+worktreeReapBoot:
+  # SHIPPED OFF, same posture as `scratchReap.enabled` above and for the same reason: this
+  # rung DELETES, so it begins survey-only — while false the boot pass SURVEYS and ledgers
+  # `worktree.reap_boot` with what it would reclaim, removing nothing, so an operator can
+  # read several boots' worth of dispositions before arming it. No `maxAgeHours` field of
+  # its own: this rung introduces no new age arithmetic — it calls reapStaleWorktrees
+  # exactly as the daemon/sweep call sites do, so it inherits `worktreeReapGraceMs` above
+  # unchanged.
+  enabled:
+    value: false
+    origin: "net-new"

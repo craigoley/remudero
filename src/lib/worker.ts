@@ -29,6 +29,7 @@ import { query, type Options, type PermissionMode } from "@anthropic-ai/claude-a
 import { loadConfig, workerHomeDir, workerShell, workerZdotdir, type Config } from "./config.js";
 import { detectCompactionEvents, isQualitySuspect, type CompactionEvent } from "./compaction.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
+import { isHolderStale, type IsHolderStaleOpts } from "./fs-race-safe.js";
 import { buildWorkerEnv, billingMode, type BillingMode } from "./env.js";
 import { loadDefaultPolicy } from "./policy.js";
 import { assertLiveSpawnAllowed } from "./spawn-guard.js";
@@ -2055,8 +2056,12 @@ export interface WorktreeReapSummary {
 }
 
 export interface WorktreeReapOpts {
-  /** Injectable liveness probe (tests). Defaults to {@link defaultIsPidAlive}. */
-  isPidAlive?: (pid: number) => boolean;
+  /** Injectable liveness probe (tests). Defaults to {@link defaultIsPidAlive}, called as
+   *  `isPidAlive(lockRead.info.pid, lockRead.info)` — the second, RunLockInfo argument is
+   *  new (W1-T406) and exists so a caller can supply a start-time-aware predicate (see
+   *  {@link worktreeLockIsPidAlive}) without reapStaleWorktrees having to know anything
+   *  about pid reuse itself. {@link defaultIsPidAlive} ignores the extra argument. */
+  isPidAlive?: (pid: number, info: RunLockInfo) => boolean;
   /** Age ceiling (ms) below which a terminal-looking entry is still protected — the
    * same create-before-lock / branch-not-yet-pushed race {@link DEFAULT_PRUNE_GRACE_MS}
    * protects against in pruneStaleRuns. Default {@link DEFAULT_WORKTREE_REAP_GRACE_MS}
@@ -2073,6 +2078,44 @@ export interface WorktreeReapOpts {
    * {@link newestActivityMs} — the REAL bounded walk, which the fixture-free tests drive.
    */
   newestActivity?: (dir: string) => { mtimeMs: number; complete: boolean };
+  /**
+   * W1-T406: SURVEY ONLY when true — an entry that would be reaped is still recorded in the
+   * returned `reaped`/`reapedLocks` (so a caller can ledger exactly what it would reclaim),
+   * but nothing is actually removed from disk. Mirrors {@link reapStaleClones}'s own `dryRun`
+   * shape. Default false, unchanged for every existing caller (the daemon poll hook and
+   * `rmd sweep`, via {@link runWorktreeReapRung}, never pass this).
+   */
+  dryRun?: boolean;
+}
+
+/**
+ * A {@link WorktreeReapOpts.isPidAlive}-shaped predicate for the W1-T406 ONE-SHOT CONTAINER
+ * boot rung: answers "is THIS the same process that wrote the lock", not merely "does some
+ * process hold this pid right now". {@link defaultIsPidAlive} (drain-lock.ts, `process.kill(pid,
+ * 0)`) answers only the second question — it reads this container's OWN pid namespace, which
+ * restarts at 1 on every `docker run`. A lock written by a previous boot naming a low pid
+ * therefore very often finds that number ALIVE as an entirely unrelated process, and
+ * reapStaleWorktrees then takes the live-pid keep branch and never reaps it — PERMANENT
+ * NON-RECLAMATION, the shape of the 3.0 GB this task was filed against, not destruction.
+ *
+ * Reuses {@link isHolderStale} (fs-race-safe.ts, W1-T396/W1-T368) exactly as written rather
+ * than reinventing its rung-3 start-time comparison — `pid`/`startedAt` structurally satisfy
+ * {@link HolderIdentity} with no `host` key at all, so isHolderStale's host rung (rung 1) is
+ * skipped by construction; there is nothing for it to read. `RunLockInfo` deliberately gains
+ * no `host` field to make that rung reachable — see this task's plan shard for why that would
+ * import the exact hazard (a container's hostname changing every boot) this predicate exists
+ * to avoid.
+ *
+ * `deps` is injectable (tests only — appended LAST, defaulting to the real syscalls) so the
+ * pid-reuse scenario itself — a live pid whose ACTUAL start time is after the lock's recorded
+ * `startedAt` — is drivable without a real process wrapping a real pid number.
+ */
+export function worktreeLockIsPidAlive(
+  pid: number,
+  info: RunLockInfo,
+  deps: Partial<IsHolderStaleOpts> = {},
+): boolean {
+  return !isHolderStale({ pid, startedAt: info.startedAt }, { isPidAlive: defaultIsPidAlive, ...deps });
 }
 
 /**
@@ -2170,6 +2213,7 @@ export function reapStaleWorktrees(root: string, opts: WorktreeReapOpts = {}): W
   const now = opts.now ?? (() => Date.now());
   const branchIsLiveUpstream = opts.branchIsLiveUpstream ?? defaultBranchIsLiveUpstream;
   const newestActivity = opts.newestActivity ?? ((d: string) => newestActivityMs(d));
+  const dryRun = opts.dryRun ?? false;
   const reaped: string[] = [];
   const reapedLocks: string[] = [];
   const kept: string[] = [];
@@ -2198,7 +2242,7 @@ export function reapStaleWorktrees(root: string, opts: WorktreeReapOpts = {}): W
     if (!isDir) continue;
 
     const lockRead = readRunLock(entryPath);
-    if (lockRead.kind === "live" && isPidAlive(lockRead.info.pid)) {
+    if (lockRead.kind === "live" && isPidAlive(lockRead.info.pid, lockRead.info)) {
       keep(name, "live-pid"); // LIVE pid — never reaped, the same guard pruneStaleRuns applies
       continue;
     }
@@ -2207,7 +2251,7 @@ export function reapStaleWorktrees(root: string, opts: WorktreeReapOpts = {}): W
     // mtime records THAT a write happened, never WHO made it, so it cannot vouch for a run whose
     // own lock says it is over. Reused, not reinvented: `!isPidAlive(pid)` is the same staleness
     // shape as drain-lock.ts's `reclaimStaleLock` (`isStale: (held) => !isAlive(held.pid)`).
-    const lockNamesDeadPid = lockRead.kind === "live" && !isPidAlive(lockRead.info.pid);
+    const lockNamesDeadPid = lockRead.kind === "live" && !isPidAlive(lockRead.info.pid, lockRead.info);
 
     // Not a live-pid worktree. A registered branch still live upstream (an open,
     // unmerged PR) is fail-closed KEPT regardless of age — the sweep-W1-T154
@@ -2242,10 +2286,16 @@ export function reapStaleWorktrees(root: string, opts: WorktreeReapOpts = {}): W
       continue;
     }
     try {
-      fs.rmSync(entryPath, { recursive: true, force: true });
-      removeRunLock(entryPath); // clear the sibling lock so it can't linger widowed
-      removeWorktreeBase(entryPath); // same for the W1-T405 base record — one orphan per reap otherwise
-      reaped.push(name);
+      if (!dryRun) {
+        fs.rmSync(entryPath, { recursive: true, force: true });
+        removeRunLock(entryPath); // clear the sibling lock so it can't linger widowed
+        // MERGE RESOLUTION (W1-T406 × W1-T405): main added this base-record cleanup while this
+        // branch added the `dryRun` guard. It belongs INSIDE the guard — the base record is a
+        // sibling FILE on disk, so removing it during a survey would be destroying state while
+        // claiming to only look. One orphan per reap otherwise.
+        removeWorktreeBase(entryPath);
+      }
+      reaped.push(name); // SURVEY (dryRun) or real removal — either way this is what qualified
     } catch {
       keep(name, "removal-failed"); // best-effort: a removal hiccup never blocks the rest of the pass
     }
@@ -2262,8 +2312,8 @@ export function reapStaleWorktrees(root: string, opts: WorktreeReapOpts = {}): W
     const dirPath = join(root, name.slice(0, -".lock".length));
     if (existsSync(dirPath)) continue; // owning worktree still present — not widowed
     try {
-      unlinkSync(join(root, name));
-      reapedLocks.push(name);
+      if (!dryRun) unlinkSync(join(root, name));
+      reapedLocks.push(name); // SURVEY (dryRun) or real removal — same "qualified" meaning as above
     } catch {
       // best-effort
     }

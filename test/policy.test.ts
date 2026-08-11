@@ -122,6 +122,11 @@ function goodRaw(): Record<string, unknown> {
         max: 168,
       },
     },
+    // W1-T406: the one-shot run-task boot rung for reapStaleWorktrees — ships off, same
+    // shape as scratchReap.enabled above.
+    worktreeReapBoot: {
+      enabled: { value: false, origin: "net-new" },
+    },
   };
 }
 
@@ -191,7 +196,7 @@ test("the SHIPPED plan/policy.yaml loads, and every row's value sits within its 
   // rather than only trusting the absence of a throw.
   const expectedTopLevelKeys = [
     "proofTimeoutMs", "pruneGraceMs", "worktreeReapGraceMs", "pollIntervalMs", "fixStrikeCap",
-    "sweep", "drain", "retro", "autoTriage", "headroom", "launchd", "scratchReap",
+    "sweep", "drain", "retro", "autoTriage", "headroom", "launchd", "scratchReap", "worktreeReapBoot",
   ];
   assert.deepEqual(Object.keys(p.values).sort(), expectedTopLevelKeys.sort());
 
@@ -455,6 +460,9 @@ test("every LIFTED field records origin=lifted:<source-site> — the net-new fie
     "autoTriage.depthCeiling",
     "autoTriage.maxPerDay",
     "scratchReap.enabled",
+    // W1-T406: `worktreeReapBoot.enabled` joins them too — the one-shot boot rung it gates
+    // did not exist before this task, so there is no prior literal to cite as its source.
+    "worktreeReapBoot.enabled",
     "sweep.tmpMaxAgeMs",
     // W1-T378: `worktreeReapGraceMs` is net-new for the same reason as sweep.tmpMaxAgeMs — it is
     // NOT a lift of DEFAULT_PRUNE_GRACE_MS. It is a deliberately SEPARATE dial (the cadence
@@ -493,6 +501,18 @@ test("REJECTS a policy missing 'sweep' entirely", () => {
   const raw = goodRaw();
   delete (raw as Record<string, unknown>).sweep;
   throwsPolicyError(() => validatePolicy(raw), /'sweep' must be a mapping/);
+});
+
+test("REJECTS a policy missing 'worktreeReapBoot' entirely (W1-T406)", () => {
+  const raw = goodRaw();
+  delete (raw as Record<string, unknown>).worktreeReapBoot;
+  throwsPolicyError(() => validatePolicy(raw), /'worktreeReapBoot' must be a mapping/);
+});
+
+test("REJECTS worktreeReapBoot.enabled when it is not a boolean (W1-T406)", () => {
+  const raw = goodRaw();
+  (raw.worktreeReapBoot as Record<string, Record<string, unknown>>).enabled.value = "yes";
+  throwsPolicyError(() => validatePolicy(raw), /worktreeReapBoot\.enabled\.value.*must be a boolean/);
 });
 
 test("REJECTS a non-numeric value where a number is required", () => {
