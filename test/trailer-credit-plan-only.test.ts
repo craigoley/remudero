@@ -23,6 +23,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { Task } from "../src/lib/plan.js";
 import { buildBatchedGithub, deriveStatus, ghGateway, isPlanOnlyChangeset, type GitHub, type PrRef } from "../src/lib/status.js";
+import { writeMutantModule } from "./helpers/mutant-module.js";
 
 function task(id: string): Task {
   return {
@@ -291,21 +292,21 @@ test("MUTANT: crediting without the plan-only test restores the false credit for
   // Mutating the SOURCE proves the refusal is carried by the line under test rather than by some
   // neighbouring accident. The substitution target is asserted UNIQUE first: a mutation applied to
   // two sites, or to none, would make the result unattributable.
-  const { readFileSync, writeFileSync: write, mkdtempSync: mkd } = await import("node:fs");
+  const { readFileSync } = await import("node:fs");
   const src = readFileSync(new URL("../src/lib/status.ts", import.meta.url), "utf8");
   const target = "const files = deps.github.changedFiles?.(trailerPr.url);";
   const occurrences = src.split(target).length - 1;
   assert.equal(occurrences, 1, "the substitution target must be UNIQUE or the mutant proves nothing");
 
-  const dir = mkd(join(tmpdir(), "trailer-plan-only-mutant-"));
-  const mutantPath = join(dir, "status.ts");
-  // The copy lives outside src/, so its SIBLING imports (`./drain-lock.js`, …) would not resolve —
-  // absolutise them against the real directory rather than writing a scratch module into src/.
-  const libDir = new URL("../src/lib/", import.meta.url).pathname;
-  const mutated = src
-    .replace(target, "const files = undefined as string[] | undefined;")
-    .replace(/from "\.\/([A-Za-z0-9._-]+)\.js"/g, (_m, name) => `from "${libDir}${name}.js"`);
-  write(mutantPath, mutated);
+  // The copy lives outside src/, so its SIBLING imports (`./drain-lock.js`, …) would not resolve;
+  // the helper absolutises them against the real directory. It also decides WHERE the copy goes,
+  // and that is load-bearing rather than cosmetic — a copy under `os.tmpdir()` re-enters the real
+  // src/lib graph from outside the project root and destroys the coverage record of modules this
+  // suite never mentions. The measurement lives in test/helpers/mutant-module.ts.
+  const mutantPath = writeMutantModule(
+    "status.ts",
+    src.replace(target, "const files = undefined as string[] | undefined;"),
+  );
   // The mutant reads the file list as permanently UNAVAILABLE, which is exactly the pre-fix
   // behaviour: every anchored trailer credits regardless of what the PR changed.
   const mutant = (await import(mutantPath)) as typeof import("../src/lib/status.js");

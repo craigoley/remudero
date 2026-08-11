@@ -99,3 +99,77 @@ test("no serve test returns a bare (un-awaited) page.<method>(...) — the teard
   }
   assert.deepEqual(offenders, [], `un-awaited \`return page.…\` in a serve test races the finally teardown; use \`return await\`:\n${offenders.join("\n")}`);
 });
+
+
+// ── mutant-module placement guard (the W1-T421 coverage collapse) ─────────────────────────────
+// A suite that writes a MUTATED COPY of a src/lib module and imports it must put the copy INSIDE
+// the project root. MEASURED across 14 bisect runs of the same 14 files: a copy under `os.tmpdir()`
+// re-enters the real src/lib graph from outside the root, a synthetic `SF:src/lib/<define:import.meta>`
+// record appears, and `src/lib/commit-message.ts` collapses from LH:533 to LH:109 — 424 lines that
+// then read to `scripts/diff-coverage.mjs` exactly like code nobody tested. Two suites had this
+// shape; both were falsifiers written the same week, which is why it surfaced now rather than a
+// year ago. The guard is here rather than in either suite because the NEXT one written is the risk.
+
+/** The offending shape: a specifier `await import()`ed whose own assignment reaches `tmpdir()`. */
+function tmpdirModuleImports(text: string): string[] {
+  const bad: string[] = [];
+  for (const m of text.matchAll(/await import\(([A-Za-z_$][A-Za-z0-9_$]*)\)/g)) {
+    const id = m[1];
+    // The assignment, from `const <id> =` to the first statement terminator at end of line — the
+    // construction spans lines in both real call sites, so this cannot be a single-line match.
+    const assign = new RegExp(`(?:const|let|var)\\s+${id}\\s*=[\\s\\S]*?;\\s*$`, "m").exec(text);
+    if (assign && /\btmpdir\(\)/.test(assign[0])) bad.push(id);
+  }
+  return bad;
+}
+
+test("no test imports a mutated module copy from outside the project root — the coverage-record anti-pattern is forbidden fleet-wide", () => {
+  // BOTH DIRECTIONS. A detector that only ever returns [] passes over every file in the repo and
+  // proves nothing, so it is driven with the exact pre-fix construction first — and with the two
+  // legitimate shapes it must stay silent on: a dynamic import of a REAL in-tree module
+  // (test/clock-sweep.test.ts and two siblings), and a tmpdir used for fixture DATA rather than a
+  // module, which is ubiquitous here.
+  assert.deepEqual(
+    tmpdirModuleImports(
+      'const mutantPath = join(mkdtempSync(join(tmpdir(), "x-mutant-")), "review.ts");\nconst m = await import(mutantPath);\n',
+    ),
+    ["mutantPath"],
+    "the detector must fire on the shape this task removed, or it is vacuous",
+  );
+  assert.deepEqual(
+    tmpdirModuleImports(
+      'const SWEEP_URL = pathToFileURL(join(dir, "..", "scripts", "clock-sweep.mjs")).href;\nconst mod = await import(SWEEP_URL);\n',
+    ),
+    [],
+    "a dynamic import of a real in-tree module is the repo idiom and must stay silent",
+  );
+  assert.deepEqual(
+    tmpdirModuleImports(
+      'const ledger = join(mkdtempSync(join(tmpdir(), "led-")), "ledger.ndjson");\nconst m = await import(REAL_URL);\n',
+    ),
+    [],
+    "a tmpdir holding fixture DATA is not this anti-pattern",
+  );
+
+  const testDir = join(fileURLToPath(new URL("..", import.meta.url)), "test");
+  // THIS FILE IS SKIPPED, and the reason is not convenience: the controls above are the offending
+  // shape written out as string literals, so a sweep including this file matches its own fixtures
+  // and reports a defect that does not exist — the self-match failure mode CLAUDE.md names for
+  // `pkill -f`, in a different dress. The hole it leaves is a mutant import written into the guard
+  // file itself, which is the one file in the repo whose whole purpose is to contain no such thing.
+  const SELF = "architecture-fitness.test.ts";
+  const offenders: string[] = [];
+  for (const file of readdirSync(testDir)) {
+    if (!/\.test\.ts$/.test(file) || file === SELF) continue;
+    for (const id of tmpdirModuleImports(readFileSync(join(testDir, file), "utf8"))) {
+      offenders.push(`${file}: a mutant module imported from ${id}`);
+    }
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    "a mutant module imported from os.tmpdir() destroys the coverage record of every src/lib module " +
+      "its graph re-enters; use writeMutantModule (test/helpers/mutant-module.ts), which writes the " +
+      `copy under test/ instead:\n${offenders.join("\n")}`,
+  );
+});

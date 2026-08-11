@@ -17,6 +17,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { bodyContradictsDiff } from "../src/lib/review.js";
+import { writeMutantModule } from "./helpers/mutant-module.js";
 
 /** A diff that is NOT plan scope only and NOT data only — so any true claim contradicts it. */
 const SRC_DIFF = ["src/lib/status.ts", "test/trailer-credit-plan-only.test.ts"];
@@ -79,19 +80,18 @@ test("a true claim is still silent — the contradiction is about the DIFF, not 
 // ── FALSIFIER ────────────────────────────────────────────────────────────────────────────────
 
 test("MUTANT: dropping the anchor makes the required proof path contradict the diff again", async () => {
-  const { readFileSync, writeFileSync, mkdtempSync } = await import("node:fs");
-  const { tmpdir } = await import("node:os");
-  const { join } = await import("node:path");
+  const { readFileSync } = await import("node:fs");
   const src = readFileSync(new URL("../src/lib/review.ts", import.meta.url), "utf8");
   const target = "    if (!shorthandIsAboutChangeset(scan, m.index ?? 0, m[0].length)) continue;\n    const violators = diffFiles.filter((f) => !isInPlanScope(f));";
   assert.equal(src.split(target).length - 1, 1, "the substitution target must be UNIQUE or the mutant proves nothing");
 
-  const libDir = new URL("../src/lib/", import.meta.url).pathname;
-  const mutated = src
-    .replace(target, "    const violators = diffFiles.filter((f) => !isInPlanScope(f));")
-    .replace(/from "\.\/([A-Za-z0-9._-]+)\.js"/g, (_m, name) => `from "${libDir}${name}.js"`);
-  const mutantPath = join(mkdtempSync(join(tmpdir(), "shorthand-anchor-mutant-")), "review.ts");
-  writeFileSync(mutantPath, mutated);
+  // The copy goes under `test/`, NOT `os.tmpdir()` — a mutant outside the project root re-enters
+  // the real src/lib graph and destroys the coverage record of modules this suite never mentions.
+  // The whole measurement is in test/helpers/mutant-module.ts; do not inline this back to tmpdir.
+  const mutantPath = writeMutantModule(
+    "review.ts",
+    src.replace(target, "    const violators = diffFiles.filter((f) => !isInPlanScope(f));"),
+  );
   const mutant = (await import(mutantPath)) as typeof import("../src/lib/review.js");
 
   const proofLine = "proof: unit test: test/trailer-credit-plan-only.test.ts";

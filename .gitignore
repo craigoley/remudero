@@ -40,3 +40,10 @@ plan/operator-notes.ndjson
 # than the disease.
 ee-open.json
 *.log
+
+# W1-T421: mutated module copies written by test/helpers/mutant-module.ts. They live under test/
+# rather than os.tmpdir() ON PURPOSE — a copy outside the project root re-enters the real src/lib
+# graph and destroys the coverage record of unrelated modules. writeMutantModule removes them on
+# process exit; this entry is the backstop for a run killed outright, so a crashed suite cannot
+# leave dirt that self-sync's unscoped dirty check reads as a reason to stop deploying.
+test/mutants-*/
