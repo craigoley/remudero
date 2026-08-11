@@ -781,6 +781,34 @@ function e2eSpawnWorkerArgs(dir: string, extra: Record<string, unknown> = {}) {
   };
 }
 
+/**
+ * Wait for a pid to disappear, POLLING TO A DEADLINE rather than sleeping a fixed
+ * interval.
+ *
+ * WHAT THIS REPLACES WAS A RACE, NOT A WAIT. Both end-to-end teardown tests below
+ * used `await new Promise((r) => setTimeout(r, 50)) // let the SIGKILL land` and
+ * then asserted the pid was gone. 50ms is not a guarantee that a real SIGKILL has
+ * been delivered AND the child reaped — it is a guess that holds on an idle laptop
+ * and not on a loaded CI runner. MEASURED: #1582 (a ONE-FILE MARKDOWN diff, which
+ * cannot reach process teardown) failed `coverage-ratchet` here with
+ * `actual: true, expected: false` — the process was simply still alive at 50ms —
+ * and the FLAKE-RETRY re-run failed identically, because an immediate retry lands
+ * on the same still-loaded machine. `ci-gate` then went red as the aggregator
+ * (its own REQUIRED list names coverage-ratchet), so one sleep reddened two checks.
+ *
+ * THE ASSERTION IS NOT WEAKENED — this is the point. A group that is genuinely NOT
+ * torn down still fails, because the caller still asserts `isPidAlive === false`
+ * afterwards; it just fails at the deadline instead of at an arbitrary 50ms. What
+ * is removed is only the false NEGATIVE on a slow machine. This is the repo's own
+ * recurring shape (CLAUDE.md): a bound that fires on a HEALTHY condition.
+ */
+async function awaitPidGone(pid: number, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (isPidAlive(pid) && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
 test("spawnWorker (end-to-end, SUCCESS path): the process group spawned via options.spawnClaudeCodeProcess is torn down after a normal resolve", async () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-worker-e2e-success-"));
   let capturedPid: number | undefined;
@@ -800,7 +828,7 @@ test("spawnWorker (end-to-end, SUCCESS path): the process group spawned via opti
 
   assert.equal(result.text, "done", "the fake success envelope reached the caller normally");
   assert.ok(capturedPid, "spawnClaudeCodeProcess was invoked and a real pid captured");
-  await new Promise((r) => setTimeout(r, 50)); // let the SIGKILL land
+  await awaitPidGone(capturedPid!); // let the SIGKILL land — polled, not guessed
   assert.equal(isPidAlive(capturedPid!), false, "the group spawned by THIS spawnWorker call must be torn down on resolve");
 });
 
@@ -823,7 +851,7 @@ test("spawnWorker (end-to-end, ERROR path): the process group is STILL torn down
     /simulated transport failure/,
   );
   assert.ok(capturedPid, "spawnClaudeCodeProcess was invoked and a real pid captured, even on the error path");
-  await new Promise((r) => setTimeout(r, 50));
+  await awaitPidGone(capturedPid!);
   assert.equal(isPidAlive(capturedPid!), false, "the group must STILL be torn down — teardown is a finally, not a success-only step");
 });
 
