@@ -309,3 +309,103 @@ export function checkBinaryPin(recordedVersion: string, actualVersion: string): 
     reason: `claude binary content changed since it was pinned: recorded ${recordedVersion}, observed ${actualVersion} at preflight`,
   };
 }
+
+// ── The DECLARED pin, and the reading that finally consumes checkBinaryPin ──
+//
+// WHY THIS EXISTS: {@link checkBinaryPin} shipped with NO PRODUCTION CALLER (src/lib/reachability.ts
+// lists it by name among the zero-consumer organs), and the reason is not that someone forgot the
+// call — it is that its `recordedVersion` argument HAD NO PRODUCER ANYWHERE IN THE TREE. `Config`
+// carries `claudeBin`, a PATH, and no version; `resolveClaudeExecutable` runs `--version` with
+// `stdio: "ignore"` and discards the output. Wiring it therefore required deciding what "recorded"
+// means, which is the whole of the design below.
+//
+// THE SOURCE OF TRUTH IS THE ONE DECLARATION THIS REPO ALREADY MAKES: `ARG CLAUDE_CODE_VERSION` in
+// deploy/Dockerfile. Two reasons, and the second is why nothing else was chosen:
+//   1. It is the version this repo SAYS its workers run — the Dockerfile argues it at length (the
+//      `stable` dist-tag, and lockstep with the `@anthropic-ai/claude-agent-sdk` version in
+//      package-lock.json). A host that disagrees with it is exactly the condition worth reporting.
+//   2. deploy/verify-image.sh reads THE SAME LINE. One declaration, two consumers, no second copy
+//      to drift — and no inference. Deriving the expected CLI from the SDK version instead would
+//      have meant trusting the 2.1.N-alongside-0.3.N convention, which upstream documents but does
+//      not guarantee; that would put an unenforced assumption inside a gate.
+//
+// THREE STATES, NEVER TWO. `unknown` is not padding: this fleet's standing law is that a READ
+// FAILURE DEGRADES TO UNKNOWN, NEVER TO A NUMBER — and the recon that produced this task found that
+// law broken three times in one function elsewhere (deployer.ts's `probeIdle`). An unreadable
+// Dockerfile or a `claude --version` that will not run must not be able to render as `match`.
+
+/** The Dockerfile ARG that declares which CLI this repo intends its workers to run. */
+export const DECLARED_CLI_PIN_ARG = "CLAUDE_CODE_VERSION";
+
+/**
+ * The declared CLI pin, parsed out of deploy/Dockerfile text. Returns `undefined` when the ARG is
+ * absent — never a guess. Tolerates the optional-default form (`ARG X=1.2.3`) that the Dockerfile
+ * actually uses, and quoting, because a future edit may add either.
+ */
+export function parseDeclaredClaudeVersion(dockerfileText: string): string | undefined {
+  const m = new RegExp(`^\\s*ARG\\s+${DECLARED_CLI_PIN_ARG}\\s*=\\s*["\']?([^"\'\\s#]+)`, "m").exec(dockerfileText);
+  return m ? m[1] : undefined;
+}
+
+/**
+ * The bare version from `claude --version` output — MEASURED shape `2.1.227 (Claude Code)`, so the
+ * trailing product name is dropped and only the version token compared. Returns `undefined` for
+ * output that carries no leading version at all, which is what a broken or wrapped binary emits.
+ */
+export function parseClaudeVersionOutput(raw: string): string | undefined {
+  const m = /^\s*(\d+\.\d+\.\d+\S*)/.exec(raw);
+  return m ? m[1] : undefined;
+}
+
+/** A three-state binary-pin reading. `unknown` means A READ FAILED, never "no drift". */
+export interface BinaryPinReading {
+  status: "match" | "drift" | "unknown";
+  declaredVersion?: string;
+  observedVersion?: string;
+  /** Always present, always says which of the three happened and why. */
+  reason: string;
+}
+
+/**
+ * Read the declared pin and the installed binary and compare them through {@link checkBinaryPin}.
+ *
+ * BOTH READS ARE INJECTED and BOTH may throw — a missing Dockerfile, a binary that will not run.
+ * Each failure yields `status: "unknown"` with the cause named, so a caller can ledger "we could
+ * not tell" as its own outcome rather than reporting a match it never observed.
+ */
+export function readBinaryPin(deps: {
+  readDockerfile: () => string;
+  runClaudeVersion: () => string;
+}): BinaryPinReading {
+  let declaredVersion: string | undefined;
+  try {
+    declaredVersion = parseDeclaredClaudeVersion(deps.readDockerfile());
+  } catch (e) {
+    return { status: "unknown", reason: `could not read the declared pin: ${String(e)}` };
+  }
+  if (!declaredVersion) {
+    return { status: "unknown", reason: `deploy/Dockerfile declares no ${DECLARED_CLI_PIN_ARG}` };
+  }
+
+  let observedVersion: string | undefined;
+  try {
+    observedVersion = parseClaudeVersionOutput(deps.runClaudeVersion());
+  } catch (e) {
+    return { status: "unknown", declaredVersion, reason: `claude --version did not run: ${String(e)}` };
+  }
+  if (!observedVersion) {
+    return { status: "unknown", declaredVersion, reason: "claude --version emitted no recognisable version" };
+  }
+
+  const pin = checkBinaryPin(declaredVersion, observedVersion);
+  return pin.drift
+    ? {
+        status: "drift",
+        declaredVersion,
+        observedVersion,
+        reason:
+          `this host runs claude ${observedVersion} but deploy/Dockerfile declares ${declaredVersion} — ` +
+          `the SDK in package-lock.json is paired with the declared one, so this combination is untested`,
+      }
+    : { status: "match", declaredVersion, observedVersion, reason: `claude ${observedVersion} matches the declared pin` };
+}
