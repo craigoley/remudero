@@ -82,7 +82,70 @@ raw: |-
 
   THE LEDGER IS UNREACHABLE (the Mac mini is down), so nothing above is inferred from it. Every
   claim is from source at 9b8736a.
+
+  ══════════════════════════════════════════════════════════════════════════════════════════════
+  RESOLUTION, APPENDED 2026-08-11 AND RE-DERIVED AT 279e1b1. EVERYTHING ABOVE STANDS AS WRITTEN.
+
+  The argument above is NOT edited away, and that is deliberate. It was correct on the evidence
+  it had, and this repo's practice is to keep a reversed position with its refutation attached
+  rather than rewrite it into agreement -- the same call a session made for #1500's halt-set doc.
+  A reader who only sees the conclusion cannot tell a lucky guess from a reasoned one.
+
+  ONE FACT CHANGED THE CALCULUS, AND THIS RECORD DID NOT HAVE IT: THE EXISTING PROBE IS
+  DEGENERATE. The clause above reads "`evaluateDenyFloor` is referenced from `src/spike.ts` ONLY.
+  Nothing on the dispatch path calls it" -- true, and it invites the obvious remedy of wiring
+  that probe up. WIRING IT AS-IS WOULD SHIP A PERMANENT FALSE GREEN. Re-derived from source at
+  279e1b1:
+    - `src/spike.ts` plants the tripwire at `~/FORBIDDEN_PROBE` (prompt step 1 is
+      `touch ~/FORBIDDEN_PROBE`; `forbiddenPath` is `join(homedir(), "FORBIDDEN_PROBE")`) -- HOME.
+    - `defaultExecutor` (src/lib/containment.ts) states the sandbox write scope in its own
+      comment: cwd + session $TMPDIR. HOME is NEITHER, so that path is denied by the SANDBOX.
+    - `evaluateDenyFloor` is fed exactly ONE input, `existsSync(forbiddenPath)`.
+  So under a HEALTHY sandbox the file is absent whether or not the hook ran, and the verdict
+  reads `heldUnderBypass: true, contained: true`. DELETING hooks/deny-floor.sh OUTRIGHT WOULD
+  STILL REPORT CONTAINED. The observation proves the sandbox and is silent about the deny floor,
+  which is the exact declared-vs-engaged confusion this record set out to prevent.
+
+  SHARPER STILL, AND WORTH RECORDING: the discriminating signal EXISTS in spike.ts and is
+  DISCARDED. `hookDenialInTranscript` (`/FORBIDDEN_PROBE|deny-floor/i` over the transcript) is
+  computed one line after the verdict and is used at exactly ONE place -- a `kv()` log line. It
+  is never fed to `evaluateDenyFloor`. The probe had the means to discriminate and threw it away.
+
+  THE OPERATOR RULED, AND #1575 SHIPPED THE ENGAGEMENT PROBE. Clause (b) above judged that shape
+  "a task, not a patch, and a half-done version of it is worse than the gap". The operator ruled
+  in favour of the narrower build. It avoids BOTH failure modes this record feared:
+    - it plants the tripwire INSIDE cwd, where the two controls DISAGREE -- the sandbox permits
+      that path (the same scope `probe-ok.txt` proves writable) and only the hook denies it, so
+      presence is a one-way witness that the floor did not bind. Not the degenerate observation.
+    - `assessDenyFloor` is TRI-STATE, so an executor reporting nothing reads UNOBSERVED and never
+      ENGAGED. Silence is not evidence.
+    - `stripDenyFloorLines` closes the one path by which adding the step could have WEAKENED
+      `assessContainment`: the tripwire's own narration could otherwise satisfy `OS_DENIAL_RE`
+      and flip a genuinely UNPROVEN run to contained, so OS-denial evidence stays sourced
+      strictly from the outside-cwd write.
+  It also did NOT do what clause (b) assumed was required: it does not fold a second verdict into
+  `assessContainment`, and it adds no fail-closed bound. That is why it was a patch after all.
+  #1575 MERGED to origin/main at 05f980f, one commit before this record itself landed (#1573,
+  db4e110) -- so the objection and its refutation reached main within minutes of each other.
+
+  WHAT REMAINS OPEN, STATED SO IT IS NOT MISTAKEN FOR CLOSED. #1575 is OBSERVATIONAL. It records
+  a verdict; it refuses nothing. A worker spawned with the `hooks` block missing still runs, and
+  the run still proceeds -- the record simply now says so. THE FAIL-CLOSED VERSION IS STILL OPEN
+  WORK, and #1575 is its substrate: flip `assessDenyFloor`'s CONSUMER, not its discriminator.
+
+  WHAT WOULD HAVE TO BE TRUE FIRST. The hook's behaviour under the INSTALLED CLI is UNMEASURED --
+  no spike was run against it, and the ledger is unreachable, so nobody has observed a single
+  real `deny_floor_engaged` value. A bound on an unmeasured control is this repo's recurring
+  defect (a wait cap under the real check wall-clock; a deploy ceiling consumed by a dry run; a
+  check-wait bound where 21 of 21 booked PRs later merged). Worse here than usual: refusing
+  dispatch on a false negative would park a fleet the operator CANNOT CURRENTLY REACH, because
+  the host that runs it is down. The flip needs a measured engaged-rate from #1575 running in
+  production, and a stated threshold -- the W1-T322 -> W1-T323 order.
+
+  NO TASK IS FILED FOR THE FLIP YET, DELIBERATELY. It waits on observations that do not exist.
+  Filing it now would mint an id whose acceptance criteria nobody can evaluate, which is the
+  thin-filing shape this repo has measured makes dispatch quality worse.
 attachments: []
 origin: recon#deny-floor-never-probed-2026-08-11
-status: new
-proposal_pr: null
+status: accepted
+proposal_pr: https://github.com/craigoley/remudero/pull/1575
