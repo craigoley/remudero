@@ -753,10 +753,13 @@ test("noPrVerdict: a terminal-SUCCESS worker with NO PR yields verdict 'no_pr' w
     result({ isError: false, subtype: "success", numTurns: 10, tokens: { input: 400, output: 40, cacheRead: 350, cacheCreation: 0 } }),
     5.05,
     "implement",
+    0,
   );
   assert.equal(v.verdict, "no_pr");
   assert.equal(v.ledger.verdict, "no_pr");
   assert.equal(v.ledger.reason, "worker completed without opening a PR");
+  assert.equal(v.ledger.commits_ahead, 0);
+  assert.equal(v.ledger.report_excerpt, undefined);
   assert.equal(v.ledger.subtype, "success");
   assert.equal(v.ledger.num_turns, 10);
   assert.equal(v.ledger.cost_usd, 5.05);
@@ -783,7 +786,7 @@ test("isTransientResult: a server_error/<synthetic>/isApiErrorMessage result is 
 test("isTransientResult: a CLEAN terminal-success (no api-error) is NOT transient → it flows to the no_pr/no-op path", () => {
   assert.equal(isTransientResult(result({ subtype: "success", apiError: false })), false);
   // and that clean-success no-op still maps to the honest no_pr verdict (the OPPOSITE of a transient):
-  assert.equal(noPrVerdict(result({ subtype: "success" }), 1, "implement").verdict, "no_pr");
+  assert.equal(noPrVerdict(result({ subtype: "success" }), 1, "implement", 0).verdict, "no_pr");
 });
 
 test("isTransientResult: a real task failure (error_max_turns) is NOT transient — it is a strike → failed", () => {

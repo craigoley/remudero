@@ -255,6 +255,28 @@ export function workerFailureExcerpt(r: Pick<WorkerResult, "isError" | "stderr" 
 }
 
 /**
+ * Persisted-report length ceiling (W1-T407) — the SAME discipline as {@link STDERR_EXCERPT_CAP}
+ * applied to a different string: a terminal-SUCCESS worker's own closing narrative instead of a
+ * failed spawn's stderr. Not a new design problem, just this mechanism applied to the text the
+ * SILENT NO-OP GUARD in run-task.ts already parses three times (decision request, PR url,
+ * already-satisfied claim) and, until now, dropped once no PR came out of it.
+ */
+export const REPORT_EXCERPT_CAP = 4000;
+
+/**
+ * The capped, ledger-safe excerpt of a worker's own report — `text` + `blocks` joined, the
+ * same shape run-task.ts's local `fullText` closure already builds for every parse at that
+ * call site. Returns `undefined` for empty/whitespace-only input, so a truly silent no-op
+ * (nothing said, nothing committed) never carries a blank/empty field on its ledger row — the
+ * same "absent, never empty" discipline {@link workerFailureExcerpt} already keeps for stderr.
+ */
+export function noPrReportExcerpt(r: Pick<WorkerResult, "text" | "blocks">): string | undefined {
+  const combined = [r.text, r.blocks.join("\n")].filter((s) => s && s.trim().length > 0).join("\n");
+  const trimmed = combined.trim();
+  return trimmed ? capStderrExcerpt(trimmed, REPORT_EXCERPT_CAP) : undefined;
+}
+
+/**
  * The standard per-call ledger telemetry (W1-T6 acceptance): every worker AND
  * brain-plane (architect/reviewer) call logs `{model, effort, tokens,
  * cache_read_input_tokens, cache_creation_input_tokens, total_cost_usd,

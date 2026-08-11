@@ -179,7 +179,7 @@ test("alreadySatisfiedVerdict: a distinct verdict, carrying the credited PR's ur
 // ── Part 5: no_pr keeps its existing, drain-halting behaviour — UNCHANGED ────────────────
 
 test("noPrVerdict: unchanged by this task — still the honest, distinct 'no_pr' verdict for a terminal-SUCCESS worker with no PR", () => {
-  const v = noPrVerdict(result({ subtype: "success", numTurns: 5 }), 2, "implement");
+  const v = noPrVerdict(result({ subtype: "success", numTurns: 5 }), 2, "implement", 0);
   assert.equal(v.verdict, "no_pr");
   assert.equal(v.ledger.verdict, "no_pr");
   assert.equal(v.ledger.reason, "worker completed without opening a PR");
