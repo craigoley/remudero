@@ -1,0 +1,60 @@
+- id: W1-T429
+  title: "every task-id-keyed decision read on instance-global state is repo-blind — `priorActionsFromLedger` counts, breaker gates, inflight locks and KICK markers all key on the bare task id, so two repos sharing an id scheme cross-contaminate caps the moment `--repo` is used: qualify the keys with the repo"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80
+  rationale: "FILED FROM the architecture brief (oper#architecture-2026-08-11), evidence re-derived
+    at 09c7bda. THE MECHANISM, DERIVED: the ledger is one file per instance (`ledgerPathFor` off
+    config.root) and only `run.start` carries a `repo:` dimension, while every DECISION read keys
+    on task_id alone — `priorActionsFromLedger` enforces ABSENT_REPUSH_CAP by counting
+    `sweep.absent_repush` lines per task id (src/lib/ledger.ts), breaker gates read the same way,
+    `state/inflight/` locks and `state/KICK-<taskId>` markers (src/lib/fleet-control.ts) are
+    task-id-named files. MEASURED: `drainCommand` and `sweepCommand` already accept `--repo`
+    today, and the fleet's plans share one id scheme (this repo's W1-Tnnn and a
+    project-init'd repo's W1-Tnnn are the SAME KEY), so the hazard is live the first time a
+    second repo is driven from this instance — a wild-trails W1-T12 inherits remudero W1-T12's
+    strike count, repush cap and KICK marker. THE CELL ARCHITECTURE (D-11) makes one-instance-
+    one-repo the default, which CONTAINS this — but `--repo` exists, the pilot path crosses it,
+    and a key that silently aliases two tasks is wrong in any topology. LEDGER: UNMEASURED for
+    live counts (the mini is down); the mechanism is source-derived, not incident-derived."
+  design: |
+    (i) repoScopedTaskKey (src/lib/ledger.ts): the ONE helper that renders a decision key from
+    (repo, task_id) — `<repo>:<task_id>` when repo is known, bare task_id as the legacy fallback
+    so pre-existing ledger lines keep matching. The name is load-bearing — the call-site
+    criterion greps for it.
+    (ii) every task-id-keyed DECISION read adopts it: `priorActionsFromLedger`'s counting, the
+    breaker-gate reads, and the writers of the lines they count (the write and the read must
+    move in the SAME PR or the cap resets — the W1-T240/#977 DECISION_RELEVANT_LEDGER_STEPS
+    lesson applies and that set must be re-checked here).
+    (iii) fleet-control markers: `state/KICK-<taskId>` and `state/inflight/<taskId>` gain the
+    repo qualifier through the same helper, with the unqualified name still HONORED on read
+    (a marker written before this change must not be orphaned by it).
+    (iv) FALSIFIER, both directions: two synthetic ledgers — same task id, two repos — must
+    count independently under the scoped key (a cap consumed by repo A leaves repo B at zero),
+    AND a legacy unqualified line must still be counted for its task when no repo dimension
+    exists (the backward direction; deleting the fallback fails it).
+    (v) NOT IN SCOPE: adding a repo dimension to every ledger step (only decision-relevant
+    ones); the owner-qualification of clone paths (W1-T403's schema decision governs that);
+    any change to the ledger file layout or rotation.
+  acceptance:
+    - claim: "the same task id in two repos counts caps and reads breakers independently, and a legacy unqualified line still matches its task"
+      proof: "unit test: test/ledger-repo-scope.test.ts"
+    - claim: "the scoped key is a single named helper adopted at the decision reads, not a per-site string format"
+      proof: "grep: repoScopedTaskKey in src/lib/ledger.ts"
+  risk: high
+  origin: oper#architecture-2026-08-11
+  plan_refs: ["W1-T408", "W1-T403"]
+  files: [src/lib/ledger.ts, src/lib/fleet-control.ts, src/run-task.ts, test/ledger-repo-scope.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — key scoping and both falsifier directions are fixture-decidable offline.
+    risk:high — the files: span (ledger, fleet-control, their run-task wiring) is Rule 19's SPAN,
+    not blast radius, and the write-and-read-move-together constraint is the #977 class.
+    budget_usd 80 — the helper, three consumer families, the legacy-fallback direction.
+    PROOF NOTES: the unit test proof is the pure-path form against a file declared in files:;
+    `repoScopedTaskKey` is 0 hits across src/ at 09c7bda (measured), so the grep discriminates
+    head from base and cannot land executed_stale. LEDGER: UNMEASURED (mini down); nothing here
+    needs it. NO depends_on: the helper and its consumers are all on main today."

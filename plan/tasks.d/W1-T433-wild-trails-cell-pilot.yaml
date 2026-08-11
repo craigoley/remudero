@@ -1,0 +1,68 @@
+- id: W1-T433
+  title: "the cell architecture is an argument until a second instance runs — the wild-trails pilot: a SECOND config root, daemon and console on the mini, driving the wild-trails backlog with its own ledger, governor and worktree pool, proving cells share nothing mutable and surfacing what the argument missed"
+  repo: remudero
+  depends_on: ["W1-T432"]
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 60
+  rationale: "FILED FROM the architecture brief (oper#architecture-2026-08-11), evidence
+    re-derived at 09c7bda. WHAT THIS PROVES: D-11 recommends one rmd instance per codebase
+    on the strength of a collision inventory (repo-blind ledger keys, one drain lock, one
+    worktree pool, owner-less clone keying) and two measured shared-mutable-state outages
+    (2026-07-29 and 2026-08-11, both the shared node_modules through a symlink). An
+    argument that strong still is not a running second instance; the pilot is the
+    difference, and wild-trails is the operator's long-named first fleet target (WS-2:
+    'first fleet-repo target (wild-trails backlog)'). WHY VERIFY:HUMAN: every deliverable
+    is on the operator's mini — launchd labels, ports, a real repo of the operator's, and
+    the WS-2 deferral criterion ('the console is feature-rich and looks good') is
+    explicitly operator-judged (DECISIONS.md 2026-07-20). TWO GATES PRECEDE ANY DISPATCH,
+    both operator acts: D-11 ratification, and the WS-2 deferral judgment — this task
+    DOCUMENTS them in its demonstrations rather than assuming them. SAME-OWNER NOTE:
+    wild-trails is under the operator's own GitHub owner, so W1-T403's cross-owner
+    constraint does NOT block the pilot — the pilot and that schema decision proceed
+    independently. LEDGER: UNMEASURED (mini down); the pilot itself will mint the first
+    second-instance ledger."
+  design: |
+    (i) the second cell is CONFIG, not code: its own config.json (own root, port, launchd
+    label suffix), its own repos/ clone of wild-trails, its own state/ and worktrees/ —
+    provisioned by the operator following a written runbook this task produces, so the
+    third cell is a copy-paste and the runbook is the artifact that survives.
+    (ii) shared by declaration only: the W1-T432 knowledge homes; nothing else — no shared
+    node_modules (each install is its own checkout per the SymlinkInstallRefusal doctrine),
+    no shared ledger, no shared locks.
+    (iii) the pilot drains a SMALL wild-trails backlog slice (operator-chosen) end to end:
+    dispatch, PR, review, merge — with the remudero cell running beside it the whole time.
+    (iv) FALSIFIER, both directions: the two consoles report DISJOINT state (a task
+    dispatched in one never appears in the other's ledger, status or inflight), AND
+    stopping one daemon leaves the other's drain observably unaffected — a shared anything
+    fails one of the two.
+    (v) the exit artifact is a findings list: every place the second cell fought the
+    architecture (port claims, keychain, notify recipient, paths) becomes a filed task,
+    the way azure-container-2026-08-08 incidents did.
+    (vi) NOT IN SCOPE: cross-owner targets (W1-T403), the relay (W1-T431), any hosted
+    surface, N>2.
+  acceptance:
+    - claim: "both consoles run side by side with disjoint ledgers, inflight state and worktree pools, and stopping one daemon leaves the other draining"
+      proof: "demonstration: operator pastes both consoles' /v1/status side by side and the stop-one-drain-on result into this task's record"
+    - claim: "D-11 is ratified and the WS-2 deferral criterion judged met before the pilot's first dispatch"
+      proof: "demonstration: operator records the D-11 ratification and WS-2 judgment in DECISIONS.md before any wild-trails task is dispatched"
+    - claim: "the pilot's friction list is filed as tasks, not left as prose"
+      proof: "demonstration: the exit findings each name a filed task id or state why none is needed"
+  risk: high
+  origin: oper#architecture-2026-08-11
+  plan_refs: ["W1-T429", "W1-T408", "W1-T403"]
+  files: [docs/runbooks/second-cell.md]
+  status: queued
+  attempts: 0
+  note: "verify:human — every deliverable is an operator act on the operator's machine, and
+    the demonstration dialect is W1-T277's intended use for exactly this shape (the W1-T370
+    precedent); isDispatchEligible refuses non-auto tasks before the linter, so this shard
+    can never stall the queue. risk:high — it is the first time two governed dispatchers
+    coexist on the host; the containment is that they share NOTHING mutable and the 2026-07-21
+    two-dispatchers rejection is answered in D-11 (that rejection was two dispatchers on ONE
+    plan; cells have one each). budget_usd 60 — runbook, provisioning session, pilot slice,
+    findings filing. PROOF NOTES: demonstration proofs are legal only on verify:human and
+    never execute, so no dialect-parse debt is possible here. LEDGER: UNMEASURED (mini down).
+    depends_on W1-T432: without the shared homes seam the second cell silently forks the org
+    brain on day one — the exact quiet fragmentation the seam exists to prevent."

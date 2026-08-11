@@ -1,0 +1,60 @@
+- id: W1-T432
+  title: "the org brain derives from config.root, so instance-per-codebase silently splits it — `learnings-user/` and `learnings-global/` become explicitly configurable shared homes with the current derivation as the default, so N cells read one brain instead of fragmenting it N ways"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55
+  rationale: "FILED FROM the architecture brief (oper#architecture-2026-08-11), evidence
+    re-derived at 09c7bda. THE MECHANISM, DERIVED: `userOverallLearningsHome` =
+    `<config.root>/learnings-user` and `globalLearningsHome`/`globalArtifactPath` =
+    `<config.root>/learnings-global/...` (src/lib/config.ts), documented as deliberately
+    CROSS-PROJECT — 'depends only on config.root so two repo checkouts resolve identically.'
+    That guarantee holds exactly as long as there is ONE config.root. D-11's cell
+    architecture gives each codebase its own config.root (own ledger, governor, worktrees),
+    which flips the same derivation into a SPLITTER: N instances each grow a private
+    learnings-user/, and the layered read hierarchy (project → org brain → commons, the
+    Commons/WS-11 design) quietly loses its middle layer. THE ASYMMETRY THAT MAKES IT QUIET:
+    nothing fails — each cell reads a perfectly valid, perfectly empty org brain, which is
+    the vacuous-pass family applied to knowledge. THE PRINCIPLED SPLIT: same-machine cells
+    SHARE BY PATH (this task); cross-machine and cross-user sharing is W1-T425's redacted
+    hash-pinned transport, unchanged. LEDGER: UNMEASURED (mini down); nothing here needs it."
+  design: |
+    (i) learningsHomes (src/lib/config.ts): resolve the two shared-knowledge homes from
+    optional config fields, defaulting to today's config.root derivation byte-for-byte —
+    an existing single-instance install changes nothing. The name is load-bearing — the
+    call-site criterion greps for it.
+    (ii) every consumer of the two homes resolves through the helper (the #781 lesson: the
+    declarative row must be the value the runtime actually reads, or the field ships green
+    and inert).
+    (iii) the single-writer discipline is stated at the seam: cells READ the shared homes
+    freely; writes remain whatever single-writer path exists today (no new locking — two
+    writers were never supported and this task does not bless them; the note in the config
+    doc says so in as many words).
+    (iv) FALSIFIER, both directions: two Config fixtures with different roots but the same
+    configured homes resolve identical paths (the sharing direction), AND a fixture with no
+    homes configured resolves exactly the pre-change config.root-derived paths (the default
+    direction — deleting the fallback fails it).
+    (v) NOT IN SCOPE: W1-T425's export/import transport; any locking or merge semantics for
+    concurrent writers; moving existing on-disk homes (the default preserves them in place).
+  acceptance:
+    - claim: "two instances with different roots and the same configured homes resolve identical org-brain paths, and an unconfigured instance resolves today's derivation unchanged"
+      proof: "unit test: test/learnings-homes-config.test.ts"
+    - claim: "the homes resolve through one named helper the consumers share, so the config field cannot ship inert"
+      proof: "grep: learningsHomes in src/lib/config.ts"
+  risk: high
+  origin: oper#architecture-2026-08-11
+  plan_refs: ["W1-T425", "W1-T419"]
+  files: [src/lib/config.ts, src/run-task.ts, test/learnings-homes-config.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — path resolution and both falsifier directions are fixture-decidable
+    offline. risk:high — the files: span (config seam plus its run-task consumers) is Rule
+    19's SPAN, not blast radius; the behavior containment is the byte-for-byte default
+    direction. budget_usd 55 — a config field, a helper, consumer rewiring, two-direction
+    fixtures. PROOF NOTES: `learningsHomes` is 0 hits across src/ at 09c7bda (measured), so
+    the grep discriminates; unit-test proof is the pure-path form against a declared file.
+    LEDGER: UNMEASURED (mini down). NO depends_on: the homes and their consumers are on main;
+    D-11 ratification gates the PILOT (W1-T433), not this seam — which is correct today even
+    at N=1."

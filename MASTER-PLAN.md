@@ -2894,6 +2894,38 @@ a second project on the harness; **WS-12 (site) is independent — separate repo
   the gate justifies itself with data or gets its scope cut into the nightly full-scope run (W1-T133),
   with the PR gate staying the fast diff-only check.
 
+- **D-11 Instance topology — CELLS: one rmd instance per codebase; nothing mutable shared between
+  cells — OPEN, RECOMMENDED, awaiting operator ratification.** Promoted from the Banked queue's
+  "Load/scale story: multiple products, one daemon vs. daemon-per-product" by the operator's
+  architecture brief (oper#architecture-2026-08-11: same container or one per codebase, and
+  remudero.com as the login-and-control surface). **THE RECOMMENDATION: daemon-per-product, where
+  an instance (cell) = one codebase + its own config root** — own ledger, governor, budget, drain
+  lock, inflight/KICK markers, worktree pool, clones, console port; on the mini, a cell is a
+  sibling config root + launchd label set; on Linux/cloud, a cell is one container of the shipped
+  worker image (`deploy/Dockerfile` + `verify-image.sh`, landed untasked via #1474/#1480 — this
+  entry is their first plan anchor). **THE EVIDENCE IS THREE-WAY CONVERGENT**: (a) two measured
+  outages from ONE shared mutable tree — 2026-07-29 and 2026-08-11, both the shared
+  `node_modules` emptied through a worktree symlink (now refused in code, `SymlinkInstallRefusal`);
+  (b) the code inventory — every task-id-keyed decision read on instance-global state is
+  repo-blind (W1-T429), the clone keying is owner-less (W1-T403), the ceiling multiplies by N
+  (W1-T408); (c) the 2025–2026 industry convergence: ephemeral single-tenant isolation units,
+  with every documented incident class (cache poisoning, runner backdooring, socket escape) a
+  shared-mutable-state failure. **THE 2026-07-21 TWO-DISPATCHER REJECTION IS ANSWERED, NOT
+  OVERRIDDEN**: that rejection was two UN-governed dispatchers on ONE repo's plan; cells are one
+  governed dispatcher per plan, sharing neither plan, ledger, nor locks — and the N=1 parallelism
+  obstacles apply WITHIN a cell, unchanged. **remudero.com IS TIER 2 MADE CONCRETE, NOT A NEW
+  INVENTION**: accounts exist at the relay only; the instance dials OUT (the GitHub-runner /
+  Outposts / Coder shape — enrollment token, no inbound ports); the relay stays a transparent
+  proxy over the §7A console contract, scope granted by the identity seam; portfolio-across-cells
+  is the §6 Pro "multi-project portfolio views" candidate; core stays fully self-hosted per §6A.
+  Knowledge does NOT fragment across cells: same-machine cells share the org-brain homes by
+  explicit path (W1-T432); cross-machine/cross-user stays W1-T425's redacted hash-pinned
+  transport (Tier 3). **THE ARC**: W1-T429 (repo-scoped keys) → W1-T430 (identity seam, the §6A
+  before-any-Pro-code obligation) → W1-T431 (outbound relay client, loopback-tested) → W1-T432
+  (shared knowledge homes) → W1-T433 (wild-trails cell pilot, gated on ratifying THIS entry and
+  the operator's WS-2 deferral judgment). Per the P48 norm this is a recommendation — the
+  operator ratifies; the pilot dispatches nothing until then.
+
 
 ## 12. Standing rules
 
@@ -3143,7 +3175,8 @@ higher-thinking mount than the coding agents; relative, config-validated, flywhe
 - Wasteland-style federation of the commons across operators (portable, reviewed knowledge
   exchange between installs) — post-WS-11 if the commons gets traction.
 - Remote/cloud workers beyond the mini (hyperscaler or Claude Code cloud sandboxes).
-- Load/scale story: multiple products, one daemon vs. daemon-per-product.
+- ~~Load/scale story: multiple products, one daemon vs. daemon-per-product~~ **PROMOTED to §11
+  D-11 (cells: one instance per codebase)** — oper#architecture-2026-08-11.
 - ClawApp inbox integration as a notifier adapter (Craig instance).
 - Plugin/skill marketplace listing once stable.
 - Cross-agent support (Codex exec) — explicitly parked; Claude-first keeps contracts tight.

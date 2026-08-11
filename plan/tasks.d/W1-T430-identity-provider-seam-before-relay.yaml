@@ -1,0 +1,60 @@
+- id: W1-T430
+  title: "console identity is granted by two hard-wired paths — bearer tokens and the Tailscale proxy check — and §6A requires the auth/identity adapter to be a first-class seam BEFORE any hosted code exists: extract an `IdentityProvider` interface with the two existing providers as its first consumers"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70
+  rationale: "FILED FROM the architecture brief (oper#architecture-2026-08-11), evidence
+    re-derived at 09c7bda. THE CONSTRAINT IS THE PLAN'S OWN: MASTER-PLAN §6A names the
+    extension seams that must be first-class plugin interfaces with a stable contract BEFORE
+    any Pro code exists — 'notifier, VCS, storage, auth/identity, model routing' — and 'Pro
+    must attach, never fork.' THE GAP, DERIVED: scope-granting today is two inlined paths in
+    src/lib/service.ts — bearer-token comparison against state/service-tokens.json
+    (resolveServiceTokens) and the additive Tailscale identity check (`IdentityAuth`,
+    resolveServeIdentity in src/lib/serve.ts, W1-T371/W1-T398) — with no declared interface a
+    third grantor could implement. THE CONSUMER THIS UNBLOCKS: D-11's Tier-2 relay (W1-T431)
+    must authenticate brokered browser sessions WITHOUT forking service.ts; per DECISIONS.md
+    2026-07-20 (three tiers) the relay is a transparent proxy, so identity is exactly where it
+    attaches. Doing the seam first is also the trust-arc shape: the refactor lands with
+    behavior pinned by the two providers that already exist, before any new grantor is
+    written. LEDGER: UNMEASURED (mini down); nothing here needs it."
+  design: |
+    (i) IdentityProvider (src/lib/service.ts): the declared interface — given a request's
+    auth material, return a granted scope (read/write/none) with a provenance label for the
+    401/403 distinction the routes already make. The name is load-bearing — the call-site
+    criterion greps for it.
+    (ii) the two existing grantors become its first implementations, behavior-identical:
+    bearer-token (service-tokens.json) and Tailscale-identity (identityCapability +
+    trustedProxy gate, W1-T398's mandatory-declaration rule preserved verbatim).
+    (iii) provider order and additivity keep today's semantics: identity auth remains
+    ADDITIVE to tokens, never a replacement (the W1-T371 contract), and an unknown provider
+    grants nothing — deny stays the default when no provider answers.
+    (iv) FALSIFIER, both directions: the existing service auth suite must pass unchanged
+    against the seam (401 unknown / 403 underscoped / write⊇read all preserved), AND a test
+    third provider registered in a fixture grants a scope the two real ones would refuse —
+    proving the seam admits a new grantor without editing the gate. Deleting the seam's
+    dispatch fails the second; regressing either real provider fails the first.
+    (v) NOT IN SCOPE: any relay or hosted code (W1-T431); accounts; changing what the scopes
+    permit (W1-T404's write-tier split is its own task); new persistence.
+  acceptance:
+    - claim: "both existing grantors pass the current auth contract through the seam, and a fixture third provider can grant scope without editing the gate"
+      proof: "unit test: test/identity-provider-seam.test.ts"
+    - claim: "the seam is a declared interface at the service layer, not a convention"
+      proof: "grep: IdentityProvider in src/lib/service.ts"
+  risk: high
+  origin: oper#architecture-2026-08-11
+  plan_refs: ["W1-T371", "W1-T398", "W1-T404"]
+  files: [src/lib/service.ts, src/lib/serve.ts, test/identity-provider-seam.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — the seam, both providers and both falsifier directions are
+    fixture-decidable offline. risk:high — it refactors the authentication gate itself; the
+    containment is that the existing auth suite must pass byte-identical semantics, stated as
+    falsifier direction one. budget_usd 70 — an interface extraction with two adopters and a
+    fixture provider. PROOF NOTES: `IdentityProvider` is 0 hits across src/ at 09c7bda
+    (measured), so the grep discriminates; the unit-test proof is the pure-path form against a
+    file declared in files:. LEDGER: UNMEASURED (mini down). NO depends_on: both providers are
+    on main; §6A's before-any-Pro-code ordering is why this precedes W1-T431 rather than
+    depending on anything."
