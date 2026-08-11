@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -333,6 +333,7 @@ import {
 import {
   assertLintClean,
   changedTaskIds,
+  rawChangedTaskIds,
   criteriaAdded,
   followUpCarriesCriteria,
   formatReadIdentity,
@@ -7714,8 +7715,31 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       // absent from the base monolith and trips, while the RIGHT migration (monolith -> shard) simply
       // leaves the set and never does.
       const baseMonolithIds = new Set(parseTasksFromYaml(oldRaw, `${baseRef}:${relPath}`).map((t) => t.id));
-      const headMonolithIds = parseTasksFromYaml(readFileSync(planPath, "utf8"), planPath).map((t) => t.id);
+      const headMonolithRaw = readFileSync(planPath, "utf8");
+      const headMonolithIds = parseTasksFromYaml(headMonolithRaw, planPath).map((t) => t.id);
       newMonolithIds = new Set(headMonolithIds.filter((id) => !baseMonolithIds.has(id)));
+      // W1-T428: the RAW-TEXT union. `changedTaskIds` above compares PARSED tasks, and the parser
+      // drops six fields the corpus uses — `design:` among them — so an instructions-only edit
+      // re-linted ZERO tasks (#1544 measured exactly that and had to call its own run vacuous).
+      // Compare each task's raw RECORD text too and union the ids into scope: the parsed side
+      // still owns semantic equivalence (a whitespace-only reorder stays invisible to it), the
+      // raw side catches every dropped field by construction. This MUST run here, inside the
+      // try: both raw trees exist only until the finally below removes tmpDir.
+      const readShardTexts = (dir: string): string[] => {
+        try {
+          return readdirSync(dir)
+            .filter((f) => f.endsWith(".yaml") || f.endsWith(".yml"))
+            .sort()
+            .map((f) => readFileSync(join(dir, f), "utf8"));
+        } catch {
+          return [];
+        }
+      };
+      const rawChanged = rawChangedTaskIds(
+        [oldRaw, ...readShardTexts(join(tmpDir, "tasks.d"))],
+        [headMonolithRaw, ...readShardTexts(join(dirname(planPath), "tasks.d"))],
+      );
+      for (const id of rawChanged) scope.add(id);
     } catch (e) {
       console.error(`### rmd lint-plan: cannot resolve --base ${baseRef}: ${(e as Error).message}`);
       return 2;
@@ -16988,6 +17012,30 @@ export interface InstallFreshnessDeps {
 }
 
 /**
+ * The REFUSAL {@link ensureInstallFresh} throws instead of installing through a symlinked
+ * `node_modules` — a NAMED type so {@link serviceFreshnessGate} can distinguish "the install
+ * was refused for safety" (ledger + proceed, per the W1-T255 service doctrine below) from
+ * "the install RAN and failed" (which must stay loud, per the W1-T151 contract above).
+ */
+export class SymlinkInstallRefusal extends Error {}
+
+/**
+ * Bound on the DEFAULT `npm ci` {@link ensureInstallFresh} runs — damage control for an
+ * install that WEDGES (dead registry socket, hung postinstall), which would otherwise hold a
+ * `daemon`/`serve`/`up` boot forever. SIZED GENEROUSLY, deliberately: this repo has had FOUR
+ * bounds fire on healthy conditions (ci-gate's wait cap under its own checks' wall-clock
+ * W1-T312; a deploy ceiling consumed by a dry-run W1-T380; a check-wait bound where 21/21
+ * booked PRs merged W1-T382; the pre-W1-T261 stale-red rerun window), and a too-tight value
+ * here would be a fifth on the ONE operation that is legitimately slow. Evidence: the
+ * review-clone sibling (`ensureDeps`, src/lib/review.ts) bounds a warm fresh-clone ci at
+ * 120s; the only installs measured on this class of host completed in 60–90s warm
+ * (2026-08-11); the cold-cache worst case (full registry download + playwright/esbuild
+ * postinstalls) is minutes, not tens of minutes. 10 minutes is ~5x the sibling bound and
+ * >6x the measured worst case — pacing is not the goal, unbounded hangs are.
+ */
+export const NPM_CI_TIMEOUT_MS = 600_000;
+
+/**
  * W1-T151 INSTALL FRESHNESS — the fix for the real incident named in this task's
  * rationale: a git pull that changes `package.json`/`package-lock.json` (or adds a
  * `workspaces` layout) leaves a checkout's `node_modules` STALE relative to the code
@@ -17028,10 +17076,33 @@ export function ensureInstallFresh(repoDir: string, deps: InstallFreshnessDeps =
       mkdirSync(dirname(p), { recursive: true });
       writeFileSync(p, h);
     });
-  const install = deps.install ?? (() => execFileSync("npm", ["ci"], { cwd: repoDir, stdio: "pipe" }));
+  const install = deps.install ?? (() => execFileSync("npm", ["ci"], { cwd: repoDir, stdio: "pipe", timeout: NPM_CI_TIMEOUT_MS }));
 
   const current = hash(repoDir);
   if (readMarker(markerPath) === current) return false; // matching hash -> no-op
+
+  // REFUSE to install through a symlinked `node_modules` — checked AFTER the no-op above, so
+  // the refusal is of the INSTALL, never of the symlink: a worktree whose shared tree already
+  // matches the lockfile hash no-ops exactly as before. `linkWorktreeNodeModules`
+  // (src/lib/worker.ts) wires every worker worktree by SYMLINK to the canonical tree ON
+  // PURPOSE, so a symlink here is the NORMAL worktree state — and `npm ci`'s clear phase
+  // FOLLOWS the link: an install that "succeeds" here EMPTIES THE SHARED CANONICAL
+  // node_modules through it (the 2026-07-29 daemon outage; measured again forensically
+  // 2026-08-11 when a test's unguarded `rmd serve` child did exactly this). A worktree that
+  // genuinely needs newer deps is served by refreshing the CANONICAL checkout — the deploy
+  // path / `serviceFreshnessGate` on the operator checkout, where `node_modules` is a real
+  // directory — after which the symlink serves the fresh tree with no install here at all.
+  let nodeModulesIsSymlink = false;
+  try {
+    nodeModulesIsSymlink = lstatSync(join(repoDir, "node_modules")).isSymbolicLink();
+  } catch {
+    // absent node_modules — a fresh clone; installing into it is the legitimate case.
+  }
+  if (nodeModulesIsSymlink) {
+    throw new SymlinkInstallRefusal(
+      `refusing npm ci in ${repoDir}: node_modules is a symlink, and an install's clear phase would empty the SHARED tree it points at through the link (the 2026-07-29 outage mechanism). Refresh the canonical checkout instead — the symlink then serves the fresh tree.`,
+    );
+  }
 
   install();
   writeMarker(markerPath, current);
@@ -17079,7 +17150,18 @@ export function serviceFreshnessGate(
   if (svc.behind) emit("daemon.stale_code", { old_sha: svc.behind.oldSha, new_sha: svc.behind.newSha });
   // Install BEFORE proceeding: package.json/package-lock.json changed since the last
   // install this repoDir ran (see ensureInstallFresh's doc) — never after.
-  if ((deps.ensureInstallFresh ?? ensureInstallFresh)(repoDir)) emit("daemon.install_freshness", {});
+  try {
+    if ((deps.ensureInstallFresh ?? ensureInstallFresh)(repoDir)) emit("daemon.install_freshness", {});
+  } catch (err) {
+    // The SYMLINK REFUSAL only — the W1-T255 doctrine above ("a service NEVER exit-1s on
+    // tree state") extends to it: ledger the refusal, say it on stderr, and boot on the deps
+    // the symlink already serves — the shared canonical tree, which is the link's whole
+    // point. Anything else `ensureInstallFresh` throws is an install that RAN and failed,
+    // and that stays loud (the W1-T151 contract): rethrow, never boot silently stale.
+    if (!(err instanceof SymlinkInstallRefusal)) throw err;
+    emit("daemon.install_refused", { reason: err.message });
+    console.error(`rmd ${cmd}: install refused — ${err.message}`);
+  }
 }
 
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.

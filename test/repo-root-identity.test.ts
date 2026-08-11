@@ -121,7 +121,16 @@ test("rmd lint-plan: cwd wins over install location — a SEPARATE work tree's o
     const stdout = execFileSync(join(repoRoot, "bin", "rmd"), ["lint-plan"], {
       cwd: other,
       encoding: "utf8",
-      env: { ...process.env },
+      env: {
+        ...process.env,
+        // REQUIRED, NOT TIDINESS (test/serve-orphan-teardown.test.ts's words, for the same
+        // reason): every CLI verb runs `checkCliFreshness` before its work, which on a clean,
+        // behind checkout does `git merge --ff-only origin/main` — a network git op from a
+        // test, able to MOVE THIS CHECKOUT'S BRANCH mid-suite. `SELF_SYNC_GUARD_ENV` is the
+        // documented escape for a spawn that is not deliberately syncing, and nothing this
+        // test asserts is about freshness: it is about WHICH tree's plan gets gated.
+        RMD_SELF_SYNC_DONE: "1",
+      },
     });
 
     assert.match(

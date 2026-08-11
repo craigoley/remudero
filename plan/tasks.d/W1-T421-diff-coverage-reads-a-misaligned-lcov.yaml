@@ -1,5 +1,5 @@
 - id: W1-T421
-  title: "`diff-coverage.mjs` blocks on lines the full-suite lcov reports as `,0` while their straight-line NEIGHBOURS report 17 — the input is misaligned, not the code untested, and the gate has been wrong on pre-existing lines invisibly because only a diff touching that window surfaces it"
+  title: "`diff-coverage.mjs` blocks on lines the full-suite lcov reports as `,0` while their straight-line NEIGHBOURS report 17 — MEASURED CAUSE: two falsifier suites import a mutated module copy from `os.tmpdir()`, whose graph re-enters the real `src/lib` from outside the project root and DISPLACES the real coverage record; the gate is correct and its input is destroyed"
   repo: remudero
   depends_on: []
   type: implement
@@ -99,46 +99,79 @@
 
     NOT IN SCOPE: the aggregate ratchet and its baseline (it passes and is not implicated), any
     threshold or exemption, and PR #1553's own content.
+
+    RESOLVED — WHAT CLAUSE (i) MEASURED, AND IT REFUTES THIS SHARD'S OWN TITLE. It is not a line
+    misalignment. `src/lib/commit-message.ts` reads `LH:533 LF:534` in every run without a tmpdir
+    mutant and `LH:109` in every run with one — 424 lines losing attribution AT ONCE, and 109 is
+    CONSTANT at 14, 48, 63, 208 and 402 test files. A constant is not a source-map offset; it is one
+    poor record standing in for the merged one. Bisected to a single file (`BASE + one` reproduces,
+    14 files), then isolated by three runs over that same set differing only in what the falsifier
+    does with its copy: write-to-tmpdir-and-never-import CLEAN, import-a-self-contained-tmp-module
+    CLEAN, import-the-real-copy DESTROYED. So neither the temp file nor a temp import is the cause —
+    a module OUTSIDE the project root re-entering the real `src/lib` graph is. `review.ts` and
+    `status.ts` each reach 30 siblings, two of which (`policy.ts`, `worker.ts`) use `import.meta`,
+    and every destroyed run carries one record a clean run never has: `SF:src/lib/<define:import.meta>`
+    — a synthetic transform artifact named INSIDE src/lib. Correlation 12 runs out of 12.
+
+    RULED OUT BY MEASUREMENT, NOT BY ARGUMENT: excluding the temp paths from coverage
+    (`--test-coverage-exclude="**/tmp/**"`). It removes the copy's own record and every
+    `../../../tmp/**` record, and the collapse survives unchanged at `LH:109` — because the record
+    that does the damage is named under `src/lib/`, not under tmp. Also ruled out: the 23
+    child-process temp records this shard named as a candidate — they are present in CLEAN runs too.
+
+    THE FIX IS THE DESTINATION. The copy is written under `test/` instead of `os.tmpdir()`; the
+    sibling-absolutising is unchanged, so the mutant still exercises the REAL collaborators rather
+    than stubs. Same 14 files, same 317 assertions: `LH:533`, no `<define:import.meta>` record. The
+    directory must NOT be dot-prefixed — `test/**` does not match a dotted segment, so a `.mutant-`
+    copy restores the record but then counts against the aggregate ratchet; `mutants-` contributes
+    no lcov record at all.
+
+    NOTHING IN scripts/diff-coverage.mjs OR .github/workflows/ci.yml CHANGED, and clause (iv) is
+    satisfied by construction rather than by promise: the gate was reporting exactly what it was
+    handed.
   acceptance:
-    - claim: "the layer producing the misalignment is named with the measurement that identified it, rather than inferred from the symptom"
-      proof: "grep: MISALIGNMENT SOURCE in scripts/diff-coverage.mjs"
-    - claim: "the impossible zero window between two non-zero straight-line neighbours is detected mechanically and swept across the whole lcov"
-      proof: "grep: lcovLineAlignmentAnomalies in scripts/diff-coverage.mjs"
-    - claim: "a full run agrees with a scoped run on lines that demonstrably execute, which a loosened threshold would not satisfy"
-      proof: "grep: SCOPED_AGREEMENT in scripts/diff-coverage.mjs"
-    - claim: "a genuinely uncovered added line still blocks, so the fix removes no enforcement"
-      proof: "grep: STILL_BLOCKS_UNCOVERED in scripts/diff-coverage.mjs"
+    - claim: "the layer producing the collapse is named with the isolation that identified it, and it is not the gate"
+      proof: "grep: define:import\\.meta in test/helpers/mutant-module.ts"
+    - claim: "neither mutant-importing suite writes its copy outside the project root any more"
+      proof: "grep: writeMutantModule in test/trailer-credit-plan-only.test.ts"
+    - claim: "the anti-pattern is refused fleet-wide, and the detector is driven with the offending shape so it cannot pass vacuously"
+      proof: "unit test: no test imports a mutated module copy from outside the project root"
+    - claim: "the reshaped falsifier still fails when the line it guards is weakened, so no enforcement was traded away"
+      proof: "unit test: MUTANT: dropping the anchor makes the required proof path contradict the diff again"
   risk: high
   origin: recon#diff-coverage-misalignment-2026-08-11
   plan_refs: ["W1-T25", "W1-T212", "W1-T297", "W1-T220"]
-  files: [scripts/diff-coverage.mjs, test/diff-coverage.test.ts]
+  files: [test/helpers/mutant-module.ts, test/changeset-shorthand-anchor.test.ts, test/trailer-credit-plan-only.test.ts, test/architecture-fitness.test.ts]
   status: queued
   attempts: 0
-  note: "verify:auto — every deliverable is decidable over fixture lcov documents and fixture diffs,
-    in-process, with no network and no operator. The one live measurement clause (i) needs is a
-    full-suite coverage run, which is a local command.
-    RULE 19: both declared paths resolve to the module id `diff-coverage` (moduleIdFromPath folds a
-    `.test` suffix away), so `subsystemsOf` sees ONE subsystem and there is no sizing violation.
-    risk:high is BLAST RADIUS, NOT SPAN, and that distinction is the point: this changes a REQUIRED
-    merge gate, and a version that mis-corrects it lets untested code through every future PR while
-    looking greener than before. Design (vi)'s second arm is where that risk is managed.
-    RULE 25 CHECKED BEFORE FILING and answered in design (v) rather than left as a hazard:
-    scripts/diff-coverage.mjs IS an INSTRUMENT_SURFACE entry, but the entanglement predicate needs a
-    PRODUCT path too and `isProductPath` excludes `test/` by design. Instrument + its own test does
-    not entangle, so one changeset holds this.
-    FILES: CAN CONTAIN THE DESIGN. The mapping from diff hunks to `DA:` records lives in
-    scripts/diff-coverage.mjs, and test/diff-coverage.test.ts already exists as that instrument's
-    fixture home — the file W1-T212 shipped for precisely this purpose. `.github/workflows/ci.yml`
-    is named in design (i)/(v) as a CANDIDATE and deliberately NOT declared: if the measurement
-    lands there, that is a re-scope with evidence rather than a path quietly held in reserve.
-    budget_usd 80 — the cost is clause (i)'s layer measurement and clause (ii)'s sweep, either of
-    which can change the task. The mapping fix itself is likely small.
-    ON THE PROOFS: all four are `grep:` with an explicit path into scripts/diff-coverage.mjs, which
-    EXISTS — so each returns a clean no-match today rather than the `exec_error` a grep at a
-    not-yet-existing path produces, which a session measured on 2026-08-10 and which is why no proof
-    here points at a file that does not exist. Each names a string absent from src/, test/ and
-    scripts/ at filing, so none can match the merge base and be downgraded to executed_stale, and
-    none names an existing symbol. The four names are BINDING on the implementer rather than a
-    guess: MISALIGNMENT SOURCE for the named layer, lcovLineAlignmentAnomalies for the sweep,
-    SCOPED_AGREEMENT for the discriminator in design (iii), STILL_BLOCKS_UNCOVERED for the
-    enforcement arm in design (vi)."
+  note: "verify:auto — every deliverable is decidable in-process, with no network and no operator.
+    The one live measurement clause (i) needed is a full-suite coverage run, which is a local command.
+    RULE 19, AND THE BAND IS SPAN AS WELL AS BLAST RADIUS. The four declared paths resolve to four
+    module ids (moduleIdFromPath folds a `.test` suffix away): mutant-module, changeset-shorthand-anchor,
+    trailer-credit-plan-only, architecture-fitness. `subsystemsOf` therefore sees four subsystems and
+    risk:medium would be a sizing violation — risk:high is set deliberately, and it is BOTH: the span
+    above, and the blast radius of a change that decides what a required merge gate is allowed to see.
+    The span is not decomposable here. The helper and its two call sites are one edit — a helper
+    landed without them changes nothing, and a call site changed without the helper is the very
+    duplication that let this defect exist in two places. The fleet-wide guard belongs with them
+    because a fix that does not refuse the next instance is a fix with a half-life.
+    RULE 25 IS NOW MOOT RATHER THAN ANSWERED. The original filing declared scripts/diff-coverage.mjs,
+    an INSTRUMENT_SURFACE entry, and design (v) reasoned about entanglement on that basis. The
+    measurement moved the fix entirely into test/, so no instrument path is touched at all and
+    `detectInstrumentEntanglement` has nothing to fire on. Design (v)'s split condition — a fix
+    needing a src/ change — did not occur: no src/ file is modified.
+    FILES: the declared set IS the changeset. test/helpers/mutant-module.ts is the one construction,
+    the two suites are its only callers, and test/architecture-fitness.test.ts is the repo's existing
+    home for fleet-wide anti-pattern guards (it already carries the Playwright teardown-race guard in
+    the same shape). scripts/diff-coverage.mjs and test/diff-coverage.test.ts were DECLARED AT FILING
+    and are deliberately no longer declared, because the measurement exonerated the gate.
+    ON DIFF-COVERAGE FOR THIS PR, STATED RATHER THAN CLAIMED: every changed path is under test/, which
+    ci.yml excludes from coverage instrumentation (`--test-coverage-exclude=\"test/**\"`). The gate
+    therefore has no added instrumented line to judge — a vacuous pass, said out loud, not a result.
+    ON THE PROOFS: two `grep:` with explicit paths and two `unit test:` naming bare titles that exist.
+    Both grep patterns are absent from the merge base — `define:import.meta` and `writeMutantModule`
+    each appear nowhere in src/, test/ or scripts/ before this change — so neither can be downgraded
+    to executed_stale. The proofs were re-written when the measurement re-scoped the task; the four
+    names the original note called BINDING (MISALIGNMENT SOURCE, lcovLineAlignmentAnomalies,
+    SCOPED_AGREEMENT, STILL_BLOCKS_UNCOVERED) all named tokens inside scripts/diff-coverage.mjs, a
+    file this task must not touch, and are withdrawn with the theory that produced them."
