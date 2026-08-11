@@ -60,6 +60,41 @@
     runReview's gh-pr-comment path includes it whenever the advisory is non-empty, so the
     overrun reaches the human gate instead of dying in a reaped worktree. The name is
     load-bearing — the call-site criterion greps it at its consumer.
+    (iii-b) THE ADVISORY CARRIES THE CORRECTED files: LINE, READY TO PASTE — the deliverable
+    that makes the note actionable rather than merely visible. correctedFilesLine (src/lib/
+    review.ts, rendered by scopeAdvisorySection alongside the offending paths) emits the
+    declaration the shard should have carried: [...declaredFiles, ...outOfScope] deduped and
+    sorted, formatted as the yaml files: line a human pastes over the old one.
+    NOTHING NEW IS COMPUTED, VERIFIED AT SOURCE RATHER THAN ASSUMED: today's
+    log("scope_guard.refused", { out_of_scope: outOfScope, declared_files: task.files ?? [] })
+    in src/run-task.ts already carries both halves, and clause (i) above carries the same two
+    fields into scope_guard.overrun. This is a pure function of two values already in hand, so
+    the cost is a renderer and its test.
+    WHY IT IS NEEDED AT ALL, MEASURED: SIX files: corrections landed in the last 400 commits on
+    origin/main (#1244, #1274, #1570, #1577, #1581, and #1579's own filing) and EVERY ONE was
+    triggered by a hard refusal — four of them on 2026-08-11 alone. This task removes the
+    refusal, so it removes the only mechanism that has ever produced one of those corrections.
+    The advisory replacing it has never been read by anyone: unwiredAdvisories is folded into
+    NEITHER state NOR floorState, and its only sink is a review.unwired_advisory ledger line —
+    scopeAdvisorySection will be the first time this signal is rendered where a human looks.
+    AND THE SIGNAL IS SOUND RATHER THAN NOISE, which is why making it actionable is worth doing:
+    44 percent of trailer-bearing merges with a resolvable declared scope would flag (16 of 36
+    over a 400-commit window), and subtracting EVERY structural class — the task's own shard,
+    generator outputs, plan/docs prose — moves that only to 42 percent. 68 percent of the
+    residual out-of-scope files are EXISTING test suites, several first added weeks before the
+    task that touched them. That is the W1-T407 shape at scale, not a blind spot reporting
+    itself. (state/recon-scope-advisory-signal.md, 2026-08-11; ledger UNMEASURED, mini down.)
+    ITS LIMIT, STATED HERE SO IT IS NOT OVERSOLD: the line fixes THIS dispatch's declaration and
+    not the next one's. It names the files the worker HAPPENED to touch on this run, so a second
+    run of the same task could touch a different file and flag again. It turns an investigation
+    into a paste; it does not prevent the omission.
+    THIS IS NOT A FOURTH REMEDY, and the distinction is the reason it is admissible here. Both
+    prevention approaches are rejected ON RECORD in the rationale above: remedy (a), a
+    filing-time grep, catches only files that already exist and only names a convention can
+    find; remedy (b), a files: prefix form, was refused because a trailing-slash entry mints no
+    subsystem in moduleIdFromPath and any shard could then evade Rule 19 sizing. Prevention is
+    off the table; making the correction FREE is the honest target that remains, and it changes
+    neither the detector nor the remedy.
     (iv) no decision consumes the new step: scope_guard.overrun is advisory, so
     DECISION_RELEVANT_LEDGER_STEPS (src/lib/ledger.ts) is deliberately NOT extended — the
     W1-T240/#977 rule cuts both ways, and test/ledger-rotation.test.ts re-derives the set
@@ -80,6 +115,8 @@
       proof: "grep: scope_guard\\.overrun in src/run-task.ts"
     - claim: "the PR comment path consumes the advisory section, so the overrun reaches the human gate"
       proof: "grep: scopeAdvisorySection( in src/run-task.ts"
+    - claim: "the advisory renders a paste-ready files: line merging the declared scope with the overrun, so correcting the shard is a copy rather than an investigation"
+      proof: "grep: correctedFilesLine in src/lib/review.ts"
   risk: high
   origin: oper#scope-guard-refusal-2026-08-11
   plan_refs: ["W1-T401", "W1-T405", "W1-T409"]
