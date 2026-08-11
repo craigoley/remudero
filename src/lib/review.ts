@@ -2724,8 +2724,15 @@ export function judgeReview(
 
   // W1-T205's own planOnly, computed EARLY (moved up from below) so the W1-T58
   // guard right below it can consult it before `state` is rolled up.
+  //
+  // W1-T427: plan scope is NOT all paperwork. `isInPlanScope` is deliberately left alone (it
+  // feeds triage, filing rules and scope classification besides this line); the CARVE-OUT is
+  // what refuses the category — a diff touching {@link ENFORCEMENT_DATA} is not plan-only,
+  // whatever else it touches, because an edit to a self-check must clear the bar the self-check
+  // exists to hold up. Everything else about a plan-scope diff is unchanged.
   const diffFiles = changedFiles(walkDiff(evidence.diff));
-  const planOnly = diffFiles.length > 0 && diffFiles.every(isInPlanScope);
+  const enforcementData = enforcementDataInDiff(diffFiles);
+  const planOnly = diffFiles.length > 0 && diffFiles.every(isInPlanScope) && enforcementData.length === 0;
 
   // W1-T58 (Standing rule 15 — RATIFIES P3): see {@link ReviewVerdict.criteriaTampered}'s
   // doc for the full design. `!planOnly` is the exemption — a genuine Architect
@@ -2871,7 +2878,7 @@ export function judgeReview(
       ? capped
         ? planOnly
           ? planOnlySummary(verdicts.length)
-          : cappedSummary(verdicts.length, keywordOnly)
+          : cappedSummary(verdicts.length, keywordOnly, enforcementData)
         : passSummary(
             verdicts.length,
             keywordOnly,
@@ -2954,11 +2961,22 @@ function passSummary(criteriaCount: number, keywordOnly = false, partial?: { exe
  * (W1-T185, gap 2) appends the same explicit tag {@link passSummary} does, so
  * a materialization-failure fallback names BOTH facts in one description
  * (criterion 5). */
-function cappedSummary(criteriaCount: number, keywordOnly = false): string {
+function cappedSummary(criteriaCount: number, keywordOnly = false, enforcementData: string[] = []): string {
   return (
     `remudero-review: CAPPED — 0/${criteriaCount} proofs executed; not certified ` +
     `(a keyword match is a claim, not evidence)` +
-    (keywordOnly ? " (keyword-only: no proof was executed on the PR head)" : "")
+    (keywordOnly ? " (keyword-only: no proof was executed on the PR head)" : "") +
+    // W1-T427: a plan-scope diff that is nonetheless NOT plan-only must SAY WHY on the status
+    // itself. This is the only rendering an operator sees for the denial, and an unexplained red
+    // is the shape that gets overridden ({@link failSummary}'s own reasoning) — here it would
+    // read as the carve-out mysteriously failing rather than as the category doing its job. The
+    // capped-SUCCESS path is the one that matters: a failing review already renders its own
+    // specific reason via {@link failSummary}, and {@link ReviewVerdict.planOnly} is consequential
+    // only for a capped success (the arm) anyway.
+    (enforcementData.length > 0
+      ? ` (ENFORCEMENT_DATA: ${enforcementData.join(", ")} — the plan-only carve-out does not ` +
+        `apply to the data the gates themselves obey)`
+      : "")
   );
 }
 
@@ -4594,6 +4612,107 @@ export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
     "wraps the ci/coverage-ratchet jobs' actual test pass/fail determination — widening deferred, see above",
   "tsconfig.json": "the TS strict-mode config the Typecheck step compiles against — widening deferred, see above",
 };
+
+/**
+ * ENFORCEMENT DATA (W1-T427): the files under `plan/**` that the fleet's own gates OBEY, as
+ * opposed to the plan paperwork those gates are applied TO — each mapped to WHAT IT ENFORCES,
+ * because a reviewer reads reasons, not lists (the {@link INSTRUMENT_SURFACE_EXCLUSIONS}
+ * discipline, applied to a category on day one rather than retrofitted onto it later).
+ *
+ * WHY THE CATEGORY EXISTS. {@link isInPlanScope} is `MASTER-PLAN.md || ORIENTATION || plan/**`,
+ * and {@link ReviewVerdict.planOnly}'s W1-T205 carve-out exempts a plan-scope-only diff from
+ * proof execution. That is right for a task filing and wrong for these four, because plan scope
+ * is not all paperwork: a PR that blunts an assertion in `plan/claims.yaml` RIDES the carve-out
+ * that skips the very floor which would catch it, and the claims gate then certifies the blunted
+ * assertion green ever after. Of the mapped guard gaps this is the only one that QUIETS ITS OWN
+ * ALARM — the others fail loudly eventually (an out-of-scope file shows up in a diff; a bad
+ * design produces a PR someone reads) — so it is closed BEFORE an incident rather than after.
+ * FILED ASSUMED: no blunting incident exists, and W1-T427's shard says so in as many words
+ * rather than implying one.
+ *
+ * THE SCOPE PREDICATE IS DELIBERATELY UNTOUCHED. Pulling these files out of `plan/**` was
+ * weighed and rejected on measured churn: `plan/policy.yaml` alone carries 20 commits, and plan
+ * scope feeds triage, filing rules and scope classification besides this carve-out —
+ * reclassifying a file every consumer reads, to fix ONE consumer's blind spot, is the wide fix.
+ * The narrow one is here, in the carve-out itself.
+ *
+ * MEASURED COST, so the denial is calibrated rather than assumed (local history at a7b88cd): 27
+ * commits touch these four files and exactly THREE are plan-scope-only — all three single-file
+ * `chore(policy)` edits to `plan/policy.yaml`. Those three would newly need a human merge in
+ * place of an unattended arm. The other 24 already carried a `src/` or `test/` file and were
+ * never plan-only, so this changes nothing for them. Routine `plan/tasks.yaml`/`plan/tasks.d`
+ * filings are untouched and keep the carve-out whole.
+ *
+ * ONE FILE IS IN BOTH MAPS AND THAT IS NOT A CONTRADICTION: `plan/claims.yaml` sits in
+ * {@link INSTRUMENT_SURFACE_EXCLUSIONS} as "claim DATA the claims gate validates, not the
+ * checker's rule logic". That answers a DIFFERENT question — whether editing it is a
+ * MEASUREMENT-INSTRUMENT change that must ride alone (Standing rule 25; it is not, the rule
+ * logic is `scripts/claims-check.mjs`). Whether editing it may skip the proof floor is this
+ * map's question, and the answer is no.
+ *
+ * EXACT PATHS, never prefixes: membership widens by an edit a reviewer reads, not by a regex
+ * that quietly grows. New arrivals are caught by the completeness alarm in
+ * test/enforcement-data-carveout.test.ts — not by a comment asking someone to re-check, which is
+ * the carrier that failed for {@link INSTRUMENT_SURFACE} (W1-T402).
+ */
+export const ENFORCEMENT_DATA: Readonly<Record<string, string>> = {
+  "plan/claims.yaml":
+    "the falsifiable self-checks scripts/claims-check.mjs runs on every PR — blunting an assertion " +
+    "here is the self-concealing edit this whole category exists to catch",
+  "plan/policy.yaml":
+    "the fleet's operating constants AS DATA — src/lib/policy.ts's loadPolicy feeds dispatch lanes, " +
+    "cost ceilings and cadence governors from it, so an edit changes what the fleet OBEYS",
+  "plan/alert-policy.yaml":
+    "the scanner-alert lane's policy AS DATA — its own header states that editing this file alone " +
+    "changes what the lane does, with no code change required",
+  "plan/mast-mapping.yaml":
+    "the deterministic verdict -> MAST classifier, whose own header reads 'this table is the " +
+    "classifier: a ledger verdict class is NEVER LLM-judged ... only looked up here'",
+};
+
+/**
+ * Deliberate exclusions from the {@link ENFORCEMENT_DATA} completeness alarm
+ * (test/enforcement-data-carveout.test.ts) — every candidate that alarm's tree-derivation finds
+ * which is NOT enforcement data, mapped to the reason it earns a pass rather than a report.
+ * Exactly the {@link INSTRUMENT_SURFACE_EXCLUSIONS} contract: the alarm refuses to honour an
+ * entry whose reason is empty or whitespace-only, because a bare path list would rebuild the
+ * silent gap the alarm exists to close. NEVER READ BY {@link enforcementDataInDiff} — this map
+ * informs the alarm only; what a diff actually loses the carve-out for is decided by
+ * {@link ENFORCEMENT_DATA} alone.
+ *
+ * A key ending in `/` excuses a whole RECORD STORE — a directory the fleet reads by globbing,
+ * never by naming a member. Those three hold 331 of the 337 tracked data files under `plan/`,
+ * and their members are the paperwork the carve-out exists for; per-file entries would be noise
+ * that hides the four real ones. They are candidates at all only because src/ PROSE cites
+ * individual members as examples (DERIVED, not assumed: all three of today's such candidates
+ * resolve to citations — doc comments in ci-parity.ts, review.ts and triage.ts, and PROMPT TEXT
+ * in plan-architect.ts and triage.ts naming a shard as a structural model. A citation is not a
+ * read, and neither is a prompt).
+ */
+export const ENFORCEMENT_DATA_EXCLUSIONS: Readonly<Record<string, string>> = {
+  "plan/tasks.d/":
+    "the task shards themselves — filing and amending tasks is exactly what the plan-only carve-out is for",
+  "plan/feedback/":
+    "the feedback inbox: entries triage reads and dispositions, never rules that gate a PR",
+  "plan/decisions.d/":
+    "recorded decision entries — provenance the DECISIONS floor validates, not a gate's own thresholds",
+  "plan/tasks.yaml":
+    "the task monolith, the same paperwork as a shard; denying it the carve-out would tax every filing",
+  "plan/plan-index.json":
+    "a GENERATED projection (scripts/generate-plan-index.mjs regenerates it), not hand-authored enforcement data",
+};
+
+/**
+ * The enforcement-data paths a changed-file list touches, in diff order (W1-T427) — the OBSERVED
+ * EVIDENCE named on the posted status by {@link cappedSummary}, not just a boolean (W1-T186
+ * emitter discipline: an operator must be told WHICH file cost the carve-out).
+ *
+ * EXACT membership via `Object.hasOwn`, so an inherited `Object.prototype` key can never make a
+ * path look like enforcement data, and no path can be matched by a prefix nobody declared.
+ */
+export function enforcementDataInDiff(diffFiles: string[]): string[] {
+  return diffFiles.filter((f) => Object.hasOwn(ENFORCEMENT_DATA, f));
+}
 
 const USER_VISIBLE_SURFACE_RE = new RegExp(
   [
