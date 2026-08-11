@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
@@ -499,8 +500,10 @@ export function loadDefaultPolicy(): Policy {
 // file, is where "was this ever overridden" survives a `state/` wipe, because `state/` is
 // exactly the thing that can disappear.
 
-/** One provenance-carrying read of the daily cost ceiling — see this section's header. */
-export type DailyCostCeilingProvenance = "overridden" | "default";
+/** One provenance-carrying read of the daily cost ceiling — see this section's header.
+ *  `"instance-share"` (W1-T408) is a THIRD arm, not a fourth precedence layer over the two
+ *  above — see that field's own section below for why it wins outright rather than merging. */
+export type DailyCostCeilingProvenance = "overridden" | "default" | "instance-share";
 
 /** Why a stored override was not used; present only when one existed but was refused. */
 export interface DailyCostCeilingFallback {
@@ -517,6 +520,17 @@ export interface EffectiveDailyCostCeiling {
   /** Set only when an on-disk override existed but was malformed/unreadable/out of bound —
    *  `usd`/`provenance` above already fell back to the committed default when this is set. */
   fallback?: DailyCostCeilingFallback;
+  /** W1-T408: this reading's `usd` came from a configured PER-INSTANCE share (see
+   *  {@link resolveDailyCostCeilingInstanceShare}) — set only when `provenance ===
+   *  "instance-share"`, and then equal to `usd`. Carried as its own field (rather than making
+   *  a caller infer it from `provenance`) so a reader can log/render it without a string
+   *  comparison. */
+  instanceShareUsd?: number;
+  /** W1-T408: the instance this reading belongs to — set only alongside `instanceShareUsd`.
+   *  Answers "visible before it trips": today the ceiling is written into the ledger only at
+   *  the moment `logCostGovernorDeferral` fires; this field lets ANY caller ask "what is MY
+   *  ceiling, and which instance is it" ahead of that, without reading the ledger at all. */
+  instanceLabel?: string;
 }
 
 /** One written override, as persisted under `state/`. */
@@ -642,4 +656,118 @@ export function resolveDailyCostCeiling(root: string, policy: Policy): Effective
   }
 
   return { usd, provenance: "overridden", committedDefaultUsd };
+}
+
+// ────────────────────────────────────────────────────────────────────────────────────────────
+// W1-T408 — THE PER-INSTANCE SHARE (the daily ceiling is per instance, not per fleet). Two
+// containers each reading `resolveDailyCostCeiling` independently both stop politely at the
+// SAME committed 500, and the bill is 1000 — each is correct about its OWN ledger and neither
+// can see the other (plan/tasks.d/W1-T408-…: "NOTHING LOOKS WRONG FROM INSIDE EITHER
+// CONTAINER"). This is deliberately NOT cross-instance coordination (there is no shared dollar
+// figure anywhere — see that task file's rationale for the two independent reasons the account
+// usage surface cannot serve this ceiling) — it is a per-instance knob the OPERATOR divides:
+// running N containers against one 500 ceiling, the operator sets each to a configured SHARE
+// (e.g. 250 each) so the fleet's real total matches what one instance used to spend alone.
+//
+// ENV, NOT A FILE: `state/DAILY_COST_CEILING_OVERRIDE` (above) retunes what the ceiling IS,
+// shared identically by every reader of the SAME `state/` directory. A share answers a
+// different question — "what is THIS INSTANCE's portion" — and env is inherently
+// per-process/per-container already, needing no new per-instance directory the way a file
+// would (`state/` itself is already instance-scoped only because it is homed under HOME —
+// see run-task.ts's `repoRoot`/`config.root` chain — an incidental fact of this deployment's
+// layout, not something a share should depend on).
+//
+// A CONFIGURED SHARE WINS OUTRIGHT, over both the committed default AND a written override —
+// it is the MOST specific, most local setting available, and the operator who sets an
+// instance's share has already made the coarser two irrelevant to that instance's own
+// enforcement. It does not merge with them (an instance's effective ceiling is one number).
+//
+// UNSET BEHAVES EXACTLY AS TODAY (acceptance: test/cost-ceiling-default-unchanged.test.ts):
+// `resolveDailyCostCeilingInstanceShare` returns `undefined` when the env var is absent, blank,
+// non-numeric, or out of the committed bound, and `resolveDailyCostCeilingForInstance` returns
+// `resolveDailyCostCeiling`'s own result UNCHANGED whenever that happens — a single-instance
+// operator who never sets the env var sees no change of any kind, byte for byte.
+//
+// WHAT THIS DOES NOT DO (recorded, not hidden): nothing stops an operator setting two
+// instances to 500 each, and nothing detects that they did — there is still no shared figure,
+// so there is nothing to check a share against. The fix makes the arithmetic CORRECT and
+// VISIBLE when the operator divides it; it does not, and cannot, ENFORCE the division.
+// ────────────────────────────────────────────────────────────────────────────────────────────
+
+/** The env var an operator sets, per container, to this instance's slice of the fleet's daily
+ *  ceiling — e.g. two containers each at `250` divide a committed `500` in half. Validated
+ *  against the SAME `sweep.dailyCostCeilingUsd` committed bound {@link writeDailyCostCeilingOverride}
+ *  already validates against — never a second, hand-copied `{min, max}`. */
+export const DAILY_COST_CEILING_SHARE_ENV_VAR = "REMUDERO_DAILY_COST_CEILING_SHARE_USD";
+
+/** The env var naming THIS instance, carried alongside a configured share so a reading is never
+ *  just a bare number — see {@link EffectiveDailyCostCeiling.instanceLabel}. Defaults to
+ *  `os.homedir()` when unset: the isolation unit this fleet already keys separate containers
+ *  off of (plan/tasks.d/W1-T408: "the unit of isolation is the INSTANCE, keyed off HOME"), so
+ *  an operator who sets nothing but the share still gets a label that actually distinguishes
+ *  one container from another. */
+export const DAILY_COST_CEILING_INSTANCE_LABEL_ENV_VAR = "REMUDERO_INSTANCE_LABEL";
+
+/** One instance's configured share of the fleet's daily ceiling — see the section header above. */
+export interface DailyCostCeilingInstanceShare {
+  usd: number;
+  instanceLabel: string;
+}
+
+/**
+ * Read this instance's configured share, if any, from `env` (defaults to `process.env` —
+ * injectable so a test never has to mutate the real process environment). Returns `undefined`
+ * — meaning "no share configured, resolve exactly as before this task" — when the env var is
+ * absent/blank, non-numeric, or outside the committed `sweep.dailyCostCeilingUsd` bound; a
+ * malformed value is IGNORED here, never thrown, because a bad env value must not crash the
+ * process on boot (mirrors {@link resolveDailyCostCeiling}'s own "fall back and report" —
+ * except a share has no ledger-worthy `fallback` slot of its own, since falling back here means
+ * exactly "resolve as if unset", which the caller already does for the true unset case).
+ */
+export function resolveDailyCostCeilingInstanceShare(
+  policy: Policy,
+  env: NodeJS.ProcessEnv = process.env,
+): DailyCostCeilingInstanceShare | undefined {
+  const raw = env[DAILY_COST_CEILING_SHARE_ENV_VAR];
+  if (raw === undefined || raw.trim() === "") return undefined;
+  const usd = Number(raw);
+  if (!Number.isFinite(usd)) return undefined;
+  const bound = policy.bounds["sweep.dailyCostCeilingUsd"];
+  if (bound && (usd < bound.min || usd > bound.max)) return undefined;
+  const instanceLabel = env[DAILY_COST_CEILING_INSTANCE_LABEL_ENV_VAR]?.trim() || homedir();
+  return { usd, instanceLabel };
+}
+
+/**
+ * The daily cost ceiling AS THIS INSTANCE should enforce it: {@link resolveDailyCostCeiling}'s
+ * committed-default/override reading, UNLESS this instance has a configured share (see the
+ * section header above), in which case the share wins outright and `provenance` reads
+ * `"instance-share"`.
+ *
+ * THIS IS THE VISIBILITY FIX (acceptance: test/cost-ceiling-visibility.test.ts): it is a pure
+ * function of `root`/`policy`/`env`, callable at ANY time — before a single dispatch has been
+ * deferred, before any ledger line exists at all — unlike `logCostGovernorDeferral`
+ * (sweep.ts), which only ever writes the ceiling into the ledger AT THE MOMENT a consultation
+ * defers. An operator (or a future console render) can call this pre-trip and see both the
+ * effective figure and the instance it belongs to.
+ *
+ * `run-task.ts`'s `dailyCostCeilingReloader` is the ONE place this becomes the LIVE governor
+ * input (W1-T331's "THE LIVE CEILING") — this function itself performs no ledger read and
+ * makes no dispatch decision, exactly like {@link resolveDailyCostCeiling} before it.
+ */
+export function resolveDailyCostCeilingForInstance(
+  root: string,
+  policy: Policy,
+  env: NodeJS.ProcessEnv = process.env,
+): EffectiveDailyCostCeiling {
+  const base = resolveDailyCostCeiling(root, policy);
+  const share = resolveDailyCostCeilingInstanceShare(policy, env);
+  if (!share) return base;
+  return {
+    ...base,
+    usd: share.usd,
+    provenance: "instance-share",
+    instanceShareUsd: share.usd,
+    instanceLabel: share.instanceLabel,
+  };
 }

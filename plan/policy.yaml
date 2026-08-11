@@ -214,6 +214,18 @@ sweep:
     origin: "lifted:src/lib/sweep.ts:365 (DEFAULT_SWEEP_POLICY.dailyCostCeilingUsd)"
     min: 100
     max: 2500
+  # W1-T408: THIS ROW IS PER FLEET, NOT PER INSTANCE — the ceiling is enforced against each
+  # instance's OWN local ledger (unit of isolation: HOME), so N containers each independently
+  # enforcing this SAME committed 500 spend, in total, N x 500. Running several instances against
+  # one committed ceiling now wants a per-instance SHARE the operator divides manually (e.g. two
+  # containers each set to 250 spend, together, what one used to spend alone) — set via the
+  # REMUDERO_DAILY_COST_CEILING_SHARE_USD env var (src/lib/policy.ts's
+  # resolveDailyCostCeilingInstanceShare/resolveDailyCostCeilingForInstance), validated against
+  # THIS row's own min/max bound above, never a second copy. Deliberately NOT a row in this file:
+  # this file is committed and identical on every instance's checkout, so a per-instance figure
+  # cannot live here without becoming, again, one number every instance shares. UNSET behaves
+  # exactly as this row already did — the knob is a division the operator opts into, never a new
+  # default.
   # W1-T320: the rmd-owned temp-dir backstop's age ceiling (src/lib/tmp.ts's
   # sweepStaleTempDirs). NET-NEW, not lifted from DEFAULT_TEMP_SWEEP_MAX_AGE_MS (24h) —
   # the 2026-08-03 incident (fb-1785807201821-e4c9dc) measured 53,310 rmd-* dirs minting

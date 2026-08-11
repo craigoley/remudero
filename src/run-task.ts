@@ -349,6 +349,7 @@ import {
   policyPath,
   PolicyError,
   resolveDailyCostCeiling,
+  resolveDailyCostCeilingForInstance,
   type Policy,
   type PolicyHeadroomRung,
 } from "./lib/policy.js";
@@ -9799,11 +9800,21 @@ function costGovernorGateFor(
  * A throw (unreadable/malformed `policy.yaml`) is deliberately left uncaught here — `runDaemon`'s
  * own reload step (daemon.ts) catches it and holds the last known-good ceiling; catching it here
  * too would just be a second, redundant discipline.
+ *
+ * W1-T408: reads through `resolveDailyCostCeilingForInstance`, never `resolveDailyCostCeiling`
+ * directly, so THE LIVE CEILING this reloader feeds `costGovernorGateFor` reflects this
+ * instance's configured share (`REMUDERO_DAILY_COST_CEILING_SHARE_USD`) when one is set — see
+ * that function's own doc for why a share wins outright over both the committed default and a
+ * written override. `deps.env` is injectable (defaults to `process.env`) for the same reason
+ * `deps.policy` already is: a test proves the live ceiling moves with the input without
+ * mutating the real process environment. Unset, this call is byte-identical to the pre-W1-T408
+ * `resolveDailyCostCeiling(...).usd` it replaces — the share resolver returns `undefined` and
+ * `resolveDailyCostCeilingForInstance` falls straight through to that same call.
  */
-export function dailyCostCeilingReloader(deps: { policy?: Policy } = {}): () => number {
+export function dailyCostCeilingReloader(deps: { policy?: Policy; env?: NodeJS.ProcessEnv } = {}): () => number {
   return () => {
     const policy = deps.policy ?? loadPolicy(policyPath(repoRoot));
-    return resolveDailyCostCeiling(repoRoot, policy).usd;
+    return resolveDailyCostCeilingForInstance(repoRoot, policy, deps.env).usd;
   };
 }
 
