@@ -1,0 +1,86 @@
+- id: W1-T419
+  title: "the learnings corpus has votes with no voters — `cited` is a hand-stamped date, injection logs a COUNT and not the ids, and the budget ratchet's overage names no candidates: close the citation loop so retention ranks on measured use"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 75.00
+  rationale: "FILED FROM OPERATOR BRIEF (learning-system research, 2026-08-10), evidence re-derived
+    at db22bd8. WHAT STACK OVERFLOW GOT RIGHT that this corpus lacks is not voting as ceremony —
+    it is that RETENTION AND RANKING RIDE A USE SIGNAL: the answer that keeps getting used keeps
+    surfacing, and the one nothing uses sinks. This corpus already has the RANKING half of the
+    plumbing: selectLearnings (src/lib/learnings.ts) tiebreaks on the `cited` field after
+    file-relevance and layer. But the signal feeding it is dead — MEASURED: entries carry
+    hand-stamped `cited` dates from the consolidation era, and origin/main's full commit history
+    contains effectively ZERO `learnings#<id>` citations (2 bare-prefix hits, no ids), so there is
+    nothing to mine. And the injection side logs `learnings.injected` with `matched:
+    selectedIds.length` — A COUNT, NOT THE IDS (`dropped` gets ids; `matched` does not) — so
+    per-entry injection frequency is unrecoverable from the ledger. A count where ids belong is
+    the same naked-aggregate shape P48 was ratified against, one layer down.
+    WHY IT MATTERS NOW RATHER THAN AT SCALE: the ratchet (scripts/learnings-budget-ratchet.mjs) is
+    a CEILING, and when the corpus hits it the overage message names the overage and NO candidates
+    — compression happens by whoever's judgment is nearest. With a use signal, the ratchet can say
+    'these entries were injected N times and never mattered; fold them first' — evidence-ranked
+    attrition, the same posture the W1-T370 ruling took for task records. Stack Overflow's
+    necromancer badge is the same insight from the other side: an old entry that earns a fresh
+    citation is ALIVE, and mechanized `cited` refresh keeps it out of the compression frontier."
+  design: |
+    THREE SMALL PIECES, ONE LOOP — none changes what gets injected today; every piece makes the
+    existing selection and compression machinery see evidence it currently cannot.
+    (i) LOG THE IDS: `learnings.injected` (the runTask call site, src/run-task.ts) gains
+    `matched_ids` beside the existing count — the dropped side already logs ids, so this is
+    symmetry, not new surface. Explicitly NOT added to DECISION_RELEVANT_LEDGER_STEPS
+    (src/lib/ledger.ts): no decision counts these rows, so rotation archiving them loses
+    analytics, not correctness — state that in a comment at the call site, because the #977 trap
+    is the inverse (a DECISION reading a rotated step) and the next reader must know which side
+    of it this line sits on.
+    (ii) MINE AND STAMP: a consolidation-side pass (with retro.ts's existing consolidation
+    machinery, host-side — the ledger lives there) computes per-entry injection counts from the
+    unioned ledger via lib/ledger-grep.ts's read, unions git-log `learnings#<id>` citations for
+    the day the channel starts carrying them, and stamps `cited` (latest evidence date) plus a
+    new optional `cited_count` on each active entry. Schema safety VERIFIED before filing: the
+    ratchet parses only id/lifecycle/fact and tolerates extra fields; LearningEntry
+    (src/lib/learnings.ts) gains the optional field. selectLearnings' ranking is UNCHANGED in
+    this task — the mined `cited` date flows through the tiebreak that already exists, so
+    selection improves with zero new ranking rules to falsify.
+    (iii) NAME THE COMPRESSION CANDIDATES: when the ratchet is over cap, its message appends the
+    K least-evidenced active entries (lowest cited_count, oldest cited) as candidates — the
+    CEILING and the red/green semantics are untouched; only the message stops being mute. An
+    entry with no evidence fields renders as `never-cited` — explicitly, never omitted.
+    (iv) FALSIFIER: a fixture corpus where entry A carries cited_count 9 and entry B is
+    never-cited must name B (not A) in the overage message; the miner over a fixture ledger with
+    three injections of A stamps A's count 3 and leaves B's absent; and a ledger row carrying
+    only the count (a pre-task row) contributes nothing rather than crashing the miner —
+    old-format rows are the normal case for all history before this ships.
+    NOT IN SCOPE: changing selectLearnings' ranking beyond the existing tiebreak; auto-deleting
+    or auto-superseding any entry (attrition stays operator-governed); the user-overall/global
+    layers' mining (project layer first; layers are follow-on).
+  acceptance:
+    - claim: "the injection line carries the selected ids beside the count, so per-entry frequency is recoverable from the ledger"
+      proof: "grep: matched_ids in src/run-task.ts"
+    - claim: "the miner stamps cited and cited_count from fixture evidence and tolerates pre-task rows that carry only the count"
+      proof: "unit test: test/learnings-citation-loop.test.ts"
+    - claim: "an over-cap ratchet names the least-evidenced entries as candidates and renders a no-evidence entry as never-cited rather than omitting it"
+      proof: "grep: never-cited in scripts/learnings-budget-ratchet.mjs"
+  risk: high
+  origin: oper#learning-system-research-2026-08-10
+  plan_refs: ["§8A", "P48", "W1-T33", "W1-T38"]
+  files: [src/run-task.ts, src/lib/learnings.ts, src/lib/retro.ts, scripts/learnings-budget-ratchet.mjs, test/learnings-citation-loop.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — every deliverable is fixture-drivable: a log payload, a miner over synthetic
+    ledgers, a message shape.
+    risk:high — set by Rule 19's SPAN (src + scripts + the retro seam), not blast radius: the loop
+    is one concern and splitting it ships a signal nothing reads or a reader with no signal
+    (Standing rule 14's exact warning). The ranking-unchanged constraint in design (ii) is the
+    blast-radius control: this task adds evidence, not policy.
+    budget_usd 75 — three small pieces plus the old-format tolerance tests.
+    PROOF NOTES: the unit proof is a forward PATH reference (declared in files:); both grep proofs
+    forward-reference load-bearing strings declared in design (i)/(iii), 0 hits at db22bd8 by
+    construction — the W1-T365/W1-T383 no-third-option form. The `matched_ids` string cannot
+    substring-collide: the current call site spells `matched:` and `dropped:` only (verified).
+    MEASUREMENTS IN THE RATIONALE: the zero-citation read is `git log --format='%s%b' origin/main
+    | grep -c 'learnings#'` = 2, both bare; the count-not-ids read is the call site at the
+    `log(\"learnings.injected\", ...)` payload. Both re-derived at db22bd8.
+    NO depends_on: composes with W1-T418 (both read the ledger union) but neither needs the other."
