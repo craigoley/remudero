@@ -2258,25 +2258,61 @@ export function noClaimIsAboutChangeset(rest: string): boolean {
 }
 
 /**
+ * A SELF-REFERENTIAL SUBJECT immediately followed by a linking verb — "This PR is …", "The diff
+ * was …", "This change is …", "It was …". The optional noun is what separates a claim from an
+ * explanation: "a merged PR is plan-only" carries a linking verb too, but its subject is a
+ * GENERIC PR rather than this one, so no determiner from this set precedes it and it does not
+ * match. Anchored at `$` by its one caller, so the verb must be IMMEDIATELY before the shorthand.
+ */
+const SELF_REFERENTIAL_CLAIM_RE =
+  /\b(?:this|these|it|the)(?:\s+(?:pr|diff|changeset|changes|change|commit|patch|revert))?\s+(?:is|are|was|were)\s+[*_`]*$/i;
+
+/** The word a shorthand MODIFIES, if it modifies one: `[ \t]+` and never `\s+`, because a word on
+ *  the NEXT line belongs to another sentence (the rule `noClaimIsAboutChangeset`'s own scan already
+ *  follows), and a leading `[*_`]*` so markdown emphasis does not hide the noun. */
+const SHORTHAND_HEAD_NOUN_RE = /^[*_`]*[ \t]+([A-Za-z][A-Za-z0-9_-]*)/;
+
+/**
  * Is a house-shorthand claim (`plan-only` / `data-only`) at `index` ABOUT THE CHANGESET?
  *
- * BOTH DIRECTIONS, WITHIN THE SENTENCE — and each half is load-bearing, established by fixtures
- * that fail without it rather than by symmetry:
- *   BACKWARD, because a body states it as a predicate: "this PR is plan-only", "the diff is
- *     data-only". That is {@link claimsChangesetContext}'s exact shape, so it is reused, not
- *     re-derived.
- *   FORWARD, because the house style also LEADS with it: "Plan-only: one shard added, no source
- *     touched." Backward alone reports nothing there — the token opens the sentence — and three
- *     existing fixtures in test/body-contradicts-diff.test.ts catch precisely that loss.
+ * THREE GRAMMATICAL RELATIONS, none of them "a changeset word appears somewhere nearby". Each is a
+ * way English predicates the shorthand OF the change; prose that merely NAMES the concept matches
+ * none of them and stays silent, which is what {@link bodyContradictsDiff}'s own contract demands:
+ * "ANYTHING THIS CANNOT DECIDE IS SILENCE, NOT A VERDICT … A checker that guesses at natural
+ * language would be a worse tripwire than the gap it closes."
+ *   LABEL — `data-only: no code.` (#1025's own body). The colon makes it the subject of the line.
+ *   COPULAR — `This PR is plan-only.` ({@link SELF_REFERENTIAL_CLAIM_RE}).
+ *   ATTRIBUTIVE — `plan-only change`, `Plan-only edit`: the head noun it modifies IS the changeset.
  *
- * NOT {@link noClaimIsAboutChangeset}, though it is the obvious forward sibling. Its contract
- * treats "no next word at all" as "the token IS the claim", which is right for `no <token>` and
- * exactly wrong here: a path like `test/trailer-credit-plan-only.test.ts` continues with `.test.ts`
- * rather than a word, so that helper reports TRUE and the filename fires. Sentence-scoped on both
- * sides, a path carries no changeset word and stays silent while a real claim still fires.
+ * WHAT THIS REPLACED, AND WHY (W1-T413 → this change). The first two arms below are W1-T413's,
+ * unaltered. The third replaces its two SENTENCE-SCOPED arms — a backward
+ * {@link claimsChangesetContext} and a forward scan to the sentence end — which between them fired
+ * whenever ANY changeset word shared a sentence with the shorthand, in EITHER direction and
+ * whatever the sentence was about. W1-T413 asserted that limit rather than hiding it
+ * (test/changeset-shorthand-anchor.test.ts: "THE RESIDUAL LIMIT … the honest repair is to write
+ * such a sentence without the word") and judged narrowing further to be the greater risk.
+ *
+ * THE MEASUREMENT THAT CHANGES THAT CALCULUS, taken on a real PR rather than imagined: a body
+ * cannot DESCRIBE this rule without tripping it, and the bodies that most need to describe it are
+ * PRs changing plan-only handling. #1562 (W1-T427) wrote its own task's acceptance criterion
+ * verbatim — "a diff touching any enforcement-data path loses the plan-only carve-out …" — and the
+ * BACKWARD arm read that as the PR claiming exemption, forcing `state: "failure"` on a two-file
+ * `src/`-touching diff. THE CORRECT WORDING IS THE ONE THAT TRIPPED IT. Against that, every
+ * recorded true positive rides an arm kept here: #1025's `data-only: no code` is the LABEL form
+ * (#974's was the file-COUNT check, a different predicate entirely), and every fixture in
+ * test/changeset-shorthand-anchor.test.ts, test/body-contradicts-diff.test.ts,
+ * test/body-vs-diff-contract.test.ts and test/gate-properties.test.ts that pins a real claim is a
+ * label, a copular or an attributive one. The sentence-scoped arms have NO recorded true positive.
+ * (Runtime firings are UNMEASURED — the ledger is unreachable — so that is a claim about the
+ * repo's recorded fixtures and incidents, not about production counts.)
+ *
+ * NOT {@link noClaimIsAboutChangeset}, though it is the obvious sibling. Its contract treats "no
+ * next word at all" as "the token IS the claim", which is right for `no <token>` and exactly wrong
+ * here: a path like `test/trailer-credit-plan-only.test.ts` continues with `.test.ts`, so that
+ * helper reports TRUE and the filename fires. Requiring real whitespace before the head noun is
+ * what keeps a path silent.
  */
 function shorthandIsAboutChangeset(report: string, index: number, length: number): boolean {
-  if (claimsChangesetContext(report, index)) return true;
   const rest = report.slice(index + length);
   // THE LABEL FORM IS A CLAIM, and it is the one the house style actually writes: `data-only: no
   // code.` (#1025's own body) and `**Plan-only**: one file added`. A colon immediately after the
@@ -2284,20 +2320,30 @@ function shorthandIsAboutChangeset(report: string, index: number, length: number
   // word inside one, and that is decidable without guessing at the elaboration that follows, which
   // often carries no changeset verb at all ("no code", "no src"). A path never continues with a
   // colon, so `test/trailer-credit-plan-only.test.ts` stays silent.
-  if (/^[*_`\s]*:/.test(rest)) return true;
+  //
+  // THE DELIMITER CLASS IS THE LABEL ARM'S OWN, not a shared helper's. W1-T395 established that a
+  // CLOSING DELIMITER (backtick, quote, paren, bracket) "merely ends a SPAN" rather than a
+  // sentence, and pinned the invariant that quoting a claim must not change the verdict
+  // (test/review-absence-anchor-delimiter.test.ts). `"Plan-only": no source touched.` satisfied
+  // that invariant only by accident until now — the emphasis-only class here never matched the
+  // quote, and the sentence-scoped arm this task removed was silently covering for it. The gap was
+  // always in this arm; removing its cover is what made it visible.
+  if (/^[*_`'")\]\s]*:/.test(rest)) return true;
   // THE COPULAR FORM IS A CLAIM: "This is plan-only.", "The diff is data-only." A linking verb
   // immediately before the shorthand makes it the PREDICATE of whatever the sentence is about, and
   // in a PR body that subject is the change. Deliberately IMMEDIATE rather than anywhere-in-
   // sentence, which is what separates it from the two shapes that must stay silent: "makes a
   // triage PR plan-only by construction" (about the LANE) and "described its revert as data-only"
   // (about ANOTHER PR) both name the concept without predicating it of this diff.
-  // The SUBJECT must be this change, not any noun that happens to precede a linking verb: "a
-  // merged PR is plan-only" explains the predicate, it does not claim it of this diff.
-  if (/\b(?:this|it|these\s+changes|the\s+(?:diff|change|changeset|pr))\s+(?:is|are|was|were)\s+[*_`]*$/i.test(report.slice(0, index))) {
-    return true;
-  }
-  const end = rest.search(/[.!?\n]/);
-  return CHANGESET_CONTEXT_RE.test(end === -1 ? rest : rest.slice(0, end));
+  if (SELF_REFERENTIAL_CLAIM_RE.test(report.slice(0, index))) return true;
+  // THE ATTRIBUTIVE FORM IS A CLAIM when — and only when — the noun the shorthand modifies is
+  // ITSELF the changeset: "plan-only change", "Plan-only edit", "a data-only diff". That is the
+  // distinction the old forward scan could not draw, because it read the whole rest of the
+  // sentence: in "the plan-only CARVE-OUT exempts a plan-scope DIFF", the modified noun is
+  // `carve-out` and `diff` is an object three words later — one sentence, two entirely different
+  // subjects. Reading only the modified noun keeps every real claim and drops the description.
+  const head = SHORTHAND_HEAD_NOUN_RE.exec(rest);
+  return head !== null && CHANGESET_CONTEXT_RE.test(head[1]);
 }
 
 /** Does `file` fall under the claimed-absent `path` (an exact file, or a directory prefix)? */
