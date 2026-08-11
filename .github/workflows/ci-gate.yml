@@ -152,6 +152,26 @@ jobs:
           WAIT_CAP_SECONDS="${WAIT_CAP_SECONDS:-2400}"
           WAIT_POLL_INTERVAL_SECONDS="${WAIT_POLL_INTERVAL_SECONDS:-15}"
 
+          # A READ THAT FAILED IS NOT A READ THAT SAID NO. On 2026-08-11 a single x509 TLS error
+          # on ONE poll killed this script under `set -euo pipefail` and ci-gate reported FAILURE
+          # on #1569 -- indistinguishable, at the check level, from a required check going red. The
+          # re-run went SUCCESS on the SAME sha with no new commit, so the gate had reported a
+          # network hiccup as a merge-blocking verdict. RETRY_ATTEMPTS/RETRY_BACKOFF_SECONDS are
+          # env (like the wait/grace knobs) so tests drive them without waiting real seconds.
+          #
+          # RETRYING THIS READ CANNOT MASK A FLAPPING CHECK, and that is why it is safe: a check's
+          # verdict is only ever carried in the BODY of a SUCCESSFUL read. A non-zero `gh api` exit
+          # yields NO rows at all, so there is nothing here to mask -- a genuinely red or flapping
+          # check still arrives as data, and steps 2/3 (evaluate + the W1-T261 grace window) decide
+          # it exactly as before. That is also why no error CLASSIFICATION is attempted: `gh api`
+          # exits 1 for a TLS failure and for an HTTP 4xx alike, and on THIS call -- `checks: read`
+          # against the workflow's own repo with `github.token` -- an HTTP-level error is a
+          # permanent misconfiguration that fails identically after the retries and lands on the
+          # unreadable exit below. Guessing at stderr text would add a parser that can be wrong
+          # about a distinction this call does not actually need.
+          RETRY_ATTEMPTS="${RETRY_ATTEMPTS:-3}"
+          RETRY_BACKOFF_SECONDS="${RETRY_BACKOFF_SECONDS:-2}"
+
           runs_json() {
             # All check runs on the PR head SHA, across every workflow + app, merged across pages,
             # THEN DEDUPED BY NAME (W1-T123): a SHA accumulates one check-run PER ATTEMPT, so a
@@ -161,10 +181,34 @@ jobs:
             # success now reads as that success; everything downstream evaluates ONLY this
             # deduped, latest-per-name list.
             # (`--slurp` can't combine with `-q`, so flatten the page array with a separate jq.)
-            gh api "repos/${REPO}/commits/${SHA}/check-runs?per_page=100" --paginate --slurp \
-              | jq -c '[ .[].check_runs[] | {name, status, conclusion, started_at} ]
+            local raw attempt=1
+            while [ "${attempt}" -le "${RETRY_ATTEMPTS}" ]; do
+              if raw="$(gh api "repos/${REPO}/commits/${SHA}/check-runs?per_page=100" --paginate --slurp)"; then
+                jq -c '[ .[].check_runs[] | {name, status, conclusion, started_at} ]
                         | group_by(.name)
-                        | map(max_by(.started_at))'
+                        | map(max_by(.started_at))' <<< "${raw}"
+                return 0
+              fi
+              echo "ci-gate: check-runs read FAILED (attempt ${attempt}/${RETRY_ATTEMPTS}) -- retrying in ${RETRY_BACKOFF_SECONDS}s" >&2
+              attempt=$((attempt + 1))
+              [ "${attempt}" -le "${RETRY_ATTEMPTS}" ] && sleep "${RETRY_BACKOFF_SECONDS}"
+            done
+            return 1
+          }
+
+          # EXHAUSTED RETRIES STILL FAIL, and the wording is the whole point. An unreadable API
+          # means the gate DOES NOT KNOW, and "does not know" on a required check must never pass
+          # -- a gate that went green on an unreadable poll would be a far worse defect than the
+          # one this retry fixes. So it fails closed, with a message that says UNREADABLE rather
+          # than FAILED, and tells the reader a re-run is the remedy (unlike the W1-T312 timeout
+          # below, where re-running the same sha is explicitly useless).
+          # Called with `||` from the PARENT shell, never from inside a command substitution: an
+          # `exit` within `$( )` would only kill the subshell, leaving the caller to carry on with
+          # an empty `runs` -- which reads as "no checks exist" and is exactly the silent pass this
+          # must never produce.
+          unreadable_die() {
+            echo "::error::ci-gate: could NOT READ the check-runs API after ${RETRY_ATTEMPTS} attempt(s) -- this is NOT a check failure and says NOTHING about the checks themselves; the gate has no data, so it fails closed. Re-running THIS sha is the remedy (unlike the wait-cap timeout below, which needs a NEW sha)."
+            exit 1
           }
 
           # 1) WAIT until every REQUIRED check is present + completed (terminal). A required check
@@ -174,7 +218,7 @@ jobs:
           #    turned the routine slow-but-green case into a false timeout (#1229, #1234).
           deadline=$(( $(date +%s) + WAIT_CAP_SECONDS ))
           while :; do
-            runs="$(runs_json)"
+            runs="$(runs_json)" || unreadable_die
             not_ready="$(jq -r --argjson req "${REQUIRED}" '
               ([ .[] | select(.status=="completed") | .name ]) as $done
               | ($req - $done)
@@ -231,7 +275,7 @@ jobs:
             printf '%s\n' "${fails}" | sed 's/^/  - /'
             while [ -n "${fails}" ] && [ "$(date +%s)" -lt "${grace_deadline}" ]; do
               sleep "${GRACE_POLL_INTERVAL_SECONDS}"
-              runs="$(runs_json)"
+              runs="$(runs_json)" || unreadable_die
               not_ready="$(jq -r --argjson req "${REQUIRED}" '
                 ([ .[] | select(.status=="completed") | .name ]) as $done
                 | ($req - $done)
