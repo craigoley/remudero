@@ -374,6 +374,28 @@ export interface PreflightRange {
 const DEFAULT_PREFLIGHT_RANGE: PreflightRange = { from: "origin/main", to: "HEAD" };
 
 /**
+ * A step whose subprocess NEVER STARTED, named as its own outcome — or `undefined` when the child
+ * did produce an exit status and the ordinary pass/fail reading applies.
+ *
+ * ENFORCES THE CONTRACT {@link PreflightSpawn}'s `error` FIELD ALREADY DECLARES and the three
+ * hand-route steps below then broke: `status: null` is "the spawn itself failed", NEVER an ordinary
+ * nonzero exit whose output happens to be empty. `shellOut` (lib/ci-parity.ts) honours it; these did
+ * not, so three drain runs read `commitlint: FAIL` on compliant 71/75/81-char subjects with an empty
+ * body, and the run's summary recorded `durationMs: 1` for the WHOLE preflight. A millisecond is not
+ * a lint. The full reasoning, the measurements and both falsifiers live in
+ * test/preflight-spawn-failure.test.ts, which is where the long form belongs.
+ */
+export function spawnFailureDetail(
+  step: string,
+  res: { status: number | null; error?: string },
+): string | undefined {
+  if (res.status !== null) return undefined;
+  const why = res.error ?? "the child produced no exit status and no error message";
+  return `${step}: SPAWN FAILURE — ${why}; the check did NOT run, so this is not a result about the code`;
+}
+
+
+/**
  * Step 1/3 — commitlint over the range, via the SAME binary + config CI uses
  * (`node_modules/.bin/commitlint --config commitlint.config.mjs`), so a local PASS means
  * the same thing a CI PASS does. Independent of the other two steps: a thrown spawn (the
@@ -391,6 +413,8 @@ export function commitlintStep(
     const res = spawn(process.execPath, [bin, "--config", config, "--from", range.from, "--to", range.to], {
       cwd: repoRoot,
     });
+    const spawnFailed = spawnFailureDetail("commitlint", res);
+    if (spawnFailed) return { name: "commitlint", ok: false, detail: spawnFailed };
     const ok = res.status === 0;
     return {
       name: "commitlint",
@@ -415,6 +439,8 @@ export function typecheckStep(repoRoot: string, spawn: PreflightSpawn = defaultP
   try {
     const tsc = join(repoRoot, "node_modules", ".bin", "tsc");
     const res = spawn(tsc, ["-p", "tsconfig.json", "--noEmit"], { cwd: repoRoot });
+    const spawnFailed = spawnFailureDetail("typecheck", res);
+    if (spawnFailed) return { name: "typecheck", ok: false, detail: spawnFailed };
     const ok = res.status === 0;
     return {
       name: "typecheck",
@@ -436,6 +462,11 @@ export function readRangeCommitMessages(
   spawn: PreflightSpawn = defaultPreflightSpawn,
 ): string[] {
   const res = spawn("git", ["log", "--format=%x00%B", `${range.from}..${range.to}`], { cwd: repoRoot });
+  // A `git log` that never ran returns an EMPTY stdout, which the filter below turns into ZERO
+  // messages — and zero messages is a PASS over an empty set, the vacuous-pass family. Throw
+  // instead; `emitterChecksStep`'s existing catch names it as that step's own failure.
+  const spawnFailed = spawnFailureDetail("emitter-checks", res);
+  if (spawnFailed) throw new Error(spawnFailed);
   return res.stdout
     .split("\0")
     .map((s) => s.trim())
