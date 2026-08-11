@@ -1,0 +1,73 @@
+- id: W1-T431
+  title: "the console is reachable only where the instance can be dialed INTO, so remote access means tailnet self-management — build the Tier-2 relay CLIENT: `rmd relay` dials OUT to a configured relay, authenticates with an enrollment token, and transparently proxies the existing console surface; it never listens and the hosted side is out of scope"
+  repo: remudero
+  depends_on: ["W1-T430"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 90
+  rationale: "FILED FROM the architecture brief (oper#architecture-2026-08-11) — the operator's
+    remudero.com direction — evidence re-derived at 09c7bda. THE DECISION THIS EXECUTES:
+    DECISIONS.md 2026-07-20 (DISTRIBUTION ARCHITECTURE) already fixed Tier 2's shape — 'The
+    agent initiates an OUTBOUND tunnel; the website brokers authenticated browser sessions to
+    it … NO inbound ports … a relay is a transparent proxy … with zero console rework' — and
+    D-11 (this brief) promotes it from deferred to the remudero.com spine. THE SHAPE IS THE
+    INDUSTRY-CONVERGED ONE, RESEARCHED 2026-08-11: GitHub's self-hosted runner holds an
+    outbound HTTPS long-poll ('you do not need to allow GitHub to make inbound connections'),
+    Devin Outposts workers 'only need outbound HTTPS … No inbound ports, public IPs, or VPN
+    tunnels', Coder agents 'establish an outbound connection rather than creating a listening
+    port', enrollment is short-lived tokens or the RFC 8628 device flow everywhere. THE
+    BOUNDARY DISCIPLINE: §7A keeps the console API as the product boundary — the relay client
+    forwards it, never reimplements it — and §6A keeps core fully functional without any
+    relay. WHY CLIENT-ONLY: the hosted service's repo home is a D-5 contract-coupling question
+    (it consumes the daemon API, which argues monorepo) the operator has not ruled on; a
+    loopback-stub-tested client ships value and pins the protocol without that ruling.
+    LEDGER: UNMEASURED (mini down); nothing here needs it."
+  design: |
+    (i) runRelayClient (src/lib/relay-client.ts) is the module's exported entry, invoked by
+    relayConnectCommand (src/run-task.ts) — `rmd relay` reads relay URL + enrollment
+    token from per-instance config (never argv, never committed), dials OUT, holds a
+    reconnecting session, and forwards proxied requests to the LOCAL serve surface as a
+    transparent byte proxy (REST and SSE both; the console client already talks to a
+    URL-configurable backend, which is the zero-rework property Tier 2's record names). Both
+    names are load-bearing — the call-site criterion greps the module's entry AT its caller.
+    (ii) the tunnel carries the console's OWN auth: brokered browser sessions present
+    identity the W1-T430 seam grants scope for; the relay client adds NO scope of its own —
+    a relay that could mint write access would be a second credential system, which is the
+    exact thing the seam exists to prevent.
+    (iii) outbound-only is a tested invariant, not a stance: the client never binds a port
+    (the falsifier asserts no listener exists), reconnects with backoff, and survives relay
+    absence — serve works untouched when no relay is configured.
+    (iv) enrollment: a short-lived token pasted from the relay's UI into per-instance config
+    (the GitHub-runner registration-token shape); rotation is re-enrollment. Device-code flow
+    is a later convenience, not v0.
+    (v) FALSIFIER, both directions: against a loopback stub relay, a browser-shaped request
+    through the tunnel reaches serve and returns the same body as a direct call (transparent
+    proxy direction), AND with the relay stub down or unconfigured, serve behaves exactly as
+    today and the client process holds no listening socket (outbound-only direction).
+    Deleting the forwarder fails the first; adding any listener fails the second.
+    (vi) NOT IN SCOPE: the hosted relay service, accounts, remudero.com DNS/TLS, portfolio
+    views across instances (§6 Pro candidates), device-code flow, any change to console
+    routes or scopes.
+  acceptance:
+    - claim: "a request through the loopback stub relay returns the same console response as a direct call, with scope granted by the identity seam and none added by the relay"
+      proof: "unit test: test/relay-client.test.ts"
+    - claim: "the relay module's entry is CALLED from the CLI command, so it cannot merge as fully-tested dead code"
+      proof: "grep: runRelayClient( in src/run-task.ts"
+  risk: high
+  origin: oper#architecture-2026-08-11
+  plan_refs: ["W1-T430", "W1-T371", "W1-T404"]
+  files: [src/run-task.ts, src/lib/relay-client.ts, test/relay-client.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — a loopback stub relay makes both falsifier directions fixture-decidable
+    offline; nothing needs the hosted side to exist. risk:high — it is a new network-facing
+    surface adjacent to auth; containment is (ii)'s no-scope-of-its-own rule and (iii)'s
+    tested no-listener invariant. budget_usd 90 — tunnel client, SSE forwarding, reconnect
+    discipline, stub relay fixture. PROOF NOTES: `runRelayClient` is 0 hits across src/ at
+    09c7bda (measured), and the open-paren call-site form greps the caller (src/run-task.ts),
+    a path distinct from the new module, per the call-site lint; unit-test proof is the
+    pure-path form against a declared file.
+    LEDGER: UNMEASURED (mini down). depends_on W1-T430: brokered sessions authenticate
+    through the identity seam — building the tunnel first would hard-wire a third auth path,
+    the §6A violation this arc exists to avoid."
