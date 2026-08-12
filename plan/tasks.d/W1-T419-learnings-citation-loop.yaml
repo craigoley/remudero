@@ -2,6 +2,7 @@
   title: "the learnings corpus has votes with no voters — `cited` is a hand-stamped date, injection logs a COUNT and not the ids, and the budget ratchet's overage names no candidates: close the citation loop so retention ranks on measured use"
   repo: remudero
   depends_on: []
+  priority: 1
   type: implement
   verify: auto
   principles: {tdd: strict}
