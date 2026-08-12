@@ -5016,6 +5016,12 @@ async function runTask(
   // dispatch never reaches the daemon poll or `rmd sweep` call site that would otherwise run
   // it. Best-effort and ships dry (`worktreeReapBoot.enabled`) — see logWorktreeReapBootSurvey.
   logWorktreeReapBootSurvey(config, log);
+  // W1-T411: three MORE sweeps with call sites only inside daemonCommand — stale rmd temp
+  // dirs, abandoned review clones, and per-spawn worker homes — get the SAME start-of-run
+  // reclaim rung pruneStaleRuns and logWorktreeReapBootSurvey already occupy. Unlike the
+  // worktree reaper above, all three already run ARMED wherever they run today, so this needs
+  // no dry-run flag of its own — see logDiskReclaimRung.
+  logDiskReclaimRung(config, log);
 
   const branch = `run-${runId}`;
   const worktreePath = join(worktreesDir(config), branch);
@@ -10486,6 +10492,107 @@ export function logWorktreeReapBootSurvey(
   } catch {
     return null; // best-effort, exactly like the sibling boot sweeps — never blocks the dispatch
   }
+}
+
+/**
+ * W1-T411 — the disk-reclaim RUNG for a ONE-SHOT `rmd run-task` dispatch, called from inside
+ * `runTaskBody` beside `pruneStaleRuns` and W1-T406's {@link logWorktreeReapBootSurvey}. Three
+ * sweeps — `sweepStaleTempDirs` (stale rmd-owned temp dirs), `reapStaleClones` (abandoned
+ * review clones, via {@link logCloneReapSurvey}), and `sweepStaleWorkerHomes` (per-spawn worker
+ * homes a killed spawn never reached its own `reapWorkerHome` for) — have their ONLY call sites
+ * inside `daemonCommand`'s boot/poll dispatch (`daemonBoot`'s closure, `buildSweepHook`), so a
+ * one-shot container never runs them and reclaims none of the three UNBOUNDED leaks they own.
+ * Every container start IS the cadence here, exactly like `pruneStaleRuns` and
+ * `logWorktreeReapBootSurvey` already are.
+ *
+ * NO NEW PREDICATE (design (i)/(ii)). Every reap decision stays inside the sweep that already
+ * owns it — this function adds no age arithmetic, no liveness probe and no destruction
+ * criterion of its own. All three sweeps ALREADY RUN ARMED wherever they run today
+ * (`scratchReap.enabled` is `true` in plan/policy.yaml as of #1250), so this rung needs no new
+ * policy flag — unlike W1-T406's `worktreeReapBoot`, which ships survey-only because
+ * `reapStaleWorktrees` can destroy uncommitted work. These three cannot: none of them calls
+ * `isPidAlive`/`process.kill` at all, and each is guarded by a name prefix plus its own age
+ * ceiling (the clone reap additionally requires a clean open-file probe before it will touch
+ * anything).
+ *
+ * THREE SEPARATE GUARDS (design (iii)), deliberately not one try/catch wrapping all three: a
+ * throw inside any one sweep is caught right there, never blocks the dispatch, and never
+ * prevents the other two from running.
+ *
+ * EACH SWEEP READS ITS OWN ROOTS (design (iv)), never a second notion of where things live:
+ * `tmpdir()` via `sweepStaleTempDirs`'s own default, `workerHomeDir(config)`, and
+ * `cloneReapRoots()` via {@link logCloneReapSurvey} — REUSED rather than re-implemented so the
+ * `scratchReap` policy field keeps exactly one read path. Its own ledger emission is suppressed
+ * here (a no-op logger passed as its `log`) so this rung still produces exactly the one combined
+ * line design (v) calls for; `logCloneReapSurvey`'s existing `daemon.clone_reap` line is
+ * untouched at its own pre-existing daemon call site.
+ *
+ * ONE LEDGER LINE (design (v)), summarising what the rung reclaimed across all three sweeps —
+ * emitted only when something was actually reclaimed. This is NOT a decision input (nothing
+ * reads `run.disk_reclaim` to decide anything), so it is deliberately NOT added to
+ * `DECISION_RELEVANT_LEDGER_STEPS`.
+ *
+ * Deps are injectable and appended LAST so no positional caller shifts; the default path calls
+ * the real sweeps against their real roots/policy.
+ */
+export function logDiskReclaimRung(
+  config: Config,
+  log: (step: string, fields: Record<string, unknown>) => void,
+  deps: {
+    sweepTempDirs?: typeof sweepStaleTempDirs;
+    reapClonesSurvey?: typeof logCloneReapSurvey;
+    cloneReapDeps?: Parameters<typeof logCloneReapSurvey>[2];
+    sweepWorkerHomes?: typeof sweepStaleWorkerHomes;
+    workerHomeRoot?: () => string;
+  } = {},
+): {
+  tempDirsRemoved: number;
+  clonesReaped: number;
+  cloneBytesReclaimed: number;
+  workerHomesRemoved: number;
+} {
+  const sweepTempDirs = deps.sweepTempDirs ?? sweepStaleTempDirs;
+  const reapClonesSurvey = deps.reapClonesSurvey ?? logCloneReapSurvey;
+  const sweepWorkerHomes = deps.sweepWorkerHomes ?? sweepStaleWorkerHomes;
+
+  let tempDirsRemoved = 0;
+  try {
+    tempDirsRemoved = sweepTempDirs().removed.length;
+  } catch {
+    // best-effort — a throw here must never block the dispatch or the other two sweeps
+  }
+
+  let clonesReaped = 0;
+  let cloneBytesReclaimed = 0;
+  try {
+    // Suppressed logger: logCloneReapSurvey already best-effort-catches internally, but an
+    // injected `reapClonesSurvey` test double could still throw — belt-and-suspenders so this
+    // guard behaves identically to the other two.
+    const summary = reapClonesSurvey(config, () => {}, deps.cloneReapDeps);
+    clonesReaped = summary?.reaped.length ?? 0;
+    cloneBytesReclaimed = summary?.bytesReclaimed ?? 0;
+  } catch {
+    // best-effort — a throw here must never block the dispatch or the other two sweeps
+  }
+
+  let workerHomesRemoved = 0;
+  try {
+    const root = (deps.workerHomeRoot ?? (() => workerHomeDir(config)))();
+    workerHomesRemoved = sweepWorkerHomes(root).removed.length;
+  } catch {
+    // best-effort — a throw here must never block the dispatch or the other two sweeps
+  }
+
+  if (tempDirsRemoved || clonesReaped || workerHomesRemoved) {
+    log("run.disk_reclaim", {
+      tmp_dirs_removed: tempDirsRemoved,
+      clones_reaped: clonesReaped,
+      clone_bytes_reclaimed: cloneBytesReclaimed,
+      worker_homes_removed: workerHomesRemoved,
+    });
+  }
+
+  return { tempDirsRemoved, clonesReaped, cloneBytesReclaimed, workerHomesRemoved };
 }
 
 /**
