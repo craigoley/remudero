@@ -61,6 +61,7 @@ usage:
   rmd feedback <text...> [--attach <path-or-url>]... [--origin cli|ui|issue]   # durable-inbox async capture (MASTER-PLAN §7B, W1-T40): writes plan/feedback/<id>.yaml with status: new; --attach copies a local screenshot/terminal-dump into plan/feedback/attachments/<id>/ or records an http(s) link verbatim; browse the inbox with plain ls/cat/git diff, no bespoke reader
   rmd triage <feedback-id>   # the Architect intake worker (MASTER-PLAN §7B, W1-T41): GROUNDS a plan/feedback/<id> entry against MASTER-PLAN/plan/LEARNINGS/DECISIONS, RESEARCHES via server-side WebSearch, then either reports 'already decided' (no task), GRILLS an ambiguous item by opening a needs-human GitHub issue with options + a recommendation (W1-T42, parks status 'grilling'), or opens a plan-only PR carrying origin: feedback#<id> provenance, gated by ci-gate+remudero-review like everything else
   rmd skill list   # §5B skill-registry reader (W1-T44): resolves every .remudero/skills/<name>.yaml ({tools, permission_profile, output_contract, grounding_sources, gate, tier}); adding a skill is a config entry, no source change
+  rmd learnings export <out> | rmd learnings import <file> --pin <hash>   # the §6 knowledge-commons transport (W1-T425). PRIVACY CONTRACT: export collects ONLY project-layer entries an operator stamped `share: public` (default absent = private forever) and independently refuses any candidate matching the leak-grep tripwire, naming it -- zero opted-in entries refuses rather than writing an empty bundle. `import <file> --pin <hash>` checks the bundle's own declared hash against the operator-supplied --pin before writing anything to the RMD-GLOBAL layer the injector already reads, then defers ALL tamper enforcement to that existing hash-pinned-artifact guard -- import never re-derives or re-implements the check, only places the file where it already looks
   rmd trace <id>   # render the provenance chain (MASTER-PLAN §7B / Standing rule 17, W1-T43): feedback → proposal PR → task(s) → run(s) → PR(s) → merge sha; <id> resolves as a task id first (reverse: task back to its origin:), else as a plan/feedback/<id> id (forward: feedback out to every task it produced)
   rmd plan --mode=create|clarify|expand [<brief>...]   # the unified Architect PLAN skill (MASTER-PLAN §5B, W1-T45) — ONE ground→research→clear-or-grill-or-propose code path shared by all three modes (Refine=clarify, Expand=expand): create scaffolds new plan/tasks.yaml task(s) for the REQUIRED <brief> initiative; clarify grills (or silently resolves) ambiguous/underspecified existing tasks, <brief> optionally narrowing the focus; expand proposes gap-filling tasks that each cite a research source. CLEAR/GRILL touch nothing and open no PR; PROPOSED opens a plan-only PR (plan/** + MASTER-PLAN.md) gated by ci-gate+remudero-review
   rmd inbox [--dry-run]   # the ratification inbox's deterministic core (MASTER-PLAN P25(i), W1-T110): tiers the ACTIVE-proposal registry (state/inbox-proposals.json) into READY (drafted tasks' deps merged, evidence anchors grep-true on main, draft lint-plan-clean, no open conflict — carries its drafted plan/tasks.yaml fragment + stamp), not-ready (each failing predicate named), or DEFERRED-WITH-TRIGGER (an unfired named trigger — never recommended); drafts missing/stale candidates via a bounded, read-only Architect worker and caches them state-side (never committed); --dry-run classifies against whatever is already cached and spawns no worker
@@ -440,6 +441,14 @@ rmd skill list
 ```
 
 §5B skill-registry reader (W1-T44): resolves every .remudero/skills/<name>.yaml ({tools, permission_profile, output_contract, grounding_sources, gate, tier}); adding a skill is a config entry, no source change
+
+### `rmd learnings`
+
+```
+rmd learnings export <out> | rmd learnings import <file> --pin <hash>
+```
+
+the §6 knowledge-commons transport (W1-T425). PRIVACY CONTRACT: export collects ONLY project-layer entries an operator stamped `share: public` (default absent = private forever) and independently refuses any candidate matching the leak-grep tripwire, naming it -- zero opted-in entries refuses rather than writing an empty bundle. `import <file> --pin <hash>` checks the bundle's own declared hash against the operator-supplied --pin before writing anything to the RMD-GLOBAL layer the injector already reads, then defers ALL tamper enforcement to that existing hash-pinned-artifact guard -- import never re-derives or re-implements the check, only places the file where it already looks
 
 ### `rmd trace`
 

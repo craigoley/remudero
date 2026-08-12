@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { parse as parseYaml } from "yaml";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { citation } from "./provenance.js";
 
 /**
@@ -106,11 +106,30 @@ import { citation } from "./provenance.js";
  * injectable-weight measurement so each layer's active corpus is capped
  * INDEPENDENTLY, rather than one global ceiling across all three layers.
  *
- * The transport that actually MOVES a promoted entry onto a populated
- * user-overall/global home on this machine (§6, DECISIONS.md
- * distribution-architecture Tier 3) is still deferred — this module decides
- * WHETHER an entry promotes and produces its next-layer shape; writing that
- * shape to a real home is the transport's job.
+ * TRANSPORT (§6, W1-T425): {@link buildExportBundle}/{@link renderExportBundle}
+ * (the SENDING side) and {@link verifyBundlePin} (the RECEIVING side's
+ * pre-write pin check) are what actually MOVE entries onto a populated
+ * global home — the piece the paragraph above used to call "still deferred."
+ * Exportability is FIELD-LEVEL OPT-IN, never a redaction guess: an entry
+ * carries `share: public` (any other value or omission is private forever)
+ * and {@link selectExportableEntries} only ever includes an entry that says
+ * so explicitly. `buildExportBundle` runs {@link scrubEntry} — the same
+ * leak-grep/PII analog {@link promoteEntry} already gates on — over every
+ * candidate as a SECOND, INDEPENDENT floor beneath the opt-in declaration,
+ * and refuses (naming the entry) on a hit; zero opted-in entries refuses
+ * with a reason rather than writing an empty-but-valid bundle (the vacuous-
+ * export twin of the naked-zero rule). The bundle is the exact
+ * {@link GlobalArtifact} shape (version/hash/entries) {@link
+ * loadGlobalArtifact} already parses, plus a `provenance` block (source
+ * repo, source sha, export date) that travels alongside the hash but is
+ * NEVER hashed or re-verified — only `entries` is. On import,
+ * `verifyBundlePin` checks the bundle's OWN declared `hash` against an
+ * operator-supplied pin (communicated out-of-band, e.g. alongside the
+ * export's printed hash) BEFORE anything is written to the global home; it
+ * deliberately does not re-derive the hash from `entries` itself — that
+ * check is {@link loadGlobalArtifact}'s job, run again at prompt-assembly
+ * time, so import never bypasses or reimplements the tamper check, it only
+ * places the artifact where the existing guard already looks.
  */
 
 /** Standing rule 7 — empirically the highest-value line in the template. */
@@ -164,6 +183,15 @@ export type Layer = "project" | "user-overall" | "global";
 /** Every valid {@link Layer}, in promotion order (bottom-up: project -> user-overall -> global). */
 export const LAYERS: readonly Layer[] = ["project", "user-overall", "global"];
 
+/**
+ * The only valid non-absent value of an entry's `share` field (§6, W1-T425):
+ * `"public"`. There is deliberately no `"private"` counterpart — omitting
+ * the field (or an entry predating this field entirely) already means
+ * private, so a second spelling of the same state would just be another way
+ * to get it wrong.
+ */
+export type Share = "public";
+
 /** One durable, provenance-tagged fact, tagged for deterministic matching. */
 export interface LearningEntry {
   /** Stable slug used in the injected citation `[src: learnings#<id>]`. */
@@ -210,6 +238,16 @@ export interface LearningEntry {
    * this raw (possibly-`undefined`) field directly.
    */
   layer?: Layer;
+  /**
+   * (§6, W1-T425) The transport opt-in: `share: public` marks this entry
+   * exportable via `rmd learnings export`. Optional; DEFAULTS TO PRIVATE
+   * FOREVER when omitted (or set to anything but the literal `"public"`) —
+   * {@link selectExportableEntries} only ever includes an entry that
+   * declares this explicitly, never one the exporter guesses is safe.
+   * Sharing is a per-entry OPERATOR act, exactly like ratification; this
+   * module never sets it and zero entries are stamped by W1-T425 itself.
+   */
+  share?: Share;
   /** Repo-relative globs; an entry matches a task iff one glob hits a task file. */
   files: string[];
   /** The fact itself — one line, the thing a worker inherits. */
@@ -359,6 +397,18 @@ function parseLearningsDoc(raw: unknown, sourceLabel: string, seen: Set<string>)
       throw new LearningsError(`learnings '${id}': 'cited_count' must be a number (${sourceLabel}).`);
     }
     const citedCount = typeof e.cited_count === "number" ? e.cited_count : undefined;
+    // The `share: public` opt-in (§6, W1-T425). Any other non-absent value is a
+    // usage error, not silently treated as private — a typo here must fail loud,
+    // never fail open into "I guess this one's fine to omit from a bundle."
+    let share: Share | undefined;
+    if (e.share !== undefined) {
+      if (e.share !== "public") {
+        throw new LearningsError(
+          `learnings '${id}': 'share' must be "public" when set (omit the field entirely to keep an entry private), got ${JSON.stringify(e.share)} (${sourceLabel}).`,
+        );
+      }
+      share = e.share;
+    }
     return {
       id,
       subsystem: typeof e.subsystem === "string" ? e.subsystem : "",
@@ -369,6 +419,7 @@ function parseLearningsDoc(raw: unknown, sourceLabel: string, seen: Set<string>)
       quarantinedReason,
       operatorImpact,
       layer,
+      share,
       files: e.files as string[],
       fact: e.fact,
       src: e.src,
@@ -496,6 +547,7 @@ export function computeArtifactHash(entries: LearningEntry[]): string {
       quarantinedReason: e.quarantinedReason ?? null,
       operatorImpact: e.operatorImpact ?? false,
       layer: entryLayer(e),
+      share: e.share ?? null,
       files: e.files,
       fact: e.fact,
       src: e.src,
@@ -952,6 +1004,142 @@ export async function runPromotionPass(entries: LearningEntry[], deps: Promotion
     if (result.promoted && result.promotedEntry) promotedEntries.push(result.promotedEntry);
   }
   return { results, promotedEntries };
+}
+
+// ── TRANSPORT: EXPORT/IMPORT (§6, W1-T425) ──────────────────────────────────
+//
+// TWO VERBS RIDING MACHINERY THAT ALREADY EXISTS: {@link loadGlobalArtifact}'s
+// hash-pin verification and {@link scrubEntry}'s leak-grep/PII analog both
+// predate this section — export/import only produce and consume the bundle
+// those already-shipped guards read. This section builds ONLY the bundle in
+// between, never a second copy of either guard.
+
+/** Provenance stamped onto an exported bundle (§6, W1-T425): where it came from and when — informational, never hashed (only `entries` is; see {@link computeArtifactHash}). */
+export interface ExportProvenance {
+  /** e.g. `owner/repo` of the exporting checkout. */
+  sourceRepo: string;
+  /** The exporting checkout's HEAD sha at export time. */
+  sourceSha: string;
+  /** ISO timestamp of the export. */
+  exportedAt: string;
+}
+
+/**
+ * A bundle produced by `rmd learnings export` — the EXACT {@link GlobalArtifact}
+ * shape (`version`/`hash`/`entries`) {@link loadGlobalArtifact} already parses
+ * and hash-verifies, plus a `provenance` block. `loadGlobalArtifact` ignores
+ * unknown top-level keys, so a `provenance`-carrying bundle round-trips
+ * through the EXISTING loader with no changes to it.
+ */
+export interface ExportBundle extends GlobalArtifact {
+  provenance: ExportProvenance;
+}
+
+/**
+ * Only ACTIVE entries carrying the explicit `share: "public"` opt-in are
+ * ever exportable (§6, W1-T425). Absence of `share`, a `lifecycle` other
+ * than `active`, or any `share` value other than `"public"` (parsing
+ * already rejects anything else) all mean PRIVATE — this is a pure filter
+ * over the DECLARED field, never a guess about what looks safe.
+ */
+export function selectExportableEntries(entries: LearningEntry[]): LearningEntry[] {
+  return entries.filter((e) => e.lifecycle === "active" && e.share === "public");
+}
+
+/** The outcome of one {@link buildExportBundle} call — a refusal always NAMES why (and, for a tripwire hit, which entry), never a silent empty bundle. */
+export type ExportResult =
+  | { ok: true; bundle: ExportBundle }
+  | { ok: false; reason: string; blockedEntryId?: string };
+
+/**
+ * Build an exportable bundle from a loaded corpus (§6, W1-T425). Two
+ * refusals, both BEFORE anything is ever produced:
+ *
+ * 1. Zero entries carry `share: public` — refuses naming that (never an
+ *    empty-but-valid bundle; the vacuous-export twin of the naked-zero
+ *    rule).
+ * 2. A candidate entry matches {@link scrubEntry}'s leak-grep/PII patterns —
+ *    the SAME deterministic gate {@link promoteEntry} already runs before
+ *    ANY entry rises a layer — refuses naming the offending entry's id. This
+ *    is the independent floor BENEATH the opt-in declaration: a
+ *    mis-declared `share: public` entry still cannot leave the tree if its
+ *    text itself looks secret-shaped.
+ *
+ * `version` defaults to the export timestamp so a caller doesn't have to
+ * invent one; pass an explicit value (e.g. a semver-ish tag) to override.
+ */
+export function buildExportBundle(
+  entries: LearningEntry[],
+  provenance: ExportProvenance,
+  version: string = provenance.exportedAt,
+): ExportResult {
+  const candidates = selectExportableEntries(entries);
+  if (candidates.length === 0) {
+    return {
+      ok: false,
+      reason:
+        "zero entries carry `share: public` — nothing exported. An entry without the explicit opt-in never leaves " +
+        "the tree; stamp `share: public` on the entries you intend to share, then export again.",
+    };
+  }
+  for (const entry of candidates) {
+    const scrub = scrubEntry(entry);
+    if (scrub.blocked) {
+      return {
+        ok: false,
+        reason:
+          `export aborted: entry '${entry.id}' matched the leak-grep tripwire (${scrub.reasons.join(", ")}) — ` +
+          `no bundle was written. This is the independent floor beneath the \`share: public\` declaration.`,
+        blockedEntryId: entry.id,
+      };
+    }
+  }
+  return { ok: true, bundle: { version, hash: computeArtifactHash(candidates), entries: candidates, provenance } };
+}
+
+/** Render an {@link ExportBundle} to YAML — the same shard shape {@link loadGlobalArtifact} parses back, plus the provenance block. */
+export function renderExportBundle(bundle: ExportBundle): string {
+  return stringifyYaml(bundle);
+}
+
+/** The outcome of one {@link verifyBundlePin} call. */
+export type BundlePinResult = { ok: true } | { ok: false; reason: string };
+
+/**
+ * Verify a bundle's OWN declared `hash` against an operator-supplied pin
+ * (§6, W1-T425) — the check `rmd learnings import` runs BEFORE writing
+ * anything to the global home. `pin` is communicated out-of-band (e.g. the
+ * hash `rmd learnings export` printed), so this catches a wrong file or one
+ * corrupted/substituted in transit before it ever reaches disk.
+ *
+ * Deliberately does NOT recompute the hash from `entries` — that
+ * content-vs-hash re-derivation is {@link loadGlobalArtifact}'s job, run
+ * again at prompt-assembly time against whatever import wrote. Import never
+ * bypasses or reimplements that tamper check; this function only gates
+ * WHETHER import writes the file at all, against a DIFFERENT question (did
+ * the operator get the bundle they meant to trust).
+ */
+export function verifyBundlePin(bundleText: string, pin: string): BundlePinResult {
+  let raw: unknown;
+  try {
+    raw = parseYaml(bundleText);
+  } catch (err) {
+    return { ok: false, reason: `bundle is not valid YAML: ${String(err)}` };
+  }
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return { ok: false, reason: "bundle must be a mapping with 'version', 'hash', 'entries' — refused, not written" };
+  }
+  const r = raw as Record<string, unknown>;
+  if (typeof r.hash !== "string" || r.hash.length === 0) {
+    return { ok: false, reason: "bundle missing string 'hash' — cannot pin, refused, not written" };
+  }
+  if (r.hash !== pin) {
+    return {
+      ok: false,
+      reason: `pin mismatch: bundle declares hash ${r.hash}, operator pinned ${pin} — refused, not written`,
+    };
+  }
+  return { ok: true };
 }
 
 // ── PER-LAYER BUDGET RATCHET (P32/W1-T146, extends W1-T38) ─────────────────

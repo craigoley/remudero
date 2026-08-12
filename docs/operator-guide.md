@@ -65,6 +65,7 @@ All logic lives in TypeScript; `bin/rmd` is a thin `exec` wrapper into
 | `rmd approve <P##>` | Ratifies a currently-READY proposal, shipping its cached draft into a plan PR gated by the normal checks. |
 | `rmd reframe <P##> --feedback "<text>"` | Records feedback against a proposal and invalidates its cached draft so the next `rmd inbox` redrafts with that feedback in view. |
 | `rmd skill list` | Lists the `.remudero/skills/<name>.yaml` skill registry. |
+| `rmd learnings export <out>` / `rmd learnings import <file> --pin <hash>` | The §6 knowledge-commons transport: `export` collects only `share: public`-stamped, active project-layer entries into a hash-pinned bundle, refusing (naming the entry) if a candidate matches the leak-grep tripwire, or refusing outright if zero entries opted in; `import` checks the bundle's own hash against the operator-supplied `--pin` before writing it to the RMD-GLOBAL layer, deferring all further tamper enforcement to the existing hash-pinned-artifact guard. |
 | `rmd emissions [--days <n>]` | Reports CLI verbs that exist in the COMMANDS registry but have emitted no ledger line in the window — the declared-but-never-run class, with a reasoned allowlist for verbs that are legitimately rare. |
 | `rmd trace <id>` | Renders the provenance chain for a task or feedback id — feedback → proposal PR → task(s) → run(s) → PR(s) → merge sha. |
 

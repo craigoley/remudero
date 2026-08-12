@@ -11,6 +11,7 @@ import {
   consoleUrl,
   fixStrikeCap,
   globalArtifactPath,
+  globalLearningsHome,
   loadConfig,
   notifyRecipient,
   resolveHeadroomEnabled,
@@ -371,7 +372,15 @@ import { realRiskJudge, resolveRiskJudgeMount, runRiskJudge, type RiskJudgeInput
 import { loadSkillRegistry, renderSkillList, skillsDir, SkillError } from "./lib/skill.js";
 import { ContainmentError, probeContainment, type ProbeExecutor } from "./lib/containment.js";
 import { IsolationError, probeIsolation, type ProbeExecutor as IsolationProbeExecutor } from "./lib/isolation.js";
-import { DEFAULT_KNOWLEDGE_BUDGET_CHARS, renderDoctrinePreamble } from "./lib/learnings.js";
+import {
+  buildExportBundle,
+  DEFAULT_KNOWLEDGE_BUDGET_CHARS,
+  loadLearningsCorpus,
+  projectLearningsHome,
+  renderDoctrinePreamble,
+  renderExportBundle,
+  verifyBundlePin,
+} from "./lib/learnings.js";
 import { assertProvenance, citation } from "./lib/provenance.js";
 import { loadOperatorNotesForTask, renderOperatorNotes } from "./lib/operator-notes.js";
 import {
@@ -17150,6 +17159,129 @@ async function skillCommand(rest: string[]): Promise<number> {
   return 0;
 }
 
+/**
+ * `rmd learnings export|import` — the §6 transport (W1-T425): dispatches to
+ * the export (sending) or import (receiving) subcommand, both thin CLI
+ * wrappers over the pure functions in lib/learnings.ts that carry the actual
+ * privacy/pin logic and are unit-tested independently (same split as
+ * `rmd correct`'s wrapper over `applyCorrection`).
+ */
+function learningsCommand(rest: string[]): number {
+  const sub = rest[0];
+  if (sub === "export") return learningsExportCommand(rest.slice(1));
+  if (sub === "import") return learningsImportCommand(rest.slice(1));
+  console.error(
+    `rmd learnings: unknown subcommand '${sub ?? ""}' — usage: rmd learnings export <out> | rmd learnings import <file> --pin <hash>\n` +
+      USAGE,
+  );
+  return 2;
+}
+
+/**
+ * `rmd learnings export <out>` — the SENDING side (§6, W1-T425): collects
+ * this checkout's ACTIVE, `share: public` project-layer entries, stamps
+ * provenance (this repo, HEAD sha, export date), and writes the hash-pinned
+ * bundle {@link buildExportBundle} produces to `<out>`. Refuses (writes
+ * nothing) when zero entries opted in, or when a candidate matches the
+ * leak-grep tripwire — either refusal is reported via the SAME
+ * {@link buildExportBundle} this command is a thin wrapper over, never
+ * reimplemented here.
+ */
+function learningsExportCommand(rest: string[]): number {
+  const out = rest[0];
+  const badArg = unknownArgError("learnings export", rest.slice(1), [], []);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  if (!out) {
+    console.error(`rmd learnings export: <out> is required — usage: rmd learnings export <out>\n` + USAGE);
+    return 2;
+  }
+  const entries = loadLearningsCorpus(projectLearningsHome(repoRoot));
+  let sourceRepo = "unknown";
+  try {
+    const { owner, repo } = resolveOwnerRepo();
+    sourceRepo = `${owner}/${repo}`;
+  } catch {
+    // no origin remote configured — provenance degrades to "unknown", never a crash.
+  }
+  let sourceSha = "unknown";
+  try {
+    sourceSha = execFileSync("git", ["-C", repoRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim() || "unknown";
+  } catch {
+    // no git history readable — same degrade-to-"unknown" as above.
+  }
+  const result = buildExportBundle(entries, { sourceRepo, sourceSha, exportedAt: new Date().toISOString() });
+  if (!result.ok) {
+    console.error(`rmd learnings export: ${result.reason}`);
+    return 1;
+  }
+  writeFileSync(out, renderExportBundle(result.bundle), "utf8");
+  const n = result.bundle.entries.length;
+  console.log(
+    `### rmd learnings export — wrote ${out}: ${n} shared entr${n === 1 ? "y" : "ies"} from ${sourceRepo}@${sourceSha.slice(0, 12)}.\n` +
+      `hash=${result.bundle.hash}\n` +
+      `Share this hash out-of-band — the importer must pass it as \`--pin <hash>\` or the import refuses.`,
+  );
+  return 0;
+}
+
+/**
+ * `rmd learnings import <file> --pin <hash>` — the RECEIVING side (§6,
+ * W1-T425): checks the bundle's own declared hash against the
+ * operator-supplied `--pin` ({@link verifyBundlePin}) and, only on a match,
+ * writes the bundle VERBATIM to the RMD-GLOBAL artifact path the injector
+ * already reads ({@link globalArtifactPath}) — an import overwrites only its
+ * own prior bundle there, never the project or user-overall layers. Import
+ * deliberately does NOT re-derive the hash from `entries` itself; that
+ * content-vs-hash tamper check is {@link loadGlobalArtifact}'s job, run
+ * again the next time a prompt is assembled, so a bundle hand-edited AFTER
+ * passing the pin check here is still refused there — the existing guard,
+ * never a reimplementation of it.
+ */
+function learningsImportCommand(rest: string[]): number {
+  const file = rest[0];
+  const badArg = unknownArgError("learnings import", rest.slice(1), ["--pin"], []);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  if (!file) {
+    console.error(`rmd learnings import: <file> is required — usage: rmd learnings import <file> --pin <hash>\n` + USAGE);
+    return 2;
+  }
+  const pin = flagValue(rest, "--pin");
+  if (!pin) {
+    console.error(
+      `rmd learnings import: --pin <hash> is required — the operator-supplied hash the bundle must match\n` + USAGE,
+    );
+    return 2;
+  }
+  let text: string;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch (e) {
+    console.error(`rmd learnings import: cannot read ${file}: ${String((e as Error)?.message ?? e)}`);
+    return 2;
+  }
+  const verified = verifyBundlePin(text, pin);
+  if (!verified.ok) {
+    console.error(`rmd learnings import: ${verified.reason}`);
+    return 1;
+  }
+  const config = loadConfig();
+  mkdirSync(globalLearningsHome(config), { recursive: true });
+  const dest = globalArtifactPath(config);
+  writeFileSync(dest, text, "utf8");
+  console.log(
+    `### rmd learnings import — wrote ${dest} (pin verified against ${file}). Trust enforcement (the content-hash ` +
+      `re-check) runs again at prompt-assembly time via the existing loadGlobalArtifact guard — a bundle ` +
+      `hand-edited after this pin check still contributes zero entries, never silently trusted.`,
+  );
+  return 0;
+}
+
 /** `before`/`after` line for `rmd correct` — the operator-facing flip. */
 function describeProjection(label: string, proj: StatusProjection): string {
   const pr = proj.prUrl ? `${proj.prUrl}${proj.prState ? ` (${proj.prState})` : ""}` : "none";
@@ -17496,6 +17628,11 @@ const COMMANDS: readonly CommandSpec[] = [
     name: "skill",
     usage:
       "rmd skill list   # §5B skill-registry reader (W1-T44): resolves every .remudero/skills/<name>.yaml ({tools, permission_profile, output_contract, grounding_sources, gate, tier}); adding a skill is a config entry, no source change",
+  },
+  {
+    name: "learnings",
+    usage:
+      "rmd learnings export <out> | rmd learnings import <file> --pin <hash>   # the §6 knowledge-commons transport (W1-T425). PRIVACY CONTRACT: export collects ONLY project-layer entries an operator stamped `share: public` (default absent = private forever) and independently refuses any candidate matching the leak-grep tripwire, naming it -- zero opted-in entries refuses rather than writing an empty bundle. `import <file> --pin <hash>` checks the bundle's own declared hash against the operator-supplied --pin before writing anything to the RMD-GLOBAL layer the injector already reads, then defers ALL tamper enforcement to that existing hash-pinned-artifact guard -- import never re-derives or re-implements the check, only places the file where it already looks",
   },
   {
     name: "trace",
@@ -17995,6 +18132,9 @@ export async function main(
   }
   if (cmd === "skill") {
     process.exit(await skillCommand(rest));
+  }
+  if (cmd === "learnings") {
+    process.exit(learningsCommand(rest));
   }
   if (cmd === "trace") {
     process.exit(await traceCommand(rest));
