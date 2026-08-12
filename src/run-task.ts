@@ -448,6 +448,7 @@ import {
   readLedgerLines,
   type DeriveDeps,
   type GitHub,
+  type GhFailureReason,
   type PrRef,
   type StatusProjection,
 } from "./lib/status.js";
@@ -4051,16 +4052,80 @@ export function prNumberFromRef(ref: string): number | undefined {
  * one of those is refused (`undefined`), and the caller falls through to the unchanged `no_pr`
  * path. An unverifiable honesty exit is worse than none.
  */
+/** Why a claim was REFUTED — the gateway answered, and the answer contradicts the claim. */
+export type AlreadySatisfiedRefusal =
+  /** `claim.ref` is not a PR reference at all, so there is nothing to verify against. */
+  | "unparsable_ref"
+  /** The gateway was consulted and holds no merged PR carrying this task's trailer. */
+  | "not_found"
+  /** A merged PR carries the trailer, but it is NOT the one the worker claimed. */
+  | "different_pr";
+
+/**
+ * THREE STATES, NEVER TWO (W1-T119's law applied to rung (c)). Before this,
+ * `resolveAlreadySatisfied` returned `{number,url} | undefined` and collapsed
+ * "genuinely absent", "the read FAILED" and "a DIFFERENT PR is credited" into one
+ * `undefined` — so an unreadable gateway was recorded as a FALSE CLAIM.
+ *
+ * MEASURED: six `already_satisfied.refused` rows exist in the ledger union; replayed
+ * later, THREE OF FOUR resolved correctly (W1-T377→#1386, W1-T378→#1391,
+ * W1-T412→#1508). The workers were right and the read could not answer at that moment.
+ * Cost of the two that re-dispatched: 10 dispatches / $23.34, both already shipped.
+ *
+ * This is the same distinction {@link GitHub.findMergedByHeadBranch}'s own doc insists on
+ * one method away — "null on a `gh` FAILURE …, [] on a genuine no-such-branch — the two
+ * must stay distinguishable" — and the same family as {@link GitHub.readFailed},
+ * `projectPlan`'s indeterminate and {@link GitHub.listOpenHeadBranches}.
+ */
+export type AlreadySatisfiedResolution =
+  | { outcome: "verified"; number: number; url: string }
+  | { outcome: "refuted"; reason: AlreadySatisfiedRefusal; creditedNumber?: number }
+  | { outcome: "unverifiable"; reason: GhFailureReason };
+
+/**
+ * Verify a worker's ALREADY_SATISFIED claim against the board gateway.
+ *
+ * THE DISCRIMINATOR IS NOT RECOMPUTED. `classifyGhFailure` already ran inside the gateway
+ * and its answer is published as {@link GitHub.readFailureReason} — this reads that,
+ * exactly as `derivePrPrecedence` does, rather than re-deriving a second opinion about
+ * why a read failed.
+ *
+ * NUMBER EQUALITY IS NOT RELAXED, deliberately: `ghGateway`'s trailer search is
+ * `--limit 1` over a FUZZY body index and returns the NEWEST match, and more than one
+ * merged PR really can carry the same task's trailer. MEASURED over all 1,169 merged PR
+ * bodies (anchored `^Remudero-Task: <id>$`): 495 distinct ids carry one and SIXTEEN are
+ * carried by several — W1-T254 by six, where #720 is the implementation and the newest is
+ * a `chore(plan): close ... as already-satisfied` PR. So the gateway's first answer can
+ * name a PR that did not build the task, and that equality check is the only thing
+ * catching it: a mismatch stays a REFUSAL, now merely one that says which kind it is.
+ * Preferring the implementing PR among several is W1-T441, filed separately.
+ *
+ * A NOTE ON `readFailed()`'s SCOPE: on `ghGateway` the flag is STICKY for the gateway's
+ * lifetime; on `buildBatchedGithub` — the gateway `runTask` actually passes — it is
+ * `lastFetchFailed`, the most recent fetch. Where it over-reports, it can only turn a
+ * refusal into an "unverifiable", never a credit: both fall to the same `no_pr` verdict,
+ * so the cost is a forensic label, never a wrong dispatch decision.
+ */
 export function resolveAlreadySatisfied(
   claim: AlreadySatisfiedClaim,
   github: GitHub,
   taskId: string,
-): { number: number; url: string } | undefined {
+): AlreadySatisfiedResolution {
   const claimedNumber = prNumberFromRef(claim.ref);
-  if (claimedNumber === undefined) return undefined;
+  if (claimedNumber === undefined) return { outcome: "refuted", reason: "unparsable_ref" };
   const credited = github.findMergedByTrailer(taskId);
-  if (!credited || credited.number !== claimedNumber) return undefined;
-  return { number: credited.number, url: credited.url };
+  if (!credited) {
+    // THE COLLAPSE THIS FIXES: `null` is "no such PR" AND "the read failed". The gateway
+    // already knows which — ask it, instead of assuming the claim was false.
+    if (github.readFailed?.()) {
+      return { outcome: "unverifiable", reason: github.readFailureReason?.() ?? "unknown" };
+    }
+    return { outcome: "refuted", reason: "not_found" };
+  }
+  if (credited.number !== claimedNumber) {
+    return { outcome: "refuted", reason: "different_pr", creditedNumber: credited.number };
+  }
+  return { outcome: "verified", number: credited.number, url: credited.url };
 }
 
 /** The verdict + ledger payload for a terminal-SUCCESS worker whose ALREADY_SATISFIED claim
@@ -5477,7 +5542,8 @@ async function runTask(
       // an error of its own — it just falls straight through to the unchanged `no_pr` path,
       // exactly as if no claim had been made at all.
       const claim = parseAlreadySatisfied(fullText(impl));
-      const resolved = claim && resolveAlreadySatisfied(claim, github, taskId);
+      const resolution = claim ? resolveAlreadySatisfied(claim, github, taskId) : undefined;
+      const resolved = resolution?.outcome === "verified" ? resolution : undefined;
       if (claim && resolved) {
         const v = alreadySatisfiedVerdict(impl, costUsd, "implement", resolved);
         try {
@@ -5490,12 +5556,34 @@ async function runTask(
         say(`verdict: already_satisfied — credited via ${v.prUrl} · ${impl.numTurns} turns`);
         return { taskId, runId, prUrl: v.prUrl, merged: true, costUsd, verdict: "already_satisfied" };
       }
-      if (claim) {
+      if (claim && resolution?.outcome === "unverifiable") {
+        // NEITHER CREDIT NOR REFUSAL. The gateway could not answer, so the claim is not
+        // refuted — recording it as `already_satisfied.refused` is what turned a failed read
+        // into "the worker lied" and re-dispatched two already-shipped tasks. The verdict
+        // still falls to `no_pr` (an unverifiable claim can never be credited — that would be
+        // strictly worse than the defect), but the RECORD no longer asserts the claim was false.
+        log("already_satisfied.unverified", {
+          claimed_ref: claim.ref,
+          claimed_number: prNumberFromRef(claim.ref) ?? null,
+          reason: resolution.reason,
+        });
+        say(
+          `ALREADY_SATISFIED claim ("${claim.ref}") could NOT be verified — the board gateway read ` +
+            `failed (${resolution.reason}). Not refuted; falling to no_pr.`,
+        );
+      } else if (claim && resolution?.outcome === "refuted") {
         log("already_satisfied.refused", {
           claimed_ref: claim.ref,
           claimed_number: prNumberFromRef(claim.ref) ?? null,
+          // WHICH of the three things happened — the row is the forensic record and could not
+          // say before. `credited_number` rides along on the one reason that has a rival PR.
+          reason: resolution.reason,
+          ...(resolution.creditedNumber !== undefined ? { credited_number: resolution.creditedNumber } : {}),
         });
-        say(`ALREADY_SATISFIED claim ("${claim.ref}") did not verify against the board gateway — falling to no_pr`);
+        say(
+          `ALREADY_SATISFIED claim ("${claim.ref}") did not verify against the board gateway ` +
+            `(${resolution.reason}) — falling to no_pr`,
+        );
       }
       const v = noPrVerdict(impl, costUsd, "implement", commitCount);
       try {

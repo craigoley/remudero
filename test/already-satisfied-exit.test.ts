@@ -33,7 +33,7 @@ import type { Config } from "../src/lib/config.js";
 import type { ProbeExecResult } from "../src/lib/containment.js";
 import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import type { GitHub, PrRef } from "../src/lib/status.js";
+import { classifyGhFailure, type GitHub, type PrRef } from "../src/lib/status.js";
 import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/worker.js";
 
 /** Build a minimal WorkerResult; only the fields each test reads matter (mirrors
@@ -121,25 +121,25 @@ function creditingGithub(taskId: string, credited: PrRef | null): GitHub {
 test("resolveAlreadySatisfied: VERIFIED when the claimed number matches the gateway's own merged, trailer-anchored PR for this task", () => {
   const claim: AlreadySatisfiedClaim = { raw: "", ref: "#42" };
   const resolved = resolveAlreadySatisfied(claim, creditingGithub(TASK_ID, CREDIT_PR), TASK_ID);
-  assert.deepEqual(resolved, { number: 42, url: "https://github.com/acme/remudero/pull/42" });
+  assert.deepEqual(resolved, { outcome: "verified", number: 42, url: "https://github.com/acme/remudero/pull/42" });
 });
 
 test("resolveAlreadySatisfied: VERIFIED off a full pull URL claim too, not just a bare number", () => {
   const claim: AlreadySatisfiedClaim = { raw: "", ref: "https://github.com/acme/remudero/pull/42" };
   const resolved = resolveAlreadySatisfied(claim, creditingGithub(TASK_ID, CREDIT_PR), TASK_ID);
-  assert.deepEqual(resolved, { number: 42, url: "https://github.com/acme/remudero/pull/42" });
+  assert.deepEqual(resolved, { outcome: "verified", number: 42, url: "https://github.com/acme/remudero/pull/42" });
 });
 
 test("resolveAlreadySatisfied: REFUSED when the claimed number does not match what the gateway finds — a worker cannot cite ANY merged PR, only the credited one", () => {
   const claim: AlreadySatisfiedClaim = { raw: "", ref: "#999" };
   const resolved = resolveAlreadySatisfied(claim, creditingGithub(TASK_ID, CREDIT_PR), TASK_ID);
-  assert.equal(resolved, undefined);
+  assert.deepEqual(resolved, { outcome: "refuted", reason: "different_pr", creditedNumber: 42 });
 });
 
 test("resolveAlreadySatisfied: REFUSED when the gateway finds NO merged, trailer-anchored PR for this task at all", () => {
   const claim: AlreadySatisfiedClaim = { raw: "", ref: "#42" };
   const resolved = resolveAlreadySatisfied(claim, creditingGithub(TASK_ID, null), TASK_ID);
-  assert.equal(resolved, undefined);
+  assert.deepEqual(resolved, { outcome: "refuted", reason: "not_found" });
 });
 
 test("resolveAlreadySatisfied: REFUSED on a malformed ref naming no PR number — never reaches the gateway with garbage", () => {
@@ -155,7 +155,7 @@ test("resolveAlreadySatisfied: REFUSED on a malformed ref naming no PR number �
     prBody: () => undefined,
   };
   const resolved = resolveAlreadySatisfied(claim, github, TASK_ID);
-  assert.equal(resolved, undefined);
+  assert.deepEqual(resolved, { outcome: "refuted", reason: "unparsable_ref" });
   assert.equal(consulted, false, "an unparseable ref must never even reach the board gateway");
 });
 
@@ -335,6 +335,11 @@ test("BEHAVIORAL: a real runTask() run whose ALREADY_SATISFIED claim does NOT ve
     const refusal = ledger.find((l) => l.step === "already_satisfied.refused");
     assert.equal(refusal?.claimed_ref, "#999");
     assert.equal(refusal?.claimed_number, 999);
+    // THE FORENSIC RECORD NAMES ITS CAUSE (W1-T119 applied to rung (c)): before this, the row
+    // carried task/ref/number and NO reason, so "you cited the wrong PR" and "the read failed"
+    // were indistinguishable on disk. #999 loses to the credited #42, and the row says so.
+    assert.equal(refusal?.reason, "different_pr", "a refusal must say WHICH of the three things happened");
+    assert.equal(refusal?.credited_number, 42, "and name the PR that actually holds the trailer");
     const verdictLine = ledger.find((l) => l.step === "verdict");
     assert.equal(verdictLine?.verdict, "no_pr");
   } finally {
@@ -396,6 +401,78 @@ test("BEHAVIORAL: a real runTask() run whose worktree teardown fails on the alre
   } finally {
     // The locked worktree's admin metadata under repoDir/.git prevents nothing here —
     // filesystem removal is unconditional regardless of git's own lock bookkeeping.
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("BEHAVIORAL: a real runTask() run whose board gateway READ FAILS records already_satisfied.unverified with its reason — never a refusal", async () => {
+  // THE $23.34 CASE, end to end. Six `already_satisfied.refused` rows exist in the ledger union;
+  // replayed later, three of four resolved correctly (W1-T377→#1386, W1-T378→#1391,
+  // W1-T412→#1508). The workers were right and the read could not answer — but the row said the
+  // claim was false, and two already-shipped tasks were re-dispatched for it.
+  const root = mkdtempSync(join(tmpdir(), "already-satisfied-unverifiable-root-"));
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(planPath, ALREADY_SATISFIED_PLAN);
+  const config: Config = { claudeBin: "/bin/true", root };
+  gitFixture(root);
+
+  // A gateway whose read genuinely FAILS, classified the way the production one does.
+  let failed = false;
+  let reason: ReturnType<typeof classifyGhFailure> | undefined;
+  const unreadable: GitHub = {
+    prByRef: () => null,
+    findMergedByTrailer: () => {
+      failed = true;
+      reason = classifyGhFailure(1, "dial tcp: connect: network is unreachable", undefined);
+      return null;
+    },
+    headRefName: () => undefined,
+    prBody: () => undefined,
+    readFailed: () => failed,
+    readFailureReason: () => reason,
+  };
+
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const spawn: typeof spawnWorker = async (args) => {
+    spawnCalls.push(args);
+    if (spawnCalls.length === 1) return result({ sessionId: "s-recon", text: RECON_TEXT });
+    // A TRUE claim — the PR really is merged; the gateway simply cannot be reached to confirm it.
+    return result({ sessionId: "s-implement", text: "REPORT\nALREADY_SATISFIED: #42\n" });
+  };
+
+  try {
+    const res = await withLiveWritesAllowed(() =>
+      runTask("T-ALREADY-SATISFIED", {
+        skipGitSync: true,
+        planPath,
+        config,
+        github: unreadable,
+        spawn,
+        containmentExec: holdingContainmentExec,
+        isolationExec: cleanIsolationExec,
+      }),
+    );
+
+    assert.equal(res.verdict, "no_pr", "an unverifiable claim is still never CREDITED — that would be worse");
+    assert.equal(res.merged, false);
+
+    const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
+
+    const unverified = ledger.find((l) => l.step === "already_satisfied.unverified");
+    assert.ok(unverified, "the run recorded that it COULD NOT CHECK");
+    assert.equal(unverified?.claimed_ref, "#42");
+    assert.equal(unverified?.claimed_number, 42);
+    assert.equal(unverified?.reason, "transport", "and why — threaded from classifyGhFailure, not guessed");
+
+    assert.equal(
+      ledger.find((l) => l.step === "already_satisfied.refused"),
+      undefined,
+      "a read that FAILED must never be recorded as a claim that was FALSE — the whole defect",
+    );
+  } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
