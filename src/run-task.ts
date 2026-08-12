@@ -449,6 +449,7 @@ import {
   type DeriveDeps,
   type GitHub,
   type GhFailureReason,
+  preferImplementingPr,
   type PrRef,
   type StatusProjection,
 } from "./lib/status.js";
@@ -4113,19 +4114,30 @@ export function resolveAlreadySatisfied(
 ): AlreadySatisfiedResolution {
   const claimedNumber = prNumberFromRef(claim.ref);
   if (claimedNumber === undefined) return { outcome: "refuted", reason: "unparsable_ref" };
-  const credited = github.findMergedByTrailer(taskId);
-  if (!credited) {
-    // THE COLLAPSE THIS FIXES: `null` is "no such PR" AND "the read failed". The gateway
-    // already knows which — ask it, instead of assuming the claim was false.
-    if (github.readFailed?.()) {
-      return { outcome: "unverifiable", reason: github.readFailureReason?.() ?? "unknown" };
-    }
-    return { outcome: "refuted", reason: "not_found" };
+  // W1-T441: ask for EVERY merged PR carrying the trailer, not just the newest. Membership needs
+  // no file reads at all — the claim is either among the trailered PRs or it is not — which is
+  // why this half of the fix is free while rung (c)'s ATTRIBUTION half is not. Falls back to the
+  // single-answer method when a gateway does not implement the wider one.
+  const all = github.findMergedByTrailerAll?.(taskId);
+  const credited = all === undefined ? github.findMergedByTrailer(taskId) : undefined;
+  const candidates: PrRef[] = all ?? (credited ? [credited] : []);
+
+  if ((all === null || (all === undefined && !credited)) && github.readFailed?.()) {
+    // The gateway could not answer. Unchanged from #1631: an unreadable read is not a false claim.
+    return { outcome: "unverifiable", reason: github.readFailureReason?.() ?? "unknown" };
   }
-  if (credited.number !== claimedNumber) {
-    return { outcome: "refuted", reason: "different_pr", creditedNumber: credited.number };
-  }
-  return { outcome: "verified", number: credited.number, url: credited.url };
+  if (candidates.length === 0) return { outcome: "refuted", reason: "not_found" };
+
+  // THE FIX: a worker citing the PR that IMPLEMENTED the task is verified even when a later
+  // `chore(plan): close ... as already-satisfied` PR carries the same trailer and is newer.
+  const match = candidates.find((pr) => pr.number === claimedNumber);
+  if (match) return { outcome: "verified", number: match.number, url: match.url };
+
+  // Genuinely not among them — still refused, and the row names the PR the gateway would credit.
+  // `preferImplementingPr` picks WHICH rival to name; with one candidate it is that candidate,
+  // so the single-hit message is byte-identical to before.
+  const rival = preferImplementingPr(candidates, (url) => github.changedFiles?.(url)) ?? candidates[0];
+  return { outcome: "refuted", reason: "different_pr", creditedNumber: rival.number };
 }
 
 /** The verdict + ledger payload for a terminal-SUCCESS worker whose ALREADY_SATISFIED claim

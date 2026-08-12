@@ -311,6 +311,24 @@ export interface GitHub {
   /** Find a MERGED PR whose body contains `Remudero-Task: <taskId>`. null if none. */
   findMergedByTrailer(taskId: string): PrRef | null;
   /**
+   * EVERY merged PR carrying `taskId`'s anchored trailer, newest-first (W1-T441) — the whole
+   * candidate set {@link findMergedByTrailer} discards by returning only the first.
+   *
+   * WHY THE SINGLE ANSWER IS SYSTEMATICALLY THE WRONG ONE. The already-satisfied CLOSE path
+   * manufactures duplicates: each close merges a NEWER trailer-bearing PR that displaces the
+   * implementation in every later lookup. MEASURED over all 1,172 merged PR bodies (anchored
+   * `^Remudero-Task: <id>$`): 496 distinct ids carry a trailer and SIXTEEN are carried by more
+   * than one — W1-T254 by six, where #720 is the implementation (`fix(sweep)…`) and the other
+   * five change `DECISIONS.md` alone.
+   *
+   * Returns null if the read FAILED (→ readFailed()/W1-T119), [] on a genuine no-such-PR — the
+   * two must stay distinguishable, exactly as {@link findMergedByHeadBranch}'s own doc insists.
+   * OPTIONAL (added after every pre-existing {@link GitHub} fixture was written) so no existing
+   * implementer breaks — omitted ⇒ callers fall back to {@link findMergedByTrailer}'s single
+   * answer and behave exactly as they did before.
+   */
+  findMergedByTrailerAll?(taskId: string): PrRef[] | null;
+  /**
    * CORROBORATION for an empty {@link findMergedByTrailer} (W1-T256): enumerate MERGED PRs
    * whose HEAD BRANCH is `run-<taskId>-*` — the deterministic, ownership-encoding signal that
    * is NOT the eventually-consistent BODY full-text index rung (c) relies on. An exit-0 EMPTY
@@ -1469,6 +1487,61 @@ function creditsByAnchoredTrailer(
  * DELETIONS COUNT (the #1465 lesson): whatever the caller's `changedFiles` reports as changed is
  * tested, so a PR that DELETES a `src/` file while editing plan files is not plan-only.
  */
+/** `ghGateway.findMergedByTrailerAll`'s fetch bound (W1-T441). The measured worst case is six
+ *  (W1-T254); this leaves an order of magnitude of headroom without becoming an unbounded list. */
+export const TRAILER_ALL_LIMIT = 50;
+
+/**
+ * BOOKKEEPING-ONLY (W1-T441): a changeset that filed, closed or recorded a task rather than
+ * building it. Deliberately WIDER than {@link isPlanOnlyChangeset}, and the difference is the
+ * whole point — the already-satisfied close path writes `DECISIONS.md`, which is NOT in plan
+ * scope, so `isPlanOnlyChangeset` reads those closes as real work.
+ *
+ * MEASURED across the 16 task ids carried by more than one merged PR: `isPlanOnlyChangeset`
+ * isolates the implementation in 3 of 16 and in ZERO of the five generator sets (W1-T12a,
+ * W1-T254, W1-T262, W1-T7, W1-T99 — the ones with a `DECISIONS.md`-only close). This predicate
+ * isolates all five.
+ */
+export function isBookkeepingOnlyChangeset(files: readonly string[]): boolean {
+  return files.length > 0 && files.every((f) => isInPlanScope(f) || f === "DECISIONS.md");
+}
+
+/**
+ * Prefer the merged PR that IMPLEMENTED `taskId` over a later bookkeeping close (W1-T441).
+ *
+ * ONE LAYER, AND NEWEST-WINS SURVIVES AS THE FALLBACK: drop candidates whose changeset is
+ * bookkeeping-only ({@link isBookkeepingOnlyChangeset}); if that would empty the set, keep it
+ * whole. So this can only ever NARROW, and when it does not discriminate the caller's existing
+ * newest-first order stands untouched — `corroborateOpenByBranch`'s "newest wins on a multi-hit"
+ * is NOT repealed here; its reasoning is about OPEN branches and this is the MERGED trailer path.
+ *
+ * A SECOND LAYER (prefer a candidate touching `src/`) WAS BUILT, MEASURED AND REMOVED: over the
+ * 16 multi-hit ids it changes the chosen PR in ZERO of them, because wherever it would have
+ * discriminated the implementation was already the newest. A layer with no case that needs it is
+ * untestable weight — the falsifier that should have caught its removal stayed green, which is
+ * how it was found.
+ *
+ * MEASURED over the 16 multi-hit ids: this isolates 8, including 5/5 of the generator sets
+ * (W1-T12a, W1-T254, W1-T262, W1-T7, W1-T99 — the ones with a `DECISIONS.md`-only close). The
+ * rest fall through to newest-first, and they are sets where BOTH PRs are genuine work — there
+ * is no "the implementation" to prefer there.
+ *
+ * `changedFiles` is a per-candidate READ, so this runs only on a genuine multi-hit (16 of 496
+ * ids) and never on the single-candidate path. A candidate whose files cannot be read is KEPT,
+ * never dropped: an unreadable changeset is missing information, not evidence of bookkeeping.
+ */
+export function preferImplementingPr(
+  candidates: readonly PrRef[],
+  changedFiles: (prUrl: string) => readonly string[] | undefined,
+): PrRef | undefined {
+  if (candidates.length <= 1) return candidates[0];
+  const notBookkeeping = candidates.filter((pr) => {
+    const f = changedFiles(pr.url);
+    return f === undefined || !isBookkeepingOnlyChangeset(f);
+  });
+  return (notBookkeeping.length > 0 ? notBookkeeping : candidates)[0];
+}
+
 export function isPlanOnlyChangeset(files: readonly string[]): boolean {
   return files.length > 0 && files.every((f) => isInPlanScope(f));
 }
@@ -2353,6 +2426,19 @@ export function ghGateway(owner: string, repo: string, opts: { exec?: (args: str
       ]);
       return list && list.length > 0 ? list[0] : null;
     },
+    findMergedByTrailerAll(taskId) {
+      // W1-T441: the SAME fuzzy body search, widened past `--limit 1`. Unlike the batched twin
+      // below this DOES cost a wider fetch, which is why it stays a separate method rather than
+      // changing what `findMergedByTrailer` returns: existing callers keep the one-hit answer and
+      // pay nothing new. TRAILER_ALL_LIMIT bounds it — a task with more than that many merged
+      // trailer-bearing PRs has a bigger problem than attribution.
+      const list = tryJson<PrRef[]>([
+        "pr", "list", "--repo", slug, "--state", "merged",
+        "--search", `"Remudero-Task: ${taskId}" in:body`,
+        "--json", "number,url,state", "--limit", String(TRAILER_ALL_LIMIT),
+      ]);
+      return list ?? null;
+    },
     findMergedByHeadBranch(taskId) {
       // Merged PRs whose HEAD BRANCH is `run-<taskId>-*` (W1-T256). `head:` is a
       // STRUCTURED ref qualifier — it matches the branch name, NOT the body
@@ -2749,6 +2835,15 @@ export function buildBatchedGithub(
       const anchored = new RegExp(`^Remudero-Task:\\s*${escapeRegExp(taskId)}\\s*$`, "m");
       const hit = index().mergedNewestFirst.find((p) => anchored.test(p.body ?? ""));
       return hit ? asRef(hit) : null;
+    },
+    findMergedByTrailerAll(taskId) {
+      // W1-T441: NO ADDITIONAL FETCH. `mergedNewestFirst` already carries every merged PR's body
+      // from the ONE batched read, so returning every anchored match is a filter over data in
+      // hand — the same `.find` this gateway already ran, widened to `.filter`. null on a fetch
+      // failure (→ readFailed()/W1-T119), never [] — the failure/absence distinction.
+      const anchored = new RegExp(`^Remudero-Task:\\s*${escapeRegExp(taskId)}\\s*$`, "m");
+      if (lastFetchFailed) return null;
+      return index().mergedNewestFirst.filter((p) => anchored.test(p.body ?? "")).map(asRef);
     },
     findMergedByHeadBranch(taskId) {
       // W1-T257: client-side head-ref match from the SAME single fetch — zero extra `gh` calls,
