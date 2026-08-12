@@ -5,11 +5,15 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 import {
+  checkCommitMessage,
   commitlintStep,
   CONVENTIONAL_LIMITS,
+  CONVENTIONAL_RULE_COVERAGE,
+  emitterChecksStep,
   normalizeSubjectCase,
   shapeCommitMessage,
   spawnFailureDetail,
+  splitRangeCommitMessages,
   typecheckStep,
   wrapBodyLines,
 } from "../src/lib/commit-message.js";
@@ -224,4 +228,106 @@ test("typecheckStep routes a never-started child to SPAWN FAILURE, not a type ve
   assert.equal(res.ok, false);
   assert.match(res.detail, /SPAWN FAILURE/);
   assert.match(res.detail, /EACCES/);
+});
+
+// ── W1-T416: emitter-checks certifies commit messages commitlint rejects ────────────
+//
+// `checkCommitMessage` used to implement THREE of `@commitlint/config-conventional`'s TEN
+// error-level rules — header-max-length, subject-case, body-max-line-length — so
+// `emitterChecksStep` could report PASS on a commit `commitlintStep` reported FAIL on, in
+// the SAME `runPreflight` steps array, over the SAME range, in the same run. The durable
+// fix is not a hand-added rule (which can drift again the moment config-conventional
+// changes) but this corpus: every entry driven through BOTH the real CLI and
+// `checkCommitMessage`, asserting they AGREE on pass/fail — a bump to config-conventional
+// that changes a rule fails HERE rather than silently on some future commit.
+
+/** One entry per `@commitlint/config-conventional` rule named in CONVENTIONAL_RULE_COVERAGE,
+ *  plus one VALID control — required so agreement is not trivially satisfied by a checker
+ *  that rejects everything. Each `rule` names the rule the message is chosen to exercise;
+ *  `valid: true` marks the one control message that must PASS both sides. */
+const EMITTER_COMMITLINT_PARITY: Array<{ rule: string; message: string; valid?: boolean }> = [
+  { rule: "valid", message: "feat(serve): add fuzzy search to the board\n", valid: true },
+  { rule: "header-max-length", message: `feat(serve): ${"x".repeat(100)}\n` },
+  { rule: "header-trim", message: "fix(scope): do the thing \n" },
+  { rule: "type-empty", message: "just fixing things\n" },
+  { rule: "type-enum", message: "wip: tidy up\n" },
+  { rule: "subject-empty", message: "fix(scope): \n" },
+  { rule: "subject-case", message: "feat(serve): FIND layer\n" },
+  { rule: "subject-full-stop", message: "fix(scope): do the thing.\n" },
+  { rule: "body-max-line-length", message: `fix(scope): ok\n\n${"y".repeat(120)}\n` },
+  // Incidental — NOT re-implemented, caught by a different check (CONVENTIONAL_RULE_COVERAGE).
+  { rule: "type-case", message: "Feat(serve): do thing\n" },
+  { rule: "footer-max-line-length", message: `chore(plan): file a task\n\nRefs: ${"x".repeat(110)}\n` },
+];
+
+test("EMITTER_COMMITLINT_PARITY: the corpus covers every rule CONVENTIONAL_RULE_COVERAGE names, plus a valid control", () => {
+  const covered = new Set(EMITTER_COMMITLINT_PARITY.map((c) => c.rule));
+  for (const entry of CONVENTIONAL_RULE_COVERAGE) {
+    assert.ok(covered.has(entry.rule), `corpus is missing a case for ${entry.rule}`);
+  }
+  assert.ok(EMITTER_COMMITLINT_PARITY.some((c) => c.valid), "corpus must contain at least one VALID message");
+});
+
+test("EMITTER_COMMITLINT_PARITY: checkCommitMessage and the real commitlint CLI agree on every corpus entry", () => {
+  for (const { rule, message, valid } of EMITTER_COMMITLINT_PARITY) {
+    const cliOk = lint(message).status === 0;
+    const emitterOk = checkCommitMessage(message).length === 0;
+    if (valid) {
+      assert.equal(cliOk, true, `control message for ${rule} must itself be valid per the real CLI`);
+    }
+    assert.equal(
+      emitterOk,
+      cliOk,
+      `disagreement on ${JSON.stringify(rule)}: commitlint ${cliOk ? "PASS" : "FAIL"}, checkCommitMessage ${
+        emitterOk ? "PASS" : "FAIL"
+      } — ${JSON.stringify(message)}`,
+    );
+  }
+});
+
+// ── W1-T416: the range half — an empty-after-trim message must not vanish before either
+// judgement is reached ──────────────────────────────────────────────────────────────
+
+test("splitRangeCommitMessages: keeps a message that trims to empty rather than dropping it", () => {
+  // `%x00%B` prefixes every commit's body with a NUL, so one commit whose body is nothing
+  // but whitespace produces `\0   \n` — the leading NUL is the split artifact, `   \n` is
+  // the (whitespace-only) message itself.
+  assert.deepEqual(splitRangeCommitMessages("\0   \n"), [""]);
+});
+
+test("splitRangeCommitMessages: strips the leading split artifact, never reporting a phantom extra message", () => {
+  assert.deepEqual(splitRangeCommitMessages("\0feat(x): one\n\0feat(x): two\n"), ["feat(x): one", "feat(x): two"]);
+});
+
+test("splitRangeCommitMessages: a blank line inside a body is never mistaken for a message boundary", () => {
+  const [only] = splitRangeCommitMessages("\0feat(x): one\n\nsecond paragraph\n");
+  assert.equal(only, "feat(x): one\n\nsecond paragraph");
+});
+
+test("splitRangeCommitMessages: a genuinely empty range (zero commits) returns zero messages, not one phantom empty message", () => {
+  assert.deepEqual(splitRangeCommitMessages(""), []);
+});
+
+test("an empty commit message fails emitterChecksStep — neither half catches it alone", () => {
+  // Reproduces the escape design (iii) argues cannot be split into two PRs: keeping the
+  // filter (old readRangeCommitMessages) drops the message before any rule sees it; keeping
+  // the filter removed but the OLD three-rule checkCommitMessage would let a zero-length
+  // header pass header-max-length, treat the empty header as the subject, and skip
+  // subject-case on the `subject !== ""` guard — zero violations either way. Both fixes
+  // together are required, which is why this task is one PR.
+  const spawn = ((file: string, args: string[]) => {
+    if (args.some((a) => a === "log")) return { status: 0, stdout: "\0   \n", stderr: "" };
+    throw new Error(`unexpected spawn: ${file} ${args.join(" ")}`);
+  }) as Parameters<typeof emitterChecksStep>[2];
+  const result = emitterChecksStep(REPO_ROOT, { from: "origin/main", to: "HEAD" }, spawn);
+  assert.equal(result.ok, false, "an empty-after-trim commit message must FAIL emitter-checks, not vanish");
+  assert.match(result.detail, /type-empty|subject-empty/);
+});
+
+test("CONVENTIONAL_RULE_COVERAGE: records TEN rules as data, matching @commitlint/config-conventional's error-level rule count", () => {
+  assert.equal(CONVENTIONAL_RULE_COVERAGE.length, 10);
+  const checked = CONVENTIONAL_RULE_COVERAGE.filter((r) => r.status === "checked").length;
+  const incidental = CONVENTIONAL_RULE_COVERAGE.filter((r) => r.status === "incidental").length;
+  assert.equal(checked, 8, "eight rules are checked directly by checkCommitMessage");
+  assert.equal(incidental, 2, "two rules (type-case, footer-max-line-length) are caught incidentally, not re-implemented");
 });
