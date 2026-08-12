@@ -650,18 +650,59 @@ interface StaticLatchDef {
 }
 
 /** Ordered by operational urgency — also the order rows render in (most-actionable first). */
+/**
+ * What a DEPLOY_FAILED latch actually MEANS, branched on the `kind` the deployer already wrote.
+ *
+ * THE TWO KINDS DID DIFFERENT THINGS AND MUST NOT SHARE A SENTENCE. `DeployFailureKind`
+ * (`deployer.ts`) is exactly `dirty-tree-conflict | health-check-rollback`, and `deps.resetHard` has
+ * exactly ONE call site — the health-check arm of `runDeployCycle`, which resets and then
+ * `kickstart`s. The dirty-tree arm returns immediately after `deps.alert`, BEFORE `pullFf` is
+ * reached: nothing is pulled, nothing is reset, and the daemon is still on the head it already had.
+ * Telling that operator the checkout "was rolled back" and is "running the PRIOR head" is false
+ * twice over — there is no prior head for it to be on — and it sends the diagnosis toward a deploy
+ * that ran when the real situation is uncommitted files in the install checkout.
+ *
+ * A MISSING OR UNRECOGNISED `kind` RENDERS NEITHER SENTENCE. Asserting one of two incompatible
+ * facts on no evidence is the defect being fixed, not a fallback for it — so an alert file from an
+ * older build degrades to naming what is known and explicitly withholding the rest. This mirrors
+ * `realDeployDeps.lastFailedKind`, which already answers `undefined` for exactly this input and says
+ * why in its own comment: "absent/legacy/corrupt ⇒ reason not recorded, never a guess".
+ *
+ * THE DEPLOYER'S MESSAGE IS APPENDED VERBATIM ON EVERY ARM. For a dirty-tree abort it carries the
+ * conflicting paths as PROSE (`… conflict with the fast-forward: <paths>`) — that list is the single
+ * most actionable thing on the row, it already reaches the operator today, and no rewrite of the
+ * clause in front of it may drop or truncate it.
+ */
+export function deployFailedConsequence(json: Record<string, unknown> | null): string {
+  const kind = typeof json?.kind === "string" ? json.kind : undefined;
+  const failedHead = typeof json?.failedHead === "string" ? json.failedHead.slice(0, 12) : undefined;
+  const rawMessage = typeof json?.message === "string" ? json.message : undefined;
+  // The old default asserted a health-check failure, which is the same unfounded claim one level
+  // down — a message-less alert says only that a deploy failed.
+  const message = rawMessage ?? "no message recorded";
+  const detail = `(${message}${failedHead ? `; failed head ${failedHead}` : ""})`;
+
+  if (kind === "dirty-tree-conflict") {
+    return (
+      `the fast-forward was REFUSED and nothing was deployed — the checkout was NOT pulled or reset ` +
+      `and the daemon is still on the head it already had; the named files are uncommitted local ` +
+      `changes in the install checkout ${detail}`
+    );
+  }
+  if (kind === "health-check-rollback") {
+    return `the checkout was rolled back — the daemon is running the PRIOR head ${detail}`;
+  }
+  return (
+    `a deploy failed and the alert does not record WHICH kind — it may have been rolled back or ` +
+    `refused before pulling; check the deploy.* ledger rows rather than assuming either ${detail}`
+  );
+}
+
 const STATIC_LATCHES: readonly StaticLatchDef[] = [
   {
     name: "DEPLOY_FAILED",
     path: deployFailedAlertPath,
-    consequence: (json) => {
-      const message = typeof json?.message === "string" ? json.message : "a deploy failed its health-check";
-      const failedHead = typeof json?.failedHead === "string" ? json.failedHead.slice(0, 12) : undefined;
-      return (
-        `the checkout was rolled back — the daemon is running the PRIOR head (${message}` +
-        `${failedHead ? `; failed head ${failedHead}` : ""})`
-      );
-    },
+    consequence: (json) => deployFailedConsequence(json),
     // THE DEPLOYER'S OWN RETRY TEST, REUSED RATHER THAN RESTATED. `decideDeployTrigger` refuses an
     // auto-retry only while `originMain === lastFailedHead` (its `alreadyFailed`), so the moment
     // origin/main moves past the failed head the supervisor WILL retry on its own and the operator
