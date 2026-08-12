@@ -125,7 +125,15 @@ test("buildStatusBoard: LATCHES — a seeded state/DEPLOY_FAILED marker is impos
   const seededAt = new Date(NOW_MS - 17 * 3_600_000).toISOString(); // 17h ago, matching the real incident
   writeFileSync(
     deployFailedAlertPath(root),
-    JSON.stringify({ message: "health-check failed: crash-loop", failedHead: "d".repeat(40), at: seededAt }),
+    // `kind` matches what `realDeployDeps.alert` actually writes — this fixture predated the field
+    // and so exercised the "kind not recorded" arm while asserting the rollback wording. The
+    // message it carries is a health-check failure, so that is the kind it should have carried.
+    JSON.stringify({
+      message: "health-check failed: crash-loop",
+      failedHead: "d".repeat(40),
+      kind: "health-check-rollback",
+      at: seededAt,
+    }),
   );
 
   const model = buildStatusBoard(root, join(tmpdir(), "does-not-exist.ndjson"), baseDeps());
