@@ -473,6 +473,12 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // step (retro.ts's `MUTATION_GATE_VERDICT_STEP`), before anything writes it in production —
   // see that constant's doc for why the write call site itself is a follow-up, not this change.
   "mutation.ratchet_verdict",
+  // W1-T435: lib/sweep.ts's `operatorVerdictEvidence` (run-task.ts's `buildOpenPrViews` calls it
+  // per open PR) reads `operator_feedback` lines to quote a wrong/needs-follow-up verdict's
+  // steering note into the next fix-rung dispatch — a DECIDING read (it drives the
+  // `blocked-fixable` re-arm), not display-only, so rotation must retain it the moment that
+  // consumer exists (the #977/W1-T240 class this task's own rationale names).
+  "operator_feedback",
 ]);
 
 /** Steps matched by PREFIX rather than enumerated — currently only `deploy.*` (`deploy.skip`,

@@ -436,14 +436,23 @@ export function renderShellHtml(
     padding: 0.22rem 0.5rem; overflow: hidden;
   }
   .row > * { flex-shrink: 0; }
-  .row:has(form), .row:has(.btn-row) { flex-wrap: wrap; overflow: visible; align-items: baseline; }
+  .row:has(form), .row:has(.btn-row), .row:has(.drain-feedback) { flex-wrap: wrap; overflow: visible; align-items: baseline; }
   .row .task-id { font-family: var(--font-mono); font-weight: 600; }
   .row .detail {
     color: var(--text-dim); font-size: 0.875rem; flex: 1 1 auto; min-width: 0; flex-shrink: 1;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
-  .row:has(form) .detail, .row:has(.btn-row) .detail {
+  .row:has(form) .detail, .row:has(.btn-row) .detail, .row:has(.drain-feedback) .detail {
     flex-basis: 100%; white-space: normal; overflow: visible; text-overflow: clip;
+  }
+  /* W1-T435: the RECENT feed's one-tap operator verdict + steering note -- wraps onto its own
+     full-width line below the detail text (the SAME "flex-basis: 100%" treatment a form/btn-row
+     already gets above), so it never forces the row into horizontal overflow at a narrow viewport. */
+  .drain-feedback { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; margin-top: 0.15rem; }
+  .drain-feedback-note {
+    flex: 1 1 160px; min-width: 120px; max-width: 100%; font: inherit; font-size: 0.8rem;
+    resize: vertical; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px;
+    padding: 0.15rem 0.35rem;
   }
   /* ANOMALY FLAG (W1-T183): a per-phase elapsed threshold exceeded -- never carried by colour
      alone, always paired with the "⚠ long-running" text+glyph marker (nowRowHtml/tickElapsed). */
@@ -1245,6 +1254,10 @@ export function renderShellHtml(
     // leaving the operator to guess whether a live daemon needs a restart to see it.
     "/v1/policy/daily-cost-ceiling": { kind: "done", text: "Daily cost ceiling updated — effective on the daemon's next tick, no restart needed." },
     "/v1/policy/daily-cost-ceiling/clear": { kind: "done", text: "Daily cost ceiling override cleared — reverted to the committed default, effective on the daemon's next tick, no restart needed." },
+    // W1-T435: the ledger write (appendPanelLedger) completes before the route replies -- "done" is
+    // accurate. A wrong/needs-follow-up verdict's note also steers the fix rung's next attempt
+    // (operatorVerdictEvidence, lib/sweep.ts); a good verdict is recorded for the learning limb only.
+    "/v1/drain/feedback": { kind: "done", text: "Feedback recorded. A wrong/needs-follow-up verdict's note also steers the next fix attempt." },
   };
   // Long enough to read a two-line message without hunting for it, short enough that it never
   // becomes furniture the operator stops seeing. Cleared by the next write either way.
@@ -2462,6 +2475,30 @@ export function renderShellHtml(
     return \` · <span class="recent-spend">spend: \${costLabel(e.costUsd)}\${turns}</span>\`;
   }
 
+  // W1-T141/W1-T435: the ONE-TAP OPERATOR VERDICT, on the RECENT feed's own terminal-outcome
+  // rows -- "merged"/"verdict" (a review-derived merge or a classified blocked outcome, board.ts's
+  // classifyLine) and "escalated" -- never a mid-rung row (fix/spend/run-started/run-refused),
+  // which has no outcome yet for an operator to judge. \`drainRunId\` has no live producer of its
+  // own (W1-T435 is entirely local-file: the ledger + plan/questions.ndjson, never a new
+  // board.ts field) -- \`taskId:ts\` is this ONE feed event's own natural key (the SAME pair
+  // \`renderRecent\`'s row \`key\` already uses), stable and unique per row without widening
+  // RecentActivityEntry's shape.
+  const DRAIN_FEEDBACK_VERBS = new Set(["merged", "verdict", "escalated"]);
+  const DRAIN_FEEDBACK_VERDICT_LABEL = { good: "good", wrong: "wrong", "needs-follow-up": "needs follow-up" };
+  function recentFeedbackHtml(e) {
+    if (!DRAIN_FEEDBACK_VERBS.has(e.verb)) return "";
+    const drainRunId = \`\${e.taskId}:\${e.ts}\`;
+    const btns = Object.entries(DRAIN_FEEDBACK_VERDICT_LABEL)
+      .map(([verdict, label]) => \`<button type="button" class="drain-feedback-btn"\${writeGateAttrs()} data-verdict="\${verdict}">\${escapeHtml(label)}</button>\`)
+      .join("");
+    return (
+      \`<span class="drain-feedback" data-task-id="\${escapeHtml(e.taskId)}" data-drain-run-id="\${escapeHtml(drainRunId)}">\` +
+      \`\${btns}\` +
+      \`<textarea class="drain-feedback-note" rows="1" placeholder="steering note (optional) -- quoted verbatim into the next fix attempt"\${writeGateAttrs()}></textarea>\` +
+      \`</span>\`
+    );
+  }
+
   function recentRowHtml(e) {
     const key = RECENT_BADGE_KEY[e.verb] ?? "queued";
     const verbLabel = RECENT_VERB_LABEL[e.verb] ?? e.verb;
@@ -2475,6 +2512,7 @@ export function renderShellHtml(
       \`\${recentSpendHtml(e)}\${recentPrLinkHtml(e)}\${unavailable} · \` +
       \`<time class="recent-ts" datetime="\${escapeHtml(e.ts)}">\${escapeHtml(formatAgo(e.ts))}</time>\` +
       \`</span>\` +
+      \`\${recentFeedbackHtml(e)}\` +
       rowChevronHtml()
     );
   }
@@ -3739,6 +3777,35 @@ export function renderShellHtml(
   // the generic bail-out (existing NEEDS ME approve/answer controls and PR links keep working
   // unchanged). Only then: a plain click anywhere else on a task row toggles ITS OWN card. ──────
   document.querySelector("main").addEventListener("click", (e) => {
+    // W1-T435: the RECENT feed's one-tap operator verdict + steering note. Matched FIRST (like
+    // every other in-row control above) -- a click on the note textarea itself is not a button/
+    // link/input the generic bail-out below would catch, so without this branch it would fall
+    // through to the plain-row-toggle at the bottom and collapse/expand the card mid-typing.
+    // The success/failure NARRATIVE is the shared write-ack banner (postJson's own showWriteAck/
+    // showWriteError, WRITE_ACK's "/v1/drain/feedback" entry) -- this handler only manages the
+    // per-row button-disable state, never a second acknowledgement surface.
+    const feedbackWrap = e.target.closest(".drain-feedback");
+    if (feedbackWrap) {
+      const feedbackBtn = e.target.closest(".drain-feedback-btn");
+      if (feedbackBtn && hasWriteScope && !feedbackBtn.disabled) {
+        const taskId = feedbackWrap.dataset.taskId;
+        const drainRunId = feedbackWrap.dataset.drainRunId;
+        const verdict = feedbackBtn.dataset.verdict;
+        const noteEl = feedbackWrap.querySelector(".drain-feedback-note");
+        const note = noteEl && noteEl.value.trim() ? noteEl.value.trim() : undefined;
+        feedbackWrap.querySelectorAll(".drain-feedback-btn").forEach((b) => (b.disabled = true));
+        postJson("/v1/drain/feedback", { taskId, verdict, drainRunId, ...(note ? { note } : {}) })
+          .then((res) => {
+            if (res.ok && noteEl) noteEl.disabled = true;
+            // a failed write (401/404/500) re-arms the buttons so a transient failure isn't a dead end.
+            if (!res.ok) feedbackWrap.querySelectorAll(".drain-feedback-btn").forEach((b) => (b.disabled = false));
+          })
+          .catch(() => {
+            feedbackWrap.querySelectorAll(".drain-feedback-btn").forEach((b) => (b.disabled = false));
+          });
+      }
+      return; // never let a click anywhere in this control (including the textarea) toggle the row
+    }
     const depBtn = e.target.closest(".card-dep-link");
     if (depBtn) { focusAndExpandTask(depBtn.dataset.depId); return; }
     const journeyTaskLink = e.target.closest(".journey-task-link");
