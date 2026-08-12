@@ -199,6 +199,7 @@ import {
   currentBranch,
   DEFAULT_BIND_ATTEMPTS,
   DEFAULT_BIND_RETRY_MS,
+  DEFAULT_SERVE_PORT,
   ensureLogFileMode,
   listenWithReapWait,
   offMainNotice,
@@ -209,6 +210,7 @@ import {
   SERVE_EXPECTED_BRANCH,
   serviceTokensPath,
 } from "./lib/serve.js";
+import { runRelayClient } from "./lib/relay-client.js";
 import { consoleUrlCommand, defaultIsListening } from "./lib/console-url.js";
 import { assertProposedPlanLoads,
   buildGrillEscalation,
@@ -280,7 +282,7 @@ import {
   type RatifyGateway,
   type ReframeResult,
 } from "./lib/inbox.js";
-import { parseUsage, type UsageSnapshot } from "./lib/headroom.js";
+import { parseUsage, usageSnapshotFromSdk, type SdkUsageReading, type UsageSnapshot } from "./lib/headroom.js";
 import {
   assertArchitectAboveWorker,
   buildGather,
@@ -522,7 +524,10 @@ import {
   type SpawnWorkerArgs,
   type WorkerResult,
   type WorktreeReapSummary,
+  openUsageProbeSession,
+  type UsageProbeQueryFn,
 } from "./lib/worker.js";
+import { LiveSpawnBlockedError } from "./lib/spawn-guard.js";
 import { gitPushRunBranch, gitPushEmptyCommit } from "./lib/git-push.js";
 import {
   ensureWorkerKeychain,
@@ -9357,8 +9362,15 @@ const defaultUsageProbeRunner: UsageProbeRunner = (bin, argv, opts) => execFileS
  * could not be run, or ran and failed. `"parse"` means the read SUCCEEDED and the text could not
  * be understood, which is a completely different problem with a completely different fix, and
  * conflating the two is what cost this fleet its headroom read for hours on 2026-07-31.
+ *
+ * `"sdk"` is the SAME discipline extended to the SDK control-request source
+ * ({@link readUsageSnapshotViaSdk}): it did not spawn a CLI and it did not fail to parse text —
+ * it asked the running SDK session and got no usable answer. Its `reason` names WHICH of the
+ * three unreadable states occurred (method absent / call threw / no usable windows), because
+ * those have three different fixes: an SDK upgrade renamed the method, the session refused, or
+ * the credential legitimately has no plan limits.
  */
-export type UsageProbeFailureStage = "spawn" | "parse";
+export type UsageProbeFailureStage = "spawn" | "parse" | "grant" | "sdk";
 
 /** Injected sink for that failure — the real caller gets {@link ledgerUsageProbeFailure}. */
 export type UsageProbeFailureSink = (stage: UsageProbeFailureStage, reason: string) => void;
@@ -9416,6 +9428,133 @@ export function ledgerUsageProbeFailure(config: Config, stage: UsageProbeFailure
  * store (skipping the grant, harmlessly, if the store does not exist yet) — the identical
  * mechanism `spawnWorker` uses, not a second, divergent one.
  */
+/**
+ * The SDK usage control request, as a headroom source — the seam a test injects so NO test ever
+ * reaches the real SDK. Mirrors `spawnWorker`'s own `queryFn` seam (worker.ts) exactly: production
+ * passes nothing and gets the real `query`, a test passes a fake and creates no process.
+ */
+export type UsageQueryFn = UsageProbeQueryFn;
+
+/**
+ * READ HEADROOM FROM THE SDK, not by shelling `claude -p "/usage"`.
+ *
+ * WHY THIS SHAPE AND NOT THE HANDLE `spawnWorker` ALREADY HOLDS. The pinned SDK 0.3.220 declares
+ * `usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET(): Promise<SDKControlGetUsageResponse>`
+ * INSIDE `Query`'s control-request block, whose own header reads "The following methods are control
+ * requests, and are only supported when streaming input/output is used". `spawnWorker` passes
+ * `prompt: string`, so reading its handle is contract-unsupported even where the CLI tolerates it —
+ * two unsupported layers, not one. The contract-supported shape is a DEDICATED session with a
+ * STREAMING prompt, which is what this is. Converting `spawnWorker` to streaming input is a
+ * separate decision (it restructures the paid spawn path) and is deliberately NOT done here.
+ *
+ * WHAT IT COSTS: a streaming generator that yields nothing, one control request, then teardown.
+ * Measured at ~890 ms, $0, zero turns, no prompt sent.
+ *
+ * THREE UNREADABLE STATES, THREE DISTINCT REASONS, AND NONE OF THEM IS ZERO-USED. A future SDK may
+ * rename or remove the method (it says so in its own name); the call may throw; or the credential
+ * may legitimately have no plan limits (`rate_limits_available: false`, true for API-key, Bedrock
+ * and Vertex sessions). All three return `undefined` — the caller then falls back to the CLI probe
+ * — and each ledgers a DIFFERENT reason under the `"sdk"` stage, because each has a different fix.
+ * Reporting any of them as 0% used would dispatch a fleet against an exhausted account.
+ *
+ * THE RETURN POLARITY IS UNCHANGED AND NOT THIS FUNCTION'S TO CHANGE. Adding a SOURCE is not a
+ * polarity change: when every source is unreadable the drain/daemon still continues, still bounded
+ * by max + budget, exactly as {@link readUsageSnapshot}'s own doc ratifies.
+ */
+export async function readUsageSnapshotViaSdk(
+  runQuery?: UsageQueryFn,
+  onUnreadable: UsageProbeFailureSink = () => {},
+): Promise<UsageSnapshot | undefined> {
+  // The session is opened by the SPAWN CHOKEPOINT (worker.ts), which owns the SDK import and the
+  // live-spawn guard — see `openUsageProbeSession`. This module never touches the SDK.
+  const q = openUsageProbeSession(runQuery);
+
+  const method = q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET;
+  if (typeof method !== "function") {
+    // UNKNOWN #1 — a future SDK renamed or removed it. Not an error, not zero: no answer.
+    onUnreadable("sdk", "usage control request absent on this SDK (method not a function) — falling back");
+    await closeQuietly(q);
+    return undefined;
+  }
+
+  let raw: unknown;
+  try {
+    raw = await method.call(q);
+  } catch (e) {
+    // UNKNOWN #2 — the session refused or the transport failed.
+    onUnreadable("sdk", `usage control request threw: ${String((e as Error)?.message ?? e)}`);
+    await closeQuietly(q);
+    return undefined;
+  } finally {
+    await closeQuietly(q);
+  }
+
+  const snap = usageSnapshotFromSdk(raw as SdkUsageReading | undefined);
+  if (!snap) {
+    // UNKNOWN #3 — answered, but with nothing usable: `rate_limits_available: false` (an API-key
+    // credential), null `rate_limits`, or no usable five-hour utilization.
+    onUnreadable("sdk", "usage control request returned no usable rate-limit windows — falling back");
+    return undefined;
+  }
+  return snap;
+}
+
+/** Tear the probe session down without letting teardown mask the reading. Best-effort by
+ *  construction: an abort that throws must never turn a good answer into an unreadable one. */
+async function closeQuietly(q: { interrupt?: () => Promise<unknown>; return?: (v?: unknown) => Promise<unknown> }): Promise<void> {
+  try {
+    await q.return?.(undefined);
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * THE COMPOSED HEADROOM SOURCE, and the thing the daemon/drain actually call: try the SDK control
+ * request first, fall back to the CLI probe when it yields nothing.
+ *
+ * WHY THE SDK FIRST. A container runs NO daemon, so it writes no `daemon.headroom` rows and has
+ * never had a headroom signal at all; the CLI probe's `-p "/usage"` returns a session cost summary
+ * with no account window panel in the image. The SDK reading needs no CLI, no prompt and no turn.
+ *
+ * WHY THE CLI IS RETAINED RATHER THAN REPLACED. It works on the mini today, and the SDK method is
+ * named `usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET`. Removing a working path while
+ * adding an experimental one is two risks in one changeset; this is one.
+ *
+ * THE POLARITY IS UNCHANGED. When BOTH sources are unreadable this returns `undefined`, exactly as
+ * the CLI probe alone did, and the drain/daemon continue — bounded by max + budget. Adding a
+ * SOURCE is not a polarity change.
+ */
+export async function readUsageSnapshotPreferSdk(
+  config: Config,
+  deps: {
+    viaSdk?: (onUnreadable: UsageProbeFailureSink) => Promise<UsageSnapshot | undefined>;
+    viaCli?: (onUnreadable: UsageProbeFailureSink) => UsageSnapshot | undefined;
+  } = {},
+): Promise<UsageSnapshot | undefined> {
+  const sink: UsageProbeFailureSink = (stage, reason) => ledgerUsageProbeFailure(config, stage, reason);
+  const viaSdk = deps.viaSdk ?? ((s) => readUsageSnapshotViaSdk(undefined, s));
+  const viaCli = deps.viaCli ?? ((s) => readUsageSnapshot(config, defaultUsageProbeRunner, s));
+  // A SOURCE THAT CANNOT ANSWER MUST NOT BREAK THE CALLER. `readUsageSnapshotViaSdk` already
+  // converts its three unreadable states into `undefined`, but OPENING the session can throw
+  // before any of that runs (a transport failure, a malformed config). Left uncaught, an
+  // experimental source would take down a drain that the CLI probe could have served — which is
+  // the opposite of adding a fallback.
+  //
+  // THE LIVE-SPAWN GUARD IS THE ONE EXCEPTION AND IS DELIBERATELY RE-THROWN. It exists to make an
+  // accidental real spawn LOUD under a test runner; swallowing it here would turn every such test
+  // into a silent CLI fallback and retire the guard by accident.
+  let fromSdk: UsageSnapshot | undefined;
+  try {
+    fromSdk = await viaSdk(sink);
+  } catch (e) {
+    if (e instanceof LiveSpawnBlockedError) throw e;
+    sink("sdk", `usage control request could not be opened: ${String((e as Error)?.message ?? e)}`);
+  }
+  if (fromSdk) return fromSdk;
+  return viaCli(sink);
+}
+
 export function readUsageSnapshot(
   config: Config,
   runUsageProbe: UsageProbeRunner = defaultUsageProbeRunner,
@@ -9430,7 +9569,18 @@ export function readUsageSnapshot(
     // directory rather than littering `worker-home-*` siblings on every tick.
     const workerHome = perRunWorkerHomeDir(workerHomeDir(config), "usage-probe");
     const workerKeychainPath = workerKeychainPaths(join(config.root, "state")).keychainPath;
-    materializeWorkerHome({ workerHome, realHome, workerKeychainPath });
+    const home = materializeWorkerHome({ workerHome, realHome, workerKeychainPath });
+    // A grant that FAILED is not a grant that was OPTIONAL. The absent-target skip stays silent
+    // (several grants are legitimately unavailable), but a target that EXISTS and could not be
+    // reached is a lost capability — and it is why this probe read `stage: "parse"` 33 times out
+    // of 33 in the Azure container: a real `.claude` DIRECTORY occupied the symlink slot, so
+    // `claude -p "/usage"` ran LOGGED OUT and emitted a 207-byte cost summary with no account
+    // panel to parse. `displaced` is reported too: the slot HEALED, and a heal that goes
+    // unrecorded is how a poisoned slot survived days of re-materialisation unnoticed.
+    for (const g of home.outcomes ?? []) {
+      if (g.state === "failed") onUnreadable("grant", `${g.relFrom} -> ${g.to}: ${g.reason ?? "unknown"}`);
+      else if (g.state === "displaced") onUnreadable("grant", `${g.relFrom}: real directory displaced to ${g.displacedTo}`);
+    }
 
     const env = buildWorkerEnv({}, process.env, {
       zdotdir: workerZdotdir(config),
@@ -9857,6 +10007,92 @@ export function escalateHeadroomReserve(
     task_id: "daemon",
     step: "daemon.headroom_reserve.escalated",
     resets_at: info.resetsAt,
+    issue_url: issueUrl,
+    delivered: issueUrl !== null,
+  });
+}
+
+/**
+ * The daemon's `onHeadroomParkCeiling` hook: the headroom park outlived its ceiling, so the fleet
+ * dispatched BLIND for one tick rather than idling forever.
+ *
+ * DEDUPED ACROSS BOOTS, and the key is "has the governor SEEN anything since we last paged?".
+ * `escalateHeadroomReserve` above keys on `resets_at` because a reserve breach has a natural
+ * boundary; a blind stretch has none, so its identity is the last moment the governor could read
+ * at all. Concretely: skip when an `.escalated` row is NEWER than the newest `daemon.headroom`
+ * (the row a READABLE probe writes). That gives exactly one page per blind stretch —
+ *   - a daemon that restart-loops while still blind re-derives the same answer and stays quiet,
+ *     which the in-process guard alone could never do;
+ *   - a probe that RECOVERS writes a newer `daemon.headroom`, so the next blind stretch pages
+ *     again rather than staying silenced forever.
+ * Both rows are in {@link DECISION_RELEVANT_LEDGER_STEPS}, so rotation cannot make this
+ * re-page — and if the readable row somehow vanished first, the comparison fails QUIET (an
+ * existing escalation wins), which is the right direction for a notification.
+ */
+export function escalateHeadroomParkCeiling(
+  info: { consecutiveUnreadable: number; parkedMs: number; ceilingMs: number },
+  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
+): void {
+  // BOTH READS COMPARE AGAINST A STRING LITERAL INLINE, DELIBERATELY, rather than through a
+  // helper taking the step name as a parameter. `test/ledger-rotation.test.ts` discovers
+  // decision-relevant steps by scanning consumer source for that exact comparison form, so a
+  // parameterised helper is INVISIBLE to it — and the rotation-set membership this dedup depends
+  // on stops being self-enforcing. Measured: with the loop factored into a generic helper,
+  // deleting either entry from DECISION_RELEVANT_LEDGER_STEPS left that test green.
+  const lines = readLedgerLines(ctx.ledgerPath);
+  let lastReadable: string | undefined;
+  let lastEscalated: string | undefined;
+  for (const l of lines) {
+    const ts = typeof l.ts === "string" ? l.ts : undefined;
+    if (!ts) continue;
+    if (l.step === "daemon.headroom" && (lastReadable === undefined || ts > lastReadable)) lastReadable = ts;
+    if (l.step === "daemon.headroom.park_ceiling.escalated" && (lastEscalated === undefined || ts > lastEscalated)) {
+      lastEscalated = ts;
+    }
+  }
+  // Already paged for THIS blind stretch: no readable row at all since, or none newer.
+  if (lastEscalated !== undefined && (lastReadable === undefined || lastEscalated > lastReadable)) return;
+
+  const minutes = Math.round(info.ceilingMs / 60_000);
+  const issueUrl = tryEscalate(
+    {
+      // MANUAL, not HARD_STOP: dispatch is NOT paused here — it is proceeding riskily, which is
+      // the opposite posture from `escalateHeadroomReserve`'s breach and needs saying.
+      class: "MANUAL",
+      taskId: "daemon",
+      runId: ctx.runId,
+      summary: `headroom unreadable for ${minutes}m — dispatching BLIND past the park ceiling`,
+      detail:
+        `The usage probe has failed ${info.consecutiveUnreadable} consecutive times and the park ` +
+        `outlived its ${minutes}-minute ceiling, so the daemon dispatched with NO headroom reading ` +
+        `rather than idling forever. The spend bound this bypasses is deliberately accepted, not ` +
+        `satisfied: the fleet may now be spending against an exhausted account. The ceiling re-arms, ` +
+        `so exposure is one blind dispatch per ${minutes} minutes until a probe succeeds — but the ` +
+        `probe itself is the thing to fix. Check the usage.probe_failed rows for the stage and ` +
+        `reason, and the worker-home grant rows for a lost .claude slot.`,
+      options: [
+        {
+          label: "fix the probe",
+          detail: "Read the usage.probe_failed stage: spawn, parse or grant each point somewhere different.",
+        },
+        {
+          label: "disable the governor",
+          detail: "Setting headroom.enabled false skips the park entirely — dispatch stops being gated on a read that cannot succeed.",
+        },
+      ],
+      recommendation: "fix the probe",
+    },
+    { issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo), ledgerPath: ctx.ledgerPath, runId: ctx.runId },
+  );
+  appendLedger(ctx.ledgerPath, {
+    run_id: ctx.runId,
+    task_id: "daemon",
+    step: "daemon.headroom.park_ceiling.escalated",
+    consecutive_unreadable: info.consecutiveUnreadable,
+    parked_ms: info.parkedMs,
+    ceiling_ms: info.ceilingMs,
+    // Forensics: the moment the governor last saw anything, which is also this dedup's key.
+    blind_since: lastReadable ?? "never",
     issue_url: issueUrl,
     delivered: issueUrl !== null,
   });
@@ -10349,6 +10585,14 @@ async function drainCommand(
      *  gateway for `remudero-sandbox`, not a hardcoded literal (W1-T53) — without a network
      *  round-trip. */
     githubFactory?: (owner: string, repo: string) => GitHub;
+    /**
+     * Injectable HEADROOM SOURCE. Defaults to {@link readUsageSnapshotPreferSdk} — SDK control
+     * request first, CLI probe as fallback. A behavioral test driving the real `drainCommand`
+     * MUST supply this (or accept the live-spawn guard's refusal), because the default now opens
+     * a real SDK session: the same reason `githubFactory` and `notifyChannel` are injectable here
+     * rather than reached for directly.
+     */
+    readUsage?: () => UsageSnapshot | undefined | Promise<UsageSnapshot | undefined>;
     /** W1-T144: injectable notify channel for the post-drain rundown push — a behavioral
      *  test supplies a recording fake so the push glue runs without a real osascript send.
      *  Defaults to the operator's iMessage channel. */
@@ -10640,7 +10884,7 @@ async function drainCommand(
         // reads (below), never a second GitHub read path — see queueGovernorGateFor's doc.
         checkQueueGovernor: queueGovernorGateFor(openPrCount, ledgerPath, runId),
         runOne: (taskId) => runTask(taskId, { planPath, config, allowStale }),
-        readUsage: () => readUsageSnapshot(config),
+        readUsage: deps.readUsage ?? (() => readUsageSnapshotPreferSdk(config)),
         checkStop: () => stopDetail(config.root),
         checkPause: () => pauseDetail(config.root),
         openPrCount, // W1-T172: the governor's WIP-ceiling input on the multi-lane path.
@@ -11449,7 +11693,7 @@ export async function daemonCommand(
             allowStale,
             skipGitSync: !!flagValue(rest, "--plan"),
           }),
-        readUsage: () => readUsageSnapshot(config),
+        readUsage: () => readUsageSnapshotPreferSdk(config),
         // THE LEDGER IS THE DEDUP (impl-FL): seed the once-per-string bound from what previous
         // processes already announced, so a restart does not re-announce. Read ONCE at daemon
         // construction, never per tick.
@@ -11457,6 +11701,8 @@ export async function daemonCommand(
         // P34 clause (c), W1-T249: the reserve gate's notification — dispatch is
         // already paused (runDaemon's own in-process idle) by the time this fires.
         onHeadroomBreach: (info) => escalateHeadroomReserve(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
+        onHeadroomParkCeiling: (info) =>
+          escalateHeadroomParkCeiling(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
         // W1-T372: both gh api rate_limit buckets, read fresh each tick alongside readUsage's
         // own headroom reading immediately above — never a second gh api rate_limit call.
         readGhQuota: () => readGhRateLimitBuckets(),
@@ -12630,6 +12876,64 @@ export async function serveCommand(
     const shutdown = () => {
       log("serve.stop", {});
       server.close(() => resolve());
+    };
+    process.once("SIGINT", shutdown);
+    process.once("SIGTERM", shutdown);
+  });
+  return 0;
+}
+
+// ── rmd relay — the Tier-2 relay CLIENT (W1-T431, MASTER-PLAN §7A/§6A, D-11) ──
+//
+// This is the CLI glue only: it reads the relay URL + enrollment token from per-instance
+// config (never argv, design note i), resolves the LOCAL console surface's own base URL the
+// SAME way `rmd serve` resolves its own bind port (config.serve.port, else DEFAULT_SERVE_PORT),
+// and hands both to `runRelayClient` (lib/relay-client.ts) — the pure, testable module that
+// actually dials out, authenticates, and forwards. `rmd relay` is a SEPARATE process from
+// `rmd serve`: nothing here touches serve's listener, so serve keeps working unchanged whether
+// or not this command is ever run (design note iii).
+
+/**
+ * `rmd relay` — dial OUT to the configured relay and hold a reconnecting tunnel that forwards
+ * the local console surface (REST + SSE) as a transparent byte proxy. Blocks until SIGINT/
+ * SIGTERM, matching `rmd serve`'s own shape. Exits 2 (spawns nothing) when `config.relay.url`
+ * or `config.relay.token` is absent — a relay is opt-in per instance, and a half-configured one
+ * fails loud rather than silently doing nothing forever.
+ */
+export async function relayConnectCommand(rest: string[]): Promise<number> {
+  const badArg = unknownArgError("relay", rest, [], []);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+
+  const config = loadConfig();
+  const relayUrl = config.relay?.url;
+  const enrollmentToken = config.relay?.token;
+  if (!relayUrl || !enrollmentToken) {
+    console.error(
+      "### rmd relay — no relay configured. Set both `relay.url` and `relay.token` in " +
+        `${instanceConfigPath()} (design note iv: a short-lived token pasted from the relay's ` +
+        "UI) before running \`rmd relay\`.",
+    );
+    return 2;
+  }
+
+  const localBaseUrl = `http://127.0.0.1:${config.serve?.port ?? DEFAULT_SERVE_PORT}`;
+  const ledgerPath = ledgerPathFor(config);
+  const runId = `RELAY-${Date.now()}`;
+  const log = (step: string, extra: Record<string, unknown> = {}) =>
+    appendLedger(ledgerPath, { run_id: runId, task_id: "RELAY", step, ...extra });
+
+  console.log(`### rmd relay — dialing ${relayUrl}, forwarding to ${localBaseUrl}`);
+  log("relay.start", { relayUrl, localBaseUrl });
+  const client = runRelayClient({ relayUrl, enrollmentToken, localBaseUrl, log });
+
+  await new Promise<void>((resolve) => {
+    const shutdown = () => {
+      log("relay.stop", {});
+      client.stop();
+      resolve();
     };
     process.once("SIGINT", shutdown);
     process.once("SIGTERM", shutdown);
@@ -17665,6 +17969,11 @@ const COMMANDS: readonly CommandSpec[] = [
       "rmd serve [--port <n>] [--host <addr>]   # the operator console FRONT DOOR (W1-T139, MASTER-PLAN §7/§7B): one HTTP surface (service.ts) serving the live board (board.ts), fleet-control + question/manual-approve write actions (panel-actions.ts), the feedback inbox + plan→task→PR graph (panel-graph.ts), and a minimal HTML shell at GET /; bearer tokens are generated on first run and persisted 0600 under <config.root>/state/service-tokens.json, and rotate by stopping serve, deleting that file, and starting again; the startup banner prints the READ token only (a bookmark grants view, not control) and never the write token, because stdout is commonly redirected to a log; --port defaults to 4317 (matches apps/dashboard's own default); --host defaults to 127.0.0.1, also reads RMD_SERVE_HOST, accepts a COMMA-SEPARATED list so the console can be reachable locally AND from the phone (e.g. 127.0.0.1,<tailnet-ip>), and REFUSES wildcards like 0.0.0.0 anywhere in that list; blocks until SIGINT/SIGTERM",
   },
   {
+    name: "relay",
+    usage:
+      "rmd relay   # W1-T431: the Tier-2 relay CLIENT (MASTER-PLAN §7A/§6A, D-11) — dials OUT to the relay URL + enrollment token in per-instance config (relay.url/relay.token; never a flag, never committed) and holds a reconnecting tunnel that forwards the LOCAL rmd serve surface (REST + SSE) as a transparent byte proxy, adding no scope of its own (the console's own W1-T430 identity seam decides every grant, exactly as a direct call would). Never binds a port — outbound-only, tested invariant. Refuses (spawns nothing) when relay.url or relay.token is absent. Blocks until SIGINT/SIGTERM, same shape as `rmd serve`; `rmd serve` is a separate process and is completely unaffected whether or not this ever runs.",
+  },
+  {
     name: "console-url",
     usage:
       "rmd console-url [--port <n>] [--host <addr>] [--write]   # print the console URL carrying the READ token — the bookmark that gets you in, one command instead of hand-extracting <config.root>/state/service-tokens.json (fb-1784772988510-da3712); prints one URL per bound interface, resolving port/host EXACTLY as `rmd serve` does (flag > RMD_SERVE_HOST > config.serve.* > 127.0.0.1:4317); --write additionally prints the WRITE token as a bare value to paste into the console (never in a URL), and REFUSES unless stdout is a TTY, because a redirected stdout becomes a file that outlives the process (R-5); reads the 0600 tokens file but never creates one — if the console has never run it says so and names the remedy; spawns nothing",
@@ -18207,6 +18516,10 @@ export async function main(
   }
   if (cmd === "serve") {
     process.exit(await serveCommand(rest));
+  }
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await relayConnectCommand(rest)) cannot carry a DA hit without forking the process; relayConnectCommand's own logic — the argv refusal, the both-or-nothing relay-config check, the local-target port resolution and the ledgered start/stop around a real outbound dial — is unit-tested in test/relay-connect-command.test.ts (same irreducible-glue shape as the sibling console-url dispatch case directly below).
+  if (cmd === "relay") {
+    process.exit(await relayConnectCommand(rest));
   }
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(await consoleUrlCommand(rest, loadConfig())) cannot carry a DA hit without forking the process; consoleUrlCommand's own logic — the URL assembly, the --write TTY refusal, and all three failure modes — is unit-tested in test/console-url.test.ts (same irreducible-glue shape as the sibling away/pause/resume dispatch cases).
   if (cmd === "console-url") {

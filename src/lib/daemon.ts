@@ -50,6 +50,7 @@ import {
 // overlap partition `runDrainLanes` (drain.ts) already composes with `runnableCandidates`/
 // `laneDispatchBudget` above — reused here verbatim rather than re-derived.
 import { partitionByFileOverlap, serializedLedgerPayload, settledSetPayload } from "./dispatch-overlap.js";
+import { DEPLOY_IDLE_DEFER_CEILING_MS } from "./deployer.js";
 import { HEADROOM_LIMIT_PCT, RESET_UNKNOWN, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
 // W1-T372: TYPE ONLY (erased at build — no runtime edge added to daemon-health.ts, which
@@ -441,6 +442,52 @@ function resolveHeadroomWindows(
  * comes from moved. */
 export const DEFAULT_UNREADABLE_DEGRADED_LIMIT = UNREADABLE_DEGRADED_LIMIT;
 
+/**
+ * THE PARK CEILING. RESOLVES TO {@link DEPLOY_IDLE_DEFER_CEILING_MS} rather than re-spelling
+ * `30 * 60_000`, for exactly the reason the constant immediately above resolves rather than
+ * matches: two independent literals drift, one shared export cannot. The deploy supervisor
+ * already settled this argument — a fleet that never goes idle still gets through after thirty
+ * minutes, ledgered as forced — and this is that idea applied to the headroom park.
+ */
+export const HEADROOM_PARK_CEILING_MS = DEPLOY_IDLE_DEFER_CEILING_MS;
+
+/** {@link evaluateHeadroomPark}'s result — deliberately {@link evaluateIdleGate}'s shape. */
+export interface HeadroomParkGate {
+  /** Parked this tick: unreadable beyond the bounded allowance. */
+  parked: boolean;
+  /** May the daemon dispatch anyway, because the ceiling fired? */
+  forced: boolean;
+  /** How long this park episode has run; 0 when not parked or on its first tick. */
+  waitedMs: number;
+}
+
+/**
+ * The park WITH a ceiling — the counterpart of {@link evaluateIdleGate}, same shape on purpose.
+ *
+ * THE DEFECT IT CLOSES: the degraded branch had no ceiling, no escalation and no exit of its
+ * own. Its only way out was a probe that RECOVERS, so a probe that cannot recover parks the
+ * fleet permanently about four minutes after boot — alive, ticking (`ticks++` happens inside the
+ * park), fresh boot sha, every liveness indicator healthy. That is not hypothetical: a real
+ * `.claude` DIRECTORY occupying the worker-home symlink slot made the usage probe fail 33 times
+ * out of 33, and re-materialisation never healed it.
+ *
+ * `parkedSinceMs === undefined` reads as a FRESH park (`waitedMs = 0`), which alone can never
+ * reach the ceiling — so a caller that does not track the clock degrades to exactly the old
+ * unbounded park, never into a surprise forced dispatch. Same fail-direction discipline
+ * {@link evaluateIdleGate} documents for its own optional persistence.
+ */
+export function evaluateHeadroomPark(
+  consecutiveUnreadable: number,
+  degradedLimit: number,
+  parkedSinceMs: number | undefined,
+  nowMs: number,
+  ceilingMs: number = HEADROOM_PARK_CEILING_MS,
+): HeadroomParkGate {
+  if (consecutiveUnreadable <= degradedLimit) return { parked: false, forced: false, waitedMs: 0 };
+  const waitedMs = parkedSinceMs === undefined ? 0 : Math.max(0, nowMs - parkedSinceMs);
+  return { parked: true, forced: waitedMs >= ceilingMs, waitedMs };
+}
+
 export interface DaemonOpts {
   /**
    * Optional iteration cap (a bounded supervised run, or a test). Absent ⇒
@@ -484,6 +531,13 @@ export interface DaemonOpts {
    * A single successful read resets the count to zero.
    */
   unreadableDegradedLimit?: number;
+  /**
+   * How long the governor may stay PARKED (unreadable beyond the allowance) before dispatching
+   * blind for one tick. Defaults to {@link HEADROOM_PARK_CEILING_MS}. Injectable so the park is
+   * reachable in a test without a real thirty-minute wait — the same reason the deploy
+   * supervisor's own ceiling is a parameter.
+   */
+  headroomParkCeilingMs?: number;
   /**
    * W1-T113: the spawn-infra backoff ceiling in ms (default
    * {@link DEFAULT_MAX_SPAWN_INFRA_BACKOFF_MS}) — consecutive failures double
@@ -735,7 +789,14 @@ export interface DaemonDeps {
    */
   openPrCount?: () => number;
   /** Read current /usage; `undefined` ⇒ unavailable (headroom check is skipped). */
-  readUsage?: () => UsageSnapshot | undefined;
+  /**
+   * W1-T417-adjacent (SDK usage source): MAY return a promise. Widened rather than made
+   * `async`, so every existing SYNCHRONOUS supplier — the CLI probe and all 60 test fakes —
+   * keeps working byte-for-byte; `await` on a non-promise is a no-op. The daemon needs this
+   * because the contract-supported SDK reading is a control request on a streaming session,
+   * which is inherently async.
+   */
+  readUsage?: () => UsageSnapshot | undefined | Promise<UsageSnapshot | undefined>;
   /**
    * Reset strings ALREADY reported by a previous process, read back off the ledger by whoever
    * builds these deps (run-task.ts). THE LEDGER IS THE DEDUP — the same idiom
@@ -770,6 +831,18 @@ export interface DaemonDeps {
     percentUsed: number;
     limitPct: number;
     resetsAt: string;
+  }) => void | Promise<void>;
+  /**
+   * Called AT MOST ONCE PER PARK, on the tick the park ceiling forces a blind dispatch — never
+   * per tick, which at a 60s poll would be a pager. Re-armed when the park ends, so a LATER park
+   * escalates again rather than staying silenced for this process's life (the same in-process
+   * discipline `onStarvation`'s `starvationEscalated` guard uses, and for the same reason).
+   * Optional — omitted, the ceiling still forces and still ledgers, it just opens no issue.
+   */
+  onHeadroomParkCeiling?: (info: {
+    consecutiveUnreadable: number;
+    parkedMs: number;
+    ceilingMs: number;
   }) => void | Promise<void>;
   /**
    * W1-T372: `gh api rate_limit`'s REST/core and GraphQL buckets, read fresh each tick —
@@ -1585,6 +1658,15 @@ export async function runDaemon(
   // read; escalates to the in-process idle heartbeat once it exceeds
   // `unreadableDegradedLimit` — see the headroom check below.
   let consecutiveUnreadable = 0;
+  // THE PARK CLOCK. Set on the tick a park BEGINS, cleared whenever the park ends — by a
+  // readable probe OR by the ceiling forcing. Clearing on a FORCE is what re-arms the ceiling:
+  // a valve that opened once and stayed open would let a blind fleet dispatch unbounded after
+  // minute thirty, which is a different and worse failure than the park it replaces.
+  let parkedSinceMs: number | undefined;
+  // Once per PARK, not once per tick — the same in-process discipline `starvationEscalated`
+  // below uses, and for the same reason: the loop polls every 60s, so a per-tick escalation is
+  // a pager. Re-armed wherever the park clock is.
+  let parkCeilingEscalated = false;
   // Seeded from the ledger so the once-per-string bound survives a restart, then maintained
   // in-process for the life of this daemon.
   const reportedUnrecognisedResets = new Set<string>(deps.priorUnrecognisedResets ?? []);
@@ -1595,6 +1677,7 @@ export async function runDaemon(
   // 2026-07-25 ruling, with this host opting out via `headroom.enabled: false`.
   const headroomEnabled = opts.headroomEnabled ?? true;
   const unreadableDegradedLimit = opts.unreadableDegradedLimit ?? DEFAULT_UNREADABLE_DEGRADED_LIMIT;
+  const parkCeilingMs = opts.headroomParkCeilingMs ?? HEADROOM_PARK_CEILING_MS;
   const now = deps.now ?? (() => new Date());
   // W1-T343: resolved ONCE, for this process's whole lifetime — `DaemonOpts` is the daemon's
   // frozen-at-boot configuration (see `wipLimit`'s own doc on why a running daemon does not
@@ -1894,11 +1977,15 @@ export async function runDaemon(
     // (`headroomPolicy`, resolved once above): on a window's final day it
     // relaxes toward 100%, since anything unspent is destroyed at reset.
     if (deps.readUsage) {
-      const snap = deps.readUsage();
+      const snap = await deps.readUsage();
       if (snap) {
         // A GOOD read clears the degraded-mode counter — only CONSECUTIVE
         // misses count toward escalation, not a lifetime total.
         consecutiveUnreadable = 0;
+        // …and ends any park episode with it: the governor can see again, so the ceiling has
+        // nothing left to bound and a LATER park starts its clock fresh.
+        parkedSinceMs = undefined;
+        parkCeilingEscalated = false;
         const windows = resolveHeadroomWindows(snap, now(), headroomPolicy, (window, raw) => {
             // ONCE PER DISTINCT STRING, NOT PER TICK. The loop polls every 60s, so a per-tick
             // emission would write ~1,440 identical lines a day and bury the one thing worth
@@ -2005,17 +2092,62 @@ export async function runDaemon(
         // in-process idle heartbeat a confirmed breach uses, until a read
         // succeeds again.
         consecutiveUnreadable++;
-        if (consecutiveUnreadable > unreadableDegradedLimit) {
+        const parkGate = evaluateHeadroomPark(
+          consecutiveUnreadable,
+          unreadableDegradedLimit,
+          parkedSinceMs,
+          now().getTime(),
+          parkCeilingMs,
+        );
+        if (parkGate.parked && parkedSinceMs === undefined) parkedSinceMs = now().getTime();
+        if (parkGate.parked && !parkGate.forced) {
           ticks++;
           log("daemon.headroom.degraded", {
             tick: ticks,
             consecutive_unreadable: consecutiveUnreadable,
             degraded_limit: unreadableDegradedLimit,
             poll_interval_ms: pollIntervalMs,
+            parked_ms: parkGate.waitedMs,
+            park_ceiling_ms: parkCeilingMs,
             note: "usage unreadable beyond the bounded allowance — idling, not dispatching",
           });
           await deps.sleep(pollIntervalMs);
           continue;
+        }
+        if (parkGate.forced) {
+          // THE CEILING FIRED. Dispatch proceeds this tick with the governor still blind, and the
+          // row says so plainly: the bound being bypassed exists to stop the fleet spending
+          // against an exhausted account, so forcing DELIBERATELY accepts that risk rather than
+          // pretending the read succeeded. Mirrors `deploy.idle_ceiling_forced`.
+          //
+          // ONE TICK, NOT A MODE. Clearing the clock here re-arms the ceiling, so the next park
+          // waits the full period again — the exposure is bounded at one blind dispatch per
+          // ceiling, never an unbounded blind run.
+          log("daemon.headroom.park_ceiling_forced", {
+            tick: ticks,
+            consecutive_unreadable: consecutiveUnreadable,
+            degraded_limit: unreadableDegradedLimit,
+            parked_ms: parkGate.waitedMs,
+            park_ceiling_ms: parkCeilingMs,
+            note:
+              "usage unreadable past the park ceiling — dispatching BLIND for one tick and re-arming; " +
+              "the spend bound this bypasses is deliberately accepted, not satisfied",
+          });
+          if (!parkCeilingEscalated) {
+            parkCeilingEscalated = true;
+            // Same backstop discipline as `onCircuitBreak`/`onHeadroomBreach`: a failed
+            // notification costs one logged line, never the daemon's liveness.
+            try {
+              await deps.onHeadroomParkCeiling?.({
+                consecutiveUnreadable,
+                parkedMs: parkGate.waitedMs,
+                ceilingMs: parkCeilingMs,
+              });
+            } catch (e) {
+              log("daemon.escalation.failed", { task: "daemon", error: String((e as Error)?.message ?? e) });
+            }
+          }
+          parkedSinceMs = undefined;
         }
         log("daemon.headroom.unavailable", {
           consecutive_unreadable: consecutiveUnreadable,

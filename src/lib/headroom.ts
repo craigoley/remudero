@@ -165,6 +165,106 @@ export function parseUsage(text: string): UsageSnapshot {
 }
 
 /** Default: at/near a window limit means ≥95% consumed. Never hammer the last 5%. */
+/**
+ * THE SDK CONTROL-REQUEST SHAPE, narrowed to what a headroom reading needs. Deliberately a LOCAL
+ * structural type rather than an import of `SDKControlGetUsageResponse`: this module is pure and
+ * must not depend on the SDK, and the method it comes from is named
+ * `usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET` — its own doc says it "may change or
+ * be removed in any release without notice". A structural type absorbs an added field; an import
+ * would make a renamed one a compile error in a module that has no business knowing about it.
+ *
+ * EVERY LEAF IS OPTIONAL AND NULLABLE, mirroring the pinned 0.3.220 declaration exactly
+ * (`utilization: number | null`, `resets_at: string | null`, `rate_limits: {…} | null`). That is
+ * not defensive padding — it is the shape, and reading it as non-null is how a missing window
+ * becomes a fabricated 0%.
+ */
+export interface SdkUsageReading {
+  subscription_type?: string | null;
+  rate_limits_available?: boolean;
+  rate_limits?: {
+    five_hour?: { utilization?: number | null; resets_at?: string | null } | null;
+    seven_day?: { utilization?: number | null; resets_at?: string | null } | null;
+    model_scoped?: Array<{ display_name?: string; utilization?: number | null; resets_at?: string | null }> | null;
+  } | null;
+}
+
+/**
+ * The label an all-models weekly window carries when the SDK supplies none.
+ *
+ * THE ONE GAP IN AN OTHERWISE DATA-DRIVEN MAPPING, named rather than hidden. `model_scoped[]`
+ * carries a server-supplied `display_name` (e.g. `Fable`), which is exactly what
+ * {@link WeeklyWindow.label} wants and what `parseUsage` reads off the CLI panel as data. But
+ * `rate_limits.seven_day` has NO label field at all, so its window needs one synthesized here.
+ * A NAMED constant rather than an inline string: it is greppable, it is obviously ours rather
+ * than the server's, and a reader comparing a CLI-sourced snapshot with an SDK-sourced one can
+ * see at a glance which label was invented.
+ */
+export const WEEKLY_ALL_MODELS_LABEL = "all models";
+
+/** One window's percent, or `undefined` when the SDK carried no usable number. NEVER 0. */
+function sdkPercent(w: { utilization?: number | null } | null | undefined): number | undefined {
+  return typeof w?.utilization === "number" && Number.isFinite(w.utilization) ? w.utilization : undefined;
+}
+
+/** One window's reset, or `undefined`. An absent reset is a real shape — see {@link UsageWindow.resetsAt}. */
+function sdkReset(w: { resets_at?: string | null } | null | undefined): string | undefined {
+  return typeof w?.resets_at === "string" && w.resets_at.length > 0 ? w.resets_at : undefined;
+}
+
+/**
+ * Map an SDK usage control-request response onto the SAME {@link UsageSnapshot} the CLI panel
+ * parses into — so every existing consumer (`headroomExhausted`, `resolveHeadroomWindows`, the
+ * daemon's governor) reads one shape and cannot tell the two sources apart.
+ *
+ * RETURNS `undefined` FOR EVERY UNREADABLE STATE, NEVER A ZERO-USED SNAPSHOT. This is the law
+ * this repo has corrected seven times, and the response type makes it easy to break: a missing
+ * `rate_limits` read as `{}` yields a 0% session window, which reads as a COMPLETELY IDLE account
+ * and would dispatch a fleet against an exhausted one. The three unreadable states are:
+ *   - `rate_limits_available === false` — an API key / Bedrock / Vertex session, where plan limits
+ *     legitimately do not apply. The credential is fine; there is simply nothing to report.
+ *   - `rate_limits` null/absent — available was true (or unstated) but no windows came back.
+ *   - `five_hour` carrying no usable `utilization` — the session window IS the governor's primary
+ *     gate, so a snapshot without it is not a headroom reading at all.
+ * The CALLER distinguishes those from a thrown call and from a missing method; this function only
+ * ever says "usable snapshot" or "not one".
+ *
+ * `billingMode` is read from `subscription_type` as data: a non-empty string is a subscription, an
+ * explicit `null` is an API-key session, and anything else is `"unknown"` — never guessed.
+ */
+export function usageSnapshotFromSdk(reading: SdkUsageReading | undefined): UsageSnapshot | undefined {
+  if (!reading) return undefined;
+  if (reading.rate_limits_available === false) return undefined;
+  const limits = reading.rate_limits;
+  if (!limits) return undefined;
+
+  const sessionPct = sdkPercent(limits.five_hour);
+  if (sessionPct === undefined) return undefined;
+
+  const weekly: WeeklyWindow[] = [];
+  const allModelsPct = sdkPercent(limits.seven_day);
+  if (allModelsPct !== undefined) {
+    weekly.push({ label: WEEKLY_ALL_MODELS_LABEL, percentUsed: allModelsPct, resetsAt: sdkReset(limits.seven_day) });
+  }
+  for (const m of limits.model_scoped ?? []) {
+    const pct = sdkPercent(m);
+    // A model bucket with no usable percent is DROPPED, not defaulted — an invented 0% for a
+    // named model is worse than the window simply not being reported.
+    if (pct === undefined) continue;
+    const label = typeof m.display_name === "string" && m.display_name.length > 0 ? m.display_name : undefined;
+    if (!label) continue; // an unlabelled model window cannot be attributed; omit it
+    weekly.push({ label, percentUsed: pct, resetsAt: sdkReset(m) });
+  }
+
+  const billingMode: BillingMode =
+    typeof reading.subscription_type === "string" && reading.subscription_type.length > 0
+      ? "subscription"
+      : reading.subscription_type === null
+        ? "api"
+        : "unknown";
+
+  return { billingMode, session: { percentUsed: sessionPct, resetsAt: sdkReset(limits.five_hour) }, weekly };
+}
+
 export const HEADROOM_LIMIT_PCT = 95;
 
 /**
