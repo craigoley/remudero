@@ -18273,6 +18273,7 @@ export async function main(
   if (cmd === "serve") {
     process.exit(await serveCommand(rest));
   }
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(await relayConnectCommand(rest)) cannot carry a DA hit without forking the process; relayConnectCommand's own logic — the argv refusal, the both-or-nothing relay-config check, the local-target port resolution and the ledgered start/stop around a real outbound dial — is unit-tested in test/relay-connect-command.test.ts (same irreducible-glue shape as the sibling console-url dispatch case directly below).
   if (cmd === "relay") {
     process.exit(await relayConnectCommand(rest));
   }

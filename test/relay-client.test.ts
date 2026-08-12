@@ -38,6 +38,21 @@ function buildRoutes(): Route[] {
         res.end(JSON.stringify(STATE_BODY));
       },
     },
+    {
+      // Echoes the REQUEST BODY back, so a tunneled request carrying one can prove the bytes
+      // survived the relay's base64 round trip rather than merely that a response came back.
+      method: "POST",
+      path: "/echo",
+      scope: "write",
+      handler: (req, res) => {
+        const chunks: Buffer[] = [];
+        req.on("data", (c: Buffer) => chunks.push(c));
+        req.on("end", () => {
+          res.writeHead(200, { "content-type": "application/octet-stream" });
+          res.end(Buffer.concat(chunks));
+        });
+      },
+    },
   ];
 }
 
@@ -69,6 +84,8 @@ interface StubRelay {
   helloSeen: Promise<{ ok: boolean; token: string }>;
   /** Drive ONE request through the tunnel end to end, resolving when `res_end` arrives. */
   proxy: (req: { method: string; path: string; headers: Record<string, string>; body?: string | null }) => Promise<ProxiedResponse>;
+  /** Write a raw line to the client verbatim — used to send a frame that is not valid JSON. */
+  sendRaw: (line: string) => void;
   close: () => Promise<void>;
 }
 
@@ -152,8 +169,29 @@ async function startStubRelay(expectedToken: string): Promise<StubRelay> {
           JSON.stringify({ t: "req", id, method: req.method, path: req.path, headers: req.headers, body: req.body ?? null }) + "\n",
         );
       }),
+    sendRaw: (line) => clientSocket!.write(line),
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };
+}
+
+/** Collect this module's own ledger-shaped log lines so an arm can be asserted by its step name. */
+function captureLog(): { log: (step: string, extra?: Record<string, unknown>) => void; steps: () => string[]; find: (step: string) => Record<string, unknown> | undefined } {
+  const seen: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  return {
+    log: (step, extra = {}) => seen.push({ step, extra }),
+    steps: () => seen.map((s) => s.step),
+    find: (step) => seen.find((s) => s.step === step)?.extra,
+  };
+}
+
+/** Poll until `predicate` holds or the budget runs out — avoids a fixed sleep racing a slow box. */
+async function waitFor(predicate: () => boolean, budgetMs = 2000): Promise<void> {
+  const deadline = Date.now() + budgetMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.ok(predicate(), "condition never became true within the budget");
 }
 
 test("relay: a request through the loopback stub relay returns the same console response as a direct call, with scope from the identity seam and none added by the relay", async () => {
@@ -211,6 +249,214 @@ test("relay: the client never holds a listening socket, connected or retrying", 
     client?.stop();
     await relay.close();
     await local.close();
+  }
+});
+
+// ── The failure arms ──
+//
+// Everything above drives the HAPPY path. These drive the arms that decide whether a relay
+// tunnel DEGRADES safely: a request the client cannot forward, a local surface that dies
+// mid-response, a relay that speaks garbage or rejects the enrollment token, and a misconfigured
+// URL. Each one must keep the wire protocol's contract (every `res_head` is eventually followed
+// by a `res_end`, so a real relay never leaks a half-open proxied request) and must never take
+// the process down -- a single bad frame or a dead local port is not a reason to stop relaying.
+
+test("relay: a tunneled request WITH a body round-trips its bytes to the local surface unchanged", async () => {
+  const local = await startLocalServe();
+  const relay = await startStubRelay(ENROLLMENT_TOKEN);
+  let client: RelayClientHandle | undefined;
+  try {
+    client = runRelayClient({ relayUrl: relay.relayUrl, enrollmentToken: ENROLLMENT_TOKEN, localBaseUrl: local.baseUrl });
+    await relay.helloSeen;
+
+    // Non-UTF8-safe bytes on purpose: base64 is the wire encoding, so a byte-for-byte proxy must
+    // return these exactly. A naive toString()/from() round trip would corrupt them.
+    const payload = Buffer.from([0x00, 0xff, 0x10, 0x80, 0x7f, 0x00]);
+    const tunneled = await relay.proxy({
+      method: "POST",
+      path: "/echo",
+      headers: { authorization: `Bearer ${WRITE_TOKEN}`, "content-length": String(payload.length) },
+      body: payload.toString("base64"),
+    });
+
+    assert.equal(tunneled.status, 200);
+    assert.deepEqual([...tunneled.body], [...payload], "the echoed body must be byte-identical to what was sent");
+  } finally {
+    client?.stop();
+    await relay.close();
+    await local.close();
+  }
+});
+
+test("relay: a req frame whose path cannot be resolved answers 502 and still terminates the exchange", async () => {
+  const local = await startLocalServe();
+  const relay = await startStubRelay(ENROLLMENT_TOKEN);
+  const captured = captureLog();
+  let client: RelayClientHandle | undefined;
+  try {
+    client = runRelayClient({
+      relayUrl: relay.relayUrl,
+      enrollmentToken: ENROLLMENT_TOKEN,
+      localBaseUrl: local.baseUrl,
+      log: captured.log,
+    });
+    await relay.helloSeen;
+
+    // `new URL("http://", base)` throws -- an unparseable path is a relay/browser-side defect the
+    // client must answer, not crash on.
+    const tunneled = await relay.proxy({ method: "GET", path: "http://", headers: {} });
+    assert.equal(tunneled.status, 502);
+    // res_end arrived (proxy() only resolves on it), so the request is not left half-open.
+    assert.equal(captured.find("relay.forward_bad_path")?.path, "http://");
+
+    // The connection survives: an ordinary request still works afterwards.
+    const after = await relay.proxy({ method: "GET", path: "/state", headers: { authorization: `Bearer ${READ_TOKEN}` } });
+    assert.equal(after.status, 200);
+  } finally {
+    client?.stop();
+    await relay.close();
+    await local.close();
+  }
+});
+
+test("relay: when the LOCAL console surface is unreachable, the tunneled request answers 502 rather than hanging", async () => {
+  // Learn a free port, then close it so the forward genuinely refuses.
+  const probe = createNetServer(() => {});
+  await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
+  const deadPort = (probe.address() as AddressInfo).port;
+  await new Promise<void>((resolve) => probe.close(() => resolve()));
+
+  const relay = await startStubRelay(ENROLLMENT_TOKEN);
+  const captured = captureLog();
+  let client: RelayClientHandle | undefined;
+  try {
+    client = runRelayClient({
+      relayUrl: relay.relayUrl,
+      enrollmentToken: ENROLLMENT_TOKEN,
+      localBaseUrl: `http://127.0.0.1:${deadPort}`,
+      log: captured.log,
+    });
+    await relay.helloSeen;
+
+    const tunneled = await relay.proxy({ method: "GET", path: "/state", headers: {} });
+    assert.equal(tunneled.status, 502);
+    assert.ok(captured.find("relay.forward_error"), "the refused forward must be logged with its reason");
+  } finally {
+    client?.stop();
+    await relay.close();
+  }
+});
+
+test("relay: a local response that dies mid-body still terminates the exchange instead of leaking it", async () => {
+  // A raw local 'console' that answers a valid head, starts a body it never finishes, and then
+  // destroys the connection -- the shape of `rmd serve` being killed mid-SSE-stream.
+  const abrupt = createNetServer((socket) => {
+    socket.on("error", () => {});
+    socket.once("data", () => {
+      socket.write("HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n");
+      socket.write("partial");
+      setTimeout(() => socket.destroy(), 20);
+    });
+  });
+  await new Promise<void>((resolve) => abrupt.listen(0, "127.0.0.1", resolve));
+  const abruptPort = (abrupt.address() as AddressInfo).port;
+
+  const relay = await startStubRelay(ENROLLMENT_TOKEN);
+  const captured = captureLog();
+  let client: RelayClientHandle | undefined;
+  try {
+    client = runRelayClient({
+      relayUrl: relay.relayUrl,
+      enrollmentToken: ENROLLMENT_TOKEN,
+      localBaseUrl: `http://127.0.0.1:${abruptPort}`,
+      log: captured.log,
+    });
+    await relay.helloSeen;
+
+    // proxy() resolves only on res_end, so this returning at all IS the assertion that the
+    // aborted local response was terminated rather than left dangling.
+    const tunneled = await relay.proxy({ method: "GET", path: "/state", headers: {} });
+    assert.equal(tunneled.status, 200, "the head had already been forwarded before the abort");
+    assert.ok(captured.find("relay.forward_response_error"), "the aborted response must be logged");
+  } finally {
+    client?.stop();
+    await relay.close();
+    await new Promise<void>((resolve) => abrupt.close(() => resolve()));
+  }
+});
+
+test("relay: a malformed frame is logged and dropped without killing the connection", async () => {
+  const local = await startLocalServe();
+  const relay = await startStubRelay(ENROLLMENT_TOKEN);
+  const captured = captureLog();
+  let client: RelayClientHandle | undefined;
+  try {
+    client = runRelayClient({
+      relayUrl: relay.relayUrl,
+      enrollmentToken: ENROLLMENT_TOKEN,
+      localBaseUrl: local.baseUrl,
+      log: captured.log,
+    });
+    await relay.helloSeen;
+
+    relay.sendRaw("{ this is not json\n");
+    await waitFor(() => captured.steps().includes("relay.bad_frame"));
+
+    // THE POINT: the tunnel still works after the garbage -- one bad frame is not a disconnect.
+    const after = await relay.proxy({ method: "GET", path: "/state", headers: { authorization: `Bearer ${READ_TOKEN}` } });
+    assert.equal(after.status, 200);
+    assert.deepEqual(JSON.parse(after.body.toString("utf8")), STATE_BODY);
+  } finally {
+    client?.stop();
+    await relay.close();
+    await local.close();
+  }
+});
+
+test("relay: a rejected enrollment token is logged and the connection dropped, never retried as if authorised", async () => {
+  const local = await startLocalServe();
+  const relay = await startStubRelay(ENROLLMENT_TOKEN);
+  const captured = captureLog();
+  let client: RelayClientHandle | undefined;
+  try {
+    client = runRelayClient({
+      relayUrl: relay.relayUrl,
+      enrollmentToken: "the-wrong-token",
+      localBaseUrl: local.baseUrl,
+      log: captured.log,
+      backoff: { initialMs: 10_000, factor: 1, maxMs: 10_000 }, // no reconnect inside this test
+    });
+
+    const hello = await relay.helloSeen;
+    assert.equal(hello.ok, false, "the stub relay must have refused this token");
+    await waitFor(() => captured.steps().includes("relay.hello_reject"));
+    assert.equal(captured.find("relay.hello_reject")?.reason, "bad token");
+  } finally {
+    client?.stop();
+    await relay.close();
+    await local.close();
+  }
+});
+
+test("relay: a malformed relay URL is reported once and does NOT spin in a reconnect loop", async () => {
+  const captured = captureLog();
+  const client = runRelayClient({
+    relayUrl: "not a url",
+    enrollmentToken: ENROLLMENT_TOKEN,
+    localBaseUrl: "http://127.0.0.1:1",
+    log: captured.log,
+    backoff: { initialMs: 5, factor: 1, maxMs: 5 },
+  });
+  try {
+    assert.deepEqual(captured.steps(), ["relay.bad_url"]);
+    assert.equal(captured.find("relay.bad_url")?.relayUrl, "not a url");
+
+    // A config error must not be retried forever: after a window that would have allowed many
+    // 5ms reconnects, the count is still exactly one.
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.deepEqual(captured.steps(), ["relay.bad_url"], "a bad URL must be logged once, not per retry");
+  } finally {
+    client.stop();
   }
 });
 
