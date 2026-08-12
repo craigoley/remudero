@@ -1346,6 +1346,70 @@ function ownsBranch(head: string | undefined, taskId: string): boolean {
   return new RegExp(`^run-${escapeRegExp(taskId)}-\\d+$`).test(head);
 }
 
+/** What is known about one remote branch, gathered by the caller (W1-T447). */
+export interface BranchFacts {
+  name: string;
+  /** The most decisive PR state for this head: a merged PR beats a closed one beats open. */
+  prState: "merged" | "closed" | "open" | "none";
+  /** `git merge-base --is-ancestor origin/<name> origin/main` SUCCEEDED — every commit is in main. */
+  tipInMain: boolean;
+  /** The branch NAME appears in `src/`, `scripts/`, `deploy/` or `.github/`. */
+  namedInSource: boolean;
+}
+
+/** The dry run's answer: three disjoint buckets plus the drift alarm (W1-T447). */
+export interface BranchReapPlan {
+  deletable: string[];
+  guarded: string[];
+  hold: string[];
+  /** Branches the NAME GREP protects that the declared list does not — the drift signal. */
+  undeclaredGuards: string[];
+}
+
+/**
+ * Classify remote branches for a DRY-RUN reap. PURE: no git, no network, no deletion —
+ * the caller gathers {@link BranchFacts} and decides what to do with the answer.
+ *
+ * PROTECTION IS EVALUATED FIRST AND WINS OUTRIGHT, and that ordering is the whole safety
+ * argument rather than a detail. `decisions-landing` is simultaneously the head of a MERGED PR
+ * (so the delete rule matches it) and a live code constant (`DECISIONS_LANDING_BRANCH` in
+ * feedback-landing.ts) — evaluated the other way round, the fleet would delete a branch its own
+ * source names. `heartbeat` is the same shape against the recency rule: it carries no PR at all
+ * and is force-pushed as a PARENTLESS ROOT COMMIT every five minutes, so ordinary history
+ * heuristics misread it while the name grep does not.
+ *
+ * DELETABLE IS THREE DISJUNCTS and the third is the one needing no trust: a merged PR head, a
+ * closed-unmerged PR head, or NO PR with a tip already an ancestor of main — the last means every
+ * commit exists in main already, so removing the ref cannot lose information. An OPEN PR is never
+ * deletable; it lands in `hold` rather than `guarded` because it is in use, not infrastructure.
+ *
+ * `undeclaredGuards` IS AN ALARM, NOT A RESULT. A declared list alone rots — measured repeatedly
+ * here — and a name grep alone cannot see a branch referenced only through a variable
+ * (`LANDING_BRANCH` recreates `feedback-landing` on the next landFeedback, when no branch of that
+ * name exists to be found). So both run, and a guard the grep finds but the list omits is
+ * REPORTED so it fails loudly rather than being swept in silence.
+ */
+export function planBranchReap(
+  facts: readonly BranchFacts[],
+  declaredGuards: readonly string[],
+): BranchReapPlan {
+  const declared = new Set(declaredGuards);
+  const plan: BranchReapPlan = { deletable: [], guarded: [], hold: [], undeclaredGuards: [] };
+  for (const f of facts) {
+    // `main` is never a candidate, whatever else is true of it.
+    const isGuarded = f.name === "main" || f.namedInSource || declared.has(f.name);
+    if (isGuarded) {
+      plan.guarded.push(f.name);
+      if (f.namedInSource && !declared.has(f.name) && f.name !== "main") plan.undeclaredGuards.push(f.name);
+      continue;
+    }
+    const deletable =
+      f.prState === "merged" || f.prState === "closed" || (f.prState === "none" && f.tipInMain);
+    (deletable ? plan.deletable : plan.hold).push(f.name);
+  }
+  return plan;
+}
+
 /**
  * The BARE run-branch form: `run-<taskId>` with no `-<epochMs>` suffix. Older/hand
  * dispatches produced it (W1-T152's own merged PR #793 is exactly this shape), so it
