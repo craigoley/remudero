@@ -74,10 +74,16 @@
   risk: high
   origin: recon#branch-accumulation-2026-08-12
   plan_refs: ["W1-T119", "P48"]
-  files: [src/run-task.ts, src/lib/status.ts, test/branch-reaper-dry-run.test.ts, test/sweep.test.ts]
+  files: [src/run-task.ts, src/lib/status.ts, docs/cli-reference.md, docs/operator-guide.md, test/branch-reaper-dry-run.test.ts, test/sweep.test.ts]
   status: queued
   attempts: 0
-  note: "verify:human — TWO rulings are needed and neither is an engineering call. FIRST, whether the
+  note: "CORRECTION MADE WHILE BUILDING THIS: `docs/cli-reference.md` and `docs/operator-guide.md`
+    WERE ADDED to files:. A new CLI verb is not a src-only change — `generate-cli-reference --check`
+    byte-compares the committed reference on every PR, and `docs-claims` asserts the operator
+    guide covers every COMMANDS registry verb. BOTH went red on the first full glob and both are
+    gates doing their job. That is the SIXTH files: correction this week; the pattern is that a
+    files: list is written from the code the author pictures, not from the gates that observe it.
+    verify:human — TWO rulings are needed and neither is an engineering call. FIRST, whether the
     fleet may ever delete a remote branch autonomously; this task builds only the dry run, so the
     ruling can wait, but the second version cannot start without it. SECOND, the 46 no-PR branches:
     the evidence says they are abandoned attempts of tasks that all shipped, and the failure
