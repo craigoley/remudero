@@ -14453,9 +14453,10 @@ export function runFeedbackDocketRung(
   ledgerPath: string,
   runId: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
-  deps: { root?: string; now?: () => Date } = {},
+  deps: { root?: string; now?: () => Date; synthesize?: typeof synthesizeFeedbackDocketProposal } = {},
 ): { fired: boolean } {
   const root = deps.root ?? repoRoot;
+  const synthesize = deps.synthesize ?? synthesizeFeedbackDocketProposal;
   try {
     const now = deps.now?.() ?? new Date();
     const markerPath = join(config.root, "state", "last-feedback-docket.json");
@@ -14483,7 +14484,7 @@ export function runFeedbackDocketRung(
       return { fired: false };
     }
 
-    const result = synthesizeFeedbackDocketProposal(docket);
+    const result = synthesize(docket);
     if (result.kind === "empty") {
       log("feedback_docket.empty", { window, counts_by_source: docket.countsBySource });
       return { fired: false };

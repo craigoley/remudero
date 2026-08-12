@@ -8,7 +8,9 @@ import {
   extractReferent,
   feedbackDocketDue,
   feedbackDocketLookbackWindow,
+  readFeedbackDocketMarker,
   synthesizeFeedbackDocketProposal,
+  writeFeedbackDocketMarker,
   type FeedbackDocketWindow,
   type RawFeedbackDocketInputs,
 } from "../src/lib/feedback-docket.js";
@@ -175,6 +177,31 @@ test("feedbackDocketDue: never twice inside a rolling 7-day period", () => {
   assert.equal(feedbackDocketDue({ lastFireIso: "not-a-date" }, now), true, "a corrupt marker fails open, not closed");
 });
 
+test("readFeedbackDocketMarker: absent file, malformed shape, and unparseable JSON all fail open", () => {
+  const dir = tmp("rmd-fd-marker-");
+  try {
+    const path = join(dir, "last-feedback-docket.json");
+    assert.equal(readFeedbackDocketMarker(path), undefined, "no file at all: fails open");
+
+    writeFileSync(path, "not json at all {{{");
+    assert.equal(readFeedbackDocketMarker(path), undefined, "unparseable JSON: the catch branch fails open, not throws");
+
+    writeFileSync(path, JSON.stringify({ lastFireIso: 12345 }));
+    assert.equal(readFeedbackDocketMarker(path), undefined, "wrong-typed field: fails open");
+
+    writeFileSync(path, JSON.stringify(["not", "an", "object"]));
+    assert.equal(readFeedbackDocketMarker(path), undefined, "non-object JSON: fails open");
+
+    writeFileSync(path, JSON.stringify({ lastFireIso: "2026-08-01T00:00:00.000Z" }));
+    assert.deepEqual(readFeedbackDocketMarker(path), { lastFireIso: "2026-08-01T00:00:00.000Z" }, "a well-formed marker round-trips");
+
+    writeFeedbackDocketMarker(path, { lastFireIso: "2026-08-02T00:00:00.000Z" });
+    assert.deepEqual(readFeedbackDocketMarker(path), { lastFireIso: "2026-08-02T00:00:00.000Z" }, "write then read round-trips");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("feedbackDocketLookbackWindow: a 7-day window ending at now", () => {
   const now = new Date("2026-08-10T12:00:00.000Z");
   const w = feedbackDocketLookbackWindow(now);
@@ -335,6 +362,76 @@ test("runFeedbackDocketRung: gathers rejected-feedback, question-answer, and ope
     assert.match(proposals[0].summary, /note text on the same subject \[Shared-Rule\]/);
   } finally {
     rmSync(instanceRoot, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("runFeedbackDocketRung: a non-empty docket whose synthesis still reports empty ledgers feedback_docket.empty", async () => {
+  const { runFeedbackDocketRung } = await import("../src/run-task.js");
+  const instanceRoot = tmp("rmd-fd-synthempty-instance-");
+  const repo = tmp("rmd-fd-synthempty-repo-");
+  try {
+    const config = { root: instanceRoot } as never;
+    const ledgerPath = join(instanceRoot, "state", "ledger.ndjson");
+    const now = new Date("2026-08-10T00:00:00.000Z");
+
+    appendLedger(ledgerPath, {
+      run_id: "r1",
+      task_id: "P1",
+      step: "ratify.reframed",
+      feedback: "one item, non-empty docket [CLAUDE.md#7]",
+      ts: "2026-08-04T00:00:00.000Z",
+    });
+
+    const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+    const log = (step: string, extra: Record<string, unknown> = {}) => lines.push({ step, extra });
+
+    // Injected: even though the docket itself is non-empty (an item was gathered above),
+    // the synthesis step is forced to report `{kind: "empty"}` — this is the seam covering
+    // that second, defensive empty-check inside the rung (as distinct from the docket-level
+    // empty-window check the earlier test above exercises).
+    const outcome = runFeedbackDocketRung(config, ledgerPath, "run-1", log, {
+      root: repo,
+      now: () => now,
+      synthesize: () => ({ kind: "empty" }),
+    });
+
+    assert.equal(outcome.fired, false);
+    assert.equal(lines.filter((l) => l.step === "feedback_docket.empty").length, 1);
+    assert.equal(lines.filter((l) => l.step === "feedback_docket.published").length, 0);
+
+    const { existsSync } = await import("node:fs");
+    const registryPath = join(instanceRoot, "state", "inbox-proposals.json");
+    assert.equal(existsSync(registryPath), false, "a forced-empty synthesis result files no proposal");
+  } finally {
+    rmSync(instanceRoot, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("runFeedbackDocketRung: a marker-write failure is caught, ledgers feedback_docket.error, and never throws", async () => {
+  const { runFeedbackDocketRung } = await import("../src/run-task.js");
+  // `instanceRoot` is a FILE, not a directory: `config.root/state/...` can never be created,
+  // so `writeFeedbackDocketMarker`'s mkdirSync throws — exercising the rung's own try/catch
+  // (its doc: "a read failure here must never take down the sweep composite it rides inside").
+  const instanceRoot = tmp("rmd-fd-errfile-instance-");
+  rmSync(instanceRoot, { recursive: true, force: true });
+  writeFileSync(instanceRoot, "i am a file, not a directory");
+  const repo = tmp("rmd-fd-errfile-repo-");
+  try {
+    const config = { root: instanceRoot } as never;
+    const ledgerPath = join(instanceRoot, "state", "ledger.ndjson");
+    const now = new Date("2026-08-10T00:00:00.000Z");
+
+    const lines: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+    const log = (step: string, extra?: Record<string, unknown>) => lines.push({ step, extra });
+
+    const outcome = runFeedbackDocketRung(config, ledgerPath, "run-1", log, { root: repo, now: () => now });
+
+    assert.equal(outcome.fired, false, "a caught internal error never reports fired");
+    assert.equal(lines.filter((l) => l.step === "feedback_docket.error").length, 1, "the failure is ledgered, not swallowed silently");
+  } finally {
+    rmSync(instanceRoot, { force: true });
     rmSync(repo, { recursive: true, force: true });
   }
 });
