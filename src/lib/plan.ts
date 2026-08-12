@@ -99,6 +99,17 @@ export interface Task {
    */
   risk: TaskRisk;
   /**
+   * OPTIONAL dispatch priority (lower dispatches sooner; absent ⇒ the default tier,
+   * ordered after every task that carries one). The honest successor to file
+   * placement in `plan/tasks.yaml`, which `dispatchOrder` (lib/drain.ts) deliberately
+   * stopped reading — see that function's impl-DQ comment for the full history. Read
+   * ONLY by `compareDispatch`; parsing tolerates absence everywhere, so every task
+   * filed before this field existed is unaffected. The §5C linter's `dispatch-priority`
+   * check (lib/task-linter.ts) WARNS on a value outside [0, 99] or set on a non-open
+   * task, so a stray value degrades to odd ordering rather than rotting silently.
+   */
+  priority?: number;
+  /**
    * DECORATIVE / initial-state only. Real merge-state is DERIVED FROM GITHUB
    * (see lib/status.ts deriveStatus) and never written back here. Kept so the
    * schema is stable and a fresh plan reads sensibly.
@@ -202,6 +213,7 @@ export function parseTasksFromYaml(text: string, sourceLabel: string): Task[] {
       type: req(e.type as Task["type"], "type", id),
       verify: (e.verify as Task["verify"]) ?? "auto",
       risk,
+      priority: typeof e.priority === "number" ? e.priority : undefined,
       status,
       attempts: typeof e.attempts === "number" ? e.attempts : 0,
       principles: e.principles as Record<string, unknown> | undefined,
