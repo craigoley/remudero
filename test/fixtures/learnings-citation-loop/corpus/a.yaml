@@ -1,0 +1,10 @@
+- id: alpha-cited
+  fact: "Alpha fact for the citation loop fixture."
+  src: test
+  files: [x]
+  cited: "2026-07-01"
+  cited_count: 9
+- id: beta-never-cited
+  fact: "Beta fact for the citation loop fixture."
+  src: test
+  files: [y]
