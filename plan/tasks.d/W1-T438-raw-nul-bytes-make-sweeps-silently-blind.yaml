@@ -1,0 +1,134 @@
+- id: W1-T438
+  title: "five raw NUL bytes across four tracked sources make the harness `grep` skip those files ENTIRELY — silent, exit 1, indistinguishable from real absence — so every `files:` sweep, violation count and scope audit that touched them answered on a corpus it could not see: write the separator as the `\\0` ESCAPE and gate the class shut"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "RECON 2026-08-11 (PR #1598, which shipped the interim CLAUDE.md rule), evidence
+    re-derived at 0b9d564. THIS TASK IS THE DURABLE HALF; the rule is the half that binds today.
+    THE DEFECT, and it is two independent facts composing rather than one bug:
+    (1) FOUR TRACKED SOURCES CARRY A RAW NUL BYTE, five bytes in total. `criterionKey`
+    (`src/lib/task-linter.ts`) and `hashToolCall` (`src/lib/flight-signals.ts`) use it as a field
+    separator in a composite key — an unambiguous delimiter, which is a GOOD reason; the
+    `HAZARDS` fuzz alphabets in `test/gate-properties.test.ts` and `test/property-parsers.test.ts`
+    carry it as deliberate parser-hostile input. NONE OF THIS IS CORRUPTION and none of it should
+    be deleted. `git check-attr -a` returns nothing on all four, so `.gitattributes` is not
+    involved.
+    (2) THE `grep` IN THE AGENT HARNESS IS A ugrep WRAPPER WITH `-I` (ignore-binary) INJECTED into
+    every invocation, so a file holding one NUL is skipped whole — no output, exit 1. MEASURED:
+    `grep -rl criterionKey src/` returns EMPTY while `grep -arl` returns the file. BARE `rg` IS
+    BLIND THE SAME WAY in a directory sweep. `/usr/bin/grep` is NOT affected, which is why this
+    survived unnoticed: a human at a terminal never sees it, and only agent sessions are blinded.
+    WHY THIS IS WORTH A TASK RATHER THAN A CONVENTION. The repo's filing and audit discipline rests
+    on sweeps — `grep -rl <symbol> test/` before declaring `files:`, `grep -c` for violation counts,
+    symbol sweeps for scope audits. Every one returns a FALSE NEGATIVE on these four, and a false
+    negative in a `files:` sweep is not cosmetic: it produces a shard whose declared scope is short,
+    which the scope guard then refuses AFTER the work is done. Law 4 says a convention binds only
+    where compliance is verifiable at invocation, and `did you pass -a` is invisible in a diff — so
+    the CLAUDE.md rule shipped in #1598 cannot bind. THIS CAN.
+    THE POPULATION IS EXACTLY FOUR AND WAS SWEPT MECHANICALLY, not sampled:
+    `git ls-files -z | xargs -0 perl -0777 -ne 'print \"$ARGV\\n\" if /\\0/'` returns seven paths —
+    three PNGs, which are legitimately binary and must keep passing, and these four sources.
+    DO NOT USE `git grep --cached -I -l ''` to re-derive this: it under-reports by half, because git
+    sniffs only the first 8000 bytes and two of the four carry their NUL past it (offsets 51271 and
+    8609 versus 5864 and 2660). The recon used it first and was misled.
+    WHAT IS ALREADY KNOWN TO HAVE BEEN MISMEASURED, so the implementer does not re-litigate it:
+    four of five audited sweeps are CLEAN (the W1-T407/408/409 `files:` sweeps have no functional
+    coupling to these files — every symbol hit is a doc comment or an error string; the P48 face-2
+    sweep's only candidate site here is P48-COMPLIANT; the 29-`state/`-paths census matches none of
+    the four). ONE HAS A REAL OVERLAP AND IS NOW UNVERIFIABLE: the guard-complement map's 22-guard
+    count had `src/lib/task-linter.ts` in its corpus (W1-T428 declares that file) and that file
+    holds 14 distinct `check:` ids, but the map was written to `state/recon-guard-complements.md`
+    and no longer exists. That is the already-recorded `state/`-is-scratch defect, not this one.
+    P48 CONNECTION, recorded because it is the standing proposal this instance tests: P48 (no naked
+    zero) predicts the next instance is triggered by an ENVIRONMENT SHIFT A QUERY PREDATES rather
+    than a code edit. A harness grep that became ugrep-with-`-I` underneath queries written for GNU
+    grep is exactly that shape, face 1 — undercount-as-answer. This task does not change P48's
+    status; it is cited so the ratification has one more measured instance."
+  design: "(i) THE FIX IS THE ESCAPE, NOT DELETION, AND IT IS PROVABLY A NO-OP. Replace each raw NUL
+    BYTE in the source text with the two-character `\\0` ESCAPE. VERIFIED IN NODE at 0b9d564, all
+    four properties: the strings compare equal, they have the same byte length, the same comparison
+    holds inside a template literal (the shape `criterionKey` and `hashToolCall` actually use), and
+    — the one that matters — THE SHA256 IS IDENTICAL. That last check is load-bearing rather than
+    decorative: `hashToolCall` HASHES the composite key for repetition detection, so a fix that
+    perturbed the digest would silently invalidate every historical comparison. It does not.
+    A file written with the escape contains NO raw NUL, so `file` classifies it as text and every
+    sweep tool sees it again. The runtime VALUE is unchanged everywhere, including the two `HAZARDS`
+    alphabets, which must keep feeding a real NUL character to the parsers under test — the point of
+    those entries is parser-hostile INPUT, and that is preserved exactly. Changing the value would
+    weaken a real test; changing only the spelling is the whole task.
+    (ii) THE GATE MUST BE A TEST, NOT A ci.yml JOB, AND THIS IS A HARD CONSTRAINT RATHER THAN A
+    PREFERENCE. `judgeReview`'s instrument-isolation predicate (Standing rule 25, W1-T297) FORCES
+    the review state to failure — never suppressible by `applyVerdictStability` — when a diff
+    contains an `INSTRUMENT_SURFACE` path AND at least one `isProductPath` src/ path. Adding a job
+    to `.github/workflows/ci.yml` matches `^\\.github/workflows/`, and this task must edit
+    `src/lib/task-linter.ts` and `src/lib/flight-signals.ts`, so a workflow-wired gate would fail
+    the PR BY CONSTRUCTION however good the work is. `isProductPath` EXCLUDES `test/`, so a
+    test-implemented gate is entangled with nothing and the whole task stays one PR.
+    THE PRECEDENT EXISTS AND IS IDIOMATIC: four suites already enumerate tracked files by shelling
+    `git ls-files` from the repo root — `test/instrument-surface-completeness.test.ts`,
+    `test/enforcement-data-carveout.test.ts`, `test/checkout-writers.test.ts` and
+    `test/moving-base-changed-files.test.ts`. Follow that shape; it runs inside the existing `ci`
+    job's `npm run test:ci` and needs no new wiring at all.
+    (iii) THE GATE MUST NOT BAN LEGITIMATE BINARIES, and how it separates them is the one real
+    implementation choice. Three tracked PNGs contain NULs correctly and must keep passing. Two
+    shapes both work and neither is mandated here: filter by SOURCE EXTENSION (assert only over
+    `.ts`/`.mjs`/`.js`/`.json`/`.yaml`/`.yml`/`.md`), which has no list to rot but silently ignores
+    an extension nobody thought of; or a DECLARED ALLOWLIST of binary paths plus a drift check in
+    the `ci-parity:drift` shape, which cannot be quietly out-grown but is more machinery for a
+    population of three. Prefer the extension filter unless the implementer finds a tracked source
+    the filter misses — and if so, say which, because that is the argument for the allowlist.
+    WHAT THE GATE MUST DO IN EITHER SHAPE: fail on a raw NUL in a covered file, and NAME THE FILE.
+    A gate that fails without naming the path reproduces this defect's own signature — an answer
+    that does not say what it could not see.
+    (iv) UPDATE THE COMMENT THAT DOCUMENTS THE HAZARD. `test/property-parsers.test.ts` carries a
+    comment reading, of its NUL entry, `the NUL bytes in flight-signals.ts / task-linter.ts that
+    made grep silent`. After this task that sentence is FALSE in the present tense and the file is
+    one of the four being edited anyway. Rewrite it to record that the raw bytes are gone, that the
+    escape is now required, and that the new gate is what keeps them gone — the comment is the
+    nearest thing this defect had to a record, and it should end up pointing at the fix rather than
+    at a condition that no longer holds.
+    (v) NOT IN SCOPE, NAMED SO IT IS NOT INFERRED: the CLAUDE.md rule shipped in #1598 stays as
+    written. It is correct for as long as any raw NUL exists anywhere, it covers the mawk sibling
+    in the same bullet, and it already describes itself as interim and points at this fix. Deleting
+    or trimming it belongs to whoever confirms the gate is live, not to this task — and a plan/doc
+    edit riding alongside this src/+test/ diff would cost the PR its clean shape for no gain."
+  acceptance:
+    - claim: "a tracked source file carrying a raw NUL byte fails the check, and the failure names the offending path"
+      proof: "unit test: test/no-raw-nul.test.ts"
+    - claim: "the three tracked PNGs still pass, so the gate refuses raw NULs in sources without banning legitimately binary files"
+      proof: "unit test: test/no-raw-nul.test.ts"
+    - claim: "none of the four previously-blind sources contains a raw NUL any more, so a plain recursive sweep finds symbols in them again"
+      proof: "unit test: test/no-raw-nul.test.ts"
+    - claim: "the escape swap is a no-op: the composite keys compare equal and hash to the same sha256 as the raw form"
+      proof: "unit test: test/nul-escape-equivalence.test.ts"
+  risk: high
+  origin: recon#binary-grep-blindness-2026-08-11
+  plan_refs: ["P48", "W1-T297", "W1-T402"]
+  files: [src/lib/task-linter.ts, src/lib/flight-signals.ts, test/gate-properties.test.ts, test/property-parsers.test.ts, test/no-raw-nul.test.ts, test/nul-escape-equivalence.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — nothing here needs an operator ruling. The tier of judgement this task
+    requires is bounded by design (iii)'s one choice, and both options are named with the condition
+    that decides between them, so a worker does not have to infer a design the plan withheld.
+    risk:high is Rule 19's SPAN, not blast radius. `subsystemsOf` reads `files:` AND acceptance
+    text, and this set crosses `src/lib` and `test/`, which is >=2 subsystems and would be a sizing
+    violation at any lower band. The band is raised UP FRONT rather than shipped as a violation —
+    the W1-T400/W1-T407 lesson. The actual blast radius is small: five bytes of source text, and
+    design (i) proves the runtime behaviour is unchanged.
+    THE `files:` SET IS THE WHOLE POPULATION PLUS ITS FALSIFIERS, and it is complete BY
+    CONSTRUCTION rather than by sweep — the four source paths are exactly the mechanical NUL scan's
+    non-PNG output, so unlike an ordinary `files:` list this one cannot be short. That matters here
+    more than usual, because a short `files:` list is the very failure this defect causes elsewhere.
+    Both new test paths are forward references to PATHS, never to symbols: a path forward-reference
+    is safe and a symbol one is a guess, and a `grep:` proof naming an existing symbol would match
+    the merge base as well as the head and be downgraded to a stale proof that discriminates
+    nothing. Three criteria share one proof file deliberately — they are three distinct assertions
+    that the same suite must carry, and in the pure-path form the proof executes the whole file.
+    budget_usd 60 — the edit itself is five bytes, so the budget is almost entirely the new gate
+    plus its two falsifier directions (a planted NUL must fail, a PNG must not) and the equivalence
+    suite. Lower than a normal implement task because there is no design to discover.
+    NO COUNT IN THIS SHARD SHOULD BE QUOTED FORWARD; the NUL scan is one command and re-running it
+    is cheaper than trusting a number."
