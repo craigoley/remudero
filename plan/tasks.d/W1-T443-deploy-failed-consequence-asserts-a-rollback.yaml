@@ -1,0 +1,89 @@
+- id: W1-T443
+  title: "the DEPLOY_FAILED latch tells the operator the checkout was ROLLED BACK and the daemon is on the PRIOR head — for a dirty-tree abort that is false on both counts, and the row ignores the `kind` field the deployer already writes to tell them apart"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: "FOUND while reconning why DEPLOY_FAILED fired repeatedly on 2026-08-12 and the daemon
+    sat behind origin/main. Re-derived at 6c23dec8.
+    THE DEFECT, QUOTED FROM SOURCE. `STATIC_LATCHES` (`src/lib/status-board.ts`) builds the
+    DEPLOY_FAILED row with a `consequence` that opens, unconditionally,
+    `the checkout was rolled back — the daemon is running the PRIOR head`. It then appends the
+    failure `message` and `failedHead` from the alert JSON. It never reads `json.kind`.
+    THAT SENTENCE IS FALSE FOR ONE OF THE TWO KINDS. `DeployFailureKind` (`src/lib/deployer.ts`) is
+    exactly `dirty-tree-conflict | health-check-rollback`, and ONLY the health-check path rolls
+    anything back — it is the sole caller of `deps.resetHard`. The dirty-tree path returns
+    `{ deployed: false, reason: dirty-tree-conflict }` immediately after `deps.alert`, BEFORE
+    `pullFf` is ever reached, so nothing is pulled, nothing is reset, and the daemon keeps running
+    precisely the head it was already on. There is no prior head to be on.
+    MEASURED LIVE ON THE MINI, 2026-08-12T18:04Z — the rendered row, verbatim:
+    `DEPLOY_FAILED, 36m36s — the checkout was rolled back — the daemon is running the PRIOR head
+    (deploy aborted: locally-modified files conflict with the fast-forward: src/lib/worker.ts,
+    src/run-task.ts; failed head db6acf9096ca)`. The parenthetical is accurate and the clause in
+    front of it is not, and the two disagree about what happened inside one sentence.
+    WHAT IS ALREADY CORRECT AND MUST NOT BE TOUCHED, so the work does not re-litigate it:
+      - THE CONFLICTING FILE LIST ALREADY REACHES THE OPERATOR. It is inside `message`
+        (`deploy aborted: locally-modified files conflict with the fast-forward: <paths>`), so it
+        renders in the latch row today. A first pass at this recon grepped the surfaces for the
+        identifier `conflicting`, found nothing, and concluded the list was missing — WRONG, and
+        recorded here so nobody re-files that. The list travels as prose inside a string, not as a
+        field. Whether it should ALSO be a field is a separate question this task does not open.
+      - SUPERSESSION WORKS. `superseded` correctly dropped the `next action` for this latch once
+        origin/main moved past `failedHead` (W1-T431/#1644 shape), and the record was kept. Verified
+        in the same render: the row is present and carries no instruction.
+      - `describeFailureKind` ALREADY EXISTS in deployer.ts and already maps both kinds to English.
+        Nothing new needs inventing to tell them apart."
+  design: "(i) THE ROW MUST BRANCH ON `kind`, WHICH IS ALREADY IN THE FILE IT READS. The alert JSON
+    written by `writeDeployFailedAlert` carries `kind`, and `consequence` is handed that whole JSON
+    object — so the fix is a read of a field already present, not new plumbing and not a new
+    deployer output. Fall back to the CURRENT wording only when `kind` is absent or unrecognised: an
+    older alert file predates nothing here, but a latch that cannot read its own kind must not
+    silently pick one of two contradictory stories.
+    (ii) WHAT THE DIRTY-TREE ARM SHOULD SAY, and the constraint is honesty rather than length. It
+    must not claim a rollback. It should say the fast-forward DID NOT HAPPEN, that the named paths
+    are UNCOMMITTED LOCAL CHANGES in the install checkout, and that the daemon is still on its
+    existing head. The paths themselves already arrive in `message` — do not duplicate them.
+    (iii) DO NOT RESTATE `describeFailureKind`. If its wording fits, import and use it; if it does
+    not, the row's own strings are the right home and that function stays unchanged. Two spellings
+    of the same distinction is the defect this task is fixing, one level up.
+    (iv) THE SECOND ARM IS NOT ASSUMED CORRECT EITHER — ESTABLISH IT. The rollback wording was
+    written for `health-check-rollback` and is probably right there, but the work should confirm
+    from `runDeployCycle` that the rollback arm does reset to a PRIOR head before asserting it,
+    rather than inheriting today's sentence untested.
+    (v) NOT IN SCOPE — the transient-dirty question. The same recon found the paths named in these
+    aborts were byte-identical to origin/main minutes later, their mtimes matching the reflog
+    entries of fast-forwards, with `deploy.discarded_identical` recording the same phenomenon on its
+    benign side. Whether the deploy is racing `checkCliFreshness` for one working tree is a real and
+    separate question about the GUARD. This task changes only what the operator is TOLD after it
+    fires, and must not move the guard."
+  acceptance:
+    - claim: "a dirty-tree abort never tells the operator the checkout was rolled back"
+      proof: "unit test: test/deploy-failed-consequence-kind.test.ts"
+    - claim: "a dirty-tree abort says the fast-forward did not happen and the daemon is on its existing head"
+      proof: "unit test: test/deploy-failed-consequence-kind.test.ts"
+    - claim: "a health-check rollback still reports the rollback it really performed"
+      proof: "unit test: test/deploy-failed-consequence-kind.test.ts"
+    - claim: "an alert file with no recognisable kind degrades to a statement that commits to neither story"
+      proof: "unit test: test/deploy-failed-consequence-kind.test.ts"
+  risk: high
+  origin: recon#deploy-failed-dirty-tree-2026-08-12
+  plan_refs: ["W1-T431", "P48"]
+  files: [src/lib/status-board.ts, test/deploy-failed-consequence-kind.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — the operator ruling this might have needed (which of the two stories is true)
+    is settled by source, not by preference: only the health-check path calls `resetHard`.
+    risk:high is Rule 19's SPAN, not blast radius — `subsystemsOf` reads `files:` plus acceptance
+    text and this set crosses `src/lib` and `test/`, which is >=2 subsystems and a sizing violation
+    at any lower band. Raised up front, the W1-T400/W1-T407 lesson. The change itself is one branch
+    on a field already in hand.
+    THE PROOF IS A FORWARD REFERENCE TO A PATH, never to a symbol: a path forward-reference is safe,
+    a symbol one is a guess, and a `grep:` proof naming an existing symbol would match the merge
+    base as well as the head and be downgraded to `executed_stale`.
+    THE FALSIFIER HAS AN OBVIOUS CHEAP FORM AND IT IS THE WRONG ONE. Asserting the absence of the
+    substring `rolled back` passes for a row that says nothing at all. Assert what the dirty-tree
+    arm DOES say as well as what it does not.
+    NO COUNT OR AGE HERE SHOULD BE QUOTED FORWARD — the 36m36s and the five aborts on 2026-08-12
+    were true at 18:04Z and the latch clears whenever an operator removes the file."
