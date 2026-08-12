@@ -147,8 +147,27 @@ forensic detail, so the narrative does not need to live here.
   ledger-only scan cannot see it. A ledger-built set gave 236 ids and offered long-merged work as
   runnable, naming W1-T227/W1-T192 as the frontier when both had merged weeks earlier (#527, #457).
   Trailers give 301; unioned with the ledger, 311.
-  `gh api 'repos/craigoley/remudero/pulls?state=closed&per_page=100&page=N'`, filter
-  `merged_at != null`, match `^Remudero-Task: (\S+)$`. *(#984)*
+  **AND A TRAILER-ONLY SET UNDER-CREDITS, because the BRANCH NAME is a second, independent credit
+  path.** `findMergedByHeadBranch` (`status.ts`) matches `run-<taskId>-<digits>` on the STRUCTURED
+  head ref and credits a merge with no trailer at all. MEASURED: **#1657 carries ZERO
+  `Remudero-Task:` lines** (`grep -acE '^Remudero-Task:'` on its body = 0) and W1-T444 is credited
+  anyway, purely by its `run-W1-T444-1786560477` head. So union the two, or you will re-dispatch a
+  task that shipped.
+  **THE TWO SCOPE-TIME CHECKS, AS COMMANDS — RUN BOTH BEFORE BUILDING A FILED TASK.** They answer
+  DIFFERENT questions and neither substitutes for the other:
+  `git ls-remote --heads origin 'run-<id>-*'`   # is someone working on it RIGHT NOW
+  `gh api "repos/<owner>/<repo>/pulls?state=closed&per_page=100" --jq '[.[]|select(.merged_at!=null)|select(.body//""|test("(?m)^Remudero-Task:[ \t]*<id>[ \t]*$"))|.number]'`   # has it ALREADY SHIPPED
+  Anchor the trailer test exactly (`^Remudero-Task:\s*<id>\s*$`, multiline) — GitHub's search is NOT
+  exact-phrase, and unioning COMMIT SUBJECTS over-credits because `chore(plan): file W1-T411` names a
+  task the filing never implemented. Add the head-ref query above when the trailer scan returns zero.
+  **NAME A SESSION BRANCH `run-<taskId>-<epochMs>` WHEN BUILDING A FILED TASK.** It is the only thing
+  that makes session work visible to the fleet: `isDispatchEligible` (`drain.ts`) consults
+  `opts.isOpenPr`, and `projectPlan` attributes an OPEN PR by `/^run-(.+)-\d+$/` against
+  `headRefName` — NOT by the trailer — so a PR on `fix/…`, `docs/…`, `chore/…` or `claude/…` is
+  invisible to dispatch however it is trailered. MEASURED 2026-08-12: 70 merges, 29 `run-*` heads and
+  41 session-shaped — a MAJORITY invisible. The convention costs one branch name and does double
+  duty: visible to dispatch while open, and credited on merge even when the body forgets the trailer
+  (again, #1657). *(#984; the branch-name credit path and both commands added 2026-08-12)*
 - **Before believing "task X is next", confirm the frontier with the repo's own selector —
   `runnableCandidates(plan, isMerged, n)` — not the task a brief or retro names**, and feed it the
   trailer-built merged set above. W1-T169 was rank 23 behind three unmet deps, not the head. A
@@ -364,6 +383,17 @@ forensic detail, so the narrative does not need to live here.
   three-pattern idiom and the per-form control are under "Ledger and evidence discipline" above.
   THE GENERAL FORM: control on COVERAGE (did every form get opened?), not on READABILITY (did
   something match?). *(2026-08-12)*
+  **(d) A QUERY CAN ANSWER THE WRONG QUESTION WITH A PERFECTLY GOOD ZERO, AND NO POSITIVE CONTROL
+  SAVES YOU.** `git ls-remote --heads origin 'run-<id>-*'` reports live worker branches. GitHub
+  DELETES the head on merge, so it returns 0 for every COMPLETED task — MEASURED:
+  `run-W1-T444-1786560477` existed 19:01:20Z–19:25:15Z and the query reads 0 today, identical to a
+  task nobody ever started. A session read that zero as "not done", rebuilt W1-T444, and discarded a
+  full build when it found the work already merged as #1657. THIS IS THE CLAUSE THAT BREAKS THE
+  PATTERN: (a) is the wrong engine and (c) is incomplete coverage, both of which a control catches —
+  here the tool works, the corpus is right, and a control PASSES (an in-flight task really does
+  return 1). The defect is that "is anyone working on this" was read as "has this been done". When a
+  zero decides something, name the question the query actually answers, and find the OTHER query for
+  the other question — both are under "Plan and task hygiene" above. *(2026-08-12)*
 
 ## Operating this host
 
