@@ -939,3 +939,166 @@ W1-T343 must prove that rather than assume it.
   field nor its `acceptance:` block is touched — `status:` is decorative/never machine-rewritten
   (`plan/tasks.yaml`'s own header) and `satisfied_by` is Architect-only (Standing rule 15).
 - Rollback: revert this PR — removes only this DECISIONS.md entry; no runtime code touched.
+
+## 2026-08-11 — PROPOSAL (AWAITING RATIFICATION): keep the harness Apache-2.0; put the licence boundary at the relay
+
+**Operator direction record (not an auto-choose resolution, and NOT a ratification).** The operator
+directed this licence analysis in two briefs and supplied the constraint it solves; he has **not**
+ratified the recommendation below, and the W1-T352 provenance floor is satisfied by that direction
+record rather than by a `Chosen (RECOMMENDED, auto)` stamp — this entry is **not** a machine
+auto-choose and must not be read as one.
+
+*Session-authored PROPOSAL, not a ruling and not a machine auto-choose. Licence choice is an operator
+act; a session may recommend and may not record. **This PR no longer moves the licence.** It changes
+exactly one file — this one — so merging it records the reasoning and leaves `LICENSE`, `README.md`
+and `package.json` untouched. The FSL commit it previously carried is still in the branch history if
+the operator decides the other way.*
+
+**THIS IS NOT LEGAL ADVICE.** It is a source-derived options memo written by an agent. Everything
+below turns on copyright ownership, prior publication and EU regulatory scope, and warrants a
+lawyer's review **before** any licence position is presented publicly as settled.
+
+### This proposal REVERSES the recommendation this PR opened with
+
+The first draft recommended relicensing to FSL-1.1-ALv2. It rested on the operator's brief assuming
+the repository was **private** — inferred from `GH_TOKEN` being needed for a fetch. It is **public**,
+and has been Apache-2.0 since 37 minutes after the initial commit. The first draft already carried
+that correction, but drew the wrong conclusion from it: it treated the forward-only moat as still
+worth buying. Re-argued against the measured facts below, it is not. The correction **weakens** the
+case for FSL rather than merely qualifying it.
+
+### The constraint being solved
+
+Operator's words: build in public, but nobody takes the source and runs a competing business.
+
+### Q1 — how much is already out, and therefore unreachable (measured at `4c48872a`)
+
+A forward relicense governs future releases only. Apache-2.0 is irrevocable, so **everything
+published to date stays Apache-2.0 forever for anyone who has it**, and anyone may fork today's tree
+and continue under Apache-2.0 indefinitely. No retraction is possible. What that leaves exposed:
+
+| fact | value | query |
+|---|---|---|
+| visibility / age | **public**, created 2026-07-14 — **28 days** | `gh api repos/craigoley/remudero` |
+| commits on `main` | **1,152** | `git rev-list --count origin/main` |
+| `LICENSE` | Apache-2.0 since `7985d6a`, 37 min after `3e118dd3` | `git log --diff-filter=A -- LICENSE` |
+| forks / stars / watchers / network | **0 / 0 / 0 / 0** | `gh api repos/craigoley/remudero` |
+| unique **viewers**, 14d | **7** (1,004 views) | `gh api …/traffic/views` |
+| referrers | `github.com` only, **4 uniques** | `gh api …/traffic/popular/referrers` |
+| npm | **never published** — 404 | `npm view remudero` |
+
+**The clone figure looks alarming and is not.** `traffic/clones` reports **33,633 clones / 1,262
+uniques**, but the same window shows only **7 unique viewers**, and the repository has logged
+**17,005 workflow runs**. A GitHub Actions checkout is a clone and each runner presents a fresh
+address, so the clone count is dominated by the project's **own CI and fleet automation**. The
+7-unique-viewer figure is the human discriminator, and it is the one to believe.
+
+**So: the snapshot is legally unrecoverable, and observably nobody has taken it.** Those are two
+different statements and both matter. The urgency argument in the first draft — a window narrowing
+with every week of visibility — is not supported: there is no observed adopter to lose and no
+observed forker to pre-empt.
+
+### Q2 — is the forward relicense still available? (yes, and this is the strongest fact for it)
+
+| author | commits | note |
+|---|---|---|
+| `Craig Oley` / `cao825` — one email, `craigoley@gmail.com` | **1,138** | the operator |
+| `dependabot[bot]` | 7 | version bumps only |
+| `claude[bot]` | 5 | GitHub App, operator-instructed |
+| `Claude <noreply@anthropic.com>` | 1 | agent commit in the operator's own checkout |
+
+Queries: `git log origin/main --format='%an <%ae>' | sort | uniq -c`, and
+`gh api 'search/issues?q=repo:craigoley/remudero+type:pr+-author:cao825'`.
+
+Of **1,211 pull requests, 14 are not the operator's** — and **every one has `user.type == "Bot"`**
+(9 `dependabot[bot]`, 5 `claude[bot]`), verified by listing them rather than by inference. **There
+are no outside human contributors.** Ownership is not the blocker; the option is genuinely open.
+
+The one thing to flag rather than assume: `dependabot[bot]` is a **third-party-operated** bot, not
+the operator's agent. Its 7 commits touch only `package.json`, `package-lock.json` and version pins
+in `.github/workflows/*.yml` — mechanical version bumps carrying no original expression. That is a
+lawyer's call to confirm, not a session's, but it is the whole of the third-party surface.
+
+### Q3 — the three options, argued against each other
+
+**(A) Relicense the harness to FSL-1.1-ALv2.** *(the first draft's recommendation)*
+
+*For:* the trajectory is real and was measured. The tree is **261,079 lines across 725 files** in
+`src|test|scripts`. In the last **14 days**: 598 commits, **480 of 725 files touched**, **+126,856
+lines — about 49% of today's tree**. In the last **7**: 259 commits, 266 files, +52,996. A fork taken
+today is materially behind within weeks, so FSL-from-here would protect a great deal even though it
+protects none of the snapshot.
+
+*Against, and this is why it is not recommended:*
+
+1. **The velocity argument cannot carry the horizon it is argued over.** The repository is **28 days
+   old**, so *every* commit falls inside any 30-day window and the churn ratio is measuring a
+   project's first month, not its steady state. Early velocity decays. Projecting six months from a
+   28-day sample is precisely the forward-quoted number this repo's own discipline refuses.
+2. **It contradicts a standing plan commitment, which the first draft did not cite.**
+   MASTER-PLAN §6A states that contributions to the core "stay under Apache-2.0 and are **never
+   relicensed**", calls this a "**one-way door, accepted knowingly**", records that "the BSL/SSPL
+   escape hatch Elastic/Redis/MongoDB used is **CLOSED to us** — that is the point", notes each of
+   those relicensings "cost enormous trust", and directs that "we publish the never-relicense
+   commitment as a **CONTRACT** (README + GOVERNANCE.md), not an internal note." **FSL-on-the-harness
+   is that exact manoeuvre.** §6A also fixes the commercial boundary: the full loop — daemon, CLI,
+   containment, principles engine, retros, campaigns, control panel, MCP — is "**free forever**", and
+   Pro "may only ever be *hosted convenience* (relay/sync, portfolio views, team seats, org-brain
+   sync)". **D-8** independently forbids premature paywalling. Option A reverses both.
+3. The costs stand as previously recorded: not OSI-approved, so the project may not call itself Open
+   Source; no CLA or DCO exists today, so a future relicense (**including the FSL's own promised
+   Apache-2.0 conversion**) would need every later outside contributor's agreement; EU instruments
+   (AI Act, Cyber Resilience Act) attach exemptions to FOSS status the FSL lacks — **flagged, not
+   analysed**; GitHub drops the recognised-licence badge; and `package.json` loses its SPDX
+   identifier for `SEE LICENSE IN LICENSE`.
+
+**(B) Keep Apache-2.0 and do nothing else.**
+
+*For:* simplest; keeps OSI status, the licence badge, the SPDX field and the EU FOSS hooks; avoids
+the CLA problem entirely; costs nothing.
+
+*Against:* it leaves the stated constraint unanswered. If the business is **hosting**, Apache-2.0
+permits a competitor to host the same harness — the Elastic/AWS problem — and doing nothing is a
+decision to accept that risk without naming where the defence lives.
+
+**(C) Keep the harness Apache-2.0; put the licence boundary at the relay and hosted code. —
+RECOMMENDED.**
+
+The commercial surface in the plan is already the relay, not the harness: §6A's Pro is "hosted
+convenience (relay/sync, portfolio views, team seats, org-brain sync)", and **D-11** puts accounts
+"at the relay only", with the instance dialling **out**. **That code does not exist yet.** No relay
+source is in the tree; `W1-T430` (identity-provider seam) and `W1-T431` (outbound relay client v0)
+are both `status: queued`. Verified: `git ls-tree -r --name-only origin/main | grep -i relay` returns
+two plan shards and one unrelated test.
+
+So the boundary can be drawn where it actually defends revenue, on code that is **born** under
+whatever licence is chosen, with **no irrevocability problem, no relicensing event, no trust cost, no
+CLA retrofit, no OSI loss and no EU FOSS forfeiture**. It answers option B's objection — a competitor
+may host the harness but not the relay, accounts, sync or portfolio layer — while keeping §6A's
+never-relicense contract intact. **It costs nothing today and forecloses nothing**: if the operator
+later judges the harness itself must be protected, option A remains available for as long as
+ownership stays consolidated, which Q2 shows it does.
+
+Option C is not a compromise between A and B. It is the position MASTER-PLAN §6A already describes,
+which the first draft failed to check before proposing to reverse it.
+
+### What this proposal does NOT decide
+
+- **The relay's own licence.** Option C says *where* the boundary goes, not what sits on the far side
+  of it. FSL, a proprietary licence, or source-available-with-conversion are all still open, and the
+  choice can wait until `W1-T431` is dispatched.
+- **CLA or DCO, and when.** §6A recommends DCO and records the one-way-door consequence. Still an
+  operator act; unchanged by this entry, and cheap only until a first outside patch lands.
+- **The licensor name** — `LICENSE` reads `Copyright 2026 Craig Oley`; if a company is to hold it,
+  better settled before any publication push.
+- **Whether to publish the never-relicense contract now.** §6A says README + GOVERNANCE.md; neither
+  exists in that form today, and shipping it is a separate change.
+
+### Naming note, carried forward
+
+`FSL-1.1-Apache-2.0` is the licence's **former** spelling; upstream (`getsentry/fsl.software`) serves
+that path as a redirect to **`FSL-1.1-ALv2`**, which is the current name and what the reverted commit
+used. Recorded so the next reader does not re-derive it.
+
+- Rollback: revert this PR — removes only this entry. No licence file, no runtime code and no gate is
+  touched by it, and no ledger line is written.

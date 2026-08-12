@@ -3138,12 +3138,16 @@ a second project on the harness; **WS-12 (site) is independent — separate repo
    written down (documented #473). [recon intake, 2026-07-21]
 25. **INSTRUMENT CHANGES RIDE ALONE — a diff may change what a gate MEASURES, or what the gate concludes
    about the product, never both in one PR.** RECORDED, NOT NEWLY DECIDED: this rule has been ENFORCED IN
-   CODE since W1-T297 and cited by name at nine sites — seven inside `src/`, including the `blocked_review`
-   summary a refused worker actually reads — while §12 never carried its text. W1-T297's own shard promised
-   it ("ships with the MASTER-PLAN §12 amendment that states the RULE (Standing rule 25) this task makes
-   executable"); the enforcement landed and the amendment did not, so every citation pointed at a rule that
-   did not exist here. This entry closes that gap and states the rule in the enforcement's own terms; it
-   grants the gate no new reach. THE MEASUREMENT-INSTRUMENT SURFACE is one exported constant,
+   CODE since W1-T297 while §12 carried no text for it. W1-T297's own shard promised the prose ("ships with
+   the MASTER-PLAN §12 amendment that states the RULE (Standing rule 25) this task makes executable"); the
+   enforcement landed and the amendment did not, so for roughly two hundred PRs every citation pointed at a
+   rule that did not exist here. THE PROSE THEREFORE FOLLOWED THE CODE, not the other way round, and a
+   reader should weigh it accordingly: where this entry and `src/lib/review.ts` disagree, the code is what
+   refuses PRs. MEASURED AT `c709493`, re-derived rather than carried forward: the exact phrase "Standing
+   rule 25" appears at **12 sites across 6 files, 8 of them inside `src/`** (`src/lib/review.ts` ×6,
+   `src/run-task.ts` ×2, plus two `test/` suites and two shards); case-insensitively, "rule 25" appears
+   **38 times across 28 files**, because ~22 task shards now run an explicit "RULE 25 CHECKED BEFORE FILING"
+   step. It is cited far more often than it was written. This entry grants the gate no new reach. THE MEASUREMENT-INSTRUMENT SURFACE is one exported constant,
    `INSTRUMENT_SURFACE` (`src/lib/review.ts`) — `.github/workflows/`, every `scripts/*-ratchet.mjs`,
    `scripts/diff-coverage.mjs`, every `scripts/*-baseline.json`, `scripts/mutation-relevant-paths.json`,
    `stryker.conf.json` — and BOTH consumers derive from it (`USER_VISIBLE_SURFACE_RE`'s instrument arm and
@@ -3151,12 +3155,32 @@ a second project on the harness; **WS-12 (site) is independent — separate repo
    PREDICATE IS ENTANGLEMENT, NOT INSTRUMENT-TOUCHING: refusal requires at least one instrument path AND at
    least one product path (`src/`, non-test) in the same diff. An instrument-only diff — optionally carrying
    its own `test/` falsifier and a `docs/` update — is the SANCTIONED shape, and so is a src-only, plan-only
-   or docs-only diff. `test/` is deliberately not the product half, or an instrument change could never ship
-   the fixture that proves it. WHY IT IS A RULE AND NOT A STYLE NOTE: a diff that lowers a coverage floor
+   or docs-only diff. `isProductPath` is `path.startsWith("src/") && !isTestPath(path)`, so `test/` is
+   deliberately NOT the product half — the design's own carve-out, because otherwise an instrument-only PR
+   could never carry the fixture that proves it; `test/diff-coverage.test.ts` is the established home for
+   exactly that, and a gate implemented in a test entangles with nothing. THE REFUSAL IS HARD AND CANNOT BE
+   FORGIVEN LATER: `instrumentEntangled` is one of the terms in BOTH of `judgeReview`'s rollups — `state`
+   and `floorState` — so it forces `state: "failure"`, and because `applyVerdictStability` (W1-T178)
+   suppresses only an UNCHANGED-HEAD SEMANTIC downgrade (`floorState === "success"`), an entanglement
+   failure can never be suppressed by verdict stability. It is a structural, diff-derived fact, and it
+   preempts the ordinary unmet-criteria text rather than queueing behind it. WHAT A REFUSED WORKER IS TOLD
+   (`src/run-task.ts`), because the rule should read the way the refusal reads. The escalation SUMMARY,
+   verbatim: `blocked_review: instrument change entangled with src/ in one PR (Standing rule 25) — <pr
+   url>`. Its DETAIL names the instrument path(s) and the `src/` path(s) found beside them, calls them "two
+   independently falsifiable claims (\"the instrument is right\" and \"the code is right\") shipped as one
+   green, self-graded by the very instrument version it also changed", and states the part that makes this
+   different from an ordinary block: "No worker may legitimately resolve this by writing more code." The two
+   OPTIONS it offers are the only sanctioned exits — **split**, "land the instrument change in its own PR,
+   then rebase this one onto it — the sanctioned shape", or **revert**, "revert the instrument hunk on this
+   branch, keeping only the `src/` change, then re-review". A rule that only refuses re-teaches nothing, so
+   the refusal ships its own remedy.
+   WHY IT IS A RULE AND NOT A STYLE NOTE: a diff that lowers a coverage floor
    while also changing the code that floor measures is self-certifying — the same PR moves the ruler and the
    thing being measured, and no reviewer is prompted to notice. Split it: the instrument change rides alone
-   and is judged on its own evidence. [W1-T297; amendment reconstructed 2026-08-11 from the enforcement it
-   was always meant to accompany]
+   and is judged on its own evidence. [W1-T297; amendment reconstructed 2026-08-11 (#1596) from the
+   enforcement it was always meant to accompany, and completed 2026-08-12 with the three enforcement facts
+   that first pass omitted — the verbatim `blocked_review` refusal, the never-suppressible property, and the
+   re-measured citation counts]
 
 - Lives at repo root. Header carries sync date + focus, his-house style.
 - Humans and agents edit via commits/PRs; the Architect does narrative syncs at workstream
