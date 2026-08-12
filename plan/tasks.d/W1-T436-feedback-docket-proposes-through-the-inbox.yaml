@@ -1,0 +1,102 @@
+- id: W1-T436
+  title: "the harness collects human feedback in five places and consumes it in none — a weekly docket that gathers what humans actually said and proposes ONE artifact diff through the INBOX the operator already triages: ratified in-console, the plan PR opened and auto-merged by the harness afterwards, the operator never on GitHub"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 90
+  rationale: "FILED FROM the operator's Warp-podcast brief (oper#warp-podcast-2026-08-11) —
+    'their feedback mechanism sounds similar to the one I've been building towards' — and
+    RE-AIMED by oper#github-touchpoints-2026-08-12: the first aim delivered the docket's
+    proposal as a PR for a human to review ON GITHUB; the touchpoint recon classified that
+    delivery INCIDENTAL and measured the console alternative ALREADY COMPLETE END TO END:
+    POST /v1/inbox/approve re-classifies live, refuses non-READY with a reason, and hands to
+    ratifyCliGateway, whose harness-side approveCommand pipeline opens the plan PR, waits for
+    CI, reviews, and ARMS AUTO-MERGE — a ratification PR reaches a human merge button only on
+    refusal paths. So the inbox is not a compromise surface; it is the stronger gate placed
+    EARLIER (approval precedes the write instead of following it), with the PR remaining as
+    transport and audit record. WHAT THE OPERATOR HAS BUILT TOWARD, INVENTORIED: reframe
+    texts captured verbatim (W1-T194); W1-T141's one-tap verdicts (route mounted, zero
+    recorded uses, no consumer — W1-T435 wires them); rejected-feedback reasons (28 of 146
+    entries); question answers; operator notes (W1-T164). FIVE CAPTURE SURFACES, NO
+    SYNTHESIS: the same correction gets typed into reframes forever; the artifact that
+    caused it never changes. THE PRACTICE THIS ADAPTS, verified in Warp's production repo
+    (update-pr-review-local.yml: cron Mondays, 7-day lookback, regenerates the review skill
+    from the week's human feedback; 'agents need feedback loops, not perfect prompts'):
+    an observer synthesizes the week's human feedback and proposes a diff to the governing
+    artifact, human-gated. THE COMPLEMENT, NOT DUPLICATE: W1-T418 measures whether RULES
+    PREVENT; this mines what HUMANS SAID and proposes the edit. W1-T420's duplicate-closure
+    applies to the docket's proposals like any other intake. §6A NOTE, made precise: the
+    commons promise ('knowledge reaches the commons ONLY via human-gated PRs') governs
+    OUTBOUND knowledge and is not implicated — the docket's targets are in-repo artifacts,
+    and their human gate is the in-console ratification that precedes any write. LEDGER:
+    UNMEASURED for live counts (mini down); surface counts are tree-derived."
+  design: |
+    (i) buildFeedbackDocket (src/lib/feedback-docket.ts): deterministic gather over the
+    lookback window — reframe texts from inbox drafts, operator_feedback ledger lines
+    (verdicts AND steering notes once W1-T435 lands; lines exist independently), rejected-
+    feedback reasons from plan/feedback/, question answers, operator notes — each item
+    normalized to {source, ts, verbatim, referent} and the docket rendered with counts per
+    source, EMPTY SOURCES NAMED (a docket that omits a silent channel reads as coverage —
+    the vacuous-pass family). Pure over injected readers; no LLM. The name is load-bearing
+    — the call-site criterion greps its consumer.
+    (ii) the synthesis leg rides triage's existing shape (src/lib/triage.ts precedent): a
+    scheduled rung gathers the docket, and an Architect run drafts AT MOST ONE artifact
+    diff per cycle — filed as an INBOX PROPOSAL through updateProposalRegistry
+    (src/lib/inbox.ts, the W1-T240 single-writer helper), the draft carrying the docket
+    excerpt it acted on, the principle it believes should change, and the exact diff.
+    Empty-docket cycles file NOTHING and ledger docket.empty (a loop that must emit weekly
+    manufactures drift — the no-op path is first-class).
+    (iii) the operator rules IN-CONSOLE: the proposal renders in NEEDS ME with the existing
+    APPROVE (arm-then-confirm) and REFRAME controls; on approve, the EXISTING harness
+    pipeline (approveCommand: ratification branch, plan PR, CI, review, auto-merge arm)
+    lands the diff with no human on GitHub; a reframe feeds the next cycle's docket — the
+    loop steers itself with its own mechanism.
+    (iv) the target artifact set is CLOSED for v0: a CLAUDE.md rule, a learnings/ entry, or
+    a review-rubric line — never src/, never plan shards (those are W1-T418's instrument-
+    proposal lane), never MASTER-PLAN prose. Every proposal cites its docket items verbatim
+    with sources; consumed items are ledgered (docket.consumed) so W1-T419's citation loop
+    can count whether gathered feedback ever changed anything.
+    (v) FALSIFIER, both directions: a fixture docket with three reframe texts indicting the
+    same rule yields exactly ONE inbox proposal whose draft quotes all three verbatim
+    (deleting the synthesis input plumbing fails this), AND an empty-window fixture files
+    no proposal and ledgers docket.empty (an unconditional weekly emitter fails this).
+    (vi) NOT IN SCOPE: GitHub PR comments as a docket source (deliberately dropped with the
+    re-aim); auto-approving any proposal (ratification is the operator's, always); rule-
+    efficacy measurement (W1-T418); changing any capture surface; the W1-T404 write-tier
+    question (the inbox approve route exists today; no new grant class is added).
+  acceptance:
+    - claim: "a window with three reframes indicting one rule yields exactly one inbox proposal quoting all three, and an empty window files none"
+      proof: "unit test: test/feedback-docket.test.ts"
+    - claim: "the docket gather is one named deterministic seam consumed by the scheduled rung, not an LLM prompt"
+      proof: "grep: buildFeedbackDocket( in src/run-task.ts"
+  risk: high
+  origin: oper#warp-podcast-2026-08-11
+  plan_refs: ["W1-T418", "W1-T419", "W1-T141", "W1-T194", "W1-T240"]
+  files: [src/run-task.ts, src/lib/feedback-docket.ts, test/feedback-docket.test.ts]
+  status: queued
+  attempts: 0
+  amendment_note: "AMENDED 2026-08-12 per oper#github-touchpoints-2026-08-12, before first
+    dispatch: the original delivery opened a plan PR for the operator to review on GitHub;
+    the touchpoint recon measured the inbox ratification path already console-complete
+    (approve/reframe routes -> ratifyCliGateway -> approveCommand -> auto-merge), so the
+    proposal now files through updateProposalRegistry and the human gate moves EARLIER —
+    in-console ratification before any write — with the PR demoted to transport and audit.
+    The Warp-derived value (weekly human-feedback synthesis proposing one artifact diff,
+    human-gated) is unchanged."
+  note: "verify:auto — the gather is pure over injected readers, both falsifier directions
+    are fixture-decidable, and both the Architect leg (triage's shape) and the ratification
+    pipeline (approveCommand) are existing tested machinery this task only composes.
+    risk:high — the files: span (new docket module, run-task rung wiring, their test) is
+    Rule 19's SPAN, not blast radius; the behavioral containment is the empty-window no-op
+    direction. Rule 25: touches src/run-task.ts (instrument-adjacent) with nothing else
+    entangled. budget_usd 90 — five reader integrations, docket renderer, the scheduled
+    rung, the inbox-proposal filing leg, two-direction fixtures. PROOF NOTES:
+    `buildFeedbackDocket` is 0 hits across src/ AND plan/ at the branch tree apart from
+    this shard's own declarations (measured, case-sensitive); the open-paren form greps the
+    CONSUMER (src/run-task.ts), distinct from the defining module, per the call-site lint;
+    unit-test proof is the pure-path form against a declared file. LEDGER: UNMEASURED (mini
+    down). NO depends_on: every v0 docket source, the registry helper and the ratification
+    pipeline are on main; W1-T435's steering notes are a named ADDITIVE input, not a
+    prerequisite."

@@ -1,0 +1,90 @@
+- id: W1-T435
+  title: "operator judgment on a run still evaporates — but the capture surface the harness OWNS is the dangling one: wire the one-tap verdict (mounted route, no UI posts to it, nothing consumes it) with a steering note into the fix rung, and let console-answered clarifications fire W1-T78's producer-less re-arm — no GitHub read anywhere"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 85
+  rationale: "FILED FROM the operator's Warp-podcast brief (oper#warp-podcast-2026-08-11); RE-AIMED
+    by the operator's GitHub-touchpoint brief (oper#github-touchpoints-2026-08-12): MINIMISE THE
+    TIME A HUMAN SPENDS IN GITHUB — the harness is the product, GitHub is plumbing. The first
+    aim of this shard read human PR comments; the touchpoint recon classified that surface
+    INCIDENTAL (the human is writing feedback, not performing a GitHub write — the PR page
+    earned its place only because the diff anchors the comment), so the same value is captured
+    where the operator already lives. THE VALUE, UNCHANGED: judgment on a run's outcome
+    evaporates today. THE CONSOLE FACTS, MEASURED AT THE BRANCH TREE: POST /v1/drain/feedback
+    (W1-T141's one-tap verdict) is mounted in buildServeRoutes — and NO console UI element
+    posts to it (the client script's postJson call sites cover every other write route),
+    NOTHING consumes operator_feedback ledger lines (two mentions in src/, both comments), and
+    operator_feedback is ABSENT from DECISION_RELEVANT_LEDGER_STEPS (src/lib/ledger.ts), so
+    rotation would archive the very lines a consumer counts — the W1-T240/#977 class, which
+    is why that set moves IN THIS PR. Meanwhile W1-T78's clarification re-arm
+    (strikeCapForAnswer) merged with no producer: answers land in plan/questions.ndjson via
+    the console's own POST /v1/questions/answer and steer nothing. THE PRACTICE THIS ADAPTS
+    (Warp interactive code review — batch human feedback, agent resolves in one pass) SURVIVES
+    THE RE-AIM INTACT: the feedback batches through the fix rung's existing strike discipline;
+    only the capture surface moves from the PR page to the console rundown. LEDGER: UNMEASURED
+    (mini down); the zero-consumer and zero-UI claims are source-derived; the zero-use history
+    for operator_feedback is the 2026-08-11 full-union scan."
+  design: |
+    (i) the console rundown row grows the verdict control: good / wrong / needs-follow-up
+    plus an optional STEERING NOTE textarea, posting {taskId, verdict, note, drainRunId} to
+    the existing POST /v1/drain/feedback (buildDrainFeedbackRoute, src/lib/panel-actions.ts,
+    extended to accept and ledger the note verbatim). W1-T141's route finally gets both its
+    writer and its reader.
+    (ii) operatorVerdictEvidence (src/lib/sweep.ts): the fix rung's evidence assembly
+    (runFixRung, src/run-task.ts) gains wrong/needs-follow-up verdicts with their notes as
+    an evidence source, quoted verbatim with attribution — the worker addresses the
+    operator's words under the SAME strike cap, fresh re-review after, escalation on
+    exhaustion unchanged. The name is load-bearing — the call-site criterion greps it at
+    its consumer.
+    (iii) operator_feedback joins DECISION_RELEVANT_LEDGER_STEPS (src/lib/ledger.ts) in the
+    SAME PR — a decision now reads it, so rotation must retain it; test/ledger-rotation
+    re-derives the set from consumers and will prove the entry.
+    (iv) the same evidence pass populates pendingAnswer from answered clarifications in
+    plan/questions.ndjson (written by the console's POST /v1/questions/answer) — W1-T78's
+    re-arm allowance finally fires, from a console write, with no GitHub read.
+    (v) FALSIFIER, both directions: a wrong-verdict-with-note fixture re-arms the fix rung
+    and the fix prompt quotes the note verbatim (deleting the consumer fails this), AND a
+    good verdict plus an unanswered question produce NO re-arm — a rung that re-arms on
+    praise or on silence would spin forever; this direction is the loop containment.
+    (vi) NOT IN SCOPE: reading GitHub PR comments (the superseded first aim — outside-
+    collaborator comments are future scope, and the harness-side reader would be a separate
+    filing); rendering diffs in the console (a NAMED GAP the touchpoint recon records — the
+    operator judging from the rundown does not see the diff inline; a console diff surface
+    is its own future filing); strike-cap changes; the W1-T404 write-tier question (this
+    extends an EXISTING write route's payload and adds no new grant class).
+  acceptance:
+    - claim: "a wrong verdict with a steering note re-arms the fix rung with the note quoted, while a good verdict and an unanswered question re-arm nothing"
+      proof: "unit test: test/operator-verdict-steering.test.ts"
+    - claim: "the verdict evidence is one named source consumed at the fix rung, and operator_feedback is rotation-retained the moment a decision reads it"
+      proof: "grep: operatorVerdictEvidence( in src/run-task.ts"
+  risk: high
+  origin: oper#warp-podcast-2026-08-11
+  plan_refs: ["W1-T141", "W1-T78", "W1-T404", "W1-T164"]
+  files: [src/run-task.ts, src/lib/sweep.ts, src/lib/panel-actions.ts, src/lib/serve.ts, src/lib/ledger.ts, test/operator-verdict-steering.test.ts]
+  status: queued
+  attempts: 0
+  amendment_note: "AMENDED 2026-08-12 per oper#github-touchpoints-2026-08-12, before first
+    dispatch: the original aim read human PR comments via a gh seam (humanCommentEvidence);
+    the touchpoint recon classified the PR page an INCIDENTAL surface for this decision and
+    the operator's goal is minimising human time in GitHub, so the capture moved to the
+    console surfaces the harness already owns (W1-T141's route + W1-T78's answer channel).
+    The Warp-derived value — batched human feedback resolved by the agent under review
+    discipline — is unchanged."
+  note: "verify:auto — the evidence assembly is pure over injected readers and both falsifier
+    directions are fixture-decidable offline. risk:high — the files: span (route payload,
+    console UI, sweep evidence, run-task wiring, the ledger retention set, their test) is
+    Rule 19's SPAN, not blast radius, declared honestly UP FRONT per the scope-guard lesson;
+    the behavioral containment is falsifier direction two, the praise-and-silence loop guard.
+    Rule 25: touches src/run-task.ts and src/lib/ledger.ts (instrument-adjacent) with the
+    files: list as the containment; the DECISION_RELEVANT_LEDGER_STEPS entry is the #977
+    write-and-read-move-together rule applied prospectively. budget_usd 85 — UI control,
+    route payload extension, evidence consumer, retention-set entry, pendingAnswer producer,
+    two-direction fixtures. PROOF NOTES: `operatorVerdictEvidence` is 0 hits across src/ AND
+    plan/ at the branch tree (measured, case-sensitive), so the grep discriminates and names
+    no existing symbol; the open-paren form greps the CONSUMER (src/run-task.ts), distinct
+    from the defining module, per the call-site lint; the unit-test proof is the pure-path
+    form against a file declared in files:. LEDGER: UNMEASURED (mini down). NO depends_on:
+    the route, the questions channel, the fix rung and the retention set are all on main."

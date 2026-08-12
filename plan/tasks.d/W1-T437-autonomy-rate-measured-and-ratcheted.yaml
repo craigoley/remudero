@@ -1,0 +1,76 @@
+- id: W1-T437
+  title: "the harness arms auto-merge and counts strikes but no number says how much of the plan ships with zero human touches — measure the zero-touch merge rate and its cost as a first-class figure on the board and in retro, so autonomy is a dial the operator ratchets on evidence instead of a vibe"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80
+  rationale: "FILED FROM the operator's Warp-podcast brief (oper#warp-podcast-2026-08-11),
+    evidence re-derived at afb12dd. THE PRACTICE THIS ADOPTS: Warp's factory north star is
+    'the percentage of all changes that are shipped automatically, and at what cost'
+    (warp.dev 'we are now factory engineers'), operationalized as a deliberate ratchet —
+    start on low-risk repos and raise the automatic-merge rate from ~20 percent toward 60
+    (Latent Space, 2026-07-01) — trust as a MEASURED DIAL, not a stance. WHAT RMD HAS,
+    INVENTORIED AT afb12dd: decideAutoMergeArm and the arming ledger, strike counts, breaker
+    gates, W1-T424 (filed) joining armed merges to reverts and follow-up fixes — the
+    CORRECTNESS half of trust. WHAT IT LACKS: any figure for the QUANTITY half. Nobody can
+    answer 'what fraction of last week's merges shipped with zero human steering, and what
+    did the steered ones cost' — the status board renders queue state, not autonomy, and
+    retro calibration tables key on task type, not touch count. THE RMD-NATIVE DIVERGENCE,
+    which is the innovative path past Warp's global percentage: rmd can measure the rate PER
+    VERDICT CLASS, because every merge carries its proof-execution record — a zero-touch
+    rate over full-PASS proof-executed merges is a different trust signal than one over
+    keyword-floor merges, and the ratchet should move where proofs are strong first. Warp
+    ratchets a global number; rmd can ratchet where the evidence is executable. THE
+    RATIFICATION BOUNDARY: the MEASUREMENT is this task; moving any arming policy stays an
+    operator act (P48 norm — the harness reports the dial, the operator turns it). LEDGER:
+    UNMEASURED for live rates (mini down); the metric's inputs (trailers on origin/main,
+    arming and strike ledger steps) are all established surfaces."
+  design: |
+    (i) zeroTouchMergeRate (src/lib/autonomy.ts): over a window of trailer-bearing merges,
+    classify each as zero-touch (auto-armed, zero strikes, no reframe, no operator note, no
+    fix-rung human evidence) or human-touched (naming WHICH touch), from the ledger union
+    and the merge record — pure over injected readers, missing archives fail LOUD (the
+    zgrep-union lesson: a live-file-only rate is an undercount that reads as a measurement).
+    (ii) the rate renders in two places: a status-board strip (rate, window, cost split
+    zero-touch vs touched) and a retro calibration column — split BY VERDICT CLASS
+    (proof-executed full PASS vs capped vs floor), because the class split is what makes
+    the number actionable: it says where the next ratchet notch is safe.
+    (iii) the ratchet itself is a documented OPERATOR act: the rendering names the current
+    arming posture beside the measured rate, and proposes nothing — no policy file is
+    written by this task, and any future auto-adjustment is its own operator-gated filing.
+    (iv) FALSIFIER, both directions: a fixture window with one auto-armed strike-free merge
+    and one reframed merge reports 50 percent with the touched merge's touch NAMED
+    (deleting the touch attribution fails this), AND a window whose ledger archives are
+    unreadable reports UNMEASURED with the missing-archive reason — never a rate computed
+    from the live file alone (the undercount containment).
+    (v) NOT IN SCOPE: changing decideAutoMergeArm or any arming policy; W1-T424's
+    revert-join correctness measurement (that is the quality of what shipped; this is the
+    quantity that shipped untouched — the two columns sit side by side in retro); alerting
+    or thresholds on the rate.
+  acceptance:
+    - claim: "a mixed fixture window reports the rate with each touched merge's touch named, split by verdict class"
+      proof: "unit test: test/autonomy-ratchet.test.ts"
+    - claim: "the rate is one named computation consumed by the board and retro, and unreadable archives yield UNMEASURED, never a live-file-only rate"
+      proof: "grep: zeroTouchMergeRate( in src/run-task.ts"
+  risk: high
+  origin: oper#warp-podcast-2026-08-11
+  plan_refs: ["W1-T424", "W1-T418", "W1-T141"]
+  files: [src/run-task.ts, src/lib/autonomy.ts, test/autonomy-ratchet.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — the classifier is pure over injected readers and both falsifier
+    directions are fixture-decidable offline. risk:high — the files: span (new autonomy
+    module, run-task board/retro wiring, their test) is Rule 19's SPAN, not blast radius;
+    the behavioral containment is the UNMEASURED-on-missing-archives direction, which is
+    the zgrep-union lesson made structural. Rule 25: touches src/run-task.ts
+    (instrument-adjacent) with nothing else entangled. budget_usd 80 — the classifier, two
+    render surfaces, verdict-class split, two-direction fixtures. PROOF NOTES:
+    `zeroTouchMergeRate` is 0 hits across src/ AND plan/ at afb12dd (measured,
+    case-sensitive); the open-paren form greps the CONSUMER (src/run-task.ts), distinct
+    from the defining module, per the call-site lint; unit-test proof is the pure-path form
+    against a declared file. LEDGER: UNMEASURED (mini down) — which is exactly the state
+    the falsifier's second direction requires the metric to report honestly. NO depends_on:
+    trailers, arming steps, strike steps and the board are all on main at afb12dd; W1-T424
+    is a sibling column, not a prerequisite."
