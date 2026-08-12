@@ -175,24 +175,39 @@ test("a STALE symlink pointing elsewhere is still re-pointed, and reports `linke
 test("the usage probe reports a DISPLACED grant through its own failure sink, naming the slot", () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-usage-grant-"));
   const config = { claudeBin: "/bin/true", root } as unknown as Config;
-  const realHome = process.env.HOME ?? "";
 
-  // Poison the exact home the probe constructs, the way the container's was poisoned.
-  const workerHome = perRunWorkerHomeDir(workerHomeDir(config), "usage-probe");
-  mkdirSync(join(workerHome, ".claude"), { recursive: true });
-  writeFileSync(join(workerHome, ".claude", "settings.local.json"), "{}");
-  assert.equal(existsSync(join(realHome, ".claude")), true, "this host really has the grant to lose");
+  // THE REAL HOME IS CONSTRUCTED, NOT BORROWED FROM THE HOST. `readUsageSnapshot` derives it from
+  // `process.env.HOME`, and the first version of this test asserted the AMBIENT home already had a
+  // `.claude` to lose — true on the operator's mini, false on a Linux CI runner, where it failed
+  // with "this host really has the grant to lose: false !== true". A fixture that depends on the
+  // machine it runs on tests the machine; this one builds the exact precondition it needs, so the
+  // grant is guaranteed to exist and `.config/gh` is guaranteed ABSENT, which makes the
+  // one-event-not-one-per-symlink assertion below deterministic rather than incidental.
+  const realHome = mkdtempSync(join(tmpdir(), "rmd-usage-grant-home-"));
+  mkdirSync(join(realHome, ".claude"), { recursive: true });
+  const priorHome = process.env.HOME;
+  process.env.HOME = realHome;
+  try {
+    // Poison the exact home the probe constructs, the way the container's was poisoned.
+    const workerHome = perRunWorkerHomeDir(workerHomeDir(config), "usage-probe");
+    mkdirSync(join(workerHome, ".claude"), { recursive: true });
+    writeFileSync(join(workerHome, ".claude", "settings.local.json"), "{}");
+    assert.equal(existsSync(join(realHome, ".claude")), true, "the fixture really has the grant to lose");
 
-  const calls: Array<{ stage: string; reason: string }> = [];
-  readUsageSnapshot(config, () => "no panel here", (stage, reason) => calls.push({ stage, reason }));
+    const calls: Array<{ stage: string; reason: string }> = [];
+    readUsageSnapshot(config, () => "no panel here", (stage, reason) => calls.push({ stage, reason }));
 
-  const grant = calls.find((c) => c.stage === "grant");
-  assert.ok(grant, "the lost/healed grant is REPORTED — it was silent, which is why the cause took days");
-  assert.match(grant!.reason, /^\.claude:/, "and names the slot it healed");
-  assert.match(grant!.reason, /displaced to /, "and where the poisoning went");
+    const grant = calls.find((c) => c.stage === "grant");
+    assert.ok(grant, "the lost/healed grant is REPORTED — it was silent, which is why the cause took days");
+    assert.match(grant!.reason, /^\.claude:/, "and names the slot it healed");
+    assert.match(grant!.reason, /displaced to /, "and where the poisoning went");
 
-  // The absent-target grants on this host stay silent — the loud path is for losses only.
-  assert.equal(calls.filter((c) => c.stage === "grant").length, 1, "one grant event, not one per symlink");
+    // The absent-target grants stay silent — the loud path is for losses only.
+    assert.equal(calls.filter((c) => c.stage === "grant").length, 1, "one grant event, not one per symlink");
+  } finally {
+    if (priorHome === undefined) delete process.env.HOME;
+    else process.env.HOME = priorHome;
+  }
 });
 
 test("a grant that genuinely CANNOT be created reports `failed`, distinct from `absent`", () => {
