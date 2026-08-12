@@ -88,6 +88,21 @@ scope that command at a repo other than this checkout's own — the plan and
 code are still always read from the local checkout; only the gateway/target
 repo changes.
 
+**`rmd reap-branches` runs on no cadence — it is a manual verb, not a sweep
+rung** (W1-T448). Wiring it into `rmd sweep`'s per-pass loop was costed and
+rejected: one reap issues ~8 `gh api` requests and takes several seconds of
+wall time (measured 2026-08-12T23:23Z: 8 pages, 6.4s real — the same order of
+magnitude as W1-T447's original 7.38s figure), and the daemon polls the sweep
+roughly every `DEFAULT_POLL_INTERVAL_MS` (60s, `src/lib/daemon.ts`) — so
+per-pass wiring would add on the order of 480 REST requests/hour against the
+5,000/hour budget (4,807/5,000 remaining at the same measurement) for a
+report that only changes when a branch is created or merged; the branch
+count moved by just 2 (49→51) across the roughly one-hour gap between this
+measurement and W1-T447's. Run `rmd reap-branches` by hand, or from your own
+cron, when you want a fresh read — one command still replaces a hand sweep of
+GitHub, which was the point. These figures move hourly: re-measure before
+revisiting this decision, never quote them forward.
+
 ## A normal day
 
 1. **Check what's running, and why it's stalled.** `rmd status` answers both
