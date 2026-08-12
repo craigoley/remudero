@@ -1,0 +1,119 @@
+- id: W1-T441
+  title: "`findMergedByTrailer` returns at most ONE merged PR and takes the NEWEST, but the already-satisfied close path manufactures newer plan-only PRs carrying the same trailer — 16 task ids already have more than one, so the first answer for W1-T254 is a bookkeeping close and not the PR that built it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 65.00
+  rationale: "SPLIT OUT OF PR #1631 (the already-satisfied unreadable-gateway fix), which named this
+    as a separate concern and deliberately did not touch it. Re-derived at 86f3955d.
+    THE MECHANISM, from source. `ghGateway`'s `findMergedByTrailer` runs
+    `gh pr list --state merged --search '\"Remudero-Task: <id>\" in:body' --limit 1`, so it returns
+    AT MOST ONE hit and GitHub orders that search newest-first. `buildBatchedGithub`'s twin — the
+    one `runTask` actually passes — has no `--limit` at all, but takes `.find(...)` over
+    `mergedNewestFirst`, which is the same newest-wins answer from an index it ALREADY HOLDS. Both
+    therefore discard every older PR carrying the trailer, and only one of them would need a network
+    change to stop doing so.
+    THE POPULATION IS REAL AND WAS MEASURED, not argued. Scanning the bodies of all 1,169 merged PRs
+    (paginated `repos/craigoley/remudero/pulls?state=closed`, anchored `^Remudero-Task: <id>$` per
+    body): 495 distinct task ids carry an anchored trailer on a merged PR, and SIXTEEN of them are
+    carried by MORE THAN ONE — TRIAGE-fb-1784762630201-4751e0, W1-PROPOSAL-RATIFY, W1-T119, W1-T12a,
+    W1-T159, W1-T1D, W1-T220, W1-T254, W1-T262, W1-T309, W1-T386, W1-T54b, W1-T60, W1-T67, W1-T7 and
+    W1-T99. Re-run the scan rather than trusting these counts; they are a snapshot.
+    WHAT MAKES THE DUPLICATES, AND WHY THE NEWEST IS THE WRONG ONE. They are not random. W1-T254 has
+    SIX: #720 is the implementation (`fix(sweep): reliable post-review sweep`, 2026-07-24, branch
+    `run-W1-T254-1784905159619`), and #1007/#1012/#1013/#1015/#1016 are all
+    `chore(plan): close W1-T254 ... as already-satisfied` bookkeeping PRs merged a week later.
+    W1-T7 is the same shape with the widest gap: #48 built it on 2026-07-15, #772 closed it as
+    already-satisfied on 2026-07-25. So the already-satisfied CLOSE path is itself the generator —
+    each close adds a NEWER trailer-bearing, plan-only PR that displaces the implementation in every
+    later lookup, and the next close displaces that one.
+    THE ONE CLAIM THIS SHARD DOES NOT MAKE, because it was checked and is FALSE: the W1-T413 case
+    cited in #1631's body is NOT a duplicate-trailer collision. #1527 carries NO anchored trailer at
+    all — only two prose mentions of the phrase inside sentences — and its head is
+    `claude/resolve-p27-findings-rnvu61`. Only #1602 carries the anchored line, so the gateway
+    returning #1602 there was correct and the refusal was correct. That correction is recorded here
+    so this task is not built on it."
+  design: "(i) TWO CONSUMERS, TWO DIFFERENT HARMS, and they should be stated separately because only
+    one of them loses information.
+      HARM A — `resolveAlreadySatisfied` (`src/run-task.ts`) compares the worker's claimed PR number
+      against this single hit, so a worker correctly citing the IMPLEMENTATION (#720 for W1-T254) is
+      refused `different_pr` against a bookkeeping close (#1016). PR #1631 made that refusal legible
+      — the row now carries `reason` and `credited_number` — but it is still a refusal of a true
+      claim, and refusals of true claims are what cost 10 dispatches / $23.34 on W1-T377/W1-T378.
+      HARM B — rung (c) of `derivePrPrecedence` (`src/lib/status.ts`) reads the same single hit. Here
+      the credit is NOT lost: a plan-only close is refused by W1-T413's own `planOnlyRefusal`, the
+      rung falls through to (c2) `corroborateByBranch`, and every W1-T254 close is on a
+      `run-W1-T254-*` branch so the task is still credited MERGED. What is wrong is the ATTRIBUTION —
+      (c2) also takes newest-first, so `prUrl`/`prNumber` name a bookkeeping PR rather than the one
+      that built the task. Establish this before building: if (c2) already rescues the merged/not-
+      merged answer, the value here is attribution and Harm A, not a false not-merged.
+    (ii) NEWEST-WINS IS DELIBERATE POLICY AND IS RIGHT IN THE PLACE IT WAS ARGUED — do not repeal it
+    globally. `corroborateOpenByBranch`'s own doc states it: `NEWEST WINS on a multi-hit: a task with
+    two open run-branches has been dispatched twice already, and the newest is the one still
+    working`, with a stated fail direction. That reasoning is about OPEN branches and does not
+    transfer to MERGED trailers, where the newest is systematically the most recent bookkeeping close
+    rather than the most recent work. The change is to the MERGED trailer path only.
+    (iii) THE CHOICE IS NOT SIMPLY `--limit 1` -> `--limit N`. Widening the fetch is necessary but not
+    sufficient: once more than one hit is in hand, something must PREFER one. Two candidate rules,
+    both already expressed in this file, and the implementer picks with the condition stated:
+      (a) PREFER A PR THE TASK OWNS — `ownsOwnRunBranch(head, taskId)`, which rung (c) already
+          computes and already treats as `an implementation by construction`. Cheap, and it is the
+          signal that actually separates #720 from #1016 — except that every W1-T254 close is ALSO
+          on a run-branch, so this rule alone does not discriminate that case.
+          VERIFY THAT BEFORE CHOOSING IT; if it does not discriminate, it is not the rule.
+      (b) PREFER A NON-PLAN-ONLY CHANGESET — reuse `isPlanOnlyChangeset`, the predicate W1-T413
+          already added and rung (c) already calls, so a `chore(plan): close ...` PR loses to the PR
+          that changed `src/`. This discriminates the measured case; it costs a `changedFiles` read
+          per candidate, which rung (c)'s own comment calls out as the O(N) cost it deliberately
+          bounds — so bound it the same way (only the residual case pays).
+    PREFER (b) UNLESS (a) IS SHOWN TO DISCRIMINATE THE W1-T254 SHAPE. Whichever is chosen, keep the
+    tie-break newest-first so behaviour is unchanged wherever exactly one PR carries the trailer.
+    (iv) THE CHEAP HALF FIRST, IF THEY SEPARATE. `buildBatchedGithub` needs NO new network call — it
+    already holds every merged PR with its body in `index()`, so returning all anchored matches
+    instead of `.find(...)` is a local change. `ghGateway` needs `--limit` widened and a per-call
+    cost argument. If the batched gateway is the only one on the dispatch path that matters, say so
+    and scope accordingly rather than changing both for symmetry.
+    (v) NOT IN SCOPE: the already-satisfied close path that MANUFACTURES the duplicates. Whether a
+    plan-only close PR should carry the task's anchored trailer at all is a separate question with a
+    real argument on both sides (the trailer is how the close is attributed), and answering it here
+    would be fixing the generator inside a task filed against the reader. Report it if the work
+    surfaces evidence either way."
+  acceptance:
+    - claim: "a task whose trailer is carried by several merged PRs resolves to the one that implemented it, not the newest bookkeeping close"
+      proof: "unit test: test/trailer-multi-hit-preference.test.ts"
+    - claim: "a task whose trailer is carried by exactly one merged PR resolves exactly as it does today"
+      proof: "unit test: test/trailer-multi-hit-preference.test.ts"
+    - claim: "an already-satisfied claim naming the implementing PR is verified rather than refused as a different PR"
+      proof: "unit test: test/trailer-multi-hit-preference.test.ts"
+    - claim: "the batched gateway returns every anchored match from the index it already holds, with no additional fetch"
+      proof: "unit test: test/trailer-multi-hit-preference.test.ts"
+  risk: high
+  origin: pr#1631-limit-one-followup
+  plan_refs: ["W1-T69", "W1-T256", "W1-T413", "P16"]
+  files: [src/lib/status.ts, src/run-task.ts, test/trailer-multi-hit-preference.test.ts, test/already-satisfied-exit.test.ts, test/already-satisfied-unverifiable.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — nothing here needs an operator ruling. Design (iii) leaves ONE choice open and
+    names the condition that decides it (does `ownsOwnRunBranch` discriminate the W1-T254 shape),
+    which is a measurement the implementer can take, not a policy the plan withheld.
+    risk:high is Rule 19's SPAN, not blast radius: `subsystemsOf` reads `files:` and acceptance text,
+    and this set crosses `src/lib`, `src/` and `test/`, which is >=2 subsystems and would be a sizing
+    violation at any lower band. Raised up front rather than shipped as one — the W1-T400/W1-T407
+    lesson. The actual change is a candidate list and a preference rule.
+    THE TWO EXISTING SUITES ARE DECLARED DELIBERATELY, not defensively.
+    `test/already-satisfied-exit.test.ts` and `test/already-satisfied-unverifiable.test.ts` both
+    assert `resolveAlreadySatisfied`'s outcomes against a gateway returning a SINGLE `PrRef`; if the
+    gateway's shape or the preference rule changes, those are the tests that go red, and a `files:`
+    omitting them is the refusal-at-push that cost W1-T407 three dispatches. Verified by invocation,
+    not by mention: both call `resolveAlreadySatisfied` directly and construct
+    `findMergedByTrailer` fixtures.
+    All four proofs name ONE forward-referenced PATH; a path forward-reference is safe and a symbol
+    one is a guess, and a `grep:` proof naming an existing symbol would match the merge base as well
+    as the head and be downgraded to stale.
+    budget_usd 65 — the fetch widening is small; the cost is the preference rule, the tie-break, and
+    the four falsifier directions, of which `exactly one PR carries the trailer` is the one that must
+    prove behaviour is UNCHANGED for the 479 of 495 ids that are not affected.
+    NO COUNT HERE SHOULD BE QUOTED FORWARD — re-run the body scan; the duplicate set grows every time
+    a task is closed as already-satisfied."
