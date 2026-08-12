@@ -2995,7 +2995,7 @@ a second project on the harness; **WS-12 (site) is independent — separate repo
    to catch. Every Promptsmith-rendered prompt injects this rule. Read the installed schema; never
    trust a prompt's spelling, including this document's.
 8. OpenClaw stays out. The mini's protected paths are inviolate (deny-floor).
-8. The loop never waits on a human unless the plan says so. Idle = groom.
+8B. The loop never waits on a human unless the plan says so. Idle = groom.
 9. OSS defaults must be defensible on a stranger's machine; yolo is a documented opt-in.
 10. This document is truth. Every session syncs it before acting and after shipping.
 11. **Isolation and containment are PROVEN PER RUN by probe, never assumed from configuration.** A
@@ -3136,6 +3136,27 @@ a second project on the harness; **WS-12 (site) is independent — separate repo
    console URL, so merely running the command leaked a fleet-control capability to disk (fixed #473, rotated
    the same day). R-31 — token generation is create-once/read-thereafter, making rotation a `rm` nobody had
    written down (documented #473). [recon intake, 2026-07-21]
+25. **INSTRUMENT CHANGES RIDE ALONE — a diff may change what a gate MEASURES, or what the gate concludes
+   about the product, never both in one PR.** RECORDED, NOT NEWLY DECIDED: this rule has been ENFORCED IN
+   CODE since W1-T297 and cited by name at nine sites — seven inside `src/`, including the `blocked_review`
+   summary a refused worker actually reads — while §12 never carried its text. W1-T297's own shard promised
+   it ("ships with the MASTER-PLAN §12 amendment that states the RULE (Standing rule 25) this task makes
+   executable"); the enforcement landed and the amendment did not, so every citation pointed at a rule that
+   did not exist here. This entry closes that gap and states the rule in the enforcement's own terms; it
+   grants the gate no new reach. THE MEASUREMENT-INSTRUMENT SURFACE is one exported constant,
+   `INSTRUMENT_SURFACE` (`src/lib/review.ts`) — `.github/workflows/`, every `scripts/*-ratchet.mjs`,
+   `scripts/diff-coverage.mjs`, every `scripts/*-baseline.json`, `scripts/mutation-relevant-paths.json`,
+   `stryker.conf.json` — and BOTH consumers derive from it (`USER_VISIBLE_SURFACE_RE`'s instrument arm and
+   `detectInstrumentEntanglement`) so the two can never drift into a second hand-maintained copy. THE
+   PREDICATE IS ENTANGLEMENT, NOT INSTRUMENT-TOUCHING: refusal requires at least one instrument path AND at
+   least one product path (`src/`, non-test) in the same diff. An instrument-only diff — optionally carrying
+   its own `test/` falsifier and a `docs/` update — is the SANCTIONED shape, and so is a src-only, plan-only
+   or docs-only diff. `test/` is deliberately not the product half, or an instrument change could never ship
+   the fixture that proves it. WHY IT IS A RULE AND NOT A STYLE NOTE: a diff that lowers a coverage floor
+   while also changing the code that floor measures is self-certifying — the same PR moves the ruler and the
+   thing being measured, and no reviewer is prompted to notice. Split it: the instrument change rides alone
+   and is judged on its own evidence. [W1-T297; amendment reconstructed 2026-08-11 from the enforcement it
+   was always meant to accompany]
 
 - Lives at repo root. Header carries sync date + focus, his-house style.
 - Humans and agents edit via commits/PRs; the Architect does narrative syncs at workstream

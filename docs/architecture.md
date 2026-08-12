@@ -66,6 +66,19 @@ Two more structural guarantees worth knowing up front:
   (`src/lib/retro.ts`) reduces the ledger + `LEARNINGS.md` into a calibration
   gather that feeds the Architect's own plan-health sweep — the harness syncs
   its own plan, deterministically, before any LLM synthesizes a plan PR.
+- **The three planes do NOT refresh on the same clock, and the assurance plane
+  is the frozen one.** The plan plane is re-read from `origin/main` at every
+  dispatch (`syncPlanFromOrigin`); each worker gets a fresh worktree off
+  `origin/main` (`worktreeAdd`, `src/lib/worker.ts`). But the control and
+  assurance planes are the **running process itself** — `judgeReview` is called
+  in-process, so the judge, the linter and the drain loop are whatever was
+  loaded at boot. A fix merged mid-drain therefore reaches the plan and the
+  workers **immediately** and the judge **not at all** until a restart. This is
+  deliberate and scoped: `src/lib/self-sync.ts` covers process **startup** and
+  says in its own header that in-process staleness belongs to the WS-2
+  self-updater. It is the most common way a correct fix looks broken — see
+  [operator-guide.md](operator-guide.md#restarting-the-supervised-daemon) for
+  what to expect between merge and restart.
 
 ## Why "docs awareness" is architectural, not cosmetic
 

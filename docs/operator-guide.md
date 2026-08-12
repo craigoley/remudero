@@ -253,8 +253,7 @@ appended to `src/lib/runbook-coverage.ts`'s named list, not discovered by hand.
 ### Restarting the supervised daemon
 
 The daemon (`rmd daemon`, loaded via `~/Library/LaunchAgents/com.remudero.daemon.plist`, label
-`com.remudero.daemon`) loads its code once at start and dispatches in-process — a merged fix on
-`origin/main` does **nothing** until the process actually restarts. See
+`com.remudero.daemon`) loads its code once at start and dispatches in-process. See
 [deploy-supervisor.md](deploy-supervisor.md) for the full mechanism; two ways to trigger it:
 
 - **Let the supervisor do it (preferred).** `rmd deploy --reason "<why>"` marks a deploy
@@ -271,6 +270,28 @@ The daemon (`rmd daemon`, loaded via `~/Library/LaunchAgents/com.remudero.daemon
   `state/inflight/` is actually empty first, because a mid-task kill SIGKILLs the worker (the
   #559/#581 orphan class the automated path exists to avoid). Confirm the restart landed by
   tailing `state/logs/daemon.out`/`daemon.err` for a fresh `daemon.boot` line.
+
+#### What a merged fix reaches before you restart — and what it does not
+
+This is the single most misread thing about the running fleet, so read it before you merge a fix
+and watch the next run to see whether it worked. **A merge does not take effect all at once. Three
+things load code or data on three different schedules, and only one of them is frozen:**
+
+| what | when it loads | so a fix merged mid-drain… |
+|---|---|---|
+| **The plan** | re-read from `origin/main` at **every dispatch** (`syncPlanFromOrigin`, `src/run-task.ts` — it fetches, then reads the blob, never your local checkout) | **is live immediately.** A merged plan or task edit governs the very next dispatch. |
+| **The worker's tree** | a fresh `git worktree add … origin/main` per run (`worktreeAdd`, `src/lib/worker.ts`, which fetches first) | **is live immediately.** The worker builds and tests against your merged `src/`. |
+| **The orchestrator itself** — the drain loop, the linter, and the acceptance judge (`judgeReview`, called in-process from `src/run-task.ts`) | **once, at process start.** The already-loaded module graph is unaffected by a later merge. | **is NOT live. It is frozen until the process restarts.** |
+
+The consequence that catches people: merge a fix to the review gate, watch the next run, and you
+will see a **mixed** result — the worker behaved differently (fresh tree, fresh plan) while the
+judge that graded it did not. That is not a flaky gate and not a failed fix; it is a restart you
+have not done yet. Judge behaviour is only observable **after** the restart below.
+
+This asymmetry is deliberate and recorded, not an oversight: `src/lib/self-sync.ts` self-syncs the
+CLI at **startup** and says so in its own header — in-process staleness in a long-running daemon is
+explicitly out of its scope and belongs to the WS-2 self-updater. Until that ships, the restart is
+the mechanism.
 
 **The reap-wait, if the same host also runs `rmd serve`.** Killing a process does not instantly
 free the port it held, so a kill-then-immediately-restart of `rmd serve` can still hit
