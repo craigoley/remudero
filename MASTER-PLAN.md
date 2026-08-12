@@ -1,40 +1,42 @@
-# REMUDERO — Master Plan (v2.30 · synced 2026-08-06)
+# REMUDERO — Master Plan (v2.31 · synced 2026-08-12)
 
-**FOCUS — THE FIRST PRE-REGISTERED PREDICTION THIS HARNESS HAS EVER CONFIRMED, AND THE ONE ORGAN IT
-STILL WILL NOT BUILD. 36 runs → 25 tasks / 25 merged PRs at $6.201/run** ($8.327 → $6.201; per
-SHIPPED task **$15.66 → $8.930**). *(An **ORGAN** is an exported capability that merged with no
-production call site — built, tested, shipped, never called; **DARK** while it stays that way. Defined
-here because R16-2 below tracks it as a metric.)* **(1) R15-1 SCORES `HIT`.** R15 predicted `implement` avg turns
-**< 90** if W1-T338/#1327's preflight `maxBuffer` fix was the cause of the turn inflation; observed
-**83.083** (126.0 → 83.1, **−34%**), while cost per turn moved **+4%** ($0.0716 → $0.0746). The whole
-saving is LENGTH, it was predicted in advance with a stated falsifier, and it is **the first `HIT` in
-P43(iii)'s calibration line** (now n=5 · hit 2 · miss 0 · unresolvable 3). One $3.482 run bought it.
-**(2) AND LEARNINGS IS STILL 74, ZERO ADDED, SIXTH CYCLE** — P38's write path stayed unbuilt while
-**six tasks burned 16 runs to ship 6**, each redispatch re-deriving its predecessor's recon verbatim.
-**(3) THE HARNESS WIRED 5 DARK ORGANS AND SHIPPED 4 NEW ONES** (T347/T349/T350/T362 merged
-deliberately unwired) — and SHIPS-UNWIRED read **clean**, because its population is NET-STATE-claimed
-symbols only. **(4) P47's author changed again: the poisoning branch is now the PLAN-SYNC LANE'S OWN**
-(`plan/dispatch-lanes-back-to-1`/#1361 → 4 foreign rejections, all W1-T343). **$52.334 of $223.251
-(23.4%) bought no ship**, down from 38.1%. **ZERO new P-numbers mined** — every finding routed to an
-existing entry. Next: **P29 → P47 → P38 → P48 → P43 → P33**.
+**FOCUS — THE PLAN READ THE WRONG NUMBER FOR EIGHT CYCLES, AND THE INSTRUMENT THAT CAUGHT LAST
+CYCLE'S ONE TRIUMPH WENT DARK. 64 runs → 27 tasks / 27 merged PRs at $3.502/run** (per SHIPPED task
+**$8.930 → $8.302**). *(An **ORGAN** is an exported capability that merged with no production call
+site — built, tested, shipped, never called; **DARK** while it stays that way.)*
+**(1) SIBLING-REJECTION COUNT WAS NEVER P29(i)'s METRIC.** It reads **19** (6 → 19) with the fix LIVE
+since 2026-07-20 — because a run that never opened a PR is *supposed* to be rejected; what #349
+changed is that a task can now be credited THROUGH a sibling's merged PR. Eight cycles of ranking
+argued over a number the fix could not move. The derivable metric is **ledger credit on shipped
+tasks: 5 of 27 (19%)**. **(2) THE HARNESS SHIPPED A TASK IT CANNOT SEE** — W1-T419's work merged as
+**#1609 carrying NO trailer**, while **#1617 on `feat/ratchet-names-compression-candidates` carries
+`Remudero-Task: W1-T419`**: both halves of P47 on one task, and the union missed the ship entirely.
+**(3) THE TURN COLUMN WENT DARK AND TOOK R16-1 WITH IT** — **12 of 26** union-listed shipped runs
+report real dollars and **exactly 0 turns**, so `avg turns 17.781` is an average over an unmeasured
+denominator and R16-1 scores **UNRESOLVABLE, not HIT**. **(4) FIRST HAIKU ROW EVER**: one plan-lint
+run merged (#1621) at **$0.295 / 62t** against a `src` mean of $3.553 — the FIRST positive datum
+W1-T167's routing question has ever had, at n=1. FOREIGN rejections **4 → 18**; **17 runs across 5
+tasks bought ZERO ships**, every one foreign-poisoned. **ZERO new P-numbers mined.**
+Next: **P47 → P38 → P40 → P48 → P43 → P33**.
 
 **Header discipline (v2.17).** Sync date + current focus, nothing else; the sections are the source of
 truth. A retro that re-inflates this header has failed the HARNESS-COMPRESSION bar.
 
-**Retro ledger (R1–R14 folded to one line — the SHIPPED log's own section headers carry the detail):**
+**Retro ledger (R1–R15 folded to one line — the SHIPPED log's own section headers carry the detail):**
 R1–R9 seeded CALIBRATION + P1–P32, corrected the false-merged W1-T54b attribution (#80 → #91) and
-closed P1–P11+P15+P21+P25+P27+P31 · R10–R14 logged the console/inbox, 94-task gate-integrity,
-ratified-backlog, account/status-board and gate/claim-integrity cycles, RETIRED **P28** (22%, n=18)
-and **P41**, CLOSED **P12/P13/P14/P18/P19/P20/P23/P24/P34/P37**, mined
-**P35/P38/P39/P40/P41/P42/P46**, and recorded the first pre-committed effect test to PASS ·
-R15 (…919636675, 2026-08-05) logged the 25-task console-tabs + governor-wiring + preflight cycle,
-priced **P38** at seventeen rediscoveries of one defect and mined **P47** ·
-**R16 (…992364048, this sync)** logs the **25-task daemon-lane + escalation-quality cycle**, re-bases
-calibration on 36 runs, **SCORES R15's four pre-registrations (2 HIT / 2 UNRESOLVABLE — the first
-`HIT` this plan has ever recorded)**, and mines **ZERO** new P-numbers, because every finding —
-recon re-buy, four newly-dark organs, the plan-sync lane poisoning a task — routes to an entry that
-already exists. **Per-proposal RE-RANK stubs stay abolished** — each proposal has ONE canonical entry,
-updated in place; the live ranking is the single line under §Retro proposals.
+closed P1–P11+P15+P21+P25+P27+P31 · R10–R15 logged the console/inbox, 94-task gate-integrity,
+ratified-backlog, account/status-board, gate/claim-integrity and console-tabs/governor-wiring cycles,
+RETIRED **P28** (22%, n=18) and **P41**, CLOSED
+**P12/P13/P14/P18/P19/P20/P23/P24/P34/P37**, mined **P35/P38/P39/P40/P41/P42/P46/P47**, and recorded
+the first pre-committed effect test to PASS ·
+R16 (…992364048, 2026-08-06) logged the 25-task daemon-lane + escalation-quality cycle and scored
+this plan's first `HIT` ·
+**R17 (…537819709, this sync)** logs the **27-task board/verdict-integrity + learning-loop cycle**,
+re-bases calibration on 64 runs, **SCORES R16's four pre-registrations (0 HIT / 0 MISS / 4
+UNRESOLVABLE — one of them because its own instrument went dark)**, RE-SPECIFIES the metric P29 was
+ranked on for eight cycles, and mines **ZERO** new P-numbers. **Per-proposal RE-RANK stubs stay
+abolished** — each proposal has ONE canonical entry, updated in place; the live ranking is the single
+line under §Retro proposals.
 
 > **Remudero** — the wrangler in charge of the remuda: the hand who manages the worker herd and
 > decides which mounts ride today. The orchestrator's own job title. CLI alias `rmd`.
@@ -91,246 +93,278 @@ Dependabot/leak-grep #76, the ci-gate aggregator #75, the dep-review lane #87/#9
 so §5A's "the harness eats first" is FACT on the security tier. As of R11 the daemon also drains
 `remudero` itself and fires its own retro (W1-T160/#853) — the operator-kick era is over.
 
-★ **THIS CYCLE (RETRO-1785992364048, 2026-08-06): THE DAEMON-LANE + ESCALATION-QUALITY CYCLE —
-36 runs → 25 tasks / 25 merged PRs at $6.201/run.** Four arcs landed; ids, PRs and costs are in the
-SHIPPED log and are NOT restated here. **THE DAEMON-LANE ARC (T339–T344)** — the keychain race, the
-plan-snapshot staleness, a bounded deploy-deferral ceiling and per-DISPATCH (not per-tick) governor
-admission all landed, then `runDaemon` was wired to lanes and `sweep.dispatchLanes` flipped off its
-dark-ship value (current lane count: CAPABILITY SNAPSHOT above) — **P19's parallel dispatch is LIVE
-for the first time**, six tasks after the N=1 ruling was overridden.
-**ESCALATION QUALITY (T345–T350, T354)** — referent-less escalations dedup, asks classify
-`needs-question`/`needs-action`, decision summaries get a translator, a holdout-scored judge decides
-whether a condition deserves a human, feedback expands with byte-identical raw storage behind an
-arm-then-confirm write control, and the plan-grill lane moved onto the async issue path. **THE GATE'S
-OWN INTEGRITY (T351/T352/T353/T359/T362)** — the commitlint job reads the LIVE PR title instead of a
-stale payload, an unprovenanced DECISIONS.md entry now FAILS review, a `ruling-verify` lint blocks
-auto-verify on ruling tasks, `judgeRubric` posts advisory, and a proof that passes on the BASE tree
-downgrades. **WIRING DARK ORGANS (T356/T357/T358/T359/T361)** — `sweepOrphanWorkers`,
-`resolveClaudeExecutable`, `planHealthSweep`, `judgeRubric` and boot-time `runRecoverability` all
-gained live call sites. **Zero `diagnose` runs** — the row that was the most-ever last cycle is empty.
+★ **THIS CYCLE (RETRO-1786537819709, 2026-08-12): THE BOARD/VERDICT-INTEGRITY + LEARNING-LOOP CYCLE —
+64 runs → 27 tasks / 27 merged PRs at $3.502/run.** Ids, PRs and costs are in the SHIPPED log and are
+NOT restated here. **THE BOARD/STATUS ARC (T364, T371–T376, T382, T414, T415)** — a console write
+control for the daily cost ceiling, tailnet identity for `Serve` scope, both `gh` quota buckets
+observed with a once-only exhaustion escalation, a fast preflight mode, the plan frontier excluding
+`verify: human` tasks, per-section filed/merged counts on the Plan tab, check-wait stopping on
+STALLED PROGRESS rather than elapsed polls, a GitHub-corroborated breaker-streak reset, and a
+truncated board fetch finally made visible so `deriveStatus` DEFERS instead of guessing.
+**VERDICT & PROOF INTEGRITY (T379, T387, T409, T416, T423, T424)** — `rmd ledger-grep` as a union
+that FAILS LOUD with no archives (P48's shape, shipped), check-proof collapsed onto the reviewer's own
+executor, an offline refusal of a shipped/not-shipped task-id contradiction (the rung that BLOCKS this
+very retro), the emitter/commitlint rule-and-range gaps closed, a **golden-verdict fixture corpus**
+over the deterministic reviewer, and review verdicts joined to post-merge reality.
+**THE LEARNING LOOP (T418, T419, T420, T426)** — a repeat-incident rate metric with escalation,
+the LEARNINGS citation loop closed so retention rides measured use, duplicate-closure detection at
+knowledge intake, and an explicit dispatch-priority field with comparator and lint (T422).
+**LOCKS & DISK (T368, T380, T381, T411)** — a lock holder judged by pid+host+start-time, a dead pid
+outranking recent activity, and a one-shot disk-reclaim rung. **Zero `diagnose` runs, second cycle.**
 
-★ **THE FINDING: THE FIRST PREDICTION THIS PLAN EVER PRE-REGISTERED CAME TRUE, AND IT NAMES THE
-CHEAPEST FIX IN THE LOG.** R15 wrote, in advance and with an explicit falsifier: *"`implement` avg
-turns < 90 — if turn inflation was the false-FAIL preflight loop, it falls; if it does NOT fall, the
-ci-parity contract is NOT the cause."* Observed: **83.083** (126.047 → 83.083, **−34%**). Cost per
-run fell **$8.327 → $6.201** and per SHIPPED task **$15.66 → $8.930**, while cost per TURN rose 4%
-($0.0716 → $0.0746) — so this is not a discount, it is **34% less work per run**, bought by
-**W1-T338/#1327, a single $3.482 / 53-turn fix**. Two things follow. **(a) P43 works**: without the
-pre-registration this reading would be UNATTRIBUTED noise like every other move in this plan, and
-instead it is the first `HIT` in P43(iii)'s calibration line. **(b) P38's price is now paid twice
-over**: the fix that bought a third of a cycle's turns is the same fact seventeen workers rediscovered
-because nothing could write it down. **One cycle's saving would have funded the write path forty times.**
+★ **THE FINDING: THE NUMBER P29 WAS RANKED ON FOR EIGHT CYCLES WAS NEVER THE FIX'S NUMBER.** Sibling
+rejections read **19** (10 → 6 → 19) with clause (i) **LIVE in `src/lib/status.ts` since 2026-07-20**
+(#349; see the correction below). That is not a regression and not a fix failing — it is a
+**MIS-SPECIFIED METRIC**. A run that opened no PR of its own is *supposed* to have a sibling's trailer
+rejected; the ownership-assert must keep refusing it, and R5's false-credit inversion is why. What
+#349 changed is downstream: the `ownResult` stash lets a task be CREDITED through a sibling's merged
+PR. So the count of rejections is orthogonal to the fix by construction, and every ranking argument
+that moved P29 on it — R13's demotion, R14's reversal, three UNRESOLVABLE scorings — was reading a
+dial the mechanism is not wired to. **R17 strikes sibling-rejection count as a P29 metric** and
+replaces it with the one that is derivable and load-bearing: **ledger credit on shipped tasks, 5 of 27
+(19%)**. The lesson generalises past P29 and is the sharpest thing this cycle produced: *a proposal's
+metric must be derivable FROM THE MECHANISM IT NAMES, or the plan will rank on a coincidence for
+years.* That is P43's territory, filed there.
 
-★ **THE COUNTER-FINDING: THE HARNESS RE-BUYS ITS OWN RECON EVERY DISPATCH.** Six tasks consumed
-**16 runs to ship 6** — W1-T343 ×5, T342 ×3, T349/T350/T353/T356 ×2 each — and the harvest shows the
-duplication is VERBATIM, not incidental: three separate W1-T342 runs each filed *"read
-`test/cost-governor.test.ts` and `test/daemon-plan-freshness.test.ts` before implementing"*; four
-separate W1-T343 runs each filed *"implement W1-T343 per its task file — dependencies unblocked,
-ready for the implement stage."* A run reads, learns, files a follow-up rule 15 forbids anyone acting
-on, and dies; the next dispatch starts from zero. **This is not a new defect — it is P38's missing
-write path at RUN granularity** (§1 already calls recon output *"TTL'd"*), and it is filed as evidence
-IN PLACE rather than as a new P-number, because minting one would be the accretion failure P8 names.
+★ **THE COUNTER-FINDING: THE HARNESS SHIPPED A TASK IT CANNOT SEE.** W1-T419's work is on `main` —
+**#1609, `feat(learnings): close the citation loop so retention rides measured use (W1-T419)`** — and
+it carries **NO `Remudero-Task` trailer at all**, so the ownership-asserted union never saw the ship.
+Meanwhile **#1617, on `feat/ratchet-names-compression-candidates`, DOES carry `Remudero-Task:
+W1-T419`** and was rejected as foreign. One task, both halves of P47 at once: the work with no
+trailer, the trailer with no work. It is recorded here BY HAND (SHIPPED log below), which is exactly
+the manual arithmetic P48's face 2 says a gate should be doing. W1-T413's harvest names the mechanism
+from the other end — **`deriveStatus`'s trailer search reads only the PR body, never the squash-merge
+commit message** — so a repo whose merge flow edits the squash message separately can strand any
+self-referential fix task the same way. This is P47 evidence in place, not a new number.
 
-★ **FIVE DARK ORGANS WIRED, FOUR NEW ONES SHIPPED — AND THE SCAN BUILT TO CATCH THAT READ CLEAN.**
-Wired: `sweepOrphanWorkers` (T356), `resolveClaudeExecutable` (T357), `planHealthSweep` (T358),
-`judgeRubric` (T359), `runRecoverability` (T361). Shipped DARK, each by its own PR's admission:
-`askType` has no producer that sets it (T347/#1371 — *"fully unit-tested but dormant in production"*),
-`escalateWithJudge()` has no live caller (T349/#1379), `expandFeedback` is unwired in `rmd serve`
-(T350/#1378), and the base-tree proof check *"degrades to `base_unknown` rather than ever observing a
-genuine base-tree pass"* (T362/#1404). **Net +1.** SHIPS-UNWIRED nonetheless reads **clean**, and the
-reason is structural: its population is symbols a NET STATE claim NAMES, so an organ the plan has not
-yet boasted about is invisible to it. R15 cited that clean reading as positive evidence for P38 —
-**R16 withdraws that reading.** The instrument is not measuring what P38 is about.
+★ **THE TURN COLUMN WENT DARK, AND TOOK LAST CYCLE'S ONE TRIUMPH WITH IT.** **12 of the 26**
+union-listed shipped runs report **nonzero dollars and exactly 0 turns** (W1-T364 $14.451/0t,
+T387 $15.477/0t, T374 $8.559/0t, T376 $8.799/0t, T372 $7.483/0t, T383 $6.884/0t, T409 $6.171/0t,
+T368 $5.119/0t, T373 $4.539/0t, T379 $4.027/0t, T381 $3.658/0t, T380 $3.370/0t), and 4 more report
+$0.000/0t. The gather nonetheless prints **avg turns 17.781** over all 64 runs. **A run that cost
+$14.451 did not take zero turns** — 0 here means UNRECORDED, which is P48(i)'s naked zero inside the
+retro's own instrument. Consequence: **R16-1 (`implement` avg turns stays < 100) scores UNRESOLVABLE,
+not HIT**, and R15-1's `HIT` — this plan's first — now rests on a metric that has since proven it can
+go dark without saying so. P40(i), closed for five cycles, **RE-OPENS**; TASK D below is the fix.
 
-★ **P47's AUTHOR CHANGED AGAIN, AND IT IS NOW THE PLAN-SYNC LANE.** Of 10 rejected trailers, **4 were
-FOREIGN and all 4 are W1-T343**, every one naming **#1361 on branch `plan/dispatch-lanes-back-to-1`** —
-a PLAN-ONLY PR, the exact shape this retro itself ships. Last cycle's poisoners were the fix rung and
-a splitter; this cycle it is the Architect's own lane. **The class is not "repair actors misbehave" —
-it is that NOTHING in this harness governs who may emit a `Remudero-Task` trailer**, so every actor
-that touches a task's subject matter can poison it. P33's list goes **10 → 11 pairs**. The other 6
-rejections are SIBLING (T342 ×2, T349, T350, T353, T356) — P29(i), unbuilt for an EIGHTH cycle.
+★ **THE FIRST HAIKU ROW EVER, AND W1-T167's FIRST POSITIVE DATUM.** The model table has **two rows for
+the first time in this plan's history**: `haiku` 1 run / 62 turns / **5.4% of weekly burn / $0.295**,
+against `sonnet` 21 runs / 1076 turns / 94.6% / $90.948. The haiku run is the `plan-lint` class row
+(W1-T426) and **it MERGED — #1621** — at **$0.295 against a `src` mean of $3.553, 12× cheaper**. For
+seven cycles the routing question (W1-T167/#606) has been *unmeasured*, its contrast rows appearing
+and vanishing at n≤4; this is the first time a non-`src` class both routed to a cheaper mount AND
+shipped. **The standing rule still binds: n=1 re-bases nothing.** But the negative claim is now
+retired for good — the discount is not unmeasurable, it is under-sampled, and one more plan-lint ship
+makes it n=2.
 
-★ **SPEND & THE INSTRUMENTS.** **$52.334 of $223.251 (23.4%) bought no ship at all**, down from
-38.1%; ledger credit reads **12 of 25 (48%)**, inside the eight-cycle noise band (0%–64%) and
-therefore **UNATTRIBUTED** (P43(ii)). Peak run W1-T349 **$27.118 / 151 turns**; **0/36 `budget_usd`
-trips**, sixth cycle. Turns hold lit (2991) and **36 of 36 runs classed**, so P40(i)/(a) stay closed —
-but the class table LOST its second row (`docs` n=1 → n=0) and the `diagnose` row emptied, so the
-W1-T167 routing question has no contrast again. **P40(ii) is unpaid for a FOURTH cycle**: the weekly
-table reports 2991 turns over **120** runs while the cycle table reports the same 2991 over **36**.
-Ratification telemetry read `3 / 11 / 21%` for the **SIXTH byte-identical time**. MAST `verification`
-**20 → 17**; UNMAPPED fell **28% → 19%** (`incomplete`×7) with P40(iii) still unbuilt. Infrastructure
-events: **none, a FOURTH consecutive clean reading** — P41 stays retired. ★ **NEW INSTRUMENT, FIRST
-READING**: W1-T358/#1398 wired `planHealthSweep` into the gather **this cycle**, and its first output
-grades **6 open tasks carrying 19 dead proofs** (W1-T12e ×8, W3-T7 ×3, W1-T147 ×3, W3-T4 ×2,
-W12-T1 ×2, W2-T2 ×1) — an instrument built and fired inside one cycle, which is the shape P38(iii)
-asks every organ to have.
+★ **SPEND & THE INSTRUMENTS.** **$224.146 total, $3.502/run, $8.302 per SHIPPED task** ($8.930 →
+$8.302). Ledger credit **5 of 27 (19%)** — inside the nine-cycle noise band (0%–64%) and therefore
+**UNATTRIBUTED** (P43(ii)), not a collapse. **37 rejected trailers: 18 FOREIGN (4 → 18), 19 SIBLING**
+— and **17 runs across 5 tasks (W1-T369 ×4, T377 ×5, T378 ×5, T386 ×1, T412 ×2) bought ZERO ships,
+every one foreign-poisoned**, two of them (T377/#1386, T378/#1391) on the slug-form `run-<task>-<slug>`
+branches W1-T390 files. `already_satisfied` appears at **9 of 64 (14%)** — P39's shipped
+dispatch-side half visibly refusing redundant work, the first cycle it is large enough to read.
+MAST `verification` **17 → 32**; UNMAPPED rose **19% → 36%** (`incomplete`×17, `blocked`×1) with
+P40(iii) still unbuilt. **P40(ii) unpaid for a FIFTH cycle**: 1138 turns reported over **22** runs
+weekly and the same 1138 over **64** cycle-wide. Ratification telemetry `3 / 11 / 21%` for the
+**SEVENTH byte-identical time**. Infrastructure events **none, a FIFTH clean reading** — P41 stays
+retired. Plan-health sweep **CLEAN** (the 19 dead proofs cleared 2026-08-07) and SHIPS-UNWIRED clean.
+**Mutation-gate lifetime: N=0 verdicts, NO POSITIVE CONTROL** — and the gather says so in those words
+rather than printing "zero escapes", which is **P48(ii) obeyed by an instrument before the proposal
+is ratified**.
 
 ★ **PRIOR CYCLES (folded — the SHIPPED log's own section headers carry every id, date and detail).**
-R15 (2026-08-05) landed the four-tab console, the governor-wiring arc and the preflight fix — 25
-tasks; it mined P47 and priced P38. R14 (2026-08-03) landed the review/claim-integrity gate, dispatch
-integrity, the credential family and CI parity — 25 tasks; first pre-committed effect test to PASS.
-R13 (2026-08-01) landed the account family and the status board — 22 tasks. R12 (2026-07-30) drained
-the whole ratified backlog: P19 parallel dispatch, P34 presence/headroom, P37 TIER-1 policy — 25
-tasks, three families CLOSED. R11 (2026-07-29) drained the gate-integrity ladder, brownfield
-onboarding and the learning flywheel — 94 tasks. R10 made the console a real instrument and closed
-the P25 ratification inbox. R9 ended the spin loop (195 runs → 26). R8 recorded 28 merges and **0**
-ledger credits — the LIVENESS inversion that mined P29/P30. R7 built flight control + the
-level-triggered PR reconciler. R6 gave the floor executable proofs (P15). R5 unioned ledger∪GitHub at
-gather time (P11) and found the FIRST integrity inversion — **PR #80's false `W1-T54b` trailer**, the
-residue P33 retires.
+R16 (2026-08-06) landed the daemon-lane arc (P19's parallel dispatch LIVE), escalation quality, the
+gate's own integrity and five dark-organ wirings — 25 tasks; it scored this plan's first `HIT`
+(R15-1, `implement` turns −34% off a single $3.482 fix) and mined ZERO new numbers. R15 (2026-08-05)
+landed the four-tab console, the governor-wiring arc and the preflight fix — 25 tasks; mined P47,
+priced P38. R14 (2026-08-03) landed the review/claim-integrity gate, dispatch integrity, the
+credential family and CI parity — 25 tasks; first pre-committed effect test to PASS. R13 (2026-08-01)
+landed the account family and the status board — 22 tasks. R12 (2026-07-30) drained the whole
+ratified backlog: P19, P34, P37 — 25 tasks, three families CLOSED. R11 (2026-07-29) drained the
+gate-integrity ladder, brownfield onboarding and the learning flywheel — 94 tasks. R10 made the
+console a real instrument and closed the P25 ratification inbox. R9 ended the spin loop (195 runs →
+26). R8 recorded 28 merges and **0** ledger credits — the LIVENESS inversion that mined P29/P30. R7
+built flight control + the level-triggered PR reconciler. R6 gave the floor executable proofs (P15).
+R5 unioned ledger∪GitHub at gather time (P11) and found the FIRST integrity inversion — **PR #80's
+false `W1-T54b` trailer**, the residue P33 retires.
 
-**Inventory (verified 2026-08-06: 25 tasks / 25 merged PRs this cycle, ~1355 merged PRs on `remudero`,
+**Inventory (verified 2026-08-12: 27 tasks / 27 merged PRs this cycle, ~1420 merged PRs on `remudero`,
 6 on `remudero-sandbox`).** WS-0 and WS-1 SHIPPED; WS-3's control panel is a live four-tab instrument
-(Decisions/Now/Plan/Feed) with a CLI projection (`rmd status`) and, as of this cycle, **operator WRITE
-controls behind arm-then-confirm** (the feedback-expansion preview T350, the cost-ceiling override
-surface T363/T364's dependency); the §5 gate stack polices its own integrity end to end and now
-refuses an unprovenanced DECISIONS.md entry (T352), blocks auto-verify on ruling tasks (T353), reads
-the LIVE PR title in commitlint (T351) and downgrades a proof that already passes on the BASE tree
-(T362); the daemon fires its own retro (W1-T160/#853), consults every governor it shipped **at
-DISPATCH time rather than per tick** (T342), and — **new this cycle — DISPATCHES MULTIPLE TASKS AT
-ONCE** (current lane count: CAPABILITY SNAPSHOT above): `runDaemon` is wired to lanes (T343) and
-`sweep.dispatchLanes` moved off 1 (T344), which is **P19's parallel dispatch live for the first
-time**, under the DECISIONS.md 2026-08-04 amendment that overrode the
-W1-T326 N=1 ruling. Escalation now classifies its own asks (`needs-question`/`needs-action`, T346),
-dedups referent-less conditions (T345) and can route through a holdout-scored judge (T349, no live
-producer yet). The SHIPPED log is the record (rule 13); no PR-by-PR restatement lives here.
+(Decisions/Now/Plan/Feed) with a CLI projection (`rmd status`) and **operator WRITE controls behind
+arm-then-confirm**, including the daily cost-ceiling override (T364/#1417) and a Plan tab that now
+carries per-section filed/merged counts (T376) over a frontier that excludes `verify: human` tasks
+(T375). The §5 gate stack polices its own integrity end to end and, **new this cycle**, refuses a
+shipped/not-shipped task-id contradiction OFFLINE (T409/#1597 — the rung that blocked this retro),
+judges lock holders by pid+host+start-time (T368) with a dead pid outranking recent activity (T381),
+collapses check-proof onto the reviewer's own executor (T387), and is itself regression-locked by a
+**golden-verdict fixture corpus** (T423/#1613) whose companion joins verdicts to post-merge reality
+(T424/#1614). `deriveStatus` now DEFERS on a truncated board fetch instead of guessing (T415) and
+resets a dispatch-breaker streak only on GitHub corroboration (T414). The daemon fires its own retro
+(W1-T160/#853), dispatches multiple tasks at once (lane count: CAPABILITY SNAPSHOT above), observes
+BOTH `gh` quota buckets and escalates exhaustion once (T372), and carries an explicit dispatch
+PRIORITY field with comparator and lint (T422/#1612). The learning loop gained a repeat-incident rate
+metric with escalation (T418), duplicate-closure detection at intake (T420) and a closed citation
+loop (T419/#1609). The SHIPPED log is the record (rule 13); no PR-by-PR restatement lives here.
 
 **mounts.yaml (W1-T5) is SHIPPED** — #42, on disk at `.remudero/mounts.yaml`, re-based to a flat-400
 tripwire by #90, and routing model + effort by task RISK and CLASS since W1-T167/#606. The
-calibration table below is the row that re-bases it. **★ THE W1-T167 QUESTION LOST ITS CONTRAST
-AGAIN.** R15's `docs` row was n=1; this cycle it is **n=0** — 36 of 36 runs are `src`, and the
-`diagnose` row emptied too (4 → 0). So the routing discount is **once more unmeasured, not
-disproven**, and the standing rule holds: **do not re-base a mount on a row that appears and vanishes
-at n≤4.** The one durable read from R15's contrast survives unchanged — the docs/plan population
-EXISTS and is merely tiny, which retires R14's "unmeasurable by construction".
+calibration table below is the row that re-bases it. **★ THE W1-T167 QUESTION GOT ITS FIRST POSITIVE
+DATUM, AT n=1.** For seven cycles the contrast row appeared and vanished at n≤4 (`docs` n=1 → 0,
+`diagnose` n=4 → 0). This cycle a `plan-lint` row exists (n=1) **and its run routed to haiku, cost
+$0.295 against a `src` mean of $3.553, and MERGED (#1621)** — the first time a non-`src` class both
+took the cheaper mount and shipped. The standing rule is UNCHANGED and still binds: **do not re-base a
+mount on a row that appears and vanishes at n≤4.** What changes is the negative claim — the discount
+is **under-sampled, not unmeasurable**, and two more plan-lint ships make it decidable.
 
-★ **CORRECTION (2026-08-07, operator-ratified) — THE RANK-1 ITEM WAS BUILT BEFORE ITS OWN EVIDENCE
-LOG OPENED, AND SIX RETROS RE-ASSERTED OTHERWISE.** **W1-T149 SHIPPED: PR #349, merged
-2026-07-20T14:16:23Z**, head `run-W1-T149-1784553391268`, body trailer `Remudero-Task: W1-T149`, all
-three acceptance criteria checked — *"fix(W1-T149): sibling-run credit liveness + per-task dispatch
-circuit breaker"*. It is not merely merged but RUNNING: the `ownResult` stash that IS P29(i)'s
-mechanism is live at `src/lib/status.ts` (rungs (a)/(b) stash a non-merged resolution instead of
-returning it, so a merged owned-branch trailer at rung (c) can still credit), and clause (ii)'s
-breaker is what fired issue #1448. P29's own entry dates the ratification to 2026-07-20 — **the same
-day #349 merged** — so the plan recorded the FILING and never the SHIP, and every entry in P29's
-evidence log (R11 onward) was written against a fix that was already in `main`. THE COMPOUNDING COST,
-which is the part that matters: R14/R15/R16 each scored a pre-registration **UNRESOLVABLE** on the
-antecedent *"W1-T149 did not ship"*, and the standing rule *"the plan does not re-rank on
-unattributed moves"* then froze rank 1 in place — so the sibling-rejection fall **23 → 10 → 6** was
-called UNATTRIBUTED for three consecutive cycles against a live fix that is its most obvious cause.
-R15 and R16 both wrote that a working per-task cap is *"what the shape would predict"* and both
-declined to credit it for want of a telemetry line; the credit was available all along from the
-merged PR. **THE CLASS, and it is new:** `plan/claims.yaml` gates prose claims about CODE, and
-nothing gates prose claims about TASK STATE — so an "unbuilt" assertion is hand-maintained,
-re-read each cycle, and self-confirming. W1-T392 files the gate. Worth a second look while doing it:
-clause (ii) is credited in P29's entry to W1-T271/#1040 (a lifetime cap no ledger step can reset)
-when #349 had already shipped a per-task breaker — plausibly a deliberate hardening against rotation,
-plausibly a second breaker bought because the first was invisible. The evidence here does not
-settle which, and it should not be asserted either way without checking.
+★ **CORRECTION (2026-08-07, operator-ratified; R17 CLOSES IT AND STRIKES ITS METRIC).** **W1-T149
+SHIPPED: PR #349, merged 2026-07-20**, head `run-W1-T149-1784553391268`, 3/3 criteria — *"sibling-run
+credit liveness + per-task dispatch circuit breaker"* — and it is RUNNING: the `ownResult` stash that
+IS P29(i) is live in `src/lib/status.ts`, and clause (ii)'s breaker fired issue #1448. Six retros
+reasoned from a premise this correction falsifies; that prose is DELETED, not folded. **THE CLASS this exposed
+is gated as of this cycle**: `plan/claims.yaml` gates prose claims about CODE and nothing gated prose
+claims about TASK STATE — **W1-T409/#1597 now refuses a shipped/not-shipped task-id contradiction
+OFFLINE**, and its rung is what BLOCKED this retro until the two surviving "W1-T149 unshipped" lines
+were struck (§Calibration reads, §Retro-proposals routing). **R17's addition, which supersedes the
+2026-08-07 framing:** the correction assumed the sibling-rejection fall 23 → 10 → 6 was #349's
+uncredited effect. It was not — see THE FINDING above. Sibling-rejection count is orthogonal to that
+mechanism, it read **19** this cycle, and no retro may credit or debit #349 with it again.
 
-**Still PLANNED, not shipped** (the honest remainder): **P33's trailer quarantine list, now eleven `(pr, task)` pairs**;
-P17's receipts task (W1-T71) — **held on its INTEROP merit alone as of 2026-08-07; the Art. 50 clock
-that ranked it for five cycles is struck, because no cycle ever checked whether the obligation reaches
-a US operator (see P17's entry)**; the remaining fleet tasks (W1-T25/T28, W2-T2
-dry-run); **the four organs this cycle shipped DARK by their own admission** (`askType`'s producer,
-`escalateWithJudge`'s caller, `expandFeedback` in `rmd serve`, a real base checkout for `unit test:`
-proofs); ~~19 dead proofs across 6 open tasks~~ **CLEARED 2026-08-07 — all 19 were on `verify: human`
-tasks and are now written in the `demonstration:` dialect (W1-T277), which lints clean because it
-declares on the record a proof the harness will never execute. The standing rule already forbade
-rewriting them as `unit test:`; R16's proposed corrective batch is REFUSED, not deferred, and the
-residual defect is that `planHealthSweep` flags free prose on a task it can never dispatch**; and
-the follow-up chain this cycle's harvest names but rule 15 forbids auto-filing (six `tasks.d` shards
-reading `status: queued` while merged — T273, T326, T345, T346, T348, T356; `src/lib/deployer.ts`'s
-comment still naming the RETIRED `reconstructState` as live boot recovery).
+**Still PLANNED, not shipped** (the honest remainder): **P33's trailer quarantine list, now thirteen
+`(pr, task)` pairs**; P17's receipts task (W1-T71) — **held on its INTEROP merit alone as of
+2026-08-07; the Art. 50 clock that ranked it for five cycles is struck, because no cycle ever checked
+whether the obligation reaches a US operator (see P17's entry)**; the remaining fleet tasks (W1-T25/
+T28, W2-T2 dry-run); **the organs this cycle shipped DARK by their own admission** —
+`learningDuplicateViolation` has no live intake gate (T420/#1610, *"tested and callable but has no
+live caller yet"*), the mutation-ratchet's `mutation.ratchet_verdict` emission call site is unwired
+(D-10/W1-T393, lifetime N=0), and the golden-corpus lint hook T423 sketches is deferred; and the
+follow-up chain this cycle's harvest names but rule 15 forbids auto-filing (~45 candidates, headed by
+the squash-commit trailer gap from W1-T413 and the `test/fleet-heartbeat.test.ts` /
+`test/worker-credential-preflight.test.ts` host-specific `--ci-parity` failures four separate runs
+each re-diagnosed from scratch).
 
-**NEXT (L2) — kick order, RE-RANKED 2026-08-07 by the correction above (W1-T149 left the list because
-it shipped, and everything below moves up one; nothing was re-ranked on a metric, so the standing
-rule against re-ranking on unattributed moves is not engaged):** **(1) P47 — trailer emission is
-unowned, and R16 proved the class is not about repair actors: the poisoning branch was the PLAN-SYNC
-LANE'S OWN (#1361), costing W1-T343 four dispatches. It inherits rank 1 on the vacancy, and W1-T390
-below is now the sharpest evidence for it — a branch the harness itself named is uncreditable
-FOREVER. (2) P38 — the LEARNINGS WRITE PATH, priced twice now: seventeen rediscoveries of one defect
-(R15) and 10 duplicated recon runs across six tasks (R16), against a corpus frozen at 74 for SIX
-cycles. Then the call-site lint rung, then the effect assertion. (3) P48 — no naked zero, whose shape
-R16 demonstrated in the affirmative: `base_unknown` (T362) is exactly its clause (i), and W1-T391's
-`blocked` bucket is its non-zero twin — one value, three populations, three opposite correct actions.
-(4) P43's pre-registration — it produced this plan's FIRST scored `HIT`; note that the correction
-above RETRACTS three of its UNRESOLVABLE scorings, whose antecedent was false in the other direction.
-(5) P33 — the quarantine list, 10 → 11 pairs.** The binding constraint is unchanged and now has seven
-cycles of evidence: **"the harness cannot tell itself whether what it BUILT is running"** — with the
-2026-08-07 amendment, which is the sharpest reading of it yet: **the harness could not tell itself
-that the very fix for THAT constraint had been running for eighteen days.** R16's amendment stands
-alongside it: the one instrument built to watch for this (SHIPS-UNWIRED) can only see organs the plan
-has already boasted about, so it read CLEAN in a cycle that shipped four dark organs.
+**NEXT (L2) — kick order, RE-RANKED 2026-08-12 on a STRUCK metric, not a moved one (P29's dial was
+never wired to its mechanism; removing a bad reading is not re-ranking on an unattributed move, which
+the standing rule forbids):** **(1) P47 — trailer emission is unowned, and R17 supplies its
+completest instance: W1-T419's WORK merged with no trailer (#1609) while a FOREIGN branch carried its
+trailer (#1617). Foreign rejections 4 → 18; 17 runs across 5 tasks bought zero ships. (2) P38 — the
+LEARNINGS WRITE PATH, priced three times now: seventeen rediscoveries of one defect (R15), duplicated
+recon across six tasks (R16), and this cycle a clean four-run PROCEDURAL shape the miner surfaced and
+the corpus could not absorb — 74 entries, zero added, SEVENTH cycle. (3) P40 — **RISES from rank 7**,
+because clause (i) RE-OPENED: 12 shipped runs report real dollars and zero turns, which silently
+converted last cycle's headline `HIT` into an UNRESOLVABLE. An instrument that can go dark without
+saying so invalidates every prediction registered against it. (4) P48 — no naked zero; the gather's
+own mutation-gate section (N=0, NO POSITIVE CONTROL) now demonstrates clause (ii) in the affirmative,
+and the turn column demonstrates clause (i) in the negative. (5) P43 — its calibration line yielded a
+SECOND design rule this cycle (a pre-registration must name its coverage precondition). (6) P33 — the
+quarantine list, 11 → 13 pairs.** The binding constraint is unchanged: **"the harness cannot tell
+itself whether what it BUILT is running"** — and R17 sharpens it one turn further: *the harness cannot
+tell itself whether what it MEASURED was measured.*
 NOTE: `nextRunnable` (drain.ts:31 `plan.tasks.find`) is DECLARATION-ORDERED; this is the authoritative
 KICK ORDER (mirrored as a comment atop plan/tasks.yaml).
 
-**★ EFFECT PRE-REGISTRATIONS (P43(i) — stored here until it is stored as data; scored by R17).**
+**★ EFFECT PRE-REGISTRATIONS (P43(i) — stored here until it is stored as data; scored by R18).**
 
 | # | metric | prediction | condition |
 |---|---|---|---|
-| R16-1 | `implement` avg turns (now **83.083**) | **stays < 100** | Nothing further shipped to move it; R15-1's saving must PERSIST to be a fix rather than a one-cycle artifact. A rise above 100 falsifies R15-1 retroactively and the inflation must be re-mined. |
-| R16-2 | exported capabilities merged with no production call site — "dark organs" — shipped per cycle (now **4**, by PR self-admission) | **≤ 1** | ONLY if P38(i)'s call-site lint rung ships. If it does not ship, any fall is **UNATTRIBUTED**; this is the first cycle the count was measured at all, so R17 must also state whether the count is still derivable. |
-| R16-3 | LEARNINGS entries (now **74**) | **> 74** | ONLY if P38's TASK A ships. Otherwise the flag stands and must be reported as a SEVENTH frozen cycle. Re-registered UNCHANGED from R15-3, deliberately: an unscored prediction is not a retired one. |
-| R16-4 | runs-per-shipped-task among multi-run tasks (now **16 runs / 6 tasks = 2.67**) | **< 2.0** | ONLY if a recon-carryover artifact (P38, TASK B below) ships. Recorded because parallel lanes (T343/T344) went live THIS cycle and will raise run counts for reasons unrelated to recon re-buy — so a RISE is likewise unattributable to the defect. |
+| R17-1 | TURN COVERAGE — shipped runs reporting nonzero turns / shipped runs with nonzero cost (now **14 of 26**) | **= 100%, or the average is not printed** | ONLY if TASK D (P40(i)) ships. If it does not, R18 must report the coverage figure ANYWAY and score every turn-conditioned prediction UNRESOLVABLE by default — the failure mode R16-1 discovered is a silent one, and this row exists to make it loud. |
+| R17-2 | FOREIGN rejected trailers per cycle (now **18**, 4 → 18) | **< 5** | ONLY if P47(i) ships. Otherwise the move is **UNATTRIBUTED in both directions** — this metric has run 0 → 12 → 4 → 18 across four cycles with nothing built, which is a noise band, not a trend. |
+| R17-3 | LEARNINGS entries (now **74**) | **> 74** | ONLY if P38's TASK A ships. Otherwise the flag stands and must be reported as an EIGHTH frozen cycle. Re-registered UNCHANGED from R15-3/R16-3 for the third time, deliberately: an unscored prediction is not a retired one. |
+| R17-4 | SIBLING rejected trailers per cycle (now **19**) | **stays ≥ 10** | **ANTECEDENT ALREADY TRUE** — P29(i) is live in `main` and nothing further is planned, so this is scorable regardless of what ships. It is the falsifier for THE FINDING above: if siblings fall below 10 with nothing built, the claim that this dial is orthogonal to #349 is weakened and the 6 → 19 → x series returns to being read as noise about credit, not about mechanism. |
 
-**R15's pre-registrations, SCORED (P43(iii)'s calibration line — and the first `HIT` in it).**
-**R15-1 `HIT`** — predicted `implement` avg turns **< 90** conditioned on W1-T338/#1327, which HAD
-already shipped; observed **83.083**. **R15-4 `HIT`** — predicted `failed` share stays **< 10%**;
-observed **0 of 36**. **R15-2 UNRESOLVABLE** — antecedent false (P47(i) did not ship); foreign
-rejections fell 12 → 4 and that fall is **UNATTRIBUTED**, not an improvement. **R15-3 UNRESOLVABLE** —
-antecedent false (P38 TASK A did not ship); LEARNINGS reads **74**, a SIXTH frozen cycle, and the flag
-stands. Running calibration: **n=5 · hit 2 · miss 0 · unresolvable 3.** The pattern across five
-scorings is now unmistakable and is a RULE, not an observation: **every prediction conditioned on a
-task nobody had committed to dispatching scored UNRESOLVABLE (3/3); both predictions conditioned on
-something that had ALREADY happened scored HIT (2/2).** R16's table above obeys it — R16-1 and R16-4
-are the honest ones, R16-2 and R16-3 are registered knowing they will likely score UNRESOLVABLE again,
-because refusing to register them would let a sixth frozen cycle pass unrecorded.
+**R16's pre-registrations, SCORED (P43(iii)'s calibration line — a 4-way UNRESOLVABLE, and one of them
+for a NEW reason).**
+**R16-1 UNRESOLVABLE (instrument dark)** — predicted `implement` avg turns **stays < 100**; observed
+**17.781**, which nominally satisfies it and **must not be scored `HIT`**, because 12 of 26 shipped
+runs report nonzero dollars against **0 turns**. The number is an average over an unmeasured
+denominator. This is the first prediction in this plan to fail on COVERAGE rather than on antecedent
+or outcome, and it retroactively puts R15-1's `HIT` on notice: that scoring stands (its cycle read 24
+of 25 runs lit) but the metric is now known to be capable of going dark silently.
+**R16-2 UNRESOLVABLE** — antecedent false; P38(i)'s call-site lint rung did NOT ship (it remains
+`callSiteViolations` at `warn`). R16-2 also asked whether the count is still derivable: **it is, and
+it reads ≥ 2** — `learningDuplicateViolation` (T420/#1610, no live caller by its own PR's admission)
+and the unwired `mutation.ratchet_verdict` emitter (D-10, lifetime N=0).
+**R16-3 UNRESOLVABLE** — antecedent false (TASK A unbuilt); LEARNINGS reads **74**, a SEVENTH frozen
+cycle, and the flag stands. **R16-4 UNRESOLVABLE** — antecedent false (TASK B unbuilt); observed
+**26 runs / 9 multi-run shipped tasks = 2.89**, UP from 2.67, and the rise is unattributable for the
+reason R16 itself pre-stated (lanes).
+Running calibration: **n=9 · hit 2 · miss 0 · unresolvable 7.** **The line now yields its SECOND
+design rule**, and R17's table is built to obey both. Rule 1 (R16's): *a pre-registration conditioned
+on work nobody has committed to dispatching is a request, not a prediction* — 7/7 such rows have
+scored UNRESOLVABLE. **Rule 2 (new): a pre-registration must name the COVERAGE precondition of its own
+metric, or a dark instrument will silently satisfy it.** R17-1 is that rule made into a row; R17-4 is
+the only row here conditioned on something already true, and is therefore the only one that can score.
 
 ## SHIPPED log
 
 Shipped arcs, keyed by Remudero-Task (Standing rule 13: the proof is a MERGED PR, not prose).
 Newest first. Cost/turns from the run ledger.
 
+### RETRO-1786537819709 (2026-08-12) — the board/verdict-integrity & learning-loop cycle (27 tasks / 27 PRs)
+
+★ **5 of 26 LEDGER-CREDITED (19%)** — inside the metric's own nine-cycle range (0%–64%), therefore
+**UNATTRIBUTED** (P43(ii)), not a collapse. The credited five: W1-T418/#1605, T416/#1607, T420/#1610,
+T422/#1612, T424/#1614. The 21 gate-side merges the W1-T51 union rescued: W1-T364/#1417, T368/#1414,
+T371/#1425, T372/#1423, T373/#1424, T374/#1434, T375/#1429, T376/#1430, T379/#1436, T380/#1437,
+T381/#1438, T382/#1453, T383/#1454, T387/#1442, T409/#1597, T411/#1595, T413/#1602, T414/#1604,
+T415/#1606, T423/#1613, T426/#1621. ★ **PLUS ONE THE UNION COULD NOT SEE, ADDED BY HAND:
+W1-T419/#1609** — merged on `main`, carrying **no `Remudero-Task` trailer at all**, while **#1617 on
+`feat/ratchet-names-compression-candidates` carries `Remudero-Task: W1-T419`** and was rejected
+foreign. That is 27 tasks, not 26, and the discrepancy is P47's completest instance to date.
+★ **THE TURN COLUMN IS PARTLY DARK — 12 of 26 union-listed shipped runs report nonzero dollars and
+EXACTLY 0 turns**, 4 more report $0.000/0t, so `avg turns 17.781` is an average over an unmeasured
+denominator and **P40(i) RE-OPENS**. Costs total **$224.146**; 0/64 `budget_usd` trips (seventh
+cycle); peak W1-T387 **$15.477**, the cheapest peak since R13. **37 rejected trailers — 18 FOREIGN,
+19 SIBLING**, and **17 runs across 5 tasks (W1-T369 ×4, T377 ×5, T378 ×5, T386 ×1, T412 ×2) bought
+ZERO ships**, every one foreign-poisoned. ★ **FIRST HAIKU ROW EVER** — the `plan-lint` class (n=1,
+W1-T426/#1621) at **$0.295 / 62t**, 5.4% of weekly burn.
+
+- **★ THE BOARD & STATUS ARC — 9 tasks** (the console write control for the daily cost-ceiling
+  override W1-T364/#1417 *$14.451* · tailnet identity for `Serve` scope, token as fallback T371/#1425
+  · both `gh` quota buckets observed with a once-only exhaustion escalation T372/#1423 · a fast
+  preflight mode for the deterministic npm-script gates T373/#1424 · policy-value invariants asserted
+  instead of shipped figures T374/#1434 · the plan frontier excluding `verify: human` tasks T375/#1429
+  · per-section filed/merged counts on the Plan tab T376/#1430 · check-wait stopping on STALLED
+  PROGRESS rather than elapsed polls T382/#1453 · a GitHub-corroborated breaker-streak reset
+  T414/#1604 · ★ a TRUNCATED board fetch exposed so `deriveStatus` DEFERS T415/#1606) → **$66.6**
+- **★ VERDICT & PROOF INTEGRITY — 6 tasks, the cycle's spine** (`rmd ledger-grep`, a union that FAILS
+  LOUD when no archive was read W1-T379/#1436 — **P48's clause (i) shipped as a verb** · check-proof
+  collapsed onto the reviewer's own executor T387/#1442 *$15.477, peak run* · ★ an OFFLINE refusal of
+  a shipped/not-shipped task-id contradiction T409/#1597 — **the rung that BLOCKED this retro until
+  two stale plan-state assertions were struck** · the emitter/commitlint rule-and-range gaps closed
+  T416/#1607 · ★ a GOLDEN-VERDICT fixture corpus over the deterministic reviewer T423/#1613 · review
+  verdicts joined to post-merge reality T424/#1614) → **$52.3**
+- **★ THE LEARNING LOOP — 5 tasks** (a repeat-incident rate metric with escalation W1-T418/#1605
+  *$10.202/137t* · ★ the LEARNINGS citation loop closed so retention rides measured use T419/**#1609**
+  — *the ship with no trailer* · duplicate-closure detection at knowledge intake T420/#1610, shipping
+  `learningDuplicateViolation` **DARK by its own admission** · an explicit dispatch-priority field,
+  comparator and WARN lint T422/#1612 · the learning-loop arc stamped as priority-field consumers
+  T426/#1621, **the first haiku-routed merge in this log**) → **$30.4**
+- **LOCKS, DISK & THE PLAN RECORD — 7 tasks** (a lock holder judged by pid+host+start-time, not pid
+  alone W1-T368/#1414 · a dead pid in `run.lock` outranking recent activity T381/#1438 · T380/#1437
+  linking to its already-merged fix #1392 · a one-shot disk-reclaim rung for three daemon-only sweeps
+  T411/#1595 · the drift-gated CAPABILITY SNAPSHOT generated into this very file T383/#1454 · a no-op
+  close of the W1-T413 re-dispatch T413/#1602 — **P39's sanctioned exit, one of 9 `already_satisfied`
+  runs this cycle**) → **$32.0**
+
 ### RETRO-1785992364048 (2026-08-06) — the daemon lanes & the escalation-quality cycle (25 tasks / 25 PRs)
 
-★ **12 of 25 LEDGER-CREDITED (48%)** — inside the metric's own eight-cycle range (0%–64%), therefore
-**UNATTRIBUTED in both directions** (P43(ii)). The 13 gate-side merges the W1-T51 union rescued:
-W1-T339/#1329, T341/#1332, T342/#1340, T348/#1372, T353/#1389, T356/#1393, T357/#1397, T358/#1398,
-T359/#1399, T361/#1403, T362/#1404, T366/#1411, T367/#1412. Turns HOLD lit — 24 of 25 nonzero (2991
-cycle-wide). Costs sum to **$170.917** of **$223.251**; the **$52.334 remainder (23.4%, down from
-38.1%)** is uncredited runs — **6 SIBLING** (P29(i)) and **4 FOREIGN, all W1-T343 against #1361 on
-the PLAN-SYNC branch `plan/dispatch-lanes-back-to-1`** (P47). 0/36 `budget_usd` trips; peak W1-T349
-**$27.118 / 151t**. ★ **ZERO `diagnose` runs and ZERO `docs`-class runs** — both rows that existed
-last cycle are empty, so the W1-T167 routing contrast is gone again.
+★ **12 of 25 LEDGER-CREDITED (48%)**; 13 gate-side (W1-T339/#1329, T341/#1332, T342/#1340, T348/#1372,
+T353/#1389, T356/#1393, T357/#1397, T358/#1398, T359/#1399, T361/#1403, T362/#1404, T366/#1411,
+T367/#1412). Turns lit 24 of 25 (2991). $170.917 of $223.251; the $52.334 remainder = 6 SIBLING + 4
+FOREIGN (all W1-T343 vs #1361, `plan/dispatch-lanes-back-to-1`). Peak W1-T349 $27.118/151t.
+**★ FOLDED TO FAMILY LINES BY R17** (ids/PRs/costs preserved, per-arc prose DELETED — NET STATE's
+prior-cycles line carries the narrative).
 
-- **★ THE DAEMON-LANE ARC — 6 tasks, and P19's parallel dispatch finally LIVE** (the worker-keychain
-  race W1-T339/#1329 · T340/#1331 · a bounded deploy-idle deferral ceiling with cross-process state
-  T341/#1332 · the cost/queue governors move from per-TICK to per-DISPATCH admission, fail-closed on
-  staleness T342/#1340 · `runDaemon` wired to lanes, shipping DARK at 1 T343/#1363 — **the task that
-  cost 5 dispatches and 4 foreign rejections** · `sweep.dispatchLanes` 1 → 2 with a stated observation
-  window and reversion trigger T344/#1365) → **$47.016**
-- **★ ESCALATION QUALITY — 7 tasks, the cycle's largest arc** (`escalate()`'s dedup gate extended to
-  referent-less escalations, killing the #1220 storm shape W1-T345/#1368 · `classifyAsk` +
-  `needs-question`/`needs-action` labels and a per-family row affordance T346/#1369 · the reconciler's
-  close guard reads that ask type T347/#1371 · `proposeFeedbackWithSummary` — the decision-summary
-  translator wired T348/#1372 · `escalateWithJudge` + a 376-issue holdout corpus (56 operator-acted /
-  320 machine-resolved) T349/#1379 at **$27.118/151t**, the cycle's costliest run · feedback expansion
-  with byte-identical raw storage behind an arm-then-confirm console write T350/#1378 · the plan-grill
-  lane moves onto the async issue path T354/#1385) → **$77.417**
-- **THE GATE'S OWN INTEGRITY — 5 tasks** (commitlint reads the LIVE PR title instead of a stale event
-  payload, with a distinct empty-read error W1-T351/#1380 · an unprovenanced DECISIONS.md entry now
-  FORCES a review failure T352/#1381 · a `ruling-verify` LintCheck blocks `verify: auto` on ruling
-  tasks, in both lint-plan and preDispatchLint T353/#1389 · `judgeRubric` posts as an advisory
-  section, fail-open T359/#1399 · a proof that ALREADY PASSES on the base tree downgrades, with
-  `base_unknown` as the honest third answer T362/#1404) → **$19.616**
-- **WIRING DARK ORGANS + THE PLAN RECORD — 7 tasks** (`sweepOrphanWorkers` wired into `daemonBoot`
-  W1-T356/#1393 · `resolveClaudeExecutable` wired through the real `daemonCommand` path T357/#1397 ·
-  ★ `planHealthSweep`/`renderPlanHealth` wired into the retro gather T358/#1398 — **the instrument
-  whose first reading appears in this very retro** · boot-time `runRecoverability`, retiring
-  `reconstructState` T361/#1403 · the ceiling reloader's governor/renderer discrepancy corrected
-  T363/#1410 · four clock-sweep drill candidates T366/#1411 · `planHealthSweep`/`openTaskIdsFromPlan`
-  moved onto the derived projection T367/#1412) → **$26.868**
+- **★ THE DAEMON-LANE ARC, P19's parallel dispatch LIVE — 6 tasks** (W1-T339/#1329 · T340/#1331 ·
+  T341/#1332 · T342/#1340 · **T343/#1363, the task that cost 5 dispatches and 4 foreign rejections** ·
+  T344/#1365) → **$47.016**
+- **★ ESCALATION QUALITY — 7 tasks** (W1-T345/#1368 · T346/#1369 · T347/#1371 · T348/#1372 ·
+  **T349/#1379 *$27.118/151t*** · T350/#1378 · T354/#1385) → **$77.417**
+- **THE GATE'S OWN INTEGRITY — 5 tasks** (W1-T351/#1380 · T352/#1381 · T353/#1389 · T359/#1399 ·
+  **T362/#1404, `base_unknown` — P48(i) in the affirmative**) → **$19.616**
+- **WIRING DARK ORGANS + THE PLAN RECORD — 7 tasks** (W1-T356/#1393 · T357/#1397 · **T358/#1398,
+  `planHealthSweep` into the gather** · T361/#1403 · T363/#1410 · T366/#1411 · T367/#1412) → **$26.868**
 
 ### RETRO-1785919636675 (2026-08-05) — the console tabs, the governor wiring & the preflight fix (25 tasks / 25 PRs)
 
@@ -570,120 +604,122 @@ i.e. the plan's OLDEST entries were its most verbose. Ids/PRs/costs/turns preser
 - **THE FIRST GREEN LOOP — 3 tasks** (WS-0 spike/#1 $0.86, 7/7 verdicts GREEN, ground truth in FIELD
   FINDING 10 · SB-HELLO/sandbox#2 $0.41 · CI-GREEN-PROBE/#5 $0.44)
 
-## Calibration (observed — through RETRO-1785992364048, 2026-08-06)
+## Calibration (observed — through RETRO-1786537819709, 2026-08-12)
 
 The empirical baseline **mounts.yaml (W1-T5, shipped #42; risk/class routing since W1-T167/#606)** and
 Flight-control burn-rate signals (§4B Layer 1, BUILT — W1-T20/#132) key off.
 
-**★ CURRENT BASELINE — this cycle (RETRO-1785992364048, 36 runs). This is the row W1-T5's mount table
-keys off. ONE row: `diagnose` (n=4 last cycle) and `docs` (n=1) both went to ZERO:**
+**★ CURRENT BASELINE — this cycle (RETRO-1786537819709, 64 runs). This is the row W1-T5's mount table
+keys off. ★ READ THE TURN COLUMN WITH ITS COVERAGE OR NOT AT ALL: 12 of 26 shipped runs report
+nonzero dollars and 0 turns, so `avg turns` here is an average over an unmeasured denominator:**
 
 | task_type | runs | merged | avg $ | avg turns | total $ |
 |---|---|---|---|---|---|
-| implement | 36 | 12 | $6.201 | 83.083 | $223.251 |
+| implement | 64 | 5 | $3.502 | 17.781 | $224.146 |
 
 **BY TASK CLASS — the W1-T167 routing question (is the class-routed mount discount paying off?).
-★ THE CONTRAST VANISHED: back to one row, so the question is UNMEASURED again, not answered:**
+★ A SECOND ROW EXISTS AGAIN, AND FOR THE FIRST TIME IT SHIPPED — but `merged` reads 0 for `plan-lint`
+because its merge (#1621) was gate-side, which is the credit defect, not a routing result:**
 
 | task_class | runs | merged | merge rate | avg $ | avg turns | total $ |
 |---|---|---|---|---|---|---|
-| src | 36 | 12 | 33% | $6.201 | 83.083 | $223.251 |
+| plan-lint | 1 | 0 | 0% | $0.295 | 62 | $0.295 |
+| src | 63 | 5 | 8% | $3.553 | 17.079 | $223.851 |
 
 **BY MODEL CLASS — weekly-limit burn (W1-T250/#898; P34 clause (d): burn is share of the weekly LIMIT,
-never imputed dollars — the dollar column is context only):**
+never imputed dollars — the dollar column is context only). ★ FIRST TWO-ROW READING EVER:**
 
 | model | runs | turns this week | share of weekly burn | $ this week (context only) |
 |---|---|---|---|---|
-| sonnet | 120 | 2991 | 100.0% | $762.475 |
+| haiku | 1 | 62 | 5.4% | $0.295 |
+| sonnet | 21 | 1076 | 94.6% | $90.948 |
 
-**Prior cycles (FOLDED — trend only):** R15 47 runs / 14 ledger-merged (25 real) / $8.327 / 116.2t ·
-R14 48 / 10 (25 real) / $3.812 / 36.2t · R13 34 / 16 (22 real) / $4.915 / 9.4t (turn column blacked
-out — do not use) · R12 54 / 4 (25 real) / $5.139 / 7.8t · R11 147 / 20 (94 real) / $6.664 / 8t (turn
-column blacked out — do not use) · R10 27 / 8 (23 real) / $10.650 / 86.6t · R9 26 / 13 (21 real) /
-$7.682 / 81.4t · R8 195 / 0 (28 real) / $1.258 / 14.7t — **churn-poisoned by the W1-T1 spin loop and
-never to be re-based on** · **R1–R7 FOLDED TO ONE LINE BY R15** (91 runs / 47 merged, $1.838–$5.794/run,
-21.4–72.2t — pre-fleet, trend only). **Derived all-time:** ~705 runs, ~339 merged.
+**Prior cycles (FOLDED — trend only):** R16 36 runs / 12 ledger-merged (25 real) / $6.201 / 83.1t ·
+R15 47 / 14 (25 real) / $8.327 / 116.2t · R14 48 / 10 (25 real) / $3.812 / 36.2t · R13 34 / 16 (22
+real) / $4.915 / 9.4t (turn column blacked out — do not use) · R12 54 / 4 (25 real) / $5.139 / 7.8t ·
+R11 147 / 20 (94 real) / $6.664 / 8t (turn column blacked out — do not use) · R10 27 / 8 (23 real) /
+$10.650 / 86.6t · R9 26 / 13 (21 real) / $7.682 / 81.4t · R8 195 / 0 (28 real) / $1.258 / 14.7t —
+**churn-poisoned by the W1-T1 spin loop and never to be re-based on** · **R1–R7 FOLDED TO ONE LINE BY
+R15** (91 runs / 47 merged, $1.838–$5.794/run, 21.4–72.2t — pre-fleet, trend only).
+**Derived all-time:** ~769 runs, ~366 merged.
 
 **Reads:**
-- **★ THE COST SLIDE RESUMED, AND FOR THE FIRST TIME THIS PLAN KNOWS WHY.** Per run $3.812 → $8.327 →
-  **$6.201**; per SHIPPED task $7.32 → $15.66 → **$8.930** ($223.251 / 25), a **43% fall in one
-  cycle**. The decomposition is the exact inverse of R15's: `implement` turns **126.047 → 83.083
-  (−34%)** while cost per turn moved **+4%** ($0.0716 → $0.0746). So the saving is **length, not
-  price** — and unlike every other move in this table it is **ATTRIBUTED**, because R15 pre-registered
-  it (R15-1) against W1-T338/#1327's preflight `maxBuffer` fix with an explicit falsifier, and the
-  prediction HIT. **This is the whole case for P43 in one row.** Standing caveat: one scored cycle is
-  n=1 on the prediction, there is no control cycle, and R16-1 re-registers persistence. Compare
-  cost-per-SHIPPED-TASK cycle-over-cycle, never merge rate.
-- **★ $52.334 OF $223.251 (23.4%) BOUGHT NO SHIP — down from 38.1%, and the split INVERTED.** Of 10
-  rejected trailers, **6 are SIBLING (P29(i))** and **4 FOREIGN (P47/P33)** — the reverse of last
-  cycle's 10/12. The foreign four are ALL W1-T343 and ALL name **#1361 on `plan/dispatch-lanes-back-to-1`**,
-  a plan-only PR: the poisoner is no longer a repair actor but **the plan-sync lane itself**. Both
-  falls are **UNATTRIBUTED** — neither W1-T149 nor P47(i) shipped (R15-2, scored UNRESOLVABLE).
-- **LEDGER CREDIT: 16% → 64% → 40% → 56% → 12/25 (48%).** Inside the metric's own eight-cycle range
-  (0%–64%), so **UNATTRIBUTED** for the third consecutive cycle — which is precisely what P43(ii)
-  exists to make sayable. The `merged` column reads 12, not 25, because 13 merges were gate-side.
-- **★ THE TURN COLUMN HOLDS, THE DENOMINATORS STILL DO NOT — FOURTH CYCLE.** 24 of 25 shipped runs
-  report nonzero turns (2991 cycle-wide), so P40(i) stays closed. But the **weekly table reports 2991
-  turns over 120 runs while this cycle's table reports the same 2991 over 36** — the same
-  irreconcilable split as 5463-over-84-vs-47 and 1736-over-37-vs-48 before it. **P40(ii) is unpaid for
-  a FOURTH cycle**; three different totals, one defect.
-- **★ THE CLASS AND TYPE CONTRASTS BOTH VANISHED.** 36 of 36 classed (P40(a) closed, fifth cycle) —
-  but the `docs` row (n=1) and the `diagnose` row (n=4) are both **n=0**, so the W1-T167 discount is
-  once more **unmeasured**. The standing rule earns its keep here: a row that appears at n≤4 and
-  vanishes the next cycle must never re-base a mount, and R15 correctly refused to let either do so.
-  What survives from R15's contrast is only the negative claim — the docs/plan population EXISTS.
-- **★ MAST distribution (W1-T89/#710): verification 20 → 17 (−3), the sole mapped category · 7 runs
-  UNMAPPED (`incomplete`×7).** The blind share fell **28% → 19%** with **P40(iii) still UNBUILT**, so
-  the fall is **UNATTRIBUTED**; `incomplete` remains a verdict class the mapping has never had a row
-  for, and it is now the ONLY unmapped class. `specification` stays at 0 for a second cycle with P46
-  unratified — still not a fix, still not a disproof.
-- **★ `failed` = 0 OF 36, a SECOND consecutive zero.** R15-4 pre-registered "stays < 10%" and scores
-  **HIT**. This is the weaker of the two hits — nothing shipped to hold it there — but it is exactly
-  what the registration was for: a rebound in R17 cannot now be read as a NEW defect. P42 does NOT
-  close; its clause (i) is what the 7 unmapped `incomplete` runs still need.
-- **GUARD-FIRED BLOCKS: 0 FOR A FOURTH CONSECUTIVE CYCLE.** No infrastructure events. **P41 stays
+- **★ THE COST SLIDE CONTINUED AND THE PER-TASK PRICE DID NOT.** Per run $8.327 → $6.201 → **$3.502**;
+  per SHIPPED task $15.66 → $8.930 → **$8.302** ($224.146 / 27). So the headline per-RUN fall is
+  mostly a denominator effect — 64 runs instead of 36, many of them uncredited redispatches — while
+  the number that actually prices delivery moved **7%**, which is inside this series' own variance and
+  is therefore **UNATTRIBUTED** (P43(ii)). Standing rule, re-earned: compare cost-per-SHIPPED-TASK
+  cycle-over-cycle, never merge rate and never cost-per-run.
+- **★ THE TURN COLUMN WENT DARK AND P40(i) RE-OPENS AFTER FIVE CLOSED CYCLES.** **12 of 26 shipped
+  runs report nonzero dollars against exactly 0 turns** — W1-T364 $14.451/0t and T387 $15.477/0t
+  among them — and 4 more report $0.000/0t. The gather prints `avg turns 17.781` over all 64 anyway.
+  A $14.451 run did not take zero turns; **0 here means UNRECORDED**, which is P48(i)'s naked zero
+  inside the retro's own instrument. The direct cost is already paid: **R16-1 was pre-registered
+  against this exact number and now scores UNRESOLVABLE rather than HIT.** TASK D below is the fix,
+  and R17-1 pre-registers the coverage figure itself so this cannot recur silently.
+- **★ P40(ii) UNPAID FOR A FIFTH CYCLE.** The weekly table reports **1138 turns over 22 runs** while
+  this cycle's table reports **the same 1138 over 64** — the same irreconcilable split as
+  2991-over-120-vs-36, 5463-over-84-vs-47 and 1736-over-37-vs-48 before it. Four different shapes of
+  one defect; the windowing has never shipped.
+- **LEDGER CREDIT: 64% → 40% → 56% → 48% → 5/26 (19%).** Inside the metric's own nine-cycle range
+  (0%–64%), so **UNATTRIBUTED** for the fourth consecutive cycle. The `merged` column reads 5, not 27,
+  because 21 merges were gate-side and one (W1-T419/#1609) carried no trailer at all.
+- **★ THE CLASS CONTRAST RETURNED WITH A SHIP ATTACHED.** 64 of 64 classed (P40(a) closed, sixth
+  cycle). `plan-lint` n=1 at **$0.295 / 62t** vs `src` n=63 at **$3.553** — and unlike R15's `docs`
+  row, **this one MERGED (#1621)**, on a **haiku** mount. The standing rule still forbids re-basing at
+  n≤4, so nothing moves; what dies is the excuse that the discount cannot be observed. Note the trap
+  the table itself sets: `plan-lint` shows `merged 0 / 0%` because its merge was gate-side, so a
+  reader keying a mount off the merge-rate column would conclude the cheap mount never ships.
+- **★ MAST distribution (W1-T89/#710): verification 17 → 32 (+15), the sole mapped category · 18 runs
+  UNMAPPED (`incomplete`×17, `blocked`×1).** The blind share ROSE **19% → 36%**, the largest in four
+  cycles, with **P40(iii) still UNBUILT**, so both the rise and last cycle's fall are
+  **UNATTRIBUTED**. `incomplete` has never had a mapping row and is now 17 of 64 runs on its own —
+  TASK E below is P42(i) with its target re-pointed at exactly this class.
+- **★ `already_satisfied` = 9 OF 64 (14%) — first cycle it is big enough to read.** This is P39's
+  shipped dispatch-side half (W1-T272/#1044) visibly REFUSING redundant work, and W1-T413/#1602 is one
+  of them landing as a sanctioned no-op close. Recorded as a POSITIVE reading with its caveat stated:
+  nothing shipped this cycle to move it, so its size is **UNATTRIBUTED** and it is not evidence P39
+  can close — clause (i) is still unbuilt.
+- **GUARD-FIRED BLOCKS: 0 FOR A FIFTH CONSECUTIVE CYCLE.** No infrastructure events. **P41 stays
   RETIRED and does not re-arm.**
-- **The $100 `budget_usd` tripwire: 0/36 trips**, sixth cycle running. Peak run W1-T349 **$27.118**,
-  the highest ever recorded, and still 3.7× below the constant. P44's argument is untouched and is
-  now slightly stronger: a tripwire that a record-setting run clears by 73% is not measuring runs.
+- **The $100 `budget_usd` tripwire: 0/64 trips**, seventh cycle running. Peak run **$15.477**
+  (W1-T387), 6.5× below the constant and the lowest peak since R13. P44's argument strengthens with
+  every quiet cycle: a tripwire nothing has approached in seven cycles is not measuring runs.
 - **A retro must not average over a spin loop** — R8's lesson, kept because it is cheap to keep and
-  expensive to relearn. **10 credit-rejected runs entered this table unannotated**; **P29(iii)**
-  (annotate credit-rejected runs before they reach the mount table) is still unbuilt, and it now has a
-  SECOND consumer: the 10 duplicated-recon runs (NET STATE) are averaged into `avg turns` as if each
-  were an independent sample of how long the work takes, when six of them re-derived a predecessor's read.
+  expensive to relearn. **37 credit-rejected runs entered this table unannotated**, the most ever;
+  **P29(iii)** (annotate credit-rejected runs before they reach the mount table) is still unbuilt, and
+  **17 of those 37 belong to five tasks that shipped NOTHING** — they are averaged into `avg $` as if
+  they were samples of what delivery costs.
 
-**Ratification telemetry (W1-T111/#373, SEVENTH reading): approved 3 · reframed 11 · approval rate 21%
-— BYTE-IDENTICAL for the SIXTH consecutive reading**, now across a further 36 runs and 25 shipped
-tasks. Six identical readings across ~165 runs is no longer plausibly a coincidence of a stable rate;
-it is the signature of an **UNWINDOWED cumulative counter** (P40(ii)) and should be read as such until
-the windowing ships. Cumulative reading unchanged at **4 approved / 18 items ≈ 22%**; the P28
-adjudication it drove stands regardless, because it was made on the cumulative figure.
+**Ratification telemetry (W1-T111/#373, EIGHTH reading): approved 3 · reframed 11 · approval rate 21%
+— BYTE-IDENTICAL for the SEVENTH consecutive reading**, now across a further 64 runs and 27 shipped
+tasks. Seven identical readings across ~229 runs is not a stable rate; it is the signature of an
+**UNWINDOWED cumulative counter** (P40(ii)) and must be read as such until the windowing ships.
+Cumulative reading unchanged at **4 approved / 18 items ≈ 22%**; the P28 adjudication it drove stands
+regardless, because it was made on the cumulative figure.
 
 ## Retro proposals (PROPOSALS ONLY; NOT yet in plan/tasks.yaml)
 
-**★ LIVE RANKING (the ONE place open proposals are ordered).** `P47 > P38 > P48 > P43 > P33 >
-P42 > P40 > P46 > P39 > P45 > P44 > P17 > P26` *(P48 rank PROPOSED by its session-mined entry below,
-pending ratification)*. **★ 2026-08-07: P29 LEFT THE RANKING — BOTH CLAUSES ARE SHIPPED, AND (i) HAD
-BEEN SINCE 2026-07-20** (PR #349; see NET STATE's correction). It held rank 1 through six retros on a
-false premise, so P47 inherits rank 1 by vacancy — **this is not a re-rank on a metric**, and the
-standing rule against re-ranking on unattributed moves is therefore not engaged. Every proposal has
-exactly ONE canonical entry below, updated IN PLACE with each cycle's
-evidence — a retro that adds a second entry restating a proposal it did not change has failed the
-HARNESS-COMPRESSION bar. **P28 and P41 are RETIRED** (tombstones only, full prose deleted);
-**P29 is CLOSED — shipped, not abandoned** (tombstone below, keeping only the durable lessons);
-**P35 is FOLDED into P38** and has no entry of its own. **R16 MOVES NOTHING AND MINTS NOTHING** — the
-first cycle in the plan's history with no re-rank and no new P-number, and both are deliberate.
-**No re-rank:** every metric that moved this cycle (foreign rejections 12 → 4, sibling 10 → 6,
-unmapped 28% → 19%, ledger credit 56% → 48%, `specification` 0 → 0) moved with its proposal UNBUILT,
-so all five are UNATTRIBUTED and the standing rule — *the plan does not re-rank on unattributed
-moves*, established when R13's one-reading demotion of P29 was reversed within a cycle — applies to
-all of them at once. **No new number:** R16's three findings each have an owner already. The recon
-re-buy (16 runs → 6 tasks) is **P38's missing write path at run granularity**, and P38's own entry
-already names P46(iii) and P47 as the same organ from other angles; a fourth number would be P8's
-accretion failure. The four newly-dark organs are **P38's headline class**, not a new one. The
-plan-sync lane poisoning W1-T343 is **P47 verbatim, with a wider author set**. What R16 adds is
-therefore all EVIDENCE IN PLACE plus **one new TASK (TASK B, under P38)** — which is what a healthy
-cycle of this section should look like once the numbers stop multiplying.
+**★ LIVE RANKING (the ONE place open proposals are ordered).** `P47 > P38 > P40 > P48 > P43 > P33 >
+P42 > P46 > P39 > P45 > P44 > P17 > P26` *(P48 rank PROPOSED by its session-mined entry below,
+pending ratification)*. **P29 LEFT THE RANKING 2026-08-07** — both clauses shipped in #349; the
+tombstone below keeps only the durable lessons. Every proposal has exactly ONE canonical entry below,
+updated IN PLACE with each cycle's evidence — a retro that adds a second entry restating a proposal it
+did not change has failed the HARNESS-COMPRESSION bar. **P28 and P41 are RETIRED** (tombstones only,
+full prose deleted); **P29 is CLOSED — shipped, not abandoned**; **P35 is FOLDED into P38**.
+**★ R17 MOVES ONE THING AND MINTS NOTHING.** **The one move: P40 rises 7 → 3**, and it is NOT a
+re-rank on a metric — clause (i) RE-OPENED on a mechanical finding (12 shipped runs report real
+dollars against 0 turns), and an instrument that goes dark without saying so silently invalidates
+every prediction registered against it, which is a *capability* regression, not a reading. Everything
+else holds: foreign rejections 4 → 18, sibling 6 → 19, unmapped 19% → 36%, credit 48% → 19% and
+`already_satisfied` 0 → 9 all moved with their proposals UNBUILT, so all five are UNATTRIBUTED and the
+standing rule — *the plan does not re-rank on unattributed moves* — applies to them at once.
+**No new number:** R17's four findings each have an owner. W1-T419's trailerless ship and the
+squash-commit read gap are **P47 verbatim** (emission is unowned; now proven in BOTH directions).
+The dark turn column is **P40(i)** and, as a value, **P48(i)**. The struck P29 metric is **P43's**
+question of whether a number can be attributed to a mechanism at all. The frozen corpus swallowing a
+clean four-run procedural shape is **P38**. R17 adds EVIDENCE IN PLACE plus **three new TASKS (C, D,
+E)**, each under an existing number.
 
 **★ THE STANDING CREDIT-ARTIFACT FOLD-LINE (one home, replacing five cycles of per-cycle
 restatements).** In every retro from R8 on, the dominant "failure" verdict classes — `blocked`,
@@ -710,15 +746,92 @@ regression, R15 refused to call 56% a fix, and R16 refuses to call 48% anything 
   broken log.** Both bounds are stated because the standing temptation with a vivid defect is to
   promote it into an explanation for everything unexplained nearby.
 
-**RETRO-1785992364048 (R16, this cycle)** — mined from 36 runs / 25 shipped tasks / 25 merged PRs / 12
-ledger credits (`blocked_ci`×9, `incomplete`×7, `no_pr`×7, `pr_attribution_failed`×1, **`failed`×0**,
-plus **10 rejected trailers — 4 FOREIGN, 6 SIBLING**). **ZERO new P-numbers are mined** — see the
-ranking line above for why each finding routed to an existing entry. One new TASK is proposed
-(**TASK B**, under P38), plus the plan-health corrective batch. **STANDING FOR EVERY BLOCK
-BELOW: candidates are ratified by the Architect via a tasks.yaml PR — rule 15, never auto-filed.**
+**RETRO-1786537819709 (R17, this cycle)** — mined from 64 runs / 27 shipped tasks / 27 merged PRs / 5
+ledger credits (`incomplete`×17, `no_pr`×16, `blocked_ci`×15, `already_satisfied`×9, `blocked`×1,
+`pr_attribution_failed`×1, **`failed`×0 for a third cycle**, plus **37 rejected trailers — 18 FOREIGN,
+19 SIBLING**). **ZERO new P-numbers are mined** — see the ranking line above for why each finding
+routed to an existing entry. **Three new TASKS are proposed (C, D, E), each under an existing
+number.** The failure classes themselves are NOT re-mined as classes; they route through the standing
+credit-artifact fold-line above. **STANDING FOR EVERY BLOCK BELOW: candidates are ratified by the
+Architect via a tasks.yaml PR — rule 15, never auto-filed.**
 
-- **★ TASK B (P38 — RECON CARRYOVER; NEW THIS CYCLE, the second task P38 has ever proposed).** GROUND
-  TRUTH (mechanical, from this gather): **six tasks consumed 16 runs to ship 6** — W1-T343 ×5, T342
+- **★ TASK C (P47 — TRAILER EMISSION AND TRAILER READING, BOTH ENDS; NEW THIS CYCLE).** GROUND TRUTH
+  (mechanical, from this gather plus `git log` on `main`): **W1-T419 shipped and the harness cannot
+  see it.** Its work merged as **#1609** — *"feat(learnings): close the citation loop so retention
+  rides measured use (W1-T419)"* — with the task id in the TITLE and **no `Remudero-Task` trailer in
+  the squash commit at all**; simultaneously **#1617, on `feat/ratchet-names-compression-candidates`,
+  carries `Remudero-Task: W1-T419`** and was rejected as foreign. One task, both failure directions
+  at once: the WORK with no trailer, the TRAILER with no work. Independently, W1-T413's harvest names
+  the reading half — ***"`deriveStatus`'s trailer search reads only the PR body, never the squash-merge
+  commit message"***, while the emitter (`plan-pr-emitter.ts`) writes it into the body and this repo's
+  merge flow sometimes edits the squash message separately. Cycle cost of the emission half: **17 runs
+  across 5 tasks (W1-T369 ×4, T377 ×5, T378 ×5, T386 ×1, T412 ×2) shipped NOTHING**, every one
+  rejected against a foreign trailer, and two of the five (T377/#1386, T378/#1391) are the slug-form
+  `run-<task>-<slug>` branches W1-T390 already files as permanently uncreditable. **WHY THIS IS NOT A
+  NEW P-NUMBER:** it is P47's thesis — *nothing governs who may emit a `Remudero-Task` trailer* — with
+  a second, symmetric half now evidenced: nothing governs where it is READ from either, so the same
+  task can be poisoned and dropped in one cycle. PROPOSE, and note it is deliberately SMALLER than
+  P47's three clauses because clause (i) alone prevents this cycle's 17 wasted runs: **(a) the
+  emitter writes the trailer into BOTH the PR body and the squash-merge commit message, and
+  `deriveStatus` reads BOTH**, preferring the commit; **(b) a PR carrying `Remudero-Task: X` on a
+  branch that is not `run-X-*` is REFUSED at creation unless it carries an operator-set
+  `Remudero-Adopt: X`, ledgered `trailer.refused_unowned_branch`** (P47(i) verbatim, unchanged).
+  GOLDEN (fixture-only, no live dep): a seeded merge whose body carries the trailer and whose squash
+  message does not is CREDITED, and so is its mirror image; a seeded merge with the id in the TITLE
+  only and no trailer anywhere is reported **`trailer.absent`, never silently uncredited** (P48(ii)
+  applied to this reader — the W1-T419 case, which cost a hand-edit to this very log); a trailer on
+  `feat/whatever` is REFUSED at creation and the same trailer on `run-X-<ts>` is ACCEPTED; the
+  refused PR carrying `Remudero-Adopt: X` is accepted and credits X exactly once.
+
+- **★ TASK D (P40(i) — TURN COVERAGE IS A DENOMINATOR, NOT AN AVERAGE; NEW THIS CYCLE, and the reason
+  P40 rises to rank 3).** GROUND TRUTH (mechanical, from this gather): **12 of 26 union-listed shipped
+  runs report nonzero dollars and EXACTLY 0 turns** — W1-T364 $14.451/0t, T387 $15.477/0t, T374
+  $8.559/0t, T376 $8.799/0t, T372 $7.483/0t, T383 $6.884/0t, T409 $6.171/0t, T368 $5.119/0t, T373
+  $4.539/0t, T379 $4.027/0t, T381 $3.658/0t, T380 $3.370/0t — and 4 more report $0.000/0t. The gather
+  prints **`avg turns 17.781` over all 64 runs regardless**. A run that cost $14.451 did not take zero
+  turns; **0 is UNRECORDED wearing a number's clothes.** THE DEMONSTRATED COST, which is what earns
+  this a task rather than a note: **R16-1 was pre-registered against this exact metric and its
+  nominal satisfaction (17.781 < 100) is worthless** — R17 must score it UNRESOLVABLE, and last
+  cycle's `HIT` (R15-1), the only one this plan has ever recorded, is now known to rest on an
+  instrument that can go dark silently. PROPOSE: **(i)** the calibration table prints TURN COVERAGE
+  (runs with nonzero turns / runs, and separately runs with `cost > 0 ∧ turns = 0`) beside every turn
+  figure; **(ii)** it **REFUSES to print an average** whose coverage is below a policy threshold,
+  emitting `turns: UNMEASURED (12/26 shipped runs report $>0 with 0 turns)` instead of a number;
+  **(iii)** a run with `cost = 0 ∧ turns = 0` is classed `unrecorded`, distinct from a genuine zero.
+  This is P48(ii) — no naked zero — applied to the retro's OWN instrument, which is the fairest place
+  to prove the proposal works. GOLDEN (fixture-only, no live dep): a seeded ledger where every run
+  reports turns prints the average with `coverage 100%`; a seeded ledger where a third report 0 turns
+  against nonzero cost prints UNMEASURED and NAMES the count, and a test asserts the numeric average
+  is absent from the output; a seeded run at $0/0t renders `unrecorded`, not `0`.
+
+- **★ TASK E (P42(i)/P40(iii) — NAME THE `incomplete` RUNS; NEW THIS CYCLE).** GROUND TRUTH: MAST
+  UNMAPPED rose **19% → 36%** — **`incomplete` ×17 and `blocked` ×1 of 64 runs** — and `incomplete`
+  has been the dominant unmapped class for five consecutive cycles (×4, ×10, ×7, ×17) while the
+  mapping has never had a row for it and the gather has never named a single one of its run ids. This
+  is P42(i) with the target moved: R12 filed it against `failed` (now zero for three cycles) and the
+  blind population simply relocated. PROPOSE: **(i)** for any verdict class exceeding a policy share,
+  the gather emits up to N exemplar runs with run id, task and the first termination line ALREADY in
+  the ledger — deterministic extraction, no LLM, no new instrumentation; **(ii)** `plan/mast-mapping.yaml`
+  gains rows for `incomplete` and `blocked` **derived from that termination line rather than guessed**,
+  and a class it cannot derive is emitted as `unmapped(<class>)` naming the class, never folded into a
+  silent remainder. GOLDEN (fixture-only, no live dep): a seeded ledger whose `incomplete` share
+  crosses the threshold emits exactly N exemplars carrying run id, task and first error line; a class
+  below threshold emits none; a seeded run whose termination line matches no mapping rule renders
+  `unmapped(incomplete)` with the line quoted, and the same run with a matching rule renders its
+  category.
+
+**RETRO-1785992364048 (R16, prior cycle)** — 36 runs / 25 tasks / 25 PRs / 12 credits (`blocked_ci`×9,
+`incomplete`×7, `no_pr`×7, `pr_attribution_failed`×1, 10 rejected trailers — 4 FOREIGN, 6 SIBLING).
+Mined ZERO new numbers; proposed **TASK B**. *(★ R17 COMPRESSION — R16's plan-health corrective batch
+is DELETED, not folded: NET STATE recorded it REFUSED on 2026-08-07 (all 19 proofs were on
+`verify: human` tasks and were rewritten in the `demonstration:` dialect instead), and this cycle's
+plan-health sweep reads CLEAN, so the bullet proposed work that will never be done against a finding
+that no longer exists. R16's "everything else is evidence" bullet is likewise DELETED — the routing it
+carried is restated for the CURRENT cycle in the ranking line above, and keeping one per retro is the
+per-cycle restatement this section forbids.)*
+
+- **★ TASK B (P38 — RECON CARRYOVER; proposed by R16, UNBUILT).** GROUND
+  TRUTH (mechanical, from R16's gather): **six tasks consumed 16 runs to ship 6** — W1-T343 ×5, T342
   ×3, T349/T350/T353/T356 ×2 each — and the follow-up harvest proves the repetition is VERBATIM, not
   incremental. Three separate W1-T342 runs each independently filed *"read `test/cost-governor.test.ts`
   and `test/daemon-plan-freshness.test.ts` in full before implementing, to find existing
@@ -745,33 +858,29 @@ BELOW: candidates are ratified by the Architect via a tasks.yaml PR — rule 15,
   and a task whose artifact exists but whose declared `files:` moved is invalidated, not reused.
   MEASUREMENT: R16-4 pre-registers runs-per-shipped-task among multi-run tasks at **2.67 → < 2.0**,
   conditioned on this task shipping, and explicitly names the confound (lanes went live this cycle).
+  **★ R17 UPDATE — THE PRICE WENT UP AND THE HARVEST GOT MORE LITERAL.** R16-4 scores UNRESOLVABLE
+  (TASK B unbuilt) and the observed figure ROSE: **26 runs / 9 multi-run shipped tasks = 2.89**. The
+  duplication is again verbatim and now visible in the harvest's own words — W1-T414 filed *"Implement
+  W1-T414 per the shard's design (i)–(v) — this recon confirms all premises hold"* on one run and
+  *"Implement W1-T414 per its design section (i)-(v) — this recon only confirmed premises"* on the
+  next; **four separate runs each independently re-diagnosed the same sandbox defect** (the macOS
+  Keychain / BSD-`date` failures that make `rmd preflight --ci-parity` unreachable from a worker box,
+  filed by T418, T416, T420 and T423). That last one is the sharpest yet: it is not task knowledge at
+  all, it is ENVIRONMENT knowledge, identical for every task on that host, re-bought four times in one
+  cycle. It also names TASK B's cheapest possible first slice — a host-scoped artifact, not even a
+  task-scoped one.
 
-- **★ PLAN-HEALTH CORRECTIVES — 6 tasks proposed by the sweep's FIRST reading, batched as ONE.** The
-  gather now carries a plan-health section (W1-T358/#1398, wired and fired inside the same cycle) and
-  its first output grades every OPEN task against the standing proof-dialect rule, finding **19 dead
-  proofs across 6 tasks**: **W1-T12e ×8** · **W3-T7 ×3** · **W1-T147 ×3** · **W3-T4 ×2** ·
-  **W12-T1 ×2** · **W2-T2 ×1**. Every one is the same defect — free prose where the floor requires
-  `unit test: <path-or-title>` or `grep: <pattern> in <path>` (moratorium finding 9, the dead proof
-  floor W1-T128/#414 built the gate for). PROPOSE **one** task, not six: the six shards are rewritten
-  in a single plan-only PR, because they share a mechanical transform and splitting them would buy six
-  dispatches of the recon this very cycle proved is re-bought each time (TASK B). **NOTE THE HONEST
-  CAVEAT:** four of the six (W1-T12e, W1-T147, W3-T7, W12-T1) have criteria that are genuinely
-  operator-attested — an overnight drill, a device screenshot, a live deploy — so the correct rewrite
-  for those is `verify: human` with a named attestation artifact, NOT a forced grep that would be
-  proof theater. **A batch that mechanically greps all 19 has failed this task, and the linter cannot
-  tell the difference** — which is itself evidence for W1-T353's `ruling-verify` shape generalized.
-
-- **★ P47 (plan + golden; THE NEW ITEM) — TRAILER EMISSION IS UNOWNED: THE HARNESS POISONS ITS OWN
-  TASKS.** GROUND TRUTH (mechanical, from this gather): of **22 rejected trailers, 12 are FOREIGN** —
-  against **zero** last cycle, when R14 recorded P33's list as "stable and no longer compounding". All
-  12 belong to four tasks, and **every offending branch was created by the harness itself**, not by a
-  human: **W1-T309 ×3 → #1225 `fix-t309-scope`** · **W1-T314 ×6 → #1293
-  `claude/split-w1-t314-console-tabs`** · **W1-T320 ×2 → #1274 `fix-t320-scope`** · **W1-T324 ×1 →
-  #1299 `claude/w1t324-lint-open-default`**. The `fix-*` names are the fix-rung's own out-of-band
-  repair branches; the `claude/*` names are a higher-tier splitter's. W1-T324's harvest watched it
-  happen in real time: *"the platform closed a green-except-remudero-review PR mid-fix and
-  independently re-solved it via a two-PR split within ~15 minutes, while I was still iterating on the
-  same PR."* THE DEFECT, stated precisely: **nothing in this harness governs WHO MAY EMIT a
+- **★ P47 (plan + golden; RANK 1) — TRAILER EMISSION IS UNOWNED: THE HARNESS POISONS ITS OWN
+  TASKS.** GROUND TRUTH (mechanical, R15's originating gather): of **22 rejected trailers, 12 were
+  FOREIGN** — against **zero** the cycle before, when R14 had recorded P33's list as "stable and no
+  longer compounding". All 12 belonged to four tasks (W1-T309, T314, T320, T324) and **every offending
+  branch was created by the harness itself** — the `fix-*` names are the fix-rung's own out-of-band
+  repair branches, the `claude/*` names a higher-tier splitter's. *(★ R17 COMPRESSION: the per-pair
+  enumeration is DELETED — P33's quarantine list is the one home for `(pr, task)` pairs and carries
+  all four.)* W1-T324's harvest watched it happen in real time: *"the platform closed a
+  green-except-remudero-review PR mid-fix and independently re-solved it via a two-PR split within ~15
+  minutes, while I was still iterating on the same PR."* THE DEFECT, stated precisely: **nothing in
+  this harness governs WHO MAY EMIT a
   `Remudero-Task` trailer, or on what branch.** A repair actor writes the trailer to be honest about
   provenance, and in doing so permanently destroys the task's derivability — `deriveStatus` will
   report it uncredited forever and `nextRunnable` will re-select it every drain, which is exactly what
@@ -819,6 +928,21 @@ BELOW: candidates are ratified by the Architect via a tasks.yaml PR — rule 15,
   W1-T343's own harvest asked an operator to *"merge #1361 before or alongside W1-T343's
   implementation"* — the race clause (iii) describes was **seen and written down by a worker**, and
   rule 15 correctly forbade it from acting.
+  **★ R17 UPDATE — THE PROPOSAL WAS HALF-STATED, AND THE MISSING HALF COST A WHOLE SHIP.** Foreign
+  rejections **4 → 18** (R17-2 registers the next reading; the series 0 → 12 → 4 → 18 with nothing
+  built is a NOISE BAND, and no retro may call any of those moves an improvement or a regression).
+  **17 runs across 5 tasks bought ZERO ships** — W1-T369 ×4 (`claude/w1t369-proof-debt-lock`),
+  T377 ×5 (`run-W1-T377-open-pr-corroboration`), T378 ×5 (`run-W1-T378-reaper-activity-gate`),
+  T386 ×1 (`claude/resolve-p27-findings-rnvu61`), T412 ×2 (`claude/remudero-planning-clarify-142opb`).
+  Note what two of those five are: **slug-form `run-<task>-<slug>` branches**, i.e. the harness's OWN
+  naming, which W1-T390 files as permanently uncreditable — so clause (i)'s `run-X-*` glob would ACCEPT
+  them and the credit path still rejects them. **Clause (i) must therefore be written against the
+  branch pattern the credit path actually enforces, not the one the plan says it enforces**, and TASK
+  C makes that explicit. **THE MISSING HALF, and it is why P47 holds rank 1:** every clause here
+  governs EMISSION, and W1-T419 proves the reader is equally ungoverned — **#1609 merged this task's
+  work with the id in its TITLE and no trailer anywhere**, while **#1617 on a foreign branch carried
+  the trailer**. An emission rule alone would not have credited W1-T419; only TASK C's reading half
+  does. P33's list goes **11 → 13** with `(#1617, W1-T419)` and `(#1420, W1-T369)`.
 
 - **★ P48 (plan + golden; NEW — session-mined `oper#outcome-proposal-2026-08-05`, NOT a retro mint,
   PENDING RATIFICATION: an agent may RECOMMEND a direction but may never RECORD one — the operator
@@ -913,19 +1037,24 @@ BELOW: candidates are ratified by the Architect via a tasks.yaml PR — rule 15,
   READ and this is a guard, so whether it counts is the operator's call, not a session's.
   **TO BECOME RATIFIABLE this entry needs the six classes enumerated and the selecting predicate
   written down, here; the 21 is otherwise a number with no method.**
-
-- **★ EVERYTHING ELSE R16 MINED IS EVIDENCE, NOT A PROPOSAL, AND IS FILED IN PLACE — no bullet
-  restates it here.** The four organs shipped dark (T347/T349/T350/T362), the sixth frozen LEARNINGS
-  cycle and the SHIPS-UNWIRED population defect (→ **P38**); sibling rejections 10 → 6 with W1-T149
-  unshipped for an eighth cycle (→ **P29**); foreign rejections 12 → 4 with a NEW author, the
-  plan-sync lane (→ **P47**), and its pair list 10 → 11 (→ **P33**); the 2991-over-120-vs-36 turn
-  denominators and the SIXTH byte-identical ratification counter (→ **P40(ii)**); the unmapped share
-  28% → 19%, still all `incomplete` (→ **P40(iii)**, **P42**); six `tasks.d` shards reading
-  `status: queued` while merged, and `deployer.ts`'s comment still naming the RETIRED
-  `reconstructState` (→ **P46** — premise rot, now visible in the plan's OWN record rather than a task
-  file); `base_unknown` shipping as a real third answer in T362 (→ **P48**, its clause (i) demonstrated
-  in the affirmative); guard-fired blocks clean for a fourth cycle (→ P41 tombstone, no re-arm).
-  **R16's pre-registrations are in NET STATE as a table — P43(i) obeyed as far as a document can.**
+  **★ R17 UPDATE — THE PROPOSAL'S SHAPE NOW SHIPS IN BOTH DIRECTIONS, WHILE THE ENTRY ITSELF STAYS
+  UNRATIFIABLE.** **(1) CLAUSE (ii) IN THE AFFIRMATIVE, FROM THE GATHER ITSELF.** The mutation-gate
+  rung (D-10/W1-T393) reports **`NO POSITIVE CONTROL: 0 verdicts recorded`** and says, in its own
+  words, *"this is NOT 'zero escapes' — it is an unmeasured history … N=0, a stated limitation, never
+  an empty result."* That is clause (ii) obeyed by a deterministic instrument BEFORE the proposal is
+  ratified — the strongest existence proof this entry has, and it cost nothing but a sentence.
+  **(2) CLAUSE (i) IN THE NEGATIVE, FROM THE RETRO'S OWN TABLE.** 12 shipped runs report **0 turns**
+  against real dollars and the gather averages them in anyway: one value, two populations (a run that
+  took no turns, a run whose turns were never written), one wrong answer. **TASK D is P48 applied to
+  the retro's own instrument**, and it is the cheapest tranche member yet identified because the
+  reader, the writer and the consumer are all in this repo. **(3) A THIRD TRANCHE MEMBER SHIPPED
+  ALREADY:** `rmd ledger-grep` (W1-T379/#1436) is the union verb that FAILS LOUD when no archive was
+  read — tranche member (3), now CLOSED, and the entry's "open, filed 2026-08-05" text above was
+  already stale before this cycle. **(4) NOTHING CHANGES ABOUT RATIFIABILITY:** the census is still
+  unrecoverable, the six mechanism classes are still unenumerated, and the selecting predicate is
+  still unwritten, so FIRST TRANCHE's own criterion remains inoperable. What R17 adds is that the
+  proposal no longer NEEDS the census to justify its first two tasks — TASK D and W1-T379 are both
+  argued entirely from evidence inside this document.
 
 **RETRO-1785778396449 (R14, prior cycle)** — 48 runs / 25 tasks / 25 PRs / 10 credits (`failed`×20,
 `blocked_ci`×9, `blocked`×7, `no_pr`×2, 23 rejected trailers — ALL SIBLING). Mined **P46**; its
@@ -1134,6 +1263,23 @@ P42 or W1-T271 and is folded there rather than given an id.
   from noise into an attributed effect. **P43 holds rank 5** only because P29/P47/P38/P48 are
   unbuilt defects while P43 is now demonstrably working in its cheapest form (a markdown table);
   clause (i) — store it as data — is the remaining ask, and it is smaller than ever.
+  **★ R17 UPDATE — A SECOND DESIGN RULE, AND THE FIRST TIME CLAUSE (ii) WAS APPLIED TO A METRIC'S
+  RIGHT TO EXIST.** **(1) THE LINE READS n=9 · hit 2 · miss 0 · unresolvable 7.** All four R16 rows
+  scored UNRESOLVABLE — three on false antecedents (rule 1, now 7/7) and **R16-1 on something new: its
+  INSTRUMENT went dark.** 17.781 nominally satisfies *stays < 100* and means nothing, because 12 of 26
+  shipped runs report real dollars against 0 turns. **RULE 2, added to this clause: a
+  pre-registration must name the COVERAGE precondition of its own metric**, or a dark instrument
+  silently satisfies it and the plan books a fake `HIT`. R17-1 is that rule made into a row.
+  **(2) CLAUSE (ii) EXTENDED — FROM 'IS THE MOVE REAL' TO 'CAN THIS DIAL MOVE AT ALL'.** For eight
+  cycles P29 was ranked on SIBLING-REJECTION COUNT. R17 establishes that number is orthogonal to
+  #349's mechanism by construction: the ownership-assert must keep rejecting a run that opened no PR,
+  and what the `ownResult` stash changed is that a task can be credited THROUGH a sibling's merged PR.
+  So R13's demotion, R14's reversal and three UNRESOLVABLE scorings all argued over a dial the fix is
+  not wired to. **The addition to clause (ii): before attributing (or refusing to attribute) a move,
+  the retro must state the causal path from the shipped mechanism to the metric — a metric with no
+  such path is STRUCK, not scored.** This is cheaper than regression control and catches a whole class
+  variance testing cannot: a number that is stable, well-measured, and about something else.
+  **P43 holds rank 5**; clause (i) — store it as data — is still the remaining ask.
 
 - **★ P44 (plan + golden) — THE TRIPWIRE IS AN ANCHOR, NOT A MEASUREMENT.** GROUND TRUTH (mechanical,
   measured at `dcbe275`): **254 of 315 tasks carry `budget_usd: 100.00` exactly**, and the entire plan
@@ -1270,6 +1416,23 @@ P42 or W1-T271 and is folded there rather than given an id.
   and nothing else. **(3) LEARNINGS = 74, ZERO ADDED, SIXTH CONSECUTIVE CYCLE**, across a further 36
   runs, while W1-T87's miner again proposed reusable shapes (12 runs, 2 shapes) and nothing wrote them.
   R15-3 scores **UNRESOLVABLE** (TASK A did not ship) and is re-registered UNCHANGED as R16-3.
+  **★ R17 UPDATE — SEVENTH FROZEN CYCLE, AND THIS TIME THE MINER HANDED THE CORPUS A CLEAN SHAPE
+  AND THE CORPUS COULD NOT TAKE IT.** **(1) LEARNINGS = 74, ZERO ADDED, SEVENTH CONSECUTIVE CYCLE**,
+  across a further 64 runs and 27 shipped tasks. R16-3 scores **UNRESOLVABLE** (TASK A did not ship)
+  and is re-registered UNCHANGED as **R17-3**, the third identical registration. **(2) THE MOST
+  POINTED INSTANCE YET IS A SUCCESS, NOT A FAILURE.** W1-T87's procedural miner surfaced
+  **`implement × clean_single_strike` across FOUR runs (W1-T416, T420, T422, T424)** — a reusable
+  shape, mechanically derived, already in the gather, needing no LLM judgment to record — and it went
+  nowhere, because there is no write path. Six cycles of this argument have been about defects the
+  harness kept re-paying for; this is the first cycle it demonstrably failed to bank a WIN. **(3) THE
+  ENVIRONMENT-KNOWLEDGE INSTANCE, which is TASK B's cheapest slice**: four separate runs (T416, T418,
+  T420, T423) each independently re-diagnosed that this box cannot provision a macOS Keychain item or
+  GNU `date`, so `rmd preflight --ci-parity` can never reach a clean PASS here regardless of diff —
+  one fact, host-scoped, invariant across every task, bought four times in one cycle. **(4) THE
+  DARK-ORGAN COUNT IS STILL DERIVABLE and reads ≥ 2** (R16-2 asked): `learningDuplicateViolation`
+  shipped with no live caller by T420/#1610's own admission, and the `mutation.ratchet_verdict`
+  emitter is unwired at lifetime **N=0**. Clause (i)'s call-site lint rung did NOT ship and remains
+  `callSiteViolations` at `warn`, so R16-2 scores **UNRESOLVABLE** on a false antecedent.
   THE GENERAL LESSON, and the reason this is P-numbered rather than three bug reports: **rule 13's
   "the proof is a merged PR" is exactly right about PROVENANCE and silent about EFFECT — and a harness
   that cannot see its own organs running will keep buying them twice.** **SUBSUMES P35** (the same
@@ -1297,7 +1460,7 @@ P42 or W1-T271 and is folded there rather than given an id.
   seeded task with a merged owned-branch trailer is REFUSED at dispatch and CREDITED exactly once; a
   task whose only merged trailer is FOREIGN-branched is refused AND escalated, never credited (P33's
   boundary preserved); an uncredited task with no merged trailer dispatches normally.
-  DEPENDENCY: sequence WITH W1-T149 — this is P29's other half. **★ R12 UPDATE:** zero no-op-close PRs,
+  DEPENDENCY: SATISFIED — W1-T149/#349 (P29's other half) shipped 2026-07-20; this is now unblocked. **★ R12 UPDATE:** zero no-op-close PRs,
   but 20 SIBLING rejections across 13 tasks — the churn appeared to move from "pay a worker to discover
   the work was done" to "pay a worker to redo work a sibling already merged". The gate as specified
   catches BOTH, because both begin with a task id that already rides a merged owned-branch trailer.
@@ -1367,6 +1530,23 @@ P42 or W1-T271 and is folded there rather than given an id.
   "did we lie in NET STATE", which is a smaller and much easier question. PROPOSE, as part (iv): the
   scan's population becomes **symbols introduced by the cycle's own merged diffs**, not claims in
   prose; a merged export with no non-test caller is reported, whether or not any section mentions it.
+  **★ R17 UPDATE — PART (i) RE-OPENS AFTER FIVE CLOSED CYCLES, AND THIS IS WHY P40 RISES TO RANK 3.**
+  Turns did NOT hold lit: **12 of 26 union-listed shipped runs report nonzero dollars and exactly 0
+  turns** (W1-T364 $14.451/0t and T387 $15.477/0t among them), and 4 more report $0.000/0t, while the
+  gather prints `avg turns 17.781` over all 64 runs anyway. R14's read — *the turn column lit with
+  nothing built and nothing naming a cause* — now has its mirror image: **it went dark the same way.**
+  A column that lights and darkens with nothing built is not an instrument, and part (ii) is exactly
+  the clause that would have made this LOUD instead of silent. **THE PRICE IS ALREADY PAID AND IT IS
+  NOT HYPOTHETICAL: R16-1 was pre-registered against this metric and must be scored UNRESOLVABLE**,
+  and R15-1 — the only `HIT` this plan has ever recorded — is now known to have run on an instrument
+  that can go dark without announcing it. **TASK D** (R17's block) is part (ii) written as a
+  dispatchable task with a golden. Part **(ii) is UNPAID FOR A FIFTH CYCLE** — a fifth
+  same-total/different-denominator print (**1138/64-vs-22**) and a **seventh** byte-identical
+  `3 / 11 / 21%`. Part **(iii) IS UNBUILT** and its blind share ran 9% → 15% → 28% → 19% → **36%**,
+  the worst reading in the series, still composed almost entirely of `incomplete` (×17 of 18) —
+  **TASK E** is part (iii) plus P42(i) written against that class. Part **(iv)**: SHIPS-UNWIRED read
+  clean again in a cycle that shipped at least two dark organs by PR self-admission, which is the
+  second consecutive confirmation that its population is the wrong one.
   GOLDEN: a seeded cycle merging one exported function with only test callers is REPORTED even when no
   NET STATE line names it, and the same function gains a production call site and is not reported.
 
@@ -1398,7 +1578,7 @@ P42 or W1-T271 and is folded there rather than given an id.
   dep): a seeded task whose only trailered merged PR is foreign-branched HALTS with exactly one escalation
   and zero further dispatches; the same task with that pair QUARANTINED derives cleanly and dispatches
   normally; a quarantined pair NEVER suppresses credit for a legitimately-owned PR on the same task.
-  DEPENDENCY: ratify AFTER or WITH W1-T149 — P29(ii)'s breaker is the backstop that makes (i) safe.
+  DEPENDENCY: SATISFIED — W1-T149/#349 shipped 2026-07-20, so P29(ii)'s breaker (the backstop that makes (i) safe) is live.
   **★ EVIDENCE LOG (in place; no re-rank stubs).** R10/R11: W1-T64 rejected 4 more times against the
   same #115, plus W1-T220 against #641's hand-authored branch. **R12 — THE CLASS QUADRUPLED, 1 → 5,
   AND FOUR ARE NEW: W1-T258→#766 (`feat-api-key-overflow`) · W1-T259→#768 (`feat-headroom-flag`) ·
@@ -1443,6 +1623,16 @@ P42 or W1-T271 and is folded there rather than given an id.
   rides.** That closes the argument for keying quarantine and refusal on BRANCH OWNERSHIP alone
   (P47(i)) rather than on any notion of a legitimate actor, since the plan lane is as legitimate as an
   actor gets. GOLDEN updated: **all ELEVEN pairs derive cleanly and dispatch none of them.**
+  **★ R17 — TWO MORE PAIRS, 11 → 13, AND ONE OF THEM POISONED A TASK WHOSE WORK HAD ALREADY MERGED:**
+  **`(#1617, W1-T419)`** on branch `feat/ratchet-names-compression-candidates` and **`(#1420,
+  W1-T369)`** on `claude/w1t369-proof-debt-lock` (rejected 4 times; W1-T369 shipped NOTHING all
+  cycle). The W1-T419 pair is qualitatively new and it is the reason a quarantine LIST cannot be the
+  remedy: the task's real work merged as **#1609 carrying no trailer at all**, so quarantining #1617
+  removes a false credit and still leaves the task uncredited — **a list can subtract, and this
+  defect needs something that can ADD** (TASK C's reading half). Foreign rejections rose 4 → 18 with
+  P47(i) unbuilt, so per P43(ii) the rise is **UNATTRIBUTED and the list still only grows** —
+  thirteen pairs, none ever removed, because nothing in this harness can remove one. GOLDEN updated:
+  **all THIRTEEN pairs derive cleanly and dispatch none of them.**
 - **P31 — RESOLVED; COLLAPSED INTO P30; prose DELETED per RATIFY-OR-KILL.** R8's decisive test (*"19 of
   the 21 blocked_ci merged anyway — if that holds, P31 collapses into P30"*) held in R9 (6 of 8) and has
   held every cycle since. No separate task; the duplicate adjudication in the R8 block below is deleted.
@@ -1474,10 +1664,18 @@ P42 or W1-T271 and is folded there rather than given an id.
   mined as P43(ii)'s regression control and is the ONE thing worth keeping from those six paragraphs
   — it is true independent of the false premise, and it lives in P43's entry, not here. R15 and R16
   then read the fall 23 → 10 → 6 as UNATTRIBUTED and twice wrote that a working per-task cap is
-  *"what the shape would predict"* while declining to credit one. **They were describing #349's
-  breaker.** The honest re-reading, recorded once: that fall is the most plausible EFFECT of clause
-  (ii), it was observable from the merged PR at any point, and P43(ii)'s bar was met by evidence
-  nobody thought to look for. **★ THE TWO-BREAKER QUESTION, RAISED AND SETTLED THE SAME DAY: DELIBERATE
+  *"what the shape would predict"* while declining to credit one.
+  **★ R17 CORRECTS THE CORRECTION — THE 2026-08-07 RE-READING WAS ITSELF WRONG, AND THE METRIC IS
+  STRUCK.** That note credited the sibling-rejection fall 23 → 10 → 6 to #349 as "the most plausible
+  EFFECT of clause (ii)". It read **19** this cycle with the fix unchanged and live. The count was
+  never this mechanism's dial: **a run that opened no PR of its own is SUPPOSED to have a sibling's
+  trailer rejected** — the ownership-assert must keep refusing it, per lesson (a) — and what the
+  `ownResult` stash changed is downstream, that a TASK can now be credited through a sibling's merged
+  PR. **No retro may credit or debit #349 with sibling-rejection count again**, in either direction;
+  the derivable replacement is ledger credit on shipped tasks (5 of 27 this cycle). R17-4 registers
+  the falsifier. This is the second time in two cycles this entry has been rewritten by better
+  evidence, and both rewrites came from asking the same question P43 now formalises: *what is the
+  causal path from the mechanism to the number?* **★ THE TWO-BREAKER QUESTION, RAISED AND SETTLED THE SAME DAY: DELIBERATE
   HARDENING, NOT DUPLICATE SPEND.** Clause (ii) is also credited here to W1-T271/#1040, so two
   breakers exist — and W1-T271's own shard proves it knew: it quotes #349's counter at
   `src/lib/status.ts:746-760` line by line, observes that *"the P29(ii) circuit breaker was armed the
