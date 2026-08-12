@@ -138,14 +138,26 @@ test("every allowlist entry carries a specific reason — 'TODO' is not one", ()
 // lcov with ZERO DA records for a changed file is a hollow pass, not a green one. Measured: that is
 // exactly what this suite produced before these tests existed.
 
-test("ledgerCorpusFiles unions the live ledger AND its rotations, ignoring decoys", () => {
+test("ledgerCorpusFiles unions the live ledger AND its rotations IN BOTH FORMS, ignoring decoys", () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-emissions-corpus-"));
   writeFileSync(join(dir, "ledger.ndjson"), "");
   writeFileSync(join(dir, "ledger.2026-07-23T03-20-10-766Z.ndjson"), "");
+  // W1-T444: the gzipped form used to be dropped here, which is how this reader reached 38,744 of
+  // 418,898 distinct lines on the real host — one in eleven.
+  writeFileSync(join(dir, "ledger.2026-07-22T21-26-36-052Z.ndjson.gz"), "");
   writeFileSync(join(dir, "ledger-archive.txt"), ""); // not .ndjson
   writeFileSync(join(dir, "service-tokens.json"), ""); // not a ledger
-  const files = ledgerCorpusFiles(dir).map((f) => f.split("/").pop());
-  assert.deepEqual(files.sort(), ["ledger.2026-07-23T03-20-10-766Z.ndjson", "ledger.ndjson"]);
+  const files = ledgerCorpusFiles(dir).map((f) => f.path.split("/").pop());
+  assert.deepEqual(files.sort(), [
+    "ledger.2026-07-22T21-26-36-052Z.ndjson.gz",
+    "ledger.2026-07-23T03-20-10-766Z.ndjson",
+    "ledger.ndjson",
+  ]);
+  assert.deepEqual(
+    ledgerCorpusFiles(dir).filter((f) => f.form === "gzip").map((f) => f.path.split("/").pop()),
+    ["ledger.2026-07-22T21-26-36-052Z.ndjson.gz"],
+    "and the gzipped one is TAGGED, so the reader decompresses it instead of sniffing",
+  );
   assert.deepEqual(ledgerCorpusFiles(join(dir, "does-not-exist")), [], "an unreadable dir is empty, never a throw");
   rmSync(dir, { recursive: true, force: true });
 });

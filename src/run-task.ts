@@ -320,7 +320,8 @@ import {
   regeneratePlanIndexFile,
 } from "./lib/plan-pr-emitter.js";
 import { appendLedger, isSpawnInfraBlockedError, LEDGER_COST_TAG_INFRA, matchesRepoScopedTask } from "./lib/ledger.js";
-import { resolveLedgerUnion } from "./lib/ledger-grep.js";
+import { gunzipSync } from "node:zlib";
+import { ledgerRotationEntries, resolveLedgerUnion, type LedgerCorpusEntry } from "./lib/ledger-grep.js";
 import { escalateRepeatingRules, ruleEfficacyReport } from "./lib/rule-efficacy.js";
 import { mineVerdictRows, verdictCalibrationReport } from "./lib/verdict-calibration.js";
 import {
@@ -7500,16 +7501,28 @@ export function checkProofTimeoutMs(readPolicy?: () => number): number {
  *  "zero in the window" is a claim about the corpus rather than about retention. */
 const EMISSIONS_DEFAULT_DAYS = 30;
 
-/** Every `<root>/state/ledger*.ndjson` — the LIVE file AND its rotations. Reading the live file
- *  alone undercounts by roughly 4x on this host (664 files), reporting hot verbs as dead. */
-export function ledgerCorpusFiles(stateDir: string): string[] {
+/**
+ * Every ledger corpus file — BOTH rotation forms plus the live file — tagged with how to read it.
+ *
+ * W1-T444: this used to filter `n.endsWith(".ndjson")` and so matched the live file and the plain
+ * rotations while missing every `.gz`. Its old doc claimed "undercounts by roughly 4x on this host
+ * (664 files)", a figure that was true before the archives were compressed out of band and matched
+ * FOUR files by 2026-08-12 — it reached 38,744 of 418,898 distinct lines, one in eleven. The
+ * classification now comes from {@link ledgerRotationEntries}, shared with `resolveLedgerUnion`,
+ * because two hand-maintained filters that disagree IS the defect and a third would relocate it.
+ */
+export function ledgerCorpusFiles(stateDir: string): LedgerCorpusEntry[] {
   let names: string[];
   try {
     names = readdirSync(stateDir);
   } catch {
     return [];
   }
-  return names.filter((n) => n.startsWith("ledger") && n.endsWith(".ndjson")).map((n) => join(stateDir, n)).sort();
+  const live = join(stateDir, "ledger.ndjson");
+  const entries = ledgerRotationEntries(names, stateDir);
+  // The live file is not a rotation, so the shared helper excludes it by construction — appended
+  // here because THIS caller's corpus is "everything", unlike the union's "archives + live" split.
+  return names.includes("ledger.ndjson") ? [...entries, { path: live, form: "plain" as const }] : entries;
 }
 
 /**
@@ -7652,10 +7665,13 @@ export function emissionsCommand(rest: string[], opts: { stateDir?: string } = {
   // event, rather than the whole line.
   const seen = new Set<string>();
   let scanned = 0;
-  for (const file of files) {
+  for (const entry of files) {
     let text: string;
     try {
-      text = readFileSync(file, "utf8");
+      // W1-T444: the form is decided from the name by `ledgerRotationEntries`, never by trying to
+      // decompress and catching — a sniff would make a corrupt `.gz` look like a plain file.
+      const buf = readFileSync(entry.path);
+      text = (entry.form === "gzip" ? gunzipSync(buf) : buf).toString("utf8");
     } catch {
       continue;
     }
