@@ -26,6 +26,22 @@ stack — OS sandbox + a deterministic deny-floor hook + worktree scoping — bu
 deny-floor is a *tripwire, not a sandbox*. Read the plan before pointing this at
 anything you care about.
 
+## Where this is going
+
+**The harness is the product; GitHub is plumbing.** The loop already runs
+unattended — the goal now is that operating it does not mean living on a PR
+page. Operator judgement is being moved into the console (verdicts that steer
+the fix rung, an inbox that ratifies a proposal *before* anything is written),
+with the PR demoted to transport and audit. Some GitHub contact stays
+irreducible on purpose: `verify: human` merges, commons and outbound gates,
+credential and org acts.
+
+Three rulings are open and are the operator's alone — instance topology, the
+naked-zero proposal, and the console's write-tier shape. They are recorded, with
+the query to re-check each, in
+**[docs/open-decisions.md](./docs/open-decisions.md)**. Sessions cite that page;
+they do not settle it.
+
 ## What's here today
 
 WS-0 (the one-shot spike proving the primitive loop closed end-to-end,
@@ -34,10 +50,12 @@ repo then ran WS-1 through its entire backlog and closed that too
 (2026-07-15: the daemon runs itself, unattended, self-hosting its own PRs).
 `src/run-task.ts` — the CLI orchestrator (`rmd`) — is not a future promise, it
 is real code: run-task/drain/daemon/review/sweep/fix/serve and the rest of the
-`rmd` command surface, over six thousand lines. See:
+`rmd` command surface, over a hundred modules under `src/lib/`. See:
 
 - **[MASTER-PLAN.md](./MASTER-PLAN.md)** — the full design; this document is the product.
+- **[docs/architecture.md](./docs/architecture.md)** — the conceptual map: the three planes, and which of them a merge reaches before a restart.
 - **[docs/operator-guide.md](./docs/operator-guide.md)** — the day-to-day view: what to type, what to watch.
+- **[docs/open-decisions.md](./docs/open-decisions.md)** — the rulings that are open, and how to check whether they still are.
 - **[FINDINGS.md](./FINDINGS.md)** — the WS-0 spike's per-verdict proofs and installed-version ground truth.
 - **[DECISIONS.md](./DECISIONS.md)** — auto-choose decision log (append-only).
 - `src/run-task.ts` — the orchestrator; `bin/rmd` is a thin `exec` wrapper into it.

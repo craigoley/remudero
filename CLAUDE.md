@@ -8,6 +8,15 @@ CI-budgeted store — `scripts/learnings-budget-ratchet.mjs` caps its injectable
 `MASTER-PLAN.md`, `DECISIONS.md`, `LEARNINGS.md`. CLAUDE.md holds only workflow rules; it does not
 restate feature history.
 
+**Nothing in this file is a gate.** Every rule here is UNENFORCED prose: a convention that binds
+only because you read it. The gates are elsewhere and refuse you by name — `coverage-ratchet` and
+`diff-coverage` on coverage, `proof-dialect` at dispatch and `lint-plan`'s changed-tasks pass on
+proofs, `judgeReview`'s rubric on the PR, `SymlinkInstallRefusal` on a worktree install. That split
+is the point: a rule stated ONLY here can be violated silently and repeatedly, which is why several
+of these bullets exist at all. When a rule below turns out to matter, the fix is to make something
+refuse it — file the task; do not sharpen the wording and call it closed. Rules that name their own
+enforcing gate say so inline.
+
 **Maintaining this file:** it is injected in full into every session, so it is a context tax paid
 per session — keep it compressed. Per MASTER-PLAN §8A, *compression is a deliverable, not just
 accretion*: a retro that adds a rule must also fold, sharpen, or delete the ones it supersedes.
@@ -173,16 +182,12 @@ forensic detail, so the narrative does not need to live here.
 
 ## CI and merging
 
-- **A stale-red `ci-gate` used to need a NEW SHA when a same-sha rerun landed AFTER ci-gate's own
-  read — W1-T261 (merged 2026-07-29, #885) fixed exactly this.** ci-gate now RE-READS inside a
-  bounded grace window before concluding FAILURE, so a required check that flips FAILURE→SUCCESS on
-  the SAME head sha self-clears with no fresh sha and no manual re-run. #873 went red while two
-  checks subsequently passed on that very sha; #877 (a byte-identical tree pushed to a fresh sha)
-  went fully green — that gap is now closed. A DIFFERENT defect in the same job — the WAIT CAP
-  itself sized shorter than this repo's own required-check wall-clock, so ci-gate timed out on
-  siblings that were still green-in-progress rather than on any failure — is fixed by W1-T312 in
-  the same change that corrects this bullet (see the `WAIT_CAP_SECONDS` comment in
-  `.github/workflows/ci-gate.yml`). *(#873/#877, W1-T261/#885, W1-T312)*
+- **Do NOT push a fresh sha to clear a stale-red `ci-gate` — it self-clears.** ci-gate RE-READS
+  inside a bounded grace window before concluding FAILURE, so a required check flipping
+  FAILURE→SUCCESS on the SAME head sha needs no new commit and no manual re-run (W1-T261); its wait
+  cap is sized against this repo's real required-check wall-clock, so a green-in-progress sibling is
+  waited out rather than timed out (W1-T312, `WAIT_CAP_SECONDS` in `.github/workflows/ci-gate.yml`).
+  Both defects are FIXED; the citations are the forensic detail. *(#873/#877, W1-T261/#885, W1-T312)*
 - **`gh pr create` is GraphQL and dies with "API rate limit already exceeded" when that budget is
   spent** (frequent on this account while REST/core stays healthy). Open PRs via REST:
   `gh api --method POST repos/<owner>/<repo>/pulls -f title=… -f head=… -f base=main -F body=@<file>`.
@@ -345,6 +350,18 @@ forensic detail, so the narrative does not need to live here.
   self-correcting restart. To force a deploy by hand: `git pull` then
   `launchctl kickstart -k gui/$UID/com.remudero.daemon`. *(#1054, superseding the #768/#773 rule that
   the supervisor never restarts for you)*
+- **A fix you merge mid-drain reaches the PLAN and the WORKERS immediately and the JUDGE not at all
+  — so "I merged it and the next run still did the wrong thing" is a RESTART, not a failed fix.**
+  Three clocks, not one: `syncPlanFromOrigin` re-reads the plan blob from origin/main at every
+  dispatch, `worktreeAdd` cuts each worker a fresh worktree off origin/main, but `judgeReview` (and
+  the linter, and the drain loop) run in the orchestrator's own module graph, loaded once at process
+  start. The trap is the MIXED result this produces — the worker visibly behaves differently while
+  the judge that grades it does not — which reads as a flaky gate. NEVER validate a review/linter/
+  drain change by watching the next live run; prove it in-process against the choke point's own
+  objects, and treat judge behaviour as unobservable until a restart. `src/lib/self-sync.ts` says so
+  itself: it covers process STARTUP only and hands in-process staleness to the WS-2 self-updater.
+  *(re-derived 2026-08-11; the operator-facing table is docs/operator-guide.md's
+  "What a merged fix reaches before you restart")*
 - **If a suite dies with `Cannot find package 'tsx'`, check the canonical `node_modules` is
   NON-EMPTY before diagnosing the code.** `bin/rmd` execs `$DIR/node_modules/.bin/tsx`, so an
   emptied `node_modules` kills every rmd verb and the launchd supervisor while the already-running

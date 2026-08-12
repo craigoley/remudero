@@ -16,8 +16,10 @@
 # authoring time, OPERATOR RULING 2026-07-23) — never trust this comment over the
 # cited site; re-derive it yourself if the site moves. `net-new` marks a field with
 # NO prior source literal — `launchd.throttleIntervalS` is the one net-new field this
-# file carries (the daemon's generated plist has no ThrottleInterval key today; see
-# src/lib/launchd.ts's `generateLaunchdPlist`). A `net-new` field must NEVER be
+# file carries — `net-new` means no prior source literal existed to lift it FROM, which
+# remains true; since W1-T253 the daemon's generated plist emits a ThrottleInterval key
+# by READING this row (src/lib/launchd.ts's `generateLaunchdPlist`), so the plist is this
+# value's consumer, not its source. A `net-new` field must NEVER be
 # relabeled `lifted:` without a real source site to cite, and a `lifted:` field must
 # NEVER be relabeled `net-new` — src/lib/policy.ts's loader enforces both directions
 # per named field (test/policy.test.ts).
@@ -366,17 +368,28 @@ headroom:
     min: 50
     max: 100
   # OPERATOR RULING 2026-07-25 (fb-1784894405468-a4153e, superseded default clause):
-  # documented default TRUE — matches the live runtime default (daemon.ts:968's
-  # `opts.headroomEnabled ?? true`) — the governor protects the subscription window
-  # by default; opting into overflow spend is the deliberate act, set here or via
-  # config `headroom.enabled: false` / `RMD_HEADROOM_ENABLED=0` (both still win over
-  # this row once W1-T253 wires the read).
+  # documented default TRUE — matches the live runtime default (`opts.headroomEnabled
+  # ?? true` in src/lib/daemon.ts; the `:968` this comment used to cite drifted long ago
+  # and is now unrelated code, which is why the symbol is the citation) — the governor
+  # protects the subscription window by default; opting into overflow spend is the
+  # deliberate act, set here or via config `headroom.enabled: false` /
+  # `RMD_HEADROOM_ENABLED=0`, both of which win over this row. W1-T253 HAS wired the
+  # read (src/lib/policy.ts's `booleanField("headroom.enabled", …)`); the previous
+  # "once W1-T253 wires the read" was written before that landed.
   enabled:
     value: true
     origin: "lifted:src/lib/daemon.ts:968 (headroomEnabled default)"
 
-# NET-NEW: no daemon-plist ThrottleInterval literal exists in src today (see
-# src/lib/launchd.ts's `generateLaunchdPlist` — it emits no ThrottleInterval key).
+# NET-NEW: no daemon-plist ThrottleInterval literal existed in src when this row was
+# AUTHORED — that is what `net-new` records, and it is a statement about the row's
+# provenance, not about the tree today. Since W1-T253, `src/lib/launchd.ts`'s
+# `generateLaunchdPlist` DOES emit a ThrottleInterval key, and it emits it by READING
+# THIS ROW. So the row stays `net-new` (there is still no prior literal it was lifted
+# FROM), and the daemon plist is now this value's consumer rather than its source.
+# Corrected 2026-08-11: the previous wording said the key does not exist, present tense,
+# which stopped being true the moment its own consumer shipped. NOTE, unfixed here:
+# `src/lib/policy.ts`'s module header carries the same sentence in the same present
+# tense and needs the same correction — a src/ edit, out of scope for this docs pass.
 # The R-1 relaunch-storm rate limit already applied to the SEPARATE serve unit
 # (`DEFAULT_SERVE_THROTTLE_S`, also 60) is the precedent this value follows, but this
 # row governs the daemon unit specifically and is NEVER to be presented as lifted from
