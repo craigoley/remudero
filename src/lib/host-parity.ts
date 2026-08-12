@@ -35,10 +35,19 @@
  * that STOPS failing is also reported, because a baseline nobody prunes decays into a mute button.
  */
 
-/** `test/<file>.test.ts::<title>` — the identity a divergence is tracked by. A bare title is not
- *  enough: several titles in this repo appear verbatim in more than one file (`THE OTHER
- *  DIRECTION…`), and a collision would let one pole's failure mask another's. */
-export type DivergenceId = string;
+/**
+ * `/…/test/foo.test.ts:2:5626` → `test/foo.test.ts`.
+ *
+ * The two poles report different absolute roots (`/Users/craigoleyagent/…` vs
+ * `/home/runner/work/…`), so an identity built on the raw location can never match across them.
+ * Anchoring on the LAST `/test/` also survives a checkout whose own path contains the word.
+ */
+export function normaliseTestPath(location: string): string {
+  const withoutPosition = location.replace(/:\d+:\d+$/, "");
+  const idx = withoutPosition.lastIndexOf("/test/");
+  if (idx >= 0) return withoutPosition.slice(idx + 1);
+  return withoutPosition.startsWith("test/") ? withoutPosition : (withoutPosition.split("/").pop() ?? withoutPosition);
+}
 
 /**
  * THE DECLARED DIVERGENCES, each with the reason it is not a defect to chase today.
@@ -80,6 +89,11 @@ export const HOST_PARITY_BASELINE: DeclaredDivergence[] = [
   },
 ];
 
+/** `test/<file>.test.ts::<title>` — the identity a divergence is tracked by. A bare title is not
+ *  enough: several titles in this repo appear verbatim in more than one file (`THE OTHER
+ *  DIRECTION…`), and a collision would let one pole's failure mask another's. */
+export type DivergenceId = string;
+
 /** Which machine a divergence belongs to. `mini` is the operator's mac — the host the review judge
  *  runs proofs on. `ci` is `ubuntu-latest`. */
 export type HostPole = "mini" | "ci";
@@ -112,20 +126,6 @@ export interface ParityDiff {
   healed: DeclaredDivergence[];
   /** Declared and observed — silence, but reported so the run can prove it looked. */
   declaredSeen: DeclaredDivergence[];
-}
-
-/**
- * `/…/test/foo.test.ts:2:5626` → `test/foo.test.ts`.
- *
- * The two poles report different absolute roots (`/Users/craigoleyagent/…` vs
- * `/home/runner/work/…`), so an identity built on the raw location can never match across them.
- * Anchoring on the LAST `/test/` also survives a checkout whose own path contains the word.
- */
-export function normaliseTestPath(location: string): string {
-  const withoutPosition = location.replace(/:\d+:\d+$/, "");
-  const idx = withoutPosition.lastIndexOf("/test/");
-  if (idx >= 0) return withoutPosition.slice(idx + 1);
-  return withoutPosition.startsWith("test/") ? withoutPosition : (withoutPosition.split("/").pop() ?? withoutPosition);
 }
 
 /**
