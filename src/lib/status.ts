@@ -1040,6 +1040,73 @@ export function evaluateDispatchBreaker(
   return freshCount >= maxDispatches ? "tripped" : "clear";
 }
 
+/**
+ * W1-T414: does GitHub's OWN view of open PRs corroborate `taskId`'s forward progress, even
+ * when THIS host's ledger has no local `pr.opened` line to prove it?
+ *
+ * `dispatchesWithoutNewOwnedPr`'s reset is a statement about a BRANCH NAME — run-task.ts logs
+ * `pr.opened` only after ITS OWN worker pushes ITS OWN `run-<taskId>-<epochMs>` branch — and
+ * branch names are GitHub's, visible identically from every host. `openHeadBranches` is the
+ * batched {@link GitHub.listOpenHeadBranches} answer, ALREADY resolved by the caller (once per
+ * drain/daemon invocation — see `breakerGateFor`, run-task.ts) so this stays a pure, zero-cost
+ * lookup rather than a second GitHub call.
+ *
+ * OWNERSHIP is decided by the same three accepted forms {@link branchClaimsOtherTask} already
+ * names — {@link ownsBranch}, {@link isBareRunBranch}, {@link isOwnedSlugBranch} — never a
+ * fresh notion of what a run branch looks like.
+ *
+ * THREE-WAY, NOT BOOLEAN, because "no corroborating branch" and "could not check" must stay
+ * distinguishable (the same discipline {@link GitHub.listOpenHeadBranches}'s own doc states):
+ *   - `"corroborated"` — the read succeeded and named a branch this task owns.
+ *   - `"not-corroborated"` — the read succeeded and named no such branch.
+ *   - `"unreadable"` — the read FAILED (`null`) or was never offered (`undefined`, e.g. a
+ *     gateway that predates {@link GitHub.listOpenHeadBranches} or omits the optional method).
+ *     Never treated as `"not-corroborated"`: a caller that collapsed the two would let a
+ *     network blip silently withdraw an already-legitimate reset.
+ */
+export function corroboratesForwardProgress(
+  openHeadBranches: ReadonlyArray<PrRef> | null | undefined,
+  taskId: string,
+): "corroborated" | "not-corroborated" | "unreadable" {
+  if (openHeadBranches == null) return "unreadable"; // null (failed read) or undefined (unoffered)
+  const owned = openHeadBranches.some((pr) => {
+    const head = pr.headRefName;
+    return head !== undefined &&
+      (ownsBranch(head, taskId) || isBareRunBranch(head, taskId) || isOwnedSlugBranch(head, taskId));
+  });
+  return owned ? "corroborated" : "not-corroborated";
+}
+
+/**
+ * W1-T414: {@link evaluateDispatchBreaker}, CORROBORATED by GitHub's own view of open PRs before
+ * a `"tripped"` verdict is handed back — the count itself stays exactly as local as it always
+ * was (this calls {@link evaluateDispatchBreaker} verbatim, unmodified, first), and so does its
+ * regression/indeterminate handling (W1-T206's, untouched — an `"indeterminate"` or `"clear"`
+ * verdict is returned as-is, never reached by the corroboration check below).
+ *
+ * ONLY a `"tripped"` verdict is reconsidered, and only in ONE direction: a corroborating branch
+ * downgrades `"tripped"` to `"clear"`, exactly as a local `pr.opened` line already would; the
+ * absence of one, or an unreadable read, leaves `"tripped"` exactly as {@link
+ * evaluateDispatchBreaker} computed it — UNREADABLE FALLS BACK TO THE LOCAL COUNT, never to
+ * "dispatch anyway" (a network blip cannot itself clear a tripped breaker) and never to "refuse"
+ * (this can only ever relax a trip the local count already decided, never add one).
+ *
+ * `openHeadBranches` is the SAME already-resolved, once-per-invocation batched read {@link
+ * corroboratesForwardProgress} consumes — see that function's and `breakerGateFor`'s (run-
+ * task.ts) docs for why this is never a per-task GitHub call.
+ */
+export function evaluateDispatchBreakerCorroborated(
+  ledgerPath: string,
+  taskId: string,
+  cache: DispatchBreakerCache,
+  openHeadBranches: ReadonlyArray<PrRef> | null | undefined,
+  opts: { maxDispatches?: number; ledgerFs?: LedgerFsDeps } = {},
+): "tripped" | "clear" | "indeterminate" {
+  const state = evaluateDispatchBreaker(ledgerPath, taskId, cache, opts);
+  if (state !== "tripped") return state;
+  return corroboratesForwardProgress(openHeadBranches, taskId) === "corroborated" ? "clear" : "tripped";
+}
+
 /** Escape a string for literal use inside a `RegExp` (dot/hyphen-safe task ids). */
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

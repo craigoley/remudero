@@ -428,7 +428,7 @@ import {
   createDispatchBreakerCache,
   DEFAULT_MAX_TASK_LIFETIME_DISPATCHES,
   deriveStatus,
-  evaluateDispatchBreaker,
+  evaluateDispatchBreakerCorroborated,
   ghGateway,
   ghRequiredStatusCheckContexts,
   isLifetimeDispatchCapExceeded,
@@ -436,6 +436,7 @@ import {
   readLedgerLines,
   type DeriveDeps,
   type GitHub,
+  type PrRef,
   type StatusProjection,
 } from "./lib/status.js";
 import {
@@ -9804,8 +9805,20 @@ export function escalateStarvation(
  * `run.start`, never reset) — deliberately not routed through `evaluateDispatchBreaker`
  * itself, whose cache/regression semantics belong to the streak breaker alone (W1-T271's own
  * scope, not this task's to touch).
+ *
+ * W1-T414 — `openHeadBranches` is the batched {@link
+ * GitHub.listOpenHeadBranches} answer, resolved ONCE by the caller (drainCommand/daemonCommand,
+ * below) before this gate is built — never a fresh per-task GitHub call — and threaded into
+ * `evaluateDispatchBreakerCorroborated` so a `"tripped"` streak verdict can be corroborated by a
+ * GitHub-visible open PR on this task's own run branch, exactly as a local `pr.opened` line
+ * already would. `undefined` (gateway lacks the method) or `null` (the read failed) both leave
+ * every task's verdict exactly as {@link evaluateDispatchBreaker} alone computed it — see that
+ * function's doc for the fail-to-local-count contract.
  */
-function breakerGateFor(ledgerPath: string): {
+function breakerGateFor(
+  ledgerPath: string,
+  openHeadBranches: ReadonlyArray<PrRef> | null | undefined,
+): {
   isIndeterminate: (taskId: string) => boolean;
   isTripped: (taskId: string) => boolean;
   isLifetimeCapExceeded: (taskId: string) => boolean;
@@ -9814,7 +9827,7 @@ function breakerGateFor(ledgerPath: string): {
   let memo: { taskId: string; state: "tripped" | "clear" | "indeterminate" } | undefined;
   const stateFor = (taskId: string) => {
     if (memo?.taskId !== taskId) {
-      memo = { taskId, state: evaluateDispatchBreaker(ledgerPath, taskId, cache) };
+      memo = { taskId, state: evaluateDispatchBreakerCorroborated(ledgerPath, taskId, cache, openHeadBranches) };
     }
     return memo.state;
   };
@@ -10177,17 +10190,6 @@ async function drainCommand(
     for (const p of lastProj?.values() ?? []) if (p.prState === "OPEN") n++;
     return n;
   };
-  // W1-T206: see breakerGateFor's doc — ONE cache for this whole `rmd drain` invocation.
-  const breakerGate = breakerGateFor(ledgerPath);
-  // W1-T119: same freshness contract as `isOpenPr` — the SAME projection
-  // `refreshMerged` just derived, never a second GitHub read path. W1-T206: ALSO
-  // indeterminate when the ledger's dispatch-breaker read for this task cannot be
-  // trusted (absent/rotated ledger reading as fewer dispatches than a live process
-  // already knows about) — nextRunnable already skips-and-retries on indeterminate
-  // rather than escalating, exactly the behavior a torn read needs here too.
-  const isIndeterminate = (id: string) =>
-    lastProj?.get(id)?.indeterminate === true || breakerGate.isIndeterminate(id);
-
   if (dryRun) {
     const merged = refreshMerged();
     if (opts.curated) {
@@ -10208,6 +10210,25 @@ async function drainCommand(
     console.log(`\nresume: ${resumeCommand(opts)}`);
     return 0;
   }
+
+  // W1-T414: ONE batched read for this whole `rmd drain` invocation, handed to every task's
+  // breaker corroboration below — never a per-task GitHub call (see breakerGateFor's doc).
+  // `githubFactory` builds a fresh `buildBatchedGithub` instance whose OWN single `gh pr list
+  // --state all` fetch already answers this; the call below is that instance's only fetch, so
+  // this is exactly one extra batched call per invocation, never one per task. Resolved AFTER
+  // the `--dry-run` early return above (never before it): a preview spawns/reads nothing beyond
+  // `refreshMerged`'s own projection, and the breaker is never consulted on that path.
+  const openHeadBranchesForBreaker = githubFactory(owner, repo).listOpenHeadBranches?.();
+  // W1-T206: see breakerGateFor's doc — ONE cache for this whole `rmd drain` invocation.
+  const breakerGate = breakerGateFor(ledgerPath, openHeadBranchesForBreaker);
+  // W1-T119: same freshness contract as `isOpenPr` — the SAME projection
+  // `refreshMerged` just derived, never a second GitHub read path. W1-T206: ALSO
+  // indeterminate when the ledger's dispatch-breaker read for this task cannot be
+  // trusted (absent/rotated ledger reading as fewer dispatches than a live process
+  // already knows about) — nextRunnable already skips-and-retries on indeterminate
+  // rather than escalating, exactly the behavior a torn read needs here too.
+  const isIndeterminate = (id: string) =>
+    lastProj?.get(id)?.indeterminate === true || breakerGate.isIndeterminate(id);
 
   // SINGLE-INSTANCE GUARD (DIAGNOSIS.md, diag/drain-concurrency): two concurrent
   // `rmd drain` processes both selected the still-unmerged W1-T7 and ran it. Refuse
@@ -10826,17 +10847,6 @@ export async function daemonCommand(
     for (const p of lastProj?.values() ?? []) if (p.prState === "OPEN") n++;
     return n;
   };
-  // W1-T206: see breakerGateFor's doc — ONE cache for this whole `rmd daemon` invocation.
-  const breakerGate = breakerGateFor(ledgerPath);
-  // W1-T119: same freshness contract as `isOpenPr` — the SAME projection
-  // `refreshMerged` just derived, never a second GitHub read path. W1-T206: ALSO
-  // indeterminate when the ledger's dispatch-breaker read for this task cannot be
-  // trusted (absent/rotated ledger reading as fewer dispatches than a live process
-  // already knows about) — nextRunnable already skips-and-retries on indeterminate
-  // rather than escalating, exactly the behavior a torn read needs here too.
-  const isIndeterminate = (id: string) =>
-    lastProj?.get(id)?.indeterminate === true || breakerGate.isIndeterminate(id);
-
   // DRY-RUN: preview the resolved target + planned sequence, spawn NOTHING, take NO lock.
   if (target.dryRun) {
     // W1-T253: drain.max from the SAME loaded policy `opts` above already threaded, never
@@ -10847,6 +10857,23 @@ export async function daemonCommand(
     if (target.isSelf) writeSyncLine(2, "  ⚠️ SELF-HOSTING target — the daemon's own source repo.");
     return 0;
   }
+
+  // W1-T414: ONE batched read for this whole `rmd daemon` invocation — see drainCommand's
+  // identical wiring/doc just above. Resolved AFTER the `--dry-run` early return above (never
+  // before it — a preview must spawn/read nothing beyond `refreshMerged`'s own projection), and
+  // once at boot, like `breakerGateFor`'s own cache immediately below, rather than re-fetched
+  // per tick.
+  const openHeadBranchesForBreaker = githubFactory(target.owner, target.repo).listOpenHeadBranches?.();
+  // W1-T206: see breakerGateFor's doc — ONE cache for this whole `rmd daemon` invocation.
+  const breakerGate = breakerGateFor(ledgerPath, openHeadBranchesForBreaker);
+  // W1-T119: same freshness contract as `isOpenPr` — the SAME projection
+  // `refreshMerged` just derived, never a second GitHub read path. W1-T206: ALSO
+  // indeterminate when the ledger's dispatch-breaker read for this task cannot be
+  // trusted (absent/rotated ledger reading as fewer dispatches than a live process
+  // already knows about) — nextRunnable already skips-and-retries on indeterminate
+  // rather than escalating, exactly the behavior a torn read needs here too.
+  const isIndeterminate = (id: string) =>
+    lastProj?.get(id)?.indeterminate === true || breakerGate.isIndeterminate(id);
 
   if (target.isSelf) {
     writeSyncLine(
