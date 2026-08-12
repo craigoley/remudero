@@ -45,6 +45,8 @@ import {
   workerCredentialFilePath,
   workerKeychainPaths,
   type SecurityRunner,
+  lostWorkerHomeGrants,
+  type WorkerHomeGrantOutcome,
 } from "./worker-home.js";
 import {
   buildContainedSpawnFn,
@@ -186,6 +188,12 @@ export interface WorkerResult {
    * MASTER-PLAN §8B) — this call's acceptance proofs must be re-verified
    * against repo state (W1-T3F), never trusted from a possibly-lossy REPORT.
    */
+  /**
+   * Worker-home grants that were LOST or HEALED for this spawn (see
+   * {@link lostWorkerHomeGrants}) — absent when every grant landed, which is the overwhelmingly
+   * common case, so the verdict row grows nothing on a healthy run.
+   */
+  lostGrants?: WorkerHomeGrantOutcome[];
   qualitySuspect: boolean;
 }
 
@@ -322,10 +330,21 @@ export function workerLedgerFields(r: WorkerResult): {
   compaction_events: CompactionEvent[];
   max_turns?: number;
   stderr_excerpt?: string;
+  lost_grants?: string[];
 } {
   const stderrExcerpt = workerFailureExcerpt(r);
   return {
     ...(stderrExcerpt !== undefined ? { stderr_excerpt: stderrExcerpt } : {}),
+    // OMITTED when every grant landed — the common case adds no field at all, which is what
+    // keeps a per-run row from carrying four states it does not need. Present only when a grant
+    // was lost or healed, and then it names WHICH slot and why.
+    ...(r.lostGrants?.length
+      ? {
+          lost_grants: r.lostGrants.map((g) =>
+            g.state === "displaced" ? `${g.relFrom}: displaced to ${g.displacedTo}` : `${g.relFrom}: ${g.reason ?? "failed"}`,
+          ),
+        }
+      : {}),
     model: r.model,
     effort: r.effort,
     tokens: r.tokens,
@@ -787,7 +806,16 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       // worker-home.ts's note above `workerCredentialFilePath` for the full argument.
       assertWorkerCredentialFile(workerCredentialFilePath(realHome), args.keychain?.readCredentialFile);
     }
-    materializeWorkerHome({ workerHome, realHome, workerKeychainPath });
+    // W1-T417-adjacent: a grant that FAILED is not a grant that was OPTIONAL. The absent-target
+    // skip stays silent (several are legitimately unavailable), but a target that EXISTS and could
+    // not be reached is a LOST CAPABILITY the worker then runs without — exactly how a real
+    // `.claude` DIRECTORY in the symlink slot left the usage probe running LOGGED OUT for days
+    // with nothing on disk saying so. Carried on the RESULT rather than logged here: this module
+    // writes no ledger rows by design, and `workerLedgerFields` already projects the result onto
+    // the verdict row every caller writes.
+    const lostGrants = lostWorkerHomeGrants(
+      materializeWorkerHome({ workerHome, realHome, workerKeychainPath }),
+    );
 
     // Shell isolation (resolved from config, never hardcoded) so a worker sources
     // no operator rc: HOME is redirected (above) so CLAUDE_CODE_SHELL's Bash-tool
@@ -889,6 +917,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
           // spawned with — see {@link WorkerResult.maxTurns}. `undefined` when the
           // caller configured no cap, never a guessed value.
           maxTurns: args.maxTurns,
+          lostGrants,
         }),
       teardownContained,
     );
@@ -930,6 +959,8 @@ export async function collectWorkerResult(
     accountLabel?: string;
     /** W1-T303: configured input, mirrored verbatim — see {@link WorkerResult.maxTurns}. */
     maxTurns?: number;
+    /** See {@link WorkerResult.lostGrants} — mirrored verbatim, never re-derived here. */
+    lostGrants?: WorkerHomeGrantOutcome[];
   },
 ): Promise<WorkerResult> {
   const blocks: string[] = [];
@@ -1033,6 +1064,7 @@ export async function collectWorkerResult(
   }
 
   return {
+    ...(opts.lostGrants?.length ? { lostGrants: opts.lostGrants } : {}),
     sessionId,
     costUsd,
     numTurns,

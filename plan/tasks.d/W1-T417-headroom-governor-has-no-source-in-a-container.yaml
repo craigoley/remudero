@@ -22,8 +22,22 @@
     `claude -p \"/usage\"`, CONFIRMED MACHINE-READABLE HEADLESS IN WS-0, and
     test/fixtures/usage/usage-resetless-weekly.txt is a real captured panel carrying `Current
     session:`, both weekly windows and the contributing-usage section. So `-p \"/usage\"` DID emit
-    the panel once. It no longer does. The image pins CLAUDE_CODE_VERSION 2.1.220 (deploy/Dockerfile).
-    THIS IS A CLIENT BEHAVIOUR CHANGE, NOT A MODE DIFFERENCE THAT WAS ALWAYS TRUE.
+    the panel once.
+    CORRECTED 2026-08-12 — THE TWO SENTENCES THAT STOOD HERE WERE WRONG, AND THE RETIREMENT RESTED
+    ON THEM. They asserted that the panel is no longer emitted and that this is a CLIENT BEHAVIOUR
+    CHANGE. There is NO client regression: on the same pinned CLAUDE_CODE_VERSION 2.1.220
+    (deploy/Dockerfile), `claude -p /usage` emits the full panel — the session line, both weeklies,
+    and the resetless Fable week line WINDOW_TAIL was widened for. Both versions work.
+    NOR DOES THE ACCOUNT LACK A CREDENTIAL. It is present, valid and Max (subscriptionType max,
+    rate_limits_available true). The probe was running LOGGED OUT because the credential was
+    UNREACHABLE FROM THE HOME THE PROBE CONSTRUCTS: a real `.claude` DIRECTORY occupied the symlink
+    slot in `worker-home-usage-probe`, so `materializeWorkerHome`'s `unlinkSync` threw, its
+    `symlinkSync` threw EEXIST, both were swallowed, and the directory won permanently. The A/B is
+    decisive — two copies of that home differing by exactly ONE FILE, and adding
+    `.claude/.credentials.json` turns the 207-byte cost summary into a panel that parses.
+    THIS RECORD IS CORRECTED, NOT RE-OPENED: the shard stays blocked and verify:human. The
+    slot-healing fix is a separate change; whether the governor is worth reviving on top of it
+    remains the operator's call and nothing here presumes it.
     SO NO PARSER CHANGE HELPS. Accepting a second format is impossible when the second output
     contains none of the required information — there is no window figure in it to read.
     AND THE TWO FALLBACK SOURCES ARE ALSO DEAD HERE, both measured in the container:

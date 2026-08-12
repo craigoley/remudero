@@ -15,8 +15,9 @@ import {
   unlinkSync,
   writeFileSync,
   writeSync,
+  renameSync,
 } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { reclaimStaleLock } from "./fs-race-safe.js";
 
@@ -114,6 +115,49 @@ export interface WorkerHomePlan {
   workerHome: string;
   rcFiles: string[];
   symlinks: Array<{ from: string; to: string; reason: string }>;
+  /**
+   * What ACTUALLY happened to each grant (W1-T442-adjacent, the seventh instance of this
+   * repo's own law: a grant that FAILED is not a grant that was OPTIONAL). Populated by
+   * {@link materializeWorkerHome}; absent on the pure {@link workerHomePlan}, which decides
+   * nothing and touches no filesystem.
+   */
+  outcomes?: WorkerHomeGrantOutcome[];
+}
+
+/**
+ * One grant's real outcome. `absent` and `failed` MUST stay distinguishable — the absent
+ * skip is a deliberate, correct optional-grant path (the mini legitimately lacks several),
+ * while a failure is a silent loss of capability that has already cost real money.
+ */
+export interface WorkerHomeGrantOutcome {
+  relFrom: string;
+  to: string;
+  /**
+   * - `linked`    — the symlink was created (or re-pointed) and now resolves to `to`.
+   * - `already`   — it already pointed at `to`; nothing done.
+   * - `absent`    — the TARGET does not exist. An optional grant, skipped SILENTLY and
+   *                 correctly: several are legitimately unavailable on the mini.
+   * - `displaced` — a REAL DIRECTORY occupied the slot; it was moved aside (see
+   *                 {@link WorkerHomeGrantOutcome.displacedTo}) and the link created.
+   * - `failed`    — the grant could not be made. The worker runs WITHOUT it.
+   */
+  state: "linked" | "already" | "absent" | "displaced" | "failed";
+  /** Where a `displaced` directory was moved to — kept, never deleted, so the thing that
+   *  poisoned the slot is still inspectable afterwards. */
+  displacedTo?: string;
+  /** Why a `failed` grant failed — the error's own message, never a guess. */
+  reason?: string;
+}
+
+/**
+ * The grants that were LOST or HEALED — everything a caller should surface, and nothing it
+ * should not. `absent` and the two healthy states are excluded deliberately: materialisation
+ * runs per spawn and per probe tick, so reporting every grant would be four rows a spawn, while
+ * `failed`/`displaced` are rare by construction (a displaced slot heals once and then reads
+ * `already`). That asymmetry is what lets this be reported at all without becoming noise.
+ */
+export function lostWorkerHomeGrants(plan: WorkerHomePlan): WorkerHomeGrantOutcome[] {
+  return (plan.outcomes ?? []).filter((o) => o.state === "failed" || o.state === "displaced");
 }
 
 /** The HOME-relative slot Claude Code resolves its keychain through. */
@@ -174,30 +218,79 @@ export function materializeWorkerHome(opts: {
     writeFileSync(rc, "");
   }
 
+  const outcomes: WorkerHomeGrantOutcome[] = [];
   for (const link of plan.symlinks) {
-    if (!existsSync(link.to)) continue; // optional grant; nothing to link
+    const relFrom = relative(plan.workerHome, link.from);
+    if (!existsSync(link.to)) {
+      // THE OPTIONAL-GRANT SKIP, DELIBERATE AND UNCHANGED. The target genuinely is not on this
+      // host (several are legitimately absent on the mini), so there is nothing to grant. This
+      // is the one silent path, and it must STAY silent — turning it into an error would break
+      // every host where a grant is unavailable by design.
+      outcomes.push({ relFrom, to: link.to, state: "absent" });
+      continue;
+    }
+    let displacedTo: string | undefined;
     try {
       const st = lstatSync(link.from);
-      if (st.isSymbolicLink() && readlinkSync(link.from) === link.to) continue; // already correct
-      // Something occupies the slot but points at the WRONG target (a stale
-      // symlink from a moved real HOME, or leftover debris) — clear it so the
-      // create below can self-heal rather than silently no-op on EEXIST.
-      unlinkSync(link.from);
+      if (st.isSymbolicLink() && readlinkSync(link.from) === link.to) {
+        outcomes.push({ relFrom, to: link.to, state: "already" });
+        continue; // already correct
+      }
+      if (st.isDirectory() && !st.isSymbolicLink()) {
+        // A REAL DIRECTORY IN THE SLOT. `unlinkSync` cannot remove one, and the `symlinkSync`
+        // below then throws EEXIST — so before this, the directory won PERMANENTLY and silently.
+        // MEASURED in the Azure container: `worker-home-usage-probe/.claude` was a directory, the
+        // usage probe therefore ran LOGGED OUT, and 33 of 33 probes read `stage: "parse"` against
+        // a 207-byte cost summary instead of the account panel. Re-materialisation did not heal it.
+        //
+        // MOVED ASIDE, NOT DELETED, and the choice is argued rather than assumed:
+        //   - RECURSIVE REMOVAL would work and is defensible — a worker home is machine-owned
+        //     scratch this function creates, so nothing user-authored lives here. It is rejected
+        //     because the directory is written BY THE CLI WE ARE GRANTING TO (it creates `.claude`
+        //     when HOME is redirected and the grant is missing), and it is the only evidence of
+        //     what poisoned the slot. This defect went undiagnosed precisely because there was no
+        //     evidence; deleting it would rebuild that condition.
+        //   - REFUSING LOUDLY is rejected: it converts a recoverable, self-healing state into a
+        //     hard spawn failure on every host that has one, which is strictly worse than the
+        //     silent degradation it replaces.
+        // `rename` is atomic and the suffix is unique, so two workers racing the same shared home
+        // cannot collide.
+        displacedTo = `${link.from}.displaced-${Date.now()}-${randomBytes(3).toString("hex")}`;
+        renameSync(link.from, displacedTo);
+      } else {
+        // Something occupies the slot but points at the WRONG target (a stale
+        // symlink from a moved real HOME, or leftover debris) — clear it so the
+        // create below can self-heal rather than silently no-op on EEXIST.
+        unlinkSync(link.from);
+      }
     } catch {
-      // does not exist yet (or wasn't removable, e.g. a real directory) — fall
-      // through to the create attempt below regardless.
+      // does not exist yet (or could not be cleared) — fall through to the create
+      // attempt below regardless, which is what reports the real outcome.
     }
     mkdirSync(dirname(link.from), { recursive: true });
     try {
       symlinkSync(link.to, link.from);
-    } catch {
-      // Racing another worker materializing the same shared worker-home, or
-      // debris that could not be cleared above — best-effort, never fatal to
-      // isolation itself (the rc files above are what actually isolate).
+      outcomes.push(
+        displacedTo
+          ? { relFrom, to: link.to, state: "displaced", displacedTo }
+          : { relFrom, to: link.to, state: "linked" },
+      );
+    } catch (e) {
+      // Racing another worker materializing the same shared worker-home, or debris that could
+      // not be cleared above — still never fatal to isolation itself (the rc files above are
+      // what actually isolate). But it is NO LONGER SILENT: the target exists and we failed to
+      // reach it, which is a lost capability, not an optional grant declined.
+      outcomes.push({
+        relFrom,
+        to: link.to,
+        state: "failed",
+        reason: String((e as Error)?.message ?? e),
+        ...(displacedTo ? { displacedTo } : {}),
+      });
     }
   }
 
-  return plan;
+  return { ...plan, outcomes };
 }
 
 // ── W1-T170: per-run/per-spawn worker HOMES (the singleton does not survive concurrency) ──

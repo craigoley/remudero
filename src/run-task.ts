@@ -9358,7 +9358,7 @@ const defaultUsageProbeRunner: UsageProbeRunner = (bin, argv, opts) => execFileS
  * be understood, which is a completely different problem with a completely different fix, and
  * conflating the two is what cost this fleet its headroom read for hours on 2026-07-31.
  */
-export type UsageProbeFailureStage = "spawn" | "parse";
+export type UsageProbeFailureStage = "spawn" | "parse" | "grant";
 
 /** Injected sink for that failure — the real caller gets {@link ledgerUsageProbeFailure}. */
 export type UsageProbeFailureSink = (stage: UsageProbeFailureStage, reason: string) => void;
@@ -9430,7 +9430,18 @@ export function readUsageSnapshot(
     // directory rather than littering `worker-home-*` siblings on every tick.
     const workerHome = perRunWorkerHomeDir(workerHomeDir(config), "usage-probe");
     const workerKeychainPath = workerKeychainPaths(join(config.root, "state")).keychainPath;
-    materializeWorkerHome({ workerHome, realHome, workerKeychainPath });
+    const home = materializeWorkerHome({ workerHome, realHome, workerKeychainPath });
+    // A grant that FAILED is not a grant that was OPTIONAL. The absent-target skip stays silent
+    // (several grants are legitimately unavailable), but a target that EXISTS and could not be
+    // reached is a lost capability — and it is why this probe read `stage: "parse"` 33 times out
+    // of 33 in the Azure container: a real `.claude` DIRECTORY occupied the symlink slot, so
+    // `claude -p "/usage"` ran LOGGED OUT and emitted a 207-byte cost summary with no account
+    // panel to parse. `displaced` is reported too: the slot HEALED, and a heal that goes
+    // unrecorded is how a poisoned slot survived days of re-materialisation unnoticed.
+    for (const g of home.outcomes ?? []) {
+      if (g.state === "failed") onUnreadable("grant", `${g.relFrom} -> ${g.to}: ${g.reason ?? "unknown"}`);
+      else if (g.state === "displaced") onUnreadable("grant", `${g.relFrom}: real directory displaced to ${g.displacedTo}`);
+    }
 
     const env = buildWorkerEnv({}, process.env, {
       zdotdir: workerZdotdir(config),
