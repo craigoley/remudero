@@ -199,6 +199,7 @@ import {
   currentBranch,
   DEFAULT_BIND_ATTEMPTS,
   DEFAULT_BIND_RETRY_MS,
+  DEFAULT_SERVE_PORT,
   ensureLogFileMode,
   listenWithReapWait,
   offMainNotice,
@@ -209,6 +210,7 @@ import {
   SERVE_EXPECTED_BRANCH,
   serviceTokensPath,
 } from "./lib/serve.js";
+import { runRelayClient } from "./lib/relay-client.js";
 import { consoleUrlCommand, defaultIsListening } from "./lib/console-url.js";
 import { assertProposedPlanLoads,
   buildGrillEscalation,
@@ -12637,6 +12639,64 @@ export async function serveCommand(
   return 0;
 }
 
+// ── rmd relay — the Tier-2 relay CLIENT (W1-T431, MASTER-PLAN §7A/§6A, D-11) ──
+//
+// This is the CLI glue only: it reads the relay URL + enrollment token from per-instance
+// config (never argv, design note i), resolves the LOCAL console surface's own base URL the
+// SAME way `rmd serve` resolves its own bind port (config.serve.port, else DEFAULT_SERVE_PORT),
+// and hands both to `runRelayClient` (lib/relay-client.ts) — the pure, testable module that
+// actually dials out, authenticates, and forwards. `rmd relay` is a SEPARATE process from
+// `rmd serve`: nothing here touches serve's listener, so serve keeps working unchanged whether
+// or not this command is ever run (design note iii).
+
+/**
+ * `rmd relay` — dial OUT to the configured relay and hold a reconnecting tunnel that forwards
+ * the local console surface (REST + SSE) as a transparent byte proxy. Blocks until SIGINT/
+ * SIGTERM, matching `rmd serve`'s own shape. Exits 2 (spawns nothing) when `config.relay.url`
+ * or `config.relay.token` is absent — a relay is opt-in per instance, and a half-configured one
+ * fails loud rather than silently doing nothing forever.
+ */
+export async function relayConnectCommand(rest: string[]): Promise<number> {
+  const badArg = unknownArgError("relay", rest, [], []);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+
+  const config = loadConfig();
+  const relayUrl = config.relay?.url;
+  const enrollmentToken = config.relay?.token;
+  if (!relayUrl || !enrollmentToken) {
+    console.error(
+      "### rmd relay — no relay configured. Set both `relay.url` and `relay.token` in " +
+        `${instanceConfigPath()} (design note iv: a short-lived token pasted from the relay's ` +
+        "UI) before running \`rmd relay\`.",
+    );
+    return 2;
+  }
+
+  const localBaseUrl = `http://127.0.0.1:${config.serve?.port ?? DEFAULT_SERVE_PORT}`;
+  const ledgerPath = ledgerPathFor(config);
+  const runId = `RELAY-${Date.now()}`;
+  const log = (step: string, extra: Record<string, unknown> = {}) =>
+    appendLedger(ledgerPath, { run_id: runId, task_id: "RELAY", step, ...extra });
+
+  console.log(`### rmd relay — dialing ${relayUrl}, forwarding to ${localBaseUrl}`);
+  log("relay.start", { relayUrl, localBaseUrl });
+  const client = runRelayClient({ relayUrl, enrollmentToken, localBaseUrl, log });
+
+  await new Promise<void>((resolve) => {
+    const shutdown = () => {
+      log("relay.stop", {});
+      client.stop();
+      resolve();
+    };
+    process.once("SIGINT", shutdown);
+    process.once("SIGTERM", shutdown);
+  });
+  return 0;
+}
+
 // ── rmd sweep — the level-triggered PR-pipeline reconciler (W1-T77, P22 core) ──
 //
 // The deterministic core (predicate + orchestration + idempotence) lives in
@@ -17665,6 +17725,11 @@ const COMMANDS: readonly CommandSpec[] = [
       "rmd serve [--port <n>] [--host <addr>]   # the operator console FRONT DOOR (W1-T139, MASTER-PLAN §7/§7B): one HTTP surface (service.ts) serving the live board (board.ts), fleet-control + question/manual-approve write actions (panel-actions.ts), the feedback inbox + plan→task→PR graph (panel-graph.ts), and a minimal HTML shell at GET /; bearer tokens are generated on first run and persisted 0600 under <config.root>/state/service-tokens.json, and rotate by stopping serve, deleting that file, and starting again; the startup banner prints the READ token only (a bookmark grants view, not control) and never the write token, because stdout is commonly redirected to a log; --port defaults to 4317 (matches apps/dashboard's own default); --host defaults to 127.0.0.1, also reads RMD_SERVE_HOST, accepts a COMMA-SEPARATED list so the console can be reachable locally AND from the phone (e.g. 127.0.0.1,<tailnet-ip>), and REFUSES wildcards like 0.0.0.0 anywhere in that list; blocks until SIGINT/SIGTERM",
   },
   {
+    name: "relay",
+    usage:
+      "rmd relay   # W1-T431: the Tier-2 relay CLIENT (MASTER-PLAN §7A/§6A, D-11) — dials OUT to the relay URL + enrollment token in per-instance config (relay.url/relay.token; never a flag, never committed) and holds a reconnecting tunnel that forwards the LOCAL rmd serve surface (REST + SSE) as a transparent byte proxy, adding no scope of its own (the console's own W1-T430 identity seam decides every grant, exactly as a direct call would). Never binds a port — outbound-only, tested invariant. Refuses (spawns nothing) when relay.url or relay.token is absent. Blocks until SIGINT/SIGTERM, same shape as `rmd serve`; `rmd serve` is a separate process and is completely unaffected whether or not this ever runs.",
+  },
+  {
     name: "console-url",
     usage:
       "rmd console-url [--port <n>] [--host <addr>] [--write]   # print the console URL carrying the READ token — the bookmark that gets you in, one command instead of hand-extracting <config.root>/state/service-tokens.json (fb-1784772988510-da3712); prints one URL per bound interface, resolving port/host EXACTLY as `rmd serve` does (flag > RMD_SERVE_HOST > config.serve.* > 127.0.0.1:4317); --write additionally prints the WRITE token as a bare value to paste into the console (never in a URL), and REFUSES unless stdout is a TTY, because a redirected stdout becomes a file that outlives the process (R-5); reads the 0600 tokens file but never creates one — if the console has never run it says so and names the remedy; spawns nothing",
@@ -18207,6 +18272,9 @@ export async function main(
   }
   if (cmd === "serve") {
     process.exit(await serveCommand(rest));
+  }
+  if (cmd === "relay") {
+    process.exit(await relayConnectCommand(rest));
   }
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(await consoleUrlCommand(rest, loadConfig())) cannot carry a DA hit without forking the process; consoleUrlCommand's own logic — the URL assembly, the --write TTY refusal, and all three failure modes — is unit-tested in test/console-url.test.ts (same irreducible-glue shape as the sibling away/pause/resume dispatch cases).
   if (cmd === "console-url") {
