@@ -44,6 +44,7 @@
  * `sweepOrphanWorkers` (orphan-sweep path) — an unattributable process is
  * reported, never signalled, no matter how suspicious it looks.
  */
+import { accessSync, constants as fsConstants, existsSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
 import type { SpawnedProcess as SdkSpawnedProcess } from "@anthropic-ai/claude-agent-sdk";
 
@@ -75,16 +76,78 @@ export interface ContainedProcess {
   pid: number;
 }
 
+/** Longest args excerpt {@link describeSpawnTarget} will put on a throw. The
+ *  worker's prompt travels over STDIN, not argv, so argv here is CLI flags and
+ *  is normally far shorter — the cap exists so a future caller that does pass
+ *  something large cannot turn one failed spawn into a multi-megabyte ledger
+ *  row, not because anything today approaches it. */
+export const SPAWN_TARGET_ARGS_EXCERPT_MAX = 240;
+
+/**
+ * The SYNCHRONOUS half of a no-pid diagnosis: everything that IS in hand at
+ * throw time, in one line fit for an error message.
+ *
+ * `exists`/`executable` are probed LIVE against `command` rather than trusted
+ * from whatever resolved it, because the gap between "resolved once, minutes or
+ * hours ago" and "exists now" is precisely the failure this is meant to make
+ * legible — a per-process memo of a path that has since been swapped out is
+ * indistinguishable, on the evidence the ledger used to carry, from a transient
+ * resource exhaustion.
+ *
+ * `opts.env` IS DELIBERATELY ABSENT AND MUST STAY ABSENT: it is the billing
+ * boundary and carries credentials. Only command, args and cwd are named.
+ */
+export function describeSpawnTarget(opts: ContainedSpawnOptions): string {
+  const args = opts.args.join(" ");
+  const argsExcerpt =
+    args.length > SPAWN_TARGET_ARGS_EXCERPT_MAX ? `${args.slice(0, SPAWN_TARGET_ARGS_EXCERPT_MAX)}…` : args;
+  return [
+    `command=${opts.command}`,
+    `exists=${commandExists(opts.command)}`,
+    `executable=${commandExecutable(opts.command)}`,
+    `cwd=${opts.cwd ?? "<inherited>"}`,
+    `args=[${argsExcerpt}]`,
+  ].join(" ");
+}
+
+/** Does `command` exist on disk right now? A bare name (resolved via PATH by
+ *  the OS, never by us) is reported `unresolved` rather than a misleading
+ *  `false` — W1-T119: a probe that could not look is not a probe that said no. */
+export function commandExists(command: string): string {
+  if (!command.includes("/")) return "unresolved";
+  // No try/catch: `existsSync` answers false rather than throwing, even for an
+  // unrepresentable path (verified against a NUL-bearing string). A catch arm
+  // here would be dead code that no falsifier could redden.
+  return String(existsSync(command));
+}
+
+/** Is `command` executable by this process right now? Same `unresolved`
+ *  discipline as {@link commandExists} for a bare, PATH-resolved name. */
+export function commandExecutable(command: string): string {
+  if (!command.includes("/")) return "unresolved";
+  try {
+    accessSync(command, fsConstants.X_OK);
+    return "true";
+  } catch {
+    return "false";
+  }
+}
+
 /**
  * Spawn `opts.command` DETACHED into its own process group/session (see file
  * header) and pipe its stderr into `onStderr` — replicating the SDK's own
  * default-spawn stderr wiring, which a custom `spawnClaudeCodeProcess` does
  * not get for free. Returns the real `ChildProcess` (already
  * `SpawnedProcess`-shaped, per the SDK's own doc comment) plus its pid.
+ *
+ * `onSpawnError` is the ASYNCHRONOUS half of the W1-T442 diagnosis and is
+ * appended LAST so no positional caller shifts. It is optional, and an omitting
+ * caller behaves exactly as before this existed.
  */
 export function spawnDetachedGroup(
   opts: ContainedSpawnOptions,
   onStderr?: (chunk: string) => void,
+  onSpawnError?: (err: NodeJS.ErrnoException) => void,
 ): ContainedProcess {
   const child = spawn(opts.command, opts.args, {
     cwd: opts.cwd,
@@ -99,7 +162,20 @@ export function spawnDetachedGroup(
   // treats that as an uncaught exception (crashing the caller's process)
   // rather than the ordinary, already-surfaced failure it is. Attached
   // UNCONDITIONALLY, before the pid check, so this holds on every path.
-  child.on("error", () => {});
+  //
+  // W1-T442: it now takes the ERROR OBJECT rather than dropping it. The errno
+  // that explains the failure (ENOENT / EAGAIN / EMFILE / EACCES) arrives ONLY
+  // here — the throw below cannot carry it, because this event fires after the
+  // throw has already unwound. A sink that throws is swallowed: a diagnostic
+  // must never become the crash it exists to explain, and re-throwing from an
+  // 'error' listener is an uncaught exception by another name.
+  child.on("error", (err: NodeJS.ErrnoException) => {
+    try {
+      onSpawnError?.(err);
+    } catch {
+      /* a diagnostic sink must never become the crash it exists to explain */
+    }
+  });
   if (onStderr) {
     child.stderr?.on("data", (chunk: Buffer) => onStderr(chunk.toString("utf8")));
   }
@@ -109,7 +185,14 @@ export function spawnDetachedGroup(
     // event instead; without a pid there is nothing for teardown to track,
     // so this fails loud immediately rather than handing back an untracked
     // handle.
-    throw new Error("spawnDetachedGroup: child process has no pid (spawn failed synchronously)");
+    //
+    // W1-T442: what IS in hand synchronously goes on the message. The live
+    // exists/executable probe is one `stat` and it is the DECISIVE bit: a
+    // command that has VANISHED separates a stale resolved path from a
+    // transient resource failure (EAGAIN/EMFILE), which is exactly the
+    // distinction two events ten hours apart could not be read for. NEVER
+    // `opts.env` — that is the billing boundary and carries credentials.
+    throw new Error(`spawnDetachedGroup: child process has no pid (spawn failed synchronously) — ${describeSpawnTarget(opts)}`);
   }
   // `stdio: ["pipe","pipe","pipe"]` above GUARANTEES stdin/stdout/stderr are
   // real streams, never null (null only happens for "inherit"/"ignore"/an fd
@@ -233,12 +316,14 @@ export function buildContainedSpawnFn(
   spawnContained: (
     opts: ContainedSpawnOptions,
     onStderr?: (chunk: string) => void,
+    onSpawnError?: (err: NodeJS.ErrnoException) => void,
   ) => ContainedProcess,
   onStderr: (chunk: string) => void,
   pidRef: { pid?: number },
+  onSpawnError?: (err: NodeJS.ErrnoException) => void,
 ): (spawnOpts: ContainedSpawnOptions) => SdkSpawnedProcess {
   return (spawnOpts) => {
-    const spawned = spawnContained(spawnOpts, onStderr);
+    const spawned = spawnContained(spawnOpts, onStderr, onSpawnError);
     pidRef.pid = spawned.pid;
     return spawned.process;
   };

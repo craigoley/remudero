@@ -696,9 +696,32 @@ export interface SpawnWorkerArgs {
    * provable without a real `claude` binary.
    */
   containment?: {
-    spawn?: (opts: ContainedSpawnOptions, onStderr?: (chunk: string) => void) => ContainedProcess;
+    spawn?: (
+      opts: ContainedSpawnOptions,
+      onStderr?: (chunk: string) => void,
+      onSpawnError?: (err: NodeJS.ErrnoException) => void,
+    ) => ContainedProcess;
     teardown?: (pgid: number) => void;
   };
+  /**
+   * W1-T442: sink for a spawn's ASYNCHRONOUS 'error' event — the only place the
+   * errno (ENOENT / EAGAIN / EMFILE / EACCES) ever appears, since the no-pid
+   * throw unwinds before the event fires.
+   *
+   * A CALLBACK RATHER THAN A MUTABLE HOLDER THE CALLER READS AFTER CATCHING,
+   * and the reason is a race, not taste: the event may not have fired when the
+   * catch runs, so a holder is read too early exactly when the spawn failed
+   * fastest. A callback fires WHEN THE ERROR DOES rather than when the caller
+   * happens to look, which is correct regardless of ordering.
+   *
+   * It is wired HERE and destined for the ledger in `run-task.ts`, because
+   * worker.ts cannot reach the ledger: `ledgerPathFor` lives in run-task.ts,
+   * run-task.ts already imports this module, and re-spelling
+   * `join(config.root, "state", "ledger.ndjson")` here would undo the
+   * consolidation that function's own doc records. Omitted ⇒ the error is
+   * swallowed exactly as it was before this existed.
+   */
+  onSpawnError?: (err: NodeJS.ErrnoException) => void;
   /**
    * W1-T117 injectable seam: override the SDK's own `query()` entry point —
    * same injection convention as every other seam above. Omitted ⇒ the real
@@ -874,7 +897,12 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       // from THIS closure (via buildContainedSpawnFn's onStderr sink), not
       // from an `Options.stderr` callback here — the SDK never invokes one for
       // a custom spawn (see the file-header note in worker-containment.ts).
-      spawnClaudeCodeProcess: buildContainedSpawnFn(spawnContained, (chunk) => stderrChunks.push(chunk), pidRef),
+      spawnClaudeCodeProcess: buildContainedSpawnFn(
+        spawnContained,
+        (chunk) => stderrChunks.push(chunk),
+        pidRef,
+        args.onSpawnError,
+      ),
     };
     if (args.resumeSessionId) options.resume = args.resumeSessionId;
     if (args.model) options.model = args.model;
