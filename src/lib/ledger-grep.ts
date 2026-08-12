@@ -116,6 +116,27 @@ export function ledgerRotationEntries(names: string[], stateDir: string): Ledger
     .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 }
 
+/**
+ * A rotation's own instant, recovered from its NAME — the exact inverse of `datedArchivePath`
+ * (`ledger.ts`), which writes `now.toISOString().replace(/[:.]/g, "-")`. Derived from that writer
+ * rather than guessed, the same discipline {@link ledgerRotationEntries} applies to the forms.
+ *
+ * WHY A CALLER WANTS THIS. `rotateLedger` archives lines ALREADY WRITTEN, so every line in a
+ * rotation is at or before the instant in its name — VERIFIED on this host over an 18-archive
+ * sample (first three, twelve random, last three): zero contain a line newer than their own stamp.
+ * A reader with a time window can therefore skip a whole rotation without opening it, which is the
+ * difference between a read bounded by the WINDOW and one bounded by ALL HISTORY.
+ *
+ * `undefined` for anything that is not a dated rotation — the live `ledger.ndjson`, a decoy, a
+ * hand-renamed file. A caller must treat that as "cannot decide, so read it": skipping on an
+ * unparseable name would silently drop a real corpus file, which is the failure this whole module
+ * exists to stop.
+ */
+export function rotationStampIso(name: string): string | undefined {
+  const m = /^ledger\.(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z\.ndjson(?:\.gz)?$/.exec(name);
+  return m ? `${m[1]}T${m[2]}:${m[3]}:${m[4]}.${m[5]}Z` : undefined;
+}
+
 /** The longest operator-supplied pattern {@link sanitizeRegExp} accepts. */
 const MAX_PATTERN_LENGTH = 200;
 

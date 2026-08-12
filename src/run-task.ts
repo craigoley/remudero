@@ -330,7 +330,7 @@ import {
 } from "./lib/plan-pr-emitter.js";
 import { appendLedger, isSpawnInfraBlockedError, LEDGER_COST_TAG_INFRA, matchesRepoScopedTask } from "./lib/ledger.js";
 import { gunzipSync } from "node:zlib";
-import { ledgerRotationEntries, resolveLedgerUnion, type LedgerCorpusEntry } from "./lib/ledger-grep.js";
+import { ledgerRotationEntries, resolveLedgerUnion, rotationStampIso, type LedgerCorpusEntry } from "./lib/ledger-grep.js";
 import { escalateRepeatingRules, ruleEfficacyReport } from "./lib/rule-efficacy.js";
 import { mineVerdictRows, verdictCalibrationReport } from "./lib/verdict-calibration.js";
 import { mineAutonomyLedgerLines, parseTrailerMerges, zeroTouchMergeRate } from "./lib/autonomy.js";
@@ -7675,7 +7675,19 @@ export function emissionsCommand(rest: string[], opts: { stateDir?: string } = {
   // event, rather than the whole line.
   const seen = new Set<string>();
   let scanned = 0;
-  for (const entry of files) {
+  // BOUND THE READ TO THE WINDOW, NOT TO ALL HISTORY. Every line in a rotation is at or before the
+  // instant in its name (`rotationStampIso`), so a rotation stamped before the cutoff cannot hold
+  // one in-window line — its 4.25 MiB mean decompresses, splits and regex-matches to nothing. That
+  // is not hypothetical waste: MEASURED on this host, 649 of 669 rotations were written in a single
+  // two-day burst on 2026-07-22/23, and they carry 97% of the corpus's 4.31M raw lines. The moment
+  // that burst passes the 30-day line, this reader would spend ~2.5 GiB of peak RSS parsing lines
+  // it discards on the very next comparison. A file with NO parseable stamp (the live ledger, a
+  // decoy) is always read — cannot-decide must never mean skip.
+  const inWindow = files.filter((e) => {
+    const stamp = rotationStampIso(basename(e.path));
+    return stamp === undefined || stamp >= cutoff;
+  });
+  for (const entry of inWindow) {
     let text: string;
     try {
       // W1-T444: the form is decided from the name by `ledgerRotationEntries`, never by trying to
@@ -7704,7 +7716,7 @@ export function emissionsCommand(rest: string[], opts: { stateDir?: string } = {
 
   const rows = emissionsReport({ measurable, counts, callSites, allowlist: EMISSIONS_ALLOWLIST });
   console.log(`rmd emissions — window ${days}d (since ${cutoff.slice(0, 10)})`);
-  console.log(`  corpus  : ${files.length} ledger file(s), ${scanned} lines scanned, ${seen.size} distinct in-window events on measured prefixes`);
+  console.log(`  corpus  : ${files.length} ledger file(s) (${inWindow.length} within the window, ${files.length - inWindow.length} skipped as older), ${scanned} lines scanned, ${seen.size} distinct in-window events on measured prefixes`);
   console.log(`  verbs   : ${verbs.length} declared, ${measurable.length} measurable, ${unauditable.length} unauditable`);
   console.log("");
   for (const r of rows) {

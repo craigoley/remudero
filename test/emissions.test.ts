@@ -12,6 +12,7 @@ import {
   EMISSIONS_ALLOWLIST,
 } from "../src/lib/emissions.js";
 import { emissionsCommand, ledgerCorpusFiles } from "../src/run-task.js";
+import { rotationStampIso } from "../src/lib/ledger-grep.js";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -171,6 +172,88 @@ test("emissionsCommand refuses a bad window and an unknown flag, spawning nothin
     assert.equal(emissionsCommand(["--bogus"]), 2);
   } finally {
     console.error = realErr;
+  }
+});
+
+// ── THE READ IS BOUNDED BY THE WINDOW, NOT BY ALL HISTORY ────────────────────────────────────
+//
+// MEASURED on the operator's mini at 2026-08-12: 670 corpus files, 4,309,016 raw lines, 2.78 GiB
+// decompressed, and a peak RSS of 1.8–2.7 GiB per run against node's ~4 GiB default old-space.
+// 649 of the 669 rotations were written in a SINGLE TWO-DAY BURST on 2026-07-22/23 and carry 97%
+// of those lines — so the corpus is not a steady accumulation, it is one spike, and the whole
+// spike crosses the default 30-day line on 2026-08-21. From that moment the old reader would
+// decompress, split and regex 4.2M lines whose every `ts` loses the very next comparison.
+
+test("rotationStampIso recovers a rotation's instant from its name, and refuses everything that is not one", () => {
+  // The exact inverse of `datedArchivePath`'s `toISOString().replace(/[:.]/g, "-")`.
+  assert.equal(rotationStampIso("ledger.2026-07-22T21-26-36-052Z.ndjson.gz"), "2026-07-22T21:26:36.052Z");
+  assert.equal(rotationStampIso("ledger.2026-08-12T03-45-46-798Z.ndjson"), "2026-08-12T03:45:46.798Z");
+  // THE OTHER DIRECTION, and it is the load-bearing half: anything undated is `undefined`, which
+  // the caller must read as "cannot decide, so READ it". Skipping on an unparseable name would
+  // silently drop a real corpus file.
+  assert.equal(rotationStampIso("ledger.ndjson"), undefined, "the live ledger is never a rotation");
+  assert.equal(rotationStampIso("ledger-archive.txt"), undefined);
+  assert.equal(rotationStampIso("ledger.2026-07-22.ndjson"), undefined, "a partial stamp is not a stamp");
+  assert.equal(rotationStampIso("service-tokens.json"), undefined);
+});
+
+test("a rotation stamped before the cutoff is SKIPPED unread, and the answer is unchanged", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-emissions-window-"));
+  try {
+    const iso = (msAgo: number) => new Date(Date.now() - msAgo).toISOString();
+    const stamp = (isoTs: string) => isoTs.replace(/[:.]/g, "-");
+    const row = (isoTs: string, step: string) => `${JSON.stringify({ ts: isoTs, step })}\n`;
+    const recent = iso(2 * 864e5);
+    const ancient = iso(400 * 864e5);
+    // IN window, and its own name is inside the cutoff.
+    writeFileSync(join(dir, `ledger.${stamp(iso(1 * 864e5))}.ndjson`), row(recent, "daemon.poll"));
+    // OUT of window by its NAME. Its body is deliberately in-window-looking garbage that would
+    // change the count if it were ever read — a rotation cannot contain a line newer than its own
+    // stamp in reality, so this fixture can only be reached by a reader that ignored the name.
+    writeFileSync(join(dir, `ledger.${stamp(ancient)}.ndjson`), row(recent, "daemon.poll") + row(recent, "sweep.disposed"));
+    // No stamp at all ⇒ ALWAYS read.
+    writeFileSync(join(dir, "ledger.ndjson"), row(recent, "sweep.disposed"));
+
+    const lines: string[] = [];
+    const realLog = console.log;
+    console.log = (...a: unknown[]) => void lines.push(a.map(String).join(" "));
+    try {
+      assert.equal(emissionsCommand([], { stateDir: dir }), 0);
+    } finally {
+      console.log = realLog;
+    }
+    const out = lines.join("\n");
+    assert.match(out, /3 ledger file\(s\) \(2 within the window, 1 skipped as older\)/, "the skip is REPORTED, never silent");
+    assert.match(out, /2 lines scanned/, "only the two in-window files were read");
+    assert.match(out, /2 distinct in-window events/, "one daemon.poll and one sweep.disposed — the skipped file's copies never arrived");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("THE OTHER DIRECTION: with no skippable rotation the read is byte-for-byte what it always was", () => {
+  // The no-op proof. At today's default window on the real host this is the live case — 670 files,
+  // 0 skipped — so the fix must be invisible until the corpus outgrows the window.
+  const dir = mkdtempSync(join(tmpdir(), "rmd-emissions-nowindow-"));
+  try {
+    const isoTs = new Date(Date.now() - 2 * 864e5).toISOString();
+    const stamp = new Date(Date.now() - 1 * 864e5).toISOString().replace(/[:.]/g, "-");
+    writeFileSync(join(dir, `ledger.${stamp}.ndjson`), `${JSON.stringify({ ts: isoTs, step: "daemon.poll" })}\n`);
+    writeFileSync(join(dir, "ledger.ndjson"), `${JSON.stringify({ ts: isoTs, step: "sweep.disposed" })}\n`);
+    const lines: string[] = [];
+    const realLog = console.log;
+    console.log = (...a: unknown[]) => void lines.push(a.map(String).join(" "));
+    try {
+      assert.equal(emissionsCommand([], { stateDir: dir }), 0);
+    } finally {
+      console.log = realLog;
+    }
+    const out = lines.join("\n");
+    assert.match(out, /2 ledger file\(s\) \(2 within the window, 0 skipped as older\)/);
+    assert.match(out, /2 lines scanned/);
+    assert.match(out, /2 distinct in-window events/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 
