@@ -1,0 +1,17 @@
+# Fixture plan (W1-T409) -- a minimal, throwaway id set for test/plan-state-claims.test.ts.
+# Split across this file and the sibling tasks.d/shard.yaml shard on purpose: loadPlan (lib/plan.ts)
+# merges both, and this fixture proves the runner resolves a compressed-pair short-form id against
+# the MERGED set, not just the monolith.
+
+- id: W1-T145
+  title: "fixture: layered knowledge"
+  repo: remudero
+  type: implement
+- id: W1-T146
+  title: "fixture: governor pair"
+  repo: remudero
+  type: implement
+- id: W1-T202
+  title: "fixture: unrelated not-shipped subject"
+  repo: remudero
+  type: implement

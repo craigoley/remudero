@@ -1,0 +1,10 @@
+# Fixture plan shard (W1-T409) -- see the sibling tasks.yaml's header for why this is split.
+
+- id: W1-T148
+  title: "fixture: sweep reconciler"
+  repo: remudero
+  type: implement
+- id: W1-T149
+  title: "fixture: sibling-run credit liveness"
+  repo: remudero
+  type: implement
