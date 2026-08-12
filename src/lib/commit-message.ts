@@ -123,9 +123,35 @@ export function wrapBodyLines(text: string, max: number = CONVENTIONAL_LIMITS.bo
  *  mirrors (`@commitlint/config-conventional`) so a failure reads the same way here as it
  *  would in a CI log. */
 export interface CommitMessageViolation {
-  rule: "header-max-length" | "subject-case" | "body-max-line-length";
+  rule:
+    | "header-max-length"
+    | "header-trim"
+    | "type-empty"
+    | "type-enum"
+    | "subject-empty"
+    | "subject-case"
+    | "subject-full-stop"
+    | "body-max-line-length";
   message: string;
 }
+
+/** The eleven values `@commitlint/config-conventional`'s `type-enum` rule accepts — read
+ *  out of the installed package (node_modules/@commitlint/config-conventional/lib/index.js),
+ *  not the README, so a version bump that changes the list fails {@link EMITTER_COMMITLINT_PARITY}
+ *  rather than silently diverging here. */
+const CONVENTIONAL_TYPES = [
+  "build",
+  "chore",
+  "ci",
+  "docs",
+  "feat",
+  "fix",
+  "perf",
+  "refactor",
+  "revert",
+  "style",
+  "test",
+] as const;
 
 /**
  * Check a FULL commit message (header, blank line, body) against the same rules
@@ -139,9 +165,15 @@ export interface CommitMessageViolation {
  * typed. This function reuses the SAME limits and the SAME `normalizeSubjectCase` rule
  * (never restates them) so the hand lane and the emitter lane cannot drift apart.
  *
+ * W1-T416: covers EIGHT of `@commitlint/config-conventional`'s TEN error-level rules
+ * directly — see {@link CONVENTIONAL_RULE_COVERAGE} for the full table, including the two
+ * (`type-case`, `footer-max-line-length`) deliberately left to the mechanisms documented
+ * there rather than re-implemented. {@link EMITTER_COMMITLINT_PARITY}
+ * (test/commit-message.test.ts) is what proves this table stays true, not this comment.
+ *
  * Returns one {@link CommitMessageViolation} per broken rule, empty when the message is
  * clean. Never throws — an unparseable header (no `type: subject` shape at all) is
- * reported as a subject-case violation against the whole header rather than crashing the
+ * reported as a type-empty violation against the whole header rather than crashing the
  * caller, since the caller's whole point is to run to completion and name every problem.
  */
 export function checkCommitMessage(
@@ -159,17 +191,55 @@ export function checkCommitMessage(
     });
   }
 
-  // `type(scope): subject` — subject is everything after the FIRST "type(scope):" colon,
-  // matching commitlint's own header-parser split. An unparseable header (no colon at
-  // all) falls back to checking the whole header as the "subject", since that is exactly
-  // what commitlint's subject-case rule would also trip on.
-  const match = header.match(/^[a-z][a-z0-9-]*(?:\([^)]*\))?!?:\s*(.*)$/);
-  const subject = match ? match[1] : header;
-  if (subject !== "" && normalizeSubjectCase(subject) !== subject) {
+  // header-trim — leading or trailing whitespace on the header line, checked against the
+  // RAW header before any trimming, since trimming it away would hide the very thing this
+  // rule exists to catch.
+  if (header !== "" && header.trim() !== header) {
     violations.push({
-      rule: "subject-case",
-      message: `subject does not start lower-case: ${JSON.stringify(subject)}`,
+      rule: "header-trim",
+      message: `header has leading or trailing whitespace: ${JSON.stringify(header)}`,
     });
+  }
+
+  // `type(scope): subject` — type and subject are captured separately, matching
+  // commitlint's own header-parser split. An unparseable header (no `type:` prefix at
+  // all, or a type that fails the lower-case anchor — a capitalised type is `type-case`,
+  // left to this fallback rather than re-implemented, see CONVENTIONAL_RULE_COVERAGE)
+  // falls back to type-empty plus checking the whole header as the subject.
+  const match = header.match(/^([a-z][a-z0-9-]*)(?:\([^)]*\))?!?:\s*(.*)$/);
+  const type = match ? match[1] : "";
+  const subject = (match ? match[2] : header).trim();
+
+  if (type === "") {
+    violations.push({
+      rule: "type-empty",
+      message: `no "type:" prefix found on the header: ${JSON.stringify(header)}`,
+    });
+  } else if (!(CONVENTIONAL_TYPES as readonly string[]).includes(type)) {
+    violations.push({
+      rule: "type-enum",
+      message: `type ${JSON.stringify(type)} is not one of [${CONVENTIONAL_TYPES.join(", ")}]`,
+    });
+  }
+
+  if (subject === "") {
+    violations.push({
+      rule: "subject-empty",
+      message: `nothing follows the "type(scope):" prefix: ${JSON.stringify(header)}`,
+    });
+  } else {
+    if (normalizeSubjectCase(subject) !== subject) {
+      violations.push({
+        rule: "subject-case",
+        message: `subject does not start lower-case: ${JSON.stringify(subject)}`,
+      });
+    }
+    if (subject.endsWith(".") && !subject.endsWith("...")) {
+      violations.push({
+        rule: "subject-full-stop",
+        message: `subject ends with a full stop: ${JSON.stringify(subject)}`,
+      });
+    }
   }
 
   for (const line of lines.slice(1)) {
@@ -183,6 +253,56 @@ export function checkCommitMessage(
 
   return violations;
 }
+
+/** One `@commitlint/config-conventional` error-level rule's coverage status in this module. */
+export type RuleCoverageStatus = "checked" | "incidental";
+
+export interface RuleCoverageEntry {
+  /** The commitlint rule id, exactly as `@commitlint/config-conventional` names it. */
+  rule: string;
+  /** "checked" — {@link checkCommitMessage} tests this rule directly. "incidental" — NOT
+   *  re-implemented; a different check in this module happens to reject the same messages,
+   *  named so a reader does not mistake the absence for a gap. */
+  status: RuleCoverageStatus;
+  note: string;
+}
+
+/**
+ * WHICH of `@commitlint/config-conventional`'s TEN error-level rules
+ * {@link checkCommitMessage} enforces, recorded as DATA rather than left for a reader to
+ * infer by counting branches — that inference is exactly what let a 3-of-10 checker sit
+ * beside a 10-of-10 linter unnoticed for as long as it did (W1-T416's own rationale).
+ *
+ * {@link EMITTER_COMMITLINT_PARITY} (test/commit-message.test.ts) is what keeps this table
+ * honest — a corpus entry per rule below, driven through both the real `commitlint` CLI and
+ * `checkCommitMessage`, asserting the two AGREE on every entry. A future config-conventional
+ * bump that adds or changes a rule fails that test rather than silently invalidating this
+ * table.
+ */
+export const CONVENTIONAL_RULE_COVERAGE: RuleCoverageEntry[] = [
+  { rule: "header-max-length", status: "checked", note: "header longer than headerMaxLength characters" },
+  { rule: "header-trim", status: "checked", note: "header has leading or trailing whitespace" },
+  { rule: "type-empty", status: "checked", note: 'no "type:" prefix found on the header at all' },
+  { rule: "type-enum", status: "checked", note: "type is not one of the eleven conventional types" },
+  { rule: "subject-empty", status: "checked", note: 'nothing follows "type(scope):" on the header' },
+  { rule: "subject-case", status: "checked", note: "subject does not start lower-case" },
+  { rule: "subject-full-stop", status: "checked", note: "subject ends with a literal full stop" },
+  { rule: "body-max-line-length", status: "checked", note: "a body line exceeds bodyMaxLineLength characters" },
+  {
+    rule: "type-case",
+    status: "incidental",
+    note:
+      "not implemented directly — a non-lower-case type fails the type-prefix match, so it falls " +
+      "into the type-empty/subject-case fallback instead of being reported by its own name",
+  },
+  {
+    rule: "footer-max-line-length",
+    status: "incidental",
+    note:
+      "not implemented directly — body-max-line-length's budget already applies to EVERY line " +
+      "after the header, footers included, so a too-long footer line is already rejected",
+  },
+];
 
 export interface ShapedMessage {
   /** The full message: header, blank line, then the wrapped body (if any). */
@@ -493,6 +613,31 @@ export function typecheckStep(repoRoot: string, spawn: PreflightSpawn = defaultP
   }
 }
 
+/**
+ * Pure NUL-split of `git log --format=%x00%B`'s raw stdout into one entry per commit.
+ *
+ * W1-T416: the range half of the emitter/commitlint divergence. `%x00%B` prefixes EVERY
+ * commit's body with a NUL — including the first — so splitting on `"\0"` alone leaves an
+ * empty artifact BEFORE the first real entry (nothing precedes the very first NUL). That
+ * leading artifact is stripped explicitly; every remaining piece is a real commit's message
+ * and is KEPT even when it trims to the empty string, because a message that trims to empty
+ * is exactly the case `subject-empty`/`type-empty` exist to catch — dropping it here would
+ * vanish it before either judgement is reached, the escape this function used to be half of.
+ * The NUL split's real purpose survives unchanged: a body containing blank lines is never
+ * mistaken for a message boundary, since only an actual `\0` (never a `\n\n`) splits entries.
+ *
+ * An entirely EMPTY `stdout` (a zero-commit range — `from` and `to` identical) is the one
+ * case treated specially: it is zero commits, not one commit with an empty message, so it
+ * returns `[]` rather than `[""]`.
+ */
+export function splitRangeCommitMessages(stdout: string): string[] {
+  if (stdout === "") return [];
+  return stdout
+    .replace(/^\0/, "")
+    .split("\0")
+    .map((s) => s.trim());
+}
+
 /** `git log` the range's raw commit messages, NUL-separated so a body containing blank
  *  lines can't be mistaken for a message boundary. */
 export function readRangeCommitMessages(
@@ -501,15 +646,13 @@ export function readRangeCommitMessages(
   spawn: PreflightSpawn = defaultPreflightSpawn,
 ): string[] {
   const res = spawn("git", ["log", "--format=%x00%B", `${range.from}..${range.to}`], { cwd: repoRoot });
-  // A `git log` that never ran returns an EMPTY stdout, which the filter below turns into ZERO
-  // messages — and zero messages is a PASS over an empty set, the vacuous-pass family. Throw
-  // instead; `emitterChecksStep`'s existing catch names it as that step's own failure.
+  // A `git log` that never ran ALSO returns an empty stdout — the same shape as a genuinely
+  // empty range — so `spawnFailureDetail` (which reads `res.status`, not `res.stdout`) is what
+  // tells the two apart. Skipping it would let a never-run spawn read as zero messages, and
+  // zero messages is a PASS over an empty set, the vacuous-pass family.
   const spawnFailed = spawnFailureDetail("emitter-checks", res);
   if (spawnFailed) throw new Error(spawnFailed);
-  return res.stdout
-    .split("\0")
-    .map((s) => s.trim())
-    .filter((s) => s !== "");
+  return splitRangeCommitMessages(res.stdout);
 }
 
 /**
