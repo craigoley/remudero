@@ -143,10 +143,27 @@ else
   echo "verify-image: no CLAUDE_CODE_VERSION found in deploy/Dockerfile - version VALUE will not be compared"
 fi
 
+# THE BUILD SHA, read HOST-SIDE from the image LABEL so the in-image probe below can compare it
+# against the FILE. Two carriers, one ARG (deploy/Dockerfile REQ 15): the label is what a host-side
+# tool reads without starting a container, the file is what an agent INSIDE a running container can
+# read with no docker at all. They are written from the same build-arg, so disagreement is a
+# malformed image and nothing else - which is the only thing this probe fails on.
+#
+# `docker inspect` renders an absent label as the literal `<no value>`, and an image built before
+# REQ 15 landed has no label at all. Both normalise to EMPTY here, and empty means the probe
+# reports UNKNOWN rather than a verdict - the same rule the CLAUDE_CODE_VERSION read above follows.
+LABEL_BUILD_SHA="$(docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "${REF}" 2>/dev/null || true)"
+[ "${LABEL_BUILD_SHA}" = "<no value>" ] && LABEL_BUILD_SHA=""
+if [ -n "${LABEL_BUILD_SHA}" ]; then
+  echo "verify-image: image LABEL declares build sha ${LABEL_BUILD_SHA}"
+else
+  echo "verify-image: no org.opencontainers.image.revision label - build sha will not be compared"
+fi
+
 echo
 echo "verify-image: checks inside ${AFTER}"
 set +e
-docker run --rm -e EXPECT_CLAUDE_VERSION="${EXPECT_CLAUDE_VERSION}" --entrypoint /bin/sh "${REF}" -c '
+docker run --rm -e EXPECT_CLAUDE_VERSION="${EXPECT_CLAUDE_VERSION}" -e EXPECT_BUILD_SHA="${LABEL_BUILD_SHA}" --entrypoint /bin/sh "${REF}" -c '
   fail=0
   # `if out="$(cmd)"` tests CMD, which piping into head would not: a pipeline reports the LAST
   # stage, so `cmd | head` returns head status and a missing binary would read as a pass. The
@@ -180,6 +197,39 @@ docker run --rm -e EXPECT_CLAUDE_VERSION="${EXPECT_CLAUDE_VERSION}" --entrypoint
     fail=1
   fi
   # END claude-version-value
+  # BEGIN image-build-sha
+  # WHAT THIS ANSWERS, and why nothing answered it before: the published image ran 108 commits
+  # behind origin/main and no artifact anywhere carried its build commit, so dating it needed an
+  # MD5 fingerprint of the baked entrypoint against git history. deploy/Dockerfile REQ 15 now bakes
+  # the sha twice - a LABEL for host-side readers and /etc/rmd-build-sha for readers INSIDE a
+  # running container - and this compares the two.
+  #
+  # IT READS THE FILE, DELIBERATELY, NOT THE LABEL. The file is the carrier that answers the
+  # question where it actually gets asked: inside a container, by something with no docker CLI and
+  # no host access. A probe that read the label would certify a path nobody can use and would pass
+  # happily on an image whose file was never written.
+  #
+  # STALENESS IS NOT A FAILURE HERE, AND THAT IS DELIBERATE. An old image is OLD, not WRONG, and
+  # this repo has four measured cases of a bound firing on a healthy condition. So the sha is
+  # REPORTED, never compared against origin/main: the failure being fixed was that nobody could
+  # ASK, not that nobody compared. The one thing that IS failed is the two carriers disagreeing,
+  # which is never a healthy state - it means one was written and the other was not.
+  #
+  # THREE STATES, same discipline as the version check above. An absent file or an absent label is
+  # UNKNOWN and warns without failing, because the CURRENTLY PUBLISHED image has neither and a
+  # check that failed on that would fire on a healthy condition the day it landed.
+  got_sha="$(cat /etc/rmd-build-sha 2>/dev/null | head -1)"
+  if [ -z "${got_sha:-}" ] || [ "${got_sha:-}" = "unknown" ]; then
+    printf "  WARN  %-22s image carries no build sha (built before REQ 15, or with no --build-arg)\n" "image build sha"
+  elif [ -z "${EXPECT_BUILD_SHA:-}" ]; then
+    printf "  WARN  %-22s %s in the image, no label to compare against\n" "image build sha" "${got_sha}"
+  elif [ "${got_sha}" = "${EXPECT_BUILD_SHA}" ]; then
+    printf "  PASS  %-22s %s (label and /etc/rmd-build-sha agree)\n" "image build sha" "${got_sha}"
+  else
+    printf "  FAIL  %-22s /etc/rmd-build-sha says %s but the label says %s\n" "image build sha" "${got_sha}" "${EXPECT_BUILD_SHA}"
+    fail=1
+  fi
+  # END image-build-sha
   check "node"      node --version
   check "gh"        gh --version
   check "git"       git --version
