@@ -99,7 +99,9 @@ jobs:
             set -euo pipefail
             TAGS=(-t "${IMAGE}:${GITHUB_SHA}")
             if [ "${TAG_LATEST}" = "true" ]; then TAGS+=(-t "${IMAGE}:latest"); fi
-            az acr build -r "${REGISTRY}" "${TAGS[@]}" -f deploy/Dockerfile .
+            az acr build -r "${REGISTRY}" "${TAGS[@]}" \
+              --build-arg "RMD_BUILD_SHA=${GITHUB_SHA}" \
+              -f deploy/Dockerfile .
         env:
           REGISTRY: ${{ inputs.registry }}
           IMAGE: ${{ inputs.image }}
