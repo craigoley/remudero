@@ -120,6 +120,21 @@ export interface Config {
    */
   serve?: { host?: string; port?: number; identityCapability?: string; trustedProxy?: string };
   /**
+   * W1-T431 (Tier-2 relay CLIENT — the outbound-only half of D-11's distribution architecture):
+   * where `rmd relay` dials OUT to, and the short-lived credential it presents once it gets
+   * there. Lives HERE, outside the git tree, for the same reason `serve.host`/`claudeBin` do —
+   * both a relay address and an enrollment token are per-install secrets that must never be a
+   * literal in committed source or a CLI argument (shell history, `ps`).
+   *
+   * `url` is the relay's dial-out address (e.g. `"https://relay.example.com:8443"`); `token` is
+   * the enrollment credential pasted from the relay's UI, the GitHub self-hosted-runner
+   * registration-token shape (design note iv) — rotation is re-enrollment (delete/replace this
+   * field), never a runtime rotation call. Both absent (the default): `rmd relay` refuses to
+   * start and says so; `rmd serve` is completely unaffected either way, since the two commands
+   * are separate processes and this field is read by neither's dispatch but its own.
+   */
+  relay?: { url?: string; token?: string };
+  /**
    * Headroom governor switch (operator ruling fb-1784894405468-a4153e, 2026-07-24,
    * amending P34(c)/W1-T249, extending W1-T252 — its DEFAULT clause reversed by the
    * operator ruling of 2026-07-25, below).
