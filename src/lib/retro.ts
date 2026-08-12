@@ -2813,3 +2813,224 @@ export function renderNetStateUnwiredAdvisories(advisories: NetStateCapabilityAd
     ...advisories.map((a) => `- \`${a.symbol}\` (${a.file}) — "${a.snippet}"`),
   ].join("\n");
 }
+
+// ── PLAN-STATE TRUTH RUNG (W1-T410, split from W1-T392) ──────────────────────────────────
+//
+// Re-derives every task id MASTER-PLAN.md asserts UNBUILT against the merge resolver the
+// retro gather already holds (`retroCommand`'s single batched `projectPlan` pass — see
+// src/run-task.ts's `planStateTruthSectionFor`). No new network call, no new gateway.
+//
+// THE EXTRACTOR MUST BIND THE ASSERTION TO ITS SUBJECT (design (i)). A LINE-scoped extractor
+// is refuted by measurement: over MASTER-PLAN.md at 0503802, the line
+//   "rejections are SIBLING (T342 ×2, T349, T350, T353, T356) — P29(i), unbuilt for an EIGHTH cycle."
+// carries FIVE task ids that are sibling REJECTION COUNTS, not the unbuilt subject — the
+// subject is the proposal P29(i), on the OTHER side of the em-dash. A CLAUSE-scoped extractor
+// (split on the strong delimiters this prose actually uses — em-dash, semicolon — and only
+// bind an id found in the SAME clause as the not-shipped phrase) reads that line correctly:
+// the clause carrying "unbuilt" carries P29(i) (a proposal id, tracked separately, never
+// resolved) and no task id at all, so it yields ZERO. A tighter clause, e.g.
+// `*"W1-T149 did not ship"*`, keeps the id and the phrase adjacent with no delimiter between
+// them, so it still binds.
+
+/** One `not-shipped` phrase this rung recognises — MASTER-PLAN's own vocabulary for asserting a
+ *  task/proposal is unbuilt (`Still PLANNED, not shipped` is covered by the `not shipped`
+ *  alternative; the literal string is not its own pattern). No `g` flag — every use here is a
+ *  single-shot `.test()` per line/clause, never a `.match()` loop, so global-flag `lastIndex`
+ *  state is never at risk of leaking between calls. */
+const NOT_SHIPPED_PHRASE_RE = /not shipped|unbuilt|did not ship/i;
+
+/** A task id in either its full (`W1-T149`) or bare (`T342`) form — MASTER-PLAN's prose uses
+ *  both. `g`-flagged and consumed ONLY via `String.prototype.match`, which resets `lastIndex`
+ *  to 0 at the start of every call (spec-guaranteed), so reuse across clauses is safe. */
+const TASK_ID_RE = /\b(?:W\d+-T\d+|T\d+)\b/g;
+
+/** A proposal id (`P29`, `P29(i)`, `P43(ii)`) — deliberately NOT `g`-flagged: it is consumed
+ *  only via `.test()` below, and a `g`-flagged regex used with repeated `.test()` calls carries
+ *  `lastIndex` across them, silently alternating match/no-match. Presence-only; no capture of
+ *  which proposal, since this rung's chosen handling (design (ii)) is to report the SKIPPED
+ *  COUNT rather than resolve a proposal to the task ids that implement it. */
+const PROPOSAL_ID_RE = /\bP\d+[A-Za-z]?(?:\([ivxlc]+\))?/i;
+
+/** Strong clause delimiters this prose actually uses to separate an unbuilt phrase's subject
+ *  from adjacent, unrelated data on the same line (see the P29(i) sibling-rejection example
+ *  above). Deliberately narrow: an en-dash (`–`, distinct from the em-dash `—` here) or a comma
+ *  is NOT a clause boundary in this corpus's usage and splitting on one would sever a bound
+ *  assertion (e.g. `"W1-T149 did not ship"*, and the standing rule…"` keeps id and phrase in
+ *  one clause across its trailing comma). */
+const CLAUSE_SPLIT_RE = /[—;]/;
+
+/** A bare `T\d+` is shorthand for `W1-T\d+` throughout this corpus (every measured occurrence
+ *  — see the module doc above); a full `W\d+-T…` id is returned unchanged. */
+function normalizeAssertedTaskId(raw: string): string {
+  return /^W\d+-/.test(raw) ? raw : `W1-${raw}`;
+}
+
+/** {@link extractAssertedUnbuiltTaskIds}'s result: the bound-to-subject task ids (deduped,
+ *  normalized), how many not-shipped-phrase-bearing lines were examined (the "size of the set
+ *  examined" acceptance criterion 4 requires), and how many of those lines' bound subject is a
+ *  proposal id rather than a task id (design (ii) — reported, never silently dropped). */
+export interface AssertedUnbuiltExtraction {
+  ids: string[];
+  examinedLines: number;
+  proposalOnlyLines: number;
+}
+
+/**
+ * Extract every task id MASTER-PLAN.md prose ASSERTS unbuilt — bound to its subject via
+ * clause-scoping (see the module doc above for why a line-scoped extractor is measurably
+ * wrong: 5 of the 6 ids it yields over this corpus are sibling rejection counts, not the
+ * unbuilt subject). Pure text extraction, no interpretation of meaning, same discipline as
+ * {@link extractStandingRules}.
+ *
+ * Design (ii): a phrase-bearing line whose bound clause carries a PROPOSAL id but no task id
+ * (13 of 23 measured at 0503802 — the corpus asserts unbuiltness about proposals far more often
+ * than about tasks) is counted in `proposalOnlyLines`, NEVER silently dropped, and NEVER
+ * resolved to the task ids that implement the proposal — that resolution is explicitly out of
+ * this rung's reach; a reader of the rendered section is told how many were skipped instead.
+ */
+export function extractAssertedUnbuiltTaskIds(masterPlanMd: string): AssertedUnbuiltExtraction {
+  const ids = new Set<string>();
+  let examinedLines = 0;
+  let proposalOnlyLines = 0;
+  for (const line of masterPlanMd.split("\n")) {
+    if (!NOT_SHIPPED_PHRASE_RE.test(line)) continue;
+    examinedLines++;
+    let boundTaskId = false;
+    let boundProposalOnly = false;
+    for (const clause of line.split(CLAUSE_SPLIT_RE)) {
+      if (!NOT_SHIPPED_PHRASE_RE.test(clause)) continue;
+      const taskMatches = clause.match(TASK_ID_RE) ?? [];
+      if (taskMatches.length > 0) {
+        for (const m of taskMatches) ids.add(normalizeAssertedTaskId(m));
+        boundTaskId = true;
+        continue;
+      }
+      if (PROPOSAL_ID_RE.test(clause)) boundProposalOnly = true;
+    }
+    if (!boundTaskId && boundProposalOnly) proposalOnlyLines++;
+  }
+  return { ids: [...ids], examinedLines, proposalOnlyLines };
+}
+
+/** What the merge resolver the retro gather already holds (`projectPlan`'s batched GitHub
+ *  read) reports for one task id — the same two fields {@link PlanHealthReport}'s caller
+ *  already reads off `StatusProjection` (`merged`, `prUrl`), passed as a plain function so this
+ *  rung stays keyed by raw STRING id rather than a `Task` object: a prose-extracted id may not
+ *  even resolve to a known plan task (retired, renamed, or simply not in `plan/tasks.yaml`),
+ *  and `undefined` here means exactly that — "the resolver has no opinion on this id", never
+ *  "unmerged" (see design (iii)'s positive control, which this distinction exists to serve). */
+export type PlanStateTruthResolver = (taskId: string) => { merged: boolean; prUrl?: string } | undefined;
+
+/** One task id the plan asserts unbuilt while the resolver reports it merged — design (v):
+ *  "name the false claim, not the count". */
+export interface PlanStateTruthFinding {
+  taskId: string;
+  prUrl?: string;
+}
+
+/**
+ * {@link planStateTruthRung}'s result — THREE STATES, THREE RENDERINGS (design (vii)), plus the
+ * fourth "unexamined" failure mode design (iii)/(vi) require:
+ *
+ * - `unavailable`: no resolver in hand this run (mirrors `netStateAdvisorySectionFor`'s and
+ *   `planHealthSweepSectionFor`'s degrade-on-unreachable-gateway discipline). Distinct from a
+ *   clean result — the rung did not scan, it is not vouching for anything.
+ * - `unexamined`: the positive control failed — either extraction yielded zero ids, or none of
+ *   the extracted ids resolved through the resolver at all (design (iii): "must fail loudly
+ *   when either is empty"). Distinct from `clean` — an empty scan must never render as a clean
+ *   result (acceptance criterion 4).
+ * - `clean`: every extracted id that resolved is reported UNMERGED by the resolver — the plan's
+ *   assertion agrees with the truth.
+ * - `findings`: at least one extracted id the plan asserts unbuilt is reported MERGED — a
+ *   BLOCKING contradiction (design (iv): outranks the plan-health sweep beside it, because it
+ *   decides the KICK ORDER, not one task's proofs).
+ */
+export type PlanStateTruthReport =
+  | { kind: "unavailable" }
+  | { kind: "unexamined"; reason: string; examinedLines: number; proposalOnlyLines: number }
+  | { kind: "clean"; examinedLines: number; proposalOnlyLines: number; idsChecked: number }
+  | {
+      kind: "findings";
+      findings: PlanStateTruthFinding[];
+      examinedLines: number;
+      proposalOnlyLines: number;
+      idsChecked: number;
+    };
+
+/**
+ * THE RUNG (W1-T410 design). Re-derives every task id MASTER-PLAN.md asserts unbuilt
+ * ({@link extractAssertedUnbuiltTaskIds}) against `resolve`, the SAME merge resolver the retro
+ * gather already computed (`retroCommand`'s single batched `projectPlan` pass — no new network
+ * call, no new gateway; see src/run-task.ts's `planStateTruthSectionFor`).
+ *
+ * `resolve` omitted (design (vii)): the caller has no projection in hand (an unreachable
+ * gateway, degraded the same way `isTaskMerged` degrades to `undefined` in `retroCommand`) —
+ * `unavailable`, never a silent skip.
+ *
+ * BOTH CONTROLS ARE BLOCKING (design (iii)), not merely test-time assertions: a run whose
+ * extraction is empty, or whose extracted ids the resolver has no opinion on AT ALL (as opposed
+ * to an opinion of "unmerged"), reports `unexamined` — loud, not a clean pass. A run whose only
+ * bound subjects are proposals is exactly the `proposalOnlyLines` count on an OTHERWISE-clean or
+ * OTHERWISE-findings report, never folded into `unexamined` by itself (a plan that correctly
+ * asserts nothing about tasks and everything about live proposals is not an unexamined scan —
+ * it is real information the render already carries via `proposalOnlyLines`).
+ */
+export function planStateTruthRung(masterPlanMd: string, resolve?: PlanStateTruthResolver): PlanStateTruthReport {
+  if (!resolve) return { kind: "unavailable" };
+  const { ids, examinedLines, proposalOnlyLines } = extractAssertedUnbuiltTaskIds(masterPlanMd);
+  if (ids.length === 0) {
+    return {
+      kind: "unexamined",
+      reason: `extraction yielded zero task ids across ${examinedLines} not-shipped-phrase-bearing line(s)`,
+      examinedLines,
+      proposalOnlyLines,
+    };
+  }
+  const findings: PlanStateTruthFinding[] = [];
+  let idsChecked = 0;
+  for (const id of ids) {
+    const resolution = resolve(id);
+    if (!resolution) continue; // the resolver has no opinion on this id — not "unmerged"
+    idsChecked++;
+    if (resolution.merged) findings.push({ taskId: id, prUrl: resolution.prUrl });
+  }
+  if (idsChecked === 0) {
+    return {
+      kind: "unexamined",
+      reason: `extracted ${ids.length} asserted-unbuilt id(s) but none resolved through the merge resolver at all`,
+      examinedLines,
+      proposalOnlyLines,
+    };
+  }
+  if (findings.length > 0) return { kind: "findings", findings, examinedLines, proposalOnlyLines, idsChecked };
+  return { kind: "clean", examinedLines, proposalOnlyLines, idsChecked };
+}
+
+/** Render {@link planStateTruthRung}'s report as a retro-report section — see that function's
+ *  doc for the four states this renders distinctly. Printed ahead of the plan-health sweep
+ *  (design (iv): a contradiction here outranks that advisory floor). */
+export function renderPlanStateTruth(report: PlanStateTruthReport): string {
+  const header = "## Plan-state truth rung — MASTER-PLAN unbuilt assertions vs. merge state (W1-T410)";
+  if (report.kind === "unavailable") {
+    return `${header}\n\nUNAVAILABLE — no merge resolver in hand this run; the rung did not scan. Distinct from a clean result: this run is not vouching for MASTER-PLAN's unbuilt assertions at all.`;
+  }
+  const scanned = `(examined ${report.examinedLines} not-shipped-phrase-bearing line(s); ${report.proposalOnlyLines} proposal-subject line(s) skipped — proposal-subject assertions are outside this rung's reach, reported here rather than silently dropped)`;
+  if (report.kind === "unexamined") {
+    return `${header}\n\nUNEXAMINED — ${report.reason} ${scanned}. Treat as a scan failure, never as a clean result.`;
+  }
+  if (report.kind === "clean") {
+    return `${header}\n\nNo contradiction: ${report.idsChecked} asserted-unbuilt id(s) resolved through the merge resolver, all still unmerged, agreeing with the plan's assertion ${scanned}.`;
+  }
+  return [
+    header,
+    "",
+    `BLOCKING — the plan asserts ${report.findings.length} id(s) unbuilt that the merge resolver reports MERGED (this outranks the plan-health sweep below for KICK ORDER purposes — design (iv)):`,
+    "",
+    ...report.findings.map(
+      (f) =>
+        `- ${f.taskId}: MASTER-PLAN asserts UNBUILT, the merge resolver reports MERGED${f.prUrl ? ` via ${f.prUrl}` : " (no PR url on record)"}`,
+    ),
+    "",
+    scanned,
+  ].join("\n");
+}

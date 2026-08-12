@@ -292,15 +292,18 @@ import {
   netStateCapabilityAdvisories,
   parseLedger,
   planHealthSweep,
+  planStateTruthRung,
   probeGithubThrottle,
   recordFollowupHarvest,
   renderGather,
   renderNetStateUnwiredAdvisories,
   renderPlanHealth,
+  renderPlanStateTruth,
   resolveMarkerForGather,
   saveMarker,
   shippedSince,
   type MastMapping,
+  type PlanStateTruthResolver,
   type RetroTriggerDecision,
   type ShippedGithub,
 } from "./lib/retro.js";
@@ -8482,6 +8485,30 @@ export function planHealthSweepSectionFor(repoRoot: string, isMerged?: (task: Ta
   }
 }
 
+/**
+ * W1-T410 (split from W1-T392): re-derives every task id MASTER-PLAN.md asserts unbuilt
+ * against the SAME merge resolver `planHealthSweepSectionFor` above already consumes — no new
+ * `projectPlan` pass, no new gateway (see `planStateTruthRung`'s doc, lib/retro.ts, for why the
+ * extractor binds an assertion to its subject rather than scanning a whole line, and for the
+ * three-plus-one states this renders).
+ *
+ * `resolve` omitted (the SAME degrade `retroCommand`'s `isTaskMerged` already has: an
+ * unreachable gateway or missing plan file): the rung renders itself UNAVAILABLE rather than
+ * silently skipping — design (vii). A MASTER-PLAN.md read/scan hiccup degrades to `""` (section
+ * omitted), the SAME best-effort discipline `netStateAdvisorySectionFor`/
+ * `planHealthSweepSectionFor` above already follow — the retro completes either way.
+ */
+export function planStateTruthSectionFor(repoRoot: string, resolve?: PlanStateTruthResolver): string {
+  try {
+    const masterPlanPath = join(repoRoot, "MASTER-PLAN.md");
+    const masterPlanMd = existsSync(masterPlanPath) ? readFileSync(masterPlanPath, "utf8") : "";
+    return `\n\n${renderPlanStateTruth(planStateTruthRung(masterPlanMd, resolve))}`;
+  } catch (e) {
+    console.error(`### [retro] plan_state_truth_rung — scan failed, degrading to none: ${String((e as Error)?.message ?? e)}`);
+    return "";
+  }
+}
+
 async function retroCommand(
   rest: string[],
   opts: {
@@ -8646,6 +8673,11 @@ async function retroCommand(
   // yaml-based default — the sweep still runs (just without this fix) rather than the whole
   // retro aborting over a `gh` outage.
   let isTaskMerged: ((task: Task) => boolean) | undefined;
+  // W1-T410: the SAME projection `isTaskMerged` above derives from, exposed keyed by raw
+  // string id (never a `Task` object — a prose-extracted id may not resolve to a known plan
+  // task at all) for the plan-state truth rung below. One projection, two consumers — no
+  // second `projectPlan` call.
+  let planStateResolver: PlanStateTruthResolver | undefined;
   try {
     const planHealthPlanPath = join(repoRoot, "plan", "tasks.yaml");
     if (existsSync(planHealthPlanPath)) {
@@ -8656,18 +8688,28 @@ async function retroCommand(
         join(config.root, "state", "status.json"),
       );
       isTaskMerged = (task) => planHealthProjection.get(task.id)?.merged ?? false;
+      planStateResolver = (taskId) => {
+        const projection = planHealthProjection.get(taskId);
+        return projection ? { merged: projection.merged, prUrl: projection.prUrl } : undefined;
+      };
     }
   } catch (e) {
     console.error(
       `### [retro] plan_health_sweep.projection — scan failed, degrading to yaml status: ${String((e as Error)?.message ?? e)}`,
     );
   }
+  // W1-T410 (split from W1-T392): the plan-state truth rung re-derives every task id
+  // MASTER-PLAN.md asserts unbuilt against the SAME merge resolver above — a BLOCKING
+  // contradiction (design (iv): outranks the plan-health sweep below for KICK ORDER purposes),
+  // so it is concatenated ahead of that advisory floor.
+  const planStateTruthSection = planStateTruthSectionFor(repoRoot, planStateResolver);
   // W1-T358 (Standing rule 20): the plan-health sweep re-grades the OPEN queue against
   // every standing rule the linter encodes — rides EVERY retro report (dry-run and real
   // alike), same as the net-state advisory section above.
   const planHealthSection = planHealthSweepSectionFor(repoRoot, isTaskMerged);
   const report =
     [renderGather(gather), "", renderRatifyTelemetry(ratifyTelemetry(parseLedger(ledgerNdjson)))].join("\n") +
+    planStateTruthSection +
     planHealthSection +
     netStateAdvisorySection;
 
