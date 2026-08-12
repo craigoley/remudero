@@ -465,6 +465,8 @@ import {
   preferImplementingPr,
   type PrRef,
   type StatusProjection,
+  planBranchReap,
+  type BranchFacts,
 } from "./lib/status.js";
 import {
   DEFAULT_SWEEP_POLICY,
@@ -7748,6 +7750,170 @@ export function emissionsCommand(rest: string[], opts: { stateDir?: string } = {
  * read, rather than falling back to a live-file-only match count — the automated form of the
  * positive control nobody writes by hand for this idiom.
  */
+/**
+ * The declared guard list (W1-T447) — branches the fleet must never delete, DECLARED so the
+ * decision is reviewable, alongside the name grep that derives the same answer independently.
+ *
+ * NEITHER SIGNAL IS SUFFICIENT ALONE, which is why both run. A declared list rots: it is a
+ * convention that binds only while someone maintains it. A name grep cannot see a branch
+ * referenced only through a VARIABLE — `LANDING_BRANCH` recreates `feedback-landing` on the next
+ * `landFeedback`, and when no such branch exists there is nothing for a grep over branch names to
+ * find. So the grep is the primary signal, this list is the reviewed one, and a branch the grep
+ * guards that this list omits is REPORTED as drift rather than swept in silence.
+ */
+export const DECLARED_BRANCH_GUARDS: readonly string[] = [
+  "main",
+  "heartbeat", // live monitoring transport; parentless root commit force-pushed every ~5 min
+  "feedback-landing", // LANDING_BRANCH — recreated by landFeedback, often absent between landings
+  "decisions-landing", // DECISIONS_LANDING_BRANCH
+  // Cited by doc comments in drain-lock.ts, inflight-lock.ts, worker.ts and run-task.ts as the
+  // forensic record behind those guards — deleting them dangles four citations. DECLARED after
+  // the drift alarm below reported them on the live repo, which is the alarm working as intended.
+  "diag/drain-concurrency",
+  "diag/drain-sequential-await",
+];
+
+/** Every remote branch name, newest-agnostic — `git ls-remote --heads`, parsed. */
+function remoteBranchNames(exec: (cmd: string, args: string[]) => string): string[] {
+  return exec("git", ["ls-remote", "--heads", "origin"])
+    .split("\n")
+    .map((l) => l.split("refs/heads/")[1])
+    .filter((n): n is string => Boolean(n && n.trim()))
+    .map((n) => n.trim());
+}
+
+/**
+ * `rmd reap-branches` — the DRY RUN. Reports which remote branches WOULD be deletable, which are
+ * guarded and why, and which are held; ledgers the answer; and DELETES NOTHING.
+ *
+ * IT DELETES NOTHING ON PURPOSE, and that is the deliverable rather than a staging step. Deletion
+ * is irreversible from the fleet's side — restoring needs the sha — and this repo has four bounds
+ * that fired on healthy conditions; a fifth that removed branches would be the worst of them. The
+ * operator gets the one command that replaces a hand sweep, which is the actual goal, without the
+ * fleet ever holding the delete.
+ *
+ * THE MANIFEST IS PRINTED, sha and name together, because that is the only thing that makes a
+ * future deleting version reversible (`git push origin <sha>:refs/heads/<name>`). It goes to
+ * STDOUT, never `state/` — that path is gitignored and is where 29 cited reports went to die.
+ *
+ * EXITS NON-ZERO ON DRIFT: a branch the name grep guards that `DECLARED_BRANCH_GUARDS` omits fails
+ * the run rather than being reported in passing, the `ci-parity:drift` shape.
+ */
+export function reapBranchesCommand(
+  rest: string[],
+  opts: { exec?: (cmd: string, args: string[]) => string; ledgerPath?: string } = {},
+): number {
+  const badArg = unknownArgError("reap-branches", rest, [], []);
+  if (badArg) {
+    console.error(badArg);
+    console.error(`usage: ${commandSyntax("reap-branches")}`);
+    return 2;
+  }
+  const exec =
+    opts.exec ?? ((cmd: string, args: string[]) => execFileSync(cmd, args, { encoding: "utf8" }).toString());
+
+  const names = remoteBranchNames(exec);
+  // A POSITIVE CONTROL, not a formality: an empty listing and a repo with only `main` are
+  // indistinguishable in the answer, and every bucket would read empty either way.
+  if (names.length === 0) {
+    console.error("rmd reap-branches: `git ls-remote --heads origin` returned NO branches — refusing to report on a corpus it could not read");
+    return 1;
+  }
+
+  // ONE batched PR fetch for the whole corpus, never one call per branch. The per-branch shape
+  // costs an API round trip per candidate (51 today) for an answer that arrives in a handful of
+  // pages, and the sweep already reads PR state this way.
+  // NEVER a hardcoded "remudero": run-task.ts already records an incident where a hardcoded
+  // gateway made an unattended run drain its own source.
+  const { owner, repo } = resolveOwnerRepo();
+  const prState = new Map<string, BranchFacts["prState"]>();
+  let prReadFailed = false;
+  for (let page = 1; page <= 8; page++) {
+    let raw: string;
+    try {
+      raw = exec("gh", [
+        "api",
+        `repos/${owner}/${repo}/pulls?state=all&per_page=100&page=${page}`,
+        "--jq",
+        '.[]|"\\(.head.ref)\\t\\(.state)\\t\\(.merged_at!=null)"',
+      ]);
+    } catch {
+      prReadFailed = true;
+      break;
+    }
+    const lines = raw.split("\n").filter((l) => l.trim());
+    for (const l of lines) {
+      const [ref, state, merged] = l.split("\t");
+      if (!ref) continue;
+      const cur = prState.get(ref);
+      // Most decisive wins: merged beats open beats closed.
+      const next: BranchFacts["prState"] = merged === "true" ? "merged" : state === "open" ? "open" : "closed";
+      if (cur === "merged" || (cur === "open" && next === "closed")) continue;
+      prState.set(ref, next);
+    }
+    if (lines.length < 100) break;
+  }
+
+  const facts: BranchFacts[] = names.map((name) => {
+    // W1-T119: a FAILED PR read is not "no PR". If the fetch broke, every branch reads OPEN — the
+    // conservative direction, since an open PR is never deletable, so the run can only under-reap.
+    const state: BranchFacts["prState"] = prReadFailed ? "open" : (prState.get(name) ?? "none");
+    let tipInMain = false;
+    try {
+      exec("git", ["merge-base", "--is-ancestor", `origin/${name}`, "origin/main"]);
+      tipInMain = true;
+    } catch {
+      tipInMain = false;
+    }
+    let namedInSource = false;
+    try {
+      const hit = exec("git", ["grep", "-l", "-F", "--", name, "--", "src/", "scripts/", "deploy/", ".github/"]);
+      namedInSource = hit.trim().length > 0;
+    } catch {
+      namedInSource = false; // git grep exits 1 on no match — a real "not named", not a failure
+    }
+    return { name, prState: state, tipInMain, namedInSource };
+  });
+
+  const plan = planBranchReap(facts, DECLARED_BRANCH_GUARDS);
+  console.log(`branches:  ${names.length} on origin`);
+  console.log(`guarded:   ${plan.guarded.length}  ${plan.guarded.join(", ")}`);
+  console.log(`deletable: ${plan.deletable.length}`);
+  for (const b of plan.deletable) {
+    let sha = "unknown";
+    try {
+      sha = exec("git", ["rev-parse", `origin/${b}`]).trim();
+    } catch {
+      /* a branch that vanished mid-run reports `unknown` rather than aborting the report */
+    }
+    console.log(`  ${sha}\t${b}`);
+  }
+  console.log(`hold:      ${plan.hold.length}  (no PR, commits not in main)`);
+  console.log("DRY RUN — nothing was deleted.");
+
+  if (opts.ledgerPath) {
+    appendLedger(opts.ledgerPath, {
+      run_id: `REAP-${Date.now()}`,
+      task_id: "REAP",
+      step: "branch_reap.dry_run",
+      branches: names.length,
+      deletable: plan.deletable.length,
+      guarded: plan.guarded.length,
+      hold: plan.hold.length,
+      undeclared_guards: plan.undeclaredGuards,
+    });
+  }
+
+  if (plan.undeclaredGuards.length > 0) {
+    console.error(
+      `rmd reap-branches: ${plan.undeclaredGuards.length} branch(es) are named in source but MISSING from ` +
+        `DECLARED_BRANCH_GUARDS — declare them or remove the reference: ${plan.undeclaredGuards.join(", ")}`,
+    );
+    return 1;
+  }
+  return 0;
+}
+
 export function ledgerGrepCommand(rest: string[], opts: { stateDir?: string } = {}): number {
   const pattern = rest[0];
   const badArg = unknownArgError("ledger-grep", rest.slice(1), [], []);
@@ -18244,6 +18410,11 @@ const COMMANDS: readonly CommandSpec[] = [
       "rmd check-proof <proof> [--allow-full-suite]   # run ONE acceptance proof through the REVIEWER'S OWN parser and executor and print what it does: parse kind, resolved candidate file(s), the exact argv, the verdict, exit code and hit count. A `grep:` pattern is a BASIC REGULAR EXPRESSION (`[ * ^ $` are metacharacters) — verifying with `grep -F` is a DIFFERENT matcher and reports a false green (PR #1071). A `unit test:` proof naming a TITLE rather than a test/<file>.test.ts PATH is resolved to its file first; when it resolves to none, the run is REFUSED rather than falling back to the whole-suite glob (--allow-full-suite overrides, time-boxed). EXIT CODE IS THE VERDICT: 0 pass, 1 fail (genuinely unmet — overrides the keyword floor), 2 refused (nothing executed — bad usage, an unparseable proof, or an unresolved name run declined), 3 no-match (ran and named nothing — degrades to the keyword floor, NEVER read as fail), 4 exec_error (a timeout/spawn failure/grep-exit-2 — inconclusive, also degrades). READ-ONLY: writes no cache, no ledger line, no state file",
   },
   {
+    name: "reap-branches",
+    usage:
+      "rmd reap-branches   # W1-T447 DRY RUN: classify every remote branch as deletable, guarded or held, print a sha->name manifest for the deletable set, and DELETE NOTHING. Deletable = the head of a merged PR, the head of a closed-unmerged PR, or no PR at all with a tip already an ancestor of origin/main (so every commit is in main and removing the ref loses nothing). Guarded = named in src/, scripts/, deploy/ or .github/, or listed in DECLARED_BRANCH_GUARDS; protection is evaluated FIRST and wins, so a branch that is both merged and referenced by source is never offered for deletion. EXITS NON-ZERO when a grep-guarded branch is missing from the declared list (drift), and when git ls-remote returns nothing rather than reporting empty buckets over a corpus it could not read. Deletes nothing, pushes nothing, writes no state file.",
+  },
+  {
     name: "ledger-grep",
     usage:
       "rmd ledger-grep <pattern>   # the deduplicated union of every state/ledger.*.ndjson.gz archive and the live state/ledger.ndjson, matched against <pattern>. Replaces the manual `grep -h '<pat>' state/ledger.*.ndjson state/ledger.ndjson | sort -u` idiom, which glob-matches ZERO gzipped archives on this host and silently answers from the live file alone (a measured 3.1x undercount). Prints the pattern, state dir and archive count BEFORE any match, then EXITS NON-ZERO, naming the globbed directory, when ZERO archive files were read — never falling back to a live-file-only count. READ-ONLY: writes no ledger line, no state file, deletes/moves nothing",
@@ -18811,6 +18982,10 @@ export async function main(
     process.exit(checkProofCommand(rest));
   }
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(ledgerGrepCommand(rest)) cannot carry a DA hit without forking the process; ledgerGrepCommand's own logic — arg validation, the archive glob, the zero-archive verdict, and the deduplicated match render — is unit-tested in test/ledger-grep.test.ts (same irreducible-glue shape as the sibling check-proof/emissions dispatch cases).
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(reapBranchesCommand(rest)) cannot carry a DA hit without forking the process; reapBranchesCommand's own logic — arg validation, the empty-listing refusal, the classification and the drift exit — is unit-tested in test/branch-reaper-dry-run.test.ts (same irreducible-glue shape as the sibling ledger-grep dispatch case).
+  if (cmd === "reap-branches") {
+    process.exit(reapBranchesCommand(rest));
+  }
   if (cmd === "ledger-grep") {
     process.exit(ledgerGrepCommand(rest));
   }
