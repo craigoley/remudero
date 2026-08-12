@@ -25,6 +25,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # `origin/main` must RESOLVE on the runner: test/recon-gaps-relayed.test.ts shells
+          # `git show origin/main:src/run-task.ts` against the live checkout, and the default
+          # shallow fetch leaves no such ref — `fatal: invalid object name`. It self-clears on
+          # a re-run, so it reads as noise; it cost four CI cycles across #1658, #1659 and
+          # #1677 in one day. Full depth is 1,227 commits / 26 MB here, and four sibling jobs
+          # (coverage-ratchet, mutation-ratchet, lint-plan, api-client-drift) already use it.
+          fetch-depth: 0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
