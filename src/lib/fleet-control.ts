@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
+import { repoScopedTaskKey } from "./ledger.js";
 
 /**
  * Fleet control set (MASTER-PLAN §4A/§4B) — `rmd stop|pause|resume`, plus the
@@ -173,12 +174,18 @@ export function resumeFleet(root: string): ResumeResult {
 // the arm-identity captured AT BIRTH — so the daemon's consume-time ledger line
 // names the console as actor without the daemon ever seeing the raw token.
 
-/** A queued-task "Run now" request, parsed off a `KICK_REQUESTED-<taskId>` marker. */
+/** A queued-task "Run now" request, parsed off a `KICK_REQUESTED-<taskId>` (or, once
+ *  repo-scoped, `KICK_REQUESTED-<repo>:<taskId>`) marker. */
 export interface KickRequest {
   taskId: string;
   /** The console actor id (a bearer-token hash), carried from write to consume. */
   origin: string;
   requestedAt: string;
+  /** W1-T429: the repo this kick targets, when the caller supplied one — `undefined` for a
+   *  legacy/unscoped marker (pre-existing on disk, or written by a caller not yet threading a
+   *  repo through). See {@link kickFilePath}'s doc for why this is what keeps two repos sharing
+   *  a task id from colliding on the SAME marker filename. */
+  repo?: string;
 }
 
 /** A "Drain now" request, parsed off the `DRAIN_REQUESTED` marker. */
@@ -200,10 +207,28 @@ export function isSafeTaskId(taskId: unknown): taskId is string {
   return typeof taskId === "string" && SAFE_TASK_ID.test(taskId) && !taskId.includes("..");
 }
 
+/** Repo names that may become part of a marker FILENAME (W1-T429) — the same shape discipline
+ *  {@link SAFE_TASK_ID} applies to a task id, so a hostile/malformed repo string can never
+ *  traverse out of `state/` either. Enforced fail-closed on write ({@link requestKick} throws). */
+const SAFE_REPO_NAME = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,63})$/;
+
+/** True iff `repo` is safe to embed in a marker filename (see {@link SAFE_REPO_NAME}). */
+export function isSafeRepoName(repo: unknown): repo is string {
+  return typeof repo === "string" && SAFE_REPO_NAME.test(repo) && !repo.includes("..");
+}
+
 const KICK_PREFIX = "KICK_REQUESTED-";
 
-export function kickFilePath(root: string, taskId: string): string {
-  return join(root, "state", `${KICK_PREFIX}${taskId}`);
+/**
+ * W1-T429: `repo` is OPTIONAL and, when supplied, folds into the marker filename via
+ * {@link repoScopedTaskKey} — `KICK_REQUESTED-<repo>:<taskId>` instead of the legacy
+ * `KICK_REQUESTED-<taskId>` — so two repos sharing a task-id scheme (the fleet's plans do; a
+ * wild-trails W1-T12 and this repo's W1-T12 are the SAME bare id) get DISTINCT marker files
+ * instead of one console click silently overwriting/consuming the other's pending kick. Omitting
+ * `repo` (every caller today) reproduces the exact legacy path unchanged.
+ */
+export function kickFilePath(root: string, taskId: string, repo?: string): string {
+  return join(root, "state", `${KICK_PREFIX}${repoScopedTaskKey(repo, taskId)}`);
 }
 
 export function drainNowFilePath(root: string): string {
@@ -211,14 +236,16 @@ export function drainNowFilePath(root: string): string {
 }
 
 /**
- * Write a `KICK_REQUESTED-<taskId>` marker (the console's "Run" button). Throws on an
- * unsafe task id BEFORE any write — a malformed id performs no side effect, ever.
- * Overwriting an existing marker for the same id is idempotent (still one pending kick).
+ * Write a `KICK_REQUESTED-<taskId>` marker (the console's "Run" button); `KICK_REQUESTED-
+ * <repo>:<taskId>` when `repo` is supplied (W1-T429). Throws on an unsafe task id OR repo
+ * BEFORE any write — a malformed id/repo performs no side effect, ever. Overwriting an existing
+ * marker for the same (repo, taskId) is idempotent (still one pending kick).
  */
-export function requestKick(root: string, taskId: string, origin: string): KickRequest {
+export function requestKick(root: string, taskId: string, origin: string, repo?: string): KickRequest {
   if (!isSafeTaskId(taskId)) throw new Error(`requestKick: unsafe task id ${JSON.stringify(taskId)}`);
-  const req: KickRequest = { taskId, origin, requestedAt: new Date().toISOString() };
-  const path = kickFilePath(root, taskId);
+  if (repo !== undefined && !isSafeRepoName(repo)) throw new Error(`requestKick: unsafe repo ${JSON.stringify(repo)}`);
+  const req: KickRequest = { taskId, origin, requestedAt: new Date().toISOString(), ...(repo !== undefined ? { repo } : {}) };
+  const path = kickFilePath(root, taskId, repo);
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, JSON.stringify(req, null, 2));
   return req;
@@ -242,8 +269,9 @@ export function pendingKicks(root: string): KickRequest[] {
   for (const name of names) {
     try {
       const o = JSON.parse(readFileSync(join(dir, name), "utf8"));
+      const repo = isSafeRepoName(o?.repo) ? o.repo : undefined;
       if (isSafeTaskId(o?.taskId) && typeof o?.origin === "string" && typeof o?.requestedAt === "string") {
-        out.push({ taskId: o.taskId, origin: o.origin, requestedAt: o.requestedAt });
+        out.push({ taskId: o.taskId, origin: o.origin, requestedAt: o.requestedAt, ...(repo !== undefined ? { repo } : {}) });
       }
     } catch {
       // garbage marker — leave it for an operator to notice; never dispatch off it.
@@ -252,9 +280,11 @@ export function pendingKicks(root: string): KickRequest[] {
   return out.sort((a, b) => a.requestedAt.localeCompare(b.requestedAt));
 }
 
-/** Delete one kick marker (consumed-once). Idempotent; a concurrent clear is not an error. */
-export function clearKick(root: string, taskId: string): boolean {
-  return clearFlag(kickFilePath(root, taskId));
+/** Delete one kick marker (consumed-once). Idempotent; a concurrent clear is not an error.
+ *  W1-T429: pass the SAME `repo` the marker was requested with (if any) — omitting it clears the
+ *  legacy/unscoped path, which is a DIFFERENT file from a repo-scoped marker's. */
+export function clearKick(root: string, taskId: string, repo?: string): boolean {
+  return clearFlag(kickFilePath(root, taskId, repo));
 }
 
 /** Write the `DRAIN_REQUESTED` marker (the console's "Drain now" button). */

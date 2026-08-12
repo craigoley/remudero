@@ -317,7 +317,7 @@ import {
   regeneratePlanIndexAndCommit,
   regeneratePlanIndexFile,
 } from "./lib/plan-pr-emitter.js";
-import { appendLedger, isSpawnInfraBlockedError, LEDGER_COST_TAG_INFRA } from "./lib/ledger.js";
+import { appendLedger, isSpawnInfraBlockedError, LEDGER_COST_TAG_INFRA, matchesRepoScopedTask } from "./lib/ledger.js";
 import { resolveLedgerUnion } from "./lib/ledger-grep.js";
 import { escalateRepeatingRules, ruleEfficacyReport } from "./lib/rule-efficacy.js";
 import { mineVerdictRows, verdictCalibrationReport } from "./lib/verdict-calibration.js";
@@ -9398,8 +9398,11 @@ export function escalateCircuitBreak(
   task: Task,
   ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
 ): void {
+  // W1-T429: repo-scoped dedup — a same-id task in ANOTHER repo must never dedup off (or be
+  // dedup'd off by) this task's own escalation marker. `matchesRepoScopedTask` also honors a
+  // marker ledgered before this task existed (no `repo` field at all) as still matching.
   const already = readLedgerLines(ctx.ledgerPath).some(
-    (l) => l.step === "dispatch.circuit_broken.escalated" && l.task_id === task.id,
+    (l) => l.step === "dispatch.circuit_broken.escalated" && matchesRepoScopedTask(l, ctx.repo, task.id),
   );
   if (already) return;
   const issueUrl = tryEscalate(
@@ -9434,6 +9437,10 @@ export function escalateCircuitBreak(
   appendLedger(ctx.ledgerPath, {
     run_id: ctx.runId,
     task_id: task.id,
+    // W1-T429: the repo dimension the dedup read above (and any future one) matches against —
+    // see repoScopedTaskKey's doc for why this rides alongside `task_id` rather than folding
+    // into it.
+    repo: ctx.repo,
     step: "dispatch.circuit_broken.escalated",
     issue_url: issueUrl,
     delivered: issueUrl !== null,
@@ -9459,8 +9466,9 @@ export function escalateLifetimeCapExceeded(
   task: Task,
   ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
 ): void {
+  // W1-T429: repo-scoped dedup — see escalateCircuitBreak's identical comment above.
   const already = readLedgerLines(ctx.ledgerPath).some(
-    (l) => l.step === "dispatch.lifetime_capped.escalated" && l.task_id === task.id,
+    (l) => l.step === "dispatch.lifetime_capped.escalated" && matchesRepoScopedTask(l, ctx.repo, task.id),
   );
   if (already) return;
   const issueUrl = tryEscalate(
@@ -9497,6 +9505,8 @@ export function escalateLifetimeCapExceeded(
   appendLedger(ctx.ledgerPath, {
     run_id: ctx.runId,
     task_id: task.id,
+    // W1-T429: see escalateCircuitBreak's identical field for why this rides alongside `task_id`.
+    repo: ctx.repo,
     step: "dispatch.lifetime_capped.escalated",
     issue_url: issueUrl,
     delivered: issueUrl !== null,
