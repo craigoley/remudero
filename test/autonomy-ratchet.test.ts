@@ -69,6 +69,7 @@ function mining(linesByTaskId: Record<string, Record<string, unknown>[]>, ledger
     archiveFiles: ["/fixture/state/ledger.2026-01-01.ndjson.gz"],
     archiveCount: 1,
     liveFileRead: false,
+    unread: [],
     ok: true,
     matches: [],
     ...ledgerOverrides,
@@ -197,6 +198,21 @@ test("FALSIFIER: unreadable ledger archives report UNMEASURED, never a rate comp
   assert.deepEqual(report.rows, []);
   assert.match(report.reason ?? "", /zero ledger archive files matched/);
   assert.match(report.reason ?? "", /not a rate over the live file alone/);
+});
+
+test("THE OTHER UNMEASURED ARM (W1-T444): PARTIAL coverage names the unread rotations, not 'zero archives'", () => {
+  // `resolveLedgerUnion`'s `ok` went false on partial coverage as well as on zero archives, so a
+  // hardcoded zero-archive reason would send a reader hunting for files that are all present. A
+  // verdict must carry the reason of the decision that produced it.
+  const merges = [{ taskId: "W1-T1", sha: SHA_A, ts: "2026-01-01T00:00:00+00:00" }];
+  const m = mining({}, { ok: false, archiveCount: 3, unread: ["/fixture/state/ledger.2026-01-02.ndjson.gz"] });
+  const report = zeroTouchMergeRate(merges, m);
+  assert.equal(report.status, "unmeasured");
+  assert.equal(report.zeroTouchRate, null);
+  assert.match(report.reason ?? "", /1 of 3 ledger rotation\(s\)/);
+  assert.match(report.reason ?? "", /ledger\.2026-01-02\.ndjson\.gz/, "the unreadable rotation is NAMED");
+  assert.match(report.reason ?? "", /coverage is PARTIAL/);
+  assert.doesNotMatch(report.reason ?? "", /zero ledger archive files/, "the wrong arm must not be reported");
 });
 
 test("an EMPTY merge corpus reports n=0 and a null rate, never a false 0% or 100%", () => {

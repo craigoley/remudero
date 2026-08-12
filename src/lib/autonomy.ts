@@ -274,10 +274,18 @@ export function zeroTouchMergeRate(
   if (!ledger.ok) {
     return {
       status: "unmeasured",
+      // NAME THE ARM THAT ACTUALLY FIRED. W1-T444 widened `resolveLedgerUnion`'s `ok` to false on
+      // PARTIAL coverage too — a rotation found on disk and unreadable — so a hardcoded
+      // "zero archive files" reason would send a reader hunting for missing files that are all
+      // present. Same defect class as a ledger row carrying the reason of a different decision.
       reason:
-        `zero ledger archive files matched under ${ledger.stateDir} — a live-file-only rate would be an ` +
-        "undercount (see lib/ledger-grep.ts's resolveLedgerUnion); this window is UNMEASURED, not a rate " +
-        "over the live file alone",
+        ledger.unread.length > 0
+          ? `${ledger.unread.length} of ${ledger.archiveCount} ledger rotation(s) under ${ledger.stateDir} ` +
+            `could not be read (${ledger.unread.join(", ")}) — coverage is PARTIAL, so this window is ` +
+            "UNMEASURED rather than a rate over the rotations that happened to open"
+          : `zero ledger archive files matched under ${ledger.stateDir} — a live-file-only rate would be an ` +
+            "undercount (see lib/ledger-grep.ts's resolveLedgerUnion); this window is UNMEASURED, not a rate " +
+            "over the live file alone",
       windowDescription,
       archiveCount: ledger.archiveCount,
       liveFileRead: ledger.liveFileRead,
