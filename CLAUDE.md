@@ -304,15 +304,30 @@ forensic detail, so the narrative does not need to live here.
   ci-gate's wait cap sized under the real check wall-clock, a deploy ceiling consumed by a dry-run
   that delivered nothing, and a check-wait bound where 21 of 21 booked PRs later merged.
   *(W1-T312, W1-T380/#1392, W1-T382/#1401)*
-- **This host's `awk` is mawk, which SILENTLY IGNORES `\s` and `\b` — an awk probe returning nothing
-  has not proved absence.** Measured here: over a file containing `  let b = 2;`, the pattern
+- **A ZERO IS NOT A MEASUREMENT UNTIL A POSITIVE CONTROL PROVES THE QUERY COULD SEE ITS CORPUS —
+  TWO TOOLS HERE ANSWER WRONG INSTEAD OF ERRORING.** Both were caught by a control; neither was
+  caught by reading the query.
+  **(a) `awk` is mawk and SILENTLY IGNORES `\s` and `\b`.** Over a file containing `  let b = 2;`,
   `/^[[:space:]]+(let|const)/` matches 1 and `/^\s+(let|const)/` matches 0. Neither errors. One
-  session's declaration scan used the `\s` form and reported an EMPTY declaration list, and its
-  companion `\b<name>\b` scan reported a row of zeros; both read as measurements and both had matched
-  nothing, and the conclusion drawn from them (that a refactor was scope-safe) was reached on no
-  evidence at all. Use POSIX classes (`[[:space:]]`) or `grep -E`/`grep -w`, and before believing any
-  ZERO, run the pattern against a line you KNOW matches. *(2026-08-09 — a control caught it; reading
-  the pattern did not, twice)*
+  session's declaration scan used the `\s` form, reported an EMPTY declaration list and a companion
+  row of zeros, and concluded a refactor was scope-safe on no evidence at all. Use POSIX classes
+  (`[[:space:]]`) or `grep -E`/`grep -w`. *(2026-08-09, twice)*
+  **(b) THE `grep` IN THIS HARNESS IS A ugrep WRAPPER WITH `-I` (ignore-binary) INJECTED, so a file
+  holding ONE NUL byte is skipped entirely — no output, exit 1, indistinguishable from real
+  absence.** FOUR tracked sources carry a DELIBERATE raw NUL and are load-bearing, not corrupt:
+  `src/lib/task-linter.ts` and `src/lib/flight-signals.ts` use it as a field separator in
+  `criterionKey`/`hashToolCall`; `test/gate-properties.test.ts` and `test/property-parsers.test.ts`
+  carry it in their `HAZARDS` fuzz alphabets. MEASURED: `grep -rl criterionKey src/` returns EMPTY
+  while `grep -arl` returns the file. **BARE `rg` IS BLIND THE SAME WAY** in a directory sweep
+  (`rg -l` EMPTY, `rg -la` and `git grep -l` fine), so "use grep -a or rg" is NOT the rule — `rg`
+  alone is unsafe. `/usr/bin/grep` is unaffected, which is why this went unnoticed for months: a
+  human at a terminal never sees it. Use `grep -ar`, `rg -la` or `git grep` for ANY sweep that
+  decides a `files:` list, a violation count or a scope audit. THE POPULATION IS EXACTLY FOUR, and
+  `git ls-files -z | xargs -0 perl -0777 -ne 'print "$ARGV\n" if /\0/'` names it — **`git grep
+  --cached -I -l ''` does NOT**, because git sniffs only the first 8000 bytes and two of the four
+  carry their NUL past that. The durable fix is to write the separator as the `\0` ESCAPE, which is
+  byte-identical (proven: same string, same length, same sha256) and makes the files plain text
+  again, rather than a flag every session must remember. *(2026-08-11)*
 
 ## Operating this host
 
