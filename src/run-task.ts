@@ -4220,16 +4220,67 @@ export function taskRecordContextLine(
  * line against N. Same reason the plan body is not shipped to workers (see `renderReconPrompt`'s
  * doc on `planIndexBlock`): name the retrievable thing, do not copy it.
  */
+/**
+ * The label every relayed COULDN'T-VERIFY line carries, so a worker can tell an OBSERVATION from
+ * a GAP. Both kinds arrive as `recon#<taskId>`-cited CONTEXT bullets — both genuinely came from
+ * recon — and the citation says WHERE a line came from, never WHAT EPISTEMIC KIND it is. Without
+ * this prefix the two would be indistinguishable once rendered, which is worse than dropping the
+ * section: an unmarked gap reads as an established fact.
+ */
+export const RECON_UNVERIFIED_PREFIX = "RECON DID NOT ESTABLISH THIS — verify it yourself before relying on it: ";
+
+/**
+ * The CONTEXT block injected when recon SUCCEEDED: recon's OBSERVED lines and its COULDN'T-VERIFY
+ * lines, each a cited claim.
+ *
+ * WHY COULDN'T-VERIFY TRAVELS, AND WHAT IT COST NOT TO. `parseReconReport` (lib/worker.ts) fills
+ * all three sections; this function used to read `parsed?.observed` ALONE, so the other two were
+ * computed on every dispatch and dropped before `renderImplementPrompt` was ever called. MEASURED,
+ * run W1-T409-1786487330401: a 5-turn recon wrote "THIS RECON ONLY CONFIRMED EXISTENCE, NOT
+ * CONTENTS" and named the files that had to be read first. That text reached the ledger
+ * (`report.followups`) and the operator's console and NEVER reached the implement worker, which
+ * then ran 73 turns, spent $4.08 and produced zero commits. The one reader who could act on the
+ * warning was the one reader routed away from it.
+ *
+ * THE RECON WAS NOT AT FAULT and is deliberately not "fixed" here. `renderReconPrompt`'s three
+ * named commands (`git remote -v`, `git log --oneline -5`, `ls`) are all ORIENTATION — none reads
+ * a file's contents — and its signature takes no task argument, so it cannot ask for a task's
+ * design. "Confirm existence, not contents" is that prompt's own worked example, and 5 turns is
+ * the success mode (`RECON_MAX_TURNS`'s doc records six sonnet successes at 5-8 turns against
+ * every failure clustered at 9). The recon reported its limit correctly; only the routing was wrong.
+ *
+ * INFERRED IS DELIBERATELY NOT RELAYED, and the reason is mechanical rather than squeamish.
+ * `section()` (lib/worker.ts) returns `m[1].trim()` — the capture AFTER the header — so the label
+ * is STRIPPED and an extracted string carries no marker of which section produced it. A relayed
+ * inference would therefore arrive as a `recon#`-cited CONTEXT bullet indistinguishable in kind
+ * from an observation, and {@link assertProvenance} would admit it to the linted claim set with
+ * exactly the same standing. That is a warrant it has not earned: INFERRED is what recon
+ * CONCLUDED without establishing, so relaying it invites a worker to build on unverified premises.
+ * COULDN'T-VERIFY is safe in the direction that matters — it LOWERS confidence, so a mistaken one
+ * can only cause a worker to re-check something, never to trust something false.
+ *
+ * NO HEADING, BY CONSTRUCTION. The gaps render as ordinary prefixed bullets rather than a section
+ * with a title, so an EMPTY `couldntVerify` contributes zero lines and there is no dangling
+ * heading to leave behind — the silently-empty-block condition {@link reconDegradedContextNote}'s
+ * doc exists to prevent cannot arise here, because there is nothing to be empty.
+ */
 function reconObservedToContext(recon: WorkerResult, taskId: string, recordPath?: string): string {
   const parsed = parseReconReport([recon.text, recon.blocks.join("\n")].join("\n"));
-  const observed = parsed?.observed ?? "";
-  const lines = observed
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0);
-  // Each OBSERVED line becomes a cited CONTEXT claim (provenance from recon). The record line
-  // leads: it is stable per task, while recon's output is per-run (cache-aware ordering, W1-T35).
-  return [taskRecordContextLine(taskId, recordPath), ...lines.map((l) => `- ${l} ${citation(`recon#${taskId}`)}`)]
+  const nonEmptyLines = (s: string): string[] =>
+    s
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0);
+  const lines = nonEmptyLines(parsed?.observed ?? "");
+  const gaps = nonEmptyLines(parsed?.couldntVerify ?? "");
+  // Each line becomes a cited CONTEXT claim (provenance from recon). The record line leads: it is
+  // stable per task, while recon's output is per-run (cache-aware ordering, W1-T35). Gaps come
+  // LAST so the prompt reads observations-then-caveats, and each carries the prefix above.
+  return [
+    taskRecordContextLine(taskId, recordPath),
+    ...lines.map((l) => `- ${l} ${citation(`recon#${taskId}`)}`),
+    ...gaps.map((l) => `- ${RECON_UNVERIFIED_PREFIX}${l} ${citation(`recon#${taskId}`)}`),
+  ]
     .filter((s) => s.length > 0)
     .join("\n");
 }
