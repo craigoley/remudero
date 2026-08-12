@@ -331,12 +331,20 @@ forensic detail, so the narrative does not need to live here.
   zero. `awk` is mawk: over a file containing `  let b = 2;`, `/^[[:space:]]+(let|const)/` matches 1
   and `/^\s+(let|const)/` matches 0 — one session's declaration scan used the `\s` form, reported an
   EMPTY declaration list and a row of zeros, and called a refactor scope-safe on no evidence
-  *(2026-08-09, twice)*. `git grep -E` IS THE SAME ENGINE PROBLEM, and it is the one that bites a
-  repo sweep: MEASURED, `git grep -lE '\busr/bin\b' -- CLAUDE.md` returns **0** while
-  `git grep -lE 'usr/bin' -- CLAUDE.md` returns 1. `git grep -P`, `git grep -w` and
-  `/usr/bin/grep -E '\busr\b'` all find it — which is exactly what makes this invisible: the `-E` you
-  type at a terminal honours `\b` and the one inside `git grep` does not *(2026-08-12)*. Use POSIX
-  classes, `-w`, or `git grep -P`; never `\b`/`\s` under `awk` or `git grep -E`.
+  *(2026-08-09, twice)*. **`\b` IS A SEPARATE TRAP AND IT IS NOT AN ENGINE DIFFERENCE — `git grep -E`
+  DOES honour it.** MEASURED at 6e7d131: `git grep -lE '\bdate' -- src/` returns **21** and
+  `git grep -lE '\busr\b' -- src/` returns **4**, so a `\b` sweep that reads zero has NOT hit a
+  broken engine. What actually fails is `\b` ADJACENT TO A NON-WORD CHARACTER, which asserts a
+  boundary that is usually absent: `git grep -lE '/usr/bin/(date|security)' -- src/` returns **3**
+  while `\b/usr/bin/(date|security)\b` returns **0**, because the leading `\b` sits before `/` and
+  needs a word character to its left where the text has a space. **GNU `/usr/bin/grep -E` SCORES THE
+  IDENTICAL PAIR 1 AND 0** on `run /usr/bin/date now`, so this reproduces everywhere and is portable
+  regex semantics, not a harness quirk — and `/usr/bin/grep -E '\busr'` on that same line returns 1,
+  the same as git's. Anchor on the non-word character itself (`[[:space:]]/usr/bin/`), use `-w`, or
+  drop the `\b`. Never `\s` under `awk`. *(2026-08-12; this clause previously claimed git grep -E
+  ignores `\b` while a terminal `-E` honours it — its own cited example,
+  `git grep -lE '\busr/bin\b' -- CLAUDE.md`, returns 1 rather than the 0 it recorded, so the
+  mechanism above replaces it)*
   **(b) THE `grep` IN THIS HARNESS IS A ugrep WRAPPER WITH `-I` (ignore-binary) INJECTED, so a file
   holding ONE NUL byte is skipped entirely — no output, exit 1, indistinguishable from real
   absence.** THE POPULATION IS NOW ZERO AND A GATE HOLDS IT THERE — W1-T438/#1664 applied the
