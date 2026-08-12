@@ -1,0 +1,127 @@
+- id: W1-T439
+  title: "the licence boundary ratified in the 2026-08-11 entry is a REPO boundary that nothing enforces — a PR relicensing the entire core went 21-of-22 green with ZERO checks objecting, so pin the core's Apache-2.0 identity and make LICENSE, package.json and README prove they still agree"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  rationale: "FROM the merged DECISIONS.md entry of 2026-08-11 (PR #1599, merged 9f208c16),
+    re-derived at 9f208c16. That entry recommends keeping the harness Apache-2.0 and putting the
+    licence boundary at the relay and hosted code. This task builds the only half of it that is
+    mechanically enforceable today.
+    WHERE THE BOUNDARY ACTUALLY IS, established from source rather than assumed — and it is NOT
+    where the phrase `boundary at the relay` first suggests. The relay CLIENT is CORE and ships in
+    this repo: W1-T431 declares `src/lib/relay-client.ts`, inside `src/lib/`, because the instance
+    DIALS OUT and the dialling code is part of the harness. The relay SERVER — remudero.com — is
+    the Pro side and does not exist in this tree at all. MASTER-PLAN's D-11 entry says it plainly:
+    accounts exist at the relay only, the relay is a transparent proxy over the console contract,
+    and `core stays fully self-hosted per §6A`. SO THE BOUNDARY IS A REPO BOUNDARY, NOT A PATH SPLIT
+    INSIDE THIS ONE. There is nothing here to classify into core-vs-Pro; everything tracked here is
+    core. A design that added a path allowlist would be enforcing a division that does not exist.
+    WHAT IS ACTUALLY UNPROTECTED, AND IT WAS MEASURED RATHER THAN ARGUED. If the whole repo is core
+    and the commitment is that core is Apache-2.0 and never relicensed (MASTER-PLAN §6A: a
+    `one-way door, accepted knowingly`, with the BSL/SSPL escape hatch `CLOSED to us`), then the
+    thing worth guarding is that the core's licence cannot MOVE without anyone noticing. Today
+    nothing guards it. THE PROOF CASE IS THIS REPO'S OWN HISTORY, at sha 7af9c798 — the first
+    revision of PR #1599, which replaced `LICENSE` with the Functional Source License, added a
+    second licence file, changed `package.json`'s licence field to a non-SPDX string, and rewrote
+    README's `Open source` claim. MEASURED: 22 check runs, 21 success, and NOT ONE objected to the
+    licence change. The single failure was the DECISIONS.md provenance floor (W1-T352), which is
+    about entry attribution and would have been satisfied by one line — after which a PR
+    relicensing the entire product would have been fully green. The only thing that stopped it was
+    a human reading the diff.
+    WHY A GATE AND NOT A CONVENTION. Law 4: a convention binds only where compliance is verifiable
+    at invocation. `check the licence did not move` is invisible in a diff and there is no reviewer
+    step that reads `LICENSE`. This is the same shape as the raw-NUL finding filed as W1-T438: the
+    honest fix is the one a machine can check.
+    THREE FACTS THE GATE RESTS ON, each re-derived at 9f208c16: `LICENSE` is Apache-2.0 and its
+    only content-establishing commit is 7985d6a; `package.json` carries `\"license\": \"Apache-2.0\"`;
+    and no licence check exists anywhere — a sweep of `scripts/`, `test/` and `.github/workflows/`
+    for licence terms returns only two incidental test files and one REST fixture, none of which
+    asserts anything about this repo's own licence."
+  design: "(i) THE GATE IS A CONSISTENCY CHECK, NOT A LITERAL PIN, and the difference is the whole
+    design. Pinning one string catches a wholesale swap and misses the dangerous case: a PARTIAL
+    change that leaves the three declarations disagreeing — `LICENSE` moved but `package.json` not,
+    or the licence moved while README still advertises the old status. Assert instead that the
+    three AGREE and that the agreed value is Apache-2.0: the licence file's identity, the
+    `license` field in `package.json`, and README's own claim about the project's licence status.
+    A PR that genuinely intends to relicense must then edit the gate in the same changeset, which
+    is exactly the loudness this is for — the change becomes deliberate and reviewable instead of
+    a one-line edit nobody reads.
+    (ii) COMPLETENESS OVER THE LICENCE-BEARING SURFACE, in the shape `ci-parity:drift` already uses
+    (`runCiParity`, `src/lib/ci-parity.ts`): derive the live set from the tree rather than from a
+    second hand-written list, diff it against a declared table, and FAIL naming what is
+    unaccounted for. Here the live set is the tracked licence-bearing files — anything matching a
+    LICENSE/COPYING-style name at the repo root. Today that set is exactly one. If a second
+    licence file appears, as `LICENSE-APACHE-2.0` did in the reverted revision, it must be
+    declared with a reason or the gate fails. That is what makes the guard survive the exact move
+    that was already attempted once, rather than only the move someone imagined.
+    (iii) IT MUST BE A TEST, NOT A ci.yml JOB — a hard constraint, same as W1-T438's. `judgeReview`'s
+    instrument-isolation predicate (Standing rule 25) FORCES the review state to failure, never
+    suppressible by `applyVerdictStability`, when a diff carries an `INSTRUMENT_SURFACE` path
+    alongside any `isProductPath` src/ path. `^\\.github/workflows/` is instrument surface. A test
+    is not: `isProductPath` excludes `test/`. Four suites already read the tree this way by
+    shelling `git ls-files` — `test/instrument-surface-completeness.test.ts`,
+    `test/enforcement-data-carveout.test.ts`, `test/checkout-writers.test.ts`,
+    `test/moving-base-changed-files.test.ts` — so the shape is idiomatic and needs no CI wiring:
+    it rides the existing `ci` job's `npm run test:ci`.
+    (iv) WHAT THIS DOES NOT DO, stated because a gate that is oversold is worse than none. It
+    provides NO legal protection and creates no moat. Everything published to date is irrevocably
+    Apache-2.0 and this changes nothing about that. It is a LEGIBILITY AND ORDERING guard: it makes
+    a licence move impossible to land silently, and it makes the relay's licence question surface
+    at the moment Pro-side code would first appear rather than after. Anyone reading the gate must
+    not mistake it for a defence.
+    (v) THE FAILURE MESSAGE MUST NAME THE DISAGREEMENT AND THE RECORD. On failure, say WHICH of the
+    three declarations diverged and what each says, and cite the 2026-08-11 DECISIONS.md entry and
+    MASTER-PLAN §6A as the commitment being contradicted. A gate that fails without naming what it
+    saw reproduces the defect class W1-T438 is filed for — an answer that does not say what it
+    could not see.
+    (vi) NOT IN SCOPE, NAMED SO IT IS NOT INFERRED. The RELAY'S OWN LICENCE is undecided and stays
+    so — the merged entry records that it can wait until W1-T431 is dispatched, and this task takes
+    no position. GOVERNANCE.md and the published never-relicense CONTRACT that §6A calls for are an
+    operator publication act, not a gate, and are deliberately left out. And W1-T431's `depends_on`
+    is NOT edited here: the ordering argument belongs to whoever dispatches it, and rewriting
+    another task's record inside a filing is the shape Rule 15 exists to refuse."
+  acceptance:
+    - claim: "a change that moves the licence file's identity away from Apache-2.0 fails the gate, and the failure names which declarations disagree"
+      proof: "unit test: test/licence-boundary.test.ts"
+    - claim: "a partial change that moves one declaration and leaves the others stale fails, so the three cannot silently diverge"
+      proof: "unit test: test/licence-boundary.test.ts"
+    - claim: "an undeclared second licence-bearing file at the repo root fails the completeness check rather than being ignored"
+      proof: "unit test: test/licence-boundary.test.ts"
+    - claim: "the repository as it stands today passes, so the gate is not red on arrival"
+      proof: "unit test: test/licence-boundary.test.ts"
+  risk: medium
+  origin: decision#licence-boundary-2026-08-11
+  plan_refs: ["§6A", "D-8", "D-11", "W1-T352"]
+  files: [test/licence-boundary.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — nothing here needs an operator ruling. The licence VALUE being asserted is
+    not chosen by this task; it is read from what the repository already is and what the merged
+    2026-08-11 entry already recommends. Every genuinely open licence question is excluded by
+    design (vi).
+    risk:medium, NOT high, and the band is argued rather than defaulted: `subsystemsOf` reads
+    `files:` plus acceptance text, and this task declares ONE path in ONE subsystem (`test/`) with
+    criteria that name no second module — so the Rule 19 span is 1 and `sizingViolation` does not
+    fire below high. Raising it to high would be cargo-culting W1-T438's band onto a task with a
+    quarter of its surface.
+    files: IS ONE PATH AND THAT IS THE POINT, not an oversight. Design (iii) forces a test-only
+    implementation, and design (i) reads `LICENSE`, `package.json` and `README.md` at RUNTIME
+    through the tree rather than importing them, so none of the three is edited and none belongs in
+    `files:`. If an implementer finds they must touch `src/`, that is a signal the design was
+    misread — the gate has no product-code seam and adding one would re-open the Rule 25 problem
+    design (iii) exists to avoid.
+    All four proofs name ONE forward-referenced PATH, never a symbol: a path forward-reference is
+    safe and a symbol one is a guess, and a `grep:` proof naming an existing symbol would match the
+    merge base as well as the head and be downgraded to a stale proof that discriminates nothing.
+    Four criteria share that file deliberately — they are four distinct assertions the same suite
+    must carry, and in the pure-path form the proof executes the whole file.
+    budget_usd 55 — below a normal implement task because there is no design to discover and no
+    product code to touch; the cost is the four falsifier directions, of which the third
+    (an undeclared second licence file) is the one that actually needs care, since it must fail on
+    a file that does not exist yet and pass on today's single one.
+    THE MEASURED FIGURE IN THE RATIONALE SHOULD NOT BE QUOTED FORWARD — re-run the check-runs query
+    against 7af9c798 rather than trusting 21-of-22, and note that sha is on a force-pushed branch
+    so it is reachable by SHA but is no longer an ancestor of any open PR."
