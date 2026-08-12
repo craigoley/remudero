@@ -39,6 +39,9 @@ plan/operator-notes.ndjson
 # deploy aborts. NAMED EXACTLY, never a *.json glob — that would mask package-lock.json and be worse
 # than the disease.
 ee-open.json
+# Claude Code's own per-project state directory. Untracked since 2026-08-03 and never committable;
+# on its own it made `git status --porcelain` non-empty, which is all self-sync's dirty check reads.
+.claude/
 *.log
 
 # W1-T421: mutated module copies written by test/helpers/mutant-module.ts. They live under test/
