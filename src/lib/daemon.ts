@@ -618,6 +618,15 @@ export interface DaemonDeps {
    */
   isCircuitTripped?: (taskId: string) => boolean;
   /**
+   * WHAT THE BREAKER SAW for a task, supplied by the SAME memoised evaluation the
+   * `isCircuitTripped`/`isIndeterminate` predicates answered from (run-task.ts's
+   * `breakerGateFor().detailFor`) — never a second call to the predicate. Spread onto the
+   * `dispatch.circuit_broken` / `dispatch.indeterminate` rows so a refusal records the count,
+   * the bound and WHICH of the three outcomes was reached, instead of only that it fired.
+   * Optional: a caller that omits it logs exactly the bare rows it logged before.
+   */
+  breakerDetail?: (taskId: string) => Record<string, unknown> | undefined;
+  /**
    * Called once per task whose circuit breaker trips this tick — the real
    * command escalates ONE (deduped) needs-human issue naming the loop, mirroring
    * `escalateBlock` below.
@@ -2196,7 +2205,7 @@ export async function runDaemon(
       // consulted — the daemon keeps polling everything else rather than
       // halting, same discipline as `dispatch.skipped`/`dispatch.circuit_broken`.
       onIndeterminate: (t) => {
-        log("dispatch.indeterminate", { task: t.id });
+        log("dispatch.indeterminate", { task: t.id, ...deps.breakerDetail?.(t.id) });
         deps.onIndeterminate?.(t);
       },
       isCircuitTripped: deps.isCircuitTripped,
@@ -2206,7 +2215,7 @@ export async function runDaemon(
       // daemon keeps polling everything else rather than halting the whole
       // loop, and never re-escalates a task it already escalated.
       onCircuitBreak: (t) => {
-        log("dispatch.circuit_broken", { task: t.id });
+        log("dispatch.circuit_broken", { task: t.id, ...deps.breakerDetail?.(t.id) });
         circuitBrokenThisTick.push(t.id);
         if (!circuitEscalated.has(t.id)) {
           circuitEscalated.add(t.id);

@@ -439,7 +439,8 @@ import {
   createDispatchBreakerCache,
   DEFAULT_MAX_TASK_LIFETIME_DISPATCHES,
   deriveStatus,
-  evaluateDispatchBreakerCorroborated,
+  evaluateDispatchBreakerCorroboratedDetailed,
+  type DispatchBreakerDetail,
   ghGateway,
   ghRequiredStatusCheckContexts,
   isLifetimeDispatchCapExceeded,
@@ -10017,22 +10018,35 @@ export function escalateStarvation(
  * every task's verdict exactly as {@link evaluateDispatchBreaker} alone computed it — see that
  * function's doc for the fail-to-local-count contract.
  */
-function breakerGateFor(
+export function breakerGateFor(
   ledgerPath: string,
   openHeadBranches: ReadonlyArray<PrRef> | null | undefined,
 ): {
   isIndeterminate: (taskId: string) => boolean;
   isTripped: (taskId: string) => boolean;
   isLifetimeCapExceeded: (taskId: string) => boolean;
+  /**
+   * WHAT THE BREAKER SAW for `taskId`, straight off the memo the boolean
+   * predicates above already answered from — never a second evaluation. A
+   * recomputation could return a different answer (the ledger moves under a
+   * live daemon) and the ledger row would then be a plausible lie about a
+   * decision that was made on other numbers, which is precisely the class this
+   * exists to close.
+   */
+  detailFor: (taskId: string) => DispatchBreakerDetail;
 } {
   const cache = createDispatchBreakerCache();
-  let memo: { taskId: string; state: "tripped" | "clear" | "indeterminate" } | undefined;
-  const stateFor = (taskId: string) => {
+  let memo: { taskId: string; detail: DispatchBreakerDetail } | undefined;
+  const detailFor = (taskId: string) => {
     if (memo?.taskId !== taskId) {
-      memo = { taskId, state: evaluateDispatchBreakerCorroborated(ledgerPath, taskId, cache, openHeadBranches) };
+      memo = {
+        taskId,
+        detail: evaluateDispatchBreakerCorroboratedDetailed(ledgerPath, taskId, cache, openHeadBranches),
+      };
     }
-    return memo.state;
+    return memo.detail;
   };
+  const stateFor = (taskId: string) => detailFor(taskId).state;
   let lifetimeMemo: { taskId: string; exceeded: boolean } | undefined;
   const lifetimeCapExceededFor = (taskId: string) => {
     if (lifetimeMemo?.taskId !== taskId) {
@@ -10044,7 +10058,19 @@ function breakerGateFor(
     isIndeterminate: (taskId) => stateFor(taskId) === "indeterminate",
     isTripped: (taskId) => stateFor(taskId) === "tripped",
     isLifetimeCapExceeded: lifetimeCapExceededFor,
+    detailFor,
   };
+}
+
+/**
+ * The `breakerDetail` dep BOTH dispatch commands wire — ONE definition, so `drainCommand` and
+ * `daemonCommand` cannot drift into logging different things about the same decision. Spreads a
+ * COPY of the memoised detail (the row is a snapshot; the gate keeps its own object).
+ */
+export function breakerDetailDep(
+  gate: Pick<ReturnType<typeof breakerGateFor>, "detailFor">,
+): (taskId: string) => Record<string, unknown> {
+  return (taskId) => ({ ...gate.detailFor(taskId) });
 }
 
 /**
@@ -10486,6 +10512,9 @@ async function drainCommand(
         // "indeterminate" (handled above by isIndeterminate) rather than a false
         // "clear" that would silently untrip an already-tripped task.
         isCircuitTripped: (taskId) => breakerGate.isTripped(taskId),
+        // W1-T314: the row records WHAT THE BREAKER SAW, from the same memoised
+        // evaluation the predicate above answered from — never a second call.
+        breakerDetail: breakerDetailDep(breakerGate),
         onCircuitBreak: (t) => escalateCircuitBreak(t, { owner, repo, ledgerPath, runId }),
         // LIFETIME DISPATCH CAP (W1-T316 wires W1-T271's own predicate): the SAME
         // breakerGate this invocation already holds for the streak breaker above,
@@ -11276,6 +11305,9 @@ export async function daemonCommand(
         // "indeterminate" (handled above by isIndeterminate) rather than a false
         // "clear" that would silently untrip an already-tripped task.
         isCircuitTripped: (taskId) => breakerGate.isTripped(taskId),
+        // W1-T314: the row records WHAT THE BREAKER SAW, from the same memoised
+        // evaluation the predicate above answered from — never a second call.
+        breakerDetail: breakerDetailDep(breakerGate),
         onCircuitBreak: (t) => escalateCircuitBreak(t, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
         // LIFETIME DISPATCH CAP (W1-T316 wires W1-T271's own predicate): the SAME
         // breakerGate this invocation already holds for the streak breaker above,
