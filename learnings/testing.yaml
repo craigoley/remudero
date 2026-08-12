@@ -32,3 +32,22 @@
     task-inside-a-task?"). Cheap deterministic checks first; the LLM layer is advisory and does not block.
   src: W1-T12, this session
   cited: "2026-07-15"
+
+# ── A "live proof" runs the tree's CURRENT checkout, not the branch you meant. (W1-T445) ──
+- id: live-proof-runs-the-checked-out-code
+  subsystem: testing
+  lifecycle: active
+  files: [bin/rmd, src/lib/self-sync.ts]
+  fact: >-
+    A live proof that shells `./bin/rmd` proves whatever source the WORKING TREE holds right then —
+    bin/rmd execs `$DIR/src/run-task.ts` relative to ITSELF, so checking out another commit to build
+    the fixture silently runs THAT commit's code (measured: a fix "disproved" by a fixture cut at
+    origin/main~1). And a fix whose trigger needs the tree BEHIND origin/main with no local commits
+    cannot be proven live at all before merge — a branch carrying it is by definition ahead. Prove it
+    with a real-repo unit test; a live run can only REPRODUCE the defect already on main.
+  src: W1-T445, PR#1662
+  cited: "2026-08-12"
+  # Pinned to bin/rmd still resolving its entrypoint relative to the script — if that ever becomes
+  # an absolute install path, the swap-on-checkout hazard disappears and this entry must quarantine
+  # rather than keep being injected.
+  assertion: 'grep -q "DIR/src/run-task.ts" bin/rmd'
