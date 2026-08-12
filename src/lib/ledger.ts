@@ -388,6 +388,19 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // needs-human issue per boot, roughly one a MINUTE for as long as the storm lasts.
   "daemon.crashloop.escalated",
   "daemon.headroom_reserve.escalated",
+  // This change: `escalateHeadroomParkCeiling` (run-task.ts) READS this row to decide whether it
+  // has already paged for the CURRENT blind stretch — it compares this row's timestamp against
+  // the newest `daemon.headroom` (immediately relevant below, and already retained). A rotation
+  // dropping this one re-opens one duplicate page per daemon boot for as long as the probe stays
+  // broken, which on a restart-looping host is exactly the pager this dedup exists to prevent.
+  "daemon.headroom.park_ceiling.escalated",
+  // …and the row that ENDS a blind stretch, which the same dedup compares against: a readable
+  // probe writes `daemon.headroom`, and an escalation newer than the newest of those means we
+  // have already paged for the CURRENT blindness. RETENTION COST IS ZERO — `isRenderRelevantStep`
+  // already keeps it for the console's account strip, and `rotateLedger` retains a line matching
+  // ANY of the three sets — so this entry only records that a DECISION now reads it too, which is
+  // what the derived-from-consumers test enforces.
+  "daemon.headroom",
   // W1-T372: escalateQuotaExhaustion's (run-task.ts) own dedup marker, read per bucket
   // (`l.bucket === info.bucket && l.resets_at === info.resetsAt`) — the SAME "written whether
   // or not delivery succeeds" discipline as `daemon.headroom_reserve.escalated` immediately

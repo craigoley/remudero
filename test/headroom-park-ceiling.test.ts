@@ -12,7 +12,8 @@ import {
 } from "../src/lib/daemon.js";
 import { DEPLOY_IDLE_DEFER_CEILING_MS } from "../src/lib/deployer.js";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
-import { writeFileSync } from "node:fs";
+import { daemonCommand, escalateHeadroomParkCeiling, ledgerPathFor } from "../src/run-task.js";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
 /**
  * A BLIND GOVERNOR NEVER RESUMED. `consecutiveUnreadable` is reset only by a READABLE probe (and
@@ -276,4 +277,135 @@ test("a RECOVERED probe clears the park clock — a later park waits the full ce
   if (nextForce >= 0) {
     assert.ok(nextForce >= 2, `a fresh park must take several ticks to reach the ceiling, saw ${after.join(",")}`);
   }
+});
+
+// ── CROSS-BOOT DEDUP: the in-process guard cannot survive a restart, and a restart-looping
+// daemon that stays blind would otherwise page once per boot. The episode key is "has the
+// governor SEEN anything since we last paged?" — a blind stretch has no natural boundary the
+// way a reserve breach's `resets_at` does, so its identity is the last readable probe. ───────
+
+function escalateFixture(): { ledgerPath: string; calls: () => number; issues: { create: () => string } } {
+  const dir = mkdtempSync(join(tmpdir(), "park-escalate-"));
+  const ledgerPath = join(dir, "ledger.ndjson");
+  let n = 0;
+  return {
+    ledgerPath,
+    calls: () => n,
+    issues: {
+      create: () => {
+        n++;
+        return "https://github.com/o/r/issues/1";
+      },
+    },
+  };
+}
+const INFO = { consecutiveUnreadable: 4, parkedMs: 30 * 60_000, ceilingMs: 30 * 60_000 };
+
+test("the park escalation is deduped ACROSS BOOTS while the governor is still blind", () => {
+  const f = escalateFixture();
+  escalateHeadroomParkCeiling(INFO, { owner: "o", repo: "r", ledgerPath: f.ledgerPath, runId: "BOOT-1", issues: f.issues as never });
+  assert.equal(f.calls(), 1, "the first blind stretch pages once");
+
+  const marker = readFileSync(f.ledgerPath, "utf8").trim().split("\n").map((l) => JSON.parse(l))
+    .find((l) => l.step === "daemon.headroom.park_ceiling.escalated");
+  assert.ok(marker, "a durable marker is written — the in-process guard alone cannot survive a restart");
+  assert.equal(marker.blind_since, "never", "and records that the governor had never read successfully");
+
+  // A FRESH PROCESS (a restart, or a crash-loop) re-observing the SAME blindness must stay quiet.
+  escalateHeadroomParkCeiling(INFO, { owner: "o", repo: "r", ledgerPath: f.ledgerPath, runId: "BOOT-2", issues: f.issues as never });
+  escalateHeadroomParkCeiling(INFO, { owner: "o", repo: "r", ledgerPath: f.ledgerPath, runId: "BOOT-3", issues: f.issues as never });
+  assert.equal(f.calls(), 1, "still one page — a restart-looping blind daemon is not a pager");
+});
+
+test("a probe that RECOVERS ends the episode, so a LATER blind stretch pages again", () => {
+  const f = escalateFixture();
+  escalateHeadroomParkCeiling(INFO, { owner: "o", repo: "r", ledgerPath: f.ledgerPath, runId: "BOOT-1", issues: f.issues as never });
+  assert.equal(f.calls(), 1);
+
+  // The governor reads successfully — the row a readable probe writes, newer than the marker.
+  appendFileSync(
+    f.ledgerPath,
+    JSON.stringify({ ts: new Date(Date.now() + 60_000).toISOString(), step: "daemon.headroom", window: "week" }) + "\n",
+  );
+
+  escalateHeadroomParkCeiling(INFO, { owner: "o", repo: "r", ledgerPath: f.ledgerPath, runId: "BOOT-2", issues: f.issues as never });
+  assert.equal(f.calls(), 2, "a NEW blind stretch after a real recovery is a NEW episode and pages again");
+
+  const markers = readFileSync(f.ledgerPath, "utf8").trim().split("\n").map((l) => JSON.parse(l))
+    .filter((l) => l.step === "daemon.headroom.park_ceiling.escalated");
+  assert.equal(markers.length, 2);
+  assert.notEqual(markers[1].blind_since, "never", "the second marker names the recovery it followed");
+});
+
+test("a THROWING gh gateway still writes the marker, so the next boot does not retry into a loop", () => {
+  const dir = mkdtempSync(join(tmpdir(), "park-escalate-throw-"));
+  const ledgerPath = join(dir, "ledger.ndjson");
+  let attempts = 0;
+  const boom = {
+    create: () => {
+      attempts++;
+      throw new Error("gh unreachable");
+    },
+  };
+  escalateHeadroomParkCeiling(INFO, { owner: "o", repo: "r", ledgerPath, runId: "BOOT-1", issues: boom as never });
+  const marker = readFileSync(ledgerPath, "utf8").trim().split("\n").map((l) => JSON.parse(l))
+    .find((l) => l.step === "daemon.headroom.park_ceiling.escalated");
+  assert.ok(marker, "the dedup marker is written whether or not DELIVERY succeeded");
+  assert.equal(marker.delivered, false, "and says plainly that it was not delivered");
+
+  escalateHeadroomParkCeiling(INFO, { owner: "o", repo: "r", ledgerPath, runId: "BOOT-2", issues: boom as never });
+  assert.equal(attempts, 1, "a failed delivery is never retried into an unbounded relaunch loop");
+});
+
+/**
+ * THE HOOK IS ONLY WORTH ANYTHING IF daemonCommand ACTUALLY SETS IT. Every test above drives
+ * `escalateHeadroomParkCeiling` directly, which proves the escalator and proves nothing about the
+ * wiring — the exact gap the W1-T356 sweepOrphans wiring test exists to close for its own dep, and
+ * the shape this mirrors: capture the REAL `DaemonDeps`, then CALL the captured hook and assert on
+ * the OUTCOME rather than on the identity of the closure.
+ *
+ * `PATH` IS STRIPPED AROUND THE CALL, DELIBERATELY. The production wiring passes no `issues`, so
+ * the hook resolves `ghIssueGateway`, which shells `execFileSync("gh", ...)` by BARE NAME. With no
+ * PATH there is no gh binary to find, the spawn fails ENOENT, `tryEscalate` catches it, and the
+ * test can never create a live issue against the self-targeted repo. That is also the assertion:
+ * `delivered: false` with the marker still written is precisely the gh-outage behaviour, so the
+ * unreachable gateway is the fixture AND the thing under test rather than a mock standing in.
+ */
+test("wiring: the REAL daemonCommand sets DaemonDeps.onHeadroomParkCeiling to the production escalator — the CAPTURED hook writes a dedup marker into the daemon's OWN ledger", async () => {
+  const home = mkdtempSync(join(tmpdir(), "park-ceiling-wiring-"));
+  const root = join(home, "Remudero");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  mkdirSync(join(root, "state"), { recursive: true });
+  const planPath = join(home, "tasks.yaml");
+  writeFileSync(planPath, "[]\n"); // an explicit --plan skips the git self-sync entirely
+
+  const oldHome = process.env.HOME;
+  const oldPath = process.env.PATH;
+  process.env.HOME = home;
+  let captured: DaemonDeps | undefined;
+  try {
+    const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+      runDaemon: async (_plan: Plan, deps: DaemonDeps) => {
+        captured = deps;
+        return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+      },
+    } as never);
+    assert.equal(code, 0, "the injected runDaemon returns a clean 'stopped' summary -> exit 0");
+    assert.ok(captured, "runDaemon was reached and its DaemonDeps captured");
+    assert.equal(typeof captured!.onHeadroomParkCeiling, "function", "the ceiling hook must be SET, not left undefined -- an unset hook forces the ceiling silently and pages nobody");
+
+    process.env.PATH = "";
+    captured!.onHeadroomParkCeiling!({ consecutiveUnreadable: 41, parkedMs: 1_900_000, ceilingMs: HEADROOM_PARK_CEILING_MS });
+  } finally {
+    process.env.PATH = oldPath;
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+  }
+
+  const lines = readFileSync(ledgerPathFor({ root } as never), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  const marker = lines.find((l) => l.step === "daemon.headroom.park_ceiling.escalated");
+  assert.ok(marker, "the captured hook must reach the REAL escalator and land its marker in the ledger daemonCommand resolved, not some other path");
+  assert.equal(marker.consecutive_unreadable, 41, "the info the hook was called with must survive the closure -- a wiring that drops it pages without the number that explains it");
+  assert.equal(marker.delivered, false, "gh was unreachable by construction, and the marker says so rather than claiming a delivery it did not make");
 });

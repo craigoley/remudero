@@ -9865,6 +9865,92 @@ export function escalateHeadroomReserve(
 }
 
 /**
+ * The daemon's `onHeadroomParkCeiling` hook: the headroom park outlived its ceiling, so the fleet
+ * dispatched BLIND for one tick rather than idling forever.
+ *
+ * DEDUPED ACROSS BOOTS, and the key is "has the governor SEEN anything since we last paged?".
+ * `escalateHeadroomReserve` above keys on `resets_at` because a reserve breach has a natural
+ * boundary; a blind stretch has none, so its identity is the last moment the governor could read
+ * at all. Concretely: skip when an `.escalated` row is NEWER than the newest `daemon.headroom`
+ * (the row a READABLE probe writes). That gives exactly one page per blind stretch —
+ *   - a daemon that restart-loops while still blind re-derives the same answer and stays quiet,
+ *     which the in-process guard alone could never do;
+ *   - a probe that RECOVERS writes a newer `daemon.headroom`, so the next blind stretch pages
+ *     again rather than staying silenced forever.
+ * Both rows are in {@link DECISION_RELEVANT_LEDGER_STEPS}, so rotation cannot make this
+ * re-page — and if the readable row somehow vanished first, the comparison fails QUIET (an
+ * existing escalation wins), which is the right direction for a notification.
+ */
+export function escalateHeadroomParkCeiling(
+  info: { consecutiveUnreadable: number; parkedMs: number; ceilingMs: number },
+  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
+): void {
+  // BOTH READS COMPARE AGAINST A STRING LITERAL INLINE, DELIBERATELY, rather than through a
+  // helper taking the step name as a parameter. `test/ledger-rotation.test.ts` discovers
+  // decision-relevant steps by scanning consumer source for that exact comparison form, so a
+  // parameterised helper is INVISIBLE to it — and the rotation-set membership this dedup depends
+  // on stops being self-enforcing. Measured: with the loop factored into a generic helper,
+  // deleting either entry from DECISION_RELEVANT_LEDGER_STEPS left that test green.
+  const lines = readLedgerLines(ctx.ledgerPath);
+  let lastReadable: string | undefined;
+  let lastEscalated: string | undefined;
+  for (const l of lines) {
+    const ts = typeof l.ts === "string" ? l.ts : undefined;
+    if (!ts) continue;
+    if (l.step === "daemon.headroom" && (lastReadable === undefined || ts > lastReadable)) lastReadable = ts;
+    if (l.step === "daemon.headroom.park_ceiling.escalated" && (lastEscalated === undefined || ts > lastEscalated)) {
+      lastEscalated = ts;
+    }
+  }
+  // Already paged for THIS blind stretch: no readable row at all since, or none newer.
+  if (lastEscalated !== undefined && (lastReadable === undefined || lastEscalated > lastReadable)) return;
+
+  const minutes = Math.round(info.ceilingMs / 60_000);
+  const issueUrl = tryEscalate(
+    {
+      // MANUAL, not HARD_STOP: dispatch is NOT paused here — it is proceeding riskily, which is
+      // the opposite posture from `escalateHeadroomReserve`'s breach and needs saying.
+      class: "MANUAL",
+      taskId: "daemon",
+      runId: ctx.runId,
+      summary: `headroom unreadable for ${minutes}m — dispatching BLIND past the park ceiling`,
+      detail:
+        `The usage probe has failed ${info.consecutiveUnreadable} consecutive times and the park ` +
+        `outlived its ${minutes}-minute ceiling, so the daemon dispatched with NO headroom reading ` +
+        `rather than idling forever. The spend bound this bypasses is deliberately accepted, not ` +
+        `satisfied: the fleet may now be spending against an exhausted account. The ceiling re-arms, ` +
+        `so exposure is one blind dispatch per ${minutes} minutes until a probe succeeds — but the ` +
+        `probe itself is the thing to fix. Check the usage.probe_failed rows for the stage and ` +
+        `reason, and the worker-home grant rows for a lost .claude slot.`,
+      options: [
+        {
+          label: "fix the probe",
+          detail: "Read the usage.probe_failed stage: spawn, parse or grant each point somewhere different.",
+        },
+        {
+          label: "disable the governor",
+          detail: "Setting headroom.enabled false skips the park entirely — dispatch stops being gated on a read that cannot succeed.",
+        },
+      ],
+      recommendation: "fix the probe",
+    },
+    { issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo), ledgerPath: ctx.ledgerPath, runId: ctx.runId },
+  );
+  appendLedger(ctx.ledgerPath, {
+    run_id: ctx.runId,
+    task_id: "daemon",
+    step: "daemon.headroom.park_ceiling.escalated",
+    consecutive_unreadable: info.consecutiveUnreadable,
+    parked_ms: info.parkedMs,
+    ceiling_ms: info.ceilingMs,
+    // Forensics: the moment the governor last saw anything, which is also this dedup's key.
+    blind_since: lastReadable ?? "never",
+    issue_url: issueUrl,
+    delivered: issueUrl !== null,
+  });
+}
+
+/**
  * W1-T372: the daemon's `onQuotaExhausted` hook, called when a `gh api rate_limit` bucket
  * (REST/core or GraphQL — read independently, `daemon.ts`'s tick) first crosses from having
  * budget to having none. UNLIKE `escalateHeadroomReserve` immediately above, dispatch is NOT
@@ -11459,6 +11545,8 @@ export async function daemonCommand(
         // P34 clause (c), W1-T249: the reserve gate's notification — dispatch is
         // already paused (runDaemon's own in-process idle) by the time this fires.
         onHeadroomBreach: (info) => escalateHeadroomReserve(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
+        onHeadroomParkCeiling: (info) =>
+          escalateHeadroomParkCeiling(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
         // W1-T372: both gh api rate_limit buckets, read fresh each tick alongside readUsage's
         // own headroom reading immediately above — never a second gh api rate_limit call.
         readGhQuota: () => readGhRateLimitBuckets(),
