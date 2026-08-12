@@ -1,0 +1,21 @@
+diff --git a/src/lib/foo.ts b/src/lib/foo.ts
+index 1111111..2222222 100644
+--- a/src/lib/foo.ts
++++ b/src/lib/foo.ts
+@@
+-export function foo(): number {
+-  return 1;
+-}
++export function foo(): number {
++  return 2;
++}
+diff --git a/plan/tasks.d/W1-T999-fake.yaml b/plan/tasks.d/W1-T999-fake.yaml
+index 3333333..4444444 100644
+--- a/plan/tasks.d/W1-T999-fake.yaml
++++ b/plan/tasks.d/W1-T999-fake.yaml
+@@
+   acceptance:
+     - claim: "foo returns the right value"
+       proof: "unit test: foo returns 2"
++    - claim: "foo is definitely correct"
++      proof: "trust me"

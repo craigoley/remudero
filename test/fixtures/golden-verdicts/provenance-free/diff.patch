@@ -1,0 +1,11 @@
+diff --git a/src/lib/greeting.ts b/src/lib/greeting.ts
+index 1111111..2222222 100644
+--- a/src/lib/greeting.ts
++++ b/src/lib/greeting.ts
+@@
+-export function greet(name: string): string {
+-  return `Hi, ${name}`;
+-}
++export function greet(name: string): string {
++  return `Hello, ${name}!`;
++}

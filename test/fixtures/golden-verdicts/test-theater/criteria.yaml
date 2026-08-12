@@ -1,0 +1,5 @@
+# The task row / proof set judgeReview is handed for this case. Deliberately a proof the
+# mechanical floor WOULD pass on its own — the point of this golden is that testTheater alone
+# must still flip the verdict red, not that the criterion itself is unmet.
+- claim: "frobnicate triples its input"
+  proof: "widget frobnicate triples input verified"

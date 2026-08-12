@@ -1,0 +1,3 @@
+# ReviewEvidence.taskDeclaredFiles — the task's declared `files:` scope. rogue.ts is touched by
+# the diff but never declared here, which is the planted violation.
+- src/lib/a.ts

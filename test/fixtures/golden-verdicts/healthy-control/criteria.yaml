@@ -1,0 +1,5 @@
+# A real, mechanically-executed grep proof run for real against this case's own checkout/
+# directory — no violation planted anywhere in this case. This is the MUST-ARM control: without
+# it, a suite of nothing but catches would reward a reviewer that refuses every PR outright.
+- claim: "greet renders a friendlier hello"
+  proof: "grep: export function greet in src/lib/greeting.ts"

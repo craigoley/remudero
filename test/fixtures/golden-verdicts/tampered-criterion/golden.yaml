@@ -1,0 +1,14 @@
+violation: tampered-criterion
+rule: >
+  W1-T400/Standing rule 15 (criterion field tampering): a diff that APPENDS a whole new
+  `claim:`/`proof:` pair to a plan/tasks.d/*.yaml shard — never just edits an existing one — while
+  also touching src/ (so the plan-only exemption cannot apply) must fail review.
+  criterionFieldTampered (src/lib/review.ts) flags any added/removed claim:/proof:/satisfied_by:
+  line in a task record.
+verdict:
+  state: failure
+  criteriaTampered: true
+  testTheater: false
+criteria:
+  - met: true
+    floorMet: true

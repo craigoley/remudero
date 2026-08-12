@@ -1,0 +1,15 @@
+violation: dead-proof
+rule: >
+  W1-T387 (the no-match class): a `unit test:` proof naming a bare, fabricated test title that
+  resolves to zero matches on the PR head is executed_fail — test theater at the proof level —
+  and OVERRIDES the keyword floor even though the report's own prose echoes the proof's words
+  closely enough that the floor alone would have passed. judgeCriterion (src/lib/review.ts)
+  degrades a no-match outcome to the keyword floor only when the proof text reads as PROSE
+  (looksLikeProseDescription); a short, punctuation-free bare name is judged as a fabricated
+  test name instead and fails outright.
+verdict:
+  state: failure
+criteria:
+  - met: false
+    floorMet: false
+    proof_exec: executed_fail

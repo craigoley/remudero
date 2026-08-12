@@ -1,0 +1,16 @@
+violation: provenance-free
+rule: >
+  The #974/bodyContradictsDiff class (W1-T274): a report claiming a path was untouched ("no
+  src/…") while the diff itself touches a file under that path must fail review, independent of
+  whether every criterion's own keyword floor passes. bodyContradictsDiff (src/lib/review.ts)
+  compares the report's `no <path>` claim against `diffFiles`.
+verdict:
+  state: failure
+  testTheater: false
+  criteriaTampered: false
+changesetContradictions:
+  - claim: "no src/"
+    files: ["src/lib/greeting.ts"]
+criteria:
+  - met: true
+    floorMet: true
