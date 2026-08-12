@@ -1,0 +1,6 @@
+# A house-dialect `unit test:` proof naming a BARE, fabricated test title (short, no sentence
+# punctuation — the W1-T161 bare-name shape) that exists nowhere in the checkout/ directory this
+# case ships. The report's own prose echoes the same words, so the keyword floor alone WOULD
+# pass this criterion — the point of this golden is that real (absent) repo state overrides it.
+- claim: "bar handles negative input"
+  proof: "unit test: bar handles the documented edge case cleanly"

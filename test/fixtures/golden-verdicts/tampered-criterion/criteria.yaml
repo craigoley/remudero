@@ -1,0 +1,4 @@
+# The task's own visible criterion — mechanically MET on its own, same shape as every other
+# case's control criterion, so the golden isolates criteriaTampered as the sole cause of failure.
+- claim: "foo returns the right value"
+  proof: "foo function returns two correctly"

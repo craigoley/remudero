@@ -414,7 +414,17 @@ test("FINDING: a `date` that ACCEPTS -d but ignores it makes every beat report a
   assert.match(field(honest.published, "daemon_verdict") ?? "", /^STALE/, "a three-day-old poll IS stale");
 
   const lying = runBeat({ ledger: stale, dateStub: IGNORES_D });
-  assert.equal(field(lying.published, "daemon_last_age_s"), "0", "every timestamp resolves to now");
+  // NOW_EPOCH is captured BEFORE epoch_of(DAEMON_LAST_TS) runs (the script probes the CLI, reads
+  // the ledger, etc. in between), so under this stub — where BOTH resolve to "the instant they
+  // were called" — a whole second can legitimately tick over between the two calls, making the
+  // age a small NEGATIVE number rather than exactly 0. The finding is that it is near-zero (NOT
+  // the ~259200s a three-day-old timestamp would honestly report), not that it is exactly 0.
+  const lyingAgeRaw = field(lying.published, "daemon_last_age_s") ?? "";
+  const lyingAge = Number(lyingAgeRaw);
+  assert.ok(
+    Number.isFinite(lyingAge) && lyingAge <= 0 && lyingAge > -5,
+    `every timestamp resolves to now, so the age should be ~0, got ${lyingAgeRaw}`,
+  );
   assert.equal(
     field(lying.published, "daemon_verdict"),
     "live",

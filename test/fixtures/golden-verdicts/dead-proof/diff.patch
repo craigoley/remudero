@@ -1,0 +1,11 @@
+diff --git a/src/lib/bar.ts b/src/lib/bar.ts
+index 1111111..2222222 100644
+--- a/src/lib/bar.ts
++++ b/src/lib/bar.ts
+@@
+-export function bar(x: number): number {
+-  return x;
+-}
++export function bar(x: number): number {
++  return x < 0 ? 0 : x;
++}

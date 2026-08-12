@@ -1,0 +1,5 @@
+# A real, mechanically-executed grep proof (dialect: `grep: <pattern> in <path>`) run for real
+# against this case's own checkout/ directory — proves the healthy criterion executes cleanly so
+# the case's own arm decision is not confused with an unrelated "capped, no proof ran" reason.
+- claim: "a.ts exports the corrected constant"
+  proof: "grep: export const a in src/lib/a.ts"

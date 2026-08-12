@@ -1,0 +1,15 @@
+violation: test-theater
+rule: >
+  Standing rule 13/14 (test theater — a diff that adds test code asserting nothing, or a
+  tautology, must fail review even when every criterion's keyword floor is otherwise met).
+  detectTestTheater (src/lib/review.ts) scans ADDED lines inside added/changed test files for a
+  hard-coded always-true condition, or (this case) an added test that calls the changed function
+  and checks nothing about its return value at all, and fails the diff outright when either shape
+  is found, before any criterion is even considered.
+verdict:
+  state: failure
+  testTheater: true
+  criteriaTampered: false
+criteria:
+  - met: true
+    floorMet: true

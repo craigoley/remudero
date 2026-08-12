@@ -1,0 +1,19 @@
+violation: scope-creep
+rule: >
+  W1-T401 (scope_violation review-time advisory): a diff touching a file outside the task's
+  declared `files:` scope must be named on the verdict, but stays ADVISORY ONLY — it may never
+  fold into `state`/`floorState` (a measured majority of scope widenings are legitimate:
+  generator-gate artifacts, a task's own plan shard, operator-instructed or review-ratified
+  widenings). unwiredAdvisoriesFor's `scopeViolationFiles` (src/lib/review.ts) computes the diff
+  files not present in the declared set.
+verdict:
+  state: success
+  floorState: success
+  capped: false
+arm: true
+unwiredAdvisories:
+  - reasonCode: scope_violation
+    symbols: ["src/lib/rogue.ts"]
+criteria:
+  - met: true
+    proof_exec: executed_pass

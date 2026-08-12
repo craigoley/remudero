@@ -1,0 +1,4 @@
+# A criterion the keyword floor mechanically MEETS on its own — the point of this golden is that
+# the report's own contradiction with the diff must still fail the review, on top of that pass.
+- claim: "the greeting docs are updated"
+  proof: "documentation edited"
