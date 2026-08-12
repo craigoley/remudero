@@ -18146,6 +18146,7 @@ export async function main(
   if (cmd === "skill") {
     process.exit(await skillCommand(rest));
   }
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(learningsCommand(rest)) cannot carry a DA hit without forking the process; learningsCommand's own logic — the export/import subcommand routing, arg validation, the privacy/tripwire refusals, and the pin-verified write — is unit-tested directly in test/learnings-commons.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/ledger-grep dispatch cases).
   if (cmd === "learnings") {
     process.exit(learningsCommand(rest));
   }
