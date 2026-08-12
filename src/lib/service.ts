@@ -148,10 +148,54 @@ export interface IdentityAuth {
   capability: string;
 }
 
+/**
+ * W1-T430 (MASTER-PLAN §6A): the auth/identity extension seam — §6A names "notifier, VCS,
+ * storage, auth/identity, model routing" as the plugin interfaces that must be first-class,
+ * with a stable contract, BEFORE any Pro/hosted code exists ("Pro must attach, never fork").
+ * Scope-granting used to be two paths inlined into {@link grantedScopes} with no declared
+ * interface a third grantor could implement; this is that interface. The two grantors below
+ * ({@link IdentityAuth}'s tailnet identity and the bearer token in {@link ServiceTokens}) are
+ * its first two implementations — see {@link createService}, which wires them in that order
+ * (identity tried first but purely ADDITIVE, the token the fallback, exactly the pre-seam
+ * W1-T371 contract) and appends any `ServiceOptions.providers` after them, so a future grantor
+ * (e.g. W1-T431's relay-brokered browser session) attaches without this dispatch changing.
+ */
+export interface IdentityProvider {
+  /** Provenance label carried through to {@link IdentityGrant.provider} — names WHICH provider
+   * vouched for a request, distinct from "nobody vouched" (401) vs. "vouched, but underscoped
+   * for this route" (403) that {@link createService}'s dispatch already makes. */
+  readonly name: string;
+  /**
+   * Given the request (and whether the matched route allows a `?token=` fallback — true ONLY
+   * for the HTML shell document, see {@link Route.allowQueryToken}), return the scopes this
+   * provider grants (`read`, `read`+`write`, or an empty set for "recognized, but grants
+   * nothing"), or `undefined` if it does not recognize the request's credentials AT ALL. An
+   * `undefined` return is not a denial — it means "not my credential, try the next provider";
+   * only once every provider in the list answers `undefined` does the request fail closed
+   * (401). This is what keeps identity ADDITIVE to the token rather than a replacement: each
+   * provider that doesn't apply steps aside instead of asserting a deny.
+   */
+  grant(req: IncomingMessage, allowQueryToken: boolean): ReadonlySet<Scope> | undefined;
+}
+
+/** What {@link createService}'s provider dispatch hands back once some {@link IdentityProvider}
+ * recognizes a request: the scopes granted, plus which provider granted them. */
+export interface IdentityGrant {
+  scopes: ReadonlySet<Scope>;
+  provider: string;
+}
+
 export interface ServiceOptions {
   tokens: ServiceTokens;
   /** Additive tailnet-identity auth — see {@link IdentityAuth}. Omitted: identity is never consulted, byte-for-byte the pre-W1-T371 behavior. */
   identity?: IdentityAuth;
+  /**
+   * W1-T430: additional {@link IdentityProvider}s consulted AFTER the two built-in grantors
+   * above (tailnet identity, then the bearer token) — the seam a future grantor attaches
+   * through without editing this module's dispatch. Optional and empty by default: omitting it
+   * is byte-for-byte today's identity-then-token behavior.
+   */
+  providers?: IdentityProvider[];
   routes?: Route[];
   sse?: SseRoute[];
   /** One ledger line per auth decision / SSE lifecycle event / handler error. */
@@ -215,26 +259,53 @@ function identityGrantedScopes(identity: IdentityAuth | undefined, req: Incoming
   return READ_WRITE;
 }
 
+/** {@link IdentityAuth}'s tailnet-identity grantor, wrapped as an {@link IdentityProvider} —
+ * W1-T430's seam, first adopter #1. `allowQueryToken` is irrelevant here (identity headers,
+ * never a query param), so the wrapper ignores it. */
+function tailscaleIdentityProvider(identity: IdentityAuth): IdentityProvider {
+  return {
+    name: "tailscale-identity",
+    grant: (req) => identityGrantedScopes(identity, req),
+  };
+}
+
+/** The bearer-token grantor (`ServiceTokens`, constant-time compare against
+ * `state/service-tokens.json`'s loaded values), wrapped as an {@link IdentityProvider} —
+ * W1-T430's seam, first adopter #2. The `?token=` query-param fallback is honored only when the
+ * caller passes `allowQueryToken` (true only for the HTML shell route, see
+ * {@link Route.allowQueryToken}). */
+function bearerTokenProvider(tokens: ServiceTokens): IdentityProvider {
+  return {
+    name: "bearer-token",
+    grant: (req, allowQueryToken) => {
+      const token = bearerToken(req) ?? (allowQueryToken ? queryToken(req) : undefined);
+      if (!token) return undefined;
+      if (safeEqual(token, tokens.write)) return READ_WRITE;
+      if (safeEqual(token, tokens.read)) return READ_ONLY;
+      return undefined;
+    },
+  };
+}
+
 /**
- * Scopes granted by the request; `undefined` = missing/unrecognized (401, not 403). Tailnet
- * identity (see {@link IdentityAuth}) is tried FIRST but is purely additive — when it doesn't
- * apply, this falls through to the bearer token exactly as before W1-T371. The token header is
- * the ONLY credential source unless `allowQuery` is set (true only for the shell document
- * route), in which case a `?token=` query param is accepted as a fallback for a client that
- * cannot send headers (browser navigation) — never for `/v1/*`.
+ * Dispatch a request across `providers` IN ORDER, returning the first provider's grant (plus
+ * its provenance) or `undefined` if none recognize the credentials (401, not 403) —
+ * {@link IdentityAuth} tailnet identity is tried FIRST but is purely additive; when it doesn't
+ * apply this falls through to the bearer token exactly as before W1-T371, then to any
+ * `ServiceOptions.providers` appended after it. W1-T430's seam: this loop is the ENTIRE gate —
+ * any provider list, any implementations, dispatch through this exact same code, which is what
+ * lets a third grantor (see test/identity-provider-seam.test.ts's fixture) attach without
+ * editing this function.
  */
 function grantedScopes(
-  tokens: ServiceTokens,
-  identity: IdentityAuth | undefined,
+  providers: readonly IdentityProvider[],
   req: IncomingMessage,
   allowQuery: boolean,
-): ReadonlySet<Scope> | undefined {
-  const identityGrant = identityGrantedScopes(identity, req);
-  if (identityGrant) return identityGrant;
-  const token = bearerToken(req) ?? (allowQuery ? queryToken(req) : undefined);
-  if (!token) return undefined;
-  if (safeEqual(token, tokens.write)) return READ_WRITE;
-  if (safeEqual(token, tokens.read)) return READ_ONLY;
+): IdentityGrant | undefined {
+  for (const provider of providers) {
+    const scopes = provider.grant(req, allowQuery);
+    if (scopes) return { scopes, provider: provider.name };
+  }
   return undefined;
 }
 
@@ -274,6 +345,13 @@ export function createService(opts: ServiceOptions): Server {
   const routes = opts.routes ?? [];
   const sseRoutes = opts.sse ?? [];
   const log = opts.log ?? (() => {});
+  // W1-T430: identity (if configured), then the bearer token — the pre-seam W1-T371 order,
+  // byte-identical — then any extra providers the caller attaches through the seam.
+  const providers: IdentityProvider[] = [
+    ...(opts.identity ? [tailscaleIdentityProvider(opts.identity)] : []),
+    bearerTokenProvider(opts.tokens),
+    ...(opts.providers ?? []),
+  ];
 
   return createServer((req, res) => {
     void (async () => {
@@ -292,14 +370,14 @@ export function createService(opts: ServiceOptions): Server {
       // Query-param auth is honored ONLY for a plain route that opted in (the HTML shell) — never
       // for an SSE stream or an API route, where a `?token=` would leak via Referer/logs.
       const allowQuery = !sseRoute && (route?.allowQueryToken ?? false);
-      const granted = grantedScopes(opts.tokens, opts.identity, req, allowQuery);
+      const granted = grantedScopes(providers, req, allowQuery);
       if (!granted) {
         log("service.unauthorized", { method, path });
         sendJson(res, 401, { error: "unauthorized" });
         return;
       }
-      if (!granted.has(requiredScope)) {
-        log("service.forbidden", { method, path, required_scope: requiredScope });
+      if (!granted.scopes.has(requiredScope)) {
+        log("service.forbidden", { method, path, required_scope: requiredScope, granted_by: granted.provider });
         sendJson(res, 403, { error: "forbidden", required_scope: requiredScope });
         return;
       }
