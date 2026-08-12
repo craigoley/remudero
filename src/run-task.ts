@@ -323,6 +323,7 @@ import { appendLedger, isSpawnInfraBlockedError, LEDGER_COST_TAG_INFRA, matchesR
 import { resolveLedgerUnion } from "./lib/ledger-grep.js";
 import { escalateRepeatingRules, ruleEfficacyReport } from "./lib/rule-efficacy.js";
 import { mineVerdictRows, verdictCalibrationReport } from "./lib/verdict-calibration.js";
+import { mineAutonomyLedgerLines, parseTrailerMerges, zeroTouchMergeRate } from "./lib/autonomy.js";
 import {
   assertRunnable,
   loadPlan,
@@ -7930,6 +7931,111 @@ export function verdictCalibrationCommand(rest: string[], opts: { stateDir?: str
     console.log(`unmeasurable: ${report.unmeasurable.length} row(s)`);
     for (const u of report.unmeasurable) {
       console.log(`  ${u.taskId} @ ${u.headSha}: ${u.why}`);
+    }
+  }
+
+  return 0;
+}
+
+/**
+ * `rmd autonomy-rate` — W1-T437's QUANTITY figure, sibling to `rmd verdict-calibration`'s
+ * (W1-T424) CORRECTNESS join: the board-strip + retro-calibration-column shape (design (ii)) —
+ * the zero-touch merge rate over every trailer-bearing merge on the read git history
+ * (lib/autonomy.ts's `parseTrailerMerges`), split by verdict class (full PASS / keyword floor /
+ * degraded arm / unclassified), with the touched merges' touches NAMED and the current arming
+ * posture printed alongside the measured rate (this reports the dial; it does not turn it — see
+ * lib/autonomy.ts's module doc). HOST-SIDE ONLY: the ledger lives on the daemon host, so a
+ * fresh checkout with no `state/ledger.*.gz` reports UNMEASURED, honestly, rather than a
+ * live-file-only rate. READ-ONLY: files nothing, proposes nothing.
+ */
+export function autonomyRateCommand(rest: string[], opts: { stateDir?: string; cwd?: string } = {}): number {
+  const badArg = unknownArgError("autonomy-rate", rest, [], []);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+
+  const stateDir =
+    opts.stateDir ??
+    (() => {
+      try {
+        return join(loadConfig().root, "state");
+      } catch {
+        return undefined;
+      }
+    })();
+  if (stateDir === undefined) {
+    console.error("rmd autonomy-rate: cannot resolve a state dir — unreadable config");
+    return 1;
+  }
+
+  const ledgerMining = mineAutonomyLedgerLines(stateDir);
+
+  let gitDump = "";
+  let gitRef = "origin/main";
+  let gitReadError: string | undefined;
+  try {
+    const read = defaultVerdictCalibrationGitLog(opts.cwd ?? repoRoot);
+    gitDump = read.dump;
+    gitRef = read.ref;
+  } catch (e) {
+    gitReadError = (e as Error).message;
+  }
+
+  const merges = gitReadError ? [] : parseTrailerMerges(gitDump);
+  const report = zeroTouchMergeRate(merges, ledgerMining, {
+    windowDescription: gitReadError
+      ? `git history UNAVAILABLE — ${gitReadError}`
+      : `${merges.length} Remudero-Task-trailer-bearing merge(s) read from ${gitRef}`,
+  });
+
+  console.log(`rmd autonomy-rate — over the unioned ledger at ${stateDir}, git history at ${gitRef}`);
+  console.log(`  archives: ${report.archiveCount} matched, live file read: ${report.liveFileRead}`);
+  if (gitReadError) {
+    console.log(`  git history: UNAVAILABLE — ${gitReadError}`);
+  }
+  console.log(`  window: ${report.windowDescription}`);
+  console.log("");
+  console.log(`arming posture: ${report.armingPosture}`);
+  console.log("");
+
+  if (report.status === "unmeasured") {
+    console.log(`zero-touch merge rate: UNMEASURED — ${report.reason}`);
+    return 0;
+  }
+
+  // The status-board strip (design (ii)): rate, window, cost split zero-touch vs touched.
+  if (report.zeroTouchRate === null) {
+    console.log("zero-touch merge rate: n=0 — no trailer-bearing merges in this window");
+  } else {
+    const pct = (report.zeroTouchRate * 100).toFixed(1);
+    console.log(
+      `zero-touch merge rate: ${pct}% (${report.zeroTouchCount}/${report.totalMerges}) — ` +
+        `${report.touchedCount} touched merge(s) cost a human or fix-rung step`,
+    );
+  }
+  console.log("");
+
+  // The retro calibration column (design (ii)): split by verdict class.
+  const classLabel = (c: (typeof report.classes)[number]["verdictClass"]): string =>
+    c === "full-pass" ? "full PASS" : c === "keyword-floor" ? "keyword floor" : c === "degraded-arm" ? "degraded arm" : "unclassified";
+  for (const c of report.classes) {
+    if (c.zeroTouchRate === null) {
+      console.log(`  ${classLabel(c.verdictClass).padEnd(14)} n=${c.total} — no merges in this class`);
+    } else {
+      const pct = (c.zeroTouchRate * 100).toFixed(1);
+      console.log(`  ${classLabel(c.verdictClass).padEnd(14)} n=${c.total} — zero-touch rate ${pct}% (${c.zeroTouchCount}/${c.total})`);
+    }
+  }
+  console.log("");
+
+  const touched = report.rows.filter((r) => !r.zeroTouch);
+  if (touched.length === 0) {
+    console.log("touched merges: none");
+  } else {
+    console.log(`touched merges: ${touched.length}`);
+    for (const r of touched) {
+      console.log(`  ${r.taskId} @ ${r.sha.slice(0, 7)}: ${r.touches.join("; ")}`);
     }
   }
 
@@ -17992,6 +18098,11 @@ const COMMANDS: readonly CommandSpec[] = [
       "rmd verdict-calibration   # W1-T424: the correctness join — joins every armed merge's ledgered review verdict (lib/verdict-calibration.ts's mineVerdictRows, over the ledger UNION, never the live file alone) to post-merge git reality, and reports per verdict class (full PASS / keyword floor / degraded arm) the revert rate and follow-up-fix rate over a stated window, each denominator NAMED (n of N armed merges) with an UNMEASURABLE arm for rows whose merge sha or verdict class could not be recovered — never a rate over a silently shrunken denominator. Below a minimum population floor a class prints its count and REFUSES the rate. The attribution window + overlap rule (lib/verdict-calibration.ts's ATTRIBUTION_POLICY) print alongside the figures, so the metric travels with its rule. HOST-SIDE ONLY: the ledger lives on the daemon host, so this is meaningless off-host. READ-ONLY: files nothing, proposes nothing in v1.",
   },
   {
+    name: "autonomy-rate",
+    usage:
+      "rmd autonomy-rate   # W1-T437: the QUANTITY figure beside W1-T424's correctness join — the zero-touch merge rate over every Remudero-Task-trailer-bearing merge on the read git history (lib/autonomy.ts's zeroTouchMergeRate, over the ledger UNION, never the live file alone), classifying each merge zero-touch (auto-armed, zero fix-rung strikes, no reframe, no operator note, no capped override, no fix-rung human evidence) or human-touched, NAMING every touch that fired — split by verdict class (full PASS / keyword floor / degraded arm / unclassified) so the class split shows where the next ratchet notch is safe. Prints the current decideAutoMergeArm arming posture beside the measured rate — proposes no policy change. Zero archive files matched under the state dir reports the whole window UNMEASURED, naming the reason, never a rate computed from the live ledger file alone. HOST-SIDE ONLY: the ledger lives on the daemon host, so this is meaningless off-host. READ-ONLY: files nothing, proposes nothing.",
+  },
+  {
     name: "check-acceptance",
     usage:
       "rmd check-acceptance <body-file>   # read a PR body from a file and report what the REVIEWER'S OWN parseAcceptanceBlock actually resolves from it, against what was written: header found, bullets written, criteria parsed, empty proofs. Exits non-zero when they disagree. A claim WRAPPED onto a second line silently truncates the block (any indented line that is not `proof:` ends it), and a `## Validation` heading is not an Acceptance header — both ship a body that says less than its author wrote. Run this before opening a PR over REST, which bypasses the orchestrator's house-block emitter. READ-ONLY: writes no ledger line, no state file",
@@ -18549,6 +18660,10 @@ export async function main(
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(verdictCalibrationCommand(rest)) cannot carry a DA hit without forking the process; verdictCalibrationCommand's own logic — arg validation, the ledger+git join, the per-class render and the UNMEASURABLE listing — is unit-tested in test/verdict-calibration.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/ledger-grep/rule-efficacy dispatch cases).
   if (cmd === "verdict-calibration") {
     process.exit(verdictCalibrationCommand(rest));
+  }
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(autonomyRateCommand(rest)) cannot carry a DA hit without forking the process; autonomyRateCommand's own logic — arg validation, the ledger+git join, the zero-touch classification, the per-class render and the touched-merge listing — is unit-tested in test/autonomy-ratchet.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/ledger-grep/rule-efficacy/verdict-calibration dispatch cases).
+  if (cmd === "autonomy-rate") {
+    process.exit(autonomyRateCommand(rest));
   }
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(checkAcceptanceCommand(rest)) cannot carry a DA hit without forking the process; checkAcceptanceCommand's own logic — the usage refusal, the unreadable-file refusal, the truncation report, the missing-header report and the clean pass — is unit-tested in test/acceptance-block-diagnostics.test.ts (same irreducible-glue shape as the sibling check-proof/emissions dispatch cases).
   if (cmd === "check-acceptance") {
