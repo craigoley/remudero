@@ -110,6 +110,10 @@ function writeStubs(dir: string): void {
     'printf %s\\\\n "$probe" >> "$STUB_REC/probes"',
     'case "$probe" in',
     '  checks)     [ "$STUB_MODE" = checks-fail ] && { echo "  FAIL  claude (not found)"; exit 1; }',
+    // The build-sha defect is its own subject: the image carries BOTH carriers and they disagree,
+    // which means one was written and the other was not. That is the only state this probe fails
+    // on - an image with neither carrier is OLD, not broken, and must stay a WARN.
+    '              [ "$STUB_MODE" = build-sha-mismatch ] && { echo "  FAIL  image build sha  /etc/rmd-build-sha says aaa but the label says bbb"; exit 1; }',
     // The version-VALUE defect is its own subject: the binary is present and runs, and is the
     // WRONG ONE. That is precisely the shape `check "claude" claude --version` certified green.
     '              [ "$STUB_MODE" = claude-version-mismatch ] && { echo "  FAIL  claude version  image has 2.1.227 but deploy/Dockerfile declares 2.1.220"; exit 1; }',
@@ -336,6 +340,116 @@ test("an ABSENT declared pin is UNKNOWN — it warns, and must never render as a
   assert.equal(r.fail, "0", "and it must not fail the image either");
 });
 
+// ── THE IMAGE MUST BE ABLE TO SAY WHICH COMMIT BUILT IT (deploy/Dockerfile REQ 15) ───────────
+//
+// The published image ran 108 commits behind origin/main and no artifact carried its build
+// commit, so dating it required MD5-fingerprinting the baked entrypoint against git history. The
+// Dockerfile now bakes the sha twice — a LABEL for host-side readers and /etc/rmd-build-sha for
+// readers INSIDE a running container — and the probe compares them.
+//
+// THE FILE IS THE LOAD-BEARING CARRIER, so these tests drive it through a stubbed `cat`: the
+// question is asked from inside a container by something with no docker CLI, and a probe that
+// read the LABEL instead would certify a path nobody can use. The mutant at the end is what makes
+// that claim falsifiable rather than decorative.
+
+function imageBuildShaBlock(): string {
+  const src = readFileSync(SCRIPT, "utf8");
+  const begin = src.indexOf("# BEGIN image-build-sha");
+  const end = src.indexOf("# END image-build-sha");
+  assert.ok(begin >= 0 && end > begin, "the sentinels must exist, or this test is executing nothing");
+  const block = src.slice(begin, end);
+  assert.ok(block.split("\n").length > 5, "the extracted block must be substantive, not an empty pair of markers");
+  return block;
+}
+
+/**
+ * Run the extracted block with `/etc/rmd-build-sha` faked through a PATH stub for `cat` — the same
+ * stub-the-binary discipline the rest of this file uses. `file: null` means the path does not
+ * exist, which is EXACTLY the currently published image.
+ */
+function runBuildShaCheck(
+  opts: { file: string | null; label: string },
+  block: string = imageBuildShaBlock(),
+): { out: string; fail: string } {
+  const dir = mkdtempSync(join(tmpdir(), "verify-image-sha-"));
+  const catStub =
+    opts.file === null
+      ? '#!/bin/sh\nif [ "$1" = "/etc/rmd-build-sha" ]; then exit 1; fi\nexec /bin/cat "$@"\n'
+      : `#!/bin/sh\nif [ "$1" = "/etc/rmd-build-sha" ]; then printf '%s\\n' "${opts.file}"; exit 0; fi\nexec /bin/cat "$@"\n`;
+  writeFileSync(join(dir, "cat"), catStub, { mode: 0o755 });
+  chmodSync(join(dir, "cat"), 0o755);
+  const r = spawnSync("sh", ["-c", `fail=0\n${block}\nprintf "FAILVAR=%s" "$fail"`], {
+    encoding: "utf8",
+    env: { ...process.env, PATH: `${dir}:${process.env.PATH ?? ""}`, EXPECT_BUILD_SHA: opts.label },
+  });
+  const out = (r.stdout ?? "") + (r.stderr ?? "");
+  return { out, fail: /FAILVAR=(\S*)/.exec(out)?.[1] ?? "?" };
+}
+
+test("the build-sha check PASSES and REPORTS the sha when the baked file and the label agree", () => {
+  const r = runBuildShaCheck({ file: "6bc4288aaaa", label: "6bc4288aaaa" });
+  assert.match(r.out, /PASS\s+image build sha/);
+  assert.match(r.out, /6bc4288aaaa/, "the whole point is that the sha is REPORTED, not merely judged");
+  assert.equal(r.fail, "0");
+});
+
+test("the build-sha check FAILS when the two carriers DISAGREE, naming both values", () => {
+  // THE ONLY FAILING STATE, and it is never a healthy one: both carriers are written from one
+  // build-arg, so a disagreement means one was written and the other was not.
+  const r = runBuildShaCheck({ file: "aaaaaaa", label: "bbbbbbb" });
+  assert.match(r.out, /FAIL\s+image build sha/);
+  assert.match(r.out, /aaaaaaa/, "must name what the image actually carries…");
+  assert.match(r.out, /bbbbbbb/, "…and what the label claimed");
+  assert.equal(r.fail, "1", "and it must set the failure flag the script exits on");
+});
+
+test("an image with NO baked sha is UNKNOWN — it warns, and must NOT fail", () => {
+  // THE CURRENTLY PUBLISHED IMAGE IS EXACTLY THIS. A check that failed here would fire on a
+  // healthy condition the day it landed, which is the defect class this repo already has four of.
+  const r = runBuildShaCheck({ file: null, label: "6bc4288aaaa" });
+  assert.match(r.out, /WARN\s+image build sha/);
+  assert.doesNotMatch(r.out, /PASS\s+image build sha/, "absent must never render as a match");
+  assert.equal(r.fail, "0", "an old image is OLD, not broken");
+});
+
+test("a build with no --build-arg bakes the literal `unknown`, which is UNKNOWN and not a value", () => {
+  // `ARG RMD_BUILD_SHA=unknown` is the Dockerfile default, so a plain `docker build` produces this.
+  // Treating the sentinel as a real sha would report `unknown` as the build commit.
+  const r = runBuildShaCheck({ file: "unknown", label: "6bc4288aaaa" });
+  assert.match(r.out, /WARN\s+image build sha/);
+  assert.equal(r.fail, "0");
+});
+
+test("a baked sha with NO label still REPORTS the sha rather than going silent", () => {
+  // The host half can be missing on its own — `docker inspect` renders an absent label as
+  // `<no value>`, which the script normalises to empty. The in-image answer is still the useful
+  // one, so it must be printed rather than swallowed for want of something to compare against.
+  const r = runBuildShaCheck({ file: "6bc4288aaaa", label: "" });
+  assert.match(r.out, /WARN\s+image build sha/);
+  assert.match(r.out, /6bc4288aaaa/, "the sha must be reported even when it cannot be compared");
+  assert.equal(r.fail, "0");
+});
+
+test("MUTANT: a probe that reads the LABEL instead of the baked FILE certifies an image that carries nothing", () => {
+  // THE SECOND TRAP, made falsifiable. The label is readable only with `docker inspect` on the
+  // host; the file is the carrier an agent inside a running container can actually read. A probe
+  // sourcing its value from the label would pass every test above that compares two equal strings
+  // — and would report a build sha for an image that has no such file at all, which is precisely
+  // the state that let 108 commits of drift go unnoticed.
+  const mutant = imageBuildShaBlock().replace(
+    'got_sha="$(cat /etc/rmd-build-sha 2>/dev/null | head -1)"',
+    'got_sha="${EXPECT_BUILD_SHA:-}"',
+  );
+  assert.notEqual(mutant, imageBuildShaBlock(), "the mutation target must exist, or this proves nothing");
+
+  const r = runBuildShaCheck({ file: null, label: "6bc4288aaaa" }, mutant);
+  assert.match(r.out, /PASS\s+image build sha/, "the mutant must PASS an image with no baked file…");
+  assert.equal(r.fail, "0");
+  // …while the real block WARNs on that identical input, which is the difference the file carries.
+  const real = runBuildShaCheck({ file: null, label: "6bc4288aaaa" });
+  assert.match(real.out, /WARN\s+image build sha/, "…and the real probe must not");
+});
+
 test("a correct subject exits 0", () => {
   const run = runVerifier("good");
   assert.equal(run.status, 0, `expected a clean verdict, got ${run.status}\n${run.stdout}\n${run.stderr}`);
@@ -357,6 +471,7 @@ const BROKEN: ReadonlyArray<{ mode: string; why: string; says: RegExp }> = [
   { mode: "boot-crash", why: "the bootstrap probe itself dies", says: /bootstrap-currency probe did not complete/ },
   { mode: "binaries-missing", why: "a process-inspection binary is absent for the runtime user", says: /process-inspection binary is missing or unrunnable/ },
   { mode: "claude-version-mismatch", why: "claude runs but is not the version the Dockerfile declares", says: /FAILURES above/ },
+  { mode: "build-sha-mismatch", why: "the image label and the baked build-sha file disagree", says: /FAILURES above/ },
 ];
 
 for (const { mode, why, says } of BROKEN) {

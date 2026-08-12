@@ -123,3 +123,39 @@ running, never a silent latch write). `rmd pause` is the **persistent** hold you
 for "don't start new work until I say so" — cleared only by `rmd resume`. See
 [control-surface.md](control-surface.md) for the full contract and recovery commands.
 [learnings#control-surface-fail-loud-stop-one-shot]
+
+## You need to know which commit built the container image
+
+**Symptom.**
+
+- The fleet is running in a container and something merged and tested is nevertheless absent
+  from it — a flag the code supports that the running image ignores, a script whose behaviour
+  does not match the repo.
+- You want to answer "how old is this image?" and there is no obvious place to look.
+
+**Cause.** For a long time there was genuinely nowhere to look. `az acr build` strips `.git`
+from the uploaded context, so `/app` carries no git metadata; the image had no label and no
+version file; and a container cannot see its own registry tag. The published image once ran
+**108 commits behind `origin/main`** with nothing anywhere saying so, and dating it required
+MD5-fingerprinting the baked entrypoint against every commit that had touched it.
+
+**Fix.** The build commit is now baked in two places, from one `--build-arg` supplied by
+`.github/workflows/acr-build.yml` (the same `GITHUB_SHA` the image is tagged with):
+
+```sh
+# from INSIDE a running container — no docker, no host access needed:
+cat /etc/rmd-build-sha
+
+# from the host, without starting a container:
+docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' <image>
+```
+
+Once you have the sha, `git log --oneline <sha>..origin/main | wc -l` is how far behind the
+image is. Note that this dates the **baked artifacts** — the entrypoint, the CLI binary,
+`node_modules` — not the code the daemon is running: `deploy/entrypoint.sh` clones or
+fast-forwards on every boot, so the source tree is current regardless of image age.
+
+`deploy/verify-image.sh` reports the value and fails only if the two carriers **disagree**,
+which means one was written and the other was not. It deliberately does not fail on an old
+image or on an image built before this landed: both read as `UNKNOWN` and warn. An old image
+is old, not wrong.

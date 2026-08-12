@@ -464,6 +464,37 @@ RUN export npm_config_cache=/tmp/npm-build-cache \
 
 COPY --chown=node:node . .
 
+# ── REQ 15: THE IMAGE MUST BE ABLE TO SAY WHICH COMMIT BUILT IT ──────────────────────────────
+# MEASURED, and this is what the omission cost. The published image ran 108 commits behind
+# origin/main and nothing anywhere said so; dating it required MD5-FINGERPRINTING the baked
+# `/usr/local/bin/rmd-entrypoint` against every commit that ever touched `deploy/entrypoint.sh`.
+# That is how a merged, tested `RMD_RESTART_THROTTLE_S` sat absent from the running image while
+# four tests passed on it.
+#
+# WHY A FILE AND NOT ONLY A LABEL. A `LABEL` is read with `docker inspect`, which needs the docker
+# CLI and the host — and the question ("what is this image?") is asked from INSIDE a running
+# container, by an agent that has neither. `az acr build` also strips `.git` from the uploaded
+# context, so `/app` carries no git metadata and there is no other in-image answer. A plain
+# world-readable file is the only form that answers it where it is actually asked:
+#   $ cat /etc/rmd-build-sha
+# The LABEL is kept as well, because it is what a registry/host-side tool reads without starting
+# a container at all — the two serve different askers, and `deploy/verify-image.sh` compares them
+# precisely BECAUSE they are written from one ARG and must never disagree.
+#
+# `unknown` IS THE DEFAULT AND MUST STAY ONE. A build that supplies no `--build-arg` (a local
+# `docker build`, or any build predating this layer) yields the literal `unknown`, and every
+# consumer treats that as UNREADABLE rather than as a match — the same three-state discipline
+# `src/lib/env.ts` readBinaryPin and this file's CLAUDE_CODE_VERSION check already follow. It is
+# NOT an error: the currently published image has neither the label nor the file, and a check that
+# failed on that would fire on a healthy condition the moment it landed.
+#
+# PLACED HERE, immediately below the source COPY that already invalidates on every commit and
+# above only USER/ENTRYPOINT/CMD, so a per-commit ARG rebuilds nothing that was not rebuilding
+# anyway. It must also precede `USER node`: /etc is root-owned, and this RUN needs to write it.
+ARG RMD_BUILD_SHA=unknown
+LABEL org.opencontainers.image.revision="${RMD_BUILD_SHA}"
+RUN printf '%s\n' "${RMD_BUILD_SHA}" > /etc/rmd-build-sha && chmod 0444 /etc/rmd-build-sha
+
 # THE RUNTIME USER, set as late as possible so every install above still had root.
 USER node
 
