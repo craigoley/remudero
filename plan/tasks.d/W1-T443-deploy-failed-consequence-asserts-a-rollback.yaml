@@ -70,10 +70,18 @@
   risk: high
   origin: recon#deploy-failed-dirty-tree-2026-08-12
   plan_refs: ["W1-T431", "P48"]
-  files: [src/lib/status-board.ts, test/deploy-failed-consequence-kind.test.ts]
+  files: [src/lib/status-board.ts, test/deploy-failed-consequence-kind.test.ts, test/status-board.test.ts]
   status: queued
   attempts: 0
-  note: "verify:auto — the operator ruling this might have needed (which of the two stories is true)
+  note: "CORRECTION MADE WHILE BUILDING THIS (2026-08-12): `test/status-board.test.ts` WAS ADDED to
+    files:, for the same measured reason W1-T442 declared `test/worker-containment.test.ts` — it
+    already asserts the old wording (`/rolled back/`, `/PRIOR head/`) against a fixture that OMITS
+    `kind`, so it is the suite that goes red the moment the row becomes kind-aware. The shard as
+    filed missed it. Its fixture was corrected rather than its assertions: the marker now carries
+    `kind: health-check-rollback`, matching what `realDeployDeps.alert` actually writes and what its
+    own `health-check failed: crash-loop` message already implied, so every assertion it made still
+    holds and still means what it meant.
+    verify:auto — the operator ruling this might have needed (which of the two stories is true)
     is settled by source, not by preference: only the health-check path calls `resetHard`.
     risk:high is Rule 19's SPAN, not blast radius — `subsystemsOf` reads `files:` plus acceptance
     text and this set crosses `src/lib` and `test/`, which is >=2 subsystems and a sizing violation
