@@ -13542,6 +13542,11 @@ export function buildOpenPrViews(
       reviewState,
       checksState,
       unmetCriteria: reviewState === "failure" && taskId ? unmetFromLedger(ledger, taskId) : [],
+      // W1-T440: whether a `Remudero-Task:` trailer resolved a task id AT ALL — i.e. whether
+      // `unmetCriteria` above reflects a real ledger read or is `[]` only because there was
+      // never a task id to read against. sweep.ts's row 7 reads this to name which empty a
+      // failing review with no unmet criteria actually is.
+      criteriaRecoverable: taskId !== undefined,
       priorStrikes: priorStrikesFor(ledger, taskId, currentStrikeRegimeFor(ledger, taskId)),
       strikeHistory: deriveStrikeHistory(ledger, taskId),
       supersededBy,
@@ -14907,6 +14912,9 @@ export async function fixCommand(
     reviewState,
     checksState,
     unmetCriteria: reviewState === "failure" && taskId ? unmetFromLedger(ledger, taskId) : [],
+    // W1-T440: same signal as buildOpenPrViews above — routeFix's deriveDisposition call
+    // reads it via the SAME sweep.ts row 7.
+    criteriaRecoverable: taskId !== undefined,
     priorStrikes: priorStrikesFor(ledger, taskId, currentStrikeRegimeFor(ledger, taskId)),
     strikeHistory: deriveStrikeHistory(ledger, taskId),
     // superseded-by is a cross-PR sweep concern (which OTHER open PR credits the

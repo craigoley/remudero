@@ -413,6 +413,18 @@ export interface OpenPrView {
   checksPendingSince?: string;
   /** The unmet acceptance criteria from a failing review ([] otherwise). */
   unmetCriteria: CriterionVerdict[];
+  /**
+   * W1-T440: true when a `Remudero-Task:` trailer resolved a task id, so `unmetCriteria`
+   * above reflects an ACTUAL ledger read (`unmetFromLedger` was consulted — see
+   * `buildOpenPrViews`); false when no trailer resolved, so `unmetCriteria` is `[]` BY
+   * CONSTRUCTION and was never checked at all. Row 7 of {@link DISPOSITION_RULES} reads this
+   * to say which empty a failing review with no unmet criteria actually is — a genuine
+   * contradiction (criteria WERE checked and none came back unmet) versus an unrecoverable
+   * one (there was no trailer to check them against). `undefined` (no producer has set it,
+   * e.g. an older fixture) is treated the SAME as `true` — the pre-existing "contradictory"
+   * wording — so this is additive, never a silent behavior change for an unset field.
+   */
+  criteriaRecoverable?: boolean;
   /** Fix-rung strikes ALREADY attempted for this PR (from the ledger). */
   priorStrikes: number;
   /** A NEWER open PR crediting the same task supersedes this one. */
@@ -1242,9 +1254,19 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
       `${pr.unmetCriteria.length} unmet criteri${pr.unmetCriteria.length === 1 ? "on" : "a"} — strike ${pr.priorStrikes + 1}/${policy.strikeCap}`,
   },
   {
+    // W1-T440: the SAME empty (`pr.unmetCriteria` is `[]`) has two distinct causes, and the
+    // reason used to name the wrong one unconditionally. `criteriaRecoverable === false` is the
+    // OBSERVED signal (set by `buildOpenPrViews`, run-task.ts) that no `Remudero-Task:` trailer
+    // resolved a task id, so `unmetFromLedger` was never consulted — the criteria were never
+    // RECOVERABLE, not contradicted. `criteriaRecoverable !== false` (true, or unset on an older
+    // fixture) means a trailer DID resolve and the ledger genuinely came back with nothing unmet
+    // — that arm keeps today's wording verbatim, byte-identical for every attributable PR.
     disposition: "blocked-ambiguous",
     when: (pr) => pr.reviewState === "failure",
-    reason: () => "review failing with no actionable unmet criteria (contradictory) — escalating",
+    reason: (pr) =>
+      pr.criteriaRecoverable === false
+        ? "review failing — criteria unrecoverable (no Remudero-Task: trailer to resolve them from) — escalating"
+        : "review failing with no actionable unmet criteria (contradictory) — escalating",
   },
   {
     // W1-T106 (the #170 DIRTY strand): CONFLICTED is a POSITIVE disposition,
