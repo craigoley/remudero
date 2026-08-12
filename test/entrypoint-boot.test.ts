@@ -167,6 +167,29 @@ function makeCwdRepo(): string {
   return repo;
 }
 
+/**
+ * FORCE GIT TO REFUSE A GUESSED IDENTITY — the same lesson as `makeCwdRepo`, in the other direction.
+ *
+ * With no `user.email` anywhere, git does not necessarily fail: it GUESSES `user@fqdn` from the
+ * passwd entry and `gethostname`, and accepts that guess whenever the hostname looks domain-like.
+ * On a GitHub runner the hostname carries no domain, the guess is rejected, and a commit fails —
+ * which is what the defect-4 pair asserts. On this mini, Tailscale MagicDNS supplies an FQDN
+ * (`…tail17e13a.ts.net`), git accepts the guess, and the SAME commit SUCCEEDS. So the mutant test
+ * passed on CI and failed wherever proofs execute, and the positive test passed for the wrong
+ * reason on any host that can guess.
+ *
+ * `user.useConfigOnly` is git's own switch for exactly this: an identity must come from config or
+ * the commit fails. Set through `GIT_CONFIG_*` it reaches the probe's git through the entrypoint's
+ * `exec` without touching the script, and it leaves the thing under test alone — the entrypoint
+ * still writes the identity into `$HOME/.gitconfig`, and that write is now the ONLY thing that can
+ * make the commit succeed, on every host.
+ */
+const NO_GUESSED_IDENTITY = {
+  GIT_CONFIG_COUNT: "1",
+  GIT_CONFIG_KEY_0: "user.useConfigOnly",
+  GIT_CONFIG_VALUE_0: "true",
+};
+
 // ── DEFECT 3: A BRANCH MEANS THE TIP AS OF THIS BOOT ────────────────────────────────────────
 
 test("a BRANCH ref lands on the freshly-fetched tip, and a SECOND boot ADVANCES when the remote moved", () => {
@@ -266,7 +289,7 @@ test("RMD_SKIP_BOOTSTRAP=1 still gets a git identity, so the recovery path can c
   const origin = makeOrigin();
   const probe = mkdtempSync(join(tmpdir(), "entrypoint-probe-"));
   const run = boot(home, origin, {
-    env: { RMD_SKIP_BOOTSTRAP: "1" },
+    env: { RMD_SKIP_BOOTSTRAP: "1", ...NO_GUESSED_IDENTITY },
     cmd: [
       "bash",
       "-c",
@@ -435,6 +458,120 @@ test("a non-numeric throttle is refused loudly and falls back to exec rather tha
   assert.ok(run.elapsedMs < 2000, "a rejected value must not sleep");
 });
 
+// ── THE THROTTLE IS ONLY REAL IF THE HOST ACTUALLY PASSES IT ────────────────────────────────
+//
+// The four tests above prove the ENTRYPOINT honours `RMD_RESTART_THROTTLE_S`, and they proved it
+// while the variable was reaching no container at all: `deploy/host-update.sh --print-daemon-run`
+// — the documented invocation, and the only place this repo says how to start the daemon — passed
+// no `-e` for it, so every one of those tests passed against a throttle that could never fire in
+// production. A test suite green on a feature nothing wires is the exact shape this file exists to
+// refuse, so the wiring is asserted here as a CHAIN rather than as two independent greps.
+//
+// AND IT IS ASSERTED BY EFFECT, NOT BY NAME. The env var name is read OUT of host-update.sh's own
+// printed invocation and then fed to the real entrypoint with `sleep` stubbed to record its
+// argument. A typo'd `-e` name on the host side sets a variable the entrypoint does not read, so
+// nothing sleeps and this fails — which a `grep RMD_RESTART_THROTTLE_S deploy/host-update.sh`
+// would have called green.
+
+const HOST_UPDATE = join(REPO_ROOT, "deploy", "host-update.sh");
+
+/** Env var names the printed daemon invocation passes through `-e`, in order. */
+function daemonRunEnvNames(scriptPath = HOST_UPDATE): string[] {
+  const printed = spawnSync("bash", [scriptPath, "--print-daemon-run"], {
+    encoding: "utf8",
+    cwd: REPO_ROOT,
+  });
+  assert.equal(printed.status, 0, `--print-daemon-run failed: ${printed.stderr}`);
+  // Only the DAEMON container's block — the console container below it has its own policy.
+  const block = printed.stdout.slice(
+    printed.stdout.indexOf("docker run -d --name remudero-daemon"),
+    printed.stdout.indexOf("./bin/rmd daemon"),
+  );
+  assert.ok(block.length > 0, "the daemon invocation must be present in --print-daemon-run output");
+  return [...block.matchAll(/-e\s+([A-Z_][A-Z0-9_]*)=/g)].map((m) => m[1]);
+}
+
+/** Boot with `sleep` stubbed, returning every argument it was called with. */
+function bootSleepArgs(env: Record<string, string>, exitCode: number): { args: string[]; stderr: string; status: number } {
+  const stubs = mkdtempSync(join(tmpdir(), "entrypoint-stub-"));
+  const rec = mkdtempSync(join(tmpdir(), "entrypoint-rec-"));
+  writeNpmStub(stubs, rec);
+  writeCmdStub(stubs, rec, "rmd-fake", exitCode);
+  // Records the ARGUMENT and returns immediately, so the assertion is on the value the script
+  // asked for rather than on how long the test happened to block.
+  writeFileSync(join(stubs, "sleep"), `#!/usr/bin/env bash\nprintf '%s\\n' "$1" >> "${rec}/sleep"\nexit 0\n`, { mode: 0o755 });
+  chmodSync(join(stubs, "sleep"), 0o755);
+  const r = spawnSync("bash", [SCRIPT, "rmd-fake", "daemon"], {
+    encoding: "utf8",
+    cwd: REPO_ROOT,
+    env: {
+      ...process.env,
+      PATH: `${stubs}:${process.env.PATH ?? ""}`,
+      HOME: freshHome(),
+      RMD_REPO_URL: makeOrigin(),
+      RMD_REF: "main",
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_TERMINAL_PROMPT: "0",
+      ...env,
+    },
+  });
+  let args: string[] = [];
+  try {
+    args = readFileSync(join(rec, "sleep"), "utf8").split("\n").filter(Boolean);
+  } catch {
+    args = [];
+  }
+  return { args, stderr: r.stderr ?? "", status: r.status ?? -1 };
+}
+
+test("host-update's printed daemon invocation passes the throttle var, and the entrypoint sleeps EXACTLY that value", () => {
+  const names = daemonRunEnvNames();
+  assert.ok(
+    names.includes("RMD_RESTART_THROTTLE_S"),
+    `--print-daemon-run must pass the throttle through; it passes only ${JSON.stringify(names)}`,
+  );
+
+  // THE CHAIN: set the variable BY THE NAME THE HOST SCRIPT PASSES, and prove the entrypoint acts
+  // on it. `sleep` is stubbed, so this asserts the argument, not a duration.
+  const run = bootSleepArgs({ RMD_RESTART_THROTTLE_S: "4" }, 7);
+  assert.equal(run.status, 7, "the command's exit code must still propagate");
+  assert.deepEqual(run.args, ["4"], "the entrypoint must sleep the configured interval exactly once");
+});
+
+test("with the throttle UNSET — what the printed invocation delivers by default — nothing sleeps at all", () => {
+  // The printed line passes `-e RMD_RESTART_THROTTLE_S="${RMD_RESTART_THROTTLE_S:-}"`, so an
+  // operator who sets nothing delivers an EMPTY value, not an absent one. Empty must resolve to
+  // today's behaviour; if it ever threw or slept, wiring the variable would have changed the
+  // default deployment, which this change explicitly must not do.
+  const run = bootSleepArgs({ RMD_RESTART_THROTTLE_S: "" }, 3);
+  assert.equal(run.status, 3);
+  assert.deepEqual(run.args, [], "an empty throttle must not sleep");
+  assert.doesNotMatch(run.stderr, /restart throttle/, "and must not announce a throttle it is not applying");
+});
+
+test("MUTANT (the defect that actually shipped): dropping the -e leaves the throttle unreachable, and the chain test catches it", () => {
+  // THIS IS NOT HYPOTHETICAL. It is the state `origin/main` was in until this change: the throttle
+  // was written, tested and merged (#1536) while `--print-daemon-run` passed no `-e` for it, so it
+  // could not fire on any container the documented invocation started. Reinstating that exact
+  // omission must turn the chain test above RED, or that test is decoration.
+  const src = readFileSync(HOST_UPDATE, "utf8");
+  const line = '    -e RMD_RESTART_THROTTLE_S="\\${RMD_RESTART_THROTTLE_S:-}" \\\\\n';
+  assert.equal(src.split(line).length - 1, 1, "the mutation target must be unique and present");
+  const dir = mkdtempSync(join(tmpdir(), "host-update-mutant-"));
+  const mutant = join(dir, "host-update.sh");
+  writeFileSync(mutant, src.replace(line, ""), { mode: 0o755 });
+  chmodSync(mutant, 0o755);
+
+  const names = daemonRunEnvNames(mutant);
+  // NON-VACUITY: extraction still works on the mutant (other `-e` flags are still found), so the
+  // assertion below fails because the throttle is GONE, never because the regex stopped matching.
+  assert.ok(names.includes("GH_TOKEN"), `extraction must still work on the mutant; got ${JSON.stringify(names)}`);
+  assert.ok(
+    !names.includes("RMD_RESTART_THROTTLE_S"),
+    "the mutant must drop the throttle var — otherwise the chain test proves nothing about the -e",
+  );
+});
+
 // ── MUTANTS: each reproduces a defect that actually shipped ─────────────────────────────────
 
 function mutate(find: string, replace: string): string {
@@ -516,7 +653,7 @@ test("MUTANT (defect 4): skipping before the identity is written leaves the reco
   const probe = mkdtempSync(join(tmpdir(), "entrypoint-probe-"));
   const run = boot(home, origin, {
     script: mutant,
-    env: { RMD_SKIP_BOOTSTRAP: "1" },
+    env: { RMD_SKIP_BOOTSTRAP: "1", ...NO_GUESSED_IDENTITY },
     cmd: ["bash", "-c", `cd ${probe} && git init -q -b main . && echo x > f && git add f && git commit -qm probe`],
   });
   assert.notEqual(run.status, 0, "the mutant must fail to commit — that is the defect being locked out");
