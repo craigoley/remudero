@@ -1,46 +1,47 @@
 # ORIENTATION
 
-_MAINTAINED BY `rmd retro` — regenerated 2026-08-06T05:20:06.087Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
+_MAINTAINED BY `rmd retro` — regenerated 2026-08-12T12:47:53.330Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
 
 A fresh Architect session should be able to orient from THIS doc alone plus the plan index —
 not by re-deriving state from the full plan and ledger.
 
 ## Current state
 
-36 run(s) since the last retro marker. Verdicts: {"blocked_ci":9,"incomplete":7,"merged":12,"no_pr":7,"pr_attribution_failed":1}.
+64 run(s) since the last retro marker. Verdicts: {"already_satisfied":9,"blocked":1,"blocked_ci":15,"incomplete":17,"merged":5,"no_pr":16,"pr_attribution_failed":1}.
 
 ### Shipped since marker
-- W1-T339 → https://github.com/craigoley/remudero/pull/1329 (gate-side merge; run ended blocked_ci)
-- W1-T340 → https://github.com/craigoley/remudero/pull/1331
-- W1-T341 → https://github.com/craigoley/remudero/pull/1332 (gate-side merge; run ended blocked_ci)
-- W1-T342 → https://github.com/craigoley/remudero/pull/1340 (gate-side merge; run ended pr_attribution_failed)
-- W1-T343 → https://github.com/craigoley/remudero/pull/1363
-- W1-T344 → https://github.com/craigoley/remudero/pull/1365
-- W1-T345 → https://github.com/craigoley/remudero/pull/1368
-- W1-T346 → https://github.com/craigoley/remudero/pull/1369
-- W1-T347 → https://github.com/craigoley/remudero/pull/1371
-- W1-T348 → https://github.com/craigoley/remudero/pull/1372 (gate-side merge; run ended blocked_ci)
-- W1-T349 → https://github.com/craigoley/remudero/pull/1379
-- W1-T350 → https://github.com/craigoley/remudero/pull/1378
-- W1-T351 → https://github.com/craigoley/remudero/pull/1380
-- W1-T352 → https://github.com/craigoley/remudero/pull/1381
-- W1-T353 → https://github.com/craigoley/remudero/pull/1389 (gate-side merge; run ended incomplete)
-- W1-T354 → https://github.com/craigoley/remudero/pull/1385
-- W1-T356 → https://github.com/craigoley/remudero/pull/1393 (gate-side merge; run ended blocked_ci)
-- W1-T357 → https://github.com/craigoley/remudero/pull/1397 (gate-side merge; run ended incomplete)
-- W1-T358 → https://github.com/craigoley/remudero/pull/1398 (gate-side merge; run ended blocked_ci)
-- W1-T359 → https://github.com/craigoley/remudero/pull/1399 (gate-side merge; run ended blocked_ci)
-- W1-T361 → https://github.com/craigoley/remudero/pull/1403 (gate-side merge; run ended blocked_ci)
-- W1-T362 → https://github.com/craigoley/remudero/pull/1404 (gate-side merge; run ended blocked_ci)
-- W1-T363 → https://github.com/craigoley/remudero/pull/1410
-- W1-T366 → https://github.com/craigoley/remudero/pull/1411 (gate-side merge; run ended incomplete)
-- W1-T367 → https://github.com/craigoley/remudero/pull/1412 (gate-side merge; run ended blocked_ci)
+- W1-T364 → https://github.com/craigoley/remudero/pull/1417 (gate-side merge; run ended blocked_ci)
+- W1-T368 → https://github.com/craigoley/remudero/pull/1414 (gate-side merge; run ended blocked_ci)
+- W1-T371 → https://github.com/craigoley/remudero/pull/1425 (gate-side merge; run ended incomplete)
+- W1-T372 → https://github.com/craigoley/remudero/pull/1423 (gate-side merge; run ended blocked_ci)
+- W1-T373 → https://github.com/craigoley/remudero/pull/1424 (gate-side merge; run ended blocked_ci)
+- W1-T374 → https://github.com/craigoley/remudero/pull/1434 (gate-side merge; run ended blocked_ci)
+- W1-T375 → https://github.com/craigoley/remudero/pull/1429 (gate-side merge; run ended incomplete)
+- W1-T376 → https://github.com/craigoley/remudero/pull/1430 (gate-side merge; run ended blocked_ci)
+- W1-T379 → https://github.com/craigoley/remudero/pull/1436 (gate-side merge; run ended blocked_ci)
+- W1-T380 → https://github.com/craigoley/remudero/pull/1437 (gate-side merge; run ended blocked_ci)
+- W1-T381 → https://github.com/craigoley/remudero/pull/1438 (gate-side merge; run ended blocked_ci)
+- W1-T382 → https://github.com/craigoley/remudero/pull/1453 (gate-side merge; run ended incomplete)
+- W1-T383 → https://github.com/craigoley/remudero/pull/1454 (gate-side merge; run ended blocked_ci)
+- W1-T387 → https://github.com/craigoley/remudero/pull/1442 (gate-side merge; run ended blocked_ci)
+- W1-T409 → https://github.com/craigoley/remudero/pull/1597 (gate-side merge; run ended pr_attribution_failed)
+- W1-T411 → https://github.com/craigoley/remudero/pull/1595 (gate-side merge; run ended incomplete)
+- W1-T413 → https://github.com/craigoley/remudero/pull/1602 (gate-side merge; run ended incomplete)
+- W1-T414 → https://github.com/craigoley/remudero/pull/1604 (gate-side merge; run ended incomplete)
+- W1-T415 → https://github.com/craigoley/remudero/pull/1606 (gate-side merge; run ended blocked)
+- W1-T416 → https://github.com/craigoley/remudero/pull/1607
+- W1-T418 → https://github.com/craigoley/remudero/pull/1605
+- W1-T420 → https://github.com/craigoley/remudero/pull/1610
+- W1-T422 → https://github.com/craigoley/remudero/pull/1612
+- W1-T423 → https://github.com/craigoley/remudero/pull/1613 (gate-side merge; run ended blocked_ci)
+- W1-T424 → https://github.com/craigoley/remudero/pull/1614
+- W1-T426 → https://github.com/craigoley/remudero/pull/1621 (gate-side merge; run ended incomplete)
 
 ## Next runnable task
 
-**W1-T364** — the operator still cannot change the daily cost ceiling without a PR and a deploy — the entire premise of the override store — give the console a write control (arm-then-confirm, bounds-refused server-side) over writeDailyCostCeilingOverride and its clear
+**W1-T425** — the global learnings layer ships with 'transport is deferred' — build the transport: opt-in, redacted, hash-pinned export and import, so one instance's earned lessons can teach another without leaking anyone's tree
 
-- risk: high · depends_on: W1-T363
+- risk: high · depends_on: (none)
 
 ## Never-do invariants (MASTER-PLAN §12 Standing rules — extracted verbatim; §12 is authoritative)
 
@@ -53,7 +54,7 @@ not by re-deriving state from the full plan and ledger.
 - 6. Zero ask rules in worker settings. Hooks <1s. Workers carry scoped PATs only. No MCP in workers.
 - 7. DISTRUST THE PROMPT OVER THE INSTALLED VERSION. Empirically the highest-value line in the template: WS-0 caught `allowedDomains` nesting; W1-T1 caught that the SDK's own schema is `$loose` and silently strips unknown keys — a guard built as specified would have PASSED the typo it exists to catch. Every Promptsmith-rendered prompt injects this rule. Read the installed schema; never trust a prompt's spelling, including this document's.
 - 8. OpenClaw stays out. The mini's protected paths are inviolate (deny-floor).
-- 8. The loop never waits on a human unless the plan says so. Idle = groom.
+- 8B. The loop never waits on a human unless the plan says so. Idle = groom.
 - 9. OSS defaults must be defensible on a stranger's machine; yolo is a documented opt-in.
 - 10. This document is truth. Every session syncs it before acting and after shipping.
 - 11. Isolation and containment are PROVEN PER RUN by probe, never assumed from configuration. A setting that "should" isolate (ZDOTDIR, a sandbox block, a stripped env) is a hypothesis until a preflight probe confirms it on THIS machine, THIS run — config that happens to work by accident of the host (PR #8: isolation held only because `~/.bashrc` was absent) must fail closed the moment the accident ends. See FIELD FINDING 11, W1-T17.
@@ -70,3 +71,4 @@ not by re-deriving state from the full plan and ledger.
 - 22. THE CONSOLE MUST DISTINGUISH CLAIMED STATE FROM EVIDENCED STATE — THE W1-T128 DOCTRINE, APPLIED TO PIXELS. A CLAIM is what a remote or a judge ASSERTS: merged-per-GitHub, review-passed. EVIDENCE is what the fleet can SHOW: a ledger receipt of the merge, proofs that actually executed. They are not the same fact, and the console must never render them as one. Every surface owes the reader which it is showing, and a surface that cannot obtain evidence SAYS SO rather than silently downgrading to the claim — or worse, to nothing. Three fixtures from 2026-07-20 make the cost concrete. (i) The board rendered `merged 0/160` with every task queued, because a failed GitHub read returned an empty set and cannot-read was presented as nothing-exists (W1-T181). (ii) RECENT rendered "no recent outcomes yet" across a week containing ~100 merges, because the section was GitHub-sourced while the LOCAL ledger held every one of them (W1-T184). (iii) `remudero-review` posted "PASS — 5 criteria substantiated, no test theater" at `proof_exec: 0/5`, directly beneath its own FLOOR DEGRADED banner, over a diff satisfying one criterion in five with zero tests on a `tdd: strict` task — a CLAIM of substantiation rendered as though it were EVIDENCE of it. The rule follows from where authority actually sits: the ledger is LOCAL, append-only and complete — the fleet's own receipt of what it did. GitHub is a REMOTE, rate-limited, occasionally-unreachable claim about the same events. A console that inverts that dependency lets a remote outage empty a local truth. Executable duties: W1-T183 (density/IA — anomaly visible at the list layer), W1-T184 (ledger-first rendering — GitHub decorates, never gates), W1-T179 (last-good status under darkness), W1-T182 (NEEDS ME joins live escalation state, not ledger history). [console design pass, 2026-07-20]
 - 23. WRITE-SIDE ATOMICITY — every multi-process-visible write is atomic or locked. The write-path sibling of cannot-observe ⇒ wait. This codebase has a rich, hard-won READ-side doctrine: a value that cannot be observed is marked indeterminate and deferred, never silently downgraded to absent or permitted (W1-T130/T179/T181/T197). It has no matching write-side doctrine, and the 2026-07-21 recon named the consequence precisely: *read-path integrity is doctrine, write-path atomicity is unowned*. The gap matters because the same invariant a read-side fix protects is REINTRODUCIBLE THROUGH A WRITE RACE UNDERNEATH IT — W1-T179's monotonic-under-darkness guarantee is defeated not by a flaw in its own logic but by a truncating `writeFileSync` on the file it reads. The rule: any file a second process can observe is written whole or not at all — temp-file-plus-rename, an append the kernel serializes, or an explicit lock. And a file that cannot be parsed is a DIFFERENT observation from a file that is absent. Collapsing those two is the write-side form of cannot-observe ⇒ permitted, and it is how a torn read becomes a zeroed circuit breaker or a pruned live worktree. Three fixtures from the 2026-07-21 recon, each verified at source. (i) `appendLedger` has no atomicity guarantee and its reader parses a torn line to `{}` — silently invisible to every consumer, on the file that backs the dispatch circuit breaker (R-8/R-16, W1-T206). (ii) `status.json` is written by four callers with a truncating write, so a reader arriving mid-write loses exactly the cached projection W1-T179 exists to preserve (R-17, W1-T207). (iii) `run.lock` collapses an unparseable read and an absent lock to the same `null` (R-18, W1-T208). One honest caveat, because the doctrine should not be justified by a fiction: `appendFileSync` opens `O_APPEND`, so concurrent appenders do NOT overwrite each other and the recon's suggested PIPE_BUF guarantee does not apply to a regular file. The exposure is a partial write and a silent torn-line read, not a lost append. Doctrine earns its keep by being true. Executable duties: W1-T206 (ledger), W1-T207 (status.json), W1-T208 (run.lock), W1-T209 (breaker-safe archival). [recon intake, 2026-07-21]
 - 24. SECRETS-AT-REST — a credential never lives in a log, a URL, or an argv. The threat model this plan grew up with is a malicious worker escaping its sandbox, and it is well served: scoped PATs, containment probes, deny-floor hooks. What it did not cover is the mundane leak — the operator's own credential sitting in a world-readable file because a startup banner printed it. The 2026-07-21 recon put it exactly: the plan tracks scoped PATs and containment sandboxing but not *a token in a log, a token in a URL, no rotation path*. The rule has three parts. A secret is never printed to stdout or stderr by a long-running service, because that output is routinely redirected to a file that outlives the process. A secret never travels in a URL, because URLs are copied, screenshotted, bookmarked, proxied and restored by session-restore — a link is the worst possible place to put a capability. And ROTATION IS A DOCUMENTED PATH, not an implementation detail someone can reconstruct: an undocumented rotation path is operationally an absent one, which is why R-31 was a real finding even though `rm` had always worked. The corollary that makes it actionable: exposure is judged by where a secret HAS BEEN, not by who was watching. A token that reached a log file, a terminal transcript, a screenshot or a chat window is compromised and must be ROTATED, not merely un-shared. Fixtures: R-5 — both bearer tokens printed to a 0644 `serve.log` with the WRITE token embedded in the console URL, so merely running the command leaked a fleet-control capability to disk (fixed #473, rotated the same day). R-31 — token generation is create-once/read-thereafter, making rotation a `rm` nobody had written down (documented #473). [recon intake, 2026-07-21]
+- 25. INSTRUMENT CHANGES RIDE ALONE — a diff may change what a gate MEASURES, or what the gate concludes about the product, never both in one PR. RECORDED, NOT NEWLY DECIDED: this rule has been ENFORCED IN CODE since W1-T297 while §12 carried no text for it. W1-T297's own shard promised the prose ("ships with the MASTER-PLAN §12 amendment that states the RULE (Standing rule 25) this task makes executable"); the enforcement landed and the amendment did not, so for roughly two hundred PRs every citation pointed at a rule that did not exist here. THE PROSE THEREFORE FOLLOWED THE CODE, not the other way round, and a reader should weigh it accordingly: where this entry and `src/lib/review.ts` disagree, the code is what refuses PRs. MEASURED AT `c709493`, re-derived rather than carried forward: the exact phrase "Standing rule 25" appears at 12 sites across 6 files, 8 of them inside `src/` (`src/lib/review.ts` ×6, `src/run-task.ts` ×2, plus two `test/` suites and two shards); case-insensitively, "rule 25" appears 38 times across 28 files, because ~22 task shards now run an explicit "RULE 25 CHECKED BEFORE FILING" step. It is cited far more often than it was written. This entry grants the gate no new reach. THE MEASUREMENT-INSTRUMENT SURFACE is one exported constant, `INSTRUMENT_SURFACE` (`src/lib/review.ts`) — `.github/workflows/`, every `scripts/*-ratchet.mjs`, `scripts/diff-coverage.mjs`, every `scripts/*-baseline.json`, `scripts/mutation-relevant-paths.json`, `stryker.conf.json` — and BOTH consumers derive from it (`USER_VISIBLE_SURFACE_RE`'s instrument arm and `detectInstrumentEntanglement`) so the two can never drift into a second hand-maintained copy. THE PREDICATE IS ENTANGLEMENT, NOT INSTRUMENT-TOUCHING: refusal requires at least one instrument path AND at least one product path (`src/`, non-test) in the same diff. An instrument-only diff — optionally carrying its own `test/` falsifier and a `docs/` update — is the SANCTIONED shape, and so is a src-only, plan-only or docs-only diff. `isProductPath` is `path.startsWith("src/") && !isTestPath(path)`, so `test/` is deliberately NOT the product half — the design's own carve-out, because otherwise an instrument-only PR could never carry the fixture that proves it; `test/diff-coverage.test.ts` is the established home for exactly that, and a gate implemented in a test entangles with nothing. THE REFUSAL IS HARD AND CANNOT BE FORGIVEN LATER: `instrumentEntangled` is one of the terms in BOTH of `judgeReview`'s rollups — `state` and `floorState` — so it forces `state: "failure"`, and because `applyVerdictStability` (W1-T178) suppresses only an UNCHANGED-HEAD SEMANTIC downgrade (`floorState === "success"`), an entanglement failure can never be suppressed by verdict stability. It is a structural, diff-derived fact, and it preempts the ordinary unmet-criteria text rather than queueing behind it. WHAT A REFUSED WORKER IS TOLD (`src/run-task.ts`), because the rule should read the way the refusal reads. The escalation SUMMARY, verbatim: `blocked_review: instrument change entangled with src/ in one PR (Standing rule 25) — <pr url>`. Its DETAIL names the instrument path(s) and the `src/` path(s) found beside them, calls them "two independently falsifiable claims (\"the instrument is right\" and \"the code is right\") shipped as one green, self-graded by the very instrument version it also changed", and states the part that makes this different from an ordinary block: "No worker may legitimately resolve this by writing more code." The two OPTIONS it offers are the only sanctioned exits — split, "land the instrument change in its own PR, then rebase this one onto it — the sanctioned shape", or revert, "revert the instrument hunk on this branch, keeping only the `src/` change, then re-review". A rule that only refuses re-teaches nothing, so the refusal ships its own remedy. WHY IT IS A RULE AND NOT A STYLE NOTE: a diff that lowers a coverage floor while also changing the code that floor measures is self-certifying — the same PR moves the ruler and the thing being measured, and no reviewer is prompted to notice. Split it: the instrument change rides alone and is judged on its own evidence. [W1-T297; amendment reconstructed 2026-08-11 (#1596) from the enforcement it was always meant to accompany, and completed 2026-08-12 with the three enforcement facts that first pass omitted — the verbatim `blocked_review` refusal, the never-suppressible property, and the re-measured citation counts]
