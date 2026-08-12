@@ -32,5 +32,17 @@ raw: "AMENDED FINDING — SWEEP DIRECT-MERGE WITHHOLD-BYPASS HYPOTHESIS REFUTED
   policy home for attested manual-merge exceptions."
 attachments: []
 origin: cli
-status: new
-proposal_pr: null
+status: proposed
+proposal_pr: https://github.com/craigoley/remudero/pull/1683
+summary:
+  headline: Direct-merge withhold bypass claim refuted—close investigation
+  what_happened: "Investigated whether task-ID withhold could be bypassed via
+    direct-merge path on PR #632. Found: withhold gates all code paths upstream;
+    PR #632 was manually merged by operator, not swept."
+  decision: Close the investigation.
+  options:
+    - label: Close—no code changes required
+      consequence: No action needed; alleged bypass does not exist.
+    - label: Close + add sweep-logging (optional)
+      consequence: Improve audit clarity by distinguishing future sweep-driven from
+        manual-driven merges.
