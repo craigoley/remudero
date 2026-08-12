@@ -94,11 +94,14 @@
     "testing.yaml": {
       "entries": [
         "lazy-config-in-ci",
+        "live-proof-runs-the-checked-out-code",
         "task-linting-is-mostly-deterministic"
       ],
       "globs": [
+        "bin/rmd",
         "src/lib/config.ts",
         "src/lib/containment.ts",
+        "src/lib/self-sync.ts",
         "src/lib/task-linter.ts"
       ]
     }
@@ -162,6 +165,9 @@
     ],
     "settings": [
       "platform.yaml"
+    ],
+    "testing": [
+      "testing.yaml"
     ]
   }
 }
