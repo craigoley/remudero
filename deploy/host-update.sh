@@ -103,12 +103,28 @@ host-update: DAEMON-MODE INVOCATION — printed only. Nothing has been started a
   # THE DAEMON. --restart=on-failure matches launchd KeepAlive{SuccessfulExit:false}: exit 0 means
   # a deliberate stop (daemonExitCode maps 'stopped' and 'max_reached' to 0) and must NOT restart;
   # nonzero includes 'stale', which REQUIRES the restart to pick up merged code (W1-T126).
-  # The :5 retry cap is the only rate protection docker offers, and it caps the COUNT, not the rate.
+  #
+  # RATE AND COUNT ARE TWO DIFFERENT BOUNDS, AND BOTH ARE SET HERE. \`--restart=on-failure:5\` caps
+  # the COUNT; docker has no rate control at all, which is why deploy/entrypoint.sh grew
+  # RMD_RESTART_THROTTLE_S — launchd's ThrottleInterval counterpart, a sleep BEFORE the non-zero
+  # exit so docker's own restart is what gets rate-limited (an in-container retry loop would re-run
+  # against the same tree and 'stale' would never clear). Exit 0 is never throttled, so a STOP
+  # still stops immediately. It is passed through from THIS SHELL's environment below.
+  #
+  # THERE IS DELIBERATELY NO DEFAULT VALUE HERE, and that is a finding rather than an omission.
+  # A throttle shorter than the time from container start to first useful dispatch just burns a
+  # restart; longer than necessary just idles the fleet. NOBODY HAS MEASURED THAT INTERVAL — no
+  # daemon has ever run in a container (zero \`daemon.*\` lines in the Azure instance's ledger), so
+  # any constant written here would be a guess that hardens into a fact nobody revisits. Unset, the
+  # entrypoint resolves \`\${RMD_RESTART_THROTTLE_S:-0}\` to 0 and behaves exactly as it does today.
+  # Set it from ONE supervised boot: time container start → first \`dispatch.*\` ledger line, and
+  # use that. Until then, running with it unset is the honest state, not a broken one.
   docker run -d --name remudero-daemon \\
     --restart=on-failure:5 \\
     --privileged \\
     --user 1000:1000 \\
     -e GH_TOKEN="\$GH_TOKEN" -e CLAUDE_CODE_OAUTH_TOKEN="\$CLAUDE_CODE_OAUTH_TOKEN" \\
+    -e RMD_RESTART_THROTTLE_S="\${RMD_RESTART_THROTTLE_S:-}" \\
     -v ${STATE_DIR}:${STATE_MOUNT_DEST} \\
     ${REF} \\
     ./bin/rmd daemon
