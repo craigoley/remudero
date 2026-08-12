@@ -380,6 +380,39 @@ test("deriveDisposition: failing review with NO actionable criteria -> blocked-a
   assert.match(r.reason, /contradictory/);
 });
 
+// W1-T440: the SAME empty (unmetCriteria === []) has two causes — a trailer resolved a task id
+// and the ledger genuinely came back with nothing unmet (contradictory, above), versus no
+// trailer at all so unmetFromLedger was never consulted (unrecoverable, here). Same
+// disposition, different reason — `criteriaRecoverable` is the observed field that tells them
+// apart, set by buildOpenPrViews (run-task.ts), never inferred here.
+test("deriveDisposition: failing review with NO Remudero-Task trailer -> blocked-ambiguous (criteria unrecoverable, not contradictory)", () => {
+  const p = pr({
+    reviewState: "failure",
+    unmetCriteria: [],
+    priorStrikes: 0,
+    taskId: undefined,
+    criteriaRecoverable: false,
+  });
+  const r = deriveDisposition(p, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(r.disposition, "blocked-ambiguous", "same disposition as the contradictory arm — only the reason text differs");
+  assert.match(r.reason, /criteria unrecoverable/);
+  assert.doesNotMatch(r.reason, /contradictory/, "must NOT claim the review contradicted itself when it was never checked");
+});
+
+// An OLDER fixture that never set `criteriaRecoverable` at all keeps today's byte-identical
+// wording (additive field, fail toward the pre-existing behavior, never a silent flip).
+test("deriveDisposition: failing review with unset criteriaRecoverable -> blocked-ambiguous (contradictory, unchanged)", () => {
+  const p = pr({ reviewState: "failure", unmetCriteria: [], priorStrikes: 0 });
+  assert.equal(p.criteriaRecoverable, undefined, "the fixture helper does not set this field by default");
+  const r = deriveDisposition(p, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(r.disposition, "blocked-ambiguous");
+  assert.equal(
+    r.reason,
+    "review failing with no actionable unmet criteria (contradictory) — escalating",
+    "byte-identical to the pre-W1-T440 wording",
+  );
+});
+
 test("deriveDisposition: in-flight (pending review, pending checks, not stale) -> blocked-ambiguous (the #161 fix — never armed pre-green)", () => {
   const r = deriveDisposition(pr(), DEFAULT_SWEEP_POLICY, NOW);
   // THE PROPERTY UNDER TEST IS UNCHANGED: a pre-green PR is never armed. `pr()`'s RECENT is a day
