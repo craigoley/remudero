@@ -257,13 +257,20 @@ export function runRelayClient(opts: RelayClientOptions): RelayClientHandle {
     };
 
     socket.once("connect", () => {
-      delayMs = backoff.initialMs; // a successful connect resets the backoff clock
       log("relay.connected", { relayUrl: opts.relayUrl });
       send({ t: "hello", token: opts.enrollmentToken });
     });
 
     wireFrameReader(socket, log, (frame) => {
       if (frame.t === "hello_ok") {
+        // THE BACKOFF CLOCK RESETS HERE, NOT ON THE SOCKET'S `connect` EVENT. A relay that
+        // accepts the TCP connection and then REJECTS the enrollment token would otherwise reset
+        // the delay before the rejection could arrive, so every cycle restarted at `initialMs`
+        // and the client redialed a relay that had already said no at that fixed rate forever
+        // (measured: 20 dials in 400ms at initialMs=20, versus ~5 once it grows). An ACCEPTED
+        // connection is the only one that proves the endpoint and the credential are both good,
+        // which is exactly what "the backoff may start over" is supposed to mean.
+        delayMs = backoff.initialMs;
         log("relay.hello_ok", {});
         return;
       }

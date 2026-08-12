@@ -438,6 +438,46 @@ test("relay: a rejected enrollment token is logged and the connection dropped, n
   }
 });
 
+test("relay: a relay that keeps REJECTING the token is backed off, not redialed at the initial interval forever", async () => {
+  // The backoff clock must be reset by a connection that WORKED, not merely one that opened.
+  // A relay which accepts TCP and then rejects the enrollment token is the case that separates
+  // the two: if the reset happens on the socket's `connect` event, it lands BEFORE the rejection
+  // arrives, so every cycle restarts at `initialMs` and the client hammers the relay forever at
+  // that rate -- exactly the spin `backoff` exists to prevent, and worst against a relay that has
+  // already said no.
+  let connections = 0;
+  const server = createNetServer((socket) => {
+    connections++;
+    socket.on("error", () => {});
+    socket.on("data", () => socket.write(JSON.stringify({ t: "hello_reject", reason: "bad token" }) + "\n"));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+
+  let client: RelayClientHandle | undefined;
+  try {
+    client = runRelayClient({
+      relayUrl: `http://127.0.0.1:${port}`,
+      enrollmentToken: "persistently-rejected",
+      localBaseUrl: "http://127.0.0.1:1",
+      backoff: { initialMs: 20, factor: 2, maxMs: 10_000 },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 400));
+
+    // Growing 20/40/80/160/320 reaches ~5 dials in 400ms. A backoff reset on every TCP connect
+    // would hold the interval at 20ms and reach roughly 20 -- an order of magnitude more.
+    assert.ok(
+      connections <= 8,
+      `a persistently-rejecting relay must be backed off; got ${connections} dials in 400ms (a non-growing 20ms retry would give ~20)`,
+    );
+    assert.ok(connections >= 2, `the client must still retry at all; got ${connections}`);
+  } finally {
+    client?.stop();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
 test("relay: a malformed relay URL is reported once and does NOT spin in a reconnect loop", async () => {
   const captured = captureLog();
   const client = runRelayClient({
