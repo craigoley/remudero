@@ -14588,6 +14588,20 @@ export async function sweepCommand(rest: string[]): Promise<number> {
     reapSummary = runWorktreeReapRung(config, log);
   }
 
+  // W1-T448 — `rmd reap-branches` is deliberately NOT a rung here, unlike the worktree reaper
+  // just above. That rung is free at this cadence (local filesystem only); the BRANCH reaper is
+  // not: one reap issues ~8 `gh api` `state=all` pages (not shared with `buildOpenPrViews`
+  // above, which is open-PRs-only) and costs several seconds of wall time, while this pass fires
+  // roughly every `DEFAULT_POLL_INTERVAL_MS` (60s, src/lib/daemon.ts). Wiring it in would add on
+  // the order of 480 REST requests/hour for an answer that only moves when a branch is created
+  // or merged — a low-frequency signal against a high-frequency loop. See docs/operator-guide.md
+  // for the measured numbers that decided this, and test/reap-cadence.test.ts for the proof.
+  // (The precedent this leans on, per design clause (iv): `deps.sweep()` itself is already
+  // wrapped in try/catch by the daemon's poll loop — `daemon.sweep.failed` is logged and never
+  // propagated, src/lib/daemon.ts — so a failing sub-step inside a sweep pass is an established,
+  // non-fatal shape; `reap-branches` staying an unwired, standalone verb sidesteps that surface
+  // entirely rather than needing a new instance of it.)
+
   console.log(
     `### rmd sweep${dryRun ? " --dry-run" : ""} — ${owner}/${repo}\n` +
       renderSweepSummary(summary) +
