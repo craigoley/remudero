@@ -119,3 +119,20 @@
     longer read GREEN locally while the reviewer judges it no-match."
   plan_section: "CLAUDE.md#writing-proofs-and-acceptance-criteria"
   assertion: 'node --test --import tsx --import ./test/setup/tmp-hygiene.ts --test-name-pattern "ACCEPTANCE #1: check-proof reports the SAME no-match verdict" test/check-proof-executor-parity.test.ts'
+
+# Added by W1-T409 (the offline half of W1-T392's split): MASTER-PLAN.md's "## SHIPPED log"
+# section and its not-shipped prose ("not shipped"/"unbuilt"/"did not ship") are two lists a
+# machine can cross offline. W1-T149 shipped (PR #349) but the SHIPPED log entry was never
+# written, and six retro cycles re-asserted it unbuilt before the drift was caught by hand -- this
+# claim is the standing, self-consistency half of the gate that incident argues for (the other
+# half, GitHub-truth re-derivation, is W1-T410's planStateTruthRung, out of scope for an offline
+# claims.yaml assertion). It reuses W1-T410's extractAssertedUnbuiltTaskIds (src/lib/retro.ts)
+# rather than re-deriving the not-shipped phrase extractor a second time.
+
+- id: plan-state-claims-self-consistent
+  claim: "MASTER-PLAN.md does not assert a task id BOTH shipped (the '## SHIPPED log' section, in
+    either its long-form W<n>-T<n> or house-style compressed-pair T<n>/#<pr> notation) AND
+    not-shipped (a 'not shipped'/'unbuilt'/'did not ship' line elsewhere) -- scripts/plan-state-
+    claims.mjs names the id and both lines when it finds one."
+  plan_section: "MASTER-PLAN.md §SHIPPED log"
+  assertion: 'node --import tsx scripts/plan-state-claims.mjs'
