@@ -1021,22 +1021,53 @@ per-cycle restatement this section forbids.)*
   (#1436, `src/lib/ledger-grep.ts`), so "open, filed 2026-08-05" above is STALE; (4) the sweep-survey
   gate, recorded UNVERIFIED above, is VERIFIED STILL OPEN — `if (actionable.length)` wraps the ONLY
   `log("daemon.clone_reap", …)` in run-task.ts, so a reaper that ran and found nothing and a reaper
-  that never ran are identical in the ledger. Face 2 ("self-hiding observability") IS specified
-  enough to sweep, and re-run over `src/**/*.ts` at d767c16: **83 guards of the form
-  `if (<coll>.length …)`, of which 10 are emptiness guards whose consequent is LOG-ONLY** (12 match
-  log-only; 2 test `> 1` and are semantic, not emptiness). CONTROL — 62 same-shaped guards whose
-  consequent carries a non-log effect, so the predicate is not vacuous — and it independently finds
-  the one instance this entry names by hand, the clone-reap gate. The other two faces have no stated
-  predicate and were NOT swept.
-  AND THE CLASS IS STILL BEING ADDED, WHICH BEARS ON RATIFICATION MORE THAN THE BACKLOG DOES. That
-  count was 9 the same day and is 10 now: `if (outOfScope.length > 0)` gating the only log on the
-  new push-and-flag path arrived with #1585, hours before this was written. Note what that does to
-  the PREDICTION above — "the next instance is triggered by an environment shift a query predates …
-  not by a code edit". This one WAS a code edit, on a path built to improve observability. Recorded
-  as an observation, not scored as a refutation: the prediction speaks of a census-class boundary
-  READ and this is a guard, so whether it counts is the operator's call, not a session's.
-  **TO BECOME RATIFIABLE this entry needs the six classes enumerated and the selecting predicate
-  written down, here; the 21 is otherwise a number with no method.**
+  that never ran are identical in the ledger. **★ RE-FOUNDED 2026-08-12 AT `4c25957` — OPERATOR-DIRECTED (the operator asked for the three faces;
+  a session may not ratify, and the PROPOSAL below still AWAITS RATIFICATION — what is settled is the
+  re-founding, not the adoption).** The census is unrecoverable and stays that way, so MEMBERSHIP NO
+  LONGER CITES IT. Each face now carries a PREDICATE that regenerates its own population on demand,
+  with a control, and FIRST TRANCHE's criterion is the union of them. **The 21 is NOT reconstructed
+  and must not be** — a number asserted as the vanished census's would be worse than the gap.
+  **FACE 1 — UNDERCOUNT-AS-ANSWER. Predicate:** an EXPORTED function whose declared return type is a
+  bare collection or count (`T[]`, `number`, `Map<…>`, `Set<…>`) with no discriminated outcome, AND
+  whose result is consumed by a caller that branches on emptiness. **Population at `4c25957`: 36**, of
+  224 bare-returning exports. **CONTROL: 126** exported functions that DO return a discriminated
+  outcome (a `kind`/`status`/`ok` tag or a `| undefined` refusal) — both shapes exist here, so the
+  query separates rather than sweeps. **It independently finds `parseAcceptanceBlock`
+  (src/lib/review.ts)**, the member this entry names by hand, and also `ledgerRotationEntries`
+  (src/lib/ledger-grep.ts) — the union VERB fails loud, its rotation-listing helper still returns a
+  bare array, so tranche member (3) is closed only at the verb.
+  **FACE 2 — SELF-HIDING OBSERVABILITY. Predicate:** `if (<expr>.length <cmp>)` across `src/**/*.ts`
+  where the comparison separates empty from non-empty (bare `.length`, `> 0`, `!== 0`, `=== 0`,
+  `>= 1`, `< 1` — NOT `> 1`, which is cardinality) and EVERY statement in the consequent is a logging
+  call, so the zero case writes nothing. **Population at `4c25957`: 12** of 204 same-shaped guards;
+  8 are semantic rather than emptiness. **CONTROL: 184** guards of the identical shape whose
+  consequent carries a non-log effect. **It independently finds the clone-reap gate**
+  (`if (actionable.length)` wrapping the only `log("daemon.clone_reap", …)` in run-task.ts), the
+  instance this entry names by hand.
+  **FACE 3 — ABSENCE-AS-SUCCESS. Predicate:** an emptiness test whose consequent WIDENS scope —
+  returns or restores an unfiltered default instead of narrowing. **Population at `4c25957`: 1**, and
+  it is the recorded instance itself (#1111): `narrowNameFilteredArgs` (src/lib/review.ts) still
+  returns the whole `baseArgs`, `TEST_GLOB` included, on zero candidates. **That one is CHANNELED,
+  not open** — `execWhitelistedProof` decides `absent` BEFORE reaching it, so the widening is now the
+  deliberate fail-open on `unresolvable` only. A one-hit predicate is WEAKLY VALIDATED (no live
+  positive to test it against); recorded as such rather than as a clean sweep.
+  **THE NEW FIRST TRANCHE CRITERION, replacing the census citation:** a boundary qualifies when it
+  MATCHES ANY FACE PREDICATE ABOVE **and** has no second channel at head. Faces 1 and 2 are therefore
+  decidable by anyone who runs the query; face 3 carries a predicate but no open member, and adds
+  members BY NAME with evidence until a live positive validates it.
+  **THE SIX MECHANISM CLASSES ARE RETIRED AS A MEMBERSHIP AXIS.** They are never enumerated anywhere
+  in this entry or its sources, they are a different partition from the three faces, and nothing at
+  head can reconstruct them. Membership is the faces; the six are not evidence for anything.
+  **AND THE OLD COUNTS CANNOT BE REPRODUCED — which is this defect one level down, inside P48's own
+  supporting sweep.** #1587 recorded outputs (83 guards / 10 log-only / 62 control) and never the
+  query. Re-derived from that prose, face 2 gives **204 / 12 / 184**; the recorded 83 also fails to
+  reconcile with itself (12 + 62 + 2 leaves 9 rows unaccounted). Neither classifier can be preferred,
+  because only one of them was written down. The predicates above are stated in full FOR THAT REASON.
+  **THE PREDICTION SURVIVES A CORRECTION, NOT A REFUTATION.** `if (outOfScope.length > 0)` (the
+  push-and-flag path, #1585) was cited as a tenth face-2 instance arriving by CODE EDIT, against the
+  PREDICTION's "environment shift a query predates". Under the stated face-2 predicate it is NOT a
+  member — its consequent carries non-log work — so it lands in the control, and the prediction is
+  untouched by it. Recorded because the earlier reading is in this entry and would otherwise stand.
   **★ R17 UPDATE — THE PROPOSAL'S SHAPE NOW SHIPS IN BOTH DIRECTIONS, WHILE THE ENTRY ITSELF STAYS
   UNRATIFIABLE.** **(1) CLAUSE (ii) IN THE AFFIRMATIVE, FROM THE GATHER ITSELF.** The mutation-gate
   rung (D-10/W1-T393) reports **`NO POSITIVE CONTROL: 0 verdicts recorded`** and says, in its own
