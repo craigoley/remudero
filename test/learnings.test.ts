@@ -247,6 +247,28 @@ test("loadLearnings rejects duplicate ids", () => {
   assert.throws(() => loadLearnings(path), /duplicate learnings id/);
 });
 
+// ── cited_count (W1-T419) ────────────────────────────────────────────────────
+
+test("loadLearnings rejects a non-numeric cited_count", () => {
+  const path = writeCorpus("- id: x\n  files: [a.ts]\n  fact: one\n  src: PR#1\n  cited_count: nope\n");
+  assert.throws(() => loadLearnings(path), /'cited_count' must be a number/);
+});
+
+test("loadLearnings rejects a non-finite cited_count", () => {
+  const path = writeCorpus("- id: x\n  files: [a.ts]\n  fact: one\n  src: PR#1\n  cited_count: .nan\n");
+  assert.throws(() => loadLearnings(path), /'cited_count' must be a number/);
+});
+
+test("loadLearnings parses a numeric cited_count onto the entry; an absent one stays undefined", () => {
+  const path = writeCorpus(
+    "- id: with-count\n  files: [a.ts]\n  fact: one\n  src: PR#1\n  cited_count: 3\n" +
+      "- id: without-count\n  files: [b.ts]\n  fact: two\n  src: PR#2\n",
+  );
+  const [withCount, withoutCount] = loadLearnings(path);
+  assert.equal(withCount.citedCount, 3);
+  assert.equal(withoutCount.citedCount, undefined);
+});
+
 test("the shipped learnings/ corpus loads (across every shard) and matches worker.ts to shell-isolation, not CI", () => {
   const entries = loadLearningsCorpus(join(REPO_ROOT, "learnings"));
   assert.ok(entries.length > 0, "the shipped corpus is non-empty");
