@@ -319,6 +319,7 @@ import {
 import { appendLedger, isSpawnInfraBlockedError, LEDGER_COST_TAG_INFRA } from "./lib/ledger.js";
 import { resolveLedgerUnion } from "./lib/ledger-grep.js";
 import { escalateRepeatingRules, ruleEfficacyReport } from "./lib/rule-efficacy.js";
+import { mineVerdictRows, verdictCalibrationReport } from "./lib/verdict-calibration.js";
 import {
   assertRunnable,
   loadPlan,
@@ -7675,6 +7676,113 @@ export function ruleEfficacyCommand(rest: string[], opts: { stateDir?: string } 
       console.log(`escalated: registry now carries ${drafted.length} proposal(s) (${registryPath})`);
     } else {
       console.log("escalated: nothing new — every REPEATING rule already carries an open proposal, or none qualifies");
+    }
+  }
+
+  return 0;
+}
+
+/** The `rmd verdict-calibration` git side's only I/O — the same shallow-clone refusal
+ *  `defaultMergeEvidenceLog` (lint-plan's failing-split) already established, extended with the
+ *  commit sha, committer-date-ISO and `--name-only`'s per-commit file list that
+ *  lib/verdict-calibration.ts's join needs (see that module's doc for the exact wire shape and
+ *  why: locating a SPECIFIC merge commit and dating reverts/fixes against it needs the sha and
+ *  date the `%s%x00%b%x01` shape alone doesn't carry, and the overlap rule needs the files). */
+export function defaultVerdictCalibrationGitLog(cwd: string): { dump: string; ref: string } {
+  const shallow = execFileSync("git", ["rev-parse", "--is-shallow-repository"], {
+    cwd,
+    encoding: "utf8",
+  }).trim();
+  if (shallow === "true") {
+    throw new Error("shallow clone — truncated history would misread absent reverts/fixes as absent evidence");
+  }
+  const ref = "origin/main";
+  const dump = execFileSync("git", ["log", "--name-only", "--format=%x02%H%x00%cI%x00%s%x00%b%x01", ref], {
+    cwd,
+    encoding: "utf8",
+    // Same rationale as classifyFailingMergeEvidence's own dump: the default 1 MiB maxBuffer
+    // dies on a history this size long before the machine does.
+    maxBuffer: 1 << 28,
+  });
+  return { dump, ref };
+}
+
+/**
+ * `rmd verdict-calibration` — W1-T424's correctness join: per verdict class (full PASS / keyword
+ * floor / degraded arm), the revert rate and follow-up-fix rate over a stated window, joining
+ * every armed merge's ledgered verdict (lib/verdict-calibration.ts's `mineVerdictRows`) to
+ * post-merge git reality (`defaultVerdictCalibrationGitLog` above). HOST-SIDE ONLY: the ledger
+ * lives on the daemon host, so this is meaningless off-host (a fresh checkout with no
+ * `state/ledger.*.gz` reads every armed merge UNMEASURABLE this run, honestly, rather than a
+ * false rate). READ-ONLY — v1 files nothing and proposes nothing (see lib/verdict-calibration.ts's
+ * module doc, NOT IN SCOPE).
+ */
+export function verdictCalibrationCommand(rest: string[], opts: { stateDir?: string; cwd?: string } = {}): number {
+  const badArg = unknownArgError("verdict-calibration", rest, [], []);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+
+  const stateDir =
+    opts.stateDir ??
+    (() => {
+      try {
+        return join(loadConfig().root, "state");
+      } catch {
+        return undefined;
+      }
+    })();
+  if (stateDir === undefined) {
+    console.error("rmd verdict-calibration: cannot resolve a state dir — unreadable config");
+    return 1;
+  }
+
+  const { ledger, rows } = mineVerdictRows(stateDir);
+
+  let gitDump = "";
+  let gitRef = "origin/main";
+  let gitReadError: string | undefined;
+  try {
+    const read = defaultVerdictCalibrationGitLog(opts.cwd ?? repoRoot);
+    gitDump = read.dump;
+    gitRef = read.ref;
+  } catch (e) {
+    gitReadError = (e as Error).message;
+  }
+
+  const report = verdictCalibrationReport(rows, gitDump, { gitReadError });
+
+  console.log(`rmd verdict-calibration — over the unioned ledger at ${stateDir}, git history at ${gitRef}`);
+  console.log(`  archives: ${ledger.archiveCount} matched, live file read: ${ledger.liveFileRead}`);
+  if (gitReadError) {
+    console.log(`  git history: UNAVAILABLE — ${gitReadError}`);
+  }
+  console.log("");
+  console.log(`attribution policy: window ${report.policy.windowDays}d — ${report.policy.overlapRuleDescription}`);
+  console.log("");
+  for (const c of report.classes) {
+    const label = c.verdictClass === "full-pass" ? "full PASS" : c.verdictClass === "keyword-floor" ? "keyword floor" : "degraded arm";
+    if (c.revertRate === null) {
+      console.log(
+        `  ${label.padEnd(14)} n=${c.total} — UNMEASURABLE (below the minimum population floor of ${report.minPopulationFloor}; counts only)`,
+      );
+      console.log(`  ${" ".repeat(14)}   reverted ${c.revertedCount}/${c.total}, follow-up-fixed ${c.followupFixedCount}/${c.total}`);
+    } else {
+      const revertPct = (c.revertRate * 100).toFixed(1);
+      const fixPct = (c.followupFixRate! * 100).toFixed(1);
+      console.log(
+        `  ${label.padEnd(14)} n=${c.total} — revert rate ${revertPct}% (${c.revertedCount}/${c.total}), follow-up-fix rate ${fixPct}% (${c.followupFixedCount}/${c.total})`,
+      );
+    }
+  }
+  console.log("");
+  if (report.unmeasurable.length === 0) {
+    console.log("unmeasurable: none");
+  } else {
+    console.log(`unmeasurable: ${report.unmeasurable.length} row(s)`);
+    for (const u of report.unmeasurable) {
+      console.log(`  ${u.taskId} @ ${u.headSha}: ${u.why}`);
     }
   }
 
@@ -17224,6 +17332,11 @@ const COMMANDS: readonly CommandSpec[] = [
       "rmd rule-efficacy [--no-escalate]   # W1-T418: the corpus repeat-incident rate — for each rule in lib/rule-efficacy.ts's signature table, the count of same-class ledger rows strictly AFTER the rule's effective (citing) date, over the ledger UNION (lib/ledger-grep.ts) rather than the live file alone; verdict is PREVENTING (0 since), REPEATING (n since, dates), or UNMEASURABLE (why) — never silently omitted. HOST-SIDE ONLY: the ledger lives on the daemon host, so this is meaningless off-host. A rule at >= 2 post-rule recurrences drafts ONE promote-to-instrument proposal into the ACTIVE-proposal registry via updateProposalRegistry, idempotent by rule id (reruns never duplicate) — the inbox's own tiering owns its fate from there; --no-escalate runs the report only, with zero writes. Otherwise READ-ONLY.",
   },
   {
+    name: "verdict-calibration",
+    usage:
+      "rmd verdict-calibration   # W1-T424: the correctness join — joins every armed merge's ledgered review verdict (lib/verdict-calibration.ts's mineVerdictRows, over the ledger UNION, never the live file alone) to post-merge git reality, and reports per verdict class (full PASS / keyword floor / degraded arm) the revert rate and follow-up-fix rate over a stated window, each denominator NAMED (n of N armed merges) with an UNMEASURABLE arm for rows whose merge sha or verdict class could not be recovered — never a rate over a silently shrunken denominator. Below a minimum population floor a class prints its count and REFUSES the rate. The attribution window + overlap rule (lib/verdict-calibration.ts's ATTRIBUTION_POLICY) print alongside the figures, so the metric travels with its rule. HOST-SIDE ONLY: the ledger lives on the daemon host, so this is meaningless off-host. READ-ONLY: files nothing, proposes nothing in v1.",
+  },
+  {
     name: "check-acceptance",
     usage:
       "rmd check-acceptance <body-file>   # read a PR body from a file and report what the REVIEWER'S OWN parseAcceptanceBlock actually resolves from it, against what was written: header found, bullets written, criteria parsed, empty proofs. Exits non-zero when they disagree. A claim WRAPPED onto a second line silently truncates the block (any indented line that is not `proof:` ends it), and a `## Validation` heading is not an Acceptance header — both ship a body that says less than its author wrote. Run this before opening a PR over REST, which bypasses the orchestrator's house-block emitter. READ-ONLY: writes no ledger line, no state file",
@@ -17767,6 +17880,10 @@ export async function main(
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(ruleEfficacyCommand(rest)) cannot carry a DA hit without forking the process; ruleEfficacyCommand's own logic — arg validation, the signature-table walk, the PREVENTING/REPEATING/UNMEASURABLE render, and the escalation write — is unit-tested in test/rule-efficacy.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/ledger-grep dispatch cases).
   if (cmd === "rule-efficacy") {
     process.exit(ruleEfficacyCommand(rest));
+  }
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(verdictCalibrationCommand(rest)) cannot carry a DA hit without forking the process; verdictCalibrationCommand's own logic — arg validation, the ledger+git join, the per-class render and the UNMEASURABLE listing — is unit-tested in test/verdict-calibration.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/ledger-grep/rule-efficacy dispatch cases).
+  if (cmd === "verdict-calibration") {
+    process.exit(verdictCalibrationCommand(rest));
   }
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(checkAcceptanceCommand(rest)) cannot carry a DA hit without forking the process; checkAcceptanceCommand's own logic — the usage refusal, the unreadable-file refusal, the truncation report, the missing-header report and the clean pass — is unit-tested in test/acceptance-block-diagnostics.test.ts (same irreducible-glue shape as the sibling check-proof/emissions dispatch cases).
   if (cmd === "check-acceptance") {

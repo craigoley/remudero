@@ -3,6 +3,11 @@ import { relative, sep } from "node:path";
 import type { AcceptanceCriterion, Plan, Task, TaskStatus } from "./plan.js";
 import { isInPlanScope } from "./plan-architect.js";
 import { isDemonstrationProof, isDialectPrefixed, parseWhitelistedProof, type WhitelistedProof } from "./review.js";
+import {
+  bestNearDuplicate,
+  DEFAULT_DUPLICATE_CUTOFF,
+  type DuplicateCorpusEntry,
+} from "./knowledge-dedup.js";
 
 /**
  * Deterministic task linter (MASTER-PLAN §5C Layer A). NO LLM — a PURE function
@@ -46,7 +51,8 @@ import { isDemonstrationProof, isDialectPrefixed, parseWhitelistedProof, type Wh
  * warns (regardless of that option) for a `unit test:` proof whose body reads as a
  * runtime narrative rather than a literal test-title substring, and proof-scope
  * (W1-T310) warns EVERYWHERE by default (`opts.proofScope`, default "warn") — see
- * that check's own module comment for the measured retrofit count behind the call.
+ * that check's own module comment for the measured retrofit count behind the call, and
+ * dispatch-priority (W1-T422) always warns, unconditionally, like budget-sanity.
  */
 
 export type LintCheck =
@@ -63,7 +69,10 @@ export type LintCheck =
   | "monolith-filing"
   | "budget-sanity"
   | "ruling-verify"
-  | "rule15-filing";
+  | "rule15-filing"
+  | "duplicate-title"
+  | "duplicate-learning"
+  | "dispatch-priority";
 export type LintSeverity = "block" | "warn";
 
 export interface LintViolation {
@@ -1237,6 +1246,152 @@ export function budgetSanityWarning(
   };
 }
 
+// ── DISPATCH-PRIORITY (W1-T422, soft) ────────────────────────────────────────
+//
+// A WARNING (never blocks) on the optional `priority:` field (lib/plan.ts) that
+// `compareDispatch` (lib/drain.ts) reads as its FIRST sort key. Two ways the field
+// rots silently without this: a value far outside the sanctioned band (a typo — a
+// risk number or a turn budget pasted into the wrong column), and a value left on a
+// task that can no longer dispatch at all (blocked/merged/done — see
+// {@link NON_OPEN_FILING_STATUSES}, reused here unchanged: "non-open" means the exact
+// same thing for a priority as it does for rule15-filing). Neither case can produce a
+// WRONG verdict — a bad priority only degrades ORDERING (design (iii), W1-T422's own
+// task record) — so blocking would overreach the failure mode.
+
+/** Sanctioned `priority` band (design (iii), W1-T422) — wide enough to rank the whole
+ *  open queue without doubling as an unbounded knob. A value outside it still sorts
+ *  exactly where the comparator says it does (dispatchOrder never refuses to read it);
+ *  the warning exists because a value this far out is very likely a typo. */
+export const DISPATCH_PRIORITY_MIN = 0;
+export const DISPATCH_PRIORITY_MAX = 99;
+
+/** ADVISORY (never blocks): this task's `priority` is out of the [0, 99] band, or set
+ *  on a task that is no longer OPEN, where it can never again affect dispatch order and
+ *  is pure noise. Absent `priority` ⇒ silent — most tasks carry none, by design. */
+export function dispatchPriorityViolations(task: Task): LintViolation[] {
+  if (task.priority === undefined) return [];
+  const violations: LintViolation[] = [];
+  if (task.priority < DISPATCH_PRIORITY_MIN || task.priority > DISPATCH_PRIORITY_MAX) {
+    violations.push({
+      check: "dispatch-priority",
+      severity: "warn",
+      message:
+        `task ${task.id} carries priority ${task.priority}, outside the sanctioned ` +
+        `[${DISPATCH_PRIORITY_MIN}, ${DISPATCH_PRIORITY_MAX}] band — dispatchOrder (lib/drain.ts) ` +
+        "still honours it exactly as written, but a value this far out is usually a typo.",
+    });
+  }
+  if (NON_OPEN_FILING_STATUSES.has(task.status)) {
+    violations.push({
+      check: "dispatch-priority",
+      severity: "warn",
+      message:
+        `task ${task.id} carries priority ${task.priority} but is status:${task.status} — a ` +
+        "gravestone with a priority is noise: it can never again affect dispatch order.",
+    });
+  }
+  return violations;
+}
+
+// ── DUPLICATE-CLOSURE AT KNOWLEDGE INTAKE (W1-T420) ──────────────────────────
+//
+// ONE PURE MODULE (src/lib/knowledge-dedup.ts's `bestNearDuplicate`), TWO CONSUMERS HERE, TWO
+// SEVERITIES — matched to population size and false-positive cost (the W1-T352-vs-W1-T322
+// calibration argument applied at filing time). Both consumers below pass their own corpus in
+// (this module reads no disk, same purity contract `moduleExists` already keeps for
+// `callSiteViolations`); the CALLER resolves `learnings/*.yaml` and `plan/tasks.yaml` + shards
+// and injects the result.
+//
+// (i) `duplicateTitleViolations` — TASK-TITLE INTAKE, ADVISORY. Wired into `lintTask` via
+//     `opts.openTaskTitles`, so it runs on every real lint pass once a caller supplies the
+//     corpus. WARN-only, unconditionally (no severity override — the whole point of the
+//     advisory posture is that it never blocks): title similarity is legitimately high for
+//     sibling tasks in an arc (a W1-T369/T370-shaped pair would rightly score high), and a
+//     false BLOCK at filing costs a whole re-file cycle. The warn is the pointer; the author
+//     decides. Escalation to blocking is follow-on work gated on a measured false-positive
+//     rate (W1-T322's advisory-first posture) — not done here.
+//
+// (ii) `learningDuplicateViolation` — LEARNINGS INTAKE, BLOCKING. NOT wired into `lintTask`
+//      (a `Task` does not carry a learning's `fact`/`id` — there is nothing on `Task` to hang
+//      this check off), and this task's own declared `files:` is
+//      [src/lib/knowledge-dedup.ts, src/lib/task-linter.ts, test/knowledge-dedup.test.ts] —
+//      wiring a live gate over `learnings/*.yaml` diffs would mean editing run-task.ts or a CI
+//      workflow file, outside that declared scope. Shipped here as a tested, directly callable
+//      function (test/knowledge-dedup.test.ts exercises it directly) ready for that follow-up
+//      wiring, exactly as `postMergeAmendmentViolations` above documents its own CI-only call
+//      site rather than pretending to own it. Population: single-digit additions per week
+//      against ~35 active entries — tiny, and every catch saves permanent double context-tax.
+//      ANSWERABLE (the W1-T365 exemption shape): a stated distinction naming the matched id
+//      clears it — a refusal that cannot be answered would just relocate the judgment it
+//      replaces.
+//
+// THE CUTOFF (both consumers default to `DEFAULT_DUPLICATE_CUTOFF`) is MEASURED, not asserted
+// — see that constant's own doc comment in knowledge-dedup.ts and this PR's body for the full
+// pairwise score distribution over the live learnings corpus and open task titles that the
+// cutoff sits above.
+
+/** Every open task's (id, title) the caller supplies for {@link duplicateTitleViolations} to
+ *  compare THIS task's title against. `undefined`/empty ⇒ the check is silent — same "no
+ *  predicate, no opinion" contract {@link callSiteViolations} uses for `opts.moduleExists`. */
+export type OpenTaskTitleCorpus = readonly DuplicateCorpusEntry[];
+
+/** ADVISORY (never blocks): this task's title scores >= cutoff against some OTHER open task's
+ *  title. Absent `opts.openTaskTitles` ⇒ silent (the caller hasn't supplied a corpus). */
+export function duplicateTitleViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  const corpus = opts.openTaskTitles;
+  if (!corpus || corpus.length === 0) return [];
+  const cutoff = opts.duplicateTitleCutoff ?? DEFAULT_DUPLICATE_CUTOFF;
+  const match = bestNearDuplicate({ id: task.id, text: task.title }, corpus);
+  if (!match || match.score < cutoff) return [];
+  return [
+    {
+      check: "duplicate-title",
+      severity: "warn",
+      message:
+        `task ${task.id}'s title scores ${match.score.toFixed(2)} (>= cutoff ${cutoff}) against open ` +
+        `task ${match.id}'s title — possible duplicate of ${match.id}. This is ADVISORY, never blocking: ` +
+        "sibling tasks in the same arc legitimately score high. If this really is the same filing, " +
+        `point to ${match.id} instead of re-filing; if it is a distinct concern, no action is needed.`,
+    },
+  ];
+}
+
+/** A stated distinction naming the SAME id `bestNearDuplicate` matched — the W1-T365 exemption
+ *  shape: an answerable refusal, cleared by the author explaining the difference rather than
+ *  relocating the judgment to a human every time. */
+export interface DuplicateLearningDistinction {
+  /** Must equal the matched entry's id for the exemption to apply. */
+  existingId: string;
+  /** Non-empty prose explaining how the new entry differs. */
+  statement: string;
+}
+
+/** BLOCKING: a NEW active learning entry's `fact` scores >= cutoff against some entry already
+ *  in the ACTIVE corpus. Returns `undefined` (clears) when no match reaches cutoff OR when
+ *  `distinction` names the matched id with a non-empty statement. Takes its corpus and
+ *  candidate by parameter — no disk read, so a caller can supply ANY corpus (a real
+ *  `learnings/*.yaml` read, or a test fixture) with identical behavior. */
+export function learningDuplicateViolation(
+  candidate: DuplicateCorpusEntry,
+  activeCorpus: readonly DuplicateCorpusEntry[],
+  opts: { cutoff?: number; distinction?: DuplicateLearningDistinction } = {},
+): LintViolation | undefined {
+  const cutoff = opts.cutoff ?? DEFAULT_DUPLICATE_CUTOFF;
+  const match = bestNearDuplicate(candidate, activeCorpus);
+  if (!match || match.score < cutoff) return undefined;
+  const distinction = opts.distinction;
+  if (distinction && distinction.existingId === match.id && distinction.statement.trim()) {
+    return undefined; // answerable exemption: the author named the match and stated the difference
+  }
+  return {
+    check: "duplicate-learning",
+    severity: "block",
+    message:
+      `possible duplicate of ${match.id} (score ${match.score.toFixed(2)} >= cutoff ${cutoff}) — ` +
+      `state the distinction from ${match.id} in the PR body to clear this, or drop the new entry.`,
+  };
+}
+
 // ── Aggregator ────────────────────────────────────────────────────────────────
 
 /**
@@ -1393,12 +1548,24 @@ export interface LintOpts {
    *  task cannot itself wire a pre-dispatch "block" override (it would be an out-of-scope
    *  edit to run-task.ts, the exact defect this check exists to catch). */
   proofScope?: LintSeverity;
+  /** Other OPEN tasks' (id, title) pairs for {@link duplicateTitleViolations} (W1-T420) to
+   *  compare THIS task's title against. Supplied by the caller — never fetched, this module
+   *  stays pure. Absent/empty ⇒ the check is silent. */
+  openTaskTitles?: OpenTaskTitleCorpus;
+  /** Jaccard cutoff for {@link duplicateTitleViolations}. Default {@link
+   *  DEFAULT_DUPLICATE_CUTOFF} (measured — see that constant's doc comment in
+   *  knowledge-dedup.ts). The check is WARN-only regardless of this value; there is no
+   *  severity override, unlike every other opt above — see the module comment ahead of
+   *  {@link duplicateTitleViolations} for why. */
+  duplicateTitleCutoff?: number;
 }
 
 /** Lint one task. Hard checks (sizing/headless-fitness/proof-shape/proof-dialect/
  *  proof-resolvability/post-merge-amendment/provenance/ruling-verify) always run —
  *  post-merge-amendment is a no-op absent `opts.postMergeAmendment` — budget-sanity
- *  runs only when `opts.mountMaxTurns` is supplied. */
+ *  runs only when `opts.mountMaxTurns` is supplied, duplicate-title (W1-T420) is a
+ *  no-op absent `opts.openTaskTitles`, and dispatch-priority (W1-T422) always runs but
+ *  is a no-op absent `task.priority`. */
 export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   const violations: LintViolation[] = [];
   const sizing = sizingViolation(task);
@@ -1412,12 +1579,14 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...postMergeAmendmentViolations(task, opts));
   violations.push(...callSiteViolations(task, opts));
   violations.push(...monolithFilingViolations(task, opts));
+  violations.push(...duplicateTitleViolations(task, opts));
   const prov = provenanceViolation(task);
   if (prov) violations.push(prov);
   const ruling = rulingVerifyViolation(task);
   if (ruling) violations.push(ruling);
   const rule15 = rule15FilingViolation(task);
   if (rule15) violations.push(rule15);
+  violations.push(...dispatchPriorityViolations(task));
   if (opts.mountMaxTurns !== undefined) {
     const warn = budgetSanityWarning(opts.mountMaxTurns, opts.calibration);
     if (warn) violations.push(warn);
