@@ -318,6 +318,7 @@ import {
 } from "./lib/plan-pr-emitter.js";
 import { appendLedger, isSpawnInfraBlockedError, LEDGER_COST_TAG_INFRA } from "./lib/ledger.js";
 import { resolveLedgerUnion } from "./lib/ledger-grep.js";
+import { escalateRepeatingRules, ruleEfficacyReport } from "./lib/rule-efficacy.js";
 import {
   assertRunnable,
   loadPlan,
@@ -7593,6 +7594,82 @@ export function ledgerGrepCommand(rest: string[], opts: { stateDir?: string } = 
   }
   console.log(`matches:    ${result.matches.length}`);
   for (const line of result.matches) console.log(line);
+  return 0;
+}
+
+/**
+ * `rmd rule-efficacy [--no-escalate]` — W1-T418's repeat-incident rate: for each rule in
+ * lib/rule-efficacy.ts's signature table, the count of same-class ledger rows strictly AFTER
+ * the rule's effective (citing) date, over the ledger UNION (lib/ledger-grep.ts) — never the
+ * live file alone. HOST-SIDE ONLY: the ledger lives on the daemon host, so this is meaningless
+ * off-host (a fresh checkout with no `state/ledger.*.gz` reads every measurable rule
+ * UNMEASURABLE this run, honestly, rather than a false PREVENTING). READ-ONLY except for the
+ * ONE escalation write below: a rule at >= 2 post-rule recurrences drafts a promote-to-
+ * instrument proposal into the ACTIVE-proposal registry via updateProposalRegistry, idempotent
+ * by rule id — `--no-escalate` runs the report only, with zero writes.
+ */
+export function ruleEfficacyCommand(rest: string[], opts: { stateDir?: string } = {}): number {
+  const badArg = unknownArgError("rule-efficacy", rest, [], ["--no-escalate"]);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+
+  const stateDir =
+    opts.stateDir ??
+    (() => {
+      try {
+        return join(loadConfig().root, "state");
+      } catch {
+        return undefined;
+      }
+    })();
+  if (stateDir === undefined) {
+    console.error("rmd rule-efficacy: cannot resolve a state dir — unreadable config");
+    return 1;
+  }
+
+  const report = ruleEfficacyReport(stateDir);
+  console.log(`rmd rule-efficacy — over the unioned ledger at ${stateDir}`);
+  // `report.ledger` is only ever unset when the signature table has no measurable rule at all
+  // (lib/rule-efficacy.ts's own module-level falsifier covers that shape) — RULE_SIGNATURES,
+  // the default this command always calls with, carries one, so it is always set here.
+  if (report.ledger) {
+    console.log(`  archives: ${report.ledger.archiveCount} matched, live file read: ${report.ledger.liveFileRead}`);
+  }
+  console.log("");
+  for (const r of report.rules) {
+    if (r.status === "UNMEASURABLE") {
+      console.log(`  UNMEASURABLE  ${r.ruleId}`);
+      console.log(`                why: ${r.why}`);
+    } else if (r.status === "PREVENTING") {
+      console.log(`  PREVENTING    ${r.ruleId}  (0 since ${r.effectiveDate})`);
+    } else {
+      const dates = r.recurrences.map((x) => x.ts).join(", ");
+      console.log(`  REPEATING     ${r.ruleId}  (${r.recurrences.length} since ${r.effectiveDate}: ${dates})`);
+    }
+  }
+  console.log("");
+  if (report.repeatIncidentRate === null) {
+    console.log(
+      "repeat-incident rate: UNMEASURABLE — no rule in the table has a ledger-visible signature this run; " +
+        "a rate over nothing must refuse to print rather than read as a false-healthy 0%.",
+    );
+  } else {
+    const pct = (report.repeatIncidentRate * 100).toFixed(1);
+    console.log(`repeat-incident rate: ${pct}% (${report.repeatingCount}/${report.measurableCount} measurable rule(s) repeating)`);
+  }
+
+  if (!rest.includes("--no-escalate")) {
+    const registryPath = join(stateDir, "inbox-proposals.json");
+    const drafted = escalateRepeatingRules(report, registryPath);
+    if (drafted) {
+      console.log(`escalated: registry now carries ${drafted.length} proposal(s) (${registryPath})`);
+    } else {
+      console.log("escalated: nothing new — every REPEATING rule already carries an open proposal, or none qualifies");
+    }
+  }
+
   return 0;
 }
 
@@ -17134,6 +17211,11 @@ const COMMANDS: readonly CommandSpec[] = [
       "rmd ledger-grep <pattern>   # the deduplicated union of every state/ledger.*.ndjson.gz archive and the live state/ledger.ndjson, matched against <pattern>. Replaces the manual `grep -h '<pat>' state/ledger.*.ndjson state/ledger.ndjson | sort -u` idiom, which glob-matches ZERO gzipped archives on this host and silently answers from the live file alone (a measured 3.1x undercount). Prints the pattern, state dir and archive count BEFORE any match, then EXITS NON-ZERO, naming the globbed directory, when ZERO archive files were read — never falling back to a live-file-only count. READ-ONLY: writes no ledger line, no state file, deletes/moves nothing",
   },
   {
+    name: "rule-efficacy",
+    usage:
+      "rmd rule-efficacy [--no-escalate]   # W1-T418: the corpus repeat-incident rate — for each rule in lib/rule-efficacy.ts's signature table, the count of same-class ledger rows strictly AFTER the rule's effective (citing) date, over the ledger UNION (lib/ledger-grep.ts) rather than the live file alone; verdict is PREVENTING (0 since), REPEATING (n since, dates), or UNMEASURABLE (why) — never silently omitted. HOST-SIDE ONLY: the ledger lives on the daemon host, so this is meaningless off-host. A rule at >= 2 post-rule recurrences drafts ONE promote-to-instrument proposal into the ACTIVE-proposal registry via updateProposalRegistry, idempotent by rule id (reruns never duplicate) — the inbox's own tiering owns its fate from there; --no-escalate runs the report only, with zero writes. Otherwise READ-ONLY.",
+  },
+  {
     name: "check-acceptance",
     usage:
       "rmd check-acceptance <body-file>   # read a PR body from a file and report what the REVIEWER'S OWN parseAcceptanceBlock actually resolves from it, against what was written: header found, bullets written, criteria parsed, empty proofs. Exits non-zero when they disagree. A claim WRAPPED onto a second line silently truncates the block (any indented line that is not `proof:` ends it), and a `## Validation` heading is not an Acceptance header — both ship a body that says less than its author wrote. Run this before opening a PR over REST, which bypasses the orchestrator's house-block emitter. READ-ONLY: writes no ledger line, no state file",
@@ -17673,6 +17755,10 @@ export async function main(
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(ledgerGrepCommand(rest)) cannot carry a DA hit without forking the process; ledgerGrepCommand's own logic — arg validation, the archive glob, the zero-archive verdict, and the deduplicated match render — is unit-tested in test/ledger-grep.test.ts (same irreducible-glue shape as the sibling check-proof/emissions dispatch cases).
   if (cmd === "ledger-grep") {
     process.exit(ledgerGrepCommand(rest));
+  }
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(ruleEfficacyCommand(rest)) cannot carry a DA hit without forking the process; ruleEfficacyCommand's own logic — arg validation, the signature-table walk, the PREVENTING/REPEATING/UNMEASURABLE render, and the escalation write — is unit-tested in test/rule-efficacy.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/ledger-grep dispatch cases).
+  if (cmd === "rule-efficacy") {
+    process.exit(ruleEfficacyCommand(rest));
   }
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(checkAcceptanceCommand(rest)) cannot carry a DA hit without forking the process; checkAcceptanceCommand's own logic — the usage refusal, the unreadable-file refusal, the truncation report, the missing-header report and the clean pass — is unit-tested in test/acceptance-block-diagnostics.test.ts (same irreducible-glue shape as the sibling check-proof/emissions dispatch cases).
   if (cmd === "check-acceptance") {
