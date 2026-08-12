@@ -177,7 +177,7 @@ test("PROPERTY bodyContradictsDiff: the scope shorthands still catch an out-of-s
 const HAZARDS = [
   "exactly", "one file", "files", "no ", "no code", "no src/", "plan-only", "data-only",
   "src/lib/x.ts", "test/a.test.ts", "MASTER-PLAN.md", ":", ",", ".", "\n", "\r\n", "  ",
-  "😀", " ", "`", "[", "]", "*", "^", "$",
+  "😀", "\0", "`", "[", "]", "*", "^", "$",
 ];
 const hazardText = fc
   .array(
