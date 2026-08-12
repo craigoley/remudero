@@ -28,5 +28,6 @@ raw: "PROOF-EXECUTABILITY GATE — block prose-dialect proofs at authoring
   criterion, don't duplicate)."
 attachments: []
 origin: cli
-status: new
+status: rejected
 proposal_pr: null
+summary: null
