@@ -75,6 +75,15 @@ export interface NextRunnableOpts {
    */
   onCircuitBreak?: (task: Task) => void;
   /**
+   * WHAT THE BREAKER SAW for a task, supplied by the SAME memoised evaluation the
+   * `isCircuitTripped`/`isIndeterminate` predicates answered from (run-task.ts's
+   * `breakerGateFor().detailFor`) — never a second call to the predicate. Spread onto the
+   * `dispatch.circuit_broken` / `dispatch.indeterminate` rows so a refusal records the count,
+   * the bound and WHICH of the three outcomes was reached, instead of only that it fired.
+   * Optional: a caller that omits it logs exactly the bare rows it logged before.
+   */
+  breakerDetail?: (taskId: string) => Record<string, unknown> | undefined;
+  /**
    * THE LIFETIME DISPATCH CAP (W1-T271): true when this task has been dispatched
    * (status.ts's `isLifetimeDispatchCapExceeded`, ledger-derived, `run.start`
    * lines counted across the task's WHOLE history) the policy-capped number of
@@ -1037,6 +1046,15 @@ export interface DrainDeps {
    */
   onCircuitBreak?: (task: Task) => void;
   /**
+   * WHAT THE BREAKER SAW for a task, supplied by the SAME memoised evaluation the
+   * `isCircuitTripped`/`isIndeterminate` predicates answered from (run-task.ts's
+   * `breakerGateFor().detailFor`) — never a second call to the predicate. Spread onto the
+   * `dispatch.circuit_broken` / `dispatch.indeterminate` rows so a refusal records the count,
+   * the bound and WHICH of the three outcomes was reached, instead of only that it fired.
+   * Optional: a caller that omits it logs exactly the bare rows it logged before.
+   */
+  breakerDetail?: (taskId: string) => Record<string, unknown> | undefined;
+  /**
    * W1-T316 (wiring W1-T271's own predicate): THE LIFETIME DISPATCH CAP, re-derived from the
    * ledger each call — same freshness contract as `isCircuitTripped`. Unlike the streak
    * breaker, never reset by a `pr.opened` line — see {@link NextRunnableOpts.isLifetimeCapExceeded}'s
@@ -1322,7 +1340,7 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
       // than halting — a throttled/errored read on one task must not stall
       // everything else still dispatchable.
       onIndeterminate: (t) => {
-        log("dispatch.indeterminate", { task: t.id });
+        log("dispatch.indeterminate", { task: t.id, ...deps.breakerDetail?.(t.id) });
         // COUNTED, not merely logged. This ledger line has always existed; what did not exist was
         // any way for the TERMINAL to say the frontier was unreadable rather than empty.
         indeterminateDeclines++;
@@ -1335,7 +1353,7 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
       // above) — the drain proceeds to the next runnable task rather than
       // halting, and never re-escalates a task it already escalated this run.
       onCircuitBreak: (t) => {
-        log("dispatch.circuit_broken", { task: t.id });
+        log("dispatch.circuit_broken", { task: t.id, ...deps.breakerDetail?.(t.id) });
         if (!circuitEscalated.has(t.id)) {
           circuitEscalated.add(t.id);
           deps.onCircuitBreak?.(t);
@@ -1611,7 +1629,7 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
         log("dispatch.stood_down", { task: t.id, pr_number: prNumber, state, reason: "cached in-flight read was stale" }),
       isIndeterminate: deps.isIndeterminate,
       onIndeterminate: (t) => {
-        log("dispatch.indeterminate", { task: t.id });
+        log("dispatch.indeterminate", { task: t.id, ...deps.breakerDetail?.(t.id) });
         // COUNTED, not merely logged. This ledger line has always existed; what did not exist was
         // any way for the TERMINAL to say the frontier was unreadable rather than empty.
         indeterminateDeclines++;
@@ -1619,7 +1637,7 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
       },
       isCircuitTripped: deps.isCircuitTripped,
       onCircuitBreak: (t) => {
-        log("dispatch.circuit_broken", { task: t.id });
+        log("dispatch.circuit_broken", { task: t.id, ...deps.breakerDetail?.(t.id) });
         if (!circuitEscalated.has(t.id)) {
           circuitEscalated.add(t.id);
           deps.onCircuitBreak?.(t);
