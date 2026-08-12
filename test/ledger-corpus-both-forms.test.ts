@@ -177,7 +177,15 @@ test("emissionsCommand counts events out of a GZIPPED rotation, not just plain o
   const dir = mkdtempSync(join(tmpdir(), "emissions-gz-"));
   const ts = new Date().toISOString(); // inside the default 30-day window
   const line = `{"ts":"${ts}","step":"drain.tick","marker":"only-in-gzip"}`;
-  writeFileSync(join(dir, "ledger.2026-07-01T00-00-00-000Z.ndjson.gz"), gzipSync(Buffer.from(`${line}\n`)));
+  // THE ROTATION'S NAME MUST BE CONSISTENT WITH ITS CONTENT. `rotateLedger` archives lines already
+  // written, so a rotation can never hold a line newer than the instant in its own name — verified
+  // over an 18-archive sample on the real host, zero exceptions. This fixture used to be stamped
+  // `2026-07-01` while carrying a line dated NOW, a corpus that cannot exist; the reader now skips
+  // a rotation whose name predates the window, and that impossible pairing was the only thing this
+  // test needed changed. Everything it proves is unchanged: the ONLY rotation here is gzipped, so a
+  // counted in-window event can have come from nowhere but the `gunzipSync` branch.
+  const stamp = new Date(Date.parse(ts) + 1000).toISOString().replace(/[:.]/g, "-");
+  writeFileSync(join(dir, `ledger.${stamp}.ndjson.gz`), gzipSync(Buffer.from(`${line}\n`)));
 
   const out: string[] = [];
   const realLog = console.log;
