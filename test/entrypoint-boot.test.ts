@@ -167,6 +167,29 @@ function makeCwdRepo(): string {
   return repo;
 }
 
+/**
+ * FORCE GIT TO REFUSE A GUESSED IDENTITY — the same lesson as `makeCwdRepo`, in the other direction.
+ *
+ * With no `user.email` anywhere, git does not necessarily fail: it GUESSES `user@fqdn` from the
+ * passwd entry and `gethostname`, and accepts that guess whenever the hostname looks domain-like.
+ * On a GitHub runner the hostname carries no domain, the guess is rejected, and a commit fails —
+ * which is what the defect-4 pair asserts. On this mini, Tailscale MagicDNS supplies an FQDN
+ * (`…tail17e13a.ts.net`), git accepts the guess, and the SAME commit SUCCEEDS. So the mutant test
+ * passed on CI and failed wherever proofs execute, and the positive test passed for the wrong
+ * reason on any host that can guess.
+ *
+ * `user.useConfigOnly` is git's own switch for exactly this: an identity must come from config or
+ * the commit fails. Set through `GIT_CONFIG_*` it reaches the probe's git through the entrypoint's
+ * `exec` without touching the script, and it leaves the thing under test alone — the entrypoint
+ * still writes the identity into `$HOME/.gitconfig`, and that write is now the ONLY thing that can
+ * make the commit succeed, on every host.
+ */
+const NO_GUESSED_IDENTITY = {
+  GIT_CONFIG_COUNT: "1",
+  GIT_CONFIG_KEY_0: "user.useConfigOnly",
+  GIT_CONFIG_VALUE_0: "true",
+};
+
 // ── DEFECT 3: A BRANCH MEANS THE TIP AS OF THIS BOOT ────────────────────────────────────────
 
 test("a BRANCH ref lands on the freshly-fetched tip, and a SECOND boot ADVANCES when the remote moved", () => {
@@ -266,7 +289,7 @@ test("RMD_SKIP_BOOTSTRAP=1 still gets a git identity, so the recovery path can c
   const origin = makeOrigin();
   const probe = mkdtempSync(join(tmpdir(), "entrypoint-probe-"));
   const run = boot(home, origin, {
-    env: { RMD_SKIP_BOOTSTRAP: "1" },
+    env: { RMD_SKIP_BOOTSTRAP: "1", ...NO_GUESSED_IDENTITY },
     cmd: [
       "bash",
       "-c",
@@ -630,7 +653,7 @@ test("MUTANT (defect 4): skipping before the identity is written leaves the reco
   const probe = mkdtempSync(join(tmpdir(), "entrypoint-probe-"));
   const run = boot(home, origin, {
     script: mutant,
-    env: { RMD_SKIP_BOOTSTRAP: "1" },
+    env: { RMD_SKIP_BOOTSTRAP: "1", ...NO_GUESSED_IDENTITY },
     cmd: ["bash", "-c", `cd ${probe} && git init -q -b main . && echo x > f && git add f && git commit -qm probe`],
   });
   assert.notEqual(run.status, 0, "the mutant must fail to commit — that is the defect being locked out");
