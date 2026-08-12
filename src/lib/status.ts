@@ -878,16 +878,62 @@ function lastPrOpened(
 export const DEFAULT_MAX_TASK_DISPATCHES = 5;
 
 /**
+ * Does this ledger line record a MERGE CREDIT for its task — either a live run's own
+ * terminal `verdict: "merged"`, or a `verdict.merged` correction appended by the
+ * credit-backfill rung (sweep.ts's `runCreditBackfill`)?
+ *
+ * ONE DEFINITION, TWO CONSUMERS, DELIBERATELY. `sweep.ts`'s `hasMergeCredit` (the
+ * backfill's own idempotence check) and {@link dispatchesWithoutNewOwnedPr}'s reset
+ * below both call THIS — they are not two hand-maintained copies of the same shape.
+ * The defect this predicate was extracted for is precisely two mechanisms holding the
+ * same fact and never comparing notes; a second copy would reproduce it.
+ *
+ * Both step spellings are required and neither is redundant: a run that merges its own
+ * PR writes `step: "verdict", verdict: "merged"`, while a merge the ledger MISSED at the
+ * time is corrected later as `step: "verdict.merged"`. Both are already in
+ * {@link DECISION_RELEVANT_LEDGER_STEPS} (ledger.ts), registered for exactly this reason,
+ * so rotation cannot drop either out from under a reader.
+ */
+export function isMergeCreditLine(line: Record<string, unknown>): boolean {
+  return line.step === "verdict.merged" || (line.step === "verdict" && line.verdict === "merged");
+}
+
+/**
  * How many `run.start` ledger lines exist for `taskId` SINCE its most recent
- * `pr.opened` line (or in total, if it has never opened one) — "dispatches
- * with no NEW owned PR" (P29(ii)'s own phrasing). Every `pr.opened` line is
- * inherently OWNED by construction: run-task.ts logs it only after ITS OWN
- * worker pushes ITS OWN `run-<taskId>-<epochMs>` branch (worker.ts), so no
- * separate ownership check is needed here the way rung (c)'s trailer search
- * needs one — a `pr.opened` line can only ever name this task's own work.
- * A fresh PR (even one that does not merge, e.g. blocked_ci) resets the count
- * to 0 — genuine forward progress is not what this breaker guards against;
- * the W1-T1/W1-T29 shape is dispatch after dispatch producing NOTHING new.
+ * FORWARD-PROGRESS line (or in total, if it has never recorded one) — "dispatches
+ * with no NEW owned PR" (P29(ii)'s own phrasing).
+ *
+ * WHAT COUNTS AS FORWARD PROGRESS, AND WHY IT IS NOT JUST `pr.opened`. The counter's
+ * intent is "did this task produce work"; `pr.opened` was a PROXY for it, sound because
+ * run-task.ts logs that line only after ITS OWN worker pushes ITS OWN
+ * `run-<taskId>-<epochMs>` branch (worker.ts) — so no ownership check is needed here the
+ * way rung (c)'s trailer search needs one. THE BRANCH CONVENTION BROKE THE PROXY. A task
+ * whose PR lands on a slug-named branch (`run-W1-T377-open-pr-corroboration`) fails
+ * `ownsBranch`'s `run-<taskId>-\d+$`, so no `pr.opened` is ever written, and the task is
+ * recorded as MERGED by the credit-backfill and as MAKING NO PROGRESS by this counter at
+ * the same time. MEASURED: W1-T377 and W1-T378 both shipped (#1386, #1391), both carry
+ * `verdict.merged` from the backfill and `pr.opened` ×0, and both ran to exactly 5
+ * dispatches against {@link DEFAULT_MAX_TASK_DISPATCHES} before tripping — 10 dispatches
+ * re-running finished work.
+ *
+ * So a merge resets the streak too ({@link isMergeCreditLine}). This RESTORES the stated
+ * intent rather than widening the rule: a merged task has self-evidently produced work,
+ * and the doc below already said a PR that merely OPENS is enough. The evidence is sound
+ * to reset a safety bound on — a `verdict.merged` line comes from `runCreditBackfill`,
+ * whose candidates are built by `deriveStatus` (run-task.ts's `buildCreditCandidates`),
+ * which re-verifies the trailer as its own exact anchored line locally (rung (c)) rather
+ * than trusting GitHub's fuzzy body index, and which refuses to credit a plan-only
+ * changeset as an implementation (W1-T413). It does NOT share the `--limit 1` weakness of
+ * the raw `findMergedByTrailer` first pass.
+ *
+ * `pr.merged` is deliberately NOT here: any run reaching it already logged `pr.opened`,
+ * so it would reset nothing that is not already reset.
+ *
+ * A fresh PR (even one that does not merge, e.g. blocked_ci) resets the count to 0 —
+ * genuine forward progress is not what this breaker guards against; the W1-T1/W1-T29
+ * shape is dispatch after dispatch producing NOTHING new. The "succeeds every time" loop
+ * that resets on its own merge each pass is NOT this counter's remit and is unchanged:
+ * {@link dispatchesEver} is the lifetime bound that catches it, and no step resets that.
  */
 export function dispatchesWithoutNewOwnedPr(
   lines: ReadonlyArray<Record<string, unknown>>,
@@ -896,8 +942,8 @@ export function dispatchesWithoutNewOwnedPr(
   let count = 0;
   for (const line of lines) {
     if (line.task_id !== taskId) continue;
-    if (line.step === "pr.opened") {
-      count = 0; // forward progress — a new PR resets the streak
+    if (line.step === "pr.opened" || isMergeCreditLine(line)) {
+      count = 0; // forward progress — a new PR, or a credited merge, resets the streak
     } else if (line.step === "run.start") {
       count++;
     }
