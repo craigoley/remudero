@@ -551,10 +551,20 @@ export function buildEscalationMarkHandledRoute(deps: PanelActionDeps): Route {
 export const DRAIN_FEEDBACK_VERDICTS = ["good", "wrong", "needs-follow-up"] as const;
 export type DrainFeedbackVerdict = (typeof DRAIN_FEEDBACK_VERDICTS)[number];
 
+/** The steering note's ceiling — generous enough for real operator commentary (a sentence or
+ *  three) while stopping one tap from swallowing the fix rung's whole prompt budget the way
+ *  `boundedReason` (lib/board.ts) already bounds an escalation's refusal reason. */
+const MAX_STEERING_NOTE_CHARS = 2000;
+
 interface DrainFeedbackInput {
   taskId: string;
   verdict: DrainFeedbackVerdict;
   drainRunId: string;
+  /** W1-T435: the STEERING NOTE — quoted verbatim into the next fix-rung dispatch by
+   *  `operatorVerdictEvidence` (lib/sweep.ts) when `verdict` is `wrong`/`needs-follow-up`.
+   *  Optional (a bare tap carries no note); a `good` verdict's note, if any, is still recorded
+   *  for the learning limb but `operatorVerdictEvidence` never quotes it — praise never re-arms. */
+  note?: string;
 }
 
 function validateDrainFeedback(body: unknown): { error: string } | DrainFeedbackInput {
@@ -564,17 +574,30 @@ function validateDrainFeedback(body: unknown): { error: string } | DrainFeedback
   if (typeof body.verdict !== "string" || !(DRAIN_FEEDBACK_VERDICTS as readonly string[]).includes(body.verdict)) {
     return { error: `verdict must be one of ${DRAIN_FEEDBACK_VERDICTS.join(", ")}` };
   }
-  return { taskId: body.taskId, verdict: body.verdict as DrainFeedbackVerdict, drainRunId: body.drainRunId };
+  if (body.note !== undefined && typeof body.note !== "string") return { error: "note must be a string" };
+  if (typeof body.note === "string" && body.note.length > MAX_STEERING_NOTE_CHARS) {
+    return { error: `note must be at most ${MAX_STEERING_NOTE_CHARS} characters` };
+  }
+  return {
+    taskId: body.taskId,
+    verdict: body.verdict as DrainFeedbackVerdict,
+    drainRunId: body.drainRunId,
+    note: body.note as string | undefined,
+  };
 }
 
 /**
  * POST /v1/drain/feedback — the post-drain rundown's one-tap operator verdict (W1-T141),
- * write-scoped. Tapping a rundown line's good/wrong/needs-follow-up writes an
- * `operator_feedback` ledger record `{taskId, verdict, drain_run_id, ts}` via
- * `appendPanelLedger` — the SAME write path every other panel action funnels through, never a
- * second ledger writer. This is the labeled human signal the learning limb (W1-T87
+ * write-scoped. Tapping a rundown line's good/wrong/needs-follow-up, plus an OPTIONAL
+ * steering note (W1-T435), writes an `operator_feedback` ledger record
+ * `{taskId, verdict, drain_run_id, note, ts}` via `appendPanelLedger` — the SAME write path
+ * every other panel action funnels through, never a second ledger writer. `note` is ledgered
+ * VERBATIM, never truncated/paraphrased here — `MAX_STEERING_NOTE_CHARS` above is a request-size
+ * refusal, not an in-flight edit. This is the labeled human signal the learning limb (W1-T87
  * success-mining, W1-T88 contradiction-detection) consumes: a judged outcome, not just a merge
- * count.
+ * count — and, for `wrong`/`needs-follow-up`, the fix rung's own steering input
+ * (`operatorVerdictEvidence`, lib/sweep.ts): W1-T141's route finally gets both its writer and
+ * its reader.
  */
 export function buildDrainFeedbackRoute(deps: PanelActionDeps): Route {
   return {
@@ -586,6 +609,7 @@ export function buildDrainFeedbackRoute(deps: PanelActionDeps): Route {
       ledgerPanelAction(deps, "operator_feedback", input.taskId, origin, {
         verdict: input.verdict,
         drain_run_id: input.drainRunId,
+        ...(input.note !== undefined ? { note: input.note } : {}),
       });
       sendJson(res, 200, { ok: true, taskId: input.taskId, verdict: input.verdict });
     }),

@@ -1669,6 +1669,63 @@ export function strikeCapForAnswer(originalCap: number, policy: ClarifyPolicy = 
   return policy.resetStrikeCounterOnAnswer ? originalCap : 1;
 }
 
+/** The last line in `lines` matching `pred` — append-only files read oldest-first, so the
+ *  last match is the NEWEST record. Shared by both halves of {@link operatorVerdictEvidence}. */
+function lastMatching<T extends Record<string, unknown>>(lines: ReadonlyArray<T>, pred: (l: T) => boolean): T | undefined {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (pred(lines[i])) return lines[i];
+  }
+  return undefined;
+}
+
+/**
+ * W1-T435: the fix rung's OPERATOR-STEERED re-arm, producing the SAME {@link
+ * OpenPrView.pendingAnswer} shape W1-T78 already wired end-to-end but never had a producer
+ * for (see that field's own "SCOPE" doc) — routed through the identical `blocked-fixable`
+ * DISPOSITION_RULES row and `strikeCapForAnswer` ceiling, never a second re-arm mechanism.
+ * ONE evidence pass, TWO console-native sources, both local files (no GitHub read):
+ *
+ *   1. A `wrong`/`needs-follow-up` one-tap verdict (POST /v1/drain/feedback,
+ *      lib/panel-actions.ts's `buildDrainFeedbackRoute`) carrying a STEERING NOTE — the
+ *      `operator_feedback` ledger line's `note`, quoted VERBATIM (never paraphrased, matching
+ *      `runFixRung`'s own `constraint` contract) with attribution, so the fix worker sees it
+ *      as the operator's own words, not a synthesized instruction. A `good` verdict — praise —
+ *      NEVER contributes: re-arming on praise would spin the rung forever on a PR nobody
+ *      objected to (this task's second falsifier direction).
+ *   2. An ANSWERED clarification (POST /v1/questions/answer, lib/panel-actions.ts's
+ *      `buildAnswerQuestionRoute`, written to `plan/questions.ndjson` by worker.ts's
+ *      `appendQuestionAnswer`) — the answer text, verbatim, exactly as W1-T78's mechanism
+ *      always intended to consume it. A QUESTION with no matching answer line contributes
+ *      nothing (this task's first falsifier direction's mirror: silence never re-arms either).
+ *
+ * Both sources key on `taskId` alone (never `drainRunId`/head sha) — the fix rung dispatches
+ * per TASK, and an operator's verdict/answer is a judgment on the task's current attempt,
+ * addressed by whichever strike comes next. `undefined` when neither source has anything —
+ * the caller ({@link "../run-task.js".buildOpenPrViews}) then leaves `pendingAnswer` unset,
+ * exactly as it always has for every PR this producer hasn't reached yet.
+ */
+export function operatorVerdictEvidence(
+  taskId: string,
+  ledgerLines: ReadonlyArray<Record<string, unknown>>,
+  questionLines: ReadonlyArray<Record<string, unknown>>,
+): { constraint: string; resetStrikeCounter?: boolean } | undefined {
+  const parts: string[] = [];
+
+  const feedback = lastMatching(ledgerLines, (l) => l.step === "operator_feedback" && l.task_id === taskId);
+  const verdict = typeof feedback?.verdict === "string" ? feedback.verdict : undefined;
+  const note = typeof feedback?.note === "string" ? feedback.note : undefined;
+  if ((verdict === "wrong" || verdict === "needs-follow-up") && note && note.trim() !== "") {
+    parts.push(`Operator marked this run "${verdict}": ${note}`);
+  }
+
+  const answer = lastMatching(questionLines, (l) => typeof l.answer === "string" && l.task === taskId);
+  if (answer && typeof answer.answer === "string" && answer.answer.trim() !== "") {
+    parts.push(answer.answer);
+  }
+
+  return parts.length > 0 ? { constraint: parts.join("\n\n") } : undefined;
+}
+
 /**
  * The block evidence `dispatchFix` carries — GENERALIZED (W1-T100, the #170
  * fix) from a bare reviewer-unmet array to the W1-T94 mode-evidence shape, so

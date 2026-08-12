@@ -467,6 +467,7 @@ import {
   listRetirableEscalationIssues,
   logCostGovernorDeferral,
   logQueueGovernorDeferral,
+  operatorVerdictEvidence,
   renderClarificationQuestion,
   renderSweepSummary,
   runCreditBackfill,
@@ -13287,6 +13288,30 @@ export function openPrMintTexts(owner: string, repo: string): string[] {
 }
 
 /**
+ * `plan/questions.ndjson` (worker.ts's `appendQuestion`/`appendQuestionAnswer`), read fresh for
+ * {@link operatorVerdictEvidence}'s answered-clarification half — a LOCAL file, never GitHub
+ * (W1-T435: "no GitHub read anywhere"). Best-effort, mirroring `readLedgerLines`' own tolerance
+ * of an absent/malformed file: a fresh checkout with no questions yet, or a torn line from a
+ * concurrent write, degrades to skipping that line rather than throwing the whole sweep pass.
+ */
+function readQuestionsNdjson(root: string): Array<Record<string, unknown>> {
+  const path = join(root, "plan", "questions.ndjson");
+  if (!existsSync(path)) return [];
+  const out: Array<Record<string, unknown>> = [];
+  for (const raw of readFileSync(path, "utf8").split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    try {
+      out.push(JSON.parse(line) as Record<string, unknown>);
+    } catch {
+      // torn/malformed line — skip it, never take out the whole read (same discipline as
+      // readLedgerLines' own `torn` handling).
+    }
+  }
+  return out;
+}
+
+/**
  * Build the observed open-PR state the sweep reconciles — the real gateway
  * (REST `/pulls?state=open`), cross-referenced with the ledger. No `gh`/network
  * lives in lib/sweep.ts; this is the injected edge.
@@ -13310,6 +13335,9 @@ export function buildOpenPrViews(
   const fetch = deps.fetch ?? ghJson;
   const raw = fetchOpenPrsRest(owner, repo, fetch) as RawOpenPr[];
   const ledger = readLedgerLines(ledgerPath);
+  // W1-T435: the SAME evidence pass that quotes an operator's steering note also produces
+  // `pendingAnswer` from an answered clarification — a local file read, never GitHub.
+  const questionLines = readQuestionsNdjson(repoRoot);
   // W1-T103: branch protection's OWN required-contexts list, read ONCE per
   // repo for this whole sweep pass (never per-PR, never hardcoded) — see
   // checksStateFromRollup's doc for why this must gate checksState instead of
@@ -13386,6 +13414,11 @@ export function buildOpenPrViews(
       // Absent from the map ⇒ GitHub had not computed it (or we could not ask) ⇒ undefined, the
       // pre-existing value. Only a DEFINITE observed "dirty" ever reaches the conflicted rows.
       mergeState: mergeStates.get(pr.number),
+      // W1-T435: `pendingAnswer`'s long-promised producer (see that field's own "SCOPE" doc,
+      // lib/sweep.ts) — an operator's steering note on a `wrong`/`needs-follow-up` verdict, or an
+      // answered clarification from the console, either re-arms the `blocked-fixable` disposition
+      // row via the SAME strikeCapForAnswer ceiling that row has always checked.
+      pendingAnswer: taskId ? operatorVerdictEvidence(taskId, ledger, questionLines) : undefined,
     };
   });
 }

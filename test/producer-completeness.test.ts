@@ -161,7 +161,9 @@ test("every KNOWN_UNWIRED entry carries a substantive reason, not a TODO", () =>
   // Was 8 when PR #1083 landed the check; W1-T225's pair (reviewOrphanedByPush,
   // priorReviewOrphans) was wired and REMOVED here, which is the allowlist shrinking as
   // intended. The stale-entry lock is what forces the removal: leaving them would fail.
-  assert.equal(Object.keys(KNOWN_UNWIRED).length, 6, "the six fields still unwired");
+  // W1-T435 wired pendingAnswer (buildOpenPrViews now assigns it via operatorVerdictEvidence),
+  // shrinking the count again, six -> five.
+  assert.equal(Object.keys(KNOWN_UNWIRED).length, 5, "the five fields still unwired");
   for (const [field, reason] of Object.entries(KNOWN_UNWIRED)) {
     assert.ok(reason.length >= 80, `${field}: a one-word reason launders 'nobody looked' into 'this is fine'`);
     assert.doesNotMatch(reason, /^\s*(TODO|FIXME|tbd)\b/i, `${field}: name the reason`);

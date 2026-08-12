@@ -212,10 +212,10 @@ export const KNOWN_UNWIRED: Readonly<Record<string, string>> = {
     "needs per-file conflict EVIDENCE (both sides' log since merge-base, W1-T94 design note iii), " +
     "which no producer captures. isPureConcurrentAddition returns false on an empty list, so the " +
     "absence fails closed to escalation rather than to a wrong auto-resolution.",
-  pendingAnswer:
-    "documented as pending at its own declaration and again at the row that reads it (sweep.ts:1127, " +
-    "'once pendingAnswer production wiring lands'). Ledger-derived; neither buildOpenPrViews nor " +
-    "fixCommand sets it.",
+  // pendingAnswer WIRED by W1-T435: buildOpenPrViews (run-task.ts) now assigns it via
+  // lib/sweep.ts's operatorVerdictEvidence, reading the operator_feedback ledger step and
+  // plan/questions.ndjson — removed here per this file's own "removing a field from this list
+  // means wiring it" rule.
 };
 
 /** What the audit concluded. Both lists must be empty for the check to pass. */
