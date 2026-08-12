@@ -808,3 +808,100 @@ test("buildStatusBoard: INBOX — ready/not-ready counts from inbox.ts's own cla
   assert.equal(model.inbox.notReadyCount, 2);
   assert.match(model.inbox.headNotReadyReason ?? "", /not-drafted/); // P1 (registry order) — no draft cached
 });
+
+// ── LAST CLOSED CYCLE: a cycle nothing has superseded still demands attention; one the daemon
+// has worked past does not. OBSERVED LIVE: the block reported the SAME errored cycle across four
+// status calls over ~8h while the daemon dispatched and completed W1-T409/T411/T425/T426, and its
+// `next action` told the operator to investigate it — competing with three real circuit-broken
+// tasks in the same output. A cycle is only written when the loop STOPS (measured: of 524
+// `daemon.summary` rows, 312 blocked / 131 error / 56 headroom_exhausted / 23 paused / 1 stopped
+// / 1 max_reached — none says "completed normally"), so this block is ALWAYS an ending. ────────
+
+function lastCycleLedger(extra: Array<Record<string, unknown>> = []): string {
+  const p = join(mkdtempSync(join(tmpdir(), "status-board-superseded-")), "ledger.ndjson");
+  const cycle = ledgerLine({
+    step: "daemon.summary",
+    ts: "2026-08-01T09:00:00.000Z",
+    attempted: ["W1-T414"],
+    merged: [],
+    stopReason: "error",
+    stopDetail: "W1-T414: spawnDetachedGroup: child process has no pid (spawn failed synchronously)",
+    costUsd: 0,
+    ticks: 0,
+  });
+  writeFileSync(p, [cycle, ...extra].map((l) => JSON.stringify(l)).join("\n") + "\n");
+  return p;
+}
+
+test("LAST CLOSED CYCLE: an errored cycle with NOTHING after it still names its next action", () => {
+  const model = buildStatusBoard(tmpRoot(), lastCycleLedger(), baseDeps());
+  assert.equal(model.lastCycle.found, true);
+  assert.equal(model.lastCycle.supersededByTs, undefined, "nothing ran after it");
+  assert.match(model.lastCycle.nextAction ?? "", /unexpected ERROR/, "an unsuperseded error is still the operator's problem");
+  assert.match(model.lastCycle.nextAction ?? "", /spawnDetachedGroup/);
+  const text = renderStatusBoardText(model);
+  assert.doesNotMatch(text, /superseded/, "nothing to supersede it");
+});
+
+test("LAST CLOSED CYCLE: daemon activity AFTER the cycle suppresses the next action and says so", () => {
+  const ledgerPath = lastCycleLedger([
+    ledgerLine({ step: "daemon.iteration", ts: "2026-08-01T09:05:00.000Z", task: "W1-T409" }),
+    ledgerLine({ step: "daemon.alive", ts: "2026-08-01T09:40:00.000Z" }),
+  ]);
+  const model = buildStatusBoard(tmpRoot(), ledgerPath, baseDeps());
+
+  assert.equal(model.lastCycle.found, true, "the closed cycle is still REPORTED — this is not hiding it");
+  assert.equal(model.lastCycle.supersededByTs, "2026-08-01T09:40:00.000Z", "the NEWEST later daemon.* row");
+  assert.equal(model.lastCycle.supersededAgeMs, NOW_MS - Date.parse("2026-08-01T09:40:00.000Z"));
+  assert.equal(
+    model.lastCycle.nextAction,
+    undefined,
+    "a cycle the daemon has already worked past must not demand investigation",
+  );
+
+  const text = renderStatusBoardText(model);
+  assert.match(text, /superseded: the daemon has run since/);
+  assert.match(text, /stopped {3}: error/, "the ending itself is still on screen");
+  assert.doesNotMatch(text, /check the ledger around this run/, "the misdirecting action is gone");
+});
+
+test("LAST CLOSED CYCLE: the header says CLOSED, and a non-daemon row after the cycle does not supersede it", () => {
+  // Only `daemon.*` counts — a worker's own row is not evidence the LOOP resumed. Same prefix
+  // rule `deriveLastPoll` uses, and the reason LIVENESS stayed correct while this block did not.
+  const ledgerPath = lastCycleLedger([
+    ledgerLine({ step: "verdict", ts: "2026-08-01T09:05:00.000Z", verdict: "merged" }),
+  ]);
+  const model = buildStatusBoard(tmpRoot(), ledgerPath, baseDeps());
+  assert.equal(model.lastCycle.supersededByTs, undefined, "a verdict row is not the daemon loop");
+  assert.match(model.lastCycle.nextAction ?? "", /unexpected ERROR/);
+  assert.match(renderStatusBoardText(model), /── LAST CLOSED CYCLE/, "the header no longer implies currency");
+});
+
+test("LAST CLOSED CYCLE: a superseded BLOCKED cycle is suppressed too — both rules are gated, not just the error one", () => {
+  // 312 of the 524 measured summaries stop BLOCKED — the commonest ending by far, so gating only
+  // the error rule would leave the majority still demanding attention after the daemon moved on.
+  const p = join(mkdtempSync(join(tmpdir(), "status-board-superseded-blocked-")), "ledger.ndjson");
+  writeFileSync(
+    p,
+    [
+      ledgerLine({
+        step: "daemon.summary",
+        ts: "2026-08-01T09:00:00.000Z",
+        attempted: ["W1-T343"],
+        merged: [],
+        stopReason: "blocked",
+        stopDetail: "W1-T343 → no_pr — blocks W1-T344",
+        costUsd: 0,
+        ticks: 0,
+      }),
+      ledgerLine({ step: "daemon.alive", ts: "2026-08-01T09:30:00.000Z" }),
+    ]
+      .map((l) => JSON.stringify(l))
+      .join("\n") + "\n",
+  );
+  const model = buildStatusBoard(tmpRoot(), p, baseDeps());
+  assert.equal(model.lastCycle.summary?.stopReason, "blocked");
+  assert.equal(model.lastCycle.supersededByTs, "2026-08-01T09:30:00.000Z");
+  assert.equal(model.lastCycle.nextAction, undefined, "a blocked cycle the daemon worked past is history too");
+  assert.doesNotMatch(renderStatusBoardText(model), /resolve the blocking task/);
+});
