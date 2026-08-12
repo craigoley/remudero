@@ -1,0 +1,4 @@
+{
+  "_comment": "alpha-cited (73 chars) + beta-never-cited (77 chars) = 150 -- over this cap, so the ratchet must BLOCK and name compression candidates.",
+  "capChars": 100
+}
