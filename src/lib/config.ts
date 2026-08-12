@@ -148,6 +148,27 @@ export interface Config {
    * interim carrier until then.
    */
   headroom?: { enabled?: boolean };
+  /**
+   * Explicit override for the shared-knowledge homes (the "org brain") — see
+   * {@link learningsHomes}. Optional; when absent (or a given sub-field is
+   * absent), each home defaults to its historic `config.root`-derived path
+   * unchanged, so a single-instance install's behavior does not change.
+   *
+   * WHY THIS EXISTS (D-11 cell architecture): `userOverallLearningsHome` and
+   * `globalLearningsHome` used to derive ONLY from `config.root`, which was
+   * fine while one instance had one `config.root`. Once a cell architecture
+   * gives each codebase its own `config.root` (own ledger, governor,
+   * worktrees), that same derivation silently SPLITS the org brain: N cells
+   * each grow a private, empty `learnings-user/` instead of sharing one. This
+   * field lets same-machine cells point at the SAME path explicitly, so N
+   * cells read one brain instead of fragmenting it N ways. Cross-machine /
+   * cross-user sharing stays W1-T425's redacted hash-pinned transport,
+   * unchanged.
+   *
+   * Cells READ the shared homes freely; this field does not add or change any
+   * locking — writes remain whatever single-writer path already exists today.
+   */
+  learningsHomes?: { userOverall?: string; global?: string };
 }
 
 /**
@@ -312,21 +333,55 @@ export function configPath(): string {
   return join(homedir(), ".config", "remudero", "config.json");
 }
 
+/** The two shared-knowledge homes {@link learningsHomes} resolves. */
+export interface LearningsHomes {
+  /** See {@link userOverallLearningsHome}. */
+  userOverall: string;
+  /** See {@link globalLearningsHome}. */
+  global: string;
+}
+
+/**
+ * Resolve the two shared-knowledge homes (the "org brain") — P32/W1-T145's
+ * layered knowledge, D-11's cell-sharing seam. This is the ONE place both
+ * homes are computed; {@link userOverallLearningsHome} and
+ * {@link globalLearningsHome} are thin wrappers over it, and every consumer
+ * elsewhere (run-task.ts, learnings.ts) reads through those wrappers rather
+ * than re-deriving a path, so an explicit `config.learningsHomes` override
+ * actually reaches every call site instead of shipping green and inert.
+ *
+ * Each home independently defaults to its historic `config.root`-derived
+ * path when `config.learningsHomes` (or the specific sub-field) is absent —
+ * BYTE-FOR-BYTE the same path an unconfigured install always resolved, so
+ * existing single-instance installs see no behavior change. An operator (or
+ * a cell orchestrator) sets `config.learningsHomes.userOverall` /
+ * `.global` to an identical path across multiple `config.root`s to make N
+ * same-machine cells read one shared corpus instead of N private ones.
+ */
+export function learningsHomes(config: Config): LearningsHomes {
+  return {
+    userOverall: config.learningsHomes?.userOverall ?? join(config.root, "learnings-user"),
+    global: config.learningsHomes?.global ?? join(config.root, "learnings-global"),
+  };
+}
+
 /**
  * The USER-OVERALL learnings home (P32/W1-T145, layered knowledge): a
  * fleet-readable directory OUTSIDE any single repo checkout, so every
  * project's fleet on this instance reads the SAME cross-project corpus.
  *
- * Derived from `config.root`, NEVER a hardcoded absolute path (public-repo
- * hygiene): default `<root>/learnings-user`. Because it depends ONLY on
- * `config.root` — never on a repo path, cwd, or which checkout is asking —
- * two different repo checkouts under the same instance always resolve to the
- * identical path, which is what makes this layer cross-project by
- * construction (same pattern as {@link workerZdotdir}/{@link workerHomeDir}
- * deriving off `config.root` rather than a per-repo path).
+ * Resolved via {@link learningsHomes}; default `<config.root>/learnings-user`
+ * when unconfigured. Because the default depends ONLY on `config.root` —
+ * never on a repo path, cwd, or which checkout is asking — two different repo
+ * checkouts under the same instance always resolve to the identical path by
+ * default, which is what made this layer cross-project by construction (same
+ * pattern as {@link workerZdotdir}/{@link workerHomeDir} deriving off
+ * `config.root` rather than a per-repo path). `config.learningsHomes.userOverall`
+ * lets an operator make that identity hold ACROSS `config.root`s too (D-11
+ * cells), not just within one.
  */
 export function userOverallLearningsHome(config: Config): string {
-  return join(config.root, "learnings-user");
+  return learningsHomes(config).userOverall;
 }
 
 /**
@@ -338,11 +393,12 @@ export function userOverallLearningsHome(config: Config): string {
  * (DECISIONS.md distribution-architecture) and is DEFERRED; this only names
  * where a pulled artifact is read from.
  *
- * Derived from `config.root`, never a hardcoded absolute path: default
- * `<root>/learnings-global`.
+ * Resolved via {@link learningsHomes}; default
+ * `<config.root>/learnings-global` when unconfigured, overridable via
+ * `config.learningsHomes.global` so same-machine cells (D-11) share it.
  */
 export function globalLearningsHome(config: Config): string {
-  return join(config.root, "learnings-global");
+  return learningsHomes(config).global;
 }
 
 /** Canonical filename of the pulled RMD-GLOBAL artifact inside {@link globalLearningsHome}. */
