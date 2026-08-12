@@ -1,0 +1,90 @@
+- id: W1-T448
+  title: "decide the branch reaper's CADENCE — wiring `rmd reap-branches` into every sweep pass costs 5,000 REST requests and 77 minutes of wall time PER DAY against a 5,000/hour budget, for a report that only changes when a branch is created or merged"
+  repo: remudero
+  depends_on: [W1-T447]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: "DEFERRED DELIBERATELY BY W1-T447's IMPLEMENTATION (#1680) and filed rather than left as
+    a sentence in a PR body. That shard's title said `add a DRY-RUN branch reaper TO THE SWEEP`; the
+    build stopped at a VERB (`rmd reap-branches`) and did not touch the sweep's cadence. This is the
+    half that was not done, with the measurement that was missing when the deferral was made.
+    THE DEFERRAL WAS ARGUED FROM COST AND THE COST IS NOW MEASURED, at b01db8dd:
+      - ONE reap takes 7.38s real (8 `gh api` pages for all-PR state, plus one `git merge-base` and
+        one `git grep` per branch — 5 ms each, local).
+      - `sweep.summary` fired 625 times on 2026-08-12, median gap 64s, minimum 47s.
+      - So PER-PASS WIRING WOULD ADD 5,000 REST REQUESTS PER DAY against a 5,000-PER-HOUR budget,
+        and 625 x 7.38s = 77 MINUTES PER DAY of sweep wall time.
+      - Measured the same hour: REST core sat at 4,127/5,000 remaining, so the budget is already
+        being spent, and this repo has a recorded GraphQL-exhaustion class where `gh pr create`,
+        `rmd review` and `gh pr view` all fail together.
+    AND THE MARGINAL COST IS NOT ZERO, WHICH IS THE OBVIOUS COUNTER-ARGUMENT AND IT IS WRONG.
+    `sweepCommand` already calls `buildOpenPrViews(owner, repo, ledgerPath)` every pass, so it looks
+    as though the reaper could ride along for free. It cannot: `buildOpenPrViews` fetches OPEN PRs
+    only, and the reaper's merged-head and closed-head disjuncts need `state=all`. The 8 pages are
+    additional, not shared.
+    WHAT THE REPORT ACTUALLY CHANGES WITH, and this is why a 64-second cadence is disproportionate:
+    the answer moves only when a branch is CREATED or MERGED. Measured on the live repo, two
+    consecutive runs minutes apart returned identical buckets (49 branches, 5 guarded, 0 deletable,
+    44 held)."
+  design: "(i) THE THREE CANDIDATES, AND THE MEASUREMENT ALREADY RULES ONE OUT.
+      (a) EVERY SWEEP PASS — rejected on the numbers above unless someone shows the budget can carry
+          it. Do not implement this without re-measuring; the figures are a day old by construction.
+      (b) A LOW CADENCE — every Nth pass, or once per daily window, with the same dry-run body. This
+          is the middle option and it needs its N argued from the create/merge rate, not picked.
+      (c) LEAVE IT A VERB — the operator (or a cron) runs `rmd reap-branches` when they want it. This
+          costs nothing, already works, and still achieves the stated goal of getting a human out of
+          GitHub, because the whole point is that ONE COMMAND replaces a hand sweep.
+      PREFER (c) OR (b) AND SAY WHICH, WITH THE NUMBER THAT DECIDED IT. Whoever builds this is
+      explicitly permitted to conclude (c) and ship NOTHING but the argument — a task whose honest
+      outcome is `the existing verb is correct` is a real outcome, and this repo has a four-instance
+      history of bounds that fired on healthy conditions because a cadence was assumed necessary.
+      (ii) IF A CADENCE IS CHOSEN, IT MUST NOT BE A NEW CLOCK. `evaluateIdleGate`'s deferral clock and
+      the deploy supervisor's ceiling both already persist `since`-style state across one-shot
+      processes; a reaper cadence that invents a fourth spelling of `how long since last time` is the
+      defect this repo keeps re-filing. Reuse or extend, and say which.
+      (iii) THE DRY RUN STAYS DRY WHATEVER THE CADENCE. This task changes WHEN the report runs, never
+      WHETHER it deletes. The autonomous-deletion ruling is W1-T447's and is still open; a cadence
+      change must not smuggle a delete in behind it.
+      (iv) FAILURE MUST NOT STOP THE SWEEP. The reaper exits non-zero on drift and on an unreadable
+      branch listing, both of which are correct for a verb an operator runs. Wired into the sweep,
+      a non-zero reap must NOT abort the pass that carries PR reconciliation — the sweep's real work
+      is unrelated and far more urgent. Establish how the sweep currently treats a failing sub-step
+      and follow it rather than inventing a policy."
+  acceptance:
+    - claim: "the chosen cadence is stated with the measured number that decided it, not asserted"
+      proof: "unit test: test/reap-cadence.test.ts"
+    - claim: "a reap that fails does not abort the sweep pass it runs inside"
+      proof: "unit test: test/reap-cadence.test.ts"
+    - claim: "the reaper still deletes nothing whatever the cadence"
+      proof: "unit test: test/reap-cadence.test.ts"
+  risk: high
+  origin: recon#branch-accumulation-2026-08-12
+  plan_refs: ["W1-T447"]
+  files: [src/run-task.ts, docs/operator-guide.md, test/reap-cadence.test.ts, test/sweep.test.ts, test/branch-reaper-dry-run.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — the cost question has a MEASURED answer, so no operator ruling is needed to
+    reject per-pass wiring. The autonomy question that WOULD need one belongs to W1-T447 and is held
+    there; `depends_on: [W1-T447]` keeps this behind it.
+    risk:high is Rule 19's SPAN, not blast radius: `subsystemsOf` reads `files:` plus acceptance text
+    and this set crosses `src/`, `docs/` and `test/`. Raised up front.
+    `docs/operator-guide.md` IS DECLARED BECAUSE IT WILL TRIP, and the reason is measured rather than
+    defensive: W1-T447's build went red on `docs-claims` (the guide must cover every COMMANDS verb)
+    and on `generate-cli-reference --check` (a byte-comparison) the moment it added a verb. If this
+    task changes the verb's usage text it trips both again. `docs/cli-reference.md` is deliberately
+    OMITTED — it is GENERATED, so it appears in the diff without being hand-edited; declaring a
+    generated artifact invites someone to edit it by hand.
+    `test/sweep.test.ts` IS DECLARED AND THE REASON IS MEASURED, not defensive: it invokes the sweep
+    62 times (counted on the invocation, not prose mentions), against 8 in `sweep-pass-heartbeat` and
+    7 in `sweep-arm-parity`, so it is the suite that moves when the sweep gains a step.
+    `test/branch-reaper-dry-run.test.ts` is declared because it pins `reapBranchesCommand`'s exit
+    codes, and clause (iv) may have to change how a non-zero reap is treated.
+    THIS IS THE SEVENTH files: CORRECTION-OR-PRE-EMPTION THIS WEEK. Five tasks were refused at push
+    for omitting the suite that asserts the shape they changed, a sixth was corrected mid-flight, and
+    W1-T447 itself needed docs added after its first full glob. The pattern is that a files: list
+    gets written from the code the author pictures, not from the GATES that observe it.
+    NO NUMBER HERE SHOULD BE QUOTED FORWARD — 7.38s, 625 passes, 5,000 requests and 49 branches were
+    true at 2026-08-12T22:20Z. Sweep cadence and branch count both move hourly; re-measure before
+    deciding anything."
