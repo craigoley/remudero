@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -16,6 +16,7 @@ import {
   type ExportProvenance,
   type LearningEntry,
 } from "../src/lib/learnings.js";
+import { learningsCommand, learningsExportCommand, learningsImportCommand } from "../src/run-task.js";
 
 // W1-T425 — the §6 knowledge-commons TRANSPORT: opt-in `share: public`, a hash-pinned
 // export/import pair riding the ALREADY-SHIPPED loadGlobalArtifact guard and scrubEntry
@@ -93,9 +94,14 @@ test("W1-T425: a `superseded` entry stamped `share: public` STILL never exports 
 // ── (ii) TRIPWIRE DIRECTION: a planted leak-grep-matching fact aborts the export by name ─────
 
 test("W1-T425: a `share: public` entry whose fact matches the leak-grep tripwire aborts the export, naming the entry", () => {
+  // Built via concatenation, deliberately never a literal AWS-key-shaped substring in this
+  // FILE'S OWN source text — otherwise this fixture would trip the repo's OWN leak-grep
+  // tripwire (.github/scripts/leak-grep.sh) on itself. The runtime STRING is still exactly
+  // AKIA-prefixed + 16 chars, which is what scrubEntry's regex (and this test) actually checks.
+  const fakeAwsKey = "AKIA" + "ABCDEFGHIJKLMNOP";
   const entries = [
     entry({ id: "safe-fact", share: "public" }),
-    entry({ id: "leaky-fact", share: "public", fact: "The AWS key is AKIAABCDEFGHIJKLMNOP, do not lose it." }),
+    entry({ id: "leaky-fact", share: "public", fact: `The AWS key is ${fakeAwsKey}, do not lose it.` }),
   ];
   const result = buildExportBundle(entries, provenance);
   assert.equal(result.ok, false);
@@ -186,4 +192,149 @@ test("W1-T425: a bundle hand-edited after export still passes the pin check (att
   assert.equal(loaded.ok, false, "the pre-existing hash-pinned-artifact guard must refuse the tampered bundle");
   if (loaded.ok) return;
   assert.match(loaded.reason, /hash mismatch/);
+});
+
+// ── verifyBundlePin's own malformed-input refusals (every branch, not just the mismatch one) ─
+
+test("W1-T425: verifyBundlePin refuses non-YAML text", () => {
+  const result = verifyBundlePin("not: [valid, yaml", "irrelevant");
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.match(result.reason, /not valid YAML/);
+});
+
+test("W1-T425: verifyBundlePin refuses a bundle that isn't a mapping", () => {
+  const result = verifyBundlePin("- just\n- a\n- list\n", "irrelevant");
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.match(result.reason, /must be a mapping/);
+});
+
+test("W1-T425: verifyBundlePin refuses a bundle missing a string 'hash'", () => {
+  const result = verifyBundlePin("version: v1\nentries: []\n", "irrelevant");
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.match(result.reason, /missing string 'hash'/);
+});
+
+// ── CLI GLUE: learningsCommand/learningsExportCommand/learningsImportCommand ─────────────────
+
+function setupHome(root: string): string {
+  const home = mkdtempSync(join(tmpdir(), "commons-home-"));
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  return home;
+}
+
+function withHome(home: string, fn: () => void): void {
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    fn();
+  } finally {
+    process.env.HOME = oldHome;
+  }
+}
+
+test("W1-T425: learningsCommand refuses an unknown subcommand, spawning/writing nothing", () => {
+  const code = learningsCommand(["frobnicate"]);
+  assert.equal(code, 2);
+});
+
+test("W1-T425: learningsCommand routes 'export'/'import' to the matching subcommand", () => {
+  // No <out>/<file> given -> each subcommand's own usage refusal (code 2), proving the
+  // dispatcher actually reached the named subcommand rather than falling through.
+  assert.equal(learningsCommand(["export"]), 2);
+  assert.equal(learningsCommand(["import"]), 2);
+});
+
+test("W1-T425: learningsExportCommand rejects a stray flag and a missing <out>", () => {
+  assert.equal(learningsExportCommand(["out.yaml", "--bogus"]), 2);
+  assert.equal(learningsExportCommand([]), 2);
+});
+
+test("W1-T425: learningsExportCommand over a fixture corpus with zero `share: public` entries refuses (exit 1), writing no file", () => {
+  const projectDir = tmpDir("commons-cli-project-empty-");
+  writeFileSync(join(projectDir, "shard.yaml"), JSON.stringify([entry({ id: "unstamped" })]));
+  const outDir = tmpDir("commons-cli-out-");
+  const out = join(outDir, "bundle.yaml");
+  const code = learningsExportCommand([out], { projectDir });
+  assert.equal(code, 1);
+  assert.throws(() => readFileSync(out, "utf8"));
+});
+
+test("W1-T425: learningsExportCommand over a fixture corpus with a `share: public` entry succeeds (exit 0) and writes a hash-pinned bundle", () => {
+  const projectDir = tmpDir("commons-cli-project-ok-");
+  writeFileSync(join(projectDir, "shard.yaml"), JSON.stringify([entry({ id: "cli-shared", share: "public" })]));
+  const outDir = tmpDir("commons-cli-out-ok-");
+  const out = join(outDir, "bundle.yaml");
+  const code = learningsExportCommand([out], { projectDir });
+  assert.equal(code, 0);
+  const written = readFileSync(out, "utf8");
+  assert.match(written, /cli-shared/);
+  assert.match(written, /hash:/);
+});
+
+test("W1-T425: learningsExportCommand degrades sourceSha to \"unknown\" (never crashes) when the head-sha read throws", () => {
+  const projectDir = tmpDir("commons-cli-project-degrade-");
+  writeFileSync(join(projectDir, "shard.yaml"), JSON.stringify([entry({ id: "cli-shared-degrade", share: "public" })]));
+  const outDir = tmpDir("commons-cli-out-degrade-");
+  const out = join(outDir, "bundle.yaml");
+  const code = learningsExportCommand([out], {
+    projectDir,
+    headSha: () => {
+      throw new Error("simulated: no git history readable");
+    },
+  });
+  assert.equal(code, 0);
+  const written = readFileSync(out, "utf8");
+  assert.match(written, /sourceSha: unknown/);
+});
+
+test("W1-T425: learningsImportCommand rejects a missing <file>, a missing --pin, an unreadable file, and a stray flag", () => {
+  assert.equal(learningsImportCommand([]), 2);
+  assert.equal(learningsImportCommand(["/does/not/exist.yaml"]), 2);
+  assert.equal(learningsImportCommand(["/does/not/exist.yaml", "--pin", "deadbeef"]), 2);
+  assert.equal(learningsImportCommand(["some-file.yaml", "--bogus"]), 2);
+});
+
+test("W1-T425: learningsImportCommand refuses on a pin mismatch (exit 1), writing nothing to the global home", () => {
+  const projectDir = tmpDir("commons-cli-import-project-");
+  writeFileSync(join(projectDir, "shard.yaml"), JSON.stringify([entry({ id: "cli-shared-2", share: "public" })]));
+  const outDir = tmpDir("commons-cli-import-out-");
+  const out = join(outDir, "bundle.yaml");
+  assert.equal(learningsExportCommand([out], { projectDir }), 0);
+
+  const root = tmpDir("commons-cli-import-root-");
+  const home = setupHome(root);
+  withHome(home, () => {
+    const code = learningsImportCommand([out, "--pin", "0".repeat(64)]);
+    assert.equal(code, 1);
+    assert.throws(() => readFileSync(join(root, "learnings-global", "artifact.yaml"), "utf8"));
+  });
+});
+
+test("W1-T425: learningsImportCommand, given the RIGHT pin, writes the bundle to the RMD-GLOBAL artifact path the injector reads", () => {
+  const projectDir = tmpDir("commons-cli-import-project-2-");
+  writeFileSync(join(projectDir, "shard.yaml"), JSON.stringify([entry({ id: "cli-shared-3", share: "public" })]));
+  const outDir = tmpDir("commons-cli-import-out-2-");
+  const out = join(outDir, "bundle.yaml");
+  assert.equal(learningsExportCommand([out], { projectDir }), 0);
+  const bundleText = readFileSync(out, "utf8");
+  const hashLine = bundleText.match(/^hash:\s*(\S+)/m);
+  assert.ok(hashLine, "exported bundle must carry a hash: line");
+  const pin = hashLine![1];
+
+  const root = tmpDir("commons-cli-import-root-2-");
+  const home = setupHome(root);
+  withHome(home, () => {
+    const code = learningsImportCommand([out, "--pin", pin]);
+    assert.equal(code, 0);
+    const written = readFileSync(join(root, "learnings-global", "artifact.yaml"), "utf8");
+    assert.equal(written, bundleText);
+    const loaded = loadGlobalArtifact(join(root, "learnings-global", "artifact.yaml"));
+    assert.equal(loaded.ok, true);
+    if (!loaded.ok) return;
+    assert.equal(loaded.entries[0].id, "cli-shared-3");
+  });
 });

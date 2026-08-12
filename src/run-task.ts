@@ -17166,7 +17166,7 @@ async function skillCommand(rest: string[]): Promise<number> {
  * privacy/pin logic and are unit-tested independently (same split as
  * `rmd correct`'s wrapper over `applyCorrection`).
  */
-function learningsCommand(rest: string[]): number {
+export function learningsCommand(rest: string[]): number {
   const sub = rest[0];
   if (sub === "export") return learningsExportCommand(rest.slice(1));
   if (sub === "import") return learningsImportCommand(rest.slice(1));
@@ -17186,8 +17186,19 @@ function learningsCommand(rest: string[]): number {
  * leak-grep tripwire — either refusal is reported via the SAME
  * {@link buildExportBundle} this command is a thin wrapper over, never
  * reimplemented here.
+ *
+ * `opts.projectDir` is injectable (defaults to this checkout's real
+ * `learnings/` directory) — same seam `emissionsCommand`/`ledgerGrepCommand`
+ * use for their state/ledger dirs — so a test can exercise the real success
+ * path over a fixture corpus without ever writing `share: public` into this
+ * repo's own committed shards. `opts.headSha` is injectable the same way
+ * {@link readHeadShaForSummary} injects `exec` — the ONLY way to drive the
+ * degrade-to-"unknown" catch arm from a test without an unreadable-git host.
  */
-function learningsExportCommand(rest: string[]): number {
+export function learningsExportCommand(
+  rest: string[],
+  opts: { projectDir?: string; headSha?: () => string } = {},
+): number {
   const out = rest[0];
   const badArg = unknownArgError("learnings export", rest.slice(1), [], []);
   if (badArg) {
@@ -17198,7 +17209,7 @@ function learningsExportCommand(rest: string[]): number {
     console.error(`rmd learnings export: <out> is required — usage: rmd learnings export <out>\n` + USAGE);
     return 2;
   }
-  const entries = loadLearningsCorpus(projectLearningsHome(repoRoot));
+  const entries = loadLearningsCorpus(opts.projectDir ?? projectLearningsHome(repoRoot));
   let sourceRepo = "unknown";
   try {
     const { owner, repo } = resolveOwnerRepo();
@@ -17206,9 +17217,11 @@ function learningsExportCommand(rest: string[]): number {
   } catch {
     // no origin remote configured — provenance degrades to "unknown", never a crash.
   }
+  const readHeadSha =
+    opts.headSha ?? (() => execFileSync("git", ["-C", repoRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim());
   let sourceSha = "unknown";
   try {
-    sourceSha = execFileSync("git", ["-C", repoRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim() || "unknown";
+    sourceSha = readHeadSha() || "unknown";
   } catch {
     // no git history readable — same degrade-to-"unknown" as above.
   }
@@ -17240,7 +17253,7 @@ function learningsExportCommand(rest: string[]): number {
  * passing the pin check here is still refused there — the existing guard,
  * never a reimplementation of it.
  */
-function learningsImportCommand(rest: string[]): number {
+export function learningsImportCommand(rest: string[]): number {
   const file = rest[0];
   const badArg = unknownArgError("learnings import", rest.slice(1), ["--pin"], []);
   if (badArg) {
