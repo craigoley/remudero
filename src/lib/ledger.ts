@@ -65,6 +65,50 @@ export function isSpawnInfraBlockedError(err: unknown): err is { reasonClass: "b
   return typeof err === "object" && err !== null && (err as { reasonClass?: unknown }).reasonClass === "blocked_toolchain";
 }
 
+// ── W1-T429: task-id-keyed DECISION reads are repo-blind ────────────────────────────────────
+//
+// The ledger is one file per INSTANCE (`ledgerPathFor` off `config.root`), and only `run.start`
+// carries a `repo:` dimension today — every other task-id-keyed decision read (a breaker-gate's
+// own escalation dedup, a cap count, a fleet-control marker's filename) keys on the bare task id
+// alone. `drainCommand`/`sweepCommand` already accept `--repo`, and the fleet's plans share ONE id
+// scheme (this repo's W1-T12 and a project-init'd repo's W1-T12 are the SAME KEY) — so the moment
+// a second repo is driven from one instance, a decision read for one repo's task id silently
+// counts/gates against the OTHER repo's history of the same id.
+
+/**
+ * THE ONE key-renderer every task-id-keyed decision read/write in this codebase goes through —
+ * never a per-site `${repo}:${taskId}` string built by hand (design note i, W1-T429): `<repo>:
+ * <task_id>` when `repo` is known, or the BARE `task_id` when it is not. The bare form is
+ * deliberately not an error case — it is the LEGACY FALLBACK a call site with no repo dimension
+ * yet threaded to it (or a line ledgered before this key existed) renders through, so a
+ * pre-existing, unscoped ledger line keeps matching once a caller starts scoping its reads.
+ */
+export function repoScopedTaskKey(repo: string | undefined, taskId: string): string {
+  return repo ? `${repo}:${taskId}` : taskId;
+}
+
+/**
+ * True iff `line` records a decision for the SAME (repo, task_id) pair as `repo`/`taskId` —
+ * the read-side half of {@link repoScopedTaskKey}'s adoption. Built on that ONE helper for the
+ * isolating comparison (two lines whose OWN `repo` differs render to different keys and never
+ * match, however momentary the equal `task_id`), plus the explicit BACKWARD-COMPAT clause design
+ * note (iii) requires: a line ledgered before this task existed carries no `repo` field at all,
+ * and must still be found by a read that now knows a repo — an upgrade must never orphan a
+ * pre-existing dedup marker or silently re-arm an already-fired escalation/cap.
+ *
+ * FALSIFIER, both directions (test/ledger-repo-scope.test.ts): (1) two synthetic lines for the
+ * SAME `task_id`, each carrying a DIFFERENT `repo`, must never both match one repo's query — the
+ * cap/gate one repo consumes must leave the other at zero. (2) a synthetic line with NO `repo`
+ * field must still match a query that now supplies one — deleting the fallback clause below fails
+ * this direction.
+ */
+export function matchesRepoScopedTask(line: { task_id?: unknown; repo?: unknown }, repo: string | undefined, taskId: string): boolean {
+  if (typeof line.task_id !== "string") return false;
+  const lineRepo = typeof line.repo === "string" ? line.repo : undefined;
+  if (repoScopedTaskKey(lineRepo, line.task_id) === repoScopedTaskKey(repo, taskId)) return true;
+  return lineRepo === undefined && line.task_id === taskId;
+}
+
 /**
  * Cost-line tag (W1-T127 design note iii). `"task"` is the ordinary, implicit
  * attribution for real billed work; `"infra"` marks a $0 line logged for a
