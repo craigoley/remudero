@@ -76,14 +76,7 @@ export function loadShardEntries(path) {
         `learnings-budget-ratchet: ${path} entry '${entry.id}': 'lifecycle' must be 'active', 'superseded', 'quarantined', or 'contested', got ${JSON.stringify(entry.lifecycle)}`,
       );
     }
-    // W1-T419: `cited`/`cited_count` are OPTIONAL extra fields this gate now reads (not
-    // validated -- src/lib/learnings.ts's parseLearningsDoc owns shape enforcement) so
-    // evaluateRatchet's over-cap message can name compression candidates by measured evidence
-    // instead of staying mute. An entry with neither field (all history before the W1-T419
-    // miner ran) carries `cited: undefined, citedCount: undefined` and renders `never-cited`.
-    const citedCount = typeof entry.cited_count === "number" ? entry.cited_count : undefined;
-    const cited = typeof entry.cited === "string" ? entry.cited : undefined;
-    return { id: entry.id, fact: entry.fact, lifecycle, cited, citedCount };
+    return { id: entry.id, fact: entry.fact, lifecycle };
   });
 }
 
@@ -145,65 +138,6 @@ export function evaluateRatchet(actualChars, baseline) {
   return violations;
 }
 
-// ── Naming the compression candidates (W1-T419 design iii) ─────────────────
-//
-// A CEILING with no candidates leaves compression to whoever's judgment is nearest -- the
-// ratchet going red said "over budget" and nothing else. With mined citation evidence (`cited` /
-// `cited_count`, stamped by retro.ts's `stampCitations`) available on active entries, the overage
-// message can instead say WHICH entries were injected least and never mattered: fold those first.
-// The ceiling and red/green semantics are UNCHANGED -- only the message stops being mute.
-
-/** How many least-evidenced active entries {@link main} names per over-cap run. */
-export const CANDIDATE_COUNT = 5;
-
-/**
- * Order active entries LEAST-EVIDENCED FIRST: lowest `citedCount` (absent sorts as less than any
- * measured count, including zero -- no evidence is weaker than "measured and zero"), then oldest
- * `cited` (absent sorts before any dated entry, for the same reason), then `id` for determinism
- * when two entries tie on both. An entry with cited_count 9 and an entry with no evidence at all
- * are never mistaken for each other: the never-cited one always sorts first.
- */
-export function leastEvidencedFirst(entries) {
-  return entries
-    .filter((e) => e.lifecycle === "active")
-    .slice()
-    .sort((a, b) => {
-      const ac = typeof a.citedCount === "number" ? a.citedCount : -1;
-      const bc = typeof b.citedCount === "number" ? b.citedCount : -1;
-      if (ac !== bc) return ac - bc;
-      const ad = a.cited ?? "";
-      const bd = b.cited ?? "";
-      if (ad !== bd) return ad < bd ? -1 : 1;
-      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
-    });
-}
-
-/**
- * Render ONE compression-candidate line. An entry carrying neither `citedCount` nor `cited`
- * (no evidence has ever been mined for it) renders as `never-cited` -- EXPLICITLY, never omitted
- * from the list just because there is nothing to show. An entry with at least one evidence field
- * renders its measured count and last-cited date instead.
- */
-export function renderCandidateLine(entry) {
-  const hasEvidence = typeof entry.citedCount === "number" || typeof entry.cited === "string";
-  if (!hasEvidence) return `${entry.id}: never-cited`;
-  const count = typeof entry.citedCount === "number" ? entry.citedCount : 0;
-  const cited = entry.cited ?? "unknown date";
-  return `${entry.id}: cited ${count}x, last ${cited}`;
-}
-
-/**
- * The K least-evidenced active entries, rendered as compression-candidate lines -- what {@link
- * main} appends to an over-cap violation message. Pure over `entries`; the caller decides whether
- * the ratchet is actually over cap before calling this (an at-or-under-cap run names no
- * candidates, same as today).
- */
-export function compressionCandidates(entries, count = CANDIDATE_COUNT) {
-  return leastEvidencedFirst(entries)
-    .slice(0, count)
-    .map(renderCandidateLine);
-}
-
 function main(argv) {
   const { values } = parseArgs({
     args: argv,
@@ -237,14 +171,6 @@ function main(argv) {
       "  Compress or supersede entries to bring the active corpus back under the cap, or -- if the growth is " +
         "deliberate and reviewed -- raise scripts/learnings-budget-baseline.json's capChars.",
     );
-    // W1-T419: name the least-evidenced entries so compression rides measured use instead of
-    // whoever's judgment is nearest -- an entry with no citation evidence (`never-cited`) sorts
-    // first; entries with evidence are still listed, oldest/least-cited first, never omitted.
-    const candidates = compressionCandidates(entries);
-    if (candidates.length > 0) {
-      console.error(`  Least-evidenced active entries (fold these first):`);
-      for (const c of candidates) console.error(`    - ${c}`);
-    }
     process.exitCode = 1;
     return;
   }
