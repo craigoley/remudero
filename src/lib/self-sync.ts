@@ -92,7 +92,7 @@ export type SelfSyncResult =
   | { status: "degraded"; reason: string }
   | { status: "up-to-date" }
   | { status: "synced"; oldSha: string; newSha: string }
-  | { status: "refused"; reason: "dirty" | "diverged"; message: string };
+  | { status: "refused"; reason: "dirty" | "diverged" | "off-main"; message: string };
 
 /** Shared remedy fragment — acceptance requires the LITERAL `git pull --ff-only` text land in
  *  stderr for both refusal reasons, so operators always get the one command that either just
@@ -198,8 +198,45 @@ export function checkCliFreshness(
     return { status: "refused", reason: "diverged", message };
   }
 
-  // CLEAN + BEHIND + ff-possible: the one case rmd is allowed to mutate anything. The fetch
-  // already ran above, so this merge is local-only -- no second network round trip.
+  // W1-T445: THE REF THIS WOULD MOVE MUST BE `main`, and until this check existed nothing asked.
+  // The three refusals above protect the WORKING TREE and the HISTORY; none of them protects the
+  // REF. `repoDir` is `resolveRepoRoot(argv, process.cwd())` -- the toplevel of wherever the verb
+  // was invoked -- so inside a worktree this function was handed that worktree and would advance
+  // ITS branch. Observed: a session cut `run-W1-T445-…` at 14:47, ran one unguarded verb at 14:52,
+  // and the reflog recorded `merge origin/main: Fast-forward` on that branch before its first
+  // commit. Nothing was lost, but the base it was measuring against moved mid-task.
+  //
+  // WHY THE BRANCH AND NOT "AM I THE INSTALL": that question cannot be answered from inside this
+  // process. `bin/rmd` execs `$DIR/src/run-task.ts` relative to ITSELF, so a worktree's own
+  // `./bin/rmd` loads that worktree's `src/` and `import.meta.url` resolves there too -- every
+  // checkout believes it is the install. The branch is the property that is actually legible, and
+  // it matches the scope the CI guard above already states in prose: an interactive-operator
+  // convenience for the operator's own `main` checkout.
+  //
+  // A DETACHED HEAD REFUSES TOO, DELIBERATELY. It moves no branch ref, so nothing is "lost" -- but
+  // this repo cuts `git checkout --detach origin/main` constantly to run a BASE-side full glob, and
+  // silently advancing that HEAD would turn a base-vs-head comparison into head-vs-head. That is a
+  // wrong ANSWER rather than a lost ref, which is worse.
+  //
+  // PLACED HERE, AFTER the divergence check, ON PURPOSE: it speaks only in the case that would
+  // otherwise have mutated. A branch check earlier would print a refusal on every verb run from a
+  // worktree that happens to be behind, which is most of them, and noise on a healthy path is how a
+  // real warning stops being read.
+  const branch = currentBranch(git);
+  if (branch !== "main") {
+    const where = branch === undefined ? "a DETACHED HEAD" : `branch \`${branch}\``;
+    const message =
+      `rmd is behind origin/main (${shortSha(headSha)}..${shortSha(originSha)}) but this checkout is ` +
+      `on ${where}, not \`main\` -- refusing to auto-sync (never moving a ref that is not main). ` +
+      `Self-sync exists to keep the operator's own \`main\` checkout fresh; fast-forwarding here ` +
+      `would move your work's base out from under it. Run \`${REMEDY_COMMAND}\` yourself if that is ` +
+      `really what you want.`;
+    warn(message);
+    return { status: "refused", reason: "off-main", message };
+  }
+
+  // CLEAN + BEHIND + ff-possible + ON MAIN: the one case rmd is allowed to mutate anything. The
+  // fetch already ran above, so this merge is local-only -- no second network round trip.
   git(["merge", "--ff-only", "origin/main"]);
   const newSha = git(["rev-parse", "HEAD"]).trim();
   say(`### rmd self-sync: ${shortSha(headSha)}..${shortSha(newSha)}`);
@@ -209,6 +246,32 @@ export function checkCliFreshness(
 
 function shortSha(sha: string): string {
   return sha.slice(0, 7);
+}
+
+/**
+ * The branch HEAD points at, or `undefined` for a detached HEAD.
+ *
+ * `git symbolic-ref --short -q HEAD` is the read that answers this WITHOUT guessing, and the
+ * alternative was rejected on MEASURED behaviour rather than taste: on a detached HEAD
+ * `rev-parse --abbrev-ref HEAD` prints the literal string `HEAD` (verified), so it reports a
+ * plausible branch NAME for a state that has no branch at all. `symbolic-ref -q` exits 1 there
+ * and prints nothing, which is the difference this function is built on; `-q` also keeps the
+ * detached case off stderr.
+ *
+ * W1-T119 SHAPE: a git failure and a detached HEAD both land in the catch and both return
+ * `undefined`, which is correct HERE only because the caller treats "not provably on main" as
+ * REFUSE — the fail-closed direction. A reader that fails to answer must never license the mutation.
+ */
+function currentBranch(git: GitRunner): string | undefined {
+  try {
+    // No empty-string guard: on success `symbolic-ref -q` always prints a ref name, and the
+    // detached case is the non-zero exit handled below — so an `|| undefined` here would be a
+    // branch no falsifier could ever redden. Verified: exit 0 prints `main`, detached exits 1
+    // and prints nothing.
+    return git(["symbolic-ref", "--short", "-q", "HEAD"]).trim();
+  } catch {
+    return undefined;
+  }
 }
 
 /**
