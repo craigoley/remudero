@@ -51,7 +51,8 @@ import {
  * warns (regardless of that option) for a `unit test:` proof whose body reads as a
  * runtime narrative rather than a literal test-title substring, and proof-scope
  * (W1-T310) warns EVERYWHERE by default (`opts.proofScope`, default "warn") — see
- * that check's own module comment for the measured retrofit count behind the call.
+ * that check's own module comment for the measured retrofit count behind the call, and
+ * dispatch-priority (W1-T422) always warns, unconditionally, like budget-sanity.
  */
 
 export type LintCheck =
@@ -70,7 +71,8 @@ export type LintCheck =
   | "ruling-verify"
   | "rule15-filing"
   | "duplicate-title"
-  | "duplicate-learning";
+  | "duplicate-learning"
+  | "dispatch-priority";
 export type LintSeverity = "block" | "warn";
 
 export interface LintViolation {
@@ -1244,6 +1246,53 @@ export function budgetSanityWarning(
   };
 }
 
+// ── DISPATCH-PRIORITY (W1-T422, soft) ────────────────────────────────────────
+//
+// A WARNING (never blocks) on the optional `priority:` field (lib/plan.ts) that
+// `compareDispatch` (lib/drain.ts) reads as its FIRST sort key. Two ways the field
+// rots silently without this: a value far outside the sanctioned band (a typo — a
+// risk number or a turn budget pasted into the wrong column), and a value left on a
+// task that can no longer dispatch at all (blocked/merged/done — see
+// {@link NON_OPEN_FILING_STATUSES}, reused here unchanged: "non-open" means the exact
+// same thing for a priority as it does for rule15-filing). Neither case can produce a
+// WRONG verdict — a bad priority only degrades ORDERING (design (iii), W1-T422's own
+// task record) — so blocking would overreach the failure mode.
+
+/** Sanctioned `priority` band (design (iii), W1-T422) — wide enough to rank the whole
+ *  open queue without doubling as an unbounded knob. A value outside it still sorts
+ *  exactly where the comparator says it does (dispatchOrder never refuses to read it);
+ *  the warning exists because a value this far out is very likely a typo. */
+export const DISPATCH_PRIORITY_MIN = 0;
+export const DISPATCH_PRIORITY_MAX = 99;
+
+/** ADVISORY (never blocks): this task's `priority` is out of the [0, 99] band, or set
+ *  on a task that is no longer OPEN, where it can never again affect dispatch order and
+ *  is pure noise. Absent `priority` ⇒ silent — most tasks carry none, by design. */
+export function dispatchPriorityViolations(task: Task): LintViolation[] {
+  if (task.priority === undefined) return [];
+  const violations: LintViolation[] = [];
+  if (task.priority < DISPATCH_PRIORITY_MIN || task.priority > DISPATCH_PRIORITY_MAX) {
+    violations.push({
+      check: "dispatch-priority",
+      severity: "warn",
+      message:
+        `task ${task.id} carries priority ${task.priority}, outside the sanctioned ` +
+        `[${DISPATCH_PRIORITY_MIN}, ${DISPATCH_PRIORITY_MAX}] band — dispatchOrder (lib/drain.ts) ` +
+        "still honours it exactly as written, but a value this far out is usually a typo.",
+    });
+  }
+  if (NON_OPEN_FILING_STATUSES.has(task.status)) {
+    violations.push({
+      check: "dispatch-priority",
+      severity: "warn",
+      message:
+        `task ${task.id} carries priority ${task.priority} but is status:${task.status} — a ` +
+        "gravestone with a priority is noise: it can never again affect dispatch order.",
+    });
+  }
+  return violations;
+}
+
 // ── DUPLICATE-CLOSURE AT KNOWLEDGE INTAKE (W1-T420) ──────────────────────────
 //
 // ONE PURE MODULE (src/lib/knowledge-dedup.ts's `bestNearDuplicate`), TWO CONSUMERS HERE, TWO
@@ -1514,8 +1563,9 @@ export interface LintOpts {
 /** Lint one task. Hard checks (sizing/headless-fitness/proof-shape/proof-dialect/
  *  proof-resolvability/post-merge-amendment/provenance/ruling-verify) always run —
  *  post-merge-amendment is a no-op absent `opts.postMergeAmendment` — budget-sanity
- *  runs only when `opts.mountMaxTurns` is supplied, and duplicate-title (W1-T420) is a
- *  no-op absent `opts.openTaskTitles`. */
+ *  runs only when `opts.mountMaxTurns` is supplied, duplicate-title (W1-T420) is a
+ *  no-op absent `opts.openTaskTitles`, and dispatch-priority (W1-T422) always runs but
+ *  is a no-op absent `task.priority`. */
 export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   const violations: LintViolation[] = [];
   const sizing = sizingViolation(task);
@@ -1536,6 +1586,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   if (ruling) violations.push(ruling);
   const rule15 = rule15FilingViolation(task);
   if (rule15) violations.push(rule15);
+  violations.push(...dispatchPriorityViolations(task));
   if (opts.mountMaxTurns !== undefined) {
     const warn = budgetSanityWarning(opts.mountMaxTurns, opts.calibration);
     if (warn) violations.push(warn);

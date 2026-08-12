@@ -157,18 +157,27 @@ export interface NextRunnableOpts {
  * `plan/tasks.yaml` was a soft priority an operator could express by moving a block, and after this
  * change moving a block does nothing. That trade is deliberate — an implicit signal that only half
  * the plan can express, and that silently starves the other half, is worse than a uniform one — but
- * it is a real loss and an explicit `priority:` field would be the honest successor.
+ * it is a real loss, and an explicit `priority:` field is now the honest successor (W1-T422): the
+ * comparator below reads it FIRST, before id, so the operator has a real instrument to front a task
+ * again — one that, unlike file placement, exists on every task and needs no migration.
  *
- * DETERMINISM IS ABSOLUTE. The comparator reads only `id`, which is committed content. It never
- * consults file order, mtime, or enumeration order. The numeric-then-lexicographic tiebreak makes it
- * a TOTAL order, so two runs over the same plan always select the same task.
+ * DETERMINISM IS ABSOLUTE. The comparator reads only `priority` and `id`, both committed content. It
+ * never consults file order, mtime, or enumeration order. Absent `priority` sorts after every task
+ * that carries one (`?? +Infinity`), so a plan with no priorities set is byte-identical in order to
+ * before this field existed. The numeric-then-lexicographic id tiebreak makes it a TOTAL order, so
+ * two runs over the same plan always select the same task.
  */
 export function dispatchOrder(tasks: readonly Task[]): Task[] {
   return [...tasks].sort(compareDispatch);
 }
 
-/** Total order over task ids: leading integer ascending, then the raw id as a stable tiebreak. */
+/** Total order: `priority` ascending FIRST (absent ⇒ `+Infinity`, so it sorts last), then the
+ *  existing id order (leading integer ascending, then the raw id) as the deterministic tiebreak —
+ *  among prioritized tasks and among un-prioritized ones alike. */
 export function compareDispatch(a: Task, b: Task): number {
+  const pa = a.priority ?? Number.POSITIVE_INFINITY;
+  const pb = b.priority ?? Number.POSITIVE_INFINITY;
+  if (pa !== pb) return pa - pb;
   const na = idOrdinal(a.id);
   const nb = idOrdinal(b.id);
   if (na !== nb) return na - nb;
