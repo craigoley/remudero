@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -10,8 +10,12 @@ import {
   evaluateDispatchBreakerCorroborated,
   isLifetimeDispatchCapExceeded,
   readLedgerLines,
+  type GitHub,
   type PrRef,
 } from "../src/lib/status.js";
+import { drainCommand } from "../src/run-task.js";
+import type { Config } from "../src/lib/config.js";
+import type { DrainSummary } from "../src/lib/drain.js";
 
 // ── W1-T414: "the dispatch breaker's COUNT is necessarily per-host but its RESET is local for
 // no reason the design requires" ───────────────────────────────────────────────────────────
@@ -186,5 +190,61 @@ test("the lifetime cap still refuses a task over its ceiling even when a corrobo
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── breakerGateFor wiring (run-task.ts): the REAL drainCommand builds the once-per-invocation
+// `openHeadBranchesForBreaker` read and `breakerGate`, and its `isCircuitTripped`/
+// `isIndeterminate` closures really do route every consultation through
+// `evaluateDispatchBreakerCorroborated` against the real ledger -- not just the pure function
+// exercised in isolation above. Uses drainCommand's own documented `runDrain` seam ("a test
+// passes a stub that captures the wired DrainDeps and returns immediately, so the dep object
+// drainCommand actually builds ... is provable without spawning a real, unbounded drain") to
+// call the real closures directly, with zero plan tasks, zero locks contended, and zero spawns.
+
+const OFFLINE_GITHUB_EMPTY_OPEN: GitHub = {
+  prByRef: () => null,
+  findMergedByTrailer: () => null,
+  headRefName: () => undefined,
+  prBody: () => undefined,
+  listOpenHeadBranches: () => [], // a SUCCESSFUL read naming no branches at all
+};
+
+test("drainCommand wiring: the real isCircuitTripped/isIndeterminate closures route through evaluateDispatchBreakerCorroborated against the real ledger", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-drain-breaker-wiring-"));
+  const planDir = mkdtempSync(join(tmpdir(), "rmd-drain-breaker-wiring-plan-"));
+  const planPath = join(planDir, "tasks.yaml");
+  writeFileSync(planPath, "[]\n"); // the stubbed runDrain below never reads plan.tasks
+  const config: Config = { claudeBin: "/bin/true", root };
+
+  const taskId = "W1-WIRING-TRIPPED";
+  mkdirSync(join(root, "state"), { recursive: true });
+  writeFileSync(join(root, "state", "ledger.ndjson"), runStartLines(taskId, 5));
+
+  let trippedResult: boolean | undefined;
+  let indeterminateResult: boolean | undefined;
+  try {
+    const code = await drainCommand([], {
+      config,
+      planPath,
+      skipGitSync: true,
+      githubFactory: () => OFFLINE_GITHUB_EMPTY_OPEN,
+      notifyChannel: { send: () => true } as never, // no real iMessage/osascript send in a test
+      runDrain: async (_plan, drainDeps): Promise<DrainSummary> => {
+        trippedResult = drainDeps.isCircuitTripped?.(taskId);
+        indeterminateResult = drainDeps.isIndeterminate?.(taskId);
+        return { attempted: [], merged: [], stopReason: "no_runnable", costUsd: 0, resumeCommand: "" };
+      },
+    });
+    assert.equal(code, 0);
+    assert.equal(
+      trippedResult,
+      true,
+      "5 real run.start lines with no pr.opened and no corroborating open branch must read tripped through the REAL breakerGateFor wiring, not just the pure function",
+    );
+    assert.equal(indeterminateResult, false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(planDir, { recursive: true, force: true });
   }
 });
