@@ -1,0 +1,123 @@
+- id: W1-T449
+  title: "a sweep arm and a hand arm are indistinguishable in the ledger — the sweep's arm dep is bare armAutoMerge (no automerge.armed line at all) and the clean-status direct merge COMPLETES a PR reporting only to stdout; give every arm/merge site one attribution line naming the PR and the lane"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: "FILED FROM feedback#fb-1784814429463-9652bd, whose PRIMARY claim was REFUTED and needs no
+    fix (see note — do not re-investigate it). What survived the investigation is the reason the
+    investigation was needed at all: nothing in the ledger says WHO armed a PR, so a hand-armed merge and
+    a sweep-armed merge read identically and cost a multi-hour audit to tell apart.
+    MEASURED FROM SOURCE IN THIS TREE, three separate holes.
+    (1) A SUCCESSFUL SWEEP ARM WRITES NO ARM LINE. The sweep's arm dep is wired as a bare call to
+    armAutoMerge (src/run-task.ts, buildSweepEffects' arm member) rather than the armAndLogOutcome wrapper
+    every other post-review lane uses. The only trace a sweep arm leaves is its sweep.disposed line
+    (src/lib/sweep.ts) with disposition mergeable and acted true; the arm OUTCOME reaches the ledger only
+    on FAILURE, folded into stand_down_reason as prose.
+    (2) THE CLEAN-STATUS DIRECT MERGE IS LEDGERLESS. attemptArm's fallback branch — the one that MERGES a
+    PR outright when GitHub refuses --auto on an already-green PR — announces itself only through deps.say
+    to stdout. A step that COMPLETES a pull request has no ledger record of any kind, which is why the
+    investigation could only establish that automerge.clean_status_direct_merge has never fired by the
+    absence of a line that could never have been written.
+    (3) THE ARM LINES THAT DO EXIST CANNOT BE FILTERED BY PR. armIfVerdictPermits and armAndLogOutcome
+    both log automerge.armed / automerge.arm_skipped carrying outcome, task_id and head_sha and NO
+    pr_number or pr_url. Independently observed from a different incident in feedback#fb-1785959546878-97abfb
+    (auto-merge armed on #1372: automerge.armed carries no pr_number to filter on).
+    WHY IT IS NOT COSMETIC. The GitHub side cannot substitute: enabledBy/mergedBy is the same account token
+    for a manual operator-agent arm and a sweep arm, so provenance is unrecoverable from the API too.
+    And a second consumer is already misreading the gap — lib/autonomy.ts (W1-T437) counts no automerge.armed
+    line for a task as a HUMAN TOUCH, so every sweep-armed merge is scored human-touched and the zero-touch
+    merge rate under-reports the autonomy it was built to measure.
+    NOT COVERED BY WHAT IS FILED: W1-T196 is stand-down behaviour when a task id cannot be resolved, not the
+    provenance of an arm that succeeded; W1-T424 and W1-T437 CONSUME automerge.armed and are victims of this
+    gap rather than fixes for it; feedback#fb-1784762629681-d60042 owns merge POLICY (arm toggles, attested
+    manual-merge exceptions) and needs this attribution to exist before any of it is enforceable."
+  design: |
+    ONE ATTRIBUTION LINE AT EVERY ARM AND EVERY MERGE SITE. run_id is already a field on every ledger line,
+    so the SWEEP RUN identifies itself by construction — what is missing is the PR and the LANE. Each arm or
+    direct-merge completion writes pr_number and pr_url alongside the outcome/task_id/head_sha it already
+    carries, plus a lane field naming which call site acted (sweep pass, review lane, at-open arm, operator
+    verb). A trailerless PR yields no task_id, which is exactly the case that needs the PR fields most: the
+    line must be attributable with task_id absent.
+    THE DIRECT MERGE GETS ITS OWN STEP. automerge.clean_status_direct_merge becomes a real ledger step, not
+    a say() string. That branch merges a PR; a completion event that only exists in daemon.out.log is the
+    same silence W1-T196 and the sweep stand-down work already ruled unacceptable elsewhere.
+    ONE IMPLEMENTATION, NEVER A SECOND COPY. Route the sweep's injected arm through the SHARED
+    armAndLogOutcome wrapper (extended to take the PR identity and lane) rather than adding a parallel
+    logging path inside sweep.ts. Two copies of arm-logging is precisely the drift impl-BI already had to
+    repair once, and armOutcomeArmed remains the single source of which outcomes count as an arm.
+    src/lib/sweep.ts IS THEREFORE NOT EDITED, and that is a measured claim rather than an intention:
+    SweepDeps.arm already hands the effect the whole OpenPrView — prNumber, prUrl and taskId
+    (src/lib/sweep.ts:1853) — and buildSweepEffects already holds the ledger `log` as a parameter
+    (src/run-task.ts:14194), so the entire sweep-arm rewiring is the ONE line at src/run-task.ts:14232
+    (`arm: (pr) => armAutoMerge(pr.prUrl, pr.taskId)`). Every deliverable below lives in src/run-task.ts.
+    WHERE THE TESTS GO. test/run-task.test.ts — the module-named file that already imports BOTH armAutoMerge
+    and buildSweepEffects (its import block, test/run-task.test.ts:9 and :16), already builds a real
+    buildSweepEffects harness (~:5019) and already owns the clean-status direct-merge block (~:5388-5431,
+    "armAutoMerge: a clean-status refusal COMPLETES as a direct merge"). The direct-merge criterion extends
+    that existing block rather than standing up a second, parallel fixture for the same branch.
+    ARM AND ARM-SKIP STAY DISTINCT STEPS. The step name continues to match the outcome (impl-BI): adding
+    fields must not resurrect an automerge.armed line for a refusal.
+    EXPLICITLY NOT IN SCOPE: any change to arming POLICY or to the W1-T230 ledger gate; the no-task-id
+    withhold (investigated and confirmed correct — see note); merge-policy controls, arm toggles and
+    attested manual-merge exceptions, which belong to feedback#fb-1784762629681-d60042 as their own filing;
+    back-filling attribution onto historical ledger lines; changing autonomy.ts's touch classifier (it
+    becomes correct for free once sweep arms are ledgered).
+  acceptance:
+    - claim: "the sweep's OWN arm effect — the arm member buildSweepEffects returns, driven through that adapter and not through the wrapper directly — writes an automerge.armed ledger line carrying pr_number, pr_url and a sweep lane on a successful arm, not only a sweep.disposed row"
+      proof: "unit test: test/run-task.test.ts"
+    - claim: "a sweep-lane arm line and a review-lane arm line for two different PRs are told apart from the ledger alone, with no task id on either"
+      proof: "unit test: test/run-task.test.ts"
+    - claim: "the clean-status direct merge writes an automerge.clean_status_direct_merge ledger line carrying pr_number and pr_url instead of reporting only to stdout"
+      proof: "unit test: test/run-task.test.ts"
+    - claim: "a refused arm still logs automerge.arm_skipped — the added pr/lane fields never turn a refusal into an armed line"
+      proof: "unit test: test/run-task.test.ts"
+  risk: medium
+  origin: feedback#fb-1784814429463-9652bd
+  plan_refs: ["§7B", "W1-T437", "W1-T424", "W1-T230"]
+  files: [src/run-task.ts, test/run-task.test.ts]
+  status: queued
+  attempts: 0
+  note: "THE REFUTED HALF, RECORDED SO IT IS NOT RE-INVESTIGATED. The originating feedback tested the
+    hypothesis that the clean-status direct-squash-merge path completes an unattributed PR by bypassing the
+    W1-T230 no-task-id withhold, with PR #632 (no Remudero-Task trailer, merged 2026-07-23T13:10:38Z) as the
+    exhibit. REFUTED on both axes and NO fix is warranted. CODE: the direct merge is not a separate branch —
+    it lives inside attemptArm, downstream of armAutoMerge's no-task-id return, and taskIdFromBody is
+    trailer-only with no branch-name fallback, so a trailerless PR is withheld BEFORE any arm or merge is
+    attempted; the sweep passes pr.taskId through, so the withhold gates the sweep too. ATTRIBUTION: #632
+    was a MANUAL operator-agent arm during a remediation pass, evidenced by no daemon or sweep ledger
+    activity in the window, by the sweep having only ever dispositioned #632 blocked-fixable acted=false,
+    and by an audit of all ten merges since the deploy finding #632 the only trailerless one.
+    THIS TASK IS THE RESIDUAL ONLY: the observability gap that made the misattribution possible.
+    verify:auto — every criterion is decidable over injected log/arm deps with no network; the sweep arm
+    path is already fully injectable (SweepDeps.arm) and armAndLogOutcome already takes its logger.
+    risk:medium — the change is additive fields plus one new step name in ONE module; it argues UP from low
+    only because rewiring the sweep's arm dep touches the live merge path, and DOWN because no arming
+    DECISION changes. budget_usd 45 unchanged — the scope did not move, only the files: list that described
+    it: a wrapper signature, three call sites (run-task.ts:14232 sweep arm, :1097-1105 direct merge,
+    :1294/:1361 the two logging sites), one new step, tests into an existing file.
+    RULE 19 / SIZING, RESOLVED BY CORRECTING files: RATHER THAN BY RAISING RISK. The first filing was
+    linted at three concerns (run-task, sweep, automerge-arm-attribution) because its files: list was wrong
+    in two ways, and both are now fixed. (a) src/lib/sweep.ts was listed but is NOT modified — SweepDeps.arm
+    already passes the whole OpenPrView and buildSweepEffects already holds `log`, so the sweep-arm rewiring
+    is one line inside run-task.ts and the design explicitly FORBIDS a second logging path in sweep.ts;
+    listing a file the task must never touch would also have handed the scope guard a licence it does not
+    need. (b) the new tests were pointed at a new test/automerge-arm-attribution.test.ts, a second concern by
+    basename; they now land in test/run-task.test.ts, the module-named file where these arm sites' tests
+    already live. What remains is one code module and its own test — one concern.
+    #588 MERITS TEST, APPLIED AND ANSWERED NO. No criterion asserts a cross-file invariant that is
+    unsatisfiable piecewise: the closest, criterion 2 (sweep lane vs review lane told apart), is a
+    cross-LANE invariant whose two lanes both live in src/run-task.ts. risk:high would therefore be
+    unearned, and Rule 19's own exemption is not a place to park a mis-drawn files: list. DECOMPOSITION was
+    considered and yields exactly this one task: every deliverable is in src/run-task.ts, so a per-subsystem
+    split would produce one piece and add a second PR contending for the same three call sites.
+    WIRING, NOT JUST BEHAVIOUR (the impl-DO lesson, applied although no src/ module is CREATED here):
+    criterion 1 is deliberately worded to be unsatisfiable by a test that calls armAndLogOutcome directly —
+    it must drive the arm member buildSweepEffects actually returns, which is the exact seam where the
+    sweep's arm dep is wired to a bare armAutoMerge today. A test proving the wrapper logs while the adapter
+    still calls the bare function is the shape of a green, unreached fix.
+    NO depends_on: armAndLogOutcome, armOutcomeArmed, SweepDeps.arm and the ledger run_id field are all on
+    main today. SIBLING SIGNAL: feedback#fb-1785959546878-97abfb reports the same missing pr_number from an
+    unrelated incident and should be closed against this task if it triages here."
