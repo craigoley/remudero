@@ -1070,12 +1070,71 @@ async function sweepLightDuringRetro(
   log: (step: string, extra?: Record<string, unknown>) => void,
   run: () => Promise<void>,
 ): Promise<void> {
-  let tickerActive = true;
+  const ticker = startInFlightTicker(deps, pollIntervalMs, log, "retro");
+  try {
+    await run();
+  } finally {
+    await ticker.stop();
+  }
+}
+
+/**
+ * THE IN-FLIGHT TICKER — the one thing that runs while the daemon is blocked on
+ * unbounded awaited work, and the ONLY writer of `daemon.alive`.
+ *
+ * WHY IT EMITS A LIVENESS ROW AND NOT MERELY A SWEEP. Every other `daemon.`-prefixed
+ * step is written when a tick CLOSES, so before this row existed "the daemon is alive"
+ * and "the daemon finished something recently" were ONE signal, and a daemon inside a
+ * long dispatch was byte-identical to a dead one. That is this repo's own
+ * cannot-observe-is-not-a-no distinction arriving as BUSY versus DEAD. MEASURED over the
+ * unioned ledger (live + all 666 gzipped rotations, 898 `daemon.iteration` rows): the
+ * window from a dispatch to the next `daemon.`-prefixed row has p50 2.4m, p75 21.2m,
+ * p90 39.5m, p95 52.5m. So 36.5% of all dispatches exceeded `fleet-heartbeat.sh`'s
+ * 600s staleness threshold and 15.9% exceeded the console's 30-minute
+ * {@link DEFAULT_LIVENESS_BOUND_MS} — both reporting a working fleet as stale or dead.
+ *
+ * WHY `daemon.`-PREFIXED, AND WHY THAT IS THE WHOLE FIX. Both liveness readers select on
+ * the PREFIX, not on a step name: `deriveLastPoll` (daemon-health.ts) takes the max `ts`
+ * over `step.startsWith("daemon.")`, and `scripts/fleet-heartbeat.sh` greps
+ * `"step":"daemon\.`. One row therefore corrects the console, the `GET /v1/daemon-health`
+ * route and the off-machine heartbeat SIMULTANEOUSLY, with no threshold moved and no
+ * second liveness rule invented — the specific way this repo has previously ended up with
+ * two surfaces documented to agree while quietly disagreeing.
+ *
+ * IT CARRIES `poll_interval_ms` BECAUSE `deriveLastPoll` READS THAT FIELD OFF THE WINNING
+ * LINE. Omitting it would make this row win the max and then silently drop the console's
+ * interval back to the injected default.
+ *
+ * IT IS LOGGED BEFORE `sweepLight()`, NOT AFTER, and that ordering is load-bearing: the
+ * row asserts "this loop is running NOW", which does not depend on the sweep's outcome. A
+ * sweep that HANGS therefore yields one last row and then silence, so a genuinely wedged
+ * daemon still goes stale on schedule — logging after the sweep would let a hung sweep
+ * suppress the very signal that should report it.
+ *
+ * THE START CONDITION IS UNCHANGED FROM W1-T254/W1-T276 — no `sweepLight`, no ticker —
+ * and that was MEASURED, not assumed. Starting it unconditionally (so liveness could not
+ * depend on an unrelated optional hook) added a `deps.sleep` call to every dispatch, and
+ * eight suites across four files count sleeps as their IDLE proxy: a ticker sleeping
+ * inside a dispatch forges evidence that the daemon idled. The coupling is therefore
+ * accepted and made explicit rather than hidden: `sweepLight` is wired unconditionally in
+ * production (`buildSweepLightHook`, run-task.ts) and that wiring already has its own
+ * guard — run-task.test.ts's "daemonCommand: builds the real daemon deps (sweep +
+ * sweepLight wiring)". A caller that omits the hook is a test, and gets no heartbeat
+ * because it is running no dispatch worth reporting on.
+ */
+function startInFlightTicker(
+  deps: DaemonDeps,
+  pollIntervalMs: number,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  phase: "dispatch" | "retro",
+): { stop: () => Promise<void> } {
+  let active = true;
   const ticker = deps.sweepLight
     ? (async () => {
-        while (tickerActive) {
+        while (active) {
           await deps.sleep(pollIntervalMs);
-          if (!tickerActive) break;
+          if (!active) break;
+          log("daemon.alive", { phase, poll_interval_ms: pollIntervalMs });
           try {
             await deps.sweepLight!();
           } catch (e) {
@@ -1084,12 +1143,14 @@ async function sweepLightDuringRetro(
         }
       })()
     : undefined;
-  try {
-    await run();
-  } finally {
-    tickerActive = false;
-    if (ticker) await ticker;
-  }
+  // Cleared on EVERY exit path by the caller; a `sweepLight()` already in flight is
+  // allowed to finish rather than aborted (unchanged from W1-T254).
+  return {
+    stop: async () => {
+      active = false;
+      if (ticker) await ticker;
+    },
+  };
 }
 
 /**
@@ -2426,28 +2487,12 @@ export async function runDaemon(
     // green-but-review-absent mid-batch re-posts within one poll interval
     // instead of sitting invisible until every lane finally returns. See
     // `DaemonDeps.sweepLight`'s doc for the full rationale.
-    let tickerActive = true;
-    const ticker = deps.sweepLight
-      ? (async () => {
-          while (tickerActive) {
-            await deps.sleep(pollIntervalMs);
-            if (!tickerActive) break;
-            try {
-              await deps.sweepLight!();
-            } catch (e) {
-              log("daemon.sweep_light.failed", { error: String((e as Error)?.message ?? e) });
-            }
-          }
-        })()
-      : undefined;
     // Cleared once every admitted lane settles, on EVERY exit path (success, a fatal
     // throw, or a degraded spawn-infra throw) — never left running past it, and never
     // aborted mid-call (a sweepLight() already in flight is allowed to finish before
-    // the ticker stops).
-    const stopTicker = async () => {
-      tickerActive = false;
-      if (ticker) await ticker;
-    };
+    // the ticker stops). It also emits this dispatch's `daemon.alive` liveness rows —
+    // see {@link startInFlightTicker} for why that row exists and why it is prefixed.
+    const stopTicker = startInFlightTicker(deps, pollIntervalMs, log, "dispatch").stop;
 
     // CONCURRENT DISPATCH (W1-T343, mirrors `runDrainLanes` exactly): `allSettled`, never
     // `all` — a sibling lane's rejection must never abort another lane already in flight;

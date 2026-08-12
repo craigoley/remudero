@@ -421,3 +421,66 @@ test("FINDING: a `date` that ACCEPTS -d but ignores it makes every beat report a
     "and a three-day-dead daemon is reported LIVE — the failure mode this records",
   );
 });
+
+// ── BUSY IS NOT DEAD: the `daemon.alive` in-dispatch liveness row ─────────────────────────────
+// THE DEFECT THIS PAIR PINS. Every other `daemon.`-prefixed step is written when a tick CLOSES,
+// so before `daemon.alive` existed the beat inferred liveness from WORK COMPLETION and a daemon
+// inside a long dispatch was byte-identical to a dead one. MEASURED on the mini (live ledger +
+// all 666 gzipped rotations, 898 `daemon.iteration` rows): the dispatch-to-next-`daemon.` window
+// runs p75 21.2m / p90 39.5m, so 36.5% of dispatches already exceeded DAEMON_STALE_AFTER_S=600
+// and read STALE while the fleet was working. Observed live: `rmd status` reported the daemon
+// RUNNING with two runs in flight while this script published `daemon STALE`.
+//
+// THE SCRIPT IS UNCHANGED BY THAT FIX, AND THAT IS THE POINT — it already selects on the PREFIX,
+// so a new `daemon.`-prefixed row corrects it, `deriveLastPoll`, and the console's
+// GET /v1/daemon-health at once, with no threshold moved and no second liveness rule invented.
+// These tests pin that contract from the reader's side so a future rename off the prefix is caught
+// here and not in production.
+//
+// BOTH DIRECTIONS, DELIBERATELY PAIRED: a change that reported "live" unconditionally would pass
+// the first test and is exactly what the second exists to catch.
+
+/** A daemon that dispatched 21 minutes ago and is STILL INSIDE that dispatch — the live case. */
+const MID_DISPATCH_LEDGER = [
+  `{"ts":"${iso(9000 * 1000)}","step":"daemon.boot","head_sha":"0123456789abcdef0123456789abcdef01234567"}`,
+  `{"ts":"${iso(21 * 60_000)}","step":"daemon.iteration","task":"W1-T409"}`,
+  `{"ts":"${iso(20 * 60_000)}","step":"run.start","task_id":"W1-T409"}`,
+  // The in-dispatch heartbeat: no tick has CLOSED, but the loop is demonstrably running.
+  `{"ts":"${iso(30_000)}","step":"daemon.alive","phase":"dispatch","poll_interval_ms":60000}`,
+];
+
+/** The SAME dispatch, with the daemon dead: the ticker stopped, so no `daemon.alive` follows. */
+const DIED_MID_DISPATCH_LEDGER = [
+  `{"ts":"${iso(9000 * 1000)}","step":"daemon.boot","head_sha":"0123456789abcdef0123456789abcdef01234567"}`,
+  `{"ts":"${iso(21 * 60_000)}","step":"daemon.iteration","task":"W1-T409"}`,
+  `{"ts":"${iso(20 * 60_000)}","step":"run.start","task_id":"W1-T409"}`,
+];
+
+test("a daemon INSIDE a long dispatch reads LIVE — the busy-versus-dead case that published a false STALE", () => {
+  const beat = runBeat({ ledger: MID_DISPATCH_LEDGER });
+  assert.equal(field(beat.published, "daemon_verdict"), "live", "a working daemon must not read STALE");
+  assert.equal(field(beat.published, "daemon_last_step"), "daemon.alive", "the in-dispatch row is what won the max");
+  assert.match(beat.stdout, /daemon live/, "and the phone-readable subject says so");
+});
+
+test("THE OTHER DIRECTION: a daemon that DIED mid-dispatch still reads STALE — the fix does not report live unconditionally", () => {
+  // Same 21-minute-old dispatch, minus the liveness row. If this ever reads `live`, the signal has
+  // become an unconditional green light, which is worse than the bug it replaced.
+  const beat = runBeat({ ledger: DIED_MID_DISPATCH_LEDGER });
+  const v = field(beat.published, "daemon_verdict");
+  assert.ok(v?.startsWith("STALE"), `a dead daemon must still read STALE, got ${v}`);
+  assert.equal(field(beat.published, "daemon_last_step"), "daemon.iteration", "the newest row is the dispatch itself");
+  assert.match(beat.stdout, /daemon STALE/, "and the subject still carries the alarm");
+});
+
+test("MUTANT: a reader that excludes daemon.alive from the prefix is caught — the whole fix rides on that prefix", () => {
+  const beat = runBeat({
+    ledger: MID_DISPATCH_LEDGER,
+    mutate: [`grep '"step":"daemon\\.' "$LEDGER"`, `grep '"step":"daemon\\.\\(idle\\|iteration\\|headroom\\)"' "$LEDGER"`],
+  });
+  const v = field(beat.published, "daemon_verdict");
+  assert.ok(
+    v?.startsWith("STALE"),
+    `dropping daemon.alive from the read must resurrect the false STALE this fix removed, got ${v}`,
+  );
+});
