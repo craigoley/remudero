@@ -2,6 +2,7 @@
   title: "every rule cites the PR that earned it and nothing measures whether it PREVENTS — a repeat-incident rate over the unioned ledger, with rules that repeat escalating to instrument proposals instead of being restated louder"
   repo: remudero
   depends_on: []
+  priority: 1
   type: implement
   verify: auto
   principles: {tdd: strict}

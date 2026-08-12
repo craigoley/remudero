@@ -2,6 +2,7 @@
   title: "the same lesson was earned three times and the same defect shape filed nine tasks because nothing at intake asks 'do we already know this' — duplicate-closure with an answerable pointer, blocking for learnings and advisory for task titles"
   repo: remudero
   depends_on: []
+  priority: 1
   type: implement
   verify: auto
   principles: {tdd: strict}
