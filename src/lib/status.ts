@@ -1082,25 +1082,97 @@ export function createDispatchBreakerCache(): DispatchBreakerCache {
  * GitHub-read failure: skip dispatch THIS tick, re-check next tick, never escalate on
  * it alone — never fold it into `isCircuitTripped`, whose `true` means "escalate now".
  */
-export function evaluateDispatchBreaker(
+/** One dispatch-breaker outcome. */
+export type DispatchBreakerState = "tripped" | "clear" | "indeterminate";
+
+/**
+ * WHAT THE BREAKER SAW, not merely that it fired (the W1-T314 gap). Until this
+ * existed, `dispatch.circuit_broken` carried `{task}` and nothing else, so a
+ * refusal and a dispatch of the SAME task nine minutes apart from the SAME
+ * daemon process (2026-08-04T15:02:25 then 15:11:51, no `pr.opened`, no kick,
+ * no rotation between) could not be reconciled from the record at all — a guard
+ * meant to bound spend keeping no account of bounding it, on a task whose runs
+ * cost $130.49.
+ *
+ * Every field is a value the decision CONSUMED, returned from the one
+ * evaluation that produced `state` — never a second call to the predicate,
+ * which could answer differently and make the row a plausible lie.
+ */
+export interface DispatchBreakerDetail {
+  /** The outcome the gate ACTED on — post-corroboration when corroboration ran. */
+  state: DispatchBreakerState;
+  /**
+   * The outcome the LEDGER alone produced, BEFORE corroboration. Kept distinct
+   * from {@link state} so "the ledger said tripped and GitHub cleared it" stays
+   * readable as the two facts it is.
+   */
+  ledgerState: DispatchBreakerState;
+  /** `dispatchesWithoutNewOwnedPr` at decision time — the count the comparison used. */
+  freshCount: number;
+  /** The bound `freshCount` was compared against. */
+  maxDispatches: number;
+  /** The cache's prior count for this task; absent on the first observation. */
+  priorCount?: number;
+  /** Whether a `pr.opened` line exists — the regression check's second term. */
+  hasNewOwnedPr: boolean;
+  /**
+   * The three-way corroboration answer. ABSENT when corroboration was never
+   * consulted (the uncorroborated entry point, or a ledger state that already
+   * settled the question) — absent and `"unreadable"` are different facts and
+   * this repo has collapsed that distinction six times this week.
+   */
+  corroboration?: "corroborated" | "not-corroborated" | "unreadable";
+}
+
+/**
+ * The core evaluator — {@link evaluateDispatchBreaker} and
+ * {@link evaluateDispatchBreakerCorroborated} are thin `.state` reads over it,
+ * so their behaviour is unchanged and every existing caller keeps working.
+ *
+ * Corroboration runs only when the caller PASSES an `openHeadBranches` key
+ * (presence, not value: `undefined` is a real answer meaning "the gateway
+ * offered no read", which `corroboratesForwardProgress` reports as
+ * `"unreadable"` — never silently as "not corroborated").
+ */
+export function evaluateDispatchBreakerDetailed(
   ledgerPath: string,
   taskId: string,
   cache: DispatchBreakerCache,
-  opts: { maxDispatches?: number; ledgerFs?: LedgerFsDeps } = {},
-): "tripped" | "clear" | "indeterminate" {
+  opts: {
+    maxDispatches?: number;
+    ledgerFs?: LedgerFsDeps;
+    openHeadBranches?: ReadonlyArray<PrRef> | null;
+  } = {},
+): DispatchBreakerDetail {
   const maxDispatches = opts.maxDispatches ?? DEFAULT_MAX_TASK_DISPATCHES;
   const ledgerFs = opts.ledgerFs ?? realLedgerFs;
   const lines = readLedgerLines(ledgerPath, ledgerFs);
   const freshCount = dispatchesWithoutNewOwnedPr(lines, taskId);
   const priorCount = cache.lastCounts.get(taskId);
   const hasNewOwnedPr = lastPrOpened(lines, taskId) !== undefined;
+  const base = { freshCount, maxDispatches, priorCount, hasNewOwnedPr };
 
   if (priorCount !== undefined && freshCount < priorCount && !hasNewOwnedPr) {
-    return "indeterminate"; // count regressed with nothing in the ledger to explain it
+    // count regressed with nothing in the ledger to explain it
+    return { ...base, state: "indeterminate", ledgerState: "indeterminate" };
   }
 
   cache.lastCounts.set(taskId, freshCount);
-  return freshCount >= maxDispatches ? "tripped" : "clear";
+  const ledgerState: DispatchBreakerState = freshCount >= maxDispatches ? "tripped" : "clear";
+  if (ledgerState !== "tripped" || !("openHeadBranches" in opts)) {
+    return { ...base, state: ledgerState, ledgerState };
+  }
+  const corroboration = corroboratesForwardProgress(opts.openHeadBranches, taskId);
+  return { ...base, ledgerState, corroboration, state: corroboration === "corroborated" ? "clear" : "tripped" };
+}
+
+export function evaluateDispatchBreaker(
+  ledgerPath: string,
+  taskId: string,
+  cache: DispatchBreakerCache,
+  opts: { maxDispatches?: number; ledgerFs?: LedgerFsDeps } = {},
+): "tripped" | "clear" | "indeterminate" {
+  return evaluateDispatchBreakerDetailed(ledgerPath, taskId, cache, opts).state;
 }
 
 /**
@@ -1165,9 +1237,18 @@ export function evaluateDispatchBreakerCorroborated(
   openHeadBranches: ReadonlyArray<PrRef> | null | undefined,
   opts: { maxDispatches?: number; ledgerFs?: LedgerFsDeps } = {},
 ): "tripped" | "clear" | "indeterminate" {
-  const state = evaluateDispatchBreaker(ledgerPath, taskId, cache, opts);
-  if (state !== "tripped") return state;
-  return corroboratesForwardProgress(openHeadBranches, taskId) === "corroborated" ? "clear" : "tripped";
+  return evaluateDispatchBreakerCorroboratedDetailed(ledgerPath, taskId, cache, openHeadBranches, opts).state;
+}
+
+/** {@link evaluateDispatchBreakerCorroborated}'s detail — the values the gate consumed. */
+export function evaluateDispatchBreakerCorroboratedDetailed(
+  ledgerPath: string,
+  taskId: string,
+  cache: DispatchBreakerCache,
+  openHeadBranches: ReadonlyArray<PrRef> | null | undefined,
+  opts: { maxDispatches?: number; ledgerFs?: LedgerFsDeps } = {},
+): DispatchBreakerDetail {
+  return evaluateDispatchBreakerDetailed(ledgerPath, taskId, cache, { ...opts, openHeadBranches });
 }
 
 /** Escape a string for literal use inside a `RegExp` (dot/hyphen-safe task ids). */
