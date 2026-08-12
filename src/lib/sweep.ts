@@ -1,5 +1,5 @@
 import { appendLedger } from "./ledger.js";
-import { readLedgerLines } from "./status.js";
+import { isMergeCreditLine, readLedgerLines } from "./status.js";
 import { loadDefaultPolicy } from "./policy.js";
 import { cappedOverrideFromLedger, decideAutoMergeArm, postedArmFactsFromLedger, REVIEW_CONTEXT } from "./review.js";
 import type { ArmDecision, CriterionVerdict } from "./review.js";
@@ -2850,9 +2850,10 @@ export interface CreditBackfillSummary {
  * counts, not only the run whose candidate is being reconciled this pass.
  */
 function hasMergeCredit(lines: Array<Record<string, unknown>>, taskId: string): boolean {
-  return lines.some(
-    (l) => l.task_id === taskId && (l.step === "verdict.merged" || (l.step === "verdict" && l.verdict === "merged")),
-  );
+  // The line-shape test is `isMergeCreditLine` (status.ts), IMPORTED not restated: the dispatch
+  // breaker's reset resets on the same fact, and two hand-maintained copies of "what a merge
+  // credit looks like" is the exact defect that let a back-credited task stay circuit-broken.
+  return lines.some((l) => l.task_id === taskId && isMergeCreditLine(l));
 }
 
 /**

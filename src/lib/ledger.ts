@@ -248,7 +248,12 @@ export const LEDGER_ROTATION_CEILING_BYTES = 4 * 1024 * 1024; // 4 MiB
  *                                              operator on every idle poll for as long as the
  *                                              queue stays starved (oper#queue-starvation-2026-08-03).
  *   - "verdict" / "verdict.merged"          → sweep.ts's hasMergeCredit — the credit-backfill
- *                                              rung's idempotence (P29(i)/W1-T149/W1-T150).
+ *                                              rung's idempotence (P29(i)/W1-T149/W1-T150) — AND
+ *                                              status.ts's dispatchesWithoutNewOwnedPr, which
+ *                                              RESETS on the same fact (both via the one shared
+ *                                              `isMergeCreditLine`). Rotating either spelling away
+ *                                              would re-strand a back-credited task as
+ *                                              circuit-broken, the W1-T377/W1-T378 shape.
  *   - "correction.provenance"               → status.ts's debunkedTrailerUrls / the
  *                                              corrections-win-supreme override (P9-iv).
  *   - "sweep.disposed"                      → sweep.ts's priorActionsFromLedger — the
