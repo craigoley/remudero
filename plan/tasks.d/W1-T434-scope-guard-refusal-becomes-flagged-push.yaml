@@ -139,4 +139,27 @@
     unit-test proof is the pure-path form against a file declared in files:. LEDGER:
     UNMEASURED (mini down) — stated where the rationale leans on cost figures. NO depends_on:
     scopeGuardOutOfScopeFiles, scopeViolationFiles, rubricAdvisorySection and the runReview
-    comment path are all on main at 07d2d65."
+    comment path are all on main at 07d2d65.
+    THE EMPTY-files: ASYMMETRY, RECORDED SO THE IMPLEMENTER DOES NOT REDISCOVER IT MID-BUILD.
+    Design (iii) sources the section from scopeViolationFiles, which returns the EMPTY list on an
+    absent or empty declared scope — deliberately, and its own doc says so in as many words:
+    DELIBERATELY DIFFERENT FROM scopeGuardOutOfScopeFiles, which returns the whole diff in that
+    same case (a task declaring nothing is not treated as declaring everything). Both re-derived
+    from source at d968c50. CONSEQUENCE: for a task declaring no files: this change is not
+    block-to-flag but block-to-LEDGER-ONLY — the scope_guard.overrun row is written and NOTHING
+    renders on the PR, clause (iii-b)'s paste-ready line included, since that line is a child of
+    the same section. THE NARROW CORRECTION, IF THE IMPLEMENTER WANTS IT: have
+    scopeAdvisorySection PREFER THE PUSH SITE'S out_of_scope when it has one, rather than
+    recomputing from scopeViolationFiles. That lets the advisory speak on the one case the review
+    side declines, and it changes scopeViolationFiles' semantics for no other PR — so it does not
+    reopen W1-T401's settlement, which design (vi) puts out of scope.
+    WHY THIS IS A NOTE AND NOT A CRITERION: IT IS LATENT. 80 of 461 tasks declare no files:, and
+    ZERO of them are dispatchable — of the 18 surviving isDispatchEligible's merge-independent
+    gates, 14 are refused by proof-dialect at assertLintClean inside runTask before any work
+    begins (so they never reach the push site at all), and the 4 that lint clean, W1-T282 through
+    W1-T285, are implemented and merged. All six no-files: shards were filed on ONE DAY,
+    2026-08-01; the 147 shards filed since then all carry files:. Nothing in the linter requires
+    the field — every use is task.files ?? [] — so a future filing can reintroduce it, which is
+    why the fact is written down rather than assumed extinct. Counts are a query, not a standing
+    number: re-run it before relying on it. (recon 2026-08-11, source-derived at d968c50; LEDGER
+    UNMEASURED, the mini is down.)"

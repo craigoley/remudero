@@ -253,6 +253,30 @@ forensic detail, so the narrative does not need to live here.
   proof verification vacuous. Always run the control
   (`--test-name-pattern "no test title matches this xyzzy"`) and require a post-filter count of 0
   before believing any match count. *(#981 — the control caught the blind discriminator, not the proofs)*
+- **A report written to `state/` is SCRATCH, not a record — land the finding in a TRACKED artifact
+  in the same session, and never let a tracked artifact rest its evidence on a `state/` path.**
+  `.gitignore`'s `state/` entry is correct and load-bearing (W1-T256: runtime exhaust the daemon
+  writes into its own tree every run; un-ignored it reads as dirt in `git status --porcelain`, which
+  pre-W1-T255 crash-looped the daemon on restart) and that directory also holds
+  `state/service-tokens.json`. So this is a PLACEMENT defect, not a gitignore one — do not propose
+  un-ignoring it. On the mini a report there is merely local; **in a cloud container it is
+  destruction**, because nothing syncs it and the container is reclaimed. MEASURED at d968c50: **29
+  distinct `state/*.md` paths are cited across 43 tracked files** — `CLAUDE.md`, `MASTER-PLAN.md`,
+  `DECISIONS.md`, `deploy/Dockerfile`, five modules under `src/`, five suites, ~26 shards and five
+  `plan/feedback/` records — and **all 29 are absent from a fresh checkout**, so every one is a
+  pointer no worker can follow. A session already re-derived a whole finding from scratch after
+  `state/recon-retro-test-github-calls.md` turned out not to exist. The durable homes that already
+  work: the PR body, the shard's own `rationale`/`note`, and `plan/feedback/` — which is tracked AND
+  has a landing mechanism (`landFeedback`, `src/lib/feedback-landing.ts`) that rebuilds from
+  origin/main and pushes, so it survives the container by construction. **Nothing in this repo tells
+  a session where to write a report** — `renderReconPrompt` asks only for a REPORT in the transcript,
+  no mount doctrine mentions one, and this file's sole `state/` mention is a citation, not an
+  instruction. The convention lives only in the operator's briefs, which is why the rule has to live
+  here. THE COMPLIANT SHAPE, and this file's own state-retention bullet above is the example: it
+  CARRIES its numbers (212 live vs 912 union, `MAX_RETAINED_LINES_PER_STEP = 200`) and the
+  `state/` path is a supplementary pointer, not the evidence. *(established 2026-08-11; the rule was
+  practised and unwritten — a grep for it across CLAUDE.md, MASTER-PLAN.md and DECISIONS.md returns
+  nothing)*
 
 ## Investigation discipline
 
