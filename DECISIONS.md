@@ -890,3 +890,52 @@ W1-T343 must prove that rather than assume it.
 
 - Rollback: revert this PR — removes only this amendment, restoring the N=1 ruling above as the
   operative decision; no runtime code touched, and no ledger line written.
+
+## 2026-08-11 — W1-T413 re-dispatch: already-satisfied, no-op close
+
+- Options: (A) close as already-satisfied, no functional code change, record the closure in
+  DECISIONS.md and supply the missing `Remudero-Task: W1-T413` trailer this PR itself carries
+  (RECOMMENDED) | (B) re-touch `src/lib/status.ts` / `test/trailer-credit-plan-only.test.ts` with a
+  cosmetic edit purely to manufacture a non-empty diff against the files this task's shard
+  declares — rejected: the code and its test are already byte-identical to what the shard's design
+  specifies, so any edit there would be either a revert-in-disguise or unrelated scope creep, the
+  same objection the W1-T1/#255 precedent recorded for an equivalent forced edit.
+- Chosen (RECOMMENDED, auto): Option A — no functional code change; this entry is the audit trail.
+- Rationale: All three of this shard's acceptance claims are satisfied on `origin/main` at this
+  worktree's `HEAD` (`c530960`). `PR #1527` — "fix(status): refuse a plan-scope-only PR's trailer
+  credit so a filing cannot mark a task built", merged 2026-08-10 — added exactly the design's
+  predicate: `isPlanOnlyChangeset` (`src/lib/status.ts`) calls `isInPlanScope`
+  (`src/lib/plan-architect.ts`) rather than re-deriving plan scope, `deriveStatus`'s rung (c) gates
+  a would-be trailer credit on `planOnlyRefusal` (skipped for free via `ownsOwnRunBranch` before any
+  file-list read), a merged PR refused this way is surfaced as
+  `rejected_candidates: [{ reason: "plan-only-changeset" }]` rather than dropped, and both
+  `ghGateway` and `buildBatchedGithub` grew an optional `changedFiles(prUrl)` read that degrades to
+  "credit as today" (clause (vi)'s fail-open direction) when the gateway cannot report it or omits
+  it entirely. `PR #1567` — "fix(review): the plan-only arm reads what the shorthand modifies, not
+  its sentence", merged 2026-08-11 — is a narrower follow-on to `src/lib/review.ts`'s unrelated
+  body-vs-diff contradiction check and does not change `status.ts`'s logic. `npx tsx --test
+  test/trailer-credit-plan-only.test.ts` (run outside this sandbox — `tsx --test`'s own IPC pipe
+  hits `EPERM` inside it, a sandbox restriction unrelated to the suite) passes 17/17, covering all
+  three claims by name: "a merged plan-only PR no longer credits its trailered task, and names
+  plan-only-changeset as the reason" (claim 1), "a merged PR touching a path outside plan scope
+  still credits, so the fix cannot strand real work" (claim 2), and "a gateway that cannot report
+  changed files still credits, so a read failure never un-merges finished work" (claim 3). `git
+  status --porcelain` was empty and this worktree's `HEAD` matched `origin/main` before this commit
+  — there is no diff to make against `src/lib/status.ts` or its test.
+  What is NOT already true, and is the actual reason this worktree was dispatched: neither #1527's
+  nor #1567's PR body carries the literal `Remudero-Task: W1-T413` line — #1527's `gh pr view
+  --json body` text mentions "W1-T413" only in prose (never as its own `Remudero-Task: W1-T413`
+  line; that exact line lives only in the squash-merge COMMIT message, which
+  `deriveStatus`/`findMergedByTrailer`'s `gh pr list --search '"Remudero-Task: W1-T413" in:body'`
+  never reads), and #1567's body says so explicitly ("No `Remudero-Task:` trailer, deliberately").
+  Confirmed live: `gh pr list --repo craigoley/remudero --state merged --search '"Remudero-Task:
+  W1-T413" in:body'` returns `[]`. So the fix this task describes is fully built and tested, but no
+  merged PR has ever anchored the credit — the task reads `source: "none"`, never `"trailer"`, and
+  stays dispatchable forever without one. This PR supplies that missing anchor: pushed from this
+  worktree's own `run-W1-T413-1786505609224` branch, `ownsOwnRunBranch` credits it on sight (the
+  same free pre-filter #1527 added), regardless of `DECISIONS.md` not being in `isInPlanScope`'s
+  scope either way. Precedent: W1-T7/#772, W1-T12a/#725, W1-T99/#731, W1-T262/#946, W1-T201/#993,
+  and W1-T254's five closures (#1007, #1012, #1013, #1015, #1016). Neither the shard's `status:`
+  field nor its `acceptance:` block is touched — `status:` is decorative/never machine-rewritten
+  (`plan/tasks.yaml`'s own header) and `satisfied_by` is Architect-only (Standing rule 15).
+- Rollback: revert this PR — removes only this DECISIONS.md entry; no runtime code touched.
