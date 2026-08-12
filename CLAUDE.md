@@ -213,28 +213,34 @@ forensic detail, so the narrative does not need to live here.
 
 ## Ledger and evidence discipline
 
-- **The archives are GZIPPED, so `ledger.*.ndjson` matches ZERO files and answers from the live file
-  alone — SILENTLY. Use `zgrep` over `ledger.*.ndjson.gz` PLUS the live file, and prove the archives
-  were read.** Every rotation is `state/ledger.<ts>.ndjson.gz` (666 of them; `find` returns **zero**
-  uncompressed rotations), so the long-standing `grep -h … state/ledger.*.ndjson state/ledger.ndjson`
-  idiom is broken in the worst way: under `bash` the non-matching glob passes through literally,
-  `grep` fails on it into `2>/dev/null`, and you get a live-file-only number that looks right. Under
-  `zsh` it errors outright. Measured the same night, same pattern: `run.start` reads **223 live and
-  696 over the union — a 3.1x undercount**; `dispatch.indeterminate` reads **0 live**. THE ONLY
-  SANCTIONED FORM, which also streams and never materialises a union to a file:
-  `zgrep -h '<pat>' state/ledger.*.ndjson.gz state/ledger.ndjson | sort -u`.
-  **Run a POSITIVE CONTROL that proves an ARCHIVE matched, not merely that the count is non-zero** —
-  a live-only answer is non-zero too, which is exactly why this went unnoticed.
-  **Nothing in `src/` reads or writes `.gz`** (zero matches across `src/` and `scripts/`), and
-  `readLedgerLines` (`status.ts`) opens exactly ONE path — no glob, no `readdir` — so no shipped
-  code unions anything; the union is always yours to build.
+- **The rotations come in TWO FORMS and every glob that names only one answers SILENTLY WRONG. The
+  union is three patterns, never two:**
+  `zgrep -h '<pat>' state/ledger.*.ndjson.gz state/ledger.*.ndjson state/ledger.ndjson | sort -u`.
+  `zgrep` reads plain input transparently (MEASURED: 223 hits on an uncompressed rotation), so the
+  fix is always THE GLOB, never the tool. MEASURED POPULATION at 2026-08-12: **666 `.gz`, 3 plain,
+  1 live** — and the `.gz` half STOPS at `2026-08-05T10-56-55Z`. `datedArchivePath`
+  (`src/lib/ledger.ts`) returns `<base>.<stamp>.ndjson` and **nothing in the repo runs `gzip`**, so
+  PLAIN IS WHAT THE CODE WRITES and the `.gz` corpus is out-of-band compression that has not run
+  since. Expect the plain half to grow; never assume either half is empty.
+  **Both one-sided globs are live defects, in OPPOSITE directions**: the sanctioned-until-now
+  `.gz`-only form hid **34,861 rows (8.3% of the corpus), every row rotated out since
+  2026-08-05T10:56:55Z** — mostly `board_gateway.*` and `sweep.*`; and `ledger.*.ndjson` alone
+  misses all 666 `.gz`. **`src/` HAS THE SAME BUG BOTH WAYS** — `ledgerGrepUnion`
+  (`src/lib/ledger-grep.ts`, behind `rmd ledger-grep`) filters `.endsWith(".ndjson.gz")`, while
+  `ledgerCorpusFiles` (`run-task.ts`) filters `.endsWith(".ndjson")`. Neither sees the whole corpus,
+  so **`rmd ledger-grep` is NOT a safe substitute for the three-pattern form** until fixed.
+  **THE CONTROL MUST PROVE EACH FORM WAS READ, and a raw cross-archive count CANNOT** — rotations
+  duplicate heavily, so `run.start` reads **257,438 raw lines across the `.gz` alone but only 779
+  distinct over the full union**: a control like that stays six figures while a whole form is
+  missed, which is exactly how this survived. Control by FILE COUNT PER FORM (`ls` each pattern,
+  require every non-empty form to be non-zero), or by a per-form match count.
   **And the archives are NOT cumulative snapshots.** `rotateLedger` keeps only
-  `MAX_RETAINED_LINES_PER_STEP = 200` newest per step and archives the rest ("Newest-N survive;
-  older ones archive"), so **63% of `run.start` history exists ONLY in older archives** — deleting
-  any of them destroys unique data, and the newest archive does not subsume the others.
+  `MAX_RETAINED_LINES_PER_STEP = 200` newest per step and archives the rest, so most history exists
+  ONLY in older archives — deleting any destroys unique data and the newest subsumes nothing.
   Claims of the form "N occurrences", and especially "zero in the entire history", are unsupportable
-  without the archives. *(recon-AE §0 — 212 live vs 912 union; re-derived 2026-08-05,
-  `state/recon-state-retention.md`)*
+  without every form. *(recon-AE §0; re-derived 2026-08-05, and CORRECTED 2026-08-12 after the
+  `.gz`-only idiom returned a silent **0** for a pattern with 3 real hits — its own positive control
+  passing at 257k the whole time)*
 - **A new ledger step that any DECISION reads must be added to `DECISION_RELEVANT_LEDGER_STEPS`
   (`src/lib/ledger.ts`) in the same PR.** `priorActionsFromLedger` enforces `ABSENT_REPUSH_CAP` by
   COUNTING `sweep.absent_repush` lines, so a rotation archiving them resets the count to zero and
@@ -310,8 +316,9 @@ forensic detail, so the narrative does not need to live here.
   that delivered nothing, and a check-wait bound where 21 of 21 booked PRs later merged.
   *(W1-T312, W1-T380/#1392, W1-T382/#1401)*
 - **A ZERO IS NOT A MEASUREMENT UNTIL A POSITIVE CONTROL PROVES THE QUERY COULD SEE ITS CORPUS —
-  TWO TOOLS HERE ANSWER WRONG INSTEAD OF ERRORING.** Both were caught by a control; neither was
-  caught by reading the query.
+  THREE THINGS HERE ANSWER WRONG INSTEAD OF ERRORING.** Each was caught by a control; none was
+  caught by reading the query. **And (c) is the warning about the other two: A CONTROL THAT PROVES
+  THE CORPUS IS READABLE DOES NOT PROVE THE QUERY COVERS IT.**
   **(a) `awk` is mawk and SILENTLY IGNORES `\s` and `\b`.** Over a file containing `  let b = 2;`,
   `/^[[:space:]]+(let|const)/` matches 1 and `/^\s+(let|const)/` matches 0. Neither errors. One
   session's declaration scan used the `\s` form, reported an EMPTY declaration list and a companion
@@ -333,6 +340,14 @@ forensic detail, so the narrative does not need to live here.
   carry their NUL past that. The durable fix is to write the separator as the `\0` ESCAPE, which is
   byte-identical (proven: same string, same length, same sha256) and makes the files plain text
   again, rather than a flag every session must remember. *(2026-08-11)*
+  **(c) A GLOB THAT NAMES ONE FILE FORM ANSWERS FROM THE OTHER WITHOUT SAYING SO.** The ledger
+  union's `.gz`-only glob returned **0 hits for a pattern with 3 real hits** while its positive
+  control read 257k lines — because the control proved the `.gz` half readable and said nothing
+  about the plain half it never globbed. Under `bash` a non-matching glob passes through literally
+  and `grep` fails it into `2>/dev/null`; under `zsh` it errors. Full population, the corrected
+  three-pattern idiom and the per-form control are under "Ledger and evidence discipline" above.
+  THE GENERAL FORM: control on COVERAGE (did every form get opened?), not on READABILITY (did
+  something match?). *(2026-08-12)*
 
 ## Operating this host
 
