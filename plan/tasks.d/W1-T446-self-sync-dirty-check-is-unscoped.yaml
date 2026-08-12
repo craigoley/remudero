@@ -1,0 +1,102 @@
+- id: W1-T446
+  title: "`checkCliFreshness` refuses to self-sync on ANY non-empty `git status --porcelain`, never consulting the incoming diff — so one untracked directory stalls the operator's rmd, while the deployer's `treeFfSafe` already intersects dirty-with-incoming and would not have blinked"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: "OBSERVED TWICE ON 2026-08-12 and diagnosed while adding `.claude/` to `.gitignore`
+    (#1666, the symptom fix). Re-derived at b008e44d.
+    THE TEST, VERBATIM, and it is one line — `src/lib/self-sync.ts`:
+      `const dirty = git([\"status\", \"--porcelain\"]).trim().length > 0;`
+    Porcelain-non-empty. Untracked `??` entries count. IT NEVER CONSULTS THE INCOMING DIFF, so the
+    condition it refuses on is not the hazard it names: an untracked file cannot conflict with a
+    fast-forward unless the merge would write that same path.
+    WHAT IT COST: `git status --porcelain` in the operator checkout returned EXACTLY ONE LINE,
+    `?? .claude/` — no modified tracked files, nothing staged, empty stash — and rmd refused to
+    self-sync twice, leaving the operator's CLI on stale code:
+      `rmd is behind origin/main (f8eefb5..70d52c2) and the working tree has uncommitted changes`
+    THE DEPLOYER ALREADY DOES IT RIGHT, and reads the SAME command. `realDeployDeps.dirtyFiles`
+    is also `git status --porcelain`, but `treeFfSafe` (`src/lib/deployer.ts`) then intersects:
+      `for (const f of i.dirtyFiles) { if (!incoming.has(f)) continue; ... }`
+    A dirty path the fast-forward will not touch is SKIPPED. `.claude/` would never have conflicted
+    there. And the deployer's handling of untracked is deliberate rather than incidental:
+    `sameAsIncoming`'s doc rejects `git diff --quiet` because `it ignores UNTRACKED files entirely`,
+    and `discardLocal` branches `tracked => checkout, untracked => remove`.
+    SO THIS IS TWO SURFACES DOCUMENTED TO AGREE WHILE QUIETLY DISAGREEING — the seventh instance of
+    that shape here. Both are described as `refuse on a dirty tree`; one means ANY dirty path, the
+    other means DIRTY INTERSECT INCOMING. The difference is not tracked-vs-untracked, it is UNSCOPED
+    vs INTERSECTED, and a modified TRACKED file the incoming diff never touches stalls self-sync just
+    as surely as an untracked one.
+    THE REPO ALREADY WROTE THE FINDING DOWN WHERE NO GATE CAN ACT ON IT. `.gitignore`'s impl-EP block
+    says, of a four-byte scratch file: `Four bytes of this was on its own enough to disable auto-sync
+    (self-sync.ts's dirty check is unscoped)`. That comment has been true and unenforced since it was
+    written, and the mitigation has been to keep adding paths to `.gitignore` one incident at a time.
+    THERE ARE TWO SITES AND THEY DIFFER IN CONSEQUENCE — establish both before changing either.
+    `checkCliFreshness` REFUSES (blocking). `checkServiceFreshness` carries the identical line but
+    only feeds `emit(\"daemon.tree_dirty\", {})` in run-task.ts — a ledger row, not a refusal. Same
+    misread, different cost: a stall versus a spurious row.
+    NOT THE SAME DEFECT AS W1-T445. That one (merged, #1662) added an `off-main` refusal to the same
+    function because it moved a ref it should not have. This is the `dirty` refusal firing when
+    nothing is at risk. Opposite directions — too eager here, not eager enough there — and both live
+    in `checkCliFreshness`, so whoever builds this will be editing a function that changed today."
+  design: "(i) THE DECISION IS THE OPERATOR'S, WHICH IS WHY THIS IS `verify: human`. Relaxing a guard
+    that refuses in the safe direction is a policy call, not an engineering one. Both guards' docs
+    argue the conservative side — `treeFfSafe` says NEVER force/reset the checkout, because a
+    fast-forward over genuinely divergent uncommitted work destroys it — and the question is only
+    whether a path the merge WILL NOT WRITE belongs in that set. The evidence says it does not, and
+    the deployer already acts on that; but a session must not decide it unilaterally.
+    (ii) IF IT IS APPROVED, PREFER THE DEPLOYER'S PREDICATE OVER A SECOND SPELLING. `treeFfSafe` is
+    exported, pure (inputs in, result out), and there is NO import cycle — `self-sync.ts` imports
+    only `node:child_process` and `deployer.ts` does not import it back. The honest cost to weigh:
+    `deployer.ts` pulls `node:fs`, `node:path`, `fleet-control.js` and `ledger.js`, and self-sync
+    loads at CLI entry for EVERY verb, so importing it there widens the startup graph of the whole
+    CLI. The alternative is moving `treeFfSafe` to a smaller shared home. Two hand-maintained
+    intersections would be the third spelling of the same idea and is the one option to reject.
+    (iii) THE INCOMING FILE LIST IS ALREADY AFFORDABLE. `checkCliFreshness` has already fetched by
+    the time the dirty check runs, so `git diff --name-only HEAD..origin/main` is local — no second
+    network round trip, the same property the deployer's own comment claims for its merge.
+    (iv) DECIDE THE LOSSLESS RELAXATION SEPARATELY, and state which was implemented. The deployer
+    ALSO discards a dirty file whose bytes already equal the incoming blob
+    (`deploy.discarded_identical`, via `sameAsIncoming` hashing with `git hash-object`). That is a
+    strictly larger change than intersecting, it MUTATES the tree, and it is not needed to fix the
+    observed incident. Intersection alone is the narrow fix.
+    (v) THE SECOND SITE IS IN SCOPE ONLY AS A DECISION. `checkServiceFreshness` feeds a ledger row,
+    not a refusal, so leaving it unscoped costs a noisy `daemon.tree_dirty` rather than a stall.
+    Changing it, leaving it, or changing it to report BOTH numbers are all defensible — say which and
+    why, rather than letting it fall out of a shared edit.
+    (vi) NOT IN SCOPE — the `.gitignore` entries. `.claude/`, `ee-open.json` and `test/mutants-*/` all
+    stay: ignoring genuine scratch is right on its own merits, and this task must not be justified as
+    a reason to un-ignore anything."
+  acceptance:
+    - claim: "a dirty path the incoming fast-forward will not write no longer refuses the sync"
+      proof: "unit test: test/self-sync-dirty-scope.test.ts"
+    - claim: "a dirty path the incoming fast-forward WOULD write still refuses, with the path named"
+      proof: "unit test: test/self-sync-dirty-scope.test.ts"
+    - claim: "an untracked file whose path the incoming diff creates is treated as a conflict rather than ignored"
+      proof: "unit test: test/self-sync-dirty-scope.test.ts"
+    - claim: "the refusal still fires without a second network fetch"
+      proof: "unit test: test/self-sync-dirty-scope.test.ts"
+  risk: high
+  origin: recon#gitignore-claude-dir-2026-08-12
+  plan_refs: ["W1-T445", "W1-T79"]
+  files: [src/lib/self-sync.ts, test/self-sync-dirty-scope.test.ts, test/self-sync.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:human ON PURPOSE — `isDispatchEligible` parks it until the operator rules, because
+    design (i) is a policy question about relaxing a safety guard and no linter can settle it. Every
+    other field is filled so that a ruling is the ONLY thing missing.
+    risk:high is Rule 19's SPAN, not blast radius: `subsystemsOf` reads `files:` plus acceptance text
+    and this set crosses `src/lib` and `test/`. Raised up front.
+    `test/self-sync.test.ts` IS DECLARED AND THE REASON IS MEASURED: it drives real repos through
+    `checkCliFreshness` and asserts the `dirty` refusal, so it is the suite that moves the moment the
+    predicate is scoped. That is the FIFTH consecutive task this week where a `files:` list would
+    otherwise have omitted the suite pinning the old behaviour (W1-T442, W1-T443, W1-T444, W1-T445).
+    THE FALSIFIER MUST DRIVE REAL GIT REPOS, never a stubbed runner alone — the existing suite
+    already builds a real origin and clone and asserts HEAD ACTUALLY ADVANCED, and a scoping change
+    proven only against a fake `git` would pass while the real `status`/`diff` disagreed.
+    AND IT MUST ASSERT THE REF: a test that only checks `status !== \"refused\"` passes for an
+    implementation that permits the sync and then fails to move anything.
+    NO SHA OR COUNT HERE SHOULD BE QUOTED FORWARD — `f8eefb5..70d52c2` and the one-line porcelain
+    were true at 2026-08-12T20:00Z on the mini."
