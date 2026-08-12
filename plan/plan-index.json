@@ -158,37 +158,37 @@
     },
     {
       "heading": "10. Workstreams",
-      "line": 2779,
+      "line": 2782,
       "summary": "WS-0 — Spike — ✅ SHIPPED & MERGED (PR #1; see SHIPPED log). Ground truth in FIELD FINDING 10;"
     },
     {
       "heading": "11. Open decisions",
-      "line": 2904,
+      "line": 2907,
       "summary": "- D-1 Name — CLOSED 2026-07-14: Remudero (domains purchased). Alias `rmd`; binary `remudero` with"
     },
     {
       "heading": "12. Standing rules",
-      "line": 2976,
+      "line": 2979,
       "summary": "1. PROVENANCE OR IT DOESN'T GO IN A PROMPT."
     },
     {
       "heading": "12A. Documentation as a gated artifact, in tiers",
-      "line": 3145,
+      "line": 3148,
       "summary": "Docs are scattered (W1-T30 skeleton, W1-T39 ORIENTATION, WS-12 website) with no coherence and no anti-rot"
     },
     {
       "heading": "13. Plan-sync: the in-repo PR flow (never scp again)",
-      "line": 3179,
+      "line": 3182,
       "summary": "`MASTER-PLAN.md` and `plan/tasks.yaml` were once copied into the tree"
     },
     {
       "heading": "14. Immediate queue",
-      "line": 3189,
+      "line": 3192,
       "summary": "SETUP COMPLETE (2026-07-14) — the full inventory (repos, org settings, workspace, auth, deny-floor)"
     },
     {
       "heading": "Banked queue",
-      "line": 3213,
+      "line": 3216,
       "summary": "- Grill-me protocol as in-harness interactive intake (`rmd chat`) — post-WS-4."
     }
   ]
