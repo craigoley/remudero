@@ -429,6 +429,23 @@ export interface GitHub {
    */
   readFailureReason?(): GhFailureReason | undefined;
   /**
+   * True if the most recent read SUCCEEDED but only PARTIALLY — {@link fetchBoardPrsRest}'s walk
+   * hit its {@link BOARD_MAX_PAGES} ceiling on the open or closed half before exhausting it
+   * (W1-T415). A THIRD accessor rather than a value folded into {@link readFailed}/
+   * {@link readFailureReason}: a fetch that FAILED and a fetch that SUCCEEDED PARTIALLY are
+   * different facts, and collapsing them would recreate the exact failure/absence conflation
+   * W1-T119 exists to keep apart, one level up. Rows the walk never reaches keep their cached
+   * values and are never fabricated or altered (open-prs-rest.ts's own comment), so truncation can
+   * only OMIT rows — a task this view CREDITS is still soundly credited, and only the "no evidence"
+   * conclusion is unsound. {@link derivePrPrecedence} therefore defers on this signal in exactly
+   * the same arm it already defers on `readFailed()`, never anywhere upstream of a credit.
+   * OPTIONAL, like {@link readFailed} and {@link warm} and for the same reason — every pre-existing
+   * {@link GitHub} fixture (and the unbatched {@link ghGateway}, which has no walk and cannot
+   * truncate) predates it, so omitted ⇒ treated as `false`, the same fail-soft discipline every
+   * other optional method here already follows.
+   */
+  readTruncated?(): boolean;
+  /**
    * Resolve an escalation issue's LIVE state (+ title, for NEEDS ME's one-line ask) by its
    * `issue_url` (W1-T182) — the join that replaces trusting escalate.ts's
    * `escalation.issue_opened` ledger line as a permanent proxy for "still open" ({@link
@@ -1584,8 +1601,12 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
   // No GitHub evidence: not merged. The yaml `status:` is decorative, not trusted.
   // EXCEPT (W1-T119) when that "no evidence" is actually "GitHub could not be read" —
   // an exhausted/errored `gh` call must defer, never be reported as a confirmed
-  // not-merged (the false `source: "none"` that mis-filed W1-T116).
-  if (deps.github.readFailed?.()) {
+  // not-merged (the false `source: "none"` that mis-filed W1-T116). W1-T415: a read that
+  // SUCCEEDED but only PARTIALLY (readTruncated()) defers here too, for the identical reason —
+  // by the time execution reaches this line, every rung above has already credited anything the
+  // (possibly truncated) view DID contain, so this arm only ever catches an absence, and an
+  // absence from a partial view is exactly as unsound as one from a failed read.
+  if (deps.github.readFailed?.() || deps.github.readTruncated?.()) {
     const unavailableReason = deps.github.readFailureReason?.() ?? "unknown";
     // MONOTONIC UNDER DARKNESS (W1-T179 / W1-T155's amended criterion): a genuine gateway
     // FAILURE must never regress a previously-observed status to `queued` -- that IS the
@@ -2401,6 +2422,11 @@ export function buildBatchedGithub(
   // must not keep shadowing a later fetch that actually succeeded.
   let lastFetchFailed = false;
   let lastFetchFailureReason: GhFailureReason | undefined;
+  // W1-T415: set from `fetched.truncated` on every fetch this default `fetchAll` performs — an
+  // INJECTED `opts.fetchAll` (every unit-test fixture predating this) bypasses `fetchBoardPrsRest`
+  // entirely and so never touches this, leaving it at its initial `false`, the same omitted-⇒-
+  // false discipline `readTruncated()`'s optionality already documents.
+  let lastFetchTruncated = false;
   const run =
     opts.exec ??
     // 3rd fd is `pipe` (W1-T119), not `ignore` — same stderr-capture fix as ghGateway, so this
@@ -2441,6 +2467,12 @@ export function buildBatchedGithub(
       };
       const fetched = fetchBoardPrsRest(owner, repo, fetchJson, knownBoardPrs);
       knownBoardPrs = new Map(fetched.rows.map((r) => [r.number, r]));
+      // W1-T415: ledgered below on EVERY successful fetch already; now also RETAINED here so
+      // `readTruncated()` can surface it — a truncated view is a SUCCESS (rows) that still hit
+      // `BOARD_MAX_PAGES` on the open or closed half, distinct from `lastFetchFailed`, which the
+      // catch below sets only on a THROW. Reassigned every successful fetch, exactly like
+      // `lastFetchFailed` above, so a later untruncated refresh clears an earlier truncated one.
+      lastFetchTruncated = fetched.truncated;
       // W1-T181 design (vi): log the payload size on every SUCCESSFUL fetch, so the next
       // approach to whatever ceiling is set above is observable in advance instead of arriving
       // as a silent outage the way tonight's did. `restCalls`/`mode` are W1-T265 additions — the
@@ -2674,6 +2706,13 @@ export function buildBatchedGithub(
     readFailureReason() {
       index();
       return lastFetchFailureReason;
+    },
+    readTruncated() {
+      // Same force-a-fetch-first shape as `readFailed()` above, for the same reason: a caller
+      // that asks this FIRST (never preceded by any other method call) still reports accurately
+      // instead of trivially returning the initial `false`.
+      index();
+      return lastFetchTruncated;
     },
     issueReadFailed() {
       issueIndex();
