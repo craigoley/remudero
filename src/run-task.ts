@@ -173,6 +173,7 @@ import { loadManagedRepos, ManagedReposError } from "./lib/managed-repos.js";
 import {
   captureFeedback,
   feedbackEntryPath,
+  listFeedback,
   parseFeedbackAddArgs,
   proposeFeedbackWithSummary,
   readFeedbackEntry,
@@ -282,6 +283,14 @@ import {
   type RatifyGateway,
   type ReframeResult,
 } from "./lib/inbox.js";
+import {
+  buildFeedbackDocket,
+  feedbackDocketDue,
+  feedbackDocketLookbackWindow,
+  readFeedbackDocketMarker,
+  synthesizeFeedbackDocketProposal,
+  writeFeedbackDocketMarker,
+} from "./lib/feedback-docket.js";
 import { parseUsage, usageSnapshotFromSdk, type SdkUsageReading, type UsageSnapshot } from "./lib/headroom.js";
 import {
   assertArchitectAboveWorker,
@@ -320,7 +329,8 @@ import {
   regeneratePlanIndexFile,
 } from "./lib/plan-pr-emitter.js";
 import { appendLedger, isSpawnInfraBlockedError, LEDGER_COST_TAG_INFRA, matchesRepoScopedTask } from "./lib/ledger.js";
-import { resolveLedgerUnion } from "./lib/ledger-grep.js";
+import { gunzipSync } from "node:zlib";
+import { ledgerRotationEntries, resolveLedgerUnion, type LedgerCorpusEntry } from "./lib/ledger-grep.js";
 import { escalateRepeatingRules, ruleEfficacyReport } from "./lib/rule-efficacy.js";
 import { mineVerdictRows, verdictCalibrationReport } from "./lib/verdict-calibration.js";
 import { mineAutonomyLedgerLines, parseTrailerMerges, zeroTouchMergeRate } from "./lib/autonomy.js";
@@ -7501,16 +7511,28 @@ export function checkProofTimeoutMs(readPolicy?: () => number): number {
  *  "zero in the window" is a claim about the corpus rather than about retention. */
 const EMISSIONS_DEFAULT_DAYS = 30;
 
-/** Every `<root>/state/ledger*.ndjson` — the LIVE file AND its rotations. Reading the live file
- *  alone undercounts by roughly 4x on this host (664 files), reporting hot verbs as dead. */
-export function ledgerCorpusFiles(stateDir: string): string[] {
+/**
+ * Every ledger corpus file — BOTH rotation forms plus the live file — tagged with how to read it.
+ *
+ * W1-T444: this used to filter `n.endsWith(".ndjson")` and so matched the live file and the plain
+ * rotations while missing every `.gz`. Its old doc claimed "undercounts by roughly 4x on this host
+ * (664 files)", a figure that was true before the archives were compressed out of band and matched
+ * FOUR files by 2026-08-12 — it reached 38,744 of 418,898 distinct lines, one in eleven. The
+ * classification now comes from {@link ledgerRotationEntries}, shared with `resolveLedgerUnion`,
+ * because two hand-maintained filters that disagree IS the defect and a third would relocate it.
+ */
+export function ledgerCorpusFiles(stateDir: string): LedgerCorpusEntry[] {
   let names: string[];
   try {
     names = readdirSync(stateDir);
   } catch {
     return [];
   }
-  return names.filter((n) => n.startsWith("ledger") && n.endsWith(".ndjson")).map((n) => join(stateDir, n)).sort();
+  const live = join(stateDir, "ledger.ndjson");
+  const entries = ledgerRotationEntries(names, stateDir);
+  // The live file is not a rotation, so the shared helper excludes it by construction — appended
+  // here because THIS caller's corpus is "everything", unlike the union's "archives + live" split.
+  return names.includes("ledger.ndjson") ? [...entries, { path: live, form: "plain" as const }] : entries;
 }
 
 /**
@@ -7653,10 +7675,13 @@ export function emissionsCommand(rest: string[], opts: { stateDir?: string } = {
   // event, rather than the whole line.
   const seen = new Set<string>();
   let scanned = 0;
-  for (const file of files) {
+  for (const entry of files) {
     let text: string;
     try {
-      text = readFileSync(file, "utf8");
+      // W1-T444: the form is decided from the name by `ledgerRotationEntries`, never by trying to
+      // decompress and catching — a sniff would make a corrupt `.gz` look like a plain file.
+      const buf = readFileSync(entry.path);
+      text = (entry.form === "gzip" ? gunzipSync(buf) : buf).toString("utf8");
     } catch {
       continue;
     }
@@ -14503,6 +14528,117 @@ export function runInflightLockSweepRung(
   }
 }
 
+/**
+ * `plan/operator-notes.ndjson`, read fresh ACROSS ALL TASKS — the feedback docket's fifth
+ * capture surface (W1-T164). `loadOperatorNotesForTask` (lib/operator-notes.ts) is scoped to
+ * one task id by design (the cross-task-leakage falsifier); the docket needs every stamped note
+ * in the window regardless of which task it guides, so this reads the store directly. Mirrors
+ * `readQuestionsNdjson`'s tolerance of an absent/malformed file: a torn line is skipped, never
+ * taking out the whole read.
+ */
+function readOperatorNotesNdjson(root: string): Array<Record<string, unknown>> {
+  const path = join(root, "plan", "operator-notes.ndjson");
+  if (!existsSync(path)) return [];
+  const out: Array<Record<string, unknown>> = [];
+  for (const raw of readFileSync(path, "utf8").split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    try {
+      out.push(JSON.parse(line) as Record<string, unknown>);
+    } catch {
+      // torn/malformed line — skip it, same discipline as readQuestionsNdjson.
+    }
+  }
+  return out;
+}
+
+/**
+ * W1-T436 — the weekly feedback docket's rung. Gathers the five human-feedback capture
+ * surfaces (reframes, operator verdicts/steering notes, rejected-feedback reasons, question
+ * answers, operator notes) over a rolling 7-day lookback via {@link buildFeedbackDocket} (the
+ * ONE named deterministic gather, no LLM), then {@link synthesizeFeedbackDocketProposal} drafts
+ * AT MOST ONE candidate and this rung files it through `updateProposalRegistry` — the SAME
+ * W1-T240 single-writer helper, so the SAME NEEDS-ME/APPROVE/REFRAME console path and the SAME
+ * `approveCommand` ratification pipeline (branch, plan PR, CI, review, auto-merge arm) every
+ * other proposal already rides (design iii): ratified IN-CONSOLE, the plan PR opened and
+ * auto-merged by the harness afterwards, the operator never on GitHub.
+ *
+ * NEVER TWICE PER WEEK: {@link feedbackDocketDue} gates on a rolling-7-day marker
+ * (`state/last-feedback-docket.json`) so a 300s poll cadence does not re-fire the gather every
+ * tick — the same idempotence discipline `auto-triage.ts`'s marker applies to its own rung.
+ * EMPTY WINDOWS FILE NOTHING: `docket.empty` is ledgered and no proposal is filed — "a loop
+ * that must emit weekly manufactures drift; the no-op path is first-class" (design). Own
+ * try/catch: a read failure here must never take down the sweep composite it rides inside.
+ */
+export function runFeedbackDocketRung(
+  config: Config,
+  ledgerPath: string,
+  runId: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  deps: { root?: string; now?: () => Date; synthesize?: typeof synthesizeFeedbackDocketProposal } = {},
+): { fired: boolean } {
+  const root = deps.root ?? repoRoot;
+  const synthesize = deps.synthesize ?? synthesizeFeedbackDocketProposal;
+  try {
+    const now = deps.now?.() ?? new Date();
+    const markerPath = join(config.root, "state", "last-feedback-docket.json");
+    const marker = readFeedbackDocketMarker(markerPath);
+    if (!feedbackDocketDue(marker, now)) {
+      return { fired: false };
+    }
+
+    const window = feedbackDocketLookbackWindow(now);
+    const ledgerLines = readLedgerLines(ledgerPath);
+    const rejectedFeedback = listFeedback(root, { status: "rejected" }).map((e) => ({ id: e.id, ts: e.ts, raw: e.raw }));
+    const questionLines = readQuestionsNdjson(root);
+    const operatorNotes = readOperatorNotesNdjson(root)
+      .filter((n) => typeof n.note === "string" && typeof n.taskId === "string" && typeof n.ts === "string")
+      .map((n) => ({ ts: n.ts as string, taskId: n.taskId as string, note: n.note as string }));
+
+    const docket = buildFeedbackDocket({ ledgerLines, rejectedFeedback, questionLines, operatorNotes, window });
+    // Recorded BEFORE the file check below, deliberately — mirrors auto-triage's "record the
+    // fire first" discipline: a crash mid-file still costs one skipped week, never a re-gather
+    // storm on the next poll.
+    writeFeedbackDocketMarker(markerPath, { lastFireIso: now.toISOString() });
+
+    if (docket.items.length === 0) {
+      log("feedback_docket.empty", { window, counts_by_source: docket.countsBySource });
+      return { fired: false };
+    }
+
+    const result = synthesize(docket);
+    if (result.kind === "empty") {
+      log("feedback_docket.empty", { window, counts_by_source: docket.countsBySource });
+      return { fired: false };
+    }
+
+    const registryPath = join(config.root, "state", "inbox-proposals.json");
+    let filed = false;
+    updateProposalRegistry(registryPath, (current) => {
+      if (current.some((p) => p.id === result.candidate.id)) return null; // already filed this cycle
+      filed = true;
+      const proposal: Proposal = {
+        id: result.candidate.id,
+        summary: result.candidate.summary,
+        evidenceAnchors: result.candidate.evidenceAnchors,
+      };
+      return [...current, proposal];
+    });
+
+    log(filed ? "feedback_docket.published" : "feedback_docket.duplicate", {
+      run_id: runId,
+      proposal_id: result.candidate.id,
+      referent: result.referent,
+      consumed_count: result.consumed.length,
+      window,
+    });
+    return { fired: filed };
+  } catch (e) {
+    log("feedback_docket.error", { error: String((e as Error)?.message ?? e) });
+    return { fired: false };
+  }
+}
+
 export function runTmpSweepRung(
   log: (step: string, extra?: Record<string, unknown>) => void,
   opts: TempSweepOpts = {},
@@ -14574,6 +14710,11 @@ export function buildSweepHook(
       // above (boot-only never re-fires on a healthy long-lived daemon), and now load-bearing
       // for `deriveStatus`'s lock-based liveness disjunct. Own try/catch inside the rung.
       runInflightLockSweepRung(config, log);
+      // W1-T436 — the weekly feedback docket rung: gathers the five human-feedback capture
+      // surfaces and files at most one inbox proposal per rolling 7-day window. Own
+      // try/catch inside the rung; a `state/last-feedback-docket.json` marker keeps this a
+      // no-op on every poll but the first one due each week.
+      runFeedbackDocketRung(config, ledgerPath, runId, log);
     } catch (e) {
       log("sweep.error", { error: String((e as Error)?.message ?? e) });
     }

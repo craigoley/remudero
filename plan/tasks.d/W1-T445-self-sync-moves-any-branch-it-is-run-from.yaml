@@ -1,0 +1,102 @@
+- id: W1-T445
+  title: "`checkCliFreshness` fast-forwards WHATEVER TREE IT IS INVOKED FROM, including a session's feature branch in a worktree — its own doc names `the operator's own main checkout` as the scope and nothing enforces it, so any rmd verb can move a branch out from under the work in progress"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: "OBSERVED HAPPENING, not reasoned about. Re-derived at f8eefb55.
+    WHAT IT DID, from the reflog of the branch it moved:
+      `ba377fca run-W1-T444-1786560477@{2026-08-12 14:52:04 -0400}: merge origin/main: Fast-forward`
+      `11dcbf08 run-W1-T444-1786560477@{2026-08-12 14:47:57 -0400}: branch: Created from HEAD`
+    A session cut a feature branch in a worktree at 14:47, ran ONE rmd verb at 14:52 without the
+    guard env, and self-sync fast-forwarded that BRANCH onto origin/main — four minutes after it was
+    created and before its first commit. The session's uncommitted work survived, but the base it had
+    been measuring against silently changed mid-task.
+    THE GUARDS THAT EXIST, and the one that does not. `checkCliFreshness` (`src/lib/self-sync.ts`)
+    refuses on exactly four conditions: `SELF_SYNC_GUARD_ENV === 1`, `isCiEnv(env)`, a DIRTY working
+    tree, and a non-fast-forwardable HEAD (`merge-base --is-ancestor HEAD origin/main` failing). It
+    NEVER ASKS WHICH BRANCH IT IS ON — a grep of that module for `symbolic-ref`, `--abbrev-ref` or
+    any branch read returns nothing. Its two stated invariants are honoured (`never mutating
+    uncommitted local state`, `never merging or rebasing on your behalf`); the unstated one — never
+    move a ref that is not `main` — is the one that broke.
+    AND THE SCOPE IS ALREADY WRITTEN DOWN, one comment above the gap: `CLI-entry auto-sync is an
+    interactive-operator convenience for the operator's own \\`main\\` checkout, never CI`. The module
+    names its own scope and then accepts any directory.
+    IT ACTS ON THE CWD, NOT THE INSTALL. `run-task.ts` calls
+    `(deps.checkFreshness ?? checkCliFreshness)(repoRoot, process.env)`, and `repoRoot` is
+    `resolveRepoRoot(process.argv.slice(2), process.cwd())` — `git rev-parse --show-toplevel` of
+    wherever you stood. Inside a worktree that resolves to THE WORKTREE, so `./bin/rmd <anything>`
+    run from a feature checkout syncs that checkout.
+    THE WINDOW IS NARROW AND EXACTLY EXPLAINS THE OBSERVED CASE: the tree must be clean AND the
+    branch must have no commits of its own, because a local commit makes HEAD a non-ancestor and the
+    existing `ffPossible` check then refuses as `diverged`. So the exposure is precisely the period
+    between cutting a branch and its first commit — which is when a session is reading the base,
+    running a base-side glob, or measuring BEFORE behaviour, and is the worst moment for the base to
+    move.
+    WHY PROSE IS NOT THE FIX HERE, and this is the argument for the task. CLAUDE.md already carries
+    the rule in capitals — `Run EVERY rmd verb as RMD_SELF_SYNC_DONE=1 ./bin/rmd <verb>` — and the
+    session that tripped this had cited that rule earlier in the same session. An unenforced
+    convention that a rule-aware reader still violates is the definition of a gate that should exist
+    in code (CLAUDE.md's own preamble says so: a rule stated ONLY there can be violated silently and
+    repeatedly, and the remedy is to make something refuse it)."
+  design: "(i) REFUSE, DO NOT SILENTLY SKIP. The existing refusals return a `refused` status with a
+    `reason` and a message naming the remedy. A branch refusal belongs in that same shape — the
+    caller already prints it — so an operator standing on a feature branch is TOLD why nothing
+    synced rather than quietly getting stale behaviour. A silent skip would trade this defect for the
+    #138 incident this module exists to prevent.
+    (ii) WHAT COUNTS AS `MAY SYNC` IS THE ONE REAL DECISION, posed rather than assumed:
+      (a) HEAD IS THE BRANCH `main`. Simple, matches the module's own stated scope and the house rule
+          that the install checkout stays on main.
+      (b) THE DIRECTORY IS THE INSTALL ROOT. Narrower still, and it is the property that actually
+          matters — the whole point is keeping the daemon's own checkout fresh — but it needs a
+          reliable notion of `the install`, and `resolveRepoRoot` already falls back to the module
+          URL's root when cwd is not a work tree, so the two can be compared.
+      PREFER (a) AS THE FLOOR because it is cheap, total, and refuses every observed shape; consider
+      (b) as an ADDITIONAL condition rather than a replacement. Whoever builds this should state
+      which it implemented and why, not silently pick one.
+    (iii) DETACHED HEAD MUST BE DECIDED EXPLICITLY, not left to fall out of the branch check. A
+    detached HEAD moves no branch ref, so nothing is lost — but this repo's base-vs-head discipline
+    cuts `git checkout --detach origin/main` constantly to run a BASE-side full glob, and silently
+    advancing that HEAD would corrupt exactly that comparison. Argue it; do not let it be an
+    accident of how the check is written.
+    (iv) THE GUARD ENV STAYS THE ESCAPE HATCH and its meaning does not change. This adds a refusal;
+    it removes nothing. `SELF_SYNC_GUARD_ENV` must still short-circuit before any git call, because
+    that is what a re-exec's child sees.
+    (v) NOT IN SCOPE — changing `resolveRepoRoot`, or making rmd refuse to RUN outside the install.
+    Plenty of verbs are legitimately run from a worktree (`check-proof`, `lint-plan`, `status` are
+    used that way constantly, and the worktree's own `./bin/rmd` is the documented form). This task
+    stops the SYNC from mutating such a checkout; it does not restrict where rmd may be invoked."
+  acceptance:
+    - claim: "a clean checkout on a branch other than main is never fast-forwarded by a self-sync"
+      proof: "unit test: test/self-sync-branch-guard.test.ts"
+    - claim: "the refusal names the branch and the remedy rather than skipping silently"
+      proof: "unit test: test/self-sync-branch-guard.test.ts"
+    - claim: "a clean checkout on main that is behind still fast-forwards exactly as before"
+      proof: "unit test: test/self-sync-branch-guard.test.ts"
+    - claim: "the guard env still short-circuits before any git command is issued"
+      proof: "unit test: test/self-sync-branch-guard.test.ts"
+  risk: high
+  origin: recon#self-sync-moved-a-branch-2026-08-12
+  plan_refs: ["W1-T79", "W1-T221"]
+  files: [src/lib/self-sync.ts, test/self-sync-branch-guard.test.ts, test/self-sync.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — design (ii) leaves ONE choice open and states why (a) is the floor, which is an
+    engineering argument rather than a policy the plan withheld.
+    risk:high is Rule 19's SPAN, not blast radius: `subsystemsOf` reads `files:` plus acceptance text
+    and this set crosses `src/lib` and `test/`. Raised up front — the W1-T400/W1-T407 lesson.
+    `test/self-sync.test.ts` IS DECLARED AND THE REASON IS MEASURED, not defensive: it already
+    asserts `result.status === \"synced\"` against a fixture repo, and that fixture's branch is
+    whatever `git init` produced — so the moment a branch condition exists, that test either pins the
+    new behaviour or contradicts it. This is the FOURTH time this week a `files:` list omitted the
+    suite that pins the old behaviour (W1-T442, W1-T443, W1-T444); declaring it up front is the
+    cheapest possible correction.
+    THE FALSIFIER MUST DRIVE A REAL GIT REPO, never a stubbed `git` runner alone. The existing suite
+    already builds real local/origin fixtures and asserts HEAD ACTUALLY ADVANCED; a branch guard
+    proven only against a fake runner would pass while the real `merge --ff-only` still moved a real
+    ref — the defect one level down.
+    AND ASSERT THE REF, NOT THE STATUS. A test that only checks `status !== \"synced\"` passes for an
+    implementation that refuses and fast-forwards anyway; assert the branch's sha is UNCHANGED after
+    the call."
