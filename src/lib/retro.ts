@@ -2394,6 +2394,131 @@ export function applyContradictionResolution(
   return updated;
 }
 
+// ── Citation mining (W1-T419) ───────────────────────────────────────────────
+//
+// selectLearnings (learnings.ts) already tiebreaks on `cited` after file-relevance and layer —
+// this corpus has the RANKING half of the Stack-Overflow-shaped loop. The signal feeding it was
+// dead: entries carried hand-stamped `cited` dates from the consolidation era, and origin/main's
+// full commit history carried effectively zero `learnings#<id>` citations (2 bare-prefix hits, no
+// ids, measured at db22bd8). This section mines the two real evidence sources —
+//   (a) `learnings.injected` ledger rows' `matched_ids` (run-task.ts, this same task's design
+//       (i) — the id list sitting beside the pre-existing count) via lib/ledger-grep.ts's
+//       archive+live union, and
+//   (b) `learnings#<id>` mentions in git-log commit subjects/bodies, the citation form the
+//       rationale's `git log --format='%s%b' | grep -c 'learnings#'` measured —
+// and stamps `cited` (latest evidence date) + `cited_count` (total occurrences) onto each ACTIVE
+// entry. An id with no evidence in either source is left untouched — the budget ratchet
+// (scripts/learnings-budget-ratchet.mjs) renders that absence as `never-cited`, never as zero or
+// an omission. selectLearnings' ranking is UNCHANGED by any of this: it already reads `cited`,
+// this section only makes that field carry a measured value instead of a hand-stamped one.
+
+/** One evidence occurrence for a learning id — WHEN it was cited, regardless of source. */
+export interface CitationEvidence {
+  id: string;
+  /** ISO date (or full timestamp); only lexicographic ("latest wins") order matters. */
+  date: string;
+}
+
+/**
+ * Mine `learnings.injected` ledger rows for per-id citation evidence — one {@link
+ * CitationEvidence} per id per row's `matched_ids`. A PRE-TASK row (every row before this task
+ * shipped: it logs `matched` as a bare count with no `matched_ids` array at all) contributes
+ * NOTHING, never a throw — old-format rows are the expected majority of history, not a parse
+ * error (W1-T419 design iv's falsifier). A malformed/non-array `matched_ids`, or a non-string
+ * entry within it, is skipped the same way rather than crashing the pass.
+ */
+export function mineLedgerCitations(records: LedgerRecord[]): CitationEvidence[] {
+  const out: CitationEvidence[] = [];
+  for (const r of records) {
+    if (r.step !== "learnings.injected") continue;
+    const ids = r.matched_ids;
+    if (!Array.isArray(ids)) continue; // pre-task row (count-only) or malformed — no evidence
+    const date = typeof r.ts === "string" ? r.ts : "";
+    for (const id of ids) {
+      if (typeof id === "string" && id.length > 0) out.push({ id, date });
+    }
+  }
+  return out;
+}
+
+/**
+ * One git-log commit reduced to just what {@link mineGitLogCitations} needs — a caller resolves
+ * these from `git log --format=...` however its own environment shells out (this repo's `rmd`
+ * CLI, a retro script, or a test fixture); this module stays a PURE reducer over already-read
+ * text, the same discipline {@link parseLedger} keeps for ledger lines.
+ */
+export interface GitLogCommit {
+  date: string;
+  message: string;
+}
+
+/**
+ * Mine git-log commit messages for `learnings#<id>` citations — ONE {@link CitationEvidence} per
+ * (commit, id) pair, deduplicated WITHIN a commit so a message citing the same id twice (once in
+ * the subject, once in a body bullet) counts as one piece of evidence rather than inflating
+ * `cited_count` per mention.
+ */
+export function mineGitLogCitations(commits: GitLogCommit[]): CitationEvidence[] {
+  const out: CitationEvidence[] = [];
+  // Ids in this corpus are alphanumeric + hyphen only (no `.`/`_` — verified against every
+  // learnings/*.yaml id at filing time), so the class stops short of `.` deliberately: a
+  // sentence-ending period right after an id (`...see learnings#foo.`) must never be captured
+  // into the id itself.
+  const pattern = /learnings#([A-Za-z0-9][A-Za-z0-9-]*)/g;
+  for (const commit of commits) {
+    const ids = new Set<string>();
+    let match: RegExpExecArray | null;
+    pattern.lastIndex = 0;
+    while ((match = pattern.exec(commit.message))) ids.add(match[1]);
+    for (const id of ids) out.push({ id, date: commit.date });
+  }
+  return out;
+}
+
+/** Per-entry mined evidence, reduced: total occurrences and the latest (max, lexicographic) date. */
+export interface CitationStamp {
+  citedCount: number;
+  cited: string;
+}
+
+/**
+ * Reduce raw {@link CitationEvidence} — from any number of sources, ledger and git-log alike, the
+ * caller concatenates before calling this — into ONE {@link CitationStamp} per id: `citedCount`
+ * sums every occurrence, `cited` is the latest date seen. An id with zero evidence across all
+ * sources has no key in the returned map; {@link stampCitations} leaves such an entry's
+ * `cited`/`citedCount` exactly as it already was.
+ */
+export function aggregateCitationEvidence(evidence: CitationEvidence[]): Map<string, CitationStamp> {
+  const out = new Map<string, CitationStamp>();
+  for (const e of evidence) {
+    const prior = out.get(e.id);
+    if (!prior) {
+      out.set(e.id, { citedCount: 1, cited: e.date });
+      continue;
+    }
+    prior.citedCount += 1;
+    if (e.date > prior.cited) prior.cited = e.date;
+  }
+  return out;
+}
+
+/**
+ * Stamp mined citation evidence onto every ACTIVE entry — pure, returns a NEW array (same
+ * discipline as {@link applyContestedLifecycle}), never mutates `entries`. Only entries WITH
+ * measured evidence this cycle change; an entry absent from `evidence` keeps whatever
+ * `cited`/`citedCount` it already carried — a mining pass that simply found nothing new never
+ * blanks an entry back to unevidenced. A non-active entry (superseded/quarantined/contested) is
+ * never stamped: selectLearnings never injects it, so citation evidence for it is moot.
+ */
+export function stampCitations(entries: LearningEntry[], evidence: Map<string, CitationStamp>): LearningEntry[] {
+  return entries.map((e) => {
+    if (e.lifecycle !== "active") return e;
+    const stamp = evidence.get(e.id);
+    if (!stamp) return e;
+    return { ...e, cited: stamp.cited, citedCount: stamp.citedCount };
+  });
+}
+
 // ── The retro marker (state/last-retro.json) ──────────────────────────────
 
 export interface RetroMarker {

@@ -216,8 +216,24 @@ export interface LearningEntry {
   fact: string;
   /** Provenance of the fact (e.g. `PR#8`); recorded lineage, not the injected src. */
   src: string;
-  /** Optional ISO date last cited; recent entries win a budget tie. */
+  /**
+   * Optional ISO date last cited; recent entries win a budget tie. Historically hand-stamped at
+   * consolidation time; W1-T419's retro.ts miner (`mineLedgerCitations` + `mineGitLogCitations`
+   * + `stampCitations`) now derives it from measured evidence — a `learnings.injected` ledger
+   * row's `matched_ids` or a `learnings#<id>` git-log citation — so a growing `cited_count` (see
+   * below) backs any date this field carries going forward.
+   */
   cited?: string;
+  /**
+   * (W1-T419) Optional total count of measured citation evidence occurrences (ledger
+   * `matched_ids` rows + git-log `learnings#<id>` mentions) backing {@link cited}. Absent means
+   * no evidence has been mined for this entry yet — the budget ratchet
+   * (scripts/learnings-budget-ratchet.mjs) renders that as `never-cited`, never as zero.
+   * selectLearnings' ranking does NOT read this field (still keyed on `cited` alone); it exists
+   * so the ratchet's compression-candidate ordering can distinguish "cited once, long ago" from
+   * "cited constantly" beyond what a single date captures.
+   */
+  citedCount?: number;
 }
 
 export class LearningsError extends Error {
@@ -339,6 +355,10 @@ function parseLearningsDoc(raw: unknown, sourceLabel: string, seen: Set<string>)
       }
       layer = e.layer;
     }
+    if (e.cited_count !== undefined && (typeof e.cited_count !== "number" || !Number.isFinite(e.cited_count))) {
+      throw new LearningsError(`learnings '${id}': 'cited_count' must be a number (${sourceLabel}).`);
+    }
+    const citedCount = typeof e.cited_count === "number" ? e.cited_count : undefined;
     return {
       id,
       subsystem: typeof e.subsystem === "string" ? e.subsystem : "",
@@ -353,6 +373,7 @@ function parseLearningsDoc(raw: unknown, sourceLabel: string, seen: Set<string>)
       fact: e.fact,
       src: e.src,
       cited: typeof e.cited === "string" ? e.cited : undefined,
+      citedCount,
     };
   });
 }
