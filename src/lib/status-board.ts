@@ -214,6 +214,17 @@ export interface LastCycleSection {
   summary?: LastCycleSummary;
   ts?: string;
   ageMs?: number;
+  /**
+   * The newest `daemon.*` ledger activity STRICTLY AFTER this cycle closed, when there is any —
+   * evidence the loop kept working since. A cycle only CLOSES when the loop stops, so a healthy
+   * daemon writes no summary at all and this block would otherwise pin to the last abnormal stop
+   * and imply it was current. MEASURED across all 524 `daemon.summary` rows: 312 `blocked`, 131
+   * `error`, 56 `headroom_exhausted`, 23 `paused`, 1 `stopped`, 1 `max_reached` — NOT ONE says
+   * "completed normally", because that row does not exist.
+   */
+  supersededByTs?: string;
+  /** Age of {@link supersededByTs}, for the renderer. */
+  supersededAgeMs?: number;
   nextAction?: string;
 }
 
@@ -481,6 +492,33 @@ function deriveDaemonBoots(lines: ReadonlyArray<Record<string, unknown>>): BootI
   return { ts: bestTs, headSha: bestHeadSha, allTimestamps };
 }
 
+/**
+ * The newest `daemon.*` ledger activity strictly after `sinceTs` — prefix-matched exactly as
+ * `deriveLastPoll` (daemon-health.ts) already matches, NEVER on a step name. That prefix is why
+ * LIVENESS stayed correct through a ten-hour window in which LAST CYCLE was pinned to a stopped
+ * cycle: the two derivations read the same ledger and only one of them tracked the daemon.
+ */
+function newestDaemonActivityAfter(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  sinceTs: string | undefined,
+): string | undefined {
+  if (!sinceTs) return undefined;
+  const since = Date.parse(sinceTs);
+  if (!Number.isFinite(since)) return undefined;
+  let bestTs: string | undefined;
+  let best = -Infinity;
+  for (const line of lines) {
+    const step = typeof line.step === "string" ? line.step : undefined;
+    if (!step || !step.startsWith("daemon.")) continue;
+    const ts = typeof line.ts === "string" ? line.ts : undefined;
+    const parsed = ts ? Date.parse(ts) : NaN;
+    if (!Number.isFinite(parsed) || parsed <= since || parsed < best) continue;
+    best = parsed;
+    bestTs = ts;
+  }
+  return bestTs;
+}
+
 function deriveLastCycle(lines: ReadonlyArray<Record<string, unknown>>): { ts?: string; summary?: LastCycleSummary } {
   let bestTs: string | undefined;
   let bestParsed = -Infinity;
@@ -737,11 +775,11 @@ const LATCHES_NEXT_ACTIONS: readonly NextActionRule<LatchesSection>[] = [
 
 const LAST_CYCLE_NEXT_ACTIONS: readonly NextActionRule<LastCycleSection>[] = [
   {
-    applies: (ctx) => ctx.found && ctx.summary?.stopReason === "blocked",
+    applies: (ctx) => ctx.found && ctx.summary?.stopReason === "blocked" && !ctx.supersededByTs,
     action: (ctx) => `the last cycle stopped BLOCKED${ctx.summary?.stopDetail ? ` — ${ctx.summary.stopDetail}` : ""} — resolve the blocking task before the next cycle`,
   },
   {
-    applies: (ctx) => ctx.found && ctx.summary?.stopReason === "error",
+    applies: (ctx) => ctx.found && ctx.summary?.stopReason === "error" && !ctx.supersededByTs,
     action: (ctx) => `the last cycle stopped on an unexpected ERROR${ctx.summary?.stopDetail ? ` — ${ctx.summary.stopDetail}` : ""} — check the ledger around this run`,
   },
 ];
@@ -1198,6 +1236,11 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
     ts: lastCycleRaw.ts,
     ageMs: Number.isFinite(lastCycleTsParsed) ? Math.max(0, nowMs - lastCycleTsParsed) : undefined,
   };
+  // W1-T279 follow-up: has the daemon done anything SINCE this cycle closed? If so the cycle is
+  // history, and telling the operator to investigate it competes with the live blockers below.
+  lastCycle.supersededByTs = newestDaemonActivityAfter(lines, lastCycle.ts);
+  const supersededParsed = lastCycle.supersededByTs ? Date.parse(lastCycle.supersededByTs) : NaN;
+  lastCycle.supersededAgeMs = Number.isFinite(supersededParsed) ? Math.max(0, nowMs - supersededParsed) : undefined;
   lastCycle.nextAction = pickNextAction(LAST_CYCLE_NEXT_ACTIONS, lastCycle);
 
   // ── W1-T280 (DERIVED half) ──
@@ -1299,7 +1342,11 @@ function renderLatchesBlock(latches: LatchesSection): string[] {
 }
 
 function renderLastCycleBlock(lc: LastCycleSection): string[] {
-  const out = ["── LAST CYCLE ───────────────────────────────────────────"];
+  // "LAST CLOSED CYCLE", not "LAST CYCLE": a cycle is only written when the loop STOPS, so this
+  // row is always an ending and never the current state. The old header implied currency it
+  // never had — observed pinned to a stopped cycle for ten hours while the daemon dispatched
+  // and completed four tasks.
+  const out = ["── LAST CLOSED CYCLE ────────────────────────────────────"];
   if (!lc.found || !lc.summary) {
     out.push("no cycle recorded");
   } else {
@@ -1309,7 +1356,10 @@ function renderLastCycleBlock(lc: LastCycleSection): string[] {
     out.push(`stopped   : ${s.stopReason}${s.stopDetail ? ` — ${s.stopDetail}` : ""}`);
     out.push(`cost      : notional $${s.costUsd.toFixed(4)}`);
     out.push(`ticks     : ${s.ticks}`);
-    out.push(`age       : ${formatAgeMs(lc.ageMs)} ago`);
+    out.push(`closed    : ${formatAgeMs(lc.ageMs)} ago`);
+    if (lc.supersededByTs) {
+      out.push(`superseded: the daemon has run since — newest activity ${formatAgeMs(lc.supersededAgeMs)} ago`);
+    }
   }
   if (lc.nextAction) out.push(`next action: ${lc.nextAction}`);
   return out;
