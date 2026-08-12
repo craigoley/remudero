@@ -1,0 +1,122 @@
+- id: W1-T442
+  title: "`spawnDetachedGroup` throws `child process has no pid` and DISCARDS the error object that says why — it recurred twice on 2026-08-12 killing two runs before any worker started, and the ledger cannot say whether it was ENOENT, EAGAIN or EMFILE"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  rationale: "FOUND while reconning `rmd status`'s stale LAST CYCLE block (PR #1639, which fixed the
+    display and deliberately left this). Re-derived at a1430033.
+    THE DEFECT, quoted from source. `spawnDetachedGroup` (`src/lib/worker-containment.ts`) attaches
+    `child.on(\"error\", () => {})` and then, when `typeof child.pid !== \"number\"`, throws
+    `spawnDetachedGroup: child process has no pid (spawn failed synchronously)`. The handler exists
+    for a good reason its own comment states — a no-pid spawn still fires `error` ASYNCHRONOUSLY
+    after this function has thrown, and with no listener Node turns that into an uncaught exception
+    that would crash the daemon. But it takes no argument, so THE ERROR OBJECT IS DROPPED. The
+    errno that actually explains the failure — ENOENT, EAGAIN, EMFILE, EACCES — never reaches the
+    thrown message, the ledger, or the operator.
+    IT IS LIVE AND IT RECURRED. Union scan over 669 ledger files (`zgrep 'has no pid'`, positive
+    control: the same sweep returns 259,405 `run.start` hits from the .gz archives alone, so the
+    archives were genuinely opened): THREE rows, TWO distinct events, both on 2026-08-12 —
+    04:42:14 (W1-T414, surfaced only as a `daemon.summary` stopDetail) and 14:41:34 (W1-T431,
+    `run.error` plus its own `daemon.summary` at 14:42:17). Nothing anywhere earlier in the union.
+    NO WORKER EVER STARTED in either: this is a different class from every other failure this week,
+    which are all post-spawn.
+    WHAT IS ALREADY RULED OUT, so the work does not re-derive it:
+      - `DISABLE_AUTOUPDATER=1` IS ALREADY GRANTED to every worker (`src/lib/env.ts`, W1-T236), so
+        `the worker updated the binary under itself` is already mitigated for workers and is not a
+        live explanation on its own.
+      - `resolveClaudeExecutable` (`src/lib/worker.ts`) DOES validate before spawning — it walks
+        env override, live PATH, then the install table, checking `exists` and `canExecute`, and
+        throws `ClaudeToolchainBlockedError` rather than a raw ENOENT when nothing resolves. So a
+        no-pid spawn is NOT `the resolver never found anything`.
+    THE LEADING HYPOTHESIS, NAMED AS A HYPOTHESIS AND NOT A FINDING — because the discarded errno
+    is exactly what would confirm or kill it: `claudeExecutableCache` is a MODULE-LEVEL PER-PROCESS
+    memo (`export const claudeExecutableCache = createClaudeExecutableCache()`), and
+    `resolveClaudeExecutable` short-circuits on `cache.resolved`. A binary swapped out of band AFTER
+    the daemon's first resolution leaves a stale path cached for that process's whole life, and
+    every later spawn would fail with ENOENT and no pid. Two events ten hours apart is consistent
+    with that and equally consistent with transient resource exhaustion (EAGAIN/EMFILE). NOTHING ON
+    DISK DISTINGUISHES THEM, WHICH IS THE POINT OF THIS TASK.
+    AND HALF A REMEDY ALREADY SHIPPED. The recorded fix for the older spawn-death class was
+    `DISABLE_AUTOUPDATER=1 + retry ENOENT spawns`. Only the first half exists: a sweep of
+    `src/lib/worker.ts`, `src/lib/worker-containment.ts` and `src/run-task.ts` for ENOENT finds
+    file-walk tolerance and the toolchain-blocked error, and NO retry on the spawn path."
+  design: "(i) THE THROW CANNOT CARRY THE ERRNO, AND THE FIX MUST NOT PRETEND OTHERWISE. The
+    function's own comment already establishes the ordering: the `error` event fires AFTER the
+    throw. So there are two halves and they must not be conflated.
+      SYNCHRONOUS HALF — what IS in hand at throw time: `opts.command`, `opts.args`, `opts.cwd`,
+      and a live `exists`/`canExecute` probe of `opts.command`. That probe is one `stat` and it is
+      DECISIVE for the leading hypothesis: a cached path that no longer exists is the stale-cache
+      case, a path that exists and is executable is not. Put those on the thrown message.
+      NEVER `opts.env` — it is the billing boundary and carries credentials.
+      ASYNCHRONOUS HALF — the errno arrives later and must reach DISK, not be discarded. The
+      handler is already attached; it needs a parameter and a destination.
+    (ii) WHERE THE ASYNC ERROR SHOULD GO IS THE ONE REAL CHOICE, posed rather than assumed:
+      (a) AN OPTIONAL CALLBACK on `ContainedSpawnOptions` (`onSpawnError?: (err) => void`) that
+          `spawnWorker` wires to a ledger line. Matches the optional-dep discipline every other
+          seam here follows, keeps `worker-containment.ts` logger-free, and an omitting caller
+          behaves exactly as today.
+      (b) A MUTABLE HOLDER the caller reads after catching. Fewer moving parts, but it invites a
+          read-before-the-event race — the error may not have fired when the catch runs.
+      PREFER (a). It is the only one that is correct regardless of when the event lands, because
+      the callback fires when the error does rather than when the caller happens to look.
+    (iii) THE UNCAUGHT-EXCEPTION GUARANTEE IS LOAD-BEARING AND MUST SURVIVE. The handler is
+    attached UNCONDITIONALLY and BEFORE the pid check precisely so every path is covered. A fix
+    that moves, conditions or replaces it must keep that property, and must keep it for the
+    SUCCESS path too — a process that spawns fine can still emit `error` later. Assert it.
+    (iv) A LEDGER STEP FOR THE ERRNO, and it is NOT decision-relevant. Whatever step the callback
+    writes is diagnostic: nothing reads it, and rotation dropping it costs a post-mortem rather
+    than a wrong decision — the same argument #1629 made for `dispatch.circuit_broken`. Do not add
+    it to `DECISION_RELEVANT_LEDGER_STEPS`; `test/ledger-rotation.test.ts` re-derives that set from
+    consumers and will catch it if a future reader appears.
+    (v) NOT IN SCOPE — RETRY. The recorded remedy's second half (`retry ENOENT spawns`) is
+    deliberately excluded. Adding a retry before the errno is visible would be a bound firing on an
+    unmeasured population, which is this repo's own recurring defect (four instances: ci-gate's
+    wait cap, a deploy ceiling consumed by a dry-run, a check-wait bound where 21 of 21 booked PRs
+    merged). Make the cause visible first; the retry is a follow-up that can then be argued from
+    evidence rather than from a plausible story.
+    (vi) NOT IN SCOPE — the per-process `claudeExecutableCache`. If the errno turns out to be
+    ENOENT, invalidating or re-validating that cache is the real fix and it is a separate change to
+    a separate module. This task makes the cause legible; it does not pre-commit the remedy."
+  acceptance:
+    - claim: "a no-pid spawn names the command, the args and the cwd it attempted, and never the env"
+      proof: "unit test: test/spawn-nopid-diagnosis.test.ts"
+    - claim: "a no-pid spawn reports whether that command existed and was executable at throw time, so a vanished binary is distinguishable from a resource failure"
+      proof: "unit test: test/spawn-nopid-diagnosis.test.ts"
+    - claim: "the asynchronous spawn error's errno reaches the caller instead of being discarded"
+      proof: "unit test: test/spawn-nopid-diagnosis.test.ts"
+    - claim: "a late error event still cannot become an uncaught exception, on the success path as well as the failure path"
+      proof: "unit test: test/spawn-nopid-diagnosis.test.ts"
+  risk: high
+  origin: recon#last-cycle-stale-2026-08-12
+  plan_refs: ["W1-T236", "W1-T113", "P48"]
+  files: [src/lib/worker-containment.ts, src/lib/worker.ts, test/spawn-nopid-diagnosis.test.ts, test/worker-containment.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — nothing here needs an operator ruling. Design (ii) leaves ONE choice open and
+    states why (a) is preferred, which is an engineering argument rather than a policy the plan
+    withheld.
+    risk:high is Rule 19's SPAN, not blast radius: `subsystemsOf` reads `files:` plus acceptance
+    text and this set crosses `src/lib` and `test/`, which is >=2 subsystems and would be a sizing
+    violation at any lower band. Raised up front — the W1-T400/W1-T407 lesson. The actual change is
+    a message, a callback and one `stat`.
+    `test/worker-containment.test.ts` IS DECLARED AND THE REASON IS MEASURED, not defensive: it
+    already asserts the thrown text with `/has no pid/`, so it is the suite that goes red the
+    moment that message gains its context, and a `files:` omitting it is the refusal-at-push that
+    cost W1-T407 three dispatches. NOTE FOR WHOEVER RUNS THE GLOB: that suite is a known
+    side-flipping flake alongside the W1-T356 wiring tests — attribute by failure SET across both
+    sides, never by count.
+    THE SPAWN PATH IS LIVE. This edits the code every worker starts through, on a host running a
+    daemon. The falsifiers must drive a REAL spawn failure (a command that genuinely cannot
+    execute), never a stubbed `undefined` pid — a fabricated no-pid is indistinguishable from the
+    thing under test, which is the whole defect one level up.
+    Both new proofs are forward references to a PATH, never to a symbol: a path forward-reference is
+    safe and a symbol one is a guess, and a `grep:` proof naming an existing symbol would match the
+    merge base as well as the head and be downgraded to stale.
+    budget_usd 55 — the edit is small; the cost is the four falsifier directions, of which the
+    uncaught-exception guarantee (design iii) is the one that needs care because asserting the
+    ABSENCE of a crash requires driving the late event deliberately rather than waiting for it.
+    NO COUNT HERE SHOULD BE QUOTED FORWARD — re-run the union sweep; two events is what it was at
+    2026-08-12T15:20Z and a third would change the priority."
