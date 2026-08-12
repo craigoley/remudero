@@ -621,9 +621,33 @@ const NOOP_ASSERTION_RE =
   /assert(\.\w+)?\(\s*true\s*[),]|assert\.equal\(\s*true\s*,\s*true|expect\(\s*true\s*\)/;
 
 /**
+ * Fixture DATA under `test/fixtures/` is not test CODE, and this exclusion is
+ * load-bearing rather than tidy-minded. A corpus of PLANTED violations
+ * necessarily CONTAINS the very patterns this detector hunts — the W1-T423
+ * golden-verdict corpus ships a `diff.patch` whose payload is `assert.ok(true)`,
+ * and a `golden.yaml` whose prose QUOTES `assert(true), assert.equal(true, true),
+ * expect(true)` to explain the rule it pins. `isTestPath` matches everything
+ * under `test/`, so both read as added test code and #1613 — the PR adding that
+ * corpus — failed as theater on its own fixtures. The failure is general, not a
+ * one-off: the corpus README's growth rule asks every future judgment-changing
+ * PR to add or update a golden, so every one of them would have hit this.
+ *
+ * Excluding fixtures does not blunt the detector. Nothing under `test/fixtures/`
+ * is executed as this repository's own suite — it is input handed to a judge or
+ * an executor — so a tautology there cannot be theater in the sense this check
+ * exists to catch, which is a REAL test that asserts nothing. Test code proper,
+ * including the golden suite's own driver at `test/golden-verdicts.test.ts`, is
+ * outside `test/fixtures/` and is still scanned exactly as before.
+ */
+function isFixtureDataPath(path: string): boolean {
+  return /(^|\/)test\/fixtures\//.test(path);
+}
+
+/**
  * Detect test theater: added test code that asserts nothing (or asserts a
- * tautology). Scans only ADDED lines inside test files. Returns false when the
- * diff touches no test file (nothing to judge) or when a real assertion is added.
+ * tautology). Scans only ADDED lines inside test files, EXCLUDING fixture data
+ * (see {@link isFixtureDataPath}). Returns false when the diff touches no test
+ * file (nothing to judge) or when a real assertion is added.
  */
 export function detectTestTheater(diff: string): boolean {
   let inTestFile = false;
@@ -632,13 +656,13 @@ export function detectTestTheater(diff: string): boolean {
     // File headers (`+++ b/path`) precede their `+`-prefixed body lines.
     if (line.startsWith("+++ ")) {
       const path = line.replace(/^\+\+\+\s+(?:b\/)?/, "").trim();
-      inTestFile = isTestPath(path);
+      inTestFile = isTestPath(path) && !isFixtureDataPath(path);
       continue;
     }
     if (line.startsWith("diff --git")) {
       // A `diff --git a/x b/y` header names both paths; use the `b/` side.
       const m = line.match(/\sb\/(\S+)\s*$/);
-      inTestFile = m ? isTestPath(m[1]) : false;
+      inTestFile = m ? isTestPath(m[1]) && !isFixtureDataPath(m[1]) : false;
       continue;
     }
     if (line.startsWith("+++") || line.startsWith("---")) continue;
