@@ -240,15 +240,13 @@ function main(argv) {
     return;
   }
 
-  let result;
-  try {
-    result = checkPlanStateConsistency(masterPlanMd, knownIds);
-  } catch (err) {
-    console.error(`plan-state-claims: ${err instanceof Error ? err.message : String(err)}`);
-    process.exitCode = 1;
-    return;
-  }
-
+  // No try/catch here, unlike the two reads above: `masterPlanMd` is always a string (readFileSync
+  // succeeded with an explicit "utf8" encoding) and `knownIds` is always an array of validated,
+  // non-empty string ids (loadPlan's own parseTasksFromYaml rejects a task with a missing/blank
+  // id before this line is ever reached) -- checkPlanStateConsistency's extractors are pure
+  // string/regex operations over those two guaranteed-valid inputs and have no other failure
+  // mode to catch.
+  const result = checkPlanStateConsistency(masterPlanMd, knownIds);
   const report = renderReport(result);
   if (result.shippedExamined === 0 || result.notShippedExamined === 0 || result.contradictions.length > 0) {
     console.error(report);

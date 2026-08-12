@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 
 // ── W1-T409: PLAN-STATE SELF-CONSISTENCY gate (the offline half of W1-T392's split) ────────────
@@ -32,9 +32,13 @@ import { dirname, join } from "node:path";
 // (scripts/plan-state-claims.mjs is a plain .mjs file outside tsconfig's `include` that also
 // imports directly from .ts modules -- src/lib/plan.ts's loadPlan, src/lib/retro.ts's
 // extractAssertedUnbuiltTaskIds (W1-T410's reused extractor) -- so, mirroring
-// test/capability-snapshot.test.ts's convention for scripts/generate-capability-snapshot.mjs, it is
-// exercised here only via `spawnSync` against its CLI surface, run under `node --import tsx` the
-// same way this task's claims.yaml entry invokes it.)
+// test/capability-snapshot.test.ts's convention for scripts/generate-capability-snapshot.mjs, every
+// scenario above is exercised via `spawnSync` against its CLI surface, run under `node --import tsx`
+// the same way this task's claims.yaml entry invokes it. ONE exception: firstNotShippedLine's
+// "no citation line found" fallback has no CLI-reachable trigger -- it can only fire for an id
+// checkPlanStateConsistency already decided IS asserted not-shipped, and that decision guarantees
+// the citation text is present on some line -- so that one case imports the exported function
+// directly instead of manufacturing an unreachable CLI scenario.)
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
@@ -119,4 +123,50 @@ test("plan-state-claims: the real MASTER-PLAN.md and plan/tasks.yaml are self-co
   const output = result.stdout + result.stderr;
   assert.equal(result.status, 0, output);
   assert.match(output, /plan-state-claims: OK/);
+});
+
+test("plan-state-claims: an unreadable --master-plan path is refused with a named error, never an uncaught crash", () => {
+  const result = spawnSync(
+    process.execPath,
+    ["--import", "tsx", SCRIPT, "--master-plan", join(FIXTURES, "does-not-exist.md"), "--plan", FIXTURE_PLAN],
+    { cwd: REPO_ROOT, encoding: "utf8" },
+  );
+  const output = result.stdout + result.stderr;
+  assert.notEqual(result.status, 0, output);
+  assert.match(output, /plan-state-claims: cannot read/);
+  assert.match(output, /does-not-exist\.md/);
+});
+
+test("plan-state-claims: an unreadable --plan path is refused with a named error, never an uncaught crash", () => {
+  const result = spawnSync(
+    process.execPath,
+    [
+      "--import",
+      "tsx",
+      SCRIPT,
+      "--master-plan",
+      join(FIXTURES, "removed-assertion.md"),
+      "--plan",
+      join(FIXTURES, "does-not-exist.yaml"),
+    ],
+    { cwd: REPO_ROOT, encoding: "utf8" },
+  );
+  const output = result.stdout + result.stderr;
+  assert.notEqual(result.status, 0, output);
+  assert.match(output, /plan-state-claims: cannot load plan/);
+  assert.match(output, /does-not-exist\.yaml/);
+});
+
+test("plan-state-claims: firstNotShippedLine returns no citation when the id is never asserted not-shipped anywhere in the document", async () => {
+  const { firstNotShippedLine } = await import(pathToFileURL(SCRIPT).href);
+  const masterPlanMd = [
+    "## SHIPPED log",
+    "",
+    "- W1-T1/#1 landed.",
+    "",
+    "## Other",
+    "",
+    "Nothing here mentions the not-shipped vocabulary at all.",
+  ].join("\n");
+  assert.equal(firstNotShippedLine(masterPlanMd, "W1-T1"), undefined);
 });
