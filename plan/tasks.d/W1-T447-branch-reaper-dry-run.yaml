@@ -1,0 +1,101 @@
+- id: W1-T447
+  title: "origin accumulates branches the merge path was supposed to delete — 105 had piled up and a session purged 55 BY HAND, so add a DRY-RUN branch reaper to the sweep that reports and ledgers what it would delete and deletes nothing"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  rationale: "FOUND after a session hand-purged 55 of 105 remote branches. Re-derived at 4c259576.
+    THE GOAL IS STATED AND THIS IS PLUMBING LEAKING INTO VIEW: the harness is the product and GitHub
+    is plumbing, so a human hand-purging branches is exactly the GitHub time the fleet exists to
+    eliminate.
+    THE FLEET ALREADY DELETES BRANCHES ON THE HAPPY PATH — this is residue, not an absent feature.
+    `gh pr merge --squash --delete-branch` fires at four sites (`run-task.ts`'s auto and clean-merge
+    paths, `worker.ts`, and the sweep's `gh pr close --delete-branch`). So every accumulated branch
+    ESCAPED that path, and one already reappeared after the purge. Whatever is built must explain the
+    escape rather than only mop up after it.
+    WHAT THE 51 REMAINING BRANCHES ACTUALLY ARE (MEASURED, no PR state guessed): 46 carry NO PR and
+    unique commits, 4 are open PRs, 1 is `decisions-landing`. Of the 46: 16 touch `src/` or `test/`,
+    14 are plan-only, 15 other, 1 empty.
+    THE 16 THAT LOOK LIKE LOST WORK ARE NOT. Every task they belong to already shipped — W1-T110,
+    T136, T149, T154, T156, T167, T189, T369, T39, T46, T50 each have commits on `origin/main`
+    citing them (6 to 34 apiece). They are ABANDONED ATTEMPTS of tasks that later succeeded.
+    AND THE `THE BRANCH IS THE ONLY RECORD OF WHY IT FAILED` WORRY IS FALSIFIED, not argued away.
+    Checked on the newest of them: `run-W1-T369-1785999203554` holds ONE commit touching
+    `plan/tasks.yaml` and `test/plan-proof-debt.test.ts` — the attempt, no diagnosis. The reason
+    lives in the LEDGER (`verdict: blocked_ci` at 07:34:52, then `already_satisfied` at 09:15:41),
+    which is archived independently of any branch. A branch holds the CODE; the ledger holds the WHY.
+    FOUR BRANCHES A NAIVE SWEEP DESTROYS, and they are why this is designed rather than scripted:
+    `heartbeat` (live monitoring transport, force-pushed PARENTLESS ROOT COMMITS every five minutes,
+    referenced by `.github/workflows/fleet-heartbeat-watch.yml` and `deploy/entrypoint.sh`);
+    `decisions-landing` (a CODE CONSTANT, `DECISIONS_LANDING_BRANCH` in `feedback-landing.ts`); and
+    `diag/drain-concurrency` + `diag/drain-sequential-await` (cited by doc comments in `drain-lock.ts`,
+    `inflight-lock.ts`, `worker.ts` and `run-task.ts` as the forensic record behind those guards).
+    `feedback-landing` belongs to the same family: absent from origin today, but `LANDING_BRANCH`
+    recreates it on the next `landFeedback`."
+  design: "(i) THE SAFE-TO-DELETE PREDICATE IS THREE DISJUNCTS AND THE THIRD CARRIES THE ARGUMENT.
+    A branch is safe iff it is the head of a MERGED PR, or the head of a CLOSED-unmerged PR, or has
+    NO PR AND its tip is already an ancestor of `origin/main`. The third is the one that needs no
+    trust: `git merge-base --is-ancestor origin/<b> origin/main` succeeding means every commit
+    already exists in main, so deletion cannot lose information. MEASURED COST: 51 calls in 0.28s,
+    about 5 ms each, entirely local — no batching needed at this scale, and PR state comes from the
+    ONE batched fetch the sweep already makes.
+    (ii) PROTECTION IS DERIVABLE, AND THAT IS THE FINDING. Grepping each branch NAME across `src/`,
+    `scripts/`, `deploy/` and `.github/` returned EXACTLY the four protected branches out of 51 — no
+    misses, no false positives. A false positive is harmless anyway: it over-protects, never deletes.
+    THE RESIDUAL HOLE IS A BRANCH NAMED ONLY THROUGH A VARIABLE, which no name grep can see. So the
+    derivation is the primary signal AND a DECLARED list is kept, with a DRIFT CHECK in the
+    `ci-parity:drift` shape: a branch the grep protects that is NOT declared FAILS, rather than being
+    silently swept. Declared-only would rot — this repo has measured that shape repeatedly.
+    (iii) IT MUST START DRY-RUN AND DELETE NOTHING. Report the two lists, ledger them, exit clean.
+    The operator has four bounds that fired on healthy conditions; a fifth that deletes branches
+    would be the worst of them, and deletion is IRREVERSIBLE FROM THE FLEET'S SIDE.
+    (iv) THE MANIFEST IS WRITTEN BEFORE ANY DELETE AND MUST SURVIVE. Restoring needs the sha
+    (`git push origin <sha>:refs/heads/<name>`), so a sha->name manifest is the only thing that makes
+    a future deleting version reversible. It must NOT go to `state/`: that path is gitignored and is
+    the grave of 29 cited reports. A tracked home under `plan/` or the PR body are the two that have
+    a landing mechanism. NAME THE HOME EXPLICITLY rather than defaulting.
+    (v) THE ESCAPE IS THE SECOND HALF AND MAY BE THE REAL FIX. Establish WHY merged branches survive
+    `--delete-branch` — a PR merged in the GitHub UI without the flag is the leading candidate, and
+    one merged branch reappeared within an hour of the purge. If the escape is closable, a reaper may
+    be unnecessary for merged heads and only the no-PR residue needs sweeping.
+    (vi) NOT IN SCOPE — deleting anything, and the 46 no-PR branches. Their retention is an operator
+    ruling (see note), not a thing this task decides."
+  acceptance:
+    - claim: "a branch whose tip is already an ancestor of main is reported deletable and one with unique commits is not"
+      proof: "unit test: test/branch-reaper-dry-run.test.ts"
+    - claim: "a branch whose name appears in src or a workflow is reported protected rather than deletable"
+      proof: "unit test: test/branch-reaper-dry-run.test.ts"
+    - claim: "a protected branch missing from the declared list fails rather than being swept silently"
+      proof: "unit test: test/branch-reaper-dry-run.test.ts"
+    - claim: "the dry run deletes nothing and issues no delete call at all"
+      proof: "unit test: test/branch-reaper-dry-run.test.ts"
+  risk: high
+  origin: recon#branch-accumulation-2026-08-12
+  plan_refs: ["W1-T119", "P48"]
+  files: [src/run-task.ts, src/lib/status.ts, test/branch-reaper-dry-run.test.ts, test/sweep.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:human — TWO rulings are needed and neither is an engineering call. FIRST, whether the
+    fleet may ever delete a remote branch autonomously; this task builds only the dry run, so the
+    ruling can wait, but the second version cannot start without it. SECOND, the 46 no-PR branches:
+    the evidence says they are abandoned attempts of tasks that all shipped, and the failure
+    diagnosis is in the ledger rather than the branch, SO THE RECOMMENDATION IS TO DELETE THEM AFTER
+    A 30-DAY WINDOW MEASURED FROM LAST COMMIT — 30 days because the oldest is 29 days and the median
+    24, so a 30-day window sweeps none of today's and still drains the backlog as it ages. That is a
+    recommendation, deliberately not split down the middle, and it is the operator's to accept.
+    `test/sweep.test.ts` IS DECLARED AND THE REASON IS MEASURED, not defensive: it invokes the sweep
+    62 times (`git grep -c` on the invocation, not prose mentions), against 8 in
+    `sweep-pass-heartbeat`, 7 in `sweep-arm-parity` and 6 in `sweep-absent-repush`. It is the suite
+    that moves when the sweep gains a pass. FIVE tasks were refused at push this week for a `files:`
+    omitting exactly such a suite, and a sixth was corrected mid-flight.
+    `src/lib/status.ts` is declared because the branch-ownership predicates the reaper must reuse
+    rather than respell — `ownsBranch`, `isBareRunBranch`, `isOwnedSlugBranch` — live there, and a
+    fourth spelling of what a run branch looks like is the defect this repo keeps re-filing.
+    IT MAY BE RIGHT TO STOP AT THE REPORT. If the drift check needs hand-maintenance anyway, a
+    periodic report the operator acts on in one command still gets him out of GitHub, which is the
+    actual goal — and it is strictly safer. Whoever builds this should be willing to conclude that
+    the dry run IS the product.
+    NO COUNT HERE SHOULD BE QUOTED FORWARD — 105/55/51/46/16 and the 4 protected were true at
+    2026-08-12T22:00Z, on a repo whose branch list changes hourly. Re-measure."
