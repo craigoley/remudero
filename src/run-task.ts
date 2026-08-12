@@ -5212,8 +5212,16 @@ async function runTask(
     // block (cache-aware ordering, W1-T35) so a growing corpus can never bust
     // the cache for the stable/per-task bytes that precede it.
     const matchedLearnings = learningsResult.matchedLearnings;
+    // W1-T419: `matched_ids` sits beside the pre-existing `matched` count — `dropped` already
+    // logged ids, so a count-only `matched` was asymmetric and made per-entry injection
+    // frequency unrecoverable from the ledger. This row is deliberately NOT added to
+    // DECISION_RELEVANT_LEDGER_STEPS (lib/ledger.ts): no decision reads it, so a rotation
+    // archiving it away loses analytics (the retro-side citation miner's input), never
+    // correctness — the inverse of the #977 trap (a DECISION reading a rotated step), and the
+    // next reader should know which side of that line this row sits on before "fixing" it.
     log("learnings.injected", {
       matched: learningsResult.selectedIds.length,
+      matched_ids: learningsResult.selectedIds,
       dropped: learningsResult.droppedIds,
       budget_chars: DEFAULT_KNOWLEDGE_BUDGET_CHARS,
       global_refused_reason: learningsResult.globalRefusedReason,

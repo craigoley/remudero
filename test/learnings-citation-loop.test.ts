@@ -1,0 +1,113 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import {
+  aggregateCitationEvidence,
+  mineGitLogCitations,
+  mineLedgerCitations,
+  stampCitations,
+  type CitationEvidence,
+  type LedgerRecord,
+} from "../src/lib/retro.js";
+import type { LearningEntry } from "../src/lib/learnings.js";
+
+// ── W1-T419: the learnings corpus has votes with no voters ─────────────────────────────────────
+//
+// selectLearnings (learnings.ts) already tiebreaks on `cited` after file-relevance/layer, but the
+// signal feeding it was dead: hand-stamped dates, no ids logged at injection, and a mute ratchet
+// message on overage. This file exercises the SIGNAL half -- the miner that produces the evidence:
+//   (1) mineLedgerCitations + aggregateCitationEvidence + stampCitations (retro.ts) -- the
+//       ledger-side half of the miner, including old-format-row tolerance (design iv).
+//   (2) mineGitLogCitations (retro.ts) -- the git-log-side half.
+//
+// THE READER HALF IS DELIBERATELY NOT HERE. Design (iii) -- the budget ratchet naming its
+// least-evidenced entries as compression candidates -- lives in
+// test/learnings-ratchet-candidates.test.ts, because `scripts/learnings-budget-ratchet.mjs` is an
+// INSTRUMENT_SURFACE path and Standing rule 25 forbids one changeset from spanning it and a `src/`
+// product path. This file's changeset is the src/ half; that file's is the instrument half. See
+// that file's header for the full split rationale -- it is not organisational taste, it is the
+// gate `detectInstrumentEntanglement` enforces and `applyVerdictStability` cannot suppress.
+
+function entry(id: string, overrides: Partial<LearningEntry> = {}): LearningEntry {
+  return {
+    id,
+    subsystem: "test",
+    lifecycle: "active",
+    files: ["x"],
+    fact: `fact for ${id}`,
+    src: "test",
+    ...overrides,
+  };
+}
+
+// ── (1) mineLedgerCitations: three injections of A -> count 3; B absent ────────────────────────
+
+test("mineLedgerCitations: 3 `learnings.injected` rows carrying A in matched_ids stamp A's count 3 and leave B absent", () => {
+  const records: LedgerRecord[] = [
+    { ts: "2026-07-01T00:00:00.000Z", step: "learnings.injected", matched: 1, matched_ids: ["A"] },
+    { ts: "2026-07-05T00:00:00.000Z", step: "learnings.injected", matched: 1, matched_ids: ["A"] },
+    { ts: "2026-07-10T00:00:00.000Z", step: "learnings.injected", matched: 1, matched_ids: ["A"] },
+  ];
+  const evidence = mineLedgerCitations(records);
+  assert.equal(evidence.filter((e) => e.id === "A").length, 3);
+  assert.equal(evidence.filter((e) => e.id === "B").length, 0);
+
+  const stamps = aggregateCitationEvidence(evidence);
+  assert.deepEqual(stamps.get("A"), { citedCount: 3, cited: "2026-07-10T00:00:00.000Z" });
+  assert.equal(stamps.has("B"), false);
+
+  const entries = [entry("A"), entry("B")];
+  const stamped = stampCitations(entries, stamps);
+  const stampedA = stamped.find((e) => e.id === "A")!;
+  const stampedB = stamped.find((e) => e.id === "B")!;
+  assert.equal(stampedA.citedCount, 3);
+  assert.equal(stampedA.cited, "2026-07-10T00:00:00.000Z");
+  // B never appeared in matched_ids anywhere -- absent evidence must leave it untouched, not
+  // stamped to zero.
+  assert.equal(stampedB.citedCount, undefined);
+  assert.equal(stampedB.cited, undefined);
+});
+
+// ── (1b) old-format (pre-task) rows contribute nothing, never crash ────────────────────────────
+
+test("mineLedgerCitations: a pre-task row carrying only `matched` (no matched_ids) contributes nothing and does not throw", () => {
+  const records: LedgerRecord[] = [
+    // The shape every row before this task shipped: a bare count, no id list at all.
+    { ts: "2026-06-01T00:00:00.000Z", step: "learnings.injected", matched: 4 },
+    // A malformed matched_ids (not an array) must be tolerated the same way.
+    { ts: "2026-06-02T00:00:00.000Z", step: "learnings.injected", matched: 2, matched_ids: "not-an-array" },
+    // A row for an unrelated step must never be mistaken for injection evidence.
+    { ts: "2026-06-03T00:00:00.000Z", step: "verdict", matched_ids: ["C"] },
+  ];
+  assert.doesNotThrow(() => mineLedgerCitations(records));
+  const evidence = mineLedgerCitations(records);
+  assert.deepEqual(evidence, []);
+
+  // Stamping a corpus over zero evidence must leave every active entry exactly as it was.
+  const entries = [entry("A", { cited: "2026-01-01", citedCount: 5 }), entry("B")];
+  const stamped = stampCitations(entries, aggregateCitationEvidence(evidence));
+  assert.deepEqual(stamped, entries);
+});
+
+// ── (2) mineGitLogCitations: dedupes within a commit, unions across commits ─────────────────────
+
+test("mineGitLogCitations: `learnings#<id>` mentions in commit subject+body count once per commit, unioned across commits", () => {
+  const evidence = mineGitLogCitations([
+    { date: "2026-08-01", message: "fix(x): follow learnings#A\n\nAlso cites learnings#A again and learnings#B." },
+    { date: "2026-08-05", message: "feat(y): apply learnings#A" },
+  ]);
+  const stamps = aggregateCitationEvidence(evidence);
+  // Commit 1 cites A twice but counts once -- only commit 2's mention pushes A to 2.
+  assert.deepEqual(stamps.get("A"), { citedCount: 2, cited: "2026-08-05" });
+  assert.deepEqual(stamps.get("B"), { citedCount: 1, cited: "2026-08-01" });
+});
+
+// ── Ledger + git-log evidence union onto one stamp ──────────────────────────────────────────────
+
+test("aggregateCitationEvidence: ledger and git-log evidence for the same id combine into one stamp", () => {
+  const ledgerEvidence: CitationEvidence[] = mineLedgerCitations([
+    { ts: "2026-07-01", step: "learnings.injected", matched_ids: ["A"] },
+  ]);
+  const gitEvidence = mineGitLogCitations([{ date: "2026-08-01", message: "learnings#A" }]);
+  const stamps = aggregateCitationEvidence([...ledgerEvidence, ...gitEvidence]);
+  assert.deepEqual(stamps.get("A"), { citedCount: 2, cited: "2026-08-01" });
+});
