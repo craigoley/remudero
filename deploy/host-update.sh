@@ -97,6 +97,68 @@ REF="${REPO_REF}:${TAG}"
 # GITIGNORED and does not survive the container that wrote it — so REQ 5 in deploy/Dockerfile
 # carries the conclusions instead, and this block carries the command.
 if [ "${PRINT_DAEMON_RUN}" -eq 1 ]; then
+  # ── THE PRINTED PATH IS CHECKED BEFORE IT IS PRINTED ───────────────────────────────────────
+  # MEASURED 2026-08-12, and this is the failure being fixed: on the Azure host `${HOME}/rmd-state`
+  # holds a ledger that STOPS ON AUG 8 (100,330 bytes) while `${HOME}/rmd-state2` is live
+  # (492,406 bytes, Aug 12) — every drain this week ran `-v ~/rmd-state2:/home/node/Remudero`. The
+  # volume moved and this default did not, so the block below printed a mount, a PAUSE lever and a
+  # STOP lever all pointing at an abandoned directory. The script already warns three lines later
+  # that "a PAUSE written to the wrong path is a lever that silently does nothing"; it just never
+  # checked its own.
+  #
+  # WHY A CHECK AND NOT A NEW LITERAL. Editing `rmd-state` to `rmd-state2` fixes today and goes
+  # stale the next time the volume moves — which the comment below records has already happened
+  # ONCE. The derivation is not the bug; printing an UNVERIFIED path is. So: state what was
+  # derived, prove it holds a ledger, and when it does not, name the siblings that do. This is
+  # also the ONLY code path in this script that did not check — `${STATE_DIR}` is validated later
+  # for the disk measurement (`if [ -d "${STATE_DIR}" ]`), just never here.
+  #
+  # IT NEVER PICKS FOR YOU AND NEVER REFUSES. Silently mounting a different volume than the one
+  # printed last week is its own hazard, and a fresh host provisioning a fleet legitimately has no
+  # ledger yet — refusing there would be a bound firing on a healthy condition. Three states, the
+  # same discipline `verify-image.sh` uses for the CLI pin: PASS names the evidence, UNKNOWN says
+  # so without a verdict, and only a real disagreement is loud.
+  # PRESENCE IS NOT THE SIGNAL — FRESHNESS IS. The abandoned volume DOES hold a ledger; that is
+  # precisely why nobody noticed. `rmd-state/state/ledger.ndjson` is 100,330 bytes and stops on
+  # Aug 8, while `rmd-state2`'s is 492,406 bytes and was written Aug 12. A check that asked only
+  # "is there a ledger here" answers YES on the dead volume and stays silent — the same
+  # readable-but-not-current shape this repo has been caught by before. So the derived path is
+  # compared against its siblings, and a sibling written MORE RECENTLY is the finding.
+  state_ledger="${STATE_DIR}/state/ledger.ndjson"
+  describe_ledger() { # path -> "N bytes, YYYY-MM-DD HH:MM"
+    printf '%s bytes, %s' "$(wc -c <"$1" | tr -d ' ')" "$(date -r "$1" '+%Y-%m-%d %H:%M' 2>/dev/null || echo 'mtime unknown')"
+  }
+  # Siblings are only ever REPORTED, never chosen: silently mounting a different volume than the
+  # one printed last week is its own hazard. `${STATE_DIR}*` catches the rmd-state -> rmd-state2
+  # shape that actually happened without hardcoding either name.
+  newer_sibling=""
+  for cand in "${STATE_DIR}"*; do
+    [ "${cand}" = "${STATE_DIR}" ] && continue
+    cand_ledger="${cand}/state/ledger.ndjson"
+    [ -s "${cand_ledger}" ] || continue
+    if [ ! -s "${state_ledger}" ] || [ "${cand_ledger}" -nt "${state_ledger}" ]; then
+      newer_sibling="${cand_ledger}"
+    fi
+  done
+
+  if [ -n "${newer_sibling}" ]; then
+    if [ -s "${state_ledger}" ]; then
+      echo "host-update: WARNING — ${state_ledger} ($(describe_ledger "${state_ledger}")) is STALER than a sibling." >&2
+    else
+      echo "host-update: WARNING — ${STATE_DIR} holds no ledger at state/ledger.ndjson." >&2
+    fi
+    echo "  more recently written: ${newer_sibling} ($(describe_ledger "${newer_sibling}"))" >&2
+    echo "  THE MOUNT AND BOTH LEVERS BELOW POINT AT ${STATE_DIR}. If that is the wrong volume, the" >&2
+    echo "  PAUSE and STOP files land where nothing reads them and silently do nothing." >&2
+    echo "  Re-run with the volume you mean: RMD_STATE_DIR=<path> $0 --print-daemon-run" >&2
+  elif [ -s "${state_ledger}" ]; then
+    echo "host-update: state volume OK — ${state_ledger} ($(describe_ledger "${state_ledger}")), newest of its siblings"
+  else
+    # No ledger anywhere under this prefix. Expected while provisioning a host, so it is a NOTE
+    # rather than a warning — refusing here would be a bound firing on a healthy condition.
+    echo "host-update: NOTE — no ledger under ${STATE_DIR} or its siblings; expected on a fresh host." >&2
+  fi
+  echo
   cat <<PRINTED
 host-update: DAEMON-MODE INVOCATION — printed only. Nothing has been started and nothing was run.
 
