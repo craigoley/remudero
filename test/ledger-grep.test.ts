@@ -78,16 +78,25 @@ test("an unreadable/absent state dir reads as zero archives, never a throw", () 
   assert.equal(result.archiveCount, 0);
 });
 
-test("a corrupt archive is skipped, not a crash, and the archive count still reflects it was found", () => {
+test("a corrupt archive is not a crash, but it is REPORTED UNREAD and refuses the answer", () => {
   const dir = tmpStateDir("rmd-ledger-grep-corrupt-");
   try {
     // Not actually gzip — gunzipSync throws.
     writeFileSync(join(dir, "ledger.2026-07-01T00-00-00-000Z.ndjson.gz"), "not gzip data");
     writeFileSync(join(dir, "ledger.ndjson"), '{"ts":"2026-08-01T00:00:00.000Z","step":"run.start"}\n');
     const result = resolveLedgerUnion(dir, "run\\.start");
-    assert.equal(result.ok, true, "one archive FILE was found (and counted), even though it failed to decompress");
-    assert.equal(result.archiveCount, 1);
-    assert.equal(result.matches.length, 1, "the live file's match still comes through");
+    // W1-T444 CHANGED THIS VERDICT DELIBERATELY. It used to assert `ok === true` — one archive was
+    // FOUND, so the zero-archive test passed while its contents were silently dropped. That is
+    // partial coverage, and it is the shape this module exists to refuse: the live file's single
+    // match would have been handed back as if the archive had been read.
+    assert.equal(result.archiveCount, 1, "the file is still FOUND and counted");
+    assert.deepEqual(
+      result.unread.map((p) => p.split("/").pop()),
+      ["ledger.2026-07-01T00-00-00-000Z.ndjson.gz"],
+      "and the one that could not be opened is named",
+    );
+    assert.equal(result.ok, false, "coverage, not readability — a rotation that exists and was not read refuses the answer");
+    assert.deepEqual(result.matches, [], "a live-only count is exactly the wrong-but-plausible number this module withholds");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

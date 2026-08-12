@@ -56,7 +56,17 @@ export interface LedgerUnionResult {
   archiveCount: number;
   /** Whether `<stateDir>/ledger.ndjson` (the live file) existed and was read. */
   liveFileRead: boolean;
-  /** False when `archiveCount === 0` — the zero-archive verdict this module exists to compute. */
+  /**
+   * W1-T444: rotations that were FOUND on disk and could not be opened — a corrupt `.gz`, an
+   * unreadable file. Named separately from `archiveCount` because the two answer different
+   * questions: the count says what exists, this says what was actually read, and PARTIAL coverage
+   * is the failure the old zero-only verdict could not see.
+   */
+  unread: string[];
+  /**
+   * False when `archiveCount === 0` OR any rotation went unread. Coverage, not readability: a
+   * verdict keyed on "did anything match" stays `true` while a whole form is skipped.
+   */
   ok: boolean;
   /**
    * Deduplicated lines matching `pattern`, archives first (sorted order) then the live file.
@@ -64,6 +74,46 @@ export interface LedgerUnionResult {
    * number this module refuses to hand back; see the module doc.
    */
   matches: string[];
+}
+
+/** How a ledger corpus file is stored, decided from its NAME — see {@link ledgerRotationEntries}. */
+export type LedgerFileForm = "gzip" | "plain";
+
+/** One ledger rotation on disk: its absolute path and how to read it. */
+export interface LedgerCorpusEntry {
+  path: string;
+  form: LedgerFileForm;
+}
+
+/**
+ * THE ONE DEFINITION of "which files in a state dir are ledger rotations", owned here because this
+ * module already owns the union and `run-task.ts` already imports from it.
+ *
+ * IT REPLACES TWO HAND-MAINTAINED FILTERS THAT DISAGREED, which is the whole defect: this module
+ * matched only `.endsWith(".ndjson.gz")` and `run-task.ts`'s `ledgerCorpusFiles` matched only
+ * `.endsWith(".ndjson")`, so each read a different half and neither said so. Measured 2026-08-12
+ * over 418,898 distinct lines: `ledger-grep` reached 384,039 (missing 8.3%) and `emissions` reached
+ * 38,744 (missing 90.8% — one line in eleven). A third spelling would relocate that, so the callers
+ * share this one and differ only in how they READ each form, which is the difference that is real.
+ *
+ * ROTATIONS ONLY — the live `ledger.ndjson` is excluded, because it is never a rotation and both
+ * callers already handle it separately (it is `NEVER_ROTATE_FILENAME` for a reason).
+ *
+ * BOTH FORMS ARE LEGITIMATE AND NEITHER IS A FAULT. `datedArchivePath` (`ledger.ts`) writes
+ * `<base>.<stamp>.ndjson` and nothing in the repo runs gzip, so plain is what the code produces;
+ * the `.gz` half is out-of-band compression that last ran 2026-08-05T10-56-55Z. A reader that works
+ * only once that external pass has run is the bug, not the plain files.
+ */
+export function ledgerRotationEntries(names: string[], stateDir: string): LedgerCorpusEntry[] {
+  return names
+    .filter((n) => n.startsWith("ledger.") && n !== NEVER_ROTATE_FILENAME)
+    .map((n): LedgerCorpusEntry | undefined => {
+      if (n.endsWith(".ndjson.gz")) return { path: join(stateDir, n), form: "gzip" };
+      if (n.endsWith(".ndjson")) return { path: join(stateDir, n), form: "plain" };
+      return undefined;
+    })
+    .filter((e): e is LedgerCorpusEntry => e !== undefined)
+    .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 }
 
 /** The longest operator-supplied pattern {@link sanitizeRegExp} accepts. */
@@ -131,16 +181,14 @@ export function resolveLedgerUnion(
     // run-task.ts's `ledgerCorpusFiles`.
     names = [];
   }
-  const archiveFiles = names
-    .filter((n) => n.startsWith("ledger.") && n.endsWith(".ndjson.gz"))
-    .map((n) => join(stateDir, n))
-    .sort();
+  const rotations = ledgerRotationEntries(names, stateDir);
+  const archiveFiles = rotations.map((e) => e.path);
 
   const livePath = join(stateDir, NEVER_ROTATE_FILENAME);
   const liveFileRead = fsDeps.existsSync(livePath);
 
   if (archiveFiles.length === 0) {
-    return { stateDir, archiveFiles, archiveCount: 0, liveFileRead, ok: false, matches: [] };
+    return { stateDir, archiveFiles, archiveCount: 0, liveFileRead, unread: [], ok: false, matches: [] };
   }
 
   const seen = new Set<string>();
@@ -154,12 +202,19 @@ export function resolveLedgerUnion(
     }
   };
 
-  for (const file of archiveFiles) {
+  // W1-T444: the form is decided from the NAME, before the read, and never by trying to
+  // decompress and catching. A catch-based sniff would make a genuinely corrupt `.gz`
+  // indistinguishable from a plain file — turning the loud failure below into a silent skip,
+  // which is this defect rebuilt one level down.
+  const unread: string[] = [];
+  for (const entry of rotations) {
     try {
-      addMatchingLines(fsDeps.gunzipSync(fsDeps.readFileSync(file)).toString("utf8"));
+      const buf = fsDeps.readFileSync(entry.path);
+      addMatchingLines((entry.form === "gzip" ? fsDeps.gunzipSync(buf) : buf).toString("utf8"));
     } catch {
-      // A corrupt/unreadable archive is skipped, never a crash — the archive count already read
-      // (archiveFiles.length) is what the zero-archive verdict is keyed on, not read success.
+      // Still never a crash — but no longer silent. A rotation that EXISTS and could not be read
+      // is partial coverage, and `ok` below refuses on it.
+      unread.push(entry.path);
     }
   }
   if (liveFileRead) {
@@ -171,5 +226,18 @@ export function resolveLedgerUnion(
     }
   }
 
-  return { stateDir, archiveFiles, archiveCount: archiveFiles.length, liveFileRead, ok: true, matches };
+  // COVERAGE, NOT READABILITY (W1-T444, the rule #1653 established from the shell side). The old
+  // verdict asked "was ANYTHING found", which six-figure raw counts answer `yes` while an entire
+  // form goes unread — `run.start` is 257,438 RAW lines across the `.gz` alone but 779 DISTINCT
+  // over the union, because rotations duplicate heavily. So a raw count is not evidence that a
+  // form was read. `unread` is: every rotation that was found on disk and could not be opened.
+  return {
+    stateDir,
+    archiveFiles,
+    archiveCount: archiveFiles.length,
+    liveFileRead,
+    unread,
+    ok: unread.length === 0,
+    matches: unread.length === 0 ? matches : [],
+  };
 }
