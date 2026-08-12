@@ -951,7 +951,7 @@ export function proofScopeViolations(task: Task, opts: LintOpts = {}): LintViola
  *  entry counts as added-or-changed. */
 function criterionKey(c: AcceptanceCriterion): string {
   const norm = (s: string) => s.trim().replace(/\s+/g, " ");
-  return `${norm(c.claim ?? "")} ${norm(c.proof ?? "")}`;
+  return `${norm(c.claim ?? "")}\0${norm(c.proof ?? "")}`;
 }
 
 /**
