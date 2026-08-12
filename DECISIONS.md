@@ -1102,3 +1102,128 @@ used. Recorded so the next reader does not re-derive it.
 
 - Rollback: revert this PR — removes only this entry. No licence file, no runtime code and no gate is
   touched by it, and no ledger line is written.
+
+## 2026-08-12 — RELAY AUTH MODEL (Tier 2): the relay asserts the human, the instance decides — AWAITING RATIFICATION
+
+Operator direction record (not an auto-choose resolution): the goal is to reach the console at
+remudero.com seamlessly, starting from "go to an IP" if that is what today allows. D-11 already
+settles the TRANSPORT — each cell dials out with an enrollment token, no inbound ports, the relay a
+transparent proxy over the §7A console contract. It does not settle AUTH. **The auth model below is
+RECOMMENDED, not ruled; three named questions at the end are open and are the operator's alone.**
+
+### The two identity paths that exist today, read from source at `a143003`
+
+`grantedScopes` (`src/lib/service.ts`) dispatches over an ordered `IdentityProvider[]`; the first
+provider to recognise a request wins, and `undefined` means "not my credential, try the next" rather
+than a denial.
+
+- **`bearer-token`** — constant-time compare (`safeEqual`) against `state/service-tokens.json`'s two
+  values; `tokens.write` grants `read`+`write`, `tokens.read` grants `read`. The `?token=` query
+  fallback is honoured only where `Route.allowQueryToken` is set, which is the HTML shell alone.
+- **`tailscale-identity`** — and this is the answer that decides the rest. It is NOT a source IP and
+  NOT a `Tailscale-User-Login` header. `identityGrantedScopes` applies two gates: (1) INTERFACE —
+  `req.socket.localAddress !== identity.trustedLocalAddress` returns `undefined`, so a header
+  arriving on any other bound address is never consulted; (2) ALLOWLIST — the
+  **`tailscale-app-capabilities`** request header, JSON-parsed, must carry `identity.capability` as
+  an own property. On success it returns `READ_WRITE` — **the full grant, unconditionally, with no
+  tier**.
+
+**So the tailnet path is already a claim trusted BECAUSE OF THE CHANNEL IT ARRIVED ON**: a header
+that anything able to reach the trusted local address could set, believed because only Tailscale
+Serve is supposed to reach it. A relay-asserted identity is structurally the same object. That is
+not an argument against it — it is the observation that the repo has already accepted this shape
+once, deliberately, with the interface gate as its containment.
+
+### The transport, and what it forecloses
+
+`rmd up` prints `console: http://<host>:<port>/?token=<read token>` (`src/run-task.ts`). Plaintext,
+with a credential in the URL. Standing rule 24 says a secret "never travels in a URL, because URLs
+are copied, screenshotted, bookmarked, proxied and restored by session-restore"; R-5 is the recorded
+fixture, and its fix downgraded the embedded value from the WRITE token to the READ token rather
+than removing the shape. That is tolerable on loopback and a tailnet. **It forecloses direct
+internet exposure entirely** — no TLS, and a credential that survives in history, referrer headers
+and screenshots. Whatever reaches remudero.com cannot be this URL.
+
+### The model: (b), the relay asserts the human; the instance decides what that identity may do
+
+**(a) THE RELAY HOLDS THE INSTANCE TOKEN AND INJECTS IT** is simpler and is rejected here. It
+concentrates every cell's `write` credential in one hosted service, so a relay compromise is a fleet
+compromise, and it makes the relay's own logs a place fleet-control credentials exist. It also
+contradicts §6A's promise that core stays self-hosted in the way that matters most: the instance
+would no longer be the thing that decides.
+
+**(b) IS RECOMMENDED.** The relay asserts WHO the human is; the instance decides what that identity
+may do, trusting the assertion because the connection was established OUTBOUND with the enrollment
+secret. The instance keeps the authorization decision, which is exactly where §6A wants it.
+
+**AND THE FINDING IS THAT (b) NEEDS NO NEW AUTH MODEL — ONLY THE SEAM, WHICH LANDED TODAY.**
+W1-T430's `IdentityProvider` merged this morning as #1636 (trailer-credited, branch
+`run-W1-T430-1786542951973`). Its own doc already names the adopter: the two built-ins are wired
+first "and appends any `ServiceOptions.providers` after them, so a future grantor (e.g. **W1-T431's
+relay-brokered browser session**) attaches without this dispatch changing." A relay-asserted
+identity is a THIRD `IdentityProvider` — one `grant(req, allowQueryToken)` returning a scope set —
+and `grantedScopes`'s loop is, in its own words, "the ENTIRE gate". Nothing in the auth dispatch
+needs to be designed; it needs to be implemented.
+
+### W1-T404 is a SECURITY PREREQUISITE, not an ordering one
+
+`Scope` is `read | write`, and both existing grantors hand back the full `write` set. Over the
+internet that means a browser session that can add an operator note can also move the daily budget
+ceiling, execute a skill against the operator's checkout and halt the fleet. On a tailnet that is a
+tolerated blast radius; through a public relay it is not.
+
+W1-T404's shard now carries the 2026-08-11 rulings — THREE TIERS (option (c)) and a declared list
+plus a `ci-parity:drift`-shaped completeness check — and its `design:` records what remains: "(iv)
+STILL OPEN — THE SECOND FACTOR IS THE ONE REMAINING OPERATOR RULING". The shard states its own flip
+condition: "WHAT WOULD MAKE IT DISPATCHABLE — exactly one ruling, on design (iv) … When that lands,
+flip `verify:` to auto; no other field needs to change." The three options it lists, with its own
+ergonomics constraint applied, are (a) a separately-issued high-tier token, (b) time-boxed
+elevation, (c) a server-issued action-bound confirm nonce. **One ruling, and W1-T404 dispatches.**
+
+### The staged path, each step with its prerequisite
+
+| step | prerequisite | state |
+|---|---|---|
+| W1-T430 — the identity seam | none | **MERGED today (#1636)** |
+| W1-T404 — write tiers | one ruling: the second factor | queued, `verify: human`, otherwise buildable |
+| W1-T431 — dial-out relay client | W1-T430 | **now unblocked**, `verify: auto`, clean at `lint-plan`; testable against a loopback stub with NO hosting |
+| single-tenant relay, no accounts | W1-T431 | not filed |
+| accounts + a relay-asserted `IdentityProvider` | the above + W1-T404 | not filed |
+| portfolio across cells | accounts | explicitly out of W1-T431's scope |
+
+**INTERIM, for tomorrow.** An SSH tunnel (`ssh -L 4317:127.0.0.1:4317`) needs nothing built and
+forecloses nothing; it is the honest answer for one operator on one machine. Tailscale on the Azure
+VM is the better interim, and Q1's answer prices it: because the check is an *interface* gate on
+`req.socket.localAddress` plus a header Serve injects, the container must be able to bind the
+address Tailscale Serve targets — so it needs host networking or a userspace `tailscaled` inside the
+container, not merely an installed client on the host. Neither interim requires the relay to exist.
+
+**THE SHORTCUT, PRICED RATHER THAN ASSUMED.** A tunnel product (Cloudflare Tunnel or similar) gives
+a real domain, TLS and human auth TODAY and forecloses nothing later. Its cost is a third party in
+the trust path, terminating TLS and seeing every console response. §6A's no-telemetry posture
+deserves an explicit ruling on that rather than arriving as a default because it was convenient.
+**This entry does not take that decision.**
+
+### Three things this record NAMES as open rather than resolving
+
+1. **A TRANSPARENT PROXY TERMINATING TLS READS EVERY CONSOLE RESPONSE.** §6A promises core stays
+   self-hosted. A relay that terminates TLS sees plan state, verdicts, costs and operator notes in
+   clear. "Transparent proxy" describes the protocol, not the confidentiality. Either the relay is
+   trusted with that, or the console contract grows an end-to-end encrypted mode; the tension is
+   real and is stated here rather than bent quietly.
+2. **ENROLLMENT TOKEN LIFECYCLE.** W1-T431 covers issuance and says "rotation is re-enrollment".
+   Revocation and decommissioning a cell are unaddressed: what invalidates a token when a machine is
+   lost, and what a revoked cell's portfolio row shows.
+3. **THE OFFLINE CASE.** A cell not dialed in must render OFFLINE, not as an error. Measured: the
+   console models no such state today — every `offline` occurrence under `src/lib/` is about git or
+   network failure in feedback landing, none about a cell's reachability. This is a new state for
+   the §7A contract, and W1-T414's read/unreadable/absent discipline is the shape it should follow.
+
+### Filed with this record: nothing
+
+No task is filed. W1-T430 landed today, W1-T431 is already unblocked and points the right way, and
+W1-T404 needs a ruling rather than a task. A new task beside them would make the plan worse. **The
+ordering IS the finding**, and it is now: rule the second factor → W1-T404 → W1-T431 → relay.
+
+- Rollback: revert this PR — removes only this entry. No task record, no runtime code, no gate and
+  no generated artifact is touched by it, and no ledger line is written.
