@@ -1115,7 +1115,14 @@ export interface DrainDeps {
   /** Run ONE task through the existing run-task path (default = runTask). */
   runOne: (taskId: string) => Promise<RunResult>;
   /** Read current /usage; `undefined` ⇒ unavailable (headroom check is skipped). */
-  readUsage?: () => UsageSnapshot | undefined;
+  /**
+   * W1-T417-adjacent (SDK usage source): MAY return a promise. Widened rather than made
+   * `async`, so every existing SYNCHRONOUS supplier — the CLI probe and all 60 test fakes —
+   * keeps working byte-for-byte; `await` on a non-promise is a no-op. The daemon needs this
+   * because the contract-supported SDK reading is a control request on a streaming session,
+   * which is inherently async.
+   */
+  readUsage?: () => UsageSnapshot | undefined | Promise<UsageSnapshot | undefined>;
   /**
    * Fleet control (W1-T11, MASTER-PLAN §4A/§4B): a defined return ⇒ a hard STOP is
    * in effect, and the string is the ledger/summary detail. Checked FIRST, every
@@ -1238,7 +1245,7 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
     // `headroomEnabled` (2026-07-28 ruling): disabled, an unreadable read is
     // absent telemetry, never a hold.
     if (deps.readUsage) {
-      const snap = deps.readUsage();
+      const snap = await deps.readUsage();
       const over = snap ? headroomExhausted(snap, opts.headroomLimitPct) : null;
       if (over) {
         log("drain.headroom", { window: over.window, percent_used: over.percentUsed, resets_at: over.resetsAt });
@@ -1540,7 +1547,7 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
     if (opts.until && isMerged(opts.until)) return summary("until_reached", opts.until);
 
     if (deps.readUsage) {
-      const snap = deps.readUsage();
+      const snap = await deps.readUsage();
       const over = snap ? headroomExhausted(snap, opts.headroomLimitPct) : null;
       if (over) {
         log("drain.headroom", { window: over.window, percent_used: over.percentUsed, resets_at: over.resetsAt });

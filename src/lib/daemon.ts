@@ -789,7 +789,14 @@ export interface DaemonDeps {
    */
   openPrCount?: () => number;
   /** Read current /usage; `undefined` ⇒ unavailable (headroom check is skipped). */
-  readUsage?: () => UsageSnapshot | undefined;
+  /**
+   * W1-T417-adjacent (SDK usage source): MAY return a promise. Widened rather than made
+   * `async`, so every existing SYNCHRONOUS supplier — the CLI probe and all 60 test fakes —
+   * keeps working byte-for-byte; `await` on a non-promise is a no-op. The daemon needs this
+   * because the contract-supported SDK reading is a control request on a streaming session,
+   * which is inherently async.
+   */
+  readUsage?: () => UsageSnapshot | undefined | Promise<UsageSnapshot | undefined>;
   /**
    * Reset strings ALREADY reported by a previous process, read back off the ledger by whoever
    * builds these deps (run-task.ts). THE LEDGER IS THE DEDUP — the same idiom
@@ -1970,7 +1977,7 @@ export async function runDaemon(
     // (`headroomPolicy`, resolved once above): on a window's final day it
     // relaxes toward 100%, since anything unspent is destroyed at reset.
     if (deps.readUsage) {
-      const snap = deps.readUsage();
+      const snap = await deps.readUsage();
       if (snap) {
         // A GOOD read clears the degraded-mode counter — only CONSECUTIVE
         // misses count toward escalation, not a lifetime total.

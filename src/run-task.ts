@@ -282,7 +282,7 @@ import {
   type RatifyGateway,
   type ReframeResult,
 } from "./lib/inbox.js";
-import { parseUsage, type UsageSnapshot } from "./lib/headroom.js";
+import { parseUsage, usageSnapshotFromSdk, type SdkUsageReading, type UsageSnapshot } from "./lib/headroom.js";
 import {
   assertArchitectAboveWorker,
   buildGather,
@@ -524,7 +524,10 @@ import {
   type SpawnWorkerArgs,
   type WorkerResult,
   type WorktreeReapSummary,
+  openUsageProbeSession,
+  type UsageProbeQueryFn,
 } from "./lib/worker.js";
+import { LiveSpawnBlockedError } from "./lib/spawn-guard.js";
 import { gitPushRunBranch, gitPushEmptyCommit } from "./lib/git-push.js";
 import {
   ensureWorkerKeychain,
@@ -9359,8 +9362,15 @@ const defaultUsageProbeRunner: UsageProbeRunner = (bin, argv, opts) => execFileS
  * could not be run, or ran and failed. `"parse"` means the read SUCCEEDED and the text could not
  * be understood, which is a completely different problem with a completely different fix, and
  * conflating the two is what cost this fleet its headroom read for hours on 2026-07-31.
+ *
+ * `"sdk"` is the SAME discipline extended to the SDK control-request source
+ * ({@link readUsageSnapshotViaSdk}): it did not spawn a CLI and it did not fail to parse text —
+ * it asked the running SDK session and got no usable answer. Its `reason` names WHICH of the
+ * three unreadable states occurred (method absent / call threw / no usable windows), because
+ * those have three different fixes: an SDK upgrade renamed the method, the session refused, or
+ * the credential legitimately has no plan limits.
  */
-export type UsageProbeFailureStage = "spawn" | "parse";
+export type UsageProbeFailureStage = "spawn" | "parse" | "sdk";
 
 /** Injected sink for that failure — the real caller gets {@link ledgerUsageProbeFailure}. */
 export type UsageProbeFailureSink = (stage: UsageProbeFailureStage, reason: string) => void;
@@ -9418,6 +9428,133 @@ export function ledgerUsageProbeFailure(config: Config, stage: UsageProbeFailure
  * store (skipping the grant, harmlessly, if the store does not exist yet) — the identical
  * mechanism `spawnWorker` uses, not a second, divergent one.
  */
+/**
+ * The SDK usage control request, as a headroom source — the seam a test injects so NO test ever
+ * reaches the real SDK. Mirrors `spawnWorker`'s own `queryFn` seam (worker.ts) exactly: production
+ * passes nothing and gets the real `query`, a test passes a fake and creates no process.
+ */
+export type UsageQueryFn = UsageProbeQueryFn;
+
+/**
+ * READ HEADROOM FROM THE SDK, not by shelling `claude -p "/usage"`.
+ *
+ * WHY THIS SHAPE AND NOT THE HANDLE `spawnWorker` ALREADY HOLDS. The pinned SDK 0.3.220 declares
+ * `usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET(): Promise<SDKControlGetUsageResponse>`
+ * INSIDE `Query`'s control-request block, whose own header reads "The following methods are control
+ * requests, and are only supported when streaming input/output is used". `spawnWorker` passes
+ * `prompt: string`, so reading its handle is contract-unsupported even where the CLI tolerates it —
+ * two unsupported layers, not one. The contract-supported shape is a DEDICATED session with a
+ * STREAMING prompt, which is what this is. Converting `spawnWorker` to streaming input is a
+ * separate decision (it restructures the paid spawn path) and is deliberately NOT done here.
+ *
+ * WHAT IT COSTS: a streaming generator that yields nothing, one control request, then teardown.
+ * Measured at ~890 ms, $0, zero turns, no prompt sent.
+ *
+ * THREE UNREADABLE STATES, THREE DISTINCT REASONS, AND NONE OF THEM IS ZERO-USED. A future SDK may
+ * rename or remove the method (it says so in its own name); the call may throw; or the credential
+ * may legitimately have no plan limits (`rate_limits_available: false`, true for API-key, Bedrock
+ * and Vertex sessions). All three return `undefined` — the caller then falls back to the CLI probe
+ * — and each ledgers a DIFFERENT reason under the `"sdk"` stage, because each has a different fix.
+ * Reporting any of them as 0% used would dispatch a fleet against an exhausted account.
+ *
+ * THE RETURN POLARITY IS UNCHANGED AND NOT THIS FUNCTION'S TO CHANGE. Adding a SOURCE is not a
+ * polarity change: when every source is unreadable the drain/daemon still continues, still bounded
+ * by max + budget, exactly as {@link readUsageSnapshot}'s own doc ratifies.
+ */
+export async function readUsageSnapshotViaSdk(
+  runQuery?: UsageQueryFn,
+  onUnreadable: UsageProbeFailureSink = () => {},
+): Promise<UsageSnapshot | undefined> {
+  // The session is opened by the SPAWN CHOKEPOINT (worker.ts), which owns the SDK import and the
+  // live-spawn guard — see `openUsageProbeSession`. This module never touches the SDK.
+  const q = openUsageProbeSession(runQuery);
+
+  const method = q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET;
+  if (typeof method !== "function") {
+    // UNKNOWN #1 — a future SDK renamed or removed it. Not an error, not zero: no answer.
+    onUnreadable("sdk", "usage control request absent on this SDK (method not a function) — falling back");
+    await closeQuietly(q);
+    return undefined;
+  }
+
+  let raw: unknown;
+  try {
+    raw = await method.call(q);
+  } catch (e) {
+    // UNKNOWN #2 — the session refused or the transport failed.
+    onUnreadable("sdk", `usage control request threw: ${String((e as Error)?.message ?? e)}`);
+    await closeQuietly(q);
+    return undefined;
+  } finally {
+    await closeQuietly(q);
+  }
+
+  const snap = usageSnapshotFromSdk(raw as SdkUsageReading | undefined);
+  if (!snap) {
+    // UNKNOWN #3 — answered, but with nothing usable: `rate_limits_available: false` (an API-key
+    // credential), null `rate_limits`, or no usable five-hour utilization.
+    onUnreadable("sdk", "usage control request returned no usable rate-limit windows — falling back");
+    return undefined;
+  }
+  return snap;
+}
+
+/** Tear the probe session down without letting teardown mask the reading. Best-effort by
+ *  construction: an abort that throws must never turn a good answer into an unreadable one. */
+async function closeQuietly(q: { interrupt?: () => Promise<unknown>; return?: (v?: unknown) => Promise<unknown> }): Promise<void> {
+  try {
+    await q.return?.(undefined);
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * THE COMPOSED HEADROOM SOURCE, and the thing the daemon/drain actually call: try the SDK control
+ * request first, fall back to the CLI probe when it yields nothing.
+ *
+ * WHY THE SDK FIRST. A container runs NO daemon, so it writes no `daemon.headroom` rows and has
+ * never had a headroom signal at all; the CLI probe's `-p "/usage"` returns a session cost summary
+ * with no account window panel in the image. The SDK reading needs no CLI, no prompt and no turn.
+ *
+ * WHY THE CLI IS RETAINED RATHER THAN REPLACED. It works on the mini today, and the SDK method is
+ * named `usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET`. Removing a working path while
+ * adding an experimental one is two risks in one changeset; this is one.
+ *
+ * THE POLARITY IS UNCHANGED. When BOTH sources are unreadable this returns `undefined`, exactly as
+ * the CLI probe alone did, and the drain/daemon continue — bounded by max + budget. Adding a
+ * SOURCE is not a polarity change.
+ */
+export async function readUsageSnapshotPreferSdk(
+  config: Config,
+  deps: {
+    viaSdk?: (onUnreadable: UsageProbeFailureSink) => Promise<UsageSnapshot | undefined>;
+    viaCli?: (onUnreadable: UsageProbeFailureSink) => UsageSnapshot | undefined;
+  } = {},
+): Promise<UsageSnapshot | undefined> {
+  const sink: UsageProbeFailureSink = (stage, reason) => ledgerUsageProbeFailure(config, stage, reason);
+  const viaSdk = deps.viaSdk ?? ((s) => readUsageSnapshotViaSdk(undefined, s));
+  const viaCli = deps.viaCli ?? ((s) => readUsageSnapshot(config, defaultUsageProbeRunner, s));
+  // A SOURCE THAT CANNOT ANSWER MUST NOT BREAK THE CALLER. `readUsageSnapshotViaSdk` already
+  // converts its three unreadable states into `undefined`, but OPENING the session can throw
+  // before any of that runs (a transport failure, a malformed config). Left uncaught, an
+  // experimental source would take down a drain that the CLI probe could have served — which is
+  // the opposite of adding a fallback.
+  //
+  // THE LIVE-SPAWN GUARD IS THE ONE EXCEPTION AND IS DELIBERATELY RE-THROWN. It exists to make an
+  // accidental real spawn LOUD under a test runner; swallowing it here would turn every such test
+  // into a silent CLI fallback and retire the guard by accident.
+  let fromSdk: UsageSnapshot | undefined;
+  try {
+    fromSdk = await viaSdk(sink);
+  } catch (e) {
+    if (e instanceof LiveSpawnBlockedError) throw e;
+    sink("sdk", `usage control request could not be opened: ${String((e as Error)?.message ?? e)}`);
+  }
+  if (fromSdk) return fromSdk;
+  return viaCli(sink);
+}
+
 export function readUsageSnapshot(
   config: Config,
   runUsageProbe: UsageProbeRunner = defaultUsageProbeRunner,
@@ -10351,6 +10488,14 @@ async function drainCommand(
      *  gateway for `remudero-sandbox`, not a hardcoded literal (W1-T53) — without a network
      *  round-trip. */
     githubFactory?: (owner: string, repo: string) => GitHub;
+    /**
+     * Injectable HEADROOM SOURCE. Defaults to {@link readUsageSnapshotPreferSdk} — SDK control
+     * request first, CLI probe as fallback. A behavioral test driving the real `drainCommand`
+     * MUST supply this (or accept the live-spawn guard's refusal), because the default now opens
+     * a real SDK session: the same reason `githubFactory` and `notifyChannel` are injectable here
+     * rather than reached for directly.
+     */
+    readUsage?: () => UsageSnapshot | undefined | Promise<UsageSnapshot | undefined>;
     /** W1-T144: injectable notify channel for the post-drain rundown push — a behavioral
      *  test supplies a recording fake so the push glue runs without a real osascript send.
      *  Defaults to the operator's iMessage channel. */
@@ -10642,7 +10787,7 @@ async function drainCommand(
         // reads (below), never a second GitHub read path — see queueGovernorGateFor's doc.
         checkQueueGovernor: queueGovernorGateFor(openPrCount, ledgerPath, runId),
         runOne: (taskId) => runTask(taskId, { planPath, config, allowStale }),
-        readUsage: () => readUsageSnapshot(config),
+        readUsage: deps.readUsage ?? (() => readUsageSnapshotPreferSdk(config)),
         checkStop: () => stopDetail(config.root),
         checkPause: () => pauseDetail(config.root),
         openPrCount, // W1-T172: the governor's WIP-ceiling input on the multi-lane path.
@@ -11451,7 +11596,7 @@ export async function daemonCommand(
             allowStale,
             skipGitSync: !!flagValue(rest, "--plan"),
           }),
-        readUsage: () => readUsageSnapshot(config),
+        readUsage: () => readUsageSnapshotPreferSdk(config),
         // THE LEDGER IS THE DEDUP (impl-FL): seed the once-per-string bound from what previous
         // processes already announced, so a restart does not re-announce. Read ONCE at daemon
         // construction, never per tick.

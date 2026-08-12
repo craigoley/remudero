@@ -917,6 +917,47 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
  * throw is swallowed and the captured envelope is returned with isError=true. A
  * throw with NO result envelope is a genuine transport/spawn failure — re-raised.
  */
+/**
+ * The SDK session type a usage probe needs — narrowed to the control request and teardown, so
+ * neither this module nor its callers depend on the experimental method's full shape.
+ */
+export interface UsageProbeSession {
+  usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET?: () => Promise<unknown>;
+  return?: (v?: unknown) => Promise<unknown>;
+}
+
+/** The injectable seam a test passes so no test ever reaches the real SDK — the same shape and
+ *  the same purpose as {@link SpawnWorkerArgs.queryFn}. */
+export type UsageProbeQueryFn = (params: { prompt: AsyncIterable<never> }) => UsageProbeSession;
+
+/** A prompt that yields NOTHING. The control request is answered on session setup, so no user
+ *  message is ever produced: no prompt sent, no turn spent, no tokens billed. */
+async function* emptyUsagePrompt(): AsyncIterable<never> {}
+
+/**
+ * OPEN A CONTROL-ONLY SDK SESSION FOR THE USAGE PROBE — and it lives HERE, in the spawn
+ * chokepoint, deliberately.
+ *
+ * `test/spawn-guard.test.ts` pins that EXACTLY ONE file imports the SDK's runtime `query`, and
+ * that that file calls {@link assertLiveSpawnAllowed} before reaching it: "If a second file now
+ * spawns workers, guard it too rather than widening this list." Putting the probe's session here
+ * keeps both halves true — one importer, one guard — instead of widening a stated invariant for a
+ * session that, while it spawns no worker, still opens a real SDK connection and so deserves the
+ * same treatment.
+ *
+ * STREAMING INPUT IS REQUIRED, NOT PREFERRED. The usage control request is declared inside
+ * `Query`'s control-request block, documented "only supported when streaming input/output is
+ * used", so this passes an async generator rather than the string `spawnWorker` uses. Converting
+ * `spawnWorker` itself to streaming input is a separate decision and is NOT made here.
+ */
+export function openUsageProbeSession(runQuery?: UsageProbeQueryFn): UsageProbeSession {
+  // Guarded on the same condition spawnWorker uses: only a REAL session is refused under a test
+  // runner. An injected `runQuery` creates no connection and is not what this stops.
+  if (runQuery === undefined) assertLiveSpawnAllowed("openUsageProbeSession (SDK usage probe)");
+  const q = runQuery ?? ((p: { prompt: AsyncIterable<never> }) => query(p as never) as unknown as UsageProbeSession);
+  return q({ prompt: emptyUsagePrompt() });
+}
+
 export async function collectWorkerResult(
   messages: AsyncIterable<unknown>,
   opts: {
