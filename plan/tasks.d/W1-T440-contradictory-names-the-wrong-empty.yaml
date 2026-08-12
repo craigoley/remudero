@@ -1,0 +1,100 @@
+- id: W1-T440
+  title: "a review-failing PR with no `Remudero-Task:` trailer is dispositioned `blocked-ambiguous` with the reason `review failing with no actionable unmet criteria (contradictory)` — but its criteria were never RECOVERABLE, so the message names a property of the review that was never observed: say which empty it is"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  risk: high
+  origin: oper#unattended-red-pr-recon-2026-08-12
+  plan_refs: ["§5", "P48", "W1-T196", "W1-T394"]
+  rationale: "RECON 2026-08-12, DERIVED AT 76f2e33. THE OPERATOR ASKED WHAT THE FIX RUNG DOES NOT
+    REACH. Most of the suspected gap does not exist, and that is recorded here so the next reader
+    does not re-derive it: the sweep enumerates EVERY open PR (`buildOpenPrViews` ->
+    `fetchOpenPrsRest`, REST /pulls?state=open) with NO branch filter, so `ownsBranch` /
+    `isBareRunBranch` / `isOwnedSlugBranch` (status.ts) are CREDIT predicates and are not the
+    sweep's selector. Measured over the unioned ledger (live + all 666 gzipped rotations,
+    2,553,989 `sweep.disposed` rows; 666 archives matched, positive control): trailerless PRs
+    ALREADY get acted on — `blocked-fixable` via the ci-log path, 5,776 rows `acted=true` across
+    65 distinct PRs, and `mergeable` (arming auto-merge), 6,808 rows `acted=true` across 61.
+    ONE PATH IS UNREACHABLE, AND IT IS THE ONE THE OPERATOR WORKS BY HAND. `deriveDisposition`'s
+    row 6 fires on `pr.reviewState === 'failure' && pr.unmetCriteria.length > 0`; row 7 is the bare
+    `pr.reviewState === 'failure'` fallthrough. `buildOpenPrViews` sets
+    `unmetCriteria: reviewState === 'failure' && taskId ? unmetFromLedger(...) : []`, and
+    `unmetFromLedger` keys on `task_id`. So with no trailer the collection is EMPTY BY
+    CONSTRUCTION, row 6 can never fire, and every such PR lands row 7. Corroborated: of 428,899
+    `review.posted` rows, ZERO are unattributable — the criteria are not merely unread, they were
+    never written for this class.
+    THE MESSAGE IS THEREFORE FALSE FOR THIS CLASS. Row 7's reason is a CONSTANT
+    (`reason: () => \"review failing with no actionable unmet criteria (contradictory) — escalating\"`),
+    so it asserts the review contradicted itself. What was actually observed is that the criteria
+    could not be recovered. THIS IS P48's NAKED ZERO, EXACTLY: one empty with two causes —
+    `absent` and `source_unreachable` — collapsed into a message naming the wrong one. #1599 is the
+    fixture: `task_id: 'SWEEP'`, `disposition: 'blocked-ambiguous'`, `acted: false`, carrying that
+    verbatim reason, while a human resolved it in one line.
+    THE CAPABILITY TO ACT ALREADY EXISTS AND THE ROUTER CANNOT REACH IT (the #1066
+    consumer-wired-producer-never shape, inverted). impl-FY built `fixRungTaskFor`, which for a
+    trailerless PR synthesises a task whose `acceptance` is `parseAcceptanceBlock(body)` — the PR's
+    OWN Acceptance block — and its suite proves the strike cap binds a no-task PR. But
+    `OpenPrView` carries NO body field, so `deriveDisposition` cannot see that block at routing
+    time, and impl-FY deliberately held dispositions byte-identical. So the fix rung can handle
+    exactly this PR and is never sent one.
+    THIS TASK DOES NOT ROUTE THEM. Whether a trailerless review-failure SHOULD reach a fix worker is
+    an OPERATOR RULING and is deliberately left open: that class is the hand-opened PR he may be
+    mid-judgement on. #1599 sat red on a DECISIONS provenance marker while the licence question was
+    undecided, and a session established that the tempting green-making marker
+    (`Chosen (RECOMMENDED, auto)`) WOULD HAVE ASSERTED SOMETHING UNTRUE and refused it on those
+    grounds. A fix worker has no such judgement and takes the marker that makes the gate green.
+    Note also that the operator's 'it works every time' is SURVIVORSHIP: he chooses when to run it,
+    on what, and reads the result before it lands. This task changes no routing, spends no strike
+    and dispatches nothing — it makes the queue legible so that ruling can be made on evidence.
+    TWO BRIEF PREMISES DID NOT SURVIVE MEASUREMENT, recorded so they are not re-carried:
+    `remudero-review` IS a required check (branch protection required contexts are exactly
+    [\"remudero-review\", \"ci-gate\"]), and the hand-fixed PRs are not on `claude/*` branches —
+    #1596/#1598/#1599/#1601/#1615/#1616 are `docs/*`, `chore/*`, `fix/*`, `plan/*`, and what they
+    share is the ABSENT TRAILER, not a branch shape."
+  acceptance:
+    - claim: "a review-failing PR whose criteria could not be recovered is reported as unrecoverable, not as contradictory"
+      proof: "grep: criteria unrecoverable in src/lib/sweep.ts"
+    - claim: "the router derives which empty it is instead of inferring it, so the distinction rests on an observed field"
+      proof: "grep: criteriaRecoverable in src/run-task.ts"
+    - claim: "no PR changes disposition — only the reason text distinguishes the two empties"
+      proof: "unit test: test/fix-rung-no-task.test.ts"
+  files: [src/lib/sweep.ts, src/run-task.ts, test/sweep.test.ts, test/escalate.test.ts, test/fix-rung-no-task.test.ts]
+  status: queued
+  attempts: 0
+  note: "DESIGN, and the two grep proofs are BINDING on these exact strings (the W1-T365/W1-T383
+    no-third-option form; both are 0 hits at 76f2e33 by construction, verified with `git grep -a`
+    because four tracked sources carry raw NULs and a plain grep returns a silent zero).
+    (i) `OpenPrView` gains a `criteriaRecoverable` boolean, set by `buildOpenPrViews` — true when a
+    trailer resolved a task id (so `unmetFromLedger` was actually consulted), false when it did not.
+    The literal `criteriaRecoverable` must appear in src/run-task.ts.
+    (ii) `deriveDisposition`'s row 7 splits its REASON — not its disposition — on that field: the
+    unrecoverable arm reads `criteria unrecoverable` (that literal, in src/lib/sweep.ts) and names
+    the absent trailer as the cause; the genuinely-contradictory arm keeps today's wording verbatim
+    so the attributable case is byte-identical.
+    (iii) NOTHING ELSE MOVES. Same disposition, same escalate path, same strike accounting. The
+    aggregate guard already exists and is the reason test/fix-rung-no-task.test.ts is declared: its
+    'AGGREGATE: no PR becomes fixable that was not before' case compares `.disposition` only, so it
+    stays green by construction and is the falsifier if the split ever leaks into routing.
+    FILES: every declared path is one this change edits or whose assertions it moves.
+    test/sweep.test.ts asserts the reason (`assert.match(derived.reason, /no actionable unmet
+    criteria/)`, plus two `renderClarificationQuestion` invocations passing it verbatim) and
+    test/escalate.test.ts asserts the escalation summary built from it — both are real invocations,
+    not prose mentions, counted by invocation. test/fixtures/needs-human-corpus.json also contains
+    the phrase but as recorded FIXTURE DATA, not an assertion, so it is deliberately not declared.
+    RULE 25 CHECKED BEFORE FILING: `files:` contains no INSTRUMENT_SURFACE path — no
+    .github/workflows/, no scripts/*-ratchet.mjs, no scripts/diff-coverage.mjs, no
+    scripts/*-baseline.json, no scripts/mutation-relevant-paths.json, no stryker.conf.json — so
+    `detectInstrumentEntanglement` has no instrument half and cannot fire.
+    RISK:HIGH IS RULE 19's SPAN, NOT BLAST RADIUS — `subsystemsOf` folds the `.test` suffix, so the
+    declared set reads as four subsystems (sweep, run-task, escalate, fix-rung-no-task) and
+    risk:medium would be a sizing violation, exactly as W1-T421 recorded. The change itself is one
+    boolean, one branch and the assertions that move with them.
+    NOT IN SCOPE, NAMED SO IT IS NOT SILENTLY ABSORBED: routing trailerless review-failures to the
+    fix rung (operator ruling, see rationale); the CADENCE limit that the FULL sweep runs once per
+    daemon tick and only `actionable: (d) => d === 'post-review'` runs during a dispatch, so the fix
+    rung is dark for a dispatch's whole duration (measured p75 21.2m, p90 39.5m) — a separate
+    concern with a recorded rationale (W1-T254: a dispatching ticker would turn one concurrent spend
+    into two) that deserves its own re-derivation now that dispatchLanes is 2."
