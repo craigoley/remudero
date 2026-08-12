@@ -1,0 +1,92 @@
+- id: W1-T444
+  title: "the two shipped ledger-corpus globs each see HALF the rotations and neither says so — `rmd ledger-grep` misses every uncompressed rotation (8.3% of the corpus) and `rmd emissions` misses every gzipped one (90.8%), each answering confidently from its half"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  rationale: "FOUND while correcting CLAUDE.md's ledger-union idiom (#1653), which fixed the SHELL
+    idiom and deliberately left the source half. Re-derived at 11dcbf08.
+    THE ROTATIONS COME IN TWO FORMS AND EACH GLOB NAMES ONE. `datedArchivePath`
+    (`src/lib/ledger.ts`) returns `<base>.<stamp>.ndjson` and NOTHING IN THE REPO RUNS GZIP, so plain
+    is what the code writes; the gzipped archives are out-of-band compression that last ran at
+    2026-08-05T10-56-55Z. Population MEASURED 2026-08-12: 666 `.gz`, 3 plain rotations, 1 live.
+      - `ledgerGrepUnion` (`src/lib/ledger-grep.ts`, behind `rmd ledger-grep`) filters
+        `n.startsWith(\"ledger.\") && n.endsWith(\".ndjson.gz\")` — it sees 666 + live and MISSES the
+        3 plain rotations.
+      - `ledgerCorpusFiles` (`src/run-task.ts`, behind `rmd emissions`) filters
+        `n.startsWith(\"ledger\") && n.endsWith(\".ndjson\")` — the MIRROR IMAGE. It sees the live file
+        and the 3 plain rotations and MISSES all 666 `.gz`.
+    MEASURED REACH, distinct lines over the full corpus of 418,898:
+      - `ledger-grep` reaches 384,039 — misses 34,859, i.e. 8.3%.
+      - `emissions` reaches 38,744 — misses 380,154, i.e. 90.8%. IT SEES ONE LINE IN ELEVEN.
+    NEITHER CAN NOTICE. `ledgerGrepUnion`'s only guard is `archiveFiles.length === 0`, which with 666
+    `.gz` present can never fire, so partial coverage is structurally invisible to it — and that verb
+    EXISTS to be the safe replacement for the hand-rolled idiom, so it inherits the very bug it was
+    built to retire. `ledgerCorpusFiles` has no guard at all.
+    THE STALENESS IS VISIBLE IN THE DOC COMMENTS, which is how the eras separate: `ledgerCorpusFiles`
+    says `the LIVE file AND its rotations … undercounts by roughly 4x on this host (664 files)` — a
+    figure only true BEFORE the archives were compressed. It matches 4 files today. Each function was
+    correct for the world it was written in; the out-of-band gzip pass silently invalidated one and
+    the gzip pass STOPPING silently invalidated the other.
+    THE SHELL HALF IS ALREADY FIXED AND MUST NOT BE RE-FILED. CLAUDE.md now carries the corrected
+    three-pattern idiom, the measured population, and the per-form control requirement (#1653). This
+    task is the SOURCE half only."
+  design: "(i) ONE HELPER THAT RETURNS EVERY FORM, TAGGED — not two widened filters. Both consumers
+    need the same list and they need to know which form each entry is, because they read them
+    differently (below). A shared function returning entries carrying the path AND its form is the
+    narrow change; duplicating a widened glob in two modules re-creates the divergence that produced
+    this.
+    (ii) WIDENING `ledger-grep`'s GLOB ALONE WOULD THROW, and this is the trap worth stating up
+    front. It calls `fsDeps.gunzipSync(fsDeps.readFileSync(file))` UNCONDITIONALLY for every archive,
+    so a plain rotation added to that list raises `incorrect header check` rather than being read.
+    The reader must branch on the form the helper reports — never sniff by trying gunzip and catching,
+    which converts a genuinely corrupt archive into a silently skipped one and rebuilds this defect a
+    level down.
+    (iii) THE GUARD MUST BECOME A COVERAGE GUARD. `archiveFiles.length === 0` answers `is anything
+    readable`, and the failure here is `is every FORM readable` — the distinction #1653 established
+    from the shell side, where a positive control read 257,438 lines while the glob missed 34,859.
+    Refuse, or say plainly what was not read, when a form that EXISTS on disk was not opened. A form
+    that legitimately has zero files (a fresh checkout has no rotations at all) is not a failure and
+    must not be treated as one — the guard is about UNREAD files, not absent ones.
+    (iv) `emissions` NEEDS ITS DEDUPE RECONSIDERED WITH THE REAL CORPUS, not just a wider glob. Its
+    comment records that a `Set` over 4.2M raw lines OOM'd, which is why it filters by prefix first
+    and keys on `ts|step`. Adding 666 archives multiplies the input it was tuned against, so whoever
+    does this must MEASURE the memory and runtime rather than assume the existing shape scales. If it
+    does not, say so and bound it explicitly rather than shipping a verb that OOMs on the live host.
+    (v) NOT IN SCOPE — making `rotateLedger` gzip, or compressing the plain rotations. That would
+    hide this rather than fix it, and the correct posture is that BOTH forms are legitimate: the code
+    writes plain, and something out-of-band may or may not compress later. A reader that only works
+    when an external pass has run is the defect."
+  acceptance:
+    - claim: "a corpus holding both compressed and uncompressed rotations is read in full by both verbs"
+      proof: "unit test: test/ledger-corpus-both-forms.test.ts"
+    - claim: "an uncompressed rotation reaches the reader without being gunzipped"
+      proof: "unit test: test/ledger-corpus-both-forms.test.ts"
+    - claim: "a form that exists on disk but was not read is reported rather than silently dropped"
+      proof: "unit test: test/ledger-corpus-both-forms.test.ts"
+    - claim: "a corpus with no rotations at all is not treated as a coverage failure"
+      proof: "unit test: test/ledger-corpus-both-forms.test.ts"
+  risk: high
+  origin: recon#ledger-union-glob-2026-08-12
+  plan_refs: ["P48", "W1-T119"]
+  files: [src/lib/ledger-grep.ts, src/run-task.ts, test/ledger-corpus-both-forms.test.ts, test/ledger-grep.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — no operator ruling is needed. Which files exist is measured, and that both
+    verbs should read all of them is not a policy question.
+    risk:high is Rule 19's SPAN, not blast radius: `subsystemsOf` reads `files:` plus acceptance text
+    and this set crosses `src/lib`, `src/` and `test/`. Raised up front — the W1-T400/W1-T407 lesson,
+    and the W1-T442/W1-T443 lesson that a `files:` omitting the suite which already asserts the old
+    behaviour costs a dispatch.
+    `test/ledger-grep.test.ts` IS DECLARED AND THE REASON IS MEASURED: it already builds fixtures
+    around the `.gz`-only filter, including one that writes `not gzip data` into a `.ndjson.gz` name
+    to prove a corrupt archive is handled — so it is the suite that moves when the filter and the
+    reader branch change.
+    THE FALSIFIER HAS AN OBVIOUS WRONG FORM. Asserting a hit count over a mixed fixture passes for a
+    reader that double-counts the same rotation twice; assert WHICH files were opened, and dedupe
+    identity, not just the total.
+    NO COUNT HERE SHOULD BE QUOTED FORWARD — 666/3/1 and the 8.3%/90.8% split were true at
+    2026-08-12T18:30Z. The plain half GROWS with every rotation and the gz half only changes if
+    someone runs a compression pass, so re-measure before relying on either figure."
