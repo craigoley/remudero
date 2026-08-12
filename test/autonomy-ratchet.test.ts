@@ -143,6 +143,27 @@ test("mineAutonomyLedgerLines: groups matched lines by task_id, excluding steps 
   }
 });
 
+test("mineAutonomyLedgerLines: a MALFORMED line that still matches the step pattern is skipped, never thrown", () => {
+  // The union match is a REGEX over raw text, so a truncated write — the shape a rotation
+  // interrupted mid-append leaves behind — matches `"step":"automerge.armed"` and then fails
+  // JSON.parse. Nothing else in this suite reaches that catch arm, and a throw here would take
+  // down the whole report rather than dropping one unreadable row: the module's own UNMEASURED
+  // discipline is about naming what could not be read, not about dying on it.
+  const dir = tmpStateDir("rmd-autonomy-malformed-");
+  try {
+    writeGzArchive(dir, "ledger.2026-01-01T00-00-00-000Z.ndjson.gz", [
+      '{"ts":"2026-01-01T00:00:00.000Z","step":"automerge.armed","task_id":"W1-T900"',
+      ledgerLine({ ts: "2026-01-01T00:00:01.000Z", step: "automerge.armed", task_id: "W1-T900" }),
+    ]);
+    const { ledger, linesByTaskId } = mineAutonomyLedgerLines(dir);
+    assert.equal(ledger.ok, true, "the archive itself read fine — this is a per-LINE failure");
+    assert.equal(ledger.matches.length, 2, "and both lines matched the step pattern, so the catch arm is reached");
+    assert.equal(linesByTaskId.get("W1-T900")?.length, 1, "only the parseable line survives");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── (ii) zeroTouchMergeRate: the pure core ──────────────────────────────────────────────────
 
 test("FALSIFIER: a mixed window (one auto-armed strike-free merge, one reframed merge) reports 50% with the touch NAMED", () => {
