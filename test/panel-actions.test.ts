@@ -600,6 +600,77 @@ test("POST /v1/drain/feedback: write-scoped -- a read-only token gets 403", asyn
   });
 });
 
+// ── W1-T435: the STEERING NOTE — quoted verbatim into the fix rung's next dispatch by
+// operatorVerdictEvidence (lib/sweep.ts) when the verdict is wrong/needs-follow-up.
+
+test("POST /v1/drain/feedback: an optional `note` is ledgered VERBATIM alongside the verdict", async () => {
+  const root = tmpRoot();
+  const deps = depsFor(root);
+  const note = "the retry loop never backs off — see the flaky assertion at line 88";
+  await withService(deps, async (base) => {
+    const res = await post(base, "/v1/drain/feedback", WRITE_TOKEN, {
+      taskId: "W1-T100",
+      verdict: "wrong",
+      drainRunId: "DRAIN-1",
+      note,
+    });
+    assert.equal(res.status, 200);
+  });
+  const lines = readLedgerLines(deps.ledgerPath);
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].note, note, "the note's own words must land unedited — never paraphrased");
+});
+
+test("POST /v1/drain/feedback: `note` omitted -> the ledger line carries no `note` key at all (never an empty-string stand-in)", async () => {
+  const root = tmpRoot();
+  const deps = depsFor(root);
+  await withService(deps, async (base) => {
+    const res = await post(base, "/v1/drain/feedback", WRITE_TOKEN, { taskId: "W1-T100", verdict: "good", drainRunId: "DRAIN-1" });
+    assert.equal(res.status, 200);
+  });
+  const lines = readLedgerLines(deps.ledgerPath);
+  assert.equal(lines.length, 1);
+  assert.equal("note" in lines[0], false);
+});
+
+test("POST /v1/drain/feedback: a non-string `note` -> 400, no ledger line", async () => {
+  const root = tmpRoot();
+  const deps = depsFor(root);
+  await withService(deps, async (base) => {
+    const res = await post(base, "/v1/drain/feedback", WRITE_TOKEN, { taskId: "T", verdict: "wrong", drainRunId: "DRAIN-1", note: 42 });
+    assert.equal(res.status, 400);
+  });
+  assert.equal(readLedgerLines(deps.ledgerPath).length, 0);
+});
+
+test("POST /v1/drain/feedback: a `note` over the character ceiling -> 400, no ledger line (never a silent truncation)", async () => {
+  const root = tmpRoot();
+  const deps = depsFor(root);
+  await withService(deps, async (base) => {
+    const res = await post(base, "/v1/drain/feedback", WRITE_TOKEN, {
+      taskId: "T",
+      verdict: "wrong",
+      drainRunId: "DRAIN-1",
+      note: "x".repeat(2001),
+    });
+    assert.equal(res.status, 400);
+    const body = (await res.json()) as { error: string };
+    assert.equal(body.error, "invalid_request");
+  });
+  assert.equal(readLedgerLines(deps.ledgerPath).length, 0);
+});
+
+test("POST /v1/drain/feedback: a `note` AT the character ceiling is accepted (the boundary is inclusive)", async () => {
+  const root = tmpRoot();
+  const deps = depsFor(root);
+  const note = "x".repeat(2000);
+  await withService(deps, async (base) => {
+    const res = await post(base, "/v1/drain/feedback", WRITE_TOKEN, { taskId: "T", verdict: "wrong", drainRunId: "DRAIN-1", note });
+    assert.equal(res.status, 200);
+  });
+  assert.equal(readLedgerLines(deps.ledgerPath)[0].note, note);
+});
+
 // ── INTEGRATION: "STOP from the panel halts the fleet within one tick" (acceptance 2) ──────
 //
 // Drives the REAL drain loop (src/lib/drain.ts's `runDrain`) wired to the REAL fleet-control
