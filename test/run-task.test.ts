@@ -5594,6 +5594,9 @@ test("drainCommand (W1-T144): a completed drain over an empty plan reaches the p
   const sent: string[] = [];
   const code = await drainCommand([], {
     config, planPath, skipGitSync: true, githubFactory: () => OFFLINE_GITHUB,
+    // The default headroom source now opens a real SDK session (SDK-preferred, CLI fallback), so
+    // this behavioral test injects one — the same reason it already injects github and notify.
+    readUsage: () => undefined,
     notifyChannel: { send: (m: string) => { sent.push(m); return true; } } as never,
   });
   assert.equal(code, 0, "an empty plan is a clean drain (nothing runnable) — exit 0, and the rundown push ran");
