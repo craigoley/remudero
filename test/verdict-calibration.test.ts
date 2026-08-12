@@ -384,6 +384,84 @@ test("verdictCalibrationCommand: with no opts.stateDir and an unreadable config,
   }
 });
 
+/** Builds a scratch repo with one commit per `taskIds` entry (each citing its own id, touching
+ *  its own file), plus the fabricated `origin/main` tracking ref. */
+function buildMultiFixtureRepo(taskIds: readonly string[]): string {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-verdict-cal-multi-"));
+  git(["init", "-q", "-b", "main"], dir);
+  git(["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "seed"], dir);
+  taskIds.forEach((taskId, i) => {
+    const file = `f${i}.ts`;
+    writeFileSync(join(dir, file), `${i}\n`);
+    git(["add", "-A"], dir);
+    const date = `2026-01-0${i + 1}T00:00:00+00:00`;
+    git(["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", `feat(x): thing ${i} (${taskId})`, "--date", date], dir, {
+      GIT_COMMITTER_DATE: date,
+    });
+  });
+  git(["update-ref", "refs/remotes/origin/main", "main"], dir);
+  return dir;
+}
+
+test("verdictCalibrationCommand: AT the population floor prints real percentages, and an unattributable row lands in the UNMEASURABLE listing", () => {
+  const ids = Array.from({ length: MIN_POPULATION_FLOOR }, (_, i) => `W1-T81${i}`);
+  const repoDir = buildMultiFixtureRepo(ids);
+  const stateDir = tmpStateDir("rmd-verdict-cal-cli-floor-");
+  const logs: string[] = [];
+  const realLog = console.log;
+  console.log = (...a: unknown[]) => void logs.push(a.map(String).join(" "));
+  try {
+    // Each fixture commit lands at 2026-01-0<i+1>T00:00:00+00:00 (buildMultiFixtureRepo) —
+    // arming at the SAME instant satisfies locateMergeCommit's "at/after arm minus slack" floor.
+    const lines = ids.flatMap((taskId, i) => [
+      ledgerLine({ ts: `2026-01-0${i + 1}T00:00:00.000Z`, step: "automerge.armed", task_id: taskId, head_sha: `sha${i}` }),
+      ledgerLine({ ts: `2026-01-0${i + 1}T00:00:00.000Z`, step: "review.posted", task_id: taskId, head_sha: `sha${i}`, capped: false, floor_degraded: false }),
+    ]);
+    // One extra armed row citing a task id absent from the fixture repo's history entirely —
+    // must surface in the UNMEASURABLE listing, never silently dropped.
+    lines.push(
+      ledgerLine({ ts: "2025-12-30T23:50:00.000Z", step: "automerge.armed", task_id: "W1-T999-missing", head_sha: "shamissing" }),
+      ledgerLine({ ts: "2025-12-30T23:50:00.000Z", step: "review.posted", task_id: "W1-T999-missing", head_sha: "shamissing", capped: false, floor_degraded: false }),
+    );
+    writeGzArchive(stateDir, "ledger.2026-01-01T00-00-00-000Z.ndjson.gz", lines);
+
+    const code = verdictCalibrationCommand([], { stateDir, cwd: repoDir });
+    assert.equal(code, 0);
+    const out = logs.join("\n");
+    assert.match(out, new RegExp(`full PASS\\s+n=${MIN_POPULATION_FLOOR} — revert rate 0\\.0% \\(0/${MIN_POPULATION_FLOOR}\\), follow-up-fix rate 0\\.0% \\(0/${MIN_POPULATION_FLOOR}\\)`));
+    assert.match(out, /unmeasurable: 1 row\(s\)/);
+    assert.match(out, /W1-T999-missing/);
+  } finally {
+    console.log = realLog;
+    rmSync(repoDir, { recursive: true, force: true });
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("verdictCalibrationCommand: a git-history read failure still prints a report, naming git history UNAVAILABLE", () => {
+  const stateDir = tmpStateDir("rmd-verdict-cal-cli-giterr-");
+  const logs: string[] = [];
+  const realLog = console.log;
+  console.log = (...a: unknown[]) => void logs.push(a.map(String).join(" "));
+  try {
+    writeGzArchive(stateDir, "ledger.2026-01-01T00-00-00-000Z.ndjson.gz", [
+      ledgerLine({ ts: "2025-12-31T23:50:00.000Z", step: "automerge.armed", task_id: "W1-T900", head_sha: "deadbeef" }),
+      ledgerLine({ ts: "2025-12-31T23:50:00.000Z", step: "review.posted", task_id: "W1-T900", head_sha: "deadbeef", capped: false, floor_degraded: false }),
+    ]);
+    const nonexistentCwd = join(tmpdir(), "rmd-verdict-cal-nonexistent-xyz-does-not-exist");
+
+    const code = verdictCalibrationCommand([], { stateDir, cwd: nonexistentCwd });
+    assert.equal(code, 0, "an unreadable git history must degrade to UNMEASURABLE, never crash the command");
+    const out = logs.join("\n");
+    assert.match(out, /git history: UNAVAILABLE/);
+    assert.match(out, /unmeasurable: 1 row\(s\)/);
+    assert.match(out, /git history unavailable/);
+  } finally {
+    console.log = realLog;
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
 test("verdictCalibrationCommand: end-to-end over a real repo — joins the ledger to git reality and prints the figures", () => {
   const repoDir = buildFixtureRepo("W1-T900");
   const stateDir = tmpStateDir("rmd-verdict-cal-cli-");

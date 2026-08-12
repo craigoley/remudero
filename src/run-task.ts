@@ -7746,11 +7746,7 @@ export function verdictCalibrationCommand(rest: string[], opts: { stateDir?: str
   const report = verdictCalibrationReport(rows, gitDump, { gitReadError });
 
   console.log(`rmd verdict-calibration — over the unioned ledger at ${stateDir}, git history at ${gitRef}`);
-  if (ledger) {
-    console.log(`  archives: ${ledger.archiveCount} matched, live file read: ${ledger.liveFileRead}`);
-  } else {
-    console.log("  archives: ledger union could not be resolved (unreadable state dir)");
-  }
+  console.log(`  archives: ${ledger.archiveCount} matched, live file read: ${ledger.liveFileRead}`);
   if (gitReadError) {
     console.log(`  git history: UNAVAILABLE — ${gitReadError}`);
   }
