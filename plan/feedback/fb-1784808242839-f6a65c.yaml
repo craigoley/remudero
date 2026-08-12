@@ -26,5 +26,6 @@ raw: "COVERAGE-RATCHET BRANCH NONDETERMINISM — ROOT CAUSE + FIX (folds into
   'plan-only falsifier' acceptance — file as/fold into W1-T220."
 attachments: []
 origin: cli
-status: new
+status: rejected
 proposal_pr: null
+summary: null
