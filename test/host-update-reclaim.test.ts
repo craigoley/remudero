@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -329,4 +329,105 @@ test("MUTANT: deciding presence by the digest again reinstates the false FIRST P
   const run = runHostUpdate("local-nodigest", [], mutant);
   assert.match(run.stdout, /FIRST PULL/, "the mutant must reproduce the false report");
   assert.doesNotMatch(runHostUpdate("local-nodigest").stdout, /FIRST PULL/, "and the real script must not");
+});
+
+// ── THE PRINTED INVOCATION MUST NOT NAME A DEAD VOLUME ───────────────────────────────────────
+//
+// MEASURED on the Azure host 2026-08-12: `~/rmd-state/state/ledger.ndjson` is 100,330 bytes and
+// stops on Aug 8, while `~/rmd-state2`'s is 492,406 bytes and was written Aug 12 — every drain
+// this week ran `-v ~/rmd-state2:/home/node/Remudero`. The volume moved and `STATE_DIR`'s default
+// did not, so `--print-daemon-run` emitted a mount AND a PAUSE lever AND a STOP lever all pointing
+// at an abandoned directory. The script warns three lines later that "a PAUSE written to the wrong
+// path is a lever that silently does nothing"; it simply never checked its own.
+//
+// PRESENCE IS NOT THE SIGNAL. The dead volume DOES hold a ledger — that is why nobody noticed, and
+// a first version of this guard reported "state volume OK" on exactly the broken host. These
+// fixtures therefore differ in FRESHNESS, not in existence.
+
+/** A host with `<prefix>` holding an old ledger and `<prefix>2` holding a newer one. */
+function stateFixture(): { dead: string; live: string } {
+  const base = mkdtempSync(join(tmpdir(), "host-update-vol-"));
+  const dead = join(base, "rmd-state");
+  const live = join(base, "rmd-state2");
+  mkdirSync(join(dead, "state"), { recursive: true });
+  mkdirSync(join(live, "state"), { recursive: true });
+  writeFileSync(join(dead, "state", "ledger.ndjson"), "x".repeat(100330));
+  writeFileSync(join(live, "state", "ledger.ndjson"), "y".repeat(492406));
+  // Freshness is the discriminator, so it is set explicitly rather than left to write order.
+  utimesSync(join(dead, "state", "ledger.ndjson"), new Date("2026-08-08T19:53:00Z"), new Date("2026-08-08T19:53:00Z"));
+  utimesSync(join(live, "state", "ledger.ndjson"), new Date("2026-08-12T18:59:00Z"), new Date("2026-08-12T18:59:00Z"));
+  return { dead, live };
+}
+
+/** Run `--print-daemon-run` against `stateDir`, returning stdout+stderr and the exit code. */
+function printWithState(stateDir: string, scriptPath = SCRIPT): { out: string; status: number } {
+  // STREAMS MERGED BY THE SHELL (2>&1), not concatenated afterwards: the warning goes to stderr
+  // and the document to stdout, so joining the two buffers would put stdout first regardless and
+  // make any ordering assertion measure THIS HELPER instead of the script. It did — the ordering
+  // test failed on a script whose output order was already correct.
+  const r = spawnSync("bash", ["-c", '"$0" --print-daemon-run 2>&1', scriptPath], {
+    encoding: "utf8",
+    cwd: REPO_ROOT,
+    env: { ...process.env, RMD_STATE_DIR: stateDir },
+  });
+  return { out: r.stdout ?? "", status: r.status ?? -1 };
+}
+
+test("the printed invocation WARNS when its state volume is staler than a sibling, naming both", () => {
+  const { dead, live } = stateFixture();
+  const run = printWithState(dead);
+  assert.equal(run.status, 0, "this is a print-only command and must still print");
+  assert.match(run.out, /is STALER than a sibling/);
+  assert.match(run.out, new RegExp(`more recently written: ${live.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+  assert.match(run.out, /100330 bytes/, "must name what the derived volume actually holds…");
+  assert.match(run.out, /492406 bytes/, "…and what the sibling holds");
+  assert.match(run.out, /RMD_STATE_DIR=<path>/, "and must name the override that fixes it");
+  // THE POINT: the warning has to precede the document an operator copies, or it is decoration.
+  assert.ok(
+    run.out.indexOf("is STALER than a sibling") < run.out.indexOf("docker run -d --name remudero-daemon"),
+    "the warning must appear BEFORE the invocation it is warning about",
+  );
+});
+
+test("the HEALTHY direction: the newest volume prints OK and no warning at all", () => {
+  const { live } = stateFixture();
+  const run = printWithState(live);
+  assert.equal(run.status, 0);
+  assert.match(run.out, /state volume OK/);
+  assert.match(run.out, /492406 bytes/, "the evidence is printed, not merely asserted");
+  assert.doesNotMatch(run.out, /STALER/, "a current volume must not be warned about");
+  assert.doesNotMatch(run.out, /WARNING/, "…and must produce no warning of any kind");
+});
+
+test("a FRESH host is a NOTE, not a warning — refusing there would fire on a healthy condition", () => {
+  const base = mkdtempSync(join(tmpdir(), "host-update-fresh-"));
+  const run = printWithState(join(base, "rmd-state"));
+  assert.equal(run.status, 0);
+  assert.match(run.out, /expected on a fresh host/);
+  assert.doesNotMatch(run.out, /STALER/);
+  // Still prints the document — provisioning a new host is the whole reason this command exists.
+  assert.match(run.out, /docker run -d --name remudero-daemon/);
+});
+
+test("MUTANT: reinstating the omission — no check at all — lets the dead volume print silently", () => {
+  // Done by REINSTATING THE DEFECT IN THE REAL SCRIPT rather than asserting against a proxy: the
+  // whole guard block is removed, which is exactly the state that shipped, and the staleness test
+  // above must go red. A mutant that only proves a string moved would pass on a guard that checks
+  // the wrong thing — as the first version of this one did, reporting OK on the broken host.
+  const src = readFileSync(SCRIPT, "utf8");
+  const begin = src.indexOf("  # PRESENCE IS NOT THE SIGNAL");
+  const end = src.indexOf("  echo\n  cat <<PRINTED");
+  assert.ok(begin >= 0 && end > begin, "the guard block must be locatable, or this proves nothing");
+  const dir = mkdtempSync(join(tmpdir(), "host-update-mutant-vol-"));
+  const mutantPath = join(dir, "host-update.sh");
+  writeFileSync(mutantPath, src.slice(0, begin) + src.slice(end), { mode: 0o755 });
+  chmodSync(mutantPath, 0o755);
+
+  const { dead } = stateFixture();
+  const run = printWithState(dead, mutantPath);
+  assert.equal(run.status, 0);
+  assert.doesNotMatch(run.out, /STALER/, "the mutant must NOT warn — that is the defect being reinstated");
+  // And it still prints the dead path as the mount and both levers, which is the shipped bug.
+  assert.match(run.out, new RegExp(`-v ${dead.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:`));
+  assert.match(run.out, new RegExp(`touch ${dead.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/state/STOP`));
 });
