@@ -315,31 +315,47 @@ forensic detail, so the narrative does not need to live here.
   ci-gate's wait cap sized under the real check wall-clock, a deploy ceiling consumed by a dry-run
   that delivered nothing, and a check-wait bound where 21 of 21 booked PRs later merged.
   *(W1-T312, W1-T380/#1392, W1-T382/#1401)*
-- **A ZERO IS NOT A MEASUREMENT UNTIL A POSITIVE CONTROL PROVES THE QUERY COULD SEE ITS CORPUS —
-  THREE THINGS HERE ANSWER WRONG INSTEAD OF ERRORING.** Each was caught by a control; none was
-  caught by reading the query. **And (c) is the warning about the other two: A CONTROL THAT PROVES
-  THE CORPUS IS READABLE DOES NOT PROVE THE QUERY COVERS IT.**
-  **(a) `awk` is mawk and SILENTLY IGNORES `\s` and `\b`.** Over a file containing `  let b = 2;`,
-  `/^[[:space:]]+(let|const)/` matches 1 and `/^\s+(let|const)/` matches 0. Neither errors. One
-  session's declaration scan used the `\s` form, reported an EMPTY declaration list and a companion
-  row of zeros, and concluded a refactor was scope-safe on no evidence at all. Use POSIX classes
-  (`[[:space:]]`) or `grep -E`/`grep -w`. *(2026-08-09, twice)*
+- **A ZERO IS NOT A MEASUREMENT UNTIL A POSITIVE CONTROL PROVES THE QUERY COULD SEE ITS CORPUS.
+  RUN ONE ON EVERY SWEEP WHOSE ANSWER YOU INTEND TO ACT ON — not just when a zero looks suspicious.**
+  FOUR distinct instruments here answer WRONG rather than erroring, and STOP EXPECTING THIS LIST TO
+  BE COMPLETE: three of the four were found by ACCIDENT within one week, each by a falsifier that
+  reddened nothing or a target visible in the file — never by reading the query. Enumerating the
+  hazards has lost that race twice; the control is the only instrument that generalises, because it
+  tests the QUERY rather than your memory of which tool is broken. A control costs one command: match
+  something you can SEE, in the same corpus, with the same tool and flags.
+  **And note the two directions a control can be too weak: (c) is one — A CONTROL THAT PROVES THE
+  CORPUS IS READABLE DOES NOT PROVE THE QUERY COVERS IT — and (a) is the other, where the control
+  passes because you unwittingly ran a DIFFERENT engine than the sweep did.**
+  **(a) A POSIX REGEX ENGINE HERE SILENTLY DROPS `\s`/`\b` INSTEAD OF ERRORING, AND TWO DIFFERENT
+  TOOLS DO IT.** Both are GNU extensions; a POSIX engine matches something else and reports a clean
+  zero. `awk` is mawk: over a file containing `  let b = 2;`, `/^[[:space:]]+(let|const)/` matches 1
+  and `/^\s+(let|const)/` matches 0 — one session's declaration scan used the `\s` form, reported an
+  EMPTY declaration list and a row of zeros, and called a refactor scope-safe on no evidence
+  *(2026-08-09, twice)*. `git grep -E` IS THE SAME ENGINE PROBLEM, and it is the one that bites a
+  repo sweep: MEASURED, `git grep -lE '\busr/bin\b' -- CLAUDE.md` returns **0** while
+  `git grep -lE 'usr/bin' -- CLAUDE.md` returns 1. `git grep -P`, `git grep -w` and
+  `/usr/bin/grep -E '\busr\b'` all find it — which is exactly what makes this invisible: the `-E` you
+  type at a terminal honours `\b` and the one inside `git grep` does not *(2026-08-12)*. Use POSIX
+  classes, `-w`, or `git grep -P`; never `\b`/`\s` under `awk` or `git grep -E`.
   **(b) THE `grep` IN THIS HARNESS IS A ugrep WRAPPER WITH `-I` (ignore-binary) INJECTED, so a file
   holding ONE NUL byte is skipped entirely — no output, exit 1, indistinguishable from real
-  absence.** FOUR tracked sources carry a DELIBERATE raw NUL and are load-bearing, not corrupt:
-  `src/lib/task-linter.ts` and `src/lib/flight-signals.ts` use it as a field separator in
-  `criterionKey`/`hashToolCall`; `test/gate-properties.test.ts` and `test/property-parsers.test.ts`
-  carry it in their `HAZARDS` fuzz alphabets. MEASURED: `grep -rl criterionKey src/` returns EMPTY
-  while `grep -arl` returns the file. **BARE `rg` IS BLIND THE SAME WAY** in a directory sweep
-  (`rg -l` EMPTY, `rg -la` and `git grep -l` fine), so "use grep -a or rg" is NOT the rule — `rg`
-  alone is unsafe. `/usr/bin/grep` is unaffected, which is why this went unnoticed for months: a
+  absence.** THE POPULATION IS NOW ZERO AND A GATE HOLDS IT THERE — W1-T438/#1664 applied the
+  durable fix (write the separator as the `\0` ESCAPE, byte-identical: same string, same length,
+  same sha256), and `test/no-raw-nul.test.ts` walks `git ls-files`, reads bytes, and fails naming
+  path@offset if a raw NUL returns. So the flag-every-session era is over for TRACKED sources.
+  **WHAT REMAINS TRUE, AND IS THE REASON THIS CLAUSE SURVIVES:** the tool is still blind, so any
+  UNTRACKED or newly-added file the gate has not seen yet reads as absent. MEASURED while it was
+  live: `grep -rl criterionKey src/` returned EMPTY while `grep -arl` returned the file. **BARE `rg`
+  IS BLIND THE SAME WAY** (`rg -l` EMPTY, `rg -la` fine), so "use grep -a or rg" is NOT the rule —
+  `rg` alone is unsafe. `/usr/bin/grep` is unaffected, which is why it went unnoticed for months: a
   human at a terminal never sees it. Use `grep -ar`, `rg -la` or `git grep` for ANY sweep that
-  decides a `files:` list, a violation count or a scope audit. THE POPULATION IS EXACTLY FOUR, and
-  `git ls-files -z | xargs -0 perl -0777 -ne 'print "$ARGV\n" if /\0/'` names it — **`git grep
-  --cached -I -l ''` does NOT**, because git sniffs only the first 8000 bytes and two of the four
-  carry their NUL past that. The durable fix is to write the separator as the `\0` ESCAPE, which is
-  byte-identical (proven: same string, same length, same sha256) and makes the files plain text
-  again, rather than a flag every session must remember. *(2026-08-11)*
+  decides a `files:` list, a violation count or a scope audit. **NEVER TRUST A COUNT HERE — RUN THE
+  QUERY:** `git ls-files -z | xargs -0 perl -0777 -ne 'print "$ARGV\n" if /\0/'`. The previous
+  wording said "EXACTLY FOUR", named four files, and was wrong twice within days — first when
+  `src/lib/verdict-calibration.ts` joined unnoticed, then when the fix emptied the set entirely.
+  Today it returns three `.png` and no sources. `git grep --cached -I -l ''` is NOT a substitute: git
+  sniffs only the first 8000 bytes, and the two files that mattered carried theirs at 51546 and 8609.
+  *(2026-08-11; the count retired and the population emptied 2026-08-12)*
   **(c) A GLOB THAT NAMES ONE FILE FORM ANSWERS FROM THE OTHER WITHOUT SAYING SO.** The ledger
   union's `.gz`-only glob returned **0 hits for a pattern with 3 real hits** while its positive
   control read 257k lines — because the control proved the `.gz` half readable and said nothing
