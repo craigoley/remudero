@@ -18,7 +18,24 @@
     THE FOUR MEASURED FACTS, EACH RE-DERIVED AT THIS SHA:
     (1) `Scope` is exactly the union of read and write, with TWO grant sets — a read-only set and a
     read-plus-write set. There is no third tier and no per-route capability.
+    RE-DERIVED AT 0b9d564, AND THE CONSUMER SET IS COMPLETE AND SMALL — this is the ripple a third
+    VALUE would have to cover, all six sites in `src/lib/service.ts` and nowhere else: the `Scope`
+    type declaration itself; the `scope` field on `Route`; the `scope` field on `SseRoute`; the
+    READ_ONLY grant set; the READ_WRITE grant set; and `grantedScopes`'s declared return type. The
+    enforcement site is a seventh, reading the resolved route's scope and answering 403 with it. The
+    ONLY other whole-word hit anywhere in src/ or test/ is a markdown heading in
+    `src/lib/project-init.ts` and two test COMMENTS, neither of which is a consumer.
     (2) 22 scope declarations across 20 DISTINCT write-scoped route paths.
+    (2a) RE-MEASURED AT 0b9d564 AND UNCHANGED SINCE THE RECON — this was checked rather than
+    assumed, because the amendment brief expected routes to have been ADDED. They have not. The
+    query, named so it can be re-run rather than quoted: `git grep -c 'scope: \"write\"' <sha> --
+    src/lib`, run at BOTH 8a2f3eb and HEAD, returns byte-identical per-file counts
+    (panel-actions 10, panel-graph 7, panel-skill-run 1, operator-notes 1, serve 3). The raw 22
+    OVER-COUNTS by two: of serve.ts's three hits exactly one is a route entry, the other two being a
+    doc comment and a response BODY that echoes the string. So 20 real entries across 20 distinct
+    paths, and the recon's 5/9/6 split still partitions them exactly — every path is accounted for
+    once, which is why design (i) can assign all 20 without a residue.
+    NO COUNT HERE SHOULD BE QUOTED FORWARD; re-run the query.
     (3) `grantedScopes` has EXACTLY ONE call site, inside `createService`'s dispatcher, with
     enforcement two lines later — a missing grant answers 401 and an insufficient one answers 403.
     It already composes identity-then-bearer with a documented fall-through, and BOTH branches
@@ -44,33 +61,97 @@
     So this is NOT a continuum and NOT a clean two-way split: it is two clear poles with a third of
     the population genuinely arguable between them. That is why the tier model is posed as options
     below rather than asserted.
+    (5) THE EXISTING TESTS THAT ASSERT THE SHAPE THIS CHANGES, swept at 0b9d564 and split by
+    INVOCATION COUNT rather than by mention, because declaring a file that merely names a symbol
+    draws a permanent advisory. FOUR files carry REAL assertions that a third tier breaks:
+      - `test/service.test.ts` and `test/panel-actions.test.ts` each assert the 403 body's
+        `required_scope` equals write, TWO real assertions apiece, and BOTH do it against
+        POST /v1/control/pause — which design (i) places in the MIDDLE tier. These do not merely
+        need updating; they are the tests that would go red first.
+      - `test/tailnet-identity-scope.test.ts` asserts an allowlisted identity 200s on that SAME
+        middle-tier route with no bearer token at all, so it also pins what tier an identity grant
+        resolves to — a question the migration in (v) must answer.
+      - `test/api-client-drift-check.test.ts` asserts the generated two-value union verbatim by
+        regex; see design (vi-a).
+    TWO more construct TYPED route literals and are encoding-dependent per design (i-a) —
+    `test/api-client-client.test.ts` (a typed Route array plus an SseRoute array) and
+    `test/serve-prewarm-clientgate.test.ts` (one SseRoute) — both read-scoped only, so they break
+    under a REQUIRED new field and not under a widened union. Declared for the same reason the panel
+    modules are: declaring costs nothing, omitting has the scope guard refuse after the work.
+    TWO ARE DELIBERATELY NOT DECLARED, and this is the invocation-count split doing real work:
+    `test/route-wiring.test.ts`'s only `Scope` hit is a SECTION COMMENT and its actual assertion —
+    a read token is refused on nine write routes — is tier-agnostic and survives all three tiers;
+    `test/route-registration.test.ts` imports the Route TYPE but never constructs one, and asserts a
+    read token is refused on a LOW-tier route. Both keep passing unchanged.
+    A MEASUREMENT HAZARD THAT COST TIME AND WILL RECUR: `src/lib/task-linter.ts`,
+    `src/lib/flight-signals.ts`, `test/gate-properties.test.ts` and `test/property-parsers.test.ts`
+    are classified by `file` as data, not text, so plain `grep` treats them as BINARY and reports
+    NOTHING while exiting 1 — a positive control for a string known to be present returned zero.
+    Use `grep -a` or `rg`. None of them is in this task's route or scope surface, so no count above
+    is affected; it is recorded because a silent zero here reads exactly like a real absence.
     ONE ROUTE MAY SIMPLY BE MIS-SCOPED TODAY, recorded because it is cheap to check and would
     shrink the surface: the auth scope route is declared write-scoped but its only job is to answer
     whether the caller HAS write scope — the shell probes it to decide whether to render write
     controls at all. Whether it needs write to answer that question is worth settling in passing."
-  design: "(i) THE TIER MODEL IS AN OPERATOR RULING AND IS POSED AS OPTIONS, NOT INFERRED. Three
-    tasks this week died because an implementer inferred a design the plan had not recorded, so the
-    trade is named and the decision is left where it belongs:
-      (a) TWO TIERS with the contested middle assigned to the HIGH tier. Safest; makes pausing the
-          fleet from a phone as ceremonious as spending money, which the operator may find
-          intolerable in exactly the moment he most wants to stop something.
-      (b) TWO TIERS with the contested middle assigned to the LOW tier. Best ergonomics; leaves the
-          spend ceiling — the control that ENABLES pole A — behind the ordinary credential.
-      (c) THREE TIERS, separating reversible-but-disruptive from both poles. Most faithful to the
-          measured population and the most machinery, and it needs a rule for what a fourth tier
-          would be before anyone adds one.
+  design: "(i) RULED 2026-08-11 — THREE TIERS, option (c). The operator has ruled; this is no longer
+    posed. The tiers are LOW (bookkeeping), MIDDLE (reversible-but-disruptive) and HIGH (spends
+    money or moves code), and the ruling's own reasoning is recorded because it is the rule for what
+    a fourth tier would have to be: forcing the contested six into either pole is what made a
+    two-tier model arbitrary, and RAISING A CEILING SPENDS NOTHING — it removes the thing that would
+    have stopped the spending. That is a distinct CONSEQUENCE CLASS, not a boundary case, and a
+    fourth tier would need to name a consequence class these three do not cover.
+    THE ASSIGNMENT, all 20 write-scoped routes, re-measured at 0b9d564 (see rationale fact (2a)):
+      HIGH, 5: POST /v1/drain/run, /v1/drain/kick, /v1/skills/run, /v1/manual/approve,
+        /v1/inbox/approve.
+      MIDDLE, 6: POST /v1/control/stop, /v1/control/pause, /v1/control/resume, /v1/quiet-hours,
+        /v1/policy/daily-cost-ceiling, /v1/policy/daily-cost-ceiling/clear.
+      LOW, 9: POST /v1/operator-notes/add, /v1/feedback, /v1/feedback/preview, /v1/feedback/decision,
+        /v1/questions/answer, /v1/escalation/mark-handled, /v1/drain/feedback, /v1/inbox/reframe,
+        and GET /v1/auth/scope.
+    (i-a) THE ENCODING IS NOT RULED and is the implementer's call, because the ruling fixes the tier
+    COUNT and not its spelling. Two encodings satisfy every criterion below: WIDEN the `Scope` union
+    (rationale fact (1) enumerates all six consumption sites, so the ripple is bounded and known), or
+    add a SEPARATE tier field to `Route`/`SseRoute` and leave `Scope` at two values. The measured
+    difference is blast radius on test route literals: a REQUIRED new field breaks every typed route
+    literal in `test/` including read-only ones (rationale fact (5)), an optional field or a widened
+    union breaks only the write ones. Both are declared in `files:` so either choice is buildable.
     (ii) TIERS MUST BE DECLARED, NOT DERIVED — established rather than assumed. Consequence is not
     recoverable from the handler: a single module declares routes at BOTH poles (inbox approve and
     feedback preview and the cost ceiling all come from the same one), so any module-level or
     grep-shaped signal scores them identically. Declaring is therefore the only honest option.
-    (iii) BUT A DECLARED LIST MUST BE COMPLETENESS-CHECKED AGAINST THE LIVE ROUTE TABLE, or it
-    becomes the hand-enumeration defect W1-T402 is filed for, where a list written against one
-    day's tree covered fewer than half the files it should. The precedent that keeps a list honest
-    is the ci-parity drift check, which FAILS on a job with no entry rather than skipping it. The
-    routes here are assembled into ONE array inside the service builder and every entry already
-    carries its path and its scope, so the same shape is available: walk the real assembled table,
-    fail on any write-scoped route with no tier. A new route must be unable to default quietly.
-    (iv) THE SECOND FACTOR MUST BE SERVER-ENFORCED OR IT IS THEATRE, and the ergonomics constraint
+    (iii) RULED 2026-08-11 — A DECLARED LIST PLUS A DRIFT CHECK, IN THE SHAPE `ci-parity:drift`
+    ALREADY USES. A new route with no tier FAILS the way an unregistered ci.yml job fails. FOLLOW
+    THAT MECHANISM RATHER THAN INVENTING A SECOND SPELLING; it is re-derived here from
+    `src/lib/ci-parity.ts` at 0b9d564 so the implementer copies a shape that exists:
+      - A declared table, `CI_PARITY_TABLE`, one entry per job. Its doc comment states the contract:
+        the drift step fails the moment `parseCiJobNames` finds a job the table does not name at
+        all, and a listed non-mirrored job is a considered, reasoned exclusion, not a gap.
+      - `runCiParity` derives the LIVE set from source rather than from a second list, then computes
+        the missing set as the live jobs not present in the table's job set.
+      - It PREPENDS one named step, `ci-parity:drift`, whose ok is exactly the missing set being
+        empty, and whose FAIL detail NAMES the entries with no parity entry. PASS states the count
+        it checked, so a vacuous pass over an empty live set is visible in the message itself.
+      - `excludedStep` renders a listed exclusion with its recorded reason, defaulting to a literal
+        no-reason-recorded string — an exclusion cannot be silent either.
+    THE SAME SHAPE IS AVAILABLE HERE because `buildServeRoutes` (`src/lib/serve.ts`) already returns
+    the real assembled table as ONE array and every entry carries its `method`, `path` and `scope`.
+    So: walk that array, and fail on any write-scoped route with no tier. A new route must be unable
+    to default quietly, and a deliberately-LOW route must be a declared entry with a reason rather
+    than an omission.
+    (iii-a) THE PRECEDENT TO IMPROVE ON, NOT COPY, IS W1-T402's. It shipped a completeness alarm for
+    `INSTRUMENT_SURFACE` (`src/lib/review.ts`) THIS WEEK, paired with an exclusions map and
+    `test/instrument-surface-completeness.test.ts`, deriving candidates from the live tree and
+    failing when one is neither covered nor excused. Its own doc comment records the limit that
+    matters here: THAT ALARM NEVER BLOCKS A PR BY ITSELF — only the constant does. It is a TEST.
+    `ci-parity:drift` is stronger because it runs inside the product function and fails the caller.
+    Prefer the ci-parity shape for that reason; W1-T402 is cited as the reason a bare comment asking
+    a future reader to re-check membership is NOT sufficient, which is what the surface had before
+    it.
+    (iv) STILL OPEN — THE SECOND FACTOR IS THE ONE REMAINING OPERATOR RULING, AND IS DELIBERATELY
+    NOT ANSWERED HERE. The 2026-08-11 rulings settled the tier COUNT (i) and the enforcement
+    MECHANISM (iii) and explicitly did not settle this. It is what keeps `verify: human` in place;
+    see the note. The options below are unchanged and none is preferred by this amendment.
+    THE SECOND FACTOR MUST BE SERVER-ENFORCED OR IT IS THEATRE, and the ergonomics constraint
     is measured rather than assumed: the operator already re-pastes the write token constantly
     because paste-once lives in session storage and dies with the tab. A design that adds a SECOND
     thing to paste makes a known friction worse. Options, with that constraint applied:
@@ -88,17 +169,38 @@
     tier, the change ships as a no-op that silently grants everything and nobody notices for months.
     Defaulting LOW is a deliberate, visible break: the existing credential keeps bookkeeping and
     loses the dangerous routes until the operator does something about it.
-    (vi) THE BLAST RADIUS IS SMALL AND WAS MEASURED. The console shell holds the token in session
-    storage and already PROBES its own scope before rendering write controls, so a tier-aware probe
-    has an existing seam to slot into; the console-url verb prints the write token for pasting. NO
-    SCRIPT UNDER scripts/ POSTS TO THE API AT ALL, so there is no script fleet to migrate."
+    (vi) THE BLAST RADIUS IS SMALL ON THE CONSOLE AND WAS MEASURED. The console shell holds the
+    token in session storage and already PROBES its own scope before rendering write controls, so a
+    tier-aware probe has an existing seam to slot into; the console-url verb prints the write token
+    for pasting. NO SCRIPT UNDER scripts/ POSTS TO THE API AT ALL, so there is no script fleet to
+    migrate.
+    (vi-a) CORRECTION, 2026-08-11 — (vi) MISSED A PUBLISHED CONTRACT, and it is the sharpest
+    files: consequence in this amendment. `required_scope` is not private to the service: it is a
+    declared field of the Error schema in `openapi/daemon.yaml`, carrying an ENUM of exactly the two
+    current values. That spec is the source for a GENERATED client, `packages/api-client`, whose
+    checked-in schema declares the same two-value union as an optional field. THE CHAIN IS
+    CI-ENFORCED: the package.json script `api-client:check` runs the generator in check mode, that
+    script is a mirrored `CI_PARITY_TABLE` entry under the job name `api-client-drift`, and
+    `test/api-client-drift-check.test.ts` asserts the generated union VERBATIM by regex. So a third
+    tier is a spec change and a regeneration, not just a service change, and omitting either path
+    from `files:` has the scope guard refuse the branch after the work is done — the W1-T407 failure
+    mode this shard is being amended to avoid.
+    ONE CONSUMER IS DELIBERATELY NOT DECLARED: `packages/daemon-client-smoke` reads the field as a
+    string to build a message, and its own header comment says it is a tripwire for a property
+    rename/removal and for an enum member rename/removal on the ERROR code — not on this field.
+    WIDENING an enum breaks neither, so it needs no edit; it is named here so a future reader does
+    not re-derive that and mistake the omission for an oversight."
   acceptance:
     - claim: "a high-consequence route refuses a credential that carries only the ordinary write grant, and says which tier it required"
       proof: "unit test: test/write-tier-enforcement.test.ts"
     - claim: "a bookkeeping route still accepts the ordinary write grant, so the common path is not made ceremonious"
       proof: "unit test: test/write-tier-low-path.test.ts"
+    - claim: "a reversible-but-disruptive route is refused the low grant and accepted by the middle one, so the third tier is distinguishable from both poles"
+      proof: "unit test: test/write-tier-middle-tier.test.ts"
     - claim: "every write-scoped route in the real assembled route table carries a tier, and a route added without one fails rather than defaulting"
       proof: "unit test: test/write-tier-completeness.test.ts"
+    - claim: "the published error schema and its generated client both carry the new tier, so the API contract cannot drift from the server"
+      proof: "unit test: test/api-client-drift-check.test.ts"
     - claim: "the second factor is checked by the server, so a request made outside the console cannot skip it"
       proof: "unit test: test/write-tier-second-factor.test.ts"
     - claim: "an existing write credential resolves to the LOW tier, so the change cannot ship as a silent grant of everything"
@@ -106,24 +208,43 @@
   risk: high
   origin: recon#hosted-console-auth-2026-08-07
   plan_refs: ["§7", "§8"]
-  files: [src/lib/service.ts, src/lib/serve.ts, src/lib/panel-actions.ts, src/lib/panel-graph.ts, src/lib/panel-skill-run.ts, src/lib/operator-notes.ts, test/write-tier-enforcement.test.ts, test/write-tier-low-path.test.ts, test/write-tier-completeness.test.ts, test/write-tier-second-factor.test.ts, test/write-tier-migration-defaults-low.test.ts]
+  files: [src/lib/service.ts, src/lib/serve.ts, src/lib/panel-actions.ts, src/lib/panel-graph.ts, src/lib/panel-skill-run.ts, src/lib/operator-notes.ts, openapi/daemon.yaml, packages/api-client/src/schema.d.ts, test/write-tier-enforcement.test.ts, test/write-tier-low-path.test.ts, test/write-tier-middle-tier.test.ts, test/write-tier-completeness.test.ts, test/write-tier-second-factor.test.ts, test/write-tier-migration-defaults-low.test.ts, test/service.test.ts, test/panel-actions.test.ts, test/tailnet-identity-scope.test.ts, test/api-client-drift-check.test.ts, test/api-client-client.test.ts, test/serve-prewarm-clientgate.test.ts]
   status: queued
   attempts: 0
-  note: "verify:human, and the reason is design (i) and (iv), not the work. A scope model is an
-    OPERATOR RULING — which of three tier shapes, and which of three second factors — and
+  note: "AMENDED 2026-08-11 — TWO OF THE THREE BLOCKING RULINGS ARE NOW RECORDED, AND THE PARK
+    STAYS FOR THE THIRD. The prior note said to flip to auto once BOTH design (i) and design (iv)
+    were answered. (i) is answered — three tiers, with the assignment of all 20 routes written out.
+    (iii)'s enforcement mechanism is answered and re-derived from source. (iv), THE SECOND FACTOR,
+    IS NOT: the operator ruled on the tier count and the enforcement mechanism and explicitly
+    withheld this one. So the flip condition as this shard itself states it is NOT met, and
+    `verify: human` is left in place deliberately rather than by neglect.
+    WHAT WOULD MAKE IT DISPATCHABLE — exactly one ruling, on design (iv): a separately-issued
+    high-tier token, a time-boxed elevation, or a server-issued action-bound confirm nonce. Nothing
+    else in this shard now needs the operator. When that lands, flip `verify:` to auto; no other
+    field needs to change, because every acceptance claim below holds under all three second
+    factors, and the two encodings in (i-a) are both already covered by `files:`.
     `isDispatchEligible` refuses a task whose verify is not auto BEFORE the linter is consulted, so
-    parking it prevents a worker rediscovering the W1-T391 wall. Flip to auto once both are
-    answered; every acceptance claim above holds under all three tier options and all three second
-    factors, so nothing needs rewriting when it flips.
+    the park also keeps a worker from rediscovering the W1-T391 wall in the meantime.
     risk:high is Rule 19's SPAN, not blast radius — the file set crosses src/ and test/ and touches
     the single authorization choke point. The band is raised deliberately rather than shipped as a
-    sizing violation, which is the W1-T400 lesson.
+    sizing violation, which is the W1-T400 lesson. THE AMENDMENT DID NOT MOVE THE BAND: this
+    amendment adds two acceptance criteria (5 to 7) and nine paths (11 to 20), and `sizingViolation`
+    (`src/lib/task-linter.ts`) returns early at risk high before `subsystemsOf` is ever consulted —
+    the Rule 19 exemption already covers whatever the widened criteria text and `files:` now span,
+    so the band was already correct rather than newly earned. Measured: this shard raised ZERO lint
+    violations before the amendment and zero after.
     The four panel modules are declared because option (ii) puts a tier on each route ENTRY, and the
     entries live in the modules that build them. Under a variant that keeps the table entirely in
     the service module they would be untouched — declaring them costs nothing, whereas omitting one
     would have the scope guard refuse the branch AFTER the work was done.
-    All five proofs are forward references to PATHS, never to symbols: a path forward-reference is
-    safe, a symbol one is a guess, and a grep proof naming an existing symbol would match the merge
-    base as well as the head and be downgraded to a stale proof that discriminates nothing.
+    ALL SEVEN proofs are PATH references, never symbol ones: a path forward-reference is safe, a
+    symbol one is a guess, and a grep proof naming an existing symbol would match the merge base as
+    well as the head and be downgraded to a stale proof that discriminates nothing. Six are forward
+    references to files that do not exist yet. THE SEVENTH IS DELIBERATELY NOT — the api-client
+    criterion names `test/api-client-drift-check.test.ts`, which EXISTS TODAY, because the contract
+    it guards exists today too and the implementation must change that file's assertion rather than
+    add a parallel one. In the pure-path form a `unit test:` proof executes the whole file, so it
+    discriminates on the amended assertion; it is not a grep and so cannot go stale against the
+    merge base.
     The ledger is UNMEASURED throughout — the host is down and no figure in this shard is read from
     it. Every count here is from source at 8a2f3eb."
