@@ -92,12 +92,25 @@
   risk: high
   origin: recon#last-cycle-stale-2026-08-12
   plan_refs: ["W1-T236", "W1-T113", "P48"]
-  files: [src/lib/worker-containment.ts, src/lib/worker.ts, test/spawn-nopid-diagnosis.test.ts, test/worker-containment.test.ts]
+  files: [src/lib/worker-containment.ts, src/lib/worker.ts, src/run-task.ts, test/spawn-nopid-diagnosis.test.ts, test/worker-containment.test.ts]
   status: queued
   attempts: 0
   note: "verify:auto — nothing here needs an operator ruling. Design (ii) leaves ONE choice open and
     states why (a) is preferred, which is an engineering argument rather than a policy the plan
     withheld.
+    CORRECTION MADE WHILE BUILDING THIS (2026-08-12): `src/run-task.ts` WAS ADDED to files:, and
+    design (ii)(a) as filed is NOT IMPLEMENTABLE AS WORDED. It proposed the callback as a field on
+    `ContainedSpawnOptions` wired by `spawnWorker` — but that object is constructed by the SDK and
+    handed to our spawn fn (`spawnClaudeCodeProcess?: (options: SpawnOptions) => SpawnedProcess`),
+    so a field we add is never populated. The callback is therefore a THIRD PARAMETER of
+    `spawnDetachedGroup`, appended LAST so no positional caller shifts. The destination moved for a
+    second, independent reason: `spawnWorker` cannot reach the ledger, because `ledgerPathFor` lives
+    in run-task.ts, run-task.ts already imports worker.ts, and re-spelling
+    join(config.root, state, ledger.ndjson) inside worker.ts would undo the consolidation that
+    function's own doc records. So worker.ts stays logger-free and `runTask` wraps its `spawn` dep
+    once — which also means a spawn added later is diagnosed by construction. The CHOICE the design
+    posed still resolves the way it argued: a callback, not a holder, because the event may not have
+    fired when the caller's catch runs.
     risk:high is Rule 19's SPAN, not blast radius: `subsystemsOf` reads `files:` plus acceptance
     text and this set crosses `src/lib` and `test/`, which is >=2 subsystems and would be a sizing
     violation at any lower band. Raised up front — the W1-T400/W1-T407 lesson. The actual change is

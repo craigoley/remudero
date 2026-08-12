@@ -4721,7 +4721,7 @@ async function runTask(
   } = {},
 ): Promise<RunResult> {
   const config = opts.config ?? loadConfig();
-  const spawn = opts.spawn ?? spawnWorker;
+  const rawSpawn = opts.spawn ?? spawnWorker;
   const runReviewFn = opts.runReview ?? runReview;
   const fetchPrBodyFn = opts.fetchPrBody ?? fetchPrBodyViaGh;
   const recordDecisionFn = opts.recordDecision ?? recordDecision;
@@ -4732,6 +4732,37 @@ async function runTask(
   const runId = `${taskId}-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, ...extra });
+
+  /**
+   * W1-T442: THE DESTINATION for a spawn's asynchronous 'error' event. Wrapping
+   * the `spawn` dep ONCE here — rather than adding `onSpawnError` at each of
+   * recon's, implement's and fix's call sites — means a spawn added later is
+   * diagnosed by construction instead of by remembering.
+   *
+   * `worker.spawn_error` is DIAGNOSTIC and is deliberately NOT added to
+   * `DECISION_RELEVANT_LEDGER_STEPS`: nothing reads it, so a rotation dropping
+   * it costs a post-mortem rather than a wrong decision — the same argument
+   * #1629 made for `dispatch.circuit_broken`. (#1648 took the OPPOSITE decision
+   * for its own rows, and the difference is the whole test: there, a consumer
+   * had appeared that read them. `test/ledger-rotation.test.ts` re-derives the
+   * set from consumer source, so it will refuse this the moment one appears
+   * here too.)
+   */
+  const spawn: typeof spawnWorker = (spawnArgs) =>
+    rawSpawn({
+      ...spawnArgs,
+      onSpawnError:
+        spawnArgs.onSpawnError ??
+        ((err) =>
+          log("worker.spawn_error", {
+            // The errno IS the finding — everything else is context for it.
+            code: err.code ?? null,
+            errno: typeof err.errno === "number" ? err.errno : null,
+            syscall: err.syscall ?? null,
+            path: err.path ?? null,
+            error: String(err.message ?? err),
+          })),
+    });
   // W1-T143: a raw synchronous write, not console.log — this narration is exactly what the
   // daemon's `runOne` exercises on every dispatch, and console.log's async, non-TTY-buffered
   // writes are why daemon.out.log sat empty for a whole live run (see writeSyncLine's doc).
