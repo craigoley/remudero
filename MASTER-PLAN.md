@@ -1021,53 +1021,83 @@ per-cycle restatement this section forbids.)*
   (#1436, `src/lib/ledger-grep.ts`), so "open, filed 2026-08-05" above is STALE; (4) the sweep-survey
   gate, recorded UNVERIFIED above, is VERIFIED STILL OPEN — `if (actionable.length)` wraps the ONLY
   `log("daemon.clone_reap", …)` in run-task.ts, so a reaper that ran and found nothing and a reaper
-  that never ran are identical in the ledger. **★ RE-FOUNDED 2026-08-12 AT `4c25957` — OPERATOR-DIRECTED (the operator asked for the three faces;
-  a session may not ratify, and the PROPOSAL below still AWAITS RATIFICATION — what is settled is the
-  re-founding, not the adoption).** The census is unrecoverable and stays that way, so MEMBERSHIP NO
-  LONGER CITES IT. Each face now carries a PREDICATE that regenerates its own population on demand,
-  with a control, and FIRST TRANCHE's criterion is the union of them. **The 21 is NOT reconstructed
-  and must not be** — a number asserted as the vanished census's would be worse than the gap.
-  **FACE 1 — UNDERCOUNT-AS-ANSWER. Predicate:** an EXPORTED function whose declared return type is a
+  that never ran are identical in the ledger. **★ RE-FOUNDED 2026-08-12 AT `4c25957` — OPERATOR-DIRECTED (the operator ruled: re-found, do not
+  restore the 21; a session may not ratify, so the PROPOSAL still AWAITS RATIFICATION — what is
+  settled is the METHOD, not the adoption).** The blocker was never the missing number: the entry
+  states a CONCLUSION AND NO METHOD, and two of its four tranche members have since been fixed
+  WITHOUT the proposal being ratified, so its substance is being adopted while its membership rule
+  stays inoperable. Membership no longer cites the census. **The 21 is NOT reconstructed.**
+  **(1) THE MECHANISM CLASSES — SIX ARE NAMEABLE FROM LIVE EVIDENCE, AND THAT IS NOT A RECOVERY.**
+  The census's own six are unknowable; these are RE-DERIVED at `4c25957`, each grounded in a citation
+  that exists at head, and **the fact that six can be named is a COINCIDENCE OF COUNT, not evidence
+  of identity with the census's six** — no future reader may treat the two lists as the same.
+  (a) GLOB MISS AFTER A FORMAT CHANGE — a filename pattern that stops matching when the form moves
+  (`ledger.*.ndjson` seeing zero `.gz`; `ledgerRotationEntries`, src/lib/ledger-grep.ts, exists
+  because two globs each read half the corpus). (b) REMOTE READ FAILURE RENDERED AS EMPTY — a
+  gateway error scored as "nothing there" (`indeterminate`, src/lib/status.ts; the reconciler's
+  throw-on-gateway-failure). (c) PARSE TRUNCATION INDISTINGUISHABLE FROM A SHORT INPUT
+  (`parseAcceptanceBlock`, src/lib/review.ts). (d) A NAME FILTER RESOLVING TO ZERO CANDIDATES
+  (`NameFilterResolution`, src/lib/review.ts). (e) A TRUTHINESS GUARD ON A COLLECTION, whose zero
+  case writes nothing — face 2's whole population. (f) ABSENT RENDERED AS A NUMERIC ZERO in a
+  computed metric (`base_unknown`'s affirmative shape; the retro's 0-turn rows against real dollars).
+  **(2) ONE PREDICATE PER FACE, EACH WITH ITS OWN CONTROL, MEASURED AT `4c25957`.**
+  **FACE 1 — UNDERCOUNT-AS-ANSWER.** *Query:* an EXPORTED function whose declared return type is a
   bare collection or count (`T[]`, `number`, `Map<…>`, `Set<…>`) with no discriminated outcome, AND
-  whose result is consumed by a caller that branches on emptiness. **Population at `4c25957`: 36**, of
-  224 bare-returning exports. **CONTROL: 126** exported functions that DO return a discriminated
-  outcome (a `kind`/`status`/`ok` tag or a `| undefined` refusal) — both shapes exist here, so the
-  query separates rather than sweeps. **It independently finds `parseAcceptanceBlock`
-  (src/lib/review.ts)**, the member this entry names by hand, and also `ledgerRotationEntries`
-  (src/lib/ledger-grep.ts) — the union VERB fails loud, its rotation-listing helper still returns a
-  bare array, so tranche member (3) is closed only at the verb.
-  **FACE 2 — SELF-HIDING OBSERVABILITY. Predicate:** `if (<expr>.length <cmp>)` across `src/**/*.ts`
+  whose result is consumed by a caller that branches on emptiness. **Population 36**, of 224
+  bare-returning exports. **CONTROL 126** exported functions that DO return a discriminated outcome
+  (a `kind`/`status`/`ok` tag or a `| undefined` refusal) — the repo holds both shapes, so the query
+  separates rather than sweeps. **It independently finds `parseAcceptanceBlock`**, the member this
+  entry names by hand. **STATED LIMITATION, because this is a CALL-GRAPH question and only half of
+  it is text:** the SIGNATURE half is exact (a declared return type is text), the CONSUMER half is a
+  TEXT APPROXIMATION — it matches a caller that reads `.length` or tests the binding for falsiness,
+  and will miss a consumer that reaches the zero through an alias, a destructure or a helper. Making
+  it exact needs a TypeScript-compiler-API pass over the call graph; until someone writes that, this
+  half UNDER-COUNTS and must never be quoted as a closed set.
+  **FACE 2 — SELF-HIDING OBSERVABILITY.** *Query:* `if (<expr>.length <cmp>)` across `src/**/*.ts`
   where the comparison separates empty from non-empty (bare `.length`, `> 0`, `!== 0`, `=== 0`,
-  `>= 1`, `< 1` — NOT `> 1`, which is cardinality) and EVERY statement in the consequent is a logging
-  call, so the zero case writes nothing. **Population at `4c25957`: 12** of 204 same-shaped guards;
-  8 are semantic rather than emptiness. **CONTROL: 184** guards of the identical shape whose
+  `>= 1`, `< 1` — NOT `> 1`, which is cardinality), and EVERY statement in the consequent is a
+  logging call, so the zero case writes nothing. **Population 12** of 204 same-shaped guards over 116
+  files; 8 are semantic rather than emptiness. **CONTROL 184** identical-shaped guards whose
   consequent carries a non-log effect. **It independently finds the clone-reap gate**
-  (`if (actionable.length)` wrapping the only `log("daemon.clone_reap", …)` in run-task.ts), the
-  instance this entry names by hand.
-  **FACE 3 — ABSENCE-AS-SUCCESS. Predicate:** an emptiness test whose consequent WIDENS scope —
-  returns or restores an unfiltered default instead of narrowing. **Population at `4c25957`: 1**, and
-  it is the recorded instance itself (#1111): `narrowNameFilteredArgs` (src/lib/review.ts) still
-  returns the whole `baseArgs`, `TEST_GLOB` included, on zero candidates. **That one is CHANNELED,
-  not open** — `execWhitelistedProof` decides `absent` BEFORE reaching it, so the widening is now the
-  deliberate fail-open on `unresolvable` only. A one-hit predicate is WEAKLY VALIDATED (no live
-  positive to test it against); recorded as such rather than as a clean sweep.
-  **THE NEW FIRST TRANCHE CRITERION, replacing the census citation:** a boundary qualifies when it
-  MATCHES ANY FACE PREDICATE ABOVE **and** has no second channel at head. Faces 1 and 2 are therefore
-  decidable by anyone who runs the query; face 3 carries a predicate but no open member, and adds
-  members BY NAME with evidence until a live positive validates it.
-  **THE SIX MECHANISM CLASSES ARE RETIRED AS A MEMBERSHIP AXIS.** They are never enumerated anywhere
-  in this entry or its sources, they are a different partition from the three faces, and nothing at
-  head can reconstruct them. Membership is the faces; the six are not evidence for anything.
-  **AND THE OLD COUNTS CANNOT BE REPRODUCED — which is this defect one level down, inside P48's own
-  supporting sweep.** #1587 recorded outputs (83 guards / 10 log-only / 62 control) and never the
-  query. Re-derived from that prose, face 2 gives **204 / 12 / 184**; the recorded 83 also fails to
-  reconcile with itself (12 + 62 + 2 leaves 9 rows unaccounted). Neither classifier can be preferred,
-  because only one of them was written down. The predicates above are stated in full FOR THAT REASON.
-  **THE PREDICTION SURVIVES A CORRECTION, NOT A REFUTATION.** `if (outOfScope.length > 0)` (the
-  push-and-flag path, #1585) was cited as a tenth face-2 instance arriving by CODE EDIT, against the
-  PREDICTION's "environment shift a query predates". Under the stated face-2 predicate it is NOT a
-  member — its consequent carries non-log work — so it lands in the control, and the prediction is
-  untouched by it. Recorded because the earlier reading is in this entry and would otherwise stand.
+  (`if (actionable.length)` wrapping the only `log("daemon.clone_reap", …)` in run-task.ts).
+  **FACE 3 — ABSENCE-AS-SUCCESS: RECORDED INSTANCES ONLY, BY NAME. There is no predicate, and that
+  is the honest answer, not a gap left open.** The face is behavioural — a zero that WIDENS scope
+  instead of narrowing (the recorded case: a zero name-filter match once ran the WHOLE suite, #1111)
+  — and "wider" is not visible in text. Membership here is by NAME with evidence, and a member joins
+  only with a behavioural fixture showing the widening. **Recorded members: none open.** The one
+  recorded instance is CLOSED: `narrowNameFilteredArgs` (src/lib/review.ts) still returns the whole
+  `baseArgs` with `TEST_GLOB` on zero candidates, but `execWhitelistedProof` decides `absent` BEFORE
+  reaching it, so the widening is now the deliberate fail-open on `unresolvable` alone. (A text scan
+  for "emptiness test whose consequent widens" was tried and returns exactly that one site — recorded
+  as CORROBORATION that the face is real, never promoted to the criterion: one hit with no live
+  positive validates nothing.)
+  **(3) THE CRITERION IS A UNION, NOT A SUBSTITUTE.** A boundary qualifies when it **MATCHES ANY
+  STATED FACE PREDICATE and has no second channel at head** — and for a face with no predicate, when
+  it is a **NAMED RECORDED INSTANCE carrying its evidence**. Faces 1 and 2 are decidable by anyone
+  who runs the query; face 3 is decidable by reading its member list. Membership regenerates where it
+  can and is honestly closed where it cannot. **A face-2-only criterion was REFUSED on measurement**:
+  it returns ZERO guard-shaped hits for `parseAcceptanceBlock`, `resolveNameFilteredCandidates` and
+  the ledger union, so it would have admitted one of four members and expelled three, including the
+  tranche's clearest live instance.
+  **(4) THE FOUR NAMED MEMBERS, RE-VERIFIED — AND THE COUNT CHANGED, 4 → 3.**
+  (1) `parseAcceptanceBlock` **QUALIFIES**, face 1 (measured, in the 36) — still a bare
+  `AcceptanceCriterion[]`, unchanged since 0332dd0. (2) `resolveNameFilteredCandidates` is
+  **DISCHARGED, not a member**: it returns `NameFilterResolution` and sits in face 1's CONTROL of 126
+  — zero hits in the population. The entry's "open, filed 2026-08-05" was stale. (3) The ledger union
+  is **RELOCATED, not closed**: the VERB shipped and fails loud (`rmd ledger-grep`, W1-T379/#1436),
+  but `ledgerRotationEntries` (src/lib/ledger-grep.ts) still returns a bare `LedgerCorpusEntry[]` and
+  IS in face 1's 36 — closed at the verb, open one level down. (4) The sweep-survey gate
+  **QUALIFIES**, face 2 (measured, in the 12).
+  **(5) THE ENTRY'S OWN FIGURES CANNOT BE REPRODUCED — AND THAT IS THE STRONGEST ARGUMENT THIS
+  PROPOSAL HAS, BECAUSE IT IS P48's DEFECT ONE LEVEL DOWN, INSIDE P48's OWN SUPPORTING SWEEP.**
+  #1587 recorded OUTPUTS (83 guards / 10 log-only / 62 control) and never the QUERY. Re-derived from
+  that prose, face 2 gives **204 / 12 / 184**; and the recorded 83 does not reconcile with itself —
+  12 + 62 + 2 leaves **9 rows unaccounted**. Neither classifier can be preferred, because only one of
+  them was written down. Every predicate above is stated in full FOR THAT REASON.
+  **AND A CORRECTION TO THIS ENTRY'S OWN READING.** `if (outOfScope.length > 0)` (the push-and-flag
+  path, #1585) was recorded above as a tenth face-2 instance arriving by CODE EDIT, in tension with
+  the PREDICTION. Under the stated predicate it is NOT a member — its consequent logs AND CONTINUES,
+  so it lands in the CONTROL — and the prediction is untouched by it.
   **★ R17 UPDATE — THE PROPOSAL'S SHAPE NOW SHIPS IN BOTH DIRECTIONS, WHILE THE ENTRY ITSELF STAYS
   UNRATIFIABLE.** **(1) CLAUSE (ii) IN THE AFFIRMATIVE, FROM THE GATHER ITSELF.** The mutation-gate
   rung (D-10/W1-T393) reports **`NO POSITIVE CONTROL: 0 verdicts recorded`** and says, in its own
