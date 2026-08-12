@@ -190,6 +190,22 @@ export interface LatchRow {
   name: string;
   ageMs?: number;
   consequence: string;
+  /**
+   * Why this latch's RECORD is still worth showing while its INSTRUCTION no longer applies —
+   * present only on a latch whose condition has been overtaken by events.
+   *
+   * TODAY THIS IS `DEPLOY_FAILED` AND ONLY IT. Nothing ever unlinks `state/DEPLOY_FAILED`
+   * (deployer.ts writes it at two failure sites; `unlinkSync` there touches only the deploy
+   * marker and the idle-deferred clock), so the alert is permanent until an operator removes the
+   * file by hand — and its next action kept saying "re-deploy once fixed" long after origin/main
+   * had moved past the head that failed. Measured on the mini: a latch 1h52m old naming
+   * `86f3955`, by then an ancestor of both the running sha and origin/main, on a clean checkout.
+   *
+   * THE RECORD IS KEPT DELIBERATELY. A deploy that failed is a fact; the defect is the advice
+   * attached to it. This is #1639's shape for LAST CLOSED CYCLE applied one block down: keep the
+   * row, drop the instruction, say why.
+   */
+  superseded?: string;
 }
 
 export interface LatchesSection {
@@ -358,7 +374,39 @@ export interface HeadroomSection {
   /** config.ts's `resolveHeadroomEnabled` — the SAME switch the daemon reads, never a second
    *  derivation. Present unconditionally: this is a LOCAL config read, never gated on GitHub. */
   enforced: boolean;
+  /**
+   * The newest `daemon.headroom.degraded` line, when one is in the window — the governor
+   * announcing that it CANNOT READ usage and has stopped dispatching (daemon.ts's park:
+   * `consecutiveUnreadable > unreadableDegradedLimit` ⇒ log, sleep, `continue`).
+   *
+   * WHY THIS FIELD EXISTS. Without it `found` is false in two completely different states —
+   * "no daemon has ticked yet" and "a daemon is ticking and will never produce a
+   * `daemon.headroom` row" — and {@link HEADROOM_NEXT_ACTIONS}' first rung reported the
+   * reassuring one for both: "it appears after the daemon's first tick". A permanent park
+   * rendered as an in-progress start-up. The two are distinguishable from the ledger and
+   * always were: the parked daemon writes `daemon.headroom.degraded` every tick while blind.
+   *
+   * THE LINE CARRIES ITS OWN DURATION, which is why one line is enough and no history is
+   * needed: `consecutive_unreadable` × `poll_interval_ms` states how long the blindness has
+   * lasted (ledger.ts's own note records observed counters of 4..42 at 60 000 ms). That also
+   * survives rotation — `daemon.headroom.degraded` is in {@link RENDER_RELEVANT_LEDGER_STEPS}
+   * with a 30-minute window, and while blind it re-fires every tick (median gap 2.32 min), so
+   * a live episode always has a line inside the window.
+   */
+  degraded?: HeadroomDegraded;
   nextAction?: string;
+}
+
+/** The governor's "I cannot read usage" signal, read off the newest `daemon.headroom.degraded`. */
+export interface HeadroomDegraded {
+  /** `consecutive_unreadable` — how many consecutive probe misses at that tick. */
+  consecutiveUnreadable?: number;
+  /** `poll_interval_ms` — the tick spacing, so duration is derivable without more lines. */
+  pollIntervalMs?: number;
+  /** That line's own `ts`. */
+  ts?: string;
+  /** `nowMs - ts`, when both parse — how stale the blindness report itself is. */
+  ageMs?: number;
 }
 
 export interface StatusBoardModel {
@@ -597,6 +645,8 @@ interface StaticLatchDef {
   name: string;
   path: (root: string) => string;
   consequence: (json: Record<string, unknown> | null) => string;
+  /** Optional: why this latch's instruction no longer applies — see {@link LatchRow.superseded}. */
+  superseded?: (json: Record<string, unknown> | null, originMainSha?: string) => string | undefined;
 }
 
 /** Ordered by operational urgency — also the order rows render in (most-actionable first). */
@@ -611,6 +661,18 @@ const STATIC_LATCHES: readonly StaticLatchDef[] = [
         `the checkout was rolled back — the daemon is running the PRIOR head (${message}` +
         `${failedHead ? `; failed head ${failedHead}` : ""})`
       );
+    },
+    // THE DEPLOYER'S OWN RETRY TEST, REUSED RATHER THAN RESTATED. `decideDeployTrigger` refuses an
+    // auto-retry only while `originMain === lastFailedHead` (its `alreadyFailed`), so the moment
+    // origin/main moves past the failed head the supervisor WILL retry on its own and the operator
+    // has nothing to do. Asking the same question here — through the same `sameCommit`, which is
+    // already imported — means the advice and the machinery can never disagree about whether a
+    // retry is pending. No git call, no ancestry walk: one sha comparison the board already holds.
+    superseded: (json, originMainSha) => {
+      const failedHead = typeof json?.failedHead === "string" ? json.failedHead : undefined;
+      if (!failedHead || !originMainSha) return undefined; // cannot tell ⇒ the instruction stands
+      if (sameCommit(originMainSha, failedHead)) return undefined; // still the head to deploy
+      return `origin/main has moved past the failed head — the supervisor retries on its own; nothing to re-deploy`;
     },
   },
   {
@@ -644,14 +706,28 @@ const STATIC_LATCHES: readonly StaticLatchDef[] = [
   },
 ];
 
-function buildLatchRows(root: string, nowMs: number, isPidAlive: (pid: number) => boolean): LatchRow[] {
+function buildLatchRows(
+  root: string,
+  nowMs: number,
+  isPidAlive: (pid: number) => boolean,
+  // APPENDED LAST and optional, so no positional caller shifts. `undefined` (origin/main
+  // unresolvable — an offline host, a missing remote) means NO supersession is claimed and the
+  // instruction stands, which is the fail-closed direction: an unreadable answer must never
+  // silence a real failure.
+  originMainSha?: string,
+): LatchRow[] {
   const rows: LatchRow[] = [];
 
   for (const def of STATIC_LATCHES) {
     const path = def.path(root);
     if (!fs.existsSync(path)) continue;
     const json = readJsonMarker(path);
-    rows.push({ name: def.name, ageMs: markerAgeMs(path, json, nowMs), consequence: def.consequence(json) });
+    rows.push({
+      name: def.name,
+      ageMs: markerAgeMs(path, json, nowMs),
+      consequence: def.consequence(json),
+      superseded: def.superseded?.(json, originMainSha),
+    });
   }
 
   // Inflight locks — one row per LIVE lock (a dead-pid lock is stale debris, not an active
@@ -760,7 +836,10 @@ const LIVENESS_NEXT_ACTIONS: readonly NextActionRule<LivenessCtx>[] = [
 const LATCHES_NEXT_ACTIONS: readonly NextActionRule<LatchesSection>[] = [
   {
     // Incident (a): DEPLOY_FAILED must never sit invisible again.
-    applies: (ctx) => ctx.rows.some((r) => r.name === "DEPLOY_FAILED"),
+    // `!r.superseded` IS THE FIX. A DEPLOY_FAILED row whose head origin/main has moved past needs
+    // no operator action — the supervisor retries by itself — so the row stays and the instruction
+    // goes. A GENUINELY failed deploy (origin/main still ON the failed head) is unaffected.
+    applies: (ctx) => ctx.rows.some((r) => r.name === "DEPLOY_FAILED" && !r.superseded),
     action: () => "inspect state/DEPLOY_FAILED and re-deploy once fixed (`rmd deploy`)",
   },
   {
@@ -1141,6 +1220,34 @@ function deriveHeadroomLatest(lines: Array<Record<string, unknown>>): { ts?: str
   return { ts: bestTs, telemetry: best };
 }
 
+/**
+ * The newest `daemon.headroom.degraded` line — the blind-governor signal. Same max-by-parsed-`ts`
+ * shape as {@link deriveHeadroomLatest} immediately above, deliberately: an exact `Set.has` on the
+ * step name (a dotted CHILD, never matched by its parent) and a comparison on PARSED timestamps,
+ * never on ledger order.
+ */
+function deriveHeadroomDegraded(
+  lines: Array<Record<string, unknown>>,
+  nowMs: number,
+): HeadroomDegraded | undefined {
+  let bestParsed = -Infinity;
+  let best: HeadroomDegraded | undefined;
+  for (const line of lines) {
+    if (line.step !== "daemon.headroom.degraded") continue;
+    const ts = typeof line.ts === "string" ? line.ts : undefined;
+    const parsed = ts ? Date.parse(ts) : NaN;
+    if (!Number.isFinite(parsed) || parsed < bestParsed) continue;
+    bestParsed = parsed;
+    best = {
+      consecutiveUnreadable: typeof line.consecutive_unreadable === "number" ? line.consecutive_unreadable : undefined,
+      pollIntervalMs: typeof line.poll_interval_ms === "number" ? line.poll_interval_ms : undefined,
+      ts,
+      ageMs: Math.max(0, nowMs - parsed),
+    };
+  }
+  return best;
+}
+
 function deriveHeadroom(lines: Array<Record<string, unknown>>, nowMs: number, enforced: boolean): HeadroomSection {
   const { ts, telemetry } = deriveHeadroomLatest(lines);
   const tsParsed = ts ? Date.parse(ts) : NaN;
@@ -1150,12 +1257,53 @@ function deriveHeadroom(lines: Array<Record<string, unknown>>, nowMs: number, en
     ts,
     ageMs: Number.isFinite(tsParsed) ? Math.max(0, nowMs - tsParsed) : undefined,
     enforced,
+    degraded: deriveHeadroomDegraded(lines, nowMs),
   };
   section.nextAction = pickNextAction(HEADROOM_NEXT_ACTIONS, section);
   return section;
 }
 
+/**
+ * Is `a` strictly newer than `b`, by PARSED timestamp? An absent or unparseable `b` (no successful
+ * read has EVER been recorded) makes `a` newer — that is the parked-since-boot case, the whole
+ * point. An absent or unparseable `a` is never newer: an undatable blindness report cannot
+ * outrank a dated healthy one.
+ */
+function isNewer(a: string | undefined, b: string | undefined): boolean {
+  const pa = a ? Date.parse(a) : NaN;
+  if (!Number.isFinite(pa)) return false;
+  const pb = b ? Date.parse(b) : NaN;
+  return !Number.isFinite(pb) || pa > pb;
+}
+
+/** `consecutive_unreadable` × `poll_interval_ms`, rendered — how long the governor has been blind.
+ *  Omitted entirely when either field is absent: a duration guessed from one of the two would be
+ *  a fabricated number on the one surface an operator consults about a stalled fleet. */
+function blindForClause(d: HeadroomDegraded): string {
+  if (typeof d.consecutiveUnreadable !== "number" || typeof d.pollIntervalMs !== "number") return "";
+  const mins = Math.round((d.consecutiveUnreadable * d.pollIntervalMs) / 60_000);
+  return ` — blind for about ${mins}m (${d.consecutiveUnreadable} consecutive unreadable probes)`;
+}
+
 const HEADROOM_NEXT_ACTIONS: readonly NextActionRule<HeadroomSection>[] = [
+  // ABOVE `!ctx.found`, and that ORDER IS THE FIX. A parked daemon produces no `daemon.headroom`
+  // row ever, so it lands in `!found` alongside a daemon that simply has not ticked yet — and the
+  // rung below reported the reassuring one for both. This rung claims the case it can actually
+  // prove: a `daemon.headroom.degraded` line means ticks HAVE happened and the governor is blind
+  // and not dispatching. It is deliberately not gated on `ctx.found`: a park that begins after a
+  // healthy period leaves a stale `daemon.headroom` row behind, and the blindness still outranks it.
+  {
+    // ONLY WHEN THE BLINDNESS IS THE LATEST WORD. A successful probe resets the daemon's
+    // `consecutiveUnreadable` and resumes dispatch, but the 30-minute render window means the old
+    // `daemon.headroom.degraded` line is often still present — so firing on its mere presence would
+    // report a RECOVERED governor as blind. Four bounds in this repo have already fired on healthy
+    // conditions; this compares parsed timestamps so a later `daemon.headroom` row wins.
+    applies: (ctx) => ctx.degraded !== undefined && isNewer(ctx.degraded.ts, ctx.ts),
+    action: (ctx) =>
+      `headroom governor is BLIND — usage unreadable beyond its allowance, so the daemon is idling and dispatching NOTHING` +
+      `${blindForClause(ctx.degraded!)}. It does not recover on its own until a probe succeeds; ` +
+      `check the usage probe, or set \`headroom.enabled: false\` to proceed on absent telemetry`,
+  },
   { applies: (ctx) => !ctx.found, action: () => "no headroom telemetry yet — it appears after the daemon's first tick" },
   { applies: (ctx) => !ctx.enforced, action: () => "headroom governor is OFF — telemetry only, dispatch is never throttled on it" },
   {
@@ -1205,12 +1353,15 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
   // said (that boot could be hours stale itself). Gated on `running`, not merely "has a
   // daemon.boot line ever", so this never reports fresh/stale for a daemon that isn't up.
   const daemonRow = services.find((s) => s.service === "daemon")!;
+  // HOISTED out of the `running` branch below (one resolution, two consumers): LATCHES needs
+  // origin/main to judge whether a DEPLOY_FAILED alert has been overtaken, and that question is
+  // independent of whether a daemon happens to be up. Resolving it twice would be two git calls
+  // for one fact; resolving it only when the daemon runs would leave the latch unjudgeable on a
+  // stopped fleet, which is exactly when an operator reads `rmd status`.
+  const originSha = resolveOriginMainSha(deps.repoDir);
   let headVsOriginMain: StaleFlag = { status: "unknown" };
-  if (daemonRow.running && boots.headSha) {
-    const originSha = resolveOriginMainSha(deps.repoDir);
-    if (originSha) {
-      headVsOriginMain = sameCommit(boots.headSha, originSha) ? { status: "fresh" } : { status: "stale", headSha: boots.headSha, originSha };
-    }
+  if (daemonRow.running && boots.headSha && originSha) {
+    headVsOriginMain = sameCommit(boots.headSha, originSha) ? { status: "fresh" } : { status: "stale", headSha: boots.headSha, originSha };
   }
 
   const crashLoop = detectDaemonCrashLoop(boots.allTimestamps, crashLoopWindow);
@@ -1224,7 +1375,7 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
   };
 
   // ── LATCHES ──
-  const rows = buildLatchRows(root, nowMs, isPidAlive);
+  const rows = buildLatchRows(root, nowMs, isPidAlive, originSha);
   const latchesSection: LatchesSection = { rows, nextAction: undefined };
   latchesSection.nextAction = pickNextAction(LATCHES_NEXT_ACTIONS, latchesSection);
 
