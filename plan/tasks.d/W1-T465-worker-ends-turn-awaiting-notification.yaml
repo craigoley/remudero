@@ -1,0 +1,109 @@
+- id: W1-T465
+  title: "a worker backgrounds a long job and ENDS ITS TURN expecting to be woken — there is no notification channel, so the run dies mid-task, produces nothing, and the orchestrator records subtype success"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  rationale: "THE WORKER IS NOT CRASHING. It stops deliberately, believing something will resume it.
+    RE-DERIVED AT 00fd6765 across all three ledger forms (666 gz / 4 plain / 1 live).
+    THE POPULATION, STATED PRECISELY, AND MY NUMBERS DIFFER FROM THE BRIEF THAT COMMISSIONED THIS —
+    the brief's figures did not reproduce here and the corrected ones are recorded instead:
+      **107** DISTINCT `no_pr` verdict rows (`step: \"verdict\"`, deduped on run_id+ts), not 39.
+      **ALL 107** carry `cost_usd`, totalling **$370.85** — not 17 rows and ~$118. The earlier zero
+      came from querying `costUsd`; THE FIELD IS `cost_usd`, and that mis-shaped query is the same
+      false-zero class this repo has now caught eight times.
+      **8** carry `report_excerpt`, not 3 — #1584 added the field, so only these 8 are OBSERVABLE and
+      the other 99 are UNEXPLAINED AND ALWAYS WILL BE. They are not counted as this shape.
+      All 8 are dated 2026-08-12, not today.
+    OF THE 8 OBSERVABLE CASES, **5 ARE WAIT-SHAPED AND 3 ARE HONEST NO-OPS.** That split is the whole
+    finding, because it supplies its own control group. Verbatim, trimmed:
+      W1-T414 — `I'll pause here and wait for the background test suite (task b8zoysdek) to finish;
+        I'll be notified automatically when it completes.`
+      W1-T415 — `I'll pause here and wait for the background rmd preflight --ci-parity task to
+        complete — the harness will notify me automatically when it finishes, so I won't poll in the
+        meantime.`
+      W1-T416 — `I'll wait for the background preflight run to finish before proceeding.`
+      W1-T435 — `I'll pause here and wait for the rmd preflight --ci-parity background task to
+        complete before proceeding to push and open the PR.`
+      W1-T438 — `I've launched the full test suite (npm run test:ci) and a watcher script in the
+        background... I'll resume with rmd preflight --ci-parity, commit, and PR creation once I get
+        the completion notification — no need to poll further.`
+    THE THREE CONTROLS are W1-T412 and W1-T413 (twice): `All 2/2 acceptance tests pass, mechanically
+    verified live`, `Working tree is clean... No code changes needed or made`, and `this task's
+    acceptance is already satisfied on origin/main`. Those are CORRECT `no_pr` outcomes.
+    COST OF THE FIVE: $5.10 + $4.30 + $3.60 + $12.76 + $4.09 = **$29.85**, for 411 turns and zero
+    commits. The $370.85 is CONTEXT FOR THE CLASS, never the price of this shape.
+    THE FLEET DID NOT TEACH THIS — ESTABLISHED, NOT ASSUMED. Zero hits for `run_in_background`,
+    `background task`, `notified automatically` or `completion notification` anywhere in `src/`.
+    POSITIVE CONTROL on the same file and tool: `REPORT` 236, `acceptance` 108, `ALREADY_SATISFIED` 25
+    hits in `src/run-task.ts`, so the query could see prompt text. The four `background` hits in that
+    file are ALL comments about `rmd serve-plist`, none in prompt text.
+    SO THE WORKER INFERRED IT FROM THE HARNESS'S OWN AFFORDANCE — backgrounding a command is a real
+    capability, and in an interactive session a completion notification really does arrive. IT DOES
+    NOT REACH A HEADLESS SDK WORKER. The move is reasonable-looking and the suite is 15-17 minutes
+    under `--ci-parity`, which is exactly long enough to make backgrounding look prudent."
+  design: "(i) THE FIX IS A CONTRACT THE PROMPT MUST STATE, because nothing in the prompt contradicts
+    the worker's inference today. The contract is one sentence with a reason: THERE IS NO NOTIFICATION
+    CHANNEL IN A HEADLESS RUN — a backgrounded job must be POLLED, and ending the turn to await a
+    wake-up ends the RUN. State the mechanism, not just the prohibition: a rule whose reason is absent
+    gets re-derived away by the next model that reasons about it.
+    (ii) DO NOT MAKE `subtype: success` THE DISCRIMINATOR ON ITS OWN. MEASURED: all 8 observable rows
+    carry `subtype: \"success\"` AND `commits_ahead: 0` — INCLUDING the three honest no-ops. The SDK
+    field reports that the conversation ended cleanly, which is TRUE in both cases; it is not lying
+    and it is not the defect. Establish what, if anything, already separates `finished the work` from
+    `stopped talking` — and note `quality_suspect` does NOT appear on `verdict` rows at all (the field
+    set is account_label, billing_mode, cache_*, commits_ahead, cost_usd, effort, model, num_turns,
+    reason, report_excerpt, run_id, stage, step, subtype, task_id, tokens, ts, verdict), so whatever
+    it guards, it did not guard this.
+    (iii) A RETRY RUNG NEEDS BOTH SIGNALS, AND THE DATA SAYS SO RATHER THAN INTUITION.
+    `commits_ahead: 0` ALONE IS NOT A SAFE DISCRIMINATOR: the three legitimate ALREADY_SATISFIED runs
+    also carry it, so a rung keyed on that would re-dispatch honest no-ops — the SIXTH instance of a
+    bound firing on a healthy condition in this repo. The wait-shaped EXCERPT is what separates them,
+    and all five say the same thing in five different phrasings (`wait for the background`, `notified
+    automatically`, `completion notification`, `won't poll`, `no need to poll`).
+    ARGUE THE OTHER SIDE BEFORE BUILDING: a text-matched excerpt is a fragile key — the sixth phrasing
+    will not match, and a worker that words it differently silently keeps the old behaviour. PREFER a
+    signal the RUN emits over one the PROSE happens to contain, if one can be found; if it cannot, say
+    so and make the matcher's fragility explicit rather than implicit.
+    (iv) NOT IN SCOPE — changing what `no_pr` means, or retrying it generally. `already_satisfied`
+    exists precisely so a run CAN legitimately conclude there is nothing to do, and three of eight
+    observable cases are exactly that.
+    (v) W1-T463 (#1744) IS A DEPENDENCY WORTH NAMING AND NOT ABSORBING. It files the local-suite
+    question — the 23-step `--ci-parity` has failed twice ever, once WRONGLY, and costs ~16 minutes of
+    a 61-minute lane. FOUR OF THE FIVE wait-shaped excerpts name `--ci-parity` or the full suite
+    explicitly, so if W1-T463 trims the long job, the temptation to background it may disappear and
+    this defect could dissolve with it. FILE AND FIX SEPARATELY ANYWAY: a worker that ends its turn
+    expecting notification is unrecoverable regardless of WHICH long job it was waiting on, and the
+    fifth excerpt (W1-T414) names a background TEST SUITE rather than preflight."
+  acceptance:
+    - claim: "the implement prompt states that a backgrounded job must be polled because no notification arrives"
+      proof: "unit test: test/worker-no-wait-contract.test.ts"
+    - claim: "a run that ends mid-wait with no commits is distinguishable from one that concluded nothing was needed"
+      proof: "unit test: test/worker-no-wait-contract.test.ts"
+    - claim: "a legitimate already-satisfied no_pr is not re-dispatched by the discriminator"
+      proof: "unit test: test/worker-no-wait-contract.test.ts"
+  origin: recon#worker-awaits-notification-2026-08-13
+  plan_refs: ["W1-T463"]
+  files: [src/run-task.ts, test/worker-no-wait-contract.test.ts, test/run-task.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT. The band is Rule 19's SPAN across `src/` and `test/`, not blast
+    radius — the blast radius is prompt text plus, at most, one discriminator.
+    `files:` IS DELIBERATELY SHORT. The prompt lives in `src/run-task.ts` (measured: 236 `REPORT`, 108
+    `acceptance`, 25 `ALREADY_SATISFIED` hits there), so no second source file is implicated unless
+    design (iii) adds a discriminator elsewhere — IF IT DOES, DECLARE THAT PATH AND DROP ANY DECLARED
+    PATH THE IMPLEMENTATION DOES NOT TOUCH. `inverseScopeUntouchedFiles` (`src/lib/review.ts`) fails a
+    declared-but-untouched path just as `scopeViolationFiles` fails an undeclared one, and SEVEN
+    files: corrections were needed this week. `test/run-task.test.ts` is declared because it is where
+    prompt-shape assertions live; RE-COUNT IT BY INVOCATION before trusting that.
+    THE 99 UNEXPLAINED ROWS ARE NOT EVIDENCE FOR THIS SHAPE and must not be recruited into it later.
+    They predate `report_excerpt` (#1584) and no artifact survives that could classify them. Anyone
+    tempted to attribute the $370.85 to this defect should stop: the defensible figure is **$29.85
+    across five runs**.
+    RE-DERIVE BEFORE BUILDING. The corpus grows hourly and this shard's own commissioning brief
+    carried figures that did not reproduce — 39/17/3 against a measured 107/107/8. Check the field
+    name is `cost_usd`, dedupe on run_id+ts (each run appears as both a `verdict` row and a
+    `daemon.block.independent_failure` row), and count OCCURRENCES rather than LINES."
