@@ -113,6 +113,15 @@ export function classifyGhFailure(
   code?: string | null,
 ): GhFailureReason {
   if (code === "ENOBUFS") return "buffer_overflow";
+  // A KILLED-ON-TIMEOUT CHILD CARRIES NO STDERR, so the transport regex below can never see it —
+  // exactly the ENOBUFS shape directly above, and detected the same way, from the Node error
+  // `code`. MEASURED: `execFileSync` past its `timeout` throws `code: "ETIMEDOUT"`,
+  // `signal: "SIGTERM"`, `status: null` and `stderr: ""`. Without this branch every
+  // {@link GH_CALL_TIMEOUT_MS} kill would ledger as "unknown" — the same silent classification
+  // that let the 2026-07-20 outage run for hours. "transport" and not a new variant: a `gh` call
+  // that never returned is a network-class failure, and the regex below already classifies the
+  // stderr-bearing form of it (`etimedout`) that way.
+  if (code === "ETIMEDOUT") return "transport";
   const text = String(stderr ?? "");
   if (/rate limit|quota|secondary rate limit/i.test(text)) return "rate_limit";
   if (/bad credentials|authentication|not logged in|gh auth login|401 unauthorized|unauthorized/i.test(text)) return "auth";
@@ -121,6 +130,32 @@ export function classifyGhFailure(
   }
   return "unknown";
 }
+
+/**
+ * Wall-clock ceiling on ONE `gh` invocation, for every gateway in this module.
+ *
+ * WHAT HAS NO BOUND TODAY BLOCKS THE WHOLE DAEMON. Both gateways shell `gh` through
+ * `execFileSync`, which is SYNCHRONOUS: a call that never returns does not merely stall the
+ * sweep, it parks the daemon's only thread, so the poll loop, every review the sweep would post
+ * and every later rung stop with it — with nothing logged, because a hang is not an error. On
+ * 2026-08-13 a single sweep pass that began at 10:57 was still running at 11:54, observed on
+ * `gh api --paginate repos/…/pulls/768/files`, with four PRs unreviewed the whole time.
+ *
+ * THE NUMBER IS SIZED SO IT CANNOT FIRE ON A HEALTHY CALL, which is this repo's recurring
+ * defect when it does. MEASURED 2026-08-13 against this repo: the heaviest read the board makes
+ * — a 100-row closed page carrying every body — took 0.70–0.90 s over six consecutive calls, and
+ * a per-PR `--paginate` file list took 0.32–0.40 s. 60 s is ~67x the slowest healthy call
+ * observed, and still inside the 60 s `DEFAULT_POLL_INTERVAL_MS`, so one stalled call cannot
+ * outlive the poll that issued it.
+ *
+ * FIRING IS FAIL-SOFT, NEVER FAIL-WRONG. The kill surfaces as a throw, which the callers already
+ * classify ({@link classifyGhFailure}, via `code: "ETIMEDOUT"` ⇒ `transport`), ledger
+ * (`board_gateway.fetch_failed`) and degrade on — `lastFetchFailed` is reset by the next
+ * successful fetch, and `fetchBoardPrsRest` leaves the caller's row cache untouched on a throw,
+ * so recovery costs a 2-request delta rather than a cold re-walk. A bounded, named, recoverable
+ * failure strictly dominates an unbounded silent hang.
+ */
+export const GH_CALL_TIMEOUT_MS = 60_000;
 
 /** A PR's identity + GitHub merge state, as seen by the {@link GitHub} gateway. */
 export interface PrRef {
@@ -2696,7 +2731,10 @@ export function ghGateway(owner: string, repo: string, opts: { exec?: (args: str
     // stdio's 3rd fd is now `pipe`, not `ignore` (W1-T119 design (i)): the
     // pre-fix triple discarded `gh`'s stderr — the one place a rate-limit or
     // auth message appears — before anyone could classify WHY a read failed.
-    ((args: string[]) => execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+    // `timeout` is not optional hardening here — see GH_CALL_TIMEOUT_MS: execFileSync is
+    // synchronous, so an unbounded `gh` parks the whole process, not just this read.
+    ((args: string[]) =>
+      execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: GH_CALL_TIMEOUT_MS }));
   const tryJson = <T>(args: string[]): T | null => {
     try {
       return JSON.parse(run(args)) as T;
@@ -2947,8 +2985,10 @@ export function buildBatchedGithub(
     // (W1-T181) — Node's 1 MiB default threw ENOBUFS once this repo's PR JSON (all states, up to
     // 1000 PRs, `body` included) crossed it; classifyGhFailure's "buffer_overflow" branch is how
     // that specific failure is now classified instead of "unknown".
+    // `timeout` (GH_CALL_TIMEOUT_MS) bounds the call the 2026-08-13 hour-long sweep was parked
+    // on — `changedFiles` below shells this same closure with `--paginate`.
     ((args: string[]) =>
-      execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1 << 26 }));
+      execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1 << 26, timeout: GH_CALL_TIMEOUT_MS }));
   // W1-T265: the cross-refresh row cache the REST delta stops against. Held HERE, at gateway
   // scope, not inside `index()` — `index()` deliberately replaces its own cache with an EMPTY
   // one on a failed fetch (the W1-T181 pairing below), and reusing that as the delta base would
