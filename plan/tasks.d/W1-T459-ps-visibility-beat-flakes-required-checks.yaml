@@ -1,0 +1,101 @@
+- id: W1-T459
+  title: "two of the three declared whole-suite flakes are ONE fixed-sleep race waiting for `ps eww` to see a new pid, and under CI contention that beat is too short — so a required check goes red and a human presses re-run twice"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  origin: recon#flake-costs-a-human-rerun-2026-08-13
+  principles: {tdd: strict}
+  budget_usd: 25
+  files:
+    - test/daemon.test.ts
+    - test/worker-containment.test.ts
+    - src/lib/host-parity.ts
+    - test/host-parity.test.ts
+  rationale: "MEASURED AT 9a6b557. `src/lib/host-parity.ts` names THREE known whole-suite flakes:
+    `test/worker-containment`, the W1-T356 wiring suite, and the `lint-plan --base`/`--all`
+    byte-identity test. TWO OF THE THREE ARE THE SAME BUG, and it is not nondeterminism.
+    THE CAUSE, READ FROM THE TESTS THEMSELVES. Both spawn a REAL detached process group and then wait
+    a FIXED beat before asking `ps eww` to attribute it — the comment above the wait says so in its
+    own words, that `ps eww` needs a beat after spawn to reliably reflect a brand-new pid ON SOME
+    HOSTS. The beat is a bare `setTimeout`: `test/daemon.test.ts` has two such sites and
+    `test/worker-containment.test.ts` three. When `ps` has not yet published the new pid's
+    environment, the sweep cannot attribute the stray, does not kill it, and never writes
+    `worker_orphan_killed` — which is EXACTLY the observed failure, `killedLine` undefined against
+    the assertion that the real production ledger dep must record the kill.
+    IT IS CONTENTION, NOT RANDOMNESS, AND THAT IS MEASURED RATHER THAN INFERRED. Over 500 workflow
+    runs (2026-08-12T21:40 to 2026-08-13T15:10) the CI job's duration splits cleanly by outcome:
+    SUCCESS n=79 median 11.9m p90 16.7m; FAILURE n=7 median 19.1m p90 27.3m. The median failure runs
+    1.61x longer than the median success, and the failure MEDIAN sits above the success P90 — the
+    failures live in the slow tail. A fixed 100 ms beat is a bet on host speed, and it loses when the
+    runner is loaded.
+    WHAT IT COSTS A HUMAN, COUNTED. In that same window 6 workflow runs carry `run_attempt` > 1 across
+    3 DISTINCT head shas — every one of them a manual press. They come in pairs, `CI` and `CI gate`
+    three each, because ci-gate aggregates CI and both must be re-run. So the price of one flake is
+    TWO button presses, and it was paid three times in seventeen and a half hours. On #1734 today it
+    was two of the three operator interventions on that PR."
+  design: |
+    (i) THE REMEDY IS A BOUNDED POLL, NOT A LONGER SLEEP. Raising 100 ms to 500 ms moves the cliff
+    without removing it and is precisely the deferral this repo has a rule about. Poll `ps eww` until
+    the spawned pid's environment is visible, with a deadline and a clear failure message when the
+    deadline passes — so a genuinely broken `ps` still fails loudly instead of silently sleeping. The
+    20 ms sites are the same bet at a shorter odds and should move with it.
+    (ii) DO NOT BUILD A RE-RUN RUNG FOR THIS, and the reason is structural rather than taste. A
+    re-drive rung ALREADY EXISTS: `runPostFixReverification` in `src/lib/sweep.ts`, with its
+    fix-class rows in `DEFAULT_FIX_CLASSES`, whose own design note says covering a new systemic fix
+    is a ROW rather than a branch. It does not fit here. Every `FixClass` carries `fixPrNumber`, THE
+    MERGED PR WHOSE FIX RESOLVES THE CLASS — the rung re-drives a red that is provably OBSOLETE
+    because the defect behind it is gone. A FLAKE HAS NO SUCH PR, so a flake row would have to invent
+    a value for that field, and the rung would stop meaning what it says.
+    (iii) AND A RE-RUN RUNG WOULD FIRE EXACTLY WHEN IT HURTS MOST. The failures cluster in the slow
+    tail (see the rationale), so the trigger condition IS contention — a rung that answers a
+    contended runner by queueing another full CI run adds load at the moment load is the cause. That
+    is the fifth-instance shape this repo keeps paying for: a bound that fires on a condition it
+    makes worse. Killing the race removes the trigger instead.
+    (iv) WHAT WOULD STILL JUSTIFY A RE-RUN RUNG LATER, so the option is not lost: a measured
+    population of stale reds whose cause is a MERGED fix — the shape `runPostFixReverification`
+    already models — rather than a flake. That rung's real defect is separate and is NOT this task:
+    it is exported, it has 15 invocations in `test/post-fix-reverification.test.ts`, and it has NO
+    CALLER anywhere in `src/` (`runCreditBackfill` and `runEscalationReconcile`, its two siblings in
+    the same file, are each referenced 3 times in `src/run-task.ts`). Built, tested, and supplied by
+    no caller. File that separately; do not fold it in here.
+  note: "SCOPE — THE BEAT IS IN EXACTLY TWO FILES AND THEY ARE THE TWO DECLARED FLAKES. Counted by
+    occurrence, not by prose: the `ps eww` comment appears once in `test/daemon.test.ts` and twice in
+    `test/worker-containment.test.ts`, and nowhere else in `test/`.
+        THREE OTHER SUITES SPAWN A DETACHED GROUP AND ALSO SLEEP A FIXED BEAT — `spawn-nopid-diagnosis`
+    (7 spawns, 3 sleeps), `worker.test.ts` (2 and 2) and the `status-board` pair (0 spawns) — but NONE
+    carries the `ps eww` visibility dependency, and none is a declared flake. They are NAMED here so
+    the implementer can judge them, and deliberately NOT declared: widening `files:` to suites whose
+    failure has never been observed would be scope inflation, and `scopeViolationFiles` is an advisory
+    rather than a blocker if one of them genuinely needs the same helper.
+        THE THIRD DECLARED FLAKE IS EXCLUDED ON PURPOSE. The `lint-plan --base`/`--all` byte-identity
+    test has a different cause entirely — no spawn, no `ps` — and bundling it would make this two
+    concerns. It stays declared as a flake until someone establishes its own cause.
+        `src/lib/host-parity.ts` IS DECLARED because its header is the thing that says there are three
+    whole-suite flakes. If two stop flaking, that sentence is stale, and a stale flake list is how a
+    real divergence gets waved through later. Updating it is part of the change, not follow-up.
+        A TOKEN SCOPE WAS CHECKED AND IS MOOT IF THIS LANDS. `gh run rerun` needs `actions: write`; the
+    operator's own token reports `gist, read:org, repo, workflow`, and a classic PAT's `repo` covers
+    actions. THE CONTAINER TOKEN'S SCOPES ARE NOT READABLE FROM THE MINI and were NOT established —
+    recorded as an open question for whoever revisits automation, not as a finding.
+        RULE 19: `risk: high`, AND THIS SHARD DID NOT GET IT RIGHT FIRST TIME — recorded because
+    CLAUDE.md's own rule says to set the band UP FRONT and this filing set `medium` and was refused.
+    `sizingViolation` (`src/lib/task-linter.ts`) counts THREE subsystems here (daemon, host-parity,
+    worker-containment) and refuses `medium` at that span. The band is the SPAN, NOT blast radius:
+    the change is one wait helper plus five call sites and a stale sentence. Decomposing a shared
+    race from the two suites that exhibit it would not be a real decomposition — it is one bug in
+    two callers.
+        NO NUMBER HERE SHOULD BE QUOTED FORWARD: the 500-run window, 79/7 split, 1.61x, 6 re-runs and 3
+    shas were measured 2026-08-13. Re-derive before building."
+  acceptance:
+    - claim: "the spawned pid's visibility is awaited by a bounded poll with a deadline, never a fixed sleep"
+      proof: "unit test: test/worker-containment.test.ts"
+    - claim: "the W1-T356 wiring suite passes with the poll in place and still fails loudly if ps never reports the pid"
+      proof: "unit test: test/daemon.test.ts"
+    - claim: "no fixed-beat setTimeout remains in either declared-flake suite's ps-visibility path"
+      proof: "unit test: test/worker-containment.test.ts"
+    - claim: "the host-parity header no longer names these two as whole-suite flakes"
+      proof: "unit test: test/host-parity.test.ts"
+  status: queued
+  attempts: 0
