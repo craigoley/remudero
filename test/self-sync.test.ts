@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   checkCliFreshness,
   checkServiceFreshness,
@@ -34,6 +35,12 @@ function gitFixture(): { originDir: string; localDir: string } {
   git(originDir, ["config", "user.email", "test@example.com"]);
   git(originDir, ["config", "user.name", "Test"]);
   writeFileSync(join(originDir, "plan", "tasks.yaml"), planYaml("origin-title"), "utf8");
+  // DECISIONS.md is COMMITTED here because it is TRACKED in the real repo, and a test that writes
+  // to it is modelling the daemon appending to its own tree (the W1-T255 crash-loop shape). Without
+  // this, that write created an UNTRACKED file and the test asserted over a tree production never
+  // has — it passed for the wrong reason, and only stopped passing once the dirty predicate started
+  // distinguishing tracked from untracked. Committing it makes the fixture mean what it says.
+  writeFileSync(join(originDir, "DECISIONS.md"), "# decisions\n", "utf8");
   git(originDir, ["add", "."]);
   git(originDir, ["commit", "--quiet", "-m", "init"]);
   execFileSync("git", ["clone", "--quiet", originDir, localDir], { encoding: "utf8" });
@@ -355,4 +362,81 @@ test("checkServiceFreshness: a rev-parse failure (after a clean fetch) DEGRADES 
   const result = checkServiceFreshness("/some/repo", {}, { git });
   assert.equal(result.status, "degraded");
   if (result.status === "degraded") assert.match(result.reason, /could not resolve HEAD\/origin\/main/);
+});
+
+// ── the freshness guard's dirty predicate must AGREE with deploy/entrypoint.sh ────────────────
+//
+// #1706 wires `checkServiceFreshness` through `daemonFreshnessFromService` to the daemon's
+// freshness guard, so this value now drives a RESTART DECISION rather than only a ledger row. The
+// step that must succeed after that guard fires is `deploy/entrypoint.sh`'s sync, which tests
+// `git status --porcelain -uno` — TRACKED ONLY. A guard that counted UNTRACKED files was strictly
+// stricter than the step it gates: one stray untracked path suppressed a restart the entrypoint
+// would have serviced happily. An untracked `.claude/` did exactly that to the operator's self-sync
+// twice in one day before it was gitignored.
+
+test("freshness guard: a tree dirty in a TRACKED file STILL reports dirty — the restart stays suppressed", () => {
+  // THE TRAP. Permitting a restart the entrypoint cannot service recreates the relaunch storm
+  // `DaemonStopReason`'s doc says must never reach an exit: the entrypoint refuses on any tracked
+  // modification, so the daemon would exit, fail to sync, boot on the same sha and exit again.
+  const { localDir } = gitFixture();
+  writeFileSync(join(localDir, "plan", "tasks.yaml"), planYaml("origin-title") + "\n# tracked edit\n", "utf8");
+  const result = checkServiceFreshness(localDir, {});
+  assert.equal(result.status, "assessed");
+  if (result.status === "assessed") {
+    assert.equal(result.dirty, true, "a TRACKED modification must still suppress the restart");
+  }
+});
+
+test("freshness guard: a tree dirty ONLY in UNTRACKED files now reports NOT dirty — the restart is permitted", () => {
+  // THE SECOND TRAP. A test asserting only the tracked case above would pass on a change that does
+  // nothing at all. This is the direction the fix actually moves.
+  const { localDir } = gitFixture();
+  writeFileSync(join(localDir, "an-untracked-scratch-file.txt"), "four", "utf8");
+  // The falsifier for the fixture itself: unscoped `--porcelain` MUST see this file, or the test
+  // is asserting over a tree that was never dirty in the first place.
+  assert.ok(
+    execFileSync("git", ["-C", localDir, "status", "--porcelain"], { encoding: "utf8" }).includes("an-untracked-scratch-file.txt"),
+    "positive control: the untracked file must be visible to the UNSCOPED predicate",
+  );
+  const result = checkServiceFreshness(localDir, {});
+  assert.equal(result.status, "assessed");
+  if (result.status === "assessed") {
+    assert.equal(result.dirty, false, "untracked-only dirt must NOT suppress a restart the entrypoint would service");
+  }
+});
+
+test("freshness guard: a CLEAN tree is unchanged — dirty=false, behind=null, byte-identical behaviour", () => {
+  const { localDir } = gitFixture();
+  const result = checkServiceFreshness(localDir, {});
+  assert.equal(result.status, "assessed");
+  if (result.status === "assessed") {
+    assert.equal(result.dirty, false);
+    assert.equal(result.behind, null, "the clean case must not move at all");
+  }
+});
+
+test("freshness guard: its git flags MATCH deploy/entrypoint.sh's, read from both sources", () => {
+  // The pairing asserted against the REAL script rather than assumed. If either side changes its
+  // flags, this fails and names the divergence instead of leaving a silent relaunch storm.
+  const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const entrypoint = readFileSync(join(repoRoot, "deploy", "entrypoint.sh"), "utf8");
+  assert.ok(
+    entrypoint.includes('status --porcelain -uno'),
+    "entrypoint.sh must still test TRACKED-ONLY dirt — if this changed, the guard must follow",
+  );
+  const selfSync = readFileSync(join(repoRoot, "src", "lib", "self-sync.ts"), "utf8");
+  assert.ok(
+    selfSync.includes('git(["status", "--porcelain", "-uno"])'),
+    "checkServiceFreshness must use the same TRACKED-ONLY predicate",
+  );
+});
+
+test("freshness guard: checkCliFreshness is NOT relaxed — its blocking dirty check still counts untracked", () => {
+  // SCOPE GUARD. The two functions carry byte-identical predicate lines, so a blind replace_all
+  // would also relax the BLOCKING refusal. That is W1-T446's scope and it is `verify: human`,
+  // because loosening a guard that refuses in the safe direction is the operator's call.
+  const { localDir } = gitFixture();
+  writeFileSync(join(localDir, "an-untracked-scratch-file.txt"), "four", "utf8");
+  const refused = checkCliFreshness(localDir, {});
+  assert.notEqual(refused.status, "synced", "the CLI guard must keep refusing on untracked dirt until the operator rules");
 });
