@@ -189,8 +189,68 @@ sweep:
   # WHY NOW: W1-T380 (a dry-run deploy clears the ceiling clock without restarting, so the bound
   # that guarantees delivery disarms itself) is filed and being built. This reduces pressure on a
   # delivery path that is currently broken, and 3 is worth revisiting once it is fixed.
+  # ── N=3 AGAIN (2026-08-13, operator-directed). THE FIRST REAL TRIAL, NOT A SECOND ONE. ─────
+  # PRECONDITION MET, WHICH IS THE WHOLE REASON THIS IS BACK: W1-T380 MERGED as a1f067c (PR
+  # #1392, "a dry-run must not consume the idle ceiling"), verified an ancestor of this commit.
+  # The block above set exactly this bar in its own words — "3 is worth revisiting once it is
+  # fixed" — so the delivery path the last revert rested on is no longer the broken one.
+  # THE LAST N=3 ATTEMPT WAS NEVER ACTUALLY RUN, so nothing below is a second opinion: it merged
+  # 22:11Z and did not go live until 23:14:51Z (39cb7a9), and in the ~25 minutes it was live it
+  # dispatched ONE task. A READER MUST NOT TREAT THE 2026-08-05 REVERT AS EVIDENCE AGAINST 3.
+  # ONE CORRECTION TO THE BLOCK ABOVE, MEASURED: it says "zero `dispatch.concurrent_set` and zero
+  # `dispatch.settled_set` rows carry `lane_count: 3`, because none was ever written." THE SETTLED
+  # HALF IS WRONG. Across all three ledger forms the lane_count census is 54 `concurrent_set` at 2,
+  # 51 `settled_set` at 2, and EXACTLY ONE `settled_set` at 3 — 2026-08-05T23:46:13.287Z, run
+  # DAEMON-1785971687412, `tasks: [W1-T356 fulfilled]`, `dispatched: 1`, `rejected: 0`. So one tick
+  # WAS offered three lanes and the queue supplied one candidate. Zero `concurrent_set` at 3 is
+  # correct. The conclusion is unchanged — n=1 with a single task is not a test of parallelism —
+  # but the reason is "never exercised", not "never written".
+  # MEASURED AT 2 BEFORE THIS FLIP (mini's ledger, union of all three forms with a per-form control:
+  # 666 gz / 4 plain / 1 live, `run.start` present in each at 257438 / 914 / 200; window
+  # 2026-08-06..08-12, i.e. after the 08-05 excursion; PROVENANCE — these are the mini's rows and
+  # the fleet has since moved to Azure, whose archives are genuinely empty rather than unread):
+  #   DISPATCHES: 89 over a 167.2h span, ~12.8/day (per-day 43, 7, ... 39).
+  #   MEAN RUN DURATION: 27.6 min, median 25.0, n=63 runs with a terminal verdict.
+  #   IDLE FRACTION: 83% at one lane-equivalent (29.0h of run time inside 167.2h).
+  #   NO-MERGE FRACTION: 15%, by the per-run method — 89 dispatches, 76 whose task later merged,
+  #   matched by anchored `Remudero-Task:` trailer OR a `run-<taskId>-<epoch>` head against a
+  #   776-PR merged corpus.
+  # THE 83% BASELINE IN THE BLOCK ABOVE IS A LEDGER-VERDICT ARTEFACT AND MUST NOT BE COMPARED
+  # AGAINST THE FIGURE ABOVE. CLAUDE.md's own rule says merge state is derived from the trailer,
+  # never from ledger verdict lines, because the dominant merge path here is GATE-SIDE: the PR
+  # merges after the run already ended blocked, so the run writes no `merged` verdict. MEASURED
+  # BOTH WAYS ON THE SAME 89 DISPATCHES: ledger-verdict says 92% unmerged, per-run/trailer says
+  # 15% — a 77-POINT METHOD GAP. LIKE FOR LIKE, both windows restricted to the PR corpus's own
+  # coverage (merges known from 2026-07-23) and scored per-run: N=1 (07-23..08-04) 277 dispatches,
+  # 211 merged, 24% no-merge; N=2 (08-06..08-12) 89 dispatches, 76 merged, 15% no-merge. SO THE
+  # NO-MERGE TRIGGER IS NOT MET — it improved. A future reader retaking this MUST use the per-run
+  # method for both sides or the comparison is meaningless.
+  # WHAT DID GET WORSE IS CHURN, AND IT IS THE THING TO WATCH SECOND: 89 dispatches covered only
+  # 54 DISTINCT TASKS, and 18 tasks were dispatched more than once — W1-T364 x5, W1-T377 x5,
+  # W1-T378 x5, W1-T369 x4, W1-T374 x4. A third lane buys throughput only if it is not spent
+  # re-running the same task; re-dispatch count per distinct task is the honest success measure.
+  # REVERSION TRIGGER, STATED IN ADVANCE. THE FIRST THING TO WATCH IS DEPLOY STARVATION, not
+  # lanes: a deploy deferral REACHING `ceiling_ms: 1800000` sends this row straight back to 2. At
+  # N=2 `daemonIsIdle` was not true for a SINGLE probe across 32 continuous minutes, with episodes
+  # ending at ~10m, 8.6m and one that HIT the ceiling, and the forced-deploy path SIGKILLs a live
+  # worker into `reconstructOrphan`, WHICH HAS NEVER BEEN EXERCISED. N=3 strictly worsens idle
+  # starvation — it spends the same slack across one more lane. The other two triggers carry over
+  # unchanged: the no-merge fraction rising materially above its baseline (now 15% per-run, NOT
+  # the 83% figure), or the cost governor tripping a second time.
+  # THE STOP IS `rmd pause`, NOT A REVERT PR: it writes state/PAUSE, `runDaemon` consults it once
+  # per tick BETWEEN iterations, so it halts new dispatch within the 60s poll without interrupting
+  # in-flight work, needs no PR and no restart, and survives a deploy's `pull --ff-only` because
+  # .gitignore ignores state/.
+  # A RUNNING DAEMON WILL NOT PICK THIS UP UNTIL IT RESTARTS. `DEFAULT_SWEEP_POLICY` (sweep.ts) is
+  # a module-level const built at import, so the flip takes effect at the daemon's NEXT start,
+  # never mid-flight. THE LAST N=3 ATTEMPT WAS INVALIDATED BY EXACTLY THIS. ANY MEASUREMENT OF
+  # THIS FLIP MUST FIRST CONFIRM THE BOOT SHA CARRIES THE CHANGE — a watch window opened before
+  # the daemon restarts measures the old value and proves nothing.
+  # AND CARRY THIS FORWARD: NO CONCURRENCY COST HAS EVER APPEARED. `rejected: 0` on every settled
+  # set including the lone lane_count:3 row, `run.error` unchanged at 18 lifetime,
+  # `scope_guard.refused` unchanged at 8. THE PROBLEM IS DELIVERY, NOT PARALLELISM.
   dispatchLanes:
-    value: 2
+    value: 3
     origin: "lifted:src/lib/sweep.ts:359 (DEFAULT_SWEEP_POLICY.dispatchLanes)"
     min: 1
     max: 4
