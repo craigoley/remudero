@@ -1,0 +1,109 @@
+- id: W1-T454
+  title: "the risk judge blocks merges on a task TITLE and prints its guesses as observations — it is never shown the diff, and its four stated reasons against #1722 were each refuted by the code it did not read"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  origin: oper#risk-judge-blind-verdict-2026-08-13
+  principles: {tdd: strict}
+  budget_usd: 40
+  files:
+    - src/lib/risk-judge.ts
+    - src/run-task.ts
+    - test/risk-judge.test.ts
+    - test/risk-judge-wiring.test.ts
+    - test/risk-judge-evidence-grammar.test.ts
+    - test/arm-at-open.test.ts
+  rationale: "RE-DERIVED at 4096adc. `RiskJudgeChange` (src/lib/risk-judge.ts) has EXACTLY TWO
+    FIELDS — `description: string` and `files?: string[]` — and the only mention of a diff in the
+    whole module is a doc hint on `description` ('diff summary, PR title/body, etc'). The
+    production call site (src/run-task.ts) passes:
+        change: { description: `${task.title} — ${prUrl}`, files: task.files },
+    A TASK TITLE, A URL, AND THE SHARD'S DECLARED `files:` LIST — not the changed files, not the PR
+    body, not one line of patch. `resolveRiskJudgeMount` then picks the CHEAPEST mount in the entire
+    table (lowest tier rank, ties broken by lowest effort), so a blind judgement is also the one
+    made by the least capable model configured.
+    MEASURED CONSEQUENCE — issue #1723, opened 12:28:09Z against PR #1722 at CONFIDENCE 0.92, four
+    reasons, each refuted by the diff it never read:
+      'Unspent nonces are never deleted—only consumed nonces are removed' — the diff contains a
+        sweep loop `for (const [staleNonce, entry] of pending) { if (nowMs - entry.issuedAt >=
+        CONFIRM_NONCE_TTL_MS) pending.delete(staleNonce); }`, run on every `issue()`, which deletes
+        expired UNSPENT entries;
+      'creating unbounded Map growth (resource exhaustion)' — that loop is what bounds it, and a
+        `size()` accessor was added, per its own doc, 'ONLY so a test can observe that eviction
+        actually bounds growth';
+      'preserves standing elevated state across arbitrary time horizons' — the diff adds
+        `export const CONFIRM_NONCE_TTL_MS = 5 * 60 * 1000`;
+      'contradicts established nonce lifecycle practice (time-bound or state-bound expiration)' —
+        time-bound expiry is precisely what it implements.
+    THE JUDGE DESCRIBED THE PRE-CHANGE DEFECT AS THOUGH IT WERE THE POST-CHANGE STATE, because
+    W1-T451's TITLE is about a missing expiry. The reviewer, which DOES read the diff, had already
+    posted `remudero-review=success — PASS — 3 criteria substantiated` on the same head."
+  design: |
+    (i) TWO CANDIDATE FIXES. Argue both in the PR body; they are not exclusive and the second is
+    the cheaper and probably the better one.
+      OPTION A — GIVE IT EVIDENCE. Pass something the verdict can rest on. THE COST IS REAL AND
+      MUST BE COSTED RATHER THAN WAVED: this runs on the cheapest configured mount by construction
+      (`resolveRiskJudgeMount`), and a full patch is the largest prompt in the pipeline on the
+      weakest model. Establish whether a BOUNDED form carries enough signal — `git diff --numstat`
+      (files plus added/deleted counts), the ACTUAL changed-file list rather than the shard's
+      declared one, and the PR body's own summary — before reaching for the whole patch. Measure
+      the prompt size of each form against a real PR rather than estimating.
+      OPTION B — MAKE THE VERDICT HONEST ABOUT ITS EVIDENCE. The escalation prints inferences in
+      the grammar of observations ('Unspent nonces ARE never deleted'). A verdict that said 'on the
+      task title alone, this change MAY leave unbounded growth — the diff was not read' would be
+      TRUE, would still disarm auto-merge, and would not send a human to fix something already
+      fixed. This is the W1-T186 emitter discipline — name what was actually observed — applied to
+      the judge's own reasons, and it costs no prompt tokens at all.
+      THE REPO HAS SEVEN MEASURED INSTANCES of a read that FAILED being reported as a read that
+      said NO. An inference printed as an observation is the same law one step further out, and
+      that is the argument for doing B even if A also ships.
+    (ii) A AND B ARE SEPARABLE AND B DOES NOT DEPEND ON A. If the judge is given a diff, its
+    reasons become observations and the grammar is honest by construction; if it is not, the
+    grammar must say so. Shipping B alone is a complete, defensible outcome.
+    (iii) WHAT MUST NOT CHANGE. Judge-unavailable still fails closed to ESCALATE (the module's own
+    'cannot-observe -> wait' rule), `disarmAutoMerge(prUrl)` still runs BEFORE the escalation
+    (W1-T125 shape, and test/arm-at-open.test.ts asserts the source ORDER disarm -> escalate ->
+    verdict), and `task.risk` stays excluded by construction. A fix that made the judge quieter by
+    letting a change through unassessed would be strictly worse than today's false positive.
+  note: "TWO STRUCTURAL HYPOTHESES ARE REFUTED — recorded so nobody rebuilds them.
+    (1) IT DOES NOT KEY ON `risk: high`. The module's own doc: 'there is nowhere to put the static
+    sizing artifact, so a caller cannot leak it in even by mistake', and `RiskJudgeChange` has no
+    field that could carry it. MEASURED: W1-T450, itself a `risk: high` shard, scored LOW at 0.88.
+    (2) IT IS NOT A BLANKET BLOCKER. Ten `risk_judge.decision` rows on the Azure host: EIGHT low
+    (confidence 0.70-0.97) and TWO high — W1-T398 (2026-08-09, 0.82) and W1-T451 (2026-08-13,
+    0.92). It is selective and it has fired before, so this is not a debut and not a rubber stamp.
+    RETIRABILITY IS NOT A DEFECT — MEASURED, AND THE THIRD QUESTION THIS TASK WAS ALMOST FILED
+    WITH. #1722 merged at 13:01:31Z and #1723 CLOSED ITSELF at 13:04:17Z, 2m46s later, with
+    `sweep.escalation_reconcile.summary` reporting `closed: 2` at 13:04:19Z. A false-positive
+    escalation cleared with no operator action once its referent task resolved. The issue footer's
+    'closing this issue does not resolve the underlying block' is about the BLOCK, not the issue's
+    lifecycle. So the cost of a false positive here is a human READING a wrong issue, not a
+    permanently stranded one — which lowers the severity and is the reason option B may be
+    sufficient on its own.
+    SEPARATELY OBSERVED, NOT FILED HERE: the same run's preflight recorded `commitlint: FAIL —
+    origin/main..HEAD  header-max-length` on a 55-character subject against a stock
+    `@commitlint/config-conventional` (limit 100), over a range measured at ONE commit whose
+    longest header is 55. The identical invocation reproduced EXIT 0 (`commitlint --from f5cf2d9
+    --to d4f996b`), and no commit in the last 80 on origin/main exceeds 100 characters. It is a
+    spurious failure, it does NOT explain #1722's missing `Remudero-Task:` trailer (commitlint
+    passes without one, so it does not enforce it), and it belongs in its own filing.
+    RISK:HIGH IS RULE 19's SPAN, NOT BLAST RADIUS — two subsystems (the judge module and its
+    dispatch-path call site) plus the suites that observe them. FILES WRITTEN FROM THE GATES,
+    separated BY INVOCATION COUNT: test/risk-judge.test.ts invokes the judge's symbols heavily
+    (assessRisk 7, planRiskJudgeAction 7, resolveRiskJudgeMount 6, runRiskJudge 5,
+    buildRiskJudgePrompt 1) and test/risk-judge-wiring.test.ts invokes runRiskJudge once AND
+    asserts the call site's LITERAL SOURCE TEXT (`indexOf('const riskJudgeInput: RiskJudgeInput =
+    {')` then `assert.match(inputSlice, /change:\\s*\\{\\s*description:/)`), so any reshaping of
+    that object breaks it. test/arm-at-open.test.ts invokes ZERO judge symbols but asserts the
+    SOURCE ORDER of disarm -> escalate -> verdict on this exact path, so it is included as a gate
+    that observes the shape. test/escalate.test.ts mentions the judge four times with zero
+    invocations and is deliberately excluded."
+  acceptance:
+    - claim: "the judge's escalation reasons state what evidence they rest on rather than asserting unread code"
+      proof: "unit test: test/risk-judge-evidence-grammar.test.ts"
+    - claim: "a judge given no diff still disarms auto-merge and still escalates, so the fail-closed path is unchanged"
+      proof: "unit test: test/risk-judge.test.ts"
+    - claim: "the dispatch call site still disarms before escalating, in that source order"
+      proof: "unit test: test/arm-at-open.test.ts"
