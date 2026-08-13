@@ -61,7 +61,10 @@ function realRepoWithBranch(baseFiles: Record<string, string>, headFiles: Record
 /** The production judgement, end to end: build the base dir for real, then ask the real guard. */
 function staleViaRealPath(head: string, proof: string): boolean {
   const criteria = [{ proof }];
-  const baseDir = buildBaseProofDir(criteria, head); // REAL default deps — no injection
+  // REAL default deps — no injection. W1-T460 split the return into
+  // (baseCheckoutDir, baseUnreadablePaths); this suite is about the DIR half, and every case below
+  // reads at the base perfectly well.
+  const baseDir = buildBaseProofDir(criteria, head).baseCheckoutDir;
   const whitelisted = parseWhitelistedProof(proof);
   assert.ok(whitelisted, `the proof must compile: ${proof}`);
   // Sanity: the proof really does pass on the HEAD, or "stale" would be meaningless.
@@ -124,11 +127,12 @@ test("buildBaseProofDir writes only the paths grep proofs name, and nothing for 
     { "src/a.ts": "alpha\n", "src/b.ts": "beta\n" },
   );
   try {
-    const dir = buildBaseProofDir(
+    const { baseCheckoutDir: dir, baseUnreadablePaths: unreadable } = buildBaseProofDir(
       [{ proof: "grep: alpha in src/a.ts" }, { proof: "unit test: test/x.test.ts" }, { proof: "some prose claim" }],
       head,
     );
     assert.ok(dir, "a grep proof means a base dir");
+    assert.deepEqual([...unreadable], [], "W1-T460: every read here succeeds — nothing is unreadable");
     assert.equal(readFileSync(join(dir, "src/a.ts"), "utf8"), "alpha\n", "the named path is materialised from the base");
     assert.equal(existsSync(join(dir, "src/b.ts")), false, "an unnamed path is not");
     assert.equal(existsSync(join(dir, "test/x.test.ts")), false, "a `unit test:` proof needs no base blob");
@@ -140,8 +144,23 @@ test("buildBaseProofDir writes only the paths grep proofs name, and nothing for 
 test("no grep proof ⇒ no base dir at all ⇒ the check stays inert, as it was for 1,180 verdicts", () => {
   const head = realRepoWithBranch({ "src/a.ts": "alpha\n" }, { "src/a.ts": "alpha\n" });
   try {
-    assert.equal(buildBaseProofDir([{ proof: "unit test: test/x.test.ts" }], head), undefined);
-    assert.equal(buildBaseProofDir([], head), undefined);
+    assert.equal(buildBaseProofDir([{ proof: "unit test: test/x.test.ts" }], head).baseCheckoutDir, undefined);
+    assert.equal(buildBaseProofDir([], head).baseCheckoutDir, undefined);
+  } finally {
+    rmSync(head, { recursive: true, force: true });
+  }
+});
+
+test("an EMPTY merge-base yields no dir either — `git merge-base` can succeed and print nothing", () => {
+  // The other half of the unresolvable case, and a distinct arm from the throwing one below: the
+  // command exits 0 but resolves no commit (unrelated histories, a truncated read). Treating "" as
+  // a rev would ask `git show :<path>` for the INDEX, quietly materialising head content as if it
+  // were the base — which would make every proof look stale. Degrading to "no signal" is required.
+  const head = mkdtempSync(join(tmpdir(), "ge-emptybase-"));
+  try {
+    const built = buildBaseProofDir([{ proof: "grep: x in src/a.ts" }], head, { mergeBase: () => "" });
+    assert.equal(built.baseCheckoutDir, undefined);
+    assert.deepEqual([...built.baseUnreadablePaths], [], "no base to read from is not a per-proof read failure");
   } finally {
     rmSync(head, { recursive: true, force: true });
   }
@@ -152,7 +171,7 @@ test("an unresolvable merge-base yields no dir rather than throwing inside a rev
   // required: a false positive strands a PR, a missed one costs only the old behaviour.
   const notARepo = mkdtempSync(join(tmpdir(), "ge-norepo-"));
   try {
-    assert.equal(buildBaseProofDir([{ proof: "grep: x in src/a.ts" }], notARepo), undefined);
+    assert.equal(buildBaseProofDir([{ proof: "grep: x in src/a.ts" }], notARepo).baseCheckoutDir, undefined);
   } finally {
     rmSync(notARepo, { recursive: true, force: true });
   }
@@ -169,10 +188,14 @@ test("the production call site actually supplies baseCheckoutDir — the gap tha
   // test/arm-outcome-five-sites.test.ts uses for the identical "is this lane actually wired" question.
   const src = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
 
+  // W1-T460 turned the old one-line ternary into a one-line SPREAD, because the builder now
+  // returns two facts (the dir AND the paths whose blob could not be read) named as the evidence
+  // fields they become. The QUESTION this pin asks is unchanged: is it actually called with the
+  // materialised head worktree, and does its result actually reach the evidence?
   assert.match(
     src,
-    /baseCheckoutDir:\s*worktreePath\s*\?\s*buildBaseProofDir\(criteria,\s*worktreePath\)\s*:\s*undefined/,
-    "reviewCommand must build the base dir from its own materialised head worktree",
+    /\.\.\.\(worktreePath \? buildBaseProofDir\(criteria, worktreePath\) : \{\}\)/,
+    "reviewCommand must build the base facts from its own materialised head worktree and spread them onto the evidence",
   );
   assert.match(
     src,
