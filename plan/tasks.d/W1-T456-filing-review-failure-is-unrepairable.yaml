@@ -1,0 +1,120 @@
+- id: W1-T456
+  title: "a filing PR fails review for one reason and cannot be repaired for a second, unrelated one — the fleet grades it, the fix rung refuses it for want of a trailer the convention forbids, and the operator absorbs every one"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: "MEASURED THREE TIMES THIS WEEK — #1714, #1715 and #1728 — all failing review, all
+    escalating, all landing on a human. EVERY LINK RE-DERIVED AT 8e5e3a55.
+    THERE ARE TWO INDEPENDENT DEFECTS HERE AND THEY MUST NOT BE COLLAPSED. One explains why a filing
+    FAILS; the other explains why that failure CANNOT BE REPAIRED. Fixing either alone leaves the
+    operator in the loop.
+    DEFECT A — WHY A FILING FAILS. Its acceptance proofs FORWARD-REFERENCE test files the
+    IMPLEMENTATION will create. The reviewer resolves the criteria correctly, runs the proof, finds no
+    such file, and the execution branch in `judgeReview` (`src/lib/review.ts`) sets
+    `proofExec = \"executed_fail\"; met = false` with the reason `proof executed and FAILED on the PR
+    head … overrides any keyword coverage`. THAT IS CORRECT FOR AN IMPLEMENTATION PR AND WRONG FOR A
+    FILING, and nothing in the reviewer can tell them apart. W1-T205's `planOnly` carve-out does NOT
+    rescue it: `planOnly` is consulted only when choosing the SUMMARY WORDING of a capped SUCCESS
+    (`planOnlySummary` vs `cappedSummary`) and never participates in computing `state`. It exempts the
+    ABSENCE of executed proofs, never the FAILURE of one.
+    DEFECT B — WHY THE FAILURE CANNOT BE REPAIRED. The fix rung (`src/lib/sweep.ts`) fires on
+    `when: (pr) => pr.reviewState === \"failure\"` and reports
+    `pr.criteriaRecoverable === false ? \"review failing — criteria unrecoverable (no Remudero-Task:
+    trailer to resolve them from) — escalating\" : …`. `criteriaRecoverable` is set by
+    `buildOpenPrViews` (`src/run-task.ts`) as `taskId !== undefined`, and that `taskId` comes from
+    `taskIdFromBody(pr.body ?? \"\")` — the trailer, and nothing else.
+    AND FILING PRs ARE REQUIRED TO OMIT THAT TRAILER: #1527 fixed the defect where one CREDITED A TASK
+    AS IMPLEMENTED the moment its filing merged. SO THE CONVENTION AND THE FIX RUNG ARE STRUCTURALLY
+    INCOMPATIBLE — a filing can never satisfy the condition the fix rung needs.
+    W1-T453 DOES NOT RESCUE IT, AND THIS WAS VERIFIED RATHER THAN ASSUMED. #1725 MERGED at
+    2026-08-13T13:31Z, but it merged the SHARD, not the implementation: at 8e5e3a55
+    `buildOpenPrViews` still reads `taskIdFromBody(pr.body ?? \"\")` and consults `headRefName` only
+    for `isDependabot`. And even once built, its fallback resolves `run-<taskId>-<epochMs>` — a filing
+    branch is `plan/preflight-commitlint-false-fail` or `chore/file-*` and CARRIES NO ID ANYWHERE, so
+    the fallback cannot resolve it by construction.
+    THE URGENCY IS REAL BUT BOUNDED, AND THE SHARD SAYS SO RATHER THAN OVERSTATING IT. A workaround
+    already works: sessions now write filing proofs as `grep:` patterns against the shard the PR
+    itself adds. Those execute, pass, and miss the merge base by construction — #1726 and #1728 both
+    landed green that way. So the operator CAN unblock any filing by hand. The cost is that every
+    filing needs a human who knows the trick, which is exactly the human-in-the-loop this task exists
+    to remove."
+  design: "(i) HOW A FILING IS IDENTIFIABLE — ARGUE ONE, AND THE SEAM MAY ALREADY EXIST.
+      (a) THE DIFF ADDS A SHARD under `plan/tasks.d/`. Simple and observable, but it covers only a
+      filing that CREATES a shard; one that REWRITES an existing shard (#1728 is exactly that) adds
+      no file and would be missed.
+      (b) `isPlanFiling` — DECLARED ON `OpenPrView` (`src/lib/sweep.ts`) AND UNWIRED. It sits in
+      `KNOWN_UNWIRED` (`src/lib/producer-completeness.ts`) with the reason `the plan-filing stand-down
+      is written and waiting for a producer; the row never matches — fail-open`. Its consumer already
+      exists: `const unattributableFiling = disposition === \"blocked-ambiguous\" && !pr.taskId &&
+      pr.isPlanFiling === true`. SO THE SEAM FOR DEFECT B IS ALREADY BUILT AND WAITING FOR A PRODUCER
+      IN `buildOpenPrViews`. ESTABLISH WHETHER WIRING IT IS THIS TASK OR A PREREQUISITE — the shard's
+      recommendation is THIS TASK, because the stand-down it drives is precisely defect B's remedy and
+      splitting them leaves a declared field still unwired.
+      (c) THE PROOF'S TARGET PATH IS ABSENT ON THE HEAD AND DECLARED IN THE SHARD'S OWN `files:`. This
+      is the only candidate that speaks to DEFECT A, because it identifies a FORWARD REFERENCE rather
+      than a filing — and a forward reference is what the reviewer must report honestly.
+      RECOMMENDATION: (b) for the fix rung and (c) for the reviewer. They are different questions and
+      one predicate cannot serve both.
+    (ii) SHOULD A FILING BE REPAIRABLE, OR SIMPLY NOT FAIL? BOTH HALVES ARE NEEDED, and establishing
+    why is the point of this clause.
+      (i-a) THE REVIEWER RECOGNISES A FORWARD REFERENCE and reports it UNBUILT rather than FAILED —
+      then there is nothing to repair. Cheaper, and probably right for the common case.
+      (i-b) THE FIX RUNG LEARNS TO RESOLVE A FILING'S CRITERIA WITHOUT A TRAILER — then failures can
+      be worked.
+      (i-a) ALONE IS NOT SUFFICIENT, AND THIS IS THE ESTABLISHED PART: a filing CAN fail for a REAL
+      reason. A malformed shard, a `lint-plan` violation, a bad `files:` list (`scopeGuardOutOfScopeFiles`
+      refused a session's own draft this week), or an acceptance block the parser reads as zero criteria
+      all fail a filing legitimately. If the reviewer excused forward references and nothing taught the
+      fix rung to resolve a filing, those genuine failures would still escalate to a human. So both.
+    (iii) THE OPPOSITE FAILURE IS WORSE AND THE OUTCOME MUST BE HONEST, NOT ABSENT. A filing that
+    PASSES because its proofs were EXCUSED would let a malformed shard through. This repo has SEVEN
+    measured instances of a read that FAILED being reported as a read that SAID NO; an unbuilt proof
+    reported as SUBSTANTIATED is the same law inverted. `ProofExecOutcome` already carries
+    `not_executable`, `exec_error`, `executed_stale` and `not_attempted`, and `ProofSkipReason` carries
+    `prose-no-match`, `dialect-parse-error`, `exec-error` and `no-exec-context`. A FORWARD REFERENCE
+    WANTS ITS OWN NAMED STATE in that vocabulary — never a silent pass, and never a reuse of
+    `exec_error`, which means the runner broke rather than the file being unwritten.
+    (iv) BOUNDARY WITH W1-T454 (#1726, merged), NAMED EXPLICITLY SO THIS IS NOT A NEAR-DUPLICATE.
+    W1-T454 targets `src/lib/risk-judge.ts` — the RISK judge, which blocks a merge on a task title.
+    THIS task targets `judgeReview` (`src/lib/review.ts`) and the fix rung (`src/lib/sweep.ts`).
+    Different functions, different verdicts. THE ONE OVERLAP IS `src/run-task.ts`, which both declare:
+    W1-T454 for the risk judge's call site, this task for `buildOpenPrViews`. Whoever builds second
+    should expect a merge conflict there and nothing more."
+  acceptance:
+    - claim: "a filing whose proof names a test the implementation will create is reported unbuilt rather than failed"
+      proof: "unit test: test/filing-forward-reference.test.ts"
+    - claim: "a filing that fails for a real reason still fails, so the honest outcome is not a blanket excuse"
+      proof: "unit test: test/filing-forward-reference.test.ts"
+    - claim: "a failing filing is resolvable by the fix rung without a task-id trailer"
+      proof: "unit test: test/filing-forward-reference.test.ts"
+  risk: high
+  origin: recon#filing-unrepairable-2026-08-13
+  plan_refs: ["W1-T205", "W1-T453", "W1-T454"]
+  files: [src/lib/review.ts, src/lib/sweep.ts, src/run-task.ts, test/filing-forward-reference.test.ts, test/review.test.ts, test/sweep.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — design (i) and (ii) both carry recommendations with their reasons, and clause
+    (iii) states a hard constraint rather than leaving the outcome to taste. Nothing is parked on an
+    operator ruling.
+    `files:` WAS DERIVED FROM THE GATES, NOT THE CODE THE AUTHOR PICTURES — this week's lesson after
+    SEVEN corrections, one of which `lint-plan` caught by reporting `scopeGuardOutOfScopeFiles` would
+    refuse the branch. `src/lib/review.ts` carries `judgeReview` and the execution branch that mints
+    `executed_fail`; `src/lib/sweep.ts` carries the fix rung and the already-declared `isPlanFiling`;
+    `src/run-task.ts` carries `buildOpenPrViews`, the producer that must populate it.
+    THE DECLARED SUITES ARE THE ONES THAT ASSERT THE SHAPES THIS CHANGES, and the implementer should
+    RE-COUNT BY INVOCATION before trusting them — `test/review.test.ts` for the verdict path and
+    `test/sweep.test.ts` for the disposition rows. DROP ANY PATH THE IMPLEMENTATION DOES NOT TOUCH:
+    `inverseScopeUntouchedFiles` (`src/lib/review.ts`) fails a declared-but-untouched path just as
+    `scopeViolationFiles` fails an undeclared one.
+    RULE 19: `risk: high` set UP FRONT so `sizingViolation` (`src/lib/task-linter.ts`) returns early
+    before `subsystemsOf` is consulted. The band is the SPAN — three `src/` modules because the two
+    defects genuinely live in two of them plus their shared producer — not blast radius.
+    RULE 25: no instrument entanglement; all three are product paths and nothing here touches
+    `INSTRUMENT_SURFACE`.
+    THE WORKAROUND IS NOT A REASON TO DEPRIORITISE THIS, BUT IT IS A REASON NOT TO RUSH IT. `grep:`
+    proofs against the PR's own shard already land filings green, so nothing is BLOCKED today; what is
+    broken is that it takes a human who knows the trick. Re-derive before building — especially
+    W1-T453's status, since its implementation may land first and would change what defect B needs."
