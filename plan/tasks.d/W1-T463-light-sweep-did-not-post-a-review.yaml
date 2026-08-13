@@ -1,0 +1,107 @@
+- id: W1-T463
+  title: "a restricted light sweep already ticks every 60s during an in-flight dispatch and is allowed to do nothing but post reviews — yet a PR sat 21-green and unreviewed for ~15 minutes, so DIAGNOSE THAT before giving reviews a second lane"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  origin: oper#review-lane-budget-2026-08-13
+  principles: {tdd: strict}
+  budget_usd: 40
+  files:
+    - src/lib/daemon.ts
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - test/retro-sweep-ticker.test.ts
+    - test/daemon.test.ts
+    - test/daemon-alive-liveness.test.ts
+    - test/run-task.test.ts
+  rationale: "RE-DERIVED AT 48fb5ec. THE LANE THE RULING ASKS FOR ALREADY EXISTS.
+    `buildSweepLightHook` (`src/run-task.ts`) calls `runSweep` with
+    `actionable: (d) => d === \"post-review\"` — every other disposition is locked out.
+    `DaemonDeps.sweepLight`'s own doc says it ticks on `pollIntervalMs` WHILE `runOne` IS IN FLIGHT
+    and is cleared when it settles, and `startInFlightTicker(deps, pollIntervalMs, log, \"dispatch\")`
+    (`src/lib/daemon.ts`) covers DISPATCH, not only retro. It is wired in production one line below
+    `sweep:` in `daemonCommand`. So W1-T254/#707 already implements `a review must not wait behind a
+    dispatch`.
+    IT DEMONSTRABLY RUNS: the ledger union carries 8 `sweep_light.error` rows (2026-07-28 to
+    2026-08-06), all transient `gh` failures — A HOOK CANNOT ERROR WITHOUT BEING INVOKED. Note it logs
+    ONLY on error, so the ABSENCE of success rows is UNINFORMATIVE and must not be read either way.
+    Step names were EXTRACTED with `\"step\":\"[^\"]*light[^\"]*\"` rather than guessed: the only
+    light-sweep step that exists is `sweep_light.error`.
+    NO LOCK EXPLAINS IT EITHER. Every `acquireDrainLock`/`acquireInflightLock` call site was checked —
+    `drainCommand`, `daemonCommand`, `triageCommand` (its own `triageLockPath`) and `runTask`. NO
+    REVIEW PATH ACQUIRES EITHER, so a separate lane is not blocked by lock ownership and the observed
+    stall is not lock contention.
+    AND YET THE FAILURE IS REAL: a session PR sat with 21 green checks and NO `remudero-review` status
+    for about fifteen minutes while the Azure sweep was on a W1-T453 implement run — the THIRD session
+    PR this week to merge without the deterministic reviewer seeing it, all three merged by hand."
+  design: |
+    (i) THE DIAGNOSIS IS THE FIRST DELIVERABLE AND IT GATES EVERYTHING BELOW IT. The question is
+    exactly: WHY DID A RESTRICTED LIGHT SWEEP THAT TICKS EVERY 60s DURING AN IN-FLIGHT DISPATCH NOT
+    POST A REVIEW FOR ~15 MINUTES? Candidates to separate, not assume: the ticker never started for
+    that `runOne`; it started and each tick found `checksState` not yet green; `runSweep`'s sequential
+    `for (const pr of openPrs)` loop spent the interval on earlier PRs; the post-review row was
+    skipped because `reviewState` was not `none`; or the hook threw and the throw predates the 8
+    recorded errors' shape.
+    IT CANNOT BE ANSWERED FROM THE MINI — Azure's ledger is not synced there, and the mini's daemon is
+    paused. THE DIAGNOSIS RUNS ON AZURE, against that container's own ledger.
+    (ii) DO NOT BUILD A SECOND MECHANISM FOR A PROPERTY THE FIRST ALREADY CLAIMS TO PROVIDE. If the
+    light sweep is broken, A NEW LANE MAY BE BROKEN THE SAME WAY — it would share `runSweep`, the same
+    disposition table and the same dedup. Shipping a budget on top of an undiagnosed fault is the
+    shape this repo keeps correcting, and it is why criterion one is a finding rather than a feature.
+    (iii) ONLY IF THE DIAGNOSIS SAYS SO: THE BUDGET IS NOT A VALUE CHANGE. `laneCount`
+    (`src/lib/daemon.ts`) is a SINGLE NUMBER and DISPATCH-ONLY — `Math.max(1, opts.laneCount ?? 1)`,
+    default 1, described in-source as the `SHIP-DARK default`, feeding `laneDispatchBudget` and
+    `dispatchSet`. The operator's `budget of 2 for reviews` therefore requires INTRODUCING A PER-KIND
+    BUDGET where only one dispatch number exists. Argue that shape explicitly; do not overload
+    `laneCount`.
+    (iv) THE SAFETY PROPERTY A CONCURRENT LANE MUST REPLACE FIRST. Today's guard against reviewing one
+    PR twice is `postReviewed.has(`${pr.taskId}@${pr.headSha}`)`, built by `postedArmFactsFromLedger`
+    FROM LEDGER READS. THAT IS NOT A MUTEX — the `mutex-serialized` phrasing in the docs describes the
+    sweep being single-threaded, not a primitive. Under a concurrent lane two reviews could BOTH READ
+    BEFORE EITHER WRITES. A real per-PR guard is a PREREQUISITE of any second lane, not a follow-up.
+    (v) THE SIZING IS HALF-KNOWN AND THE MISSING HALF IS WORK, NOT A FACT. ENCOURAGING: of 1,511
+    distinct `reviewer_outcome` rows across all three ledger forms, 1,054 are `not_attempted` (70%)
+    against 454 `success` (30%) — the expensive non-deterministic half is skipped on most reviews, so
+    a review is usually deterministic proofs plus a status post. UNKNOWN: there is NO measured wall
+    time and NO peak memory per review. Azure is 4 cores / 7.75 GB and ONE implement lane measured
+    299% CPU and ~2 GB. WHETHER TWO REVIEWER WORKERS FIT ALONGSIDE ONE DISPATCH IS UNMEASURED, and the
+    30% that DO spawn are the ones that decide it. Measure before choosing 2.
+  note: "WHAT SUPPORTS THE OPERATOR'S INTUITION, recorded because it is the strongest argument FOR a
+    separate budget once the diagnosis lands: `dispatch.serialized`'s overlap rule keys on tasks'
+    declared `files:`. TWO REVIEWS TOUCH NO REPO FILES — they read a PR and post a status — so that
+    guard is IRRELEVANT to them. Reviews were arguably never meant to share the dispatch budget at
+    all.
+        TWO SAFETY PROPERTIES ARE NOT YET VERIFIED AND ARE RECORDED AS SUCH RATHER THAN ASSUMED. First,
+    whether the head is RE-READ immediately before posting: the dedup key IS sha-pinned, so a
+    force-push correctly yields a fresh review, but the read-before-post ordering was not established.
+    Second, whether W1-T228's closed-lifecycle refusal holds UNDER CONCURRENCY — it was observed firing
+    correctly today, single-threaded, which says nothing about two reviews racing a merge.
+        SCOPE BOUNDARY — W1-T276 IS THE NEIGHBOUR AND IS NOT THIS TASK. It is a gap in ticker COVERAGE:
+    a fired retro froze the loop because `runRetroTrigger` was a bare await. THIS task is the opposite
+    shape — dispatch IS wrapped by the ticker and a review still did not land. Do not fold them.
+        `files:` IS PROVISIONAL ON CRITERION ONE AND THAT IS DELIBERATE. The diagnosis may land in the
+    ticker (`src/lib/daemon.ts`), the hook's restriction (`src/run-task.ts`) or the disposition/dedup
+    (`src/lib/sweep.ts`), so all three are declared; whichever the finding does not touch is an
+    `inverse_scope` ADVISORY, not a gate. DROP an unused path rather than editing a file to satisfy the
+    list.
+        THE DECLARED SUITES ALL SUPPLY `sweepLight:` AS A DEP, counted rather than eyeballed:
+    `test/retro-sweep-ticker.test.ts` 3, `test/daemon.test.ts` 2, `test/daemon-alive-liveness.test.ts`
+    2, and `test/run-task.test.ts` invokes `buildSweepLightHook(` twice — the only suite that builds
+    the real hook. No suite is declared on a prose mention.
+        RULE 19: `risk: high` SET UP FRONT because `files:` spans daemon, sweep and run-task; the band
+    is the SPAN, not blast radius.
+        NO NUMBER HERE SHOULD BE QUOTED FORWARD: the 8 error rows, the 1,511/1,054/454 split and the
+    299% / 2 GB figure were measured 2026-08-13. Re-derive before building."
+  acceptance:
+    - claim: "the diagnosis names why the light sweep posted no review in that window, from Azure's own ledger"
+      proof: "unit test: test/retro-sweep-ticker.test.ts"
+    - claim: "a regression test pins whatever the diagnosis found, so the same silence fails loudly next time"
+      proof: "unit test: test/retro-sweep-ticker.test.ts"
+    - claim: "no second review lane ships until criterion one is answered"
+      proof: "unit test: test/run-task.test.ts"
+    - claim: "if a lane ships, a real per-PR guard replaces the ledger-read dedup before it is enabled"
+      proof: "unit test: test/daemon.test.ts"
+  status: queued
+  attempts: 0
