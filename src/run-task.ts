@@ -467,6 +467,7 @@ import {
   type StatusProjection,
   planBranchReap,
   type BranchFacts,
+  readLedgerUnionBounded,
 } from "./lib/status.js";
 import {
   DEFAULT_SWEEP_POLICY,
@@ -17296,18 +17297,46 @@ export async function digestCommand(
  * escalates and captures nothing new. --dry-run previews the counts + which alerts WOULD
  * escalate; it opens no issues, captures no feedback, and writes no ledger line.
  */
-async function opsCommand(rest: string[]): Promise<number> {
+export async function opsCommand(
+  rest: string[],
+  // W1-T462: APPENDED LAST AND FULLY DEFAULTED, so no positional caller shifts. Exists because the
+  // union-reading `readLedger` below is otherwise unreachable from a test — this function builds its
+  // own config, gateways and ledger path, so without a seam the one line that fixes the dedupe could
+  // only be asserted by grepping source, which is what let its predecessor ship half-wired.
+  deps: { pollAlerts?: typeof pollAlerts; loadConfig?: typeof loadConfig; resolveOwnerRepo?: typeof resolveOwnerRepo } = {},
+): Promise<number> {
   const badArg = unknownArgError("ops", rest, [], ["--dry-run"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
   }
   const dryRun = rest.includes("--dry-run");
-  const config = loadConfig();
+  const config = (deps.loadConfig ?? loadConfig)();
   const ledgerPath = ledgerPathFor(config);
-  const { owner, repo } = resolveOwnerRepo();
+  const { owner, repo } = (deps.resolveOwnerRepo ?? resolveOwnerRepo)();
   const runId = `OPS-${Date.now()}`;
-  const result = await pollAlerts(owner, repo, {
+  const result = await (deps.pollAlerts ?? pollAlerts)(owner, repo, {
+    // W1-T462: THE DEDUPE READS THE UNION, NOT ONE FILE. `pollAlerts` defaults `readLedger` to
+    // `readLedgerLines`, which opens EXACTLY ONE path — and its dedupe key,
+    // `escalation.issue_opened`, is capped by rotation at `MAX_RETAINED_LINES_PER_STEP` (200).
+    // MEASURED on this host at 2026-08-13: the live file exposes 107 distinct escalated ids while
+    // the union holds 207 — SO 100 ALREADY-ESCALATED ALERTS WERE INVISIBLE TO THE DEDUPE, and
+    // re-polling would have opened a duplicate issue for every one of them.
+    //
+    // THAT IS WHY THIS LINE SHIPS WITH THE CADENCE RATHER THAN AFTER IT. A cadence is precisely
+    // what turns a latent one-file read into repeated duplicate escalations — the same shape as the
+    // credit treadmill #1710 fixed, where `hasMergeCredit` read one file against the same 200-row
+    // cap and re-credited 185 tasks forever. Scheduling the poll without this would have shipped
+    // the amplifier and called it a feature.
+    //
+    // The fix is at the CALLER because `readLedger` is already injectable — `lib/ops.ts` is
+    // untouched, which is what W1-T462's design (iii) requires ("do not build a new poller").
+    // NO `satisfied` PREDICATE, DELIBERATELY. `readLedgerUnionBounded`'s early stop is keyed on
+    // STEPS SEEN, which answers "is this step present anywhere" — and the live file almost always
+    // has one `escalation.issue_opened`, so a step predicate stops before opening a single
+    // rotation and reproduces the exact one-file blindness this injection exists to fix. A dedupe
+    // needs the whole SET, not the newest row, so it reads to the rotation cap.
+    readLedger: (path) => readLedgerUnionBounded(path),
     alerts: ghAlertGateway(),
     issues: ghIssueGateway(owner, repo),
     ledgerPath,
