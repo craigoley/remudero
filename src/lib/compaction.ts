@@ -229,6 +229,21 @@ export function outputContractLines(taskId: string): string[] {
     "  THIS task, or the claim is refused and treated as if you had opened no PR at all.",
     "- Otherwise: stage the changed file(s), commit, then run",
     ...ciParityContractLines(),
+    // W1-T465: THE MECHANISM, NOT JUST THE PROHIBITION. Five runs on the mini and three on Azure
+    // backgrounded a long job (`--ci-parity` is 15-17 minutes) and ENDED THE TURN expecting a
+    // wake-up; all eight produced `no_pr` with `commits_ahead: 0` and `subtype: "success"`, and the
+    // three Azure ones alone cost $49.36. NOTHING IN ANY PROMPT TAUGHT THIS — the worker inferred it
+    // from the harness's real backgrounding affordance, which genuinely DOES notify in an
+    // INTERACTIVE session and cannot reach a headless run. So the reason is stated with the rule: a
+    // prohibition whose mechanism is absent gets re-derived away by the next model that reasons
+    // about it, and a worker facing a fifteen-minute job will background it anyway. No polling
+    // helper exists in this repo to cite (measured), so the SHAPE is spelled out rather than named.
+    "- NEVER background a long job and then end your turn to wait for it. THERE IS NO NOTIFICATION",
+    "  CHANNEL in this run: nothing will wake you when a background task finishes, and the run ENDS",
+    "  the moment you stop issuing tool calls — your work is discarded with it, however far you got.",
+    "  If you background anything, POLL it yourself and keep issuing tool calls until it is done,",
+    "  e.g. `until [ -f /tmp/done ]; do sleep 20; done` — or simply run the command in the",
+    "  foreground and wait for it to return.",
     "  Only once that passes: `git push origin HEAD` (NOT `-u` — the shared .git/config is",
     "  outside the sandbox write scope, WS-0 FF10f), and open a PR with `gh pr create --fill",
     "  --base main`.",
