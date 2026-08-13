@@ -153,4 +153,7 @@ test("the real generated client's components.schemas.Error mirrors src/lib/servi
   assert.match(generated, /Error: \{/);
   assert.match(generated, /error: "unauthorized" \| "forbidden" \| "not_found" \| "invalid_request" \| "internal_error";/);
   assert.match(generated, /required_scope\?: "read" \| "write";/);
+  // W1-T404: the tier field the Error schema grew alongside required_scope -- carries the same
+  // proof forward rather than adding a parallel one, so a future drift here fails THIS assertion.
+  assert.match(generated, /required_tier\?: "low" \| "middle" \| "high";/);
 });

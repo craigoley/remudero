@@ -180,6 +180,24 @@ test("every panel action route is write-scoped: a read-only token gets 403", asy
   });
 });
 
+// ── W1-T404: every route this module declares carries its ruled WriteTier ───────────────────
+
+test("every panel-actions.ts write route carries its design-(i)-ruled tier", () => {
+  const root = tmpRoot();
+  const routes = buildServeRoutes(serveDepsFor(depsFor(root)));
+  const tierOf = (path: string) => routes.find((r) => r.method === "POST" && r.path === path)?.tier;
+  assert.equal(tierOf("/v1/control/pause"), "middle");
+  assert.equal(tierOf("/v1/control/resume"), "middle");
+  assert.equal(tierOf("/v1/control/stop"), "middle");
+  assert.equal(tierOf("/v1/quiet-hours"), "middle");
+  assert.equal(tierOf("/v1/questions/answer"), "low");
+  assert.equal(tierOf("/v1/escalation/mark-handled"), "low");
+  assert.equal(tierOf("/v1/drain/feedback"), "low");
+  assert.equal(tierOf("/v1/manual/approve"), "high");
+  assert.equal(tierOf("/v1/drain/kick"), "high");
+  assert.equal(tierOf("/v1/drain/run"), "high");
+});
+
 test("no bearer token at all -> 401", async () => {
   const root = tmpRoot();
   await withService(depsFor(root), async (base) => {

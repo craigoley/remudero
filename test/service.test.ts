@@ -240,3 +240,43 @@ test("service surface: a handler that throws -> 500, never crashes the server", 
     void svc; // outer service untouched by this sub-fixture
   });
 });
+
+// ── W1-T404: Route.tier is inert unless ServiceOptions.enforceWriteTiers turns it on ────────
+//
+// The full tier + second-factor mechanism has its own dedicated falsifiers
+// (test/write-tier-*.test.ts). What THIS file must prove, as the generic surface's own suite, is
+// the claim `enforceWriteTiers`'s doc makes: labeling a route's tier never changes what it
+// accepts unless that flag is set. Without this, a future reader could not tell "the flag
+// defaults off" from "nobody checked."
+
+test("a write route's declared HIGH tier does NOT gate anything when enforceWriteTiers is unset (the default)", async () => {
+  const server = createService({
+    tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
+    routes: [
+      {
+        method: "POST",
+        path: "/tiered",
+        scope: "write",
+        tier: "high",
+        handler: (_req, res) => {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ ok: true }));
+        },
+      },
+    ],
+    // enforceWriteTiers deliberately omitted.
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/tiered`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${WRITE_TOKEN}` },
+    });
+    // Ordinary write scope, no nonce, no tier credential -- and it still succeeds, exactly the
+    // pre-W1-T404 behavior, because the gate is off.
+    assert.equal(res.status, 200);
+  } finally {
+    server.close();
+  }
+});

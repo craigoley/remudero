@@ -331,6 +331,8 @@ export function buildSubmitFeedbackRoute(deps: PanelGraphDeps): Route {
     method: "POST",
     path: "/v1/feedback",
     scope: "write",
+    // W1-T404: LOW — bookkeeping, trivially reversible (capture-only).
+    tier: "low",
     handler: jsonAction(validateSubmitFeedback, (input, req, res) => {
       if (input.replyTo !== undefined) {
         let target: FeedbackEntry;
@@ -403,6 +405,8 @@ export function buildPreviewFeedbackRoute(deps: PanelGraphDeps): Route {
     method: "POST",
     path: "/v1/feedback/preview",
     scope: "write",
+    // W1-T404: LOW — bookkeeping, trivially reversible (files nothing, W1-T350).
+    tier: "low",
     handler: jsonAction(validatePreviewFeedback, async (input, _req, res) => {
       if (input.replyTo !== undefined) {
         let target: FeedbackEntry;
@@ -516,6 +520,8 @@ export function buildProposalDecisionRoute(deps: PanelGraphDeps): Route {
     method: "POST",
     path: "/v1/feedback/decision",
     scope: "write",
+    // W1-T404: LOW — bookkeeping, trivially reversible (accept/reject a proposal's status).
+    tier: "low",
     handler: jsonAction(validateProposalDecision, (input, req, res) => {
       let entry: FeedbackEntry;
       try {
@@ -1259,6 +1265,8 @@ export function buildApproveProposalRoute(deps: PanelGraphDeps): Route {
     method: "POST",
     path: "/v1/inbox/approve",
     scope: "write",
+    // W1-T404: HIGH — moves code (hands off to a detached rmd spawn: ratify/merge).
+    tier: "high",
     handler: jsonAction(validateApproveProposal, (input, req, res) => {
       const { proposals, classifications } = classifyAllProposals(deps);
       if (!proposals.some((p) => p.id === input.proposalId)) {
@@ -1308,6 +1316,8 @@ export function buildReframeProposalRoute(deps: PanelGraphDeps): Route {
     method: "POST",
     path: "/v1/inbox/reframe",
     scope: "write",
+    // W1-T404: LOW — bookkeeping, trivially reversible (feedback, no ratification).
+    tier: "low",
     handler: jsonAction(validateReframeProposal, (input, req, res) => {
       const { proposals } = classifyAllProposals(deps);
       if (!proposals.some((p) => p.id === input.proposalId)) {
@@ -1397,6 +1407,9 @@ export function buildSetDailyCostCeilingRoute(deps: PanelGraphDeps): Route {
     method: "POST",
     path: "/v1/policy/daily-cost-ceiling",
     scope: "write",
+    // W1-T404: MIDDLE — reversible (lowered again / cleared) but a spend force multiplier:
+    // raising it spends nothing, it removes the thing that would have stopped the spending.
+    tier: "middle",
     handler: jsonAction(validateSetDailyCostCeiling, (input, req, res) => {
       const policy = ceilingPolicy(deps);
       const before = resolveDailyCostCeiling(deps.root, policy);
@@ -1427,6 +1440,9 @@ export function buildClearDailyCostCeilingRoute(deps: PanelGraphDeps): Route {
     method: "POST",
     path: "/v1/policy/daily-cost-ceiling/clear",
     scope: "write",
+    // W1-T404: MIDDLE — reversible (re-set again) but a spend force multiplier, same reasoning
+    // as the set route above.
+    tier: "middle",
     handler: async (req, res) => {
       const policy = ceilingPolicy(deps);
       const before = resolveDailyCostCeiling(deps.root, policy);

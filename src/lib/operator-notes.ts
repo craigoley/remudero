@@ -164,6 +164,8 @@ export function buildAddOperatorNoteRoute(deps: OperatorNoteRouteDeps): Route {
     method: "POST",
     path: "/v1/operator-notes/add",
     scope: "write",
+    // W1-T404: LOW — bookkeeping, trivially reversible (an advisory guidance note).
+    tier: "low",
     handler: jsonAction(validateAddOperatorNote, (input, req, res) => {
       const ts = new Date().toISOString();
       const entry: OperatorNoteEntry = { ts, taskId: input.taskId, author: input.author, note: input.note };

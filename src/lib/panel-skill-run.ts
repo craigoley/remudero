@@ -217,6 +217,8 @@ export function buildRunSkillRoute(deps: PanelSkillRunDeps): Route {
     method: "POST",
     path: "/v1/skills/run",
     scope: "write",
+    // W1-T404: HIGH — executes a skill against the operator's own checkout.
+    tier: "high",
     handler: jsonAction(validateRunSkill, (input, req, res) => {
       const registry = loadSkillRegistry(skillsDir(deps.root));
       if (!registry.some((s) => s.name === input.skill)) {

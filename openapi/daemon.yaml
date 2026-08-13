@@ -97,6 +97,18 @@ components:
           enum:
             - read
             - write
+        required_tier:
+          type: string
+          description: >
+            W1-T404 -- present only on a 403 refused for an insufficient WRITE TIER (once
+            src/lib/service.ts's `enforceWriteTiers` is turned on; not yet set by `rmd serve`'s
+            own production wiring). `low` (bookkeeping), `middle` (reversible but disruptive,
+            or a spend force multiplier) or `high` (spends money or moves code) -- the tier the
+            caller's token was missing, alongside `required_scope: write`.
+          enum:
+            - low
+            - middle
+            - high
 
     StatusProjection:
       type: object

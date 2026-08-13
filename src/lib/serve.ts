@@ -40,7 +40,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
 import { createOrReadExclusive } from "./fs-race-safe.js";
-import { createService, type Route, type ServiceOptions, type ServiceTokens, type SseRoute } from "./service.js";
+import { assertWriteTiersComplete, createService, type Route, type ServiceOptions, type ServiceTokens, type SseRoute } from "./service.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
 import type { GitHub } from "./status.js";
 import {
@@ -4327,6 +4327,10 @@ function buildAuthScopeRoute(): Route {
     method: "GET",
     path: "/v1/auth/scope",
     scope: "write",
+    // W1-T404: LOW — a side-effect-free probe of "do I have write scope at all", the least
+    // consequential thing a write token can do (rationale note: worth settling whether this
+    // needs write scope at all; unchanged by this task either way).
+    tier: "low",
     handler: (_req, res) => {
       res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({ scope: "write" }));
@@ -4377,7 +4381,7 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
     root: deps.accountUsage?.root ?? deps.fleetControlRoot,
   };
 
-  return [
+  const routes = [
     buildStatusRoute(deps.board, lastSeen),
     buildRecentRoute(deps.board),
     buildDaemonHealthRoute(daemonHealthDeps),
@@ -4443,6 +4447,13 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
     }),
     buildVersionRoute(consoleSha),
   ];
+
+  // W1-T404 design (iii): `ci-parity:drift`-shaped completeness, run inside the PRODUCT function
+  // (this one), not merely a test — a write-scoped route added here with no declared tier fails
+  // the build rather than defaulting quietly. See `assertWriteTiersComplete`'s own doc.
+  assertWriteTiersComplete(routes);
+
+  return routes;
 }
 
 /**

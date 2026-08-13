@@ -44,10 +44,62 @@
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { timingSafeEqual } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 
 /** Bearer scope a route (or SSE stream) requires. `write` implies `read`. */
 export type Scope = "read" | "write";
+
+/**
+ * W1-T404 (MASTER-PLAN §7A/§7): a write-scoped route's CONSEQUENCE class, ruled 2026-08-11 —
+ * "one `write` grant reaches all 20 write-scoped routes, so the credential that adds an operator
+ * note is the credential that spends the daily budget, executes a skill against the operator's
+ * checkout and halts the fleet." Three tiers, by worst outcome of one unintended call:
+ *   `low`    — bookkeeping, trivially reversible (an operator note, a feedback entry).
+ *   `middle` — reversible but disruptive, or a force multiplier for `high` (STOP, the cost
+ *              ceiling — raising it spends nothing, it removes the thing that would have
+ *              stopped the spending).
+ *   `high`   — spends money or moves code (drain, skills/run, MANUAL approve, inbox approve).
+ * PURELY DECLARATIVE on {@link Route} — see that field's own doc for why consequence cannot be
+ * derived from the handler. The comparison this ordering backs is {@link writeTierSatisfies}.
+ */
+export type WriteTier = "low" | "middle" | "high";
+
+const WRITE_TIER_RANK: Record<WriteTier, number> = { low: 1, middle: 2, high: 3 };
+
+/**
+ * True iff a `granted` write tier meets a `required` one — higher tiers imply every lower one,
+ * the same "write implies read" shape {@link Scope} already has. `undefined` (a grantor that
+ * never reported a tier at all) satisfies nothing: the absence of a tier claim is not a claim of
+ * the lowest one.
+ */
+export function writeTierSatisfies(granted: WriteTier | undefined, required: WriteTier): boolean {
+  if (!granted) return false;
+  return WRITE_TIER_RANK[granted] >= WRITE_TIER_RANK[required];
+}
+
+/**
+ * design (iii)'s `ci-parity:drift`-shaped completeness check, re-derived from `src/lib/ci-parity.ts`
+ * at 0b9d564 rather than a new spelling: given the REAL assembled route table, name every
+ * write-scoped route with no declared {@link Route.tier} — the set a caller fails loud on rather
+ * than silently defaulting. Empty ⇒ every write route in `routes` is classified.
+ */
+export function writeRoutesMissingTier(routes: readonly Route[]): string[] {
+  return routes.filter((r) => r.scope === "write" && !r.tier).map((r) => `${r.method} ${r.path}`);
+}
+
+/**
+ * design (iii-a): run {@link writeRoutesMissingTier} and FAIL THE CALLER (throw) rather than
+ * merely reporting — the "runs inside the product function" half of the ci-parity:drift shape,
+ * stronger than a bare test assertion (see that design note's own W1-T402 contrast). Extracted
+ * here, callable directly, so its throw branch is unit-testable without needing the real
+ * assembled route table (which never triggers it) to somehow go missing a tier.
+ */
+export function assertWriteTiersComplete(routes: readonly Route[]): void {
+  const missing = writeRoutesMissingTier(routes);
+  if (missing.length > 0) {
+    throw new Error(`write-scoped route(s) with no declared WriteTier: ${missing.join(", ")}`);
+  }
+}
 
 export type Method = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
@@ -76,6 +128,18 @@ export interface Route {
    * (`/v1/*`) — a token in the URL leaks via `Referer` and access logs; those stay header-only.
    */
   allowQueryToken?: boolean;
+  /**
+   * W1-T404: this route's {@link WriteTier} — DECLARED, never derived (design ii: a single
+   * module declares routes at both consequence poles, so no module-level or grep-shaped signal
+   * could tell them apart). Meaningful only when `scope === "write"`; every write-scoped route
+   * in the REAL assembled table (`serve.ts`'s `buildServeRoutes`) must carry one — see
+   * {@link writeRoutesMissingTier}, which that function fails loud on rather than defaulting.
+   * Optional on the TYPE (design i-a's chosen encoding) so it never forces every existing
+   * read-scoped route literal in `test/` to grow a field it has no use for; enforcement is
+   * opt-in via {@link ServiceOptions.enforceWriteTiers}, off by default, so labeling a route here
+   * classifies it without changing what it accepts until that flag is turned on.
+   */
+  tier?: WriteTier;
 }
 
 /** Push one SSE event to a subscribed client (`event:`/`data:` framing, owned by this module). */
@@ -176,6 +240,16 @@ export interface IdentityProvider {
    * provider that doesn't apply steps aside instead of asserting a deny.
    */
   grant(req: IncomingMessage, allowQueryToken: boolean): ReadonlySet<Scope> | undefined;
+  /**
+   * W1-T404: the {@link WriteTier} this provider's `write` grant is entitled to — a property of
+   * the PROVIDER, not a per-request decision (mirrors `grant`'s own `read`/`write` set being one
+   * fixed grant per grantor). `undefined` (the default for a provider that declares nothing)
+   * satisfies no tier at all once {@link ServiceOptions.enforceWriteTiers} is on — silence is
+   * never read as the lowest tier. Design (v)'s ruling for the bearer token specifically: an
+   * EXISTING write credential resolves to `"low"`, a deliberate, visible break from a token that
+   * used to reach every write route — see {@link bearerTokenProvider}.
+   */
+  readonly writeTier?: WriteTier;
 }
 
 /** What {@link createService}'s provider dispatch hands back once some {@link IdentityProvider}
@@ -183,6 +257,9 @@ export interface IdentityProvider {
 export interface IdentityGrant {
   scopes: ReadonlySet<Scope>;
   provider: string;
+  /** W1-T404: the granting provider's {@link IdentityProvider.writeTier}, carried through
+   *  unchanged — {@link grantedScopes} never invents a default here. */
+  tier?: WriteTier;
 }
 
 export interface ServiceOptions {
@@ -200,6 +277,136 @@ export interface ServiceOptions {
   sse?: SseRoute[];
   /** One ledger line per auth decision / SSE lifecycle event / handler error. */
   log?: (step: string, extra?: Record<string, unknown>) => void;
+  /**
+   * W1-T404: turns ON the {@link Route.tier} + second-factor mechanism below — OFF by default,
+   * so labeling the real 20 write routes with a tier (required for
+   * {@link writeRoutesMissingTier}'s completeness check) never changes what a caller can reach
+   * until this is set. `rmd serve`'s own production wiring does not set it yet: flipping it on
+   * is paired follow-up work with the console's own tier-aware nonce round trip (design vi) —
+   * without that client-side half, an operator's existing single write token would silently
+   * start 403ing on buttons the shipped client has no way to unblock. The mechanism itself is
+   * real and fully exercised over HTTP by `test/write-tier-*.test.ts`, which turn this on.
+   */
+  enforceWriteTiers?: boolean;
+  /**
+   * W1-T404 design (iv): the server-issued, single-use, action-and-payload-bound second factor
+   * store HIGH-tier routes consult when {@link enforceWriteTiers} is on. Defaults to a fresh
+   * {@link createConfirmNonceStore} — one daemon process, no cross-process sharing needed
+   * (mirrors {@link ServiceTokens}' own single-process trust model).
+   */
+  confirmNonces?: ConfirmNonceStore;
+}
+
+/**
+ * W1-T404 design (iv), ruled 2026-08-13, option (c): one action a {@link ConfirmNonceStore}
+ * nonce is issued for or verified against — the EXACT route and payload it authorizes. Binding
+ * to the action (not to a time window) is the reasoning the ruling itself records: it creates no
+ * standing elevated state a stolen session can spend, and adds no second secret to paste.
+ */
+export interface ConfirmNonceAction {
+  method: Method;
+  path: string;
+  /** The raw request body text the authorized call will send, byte for byte — never a
+   *  re-serialization of a parsed object, which could reorder/drop keys the caller never typed.
+   *  A client controls both calls' bytes, so reusing the identical string is trivial for it. */
+  payload: string;
+}
+
+/**
+ * Server-issued, single-use, action-and-payload-bound second factor for HIGH-tier write routes.
+ * `issue` proves nothing by itself (any write-scoped caller may request one — it names an
+ * action, not a permission); `consume` is what makes it a factor: it verifies AND SPENDS in one
+ * step, so a captured nonce can never be replayed, even against the identical action again.
+ */
+export interface ConfirmNonceStore {
+  issue(action: ConfirmNonceAction): string;
+  consume(nonce: string, action: ConfirmNonceAction): boolean;
+}
+
+/** In-memory default — single daemon process, no persistence needed. `randomToken` is injectable
+ *  so a test can assert on a known nonce value; production always uses real `randomBytes`. */
+export function createConfirmNonceStore(randomToken: () => string = () => randomBytes(24).toString("hex")): ConfirmNonceStore {
+  const pending = new Map<string, ConfirmNonceAction>();
+  return {
+    issue(action) {
+      const nonce = randomToken();
+      pending.set(nonce, action);
+      return nonce;
+    },
+    consume(nonce, action) {
+      const recorded = pending.get(nonce);
+      pending.delete(nonce); // single-use regardless of outcome — a wrong guess spends it too.
+      if (!recorded) return false;
+      return recorded.method === action.method && recorded.path === action.path && safeEqual(recorded.payload, action.payload);
+    },
+  };
+}
+
+interface ConfirmNonceRequestBody {
+  method: Method;
+  path: string;
+  payload: string;
+}
+
+function validateConfirmNonceRequest(body: unknown): { error: string } | ConfirmNonceRequestBody {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return { error: "body must be a JSON object" };
+  const b = body as Record<string, unknown>;
+  const methods: Method[] = ["GET", "POST", "PUT", "PATCH", "DELETE"];
+  if (typeof b.method !== "string" || !(methods as string[]).includes(b.method)) return { error: `method must be one of ${methods.join(", ")}` };
+  if (typeof b.path !== "string" || !b.path.startsWith("/")) return { error: "path must be a string starting with /" };
+  if (typeof b.payload !== "string") return { error: "payload must be a string" };
+  return { method: b.method as Method, path: b.path, payload: b.payload };
+}
+
+/**
+ * `POST /v1/confirm` — design (iv)'s "costs one round trip per high-tier action": names the
+ * exact `{method, path, payload}` a subsequent HIGH-tier call will make, and gets back a nonce
+ * that one specific call must present (`X-Confirm-Nonce`) to satisfy the second factor. Plain
+ * write scope, no tier of its own — requesting a nonce for an action grants nothing by itself;
+ * the target route's own tier + nonce check (createService's dispatch) is the real gate. Not
+ * mounted by `rmd serve` today (see {@link ServiceOptions.enforceWriteTiers}); exported so a
+ * caller that turns enforcement on has the matching issuance route ready to mount.
+ */
+export function makeConfirmNonceRoute(store: ConfirmNonceStore): Route {
+  return {
+    method: "POST",
+    path: "/v1/confirm",
+    scope: "write",
+    // A socket error while reading the body is deliberately NOT caught here — it propagates
+    // out of this async handler to createService's own dispatch try/catch (500, `service.error`),
+    // the same fate every other route's handler already gets on a transport failure. This isn't
+    // a client-input problem (jsonAction's 400 shape), so it never pretends to be one.
+    handler: async (req, res) => {
+      const raw = await readRawBody(req);
+      let parsed: unknown;
+      try {
+        parsed = raw.trim() ? JSON.parse(raw) : {};
+      } catch {
+        sendJson(res, 400, { error: "invalid_request", detail: "body is not valid JSON" });
+        return;
+      }
+      const validated = validateConfirmNonceRequest(parsed);
+      if ("error" in validated) {
+        sendJson(res, 400, { error: "invalid_request", detail: validated.error });
+        return;
+      }
+      const nonce = store.issue(validated);
+      sendJson(res, 200, { nonce });
+    },
+  };
+}
+
+/** Read + buffer a request body verbatim, never JSON-parsed here — the ONE primitive both
+ *  {@link makeConfirmNonceRoute} and createService's dispatch bind a nonce's `payload` against,
+ *  so "the exact bytes a client sent" can never drift between the two call sites. Rejects (never
+ *  throws synchronously) on a socket error, mirroring panel-actions.ts's own `readJsonBody`. */
+function readRawBody(req: IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("error", reject);
+  });
 }
 
 const READ_ONLY: ReadonlySet<Scope> = new Set<Scope>(["read"]);
@@ -266,6 +473,11 @@ function tailscaleIdentityProvider(identity: IdentityAuth): IdentityProvider {
   return {
     name: "tailscale-identity",
     grant: (req) => identityGrantedScopes(identity, req),
+    // W1-T404: unchanged from before tiers existed — the interface+allowlist gates in
+    // IdentityAuth's own doc are already a stronger proof than a pasted secret, so this
+    // grantor keeps reaching every tier once enforcement is on, exactly as it reaches every
+    // route today.
+    writeTier: "high",
   };
 }
 
@@ -284,6 +496,11 @@ function bearerTokenProvider(tokens: ServiceTokens): IdentityProvider {
       if (safeEqual(token, tokens.read)) return READ_ONLY;
       return undefined;
     },
+    // W1-T404 design (v), THE SHARPEST RULING IN THE TASK: an EXISTING write credential
+    // resolves to `"low"`, never higher — a deliberate, visible break (once enforcement is on)
+    // from a single token that used to reach every write route. Defaulting this to `"high"`
+    // would ship the change as a no-op that silently re-grants everything.
+    writeTier: "low",
   };
 }
 
@@ -304,7 +521,7 @@ function grantedScopes(
 ): IdentityGrant | undefined {
   for (const provider of providers) {
     const scopes = provider.grant(req, allowQuery);
-    if (scopes) return { scopes, provider: provider.name };
+    if (scopes) return { scopes, provider: provider.name, tier: provider.writeTier };
   }
   return undefined;
 }
@@ -352,6 +569,10 @@ export function createService(opts: ServiceOptions): Server {
     bearerTokenProvider(opts.tokens),
     ...(opts.providers ?? []),
   ];
+  // W1-T404: OFF by default — see ServiceOptions.enforceWriteTiers's own doc for why labeling a
+  // route's tier must not, by itself, change what it accepts.
+  const enforceWriteTiers = opts.enforceWriteTiers ?? false;
+  const confirmNonces = opts.confirmNonces ?? createConfirmNonceStore();
 
   return createServer((req, res) => {
     void (async () => {
@@ -380,6 +601,34 @@ export function createService(opts: ServiceOptions): Server {
         log("service.forbidden", { method, path, required_scope: requiredScope, granted_by: granted.provider });
         sendJson(res, 403, { error: "forbidden", required_scope: requiredScope });
         return;
+      }
+
+      // W1-T404: the tier + second-factor gate, entirely additive to the scope check above and
+      // a no-op unless BOTH `enforceWriteTiers` is on AND this route declared a tier — see
+      // ServiceOptions.enforceWriteTiers's doc for why that is off by default in production.
+      if (enforceWriteTiers && route?.tier) {
+        if (!writeTierSatisfies(granted.tier, route.tier)) {
+          log("service.forbidden_tier", { method, path, required_tier: route.tier, granted_by: granted.provider, granted_tier: granted.tier });
+          sendJson(res, 403, { error: "forbidden", required_scope: requiredScope, required_tier: route.tier });
+          return;
+        }
+        if (route.tier === "high") {
+          const nonceHeader = req.headers["x-confirm-nonce"];
+          const nonce = Array.isArray(nonceHeader) ? nonceHeader[0] : nonceHeader;
+          // CONSUMPTION CAVEAT for a future HIGH-tier handler: presenting a nonce drains the
+          // request body HERE to bind it to the exact bytes {@link makeConfirmNonceRoute} was
+          // told to expect, so a handler reached past this point must not also read `req` as a
+          // stream (a second `.on("data")` sees nothing — the body is already gone). Read
+          // `ctx`/the already-parsed input instead, or accept this route never needs its own
+          // body. `enforceWriteTiers` off (today's default) never reaches this line at all, so
+          // no existing handler is affected yet.
+          const ok = nonce ? confirmNonces.consume(nonce, { method, path, payload: await readRawBody(req) }) : false;
+          if (!ok) {
+            log("service.confirm_nonce_refused", { method, path });
+            sendJson(res, 403, { error: "confirm_nonce_required" });
+            return;
+          }
+        }
       }
 
       if (sseRoute) {
