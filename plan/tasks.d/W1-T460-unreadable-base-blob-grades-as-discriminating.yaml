@@ -1,0 +1,112 @@
+- id: W1-T460
+  title: "an UNREADABLE base blob is graded as a DISCRIMINATING proof — materialiseBaseProofBlobs catches absence and read-failure identically, so a proof whose base read broke is silently upgraded to executed_pass"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: "RE-DERIVED AT 01965452, every link quoted from source rather than carried forward.
+    THE CONFLATION IS ADMITTED IN THE CODE'S OWN COMMENT. `materialiseBaseProofBlobs`
+    (`src/lib/review.ts`) wraps its base read in a bare catch:
+      try { writeBlob(repoRelPath, showBlob(baseRev, repoRelPath)); written++; }
+      catch { /* absent at base (forward reference) or unreadable — leave it out; grep then finds nothing */ }
+    THE GRADING THEN READS THAT SILENCE AS EVIDENCE. `classifyBaseProofOutcome` is
+      try { return exec(whitelisted, baseCwd) === \"pass\" ? \"stale\" : \"discriminates\"; }
+      catch { return \"base_unknown\"; }
+    and `judgeCriterion` branches on `if (baseOutcome === \"stale\")` ONLY — every other value falls to
+    the `else`, which sets `proofExec = \"executed_pass\"; met = true`. So a blob that FAILED TO READ
+    produces no base file, the base grep finds nothing, the outcome is `discriminates`, and the proof
+    is credited as if it had been proven to discriminate.
+    THIS IS THE SEVEN-INSTANCE LAW ONE LAYER OUT — a read that FAILED reported as a read that SAID NO.
+    Here the inversion is worse than usual because the failure direction is TOWARD CREDIT: the
+    unreadable case does not merely go unreported, it is scored as the good outcome.
+    AND THE OMISSION IS PER FILE, WHICH IS WHAT MAKES THE `base_unknown` DEFENCE INAPPLICABLE. The
+    loop skips only the blob that threw; a mixed proof set where one path reads and another fails
+    STILL PRODUCES A BASE TREE, so `baseCwd` is defined, `classifyBaseProofOutcome` runs normally, and
+    only the unreadable proof is upgraded. Nothing anywhere records that one of them was never read.
+    THE FAILURE MODES ARE CLEANLY SEPARABLE, WHICH MAKES THE FIX MUCH SMALLER THAN IT LOOKS.
+    RE-MEASURED at 01965452 with stderr piped:
+      path absent at that rev -> `e.code` undefined, `e.status` 128   (git ran and answered)
+      maxBuffer overflow      -> `e.code` \"ENOBUFS\", `e.status` null (the read itself failed)
+    `status === 128` MEANS GIT ANSWERED \"NOT THERE\"; ANY NODE `code` MEANS THE READ BROKE. So the
+    catch can keep swallowing absence and let a genuine read failure surface. NO NEW OUTCOME
+    VOCABULARY IS STRICTLY REQUIRED.
+    AND GIT DISTINGUISHES TWO ABSENCE MESSAGES, both `status: 128`, both reproduced here:
+      `does not exist in '<rev>'`            — absent from the rev AND from the working tree
+      `exists on disk, but not in '<rev>'`   — present in the head worktree, absent at base
+    The four reviews the operator saw (#1732, #1734, #1735, #1736) all carried the SECOND, which is
+    the benign new-shard forward reference — so nothing observed so far was a real read failure.
+    THE REF IS NOT THE PROBLEM AND MUST NOT BE SCOPED IN. The base is
+    `git merge-base origin/main HEAD`, verified equal to `012b4b70` while `origin/main` had already
+    moved; neither clone is shallow."
+  design: "(i) KEEP THE TWO `base_unknown` CASES APART — THIS IS THE CRUX AND THE MODULE'S EXISTING
+    DEFENCE IS ONLY HALF RIGHT. The module documents `base_unknown` as `an environment gap, never
+    evidence either way; executed_pass stands`, and THAT IS DEFENSIBLE WHEN THE BASE IS WHOLLY
+    UNRESOLVABLE: the builder already returns `undefined` for that case with the stated reason
+    `unresolvable base ⇒ no staleness signal, never a false positive`, and a global gap really does
+    leave no signal for any proof.
+    IT IS NOT DEFENSIBLE WHEN ONE BLOB FAILED WHILE ITS SIBLINGS READ. That is a PER-PROOF gap wearing
+    a GLOBAL gap's clothes: the base tree exists, other proofs were genuinely discriminated against
+    it, and only this one was silently exempted. The implementation must be able to tell those apart —
+    a whole-base failure and a single-blob failure are different facts and today they are the same
+    value.
+    (ii) THE NARROW FIX IS A CLASSIFIED CATCH, NOT A NEW VOCABULARY. Re-raise (or record) when a Node
+    `code` is present, keep swallowing when `status === 128`. Establish by re-measuring, not by
+    trusting this shard: the numbers above were true at 01965452 and a git upgrade could move them.
+    IF a new state is added anyway, it must be HONEST rather than absent — the existing vocabulary
+    (`not_executable`, `exec_error`, `executed_stale`, `not_attempted`, and `ProofSkipReason`'s
+    `prose-no-match`/`dialect-parse-error`/`exec-error`/`no-exec-context`) already carries the shape,
+    and `exec_error` in particular already means `the runner broke` rather than `the file was absent`.
+    (iii) THE COSMETIC HALF — ARGUE IT, DO NOT ASSUME IT. `showBlob` calls `execFileSync` with NO
+    `stdio`, so git's stderr forwards to the parent and a PASSING review prints `fatal: …`, which
+    reads as breakage. It appeared on FOUR reviews in one day and costs a reader minutes each time.
+    `stdio: [\"ignore\",\"pipe\",\"pipe\"]` silences it, AND THE CLASSIFICATION IN (ii) WAS MEASURED WITH
+    STDERR ALREADY PIPED, so silencing cannot break the discrimination.
+    THE ARGUMENT FOR ONE PR: the one-line option object is where the classified catch has to read
+    `e.stderr` anyway, so the two changes touch the same call. THE ARGUMENT AGAINST: they are
+    different concerns — one is a grading defect that mis-credits, the other is noise — and bundling
+    them means a revert of the noise fix reverts the grading fix. RECOMMENDATION: ship together,
+    because separating them leaves a KNOWN-misleading `fatal:` on every review for another cycle for
+    no benefit; but say which was done and why.
+    (iv) SCOPE BOUNDARY — NEITHER NEIGHBOUR IS THIS TASK, AND NAMING THEM MATTERS BECAUSE ATTRIBUTING
+    A NEW DEFECT TO A COMPLETED TASK IS ITS OWN ERROR. W1-T273 BUILT the staleness mechanism and built
+    it correctly; the `stale`/`discriminates` distinction it introduced does exactly what it says. The
+    defect here is in the BLOB MATERIALISATION that feeds it — a step W1-T273 did not own — so
+    referencing it would blame a finished task for a gap upstream of its own inputs. W1-T305 is the
+    other near neighbour and is about MALFORMED DIALECT PROOFS (`dialect-parse-error`, an authoring
+    error in the proof TEXT); this defect fires on a WELL-FORMED proof whose base READ broke. Neither
+    is in `plan_refs` for that reason."
+  acceptance:
+    - claim: "a base blob that fails to read is not graded as a discriminating proof"
+      proof: "unit test: test/base-blob-read-failure.test.ts"
+    - claim: "a base blob that is merely absent at the base still grades as a forward reference"
+      proof: "unit test: test/base-blob-read-failure.test.ts"
+    - claim: "a proof whose base read broke is distinguishable from one where the whole base was unresolvable"
+      proof: "unit test: test/base-blob-read-failure.test.ts"
+  origin: recon#base-blob-misgrade-2026-08-13
+  plan_refs: []
+  files: [src/lib/review.ts, test/base-blob-read-failure.test.ts, test/review.test.ts, test/preexisting-proof-hits-wiring.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT, deliberately — a session had `sizingViolation`
+    (`src/lib/task-linter.ts`) refuse a `medium` at three subsystems today. The band is Rule 19's
+    SPAN across `src/` and `test/`, not blast radius: the blast radius is one catch block and one
+    options object.
+    `files:` WAS DERIVED FROM THE GATES AND THE SUITES MEASURED BY INVOCATION, not by prose mention —
+    this week's lesson after SEVEN corrections. At 01965452 exactly two suites invoke the shapes this
+    changes: `test/review.test.ts` (5 invocations of `materialiseBaseProofBlobs(`/`baseCwd:`) and
+    `test/preexisting-proof-hits-wiring.test.ts` (1). Both are declared. DROP EITHER if the
+    implementation does not touch it — `inverseScopeUntouchedFiles` fails a declared-but-untouched
+    path just as `scopeViolationFiles` fails an undeclared one.
+    `plan_refs` IS DELIBERATELY EMPTY. Design (iv) explains why: W1-T273 and W1-T305 are the near
+    neighbours and NEITHER owns this, so listing them would misattribute a new defect to completed
+    work.
+    NOTHING OBSERVED SO FAR WAS A REAL READ FAILURE — all four sighted reviews carried the benign
+    `exists on disk, but not in` message. That bounds the URGENCY without weakening the defect: the
+    mis-grade is latent, and it becomes live the first time a base blob is genuinely unreadable
+    (ENOBUFS on a large blob is the measured example, and this repo has already hit ENOBUFS once on PR
+    JSON large enough to need a 64 MiB maxBuffer).
+    RE-MEASURE `status`/`code` BEFORE BUILDING. Those two numbers are the whole basis for the narrow
+    fix, and they are a property of the installed git."
