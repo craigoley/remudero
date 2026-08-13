@@ -94,6 +94,20 @@ export type ReviewState = "success" | "failure";
  *                     here the tree exists and SIBLING proofs were genuinely
  *                     checked against it, so exempting this one is a
  *                     per-proof gap wearing a global gap's clothes.
+ *   not_yet_built   — (W1-T456) an exact-path `unit test:` proof names a file that does not
+ *                     exist on the PR head, but the SAME diff declares that exact path in a
+ *                     plan shard's own `files:` list — a FORWARD REFERENCE, not a failure. Before
+ *                     this, the missing file made `node --test` exit nonzero ("Could not find
+ *                     '<path>'"), which this module read as a genuine `executed_fail` — HARD
+ *                     BLOCKING a plan-filing PR whose acceptance criteria (quoting the task it is
+ *                     filing) cite a test the IMPLEMENTATION, a later PR, will create. Degrades to
+ *                     the keyword floor verbatim, exactly like `exec_error`/`executed_stale`
+ *                     degrade, under its OWN name because the cause is neither an authoring gap
+ *                     nor an environment hiccup — see {@link shardDeclaredFilesInDiff}'s doc.
+ *                     NEVER assigned when the named path is simply absent and UNDECLARED — that
+ *                     stays `executed_fail` (W1-T72's test-theater guard, unchanged): a forward
+ *                     reference is a POSITIVE claim from the diff itself, never inferred from
+ *                     absence alone.
  */
 /**
  * WHY a criterion produced no executed outcome. Diagnostic only — it never affects `met`, `state`,
@@ -121,8 +135,25 @@ export type ReviewState = "success" | "failure";
  *                          proof's named PATH is simply absent on the checkout).
  *   no-exec-context      — no PR-head checkout was supplied at all; execution was never attempted
  *                          for ANY criterion.
+ *   forward-reference    — (W1-T456) an exact-path `unit test:` proof names a file ABSENT on the
+ *                          PR head, but that SAME path is declared in a plan-shard's own `files:`
+ *                          list ADDED by this very diff — a filing PR citing the acceptance
+ *                          criteria of the task it is filing, whose test the IMPLEMENTATION (a
+ *                          later PR) will create. Distinct from `exec-error` (an authoring/
+ *                          environment gap): the proof named exactly what the shard promises,
+ *                          never executed, keyword floor applied. See {@link
+ *                          shardDeclaredFilesInDiff}'s doc for why the diff itself, not a
+ *                          resolved task id, is the source of truth here — a filing PR
+ *                          deliberately carries no `Remudero-Task:` trailer (#1527), so there is
+ *                          no task id to resolve `files:` from.
  */
-export type ProofSkipReason = "no-dialect" | "dialect-parse-error" | "prose-no-match" | "exec-error" | "no-exec-context";
+export type ProofSkipReason =
+  | "no-dialect"
+  | "dialect-parse-error"
+  | "prose-no-match"
+  | "exec-error"
+  | "no-exec-context"
+  | "forward-reference";
 
 export type ProofExecOutcome =
   | "executed_pass"
@@ -130,7 +161,8 @@ export type ProofExecOutcome =
   | "not_executable"
   | "exec_error"
   | "executed_stale"
-  | "base_unreadable";
+  | "base_unreadable"
+  | "not_yet_built";
 
 /** One criterion's verdict against its stated proof. */
 export interface CriterionVerdict {
@@ -1720,6 +1752,12 @@ export interface ProofExecContext {
    * `base_unreadable` rather than credited with a discrimination nobody measured. Absent/empty ⇒
    * byte-identical to pre-W1-T460 behaviour for every proof. */
   baseUnreadablePaths?: ReadonlySet<string>;
+  /** (W1-T456, DEFECT A) Repo-relative paths a `unit test:` proof may forward-reference without
+   *  being scored `executed_fail` — the union of {@link shardDeclaredFilesInDiff}'s read of THIS
+   *  diff's own added shard(s) and (when a task id resolved) that task's declared `files:`.
+   *  Absent/empty ⇒ every exact-path `unit test:` proof naming an absent file stays
+   *  `executed_fail`, byte-identical to pre-W1-T456 behavior. */
+  forwardReferenceFiles?: ReadonlySet<string>;
 }
 
 /**
@@ -2001,95 +2039,117 @@ export function judgeCriterion(
     const whitelisted = parseWhitelistedProof(criterion.proof);
     if (whitelisted) {
       proofSkip = undefined;
-      const exec = execCtx.exec ?? execWhitelistedProof;
-      try {
-        const outcome = exec(whitelisted, execCtx.cwd);
-        if (outcome === "pass") {
-          // W1-T273 (grep) / W1-T362 (extended to `unit test:`): re-run the SAME
-          // whitelisted check against the PR's merge-base — one execution answers
-          // both "is this stale" and, if not, why not (see classifyBaseProofOutcome).
-          const baseOutcome =
-            execCtx.baseCwd !== undefined
-              ? classifyBaseProofOutcome(whitelisted, exec, execCtx.baseCwd, execCtx.baseUnreadablePaths)
-              : undefined;
-          if (baseOutcome === "base_unreadable") {
-            // W1-T460: the base tree exists and sibling proofs were checked against it, but THIS
-            // proof's base blob never arrived — so its head-side pass proves nothing about
-            // discrimination. Withdraw the positive override and fall back to the keyword floor
-            // verbatim (`met`/`reason` as computed above), exactly like `executed_stale` degrades.
-            // NOT a failure: we did not learn the proof is bad, we learned we never asked.
-            proofExec = "base_unreadable";
-            reason =
-              `${reason} — NOTE: proof PASSED on the PR head ` +
-              `(${whitelisted.kind}: ${whitelisted.label}) but its base blob could not be read, so the ` +
-              `merge-base staleness check never ran for THIS proof (the base tree itself exists and ` +
-              `other proofs were checked against it); positive override withdrawn, keyword floor applied`;
-          } else if (baseOutcome === "stale") {
-            // The SAME check also matches/passes on the PR's MERGE-BASE — it
-            // would have exited 0 before this task's work ever landed, so
-            // its exit-0 here discriminates nothing. See
-            // {@link classifyBaseProofOutcome}'s doc for the full design; `met`/
-            // `reason` are LEFT UNTOUCHED (the keyword floor computed above
-            // stands, verbatim) — the proof's positive override is withdrawn,
-            // never converted into a failure.
-            proofExec = "executed_stale";
-            reason =
-              `${reason} — NOTE: proof also matches the PR's merge-base ` +
-              `(${whitelisted.kind}: ${whitelisted.label}); non-discriminating, ` +
-              `positive override withdrawn, keyword floor applied`;
-          } else {
-            proofExec = "executed_pass";
-            met = true;
-            reason = `proof executed and PASSED on the PR head (${whitelisted.kind}: ${whitelisted.label})`;
-            // W1-T362: record the base-run outcome on the verdict for a `unit test:`
-            // proof specifically (grep's reason text stays byte-identical to its
-            // shipped W1-T273 shape — that check is not in this task's scope).
-            if (whitelisted.kind === "test" && baseOutcome === "discriminates") {
-              reason +=
-                ` — NOTE: also re-run against the PR's merge-base and did NOT pass there ` +
-                `(absent, no-match, or a genuine failure); the proof discriminates, executed_pass stands`;
-            } else if (whitelisted.kind === "test" && baseOutcome === "base_unknown") {
-              reason +=
-                ` — NOTE: re-run against the PR's merge-base for staleness could not complete ` +
-                `(base_unknown, an environment gap); executed_pass stands, downgrade withheld`;
+      // W1-T456 (DEFECT A), checked BEFORE spawning anything: an exact-path `unit test:`
+      // proof (never a name-filtered one — see the module doc's `not_yet_built` entry) whose
+      // target is ABSENT on the head but DECLARED by this diff's own plan shard is a forward
+      // reference to the implementation a LATER PR will add, not a failure. Spawning `node
+      // --test` on it would exit nonzero ("Could not find '<path>'"), which the branch below
+      // reads as a genuine `executed_fail` — exactly the hard block that made a filing PR
+      // unrepairable. Gated on `!nameFiltered`: a bare test-NAME proof has no single target
+      // path to look up in `files:`, so it is untouched and keeps today's behavior.
+      const forwardReference =
+        whitelisted.kind === "test" &&
+        !whitelisted.nameFiltered &&
+        execCtx.forwardReferenceFiles?.has(whitelisted.label) === true &&
+        !existsSync(join(execCtx.cwd, whitelisted.label));
+      if (forwardReference) {
+        proofExec = "not_yet_built";
+        proofSkip = "forward-reference";
+        reason =
+          `${reason} — NOTE: proof names ${whitelisted.label}, absent on the PR head but declared in ` +
+          `this diff's own plan shard \`files:\` — a forward reference to work not yet built, not a ` +
+          `failure; not executed, keyword floor applied`;
+      } else {
+        const exec = execCtx.exec ?? execWhitelistedProof;
+        try {
+          const outcome = exec(whitelisted, execCtx.cwd);
+          if (outcome === "pass") {
+            // W1-T273 (grep) / W1-T362 (extended to `unit test:`): re-run the SAME
+            // whitelisted check against the PR's merge-base — one execution answers
+            // both "is this stale" and, if not, why not (see classifyBaseProofOutcome).
+            const baseOutcome =
+              execCtx.baseCwd !== undefined
+                ? classifyBaseProofOutcome(whitelisted, exec, execCtx.baseCwd, execCtx.baseUnreadablePaths)
+                : undefined;
+            if (baseOutcome === "base_unreadable") {
+              // W1-T460: the base tree exists and sibling proofs were checked against it, but THIS
+              // proof's base blob never arrived — so its head-side pass proves nothing about
+              // discrimination. Withdraw the positive override and fall back to the keyword floor
+              // verbatim (`met`/`reason` as computed above), exactly like `executed_stale` degrades.
+              // NOT a failure: we did not learn the proof is bad, we learned we never asked.
+              proofExec = "base_unreadable";
+              reason =
+                `${reason} — NOTE: proof PASSED on the PR head ` +
+                `(${whitelisted.kind}: ${whitelisted.label}) but its base blob could not be read, so the ` +
+                `merge-base staleness check never ran for THIS proof (the base tree itself exists and ` +
+                `other proofs were checked against it); positive override withdrawn, keyword floor applied`;
+            } else if (baseOutcome === "stale") {
+              // The SAME check also matches/passes on the PR's MERGE-BASE — it
+              // would have exited 0 before this task's work ever landed, so
+              // its exit-0 here discriminates nothing. See
+              // {@link classifyBaseProofOutcome}'s doc for the full design; `met`/
+              // `reason` are LEFT UNTOUCHED (the keyword floor computed above
+              // stands, verbatim) — the proof's positive override is withdrawn,
+              // never converted into a failure.
+              proofExec = "executed_stale";
+              reason =
+                `${reason} — NOTE: proof also matches the PR's merge-base ` +
+                `(${whitelisted.kind}: ${whitelisted.label}); non-discriminating, ` +
+                `positive override withdrawn, keyword floor applied`;
+            } else {
+              proofExec = "executed_pass";
+              met = true;
+              reason = `proof executed and PASSED on the PR head (${whitelisted.kind}: ${whitelisted.label})`;
+              // W1-T362: record the base-run outcome on the verdict for a `unit test:`
+              // proof specifically (grep's reason text stays byte-identical to its
+              // shipped W1-T273 shape — that check is not in this task's scope).
+              if (whitelisted.kind === "test" && baseOutcome === "discriminates") {
+                reason +=
+                  ` — NOTE: also re-run against the PR's merge-base and did NOT pass there ` +
+                  `(absent, no-match, or a genuine failure); the proof discriminates, executed_pass stands`;
+              } else if (whitelisted.kind === "test" && baseOutcome === "base_unknown") {
+                reason +=
+                  ` — NOTE: re-run against the PR's merge-base for staleness could not complete ` +
+                  `(base_unknown, an environment gap); executed_pass stands, downgrade withheld`;
+              }
             }
-          }
-        } else if (outcome === "no-match") {
-          // ZERO tests matched the proof's name pattern (the run completed — see
-          // nameFilteredOutcome). W1-T161/#349: this is EITHER a proof-authoring
-          // mismatch (the house convention writes a `unit test:` proof as PROSE
-          // describing a test's behavior, not its literal name — see
-          // looksLikeProseDescription's doc comment for the #349 fixture) OR
-          // genuine test theater (a proof naming a specific, fabricated test).
-          // The two are told apart by a deterministic shape check over the body,
-          // never by re-running anything or calling a model.
-          if (looksLikeProseDescription(whitelisted.label)) {
-            // A prose paraphrase, not a bare name: NOT a failing test. Degrade to
-            // `not_executable` (the keyword floor stands as computed above —
-            // `met`/`reason` from mechanical coverage), and ANNOTATE why, so an
-            // author sees "names no matching test" rather than a misleading
-            // "executed and FAILED" — a false block on green, test-passing code.
-            proofExec = "not_executable";
-            proofSkip = "prose-no-match";
-            reason = `${reason} — NOTE: proof names no matching test (0 tests matched '${whitelisted.label}'); not executed, keyword floor applied`;
+          } else if (outcome === "no-match") {
+            // ZERO tests matched the proof's name pattern (the run completed — see
+            // nameFilteredOutcome). W1-T161/#349: this is EITHER a proof-authoring
+            // mismatch (the house convention writes a `unit test:` proof as PROSE
+            // describing a test's behavior, not its literal name — see
+            // looksLikeProseDescription's doc comment for the #349 fixture) OR
+            // genuine test theater (a proof naming a specific, fabricated test).
+            // The two are told apart by a deterministic shape check over the body,
+            // never by re-running anything or calling a model.
+            if (looksLikeProseDescription(whitelisted.label)) {
+              // A prose paraphrase, not a bare name: NOT a failing test. Degrade to
+              // `not_executable` (the keyword floor stands as computed above —
+              // `met`/`reason` from mechanical coverage), and ANNOTATE why, so an
+              // author sees "names no matching test" rather than a misleading
+              // "executed and FAILED" — a false block on green, test-passing code.
+              proofExec = "not_executable";
+              proofSkip = "prose-no-match";
+              reason = `${reason} — NOTE: proof names no matching test (0 tests matched '${whitelisted.label}'); not executed, keyword floor applied`;
+            } else {
+              // W1-T72's test-theater guard, PRESERVED: the body reads as a bare,
+              // concrete test NAME (short, no sentence punctuation) rather than a
+              // prose description, and it matches nothing on the PR head — a
+              // fabricated test name is theater and must FAIL, never silently
+              // degrade to the keyword floor.
+              proofExec = "executed_fail";
+              met = false;
+              reason = `proof names a specific test that does not exist on the PR head (0 tests matched '${whitelisted.label}') — test theater, not executed`;
+            }
           } else {
-            // W1-T72's test-theater guard, PRESERVED: the body reads as a bare,
-            // concrete test NAME (short, no sentence punctuation) rather than a
-            // prose description, and it matches nothing on the PR head — a
-            // fabricated test name is theater and must FAIL, never silently
-            // degrade to the keyword floor.
             proofExec = "executed_fail";
             met = false;
-            reason = `proof names a specific test that does not exist on the PR head (0 tests matched '${whitelisted.label}') — test theater, not executed`;
+            reason = `proof executed and FAILED on the PR head (${whitelisted.kind}: ${whitelisted.label}) — overrides any keyword coverage`;
           }
-        } else {
-          proofExec = "executed_fail";
-          met = false;
-          reason = `proof executed and FAILED on the PR head (${whitelisted.kind}: ${whitelisted.label}) — overrides any keyword coverage`;
+        } catch {
+          proofExec = "exec_error"; // met/reason stay EXACTLY the keyword-floor verdict above
+          proofSkip = "exec-error";
         }
-      } catch {
-        proofExec = "exec_error"; // met/reason stay EXACTLY the keyword-floor verdict above
-        proofSkip = "exec-error";
       }
     } else if (isMalformedDialectProof(criterion.proof)) {
       // W1-T305: a proof declaring a dialect label (`grep:`/`unit test:`) that still failed to
@@ -2915,6 +2975,11 @@ export function judgeReview(
   evidence: ReviewEvidence,
 ): ReviewVerdict {
   const reportTokens = new Set(tokenize(evidence.report));
+  // W1-T456 (DEFECT A): read straight off THIS diff, never off a resolved task id — see
+  // shardDeclaredFilesInDiff's doc for why a filing PR (no Remudero-Task: trailer, #1527) has
+  // no task id to look `files:` up against otherwise. Union'd with a resolved task's own
+  // declared files (evidence.taskDeclaredFiles) so a plain implementing PR loses nothing.
+  const forwardReferenceFiles = new Set([...shardDeclaredFilesInDiff(evidence.diff), ...(evidence.taskDeclaredFiles ?? [])]);
   // Absent headCheckoutDir ⇒ execCtx is undefined ⇒ every criterion is
   // not_executable and the keyword floor is byte-identical to pre-W1-T65 —
   // exactly what every fixture/caller that predates this task still gets.
@@ -2924,6 +2989,7 @@ export function judgeReview(
         exec: evidence.execProof,
         baseCwd: evidence.baseCheckoutDir,
         baseUnreadablePaths: evidence.baseUnreadablePaths,
+        forwardReferenceFiles,
       }
     : undefined;
   const verdicts = criteria.map((c, i) =>
@@ -4516,6 +4582,47 @@ function walkDiff(diff: string): DiffLine[] {
     else out.push({ file, kind: "ctx", text: raw.startsWith(" ") ? raw.slice(1) : raw });
   }
   return out;
+}
+
+/** A plan-shard's own `files:` line, house convention: a single flow-style YAML array,
+ *  `  files: [a/b.ts, c/d.ts]` — verified against every shard under `plan/tasks.d/` at
+ *  W1-T456's own commit (grep `^  files:`): all single-line, none block-style. */
+const SHARD_FILES_LINE_RE = /^\s*files:\s*\[(.*)\]\s*$/;
+/** A diff-touched path this repo's task shards live at — `plan/tasks.yaml` (the
+ *  monolith some flows still write) or `plan/tasks.d/<id>.yaml` (the sharded form). */
+const SHARD_PATH_RE = /^plan\/(tasks\.yaml|tasks\.d\/[^/]+\.ya?ml)$/;
+
+/**
+ * (W1-T456, DEFECT A) Repo-relative paths a plan-shard ADDS to its own `files:` scope, read
+ * straight off the ADDED lines of THIS diff — never off a resolved task id.
+ *
+ * WHY THE DIFF, NOT A RESOLVED TASK. A plan-FILING PR deliberately carries no
+ * `Remudero-Task:` trailer (#1527's correctness rule — crediting a filing PR would mark
+ * the task it just filed DONE before it is ever built), so `judgeReview` has no task id to
+ * look `files:` up against for exactly the PRs this function exists to help. The shard the
+ * PR is filing is sitting right there in the diff it is being reviewed against, complete
+ * with its own declared `files:` — reading it from the ADDED lines needs no plan load, no
+ * task id, and cannot be spoofed by a DELETED line (a shard being narrowed, not widened).
+ *
+ * Deliberately narrow: only a bare, single-line `files: [...]` (the house convention, see
+ * {@link SHARD_FILES_LINE_RE}'s doc) inside an added/modified `plan/tasks.d/*.yaml` or
+ * `plan/tasks.yaml` hunk counts. A block-style list or a shard this diff does not touch
+ * contributes nothing — under-matching here only means a real forward reference falls back
+ * to `executed_fail` (today's byte-identical behavior, never a new false pass); it can never
+ * manufacture a forward-reference exemption for a path no shard in this diff actually named.
+ */
+export function shardDeclaredFilesInDiff(diff: string): Set<string> {
+  const declared = new Set<string>();
+  for (const line of walkDiff(diff)) {
+    if (line.kind !== "add" || !SHARD_PATH_RE.test(line.file)) continue;
+    const m = line.text.match(SHARD_FILES_LINE_RE);
+    if (!m) continue;
+    for (const raw of m[1].split(",")) {
+      const path = raw.trim();
+      if (path) declared.add(path);
+    }
+  }
+  return declared;
 }
 
 // ── Item 1: ONE CONCERN per PR ─────────────────────────────────────────────

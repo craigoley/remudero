@@ -411,7 +411,16 @@ export interface OpenPrView {
    * catch-all escalate, never a silent indefinite wait on state we can't date).
    */
   checksPendingSince?: string;
-  /** The unmet acceptance criteria from a failing review ([] otherwise). */
+  /**
+   * The unmet acceptance criteria from a failing review ([] otherwise). W1-T456: for a
+   * task-id-less PLAN-FILING PR (no `Remudero-Task:` trailer, #1527) `buildOpenPrViews` can
+   * ALSO populate this from the ledger, keyed by the same synthetic `PR-<n>` id
+   * `reviewCommand`/`escalationTaskIdFor` already use for every task-id-less review — see that
+   * function's own doc. A non-empty list here is what lets row 6 below route a filing's REAL
+   * failure to `blocked-fixable` (resolvable by the fix rung) instead of always falling to row
+   * 7's escalate-only "criteria unrecoverable" — WITHOUT widening what `criteriaRecoverable`
+   * (right below) means: that field stays keyed strictly to a resolved `taskId`, on purpose.
+   */
   unmetCriteria: CriterionVerdict[];
   /**
    * W1-T440: true when a `Remudero-Task:` trailer resolved a task id, so `unmetCriteria`
@@ -423,6 +432,12 @@ export interface OpenPrView {
    * one (there was no trailer to check them against). `undefined` (no producer has set it,
    * e.g. an older fixture) is treated the SAME as `true` — the pre-existing "contradictory"
    * wording — so this is additive, never a silent behavior change for an unset field.
+   *
+   * DELIBERATELY NOT WIDENED by W1-T456's filing-PR ledger read above: that read can populate
+   * `unmetCriteria` for a task-id-less PR too, but this field still answers ONLY "did a
+   * `Remudero-Task:` trailer resolve a task id" — test/openpr-taskid-resolver.test.ts locks a
+   * plan-only filing PR to `criteriaRecoverable: false` regardless, so widening this field's
+   * meaning would read as silently crediting an unattributed PR, which #1527 forbids.
    */
   criteriaRecoverable?: boolean;
   /** Fix-rung strikes ALREADY attempted for this PR (from the ledger). */
