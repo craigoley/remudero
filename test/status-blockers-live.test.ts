@@ -233,6 +233,27 @@ test("buildStatusBoard: BLOCKERS BY CLASS — a blocked PR whose owning task Git
   assert.doesNotMatch(text, /next action:.*400/);
 });
 
+// ── W1-T450: an EMPTY dispatch queue must stay silent about staleness even when the ledger's
+// own run.start history is stale — "nothing dispatchable" is the honest idle state this task's
+// stall rung is not, and reusing this file's already-live-GitHub board keeps that assertion
+// exercised with the same reachable-gateway shape every test above already uses ──────────────────
+
+test("buildStatusBoard: QUEUE HEAD — an empty candidate list never renders a stall, however old the ledger's own run.start history is", () => {
+  const ledgerPath = writeLedger([
+    ledgerLine({ step: "run.start", task_id: "SOME-TASK", run_id: "R1", ts: "2026-08-01T08:00:00.000Z" }),
+    ledgerLine({ step: "run.start", task_id: "SOME-TASK", run_id: "R2", ts: "2026-08-01T08:05:00.000Z" }),
+  ]);
+  const emptyPlan = loadPlanFromYaml("[]\n", "fixture");
+
+  const model = buildStatusBoard(tmpRoot(), ledgerPath, baseDeps({ plan: emptyPlan, github: fakeGithub() }));
+
+  assert.deepEqual(model.queueHead.rows, []);
+  assert.equal(model.queueHead.stall, undefined, "an empty queue must never render a stall, however stale run.start is");
+  const text = renderStatusBoardText(model);
+  assert.match(text, /nothing dispatchable/);
+  assert.doesNotMatch(text, /STALL/);
+});
+
 test("buildStatusBoard: BLOCKERS BY CLASS — with a closed PR dropped, `next action:` still names a REMAINING genuine blocker, never silently going blank when there is real news", () => {
   const ledgerPath = writeLedger([
     ledgerLine({

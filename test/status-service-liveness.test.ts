@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { buildStatusBoard, livenessState, renderStatusBoardText, type StatusBoardDeps } from "../src/lib/status-board.js";
+import { loadPlanFromYaml, type Plan } from "../src/lib/plan.js";
+import type { GitHub } from "../src/lib/status.js";
 
 // ── W1-T301: `rmd status` reported the deploy-supervisor (a launchd StartInterval ONE-SHOT,
 // `rmd deploy-run` every ~120s) as "not running" whenever polled between ticks — its NORMAL
@@ -46,6 +48,70 @@ function deploySupervisorRow(model: ReturnType<typeof buildStatusBoard>) {
   assert.ok(row, "expected a deploy-supervisor row");
   return row!;
 }
+
+// ── W1-T450: QUEUE HEAD's stall rung must stay SILENT on an unknown answer rather than claim a
+// stall — no ledger, an unparseable run.start timestamp, or too little dispatch history to learn
+// a cadence from are all "we don't know", never "it's stuck" (design (iv)) ─────────────────────
+
+const QUEUE_HEAD_PLAN_YAML = `
+- id: W1-T920
+  title: a queue-head candidate for the staleness rung
+  repo: remudero
+  type: implement
+  verify: auto
+  depends_on: []
+  status: queued
+`;
+
+function plan(): Plan {
+  return loadPlanFromYaml(QUEUE_HEAD_PLAN_YAML, "fixture");
+}
+
+function fakeGithub(overrides: Partial<GitHub> = {}): GitHub {
+  return {
+    prByRef: () => null,
+    findMergedByTrailer: () => null,
+    headRefName: () => undefined,
+    prBody: () => undefined,
+    readFailed: () => false,
+    ...overrides,
+  };
+}
+
+test("buildStatusBoard: QUEUE HEAD — an unreadable or absent run.start leaves the stall rung silent, never claiming a stall on an unknown answer", () => {
+  const fixturePlan = plan();
+  const github = fakeGithub();
+
+  // Case A: no ledger file at all — run.start is ABSENT, not merely old.
+  const noLedgerDir = mkdtempSync(join(tmpdir(), "status-liveness-noledger-"));
+  const noLedgerModel = buildStatusBoard(tmpRoot(), join(noLedgerDir, "does-not-exist.ndjson"), baseDeps({ plan: fixturePlan, github }));
+  assert.ok(noLedgerModel.queueHead.rows.length > 0, "the fixture plan must still produce a candidate");
+  assert.equal(noLedgerModel.queueHead.stall, undefined, "no ledger at all must never render as a stall");
+
+  // Case B: run.start lines present, but their `ts` does not parse.
+  const badTsLedgerPath = writeLedger([
+    { run_id: "R1", task_id: "OTHER", step: "run.start", ts: "not-a-real-timestamp" },
+    { run_id: "R2", task_id: "OTHER", step: "run.start", ts: "also-not-a-timestamp" },
+  ]);
+  const badTsModel = buildStatusBoard(tmpRoot(), badTsLedgerPath, baseDeps({ plan: fixturePlan, github }));
+  assert.equal(badTsModel.queueHead.stall, undefined, "an unparseable run.start timestamp must never be counted toward a stall");
+
+  // Case C: only ONE dispatch has EVER been recorded — there is no gap yet to learn a cadence
+  // from, so the bound itself is unknown and the rung must stay silent rather than guess one.
+  const oneDispatchLedgerPath = writeLedger([
+    { run_id: "R1", task_id: "OTHER", step: "run.start", ts: new Date(NOW_MS - 5 * 3_600_000).toISOString() },
+  ]);
+  const oneDispatchModel = buildStatusBoard(tmpRoot(), oneDispatchLedgerPath, baseDeps({ plan: fixturePlan, github }));
+  assert.equal(
+    oneDispatchModel.queueHead.stall,
+    undefined,
+    "a single ever-recorded dispatch has no gap to derive a bound from — silent, not stalled",
+  );
+
+  for (const model of [noLedgerModel, badTsModel, oneDispatchModel]) {
+    assert.doesNotMatch(renderStatusBoardText(model), /STALL/);
+  }
+});
 
 // ── ACCEPTANCE 1 ─────────────────────────────────────────────────────────────────────────────
 
