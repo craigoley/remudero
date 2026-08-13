@@ -4023,6 +4023,13 @@ export interface NoPrVerdict {
      * `undefined`, never an empty string, when the worker left nothing to carry.
      */
     report_excerpt?: string;
+    /**
+     * (W1-T465) WHICH KIND of `no_pr` this row is, per {@link classifyNoPrShape} — the stalled
+     * "backgrounded a job and ended the turn" shape, or unclassified. DIAGNOSTIC ONLY: no
+     * scheduling path reads it, and `no_pr` remains drain-halting either way. Always present, so
+     * a reader can tell "looked and found nothing" from "the field predates this task".
+     */
+    no_pr_shape: "awaiting-notification" | "unclassified";
   };
 }
 
@@ -4047,6 +4054,41 @@ export interface NoPrVerdict {
  * `report_excerpt`) from one that said nothing at all — the fixed sentence this function used
  * to return unconditionally is now reserved for the genuinely silent case.
  */
+/**
+ * (W1-T465) WHICH KIND of `no_pr` this was, read off the worker's own closing report.
+ *
+ * THE DISTINCTION THIS EXISTS TO MAKE, and why nothing cheaper works. Of the eight `no_pr` runs
+ * that carry a `report_excerpt` at all (the field arrived with #1584; the ~99 older rows are
+ * unexplained and always will be), FIVE on the mini and THREE measured independently on Azure
+ * ended mid-wait — the worker backgrounded a long job and stopped issuing tool calls, expecting a
+ * notification that a headless run can never deliver. The other three concluded, correctly, that
+ * there was nothing left to do. **ALL of them carry `commits_ahead: 0` AND `subtype: "success"`**,
+ * so neither field separates the two: a rung keyed on those would re-dispatch work that was right
+ * to produce no PR, which is this repo's recurring "a bound fires on a healthy condition" defect.
+ *
+ * THIS IS A PROSE MATCHER, AND THAT IS A REAL WEAKNESS RATHER THAN AN ACCEPTABLE ONE. The five
+ * mini excerpts say the same thing five different ways; A SIXTH PHRASING WILL NOT MATCH and the row
+ * will read `unclassified`, which is indistinguishable from an honest no-op at a glance. A signal
+ * the RUN emits would be strictly better and was looked for: the sanctioned `ALREADY_SATISFIED:`
+ * marker cannot serve, because the honest runs did NOT emit it — that is exactly why they landed
+ * `no_pr` instead of `already_satisfied`. None was found, so the fragility is written down here
+ * rather than left to be discovered.
+ *
+ * CLASSIFICATION ONLY. This label is recorded for a reader and consulted by NO scheduling path —
+ * see `test/worker-no-wait-contract.test.ts`, which asserts that `drain.ts` and `daemon.ts` never
+ * reference it. Retrying `no_pr` is deliberately out of scope (W1-T465 design (iv)): `no_pr` stays
+ * drain-halting, and `already_satisfied` remains the sanctioned exit for an honest no-op.
+ */
+export function classifyNoPrShape(reportExcerpt: string | undefined): "awaiting-notification" | "unclassified" {
+  const text = String(reportExcerpt ?? "");
+  if (!text) return "unclassified";
+  // Three independent shapes, because the eight real excerpts use three different constructions.
+  const waitsOnBackground = /\b(wait(ing|s)?\s+for|await(ing)?)\b[^.]{0,60}\bbackground\b/i.test(text);
+  const expectsNotification = /\b(notified|notification)\b/i.test(text);
+  const refusesToPoll = /\b(won'?t|will not|no need to)\s+poll\b/i.test(text);
+  return waitsOnBackground || expectsNotification || refusesToPoll ? "awaiting-notification" : "unclassified";
+}
+
 export function noPrVerdict(
   r: WorkerResult,
   costUsd: number,
@@ -4074,6 +4116,9 @@ export function noPrVerdict(
       ...cacheTokenLedgerFields(r.tokens),
       commits_ahead: commitsAheadCount,
       ...(reportExcerpt !== undefined ? { report_excerpt: reportExcerpt } : {}),
+      // W1-T465: recorded UNCONDITIONALLY, unlike `report_excerpt` above — an absent field and a
+      // field reading `unclassified` mean different things, and only one of them is a measurement.
+      no_pr_shape: classifyNoPrShape(reportExcerpt),
     },
   };
 }
