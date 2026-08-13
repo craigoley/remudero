@@ -359,7 +359,18 @@ function stateFixture(): { dead: string; live: string } {
   return { dead, live };
 }
 
-/** Run `--print-daemon-run` against `stateDir`, returning stdout+stderr and the exit code. */
+/**
+ * Run `--print-daemon-run` against `stateDir`, returning stdout+stderr and the exit code.
+ *
+ * THE CREDENTIAL DIR IS PINNED TOO, and that is not incidental to a volume test. These cases
+ * assert on the VOLUME check, and one of them asserts NO WARNING OF ANY KIND — so an unpinned
+ * `RMD_CLAUDE_DIR` lets the credential check this same PR adds decide the result from whatever the
+ * HOST happens to have in `~/.claude`. MEASURED: green on the operator's mini, which has a real
+ * credential, and RED on a GitHub runner, where `/home/runner/.claude/.credentials.json` does not
+ * exist and the new warning fires. Same shape as #1642 — a fixture asserting on the ambient `$HOME`
+ * — so the fixture owns the condition instead of borrowing it, and the volume tests measure the
+ * volume check alone.
+ */
 function printWithState(stateDir: string, scriptPath = SCRIPT): { out: string; status: number } {
   // STREAMS MERGED BY THE SHELL (2>&1), not concatenated afterwards: the warning goes to stderr
   // and the document to stdout, so joining the two buffers would put stdout first regardless and
@@ -368,7 +379,7 @@ function printWithState(stateDir: string, scriptPath = SCRIPT): { out: string; s
   const r = spawnSync("bash", ["-c", '"$0" --print-daemon-run 2>&1', scriptPath], {
     encoding: "utf8",
     cwd: REPO_ROOT,
-    env: { ...process.env, RMD_STATE_DIR: stateDir },
+    env: { ...process.env, RMD_STATE_DIR: stateDir, RMD_CLAUDE_DIR: credFixture(60 * 60 * 1000) },
   });
   return { out: r.stdout ?? "", status: r.status ?? -1 };
 }
@@ -430,4 +441,139 @@ test("MUTANT: reinstating the omission — no check at all — lets the dead vol
   // And it still prints the dead path as the mount and both levers, which is the shipped bug.
   assert.match(run.out, new RegExp(`-v ${dead.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:`));
   assert.match(run.out, new RegExp(`touch ${dead.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/state/STOP`));
+});
+
+// ── THE PRINTED INVOCATION MUST BE COMPLETE, NOT MERELY CHANGED ──────────────────────────────
+//
+// MEASURED 2026-08-13, on the first containerised daemon ever run: the printed invocation was
+// wrong in FOUR ways at once and cost four container restarts to unpick. It omitted `--repo`
+// (rmd daemon refuses, exit 2, and the restart throttle then slept so the failure looked like a
+// hang); it suggested `-e CLAUDE_CODE_OAUTH_TOKEN`, which authenticates but carries NO plan
+// context (measured A/B: with the credential file, subscription_type "max"; with the token alone,
+// null); it mounted no credential at all, so the worker preflight refused every spawn; and the
+// mount an operator improvised was a `:ro` FILE, which can never be refreshed.
+//
+// SO THESE ASSERT PRESENCE OF EVERY FLAG, not the absence of the old ones. A test that only
+// checked "the token line is gone" would pass on an invocation missing half the mounts.
+
+/** Run `--print-daemon-run` with both host-side paths pinned, streams merged as a terminal shows. */
+function printWithPaths(stateDir: string, credDir: string, scriptPath = SCRIPT): { out: string; status: number } {
+  const r = spawnSync("bash", ["-c", '"$0" --print-daemon-run 2>&1', scriptPath], {
+    encoding: "utf8",
+    cwd: REPO_ROOT,
+    env: { ...process.env, RMD_STATE_DIR: stateDir, RMD_CLAUDE_DIR: credDir },
+  });
+  return { out: r.stdout ?? "", status: r.status ?? -1 };
+}
+
+/** A credential directory whose token expires `offsetMs` from now (negative ⇒ already expired). */
+function credFixture(offsetMs: number): string {
+  const dir = mkdtempSync(join(tmpdir(), "host-update-cred-"));
+  writeFileSync(
+    join(dir, ".credentials.json"),
+    JSON.stringify({ claudeAiOauth: { accessToken: "sk-ant-oat01-x", expiresAt: Date.now() + offsetMs } }),
+  );
+  return dir;
+}
+
+/** Every flag the END-TO-END VERIFIED invocation carries. Dropping any one must fail a test. */
+const REQUIRED_FLAGS: ReadonlyArray<{ flag: string; why: string }> = [
+  { flag: "--restart=on-failure:5", why: "exit 0 is a deliberate stop and must not restart" },
+  { flag: "--privileged", why: "the bwrap sandbox the worker settings require" },
+  { flag: "--user 1000:1000", why: "claude refuses bypassPermissions as uid 0" },
+  { flag: "-e GH_TOKEN=", why: "the gh credential helper reads it at call time" },
+  { flag: "-e RMD_RESTART_THROTTLE_S=", why: "docker caps restart COUNT, never RATE (#1645)" },
+  { flag: ":/home/node/Remudero", why: "the state volume mount" },
+  { flag: ":/home/node/.claude", why: "the credential DIRECTORY mount — without it every spawn is refused" },
+  { flag: "--repo ", why: "rmd daemon refuses without it: usage dump, exit 2" },
+  { flag: "--allow-self-target", why: "this fleet drains its own source repo; W1-T109's consent record" },
+];
+
+test("the printed invocation carries EVERY flag the verified-working one does", () => {
+  const { dead } = stateFixture();
+  const run = printWithPaths(dead, credFixture(8 * 3600_000));
+  assert.equal(run.status, 0);
+  const block = run.out.slice(run.out.indexOf("docker run -d --name remudero-daemon"), run.out.indexOf("./bin/rmd daemon") + 80);
+  assert.ok(block.length > 100, "the daemon block must be present at all");
+  for (const { flag, why } of REQUIRED_FLAGS) {
+    assert.ok(block.includes(flag), `printed invocation is missing ${flag} — ${why}`);
+  }
+});
+
+test("the credential mount is the DIRECTORY and is NOT read-only — :ro can never be refreshed", () => {
+  // The subtlest of the four: the token self-refreshes on an 8-hour cycle, rewritten IN PLACE.
+  // A `:ro` mount, or a mount of the single FILE, ages out silently and the governor goes blind.
+  const { dead } = stateFixture();
+  const cred = credFixture(8 * 3600_000);
+  const run = printWithPaths(dead, cred);
+  assert.match(run.out, new RegExp(`-v ${cred.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:/home/node/\\.claude`));
+  assert.doesNotMatch(run.out, /\.claude:ro|\.credentials\.json:/, "must not mount :ro, and must not mount the FILE");
+});
+
+test("a bare CLAUDE_CODE_OAUTH_TOKEN is no longer suggested — it authenticates with NO plan context", () => {
+  const { dead } = stateFixture();
+  const run = printWithPaths(dead, credFixture(8 * 3600_000));
+  assert.doesNotMatch(run.out, /-e CLAUDE_CODE_OAUTH_TOKEN/, "the token alone yields rate_limits_available:false");
+});
+
+test("an EXPIRED credential WARNS, naming how long ago — the check that cost four restarts", () => {
+  const { dead } = stateFixture();
+  const run = printWithPaths(dead, credFixture(-90 * 60_000)); // 90 minutes stale
+  assert.match(run.out, /credential at .* EXPIRED/);
+  // Integer division truncates, so a 90-minute offset renders as 89 — assert the VALUE is close
+  // rather than pinning a literal that an off-by-one would fail for the wrong reason.
+  const staleFor = Number(/EXPIRED (\d+) minute\(s\) ago/.exec(run.out)?.[1]);
+  assert.ok(
+    Number.isFinite(staleFor) && Math.abs(staleFor - 90) <= 1,
+    `must say HOW stale, not merely that it is; got ${staleFor}`,
+  );
+  assert.match(run.out, /read-write/, "and must name the fix: the CLI refreshes the file in place");
+  assert.equal(run.status, 0, "print-only must still print — this is a warning, never a refusal");
+});
+
+test("a VALID credential says so with its remaining life, and warns about nothing", () => {
+  const { dead } = stateFixture();
+  const run = printWithPaths(dead, credFixture(3 * 3600_000));
+  assert.match(run.out, /credential OK .* valid for 1[0-9][0-9] more minute\(s\)/);
+  assert.doesNotMatch(run.out, /EXPIRED/);
+});
+
+test("an ABSENT credential warns and names the override, rather than printing a doomed invocation silently", () => {
+  const { dead } = stateFixture();
+  const empty = mkdtempSync(join(tmpdir(), "host-update-nocred-"));
+  const run = printWithPaths(dead, empty);
+  assert.match(run.out, /no readable credential/);
+  assert.match(run.out, /RMD_CLAUDE_DIR=<path>/);
+  assert.equal(run.status, 0);
+});
+
+test("REGRESSION: the heredoc shells out to nothing — an unescaped backtick becomes a command", () => {
+  // SELF-INFLICTED AND CAUGHT BY RUNNING IT: a comment added to this block containing `rmd daemon`
+  // in unescaped backticks made the heredoc EXECUTE it ("rmd: command not found"), because
+  // `cat <<PRINTED` is unquoted. Same family as the apostrophe truncation this file already
+  // carries a mutant for, and invisible to `bash -n`.
+  const { dead } = stateFixture();
+  const run = printWithPaths(dead, credFixture(8 * 3600_000));
+  assert.doesNotMatch(run.out, /command not found/, "the printed block must execute nothing");
+  const src = readFileSync(SCRIPT, "utf8");
+  const heredoc = src.slice(src.indexOf("  cat <<PRINTED"), src.indexOf("\nPRINTED\n"));
+  const unescaped = heredoc.split("\n").filter((l) => /(^|[^\\])`/.test(l));
+  assert.deepEqual(unescaped, [], "every backtick inside the heredoc must be escaped as \\`");
+});
+
+test("MUTANT: dropping the credential mount from the REAL block is caught by the completeness table", () => {
+  const src = readFileSync(SCRIPT, "utf8");
+  const line = "    -v ${CRED_DIR}:${CRED_MOUNT_DEST} \\\\\n";
+  assert.equal(src.split(line).length - 1, 1, "the mutation target must be unique by occurrence count");
+  const dir = mkdtempSync(join(tmpdir(), "host-update-mutant-cred-"));
+  const mutant = join(dir, "host-update.sh");
+  writeFileSync(mutant, src.replace(line, ""), { mode: 0o755 });
+  chmodSync(mutant, 0o755);
+
+  const { dead } = stateFixture();
+  const run = printWithPaths(dead, credFixture(8 * 3600_000), mutant);
+  assert.ok(!run.out.includes(":/home/node/.claude"), "the mutant must really drop the mount");
+  // …and the healthy script must still carry it, or this proves nothing about the guard.
+  const real = printWithPaths(dead, credFixture(8 * 3600_000));
+  assert.ok(real.out.includes(":/home/node/.claude"), "the real script must carry what the mutant dropped");
 });

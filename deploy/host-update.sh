@@ -63,6 +63,26 @@ PRINT_DAEMON_RUN=0
 # derives from HOME — see REQ 10 in deploy/Dockerfile), and the measured invocation binds
 # ~/rmd-state to it. Only ever read.
 STATE_DIR="${RMD_STATE_DIR:-${HOME:-/root}/rmd-state}"
+# The HOST side of the CREDENTIAL bind mount, derived the same way STATE_DIR is rather than
+# hardcoded to one operator's home. MEASURED 2026-08-13, on the first containerised daemon: the
+# printed invocation mounted NO credential at all, and the worker preflight refused every spawn —
+# "refusing to spawn a credential-dead worker" — taking the retro, containment and triage with it.
+#
+# IT MUST BE THE DIRECTORY AND IT MUST BE WRITABLE, and that is the subtlest of the four defects
+# found that night. The credential SELF-REFRESHES on an 8-hour cycle and is rewritten IN PLACE:
+# measured to the millisecond, mtime 01:05:38.540 against expiresAt 09:05:38.322, exactly 8.0 hours.
+# A `:ro` mount of the FILE therefore ages out silently — the CLI cannot write the new token back —
+# and `assertWorkerCredentialFile`'s own comment names the assumption that breaks: "An EXPIRED token
+# is reported and allowed through: there is nothing to re-provision from on this platform, the CLI
+# maintains its own refresh." Mount the directory read-write and the refresh works.
+CRED_DIR="${RMD_CLAUDE_DIR:-${HOME:-/root}/.claude}"
+# The container-side path the credential must land on: `config.root` derives from HOME (Dockerfile
+# REQ 10), so the worker home's `.claude` symlink grant resolves to exactly this.
+CRED_MOUNT_DEST="/home/node/.claude"
+# The repo `rmd daemon` drains. It REFUSES without `--repo` (usage dump, exit 2), which is how a
+# containerised boot burned four restarts before anyone read the exit code — `daemon-plist` bakes
+# the same flag for the launchd path, and the printed invocation must not be weaker.
+DAEMON_REPO="${RMD_DAEMON_REPO:-remudero}"
 # The container-side path, used to RECOGNISE a fleet container by what it has mounted. This is the
 # check that catches a container started from a locally-tagged image such as `rmd-local:latest`,
 # whose name contains nothing this script would otherwise match.
@@ -158,6 +178,41 @@ if [ "${PRINT_DAEMON_RUN}" -eq 1 ]; then
     # rather than a warning — refusing here would be a bound firing on a healthy condition.
     echo "host-update: NOTE — no ledger under ${STATE_DIR} or its siblings; expected on a fresh host." >&2
   fi
+
+  # ── THE CREDENTIAL IS CHECKED THE SAME WAY, AND EXPIRY IS THE CHECK THAT MATTERS ────────────
+  # Three states, same discipline as the state volume above: absent, present-but-expired, and OK.
+  # EXPIRY EARNS ITS PLACE because it is the failure that cost four container restarts to find —
+  # a mounted, readable, genuine credential whose token had aged out reads as fully healthy to
+  # every other check. `assertWorkerCredentialFile` deliberately lets an expired token through
+  # (the CLI is expected to refresh it), so nothing downstream complains either; the probe just
+  # reports `rate_limits_available: false` and the governor goes blind.
+  #
+  # `expiresAt` is epoch MILLISECONDS. Extracted with grep/cut rather than jq or node: this script
+  # is documented to run on a host with no node, no rmd and no checkout, and jq is not present on
+  # the measured host either.
+  cred_file="${CRED_DIR}/.credentials.json"
+  if [ ! -r "${cred_file}" ]; then
+    echo "host-update: WARNING — no readable credential at ${cred_file}." >&2
+    echo "  The worker preflight REFUSES every spawn without one (\"credential-dead worker\"), which" >&2
+    echo "  also takes down the retro, containment and triage rungs. Point at the right home with:" >&2
+    echo "  RMD_CLAUDE_DIR=<path> $0 --print-daemon-run" >&2
+  else
+    cred_exp="$(grep -ao '"expiresAt":[0-9]*' "${cred_file}" 2>/dev/null | head -1 | cut -d: -f2)"
+    cred_now="$(( $(date +%s) * 1000 ))"
+    if [ -z "${cred_exp}" ]; then
+      # A credential with no stated expiry is NOT a failure — a bare token legitimately carries
+      # none. Say so rather than inventing a verdict either way.
+      echo "host-update: NOTE — ${cred_file} states no expiresAt; freshness not checkable." >&2
+    elif [ "${cred_exp}" -le "${cred_now}" ]; then
+      echo "host-update: WARNING — the credential at ${cred_file} EXPIRED $(( (cred_now - cred_exp) / 60000 )) minute(s) ago." >&2
+      echo "  It will still authenticate enough to pass the worker preflight, so nothing downstream" >&2
+      echo "  will complain — but the headroom probe returns rate_limits_available:false and the" >&2
+      echo "  governor runs blind. The CLI refreshes this file IN PLACE, so mount the DIRECTORY" >&2
+      echo "  read-write (as printed below); a :ro or single-FILE mount can never be refreshed." >&2
+    else
+      echo "host-update: credential OK — ${cred_file}, valid for $(( (cred_exp - cred_now) / 60000 )) more minute(s)"
+    fi
+  fi
   echo
   cat <<PRINTED
 host-update: DAEMON-MODE INVOCATION — printed only. Nothing has been started and nothing was run.
@@ -181,15 +236,29 @@ host-update: DAEMON-MODE INVOCATION — printed only. Nothing has been started a
   # entrypoint resolves \`\${RMD_RESTART_THROTTLE_S:-0}\` to 0 and behaves exactly as it does today.
   # Set it from ONE supervised boot: time container start → first \`dispatch.*\` ledger line, and
   # use that. Until then, running with it unset is the honest state, not a broken one.
+  # THE CREDENTIAL IS A DIRECTORY MOUNT, READ-WRITE, AND NOT AN ENV TOKEN. A bare
+  # CLAUDE_CODE_OAUTH_TOKEN authenticates but carries NO PLAN CONTEXT: measured A/B, same account,
+  # same binary — with the credential FILE, subscription_type "max" and rate_limits_available true;
+  # with the token alone, subscription_type null and rate_limits null. The SDK's own doc names that
+  # bucket ("false for API key, Bedrock, Vertex, or missing profile scope"), so the governor cannot
+  # read headroom at all. Mount the directory READ-WRITE: the token self-refreshes on an 8-hour
+  # cycle and is rewritten in place, so :ro or a single-FILE mount ages out silently.
+  #
+  # --repo IS REQUIRED. \`rmd daemon\` refuses without it (usage dump, exit 2) and the restart
+  # throttle then sleeps before exiting, so the failure looks like a hang. --allow-self-target is
+  # printed BECAUSE THIS FLEET DRAINS ITS OWN SOURCE REPO, and it is the consent record W1-T109
+  # exists to capture: if you are pointing this at a DIFFERENT repo, delete the flag rather than
+  # carrying it by habit. Read this line before you paste it.
   docker run -d --name remudero-daemon \\
     --restart=on-failure:5 \\
     --privileged \\
     --user 1000:1000 \\
-    -e GH_TOKEN="\$GH_TOKEN" -e CLAUDE_CODE_OAUTH_TOKEN="\$CLAUDE_CODE_OAUTH_TOKEN" \\
+    -e GH_TOKEN="\$GH_TOKEN" \\
     -e RMD_RESTART_THROTTLE_S="\${RMD_RESTART_THROTTLE_S:-}" \\
     -v ${STATE_DIR}:${STATE_MOUNT_DEST} \\
+    -v ${CRED_DIR}:${CRED_MOUNT_DEST} \\
     ${REF} \\
-    ./bin/rmd daemon
+    ./bin/rmd daemon --repo ${DAEMON_REPO} --allow-self-target
 
   # THE CONSOLE, IF WANTED, IS A SEPARATE CONTAINER WITH A DIFFERENT POLICY. serve returns 0 on a
   # clean shutdown and must come back from EVERY exit, so it takes unless-stopped, not on-failure.
