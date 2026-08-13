@@ -64,6 +64,31 @@ forensic detail, so the narrative does not need to live here.
 
 ## Writing proofs and acceptance criteria
 
+- **THE BLOCK MUST PARSE BEFORE ANY PROOF IN IT CAN RUN — check GITHUB'S STORED BODY with
+  `rmd check-acceptance`, never your local file.** `parseAcceptanceBlock` (`src/lib/review.ts`)
+  resolves criteria ONLY from BULLETS — `ACCEPTANCE_BULLET_RE` accepts `-`, `*`, `1.`/`1)` — so a
+  bare unbulleted `claim:` line matches NOTHING and the review lands *"FAIL — no acceptance criteria
+  to judge (fail closed)"* on a PR whose checks are ALL GREEN. #1721 shipped 8 pairs and measured
+  `criteria parsed: 0` against 22/22 green checks. Four more ways to reach zero: a header that is not
+  a BARE line (`ACCEPTANCE_HEADER_RE` — `## Validation` is not one); PROSE between the heading and
+  the first bullet (#1714's first draft); a blank line ANYWHERE after the bullets begin (tolerated
+  only BEFORE the first one); and ANY indented line that is not a fresh `proof:`, which is why a
+  claim WRAPPED onto a second line silently truncates everything below it.
+  **TWO SHAPES PARSE — measured 2026-08-13:** the house form `renderAcceptanceBlock`
+  (`src/lib/plan-pr-emitter.ts`) itself emits, `- <claim> | <proof>`; and `- claim: …` with an
+  INDENTED `  proof: …` continuation. **"two-line `claim:`/`proof:` form" READS AS UNBULLETED AND
+  THAT IS THE TRAP** — it is two lines, but the first is still a `-` bullet. The DIFFERENT hazard
+  that phrase warns of is writing `| proof:`: the pipe already delimits, so the label doubles, the
+  proof becomes `proof: grep: …`, and `check-proof` refuses it (`parse: REFUSED`, exit 2) — that
+  capped #1598 at 0/3. After a pipe, write the BARE proof.
+  **RUN BOTH VERBS — NEITHER CATCHES THE OTHER'S FAILURE, MEASURED BOTH WAYS:** that doubled-label
+  body passes `check-acceptance` with `OK` and exit 0 while `check-proof` refuses it, and an
+  unbulleted body fails `check-acceptance` while every proof string inside it is individually valid.
+  `gh api repos/<o>/<r>/pulls/<n> --jq .body > /tmp/b.md && RMD_SELF_SYNC_DONE=1 ./bin/rmd check-acceptance /tmp/b.md`
+  **AND REPAIRING THE BODY CLEARS NOTHING ON ITS OWN.** The sweep's post-review row fires only at
+  `pr.checksState === "green" && pr.reviewState === "none"` (`src/lib/sweep.ts`), so once a verdict
+  is posted that sha is never re-reviewed — the designed path for a stale verdict is A NEW HEAD. A
+  session that fixes the block and pushes nothing has fixed nothing. *(#1598, #1714, #1721)*
 - **EVERY proof needs a dialect prefix — `unit test:` or `grep:`. A bare title is PROSE and never
   executes.** `rmd check-proof` refuses it in as many words: *"a proof with no dialect prefix at all
   is prose and never executes."* It does not fail loudly; it silently contributes nothing and the
@@ -73,10 +98,9 @@ forensic detail, so the narrative does not need to live here.
   bare title, NOT the `test/foo.test.ts::title` form — that form satisfies `rmd lint-plan` but the
   executor feeds the whole string to `--test-name-pattern` and matches zero tests. In a **plan
   shard**, use the pure-path form `unit test: test/foo.test.ts`: it lint-passes and executes the
-  whole file. **Verify every proof through `rmd check-proof '<proof>'` before opening the PR** — it
-  is the reviewer's own parser AND executor (W1-T387: it now judges the run through
-  `execWhitelistedProof` itself, not a second hand-rolled exit-code check), and prints the parse
-  kind, the resolved candidates, the exact argv, the verdict and a hit count. Read the `verdict:`
+  whole file. `rmd check-proof '<proof>'` — the second of the two verbs the bullet above requires —
+  is the reviewer's own parser AND executor (W1-T387: it judges the run through
+  `execWhitelistedProof` itself, not a second hand-rolled exit-code check). Read its `verdict:`
   line, never the raw `exit:` line — a name-filtered proof that resolves to a file but names no real
   test title exits 0 and looks green (`exit: 0`, `hits: 17` is a MEASURED real example) while its
   `verdict:` correctly reads `no-match`; `rmd check-proof --help` states the full verdict→exit-code
