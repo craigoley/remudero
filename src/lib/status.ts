@@ -707,6 +707,138 @@ function withReadMeta(out: Array<Record<string, unknown>>, torn: number, present
 export const STATUS_BOARD_MAX_ROTATIONS = 24;
 
 /**
+ * How many rotations {@link readMergeCreditedTaskIds} may open before giving up on a task it has
+ * not yet found a credit for.
+ *
+ * MEASURED on this host's real 666-gz/3-plain/1-live corpus, over BOTH credit spellings: every one
+ * of the 445 ever-credited ids resolves within 24 files, and the depth distribution is
+ * median 0, p90 0. The only ids needing more than 8 are `SBX-T1`/`SBX-T2`/`SBX-T3`/`SB-HELLO`/
+ * `CI-GREEN-PROBE` at depth 21 — WS-1 sandbox probe ids that appear in `plan/` only inside a
+ * `satisfied_by` PROSE string, never as a task id, so `buildCreditCandidates` (which iterates
+ * `plan.tasks`) can never ask about them. For the ids it CAN ask about, the deepest is under 8.
+ *
+ * COST, measured on the same corpus: 1 file 21 ms / 3.3 MiB, 8 files 197 ms / 16.8 MiB, 24 files
+ * 598 ms / 20.4 MiB. The full union is 11.42 s / 0.11 GiB — the price this cap exists to refuse,
+ * and a per-pass full-corpus read would be far worse than the treadmill it replaces.
+ *
+ * THE CAP IS SAFE IN THE DIRECTION THAT MATTERS, which is why a bound is acceptable here at all.
+ * This reader only ever ADDS ids it has actually seen, so it cannot invent a credit. Reading too
+ * shallow therefore degrades to EXACTLY today's behaviour (the task is re-credited); it can never
+ * strand real work by falsely reporting a task already credited. Under-read is cheap and
+ * self-correcting; over-report would be the dangerous direction and is unreachable by construction.
+ */
+export const CREDIT_SCAN_MAX_ROTATIONS = 24;
+
+/**
+ * Every task id the ledger has EVER recorded merge credit for, read across all three ledger forms,
+ * newest-first, stopping as soon as every `candidate` is resolved.
+ *
+ * WHY THIS EXISTS — `runCreditBackfill` asked `hasMergeCredit` against `readLedgerLines`, WHICH
+ * OPENS EXACTLY ONE FILE. `verdict.merged` and `verdict`/`merged` are both registered in
+ * `DECISION_RELEVANT_LEDGER_STEPS`, and the comment on {@link isMergeCreditLine} concluded from that
+ * "rotation cannot drop either out from under a reader" — WHICH IS FALSE, and is the belief that
+ * hid this defect. Registration stops a step being shed COMPLETELY; it does nothing about
+ * `MAX_RETAINED_LINES_PER_STEP`, which keeps only the newest 200 rows PER STEP. Credit older than
+ * that leaves the live file, the backfill cannot see it, the task is re-credited, and the fresh row
+ * evicts another — self-sustaining.
+ *
+ * MEASURED at 2026-08-13 on the live corpus, and the arithmetic is exact:
+ *   distinct tasks carrying `verdict.merged` in the live file : 385
+ *   MAX_RETAINED_LINES_PER_STEP                               : 200
+ *     => credits rotation drops                               : 185
+ *   `sweep.credit_backfill` rows in the live file             : 185   <- exact match
+ * Amplification over the whole corpus: 61,903 `verdict.merged` rows across 386 distinct tasks
+ * (160x), with many unrelated ancient tasks sitting at EXACTLY 670 rows apiece — an identical count
+ * across unrelated tasks is a systematic signature, not organic activity. And it was not
+ * converging: 6,759 corrections across 4,722 full sweeps = 1.43 per sweep, sustained.
+ *
+ * WHY A SET AND NOT `LedgerLines`. {@link readLedgerUnionBounded} returns every line it read, which
+ * is right for a rendering surface that matches steps by prefix but wrong here: this runs on every
+ * full sweep and would hold ~20 MiB of raw JSON as parsed objects for a question whose whole answer
+ * is a set of ids. Accumulating only the ids keeps the memory bounded by the plan, not the corpus.
+ *
+ * IT SHARES {@link ledgerRotationEntries} DELIBERATELY. That function is "the one definition of
+ * which files in a state dir are ledger rotations", and a fourth spelling of it is the defect this
+ * repo keeps re-filing. Callers differ only in how they READ each form and what they accumulate —
+ * the difference that is real.
+ */
+export function readMergeCreditedTaskIds(
+  path: string,
+  opts: {
+    /** Stop as soon as every one of these has been resolved. Omitted ⇒ read to the cap. */
+    candidates?: Iterable<string>;
+    maxRotations?: number;
+    /**
+     * The LIVE half only. Exists so a caller that already has an injected ledger reader (every
+     * `runCreditBackfill` test does) keeps controlling the live file exactly as before, while the
+     * rotations still come from the real corpus — ONE code path, not a legacy branch beside a new
+     * one. A temp-dir fixture has no rotations, so an injected reader behaves identically to today.
+     */
+    readLive?: (path: string) => Iterable<Record<string, unknown>>;
+    ledgerFs?: LedgerFsDeps;
+    readdirSync?: (dir: string) => string[];
+    gunzipSync?: (buf: Buffer) => Buffer;
+    readFileBuffer?: (p: string) => Buffer;
+  } = {},
+): { credited: Set<string>; filesRead: number; complete: boolean } {
+  const credited = new Set<string>();
+  const wanted = new Set(opts.candidates ?? []);
+  // O(1) per line: decrement a counter rather than re-testing the whole candidate set. The board
+  // reader's own doc records what the naive form costs — re-scanning a growing array per rotation
+  // cost ~2s of wall time — and a bounded read is only cheap if the stop test is cheap too.
+  let outstanding = wanted.size;
+  const take = (line: Record<string, unknown>): void => {
+    if (!isMergeCreditLine(line)) return;
+    const id = line.task_id;
+    if (typeof id !== "string" || credited.has(id)) return;
+    credited.add(id);
+    if (wanted.has(id)) outstanding -= 1;
+  };
+  const done = (): boolean => wanted.size > 0 && outstanding <= 0;
+
+  const live = opts.readLive ? opts.readLive(path) : readLedgerLines(path, opts.ledgerFs ?? realLedgerFs);
+  for (const l of live) take(l);
+  let filesRead = 1;
+  if (done()) return { credited, filesRead, complete: true };
+
+  let names: string[];
+  try {
+    names = (opts.readdirSync ?? nodeReaddirSync)(dirname(path));
+  } catch {
+    // An unreadable state dir degrades to the live answer — i.e. exactly today's behaviour — never
+    // to a throw. W1-T119: a read that failed is not a read that said no.
+    return { credited, filesRead, complete: false };
+  }
+  const rotations = ledgerRotationEntries(names, dirname(path)).sort((a, b) =>
+    a.path < b.path ? 1 : a.path > b.path ? -1 : 0,
+  );
+  const cap = opts.maxRotations ?? CREDIT_SCAN_MAX_ROTATIONS;
+  for (const entry of rotations.slice(0, cap)) {
+    let text: string;
+    try {
+      const buf = (opts.readFileBuffer ?? ((p: string) => nodeReadFileSync(p)))(entry.path);
+      text = (entry.form === "gzip" ? (opts.gunzipSync ?? nodeGunzipSync)(buf) : buf).toString("utf8");
+    } catch {
+      continue; // a corrupt rotation costs its rows, never the answer
+    }
+    filesRead += 1;
+    for (const raw of text.split("\n")) {
+      const l = raw.trim();
+      if (!l) continue;
+      try {
+        take(JSON.parse(l) as Record<string, unknown>);
+      } catch {
+        // a torn line costs its own credit, never the walk
+      }
+    }
+    if (done()) return { credited, filesRead, complete: true };
+  }
+  // `complete: false` means the cap or the corpus ran out with candidates still unresolved — those
+  // get re-credited, which is today's behaviour, not a regression.
+  return { credited, filesRead, complete: wanted.size === 0 ? true : outstanding <= 0 };
+}
+
+/**
  * The ledger union a RENDERING surface needs: the live file plus dated rotations, NEWEST FIRST,
  * stopping as soon as `satisfied` is met or {@link STATUS_BOARD_MAX_ROTATIONS} files are open.
  *
@@ -1005,9 +1137,16 @@ export const DEFAULT_MAX_TASK_DISPATCHES = 5;
  *
  * Both step spellings are required and neither is redundant: a run that merges its own
  * PR writes `step: "verdict", verdict: "merged"`, while a merge the ledger MISSED at the
- * time is corrected later as `step: "verdict.merged"`. Both are already in
- * {@link DECISION_RELEVANT_LEDGER_STEPS} (ledger.ts), registered for exactly this reason,
- * so rotation cannot drop either out from under a reader.
+ * time is corrected later as `step: "verdict.merged"`. Both are in
+ * {@link DECISION_RELEVANT_LEDGER_STEPS} (ledger.ts), registered for exactly this reason.
+ *
+ * CORRECTED 2026-08-13 — this comment used to conclude "so rotation cannot drop either out from
+ * under a reader", AND THAT WAS FALSE. It is the belief that hid a live defect for months, so it is
+ * corrected here rather than deleted. Registration stops a step being shed COMPLETELY; it says
+ * nothing about `MAX_RETAINED_LINES_PER_STEP`, which keeps only the newest 200 rows PER STEP. A
+ * registered step with more than 200 rows still loses its oldest to rotation. Any caller asking
+ * "was this task EVER credited" therefore needs {@link readMergeCreditedTaskIds}, not a single-file
+ * read — see that function for the measured arithmetic.
  */
 export function isMergeCreditLine(line: Record<string, unknown>): boolean {
   return line.step === "verdict.merged" || (line.step === "verdict" && line.verdict === "merged");

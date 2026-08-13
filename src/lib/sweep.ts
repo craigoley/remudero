@@ -1,5 +1,5 @@
 import { appendLedger } from "./ledger.js";
-import { isMergeCreditLine, readLedgerLines } from "./status.js";
+import { readLedgerLines, readMergeCreditedTaskIds } from "./status.js";
 import { loadDefaultPolicy } from "./policy.js";
 import { cappedOverrideFromLedger, decideAutoMergeArm, postedArmFactsFromLedger, REVIEW_CONTEXT } from "./review.js";
 import type { ArmDecision, CriterionVerdict } from "./review.js";
@@ -2919,21 +2919,24 @@ export interface CreditBackfillSummary {
   results: CreditBackfillResult[];
 }
 
-/**
- * Has this task's merge already been CREDITED on the ledger — either a live
- * run's own terminal `verdict: "merged"` line, or a PRIOR `verdict.merged`
- * backfill correction from this same rung (IDEMPOTENCE: acceptance 2 — a
- * second pass over unchanged state must see its own prior correction and
- * append nothing further)? Scoped to `task_id` only, never `run_id` — sibling
- * credit (P29(i)/W1-T149) means ANY run of this task recording a merge
- * counts, not only the run whose candidate is being reconciled this pass.
+/*
+ * `hasMergeCredit` USED TO LIVE HERE and was removed 2026-08-13, not merely bypassed.
+ *
+ * It answered "has this task's merge already been credited" — either a live run's own terminal
+ * `verdict: "merged"` line or a PRIOR `verdict.merged` correction from this rung — over an array
+ * the caller had read with `readLedgerLines`, WHICH OPENS EXACTLY ONE FILE. That single-file read
+ * was the defect: rotation caps a step at `MAX_RETAINED_LINES_PER_STEP`, so older credit left the
+ * live file and the same tasks were re-credited forever.
+ *
+ * `readMergeCreditedTaskIds` (status.ts) now answers the same question across all three ledger
+ * forms and returns the ids as a set. Its semantics are preserved exactly where they were right:
+ * still keyed on `task_id` ALONE and never `run_id`, because sibling credit (P29(i)/W1-T149) means
+ * ANY run of this task recording a merge counts — not only the run whose candidate is being
+ * reconciled this pass. The line-shape test is still `isMergeCreditLine`, imported rather than
+ * restated, for the reason the deleted comment gave: two hand-maintained copies of "what a merge
+ * credit looks like" is what once let a back-credited task stay circuit-broken. Leaving this
+ * function here beside the new reader would recreate exactly that.
  */
-function hasMergeCredit(lines: Array<Record<string, unknown>>, taskId: string): boolean {
-  // The line-shape test is `isMergeCreditLine` (status.ts), IMPORTED not restated: the dispatch
-  // breaker's reset resets on the same fact, and two hand-maintained copies of "what a merge
-  // credit looks like" is the exact defect that let a back-credited task stay circuit-broken.
-  return lines.some((l) => l.task_id === taskId && isMergeCreditLine(l));
-}
 
 /**
  * THE CREDIT-BACKFILL RUNG (W1-T150). For every candidate whose OWNED PR is
@@ -2957,16 +2960,28 @@ export async function runCreditBackfill(
   candidates: CreditCandidate[],
   deps: Pick<SweepDeps, "ledgerPath" | "runId" | "readLedger" | "appendLine" | "log" | "dryRun">,
 ): Promise<CreditBackfillSummary> {
-  const readLedger = deps.readLedger ?? readLedgerLines;
   const appendLine = deps.appendLine ?? appendLedger;
   const log = deps.log ?? (() => {});
-  const lines = readLedger(deps.ledgerPath);
+
+  // THE CREDIT QUESTION IS "EVER", AND ONE FILE CANNOT ANSWER IT. This used to read
+  // `readLedgerLines`, which opens exactly ONE path, against a step whose rows rotation caps at
+  // `MAX_RETAINED_LINES_PER_STEP` (200 newest). Credit older than that left the live file, this
+  // check said "not credited", the task was re-credited, and the fresh row evicted another —
+  // self-sustaining. MEASURED 2026-08-13: 385 distinct credited tasks in the live file minus the
+  // 200 rotation retains = 185, and the live file held EXACTLY 185 `sweep.credit_backfill` rows.
+  // See {@link readMergeCreditedTaskIds} for the full arithmetic and the read-cost measurements.
+  const credited = readMergeCreditedTaskIds(deps.ledgerPath, {
+    // Only the tasks this pass could ask about, so the walk stops as soon as they are all resolved
+    // rather than reading to the cap. Measured: real plan ids resolve below depth 8.
+    candidates: candidates.map((c) => c.taskId),
+    readLive: deps.readLedger,
+  }).credited;
 
   const results: CreditBackfillResult[] = [];
   let corrected = 0;
 
   for (const c of candidates) {
-    const alreadyCredited = hasMergeCredit(lines, c.taskId);
+    const alreadyCredited = credited.has(c.taskId);
     const shouldCorrect = c.merged && !alreadyCredited;
     const acted = shouldCorrect && !deps.dryRun;
 
@@ -2984,7 +2999,9 @@ export async function runCreditBackfill(
       // the NEXT sweep) so a second candidate naming the same task later in
       // this same array — e.g. a duplicate produced by the caller — is
       // credited exactly once, never twice, without waiting on a fresh poll.
-      lines.push({ task_id: c.taskId, step: "verdict.merged" });
+      // Reflected into THIS pass's own view (not just re-read on the next sweep) so a duplicate
+      // candidate naming the same task later in the same array credits exactly once.
+      credited.add(c.taskId);
       corrected++;
     }
 
