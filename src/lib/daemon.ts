@@ -633,6 +633,55 @@ export interface DaemonSummary {
 }
 
 /** Injectable dependencies — the real command wires GitHub/run-task/usage/locks. */
+/**
+ * W1-T462: should the daemon poll security alerts on THIS tick?
+ *
+ * THE GAP WAS CADENCE, NOT CAPABILITY. `pollAlerts` (lib/ops.ts) already reads code-scanning,
+ * Dependabot and secret-scanning alerts, folds open counts into the digest and escalates each NEW
+ * critical/high exactly once — but MEASURED across all three ledger forms, `ops.alerts_polled` had
+ * TWO rows in the entire corpus, both in archives from 2026-07-21 and 2026-08-02, and nothing
+ * scheduled `opsCommand` at all: no daemon hook, no workflow, no launchd unit. Ten OSV advisories
+ * accumulated until a human asked. The signal was produced and delivered; only the reader was missing.
+ *
+ * SHAPED AFTER {@link decideAutoTriage} RATHER THAN INVENTING A FOURTH CLOCK — same marker-plus-
+ * interval form, same idle gate, same fail-closed-on-corrupt-marker rule. This repo keeps re-filing
+ * "a fourth spelling of how long since last time"; reusing the established shape is the point.
+ *
+ * THE IDLE GATE IS NOT DECORATION. `decideAutoTriage` checks it for a reason: a poll shells three
+ * `gh api` endpoints, and a dispatch tick is where the REST budget is already under pressure. It is
+ * cheap (3 requests against a 5,000/hour budget measured at 4,834 remaining) but "cheap" is not
+ * "free at the worst possible moment".
+ */
+export interface AlertPollInputs {
+  enabled: boolean;
+  idle: boolean;
+  now: Date;
+  /** ISO of the last successful poll, or undefined if it has never run. */
+  lastPollIso: string | undefined;
+  minIntervalMinutes: number;
+}
+
+export interface AlertPollDecision {
+  fire: boolean;
+  reason: string;
+}
+
+export function decideAlertPoll(i: AlertPollInputs): AlertPollDecision {
+  if (!i.enabled) return { fire: false, reason: "alert poll disabled (policy.alertPoll.enabled=false)" };
+  if (!i.idle) return { fire: false, reason: "daemon is not idle" };
+  if (i.lastPollIso === undefined) return { fire: true, reason: "no prior poll recorded — first run" };
+  const last = Date.parse(i.lastPollIso);
+  // A marker we cannot parse FAILS CLOSED, exactly as decideAutoTriage does on a corrupt marker:
+  // firing on an unreadable timestamp would poll every tick, which is the noise this gate exists
+  // to prevent.
+  if (Number.isNaN(last)) return { fire: false, reason: "last poll timestamp unreadable — failing closed" };
+  const sinceMin = (i.now.getTime() - last) / 60_000;
+  if (sinceMin < i.minIntervalMinutes) {
+    return { fire: false, reason: `polled ${sinceMin.toFixed(1)}m ago — under the ${i.minIntervalMinutes}m interval` };
+  }
+  return { fire: true, reason: `last poll ${sinceMin.toFixed(1)}m ago — interval elapsed` };
+}
+
 export interface DaemonDeps {
   /**
    * impl-FZ — re-read the plan from the SAME source the boot used, returning the fresh plan or
@@ -992,6 +1041,12 @@ export interface DaemonDeps {
    * scheduler. Called alongside dispatch, NOT a replacement for it.
    */
   sweep?: () => Promise<void> | void;
+  /**
+   * W1-T462: run ONE security-alert poll. Best-effort by the same contract as `sweep` above — a
+   * throw costs the daemon one logged tick, never its life. Returns the ISO of the poll so the
+   * caller can persist it as the interval marker.
+   */
+  alertPoll?: () => Promise<string | undefined> | string | undefined;
   /**
    * W1-T117 orphan sweep (design part ii): the SAME `sweepOrphanWorkers`
    * entry point (worker-containment.ts) `daemonBoot`'s own
