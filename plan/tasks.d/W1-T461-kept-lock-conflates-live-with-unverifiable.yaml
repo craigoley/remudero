@@ -1,0 +1,102 @@
+- id: W1-T461
+  title: "the inflight sweep reports a dead container's stranded lock as `kept` — the same bucket as a healthy live worker — so a lock nothing can ever clear is indistinguishable from one that should not be cleared"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  origin: recon#stranded-inflight-locks-2026-08-13
+  principles: {tdd: strict}
+  budget_usd: 25
+  files:
+    - src/lib/inflight-lock.ts
+    - src/run-task.ts
+    - test/inflight-lock.test.ts
+    - test/daemon.test.ts
+  rationale: "RE-DERIVED AT 3e370e3. A container replacement strands every inflight lock its workers
+    held, and NOTHING can clear them: `isHolderStale` (`src/lib/fs-race-safe.ts`) rung 1 returns
+    false — NOT stale — for a foreign host, and the pid is never probed. That ordering is DELIBERATE
+    and must not be undone: W1-T396 moved the host rung ABOVE the pid probe precisely because a
+    foreign lock previously read as `pid absent => dead => stale` and was RECLAIMED WHILE ITS REAL
+    HOLDER RAN — two workers on one task, no error on either side. The function's own doc names this
+    residual cost in terms: a machine whose hostname CHANGES between acquire and reclaim sees its own
+    older locks as foreign and permanently unreclaimable, `recoverable only by deleting the lock
+    file`. A CONTAINER IS EXACTLY THAT MACHINE.
+    THE REAPER IS NOT MISSING — IT ALREADY RUNS TWICE AND CORRECTLY DECLINES. `sweepStaleInflightLocks`
+    (`src/lib/inflight-lock.ts`) runs at boot via `daemon.lock_sweep` and every poll via
+    `runInflightLockSweepRung`, and both route staleness through that same predicate. So the fleet
+    already looks at these files on a cadence and walks past them.
+    WHAT IS ACTUALLY BROKEN IS THE REPORT, AND IT IS A FALSE STATEMENT RATHER THAN A MISSING ONE.
+    `InflightSweepResult.kept` collapses THREE outcomes of `reclaimStaleLock` — `live`, `missing` and
+    `lost` — into one array, and the field's own doc reads `Task ids whose lock was left because its
+    holder is still alive`. FOR A FOREIGN-HOST LOCK THAT SENTENCE IS FALSE. `isHolderStale` returned
+    false meaning UNVERIFIABLE FROM HERE, which its own rung-1 comment says outright; it never
+    established that anything is alive. So `daemon.lock_sweep` logs `kept: 3` and a reader cannot
+    separate three healthy workers from three dead containers' debris.
+    THAT SILENCE IS THE COST. Measured on Azure today after a VM resize: four locks, THREE naming dead
+    containers — W1-T395 three days old, W1-T404 whose PR had already merged, W1-T453 which was
+    refused repeatedly until an operator deleted the file by hand, after which it dispatched
+    immediately. Four container generations on one host in one day, and it recurs on every resize,
+    image rebuild and `docker rm`."
+  design: |
+    (i) REPORT, DO NOT REAP. This task changes what the sweep SAYS, never what it deletes. That is the
+    whole safety argument: reaping a foreign-host lock is exactly the W1-T396 defect, and this repo has
+    five measured instances of a bound firing on a healthy condition. Splitting `kept` cannot
+    resurrect either.
+    (ii) THE SPLIT IS READABLE WITHOUT TOUCHING THE PREDICATE. `sweepStaleInflightLocks` already parses
+    the holder, so it can compare `held.host` against `hostname()` itself and classify the keep as
+    `unverifiable-foreign-host` versus `live`. `isHolderStale` — the W1-T396 correctness property — is
+    NOT modified, NOT re-ordered, and NOT given a new return shape. Keeping that function untouched is
+    a deliberate constraint of this task, not an accident of scope.
+    (iii) BOTH LOG SITES CARRY THE NEW COUNT, which is why `src/run-task.ts` is declared:
+    `daemon.lock_sweep` (boot, `src/lib/daemon.ts`) and `daemon.inflight_sweep` (per poll,
+    `runInflightLockSweepRung`) both log `kept` today. A split reported at one site and not the other
+    would leave the boot path — the one a container replacement actually hits — still silent.
+    (iv) WHAT THIS DELIBERATELY DOES NOT DECIDE. Whether a boot-time reap of foreign locks is safe
+    turns on a guarantee this task does not establish: that a single-container volume has exactly one
+    live host. The drain lock does refuse a second daemon (`DrainLockError` on a `live` holder), which
+    is suggestive — but a worker can outlive the daemon that spawned it, and `run-task.ts`'s
+    SIGINT/SIGTERM handlers release the DRAIN lock only, never a per-task inflight lock, so a
+    gracefully-stopped container releases its drain lock while stranding its inflight ones. That
+    asymmetry is why the earlier drain-lock recommendation (document it, `docker rm -f` is an operator
+    habit) DOES NOT TRANSFER HERE: a clean `docker stop` strands an inflight lock. Establishing the
+    guarantee, and any reap that rests on it, is a SEPARATE task that should cite this one's output.
+    (v) A BOOT ID IS A PREREQUISITE, NOT THIS TASK, and the source says so: recording a stable
+    per-machine identity `changes what four writers RECORD rather than how this predicate READS, which
+    is a different concern and a different changeset`. Four acquire paths write `os.hostname()` —
+    inflight-lock, drain-lock, review, task-id-reservation. Do not fold that in.
+  note: "THE RATE WAS NOT MEASURABLE FROM THE MINI, AND THE SHARD SAYS SO RATHER THAN GUESSING. The
+    union carries exactly TWO `inflight.refused` rows ever (W1-T132 2026-07-20, W1-T314 2026-08-04),
+    both with five-digit host pids. That corpus CANNOT show this defect: the mini's hostname
+    (`Craigs-Mac-mini`) is stable, the failure needs a hostname that changes between acquire and
+    reclaim, and a grep for container-shaped 12-hex host values across all three ledger forms returns
+    ZERO against a positive control showing `host` fields do exist. Azure's ledger is not synced to the
+    mini. So the blocking rate rests on the operator's four observed locks, and is ASSUMED to recur
+    structurally rather than measured — the implementer should re-derive it from the container's own
+    ledger if that becomes reachable.
+        THE REFUSAL IS ALREADY LEGIBLE WHERE IT FIRES: run-task.ts says `REFUSED: task <id> already
+    running (pid …) — not starting a duplicate` and logs `inflight.refused`. What is NOT legible is the
+    STANDING condition between refusals — a stranded lock sitting there for three days, as W1-T395's
+    did, announces itself nowhere.
+        DECLARED SUITES SEPARATED BY INVOCATION COUNT, not prose mention: `test/inflight-lock.test.ts`
+    invokes `sweepStaleInflightLocks` 5 times and `test/daemon.test.ts` references `daemon.lock_sweep`
+    4 times. `test/inflight-sweep-rung.test.ts` mentions the symbol but invokes it ZERO times and is
+    deliberately NOT declared; `test/lock-holder-identity.test.ts` and `test/lock-reclaim-race.test.ts`
+    invoke it once each and belong to `isHolderStale`/`reclaimStaleLock`, which this task does not
+    touch.
+        RULE 19: `risk: high` SET UP FRONT — `files:` spans inflight-lock, run-task and daemon, and
+    `sizingViolation` refuses `medium` at three subsystems. The band is the SPAN, not blast radius:
+    the change is one classification and two log fields.
+        NO NUMBER HERE SHOULD BE QUOTED FORWARD: the four Azure locks, the two refusals and the
+    invocation counts were measured 2026-08-13."
+  acceptance:
+    - claim: "a foreign-host keep is reported distinctly from a live-holder keep, with its own count"
+      proof: "unit test: test/inflight-lock.test.ts"
+    - claim: "a same-host dead holder is still reaped exactly as before, so W1-T396's ordering is untouched"
+      proof: "unit test: test/inflight-lock.test.ts"
+    - claim: "both the boot sweep and the per-poll rung carry the new count, not just one"
+      proof: "unit test: test/daemon.test.ts"
+    - claim: "no lock naming a foreign host is deleted by this change"
+      proof: "unit test: test/inflight-lock.test.ts"
+  status: queued
+  attempts: 0
