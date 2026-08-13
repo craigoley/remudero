@@ -468,6 +468,7 @@ import {
   planBranchReap,
   type BranchFacts,
   readLedgerUnionBounded,
+  taskIdFromRunBranch,
 } from "./lib/status.js";
 import {
   DEFAULT_SWEEP_POLICY,
@@ -13597,6 +13598,47 @@ function taskIdFromBody(body: string): string | undefined {
 }
 
 /**
+ * Is `prUrl` a plan-only filing PR, per the ONE positive signal `OpenPrView.isPlanFiling`'s
+ * own doc (lib/sweep.ts) requires: a `pr.opened{plan_only:true}` ledger line the emitter
+ * itself wrote for THIS pr_url — never inferred from an absent trailer (that would also
+ * swallow a genuinely mis-trailered IMPLEMENTING PR) and never inferred from the diff
+ * touching only `plan/**` (a hand-authored plan PR would misclassify). The retro/triage/
+ * `rmd plan` filing flows all write this line right after their own deterministic
+ * plan-only-diff guard passes (this file's `log("pr.opened", { pr_url, plan_only: true, ... })`
+ * call sites) — a positive record from the ONE place that already verified the diff, not a
+ * guess from this function.
+ */
+function isPlanOnlyFilingPr(ledger: Array<Record<string, unknown>>, prUrl: string): boolean {
+  return ledger.some((l) => l.step === "pr.opened" && l.pr_url === prUrl && l.plan_only === true);
+}
+
+/**
+ * Resolve a PR's task id (W1-T453): the fleet's own `run-<taskId>-<epochMs>` branch naming
+ * ({@link taskIdFromRunBranch}, status.ts) is readable everywhere EXCEPT here — `projectPlan`
+ * uses it twice, `isDispatchedRunBranch`/`fixHeadAcceptable` use its shape — so a fleet-built
+ * PR with no `Remudero-Task:` trailer could never arm `armAutoMerge` (`automerge.ledger_refused
+ * (W1-T230): no task id resolvable`, observed 6x on PR #1722, which the fleet had already
+ * reviewed PASS) and reported `criteriaRecoverable: false` even after a passing review.
+ *
+ * TRAILER FIRST, head-ref only as a FALLBACK: an author's trailer is a deliberate statement,
+ * while a branch name is minted by `worktreeAdd` — on a genuine disagreement (a worker that
+ * opens a PR for task A from a worktree cut for task B) the explicit statement wins.
+ *
+ * The head-ref fallback is WITHHELD for a plan-only filing PR ({@link isPlanOnlyFilingPr}):
+ * #1527 deliberately strips the trailer from a filing PR so merging it cannot credit the
+ * task(s) it just filed as IMPLEMENTED. A filing PR dispatched from an existing task's own
+ * `run-<taskId>-*` worktree sits on that task's run branch too — falling back to the head ref
+ * unconditionally would re-open that exact hole by crediting the DISPATCHED task from a
+ * plan-only diff, the trap design (iii) of this task names explicitly.
+ */
+function resolveOpenPrTaskId(pr: RawOpenPr, ledger: Array<Record<string, unknown>>): string | undefined {
+  const fromTrailer = taskIdFromBody(pr.body ?? "");
+  if (fromTrailer) return fromTrailer;
+  if (isPlanOnlyFilingPr(ledger, pr.url)) return undefined;
+  return taskIdFromRunBranch(pr.headRefName);
+}
+
+/**
  * Recover the most recent failing review's unmet criteria for a task from the
  * ledger (`review.posted` / `fix.review` lines carry `unmet_criteria` + `reasons`).
  * No PR-head checkout needed just to ROUTE the disposition — the fix rung itself
@@ -13832,13 +13874,13 @@ export function buildOpenPrViews(
   // supersededBy: the HIGHEST-numbered other open PR crediting the same task.
   const byTask = new Map<string, number[]>();
   for (const pr of raw) {
-    const t = taskIdFromBody(pr.body ?? "");
+    const t = resolveOpenPrTaskId(pr, ledger);
     if (!t) continue;
     (byTask.get(t) ?? byTask.set(t, []).get(t)!).push(pr.number);
   }
 
   return raw.map((pr) => {
-    const taskId = taskIdFromBody(pr.body ?? "");
+    const taskId = resolveOpenPrTaskId(pr, ledger);
     const peers = taskId ? (byTask.get(taskId) ?? []) : [];
     const newest = peers.length ? Math.max(...peers) : pr.number;
     const supersededBy = newest > pr.number ? newest : undefined;
