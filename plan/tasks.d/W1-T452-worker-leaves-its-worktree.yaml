@@ -20,6 +20,14 @@
     no longer an ancestor of origin/main — DIVERGED, which is what a branch IS. The commits are the
     only real damage: `git commit` run while `cd`-ed into the checkout lands there. The tooling
     excursions are legitimate validation.
+    REPRODUCED LIVE, NOT ONLY DERIVED FROM THE SOURCE — in a linked worktree at 329d22b:
+    `rmd has diverged from origin/main (329d22b vs ab85e66) -- not a fast-forward, refusing to
+    auto-sync`, EXIT 1. TWO CONTROLS ON THE IDENTICAL COMMAND both passed: `RMD_SELF_SYNC_DONE=1`
+    and `CI=1`. That pair is what makes the diagnosis discriminating rather than merely consistent —
+    it isolates the refusal to the freshness guard, and it is the same `isCiEnv` short-circuit the
+    `/app` paragraph below turns on. The excursion is therefore LEGITIMATE VALIDATION
+    (check-proof, preflight --ci-parity, review, gh pr create) reaching for the only place those
+    verbs still run.
     THE `/app` HYPOTHESIS IS FALSIFIED, AND THAT IS THE FINDING THAT CHANGES THE FIX. The live
     fix-rung worker was observed running `CI=true /app/bin/rmd preflight --ci-parity` — the BAKED
     IMAGE copy, which `verify-image.sh` records as having no `.git`. The proposal was that a missing
@@ -79,7 +87,15 @@
     The remaining candidates are that it ran every verb under `CI=true`, or that it committed before
     invoking any refusing verb. Establishing which needs that run's transcript, which this shard does
     not have. NAMED UNRESOLVED DELIBERATELY: a fix argued from a wrong explanation of the one success
-    would be worse than one argued from the fourteen failures."
+    would be worse than one argued from the fourteen failures.
+    ONE PIECE OF EVIDENCE LEANS TOWARD THE ORDERING CANDIDATE, AND IT IS CIRCUMSTANTIAL — say so when
+    citing it. The mechanism predicts the refusal fires only AFTER the first commit, so a worker that
+    runs its gates BEFORE committing never meets it, and such a run should show a THINNER envelope
+    because it re-runs fewer local gates. #1695's envelope is consistent with that: 111 turns /
+    $7.68, against W1-T404's 228 turns / $27.71. THIS IS A CORRELATION OVER n=1 PER SIDE and envelope
+    size has many other causes (task difficulty above all), so it CANNOT settle the question — it only
+    says which candidate to test first if the transcript becomes reachable. Do not promote it to a
+    finding, and do not let it substitute for the transcript."
   acceptance:
     - claim: "a worker running a verb inside its worktree is not refused, so it never has to leave"
       proof: "unit test: test/worktree-verb-containment.test.ts"
