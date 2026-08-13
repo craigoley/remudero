@@ -1,0 +1,104 @@
+- id: W1-T469
+  title: "an idle-gated rung leaves NO trace on a busy tick — auto-triage's skip is logged only when the daemon was already idle, so the 1,214-row skip population is CONDITIONED and every conclusion drawn from it is biased toward the gates that fire late in the chain"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: "THE RUNG IS NOT THROTTLED WHEN THE FLEET IS BUSY. IT IS NEVER CONSULTED, AND IT SAYS
+    NOTHING ABOUT IT. RE-DERIVED on the MINI's corpus at 592beb65 (live 1 file / 3,894 rows; plain 4 /
+    64,663; gz 666 / 4,257,015; positive control `sweep.pass` = 1,897). THE MINI IS THE ONLY CORPUS
+    CITED HERE — there is NO SSH route between the mini and Azure (publickey/password denied, no SSH
+    config), so nothing below is a claim about the Azure fleet, which runs three lanes.
+    THE CHAIN AND THE HOLE. `decideAutoTriage` (`src/lib/auto-triage.ts`) gates in order: enabled ->
+    idle -> lockHeld -> marker -> interval -> maxPerDay -> candidates. The reason string
+    `daemon is not idle` EXISTS in that file (measured: 1 occurrence) and appears **0 TIMES IN 1,214
+    DISTINCT `auto_triage.skipped` ROWS** — positive control on the same rows, same tool: `cap` matches
+    666. `src/lib/daemon.ts` says why in its own comment: the rung is **`Placed HERE, inside the idle
+    branch`**. So `if (!i.idle)` IS UNREACHABLE FROM THE DAEMON PATH and a busy tick logs NOTHING AT
+    ALL — not a skip, not a reason, not a row.
+    PROOF BY A WHOLE DAY: **2026-08-05 — `daemon.start` = 43, `daemon.idle` = 0, auto-triage rows = 0.**
+    The daemon ran all day and the rung was never consulted, leaving no trace that it had not been.
+    AND THE LOGGED POPULATION IS EXACTLY ONE DECISION PER IDLE TICK, which is what makes the omission
+    provable rather than suspected. `idle ticks == skips + fires`, re-derived on SIX days:
+      Aug 2  796 == 786 + 10      Aug 3   69 ==  50 + 19      Aug 4  23 == 19 + 4
+      Aug 6  105 == 100 +  5      Aug 12  20 ==  17 +  3      Aug 5   0 ==   0 + 0
+    SO THE SKIP DISTRIBUTION IS A SAMPLE CONDITIONED ON IDLENESS, and any ranking of `what stops the
+    rung` computed from it silently omits the gate that stops it most: never being asked."
+  design: "(i) THE CAP HYPOTHESIS IS DEAD AND IS RECORDED HERE SO IT IS NOT PROPOSED AGAIN. It looks
+    alive in the aggregate and is not. MEASURED, by day:
+      **ALL 654 `daily cap reached (4/4)` SKIPS ARE FROM 2026-08-02 ALONE**, under the RETIRED 4/day
+      cap. The current 24/day cap has bound **12 times in its life, ALL on 2026-08-03**.
+      **SINCE 2026-08-04 THE ONLY SKIP REASON IS THE ADAPTIVE INTERVAL** — 136 rows, cap 0,
+      disabled 0, fixed-minInterval 0.
+    **SO RAISING THE CAP CHANGES NOTHING.** Say it plainly to anyone who proposes it.
+    (ii) AND THE INTERVAL IS DELIBERATE, NOT ACCIDENTAL — the second thing a reader will want to
+    `fix`. `effectiveIntervalMinutes` (`src/lib/auto-triage.ts`) LENGTHENS toward `maxIntervalMinutes`
+    as TASK-QUEUE depth rises (`queue full — no rush`), and `depth` is the runnable-soon TASK backlog,
+    NOT feedback depth. The curve solves from the reason strings alone — `interval 51.0m at depth 8`
+    and `55.5m at depth 9` give 15 + t*45 with t = 0.8 and 0.9, hence span 10, hence **depthFloor 0,
+    depthCeiling 10, min 15m, max 60m**; `60.0m at depth 17` is the pin above the ceiling. Working as
+    designed.
+    (iii) THE SCOPE OF THE CLASS, MEASURED RATHER THAN ASSUMED — and it is NARROWER than `every idle
+    rung`, which matters because overstating it would invite a sweeping change. Inside `daemon.ts`'s
+    idle branch the only work-generating rung is auto-triage (`deps.checkAutoTriage` /
+    `deps.runAutoTriage`, with `deps.isFeedbackOpenPr` / `deps.readFeedbackLiveState` as its own
+    helpers). The RETRO rung fires on CADENCE, not idle — `auto-triage.ts` says so itself, calling
+    itself `the first that fires on IDLE rather than on CADENCE`.
+    (iv) THE NEAR NEIGHBOUR IS THE SAME HAZARD ALREADY SOLVED ONCE, AND THAT IS THE STRONGEST ARGUMENT
+    THIS SHARD HAS. `daemonIsIdle` (`src/lib/deployer.ts`) is a DIFFERENT gate — it conjoins GLOBAL
+    fleet counters (`workers === 0 && inflightLocks === 0 && worktreeLocks === 0`) for the DEPLOY
+    supervisor. W1-T341 gave that gate a ceiling (`DEPLOY_IDLE_DEFER_CEILING_MS`) which forces the
+    deploy through after 30 minutes AND LEDGERS IT AS FORCED. So the deploy path can no longer wait
+    silently — and auto-triage still can. The hazard was recognised and bounded in one place and not
+    the other; this shard is not re-filing W1-T341, it is naming the place its lesson was not applied.
+    (v) DIRECTION OF TRAVEL, and why this gets worse rather than better: more lanes mean less idle, so
+    every idle-gated rung goes quieter exactly as the fleet gets busier. A session measured
+    `daemonIsIdle` NEVER TRUE across 32 continuous minutes at TWO lanes; the fleet now runs THREE.
+    (vi) NOT IN SCOPE, DELIBERATELY. Whether the gate should move, or whether a busy tick should log
+    its skip, is the operator's call and a later shard's. Both are real options with different costs
+    and this shard takes neither."
+  acceptance:
+    - claim: "a tick on which the rung was never consulted is distinguishable from one that considered it and declined"
+      proof: "unit test: test/auto-triage-rung.test.ts"
+    - claim: "the one-decision-per-idle-tick identity still holds, so no idle tick records its outcome twice"
+      proof: "unit test: test/auto-triage-rung.test.ts"
+    - claim: "the set of rungs sitting behind the same idle gate is enumerated rather than assumed"
+      proof: "unit test: test/auto-triage-wiring.test.ts"
+  origin: recon#idle-gated-rung-invisible-2026-08-13
+  plan_refs: ["W1-T341", "W1-T318"]
+  files: [src/lib/daemon.ts, src/lib/auto-triage.ts, test/auto-triage-rung.test.ts, test/auto-triage-wiring.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT — the band is Rule 19's SPAN across `src/lib/daemon.ts` and
+    `src/lib/auto-triage.ts` plus their suites, not blast radius; `sizingViolation`
+    (`src/lib/task-linter.ts`) refuses `medium` at two subsystems. `verify: human` because BOTH
+    candidate directions in design (vi) need a ruling this shard must not pre-empt.
+    `files:` WAS DERIVED BY INVOCATION COUNT, NOT PROSE MENTION. Measured at 592beb65:
+    `test/auto-triage-rung.test.ts` 13 invocations / 16 mentions and it asserts the
+    `auto_triage.skipped` STEP twice; `test/auto-triage-wiring.test.ts` 0 invocations / 8 mentions but
+    it is the REACHABILITY suite (it captures `DaemonDeps` and asserts `checkAutoTriage` is wired).
+    DELIBERATELY EXCLUDED: `test/triage-inflight-dedup.test.ts` (5 invocations),
+    `test/auto-triage-daily-cap.test.ts` (2) and `test/auto-triage-policy-seam.test.ts` (3) assert
+    dedup, cap and policy behaviour — none asserts PLACEMENT. DROP ANY DECLARED PATH THE
+    IMPLEMENTATION DOES NOT TOUCH.
+    AND THE PLACEMENT IS ASSERTED BY NOTHING TODAY: zero test files match `idle branch` or
+    `inside the idle`, against a positive control of 54 test files mentioning `idle` at all. The line
+    that makes the rung silent is load-bearing and unguarded.
+    WHAT THIS SHARD MUST NOT BE USED TO ARGUE — the queue is a STANDING POOL, NOT A RISING TIDE.
+    Intake is bursty and HAS STOPPED: 20+27 on Jul 22-23, 46 across Aug 3-5, then 2, 2, 2, 1 on
+    Aug 7-11, and NOTHING SINCE 2026-08-11. That removes the urgency argument without making the pool
+    cheap. The pool is real: 88 `status: new` of 147, 123 of them `origin: cli` operator captures, and
+    yield over the 57 decided entries is 25 accepted (43.9%) / 32 rejected (56.1%) — roughly a
+    coin-flip, NOT `mostly already decided`. Draining costs: 73 `triage.synthesized` rows, total
+    $78.17, mean $1.07, median $1.02, max $2.86, all Opus — so 88 entries is about $94 at the mean and
+    ~$252 worst case. Cost per SURVIVING task is $3.72, because 47 mint events produced only 21
+    distinct `minted_id`s (RETRY CHURN — W1-T388 and W1-T298 each minted five times).
+    TWO RETRACTED METRICS, CARRIED AS WARNINGS BECAUSE BOTH LOOKED SOUND. (1) `17 of 25 accepted
+    entries mention a W1-T id` is NOT yield — it measured OPERATOR PROSE, and the control killed it:
+    63% of UNTRIAGED entries mention one too. (2) A first `minted_id` sweep returned a FALSE ZERO
+    because `task_id` on those rows holds the TRIAGE RUN id (`TRIAGE-fb-…`), with the task in
+    `minted_id`; checking the row's keys caught it. Both are the query-shape false-zero class this
+    repo has now measured ten times this week."
