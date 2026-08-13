@@ -13,7 +13,10 @@ import { execFileSync } from "node:child_process";
 // observes it — the same guarantee {@link LedgerFsDeps} gives a caller that injects
 // its own fake, extended to a caller that only has the real `node:fs` module to spy on.
 import fs from "node:fs";
+import { readdirSync as nodeReaddirSync, readFileSync as nodeReadFileSync } from "node:fs";
+import { gunzipSync as nodeGunzipSync } from "node:zlib";
 import { dirname } from "node:path";
+import { ledgerRotationEntries } from "./ledger-grep.js";
 import type { Plan, Task, TaskStatus } from "./plan.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { labelledIssuesRestArgs, NEEDS_HUMAN_LABEL, parseLabelledIssuesRest } from "./escalate.js";
@@ -692,6 +695,100 @@ function withReadMeta(out: Array<Record<string, unknown>>, torn: number, present
  * leaving the breaker tripped) or a torn `run.start` (undercounting toward it) both need to
  * be visible, not silently absorbed into an empty record no consumer could distinguish from
  * a genuinely uneventful line. */
+/**
+ * How many dated rotations {@link readLedgerUnionBounded} will open before giving up, newest first.
+ *
+ * MEASURED on the live host (669 rotations): the live file plus the NINE newest rotations contained
+ * at least one row of every step the status board reads, and parsing that set cost 0.23s / 0.11 GiB.
+ * The full union costs 7.74s / 2.57 GiB through `rmd emissions` — the price this cap exists to
+ * refuse. 24 is that measured 9 with headroom for a busier day, and reading all 24 was measured at
+ * 0.21s, so the cap is cheap even when the early exit never fires.
+ */
+export const STATUS_BOARD_MAX_ROTATIONS = 24;
+
+/**
+ * The ledger union a RENDERING surface needs: the live file plus dated rotations, NEWEST FIRST,
+ * stopping as soon as `satisfied` is met or {@link STATUS_BOARD_MAX_ROTATIONS} files are open.
+ *
+ * WHY THE BOARD CANNOT USE {@link readLedgerLines}: that opens exactly ONE path. `rotateLedger`
+ * keeps only `MAX_RETAINED_LINES_PER_STEP` per step and only for steps in a retention set, so a
+ * step in NO set is shed COMPLETELY and the live file can never hold one. MEASURED: `daemon.summary`
+ * had **0 live rows against 524 in rotations** — which is why `rmd status` reported `no cycle
+ * recorded` on a host with 524 recorded cycles.
+ *
+ * IT RETURNS EVERY LINE IT READ, UNFILTERED, and that is deliberate rather than lazy. The board
+ * matches `deploy.` BY PREFIX (`step.startsWith("deploy.")` in status-board.ts), so a reader that
+ * filtered to an exact step list would silently drop the supervisor-tick rung. Returning whole files
+ * keeps every consumer's own matching intact.
+ *
+ * THE EARLY EXIT IS THE POINT AND THE CAP IS ITS BACKSTOP. Every rung this serves reads the NEWEST
+ * row of a step, never a count, so stopping early cannot under-count anything. The cap protects the
+ * other direction: a step that is never found would otherwise walk all 669 files and pay the full
+ * union price.
+ */
+export function readLedgerUnionBounded(
+  path: string,
+  opts: {
+    satisfied?: (stepsSeen: ReadonlySet<string>) => boolean;
+    maxRotations?: number;
+    ledgerFs?: LedgerFsDeps;
+    readdirSync?: (dir: string) => string[];
+    gunzipSync?: (buf: Buffer) => Buffer;
+    readFileBuffer?: (p: string) => Buffer;
+  } = {},
+): LedgerLines {
+  const ledgerFs = opts.ledgerFs ?? realLedgerFs;
+  const live = readLedgerLines(path, ledgerFs);
+  const satisfied = opts.satisfied;
+  // O(1) per line, accumulated ONCE. An earlier revision handed the whole growing array to the
+  // predicate on every rotation, which re-scanned 173k lines nine times and cost ~2s of board wall
+  // time — a bounded read is only cheap if the stop test is cheap too.
+  const stepsSeen = new Set<string>();
+  for (const l of live) {
+    const s0 = l.step;
+    if (typeof s0 === "string") stepsSeen.add(s0);
+  }
+  if (satisfied?.(stepsSeen)) return live;
+
+  const stateDir = dirname(path);
+  let names: string[];
+  try {
+    names = (opts.readdirSync ?? nodeReaddirSync)(stateDir);
+  } catch {
+    return live; // an unreadable state dir degrades to exactly today's answer, never to a throw
+  }
+  // NEWEST FIRST. The rotation stamp is an ISO instant, so a descending lexicographic sort IS
+  // chronological — the same property `rmd ledger-grep`'s own sort relies on.
+  const rotations = ledgerRotationEntries(names, stateDir).sort((a, b) => (a.path < b.path ? 1 : a.path > b.path ? -1 : 0));
+
+  const out: Array<Record<string, unknown>> = [...live];
+  let torn = live.torn ?? 0;
+  const cap = opts.maxRotations ?? STATUS_BOARD_MAX_ROTATIONS;
+  for (const entry of rotations.slice(0, cap)) {
+    let text: string;
+    try {
+      const buf = (opts.readFileBuffer ?? ((p: string) => nodeReadFileSync(p)))(entry.path);
+      text = (entry.form === "gzip" ? (opts.gunzipSync ?? nodeGunzipSync)(buf) : buf).toString("utf8");
+    } catch {
+      continue; // a corrupt rotation is skipped, never fatal — the live answer still renders
+    }
+    for (const raw of text.split("\n")) {
+      const l = raw.trim();
+      if (!l) continue;
+      try {
+        const parsed = JSON.parse(l) as Record<string, unknown>;
+        out.push(parsed);
+        const s1 = parsed.step;
+        if (typeof s1 === "string") stepsSeen.add(s1);
+      } catch {
+        torn++;
+      }
+    }
+    if (satisfied?.(stepsSeen)) break;
+  }
+  return withReadMeta(out, torn, live.present);
+}
+
 export function readLedgerLines(path: string, ledgerFs: LedgerFsDeps = realLedgerFs): LedgerLines {
   const out: Array<Record<string, unknown>> = [];
   // `present: false` is the whole point of this early return carrying metadata at all — see

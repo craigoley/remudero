@@ -89,6 +89,7 @@ import {
   type GitHub,
   type LedgerReader,
   type StatusProjection,
+  readLedgerUnionBounded,
 } from "./status.js";
 import { taskCardRuns } from "./task-card.js";
 
@@ -1358,7 +1359,24 @@ const HEADROOM_NEXT_ACTIONS: readonly NextActionRule<HeadroomSection>[] = [
 export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusBoardDeps): StatusBoardModel {
   const now = deps.now ?? Date.now;
   const nowMs = now();
-  const readLedger = deps.readLedger ?? readLedgerLines;
+  // W1: THE BOARD MUST READ ROTATIONS, NOT ONE FILE. `readLedgerLines` opens exactly one path, and
+  // `rotateLedger` sheds a step COMPLETELY when it is in no retention set — MEASURED, `daemon.summary`
+  // had 0 live rows against 524 in rotations, which is why LAST CLOSED CYCLE rendered
+  // `no cycle recorded` on a host with 524 recorded cycles.
+  //
+  // THE PREDICATE NAMES ONLY THE STEPS THAT ARE ACTUALLY SHED. Six of the board's steps are present
+  // in the live file, so they need no rotation at all; these three are the measured blind set, and
+  // every rung reading them takes the NEWEST row rather than a count, so stopping early is exact
+  // rather than approximate.
+  const readLedger =
+    deps.readLedger ??
+    ((ledgerPath: string) =>
+      readLedgerUnionBounded(ledgerPath, {
+        satisfied: (stepsSeen) =>
+          stepsSeen.has("daemon.summary") &&
+          stepsSeen.has("daemon.headroom.degraded") &&
+          stepsSeen.has("dispatch.indeterminate"),
+      }));
   const resolveOriginMainSha = deps.resolveOriginMainSha ?? defaultResolveOriginMainSha;
   const crashLoopWindow = deps.crashLoopWindow ?? DEFAULT_CRASHLOOP_WINDOW;
   const isPidAlive = deps.isPidAlive ?? defaultIsPidAlive;
