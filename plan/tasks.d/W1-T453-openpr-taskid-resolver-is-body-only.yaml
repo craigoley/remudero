@@ -1,0 +1,110 @@
+- id: W1-T453
+  title: "buildOpenPrViews resolves a PR's task id from the BODY TRAILER ALONE, so a fleet-built PR on a run-<taskId>-<epoch> branch with no trailer can never arm and reports its own criteria unrecoverable — one four-line resolver, two symptoms diagnosed apart three times"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  rationale: "RE-DERIVED AT f5cf2d95. The whole defect is four lines in `src/run-task.ts`:
+      buildOpenPrViews:  const taskId = taskIdFromBody(pr.body ?? \"\");
+      taskIdFromBody:    const m = body.match(/^Remudero-Task:\\s*(\\S+)\\s*$/m); return m ? m[1] : undefined;
+    `headRefName` is assigned into the SAME returned object a few fields later and is never consulted
+    for identity. The fleet already knows how to read a run branch — `/^run-(.+)-\\d+$/` appears TWICE
+    in `projectPlan` (`src/lib/status.ts`), plus `^run-<taskId>-\\d+$` forms in `ownsBranch`
+    (status.ts) and `fixHeadAcceptable` (run-task.ts). `buildOpenPrViews` simply does not.
+    TWO SYMPTOMS, ONE LINE, AND THEY HAVE BEEN DIAGNOSED SEPARATELY THREE TIMES.
+    (1) ARMING. `armAutoMerge` receives `pr.taskId` from this view and its `!taskId` branch emits
+    `automerge.ledger_refused (W1-T230): no task id resolvable for this PR — arming withheld`.
+    OBSERVED SIX TIMES on PR #1722 in one log tail. That PR was BUILT AND REVIEWED BY THE FLEET —
+    `remudero-review: PASS — 3 criteria substantiated, no test theater, proof_exec 3/3` — and it
+    CANNOT ARM. Its head is `run-W1-T451-1786622432602`, which every other resolver would match.
+    (2) DISPOSITION. `criteriaRecoverable: taskId !== undefined` is set from the SAME `taskId`, and
+    `runSweep` renders it as `review failing — criteria unrecoverable (no Remudero-Task: trailer to
+    resolve them from)`. On #1714 and #1715 that line CONTRADICTED the reviewer's own verdict, which
+    had resolved the criteria from the PR body's `## Acceptance` block and named the failing test.
+    THE CONTRADICTION CAUSED TWO WRONG DIAGNOSES: the trailer was blamed for a proof-execution
+    failure it had nothing to do with. Both lines were true; they answer different questions from
+    different code, and only this resolver makes them look like one.
+    THE BACKOFF IS A SEPARATE CONCERN AND IS DELIBERATELY NOT THIS TASK — see design (iv)."
+  design: "(i) REUSE, DO NOT WRITE A FIFTH REGEX. This repo has measured what a second spelling costs:
+    two hand-maintained copies of `what a merge credit looks like` once let a back-credited task stay
+    circuit-broken. THE HONEST STATE OF THE REUSE CANDIDATES, established rather than assumed:
+      `isDispatchedRunBranch` (run-task.ts) IS EXPORTED but returns a BOOLEAN — `/^run-.+-\\d+$/`,
+      the SHAPE test, with no capture group. It answers `is this a run branch`, not `whose`.
+      `projectPlan`'s `/^run-(.+)-\\d+$/` (status.ts, twice) EXTRACTS the id but is INLINE and
+      UNEXPORTED, and it is duplicated within that one function.
+      `ownsBranch` (status.ts) is `^run-<taskId>-\\d+$` — it VERIFIES a known id, so it cannot
+      discover one.
+    SO THERE IS AN EXPORTED SHAPE TEST AND NO EXPORTED EXTRACTOR. The narrow move is to lift
+    `projectPlan`'s inline regex into ONE named exported helper and have all three call sites use it —
+    which also de-duplicates the pair already inside `projectPlan`. Writing a new regex in
+    `buildOpenPrViews` would make it the FIFTH spelling and is the option to reject.
+    (ii) PRECEDENCE MUST BE DECIDED, NOT DEFAULTED, BECAUSE BOTH PATHS ARE LOAD-BEARING. A recon
+    measured that #1657 carries ZERO `Remudero-Task:` lines and is credited ONLY by its branch name,
+    so head-ref cannot be a mere tiebreak; and the trailer is the only signal for a PR whose branch is
+    not run-shaped. RECOMMENDATION: TRAILER FIRST, head-ref as a FALLBACK when the trailer is absent —
+    because the trailer is written deliberately by an author while a branch name is minted by
+    `worktreeAdd`, so on a genuine disagreement the explicit statement should win.
+    ESTABLISH WHAT HAPPENS WHEN THEY DISAGREE rather than assuming it cannot: a worker that opens a PR
+    for task A from a worktree cut for task B produces exactly that, and the answer must be recorded
+    (prefer the trailer, and ledger the disagreement so it is observable) rather than silently
+    resolved.
+    (iii) THE FILING EXCEPTION IS THE TRAP THAT WOULD MAKE THIS WORSE THAN THE DEFECT. #1527 removed
+    the `Remudero-Task:` trailer from FILING PRs deliberately, because it credited a task as
+    IMPLEMENTED on merge. A head-ref fallback must not re-introduce that by the back door.
+    MEASURED at 2026-08-13 over the newest 100 closed PRs: 9 merged filings, and ZERO have a
+    `run-*` head — they use `plan/file-*`, `file-*` and `chore/file-*`. The structural reason is that
+    `run-<taskId>-<epochMs>` is minted by `worktreeAdd` for a DISPATCHED task, while a filing is
+    authored on a descriptive branch.
+    THE RESIDUAL HOLE IS REAL AND MUST BE HANDLED, NOT WAVED PAST: a DISPATCHED worker that files a
+    NEW task would be sitting on a `run-*` branch, and its filing PR would then head-ref-resolve to
+    the task it was dispatched for — crediting THAT task as implemented by a plan-only diff. Establish
+    whether the credit path is reachable from a plan-only diff at all (`isInPlanScope`, review.ts) and
+    gate on it if so. A test for this case is mandatory.
+    (iv) THE MISSING BACKOFF IS NOT IN SCOPE, AND ESTABLISHING WHY IS PART OF THIS TASK. The refusal
+    re-evaluates every sweep pass forever while its siblings are bounded (`dispatchesWithoutNewOwnedPr`
+    at 5, `strikeCap` at 2, the retro's `maxPerDay`). BUT IT IS CHEAP: `armAutoMerge`'s `!taskId`
+    branch returns BEFORE `deps.headSha(prUrl)`, so a refusal performs ZERO GitHub requests and costs
+    one `automerge.arm_skipped` row. AND THE VOCABULARY ALREADY DISTINGUISHES THE KINDS —
+    `arm-error-ignored` (98 rows, `treated as transient and left for the next sweep pass`) is
+    CORRECTLY retried forever because its input can change, while `no-task-id` is a read that
+    SUCCEEDED AND SAID NO.
+    WHOEVER BUILDS THIS MUST MEASURE THE REMAINING UNRESOLVABLE POPULATION AFTER THE FALLBACK LANDS.
+    If head-ref resolution empties it, a bound would be a fifth instance of this repo's
+    bound-fires-on-a-healthy-condition class and MUST NOT be added. File the backoff separately ONLY
+    if a non-empty population survives, and say what it is."
+  acceptance:
+    - claim: "a PR whose head is a run branch and whose body carries no trailer resolves its task id"
+      proof: "unit test: test/openpr-taskid-resolver.test.ts"
+    - claim: "a PR whose body carries a trailer keeps resolving from the trailer when the two disagree"
+      proof: "unit test: test/openpr-taskid-resolver.test.ts"
+    - claim: "a plan-only filing PR on a run branch does not resolve a task id it would credit"
+      proof: "unit test: test/openpr-taskid-resolver.test.ts"
+  risk: high
+  origin: recon#arm-refusal-no-backoff-2026-08-13
+  plan_refs: ["W1-T230", "W1-T449"]
+  files: [src/run-task.ts, src/lib/status.ts, test/openpr-taskid-resolver.test.ts, test/sweep.test.ts, test/status.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — every open question here has a derivable answer. The one judgement call is
+    precedence, and design (ii) states a recommendation with its reason rather than parking it.
+    `files:` WAS DERIVED FROM THE GATES, NOT FROM THE CODE THE AUTHOR PICTURES — this week's lesson
+    after SEVEN corrections. `src/lib/status.ts` is declared because design (i) lifts `projectPlan`'s
+    inline regex into an exported helper there; `src/run-task.ts` because `buildOpenPrViews` and
+    `isDispatchedRunBranch` both live there.
+    THE DECLARED SUITES WERE MEASURED BY INVOCATION, NOT PROSE MENTION. `test/sweep.test.ts` is the
+    suite that moves when an `OpenPrView` field changes shape — it builds those views by hand
+    throughout. `test/status.test.ts` is declared because `projectPlan`'s attribution is asserted
+    there and lifting its regex changes the shape it tests. WHOEVER BUILDS THIS SHOULD RE-COUNT both
+    by invocation before trusting this list, and DROP any path the implementation does not touch:
+    `inverseScopeUntouchedFiles` (`src/lib/review.ts`) fails a declared-but-untouched path just as
+    `scopeViolationFiles` fails an undeclared one.
+    RULE 19: `risk: high` set UP FRONT so `sizingViolation` (`src/lib/task-linter.ts`) returns early
+    before `subsystemsOf` is consulted — the band is the SPAN across `src/` and `test/`, not blast
+    radius. The blast radius is one resolver and one lifted regex.
+    RULE 25: no instrument entanglement — `run-task.ts` and `status.ts` are product paths and nothing
+    here touches `INSTRUMENT_SURFACE`.
+    NO NUMBER HERE SHOULD BE QUOTED FORWARD: the 9-filings/0-run-heads sample, the 98
+    `arm-error-ignored` rows and #1722's state were true at 2026-08-13T13:00Z. Re-derive — especially
+    the filing-head sample, which is the evidence the whole safety argument in (iii) rests on."
