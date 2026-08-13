@@ -637,6 +637,55 @@ test("buildStatusBoard: QUEUE HEAD — a task with only ONE dispatch is NOT flag
   assert.equal(row!.observedPerCycleCostUsd, undefined);
 });
 
+// ── W1-T450: QUEUE HEAD's candidate list renders identically whether it is about to dispatch or
+// has been sitting untouched — the rung compares `rows` against the newest `run.start` seen
+// ANYWHERE (task-id-agnostic, like `distinctDispatchedTaskIds`), against a bound derived from
+// THIS HOST'S OWN observed dispatch cadence, never a guessed constant (design (iii)) ───────────
+
+test("buildStatusBoard: QUEUE HEAD — a non-empty candidate list with no run.start newer than the observed-cadence bound renders a STALL, naming the candidate count and how long it has been quiet", () => {
+  const ledgerPath = writeLedger([
+    // Three dispatches of a DIFFERENT task, 5 minutes apart — "nothing dispatched" means no task
+    // anywhere, not just today's own candidate, so this is deliberately task-id-agnostic.
+    ledgerLine({ step: "run.start", task_id: "OTHER-TASK", run_id: "R1", ts: "2026-08-01T10:00:00.000Z" }),
+    ledgerLine({ step: "run.start", task_id: "OTHER-TASK", run_id: "R2", ts: "2026-08-01T10:05:00.000Z" }),
+    ledgerLine({ step: "run.start", task_id: "OTHER-TASK", run_id: "R3", ts: "2026-08-01T10:10:00.000Z" }),
+  ]);
+
+  const model = buildStatusBoard(tmpRoot(), ledgerPath, baseDeps({ plan: plan(), github: fakeGithub() }));
+
+  assert.equal(model.queueHead.rows.length, 1, "the fixture plan's own W1-T910 must still be the sole candidate");
+  const stall = model.queueHead.stall;
+  assert.ok(stall, "1h50m of silence past a 15-minute bound (3x the 5-minute worst observed gap) must render a stall");
+  assert.equal(stall!.candidateCount, 1);
+  assert.equal(stall!.lastDispatchTs, "2026-08-01T10:10:00.000Z");
+  assert.equal(stall!.sinceMs, NOW_MS - Date.parse("2026-08-01T10:10:00.000Z"));
+  assert.equal(stall!.boundMs, 5 * 60_000 * 3); // 3x the 5-minute worst observed gap
+  assert.match(stall!.boundDerivation, /3x/);
+  assert.match(stall!.boundDerivation, /5m/);
+
+  assert.match(model.queueHead.nextAction ?? "", /1 candidate/);
+  assert.match(model.queueHead.nextAction ?? "", /nothing has dispatched/);
+
+  const text = renderStatusBoardText(model);
+  assert.match(text, /STALL: 1 candidate\(s\), nothing dispatched in 1h50m/);
+});
+
+test("buildStatusBoard: QUEUE HEAD — a non-empty candidate list with a run.start INSIDE the observed-cadence bound renders no stall — a fleet about to dispatch must not be misread as one that has stopped", () => {
+  const ledgerPath = writeLedger([
+    ledgerLine({ step: "run.start", task_id: "OTHER-TASK", run_id: "R1", ts: "2026-08-01T10:00:00.000Z" }),
+    ledgerLine({ step: "run.start", task_id: "OTHER-TASK", run_id: "R2", ts: "2026-08-01T10:05:00.000Z" }),
+    // Newest dispatch just 2 minutes ago — well inside the 15-minute bound the 5-minute worst
+    // gap above licenses.
+    ledgerLine({ step: "run.start", task_id: "OTHER-TASK", run_id: "R3", ts: new Date(NOW_MS - 2 * 60_000).toISOString() }),
+  ]);
+
+  const model = buildStatusBoard(tmpRoot(), ledgerPath, baseDeps({ plan: plan(), github: fakeGithub() }));
+
+  assert.equal(model.queueHead.rows.length, 1);
+  assert.equal(model.queueHead.stall, undefined);
+  assert.doesNotMatch(renderStatusBoardText(model), /STALL/);
+});
+
 // ── ACCEPTANCE 3: a blocked item whose reason the system never named renders as "reason not
 // named" rather than blank, and no blocker class is minted here that the named-reason
 // vocabulary (sweep.ts's own `disposition`) does not already carry ────────────────────────────

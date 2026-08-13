@@ -336,7 +336,41 @@ export interface QueueHeadSection {
   /** Present when dispatch eligibility (merge state) could not be resolved — no reachable
    *  GitHub gateway, so nothing here would be trustworthy enough to print as "next up". */
   unknownReason?: string;
+  /**
+   * W1-T450: `rows` naming ELIGIBLE candidates renders identically whether they are about to
+   * dispatch or have been sitting untouched for an hour — a daemon failing every pass looks
+   * calm. Present ONLY when `rows` is non-empty AND the newest `run.start` already read (across
+   * ANY task, not just these candidates) is older than {@link QueueHeadStall.boundMs}.
+   *
+   * SILENT, NOT JUST ABSENT, IN THE OTHER TWO CASES. An EMPTY queue never gets a `stall` —
+   * `nothing dispatchable` is the honest idle state this defect is not (design (i)). An
+   * UNREADABLE cadence — no ledger, no parseable `run.start`, or fewer than two dispatches ever
+   * recorded to learn a gap from — also never gets one: an unknown answer must not render as a
+   * finding (design (iv)).
+   */
+  stall?: QueueHeadStall;
   nextAction?: string;
+}
+
+/**
+ * Names both halves of the stall (design (i)): how many candidates, and how long since anything
+ * dispatched. NOT A GATE (design (ii)) — this only ever backs a rendered line and a next
+ * action; nothing reading it may block or refuse a dispatch.
+ */
+export interface QueueHeadStall {
+  /** `rows.length` at render time — repeated here so the rendered line is self-contained. */
+  candidateCount: number;
+  /** `now - lastDispatchTs`, clamped to >= 0. */
+  sinceMs: number;
+  /** The newest `run.start` line's own `ts`, across every task — task-id-agnostic like {@link
+   *  distinctDispatchedTaskIds}: "nothing dispatched" means no task anywhere, not just one of
+   *  today's candidates. */
+  lastDispatchTs: string;
+  /** The staleness bound THIS HOST'S OWN observed dispatch cadence licenses (design (iii)) —
+   *  never a guessed round figure. See {@link boundDerivation} for how it was computed. */
+  boundMs: number;
+  /** States the derivation beside the constant, so an operator never has to trust a bare number. */
+  boundDerivation: string;
 }
 
 // ── INBOX (W1-T280) — ready/not-ready COUNTS from inbox.ts's own InboxState; `rmd inbox`
@@ -964,6 +998,62 @@ function distinctDispatchedTaskIds(lines: Array<Record<string, unknown>>): strin
   return [...ids];
 }
 
+/** Every `run.start` line's own `ts`, oldest first — the SAME task-id-agnostic scan {@link
+ *  distinctDispatchedTaskIds} already makes over the identical step, kept rather than discarded
+ *  (W1-T450's rationale: "it collects ids and DISCARDS the timestamps"). A line with no `ts`, or
+ *  one that doesn't parse, is skipped rather than counted — an unreadable row must not corrupt a
+ *  derived cadence. */
+function dispatchRunStarts(lines: Array<Record<string, unknown>>): Array<{ ts: string; parsed: number }> {
+  const out: Array<{ ts: string; parsed: number }> = [];
+  for (const line of lines) {
+    if (line.step !== "run.start") continue;
+    const ts = typeof line.ts === "string" ? line.ts : undefined;
+    const parsed = ts !== undefined ? Date.parse(ts) : NaN;
+    if (ts !== undefined && Number.isFinite(parsed)) out.push({ ts, parsed });
+  }
+  out.sort((a, b) => a.parsed - b.parsed);
+  return out;
+}
+
+/** How much this module multiplies the longest OBSERVED inter-dispatch gap by to get the
+ *  QUEUE-HEAD staleness bound (design (iii)) — mirrors this file's own precedent for the
+ *  identical shape of problem: {@link SUPERVISOR_TICK_OVERDUE_MS} multiplies its installed
+ *  interval by the same factor so one or two slow ticks don't false-positive. A fleet
+ *  legitimately goes quiet during one long single run; 3x the worst gap this host has ever
+ *  actually produced survives that without being talked into a round wall-clock guess. */
+const QUEUE_HEAD_STALL_MULTIPLIER = 3;
+
+interface DispatchCadence {
+  /** The newest `run.start` seen, when any was — present even with only one ever recorded. */
+  newestTs?: string;
+  /** Present only once at least TWO dispatches have been observed and they didn't all land at
+   *  the same instant — with fewer, there is no gap to learn a cadence from at all. */
+  boundMs?: number;
+  boundDerivation?: string;
+}
+
+/** Derives the QUEUE-HEAD staleness bound from THIS HOST'S OWN observed `run.start` history —
+ *  never a hardcoded constant (design (iii); the whole risk this task names). Silent by
+ *  construction on too little evidence: zero or one dispatch ever, or every dispatch landing at
+ *  the identical instant, both leave `boundMs`/`boundDerivation` undefined rather than fabricate
+ *  a number (design (iv), "unknown is not stalled"). */
+function deriveDispatchCadence(lines: Array<Record<string, unknown>>): DispatchCadence {
+  const dispatches = dispatchRunStarts(lines);
+  if (dispatches.length === 0) return {};
+  const newest = dispatches[dispatches.length - 1]!;
+  if (dispatches.length < 2) return { newestTs: newest.ts };
+  let maxGapMs = 0;
+  for (let i = 1; i < dispatches.length; i++) {
+    maxGapMs = Math.max(maxGapMs, dispatches[i]!.parsed - dispatches[i - 1]!.parsed);
+  }
+  if (maxGapMs <= 0) return { newestTs: newest.ts }; // every dispatch at the same instant — no gap to learn from
+  return {
+    newestTs: newest.ts,
+    boundMs: maxGapMs * QUEUE_HEAD_STALL_MULTIPLIER,
+    boundDerivation: `${QUEUE_HEAD_STALL_MULTIPLIER}x the longest observed gap between dispatches on this host (${formatAgeMs(maxGapMs)} over ${dispatches.length} run.start rows)`,
+  };
+}
+
 function deriveCircuitBrokenBlockers(lines: Array<Record<string, unknown>>): CircuitBrokenBlocker[] {
   const out: CircuitBrokenBlocker[] = [];
   for (const taskId of distinctDispatchedTaskIds(lines)) {
@@ -1152,6 +1242,7 @@ function deriveQueueHead(
   projections: Map<string, StatusProjection> | undefined,
   ghUnknownReason: string | undefined,
   limit: number,
+  nowMs: number,
 ): QueueHeadSection {
   if (!plan || !projections || ghUnknownReason) {
     const section: QueueHeadSection = { rows: [], unknownReason: ghUnknownReason ?? "plan/tasks.yaml is unreadable" };
@@ -1174,12 +1265,46 @@ function deriveQueueHead(
     return row;
   });
   const section: QueueHeadSection = { rows };
+  // W1-T450: candidates present AND no run.start newer than the observed-cadence bound ⇒ a
+  // stall — never computed at all when `rows` is empty, so the honest "nothing dispatchable"
+  // idle state (design (i)) can never grow a stall it doesn't deserve.
+  if (rows.length > 0) {
+    const cadence = deriveDispatchCadence(lines);
+    const lastDispatchParsed = cadence.newestTs !== undefined ? Date.parse(cadence.newestTs) : NaN;
+    if (cadence.boundMs !== undefined && cadence.boundDerivation !== undefined && Number.isFinite(lastDispatchParsed)) {
+      const sinceMs = Math.max(0, nowMs - lastDispatchParsed);
+      if (sinceMs > cadence.boundMs) {
+        section.stall = {
+          candidateCount: rows.length,
+          sinceMs,
+          lastDispatchTs: cadence.newestTs!,
+          boundMs: cadence.boundMs,
+          boundDerivation: cadence.boundDerivation,
+        };
+      }
+    }
+  }
   section.nextAction = pickNextAction(QUEUE_HEAD_NEXT_ACTIONS, section);
   return section;
 }
 
 const QUEUE_HEAD_NEXT_ACTIONS: readonly NextActionRule<QueueHeadSection>[] = [
   { applies: (ctx) => ctx.unknownReason !== undefined, action: (ctx) => `queue head is unknown — ${ctx.unknownReason}` },
+  {
+    // W1-T450: eligible work sitting with ZERO dispatches for longer than this host's own
+    // observed cadence licenses — the "a daemon failing every pass looks calm" falsifier.
+    // NOT A GATE (design (ii)): this rule only ever picks a line to print; nothing here blocks
+    // or refuses a dispatch.
+    applies: (ctx) => ctx.stall !== undefined,
+    action: (ctx) => {
+      const s = ctx.stall!;
+      return (
+        `${s.candidateCount} candidate(s) eligible but nothing has dispatched in ${formatAgeMs(s.sinceMs)}` +
+        ` (bound ${formatAgeMs(s.boundMs)} — ${s.boundDerivation}) — confirm the daemon is actually ticking,` +
+        ` not just running, before assuming these are about to dispatch`
+      );
+    },
+  },
   {
     applies: (ctx) => ctx.rows.some((r) => r.perpetual),
     action: (ctx) => {
@@ -1459,7 +1584,7 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
   const queueHeadLimit = deps.queueHeadLimit ?? 5;
 
   const blockers = deriveBlockers(lines, projections, deps.github, queueHeadLimit);
-  const queueHead = deriveQueueHead(plan, lines, projections, ghUnknownReason, queueHeadLimit);
+  const queueHead = deriveQueueHead(plan, lines, projections, ghUnknownReason, queueHeadLimit, nowMs);
   const grepAnchorTrue = deps.grepAnchorTrue ?? ((a: EvidenceAnchor) => gitGrepAnchorTrue(deps.repoDir, "origin/main", a));
   const readProposalRegistry =
     deps.readProposalRegistry ?? (() => parseProposalRegistry(readTextFileIfExists(join(root, "state", "inbox-proposals.json"))));
@@ -1602,6 +1727,12 @@ function renderQueueHeadBlock(q: QueueHeadSection): string[] {
       const cost = r.observedPerCycleCostUsd !== undefined ? `, ~$${r.observedPerCycleCostUsd.toFixed(4)}/cycle` : "";
       const flag = r.perpetual ? ` — PERPETUAL (attempts ${r.attempts}${cost})` : ` (attempts ${r.attempts})`;
       out.push(`${r.taskId} — ${r.title}${flag}`);
+    }
+    if (q.stall) {
+      out.push(
+        `STALL: ${q.stall.candidateCount} candidate(s), nothing dispatched in ${formatAgeMs(q.stall.sinceMs)}` +
+          ` (bound ${formatAgeMs(q.stall.boundMs)} — ${q.stall.boundDerivation})`,
+      );
     }
   }
   if (q.nextAction) out.push(`next action: ${q.nextAction}`);
