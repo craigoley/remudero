@@ -1,0 +1,103 @@
+- id: W1-T455
+  title: "the worker preflight's commitlint step fails on healthy commits and silently reroutes the run to the orchestrator fallback — 14 of 15 recorded preflight failures are this step alone"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  origin: oper#preflight-commitlint-false-fail-2026-08-13
+  principles: {tdd: strict}
+  budget_usd: 40
+  files:
+    - src/lib/commit-message.ts
+    - src/run-task.ts
+    - test/preflight.test.ts
+    - test/preflight-spawn-failure.test.ts
+    - test/preflight-killed-child.test.ts
+    - test/preflight-commitlint-range.test.ts
+    - test/commit-message.test.ts
+  rationale: "RE-DERIVED at 4096adc. `commitlintStep` (src/lib/commit-message.ts) spawns
+    `<repoRoot>/node_modules/.bin/commitlint --config <repoRoot>/commitlint.config.mjs --from
+    <range.from> --to <range.to>` and reports
+    `commitlint: FAIL — ${range.from}..${range.to}\\n${(res.stdout + res.stderr).trim()}` — so the
+    `origin/main..HEAD` in a recorded failure is the LITERAL argument pair, and everything after
+    the newline is commitlint's own output.
+    THE RECORDED FAILURE CANNOT BE A LINT FAILURE. From the W1-T451 run's
+    `coverage/preflight-summary.json`: `{\"name\":\"commitlint\",\"ok\":false,\"detail\":\"commitlint:
+    FAIL — origin/main..HEAD\\nheader-max-length\"}` with typecheck and emitter-checks both PASS.
+    Measured three ways: that range was ONE commit whose subject
+    `fix(service): expire and evict confirm nonces (W1-T451)` is 55 CHARACTERS;
+    `commitlint.config.mjs` is stock `@commitlint/config-conventional`, limit 100; and the
+    identical invocation reproduced EXIT 0.
+    IT IS SYSTEMATIC, NOT A ONE-OFF. Fifteen `preflight.failed` rows exist on the Azure ledger and
+    FOURTEEN name `1 of 3 step(s) failed: commitlint` — the sole exception is a `--ci-parity` run
+    failing three test/coverage steps. Across every failing head sha the LONGEST subject is 86
+    characters (7862096) against a limit of 100, so `header-max-length` cannot legitimately have
+    fired on any of them.
+    THE CONSEQUENCE IS A SILENT REROUTE, NOT A COSMETIC WARNING. A failed worker preflight sends
+    the run down the orchestrator fallback (`say(\"fallback: pushing branch from orchestrator
+    (outside sandbox)\")`, src/run-task.ts) — which is how PR #1722 came to exist pushed from
+    outside the sandbox. A spurious gate failure rerouted a healthy run."
+  design: |
+    (i) FIND THE REAL CAUSE BEFORE CHANGING THE CHECK. Two false-failure modes are already
+    demonstrated and they are NOT the same bug:
+      (a) EMPTY RANGE. MEASURED: `commitlint --from X --to X` prints its USAGE BANNER and exits 9.
+      The step reports that as a FAIL. And the ledger contains exactly this shape — the W1-T404 row
+      records `preflight FAILED at 3a5c677`, which WAS origin/main at that moment, so the worker had
+      committed nothing and `origin/main..HEAD` was empty. A worker that runs preflight before its
+      first commit fails a gate for having written nothing yet.
+      (b) THE `header-max-length` OUTPUT IS UNEXPLAINED. MEASURED: a genuine over-length header
+      makes commitlint print a multi-line block (`⧗ --- input ---`, `✖ header must not be longer
+      than 100 characters, current length is N [header-max-length]`, `✖ found 1 problems`). A bare
+      rule id on its own line is NOT commitlint's output shape in any observed mode. Establish what
+      produces it before assuming a range problem.
+    (ii) THE RANGE HYPOTHESIS IS NOT SUPPORTED TODAY AND MUST BE RE-TESTED, NOT ASSUMED. A worker
+    worktree inherits its parent clone's refs, so a stale `origin/main` there could widen the range
+    and sweep in an older long-subject commit. MEASURED at filing: the fleet clone
+    (`/home/node/Remudero/repos/remudero`, the clone worker worktrees are cut from) resolves
+    `origin/main` to 4096adc — CURRENT, zero behind. So the widening hypothesis is refuted at this
+    sha. It may still have held at the moment of an individual failure; that is what needs
+    instrumenting rather than reasoning about.
+    (iii) CAPTURE THE EVIDENCE BEFORE IT IS REAPED. This investigation lost its primary artifact:
+    `coverage/preflight-summary.json` lives in the worker's worktree, and the reaper removed both
+    the W1-T451 and W1-T452 worktrees during this session — one of them BETWEEN a directory listing
+    and the next command. Whatever ships must make the failing invocation reconstructable from a
+    durable surface (the ledger row already carries the step name; it does not carry the resolved
+    refs, the commit count, or commitlint's own output).
+    (iv) EMPTY IS NOT A FAILURE. Whatever the cause of (b), a range with no commits is a healthy
+    state — a worker that has not yet committed has nothing to lint — and must not fail the step or
+    reroute the run. Both directions belong in the acceptance: an empty range passes, and a
+    genuinely over-length subject still fails.
+  note: "KEEP THIS SEPARATE FROM THE MISSING TRAILER — TWO DEFECTS THAT MET ON ONE RUN. Commitlint
+    PASSES #1722's message WITHOUT a `Remudero-Task:` trailer (measured, exit 0), so commitlint does
+    not enforce the trailer and this step's failure does not explain its absence. The body-only
+    task-id resolver is filed separately as W1-T453 (#1725). Do not merge the two.
+    THE CI-PARITY FRAMING NEEDS CORRECTING, AND THE BRIEF THAT PROMPTED THIS TASK HAD IT SLIGHTLY
+    WRONG. It is tempting to say 'a gate that disagrees with the gate it exists to predict' —
+    CI was green on d4f996b (ci-gate: success, every required check passing) while the local step
+    failed. But `ci-parity.ts` ALREADY declares the commitlint job `mirrored: false`, with the
+    stated reason that CI's job lints the SQUASH-MERGE PR TITLE, which does not exist until the PR
+    is opened, and that preflight's step is 'the closest local proxy available pre-push'. So there
+    is no parity claim to violate. THE SHARPER AND TRUE STATEMENT is narrower: a local proxy gate
+    fails on healthy input, and its failure silently changes how the run pushes.
+    RISK:HIGH IS RULE 19's SPAN, NOT BLAST RADIUS — two subsystems (the preflight step in
+    commit-message.ts and the fallback/logging path in run-task.ts) plus the suites that observe
+    them. The change itself is expected to be one predicate plus a captured detail string.
+    FILES WRITTEN FROM THE GATES, separated BY INVOCATION COUNT: `commitlintStep(` is invoked by
+    test/preflight.test.ts (3, which also invokes runPreflight 5 times),
+    test/preflight-spawn-failure.test.ts (3), test/preflight-killed-child.test.ts (1) and
+    test/commit-message.test.ts (1) — all four declared. A dozen further suites mention 'preflight'
+    in prose with ZERO invocations of these symbols (test/binary-pin-rung.test.ts,
+    test/isolation.test.ts, test/host-update-reclaim.test.ts and the rest) and are deliberately
+    excluded. test/ci-parity-contract.test.ts is also excluded: it asserts the ci.yml job table,
+    which this task does not change — and if an implementer finds they must touch the
+    `mirrored: false` entry, that is a signal the scope grew and the files: list must grow with it."
+  acceptance:
+    - claim: "an empty commit range passes the commitlint step instead of failing the run"
+      proof: "unit test: test/preflight-commitlint-range.test.ts"
+    - claim: "a genuinely over-length subject still fails the step, so the check is not merely disabled"
+      proof: "unit test: test/preflight.test.ts"
+    - claim: "a failing step records the resolved refs and the linter's own output, not just a rule id"
+      proof: "unit test: test/preflight-commitlint-range.test.ts"
+    - claim: "a spawn that dies is still reported as this step's own failure and never aborts later steps"
+      proof: "unit test: test/preflight-spawn-failure.test.ts"
