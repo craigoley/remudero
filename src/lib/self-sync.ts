@@ -148,6 +148,27 @@ export function checkCliFreshness(
   const warn = deps.warn ?? ((msg: string) => console.error(msg));
   const reexec = deps.reexec ?? (() => defaultReexec(env));
 
+  // W1-T452: A LINKED WORKTREE IS SUPPOSED TO HAVE DIVERGED. `spawnContained` starts a worker
+  // with `cwd: worktreePath` on `run-<taskId>-<epochMs>`, cut from origin/main at claim time —
+  // the moment that branch takes its first commit it is no longer origin/main's ancestor, which
+  // is what a branch on its own line of history IS, not a stale-binary condition. Without this
+  // guard the very next non-exempt verb reads that healthy divergence as `refused: "diverged"`
+  // (or, once W1-T445's branch check runs, `"off-main"`) and `main()` turns that into
+  // `process.exit(1)` — the worker then walks to the shared checkout to find a verb that
+  // doesn't refuse, and ITS commits land there instead of in the worktree it was given.
+  // Self-sync's whole contract ("keep the operator's own interactive `main` checkout fresh") is
+  // simply not this repo's remit — same shape as the CI guard just above, so it short-circuits
+  // the same way: skip entirely, no fetch, no mutation, no refusal.
+  //
+  // DETECTED, NOT GUESSED: `git rev-parse --git-dir` resolves to `<repo>/.git/worktrees/<name>`
+  // inside a LINKED worktree (created by `git worktree add`) and to `.git` in the main checkout
+  // — MEASURED live in this repo's own linked worktree, not merely read from git's docs. A
+  // failure to resolve (e.g. `repoDir` is not a git repo at all) is read as "not a worktree" —
+  // the fail-closed direction for a guard whose job is to REFUSE, not to skip refusing.
+  if (isLinkedWorktree(git)) {
+    return { status: "guarded" };
+  }
+
   try {
     // Same call shape as W1-T60's syncPlanFromOrigin: `git fetch --quiet origin` only ever
     // moves remote-tracking refs, never the working tree or local branches.
@@ -250,6 +271,26 @@ export function checkCliFreshness(
 
 function shortSha(sha: string): string {
   return sha.slice(0, 7);
+}
+
+/**
+ * True when `repoDir` is a LINKED git worktree (created via `git worktree add`), false for the
+ * main checkout — see the W1-T452 call site above for why this distinction matters.
+ *
+ * `git rev-parse --git-dir` is the read that answers this WITHOUT guessing: a linked worktree's
+ * git-dir is a path under the main repo's `.git/worktrees/<name>` (git stores the worktree's own
+ * HEAD/index there, separate from the main checkout's), while the main checkout's is bare `.git`
+ * (or an absolute path ending in it). MEASURED against this very worktree, not assumed from
+ * docs. A rev-parse failure (not a git repo, or git itself missing) is read as "not a worktree" —
+ * fail-closed for a caller whose job is to decide whether to REFUSE.
+ */
+function isLinkedWorktree(git: GitRunner): boolean {
+  try {
+    const gitDir = git(["rev-parse", "--git-dir"]).trim();
+    return /[/\\]worktrees[/\\]/.test(gitDir);
+  } catch {
+    return false;
+  }
 }
 
 /**
