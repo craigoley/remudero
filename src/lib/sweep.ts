@@ -725,7 +725,29 @@ export function checksStateFromRollup(
   // Required contexts are configured but none has registered on this head yet
   // (e.g. the workflow hasn't started) — waiting, not "no checks at all".
   if (gate.length === 0) return knownRequired ? "pending" : "none";
-  const ok = knownRequired ? REQUIRED_CHECK_OK : new Set(["SUCCESS"]);
+  // ONE OK-SET, KNOWN CONTEXTS OR NOT (2026-08-13). This used to narrow to `new Set(["SUCCESS"])`
+  // whenever the required list was unreadable — an asymmetry that landed in the SAME commit as
+  // REQUIRED_CHECK_OK (#196/W1-T103) and, unlike its sibling, carried no stated reason. It has none
+  // available: REQUIRED_CHECK_OK's own doc is a claim about GITHUB'S merge-eligibility semantics —
+  // "a required check that reports SKIPPED or NEUTRAL still counts as green" — and those semantics
+  // do not change because OUR token could not read branch protection.
+  //
+  // WHAT THE ASYMMETRY COST, measured live: `ghRequiredStatusCheckContexts` fails SOFT to undefined
+  // on any error, and a container's PAT gets 403 "Resource not accessible by personal access token"
+  // on the protection endpoint (the mini's token returns ["remudero-review","ci-gate"]). So every
+  // sweep in a container took this branch, and `osv-scanner`'s NEUTRAL — present on essentially
+  // every PR here — read as PENDING FOREVER, because NEUTRAL never becomes SUCCESS. Issue #1698
+  // escalated PR #1692 with "checks pending 65m (>= 60m ceiling)" while nothing was running, and
+  // `rmd status` showed #1699 at "checks pending 237m". That is the 57-unretirable-issues shape
+  // (see pendingAgeMinutes' doc) recurring with the bound firing LATE rather than never.
+  //
+  // NOT WIDENED TO A NEW `unknown` checksState, deliberately: `OpenPrView["checksState"]` is a
+  // four-member union read at 17 comparison sites in this file, and a fifth member every existing
+  // row silently fails to match is precisely the false-predicate-falls-through-to-a-row-that-acts
+  // shape that produced the 57 issues in the first place. Aligning the sets changes one expression
+  // and leaves the vocabulary alone. A genuinely unresolved check is in NEITHER set and still holds
+  // `pending`, which is the property the strict fallback was reaching for.
+  const ok = REQUIRED_CHECK_OK;
   let anyPending = false;
   for (const c of gate) {
     const s = (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();

@@ -1405,6 +1405,74 @@ test("W1-T103 — checksStateFromRollup: a FAILING non-required context never ve
   assert.equal(checksStateFromRollup(rollup, REQUIRED), "green");
 });
 
+// ── THE UNREADABLE-CONTEXTS PATH: NEUTRAL IS NOT PENDING (2026-08-13) ────────────────────────
+//
+// `ghRequiredStatusCheckContexts` fails SOFT to undefined on any error, and a container's PAT gets
+// 403 on the protection endpoint, so EVERY containerised sweep reaches this branch. It used to
+// narrow the ok-set to SUCCESS only, and `osv-scanner`'s NEUTRAL then read as pending forever —
+// escalating #1692 at "checks pending 65m" with nothing running. These four cases pin all three
+// directions the fix has to satisfy at once.
+
+test("UNREADABLE contexts: a NEUTRAL check is NOT pending — the container path that escalated #1692", () => {
+  // THE FIXTURE REACHES THE FALLBACK, asserted rather than assumed: `undefined` contexts is the
+  // ONLY way into this branch, and a test passing readable contexts would never exercise it.
+  const rollup: RollupCheckEntry[] = [
+    rollupCheck({ name: "ci-gate", conclusion: "SUCCESS" }),
+    rollupCheck({ name: "osv-scanner", conclusion: "NEUTRAL" }),
+  ];
+  assert.equal(checksStateFromRollup(rollup, undefined), "green");
+  assert.equal(checksStateFromRollup(rollup, []), "green", "an EMPTY list is the same unreadable case");
+});
+
+test("UNREADABLE contexts: a SKIPPED check is NOT pending either — the same defect one conclusion over", () => {
+  const rollup: RollupCheckEntry[] = [
+    rollupCheck({ name: "ci-gate", conclusion: "SUCCESS" }),
+    rollupCheck({ name: "schedule-stub", conclusion: "SKIPPED" }),
+  ];
+  assert.equal(checksStateFromRollup(rollup, undefined), "green");
+});
+
+test("THE OTHER DIRECTION — UNREADABLE contexts: a GENUINELY pending check STILL reads pending", () => {
+  // THE TRAP. A fix that only proved the first case would pass on a change that reports everything
+  // green, which would arm auto-merge on PRs whose checks are still running. An unresolved
+  // conclusion is in NEITHER the ok-set nor the fail-set, and must still hold the PR.
+  for (const live of ["IN_PROGRESS", "QUEUED", "PENDING", "WAITING"]) {
+    const rollup: RollupCheckEntry[] = [
+      rollupCheck({ name: "ci-gate", conclusion: "SUCCESS" }),
+      rollupCheck({ name: "osv-scanner", conclusion: "NEUTRAL" }),
+      rollupCheck({ name: "ci", conclusion: undefined, status: live }),
+    ];
+    assert.equal(checksStateFromRollup(rollup, undefined), "pending", live);
+  }
+  // …and a genuine FAILURE still vetoes outright, unreadable contexts or not.
+  const red: RollupCheckEntry[] = [rollupCheck({ name: "ci", conclusion: "FAILURE" })];
+  assert.equal(checksStateFromRollup(red, undefined), "red");
+});
+
+test("THE KNOWN-contexts path is BYTE-IDENTICAL — this must not change behaviour where the token can read protection", () => {
+  // The mini's token returns ["remudero-review","ci-gate"], so every case below is what that host
+  // already saw. NEUTRAL and SKIPPED were already ok there; the fix only removed the asymmetry.
+  const neutral: RollupCheckEntry[] = [
+    rollupCheck({ name: "ci-gate", conclusion: "SUCCESS" }),
+    rollupCheck({ name: "osv-scanner", conclusion: "NEUTRAL" }),
+  ];
+  // NOT "pending": `checksStateFromRollup` filters REVIEW_CONTEXT out of the rollup BEFORE gating,
+  // so an absent remudero-review can never hold checksState — that fact lives in `reviewState`.
+  // My first draft asserted pending here and the code was right.
+  assert.equal(checksStateFromRollup(neutral, REQUIRED), "green");
+  const complete: RollupCheckEntry[] = [
+    rollupCheck({ name: "ci-gate", conclusion: "SUCCESS" }),
+    rollupCheck({ name: "remudero-review", conclusion: "SUCCESS" }),
+    rollupCheck({ name: "osv-scanner", conclusion: "NEUTRAL" }),
+  ];
+  assert.equal(checksStateFromRollup(complete, REQUIRED), "green");
+  const stillRunning: RollupCheckEntry[] = [
+    rollupCheck({ name: "ci-gate", conclusion: undefined, status: "IN_PROGRESS" }),
+    rollupCheck({ name: "remudero-review", conclusion: "SUCCESS" }),
+  ];
+  assert.equal(checksStateFromRollup(stillRunning, REQUIRED), "pending");
+});
+
 test("W1-T103 acceptance 2 (regression lock) — checksStateFromRollup: a PENDING required context -> pending, unchanged", () => {
   const rollup: RollupCheckEntry[] = [
     rollupCheck({ name: "ci-gate", conclusion: "" , status: "IN_PROGRESS" }),
@@ -1422,12 +1490,28 @@ test("W1-T103 acceptance 2 (regression lock) — checksStateFromRollup: a FAILIN
   assert.equal(checksStateFromRollup(rollup, REQUIRED), "red");
 });
 
-test("W1-T103 — checksStateFromRollup: no requiredContexts supplied (unreadable branch protection) degrades to the pre-fix conservative fallback — every reported context counts", () => {
+test("W1-T103 — checksStateFromRollup: no requiredContexts supplied (unreadable branch protection) still counts EVERY reported context, and judges each by the same ok-set", () => {
+  // CONTRACT CORRECTED 2026-08-13, and this test previously PINNED THE DEFECT: it asserted
+  // "SKIPPED isn't SUCCESS under the fail-closed fallback", which is what made every containerised
+  // sweep read `osv-scanner`'s NEUTRAL as pending forever and escalate #1692 with nothing running.
+  // The WIDENING half of the fallback is unchanged and still asserted below — with the required
+  // list unreadable, EVERY reported context is gated, not just the required ones. What changed is
+  // only HOW each one is judged: by REQUIRED_CHECK_OK, the same set the known-contexts path uses,
+  // because GitHub's merge-eligibility semantics do not depend on whether our token can read
+  // protection.
   const rollup: RollupCheckEntry[] = [
     rollupCheck({ name: "ci-gate", conclusion: "SUCCESS" }),
     rollupCheck({ name: "schedule-stub", conclusion: "SKIPPED" }),
   ];
-  assert.equal(checksStateFromRollup(rollup, undefined), "pending", "SKIPPED isn't SUCCESS under the fail-closed fallback");
+  assert.equal(checksStateFromRollup(rollup, undefined), "green", "a resolved SKIPPED satisfies, exactly as it does with the list readable");
+
+  // THE WIDENING ITSELF, unchanged: a NON-required context that is genuinely unresolved still holds
+  // the PR, because with no list nothing can be excluded from the gate.
+  const nonRequiredRunning: RollupCheckEntry[] = [
+    rollupCheck({ name: "ci-gate", conclusion: "SUCCESS" }),
+    rollupCheck({ name: "some-advisory-job", conclusion: undefined, status: "IN_PROGRESS" }),
+  ];
+  assert.equal(checksStateFromRollup(nonRequiredRunning, undefined), "pending");
 
   const withFailure: RollupCheckEntry[] = [
     rollupCheck({ name: "ci-gate", conclusion: "SUCCESS" }),
