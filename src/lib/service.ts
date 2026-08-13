@@ -87,6 +87,20 @@ export function writeRoutesMissingTier(routes: readonly Route[]): string[] {
   return routes.filter((r) => r.scope === "write" && !r.tier).map((r) => `${r.method} ${r.path}`);
 }
 
+/**
+ * design (iii-a): run {@link writeRoutesMissingTier} and FAIL THE CALLER (throw) rather than
+ * merely reporting — the "runs inside the product function" half of the ci-parity:drift shape,
+ * stronger than a bare test assertion (see that design note's own W1-T402 contrast). Extracted
+ * here, callable directly, so its throw branch is unit-testable without needing the real
+ * assembled route table (which never triggers it) to somehow go missing a tier.
+ */
+export function assertWriteTiersComplete(routes: readonly Route[]): void {
+  const missing = writeRoutesMissingTier(routes);
+  if (missing.length > 0) {
+    throw new Error(`write-scoped route(s) with no declared WriteTier: ${missing.join(", ")}`);
+  }
+}
+
 export type Method = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
 /** Reserved for future path params (v0 routing is exact-match only, so always `{}` today). */
@@ -358,14 +372,12 @@ export function makeConfirmNonceRoute(store: ConfirmNonceStore): Route {
     method: "POST",
     path: "/v1/confirm",
     scope: "write",
+    // A socket error while reading the body is deliberately NOT caught here — it propagates
+    // out of this async handler to createService's own dispatch try/catch (500, `service.error`),
+    // the same fate every other route's handler already gets on a transport failure. This isn't
+    // a client-input problem (jsonAction's 400 shape), so it never pretends to be one.
     handler: async (req, res) => {
-      let raw: string;
-      try {
-        raw = await readRawBody(req);
-      } catch (e) {
-        sendJson(res, 400, { error: "invalid_request", detail: (e as Error).message });
-        return;
-      }
+      const raw = await readRawBody(req);
       let parsed: unknown;
       try {
         parsed = raw.trim() ? JSON.parse(raw) : {};

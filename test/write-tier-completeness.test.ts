@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { writeRoutesMissingTier, type Route } from "../src/lib/service.js";
+import { assertWriteTiersComplete, writeRoutesMissingTier, type Route } from "../src/lib/service.js";
 import { buildServeRoutes, type ServeDeps } from "../src/lib/serve.js";
 import type { IssueCloser } from "../src/lib/panel-actions.js";
 import type { Plan } from "../src/lib/plan.js";
@@ -40,6 +40,20 @@ test("writeRoutesMissingTier: every write route labeled -> empty (never a vacuou
   assert.deepEqual(writeRoutesMissingTier(routes), []);
   // Positive control: the checked set is non-trivial, or the empty result above proves nothing.
   assert.ok(routes.length > 0);
+});
+
+// ── assertWriteTiersComplete: the throw half design (iii-a) requires ("runs inside the product
+// function", not merely a test) — `buildServeRoutes` calls this directly, so its throw branch is
+// unit-tested here rather than through the real table, which never triggers it. ──
+
+test("assertWriteTiersComplete: throws naming the unlabeled route(s), never defaults quietly", () => {
+  const routes: Route[] = [baseRoute({ path: "/v1/labeled", tier: "low" }), baseRoute({ path: "/v1/unlabeled" })];
+  assert.throws(() => assertWriteTiersComplete(routes), /POST \/v1\/unlabeled/);
+});
+
+test("assertWriteTiersComplete: every route labeled -> does not throw", () => {
+  const routes: Route[] = [baseRoute({ path: "/v1/a", tier: "low" })];
+  assert.doesNotThrow(() => assertWriteTiersComplete(routes));
 });
 
 // ── the real assembled table ──────────────────────────────────────────────────

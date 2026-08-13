@@ -40,7 +40,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
 import { createOrReadExclusive } from "./fs-race-safe.js";
-import { createService, writeRoutesMissingTier, type Route, type ServiceOptions, type ServiceTokens, type SseRoute } from "./service.js";
+import { assertWriteTiersComplete, createService, type Route, type ServiceOptions, type ServiceTokens, type SseRoute } from "./service.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
 import type { GitHub } from "./status.js";
 import {
@@ -4450,11 +4450,8 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
 
   // W1-T404 design (iii): `ci-parity:drift`-shaped completeness, run inside the PRODUCT function
   // (this one), not merely a test — a write-scoped route added here with no declared tier fails
-  // the build rather than defaulting quietly. See `writeRoutesMissingTier`'s own doc.
-  const missingTier = writeRoutesMissingTier(routes);
-  if (missingTier.length > 0) {
-    throw new Error(`buildServeRoutes: write-scoped route(s) with no declared WriteTier: ${missingTier.join(", ")}`);
-  }
+  // the build rather than defaulting quietly. See `assertWriteTiersComplete`'s own doc.
+  assertWriteTiersComplete(routes);
 
   return routes;
 }

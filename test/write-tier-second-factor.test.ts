@@ -59,6 +59,36 @@ async function withServer<T>(fn: (base: string) => Promise<T>): Promise<T> {
 
 const HIGH_AUTH = { [HIGH_HEADER]: HIGH_SECRET };
 
+// ── POST /v1/confirm's own input validation ──────────────────────────────────────────────────
+
+test("POST /v1/confirm: a malformed (non-JSON) body -> 400, never a nonce", async () => {
+  await withServer(async (base) => {
+    const res = await fetch(`${base}/v1/confirm`, {
+      method: "POST",
+      headers: { ...HIGH_AUTH, "content-type": "application/json" },
+      body: "{not json",
+    });
+    assert.equal(res.status, 400);
+    const body = (await res.json()) as { error: string; detail: string };
+    assert.equal(body.error, "invalid_request");
+    assert.match(body.detail, /not valid JSON/);
+  });
+});
+
+test("POST /v1/confirm: a well-formed JSON body missing a required field -> 400 naming which one", async () => {
+  await withServer(async (base) => {
+    const res = await fetch(`${base}/v1/confirm`, {
+      method: "POST",
+      headers: { ...HIGH_AUTH, "content-type": "application/json" },
+      body: JSON.stringify({ method: "POST", path: "/v1/high" }), // payload omitted
+    });
+    assert.equal(res.status, 400);
+    const body = (await res.json()) as { error: string; detail: string };
+    assert.equal(body.error, "invalid_request");
+    assert.match(body.detail, /payload/);
+  });
+});
+
 test("HIGH-tier route: a fully-scoped, fully-tiered credential is STILL refused with no nonce", async () => {
   await withServer(async (base) => {
     const res = await fetch(`${base}/v1/high`, { method: "POST", headers: { ...HIGH_AUTH, "content-type": "application/json" }, body: "{}" });
