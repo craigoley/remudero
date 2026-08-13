@@ -13840,10 +13840,16 @@ function buildCreditCandidates(
   plan: Plan,
   ledgerPath: string,
   log?: (step: string, extra?: Record<string, unknown>) => void,
+  // APPENDED LAST so neither positional call site shifts — the same convention
+  // `buildEscalationReconcileCandidates`' own `injected.github` seam below already follows.
+  // Supplied by {@link buildSweepHook} so the daemon's per-poll rung reuses ONE warm gateway
+  // (see that function's doc for the measurement); omitted by `sweepCommand`, a one-shot CLI
+  // invocation with no second pass to amortise a row cache over.
+  github?: GitHub,
 ): CreditCandidate[] {
   // W1-T181: wires the same fetch-size/fetch-failure observability the SERVE board gateway gets —
   // this sweep/daemon-poll gateway shells the identical `gh pr list` this outage's fix targeted.
-  const deps: DeriveDeps = { ledgerPath, github: buildBatchedGithub(owner, repo, { log }) };
+  const deps: DeriveDeps = { ledgerPath, github: github ?? buildBatchedGithub(owner, repo, { log }) };
   const candidates: CreditCandidate[] = [];
   for (const task of plan.tasks) {
     const proj = deriveStatus(task, deps);
@@ -14943,11 +14949,45 @@ export function buildSweepHook(
   plan: Plan,
   log: (step: string, extra?: Record<string, unknown>) => void,
   tmpMaxAgeMs?: number,
+  // Injectable board gateway — appended LAST so no positional caller shifts, the same convention
+  // `buildSweepEffects`' own trailing seams follow. Real callers omit it and get the warm
+  // once-per-daemon-start instance built immediately below; a test supplies one with its own
+  // `exec`/`ttlMs` so the delta's request count is measurable without shelling out.
+  github?: GitHub,
 ): () => Promise<void> {
   // W1-T192: the daemon-side draft rung, built ONCE per daemon start (mirrors this
   // function's own once-per-daemon-start construction) — see buildInboxDraftHook's doc for
   // why it rides THIS seam rather than a second, separately-scheduled loop.
   const draftHook = buildInboxDraftHook(owner, repo, config, runId, log);
+  // ONE GATEWAY FOR THE DAEMON'S WHOLE LIFE, built here for the same reason `draftHook` above is:
+  // this function runs once per daemon start, the closure it returns runs once per poll.
+  //
+  // THE DELTA WAS ALREADY BUILT AND A CONSTRUCTOR'S LIFETIME WAS DEFEATING IT. `buildBatchedGithub`
+  // holds `knownBoardPrs` — the row cache `fetchBoardPrsRest`'s early stop compares against — at
+  // GATEWAY scope, so a gateway rebuilt per poll always starts `undefined`, takes `mode: "full"`
+  // at `BOARD_FULL_PAGE_SIZE`, and walks the whole repo again. Both of this hook's deriving rungs
+  // used to build their own inside the poll closure, so neither ever saw a second pass.
+  //
+  // MEASURED over the unioned ledger (`board_gateway.fetch_bytes`, 49,497 distinct rows across all
+  // three archive forms): `serveCommand`, which keeps ONE gateway warm, logs 16,770 `mode: "delta"`
+  // fetches at exactly 2 REST calls against 224 cold ones — its doc's "steady state is 2", borne
+  // out. The daemon logs 5,022 `mode: "full"` at a mean of 9.74 calls (max 14) against 18 deltas.
+  // Same code, inverted ratio, entirely because of where the constructor sat.
+  //
+  // WHY A WARM GATEWAY IS STILL CURRENT — a PR merged externally must not read open forever, and
+  // TWO independent properties have to hold, not one:
+  //  (i) FREQUENCY IS UNCHANGED. `ttlMs` defaults to 15 s, far below the daemon's 60 s
+  //      `pollIntervalMs` (DEFAULT_POLL_INTERVAL_MS, which the headroom curve only ever raises),
+  //      so every poll's first read still finds the index expired and issues a real fetch.
+  //      Warming changes a fetch's SHAPE, never whether one happens.
+  // (ii) THE FETCH ITSELF RE-READS WHAT CAN MOVE. `fetchBoardPrsRest`'s HOT half re-reads EVERY
+  //      open PR unconditionally on every call, and its COLD half walks `updated_at` descending —
+  //      so any row that changed sorts strictly above the first unchanged row the walk stops on.
+  //      A PR merged between polls has a bumped `updated_at` and therefore arrives on the very
+  //      next fetch. Only rows genuinely frozen at merge are ever served from the cache.
+  // The rungs below consume merge state and open state; (ii) covers both, so a warm cache can
+  // delay nothing and can never report a stale OPEN for a PR that has since merged.
+  const boardGithub = github ?? buildBatchedGithub(owner, repo, { log });
   return async () => {
     try {
       const openPrs = buildOpenPrViews(owner, repo, ledgerPath);
@@ -14958,10 +14998,10 @@ export function buildSweepHook(
       // cadence. The missing third leg of the escalation lifecycle (creation W1-T8, dedup
       // W1-T195, closure here); same level-triggered doctrine as the credit rung below. Its
       // own read failures degrade to [] internally, so it never strands the credit rung.
-      await sweepEscalationReconcile(owner, repo, plan, ledgerPath, runId, log);
+      await sweepEscalationReconcile(owner, repo, plan, ledgerPath, runId, log, { github: boardGithub });
       // W1-T150: the SAME credit-backfill rung `rmd sweep` runs, on the
       // daemon's own poll cadence — never a second, separately-scheduled loop.
-      const creditCandidates = buildCreditCandidates(owner, repo, plan, ledgerPath, log);
+      const creditCandidates = buildCreditCandidates(owner, repo, plan, ledgerPath, log, boardGithub);
       await runCreditBackfill(creditCandidates, { ledgerPath, runId, log });
       // W1-T175 — the worktree reaper rung, on the daemon's own poll cadence: the hole
       // this closes is specifically an IDLE fleet (no run dispatched, so pruneStaleRuns'
