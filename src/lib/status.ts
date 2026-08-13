@@ -1592,6 +1592,23 @@ function latestActualPrUrl(lines: Array<Record<string, unknown>>, taskId: string
 }
 
 /**
+ * Extract the task id a fleet-dispatched run branch (`run-<taskId>-<epochMs>`,
+ * `worktreeAdd`'s naming) claims, or `undefined` if `head` is not that shape.
+ *
+ * The ONE named extractor for a shape this repo already tests three other ways:
+ * {@link ownsBranch} below VERIFIES a known id (`^run-<taskId>-\d+$`, cannot discover
+ * one), and run-task.ts's `isDispatchedRunBranch` answers only "is this a run branch"
+ * (a boolean shape test, no capture group). This was previously inlined TWICE inside
+ * {@link projectPlan} itself (`/^run-(.+)-\d+$/`, duplicated within that one function);
+ * W1-T453 lifted it here so every caller shares one spelling rather than writing a
+ * fifth. Both `projectPlan` call sites below now call this instead of matching inline.
+ */
+export function taskIdFromRunBranch(head: string | undefined): string | undefined {
+  const m = /^run-(.+)-\d+$/.exec(head ?? "");
+  return m ? m[1] : undefined;
+}
+
+/**
  * RUNG (c) OWNERSHIP-ASSERT (MASTER-PLAN P16 / W1-T69, ratifying the same class
  * W1-T62 fixed on the write side and W1-T51 on the retro read side): a trailer
  * credit is only trustworthy if the PR was opened from THIS task's own branch
@@ -2567,11 +2584,11 @@ export function projectPlan(
     if (allMerged !== null) {
       byTask = new Map<string, PrRef[]>();
       for (const pr of allMerged) {
-        const owner = /^run-(.+)-\d+$/.exec(pr.headRefName ?? "");
-        if (!owner) continue;
-        const existing = byTask.get(owner[1]);
+        const owner = taskIdFromRunBranch(pr.headRefName);
+        if (owner === undefined) continue;
+        const existing = byTask.get(owner);
         if (existing) existing.push(pr);
-        else byTask.set(owner[1], [pr]);
+        else byTask.set(owner, [pr]);
       }
     }
     const captured = byTask;
@@ -2590,11 +2607,11 @@ export function projectPlan(
     if (allOpen !== null) {
       openByTask = new Map<string, PrRef[]>();
       for (const pr of allOpen) {
-        const owner = /^run-(.+)-\d+$/.exec(pr.headRefName ?? "");
-        if (!owner) continue;
-        const existing = openByTask.get(owner[1]);
+        const owner = taskIdFromRunBranch(pr.headRefName);
+        if (owner === undefined) continue;
+        const existing = openByTask.get(owner);
         if (existing) existing.push(pr);
-        else openByTask.set(owner[1], [pr]);
+        else openByTask.set(owner, [pr]);
       }
     }
     const capturedOpen = openByTask;
