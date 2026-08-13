@@ -1,0 +1,123 @@
+- id: W1-T452
+  title: "workers build in the daemon's live checkout because `bin/rmd` refuses itself inside a worktree — a run branch is DIVERGED by construction, so the first verb after the first commit exits 1 and the worker walks to the checkout, where its commits then land"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: "FOURTEEN OF THE LAST FIFTEEN implement runs built in the daemon's live checkout rather
+    than the worktree they were given. Three recons established the chain; the load-bearing links
+    were re-derived at ab85e661 and the parts marked SETTLED are not re-litigated here.
+    THE CHAIN: `spawnWorker` passes `cwd: worktreePath`, `buildContainedSpawnFn` forwards `spawnOpts`
+    whole and `spawnContained` sets `cwd: opts.cwd`, so THE WORKER STARTS IN THE WORKTREE (and
+    `.cc-writes` appeared there five seconds after `worktree.add`). The worktree is ALREADY
+    self-sufficient — `linkWorktreeNodeModules` symlinks `node_modules` on every `worktreeAdd`,
+    deliberately `never by installing`, because an install there emptied the shared tree on
+    2026-07-29. The worker LEAVES because `bin/rmd` refuses itself: every verb except
+    daemon/serve/deploy-run runs `checkCliFreshness`, and `main()` turns `status === \"refused\"` into
+    `process.exit(1)`. A worktree sits on `run-<taskId>-<epochMs>`, so after its FIRST COMMIT it is
+    no longer an ancestor of origin/main — DIVERGED, which is what a branch IS. The commits are the
+    only real damage: `git commit` run while `cd`-ed into the checkout lands there. The tooling
+    excursions are legitimate validation.
+    THE `/app` HYPOTHESIS IS FALSIFIED, AND THAT IS THE FINDING THAT CHANGES THE FIX. The live
+    fix-rung worker was observed running `CI=true /app/bin/rmd preflight --ci-parity` — the BAKED
+    IMAGE copy, which `verify-image.sh` records as having no `.git`. The proposal was that a missing
+    `.git` is why it does not refuse, making the whole fix one path substitution. IT IS NOT, for two
+    reasons, both established by EXECUTION at ab85e661 rather than by reading:
+      (1) `repoRoot = resolveRepoRoot(process.argv.slice(2), process.cwd())` resolves from THE
+          CALLER'S CWD via `git -C cwd rev-parse --show-toplevel`, falling back to the install root
+          ONLY when that fails. MEASURED: cwd=<a worktree> returns THE WORKTREE ITSELF; cwd=/tmp
+          returns the install root. So `/app/bin/rmd` invoked from a worktree still resolves
+          `repoRoot` to the worktree — a real, diverged repo — and `checkCliFreshness` still refuses.
+          `bin/rmd` only changes where the CODE loads from (`exec \"$DIR/node_modules/.bin/tsx\"
+          \"$DIR/src/run-task.ts\"`); it does not change what `repoRoot` resolves to.
+      (2) The observed command sets `CI=true`, and `isCiEnv(env)` returns `guarded` BEFORE any git
+          call. That, not the missing `.git`, is why that particular invocation does not refuse — and
+          it matches the transcript detail that `CI=1` was present on `preflight` and `review` but
+          NOT on `check-proof`, the one verb that would have refused.
+    WHAT A MISSING `.git` ACTUALLY DOES, since the shard should not leave it as an open question:
+    MEASURED by execution against a directory with no `.git`, with neither the guard env nor CI set —
+    `checkCliFreshness` returns `status: \"degraded\"` (the first `git fetch` throws and is caught),
+    NOT `refused` and NOT an uncaught throw. Only `refused` reaches `process.exit(1)`. So an rmd whose
+    repoRoot really is a non-repo is harmless — that case simply never arises from a worktree."
+  design: "(i) ARGUE ALL THREE AND SHIP ONE. The `/app` path substitution is candidate ZERO and the
+    rationale above already disqualifies it: it does not change `repoRoot`, so it does not stop the
+    refusal. Do not spend the budget re-testing it; if the implementer disagrees, the falsifier is one
+    command — invoke any refusing verb from a worktree with an `/app`-style copy and observe exit 1.
+      (a) SET THE GUARD ENV FOR WORKERS. `SELF_SYNC_GUARD_ENV` is NOT in `buildWorkerEnv`'s
+      `ALLOWLIST` today (measured: zero hits for it or `CI` under `src/lib/env.ts` and
+      `src/lib/worker.ts`), so this means adding it to the allowlist or passing it through `extra`.
+      Cheap, changes the environment rather than the guard — AND IT FAILS OPEN. Any sub-shell the
+      worker spawns that does not inherit the variable refuses again, and the failure mode is
+      exactly today's: silent relocation to the checkout. It is one forgotten export from being back.
+      (b) MAKE `checkCliFreshness` NOT REFUSE INSIDE A WORKTREE. A worktree on a run branch is
+      SUPPOSED to have diverged; refusing there is the guard firing on a healthy condition, which is
+      this repo's recurring defect class (four measured instances). `git rev-parse --git-dir` returns
+      a path under `worktrees/` inside a linked worktree, so the state is DISTINGUISHABLE without
+      guessing. Survives a forgotten flag because it does not depend on one.
+      THE HONEST COST OF (b), which must be weighed rather than waved past: it edits a BLOCKING guard,
+      and W1-T445 (#1662) added the off-main refusal to that same function very recently, so this is
+      freshly-changed code with live tests pinning it. It also widens what the guard permits on every
+      host, not just under a worker.
+      RECOMMENDATION: (b), with (a) as a belt-and-braces addition rather than an alternative — but the
+      implementer owns this and must say which shipped and why.
+    (ii) WHATEVER SHIPS, THE ACCEPTANCE MUST PIN THAT COMMITS LAND IN THE WORKTREE. Not that a verb
+    exits 0, not that an env var is set — those are proxies, and the observed damage is commits in the
+    wrong repository. A test that asserts the exit code would pass on a change that fixes nothing
+    about where `git commit` writes.
+    (iii) TWO RECOMMENDATIONS ARE WITHDRAWN — RECORDED SO NOBODY REBUILDS THEM.
+      A SANDBOX `denyWrite` ON THE CHECKOUT IS WRONG: `preflight --ci-parity` writes
+      `coverage/preflight-summary.json`, `check-proof` spawns `node --test`, and `review` and
+      `gh pr create` run there. Denying writes would break the gates the fleet requires before a PR.
+      MAKING THE WORKTREE SELF-SUFFICIENT IS MOOT: it already is (`linkWorktreeNodeModules`), a real
+      `npm ci` costs 60-90s warm per this repo's own `NPM_CI_TIMEOUT_MS` doc, and it SOLVES NOTHING
+      because the refusal is about branch divergence, not `node_modules`.
+    (iv) #1695 / W1-T450 IS UNRESOLVED AND MUST NOT BE ASSUMED AWAY. It is the ONE of fifteen that
+    stayed contained — one commit, authored `remudero-worker`, merged 2026-08-13T01:47:42Z. `/app`
+    does NOT explain it, because `/app` does not explain the general case either (see the rationale).
+    The remaining candidates are that it ran every verb under `CI=true`, or that it committed before
+    invoking any refusing verb. Establishing which needs that run's transcript, which this shard does
+    not have. NAMED UNRESOLVED DELIBERATELY: a fix argued from a wrong explanation of the one success
+    would be worse than one argued from the fourteen failures."
+  acceptance:
+    - claim: "a worker running a verb inside its worktree is not refused, so it never has to leave"
+      proof: "unit test: test/worktree-verb-containment.test.ts"
+    - claim: "a commit made by that worker lands in the worktree and not in the shared checkout"
+      proof: "unit test: test/worktree-verb-containment.test.ts"
+    - claim: "the guard still refuses a genuinely stale ordinary checkout, so the relaxation is scoped"
+      proof: "unit test: test/worktree-verb-containment.test.ts"
+  risk: high
+  origin: recon#worker-builds-in-checkout-2026-08-13
+  plan_refs: ["W1-T445", "W1-T446"]
+  files: [src/lib/self-sync.ts, src/lib/env.ts, test/worktree-verb-containment.test.ts, test/self-sync.test.ts, test/self-sync-branch-guard.test.ts, test/env.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — nothing here is parked on an operator ruling. Design (i) is an engineering
+    choice between two mechanisms with a stated recommendation, and the withdrawn options in (iii) are
+    recorded as settled rather than reopened.
+    `files:` COVERS BOTH CANDIDATE SURFACES because the shard deliberately does not pick for the
+    implementer: `src/lib/self-sync.ts` for (b) and `src/lib/env.ts` for (a). If only one ships, the
+    other is an inverse-scope violation at review — DROP THE UNUSED PATH rather than touching a file
+    to satisfy the list. That warning is here because `scopeViolationFiles` and
+    `inverseScopeUntouchedFiles` (`src/lib/review.ts`) both bite, in opposite directions.
+    THE DECLARED TEST SUITES WERE MEASURED BY INVOCATION, NOT PROSE MENTION, which is this week's
+    lesson after SEVEN files: corrections. At ab85e661, eleven files mention `checkCliFreshness` and
+    only TWO invoke it: `test/self-sync.test.ts` (9 invocations) and `test/self-sync-branch-guard.test.ts`
+    (5 — W1-T445's own suite, pinning the off-main refusal this task edits around). Nine others are
+    prose-only and are NOT declared. `test/env.test.ts` (22 `buildWorkerEnv(` invocations) is the
+    allowlist's suite and moves only if (a) ships.
+    THE MINI IS UNMEASURED AND THIS SHARD DOES NOT CLAIM OTHERWISE. The clone-identity discriminator
+    that produced the 14-of-15 figure does not transfer to the operator's host: `deploy/Dockerfile`'s
+    own note records that `63 of 64 merged Remudero-Task: commits actually carry Craig Oley — the
+    OPERATOR'S OWN`, so authorship cannot separate a worker's commit from the operator's there. The
+    MECHANISM is host-independent — the refusal is a property of a diverged branch, not of a
+    container — so the pressure exists on the mini too; whether it fires is simply unknown.
+    RULE 19: `risk: high` is set UP FRONT so `sizingViolation` (`src/lib/task-linter.ts`) returns
+    early before `subsystemsOf` is consulted. The band is the SPAN (`src/` plus `test/`, two modules
+    because two candidates are open), not blast radius — whichever candidate ships is a few lines.
+    RULE 25: no instrument entanglement; `self-sync.ts` and `env.ts` are product paths and nothing
+    here touches `INSTRUMENT_SURFACE`.
+    NO NUMBER HERE SHOULD BE QUOTED FORWARD: 14-of-15, the invocation counts and the `/app` observation
+    were true at 2026-08-13T12:00Z. Re-derive before building — especially the `/app` falsification,
+    which is the one finding that changes what gets built."
