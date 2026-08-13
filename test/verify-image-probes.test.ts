@@ -282,6 +282,106 @@ test("MUTANT: one apostrophe in a probe comment breaks delivery, and the deliver
   );
 });
 
+// ── EVERY SHELLED BINARY IS INVOKED AS uid 1000, AND jq IS ONE OF THEM ───────────────────────
+//
+// A binary installed in the Dockerfile but never EXECUTED by a probe is the vacuous check this file
+// has been corrected for seven times: `apt-get install` succeeding proves the package resolved, not
+// that the runtime user can run the thing. The `binaries` probe already invokes ps/pgrep/lsof for
+// exactly that reason (#1515). jq joins them here.
+//
+// WHY jq AT ALL: MEASURED on the published image at `3a5c677`, a full glob gave 16 failures and 14
+// were `jq: command not found`, exit 127 — the three `ci-gate-*` suites extract and RUN the real
+// bash+jq script out of `.github/workflows/ci-gate.yml`, which uses jq legitimately because it runs
+// on ubuntu-latest. The dependency is the workflow's; the gap is the image's.
+
+/**
+ * The `binaries` probe's payload AS DELIVERED — read out of the argv the script actually handed
+ * `docker run`, not out of the file. This is the form that proves delivery.
+ */
+function binariesProbeDelivered(): string {
+  const run = runVerifier("good").argvs
+    .filter((a) => a[0] === "run")
+    .map((a) => a[a.indexOf("-c") + 1] ?? "")
+    .find((p) => p.includes("ALL_RUNNABLE"));
+  assert.ok(run, "the binaries probe must reach docker at all");
+  return run;
+}
+
+/**
+ * The same probe read out of a script's TEXT.
+ *
+ * Needed for the mutant below, and the reason is worth stating rather than working around silently:
+ * the binaries probe is the LAST section of the script, and a copy running from a temp dir exits
+ * before it (it has no checkout beside it). So a mutant cannot be observed through delivery — the
+ * probe never arrives for reasons that have nothing to do with the mutation, which would make the
+ * mutant "pass" while measuring nothing. Reading the text keeps the mutant honest about what it is
+ * actually proving: that the assertion depends on the line being there.
+ */
+function binariesProbeText(text: string): string {
+  const start = text.indexOf("fail=0");
+  const end = text.indexOf("ALL_RUNNABLE", start);
+  assert.ok(start !== -1 && end !== -1, "the binaries probe block must be findable in the text");
+  return text.slice(start, end);
+}
+
+test("the binaries probe INVOKES jq, rather than testing for its presence", () => {
+  const payload = binariesProbeDelivered();
+  assert.match(payload, /jq --version/, "jq must be executed, not `command -v`'d");
+  assert.match(payload, /MISS jq/, "and a failure must name jq, so the report says which binary");
+  // The whole point of this probe is that it runs as the RUNTIME user, not root.
+  const argv = runVerifier("good").argvs.find((a) => a.includes("--user"));
+  assert.ok(argv?.includes("1000:1000"), "the probe must run as uid 1000, or it proves nothing");
+});
+
+test("every binary the probe claims to cover is actually invoked in it — no silent drop", () => {
+  const payload = binariesProbeDelivered();
+  for (const bin of ["ps", "pgrep", "lsof", "jq"]) {
+    assert.ok(payload.includes(`MISS ${bin}`), `the probe must be able to report a missing ${bin}`);
+  }
+});
+
+test("MUTANT: drop jq's invocation from the probe and the coverage test catches it", () => {
+  // The anti-vacuity guard for the two tests above: they assert a property, this proves they FAIL.
+  const real = readFileSync(SCRIPT, "utf8");
+  const target = '  jq --version >/dev/null 2>&1    || { echo "MISS jq";     fail=1; }\n';
+  assert.equal(
+    real.split(target).length - 1,
+    1,
+    "the substitution target must be UNIQUE, or this mutant is not injecting where it claims",
+  );
+  const mutant = real.replace(target, "");
+  assert.notEqual(mutant, real, "the mutation must actually change the file");
+
+  const dir = mkdtempSync(join(tmpdir(), "verify-image-jq-mutant-"));
+  const path = join(dir, "verify-image.sh");
+  writeFileSync(path, mutant, { mode: 0o755 });
+
+  // Still syntactically valid — asserted, because that is exactly why `bash -n` cannot catch this.
+  const lint = spawnSync("bash", ["-n", path], { encoding: "utf8" });
+  assert.equal(lint.status, 0, `bash -n must stay clean on the mutant: ${lint.stderr}`);
+
+  const payload = binariesProbeText(readFileSync(path, "utf8"));
+  assert.doesNotMatch(payload, /jq --version/, "the mutant really did remove the invocation");
+  assert.ok(!payload.includes("MISS jq"), "and with it, the ability to report jq missing");
+});
+
+// ── THE DOCKERFILE MUST BOTH INSTALL IT AND VERIFY IT IN-LAYER ───────────────────────────────
+
+test("the Dockerfile installs jq AND runs it in the same layer, so a broken package fails the build", () => {
+  // "Verified in-layer for the same reason REQ 7 is: a missing sandbox binary should fail the build
+  // here, not a worker later." — deploy/Dockerfile's own words about this RUN.
+  const dockerfile = readFileSync(join(REPO_ROOT, "deploy", "Dockerfile"), "utf8");
+  const layer = dockerfile
+    .split("\n")
+    .join("\n")
+    .match(/RUN apt-get update && apt-get install -y --no-install-recommends \\\n(?:.*\\\n)*.*/);
+  assert.ok(layer, "the sandbox/process-inspection RUN layer must still be findable");
+  const block = dockerfile.slice(dockerfile.indexOf("bubblewrap socat procps lsof"));
+  const upToLayerEnd = block.slice(0, block.indexOf("\n#"));
+  assert.match(upToLayerEnd, /bubblewrap socat procps lsof jq/, "jq must be in the install list");
+  assert.match(upToLayerEnd, /jq --version/, "and INVOKED in the same RUN, not merely installed");
+});
+
 // ── THE VERSION-VALUE CHECK, EXECUTED RATHER THAN READ ───────────────────────────────────────
 //
 // The stub above REPLAYS canned probe output, so the verdict tests prove the script's exit-code
@@ -469,7 +569,7 @@ const BROKEN: ReadonlyArray<{ mode: string; why: string; says: RegExp }> = [
   { mode: "collide-silent-stale", why: "an untracked-file collision leaves the tree stale but reports success", says: /stayed on the old sha and reported success/ },
   { mode: "unpinned", why: "a sha ref stops pinning exactly", says: /sha ref did NOT pin exactly/ },
   { mode: "boot-crash", why: "the bootstrap probe itself dies", says: /bootstrap-currency probe did not complete/ },
-  { mode: "binaries-missing", why: "a process-inspection binary is absent for the runtime user", says: /process-inspection binary is missing or unrunnable/ },
+  { mode: "binaries-missing", why: "a shelled binary is absent for the runtime user", says: /a shelled binary is missing or unrunnable/ },
   { mode: "claude-version-mismatch", why: "claude runs but is not the version the Dockerfile declares", says: /FAILURES above/ },
   { mode: "build-sha-mismatch", why: "the image label and the baked build-sha file disagree", says: /FAILURES above/ },
 ];

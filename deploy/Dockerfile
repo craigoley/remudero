@@ -256,13 +256,14 @@ RUN npm_config_cache=/tmp/npm-build-cache \
 # Verified in-layer for the same reason REQ 7 is: a missing sandbox binary should fail the build
 # here, not a worker later.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      bubblewrap socat procps lsof \
+      bubblewrap socat procps lsof jq \
  && rm -rf /var/lib/apt/lists/* \
  && bwrap --version \
  && socat -V >/dev/null \
  && ps -eo pid= >/dev/null \
  && pgrep --version >/dev/null \
- && lsof -v >/dev/null 2>&1
+ && lsof -v >/dev/null 2>&1 \
+ && jq --version >/dev/null
 # NOTE the `>/dev/null` above rather than `| head -1`: `A && B | C` parses as `A && (B | C)` and a
 # pipeline's status is its LAST stage, so `socat -V | head -1` would return head's zero even with
 # socat absent — the check would pass for a missing binary. Written that way first, caught here.
@@ -286,6 +287,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # (lib/clone-reaper.ts) FAILS CLOSED by design — with `lsof` absent it returns 1 ("something holds
 # it"), so the clone reaper reclaims nothing rather than deleting something live. Safe, still a
 # no-op sweep.
+#
+# `jq` IS THE SAME CLASS ONE BINARY OVER, and its failure mode is louder rather than silent — which
+# is the only reason it went 14 tests before anyone looked. MEASURED on this image at `3a5c677`, a
+# full `test/**/*.test.ts` glob gave 16 failures, and 14 of them are `jq: command not found` with
+# exit 127. THE TESTS ARE NOT AT FAULT AND MUST NOT BE REWRITTEN: `test/ci-gate-dedupe.test.ts`,
+# `test/ci-gate-reaggregate.test.ts` and `test/ci-gate-transport-retry.test.ts` extract the REAL
+# bash+jq script out of `.github/workflows/ci-gate.yml` and run it — "never re-typed here", as all
+# three say — so the dependency belongs to the WORKFLOW, which legitimately uses jq because it runs
+# on `ubuntu-latest`. Rewriting those seven jq calls to `node -e` would change a product artifact to
+# suit a host, and would break the property that makes the suite worth having.
+#
+# THIS IS NOT IN TENSION WITH `deploy/host-update.sh`, WHICH DELIBERATELY AVOIDS jq. That script's
+# comment scopes its own reason precisely — it "is documented to run on a host with no node, no rmd
+# and no checkout, and jq is not present on the measured host either". That is the OPERATOR'S BARE
+# HOST, a deliberately minimal environment this image is not. The repo's position is "the bootstrap
+# script assumes nothing", not "jq is unwelcome"; `.github/workflows/ci-gate.yml` shells it seven
+# times.
+#
+# Cost is 1152 KB installed (399 KB to fetch) for `jq` plus its `libjq1`/`libonig5` dependencies.
 #
 # WHAT IS INSTALLED AND WHY: `procps` for `ps` (four call sites) and `pgrep` (one); `lsof` for three.
 # `pkill`, `top` and `free` have ZERO callers — `pkill` appears only as a string in

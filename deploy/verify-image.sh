@@ -636,16 +636,21 @@ out="$(docker run --rm --entrypoint /bin/sh --user 1000:1000 "${REF}" -c '
   ps -eo pid= >/dev/null 2>&1     || { echo "MISS ps";     fail=1; }
   pgrep --version >/dev/null 2>&1 || { echo "MISS pgrep";  fail=1; }
   lsof -v >/dev/null 2>&1         || { echo "MISS lsof";   fail=1; }
+  # jq is not process inspection; it is the ci-gate workflow script the three ci-gate suites
+  # extract and RUN. Absent, they exit 127 and 14 tests fail — measured on this image.
+  jq --version >/dev/null 2>&1    || { echo "MISS jq";     fail=1; }
   [ "$fail" -eq 0 ] && echo ALL_RUNNABLE
 ' 2>&1)"
 set -e
 if printf '%s\n' "${out}" | grep -q '^ALL_RUNNABLE$'; then
-  echo "  OK    ps, pgrep and lsof all executed as uid 1000"
+  echo "  OK    ps, pgrep, lsof and jq all executed as uid 1000"
 else
-  echo "  FAIL  a process-inspection binary is missing or unrunnable as uid 1000:" >&2
+  echo "  FAIL  a shelled binary is missing or unrunnable as uid 1000:" >&2
   printf '%s\n' "${out}" | sed 's/^/        /' >&2
-  echo "        Every sweep that shells one of these reports SUCCESS on an empty result," >&2
-  echo "        so this failing silently is what it looks like when it is not checked." >&2
+  echo "        ps/pgrep/lsof fail SILENTLY: every sweep that shells one reports SUCCESS on an" >&2
+  echo "        empty result, so this is what that looks like when it is not checked. jq fails" >&2
+  echo "        LOUDLY instead - exit 127 in the ci-gate script the ci-gate suites run - which is" >&2
+  echo "        why it cost 14 red tests rather than a silent no-op. Both belong in this probe." >&2
   RC=1
 fi
 
