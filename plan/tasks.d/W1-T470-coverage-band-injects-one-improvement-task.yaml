@@ -1,0 +1,178 @@
+- id: W1-T470
+  title: "branch coverage between 85 and 90 passes the build but injects ONE coverage-improvement task naming the files that own the debt, filed through the triage queue so the fleet's own grounding refuses it when it is already known"
+  repo: remudero
+  depends_on: [W1-T466]
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: "RE-DERIVED AT 592beb6 ON THE MINI (Craigs-Mac-mini). Every figure below was
+    re-measured for this filing; where a carried figure did not reproduce, the correction is here
+    rather than the original.
+
+    (0) WHAT TIER TWO IS, AND WHAT IT IS NOT. The absolute-threshold gate has three tiers: at or
+    above 90 the build passes silently; BETWEEN 85 AND 90 the build PASSES and one
+    coverage-improvement task is injected; below 85 the build blocks. This task is the MIDDLE tier
+    only.
+    TIER ONE SHIPS SEPARATELY AS AN INSTRUMENT-ONLY CHANGESET — the thresholds themselves
+    (`classifyCoverageTier`, `scripts/coverage-ratchet.mjs`, `scripts/coverage-baseline.json`) are a
+    different diff, and that diff MERGED as #1758 (`39f198a`) while this shard was being written, so
+    the 85-90 band this task acts on now exists on main and W1-T466 is credited. TIER THREE WAITS ON THE TRIAGE DRAIN: the remediation
+    loop is a repeated injection, and a loop is exactly what a saturated queue cannot absorb today
+    (see (2)). Tier two is ONE entry per red-band run, which is survivable, and that is the whole
+    reason it ships before tier three.
+
+    (1) THE INJECTED TASK IS THE WHOLE OF TIER TWO, because there is no PR-side knob left to turn.
+    `scripts/diff-coverage.mjs` is BINARY, NOT A THRESHOLD: it blocks when ANY added source line has
+    zero hits, so it is already maximally strict and cannot be tightened by a band. Anything tier two
+    adds to the PR surface can therefore only be ADVISORY — a note in the review, nothing that
+    refuses. So a design that spends its effort on PR messaging has built the part that does not
+    matter. The deliverable is the injected task.
+
+    (2) THE QUEUE IS SATURATED, RE-COUNTED AT FILING TIME. `plan/feedback/` holds 146 entries:
+    88 `status: new`, 32 `rejected`, 25 `accepted`, 1 `proposed`. The 88 grew from 58 AFTER the
+    triage cadence was quadrupled from 60m to 15m, so cadence is not the binding constraint — the
+    per-day cap is. This is the reason tier three waits and the reason tier two must emit ONE entry,
+    never one per file.
+
+    (3) THROUGH THE QUEUE AND NOT DIRECT — ARGUED, NOT ASSUMED, AND THE EVIDENCE LEANS THROUGH.
+    Direct filing sidesteps saturation, and that is its only advantage. What it removes is the ONLY
+    thing standing between the fleet and rebuilding work it has already declined: `rmd triage`'s
+    grounding, whose entire purpose is refusing duplicate and already-decided work. That grounding is
+    not theoretical and it is not sufficient either — THIS WEEK PRODUCED FIFTEEN-PLUS DUPLICATIONS
+    WITH GROUNDING ALREADY IN PLACE. Read correctly that cuts FOR the queue, not against it: if
+    duplication survives grounding, it would be far worse without it, and a coverage producer is the
+    most repetitive filer imaginable — the same ten files own the debt every single run. A direct
+    path would refile them forever.
+    AND THE DIRECT PATH IS NOT THE CHEAP OPTION IT LOOKS LIKE. THERE IS NO PROGRAMMATIC
+    TASK-MINTING PATH: no code anywhere writes a shard into `plan/tasks.d/`. Re-verified here with a
+    control that FIRES — the same query shape finds `writeFileSync(feedbackEntryPath(...))` in
+    `src/lib/feedback.ts` at four call sites, and `src/lib/plan-architect.ts` contains ZERO
+    `writeFileSync` while `src/lib/feedback.ts` contains six. `planArchitectPrompt` builds a PROMPT;
+    `triageCommand` and its siblings take an injectable `spawn?: typeof spawnWorker`. TASK AUTHORING
+    GOES THROUGH A SPAWNED MODEL WORKER. The one near-miss was ruled out: `materializeOriginShards`
+    (`src/run-task.ts`) writes shard blobs into `makeTempDir(\"plan\")` for the dispatch-time synced
+    view, never into the real `plan/tasks.d/`. So 'file directly' means either BUILD A MINTER THAT
+    DOES NOT EXIST or SPAWN A WORKER — which costs money and bypasses the grounding. The producer
+    therefore writes ONE `plan/feedback/` entry via `captureFeedback` (`src/lib/feedback.ts`, the
+    writer that stamps `status: \"new\"`).
+
+    (4) THE DEDUPE, AND THE BUG NOT TO COPY. The escalation precedent is RIGHT IN SHAPE AND WRONG IN
+    IMPLEMENTATION: its ledger-read dedupe consulted ONE FILE against a rotation cap of
+    `MAX_RETAINED_LINES_PER_STEP = 200` newest rows per step (`src/lib/ledger.ts`), which made 100 of
+    207 escalated ids invisible. A coverage producer inheriting that shape reads 'not yet filed' for
+    anything older than the cap AND FILES AGAIN EVERY RUN — an unbounded refile loop wearing a dedupe
+    as a disguise. READ THE UNION ACROSS ALL THREE LEDGER FORMS instead: the gzipped rotations, the
+    PLAIN rotations, and the live `state/ledger.ndjson`.
+    A CORRECTION TO THE CARRIED GUIDANCE, MEASURED HERE: the union helper is NO LONGER one-sided.
+    `ledgerRotationEntries` (`src/lib/ledger-grep.ts`) is now THE ONE DEFINITION of which files are
+    rotations, classifying both `.ndjson.gz` and `.ndjson` from the NAME, and it is shared by
+    `resolveLedgerUnion`, `ledgerCorpusFiles` (`src/run-task.ts`) and `src/lib/status.ts`. Its own
+    doc records the fix and the measurement behind it — 418,898 distinct lines, of which the old
+    `.gz`-only reader reached 384,039 and the old `.ndjson`-only reader reached 38,744. SO THE
+    PRODUCER MUST REUSE THAT HELPER RATHER THAN HAND-ROLL A GLOB; a fourth spelling would relocate
+    the same defect. Whatever step name the producer writes must also be added to
+    `DECISION_RELEVANT_LEDGER_STEPS` (`src/lib/ledger.ts`) in the same PR, or rotation will archive
+    the dedupe's own evidence and reset it.
+
+    (5) WHAT MAKES THE TASK ACTIONABLE: NAME THE FILES AND NEVER A PERCENTAGE. 'coverage went down'
+    is unactionable and is what today's gate says. Per-file attribution IS available at the moment
+    the producer runs: `coverage/lcov.info` is job-local, written by the coverage job's
+    'Test with coverage' step and read by BOTH later steps of the SAME job
+    (`.github/workflows/ci.yml`), so it carries full per-file `SF:`/`BRF:`/`BRH:` records.
+    THE PRODUCER MUST COMPUTE THE ATTRIBUTION AT RUN TIME FROM THAT LCOV AND MUST NOT CARRY A
+    NUMBER FROM THIS SHARD. That is a correctness requirement, not a style preference, and this
+    filing is itself the evidence for it: the commissioning brief carried 'src/run-task.ts is 51% of
+    all uncovered branches, top ten 69.6%', and re-measured here against a real lcov those figures
+    DID NOT REPRODUCE UNDER ANY NATURAL DENOMINATOR. The lcov used is the right one — it reproduces
+    the gate's own aggregate of 90.27% exactly (all in-repo BRF 15174 / BRH 13698). Measured over
+    it: `src/run-task.ts` owns 528 of 1351 uncovered branches under `src/`, which is 39.1%, or 35.8%
+    of all 1476 in-repo uncovered branches; the top ten files are 60.7% cumulative, not 69.6%. The
+    same file is 72.0% of uncovered LINES and 18.5% of uncovered FUNCTIONS, so no reading of that
+    lcov yields 51%. A frozen percentage rots between the run that measured it and the task that
+    quotes it; a run-time computation cannot.
+    Indicative shape only, to size the work: the debt is heavily concentrated, one file dominates,
+    and a ten-file list covers roughly three fifths of it.
+
+    (6) RULE 25 FORBIDS SHIPPING THE PRODUCER WITH THE THRESHOLDS, and it forces a SECOND split
+    inside tier two that is easy to miss. `detectInstrumentEntanglement` (`src/lib/review.ts`,
+    module-private) fails any PR whose diff carries BOTH an instrument path and a product path,
+    where instrument is `INSTRUMENT_SURFACE` — which includes `^.github/workflows/` and the ratchet
+    and baseline scripts — and product is `isProductPath`, meaning under `src/` and not a test.
+    Reproduced faithfully at 592beb6, with both controls behaving: a diff of
+    `src/lib/coverage-improvement.ts` plus `.github/workflows/ci.yml` reads entangled=TRUE, while
+    the producer plus its tests alone reads FALSE and a lone `ci.yml` step reads FALSE. Tier one's
+    own shape (`scripts/coverage-ratchet.mjs` + baseline + `ci.yml` + its test) also reads FALSE, and
+    the control `scripts/coverage-ratchet.mjs` + `src/lib/review.ts` correctly reads TRUE.
+    SO TIER TWO IS TWO PULL REQUESTS, NOT ONE: first the producer and its tests under `src/` and
+    `test/` with no workflow edit, then the one-line step that invokes it in the coverage job. Either
+    ordering works because the producer is inert until wired, but they cannot be the same diff, and
+    neither may carry tier one's threshold change."
+  acceptance:
+    - claim: "the shard scopes itself to the middle tier and says where the other two live"
+      proof: "grep: TIER ONE SHIPS SEPARATELY AS AN INSTRUMENT-ONLY CHANGESET in plan/tasks.d/W1-T470-coverage-band-injects-one-improvement-task.yaml"
+    - claim: "the shard records that tier three is deferred until the triage queue drains"
+      proof: "grep: TIER THREE WAITS ON THE TRIAGE DRAIN in plan/tasks.d/W1-T470-coverage-band-injects-one-improvement-task.yaml"
+    - claim: "the shard establishes that the injected task is the deliverable because diff-coverage is binary and leaves no stricter PR knob"
+      proof: "grep: THE INJECTED TASK IS THE WHOLE OF TIER TWO in plan/tasks.d/W1-T470-coverage-band-injects-one-improvement-task.yaml"
+    - claim: "the shard argues the filing route rather than asserting it and lands on the queue"
+      proof: "grep: THROUGH THE QUEUE AND NOT DIRECT in plan/tasks.d/W1-T470-coverage-band-injects-one-improvement-task.yaml"
+    - claim: "the shard specifies the union read across every ledger form as the dedupe and names the capped one-file read as the bug not to copy"
+      proof: "grep: READ THE UNION ACROSS ALL THREE LEDGER FORMS in plan/tasks.d/W1-T470-coverage-band-injects-one-improvement-task.yaml"
+    - claim: "the shard requires the injected task to name files computed at run time rather than a frozen percentage"
+      proof: "grep: NAME THE FILES AND NEVER A PERCENTAGE in plan/tasks.d/W1-T470-coverage-band-injects-one-improvement-task.yaml"
+    - claim: "the shard states that Rule 25 keeps the producer out of tier one's changeset and splits the wiring from the implementation"
+      proof: "grep: RULE 25 FORBIDS SHIPPING THE PRODUCER WITH THE THRESHOLDS in plan/tasks.d/W1-T470-coverage-band-injects-one-improvement-task.yaml"
+    - claim: "the producer is reached from a real call site rather than merged green and unreached"
+      proof: "grep: injectCoverageImprovementTask( in src/run-task.ts"
+  origin: recon#coverage-tier-two-2026-08-13
+  plan_refs: []
+  files: [src/lib/coverage-improvement.ts, src/run-task.ts, src/lib/feedback.ts, src/lib/ledger.ts, .github/workflows/ci.yml, test/coverage-improvement.test.ts, test/coverage-ratchet.test.ts, test/ledger-rotation.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT. `sizingViolation` (`src/lib/task-linter.ts`) blocks at
+    `>=2 subsystems while risk<high`, and `files:` spans `src/lib/`, `.github/workflows/` and
+    `test/`. The band is Rule 19's SPAN, not blast radius — the producer is inert until its one-line
+    step is wired, and the runtime blast radius is one `plan/feedback/` entry per red-band CI run.
+
+    `files:` INCLUDES THE EXISTING TESTS THAT ASSERT THE SHAPES THIS TASK CHANGES, not only the new
+    ones. `test/coverage-ratchet.test.ts` carries the two `coverage-ratchet CI wiring` tests that
+    assert the coverage job's step wiring in `.github/workflows/ci.yml` — the exact job the producer's
+    step is added to. `test/ledger-rotation.test.ts` re-derives
+    `DECISION_RELEVANT_LEDGER_STEPS` from every consumer's source, so it fails the moment the
+    producer's dedupe step is read without being registered there; that is a whole-suite check a
+    scoped local run cannot catch. `src/lib/feedback.ts` is listed because the producer calls
+    `captureFeedback` rather than writing YAML by hand, and `src/lib/ledger.ts` because the step
+    constant lives there.
+    `test/instrument-isolation.test.ts` is DELIBERATELY ABSENT: it asserts the W1-T297 entanglement
+    rules in general, which this task obeys rather than changes.
+
+    THE TWO-PR SPLIT IN (6) IS A CONSTRAINT ON THE IMPLEMENTER, NOT A SECOND TASK. `files:` spans
+    both halves because one task owns them; the implementer must simply not put them in one diff.
+
+    THE CALL-SITE CRITERION NAMES `injectCoverageImprovementTask` DELIBERATELY, and that name is a
+    SPECIFICATION rather than a guess about existing code — the symbol does not exist yet, and the
+    linter's `call-site` check requires a criterion of the form `grep: <symbol>( in <caller>` or the
+    module can merge green and unreached, which it says has already happened to eleven modules. The
+    caller is `src/run-task.ts` because the producer is reached as an `rmd` verb: the coverage job
+    cannot invoke a `src/lib/` module directly without either a bare `tsx -e` incantation in the
+    workflow or a second entry point. Forward-referencing the PATH is safe; the implementer must
+    honour the SYMBOL or update this criterion in the same PR.
+
+    THE SHARD'S OWN PATH IS DELIBERATELY *NOT* IN `files:`, AND THAT COSTS SEVEN `proof-scope`
+    WARNINGS ON PURPOSE. Every content criterion greps this file, so `proof-scope` warns that
+    `scopeGuardOutOfScopeFiles` (`src/run-task.ts`) would refuse a branch touching a path outside
+    `files:`. ADDING THE PATH WAS TRIED HERE AND IS STRICTLY WORSE — MEASURED: it trades those seven
+    WARNINGS for one HARD `rule15-filing` violation, because declaring a plan-scope path alongside
+    `src/` paths at `verify: auto` destroys the reviewer's `planOnly` carve-out, so `criteriaTampered`
+    refuses the PR however good the work is, and a dispatched worker gets ONE PR and cannot split it.
+    The warning is the endemic shape rather than a novel defect: 357 such warnings already exist
+    across the plan, and W1-T468 — filed the same day and MERGED GREEN — carries three of them with
+    zero hard violations. The implementer must therefore not touch this shard on the
+    implementation branch; if a criterion needs rewording, that is a separate plan-only edit.
+
+    ONE FIGURE IS DELIBERATELY ABSENT FROM THIS SHARD: the per-file attribution percentages. Clause
+    (5) explains why — the commissioning brief's own carried numbers failed to reproduce, and the
+    producer computes them at run time from the job's lcov. The measurements quoted in (5) are
+    provenance for THAT decision and must not be copied into the injected task."
