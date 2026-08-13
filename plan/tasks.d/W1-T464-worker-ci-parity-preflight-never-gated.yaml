@@ -1,0 +1,151 @@
+- id: W1-T464
+  title: "the worker's `--ci-parity` preflight gates nothing, has never prevented a push, and costs about a quarter of every lane — decide whether it should remain a WORKER step at all"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  rationale: "RE-DERIVED AT 00fd676 ON THE AZURE HOST, whose ledger holds the dispatch history. Every
+    number below was re-measured for this filing; two of the commissioning brief's own premises did
+    not survive that re-measurement and are corrected here rather than repeated.
+
+    (1) NOTHING GATES ON IT, AND THAT IS VISIBLE IN THE SOURCE, NOT INFERRED. The ENTIRE handling of a
+    failed worker preflight in `src/run-task.ts` is, verbatim:
+      const preflightNotice = preflightFailureNotice(worktreePath);
+      if (preflightNotice) {
+        log(\"preflight.failed\", { detail: preflightNotice, worktree: worktreePath });
+        say(preflightNotice);
+      }
+    There is NO branch, NO early return, NO gate. The next statement is `failOnWorkerError(impl,
+    \"implement\")`, which concerns the worker's own error and not the preflight. The orchestrator does
+    not even observe the failure directly: `preflightFailureNotice` (`src/lib/ci-parity.ts`) READS a
+    summary file the worker left in the worktree, after the fact.
+
+    (2) THE MEASURED POPULATION IS TWO, AND THE COMMISSIONING PREMISE ABOUT THE CHEAP TIER IS REFUTED.
+    17 `preflight.failed` rows exist on this host. Applying W1-T455's discriminator — the argv suffix,
+    which `preflightFailureNotice` appends ONLY when `summary.args` is a non-empty array — the split is
+    UNANIMOUS: 15 rows carry NO suffix and read EXACTLY `1 of 3 step(s) failed: commitlint`, character
+    for character the fake spawn's signature; 2 rows carry `(rmd preflight --ci-parity)`. So the 15
+    commitlint rows were NOT produced by any worker. They are `test/preflight.test.ts`'s fake spawn
+    writing a summary into whatever tree the suite ran in — the defect W1-T455 owns.
+    THE CORRECTIONS THAT FOLLOW, both against the brief that commissioned this shard AND against the
+    recon that preceded it, which reported the contaminated figures as derived:
+      - `the cheap tier fails only on commitlint, 15 times` — REFUTED. The cheap tier has produced
+        ZERO genuine failures on this host. Its observed output is empty, not one-check.
+      - `85% of pushing runs pushed with a failing preflight (17 of 20)` — REFUTED. Genuine rows are
+        2 of 20 runs that reached `pr.opened`, i.e. 10%.
+    The `--ci-parity` figures are UNAFFECTED, because both genuine rows are `--ci-parity` rows.
+
+    (3) THE TWO GENUINE FAILURES, TRACED END TO END, EARNED NOTHING.
+      W1-T406 -> #1559: `preflight.failed` 04:24:55, `pr.opened` 04:24:56. ONE SECOND. CI on that sha
+      `3491d085` registered ZERO check runs — the documented signature of a conflicting PR whose checks
+      never start — so CI never judged it. UNDECIDABLE, not a catch.
+      W1-T454 -> #1740: `preflight.failed` 17:30:34, `pr.opened` 17:30:34, the SAME SECOND. CI on the
+      IDENTICAL sha `a7114bb1`: 22 checks, 21 success + 1 neutral, ZERO failures; merged 17:39:54.
+      THE PREFLIGHT WAS WRONG.
+    EARNED ITS COST: 0. ONLY DELAYED THE ANSWER: 0. WRONG: 1. UNDECIDABLE: 1. In neither case did a
+    worker fix anything before pushing, because nothing asked it to — see (1).
+
+    (4) THE COST, cited from the recon that measured it on this host: one passing `--ci-parity` is
+    roughly 15-17 minutes — a 4-6 minute non-coverage suite plus a ~10 minute coverage suite plus 21
+    cheaper steps — against W1-T454's 48.5-minute implement phase and 61.1-minute lane. Roughly a
+    quarter of a lane. It is also the part that actually uses multiple cores; the LLM worker is a
+    single-threaded wait on an API. NOT INDEPENDENTLY RE-TIMED FOR THIS FILING: the ledger cannot
+    separate the two, because `implement.done` and `preflight.failed` carry identical timestamps on
+    both genuine rows (17:30:34.001 / 17:30:34.002) — the preflight runs INSIDE the worker's step.
+
+    (5) THE SAFETY NET IS REAL. `blocked_ci` is a first-class verdict in `NON_HALTING_VERDICTS`
+    (`src/lib/drain.ts`), whose own doc says a `blocked_ci` run HAS pushed its work and left the PR
+    open, and `src/lib/block-reason.ts` classifies it. A worker that pushes and lets CI judge is not
+    unprotected."
+  design: "(i) WHAT THE THREE-STEP BASE TIER SHOULD KEEP, AND THE ARGUMENT THAT IS NO LONGER
+    AVAILABLE. Per `docs/cli-reference.md` the base `rmd preflight` runs commitlint, `tsc --noEmit`
+    and `src/lib/commit-message.ts`'s own header/body checks as three INDEPENDENT steps. `tsc
+    --noEmit` and the commit-message checks are cheap, deterministic, and catch things a worker
+    genuinely should not push; nothing here argues against them.
+    COMMITLINT IS THE OPEN QUESTION, AND IT MUST BE ARGUED ON DESIGN, NOT ON THE LEDGER. The tempting
+    argument — `commitlint is the check that fires` — IS NOT AVAILABLE: per (2) every one of those 15
+    rows was forged, so there is NO evidence commitlint has ever misfired in the worker path. What
+    REMAINS true is structural and comes from the design's own table: `CI_PARITY_TABLE`
+    (`src/lib/ci-parity.ts`) marks the `commitlint` job `mirrored: false` because that job lints the
+    SQUASH-MERGE PR TITLE, which does not exist until the PR does. So the question is whether a
+    pre-push commitlint step can be checking the right thing AT ALL, and if it is worth keeping,
+    whether it should run against the COMMIT SUBJECT — which exists — rather than a squash title it
+    cannot see. Establish which of the two the local step actually reads before changing it.
+    (ii) WHETHER `--ci-parity` SHOULD BE A WORKER STEP, AND WHAT REMOVING IT WOULD AND WOULD NOT COST.
+    THE ENTIRE WORKER COUPLING IS TWO PROMPT LINES. `ciParityContractLines()`
+    (`src/lib/compaction.ts`) returns them, and `src/run-task.ts` spreads them into the implement
+    contract. That is the whole mechanism — there is no code path that runs the preflight, only a
+    prompt line asking the worker to.
+    REMOVING IT FROM THE WORKER PATH DOES NOT REMOVE THE VERB. `rmd preflight --ci-parity` is the HAND
+    route's gate by construction (W1-T221 built the verb, W1-T294 added the flag), and
+    `docs/operator-guide.md` already says of it: `too slow to run habitually`, against `--fast` which
+    is `affordable to run before every push`. An OPERATOR about to make a hand-authored push is a
+    different caller with different economics — they have no `blocked_ci` fix rung behind them — and
+    that case is untouched by anything considered here. SAY SO EXPLICITLY in whatever ships, so the
+    verb is not later deleted as dead.
+    (iii) THE CAVEAT THAT IS WORK, NOT A FACT, AND MUST NOT BE PRESENTED AS ONE. The rate at which
+    workers push code CI GENUINELY rejects is UNMEASURED. `blocked_ci` conflates real CI failures with
+    timeouts (`ci.stalled` x4 in this ledger) and with false blocks (`fix.false_block` x1 — so part of
+    the fix-rung cost is not caused by bad pushes at all), against `fix.dispatch` x6 / `fix.done` x6 /
+    `fix.exhausted` x3 / `fix.resolved` x1. IF THAT RATE IS HIGH, the preflight is buying down
+    something real even though it has never demonstrably caught it, and that would be an argument for
+    KEEPING it that none of the evidence above can refute. Measure it first; it is the one input that
+    could reverse the conclusion.
+    (iv) BE WILLING TO CONCLUDE THE STEP SHOULD STAY. A local suite that catches real failures before
+    they reach GitHub is worth its cost if it fires usefully. The finding here is not that it is
+    worthless in principle — it is that on this host it has never gated anything, could not have, and
+    was wrong the one time CI could judge it."
+  acceptance:
+    - claim: "the shard records that the orchestrator's handling of a failed preflight contains no gate"
+      proof: "grep: NO branch, NO early return, NO gate in plan/tasks.d/W1-T464-worker-ci-parity-preflight-never-gated.yaml"
+    - claim: "the shard records the forged-row correction to the commissioning premise"
+      proof: "grep: 15 rows carry NO suffix in plan/tasks.d/W1-T464-worker-ci-parity-preflight-never-gated.yaml"
+    - claim: "the shard records that removing the worker step leaves the operator verb intact"
+      proof: "grep: DOES NOT REMOVE THE VERB in plan/tasks.d/W1-T464-worker-ci-parity-preflight-never-gated.yaml"
+  origin: recon#worker-preflight-never-gated-2026-08-13
+  plan_refs: []
+  files: [src/lib/compaction.ts, src/run-task.ts, test/ci-parity-contract.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT, deliberately. `sizingViolation` (`src/lib/task-linter.ts`)
+    blocks at `>=2 subsystems while risk<high`, and `files:` spans `src/lib/`, `src/` and `test/`. The
+    band is Rule 19's SPAN, not blast radius: the blast radius is one exported function returning two
+    prompt lines, its one spread site, and the suite that asserts its shape.
+    THREE `proof-scope` WARNINGS ARE EXPECTED ON THIS SHARD AND ARE DELIBERATELY LEFT. The proofs are
+    `grep:` patterns against this shard rather than the house forward-referencing `unit test:` form,
+    because a forward reference cannot EXECUTE on the FILING PR — it would cap this review at
+    `proof_exec: 0/3`, whereas a `grep:` with an explicit path executes and can earn a full PASS on a
+    plan-only diff. `proofScopeViolations` (`src/lib/task-linter.ts`) then warns that the proof path is
+    outside `files:`.
+    ITS OTHER REMEDY WAS TRIED AND IS WORSE, MEASURED: adding this shard's path to `files:` alongside
+    the src/test paths turns the three WARNINGS into one BLOCK — `rule15-filing`, because a record edit
+    beside code at `verify:auto` puts `criteriaTampered` in a position to refuse the implementation PR
+    outright. Open-failing went 165 -> 166. `proofScope` defaults to `warn` and NO caller overrides it
+    (`opts.proofScope`), so these three never block. Leave them.
+    `files:` WAS OTHERWISE DERIVED BY INVOCATION, not by prose mention. `ciParityContractLines` is defined in
+    `src/lib/compaction.ts`, spread into the implement contract in `src/run-task.ts`, and asserted by
+    `test/ci-parity-contract.test.ts` — which pins the literal command, the before-the-push wording,
+    and the ORDER (`parityIdx < pushIdx`), so it fails the moment the contract changes and MUST be in
+    scope. DROP ANY PATH THE IMPLEMENTATION DOES NOT TOUCH: `inverseScopeUntouchedFiles` fails a
+    declared-but-untouched path just as `scopeViolationFiles` fails an undeclared one.
+    `plan_refs` IS DELIBERATELY EMPTY, and the two near neighbours are named here instead because
+    NEITHER OWNS THIS. W1-T455 owns the FORGED SUMMARIES — it repairs the instrument that produced the
+    15 fake rows; this task asks whether the thing being measured should run at all, which is a
+    question W1-T455 does not touch and which its own rewrite does not answer. W1-T295 ADDED the
+    contract line this task reconsiders; citing it as a dependency would read as blaming a completed
+    task for a decision that was reasonable when made and is being revisited on evidence that did not
+    exist then.
+    THE LANE-COUNT QUESTION IS NOT IN SCOPE AND MUST NOT BE CONFLATED WITH IT. Whether three
+    concurrent lanes fit on one VM is a separate question whose binding constraint is DISK, not the
+    suite. MEASURED TODAY on the Azure host: 16 GB of 29 GB used, 57% full, 13 GB free, with 31.2 GB
+    written by the daemon container alone. NOTE THAT THIS MOVED: the commissioning brief carried 26 GB
+    of 29 GB, 92% full, 2.5 GB free, and that was true earlier the same day — so the disk figure is
+    volatile and must be re-measured at decision time rather than quoted from here.
+    THE HOST MATTERS FOR EVERY NUMBER ABOVE. All ledger figures are the AZURE host's, whose ledger has
+    never rotated — the per-form control returns 1 live file and ZERO archives of either form, and
+    those archives are genuinely absent rather than unread. The mini's corpus is different (W1-T455
+    re-derived 27 rows across 666 gz / 3 plain / 1 live there, splitting 15 forged / 12 genuine), so
+    the two hosts must not be pooled without saying so."
