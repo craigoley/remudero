@@ -1,0 +1,102 @@
+- id: W1-T467
+  title: "main is below its own branch floor because #1739 made the metric MORE honest — 214 branches newly DISCOVERED against 113 newly covered — and every PR since inherits the red; the operator must choose between re-capturing the floor and retiring the aggregate comparison"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: "MAIN IS RED ON ITS OWN COVERAGE FLOOR AND EVERY PR INHERITS IT, INCLUDING PLAN-ONLY YAML
+    EDITS. The investigation is COMPLETE; this shard records the decision, not the diagnosis.
+    THE NEWLY-DISCOVERED BRANCHES ARE REAL GAPS, NOT IMPORT-TIME ARTEFACTS — and this is the sentence
+    that matters: **#1739 MADE THE METRIC MORE HONEST AND WAS PUNISHED FOR IT.** RE-VERIFIED at
+    00fd6765: `src/lib/deployer.ts` is BYTE-IDENTICAL between the two shas (`git diff --stat
+    3e370e35 origin/main -- src/lib/deployer.ts` is EMPTY), and all four named sites are still there —
+    `newPid ?? null` in `restartConsole`, `data ? … : \"\"` and `...(data ?? {})` in
+    `buildDeployLogger`, and `realDeployDeps`, which six test files call. They are untaken arms of
+    `??` fallbacks and ternary else-branches INSIDE ALREADY-EXERCISED CODE: always untested, and only
+    COUNTABLE once wider compilation made V8 emit their records.
+    THE ARITHMETIC, RE-DERIVED ON THIS HOST (mac mini) AND STATED WITH ITS READING COUNT — **ONE
+    reading per side**, which is why the figures below differ slightly from the brief that commissioned
+    this and why anyone acting on them should re-measure:
+      pre-#1739 : BRF 14,975 / BRH 13,596 / uncovered 1,379 -> **90.79%**
+      post      : BRF 15,179 / BRH 13,703 / uncovered 1,476 -> **90.28%**
+      => **+204 newly DISCOVERED, +107 newly COVERED, net +97 uncovered** (the commissioning figures
+      were 214 / 113 / +101 — same magnitude, same direction, within run-to-run variance).
+    THE BASELINE'S OWN NOTE TOOK EIGHT LOCAL READINGS BEFORE MOVING A FLOOR BY 0.04pts. One reading is
+    not that. TREAT EVERY NUMBER HERE AS A DIRECTION, NOT A VALUE.
+    `diff-coverage` CANNOT SUBSTITUTE, AND THIS IS WHY THE AGGREGATE RATCHET IS THE ONLY BRANCH GATE IN
+    THE STACK. MEASURED at 00fd6765: `scripts/diff-coverage.mjs` contains exactly ONE line mentioning
+    `BRDA`/`BRF`/`BRH`, and it is a COMMENT describing the ratchet — against 11 lines reading `DA:`.
+    Its own header states the division: `an already-uncovered pre-existing line is the aggregate
+    ratchet's problem, not a new regression this diff introduced.`"
+  design: "(i) THE DECISION IS TWO OPTIONS, NOT FOUR. Both are recorded with what is already measured;
+    NEITHER is recommended here, because the choice is the operator's.
+      **(1) RE-CAPTURE THE BRANCH FLOOR AGAINST TODAY'S IMPORT GRAPH, TIGHTENING LINES IN THE SAME
+      EDIT.** Using the file's own margin convention (0.56 lines / 0.10 branches under the lowest
+      reading): lines **95.62 -> ~97.95, a 2.33pt TIGHTENING**; branches **90.40 -> ~90.05, a 0.35pt
+      LOOSENING**. MIXED, NOT PURE — say so plainly rather than selling it as a ratchet-up.
+      **(2) STOP COMPARING AN AGGREGATE WHOSE DENOMINATOR MOVES WITH MODULE DISCOVERY.** The
+      baseline's own `_branchFloorCorrection` (#1566) already concedes the mechanism — `THE DRIVER IS
+      THE DENOMINATOR … BRH moves by 2 while BRF moves by 15` — and sized its margin at 0.1158pt, about
+      1.24x a measured 15-branch noise band. **#1739 MOVED BRF BY ~204: FOURTEEN TIMES THE NOISE THAT
+      MARGIN WAS BUILT FOR.** So the margin is not merely too small — IT WAS SIZED FOR A DIFFERENT
+      PHENOMENON, and widening it would be fitting a bound to the wrong distribution.
+    (ii) IF (2) IS CHOSEN, TWO SHAPES MUST BE KEPT APART.
+      A TOLERANCE BAND at a stated multiple of measured noise — bounded, explicit, re-derivable.
+      A FLOOR THAT RATCHETS UP ON GREEN — and NAME ITS HAZARD RATHER THAN SHIPPING IT QUIETLY: an
+      auto-advancing floor RATCHETS ON A LUCKY DENOMINATOR. That is exactly today's defect with the
+      sign flipped, and it compounds silently: each lucky run raises the bar the next honest run must
+      clear.
+    (iii) OPTION (b) FROM THE EARLIER ANALYSIS IS MEASURED NOT TO WORK — recorded so nobody rebuilds
+    it. A session performed it exactly: source-text pin, single-line spread call site, shallow
+    no-worktree driver. `diff-coverage` went GREEN and **the ratchet still read 90.16%**, because the
+    shallow driver STILL ENTERS `reviewCommand` and the compilation happens anyway. Removing that
+    driver would leave the spread line uncovered and re-red `diff-coverage`. NO THIRD SHAPE EXISTS:
+    any line inside `reviewCommand` can only be covered by entering `reviewCommand`.
+    (iv) OPTION (a) — cover the ~97-101 branches — IS REAL WORK ACROSS ~108 FILES, about one branch
+    each. It genuinely improves the suite and is NOT narrow by any reading. It is not excluded; it is
+    simply not a quick unblock, and presenting it as one would be dishonest.
+    (v) TWO EARLIER FIGURES ARE WRONG AND ARE CORRECTED HERE so they are not re-imported: the
+    `mounts.ts` `3/3 -> 22/48` came from a SCOPED TWO-FILE EXPERIMENT and is not a whole-suite reading;
+    and `main scored 90.75% ABOVE the floor` described **PRE-#1739 main**, not today's."
+  acceptance:
+    - claim: "the recorded floor is justified against a stated number of whole-suite readings, not one"
+      proof: "unit test: test/coverage-floor-recapture.test.ts"
+    - claim: "a denominator shift is distinguished from a coverage regression before any floor moves"
+      proof: "unit test: test/coverage-floor-recapture.test.ts"
+    - claim: "main passes its own floor after the change, so no later PR inherits a red it did not cause"
+      proof: "unit test: test/coverage-floor-recapture.test.ts"
+  origin: recon#branch-floor-denominator-2026-08-13
+  plan_refs: ["W1-T402"]
+  files: [scripts/coverage-baseline.json, scripts/coverage-ratchet.mjs, test/coverage-floor-recapture.test.ts, test/coverage-ratchet.test.ts]
+  status: queued
+  attempts: 0
+  note: "`verify: human` — BOTH options need a ruling this shard must not pre-empt. Option (1)
+    DIRECTLY CONTRADICTS A STANDING INSTRUCTION IN THE FILE IT WOULD EDIT
+    (`scripts/coverage-baseline.json`): `Never lower these numbers to make a PR pass — raise them
+    (ratchet up) when coverage genuinely improves; a coverage-lowering PR must go CI-red.`
+    THE OPERATOR'S POSITION, RECORDED AS HIS: amend that to say what it actually means — never lower
+    to hide a REGRESSION, but a DENOMINATOR SHIFT IS NOT ONE.
+    AND THE ARGUMENT AGAINST, WHICH THE SHARD OWES HIM: every future lowering will be argued as a
+    denominator shift, because that is the cheapest available story and the person telling it is the
+    person who wants the PR to land. The instruction is currently UNCONDITIONAL, which is exactly what
+    makes it enforceable by a reader who was not there. Amending it trades a bright line for a
+    judgement call — DEFENSIBLE ONLY IF THE AMENDMENT NAMES THE EVIDENCE A DENOMINATOR CLAIM MUST
+    CARRY (BRF moved, BRH moved, the ratio of the two), not merely the exemption.
+    RULE 25 — MEASURED, NOT ASSUMED, with both controls run: `INSTRUMENT_SURFACE` (`src/lib/review.ts`)
+    matches `scripts/coverage-baseline.json` AND `scripts/coverage-ratchet.mjs` (via
+    `^scripts/[^/]*-baseline\\.json$` and `^scripts/[^/]*-ratchet\\.mjs$`), while `src/lib/review.ts`
+    and `src/lib/deployer.ts` read as PRODUCT. So an instrument change CANNOT be entangled with a
+    `src/` coverage fix: **the options are separate changesets whatever the ruling**, and this shard's
+    `files:` is instrument-only for that reason. Option (a) would be a DIFFERENT task.
+    `enforce_admins` ORDERING — a NOTE, not a second concern. `enforce_admins: false` is HOW main
+    became red: a merge landed past a red required check, TWICE the same day (#1739 and #1721, both
+    merged while `ci-gate` was in progress). Enabling it NOW would bind the operator at exactly the
+    moment he needs to merge the fix, because `ci-gate` would fail on the inherited drop. THE ORDER IS:
+    **fix coverage -> confirm main goes green -> then enable `enforce_admins`.**
+    AND THE STRUCTURAL PRESSURE, RECORDED HONESTLY: `ci-gate` legitimately takes ~25 minutes when
+    something fails (`WAIT_CAP_SECONDS: 2400` plus a `GRACE_WINDOW_SECONDS: 600` re-aggregate window).
+    That is a long time for a plan-only YAML edit, and hand-merging is a RATIONAL response to it. A
+    remedy that makes hand-merging harder WITHOUT making the fleet faster deserves to be rejected."
