@@ -1,0 +1,116 @@
+- id: W1-T452
+  title: "bin/rmd refuses itself inside a worktree the moment the worker commits — so implement workers cd to the daemon's live checkout to run the gates, and their commits land there"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  origin: oper#worker-builds-in-checkout-2026-08-13
+  principles: {tdd: strict}
+  budget_usd: 40
+  files:
+    - src/lib/self-sync.ts
+    - src/run-task.ts
+    - test/self-sync.test.ts
+    - test/self-sync-branch-guard.test.ts
+    - test/self-sync-worktree-guard.test.ts
+    - test/feedback-landing.test.ts
+    - test/deploy-run-freshness-exempt.test.ts
+  rationale: "MEASURED on the Azure container and re-derived at ab85e66. FOURTEEN OF THE LAST
+    FIFTEEN merged implement runs built their work in the daemon's LIVE CHECKOUT rather than the
+    worktree they were given — #1709, #1690, #1684, #1680, #1671, #1664, #1662, #1661, #1658,
+    #1657, #1655, #1654, #1651, #1650, identified by PR tip-commit author: the fleet clone
+    (repos/remudero) carries NO local git identity and falls back to the container's global
+    `remudero-worker`, while the daemon checkout's .git/config carries local `cao825`, so the
+    author names WHICH CLONE a commit was made in.
+    THE WORKER IS NOT WANDERING AND THE WORKTREE IS NOT DEFICIENT. `spawnWorker` passes
+    `cwd: worktreePath` (12 call sites in run-task.ts), `buildContainedSpawnFn` forwards the SDK's
+    spawn options whole and the contained spawn sets `cwd: opts.cwd`; the worker demonstrably
+    STARTS there (`.claude/.cc-writes` appeared in the worktree at 07:40:43Z, five seconds after
+    `worktree.add` at 07:40:38.510Z). And `linkWorktreeNodeModules` (src/lib/worker.ts) symlinks
+    `node_modules` on every `worktreeAdd` — deliberately, 'never by installing', because an install
+    there emptied the shared tree on 2026-07-29. `bin/rmd` is tracked and `node_modules/.bin/tsx`
+    resolves. The toolchain is present and runnable.
+    WHAT DRIVES THE WORKER OUT IS `bin/rmd` REFUSING ITSELF. Every verb except daemon/serve/
+    deploy-run runs `checkCliFreshness`, and main() turns a refusal into
+    `console.error(...); process.exit(1)`. A worktree sits on `run-<taskId>-<epochMs>`, so the
+    moment the worker makes its FIRST COMMIT, HEAD stops being an ancestor of origin/main and the
+    `diverged` arm fires. REPRODUCED LIVE in a linked worktree at 329d22b:
+    `rmd has diverged from origin/main (329d22b vs ab85e66) -- not a fast-forward, refusing to
+    auto-sync`, EXIT 1 — with `RMD_SELF_SYNC_DONE=1` and `CI=1` both passing as controls on the
+    identical command. The excursion is therefore LEGITIMATE VALIDATION (check-proof,
+    preflight --ci-parity, review, gh pr create) reaching for the only place those verbs still run.
+    THE COMMITS ARE COLLATERAL, and they are the only real damage: `git commit` executed while
+    cd-ed into the checkout lands there, which is how the daemon's live checkout came to sit on a
+    feature branch for 2h36m while loading its own code from that directory."
+  design: |
+    (i) TWO CANDIDATE FIXES, AND THEY ARE NOT EQUIVALENT. Argue both in the PR body; ship one.
+      OPTION A — ENVIRONMENT: set `RMD_SELF_SYNC_DONE=1` in the worker's child env. ESTABLISHED:
+      the fleet does NOT set it today — `SELF_SYNC_GUARD_ENV` occurs in exactly ONE file,
+      src/lib/self-sync.ts, and its only write is `defaultReexec`'s own loop guard. Cheap, and it
+      matches what CLAUDE.md already mandates for sessions. BUT it is invisible at the call site
+      and does not survive a worker that shells a nested tool with a scrubbed env, nor a human
+      running a verb by hand in a worktree — the flag has to be remembered every time.
+      OPTION B — THE GUARD: `checkCliFreshness` should not refuse in a LINKED WORKTREE at all. A
+      worktree on a run branch is SUPPOSED to have diverged; that is what a branch is, so the
+      `diverged` arm is answering a question nobody asked. MEASURED: a worktree is distinguishable
+      in one predicate — `git rev-parse --git-dir` returns a path containing `/worktrees/`
+      (`/home/node/Remudero/remudero/.git/worktrees/shard-work`) where a main checkout returns
+      `.git`, and `--git-common-dir` differs from `--git-dir` only in a worktree. One predicate, in
+      the function that already owns the branch and divergence decisions.
+      THE ARGUMENT FOR B: it survives a worker that forgets the flag, which A cannot. Prefer it
+      unless the implementer finds a case where a worktree is GENUINELY stale in a way that matters
+      — note that dispatch re-cuts each worktree from origin/main per run and `syncPlanFromOrigin`
+      reads the plan from origin/main regardless, so the freshness refusal buys little there.
+    (ii) THE OPERATOR PATH MUST NOT WEAKEN. The refusal exists so `rmd` never runs stale code on
+    the operator's own `main` checkout, and W1-T445's off-main arm exists so a verb never advances
+    a ref that is not main. Both must still fire exactly where they fire today; only the
+    linked-worktree case changes. Both directions are acceptance criteria, not commentary.
+    (iii) WHAT CANNOT BE UNIT-ASSERTED, STATED RATHER THAN GLOSSED. Where a worker chooses to run
+    `git commit` is a model decision and no test can pin it. The acceptance therefore pins the
+    CAUSE — that a verb run inside a linked worktree on a diverged branch now exits 0, so the
+    worker has no reason to leave. The implementer should ALSO report, in the PR body, whether the
+    daemon's checkout acquires a `run-*` branch on the next dispatch after the change; that is the
+    outcome measure and it is observable in `.git/logs/HEAD`, not in a suite.
+  note: "TWO EARLIER RECOMMENDATIONS ARE WITHDRAWN — recorded here so nobody rebuilds them.
+    (1) A SANDBOX `denyWrite` ON THE CHECKOUT IS WRONG. It was proposed before the mechanism was
+    known. The excursions are validation that WRITES: `preflight --ci-parity` writes
+    coverage/preflight-summary.json, `check-proof` spawns `node --test`, and `review` and
+    `gh pr create` run there. A write-scope would break the gates the fleet requires before a PR.
+    Do not file it, and do not treat settings/worker.json's read-only `filesystem.denyRead` as an
+    omission awaiting a write half.
+    (2) MAKING THE WORKTREE SELF-SUFFICIENT IS MOOT — it already is. A real `npm ci` per worktree
+    costs 60-90s warm on this class of host (the repo's own NPM_CI_TIMEOUT_MS doc) and solves
+    NOTHING, because the refusal is not about node_modules. An install in a worktree is also the
+    exact operation that emptied the shared tree under a live daemon on 2026-07-29.
+    #1695 IS UNRESOLVED AND IS THE SHAPE THAT WORKS. It is the ONE of the last fifteen authored
+    `remudero-worker`, i.e. properly contained. The most likely explanation follows from the
+    mechanism — the refusal fires only AFTER the first commit, so a worker that runs its gates
+    BEFORE committing never sees it — and its envelope is consistent with less local gate-running
+    (111 turns / $7.68 against W1-T404's 228 turns / $27.71). That is a HYPOTHESIS: its transcript
+    lives in the daemon container's own ~/.claude and was not reachable, so ordering was never
+    observed. If the implementer can reach it, confirming or killing this is worth more than the
+    fix, because it would say whether the fix already exists in one code path.
+    THE MINI IS UNMEASURED. The mechanism is host-independent — plain source in self-sync.ts and
+    run-task.ts with no platform branch — so the same pressure exists there. Whether it fires is
+    NOT established, and the clone-identity discriminator does not transfer: deploy/Dockerfile's
+    own note records that '63 of 64 merged Remudero-Task: commits actually carry Craig Oley — the
+    OPERATOR'S OWN', the global identity a commit carries from either location. Do not assume the
+    mini is clean and do not assume it is affected.
+    RISK:HIGH IS RULE 19's SPAN, NOT BLAST RADIUS. The change is one predicate in one function; the
+    files: list is wide because it names the suites that OBSERVE that predicate, and decomposing an
+    assertion from the thing it asserts is not a real decomposition. The list was written from the
+    gates rather than from the file the author pictures: separated BY INVOCATION COUNT,
+    test/self-sync.test.ts (9 invocations of checkCliFreshness), test/self-sync-branch-guard.test.ts
+    (5) and test/feedback-landing.test.ts (1) actually assert the shape, while eight further files
+    mention the symbol in prose only and are deliberately excluded;
+    test/deploy-run-freshness-exempt.test.ts invokes NOTHING but injects a fake checkFreshness into
+    main() and asserts the deploy-run carve-out, so it asserts the consumer this change edits and
+    is included on that basis."
+  acceptance:
+    - claim: "a verb run inside a linked worktree on a diverged run branch exits 0 rather than refusing"
+      proof: "unit test: test/self-sync-worktree-guard.test.ts"
+    - claim: "a diverged checkout that is NOT a worktree still refuses, so the operator path is unchanged"
+      proof: "unit test: test/self-sync.test.ts"
+    - claim: "the off-main refusal still fires exactly where it fired before this change"
+      proof: "unit test: test/self-sync-branch-guard.test.ts"
