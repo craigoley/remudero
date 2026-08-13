@@ -434,6 +434,24 @@ forensic detail, so the narrative does not need to live here.
   return 1). The defect is that "is anyone working on this" was read as "has this been done". When a
   zero decides something, name the question the query actually answers, and find the OTHER query for
   the other question — both are under "Plan and task hygiene" above. *(2026-08-12)*
+  **(e) A CONTROL PROVES THE QUERY CAN SEE ITS CORPUS; IT DOES NOT PROVE THE CORPUS IS THE RIGHT ONE
+  — AND RE-RUNNING THE SAME WAY IS NOT A SECOND OPINION.** (a)-(d) are all ZEROS; THIS ONE IS A
+  CONFIDENT NON-ZERO, which is why the section's own framing does not catch it. MEASURED 2026-08-13:
+  `tsc` reported four `api-client` errors inside a session's ad-hoc container. The session stashed its
+  changes, re-ran on a CLEAN TREE, got the IDENTICAL FOUR, and reported them as pre-existing in TWO PR
+  bodies. **THAT CONTROLLED FOR THE TREE AND NOT FOR THE ENVIRONMENT.** The cause was never in the
+  repo: `node_modules/@remudero/api-client -> ../../packages/api-client` is a RELATIVE link, and that
+  container mounted `node_modules` and `.git` but never `packages/`, so the link resolved to nothing.
+  Mount `packages/` and `apps/`, change nothing else: `tsc` exits 0. CI ran the same check as a
+  required step, green, the whole time. AN ENVIRONMENTAL DEFECT REPRODUCES EXACTLY — so agreement
+  between two readings taken THE SAME WAY is not corroboration, it is one measurement performed twice,
+  and the confidence it buys is counterfeit.
+  THE CHECK, AND IT NAMES WHAT TO VARY: when a result surprises you, RE-RUN IT SOMEWHERE ELSE before
+  believing it — a second host, CI's own logs, or a differently-provisioned container. Vary the
+  ENVIRONMENT, not just the input; re-running the same command in the same place tests neither.
+  THE CHEAPEST INSTANCE OF THIS ONE IS A SINGLE COMMAND: `readlink -f <workspace-symlink>` prints
+  EMPTY when the target sits outside the mount set, which would have settled it in seconds.
+  *(2026-08-13)*
 
 ## Operating this host
 
