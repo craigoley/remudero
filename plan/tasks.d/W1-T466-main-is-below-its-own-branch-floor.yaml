@@ -1,0 +1,120 @@
+- id: W1-T466
+  title: "main sits 0.13pts below its own branch floor so every PR inherits a red coverage-ratchet — including plan-only YAML edits — and the deciding question is whether the lost branches are real gaps or import-time artefacts"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: medium
+  origin: oper#coverage-ratchet-inherited-red-2026-08-13
+  principles: {tdd: strict}
+  budget_usd: 35
+  files:
+    - test/coverage-ratchet.test.ts
+  rationale: "MEASURED AT 00fd676 WITH CI'S EXACT INVOCATION: lines 98.34% against a 95.62 floor,
+    branches 90.27% against a 90.40 floor — BLOCKED at -0.13pts. Every PR now inherits it: #1741 and
+    #1743 (plan-only) passed the same gate, then #1739 (5 files) failed at 90.18% / -0.22, and #1744
+    (plan-only, ONE YAML FILE) failed at 90.21% / -0.19. A YAML diff cannot move branch coverage.
+    NO AGGREGATION HOLE, AND THIS IS SETTLED. `ci-gate` FAILED at 19:17:41Z; #1739 MERGED at
+    19:15:31Z — TWO MINUTES AND TEN SECONDS EARLIER. Branch protection requires exactly
+    `remudero-review` and `ci-gate`, and `coverage-ratchet` aggregates into `ci-gate` correctly. A
+    MERGE RACED A STILL-PENDING REQUIRED CHECK, the same shape as #1721 the same day. Do not
+    re-investigate the gate stack.
+    THE RATCHET IS AGGREGATE AND DENOMINATOR-SENSITIVE BY ITS OWN ADMISSION.
+    `scripts/coverage-ratchet.mjs` sums LF/LH and BRF/BRH across every source file and compares two
+    whole-suite percentages at epsilon 1e-9, while `scripts/diff-coverage.mjs` scores ONLY changed
+    lines. SO `diff-coverage` ALREADY GUARANTEES NEW CODE IS COVERED and the aggregate ratchet
+    protects a DIFFERENT property — whole-suite erosion. And `scripts/coverage-baseline.json`'s own
+    `_branchFloorCorrection` note already describes today's failure mode: `THE DRIVER IS THE
+    DENOMINATOR: across those four runs BRH moves by 2 (12176-12178) while BRF moves by 15
+    (13439-13454)`, and a run loading fewer modules discovers fewer branches, which RAISES the ratio.
+    RE-BASELINING BRANCHES WOULD BE A WEAKENING, NOT A TIGHTENING, and an earlier 90.75% reading is
+    STALE — main is 90.27% today, BELOW the floor. The LINE floor is separately stale LOW (98.34 vs
+    95.62, 2.72pts of slack nobody captures). DO NOT CONFLATE THE TWO DIRECTIONS.
+    AND `reviewCommand` WAS ALREADY DRIVEN BEFORE #1739 — `review-rest-transport.test.ts` twice and
+    `run-task.test.ts` once, both predating it. That does NOT refute the import-graph mechanism,
+    because `node --test` runs each file in its OWN CHILD PROCESS, so a new file adds a FRESH set of
+    discovered-but-unexecuted modules. But the mechanism is subtler than `compiled for the first
+    time` and must not be restated that way."
+  design: |
+    (i) THE MEASUREMENT COMES FIRST AND THE REMEDY SECOND. THE DECIDING QUESTION IS UNANSWERED: ARE
+    THE NEWLY-DISCOVERED BRANCHES GENUINELY UNTESTED CODE, OR ARTEFACTS OF IMPORT-TIME EVALUATION?
+    They want opposite responses — cover them, or accept the denominator shift — so no option below
+    may be chosen before this is answered.
+    (ii) THE METHOD IS SPECIFIED BECAUSE THE OBVIOUS ONE FAILED. An attempt to diff BRF per file
+    between main and #1739's parent was INVALID AND INCOHERENT: `run-task.ts` BRF fell 532 and
+    `review.ts` fell 311, i.e. main DISCOVERED FEWER branches while SCORING HIGHER. TWO FAULTS — a
+    CHECKOUT was compared against a WORKTREE, and only the lcov reporter was used so NEITHER RUN
+    PRODUCED A `# tests` SUMMARY LINE, leaving both pass/fail sets uncaptured. Run-to-run BRF variance
+    of HUNDREDS swamps the effect. THE METHOD MUST BE: the SAME TREE for both readings, the SAME
+    reporter set INCLUDING `spec` so a summary line exists, pass/fail sets CAPTURED and compared, and
+    REPEATED READINGS — the baseline's own note took EIGHT LOCAL READINGS before moving a floor by
+    0.04pts.
+    (iii) FOUR OPTIONS. The first three are the obvious ones and each is costed; the fourth is the
+    operator's position and is NOT ranked below them.
+      (a) COVER THE NEWLY-DISCOVERED BRANCHES. Honest if they are real gaps. Cost UNKNOWN until (i)
+      answers — it may be a handful or a hundred, and the failed method above could not size it.
+      (b) STOP THE NEW TEST DRIVING `reviewCommand`. Cheaper call site, but a session recorded that
+      the alternative FAILED `diff-coverage`, which wants that line covered, and covering it requires
+      driving `reviewCommand`. THAT CONFLICT WAS NOT RE-VERIFIED, so this shard does NOT claim a third
+      shape exists — establish it before relying on it.
+      (c) RE-BASELINE. On BRANCHES this LOWERS a floor main sits under, which is a WEAKENING and the
+      baseline forbids it in its own words. On LINES it would RAISE 95.62 toward 98.34, which is a
+      tightening and a genuinely separate change.
+      (d) CHANGE THE MECHANISM, NOT THE NUMBER — THE OPERATOR'S POSITION, AND IT SURVIVES EITHER
+      ANSWER TO (i), WHICH IS WHY IT BELONGS HERE RATHER THAN AS AN OBVIOUS CHOICE. A static
+      hand-maintained floor is fragile by construction: the number moves for reasons unrelated to test
+      quality (the denominator note above), the noise band is ALREADY MEASURED at 0.0936pt, the
+      current margin was sized at 1.24x it, and moving a floor by 0.04pts took EIGHT LOCAL READINGS.
+      A gate needing that ceremony to adjust, which then BLOCKS PLAN-ONLY YAML EDITS when it drifts,
+      is expensive to maintain and cheap to trip. THE ASYMMETRY IS THE TELL: lines carry 2.72pts of
+      uncaptured slack while branches sit 0.13 BELOW and block everything.
+      TWO DISTINCT SHAPES, KEPT APART BECAUSE THEY ANSWER DIFFERENT QUESTIONS:
+        (d-i) A TOLERANCE BAND rather than a hard floor — fail only outside a multiple of the MEASURED
+        noise band instead of at epsilon 1e-9. Uses a number this repo already derived. ESTABLISH THE
+        MULTIPLE: too tight reproduces today, too loose lets genuine erosion through, and this repo has
+        FIVE measured instances of a bound firing on a healthy condition.
+        (d-ii) A FLOOR THAT RATCHETS ON GREEN — when a run comes in ABOVE the floor the floor moves up
+        automatically, so it only ever blocks a real drop. THAT IS THE ORDINARY MEANING OF `ratchet`,
+        and what exists today is a STATIC THRESHOLD MAINTAINED BY HAND: MEASURED, nothing in the repo
+        writes `scripts/coverage-baseline.json` — there is NO WRITER, only readers — while the file's
+        own comment instructs a human to `raise them (ratchet up) when coverage genuinely improves`.
+        THE HAZARD, NAMED: an auto-advancing floor RATCHETS ON A LUCKY RUN. A run that loads fewer
+        modules scores higher for denominator reasons, the floor rises on an artefact, and every
+        subsequent run fails — TODAY'S DEFECT WITH THE SIGN FLIPPED. That is why (d-ii) may need
+        (d-i) UNDERNEATH it rather than instead of it.
+    (iv) IF (i) SAYS REAL GAPS, a tolerance band HIDES them and (a) is right. IF (i) SAYS ARTEFACTS,
+    the gate is measuring noise and (d) is right. State which the finding supports before building.
+  note: "RULE 25 FORCES THE OPTIONS APART AND THE PREDICATE WAS RUN, NOT ASSUMED. Driving
+    `INSTRUMENT_SURFACE` (`src/lib/review.ts`) directly: `scripts/coverage-baseline.json`
+    instrument=TRUE, `scripts/coverage-ratchet.mjs` instrument=TRUE, and the CONTROLS
+    `src/lib/review.ts` instrument=FALSE and `test/base-blob-read-failure.test.ts` instrument=FALSE.
+    So options (c) and (d) are INSTRUMENT-ONLY CHANGESETS BY CONSTRUCTION and cannot be entangled with
+    a `src/` fix; option (a) is a src/test change that must NOT carry a baseline edit. Whatever the
+    measurement says, THESE SHIP AS SEPARATE PRs.
+        THIS SHARD'S OWN PR WILL FAIL `coverage-ratchet`, AND THAT IS THE SYMPTOM BEING FILED, NOT A
+    DEFECT IN THE FILING. A plan-only YAML diff cannot move branch coverage; #1744 demonstrated
+    exactly this. Do not chase it.
+        `files:` IS DELIBERATELY NARROW AND PROVISIONAL ON CRITERION ONE. `test/coverage-ratchet.test.ts`
+    is where a regression lock for the finding belongs — it drives the REAL CLI via `spawnSync` 3
+    times rather than importing `evaluateRatchet`, which is why an `evaluateRatchet(` invocation sweep
+    returns ZERO across every suite; that zero is genuine, and the file's own header (`Every test below
+    drives the actual CLI`) is the control that proves it. NO REMEDY SURFACE IS DECLARED AT ALL, and that is the point of a measurement-first task:
+    `test/base-blob-read-failure.test.ts` is option (b)'s only surface and is EXCLUDED because this shard
+    refuses to pick (b) before criterion one answers — declaring it would presume the remedy. No
+    `scripts/` path is declared either, because
+    options (c) and (d) are separate instrument-only changesets; declaring one here would invite the
+    entanglement Rule 25 forbids. An untouched declared path is an `inverse_scope` ADVISORY, not a gate.
+        NO NUMBER HERE SHOULD BE QUOTED FORWARD: 98.34 / 90.27, the four PR readings, the 0.0936pt
+    spread, the 1.24x margin and the eight readings were measured or quoted 2026-08-13. Re-derive
+    before building — main may have moved."
+  acceptance:
+    - claim: "the attribution question is answered with the specified method before any remedy is chosen"
+      proof: "unit test: test/coverage-ratchet.test.ts"
+    - claim: "both readings come from the same tree with a spec reporter and captured pass or fail sets"
+      proof: "unit test: test/coverage-ratchet.test.ts"
+    - claim: "the chosen remedy names which of the four options the finding supports and why"
+      proof: "unit test: test/coverage-ratchet.test.ts"
+    - claim: "a plan-only diff passes the gate once the remedy lands"
+      proof: "unit test: test/coverage-ratchet.test.ts"
+  status: queued
+  attempts: 0
