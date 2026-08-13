@@ -190,14 +190,23 @@ jobs:
             --test-reporter=spec --test-reporter-destination=stdout \
             --test-reporter=lcov --test-reporter-destination=coverage/lcov.info \
             --test --import tsx "test/**/*.test.ts"
-      - name: Coverage ratchet (blocks a coverage-lowering PR)
-        run: node scripts/coverage-ratchet.mjs --lcov coverage/lcov.info --baseline scripts/coverage-baseline.json
+      # ORDER IS LOAD-BEARING (2026-08-13): diff-coverage runs BEFORE the aggregate ratchet.
+      # No step in this job carries an `if:`, so a failing step skips every step after it —
+      # MEASURED: in five of six recent failing CI runs the ratchet step concluded `failure` and
+      # `Diff coverage` was `skipped`. While the aggregate floor was red, the PER-DIFF gate — the
+      # only thing checking that a PR covers the lines it adds — DID NOT RUN AT ALL. Both gates
+      # were down, not one. Putting the per-diff check first makes it independent of the
+      # aggregate's verdict without an `if:` condition: a genuinely broken run still fails at the
+      # Test step above and correctly skips both, which `if: always()` would NOT have preserved
+      # (it would run diff-coverage against a missing lcov and report a confusing second error).
       - name: Compute this PR's base...head diff (for the per-diff coverage check below)
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: git diff "${BASE_SHA}"...HEAD > pr.diff
-      - name: Diff coverage (blocks a PR that adds untested source lines, even when the aggregate floor above stays green)
+      - name: Diff coverage (blocks a PR that adds untested source lines, even when the aggregate floor below stays green)
         run: node scripts/diff-coverage.mjs --lcov coverage/lcov.info --diff pr.diff
+      - name: Coverage ratchet (blocks a PR whose branch coverage is below the absolute floor)
+        run: node scripts/coverage-ratchet.mjs --lcov coverage/lcov.info --baseline scripts/coverage-baseline.json
 
   mutation-ratchet:
     # §5 TIER 2, quality gate 2/4 (W1-T96) — green tests that kill no mutants are theater; the

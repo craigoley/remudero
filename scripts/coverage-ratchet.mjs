@@ -95,6 +95,64 @@ export function evaluateRatchet(actual, baseline, epsilon = 1e-9) {
   return violations;
 }
 
+/**
+ * TIER ONE OF THE ABSOLUTE-THRESHOLD GATE. Classify a run's BRANCH coverage against fixed cuts
+ * instead of against a recorded baseline.
+ *
+ * WHY ABSOLUTE, AND WHY THIS CANNOT DRIFT. The delta form this replaces compared two whole-tree
+ * scalars, and the scalar moves when the DENOMINATOR moves — `coverage-baseline.json`'s own
+ * `_branchFloorCorrection` concedes it: "THE DRIVER IS THE DENOMINATOR … dropping them RAISES the
+ * ratio." MEASURED across #1739: BRF +204, BRH +107, lines ROSE +2.102pt while branches fell, and
+ * the CI readings either side are DISJOINT with a 0.470pt gap. 98% of the newly-uncovered branches
+ * sit on UNCALLED FUNCTION DECLARATION LINES — real debt, always present, newly counted. An
+ * absolute threshold is immune to all of that: 90% is 90% however many modules the suite loaded.
+ * DO NOT REINTRODUCE A DELTA COMPARISON HERE.
+ *
+ * KEYED ON BRANCHES ALONE, DELIBERATELY. Lines measure ~98.3% and branches ~90.2%, so one pair of
+ * cuts cannot mean the same thing to both. "Worse of the two" is equivalent to branches TODAY but
+ * silently becomes a lines gate if branches ever overtake — a surprise waiting. Lines keep their
+ * own separate floor (see `evaluateRatchet` above), unchanged and still enforced.
+ *
+ * ONLY `blocking` FAILS THE BUILD, AND THAT IS THE RULING, NOT A SOFTENING. The tiers are:
+ *   >= 90  PASS.
+ *   85-90  PASS, and (once tier two ships) inject ONE coverage-improvement task.
+ *   < 85   remediation loop — tier three, not built.
+ * Both upper tiers PASS, so 85 is the only blocking cut. THAT IS WHAT PUTS THE BOUNDARY CLEAR OF
+ * THE NOISE. MEASURED from 16 post-regime CI readings: min 90.12, max 90.26, spread 0.140pt. A cut
+ * at 90 would sit 0.120pt above the worst reading — INSIDE one spread, so an unlucky run would
+ * block for no reason, recreating today's defect at a new number. At 85 the margin is ~5.1pt,
+ * about 37x the spread. Hysteresis was considered and rejected: it would make the tier STATEFUL
+ * across stateless CI runs, and moving the blocking cut achieves the same thing with no memory.
+ * The 90 line is retained as a REPORTED tier boundary so tier two has its trigger already measured.
+ *
+ * @param {{branchesPct:number}} actual
+ * @param {{tierPassPct?:number, tierBlockPct?:number}} thresholds
+ */
+export function classifyCoverageTier(actual, thresholds = {}) {
+  const pass = typeof thresholds.tierPassPct === 'number' ? thresholds.tierPassPct : 90;
+  const block = typeof thresholds.tierBlockPct === 'number' ? thresholds.tierBlockPct : 85;
+  const pct = actual.branchesPct;
+  if (pct < block) {
+    return {
+      tier: 'remediate',
+      blocking: true,
+      message:
+        `branches ${pct.toFixed(2)}% is below the ${block}% floor — coverage remediation is required ` +
+        `(tier three: loop targeted tasks until above ${pass}% or returns diminish)`,
+    };
+  }
+  if (pct < pass) {
+    return {
+      tier: 'improve',
+      blocking: false,
+      message:
+        `branches ${pct.toFixed(2)}% is between ${block}% and ${pass}% — PASS, and one ` +
+        `coverage-improvement task is owed (tier two, not yet wired)`,
+    };
+  }
+  return { tier: 'healthy', blocking: false, message: `branches ${pct.toFixed(2)}% is at or above ${pass}%` };
+}
+
 function main(argv) {
   const { values } = parseArgs({
     args: argv,
@@ -110,16 +168,31 @@ function main(argv) {
   const violations = evaluateRatchet(actual, baseline);
 
   console.log(
+    // BRANCHES REPORT THEIR TIER CUTS, NEVER A "baseline". `branchesPct` is GONE from the real
+    // baseline file, so the old `(baseline ${x ?? 0})` form would print `(baseline 0.00%)` on every
+    // CI run and read as a 0% floor — the misleading-zero shape this repo keeps paying for. Lines
+    // keep the old wording because lines keep a real recorded baseline. The harvestable prefix
+    // (`lines X% ... branches Y%`) is unchanged so the CI-log harvest that measured the 0.140pt
+    // spread still parses.
     `coverage-ratchet: lines ${actual.linesPct.toFixed(2)}% (baseline ${(baseline.linesPct ?? 0).toFixed(2)}%), ` +
-      `branches ${actual.branchesPct.toFixed(2)}% (baseline ${(baseline.branchesPct ?? 0).toFixed(2)}%)` +
+      `branches ${actual.branchesPct.toFixed(2)}% (pass ${baseline.tierPassPct ?? 90}% / block ${baseline.tierBlockPct ?? 85}%)` +
       (actual.skippedRecords > 0
         ? ` [excluded ${actual.skippedRecords} out-of-repo record(s) from temp-dir child coverage]`
         : ''),
   );
 
-  if (violations.length > 0) {
-    console.error('coverage-ratchet: BLOCKED -- coverage dropped below the recorded baseline:');
-    for (const v of violations) console.error(`  - ${v}`);
+  const tier = classifyCoverageTier(actual, baseline);
+  console.log(`coverage-ratchet: tier=${tier.tier} — ${tier.message}`);
+
+  // BOTH GATES REPORT, NEITHER PRE-EMPTS. An earlier draft returned as soon as the tier blocked,
+  // which SUPPRESSED the line-baseline violation: a change dropping lines AND branches was told
+  // only about branches, and would fix one, re-push, and discover the other. Collect and print
+  // every reason, then exit once.
+  const blockers = [...(tier.blocking ? [tier.message] : []), ...violations];
+
+  if (blockers.length > 0) {
+    console.error('coverage-ratchet: BLOCKED -- coverage is below a floor:');
+    for (const b of blockers) console.error(`  - ${b}`);
     process.exitCode = 1;
     return;
   }

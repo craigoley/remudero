@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -242,7 +244,7 @@ test("coverage-ratchet PLAN-ONLY FALSIFIER: the W1-T187 benchmark's flake-avoida
   );
 });
 
-test("coverage-ratchet CLI: baseline record missing BOTH metrics -> no crash, no false block, prints 0.00% baseline", () => {
+test("coverage-ratchet CLI: baseline record missing BOTH metrics -> no crash, no false block; lines still print a 0.00% baseline but branches print their TIER CUTS, never a misleading 0% floor", () => {
   const result = spawnSync(process.execPath, [
     SCRIPT,
     "--lcov",
@@ -250,9 +252,23 @@ test("coverage-ratchet CLI: baseline record missing BOTH metrics -> no crash, no
     "--baseline",
     join(FIXTURES, "baseline-no-metrics.json"),
   ]);
-  assert.equal(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
-  assert.match(result.stdout.toString(), /baseline 0\.00%.*baseline 0\.00%/s);
-  assert.match(result.stdout.toString(), /OK -- at or above baseline/);
+  const stdout = result.stdout.toString();
+  assert.equal(result.status, 0, stdout + result.stderr?.toString());
+  // Lines keep a recorded baseline, so an absent one still renders as 0.00% -- unchanged behaviour.
+  assert.match(stdout, /lines 95\.00% \(baseline 0\.00%\)/);
+  // Branches no longer HAVE a recorded baseline: `branchesPct` was removed from
+  // scripts/coverage-baseline.json when the absolute thresholds landed. The old `?? 0` rendering
+  // would therefore print `branches 90.00% (baseline 0.00%)` on EVERY real CI run, which reads as
+  // "the branch floor is zero" -- the misleading-zero shape this repo keeps paying for. The branch
+  // half must report the cuts it is actually judged against instead.
+  assert.match(stdout, /branches 90\.00% \(pass 90% \/ block 85%\)/);
+  assert.doesNotMatch(
+    stdout,
+    /branches [\d.]+% \(baseline/,
+    "branches must never report a `baseline` -- they are judged against absolute tier cuts, and " +
+      "an absent branchesPct rendering as `(baseline 0.00%)` would advertise a 0% floor",
+  );
+  assert.match(stdout, /OK -- at or above baseline/);
 });
 
 test("coverage-ratchet module: importing (not spawning as the entry script) does not re-invoke main() -- process.argv[1] is undefined when eval'd", () => {
@@ -269,4 +285,195 @@ test("coverage-ratchet module: importing (not spawning as the entry script) does
   ]);
   assert.equal(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
   assert.match(result.stdout.toString(), /imported-without-main-invocation/);
+});
+
+// ── W1-T466: absolute branch thresholds (tier one) ──
+//
+// The gate used to compare branch coverage against a RECORDED branch baseline, and main fell
+// below its own floor: every PR inherited `branches 90.27% < baseline 90.40%` and could not go
+// green on its own merits. The driver was the DENOMINATOR, not a real regression -- #1739 moved
+// BRF +204 / BRH +107 and lines ROSE 2.102pt while the branch RATIO fell. Absolute cuts are
+// immune to that: 90% is 90% however many modules the suite loaded.
+//
+// The tiers, and note that only the LOWEST cut blocks:
+//   >= 90  healthy, PASS
+//   85-90  improve, PASS (tier two will inject one coverage-improvement task; not yet wired)
+//   < 85   remediate, BLOCK
+//
+// These drive the real CLI against synthesized fixtures, per this file's never-import convention.
+// Fixtures are built in a temp dir rather than checked in, keeping W1-T466's declared `files:`
+// list to this one path.
+
+/** Build an lcov whose aggregate totals are exactly the requested found/hit counts. */
+function writeLcov(
+  dir: string,
+  name: string,
+  totals: { lf: number; lh: number; brf: number; brh: number },
+): string {
+  const path = join(dir, name);
+  writeFileSync(
+    path,
+    [
+      "SF:src/lib/synthetic.ts",
+      `LF:${totals.lf}`,
+      `LH:${totals.lh}`,
+      `BRF:${totals.brf}`,
+      `BRH:${totals.brh}`,
+      "end_of_record",
+      "",
+    ].join("\n"),
+  );
+  return path;
+}
+
+function writeBaseline(dir: string, name: string, body: Record<string, number>): string {
+  const path = join(dir, name);
+  writeFileSync(path, JSON.stringify(body));
+  return path;
+}
+
+/** An lcov whose BRANCH percentage is exactly `pct` and whose lines are comfortably high. */
+function lcovAtBranchPct(dir: string, name: string, pct: number): string {
+  return writeLcov(dir, name, { lf: 10000, lh: 9900, brf: 10000, brh: Math.round(pct * 100) });
+}
+
+function runCli(lcov: string, baseline: string) {
+  const r = spawnSync(process.execPath, [SCRIPT, "--lcov", lcov, "--baseline", baseline]);
+  return { status: r.status, stdout: r.stdout.toString(), stderr: r.stderr.toString() };
+}
+
+test("W1-T466 absolute thresholds: the three tiers classify by BRANCH percentage, and only the sub-85 tier blocks", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-covtier-"));
+  try {
+    const baseline = writeBaseline(dir, "b.json", {
+      linesPct: 95,
+      tierPassPct: 90,
+      tierBlockPct: 85,
+    });
+
+    const healthy = runCli(lcovAtBranchPct(dir, "healthy.lcov", 92), baseline);
+    assert.equal(healthy.status, 0, healthy.stdout + healthy.stderr);
+    assert.match(healthy.stdout, /tier=healthy/);
+    assert.match(healthy.stdout, /branches 92\.00% is at or above 90%/);
+
+    const improve = runCli(lcovAtBranchPct(dir, "improve.lcov", 87), baseline);
+    assert.equal(
+      improve.status,
+      0,
+      "the 85-90 band PASSES -- it owes a coverage-improvement task, it does not fail the build:\n" +
+        improve.stdout +
+        improve.stderr,
+    );
+    assert.match(improve.stdout, /tier=improve/);
+    assert.match(improve.stdout, /coverage-improvement task is owed/);
+
+    const remediate = runCli(lcovAtBranchPct(dir, "remediate.lcov", 80), baseline);
+    assert.equal(remediate.status, 1, remediate.stdout + remediate.stderr);
+    assert.match(remediate.stdout, /tier=remediate/);
+    assert.match(remediate.stderr, /BLOCKED/);
+    assert.match(remediate.stderr, /branches 80\.00% is below the 85% floor/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T466 absolute thresholds: the cuts are INCLUSIVE at the boundary -- exactly 85.00% passes and exactly 90.00% is healthy, so a run landing on the number is never blocked by rounding", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-covedge-"));
+  try {
+    const baseline = writeBaseline(dir, "b.json", {
+      linesPct: 95,
+      tierPassPct: 90,
+      tierBlockPct: 85,
+    });
+
+    const onBlockCut = runCli(lcovAtBranchPct(dir, "at85.lcov", 85), baseline);
+    assert.equal(onBlockCut.status, 0, onBlockCut.stdout + onBlockCut.stderr);
+    assert.match(onBlockCut.stdout, /tier=improve/);
+
+    const justUnder = runCli(lcovAtBranchPct(dir, "under85.lcov", 84.99), baseline);
+    assert.equal(justUnder.status, 1, justUnder.stdout + justUnder.stderr);
+    assert.match(justUnder.stdout, /tier=remediate/);
+
+    const onPassCut = runCli(lcovAtBranchPct(dir, "at90.lcov", 90), baseline);
+    assert.equal(onPassCut.status, 0, onPassCut.stdout + onPassCut.stderr);
+    assert.match(onPassCut.stdout, /tier=healthy/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T466 absolute thresholds: main's real reading (branches 90.27%) PASSES, where the delta gate it replaces blocked it against a 90.40% recorded floor", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-covmain-"));
+  try {
+    // The exact shape that was blocking every PR on main.
+    const lcov = lcovAtBranchPct(dir, "main.lcov", 90.27);
+
+    const oldGate = runCli(lcov, writeBaseline(dir, "old.json", { branchesPct: 90.4 }));
+    assert.equal(oldGate.status, 1, "the delta gate must be shown to have really blocked this");
+    assert.match(oldGate.stderr, /branches coverage 90\.27% < baseline 90\.40%/);
+
+    const newGate = runCli(
+      lcov,
+      writeBaseline(dir, "new.json", { linesPct: 95, tierPassPct: 90, tierBlockPct: 85 }),
+    );
+    assert.equal(newGate.status, 0, newGate.stdout + newGate.stderr);
+    assert.match(newGate.stdout, /tier=healthy/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T466 absolute thresholds: a line-coverage regression STILL blocks -- replacing the branch floor did not silently delete the line gate, and both reasons are reported together rather than one pre-empting the other", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-covboth-"));
+  try {
+    const baseline = writeBaseline(dir, "b.json", {
+      linesPct: 95,
+      tierPassPct: 90,
+      tierBlockPct: 85,
+    });
+
+    // Lines regress; branches stay healthy. The line ratchet must still fail the build.
+    const linesOnly = runCli(
+      writeLcov(dir, "lines-bad.lcov", { lf: 10000, lh: 7000, brf: 10000, brh: 9200 }),
+      baseline,
+    );
+    assert.equal(linesOnly.status, 1, linesOnly.stdout + linesOnly.stderr);
+    assert.match(linesOnly.stdout, /tier=healthy/);
+    assert.match(linesOnly.stderr, /lines coverage 70\.00% < baseline 95\.00%/);
+
+    // BOTH regress. An earlier draft returned as soon as the tier blocked, so the line violation
+    // never printed and the author would fix branches, re-push, and only then learn about lines.
+    const both = runCli(
+      writeLcov(dir, "both-bad.lcov", { lf: 10000, lh: 7000, brf: 10000, brh: 8000 }),
+      baseline,
+    );
+    assert.equal(both.status, 1, both.stdout + both.stderr);
+    assert.match(both.stderr, /branches 80\.00% is below the 85% floor/);
+    assert.match(
+      both.stderr,
+      /lines coverage 70\.00% < baseline 95\.00%/,
+      "the branch tier must not suppress the line violation -- both reasons report in one run",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T466 absolute thresholds: the SHIPPED scripts/coverage-baseline.json carries both tier cuts, no longer carries a branchesPct delta floor, and RETAINS its linesPct floor", async () => {
+  const shipped = JSON.parse(
+    await readFile(join(REPO_ROOT, "scripts", "coverage-baseline.json"), "utf8"),
+  );
+  assert.equal(shipped.tierPassPct, 90);
+  assert.equal(shipped.tierBlockPct, 85);
+  assert.equal(
+    Object.hasOwn(shipped, "branchesPct"),
+    false,
+    "a recorded branch baseline would re-arm the delta comparison this task removed -- the branch " +
+      "ratio moves with the DENOMINATOR, which is how main fell below its own floor",
+  );
+  assert.equal(
+    typeof shipped.linesPct,
+    "number",
+    "the line floor must survive -- this task replaced the BRANCH gate, it did not remove coverage gating",
+  );
 });
