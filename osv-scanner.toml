@@ -7,7 +7,8 @@
 [[IgnoredVulns]]
 id = "GHSA-frvp-7c67-39w9"
 # Node.js Adapter for Hono: path traversal in `serve-static` on Windows via encoded backslash
-# (%5C). Present as @hono/node-server@1.19.14; fixed in 2.0.5.
+# (%5C). Present as @hono/node-server@1.19.17 (was 1.19.14 when this entry was written; the
+# 2026-08-13 transitive-advisory bump moved it within 1.x); fixed in 2.0.5, so still unfixed here.
 #
 # NOT UPGRADABLE FROM HERE. The full chain is:
 #     remudero -> @anthropic-ai/claude-agent-sdk (direct)
