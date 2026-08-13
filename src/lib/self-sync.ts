@@ -1,4 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
+import { resolve } from "node:path";
 // TYPE-ONLY, so this stays a one-way dependency at runtime: the import is erased, daemon.ts
 // imports nothing from here, and lib/daemon.ts's "never touches the filesystem" purity is
 // untouched by a module that shells out to git.
@@ -96,7 +97,17 @@ export type SelfSyncResult =
   | { status: "degraded"; reason: string }
   | { status: "up-to-date" }
   | { status: "synced"; oldSha: string; newSha: string }
-  | { status: "refused"; reason: "dirty" | "diverged" | "off-main"; message: string };
+  | { status: "refused"; reason: "dirty" | "diverged" | "off-main"; message: string }
+  /**
+   * W1-T452: this repoDir is a LINKED WORKTREE, so self-sync declines to refuse OR to mutate.
+   *
+   * A DISTINCT STATE RATHER THAN `guarded`, deliberately. `guarded`'s own doc says it skips
+   * EVERYTHING, "not even a fetch" — returning it from a point AFTER the fetch has already run
+   * would make that doc false, and the loop-guard meaning is worth keeping unambiguous. Only one
+   * consumer branches on this type at all (`freshness.status === "refused"` in `run-task.ts`'s
+   * gate), so a new arm costs nothing and reads honestly at every call site.
+   */
+  | { status: "worktree"; gitDir: string };
 
 /** Shared remedy fragment — acceptance requires the LITERAL `git pull --ff-only` text land in
  *  stderr for both refusal reasons, so operators always get the one command that either just
@@ -167,6 +178,52 @@ export function checkCliFreshness(
 
   if (headSha === originSha) {
     return { status: "up-to-date" };
+  }
+
+  // W1-T452: A LINKED WORKTREE IS SUPPOSED TO HAVE DIVERGED — THAT IS WHAT A BRANCH IS.
+  //
+  // A worktree sits on `run-<taskId>-<epochMs>`, so from its FIRST COMMIT it is no longer an
+  // ancestor of origin/main and the `diverged` refusal below fires. `main()` turns any `refused`
+  // into `process.exit(1)`, so every subsequent verb died IN THE PLACE THE WORKER WAS TOLD TO WORK.
+  // MEASURED: fourteen of the last fifteen implement runs relocated to the daemon's live checkout to
+  // run `check-proof`, `preflight --ci-parity`, `review` and `gh pr create` — and their commits
+  // landed there as collateral, which is the actual damage.
+  //
+  // IT MUST CLEAR *BOTH* REFUSALS, and that is why this sits above `dirty` rather than beside the
+  // divergence test. A worktree trips `diverged` once it has a commit, but a worktree that is merely
+  // BEHIND and still fast-forwardable falls through to W1-T445's `off-main` refusal instead — same
+  // exit 1, different reason. Clearing only `diverged` would leave the worker refused for the other
+  // one and look like the fix had failed. It also skips `dirty`, which a worktree mid-task always is.
+  //
+  // PLACED AFTER THE FETCH ON PURPOSE: the fetch has already run by here, so a verb that wanted
+  // origin refreshed still gets it. Only the REFUSALS and the ff-merge are skipped — and the merge
+  // must never run here anyway, which is precisely what W1-T445 established.
+  //
+  // DETECTION IS GIT'S OWN DEFINITION OF A LINKED WORKTREE: `--git-dir` differs from
+  // `--git-common-dir`. MEASURED at ab85e661 on all four shapes — linked worktree
+  // (`…/.git/worktrees/<name>` vs `…/.git`) => true; main checkout (`.git` vs `.git`) => false;
+  // a SUBDIR of the main checkout => false; a directory with no `.git` => throws.
+  //
+  // THE PATHS MUST BE RESOLVED BEFORE COMPARING AND THE RAW STRINGS MUST NOT BE. From a subdir git
+  // answers `--git-dir` ABSOLUTE and `--git-common-dir` RELATIVE (`/…/.git` vs `../.git`) — string-
+  // different, same directory. A raw comparison would classify the operator's own checkout as a
+  // worktree and relax the guard exactly where it protects a human, which is strictly worse than the
+  // defect it fixes.
+  //
+  // A THROW IS CAUGHT AND FALLS THROUGH, never propagates: with no `.git` at all this function
+  // already returns `degraded` from the fetch above, and that path must keep working — `/app` in the
+  // container image has no `.git`, and this must not start throwing where it used to degrade.
+  let linkedWorktree: string | undefined;
+  try {
+    const [gitDir, commonDir] = git(["rev-parse", "--git-dir", "--git-common-dir"]).trim().split("\n");
+    const resolvedGit = resolve(repoDir, (gitDir ?? "").trim());
+    const resolvedCommon = resolve(repoDir, (commonDir ?? "").trim());
+    if (resolvedGit !== resolvedCommon) linkedWorktree = resolvedGit;
+  } catch {
+    // Not resolvable as a worktree question — fall through to the ordinary refusals unchanged.
+  }
+  if (linkedWorktree !== undefined) {
+    return { status: "worktree", gitDir: linkedWorktree };
   }
 
   const dirty = git(["status", "--porcelain"]).trim().length > 0;
