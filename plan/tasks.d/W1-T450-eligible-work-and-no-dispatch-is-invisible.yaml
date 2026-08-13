@@ -1,0 +1,92 @@
+- id: W1-T450
+  title: "a fleet holding ELIGIBLE work and dispatching NOTHING renders identically to an idle one — QUEUE HEAD names the candidates and never asks how long it has been naming them, so a daemon failing every pass looks calm"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  origin: oper#dispatch-stall-invisible-2026-08-12
+  principles: {tdd: strict}
+  budget_usd: 40
+  files:
+    - src/lib/status-board.ts
+    - test/status-board.test.ts
+    - test/status-blockers-live.test.ts
+    - test/status-service-liveness.test.ts
+    - test/headroom-blind-governor-rung.test.ts
+    - test/deploy-failed-latch-superseded.test.ts
+    - test/deploy-failed-consequence-kind.test.ts
+    - docs/operator-guide.md
+  rationale: "MEASURED 2026-08-12 on the Azure container and re-derived on the mini at 8e25eee.
+    THE INCIDENT: a daemon failed in a loop for FIFTEEN MINUTES with W1-T448 and W1-T449 queued and
+    ZERO dispatches. Three identical `retro.error` rows, `retro_triggered` before each with identical
+    inputs, and the container healthy throughout — running, ticking, sweeping, 376 MB, 35 PIDs, 18%
+    CPU. The operator found it by reading `docker logs` BY HAND.
+    WHY NO SURFACE SAW IT. `buildStatusBoard`'s QUEUE HEAD derivation (src/lib/status-board.ts)
+    answers exactly one question — WHICH TASKS ARE ELIGIBLE RIGHT NOW — and never compares that
+    against dispatch activity: a grep of that derivation for `run.start`, `since`, `recent`,
+    `lastDispatch` or `age` returns NOTHING. So 'two eligible tasks, about to dispatch' and 'two
+    eligible tasks, failing every pass for an hour' RENDER IDENTICALLY. LIVENESS reports a running
+    pid and a ticking process (both true), BLOCKERS BY CLASS reports circuit breaks and blocked PRs
+    (there were none), and LAST CLOSED CYCLE reads `no cycle recorded` on any host busy enough to
+    have rotated (MEASURED on the mini: `daemon.summary` is 0 in the live file, 9 plain, 515 gz).
+    THE FIX IS CHEAP BECAUSE BOTH FACTS ARE ALREADY IN THE SAME FUNCTION. `runnableCandidates` is
+    already called for QUEUE HEAD, and `distinctDispatchedTaskIds` already scans `run.step ===
+    'run.start'` for the circuit-broken class — it collects ids and DISCARDS the timestamps. The
+    rung is: candidates present AND no `run.start` newer than N minutes. No new read, no new dep,
+    no plan load, no gateway call.
+    AND IT NEEDS NO UNION FIX, WHICH IS WHY IT IS FILED AND ITS SIBLING IS NOT. The board reads ONE
+    ledger path (`readLedgerLines`, src/lib/status.ts — no glob, no readdir). That blinds any rung
+    counting occurrences over days, but NOT this one: rotation retains the NEWEST rows per step, so
+    the newest `run.start` is exactly what survives. MEASURED on the mini: 209 `run.start` rows in
+    the live file, newest 2026-08-12T23:50:30Z, eight minutes old at filing.
+    NOT COVERED BY THE TWO ADJACENT FILINGS, CHECKED BEFORE MINTING. W1-T298 is the EMPTY queue
+    ('an EMPTY dispatch queue escalates nothing') — this is the opposite case, a queue that is NOT
+    empty. W1-T329 is governor DEFERRAL made invisible in the console (`serve.ts`,
+    `daemon.cost_governor`/`daemon.queue_governor`) — a fleet deliberately holding back, not one
+    trying and failing, and a different surface."
+  design: |
+    (i) A QUEUE-HEAD staleness clock in `buildStatusBoard` (src/lib/status-board.ts): when
+    `runnableCandidates` returns a non-empty list AND the newest `run.start` in the ledger lines
+    already read is older than a stated bound, the section says so and names both halves — how many
+    candidates, and how long since anything dispatched. When the queue is EMPTY the rung must stay
+    silent: `nothing dispatchable` is the honest idle state and is not this defect.
+    (ii) NOT A GATE, AND THIS IS LOAD-BEARING. It renders a line and a next action; it blocks
+    nothing, refuses nothing and exits 0. Four bounds in this repo have fired on a healthy condition
+    (ci-gate's wait cap, the deploy ceiling consumed by a dry run, the check-wait bound where 21 of
+    21 booked PRs merged, the headroom park); a fifth that stopped a fleet on a dispatch-timing
+    heuristic would be the worst of them.
+    (iii) THE BOUND MUST NOT FIRE ON A HEALTHY FLEET, and the number is the whole risk. Derive it
+    from this host's own observed dispatch cadence over the unioned ledger rather than choosing a
+    round figure, and state the derivation beside the constant. A fleet legitimately goes quiet
+    during a long single run — the rung must survive that, so the bound is a function of observed
+    inter-dispatch gaps, not of wall-clock taste.
+    (iv) UNKNOWN IS NOT STALLED. No ledger, no readable `run.start`, or an unparseable timestamp
+    leaves the rung SILENT rather than claiming a stall — an unreadable answer must never render as
+    a finding.
+  note: "RISK:HIGH IS RULE 19's SPAN, NOT BLAST RADIUS — the linter counts seven concerns because the
+    files: list names five suites that OBSERVE one board change plus the guide; the change itself is one
+    rung in one function, and decomposing an assertion from the thing it asserts is not a real
+    decomposition. Files span src/lib/status-board.ts plus FIVE existing suites that assert the board's shape
+    and would break on a new section, plus the operator guide — the list is written from the gates
+    that observe the change, not from the one file the author pictures. Reported and deliberately
+    NOT filed alongside: thirty `*.error` steps are written in src/ and ZERO reach any operator
+    surface (status-board.ts 0/30, serve.ts 0/30, digest.ts 0/30, board.ts 0/30, with
+    `daemon.summary`/`run.start` as positive controls proving the queries work), and the cost is
+    already paid — `sweep.error` fired 1,307 times with TWO distinct reasons between
+    2026-07-19T07:12Z and 2026-08-02T15:36Z and nobody saw it. That rung CANNOT be built until the
+    board reads the ledger union: `sweep.error` is 1,307 in the .gz archives and ZERO in both the
+    live file and the plain rotations (control: `run.start` is 257,438/705/209 across the three), so
+    a board reading one path would see none of it. Filing it now would create a task whose first act
+    is to discover its own blocker. Also reported, not fixed: `retro.error` is in
+    `LANE_TERMINAL_STEPS` (src/lib/status.ts) where its job is to CLOSE a lane, and a SUCCESSFUL
+    retro logs no terminal step at all (`retro.synthesized`/`retro.no_op` are not in the set) — so a
+    retro that dies closes cleanly while one that succeeds lingers on the liveness bound. Correct as
+    bookkeeping, backwards as a signal; a separate concern."
+  acceptance:
+    - claim: "a non-empty candidate list with no recent run.start renders a stall, naming the candidate count and the age"
+      proof: "unit test: test/status-board.test.ts"
+    - claim: "an empty queue stays silent, so the honest idle state is not reported as a stall"
+      proof: "unit test: test/status-blockers-live.test.ts"
+    - claim: "an unreadable or absent run.start leaves the rung silent rather than claiming a stall"
+      proof: "unit test: test/status-service-liveness.test.ts"
