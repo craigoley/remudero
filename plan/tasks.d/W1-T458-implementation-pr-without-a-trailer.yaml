@@ -1,0 +1,105 @@
+- id: W1-T458
+  title: "an implementation PR that merges with no `Remudero-Task:` trailer earns its task NO credit and leaves it re-dispatchable, and the reviewer never looks at the trailer at all"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  origin: recon#untrailered-implementation-2026-08-13
+  principles: {tdd: strict}
+  budget_usd: 30
+  files:
+    - src/lib/review.ts
+    - test/review-trailer-absent-advisory.test.ts
+    - test/scope-guard-review-direction.test.ts
+    - test/ships-unwired-floor.test.ts
+    - test/golden-verdicts.test.ts
+  rationale: "RE-DERIVED AT 012b4b7. #1731 implemented W1-T452 and merged on head
+    `fix/worktree-verb-containment`. NEITHER CREDIT PATH RESOLVED: `findMergedByTrailer` found no
+    anchored trailer in the body, and `findMergedByHeadBranch`'s `^run-<taskId>-\\d+$` does not match
+    that branch (MEASURED: the head matches that pattern 0 times). The daemon then re-dispatched the
+    task it had just merged.
+    THE SEQUENCE, ALL FOUR STAMPS FROM THE GitHub API: created 13:43:17Z; MERGED 13:58:42Z with no
+    trailer; RE-DISPATCHED 14:02:34Z as run W1-T452-1786629754611, cutting its worktree from the very
+    commit that implements the task; body updated 14:07:39Z when an operator added the trailer. Credit
+    then repaired RETROACTIVELY — `findMergedByTrailer` reads the body as it stands, not as it was at
+    merge — and the anchored trailer now matches once.
+    THE NEAR-MISS IS WORSE THAN THE WASTED DISPATCH, and it is what makes this worth a gate rather
+    than a habit. `resolveAlreadySatisfied` (`src/run-task.ts`) returned `refuted: not_found` for a
+    W1-T452 claim before the trailer landed and `verified` after — MEASURED both ways against the live
+    gateway. A worker dispatched inside that window and reaching for the already-satisfied exit would
+    have been told ITS TRUE CLAIM WAS FALSE and pushed to rebuild work that was already on main. The
+    exit existed and was closed for nine minutes.
+    THE INVERSION IS THE FINDING. `git grep -c 'Remudero-Task' -- src/lib/review.ts` returns 0 — the
+    reviewer NEVER inspects the trailer (positive control: the same grep against `src/lib/status.ts`
+    returns 14, where attribution actually lives). The reviewer DOES receive `taskDeclaredFiles` and
+    compares it in both directions — `scopeViolationFiles` and `inverseScopeUntouchedFiles`, 7
+    references in `review.ts` — BUT ONLY AFTER A TASK HAS BEEN RESOLVED, WHICH REQUIRES THE TRAILER
+    THAT IS MISSING. The scope check runs in the one case that cannot fail."
+  design: |
+    (i) THE SHAPE. Given the diff's file list and the loaded plan, find OPEN tasks whose declared
+    `files:` INTERSECT it; if any do and no task was resolved for this PR, emit an ADVISORY. Every
+    primitive already exists: `walkDiff` and the advisory list in `src/lib/review.ts`, the anchored
+    trailer regex in `src/lib/status.ts`, and the plan loader. NO NEW DATA IS FETCHED.
+    (ii) WARN, NOT BLOCK — AND THE MEASUREMENT SAYS SO RATHER THAN A PREFERENCE. Sampled at today's
+    sha over the last 87 merged PRs: 45 (52%) can earn credit by NEITHER path. THAT RAW FIGURE MUST
+    NOT BE QUOTED ALONE — it counts plan filings and docs PRs that SHOULD earn no task credit.
+    Keyed on the gate's own predicate the population falls: 20 of the 45 touch at least one declared
+    path of any kind, and only 10 touch a declared `src/` or `test/` path. So the honest figure is
+    10 of 87 — about 11% — and the raw 52% overstates it fivefold.
+    A BLOCKER AT THAT FALSE-POSITIVE RATE IS WRONG. It would refuse a refactor crossing three tasks'
+    files, or a session fixing a typo in a declared path. This repo has FIVE measured instances of a
+    bound firing on a healthy condition, the newest filed TODAY as W1-T457. WHAT WOULD JUSTIFY
+    ESCALATING LATER, stated so the decision is not re-litigated from taste: a measured run of the
+    advisory over a full week in which the warned set contains no legitimate incidental touch — i.e.
+    precision at or near 1.0 on real traffic, not on fixtures.
+    (iii) THE TRIGGER MUST BE "NO TASK RESOLVED", NEVER "NO TRAILER IN THE BODY". This is not a
+    stylistic choice and it is the one way to get this wrong quietly. MEASURED:
+    `test/fixtures/golden-verdicts/scope-creep/` supplies `declared-files.yaml` and carries NO trailer
+    in any fixture file — because the harness injects `taskDeclaredFiles` directly. A gate keyed on
+    the body's trailer would fire on that fixture and shift `golden.yaml`; a gate keyed on "no task
+    was resolved" leaves it untouched. `test/golden-verdicts.test.ts` is declared for exactly this
+    reason: it is the assertion that catches the wrong trigger.
+    (iv) THE REVIEWER IS THE RIGHT HOME, and the alternative has no surface. A merge-time check has
+    nowhere to post — merge is a GitHub action, not a rung — whereas the reviewer already holds the
+    diff, already loads the plan, and already posts a status a human reads before merging. It is also
+    where the two symmetrical scope comparisons already live, so this joins them rather than opening
+    a second place that answers scope questions. That it currently never reads the trailer is the
+    defect, not an argument for putting the check elsewhere.
+  note: "AN INTERSECTION IS EVIDENCE, NOT PROOF, AND THE WARNING MUST SAY SO. A task's `files:` list is
+    DECLARED, not derived: SEVEN `files:` corrections were needed this week, and a session's own draft
+    was caught by `lint-plan` reporting that `scopeGuardOutOfScopeFiles` would refuse the branch. So an
+    intersection can be stale in EITHER direction — a task may declare a path it no longer touches, or
+    touch one it never declared.
+        THEREFORE THE WARNING SHOULD NAME THE SUSPECTED TASK BUT MUST NOT ASSERT IT. Naming is what
+    makes the advisory actionable — `no trailer, and this diff touches files declared by W1-T4xx` tells
+    the author the one line to add — while a bare `no trailer on an implementation-shaped diff` leaves
+    them to guess which of 403 tasks with a `files:` list is meant. The wording must be a QUESTION the
+    author answers, never a claim the gate makes: it is reporting an overlap it cannot verify.
+        SCOPE BOUNDARY — THREE NEIGHBOURING TASKS, NONE OF THEM THIS ONE. W1-T401 wires
+    `scopeGuardOutOfScopeFiles` at review time and enforces `files:` GIVEN a resolved task; W1-T196 is
+    about a rung that cannot resolve a task id standing down instead of escalating `task: UNKNOWN`;
+    W1-T413 is the OPPOSITE direction — a plan-only PR that carries a trailer being wrongly credited as
+    an implementation. This task is the missing case: no task resolved at all, on a diff that looks like
+    an implementation. Do not fold it into any of the three.
+        THE DECLARED SUITES WERE SEPARATED BY INVOCATION COUNT, not prose mention.
+    `test/scope-guard-review-direction.test.ts` asserts the advisory reason codes 14 times and
+    references `taskDeclaredFiles` 6 times; `test/ships-unwired-floor.test.ts` references
+    `unwiredAdvisories` 15 times; `test/golden-verdicts.test.ts` references it 6 times and owns the
+    fixture in (iii). `test/review.test.ts` invokes `judgeReview` 83 times but asserts nothing about
+    this shape and is deliberately NOT declared.
+        RULE 19: `risk: high` is set UP FRONT because `files:` spans `src/` and `test/`; the band is
+    the SPAN, not blast radius — the change is one advisory beside two that already exist.
+        NO NUMBER HERE SHOULD BE QUOTED FORWARD: 87/45/20/10, the invocation counts and the four
+    timestamps were measured 2026-08-13. Re-derive before building."
+  acceptance:
+    - claim: "an implementation-shaped diff with no resolved task and an intersecting declared files list produces an advisory"
+      proof: "unit test: test/review-trailer-absent-advisory.test.ts"
+    - claim: "the advisory is ADVISORY — it never forces state or floorState to failure"
+      proof: "unit test: test/review-trailer-absent-advisory.test.ts"
+    - claim: "a PR whose task IS resolved produces no such advisory, so the golden fixtures do not shift"
+      proof: "unit test: test/golden-verdicts.test.ts"
+    - claim: "the two existing scope comparisons keep their current behaviour in both directions"
+      proof: "unit test: test/scope-guard-review-direction.test.ts"
+  status: queued
+  attempts: 0
