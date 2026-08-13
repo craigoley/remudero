@@ -8873,6 +8873,13 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
  * passed; every mode's steps print after the hand-route steps, with the same independent-
  * step, print-everything, exit-non-zero-iff-any-failed discipline; omitting both flags leaves
  * the shipped hand route byte-for-byte unchanged.
+ *
+ * SUMMARY-FILE CONTAINMENT (W1-T455). A `deps.spawn` override means the caller is a test, not a
+ * real worker, and a test has no business writing the orchestrator's adjudicated verdict — the
+ * default path is what {@link preflightFailureNotice} reads back and reports AS THE WORKER'S OWN
+ * result. So an injected `deps.spawn` with no explicit `--summary-file` writes NOTHING; pass
+ * `--summary-file` to opt into a specific path regardless. Only a call with no injected spawn
+ * (a real worker running the real binary) falls back to `preflightSummaryPath(repoRoot)`.
  */
 export async function preflightCommand(rest: string[], deps: PreflightDeps = {}): Promise<number> {
   const badArg = unknownArgError("preflight", rest, ["--from", "--to", "--summary-file"], ["--ci-parity", "--fast"]);
@@ -8918,7 +8925,18 @@ export async function preflightCommand(rest: string[], deps: PreflightDeps = {})
   // branch, because a FAILING run's summary is the one most worth keeping. A write failure is
   // reported and never changes the exit code — the verdict belongs to the checks, not to whether
   // a file could be written.
-  const summaryPath = flagValue(rest, "--summary-file") ?? preflightSummaryPath(repoRoot);
+  //
+  // W1-T455: REFUSE THE DEFAULT PATH WHEN A SPAWN IS INJECTED. `deps.spawn` set means a test is
+  // driving this call, and a test has no business writing the orchestrator's adjudicated verdict
+  // (`preflightFailureNotice` reads `preflightSummaryPath(repoRoot)` and reports it as the
+  // WORKER'S OWN result) into whatever `repoRoot` the suite happens to resolve. An explicit
+  // `--summary-file` is still honoured either way — that is the caller opting in to a specific,
+  // named path, never the default the orchestrator trusts. Only a real, non-injected spawn may
+  // fall back to the default: that is the one call shape the orchestrator's own verdict comes
+  // from.
+  const explicitSummaryFile = flagValue(rest, "--summary-file");
+  const injectedSpawn = deps.spawn !== undefined;
+  const summaryPath = explicitSummaryFile ?? (injectedSpawn ? undefined : preflightSummaryPath(repoRoot));
   const summary = buildPreflightSummary({
     steps: [...result.steps, ...(fast?.steps ?? []), ...(ciParity?.steps ?? [])],
     finishedAt: new Date().toISOString(),
@@ -8926,12 +8944,18 @@ export async function preflightCommand(rest: string[], deps: PreflightDeps = {})
     headSha: readHeadShaForSummary(),
     args: rest,
   });
-  try {
-    mkdirSync(dirname(summaryPath), { recursive: true });
-    writeFileSync(summaryPath, JSON.stringify(summary, null, 2) + "\n", "utf8");
-    console.log(`### summary written: ${summaryPath} (${summary.passed} passed, ${summary.failed} failed, ${Math.round(summary.durationMs / 1000)}s)`);
-  } catch (e) {
-    console.error(`### summary NOT written to ${summaryPath}: ${String((e as Error)?.message ?? e)}`);
+  if (summaryPath === undefined) {
+    console.log(
+      `### summary NOT written: an injected spawn refuses the default path (${preflightSummaryPath(repoRoot)}) — pass --summary-file to write one anyway`,
+    );
+  } else {
+    try {
+      mkdirSync(dirname(summaryPath), { recursive: true });
+      writeFileSync(summaryPath, JSON.stringify(summary, null, 2) + "\n", "utf8");
+      console.log(`### summary written: ${summaryPath} (${summary.passed} passed, ${summary.failed} failed, ${Math.round(summary.durationMs / 1000)}s)`);
+    } catch (e) {
+      console.error(`### summary NOT written to ${summaryPath}: ${String((e as Error)?.message ?? e)}`);
+    }
   }
   return ok ? 0 : 1;
 }
