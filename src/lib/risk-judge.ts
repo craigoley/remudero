@@ -138,6 +138,13 @@ export function buildRiskJudgePrompt(input: RiskJudgeInput): string {
     `state below. You are NEVER shown, and must NEVER consult, any static \`risk:\``,
     `field — that field sizes effort, it does not measure danger.`,
     ``,
+    `YOU ARE NOT SHOWN A DIFF (W1-T454). The description and files list below are`,
+    `everything you get — no patch, no hunks, no code. Do not phrase a RISK_REASON`,
+    `as though you read the code ("the code does X", "X is never done") — phrase it`,
+    `as what the description/files/gates state below actually show or imply. An`,
+    `inference about unseen code, printed in the grammar of an observation, is`,
+    `exactly the defect this judge exists to avoid, not one it may commit.`,
+    ``,
     `CANDIDATE CHANGE: ${input.change.description}`,
     `FILES TOUCHED: ${filesLine}`,
     ``,
@@ -153,9 +160,10 @@ export function buildRiskJudgePrompt(input: RiskJudgeInput): string {
     `each of these lines, and nothing else on the line:`,
     `  RISK_VERDICT: <low|high>`,
     `  RISK_CONFIDENCE: <0.0-1.0>`,
-    `and one or more lines naming the OBSERVED basis for your verdict — never an`,
-    `inferred symptom (the W1-T186 emitter discipline):`,
-    `  RISK_REASON: <one concrete, observed reason>`,
+    `and one or more lines naming the OBSERVED basis for your verdict — observed IN`,
+    `THE TEXT ABOVE, never an inferred symptom of code you have not read (the`,
+    `W1-T186 emitter discipline, applied to this judge's own evidentiary limits):`,
+    `  RISK_REASON: <what the description/files/gates state above actually shows>`,
   ].join("\n");
 }
 
@@ -217,16 +225,41 @@ export interface RiskJudgeConfig {
 
 const DEFAULT_CONFIDENCE_THRESHOLD = 0.7;
 
+/**
+ * W1-T454: {@link RiskJudgeChange} carries only a free-text `description` and a
+ * `files` path list — never a patch — so every reason a LIVE judge call produces is
+ * necessarily an INFERENCE from that text, not an observation of code. Issue #1723
+ * printed four such inferences in the grammar of observations ('Unspent nonces ARE
+ * never deleted') against a diff that refuted every one, because nothing forced the
+ * printed reason to say what it actually rests on. This wraps each reason with its
+ * true evidence basis BY CONSTRUCTION — a deterministic string transform downstream
+ * of the judge's own text, not a prompt instruction it could ignore or comply with
+ * inconsistently — so the text a human reads in the escalation is honest even when
+ * the judge's own prose is not.
+ *
+ * The two internal fail-closed reasons ({@link FAIL_CLOSED_VERDICT} and the catch
+ * branch in {@link assessRisk}, both prefixed "judge ...") are exempt: they already
+ * truthfully name their OWN basis — the judge's unavailability or unparseable
+ * output — not a claim about the change, so qualifying them again would be noise
+ * at best and misleading at worst (they have nothing to do with the description).
+ */
+function evidenceQualifiedReason(reason: string): string {
+  if (reason.startsWith("judge ")) return reason;
+  return `on the change's description/files alone, no diff was read — ${reason}`;
+}
+
 function reasonsText(verdict: RiskJudgeVerdict): string {
-  return verdict.reasons.length > 0 ? verdict.reasons.join("; ") : "no reasons stated";
+  if (verdict.reasons.length === 0) return "no reasons stated";
+  return verdict.reasons.map(evidenceQualifiedReason).join("; ");
 }
 
 /**
  * Pure verdict -> action mapping, no LLM call inside it: `high` OR
- * below-confidence ESCALATES (naming the verdict's own OBSERVED reasons,
- * W1-T186 emitter discipline); otherwise PROCEEDS. The static `risk:` field
- * plays no part — this function's only inputs are the judge's own verdict
- * and the confidence floor.
+ * below-confidence ESCALATES (naming the verdict's own reasons, each wrapped by
+ * {@link evidenceQualifiedReason} — W1-T454 — with the evidence it actually rests
+ * on, the W1-T186 emitter discipline applied to the judge's own evidentiary
+ * limits); otherwise PROCEEDS. The static `risk:` field plays no part — this
+ * function's only inputs are the judge's own verdict and the confidence floor.
  */
 export function planRiskJudgeAction(verdict: RiskJudgeVerdict, config: RiskJudgeConfig = {}): RiskJudgeAction {
   const threshold = config.confidenceThreshold ?? DEFAULT_CONFIDENCE_THRESHOLD;
