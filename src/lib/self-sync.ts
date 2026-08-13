@@ -350,7 +350,30 @@ export function checkServiceFreshness(
     return { status: "degraded", reason: `could not resolve HEAD/origin/main in ${repoDir}: ${String(err)}` };
   }
   // dirty and behind are INDEPENDENT facts (a tree can be both) — the caller ledgers each.
-  const dirty = git(["status", "--porcelain"]).trim().length > 0;
+  // `-uno` — TRACKED MODIFICATIONS ONLY, and this MATCHES `deploy/entrypoint.sh` EXACTLY, which is
+    // the whole point rather than a tidy-up. This value now drives a RESTART DECISION (#1706 wires it
+    // through `daemonFreshnessFromService` to the daemon's freshness guard), and the thing that must
+    // succeed after that guard fires is the entrypoint's sync. That script tests
+    // `git status --porcelain -uno` and refuses on any TRACKED modification, so a guard counting
+    // UNTRACKED files was strictly stricter than the step it gates: one stray untracked path
+    // suppressed a restart the entrypoint would have serviced happily. Not hypothetical here — an
+    // untracked `.claude/` blocked the operator's self-sync TWICE in one day before it was ignored.
+    //
+    // ALIGNING DOWN IS SAFE IN THE ONLY DIRECTION THAT MATTERS: it can only ever PERMIT restarts the
+    // entrypoint can complete, never permit one it would refuse. The opposite alignment — an
+    // INTERSECTING predicate, as `treeFfSafe` uses — would be actively wrong here, and deliberately
+    // so: `treeFfSafe` governs the MINI's deploy supervisor, while the script that must succeed after
+    // a stale exit on AZURE is `entrypoint.sh`, which refuses on ANY tracked modification, unscoped,
+    // and says so in its own refusal text. An intersecting guard would report stale on a tree the
+    // entrypoint then refuses to sync — same sha, same staleness, exit again: the relaunch storm
+    // `DaemonStopReason`'s doc says must never reach an exit. That divergence is DECLARED, not
+    // accidental, so this aligns with the entrypoint and NOT with the deployer.
+    //
+    // `checkCliFreshness` above KEEPS the unscoped form deliberately. Its dirty check REFUSES rather
+    // than assesses, relaxing it is W1-T446's scope, and that task is `verify: human` precisely
+    // because loosening a blocking guard is the operator's call. This edit is scoped to the assessing
+    // sibling for that reason.
+    const dirty = git(["status", "--porcelain", "-uno"]).trim().length > 0;
   const behind = headSha !== originSha ? { oldSha: headSha, newSha: originSha } : null;
   return { status: "assessed", dirty, behind };
 }
