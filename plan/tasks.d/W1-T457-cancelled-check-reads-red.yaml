@@ -1,0 +1,98 @@
+- id: W1-T457
+  title: "a SUPERSEDED cancelled check-run makes checksState red forever, so the fix rung dispatches against an empty failing set — 5 of 6 fix dispatches were unmet_count 0"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  origin: oper#fix-rung-dispatches-on-empty-set-2026-08-13
+  principles: {tdd: strict}
+  budget_usd: 40
+  files:
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - test/sweep.test.ts
+    - test/sweep-blocked-routing.test.ts
+    - test/open-prs-rest.test.ts
+    - test/run-task.test.ts
+    - test/sweep-superseded-check-run.test.ts
+  rationale: "RE-DERIVED at e4b3d8c. THE RUNG'S PREDICATE IS CORRECT AND ITS INPUT IS WRONG.
+    `checksStateFromRollup` (src/lib/sweep.ts) walks the gate set and returns `red` the moment ANY
+    entry's state is in `REQUIRED_CHECK_FAIL` — a set that includes `CANCELLED` alongside FAILURE,
+    ERROR, TIMED_OUT, ACTION_REQUIRED and STARTUP_FAILURE. IT DOES NOT DEDUPE BY CHECK NAME AND IT
+    DOES NOT PREFER THE NEWEST RUN (verified by reading the function body; positive control — the
+    word `gate` appears twice in the slice read, so the slice really is the body).
+    MEASURED ON PR #1728's HEAD 94c97e33: TWO `ci-gate` check-runs exist on that one sha —
+    `completed/cancelled` started 13:48:42, and `completed/success` started 13:50:02. The cancelled
+    one is the SUPERSEDED run. So the newest `ci-gate` was green and `checksState` still read `red`,
+    because the stale cancelled entry is never dropped.
+    THE SECOND SET DISAGREES WITH THE FIRST, AND THAT IS THE WHOLE DEFECT. `fetchCiFailures`
+    (src/run-task.ts) populates `ciFailures` from the SAME rollup but filters to `FAILURE` or
+    `ERROR` ONLY — `CANCELLED` yields no record. So one predicate says the PR is red and the other
+    says nothing is failing. `blocked-fixable` fires with an EMPTY list, the rung dispatches a
+    ci-log fix worker with nothing to fix, and the escalation renders
+    `required checks are STILL red — no review has run yet. Failing check(s):` with nothing after
+    the colon.
+    THIS IS NOT ONE OCCURRENCE. Ledger, at today's sha: SIX `fix.dispatch` rows exist. FIVE are
+    `mode: \"ci-log\"` with `unmet_count: 0` — W1-T449 (strikes 1 and 2), W1-T404 (strike 1), and
+    PR-1728 (strikes 1 and 2). Only ONE is legitimate: `mode: \"reviewer-unmet\"` with
+    `unmet_count: 5`. Forty-four `ci-log fix, strike` disposition rows span FOUR distinct PRs —
+    #1690, #1693, #1709, #1728.
+    THE COST IS SMALLER THAN THE BRIEF THAT COMMISSIONED THIS ASSUMED, AND THE CORRECTION IS
+    RECORDED SO NOBODY PRICES IT WRONG: paired `fix.done` rows give $0, $0, $1.926, $0.334, $0.267
+    for the five empty-set dispatches — **$2.53 total**, not two Opus-class runs per occurrence.
+    The workers exit quickly precisely BECAUSE there is nothing to fix. The cost is wasted
+    dispatches and a misleading escalation, not material spend."
+  design: |
+    (i) THE DEDUPE ALREADY EXISTS ONE SURFACE OVER, AND THAT IS THE STRONGEST ARGUMENT FOR THE SHAPE
+    OF THE FIX. `.github/workflows/ci-gate.yml` solved exactly this for itself: its own suite
+    (test/ci-gate-dedupe.test.ts) asserts that "a SHA carrying a failed then a later successful run
+    of the SAME required check name reads as SUCCESS" — the #242 fixture. `checksStateFromRollup`
+    has no such dedupe. TWO SURFACES DOCUMENTED TO AGREE, QUIETLY DISAGREEING; the fix is to give
+    the sweep the rule the gate already has, not to invent one.
+    (ii) BOTH SETS MUST MOVE TOGETHER OR NEITHER SHOULD. `REQUIRED_CHECK_FAIL` (sweep.ts) and
+    `fetchCiFailures`' FAILURE|ERROR filter (run-task.ts) are the two halves that disagree.
+    Establish which is right BEFORE changing either: if a cancelled superseded run should not count
+    as red, the first is wrong; if a cancelled run genuinely blocks merge, the second is wrong and
+    the list should name it. A fix that changes only one leaves the other producing the same
+    contradiction with the polarity reversed.
+    (iii) THE RENDERER IS A SYMPTOM, NOT THE CAUSE, AND MUST NOT BE FIXED ALONE. The escalation text
+    also CONFLATES TWO CONDITIONS in one sentence — "required checks are STILL red — no review has
+    run yet" — which are independent facts (#1728 had a pending gate AND no review). Making it print
+    an accurate empty list would silence the symptom while the rung kept dispatching.
+    (iv) DO NOT WEAKEN THE RED PATH. A genuinely failing required check must still route to
+    `blocked-fixable` and still dispatch the ci-log rung — that is the #170/W1-T100 fix and it works.
+    Both directions belong in the acceptance: a superseded cancelled run beside a newer success is
+    NOT red, and a current failure still is.
+  note: "SCOPE — WHAT IS DELIBERATELY EXCLUDED. #1728 is a plan-only FILING, so even a correct fix
+    rung could not have repaired it: `criteriaRecoverable` is false without a `Remudero-Task:`
+    trailer, which filings must omit, and the head-ref fallback cannot resolve a `plan/…` branch
+    either. That is W1-T456 (#1732) and it is NOT part of this task. This shard is only about the
+    rung firing on a healthy condition.
+    THIS IS THE FIFTH MEASURED INSTANCE of a bound firing on a healthy condition in this repo —
+    W1-T312's ci-gate wait cap, W1-T380's dry-run deploy ceiling, W1-T382's check-wait bound where
+    21 of 21 booked PRs merged, and the idle-gate ceiling are the others. It is the first that
+    spends dispatches per occurrence, which is why it is worth a task rather than a note.
+    A MEASUREMENT HAZARD RECORDED FOR THE IMPLEMENTER, because it cost this recon a false zero: the
+    strings the operator sees — `dispatching ONE ci-log fix worker for 0 failing check(s)` and
+    `fix rung: exhausted after 2 strike(s)` — are `say()` output to stdout and NEVER REACH THE
+    LEDGER. Grepping the ledger for them returns 0 WITH THE POSITIVE CONTROL ALSO RETURNING 0.
+    Count via `fix.dispatch` rows (which carry `unmet_count`, `mode`, `strike`) and the
+    `ci-log fix, strike` dispositions instead.
+    RISK:HIGH IS RULE 19's SPAN, NOT BLAST RADIUS — the state predicate lives in sweep.ts, the
+    failing-list producer and the escalation renderer in run-task.ts, and four existing suites
+    observe them. The change itself is expected to be one dedupe plus one aligned set.
+    FILES WRITTEN FROM THE GATES, separated BY INVOCATION COUNT: `checksStateFromRollup(` is invoked
+    by test/sweep.test.ts (21), test/open-prs-rest.test.ts (7) and test/sweep-blocked-routing.test.ts
+    (5); `isBlockedCi(` by test/sweep.test.ts (4), test/run-task.test.ts (3) and
+    test/sweep-blocked-routing.test.ts (2). All four declared. `fetchCiFailures(` is invoked ZERO
+    times from test/ — it is module-private in run-task.ts — so it has no suite of its own today and
+    the new file is where its contract gets one. test/ci-gate-dedupe.test.ts is deliberately EXCLUDED:
+    it asserts the WORKFLOW's dedupe, which this task copies from rather than changes."
+  acceptance:
+    - claim: "a superseded cancelled run beside a newer success for the same check name is not red"
+      proof: "unit test: test/sweep-superseded-check-run.test.ts"
+    - claim: "a currently failing required check is still red and still routes to the ci-log fix rung"
+      proof: "unit test: test/sweep-blocked-routing.test.ts"
+    - claim: "the state predicate and the failing-list producer agree on what counts as failing"
+      proof: "unit test: test/sweep-superseded-check-run.test.ts"
