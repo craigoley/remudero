@@ -49,6 +49,36 @@
     reporter set INCLUDING `spec` so a summary line exists, pass/fail sets CAPTURED and compared, and
     REPEATED READINGS — the baseline's own note took EIGHT LOCAL READINGS before moving a floor by
     0.04pts.
+    (ii-RETRACTED, 2026-08-13) THAT METHOD WAS FOLLOWED EXACTLY AND FAILED ANYWAY. Kept above rather
+    than deleted, per §8A: two failed attempts with DIFFERENT faults are the most useful thing anyone
+    has produced on this question, and a later session must not re-derive the protocol and repeat it.
+    ATTEMPT TWO used the SAME TREE, the `spec` reporter, THREE readings a side, INTERLEAVED so drift
+    hit both sides equally. It failed three ways at once:
+      1. THE INSTRUMENT LOST HALF ITS WRITES. Across 16 run-attempts only 8 produced a usable lcov. In
+         the first pass 5 of 6 were 0 BYTES, and every empty file's mtime equalled its run's START,
+         not its end — opened at start, never written at exit. The one survivor ran in the quietest
+         window (load 12.5 falling to 9.8) while the others ran at 13-19. A LOAD-DEPENDENT FLUSH RACE.
+      2. SIX READINGS OF A BARELY-CHANGED TREE SPREAD WIDER THAN THE EFFECT: 87.88, 88.04, 89.89,
+         89.90, 89.91, 89.94 — a 2.06pt BRANCH SPREAD against the 0.54pt effect, roughly 4x. Lines
+         spread 88.17 to 98.17, TEN POINTS.
+      3. THE READINGS CLUSTER BY TEST COUNT, NOT BY SHA. Every 6800-test reading scored about 89.9%;
+         every 6769/6788 reading about 88%. `run-task.ts` BRF swung 2810 to 3496 across readings of
+         the same nominal code.
+    AND IT CONTRADICTS ITSELF IRRESOLVABLY, BOTH SIDES FROM THE SAME SIX RUNS: the test counts track
+    the sha CORRECTLY (base 6769, after 6788, the base sha verified with `git cat-file` to lack
+    `test/base-blob-read-failure.test.ts`), YET `src/lib/review.ts` reports LF 5841 in ALL SIX readings
+    against a base file of 5702 LINES — and lines-found cannot exceed a file's length. The session
+    DECLINED TO GUESS which side is wrong and so does this shard.
+    THE SESSION'S OWN ERROR, NAMED: it suppressed `git checkout`'s stderr with `2>/dev/null` and never
+    asserted HEAD afterwards, so it cannot cleanly say which tree each run measured. Any future
+    protocol MUST assert HEAD after every checkout.
+    AND THE SHAS WERE WRONG IN THE ORIGINAL FRAMING: `origin/main` moved to `2411153` mid-session, so
+    comparing against `main` attributes THREE LATER PRs to #1739. THE CORRECT PAIR IS `4429ff6`
+    (#1739's parent) AGAINST `00fd676` (its merge) — adjacent commits, so the diff is exactly #1739.
+    (ii-b) SO THE READING MUST COME FROM CI'S OWN LOGS, NOT FROM THIS HOST. CI is uncontended, its
+    runs exist in bulk, and it is the reading THE GATE ACTUALLY MAKES — the baseline's own note already
+    observes CI reads higher and steadier than local. ANY FUTURE ATTEMPT MUST NOT REPEAT A LOCAL
+    PROTOCOL, however carefully specified.
     (iii) FOUR OPTIONS. The first three are the obvious ones and each is costed; the fourth is the
     operator's position and is NOT ranked below them.
       (a) COVER THE NEWLY-DISCOVERED BRANCHES. Honest if they are real gaps. Cost UNKNOWN until (i)
@@ -84,6 +114,22 @@
         (d-i) UNDERNEATH it rather than instead of it.
     (iv) IF (i) SAYS REAL GAPS, a tolerance band HIDES them and (a) is right. IF (i) SAYS ARTEFACTS,
     the gate is measuring noise and (d) is right. State which the finding supports before building.
+    (v) WHAT THE TWICE-FAILED MEASUREMENT DOES SETTLE, AND WHAT IT LEAVES OPEN (2026-08-13).
+    SETTLED — THE MECHANISM QUESTION. The gate compares a whole-tree average against a fixed number at
+    `epsilon 1e-9`, the floor sits 0.13pt BELOW main, and the instrument's own spread on this host is
+    ~2pt. A THRESHOLD AN ORDER OF MAGNITUDE FINER THAN ITS INSTRUMENT'S SPREAD CANNOT DISTINGUISH A
+    REGRESSION FROM A RE-ROLL. That is direct evidence for option (d), and specifically for (d-i), a
+    tolerance band keyed to MEASURED noise.
+    AND IT RAISES THE BAND: the baseline's recorded 0.0936pt spread came from eight readings on one
+    tree; this session measured 2.06pt on an equally static tree. WHATEVER MULTIPLE (d-i) PICKS MUST BE
+    DERIVED FROM A FRESH SPREAD, NEVER FROM THE 0.0936pt FIGURE.
+    STILL OPEN — WHETHER THE BRANCHES ARE REAL GAPS. The `deployer.ts` sample (untaken `??` and ternary
+    arms inside code six test files exercise) STANDS UNREFUTED AND UNEXTENDED at n=1.
+    A SEPARATE READING OVER 92 CI LOGS classified 98% as uncalled-function declaration lines and 2% as
+    pure artefact. CARRIED HERE WITH ITS CI PROVENANCE AND EXPLICITLY NOT AS A LOCAL MEASUREMENT — it
+    was never reproduced on this host, and nothing local in this shard corroborates it.
+    THIS DOES NOT PRE-EMPT THE RULING. The four options stand unchanged and the choice between them is
+    the operator's.
   note: "RULE 25 FORCES THE OPTIONS APART AND THE PREDICATE WAS RUN, NOT ASSUMED. Driving
     `INSTRUMENT_SURFACE` (`src/lib/review.ts`) directly: `scripts/coverage-baseline.json`
     instrument=TRUE, `scripts/coverage-ratchet.mjs` instrument=TRUE, and the CONTROLS
@@ -108,9 +154,9 @@
     spread, the 1.24x margin and the eight readings were measured or quoted 2026-08-13. Re-derive
     before building — main may have moved."
   acceptance:
-    - claim: "the attribution question is answered with the specified method before any remedy is chosen"
+    - claim: "criterion one is ANSWERED — the local attribution measurement is unavailable at this precision"
       proof: "unit test: test/coverage-ratchet.test.ts"
-    - claim: "both readings come from the same tree with a spec reporter and captured pass or fail sets"
+    - claim: "any future attribution reading is taken from CI logs rather than a local protocol"
       proof: "unit test: test/coverage-ratchet.test.ts"
     - claim: "the chosen remedy names which of the four options the finding supports and why"
       proof: "unit test: test/coverage-ratchet.test.ts"
