@@ -7,7 +7,28 @@
   risk: high
   principles: {tdd: strict}
   budget_usd: 30.00
-  rationale: "MAIN IS RED ON ITS OWN COVERAGE FLOOR AND EVERY PR INHERITS IT, INCLUDING PLAN-ONLY YAML
+  rationale: "AMENDED 2026-08-13 AGAINST 92 UNCONTENDED CI READINGS. THE HEADLINE SURVIVES AND ONE
+    SENTENCE DOES NOT. RETRACTED, NOT DELETED (§8A asks for compression, not erasure — the original
+    reasoning below is the record of how this was read twice):
+      **'THE NEWLY-DISCOVERED BRANCHES ARE REAL GAPS, NOT IMPORT-TIME ARTEFACTS' IS HALF-WRONG.**
+    It generalises from `src/lib/deployer.ts`, n=1, AND THAT FILE IS ATYPICAL: it has no trailing
+    zero-hit record and its 9 uncovered branches really are genuine `??`/ternary arms. The general
+    population does not look like it. Of 96 files carrying a FINAL zero-hit branch record, **94 (98%)
+    sit on an UNCALLED FUNCTION'S DECLARATION LINE** and 2 sit on a non-branching line and are pure
+    artefact. THE CLEAN CASE, RE-VERIFIED HERE AND QUOTABLE: `src/lib/proof-grammar.ts` is 42 lines
+    with ZERO occurrences of `??`, `||`, `&&` or a ternary (positive control on the same tool: one
+    `export`), yet reports `BRF:3 / BRH:2`, and its untaken record is `BRDA:42,2,0,0` — line 42, which
+    is literally `];`. THERE IS NO BRANCH THERE TO TEST, so it cannot be a missing test.
+    WHAT THAT DOES AND DOES NOT CHANGE. It does NOT rescue the aggregate: 98% ARE real functions with
+    real missing tests, so calling this phantom bookkeeping would be dishonest in the other direction.
+    It DOES destroy the tractability estimate — see the amendment's own section below.
+    **THE HEADLINE IS UNCHANGED AND IS NOW FAR BETTER EVIDENCED:** #1739 made the metric more honest
+    and was punished for it. THE HONEST FRAMING, which the options below should be read against: a
+    gate comparing ONE WHOLE-CODEBASE AVERAGE against a FIXED NUMBER was handed a BIGGER, MORE HONEST
+    CODEBASE and read the improvement as a failure.
+
+    THE ORIGINAL REASONING, PRESERVED VERBATIM FROM HERE — read the retraction above first:
+    MAIN IS RED ON ITS OWN COVERAGE FLOOR AND EVERY PR INHERITS IT, INCLUDING PLAN-ONLY YAML
     EDITS. The investigation is COMPLETE; this shard records the decision, not the diagnosis.
     THE NEWLY-DISCOVERED BRANCHES ARE REAL GAPS, NOT IMPORT-TIME ARTEFACTS — and this is the sentence
     that matters: **#1739 MADE THE METRIC MORE HONEST AND WAS PUNISHED FOR IT.** RE-VERIFIED at
@@ -30,7 +51,54 @@
     THE STACK. MEASURED at 00fd6765: `scripts/diff-coverage.mjs` contains exactly ONE line mentioning
     `BRDA`/`BRF`/`BRH`, and it is a COMMENT describing the ratchet — against 11 lines reading `DA:`.
     Its own header states the division: `an already-uncovered pre-existing line is the aggregate
-    ratchet's problem, not a new regression this diff introduced.`"
+    ratchet's problem, not a new regression this diff introduced.`
+    — END OF THE ORIGINAL REASONING. THE AMENDMENT'S OWN MEASUREMENTS FOLLOW. —
+
+    (A) THE EFFECT IS FAR OUTSIDE THE NOISE, over 92 CI readings (n=83 without #1739, n=9 with):
+      without #1739 : branches mean **90.771%**, min 90.65, max 90.88 — every reading CLEARS 90.40
+      with #1739    : branches mean **90.192%**, min 90.12, max 90.23 — every reading FAILS by 0.17-0.28pt
+      => **DISJOINT.** Worst case 0.42pt apart; gap between means 0.5787pt.
+    AND **LINES ROSE +2.102pt SIMULTANEOUSLY** (96.222 -> 98.324) — the same fact from the other side:
+    more of the codebase became visible to the measurement. PROVENANCE: those figures are the CI
+    corpus, not re-measured here. INDEPENDENTLY CORROBORATED on 5 sampled CI job logs while amending —
+    pre: #1743 96.23/90.76, #1741 96.23/90.73, #1746 96.24/90.75 (all PASS); post: #1751 98.34/90.22,
+    #1752 98.33/90.25 (both FAIL). Same split, same direction, disjoint at n=5 too.
+
+    (B) NAME THE DISCRIMINATOR, BECAUSE TIMESTAMPS DO NOT WORK. A reading is 'with #1739' when its log
+    says `[excluded 22 out-of-repo record(s)]` and 'without' at 21 — the step is EXACTLY one, caused by
+    #1739's test spawning `/tmp/t460-child-*/probe.ts`. THIS SORTS BY CONTENT, NOT BY CLOCK, which is
+    why it works on #1739's own branch pre-merge. MEASURED WHILE AMENDING: **#1746 MERGED AFTER #1739
+    AND READS 21** — its head was branched before, so a timestamp sort would have filed it on the
+    wrong side.
+
+    (C) ONE SUB-RESULT IS EXACT; THE REST IS A CONVERGING ESTIMATE. SAY WHICH IS WHICH.
+      **EXACT: +21 PROVEN-NEW.** CI shows 21 files falling FROM 100.00%, and the lcov shows 21 files
+      whose only uncovered branch is that final record — the same 21. At 100% BRF = BRH, so each
+      gained exactly one uncovered branch. No modelling.
+      **ESTIMATE: ~96 net-new uncovered**, converging with this shard's own +97 and an earlier +101.
+      A DIRECTION, NOT A VALUE.
+    CORROBORATION FROM THE FUNCTION AXIS: function coverage collapsed **94.96% -> 67.93%**, 2123
+    uncalled of 5917 in the post tree. RE-DERIVED LOCALLY HERE (in-repo files only, so the absolute
+    numbers differ and the direction does not): functions 95.27% -> 67.77%, uncalled 185 -> 1813, and
+    `FNF` 3912 -> 5625 — **+1713 functions DISCOVERED against +85 newly CALLED.** That is the whole
+    mechanism in one line.
+
+    (D) TRACTABILITY INVERTS, AND THIS IS THE PRACTICAL CONSEQUENCE FOR OPTION (a). The top ten files
+    hold 69.6% of TOTAL uncovered branches (`run-task.ts` alone 51%), so the STOCK is concentrated —
+    but the NEWLY-uncovered are **~1 per file across ~96 files, maximally spread**. Option (a) is
+    therefore calling ~94 uncalled functions in ~94 SEPARATE FILES. **IT IS NOT A QUICK UNBLOCK**, and
+    any reading of it as a ten-file job is wrong.
+
+    (E) RECORD THE METHOD FAILURE SO IT IS NOT REPEATED — THE LOCAL PROTOCOL PRODUCED A VOID RESULT
+    THAT LOOKED COMPLETE. **4 of 6 lcovs were 0 BYTES** while every spec file carried a normal
+    tests/pass/fail summary: the emptiness is visible ONLY by `stat`-ing the lcov, never from the test
+    output. AND THE SURVIVING PAIR MEASURED THE AFTER TREE TWICE — `base-r3.lcov` reports
+    `src/lib/review.ts` at LF:5841, which is the AFTER length (5702 at base), and total LF is
+    byte-identical at 97591 on BOTH sides. It reproduced the known-invalid signature (`review.ts` BRF
+    falling 1274->957, the same shape as an earlier discarded attempt's -311).
+    **SO: TAKE THIS READING FROM CI'S OWN LOGS, NOT LOCALLY.** They are uncontended, they are the
+    reading the gate actually makes, and they exist in bulk. A local run on a contended box is not a
+    cheaper version of that measurement; it is a different and worse one."
   design: "(i) THE DECISION IS TWO OPTIONS, NOT FOUR. Both are recorded with what is already measured;
     NEITHER is recommended here, because the choice is the operator's.
       **(1) RE-CAPTURE THE BRANCH FLOOR AGAINST TODAY'S IMPORT GRAPH, TIGHTENING LINES IN THE SAME
@@ -73,7 +141,21 @@
   files: [scripts/coverage-baseline.json, scripts/coverage-ratchet.mjs, test/coverage-floor-recapture.test.ts, test/coverage-ratchet.test.ts]
   status: queued
   attempts: 0
-  note: "`verify: human` — BOTH options need a ruling this shard must not pre-empt. Option (1)
+  note: "AMENDMENT 2026-08-13 — TWO FRAMINGS THE RULING NEEDS, AND BOTH MUST BE HELD AT ONCE. THE
+    OPTIONS BELOW ARE UNCHANGED; this adds no recommendation.
+    (1) RE-BASELINING WOULD NOT HIDE A REGRESSION. **Nothing that was tested stopped being tested.**
+    RE-DERIVED: the two files #1739 actually edited both went UP — `src/lib/review.ts` 888/934
+    (95.07%) -> 911/957 (95.19%), `src/run-task.ts` 2266/2795 (81.07%) -> 2274/2802 (81.16%). The
+    aggregate fell while both changed files improved, which is the signature of a DENOMINATOR move
+    rather than a coverage loss.
+    (2) AND IT IS NOT PHANTOM BOOKKEEPING EITHER — saying so would be dishonest in the other
+    direction. **98% of the newly-counted records are real functions with real missing tests**; only
+    2% are the non-branching artefact (`];`, a bare `export const`). The retraction at the top of the
+    rationale narrows WHICH claim was wrong — the generalisation from `deployer.ts` — and does not
+    convert the population into noise.
+    HOLDING BOTH: a gate comparing one whole-codebase average against a fixed number was handed a
+    bigger, more honest codebase and read the improvement as a failure. That is the thing to rule on.
+    `verify: human` — BOTH options need a ruling this shard must not pre-empt. Option (1)
     DIRECTLY CONTRADICTS A STANDING INSTRUCTION IN THE FILE IT WOULD EDIT
     (`scripts/coverage-baseline.json`): `Never lower these numbers to make a PR pass — raise them
     (ratchet up) when coverage genuinely improves; a coverage-lowering PR must go CI-red.`
