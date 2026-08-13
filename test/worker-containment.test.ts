@@ -59,6 +59,35 @@ async function waitUntilDead(pid: number, timeoutMs = 5000): Promise<void> {
 }
 
 /**
+ * W1-T459: wait for the CONDITION the attribution path actually reads — `ps eww` having published
+ * `pid`'s marker ENV — instead of sleeping a fixed beat and hoping.
+ *
+ * WHY A POLL AND NOT A BIGGER NUMBER. The fixed 100 ms beat this replaces was a bet on host speed.
+ * MEASURED on the mini (10 cores) by spawning a marked child and polling to first visibility: IDLE
+ * median 2 ms / max 3 ms, but at load 58-86 median 48 ms, p90 117 ms, max 150 ms — 4 of 25 samples
+ * past 100 ms. The beat does not fail because 100 is the wrong constant; it fails because a
+ * constant cannot bound a quantity that moves with contention. A longer sleep only moves the cliff.
+ *
+ * THE CEILING IS 5000 ms, matching {@link waitUntilDead} directly above rather than inventing a
+ * second convention — 33x the worst visibility measured under deliberate overload. BOTH failure
+ * modes are real and named: too short reintroduces the flake, and too long makes a GENUINE
+ * never-attributable process take the full ceiling before it reports. 5 s is chosen so the second
+ * cost is paid only on a real defect, never on a slow host.
+ *
+ * IT THROWS ON THE CEILING, and that is load-bearing: a poll that gave up and let the caller
+ * proceed would convert this file's regression locks into vacuous passes.
+ */
+async function waitUntilMarkersVisible(pid: number, timeoutMs = 5000): Promise<void> {
+  const start = Date.now();
+  while (defaultReadMarkers(pid) === undefined) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error(`ps eww never published marker env for pid ${pid} within ${timeoutMs}ms`);
+    }
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
+
+/**
  * The "worker fixture" the acceptance criteria describe: a leader process
  * spawned via `spawnDetachedGroup` (own process group/session) that ITSELF
  * backgrounds a long-sleep child via plain shell job control (`cmd &`,
@@ -313,8 +342,9 @@ test("defaultReadMarkers: a real child spawned WITH marker env vars is attribute
   });
   const unmarked = spawnDetachedGroup({ command: "/bin/sh", args: ["-c", "sleep 300"], env: { PATH: process.env.PATH } });
   try {
-    // `ps eww` needs a beat after spawn to reliably reflect a brand-new pid on some hosts.
-    await new Promise((r) => setTimeout(r, 100));
+    // W1-T459: WAIT FOR THE CONDITION, not a duration — `ps eww` publishes a brand-new pid's env
+    // in 2 ms idle but up to 150 ms under load, so the old fixed beat was a host-speed bet.
+    await waitUntilMarkersVisible(marked.pid);
     assert.deepEqual(defaultReadMarkers(marked.pid), { runId: "run-real-1", taskId: "W1-T117" });
     assert.equal(defaultReadMarkers(unmarked.pid), undefined);
   } finally {
@@ -413,9 +443,11 @@ test("W1-T356 wiring: the REAL daemonCommand boots with the orphan sweep wired f
   const stray = spawnDetachedGroup({ command: "/bin/sh", args: ["-c", "sleep 300"], env: strayEnv });
   const unrelated = spawnDetachedGroup({ command: "/bin/sh", args: ["-c", "sleep 300"], env: { PATH: process.env.PATH } });
   try {
-    // `ps eww` needs a beat after spawn to reliably reflect a brand-new pid on some hosts —
-    // same discipline as the direct defaultReadMarkers test above.
-    await new Promise((r) => setTimeout(r, 100));
+    // W1-T459: the boot sweep can only attribute this stray once `ps eww` publishes its marker
+    // env, so wait for exactly that — same discipline as the direct defaultReadMarkers test above.
+    // The UNRELATED process needs no wait: its assertion is that it SURVIVES, which holds whether
+    // or not ps has caught up, so polling it would bound nothing.
+    await waitUntilMarkersVisible(stray.pid);
     const loopStub = async (): Promise<DaemonSummary> => ({ attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 });
     const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], { runDaemon: loopStub });
     assert.equal(code, 0);
@@ -443,5 +475,63 @@ test("W1-T356 wiring: the REAL daemonCommand boots with the orphan sweep wired f
     if (oldHome === undefined) delete process.env.HOME;
     else process.env.HOME = oldHome;
     rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T459: the beat is a CONDITION POLL, and it must stay one ───────────────────────────────
+//
+// The defect these replace was a fixed 100 ms sleep before reading `ps eww`. MEASURED on the mini
+// (10 cores) by spawning a marked child and polling to first visibility: 2 ms idle, but 48 ms
+// median and 150 ms max at load 58-86, with 4 of 25 samples past 100 ms. A bigger constant would
+// pass today and fail on a slower host — so these tests pin the SHAPE, not a number.
+
+test("waitUntilMarkersVisible returns as soon as ps publishes the markers — a condition poll, never a fixed beat", async () => {
+  const env = { ...process.env, [RUN_ID_ENV]: "run-poll-shape", [TASK_ID_ENV]: "T-poll-shape" };
+  const p = spawnDetachedGroup({ command: "/bin/sh", args: ["-c", "sleep 30"], env });
+  try {
+    const t0 = Date.now();
+    await waitUntilMarkersVisible(p.pid);
+    const elapsed = Date.now() - t0;
+    assert.deepEqual(defaultReadMarkers(p.pid), { runId: "run-poll-shape", taskId: "T-poll-shape" });
+    // THE DISCRIMINATOR AGAINST "just sleep longer": a fixed beat always costs its full duration.
+    // This returns on the condition, so on an idle host it beats the 100 ms it replaced outright.
+    assert.ok(elapsed < 100, `a condition poll returns when the condition holds, not after a duration (took ${elapsed}ms)`);
+  } finally {
+    safeKillGroup(p.pid);
+  }
+});
+
+test("waitUntilMarkersVisible THROWS at its ceiling when the markers never appear — a timeout can never read as a pass", async () => {
+  // A live process with NO marker env: `defaultReadMarkers` returns undefined forever, which is
+  // exactly the never-attributable shape. A poll that gave up quietly would turn every attribution
+  // lock in this file into a vacuous pass, so the ceiling must throw.
+  const p = spawnDetachedGroup({ command: "/bin/sh", args: ["-c", "sleep 30"], env: { PATH: process.env.PATH } });
+  try {
+    await assert.rejects(
+      () => waitUntilMarkersVisible(p.pid, 200),
+      /never published marker env/,
+      "the ceiling must reject, never resolve",
+    );
+    assert.equal(defaultReadMarkers(p.pid), undefined, "and the process really is unattributable — the throw was not spurious");
+  } finally {
+    safeKillGroup(p.pid);
+  }
+});
+
+test("neither declared-flake suite still sleeps a fixed beat before reading ps — the shape, asserted structurally", () => {
+  for (const rel of ["worker-containment", "daemon"]) {
+    const src = readFileSync(new URL(`./${rel}.test.ts`, import.meta.url), "utf8");
+    // ASSEMBLED FROM PARTS ON PURPOSE: this test reads its own file, so a literal needle would
+    // match the needle itself and the assertion would fail on a clean tree (it did, first run).
+    const oldBeatComment = ["needs a beat", "after spawn"].join(" ");
+    assert.ok(
+      !src.includes(oldBeatComment),
+      `${rel}.test.ts still carries the fixed-beat comment — the host-speed bet is back`,
+    );
+    // The only remaining bare setTimeouts must be POLL INTERVALS inside a bounded waiter, never a
+    // pre-assertion sleep: every one is 20 ms and every waiter throws on its ceiling.
+    const beats = [...src.matchAll(/setTimeout\(r, (\d+)\)/g)].map((m) => Number(m[1]));
+    assert.ok(beats.length > 0, `${rel}.test.ts should still have poll intervals`);
+    assert.deepEqual([...new Set(beats)], [20], `${rel}.test.ts has a non-poll-interval sleep: ${beats.join(",")}`);
   }
 });

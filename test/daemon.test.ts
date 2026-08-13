@@ -31,7 +31,7 @@ import { resolveHeadroomEnabled } from "../src/lib/config.js";
 import { pauseDetail, requestPause, requestStop, resumeFleet, stopDetail } from "../src/lib/fleet-control.js";
 import type { MergedSet, OpenPrCheck } from "../src/lib/drain.js";
 import { deriveStatus, type GitHub, type PrRef } from "../src/lib/status.js";
-import { RUN_ID_ENV, TASK_ID_ENV, isPidAlive, killProcessGroup, spawnDetachedGroup } from "../src/lib/worker-containment.js";
+import { RUN_ID_ENV, TASK_ID_ENV, defaultReadMarkers, isPidAlive, killProcessGroup, spawnDetachedGroup } from "../src/lib/worker-containment.js";
 
 // A small linear-ish plan: A → B → C (chain) + D (independent), all auto.
 const YAML = `
@@ -1966,6 +1966,27 @@ async function waitUntilDead(pid: number, timeoutMs = 5000): Promise<void> {
   }
 }
 
+/**
+ * W1-T459: wait for the CONDITION the orphan sweep reads — `ps eww` having published `pid`'s
+ * marker ENV — rather than sleeping a fixed beat. Twin of the helper in
+ * test/worker-containment.test.ts, duplicated here for the same reason `waitUntilDead` above
+ * already is: these two suites keep their process helpers local rather than sharing a module.
+ *
+ * MEASURED on the mini (10 cores): first visibility is 2 ms idle, but 48 ms median / 150 ms max at
+ * load 58-86, with 4 of 25 samples past the 100 ms the old beat allowed. Ceiling 5000 ms matches
+ * `waitUntilDead`; it THROWS rather than proceeding, so a never-published pid fails loudly instead
+ * of turning this wiring lock into a vacuous pass.
+ */
+async function waitUntilMarkersVisible(pid: number, timeoutMs = 5000): Promise<void> {
+  const start = Date.now();
+  while (defaultReadMarkers(pid) === undefined) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error(`ps eww never published marker env for pid ${pid} within ${timeoutMs}ms`);
+    }
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
+
 test("W1-T356 wiring: the REAL daemonCommand sets DaemonDeps.sweepOrphans to the SAME production closure daemonBoot uses — calling the CAPTURED dep kills+ledgers an ended-run stray and leaves an unattributable process alone", async () => {
   const { home, root, planPath } = fixtureHome();
   const oldHome = process.env.HOME;
@@ -1975,9 +1996,11 @@ test("W1-T356 wiring: the REAL daemonCommand sets DaemonDeps.sweepOrphans to the
   const unrelated = spawnDetachedGroup({ command: "/bin/sh", args: ["-c", "sleep 300"], env: { PATH: process.env.PATH } });
   let captured: DaemonDeps | undefined;
   try {
-    // `ps eww` needs a beat after spawn to reliably reflect a brand-new pid on some hosts —
-    // same discipline as worker-containment.test.ts's own defaultReadMarkers test.
-    await new Promise((r) => setTimeout(r, 100));
+    // W1-T459: the sweep can only attribute this stray once `ps eww` publishes its marker env, so
+    // wait for exactly that condition — same discipline as worker-containment.test.ts's own
+    // defaultReadMarkers test. This is the beat whose expiry produced the observed
+    // `killedLine undefined`: unattributed means unkilled means unledgered.
+    await waitUntilMarkersVisible(stray.pid);
     const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
       runDaemon: async (_plan, deps): Promise<DaemonSummary> => {
         captured = deps;
