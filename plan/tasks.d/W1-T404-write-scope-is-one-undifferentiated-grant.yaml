@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   principles: {tdd: strict}
   budget_usd: 95.00
   rationale: "RECON 2026-08-07 (state/recon-hosted-console-auth.md), RE-DERIVED AT 8a2f3eb.
@@ -147,10 +147,19 @@
     Prefer the ci-parity shape for that reason; W1-T402 is cited as the reason a bare comment asking
     a future reader to re-check membership is NOT sufficient, which is what the surface had before
     it.
-    (iv) STILL OPEN — THE SECOND FACTOR IS THE ONE REMAINING OPERATOR RULING, AND IS DELIBERATELY
-    NOT ANSWERED HERE. The 2026-08-11 rulings settled the tier COUNT (i) and the enforcement
-    MECHANISM (iii) and explicitly did not settle this. It is what keeps `verify: human` in place;
-    see the note. The options below are unchanged and none is preferred by this amendment.
+    (iv) RULED 2026-08-13 — THE SECOND FACTOR IS A SERVER-ISSUED ACTION-BOUND CONFIRM NONCE,
+    option (c). The operator has ruled; this is no longer posed, and it was the LAST ruling this
+    shard was waiting on. THE REASONING IS RECORDED because it is the rule for judging any later
+    variant: the nonce binds to the SPECIFIC ACTION rather than to a window, so it creates no
+    standing elevated state a stolen session can spend, and it adds no second thing to paste —
+    which is what disqualifies (a) against the measured friction finding that the operator already
+    re-pastes the write token constantly. A time-boxed elevation (b) fails the same test from the
+    other side: it IS a standing elevated state, and its window is a bound that would fire on a
+    healthy condition every time the operator paused mid-task.
+    WHAT THE IMPLEMENTATION OWES, so a later variant can be judged against it: the nonce is ISSUED
+    BY THE SERVER, is SINGLE-USE, NAMES THE EXACT ROUTE AND PAYLOAD it authorises, and is VERIFIED
+    SERVER-SIDE. A client-generated or route-agnostic nonce is the theatre this clause refuses. The 2026-08-11 rulings settled the tier COUNT (i) and the enforcement
+    MECHANISM (iii) and explicitly did not settle this. It no longer parks this task; see the note. The options below are unchanged and none is preferred by this amendment.
     THE SECOND FACTOR MUST BE SERVER-ENFORCED OR IT IS THEATRE, and the ergonomics constraint
     is measured rather than assumed: the operator already re-pastes the write token constantly
     because paste-once lives in session storage and dies with the tab. A design that adds a SECOND
@@ -214,17 +223,16 @@
   note: "AMENDED 2026-08-11 — TWO OF THE THREE BLOCKING RULINGS ARE NOW RECORDED, AND THE PARK
     STAYS FOR THE THIRD. The prior note said to flip to auto once BOTH design (i) and design (iv)
     were answered. (i) is answered — three tiers, with the assignment of all 20 routes written out.
-    (iii)'s enforcement mechanism is answered and re-derived from source. (iv), THE SECOND FACTOR,
-    IS NOT: the operator ruled on the tier count and the enforcement mechanism and explicitly
-    withheld this one. So the flip condition as this shard itself states it is NOT met, and
-    `verify: human` is left in place deliberately rather than by neglect.
-    WHAT WOULD MAKE IT DISPATCHABLE — exactly one ruling, on design (iv): a separately-issued
-    high-tier token, a time-boxed elevation, or a server-issued action-bound confirm nonce. Nothing
-    else in this shard now needs the operator. When that lands, flip `verify:` to auto; no other
-    field needs to change, because every acceptance claim below holds under all three second
-    factors, and the two encodings in (i-a) are both already covered by `files:`.
-    `isDispatchEligible` refuses a task whose verify is not auto BEFORE the linter is consulted, so
-    the park also keeps a worker from rediscovering the W1-T391 wall in the meantime.
+    (iii)'s enforcement mechanism is answered and re-derived from source. (iv), THE SECOND FACTOR, WAS THE LAST ONE AND IS NOW RULED (2026-08-13): a
+    server-issued ACTION-BOUND CONFIRM NONCE, design (iv) option (c). THE FLIP CONDITION THIS SHARD
+    SET FOR ITSELF IS THEREFORE MET, and `verify:` is now `auto` — the ONLY field this amendment
+    changed, exactly as the prior note predicted: every acceptance claim already held under all
+    three second factors, and both encodings in (i-a) were already covered by `files:`.
+    THE PARK IS OVER, AND THAT HAS A CONSEQUENCE WORTH STATING PLAINLY: `isDispatchEligible`
+    refuses a task whose verify is not auto BEFORE the linter is consulted, so this shard was
+    unreachable by the fleet until now. It is lint-clean at d4179aef (checked, not assumed), so the
+    next drain that reaches it WILL dispatch it — 20 files, risk:high, budget_usd 95. That is
+    intended by the ruling, not a side effect of it.
     risk:high is Rule 19's SPAN, not blast radius — the file set crosses src/ and test/ and touches
     the single authorization choke point. The band is raised deliberately rather than shipped as a
     sizing violation, which is the W1-T400 lesson. THE AMENDMENT DID NOT MOVE THE BAND: this
