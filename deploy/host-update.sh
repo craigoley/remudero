@@ -230,12 +230,31 @@ host-update: DAEMON-MODE INVOCATION — printed only. Nothing has been started a
   #
   # THERE IS DELIBERATELY NO DEFAULT VALUE HERE, and that is a finding rather than an omission.
   # A throttle shorter than the time from container start to first useful dispatch just burns a
-  # restart; longer than necessary just idles the fleet. NOBODY HAS MEASURED THAT INTERVAL — no
-  # daemon has ever run in a container (zero \`daemon.*\` lines in the Azure instance's ledger), so
-  # any constant written here would be a guess that hardens into a fact nobody revisits. Unset, the
-  # entrypoint resolves \`\${RMD_RESTART_THROTTLE_S:-0}\` to 0 and behaves exactly as it does today.
-  # Set it from ONE supervised boot: time container start → first \`dispatch.*\` ledger line, and
-  # use that. Until then, running with it unset is the honest state, not a broken one.
+  # restart; longer than necessary just idles the fleet. This block used to say NOBODY HAD MEASURED
+  # THAT INTERVAL, because no daemon had ever run in a container. ONE HAS NOW, and the supervised
+  # boot this comment asked for was taken on the Azure instance at 2026-08-13T06:04Z:
+  #   06:04:17.1  entrypoint fetch + \`checkout --detach\` complete (.git/packed-refs, .git/HEAD)
+  #   06:04:18.3  first \`daemon.*\` ledger row — the process is up 1.2s after the checkout
+  #   06:04:29.2  \`daemon.start\` — the 10.9s gap is ONE call, \`board_gateway.fetch_bytes\`
+  #               (26,680,472 bytes over 14 REST calls); it is the whole of boot cost
+  #   06:05:45.3  first \`run.start\` (W1-T404) — the first tick sweeps and idles, so useful
+  #               dispatch lands one poll interval later
+  # CONTAINER START → FIRST USEFUL DISPATCH IS ~88s, and 73-88s across the four boots in that
+  # ledger that dispatched at all. So a throttle BELOW ~90s cannot save a restart, and the
+  # provisional 300s currently set on the running container is ~3.4x above the measurement.
+  #
+  # THE NUMBER IS NOT THE WHOLE ANSWER, THOUGH, AND THE REST ARGUES AGAINST 0 RATHER THAN FOR IT.
+  # \`stale\` exits NON-ZERO, so once \`DaemonDeps.checkFreshness\` is wired every freshness
+  # self-restart pays this sleep too. Measured on origin/main over 14 days: 645 commits, and after
+  # absorbing those a restart would already cover, 13-30 restarts/day (worst day 20-61) depending
+  # on how much of the day the daemon spends inside a dispatch — measured at 18.2%, p50 28.3 min.
+  # At 300s that is 1.4-3.2h/day of deliberate downtime. At 0s it is 19-44 min/day, but the densest
+  # 10-minute window then holds 4 boots against \`DEFAULT_CRASHLOOP_WINDOW\`'s maxBoots of 5 — one
+  # boot of margin before W1-T215's invariant escalates a needs-human issue on a HEALTHY fleet.
+  # A value near the measurement (~90-120s) keeps both bounds comfortable; that is the recommendation
+  # this block now carries, and the operator still sets it, because \`--restart=on-failure:5\`'s own
+  # count cap is the other half and only they can watch it. Unset, the entrypoint resolves
+  # \`\${RMD_RESTART_THROTTLE_S:-0}\` to 0 and behaves exactly as it does today.
   # THE CREDENTIAL IS A DIRECTORY MOUNT, READ-WRITE, AND NOT AN ENV TOKEN. A bare
   # CLAUDE_CODE_OAUTH_TOKEN authenticates but carries NO PLAN CONTEXT: measured A/B, same account,
   # same binary — with the credential FILE, subscription_type "max" and rate_limits_available true;

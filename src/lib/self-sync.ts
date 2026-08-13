@@ -1,4 +1,8 @@
 import { execFileSync, spawnSync } from "node:child_process";
+// TYPE-ONLY, so this stays a one-way dependency at runtime: the import is erased, daemon.ts
+// imports nothing from here, and lib/daemon.ts's "never touches the filesystem" purity is
+// untouched by a module that shells out to git.
+import type { DaemonFreshness } from "./daemon.js";
 
 /**
  * CLI self-freshness at entry (W1-T79) — the "stale-binary" class.
@@ -349,4 +353,55 @@ export function checkServiceFreshness(
   const dirty = git(["status", "--porcelain"]).trim().length > 0;
   const behind = headSha !== originSha ? { oldSha: headSha, newSha: originSha } : null;
   return { status: "assessed", dirty, behind };
+}
+
+/**
+ * {@link ServiceFreshness} → {@link DaemonFreshness}: the ADAPTER that finally supplies
+ * `DaemonDeps.checkFreshness` (daemon.ts). W1-T126 shipped the consumer in 2026; its only
+ * writers were ever test fakes, so `deps.checkFreshness?.()` was `undefined` on every
+ * production boot and the stale self-restart has NEVER fired — measured on the Azure daemon's
+ * own ledger, 0 `daemon_selfrestart_for_freshness` rows in 6,838.
+ *
+ * WHY THIS PREDICATE AND NOT {@link checkCliFreshness}, which the W1-T126 doc gestured at.
+ * checkCliFreshness cannot answer the question AT ALL on a container, for two independent
+ * reasons, and the first is fatal rather than merely undesirable:
+ *   1. IT REFUSES. `deploy/entrypoint.sh` boots the daemon with `git checkout --detach`, so
+ *      the checkout is on a DETACHED HEAD (verified on the live container). W1-T445's branch
+ *      guard refuses exactly that — `{ status: "refused", reason: "off-main" }` — a result
+ *      with no sha pair and no `stale` field, which does not fit `DaemonFreshness` in any
+ *      direction. The mutation objection below is almost secondary to this one.
+ *   2. IT MUTATES. It ff-merges and re-execs. A daemon must never re-exec itself (that is the
+ *      supervisor's job) and must never move a ref as a side effect of ASKING a question.
+ * checkServiceFreshness is the sibling built for exactly this caller: read-only, fetch-then-
+ * compare, works detached because it compares SHAs rather than branch names, and degrades to
+ * "can't tell" on a network hiccup. Nothing here needs to fetch the code — the entrypoint
+ * already clones-or-fast-forwards on every boot, so the daemon's whole job is to DETECT and
+ * exit non-zero; `daemonExitCode("stale")` is 1 and docker's `--restart=on-failure` (launchd's
+ * `KeepAlive{SuccessfulExit:false}` on the mini) does the rest.
+ *
+ * EVERY NON-`assessed` STATUS IS `{ stale: false }`, deliberately. `guarded` (a CI job, or
+ * `RMD_SELF_SYNC_DONE=1`) and `degraded` (fetch failed) both mean "I could not tell", and the
+ * fail-safe direction for a restart trigger is NOT to restart — the W1-T255 doctrine that a
+ * service is never blocked, or here bounced, by a network hiccup.
+ *
+ * AND A DIRTY TREE IS NOT STALE, which is the one clause that is not a straight translation.
+ * `behind` alone would be a RESTART LOOP: entrypoint.sh REFUSES to sync a tree with tracked
+ * modifications ("REFUSING to sync: the work tree has uncommitted changes"), so the restarted
+ * container comes back on the SAME old sha, reads the same staleness, and exits again — the
+ * relaunch storm `DaemonStopReason`'s own doc says must never be allowed to reach an exit
+ * (the 2026-07-22 `paused` incident, ~10s apart until bootout). Restarting is only correct
+ * when a restart can actually CLEAR the condition, and on a dirty tree it provably cannot.
+ * The staleness is still recorded: `serviceFreshnessGate` (run-task.ts) ledgers
+ * `daemon.stale_code`/`daemon.tree_dirty` from this same predicate at boot.
+ *
+ * `installNeeded` is deliberately never set, so `DaemonDeps.runInstall` stays unwired. It
+ * would be redundant: the restart re-enters `serviceFreshnessGate`, which already calls
+ * `ensureInstallFresh(repoDir)` on every `rmd daemon` boot — the install-then-restart ordering
+ * W1-T151 asks for, already satisfied one layer up, on the path a restart is guaranteed to take.
+ */
+export function daemonFreshnessFromService(svc: ServiceFreshness): DaemonFreshness {
+  if (svc.status !== "assessed") return { stale: false };
+  if (svc.dirty) return { stale: false };
+  if (!svc.behind) return { stale: false };
+  return { stale: true, oldSha: svc.behind.oldSha, newSha: svc.behind.newSha };
 }

@@ -552,7 +552,7 @@ import {
 } from "./lib/worker-home.js";
 import { CI_LOG_FENCE_CLOSE, CI_LOG_FENCE_OPEN, FIX_WORKER_TOOLS, neutralizeFenceMarkers } from "./lib/fix-fence.js";
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock, type DrainLockHandle } from "./lib/drain-lock.js";
-import { checkCliFreshness, checkServiceFreshness } from "./lib/self-sync.js";
+import { checkCliFreshness, checkServiceFreshness, daemonFreshnessFromService } from "./lib/self-sync.js";
 import {
   acquireInflightLock,
   InflightLockError,
@@ -12109,6 +12109,28 @@ export async function daemonCommand(
         onStarvation: (census) => escalateStarvation(census, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
         checkStop: () => stopDetail(config.root),
         checkPause: () => pauseDetail(config.root),
+        // CODE FRESHNESS — THE PRODUCER W1-T126 NEVER GOT. The consumer has read
+        // `deps.checkFreshness` since 2026 and this object never supplied it, so the stale
+        // self-restart had fired ZERO times in the Azure daemon's 6,838-row ledger. MEASURED
+        // consequence on 2026-08-13: that daemon sat on one sha for five hours while origin/main
+        // moved seven commits, dispatched W1-T404 from the STALE plan blob (filtered
+        // `verify: human` after the flip had merged), and its triage selector re-picked a feedback
+        // entry that a merged commit had already settled — one cause, three symptoms.
+        //
+        // WHY THIS IS A TICK CHECK AND NOT THE BOOT GATE THAT ALREADY EXISTS. `serviceFreshnessGate`
+        // (below) runs this SAME predicate at every `rmd daemon` boot and has ledgered
+        // `daemon.stale_code` zero times — not because the daemon is never stale, but because
+        // `deploy/entrypoint.sh` checks out origin/main IMMEDIATELY BEFORE it, so the boot gate can
+        // only ever observe a condition the boot itself just eliminated. Staleness is acquired
+        // DURING a process's life; only a per-tick check can see it.
+        //
+        // NEVER INTERRUPTS A WORKER. `runDaemon` consults this between iterations only, after the
+        // current `runOne` has resolved — the same drain-and-hold discipline `checkStop`/`checkPause`
+        // rely on, stated in `DaemonDeps.checkFreshness`'s own contract and pinned by
+        // test/daemon-freshness-wiring.test.ts's ordering test. So no idle gate has to be added: a
+        // dispatch runs to its verdict first, which is also what bounds the restart rate (measured:
+        // the daemon is inside a dispatch 18.2% of wall clock, p50 28.3 min).
+        checkFreshness: () => daemonFreshnessFromService(checkServiceFreshness(repoRoot, process.env)),
         // impl-FZ — PLAN FRESHNESS. Wired ONLY on the git-synced self-target path, so the reload
         // reads the SAME source the boot did (origin/main, never the working tree). An explicit
         // `--plan` keeps the frozen-at-boot behaviour, because that caller asked for a literal file.
