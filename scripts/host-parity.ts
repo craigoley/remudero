@@ -23,11 +23,12 @@
  * daemon dispatching and workers live: 107s for 6,496 tests. It does not need an idle gate.
  */
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { captureFeedback } from "../src/lib/feedback.js";
-import { readTapFailures, runHostParity, type HostPole } from "../src/lib/host-parity.js";
+import { readTapFailures, resolveHostPole, runHostParity, type HostPole } from "../src/lib/host-parity.js";
 
 /** One `node --test` invocation, returning its combined output. A nonzero exit is a failing test,
  *  which is the ordinary case here — never a throw. */
@@ -42,9 +43,15 @@ function runNodeTest(cwd: string, target: string): string {
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-/** darwin is the judge's pole. Anything else running this is a runner or a container, and its
- *  failure set belongs to the OTHER side of the diff. */
-const pole: HostPole = process.platform === "darwin" ? "mini" : "ci";
+/** The pole this host reports as. The decision moved into `resolveHostPole` (lib/host-parity.ts) so
+ *  it is unit-testable in both directions; this line supplies the three real-world inputs and
+ *  nothing else. `/.dockerenv` is Docker's own marker and is read HERE because that module is pure
+ *  and stats nothing. */
+const pole: HostPole = resolveHostPole({
+  platform: process.platform,
+  env: process.env,
+  inContainer: existsSync("/.dockerenv"),
+});
 
 const headSha = spawnSync("git", ["rev-parse", "--short", "HEAD"], { cwd: repoRoot, encoding: "utf8" }).stdout?.trim();
 

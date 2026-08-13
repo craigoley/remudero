@@ -57,6 +57,28 @@ export function normaliseTestPath(location: string): string {
  * run — the three known whole-suite flakes (`test/worker-containment`, the W1-T356 wiring suite, the
  * `lint-plan --base`/`--all` byte-identity test) did not fire in that run at all, which is exactly
  * why they are absent here: a flake is not a divergence and must not be declared as one.
+ *
+ * THE `azure` POLE IS DECLARED EMPTY, AND THAT IS THE POINT RATHER THAN AN OMISSION. Its full glob
+ * MEASURED 16 failures at `3a5c677` (6,656 tests), and not one of them belongs here:
+ *   - 14 are `jq` being ABSENT FROM THE IMAGE. Each cites `jq: command not found` and exits 127.
+ *     They are not host-dependent tests — the three `ci-gate-*` suites extract and run the REAL
+ *     bash+jq script from `.github/workflows/ci-gate.yml` ("never re-typed here"), which correctly
+ *     uses jq because it runs on `ubuntu-latest`. That is a MISSING DEPENDENCY IN A CONTAINER, the
+ *     same class `deploy/Dockerfile` already bakes `procps`/`lsof` for, and it is fixed in the
+ *     image rather than blessed here. Declaring them would mute a defect and then decay into the
+ *     mute button this file's header warns about.
+ *   - 2 are `teardownProcessGroup`, the `test/worker-containment` whole-suite flake this doc
+ *     ALREADY names as a flake, on exactly the reasoning above: a flake is not a divergence.
+ * So the honest first `azure` run reports 14 undeclared and heals to 0 when the image ships. That
+ * is the instrument working: it is a report, not a gate, and it exits 0 either way.
+ *
+ * WHAT WAS **NOT** A DIVERGENCE, recorded because a session got it wrong first: those runs also
+ * printed `tls: failed to verify certificate: x509: ... api.github.com`, which reads exactly like a
+ * TLS-intercepting proxy. It is a HARDCODED FIXTURE STRING inside `writeFlakyGh` in
+ * `test/ci-gate-transport-retry.test.ts` — a canned stderr line its fake `gh` emits on purpose, and
+ * the only occurrence in the tree (`git grep -lF`). Real TLS from that container is healthy
+ * (`curl https://api.github.com/` → 200). An environment claim that turns out to be fixture data is
+ * the kind of thing a baseline entry would have frozen in place.
  */
 export const HOST_PARITY_BASELINE: DeclaredDivergence[] = [
   {
@@ -95,8 +117,51 @@ export const HOST_PARITY_BASELINE: DeclaredDivergence[] = [
 export type DivergenceId = string;
 
 /** Which machine a divergence belongs to. `mini` is the operator's mac — the host the review judge
- *  runs proofs on. `ci` is `ubuntu-latest`. */
-export type HostPole = "mini" | "ci";
+ *  runs proofs on. `ci` is `ubuntu-latest`. `azure` is the containerised daemon host. */
+export type HostPole = "mini" | "ci" | "azure";
+
+/**
+ * WHICH POLE AM I. Extracted from `scripts/host-parity.ts`, where it was the one-line ternary
+ * `process.platform === "darwin" ? "mini" : "ci"` — and that line is the defect this function
+ * exists to fix. Its own comment said it in terms: *"Anything else running this is a runner or a
+ * container, and its failure set belongs to the OTHER side of the diff."* A runner and a container
+ * are NOT the same side. The Azure daemon host self-reported as `ci` and was therefore diffed
+ * against the ci baseline's single entry, so its divergences were not merely undeclared — they
+ * were attributed to a machine that does not have them.
+ *
+ * MEASURED on the Azure container, 2026-08-13: a full glob gave 16 failures against a `ci` baseline
+ * declaring one, none of which is any of the 16.
+ *
+ * ORDER IS LOAD-BEARING, and the CI test must sit ABOVE the container test rather than below it. A
+ * GitHub job configured with `container:` runs inside Docker and carries the marker, but its
+ * failure set is still the one `ci`'s baseline describes — the runner is what the entry is about,
+ * not the isolation it happens to use. Testing the marker first would silently reclassify every
+ * containerised CI job as `azure` and empty the ci pole.
+ *
+ * THE FALLBACK STAYS `ci`, deliberately unchanged. A bare Linux box that is neither a runner nor a
+ * container (a developer's machine) keeps reporting exactly what it reports today; widening this
+ * function's remit to invent a fourth pole for it would be a behaviour change nobody measured.
+ *
+ * THE CI PREDICATE IS DUPLICATED FROM `isCiEnv` (lib/self-sync.ts) RATHER THAN IMPORTED, and that
+ * is the one place this file trades DRY for something it values more. This module has NO imports
+ * at all — `self-sync.ts` reaches for `node:child_process` at its top, and pulling that graph in
+ * would end this file's purity for a four-line truthiness check. The duplication is stated here so
+ * it reads as a decision; if the two ever disagree, `isCiEnv` is the authority.
+ */
+export function resolveHostPole(input: {
+  platform: string;
+  env: Record<string, string | undefined>;
+  /** Whether Docker's own container marker (`/.dockerenv`) is present. Injected rather than
+   *  stat'ed here so this module never touches the filesystem; the runner passes the real check. */
+  inContainer: boolean;
+}): HostPole {
+  if (input.platform === "darwin") return "mini";
+  const truthy = (v: string | undefined): boolean =>
+    v !== undefined && v !== "" && v !== "0" && v.toLowerCase() !== "false";
+  if (truthy(input.env.CI) || truthy(input.env.GITHUB_ACTIONS)) return "ci";
+  if (input.inContainer) return "azure";
+  return "ci";
+}
 
 /** One entry in {@link HOST_PARITY_BASELINE}: a divergence somebody looked at and chose to keep. */
 export interface DeclaredDivergence {
