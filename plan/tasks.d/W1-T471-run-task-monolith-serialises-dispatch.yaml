@@ -1,0 +1,102 @@
+- id: W1-T471
+  title: "one file serialises the fleet — `src/run-task.ts` is 19,489 lines and 21% of all src, 8 of 10 dispatchable tasks declare it, and `partitionByFileOverlap` blocks on DECLARED paths alone, so lane two and lane three defer on collisions their tasks genuinely own"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  rationale: "THE LANE COUNT IS DOWNSTREAM OF ONE FILE, AND RAISING IT DOES NOT HELP.
+    SIZE RE-DERIVED AT fb49c2f0 ON THE MINI, FROM GIT (host-independent — these are tree facts, not
+    ledger facts): `src/run-task.ts` **19,489 lines / 254 exports**, against `src/lib/review.ts`
+    5,841/120, `src/lib/sweep.ts` 3,607/76, `src/lib/status.ts` 3,301/56, `src/lib/daemon.ts`
+    2,905/36. All `src/` is 92,555 lines, so ONE FILE IS 21.0% OF THE CODEBASE. TWO EXPORT COUNTS HAVE
+    DRIFTED since the brief that commissioned this — run-task 250 -> 254 and daemon 35 -> 36 — so
+    treat every count here as of fb49c2f0 and re-derive before acting.
+    CARRIED WITH ITS PROVENANCE, NOT RE-DERIVED HERE: that `run-task.ts` holds ~51% of all uncovered
+    branches (a prior session's whole-suite lcov reading), and the three-lane boot evidence — lanes
+    went live at 22:26, the FIRST post-boot tick offered candidates for lanes two and three and
+    DEFERRED BOTH (W1-T457 on `[sweep.ts, run-task.ts, sweep.test.ts]`, W1-T458 on `[review.ts]`), no
+    tick has since filled more than one lane, and re-dispatch per distinct task moved the WRONG WAY,
+    1.89 today against 1.65 historical. THOSE ARE AZURE MEASUREMENTS AND **THERE IS NO SSH ROUTE FROM
+    THIS HOST TO AZURE** (publickey/password denied, no SSH config), so they are cited, not verified.
+    THE MECHANISM, RE-DERIVED FROM SOURCE. `overlappingPaths` (`src/lib/dispatch-overlap.ts`) reads
+    `a.files ?? []` and `b.files ?? []` — **DECLARED PATHS ONLY, NO DIFF IS EVER CONSULTED** — and
+    `partitionByFileOverlap` blocks a pair whose declared globs intersect under `globsIntersect`. THE
+    FAIL-CLOSED ARM IS A TOTAL BLOCK: `if (filesA.length === 0 && filesB.length === 0) return [\"*\"]`,
+    and the module's own doc says an absent or empty `files:` is `treated as overlapping EVERY other
+    candidate`."
+  design: "(i) THE COLLISIONS ARE REAL, NOT BOOKKEEPING — AND THIS IS THE FINDING THAT MATTERS,
+    BECAUSE IT KILLS THE CHEAP FIX. Over-declaration is real but it is in the WRONG PLACE to help.
+    RE-COUNTED over ten trailered merges at fb49c2f0 (GitHub + the plan tree, host-independent):
+    **16 of 55 declared paths untouched = 29%** — the same rate the commissioning brief measured on a
+    different sample (13 of 45). BUT THE SPLIT IS DECISIVE: **13 of those 16 are TEST files.** Declared
+    `src/` paths are touched **15 of 17 (88%)**, and on the hot files themselves `src/run-task.ts` is
+    4/5 and `src/lib/review.ts` 1/1.
+    **SO TRIMMING DEFENSIVE `files:` RECOVERS PARALLELISM ONLY AT THE MARGINS.** It would not have
+    unblocked the two deferred lanes, because their collisions are on source files those tasks
+    genuinely edit. Anyone proposing a `files:` audit as the remedy should be shown this line first.
+    (ii) THE CENSUS, AND A CORPUS TRAP THAT ALMOST PRODUCED A FALSE CORRECTION. On THIS host (the
+    mini) `dispatch.serialized` has **30 distinct rows** spanning 2026-08-05..2026-08-12 (10 on 08-05,
+    2 on 08-06, 18 on 08-12), all `reason: file-overlap`, over 20 distinct task pairs. Parsed from the
+    `paths` array rather than grepped: **`src/run-task.ts` in 21 of 30 (70%)**, `src/lib/escalate.ts`
+    4, `test/escalate.test.ts` 4, `src/lib/status.ts` 4, and `src/lib/review.ts` and `src/lib/sweep.ts`
+    in **ZERO**. Positive control on the same corpus: `sweep.pass` 1,897; negative control: a
+    non-existent path matches 0.
+    **THE AZURE CENSUS REPORTS THE SAME TOTAL — 30 — AND A DIFFERENT POPULATION** (`review.ts` 15,
+    `run-task.ts` 13, `escalate.ts` 0, dated 08-10/08-11, which are days this host has NO rows for).
+    Two fleets, two ledgers, one coincident total. CONSEQUENCE, AND THE SHARD OWES IT PLAINLY: the
+    earlier claim of `four rows, all src/lib/escalate.ts` WAS NOT REFUTED — it is CORROBORATED here
+    (4 rows, `escalate.ts`, 08-05), and the Azure `refutation` compared across corpora. A count is
+    only a claim about the corpus it was taken from.
+    (iii) WHETHER A SPLIT IS EVEN POSSIBLE — MEASURED, BECAUSE IT DECIDES EVERYTHING DOWNSTREAM AND IT
+    IS CHEAP. The file carries ELEVEN text-bearing section banners (three more `// ──` lines are
+    closers, and TWO OF THE ELEVEN ARE THE SAME BANNER TEXT — `CLI entry ... Kept tiny` appears
+    twice). Assigning every top-level definition to its enclosing section gives 368 owned symbols, and
+    counting identifier references that cross a section boundary (comment lines skipped) gives:
+      **640 cross-section references. 128 of 368 symbols (35%) are referenced from outside the
+      section that defines them.** `main`, `repoRoot` and `ledgerPathFor` are each referenced from
+      SEVEN of the ten other sections; `USAGE` from six; `waitForCiGreen` and `runReview` from five.
+      Exactly ONE section has no traffic in either direction, AND IT OWNS ZERO DEFINITIONS — it is a
+      banner sitting above the fix-rung taxonomy, not a separable concern.
+    **SO THE BANNERS DO NOT CORRESPOND TO SEPARABLE CONCERNS. THE FILE IS GENUINELY INTERWOVEN.** A
+    split along the banner lines is not a filing exercise; it would have to break 640 references and
+    re-home a shared foundation that seven of ten sections call. CONTROL: the three most cross-cutting
+    symbols were confirmed to be real declarations in the file, not identifier noise.
+    (iv) NOT IN SCOPE, DELIBERATELY AND EXPLICITLY. **THIS SHARD DOES NOT PROPOSE SPLITTING THE FILE.**
+    A 19,489-line file with 254 exports is load-bearing, and (iii) shows a split is a large judgement
+    rather than a mechanical one. The operator's three options — split it, re-scope tasks so fewer
+    declare it, or accept one effective lane — are recorded here with their evidence and NOT ranked."
+  acceptance:
+    - claim: "the constraint is recorded with its measured size, collision census and cross-reference count"
+      proof: "unit test: test/dispatch-overlap.test.ts"
+    - claim: "a declared-files trim is shown not to recover the deferred lanes, so it is not proposed as the remedy"
+      proof: "unit test: test/dispatch-overlap.test.ts"
+    - claim: "a second lane is either filled or its collision is attributed to a source file both tasks edit"
+      proof: "unit test: test/parallel-dispatch.test.ts"
+  origin: recon#run-task-serialises-dispatch-2026-08-13
+  plan_refs: ["W1-T344", "W1-T325"]
+  files: [src/run-task.ts, src/lib/dispatch-overlap.ts, test/dispatch-overlap.test.ts, test/parallel-dispatch.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `src/run-task.ts` and
+    `src/lib/dispatch-overlap.ts` plus their suites; `sizingViolation` (`src/lib/task-linter.ts`)
+    refuses `medium` at two subsystems. `verify: human` because the three options in design (iv) need
+    a ruling this shard must not pre-empt, and because the largest of them is a refactor of 21% of the
+    codebase.
+    `files:` DERIVED BY INVOCATION COUNT, NOT PROSE MENTION. At fb49c2f0
+    `test/dispatch-overlap.test.ts` invokes the surface 17 times (31 mentions) and is the assertion
+    suite; `test/parallel-dispatch.test.ts` asserts the `dispatch.serialized` STEP three times with
+    zero direct invocations. DELIBERATELY EXCLUDED, all prose-only or step-only:
+    `test/drain.test.ts` (0 invocations, 3 step hits), `test/daemon-plan-freshness.test.ts`,
+    `test/away-mode-delivery.test.ts`, `test/dispatch-settled-set.test.ts`,
+    `test/lane-governor-per-dispatch.test.ts`. Positive control: 170 test files mention `dispatch` at
+    all, so the narrow list is a filter and not an empty query. DROP ANY DECLARED PATH THE
+    IMPLEMENTATION DOES NOT TOUCH.
+    WHICH CORPUS EVERY NUMBER CAME FROM, because this shard's own evidence is split across two hosts
+    that cannot see each other. TREE FACTS (line counts, export counts, cross-references, source
+    semantics, declared-vs-touched) are from git and GitHub at fb49c2f0 and are host-independent. THE
+    `dispatch.serialized` CENSUS IS THE MINI'S (live 1 file / plain 4 / gz 666). THE LANE-BOOT
+    EVIDENCE AND THE 1.89-VS-1.65 RE-DISPATCH RATIO ARE AZURE'S AND ARE UNVERIFIABLE FROM HERE.
+    RE-DERIVE THE CENSUS ON WHICHEVER HOST WILL ACT ON IT — the two disagree, as (ii) shows."
