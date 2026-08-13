@@ -1,0 +1,108 @@
+- id: W1-T451
+  title: "W1-T404's confirm nonce never expires — the store deletes an entry only on consume, so an unspent nonce lives forever: unbounded Map growth AND standing elevated state, the exact property the action-bound ruling was chosen to avoid"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: "RE-DERIVED AT ab85e661 (W1-T404's merge, #1709). `createConfirmNonceStore`
+    (`src/lib/service.ts`) is nine lines and carries no clock at all — quoted verbatim because the
+    whole finding is visible in it:
+      const pending = new Map<string, ConfirmNonceAction>();
+      issue(action)  { const nonce = randomToken(); pending.set(nonce, action); return nonce; }
+      consume(nonce, action) { const recorded = pending.get(nonce); pending.delete(nonce); ... }
+    There is no timestamp on the stored value, no sweep, and no expiry check. `pending` shrinks on
+    `consume` and NOWHERE ELSE. `ConfirmNonceAction` is `{method, path, payload}` — it has no field
+    an expiry could even be computed from, so this is an added field, not a changed comparison.
+    TWO INDEPENDENT DEFECTS SHARE THIS STORE AND THEY MUST NOT BE COLLAPSED INTO ONE FIX.
+    (1) UNBOUNDED GROWTH. An issued-and-never-spent nonce is never read again, so nothing will ever
+    remove it. The processes this runs in are long-lived by design: the Azure daemon has run 5+
+    hours at a stretch and the mini's ran 13 days. Every abandoned confirmation — the operator
+    closes the tab, the browser retries, a request is cancelled — leaks one entry permanently.
+    (2) A NONCE THAT STAYS SPENDABLE INDEFINITELY. THIS IS THE SECURITY HALF AND IT IS THE WORSE
+    ONE, because it defeats the property the operator's ruling SELECTED. W1-T404's own shard rejected
+    a time-boxed elevation in these words: a time-boxed elevation `is standing elevated state, and
+    its window is a bound that would fire on a healthy condition every time you paused mid-task`.
+    A nonce with no expiry is STANDING ELEVATED STATE BY ANOTHER ROUTE — an unbounded window rather
+    than a fixed one. The action-binding survives (it is still one route, one payload), but the
+    time-boxing the ruling implicitly relied on does not exist.
+    IT IS LATENT, NOT HARMLESS, AND THE LATENCY HAS A KNOWN END DATE. `enforceWriteTiers` is
+    `opts.enforceWriteTiers ?? false` in `createService` and is set true NOWHERE in `src/` (measured
+    at ab85e661: zero hits for `enforceWriteTiers: true` under `src/`; every hit is in `test/`), so
+    the confirm route is unreachable in production today. Flipping that flag is the next step on the
+    console arc, and it turns both defects live in the same commit.
+    THE STORE IS PER-PROCESS AND THAT DECIDES THE EVICTION QUESTION BELOW: `createService` does
+    `opts.confirmNonces ?? createConfirmNonceStore()` and NO caller in `src/` passes one, so the map
+    lives in the SERVE process's memory."
+  design: "(i) WHAT TTL — ARGUE IT, DO NOT PICK IT. The nonce covers ONE ROUND TRIP: issue →
+    operator reads a confirmation → spend. Both failure modes are real and must be named in the
+    implementation's own comment.
+      TOO SHORT IS A FIFTH BOUND FIRING ON A HEALTHY CONDITION. This repo has four MEASURED
+      instances (W1-T312's ci-gate wait cap, W1-T380's dry-run deploy ceiling, W1-T382's check-wait
+      bound, the idle-gate ceiling), and a fifth would be the worst kind because it fires on an
+      operator who simply read the dialog carefully. A human reading `This action SPENDS MONEY`,
+      checking the payload and deciding is tens of seconds, not one.
+      TOO LONG DEFEATS THE POINT — it reinstates the standing elevated state above.
+      ESTABLISH THE FLOOR FROM EVIDENCE, not intuition: the console's own confirmation path is the
+      thing being timed, so measure or reason from it rather than from a generic HTTP timeout.
+    (ii) EVICTION IS A SEPARATE QUESTION FROM EXPIRY AND THE OBVIOUS ANSWER IS WRONG. A TTL checked
+    ONLY on `consume` fixes defect (2) and leaves defect (1) exactly as it is, because an unspent
+    nonce is never consumed and so never examined. Eviction needs its own trigger.
+    AND THE DAEMON'S EXISTING SWEEPS CANNOT CARRY IT — established, not assumed. `daemon.tmp_sweep`,
+    `daemon.lock_sweep`, `daemon.orphan_sweep` and `daemon.worker_home_sweep` all live in
+    `src/lib/daemon.ts` and run in the DAEMON process; this map lives in the SERVE process (see the
+    rationale's last paragraph). A daemon tick cannot reach it. The two candidates that CAN are a
+    sweep-on-`issue` (amortised, no timer, bounded by call rate) and a timer owned by the service.
+    PREFER THE ONE THAT ADDS NO NEW CLOCK — this repo keeps re-filing `a fourth spelling of how long
+    since last time` — and say which was chosen and why.
+    (iii) THE `consume`-ON-MISMATCH BEHAVIOUR IS SETTLED. IT IS NOT PART OF THIS TASK AND MUST NOT
+    BE RE-LITIGATED. `pending.delete(nonce)` runs BEFORE the match test, with the comment `single-use
+    regardless of outcome — a wrong guess spends it too`. That is a DELIBERATE anti-guessing choice:
+    it denies an attacker an oracle to probe nonces against. Its cost is equally real and is recorded
+    here so nobody rediscovers it as a bug: an attacker who can reach the endpoint can BURN the
+    operator's pending confirmations, and the operator sees a console where confirming never works.
+    WHETHER A TTL MAKES THAT BETTER OR WORSE IS IN SCOPE AS AN ANALYSIS: it bounds how long a burned
+    confirmation could have been useful, but it also gives an attacker a cheaper denial (burn, then
+    wait for expiry) — establish which dominates and record it. Do not change the behaviour.
+    (iv) NOT IN SCOPE — flipping `enforceWriteTiers`. That is the console-arc decision and it is the
+    operator's; this task must leave the flag exactly as it is so the fix can land ahead of it."
+  acceptance:
+    - claim: "a nonce presented after its lifetime has elapsed is refused rather than accepted"
+      proof: "unit test: test/confirm-nonce-expiry.test.ts"
+    - claim: "an issued nonce that is never spent is evicted, so the store does not grow without bound"
+      proof: "unit test: test/confirm-nonce-expiry.test.ts"
+    - claim: "a nonce presented well within its lifetime is still accepted, so the bound does not fire on a healthy confirmation"
+      proof: "unit test: test/confirm-nonce-expiry.test.ts"
+  risk: high
+  origin: review#1709-confirm-nonce-store
+  plan_refs: ["W1-T404"]
+  files: [src/lib/service.ts, test/confirm-nonce-expiry.test.ts, test/write-tier-second-factor.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — every clause here is an engineering question with a derivable answer. The one
+    question that WOULD need the operator (whether the fleet may enforce write tiers in production at
+    all) is design (iv) and is explicitly OUT of scope, so nothing in this shard is parked on a ruling.
+    `files:` IS DELIBERATELY SHORT AND EVERY ENTRY WAS DERIVED FROM A GATE, NOT FROM THE CODE THE
+    AUTHOR PICTURES — that phrasing is this week's lesson, after SEVEN files: corrections.
+    `test/write-tier-second-factor.test.ts` IS DECLARED BECAUSE IT IS THE ONLY SUITE THAT TOUCHES THE
+    STORE, and that was measured by INVOCATION rather than by prose mention: at ab85e661 it is the
+    sole file matching `createConfirmNonceStore(`/`confirmNonces:` (2 invocations) AND the sole file
+    exercising the route (5 `/v1/confirm` invocations). Adding a clock to the store changes the shape
+    that suite asserts, so it will move.
+    `docs/` IS DELIBERATELY OMITTED: this adds no CLI verb, so neither `generate-cli-reference --check`
+    nor `docs-claims` is implicated — the two gates that caught W1-T447's omission.
+    `openapi/daemon.yaml` IS DELIBERATELY OMITTED TOO, and this is the entry most likely to be wrong:
+    an expiry that is purely internal changes no wire field, but if the implementation chooses to
+    return an `expires_in_ms` alongside the nonce then the published schema and its generated client
+    both move, and `api-client-drift` will say so. Whoever builds this should add
+    `openapi/daemon.yaml` and `packages/api-client/src/schema.d.ts` the moment they expose the value.
+    RULE 19: `risk: high` is set UP FRONT so `sizingViolation` (`src/lib/task-linter.ts`) returns
+    early before `subsystemsOf` is consulted — the `files:` set spans `src/` and `test/`, which is the
+    SPAN that trips the band, not blast radius. The blast radius is genuinely small: nine lines and a
+    dead code path.
+    RULE 25: no instrument entanglement — `src/lib/service.ts` is a product path, and nothing here
+    touches `INSTRUMENT_SURFACE`.
+    NO NUMBER HERE SHOULD BE QUOTED FORWARD: the 5-hour and 13-day uptimes and the zero
+    `enforceWriteTiers: true` hits were true at 2026-08-13T11:30Z, on a fleet whose flag is expected
+    to flip. Re-derive before building."
