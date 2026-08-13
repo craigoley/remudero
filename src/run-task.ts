@@ -1243,6 +1243,45 @@ export function withdrawArmIfVerdictRefuses(
  * a PR that lane may have deliberately declined. Two lanes arming one PR on different rules is
  * worse than the gap being closed here.
  */
+/**
+ * W1-T449 — THE ONE PLACE an arm/merge site's LEDGER LINE gains PR identity + lane, so a
+ * sweep-armed merge and a hand-armed merge — previously identical `automerge.armed` rows
+ * carrying only `outcome`/`task_id`/`head_sha` — are told apart from the ledger alone, even
+ * when `task_id` is absent (a trailerless PR, the exact case that needs these fields most).
+ * `pr_number` is derived from `prUrl` itself via {@link prNumberFromRef} so no caller has to
+ * thread a redundant number alongside the URL it already carries. `lane` names WHICH call
+ * site acted: `armIfVerdictPermits` (below) always passes `"review"`; {@link armAndLogOutcome}
+ * defaults to `"operator"` (dep-review/retro/triage/plan/approve) and its sweep caller
+ * (`buildSweepEffects`'s `arm` member) passes `"sweep"`.
+ *
+ * ALSO GIVES THE CLEAN-STATUS DIRECT MERGE ITS OWN STEP. `attemptArm`'s clean-status
+ * fallback (above, ~:1097) completes a PR outright and used to announce itself only through
+ * `deps.say` — stdout, where nobody counts. A `direct-merged` outcome already logs as
+ * `automerge.armed` ({@link armOutcomeArmed} correctly treats it as a real success); this
+ * ADDS `automerge.clean_status_direct_merge` alongside it, naming the completion itself
+ * rather than folding it into the generic armed line.
+ */
+function logArmAttribution(
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  outcome: ArmOutcome,
+  prUrl: string,
+  taskId: string | undefined,
+  lane: string,
+  extra: Record<string, unknown> = {},
+): void {
+  const prNumber = prNumberFromRef(prUrl);
+  log(armOutcomeArmed(outcome) ? "automerge.armed" : "automerge.arm_skipped", {
+    ...extra,
+    task_id: taskId,
+    pr_number: prNumber,
+    pr_url: prUrl,
+    lane,
+  });
+  if (outcome === "direct-merged") {
+    log("automerge.clean_status_direct_merge", { task_id: taskId, pr_number: prNumber, pr_url: prUrl, lane });
+  }
+}
+
 export function armIfVerdictPermits(
   verdict: Pick<ReviewVerdict, "state" | "capped" | "planOnly">,
   ctx: {
@@ -1291,12 +1330,11 @@ export function armIfVerdictPermits(
   // `outcome` comes from the LEDGER gate inside `armAutoMerge` (which refused), whose real reason
   // reached only stdout via `deps.say`. The semantic verdict is kept under its own name so the
   // line still records why arming was PERMITTED as well as what actually happened.
-  ctx.log(armOutcomeArmed(outcome) ? "automerge.armed" : "automerge.arm_skipped", {
+  logArmAttribution(ctx.log, outcome, ctx.prUrl, ctx.taskId, "review", {
     outcome,
     reason: armOutcomeReason(outcome, decision.reason),
     decision_reason: decision.reason,
     head_sha: ctx.headSha,
-    task_id: ctx.taskId,
   });
   return outcome;
 }
@@ -1350,15 +1388,22 @@ export function armOutcomeReason(outcome: ArmOutcome | "skipped", decisionReason
  *
  * The step names match the ones {@link armIfVerdictPermits} already established, so a reader
  * grepping the ledger for `automerge.arm_skipped` finds every non-arm from every lane.
+ *
+ * W1-T449: `lane` names which caller acted — every Architect verb above defaults to
+ * `"operator"`; `buildSweepEffects`'s `arm` member is the one caller that passes `"sweep"`,
+ * which is what makes a sweep-armed merge and a hand-armed merge finally distinguishable on
+ * the ledger. `pr_number`/`pr_url` are added by {@link logArmAttribution}, not here, so this
+ * stays the single place that decides which outcomes count as armed.
  */
 export function armAndLogOutcome(
   prUrl: string,
   taskId: string | undefined,
   log: (step: string, extra?: Record<string, unknown>) => void,
   arm: (prUrl: string, taskId: string | undefined) => ArmOutcome = armAutoMerge,
+  lane: string = "operator",
 ): ArmOutcome {
   const outcome = arm(prUrl, taskId);
-  log(armOutcomeArmed(outcome) ? "automerge.armed" : "automerge.arm_skipped", { outcome, task_id: taskId });
+  logArmAttribution(log, outcome, prUrl, taskId, lane, { outcome });
   return outcome;
 }
 
@@ -14216,6 +14261,14 @@ export function buildSweepEffects(
   // failure being reported; that catch arm is only reachable if something in here throws, so it is
   // only provable with an injected thrower.
   stallNotice: (verdict: PostReviewStallVerdict, ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway }) => void = escalatePostReviewStall,
+  // Injectable arm — same convention as `reviewRunner`/`spawnImpl` above: without it, a
+  // SUCCESSFUL sweep arm is unreachable from any offline test, because the adapter always
+  // called the real `armAutoMerge` (a live `gh pr merge`). Default is `armAutoMerge` itself,
+  // so production wiring is unchanged. W1-T449: the `arm` effect below now routes this
+  // through `armAndLogOutcome` (rather than calling it bare), so a successful sweep arm
+  // finally reaches the ledger with the PR identity + a `"sweep"` lane, not only the
+  // sweep.disposed row.
+  armImpl: (prUrl: string, taskId: string | undefined) => ArmOutcome = armAutoMerge,
 ): Pick<SweepDeps, "arm" | "close" | "dispatchFix" | "escalate" | "readLiveState" | "depReview" | "postReview" | "repushAbsent"> {
   const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
   const issues = issuesImpl ?? ghIssueGateway(owner, repo);
@@ -14229,7 +14282,16 @@ export function buildSweepEffects(
     // (it preserves the pre-#968 assumption for fakes that return nothing), which meant the
     // real sweep kept recording `acted:true` for refused arms and #968 was inert in
     // production. A brace and a `return` are the whole difference.
-    arm: (pr) => armAutoMerge(pr.prUrl, pr.taskId),
+    //
+    // W1-T449 — ROUTED THROUGH THE SHARED WRAPPER, NOT A BARE CALL. This used to call
+    // `armAutoMerge` directly, so a successful sweep arm left NO ledger trace of its own —
+    // only the `sweep.disposed` row (disposition `mergeable`, `acted: true`) and, on
+    // FAILURE, prose folded into a stand-down reason. `armAndLogOutcome` is the SAME wrapper
+    // every post-review Architect lane already uses (never a second logging path in
+    // sweep.ts, per this task's design), passed the `"sweep"` lane so its
+    // `automerge.armed`/`automerge.arm_skipped` line reads apart from a review-lane arm on
+    // the ledger alone, even with no task id on either.
+    arm: (pr) => armAndLogOutcome(pr.prUrl, pr.taskId, log, armImpl, "sweep"),
 
     // THE ABSENT-CHECK-SUITE REMEDY (W1-T186 follow-up). Routed through git-push.ts's leaf, so
     // the live-write guard applies and no new outward path exists. `commit-tree` plumbing means
