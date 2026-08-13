@@ -1,5 +1,5 @@
 - id: W1-T455
-  title: "the worker preflight's commitlint step fails on healthy commits and silently reroutes the run to the orchestrator fallback — 14 of 15 recorded preflight failures are this step alone"
+  title: "a TEST writes a FORGED preflight summary into whatever tree it runs in, and the orchestrator reads it as the worker's own verdict — 15 of 27 recorded preflight failures are fabricated, and the commitlint premise this shard opened with is REFUTED"
   repo: remudero
   depends_on: []
   type: implement
@@ -9,14 +9,59 @@
   principles: {tdd: strict}
   budget_usd: 40
   files:
-    - src/lib/commit-message.ts
-    - src/run-task.ts
-    - test/preflight.test.ts
-    - test/preflight-spawn-failure.test.ts
-    - test/preflight-killed-child.test.ts
-    - test/preflight-commitlint-range.test.ts
-    - test/commit-message.test.ts
-  rationale: "RE-DERIVED at 4096adc. `commitlintStep` (src/lib/commit-message.ts) spawns
+      - src/run-task.ts
+      - test/preflight.test.ts
+      - test/preflight-ci-parity.test.ts
+      - test/preflight-fast-mode.test.ts
+      - test/preflight-summary-containment.test.ts
+  rationale: "PREMISE REFUTED 2026-08-13, REWRITTEN NOT CLOSED — the original reasoning is PRESERVED
+    VERBATIM below under ORIGINAL REASONING (RETRACTED), because it is the record of how this was
+    misdiagnosed twice and §8A asks for compression, not erasure.
+    WHAT IS REFUTED: `commitlintStep` does not fail healthy commits. Nothing was wrong with commitlint.
+    WHAT ACTUALLY HAPPENS, re-derived at 43ca3f30 and quotable in three lines:
+      `test/preflight.test.ts` defines a FAKE SPAWN — `commitlint: { status: 1, stderr:
+      \"header-max-length\" }` — and calls `preflightCommand([], { spawn })` WITH NO `--summary-file`.
+      `preflightCommand` (src/run-task.ts) writes to
+      `flagValue(rest, \"--summary-file\") ?? preflightSummaryPath(repoRoot)`.
+      `repoRoot` is a MODULE-LEVEL `const repoRoot = resolveRepoRoot(process.argv.slice(2),
+      process.cwd())`.
+    SO RUNNING THE SUITE WRITES A FAKE FAILING SUMMARY INTO WHATEVER TREE THE SUITE RUNS IN. THREE
+    suites do it, each calling `preflightCommand([], { spawn })` with no summary path:
+    `preflight.test.ts`, `preflight-ci-parity.test.ts`, `preflight-fast-mode.test.ts`.
+    `preflightFailureNotice(worktreePath)` (src/lib/ci-parity.ts) then READS it and the orchestrator
+    logs `preflight.failed`, believing it is the worker's own verdict.
+    NOTE A SYMBOL CORRECTION: the brief that commissioned this rewrite named
+    `workerPreflightFailureDetail`; NO SUCH SYMBOL EXISTS at 43ca3f30. The reader is
+    `preflightFailureNotice`, and the argv logic is its line
+      appends the argv suffix ONLY when `summary.args` is a non-empty array, so NO SUFFIX means
+      `args: []`.
+    THE MEASURED SPLIT HAS MOVED AND THE NEW NUMBERS ARE STRONGER, NOT WEAKER. Re-derived over all
+    three ledger forms (666 gz / 3 plain / 1 live), deduped across forms: **27 `preflight.failed`
+    rows — 15 FORGED, 12 GENUINE**, not the 14-of-15 the original brief carried. The discriminator is
+    the argv suffix, and the separation is UNANIMOUS: all 15 forged rows read EXACTLY
+    `1 of 3 step(s) failed: commitlint` — the fake's signature, character for character — and carry no
+    suffix, so `args: []`. All 12 genuine rows carry `(rmd preflight ...)` AND a different shape,
+    `2 of 23 step(s) failed: ci:tes…`. A bimodal split with no overlap.
+    THE `durationMs` DISCRIMINATOR CORROBORATES IT: `tsc -p tsconfig.json --noEmit` cannot pass in one
+    millisecond. Forged summaries measured 0–1 ms; genuine runs 9,656 ms to 3,488,663 ms.
+    THE REUSABLE FINDING IS A THREE-PROPERTY CONJUNCTION, and it is why this is worth a task at all:
+      WRITTEN FROM A `repoRoot`-DERIVED PATH BY A TEST · GITIGNORED · TRUSTED BY THE ORCHESTRATOR.
+    Only the conjunction bites. MEASURED at 43ca3f30 over the four worktree-relative artifacts the
+    orchestrator reads: `plan/tasks.yaml` and `plan/feedback/` are TRACKED and not ignored, so a test
+    writing there DIRTIES THE TREE AND IS VISIBLE — git is the protection. `coverage/preflight-summary.json`
+    is untracked AND ignored AND adjudicated, which is why it alone produced false verdicts.
+    THE SECOND MEMBER, RECORDED SO THE CLASS IS NOT READ AS A SINGLETON: `plan/questions.ndjson`,
+    written by `appendQuestion(repoRoot, …)` (src/lib/worker.ts), gitignored, and read by
+    `readQuestionsNdjson(root)` (src/run-task.ts) — consumed by `buildOpenPrViews` and the feedback
+    docket rung. IT WAS NEARLY DISMISSED AS LITTER because grepping the FILENAME across `src/` returns
+    only comments; THE READER BUILDS THE PATH INTERNALLY. Its consumers AGGREGATE rather than
+    ADJUDICATE, so the consequence is quieter — a polluted question list, not a false verdict. That is
+    stated as the limit of the claim, not softened.
+    AND THE COUNTER-EXAMPLE, WHICH PROVES THE REPO ALREADY KNOWS THIS CLASS: `taskIdHistoryCachePath`
+    (src/run-task.ts) deliberately resolves against `git rev-parse --git-common-dir` rather than
+    `repoRoot`, its own doc saying NOT repoRoot. The pattern was recognised and avoided once already.
+    ORIGINAL REASONING (RETRACTED — the commitlint premise below is FALSE; preserved as the record of
+    the misdiagnosis): RE-DERIVED at 4096adc. `commitlintStep` (src/lib/commit-message.ts) spawns
     `<repoRoot>/node_modules/.bin/commitlint --config <repoRoot>/commitlint.config.mjs --from
     <range.from> --to <range.to>` and reports
     `commitlint: FAIL — ${range.from}..${range.to}\\n${(res.stdout + res.stderr).trim()}` — so the
@@ -93,11 +138,31 @@
     which this task does not change — and if an implementer finds they must touch the
     `mirrored: false` entry, that is a signal the scope grew and the files: list must grow with it."
   acceptance:
-    - claim: "an empty commit range passes the commitlint step instead of failing the run"
-      proof: "unit test: test/preflight-commitlint-range.test.ts"
-    - claim: "a genuinely over-length subject still fails the step, so the check is not merely disabled"
-      proof: "unit test: test/preflight.test.ts"
-    - claim: "a failing step records the resolved refs and the linter's own output, not just a rule id"
-      proof: "unit test: test/preflight-commitlint-range.test.ts"
-    - claim: "a spawn that dies is still reported as this step's own failure and never aborts later steps"
-      proof: "unit test: test/preflight-spawn-failure.test.ts"
+    - claim: "running the preflight suite leaves no summary file behind in the tree it ran in"
+      proof: "unit test: test/preflight-summary-containment.test.ts"
+    - claim: "a preflight invoked with an injected spawn refuses to write to the default summary path"
+      proof: "unit test: test/preflight-summary-containment.test.ts"
+    - claim: "a real preflight with no injected spawn still writes its summary where the orchestrator reads it"
+      proof: "unit test: test/preflight-summary-containment.test.ts"
+
+  design_addendum: "TWO CANDIDATE FIXES, AND THE SHARD DOES NOT PICK FOR THE IMPLEMENTER.
+    (a) FIX THE TESTS. Pass an explicit `--summary-file` into a tmpdir from all three suites. Narrow,
+    touches only `test/`, and fixes THE INSTANCE. Its weakness is that it fixes only the three suites
+    that exist today: the fourth suite someone writes next month re-opens it, because nothing refuses.
+    (b) FIX THE COMMAND. Make `preflightCommand` REFUSE to write to the DEFAULT path when a spawn is
+    INJECTED — an injected spawn means a test, and a test has no business writing the orchestrator's
+    adjudicated artifact. Touches production code (`src/run-task.ts`) and fixes THE SHAPE: it cannot
+    be re-opened by a new suite. RECOMMENDED, because this defect survived three suites and the
+    class has a second member.
+    ORDERING FACT THAT BOUNDS THE DAMAGE, and it explains the split exactly: `--ci-parity` shells
+    `npm run test:ci`, so the suite writes the fake AND THEN `preflightCommand` OVERWRITES it with the
+    real verdict. That is precisely why every genuine row is a `--ci-parity` row. THE DAMAGE IS THE
+    INVERSE CASE: a worker that runs the suite by ANY route not followed by a preflight write leaves
+    the fake as final state, and is charged with a failure it never earned and never saw.
+    DOES A REAL DEFECT SURVIVE? The original downstream claim — that a failed preflight reroutes the
+    push to the orchestrator fallback — STILL HAPPENED, 15 times, but from a FORGED cause. The
+    fallback itself is sound: it pushes from `worktreePath`, so branch content, commit, author and
+    scope-guard flagging all survive. The ONLY divergence is that `--fill` composes the PR body from
+    the commit message, hence no `Remudero-Task:` trailer — WHICH IS ALREADY ADDRESSED BY W1-T453
+    (#1725), whose head-ref fallback resolves exactly those PRs. NOTHING FURTHER NEEDS FILING, and
+    this clause exists so nobody re-files it."
