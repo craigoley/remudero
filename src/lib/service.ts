@@ -321,23 +321,80 @@ export interface ConfirmNonceAction {
 export interface ConfirmNonceStore {
   issue(action: ConfirmNonceAction): string;
   consume(nonce: string, action: ConfirmNonceAction): boolean;
+  /** W1-T451: count of entries not yet consumed or swept. Exists ONLY so a test can observe that
+   *  eviction actually bounds growth (an unspent nonce alone can't be proven gone through
+   *  `issue`/`consume` — both a swept entry and a merely-expired-but-still-present one refuse a
+   *  `consume` identically). `createService`'s dispatch never reads this. */
+  size(): number;
+}
+
+/**
+ * W1-T451 design (i): the nonce covers ONE round trip — issue, an operator reads the
+ * confirmation, spend — and both a too-short and a too-long TTL are real failure modes.
+ * TOO SHORT is a fifth "bound fires on a healthy condition" (this repo already has four:
+ * W1-T312's ci-gate wait cap, W1-T380's dry-run deploy ceiling, W1-T382's check-wait bound, the
+ * idle-gate ceiling) and the worst kind, because it would fire on an operator who simply read the
+ * dialog carefully: reading `This action SPENDS MONEY`, checking the payload and deciding is
+ * TENS OF SECONDS, not one. TOO LONG reinstates the standing elevated state the action-binding
+ * was chosen to avoid (W1-T404's own ruling). There is no real console client yet to measure (the
+ * confirmation UI is future console-arc work), so this is reasoned from the floor up rather than
+ * from a generic HTTP timeout: five minutes is roughly two orders of magnitude past the
+ * tens-of-seconds floor — room to get distracted mid-read, scroll back, re-check a payload — while
+ * still being a materially bounded window, not hours and not indefinite.
+ */
+export const CONFIRM_NONCE_TTL_MS = 5 * 60 * 1000;
+
+interface StoredConfirmNonce {
+  action: ConfirmNonceAction;
+  issuedAt: number;
 }
 
 /** In-memory default — single daemon process, no persistence needed. `randomToken` is injectable
- *  so a test can assert on a known nonce value; production always uses real `randomBytes`. */
-export function createConfirmNonceStore(randomToken: () => string = () => randomBytes(24).toString("hex")): ConfirmNonceStore {
-  const pending = new Map<string, ConfirmNonceAction>();
+ *  so a test can assert on a known nonce value; production always uses real `randomBytes`. `now`
+ *  is injectable the same way so a test can assert on expiry without sleeping real time;
+ *  production always uses real `Date.now`. */
+export function createConfirmNonceStore(
+  randomToken: () => string = () => randomBytes(24).toString("hex"),
+  now: () => number = () => Date.now(),
+): ConfirmNonceStore {
+  const pending = new Map<string, StoredConfirmNonce>();
   return {
     issue(action) {
+      // W1-T451 design (ii): EVICTION IS SEPARATE FROM EXPIRY. A TTL checked only on `consume`
+      // fixes the security half (a stale nonce staying spendable) but leaves an unspent nonce in
+      // the map forever, because it is never read again — unbounded growth needs its OWN
+      // trigger. The daemon's existing sweeps (tmp_sweep, lock_sweep, orphan_sweep,
+      // worker_home_sweep) run in the daemon process; this store lives in the serve process, so a
+      // daemon tick can't reach it either. Sweep-on-issue is the one option that adds no new
+      // clock/timer: amortised over calls to `issue`, bounded by call rate, and every issue call
+      // already runs on this process's event loop.
+      const nowMs = now();
+      // Same age comparison `consume` uses below (`>=`, not `<`) — a nonce exactly at its TTL
+      // boundary must be swept here the same way it's refused there.
+      for (const [staleNonce, entry] of pending) {
+        if (nowMs - entry.issuedAt >= CONFIRM_NONCE_TTL_MS) pending.delete(staleNonce);
+      }
       const nonce = randomToken();
-      pending.set(nonce, action);
+      pending.set(nonce, { action, issuedAt: nowMs });
       return nonce;
     },
     consume(nonce, action) {
       const recorded = pending.get(nonce);
       pending.delete(nonce); // single-use regardless of outcome — a wrong guess spends it too.
       if (!recorded) return false;
-      return recorded.method === action.method && recorded.path === action.path && safeEqual(recorded.payload, action.payload);
+      // W1-T451 design (iii): does a TTL make the consume-on-mismatch burn better or worse for an
+      // attacker who reaches the endpoint? BETTER dominates: it bounds how long a burned
+      // confirmation could have been useful (an attacker who burns a nonce also can't wait out an
+      // unbounded window and try later), and it doesn't create a materially cheaper denial —
+      // burning a nonce is already immediate and free of a wait either way, since the operator's
+      // next legitimate attempt needs a freshly issued nonce regardless of whether this one was
+      // burned or simply expired. This is analysis only; the burn-on-any-mismatch behavior itself
+      // is unchanged.
+      if (now() - recorded.issuedAt >= CONFIRM_NONCE_TTL_MS) return false;
+      return recorded.action.method === action.method && recorded.action.path === action.path && safeEqual(recorded.action.payload, action.payload);
+    },
+    size() {
+      return pending.size;
     },
   };
 }
