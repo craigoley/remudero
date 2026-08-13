@@ -106,10 +106,16 @@
   risk: high
   origin: recon#worker-builds-in-checkout-2026-08-13
   plan_refs: ["W1-T445", "W1-T446"]
-  files: [src/lib/self-sync.ts, src/lib/env.ts, test/worktree-verb-containment.test.ts, test/self-sync.test.ts, test/self-sync-branch-guard.test.ts, test/env.test.ts]
+  files: [src/lib/self-sync.ts, test/worktree-verb-containment.test.ts, test/self-sync.test.ts, test/self-sync-branch-guard.test.ts]
   status: queued
   attempts: 0
-  note: "verify:auto — nothing here is parked on an operator ruling. Design (i) is an engineering
+  note: "FILES: CORRECTED WHEN CANDIDATE (b) WAS RULED (2026-08-13). `src/lib/env.ts` and
+    `test/env.test.ts` were candidate (a)'s paths and are DROPPED, not touched to satisfy the list —
+    this shard's own note predicted exactly this and said to drop rather than touch, because
+    `inverseScopeUntouchedFiles` (`src/lib/review.ts`) fails a DECLARED-but-untouched path just as
+    `scopeViolationFiles` fails an undeclared one. Candidate (a) is not merely unbuilt; it is
+    withdrawn, for the reason design (i) already recorded: it fails open.
+        verify:auto — nothing here is parked on an operator ruling. Design (i) is an engineering
     choice between two mechanisms with a stated recommendation, and the withdrawn options in (iii) are
     recorded as settled rather than reopened.
     `files:` COVERS BOTH CANDIDATE SURFACES because the shard deliberately does not pick for the
