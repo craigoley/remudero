@@ -52,5 +52,6 @@ raw: "PROOF-EXECUTABILITY: AUTHORING-TIME ROOT CAUSE (fable, supersedes/extends
   emitter self-check if lint-plan flags the span)."
 attachments: []
 origin: cli
-status: new
+status: rejected
 proposal_pr: null
+summary: null
