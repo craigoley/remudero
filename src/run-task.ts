@@ -996,6 +996,25 @@ export interface ArmDeps {
   /** `gh pr merge --disable-auto` — withdraws an early arm, W1-T125. */
   disableAuto: (prUrl: string) => void;
   say: (msg: string) => void;
+  /**
+   * W1-T449 — the real ledger record for the clean-status direct-merge completion
+   * ({@link attemptArm}'s fallback branch). That branch COMPLETES a pull request; before this it
+   * announced itself only through `say` (stdout), so a step that merges a PR had no ledger
+   * record of any kind. Optional so every existing `ArmDeps` fake in tests keeps compiling
+   * unchanged; {@link realArmDeps} wires a real one so the gap closes in production, not only
+   * under test (the impl-DO lesson: a seam that is only EXERCISABLE, never actually WIRED, is a
+   * green, unreached fix).
+   */
+  log?: (step: string, extra?: Record<string, unknown>) => void;
+}
+
+/** W1-T449 — the PR number, parsed from the URL every arm/merge site already carries. The one
+ *  identity field none of `armIfVerdictPermits`/`armAndLogOutcome`/the direct-merge ledger line
+ *  had before, and the only one of the three (pr_number, pr_url, lane) that isn't already sitting
+ *  in a parameter somewhere. */
+function prNumberFromArmUrl(prUrl: string): number | undefined {
+  const n = Number(prUrl.match(/\/pull\/(\d+)/)?.[1]);
+  return Number.isFinite(n) ? n : undefined;
 }
 
 export function realArmDeps(): ArmDeps {
@@ -1027,6 +1046,12 @@ export function realArmDeps(): ArmDeps {
       });
     },
     say: (msg) => console.log(msg),
+    // W1-T449: the real ledger write for the direct-merge completion — `automerge-<ts>` because
+    // this leaf has no run of its own to credit (it is shared by every caller, some of which
+    // — armAutoMergeAtOpen — have no task id resolved yet either); the PR/task identity that
+    // DOES matter for attribution travels in `extra` (pr_number, pr_url, task_id) and is never
+    // shadowed by these two defaults.
+    log: (step, extra = {}) => appendLedger(ledgerPathFor(loadConfig()), { run_id: `automerge-${Date.now()}`, task_id: "automerge", step, ...extra }),
   };
 }
 
@@ -1069,7 +1094,7 @@ export function armAutoMerge(
     deps.say(`automerge.ledger_refused (W1-T230): ${decision.reason} — ${prUrl}`);
     return "ledger-refused";
   }
-  return attemptArm(prUrl, deps);
+  return attemptArm(prUrl, taskId, deps);
 }
 
 /**
@@ -1077,8 +1102,16 @@ export function armAutoMerge(
  * factored out (W1-T125) so both the ledger-gated {@link armAutoMerge} and the
  * ungated {@link armAutoMergeAtOpen} share the EXACT same completion logic
  * rather than duplicating it.
+ *
+ * `taskId` is `undefined` for {@link armAutoMergeAtOpen} (called before any verdict, hence
+ * before any task id is necessarily resolved) — carried through ONLY for the W1-T449 ledger
+ * line below, never consulted by the merge decision itself.
  */
-function attemptArm(prUrl: string, deps: Pick<ArmDeps, "armAuto" | "mergeDirect" | "say">): ArmOutcome {
+function attemptArm(
+  prUrl: string,
+  taskId: string | undefined,
+  deps: Pick<ArmDeps, "armAuto" | "mergeDirect" | "say" | "log">,
+): ArmOutcome {
   try {
     deps.armAuto(prUrl);
     return "armed";
@@ -1098,6 +1131,16 @@ function attemptArm(prUrl: string, deps: Pick<ArmDeps, "armAuto" | "mergeDirect"
       try {
         deps.mergeDirect(prUrl);
         deps.say(`automerge.clean_status_direct_merge (already green — merged now): ${prUrl}`);
+        // W1-T449: THE DIRECT MERGE GETS ITS OWN STEP, not only a `say()` string — this branch
+        // COMPLETES a pull request, and a completion event with no ledger record of any kind is
+        // exactly the silence W1-T196/the sweep stand-down work already ruled unacceptable
+        // elsewhere. `pr_number`/`pr_url` are what make the line attributable even when
+        // `task_id` cannot be resolved (an at-open arm has none yet).
+        deps.log?.("automerge.clean_status_direct_merge", {
+          pr_url: prUrl,
+          pr_number: prNumberFromArmUrl(prUrl),
+          task_id: taskId ?? "automerge",
+        });
         return "direct-merged";
       } catch (e2) {
         deps.say(`automerge.direct_merge_failed: ${String((e2 as Error)?.message ?? e2)} — ${prUrl}`);
@@ -1129,9 +1172,9 @@ function attemptArm(prUrl: string, deps: Pick<ArmDeps, "armAuto" | "mergeDirect"
  */
 export function armAutoMergeAtOpen(
   prUrl: string,
-  deps: Pick<ArmDeps, "armAuto" | "mergeDirect" | "say"> = realArmDeps(),
+  deps: Pick<ArmDeps, "armAuto" | "mergeDirect" | "say" | "log"> = realArmDeps(),
 ): ArmOutcome {
-  return attemptArm(prUrl, deps);
+  return attemptArm(prUrl, undefined, deps);
 }
 
 /**
@@ -1256,7 +1299,13 @@ export function armIfVerdictPermits(
   deps: { arm?: (prUrl: string, taskId: string) => ArmOutcome; ledgerLines?: () => Array<Record<string, unknown>> } = {},
 ): ArmOutcome | "skipped" {
   if (ctx.headRefName?.startsWith("dependabot/")) {
-    ctx.log("automerge.arm_skipped", { reason: "dependabot PR — the dep-review lane owns arming for these", head_sha: ctx.headSha });
+    ctx.log("automerge.arm_skipped", {
+      reason: "dependabot PR — the dep-review lane owns arming for these",
+      head_sha: ctx.headSha,
+      pr_url: ctx.prUrl,
+      pr_number: prNumberFromArmUrl(ctx.prUrl),
+      lane: "review",
+    });
     return "skipped";
   }
   const override = verdict.capped
@@ -1274,6 +1323,9 @@ export function armIfVerdictPermits(
       decision_reason: decision.reason,
       head_sha: ctx.headSha,
       task_id: ctx.taskId,
+      pr_url: ctx.prUrl,
+      pr_number: prNumberFromArmUrl(ctx.prUrl),
+      lane: "review",
     });
     return "skipped";
   }
@@ -1291,12 +1343,19 @@ export function armIfVerdictPermits(
   // `outcome` comes from the LEDGER gate inside `armAutoMerge` (which refused), whose real reason
   // reached only stdout via `deps.say`. The semantic verdict is kept under its own name so the
   // line still records why arming was PERMITTED as well as what actually happened.
+  // W1-T449: pr_number/pr_url/lane — a hand-armed (review-lane) merge and a sweep-armed one used
+  // to log identically, and neither carried enough to filter the ledger by PR at all (see
+  // armAndLogOutcome's mirror of this same fix). A trailerless PR yields no task_id, which is
+  // exactly the case that needs these fields most — never omitted for that reason.
   ctx.log(armOutcomeArmed(outcome) ? "automerge.armed" : "automerge.arm_skipped", {
     outcome,
     reason: armOutcomeReason(outcome, decision.reason),
     decision_reason: decision.reason,
     head_sha: ctx.headSha,
     task_id: ctx.taskId,
+    pr_url: ctx.prUrl,
+    pr_number: prNumberFromArmUrl(ctx.prUrl),
+    lane: "review",
   });
   return outcome;
 }
@@ -1350,15 +1409,29 @@ export function armOutcomeReason(outcome: ArmOutcome | "skipped", decisionReason
  *
  * The step names match the ones {@link armIfVerdictPermits} already established, so a reader
  * grepping the ledger for `automerge.arm_skipped` finds every non-arm from every lane.
+ *
+ * W1-T449: `lane` names WHICH call site acted (`buildSweepEffects`'s own arm member passes
+ * `"sweep"`; every other caller keeps this wrapper's default, `"operator verb"` — the shared
+ * shape of dep-review/retro/triage/plan/approve). Paired with `pr_number`/`pr_url` (parsed off
+ * `prUrl`, which every caller already has), a hand-armed merge and a sweep-armed one — previously
+ * indistinguishable in the ledger — are now told apart even when `task_id` is absent, which is
+ * exactly the case (a trailerless PR) that needs this the most.
  */
 export function armAndLogOutcome(
   prUrl: string,
   taskId: string | undefined,
   log: (step: string, extra?: Record<string, unknown>) => void,
   arm: (prUrl: string, taskId: string | undefined) => ArmOutcome = armAutoMerge,
+  lane: string = "operator verb",
 ): ArmOutcome {
   const outcome = arm(prUrl, taskId);
-  log(armOutcomeArmed(outcome) ? "automerge.armed" : "automerge.arm_skipped", { outcome, task_id: taskId });
+  log(armOutcomeArmed(outcome) ? "automerge.armed" : "automerge.arm_skipped", {
+    outcome,
+    task_id: taskId,
+    pr_url: prUrl,
+    pr_number: prNumberFromArmUrl(prUrl),
+    lane,
+  });
   return outcome;
 }
 
@@ -14229,7 +14302,15 @@ export function buildSweepEffects(
     // (it preserves the pre-#968 assumption for fakes that return nothing), which meant the
     // real sweep kept recording `acted:true` for refused arms and #968 was inert in
     // production. A brace and a `return` are the whole difference.
-    arm: (pr) => armAutoMerge(pr.prUrl, pr.taskId),
+    //
+    // W1-T449 — ROUTED THROUGH THE SHARED WRAPPER, NOT A BARE CALL. This used to be
+    // `armAutoMerge(pr.prUrl, pr.taskId)` directly, so a successful sweep arm wrote NO
+    // `automerge.armed` line at all — the only trace it left was `sweep.disposed`
+    // (mergeable/acted:true), indistinguishable from a hand arm on the same PR. Going through
+    // {@link armAndLogOutcome} — the exact wrapper the other five post-review lanes already use —
+    // gives the sweep the same ledger line those lanes get, tagged `lane: "sweep"`, with no
+    // second logging path duplicated into lib/sweep.ts.
+    arm: (pr) => armAndLogOutcome(pr.prUrl, pr.taskId, log, armAutoMerge, "sweep"),
 
     // THE ABSENT-CHECK-SUITE REMEDY (W1-T186 follow-up). Routed through git-push.ts's leaf, so
     // the live-write guard applies and no new outward path exists. `commit-tree` plumbing means

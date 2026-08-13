@@ -130,11 +130,24 @@ test("SITE approve reads the arm outcome rather than discarding it", () => {
 });
 
 // ── 9: the SIXTH site the brief did not name — #968 was inert without it ────────────
-test("SITE sweep adapter returns the arm outcome so the sweep can read it at all", () => {
+//
+// W1-T449 RE-EXPRESSED THIS TEST. It used to pin the adapter at a BARE `armAutoMerge(...)` call
+// (still returning the outcome, which is what #968 needed) — but a bare call is exactly the
+// shape that left a successful sweep arm with NO `automerge.armed` ledger line at all, the only
+// trace being `sweep.disposed` (mergeable/acted:true), indistinguishable from a hand arm on the
+// same PR. The adapter now routes through `armAndLogOutcome` — the same wrapper the other five
+// lanes below already use — tagged `lane: "sweep"`. The RETURNS-THE-OUTCOME property #968 needed
+// still holds: `armAndLogOutcome` returns exactly what `arm` (here `armAutoMerge`) returned.
+test("SITE sweep adapter arms through the reporting wrapper, tagged as the sweep lane, and still returns the arm outcome", () => {
   assert.match(
     SRC,
+    /arm: \(pr\) => armAndLogOutcome\(pr\.prUrl, pr\.taskId, log, armAutoMerge, "sweep"\),/,
+    "the adapter RETURNS the outcome (armAndLogOutcome always returns what `arm` returned) AND now ledgers it, tagged as the sweep lane",
+  );
+  assert.doesNotMatch(
+    SRC,
     /arm: \(pr\) => armAutoMerge\(pr\.prUrl, pr\.taskId\),/,
-    "the adapter RETURNS the outcome — as a braced body it resolved to undefined, which armOutcomeArmed treats as armed, so the sweep's own check could never fire",
+    "the bare call is gone — it left a successful sweep arm with no ledger line at all",
   );
   assert.equal(
     SRC.includes("arm: (pr) => {\n      armAutoMerge(pr.prUrl, pr.taskId);\n    },"),

@@ -2253,7 +2253,12 @@ test("W1-T229 acceptance criterion 2: the plan-only-PR-emitting flows (retro/tri
     laneArmSites >= 6,
     "expected the plan-only-PR-emitting lanes (retro/triage/plan/approve/dep-review) to arm via armAndLogOutcome, plus its definition",
   );
-  assert.match(runTaskSrc, /arm: \(pr\) => armAutoMerge\(/, "the sweep arm effect still calls armAutoMerge directly");
+  // W1-T449: the sweep arm effect used to call `armAutoMerge` directly, which is exactly why a
+  // successful sweep arm wrote no ledger line at all (see armAndLogOutcome's own doc). It now
+  // routes through `armAndLogOutcome` — passing `armAutoMerge` straight through as that
+  // wrapper's `arm` argument, so the property this test is about (no raised-floor gate) still
+  // holds structurally: `armAndLogOutcome` is a REPORTING wrapper only, asserted below.
+  assert.match(runTaskSrc, /arm: \(pr\) => armAndLogOutcome\(pr\.prUrl, pr\.taskId, log, armAutoMerge, "sweep"\),/, "the sweep arm effect still passes armAutoMerge straight through, now via the reporting wrapper");
 
   const wrapper = runTaskSrc.slice(runTaskSrc.indexOf("export function armAndLogOutcome("));
   const wrapperBody = wrapper.slice(0, wrapper.indexOf("\n}\n") + 3);

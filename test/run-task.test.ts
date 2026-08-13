@@ -7,6 +7,8 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { readlineAsk, type GitRunner, materializeOriginShards, escalateCommand, digestCommand, pushDrainRundown,
   armAutoMerge,
+  armAndLogOutcome,
+  armIfVerdictPermits,
   armFailureAction,
   buildEscalationCloser,
   buildEscalationReconcileCandidates,
@@ -5387,10 +5389,15 @@ test("ghPrCreateFillCommand: plan/triage PR-create runs gh with cwd pinned to th
 
 // ── armAutoMerge: the clean-status arm no-op (20 acted lines, zero arms) ─────
 
-function armDeps(over: Partial<ArmDeps> = {}): ArmDeps & { said: string[] } {
+function armDeps(over: Partial<ArmDeps> = {}): ArmDeps & { said: string[]; logged: Array<{ step: string; extra?: Record<string, unknown> }> } {
   const said: string[] = [];
+  // W1-T449: every fixture below gets a `log` recorder too, even the ones that never assert on
+  // it — `ArmDeps.log` is optional, so this is purely additive and cannot change any existing
+  // assertion's outcome.
+  const logged: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   return {
     said,
+    logged,
     headSha: () => "abc1234",
     // A ledgered SUCCESS review with EXECUTED proof for this head — the W1-T230
     // gate's arm-permitting shape (decideArmFromLedgerVerdict).
@@ -5401,6 +5408,7 @@ function armDeps(over: Partial<ArmDeps> = {}): ArmDeps & { said: string[] } {
     mergeDirect: () => {},
     disableAuto: () => {},
     say: (m) => { said.push(m); },
+    log: (step, extra) => { logged.push({ step, extra }); },
     ...over,
   };
 }
@@ -5428,9 +5436,16 @@ test("armAutoMerge: a clean-status refusal COMPLETES as a direct merge — the g
     armAuto: () => { throw cleanStatusErr(); },
     mergeDirect: (u) => { merged.push(u); },
   });
-  assert.equal(armAutoMerge("url/591", "W1-TX", deps), "direct-merged");
-  assert.deepEqual(merged, ["url/591"]);
+  assert.equal(armAutoMerge("https://github.com/craigoley/remudero/pull/591", "W1-TX", deps), "direct-merged");
+  assert.deepEqual(merged, ["https://github.com/craigoley/remudero/pull/591"]);
   assert.ok(deps.said.some((m) => m.includes("clean_status_direct_merge")), "the completion is said, never silent");
+  // W1-T449 acceptance criterion 3: THE DIRECT MERGE GETS ITS OWN LEDGER STEP, not only a
+  // say() string — this branch COMPLETES a pull request, and before this a completion event
+  // that only reached daemon.out.log was indistinguishable from one that never ran at all.
+  const direct = deps.logged.filter((l) => l.step === "automerge.clean_status_direct_merge");
+  assert.equal(direct.length, 1, "exactly one real ledger step for the completed merge, not only the say() line");
+  assert.equal(direct[0].extra?.pr_url, "https://github.com/craigoley/remudero/pull/591", "attributable to the PR that was actually merged");
+  assert.equal(direct[0].extra?.pr_number, 591, "and to its number, parsed off the same URL every caller already carries");
 });
 
 test("armAutoMerge: a transient arm failure stays ignored (retried by the next sweep pass) — no direct merge fires", () => {
@@ -5506,6 +5521,7 @@ test("realArmDeps: the real gh/config wiring executes against a PATH-stubbed gh 
 
 test("buildSweepEffects.arm: the sweep's real arm wrapper reaches armAutoMerge (safe no-task-id path, no gh spawned)", async () => {
   const root = mkdtempSync(join(tmpdir(), "sweep-arm-"));
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   const effects = buildSweepEffects(
     "craigoley",
     "remudero",
@@ -5513,11 +5529,11 @@ test("buildSweepEffects.arm: the sweep's real arm wrapper reaches armAutoMerge (
     join(root, "ledger.ndjson"),
     "RUN-ARM-1",
     { tasks: [] } as never,
-    () => {},
+    (step, extra) => { logs.push({ step, extra }); },
   );
-  await effects.arm({
+  const outcome = await effects.arm({
     prNumber: 1,
-    prUrl: "url/1",
+    prUrl: "https://github.com/craigoley/remudero/pull/1",
     taskId: undefined,
     reviewState: "none",
     checksState: "green",
@@ -5527,7 +5543,177 @@ test("buildSweepEffects.arm: the sweep's real arm wrapper reaches armAutoMerge (
     headSha: "x",
     autoMergeArmed: false,
   } as never);
+  // W1-T449 acceptance criterion 1 (the no-op half): a REFUSED sweep arm was already legible
+  // before this task (armOutcomeArmed(undefined) === true is the OLD gap #968 closed) — what
+  // was still missing is that the sweep's arm effect writes ANY `automerge.*` ledger line at
+  // all. Before this task it was wired as a bare `armAutoMerge(...)` call with no `log` in
+  // reach, so this exact fixture (no task id -> refused) left `logs` EMPTY. It no longer does.
+  assert.equal(outcome, "no-task-id");
+  const armLines = logs.filter((l) => String(l.step).startsWith("automerge."));
+  assert.equal(armLines.length, 1, "the sweep's own arm effect now writes an automerge.* ledger line — bare armAutoMerge wrote none");
+  assert.equal(armLines[0].step, "automerge.arm_skipped", "a refusal is ledgered as a skip, never as an arm");
+  assert.equal(armLines[0].extra?.lane, "sweep", "tagged with the lane that acted");
+  assert.equal(armLines[0].extra?.pr_number, 1);
+  assert.equal(armLines[0].extra?.pr_url, "https://github.com/craigoley/remudero/pull/1");
   rmSync(root, { recursive: true, force: true });
+});
+
+// ── W1-T449: arm-site attribution — pr_number/pr_url/lane on every arm/merge ledger line ────
+
+/** A fixture HOME whose `~/.config/remudero/config.json` and `<root>/state/` are fully under
+ *  the caller's control — the same recipe test/auto-triage-wiring.test.ts's `fixtureHome` uses,
+ *  needed here because `armAutoMerge`'s real deps (`realArmDeps()`) read `loadConfig()` off the
+ *  ACTUAL machine's `HOME`, and this task's design explicitly requires driving the sweep's own
+ *  arm effect (not a stand-in) to a genuinely ARMED outcome — the wiring, not just the shape. */
+function fixtureArmHome(ledgerLines: Array<Record<string, unknown>>): { home: string; root: string } {
+  const home = mkdtempSync(join(tmpdir(), "rmd-w1t449-armhome-"));
+  const root = join(home, "Remudero");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  mkdirSync(join(root, "state"), { recursive: true });
+  writeFileSync(join(root, "state", "ledger.ndjson"), ledgerLines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+  return { home, root };
+}
+
+/** A PATH-stubbed `gh` answering REST `headSha` reads with `head` and letting every `pr merge`
+ *  invocation succeed (exit 0) — the same shape test/run-task.test.ts's own "realArmDeps" test
+ *  above already uses, factored out so this section's two fixtures share it. */
+function ghArmStub(headSha: string): { bin: string; restore: () => void } {
+  const bin = mkdtempSync(join(tmpdir(), "gh-w1t449-armstub-"));
+  writeFileSync(
+    join(bin, "gh"),
+    `#!/bin/sh\ncase "$1" in api) echo "{\\"number\\":1,\\"html_url\\":\\"u\\",\\"updated_at\\":\\"t\\",\\"head\\":{\\"ref\\":\\"b\\",\\"sha\\":\\"${headSha}\\"}}";; *) exit 0;; esac\n`,
+    { mode: 0o755 },
+  );
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}:${oldPath}`;
+  return {
+    bin,
+    restore: () => {
+      process.env.PATH = oldPath;
+      rmSync(bin, { recursive: true, force: true });
+    },
+  };
+}
+
+test("W1-T449 acceptance criteria 1 & 2: a REAL sweep arm — driven through buildSweepEffects' own adapter, never a direct armAndLogOutcome call — writes automerge.armed with pr_number/pr_url/lane:\"sweep\"; a review-lane arm for a DIFFERENT PR is told apart by lane+pr_number alone with no task id distinguishing either", async () => {
+  const HEAD = "cafef00dcafef00dcafef00dcafef00dcafef00d";
+  // Both lanes below share this SAME task_id on purpose (armAutoMerge's very first branch
+  // refuses to arm at all when taskId is falsy, so a genuine ARMED outcome needs a real one) —
+  // the point of criterion 2 is that task_id gives NO distinguishing signal between the two
+  // lines even when it is present and identical; only lane + pr_number do.
+  const SHARED_TASK_ID = "W1-T977";
+  const { home, root } = fixtureArmHome([
+    { run_id: "R", task_id: SHARED_TASK_ID, step: "review.posted", state: "success", head_sha: HEAD, proof_exec: ["executed_pass"] },
+  ]);
+  const gh = ghArmStub(HEAD);
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    // ── the sweep's own arm effect, driven for real (criterion 1) ──
+    const sweepLogs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+    const effects = buildSweepEffects(
+      "craigoley",
+      "remudero",
+      { root } as never,
+      join(root, "sweep-ledger.ndjson"), // deliberately NOT the same file `realArmDeps` reads —
+      // proves the wrapper's `log` (this recorder) is what the SWEEP wires, independent of
+      // realArmDeps's own config-rooted ledger the arm DECISION consults.
+      "SWEEP-RUN-1",
+      { tasks: [] } as never,
+      (step, extra) => { sweepLogs.push({ step, extra }); },
+    );
+    const sweepOutcome = await withLiveWritesAllowed(() =>
+      effects.arm({
+        prNumber: 42,
+        prUrl: "https://github.com/craigoley/remudero/pull/42",
+        taskId: SHARED_TASK_ID,
+        reviewState: "none",
+        checksState: "green",
+        unmetCriteria: [],
+        priorStrikes: 0,
+        lastActivityAt: new Date().toISOString(),
+        headSha: HEAD,
+        autoMergeArmed: false,
+      } as never),
+    );
+    assert.equal(sweepOutcome, "armed", "the ledgered review.posted success + matching live head must arm for real");
+    const sweepArmed = sweepLogs.filter((l) => l.step === "automerge.armed");
+    assert.equal(sweepArmed.length, 1, "one real automerge.armed line — not only a sweep.disposed row");
+    assert.equal(sweepArmed[0].extra?.lane, "sweep");
+    assert.equal(sweepArmed[0].extra?.pr_number, 42);
+    assert.equal(sweepArmed[0].extra?.pr_url, "https://github.com/craigoley/remudero/pull/42");
+
+    // ── a review-lane arm, for a DIFFERENT PR, told apart with no task id on either (criterion 2) ──
+    const reviewLogs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+    const reviewOutcome = armIfVerdictPermits(
+      { state: "success", capped: false, planOnly: false },
+      {
+        prUrl: "https://github.com/craigoley/remudero/pull/99",
+        taskId: SHARED_TASK_ID, // the SAME task_id as the sweep arm above — see the note at
+        // SHARED_TASK_ID: it must carry no distinguishing signal; lane + pr_number must.
+        headSha: HEAD,
+        ledgerPath: "/dev/null",
+        log: (step, extra) => { reviewLogs.push({ step, extra }); },
+      },
+      { arm: () => "armed" }, // the review lane's own gate is proven elsewhere (arm-ordering);
+      // this fixture proves ATTRIBUTION, so the arm decision itself is injected.
+    );
+    assert.equal(reviewOutcome, "armed");
+    const reviewArmed = reviewLogs.filter((l) => l.step === "automerge.armed");
+    assert.equal(reviewArmed.length, 1);
+    assert.equal(reviewArmed[0].extra?.lane, "review");
+    assert.equal(reviewArmed[0].extra?.pr_number, 99);
+    assert.equal(reviewArmed[0].extra?.pr_url, "https://github.com/craigoley/remudero/pull/99");
+
+    // THE KEY: task_id is identical on both lines, yet they are unambiguously told apart —
+    // exactly the "no task id [to filter by]" case the design calls out.
+    assert.equal(sweepArmed[0].extra?.task_id, reviewArmed[0].extra?.task_id, "task_id carries no distinguishing signal here, by construction");
+    assert.notEqual(sweepArmed[0].extra?.lane, reviewArmed[0].extra?.lane, "lane alone tells them apart");
+    assert.notEqual(sweepArmed[0].extra?.pr_number, reviewArmed[0].extra?.pr_number, "and so does pr_number alone");
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    gh.restore();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("W1-T449 acceptance criterion 4: a refused arm still logs automerge.arm_skipped — the added pr_number/pr_url/lane fields never turn a refusal into an armed line", () => {
+  // armAndLogOutcome — every non-sweep lane's own reporting wrapper (and, since this task, the
+  // sweep's too via buildSweepEffects' adapter).
+  const logged1: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const outcome1 = armAndLogOutcome(
+    "https://github.com/craigoley/remudero/pull/974",
+    "W1-T974",
+    (step, extra) => { logged1.push({ step, extra }); },
+    () => "ledger-refused",
+    "sweep",
+  );
+  assert.equal(outcome1, "ledger-refused");
+  assert.deepEqual(logged1.map((l) => l.step), ["automerge.arm_skipped"], "still exactly the skip step, never automerge.armed");
+  assert.equal(logged1[0].extra?.lane, "sweep", "the new fields ride along on a refusal too");
+  assert.equal(logged1[0].extra?.pr_number, 974);
+  assert.equal(logged1[0].extra?.pr_url, "https://github.com/craigoley/remudero/pull/974");
+
+  // armIfVerdictPermits — the review lane's own wrapper.
+  const logged2: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const outcome2 = armIfVerdictPermits(
+    { state: "success", capped: false, planOnly: false },
+    {
+      prUrl: "https://github.com/craigoley/remudero/pull/975",
+      taskId: "W1-T975",
+      headSha: "deadbeef",
+      ledgerPath: "/dev/null",
+      log: (step, extra) => { logged2.push({ step, extra }); },
+    },
+    { arm: () => "ledger-refused", ledgerLines: () => [] },
+  );
+  assert.equal(outcome2, "ledger-refused");
+  assert.deepEqual(logged2.map((l) => l.step), ["automerge.arm_skipped"]);
+  assert.equal(logged2[0].extra?.lane, "review");
+  assert.equal(logged2[0].extra?.pr_number, 975);
+  assert.equal(logged2[0].extra?.pr_url, "https://github.com/craigoley/remudero/pull/975");
 });
 
 // ── pushDrainRundown: the extracted post-drain push glue (W1-T144, #606 discipline) ──
