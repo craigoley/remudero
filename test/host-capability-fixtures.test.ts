@@ -21,7 +21,7 @@
  *
  * ── WHAT IT CANNOT COVER, AND A READER MUST NOT TRUST IT FURTHER ─────────────────────────────────
  *
- * THE TWO WORST INSTANCES HAVE NO GREPPABLE TOKENS AT ALL, and both were MEASURED to have none:
+ * THREE INSTANCES HAVE NO GREPPABLE TOKENS AT ALL, and each was MEASURED to have none:
  *
  *   - #1645. `MUTANT (defect 4)` in `test/entrypoint-boot.test.ts` asserted a commit must FAIL with
  *     no git identity configured. Git does not guarantee that: it guesses `user@fqdn` from the
@@ -32,11 +32,34 @@
  *   - #892. `test/serve.*.test.ts` died on a Chromium revision the review host had never installed,
  *     and the whole-file proof's exit code posted it as `executed_fail` on code `ci` was passing.
  *     W1-T202 burned FIVE identical FAIL rounds on it. Also zero greppable tokens.
+ *   - #1693, THE THIRD FORM: A HELPER THAT SPAWNS WITHOUT PINNING `HOME`. `printWithState`
+ *     (test/host-update-reclaim.test.ts) pinned only `RMD_STATE_DIR`, so when a NEW credential check
+ *     inside `deploy/host-update.sh` began reading `~/.claude`, the ambient home decided a test that
+ *     asserts on the STATE VOLUME and happens to add `doesNotMatch(/WARNING/)`. Green on the mini,
+ *     which has a real credential; red on a runner, which does not. THE IDIOM EXISTED BESIDE THE
+ *     DEFECT — the credential cases in that same file already pinned `RMD_CLAUDE_DIR` through
+ *     `printWithPaths`; only the volume helper inherited. USE THE PINNING HELPER.
+ *     WHY THERE IS NO PREDICATE FOR IT, measured: 36 test files pass an inline `env:` object and only
+ *     8 set `HOME:`, so a check keyed on `spawns without pinning HOME` flags 28 files that inherit
+ *     legitimately for git, npm or tsx. And the coupling is not in `test/` at all — it is between a
+ *     shell script's new behaviour and a helper's env, added in different commits, so no walk of this
+ *     directory can connect them. A guard here would have been a false positive for months and still
+ *     missed the day it mattered.
  *
- * BOTH ENTERED THROUGH A CHILD PROCESS'S OWN VIEW OF A WORLD THE TEST NEVER MENTIONS. No sweep of
+ * ALL THREE ENTERED THROUGH A CHILD PROCESS'S OWN VIEW OF A WORLD THE TEST NEVER MENTIONS. No sweep of
  * `test/` can see that class, and this one does not claim to. THE INSTRUMENT FOR THE OTHER HALF IS
  * RUNNING THE SUITE ON BOTH POLES AND DIFFING THE FAILURE SETS (PR #1659) — this walk is the cheap,
- * fast complement that stops the greppable forms from accumulating between those runs.
+ * fast complement that stops the greppable forms from accumulating between those runs. BE PRECISE
+ * ABOUT WHICH DIRECTION THAT INSTRUMENT COVERS: `HOST_PARITY_BASELINE`'s mini pole is automated, its
+ * ci pole is DECLARED BY HAND (the `ci` job publishes no machine-readable failure set), and #1693
+ * failed on the ci side — so CI going red on first push, not host-parity, is what caught it.
+ * THE CHEAP SWEEP FOR THIS FORM IS NOT A PREDICATE BUT A RUN: the whole suite with `HOME` pointed at
+ * an empty directory, diffed against a normal run. MEASURED at d4179ae — 50 tests move, of which 48
+ * are the harness's OWN artefact (Playwright's browser cache lives under `$HOME`; pin
+ * `PLAYWRIGHT_BROWSERS_PATH` and they vanish), leaving exactly ONE genuine dependant:
+ * `emissionsCommand renders the real report over the real corpus`, which is already declared. That
+ * run cannot see a test passing on BOTH homes for two different reasons, which is the form nothing
+ * here detects.
  *
  * ── NOT A MIGRATION ──────────────────────────────────────────────────────────────────────────────
  *
