@@ -1,0 +1,111 @@
+- id: W1-T462
+  title: "the alert poller exists and nothing runs it — `rmd ops` has polled twice in its life, `rmd alert-fix` has never run at all, and ten OSV advisories accumulated until a human asked"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  rationale: "TEN OSV ADVISORIES ACCUMULATED UNNOTICED AND A HUMAN HAD TO ASK. A session cleared them
+    in #1742 — hono, ip-address, brace-expansion, js-yaml, fast-uri — EVERY ONE a transitive dependency
+    whose fix was INSIDE THE SAME MAJOR, with the declared range ALREADY ALLOWING IT. `package.json`
+    needed no change and no override; the lockfile was simply pinned behind. That is the cheapest
+    possible class of security debt, and nothing was watching for it.
+    THE CAPABILITY ALREADY EXISTS. THE GAP IS CADENCE, NOT CAPABILITY — that is the whole finding, and
+    it makes this a small task rather than a new subsystem. All four links re-derived at 3e370e35:
+    (1) `pollAlerts` (`src/lib/ops.ts`) polls code-scanning, Dependabot and secret-scanning alerts and
+    ledgers ONE `ops.alerts_polled` line, which `digest.ts` already reads for its window. Code-scanning
+    is EXACTLY where the OSV findings land, so this poller would have seen them.
+    (2) IT HAS RUN TWICE IN ITS ENTIRE HISTORY. MEASURED across all three ledger forms (666 gz / 4
+    plain / 1 live): `ops.alerts_polled` = 2 rows, BOTH in old `.gz` archives, timestamped
+    2026-07-21T17:40:35Z and 2026-08-02T13:27:36Z. Its sibling `ops.feedback_reconciled` shows 88 rows
+    including 11 live — so `rmd ops` itself is invoked, and it is specifically the ALERT half that has
+    effectively never run.
+    (3) `rmd alert-fix` HAS NEVER RUN. `alert-fix.dispatching`, `alert-fix.pr_opened` and
+    `alert-fix.error` are ZERO across all three forms. POSITIVE CONTROL: `sweep.pass` reads 1,897 over
+    the same corpus, so the query and the corpus are sound. NOTE THE NAMING TRAP THAT ALMOST PRODUCED
+    A FALSE ZERO — the steps are `alert-fix.*` with a HYPHEN, not `alert_fix.*`; the first sweep
+    guessed the underscore form and returned an all-zero table that looked identical to the real
+    answer.
+    (4) NOTHING SCHEDULES IT. `opsCommand` (`src/run-task.ts`) is a plain CLI verb: zero hits for
+    `opsCommand` or `\"ops\"` in `src/lib/daemon.ts`, and zero hits for `rmd ops` across `.github/`,
+    `deploy/` and `scripts/`. No daemon hook, no workflow, no launchd entry.
+    AND THE SCAN ITSELF IS NOT THE HOLE. `.github/workflows/osv-scanner.yml` runs on push to main and
+    weekly (`cron: 43 4 * * 1`) with `upload-sarif: true` and `fail-on-vuln: false`; the PR variant
+    (`osv-scanner-pr.yml`) carries `fail-on-vuln: true`. Both are CORRECT: the PR scan fails on what a
+    PR INTRODUCES, and these ten arrived by ADVISORY DRIFT against already-pinned versions, which no
+    PR-diff scan can see. The main scan found them and reported them as SARIF — which became the
+    code-scanning alerts nobody polled. THE SIGNAL WAS PRODUCED AND DELIVERED; ONLY THE READER WAS
+    MISSING."
+  design: "(i) WHAT CADENCE, AND WHAT IT MAY DO — ARGUE IT, AND THE EVIDENCE ONLY SUPPORTS THE FIRST
+    TWO RUNGS.
+      REPORT ONLY — run `rmd ops` on a schedule, fold the OSV/alert count into the digest, escalate a
+      NEW critical/high exactly once. This is what `pollAlerts` ALREADY does; the change is a caller,
+      not a feature. SAFEST AND SUFFICIENT to have caught this incident, because a human asking is
+      precisely the failure a digest line removes.
+      PROPOSE — open a lockfile-only PR on a cadence, gated like everything else. THE EVIDENCE FOR
+      SAFETY IS UNUSUALLY GOOD AND SHOULD BE STATED RATHER THAN ASSUMED: all ten fixes were in-range
+      lockfile bumps with NO `package.json` change, 474 package entries before and after with none
+      added or removed, and `osv-scanner` went 10 -> 0. That is exactly what
+      `npm audit fix --package-lock-only` produces and exactly what CI can judge.
+      ACT (merge unattended) — REJECT. One clean instance is not evidence; this repo has four measured
+      bounds that fired on healthy conditions, and an unattended dependency merge is a supply-chain
+      write.
+      RECOMMENDATION: ship REPORT first and let PROPOSE follow only if the report rung shows a steady
+      stream of in-range fixes. Say which shipped.
+    (ii) THE FAILURE MODE A NAIVE CADENCE HAS, AND THE PRECEDENT THAT SOLVES IT. A rung that opened a
+    PR whenever ANY advisory appeared would open one for a finding with NO fix available, or one
+    needing a MAJOR bump — the repo already has exactly that case in `osv-scanner.toml`
+    (GHSA-frvp-7c67-39w9, fixed only in 2.0.5 while the parent pins ^1.19.9). `rmd alert-fix`'s
+    `plan/alert-policy.yaml` is the established precedent for deciding act-vs-escalate FROM DATA
+    rather than from an LLM. ESTABLISH whether that table can carry an `osv`/`dependency` source, and
+    prefer extending it to inventing a second policy surface.
+    (iii) DO NOT BUILD A NEW POLLER. `pollAlerts` is written, tested and already ledgers the line
+    `digest.ts` reads. If the implementation finds itself adding a second alert-reading path, that is
+    the signal it has taken a wrong turn.
+    (iv) SUPPRESSION EXPIRY IS RELATED AND DELIBERATELY OUT OF SCOPE — recorded here so it is not
+    re-discovered as new. MEASURED: NOTHING in `src/`, `test/`, `scripts/` or `.github/` reads
+    `osv-scanner.toml`; only `osv-scanner` itself consumes it. So a suppression is a PERMANENT
+    exemption that no mechanism revisits, which is this repo's own measured defect class — a declared
+    exemption outliving its reason. The file's own doctrine says such a finding `expires the moment
+    the dependency graph moves`, AND IT JUST DID: #1742 moved `@hono/node-server` 1.19.14 -> 1.19.17,
+    stale-ing the version its one entry cites (the entry stays VALID — the fix is 2.0.5 and 1.19.17 is
+    still 1.x — and #1742 updated the comment). IT IS NOT FILED SEPARATELY BECAUSE n = 1: one
+    suppression, still correct, already corrected. Filing a re-validation mechanism for a
+    single-entry file would be the thin filing this repo has measured as degrading dispatch quality.
+    RE-OPEN THIS the moment the file carries a second entry, or an entry survives a dependency move
+    without being re-checked."
+  acceptance:
+    - claim: "the alert poll runs on a cadence rather than only when a human invokes it"
+      proof: "unit test: test/ops-alert-cadence.test.ts"
+    - claim: "a poll that finds no new alert does not escalate, so the cadence is not a noise source"
+      proof: "unit test: test/ops-alert-cadence.test.ts"
+    - claim: "an advisory with no available fix escalates rather than opening an unmergeable PR"
+      proof: "unit test: test/ops-alert-cadence.test.ts"
+  origin: recon#osv-advisories-unwatched-2026-08-13
+  plan_refs: ["W1-T55"]
+  files: [src/run-task.ts, src/lib/daemon.ts, plan/alert-policy.yaml, test/ops-alert-cadence.test.ts, test/ops.test.ts, test/daemon.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT, AND IT WAS MEASURED RATHER THAN PREDICTED. This shard was first
+    written at `medium` and `rmd lint-plan` REFUSED it in as many words: `spans 4 distinct
+    subsystems/concerns (daemon, ops, ops-alert-cadence, run-task) at risk:medium — Rule 19: raise to
+    risk:high or decompose`. It was raised before filing, so the refusal is recorded here rather than
+    left for the implementer to rediscover.
+    THE BAND IS RULE 19's SPAN, NOT BLAST RADIUS — the blast radius is a scheduler call site, not a
+    new subsystem, and design (iii) forbids touching the poller at all.
+    `files:` COVERS THE CALLER, NOT THE POLLER. `src/lib/ops.ts` is DELIBERATELY ABSENT: design (iii)
+    says do not build a second poller, so an implementation that edits it has taken a wrong turn and
+    should stop rather than add the path. `src/lib/daemon.ts` and `src/run-task.ts` are where a
+    cadence hook lands; `plan/alert-policy.yaml` only if design (ii) extends the existing table.
+    DROP ANY PATH THE IMPLEMENTATION DOES NOT TOUCH — `inverseScopeUntouchedFiles`
+    (`src/lib/review.ts`) fails a declared-but-untouched path just as `scopeViolationFiles` fails an
+    undeclared one, and SEVEN files: corrections were needed this week.
+    THE DECLARED SUITES SHOULD BE RE-COUNTED BY INVOCATION before they are trusted — `test/ops.test.ts`
+    for the poller's own shape and `test/daemon.test.ts` for a hook, which at 3e370e35 runs 92 tests
+    whole and is one of the three known whole-suite flakes.
+    NO NUMBER HERE SHOULD BE QUOTED FORWARD: the 2 `ops.alerts_polled` rows, the zero `alert-fix.*`
+    rows and the 1,897 `sweep.pass` control were true at 2026-08-13T20:00Z on the MINI, whose daemon
+    is PAUSED. THE AZURE FLEET IS UNMEASURED FROM HERE and may have polled more often; re-derive on
+    the host that will run the cadence before sizing anything."
