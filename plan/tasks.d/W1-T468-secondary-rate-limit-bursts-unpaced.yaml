@@ -1,0 +1,148 @@
+- id: W1-T468
+  title: "the daemon tick fires a REST burst that trips GitHub's SECONDARY rate limit while both quota buckets sit comfortable, and nothing anywhere paces or backs off"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: "RE-DERIVED AT 00fd676. Every figure below was re-measured for this filing, and two of
+    the commissioning brief's hypotheses did not survive that re-measurement; the corrections are
+    carried here rather than the originals.
+
+    (1) IT IS NOT A QUOTA PROBLEM, RE-MEASURED. `gh api rate_limit` at filing time: core
+    4767/5000 remaining (233 used), graphql 3540/5000 remaining (1460 used).
+    BOTH BUCKETS COMFORTABLE — the secondary limit fires on request RATE, not on volume, so every
+    instrument this repo has pointed at the quota is pointed at the wrong number.
+
+    (2) THE BURSTING CALLER IS NAMED BY THE LEDGER, AND IT IS REST, NOT GRAPHQL. All 22 rate-limit
+    rows on the Azure host are `gh api` calls, and they fire THREE IN THE SAME SECOND, recurring at
+    ~63-second intervals — the daemon's own poll cadence. The three, per tick:
+      `board_gateway.fetch_failed`       — `gh api repos/<o>/<r>/pulls?...&page=` (`src/lib/status.ts`)
+      `board_gateway.issue_fetch_failed` — `gh api repos/<o>/<r>/issues?...--paginate` (`src/lib/status.ts`)
+      `sweep.error`                      — `gh api repos/<o>/<r>/pulls?state=open&per_page=100`
+                                            (`openPrsRestArgs`, `src/lib/open-prs-rest.ts`)
+    MEASURED SHAPE: 11 distinct seconds carrying rate-limit rows, max 3 per second. `--paginate` on
+    the issues call multiplies the request count further within a single logical read.
+    THE BRIEF'S GRAPHQL HYPOTHESIS IS NOT SUPPORTED BY THIS EVIDENCE, AND ALSO NOT REFUTED BY IT —
+    SAY BOTH. A matcher for `gh pr view`/`gh pr list`/`--json` over the rate-limit rows returned
+    zero, BUT ITS POSITIVE CONTROL ALSO RETURNED ZERO over the whole ledger, so that zero is
+    UNVALIDATED: the ledger simply carries no GraphQL command text anywhere. What is established is
+    that the observed failures are REST; whether GraphQL callers also trip it is UNOBSERVABLE from
+    this corpus and must be measured another way.
+
+    (3) THE MIGRATION THAT CREATED THE BURST SAID SO IN ITS OWN DOC, reasoning about the wrong axis.
+    `src/lib/open-prs-rest.ts` moved the sweep's enumeration off ONE GraphQL call onto REST, and
+    states the trade verbatim: `GraphQL answered the whole question in ONE request; REST needs
+    1 + 2N (the list, then check-runs + combined-status per PR head)` — `7-21 core requests per sweep
+    pass ... affordable at a 1-minute poll, and spent from the budget that was NEVER the one
+    exhausted`. THAT REASONING IS ABOUT VOLUME AND ABOUT WHICH BUCKET. It is correct on both counts
+    and still produced this defect, because it never considered the RATE at which those 7-21 requests
+    are emitted — back to back, within one tick. THIS IS NOT AN ARGUMENT TO REVERT IT: the GraphQL
+    exhaustion it fixed was worse (22 consecutive minutes of a totally blind sweep).
+
+    (4) THE CLASSIFIER IS NOT THE GAP, WHICH CORRECTS THE BRIEF'S STATED CRUX. `classifyGhFailure`
+    (`src/lib/status.ts`) ALREADY distinguishes a rate limit from a transport error from an unknown:
+    it tests `/rate limit|quota|secondary rate limit/i` against stderr and returns `rate_limit`. So a
+    403 arriving through `gh` is NOT currently read as `no data` at the classifier. THE SEVEN-INSTANCE
+    LAW STILL FIRED TODAY, but one layer out and in a caller that never reaches this classifier: a
+    session's raw `curl` of a PR body received 537 bytes of rate-limit JSON and `check-acceptance`
+    read it as `DEFECTIVE: no Acceptance header`. The defect is therefore NOT `teach the classifier
+    about 403` — it is that NOTHING CONSUMES the classification, and that unclassified raw fetches
+    exist beside it.
+
+    (5) NOTHING BACKS OFF, AND THAT IS MEASURED, NOT INFERRED. `retry-after` appears ZERO times
+    anywhere under `src/` (positive control: `rate limit` appears 17 times over the same tool, flags
+    and scope, so the query works). The only backoff in the tree is
+    `DEFAULT_MAX_SPAWN_INFRA_BACKOFF_MS` (`src/lib/daemon.ts`), which governs consecutive SPAWN-INFRA
+    failures and never sees a gh call.
+
+    (6) THE ONE INSTRUMENT AIMED AT THIS CANNOT FIRE ON IT. W1-T372's quota reader runs every tick and
+    its own comment says: `THIS IS OBSERVE-AND-SURFACE ONLY ... no continue is taken here and dispatch
+    is never paused on a bucket's account`. It latches on `reading.remaining > 0` — i.e. on
+    EXHAUSTION. With both buckets comfortable (see (1)) that latch is unreachable in this failure
+    mode. The fleet is watching the tank while the defect is the throttle.
+
+    (7) #1721's TIMEOUT IS IRRELEVANT HERE, CONFIRMED FROM SOURCE BECAUSE THE TWO LOOK ADJACENT.
+    `GH_CALL_TIMEOUT_MS` (`src/lib/status.ts`, 60_000) is passed as `execFileSync`'s `timeout` and
+    bounds a HUNG call; a killed child surfaces as Node `code: ETIMEDOUT`, which `classifyGhFailure`
+    routes to `transport`. A 403 RETURNS INSTANTLY WITH STDERR and takes the `rate_limit` branch
+    instead. They are different arms of the same function and neither covers the other."
+  design: "(i) ESTABLISH WHETHER THE ANSWER IS PACING OR RETRY, AND PREFER PACING ON GITHUB'S OWN
+    GUIDANCE. GitHub documents the secondary limit as a signal to SLOW DOWN, not to try again: a
+    naive retry loop makes it worse, and this repo has the proof — a session tripped the limit
+    precisely BY polling rapidly, then tripped it again retrying. THE MEASURED SHAPE POINTS THE SAME
+    WAY: three requests in one second, every ~63 seconds. That is a burst inside a tick, not a
+    sustained overrun, so spacing the requests WITHIN a tick is the intervention that matches the
+    evidence. Establish before building: what `retry-after` and `x-ratelimit-*` actually arrive on
+    these responses, and whether `gh` surfaces response headers at all — if it does not, that
+    constrains the design to call-site pacing and the shard should say so rather than assume a header
+    is reachable.
+    (ii) THE CANDIDATE SITES ARE THREE AND THEY SHARE A TICK. `src/lib/status.ts`'s board-gateway
+    index issues two paginated reads; `openPrsRestArgs` plus its 1 + 2N per-PR fan-out issues the
+    rest. Whatever is built should pace the TICK, not each call site independently — three
+    independently-polite callers still collide if they all fire at second zero. DO NOT ADD BACKOFF
+    EVERYWHERE: the measurement in (2) names these three, and a fourth site should be added only on
+    its own evidence.
+    (iii) A CLASSIFIED FAILURE MUST CHANGE BEHAVIOUR, NOT JUST THE LEDGER. `classifyGhFailure`
+    already returns `rate_limit` (rationale (4)); nothing acts on it. The smallest honest change is
+    that a `rate_limit` classification makes the NEXT tick slower rather than the current one louder.
+    Establish what the sweep does today on a fetch failure — whether it degrades to a partial view or
+    goes blind — because that determines whether pacing alone is sufficient or whether the caller
+    also needs a degraded mode.
+    (iv) THE UNCLASSIFIED RAW FETCHES ARE PART OF THIS OR THEY ARE NOT — DECIDE EXPLICITLY. The
+    session-side `curl` that produced `DEFECTIVE: no Acceptance header` never touches
+    `classifyGhFailure`. If the scope is `the fleet paces itself`, that path is out of scope and the
+    shard should say so; if the scope is `a 403 never reads as absence anywhere`, it is in. It cannot
+    be left ambiguous, because the two produce different `files:` lists.
+    (v) THE CONSEQUENCE, NAMED BUT NOT SCOPED IN. When the W1-T455 worker took two 403s mid-run, the
+    orchestrator fallback pushed its branch, so PR #1747 carries no `Remudero-Task:` trailer and
+    CANNOT ARM — the same outcome as #1722, and confirmed at filing time (#1747 is open on head
+    `run-W1-T455-1786649835883` with no trailer). That unarmability is W1-T453's concern, not this
+    one: `buildOpenPrViews` resolves `taskIdFromBody` ONLY and never `headRefName`, so a
+    fallback-pushed PR is unarmable BY CONSTRUCTION. NOTE FOR WHOEVER PICKS W1-T453 UP: it has FAILED
+    TWICE, one run ending `no_pr` at 108 turns and $7.89 while waiting on a background job that never
+    notified it."
+  acceptance:
+    - claim: "the shard records that both quota buckets were comfortable when the secondary limit fired"
+      proof: "grep: BOTH BUCKETS COMFORTABLE in plan/tasks.d/W1-T468-secondary-rate-limit-bursts-unpaced.yaml"
+    - claim: "the shard records that the gh failure classifier already names a rate limit, so the classifier is not the gap"
+      proof: "grep: THE CLASSIFIER IS NOT THE GAP in plan/tasks.d/W1-T468-secondary-rate-limit-bursts-unpaced.yaml"
+    - claim: "the shard records that the adjacent timeout defect cannot apply to a 403 that returns instantly"
+      proof: "grep: RETURNS INSTANTLY WITH STDERR in plan/tasks.d/W1-T468-secondary-rate-limit-bursts-unpaced.yaml"
+  origin: recon#secondary-rate-limit-unpaced-2026-08-13
+  plan_refs: []
+  files: [src/lib/status.ts, src/lib/open-prs-rest.ts, src/run-task.ts, test/open-prs-rest.test.ts, test/status.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT. `sizingViolation` (`src/lib/task-linter.ts`) blocks at
+    `>=2 subsystems while risk<high`, and `files:` spans `src/lib/`, `src/` and `test/`. The band is
+    Rule 19's SPAN, not blast radius.
+    `files:` WAS DERIVED BY INVOCATION COUNT, NOT PROSE MENTION, which is the distinction this repo
+    keeps getting wrong. Measured at 00fd676 by counting `<symbol>(` in `test/`:
+    `openPrsRestArgs` is invoked 2x, in `test/open-prs-rest.test.ts` ONLY. `classifyGhFailure` is
+    invoked 9x in `test/gh-call-timeout.test.ts`, 7x in `test/status.test.ts`, 2x in
+    `test/already-satisfied-unverifiable.test.ts` and 1x in `test/trailer-multi-hit-preference.test.ts`.
+    `readGhQuota` is invoked ZERO times in `test/`. Only the two suites that assert the shapes most
+    likely to move are declared; `test/gh-call-timeout.test.ts` is DELIBERATELY NOT declared because
+    the design in (i)-(iii) paces CALL SITES and does not change `classifyGhFailure` itself — ADD IT
+    the moment the implementation touches that function, and DROP any declared path the
+    implementation leaves untouched (`inverseScopeUntouchedFiles` fails a declared-but-untouched path
+    just as `scopeViolationFiles` fails an undeclared one).
+    `plan_refs` IS DELIBERATELY EMPTY AND THE NEAR NEIGHBOUR IS NAMED HERE INSTEAD. W1-T372 owns
+    QUOTA EXHAUSTION — the VOLUME signal, latched on `remaining === 0`. This is the RATE signal, and
+    it fires with both buckets comfortable, so W1-T372's instrument cannot observe it and citing it as
+    a dependency would misattribute a new defect to a task whose own scope excludes it by
+    construction.
+    THREE `proof-scope` WARNINGS ARE EXPECTED AND DELIBERATE. The proofs are `grep:` patterns against
+    this shard rather than forward-referencing `unit test:` paths, because a forward reference cannot
+    EXECUTE on the FILING PR and would cap its review at `proof_exec: 0/3`. `proofScopeViolations`
+    (`src/lib/task-linter.ts`) defaults to `warn` and no caller overrides it, so they never block. The
+    other remedy is worse and was measured on W1-T464: adding this shard's path to `files:` beside the
+    src/test paths converts the three warnings into a `rule15-filing` BLOCK.
+    THIS SHARD DOES NOT SCOPE IN THE MISSING TRAILER (design (v)) — that is W1-T453's.
+    EXPECT `coverage-ratchet` RED ON THIS PR AND DO NOT CHASE IT. Main is currently below its own
+    branch floor: #1739 merged 0.22pts under the baseline and became main's tip, so EVERY PR
+    including plan-only ones inherits the failure. W1-T466 (open at filing time, PR #1749) owns that;
+    it is not this task's to fix and a plan-only YAML diff cannot move branch coverage."
