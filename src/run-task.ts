@@ -1261,12 +1261,20 @@ export function withdrawArmIfVerdictRefuses(
  * ADDS `automerge.clean_status_direct_merge` alongside it, naming the completion itself
  * rather than folding it into the generic armed line.
  */
+/**
+ * WHICH CALL SITE ARMED. A UNION rather than a bare `string`, deliberately: the entire value of
+ * this attribution is that a sweep-armed merge and a hand-armed merge are TOLD APART on the
+ * ledger, and a mistyped `"sweeep"` would produce a confidently wrong answer that no gate here
+ * catches. Three lanes exist and the compiler now knows all three.
+ */
+export type ArmLane = "review" | "operator" | "sweep";
+
 function logArmAttribution(
   log: (step: string, extra?: Record<string, unknown>) => void,
   outcome: ArmOutcome,
   prUrl: string,
   taskId: string | undefined,
-  lane: string,
+  lane: ArmLane,
   extra: Record<string, unknown> = {},
 ): void {
   const prNumber = prNumberFromRef(prUrl);
@@ -1400,7 +1408,7 @@ export function armAndLogOutcome(
   taskId: string | undefined,
   log: (step: string, extra?: Record<string, unknown>) => void,
   arm: (prUrl: string, taskId: string | undefined) => ArmOutcome = armAutoMerge,
-  lane: string = "operator",
+  lane: ArmLane = "operator",
 ): ArmOutcome {
   const outcome = arm(prUrl, taskId);
   logArmAttribution(log, outcome, prUrl, taskId, lane, { outcome });
