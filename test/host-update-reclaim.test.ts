@@ -359,7 +359,18 @@ function stateFixture(): { dead: string; live: string } {
   return { dead, live };
 }
 
-/** Run `--print-daemon-run` against `stateDir`, returning stdout+stderr and the exit code. */
+/**
+ * Run `--print-daemon-run` against `stateDir`, returning stdout+stderr and the exit code.
+ *
+ * THE CREDENTIAL DIR IS PINNED TOO, and that is not incidental to a volume test. These cases
+ * assert on the VOLUME check, and one of them asserts NO WARNING OF ANY KIND — so an unpinned
+ * `RMD_CLAUDE_DIR` lets the credential check this same PR adds decide the result from whatever the
+ * HOST happens to have in `~/.claude`. MEASURED: green on the operator's mini, which has a real
+ * credential, and RED on a GitHub runner, where `/home/runner/.claude/.credentials.json` does not
+ * exist and the new warning fires. Same shape as #1642 — a fixture asserting on the ambient `$HOME`
+ * — so the fixture owns the condition instead of borrowing it, and the volume tests measure the
+ * volume check alone.
+ */
 function printWithState(stateDir: string, scriptPath = SCRIPT): { out: string; status: number } {
   // STREAMS MERGED BY THE SHELL (2>&1), not concatenated afterwards: the warning goes to stderr
   // and the document to stdout, so joining the two buffers would put stdout first regardless and
@@ -368,7 +379,7 @@ function printWithState(stateDir: string, scriptPath = SCRIPT): { out: string; s
   const r = spawnSync("bash", ["-c", '"$0" --print-daemon-run 2>&1', scriptPath], {
     encoding: "utf8",
     cwd: REPO_ROOT,
-    env: { ...process.env, RMD_STATE_DIR: stateDir },
+    env: { ...process.env, RMD_STATE_DIR: stateDir, RMD_CLAUDE_DIR: credFixture(60 * 60 * 1000) },
   });
   return { out: r.stdout ?? "", status: r.status ?? -1 };
 }
