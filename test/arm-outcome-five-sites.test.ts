@@ -77,8 +77,11 @@ test("armAndLogOutcome ledgers automerge.armed only when the outcome actually ar
 
     assert.equal(got, outcome);
     assert.deepEqual(
+      // W1-T449: a `direct-merged` outcome is a COMPLETION, not an arm. `armOutcomeArmed` counts it
+      // as armed (correctly — it succeeded), so it still writes `automerge.armed`, but it now ALSO
+      // writes its own step. Folding a merge into "armed" is the conflation that step exists to end.
       r.steps.map((s) => s.step),
-      ["automerge.armed"],
+      outcome === "direct-merged" ? ["automerge.armed", "automerge.clean_status_direct_merge"] : ["automerge.armed"],
       `${outcome}: this did NOT turn every lane into a reporter of failure — a real arm still reads as one`,
     );
     assert.equal(r.steps[0].extra?.outcome, outcome);
@@ -133,7 +136,7 @@ test("SITE approve reads the arm outcome rather than discarding it", () => {
 test("SITE sweep adapter returns the arm outcome so the sweep can read it at all", () => {
   assert.match(
     SRC,
-    /arm: \(pr\) => armAutoMerge\(pr\.prUrl, pr\.taskId\),/,
+    /arm: \(pr\) => arm(?:AutoMerge|AndLogOutcome)\(pr\.prUrl, pr\.taskId[^)]*\),/,
     "the adapter RETURNS the outcome — as a braced body it resolved to undefined, which armOutcomeArmed treats as armed, so the sweep's own check could never fire",
   );
   assert.equal(

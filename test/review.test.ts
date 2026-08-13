@@ -2253,7 +2253,15 @@ test("W1-T229 acceptance criterion 2: the plan-only-PR-emitting flows (retro/tri
     laneArmSites >= 6,
     "expected the plan-only-PR-emitting lanes (retro/triage/plan/approve/dep-review) to arm via armAndLogOutcome, plus its definition",
   );
-  assert.match(runTaskSrc, /arm: \(pr\) => armAutoMerge\(/, "the sweep arm effect still calls armAutoMerge directly");
+  // W1-T449 routed the sweep through the SAME `armAndLogOutcome` wrapper the five plan lanes
+  // already use, so it is ledgered with its lane. That does not weaken this invariant — the
+  // wrapper is the shape this test already blesses above, and the assertion immediately below
+  // is what actually holds the line by proving the wrapper contains no arm-decision gate.
+  assert.match(
+    runTaskSrc,
+    /arm: \(pr\) => arm(?:AutoMerge|AndLogOutcome)\(/,
+    "the sweep arm effect still arms UNCONDITIONALLY — directly, or through the reporting wrapper, but never behind the raised floor",
+  );
 
   const wrapper = runTaskSrc.slice(runTaskSrc.indexOf("export function armAndLogOutcome("));
   const wrapperBody = wrapper.slice(0, wrapper.indexOf("\n}\n") + 3);

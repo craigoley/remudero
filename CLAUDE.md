@@ -39,10 +39,18 @@ forensic detail, so the narrative does not need to live here.
   (`git show <sha> -- src/… > /tmp/x.diff`). If that blocks too, your lcov under-reports and a
   local block means "investigate", not "stop". *(#981; #973/#975 both blocked locally yet merged green)*
 - **Verify every PR-body claim about your own diff against `git diff --numstat`, and RE-VERIFY after
-  each follow-up commit.** The `remudero-review` keyword floor matches the BODY and never opens the
-  diff, so a body contradicting its own changeset still merges on a `success` status. #974 merged
-  claiming "exactly one file: MASTER-PLAN.md" while carrying three, including `docs/ORIENTATION.md`
-  — which sits outside `isInPlanScope` and cost the PR its `planOnly` carve-out. *(#974, #984)*
+  each follow-up commit.** `bodyContradictsDiff` (`src/lib/review.ts`, W1-T274) OPENS THE DIFF and
+  FAILS the PR — MEASURED 2026-08-12: #1685 refused with *"body contradicts its own diff: claimed
+  'exactly one file'"*, over the same three files #974 carried. #974 merged (PRE-W1-T274, which is the
+  only reason it merged at all) claiming *"exactly one file: MASTER-PLAN.md. No src/, no test/, no
+  docs/ORIENTATION.md"* while carrying `MASTER-PLAN.md` + `docs/ORIENTATION.md` + `plan/plan-index.json`
+  — and what was load-bearing is that THE BODY NAMED THE VERY FILE THE DIFF TOUCHED. The detector's own
+  doc says it in terms: *"NOT because of plan scope"* — **#974 KEPT its `planOnly` carve-out.**
+  **NEVER ASSERT SCOPE MEMBERSHIP FROM MEMORY; RUN THE PREDICATE** —
+  `isInPlanScope("docs/ORIENTATION.md")` returns **TRUE** (run, not read), and any claim about it goes
+  stale the moment `plan-architect.ts` moves. This bullet asserted the opposite until 2026-08-12, and a
+  session repairing a false body claim FOLLOWED IT AND WROTE A FRESH ONE — the same defect the bullet
+  exists to prevent, caused by the bullet. *(#974, #984, #1685)*
 - **A test run with no `# tests` summary line is NOT A RESULT — check for the summary, never the
   failure count.** A killed or timed-out run prints every assertion it reached and no totals, so its
   failure set is a SUBSET BY CONSTRUCTION and reads as "fewer failures on this side". One session
