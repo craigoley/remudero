@@ -77,6 +77,23 @@ export type ReviewState = "success" | "failure";
  *                     point of a forward-referencing test) or that fails
  *                     there is the OPPOSITE of this: it discriminates and
  *                     stays `executed_pass`, per W1-T362.
+ *   base_unreadable — (W1-T460) the proof passed on the head, a base tree
+ *                     DOES exist, but THIS proof's base blob could not be
+ *                     read, so the staleness question was never actually
+ *                     asked for it. Before W1-T460 the unread blob simply
+ *                     produced an empty base file, the base grep found
+ *                     nothing, and that silence was scored `discriminates`
+ *                     ⇒ `executed_pass` — a read that FAILED reported as a
+ *                     read that said NO, with the failure direction toward
+ *                     CREDIT. Degrades to the keyword floor verbatim, like
+ *                     `executed_stale`/`exec_error`, under its own name
+ *                     because the cause is neither an authoring gap nor a
+ *                     head-side hiccup. DISTINCT FROM the whole-base gap
+ *                     (`base_unknown`, which keeps `executed_pass`): there,
+ *                     no base tree exists and no proof could be checked;
+ *                     here the tree exists and SIBLING proofs were genuinely
+ *                     checked against it, so exempting this one is a
+ *                     per-proof gap wearing a global gap's clothes.
  */
 /**
  * WHY a criterion produced no executed outcome. Diagnostic only — it never affects `met`, `state`,
@@ -112,7 +129,8 @@ export type ProofExecOutcome =
   | "executed_fail"
   | "not_executable"
   | "exec_error"
-  | "executed_stale";
+  | "executed_stale"
+  | "base_unreadable";
 
 /** One criterion's verdict against its stated proof. */
 export interface CriterionVerdict {
@@ -184,6 +202,16 @@ export interface ReviewEvidence {
    * before this task — byte-identical to every caller/fixture that predates it.
    */
   baseCheckoutDir?: string;
+  /**
+   * (W1-T460) The repo-relative paths whose base blob could NOT be read while `baseCheckoutDir`
+   * was built — a GENUINE read failure (ENOBUFS on an oversized blob, a write that failed), never
+   * the ordinary "absent at the base" forward reference, which is the healthy case and stays
+   * silently carved out. Distinct from `baseCheckoutDir` being absent altogether: that is a GLOBAL
+   * gap where no proof could be checked, whereas each path here names a proof that was exempted
+   * while its SIBLINGS were genuinely checked against the very same base tree. Absent/empty ⇒
+   * byte-identical to pre-W1-T460 behaviour.
+   */
+  baseUnreadablePaths?: ReadonlySet<string>;
   /**
    * Injected proof executor. Real callers omit this — {@link execWhitelistedProof}
    * (the real, whitelist-bounded shell-out) is the default. Tests inject a fake so
@@ -1686,6 +1714,12 @@ export interface ProofExecContext {
    * non-discrimination. Absent ⇒ {@link preexistingProofHits} always reports
    * `false` and every grep proof that passes on `cwd` stays `executed_pass`. */
   baseCwd?: string;
+  /** (W1-T460) mirrors {@link ReviewEvidence.baseUnreadablePaths} — the repo-relative paths whose
+   * base blob could NOT be read while `baseCwd` was built. A proof naming one of these was never
+   * actually checked against the base, however healthy `baseCwd` itself looks, so it is graded
+   * `base_unreadable` rather than credited with a discrimination nobody measured. Absent/empty ⇒
+   * byte-identical to pre-W1-T460 behaviour for every proof. */
+  baseUnreadablePaths?: ReadonlySet<string>;
 }
 
 /**
@@ -1745,34 +1779,99 @@ export interface ProofExecContext {
  * so `grep` reports no match and the proof is NOT flagged. "Did not exist before" and "already
  * matched before" are opposite conditions; only the second is the defect.
  *
- * Best-effort throughout: an unresolvable rev, an unreadable blob, or a write failure skips that one
- * path rather than throwing inside a review. A missing file degrades to "not stale", never to a
- * false positive.
+ * Best-effort throughout: an unresolvable rev or an absent path skips that one path rather than
+ * throwing inside a review. A missing file degrades to "not stale", never to a false positive.
+ *
+ * (W1-T460) ABSENCE AND A BROKEN READ ARE NO LONGER THE SAME EVENT. This catch used to swallow
+ * both — its own comment said so — and the three hops downstream turned that silence into credit:
+ * the blob is not written, the base grep over the missing file returns no-match,
+ * {@link classifyBaseProofOutcome} grades no-match as `"discriminates"`, and {@link judgeCriterion}
+ * scores anything-but-`"stale"` as `executed_pass`. So a proof whose base read FAILED was recorded
+ * as one PROVEN to discriminate. Absence keeps its carve-out (it is the healthy forward-reference
+ * case every filing PR depends on — see {@link baseBlobErrorIsAbsence} for how the two are told
+ * apart); a genuine read failure is now RETURNED, per path, so the proof it belongs to can be
+ * graded honestly instead of silently upgraded.
  */
 export function materialiseBaseProofBlobs(
   criteria: ReadonlyArray<{ proof?: string }>,
   baseRev: string,
   showBlob: (rev: string, repoRelPath: string) => string,
   writeBlob: (repoRelPath: string, contents: string) => void,
-): number {
+): { written: number; unreadable: string[] } {
   let written = 0;
+  const unreadable: string[] = [];
   const seen = new Set<string>();
   for (const c of criteria) {
     const parsed = c.proof ? parseWhitelistedProof(c.proof) : null;
-    if (!parsed || parsed.kind !== "grep") continue;
-    // The compiled argv is ["-arn", "--", <pattern>, <path>] — the path is the LAST element, taken
-    // from the compiler rather than re-parsed from the proof text, so the two can never disagree.
-    const repoRelPath = parsed.args[parsed.args.length - 1];
+    if (!parsed) continue;
+    const repoRelPath = grepProofTargetPath(parsed);
     if (!repoRelPath || seen.has(repoRelPath)) continue;
     seen.add(repoRelPath);
+
+    let contents: string;
     try {
-      writeBlob(repoRelPath, showBlob(baseRev, repoRelPath));
+      contents = showBlob(baseRev, repoRelPath);
+    } catch (e) {
+      // ABSENT AT BASE (forward reference) — the healthy case: leave it out, grep then finds
+      // nothing, and the proof correctly reads as discriminating.
+      if (baseBlobErrorIsAbsence(e)) continue;
+      // THE READ ITSELF BROKE. Nothing can be concluded about the base for this path.
+      unreadable.push(repoRelPath);
+      continue;
+    }
+    try {
+      writeBlob(repoRelPath, contents);
       written++;
     } catch {
-      /* absent at base (forward reference) or unreadable — leave it out; grep then finds nothing */
+      // The blob read fine but never reached the base tree, so the base grep would be just as
+      // uninformative as a failed read — same fact, same honest outcome.
+      unreadable.push(repoRelPath);
     }
   }
-  return written;
+  return { written, unreadable };
+}
+
+/**
+ * (W1-T460) The compiled argv for a `grep:` proof is `["-arn", "--", <pattern>, <path>]` — the path
+ * is the LAST element, taken from the COMPILER rather than re-parsed from the proof text, so the
+ * two can never disagree. Shared by {@link materialiseBaseProofBlobs} (which keys the unreadable
+ * set by it) and {@link classifyBaseProofOutcome} (which looks a proof up in that set), so a
+ * materialised blob and the proof it belongs to are matched BY CONSTRUCTION rather than by two
+ * hand-rolled extractions that could drift apart. `undefined` for any non-`grep:` proof: only
+ * `grep:` proofs ever get a base blob materialised for them.
+ */
+function grepProofTargetPath(whitelisted: WhitelistedProof): string | undefined {
+  if (whitelisted.kind !== "grep") return undefined;
+  return whitelisted.args[whitelisted.args.length - 1];
+}
+
+/**
+ * (W1-T460) Did `git show <rev>:<path>` fail because the path is NOT IN THAT REV, or because the
+ * read itself broke? MEASURED against the installed git (and locked by
+ * test/base-blob-read-failure.test.ts Group 0, so a git upgrade that moves these shapes turns red
+ * rather than silently reverting to "swallow everything"):
+ *
+ *   path absent at the rev  →  `code` undefined, `status` **128**  (git ran and answered "not there")
+ *   maxBuffer overflow      →  `code` **"ENOBUFS"**, `status` null (the read never completed)
+ *
+ * `status === 128` with NO Node `code` is therefore git's own answer and the only shape treated as
+ * absence. Git emits two different absence MESSAGES — `does not exist in '<rev>'` when the path is
+ * absent from the worktree too, `exists on disk, but not in '<rev>'` when the branch created it —
+ * but BOTH carry `status: 128`, so the distinction is cosmetic and this predicate deliberately
+ * never reads the message text.
+ *
+ * FAILS CLOSED, and that direction is deliberate: anything unrecognised (a bare `Error`, a spawn
+ * failure, a fake in a test) is a READ FAILURE, not absence. Mis-classifying a broken read as
+ * absence re-creates the exact defect this task fixes — silent credit — while mis-classifying
+ * absence as a broken read only withdraws a proof's positive override and falls back to the
+ * keyword floor.
+ */
+export function baseBlobErrorIsAbsence(e: unknown): boolean {
+  if (typeof e !== "object" || e === null) return false;
+  const err = e as { status?: unknown; code?: unknown };
+  // A Node error code always wins: `spawnSync` sets it only when the spawn/read itself failed.
+  if (err.code !== undefined) return false;
+  return err.status === 128;
 }
 
 /**
@@ -1785,6 +1884,18 @@ export function materialiseBaseProofBlobs(
  *                      `unit test:` proof's base tree that cannot even run `node --test`, …) — an
  *                      environment gap, never evidence either way; `executed_pass` stands, exactly
  *                      like `exec_error` degrades elsewhere in this module.
+ *   "base_unreadable" — (W1-T460) a base tree EXISTS, but THIS proof's base blob never reached it
+ *                      because {@link materialiseBaseProofBlobs} could not read it. The base run is
+ *                      not even attempted: a grep over a blob that was never written answers "no
+ *                      match" for a reason that has nothing to do with the PR, and grading that
+ *                      silence `"discriminates"` is precisely the defect W1-T460 fixes.
+ *
+ * WHY THIS IS NOT `base_unknown`, THE CRUX OF W1-T460: `base_unknown` is a GLOBAL gap — no base
+ * tree, so no proof in the review could be checked and letting `executed_pass` stand costs nothing
+ * that was ever available. `base_unreadable` is a PER-PROOF gap: the tree is right there, sibling
+ * proofs were genuinely discriminated against it, and only this one was exempted. Same shape, very
+ * different facts, so they must not report as the same value.
+ *
  * A SINGLE execution against `baseCwd` answers both "is it stale" and "why not, if not" — a second
  * base run would double this check's own cost on top of the base-run cost W1-T273 already pays.
  */
@@ -1792,7 +1903,10 @@ function classifyBaseProofOutcome(
   whitelisted: WhitelistedProof,
   exec: ProofExecutor,
   baseCwd: string,
-): "stale" | "discriminates" | "base_unknown" {
+  baseUnreadablePaths?: ReadonlySet<string>,
+): "stale" | "discriminates" | "base_unknown" | "base_unreadable" {
+  const target = grepProofTargetPath(whitelisted);
+  if (target !== undefined && baseUnreadablePaths?.has(target)) return "base_unreadable";
   try {
     return exec(whitelisted, baseCwd) === "pass" ? "stale" : "discriminates";
   } catch {
@@ -1804,9 +1918,13 @@ export function preexistingProofHits(
   whitelisted: WhitelistedProof,
   exec: ProofExecutor,
   baseCwd: string | undefined,
+  baseUnreadablePaths?: ReadonlySet<string>,
 ): boolean {
   if (baseCwd === undefined) return false;
-  return classifyBaseProofOutcome(whitelisted, exec, baseCwd) === "stale";
+  // Only `"stale"` is a hit, so an unreadable base blob answers `false` here exactly like every
+  // other non-stale outcome — this guard never manufactures a false positive (W1-T460 changes
+  // WHICH outcome is reported, never this function's never-a-false-positive contract).
+  return classifyBaseProofOutcome(whitelisted, exec, baseCwd, baseUnreadablePaths) === "stale";
 }
 
 /** Verdict one criterion against its proof, given the report + optional semantic. */
@@ -1891,8 +2009,22 @@ export function judgeCriterion(
           // whitelisted check against the PR's merge-base — one execution answers
           // both "is this stale" and, if not, why not (see classifyBaseProofOutcome).
           const baseOutcome =
-            execCtx.baseCwd !== undefined ? classifyBaseProofOutcome(whitelisted, exec, execCtx.baseCwd) : undefined;
-          if (baseOutcome === "stale") {
+            execCtx.baseCwd !== undefined
+              ? classifyBaseProofOutcome(whitelisted, exec, execCtx.baseCwd, execCtx.baseUnreadablePaths)
+              : undefined;
+          if (baseOutcome === "base_unreadable") {
+            // W1-T460: the base tree exists and sibling proofs were checked against it, but THIS
+            // proof's base blob never arrived — so its head-side pass proves nothing about
+            // discrimination. Withdraw the positive override and fall back to the keyword floor
+            // verbatim (`met`/`reason` as computed above), exactly like `executed_stale` degrades.
+            // NOT a failure: we did not learn the proof is bad, we learned we never asked.
+            proofExec = "base_unreadable";
+            reason =
+              `${reason} — NOTE: proof PASSED on the PR head ` +
+              `(${whitelisted.kind}: ${whitelisted.label}) but its base blob could not be read, so the ` +
+              `merge-base staleness check never ran for THIS proof (the base tree itself exists and ` +
+              `other proofs were checked against it); positive override withdrawn, keyword floor applied`;
+          } else if (baseOutcome === "stale") {
             // The SAME check also matches/passes on the PR's MERGE-BASE — it
             // would have exited 0 before this task's work ever landed, so
             // its exit-0 here discriminates nothing. See
@@ -2050,7 +2182,9 @@ export interface MergedClaimAuditReport {
  *  checkout — {@link preexistingProofHits}'s own doc says it always returns `false`,
  *  never stale, when `baseCwd` is absent). That makes `"executed_stale"` structurally
  *  unreachable through THIS caller, so it is intentionally folded into the same
- *  generic `default` wording below rather than carrying a dedicated, untestable case. */
+ *  generic `default` wording below rather than carrying a dedicated, untestable case.
+ *  `"base_unreadable"` (W1-T460) is unreachable here for the SAME reason and folded the same
+ *  way: it is only ever assigned alongside a `baseCwd`, which this caller never supplies. */
 function describeUnresolvedOrFailing(proofExec: ProofExecOutcome, proofSkip: ProofSkipReason | undefined): string {
   switch (proofExec) {
     case "executed_fail":
@@ -2785,7 +2919,12 @@ export function judgeReview(
   // not_executable and the keyword floor is byte-identical to pre-W1-T65 —
   // exactly what every fixture/caller that predates this task still gets.
   const execCtx: ProofExecContext | undefined = evidence.headCheckoutDir
-    ? { cwd: evidence.headCheckoutDir, exec: evidence.execProof, baseCwd: evidence.baseCheckoutDir }
+    ? {
+        cwd: evidence.headCheckoutDir,
+        exec: evidence.execProof,
+        baseCwd: evidence.baseCheckoutDir,
+        baseUnreadablePaths: evidence.baseUnreadablePaths,
+      }
     : undefined;
   const verdicts = criteria.map((c, i) =>
     judgeCriterion(c, reportTokens, evidence.semantic?.[i], execCtx),

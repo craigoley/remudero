@@ -3034,3 +3034,49 @@ test("W1-T362: grep proofs are UNCHANGED — the executed_pass reason carries no
   assert.equal(v.proof_exec, "executed_pass");
   assert.equal(v.reason, `proof executed and PASSED on the PR head (grep: wx flag present in src/lib/config.ts)`);
 });
+
+// W1-T460 added a FOURTH base outcome (`base_unreadable`) and a fourth parameter carrying the
+// paths whose base blob could not be read. The claim it rests on is that the addition is PURELY
+// ADDITIVE — every W1-T362 outcome above is reached identically when no such path is supplied.
+// That claim is asserted HERE, beside the three tests it is about, rather than only in W1-T460's
+// own suite: this is where a reader goes to learn what the base outcomes mean, and it is these
+// tests that would have to change if the addition were not additive.
+
+test("W1-T460: the base-unreadable parameter is PURELY ADDITIVE — every W1-T362 outcome is unchanged when it is absent or empty", () => {
+  const criterion = { claim: "the widget is frobnicated", proof: "grep: frobnicate in src/widget.ts" };
+  // Each case is run twice: once with the parameter absent (every pre-W1-T460 caller), once with
+  // an EMPTY set (the production shape when nothing failed to read). Both must match W1-T362.
+  for (const ctx of [{}, { baseUnreadablePaths: new Set<string>() }]) {
+    const stale = judgeCriterion(criterion, new Set(), undefined, { cwd: "/tmp/head", baseCwd: BASE_DIR, exec: () => "pass", ...ctx });
+    assert.equal(stale.proof_exec, "executed_stale", "pass at base ⇒ stale, exactly as W1-T362 left it");
+
+    const discriminates = judgeCriterion(criterion, new Set(), undefined, {
+      cwd: "/tmp/head",
+      baseCwd: BASE_DIR,
+      exec: (_wp, cwd) => (cwd === BASE_DIR ? "no-match" : "pass"),
+      ...ctx,
+    });
+    assert.equal(discriminates.proof_exec, "executed_pass", "absent at base ⇒ discriminates");
+
+    const unknown = judgeCriterion(criterion, new Set(), undefined, {
+      cwd: "/tmp/head",
+      baseCwd: BASE_DIR,
+      exec: (_wp, cwd) => {
+        if (cwd === BASE_DIR) throw new Error("base checkout unusable");
+        return "pass";
+      },
+      ...ctx,
+    });
+    assert.equal(unknown.proof_exec, "executed_pass", "a thrown base run is still base_unknown ⇒ executed_pass");
+  }
+});
+
+test("W1-T460: preexistingProofHits' new fourth argument defaults safely — omitting it is the pre-task call", () => {
+  const wp = parseWhitelistedProof("grep: frobnicate in src/widget.ts")!;
+  // The three-argument call every pre-W1-T460 caller makes still answers exactly as it did.
+  assert.equal(preexistingProofHits(wp, () => "pass", BASE_DIR), true);
+  assert.equal(preexistingProofHits(wp, () => "no-match", BASE_DIR), false);
+  // An unreadable path is NOT a hit — the guard's never-a-false-positive contract is preserved,
+  // and the honest outcome is carried by `proof_exec`, not by turning this into a true.
+  assert.equal(preexistingProofHits(wp, () => "pass", BASE_DIR, new Set(["src/widget.ts"])), false);
+});

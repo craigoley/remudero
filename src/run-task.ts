@@ -2045,6 +2045,8 @@ async function runReview(args: {
   headCheckoutDir?: string;
   /** impl-GE: merge-base blobs for the staleness check — see buildBaseProofDir. */
   baseCheckoutDir?: string;
+  /** W1-T460: the paths whose base blob could not be READ — see buildBaseProofDir. */
+  baseUnreadablePaths?: ReadonlySet<string>;
   /**
    * W1-T233: the NAMED reason `headCheckoutDir` is absent because a worktree
    * materialization attempt failed (rather than simply never having been
@@ -2186,6 +2188,7 @@ async function runReview(args: {
     semantic,
     headCheckoutDir: args.headCheckoutDir,
     baseCheckoutDir: args.baseCheckoutDir,
+    baseUnreadablePaths: args.baseUnreadablePaths,
     // W1-T322: advisory-only inputs — see ReviewEvidence's own doc for both fields.
     taskDeclaredFiles: task.files,
     openTaskIds: args.openTaskIds,
@@ -6259,13 +6262,21 @@ export function resolveReviewTarget(
 
 /**
  * Build the BASE-revision directory {@link preexistingProofHits} needs, containing only the blobs
- * this review's `grep:` proofs name. Returns the directory, or `undefined` when there is nothing to
- * put in it (no grep proof, or no resolvable merge-base) — in which case the staleness check stays
- * inert exactly as it was, which is the pre-impl-GE behaviour.
+ * this review's `grep:` proofs name. Returns `dir: undefined` when there is nothing to put in it
+ * (no grep proof, or no resolvable merge-base) — in which case the staleness check stays inert
+ * exactly as it was, which is the pre-impl-GE behaviour.
  *
  * THE MERGE-BASE, not `origin/main`: "already matched before this work existed" is a question about
  * the commit the branch forked from, and a proof legitimately added by a PR merged in between must
  * not count against this one.
+ *
+ * (W1-T460) RETURNS TWO FACTS, NOT ONE, NAMED AS THE EVIDENCE FIELDS THEY BECOME so the call site
+ * can spread them in one line. `baseUnreadablePaths` names the paths whose base blob GENUINELY
+ * failed to read (never the ordinary absent-at-base forward reference, which stays carved out).
+ * That set is a PER-PROOF fact and cannot be folded into `baseCheckoutDir === undefined`, which is
+ * the GLOBAL "no base at all" fact: a mixed review where one blob reads and another fails still
+ * produces a perfectly good dir, and collapsing the two would either exempt every proof in the
+ * review or silently credit the one that was never checked — the defect W1-T460 fixes.
  */
 export function buildBaseProofDir(
   criteria: ReadonlyArray<{ proof?: string }>,
@@ -6275,27 +6286,42 @@ export function buildBaseProofDir(
     showBlob?: (cwd: string, rev: string, repoRelPath: string) => string;
     makeDir?: () => string;
   } = {},
-): string | undefined {
+): { baseCheckoutDir: string | undefined; baseUnreadablePaths: ReadonlySet<string> } {
   const mergeBase =
     deps.mergeBase ??
     ((cwd: string) =>
-      execFileSync("git", ["-C", cwd, "merge-base", "origin/main", "HEAD"], { encoding: "utf8" }).trim());
+      execFileSync("git", ["-C", cwd, "merge-base", "origin/main", "HEAD"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      }).trim());
   const showBlob =
     deps.showBlob ??
     ((cwd: string, rev: string, rel: string) =>
-      execFileSync("git", ["-C", cwd, "show", `${rev}:${rel}`], { encoding: "utf8", maxBuffer: 1 << 26 }));
+      // W1-T460: `stdio` PIPES git's stderr instead of letting it inherit the reviewer's. Without
+      // it, the routine absent-at-base read (every filing PR has one) printed `fatal: path … does
+      // not exist in …` straight through a PASSING review — it surfaced on #1732/#1734/#1735/#1736
+      // and reads as breakage. Piping does not change what the caller can tell apart: the
+      // absence-vs-read-failure classification `baseBlobErrorIsAbsence` keys on (`status: 128` vs a
+      // Node `code`) was MEASURED with stderr already piped, and is locked by
+      // test/base-blob-read-failure.test.ts Group 0.
+      execFileSync("git", ["-C", cwd, "show", `${rev}:${rel}`], {
+        encoding: "utf8",
+        maxBuffer: 1 << 26,
+        stdio: ["ignore", "pipe", "pipe"],
+      }));
   const makeDir = deps.makeDir ?? (() => mkdtempSync(join(tmpdir(), "rmd-proof-base-")));
 
+  const noBase = { baseCheckoutDir: undefined, baseUnreadablePaths: new Set<string>() };
   let base: string;
   try {
     base = mergeBase(headCheckoutDir);
   } catch {
-    return undefined; // unresolvable base ⇒ no staleness signal, never a false positive
+    return noBase; // unresolvable base ⇒ no staleness signal, never a false positive
   }
-  if (!base) return undefined;
+  if (!base) return noBase;
 
   const dir = makeDir();
-  const written = materialiseBaseProofBlobs(
+  const { written, unreadable } = materialiseBaseProofBlobs(
     criteria,
     base,
     (rev: string, rel: string) => showBlob(headCheckoutDir, rev, rel),
@@ -6305,7 +6331,7 @@ export function buildBaseProofDir(
       writeFileSync(dest, contents);
     },
   );
-  return written > 0 ? dir : undefined;
+  return { baseCheckoutDir: written > 0 ? dir : undefined, baseUnreadablePaths: new Set(unreadable) };
 }
 
 // ── W1-T185 (Gap 2): materialize a PR-head worktree for `rmd review` ────────
@@ -6909,7 +6935,13 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
       // matched before the work existed is marked `executed_stale` instead of counting as evidence.
       // `undefined` when the PR has no grep proof or no resolvable base — the check then stays inert,
       // exactly as it was for its first 1,180 verdicts.
-      baseCheckoutDir: worktreePath ? buildBaseProofDir(criteria, worktreePath) : undefined,
+      // W1-T460 makes this ONE spread rather than two named fields: the builder now yields
+      // `baseCheckoutDir` AND `baseUnreadablePaths` (the paths whose blob could not be READ — a
+      // per-proof fact the dir alone cannot carry; without it a proof never checked against the
+      // base is graded `executed_pass` as if proven to discriminate). Spreading keeps the whole
+      // wiring on a single executable line, which matters because this function is reachable only
+      // through a full `rmd review` drive.
+      ...(worktreePath ? buildBaseProofDir(criteria, worktreePath) : {}),
       // W1-T233: the named reason materialization failed (absent ⇒ it was
       // never attempted at all) — carried onto the posted CAPPED description
       // and the review.posted ledger line's degraded_reason fields.
