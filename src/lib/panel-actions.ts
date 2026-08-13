@@ -345,6 +345,8 @@ export function buildPauseRoute(deps: PanelActionDeps): Route {
     method: "POST",
     path: "/v1/control/pause",
     scope: "write",
+    // W1-T404: MIDDLE — reversible (resume clears it) but disruptive.
+    tier: "middle",
     handler: jsonAction(validateOptionalReason, (input, req, res) => {
       const info = requestPause(deps.root, input.reason);
       const origin = bearerTokenId(req);
@@ -362,6 +364,8 @@ export function buildResumeRoute(deps: PanelActionDeps): Route {
     method: "POST",
     path: "/v1/control/resume",
     scope: "write",
+    // W1-T404: MIDDLE — reversible but disruptive (clears STOP + PAUSE).
+    tier: "middle",
     handler: async (req, res) => {
       const result = resumeFleet(deps.root);
       const origin = bearerTokenId(req);
@@ -384,6 +388,8 @@ export function buildStopRoute(deps: PanelActionDeps): Route {
     method: "POST",
     path: "/v1/control/stop",
     scope: "write",
+    // W1-T404: MIDDLE — reversible (resume clears it) but disruptive; the hard kill.
+    tier: "middle",
     handler: jsonAction(validateOptionalReason, (input, req, res) => {
       const info = requestStop(deps.root, input.reason);
       const origin = bearerTokenId(req);
@@ -411,6 +417,8 @@ export function buildQuietHoursRoute(deps: PanelActionDeps): Route {
     method: "POST",
     path: "/v1/quiet-hours",
     scope: "write",
+    // W1-T404: MIDDLE — reversible (toggled again) but a schedule-window force multiplier.
+    tier: "middle",
     handler: jsonAction(validateQuietHours, (input, req, res) => {
       const enabled = setQuietHours(deps.root, input.enabled);
       const origin = bearerTokenId(req);
@@ -455,6 +463,8 @@ export function buildAnswerQuestionRoute(deps: PanelActionDeps): Route {
     method: "POST",
     path: "/v1/questions/answer",
     scope: "write",
+    // W1-T404: LOW — bookkeeping, trivially reversible (a recorded answer).
+    tier: "low",
     handler: jsonAction(validateAnswerQuestion, (input, req, res) => {
       const origin = bearerTokenId(req);
       const ts = new Date().toISOString();
@@ -495,6 +505,8 @@ export function buildApproveManualRoute(deps: PanelActionDeps): Route {
     method: "POST",
     path: "/v1/manual/approve",
     scope: "write",
+    // W1-T404: HIGH — moves code (closes a MANUAL-queue issue, the check-off).
+    tier: "high",
     handler: jsonAction(validateApproveManual, (input, req, res) => {
       deps.issues.close(input.issueUrl);
       const origin = bearerTokenId(req);
@@ -536,6 +548,8 @@ export function buildEscalationMarkHandledRoute(deps: PanelActionDeps): Route {
     method: "POST",
     path: "/v1/escalation/mark-handled",
     scope: "write",
+    // W1-T404: LOW — bookkeeping, trivially reversible (closes an issue, resolves nothing itself).
+    tier: "low",
     handler: jsonAction(validateMarkEscalationHandled, (input, req, res) => {
       deps.issues.close(input.issueUrl);
       const origin = bearerTokenId(req);
@@ -604,6 +618,8 @@ export function buildDrainFeedbackRoute(deps: PanelActionDeps): Route {
     method: "POST",
     path: "/v1/drain/feedback",
     scope: "write",
+    // W1-T404: LOW — bookkeeping, trivially reversible (a one-tap verdict + note).
+    tier: "low",
     handler: jsonAction(validateDrainFeedback, (input, req, res) => {
       const origin = bearerTokenId(req);
       ledgerPanelAction(deps, "operator_feedback", input.taskId, origin, {
@@ -648,6 +664,8 @@ export function buildKickRoute(deps: Pick<PanelActionDeps, "root" | "ledgerPath"
     method: "POST",
     path: "/v1/drain/kick",
     scope: "write",
+    // W1-T404: HIGH — dispatches a task: real spend.
+    tier: "high",
     handler: jsonAction(validateTaskId, (input, req, res) => {
       const origin = bearerTokenId(req);
       requestKick(deps.root, input.taskId, origin);
@@ -667,6 +685,8 @@ export function buildDrainNowRoute(deps: Pick<PanelActionDeps, "root" | "ledgerP
     method: "POST",
     path: "/v1/drain/run",
     scope: "write",
+    // W1-T404: HIGH — dispatches paid work, fleet-wide.
+    tier: "high",
     handler: async (req, res) => {
       const origin = bearerTokenId(req);
       requestDrainNow(deps.root, origin);

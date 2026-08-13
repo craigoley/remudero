@@ -139,3 +139,44 @@ test("tailnet identity: with no identity presented, the bearer token still authe
     assert.equal(none.status, 401);
   });
 });
+
+// ── W1-T404: identity's write grant resolves to the HIGH tier, unlike the bearer token's LOW ──
+//
+// See src/lib/service.ts's `tailscaleIdentityProvider` doc: the interface+allowlist gates above
+// are already a stronger proof than a pasted secret, so this grantor keeps reaching every tier
+// once `enforceWriteTiers` is on -- the counterpoint to
+// test/write-tier-migration-defaults-low.test.ts's bearer-token proof.
+
+test("tailnet identity: an allowlisted identity's write grant satisfies a MIDDLE-tier route the bearer token alone would not", async () => {
+  const server = createService({
+    tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
+    identity: { trustedLocalAddress: "127.0.0.1", capability: CAPABILITY },
+    routes: [
+      {
+        method: "POST",
+        path: "/middle",
+        scope: "write",
+        // MIDDLE, not HIGH, deliberately -- isolates the TIER resolution this test is about from
+        // the second-factor nonce mechanism (its own dedicated suite,
+        // test/write-tier-second-factor.test.ts), which HIGH would additionally require.
+        tier: "middle",
+        handler: (_req, res) => {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ ran: true }));
+        },
+      },
+    ],
+    enforceWriteTiers: true,
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as { port: number }).port;
+  try {
+    // Identity alone -- no bearer token needed -- reaches MIDDLE, unlike
+    // test/write-tier-migration-defaults-low.test.ts's bearer token, which is refused there.
+    const res = await fetch(`http://127.0.0.1:${port}/middle`, { method: "POST", headers: capabilityHeader(CAPABILITY) });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { ran: true });
+  } finally {
+    server.close();
+  }
+});

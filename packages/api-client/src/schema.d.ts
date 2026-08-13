@@ -11,6 +11,8 @@ export interface components {
       error: "unauthorized" | "forbidden" | "not_found" | "invalid_request" | "internal_error";
       /** Present only on a 403 -- the scope the caller's token was missing. */
       required_scope?: "read" | "write";
+      /** W1-T404 -- present only on a 403 refused for an insufficient WRITE TIER (once src/lib/service.ts's `enforceWriteTiers` is turned on; not yet set by `rmd serve`'s own production wiring). `low` (bookkeeping), `middle` (reversible but disruptive, or a spend force multiplier) or `high` (spends money or moves code) -- the tier the caller's token was missing, alongside `required_scope: write`. */
+      required_tier?: "low" | "middle" | "high";
     };
     /** One task's projected merge-state, derived from GitHub (src/lib/status.ts's `StatusProjection` -- never written back to plan/tasks.yaml). This is the per-task "live state" the read-only board (W3-T2) renders. */
     StatusProjection: {
