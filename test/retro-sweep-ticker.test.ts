@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
 import type { RunResult } from "../src/lib/run-result.js";
+import { waitForCiGreen, pollToGate } from "../src/run-task.js";
 
 // ── W1-T276: the RETRO SWEEP TICKER ─────────────────────────────────────────
 //
@@ -269,4 +271,203 @@ test("W1-T276: no sweepLight wired -> a fired retro behaves exactly as before th
   });
   assert.equal(summary.stopReason, "stopped");
   assert.equal(runCalls, 1, "the retro still runs exactly once with no sweepLight wired");
+});
+
+// -- W1-T463: THE CI WAIT MUST NOT BLOCK THE DAEMON'S EVENT LOOP -----------------------------
+//
+// THE SIBLING DEFECT TO W1-T276 ABOVE, AND THE ONE THAT SURVIVED IT. W1-T276 closed a gap in
+// ticker COVERAGE: a rung the ticker did not wrap. This is the opposite shape -- the ticker DID
+// wrap the dispatch, and the sweep still went silent for 16m55s, because `waitForCiGreen` and
+// `pollToGate` (src/run-task.ts) were declared `async` and contained ZERO `await`. Their GitHub
+// read was `execFileSync` and their inter-poll delay was `execFileSync("sleep", ...)` -- a blocking
+// child process, not a timer -- so the single JS thread never yielded and EVERY timer in the
+// process was frozen, `startInFlightTicker`'s included.
+//
+// THE FALSIFIER THIS FILE MUST CARRY, and the reason a return-value test is worthless here: the
+// function RETURNED CORRECTLY BEFORE. The only assertion that discriminates is that a timer
+// scheduled BEFORE the wait FIRES DURING IT. The pair below drives the SAME real function twice --
+// once with the shipped yielding sleep and once with a sleep that blocks the thread the way
+// `execFileSync` did -- and the timer fires in exactly one of them.
+
+/** A sleep that HOLDS the thread, exactly as `execFileSync("sleep", ...)` did. */
+function blockingSleep(ms: number): Promise<void> {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    /* spin -- the event loop cannot turn, which is the whole point */
+  }
+  return Promise.resolve();
+}
+
+/** A `gh pr view --json statusCheckRollup` fake: `n` pending reads, then `final`. */
+function rollupReads(n: number, final: Array<Record<string, unknown>>): {
+  read: (args: string[]) => Promise<unknown>;
+  calls: () => number;
+} {
+  let i = 0;
+  return {
+    read: async () => {
+      const pending = [{ name: "ci", status: "IN_PROGRESS" }];
+      const out = i < n ? pending : final;
+      i++;
+      return { state: "OPEN", statusCheckRollup: out };
+    },
+    calls: () => i,
+  };
+}
+
+const GREEN = [{ name: "ci", conclusion: "SUCCESS" }];
+
+test("W1-T463 FALSIFIER: a timer scheduled BEFORE the CI wait FIRES DURING it", async () => {
+  const { read } = rollupReads(3, GREEN);
+  let firedAt: number | undefined;
+  const started = Date.now();
+  // Scheduled BEFORE the wait, due while the wait is still polling. Under the shipped
+  // (yielding) sleep this MUST run; under the old blocking one it could not.
+  const timer = setTimeout(() => {
+    firedAt = Date.now();
+  }, 30);
+  const outcome = await waitForCiGreen("u/1", () => {}, 0.02, { readJson: read });
+  clearTimeout(timer);
+  assert.equal(outcome, "green");
+  assert.notEqual(firedAt, undefined, "the timer never fired -- the event loop did not turn during the wait");
+  assert.ok(
+    (firedAt ?? Infinity) < Date.now(),
+    "the timer must fire DURING the wait, not after it -- otherwise this proves only that the wait ended",
+  );
+  assert.ok(Date.now() - started >= 30, "sanity: the wait really did outlast the timer's due time");
+});
+
+test("W1-T463 MUTANT: a BLOCKING sleep starves that same timer -- the falsifier discriminates", async () => {
+  const { read } = rollupReads(3, GREEN);
+  let fired = false;
+  const timer = setTimeout(() => {
+    fired = true;
+  }, 30);
+  // Same function, same reads, same cadence -- only the sleep is the pre-W1-T463 shape.
+  const outcome = await waitForCiGreen("u/1", () => {}, 0.05, { readJson: read, sleep: blockingSleep });
+  clearTimeout(timer);
+  assert.equal(outcome, "green", "the mutant still RETURNS correctly, which is exactly why a return-value test proves nothing");
+  assert.equal(fired, false, "a blocking sleep must starve the timer -- if this fires, the falsifier above is vacuous");
+});
+
+test("W1-T463: the poll CADENCE is unchanged -- one sleep per poll, at everySec * 1000 ms", async () => {
+  const { read, calls } = rollupReads(4, GREEN);
+  const slept: number[] = [];
+  const outcome = await waitForCiGreen("u/1", () => {}, 6, {
+    readJson: read,
+    sleep: async (ms) => {
+      slept.push(ms);
+    },
+  });
+  assert.equal(outcome, "green");
+  assert.equal(calls(), 5, "four pending reads then the green one");
+  assert.deepEqual(slept, [6000, 6000, 6000, 6000], "six seconds between polls, unchanged -- a faster poll burns the secondary rate limit");
+});
+
+test("W1-T463: the ci.polling LOG cadence is unchanged -- i === 0 || i % 5 === 0", async () => {
+  const { read } = rollupReads(12, GREEN);
+  const steps: string[] = [];
+  await waitForCiGreen("u/1", (s) => steps.push(s), 6, { readJson: read, sleep: async () => {} });
+  // 13 polls (0..12): logged at i = 0, 5, 10 -- three rows, exactly as before. 467 recorded rows
+  // imply ~2,335 real polls precisely because of this 1-in-5 sampling.
+  assert.equal(steps.filter((s) => s === "ci.polling").length, 3);
+});
+
+test("W1-T463: the RED direction still returns red, and stops polling immediately", async () => {
+  const { read, calls } = rollupReads(1, [{ name: "ci", conclusion: "FAILURE" }]);
+  const outcome = await waitForCiGreen("u/1", () => {}, 6, { readJson: read, sleep: async () => {} });
+  assert.equal(outcome, "red", "blocked_ci handling depends on this exact value");
+  assert.equal(calls(), 2, "one pending read then the red one -- it must not keep polling past a red");
+});
+
+test("W1-T463: the TIMEOUT direction still returns timeout on a stalled rollup", async () => {
+  // Every read identical AND NOT RUNNING: `checkWaitStalled` refuses to call a still-moving check
+  // stalled (`rollupHasRunningCheck`, the W1-T382 correction), so `IN_PROGRESS` here would poll
+  // forever -- correctly. QUEUED is pending-but-not-moving, which is the real stall shape.
+  const read = async () => ({ state: "OPEN", statusCheckRollup: [{ name: "ci", status: "QUEUED" }] });
+  const steps: string[] = [];
+  const outcome = await waitForCiGreen("u/1", (s) => steps.push(s), 6, { readJson: read, sleep: async () => {} });
+  assert.equal(outcome, "timeout");
+  assert.ok(steps.includes("ci.stalled"), "and it must say which checks were still pending when it gave up");
+});
+
+test("W1-T463: pollToGate yields too -- fixing ONE of the two daemon sites would leave the symptom alive", async () => {
+  let reads = 0;
+  const read = async () => {
+    reads++;
+    return reads < 3
+      ? { state: "OPEN", statusCheckRollup: [{ name: "ci", status: "IN_PROGRESS" }] }
+      : { state: "MERGED", statusCheckRollup: GREEN };
+  };
+  let fired = false;
+  const timer = setTimeout(() => {
+    fired = true;
+  }, 30);
+  const outcome = await pollToGate("u/1", () => {}, 0.02, { readJson: read });
+  clearTimeout(timer);
+  assert.equal(outcome.merged, true, "a MERGED pr still resolves merged");
+  assert.equal(fired, true, "pollToGate must release the loop as well -- it is the same shape and the same freeze");
+});
+
+test("W1-T463: pollToGate's red and closed directions are unchanged", async () => {
+  const red = await pollToGate("u/1", () => {}, 6, {
+    readJson: async () => ({ state: "OPEN", statusCheckRollup: [{ name: "ci", conclusion: "FAILURE" }] }),
+    sleep: async () => {},
+  });
+  assert.equal(red.merged, false);
+  assert.match(red.reason, /required check red/);
+
+  const closed = await pollToGate("u/1", () => {}, 6, {
+    readJson: async () => ({ state: "CLOSED", statusCheckRollup: [] }),
+    sleep: async () => {},
+  });
+  assert.equal(closed.merged, false);
+  assert.match(closed.reason, /pr closed/);
+});
+
+test("W1-T463: NO BLOCKING SLEEP SURVIVES in src/run-task.ts -- the regression this file exists to pin", () => {
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "src", "run-task.ts"), "utf8");
+  // Comments naming the old call are fine and wanted; a real CALL is not. Anchored on the
+  // statement form so the explanatory prose above the two loops cannot satisfy it.
+  const realCalls = src.split("\n").filter((l) => /^\s*execFileSync\("sleep"/.test(l));
+  assert.deepEqual(realCalls, [], `a blocking sleep came back to the daemon's own file: ${realCalls.join(" | ")}`);
+  // POSITIVE CONTROL on that zero: the same predicate DOES find the two deferred, non-daemon sites.
+  const deferred = ["src/lib/inbox.ts", "src/spike.ts"].filter((p) =>
+    readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", p), "utf8")
+      .split("\n")
+      .some((l) => /^\s*execFileSync\("sleep"/.test(l)),
+  );
+  assert.deepEqual(deferred, ["src/lib/inbox.ts", "src/spike.ts"], "the predicate must be able to find one at all");
+});
+
+test("W1-T463: the DEFAULT gh read is driven for real -- an async execFile, not the sync one it replaced", async () => {
+  // THE DEFAULT SEAM, NOT A FAKE. Every test above injects `readJson`, which leaves `ghJsonAsync`'s
+  // own body unreachable -- the #977/#978 shape ("when every test injects a fake, the seam's DEFAULT
+  // implementation is unreachable"). This drives it by putting a stub `gh` FIRST on PATH, so the
+  // real `execFileAsync("gh", ...)` runs, its stdout is really parsed, and the promise really
+  // resolves.
+  // IT DELIBERATELY ASSERTS NOTHING ABOUT THE LOOP TURNING. A first draft also checked that a 5ms
+  // timer fired during the call, and that assertion RACED: the stub answers green on the FIRST read,
+  // so the function returns before any sleep and the timer's due time is a coin flip against the
+  // spawn. It failed once and passed once on identical code, which is a flake, not evidence. The
+  // loop-turns claim is carried by the FALSIFIER above and its discriminating mutant, where it is
+  // deterministic; adding a racy second copy of it here would only make the suite lie sometimes.
+  const dir = mkdtempSync(join(tmpdir(), "rmd-gh-stub-"));
+  const stub = join(dir, "gh");
+  writeFileSync(
+    stub,
+    ["#!/usr/bin/env bash", 'printf %s "{\\"state\\":\\"OPEN\\",\\"statusCheckRollup\\":[{\\"name\\":\\"ci\\",\\"conclusion\\":\\"SUCCESS\\"}]}"', ""].join(
+      "\n",
+    ),
+    { mode: 0o755 },
+  );
+  const prevPath = process.env.PATH;
+  process.env.PATH = `${dir}:${prevPath ?? ""}`;
+  try {
+    const outcome = await waitForCiGreen("u/1", () => {}, 0.02);
+    assert.equal(outcome, "green", "the default reader must really parse the child's stdout");
+  } finally {
+    process.env.PATH = prevPath;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
