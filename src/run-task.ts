@@ -8188,7 +8188,17 @@ export function ruleEfficacyCommand(rest: string[], opts: { stateDir?: string } 
  */
 export function coverageImproveCommand(
   rest: string[],
-  opts: { root?: string; stateDir?: string; ledgerPath?: string; runId?: string } = {},
+  opts: {
+    root?: string;
+    stateDir?: string;
+    ledgerPath?: string;
+    runId?: string;
+    /** Injectable ONLY so BOTH arms of the state-dir fallback below are reachable from a test —
+     *  production always takes this module's own `loadConfig`. Appended LAST so no positional
+     *  caller shifts. Without it the `catch` arm cannot be exercised: `loadConfig` reads the real
+     *  checkout, so no test can make it throw, and the arm would ship unrun. */
+    loadConfig?: () => { root: string };
+  } = {},
 ): number {
   const badArg = unknownArgError("coverage-improve", rest, ["--lcov"], []);
   if (badArg) {
@@ -8212,11 +8222,12 @@ export function coverageImproveCommand(
     return 1;
   }
 
+  const resolveConfig = opts.loadConfig ?? loadConfig;
   const stateDir =
     opts.stateDir ??
     (() => {
       try {
-        return join(loadConfig().root, "state");
+        return join(resolveConfig().root, "state");
       } catch {
         return undefined;
       }

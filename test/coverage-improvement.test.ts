@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -408,4 +408,81 @@ test("coverageImproveCommand: improve-band lcov -> exit 0, writes ONE plan/feedb
   assert.equal(code2, 0);
   const entriesAfter = readdirSync(feedbackDir).filter((f) => f.endsWith(".yaml"));
   assert.equal(entriesAfter.length, 1, "an unchanged debt signature must not file a second entry");
+});
+
+// ── coverageImproveCommand: the arms the wrapper owns but the library cannot reach ────────────
+// Every case below is a line `diff-coverage` flagged as added-and-uncovered on #1783. They are
+// wrapper-only paths: `injectCoverageImprovementTask` is exhaustively tested above, but the verb's
+// OWN switch arms and its state-dir fallback are not reachable through it. Testing the library and
+// calling the CLI covered is the exact gap that shipped.
+
+test("coverageImproveCommand: a below-block-tier lcov reports the remediation band and files nothing", () => {
+  const root = tmp("rmd-coverage-improve-blocking-");
+  const stateDir = tmp("rmd-coverage-improve-blocking-state-");
+  const lcovPath = join(root, "lcov.info");
+  // 80/100 branches = 80% — under DEFAULT_TIER_BLOCK_PCT (85), so tier `remediate`, which the
+  // verb reports as `blocking` and deliberately leaves to tier three's own loop.
+  writeFileSync(lcovPath, fixtureLcov([{ file: "src/a.ts", brf: 100, brh: 80 }]));
+
+  const code = coverageImproveCommand(["--lcov", lcovPath], { root, stateDir, ledgerPath: join(stateDir, "ledger.ndjson"), runId: "blocking-run" });
+  assert.equal(code, 0, "the block tier is not this verb's job, but it is not an ERROR either");
+  assert.ok(!existsSync(join(root, "plan", "feedback")), "a below-block run must file nothing");
+});
+
+test("coverageImproveCommand: in-band coverage whose debt lives entirely OUTSIDE src/ reports no-debt", () => {
+  const root = tmp("rmd-coverage-improve-nodebt-");
+  const stateDir = tmp("rmd-coverage-improve-nodebt-state-");
+  const lcovPath = join(root, "lcov.info");
+  // 87/100 = 87%, inside the 85-90 pass-with-debt band — but `rankCoverageDebt` ranks only
+  // `src/`-prefixed records, and the one src/ file is fully covered. The uncovered branches are
+  // all in scripts/, so there is real aggregate debt and NO file this verb may name.
+  writeFileSync(
+    lcovPath,
+    fixtureLcov([
+      { file: "src/a.ts", brf: 50, brh: 50 },
+      { file: "scripts/x.mjs", brf: 50, brh: 37 },
+    ]),
+  );
+
+  const code = coverageImproveCommand(["--lcov", lcovPath], { root, stateDir, ledgerPath: join(stateDir, "ledger.ndjson"), runId: "nodebt-run" });
+  assert.equal(code, 0);
+  assert.ok(!existsSync(join(root, "plan", "feedback")), "no nameable src/ debt must file nothing rather than an empty entry");
+});
+
+test("coverageImproveCommand: with no stateDir, the config fallback resolves one and the ledger is written THERE", () => {
+  const root = tmp("rmd-coverage-improve-cfg-");
+  const configRoot = tmp("rmd-coverage-improve-cfgroot-");
+  mkdirSync(join(configRoot, "state"), { recursive: true });
+  const lcovPath = join(root, "lcov.info");
+  writeFileSync(
+    lcovPath,
+    fixtureLcov([
+      { file: "src/healthy.ts", brf: 50, brh: 50 },
+      { file: "src/debt.ts", brf: 50, brh: 35 },
+    ]),
+  );
+
+  // stateDir OMITTED on purpose: this is the only way to reach the fallback at all.
+  const code = coverageImproveCommand(["--lcov", lcovPath], { root, runId: "cfg-run", loadConfig: () => ({ root: configRoot }) });
+  assert.equal(code, 0);
+  // The assertion that matters: the fallback did not merely RETURN a path, the run USED it.
+  const ledgerLines = readFileSync(join(configRoot, "state", "ledger.ndjson"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.ok(
+    ledgerLines.some((l) => l.step === COVERAGE_IMPROVEMENT_FILED_STEP && l.run_id === "cfg-run"),
+    "the ledger must land under the config-derived state dir, proving the fallback fed ledgerPath",
+  );
+});
+
+test("coverageImproveCommand: an unreadable config leaves no state dir, so the run refuses (exit 1) rather than guessing one", () => {
+  const root = tmp("rmd-coverage-improve-nocfg-");
+  const lcovPath = join(root, "lcov.info");
+  writeFileSync(lcovPath, fixtureLcov([{ file: "src/a.ts", brf: 10, brh: 10 }]));
+
+  const code = coverageImproveCommand(["--lcov", lcovPath], {
+    root,
+    loadConfig: () => {
+      throw new Error("config unreadable");
+    },
+  });
+  assert.equal(code, 1, "a config that cannot be read must fail CLOSED, never fall back to a guessed path");
 });
