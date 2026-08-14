@@ -77,6 +77,29 @@ export function checkCiGateDocNotAProbe(ciGateDocExists: boolean): { ok: boolean
   return { ok: true };
 }
 
+/**
+ * W1-T488: CLAUDE.md must state that a `unit test:` proof body is matched as a LITERAL
+ * substring (after escaping) — the OPPOSITE of a `grep:` pattern, which is a BASIC REGEX.
+ * Neither half in isolation proves the claim this task exists to fix: the asymmetry between
+ * the two dialects is what silently misleads an author who reads both lines in sequence and
+ * assumes they behave alike, so this requires "LITERAL substring" and "BASIC REGEX" to appear
+ * close together (same bullet), not merely somewhere each in the whole file.
+ */
+export function checkUnitTestLiteralMatchClaim(claudeMdText: string): { ok: boolean; reason?: string } {
+  if (!/unit test:/i.test(claudeMdText)) {
+    return { ok: false, reason: "CLAUDE.md never mentions the `unit test:` dialect at all" };
+  }
+  if (!/LITERAL substring[\s\S]{0,400}BASIC REGEX|BASIC REGEX[\s\S]{0,400}LITERAL substring/.test(claudeMdText)) {
+    return {
+      ok: false,
+      reason:
+        "CLAUDE.md never states, in one place, that a `unit test:` proof body is matched as a LITERAL " +
+        "substring while a `grep:` pattern is a BASIC REGEX — the asymmetry itself, not either half alone",
+    };
+  }
+  return { ok: true };
+}
+
 // ── The real docs: each check currently holds ────────────────────────────────────────────────
 
 test("docs-claims: README.md does not claim the repo currently contains the WS-0 spike", async () => {
@@ -105,6 +128,12 @@ test("docs-claims: docs/operator-guide.md's command table covers every COMMANDS 
 
 test("docs-claims: docs/ci-gate.md is removed, not a one-line probe artifact", () => {
   const result = checkCiGateDocNotAProbe(existsSync(join(REPO_ROOT, "docs", "ci-gate.md")));
+  assert.ok(result.ok, result.reason);
+});
+
+test("docs-claims: CLAUDE.md states a unit test: proof body is matched LITERALLY, against a grep: pattern's BASIC REGEX", async () => {
+  const claudeMd = await readFile(join(REPO_ROOT, "CLAUDE.md"), "utf8");
+  const result = checkUnitTestLiteralMatchClaim(claudeMd);
   assert.ok(result.ok, result.reason);
 });
 
@@ -137,4 +166,18 @@ test("docs-claims falsifier: an operator guide missing a real COMMANDS verb turn
 
 test("docs-claims falsifier: a docs/ci-gate.md probe artifact reappearing turns the ci-gate-doc check RED", () => {
   assert.equal(checkCiGateDocNotAProbe(true).ok, false);
+});
+
+test("docs-claims falsifier: CLAUDE.md missing the unit-test/grep: dialect asymmetry turns the check RED", () => {
+  const missingAsymmetry = "Write `unit test: <exact-title substring>`: the prefix is required.\n";
+  assert.equal(checkUnitTestLiteralMatchClaim(missingAsymmetry).ok, false);
+});
+
+test("docs-claims falsifier: LITERAL substring and BASIC REGEX far apart (different bullets) turns the check RED", () => {
+  const farApart =
+    "A unit test: title is matched literally.\n" +
+    "LITERAL substring semantics apply here.\n" +
+    "x".repeat(500) +
+    "\nElsewhere, a grep: pattern is a BASIC REGEX.\n";
+  assert.equal(checkUnitTestLiteralMatchClaim(farApart).ok, false);
 });
