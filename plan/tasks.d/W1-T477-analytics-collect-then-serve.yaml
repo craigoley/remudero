@@ -1,0 +1,114 @@
+- id: W1-T477
+  title: "the ledger is the telemetry but three of the operator's four analytics questions are unanswerable from it — no per-verb invocation row, no worker duration, lane identity only in step-name prose: collect the three missing signals and serve the per-instance aggregate on a read-scoped console route the relay already forwards"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 90
+  rationale: "FILED FROM the operator's analytics brief (oper#queue-order-2026-08-14),
+    SOURCE-DERIVED at e26f928 on this filing session's host (cloud container, NO route to
+    either fleet ledger — the mini and Azure keep separate corpora with no SSH between them,
+    and every fleet figure in this record is CARRIED from the operator's brief with its host
+    named). THE OPERATOR'S FOUR QUESTIONS, TRIED LITERALLY AGAINST THE WRITERS: (1) how
+    often each command is called — NOT ANSWERABLE: main() (src/run-task.ts) ledgers nothing
+    per verb, only lane verbs self-ledger a start, and rmd emissions exists BECAUSE of this
+    gap (attributeVerbs' own doc concedes even run-task is unauditable by name); (2) what
+    worker types are generated — PROXY ONLY: no row carries a lane or worker-kind FIELD,
+    the lane lives in step-name prose plus pseudo task_ids (DRAIN, DAEMON, TRIAGE-<fbId>),
+    exactly the hand-maintained-mapping drift emissions.ts documents; (3) time per task —
+    DERIVABLE by ts joins (run.start to verdict per run_id) with named hazards: gate-side
+    merges leave no verdict row, successful retro/triage log no terminal at all; (4) time
+    per command/worker — NOT ANSWERABLE: workerLedgerFields (src/lib/worker.ts) carries
+    cost, tokens, model, effort — and NO duration; rows are written after the call returns.
+    THE PATTERN THE OPERATOR NAMED IS REAL AND THE BRIEF'S INSTANCES ARE CARRIED (fix-rung
+    say() strings, logTail, the risk judge's unparseable raw output, waited_ms against its
+    1,800,000 ms ceiling, the 99 forever-unexplained no_pr rows pre-#1584): A SIGNAL THAT
+    REACHES DOCKER LOGS BUT NOT THE LEDGER IS UNMEASURABLE LATER. THE AGGREGATION HALF IS A
+    CONSUMER, NOT A SUBSYSTEM, DERIVED: runRelayClient (src/lib/relay-client.ts, W1-T431
+    merged #1641) transparently forwards the ENTIRE console REST+SSE surface outbound-only,
+    nothing today exports ledger content off-host, and no console route serves raw rows —
+    so a read-scoped aggregate route is reachable from a hosted portfolio the moment
+    W1-T433's second cell and the hosted relay exist, with ZERO new transport. THE READING
+    HAZARDS ARE DESIGN CONSTRAINTS, NOT FOOTNOTES (each burned a session this week, per the
+    operator's brief): rotation (a single-file read lies — ledgerRotationEntries in
+    src/lib/ledger-grep.ts is the one rotation-aware definition and this route MUST read
+    through its union; readLedgerLines remains single-file by design at dozens of decision
+    sites), dedupe keys (ts+task_id collapsed simultaneous DAEMON rows — full-line dedupe
+    only), the 200/step retention cap (a live-only scan made 100 of 207 escalated ids
+    invisible — CARRIED, host mini), and field-name traps (cost_usd not costUsd; triage
+    rows hold the task in minted_id, task_id is the TRIAGE run pseudo-id — quoted from the
+    writer in triageCommandLocked). A DASHBOARD INHERITING THESE REPORTS CONFIDENT WRONG
+    NUMBERS, WHICH IS WORSE THAN NO DASHBOARD. COLLECTION COST, DERIVED: rotation triggers
+    on bytes (LEDGER_ROTATION_CEILING_BYTES 4 MiB) while retention caps are line-counted,
+    so richer rows trade retention depth for width on the LIVE file — but this route reads
+    the archive union, so the three new signals need NO retention-set changes; volumes are
+    one row per CLI invocation and two fields on existing rows, comparable to existing lane
+    starts. Fleet scale figures CARRIED from the brief: mini 666 gz / 4.26M rows; Azure
+    rotated today at ~4.19 MB."
+  design: |
+    (i) COLLECT — three signals, smallest shapes: a `cli.invoked` row in main()
+    (src/run-task.ts) carrying {verb, argv_shape} for EVERY verb including read-only ones
+    (one row per invocation; the dot in the step name is literal); a `lane` field added to
+    the lane log-closures (src/run-task.ts) so worker kind is a FIELD, not step-name
+    archaeology; workerDurationMs measured around the worker call and spread into
+    workerLedgerFields (src/lib/worker.ts) so per-call wall-clock exists at the source.
+    No retention-set changes: the consumer reads the archive union, and registration
+    without need is its own defect (the #977 rule cuts both ways).
+    (ii) SERVE — buildAnalyticsRoute (src/lib/analytics-route.ts): GET /v1/analytics,
+    scope read, mounted in buildServeRoutes (src/lib/serve.ts) beside its siblings. The
+    aggregate answers the four questions per instance: invocation counts per verb, worker
+    counts and cost by lane/model, wall-clock per task (run.start-to-verdict joins with
+    the no-terminal population EXPLICITLY counted as a bucket, never dropped), and
+    duration distributions per lane once (i)'s field exists. Sections whose signal
+    predates collection render as UNMEASURED-BEFORE-<date>, never as zero — a zero that
+    means 'not collected yet' is the false-refutation shape the operator's brief opens
+    with (two fleets, one coincident total of 30).
+    (iii) THE READER DISCIPLINE, enforced by construction: the route's miner reads through
+    ledgerRotationEntries' union ONLY (live-file-only reads refused at review by the grep
+    criterion below), dedupes on full lines, keys triage rows on minted_id, and takes
+    field names from the writers.
+    (iv) CROSS-INSTANCE, stated as the consumer it is: N=1 today; the hosted portfolio
+    polls each cell's /v1/analytics through the relay once W1-T433 and hosted
+    infrastructure exist — no ledger rows leave the host, which keeps W1-T425's
+    redaction reservations untouched.
+    (v) FALSIFIER, both directions: a fixture state dir with rows split across the live
+    file and TWO rotation archives must aggregate identically to the same rows in one
+    file (a live-only reader fails it — the rotation hazard made structural), AND a
+    fixture with two byte-identical DAEMON rows at one ts plus one distinct row must
+    count three, not two (full-line dedupe, the collapsed-deferral hazard made
+    structural).
+    (vi) NOT IN SCOPE: shipping raw rows off-host (W1-T425's redaction lane); any hosted
+    service; retention-set changes; backfilling signals that were never written (the
+    UNMEASURED-BEFORE bucket is the honest rendering); the brief's other print-only
+    signals (logTail, risk-judge raw output, waited_ms) — each needs its own writer-side
+    decision and this shard names them for follow-up rather than absorbing them.
+  acceptance:
+    - claim: "the aggregate over rows split across live file and two archives equals the single-file aggregate, and identical simultaneous rows count separately"
+      proof: "unit test: test/analytics-route.test.ts"
+    - claim: "the analytics miner reads the rotation union, so a live-only read cannot ship"
+      proof: "grep: buildAnalyticsRoute( in src/lib/serve.ts"
+  risk: high
+  origin: oper#queue-order-2026-08-14
+  plan_refs: ["W1-T431", "W1-T433", "W1-T425", "W1-T437"]
+  files: [src/run-task.ts, src/lib/worker.ts, src/lib/analytics-route.ts, src/lib/serve.ts, test/analytics-route.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — both falsifier directions are fixture-decidable with throwaway state
+    dirs; no fleet ledger is needed to build or test any of it. risk:high — the files: span
+    (main() instrumentation, worker fields, the new route module, its serve mount, the
+    test) is Rule 19's SPAN, not blast radius, and each entry is invocation-derived: main()
+    writes cli.invoked, worker.ts carries the duration, the module defines the route,
+    serve.ts mounts it. Rule 25: touches src/run-task.ts (instrument-adjacent) with the
+    files: list as containment. budget_usd 90 — three collection signals, the union-reading
+    miner, the route with its UNMEASURED-BEFORE discipline, two-direction fixtures. PROOF
+    NOTES: `buildAnalyticsRoute` is 0 hits across src/ AND plan/ at e26f928 (measured,
+    case-sensitive, single-line pattern), so the grep discriminates at hits>=1/base=0 and
+    names no existing symbol; the open-paren form greps the CONSUMER (src/lib/serve.ts),
+    distinct from the defining module, per the call-site lint; the unit-test proof is the
+    pure-path form against a declared file. PROVENANCE DISCIPLINE per the operator's brief:
+    every fleet number above is CARRIED with its host named (mini or Azure, from the brief);
+    everything else is DERIVED from source at e26f928 on this cloud container. NO
+    depends_on: the relay, the console, ledgerRotationEntries and the writers are all on
+    main; W1-T433 gates only the CROSS-instance consumer, which this shard deliberately
+    does not build."
