@@ -72,7 +72,38 @@
 # arguments. The watcher's staleness threshold is derived from that five-minute interval — see
 # STALE_AFTER_MINUTES in .github/workflows/fleet-heartbeat-watch.yml before changing the cadence.
 #
-# Overrides, all optional: RMD_ROOT (config.root), RMD_HEARTBEAT_BRANCH, RMD_HEARTBEAT_REMOTE.
+# ── INSTALLING IT ON A CONTAINER HOST (W1-T483) ───────────────────────────────────────────────
+# The Azure host runs the fleet as docker containers and has NO launchd. A host `crontab` line is
+# the install surface, and it is the same one this script's own header already documents:
+#
+#   */5 * * * * RMD_ROOT=<state-root> RMD_HEARTBEAT_BRANCH=heartbeat-<host> \
+#               <checkout>/scripts/fleet-heartbeat.sh >/dev/null 2>&1
+#
+# THE REPORTER MUST NOT RUN INSIDE THE THING IT REPORTS ON, and on a container host that stops
+# being a philosophical point and becomes the whole defect. A beat scheduled INSIDE
+# `remudero-daemon` dies at the same instant the daemon does, so the one condition it exists to
+# report is the one it can never report — and the container also reads "Up N minutes" while the
+# daemon process is gone (the entrypoint shell and its restart-throttle `sleep` keep it alive), so
+# the container's own status cannot stand in either. A SIDECAR container is closer but still wrong
+# twice over: it would need the docker socket mounted to read the restart budget below, which is a
+# privilege escalation for a reporter, and it is itself a container that can be stopped by the same
+# hand or the same host problem. A HOST cron entry has neither objection: it survives every
+# container, it already has docker, and it is plain bash and git — which is the one constraint this
+# script may never trade away (see the header above: an emptied `node_modules` kills every `rmd`
+# verb while the resident daemon keeps serving, and a beat written as a verb goes silent in exactly
+# that state).
+#
+# ── ONE BRANCH PER HOST. TWO HOSTS ON ONE BRANCH IS THE DEFECT, NOT A TIDINESS ISSUE ──────────
+# Each beat is a FORCE-PUSHED PARENTLESS COMMIT, so a branch holds exactly one beat and no history.
+# Two hosts beating to the same branch therefore OVERWRITE each other, and the watcher — which
+# measures `now - last commit` on that branch — reads the freshest of them. A healthy host then
+# masks a dead one completely: measured 2026-08-14, the Azure fleet was down 2h56m while this
+# branch kept reporting `daemon live`, truthfully, about the mini. So SET
+# `RMD_HEARTBEAT_BRANCH` PER HOST and list every branch in the watcher's `HEARTBEAT_BRANCHES`.
+# The default is left at `heartbeat` so an already-installed host keeps beating where it does.
+#
+# Overrides, all optional: RMD_ROOT (config.root), RMD_HEARTBEAT_BRANCH, RMD_HEARTBEAT_REMOTE,
+# RMD_HEARTBEAT_CONTAINER (the container whose restart budget to read; `none` to skip).
 
 # NOT `set -e`, deliberately. Every probe below is BEST-EFFORT and a probe that cannot answer is
 # itself diagnostic — "the ledger is unreadable" is a finding, not a reason to abort the beat.
@@ -219,6 +250,66 @@ fi
 INSTALL_SHA="$(git -C "$INSTALL_DIR" rev-parse --short HEAD 2>/dev/null)"
 [ -n "$INSTALL_SHA" ] || INSTALL_SHA="unknown"
 
+# ── probe: the container restart budget (W1-T483) ─────────────────────────────────────────────
+# THIS IS AN EARLY WARNING, NOT A DETECTOR, AND THE DISTINCTION IS THE WHOLE POINT. Docker's
+# `--restart=on-failure:N` caps the COUNT of automatic restarts for a container instance, and
+# nothing restores it: measured on this host with three throwaway containers, a container that ran
+# healthily for twenty seconds — and one that ran for two full minutes, twice — still reached the
+# cap and stayed exited. Every non-zero exit spends one, and `daemonExitCode` (src/lib/daemon.ts)
+# returns non-zero for a routine freshness restart as well as for a crash, so a HEALTHY, MERGING
+# fleet empties the budget as fast as it merges. When it empties the container stops for good and
+# nothing brings it back. Publishing the count while the fleet is still up is what turns that from
+# a post-mortem into a warning.
+# WHAT THIS CAN NEVER DO: report the budget once the container is already down — there is nothing
+# left to inspect. THE DETECTOR IS THE BEAT'S ABSENCE, which the watcher already reads. This field
+# only buys the operator the interval BEFORE the stop.
+# AND IT DEGRADES TO ABSENT, NEVER TO ZERO. A `restart_count=0` means "the whole budget is
+# untouched" — the most reassuring value in the field's range — so a read that FAILED must never
+# produce it. On a host with no docker, or where the inspect fails, the numeric fields are OMITTED
+# ENTIRELY and only `restart_source` is written, carrying the reason. This is the law this repo has
+# corrected seven times, applied to a field whose failure direction is unusually dangerous.
+RESTART_CONTAINER="${RMD_HEARTBEAT_CONTAINER:-remudero-daemon}"
+# The runtime is a NAME, not a hardcoded call, for two reasons that are not about testing: a host
+# may keep it off the default PATH, and a podman-based host answers the identical `inspect
+# --format` contract. Overriding it to a path that does not exist is also the only honest way to
+# exercise the no-runtime branch, since `command -v docker` would otherwise find the real one.
+RESTART_RUNTIME="${RMD_HEARTBEAT_DOCKER:-docker}"
+RESTART_COUNT=""
+RESTART_MAX=""
+RESTART_POLICY=""
+if [ "$RESTART_CONTAINER" = "none" ]; then
+  RESTART_SOURCE="skipped — RMD_HEARTBEAT_CONTAINER=none"
+elif ! command -v "$RESTART_RUNTIME" >/dev/null 2>&1; then
+  RESTART_SOURCE="unavailable — no ${RESTART_RUNTIME} on this host"
+else
+  RESTART_RAW="$("$RESTART_RUNTIME" inspect "$RESTART_CONTAINER" \
+    --format '{{.RestartCount}} {{.HostConfig.RestartPolicy.MaximumRetryCount}} {{.HostConfig.RestartPolicy.Name}}' \
+    2>/dev/null)"
+  if [ -z "$RESTART_RAW" ]; then
+    RESTART_SOURCE="unavailable — ${RESTART_RUNTIME} inspect ${RESTART_CONTAINER} returned nothing"
+  else
+    read -r RESTART_COUNT RESTART_MAX RESTART_POLICY <<<"$RESTART_RAW"
+    # A non-numeric count is a parse failure, not a reading. Clearing BOTH numbers here is what
+    # keeps the absent-never-zero rule true for a malformed answer as well as for a missing one.
+    case "${RESTART_COUNT:-}" in
+      '' | *[!0-9]*)
+        RESTART_COUNT=""
+        RESTART_MAX=""
+        RESTART_SOURCE="unavailable — ${RESTART_RUNTIME} inspect ${RESTART_CONTAINER} gave no numeric RestartCount"
+        ;;
+      *)
+        RESTART_SOURCE="${RESTART_RUNTIME} inspect ${RESTART_CONTAINER}"
+        # `MaximumRetryCount` is 0 for every policy that does not cap, and for `on-failure` with no
+        # `:N`. Rendering that 0 verbatim would read as "no restarts left" — the opposite of what it
+        # means — so an uncapped policy says so in words.
+        if [ "$RESTART_POLICY" != "on-failure" ] || [ "$RESTART_MAX" = "0" ]; then
+          RESTART_MAX="unlimited"
+        fi
+        ;;
+    esac
+  fi
+fi
+
 # The gap the MACHINE observed since its own last successful beat. This is what makes the
 # watcher's threshold refinable later against a measured distribution instead of intuition — a
 # force-pushed single-commit branch keeps no history of its own to measure.
@@ -252,8 +343,21 @@ ledger_bytes=${LEDGER_BYTES}
 disk_free_kb=${DISK_FREE_KB}
 prev_beat_ts=${PREV_BEAT_TS:-none}
 since_prev_beat_s=${SINCE_PREV_S:-unknown}
+restart_source=${RESTART_SOURCE}
 EOF
 )"
+
+# APPENDED, NOT INTERPOLATED WITH A SENTINEL — see the probe's own note above. `restart_source` is
+# always present because it is a diagnosis and can never be misread as headroom; the two NUMBERS
+# appear only when they were actually read, so `field(payload, "restart_count") === undefined` is
+# the honest signal that nothing was measured.
+if [ -n "$RESTART_COUNT" ]; then
+  PAYLOAD="${PAYLOAD}
+restart_container=${RESTART_CONTAINER}
+restart_count=${RESTART_COUNT}
+restart_max=${RESTART_MAX}
+restart_policy=${RESTART_POLICY}"
+fi
 
 # The subject line IS the phone-readable answer — it is what shows on the branch listing without
 # opening anything. Both verdicts ride in it, because the two failures it separates (a dead
