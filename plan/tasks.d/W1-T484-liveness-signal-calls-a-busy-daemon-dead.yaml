@@ -1,0 +1,139 @@
+- id: W1-T484
+  title: "the fleet's liveness signal reports a healthy busy daemon as dead about 27 times a day, because `runDaemon` has no ledger step that fires unconditionally every tick and both the beat and the console read a prefix that merely usually advances"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: "RE-DERIVED ON THE MAC MINI at 9c9cac0. PROVENANCE PER NUMBER. Every SOURCE fact below is
+    a tree fact and host-independent. THE DISTRIBUTION IS AZURE'S AND IS CARRIED, NOT RE-DERIVED --
+    there is no ssh route from here, and the reason it cannot be re-derived on the mini is itself part
+    of the finding (see (3)).
+
+    (0) THE ROOT IS ALREADY WRITTEN DOWN IN THE MODULE THAT SUFFERS FROM IT. `daemon-health.ts`'s own
+    header states it: `runDaemon` has no SINGLE ledger step name that fires unconditionally every tick
+    -- `daemon.pause`, `daemon.headroom`, `daemon.idle`, `daemon.iteration` each fire on a DIFFERENT
+    branch -- and it concludes that the MAX ts over the `daemon.`-prefixed lines is therefore
+    a real, always-advancing last-poll signal. THE MEASUREMENT FALSIFIES THE WORD ALWAYS. The prefix
+    usually advances; it does not always advance inside 600s.
+
+    (1) THERE IS NO STALENESS VERDICT ANYWHERE IN THAT MODULE, AND THAT IS THE POINT.
+    `deriveLastPoll` (`src/lib/daemon-health.ts`) returns only `lastPollTs` and `pollIntervalMs`; the
+    route adds `lastPollAgeMs` and `nextPollAt`. MEASURED at this sha: the strings stale, STALE,
+    staleness, verdict, alive and dead occur ZERO times in that file, against a control of 3
+    occurrences of `lastPollAgeMs`. So no code there decides live-versus-dead; a NUMBER is exported
+    and the reader supplies the word.
+
+    (2) THE CONSOLE HAS THE SAME BLIND SPOT, SO THIS IS NOT THE BEAT'S DEFECT. `serve.ts` renders
+    `dh-last-poll` as `formatRelative(h.lastPollAgeMs)` and counts `dh-next-poll` down with
+    `ms <= 0 ? due now : ...`. During the 13:08-13:25 window it would have read
+    `last poll: 16m ago, next poll: due now` WITH TWO WORKERS RUNNING. The beat script mirrors
+    `deriveLastPoll` DELIBERATELY rather than inventing a second liveness rule that could disagree
+    with the console's -- SO CHANGING ONE CHANGES BOTH, BY DESIGN, and that is a property to preserve
+    rather than a coincidence to exploit.
+
+    (3) THE DISTRIBUTION, CARRIED FROM AZURE OVER 34.14h OF COVERED UPTIME:
+      - 3.19h, 9.34% of uptime, sits more than 600s past the last `daemon.*` row -- about 27
+        false-stale beats per day, in runs of 7, 7, 10 and 12 consecutive beats.
+      - In-process silences: median 60.5s, p90 67.2s, p99 383.8s, max 4,333.8s (72.2m). Over 30m: 4 of
+        2,474 (0.16%).
+      - ALL FOUR OF THE OVER-30m WINDOWS CONTAIN `fix.dispatch` and THREE ALSO CONTAIN
+        `review.reviewer`.
+      I COULD NOT RE-DERIVE THIS ON THE MINI, AND THE REASON IS THE DEFECT ITSELF. The mini's union
+      (666 gz + 4 plain + 1 live; control `sweep.pass` = 1,897, negative control 0) holds 18,544
+      distinct `daemon.*` timestamps over a 718.54h span, but that span is dominated by genuine
+      downtime -- the largest single gap is 420,175s (4.9 DAYS) and the corpus carries 889
+      `daemon.start` rows. SEPARATING daemon-up-but-silent FROM daemon-down NEEDS EXACTLY THE
+      UNCONDITIONAL HEARTBEAT THIS TASK IS ABOUT, so the measurement is circular on any host without
+      one. Bounding to sub-hour gaps still yields a 44.96% false-stale share against Azure's 9.34% --
+      a DIFFERENT DUTY CYCLE, not a contradiction, and the two must never be merged (the cross-corpus
+      error W1-T471 records). WHAT THE MINI DOES CORROBORATE, independently: gaps past 600s are
+      common here too -- 442 of them within sub-hour gaps, p99 1,625s, max 60.0m.
+
+    (4) TWO CAUSES, AND THEY MUST BE KEPT APART. The first is UNCOVERED RUNGS:
+    `startInFlightTicker` (`src/lib/daemon.ts`) has exactly two call sites, one labelled retro and one
+    labelled dispatch, and the dispatch one wraps
+    `Promise.allSettled(admitted.map((t) => deps.runOne(t.id)))` -- the IMPLEMENT dispatch -- stopping
+    immediately after. `fix.dispatch` is emitted from `src/lib/sweep.ts` and `review.reviewer` from
+    `src/run-task.ts`, neither inside that ticker. THE SECOND CAUSE IS DIFFERENT AND A TICKER CANNOT
+    REACH IT: a 17-minute silence INSIDE a covered implement dispatch, where `ci.polling` logged 41
+    times throughout and one `sweepLight()` call neither completed nor threw.
+    WIDENING THE TICKER WOULD NOT FIX THAT ONE. That stall is a SEPARATE CONCERN with its own investigation and is cited
+    here only as evidence that option (a) is incomplete -- it is NOT absorbed into this task.
+
+    (5) THE HUMAN COST IS THE REASON TO ACT SOON. The beat says daemon STALE about 27 times a day on a
+    working fleet, in runs of up to a dozen. NOTHING AUTOMATED REACTS -- but a human who reads the
+    branch subject is being trained to disbelieve it, which is the muting the workflow's own header
+    warns about, arriving through the person instead of through the label."
+  design: "FOUR OPTIONS, MEASURED RATHER THAN SPECULATIVE, AND THIS SHARD RANKS NONE OF THEM.
+    (a) WIDEN THE TICKER to cover the fix and reviewer rungs. Fixes the four over-30m windows at the
+    cause. THE COST IS NOW MEASURED AND IT IS NOT SMALL: each fire runs a FULL LIGHT SWEEP --
+    `buildOpenPrViews` (a live `gh api` list) and the REAL `reviewCommand` per eligible PR -- so
+    widening it means running post-review passes DURING the fix and reviewer rungs, which are
+    themselves review-adjacent. THAT IS RE-ENTRANCY TODAY'S CODE HAS NEVER HAD TO SURVIVE. And per (4)
+    it does not fix the fifth shape.
+    (b) AN UNCONDITIONAL TICK ROW at the top of every iteration. Smallest change, AND THE ONLY ONE
+    THAT ADDRESSES BOTH CAUSES, because it is decoupled from `sweepLight` entirely. Cost: liveness
+    becomes honest and says nothing about PROGRESS -- a wedged daemon would still beat. Mitigating:
+    the beat already carries `restart_count`/`restart_max` and `rmd_verdict`, so alive-but-wedged is
+    not the only available signal. STILL A REAL LOSS -- today a long silence is at least visible, and
+    this removes that accidental signal without replacing it.
+    (c) RAISE THE THRESHOLD. Cheapest, and wrong on the distribution: covering the 72.2m maximum means
+    sizing past 72 minutes and losing detection of everything shorter. AND IT WOULD HAVE TO MOVE
+    `DAEMON_STALE_AFTER_S` (600s) IN THE SCRIPT, NOT THE WATCHER'S 30m -- the watcher keys on BEAT age
+    and does not misfire. This repo filed W1-T312, W1-T380 and W1-T382 for bounds sized against
+    UNOBSERVED populations; this would be the INVERSE error, sizing against the worst OBSERVED one.
+    (d) CARRY WORKER STATE IN THE BEAT. Verified cheaply derivable in plain bash and git: `run.start`
+    and `verdict` rows share a `run_id`, so a `run.start` with no `verdict` is two greps and a set
+    difference -- NO `rmd` VERB, NO NODE, which matters because an emptied `node_modules` kills every
+    verb while the daemon keeps serving from resident memory. It would have turned STALE into
+    `last poll 16m ago, 2 runs in flight` -- the true statement. Cost: the verdict then depends on a
+    second unrelated pair of steps, and A RUN WHOSE `verdict` ROW IS LOST WOULD READ AS PERMANENTLY
+    OCCUPIED -- the opposite failure, and one nothing would clear.
+    NOT IN SCOPE: the 17-minute blocked sweep of (4); and #1798's per-host watching and restart budget,
+    which are correct and merged and whose declared files this task does not touch."
+  acceptance:
+    - claim: "the shard records that no staleness verdict exists in the health module and the reader supplies the word"
+      proof: "grep: THERE IS NO STALENESS VERDICT ANYWHERE IN THAT MODULE in plan/tasks.d/W1-T484-liveness-signal-calls-a-busy-daemon-dead.yaml"
+    - claim: "the shard records that the console shares the blind spot so the beat is not the defect"
+      proof: "grep: THE CONSOLE HAS THE SAME BLIND SPOT in plan/tasks.d/W1-T484-liveness-signal-calls-a-busy-daemon-dead.yaml"
+    - claim: "the shard keeps the uncovered rungs and the blocked sweep apart as two distinct causes"
+      proof: "grep: WIDENING THE TICKER WOULD NOT FIX THAT ONE in plan/tasks.d/W1-T484-liveness-signal-calls-a-busy-daemon-dead.yaml"
+    - claim: "the shard records why the distribution could not be re-derived on this host"
+      proof: "grep: SEPARATING daemon-up-but-silent FROM daemon-down in plan/tasks.d/W1-T484-liveness-signal-calls-a-busy-daemon-dead.yaml"
+    - claim: "the shard costs the ticker option with the re-entrancy it would introduce"
+      proof: "grep: RE-ENTRANCY TODAY'S CODE HAS NEVER HAD TO SURVIVE in plan/tasks.d/W1-T484-liveness-signal-calls-a-busy-daemon-dead.yaml"
+    - claim: "the shard names the inverse-of-W1-T312 error that raising the threshold would commit"
+      proof: "grep: this would be the INVERSE error in plan/tasks.d/W1-T484-liveness-signal-calls-a-busy-daemon-dead.yaml"
+    - claim: "the shard states the human cost as the reason to act rather than an aside"
+      proof: "grep: THE HUMAN COST IS THE REASON TO ACT SOON in plan/tasks.d/W1-T484-liveness-signal-calls-a-busy-daemon-dead.yaml"
+  origin: recon#daemon-liveness-false-stale-2026-08-14
+  plan_refs: ["W1-T312", "W1-T380", "W1-T382", "W1-T471"]
+  files: [src/lib/daemon.ts, src/lib/daemon-health.ts, test/daemon.test.ts, test/daemon-health.test.ts, test/daemon-alive-liveness.test.ts]
+  status: queued
+  attempts: 0
+  note: "`verify: human` ON PURPOSE. Design (a)-(d) is a RULING, not a decidable criterion: each option
+    trades a different kind of honesty for a different kind of blindness, and no linter can settle
+    which loss the operator prefers. `isDispatchEligible` parks it until that ruling exists, which is
+    the correct behaviour for this shard rather than a defect in it.
+
+    `risk: high` IS SET UP FRONT. `sizingViolation` (`src/lib/task-linter.ts`) blocks at
+    `>=2 subsystems while risk<high`, and `files:` spans `src/lib/` and `test/`. The band is Rule 19's
+    SPAN, not blast radius -- three of the four options are a handful of lines.
+
+    `files:` IS DERIVED BY INVOCATION COUNT, counting OCCURRENCES rather than lines, and spans the
+    UNION of the four options because the shard deliberately picks none. `src/lib/daemon-health.ts`
+    holds `deriveLastPoll`; `src/lib/daemon.ts` holds `startInFlightTicker` and is where an
+    unconditional tick row would go. On the test side: `test/daemon-health.test.ts` invokes
+    `deriveLastPoll(` 3 times (the most of any file), `test/daemon.test.ts` mentions
+    `startInFlightTicker` 6 times (the most), and `test/daemon-alive-liveness.test.ts` is the only
+    file touching BOTH symbols, which is why all three are declared rather than the top one only.
+    `src/run-task.ts` IS DELIBERATELY NOT DECLARED: `review.reviewer` is emitted there, but no option
+    requires editing it, and at 19,588 lines every task declaring it serialises against every other
+    that does (W1-T471). `src/lib/sweep.ts` is likewise not declared -- option (a) would widen a
+    ticker defined in `daemon.ts`, not edit the sweep. If an implementer finds either genuinely
+    required, that is a `files:` amendment, not a silent widening.
+    The shard's own path is NOT declared: adding it converts the endemic proof-scope warnings into one
+    hard `rule15-filing` violation."
