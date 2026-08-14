@@ -7,7 +7,8 @@
   risk: high
   principles: {tdd: strict}
   budget_usd: 30.00
-  rationale: "EITHER THE RESULT GATES SOMETHING, OR THE FLEET STOPS PAYING FOR IT. RUNNING IT AND
+  rationale: "WITHDRAWN AS FILED 2026-08-14 — OPTION (b) SHIPPED UNDER A DIFFERENT SHARD WHILE THIS ONE WAITED FOR THE RULING. #1777 (e26f9285, `fix(compaction): stop making workers run rmd preflight --ci-parity`) is exactly this shard's option (b), and it merged under W1-T464 — which is `verify: auto`. RE-VERIFIED AT f0ce71d6 WITH CONTROLS: `ciParityContractLines` has ZERO definitions and only 2 surviving references, BOTH on comment lines (positive control: `commitMessageContractLines` 7 references, live); in src/lib/compaction.ts both `test:ci` / `preflight --ci-parity` matches are comment lines (2 of 2, control: 8 `preflight` mentions), and `outputContractLines` emits no obligation to run it — its single `--ci-parity` mention is a DURATION reference inside the no-wait contract, not an instruction. AND #1777 CARRIED EVIDENCE THIS SHARD DID NOT HAVE, which is why (b) rather than (a) was right: of 17 `preflight.failed` rows, 15 were a TEST-FIXTURE defect rather than the gate firing; of the 2 genuine ones, one was UNDECIDABLE and one was WRONG — CI passed 21/22 on the identical sha. Earned cost: zero. This shard argued (a) and (b) were `not symmetric` and declined to rank them; #1777 supplied the measurement that breaks the tie. THE PATTERN, NAMED BECAUSE IT WILL RECUR: A `verify: auto` SIBLING SHIPPED THE SUBSTANCE OF A `verify: human` SHARD WHILE THAT SHARD SAT WAITING FOR A RULING, AND NEITHER SIDE NOTICED. Nothing links a human-gated question to an auto-gated task that would answer it, so the queue can hold a live question whose answer has already merged. The cost here was bounded — two shards' worth of stale asking — but the mechanism is general and this is the second instance in two days. status: blocked, NOT a new status: `withdrawn` is NOT in plan.ts's TASK_STATUSES (queued, recon, prompted, running, review, fixing, diagnosing, blocked, merged, done). W1-T270 already hit exactly this and established the equivalent — `status: blocked` as a `RECORD of the retirement decision, not a work item` — so this follows that precedent rather than inventing one. RETRACTED IN PLACE, NOT DELETED (MASTER-PLAN §8A asks for compression, not erasure): every acceptance criterion and the whole original argument are preserved verbatim below, because they are the record of a question that was live when it was asked. OPTION (c) IS SUPERSEDED, NOT DEFERRED, AND IS DELIBERATELY NOT REFILED: collapsing the double suite run was worth ~29% of local suite time, NOT half — this shard was explicit about that — and it is now largely irrelevant to the worker path, because the pre-push run it would have halved is gone. What remains is the hand route's own `--ci-parity`, which is not on any lane's critical path. --- ORIGINAL RATIONALE, PRESERVED VERBATIM --- 
+    EITHER THE RESULT GATES SOMETHING, OR THE FLEET STOPS PAYING FOR IT. RUNNING IT AND
     DISCARDING IT IS THE ONE OPTION THAT COSTS FULL PRICE FOR NOTHING. That is the whole concern, and
     it is narrower than W1-T463 — see the note.
     NOTHING GATES ON IT, EXACTLY. RE-DERIVED at 71cedbbc: `preflightFailureNotice`
@@ -89,7 +90,7 @@
   origin: recon#preflight-result-discarded-2026-08-13
   plan_refs: ["W1-T463", "W1-T453"]
   files: [src/run-task.ts, src/lib/ci-parity.ts, test/worker-preflight-visibility.test.ts, test/preflight-ci-parity.test.ts]
-  status: queued
+  status: blocked
   attempts: 0
   note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `src/run-task.ts` and
     `src/lib/ci-parity.ts` plus their suites; `sizingViolation` (`src/lib/task-linter.ts`) refuses
