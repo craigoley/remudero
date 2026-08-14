@@ -129,32 +129,37 @@ export function bodyVsDiffContractLines(): string[] {
 }
 
 /**
- * THE CI-PARITY-BEFORE-FIRST-PUSH CONTRACT (W1-T295) — shared VERBATIM by the implement
- * contract (`outputContractLines`, below) and the fix rung's footer (`renderFixPrompt`,
- * run-task.ts), the same two prompts {@link commitMessageContractLines} and
- * {@link bodyVsDiffContractLines} already keep in sync — for the same reason: two copies of
- * one rule drift (PR #427/#428, where the commit-message rule reached only the implement
- * lane and a fix worker paid for the gap).
+ * REMOVED (W1-T295 added it, W1-T464 removed it): a WORKER-facing contract line telling a
+ * worker to run `rmd preflight --ci-parity` before its first push. `ciParityContractLines()`
+ * used to live here and was spread into both `outputContractLines` (below) and the fix rung's
+ * footer (`renderFixPrompt`, run-task.ts).
  *
- * WHY IT EXISTS. `outputContractLines` went straight from "stage, commit, push" to opening
- * the PR with nothing said about reaching green first. CLAUDE.md's "Before you push" section
- * records the coverage ratchet alone blocking three consecutive PRs on their first push, each
- * costing an amend, a force-push and a CI round-trip — a cost paid in strikes, since a red
- * first push spends a fix-rung attempt on infrastructure discovery instead of a review
- * finding. That prose lived only in a doc a worker is never shown; W1-T294 gives it a command
- * (`rmd preflight --ci-parity`, mirroring every CI job — see lib/ci-parity.ts) and this
- * function is what makes a worker RUN it before the first push rather than after a check goes
- * red on GitHub.
+ * WHY IT'S GONE. Re-measured on the Azure host's full ledger (W1-T464's shard): the
+ * orchestrator's handling of a failed worker preflight (`run-task.ts`) has NO branch, NO early
+ * return, NO gate — it logs `preflight.failed` and keeps going, so the two prompt lines below
+ * never stopped a push. Of the 17 `preflight.failed` rows on that host, only 2 were genuine
+ * (the other 15 were `test/preflight.test.ts`'s fake spawn writing into the worker's tree, a
+ * defect W1-T455 owns, not evidence of the gate firing); of those 2, one was UNDECIDABLE (CI
+ * never ran on a superseded sha) and the other was WRONG (CI passed 21/22 checks, 1 neutral,
+ * on the identical sha the preflight had flagged). Earned cost: 0. It also was NOT cheap: one
+ * `--ci-parity` pass runs ~15-17 minutes (a 4-6 minute non-coverage suite plus a ~10 minute
+ * coverage suite plus 21 cheaper steps) against a ~61-minute lane — roughly a quarter of it,
+ * paid on every implement and every fix-rung round, for a check that could not have blocked
+ * anything even when it was wrong.
  *
- * ONCE, NOT PER COMMIT: this is about the FIRST push only — the fix rung already amends the
- * same PR, and a "before every push" reading would be ignored or cost more than it saves.
+ * WHAT THIS DOES NOT REMOVE. `rmd preflight --ci-parity` remains a fully intact CLI verb
+ * (lib/ci-parity.ts, docs/cli-reference.md) — it is the HAND route's own gate (W1-T221 built
+ * the verb, W1-T294 added the flag), and an operator making a hand-authored push is a
+ * different caller with different economics: no `blocked_ci` fix rung runs behind them if CI
+ * catches something after the fact. Only the WORKER's obligation to run it pre-push is gone;
+ * a worker that pushes now and lets CI judge is not unprotected — `blocked_ci` is a
+ * first-class, non-halting verdict (`src/lib/drain.ts`) whose fix rung already exists for
+ * exactly this case.
+ *
+ * The base `rmd preflight` (no flags) — commitlint, `tsc --noEmit`, and the commit-message
+ * checks — is untouched by this shard; it was never part of this contract to begin with (see
+ * `commitMessageContractLines`, above, for the one piece of it a worker IS told about).
  */
-export function ciParityContractLines(): string[] {
-  return [
-    "- BEFORE THE FIRST PUSH, run `rmd preflight --ci-parity` (mirrors every CI job) and reach a",
-    "  PASS: fix whatever step it names — do not push to find out whether a required check is red.",
-  ];
-}
 
 /**
  * THE ROLE SENTENCE — the one thing `renderImplementPrompt` never said.
@@ -227,8 +232,7 @@ export function outputContractLines(taskId: string): string[] {
     "  `ALREADY_SATISFIED: <the PR number or url that already merged and satisfies this task>`.",
     `  That PR must actually be MERGED and its body must carry \`Remudero-Task: ${taskId}\` for`,
     "  THIS task, or the claim is refused and treated as if you had opened no PR at all.",
-    "- Otherwise: stage the changed file(s), commit, then run",
-    ...ciParityContractLines(),
+    "- Otherwise: stage the changed file(s) and commit.",
     // W1-T465: THE MECHANISM, NOT JUST THE PROHIBITION. Five runs on the mini and three on Azure
     // backgrounded a long job (`--ci-parity` is 15-17 minutes) and ENDED THE TURN expecting a
     // wake-up; all eight produced `no_pr` with `commits_ahead: 0` and `subtype: "success"`, and the
@@ -244,7 +248,7 @@ export function outputContractLines(taskId: string): string[] {
     "  If you background anything, POLL it yourself and keep issuing tool calls until it is done,",
     "  e.g. `until [ -f /tmp/done ]; do sleep 20; done` — or simply run the command in the",
     "  foreground and wait for it to return.",
-    "  Only once that passes: `git push origin HEAD` (NOT `-u` — the shared .git/config is",
+    "  Then: `git push origin HEAD` (NOT `-u` — the shared .git/config is",
     "  outside the sandbox write scope, WS-0 FF10f), and open a PR with `gh pr create --fill",
     "  --base main`.",
     ...commitMessageContractLines(),

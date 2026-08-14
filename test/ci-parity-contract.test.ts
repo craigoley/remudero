@@ -1,26 +1,31 @@
 /**
- * test/ci-parity-contract.test.ts — W1-T295.
+ * test/ci-parity-contract.test.ts — W1-T295, revised by W1-T464.
  *
- * THE GAP. `outputContractLines` went straight from "stage the changed file(s), commit, then
- * run `git push origin HEAD`" to opening the PR — nothing told a worker to verify its own
- * change against CI before that first push. CLAUDE.md's "Before you push" section records the
- * coverage ratchet alone blocking three consecutive PRs on their first push, each costing an
- * amend, a force-push and a CI round-trip — a report, not a contract line, and a report leaks
- * (LEARNINGS, PR 407). W1-T294 shipped the command (`rmd preflight --ci-parity`, mirroring
- * every CI job); this task is what makes a worker RUN it before the first push.
+ * THE ORIGINAL GAP (W1-T295). `outputContractLines` went straight from "stage the changed
+ * file(s), commit, then run `git push origin HEAD`" to opening the PR — nothing told a worker
+ * to verify its own change against CI before that first push. W1-T294 shipped the command
+ * (`rmd preflight --ci-parity`, mirroring every CI job); W1-T295 made a worker RUN it before
+ * the first push via a shared literal, `ciParityContractLines()`, composed byte-identically
+ * into BOTH the implement contract (`outputContractLines`, which also composes into
+ * `renderAnchorBlock`) and the fix rung's own footer (`renderFixPrompt`, run-task.ts).
  *
- * ONE SHARED LITERAL, TWO PROMPTS (the #427/#428 shape): `ciParityContractLines()` lives
- * beside `commitMessageContractLines`/`bodyVsDiffContractLines` in lib/compaction.ts and must
- * be composed byte-identically into BOTH the implement contract (`outputContractLines`, which
- * also composes into `renderAnchorBlock`, so it survives compaction) and the fix rung's own
- * footer (`renderFixPrompt`, run-task.ts) — never restated as a second copy of the same text.
+ * WHY THAT CONTRACT IS GONE (W1-T464). Re-measured on the Azure host's full ledger: the
+ * orchestrator's own handling of a failed preflight (`run-task.ts`) has NO branch, NO early
+ * return, NO gate — a worker that ran `--ci-parity` and failed it pushed anyway, every time.
+ * Of 17 `preflight.failed` rows, only 2 were genuine (15 were `test/preflight.test.ts`'s fake
+ * spawn contaminating the ledger, a defect W1-T455 owns); of those 2 genuine rows, one was
+ * UNDECIDABLE and the other was WRONG (CI passed 21/22 checks, 1 neutral, on the identical
+ * sha). The step cost ~15-17 minutes — roughly a quarter of a lane — for zero earned catches.
+ * `ciParityContractLines()` was removed from lib/compaction.ts along with both call sites; the
+ * `rmd preflight --ci-parity` CLI verb itself is untouched and remains the hand route's gate.
+ * These tests now assert the NEGATIVE: neither worker prompt carries that obligation anymore.
  */
 import assert from "node:assert/strict";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { ciParityContractLines, outputContractLines, renderAnchorBlock } from "../src/lib/compaction.js";
+import { outputContractLines, renderAnchorBlock } from "../src/lib/compaction.js";
 import { CI_PARITY_TABLE, runCiParity } from "../src/lib/ci-parity.js";
 import type { PreflightSpawn } from "../src/lib/commit-message.js";
 
@@ -44,79 +49,58 @@ function recordingSpawn(map: Record<string, { status: number; stdout?: string; s
   return { spawn, calls };
 }
 
-// ── (1) the requirement is stated, and it is stated at turn 0 ────────────────
+// ── (1) the implement contract no longer obligates a worker to run --ci-parity ───────────────
 
-test("ciParityContractLines names the exact command a worker is expected to run", () => {
-  const lines = ciParityContractLines();
-  assert.ok(lines.length > 0);
-  const text = lines.join("\n");
-  assert.match(text, /rmd preflight --ci-parity/, "the literal command, not a paraphrase");
-  assert.match(text, /CI job/i, "explains what the command mirrors");
+test("the implement output contract no longer tells a worker to run rmd preflight --ci-parity", () => {
+  const implement = outputContractLines("W1-T464").join("\n");
+  assert.doesNotMatch(implement, /rmd preflight --ci-parity/, "W1-T464 removed the worker-facing obligation");
+  assert.doesNotMatch(implement, /BEFORE THE FIRST PUSH, run/i, "the whole contract line is gone, not reworded");
 });
 
-test("ciParityContractLines says named failures are fixed BEFORE pushing, not after", () => {
-  const text = ciParityContractLines().join("\n");
-  // "fix ... before" / "do not push to find out" — the ordering claim itself, not just the verb.
-  assert.match(text, /fix/i);
-  assert.match(text, /before the first push|do not push/i);
-});
-
-test("the implement output contract carries the ci-parity requirement, at turn 0", () => {
-  const contract = ciParityContractLines();
-  const implement = outputContractLines("W1-T295").join("\n");
-  assert.ok(implement.includes(contract.join("\n")), "the implement contract carries it verbatim, not paraphrased");
-  // Ordered BEFORE the push step, so a worker following the contract in order cannot skip it.
-  const parityIdx = implement.indexOf(contract[0]);
+test("the implement output contract still tells a worker how to push and open a PR", () => {
+  const implement = outputContractLines("W1-T464").join("\n");
+  assert.match(implement, /git push origin HEAD/, "pushing is still part of the contract");
+  assert.match(implement, /gh pr create --fill/, "opening the PR is still part of the contract");
+  // Ordered after commit, same as before — only the ci-parity gate in between is gone.
+  const stageIdx = implement.indexOf("stage the changed file(s)");
   const pushIdx = implement.indexOf("git push origin HEAD");
-  assert.ok(parityIdx >= 0 && pushIdx >= 0);
-  assert.ok(parityIdx < pushIdx, "the parity requirement must precede the push instruction");
+  assert.ok(stageIdx >= 0 && pushIdx >= 0 && stageIdx < pushIdx);
 });
 
-// ── (2) the fix rung carries the BYTE-IDENTICAL requirement from the same source ─────────────
+// ── (2) the fix rung carries the SAME absence, not a second copy of the removed rule ─────────
 
-test("the fix rung's prompt carries the same shared literal, not a second copy of the rule", async () => {
-  const contract = ciParityContractLines();
+test("the fix rung's prompt also no longer carries the --ci-parity obligation", async () => {
   const { renderFixPrompt } = await import("../src/run-task.js");
   const fix = renderFixPrompt({
-    task: { id: "W1-T295", title: "t" },
+    task: { id: "W1-T464", title: "t" },
     round: 2,
-    branch: "run-W1-T295-1",
+    branch: "run-W1-T464-1",
     evidence: {} as never,
   } as never);
-  assert.ok(fix.includes(contract.join("\n")), "the fix rung carries the SAME literal as the implement contract");
+  assert.doesNotMatch(fix, /rmd preflight --ci-parity/, "removed from both prompts together");
+  assert.match(fix, /git push origin HEAD/, "the fix rung still pushes once its own steps are done");
 });
 
-// ── (3) it is part of the block re-injected verbatim after compaction ────────────────────────
+// ── (3) the anchor re-injected after compaction reflects the same absence ────────────────────
 
-test("the ci-parity requirement survives compaction via renderAnchorBlock", () => {
-  const contract = ciParityContractLines();
+test("the post-compaction anchor does not re-inject the --ci-parity requirement either", () => {
   const anchor = renderAnchorBlock(
     {
-      id: "W1-T295",
+      id: "W1-T464",
       title: "t",
       prompt: "do the thing",
       acceptance: [],
     } as never,
-    "run-W1-T295-1",
+    "run-W1-T464-1",
   );
-  assert.ok(anchor.includes(contract.join("\n")), "the anchor re-injected after compaction carries it verbatim");
+  assert.doesNotMatch(anchor, /rmd preflight --ci-parity/, "the anchor composes outputContractLines, so it inherits the removal");
 });
 
-// ── (4) both prompt renderers consume the shared function rather than restating its text ─────
+// ── (4) the hand route's own verb is untouched by the worker-contract removal ────────────────
 
-test("outputContractLines and the fix rung compose ciParityContractLines() — not a paraphrase", async () => {
-  const contract = ciParityContractLines();
-  const implement = outputContractLines("W1-T1").join("\n");
-  const { renderFixPrompt } = await import("../src/run-task.js");
-  const fix = renderFixPrompt({
-    task: { id: "W1-T1", title: "t" },
-    round: 1,
-    branch: "run-W1-T1-1",
-    evidence: {} as never,
-  } as never);
-  for (const text of [implement, fix]) {
-    assert.ok(text.includes(contract.join("\n")), "byte-identical composition, both prompts");
-  }
+test("rmd preflight --ci-parity remains a live CLI verb — only the worker's obligation to run it is gone", () => {
+  const ciEntry = CI_PARITY_TABLE.find((e) => e.job === "ci");
+  assert.ok(ciEntry && ciEntry.mirrored, "CI_PARITY_TABLE — the machinery --ci-parity runs — is still intact");
 });
 
 // ── (5) W1-T373 design (v): cli-reference:check is a ci-parity entry — ONE LIST, ONE TRUTH ──
