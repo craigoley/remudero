@@ -21,7 +21,7 @@ import type { Plan, Task, TaskStatus } from "./plan.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { labelledIssuesRestArgs, NEEDS_HUMAN_LABEL, parseLabelledIssuesRest } from "./escalate.js";
 import { isHolderStale } from "./fs-race-safe.js";
-import { type BoardPrRest, fetchBoardPrsRest } from "./open-prs-rest.js";
+import { type BoardPrRest, fetchBoardPrsRest, type GhCallPacer, paceGhEntry } from "./open-prs-rest.js";
 import { isInPlanScope } from "./plan-architect.js";
 
 /**
@@ -129,6 +129,17 @@ export function classifyGhFailure(
     return "transport";
   }
   return "unknown";
+}
+
+/**
+ * True iff `err` — as `execFileSync`/a `gh` invocation throws it — classifies as `rate_limit` via
+ * {@link classifyGhFailure} (W1-T468). The pacing feedback signal {@link GhCallPacer.recordResult}
+ * needs: a rate-limit-classified failure must slow the calls that follow it (design (iii)), and
+ * this is the one place that decision is made so every guarded call site shares the same rule.
+ */
+export function isGhRateLimitError(err: unknown): boolean {
+  const e = err as NodeJS.ErrnoException & { status?: number | null; stderr?: string | Buffer };
+  return classifyGhFailure(e?.status, e?.stderr != null ? String(e.stderr) : undefined, e?.code) === "rate_limit";
 }
 
 /**
@@ -2978,6 +2989,16 @@ export function buildBatchedGithub(
      * prove the escalation join is O(1) and fails closed on a read error, without shelling out.
      */
     fetchAllIssues?: () => BatchedIssue[];
+    /**
+     * PACES this gateway's two REST reads (the PR list `fetchAll` and the issue list
+     * `fetchAllIssues`) against the daemon's OTHER burst call site, run-task.ts's
+     * `buildOpenPrViews` (W1-T468) — see lib/open-prs-rest.ts's `GhCallPacer` doc for why one
+     * shared instance, not independent per-call backoff, is what actually prevents the collision.
+     * OPTIONAL and omitted by every existing caller/fixture: absent ⇒ both reads fire with no
+     * gap, exactly the pre-W1-T468 behavior. The daemon's real wiring (run-task.ts's
+     * `buildSweepHook`) is the only caller that constructs and threads one through.
+     */
+    pacer?: GhCallPacer;
   } = {},
 ): GitHub {
   const ttlMs = opts.ttlMs ?? 15_000;
@@ -3088,7 +3109,9 @@ export function buildBatchedGithub(
     if (!issueCache || now() - issueCache.at >= ttlMs) {
       let all: BatchedIssue[];
       try {
-        all = fetchAllIssues();
+        // W1-T468: waits its turn on the shared pacer (a no-op absent one) BEFORE the real call,
+        // and reports back whether it was rate-limited — see the `pacer` opt's doc above.
+        all = paceGhEntry(opts.pacer, isGhRateLimitError, fetchAllIssues);
         lastIssueFetchFailed = false;
         lastIssueFetchFailureReason = undefined;
         log("board_gateway.issue_fetch_ok", { issueCount: all.length });
@@ -3139,7 +3162,10 @@ export function buildBatchedGithub(
       // caller; only the default execFileSync path degraded softly.
       let all: BatchedPr[];
       try {
-        all = fetchAll();
+        // W1-T468: same shared-pacer guard as `fetchAllIssues` above — one pacer instance across
+        // BOTH of this gateway's reads (and run-task.ts's sweep enumeration) is what actually
+        // keeps three independently-polite callers from colliding at second zero.
+        all = paceGhEntry(opts.pacer, isGhRateLimitError, fetchAll);
         lastFetchFailed = false;
         lastFetchFailureReason = undefined;
         log("board_gateway.fetch_ok", { prCount: all.length });

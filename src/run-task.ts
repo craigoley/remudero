@@ -144,12 +144,15 @@ import {
   type OpenIssue,
   type PresenceMode, prReferentFromIssueText,} from "./lib/escalate.js";
 import {
+  createGhCallPacer,
   fetchOpenPrsRest,
   fetchSinglePrRest,
   hydrateMergeStates,
   mapRestPr,
+  paceGhEntry,
   singlePrRestArgs,
   type GhApiFetcher,
+  type GhCallPacer,
   type RestPullRow,
 } from "./lib/open-prs-rest.js";
 import { imessageChannel, notify, type NotifyChannel } from "./lib/notify.js";
@@ -456,6 +459,7 @@ import {
   type DispatchBreakerDetail,
   ghGateway,
   ghRequiredStatusCheckContexts,
+  isGhRateLimitError,
   isLifetimeDispatchCapExceeded,
   projectPlan,
   readLedgerLines,
@@ -12272,7 +12276,23 @@ export async function daemonCommand(
         // pollIntervalMs/the headroom curve) into the per-poll tmp-sweep rung — the
         // regression lock this task's design demands (proof against the sweep
         // configuration the daemon command actually builds, never a hand-built fixture).
-        sweep: buildSweepHook(target.owner, target.repo, config, ledgerPath, runId, plan, log, policy.values.sweep.tmpMaxAgeMs),
+        // W1-T468: the ONE real pacer instance for this daemon's life — shared by this hook's own
+        // sweep enumeration and its board gateway's PR/issue reads, so the three-call burst that
+        // trips GitHub's secondary rate limit at the poll cadence cannot collide. `github` (the
+        // param before this one) is left undefined so the hook builds its own board gateway,
+        // which is the ONLY construction this pacer can actually reach.
+        sweep: buildSweepHook(
+          target.owner,
+          target.repo,
+          config,
+          ledgerPath,
+          runId,
+          plan,
+          log,
+          policy.values.sweep.tmpMaxAgeMs,
+          undefined,
+          createGhCallPacer(),
+        ),
         // W1-T254 (the #707 fix): the restricted light-sweep ticker — ticks ONLY
         // the deterministic post-review re-post while `runOne` is unbounded and in
         // flight, so a green PR whose review went absent re-posts within one poll
@@ -13914,10 +13934,20 @@ export function buildOpenPrViews(
   deps: {
     fetch?: GhApiFetcher;
     requiredContexts?: (owner: string, repo: string) => string[] | undefined;
+    /**
+     * PACES this function's enumeration call against the daemon's OTHER two burst call sites —
+     * lib/status.ts's board-gateway PR list and issue list (W1-T468). OPTIONAL and omitted by
+     * every existing caller/fixture: absent ⇒ the enumeration fires with no gap, exactly the
+     * pre-W1-T468 behavior. `buildSweepHook`'s real (non-test) wiring is the only caller that
+     * threads one through, sharing the SAME instance `buildBatchedGithub` is given there.
+     */
+    pacer?: GhCallPacer;
   } = {},
 ): OpenPrView[] {
   const fetch = deps.fetch ?? ghJson;
-  const raw = fetchOpenPrsRest(owner, repo, fetch) as RawOpenPr[];
+  // W1-T468: waits its turn on the shared pacer (a no-op absent one) before the real list call,
+  // and reports back whether it was rate-limited — see lib/open-prs-rest.ts's `GhCallPacer` doc.
+  const raw = paceGhEntry(deps.pacer, isGhRateLimitError, () => fetchOpenPrsRest(owner, repo, fetch)) as RawOpenPr[];
   const ledger = readLedgerLines(ledgerPath);
   // W1-T435: the SAME evidence pass that quotes an operator's steering note also produces
   // `pendingAnswer` from an answered clarification — a local file read, never GitHub.
@@ -15169,6 +15199,11 @@ export function buildSweepHook(
   // once-per-daemon-start instance built immediately below; a test supplies one with its own
   // `exec`/`ttlMs` so the delta's request count is measurable without shelling out.
   github?: GitHub,
+  // W1-T468: paces this poll's three-way burst (this hook's own sweep enumeration plus the board
+  // gateway's PR/issue reads below) — trailing and optional so every existing call site (every
+  // test included) is unaffected; omitted ⇒ no pacing, exactly the pre-W1-T468 behavior. The
+  // daemon's real (non-test) wiring is the only caller that constructs and passes one.
+  pacer?: GhCallPacer,
 ): () => Promise<void> {
   // W1-T192: the daemon-side draft rung, built ONCE per daemon start (mirrors this
   // function's own once-per-daemon-start construction) — see buildInboxDraftHook's doc for
@@ -15202,10 +15237,14 @@ export function buildSweepHook(
   //      next fetch. Only rows genuinely frozen at merge are ever served from the cache.
   // The rungs below consume merge state and open state; (ii) covers both, so a warm cache can
   // delay nothing and can never report a stale OPEN for a PR that has since merged.
-  const boardGithub = github ?? buildBatchedGithub(owner, repo, { log });
+  // W1-T468: `pacer` is threaded into the board gateway's OWN construction (never applied when a
+  // test supplies its own `github` above — that gateway was built outside this function and has
+  // no seam to receive it) and into `buildOpenPrViews` below, so both burst call sites share the
+  // SAME instance for this daemon's whole life, exactly as `boardGithub` itself is shared.
+  const boardGithub = github ?? buildBatchedGithub(owner, repo, { log, pacer });
   return async () => {
     try {
-      const openPrs = buildOpenPrViews(owner, repo, ledgerPath);
+      const openPrs = buildOpenPrViews(owner, repo, ledgerPath, { pacer });
       const effects = buildSweepEffects(owner, repo, config, ledgerPath, runId, plan, log, DEFAULT_SWEEP_POLICY);
       await runSweep(openPrs, { ...effects, ledgerPath, runId, log }, DEFAULT_SWEEP_POLICY);
       // fb-1784756088300-6a481e: the escalation-lifecycle reconciler rung — closes stale

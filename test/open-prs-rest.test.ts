@@ -7,10 +7,14 @@ import { join } from "node:path";
 import {
   checkRunsRestArgs,
   combinedStatusRestArgs,
+  createGhCallPacer,
+  DEFAULT_GH_PACE_MIN_GAP_MS,
+  DEFAULT_GH_PACE_RATE_LIMIT_GAP_MS,
   fetchOpenPrsRest,
   fetchSinglePrRest,
   mapRestPr,
   openPrsRestArgs,
+  paceGhEntry,
   prStateFromRest,
   rollupFromRest,
   singlePrRestArgs,
@@ -332,4 +336,151 @@ test("fixCommand looks the PR up through the injected REST fetcher and never thr
   assert.match(seen[0][1], /^repos\/[^/]+\/[^/]+\/pulls\/806$/);
   assert.equal(seen[0].includes("pr"), false);
   assert.equal(seen[0].includes("--json"), false);
+});
+
+// ── W1-T468: GhCallPacer / paceGhEntry — the daemon fires THREE independent REST reads in the
+// same wall-clock second (this module's own enumeration plus lib/status.ts's board-gateway PR
+// and issue lists), which trips GitHub's secondary rate limit even though neither quota bucket is
+// exhausted. `GhCallPacer` paces those call sites against a SHARED instance; `paceGhEntry` is the
+// generic guard every call site wraps its real fetch in. `now`/`sleepSync` are injected so this
+// exercises the gap arithmetic and the rate-limit widen/heal transitions with no real sleep. ──
+
+/** A fake clock: `sleepSync` both records the requested duration AND advances `now`, so a test
+ *  chaining multiple `wait()` calls sees the SAME elapsed time a real sleep would produce. */
+function fakeClock(startAt = 0) {
+  let now = startAt;
+  const sleeps: number[] = [];
+  return {
+    now: () => now,
+    sleepSync: (ms: number) => {
+      sleeps.push(ms);
+      now += ms;
+    },
+    advance: (ms: number) => {
+      now += ms;
+    },
+    sleeps,
+  };
+}
+
+test("createGhCallPacer: the FIRST wait() never sleeps — there is no prior call to pace against", () => {
+  const clock = fakeClock();
+  const pacer = createGhCallPacer({ now: clock.now, sleepSync: clock.sleepSync });
+  pacer.wait();
+  assert.deepEqual(clock.sleeps, [], "nothing to wait for on the very first call");
+});
+
+test("createGhCallPacer: a SECOND wait() inside the gap blocks for exactly the remaining time", () => {
+  const clock = fakeClock();
+  const pacer = createGhCallPacer({ now: clock.now, sleepSync: clock.sleepSync, minGapMs: 1000 });
+  pacer.wait(); // t=0
+  clock.advance(300); // only 300ms of the 1000ms floor has elapsed
+  pacer.wait();
+  assert.deepEqual(clock.sleeps, [700], "700ms remained of the 1000ms floor");
+});
+
+test("createGhCallPacer: a wait() AFTER the gap has already elapsed does not sleep at all", () => {
+  const clock = fakeClock();
+  const pacer = createGhCallPacer({ now: clock.now, sleepSync: clock.sleepSync, minGapMs: 1000 });
+  pacer.wait();
+  clock.advance(1500); // already past the floor
+  pacer.wait();
+  assert.deepEqual(clock.sleeps, [], "the gap had already elapsed on its own — nothing left to wait for");
+});
+
+test("createGhCallPacer: recordResult(true) WIDENS the gap the NEXT wait() enforces — design (iii), a classified failure slows what follows rather than only naming it", () => {
+  const clock = fakeClock();
+  const pacer = createGhCallPacer({ now: clock.now, sleepSync: clock.sleepSync, minGapMs: 1000, rateLimitGapMs: 9000 });
+  pacer.wait();
+  pacer.recordResult(true); // this call was rate-limited
+  clock.advance(500);
+  pacer.wait();
+  assert.deepEqual(clock.sleeps, [8500], "the widened 9000ms gap governs the NEXT wait, not the 1000ms floor");
+});
+
+test("createGhCallPacer: a later CLEAN result heals the gap back down to the floor", () => {
+  const clock = fakeClock();
+  const pacer = createGhCallPacer({ now: clock.now, sleepSync: clock.sleepSync, minGapMs: 1000, rateLimitGapMs: 9000 });
+  pacer.wait();
+  pacer.recordResult(true);
+  clock.advance(9000); // pay the widened gap off in full
+  pacer.wait();
+  pacer.recordResult(false); // clean now — heals back to the floor
+  clock.advance(500);
+  pacer.wait();
+  assert.deepEqual(clock.sleeps, [500], "500ms remaining against the HEALED 1000ms floor, not the widened 9000ms");
+});
+
+test("createGhCallPacer: a fresh pacer enforces the module's exported default gap and default backoff", () => {
+  const clock = fakeClock();
+  const pacer = createGhCallPacer({ now: clock.now, sleepSync: clock.sleepSync });
+  pacer.wait();
+  pacer.wait();
+  assert.deepEqual(clock.sleeps, [DEFAULT_GH_PACE_MIN_GAP_MS], "omitting minGapMs falls back to the exported floor");
+  pacer.recordResult(true);
+  pacer.wait();
+  assert.deepEqual(
+    clock.sleeps,
+    [DEFAULT_GH_PACE_MIN_GAP_MS, DEFAULT_GH_PACE_RATE_LIMIT_GAP_MS],
+    "omitting rateLimitGapMs falls back to the exported backoff constant",
+  );
+});
+
+test("paceGhEntry: with no pacer, `call` runs immediately — the exact pre-W1-T468 behavior for every caller that omits one", () => {
+  let ran = 0;
+  const result = paceGhEntry(
+    undefined,
+    () => true,
+    () => {
+      ran += 1;
+      return "ok";
+    },
+  );
+  assert.equal(result, "ok");
+  assert.equal(ran, 1);
+});
+
+test("paceGhEntry: with a pacer, `call` waits its turn and a CLEAN result reports back rateLimited=false", () => {
+  const seen: string[] = [];
+  const pacer = { wait: () => seen.push("wait"), recordResult: (r: boolean) => seen.push(`result:${r}`) };
+  const result = paceGhEntry(
+    pacer,
+    () => true, // never consulted — the call did not throw
+    () => "ok",
+  );
+  assert.equal(result, "ok");
+  assert.deepEqual(seen, ["wait", "result:false"]);
+});
+
+test("paceGhEntry: a thrown call is classified via `isRateLimited` and RETHROWN UNCHANGED — the caller's own catch/classify logic sees the identical error object", () => {
+  const seen: string[] = [];
+  const pacer = { wait: () => seen.push("wait"), recordResult: (r: boolean) => seen.push(`result:${r}`) };
+  const boom = new Error("rate limited");
+  assert.throws(
+    () =>
+      paceGhEntry(
+        pacer,
+        (err) => err === boom,
+        () => {
+          throw boom;
+        },
+      ),
+    (err: unknown) => err === boom,
+  );
+  assert.deepEqual(seen, ["wait", "result:true"]);
+});
+
+test("paceGhEntry: a NON-rate-limit throw reports back rateLimited=false, so an unrelated outage never widens the pacer's gap", () => {
+  const seen: string[] = [];
+  const pacer = { wait: () => seen.push("wait"), recordResult: (r: boolean) => seen.push(`result:${r}`) };
+  assert.throws(() =>
+    paceGhEntry(
+      pacer,
+      () => false,
+      () => {
+        throw new Error("network blip");
+      },
+    ),
+  );
+  assert.deepEqual(seen, ["wait", "result:false"]);
 });
