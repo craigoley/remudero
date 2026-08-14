@@ -90,6 +90,25 @@ export interface SelfSyncDeps {
    * loop-guard env added. Tests inject a spy that just records the call — never forking.
    */
   reexec?: () => void;
+  /**
+   * W1-T486: one ledger-shaped line per DISTINCT refusal reason per process (at most three
+   * calls per invocation, in practice one) — the same `log?: (step, extra?) => void` shape
+   * already used by `ArmDeps`/`DiagnoseThenRetryDeps`/etc., no-op by default so every existing
+   * caller and fake keeps working unchanged.
+   *
+   * Before this, `dirty`/`diverged`/`off-main` were stderr-only: nobody could say how often one
+   * refusal reason fires versus another (the question W1-T446's ruling is blocked on). Carries
+   * `reason` and the two shas already in the `warn()` message; for `reason: "dirty"` ALSO a
+   * `count` of dirty paths -- NEVER the paths themselves, which are content a ledger row must
+   * not carry (a dirty tree can hold customer/credential material).
+   *
+   * Deliberately NOT wired to a real ledger here: `self-sync.ts` imports no config/ledger
+   * today, and acquiring one via `loadConfig()` would pull in `resolveClaudeBin()`, which
+   * throws where no claude binary exists -- exactly the "runs anywhere" hazard `ci-parity.ts`
+   * exists to catch. A caller that already holds a ledger handle wires this sink; this module
+   * never acquires one itself.
+   */
+  log?: (step: string, extra?: Record<string, unknown>) => void;
 }
 
 export type SelfSyncResult =
@@ -122,7 +141,8 @@ const REMEDY_COMMAND = "git pull --ff-only";
  * @param repoDir  The checkout to check (the running CLI's own repo root in production).
  * @param env      Process environment to read {@link SELF_SYNC_GUARD_ENV} from (injectable —
  *                 production passes `process.env`, tests pass a plain object).
- * @param deps     Injectable git/say/warn/reexec; all default to real implementations.
+ * @param deps     Injectable git/say/warn/reexec/log; all default to real implementations (log
+ *                 defaults to a no-op — see {@link SelfSyncDeps.log}).
  */
 /** True in a CI / non-interactive runner (GitHub Actions + the common `CI` convention). The
  *  CLI-entry auto-sync is an interactive-operator convenience for the operator's own `main`
@@ -158,6 +178,7 @@ export function checkCliFreshness(
   const say = deps.say ?? ((msg: string) => console.log(msg));
   const warn = deps.warn ?? ((msg: string) => console.error(msg));
   const reexec = deps.reexec ?? (() => defaultReexec(env));
+  const log = deps.log ?? (() => {});
 
   try {
     // Same call shape as W1-T60's syncPlanFromOrigin: `git fetch --quiet origin` only ever
@@ -226,13 +247,21 @@ export function checkCliFreshness(
     return { status: "worktree", gitDir: linkedWorktree };
   }
 
-  const dirty = git(["status", "--porcelain"]).trim().length > 0;
+  const porcelain = git(["status", "--porcelain"]).trim();
+  const dirty = porcelain.length > 0;
   if (dirty) {
     const message =
       `rmd is behind origin/main (${shortSha(headSha)}..${shortSha(originSha)}) and the working tree ` +
       `has uncommitted changes -- refusing to auto-sync (never mutating uncommitted local state). ` +
       `Commit or stash your changes, then run \`${REMEDY_COMMAND}\` yourself.`;
     warn(message);
+    // W1-T486: a COUNT, never the porcelain paths themselves -- see the `log` field's doc.
+    log("self_sync.refused", {
+      reason: "dirty",
+      old_sha: headSha,
+      new_sha: originSha,
+      count: porcelain.split("\n").length,
+    });
     return { status: "refused", reason: "dirty", message };
   }
 
@@ -256,6 +285,8 @@ export function checkCliFreshness(
       `\`${REMEDY_COMMAND}\` yourself -- it will fail cleanly if a fast-forward truly isn't ` +
       `possible, and you can resolve the divergence from there.`;
     warn(message);
+    // W1-T486: no path content on this branch -- only the two shas already in `message`.
+    log("self_sync.refused", { reason: "diverged", old_sha: headSha, new_sha: originSha });
     return { status: "refused", reason: "diverged", message };
   }
 
@@ -293,6 +324,8 @@ export function checkCliFreshness(
       `would move your work's base out from under it. Run \`${REMEDY_COMMAND}\` yourself if that is ` +
       `really what you want.`;
     warn(message);
+    // W1-T486: no path content on this branch -- only the two shas already in `message`.
+    log("self_sync.refused", { reason: "off-main", old_sha: headSha, new_sha: originSha });
     return { status: "refused", reason: "off-main", message };
   }
 

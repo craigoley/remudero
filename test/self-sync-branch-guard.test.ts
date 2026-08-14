@@ -59,6 +59,7 @@ const headSha = (dir: string): string => git(dir, ["rev-parse", "HEAD"]).trim();
 
 function spies(localDir: string) {
   const warnCalls: string[] = [];
+  const logCalls: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   let reexecCalls = 0;
   const gitCalls: string[][] = [];
   const runner: GitRunner = (args) => {
@@ -67,12 +68,14 @@ function spies(localDir: string) {
   };
   return {
     warnCalls,
+    logCalls,
     gitCalls,
     reexecCount: () => reexecCalls,
     deps: {
       git: runner,
       say: () => {},
       warn: (m: string) => void warnCalls.push(m),
+      log: (step: string, extra?: Record<string, unknown>) => void logCalls.push({ step, extra }),
       reexec: () => void reexecCalls++,
     },
   };
@@ -85,7 +88,7 @@ test("a clean checkout BEHIND origin/main on a feature branch is refused, and it
   git(localDir, ["checkout", "--quiet", "-b", "run-W1-T445-1786562957"]);
   const before = headSha(localDir);
 
-  const { deps, reexecCount } = spies(localDir);
+  const { deps, reexecCount, logCalls } = spies(localDir);
   const result = checkCliFreshness(localDir, {}, deps);
 
   assert.equal(result.status, "refused");
@@ -98,6 +101,13 @@ test("a clean checkout BEHIND origin/main on a feature branch is refused, and it
     "and it must still be checked out on the same branch",
   );
   assert.equal(reexecCount(), 0, "nothing changed, so nothing may re-exec");
+
+  // W1-T486: off-main is now distinguishable from dirty/diverged in the ledger too.
+  assert.equal(logCalls.length, 1);
+  assert.equal(logCalls[0].step, "self_sync.refused");
+  assert.equal(logCalls[0].extra?.reason, "off-main");
+  assert.equal(logCalls[0].extra?.old_sha, before);
+  assert.equal(logCalls[0].extra?.count, undefined, "off-main never carries a dirty-style count");
 });
 
 test("the refusal names the branch and the remedy rather than failing silently", () => {
@@ -136,12 +146,13 @@ test("a clean checkout BEHIND origin/main ON MAIN still fast-forwards — the he
   const before = headSha(localDir);
   assert.equal(git(localDir, ["rev-parse", "--abbrev-ref", "HEAD"]).trim(), "main", "the fixture starts on main");
 
-  const { deps, reexecCount } = spies(localDir);
+  const { deps, reexecCount, logCalls } = spies(localDir);
   const result = checkCliFreshness(localDir, {}, deps);
 
   assert.equal(result.status, "synced", "this is the case self-sync exists for — the #138 stale-checkout shape");
   assert.notEqual(headSha(localDir), before, "and the ref ACTUALLY advanced, not merely reported success");
   assert.equal(reexecCount(), 1, "a real sync re-execs so the new code serves the command");
+  assert.equal(logCalls.length, 0, "a successful sync is not a refusal -- W1-T486's sink stays silent");
 });
 
 // ── DIRECTION 4: the guard env still short-circuits before any git at all ─────────────────────
