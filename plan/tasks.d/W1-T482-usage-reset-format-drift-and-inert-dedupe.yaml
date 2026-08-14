@@ -31,6 +31,44 @@
     (`373853a`, #531, W1-T197) and has never been edited since it shipped, so nothing on our side
     changed at that moment.
 
+    (1a) AND IT STOPPED DEAD — THE SPLIT, WHICH IS THE STRONGEST EVIDENCE IN THIS SHARD. Re-derived on
+    the MINI at 2ccb3fc across all three ledger forms (666 gz + 4 plain + 1 live; positive control on
+    the same sweep: `sweep.pass` = 1,897). Splitting the 3,391 `daemon.headroom` rows at the FIRST
+    `daemon.usage_reset_unrecognised` row (2026-08-12T18:10:08.645Z):
+      BEFORE — limit_pct 95: 1,825 · limit_pct 100: 1,482
+      AFTER  — limit_pct 95:    28 · limit_pct 100:     0
+    THE RELAXED RUNG FIRED 1,482 TIMES AND THEN NEVER AGAIN. That is a MEASURED BEFORE/AFTER LOSS OF A
+    WORKING SIGNAL, not a latent risk — and it upgrades clause (0) from `cost so far zero` to `a signal
+    that was live for a fortnight and is now silent`. (3,335 of the 3,391 rows carry a `limit_pct`
+    field at all; the split is over those.)
+    AND WHY THE OTHER CORPUS COULD NOT HAVE FOUND THIS, WHICH IS THE WHOLE ARGUMENT FOR KEEPING TWO:
+    AZURE`S `daemon.headroom` SAMPLE IS ALL-95. An all-95 sample cannot distinguish `this rung has
+    never fired` from `this rung stopped firing`, and the commissioning brief read it as the former.
+    Only a host carrying the BEFORE side can tell those apart. THE TWO CORPORA ARE REPORTED SEPARATELY
+    AND NEVER SUMMED.
+
+    (2a) THE PARSER IS THE ONLY STRING ENTRY POINT — SO THE FIX IS NARROWER THAN A READER WILL FEAR,
+    AND THIS WAS CHECKED RATHER THAN ASSUMED. The natural worry is the seven-instance pattern where one
+    reader is taught a new dialect and its siblings are left quietly disagreeing. IT DOES NOT APPLY:
+    the siblings take a `Date`, not a string — `canonicalizeResetInstant(d: Date): Date` rounds to the
+    hour, and `formatResetInstant(d: Date): string` calls canonicalize then `toISOString`. NEITHER
+    PARSES TEXT. Measured on the same sweep: exactly ONE function in `src/lib/daemon.ts` takes a raw
+    reset string, `parseResetInstant(raw: string, now: Date)`. So teaching that one function ISO
+    cannot leave a sibling behind.
+
+    (3a) THE FALSIFICATION TABLE, RUN AGAINST THE REAL FUNCTION at now = 2026-08-14T12:00:00Z, because
+    the regex argument above is easier to trust when the consequence is shown end to end:
+      `2026-08-14T16:20:00.069763+00:00`  null    —        limitPct 95   <- the live payload
+      `2026-08-14T16:20:00Z`              null    —        limitPct 95
+      `2026-08-14T16:20:00+00:00`         null    —        limitPct 95   <- so it is the FORM, not the microseconds
+      `Aug 14 at 4pm`                     PARSED  8.00h    limitPct 100
+      `4pm`                               PARSED  8.00h    limitPct 100
+      `Monday`                            PARSED  64.00h   limitPct 95
+    THE `Monday` ROW IS THE ONE THAT MATTERS AND IT IS EASY TO OMIT: it PARSES and still yields 95,
+    because 64 hours misses the `maxHoursToReset: 24` rung. SO A SUCCESSFUL PARSE IS NOT SUFFICIENT FOR
+    THE RELAXATION — only a parse landing inside the final day is. Without this row a reader concludes
+    `parse succeeds therefore ceiling relaxes`, which is false, and would size the benefit wrongly.
+
     (2) SO THE REGEX IS CORRECT HISTORY, NOT A MISTAKE.
     THE FIX IS TO ACCEPT BOTH RATHER THAN REPLACE ONE. `parseResetInstant` (`src/lib/daemon.ts`) has THREE branches and every one is a human
     form — a month-day form
