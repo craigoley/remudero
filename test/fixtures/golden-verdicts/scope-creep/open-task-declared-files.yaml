@@ -1,0 +1,8 @@
+# W1-T458 (ReviewEvidence.openTaskDeclaredFiles) — a SEPARATE open task (not this fixture's own
+# resolved task, whose declared scope lives in declared-files.yaml) that happens to declare one of
+# the SAME files this diff touches (src/lib/a.ts). This fixture's own task IS resolved
+# (declared-files.yaml is non-empty), so the unresolved_task_scope advisory must stay SILENT
+# despite the overlap — proving the trigger is "no task resolved", never "diff touches a declared
+# path" alone. See the golden-verdicts.test.ts SCOPE CREEP case, which asserts this directly.
+W1-T999-unrelated-task:
+  - src/lib/a.ts
