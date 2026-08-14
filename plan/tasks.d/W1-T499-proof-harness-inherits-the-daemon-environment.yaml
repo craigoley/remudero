@@ -1,0 +1,112 @@
+- id: W1-T499
+  title: "a PR's review verdict is decided by how the daemon happens to be launched — `defaultProofSpawner` passes no `env`, so a proof inherits the orchestrator's whole environment, and the reviewer and CI can disagree about the same sha"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  rationale: "RE-DERIVED AT 0a1179a6 ON THE MAC MINI (zsh 5.9). Tree facts are host-independent; the
+    ledger figures are THIS host's and are marked as such, because the two hosts keep separate ledgers
+    with no route between them.
+    (1) THE MECHANISM, IN ONE LINE OF SOURCE. `defaultProofSpawner` (`src/lib/review.ts`) calls
+    `execFileSync(command, args, { cwd, stdio, timeout, encoding })` — WITH NO `env` KEY — so the
+    child inherits `process.env` entire. THE SAME FILE ALREADY KNOWS BETTER: its `gh` invocation
+    passes `{ stdio: \"pipe\", env, encoding: \"utf8\" }` explicitly. The precedent for an explicit
+    env is inside the very module that omits it.
+    (2) AND THE HARNESS COMPLETES THE CIRCUIT. `test/entrypoint-boot.test.ts`'s `boot`, `bootTimed`
+    and `bootSeq` each spread `...process.env` into the child (SEVEN spread sites in that file), so a
+    variable the daemon carries reaches a test that assumes it absent. That file already practises
+    env hygiene for a different variable — it sets `GIT_CONFIG_NOSYSTEM: \"1\"` precisely so a
+    system-level identity on the host cannot reach the probe. (The commissioning brief called that
+    precedent `GIT_CONFIG_GLOBAL`; the actual variable is `GIT_CONFIG_NOSYSTEM`.)
+    (3) THE DEPLOYMENT SUPPLIES THE VARIABLE AND CI DOES NOT — THIS IS THE ALARMING HALF.
+    `deploy/host-update.sh` passes `-e RMD_RESTART_THROTTLE_S=\"...\"` into the daemon container and
+    `deploy/entrypoint.sh` reads `${RMD_RESTART_THROTTLE_S:-0}`. MEASURED: the variable appears in NO
+    `.github/` file at all (POSITIVE CONTROL on the same query and tree: `GH_TOKEN`/`GITHUB_TOKEN` IS
+    found, in `ci-gate.yml` among others). SO A GITHUB RUNNER AND THE REVIEWER EVALUATE THE SAME SHA
+    IN DIFFERENT ENVIRONMENTS, and can reach opposite verdicts on it.
+    (4) WHAT IT COST. PR #1830 failed review twice — on `a crash loop is still bounded after the
+    change` and `a deliberate stop still leaves the container down` — THE FIX RUNG SPENT BOTH STRIKES
+    AND A THIRD WORKER WAS IN FLIGHT before a recon established the diff was never the cause. The PR
+    was closed as superseded. (ASSUMED, commissioning measurement: same container, same command,
+    unset => 32/32/0; `=2` => 32/30/2 failing tests [13] and [19], byte-for-byte the review's
+    signature; `=120` => the run times out because those tests then really sleep. AND THE CONTROL
+    SETTLES AUTHORSHIP: `origin/main` fails the identical two tests under the identical leak.)
+    (5) AND THE RUNG COULD NEVER HAVE CONVERGED, WHICH IS THE PART A READER WILL MISS. Both criteria
+    were proved by a PURE-PATH `unit test:` proof, so THE WHOLE FILE RUNS: any failure anywhere in it
+    fails BOTH criteria at once, whatever the diff does. A fix worker chasing either criterion was
+    being graded on tests its change could not reach."
+  design: "(i) THE POPULATION IS A CLASS, NOT ONE FILE — MEASURED, AND IT DECIDES THE SHAPE OF THE
+    FIX. 48 files under `test/` spread `...process.env` into a spawned child; 22 reference `RMD_*` at
+    all. POSITIVE CONTROL: 524 files under `test/` contain `assert`, so the sweep sees the tree. A
+    one-file harness patch therefore closes ONE instance of a shape that exists 48 times.
+    (ii) THREE PLACES THE FIX COULD LIVE. ARGUED, RANKED BY NOBODY.
+      THE HARNESS — have `boot`/`bootTimed`/`bootSeq` DELETE the `RMD_*` keys from the spread. Narrow,
+      local, and matches the `GIT_CONFIG_NOSYSTEM` precedent already in that file. Fixes exactly what
+      it names and nothing else.
+      THE SPAWNER — give `defaultProofSpawner` an explicit `env` allowlist. THE ONLY OPTION THAT MAKES
+      THE REVIEWER AND CI AGREE, because it fixes the class rather than an instance. BUT
+      `src/lib/review.ts` IS THE REVIEWER: a wrong allowlist breaks every proof on every PR at once,
+      and these suites spawn REAL containers and genuinely need `PATH`, `HOME`, and the git identity
+      variables to survive. DO NOT PROPOSE STRIPPING `process.env` WHOLESALE.
+      THE PROOF CONVENTION — prefer a name-filtered `unit test:` proof over a pure path, so a
+      criterion fails only on ITS OWN assertion. THIS WOULD HAVE PREVENTED #1830 SPECIFICALLY, since
+      the two failing tests were not the ones the criteria named. It is a CLAUDE.md line plus a
+      shard-writing rule, NOT a subsystem — and W1-T488 just shipped the `check-proof` warning that
+      makes name-filtered proofs safe to rely on. IT DOES NOT FIX THE LEAK; it stops the reviewer
+      being hostage to it.
+    (iii) WHAT MUST SURVIVE ANY ENV NARROWING, so an implementer does not discover it by breaking the
+    suite: `PATH`, `HOME`, and the git identity variables the file already sets deliberately
+    (`GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_0`, `GIT_CONFIG_VALUE_0`,
+    `GIT_TERMINAL_PROMPT`). These tests spawn real containers; a blanket strip breaks them.
+    (iv) HOW MUCH ELSE THIS EXPLAINS — MEASURED, AND THE ANSWER IS `SOME, NOT MOST`. Over this host's
+    full three-form ledger union (coverage control: `run.start` = 257,438 gz / 914 plain / 200 live,
+    every form non-zero) there are 1,623 deduped `review.posted` rows, 365 at `state: failure`, of
+    which 78 carry a proof-execution failure. Those name 15 distinct suites. ONLY THREE OF THE 15
+    SPREAD `process.env` AT ALL: `test/entrypoint-boot.test.ts` (2 failures, 7 spread sites),
+    `test/temp-hygiene-suite.test.ts` (4, 1) and `test/worker-run-lock.test.ts` (3, 1). THE OTHER
+    ELEVEN TOUCH THE ENVIRONMENT NOWHERE, so their failures are genuine and must not be re-litigated
+    as leaks. The case for this task is the MECHANISM and the CI/reviewer divergence, not the rate.
+    (v) NOT IN SCOPE. The freshness pause is a separate shard. So is any change to what a proof
+    RESOLVES to — this task is about the environment a proof RUNS in."
+  acceptance:
+    - claim: "a proof executes in a declared environment rather than inheriting the orchestrator's"
+      proof: "unit test: test/proof-spawner-env-isolation.test.ts"
+    - claim: "the variables these suites genuinely need still reach the child"
+      proof: "unit test: test/proof-spawner-env-isolation.test.ts"
+    - claim: "the same sha reviewed under two different orchestrator environments reaches the same verdict"
+      proof: "unit test: test/proof-spawner-env-isolation.test.ts"
+  origin: recon#proof-harness-env-leak-2026-08-14
+  plan_refs: ["W1-T488"]
+  files: [src/lib/review.ts, test/proof-spawner-env-isolation.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `src/` and `test/`, and `src/lib/review.ts`
+    is the highest-consequence file this could touch.
+    `verify: human` — design (ii) offers three incompatible fixes with different `files:`, and the
+    ruling changes which. THE DECLARED `files:` ASSUME THE SPAWNER OPTION, because it is the only one
+    that makes the reviewer and CI agree. IF THE RULING IS THE HARNESS OPTION, `files:` MUST BECOME
+    `test/entrypoint-boot.test.ts` PLUS THE NEW SUITE; IF IT IS THE CONVENTION, IT MUST BECOME
+    `CLAUDE.md` AND NO `src/` PATH AT ALL. Correct it BEFORE dispatch —
+    `inverseScopeUntouchedFiles` (`src/lib/review.ts`) fails a declared-but-untouched path exactly as
+    `scopeViolationFiles` fails an undeclared one, and this shard would otherwise ship a `files:` list
+    that is wrong for two of three outcomes.
+    `src/run-task.ts` IS NOT DECLARED and nothing here touches it (19,588 lines; naming it serialises
+    this task against every other that does — W1-T471).
+    THE PROOFS ARE PURE-PATH, AND THAT IS A CONCESSION THIS SHARD OWES THE READER RATHER THAN A
+    PREFERENCE. Name-filtering them would be better ON THIS TASK OF ALL TASKS — rationale (5) is
+    exactly the argument for it — and it was tried. IT CANNOT BE DONE IN A FILING. CLAUDE.md is
+    explicit: the `test/foo.test.ts::title` form `satisfies rmd lint-plan but the executor feeds the
+    whole string to --test-name-pattern and matches zero tests`, and a BARE title cannot be written
+    for a suite that does not exist yet. MEASURED: the `::` form drew two fresh `proof-dialect`
+    warnings here, and a warning on a CHANGED task blocks in CI's changed-tasks pass. SO THE
+    CONVENTION OPTION IN DESIGN (ii) IS NOT AVAILABLE TO A FORWARD-REFERENCING SHARD TODAY — it can
+    only be adopted by the IMPLEMENTING PR, once the suite exists. That is a real constraint on
+    option three and the operator should weigh it: the convention fix cannot be self-applied at
+    filing time.
+    A NOTE FOR WHOEVER IMPLEMENTS THE SPAWNER OPTION: the fix is NOT `env: {}`. These proofs run
+    `node --test` in a fresh worktree and shell out to `npm ci`, `grep` and a pinned Playwright CLI —
+    all of which need `PATH` at minimum. An allowlist that omits it turns every proof into
+    `exec_error`, which degrades to the keyword floor and would look like the gate quietly relaxing."
