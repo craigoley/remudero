@@ -476,6 +476,7 @@ import {
   checkCostGovernor,
   checkQueueGovernor,
   checksStateFromRollup,
+  dedupeRollupByLatestAttempt,
   deriveDayCostUsd,
   deriveDisposition,
   isBlockedCi,
@@ -485,6 +486,7 @@ import {
   operatorVerdictEvidence,
   renderClarificationQuestion,
   renderSweepSummary,
+  REQUIRED_CHECK_FAIL,
   runCreditBackfill,
   runEscalationReconcile,
   runSweep,
@@ -13479,6 +13481,9 @@ interface RollupCheck {
   state?: string;
   /** The check's GitHub Actions job URL (…/actions/runs/<run>/job/<job>) — the ci-log mode's log source (W1-T100). */
   detailsUrl?: string;
+  /** When this attempt started — see {@link RollupCheckEntry.startedAt} (lib/sweep.ts), which this
+   *  type is structurally assignable to. Feeds {@link dedupeRollupByLatestAttempt} (W1-T457). */
+  startedAt?: string;
 }
 
 interface RawOpenPr {
@@ -13611,11 +13616,28 @@ export function reviewOrphansFor(
  * daemon/sweep can target a repo other than its own checkout's cwd (the
  * daemon-repo-targeting design), so this must never rely on `gh`'s ambient
  * cwd-inferred repo, which would silently query the WRONG repo's job ids.
+ *
+ * DEDUPED AND ALIGNED WITH `checksStateFromRollup` (W1-T457). This function used to filter to
+ * `FAILURE`/`ERROR` only, over the RAW (non-deduped) rollup — TWO drifts from the red predicate
+ * in lib/sweep.ts: (1) a stale SUPERSEDED attempt of a check name could still appear here even
+ * after a later attempt of the SAME name went green, and (2) `checksStateFromRollup` vetoes on
+ * the wider {@link REQUIRED_CHECK_FAIL} set (also TIMED_OUT/CANCELLED/ACTION_REQUIRED/
+ * STARTUP_FAILURE), so a required check red for one of THOSE reasons made `checksState` "red"
+ * while this producer named nothing — the #1728 defect: an empty failing list dispatched behind
+ * a red disposition, burning a ci-log fix-rung strike with nothing to fix (5 of 6 measured
+ * `fix.dispatch` rows for this shape carried `unmet_count: 0`). Deduping first with the SAME
+ * {@link dedupeRollupByLatestAttempt} rule and filtering on the SAME `REQUIRED_CHECK_FAIL` set
+ * makes this producer and that predicate agree BY CONSTRUCTION — one drifting without the other
+ * is no longer possible, since both read the one shared definition.
+ *
+ * EXPORTED (previously module-private) so this contract has its own direct test coverage —
+ * test/sweep-superseded-check-run.test.ts drives it straight, rather than only indirectly through
+ * the wider sweep pipeline.
  */
-function fetchCiFailures(owner: string, repo: string, rollup: RollupCheck[] | undefined, tailLines = 60): CiFailure[] {
-  const failing = (rollup ?? []).filter((c) => {
+export function fetchCiFailures(owner: string, repo: string, rollup: RollupCheck[] | undefined, tailLines = 60): CiFailure[] {
+  const failing = dedupeRollupByLatestAttempt(rollup ?? []).filter((c) => {
     const s = (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();
-    return s === "FAILURE" || s === "ERROR";
+    return REQUIRED_CHECK_FAIL.has(s);
   });
   return failing.map((c) => {
     const name = c.name ?? c.context ?? "unknown";

@@ -665,6 +665,13 @@ export interface RollupCheckEntry {
   status?: string;
   conclusion?: string;
   state?: string;
+  /**
+   * When this attempt started (W1-T457). gh's own JSON exporter (cli/cli's `export_pr.go`)
+   * populates this for BOTH rollup node shapes — a CheckRun's own `startedAt`, and a
+   * StatusContext's mapped from `createdAt` — so it is present on every entry the real gateway
+   * reports, and is what {@link dedupeRollupByLatestAttempt} sorts on.
+   */
+  startedAt?: string;
 }
 
 /**
@@ -676,15 +683,47 @@ export interface RollupCheckEntry {
  */
 const REQUIRED_CHECK_OK = new Set(["SUCCESS", "SKIPPED", "NEUTRAL"]);
 
-/** Conclusions that veto a required check outright — checksState goes "red". */
-const REQUIRED_CHECK_FAIL = new Set([
-  "FAILURE",
-  "ERROR",
-  "TIMED_OUT",
-  "CANCELLED",
-  "ACTION_REQUIRED",
-  "STARTUP_FAILURE",
-]);
+/**
+ * Conclusions that veto a required check outright — checksState goes "red". EXPORTED (W1-T457)
+ * so run-task.ts's `fetchCiFailures` — the failing-list PRODUCER — filters on the exact SAME set
+ * this file's checksState PREDICATE vetoes on, rather than hand-copying a narrower one that can
+ * silently drift out of agreement (the #1728 defect: `checksState` read "red" off a CANCELLED
+ * entry this set includes, while `fetchCiFailures` filtered to FAILURE|ERROR only and reported
+ * nothing — a red predicate with an empty evidence list, dispatching the ci-log fix rung against
+ * nothing to fix).
+ */
+export const REQUIRED_CHECK_FAIL = new Set(["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"]);
+
+/**
+ * Group rollup entries by check name (a CheckRun's `name`) or commit-status context (a
+ * StatusContext's `context`) and keep ONLY the entry with the latest {@link RollupCheckEntry.startedAt}
+ * — the SAME rule `.github/workflows/ci-gate.yml`'s own dedupe already applies one surface over
+ * (W1-T123, test/ci-gate-dedupe.test.ts's #242 fixture: `group_by(name) | map(max_by(started_at))`),
+ * copied here rather than reinvented (W1-T457's design note (i): "the fix is to give the sweep the
+ * rule the gate already has, not to invent one").
+ *
+ * WHY THIS IS NEEDED, MEASURED (W1-T457, PR #1728's HEAD 94c97e33): a SHA accumulates one rollup
+ * entry PER ATTEMPT, not one per check name — `statusCheckRollup` reported TWO `ci-gate` entries
+ * on that one sha, `completed/cancelled` started 13:48:42 and `completed/success` started
+ * 13:50:02. Without this dedupe, {@link checksStateFromRollup} saw the stale CANCELLED entry (a
+ * member of {@link REQUIRED_CHECK_FAIL}) and read "red" FOREVER even though the check's own
+ * newest attempt had already gone green — a superseded attempt could never be outvoted by its own
+ * successor.
+ *
+ * An entry with no `startedAt` at all sorts as OLDER than any timestamped entry sharing its key,
+ * and a tie (including two entries both missing it) keeps the LAST one encountered — this
+ * function's contract is only that duplicates collapse to exactly one row per name/context, never
+ * that array order carries meaning on its own.
+ */
+export function dedupeRollupByLatestAttempt<T extends RollupCheckEntry>(rollup: readonly T[]): T[] {
+  const latest = new Map<string, T>();
+  for (const c of rollup) {
+    const key = c.name ?? c.context ?? "";
+    const prior = latest.get(key);
+    if (!prior || (c.startedAt ?? "") >= (prior.startedAt ?? "")) latest.set(key, c);
+  }
+  return [...latest.values()];
+}
 
 /**
  * Aggregate ONLY the REQUIRED contexts into the sweep's checksState (W1-T103,
@@ -727,6 +766,12 @@ const REQUIRED_CHECK_FAIL = new Set([
  * separately) still counts — this exclusion is specific to the ONE context
  * that already has its own signal, never a general check-run/commit-status
  * split (that split is NOT in scope here — see the task's design note).
+ *
+ * DEDUPED BY {@link dedupeRollupByLatestAttempt} BEFORE JUDGING (W1-T457): a SHA can carry more
+ * than one rollup entry for the SAME check name (one per attempt), and only the LATEST attempt's
+ * conclusion should vote — a SUPERSEDED entry (e.g. a CANCELLED run of a check whose later
+ * attempt on the same sha went SUCCESS) must never permanently veto this function's answer. See
+ * that function's own doc for the measured live incident this closes.
  */
 export function checksStateFromRollup(
   rollup: RollupCheckEntry[] | undefined,
@@ -736,7 +781,13 @@ export function checksStateFromRollup(
   if (all.length === 0) return "none";
   const required = new Set(requiredContexts ?? []);
   const knownRequired = required.size > 0;
-  const gate = knownRequired ? all.filter((c) => required.has(c.name ?? "") || required.has(c.context ?? "")) : all;
+  // W1-T457: dedupe to ONE entry per check name/context — the LATEST attempt — before this
+  // gate is judged. Dedup never changes gate.length's zero-ness (grouping only merges rows
+  // that share a key, it cannot invent or drop a key entirely), so the "required but not yet
+  // registered" distinction just below is unaffected by it.
+  const gate = dedupeRollupByLatestAttempt(
+    knownRequired ? all.filter((c) => required.has(c.name ?? "") || required.has(c.context ?? "")) : all,
+  );
   // Required contexts are configured but none has registered on this head yet
   // (e.g. the workflow hasn't started) — waiting, not "no checks at all".
   if (gate.length === 0) return knownRequired ? "pending" : "none";
