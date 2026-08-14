@@ -7117,6 +7117,93 @@ test("buildSweepLightHook: runs the restricted light sweep over an empty PR set 
   }
 });
 
+// ── W1-T463 acceptance 3: "no second review lane ships until criterion one is answered" ──
+// The fix this task ships (`runSweepLightPass`, src/lib/sweep.ts) makes `buildSweepLightHook`
+// process every open PR's own `runSweep` call CONCURRENTLY instead of the whole snapshot
+// sequentially — but it is NOT a second lane: it is the SAME single restricted hook, still
+// gated by the SAME `actionable: d => d === "post-review"` predicate. This proves that
+// restriction survived the concurrency change over a MIXED-disposition, multi-PR set: a
+// mergeable PR and a checks-red PR both stand down ("deferred to full sweep (light pass)")
+// exactly as they did before W1-T463, even though both are now dispositioned and processed in
+// parallel rather than one after another.
+function ghStubForTwoMixedDispositionPrs(): string {
+  return `#!/usr/bin/env node
+const a = process.argv.slice(2).join(" ");
+if (a.includes("required_status_checks")) {
+  process.stdout.write(JSON.stringify({ contexts: ["ci-gate", "remudero-review"] }));
+  process.exit(0);
+}
+if (a.includes("pulls?state=open")) {
+  process.stdout.write(JSON.stringify([
+    {
+      number: 900, html_url: "https://github.com/o/r/pull/900", state: "open",
+      body: "Remudero-Task: W1-T900\\n", updated_at: "2026-07-30T00:00:00Z",
+      head: { ref: "run-W1-T900-1", sha: "aaaa900000000000000000000000000000000a" },
+      auto_merge: null,
+    },
+    {
+      number: 901, html_url: "https://github.com/o/r/pull/901", state: "open",
+      body: "Remudero-Task: W1-T901\\n", updated_at: "2026-07-30T00:00:00Z",
+      head: { ref: "run-W1-T901-1", sha: "bbbb901000000000000000000000000000000b" },
+      auto_merge: null,
+    },
+  ]));
+  process.exit(0);
+}
+if (a.includes("aaaa900") && a.includes("check-runs")) {
+  process.stdout.write(JSON.stringify({ check_runs: [{ name: "ci-gate", status: "completed", conclusion: "success" }] }));
+  process.exit(0);
+}
+if (a.includes("aaaa900") && a.includes("/status")) {
+  process.stdout.write(JSON.stringify({ statuses: [{ context: "remudero-review", state: "success" }] }));
+  process.exit(0);
+}
+if (a.includes("bbbb901") && a.includes("check-runs")) {
+  process.stdout.write(JSON.stringify({ check_runs: [{ name: "ci-gate", status: "completed", conclusion: "failure" }] }));
+  process.exit(0);
+}
+if (a.includes("bbbb901") && a.includes("/status")) {
+  process.stdout.write(JSON.stringify({ statuses: [] }));
+  process.exit(0);
+}
+process.stdout.write("{}");
+`;
+}
+
+test("buildSweepLightHook (W1-T463): the concurrency fix does not widen what fires — a mergeable PR and a checks-red PR both still stand down 'deferred to full sweep (light pass)', processed together, never armed/fixed/escalated", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-lighthook-mixed-"));
+  const bin = mkdtempSync(join(tmpdir(), "gh-mixed-"));
+  writeFileSync(join(bin, "gh"), ghStubForTwoMixedDispositionPrs(), { mode: 0o755 });
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}:${oldPath}`;
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  try {
+    const hook = buildSweepLightHook(
+      "o", "r", { root } as never, join(root, "ledger.ndjson"), "RUN-LH-MIXED",
+      { tasks: [] } as never,
+      (step, extra) => { logs.push({ step, extra }); },
+    );
+    await hook();
+    assert.ok(!logs.some((l) => l.step === "sweep_light.error"), `no internal failure; logs=${JSON.stringify(logs)}`);
+    const disposed = logs.filter((l) => l.step === "sweep.dispose");
+    assert.equal(disposed.length, 2, "both PRs were dispositioned — the concurrency fix still reaches every open PR");
+    for (const l of disposed) {
+      assert.notEqual(l.extra?.disposition, "post-review", "neither fixture PR is post-review-eligible in this stub");
+      assert.equal(l.extra?.acted, false, `PR #${l.extra?.pr_number} (${l.extra?.disposition}) must stand down — not actionable in the light pass`);
+    }
+    const notOpen = logs.filter((l) => l.step === "sweep.dispose.not_open");
+    assert.equal(notOpen.length, 2, "both stand-downs are named on the ledger, never silent");
+    assert.ok(
+      notOpen.every((l) => /deferred to full sweep \(light pass\)/.test(String(l.extra?.reason))),
+      `both PRs deferred to the full sweep, unchanged by the concurrency fix; notOpen=${JSON.stringify(notOpen)}`,
+    );
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(bin, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("daemonCommand: builds the real daemon deps (sweep + sweepLight wiring) then a present STOP returns exit 0 before any dispatch/sweep/gh (W1-T254)", async () => {
   // loadConfig() takes no injection and reads $HOME, so redirect HOME at a throwaway
   // dir: the REAL daemonCommand then runs entirely against tmp state, never the live

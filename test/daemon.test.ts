@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { loadPlan, type Plan, type Task } from "../src/lib/plan.js";
 import { daemonCommand, ledgerPathFor, type RunResult } from "../src/run-task.js";
 import { CLAUDE_BIN_ENV_OVERRIDE, claudeExecutableCache } from "../src/lib/worker.js";
@@ -28,6 +29,7 @@ import {
   type OrphanedRun,
 } from "../src/lib/daemon.js";
 import { resolveHeadroomEnabled } from "../src/lib/config.js";
+import { runSweep, DEFAULT_SWEEP_POLICY } from "../src/lib/sweep.js";
 import { pauseDetail, requestPause, requestStop, resumeFleet, stopDetail } from "../src/lib/fleet-control.js";
 import type { MergedSet, OpenPrCheck } from "../src/lib/drain.js";
 import { deriveStatus, type GitHub, type PrRef } from "../src/lib/status.js";
@@ -2410,4 +2412,87 @@ test("idle reasons: an idle daemon SAYS why, and does not repeat an unchanged pi
   assert.deepEqual(t["verify-not-auto"].ids, ["H"], "and the operator is told WHICH");
   assert.equal(t["already-merged"].count, 4, "A,B,C,D were filtered as already merged");
   assert.equal(s, undefined, "the fixture stopped the loop, not the daemon");
+});
+
+// ── W1-T463 acceptance 4: "if a lane ships, a real per-PR guard replaces the ledger-read
+//    dedup before it is enabled" ────────────────────────────────────────────────────────────
+// This task's diagnosis (see test/retro-sweep-ticker.test.ts and src/lib/sweep.ts's
+// `runSweepLightPass`) closed the ~15-minute stall WITHOUT shipping a second review lane —
+// design (ii)/(iii): a per-kind dispatch budget is a follow-up, gated on this diagnosis, never
+// bundled with it. These two tests are the tripwire this criterion asks for: the first pins
+// that NO second lane exists in the shipped daemon wiring; the second demonstrates WHY one
+// can't ship on today's dedup alone, so both must be revisited together before either changes.
+
+const daemonSrc = readFileSync(fileURLToPath(new URL("../src/lib/daemon.ts", import.meta.url)), "utf8");
+
+test("W1-T463: no second review lane shipped alongside the diagnosis — startInFlightTicker still has exactly its two known call sites (retro, dispatch), never a third", () => {
+  const calls = [...daemonSrc.matchAll(/\bstartInFlightTicker\(/g)];
+  // Three occurrences total: the function's own `function startInFlightTicker(` declaration,
+  // plus exactly two CALL sites. A third call site would mean a new, independently-scheduled
+  // ticker exists — the shape design (ii) forbids shipping without the per-PR guard below.
+  assert.equal(calls.length, 3, `expected 1 declaration + 2 call sites, found ${calls.length} occurrence(s) of startInFlightTicker(`);
+  assert.match(daemonSrc, /startInFlightTicker\(deps, pollIntervalMs, log, "retro"\)/, "the retro call site is unchanged");
+  assert.match(daemonSrc, /startInFlightTicker\(deps, pollIntervalMs, log, "dispatch"\)\.stop/, "the dispatch call site is unchanged");
+});
+
+test("W1-T463: DaemonOpts still carries exactly ONE lane-sizing knob (laneCount, dispatch-only) — no second, per-kind budget was introduced", () => {
+  const start = daemonSrc.indexOf("export interface DaemonOpts {");
+  assert.ok(start >= 0, "DaemonOpts must still exist verbatim");
+  const end = daemonSrc.indexOf("\n}", start);
+  const body = daemonSrc.slice(start, end);
+  // Every declared field, in order — matches `name?: type;` (JSDoc lines are skipped, they
+  // carry no trailing semicolon at column 2). A second lane-shaped field (e.g.
+  // `reviewLaneCount`/`reviewBudget`) would show up here as an extra match.
+  const fields = [...body.matchAll(/^ {2}(\w+)\??:/gm)].map((m) => m[1]);
+  const laneFields = fields.filter((f) => /lane|budget/i.test(f));
+  assert.deepEqual(laneFields, ["laneCount"], `DaemonOpts's only lane/budget-shaped field must still be laneCount; found ${JSON.stringify(laneFields)}`);
+});
+
+test("W1-T463: TODAY's post-review dedup is a ledger READ, not a mutex — two concurrent passes over the SAME PR can both act before either's ledger write lands (design (iv): the hazard a second lane must close first, not inherit)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-daemon-t463-mutex-"));
+  const ledgerPath = join(root, "ledger.ndjson");
+  const pr = {
+    prNumber: 584,
+    prUrl: "url/584",
+    taskId: "W1-T584",
+    reviewState: "none",
+    checksState: "green",
+    unmetCriteria: [],
+    priorStrikes: 0,
+    lastActivityAt: "2026-07-16T12:00:00Z",
+    headSha: "aaaa111",
+    autoMergeArmed: false,
+  } as never;
+  let posted = 0;
+  // A gate that lets BOTH concurrent passes reach `runSweep`'s own dedup READ before either one
+  // finishes its `postReview` (and hence its ledger write) — exactly the race window design
+  // (iv) names: "two reviews could both read before either writes".
+  let arrivals = 0;
+  let releaseBoth: (() => void) | undefined;
+  const bothArrived = new Promise<void>((resolve) => {
+    releaseBoth = resolve;
+  });
+  const deps = {
+    ledgerPath,
+    runId: "SWEEP-RACE",
+    now: () => Date.parse("2026-07-17T12:00:00Z"),
+    arm: () => {},
+    close: () => {},
+    dispatchFix: () => {},
+    escalate: () => {},
+    postReview: async () => {
+      arrivals++;
+      if (arrivals >= 2) releaseBoth?.();
+      await bothArrived; // both lanes are now PAST the dedup read, neither has posted yet
+      posted++;
+    },
+  } as never;
+  await Promise.all([runSweep([pr], deps, DEFAULT_SWEEP_POLICY), runSweep([pr], deps, DEFAULT_SWEEP_POLICY)]);
+  assert.equal(
+    posted,
+    2,
+    "TWO concurrent passes over the same PR both posted — today's ledger-read dedup does not " +
+      "arbitrate between simultaneous readers; a second lane MUST replace this with a real " +
+      "per-PR mutex before it is enabled, never inherit this dedup as-is",
+  );
 });
