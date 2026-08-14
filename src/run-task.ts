@@ -9344,7 +9344,7 @@ export function retroTriggerCheck(
  * change exists to remove.
  */
 export function buildAutoTriageDaemonHooks(deps: {
-  check?: () => AutoTriageDecision;
+  check?: (deferralPending: boolean) => AutoTriageDecision;
   runTriage?: (feedbackId: string) => Promise<number>;
   config?: Config;
   now?: () => Date;
@@ -9352,16 +9352,17 @@ export function buildAutoTriageDaemonHooks(deps: {
    *  Production passes none and the checked-in `plan/policy.yaml` governs, exactly as before. */
   policy?: Policy;
 } = {}): {
-  checkAutoTriage: () => AutoTriageDecision;
+  checkAutoTriage: (deferralPending: boolean) => AutoTriageDecision;
   runAutoTriage: (feedbackId: string) => Promise<void>;
 } {
   const check =
     deps.check ??
-    (() => autoTriageCheck({ config: deps.config, now: deps.now?.(), policy: deps.policy }));
+    ((deferralPending: boolean) =>
+      autoTriageCheck({ config: deps.config, now: deps.now?.(), policy: deps.policy, deferralPending }));
   const runTriage = deps.runTriage ?? ((feedbackId: string) => triageCommand([feedbackId]));
   const configFor = () => deps.config ?? loadConfig();
   return {
-    checkAutoTriage: () => check(),
+    checkAutoTriage: (deferralPending: boolean) => check(deferralPending),
     runAutoTriage: async (feedbackId) => {
       // RECORD THE FIRE FIRST, deliberately. If triage throws or the process dies mid-run, the
       // marker has already advanced and the interval bound still holds — the failure costs one
@@ -9391,14 +9392,19 @@ export function buildAutoTriageDaemonHooks(deps: {
  * flipped (#1093). Production still passes nothing and reads the checked-in file exactly as before.
  */
 export function autoTriageCheck(
-  opts: { config?: Config; now?: Date; policy?: Policy } = {},
+  opts: { config?: Config; now?: Date; policy?: Policy; deferralPending?: boolean } = {},
 ): AutoTriageDecision {
   const config = opts.config ?? loadConfig();
   const policy = opts.policy ?? loadPolicy(policyPath(repoRoot));
   const held = readDrainLock(triageLockPath(config.root));
   return decideAutoTriage({
     policy: policy.values.autoTriage,
-    idle: true,
+    // W1-T469 — WAS HARDCODED `idle: true`, WHICH IS WHY THE GUARD WAS DOUBLY UNREACHABLE: the rung
+    // sat inside the daemon's idle branch AND the input could never be false, so `!i.idle` could
+    // not fire even when reached. That is the whole of the 0-of-1,214 measurement. Defaults to
+    // FALSE so a caller that does not supply the signal REFUSES rather than fires — the hand route
+    // (`rmd triage <id>`) does not come through here.
+    deferralPending: opts.deferralPending ?? false,
     // A lock whose holder is DEAD is not held — the same liveness rule `acquireDrainLock` itself
     // applies, so a crashed run cannot wedge the rung shut forever.
     lockHeld: held !== null && defaultIsPidAlive(held.pid),

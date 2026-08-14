@@ -17,14 +17,31 @@ function tmp(p: string): string {
   return mkdtempSync(join(tmpdir(), p));
 }
 
+/**
+ * Two tasks DECLARING THE SAME FILE, so `partitionByFileOverlap` defers the second on every pass.
+ *
+ * W1-T469 — WHY THIS IS A COLLIDING PAIR AND NOT ONE TASK. Every fixture in this file used to be an
+ * all-merged plan (`refreshMerged: () => () => true`), because the rung was reached only from the
+ * daemon's IDLE branch. The operator's ruling replaces that idle conjunct with a DEFERRED PAIRING,
+ * which cannot occur on an idle tick — so an all-merged plan now never consults the rung at all and
+ * every assertion below would pass vacuously against a rung that is never called. The in-flight
+ * guard these tests cover is unchanged; only the way the rung is REACHED has moved.
+ */
 function fixturePlan(dir: string): string {
   const f = join(dir, "tasks.yaml");
   writeFileSync(
     f,
-    "- id: T1\n  title: t\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n",
+    "- id: T1\n  title: t1\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n  status: queued\n  files: [src/shared.ts]\n" +
+      "- id: T2\n  title: t2\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n  status: queued\n  files: [src/shared.ts]\n",
   );
   return f;
 }
+
+/** Nothing merges, so the collision — and therefore the deferral the rung now gates on — persists. */
+const NEVER_MERGED = () => () => false;
+const OK_RUN = async (id: string) => ({ taskId: id, ok: true, merged: true }) as never;
+/** `partitionByFileOverlap` only runs at N>=2; at laneCount 1 the budget is 1 and nothing collides. */
+const TWO_LANES = { laneCount: 2 } as const;
 
 test("REFUSAL: a feedback id with an open triage PR is never re-fired, and the refusal is ledgered with the id and PR number", async () => {
   const { runDaemon } = await import("../src/lib/daemon.js");
@@ -37,10 +54,8 @@ test("REFUSAL: a feedback id with an open triage PR is never re-fired, and the r
     const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
 
     const summary = await runDaemon(plan, {
-      refreshMerged: () => () => true, // everything merged ⇒ every tick is IDLE
-      runOne: async () => {
-        throw new Error("runOne must never run in this fixture");
-      },
+      refreshMerged: NEVER_MERGED,
+      runOne: OK_RUN,
       checkStop: () => {
         stopChecks++;
         return stopChecks > 3 ? "test bound reached" : undefined;
@@ -53,7 +68,7 @@ test("REFUSAL: a feedback id with an open triage PR is never re-fired, and the r
       // The first triage PR is still OPEN — the second fire must be refused, never re-dispatched.
       isFeedbackOpenPr: (feedbackId) => (feedbackId === "fb-1784762630201-4751e0" ? 1184 : undefined),
       log: (step, extra = {}) => lines.push({ step, extra: extra ?? {} }),
-    });
+    }, TWO_LANES);
 
     assert.equal(summary.stopReason, "stopped");
     assert.equal(fires, 0, "an id with an open triage PR must never be re-dispatched");
@@ -84,10 +99,8 @@ test("NO OPEN PR: an id with no open triage PR fires exactly as before this guar
     const lines: Array<{ step: string }> = [];
 
     await runDaemon(plan, {
-      refreshMerged: () => () => true,
-      runOne: async () => {
-        throw new Error("never");
-      },
+      refreshMerged: NEVER_MERGED,
+      runOne: OK_RUN,
       checkStop: () => {
         stopChecks++;
         return stopChecks > 1 ? "bound" : undefined;
@@ -99,7 +112,7 @@ test("NO OPEN PR: an id with no open triage PR fires exactly as before this guar
       },
       isFeedbackOpenPr: () => undefined, // no open PR carries fb-clear's provenance
       log: (step) => lines.push({ step }),
-    });
+    }, TWO_LANES);
 
     assert.equal(fires, 1, "an unguarded id must still fire normally");
     assert.equal(lines.filter((l) => l.step === "auto_triage.fired").length, 1);
@@ -118,10 +131,8 @@ test("NO GUARD WIRED: omitting isFeedbackOpenPr behaves exactly as before this g
     let fires = 0;
     let stopChecks = 0;
     await runDaemon(plan, {
-      refreshMerged: () => () => true,
-      runOne: async () => {
-        throw new Error("never");
-      },
+      refreshMerged: NEVER_MERGED,
+      runOne: OK_RUN,
       checkStop: () => {
         stopChecks++;
         return stopChecks > 1 ? "bound" : undefined;
@@ -133,7 +144,7 @@ test("NO GUARD WIRED: omitting isFeedbackOpenPr behaves exactly as before this g
       },
       // isFeedbackOpenPr deliberately omitted.
       log: () => {},
-    });
+    }, TWO_LANES);
     assert.equal(fires, 1, "an omitted guard must not change existing behaviour");
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -151,10 +162,8 @@ test("STALE CACHE CONFIRMED: a fresh read that the cached open PR already merged
     const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
 
     await runDaemon(plan, {
-      refreshMerged: () => () => true,
-      runOne: async () => {
-        throw new Error("never");
-      },
+      refreshMerged: NEVER_MERGED,
+      runOne: OK_RUN,
       checkStop: () => {
         stopChecks++;
         return stopChecks > 1 ? "bound" : undefined;
@@ -170,7 +179,7 @@ test("STALE CACHE CONFIRMED: a fresh read that the cached open PR already merged
       isFeedbackOpenPr: () => 1184,
       readFeedbackLiveState: () => "MERGED",
       log: (step, extra = {}) => lines.push({ step, extra: extra ?? {} }),
-    });
+    }, TWO_LANES);
 
     assert.equal(fires, 1, "a confirmed-stale cache must stand down and allow the fire");
     assert.equal(
@@ -199,10 +208,8 @@ test("INDETERMINATE LIVE READ FAILS OPEN: an undefined fresh read still refuses 
     const lines: Array<{ step: string }> = [];
 
     await runDaemon(plan, {
-      refreshMerged: () => () => true,
-      runOne: async () => {
-        throw new Error("never");
-      },
+      refreshMerged: NEVER_MERGED,
+      runOne: OK_RUN,
       checkStop: () => {
         stopChecks++;
         return stopChecks > 1 ? "bound" : undefined;
@@ -217,7 +224,7 @@ test("INDETERMINATE LIVE READ FAILS OPEN: an undefined fresh read still refuses 
       // fail-OPEN contract as the task lane's readLiveState: never a reason to allow the fire.
       readFeedbackLiveState: () => undefined,
       log: (step) => lines.push({ step }),
-    });
+    }, TWO_LANES);
 
     assert.equal(fires, 0, "an indeterminate live read must fail OPEN, never authorise a duplicate fire");
     assert.equal(lines.filter((l) => l.step === "auto_triage.skipped_inflight").length, 1);

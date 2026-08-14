@@ -62,7 +62,7 @@ function simulate(policy: AutoTriagePolicy, days = 3, opts: { candidates?: strin
       const now = new Date(start + m * 60_000);
       const d = decideAutoTriage({
         policy,
-        idle: true,
+        deferralPending: true,
         lockHeld: false,
         marker: readAutoTriageMarker(markerPath),
         now,
@@ -145,7 +145,7 @@ test("a fire inside the interval is refused naming minInterval, not the daily ca
     recordAutoTriageFire(markerPath, t0, DAY_MS);
     const d = decideAutoTriage({
       policy: shippedAutoTriagePolicy(),
-      idle: true,
+      deferralPending: true,
       lockHeld: false,
       marker: readAutoTriageMarker(markerPath),
       now: new Date(t0.getTime() + 14 * 60_000), // 14m — one minute short of the shipped 15m floor

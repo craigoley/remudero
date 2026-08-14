@@ -1,0 +1,124 @@
+- id: W1-T491
+  title: "nothing re-checks main's tip, so a plan that two independently-green PRs break on merge stays broken INVISIBLY until the next PR opens — and because a PR's base sha is pinned, every PR opened inside that window fails for a cause its own diff never introduced and a re-run cannot clear"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  rationale: "MEASURED END TO END ON 2026-08-14, re-derived at e8bcaf60 on the mac mini. Everything
+    below is a GitHub API or tree fact and is host-independent.
+    (1) HOW THE WINDOW OPENS, AND IT IS STRUCTURAL RATHER THAN ANYONE'S MISTAKE. Branch protection on
+    `main` reads `strict: false` (measured: `required_status_checks.strict` = false, contexts
+    `[remudero-review, ci-gate]`, `enforce_admins` = true). So two PRs cut from the same base NEVER
+    rebase onto each other. #1816 and #1817 BOTH carry `base.sha = f1ff8fc4`. Each ran `lint-plan`
+    against its OWN tree, each was CORRECTLY GREEN, and each added a differently-NAMED shard
+    declaring the SAME `- id: W1-T488`. Merging both produced a `main` on which `loadPlan` refuses.
+    NEITHER PR WAS WRONG; the pair was.
+    (2) AND NOTHING ON MAIN NOTICES. MEASURED across `.github/workflows/`: exactly FOUR workflows
+    carry a `push:` trigger for `main` — `codeql.yml`, `osv-scanner.yml`, `scorecard.yml`,
+    `semgrep.yml` — ALL of them security scans. `ci.yml` (which owns `lint-plan`, `claims` and the
+    test suite) and `ci-gate.yml` are `pull_request`-triggered ONLY. POSITIVE CONTROL: eight
+    workflows DO carry `pull_request`, so the query reads the triggers correctly and the four is a
+    real four. THE BREAKAGE IS THEREFORE INVISIBLE FROM 15:25:37Z UNTIL THE NEXT PR OPENS.
+    (3) WHAT IT COST, MEASURED. The window ran 15:25:37Z (#1816 merged) to 15:49:46Z (#1820 merged
+    the renumber) — about 24 minutes. Inside it, `lint-plan` FAILED on #1820 and #1821 and would fail
+    on any PR whose base landed in the window. #1819, based at `90fb8ebc` from before the window, was
+    unaffected and passed — so the discriminator really is the BASE, not the diff.
+    (4) THE PART THAT MAKES IT UNRECOVERABLE BY RE-RUN, AND IT IS THE POINT. CI runs
+    `lint-plan -- --base \"$BASE_SHA\"`, which LOADS THE PLAN AT THE BASE SHA. A PR's `base.sha` is
+    PINNED, so repairing `main` does not repair the PR. `lintPlanCommand` (`src/run-task.ts`) returns
+    **2** on that path, after printing `cannot resolve --base <sha>: duplicate task id …` — a
+    DIFFERENT exit code from the **1** it returns for ordinary violations. RE-RUNNING REPLAYS THE
+    ORIGINAL EVENT'S REFS AND RE-READS THE SAME POISONED COMMIT, so it fails identically. VERIFIED
+    STEPWISE: `--base 86ee5b35` fatal; `--base e8bcaf60` clean (0 checked / 0 failing / 0 warnings);
+    `claims` 13/13 and the suites 121/121 on a tree merged with current main. The only thing that
+    clears it is a MERGE FROM MAIN, which makes GitHub recompute the base — observed live on #1821,
+    whose `base.sha` moved `86ee5b35` -> `e8bcaf60` on the push.
+    (5) AND THE REPAIR PR WAS ITSELF CAUGHT BY THE BREAKAGE IT REPAIRED. #1820 — the renumber that
+    fixed `main` — carried `base.sha = 86ee5b35`, so its OWN `lint-plan` failed at 15:27:48Z and its
+    `ci-gate` failed at 15:48:13Z. It merged anyway at 15:49:46Z, by hand, past a failing required
+    check. A BOOTSTRAP TRAP: the cheapest fix for a poisoned main cannot pass the gate the poison
+    breaks."
+  design: "(i) THIS TASK IS THE PREVENTION HALF ONLY, AND THE TWO HALVES MUST NOT BE CONFLATED.
+      PREVENTION — make a broken `main` visible in about a minute instead of at the next PR.
+      RECOVERY — get the PRs already caught inside the window back to green.
+    THIS SHARD IS SCOPED TO PREVENTION. The recovery half is recorded in (iv) and belongs to a
+    separate, smaller change.
+    (ii) THE PROPOSED PREVENTION IS ONE SMALL WORKFLOW, NOT A `push:` ON `ci.yml`. Adding `push:` to
+    `ci.yml` would run the whole suite on every merge — this fleet merges roughly twenty a day, so
+    that is twenty full CI runs bought to answer one cheap question. A DEDICATED workflow that does
+    nothing but load the plan on push to `main` costs seconds and answers exactly the question that
+    went unanswered for 24 minutes. It must FAIL LOUDLY rather than open an issue quietly: the whole
+    defect is that nobody was told.
+    (iii) THE ALTERNATIVE PREVENTION IS `strict: true`, AND ITS COST IS NAMED RATHER THAN HIDDEN. It
+    would have prevented today's breakage ENTIRELY — #1817 would have had to rebase onto #1816's
+    merge, and `lint-plan` would then have caught the duplicate on the PR itself, which is the right
+    place. But it forces a rebase before EVERY merge on a fleet doing about twenty a day, and each
+    rebase re-triggers every required check. THAT IS A LARGE, PERMANENT TAX TO PREVENT A RARE EVENT,
+    and it is recorded as the operator's call rather than recommended here.
+    (iv) THE RECOVERY HALF HAS A HOME ALREADY, AND IT IS A ROW, NOT A MECHANISM. W1-T474 (#1791)
+    SHIPPED AND IS WIRED: `sweepPostFixReverification` runs in `sweepCommand` BEFORE the fix rung,
+    precisely so a PR that inherited a systemic failure is re-verified instead of having a fix worker
+    spend a strike on a defect its diff never introduced. IT DID NOT FIRE HERE FOR A SIMPLE,
+    DESIGNED REASON: it matches a PR's failure against `DEFAULT_FIX_CLASSES`, which carries exactly
+    THREE rows — `CI_GATE_TIMEOUT_FIX_CLASS`, `COVERAGE_TIER_FIX_CLASS`,
+    `CAPABILITY_SNAPSHOT_FIX_CLASS` — and none of them describes a poisoned base. Its own module
+    comment says covering a new systemic fix is `a ROW, never a branch`. SO W1-T474 DOES NOT SUBSUME
+    THIS, BUT IT IS THE RIGHT HOME FOR THE RECOVERY HALF. One caveat that follow-up must settle:
+    `PostFixReverificationDeps.redrive` may re-request the check IN PLACE or push a refresh commit,
+    and ONLY the pushing arm can move a pinned base sha — an in-place re-request re-reads the same
+    poisoned commit, which is exactly what failed today.
+    (v) WHAT THE FLEET CAN SAY ABOUT A RED PR TODAY, ENUMERATED SO THE GAP IS VISIBLE. The fix rung
+    dispatches a worker AT THE PR'S OWN DIFF, where here there is no defect. `DISPOSITION_RULES`'
+    conflicted row fires only on `pr.mergeState === \"dirty\"` AND `isPureConcurrentAddition`; #1821
+    was `mergeable: true`, so it never applied. And `ci-gate` self-clearing works only on the SAME
+    sha, which is precisely the case that does not apply. THERE IS NO SYMBOL ANYWHERE IN `src/` THAT
+    MERGES MAIN INTO A BRANCH: a repo-wide case-insensitive search finds `merge origin/main` only as
+    PROSE inside a remedy message (`src/lib/sweep.ts`) and an escalation option label
+    (`src/run-task.ts`), never as an executed action. A stale-red base sha is a THIRD STATE with no
+    handler.
+    (vi) THE ZERO-COST MITIGATION SHOULD HAPPEN WHATEVER IS RULED, and it is not this task. The tell
+    is specific: `lint-plan` EXITING 2 WITH `cannot resolve --base` MEANS THE BASE IS POISONED, NOT
+    THE DIFF, and the remedy is to merge current main into the branch. One line in CLAUDE.md would
+    have saved a session two wrong diagnoses today. Recorded here so it is not lost if this task is
+    declined outright."
+  acceptance:
+    - claim: "a push to main that leaves the plan unloadable fails a check on main itself, not on the next PR"
+      proof: "unit test: test/main-plan-load-guard.test.ts"
+    - claim: "the guard runs on push to main and is not gated behind a path filter that could make it silently absent"
+      proof: "unit test: test/main-plan-load-guard.test.ts"
+    - claim: "a healthy plan on main leaves the guard green, so it is a detector rather than a permanent red"
+      proof: "unit test: test/main-plan-load-guard.test.ts"
+    - claim: "the guard does not re-run the whole PR suite on every merge"
+      proof: "unit test: test/main-plan-load-guard.test.ts"
+  origin: recon#pinned-base-sha-stale-red-2026-08-14
+  plan_refs: ["W1-T474", "W1-T489"]
+  files: [.github/workflows/main-plan-guard.yml, test/main-plan-load-guard.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `.github/workflows/` and `test/`. The blast
+    radius is one new workflow that can only ever ADD a signal; it gates no merge and blocks no PR.
+    `verify: human` — design (ii) versus (iii) is a cost question about a permanent per-merge tax on a
+    twenty-a-day fleet, and no linter can settle it. This shard recommends neither.
+    `files:` IS TWO PATHS AND `src/run-task.ts` IS DELIBERATELY NOT DECLARED. The exit-2 behaviour
+    this rationale rests on ALREADY EXISTS in `lintPlanCommand`; nothing about it needs to change, so
+    declaring that file would serialise this task against every other naming it (W1-T471) for no
+    edit. RULE 25 IS SATISFIED BY CONSTRUCTION: `.github/workflows/` matches `INSTRUMENT_SURFACE`
+    (`src/lib/review.ts`) and `test/` is excluded from `isProductPath`, so an instrument-plus-test
+    changeset reads `entangled: false` — but it also means THIS TASK MUST NEVER BE BUNDLED WITH A
+    `src/` CHANGE, which is a second reason the recovery half in design (iv) belongs to its own PR.
+    EVERY CRITERION IS `unit test:` ON PURPOSE. A shard whose proofs are all `grep:` patterns against
+    its own file caps its own implementation at `proof_exec: 0/N` and needs an operator override —
+    that happened to #1812 — and a `grep:` naming this shard's own path additionally draws a
+    `proof-scope` warning that BLOCKS in CI's changed-tasks pass.
+    THE RATE IS THREE ID COLLISIONS IN THREE DAYS, BUT ONLY ONE BROKE MAIN, and that asymmetry is the
+    honest sizing input: the id collision is the common event and the broken main is the rare
+    consequence. A reader who wants to argue this is too rare to build should start from that, and
+    from the fact that the recovery, once known, is one command.
+    PROVENANCE. `strict: false`, `enforce_admins: true`, the two `base.sha` values, the four
+    push-triggered workflows, the three `DEFAULT_FIX_CLASSES` rows and every timestamp are GitHub API
+    or tree facts at e8bcaf60, taken 2026-08-14 from the mac mini. NO LEDGER FIGURE IS USED, so
+    nothing here is a claim about either host's ledger, and the mini and Azure keep separate ones
+    with no route between them."
