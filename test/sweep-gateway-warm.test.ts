@@ -279,7 +279,10 @@ test("buildSweepHook builds its board gateway ONCE per daemon start, not once pe
   const hookStart = src.indexOf("export function buildSweepHook(");
   assert.ok(hookStart > 0, "buildSweepHook is where the daemon's per-poll composite is assembled");
   const body = src.slice(hookStart, src.indexOf("\n}\n", hookStart));
-  const ctorIdx = body.indexOf("buildBatchedGithub(owner, repo, { log })");
+  // W1-T468: the call now also threads the daemon's shared REST-pacing instance (`pacer`,
+  // optional and trailing — omitted by every caller here, so this test's own behavior is
+  // unaffected), so the exact substring gained that one extra option key.
+  const ctorIdx = body.indexOf("buildBatchedGithub(owner, repo, { log, pacer })");
   const returnIdx = body.indexOf("return async () => {");
   assert.ok(ctorIdx > 0 && returnIdx > 0, "both landmarks resolve");
   assert.ok(

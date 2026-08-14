@@ -40,6 +40,125 @@ export function openPrsRestArgs(owner: string, repo: string): string[] {
   return ["api", `repos/${owner}/${repo}/pulls?state=open&per_page=100`];
 }
 
+/* ────────────────────────────────────────────────────────────────────────────────────────────
+ * PACING (W1-T468). GitHub's SECONDARY rate limit fires on REQUEST RATE, not on either quota
+ * bucket's remaining volume — measured at filing, core and graphql both sat comfortable while it
+ * tripped. The daemon's poll tick fires THREE independently-built REST reads back to back: this
+ * module's own open-PR enumeration (above/below) plus lib/status.ts's board-gateway PR list and
+ * issue list, all landing in the same wall-clock second at ~63s intervals (the poll cadence).
+ * GitHub documents the secondary limit as a signal to SLOW DOWN, never to retry — this repo has
+ * the proof, a session tripping it BY polling rapidly and then again retrying — so the fix is
+ * spacing, not a retry loop. {@link GhCallPacer} is a SHARED, tick-lifetime pacer: three
+ * independently-polite call sites each pacing only themselves can still collide at second zero,
+ * so the mechanism that actually prevents the collision has to know about all three, which is why
+ * this is one instance threaded through every guarded site rather than three separate ones.
+ * ──────────────────────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * Minimum milliseconds {@link GhCallPacer} enforces between the real `gh` calls it guards, absent
+ * a rate-limit-classified failure. The measured trigger shape is three reads landing in the same
+ * one-second window, so a floor comfortably past one second between guarded calls is enough to
+ * keep them apart without meaningfully taxing the daemon's 60s poll cadence — three guarded waits
+ * cost at most ~4.5s against that 60s interval.
+ */
+export const DEFAULT_GH_PACE_MIN_GAP_MS = 1_500;
+
+/**
+ * The WIDENED gap {@link GhCallPacer} switches every later guarded call to once ANY of them is
+ * classified `rate_limit` (W1-T468 design (iii): "a classified failure must change behaviour, not
+ * just the ledger"). A caller builds ONE pacer per daemon start (mirrors `buildBatchedGithub`'s
+ * own once-per-daemon-start gateway lifetime), so a hit this tick makes the rest of this tick's
+ * guarded calls — and the whole of the next tick's — slower, never merely louder. A later clean
+ * (non-rate_limit) result narrows the gap back to {@link DEFAULT_GH_PACE_MIN_GAP_MS}.
+ */
+export const DEFAULT_GH_PACE_RATE_LIMIT_GAP_MS = 10_000;
+
+/**
+ * Paces a set of independent `gh` call sites sharing one daemon poll tick (W1-T468 design (ii)).
+ * `wait()` blocks the caller until at least the pacer's CURRENT gap has elapsed since the last
+ * call any guarded site made through this same instance, and `recordResult()` feeds a call's
+ * classified outcome back in so a rate-limit hit widens the gap for what follows (design (iii)).
+ */
+export interface GhCallPacer {
+  /** Block until it is safe to issue the next guarded `gh` call, then record that a call is
+   *  starting now. Call this IMMEDIATELY BEFORE the guarded call, never after — pacing bounds the
+   *  gap BETWEEN calls, never a call's own duration. */
+  wait(): void;
+  /** Record how the call `wait()` just gated actually resolved: `true` for a rate-limit-classified
+   *  failure, `false` for anything else (including success). */
+  recordResult(rateLimited: boolean): void;
+}
+
+/**
+ * Build a {@link GhCallPacer}. `now`/`sleepSync` are injectable (mirrors this codebase's other
+ * synchronous-clock seams, e.g. `DeriveDeps.now`) so a test can assert the gap arithmetic and the
+ * rate-limit widen/heal transitions without a real sleep. Real callers omit both and get
+ * `Date.now` plus a genuinely BLOCKING wait — deliberately not `setTimeout`-async: every guarded
+ * call site here shells `gh` through synchronous `execFileSync` already (see lib/status.ts's
+ * `GH_CALL_TIMEOUT_MS` doc — the daemon's one thread is already parked by a real `gh` call), so an
+ * async pacer guarding a synchronous call would not actually delay when that call fires.
+ */
+export function createGhCallPacer(
+  opts: {
+    minGapMs?: number;
+    rateLimitGapMs?: number;
+    now?: () => number;
+    sleepSync?: (ms: number) => void;
+  } = {},
+): GhCallPacer {
+  const minGapMs = opts.minGapMs ?? DEFAULT_GH_PACE_MIN_GAP_MS;
+  const rateLimitGapMs = opts.rateLimitGapMs ?? DEFAULT_GH_PACE_RATE_LIMIT_GAP_MS;
+  const now = opts.now ?? (() => Date.now());
+  const sleepSync = opts.sleepSync ?? defaultBlockingSleepSync;
+  let lastCallAt: number | undefined;
+  let gapMs = minGapMs;
+  return {
+    wait() {
+      if (lastCallAt !== undefined) {
+        const remaining = gapMs - (now() - lastCallAt);
+        if (remaining > 0) sleepSync(remaining);
+      }
+      lastCallAt = now();
+    },
+    recordResult(rateLimited) {
+      gapMs = rateLimited ? rateLimitGapMs : minGapMs;
+    },
+  };
+}
+
+/**
+ * Real (non-test) blocking sleep for {@link createGhCallPacer}'s default `sleepSync`. Node has no
+ * synchronous timer, so this parks the thread on a private `SharedArrayBuffer` via `Atomics.wait`
+ * — the same "the daemon's one thread is already parked by a synchronous call" discipline
+ * `GH_CALL_TIMEOUT_MS` (lib/status.ts) already accepts for this codebase's daemon.
+ */
+function defaultBlockingSleepSync(ms: number): void {
+  if (ms <= 0) return;
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Guard one `gh` ENTRY POINT with a {@link GhCallPacer} (W1-T468): waits its turn, runs `call`,
+ * and reports the outcome back to the pacer via `isRateLimited` — `true` when the thrown error
+ * classifies as `rate_limit` (design (iii)), so a LATER guarded call on the same pacer slows down
+ * rather than colliding again. `pacer` is OPTIONAL and, when omitted, `call` runs immediately with
+ * no gap and no result recorded — the exact pre-W1-T468 behavior, so every existing caller that
+ * does not pass a pacer is unaffected byte-for-byte. Rethrows `call`'s own error unchanged (never
+ * wraps it), so a caller's existing catch/classify logic keeps working verbatim.
+ */
+export function paceGhEntry<T>(pacer: GhCallPacer | undefined, isRateLimited: (err: unknown) => boolean, call: () => T): T {
+  if (!pacer) return call();
+  pacer.wait();
+  try {
+    const result = call();
+    pacer.recordResult(false);
+    return result;
+  } catch (err) {
+    pacer.recordResult(isRateLimited(err));
+    throw err;
+  }
+}
+
 /** The single-PR argv — the `rmd fix` path, which names one PR explicitly. */
 export function singlePrRestArgs(owner: string, repo: string, prNumber: number): string[] {
   return ["api", `repos/${owner}/${repo}/pulls/${prNumber}`];

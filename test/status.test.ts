@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { Plan, Task } from "../src/lib/plan.js";
 import { nextRunnable, type MergedSet } from "../src/lib/drain.js";
+import type { GhCallPacer } from "../src/lib/open-prs-rest.js";
 import {
   buildBatchedGithub,
   classifyGhFailure,
@@ -1541,6 +1542,68 @@ test("W1-T181: an INJECTED fetchAll that throws (not just the default execFileSy
   assert.equal(gh.findMergedByTrailer("W1-T1"), null);
   assert.equal(gh.readFailed?.(), true);
   assert.equal(gh.readFailureReason?.(), "rate_limit");
+});
+
+// ── W1-T468: the board gateway's two REST reads (PR list + issue list) are the FIRST two of the
+// daemon tick's three-call burst that trips GitHub's secondary rate limit. `opts.pacer` gates
+// each real fetch through a shared `GhCallPacer` so this gateway cannot fire either read without
+// waiting its turn — see lib/open-prs-rest.ts's `GhCallPacer`/`paceGhEntry` doc for the mechanism
+// and run-task.ts's `buildSweepHook`/`buildOpenPrViews` for the third (sweep enumeration) site. ──
+
+test("W1-T468: buildBatchedGithub's PR-list fetch waits its turn on an injected pacer and reports a clean result back", () => {
+  const calls: string[] = [];
+  const pacer: GhCallPacer = {
+    wait: () => calls.push("wait"),
+    recordResult: (rateLimited) => calls.push(`result:${rateLimited}`),
+  };
+  const gh = buildBatchedGithub("o", "r", { fetchAll: () => [], pacer });
+  gh.findMergedByTrailer("W1-T1");
+  assert.deepEqual(calls, ["wait", "result:false"], "the pacer gates the real fetch and is told it succeeded");
+});
+
+test("W1-T468: a rate-limit-classified PR-list failure is reported back to the pacer as rateLimited=true, so a LATER guarded call slows down", () => {
+  const calls: string[] = [];
+  const pacer: GhCallPacer = {
+    wait: () => calls.push("wait"),
+    recordResult: (rateLimited) => calls.push(`result:${rateLimited}`),
+  };
+  const rateLimitError = Object.assign(new Error("Command failed: gh pr list"), {
+    status: 1,
+    stderr: "gh: API rate limit exceeded for user ID 123456. (HTTP 403)",
+  });
+  const gh = buildBatchedGithub("o", "r", { fetchAll: () => { throw rateLimitError; }, pacer });
+  assert.doesNotThrow(() => gh.findMergedByTrailer("W1-T1"));
+  assert.deepEqual(calls, ["wait", "result:true"], "a rate-limit-classified throw reports rateLimited=true, never false");
+});
+
+test("W1-T468: a NON-rate-limit PR-list failure reports back rateLimited=false, so an unrelated outage never widens the pacer's gap", () => {
+  const calls: string[] = [];
+  const pacer: GhCallPacer = {
+    wait: () => calls.push("wait"),
+    recordResult: (rateLimited) => calls.push(`result:${rateLimited}`),
+  };
+  const authError = Object.assign(new Error("Command failed: gh pr list"), { status: 1, stderr: "gh: not logged in" });
+  const gh = buildBatchedGithub("o", "r", { fetchAll: () => { throw authError; }, pacer });
+  assert.doesNotThrow(() => gh.findMergedByTrailer("W1-T1"));
+  assert.deepEqual(calls, ["wait", "result:false"], "an auth failure is not a rate-limit signal");
+});
+
+test("W1-T468: buildBatchedGithub's issue-list fetch is paced through the SAME pacer instance as the PR-list fetch", () => {
+  const calls: string[] = [];
+  const pacer: GhCallPacer = {
+    wait: () => calls.push("wait"),
+    recordResult: (rateLimited) => calls.push(`result:${rateLimited}`),
+  };
+  const gh = buildBatchedGithub("o", "r", { fetchAll: () => [], fetchAllIssues: () => [], pacer });
+  gh.issueByUrl?.("https://github.com/o/r/issues/1");
+  assert.deepEqual(calls, ["wait", "result:false"], "the issue fetch is gated and reported exactly like the PR fetch");
+});
+
+test("W1-T468: omitting the pacer leaves buildBatchedGithub's reads untouched — no gap, nothing recorded, the exact pre-W1-T468 behavior", () => {
+  let fetchCalls = 0;
+  const gh = buildBatchedGithub("o", "r", { fetchAll: () => { fetchCalls++; return []; } });
+  gh.findMergedByTrailer("W1-T1");
+  assert.equal(fetchCalls, 1, "the fetch still runs exactly once with no pacer wired");
 });
 
 test("W1-T181: a batched-gateway fetch FAILURE projects indeterminate/throttled through deriveStatus — never the bare merged=false/source=none shape a genuine absence produces (the signal W1-T179's github_unobservable marking is designed to consume)", () => {
