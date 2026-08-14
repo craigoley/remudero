@@ -1,0 +1,128 @@
+- id: W1-T481
+  title: "`diff-coverage.mjs` blocks a function that is CALLED 13 times, because `fnLines` is keyed by LINE and `fnHits` by NAME and both are last-wins — so a shared declaration line resolves to the wrong function and a real FNDA is overwritten by a later zero; the declEntered RULE is correct and the parse feeding it is not"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  rationale: "RE-DERIVED AT 7c4067c ON THE MAC MINI. Every lcov figure below comes from ONE full-suite
+    artifact built from that exact tree in this session (/tmp/full-7c4067c.lcov, 143 SF records, 5,733
+    FN and 5,733 FNDA, control 99,165 DA). The two hosts keep separate ledgers with no ssh route; no
+    figure here is a claim about the Azure fleet.
+
+    (0) THE DEFECT, IN THE SOURCE. `scripts/diff-coverage.mjs` builds two maps in one pass:
+    `fnLines.get(currentPath).set(Number(ln), name)` — keyed by LINE — and
+    `fnHits.get(currentPath).set(name, Number(hits))` — keyed by NAME. BOTH ARE LAST-WINS. So when two
+    FN records share a declaration line, the line resolves to whichever name was parsed last; and when
+    two FNDA records share a name, the last hit count overwrites the earlier one.
+    THE PARSE FEEDING IT IS NOT sound, and the two defects COMPOUND — patching only the FNDA merge leaves the line-keyed
+    lookup still resolving to the wrong function.
+    THE RULE ITSELF IS CORRECT AND MUST NOT BE TOUCHED. `declEntered` exists because, under
+    `--enable-source-maps`, a tsx-compiled map scores a declaration line DA:0 even when the body is
+    fully covered; its own comment states the rule — `an ENTERED function's declaration line is
+    covered, whatever DA says`. The bug is upstream of it.
+
+    (1) THE BLAST RADIUS, MEASURED ON THAT ARTIFACT. **282 (file, line) keys carry MORE THAN ONE FN
+    record**, against a control of 4,042 distinct FN keys — so roughly one declaration line in
+    fourteen is exposed to the line-keyed collision. Real examples, named rather than hypothesised:
+    `src/lib/account-usage.ts` line 593 carries `buildAccountUsageRoute` AND `anonymous_14`;
+    `src/lib/alert-lane.ts` line 279 carries `runAlertLane` AND `anonymous_12`. In both, an EXPORTED
+    function shares its declaration line with an anonymous callback — exactly the shape that makes the
+    lookup resolve to the anonymous one and report an entered function as unentered.
+
+    (2) THE MERGE ARITHMETIC IS MOOT, AND THAT IS THE FINDING — DO NOT RE-OPEN IT. The same artifact
+    carries **1,362 duplicate (file, name) FNDA pairs, 48 of them with more than one NON-ZERO** value.
+    `findMergedByTrailer` in `src/lib/status.ts` carries FNDA:79 and FNDA:1089, so `max` (1089), `sum`
+    (1168) and last-wins (79 or 1089) genuinely differ. BUT THE SOLE CONSUMER IS `declEntered`, WHICH
+    USES THE VALUE ONLY AS `(fnHit?.get(name) ?? 0) > 0` — A BOOLEAN. All three are therefore
+    equivalent here, and the correct fix is not an arithmetic at all but the question WAS ANY RECORD
+    FOR THIS NAME NON-ZERO. Choosing `sum` would invent a call count nothing consumes; choosing `max` a
+    maximum nothing consumes.
+    AND THERE IS NO SECOND FINDING IN THE SIBLING SCRIPT: `scripts/coverage-ratchet.mjs` reads NO `FN`
+    and NO `FNDA` records at all (control: it reads no `BRDA` either — it sums only LF/LH/BRF/BRH), so
+    the two scripts cannot disagree about function hits.
+
+    (3) PERMISSIVE COSTS NO STRICTNESS AT A SHARED LINE, AND STRICT WOULD BREAK THE FEATURE. With one
+    function entered and one not, the UNENTERED function's BODY still carries its own DA records and is
+    judged independently — so treating the shared declaration line as covered lets no uncovered code
+    through; it only stops one line being double-counted. The strict reading would block a
+    genuinely-covered exported function because an anonymous callback happens to share its line, which
+    IS the false positive being fixed, and would make the declaration-line override useless for the one
+    case it exists to serve.
+
+    (4) CORROBORATION THAT ARRIVED INDEPENDENTLY, FROM CI RATHER THAN FROM THIS ANALYSIS. PR #1783
+    blocked on head `af3034a` with fourteen added lines: thirteen genuinely untested in
+    `coverageImproveCommand`, and one in `src/lib/coverage-improvement.ts`. On the next head `ca3ea9b`,
+    after tests were added, THE THIRTEEN CLEARED AND THE ONE PERSISTED. The fourteenth is the tool, not
+    a gap. That head's lcov is not reproducible from this tree, so the named examples in (1) — which
+    are — carry the argument instead.
+
+    (5) W1-T421 IS A DIFFERENT DEFECT AND MUST NOT BE TRAILERED FOR THIS. No shard names `FNDA`,
+    `declEntered`, `fnLines` or `fnHits` — 0 each, against a positive control of 10 shards naming
+    `lcov`, so the corpus is readable and this defect is genuinely unfiled. The nearest candidate,
+    W1-T421, has a DIFFERENT measured cause — tmpdir mutant-module copies displacing coverage records —
+    its `files:` are entirely `test/`, and its thesis is that the gate is correct and its INPUT is
+    destroyed. Trailering it here would credit it as implemented by a change that does the opposite of
+    what it specifies, and would leave its real test-side work undone."
+  design: "THE FIX IS THREE HUNKS AND THE FIXTURE IS THE LASTING PART.
+    (i) Key the hit lookup so a name's records are reduced to ANY-NON-ZERO rather than last-wins, and
+    resolve a declaration line to ANY function declared there that was entered, rather than to the last
+    name parsed. Both halves are required; either alone leaves the false positive reachable.
+    (ii) THE DURABLE ARTEFACT IS A FIXTURE PAIR modelled on the existing
+    `test/fixtures/diff-coverage/fnda-decl.lcov` and `fnda-uncalled.lcov`: a SHARED declaration line
+    carrying one entered function and one unentered, plus its diff. Those two existing fixtures encode
+    the entered and unentered cases separately; nothing today encodes them COLLIDING, which is why the
+    defect shipped.
+    (iii) THIS IS AN INSTRUMENT-ONLY CHANGESET. `scripts/diff-coverage.mjs` matches
+    `INSTRUMENT_SURFACE` (`src/lib/review.ts`), so Rule 25 refuses any diff that also carries a
+    product path. VERIFIED WITH CONTROLS at this sha: the script plus its fixtures plus its test reads
+    entangled=FALSE, the same script bundled with `src/lib/review.ts` reads entangled=TRUE, and a
+    src-only set reads FALSE. Nobody may bundle this with a `src/` change."
+  acceptance:
+    - claim: the shard records that the declEntered rule is sound and the parse beneath it is not
+      proof: "grep: THE PARSE FEEDING IT IS NOT in plan/tasks.d/W1-T481-diff-coverage-fnda-keyed-two-ways.yaml"
+    - claim: the shard settles the merge arithmetic as moot because the only consumer is a boolean
+      proof: "grep: THE MERGE ARITHMETIC IS MOOT in plan/tasks.d/W1-T481-diff-coverage-fnda-keyed-two-ways.yaml"
+    - claim: the shard argues that the permissive reading gives up no strictness
+      proof: "grep: PERMISSIVE COSTS NO STRICTNESS in plan/tasks.d/W1-T481-diff-coverage-fnda-keyed-two-ways.yaml"
+    - claim: the shard names the fixture pair rather than the script edit as the durable artefact
+      proof: "grep: THE FIXTURE IS THE LASTING PART in plan/tasks.d/W1-T481-diff-coverage-fnda-keyed-two-ways.yaml"
+    - claim: the shard forbids bundling the fix with any product change under Rule 25
+      proof: "grep: THIS IS AN INSTRUMENT-ONLY CHANGESET in plan/tasks.d/W1-T481-diff-coverage-fnda-keyed-two-ways.yaml"
+    - claim: the shard establishes that the nearest existing task is a different defect
+      proof: "grep: W1-T421 IS A DIFFERENT DEFECT in plan/tasks.d/W1-T481-diff-coverage-fnda-keyed-two-ways.yaml"
+    - claim: the patched script still blocks a genuinely uncovered added line, not only the false positive
+      proof: "unit test: test/diff-coverage.test.ts"
+  origin: recon#diff-coverage-fnda-keying-2026-08-14
+  plan_refs: ["W1-T421", "W1-T143"]
+  files: [scripts/diff-coverage.mjs, test/diff-coverage.test.ts, test/fixtures/diff-coverage/fnda-shared-decl.lcov, test/fixtures/diff-coverage/fnda-shared-decl.diff]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT. `sizingViolation` (`src/lib/task-linter.ts`) blocks at
+    `>=2 subsystems while risk<high`, and `files:` spans `scripts/` and `test/`. The band is Rule 19's
+    SPAN, not blast radius — the runtime effect is one gate reading one line differently.
+
+    THE ACCEPTANCE IS THE FALSIFIER, NOT THE SYMPTOM, AND THIS IS THE POINT MOST LIKELY TO BE GOT
+    WRONG. A gate fix that proves only that the false positive is gone is INDISTINGUISHABLE FROM
+    SWITCHING THE GATE OFF. The implementer must demonstrate BOTH DIRECTIONS ON A SAME-TREE PAIR: the
+    patched script reads OK on a real lcov and diff, AND still BLOCKS genuinely-uncovered added lines.
+    The `unit test:` criterion above is the file that already carries four FNDA assertions, including
+    the UNENTERED case that must keep blocking.
+
+    BUILD THE LCOV AND THE DIFF FROM THE SAME TREE, AND NAME THE SHA. A session voided a whole re-run
+    by reusing artifact filenames across a session while `origin/main` moved: its lcov and its diff no
+    longer described the same tree and every number it produced was meaningless. This shard's own
+    figures come from `/tmp/full-7c4067c.lcov`, built from 7c4067c in the filing session, and the sha
+    is named for exactly that reason. A stale artifact from 2026-08-11 was rejected here rather than
+    reused, because it held 108 SF records — a SCOPED run, not the merged full-suite lcov the census
+    needs — and would have under-reported the duplicate census by two orders of magnitude.
+
+    `files:` IS DERIVED BY INVOCATION, NOT BY MENTION, and is kept to four paths because
+    `partitionByFileOverlap` blocks on declared paths. 25 test files MENTION diff-coverage; only
+    `test/diff-coverage.test.ts` carries the FNDA assertions this change alters (four of them), so it
+    is the one existing test declared. `src/run-task.ts` is DELIBERATELY NOT DECLARED — at 19,588 lines
+    every task naming it serialises against every other that does (W1-T471), and this change does not
+    touch it. The shard's own path is NOT declared either: adding it converts the endemic proof-scope
+    warnings into one hard `rule15-filing` violation."

@@ -118,4 +118,76 @@
     a TREE FACT at 71cedbbc and is host-independent. The 12 `preflight.failed` rows, the 254
     `blocked_ci` rows and the 81/51 split are THE MINI's and are NOT claims about the Azure fleet. A
     session compared two corpora tonight and called the difference a refutation; the totals coincided
-    at 30 and the trap was invisible. RE-DERIVE ON WHICHEVER HOST WILL ACT ON THIS."
+    at 30 and the trap was invisible. RE-DERIVE ON WHICHEVER HOST WILL ACT ON THIS.
+
+    ── AMENDMENT 2026-08-14, RE-DERIVED ON THE MAC MINI AT f0ce71d ──
+    THE FLEET DROPPED IT AND THE FIRST MEASURED COST HAS ARRIVED. Option (b) shipped as #1777
+    (`e26f928`) under a DIFFERENT shard, W1-T464, which was `verify: auto` and merged while this
+    shard sat unmerged asking for the ruling. THIS SHARD IS STILL OPEN — `verify: human`,
+    `status: queued`, and ZERO commits on origin/main name W1-T472 (control: two name W1-T464). No
+    closure has landed; this amendment records evidence into an OPEN shard, and it is EVIDENCE
+    RATHER THAN A REVERSAL.
+
+    (1) THE OBLIGATION IS GONE FROM BOTH PROMPTS. `ciParityContractLines()` has NO definition and NO
+    call site: 2 references in `src/` and both are COMMENTS (`src/lib/compaction.ts`,
+    `src/run-task.ts`), plus 2 more in `test/ci-parity-contract.test.ts`'s header. CONTROL, same
+    query shape: `commitMessageContractLines` reads 7 references including its `export function` and
+    two live spreads. `src/run-task.ts` records why, verbatim: `this rung used to spread
+    ciParityContractLines() here ... but the orchestrator never gated on a preflight failure (no
+    branch, no early return), so the ~15-17 minute step was paid on every fix round without ever
+    blocking one. Removed from BOTH prompts together` — so the FIX RUNG lost the same obligation the
+    implement contract did.
+
+    (2) NO WORKER-SIDE CHECK CAN CATCH THIS CLASS NOW. What survives is `--fast`, whose
+    `FAST_GATE_STEPS` (`src/lib/ci-parity.ts`) is exactly SEVEN entries — `cli-reference:check`,
+    `claims`, `learnings-budget-ratchet`, `jscpd`, `depcruise`, `api-client:check`,
+    `no-hand-rolled-fetch:check` — and `diff-coverage` is NONE of them (control: 3 of the 7 contain
+    the string `check`, so the query sees the list). `runPreflightFast` never shells the suite by
+    construction; its own comment says it only ever invokes `npm run --silent <script>` for a script
+    named in that table.
+
+    (3) THE CATCH, MEASURED. PR #1783 (`run-W1-T470-...`) blocked on head `af3034a` with
+    `diff-coverage: BLOCKED` naming FOURTEEN added lines: thirteen in `src/run-task.ts` — the
+    `coverageImproveCommand` arms — and one in `src/lib/coverage-improvement.ts`. The thirteen were
+    GENUINELY UNTESTED, the classic shape CLAUDE.md names: the seam's injected path was covered while
+    the default arm shipped unrun. The identical script runs as `coverage-ratchet:diff-coverage`
+    under `--ci-parity`, so a worker-side run would have printed that exact BLOCKED output before the
+    push. CORROBORATION FROM THE NEXT HEAD: on `ca3ea9b`, after tests were added, all thirteen
+    cleared and the `coverage-improvement.ts` line PERSISTED — which is what points at (6) rather
+    than at a real gap.
+
+    (4) AND THE COUNTER, STATED BESIDE IT, BECAUSE ONE DATA POINT IS NOT A VERDICT. ONE CATCH AGAINST
+    A GATE THAT HAS NEVER EARNED ITS COST is evidence, not a ruling. PROVENANCE PER HOST, and the two
+    must not be merged. AZURE, carried verbatim from `src/lib/compaction.ts` and NOT verifiable from
+    this host: 17 `preflight.failed` rows, 15 of them a `test/preflight.test.ts` fake-spawn defect
+    (W1-T455 owns it), and of the 2 genuine one was UNDECIDABLE and one was WRONG — CI passed 21/22
+    with 1 neutral on the identical sha. Earned cost: ZERO. THE MINI, re-counted here on its own
+    corpus over the three-form union: 27 distinct `preflight.failed` rows, all 27 in the PLAIN form,
+    ZERO in gz and ZERO in the live file — so a live-only read would have reported none. Positive
+    control `sweep.pass` = 1897; negative control 0. Cost side unchanged: 15-17 minutes of a lane on
+    every implement and every fix round.
+
+    (5) THE INSTANCE SUPPLIES A SHARPER FRAMING, AND IT NARROWS THE ORIGINAL FORK. The question may
+    not be gate-the-whole-preflight versus drop-it, but WHICH SINGLE STEPS ARE WORTH A WORKER'S TIME.
+    `diff-coverage` is cheap in itself — it scores only changed lines. BUT: diff-coverage CANNOT RUN
+    IN --fast AS THINGS STAND. `scripts/diff-coverage.mjs` reads its lcov with a BARE, UNGUARDED
+    `readFileSync(values.lcov)` defaulting to `coverage/lcov.info`; the only producer of that file is
+    the coverage suite run (`--test-reporter=lcov --test-reporter-destination=coverage/lcov.info`,
+    `.github/workflows/ci.yml`); and `coverage/` is GITIGNORED, so a fresh worker worktree never has
+    one. A missing lcov is an ENOENT throw, not a skip.
+    SO THE FORK STANDS AS FILED — but with one figure the original did not have, and it is the
+    costed third option nobody had priced: the dependency is the COVERAGE suite, not the whole
+    parity run. By this shard's own decomposition in (i)(c) — a 4-6 minute non-coverage suite plus a
+    ~10 minute coverage suite plus 21 cheaper steps — a coverage-only preflight sufficient to feed
+    `diff-coverage` costs about TEN minutes rather than 15-17. Cheaper than what was dropped, not
+    cheap. THIS AMENDMENT DOES NOT RESOLVE THE FORK; it records the option and its price.
+
+    (6) THE FOURTEENTH LINE WAS AN INSTRUMENT BUG, CITED AND DELIBERATELY NOT SCOPED IN. In
+    `scripts/diff-coverage.mjs`, `fnLines` is keyed by LINE and `fnHits` by NAME and BOTH are
+    last-wins, so a shared declaration line resolves to the wrong function and a real `FNDA:13` can
+    be overwritten by a later `FNDA:0`. That is instrument-only surface and belongs in its own PR;
+    naming it here is provenance for why (3)'s fourteenth line survived its tests, not scope.
+
+    WHY THIS MATTERS EVEN IF W1-T472 IS CLOSED AS MOOT: the fleet now ships with NO worker-side
+    coverage check at all, so this question WILL recur. The amendment exists to make the evidence
+    findable when it does."

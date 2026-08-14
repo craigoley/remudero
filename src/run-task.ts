@@ -494,6 +494,7 @@ import {
   REQUIRED_CHECK_FAIL,
   runCreditBackfill,
   runEscalationReconcile,
+  runPostFixReverification,
   runSweep,
   runSweepLightPass,
   strikeCapForAnswer,
@@ -505,16 +506,19 @@ import {
   type CreditCandidate,
   type EscalationReconcileCandidate,
   type EscalationReconcileSummary,
+  type FixClass,
   type FixDispatchEvidence,
   type LiveStateResult,
   type MergeConflictEvidence,
   type OpenPrView,
+  type PostFixReverificationSummary,
   type QueueGovernorResult,
   type PostReviewStallVerdict,
   type StrikeAttempt,
   type SweepDeps,
   type SweepPolicy,
   ABSENT_REPUSH_CAP,
+  DEFAULT_FIX_CLASSES,
   detectPostReviewStall,
 } from "./lib/sweep.js";
 import { applyCorrection } from "./lib/correct.js";
@@ -14972,9 +14976,20 @@ export async function sweepCommand(rest: string[]): Promise<number> {
     return 1;
   }
 
+  // W1-T474 — the post-fix re-verification rung, RUN BEFORE the fix rung below (rationale (10)):
+  // once a systemic cause merges (a DEFAULT_FIX_CLASSES row's `fixPrNumber`), a PR that inherited
+  // that failure gets re-verified here rather than having the fix rung spend a strike repairing a
+  // defect its own diff never introduced. `redrivenThisPass` is then excluded from `runSweep`
+  // below so the two rungs never both derive a disposition for the same PR in one pass.
+  const reverifySummary = await sweepPostFixReverification(owner, repo, openPrs, ledgerPath, runId, log, { dryRun });
+  const redrivenThisPass = new Set(
+    reverifySummary.results.filter((r) => r.outcome === "redriven").map((r) => r.prNumber),
+  );
+  const prsForFixRung = openPrs.filter((pr) => !redrivenThisPass.has(pr.prNumber));
+
   const effects = buildSweepEffects(owner, repo, config, ledgerPath, runId, plan, log, DEFAULT_SWEEP_POLICY);
   const summary = await runSweep(
-    openPrs,
+    prsForFixRung,
     { ...effects, ledgerPath, runId, log, dryRun },
     DEFAULT_SWEEP_POLICY,
   );
@@ -15018,6 +15033,7 @@ export async function sweepCommand(rest: string[]): Promise<number> {
   console.log(
     `### rmd sweep${dryRun ? " --dry-run" : ""} — ${owner}/${repo}\n` +
       renderSweepSummary(summary) +
+      `\npost-fix re-verification: ${reverifySummary.total} open PR(s) checked · ${reverifySummary.redriven} redriven` +
       `\ncredit backfill: ${creditSummary.total} candidate(s) reconciled · ${creditSummary.corrected} corrected` +
       `\nescalation reconcile: ${reconcileSummary.total} open needs-human issue(s) checked · ${reconcileSummary.closed} closed` +
       `\nworktree reap: ${reapSummary.reaped.length} worktree(s) reaped · ${reapSummary.reapedLocks.length} widowed lock(s) reaped`,
@@ -15071,6 +15087,83 @@ export async function sweepEscalationReconcile(
     log,
     dryRun: opts.dryRun,
   });
+}
+
+/**
+ * THE W1-T474 CALL SITE for W1-T124's post-fix re-verification rung (`runPostFixReverification`,
+ * src/lib/sweep.ts) — built and unit-tested (test/post-fix-reverification.test.ts) but callerless
+ * until this task. For every open PR whose recorded failure matches a {@link DEFAULT_FIX_CLASSES}
+ * row whose `fixPrNumber` has MERGED, mints a fresh head via the SAME `pushEmptyCommit` leaf the
+ * ABSENT remedy (`repushAbsent` in {@link buildSweepEffects}) already uses — never a check
+ * re-run: W1-T474's rationale (7) measured that the `pull_request` default checkout is the
+ * PINNED merge ref, so re-requesting the same check-run replays the identical stale tree. Only a
+ * new push (which fires `synchronize` and recomputes `refs/pull/N/merge` against CURRENT main)
+ * actually changes what gets tested.
+ *
+ * `isMergedByNumber` defaults to a real `gh pr view --json state` read (mirrors `ghLiveStateByNumber`'s
+ * own shape) so a class's fix is only ever treated as merged off a LIVE read, never an assumption.
+ * `openPrs` is the caller's own already-fetched snapshot (never a second `buildOpenPrViews` read)
+ * so this rung and `runSweep` observe the identical state for the same pass.
+ *
+ * MUST be called BEFORE `runSweep` (rationale (10)): the caller is responsible for excluding this
+ * pass's `outcome === "redriven"` PRs from the list it hands `runSweep`, so the fix rung never
+ * spends a strike deriving a disposition for a PR this rung just acted on in the same pass — a
+ * fresh head carries no settled checks/review yet, so no rung should dispose it again until the
+ * NEXT poll observes GitHub's own post-push state.
+ */
+export async function sweepPostFixReverification(
+  owner: string,
+  repo: string,
+  openPrs: OpenPrView[],
+  ledgerPath: string,
+  runId: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  opts: {
+    dryRun?: boolean;
+    classes?: readonly FixClass[];
+    pushEmptyCommit?: typeof gitPushEmptyCommit;
+    isMergedByNumber?: (prNumber: number) => boolean;
+  } = {},
+): Promise<PostFixReverificationSummary> {
+  const classes = opts.classes ?? DEFAULT_FIX_CLASSES;
+  const pushEmptyCommitImpl = opts.pushEmptyCommit ?? gitPushEmptyCommit;
+  const isMergedByNumber = opts.isMergedByNumber ?? ((n) => ghLiveStateByNumber(owner, repo, n) === "MERGED");
+
+  const mergedFixPrNumbers = new Set<number>();
+  for (const fixPrNumber of new Set(classes.map((c) => c.fixPrNumber))) {
+    if (isMergedByNumber(fixPrNumber)) mergedFixPrNumbers.add(fixPrNumber);
+  }
+
+  return runPostFixReverification(
+    openPrs,
+    mergedFixPrNumbers,
+    {
+      // W1-T474 rationale (8): the effect the ABSENT remedy already ships, reused verbatim rather
+      // than a new outward path — an empty commit on the PR's OWN branch (never --force, never a
+      // rebase, per src/lib/sweep.ts's own house rule). No settled `fresh` view is returned: a
+      // push cannot observe GitHub's own re-derived checks/review synchronously, so (design note
+      // ii, sweep.ts) this pass records the redrive and stops — the next ordinary sweep re-derives
+      // the disposition once the fresh head's state has actually landed.
+      redrive: (pr, cls) => {
+        if (!pr.headRefName) return {};
+        pushEmptyCommitImpl(
+          repoRoot,
+          pr.headRefName,
+          pr.headSha,
+          `chore(ci): re-trigger checks on #${pr.prNumber}\n\n` +
+            `${cls.description}\n\nThe fix (#${cls.fixPrNumber}) has merged since this head was tested; this\n` +
+            `empty commit mints a fresh head sha so the required checks recompute against CURRENT\n` +
+            `main. Automated by the post-fix re-verification rung (W1-T474/W1-T124).`,
+        );
+        return {};
+      },
+      ledgerPath,
+      runId,
+      log,
+      dryRun: opts.dryRun,
+    },
+    classes,
+  );
 }
 
 /**
@@ -15342,8 +15435,16 @@ export function buildSweepHook(
   return async () => {
     try {
       const openPrs = buildOpenPrViews(owner, repo, ledgerPath, { pacer });
+      // W1-T474 — the post-fix re-verification rung, on the daemon's own poll cadence and, same
+      // as `sweepCommand`, run BEFORE `runSweep` so the fix rung never spends a strike on a PR
+      // this pass just redrove (rationale (10) — see `sweepPostFixReverification`'s own doc).
+      const reverifySummary = await sweepPostFixReverification(owner, repo, openPrs, ledgerPath, runId, log);
+      const redrivenThisPass = new Set(
+        reverifySummary.results.filter((r) => r.outcome === "redriven").map((r) => r.prNumber),
+      );
+      const prsForFixRung = openPrs.filter((pr) => !redrivenThisPass.has(pr.prNumber));
       const effects = buildSweepEffects(owner, repo, config, ledgerPath, runId, plan, log, DEFAULT_SWEEP_POLICY);
-      await runSweep(openPrs, { ...effects, ledgerPath, runId, log }, DEFAULT_SWEEP_POLICY);
+      await runSweep(prsForFixRung, { ...effects, ledgerPath, runId, log }, DEFAULT_SWEEP_POLICY);
       // fb-1784756088300-6a481e: the escalation-lifecycle reconciler rung — closes stale
       // needs-human issues whose referenced task has since resolved, on the daemon's own
       // cadence. The missing third leg of the escalation lifecycle (creation W1-T8, dedup
