@@ -2,7 +2,13 @@ import { createHash } from "node:crypto";
 import { relative, sep } from "node:path";
 import type { AcceptanceCriterion, Plan, Task, TaskStatus } from "./plan.js";
 import { isInPlanScope } from "./plan-architect.js";
-import { isDemonstrationProof, isDialectPrefixed, parseWhitelistedProof, type WhitelistedProof } from "./review.js";
+import {
+  isDemonstrationProof,
+  isDialectPrefixed,
+  parseWhitelistedProof,
+  type NameFilterResolution,
+  type WhitelistedProof,
+} from "./review.js";
 import {
   bestNearDuplicate,
   DEFAULT_DUPLICATE_CUTOFF,
@@ -63,6 +69,7 @@ export type LintCheck =
   | "proof-resolvability"
   | "proof-grep-safety"
   | "proof-scope"
+  | "proof-name-resolution"
   | "post-merge-amendment"
   | "provenance"
   | "call-site"
@@ -921,6 +928,108 @@ export function proofScopeViolations(task: Task, opts: LintOpts = {}): LintViola
   return violations;
 }
 
+// ── PROOF-NAME-RESOLUTION (W1-T488 — the literal-substring trap) ────────────
+//
+// A name-filtered `unit test: <title>` proof (parseTestTarget, review.ts) is NOT a regex against
+// real test titles: `escapeRegExp` runs on the body FIRST, so `.` `(` `)` `[` `]` and every other
+// regex metacharacter match only THEMSELVES. A title an author wrote with `.` standing in for a
+// symbol resolves to ZERO real tests and reads `not_executable` — silently, with no error, and
+// the criterion falls back to the keyword floor looking healthy. OBSERVED live (W1-T245/#651): 4
+// of 5 proofs executed and the 5th used `.` for the parentheses in the test's own title.
+//
+// REUSES resolveNameFilteredCandidates (review.ts) — the SAME resolver `execWhitelistedProof`
+// itself calls before ever spawning `node --test` — so this check can never disagree with the
+// reviewer about what a proof's raw name resolves to (the same rule {@link proofScopeViolations}
+// above already applies to proof-scope). NOT a reimplementation of that decision: `resolved` /
+// `absent` / `unresolvable` are read verbatim off its return value.
+//
+// INJECTED, LIKE `opts.moduleExists` — resolveNameFilteredCandidates shells out to `grep` against
+// a real checkout, and this module reads no disk (the same "no predicate ⇒ no opinion" contract
+// {@link callSiteViolations} already uses). Absent `opts.resolveNameFilteredCandidates` this check
+// is silent. NOT wired to any real call site by this task (`run-task.ts`'s pre-dispatch guard and
+// `lintPlanCommand` are both outside this task's declared `files:`) — shipped here as a tested,
+// directly callable function ready for that follow-up wiring, the same posture W1-T420's
+// `learningDuplicateViolation` documents for its own out-of-scope gate.
+//
+// THE ZERO-MATCH WARN IS NARROWED, and that narrowing is a MEASURED call, not a guess (design
+// point 3 required the measurement before shipping). A naive "WARN on every zero-resolution
+// name-filtered proof" was run once against the live open queue (338 tasks, 2026-08-14): 251 of
+// 319 open name-filtered proofs (78.7%) resolve to zero — almost all of them multi-clause SCENARIO
+// NARRATIVES (`looksLikeScenarioNarrative`, defined above) that `proofDialectViolations` already
+// warns about via a different signal, not the wildcard-confusion defect this check exists to
+// name. Restricting to proofs that ALSO carry a regex metacharacter still left 145/319 (45.5%) —
+// most of those narratives again, just ones that happen to contain a `.` or `(`. Restricting
+// FURTHER to "contains a metacharacter AND does not read as a scenario narrative" — the same
+// narrative guard {@link proofResolvabilityViolations} already exempts a single plausible test
+// title from — cut it to 15/319 (4.7%), a high-precision set where the metacharacter is plausibly
+// load-bearing punctuation inside an otherwise title-shaped body rather than narrative prose. That
+// is the shape this check warns on. The MANY-match warn needed no such narrowing: it fired on
+// 4/319 (1.25%) of the same corpus, so it is reported unconditionally.
+
+/** Mirrors the exact character class `escapeRegExp` (review.ts, not exported) makes inert on a
+ *  name-filtered proof's raw title — used only to NAME which of them a title contains, for the
+ *  warning message. Detection only; the resolution decision itself never touches this and comes
+ *  from {@link LintOpts.resolveNameFilteredCandidates} alone. */
+const LITERAL_ONLY_METACHARS_RE = /[.*+?^${}()|[\]\\]/g;
+
+/** The distinct regex metacharacters `rawName` contains, in first-seen order — what a
+ *  name-filtered `unit test:` title would have meant as a wildcard/anchor/group/class had
+ *  escaping not made it literal. Empty for the common case, a title with none of them. */
+export function literalOnlyMetacharsIn(rawName: string): string[] {
+  return [...new Set(rawName.match(LITERAL_ONLY_METACHARS_RE) ?? [])];
+}
+
+/** Every name-filtered `unit test:` proof whose raw title resolves to ZERO tests (narrowed to the
+ *  high-precision case above) or into MANY different test files. WARN-only, unconditionally — no
+ *  severity override, ever: zero is legitimately a forward reference to an unwritten test
+ *  (CLAUDE.md), so this can never BLOCK without refusing correct authoring at scale (design point
+ *  3). Silent absent `opts.resolveNameFilteredCandidates` (see the module comment above). */
+export function proofNameResolutionViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  // The reviewer's OWN resolver, called directly — never a reimplementation, so lint and review can
+  // never disagree about what a proof's raw name resolves to.
+  const resolveNameFilteredCandidates = opts.resolveNameFilteredCandidates;
+  if (!resolveNameFilteredCandidates) return [];
+  const violations: LintViolation[] = [];
+  (task.acceptance ?? []).forEach((c, i) => {
+    if (c.satisfied_by) return; // Architect-only; no proof text to resolve
+    const whitelisted = parseWhitelistedProof(c.proof ?? "");
+    if (!whitelisted || whitelisted.kind !== "test" || !whitelisted.nameFiltered) return;
+    const rawName = whitelisted.label;
+    const resolution = resolveNameFilteredCandidates(rawName);
+    const claimHead = (c.claim ?? "").slice(0, 60);
+    const head = rawName.slice(0, 70) + (rawName.length > 70 ? "…" : "");
+    if (resolution.status === "absent") {
+      const metachars = literalOnlyMetacharsIn(rawName);
+      if (!metachars.length) return; // not the high-precision case — see module comment
+      if (looksLikeScenarioNarrative(rawName)) return; // proof-dialect already warns on this shape
+      violations.push({
+        check: "proof-name-resolution",
+        severity: "warn",
+        message:
+          `criterion ${i + 1} ("${claimHead}") \`unit test:\` proof "${head}" resolves to ZERO tests today ` +
+          `and contains ${metachars.map((m) => `\`${m}\``).join(", ")} — a regex would read ${metachars.length === 1 ? "that" : "those"} ` +
+          `as a wildcard/anchor/group, but this dialect ESCAPES the body first and matches it as a LITERAL ` +
+          `substring (parseTestTarget, src/lib/review.ts), so it matches only itself. If a real test is titled ` +
+          "exactly this, copy its plain prose out of the title verbatim with no metacharacters, or switch to " +
+          `the whole-file \`unit test: test/*.test.ts\` path form. If the test does not exist yet, this may be ` +
+          "a legitimate forward reference (CLAUDE.md) — this is a WARN, never a BLOCK, for exactly that reason.",
+      });
+    } else if (resolution.status === "resolved" && resolution.files.length > 1) {
+      violations.push({
+        check: "proof-name-resolution",
+        severity: "warn",
+        message:
+          `criterion ${i + 1} ("${claimHead}") \`unit test:\` proof "${head}" resolves into ` +
+          `${resolution.files.length} DIFFERENT test files (${resolution.files.join(", ")}) — it executes, but ` +
+          "the literal substring is not unique to one test, so the run certifies a wider set than the single " +
+          "test the author likely meant to name. Narrow the title so it identifies one test uniquely, or " +
+          "confirm the breadth is intended.",
+      });
+    }
+  });
+  return violations;
+}
+
 // ── POST-MERGE-AMENDMENT (§5C, W1-T180) ──────────────────────────────────────
 //
 // An amendment to an ALREADY-MERGED task's acceptance criteria is unreachable by
@@ -1548,6 +1657,13 @@ export interface LintOpts {
    *  task cannot itself wire a pre-dispatch "block" override (it would be an out-of-scope
    *  edit to run-task.ts, the exact defect this check exists to catch). */
   proofScope?: LintSeverity;
+  /** The reviewer's OWN `resolveNameFilteredCandidates` (review.ts), bound to a real checkout,
+   *  for {@link proofNameResolutionViolations} (W1-T488) to resolve a name-filtered `unit test:`
+   *  proof's raw title against — never a reimplementation, so lint and review can never disagree
+   *  about what a proof names. The linter itself is pure (no fs), so this is the caller's to
+   *  supply — same "no predicate ⇒ no opinion" contract {@link callSiteViolations}'s
+   *  `opts.moduleExists` already uses. Absent ⇒ the check is silent. */
+  resolveNameFilteredCandidates?: (rawName: string) => NameFilterResolution;
   /** Other OPEN tasks' (id, title) pairs for {@link duplicateTitleViolations} (W1-T420) to
    *  compare THIS task's title against. Supplied by the caller — never fetched, this module
    *  stays pure. Absent/empty ⇒ the check is silent. */
@@ -1564,8 +1680,9 @@ export interface LintOpts {
  *  proof-resolvability/post-merge-amendment/provenance/ruling-verify) always run —
  *  post-merge-amendment is a no-op absent `opts.postMergeAmendment` — budget-sanity
  *  runs only when `opts.mountMaxTurns` is supplied, duplicate-title (W1-T420) is a
- *  no-op absent `opts.openTaskTitles`, and dispatch-priority (W1-T422) always runs but
- *  is a no-op absent `task.priority`. */
+ *  no-op absent `opts.openTaskTitles`, proof-name-resolution (W1-T488) is a no-op
+ *  absent `opts.resolveNameFilteredCandidates`, and dispatch-priority (W1-T422) always
+ *  runs but is a no-op absent `task.priority`. */
 export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   const violations: LintViolation[] = [];
   const sizing = sizingViolation(task);
@@ -1576,6 +1693,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...proofResolvabilityViolations(task, opts));
   violations.push(...proofGrepSafetyViolations(task));
   violations.push(...proofScopeViolations(task, opts));
+  violations.push(...proofNameResolutionViolations(task, opts));
   violations.push(...postMergeAmendmentViolations(task, opts));
   violations.push(...callSiteViolations(task, opts));
   violations.push(...monolithFilingViolations(task, opts));

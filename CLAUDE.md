@@ -120,6 +120,15 @@ forensic detail, so the narrative does not need to live here.
   test title exits 0 and looks green (`exit: 0`, `hits: 17` is a MEASURED real example) while its
   `verdict:` correctly reads `no-match`; `rmd check-proof --help` states the full verdict→exit-code
   mapping. *(#766, #773, #777, #1189, #1194)*
+- **A `unit test:` title is matched as a LITERAL substring after escaping — the OPPOSITE of a
+  `grep:` pattern, which is a BASIC REGEX.** `parseTestTarget` (`src/lib/review.ts`) compiles a
+  bare title to `--test-name-pattern escapeRegExp(trimmed)`, so `.` `(` `)` `[` `]` and every other
+  regex metacharacter match only THEMSELVES and never act as a wildcard, group, or class. A title
+  where `.` stands in for punctuation you didn't want to type verbatim resolves to ZERO real tests
+  and reads `not_executable` — silently, with no error, and the criterion quietly falls back to the
+  keyword floor (W1-T245/#651: 4 of 5 proofs executed; the 5th used `.` for the parentheses in the
+  test's own title and matched nothing). Copy the title's plain prose out verbatim and use no
+  metacharacters; this dialect offers no way to opt into pattern semantics. *(W1-T112, W1-T488)*
 - **Require a verbatim `grep -rlF -- '<substring>' test/` hit — a passing scoped test run is NOT
   evidence the proof resolves.** `resolveNameFilteredCandidates` greps the SOURCE with a fixed
   string, so a title assembled from `" + "`-joined literals exists verbatim in no file: a proof
