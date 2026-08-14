@@ -14996,15 +14996,20 @@ export function runInflightLockSweepRung(
 ): InflightSweepResult {
   try {
     const swept = sweepStaleInflightLocks(join(config.root, "state", "inflight"));
+    // `kept` alone conflates a confirmed-live holder with an unverifiable-foreign-host one
+    // (W1-T461) — the per-poll site the boot sweep's own doc calls out as the one that must not
+    // stay silent (design clause iii), so `live`/`unverifiable_foreign_host` ride the same line.
     log("daemon.inflight_sweep", {
       reaped: swept.reaped.length,
       kept: swept.kept.length,
+      live: swept.live.length,
+      unverifiable_foreign_host: swept.unverifiableForeignHost.length,
       reaped_ids: swept.reaped.slice(0, 10),
     });
     return swept;
   } catch (e) {
     log("daemon.inflight_sweep", { error: String((e as Error)?.message ?? e) });
-    return { reaped: [], kept: [] };
+    return { reaped: [], kept: [], live: [], unverifiableForeignHost: [] };
   }
 }
 
