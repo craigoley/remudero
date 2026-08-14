@@ -1,0 +1,110 @@
+- id: W1-T492
+  title: "`proofNameResolutionViolations` is CALLED by `lintTask` but its resolver is never injected, so it returns an empty array on every production path and the defect it was built for still ships — and wiring it is one line that costs ~320 grep subprocesses per lint-plan run and adds ~15 warnings to a stream already carrying 598"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  rationale: "RE-DERIVED AT 5a32472a, WITH #1821 (W1-T488) NOW MERGED. Every figure below is a tree
+    fact or a locally-executed count on the mac mini and is host-independent; no ledger is read.
+    (1) THE CHECK IS WIRED. IT IS THE DEPENDENCY THAT IS MISSING, AND THAT DISTINCTION IS THE WHOLE
+    TASK. `lintTask` (`src/lib/task-linter.ts`) pushes `proofNameResolutionViolations(task, opts)`
+    into its violation list like every sibling check, and `lintTask` itself has EIGHT production call
+    sites (`inbox.ts`, `panel-skill-run.ts`, `relint.ts`, `retro.ts`, `task-linter.ts` twice, and
+    `run-task.ts`'s `preDispatchLint` and `lintPlanCommand`). SO `CALLERLESS` IS THE WRONG DIAGNOSIS
+    and a reader who reaches for it will look in the wrong place.
+    WHAT ACTUALLY HAPPENS: the function's first two statements read
+    `opts.resolveNameFilteredCandidates` and RETURN `[]` when it is absent — a deliberate
+    `no predicate ⇒ no opinion` contract the module shares with `opts.moduleExists`. AND NO
+    PRODUCTION CALL SITE SUPPLIES IT. Measured: every `resolveNameFilteredCandidates` mention in
+    `src/` is either its definition and doc in `review.ts`, `execWhitelistedProof`'s own use, a
+    direct call in `run-task.ts`'s check-proof path, or the linter's own type and guard — none is an
+    assignment into a `LintOpts`. POSITIVE CONTROL, the same query shape on a dep that IS supplied:
+    `opts.moduleExists = (rel) => existsSync(...)` appears TWICE in `run-task.ts`.
+    (2) THE EMPTY RESULT IS OBSERVABLE, NOT INFERRED. `rmd lint-plan` on origin/main reports
+    **598 warnings BEFORE #1821 merged and 598 AFTER** — the same number, over 477 tasks. A check
+    that fires on a measured 4.7% of 320 proofs would have moved that figure by about fifteen. IT
+    MOVED BY ZERO.
+    (3) SO THE DEFECT IT WAS BUILT FOR STILL SHIPS. W1-T245 (#651) — four of five proofs executed and
+    the fifth used `.` for the parentheses in its own test title — would pass the linter today
+    exactly as it did then.
+    (4) AND THE AUTHOR'S REASON WAS GOOD, WHICH IS WHY THIS IS A FOLLOW-UP AND NOT A COMPLAINT. The
+    module comment records that `run-task.ts`'s pre-dispatch guard and `lintPlanCommand` were BOTH
+    outside W1-T488's declared `files:`, so wiring was structurally out of scope for that PR.
+    `inverseScopeUntouchedFiles` and `scopeViolationFiles` (`src/lib/review.ts`) would have failed it
+    for reaching. THAT IS A GOOD REASON FOR THE PR AND A BAD REASON TO LEAVE IT DORMANT."
+  design: "(i) WIRING IS ONE LINE, AND THE COST IS NOT. The line goes exactly where
+    `opts.moduleExists` is already supplied in `lintPlanCommand` — the import of
+    `resolveNameFilteredCandidates` is ALREADY PRESENT in `run-task.ts`, so nothing new is pulled in.
+    BUT `resolveNameFilteredCandidates` SHELLS OUT: its body calls `grepFilesContaining` twice (once
+    for the raw name, once for the empty-string corpus control). MEASURED ON THE CURRENT PLAN: 320
+    name-filtered `unit test:` proofs across 1,684 acceptance criteria, ALL of them on open tasks. So
+    wiring it into `lintPlanCommand` turns a job `ci.yml`'s own comment calls `Cheap (pure JS over
+    plan/tasks.yaml, no network)` into one that spawns roughly 320 grep subprocesses per run, on
+    EVERY PR. THAT IS THE RULING THIS SHARD WANTS AND IT IS A COST QUESTION, NOT A CORRECTNESS ONE.
+    (ii) THE CHANGED-TASKS BLOCKING HAZARD DOES NOT APPLY HERE, AND THIS IS RECORDED BECAUSE IT IS
+    THE FIRST OBJECTION A READER WILL RAISE. CLAUDE.md warns that CI's changed-tasks pass promotes a
+    warning on a touched task to blocking — true, but it describes checks whose push site carries a
+    VARIABLE `severity` (`proof-resolvability` is the named example). `proof-name-resolution` pushes
+    a HARDCODED `severity: \"warn\"` at BOTH of its push sites, with no override path anywhere, and
+    `lintPlanCommand` increments `failing` only for `severity === \"block\"`. IT CAN NEVER BLOCK. So
+    wiring it cannot turn a green PR red for a proof it did not write.
+    (iii) THE HARDER QUESTION IS WHETHER FIFTEEN MORE WARNINGS ARE WORTH ANYTHING. The author
+    measured the threshold before shipping: naive zero-resolution fires on 251/319 proofs (78.7%),
+    metachar-only 145/319 (45.5%), metachar-and-not-narrative 15/319 (4.7%), many-match 4/319. The
+    narrow threshold is well chosen. But it lands in a stream ALREADY CARRYING 598 WARNINGS, so it
+    would be a 2.5% addition to a signal nobody demonstrably reads. ARGUE BOTH SIDES RATHER THAN
+    ASSUMING: fifteen high-precision warnings may be exactly the ones worth surfacing, or the honest
+    answer may be that the 598 is the real defect and this check should wait behind it.
+    (iv) THREE CANDIDATE SITES, RANKED BY NOBODY.
+      (a) `lintPlanCommand` only — the whole-plan sweep. Highest coverage, and the full ~320-grep
+          cost lands on every PR.
+      (b) `preDispatchLint` only — runs per dispatch, so the cost is one task's proofs rather than
+          320, and it catches a bad proof at the moment it would actually be executed. Needs the
+          resolver threaded through a different opts construction.
+      (c) A dedicated verb or the retro's plan-health sweep — zero PR-time cost, but nobody reads it
+          unprompted, which is the same failure mode as the 598.
+    (v) NOT IN SCOPE, DELIBERATELY. The 598-warning stream itself is a real and separate concern; it
+    is named here as the thing that makes (iii) hard, NOT proposed for repair by this task."
+  acceptance:
+    - claim: "the name-resolution check produces a violation on a real plan rather than an empty array"
+      proof: "unit test: test/lint-proof-name-resolution-wiring.test.ts"
+    - claim: "the resolver dependency is supplied by the same call site that already supplies moduleExists"
+      proof: "unit test: test/lint-proof-name-resolution-wiring.test.ts"
+    - claim: "a proof whose title resolves cleanly still produces no violation once the resolver is wired"
+      proof: "unit test: test/lint-proof-name-resolution-wiring.test.ts"
+    - claim: "wiring the check cannot make a task fail, because its severity stays warn on every path"
+      proof: "unit test: test/lint-proof-name-resolution-wiring.test.ts"
+  origin: recon#proof-name-resolution-dep-starved-2026-08-14
+  plan_refs: ["W1-T488", "W1-T245"]
+  files: [src/run-task.ts, test/lint-proof-name-resolution-wiring.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `src/` and `test/`. Blast radius is one
+    assignment plus whatever design (iv) rules; the check itself is unchanged and cannot block.
+    `verify: human` — design (i) versus (iii) is a cost-and-value ruling about spending ~320
+    subprocesses per PR to surface ~15 warnings into a stream of 598. No linter can settle that.
+    `src/run-task.ts` IS DECLARED AND IS GENUINELY TOUCHED — the assignment goes beside
+    `opts.moduleExists` in `lintPlanCommand`, and there is nowhere else it can go. The cost is
+    recorded rather than hidden: at 19,588 lines it serialises this task against every other naming
+    it (W1-T471), which is why `files:` is held to TWO paths and why the new suite gets its OWN file
+    rather than an append to `test/run-task.test.ts` (which crashes at FILE level under
+    `--experimental-test-coverage`). `src/lib/task-linter.ts` is deliberately NOT declared: the check
+    is already correct and needs no edit, and declaring a file the implementation never touches trips
+    `inverseScopeUntouchedFiles`.
+    EVERY CRITERION IS `unit test:` ON PURPOSE — a shard whose proofs are all `grep:` against its own
+    path caps its implementation at `proof_exec: 0/N` and additionally draws a `proof-scope` warning
+    that blocks in CI's changed-tasks pass.
+    A SEPARATE FINDING FROM THE SAME REVIEW WAS DELIBERATELY NOT FILED, and is recorded here so it is
+    not re-raised as new. `LITERAL_ONLY_METACHARS_RE` (`src/lib/task-linter.ts`) hand-mirrors
+    `escapeRegExp`'s character class — but that class is NOT a pair. MEASURED: the identical class
+    (sha256 prefix e5ad1302f6 on the extracted literal) appears in `review.ts`, `status.ts`,
+    `reachability.ts`, `verdict-calibration.ts`, `task-linter.ts` and TWICE inline in `run-task.ts`,
+    plus `scripts/learnings-assert-check.mjs` and about twenty test files, with FOUR independent
+    local `escapeRegExp` definitions. It is the canonical escape idiom, identical everywhere, and at
+    the task-linter site it is detection-only — used to NAME which metacharacter a title contains,
+    never to decide resolution. A test pinning two of seven copies would be theatre; the only
+    coherent remedy is a shared constant across seven files including `src/run-task.ts`, which is a
+    much larger change than the risk justifies. NOTHING IS BROKEN THERE TODAY."
