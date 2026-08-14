@@ -265,22 +265,34 @@ function to24Hour(h: number, ampm: string): number {
  *   `"<Mon> <D> at <H>(:<MM>)?(am|pm)"`   e.g. "Jul 21 at 12am"
  *   `"<H>(:<MM>)?(am|pm)"`                e.g. "3pm"
  *   `"<weekday name or abbrev>"`          e.g. "Mon", "Monday"
+ *   `"<ISO-8601 with offset>"`            e.g. "2026-08-13T03:19:59.748109+00:00"
+ * The upstream started emitting the ISO form on 2026-08-12 (W1-T482's rationale) IN ADDITION TO,
+ * never instead of, the human forms above — this branch is additive: every human shape that
+ * matched before still matches, exactly as it did, because none of those regexes accept a `T`
+ * date-time separator or a numeric-offset/`Z` suffix.
  */
 /** Ledger lines are read by humans and by rotation; a pathological upstream string must not be
  *  able to write an unbounded one. 200 chars is far longer than any observed reset clause. */
 const UNRECOGNISED_RESET_MAX_LEN = 200;
 
 /**
- * Every reset string a previous process already announced — the ledger-derived seed for
- * {@link DaemonDeps.priorUnrecognisedResets}. Mirrors `priorEscalatedAlertIds` /
- * `priorReconciledAlertFeedbackIds` exactly: the step this reads is the step the loop writes, so
- * the ledger is the store and no new state file exists. Exported for the caller that owns the
- * ledger read (run-task.ts) — daemon.ts itself never touches the filesystem.
+ * Every WINDOW a previous process already announced an unrecognised reset for — the
+ * ledger-derived seed for {@link DaemonDeps.priorUnrecognisedResets}. Mirrors
+ * `priorEscalatedAlertIds` / `priorReconciledAlertFeedbackIds` exactly: the step this reads is the
+ * step the loop writes, so the ledger is the store and no new state file exists. Exported for the
+ * caller that owns the ledger read (run-task.ts) — daemon.ts itself never touches the filesystem.
+ *
+ * Keyed on `window`, NOT `raw` (W1-T482): the emitter used to dedupe on the whole raw string, which
+ * a microsecond-precision ISO reset defeats outright — every tick produces a string no previous
+ * tick produced, so the bound never actually bound anything (measured: 56-for-56 and 335-for-335
+ * fired, zero suppressed, on two independent ledgers). `window` is a small, fixed set (`session
+ * (5h)` plus one `weekly (<label>)` per model) so it bounds the SAME way the old key was documented
+ * to, but actually holds under a raw value that drifts every tick.
  */
 export function priorUnrecognisedResetStrings(lines: ReadonlyArray<Record<string, unknown>>): ReadonlySet<string> {
   const out = new Set<string>();
   for (const l of lines) {
-    if (l.step === "daemon.usage_reset_unrecognised" && typeof l.raw === "string") out.add(l.raw);
+    if (l.step === "daemon.usage_reset_unrecognised" && typeof l.window === "string") out.add(l.window);
   }
   return out;
 }
@@ -321,6 +333,18 @@ export function parseResetInstant(raw: string, now: Date): Date | null {
     // (larger hours-to-reset, never-relax-on-ambiguity) reading.
     if (deltaDays === 0) deltaDays = 7;
     return new Date(startOfToday.getTime() + deltaDays * 24 * 3_600_000);
+  }
+
+  // ISO-8601 with an explicit offset or `Z` — the shape `/usage` switched to on 2026-08-12
+  // (`2026-08-13T03:19:59.748109+00:00`). Matched by a STRICT shape check first, not handed
+  // straight to `Date.parse`/`new Date()`: those accept a wide, engine-dependent grab-bag of
+  // non-ISO strings too (including some of the human forms above, ambiguously), and this
+  // function's `null` contract is load-bearing for the conservative fallback in
+  // `resolveHeadroomLimitPct` — a loose accidental match must never look like a confirmed parse.
+  const iso = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/.exec(text);
+  if (iso) {
+    const parsed = new Date(text);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
   }
 
   return null;
@@ -847,12 +871,12 @@ export interface DaemonDeps {
    */
   readUsage?: () => UsageSnapshot | undefined | Promise<UsageSnapshot | undefined>;
   /**
-   * Reset strings ALREADY reported by a previous process, read back off the ledger by whoever
-   * builds these deps (run-task.ts). THE LEDGER IS THE DEDUP — the same idiom
-   * `priorEscalatedAlertIds` and `priorReconciledAlertFeedbackIds` already use: a step written once
-   * and read back as the key, never a new state file. Seeding from it is what makes the
-   * once-per-string bound survive a restart; without it a daemon that reboots hourly would
-   * re-announce the same string on every boot.
+   * WINDOWS already reported by a previous process, read back off the ledger by whoever builds
+   * these deps (run-task.ts). THE LEDGER IS THE DEDUP — the same idiom `priorEscalatedAlertIds` and
+   * `priorReconciledAlertFeedbackIds` already use: a step written once and read back as the key,
+   * never a new state file. Seeding from it is what makes the once-per-window bound survive a
+   * restart; without it a daemon that reboots hourly would re-announce the same window on every
+   * boot. Keyed on `window`, not the raw string (W1-T482) — see {@link priorUnrecognisedResetStrings}.
    */
   priorUnrecognisedResets?: ReadonlySet<string>;
   /**
@@ -2052,14 +2076,21 @@ export async function runDaemon(
         parkedSinceMs = undefined;
         parkCeilingEscalated = false;
         const windows = resolveHeadroomWindows(snap, now(), headroomPolicy, (window, raw) => {
-            // ONCE PER DISTINCT STRING, NOT PER TICK. The loop polls every 60s, so a per-tick
-            // emission would write ~1,440 identical lines a day and bury the one thing worth
-            // reading. The set is seeded from the ledger (DaemonDeps.priorUnrecognisedResets), so
-            // the bound holds across a restart as well as within one process.
-            if (reportedUnrecognisedResets.has(raw)) return;
-            reportedUnrecognisedResets.add(raw);
+            // ONCE PER WINDOW, NOT PER DISTINCT STRING (W1-T482). The loop polls every 60s, so a
+            // per-tick emission would write ~1,440 identical lines a day and bury the one thing
+            // worth reading — which is exactly what keying on the raw string stopped preventing
+            // once the upstream started emitting microsecond-precision ISO timestamps: every tick
+            // produces a string no earlier tick produced, so a raw-keyed set never once matched and
+            // the bound was inert (measured 1:1 fired-to-distinct on two independent ledgers).
+            // `window` is the small, fixed set this was always meant to bound by. The set is seeded
+            // from the ledger (DaemonDeps.priorUnrecognisedResets), so the bound holds across a
+            // restart as well as within one process.
+            if (reportedUnrecognisedResets.has(window)) return;
+            reportedUnrecognisedResets.add(window);
             // CARRY THE STRING — the whole value is knowing WHAT could not be parsed. A line
-            // saying only "parse failed" would have saved nobody the three-hour outage.
+            // saying only "parse failed" would have saved nobody the three-hour outage. A coarser
+            // key must not mean a lost sample, so the one line this window DOES emit still carries
+            // a representative raw value, even though later drift on this window won't re-fire.
             log("daemon.usage_reset_unrecognised", {
               window,
               raw: raw.slice(0, UNRECOGNISED_RESET_MAX_LEN),

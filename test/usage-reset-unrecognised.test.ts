@@ -65,10 +65,13 @@ async function runLoop(
 const firedFor = (lines: Array<{ step: string; extra: Record<string, unknown> }>) =>
   lines.filter((l) => l.step === STEP);
 
-// ── (4) an ISO-shaped reset fires it, carrying the string ────────────────────
+// ── (4) a genuinely unrecognisable reset fires it, carrying the string ───────
 
-test("an ISO-shaped reset fires the step through the real loop, carrying the string", async () => {
-  const raw = "2026-08-09T01:00:00-04:00";
+test("a genuinely unrecognisable reset fires the step through the real loop, carrying the string", async () => {
+  // W1-T482: ISO-8601 is now a RECOGNISED shape (parseResetInstant grew that branch), so it can no
+  // longer stand in for "unparseable" here — see the ISO-shaped cases folded into the lock test
+  // below instead. This fixture is neither ISO nor any of the three human forms.
+  const raw = "sometime after the deploy finishes";
   const lines = await runLoop(snap({ percentUsed: 3, resetsAt: raw }));
 
   const fired = firedFor(lines);
@@ -103,6 +106,11 @@ test("every currently-recognised reset shape does NOT fire the step", async () =
     "1am", // timeOnly, no minutes
     "Sunday", // weekday
     "wed", // weekday, abbreviated
+    // W1-T482: ISO-8601, the format /usage switched to on 2026-08-12 — taken from the shard's own
+    // falsification table. Parseability doesn't depend on `now` here, only on the shape.
+    "2026-08-14T16:20:00.069763+00:00", // the live payload shape, microseconds and all
+    "2026-08-14T16:20:00Z",
+    "2026-08-14T16:20:00+00:00",
   ]) {
     const lines = await runLoop(snap({ percentUsed: 3, resetsAt: raw }));
     assert.equal(firedFor(lines).length, 0, `recognised shape ${JSON.stringify(raw)} must stay silent`);
@@ -127,7 +135,7 @@ test("a deliberately absent reset clause does NOT fire the step", async () => {
 // ── (8) THE DEDUP: same string across many ticks emits ONCE ─────────────────
 
 test("the same unrecognised string across many ticks emits exactly once", async () => {
-  const lines = await runLoop(snap({ percentUsed: 3, resetsAt: "2026-08-09T01:00:00Z" }), 12);
+  const lines = await runLoop(snap({ percentUsed: 3, resetsAt: "reset pending confirmation" }), 12);
 
   const fired = firedFor(lines);
   // COUNT, not presence: a per-tick emission would write ~1,440 lines a day and bury the signal.
@@ -137,29 +145,64 @@ test("the same unrecognised string across many ticks emits exactly once", async 
   assert.ok(heartbeats >= 10, `the loop must actually have ticked; saw ${heartbeats} heartbeats`);
 });
 
-test("two DIFFERENT unrecognised strings each emit once — the bound is per-string, not global", async () => {
+test("two DIFFERENT unrecognised strings each emit once — the bound is per-window, not global", async () => {
   const lines = await runLoop(
-    snap({ percentUsed: 3, resetsAt: "2026-08-09T01:00:00Z" }, [
+    snap({ percentUsed: 3, resetsAt: "reset pending confirmation" }, [
       { label: "all models", percentUsed: 1, resetsAt: "in 5 hours" },
     ]),
     6,
   );
 
   const fired = firedFor(lines);
-  assert.equal(fired.length, 2, "one per distinct string");
+  assert.equal(fired.length, 2, "one per distinct window");
   assert.deepEqual(
     fired.map((f) => f.extra.raw).sort(),
-    ["2026-08-09T01:00:00Z", "in 5 hours"],
+    ["in 5 hours", "reset pending confirmation"],
   );
+});
+
+// ── (W1-T482) THE FIX ITSELF: a raw string that DRIFTS every tick (the microsecond-ISO shape
+// this task's rationale measured as 1:1 fired-to-distinct, i.e. never suppressed) must still
+// collapse to ONE line, because the key is now the window, not the string ───────────────────
+
+test("an unrecognised raw that changes EVERY tick still emits only once — the dedup key is the window, not the string", async () => {
+  let n = 0;
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  let ticks = 0;
+  const TICKS = 12;
+  await runDaemon(
+    emptyPlan(),
+    {
+      refreshMerged: () => () => false,
+      runOne: async () => {
+        throw new Error("nothing should dispatch from an empty plan");
+      },
+      // A FRESH string every single call — the worst case for a raw-keyed dedup, and exactly what
+      // a microsecond-precision ISO reset does in production. Still not ISO-shaped here (ISO now
+      // parses successfully), just still-unrecognised and still distinct tick over tick.
+      readUsage: () => snap({ percentUsed: 3, resetsAt: `not-a-real-shape-${n++}` }),
+      now: NOW,
+      checkStop: () => (++ticks > TICKS ? "test-complete" : undefined),
+      sleep: async () => {},
+      log: (step, e = {}) => lines.push({ step, extra: e as Record<string, unknown> }),
+    } as DaemonDeps,
+    { maxTicks: TICKS + 1 } as never,
+  );
+
+  const fired = firedFor(lines);
+  assert.equal(fired.length, 1, `a drifting raw string must still collapse to ONE line per window; got ${fired.length}`);
+  // A SUPPRESSED ROW MUST NOT MEAN A LOST SAMPLE: the one line that does emit still carries a
+  // representative raw value (the first tick's), never an empty/placeholder field.
+  assert.equal(fired[0].extra.raw, "not-a-real-shape-0");
 });
 
 // ── the restart half of the bound ───────────────────────────────────────────
 
-test("a string a PREVIOUS process already announced is not re-announced after restart", async () => {
-  const raw = "2026-08-09T01:00:00Z";
+test("a window a PREVIOUS process already announced is not re-announced after restart", async () => {
+  const raw = "reset pending confirmation";
   const lines = await runLoop(snap({ percentUsed: 3, resetsAt: raw }), 3, {
-    // What run-task.ts seeds from the ledger — the restart half of the once-per-string bound.
-    priorUnrecognisedResets: new Set([raw]),
+    // What run-task.ts seeds from the ledger — the restart half of the once-per-window bound.
+    priorUnrecognisedResets: new Set(["session (5h)"]),
   });
 
   assert.equal(firedFor(lines).length, 0, "already on the ledger ⇒ already announced");
@@ -177,16 +220,19 @@ test("the raw string is bounded in length so a pathological upstream cannot writ
 
 // ── the LEDGER-DERIVED seed: the restart half of the bound, at its source ────
 
-test("priorUnrecognisedResetStrings reads back exactly the strings this step wrote", () => {
+test("priorUnrecognisedResetStrings reads back exactly the windows this step wrote", () => {
+  // W1-T482: keyed on `window`, not `raw` — a raw-keyed seed never suppressed a
+  // microsecond-drifting ISO string across a restart either, for the same reason it never
+  // suppressed one within a single process.
   const seeded = priorUnrecognisedResetStrings([
     { step: STEP, raw: "in 5 hours", window: "session (5h)" },
     { step: STEP, raw: "2026-08-09T01:00:00Z", window: "weekly (all models)" },
-    { step: STEP, raw: 42 }, // non-string raw — ignored, never coerced
-    { step: "daemon.headroom", raw: "not-this-step" }, // a DIFFERENT step must not seed the bound
-    { step: STEP }, // no raw at all
+    { step: STEP, window: 42 }, // non-string window — ignored, never coerced
+    { step: "daemon.headroom", window: "not-this-step" }, // a DIFFERENT step must not seed the bound
+    { step: STEP }, // no window at all
   ]);
 
-  assert.deepEqual([...seeded].sort(), ["2026-08-09T01:00:00Z", "in 5 hours"]);
+  assert.deepEqual([...seeded].sort(), ["session (5h)", "weekly (all models)"]);
   assert.equal(seeded.has("not-this-step"), false, "only this step's own lines are the dedup key");
 });
 
