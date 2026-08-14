@@ -1,0 +1,91 @@
+- id: W1-T479
+  title: "the LINE floor is the last delta-era artefact — `linesPct: 95.62` sits 2.70pt under a CI-measured 98.32-98.37, so it cannot fail; the question is not what number to raise it to but whether lines should follow branches onto absolute tiers"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  rationale: "#1758 (39f198a2) RETIRED THE BRANCH DELTA FLOOR AND LEFT THE LINE ONE EXACTLY AS FOUND,
+    SAYING SO IN TERMS. The shipped `scripts/coverage-baseline.json` reads: `LINES ARE UNCHANGED at
+    linesPct 95.62 and still enforced by evaluateRatchet — that floor is stale LOW against a real
+    ~98.3% and is a delta-era artefact, left exactly as found rather than retuned in a changeset about
+    branches; tidying it needs its own ruling.` THIS IS THAT RULING, AND NOTHING ELSE — it is a
+    SMALLER question than W1-T467's, which asked whether to re-capture or retire the whole aggregate
+    comparison and is now closed because #1758 answered it.
+    THE FIGURE, MEASURED FROM CI's OWN LOGS AND NOT LOCALLY. 17 `coverage-ratchet:` readings harvested
+    from CI job logs span **98.32-98.37, mean 98.348, spread 0.050pt**. The floor is 95.62. The floor is therefore
+    DEAD SLACK OF ABOUT 2.70 POINTS, measured against CI and not a local run.
+    WHY CI AND NOT A LOCAL RUN, RECORDED SO NOBODY REPEATS IT: two local measurement attempts failed
+    with DIFFERENT faults — one produced a **2.06pt spread on a STATIC tree** (against CI's 0.050pt),
+    and one measured the AFTER-tree twice without noticing, provable because total `LF` was
+    byte-identical at 97591 across both sides. A local lcov is not predictive here in either
+    direction; the percentage above is CI's.
+    SIZING IT, WITH ITS PROVENANCE MARKED: at a full-suite `LF` of ~98,872 (a LOCAL run on the mini
+    for PR #1783, used ONLY to convert points into lines — the percentage itself is CI's), 2.70pt is
+    about **2,670 lines**. That is the amount of line coverage that could be lost today without this
+    gate noticing."
+  design: "(i) THE QUESTION IS NOT `WHAT NUMBER` — AND THAT IS THE WHOLE POINT OF FILING IT. #1758
+    moved BRANCHES off a delta floor onto ABSOLUTE TIERS (`tierPassPct: 90`, `tierBlockPct: 85`)
+    precisely because a delta floor sat inside its own noise. The line floor is THE SAME MECHANISM,
+    still running. So the coherent options are:
+      **(1) RAISE THE DELTA FLOOR.** Apply the file's own margin convention (0.56 lines under the
+      lowest reading): 98.32 - 0.56 -> ~97.76. RESTORES ~2,670 lines of protection.
+      **(2) MOVE LINES ONTO ABSOLUTE TIERS TOO**, matching what branches now do, and stop maintaining
+      a delta at all.
+      **(3) LEAVE IT.** A floor nothing trips costs nothing to keep.
+    (ii) ARGUE IT BOTH WAYS, BECAUSE THE HONEST ANSWER IS NOT OBVIOUS.
+      FOR ACTING: the delta floor's margin here is SAFE in a way the branch one never was — 0.56pt of
+      margin against a 0.050pt CI spread is **11.2x**, where the branch floor's was 0.1158pt against
+      0.0936pt, or **1.24x**, which is exactly why it had to be retired. So raising the line floor
+      carries none of the false-block risk that killed the branch delta. And 2,670 lines is not a
+      rounding error.
+      AGAINST ACTING: NOTHING IS FAILING THIS GATE, and the failure mode it would catch — wholesale
+      coverage loss with no diff to attribute it to — HAS NEVER BEEN OBSERVED. The per-diff gate is
+      what actually bites: `scripts/diff-coverage.mjs` blocked 13 genuinely-uncovered added lines on
+      PR #1783 on 2026-08-14, which the aggregate floor passed straight through. A backstop for an
+      unobserved failure mode, guarding a metric already guarded per-diff, may simply not be worth a
+      ruling — and this shard says so rather than assuming the tightening is obviously right.
+    (iii) IF (1) IS CHOSEN, THE NUMBER MUST COME FROM CI, NOT A LOCAL RUN — see the rationale's two
+    failed local attempts. Harvest `coverage-ratchet: lines` from job logs across at least a dozen
+    runs and apply the margin to the LOWEST, exactly as the file's own convention says.
+    (iv) NOT IN SCOPE. W1-T467's branch-floor question is CLOSED (#1758 both shipped the retirement
+    and forbids reintroducing a `branchesPct` delta floor). This shard must not reopen it, and must
+    not touch `tierPassPct`/`tierBlockPct`."
+  acceptance:
+    - claim: "the line floor either describes today's real coverage or is recorded as deliberately left alone"
+      proof: "unit test: test/coverage-ratchet.test.ts"
+    - claim: "any new line figure is derived from CI readings rather than a local run"
+      proof: "unit test: test/coverage-ratchet.test.ts"
+    - claim: "the branch tiers shipped by #1758 are unchanged by whatever is decided here"
+      proof: "unit test: test/coverage-ratchet.test.ts"
+  origin: recon#line-floor-residual-2026-08-14
+  plan_refs: ["W1-T467"]
+  files: [scripts/coverage-baseline.json, scripts/coverage-ratchet.mjs, test/coverage-ratchet.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` — MEASURED, NOT PREDICTED, AND THE REFUSAL IS RECORDED HERE RATHER THAN LEFT
+    FOR THE IMPLEMENTER TO REDISCOVER. This shard was first written at `medium`, reasoning that it
+    spans ONE subsystem — the coverage instrument. `rmd lint-plan` REFUSED IT: `[sizing] spans 2
+    distinct subsystems/concerns (coverage-baseline, coverage-ratchet) at risk:medium — Rule 19:
+    raise to risk:high or decompose`. The band is Rule 19 SPAN across two declared instrument paths,
+    NOT blast radius — the blast radius is one number in one JSON file.
+    automated run can choose.
+    `files:` IS TIGHT ON PURPOSE. `partitionByFileOverlap` blocks on DECLARED paths, so every extra
+    entry serialises this task against others naming it; `src/run-task.ts` is the fleet's
+    serialisation point and is NOT declared here because this task does not touch it. `files:` IS NOT
+    EMPTY, which matters: `overlappingPaths` returns the OTHER side's entire list when one side is
+    empty, so an undeclared task blocks every candidate.
+    RULE 25 CHECKED WITH CONTROLS, NOT ASSUMED. `scripts/coverage-baseline.json` and
+    `scripts/coverage-ratchet.mjs` are both INSTRUMENT_SURFACE; this changeset is instrument + test
+    and reads NOT entangled (control: adding any `src/` path flips it to ENTANGLED). So the
+    implementation must not pick up a `src/` fix along the way.
+    `test/coverage-ratchet.test.ts` is declared as the assertion suite; note it invokes the ratchet as
+    a SUBPROCESS rather than importing it (measured: 0 direct invocations of `evaluateRatchet` across
+    all of test/, 4 mentions in that file, against a positive control of 127 test files mentioning
+    `coverage`), so a falsifier here is a fixture, not a unit call. DROP ANY DECLARED PATH THE
+    IMPLEMENTATION DOES NOT TOUCH.
+    PROVENANCE. The 17-reading CI figure is from GitHub job logs and is host-independent. The ~98,872
+    `LF` used only to convert points into lines is from a LOCAL mini run and is marked as such. The
+    two hosts keep separate ledgers with no SSH route between them; nothing here rests on either."
