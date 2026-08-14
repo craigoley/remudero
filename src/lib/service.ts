@@ -101,6 +101,21 @@ export function assertWriteTiersComplete(routes: readonly Route[]): void {
   }
 }
 
+/**
+ * W1-T495 (MASTER-PLAN §7A), ruled 2026-08-14: the READ half of the axis W1-T404 already proved
+ * for writes. {@link WriteTier} ranks a write route's consequence (low/middle/high) because
+ * writes differ in DEGREE -- an operator note and a budget drain are not equally bad. A read
+ * route's sensitivity is not a matter of degree: it either surfaces something an ordinary read
+ * grant should never reach on its own (spend, provenance) or it doesn't, so this axis is a
+ * single label rather than a rank. Its one value is the label itself; the label's ABSENCE (the
+ * field left `undefined`, exactly as an untiered write route defaults under `WriteTier`) is what
+ * "ordinary read" means -- silence is never read as an entitlement, the same rule
+ * {@link IdentityProvider.writeTier}'s own doc states for tiers. See {@link Route.sensitivity}
+ * for the per-route label and {@link IdentityProvider.readSensitivity} for the grant-side
+ * entitlement that must match it once {@link ServiceOptions.enforceReadSensitivity} is on.
+ */
+export type ReadSensitivity = "sensitive";
+
 export type Method = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
 /** Reserved for future path params (v0 routing is exact-match only, so always `{}` today). */
@@ -140,6 +155,18 @@ export interface Route {
    * classifies it without changing what it accepts until that flag is turned on.
    */
   tier?: WriteTier;
+  /**
+   * W1-T495: this READ-scoped route's {@link ReadSensitivity} label -- DECLARED, never derived,
+   * mirroring {@link tier}'s own reasoning for writes. Meaningful only when `scope === "read"`.
+   * Optional on the TYPE so it never forces every existing read-scoped route literal in `test/`
+   * to grow a field it has no use for; enforcement is opt-in via
+   * {@link ServiceOptions.enforceReadSensitivity}, off by default, so labeling a route here
+   * classifies it without changing what it accepts until that flag is turned on. Design (iii):
+   * labelling the REAL route table (spread across fourteen modules) is deliberately out of scope
+   * for this task -- this field exists so a later task can do that labelling without this module
+   * changing again.
+   */
+  sensitivity?: ReadSensitivity;
 }
 
 /** Push one SSE event to a subscribed client (`event:`/`data:` framing, owned by this module). */
@@ -250,6 +277,15 @@ export interface IdentityProvider {
    * used to reach every write route — see {@link bearerTokenProvider}.
    */
   readonly writeTier?: WriteTier;
+  /**
+   * W1-T495: whether this provider's `read` grant is entitled to a {@link Route} labelled
+   * `sensitivity: "sensitive"` — a property of the PROVIDER, not a per-request decision, mirroring
+   * {@link writeTier}'s own shape. `undefined` (the default for a provider that declares nothing)
+   * satisfies no sensitive-labelled route at all once {@link ServiceOptions.enforceReadSensitivity}
+   * is on — silence is never read as an entitlement, the same rule {@link writeTier} states for
+   * tiers.
+   */
+  readonly readSensitivity?: ReadSensitivity;
 }
 
 /** What {@link createService}'s provider dispatch hands back once some {@link IdentityProvider}
@@ -260,6 +296,9 @@ export interface IdentityGrant {
   /** W1-T404: the granting provider's {@link IdentityProvider.writeTier}, carried through
    *  unchanged — {@link grantedScopes} never invents a default here. */
   tier?: WriteTier;
+  /** W1-T495: the granting provider's {@link IdentityProvider.readSensitivity}, carried through
+   *  unchanged — {@link grantedScopes} never invents a default here, mirroring {@link tier}. */
+  readSensitivity?: ReadSensitivity;
 }
 
 export interface ServiceOptions {
@@ -288,6 +327,19 @@ export interface ServiceOptions {
    * real and fully exercised over HTTP by `test/write-tier-*.test.ts`, which turn this on.
    */
   enforceWriteTiers?: boolean;
+  /**
+   * W1-T495: turns ON the {@link Route.sensitivity} + grant-side
+   * {@link IdentityProvider.readSensitivity} check below — OFF by default, so labeling a read
+   * route sensitive never changes what a caller can reach until this is set, the exact
+   * precedent {@link enforceWriteTiers} already set (design ii). Ships dark: no provider in this
+   * module declares `readSensitivity` and no route in `rmd serve`'s production wiring declares
+   * `sensitivity` yet (design iii — labelling the real route table is a separate task); turning
+   * this on today would refuse every sensitive-labelled route to every existing grantor, which
+   * is exactly why it stays off until both halves of the mechanism have a real caller. The
+   * mechanism itself is real and fully exercised over HTTP by `test/read-sensitivity-gate.test.ts`,
+   * which turns this on.
+   */
+  enforceReadSensitivity?: boolean;
   /**
    * W1-T404 design (iv): the server-issued, single-use, action-and-payload-bound second factor
    * store HIGH-tier routes consult when {@link enforceWriteTiers} is on. Defaults to a fresh
@@ -578,7 +630,7 @@ function grantedScopes(
 ): IdentityGrant | undefined {
   for (const provider of providers) {
     const scopes = provider.grant(req, allowQuery);
-    if (scopes) return { scopes, provider: provider.name, tier: provider.writeTier };
+    if (scopes) return { scopes, provider: provider.name, tier: provider.writeTier, readSensitivity: provider.readSensitivity };
   }
   return undefined;
 }
@@ -629,6 +681,9 @@ export function createService(opts: ServiceOptions): Server {
   // W1-T404: OFF by default — see ServiceOptions.enforceWriteTiers's own doc for why labeling a
   // route's tier must not, by itself, change what it accepts.
   const enforceWriteTiers = opts.enforceWriteTiers ?? false;
+  // W1-T495: OFF by default — see ServiceOptions.enforceReadSensitivity's own doc for why
+  // labeling a route's sensitivity must not, by itself, change what it accepts.
+  const enforceReadSensitivity = opts.enforceReadSensitivity ?? false;
   const confirmNonces = opts.confirmNonces ?? createConfirmNonceStore();
 
   return createServer((req, res) => {
@@ -657,6 +712,18 @@ export function createService(opts: ServiceOptions): Server {
       if (!granted.scopes.has(requiredScope)) {
         log("service.forbidden", { method, path, required_scope: requiredScope, granted_by: granted.provider });
         sendJson(res, 403, { error: "forbidden", required_scope: requiredScope });
+        return;
+      }
+
+      // W1-T495: the read-sensitivity gate, entirely additive to the scope check above and a
+      // no-op unless BOTH `enforceReadSensitivity` is on AND this route declared a `sensitivity`
+      // label — see ServiceOptions.enforceReadSensitivity's doc for why that is off by default.
+      // An ORDINARY read grant (no `readSensitivity` reported, or a mismatched one) is refused
+      // on a sensitive-labelled route and left untouched on every unlabelled one — the label
+      // discriminates rather than merely existing (design v).
+      if (enforceReadSensitivity && route?.sensitivity && granted.readSensitivity !== route.sensitivity) {
+        log("service.forbidden_sensitivity", { method, path, required_sensitivity: route.sensitivity, granted_by: granted.provider });
+        sendJson(res, 403, { error: "forbidden", required_scope: requiredScope, required_sensitivity: route.sensitivity });
         return;
       }
 

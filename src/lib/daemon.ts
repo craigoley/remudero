@@ -129,22 +129,26 @@ export type DaemonStopReason = "stopped" | "blocked" | "max_reached" | "error" |
 export const DEFAULT_POLL_INTERVAL_MS = 60_000;
 
 /**
- * The nonzero exit code for a `blocked`/`error` stop — a GENUINE crash or an unrecoverable
- * block, as opposed to `stale`'s healthy, WANTED restart (see {@link daemonExitCode}'s doc).
+ * The exit code a FRESHNESS self-restart uses, distinct from a crash's 1 (W1-T490).
  *
- * W1-T490 (freshness restart spends the crash-loop budget): before this constant existed,
- * `blocked`, `error` AND `stale` all collapsed to the same bare `1`, so `deploy/entrypoint.sh` —
- * whose only channel is `$rc`, since a docker experiment recorded in this task's shard
- * established the restart policy itself reads zero/non-zero only, never the value — could not
- * tell a routine, one-per-merge freshness restart from an actual crash. `stale` STAYS AT 1
- * rather than moving to this new value: `test/daemon-freshness.test.ts` already asserts
- * `daemonExitCode("stale") === 1` as a regression lock, and that file is not declared in this
- * task's scope, so the split runs the other way — the (previously unremarkable) crash codes move
- * here instead. Distinctness is all `deploy/entrypoint.sh`'s per-case accounting needs; which
- * literal number lands on which case does not matter to Docker (it only reads zero/non-zero) or
- * to launchd's `KeepAlive{SuccessfulExit:false}` (same).
+ * 75 is `EX_TEMPFAIL` from sysexits(3) — "temporary failure, the user is invited to
+ * retry" — which is precisely what a `stale` stop is: nothing is wrong, the process
+ * simply needs to come back on newer code. Any nonzero value would work for docker
+ * (it reads only zero/nonzero); a conventional one is chosen so an operator reading
+ * `docker inspect --format '{{.State.ExitCode}}'` by hand gets a meaning rather than
+ * a magic number.
+ *
+ * THE VALUE IS DUPLICATED IN `deploy/entrypoint.sh`, DELIBERATELY, AND A TEST PINS
+ * THE PAIR. The entrypoint cannot import this module: it runs at the exact moment
+ * the daemon has failed, and its own restart-throttle block already records why it
+ * refuses to depend on the repo being loadable then ("Reading it here instead would
+ * need the plan loadable at exactly the moment an unloadable plan is what is
+ * crashing the daemon — the measured incident"). A shell literal that silently
+ * drifts from this constant would reinstate the whole defect while every unit test
+ * stayed green, so `test/entrypoint-boot.test.ts` greps the script for this number
+ * and fails if the two disagree.
  */
-export const CRASH_EXIT_CODE = 2;
+export const DAEMON_EXIT_STALE = 75;
 
 /**
  * The pure stop-reason → process-exit-code mapping (operator ruling,
@@ -164,22 +168,45 @@ export const CRASH_EXIT_CODE = 2;
  * it. This is exactly why neither headroom exhaustion NOR pause can be
  * allowed to reach this function as a `DaemonStopReason` at all (see that
  * type's doc, above): each would either wrongly map to 0 (silence —
- * permanently dead until a manual reload) or wrongly map to a restart-loop
- * code (a relaunch storm — ~86s for headroom, ~10s for the 2026-07-22 paused
- * storm) — both wrong, because an awaiting-state is neither a clean stop nor
- * a crash. Both are handled entirely inside the loop below instead, and
- * never become return values.
+ * permanently dead until a manual reload) or wrongly map to 1 (a relaunch
+ * storm — ~86s for headroom, ~10s for the 2026-07-22 paused storm) — both
+ * wrong, because an awaiting-state is neither a clean stop nor a crash. Both
+ * are handled entirely inside the loop below instead, and never become
+ * return values.
  *
- * W1-T490 (freshness restart spends the crash-loop budget): `stale` now maps to a DISTINCT
- * nonzero code from `blocked`/`error` ({@link CRASH_EXIT_CODE}) rather than sharing the bare `1`
- * every stop reason but the clean two used to collapse into. `deploy/entrypoint.sh` reads this
- * distinction off `$rc` to give a routine, healthy freshness restart different accounting from a
- * genuine crash — see that script's "RESTART RATE LIMIT" section for what it does with it.
+ * ── W1-T490: `stale` NOW CARRIES ITS OWN CODE, BECAUSE THE CALLER THAT NEEDS TO
+ * TELL IT APART CANNOT SEE ANYTHING ELSE ──────────────────────────────────────
+ *
+ * The mapping above collapsed FIVE reasons onto two codes, so `blocked`, `error`
+ * and `stale` were indistinguishable at the process boundary. That is fine for
+ * launchd — `KeepAlive{SuccessfulExit:false}` restarts on any nonzero and wants
+ * to — but it is NOT fine for the container, where the restart budget is finite:
+ * docker's `--restart=on-failure:N` counts every nonzero exit against N and
+ * MEASURED (Azure, 2026-08-14, docker 29.1.3) cannot read the value at all —
+ * `exit 1` and `exit 42` both parked at `RestartCount=2` on `on-failure:2`,
+ * while `exit 0` did not restart. So a routine freshness restart — one per merge,
+ * 14 in 24 hours — spent the same budget as a crash, and no amount of healthy
+ * running refunded it (three containers exiting after 0s, 20s and 120s of clean
+ * work all parked permanently). The measured consequence was a 2h56m outage that
+ * only a human ended.
+ *
+ * SINCE DOCKER CANNOT READ THE CODE, THE ENTRYPOINT READS IT INSTEAD. This
+ * function's job is only to make the two cases DISTINGUISHABLE; the accounting
+ * is `deploy/entrypoint.sh`'s (see its freshness-restart block, which re-runs the
+ * bootstrap so the staleness actually clears, and still exits for a real crash so
+ * `on-failure:N` keeps bounding a crash loop). {@link DAEMON_EXIT_STALE} is the
+ * one name both halves share.
+ *
+ * NOTHING ELSE CHANGES POLARITY. `stale` stays NONZERO, so launchd's KeepAlive and
+ * a bare `--restart=on-failure` with no entrypoint support both still restart
+ * exactly as they did — this is strictly a refinement WITHIN nonzero, not a move
+ * across the zero boundary. `blocked` and `error` keep 1 precisely so that a
+ * crash remains countable.
  */
 export function daemonExitCode(stopReason: DaemonStopReason): number {
   if (stopReason === "stopped" || stopReason === "max_reached") return 0;
-  if (stopReason === "stale") return 1;
-  return CRASH_EXIT_CODE;
+  if (stopReason === "stale") return DAEMON_EXIT_STALE;
+  return 1;
 }
 
 /**

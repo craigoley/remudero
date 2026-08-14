@@ -1,0 +1,124 @@
+- id: W1-T495
+  title: "before any role model can mean anything the scope vocabulary must be able to say SENSITIVE READ — today it is exactly read | write, so a GET that returns spend or provenance is indistinguishable from a GET that returns a static shell, and every published role scheme would grant the most revealing reads by default"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45
+  rationale: "THE OPERATOR HAS RULED (2026-08-14): the console will be reached through W1-T431's
+    OUTBOUND RELAY, not by terminating TLS on the fleet VM. RECORDED, NOT RE-ARGUED. The reasoning
+    is that the fleet VM is the wrong thing to expose: it holds GH_TOKEN in a container env,
+    ~/.gh-token at mode 600, the ledger, and a daemon that pushes to main, and its NSG carries
+    EXACTLY ONE INBOUND RULE, SSH/22 from *. The console write set can stop the fleet, spend money
+    via /v1/drain/run and /v1/skills/run, approve proposals, and raise the daily cost ceiling — so
+    an auth bug on a public VM costs the FLEET, not a dashboard. remudero.com is already delegated
+    to Vercel (ns1/ns2.vercel-dns.com, apex on 216.150.1.1 — re-derived read-only at filing), which
+    puts a front end somewhere that is not the operator's infrastructure, the shape synthwatch uses.
+
+    WHY THIS TASK IS NOT THE SESSION TASK, AND WHY THE SESSION TASK IS NOT FILED. Step 1 shipped as
+    W1-T493 (#1828): enforcement is ALREADY server-side and ALREADY fails closed. Step 2 was to be
+    sessions and identity. IT CANNOT BE SPECIFIED YET, and the blocker is measured rather than
+    suspected: W1-T431 is CLIENT-ONLY BY ITS OWN CLAUSE (vi), which puts the hosted relay service,
+    accounts and remudero.com DNS/TLS out of scope, and its rationale says WHY — the hosted side is
+    a D-5 contract-coupling question the operator has not ruled on. Its clause (ii) says the tunnel
+    carries brokered browser sessions, so THE BROKER IS WHAT ISSUES OR VERIFIES A SESSION, and the
+    broker is the unspecified half. Vercel hosts static and serverless, not a persistent tunnel
+    endpoint, so nothing named anywhere in the plan today would terminate the outbound connection.
+    UNTIL THAT IS DEFINED, DOES THE FLEET ISSUE THE SESSION OR MERELY TRUST ONE is undecidable, and
+    those are different tasks with different threat models: a self-issued opaque token in a local
+    store is validated by the fleet, a relay-signed assertion is validated against a key the fleet
+    does not own. A session task written against an unspecified transport would be the thin filing
+    this repo has measured as degrading dispatch quality. RECOMMENDATION: build W1-T431, and rule on
+    the hosted side, BEFORE filing the session task.
+
+    WHAT IS UNBLOCKED, AND WHY IT IS STRICTLY FIRST. The scope vocabulary is Scope = read | write
+    (src/lib/service.ts, measured at filing) — no anon, no admin, and no way to say that one read is
+    more revealing than another. MEASURED, each with a positive control: GET /v1/account-usage is
+    scope read and returns spend (src/lib/account-usage.ts); GET /v1/trace is scope read and returns
+    provenance (src/lib/panel-graph.ts); while POST /v1/confirm is scope write and merely mints a
+    nonce (src/lib/service.ts), carrying no tier at all. SO SYNTHWATCH'S VERB-GATE CANNOT BE COPIED
+    LITERALLY: its AuthGate.Decide passes GET/HEAD and requires editor or admin for mutations, which
+    on this console would pass the two most revealing reads to anyone and block the most harmless
+    write. That inversion is exactly why synthwatch needed a SessionReadGate beside its verb-gate.
+    A role model layered on read | write therefore cannot express the thing that matters, which is
+    why this widening comes before sessions rather than after.
+
+    THE ADMIN IS GIVEN, NOT DESIGNED: craigoley@gmail.com. This task does not model it — there is no
+    admin scope to put it in yet, which is the gap being closed.
+
+    NOT SCOPED IN, CITED SO THEY ARE NOT LOST: the step-1 audit found the token store is JSON.parsed
+    with NO SHAPE VALIDATION, and the listener is a bare void async IIFE with no .catch, so a
+    throwing provider is PROCESS-FATAL under Node 22. Both refuse rather than grant, which is the
+    safe direction, but a console that dies on a malformed token file is a poor thing to put behind
+    a public relay. They are separate concerns and belong in their own task."
+  design: |
+    (i) WIDEN THE VOCABULARY AT ITS ONE DEFINITION. `Scope` (src/lib/service.ts) gains a
+    read-sensitivity axis. The shape is NOT a new scope string bolted onto the union — that would
+    silently reclassify every existing `read` route and break the two built-in grantors. It is a
+    per-route SENSITIVITY LABEL plus a grant-side entitlement, mirroring the axis W1-T404 already
+    proved in this exact module: `WriteTier` labels the consequence of a write and
+    `IdentityProvider.writeTier` says what a grantor is entitled to. This task adds the READ half of
+    that same pattern, so the module ends with one symmetric idea rather than two unrelated ones.
+    (ii) SHIP DARK, EXACTLY AS `enforceWriteTiers` DID. The mechanism is real, fully exercised over
+    HTTP, and OFF by default behind a `ServiceOptions` flag, so mounting it changes nothing a caller
+    can reach until it is switched on. That precedent is load-bearing and already has six suites
+    turning its flag on against synthetic routes; this follows it rather than inventing a second
+    migration style. `rmd serve`'s production wiring is NOT flipped here.
+    (iii) LABELLING THE REAL ROUTES IS DELIBERATELY OUT OF SCOPE. The route table is spread across
+    FOURTEEN modules (measured at filing), and relabelling them is a wide, reviewable sweep with a
+    completeness check of its own — the W1-T404 shape again, where the mechanism landed first and
+    the twenty write routes were labelled behind it. Declaring those fourteen files here would also
+    trip `inverseScopeUntouchedFiles` for every one the implementation did not reach.
+    (iv) ENFORCEMENT STAYS WHERE STEP 1 FOUND IT — inside `createService`'s dispatch, before any
+    handler runs, failing closed. No route may be gated by the console hiding a button; W1-T493
+    established that property and this must not weaken it.
+    (v) FALSIFIER, BOTH DIRECTIONS. With the flag ON, a request carrying only an ordinary read grant
+    is REFUSED on a route labelled sensitive and ALLOWED on an unlabelled read route — so the label
+    discriminates rather than merely existing. With the flag OFF, both requests behave exactly as
+    today. Deleting the check fails the first; making the check unconditional fails the second.
+    (vi) NOT IN SCOPE: sessions, cookies, expiry, revocation, roles, an admin identity, the relay,
+    the hosted broker, route relabelling, the token-store and listener robustness defects cited in
+    the rationale.
+  acceptance:
+    - claim: "with the flag on, an ordinary read grant is refused on a sensitive-labelled read route and allowed on an unlabelled one, so the label discriminates in both directions"
+      proof: "unit test: test/read-sensitivity-gate.test.ts"
+    - claim: "with the flag off the mechanism is inert and both routes answer exactly as they do today, so mounting it changes nothing until it is switched on"
+      proof: "unit test: test/read-sensitivity-gate.test.ts"
+    - claim: "the refusal is decided inside the service dispatch before any handler runs, so a sensitive read cannot be reached by calling the route directly"
+      proof: "unit test: test/read-sensitivity-gate.test.ts"
+  risk: high
+  origin: oper#console-exposure-step2-2026-08-14
+  plan_refs: ["W1-T493", "W1-T431", "W1-T430", "W1-T404"]
+  files: [src/lib/service.ts, test/read-sensitivity-gate.test.ts]
+  status: queued
+  attempts: 0
+  note: "risk:high IS SET UP FRONT. `files:` spans two subsystems (src/, test/) and
+    `sizingViolation` (src/lib/task-linter.ts) blocks at >=2 below high; the band is Rule 19's SPAN,
+    and it is independently warranted because this edits the auth dispatch every route passes
+    through. budget_usd 45 — one type change, one dispatch branch, one flag, and an over-HTTP
+    falsifier in both directions.
+
+    `files:` IS TWO PATHS AND BOTH WILL BE TOUCHED. `src/lib/service.ts` is where `Scope`,
+    `IdentityProvider`, `Route` and `createService`'s dispatch all live, so the whole mechanism
+    lands in one module. The single new test file carries both falsifier directions rather than
+    splitting them, because `inverseScopeUntouchedFiles` (src/lib/review.ts) fails a
+    declared-but-untouched path exactly as `scopeViolationFiles` fails an undeclared one, and a
+    second declared test file the implementation folded into the first would fail that check.
+    `src/lib/serve.ts` is NOT declared: no route is labelled here, so nothing in it is touched, and
+    W1-T493 already declares it. `src/run-task.ts` is NOT declared: the flag is a `ServiceOptions`
+    field, not a CLI surface.
+
+    PROOF NOTES: all three proofs are the pure-path form against a declared file, which lint-passes
+    and executes the whole file; the named file does not exist yet, which is the legitimate forward
+    reference for an unimplemented task — what holds today is that the proof PARSES. A path resolves
+    to exactly one file by construction, so none can trip the zero-or-many warning W1-T488 added.
+    No proof names this shard, so the implementation is not capped at 0/N by self-reference.
+
+    W1-T430's SHARD IS STALE AND THAT MATTERS TO WHOEVER BUILDS THIS: it reads status queued, but
+    `IdentityProvider` is BUILT and exported from src/lib/service.ts, with `ServiceOptions.providers`
+    appended after the two built-in grantors and its own doc naming a future relay-brokered browser
+    session as the anticipated third. So the seam a session would attach through already exists; it
+    is the session's ISSUER, not its attachment point, that is undefined. depends_on is EMPTY on
+    purpose — this widening needs neither the relay nor a session, and making it wait on either
+    would block the one piece that is ready."

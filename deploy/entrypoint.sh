@@ -222,13 +222,14 @@ checkout_target() {
   fi
 }
 
-# ── CLONE, OR SYNC WHAT IS ALREADY THERE ─────────────────────────────────────────────────────
-if [ ! -e "$TREE/.git" ]; then
-  log "no work tree at $TREE — cloning $REPO_URL"
-  mkdir -p "$CONFIG_ROOT"
-  git clone "$REPO_URL" "$TREE" || die "clone failed — check GH_TOKEN and RMD_REPO_URL"
-  checkout_target
-else
+# FETCH, GUARD, CHECKOUT — EXTRACTED SO IT CAN RUN MORE THAN ONCE (W1-T490).
+# The body is byte-for-byte what the `else` branch below used to hold inline; only its location
+# moved. It is a function now because the freshness-restart block at the foot of this script has to
+# re-run it: a daemon that stopped `stale` must come back on the code that made it stale, and the
+# fetch+checkout is the only thing in this container that advances the tree. That is exactly the
+# objection the restart-throttle block below used to raise against looping in-container ("the
+# clone/fetch/checkout above runs ONCE, before this line"), and extracting this is what retires it.
+sync_tree() {
   log "work tree present at $TREE"
   git -C "$TREE" fetch --prune origin || log "fetch FAILED — continuing on the tree as it stands"
 
@@ -263,6 +264,16 @@ else
     # the target IS the freshly-fetched tip, so a single detach lands on it directly.
     checkout_target
   fi
+}
+
+# ── CLONE, OR SYNC WHAT IS ALREADY THERE ─────────────────────────────────────────────────────
+if [ ! -e "$TREE/.git" ]; then
+  log "no work tree at $TREE — cloning $REPO_URL"
+  mkdir -p "$CONFIG_ROOT"
+  git clone "$REPO_URL" "$TREE" || die "clone failed — check GH_TOKEN and RMD_REPO_URL"
+  checkout_target
+else
+  sync_tree
 fi
 
 # RECORD WHAT ACTUALLY RUNS. The point of the pin is lost if the resolved commit is not observable,
@@ -302,38 +313,49 @@ cd "$TREE"
 # missing, and the measured precedent is a duplicate task id making the plan unreadable and
 # crash-looping the daemon at ~5 restarts/minute.
 #
-# THIS SLEEPS BEFORE EXITING; IT DOES NOT LOOP. That inversion is the whole design, and the reason
-# is `stale`. A daemon that finds itself on superseded code stops with DaemonStopReason `stale`,
-# which daemon.ts's own comment calls the path that "WANTS exactly that restart (it is how a
-# long-running daemon reaches merged code)". The clone/fetch/checkout above runs ONCE, before this
-# line — so an in-container retry loop would re-run the daemon against the SAME tree forever and
-# `stale` would never clear. Only a CONTAINER restart re-enters this script and re-fetches.
-# Sleeping before exit therefore keeps docker's restart as the mechanism and merely rate-limits it.
+# THIS SLEEPS BEFORE EXITING, AND — SINCE W1-T490 — LOOPS FOR EXACTLY ONE CASE. The original text
+# here rejected looping outright, on two grounds. The FIRST no longer holds and the SECOND still
+# does, so the block below honours the second and retires the first.
 #
-# IT ALSO LEAVES `--restart=on-failure:N` INTACT, which an internal loop would render inert: the
-# container still exits non-zero once per attempt, so N still counts attempts and still parks the
-# container after N. Rate here, count there — the two compose instead of overriding each other.
+#   RETIRED: "The clone/fetch/checkout above runs ONCE, before this line — so an in-container retry
+#   loop would re-run the daemon against the SAME tree forever and `stale` would never clear." That
+#   was true only of a loop around `"$@"`. The bootstrap is now the `sync_tree` FUNCTION above, so
+#   the loop below re-runs the fetch and the checkout before every retry and staleness clears
+#   exactly as a container restart would clear it.
+#
+#   STILL BINDING: "IT ALSO LEAVES `--restart=on-failure:N` INTACT, which an internal loop would
+#   render inert: the container still exits non-zero once per attempt, so N still counts attempts."
+#   A container that never exits is never counted, so an unconditional loop would delete the
+#   crash-loop bound entirely. THE LOOP BELOW IS THEREFORE NARROW: it re-enters ONLY on
+#   `DAEMON_EXIT_STALE`, and every other non-zero exit still falls straight through to the sleep and
+#   the exit, so a crash is counted by docker exactly as it was.
+#
+# ── WHY `stale` HAD TO BE SEPARATED AT ALL ───────────────────────────────────────────────────
+# `daemonExitCode` (src/lib/daemon.ts) used to map `blocked`, `error` AND `stale` onto 1, and
+# docker's `on-failure:N` counts every non-zero exit against N. MEASURED (Azure, 2026-08-14): the
+# policy cannot read the code — `exit 1` and `exit 42` both parked at `RestartCount=2` under
+# `on-failure:2` — and health never refunds the budget: containers exiting after 0s, 20s and 120s of
+# clean work all parked permanently, the only observed reset being a manual `docker start`. So a
+# freshness restart, which happens ONCE PER MERGE (14 rows in 24 hours), spent the same finite budget
+# as a crash, and a healthy merging fleet exhausted `on-failure:5` in roughly half a day. The
+# measured cost was a 2h56m outage — 90% of that day's downtime — that only a human ended.
+#
+# THE FIX IS NOT A POLICY CHANGE. `--restart=on-failure:5` is on the operator's `docker run` and is
+# deliberately left alone: an unbounded `always`/`unless-stopped` would have spun forever on the
+# MEASURED lock storm of 2026-08-13 22:23:40–22:26:10 (5 boots, 3 exits and 3 "a drain/daemon is
+# already running" collisions in 150 seconds, arriving 13–17s apart). The bound is wanted. What
+# changes is only WHICH exits are charged to it.
+#
+# THE FRESHNESS LOOP IS ITSELF BOUNDED, so nothing here is unbounded in either direction. It retries
+# at most `RMD_FRESHNESS_RESTART_MAX` times (default 20) and sleeps the SAME throttle between
+# attempts, so a pathological restart-storm is rate-limited exactly as before and then falls through
+# to a real exit, handing the container back to docker's count. Rate here, count there, still — the
+# only difference is that routine freshness no longer spends the count.
 #
 # EXIT 0 IS NEVER THROTTLED. `daemonExitCode` maps stopped/max_reached to 0, and a `STOP` file
 # yields `stopped` — so an operator stopping the fleet from the host gets an immediate clean exit
 # and `on-failure` leaves the container down. Sleeping there would delay a requested stop by a
 # minute for no reason.
-#
-# NEITHER IS EXIT 1, AS OF W1-T490. `daemonExitCode` used to send `blocked`, `error` AND `stale`
-# through this same branch as a bare, undifferentiated nonzero — so a routine, one-per-merge
-# freshness restart paid the SAME crash-storm sleep as an actual crash, purely because this script
-# had no way to tell them apart. It now does: `stale` maps to exit 1 and `blocked`/`error` map to
-# `CRASH_EXIT_CODE` (2, src/lib/daemon.ts) — DISTINCT codes, and `$rc` is the only channel this
-# script has to read that distinction (the docker experiment behind this task established the
-# restart POLICY itself never reads the value, only zero/non-zero, so acting on it has to happen
-# here). A `stale` exit already WANTS the restart it is about to get — it is how a long-running
-# daemon gets off superseded code (see this section's own note on `stale`, above) — and it is not
-# the crash-loop-storm scenario (design (ii) in this task's shard: 5 boots and 3 lock collisions in
-# 150 seconds) the throttle exists to slow down. So it is treated exactly like exit 0: immediate,
-# unthrottled — `--restart=on-failure:N` still counts the attempt (this does not touch N, and
-# cannot: see the shard's rationale for why no in-container mechanism can), it just does not ALSO
-# pay a sleep a healthy restart never needed. A genuine crash or block (anything else nonzero)
-# keeps the exact throttle behavior this script already had.
 #
 # THE INTERVAL COMES FROM THE ENVIRONMENT, NEVER FROM THE REPO. plan/policy.yaml is read by
 # `generateLaunchdPlist` at PLIST-GENERATION time and baked into static XML; launchd never reads
@@ -357,21 +379,58 @@ if [ "$RESTART_THROTTLE_S" -eq 0 ]; then
 fi
 
 log "restart throttle: a NON-ZERO exit will sleep ${RESTART_THROTTLE_S}s before exiting, so docker restarts at that rate"
+
+# THE FRESHNESS EXIT CODE, DUPLICATED FROM `DAEMON_EXIT_STALE` (src/lib/daemon.ts) ON PURPOSE.
+# This script cannot import that module: it runs at the exact moment the daemon has failed, and the
+# note on the throttle interval above already records why nothing here may depend on the repo being
+# loadable then. `test/entrypoint-boot.test.ts` greps this file for the constant and fails if the two
+# ever drift, so the duplication is pinned rather than merely commented.
+DAEMON_EXIT_STALE=75
+FRESHNESS_RESTART_MAX="${RMD_FRESHNESS_RESTART_MAX:-20}"
+case "$FRESHNESS_RESTART_MAX" in
+  '' | *[!0-9]*)
+    log "RMD_FRESHNESS_RESTART_MAX is not a whole number — ignoring it and using 20"
+    FRESHNESS_RESTART_MAX=20
+    ;;
+esac
+
 # CAPTURE THE CODE IN THE SAME COMMAND THAT RUNS IT. `if "$@"; then ...; fi; rc=$?` reads $? from
 # the COMPOUND, which is 0 when the condition merely tested false — so a crashing daemon exited 0,
 # docker's `on-failure` saw a success, and the container stayed down through exactly the crash it
 # is meant to restart. Caught by the non-zero-direction test below, which asserted the propagated
 # code rather than only the sleep; the sleep and both log lines were already correct.
-rc=0
-"$@" || rc=$?
-if [ "$rc" -eq 0 ]; then
-  log "exited 0 — not throttled (a STOP is a clean stop; --restart=on-failure leaves the container down)"
-  exit 0
-fi
-if [ "$rc" -eq 1 ]; then
-  log "exited 1 — a freshness self-restart (stale), not throttled: it already wants the immediate restart"
-  exit 1
-fi
-log "exited $rc — sleeping ${RESTART_THROTTLE_S}s before exiting so the restart is rate-limited, not just counted"
-sleep "$RESTART_THROTTLE_S"
-exit "$rc"
+freshness_restarts=0
+while :; do
+  rc=0
+  "$@" || rc=$?
+
+  if [ "$rc" -eq 0 ]; then
+    log "exited 0 — not throttled (a STOP is a clean stop; --restart=on-failure leaves the container down)"
+    exit 0
+  fi
+
+  # THE ONE CASE THAT DOES NOT SPEND THE BUDGET. A `stale` stop is not a failure: the daemon is
+  # asking to come back on code that has since merged, and daemon.ts calls it the path that "WANTS
+  # exactly that restart". Serving it here means the container never exits, so docker never counts
+  # it — while the re-sync below makes the retry meaningful rather than a re-run of the same tree.
+  if [ "$rc" -eq "$DAEMON_EXIT_STALE" ] && [ "$freshness_restarts" -lt "$FRESHNESS_RESTART_MAX" ]; then
+    freshness_restarts=$((freshness_restarts + 1))
+    log "exited $rc (freshness) — restart ${freshness_restarts}/${FRESHNESS_RESTART_MAX} IN-CONTAINER, so docker's on-failure budget is not spent"
+    log "  sleeping ${RESTART_THROTTLE_S}s first, then re-running the fetch/checkout so the staleness actually clears"
+    sleep "$RESTART_THROTTLE_S"
+    sync_tree
+    log "checkout: $(git -C "$TREE" rev-parse HEAD) ($REF)"
+    continue
+  fi
+
+  # EVERYTHING ELSE EXITS, AND IS COUNTED. A crash (`blocked`/`error` ⇒ 1) reaches here on its first
+  # attempt, so `--restart=on-failure:N` bounds a crash loop exactly as it did before this block
+  # existed. A freshness storm reaches here only after exhausting the loop above, which is what
+  # keeps the in-container path from replacing a bound with nothing.
+  if [ "$rc" -eq "$DAEMON_EXIT_STALE" ]; then
+    log "exited $rc (freshness) — but ${FRESHNESS_RESTART_MAX} in-container restarts are already spent, so this one goes to docker's count"
+  fi
+  log "exited $rc — sleeping ${RESTART_THROTTLE_S}s before exiting so the restart is rate-limited, not just counted"
+  sleep "$RESTART_THROTTLE_S"
+  exit "$rc"
+done

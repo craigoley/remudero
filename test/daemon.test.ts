@@ -9,9 +9,9 @@ import { daemonCommand, ledgerPathFor, runInflightLockSweepRung, type RunResult 
 import { CLAUDE_BIN_ENV_OVERRIDE, claudeExecutableCache } from "../src/lib/worker.js";
 import { HEADROOM_LIMIT_PCT, type UsageSnapshot } from "../src/lib/headroom.js";
 import {
-  CRASH_EXIT_CODE,
   DEFAULT_MAX_SPAWN_INFRA_BACKOFF_MS,
   DEFAULT_POLL_INTERVAL_MS,
+  DAEMON_EXIT_STALE,
   DEFAULT_UNREADABLE_DEGRADED_LIMIT,
   buildDefaultHeadroomPolicy,
   canonicalizeResetInstant,
@@ -1263,24 +1263,12 @@ test("headroom heartbeat: two boots reading the SAME window a minute apart log t
 });
 
 // ── daemonExitCode: the pure stop-reason -> exit-code mapping (Rule 18) ─────
-//
-// W1-T490: A ROUTINE FRESHNESS RESTART MUST BE DISTINGUISHABLE FROM A CRASH AT THE EXIT CODE
-// ITSELF — that is the only channel `deploy/entrypoint.sh` has, since the docker experiment
-// recorded in this task's shard established Docker's restart policy reads zero/non-zero only,
-// never the value, so the ENTRYPOINT is the one place a distinct code can matter, and it can only
-// act on it if the code truly differs. `stale` STAYS AT 1: `test/daemon-freshness.test.ts` (a
-// file this task does not declare and must not touch) already asserts
-// `daemonExitCode("stale") === 1` as a regression lock, and moving that value would break a
-// passing suite outside this task's scope. So the split runs the OTHER way — `blocked`/`error`
-// (a genuine crash or an unrecoverable block) move to their own CRASH_EXIT_CODE, distinct from
-// both `stale`'s 1 and the clean 0 — which is exactly as sufficient for "distinguishable at the
-// point the container restarts on": the entrypoint only needs stale's code to differ from
-// everything else, not to occupy any particular number.
+
 test("daemonExitCode: stopped/max_reached are the ONLY clean (zero) exits", () => {
   const zero: DaemonStopReason[] = ["stopped", "max_reached"];
   const nonzero: DaemonStopReason[] = ["blocked", "error"];
   for (const r of zero) assert.equal(daemonExitCode(r), 0, `${r} should exit 0`);
-  for (const r of nonzero) assert.equal(daemonExitCode(r), CRASH_EXIT_CODE, `${r} should exit ${CRASH_EXIT_CODE}`);
+  for (const r of nonzero) assert.equal(daemonExitCode(r), 1, `${r} should exit nonzero`);
 });
 
 test("daemonExitCode: a genuine crash (stopReason='error') STILL exits nonzero — preserving the KeepAlive restart the kill -9 drill verified", async () => {
@@ -1295,20 +1283,53 @@ test("daemonExitCode: a genuine crash (stopReason='error') STILL exits nonzero �
     sleep: clock.sleep,
   });
   assert.equal(s.stopReason, "error");
-  assert.equal(daemonExitCode(s.stopReason), CRASH_EXIT_CODE, "a real crash must still map to a nonzero exit so launchd's KeepAlive restarts it");
+  assert.equal(daemonExitCode(s.stopReason), 1, "a real crash must still map to a nonzero exit so launchd's KeepAlive restarts it");
 });
 
-test("daemonExitCode: a freshness self-restart (stale) is DISTINCT from a genuine crash — the entrypoint's only channel to tell them apart", () => {
-  // THE ACTUAL DELIVERABLE (W1-T490): `deploy/entrypoint.sh` sees only `$rc` — no stop reason,
-  // no ledger, nothing but the number this function returns. Before this change `blocked`,
-  // `error` AND `stale` all collapsed to the same 1, so a routine merge-triggered restart was
-  // bit-for-bit indistinguishable from a crash at the one point (`$rc`) an entrypoint can act on
-  // it. This is the regression lock for that collapse.
-  assert.equal(daemonExitCode("stale"), 1, "stale keeps exit 1 — asserted elsewhere by test/daemon-freshness.test.ts, outside this task's declared files");
-  assert.notEqual(daemonExitCode("stale"), daemonExitCode("blocked"), "a freshness restart must read differently from a block at the exit code");
-  assert.notEqual(daemonExitCode("stale"), daemonExitCode("error"), "a freshness restart must read differently from a crash at the exit code");
-  assert.notEqual(daemonExitCode("stale"), daemonExitCode("stopped"), "stale is nonzero — it still wants the restart, unlike a clean stop");
-  assert.notEqual(daemonExitCode("stale"), daemonExitCode("max_reached"));
+// ── W1-T490: A FRESHNESS EXIT AND A CRASH MUST BE TELLABLE APART ────────────
+//
+// BOTH DIRECTIONS OR NOTHING. The defect was that `blocked`, `error` and `stale` all mapped to 1,
+// so docker's `--restart=on-failure:N` charged a routine freshness restart — one per merge — to the
+// same finite budget as a crash, and no amount of healthy running refunded it. The fix must make
+// `stale` distinguishable WITHOUT making a crash indistinguishable from a clean stop: a change that
+// stops freshness spending the budget but also stops a crash loop being caught is a regression
+// wearing a fix's clothes. The pair below asserts each direction separately.
+
+test("W1-T490: a freshness stop carries its OWN code, so the entrypoint can tell it from a crash", () => {
+  assert.equal(daemonExitCode("stale"), DAEMON_EXIT_STALE);
+  // THE DISCRIMINATION THAT MATTERS. Before this change both sides of each comparison were 1, so
+  // the entrypoint had no signal at all to branch on.
+  assert.notEqual(daemonExitCode("stale"), daemonExitCode("error"), "a freshness restart must not look like a crash");
+  assert.notEqual(daemonExitCode("stale"), daemonExitCode("blocked"), "nor like a blocked stop");
+});
+
+test("W1-T490: and a crash is STILL nonzero-and-countable — the freshness carve-out must not swallow it", () => {
+  // The regression this guards: giving `stale` its own code by widening the ZERO set instead of the
+  // nonzero one. `blocked`/`error` staying at 1 is what leaves `on-failure:N` bounding a crash loop.
+  for (const r of ["blocked", "error"] as DaemonStopReason[]) {
+    assert.equal(daemonExitCode(r), 1, `${r} must stay 1 so docker still counts it against the budget`);
+  }
+  // AND `stale` MUST NOT HAVE CROSSED TO ZERO. Zero is the one value that stops a restart happening
+  // at all — `--restart=on-failure` leaves the container DOWN on a clean exit — so mapping freshness
+  // to 0 would trade a spent budget for a dead fleet, which is the worse failure.
+  assert.notEqual(daemonExitCode("stale"), 0, "a freshness stop must still RESTART; 0 would leave the container down");
+  for (const r of ["stopped", "max_reached"] as DaemonStopReason[]) {
+    assert.equal(daemonExitCode(r), 0, `${r} must stay a clean exit so an operator STOP really stops the fleet`);
+  }
+});
+
+test("W1-T490: every DaemonStopReason maps to a real exit code, and the three classes stay distinct", () => {
+  // EXHAUSTIVE OVER THE UNION, so a sixth member added later cannot silently inherit a class.
+  const all: DaemonStopReason[] = ["stopped", "blocked", "max_reached", "error", "stale"];
+  for (const r of all) {
+    const code = daemonExitCode(r);
+    assert.ok(Number.isInteger(code) && code >= 0 && code <= 255, `${r} -> ${code} is not a valid process exit code`);
+  }
+  assert.deepEqual(
+    [...new Set(all.map(daemonExitCode))].sort((a, b) => a - b),
+    [0, 1, DAEMON_EXIT_STALE],
+    "exactly three classes: clean stop, crash, freshness",
+  );
 });
 
 // ── stop-on-block v1 (block-REASONING is W1-T46, a successor built on this) ─
