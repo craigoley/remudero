@@ -319,6 +319,22 @@ cd "$TREE"
 # and `on-failure` leaves the container down. Sleeping there would delay a requested stop by a
 # minute for no reason.
 #
+# NEITHER IS EXIT 1, AS OF W1-T490. `daemonExitCode` used to send `blocked`, `error` AND `stale`
+# through this same branch as a bare, undifferentiated nonzero — so a routine, one-per-merge
+# freshness restart paid the SAME crash-storm sleep as an actual crash, purely because this script
+# had no way to tell them apart. It now does: `stale` maps to exit 1 and `blocked`/`error` map to
+# `CRASH_EXIT_CODE` (2, src/lib/daemon.ts) — DISTINCT codes, and `$rc` is the only channel this
+# script has to read that distinction (the docker experiment behind this task established the
+# restart POLICY itself never reads the value, only zero/non-zero, so acting on it has to happen
+# here). A `stale` exit already WANTS the restart it is about to get — it is how a long-running
+# daemon gets off superseded code (see this section's own note on `stale`, above) — and it is not
+# the crash-loop-storm scenario (design (ii) in this task's shard: 5 boots and 3 lock collisions in
+# 150 seconds) the throttle exists to slow down. So it is treated exactly like exit 0: immediate,
+# unthrottled — `--restart=on-failure:N` still counts the attempt (this does not touch N, and
+# cannot: see the shard's rationale for why no in-container mechanism can), it just does not ALSO
+# pay a sleep a healthy restart never needed. A genuine crash or block (anything else nonzero)
+# keeps the exact throttle behavior this script already had.
+#
 # THE INTERVAL COMES FROM THE ENVIRONMENT, NEVER FROM THE REPO. plan/policy.yaml is read by
 # `generateLaunchdPlist` at PLIST-GENERATION time and baked into static XML; launchd never reads
 # the repo at crash time. Reading it here instead would need the plan loadable at exactly the
@@ -351,6 +367,10 @@ rc=0
 if [ "$rc" -eq 0 ]; then
   log "exited 0 — not throttled (a STOP is a clean stop; --restart=on-failure leaves the container down)"
   exit 0
+fi
+if [ "$rc" -eq 1 ]; then
+  log "exited 1 — a freshness self-restart (stale), not throttled: it already wants the immediate restart"
+  exit 1
 fi
 log "exited $rc — sleeping ${RESTART_THROTTLE_S}s before exiting so the restart is rate-limited, not just counted"
 sleep "$RESTART_THROTTLE_S"

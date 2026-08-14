@@ -129,6 +129,24 @@ export type DaemonStopReason = "stopped" | "blocked" | "max_reached" | "error" |
 export const DEFAULT_POLL_INTERVAL_MS = 60_000;
 
 /**
+ * The nonzero exit code for a `blocked`/`error` stop — a GENUINE crash or an unrecoverable
+ * block, as opposed to `stale`'s healthy, WANTED restart (see {@link daemonExitCode}'s doc).
+ *
+ * W1-T490 (freshness restart spends the crash-loop budget): before this constant existed,
+ * `blocked`, `error` AND `stale` all collapsed to the same bare `1`, so `deploy/entrypoint.sh` —
+ * whose only channel is `$rc`, since a docker experiment recorded in this task's shard
+ * established the restart policy itself reads zero/non-zero only, never the value — could not
+ * tell a routine, one-per-merge freshness restart from an actual crash. `stale` STAYS AT 1
+ * rather than moving to this new value: `test/daemon-freshness.test.ts` already asserts
+ * `daemonExitCode("stale") === 1` as a regression lock, and that file is not declared in this
+ * task's scope, so the split runs the other way — the (previously unremarkable) crash codes move
+ * here instead. Distinctness is all `deploy/entrypoint.sh`'s per-case accounting needs; which
+ * literal number lands on which case does not matter to Docker (it only reads zero/non-zero) or
+ * to launchd's `KeepAlive{SuccessfulExit:false}` (same).
+ */
+export const CRASH_EXIT_CODE = 2;
+
+/**
  * The pure stop-reason → process-exit-code mapping (operator ruling,
  * 2026-07-21: "VERIFY from source how DaemonStopReason reaches the process
  * exit today... the deliverable is the pure stop-reason-to-exit-code
@@ -146,14 +164,22 @@ export const DEFAULT_POLL_INTERVAL_MS = 60_000;
  * it. This is exactly why neither headroom exhaustion NOR pause can be
  * allowed to reach this function as a `DaemonStopReason` at all (see that
  * type's doc, above): each would either wrongly map to 0 (silence —
- * permanently dead until a manual reload) or wrongly map to 1 (a relaunch
- * storm — ~86s for headroom, ~10s for the 2026-07-22 paused storm) — both
- * wrong, because an awaiting-state is neither a clean stop nor a crash. Both
- * are handled entirely inside the loop below instead, and never become
- * return values.
+ * permanently dead until a manual reload) or wrongly map to a restart-loop
+ * code (a relaunch storm — ~86s for headroom, ~10s for the 2026-07-22 paused
+ * storm) — both wrong, because an awaiting-state is neither a clean stop nor
+ * a crash. Both are handled entirely inside the loop below instead, and
+ * never become return values.
+ *
+ * W1-T490 (freshness restart spends the crash-loop budget): `stale` now maps to a DISTINCT
+ * nonzero code from `blocked`/`error` ({@link CRASH_EXIT_CODE}) rather than sharing the bare `1`
+ * every stop reason but the clean two used to collapse into. `deploy/entrypoint.sh` reads this
+ * distinction off `$rc` to give a routine, healthy freshness restart different accounting from a
+ * genuine crash — see that script's "RESTART RATE LIMIT" section for what it does with it.
  */
 export function daemonExitCode(stopReason: DaemonStopReason): number {
-  return stopReason === "stopped" || stopReason === "max_reached" ? 0 : 1;
+  if (stopReason === "stopped" || stopReason === "max_reached") return 0;
+  if (stopReason === "stale") return 1;
+  return CRASH_EXIT_CODE;
 }
 
 /**

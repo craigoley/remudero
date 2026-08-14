@@ -444,6 +444,33 @@ test("an exit 0 is NEVER throttled, so a STOP file stops the fleet immediately",
   assert.match(run.stderr, /exited 0 — not throttled/);
 });
 
+// ── W1-T490: A ROUTINE FRESHNESS RESTART DOES NOT PAY THE CRASH THROTTLE ────────────────────
+//
+// `daemonExitCode` (src/lib/daemon.ts) now maps `stale` to a DISTINCT code (1) from `blocked`/
+// `error` (`CRASH_EXIT_CODE`, 2) — see that file's doc for why the split runs this way round and
+// not the more obvious one. This entrypoint is the one place that distinction can be ACTED on: it
+// is the only reader of `$rc`, since the docker experiment recorded in this task's shard
+// established the restart policy itself never sees the value, only zero/non-zero. A freshness
+// restart already WANTS the restart it is about to get (the comment three sections up: "the ONLY
+// path onto merged code") and is not the crash-storm scenario the throttle exists for — so it
+// exits immediately, same as an exit 0, while a genuine crash still pays the sleep exactly as
+// before this task.
+test("an exit 1 (a freshness self-restart, stale) is NEVER throttled, so a routine merge does not pay the crash-storm sleep", () => {
+  const run = bootTimed(freshHome(), makeOrigin(), 1, { RMD_RESTART_THROTTLE_S: "5" });
+  assert.equal(run.calls, 1, "the command runs ONCE per container; the restart is docker's job");
+  assert.equal(run.status, 1, "the exit code still propagates, so docker's on-failure still restarts it");
+  assert.ok(run.elapsedMs < 5000, `a freshness (exit 1) restart must not sleep, took ${run.elapsedMs}ms`);
+  assert.match(run.stderr, /exited 1 — a freshness self-restart \(stale\), not throttled/);
+});
+
+test("a genuine crash (exit 2, CRASH_EXIT_CODE) is STILL throttled — the crash-loop bound this task must not remove", () => {
+  const run = bootTimed(freshHome(), makeOrigin(), 2, { RMD_RESTART_THROTTLE_S: "2" });
+  assert.equal(run.calls, 1);
+  assert.equal(run.status, 2, "the command's own exit code is propagated, not swallowed");
+  assert.ok(run.elapsedMs >= 2000, `a genuine crash must still sleep ~2s before exiting, took ${run.elapsedMs}ms`);
+  assert.match(run.stderr, /exited 2 — sleeping 2s/);
+});
+
 test("with the throttle UNSET the script still execs, so one-shot verbs keep today's latency", () => {
   const run = bootTimed(freshHome(), makeOrigin(), 3, {});
   assert.equal(run.status, 3, "the exit code still propagates through exec");
