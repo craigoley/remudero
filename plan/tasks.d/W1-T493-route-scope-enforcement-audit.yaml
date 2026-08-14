@@ -1,0 +1,115 @@
+- id: W1-T493
+  title: "prove every console route's scope is enforced server-side BEFORE the console is exposed — the audit is worth doing even if hosting never happens, and its whole value is the property that route 37 added tomorrow without a classification FAILS rather than defaulting open"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  rationale: "STEP ONE OF FOUR toward a public console, and the only one that pays off if the other
+    three never happen. THE GOVERNING PRINCIPLE IS SYNTHWATCH'S, QUOTED VERBATIM FROM ITS OWN
+    `docs/auth-gates.md`: `the API is the real security boundary (the dashboard only hides buttons)`.
+    RE-DERIVED AT 50d039a0 on the mac mini; all of it is a tree fact, host-independent, no ledger read.
+    (1) THE GOOD NEWS FIRST, BECAUSE IT NARROWS THE TASK. ENFORCEMENT IS ALREADY SERVER-SIDE AND
+    ALREADY FAILS CLOSED. `createService` (`src/lib/service.ts`) resolves `requiredScope` off the
+    matched `Route`/`SseRoute` itself, calls `grantedScopes`, and returns 401 when nothing granted or
+    403 when `!granted.scopes.has(requiredScope)` — BOTH BEFORE ANY HANDLER RUNS. NO ROUTE IS GATED
+    ONLY BY THE UI: the console's `hasWriteScope`/`probeWriteScope` merely hide buttons, and the
+    server re-checks regardless. An unmatched path 404s. SO THIS TASK IS AN AUDIT AND A LOCK, NOT A
+    REPAIR — say that plainly rather than implying the surface is open today.
+    (2) AND THE ROUTE TABLE IS RUNTIME-ENUMERABLE, WHICH IS WHAT MAKES THIS TESTABLE AT ALL.
+    `buildServeRoutes(deps)` (`src/lib/serve.ts`) RETURNS `Route[]` — the real assembled table, not a
+    doc. `Route.scope` is REQUIRED on the type, so a new route cannot compile without one. If either
+    were false this task would be unbuildable and should be closed instead.
+    (3) THERE IS ALREADY A PRECEDENT FOR THE EXACT PROPERTY WANTED, FOR A DIFFERENT FIELD.
+    `writeRoutesMissingTier` makes `buildServeRoutes` FAIL LOUD when a write-scoped route omits its
+    W1-T404 `tier`, rather than defaulting. That is the shape this audit needs for scope, and it means
+    the pattern is copied, not invented.
+    (4) WHAT IS ACTUALLY MISSING, AND IT IS THE FOUR-WAY CLASSIFICATION THE HOSTING PLAN ASSUMES.
+    `Scope` is `read | write` — TWO VALUES. THERE IS NO `anon` AND NO `admin`. Every route today
+    requires a credential; nothing is publicly readable by design, and no route can be restricted to
+    an owner. A login that distinguishes an admin has nowhere to express that yet.
+    (5) AND A METHOD-BASED VERB-GATE IS THE WRONG DEFAULT FOR THIS SURFACE — recorded because
+    synthwatch's is the model and copying it literally would be a mistake. `AuthGate.Decide` passes
+    GET/HEAD and gates mutations. HERE SOME GETs ARE STRICTLY MORE SENSITIVE THAN SOME POSTs:
+    `GET /v1/account-usage` is spend, `GET /v1/trace` renders provenance chains, `GET /v1/status`
+    carries absolute host file paths, while `POST /v1/confirm` merely mints a nonce. A GET-passes
+    default would expose the most sensitive reads on this console. The synthwatch answer to exactly
+    this is its `SessionReadGate` — a handler-side gate for sensitive reads the verb-gate cannot
+    see — and the equivalent here is that scope must stay DECLARED PER ROUTE, never derived from
+    method."
+  design: "(i) THE ACCEPTANCE IS THE RATCHET, NOT THE SNAPSHOT. A matrix test that passes today and
+    silently admits route 37 tomorrow is worth nothing. The test must drive the REAL table from
+    `buildServeRoutes` — never a hand-copied list, which is the artifact that rots — and assert, for
+    every route it finds: a declared scope, and that a request without that scope is refused by the
+    REAL `createService` request path rather than by a stub. THE LOAD-BEARING ASSERTION IS THE
+    COMPLETENESS ONE: a route present in the assembled table but absent from the classification
+    fixture must FAIL, in the shape `writeRoutesMissingTier` already uses.
+    (ii) WHAT FAILS CLOSED TODAY — CHECKED PATH BY PATH, AND NO FAIL-OPEN WAS FOUND. Recorded because
+    the repo has corrected seven instances of a read that FAILED being reported as a read that SAID
+    NO, and the dangerous direction here is the opposite one.
+      `grantedScopes` returns `undefined` when no provider grants ⇒ 401.
+      `bearerTokenProvider` returns `undefined` on a missing token, and on any non-match ⇒ 401.
+      `safeEqual` length-checks BEFORE `timingSafeEqual`, so a length mismatch is a clean false.
+      AN EMPTY CREDENTIAL CANNOT MATCH AN EMPTY STORED TOKEN: `if (!token) return undefined` runs
+      first, so the empty-string-equals-empty-string hole is already closed.
+      `resolveServiceTokens` (`src/lib/serve.ts`) CREATES the file at 0600 with
+      `randomBytes(32).toString(\"hex\")` when absent — a missing file is not an open door.
+    (iii) TWO FAIL-FATAL PATHS, WHICH ARE NOT FAIL-OPEN BUT SHOULD BE NAMED. `resolveServiceTokens`
+    ends `JSON.parse(result.raw) as ServiceTokens` with NO SHAPE VALIDATION — a corrupt file throws
+    at startup, and a well-formed file missing its keys yields `undefined` tokens that throw
+    per-request inside `Buffer.from`. And `createService`'s listener is `void (async () => { … })();`
+    with NO `.catch()`, so a throwing `IdentityProvider` becomes an unhandled rejection, which Node
+    22 treats as fatal. BOTH REFUSE RATHER THAN GRANT — the safe direction — but both take the
+    console down rather than returning 500, and an audit that does not say so is incomplete.
+    (iv) EXPLICITLY OUT OF SCOPE, SO NOBODY WIDENS THIS. Sessions, the PIN/email-code flow, the admin
+    role, TLS, DNS and the NSG are steps two through four and are separately ruled. This task adds NO
+    new scope value, NO login, and NO deployment. `IdentityProvider` (W1-T430) is a SCOPE-GRANTING
+    seam, not a login seam, so this task extends nothing — it audits what that seam already decides.
+    (v) ONE ARCHITECTURAL RULING IS OUTSTANDING AND THIS TASK DOES NOT DEPEND ON IT. The fleet VM
+    holds `GH_TOKEN` in a container env, `~/.gh-token` at 0600, the ledger, and a daemon that pushes
+    to main; its NSG carries exactly one inbound rule, SSH/22 from `*`; and `remudero.com`'s DNS is
+    already delegated to Vercel. Terminating TLS on that VM is one answer and W1-T431's outbound
+    relay is another. WHICH IS CHOSEN CHANGES STEP FOUR AND NOT WHAT THIS TASK MUST PROVE.
+    (vi) AND THE ASSUMPTION THIS EXISTS TO RETIRE. `WILDCARD_HOSTS` refuses `0.0.0.0`/`::`/`*`/``,
+    but a SPECIFIC non-loopback address is accepted, and the mini already listens on its tailnet
+    address as well as loopback. THE TAILNET IS CURRENTLY LOAD-BEARING AUTH, NOT MERELY TRANSPORT.
+    The audit's job is to make that overlay redundant to correctness, so removing it later is a
+    deployment decision rather than a security regression."
+  acceptance:
+    - claim: "every route in the really-assembled table is driven through the real service and refused without its scope"
+      proof: "unit test: test/route-scope-matrix.test.ts"
+    - claim: "a route added without a classification fails the audit instead of defaulting open"
+      proof: "unit test: test/route-scope-matrix.test.ts"
+    - claim: "a sensitive read is refused without a credential, not merely hidden by the console"
+      proof: "unit test: test/route-scope-matrix.test.ts"
+    - claim: "an unreadable or malformed token store refuses rather than granting"
+      proof: "unit test: test/route-scope-matrix.test.ts"
+  origin: recon#console-hosting-step-one-2026-08-14
+  plan_refs: ["W1-T430", "W1-T404", "W1-T431"]
+  files: [src/lib/serve.ts, test/route-scope-matrix.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `src/` and `test/`. Blast radius is one
+    completeness guard plus a test; the enforcement path itself is already correct and this task must
+    not rewrite it.
+    `verify: human` — design (i) fixes the ratchet's shape but the operator is minting these four
+    steps ONE AT A TIME, deliberately, and should see the audit's findings before step two is scoped.
+    `files:` IS TWO PATHS. `src/lib/serve.ts` is declared because `buildServeRoutes` and its existing
+    `writeRoutesMissingTier` guard live there, and the completeness guard belongs beside them.
+    `src/lib/service.ts` is DELIBERATELY NOT DECLARED: `createService`'s enforcement was measured
+    correct and fail-closed, so the implementation should not need to touch it — and declaring a file
+    the implementation never edits trips `inverseScopeUntouchedFiles` (`src/lib/review.ts`). IF the
+    implementer finds a real enforcement defect there, declare it THEN and say why.
+    `src/run-task.ts` IS NOT DECLARED and must not be: at 19,588 lines every task naming it serialises
+    against every other that does (W1-T471), and nothing here touches it.
+    EVERY CRITERION IS `unit test:` ON PURPOSE — a shard whose proofs are all `grep:` against its own
+    path caps its implementation at `proof_exec: 0/N` and needs an operator override (that happened to
+    #1812), and such a proof additionally draws a `proof-scope` warning that BLOCKS in CI's
+    changed-tasks pass. The titles are written to resolve to ONE file, because `check-proof` now warns
+    on a `unit test:` title matching zero or many tests (W1-T488).
+    WHAT THIS TASK MUST NOT BECOME. It is an audit and a ratchet. If the audit finds the surface
+    already correct — which the measurements in the rationale suggest it largely is — THE RIGHT
+    OUTCOME IS A PASSING TEST THAT CANNOT SILENTLY ADMIT ROUTE 37, not a redesign. A large diff here
+    is evidence of scope creep, not thoroughness."
