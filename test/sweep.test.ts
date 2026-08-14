@@ -2494,6 +2494,31 @@ test("W1-T473 acceptance 3 — a pass with NO post-review-eligible PRs starts ZE
   assert.deepEqual(emptyCalls, []);
 });
 
+test("W1-T473 — a postReview call that THROWS inside the concurrent budget batch is contained exactly like every other disposition's throw (W1-T254): acted:false, its own sweep.action_failed line, the pass still completes", async () => {
+  const deps = fakeDeps({
+    postReview: () => {
+      throw new Error("reviewer worker boom");
+    },
+  });
+
+  const summary = await runSweep([greenPr(910)], deps, DEFAULT_SWEEP_POLICY);
+
+  const action = summary.actions.find((a) => a.prNumber === 910);
+  assert.equal(action?.acted, false, "a thrown postReview call is never credited as acted");
+  assert.match(action?.actionError ?? "", /reviewer worker boom/);
+
+  const failed = readLedgerLines(deps.ledgerPath).filter((l) => l.step === "sweep.action_failed");
+  assert.equal(failed.length, 1, "exactly one sweep.action_failed line, matching every other disposition's throw containment");
+  assert.equal(failed[0].pr_number, 910);
+  assert.equal(failed[0].disposition, "post-review");
+  assert.match(String(failed[0].error), /reviewer worker boom/);
+
+  const disposed = readLedgerLines(deps.ledgerPath).filter((l) => l.step === "sweep.disposed");
+  const disposedLine = disposed.find((l) => l.pr_number === 910);
+  assert.equal(disposedLine?.acted, false);
+  assert.match(String(disposedLine?.action_error ?? ""), /reviewer worker boom/);
+});
+
 // ── W1-T254: per-PR throw containment — one PR's thrown action never aborts the pass ──
 
 test("runSweep: a throwing action does not abort the pass — later PRs still reconcile and the throwing PR is attributed (W1-T254)", async () => {
