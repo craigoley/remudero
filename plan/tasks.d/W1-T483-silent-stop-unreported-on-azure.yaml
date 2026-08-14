@@ -1,0 +1,162 @@
+- id: W1-T483
+  title: "the fleet stopped for two hours and fifty-six minutes and no instrument on that host said so — the one named heartbeat beats from the OTHER machine, and its watcher reads a single branch that the healthy host keeps fresh"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: "**THE OUTAGE.** Azure, 24h to 2026-08-14T12:26Z: uptime 86.4%, and 90% of ALL downtime
+    is ONE event — an exit at 08:34:53 whose next entrypoint start is 11:30:20, 2h55m45s later. The
+    nine routine gaps are 132-141s each. `RestartCount=1` with `StartedAt=2026-08-14T12:19:22Z` is
+    the counter as it stands after a MANUAL start; the container was created 2026-08-13T16:35:32Z.
+
+    **DOCKER'S SEMANTICS, ESTABLISHED BY EXPERIMENT RATHER THAN INHERITED — THIS IS THE CLAIM THE
+    WHOLE TASK RESTS ON AND IT WAS THE ONE MOST LIKELY TO BE WRONG.** Three throwaway containers on
+    this host, docker 29.1.3, `--restart=on-failure:2`, none of them touching the fleet:
+      A. `exit 1` immediately        -> 3 boots, RestartCount=2, **exited permanently**
+      B. `sleep 20;  exit 1`         -> 3 boots, RestartCount=2, **exited permanently**
+      C. `sleep 120; exit 1`         -> 3 boots, RestartCount=2, **exited permanently**
+    **SO `on-failure:N` COUNTS CUMULATIVE RESTARTS OF A CONTAINER INSTANCE, NOT CONSECUTIVE
+    FAILURES, AND NO DURATION OF HEALTHY RUNNING EARNS A RETRY BACK.** Two consecutive
+    two-minute healthy runs reset nothing. The only observed reset is a manual start — which is
+    exactly why the live counter reads 1 today and why the fleet's own log carries 11 exits against
+    a cap of 5 since 2026-08-13T16:35: the intervening resets were hands, not uptime.
+
+    **AND THE BUDGET IS SPENT BY HEALTHY WORK.** `daemonExitCode` (`src/lib/daemon.ts`), verbatim:
+      return stopReason === \"stopped\" || stopReason === \"max_reached\" ? 0 : 1;
+    So `stale` — the freshness self-restart, 10 rows in 24h, one per merge — returns **1**, the same
+    code as every crash. `deploy/entrypoint.sh` sees only `$rc`
+    (`log \"exited $rc — sleeping ${RESTART_THROTTLE_S}s…\"`), and Docker sees only non-zero.
+    **A ROUTINE FRESHNESS RESTART AND A CRASH-LOOP ARE INDISTINGUISHABLE TO THE RESTART POLICY.**
+    That conflation is the root: a healthy, merging fleet consumes a finite retry budget as fast as
+    it merges, and when the budget runs out the fleet stops — correctly, by policy, and silently.
+
+    **THE CAP IS NOT THE VILLAIN, AND THE COUNTER-ARGUMENT IS MEASURED.** Re-derived from the
+    container's own log, 2026-08-13T22:23:40-22:26:10 — **150 seconds carrying 5 boots, 3 exits and
+    3 `rmd daemon REFUSED — a drain/daemon is already running` lock collisions**, each printing the
+    identical `exited 1 — sleeping 120s` line while the next boot arrived 13-17s later, so the
+    throttle did not rate-limit them either. An unbounded `always`/`unless-stopped` policy would have
+    spun on that shape indefinitely. **A bound is wanted. What is missing is the alarm.**
+
+    **NOTHING ON AZURE REPORTS THE STOP, AND THE ONE THING NAMED FOR IT IS BOUND TO THE OTHER HOST.**
+    `scripts/fleet-heartbeat.sh` is exactly the right instrument and its header says so — *\"THE
+    REPORTER MUST NOT DEPEND ON THE THING IT REPORTS ON\"*, plain bash and git, carrying the daemon's
+    own last-poll timestamp so a beat is never *\"A GREEN LIGHT ON A DEAD FLEET\"*. Its live payload,
+    read from `origin/heartbeat` during this recon:
+      beat_host=Craigs-Mac-mini
+      install_dir=/Users/craigoleyagent/Remudero/remudero
+      daemon_verdict=live   daemon_last_step=daemon.pause   ledger_bytes=1553720
+    **FALSIFIED THREE INDEPENDENT WAYS THAT THIS IS NOT AZURE:** the host name and install path are
+    the mini's; `ledger_bytes` reads 1,553,720 against Azure's live ledger at 1,178,150; and
+    `daemon_last_step=daemon.pause` names a step Azure's ledger has **ZERO** of, ever (positive
+    control — the same query returns Azure's real most-recent `daemon.*` row, `daemon.alive` at
+    12:45:26Z). On Azure itself there is **no crontab entry, no systemd timer and no container**
+    running the beat (positive control: the same queries do return `/etc/cron.d/e2scrub_all`,
+    `sysstat`, and all five containers).
+    **SO THROUGHOUT THE 2h56m THE HEARTBEAT KEPT BEATING `daemon live`, TRUTHFULLY, ABOUT A
+    DIFFERENT MACHINE**, and `.github/workflows/fleet-heartbeat-watch.yml` — `STALE_AFTER_MINUTES:
+    30`, hourly — correctly stayed silent.
+
+    **AND THE HISTORY IS GONE, WHICH IS WHY NOBODY COULD CHECK AFTERWARDS.** `origin/heartbeat` is a
+    FORCE-PUSHED ROOT COMMIT: `git rev-list --count` = 1, `parents=[]`. Only the latest beat exists,
+    so no one can ask what the heartbeat said at 09:00.
+
+    **CONTEXT, RECORDED SO NOBODY BLAMES THE WRONG THING.** The freshness cycle costs ~1.7% of
+    wall-clock (9 x ~133s downtime + 10 x ~25s boot ramp); boot is now **25.2s median** from
+    `daemon.boot` to first productive row, FASTER than the obsolete 73-88s figure; worker-occupied
+    time was **63.2% of wall-clock** with 15 merges and 38 reviews in the day. **THE RESTARTS ARE NOT
+    THE PROBLEM; THE RETRY BUDGET THEY CONSUME IS, AND THE SILENCE WHEN IT EMPTIES.** A task that
+    reads as \"the freshness check is too aggressive\" is the wrong task."
+  design: "**THE SCOPE TAKEN, AND WHY THIS ONE.** The evidence points at OBSERVABILITY, not at the
+    policy: the 150-second lock storm argues a bound is genuinely wanted, and the cap did its job.
+    What failed is that a correct, deliberate stop produced no signal on the host it happened on. So
+    this task makes the stop LOUD and changes no restart policy and no exit code. The policy levers
+    are named in (iv) and are explicitly NOT in scope.
+
+    (i) **THE BEAT MUST COVER THIS HOST, AND IT ALREADY CAN — IT IS SIMPLY NOT INSTALLED.**
+    `scripts/fleet-heartbeat.sh` is already host-agnostic in code: `RMD_ROOT` is an override falling
+    back to `config.root` then `${HOME}/Remudero`, `LEDGER` is derived from it, and `beat_host` is
+    `$(hostname)`. Nothing in it is mini-specific. Establish the install surface for a container
+    host — this fleet runs under docker with no launchd and no crontab — and note the script's own
+    hard constraint: it must stay PLAIN BASH AND GIT, never an `rmd` verb, because an emptied
+    `node_modules` kills every verb while the resident daemon keeps serving. A beat that dies in
+    that state is the failure the header was written against.
+
+    (ii) **ONE BRANCH CANNOT WATCH TWO HOSTS, AND THIS IS THE PART MOST LIKELY TO BE BUILT WRONG.**
+    `BRANCH=\"${RMD_HEARTBEAT_BRANCH:-heartbeat}\"` and the watcher pins `HEARTBEAT_BRANCH:
+    heartbeat`, reading age with a single `git log -1 --format=%ct`. Each beat is a force-pushed root
+    commit, so two hosts beating to one branch OVERWRITE each other and the freshest beat makes the
+    other host's silence invisible — **the exact failure this task exists to close, reintroduced by
+    the obvious implementation.** `RMD_HEARTBEAT_BRANCH` already exists as the seam. Establish
+    whether the watcher should take a LIST of branches or whether one job per host is cleaner; the
+    workflow's own header explains why absence-of-branch is silent (not-installed is not a finding),
+    and that clause must keep holding per branch rather than collapsing to any-branch-is-fresh.
+
+    (iii) **WHAT THE BEAT MUST SAY THAT IT DOES NOT SAY TODAY.** The payload already carries
+    `daemon_verdict`, `daemon_last_ts` and `daemon_last_age_s` — enough to distinguish a dead daemon
+    from a quiet one. It does NOT carry the thing this outage turned on: **the container's restart
+    budget.** `docker inspect --format '{{.RestartCount}}'` against the policy's own maximum is one
+    cheap read that would have made the approach to exhaustion visible BEFORE the stop rather than
+    after it. Establish whether that belongs in the beat, and note the honest limit — a beat cannot
+    report a budget after the container is already down, so this is an EARLY WARNING, not a
+    detector. The detector is the beat's absence.
+
+    (iv) **NOT IN SCOPE, AND NAMED SO NOBODY RE-DERIVES THEM. THREE POLICY LEVERS EXIST AND EACH IS A
+    DIFFERENT TASK:**
+      - **EXIT 0 ON A FRESHNESS RESTART.** A clean exit should not spend the budget. But
+        `deploy/entrypoint.sh` says in its own log line what happens then — *\"exited 0 — not
+        throttled (a STOP is a clean stop; --restart=on-failure leaves the container down)\"* — so
+        exit 0 means NO restart at all. The entrypoint would have to loop instead of exit, which
+        `deploy/entrypoint.sh`'s own comment rejects (*\"an in-container retry loop would re-run
+        against the same tree and 'stale' would never clear\"*), or the policy would have to change.
+      - **`unless-stopped` / `always`.** No budget to exhaust; the 150-second lock storm is the
+        measured counter-example.
+      - **SEPARATE THE EXIT CODES** so `deploy/entrypoint.sh` can tell `stale` from a crash and pick
+        a throttle and a policy per case. **THIS IS THE PREREQUISITE FOR EVERY OTHER LEVER, INCLUDING
+        LOWERING THE 120s THROTTLE**, and it touches `daemonExitCode` and `DaemonStopReason` in
+        `src/lib/daemon.ts`. It is a separate task on purpose: it changes how the fleet restarts,
+        which is the operator's call, while this one only changes whether he is told.
+
+    (v) **THE PRIOR ART IS ALREADY IN THE REPO AND SHOULD BE READ BEFORE ARGUING ANY NUMBER.**
+    `deploy/host-update.sh`'s daemon block PREDICTED this: it records that once
+    `DaemonDeps.checkFreshness` is wired *\"every freshness self-restart pays this sleep too\"*,
+    estimates 13-30 restarts/day, and states that `--restart=on-failure:5`'s *\"own count cap is the
+    other half and only they can watch it\"*. **The count cap was knowingly left to the operator to
+    watch, and nothing was ever built for him to watch it with.** That is this task."
+  acceptance:
+    - claim: "a host running the beat is watched independently of any other host that also beats"
+      proof: "unit test: test/fleet-heartbeat.test.ts"
+    - claim: "the beat reports the container restart budget alongside daemon liveness"
+      proof: "unit test: test/fleet-heartbeat.test.ts"
+    - claim: "a host that has never been installed stays silent rather than reporting a finding"
+      proof: "unit test: test/fleet-heartbeat.test.ts"
+  origin: recon#silent-stop-retry-budget-2026-08-14
+  plan_refs: ['W1-T215', 'W1-T126']
+  files: [scripts/fleet-heartbeat.sh, .github/workflows/fleet-heartbeat-watch.yml, test/fleet-heartbeat.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT. `files:` spans THREE subsystems — `scripts/`, `.github/` and
+    `test/` — and `sizingViolation` (`src/lib/task-linter.ts`) blocks at >=2 below `high`. The band is
+    Rule 19's SPAN, not blast radius: nothing here changes how the fleet restarts, only whether the
+    stop is reported.
+    `files:` WAS DERIVED BY INVOCATION COUNT, NOT PROSE MENTION. Measured over `test/`: `heartbeat`
+    appears 12 times in `test/fleet-heartbeat.test.ts`, which is the only suite whose subject IS the
+    beat — the higher raw counts elsewhere (`test/sweep-pass-heartbeat.test.ts` 23,
+    `test/daemon.test.ts` 36) are a different `heartbeat` (the sweep's own pass heartbeat and the
+    daemon's liveness rows), and neither drives `scripts/fleet-heartbeat.sh`. The two non-test paths
+    are the script and its watcher, which are the only files that can carry the change at all.
+    **NO `src/` PATH IS DECLARED AND THAT IS DELIBERATE.** The exit-code separation lives in
+    `src/lib/daemon.ts` and is argued OUT of scope in design (iv); declaring it here would both trip
+    `inverseScopeUntouchedFiles` (`src/lib/review.ts`) on an untouched path and pull a policy change
+    into an observability task. `src/run-task.ts` is NOT declared either: it is 19,588 lines and two
+    of the three currently-eligible tasks already name it, which is why only two lanes fill (W1-T471,
+    via `partitionByFileOverlap` in `src/lib/dispatch-overlap.ts`).
+    THIS SHARD'S OWN PATH IS DELIBERATELY NOT IN `files:` — adding it converts the `proof-scope`
+    warnings into a HARD `rule15-filing` violation, measured on W1-T464.
+    THE PROOFS ARE PURE-PATH FORWARD REFERENCES: the named tests do not exist yet, and a path is safe
+    to forward-reference where a symbol name would be a guess.
+    ONE MEASUREMENT HERE WILL GO STALE AND SHOULD BE RE-TAKEN, NOT QUOTED: `RestartCount` was 1 at
+    2026-08-14T12:19:22Z against a maximum of 5. If it is climbing again, another silent stop is
+    already approaching — read it, do not cite this line."
