@@ -1,0 +1,166 @@
+- id: W1-T474
+  title: "when main breaks and is then repaired, nothing re-tests the open PRs that inherited the failure — they stay red for a cause their own diff never introduced, the reviewer goes silent because every disposition it acts on requires green, and the operator merges past red to keep moving"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: "RE-DERIVED AT 71cedbb ON THE MAC MINI. Azure has NO SSH ROUTE from here, so every number
+    below is the mini's or GitHub's API; where a figure could only come from the container it is
+    marked UNVERIFIED rather than guessed.
+
+    (0) THE COST, AND A CORRECTION TO ITS HEADLINE FIGURE. Two merges broke main for everyone else:
+    #1739 put it below its own branch floor, and #1757 staled the capability snapshot. Every open PR
+    then failed for a reason its own diff never caused, INCLUDING ONE-FILE YAML EDITS, and nothing
+    re-ran them once #1758 and #1762 repaired the causes.
+    THE COMMISSIONING FIGURE WAS 8 OF THE LAST 9 MERGES CARRYING `ci-gate = failure`; RE-MEASURED AT
+    FILING TIME IT IS 5 OF 9, AND THE DIFFERENCE IS THE POINT RATHER THAN A CONTRADICTION. The window
+    moved: #1756-#1760 all merged red, and the four merges after the repair (#1761-#1764) are all
+    green. Same PR population, same author, same gates — red before the repair, green after it. That
+    is the cleanest available evidence that the failures were INHERITED rather than caused, and it is
+    why a re-test is the right remedy rather than a fix.
+
+    (1) NO TASK ID, SO NO RUNG CAN BE ROUTED. `resolveOpenPrTaskId` (`src/run-task.ts`) tries the body
+    trailer, then returns `undefined` outright for `isPlanOnlyFilingPr`, then falls back to
+    `taskIdFromRunBranch` (`src/lib/status.ts`), which requires `/^run-(.+)-\\d+$/`. A filing carries
+    NO `Remudero-Task:` trailer by convention and its head is `plan/…`, which does not match. Live at
+    filing time: open PRs #1765 and #1767 both have `plan/…` heads. Same shape as W1-T456.
+
+    (2) NO `pr.opened` ROW. A session-created PR is invisible to the ledger, so the fleet knows it only
+    as an anonymous open PR and no per-PR history exists to reason from.
+
+    (3) THE DISPOSITION LADDER DOES HAVE A RED ROW — AND THAT IS WORSE THAN HAVING NONE. The
+    commissioning brief says red matches no disposition; re-derived against `DISPOSITION_RULES`
+    (`src/lib/sweep.ts`) that is not so. `isBlockedCi` is literally `pr.checksState === \"red\"`, and
+    its row yields `blocked-fixable`, which routes to the FIX RUNG and SPENDS A STRIKE. The brief is
+    right about the three ACTIONS it names — `post-review` and `mergeable` both require
+    `checksState === \"green\"`, and `sweep.absent_repush` requires a missing suite — and right that
+    the reviewer therefore goes silent. But the correct statement is not that nothing happens: the fix
+    rung is asked to repair, from the PR's own diff, a failure the diff never caused, striking out
+    until `blocked-ambiguous` at the strike cap. `FAILING` is only a label rendered by
+    `renderObservedFacts`, never a rule that acts.
+
+    (4) NO PATH EXISTS FOR STALE-BUT-CLEAN, AND THE CODE SAYS SO IN ITS OWN WORDS. The bring-current
+    prompt targets `mergeState === \"dirty\"`. `MergeState`'s own doc comment says `\"behind\"` is
+    \"deliberately OUT OF SCOPE (design note iv) — auto-merge already handles a behind-but-clean PR on
+    its own\". THAT ASSUMPTION IS WHAT FAILED. Auto-merge only handles it once ARMED, and arming
+    requires green plus a review success, so a red PR never arms and nothing brings it current.
+
+    (5) NOTHING FORCES CURRENCY. Branch protection reads `required_status_checks.strict = false`
+    (measured via the API at filing time), and there is no automated rebase anywhere: `rebase` appears
+    8 times in `src/`, ALL comments or prompt text, zero invocations.
+    MEASURE THIS CASE-SENSITIVELY. A case-insensitive sweep reads 18 rather than 8 because
+    `CaptureBaselinesInput` and `captureBaselines` (`src/lib/project-init.ts`) contain \"reBASE\"; the
+    10 extra hits are 7 + 4 of those two identifiers plus `rebaseable`.
+
+    (6) THE MECHANISM EXISTS, BUILT AND CALLERLESS — RE-DERIVED AT TODAY'S SHA.
+    `runPostFixReverification` (`src/lib/sweep.ts`) is referenced 0 times in `src/run-task.ts`, against
+    3 each for its two siblings `runCreditBackfill` and `runEscalationReconcile`, with 16 invocations
+    in `test/post-fix-reverification.test.ts`. The control fires: the same query finds
+    `runCreditBackfill`'s real call sites. Its `FixClass` rows carry `fixPrNumber`, documented as \"the
+    merged PR whose fix resolves this class\" — exactly \"main was broken by X, X has merged, re-drive\".
+    A SESSION DECLINED TO WIRE IT ON TWO GROUNDS AND BOTH HAVE NOW CHANGED. Its only row was dead
+    (`CI_GATE_TIMEOUT_FIX_CLASS`, `fixPrNumber: 820`, matching nothing) — still true, and #820 is
+    genuinely merged, so the row is inert rather than wrong. And its `redrive` dep had no production
+    implementation. TONIGHT SUPPLIED TWO LIVE CLASSES: #1758 (`39f198a`, the coverage-tier fix) and
+    #1762 (`b537b08`, the snapshot regeneration), each a merged `fixPrNumber` with a queue of PRs that
+    inherited its failure. `DEFAULT_FIX_CLASSES` is `[CI_GATE_TIMEOUT_FIX_CLASS]`, and its own note
+    says covering a new systemic fix is A ROW, never a change to the reconciler.
+    ONE CARRIED CLAIM CORRECTED: `redrive` is NOT confined to `sweep.ts`. It appears 3 times outside
+    it, all in `src/lib/ledger.ts`, registering `sweep.post_fix_redriven` in
+    `DECISION_RELEVANT_LEDGER_STEPS`. That is load-bearing GOOD NEWS — the dedup that stops this rung
+    re-driving the same head forever already survives rotation, so this task inherits no ledger defect.
+
+    (7) A RE-RUN CANNOT CLEAR EITHER CLASS, AND THIS IS THE DESIGN QUESTION ANSWERED BY MEASUREMENT.
+    Re-running checks on the same head only helps if the failure lived in main's SHARED state. It does
+    not here, and the reason is the checkout. No workflow pins a `ref:` (0 across 14 workflows;
+    control: `fetch-depth:` reads 6), so the `pull_request` default applies — and measured on PR
+    #1764's own `ci` log, that default is the MERGE REF, fetched BY PINNED SHA:
+    `+37da33f…:refs/remotes/pull/1764/merge`, resolving to `Merge 93b420b into b537b08`. A re-run
+    replays the same event, so it re-fetches THAT SAME pinned merge commit — head merged into the OLD
+    base. Both classes read their verdict from a file IN THAT TREE: the ratchet reads
+    `scripts/coverage-baseline.json` (which #1758 changed) and the snapshot check reads
+    `MASTER-PLAN.md` (which #1762 changed). So a re-run fails again, identically, for BOTH classes.
+    THEY DO NOT DIFFER, AND ONE MECHANISM COVERS BOTH.
+
+    (8) AN EMPTY REFRESH COMMIT IS THE REMEDY, NOT A REBASE AND NOT A CHECK RE-RUN. A push mints a new
+    head, which fires `synchronize`, and GitHub recomputes `refs/pull/N/merge` against CURRENT main —
+    so the tested tree becomes current WITHOUT rewriting the branch. A rebase would also work and is
+    strictly worse: it rewrites history for no added effect, and `src/lib/sweep.ts` already states the
+    house rule as merge \"(never rebase-force)\".
+    THE EFFECT ALREADY EXISTS AS pushEmptyCommit. `repushAbsent` (`src/run-task.ts`) calls it today
+    with `(repoRoot, pr.headRefName, pr.headSha, message)` and is WIRED IN PRODUCTION — 2 references
+    in `src/run-task.ts`, against 0 for the rung this task wires. The `redrive` dep's signature is
+    `(pr, fixClass) => RedriveResult | Promise<RedriveResult>`, so it takes the class and can name it
+    in the commit message the way the ABSENT remedy names its own.
+    SCOPES, MEASURED WHERE I COULD AND MARKED WHERE I COULD NOT. An empty commit needs only
+    `contents: write`; re-requesting a check-run would need `actions`/`checks: write` AND would not
+    work anyway per (7). The mini's token carries `gist, read:org, repo, workflow`, and `repo` covers
+    `contents: write`. THE AZURE CONTAINER'S TOKEN IS UNVERIFIED — no ssh route — so the implementer
+    must confirm it before assuming the push succeeds there.
+
+    (9) KEYED ON fixPrNumber AND NEVER ON REDNESS. A rung that re-drives any red would retry until
+    green and mask real failures — the worst possible shape. `fixPrNumber` means a red can only be
+    re-driven when its cause has PROVABLY MERGED, which cannot be bent to flakes. DO NOT GENERALISE
+    THIS INTO A RE-RUN RUNG: W1-T459 rejected one on measurement — CI failure median 19.1m against
+    success p90 16.7m, so failures live in the slow tail and a blind retry fires exactly when
+    contention is the cause. Guard rails to carry over from the ABSENT remedy: a per-PR cap, and
+    `absentChecksRepushDecision`'s refusal to re-push when review already PASSED on that head, which
+    a re-push would discard.
+
+    (10) IT MUST RUN BEFORE THE FIX RUNG, AND THE OVERLAP IS REAL. A re-drive has to happen before the
+    fix rung spends a strike on a red it is about to make stale. But the re-drive derives a
+    disposition of its own, so two rungs would derive one for the same PR in one pass, and the
+    existing dedup is keyed on the redrive rather than on the fix ladder — nothing today prevents the
+    overlap. The task must state the ordering AND make the fix rung skip a PR the re-drive acted on
+    this pass, not merely run first and hope."
+  acceptance:
+    - claim: "the shard establishes that re-running checks on the same head cannot clear either class"
+      proof: "grep: A RE-RUN CANNOT CLEAR EITHER CLASS in plan/tasks.d/W1-T474-nothing-retests-prs-that-inherited-a-broken-main.yaml"
+    - claim: "the shard chooses the empty refresh commit over a rebase and over a check re-run"
+      proof: "grep: AN EMPTY REFRESH COMMIT IS THE REMEDY in plan/tasks.d/W1-T474-nothing-retests-prs-that-inherited-a-broken-main.yaml"
+    - claim: "the shard names the existing production push effect rather than proposing a new one"
+      proof: "grep: THE EFFECT ALREADY EXISTS AS pushEmptyCommit in plan/tasks.d/W1-T474-nothing-retests-prs-that-inherited-a-broken-main.yaml"
+    - claim: "the shard requires the discriminator to stay keyed on a merged fix PR rather than on redness"
+      proof: "grep: KEYED ON fixPrNumber AND NEVER ON REDNESS in plan/tasks.d/W1-T474-nothing-retests-prs-that-inherited-a-broken-main.yaml"
+    - claim: "the shard states the ordering against the fix rung and that the two-disposition overlap is unguarded"
+      proof: "grep: IT MUST RUN BEFORE THE FIX RUNG in plan/tasks.d/W1-T474-nothing-retests-prs-that-inherited-a-broken-main.yaml"
+    - claim: "the shard records that the red disposition exists and spends a strike rather than doing nothing"
+      proof: "grep: AND THAT IS WORSE THAN HAVING NONE in plan/tasks.d/W1-T474-nothing-retests-prs-that-inherited-a-broken-main.yaml"
+    - claim: "the producer is reached from a real call site rather than staying callerless"
+      proof: "grep: runPostFixReverification( in src/run-task.ts"
+  origin: recon#post-fix-reverification-unwired-2026-08-13
+  plan_refs: []
+  files: [src/lib/sweep.ts, src/run-task.ts, test/post-fix-reverification.test.ts, test/sweep-absent-repush.test.ts, test/sweep-blocked-routing.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT. `sizingViolation` (`src/lib/task-linter.ts`) blocks at
+    `>=2 subsystems while risk<high`, and `files:` spans `src/lib/`, `src/` and `test/`. The band is
+    Rule 19's SPAN, not blast radius: the runtime effect is one empty commit per PR per merged fix
+    class, capped.
+
+    HOW THIS DIFFERS FROM ITS TWO ADJACENTS, both merged and both cited above.
+    W1-T459 is the task that ORDERED this filing: it rejected a re-run rung for flakes and said the
+    callerless rung's own defect \"is separate and is NOT this task … File that separately; do not fold
+    it in here\". This is that separate filing, and it obeys W1-T459's constraint — a flake has no
+    merged fix PR, so no flake row is proposed here.
+    W1-T456 is the same ROOT (a filing PR that no rung can route because it has no resolvable task id)
+    but the opposite REMEDY: W1-T456 makes a filing repairable, whereas this task makes a red OBSOLETE
+    so no repair is needed. They compose; neither subsumes the other, and this one deliberately does
+    not touch `resolveOpenPrTaskId`.
+    W1-T405 is adjacent and NOT the same: it asserts base currency at DISPATCH, before a worker run
+    starts. This task acts on PRs that already exist and are already red.
+
+    `files:` COVERS THE EXISTING TESTS THAT PIN THE SHAPES THIS TASK CHANGES.
+    `test/post-fix-reverification.test.ts` holds the rung's 16 existing invocations and is where the
+    two new rows and the wiring are proven. `test/sweep-absent-repush.test.ts` pins the
+    `repushAbsent`/`pushEmptyCommit` wiring this task reuses for its own effect.
+    `test/sweep-blocked-routing.test.ts` pins the blocked-routing order the new rung must precede.
+    `src/lib/ledger.ts` is DELIBERATELY ABSENT: `sweep.post_fix_redriven` is ALREADY registered in
+    `DECISION_RELEVANT_LEDGER_STEPS`, so no ledger change is owed and adding the file would widen the
+    span for nothing.
+    THE SHARD'S OWN PATH IS NOT IN `files:`, which costs the endemic `proof-scope` warnings. Adding it
+    is strictly worse: a plan-scope path beside `src/` at `verify: auto` destroys the reviewer's
+    filing carve-out and converts those warnings into one hard `rule15-filing` violation."
