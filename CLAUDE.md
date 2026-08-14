@@ -31,13 +31,19 @@ forensic detail, so the narrative does not need to live here.
   amend + force-push + CI round-trip.
   `node --test --experimental-test-coverage --enable-source-maps --test-reporter=lcov --test-reporter-destination=/tmp/x.lcov --import tsx --import ./test/setup/tmp-hygiene.ts <touched test files>`
   then `node scripts/diff-coverage.mjs --lcov /tmp/x.lcov --diff <(git diff --cached origin/main -- <touched src files>)`.
-  *(#768, #773, #777)*
+  COMMIT FIRST and prefer `git diff origin/main...HEAD` over `--cached` — the staged form only
+  agrees with the same-tree rule below ("Coverage traps") when everything is staged. *(#768, #773, #777)*
 - **A local lcov is not predictive in EITHER direction — calibrate it before trusting a local block
   or a local pass.** CI builds its lcov from the full suite and reaches paths a scoped run never
   does (one local run flagged 13 lines where CI flagged 3; it also cannot prove absence). Calibrate
   by running `scripts/diff-coverage.mjs` with your lcov against a recently-merged, CI-green commit
   (`git show <sha> -- src/… > /tmp/x.diff`). If that blocks too, your lcov under-reports and a
-  local block means "investigate", not "stop". *(#981; #973/#975 both blocked locally yet merged green)*
+  local block means "investigate", not "stop". **And never QUOTE a coverage percentage from a local
+  run** — carried figures must come from CI's own logs: one local attempt produced a 2.06pt spread
+  on a static tree against CI's ~0.14pt, another measured the after-tree twice (total LF
+  byte-identical at 97591) and reported it as a before/after delta. The local instrument decides
+  "investigate vs proceed"; CI's log is the only citable number.
+  *(#981; #973/#975 both blocked locally yet merged green; local-spread instances 2026-08-14)*
 - **Verify every PR-body claim about your own diff against `git diff --numstat`, and RE-VERIFY after
   each follow-up commit.** `bodyContradictsDiff` (`src/lib/review.ts`, W1-T274) OPENS THE DIFF and
   FAILS the PR — MEASURED 2026-08-12: #1685 refused with *"body contradicts its own diff: claimed
@@ -50,7 +56,12 @@ forensic detail, so the narrative does not need to live here.
   `isInPlanScope("docs/ORIENTATION.md")` returns **TRUE** (run, not read), and any claim about it goes
   stale the moment `plan-architect.ts` moves. This bullet asserted the opposite until 2026-08-12, and a
   session repairing a false body claim FOLLOWED IT AND WROTE A FRESH ONE — the same defect the bullet
-  exists to prevent, caused by the bullet. *(#974, #984, #1685)*
+  exists to prevent, caused by the bullet. **The detector also has a SHORTHAND arm**: scope-shorthand
+  phrases (the plan-only/data-only family) fire when ANCHORED — as a label with a colon, a copular
+  claim ("this PR is …-only"), or attributive before a changeset noun — while bare mentions, quoted
+  regions and file paths stay silent (`shorthandIsAboutChangeset`, W1-T413). If the diff carries any
+  file outside the claimed scope, the anchored phrase fails the PR — so do not write the shorthand
+  in a body unless the predicate agrees, and do not fear it in quotes. *(#974, #984, #1685)*
 - **A test run with no `# tests` summary line is NOT A RESULT — check for the summary, never the
   failure count.** A killed or timed-out run prints every assertion it reached and no totals, so its
   failure set is a SUBSET BY CONSTRUCTION and reads as "fewer failures on this side". One session
@@ -85,6 +96,10 @@ forensic detail, so the narrative does not need to live here.
   body passes `check-acceptance` with `OK` and exit 0 while `check-proof` refuses it, and an
   unbulleted body fails `check-acceptance` while every proof string inside it is individually valid.
   `gh api repos/<o>/<r>/pulls/<n> --jq .body > /tmp/b.md && RMD_SELF_SYNC_DONE=1 ./bin/rmd check-acceptance /tmp/b.md`
+  **GUARD THE FETCH ON STRUCTURE, NEVER ON SIZE**: reject on a non-200 HTTP code or a missing/null
+  `.body` key before judging the file — a 537-byte rate-limit payload landed in `/tmp/b.md` and
+  read as `DEFECTIVE: no Acceptance header`, failing a body that was fine. A size floor cannot tell
+  a short body from an error payload; the key can. *(2026-08-14)*
   **AND REPAIRING THE BODY CLEARS NOTHING ON ITS OWN.** The sweep's post-review row fires only at
   `pr.checksState === "green" && pr.reviewState === "none"` (`src/lib/sweep.ts`), so once a verdict
   is posted that sha is never re-reviewed — the designed path for a stale verdict is A NEW HEAD. A
@@ -122,7 +137,10 @@ forensic detail, so the narrative does not need to live here.
   glob-looking pattern is silently wrong: `learnings/*.yaml` reads as *learnings, zero-or-more slashes,
   any char, yaml* and matches nothing. That is not a soft cap — `executed_fail` OVERRIDES keyword
   coverage and FAILS the PR. Also require the pattern to MISS the merge-base: one matching both head
-  and base is downgraded to `executed_stale` (W1-T273) because it discriminates nothing. Run a control
+  and base is downgraded to `executed_stale` (W1-T273) because it discriminates nothing — **and
+  W1-T362 extended `executed_stale` to `unit test:` proofs too, so DISCRIMINATION, not mere
+  execution, is the bar for every dialect**: a proof reading 1/1 across head and base substantiates
+  nothing. Run a control
   pattern that must NOT match, because `grep -r` with no file operand searches the cwd instead of stdin
   and will fake a match for every pattern you test. *(#1120 — a `-F`-verified proof failed the review)*
 - **A plan-only PR is not automatically CAPPED — prefer certification over the W1-T205 carve-out.**
@@ -134,7 +152,11 @@ forensic detail, so the narrative does not need to live here.
   returns false at `t.verify !== "auto"` BEFORE the linter is consulted, so their dialect debt can
   never stall the queue. Forcing chaos drills, device recordings and live deploys into `unit test:`
   yields proofs that parse, match zero tests, and cap the review — the exact theatre the dialect
-  gate exists to stop. Report them as needing a proof kind the dialect lacks. *(#984)*
+  gate exists to stop. Report them as needing a proof kind the dialect lacks. **And before treating
+  a `verify: human` shard's questions as LIVE, check whether a `verify: auto` sibling already
+  merged their substance** — measured twice in two days: the queue held open operator questions
+  whose answers had shipped under a different id. The check: grep the shard's load-bearing symbols
+  across merged trailers/subjects before escalating its questions. *(#984; siblings 2026-08-13/14)*
 
 ## Coverage traps
 
@@ -162,10 +184,14 @@ forensic detail, so the narrative does not need to live here.
   instruments is covered" is trivially true over an EMPTY SET. This is the vacuous-pass family, not
   a coverage result. *(#1399 — an `OK` with zero `SF:` records for both `src/run-task.ts` and
   `src/lib/review.ts` while CI's coverage-ratchet was failing on 10 uncovered lines)*
-- **Build the lcov and the diff from the SAME tree — commit before measuring.** An lcov from a dirty
-  working tree measured against `git diff origin/main...HEAD` (which excludes uncommitted work)
-  misaligns line numbers and reports untouched pre-existing code as newly uncovered.
-  *(#1399 — two phantom "uncovered" lines that were the pre-existing `floorDegraded` branch)*
+- **Build the lcov and the diff from the SAME tree — commit before measuring — AND NAME THE SHA in
+  what you report.** An lcov from a dirty working tree measured against `git diff origin/main...HEAD`
+  (which excludes uncommitted work) misaligns line numbers and reports untouched pre-existing code
+  as newly uncovered. The quieter variant: reusable artefact paths (`/tmp/x.lcov`) survive while
+  `origin/main` MOVES under you mid-session, so a re-run silently compares a stale lcov against a
+  fresh diff — stamp the sha into the filename or the report line, and re-derive both sides after
+  any pull. *(#1399 — two phantom "uncovered" lines that were the pre-existing `floorDegraded`
+  branch; filename-reuse variant measured 2026-08-14)*
 - **`diff-coverage` flags ADDED lines, so restructuring an untested region inherits its debt at the
   gate — measure MAIN's coverage of that region before assuming the PR caused it.** Rewriting a
   block converts a silent pre-existing gap into a blocking failure. *(#1399 — every line of the
@@ -228,8 +254,23 @@ forensic detail, so the narrative does not need to live here.
   381`). *(it returned W1-T379 immediately after W1-T379 was filed in #1388; true tree max was 380)*
 - **A shard whose `files:` spans two concerns fails Rule 19 sizing at `risk:medium` — set
   `risk:high` UP FRONT and record in the note that the band is Rule 19's SPAN, not blast radius.**
-  Decomposing a predicate from its own falsifier is not a real decomposition. *(#1400 shipped the
-  violation and pushed open-failing 176→177; #1401 pre-empted it and stayed at 176)*
+  Decomposing a predicate from its own falsifier is not a real decomposition. **And NEVER file an
+  empty `files:` list**: `overlappingPaths` (`src/lib/dispatch-overlap.ts`) fail-closes — one empty
+  side returns the OTHER side's entire list — so an undeclared task overlaps every candidate, and
+  placed first it serializes the whole dispatch pool behind it (measured: one empty-`files:` task at
+  the queue head held admissions to 1 lane where 11 disjoint tasks waited; W1-T476 files the
+  ordering fix, but the authoring rule stands regardless). *(#1400 shipped the
+  violation and pushed open-failing 176→177; #1401 pre-empted it and stayed at 176; #1779)*
+- **Decoding rule citations — where each family canonically lives.** "Rule N" / "Standing rule N"
+  = MASTER-PLAN **§12** (1–25, plus 3B/8B); the linter enforces several by name — 15:
+  `criterionFieldTampered` + `rule15FilingViolation`, 17: `provenanceViolation`, 18:
+  `headlessFitnessViolations`, 19: `sizingViolation`, 21: `postMergeAmendmentViolations`, 25:
+  `detectInstrumentEntanglement`/`INSTRUMENT_SURFACE` (`src/lib/review.ts` — and §12.25 says the
+  code wins where they disagree). `rule15-*` tokens are artifacts NAMED AFTER §12 rule 15 (test
+  files, recon slugs), not rules. "G-N" = operator directives indexed in MASTER-PLAN §14's "Grill
+  RESOLVED" paragraph (G-17 = `enforceTierInvariant`, `src/lib/mounts.ts`). "P-N" = retro
+  proposals in MASTER-PLAN's Retro-proposals ledger; retired ones are tombstones whose full text
+  is git-archaeology only. *(mapped 2026-08-14 — the numbers were tribal knowledge until this row)*
 
 ## CI and merging
 
@@ -248,6 +289,14 @@ forensic detail, so the narrative does not need to live here.
 - **A CONFLICTING PR registers ZERO check runs. `total: 0` reads as "still queued" but means
   `mergeable_state: dirty` — check mergeability before waiting on CI.** *(#1399 — a full CI cycle
   spent waiting on checks that were never going to start)*
+- **`remudero-review` is a COMMIT STATUS, not a check-run — `/check-runs` is structurally blind to
+  it.** `postReviewStatus` (`src/lib/review.ts`) POSTs `repos/…/statuses/{sha}` with context
+  `REVIEW_CONTEXT`; `rollupFromRest` (`src/lib/open-prs-rest.ts`) says it in terms: reading only
+  `/check-runs` "would drop `remudero-review` entirely and make every reviewed PR look unreviewed."
+  Two analyses were misled by that read. The endpoints that DO see it: GraphQL's
+  `statusCheckRollup` (a union of CheckRun AND StatusContext nodes) and the combined-status
+  endpoint `repos/…/commits/{sha}/status` — use one of those, never `/check-runs` alone, when
+  asking "is this PR reviewed". *(measured twice, 2026-08-13/14)*
 - **When two PRs append tests to the same file's TAIL, the conflict region can cut just before a
   SHARED closing `});`** — keeping both sides then leaves one block unclosed, and esbuild reports
   `Unexpected end of file` rather than naming the merge. Close the ours-side block explicitly.
@@ -276,10 +325,13 @@ forensic detail, so the narrative does not need to live here.
   **Both one-sided globs are live defects, in OPPOSITE directions**: the sanctioned-until-now
   `.gz`-only form hid **34,861 rows (8.3% of the corpus), every row rotated out since
   2026-08-05T10:56:55Z** — mostly `board_gateway.*` and `sweep.*`; and `ledger.*.ndjson` alone
-  misses all 666 `.gz`. **`src/` HAS THE SAME BUG BOTH WAYS** — `ledgerGrepUnion`
-  (`src/lib/ledger-grep.ts`, behind `rmd ledger-grep`) filters `.endsWith(".ndjson.gz")`, while
-  `ledgerCorpusFiles` (`run-task.ts`) filters `.endsWith(".ndjson")`. Neither sees the whole corpus,
-  so **`rmd ledger-grep` is NOT a safe substitute for the three-pattern form** until fixed.
+  misses all 666 `.gz`. **`src/` HAD the same bug both ways; W1-T444/#1657 (commit 70d52c2) fixed
+  it**: `ledgerRotationEntries` (`src/lib/ledger-grep.ts`) is now THE ONE definition of the corpus
+  (both forms), `resolveLedgerUnion` reads both and refuses on partial coverage, and
+  `ledgerCorpusFiles` (`run-task.ts`) delegates to it — so **`rmd ledger-grep` IS the sanctioned
+  in-process reader**; the three-pattern zgrep stays the out-of-process shell idiom. The check:
+  `grep -c ledgerRotationEntries src/lib/ledger-grep.ts src/run-task.ts` — non-zero in both, or
+  this bullet has gone stale again.
   **THE CONTROL MUST PROVE EACH FORM WAS READ, and a raw cross-archive count CANNOT** — rotations
   duplicate heavily, so `run.start` reads **257,438 raw lines across the `.gz` alone but only 779
   distinct over the full union**: a control like that stays six figures while a whole form is
@@ -306,7 +358,8 @@ forensic detail, so the narrative does not need to live here.
 - **Treat a step NAME as a claim, not evidence — check what the function that wrote it can actually
   return.** `armAutoMerge` returns one of seven outcomes and never throws; five arm nothing, yet five
   Architect lanes logged `automerge.armed` unconditionally. Measured over the unioned ledger: 176
-  rows, 135 blind, 17 provably false, 119 undecidable — the blind rows recorded no `head_sha`, so
+  rows; 135 blind, 17 provably false, 119 undecidable — OVERLAPPING categories, not a partition
+  (they sum past 176) — the blind rows recorded no `head_sha`, so
   they can never be adjudicated. Any historical claim resting on that step name is unsound for rows
   written before #981. *(#981)*
 - **On a zero match, `node --test --test-name-pattern` still emits `ok 1 - <RELATIVE test path>` —
@@ -332,10 +385,11 @@ forensic detail, so the narrative does not need to live here.
   has a landing mechanism (`landFeedback`, `src/lib/feedback-landing.ts`) that rebuilds from
   origin/main and pushes, so it survives the container by construction. **Nothing in this repo tells
   a session where to write a report** — `renderReconPrompt` asks only for a REPORT in the transcript,
-  no mount doctrine mentions one, and this file's sole `state/` mention is a citation, not an
-  instruction. The convention lives only in the operator's briefs, which is why the rule has to live
-  here. THE COMPLIANT SHAPE, and this file's own state-retention bullet above is the example: it
-  CARRIES its numbers (212 live vs 912 union, `MAX_RETAINED_LINES_PER_STEP = 200`) and the
+  no mount doctrine mentions one, and nothing in this file INSTRUCTS a `state/` write (its `state/`
+  mentions are citations and read idioms). The convention lives only in the operator's briefs, which
+  is why the rule has to live here. THE COMPLIANT SHAPE, and this file's own ledger-union bullet
+  above is the example: it CARRIES its measured figures with their dates and the re-run query
+  (`MAX_RETAINED_LINES_PER_STEP = 200` is symbol-anchored — the check IS the name), and any
   `state/` path is a supplementary pointer, not the evidence. *(established 2026-08-11; the rule was
   practised and unwritten — a grep for it across CLAUDE.md, MASTER-PLAN.md and DECISIONS.md returns
   nothing)*
@@ -452,6 +506,14 @@ forensic detail, so the narrative does not need to live here.
   THE CHEAPEST INSTANCE OF THIS ONE IS A SINGLE COMMAND: `readlink -f <workspace-symlink>` prints
   EMPTY when the target sits outside the mount set, which would have settled it in seconds.
   *(2026-08-13)*
+  **(f) THE TWO SIDES OF A COMPARISON MUST COUNT THE SAME UNITS — `ls` COUNTS A DIRECTORY AS ONE
+  ENTRY.** A naive `git ls-tree` vs `ls` tally read 114 vs 111 on an equal tree, because the tree
+  side listed files recursively while `ls` collapsed each directory to one row. And ls-tree
+  pathspecs do not glob like the shell: `git ls-tree HEAD -- '*.md'` returns ZERO at a root that
+  holds ten `.md` files — a query-shape zero the mismatch then "confirms". The check: filter BOTH
+  sides to the same unit first — `diff <(git ls-tree --name-only HEAD | grep '\.md$' | sort)
+  <(ls -1 *.md | sort)` — and demand a positive control on whichever side reads zero.
+  *(2026-08-14, both directions measured)*
 
 ## Operating this host
 
