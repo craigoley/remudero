@@ -55,13 +55,30 @@ export function parseLcovHitsByFile(lcovText) {
       // FN:<line>,<name> — a function DECLARED at <line>. Under --enable-source-maps the
       // tsx-compiled map scores declaration lines DA:0 even when the function body is fully
       // covered (observed: FN:62 with FNDA:11 beside DA:62,0) — FNDA is the truth for them.
+      //
+      // ONE LINE CAN DECLARE SEVERAL FUNCTIONS, so this is a LIST, never a single name (W1-T481).
+      // Measured on a full-suite lcov: 282 (file, line) keys carry more than one FN record against
+      // 4,042 distinct keys — about one declaration line in fourteen. The shape is always the same,
+      // an exported function sharing its line with an anonymous callback (`buildAccountUsageRoute`
+      // with `anonymous_14`; `runAlertLane` with `anonymous_12`). Keyed last-wins, the line resolved
+      // to the anonymous one and an entered function was reported as never entered.
       const [ln, name] = line.slice(3).split(',');
       if (!fnLines.has(currentPath)) fnLines.set(currentPath, new Map());
-      fnLines.get(currentPath).set(Number(ln), name);
+      const namesByLine = fnLines.get(currentPath);
+      const declLine = Number(ln);
+      if (!namesByLine.has(declLine)) namesByLine.set(declLine, []);
+      namesByLine.get(declLine).push(name);
     } else if (line.startsWith('FNDA:') && current) {
+      // ANY-NON-ZERO, never last-wins. The same (file, name) pair recurs throughout a merged
+      // full-suite lcov (measured: 1,362 duplicate pairs, 48 of them with more than one NON-ZERO
+      // value — `findMergedByTrailer` carries both FNDA:79 and FNDA:1089), so a later FNDA:0 would
+      // erase an earlier real call count. This is deliberately NOT an arithmetic: the sole consumer
+      // is declEntered, which asks only `was this function ever entered`, so summing or maxing would
+      // invent a call count nothing reads.
       const [hits, name] = line.slice(5).split(',');
       if (!fnHits.has(currentPath)) fnHits.set(currentPath, new Map());
-      fnHits.get(currentPath).set(name, Number(hits));
+      const enteredByName = fnHits.get(currentPath);
+      enteredByName.set(name, (enteredByName.get(name) ?? false) || Number(hits) > 0);
     } else if (line.startsWith('DA:') && current) {
       const [lineNoStr, hitsStr] = line.slice(3).split(',');
       current.set(Number(lineNoStr), Number(hitsStr));
@@ -299,9 +316,16 @@ export function findUncoveredAddedLines(added, lcov) {
     if (!hitsByLine) continue; // lcov never saw this file (e.g. test/**) -- no claim to make.
     const fnsAt = fnLines.get(file);
     const fnHit = fnHits.get(file);
+    // A declaration line is covered when ANY function declared there was entered (W1-T481).
+    // PERMISSIVE IS RIGHT HERE AND COSTS NO STRICTNESS: an unentered function that merely shares
+    // its declaration line still has its own DA records for its BODY, which are judged
+    // independently, so this rescues one line and lets no uncovered code through. The strict
+    // reading would block a genuinely-covered exported function because an anonymous callback
+    // happens to share its line — the false positive this exists to fix.
     const declEntered = (ln) => {
-      const name = fnsAt?.get(ln);
-      return name !== undefined && (fnHit?.get(name) ?? 0) > 0;
+      const names = fnsAt?.get(ln);
+      if (names === undefined) return false;
+      return names.some((name) => fnHit?.get(name) === true);
     };
     const uncovered = [...lines.keys()]
       .filter((ln) => hitsByLine.has(ln) && hitsByLine.get(ln) === 0)

@@ -146,6 +146,58 @@ test("diff-coverage CLI: an UNENTERED function (FNDA:0) still blocks on its unco
   assert.match(result.stderr.toString(), /src\/lib\/newfn\.ts:4/);
 });
 
+// ── W1-T481: FN is keyed by LINE and FNDA by NAME, and both were LAST-WINS ───
+//
+// Two collisions, both measured on a full-suite lcov, both producing the SAME symptom — a function
+// that really was entered reported as never entered, blocking a covered line:
+//   LINE COLLISION  — 282 (file, line) keys carry more than one FN record against 4,042 distinct
+//     keys (~1 declaration line in 14). Always the same shape: an exported function sharing its
+//     line with an anonymous callback (`buildAccountUsageRoute`+`anonymous_14` at account-usage.ts
+//     line 593). Last-wins resolved the line to the anonymous one, whose FNDA is 0.
+//   NAME COLLISION  — 1,362 duplicate (file, name) FNDA pairs, 48 with more than one NON-ZERO
+//     (`findMergedByTrailer` carries both FNDA:79 and FNDA:1089). Last-wins let a later FNDA:0
+//     erase a real call count.
+// The two COMPOUND: fixing either alone leaves the false positive reachable through the other.
+//
+// ONE fixture pair drives BOTH DIRECTIONS IN A SINGLE INVOCATION, which is the point — a fix that
+// only proved the false positives were gone would be indistinguishable from switching the gate off.
+// Measured against origin/main's script, the same fixture blocks all FIVE lines; patched it blocks
+// exactly the two that are genuinely uncovered.
+
+test("diff-coverage CLI: a shared declaration line where ONE of the functions was entered does NOT block — the line-keyed FN collision (W1-T481)", () => {
+  const result = runDiffCoverage("fnda-shared-decl.lcov", "fnda-shared-decl.diff");
+  const err = result.stderr.toString();
+  // t481-shared.ts line 3 declares BOTH `keptFn` (FNDA:13) and `anonymous_1` (FNDA:0).
+  assert.doesNotMatch(err, /t481-shared\.ts:3/, "an entered function's declaration line must not block because an anonymous callback shares it");
+  // t481-livebody.ts line 1 is the same collision in the measured account-usage.ts shape.
+  assert.doesNotMatch(err, /t481-livebody\.ts:1/, "the exported function's declaration line is covered — it was entered 13 times");
+});
+
+test("diff-coverage CLI: a REPEATED FNDA name keeps its non-zero hit — a later FNDA:0 must not erase it (W1-T481)", () => {
+  const result = runDiffCoverage("fnda-shared-decl.lcov", "fnda-shared-decl.diff");
+  // t481-dupname.ts carries FNDA:13,dupFn followed by FNDA:0,dupFn — the merged-lcov shape.
+  assert.doesNotMatch(
+    result.stderr.toString(),
+    /t481-dupname\.ts:1/,
+    "any non-zero FNDA for a name means the function was entered; last-wins dropped the 13",
+  );
+});
+
+test("diff-coverage FALSIFIER: the shared-line rescue still BLOCKS when NO function on that line was entered, and blocks an unentered sibling's BODY (W1-T481)", () => {
+  // THE FALSIFIER THAT SEPARATES A FIX FROM A DISABLED GATE. If the rescue were unconditional --
+  // or scoped to a function's whole region rather than its declaration line -- both of these
+  // would go quiet and the gate would be off.
+  const result = runDiffCoverage("fnda-shared-decl.lcov", "fnda-shared-decl.diff");
+  assert.notEqual(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
+  const err = result.stderr.toString();
+  assert.match(err, /BLOCKED/);
+  // Two functions declared on line 1, NEITHER entered -- permissiveness needs an entered function.
+  assert.match(err, /t481-bothdead\.ts:1/, "a shared line with no entered function must still block");
+  // The rescue covers the DECLARATION line only: the unentered callback's body is judged on its
+  // own DA record, which is why permissiveness at the declaration costs no strictness.
+  assert.match(err, /t481-livebody\.ts:2/, "the unentered callback's body must still block");
+});
+
 // ── W1-T221: the `// diff-cov: process-boundary — <reason>` directive ────────
 //
 // Re-exec/exit glue (`spawnSync(process.execPath, …)` then `process.exit(…)`) cannot carry a
