@@ -79,14 +79,13 @@ export interface PolicyValues {
     daysThreshold: number;
   };
   /** The daemon's auto-triage rung (recon-DC #2). DEFAULT OFF — it spends unsupervised.
-   *  `minIntervalMinutes`/`maxIntervalMinutes`/`depthFloor`/`depthCeiling` are the W1-T318
-   *  adaptive-cadence curve; `maxPerDay` remains the untouched ceiling that curve spends against. */
+   *  W1-T475 deleted the W1-T318 adaptive-cadence curve (`maxIntervalMinutes`/`depthFloor`/
+   *  `depthCeiling`): it was a second, weaker governor on the quantity `maxPerDay` already bounds
+   *  exactly, keyed to a depth proxy uncorrelated with capacity. `minIntervalMinutes` survives as
+   *  the fixed floor — it used to reach the decision ONLY through that curve. */
   autoTriage: {
     enabled: boolean;
     minIntervalMinutes: number;
-    maxIntervalMinutes: number;
-    depthFloor: number;
-    depthCeiling: number;
     maxPerDay: number;
   };
   headroom: {
@@ -172,9 +171,6 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   "drain.max": "lifted",
   "autoTriage.enabled": "net-new",
   "autoTriage.minIntervalMinutes": "net-new",
-  "autoTriage.maxIntervalMinutes": "net-new",
-  "autoTriage.depthFloor": "net-new",
-  "autoTriage.depthCeiling": "net-new",
   "autoTriage.maxPerDay": "net-new",
   "retro.mergesThreshold": "lifted",
   "retro.daysThreshold": "lifted",
@@ -373,12 +369,9 @@ export function validatePolicy(raw: unknown): Policy {
     ? {
         enabled: booleanField("autoTriage.enabled", autoTriageRaw.enabled, origin),
         minIntervalMinutes: numberField("autoTriage.minIntervalMinutes", autoTriageRaw.minIntervalMinutes, origin),
-        maxIntervalMinutes: numberField("autoTriage.maxIntervalMinutes", autoTriageRaw.maxIntervalMinutes, origin),
-        depthFloor: numberField("autoTriage.depthFloor", autoTriageRaw.depthFloor, origin),
-        depthCeiling: numberField("autoTriage.depthCeiling", autoTriageRaw.depthCeiling, origin),
         maxPerDay: numberField("autoTriage.maxPerDay", autoTriageRaw.maxPerDay, origin),
       }
-    : { enabled: false, minIntervalMinutes: 60, maxIntervalMinutes: 60, depthFloor: 0, depthCeiling: 10, maxPerDay: 4 };
+    : { enabled: false, minIntervalMinutes: 60, maxPerDay: 4 };
   const retroMergesThreshold = numberField("retro.mergesThreshold", retroRaw.mergesThreshold, origin);
   const retroDaysThreshold = numberField("retro.daysThreshold", retroRaw.daysThreshold, origin);
 

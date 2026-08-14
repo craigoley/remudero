@@ -20,9 +20,6 @@ import {
 const ON: AutoTriagePolicy = {
   enabled: true,
   minIntervalMinutes: 60,
-  maxIntervalMinutes: 60,
-  depthFloor: 0,
-  depthCeiling: 10,
   maxPerDay: 4,
 };
 const NOW = new Date("2026-08-01T12:00:00.000Z");

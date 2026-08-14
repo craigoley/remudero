@@ -449,7 +449,7 @@ import {
   type ReviewVerdict,
 } from "./lib/review.js";
 import { buildDepReviewArmUnreachableEscalation, buildDepReviewEscalation, decideDepReview } from "./lib/dep-review.js";
-import { decideAutoTriage, newFeedbackIdsOldestFirst, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, type AutoTriageDecision, type AutoTriageCensus } from "./lib/auto-triage.js";
+import { decideAutoTriage, newFeedbackIdsOldestFirst, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, type AutoTriageDecision } from "./lib/auto-triage.js";
 import { validateWorkerSettingsFile } from "./lib/settings.js";
 import {
   buildBatchedGithub,
@@ -9254,7 +9254,7 @@ export function retroTriggerCheck(
  * change exists to remove.
  */
 export function buildAutoTriageDaemonHooks(deps: {
-  check?: (census?: AutoTriageCensus) => AutoTriageDecision;
+  check?: () => AutoTriageDecision;
   runTriage?: (feedbackId: string) => Promise<number>;
   config?: Config;
   now?: () => Date;
@@ -9262,16 +9262,16 @@ export function buildAutoTriageDaemonHooks(deps: {
    *  Production passes none and the checked-in `plan/policy.yaml` governs, exactly as before. */
   policy?: Policy;
 } = {}): {
-  checkAutoTriage: (census?: AutoTriageCensus) => AutoTriageDecision;
+  checkAutoTriage: () => AutoTriageDecision;
   runAutoTriage: (feedbackId: string) => Promise<void>;
 } {
   const check =
     deps.check ??
-    ((census?: AutoTriageCensus) => autoTriageCheck({ config: deps.config, now: deps.now?.(), policy: deps.policy, census }));
+    (() => autoTriageCheck({ config: deps.config, now: deps.now?.(), policy: deps.policy }));
   const runTriage = deps.runTriage ?? ((feedbackId: string) => triageCommand([feedbackId]));
   const configFor = () => deps.config ?? loadConfig();
   return {
-    checkAutoTriage: (census?: AutoTriageCensus) => check(census),
+    checkAutoTriage: () => check(),
     runAutoTriage: async (feedbackId) => {
       // RECORD THE FIRE FIRST, deliberately. If triage throws or the process dies mid-run, the
       // marker has already advanced and the interval bound still holds — the failure costs one
@@ -9301,7 +9301,7 @@ export function buildAutoTriageDaemonHooks(deps: {
  * flipped (#1093). Production still passes nothing and reads the checked-in file exactly as before.
  */
 export function autoTriageCheck(
-  opts: { config?: Config; now?: Date; policy?: Policy; census?: AutoTriageCensus } = {},
+  opts: { config?: Config; now?: Date; policy?: Policy } = {},
 ): AutoTriageDecision {
   const config = opts.config ?? loadConfig();
   const policy = opts.policy ?? loadPolicy(policyPath(repoRoot));
@@ -9316,9 +9316,6 @@ export function autoTriageCheck(
     now: opts.now ?? new Date(),
     // repoRoot, NOT config.root — see this block's doc comment.
     candidates: newFeedbackIdsOldestFirst(repoRoot),
-    // W1-T318: the adaptive-cadence census, forwarded verbatim to the pure decision. Absent ⇒
-    // decideAutoTriage's own fastest-point default — see its doc.
-    census: opts.census,
   });
 }
 

@@ -29,23 +29,19 @@ import { test } from "node:test";
 import { parse as parseYaml } from "yaml";
 import { autoTriageCheck, buildAutoTriageDaemonHooks } from "../src/run-task.js";
 import { loadPolicy, policyPath, validatePolicy, PolicyError, type Policy } from "../src/lib/policy.js";
-import { decideAutoTriage, type AutoTriageCensus } from "../src/lib/auto-triage.js";
+import { decideAutoTriage } from "../src/lib/auto-triage.js";
 import type { Config } from "../src/lib/config.js";
 
 const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 const SHIPPED: Policy = loadPolicy(policyPath(REPO_ROOT));
 
-/** W1-T318: the new cadence-curve fields (`maxIntervalMinutes`/`depthFloor`/`depthCeiling`) are
- *  OPTIONAL here and default from the SHIPPED policy — every pre-existing call below still passes
- *  only `enabled`/`minIntervalMinutes`/`maxPerDay` and is completely unaffected; new tests that
- *  care about the curve pass the extra fields explicitly. */
+/** W1-T475: the cadence-curve fields are GONE from the policy, so this fixture carries only the
+ *  three rows that remain. `maxPerDay` defaults from the SHIPPED policy so a test that cares only
+ *  about the floor cannot accidentally pin a cap value of its own invention. */
 function policyFixture(autoTriage: {
   enabled: boolean;
   minIntervalMinutes: number;
-  maxPerDay: number;
-  maxIntervalMinutes?: number;
-  depthFloor?: number;
-  depthCeiling?: number;
+  maxPerDay?: number;
 }): Policy {
   return {
     ...SHIPPED,
@@ -54,10 +50,7 @@ function policyFixture(autoTriage: {
       autoTriage: {
         enabled: autoTriage.enabled,
         minIntervalMinutes: autoTriage.minIntervalMinutes,
-        maxIntervalMinutes: autoTriage.maxIntervalMinutes ?? SHIPPED.values.autoTriage.maxIntervalMinutes,
-        depthFloor: autoTriage.depthFloor ?? SHIPPED.values.autoTriage.depthFloor,
-        depthCeiling: autoTriage.depthCeiling ?? SHIPPED.values.autoTriage.depthCeiling,
-        maxPerDay: autoTriage.maxPerDay,
+        maxPerDay: autoTriage.maxPerDay ?? SHIPPED.values.autoTriage.maxPerDay,
       },
     },
   };
@@ -207,133 +200,142 @@ test("production passes no policy, so the checked-in file still governs", () => 
   }
 });
 
-// ── W1-T318: the adaptive cadence curve ─────────────────────────────────────────────────────
+// ── W1-T475: the adaptive cadence curve is GONE; the floor and the cap are what remain ─────
 //
-// The four tests below drive the PURE `decideAutoTriage` directly (never a filesystem, never a
-// clock) — the census is exactly the shape `daemon.ts` computes off the SAME idle_reasons tally
-// it already logs (see `src/lib/auto-triage.ts`'s `AutoTriageCensus` doc), so these pin the curve
-// at the one seam that matters without re-deriving what "runnable" means.
+// The curve (W1-T318) was deleted on the operator's ruling: it was a SECOND, WEAKER governor on
+// the quantity `maxPerDay` already bounds exactly, and its input was uncorrelated with capacity in
+// both directions — `depth` counted the recoverable backlog of tasks that CANNOT run, so a queue
+// of purely colliding-but-eligible work read 0 and triaged at the FAST end while lanes sat empty.
+//
+// THESE THREE TESTS ARE THE FALSIFIERS THAT MATTER AFTER A BOUND IS REMOVED, and each pins a
+// different way this change could have gone silently wrong:
+//   1. the DAILY CAP still refuses — with the interval no longer throttling, it is the only bound
+//      left, and a test asserting merely that the rung FIRES would not have caught its loss;
+//   2. the FLOOR survives — `minIntervalMinutes` used to reach the decision ONLY through the
+//      curve's `depth <= depthFloor` arm, so deleting the curve could have deleted it too and
+//      left a rung free to fire on every idle tick;
+//   3. the SKIP is still LOGGED WITH A REASON — a removed branch that stops emitting leaves the
+//      next investigation blind, and this repo already has a rung whose "daemon is not idle"
+//      reason is unreachable and appears 0 times in 1,214 skip rows.
 
-/** A policy whose curve is wide enough that `sinceMin` below can land on either side of it,
- *  and whose `maxPerDay` is high enough that the daily cap never interferes — these tests are
- *  about the INTERVAL, not the cap (that falsifier gets its own test further down). */
-function cadencePolicy() {
-  return policyFixture({
-    enabled: true,
-    minIntervalMinutes: 10,
-    maxIntervalMinutes: 100,
-    depthFloor: 0,
-    depthCeiling: 10,
-    maxPerDay: 1000,
-  }).values.autoTriage;
+/** Cap high enough not to interfere; floor wide enough that `sinceMin` can land on either side. */
+function floorPolicy(maxPerDay = 1000) {
+  return policyFixture({ enabled: true, minIntervalMinutes: 10, maxPerDay }).values.autoTriage;
 }
 
-function decideAt(census: AutoTriageCensus, sinceMinutesAgo: number) {
+function decideAfter(sinceMinutesAgo: number, opts: { maxPerDay?: number; extraFires?: string[] } = {}) {
   const now = new Date("2026-08-04T12:00:00.000Z");
-  return decideAutoTriage({
-    policy: cadencePolicy(),
-    idle: true,
-    lockHeld: false,
-    marker: { kind: "ok", marker: { fires: [new Date(now.getTime() - sinceMinutesAgo * 60_000).toISOString()] } },
-    now,
-    candidates: ["fb-x"],
-    census,
-  });
-}
-
-test("the interval shortens toward minIntervalMinutes as depth approaches the floor", () => {
-  // 60 minutes since the last fire. At the floor (depth 0) the curve's fastest point,
-  // minIntervalMinutes 10m, has long since elapsed — it must fire.
-  const d = decideAt({ depth: 0, allMerged: false }, 60);
-  assert.equal(d.fire, true, "depth at the floor must use the SHORT interval and clear a 60m gap");
-});
-
-test("the interval lengthens toward maxIntervalMinutes as depth recovers toward the ceiling", () => {
-  // Same 60-minute gap, but depth is now at the ceiling (10): the curve's slowest point,
-  // maxIntervalMinutes 100m, has NOT elapsed — it must refuse, naming the interval and the depth.
-  const d = decideAt({ depth: 10, allMerged: false }, 60);
-  assert.equal(d.fire, false, "depth at the ceiling must use the LONG interval and refuse a 60m gap");
-  assert.match(
-    (d as { reason: string }).reason,
-    /interval 100\.0m at depth 10/,
-    "the refusal must name the lengthened interval and the depth that produced it",
-  );
-});
-
-test("depth between the floor and the ceiling interpolates strictly between the two intervals", () => {
-  // Depth 5 of a [0,10] span is the curve's midpoint: 10 + 0.5*(100-10) = 55m. A 60m gap clears
-  // it (unlike the ceiling case just above) — proving the curve is a continuum, not a step from
-  // "fast" straight to "slow".
-  const mid = decideAt({ depth: 5, allMerged: false }, 60);
-  assert.equal(mid.fire, true, "the interpolated 55m interval must clear a 60m gap");
-
-  // A tighter gap (50m) falls short of that same 55m midpoint interval and must refuse — pinning
-  // the interpolated NUMBER, not just its sign.
-  const midTight = decideAt({ depth: 5, allMerged: false }, 50);
-  assert.equal(midTight.fire, false, "50m must not clear the interpolated 55m interval");
-  assert.match((midTight as { reason: string }).reason, /interval 55\.0m at depth 5/);
-});
-
-test("adaptive cadence never exceeds the daily cap — at the cap with zero depth nothing fires", () => {
-  // THE FALSIFIER (design clause v). depth 0 is the curve's most urgent point — minIntervalMinutes
-  // alone would fire immediately — but the daily cap is a SEPARATE, unconditional bound the curve
-  // never touches. Two fires already inside the 24h window at a cap of 2 must still refuse.
-  const now = new Date("2026-08-04T12:00:00.000Z");
-  const recentFires = [
-    new Date(now.getTime() - 30 * 60_000).toISOString(),
-    new Date(now.getTime() - 20 * 60_000).toISOString(),
+  const fires = [
+    ...(opts.extraFires ?? []),
+    new Date(now.getTime() - sinceMinutesAgo * 60_000).toISOString(),
   ];
-  const policy = policyFixture({
-    enabled: true,
-    minIntervalMinutes: 1,
-    maxIntervalMinutes: 5,
-    depthFloor: 0,
-    depthCeiling: 10,
-    maxPerDay: 2,
-  }).values.autoTriage;
-
-  const d = decideAutoTriage({
-    policy,
+  return decideAutoTriage({
+    policy: floorPolicy(opts.maxPerDay),
     idle: true,
     lockHeld: false,
-    marker: { kind: "ok", marker: { fires: recentFires } },
+    marker: { kind: "ok", marker: { fires } },
     now,
     candidates: ["fb-x"],
-    census: { depth: 0, allMerged: false }, // most urgent point on the curve
   });
+}
 
-  assert.equal(d.fire, false, "the daily cap must refuse even at the curve's fastest, most urgent point");
-  assert.match((d as { reason: string }).reason, /daily cap reached \(2\/2/);
-});
+test("W1-T475 FALSIFIER: the 25th fire in a rolling day is REFUSED — the cap is now the only spend bound", () => {
+  // THE TRAP THIS EXISTS FOR. With the interval no longer throttling, `maxPerDay` is all that
+  // stands between this rung and 1,440 idle ticks a day. Asserting the rung FIRES proves nothing;
+  // this asserts the 25th attempt does NOT, at the SHIPPED cap of 24.
+  const now = new Date("2026-08-04T12:00:00.000Z");
+  const shipped = policyFixture({ enabled: true, minIntervalMinutes: 15 }).values.autoTriage;
+  assert.equal(shipped.maxPerDay, 24, "this test is pinned to the shipped cap, not a fixture value");
 
-test("a plan whose every task is already merged is DONE and does not accelerate triage", () => {
-  // Design clause iv. Depth 0 is IDENTICAL in both branches below — only `allMerged` differs —
-  // so this isolates the one bit that must override the "near-empty, go fast" reading.
-  const thin = decideAt({ depth: 0, allMerged: false }, 30);
-  assert.equal(thin.fire, true, "a genuinely thin (but not all-merged) queue at depth 0 fires on a 30m gap");
-
-  const done = decideAt({ depth: 0, allMerged: true }, 30);
-  assert.equal(done.fire, false, "an all-merged plan must NOT accelerate — same depth, opposite outcome");
-  assert.match(
-    (done as { reason: string }).reason,
-    /all-merged/,
-    "the refusal must name WHY: DONE, not starved, never a reason to accelerate",
+  // 24 fires already inside the window, the newest old enough that the FLOOR is satisfied — so the
+  // cap is provably the bound doing the refusing, not the interval.
+  const twentyFour = Array.from({ length: 24 }, (_, k) =>
+    new Date(now.getTime() - (60 + k) * 60_000).toISOString(),
   );
+  const d = decideAutoTriage({
+    policy: shipped,
+    idle: true,
+    lockHeld: false,
+    marker: { kind: "ok", marker: { fires: twentyFour } },
+    now,
+    candidates: ["fb-x"],
+  });
+  assert.equal(d.fire, false, "the 25th fire in a rolling 24h window must be refused");
+  assert.match((d as { reason: string }).reason, /daily cap reached \(24\/24 in the last 24h\)/);
+
+  // FALSIFIER FOR THE FALSIFIER: 23 in the window, same floor-satisfying gap, MUST fire — otherwise
+  // this test would pass against a rung that refuses unconditionally.
+  const twentyThree = twentyFour.slice(0, 23);
+  const under = decideAutoTriage({
+    policy: shipped,
+    idle: true,
+    lockHeld: false,
+    marker: { kind: "ok", marker: { fires: twentyThree } },
+    now,
+    candidates: ["fb-x"],
+  });
+  assert.equal(under.fire, true, "23 fires in the window is UNDER the cap and must still fire");
 });
 
-test("the cadence curve is bounded policy data whose out-of-range value is refused at load", () => {
-  // Read from the SHIPPED file, never hardcoded — this file's own convention (see the module doc
-  // above). Push depthCeiling past its own declared max and prove validatePolicy refuses it by
-  // name, exactly like every other bounded numeric row.
+test("W1-T475: the minimum-interval FLOOR survives the curve's deletion — two ticks inside it yield ONE fire", () => {
+  // `minIntervalMinutes` used to be reachable ONLY through the deleted curve. If it had gone with
+  // it, both ticks below would fire and the rung would run every poll.
+  const inside = decideAfter(4); // 4m elapsed against a 10m floor
+  assert.equal(inside.fire, false, "a tick INSIDE the floor must not fire");
+
+  const alsoInside = decideAfter(9); // a second tick, still inside
+  assert.equal(alsoInside.fire, false, "a second tick inside the same floor must not fire either");
+
+  const outside = decideAfter(11); // past the floor
+  assert.equal(outside.fire, true, "once the floor has elapsed the rung fires — the floor is a delay, not a block");
+});
+
+test("W1-T475: the interval skip is still LOGGED WITH A REASON naming the floor and the elapsed time", () => {
+  // A removed branch that silently stops emitting is how a rung becomes unmeasurable. The reason
+  // string is the ONLY record of this refusal.
+  const d = decideAfter(4);
+  assert.equal(d.fire, false);
+  const reason = (d as { reason: string }).reason;
+  assert.match(reason, /only 4\.0m since the last fire/, "the refusal must name how long it has been");
+  assert.match(reason, /minInterval 10m/, "and the floor that refused it");
+  // The curve's own vocabulary must be GONE, not merely unused — a stale "at depth N" would mean
+  // some caller is still computing a census the policy no longer has.
+  assert.doesNotMatch(reason, /at depth/, "no depth wording survives the curve's deletion");
+});
+
+test("W1-T475: minIntervalMinutes is still bounded policy data whose out-of-range value is refused at load", () => {
+  // COVERAGE PRESERVED, REDIRECTED. The deleted curve tests included the only assertion that an
+  // autoTriage row's declared bound is enforced (it named `depthCeiling`). That row is gone, but
+  // the property must not go with it — and it matters MORE now, because `minIntervalMinutes` is
+  // the sole remaining interval bound rather than one end of a curve. Read from the SHIPPED file,
+  // never hardcoded, per this file's own convention.
   const raw = parseYaml(readFileSync(policyPath(REPO_ROOT), "utf8")) as Record<string, unknown>;
   const autoTriageRaw = raw.autoTriage as Record<string, Record<string, unknown>>;
-  const depthCeilingMax = autoTriageRaw.depthCeiling.max as number;
-  autoTriageRaw.depthCeiling = { ...autoTriageRaw.depthCeiling, value: depthCeilingMax + 1 };
+  const declaredMax = autoTriageRaw.minIntervalMinutes.max as number;
+  autoTriageRaw.minIntervalMinutes = { ...autoTriageRaw.minIntervalMinutes, value: declaredMax + 1 };
 
   assert.throws(
     () => validatePolicy(raw),
     (err: unknown) =>
-      err instanceof PolicyError && /autoTriage\.depthCeiling\.value.*out of its declared bound/.test(err.message),
-    "an out-of-bounds cadence value must be refused at load, named by field",
+      err instanceof PolicyError &&
+      /autoTriage\.minIntervalMinutes\.value.*out of its declared bound/.test(err.message),
+    "an out-of-bounds floor must be refused at load, named by field",
   );
+});
+
+test("W1-T475: the deleted curve rows are absent from BOTH the policy file and the loaded shape", () => {
+  // A removed field that plan/policy.yaml still declares is a surface documented to disagree with
+  // the code — the seven-instance pattern this change exists not to repeat. Assert BOTH sides:
+  // the file no longer declares the rows, and the loaded policy object no longer carries them.
+  const raw = parseYaml(readFileSync(policyPath(REPO_ROOT), "utf8")) as Record<string, unknown>;
+  const autoTriageRaw = raw.autoTriage as Record<string, unknown>;
+  for (const gone of ["maxIntervalMinutes", "depthFloor", "depthCeiling"]) {
+    assert.equal(gone in autoTriageRaw, false, `plan/policy.yaml still declares autoTriage.${gone}`);
+    assert.equal(gone in SHIPPED.values.autoTriage, false, `the loaded policy still carries ${gone}`);
+  }
+  // FALSIFIER: the rows that MUST remain are still both declared and loaded.
+  for (const kept of ["enabled", "minIntervalMinutes", "maxPerDay"]) {
+    assert.equal(kept in autoTriageRaw, true, `plan/policy.yaml lost autoTriage.${kept}`);
+    assert.equal(kept in SHIPPED.values.autoTriage, true, `the loaded policy lost ${kept}`);
+  }
 });
