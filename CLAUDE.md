@@ -519,6 +519,25 @@ forensic detail, so the narrative does not need to live here.
   find something to kill. When you must reach a whole tree, spawn it `detached` and use
   `killProcessGroup` (`src/lib/worker-containment.ts`), which is pid-based and ESRCH-tolerant.
   *(2026-08-09 ×2; the `main-pristine` kill days earlier)*
+- **PREFER `git checkout -- <path>` WITH A SAVED COPY OVER EVERY `git stash` FORM — the stash is A
+  SHARED UNNAMED LIFO STACK on a checkout several sessions touch, and `git stash pop` with no
+  argument takes `stash@{0}` whoever pushed it.** Same shape as the shared `node_modules` bullet
+  above: one mutable resource, no lock, several writers. MEASURED 2026-08-13 — the stack held ONE
+  entry dated 2026-07-23 on base `7c406b6` (#648), three weeks older than any live session, and a
+  session's `git stash -u` + `pop` restored its payload into that session's tree. It noticed and
+  removed them, but **`git status` after a `pop` shows another session's files INDISTINGUISHABLE
+  FROM YOUR OWN WORK** — nothing marks provenance, and `git log` authorship does not either (every
+  entry here is `cao825`). THE CHECK IS ONE COMMAND: `git stash list` before and after any stash
+  operation. **AND INSPECT WITH `^3`, because the obvious command UNDERSTATES the payload** —
+  `git stash show --stat stash@{0}` printed NOTHING for that entry, since all 9 files were UNTRACKED
+  and untracked payload hangs off the third parent: `git show --stat 'stash@{0}^3'` is what shows it.
+  **RETRACTED HERE AFTER RE-DERIVATION ON GIT 2.54.0: `git stash push <path>` is NOT "unsupported".**
+  It works — exit 0, list 1→2, the path reverted — so any reading that blamed a silent no-op was
+  wrong about the mechanism and should be re-taken. It is still the wrong verb, for the reason above
+  and demonstrated by that very probe: the new entry landed at `stash@{0}` and DEMOTED the
+  three-week-old one to `stash@{1}`, so a concurrent bare `pop` would have taken mine. `git checkout
+  -- <path>` is scoped to the path, cannot reach another session's work, and cannot silently no-op.
+  *(2026-08-13 — the eight-file pop, and the `push <path>` claim re-derived and retracted)*
 
 ## Code traps
 
