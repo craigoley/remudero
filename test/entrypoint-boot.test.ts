@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { DAEMON_EXIT_STALE } from "../src/lib/daemon.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(REPO_ROOT, "deploy", "entrypoint.sh");
@@ -424,9 +425,10 @@ function bootTimed(
 
 test("a NON-ZERO exit sleeps the throttle interval before exiting, so docker restarts at that rate", () => {
   const run = bootTimed(freshHome(), makeOrigin(), 7, { RMD_RESTART_THROTTLE_S: "2" });
-  // REACHED THE CODE: the stubbed command really ran, exactly once — the throttle must not loop,
-  // because looping would re-run the daemon without re-running the clone/fetch above it.
-  assert.equal(run.calls, 1, "the command runs ONCE per container; the restart is docker's job");
+  // REACHED THE CODE: the stubbed command really ran, exactly once. W1-T490 added an in-container
+  // loop, but ONLY for the freshness code — 7 is a crash, so it still exits on the first attempt and
+  // docker still counts it. That is the half of the bound this test now also pins.
+  assert.equal(run.calls, 1, "the command runs ONCE per container; a CRASH's restart is docker's job");
   assert.equal(run.status, 7, "the command's own exit code is propagated, not swallowed");
   assert.ok(run.elapsedMs >= 2000, `must have slept ~2s before exiting, took ${run.elapsedMs}ms`);
   assert.match(run.stderr, /restart throttle: a NON-ZERO exit will sleep 2s/);
@@ -456,6 +458,175 @@ test("a non-numeric throttle is refused loudly and falls back to exec rather tha
   assert.equal(run.status, 3);
   assert.match(run.stderr, /not a whole number of seconds/);
   assert.ok(run.elapsedMs < 2000, "a rejected value must not sleep");
+});
+
+// ── W1-T490: A FRESHNESS RESTART MUST NOT SPEND THE CRASH-LOOP BUDGET, AND A CRASH STILL MUST ──
+//
+// THE DEFECT. `--restart=on-failure:N` counts every non-zero exit against N and MEASURED cannot read
+// the value (`exit 1` and `exit 42` behaved identically); health never refunds it (containers
+// exiting after 0s, 20s and 120s of clean work all parked). So a freshness restart — one per merge —
+// burned the same budget as a crash and a healthy fleet exhausted `on-failure:5` in half a day.
+//
+// THE ONLY WAY TO SPEND NO BUDGET IS NOT TO EXIT, because docker counts exits and cannot be told
+// otherwise. Hence an in-container restart for that ONE code. The whole risk of that shape is that
+// it also swallows a crash loop, so these tests assert BOTH directions: a `stale` exit must re-enter
+// without exiting, and a crash must still exit on its first attempt so N still bounds it.
+
+/** A stub that walks a SEQUENCE of exit codes, one per invocation, so a loop is observable. */
+function writeSeqCmdStub(dir: string, rec: string, name: string, codes: readonly number[]): void {
+  const body = [
+    "#!/usr/bin/env bash",
+    `n=$(wc -l < "${rec}/${name}" 2>/dev/null || echo 0)`,
+    `printf '%s\\n' "call" >> "${rec}/${name}"`,
+    `codes=(${codes.join(" ")})`,
+    'if [ "$n" -ge "${#codes[@]}" ]; then exit "${codes[${#codes[@]}-1]}"; fi',
+    'exit "${codes[$n]}"',
+    "",
+  ].join("\n");
+  writeFileSync(join(dir, name), body, { mode: 0o755 });
+  chmodSync(join(dir, name), 0o755);
+}
+
+/** Boot with a stub whose exit code changes per call, returning how many times it ran. */
+function bootSeq(
+  home: string,
+  origin: string,
+  codes: readonly number[],
+  env: Record<string, string>,
+): { status: number; stderr: string; calls: number } {
+  const stubs = mkdtempSync(join(tmpdir(), "entrypoint-stub-"));
+  const rec = mkdtempSync(join(tmpdir(), "entrypoint-rec-"));
+  writeNpmStub(stubs, rec);
+  writeSeqCmdStub(stubs, rec, "rmd-fake", codes);
+  const r = spawnSync("bash", [SCRIPT, "rmd-fake", "daemon"], {
+    encoding: "utf8",
+    cwd: REPO_ROOT,
+    env: {
+      ...process.env,
+      PATH: `${stubs}:${process.env.PATH ?? ""}`,
+      HOME: home,
+      RMD_REPO_URL: origin,
+      RMD_REF: "main",
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_TERMINAL_PROMPT: "0",
+      ...env,
+    },
+  });
+  let calls = 0;
+  try {
+    calls = readFileSync(join(rec, "rmd-fake"), "utf8").split("\n").filter(Boolean).length;
+  } catch {
+    calls = 0;
+  }
+  return { status: r.status ?? -1, stderr: r.stderr ?? "", calls };
+}
+
+const STALE = 75;
+
+test("W1-T490 DIRECTION 1: a FRESHNESS exit restarts IN-CONTAINER, so docker's budget is never charged", () => {
+  // 75 then 0: the freshness restart is served here, and the second run stops cleanly.
+  const run = bootSeq(freshHome(), makeOrigin(), [STALE, 0], { RMD_RESTART_THROTTLE_S: "1" });
+  assert.equal(run.calls, 2, "the daemon must be re-run in-container rather than the container exiting");
+  // THE ASSERTION THAT IS THE WHOLE POINT: the container exits 0. `--restart=on-failure` does not
+  // restart on 0 and does not count it, so RestartCount is untouched by a routine merge.
+  assert.equal(run.status, 0, "a freshness restart must not surface as a non-zero container exit");
+  assert.match(run.stderr, /freshness\) — restart 1\/20 IN-CONTAINER/);
+  assert.match(run.stderr, /budget is not spent/);
+});
+
+test("W1-T490 DIRECTION 2: a CRASH still exits on its FIRST attempt, so on-failure:N still bounds a crash loop", () => {
+  // 1 is what `blocked`/`error` map to. If this ever loops, the crash-loop bound is gone — which is
+  // the regression the in-container loop above would cause if it were unconditional.
+  const run = bootSeq(freshHome(), makeOrigin(), [1, 1, 1], { RMD_RESTART_THROTTLE_S: "1" });
+  assert.equal(run.calls, 1, "a crash must NOT be retried in-container; docker has to see the exit to count it");
+  assert.equal(run.status, 1, "and the code must propagate so on-failure actually fires");
+  assert.doesNotMatch(run.stderr, /IN-CONTAINER/, "a crash must not take the freshness path at all");
+});
+
+test("W1-T490: the freshness loop is itself BOUNDED, so a stale STORM still reaches docker's count", () => {
+  // THE OBJECTION THIS ANSWERS, verbatim from the entrypoint's own note: an internal loop "would
+  // render inert" the count cap, because a container that never exits is never counted. MEASURED
+  // precedent: 5 boots and 3 lock collisions in 150 seconds on 2026-08-13. So the loop has its own
+  // bound and then hands the container back.
+  const run = bootSeq(freshHome(), makeOrigin(), [STALE, STALE, STALE, STALE], {
+    RMD_RESTART_THROTTLE_S: "1",
+    RMD_FRESHNESS_RESTART_MAX: "2",
+  });
+  assert.equal(run.calls, 3, "the initial run plus exactly 2 in-container restarts");
+  assert.equal(run.status, STALE, "once the bound is spent the container exits, so docker counts it again");
+  assert.match(run.stderr, /2 in-container restarts are already spent/);
+});
+
+test("W1-T490: a freshness restart RE-RUNS the fetch/checkout, so the staleness it restarted for actually clears", () => {
+  // THE OBJECTION THE ENTRYPOINT USED TO RAISE AGAINST LOOPING: "the clone/fetch/checkout above runs
+  // ONCE, before this line — so an in-container retry loop would re-run the daemon against the SAME
+  // tree forever and `stale` would never clear." That is retired by extracting `sync_tree`, and this
+  // is the test that holds the retirement honest: the remote MOVES between the two runs, and the
+  // tree must be on the new sha afterwards. Without the re-sync this fails on the sha comparison.
+  const home = freshHome();
+  const origin = makeOrigin();
+  const before = git(origin, ["rev-parse", "HEAD"]);
+  // The stub advances origin on its FIRST call, so the restart has something newer to land on.
+  const stubs = mkdtempSync(join(tmpdir(), "entrypoint-stub-"));
+  const rec = mkdtempSync(join(tmpdir(), "entrypoint-rec-"));
+  writeNpmStub(stubs, rec);
+  const body = [
+    "#!/usr/bin/env bash",
+    `n=$(wc -l < "${rec}/rmd-fake" 2>/dev/null || echo 0)`,
+    `printf '%s\\n' "call" >> "${rec}/rmd-fake"`,
+    'if [ "$n" -eq 0 ]; then exit 75; fi',
+    "exit 0",
+    "",
+  ].join("\n");
+  writeFileSync(join(stubs, "rmd-fake"), body, { mode: 0o755 });
+  chmodSync(join(stubs, "rmd-fake"), 0o755);
+  const after = advanceOrigin(origin, "moved.txt", "a commit that merged while the daemon was up");
+  assert.notEqual(before, after, "sanity: the remote really moved");
+  const r = spawnSync("bash", [SCRIPT, "rmd-fake", "daemon"], {
+    encoding: "utf8",
+    cwd: REPO_ROOT,
+    env: {
+      ...process.env,
+      PATH: `${stubs}:${process.env.PATH ?? ""}`,
+      HOME: home,
+      RMD_REPO_URL: origin,
+      RMD_REF: "main",
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_TERMINAL_PROMPT: "0",
+      RMD_RESTART_THROTTLE_S: "1",
+    },
+  });
+  assert.equal(r.status, 0, `expected a clean exit, got ${r.status}: ${r.stderr}`);
+  assert.equal(headOf(home), after, "the restart must land on the NEWER sha — otherwise the loop re-runs stale code forever");
+});
+
+test("W1-T490: the freshness loop belongs to SUPERVISED mode — with the throttle unset the script still plain execs", () => {
+  // THE COUPLING, PINNED RATHER THAN LEFT IMPLICIT. `exec "$@"` replaces this shell, so nothing can
+  // observe the exit code afterwards — the freshness branch is unreachable by construction on that
+  // path. Rather than quietly abandon the documented "unset ⇒ byte-for-byte what it was" contract
+  // (which exists because `exec` serves every one-shot container verb, not just the daemon), the
+  // freshness handling lives in the SAME opt-in supervised branch the throttle already created.
+  // THIS IS NOT A GAP IN PRODUCTION: the daemon container is launched with
+  // RMD_RESTART_THROTTLE_S=120 (deploy/host-update.sh passes it, and the live container carries it),
+  // so the supervised branch is exactly the branch the fleet runs.
+  const run = bootSeq(freshHome(), makeOrigin(), [STALE, 0], {});
+  assert.equal(run.calls, 1, "with no throttle the script execs, so there is no shell left to retry in");
+  assert.equal(run.status, STALE, "and the code propagates untouched through exec");
+  assert.doesNotMatch(run.stderr, /IN-CONTAINER/);
+});
+
+test("W1-T490: the entrypoint's freshness code is the SAME NUMBER as DAEMON_EXIT_STALE, not a drifting literal", () => {
+  // THE DUPLICATION THIS PINS. The entrypoint cannot import src/lib/daemon.ts — it runs at exactly
+  // the moment the daemon has failed, and the throttle note above records why nothing here may
+  // depend on the repo being loadable then. So the constant is written twice and this is what stops
+  // the two drifting: a silent drift would restore the whole defect with every unit test green.
+  const script = readFileSync(SCRIPT, "utf8");
+  const m = script.match(/^DAEMON_EXIT_STALE=(\d+)$/m);
+  assert.ok(m, "the entrypoint must define DAEMON_EXIT_STALE as a plain assignment this test can read");
+  assert.equal(Number(m![1]), DAEMON_EXIT_STALE, "entrypoint and daemon.ts disagree about the freshness exit code");
+  // POSITIVE CONTROL on that match: the same predicate must FAIL against a mutated script, or it
+  // would pass for a file that no longer carries the assignment at all.
+  assert.equal(/^DAEMON_EXIT_STALE=(\d+)$/m.test(script.replace(/^DAEMON_EXIT_STALE=\d+$/m, "# gone")), false);
 });
 
 // ── THE THROTTLE IS ONLY REAL IF THE HOST ACTUALLY PASSES IT ────────────────────────────────

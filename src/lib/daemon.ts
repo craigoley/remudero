@@ -129,6 +129,28 @@ export type DaemonStopReason = "stopped" | "blocked" | "max_reached" | "error" |
 export const DEFAULT_POLL_INTERVAL_MS = 60_000;
 
 /**
+ * The exit code a FRESHNESS self-restart uses, distinct from a crash's 1 (W1-T490).
+ *
+ * 75 is `EX_TEMPFAIL` from sysexits(3) — "temporary failure, the user is invited to
+ * retry" — which is precisely what a `stale` stop is: nothing is wrong, the process
+ * simply needs to come back on newer code. Any nonzero value would work for docker
+ * (it reads only zero/nonzero); a conventional one is chosen so an operator reading
+ * `docker inspect --format '{{.State.ExitCode}}'` by hand gets a meaning rather than
+ * a magic number.
+ *
+ * THE VALUE IS DUPLICATED IN `deploy/entrypoint.sh`, DELIBERATELY, AND A TEST PINS
+ * THE PAIR. The entrypoint cannot import this module: it runs at the exact moment
+ * the daemon has failed, and its own restart-throttle block already records why it
+ * refuses to depend on the repo being loadable then ("Reading it here instead would
+ * need the plan loadable at exactly the moment an unloadable plan is what is
+ * crashing the daemon — the measured incident"). A shell literal that silently
+ * drifts from this constant would reinstate the whole defect while every unit test
+ * stayed green, so `test/entrypoint-boot.test.ts` greps the script for this number
+ * and fails if the two disagree.
+ */
+export const DAEMON_EXIT_STALE = 75;
+
+/**
  * The pure stop-reason → process-exit-code mapping (operator ruling,
  * 2026-07-21: "VERIFY from source how DaemonStopReason reaches the process
  * exit today... the deliverable is the pure stop-reason-to-exit-code
@@ -151,9 +173,40 @@ export const DEFAULT_POLL_INTERVAL_MS = 60_000;
  * wrong, because an awaiting-state is neither a clean stop nor a crash. Both
  * are handled entirely inside the loop below instead, and never become
  * return values.
+ *
+ * ── W1-T490: `stale` NOW CARRIES ITS OWN CODE, BECAUSE THE CALLER THAT NEEDS TO
+ * TELL IT APART CANNOT SEE ANYTHING ELSE ──────────────────────────────────────
+ *
+ * The mapping above collapsed FIVE reasons onto two codes, so `blocked`, `error`
+ * and `stale` were indistinguishable at the process boundary. That is fine for
+ * launchd — `KeepAlive{SuccessfulExit:false}` restarts on any nonzero and wants
+ * to — but it is NOT fine for the container, where the restart budget is finite:
+ * docker's `--restart=on-failure:N` counts every nonzero exit against N and
+ * MEASURED (Azure, 2026-08-14, docker 29.1.3) cannot read the value at all —
+ * `exit 1` and `exit 42` both parked at `RestartCount=2` on `on-failure:2`,
+ * while `exit 0` did not restart. So a routine freshness restart — one per merge,
+ * 14 in 24 hours — spent the same budget as a crash, and no amount of healthy
+ * running refunded it (three containers exiting after 0s, 20s and 120s of clean
+ * work all parked permanently). The measured consequence was a 2h56m outage that
+ * only a human ended.
+ *
+ * SINCE DOCKER CANNOT READ THE CODE, THE ENTRYPOINT READS IT INSTEAD. This
+ * function's job is only to make the two cases DISTINGUISHABLE; the accounting
+ * is `deploy/entrypoint.sh`'s (see its freshness-restart block, which re-runs the
+ * bootstrap so the staleness actually clears, and still exits for a real crash so
+ * `on-failure:N` keeps bounding a crash loop). {@link DAEMON_EXIT_STALE} is the
+ * one name both halves share.
+ *
+ * NOTHING ELSE CHANGES POLARITY. `stale` stays NONZERO, so launchd's KeepAlive and
+ * a bare `--restart=on-failure` with no entrypoint support both still restart
+ * exactly as they did — this is strictly a refinement WITHIN nonzero, not a move
+ * across the zero boundary. `blocked` and `error` keep 1 precisely so that a
+ * crash remains countable.
  */
 export function daemonExitCode(stopReason: DaemonStopReason): number {
-  return stopReason === "stopped" || stopReason === "max_reached" ? 0 : 1;
+  if (stopReason === "stopped" || stopReason === "max_reached") return 0;
+  if (stopReason === "stale") return DAEMON_EXIT_STALE;
+  return 1;
 }
 
 /**

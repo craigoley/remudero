@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import type { RunResult } from "../src/run-task.js";
 import {
+  DAEMON_EXIT_STALE,
   daemonExitCode,
   runDaemon,
   type DaemonFreshness,
@@ -163,7 +164,14 @@ test("with no checkFreshness dependency injected, the loop behaves exactly as be
 // ── claim 3: nonzero exit, distinguishable from a crash-loop ────────────────────
 
 test("daemonExitCode(\"stale\") is nonzero, like blocked/error — so KeepAlive{SuccessfulExit:false} actually restarts", () => {
-  assert.equal(daemonExitCode("stale"), 1);
+  // W1-T490 GAVE THIS SECTION'S OWN HEADING ("distinguishable from a crash-loop") ITS FIRST REAL
+  // TEETH. The literal was 1, which made `stale` nonzero — satisfying launchd — but IDENTICAL to
+  // `blocked`/`error`, so the container half could not tell a freshness restart from a crash and
+  // charged both to `--restart=on-failure:N`. The assertion that carries this test's actual claim is
+  // NONZERO-ness, which is unchanged; the exact value now discriminates as the heading always said
+  // it should. The full both-directions pair lives in `test/daemon.test.ts` beside the mapping.
+  assert.notEqual(daemonExitCode("stale"), 0, "still nonzero — KeepAlive{SuccessfulExit:false} must still restart");
+  assert.equal(daemonExitCode("stale"), DAEMON_EXIT_STALE);
   assert.notEqual(daemonExitCode("stale"), daemonExitCode("stopped"));
   assert.notEqual(daemonExitCode("stale"), daemonExitCode("max_reached"));
 });
