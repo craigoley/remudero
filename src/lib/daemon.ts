@@ -1429,7 +1429,7 @@ export function daemonBoot(
   log: (step: string, extra?: Record<string, unknown>) => void,
   env: NodeJS.ProcessEnv = process.env,
   sweepTmp?: () => { removed: string[]; kept: string[] },
-  sweepLocks?: () => { reaped: string[]; kept: string[] },
+  sweepLocks?: () => { reaped: string[]; kept: string[]; live: string[]; unverifiableForeignHost: string[] },
   unlockWorkerKeychain?: () => { keychainPath: string; provisioned: boolean; unlocked: true },
   crashLoopCheck?: {
     /**
@@ -1541,7 +1541,17 @@ export function daemonBoot(
   // re-dispatched, so its lock lingers indefinitely and reads as live work.
   if (sweepLocks) {
     const swept = sweepLocks();
-    log("daemon.lock_sweep", { reaped: swept.reaped.length, kept: swept.kept.length });
+    // `kept` collapsed a confirmed-live holder and an unverifiable-foreign-host one into a
+    // single count (W1-T461): a container replacement strands the latter forever (isHolderStale
+    // rung 1, W1-T396, never reaps a foreign host), so `live`/`unverifiable_foreign_host` are
+    // logged alongside the total so that permanently-stuck debris is legible on this boot line,
+    // not indistinguishable from healthy live work.
+    log("daemon.lock_sweep", {
+      reaped: swept.reaped.length,
+      kept: swept.kept.length,
+      live: swept.live.length,
+      unverifiable_foreign_host: swept.unverifiableForeignHost.length,
+    });
   }
   // W1-T113 part (i): resolve — and log — the real `claude` binary ONCE at
   // boot, see this function's own doc above. A refusal here is logged, never
