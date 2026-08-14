@@ -98,10 +98,18 @@ permissions:
   contents: read
 
 env:
-  # ONE ENTRY PER HOST, space-separated. `heartbeat` is the mini's, already installed and left
-  # where it is. Adding a host is one word here plus `RMD_HEARTBEAT_BRANCH=<that word>` in its
-  # cron line — and an entry whose branch does not exist yet costs nothing, because absence is
-  # silent per branch.
+  # ONE ENTRY PER HOST, space-separated. `heartbeat-mini` is the mini's and `heartbeat-azure` is
+  # Azure's. Adding a host is one word here plus `RMD_HEARTBEAT_BRANCH=<that word>` in its cron
+  # line — and an entry whose branch does not exist yet costs nothing, because absence is silent
+  # per branch.
+  #
+  # THE BARE `heartbeat` NAME IS DELIBERATELY GONE FROM THIS LIST, AND NOTHING WRITES IT ANY MORE.
+  # It was the mini's until its cron moved to `RMD_HEARTBEAT_BRANCH=heartbeat-mini`; its last beat
+  # is frozen at 2026-08-14T16:30:00Z carrying `beat_host=Craigs-Mac-mini`. Leaving it here would
+  # watch a branch no host writes, which goes stale after STALE_AFTER_MINUTES and opens a
+  # needs-human issue about a machine that is perfectly healthy — the fastest way to get this
+  # watcher muted. The ref is NOT deleted: deleting a remote ref is the operator's act, and the
+  # reaper can never offer it anyway (see the guard note below). It simply sits inert.
   #
   # NAMING A BRANCH HERE ALSO GUARDS IT FROM THE REAPER, AND OWES A DECLARATION. `reapBranchesCommand`
   # (src/run-task.ts) derives `namedInSource` from `git grep -F <branch> -- src/ scripts/ deploy/
@@ -113,7 +121,7 @@ env:
   # is a one-line change to src/run-task.ts and is deliberately NOT part of W1-T483, whose scope is
   # observability and which declares no `src/` path. Whoever adds the third host should expect the
   # same alarm; its own doc calls that "the alarm working as intended".
-  HEARTBEAT_BRANCHES: "heartbeat heartbeat-azure"
+  HEARTBEAT_BRANCHES: "heartbeat-mini heartbeat-azure"
   STALE_AFTER_MINUTES: "30"
 
 jobs:
