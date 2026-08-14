@@ -97,7 +97,14 @@
       proof: "unit test: test/sweep.test.ts"
   origin: recon#review-lane-never-broken-2026-08-14
   plan_refs: ['W1-T463']
-  files: [src/lib/sweep.ts, src/lib/policy.ts, test/sweep.test.ts, test/review-status-gate.test.ts, test/policy-consumers.test.ts]
+  # W1-T473 IMPLEMENTATION NOTE: the "one number today" branch of design (ii) was taken —
+  # `runSweep` reads `SweepPolicy.dispatchLanes` (sweep.ts) a SECOND time as the review-lane
+  # ceiling, no sibling `reviewLanes` policy field. Per this shard's own note ("DROP BOTH IF
+  # THE IMPLEMENTATION READS dispatchLanes DIRECTLY INSTEAD"), src/lib/policy.ts and
+  # test/policy-consumers.test.ts are dropped from `files:` below — neither is touched by the
+  # diff, and leaving them declared would both trip inverseScopeUntouchedFiles and serialise
+  # this task against every other task that also names them (partitionByFileOverlap).
+  files: [src/lib/sweep.ts, test/sweep.test.ts, test/review-status-gate.test.ts]
   status: queued
   attempts: 0
   note: "CLOSES W1-T463's (#1750) CRITERION ONE. That shard asked whether the light sweep was broken

@@ -2461,6 +2461,126 @@ test("W1-T225 — a PR awaiting its FIRST review is never bound by the orphan ca
   assert.equal(deriveDisposition(neverReviewed, DEFAULT_SWEEP_POLICY, NOW).disposition, "post-review");
 });
 
+// ── W1-T473: reviews get their OWN concurrency budget, honouring the SAME ──
+//    lane number dispatch uses (`policy.dispatchLanes`), with real mutual
+//    exclusion supplying what single-threading used to give for free.
+
+function greenPr(n: number): OpenPrView {
+  return ungatedGreenPr({ prNumber: n, prUrl: `url/${n}`, taskId: `W1-BUDGET-${n}`, headSha: `sha${n}` });
+}
+
+test("W1-T473 — post-review PRs run CONCURRENTLY within one pass, not one at a time: two independent reviews are BOTH in flight before either resolves (the crux this task closes)", async () => {
+  const started: number[] = [];
+  const finished: number[] = [];
+  let releaseBoth: () => void = () => {};
+  const bothStarted = new Promise<void>((resolve) => {
+    releaseBoth = resolve;
+  });
+
+  const deps = fakeDeps({
+    postReview: async (p) => {
+      started.push(p.prNumber);
+      if (started.length === 2) releaseBoth();
+      // A SERIAL implementation would await this whole call before ever
+      // starting the second PR's — `started.length` would freeze at 1 and
+      // this await would never resolve, timing out the race below. A
+      // genuinely concurrent implementation starts BOTH before either
+      // reaches this line.
+      await bothStarted;
+      finished.push(p.prNumber);
+    },
+  });
+
+  const timeout = new Promise((_resolve, reject) =>
+    setTimeout(() => reject(new Error("timed out — the two reviews never both started (still serial?)")), 5000),
+  );
+  await Promise.race([runSweep([greenPr(901), greenPr(902)], deps, DEFAULT_SWEEP_POLICY), timeout]);
+
+  assert.deepEqual(started.sort(), [901, 902]);
+  assert.deepEqual(finished.sort(), [901, 902]);
+});
+
+test("W1-T473 acceptance 2 — the review budget bounds CONCURRENCY, never ELIGIBILITY: 3 post-review PRs under a 2-lane budget run only 2 THIS pass, and the 3rd is picked up (untouched, still eligible) on the very next pass", async () => {
+  const lp = ledgerPath();
+  const tightPolicy: SweepPolicy = { ...DEFAULT_SWEEP_POLICY, dispatchLanes: 2 };
+  const prs = [greenPr(801), greenPr(802), greenPr(803)];
+
+  const attempts1: number[] = [];
+  const deps1 = fakeDeps({
+    ledgerPath: lp,
+    postReview: (p) => {
+      attempts1.push(p.prNumber);
+      // Simulate the real effect reaching a verdict, exactly like the other
+      // outcome-keyed dedup fixtures above — so pass 2 below can prove the
+      // deferred PR (never attempted) is the one retried, not a re-roll of
+      // one already handled.
+      appendLedger(lp, { run_id: "SWEEP-1", task_id: p.taskId ?? "", step: "review.posted", head_sha: p.headSha, state: "success" });
+    },
+  });
+  const summary1 = await runSweep(prs, deps1, tightPolicy);
+
+  assert.equal(summary1.byDisposition["post-review"], 3, "ELIGIBILITY is unchanged — all 3 PRs still derive the post-review disposition");
+  assert.equal(attempts1.length, 2, "the 2-lane budget bounds how many actually run THIS pass");
+  const skipped = prs.map((p) => p.prNumber).filter((n) => !attempts1.includes(n));
+  assert.equal(skipped.length, 1, "exactly one PR stood down on this pass, budget-exhausted, never dropped");
+
+  const disposed1 = readLedgerLines(lp).filter((l) => l.step === "sweep.disposed");
+  const skippedLine = disposed1.find((l) => l.pr_number === skipped[0]);
+  assert.equal(skippedLine?.acted, false);
+  assert.match(String(skippedLine?.stand_down_reason ?? ""), /review budget exhausted/);
+
+  // The very next pass: the two ALREADY-reviewed PRs dedup (outcome-keyed,
+  // W1-T254) and the deferred PR — never attempted, never ledgered an
+  // outcome — is exactly the one that gets its turn.
+  const attempts2: number[] = [];
+  const deps2 = fakeDeps({ ledgerPath: lp, postReview: (p) => { attempts2.push(p.prNumber); } });
+  const summary2 = await runSweep(prs, deps2, tightPolicy);
+  assert.deepEqual(attempts2, skipped, "the deferred PR — and only it — is retried; nothing was permanently dropped");
+  assert.equal(summary2.byDisposition["post-review"], 3, "eligibility is STILL unchanged on the follow-up pass");
+});
+
+test("W1-T473 acceptance 3 — a pass with NO post-review-eligible PRs starts ZERO review lanes: the budget is a ceiling on work that already exists, never a target that goes hunting for some", async () => {
+  const calls: number[] = [];
+  const deps = fakeDeps({ postReview: (p) => { calls.push(p.prNumber); } });
+
+  // Every PR here derives something OTHER than post-review (mergeable / blocked-fixable).
+  const summary = await runSweep([mergeablePr(), blockedFixablePr()], deps, DEFAULT_SWEEP_POLICY);
+  assert.equal(summary.byDisposition["post-review"], 0);
+  assert.deepEqual(calls, [], "zero eligible reviews -> postReview is never invoked, however large the lane budget is");
+
+  // The degenerate case too: nothing open at all.
+  const emptyCalls: number[] = [];
+  const emptyDeps = fakeDeps({ postReview: (p) => { emptyCalls.push(p.prNumber); } });
+  const emptySummary = await runSweep([], emptyDeps, DEFAULT_SWEEP_POLICY);
+  assert.equal(emptySummary.total, 0);
+  assert.deepEqual(emptyCalls, []);
+});
+
+test("W1-T473 — a postReview call that THROWS inside the concurrent budget batch is contained exactly like every other disposition's throw (W1-T254): acted:false, its own sweep.action_failed line, the pass still completes", async () => {
+  const deps = fakeDeps({
+    postReview: () => {
+      throw new Error("reviewer worker boom");
+    },
+  });
+
+  const summary = await runSweep([greenPr(910)], deps, DEFAULT_SWEEP_POLICY);
+
+  const action = summary.actions.find((a) => a.prNumber === 910);
+  assert.equal(action?.acted, false, "a thrown postReview call is never credited as acted");
+  assert.match(action?.actionError ?? "", /reviewer worker boom/);
+
+  const failed = readLedgerLines(deps.ledgerPath).filter((l) => l.step === "sweep.action_failed");
+  assert.equal(failed.length, 1, "exactly one sweep.action_failed line, matching every other disposition's throw containment");
+  assert.equal(failed[0].pr_number, 910);
+  assert.equal(failed[0].disposition, "post-review");
+  assert.match(String(failed[0].error), /reviewer worker boom/);
+
+  const disposed = readLedgerLines(deps.ledgerPath).filter((l) => l.step === "sweep.disposed");
+  const disposedLine = disposed.find((l) => l.pr_number === 910);
+  assert.equal(disposedLine?.acted, false);
+  assert.match(String(disposedLine?.action_error ?? ""), /reviewer worker boom/);
+});
+
 // ── W1-T254: per-PR throw containment — one PR's thrown action never aborts the pass ──
 
 test("runSweep: a throwing action does not abort the pass — later PRs still reconcile and the throwing PR is attributed (W1-T254)", async () => {

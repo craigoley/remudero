@@ -17,6 +17,7 @@ import {
   type PostedReviewStatusRecord,
   type PrLifecycleState,
 } from "../src/lib/review.js";
+import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
 import { readLedgerLines } from "../src/lib/status.js";
 
 /**
@@ -623,6 +624,81 @@ test("postReviewStatusGuarded: ACCEPTANCE 3 — a permanent-error post failure i
     assert.ok(failed);
     assert.equal(failed?.head_sha, "sha2");
     assert.match(String(failed?.error ?? ""), /404/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T473 acceptance 1 — REAL mutual exclusion for concurrent reviews ─────
+//
+// `runSweep` (sweep.ts) used to walk every open PR strictly one at a time, so
+// its `postReviewed` dedup — a `Set` read ONCE from the ledger before the
+// walk starts (see `PriorActions.postReviewed`'s own doc) — was safe only
+// because no second PR's `postReview` call could ever be in flight when a
+// later PR's dedup check ran. W1-T473 gives `runSweep` its own concurrency
+// budget for the review lane, which removes that free safety: two open PRs
+// that happen to share the exact same `${taskId}@${headSha}` (the rationale's
+// own falsifier — e.g. a duplicate/retry PR pointing at an identical push)
+// could now both be scheduled for a concurrent `postReview` call at once,
+// unless `runSweep` supplies REAL mutual exclusion of its own. This proves it
+// does: only the FIRST PR to claim the key ever invokes `postReview`; the
+// second stands down instead of racing it.
+
+function greenPrAwaitingReview(over: Partial<OpenPrView> = {}): OpenPrView {
+  return {
+    prNumber: 1,
+    prUrl: "https://github.com/o/r/pull/1",
+    reviewState: "none",
+    checksState: "green",
+    unmetCriteria: [],
+    priorStrikes: 0,
+    lastActivityAt: new Date(0).toISOString(),
+    headSha: "sha1",
+    autoMergeArmed: false,
+    ...over,
+  };
+}
+
+test("W1-T473 acceptance 1 — two PRs sharing the SAME task+head key can never both invoke postReview concurrently: only the first claims the lane, the second stands down", async () => {
+  const dir = tmpDir();
+  try {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    const started: number[] = [];
+    const deps: SweepDeps = {
+      arm: () => {},
+      close: () => {},
+      dispatchFix: () => {},
+      escalate: () => {},
+      // A slow, "genuinely running" review (like a real reviewer-worker spawn)
+      // — long enough that a broken implementation letting BOTH PRs through
+      // would have both calls overlapping in time, not just both eventually
+      // firing one after another.
+      postReview: async (p) => {
+        started.push(p.prNumber);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      },
+      ledgerPath,
+      runId: "SWEEP-MUTEX",
+      now: () => 0,
+    };
+
+    // Two DISTINCT PRs — different pr numbers/URLs, same task id AND head sha.
+    const a = greenPrAwaitingReview({ prNumber: 11, prUrl: "url/11", taskId: "W1-DUP", headSha: "shaDUP" });
+    const b = greenPrAwaitingReview({ prNumber: 12, prUrl: "url/12", taskId: "W1-DUP", headSha: "shaDUP" });
+
+    const summary = await runSweep([a, b], deps, DEFAULT_SWEEP_POLICY);
+
+    assert.deepEqual(started, [11], "only the PR that claimed the key first ever reaches postReview — the duplicate never races it");
+
+    const aAction = summary.actions.find((act) => act.prNumber === 11);
+    const bAction = summary.actions.find((act) => act.prNumber === 12);
+    assert.equal(aAction?.acted, true, "the claimant's review still runs normally");
+    assert.equal(bAction?.acted, false, "the duplicate stands down rather than crashing or silently double-posting");
+
+    const disposed = readLedgerLines(ledgerPath).filter((l) => l.step === "sweep.disposed");
+    const dupLine = disposed.find((l) => l.pr_number === 12);
+    assert.equal(dupLine?.acted, false);
+    assert.match(String(dupLine?.stand_down_reason ?? ""), /already claimed this pass/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
