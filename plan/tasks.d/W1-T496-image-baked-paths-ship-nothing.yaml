@@ -1,0 +1,172 @@
+- id: W1-T496
+  title: "a merged change to an image-baked path ships nothing and every diagnostic still reads green — the running image is 124 commits behind, its build sha is recorded in two places inside the container, and no consumer publishes or compares it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  rationale: "MEASURED ON THE AZURE HOST, 2026-08-14, ALL DERIVED UNLESS MARKED. The mini keeps a
+    separate image and none of this is verifiable from there.
+
+    (1) **THE RUNNING CONTAINER IS ON AN OLD ENTRYPOINT, AND THE SYMPTOM READS AS SUCCESS.**
+    `docker exec remudero-daemon grep -c 'DAEMON_EXIT_STALE\\|exit 75' /usr/local/bin/rmd-entrypoint`
+    returns **0**. POSITIVE CONTROL on the same file and tool: `rmd-entrypoint` matches **2** and
+    `RMD_RESTART_THROTTLE_S` matches **2**, so the file is readable and carries the PRE-W1-T490
+    throttle — the absence is real, not a bad query. The daemon BINARY is current (it resolves from
+    the bind-mounted checkout), so `daemonExitCode` emits 75 correctly and `exited 75` appears in the
+    log. The entrypoint that must RECOGNISE 75 ships in the image, does not, and falls through to the
+    generic sleep-and-exit — so docker counts the retry and the log line looks like the fix working.
+
+    (2) **THE IMAGE IS 124 COMMITS BEHIND, 4 OF THEM TOUCHING `deploy/`.** Running image
+    `sha256:e03b51be…`, Created **2026-08-12T23:09:45Z**; `origin/main` at filing `0a1179a`. The four:
+      `5269128` (#1693) `deploy/host-update.sh` +71/-2   — HOST script, run from the checkout: CURRENT
+      `bb7fedd` (#1706) `deploy/host-update.sh` +25/-6   — same: CURRENT
+      `0dce882` (#1708) `deploy/Dockerfile` +22/-2       — BAKED: **NOT RUNNING**
+      `feeebd2` (#1825) `deploy/entrypoint.sh` +105/-26  — BAKED: **NOT RUNNING**
+
+    (3) **#1708 IS THE PROOF THAT THIS IS NOT A ONE-OFF, AND IT HAS BEEN FAILING FOR OVER A DAY.**
+    That commit baked `jq` specifically to fix what its own diff calls '14 failures of
+    `jq: command not found`'. FALSIFIABLE PREDICTION, RUN: `docker exec remudero-daemon command -v jq`
+    reports **ABSENT**; control, same shell: `git` and `node` both resolve. Every container test run
+    on this host still carries **13 `ci-gate` failures** for exactly that reason. So at least TWO
+    merged fixes are inert, and the older one was silently mis-attributed to 'the image lacks jq'
+    rather than 'a merged fix has not shipped'.
+
+    (4) **THE BUILD IS DOCUMENTED, IN-REPO, AND DELIBERATELY MANUAL — THE PREMISE THAT NOTHING BUILDS
+    THE IMAGE IS FALSE, AND ONLY A POSITIVE CONTROL CAUGHT IT.** `git grep 'docker build'` really does
+    return only a `docker builder prune` and comments — but `.github/workflows/acr-build.yml` builds
+    via `az acr build`, which that query cannot see. Its header states the trigger and the reason:
+    `workflow_dispatch` ONLY, 'not `push`, not `schedule`', because 'an image build on every merge
+    would be pure waste; the operator triggers this from the Actions tab'. **19 runs, every one
+    `workflow_dispatch` by `cao825`; the most recent 2026-08-12T23:07:47Z at `a25b3054`** — which is
+    exactly the running image's recorded revision, two minutes before its Created stamp. **SO THE
+    MANUAL STEP IS A DESIGN DECISION, NOT AN OVERSIGHT, AND THIS TASK MUST NOT UNDO IT.**
+
+    (5) **THE THIRD SHA ALREADY EXISTS INSIDE THE CONTAINER, IN TWO FORMS, AND NOTHING PUBLISHES IT.**
+    `deploy/Dockerfile` writes both `LABEL org.opencontainers.image.revision` and
+    `/etc/rmd-build-sha` (0444). MEASURED LIVE: `docker exec remudero-daemon cat /etc/rmd-build-sha`
+    returns `a25b305491a113d94b0cb2d8b9aa6bf730c2a23b` against `origin/main` `0a1179a6…`. **THE
+    COMPARISON IS ONE `docker exec cat` AND ONE `git rev-parse` AWAY AND NOBODY TAKES IT.**
+    `deploy/verify-image.sh` ALREADY reads the label (**13** `BUILD_SHA` references, the highest of
+    any file) — the reader exists; it is a manual verifier, not a published signal.
+
+    (6) **AND THE TWO SHAS THE BEAT DOES PUBLISH CANNOT SEE THIS, BY CONSTRUCTION.**
+    `scripts/fleet-heartbeat.sh` emits `daemon_boot_head_sha` (parsed from the boot ledger line) and
+    `install_head_sha` (`git -C \"$INSTALL_DIR\" rev-parse --short HEAD`). **BOTH READ THE MOUNTED
+    CHECKOUT.** Its `build[_-]sha|BUILD_SHA` count is **0**; POSITIVE CONTROL on the same file and
+    query, `restart_count` matches **3**. W1-T494 files the adjacent case where those two agreed while
+    both were stale — THIS IS A GENUINELY DIFFERENT MEASUREMENT, not a third copy of the same one."
+  design: "(0) **THE BOUNDARY, WHICH IS THE HALF NOBODY CAN CURRENTLY DERIVE FROM A DIFF.** The
+    container mounts `/home/craigoleyagent/rmd-state2 -> /home/node/Remudero` and the entrypoint
+    `cd`s to `$HOME/Remudero/remudero`, so the daemon runs from the MOUNT while its own boot script
+    runs from the IMAGE. MEASURED:
+      SHIPS ON MERGE (mount)     : `src/`, `test/`, `plan/`, `scripts/`, `bin/`, and `deploy/*.sh`
+                                   AS FILES READ FROM THE CHECKOUT (e.g. `host-update.sh`,
+                                   `verify-image.sh`, both run by the operator on the host)
+      NEEDS AN IMAGE REBUILD     : `deploy/entrypoint.sh` AS THE EXECUTED ENTRYPOINT
+                                   (`COPY deploy/entrypoint.sh /usr/local/bin/rmd-entrypoint`, and
+                                   `ENTRYPOINT [\"/usr/bin/tini\",\"--\",\"/usr/local/bin/rmd-entrypoint\"]`),
+                                   and `deploy/Dockerfile` — every apt binary (`jq`, `tini`,
+                                   `bubblewrap`, `socat`), the node version, the `/app` snapshot
+    **`node_modules` IS THE EDGE AND IT RESOLVES TO THE MOUNT.** `stat -c %i` reads inode **335487**
+    for BOTH `/home/craigoleyagent/rmd-state2/remudero/node_modules` and the container's
+    `/home/node/Remudero/remudero/node_modules` — the same object. `/app` carries its OWN
+    `node_modules` which the Dockerfile's own comment says the entrypoint 'NEVER FALLS BACK TO'. So a
+    package.json/lockfile change SHIPS VIA THE MOUNT through `ensureInstallFresh`, and needs no
+    rebuild — but an apt-level binary does. **THAT ROW IS THE ONE PEOPLE GET WRONG**, because both
+    look like 'a dependency'.
+    **THIS TABLE BELONGS IN `CLAUDE.md`.** MEASURED: it has **0** matches for
+    `bind-mount|mounted checkout|image rebuild|baked`; control on the same file, `node_modules`
+    matches **11**. Nothing in the repo tells an author which half their diff lands in.
+
+    (i) **THE OPTIONS. ARGUE AND CHOOSE; DO NOT BUILD MORE THAN ONE MECHANISM.**
+      (a) **PUBLISH THE IMAGE BUILD SHA IN THE BEAT, BESIDE THE TWO THAT EXIST.** One field read from
+          `/etc/rmd-build-sha` (present, 0444, already populated) or the label. Cost: it is a THIRD
+          sha in a beat that already publishes two, and a reader must be told which of the three
+          answers which question — which is precisely why (0)'s table is part of this task rather
+          than a separate one. Degrade to ABSENT rather than a literal `unknown`, matching the
+          `restart_count` precedent (W1-T483) where a bare 0 read as 'no restarts left'.
+      (b) **DOCUMENT ONLY — the table plus the build command in `CLAUDE.md`, no code.** Cheapest, and
+          this repo has measured that a merged change to a baked path is indistinguishable from a
+          shipped one BY READING ALONE. Cost: it is UNENFORCED PROSE, which CLAUDE.md's own header
+          says binds only because you read it — and the failure it prevents has now occurred twice.
+      (c) **FAIL THE BUILD-SHA COMPARISON IN THE WATCHER.** `fleet-heartbeat-watch.yml` already
+          alarms on published fields. Cost: the image is EXPECTED to lag — a build is deliberately
+          not per-merge — so a bare 'image != main' alarm would be red almost always and would train
+          the operator to ignore it. Any alarm must key on 'a `deploy/` commit merged since the
+          image sha', not on distance.
+    **THE RECOMMENDATION IS (a) PLUS (0)'s TABLE**, and the argument is the rate: this is the SECOND
+    inert merge in two days (#1708, #1825) and the fourth reads-like-success failure measured today.
+    A field costs one line in a script that already publishes two shas; the operator then sees the
+    divergence without shelling in.
+
+    (ii) **WHAT MUST NOT BE BUILT.**
+      - **NOTHING THAT CHANGES THE BIND-MOUNT ARCHITECTURE.** Mounting the checkout is WHY `src/`
+        fixes ship instantly, and it is not the defect.
+      - **NO AUTOMATIC BUILD-ON-MERGE.** `acr-build.yml` documents the refusal and the reason; tens
+        of PRs a day makes per-merge builds waste. If the cadence is wrong that is its own task.
+      - **NO SECOND ALARM MECHANISM.** #1798's beat is live and independent; add a field to it.
+      - **NOTHING THAT REMOVES OR WEAKENS `verify-image.sh`'s existing label read** — it is the
+        working reader this task publishes FROM.
+      - **AND DO NOT RE-DERIVE THE BUILD OWNER**: it is `.github/workflows/acr-build.yml`,
+        `workflow_dispatch`, operator-triggered. That question is answered.
+
+    (iii) **THE DOCUMENTATION GAP WORTH RECORDING SEPARATELY, NOT FIXED HERE.**
+    `deploy/host-update.sh` is 41,890 bytes with 182 comment lines and is the operator-facing deploy
+    script. It mentions `az acr login` only for PULLING and **never names `acr-build.yml` or any
+    build step at all** — so the script an operator runs to update the fleet does not tell them the
+    image half exists. Naming it; not scoping it in.
+
+    (iv) NOT IN SCOPE: the build CADENCE, the `enforce_admins` setting, W1-T494's dirty-tree pin, and
+    the 13 `ci-gate` jq failures themselves (they clear when an image carrying #1708 is published)."
+  acceptance:
+    - claim: "the image's own build sha is published where an off-host reader can see it without shelling into the container"
+      proof: "unit test: test/fleet-heartbeat-image-sha.test.ts"
+    - claim: "the published image sha is distinguishable from the two checkout shas the beat already emits"
+      proof: "unit test: test/fleet-heartbeat-image-sha.test.ts"
+    - claim: "an unreadable or unlabelled image degrades to absent rather than to a literal that reads as healthy"
+      proof: "unit test: test/fleet-heartbeat-image-sha.test.ts"
+    - claim: "the mount-versus-rebuild boundary is written down so an author can tell which half a diff lands in"
+      proof: "unit test: test/fleet-heartbeat-image-sha.test.ts"
+  origin: recon#image-baked-paths-ship-nothing-2026-08-14
+  plan_refs: ["W1-T483", "W1-T490", "W1-T494"]
+  files: [scripts/fleet-heartbeat.sh, test/fleet-heartbeat-image-sha.test.ts, CLAUDE.md]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT. `files:` SPANS THREE SUBSYSTEMS — `scripts/`, `test/` and a
+    root doc — and `sizingViolation` (`src/lib/task-linter.ts`) blocks at >=2 below that band. The
+    band is Rule 19's SPAN, not blast radius; the blast radius is one published field and one table.
+    **`files:` WAS DERIVED BY INVOCATION COUNT, NOT PROSE MENTION**, measured at `0a1179a`:
+    `scripts/fleet-heartbeat.sh` carries `head_sha` **3** and `install_head_sha` **3** while its
+    `build[_-]sha|BUILD_SHA` count is **0** — it is the publisher and it has no build-sha concept, so
+    it is where the field goes. `CLAUDE.md` scores **0** on
+    `bind-mount|mounted checkout|image rebuild|baked` against a control of **11** for `node_modules`,
+    so the table genuinely does not exist there.
+    **`deploy/verify-image.sh` IS DELIBERATELY NOT DECLARED** even though it scores **13** on
+    `BUILD_SHA` — the HIGHEST of any file. It is the existing READER and this task publishes FROM its
+    idiom rather than changing it; declaring a path the implementer should not touch would fail
+    `inverseScopeUntouchedFiles` (`src/lib/review.ts`) exactly as an undeclared one fails
+    `scopeViolationFiles`. `.github/workflows/fleet-heartbeat-watch.yml` is likewise NOT declared:
+    option (c) is argued and NOT recommended, and a declared-but-untouched workflow would fail the
+    same check. `src/run-task.ts` is NOT declared and must not be — nothing here touches it, and every
+    task naming it serialises against every other that does.
+    **THIS SHARD'S OWN PATH IS DELIBERATELY ABSENT FROM `files:`** — adding it converts the
+    `proof-scope` warnings into a HARD `rule15-filing` violation.
+    **THE ACCEPTANCE PROOFS ARE PURE-PATH `unit test:` FORMS NAMING ONE FILE EACH, AND THAT IS
+    DELIBERATE.** A shard whose proofs all point at its own yaml is self-referential and caps its
+    implementation at `proof_exec: 0/N`; a pure path lint-passes today and executes the whole file
+    once the implementation creates it. The file is NEW, matching the shape W1-T494 already uses
+    (`test/fleet-heartbeat-stale-pin.test.ts`), so the fourth criterion's CLAUDE.md claim is asserted
+    by that suite reading the doc — which is how `test/docs-claims.test.ts` already works — rather
+    than by declaring a second test file this task would not otherwise touch.
+    **OVERLAP, NAMED RATHER THAN DISCOVERED AT DISPATCH:** W1-T494 declares
+    `scripts/fleet-heartbeat.sh` too, so `overlappingPaths` (`src/lib/dispatch-overlap.ts`) will
+    serialise these two. That is correct — both add a field to the same publisher and a concurrent
+    pair would conflict in the same emit block — but whichever lands second must re-read the file
+    rather than assume the emit list it was filed against.
+    EVERY NUMBER HERE IS AZURE-ONLY AND DATED 2026-08-14: the 124-commit gap, the 4 `deploy/`
+    commits, `a25b3054` vs `0a1179a`, the jq absence, the 19 `acr-build` runs and inode 335487.
+    RE-DERIVE BEFORE BUILDING — a single `acr-build.yml` dispatch closes the gap and changes every
+    sha above, though it does not change the boundary or the missing field."
