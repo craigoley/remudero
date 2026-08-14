@@ -1,0 +1,119 @@
+- id: W1-T475
+  title: "the auto-triage throttle is keyed to a number that answers a different question — `depth` counts tasks that CANNOT run, so a queue of purely colliding work triages at the FAST end while a dependency-blocked queue throttles to 60 minutes, and the gate it feeds already fires with every lane full"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: "TWO INDEPENDENT DEFECTS IN ONE RUNG: THE THROTTLE'S INPUT, AND THE GATE'S PREDICATE.
+    Both re-derived at 556ef229; all of this is a TREE FACT and host-independent.
+    (1) THE INPUT. `src/lib/daemon.ts` builds the census as, verbatim:
+      depth: idleTally.blocked.count + idleTally[\"unmet-deps\"].count
+    That is THE RECOVERABLE BACKLOG OF TASKS THAT CANNOT RUN — not `runnable-soon`, and emphatically
+    not `runnable AND disjoint`. `effectiveIntervalMinutes` (`src/lib/auto-triage.ts`) then LENGTHENS
+    toward `maxIntervalMinutes` as that number rises, on the stated rationale `queue full — no rush`.
+    CONSTANTS READ FROM `plan/policy.yaml`, NOT INFERRED FROM REASON STRINGS: minIntervalMinutes 15,
+    maxIntervalMinutes 60, depthFloor 0, depthCeiling 10, maxPerDay 24.
+    SO THE THROTTLE IS WRONG IN BOTH DIRECTIONS. A queue of PURELY COLLIDING-BUT-ELIGIBLE work
+    contributes NOTHING to `depth`, reads 0, and triages every 15 MINUTES — THE FAST END — at exactly
+    the moment lanes sit empty. A queue merely blocked on dependencies reads HIGH and throttles to 60
+    with no capacity problem at all. THE INPUT IS UNCORRELATED WITH CAPACITY IN EITHER DIRECTION.
+    MEASURED NOW: blocked 4, unmet-deps 3 => **depth 7 => 46.5 minutes**, against **13 eligible
+    candidates** of which only 3-5 are mutually disjoint.
+    AND THE STRUCTURAL REASON IT CANNOT SEE COLLISIONS. `onFiltered` (`src/lib/drain.ts`) records
+    EXACTLY FIVE buckets — `already-merged`, `continued-this-pass`, `verify-not-auto`, `blocked`,
+    `unmet-deps` (positive control: 5 `onFiltered` call sites, 0 matching serial/overlap) — AND THERE
+    IS NO SIXTH BUCKET FOR A FILE-OVERLAP DEFERRAL. A collision emits `dispatch.serialized`, a
+    SEPARATE ledger step, and `onFiltered` fires inside `isDispatchEligible` DURING
+    `runnableCandidates` — BEFORE `partitionByFileOverlap` RUNS. A task the partitioner defers is
+    never filtered and appears in no bucket at all. The blindness is an ORDERING fact, not an
+    omission anyone can patch by adding a count."
+  design: "(i) THE SECOND DEFECT IS INDEPENDENT AND COUNTER-INTUITIVE, SO IT IS RECORDED WITH ITS
+    DERIVATION. The idle branch is `if (dispatchSet.length === 0)` — THIS TICK ADMITTED NOTHING — NOT
+    `the fleet is quiet`. AND IT FIRES WITH EVERY LANE FULL: at `budget <= 0` the daemon logs
+    `dispatch.wip_deferred` and DOES NOT `continue`; `runnableCandidates(plan, isMerged, 0, opts)`
+    breaks immediately on `out.length >= limit` (0 >= 0) and returns `[]`; so `partition.dispatch` is
+    empty, `dispatchSet` is empty, and the idle branch is ENTERED WITH THREE WORKERS RUNNING.
+    **THE CONTENTION PROTECTION THIS GATE IS ASSUMED TO PROVIDE DOES NOT EXIST TODAY.** The ONLY case
+    it skips is PARTIAL FILL — some lanes busy, some free — which is precisely when spare capacity
+    exists. Anyone reasoning about `loosening the idle gate` should start from that, not from
+    `currently it only fires when nothing is happening`.
+    (ii) WHAT `depth` SHOULD COUNT, IF ANYTHING — ARGUE BOTH, DO NOT PICK.
+      FOR A CORRECTED INPUT: the rationale `queue full — no rush` is defensible with the RIGHT number.
+      A count of DISPATCHABLE-AND-DISJOINT candidates would actually say `there is runnable work, spend
+      the tick on it`, which is what the curve was reaching for. The curve, the constants and the
+      policy rows all survive; only the expression changes.
+      AGAINST ASKING AT ALL: if the real constraint is SPEND, `maxPerDay` already bounds it exactly
+      and an interval curve is a second, weaker bound on the same thing — two governors on one
+      quantity, one of them keyed to a proxy. Deleting the curve and keeping the cap is strictly
+      simpler and loses nothing measurable.
+    (iii) THE INPUT AND THE GATE ARE SEPARABLE, AND BOTH ARE ALREADY IN SCOPE WITH NO NEW PLUMBING.
+    `depth` can be corrected while the idle branch stands; or the branch can key on
+    `dispatchSet.length < budget` or `partition.serialized.length > 0`. `budget` is computed just
+    above `runnableCandidates`, and `partition.serialized` is ALREADY ITERATED to emit
+    `dispatch.serialized` before the idle branch begins. A DEFERRAL IS THE STRONGEST AVAILABLE SIGNAL:
+    it means capacity AND work both existed and the partitioner refused the pairing.
+    (iv) WHAT LOOSENING COSTS, AND WHY THE CAP BECOMES LOAD-BEARING. `maxPerDay: 24` x $1.07 mean is
+    about **$26/day against `dailyCostCeilingUsd: 500`** — roughly 5%, comfortably sized. BUT THE
+    BUDGET IS SHARED, and the path is traced rather than assumed: `deriveDayCostUsd` ->
+    `deriveWindowCostUsd` (`src/lib/sweep.ts`) buckets EVERY ledger line by `run_id` with NO step
+    filter, then per run takes the `verdict` line's cost OR ANY line carrying a numeric `cost_usd`.
+    Triage runs carry their own `run_id` (`TRIAGE-fb-...`) and a `cost_usd` on `triage.synthesized`,
+    so THEY ARE COUNTED, through that fallback arm. Triage spend therefore feeds the governor that
+    DEFERS NEW DISPATCH. The cap has bound only 12 times ever because the IDLE GATE stopped the rung
+    long before the cap could; LOOSENING EITHER SIDE MAKES `maxPerDay` LOAD-BEARING FOR THE FIRST
+    TIME, and it is sized for that role but has never been tested in it.
+    (v) NOT IN SCOPE. This shard records the observation. Whether the fix is the input, the gate,
+    both, or deleting the curve is the operator's ruling and a later shard's."
+  acceptance:
+    - claim: "the throttle's input distinguishes tasks that cannot run from capacity that is free"
+      proof: "unit test: test/auto-triage-policy-seam.test.ts"
+    - claim: "a tick that admitted nothing because lanes were full is distinguishable from an idle one"
+      proof: "unit test: test/auto-triage-rung.test.ts"
+    - claim: "a file-overlap deferral is visible to whatever decides the triage cadence"
+      proof: "unit test: test/auto-triage-rung.test.ts"
+  origin: recon#triage-throttle-wrong-depth-2026-08-13
+  plan_refs: ["W1-T469", "W1-T471"]
+  files: [src/lib/daemon.ts, src/lib/auto-triage.ts, test/auto-triage-rung.test.ts, test/auto-triage-policy-seam.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `src/lib/daemon.ts` and
+    `src/lib/auto-triage.ts` plus their suites; `sizingViolation` (`src/lib/task-linter.ts`) refuses
+    `medium` at two subsystems. `verify: human` — design (ii) offers two incompatible directions and
+    this shard picks neither.
+    HOW THIS DIFFERS FROM W1-T469 (#1759), WHICH IT MUST NOT BE READ AS. W1-T469 files the
+    INVISIBILITY: the rung sits inside the idle branch, so `if (!i.idle)` is unreachable and a busy
+    tick LOGS NOTHING. THIS SHARD IS ABOUT THE GATE'S PREDICATE AND THE THROTTLE'S INPUT — that the
+    predicate fires with lanes full, and that the cadence is keyed to a number uncorrelated with
+    capacity. W1-T469 could be fixed in full and both defects here would remain.
+    `files:` IS DELIBERATELY TIGHT, BECAUSE `partitionByFileOverlap` BLOCKS ON DECLARED PATHS and
+    every extra entry serialises this task against others naming it. Derived BY INVOCATION COUNT at
+    556ef229: `test/auto-triage-rung.test.ts` 11 invocations / 12 mentions, and
+    `test/auto-triage-policy-seam.test.ts` 5 / 6 (the curve-and-policy seam, which is the shape a
+    corrected input changes). EXCLUDED with counts so the choice is auditable:
+    `test/auto-triage-daily-cap.test.ts` (2 invocations, asserts the cap not the curve),
+    `test/auto-triage-wiring.test.ts` (0) and `test/ops-alert-cadence.test.ts` (0). POSITIVE CONTROL:
+    12 test files mention `autoTriage`/`auto-triage` at all, so the shortlist is a filter and not an
+    empty query. THIS SHARD'S OWN PATH IS ABSENT FROM `files:` DELIBERATELY.
+    ADJACENT MEASUREMENT, RECORDED SO IT IS NOT RE-RUN, AND NOT ABSORBED: triage-minted work is MORE
+    SPREAD than the dispatchable head but MORE COLLISION-PRONE than the plan average — all tasks 42%
+    declare `src/run-task.ts` / 54% any hot file; feedback-origin 54% / 56%; triage-minted-and-
+    surviving 53% / 63%; against the current dispatchable head's ~80%. ROUGHLY ONE TRIAGE IN TWO
+    YIELDS WORK THAT COULD FILL A FREE LANE — partial relief, not decisive. That bears on whether
+    loosening the gate helps, and belongs to the operator's ruling, not to this defect.
+    AND THE HAZARD FOUND ALONGSIDE, MEASURED RATHER THAN ASSERTED. `overlappingPaths`
+    (`src/lib/dispatch-overlap.ts`) has THREE arms, not one: both-empty returns `[\"*\"]`, and a
+    SINGLE empty side returns THE OTHER SIDE'S ENTIRE LIST — so **A TASK WITH AN EMPTY `files:` LIST
+    OVERLAPS EVERY OTHER CANDIDATE**, exactly as the module's own `FAIL-CLOSED ON UNDECLARED SCOPE`
+    doc says. VERIFIED EMPIRICALLY against the real partitioner: `empty + declared` admits 1 and
+    defers 1, while `declared + disjoint` admits 2. POPULATION: 80 of 499 tasks declare an empty or
+    absent `files:`, but only 10 are UNMERGED, only 1 is triage-minted (W1-T286), and only TWO are
+    unmerged AND `verify: auto` so as to reach the partitioner at all — W3-T3 (`status: blocked`, so
+    never a candidate) and **W1-T49 (`queued`, `auto`) — the single live exposure today.** The general
+    hazard is real; the current blast radius is one task.
+    PROVENANCE. Everything above is a TREE FACT at 556ef229 — `plan/policy.yaml`, `daemon.ts`,
+    `drain.ts`, `auto-triage.ts`, `dispatch-overlap.ts`, `sweep.ts` and the plan tree — and is
+    host-independent. The $1.07 triage mean is THE MINI's ledger and is not a claim about the Azure
+    fleet; the two hosts keep separate ledgers with no SSH route between them."
