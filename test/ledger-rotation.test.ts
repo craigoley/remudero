@@ -18,6 +18,7 @@ import type { Task } from "../src/lib/plan.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
 import { isRatifiedInLedger } from "../src/lib/inbox.js";
 import { priorEscalatedAlertIds } from "../src/lib/ops.js";
+import { alreadyFiledForSignature } from "../src/lib/coverage-improvement.js";
 
 // ── W1-T209: "the ledger grows unbounded with no archival, and any rotation that hides a
 // decision-relevant line silently zeroes the dispatch breaker it also backs" (RECON R-9,
@@ -325,6 +326,16 @@ test("rotateLedger: a malformed (non-JSON) line is archived, never retained live
 
 function noiseBlock(count: number, offset = 0): string {
   return Array.from({ length: count }, (_, i) => noiseLine(offset + i)).join("\n") + "\n";
+}
+
+/** Raw (unparsed) trimmed, non-empty lines of a ledger file — the shape
+ *  `alreadyFiledForSignature` consumes (a `resolveLedgerUnion` match set is raw text, never
+ *  pre-parsed objects), matching the discipline every FALSIFIER below already applies. */
+function rawLines(path: string): string[] {
+  return readFileSync(path, "utf8")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
 }
 
 /** The counterfactual ledger content: `original` with every line whose `step` is
@@ -664,6 +675,43 @@ test("FALSIFIER — fix-strike history: dropping a fix.review line hides that a 
     assert.equal(result.rotated, true);
     const rotHistory = deriveStrikeHistory(readLedgerLines(rotatedPath), taskId);
     assert.equal(rotHistory[0]?.ciGreen, true, "the REAL rotation retains fix.review — history still complete");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("FALSIFIER — W1-T470 coverage-improvement dedupe: dropping the coverage.improvement.filed line makes an unchanged debt signature look un-filed; a real rotation never does", () => {
+  const dir = tmpDir();
+  try {
+    const signature = "src/run-task.ts";
+    const original =
+      JSON.stringify({ run_id: "r0", task_id: "coverage-improve", step: "coverage.improvement.filed", signature }) +
+      "\n" +
+      noiseBlock(300);
+
+    const groundTruthPath = join(dir, "ground-truth.ndjson");
+    writeFileSync(groundTruthPath, original);
+    assert.equal(alreadyFiledForSignature(rawLines(groundTruthPath), signature), true, "sanity: recorded as already filed");
+
+    const droppedPath = join(dir, "line-dropped.ndjson");
+    writeFileSync(droppedPath, withoutStep(original, "coverage.improvement.filed"));
+    assert.equal(
+      alreadyFiledForSignature(rawLines(droppedPath), signature),
+      false,
+      "FALSIFIER: dropping coverage.improvement.filed makes an unchanged debt signature look un-filed — injectCoverageImprovementTask would refile identical content, the unbounded loop design clause (4) exists to prevent",
+    );
+
+    const rotatedPath = join(dir, "real-rotation.ndjson");
+    writeFileSync(rotatedPath, original);
+    const ceiling = 2000;
+    assert.ok(ledgerExceedsRotationCeiling(rotatedPath, ceiling));
+    const result = rotateLedger(rotatedPath, { ceilingBytes: ceiling });
+    assert.equal(result.rotated, true);
+    assert.equal(
+      alreadyFiledForSignature(rawLines(rotatedPath), signature),
+      true,
+      "the REAL rotation retains coverage.improvement.filed — still reads as already filed",
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
