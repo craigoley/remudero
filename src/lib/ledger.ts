@@ -479,6 +479,14 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // `blocked-fixable` re-arm), not display-only, so rotation must retain it the moment that
   // consumer exists (the #977/W1-T240 class this task's own rationale names).
   "operator_feedback",
+  // W1-T470: `injectCoverageImprovementTask`'s (src/lib/coverage-improvement.ts) own dedup
+  // marker — read back via a ledger UNION (never the live file alone; the escalation precedent
+  // this shape is modeled on used a rotation-capped one-file read that eventually forgot its own
+  // marker and refiled identical content forever) to decide whether a run's exact debt-file
+  // signature was already filed as a plan/feedback/ entry. A rotation dropping this line would
+  // reproduce that exact bug one module later: the next red-band CI run reads "not yet filed"
+  // and re-files the same debt profile, the unbounded-refile loop this dedupe exists to prevent.
+  "coverage.improvement.filed",
 ]);
 
 /** Steps matched by PREFIX rather than enumerated — currently only `deploy.*` (`deploy.skip`,

@@ -335,6 +335,7 @@ import { appendLedger, isSpawnInfraBlockedError, LEDGER_COST_TAG_INFRA, matchesR
 import { gunzipSync } from "node:zlib";
 import { ledgerRotationEntries, resolveLedgerUnion, rotationStampIso, type LedgerCorpusEntry } from "./lib/ledger-grep.js";
 import { escalateRepeatingRules, ruleEfficacyReport } from "./lib/rule-efficacy.js";
+import { injectCoverageImprovementTask } from "./lib/coverage-improvement.js";
 import { mineVerdictRows, verdictCalibrationReport } from "./lib/verdict-calibration.js";
 import { mineAutonomyLedgerLines, parseTrailerMerges, zeroTouchMergeRate } from "./lib/autonomy.js";
 import {
@@ -8172,6 +8173,102 @@ export function ruleEfficacyCommand(rest: string[], opts: { stateDir?: string } 
   }
 
   return 0;
+}
+
+/**
+ * `rmd coverage-improve [--lcov <path>]` — TIER TWO of the absolute-threshold coverage gate
+ * (W1-T470): when this run's branch coverage sits in the 85-90 pass-with-debt band, name the
+ * `src/` files that own the most uncovered branches and file ONE `plan/feedback/` entry about
+ * them (never a shard written directly into `plan/tasks.d/` — no such minter exists — and never
+ * one entry per file). All the decision logic lives in `injectCoverageImprovementTask`
+ * (`src/lib/coverage-improvement.ts`); this command is the `rmd` verb wiring — arg parsing, lcov
+ * I/O, state-dir/ledger-path resolution — that the coverage CI job needs to reach it (a job
+ * cannot invoke a `src/lib/` module directly without either a bare `tsx -e` incantation or a
+ * second entry point). INERT until wired into `.github/workflows/ci.yml`'s coverage job, which
+ * is a deliberately SEPARATE PR (Rule 25 / `detectInstrumentEntanglement`, `src/lib/review.ts`:
+ * mixing an instrument path like a workflow file with a product path like this one entangles).
+ * Defaults `--lcov` to `coverage/lcov.info` under the resolved repo root, matching where the
+ * coverage job's own "Test with coverage" step already writes it.
+ */
+export function coverageImproveCommand(
+  rest: string[],
+  opts: {
+    root?: string;
+    stateDir?: string;
+    ledgerPath?: string;
+    runId?: string;
+    /** Injectable ONLY so BOTH arms of the state-dir fallback below are reachable from a test —
+     *  production always takes this module's own `loadConfig`. Appended LAST so no positional
+     *  caller shifts. Without it the `catch` arm cannot be exercised: `loadConfig` reads the real
+     *  checkout, so no test can make it throw, and the arm would ship unrun. */
+    loadConfig?: () => { root: string };
+  } = {},
+): number {
+  const badArg = unknownArgError("coverage-improve", rest, ["--lcov"], []);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const lcovFlagIdx = rest.indexOf("--lcov");
+  const lcovArg = lcovFlagIdx >= 0 ? rest[lcovFlagIdx + 1] : undefined;
+  if (lcovFlagIdx >= 0 && lcovArg === undefined) {
+    console.error("rmd coverage-improve: --lcov requires a value\n" + USAGE);
+    return 2;
+  }
+
+  const root = opts.root ?? repoRoot;
+  const lcovPath = lcovArg ? resolve(root, lcovArg) : join(root, "coverage", "lcov.info");
+  let lcovText: string;
+  try {
+    lcovText = readFileSync(lcovPath, "utf8");
+  } catch (e) {
+    console.error(`rmd coverage-improve: cannot read lcov report at ${lcovPath} (${(e as Error).message})`);
+    return 1;
+  }
+
+  const resolveConfig = opts.loadConfig ?? loadConfig;
+  const stateDir =
+    opts.stateDir ??
+    (() => {
+      try {
+        return join(resolveConfig().root, "state");
+      } catch {
+        return undefined;
+      }
+    })();
+  if (stateDir === undefined) {
+    console.error("rmd coverage-improve: cannot resolve a state dir — unreadable config");
+    return 1;
+  }
+  const ledgerPath = opts.ledgerPath ?? join(stateDir, "ledger.ndjson");
+  const runId = opts.runId ?? `COVERAGE-IMPROVE-${Date.now()}`;
+
+  const result = injectCoverageImprovementTask({ root, stateDir, ledgerPath, runId, lcovText });
+
+  switch (result.action) {
+    case "healthy":
+      console.log(`rmd coverage-improve: branches ${result.branchesPct.toFixed(2)}% — at or above the healthy tier, nothing to file`);
+      return 0;
+    case "blocking":
+      console.log(
+        `rmd coverage-improve: branches ${result.branchesPct.toFixed(2)}% — below the block tier (tier three, a separate remediation loop, not this verb's job), nothing to file`,
+      );
+      return 0;
+    case "no-debt":
+      console.log(
+        `rmd coverage-improve: branches ${result.branchesPct.toFixed(2)}% is in the pass-with-debt band, but no src/ file carries an uncovered branch — nothing to file`,
+      );
+      return 0;
+    case "skipped-duplicate":
+      console.log(
+        `rmd coverage-improve: branches ${result.branchesPct.toFixed(2)}% — an improvement task for this exact file set is already filed (signature ${result.signature}), skipping`,
+      );
+      return 0;
+    case "filed":
+      console.log(`rmd coverage-improve: branches ${result.branchesPct.toFixed(2)}% — filed ${result.feedbackId} naming ${result.files.length} file(s)`);
+      for (const f of result.files) console.log(`  ${f.file} — ${f.uncoveredBranches} uncovered branch(es)`);
+      return 0;
+  }
 }
 
 /** The `rmd verdict-calibration` git side's only I/O — the same shallow-clone refusal
@@ -18842,6 +18939,11 @@ const COMMANDS: readonly CommandSpec[] = [
       "rmd rule-efficacy [--no-escalate]   # W1-T418: the corpus repeat-incident rate — for each rule in lib/rule-efficacy.ts's signature table, the count of same-class ledger rows strictly AFTER the rule's effective (citing) date, over the ledger UNION (lib/ledger-grep.ts) rather than the live file alone; verdict is PREVENTING (0 since), REPEATING (n since, dates), or UNMEASURABLE (why) — never silently omitted. HOST-SIDE ONLY: the ledger lives on the daemon host, so this is meaningless off-host. A rule at >= 2 post-rule recurrences drafts ONE promote-to-instrument proposal into the ACTIVE-proposal registry via updateProposalRegistry, idempotent by rule id (reruns never duplicate) — the inbox's own tiering owns its fate from there; --no-escalate runs the report only, with zero writes. Otherwise READ-ONLY.",
   },
   {
+    name: "coverage-improve",
+    usage:
+      "rmd coverage-improve [--lcov <path>]   # W1-T470 tier two of the absolute coverage gate: when this run's branch coverage (read from --lcov, default coverage/lcov.info) sits in the 85-90 pass-with-debt band, ranks the src/ files owning the most uncovered branches (a COUNT, never a percentage — computed fresh every run, lib/coverage-improvement.ts) and files ONE plan/feedback/ entry naming them via captureFeedback, never a shard written straight into plan/tasks.d/ (no such minter exists) and never one entry per file. Dedupes against the ledger UNION (lib/ledger-grep.ts, never the live file alone) keyed on the exact set of files currently owning the debt — a run whose top offenders are unchanged from the last filing is skipped; a shifted debt profile files again. >= 90% (healthy) and < 85% (tier three, a separate remediation loop) are both no-ops here. INERT until wired into the coverage CI job's own step, which is a separate PR (Rule 25 keeps this producer's diff free of any .github/workflows/ci.yml or scripts/coverage-ratchet.mjs edit).",
+  },
+  {
     name: "verdict-calibration",
     usage:
       "rmd verdict-calibration   # W1-T424: the correctness join — joins every armed merge's ledgered review verdict (lib/verdict-calibration.ts's mineVerdictRows, over the ledger UNION, never the live file alone) to post-merge git reality, and reports per verdict class (full PASS / keyword floor / degraded arm) the revert rate and follow-up-fix rate over a stated window, each denominator NAMED (n of N armed merges) with an UNMEASURABLE arm for rows whose merge sha or verdict class could not be recovered — never a rate over a silently shrunken denominator. Below a minimum population floor a class prints its count and REFUSES the rate. The attribution window + overlap rule (lib/verdict-calibration.ts's ATTRIBUTION_POLICY) print alongside the figures, so the metric travels with its rule. HOST-SIDE ONLY: the ledger lives on the daemon host, so this is meaningless off-host. READ-ONLY: files nothing, proposes nothing in v1.",
@@ -19409,6 +19511,10 @@ export async function main(
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(ruleEfficacyCommand(rest)) cannot carry a DA hit without forking the process; ruleEfficacyCommand's own logic — arg validation, the signature-table walk, the PREVENTING/REPEATING/UNMEASURABLE render, and the escalation write — is unit-tested in test/rule-efficacy.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/ledger-grep dispatch cases).
   if (cmd === "rule-efficacy") {
     process.exit(ruleEfficacyCommand(rest));
+  }
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(coverageImproveCommand(rest)) cannot carry a DA hit without forking the process; coverageImproveCommand's own logic — arg validation, the lcov read failure, and every injectCoverageImprovementTask action (healthy/blocking/no-debt/skipped-duplicate/filed) — is unit-tested in test/coverage-improvement.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/ledger-grep/rule-efficacy dispatch cases).
+  if (cmd === "coverage-improve") {
+    process.exit(coverageImproveCommand(rest));
   }
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(verdictCalibrationCommand(rest)) cannot carry a DA hit without forking the process; verdictCalibrationCommand's own logic — arg validation, the ledger+git join, the per-class render and the UNMEASURABLE listing — is unit-tested in test/verdict-calibration.test.ts (same irreducible-glue shape as the sibling check-proof/emissions/ledger-grep/rule-efficacy dispatch cases).
   if (cmd === "verdict-calibration") {
