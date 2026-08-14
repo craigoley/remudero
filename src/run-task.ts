@@ -7999,7 +7999,21 @@ export function emissionsCommand(rest: string[], opts: { stateDir?: string } = {
  */
 export const DECLARED_BRANCH_GUARDS: readonly string[] = [
   "main",
-  "heartbeat", // live monitoring transport; parentless root commit force-pushed every ~5 min
+  // ── THE HEARTBEAT TRANSPORTS — ONE BRANCH PER HOST, each a parentless root commit force-pushed
+  // every ~5 min. All three are named by `.github/workflows/fleet-heartbeat-watch.yml` and/or
+  // `scripts/fleet-heartbeat.sh`, so `namedInSource` guards them and each OWES a declaration here.
+  "heartbeat-mini", // the mini's, since its cron moved to RMD_HEARTBEAT_BRANCH=heartbeat-mini
+  "heartbeat-azure", // Azure's — DECLARED LATE: #1798 added it to the watcher without declaring it
+  // here, so `rmd reap-branches` exited 1 naming it. Measured on the live repo before this change:
+  // "1 branch(es) are named in source but MISSING from DECLARED_BRANCH_GUARDS: heartbeat-azure".
+  //
+  // `heartbeat` STAYS, THOUGH NOTHING WRITES OR WATCHES IT ANY MORE. `namedInSource` is
+  // `git grep -l -F` — a SUBSTRING match — and the string "heartbeat" occurs in 18 files under
+  // src/, scripts/, deploy/ and .github/ (re-derived at this commit; an earlier note said 5, which
+  // was an artifact of a `head -5` on the measuring command, not a count). So the grep guards it
+  // permanently no matter what the workflow says, and REMOVING this line would manufacture exactly
+  // the drift alarm the two entries above exist to clear.
+  "heartbeat",
   "feedback-landing", // LANDING_BRANCH — recreated by landFeedback, often absent between landings
   "decisions-landing", // DECISIONS_LANDING_BRANCH
   // Cited by doc comments in drain-lock.ts, inflight-lock.ts, worker.ts and run-task.ts as the
