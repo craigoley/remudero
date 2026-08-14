@@ -11,6 +11,34 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(REPO_ROOT, "deploy", "entrypoint.sh");
 
 /**
+ * `process.env` MINUS every ambient git-identity/config channel — not just `GIT_CONFIG_GLOBAL`
+ * (closed by a prior round of this same fix). Every spawn site below used to spread
+ * `...process.env` verbatim, and `GIT_CONFIG_GLOBAL` is only ONE of several independent channels
+ * git reads config from: `GIT_CONFIG_PARAMETERS` / `GIT_CONFIG_COUNT`+`GIT_CONFIG_KEY_n`+
+ * `GIT_CONFIG_VALUE_n` (git's own env-based config injection — MEASURED ambient, unrelated to
+ * identity, on the box this hardening was written on: `GIT_CONFIG_PARAMETERS=
+ * 'http.proxyAuthMethod=basic'`, proving the leak class is real even where it happens not to carry
+ * `user.*` today), `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL`/`GIT_COMMITTER_NAME`/`GIT_COMMITTER_EMAIL`
+ * (read BEFORE any config file and BEFORE an explicit `git -c user.name=…`, so these override even
+ * `commit()`'s own inline identity below), and `XDG_CONFIG_HOME` (an ADDITIONAL git config source
+ * layered between system and global). Any one of these, ambient on the host running this suite,
+ * can make `deploy/entrypoint.sh`'s "write an identity only if one is not already resolvable"
+ * branch silently skip, or can make a fixture commit carry a different identity than the one it
+ * asked for — exactly the class of review-host-dependent flake the `GIT_CONFIG_GLOBAL` guard closed
+ * for one channel. This closes the rest by SUBTRACTING them from the inherited set rather than
+ * overriding each by name, so a channel nobody has enumerated yet is closed too.
+ */
+function isolatedEnv(): Record<string, string> {
+  const DANGEROUS = /^(?:GIT_CONFIG_(?:PARAMETERS|COUNT|KEY_\d+|VALUE_\d+)|GIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL|DATE)|XDG_CONFIG_HOME|GIT_DIR|GIT_WORK_TREE|GIT_INDEX_FILE)$/;
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v === undefined || DANGEROUS.test(k)) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
+/**
  * `deploy/entrypoint.sh` IS THE BOOT PATH FOR EVERY CONTAINER RUN — it clones, checks out,
  * installs, writes the git identity and the credential helper, then execs. FOUR defects have been
  * found in it BY HAND, each after it shipped:
@@ -61,7 +89,7 @@ function git(cwd: string, args: string[]): string {
   const r = spawnSync("git", args, {
     cwd,
     encoding: "utf8",
-    env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", HOME: cwd, GIT_TERMINAL_PROMPT: "0" },
+    env: { ...isolatedEnv(), GIT_CONFIG_NOSYSTEM: "1", HOME: cwd, GIT_TERMINAL_PROMPT: "0" },
   });
   if (r.status !== 0) throw new Error(`git ${args.join(" ")} failed in ${cwd}: ${r.stderr}`);
   return (r.stdout ?? "").trim();
@@ -72,7 +100,7 @@ function commit(cwd: string, message: string): string {
   spawnSync("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", message], {
     cwd,
     encoding: "utf8",
-    env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", HOME: cwd },
+    env: { ...isolatedEnv(), GIT_CONFIG_NOSYSTEM: "1", HOME: cwd },
   });
   return git(cwd, ["rev-parse", "HEAD"]);
 }
@@ -122,7 +150,7 @@ function boot(
     // spawnSync cannot chdir into it.
     cwd: opts.cwd ?? REPO_ROOT,
     env: {
-      ...process.env,
+      ...isolatedEnv(),
       PATH: `${stubs}:${process.env.PATH ?? ""}`,
       HOME: home,
       RMD_REPO_URL: origin,
@@ -417,7 +445,7 @@ function bootTimed(
     encoding: "utf8",
     cwd: REPO_ROOT,
     env: {
-      ...process.env,
+      ...isolatedEnv(),
       PATH: `${stubs}:${process.env.PATH ?? ""}`,
       HOME: home,
       RMD_REPO_URL: origin,
@@ -529,7 +557,7 @@ function bootSeq(
     encoding: "utf8",
     cwd: REPO_ROOT,
     env: {
-      ...process.env,
+      ...isolatedEnv(),
       PATH: `${stubs}:${process.env.PATH ?? ""}`,
       HOME: home,
       RMD_REPO_URL: origin,
@@ -614,7 +642,7 @@ test("W1-T490: a freshness restart RE-RUNS the fetch/checkout, so the staleness 
     encoding: "utf8",
     cwd: REPO_ROOT,
     env: {
-      ...process.env,
+      ...isolatedEnv(),
       PATH: `${stubs}:${process.env.PATH ?? ""}`,
       HOME: home,
       RMD_REPO_URL: origin,
@@ -768,7 +796,7 @@ function bootSleepArgs(env: Record<string, string>, exitCode: number): { args: s
     encoding: "utf8",
     cwd: REPO_ROOT,
     env: {
-      ...process.env,
+      ...isolatedEnv(),
       PATH: `${stubs}:${process.env.PATH ?? ""}`,
       HOME: home,
       RMD_REPO_URL: makeOrigin(),
