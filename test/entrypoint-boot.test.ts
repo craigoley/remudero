@@ -128,6 +128,20 @@ function boot(
       RMD_REPO_URL: origin,
       RMD_REF: opts.ref ?? "main",
       GIT_CONFIG_NOSYSTEM: "1",
+      // PINNED, NOT MERELY DEFAULTED: an ambient `GIT_CONFIG_GLOBAL` on the host running this suite
+      // (e.g. a review/CI box with its own bot identity already exported for ITS OWN commits) is
+      // inherited by the `...process.env` spread above and would redirect every `git config
+      // --global` write this script makes clean off `home/.gitconfig` and onto that host path — and
+      // because the script only writes an identity when one is NOT already resolvable (see
+      // deploy/entrypoint.sh's "already configured" probe), an ambient identity there makes the
+      // write SILENTLY SKIP rather than error. MEASURED: with `GIT_CONFIG_GLOBAL` pointing at an
+      // already-populated file, exactly 6 of this suite's tests fail — every one that reads
+      // `home/.gitconfig` or asserts the identity/credential-helper content the script was supposed
+      // to write there — while the other 26 pass, because they never look. Same category of leak
+      // `GIT_CONFIG_NOSYSTEM` above already guards against for the SYSTEM scope; this closes it for
+      // the GLOBAL scope so the fixture's git identity resolution depends only on `home`, never on
+      // the invoking host's own git config.
+      GIT_CONFIG_GLOBAL: join(home, ".gitconfig"),
       GIT_TERMINAL_PROMPT: "0",
       ...(opts.env ?? {}),
     },
@@ -409,6 +423,7 @@ function bootTimed(
       RMD_REPO_URL: origin,
       RMD_REF: "main",
       GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: join(home, ".gitconfig"), // see boot()'s comment above — same ambient-leak guard
       GIT_TERMINAL_PROMPT: "0",
       ...env,
     },
@@ -508,6 +523,7 @@ function bootSeq(
       RMD_REPO_URL: origin,
       RMD_REF: "main",
       GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: join(home, ".gitconfig"), // see boot()'s comment above — same ambient-leak guard
       GIT_TERMINAL_PROMPT: "0",
       ...env,
     },
@@ -592,6 +608,7 @@ test("W1-T490: a freshness restart RE-RUNS the fetch/checkout, so the staleness 
       RMD_REPO_URL: origin,
       RMD_REF: "main",
       GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: join(home, ".gitconfig"), // see boot()'s comment above — same ambient-leak guard
       GIT_TERMINAL_PROMPT: "0",
       RMD_RESTART_THROTTLE_S: "1",
     },
@@ -731,16 +748,18 @@ function bootSleepArgs(env: Record<string, string>, exitCode: number): { args: s
   // asked for rather than on how long the test happened to block.
   writeFileSync(join(stubs, "sleep"), `#!/usr/bin/env bash\nprintf '%s\\n' "$1" >> "${rec}/sleep"\nexit 0\n`, { mode: 0o755 });
   chmodSync(join(stubs, "sleep"), 0o755);
+  const home = freshHome();
   const r = spawnSync("bash", [SCRIPT, "rmd-fake", "daemon"], {
     encoding: "utf8",
     cwd: REPO_ROOT,
     env: {
       ...process.env,
       PATH: `${stubs}:${process.env.PATH ?? ""}`,
-      HOME: freshHome(),
+      HOME: home,
       RMD_REPO_URL: makeOrigin(),
       RMD_REF: "main",
       GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: join(home, ".gitconfig"), // see boot()'s comment above — same ambient-leak guard
       GIT_TERMINAL_PROMPT: "0",
       ...env,
     },
