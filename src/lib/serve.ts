@@ -67,6 +67,7 @@ import { buildAddOperatorNoteRoute, buildListOperatorNotesRoute } from "./operat
 import { createLastSeenStore, lastSeenPath, type LastSeenStore } from "./last-seen.js";
 import { buildDaemonHealthRoute, type DaemonHealthDeps } from "./daemon-health.js";
 import { buildAccountUsageRoute, type AccountUsageDeps } from "./account-usage.js";
+import { buildAnalyticsRoute, type AnalyticsRouteDeps } from "./analytics-route.js";
 import { resolveFreshness } from "./console-freshness.js";
 import { readIdleReasons, renderIdleReasonsHtml } from "./idle-reasons-panel.js";
 import { readLedgerLines } from "./status.js";
@@ -159,6 +160,14 @@ export interface ServeDeps {
    * rest of the page.
    */
   accountUsage?: Omit<AccountUsageDeps, "ledgerPath">;
+  /**
+   * W1-T477: `GET /v1/analytics`'s deps (see analytics-route.ts's header). OPTIONAL and defaults
+   * to a real rotation-union read against the real filesystem, the same "the assembler wires the
+   * real thing, a test injects a fake" split every other optional field here already follows. The
+   * `ledgerPath` half is always the console's own — see {@link accountUsage}'s doc immediately
+   * above for why that is never a caller-supplied override.
+   */
+  analytics?: Omit<AnalyticsRouteDeps, "ledgerPath">;
   /**
    * W1-T371: additive tailnet-identity auth — forwarded verbatim to `createService`'s
    * `identity` option (see service.ts's {@link IdentityAuth} for the two gates it enforces).
@@ -4441,6 +4450,9 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
     // the bot branch instead of dirtying the daemon's checkout.
     ...buildPanelSkillRunRoutes(panelGraphDeps),
     buildTaskCardRoute(deps.board),
+    // W1-T477: the operator's four analytics questions, aggregated over the rotation union — see
+    // analytics-route.ts's module header for the reader discipline and scope.
+    buildAnalyticsRoute({ ...deps.analytics, ledgerPath: deps.ledgerPath }),
     buildAuthScopeRoute(),
     buildShellRoute(deps.phaseElapsedThresholdsMs ?? DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS, consoleSha, {
       ledgerPath: deps.ledgerPath,

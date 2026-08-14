@@ -4862,7 +4862,7 @@ async function runTask(
 
   const runId = `${taskId}-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
-    appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, ...extra });
+    appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "run-task", ...extra });
 
   /**
    * W1-T442: THE DESTINATION for a spawn's asynchronous 'error' event. Wrapping
@@ -6944,7 +6944,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   const ledgerPath = ledgerPathFor(config);
   const runId = `review-PR${view.number}-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
-    appendLedger(ledgerPath, { run_id: runId, task_id: taskId ?? `PR-${view.number}`, step, ...extra });
+    appendLedger(ledgerPath, { run_id: runId, task_id: taskId ?? `PR-${view.number}`, step, lane: "review", ...extra });
 
   console.log(`### rmd review PR #${view.number} — criteria from ${source}`);
 
@@ -7132,7 +7132,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
   const runId = `dep-review-PR${view.number}-${Date.now()}`;
   const taskId = `dep-review-PR${view.number}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
-    appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, ...extra });
+    appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "dep-review", ...extra });
 
   const result = decideDepReview({
     author: { login: view.author?.login ?? "" },
@@ -9684,7 +9684,7 @@ async function retroCommand(
 
   const runId = `RETRO-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
-    appendLedger(ledgerPath, { run_id: runId, task_id: "RETRO", step, ...extra });
+    appendLedger(ledgerPath, { run_id: runId, task_id: "RETRO", step, lane: "retro", ...extra });
   const say = (msg: string) => console.log(`\n### [retro] ${msg}`);
   log("retro.start", { since: gather.sinceTs ?? null, runs_in_scope: gather.totalRuns, architect: arch, worker: wrk });
   say(`retro ${runId} — architect ${arch} over worker ${wrk}; ${gather.totalRuns} runs in scope`);
@@ -11298,7 +11298,7 @@ async function drainCommand(
 
   const runId = `DRAIN-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
-    appendLedger(ledgerPath, { run_id: runId, task_id: "DRAIN", step, ...extra });
+    appendLedger(ledgerPath, { run_id: runId, task_id: "DRAIN", step, lane: "drain", ...extra });
 
   // BATCHED, NOT `ghGateway` — `drainCommand` was the LAST dispatch-path holdout, after #1529
   // moved `runTask` and #1531 moved `retroCommand`. `daemonCommand` (below) has always built its
@@ -11962,7 +11962,7 @@ export async function daemonCommand(
 
   const runId = `DAEMON-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
-    appendLedger(ledgerPath, { run_id: runId, task_id: "DAEMON", step, ...extra });
+    appendLedger(ledgerPath, { run_id: runId, task_id: "DAEMON", step, lane: "daemon", ...extra });
   log("daemon.target", {
     repo: target.repo,
     gateway: `${target.owner}/${target.repo}`,
@@ -13382,7 +13382,7 @@ export async function serveCommand(
 
   const runId = `SERVE-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
-    appendLedger(ledgerPath, { run_id: runId, task_id: "SERVE", step, ...extra });
+    appendLedger(ledgerPath, { run_id: runId, task_id: "SERVE", step, lane: "serve", ...extra });
 
   // ── SERVICE POSTURE (W1-T152). None of these three can refuse to start: under the launchd
   // unit this command now generates, a startup refusal is a KeepAlive crash-loop, and a
@@ -13568,7 +13568,7 @@ export async function relayConnectCommand(rest: string[]): Promise<number> {
   const ledgerPath = ledgerPathFor(config);
   const runId = `RELAY-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
-    appendLedger(ledgerPath, { run_id: runId, task_id: "RELAY", step, ...extra });
+    appendLedger(ledgerPath, { run_id: runId, task_id: "RELAY", step, lane: "relay", ...extra });
 
   console.log(`### rmd relay — dialing ${relayUrl}, forwarding to ${localBaseUrl}`);
   log("relay.start", { relayUrl, localBaseUrl });
@@ -14955,7 +14955,7 @@ export async function sweepCommand(rest: string[]): Promise<number> {
   const owner = self.owner;
   const runId = `SWEEP-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
-    appendLedger(ledgerPath, { run_id: runId, task_id: "SWEEP", step, ...extra });
+    appendLedger(ledgerPath, { run_id: runId, task_id: "SWEEP", step, lane: "sweep", ...extra });
 
   // The plan backs the fix rung's task lookup (title/acceptance/risk). Best-effort:
   // a repo without a readable plan can still arm/close/escalate; only fix needs it.
@@ -15650,7 +15650,7 @@ export async function fixCommand(
   const owner = self.owner;
   const runId = `FIX-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
-    appendLedger(ledgerPath, { run_id: runId, task_id: "FIX", step, ...extra });
+    appendLedger(ledgerPath, { run_id: runId, task_id: "FIX", step, lane: "fix", ...extra });
 
   let raw: RawOpenPr & { state?: string };
   try {
@@ -16300,7 +16300,7 @@ async function triageCommandLocked(
   const taskId = `TRIAGE-${feedbackId}`;
   const runId = `${taskId}-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
-    appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, ...extra });
+    appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "triage", ...extra });
   const say = (msg: string) => console.log(`\n### [triage] ${msg}`);
   log("triage.start", { feedback_id: feedbackId, architect: arch, worker: wrk });
   say(`triage ${runId} — architect ${arch} over worker ${wrk} — feedback#${feedbackId}`);
@@ -16682,7 +16682,7 @@ export async function planCommand(
   const taskId = `PLAN-${mode}`;
   const runId = `${taskId}-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
-    appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, ...extra });
+    appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "plan", ...extra });
   const say = (msg: string) => console.log(`\n### [plan] ${msg}`);
   log("plan.start", { mode, brief, architect: arch, worker: wrk });
   say(`plan ${runId} — mode=${mode} — architect ${arch} over worker ${wrk}`);
@@ -17180,7 +17180,7 @@ export async function inboxCommand(rest: string[], deps: { config?: Config } = {
   const needsDraft = proposalsNeedingDraft(proposals, drafts);
 
   const runId = `INBOX-${Date.now()}`;
-  const log = (step: string, extra: Record<string, unknown> = {}) => appendLedger(ledgerPath, { run_id: runId, task_id: "inbox", step, ...extra });
+  const log = (step: string, extra: Record<string, unknown> = {}) => appendLedger(ledgerPath, { run_id: runId, task_id: "inbox", step, lane: "inbox", ...extra });
 
   if (needsDraft.length > 0 && !dryRun) {
     const outcomes = await draftProposalBatch(needsDraft, config, owner, repo, runId, log);
@@ -17317,7 +17317,7 @@ export async function approveCommand(rest: string[], deps: { config?: Config; ga
   }
 
   const runId = `APPROVE-${proposalId}-${Date.now()}`;
-  const log = (step: string, extra: Record<string, unknown> = {}) => appendLedger(ledgerPath, { run_id: runId, task_id: proposalId, step, ...extra });
+  const log = (step: string, extra: Record<string, unknown> = {}) => appendLedger(ledgerPath, { run_id: runId, task_id: proposalId, step, lane: "approve", ...extra });
 
   let repoDir: string | undefined;
   let worktreePath: string | undefined;
@@ -17859,7 +17859,7 @@ export async function dispatchAlertFixRun(
   const originId = alertOriginId(alert);
   const taskId = alertTaskId(alert);
   const log = (step: string, extra: Record<string, unknown> = {}) =>
-    appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, ...extra });
+    appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "alert-fix", ...extra });
 
   const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
   const branch = `alert-fix-${originId}-${Date.now()}`;
@@ -19482,6 +19482,44 @@ export function serviceFreshnessGate(
   }
 }
 
+/**
+ * W1-T477 signal (i): ONE ledger row per CLI invocation, for EVERY verb including read-only
+ * ones — the ledger's only source for "how often is each command called" (question 1 of the
+ * operator's analytics brief; before this, main() ledgered nothing per verb, and only lane verbs
+ * self-ledgered their OWN start under their own step name, which `rmd emissions`' own doc already
+ * concedes leaves `run-task` unauditable by name). Called FIRST in `main()`, before the freshness
+ * gate or any `if (cmd === ...)` dispatch branch, so it fires exactly once per process regardless
+ * of which arm matches below (or none does, falling through to the USAGE refusal) and regardless
+ * of what that arm does afterward — a single, un-branched instrumentation point rather than one
+ * per verb.
+ *
+ * `argv_shape` — never the raw argv — keeps every FLAG verbatim (a flag name is not a secret) and
+ * replaces every positional with the literal `"<arg>"`: a positional can be a PR number, a task
+ * id, or free text (`rmd notify <message>`, `rmd fix <task-or-pr> <message>`), and this route is
+ * read-scoped from day one (design note iv) — an operator's message text must never ride a
+ * ledger line a future relay/console surface might serve outward, even redacted-by-omission.
+ *
+ * NEVER blocks dispatch: `loadConfig()` throws on an unreadable/corrupt config, the exact failure
+ * mode run-task.ts's other diagnostic verbs already catch (see e.g. the `stateDir` closure ~line
+ * 7806), and `appendLedger` can throw on a hostile filesystem. Either way this is telemetry, not
+ * a gate — a write failure here is swallowed, same "ledger is best-effort" discipline the daemon
+ * service-posture `emit` closure just above already keeps, never a reason a command that would
+ * otherwise have worked now doesn't.
+ */
+function logCliInvocation(cmd: string | undefined, argv: string[]): void {
+  try {
+    appendLedger(ledgerPathFor(loadConfig()), {
+      run_id: `CLI-${Date.now()}`,
+      task_id: "CLI",
+      step: "cli.invoked",
+      verb: cmd ?? "(none)",
+      argv_shape: argv.map((a) => (a.startsWith("-") ? a : "<arg>")),
+    });
+  } catch {
+    // Telemetry-only — see this function's own doc.
+  }
+}
+
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
 export async function main(
   // W1-T79/W1-T221: the freshness check is injectable so a `callMain` test can drive the
@@ -19494,6 +19532,9 @@ export async function main(
 ): Promise<void> {
   const [cmd, ...rest] = stripRepoRootFlag(process.argv.slice(2));
   const arg = rest[0];
+  // W1-T477 signal (i): see logCliInvocation's own doc — first, unconditional, one row per
+  // process regardless of which dispatch arm below (if any) ends up matching `cmd`.
+  logCliInvocation(cmd, rest);
   if (cmd === "--help" || cmd === "-h" || cmd === "help") {
     console.log(USAGE);
     process.exit(0);
