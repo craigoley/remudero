@@ -1,0 +1,124 @@
+- id: W1-T500
+  title: "the write-consequence limit is built, labelled and switched OFF — flipping enforceWriteTiers alone would 403 every high-tier button with confirm_nonce_required, because the nonce route is never mounted and the console client never asks for one, so turn it on as the three-part change it actually is before the console is published"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60
+  rationale: "THIS IS THE PREREQUISITE FOR A PUBLISHED CONSOLE, AND IT IS OFF. `enforceWriteTiers`
+    and `enforceReadSensitivity` are both implemented and neither is set: each appears ZERO times
+    anywhere in `src/` outside `src/lib/service.ts`, re-derived at 2513d0d with the controls that
+    make the zero a measurement — 12 and 9 occurrences INSIDE that file. So today any grant of
+    `write` reaches all 23 write-scoped routes. The fleet's own decision record already named the
+    stake, verbatim: over the internet a browser session that can add an operator note can also
+    move the daily budget ceiling, execute a skill against the operator's checkout and halt the
+    fleet.
+
+    THE WRITE AXIS IS ALREADY LABELLED, SO LABELLING IS NOT THE WORK. `assertWriteTiersComplete`
+    (`src/lib/service.ts`) is called UNCONDITIONALLY from `buildServeRoutes` (`src/lib/serve.ts`) —
+    not under the flag — and throws naming any write route lacking a tier. `rmd serve` runs, so the
+    table is complete by construction; `tier:` is declared 27 times across the tree. THAT IS WHAT
+    MAKES THIS TASK SMALL ENOUGH TO BE ONE TASK.
+
+    BUT THE FLAG IS NOT A ONE-LINE FLIP, AND THE MEASUREMENT SAYS WHY. `src/lib/service.ts`'s own
+    comment on the flag predicted it: without the client-side half an operator's existing single
+    write token would silently start 403ing on buttons the shipped client has no way to unblock.
+    Confirmed at 2513d0d, each with a control: `/v1/confirm` occurs 0 times in `src/lib/serve.ts`
+    (control: `/v1/status` occurs 24 times there), and `makeConfirmNonceRoute` is DEFINED IN
+    `src/lib/service.ts` AND MOUNTED NOWHERE (control: `buildStatusRoute(` has 1 production call
+    site). So the route that issues nonces is not served, and the client never asks. Flipping the
+    flag alone converts every HIGH-tier write into a 403 `confirm_nonce_required` with no way to
+    satisfy it. This task is therefore THREE changes in one PR — mount the route, teach the client
+    the round trip, flip the flag — because any two of them without the third leave the console
+    broken or unprotected.
+
+    THE GRANDFATHERING QUESTION IS ALREADY ANSWERED AND MUST NOT BE REOPENED. The bearer token does
+    NOT lose everything: `bearerTokenProvider` (`src/lib/service.ts`) declares `writeTier: low`, and
+    its comment calls that the sharpest ruling in W1-T404 — an existing write credential resolves to
+    low, never higher, and defaulting it to high would ship the change as a no-op that silently
+    re-grants everything. DO NOT RAISE IT. The tailnet grantor is separately fine:
+    `tailscaleIdentityProvider` already declares `writeTier: high`, so the operator's current route
+    in — and his fallback during a Cloudflare outage — keeps full reach with no change. Those two
+    facts together are why this can ship without breaking the console the operator uses today.
+
+    THE READ AXIS IS A DIFFERENT SIZE OF TASK AND IS DELIBERATELY EXCLUDED. `enforceReadSensitivity`
+    has NO completeness ratchet at all — `readRoutesMissingSensitivity`,
+    `assertReadSensitivityComplete` and `sensitivityMissing` all read 0 (controls:
+    `writeRoutesMissingTier` 5, `assertWriteTiersComplete` 4) — and ZERO production routes carry the
+    label: the only two `sensitivity:` occurrences are a doc comment in `src/lib/service.ts` and a
+    fixture in `test/read-sensitivity-gate.test.ts`. Labelling the 18 read routes spans 10 modules,
+    and a `files:` list that wide would serialise against half the plan while
+    `inverseScopeUntouchedFiles` (`src/lib/review.ts`) failed every module the implementation did not
+    reach. That is a second task, and this shard recommends the split rather than taking it.
+
+    MOTIVATION, NOT SCOPE: `cloudflared` 2026.5.1 is ALREADY RUNNING on the mini as a quick tunnel —
+    `cloudflared tunnel --url https://localhost:18794 --no-tls-verify`, no named tunnel, no
+    credentials, and by construction no Access application in front — serving ClawApp, not remudero.
+    It is the exact failure mode this sequence exists to avoid, already live for a different app. It
+    is NOT this task's to fix. And the ordering that gates everything after this: the Access
+    application must be created BEFORE the tunnel route, or the published hostname is open to
+    anyone — Cloudflare's own warning lives on the self-hosted-application page, NOT on the DNS
+    routing page an operator actually follows at that step."
+  design: |
+    (i) MOUNT THE NONCE ROUTE. `buildServeRoutes` (`src/lib/serve.ts`) adds
+    `makeConfirmNonceRoute(store)` to the table it returns, and the `createService({...})` call in
+    the same module passes a `confirmNonces` store. Both symbols already exist in
+    `src/lib/service.ts` and are NOT edited here — the defect is that nothing mounts them.
+    (ii) TEACH THE CLIENT THE ROUND TRIP. The console's own JS gains the tier-aware step: on a
+    HIGH-tier action, POST the action and payload to `/v1/confirm`, then replay the write carrying
+    the returned nonce. THE CLIENT JS LIVES INSIDE A BACKTICK TEMPLATE LITERAL in `src/lib/serve.ts`
+    — never put a backtick in a client-code comment, or esbuild fails the build — and its DOM
+    behaviour is covered by the real Playwright suites `test/serve.*.test.ts`, which must be run for
+    this change.
+    (iii) FLIP THE FLAG. `enforceWriteTiers: true` on the same `createService({...})` call. LAST, not
+    first: (i) and (ii) without (iii) are inert and safe; (iii) without them is a broken console.
+    (iv) CHANGE NO GRANT. `bearerTokenProvider` stays `low` and `tailscaleIdentityProvider` stays
+    `high`. Raising either is out of scope and is explicitly the no-op W1-T404 rejected.
+    (v) FALSIFIER, BOTH DIRECTIONS, OVER HTTP. With enforcement on, a bearer-token request to a
+    HIGH-tier route is refused 403 WITHOUT a nonce and SUCCEEDS with one obtained from the mounted
+    route; and a tailnet-identity request reaches the same route unchanged. Deleting the mount fails
+    the first; raising the bearer tier to high fails the discrimination the first depends on.
+    (vi) NOT IN SCOPE: `enforceReadSensitivity` and read-route labelling, the Access-JWT
+    `IdentityProvider`, any DNS/tunnel/Cloudflare resource, any change to `src/lib/service.ts`, and
+    raising any provider's tier.
+  acceptance:
+    - claim: "the confirm-nonce route is mounted by the real serve route builder, so a client can obtain a nonce at all"
+      proof: "unit test: the assembled serve table mounts the confirm-nonce route"
+    - claim: "with enforcement on, a bearer-token write to a high-tier route is refused without a nonce and succeeds with one"
+      proof: "unit test: a high-tier write is refused without a nonce and succeeds with one"
+    - claim: "the tailnet grantor keeps full reach once enforcement is on, so the operator's fallback route is unchanged"
+      proof: "unit test: tailnet identity still reaches a high-tier route under enforcement"
+    - claim: "the existing bearer token stays at the low tier rather than being grandfathered upward"
+      proof: "unit test: the bearer token remains low tier under enforcement"
+  risk: high
+  origin: oper#console-exposure-prereq-2026-08-14
+  plan_refs: ["W1-T404", "W1-T495", "W1-T430"]
+  files: [src/lib/serve.ts, test/serve-write-tier-wiring.test.ts]
+  status: queued
+  attempts: 0
+  note: "risk:high IS SET UP FRONT. `files:` spans src/ and test/, and `sizingViolation`
+    (`src/lib/task-linter.ts`) blocks at >=2 subsystems below that band; it is independently
+    warranted because this turns on refusal across all 23 write routes and edits the console's own
+    client JS. budget_usd 60 — a route mount, a client round trip inside a template literal, a flag,
+    and an over-HTTP falsifier in both directions plus the Playwright suites.
+
+    `files:` IS TWO PATHS AND BOTH WILL BE TOUCHED. `src/lib/serve.ts` holds `buildServeRoutes`, the
+    single production `createService({...})` and the client JS — all three changes land there.
+    `src/run-task.ts` IS DELIBERATELY NOT DECLARED, AND THAT IS A MEASUREMENT RATHER THAN AN
+    AVOIDANCE: it contains `createService` 0 times and `buildServeRoutes` 0 times (control:
+    `serveCommand` 3), so the production wiring genuinely does not live there and declaring it would
+    fail `inverseScopeUntouchedFiles` (`src/lib/review.ts`) while serialising this task against every
+    other task naming that 19,943-line file (W1-T471). `src/lib/service.ts` is NOT declared either:
+    every symbol this task needs is already exported from it and none is edited.
+
+    PROOF NOTES: all four proofs are NAME-FILTERED titles, not pure paths, because a pure path runs
+    the whole file and one unrelated failure would fail every criterion. Each title was verified to
+    match ZERO files today (the legitimate forward reference for an unimplemented task) against a
+    control title that matches exactly one. No proof names this shard, so the implementation is not
+    capped at 0/N by self-reference.
+
+    ID PROVENANCE: origin/main's max is 499 by both shard filename and declaration, and no open PR
+    mints a shard id; `rmd next-task-id` independently returned W1-T500, re-derived again
+    immediately before push. The id trap has fired four times in two days, twice with main's max
+    behind an open PR's mint."
