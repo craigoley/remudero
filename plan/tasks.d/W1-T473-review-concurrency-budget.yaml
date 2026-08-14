@@ -1,0 +1,127 @@
+- id: W1-T473
+  title: "reviews run one at a time inside the sweep's per-PR walk — give them their own concurrency budget honouring the same lane number as dispatch, and supply the mutual exclusion that single-threading currently provides for free"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  rationale: "THE CRUX FIRST, BECAUSE IT IS THE ONE THING THAT CAN GO WRONG: **THERE IS NO MUTUAL
+    EXCLUSION HERE TO INHERIT.** The dedup guard is `postReviewed`, a plain `Set<string>` in
+    `src/lib/sweep.ts`, keyed `` `${task_id}@${head_sha}` ``. It is BUILT BY READING THE LEDGER — the
+    loop over `lines` adds a key for every `review.posted` and `review.post_refused` step — and
+    CONSULTED once per PR as `prior.postReviewed.has(`${pr.taskId ?? \"\"}@${pr.headSha}`)`. THAT IS A
+    READ-THEN-WRITE ACROSS A WHOLE PASS, and it is safe today for exactly one reason: the pass is
+    single-threaded, so no second reader exists between the read and the ledger write. **UNDER
+    CONCURRENCY TWO LANES COULD BOTH READ BEFORE EITHER WRITES AND BOTH POST THE SAME REVIEW.** Any
+    concurrent review lane MUST SUPPLY REAL MUTUAL EXCLUSION; it cannot borrow one, because none
+    exists. The `mutex-serialized` phrasing in the surrounding docs describes the sweep being
+    single-threaded, NOT a lock object.
+
+    **THIS IS A THROUGHPUT IMPROVEMENT, NOT A REPAIR — AND THE DIAGNOSIS THAT GATED IT IS CLOSED.**
+    Recorded here so nobody re-investigates a working lane:
+      - `remudero-review` IS A COMMIT **STATUS**, NOT A CHECK-RUN. It does not appear in
+        `/check-runs` AT ALL, so every rollup that reported it missing was reading an API structurally
+        incapable of carrying it. It lives on `/commits/{sha}/status`.
+      - THE CORRELATION IS SIX FOR SIX, BOTH DIRECTIONS (Azure, 2026-08-13/14): #1751, #1752, #1754,
+        #1756 and pre-rebase #1761 were RED and got NO review; #1762 and post-rebase #1761 were GREEN
+        and both got one. The post-review disposition fires at
+        `checksState === \"green\" && reviewState === \"none\"`, so a RED PR matches NO disposition and
+        the light sweep CORRECTLY DECLINED every one.
+      - MAIN WAS RED ALL EVENING — below its branch floor after #1739, then the stale capability
+        snapshot after #1757 — so every open PR inherited a red it did not cause.
+      - RECOVERY WAS FAST AND CONCURRENT: #1762 last check 23:39:16Z -> review 23:40:25Z (**69s**);
+        #1761 00:06:22Z -> 00:06:59Z (**37s**). BOTH WHILE THE W1-T456 WORKER HELD ITS LOCK, i.e.
+        alongside a live implement run, inside one poll interval.
+    SO THE LANE WAS NEVER BROKEN. Nothing here fixes a fault; it raises a ceiling.
+
+    THE PRESENT SHAPE, RE-DERIVED AT 71cedbb:
+      - **REVIEWS ARE SERIAL WITH EACH OTHER.** `runSweep` walks `for (const pr of openPrs)` and the
+        rung does `await deps.postReview(pr)`. Parallel with DISPATCH, never with each other. FOUR
+        REVIEWS LANDED IN ONE PASS TONIGHT (#1761, #1762, #1763, #1764) — serially, and fast enough
+        that nobody noticed, which is the honest measure of how much this is worth.
+      - **`laneCount` IS DISPATCH-ONLY.** `const laneCount = Math.max(1, opts.laneCount ?? 1)` in
+        `src/lib/daemon.ts`, fed from `SweepPolicy.dispatchLanes` (`src/lib/policy.ts`). A review
+        budget is A NEW CONCEPT, not a value change.
+      - **THE TICKER CANNOT ACCUMULATE PASSES.** `startInFlightTicker` (`src/lib/daemon.ts`) is a
+        serial loop — `while (active) { await deps.sleep(pollIntervalMs); ... await deps.sweepLight(); }`
+        — NOT a `setInterval`, so passes never queue and none are dropped; a slow pass merely delays
+        the next. MEASURED on Azure across the live W1-T456 run: **103 ticks, min 60s / median 63s /
+        max 83s**, so each pass completes in <=23s. AND THE LIGHT PATH NEVER FETCHES THE BOARD: ZERO
+        `board_gateway` rows across those 103 ticks, against 551 such rows overall as the positive
+        control.
+
+    SIZING, WITH PROVENANCE STATED PER NUMBER — **THE TWO HOSTS KEEP SEPARATE LEDGERS AND THERE IS NO
+    SSH ROUTE BETWEEN THEM; DO NOT MERGE OR DIFF THESE CORPORA.** A session called such a difference a
+    refutation tonight when the totals happened to coincide at 30, and the trap was invisible.
+      AZURE (both non-empty forms, deduped): **36 `reviewer_outcome` rows — 20 `not_attempted` (56%),
+      16 `success` (44%)**.
+      MINI (reported, not re-derivable from Azure): **1,054 of 1,511 `not_attempted` (70%)**.
+    SAME DIRECTION, DIFFERENT CORPORA. Either way the expensive non-deterministic half is SKIPPED on
+    the majority of reviews, which is why two or three concurrent reviews are cheap."
+  design: "(i) WHAT THE BUDGET BOUNDS — CALLS OR SPAWNED WORKERS — AND THE TWO ARE NOT INTERCHANGEABLE.
+    Between 56% (Azure) and 70% (mini) of reviews never spawn the reviewer worker at all: they resolve
+    deterministically and post. SO A BUDGET ON `postReview` CALLS THROTTLES MOSTLY-CHEAP WORK, while a
+    budget ON SPAWNED WORKERS throttles the expensive half and lets the cheap majority through
+    unbounded. ESTABLISH WHICH THE OPERATOR'S `same limit, applied separately` means before building —
+    the two produce different systems from the same sentence, and the ledger already tells you which
+    half is expensive.
+    (ii) ONE NUMBER TODAY, TWO FIELDS OR ONE — ARGUE IT, DO NOT ASSUME. Honouring the SAME number can
+    be done by reading `SweepPolicy.dispatchLanes` twice, or by adding a sibling field (e.g.
+    `reviewLanes`) that DEFAULTS to it. A SIBLING FIELD LETS THE TWO DIVERGE LATER WHILE SHARING ONE
+    NUMBER TODAY, at the cost of one more policy key and a second live-reload gap. Reading the
+    dispatch field twice is smaller now and silently couples two unrelated ceilings forever. Whichever
+    is chosen, `dispatchLanes` MUST KEEP ITS PRESENT MEANING — the capability snapshot renders it and
+    `test/policy-consumers.test.ts` asserts its consumers.
+    (iii) WHAT HAPPENS WHEN THE BUDGET IS FULL, AND THE CHEAP ANSWER IS PROBABLY RIGHT. **A REVIEW
+    SKIPPED IS RE-OFFERED IN ~60 SECONDS** — the ticker's own cadence, measured above. So SKIPPING
+    costs at most one poll interval and needs no state; QUEUEING adds an unbounded structure that
+    survives the pass that made it; BLOCKING stalls a pass that is also doing dispatch-adjacent work
+    and is the only option that can make the tick exceed its interval. Establish the choice against
+    that measured 60s, not against intuition.
+    (iv) **THE BUDGET IS A CEILING, NOT A TARGET — AND THIS IS THE FAILURE MODE MOST LIKELY TO BE
+    BUILT BY ACCIDENT.** Tonight the queue was red for hours and the CORRECT behaviour was to do
+    nothing at all. An implementation that spins up N review lanes each tick and then hunts for
+    eligible PRs would be the SEVENTH measured instance in this repo of a bound firing on a HEALTHY
+    condition. The lane count must cap work that already exists, never manufacture a search for it —
+    when nothing is green, the correct number of review lanes is zero.
+    (v) NOT IN SCOPE: changing WHICH PRs are eligible, the disposition table, or `dispatchLanes`'
+    value. This adds a ceiling to an existing, working rung."
+  acceptance:
+    - claim: "two concurrent reviews of the same task and head cannot both post"
+      proof: "unit test: test/review-status-gate.test.ts"
+    - claim: "the review budget bounds concurrency without changing which PRs are eligible"
+      proof: "unit test: test/sweep.test.ts"
+    - claim: "a pass with no green PRs starts no review lanes"
+      proof: "unit test: test/sweep.test.ts"
+  origin: recon#review-lane-never-broken-2026-08-14
+  plan_refs: ['W1-T463']
+  files: [src/lib/sweep.ts, src/lib/policy.ts, test/sweep.test.ts, test/review-status-gate.test.ts, test/policy-consumers.test.ts]
+  status: queued
+  attempts: 0
+  note: "CLOSES W1-T463's (#1750) CRITERION ONE. That shard asked whether the light sweep was broken
+    before anyone built a per-kind budget on the same `runSweep`, disposition table and dedup — its own
+    reasoning being that if the sweep were broken, a budget built on it would BREAK THE SAME WAY. The
+    answer is recorded in the rationale above: it was never broken, so the budget proceeds as an
+    improvement rather than a repair.
+    `risk: high` IS SET UP FRONT. `sizingViolation` (`src/lib/task-linter.ts`) blocks at `>=2
+    subsystems while risk<high`, and `files:` spans `src/lib/` and `test/`. The band is Rule 19's SPAN,
+    not blast radius — the blast radius is one rung's concurrency and whatever lock replaces
+    single-threading.
+    `files:` WAS DERIVED BY INVOCATION COUNT, NOT PROSE MENTION. Measured at 71cedbb over `test/`:
+    `runSweep` 88 in `test/sweep.test.ts`; `postReview` 29 in `test/review-status-gate.test.ts` and 19
+    in `test/sweep.test.ts`; `dispatchLanes` 10 in `test/policy-consumers.test.ts`. `src/lib/policy.ts`
+    and `test/policy-consumers.test.ts` are declared ONLY for design (ii)'s sibling-field option —
+    **DROP BOTH IF THE IMPLEMENTATION READS `dispatchLanes` DIRECTLY INSTEAD**, because
+    `inverseScopeUntouchedFiles` (`src/lib/review.ts`) fails a declared-but-untouched path just as
+    `scopeViolationFiles` fails an undeclared one.
+    OVER-DECLARATION HAS A MEASURED COST HERE BEYOND THE LINTER: `partitionByFileOverlap`
+    (`src/lib/dispatch-overlap.ts`) blocks on DECLARED paths alone, so every extra path in this list
+    serialises this task against every other task that names it. That is W1-T471's finding and it
+    applies to this shard's own `files:`.
+    THIS SHARD'S OWN PATH IS DELIBERATELY NOT IN `files:` — adding it converts the three
+    `proof-scope` warnings into a HARD `rule15-filing` violation, measured on W1-T464.
+    EXPECT NOTHING FROM `coverage-ratchet` HERE: main now judges branches against absolute tiers
+    (#1758) and reads healthy, so this filing should inherit a clean gate rather than the red every PR
+    carried earlier tonight."
