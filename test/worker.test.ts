@@ -326,7 +326,15 @@ test("workerLedgerFields: success call ⇒ {model, effort, tokens, cache_read_in
     maxTurns: 20,
   });
   const fields = workerLedgerFields(r);
-  assert.deepEqual(fields, {
+  // W1-T477: `worker_duration_ms` is now ALWAYS present off a real `collectWorkerResult` call
+  // (measured start-to-return around the message loop, see that function's own doc) — a real
+  // elapsed-ms figure, never a fixed constant this exact-shape assertion could hardcode. Checked
+  // for shape here, then excluded from the `deepEqual` below so the rest of the row's shape stays
+  // pinned exactly as it was.
+  assert.equal(typeof fields.worker_duration_ms, "number");
+  assert.ok(fields.worker_duration_ms! >= 0, "a real spawn's duration is never negative");
+  const { worker_duration_ms: _workerDurationMs, ...fieldsWithoutDuration } = fields;
+  assert.deepEqual(fieldsWithoutDuration, {
     model: "claude-opus-4",
     effort: "high",
     tokens: { input: 1000, output: 200, cacheRead: 500, cacheCreation: 50 },

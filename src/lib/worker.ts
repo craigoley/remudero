@@ -195,6 +195,18 @@ export interface WorkerResult {
    */
   lostGrants?: WorkerHomeGrantOutcome[];
   qualitySuspect: boolean;
+  /**
+   * W1-T477: wall-clock milliseconds this call spent inside the actual SDK query — measured in
+   * {@link collectWorkerResult}, around the message-consumption loop that IS the worker call
+   * (excludes the pre-spawn setup above it in {@link spawnWorker}: config load, worker-home
+   * materialization, keychain unlock — all local/free per that function's own "impl-EM" comment).
+   * Optional, never guessed: a hand-built `WorkerResult` fixture (every existing test helper in
+   * test/) simply omits it, and `workerLedgerFields` renders it absent rather than 0 on a call
+   * that was never really timed. Answers the operator's fourth analytics question ("time per
+   * command/worker") — before this field, `workerLedgerFields` carried cost/tokens/model/effort
+   * and no duration at all (see the rationale this task was filed from).
+   */
+  workerDurationMs?: number;
 }
 
 /** `model`/`effort` label logged when a call rides no explicit mount override
@@ -331,6 +343,7 @@ export function workerLedgerFields(r: WorkerResult): {
   max_turns?: number;
   stderr_excerpt?: string;
   lost_grants?: string[];
+  worker_duration_ms?: number;
 } {
   const stderrExcerpt = workerFailureExcerpt(r);
   return {
@@ -360,6 +373,12 @@ export function workerLedgerFields(r: WorkerResult): {
     verdict: r.isError ? r.subtype : "success",
     quality_suspect: r.qualitySuspect,
     compaction_events: r.compactionEvents,
+    // W1-T477: per-call wall-clock, mirrored verbatim off `WorkerResult.workerDurationMs` — see
+    // that field's own doc. `undefined` (never a guessed 0) on a hand-built test fixture that
+    // never went through a real spawn; JSON.stringify drops an undefined key, so an untimed call's
+    // ledger line simply carries no `worker_duration_ms` key at all, the same "absent, never
+    // guessed" discipline `max_turns` above already keeps.
+    worker_duration_ms: r.workerDurationMs,
   };
 }
 
@@ -1032,6 +1051,13 @@ export async function collectWorkerResult(
     lostGrants?: WorkerHomeGrantOutcome[];
   },
 ): Promise<WorkerResult> {
+  // W1-T477: started BEFORE the first `for await` pull below — this function's body, start to
+  // return, IS the worker call (spawnWorker's own "impl-EM" comment: everything ABOVE this call
+  // is local/free setup). No clock injection: existing callers/tests already exercise this loop
+  // against synthetic (near-instant) message streams, so `worker_duration_ms` on those results is
+  // small but present, never a reason to add an injectable `now` seam this module didn't need
+  // before.
+  const startedAtMs = Date.now();
   const blocks: string[] = [];
   const stderrChunks = opts.stderrChunks ?? [];
 
@@ -1153,6 +1179,7 @@ export async function collectWorkerResult(
     modelUsage,
     compactionEvents,
     qualitySuspect: isQualitySuspect(compactionEvents),
+    workerDurationMs: Date.now() - startedAtMs,
   };
 }
 
