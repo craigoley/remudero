@@ -1,0 +1,95 @@
+- id: W1-T487
+  title: "an exhausted fix rung escalates with `Failing check(s):` and NOTHING after the colon — all three evidence arms in `runFixRung` render an unguarded `.map().join()` over a possibly-empty list, so the one artifact a human reads to decide what broke can name zero evidence and still look authoritative"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  rationale: "SCOPE IS THE ESCALATION'S WORDING, NOT THE RUNG'S TRIGGER, and that distinction is the
+    whole of this shard. The commissioning brief proposed the opposite — that the fix rung dispatches
+    only on review failures and is BLIND to check-run failures — and THAT PREMISE IS FALSE. Corrected
+    here so it is not re-imported: `DISPOSITION_RULES` in `src/lib/sweep.ts` carries a row whose
+    `when` is literally `(pr) => isBlockedCi(pr)`, resolving to `blocked-fixable` with the reason
+    `required checks red — ci-log fix, strike N/cap`; `isBlockedCi` is `pr.checksState === 'red'`.
+    The module's own disposition table states this row is CHECKED FIRST, before a review verdict is
+    ever classified as the block. A red required check DOES route to the fix rung.
+    WHY #1800 LOOKED LIKE A BLIND SPOT, RE-DERIVED FROM SOURCE. `waitForCiGreen` (`src/run-task.ts`)
+    returning non-green makes the RUN log `verdict: blocked_ci` and RETURN, leaving the PR open and
+    deliberately posting no `remudero-review` — its own comment says `no review over unproven code`.
+    That is why #1800 showed `combined=pending`, `statuses=0`. The sweep is a SEPARATE later pass, and
+    the absence of a review status is the designed hand-off, not evidence that nothing is routed.
+    THE TWO ADJACENT DEFECTS ARE ALREADY FIXED, so neither is available as this shard's ground.
+    W1-T457 MERGED as #1771 — `checksStateFromRollup` now calls `dedupeRollupByLatestAttempt`, so a
+    superseded cancelled check-run can no longer hold `checksState` red forever. W1-T474 MERGED as
+    #1791 at 2026-08-14T12:56:11Z, wiring the post-fix re-verification rung for PRs that inherited a
+    broken main. #1800 was created at 13:40:05Z, AFTER both.
+    WHAT IS ACTUALLY UNGUARDED, MEASURED ON origin/main. `runFixRung` (`src/run-task.ts`) builds the
+    escalation `detail` for THREE arms, each an unguarded map-join over a list that can be empty:
+    the ci arm joins `(currentCiFailures ?? [])` after the text `Failing check(s):`; the conflicted
+    arm joins `(currentMergeConflict?.files ?? [])` after `Conflicting file(s):`; the review arm joins
+    `unmet` after `Unmet criteria:`. NOTHING checks length first, so the artifact renders a heading,
+    a blank line, and nothing else — a report that states a cause and supplies no instance.
+    AND IT IS NOT COVERED: `test/escalate.test.ts` contains ZERO occurrences of `Failing check(s)`
+    (control: the same file matches escalation assertions 10 times under a broader pattern), so no
+    suite pins what the body does when the evidence list is empty."
+  design: "(i) THE FIX IS A RENDERING FLOOR, AND MUST NOT WIDEN ANY TRIGGER. This shard deliberately
+    changes NO `when:`, NO disposition, and NO dispatch condition. A rung that dispatched at every red
+    check on a fleet whose reds were largely inherited would be the EIGHTH measured instance here of a
+    bound firing on a healthy condition, and six were already on the record before this week. The
+    escalation is the last artifact a human reads; making it honest costs nothing and risks nothing.
+    (ii) STATE WHAT AN EMPTY LIST MEANS RATHER THAN PRINTING NOTHING. The two causes are different and
+    the reader cannot tell them apart today: the evidence was never collected, versus it was collected
+    and is genuinely empty because the condition cleared between the last strike and the render (the
+    list is re-fetched at escalation time). Name which, in the body.
+    (iii) DO NOT DELETE THE ESCALATION WHEN THE LIST IS EMPTY. An exhausted rung with no evidence is
+    MORE in need of a human, not less — suppressing it would convert a confusing notification into a
+    silent one, which is strictly worse and is the failure mode `escalate()` exists to prevent.
+    (iv) ALL THREE ARMS OR NONE. Fixing only the ci arm leaves the identical defect in two others and
+    guarantees a second visit; they share one shape and should share one guard.
+    (v) THE HARNESS BLIND SPOT IS OUT OF SCOPE, AND THIS RECORDS WHY SO IT IS NOT RE-FILED HERE. The
+    agent harness's `grep` is a ugrep wrapper with `-I` injected, so a file carrying one NUL byte is
+    skipped whole — no output, exit 1, indistinguishable from the symbol not existing (observed
+    directly in this host's process list as `ugrep -G --ignore-files --hidden -I ...`). That is a
+    property of the HARNESS, not of this repo, and cannot be fixed from here. W1-T438 already built
+    `test/no-raw-nul.test.ts` as the durable answer, and it WORKED: on #1800 it failed CI naming
+    `src/lib/analytics-route.ts@10570` exactly. The gate is not the gap.
+    (vi) INHERITED-VERSUS-CAUSED IS NOT THIS TASK'S QUESTION AND IS NOT ANSWERED HERE. Whether a red
+    check was caused by this diff or inherited from a broken main is the subject of W1-T474, MERGED as
+    #1791. This shard neither re-opens nor depends on it."
+  acceptance:
+    - claim: "an escalation whose evidence list is empty says so in words instead of printing a bare heading"
+      proof: "unit test: test/escalation-evidence-floor.test.ts"
+    - claim: "an escalation with real evidence still renders every item exactly as it does today"
+      proof: "unit test: test/escalation-evidence-floor.test.ts"
+    - claim: "all three evidence arms are guarded, not only the failing-checks one"
+      proof: "unit test: test/escalation-evidence-floor.test.ts"
+    - claim: "an empty evidence list still escalates rather than being suppressed"
+      proof: "unit test: test/escalation-evidence-floor.test.ts"
+  origin: recon#fix-rung-trigger-is-not-blind-2026-08-14
+  plan_refs: ["W1-T457", "W1-T474", "W1-T438"]
+  files: [src/run-task.ts, test/escalation-evidence-floor.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT. The band is Rule 19's SPAN across `src/` and `test/`, not blast
+    radius — the runtime effect is the text of one notification.
+    `src/run-task.ts` IS DECLARED RELUCTANTLY AND GENUINELY: `runFixRung` and all three of its evidence
+    arms live in that file, so the change cannot be made anywhere else. The cost is real and is
+    recorded rather than hidden — at 19,588 lines every task declaring it serialises against every
+    other that does, which is W1-T471's whole subject. `files:` is kept to TWO paths for that reason.
+    THE NEW SUITE GETS ITS OWN FILE, never an append to `test/run-task.test.ts`, which crashes at FILE
+    level under `--experimental-test-coverage` and would take this task's coverage with it.
+    `test/escalate.test.ts` is NOT declared: it holds escalation assertions but ZERO occurrences of
+    `Failing check(s)`, so it pins none of the behaviour this task changes — declaring it would trip
+    `inverseScopeUntouchedFiles` if the implementation never touches it.
+    REACHABILITY IS UNMEASURED FROM THIS HOST AND THAT IS STATED, NOT GLOSSED. The frequency with
+    which an evidence list is empty POST-#1771 cannot be derived on the mac mini: W1-T477, W1-T483 and
+    W1-T474 all return ZERO rows across its full ledger union (666 `.gz`, 4 plain, 1 live), against a
+    coverage control of `run.start` reading 257,438 / 914 / 200 — every form non-zero, so the query
+    covers all three and the zero is real. Those tasks ran on AZURE, whose ledger has NO SSH ROUTE
+    from here. Anyone sizing this defect must measure on the host that dispatched it.
+    AND THE GUARD IS WORTH HAVING EVEN IF RARE, because the cost is not the frequency: an escalation
+    that names a cause and supplies no instance sends the whole diagnosis toward a policy question
+    instead of the defect — the same reasoning the ledger-line rule already applies to a row whose
+    outcome and reason disagree."
