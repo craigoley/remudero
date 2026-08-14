@@ -11,5 +11,6 @@ raw: "NO_PR RUNS DISCARD THE WORKER'S RATIONALE — a no_pr verdict persists onl
   dispositions need and could not get."
 attachments: []
 origin: cli
-status: new
+status: rejected
 proposal_pr: null
+summary: null
