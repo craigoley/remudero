@@ -1,0 +1,179 @@
+- id: W1-T478
+  title: "a risk-judge response that could not be READ is recorded as a maximum-confidence high-risk FINDING and the text that failed to parse is thrown away — failing closed is right, reporting confidence 1.00 and keeping no evidence is not"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  rationale: "THE ROW, VERBATIM FROM THE LEDGER (Azure):
+    {\"ts\":\"2026-08-14T00:28:15.485Z\",\"run_id\":\"W1-T456-1786660022011\",\"task_id\":\"W1-T456\",
+    \"step\":\"risk_judge.decision\",\"verdict\":\"high\",\"reasons\":[\"judge output carried no
+    parseable RISK_VERDICT — failing closed (never silent-proceed)\"],\"confidence\":1,
+    \"action\":\"escalate\",\"reason\":\"high-risk verdict at confidence 1.00 — judge output carried
+    no parseable RISK_VERDICT — failing closed (never silent-proceed)\"}
+
+    **FAILING CLOSED IS CORRECT AND IS NOT WHAT THIS TASK CHANGES.** An unreadable judge response is
+    itself evidence the decision needs a human; `assessRisk` says so and so does the constant's own
+    comment. Two OTHER things are wrong: a read that FAILED is reported as a read that SAID NO at
+    `confidence: 1`, and the output that failed to parse is not kept, so nobody can say WHY.
+
+    **THE RATE, RE-DERIVED — IT IS NO LONGER n=1. IT IS n=2 AND THE SECOND ONE IS ALREADY
+    UNEXPLAINED.** Provenance: Azure only, state root `rmd-state2`. THE TWO HOSTS KEEP SEPARATE
+    LEDGERS WITH NO SSH ROUTE; the mini's corpus is neither merged nor diffed here. Per-form file
+    count control: `.gz` archives 0 files (genuinely empty on this host), plain archives 1, live 1 —
+    both non-empty forms read, deduped ON THE FULL LINE. Per-form readability control
+    (`daemon.alive`): 634 in the archive, 541 in the live file, so both forms were genuinely opened.
+    Step names EXTRACTED, not assumed: `risk_judge.decision` and `risk_judge.escalated` are the only
+    two the corpus carries.
+      **19 `risk_judge.decision` rows. 4 `risk_judge.escalated`. 2 carrying \"no parseable
+      RISK_VERDICT\".** (The brief's earlier reading was 14 / 3 / 1.) Note `grep -c` counts LINES,
+      not occurrences: the phrase appears 4 times across 2 rows because each row prints it twice,
+      once in `reasons` and once in `reason`.
+      **SO HALF OF EVERY ESCALATION THIS FLEET HAS EVER RAISED IS A PARSE FAILURE — 2 of 4.**
+      Escalation rate overall is 4/19 = 21%, so the judge is genuinely selective; the parse failures
+      are not noise inside a chatty judge, they are half its entire output.
+
+    **AND THE TWO ARE NOT SPREAD ACROSS THE CORPUS — THEY ARE BOTH IN THE LAST SIX HOURS OF IT.**
+    Zero parse failures in the first 13 decisions (2026-08-09T15:50 through 2026-08-13T21:21); two in
+    the last six (2026-08-14T00:28 W1-T456, 2026-08-14T05:38 W1-T464). Something changed. **NOBODY
+    CAN INVESTIGATE WHAT, BECAUSE THE OUTPUT IS NOT KEPT** — an API error, an empty response, and
+    sensible prose that omitted the machine-readable line are indistinguishable today.
+
+    **CONFIDENCE 1 IS CURRENTLY A PERFECT DISCRIMINATOR BY ACCIDENT, WHICH IS THE WORST KIND.**
+    Across all 19 decisions the genuine confidences are 0.70, 0.82, 0.85, 0.87 x2, 0.88 x4, 0.90 x3,
+    0.92 x2, 0.95 x2, 0.97 — and the ONLY two rows reading exactly 1 are the two parse failures. So
+    the field happens to be queryable today, purely because no real judge has yet returned 1.00. The
+    first one that does destroys the distinction retroactively, and nothing declares or defends it.
+
+    **WHAT IT COST, AND WHAT A HUMAN THEN DID.** Both escalations blocked COMPLETED work and both
+    were resolved by merging it unchanged:
+      - W1-T456 -> issue #1768, `verdict: blocked`, **$19.45** — PR #1766 MERGED at 00:31:28Z, about
+        three minutes after the escalation opened.
+      - W1-T464 -> issue #1778, `verdict: blocked`, **$5.18** — PR #1777 MERGED at 05:55:01Z, about
+        seventeen minutes after.
+    **$24.64 of finished work stopped, and both issue titles read `risk judge ESCALATED (high,
+    confidence 1.00)`** — verbatim from the API, indistinguishable from issue #1723, which WAS a real
+    (if wrong, see W1-T454) high-risk finding. A human triaging the queue by title cannot tell the
+    two populations apart.
+
+    **THE CASE FOR FILING AT n=2 IS NOT THE COUNT — IT IS THAT THE ASYMMETRY ALREADY RESOLVED
+    AGAINST US.** The argument for capture was always that the excerpt must exist BEFORE the second
+    occurrence or that one is unexplained too. The second occurrence has now happened, and it is
+    unexplained, permanently. This is the `no_pr` shape before #1584 threaded `report_excerpt`, which
+    left 99 rows unexplained forever and then paid for itself within a day once it existed. Filing on
+    a count of two would be thin; filing because the evidence window has already closed twice is not."
+  design: "(i) **THE VOCABULARY ALREADY HAS ROOM, AND THE MODULE ALREADY CONTRADICTS ITSELF ABOUT
+    WHICH NUMBER TO USE.** `src/lib/risk-judge.ts` has THREE fail-closed-ish paths and they do not
+    agree:
+      - `FAIL_CLOSED_VERDICT` (unparseable output) -> `{verdict: high, confidence: 1}`.
+      - the catch branch inside `assessRisk` (judge unavailable, spawn error, timeout) ->
+        `{verdict: high, confidence: 0}`.
+      - `parseRiskJudgeVerdict` on a PARSEABLE verdict whose `RISK_CONFIDENCE` line is missing -> 0,
+        and its own doc comment states the rule as \"never assume high confidence that was never
+        stated\".
+    Two of the three already report 0 for a confidence nobody stated, and the module's stated rule is
+    the 0 rule. The unparseable path is the outlier against its own file. `test/risk-judge.test.ts`
+    pins both sides today — one test asserts `confidence, 1` for unparseable output and another
+    asserts `confidence, 0` for absent confidence.
+
+    (ii) **THE CONSUMERS, ENUMERATED — THE BLAST RADIUS IS SMALL AND THE MEASUREMENT SAYS SO.**
+    Outside `src/lib/risk-judge.ts` there is EXACTLY ONE consumer in the whole tree: `src/run-task.ts`
+    (control: the same symbol grep over `scripts/`, `apps/`, `docs/` and `bin/` returns nothing, while
+    `src/` returns 7 hits). `verdict` and `confidence` are read in exactly three places:
+      - `planRiskJudgeAction` — branches on `verdict.verdict === \"high\"` FIRST and RETURNS, so for
+        any high verdict `confidence` is NEVER consulted for the decision, only formatted into the
+        `reason` string. The `confidence < threshold` branch is unreachable for a high verdict.
+      - `run-task.ts`'s `escalate` callback — interpolates both into the issue `summary`, i.e. the
+        title a human reads.
+      - `runRiskJudge`'s `log(\"risk_judge.decision\", …)` — the ledger row.
+    The dispatch call site branches ONLY on `riskJudgeResult.action.kind === \"escalate\"`; it never
+    reads `verdict` or `confidence` at all. **SO CHANGING THE CONFIDENCE ON THE UNPARSEABLE PATH
+    CHANGES NO CONTROL FLOW ANYWHERE — it still escalates, via the `high` branch, and the arm is
+    still withdrawn.** That is a measured fact about this option, not a prediction.
+
+    (iii) **THE OPTIONS. CHOOSE ONE; DO NOT BUILD MORE THAN ONE.**
+      (a) KEEP `verdict: high`, REPLACE `confidence: 1` with a number that does not claim certainty
+          (0 is what the sibling catch branch and the module's own doc already use). Cheapest by the
+          measurement in (ii): no control flow moves, the issue title changes for free because it
+          interpolates the field, and the ledger row stops asserting certainty. Costs: it makes the
+          two fail-closed paths indistinguishable FROM EACH OTHER (both become high/0), and it leaves
+          `verdict: high` still reading as a finding.
+      (b) A DISTINCT OUTCOME (`unparseable`, `judge_error`) that STILL ESCALATES but is queryable
+          apart from a genuine high-risk finding. Most honest and the only option that makes the
+          ledger answerable by query rather than by string-matching a reason. Costs: it widens
+          `RiskJudgeVerdictLabel` beyond `\"low\" | \"high\"`, which `VALID_VERDICTS` also gates, and
+          `planRiskJudgeAction` needs a branch — small, but a real type change with tests pinned to
+          the two-label shape.
+      (c) LEAVE THE FIELDS, FIX ONLY THE ISSUE TITLE AND BODY so a human sees the cause first. Costs:
+          it repairs the human path and leaves the LEDGER — the thing every later analysis reads —
+          still asserting a maximum-confidence finding. **AND IT IS THE ONLY OPTION THAT REQUIRES
+          TOUCHING `src/run-task.ts`** (see the `files:` note), which is an argument against it here
+          beyond its merits.
+
+    (iv) **THE CAPTURE, AND WHERE THE TEXT ACTUALLY IS.** The seam is `realRiskJudge`: it does
+    `parseRiskJudgeVerdict(result.text)` and DROPS `result.text` on the same line. That is the only
+    place the raw output exists. `parseRiskJudgeVerdict` is a pure text->verdict function that returns
+    `FAIL_CLOSED_VERDICT` without the text, so the excerpt has to be carried either on the verdict
+    shape or captured at `realRiskJudge`. Establish which; do not do both. **THE PRECEDENT TO COPY IS
+    #1584's**: `REPORT_EXCERPT_CAP = 4000` and `capStderrExcerpt` in `src/lib/worker.ts`, plus its
+    \"absent, never empty\" discipline — a truly empty response must carry NO field rather than an
+    empty one, because an absent field and an empty one answer different questions. That distinction
+    is the whole point here: an empty judge response and an off-contract prose response are the two
+    hypotheses nobody can currently separate.
+
+    (v) **REDACTION: ANSWERED — NO REDACTION IS NEEDED, AND THE REASON IS STRUCTURAL RATHER THAN A
+    POLICY.** Verified at today's sha, not from memory: `RiskJudgeChange` has exactly two fields,
+    `description: string` and `files?: string[]` — no diff, no patch, no hunks. The call site passes
+    `description` as the task title plus the PR url, `files` as `task.files`, `gatesState` as review
+    state / capped flag / ci / arm-decision reason, and `planContext` as task id, title and type.
+    `buildRiskJudgePrompt` renders nothing else and states \"YOU ARE NOT SHOWN A DIFF\" in the prompt
+    itself. **AND THE JUDGE HAS NO TOOLS**: `RISK_JUDGE_TOOLS` is `[]`, and `worker.ts` applies it
+    (`if (args.tools) options.tools = args.tools` — an empty ARRAY is truthy, so the restriction is
+    real and the judge cannot read the worktree it is spawned in). So the judge cannot obtain code it
+    was never given, and everything it CAN echo is already public in the PR or already in the ledger.
+    **THE BOUND IS INHERITED, NOT OWNED** — it holds only while `RiskJudgeChange` carries no patch and
+    `RISK_JUDGE_TOOLS` stays empty. Record that in the code beside the excerpt, so a later change to
+    either is confronted with the excerpt it would start leaking through.
+
+    (vi) NOT IN SCOPE: whether the judge should be shown a diff (that is W1-T454's territory), the
+    confidence threshold's value, the escalation's issue class, and whether an unparseable response
+    should escalate at all — it should, and this task keeps that."
+  acceptance:
+    - claim: "an unparseable judge response is distinguishable from a genuine high-risk finding"
+      proof: "unit test: test/risk-judge.test.ts"
+    - claim: "the text that failed to parse is recorded on the decision row under a length cap"
+      proof: "unit test: test/risk-judge.test.ts"
+    - claim: "a parse failure still escalates and still withdraws the arm"
+      proof: "unit test: test/risk-judge.test.ts"
+  origin: recon#unparseable-risk-verdict-2026-08-14
+  plan_refs: ['W1-T454', 'W1-T248']
+  files: [src/lib/risk-judge.ts, test/risk-judge.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT. `sizingViolation` (`src/lib/task-linter.ts`) blocks at >=2
+    subsystems while risk<high and `files:` spans `src/lib/` and `test/`. The band is Rule 19's SPAN,
+    not blast radius — the blast radius is measured in design (ii) and is one string and one ledger
+    field.
+    `files:` WAS DERIVED BY INVOCATION COUNT, NOT PROSE MENTION. Measured over `test/` at f0ce71d:
+    `parseRiskJudgeVerdict` 14 occurrences, `assessRisk` 13, `runRiskJudge` 11, `planRiskJudgeAction`
+    10, `realRiskJudge` 4 — ALL of them in `test/risk-judge.test.ts`, which is also the file already
+    pinning both `confidence, 1` and `confidence, 0`. The three sibling suites carry far less of the
+    touched surface (`risk-judge-evidence-grammar` 6/3/3, `risk-judge-wiring` 4, `arm-at-open` 2/1)
+    and none asserts the fail-closed confidence, so none is declared.
+    **`src/run-task.ts` IS DELIBERATELY NOT DECLARED, AND THAT IS A MEASURED CHOICE.** Every string a
+    human reads — the issue `summary` and the issue `detail` — is INTERPOLATED there from values built
+    inside `src/lib/risk-judge.ts` (`verdict.confidence` directly, and `action.reason` from
+    `planRiskJudgeAction`), so options (a) and (b) both reach the issue title WITHOUT touching the
+    fleet's serialisation point. Only option (c) needs it. `src/run-task.ts` is 19,588 lines and every
+    task declaring it serialises against every other task that does (W1-T471, via
+    `partitionByFileOverlap` in `src/lib/dispatch-overlap.ts`), so if the implementer chooses (c) the
+    shard must be amended FIRST rather than the path added mid-run —
+    `inverseScopeUntouchedFiles` (`src/lib/review.ts`) fails a declared-but-untouched path exactly as
+    `scopeViolationFiles` fails an undeclared one, and W1-T473 dropped two paths for the same reason.
+    THIS SHARD'S OWN PATH IS DELIBERATELY NOT IN `files:` — adding it converts the `proof-scope`
+    warnings into a HARD `rule15-filing` violation, measured on W1-T464.
+    THE PROOFS ARE PURE-PATH FORWARD REFERENCES on purpose: the named tests do not exist yet, and
+    `test/risk-judge.test.ts` is a path rather than a symbol name, so nothing here guesses at a title
+    that has not been written."
