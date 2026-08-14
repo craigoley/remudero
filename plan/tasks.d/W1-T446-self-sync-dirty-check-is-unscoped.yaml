@@ -37,6 +37,22 @@
     `checkCliFreshness` REFUSES (blocking). `checkServiceFreshness` carries the identical line but
     only feeds `emit(\"daemon.tree_dirty\", {})` in run-task.ts — a ledger row, not a refusal. Same
     misread, different cost: a stall versus a spurious row.
+    EXHIBIT CORRECTED 2026-08-14 ON THE MINI — THE ARGUMENT ABOVE IS UNCHANGED AND STILL STANDS.
+    The two 2026-08-12 observations REMAIN VALID dirty-guard evidence: porcelain returned exactly one
+    line, `?? .claude/`, nothing staged, empty stash, and the sync refused twice. What is corrected is
+    the STANDING state of that checkout, because ANYONE WHO OPENS IT TODAY AS THE MOTIVATING CASE WILL
+    BE READING THE WRONG BRANCH OF THE FUNCTION.
+    MEASURED BY THIS SESSION at 2026-08-14T13:00Z, before the operator reset it: the tree was CLEAN
+    (`git status --porcelain` empty) while carrying ONE unpublished commit — `fix(automerge): ledger
+    every arm/merge site with its pr and lane` — and reading 1 ahead / 82 behind origin/main. A CLEAN
+    TREE CANNOT REACH THE `dirty` BRANCH: `checkCliFreshness` tests dirty FIRST and returns early. The
+    branch that fired was the NEXT one, `merge-base --is-ancestor HEAD origin/main` failing on that
+    commit, which returns `reason: diverged`. RELAXING THE DIRTY GUARD WOULD NOT HAVE UNSTUCK IT.
+    RE-MEASURED at 2026-08-14T13:34:39Z the reset had COMPLETED — porcelain 0, stash 0, staged 0, HEAD
+    equal to origin/main, 0 ahead and 0 behind — so that tree now trips NEITHER refusal and is no
+    longer an exhibit for anything. (A commissioning brief cited 84 behind; this session measured 82 at
+    13:00Z. Both are true at their own instant — origin/main moved between them. THE COUNT IS NOT THE
+    EVIDENCE; the ancestry failure is.)
     NOT THE SAME DEFECT AS W1-T445. That one (merged, #1662) added an `off-main` refusal to the same
     function because it moved a ref it should not have. This is the `dirty` refusal firing when
     nothing is at risk. Opposite directions — too eager here, not eager enough there — and both live
@@ -98,5 +114,37 @@
     proven only against a fake `git` would pass while the real `status`/`diff` disagreed.
     AND IT MUST ASSERT THE REF: a test that only checks `status !== \"refused\"` passes for an
     implementation that permits the sync and then fails to move anything.
-    NO SHA OR COUNT HERE SHOULD BE QUOTED FORWARD — `f8eefb5..70d52c2` and the one-line porcelain
-    were true at 2026-08-12T20:00Z on the mini."
+    Q1 — THE REFUSAL-TYPE RATES ARE NOT MEASURABLE, AND THAT IS ITSELF THE FINDING.
+    `checkCliFreshness` WRITES NOTHING TO THE LEDGER; it only `warn()`s to stderr, so no row records
+    whether a refusal was `dirty`, `diverged` or `off-main`. MEASURED across ALL THREE ledger forms on
+    the mini (666 `.gz`, 4 plain, 1 live) at 2026-08-14: the function's own four message substrings —
+    `refusing to auto-sync`, `has diverged from origin/main`, `never merging or rebasing on your
+    behalf`, `uncommitted changes` — all return ZERO, against a POSITIVE CONTROL of 2,009 `sweep.pass`
+    rows over the same corpus with the same tool and flags. The only freshness rows present are
+    `daemon.install_freshness` (11) and `daemon_selfrestart_for_freshness` (2), both written by
+    `checkServiceFreshness`, a DIFFERENT function. SO NOBODY CAN BE SHOWN WHICH HALF IS THE COMMON ONE,
+    and this shard must not imply otherwise. If the ruling needs that number, the rates have to be
+    instrumented first.
+    W1-T452 ALREADY SHRANK THE DIRTY POPULATION. #1731 (merged 2026-08-13T13:58:42Z) returns
+    `{status: worktree}` ABOVE the dirty branch, and its own comment says so: `It also skips dirty,
+    which a worktree mid-task always is.` A worker worktree is dirty mid-task AND diverged once it
+    commits, so that single return removed the ENTIRE worktree population from BOTH refusals; 82
+    worktrees are registered on this clone. WHAT REMAINS in the dirty population is non-worktree
+    checkouts — in practice the operator's own `main` and the daemon's live checkout.
+    Q2 — A DIVERGENCE REFUSAL MAY SIMPLY BE CORRECT, WHICH NARROWS THIS SHARD RATHER THAN WEAKENING IT.
+    An unpublished commit is work, and the function states one contract for both arms: never mutate,
+    never merge or rebase on the operator's behalf. The real case was resolved by archiving and
+    dropping that commit rather than asking the tool to reason about it. IF THAT READING HOLDS, the
+    scope here is the `dirty` guard ALONE and this amendment has removed a misleading exhibit and
+    nothing else. NOT A RULING — recorded so the ruling is not made against the wrong branch.
+    Q3 — WHAT A STALE CLI THERE COSTS, since it changes the stakes. `~/Remudero/remudero` is not a
+    spare checkout: MEASURED 2026-08-14, `com.remudero.daemon` (pid 83613) and `com.remudero.serve`
+    (pid 87805) BOTH run `/Users/craigoleyagent/Remudero/remudero/bin/rmd` ->
+    `node_modules/.bin/tsx src/run-task.ts`. THE RUNNING PAIR IS NOT AFFECTED — each holds its module
+    graph from process start — so a stale checkout costs (a) every NEW `rmd` invocation from that
+    directory, which is the binary the mini's sessions invoke, and (b) whatever the daemon boots into
+    at its NEXT restart. Both booted after the reset and are on origin/main now.
+    NO SHA OR COUNT ANYWHERE IN THIS SHARD SHOULD BE QUOTED FORWARD — `f8eefb5..70d52c2` and the
+    one-line porcelain were true at 2026-08-12T20:00Z; the clean/diverged and reset readings at
+    2026-08-14T13:00Z and 13:34:39Z; the ledger and worktree counts on the mini that same day. The
+    mini and Azure keep SEPARATE ledgers with no ssh route, so none of these is a claim about Azure."
