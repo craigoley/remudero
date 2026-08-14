@@ -1,0 +1,153 @@
+- id: W1-T480
+  title: "five read-only spawns are read-only only because an empty ARRAY is truthy in JavaScript, and every test that claims the property proves it one layer above the line that enforces it — nothing asserts the tool set the SDK actually receives"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: medium
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  rationale: "THE LINE, VERBATIM, RE-DERIVED AT 66ef336 — it is the ONLY occurrence of
+    `options.tools` anywhere in the repository:
+      src/lib/worker.ts:  if (args.tools) options.tools = args.tools;
+    and the value it guards, also re-derived at 66ef336:
+      src/lib/risk-judge.ts:  export const RISK_JUDGE_TOOLS: string[] = [];
+
+    **AN EMPTY ARRAY IS TRUTHY IN JAVASCRIPT, SO THE RESTRICTION IS REAL AND THE JUDGE CANNOT READ
+    THE WORKTREE IT IS SPAWNED IN. THAT IS CORRECT TODAY.** Written as `if (args.tools?.length)` —
+    a one-character-class edit that any reviewer would wave through as a defensive tidy-up — the
+    empty array becomes falsy, `options.tools` is never set, and the SDK default (ALL Claude Code
+    tools) applies instead. Nothing in the repo would say so.
+
+    **THIS IS NOT ONE CALL SITE. FIVE SPAWN-ARG BUILDERS ACROSS FOUR MODULES DEPEND ON THAT
+    TRUTHINESS**, derived by enumerating every `permissionMode:` construction site (25 of them) and
+    reading each one's `tools` key:
+      - `buildRiskJudgeSpawnArgs`         (src/lib/risk-judge.ts)      -> `RISK_JUDGE_TOOLS = []`
+      - `buildEscalationJudgeSpawnArgs`   (src/lib/escalate.ts)        -> `ESCALATION_JUDGE_TOOLS = []`
+      - `buildFlightJudgeSpawnArgs`       (src/lib/flight-judge.ts)    -> `JUDGE_TOOLS = []`
+      - `buildDecisionSummarySpawnArgs`   (src/lib/feedback.ts)        -> inline `tools: []`
+      - `buildFeedbackExpansionSpawnArgs` (src/lib/feedback.ts)        -> inline `tools: []`
+    The remaining 20 split into 8 passing a POPULATED list (`SPECIALIST_TOOLS`, `FIX_WORKER_TOOLS`,
+    `TRIAGE_WORKER_TOOLS`, `PLAN_WORKER_TOOLS`, `INBOX_DRAFT_WORKER_TOOLS`, isolation's `[\"Bash\"]`)
+    and 12 passing NO `tools` key at all — `undefined`, the SDK default, deliberately (the implement
+    worker, the recon spawns, `containment.ts`'s probe, and every `src/spike.ts` call). **THREE CASES,
+    AND THE DIFFERENCE BETWEEN TWO OF THEM IS ONE FALSY/TRUTHY STEP THAT IS INVISIBLE AT THE CALL
+    SITE.**
+
+    **WHAT IS PINNED, AND WHY IT DOES NOT HELP.** Five tests assert the property — and all five stop
+    one layer above the line that enforces it, asserting the return value of a PURE BUILDER:
+      test/risk-judge.test.ts        `assert.equal(args.tools, RISK_JUDGE_TOOLS)`
+      test/escalate.test.ts          `assert.equal(args.tools, ESCALATION_JUDGE_TOOLS)`
+      test/flight-judge.test.ts      `assert.equal(args.tools, JUDGE_TOOLS)`
+      test/feedback.test.ts          `assert.deepEqual(args.tools, [])`
+      test/decision-summary.test.ts  `assert.deepEqual(args.tools, [])`
+    **FOUR OF THE FIVE STATE THE SECURITY PROPERTY IN THEIR OWN TEST TITLE** — \"the judge cannot
+    write/edit, by construction\" — while proving only that a function with no side effects returns
+    an empty array. `buildRiskJudgeSpawnArgs` never calls `spawnWorker`. **SO ALL FIVE STAY GREEN
+    UNDER THE ONE-CHARACTER CHANGE, BY CONSTRUCTION**, and the suite would report a clean run while
+    five judges silently acquired a full tool set.
+
+    **THE ZERO, WITH ITS CONTROLS.** `options.tools` appears **0 times in `test/`** at 66ef336
+    (`git grep -c` exits 1). Controls, because a zero is not a measurement on its own: the same
+    string appears **1 time in `src/`** (the line above), so it is greppable; `options.` appears in
+    8 test files, so the query shape reaches test sources; and the five `args.tools` assertions above
+    prove a tool-set assertion is found WHEN ONE EXISTS. The absence is real.
+
+    **THIS REPO HAS A NAME FOR THE SHAPE AND A PRECEDENT THAT SOLVED IT.** `test/strict-probe.test.ts`
+    (W1-T98) exists because *\"'0 violations' from a fresh strict gate reads identically whether
+    strict is genuinely wired or silently inert\"* — its remedy is a committed probe driven through
+    the REAL binary that MUST fail one way and MUST pass the other, never an assertion on an
+    intermediate value. An empty tool list reads identically whether it is applied or silently
+    dropped. Same shape, same remedy.
+
+    **THE CODE IS CORRECT. THIS TASK PROPOSES NO SOURCE CHANGE.** The gap is that a security property
+    is held by an idiom nobody declared, and the assertion is missing at exactly the layer where the
+    property lives. That, and not a defect, is the whole case for filing."
+  design: "(i) **THE REMEDY IS A TEST, AND THE HARNESS ALREADY EXISTS.** `spawnWorker` takes an
+    injectable `queryFn` (`SpawnWorkerArgs.queryFn`), and `test/worker.test.ts` ALREADY drives
+    `spawnWorker` end to end through a `fakeQueryFn` whose parameter object carries the very
+    `options` the SDK would receive — it already reads `params.options.env` and calls
+    `params.options.spawnClaudeCodeProcess`. `test/worker-home-per-run.test.ts` runs the same shape
+    for both the success and error paths. **NOTHING NEW HAS TO BE BUILT; THE FAKE JUST HAS TO LOOK AT
+    `options.tools`.** `spawn-guard.ts`'s live-spawn refusal does not block this — injecting `queryFn`
+    is its own documented escape (`\"inject a fake: pass queryFn to spawnWorker\"`), which is why the
+    two suites above already run.
+
+    (ii) **ASSERT ALL THREE CASES — TWO OF THEM ARE THE DISCRIMINATOR AND ONE ALONE IS NOT ENOUGH.**
+    Following the strict-probe precedent, the test must separate outcomes rather than confirm one:
+      - `tools: []`        -> `options.tools` is PRESENT and deep-equals `[]`.
+      - `tools` ABSENT     -> `options.tools` is NOT SET AT ALL (`\"tools\" in options` is false), the
+                              12 sites that rely on the SDK default.
+      - populated list     -> passes through unchanged.
+    The first assertion is the falsifier: under `if (args.tools?.length)` an empty array yields
+    `options.tools === undefined`, so that assertion fails while the five builder tests stay green.
+    The second is what stops someone \"fixing\" the first by unconditionally assigning, which would
+    silently restrict the implement worker to an empty tool set — the opposite regression, and the
+    more damaging one.
+
+    (iii) **SEVERITY: A CORRECTNESS PROBLEM, NOT A CONTAINMENT ONE — AND THE SANDBOX ANSWER IS THE
+    REASON.** `settings/worker.json` (the template `renderWorkerSettings` renders, which the judge
+    inherits from its run) denies reads of `~/.ssh/**`, `~/.aws/**` and `~/.config/remudero/**` twice
+    over — under `permissions.deny` AND under `sandbox.filesystem.denyRead` — runs with
+    `sandbox.enabled: true, failIfUnavailable: true`, allowlists four network domains, and hooks
+    `deny-floor.sh` onto `Bash|Write|Edit|MultiEdit|NotebookEdit` as a PreToolUse floor that the
+    fleet's `containment preflight` then proves engaged. **SO CREDENTIALS AND OUTSIDE-CWD WRITES ARE
+    ALREADY COVERED AND WOULD STAY COVERED.** What the sandbox does NOT and CANNOT bound is a READ
+    INSIDE THE CWD — the cwd IS the worktree, by design.
+    That is precisely the exposure. `buildRiskJudgePrompt` tells the judge \"YOU ARE NOT SHOWN A DIFF
+    (W1-T454)\" and `RiskJudgeChange` carries only `description` and `files` — no patch. **THE EMPTY
+    TOOL LIST IS WHAT MAKES THAT PROMISE TRUE**; with tools the judge could simply read the diff it
+    is documented not to see. And W1-T454's own remedy would then start lying: `evidenceQualifiedReason`
+    prefixes every reason with \"on the change's description/files alone, no diff was read\", a
+    deterministic string transform that cannot know whether a diff was read. A tool-equipped judge
+    would emit a FALSE disclaimer on every reason. **That is a correctness and honesty failure in a
+    rung that gates merges — remedied by a test, not by a sandbox change and not by a code change.**
+    Cost is a secondary and much smaller effect: these builders pass `maxTurns` from the cheapest
+    mount but no `maxBudgetUsd`, so an exploring judge would burn turns rather than run away.
+
+    (iv) **WHY NOT ALSO MAKE THE GUARD EXPLICIT.** Rewriting `if (args.tools)` as an explicit
+    `!== undefined` test would read better and is tempting to bundle. It is DELIBERATELY OUT OF
+    SCOPE: with no test, that edit is exactly as unverified as the one this task exists to catch, and
+    once the test lands the edit is safe for anyone to make at any time. Landing the assertion first
+    is the point. If a later task wants the explicit form, it inherits a falsifier — which is the
+    whole benefit.
+
+    (v) NOT IN SCOPE: changing any tool list's contents, the sandbox or deny-floor policy, whether the
+    judge should be shown a diff (W1-T454's territory), and the 12 sites that pass no `tools` key —
+    their SDK-default behaviour is deliberate and this task pins it rather than altering it."
+  acceptance:
+    - claim: "a worker spawned with an empty tool list reaches the SDK with an empty tool list"
+      proof: "unit test: test/worker.test.ts"
+    - claim: "a worker spawned with no tool list leaves the option unset"
+      proof: "unit test: test/worker.test.ts"
+    - claim: "a populated tool list reaches the SDK unchanged"
+      proof: "unit test: test/worker.test.ts"
+  origin: recon#empty-toolset-truthiness-2026-08-14
+  plan_refs: ['W1-T454', 'W1-T98']
+  files: [test/worker.test.ts]
+  status: queued
+  attempts: 0
+  note: "**NO `src/` PATH IS DECLARED AND THAT IS THE FINDING, NOT AN OVERSIGHT.** `src/lib/worker.ts`
+    is CORRECT at 66ef336; this task adds the assertion that was missing and changes no behaviour. A
+    shard proposing a source edit here would be overreach — see design (iv).
+    `files:` WAS DERIVED BY INVOCATION COUNT. Measured over `test/` at 66ef336, `spawnWorker` appears
+    25 times in `test/worker.test.ts`, 16 in `test/run-task.test.ts`, 10 in
+    `test/worker-credential-preflight.test.ts`, 9 each in `test/worker-home-per-run.test.ts` and
+    `test/spawn-guard.test.ts`. Only FOUR suites drive it end to end through an injected `queryFn`
+    (`worker`, `worker-home-per-run`, `spawn-guard`, `headroom-sdk-source`), and `test/worker.test.ts`
+    is the highest-count member of that set AND already owns the `fakeQueryFn` harness this test
+    needs. **APPEND THERE AND REUSE THAT HARNESS — DO NOT DUPLICATE ~40 LINES OF FAKE-SDK
+    SCAFFOLDING INTO A NEW FILE**, which is why exactly one path is declared and why it is that one.
+    Two cautions on that file, both from CLAUDE.md and neither a blocker: append carefully, because
+    two PRs appending to the same suite's TAIL can produce a conflict region that cuts before a
+    shared closing `});`; and note this task adds NO source lines, so it is not coverage-load-bearing
+    and the own-file rule for coverage-critical tests does not apply.
+    `risk: medium` IS SET UP FRONT. `files:` spans ONE subsystem (`test/`), so `sizingViolation`
+    (`src/lib/task-linter.ts`), which blocks at >=2 subsystems below `high`, does not apply — `high`
+    would misreport a three-assertion test as a two-subsystem change. `src/run-task.ts` is NOT
+    declared: it is 19,588 lines and every task naming it serialises against every other task that
+    does (W1-T471, via `partitionByFileOverlap`), and nothing in this task touches it.
+    THIS SHARD'S OWN PATH IS DELIBERATELY NOT IN `files:` — adding it converts the `proof-scope`
+    warnings into a HARD `rule15-filing` violation, measured on W1-T464.
+    THE PROOFS ARE PURE-PATH FORWARD REFERENCES: the tests do not exist yet, and a path is safe to
+    forward-reference where a symbol name would be a guess."
