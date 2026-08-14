@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadPlan, type Plan, type Task } from "../src/lib/plan.js";
-import { daemonCommand, ledgerPathFor, type RunResult } from "../src/run-task.js";
+import { daemonCommand, ledgerPathFor, runInflightLockSweepRung, type RunResult } from "../src/run-task.js";
 import { CLAUDE_BIN_ENV_OVERRIDE, claudeExecutableCache } from "../src/lib/worker.js";
 import { HEADROOM_LIMIT_PCT, type UsageSnapshot } from "../src/lib/headroom.js";
 import {
@@ -28,7 +28,7 @@ import {
   type HeadroomPolicy,
   type OrphanedRun,
 } from "../src/lib/daemon.js";
-import { resolveHeadroomEnabled } from "../src/lib/config.js";
+import { resolveHeadroomEnabled, type Config } from "../src/lib/config.js";
 import { runSweep, DEFAULT_SWEEP_POLICY } from "../src/lib/sweep.js";
 import { pauseDetail, requestPause, requestStop, resumeFleet, stopDetail } from "../src/lib/fleet-control.js";
 import type { MergedSet, OpenPrCheck } from "../src/lib/drain.js";
@@ -2181,7 +2181,7 @@ test("daemonBoot: calls the injected lock sweep once and logs daemon.lock_sweep 
   let calls = 0;
   const sweepLocks = () => {
     calls += 1;
-    return { reaped: ["W1-T1"], kept: ["W1-T184"] };
+    return { reaped: ["W1-T1"], kept: ["W1-T184"], live: ["W1-T184"], unverifiableForeignHost: [] };
   };
   daemonBoot((step, extra = {}) => lines.push({ step, extra }), { PATH: "/usr/bin" }, undefined, sweepLocks);
   assert.equal(calls, 1, "swept exactly once at boot, not per poll");
@@ -2195,6 +2195,65 @@ test("daemonBoot: with no lock sweep injected, no daemon.lock_sweep line is writ
   const lines: Array<{ step: string }> = [];
   daemonBoot((step) => lines.push({ step }), { PATH: "/usr/bin" });
   assert.equal(lines.filter((l) => l.step === "daemon.lock_sweep").length, 0);
+});
+
+// ── W1-T461: `kept` collapsed a confirmed-live holder with an unverifiable foreign-host one, on
+// BOTH the boot sweep above and the per-poll rung below — a container replacement strands the
+// latter forever (isHolderStale's rung 1, W1-T396, never reaps a foreign host), so a split
+// reported at only one site would leave the other still silently misleading.
+
+test("daemonBoot: daemon.lock_sweep carries `live` and `unverifiable_foreign_host` as their OWN counts, distinct from each other", () => {
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const sweepLocks = () => ({
+    reaped: ["W1-T900"],
+    kept: ["W1-T184", "W1-T395"],
+    live: ["W1-T184"],
+    unverifiableForeignHost: ["W1-T395"],
+  });
+  daemonBoot((step, extra = {}) => lines.push({ step, extra }), { PATH: "/usr/bin" }, undefined, sweepLocks);
+  const swept = lines.find((l) => l.step === "daemon.lock_sweep");
+  assert.ok(swept, "the boot sweep is legible on its own ledger step");
+  assert.equal(swept?.extra.reaped, 1);
+  assert.equal(swept?.extra.kept, 2, "the total is unchanged — a superset of the two new counts");
+  assert.equal(swept?.extra.live, 1, "a same-host confirmed-alive holder has its own count");
+  assert.equal(
+    swept?.extra.unverifiable_foreign_host,
+    1,
+    "a foreign-host holder — never verified alive — is reported distinctly from `live`",
+  );
+});
+
+test("runInflightLockSweepRung: daemon.inflight_sweep (the per-poll rung) ALSO carries `live`/`unverifiable_foreign_host` — not just the boot sweep", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-daemon-inflight-sweep-"));
+  try {
+    const dir = join(root, "state", "inflight");
+    mkdirSync(dir, { recursive: true });
+    // A confirmed-live same-host holder (this test process's own pid) beside a foreign-host
+    // lock naming a container-shaped host this process can never verify or clear.
+    writeFileSync(
+      join(dir, "W1-T184.lock"),
+      JSON.stringify({ pid: process.pid, run_id: "live-r", host: hostname(), startedAt: new Date().toISOString() }),
+    );
+    writeFileSync(
+      join(dir, "W1-T395.lock"),
+      JSON.stringify({ pid: 4242, run_id: "stranded-r", host: "container-shaped-abc123", startedAt: "2026-08-11T00:00:00Z" }),
+    );
+    const lines: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+    const result = runInflightLockSweepRung({ root } as Config, (step, extra) => lines.push({ step, extra }));
+
+    assert.deepEqual(result.reaped, [], "neither lock's holder is dead on this host");
+    assert.deepEqual(result.live.sort(), ["W1-T184"]);
+    assert.deepEqual(result.unverifiableForeignHost, ["W1-T395"]);
+    assert.ok(existsSync(join(dir, "W1-T395.lock")), "the foreign-host lock is never deleted");
+
+    const swept = lines.find((l) => l.step === "daemon.inflight_sweep");
+    assert.ok(swept, "the per-poll rung is legible on its own ledger step");
+    assert.equal(swept?.extra?.live, 1);
+    assert.equal(swept?.extra?.unverifiable_foreign_host, 1, "the SAME split as daemon.lock_sweep, on the per-poll rung");
+    assert.equal(swept?.extra?.kept, 2);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 // ── daemonBoot: W1-T113 part (i) — resolve + log the claude binary ONCE ────

@@ -166,8 +166,24 @@ export function withInflightLock<T>(
 export interface InflightSweepResult {
   /** Task ids whose lock was removed because its holder pid is gone. */
   reaped: string[];
-  /** Task ids whose lock was left because its holder is still alive. */
+  /** Task ids whose lock was left alone for ANY reason other than a reap: a confirmed-live
+   *  holder ({@link live}), an unverifiable foreign-host holder ({@link unverifiableForeignHost}),
+   *  or the rare race outcomes `reclaimStaleLock` reports as "missing" (the file vanished between
+   *  this sweep's readdir and its read) or "lost" (a real acquirer reclaimed it first) — neither of
+   *  which carries a holder to classify. Superset of `live` + `unverifiableForeignHost`; kept for
+   *  callers that only want the total non-reaped count. */
   kept: string[];
+  /** Task ids whose lock was left because a real, SAME-HOST holder is confirmed alive —
+   *  `reclaimStaleLock`'s "live" outcome with `holder.host` matching this host (or absent, the
+   *  pre-W1-T368 shape). This is the ONLY bucket `isHolderStale` actually verified. */
+  live: string[];
+  /** Task ids whose lock was left because it names a DIFFERENT host than this one.
+   *  `isHolderStale`'s rung 1 (W1-T396) refuses to reason about a foreign host's process table,
+   *  so this lock's holder was NEVER established to be alive — only unreclaimable from here. A
+   *  container replacement strands exactly these: nothing on the new container can ever verify
+   *  or clear them, so collapsing this into {@link live} (as the sweep did before this field
+   *  existed) reads a permanently-stuck lock as indistinguishable from healthy live work. */
+  unverifiableForeignHost: string[];
 }
 
 /**
@@ -202,10 +218,17 @@ export function sweepStaleInflightLocks(
     onLostReclaim?: (detail: { lockPath: string; reason: string }) => void;
     /** TEST-ONLY seam forwarded to {@link reclaimStaleLock}'s `beforeDelete`. */
     __beforeReclaimDelete?: () => void;
+    /** This host's own identity — forwarded to {@link isHolderStale} (so its rung-1 host
+     *  comparison and this sweep's `live`/`unverifiableForeignHost` classification always agree)
+     *  and used directly below. Defaults to `os.hostname()`; injectable so a test can simulate a
+     *  foreign host without controlling the real machine name (mirrors
+     *  {@link import("./fs-race-safe.js").IsHolderStaleOpts.hostname}). */
+    hostname?: () => string;
   } = {},
 ): InflightSweepResult {
   const isAlive = opts.isPidAlive ?? defaultIsPidAlive;
-  const result: InflightSweepResult = { reaped: [], kept: [] };
+  const myHost = (opts.hostname ?? hostname)();
+  const result: InflightSweepResult = { reaped: [], kept: [], live: [], unverifiableForeignHost: [] };
   if (!existsSync(inflightDir)) return result;
 
   for (const entry of readdirSync(inflightDir)) {
@@ -214,18 +237,34 @@ export function sweepStaleInflightLocks(
     const lockPath = inflightLockPath(inflightDir, taskId);
     const reclaim = reclaimStaleLock(lockPath, {
       parseHolder: parseInflightLockInfo,
-      isStale: (held) => isHolderStale(held, { isPidAlive: isAlive, getProcessStartTime: opts.getProcessStartTime }),
+      isStale: (held) =>
+        isHolderStale(held, {
+          isPidAlive: isAlive,
+          getProcessStartTime: opts.getProcessStartTime,
+          hostname: opts.hostname,
+        }),
       onLostReclaim: opts.onLostReclaim,
       beforeDelete: opts.__beforeReclaimDelete,
     });
     if (reclaim.outcome === "reclaimed") {
       result.reaped.push(taskId);
-    } else {
-      // "live" (a real holder), "missing" (already gone), or "lost" (raced with a real
-      // acquire that reclaimed it first) — none of these is a reap this sweep performed,
-      // so count it as kept rather than claiming one that did not happen.
-      result.kept.push(taskId);
+      continue;
     }
+    // "live" (a real holder — split below), "missing" (already gone), or "lost" (raced with a
+    // real acquire that reclaimed it first) — none of these is a reap this sweep performed, so
+    // count it as kept rather than claiming one that did not happen.
+    result.kept.push(taskId);
+    if (reclaim.outcome === "live") {
+      // Mirror isHolderStale's rung 1 EXACTLY (same `myHost`, same "absent host ⇒ skip the
+      // check" reading) so the split can never disagree with the predicate that already decided
+      // this lock was not reaped: a foreign host is UNVERIFIABLE, not confirmed alive.
+      if (reclaim.holder.host !== undefined && reclaim.holder.host !== myHost) {
+        result.unverifiableForeignHost.push(taskId);
+      } else {
+        result.live.push(taskId);
+      }
+    }
+    // "missing"/"lost" carry no holder to classify — counted in `kept` only, as before.
   }
   return result;
 }

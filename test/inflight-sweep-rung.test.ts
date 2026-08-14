@@ -68,7 +68,7 @@ test("the rung is best-effort — an unreadable inflight directory is logged, ne
   const { log, lines } = capture();
 
   const result = runInflightLockSweepRung({ root } as Config, log);
-  assert.deepEqual(result, { reaped: [], kept: [] });
+  assert.deepEqual(result, { reaped: [], kept: [], live: [], unverifiableForeignHost: [] });
   const line = lines.find((l) => l.step === "daemon.inflight_sweep");
   assert.ok(line?.extra?.error, "the failure is named on the ledger line rather than swallowed silently");
 });
@@ -77,7 +77,7 @@ test("a missing inflight directory sweeps to an empty result without creating on
   const root = mkdtempSync(join(tmpdir(), "rmd-inflight-sweep-none-"));
   const { log } = capture();
   const result = runInflightLockSweepRung({ root } as Config, log);
-  assert.deepEqual(result, { reaped: [], kept: [] });
+  assert.deepEqual(result, { reaped: [], kept: [], live: [], unverifiableForeignHost: [] });
   assert.equal(existsSync(join(root, "state", "inflight")), false, "the sweep is read-only about directory existence");
 });
 
