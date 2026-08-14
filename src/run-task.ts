@@ -1,4 +1,5 @@
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import { promisify } from "node:util";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type Server } from "node:http";
@@ -1774,14 +1775,78 @@ interface GateOutcome {
  * PRs this repo ever booked as a check-wait timeout later merged, so a bound
  * on ELAPSED POLLS was firing on a healthy PR every single time it fired).
  */
-async function pollToGate(
+// ── W1-T463: THE CI WAIT MUST NOT BLOCK THE DAEMON'S EVENT LOOP ──────────────────────────────
+//
+// THE DEFECT, AND WHY IT WAS INVISIBLE. Both poll loops below were declared `async` and contained
+// ZERO `await`: the GitHub read was `ghJson` (`execFileSync`) and the inter-poll delay was
+// `execFileSync("sleep", …)` — a BLOCKING CHILD PROCESS, not a timer. So the daemon's single JS
+// thread never yielded for the whole of a CI wait, and every timer in the process was frozen,
+// including `startInFlightTicker`'s `await deps.sleep(pollIntervalMs)` (`src/lib/daemon.ts`), whose
+// `sleep` is `(ms) => new Promise((resolve) => setTimeout(resolve, ms))`.
+// MEASURED 2026-08-14: `verdict W1-T481` and `daemon.alive` share the millisecond
+// `2026-08-14T13:25:35.828Z` — an overdue timer firing the instant the thread was released after a
+// 16m55s wait. ~3.9 hours of blocking sleep against ~38 hours of uptime, and 17 of 19 measured
+// silence windows contain `ci.polling`.
+// AND `ci.polling` ROWS KEPT APPEARING THROUGHOUT, which is why this read as something else:
+// `appendLedger` (`src/lib/ledger.ts`) is `openSync`/`writeSync`/`closeSync`, fully synchronous, so
+// it logs happily while the loop is frozen. THOSE ROWS PROVE THE THREAD WAS RUNNING; THEY PROVE
+// NOTHING ABOUT THE LOOP. THE SWEEP AND THE TICKER WERE INNOCENT — a completed light pass takes
+// 4.0s, and passes either side of that window took 7s, 12s, 19s and 27s.
+//
+// BOTH PRIMITIVES YIELD OR THE FIX IS PARTIAL. Fixing only the sleep would still freeze the loop for
+// the duration of every `gh` call: MEASURED on this host, `gh pr view --json statusCheckRollup` runs
+// 510–1020ms over 8 samples, median ~630ms. Against a 6s cadence that is a ~10% duty cycle — small,
+// but it is a number rather than an assertion, and it is removed entirely by reading through
+// {@link ghJsonAsync} rather than left as a residual.
+
+/** The always-yielding delay — the SAME shape `DaemonDeps.sleep` (`src/lib/daemon.ts`) already uses. */
+const yieldingSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+const execFileAsync = promisify(execFile);
+
+/**
+ * `ghJson`'s non-blocking twin, deliberately LOCAL to this module rather than added beside `ghJson`
+ * in `src/lib/worker.ts`: that file is not in W1-T463's declared `files:`, and the shard wins. It is
+ * used ONLY by the two poll loops below — every other `gh` read in the tree is unchanged.
+ *
+ * THE UNBOUNDED-`gh` EXPOSURE IS INHERITED, NOT INTRODUCED, AND IS NOT FIXED HERE. Like `ghJson`
+ * this carries `maxBuffer` and NO `timeout`; of the 41 real `execFileSync("gh", …)` sites in the
+ * tree exactly 2 are bounded, both in `src/lib/status.ts` under `GH_CALL_TIMEOUT_MS`. A hung `gh`
+ * here is unbounded — but it no longer holds the event loop while it hangs, which is a strictly
+ * different (and much smaller) failure. Bounding it is its own task.
+ */
+async function ghJsonAsync(args: string[]): Promise<unknown> {
+  const { stdout } = await execFileAsync("gh", args, { encoding: "utf8", maxBuffer: 1 << 24 });
+  return JSON.parse(stdout);
+}
+
+/**
+ * The two seams the poll loops below take, both defaulted to the real thing. Injectable ONLY so a
+ * test can drive the real loop without a network or a six-second wall clock — production supplies
+ * neither, and `{}` is byte-identical to the pre-W1-T463 call shape at every existing call site.
+ */
+export interface PollDeps {
+  /** Defaults to {@link ghJsonAsync}. */
+  readJson?: (args: string[]) => Promise<unknown>;
+  /** Defaults to {@link yieldingSleep}. */
+  sleep?: (ms: number) => Promise<void>;
+}
+
+// EXPORTED INLINE, not on the tail export list its sibling `waitForCiGreen` rides: that list is the
+// LAST source line in this file, where `--experimental-test-coverage` stamps `DA:<line>,0` on the
+// trailing records, so adding a name to it costs a permanently-uncoverable added line at
+// diff-coverage. This declaration sits among covered code.
+export async function pollToGate(
   prUrl: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
   everySec = 6,
+  deps: PollDeps = {},
 ): Promise<GateOutcome> {
+  const read = deps.readJson ?? ghJsonAsync;
+  const sleep = deps.sleep ?? yieldingSleep;
   const readings: (RollupEntry[] | undefined)[] = [];
   for (let i = 0; ; i++) {
-    const v = ghJson(["pr", "view", prUrl, "--json", "state,statusCheckRollup"]) as {
+    const v = (await read(["pr", "view", prUrl, "--json", "state,statusCheckRollup"])) as {
       state: string;
       statusCheckRollup?: RollupEntry[];
     };
@@ -1812,7 +1877,8 @@ async function pollToGate(
         checks: roll.map((c) => `${c.name ?? c.context}:${c.conclusion ?? c.status ?? c.state}`),
       });
     }
-    execFileSync("sleep", [String(everySec)]);
+    // W1-T463: see `waitForCiGreen`'s note — a timer, not a blocking child process.
+    await sleep(everySec * 1000);
   }
 }
 
@@ -1987,10 +2053,13 @@ async function waitForCiGreen(
   prUrl: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
   everySec = 6,
+  deps: PollDeps = {},
 ): Promise<"green" | "red" | "timeout"> {
+  const read = deps.readJson ?? ghJsonAsync;
+  const sleep = deps.sleep ?? yieldingSleep;
   const readings: (RollupEntry[] | undefined)[] = [];
   for (let i = 0; ; i++) {
-    const v = ghJson(["pr", "view", prUrl, "--json", "statusCheckRollup"]) as {
+    const v = (await read(["pr", "view", prUrl, "--json", "statusCheckRollup"])) as {
       statusCheckRollup?: RollupEntry[];
     };
     const state = ciGateFromRollup(v.statusCheckRollup);
@@ -2005,7 +2074,10 @@ async function waitForCiGreen(
       log("ci.stalled", { pending: stall.pending, identicalPolls: STALL_WINDOW });
       return "timeout";
     }
-    execFileSync("sleep", [String(everySec)]);
+    // W1-T463: `await` a TIMER, never `execFileSync("sleep", …)`. The cadence is byte-identical —
+    // `everySec` seconds between polls, unchanged — but the thread is now RELEASED for the whole
+    // of it instead of held by a blocking child process.
+    await sleep(everySec * 1000);
   }
 }
 
