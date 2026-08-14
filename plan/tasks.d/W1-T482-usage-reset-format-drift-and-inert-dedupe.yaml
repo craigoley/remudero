@@ -1,0 +1,119 @@
+- id: W1-T482
+  title: "the upstream flipped its reset text to ISO-8601 on 2026-08-12 and `parseResetInstant` accepts only human forms, so the headroom curve lost its input — and the log bound meant to cap the fallout is INERT because it dedupes on a string carrying microseconds"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  rationale: "RE-DERIVED ON THE MAC MINI at 2ccb3fc. PROVENANCE PER NUMBER, BECAUSE THE TWO HOSTS KEEP
+    SEPARATE LEDGERS AND THERE IS NO SSH ROUTE FROM HERE. Every source fact is a TREE fact and is
+    host-independent. Every ledger figure below is THE MINI'S OWN, swept across all three forms
+    (666 gz + 4 plain + 1 live); the commissioning brief's Azure figures are carried as AZURE and are
+    NOT re-verifiable from this host. The two corpora are reported separately and never merged.
+
+    (0) THIS FINDING IS SMALL, AND THAT IS THE HONEST HEADLINE — say it before the detail, because the
+    detail reads alarming and the consequence is not. The lost input feeds a ceiling that FAILS
+    CONSERVATIVE. Nothing over-spends. The real cost is a few percent of unused budget on the final
+    day of each window, plus 335 wasted ledger rows on Azure competing for a 200-row retention cap.
+
+    (1) THE PARSER DID WORK AND THE DRIFT IS DATED. This is the first thing to establish, because
+    `the parser never matched` would have been a much bigger finding — and it is FALSE.
+    `resolveHeadroomLimitPct` returns 100 only via the `maxHoursToReset: 24` rung, which is reachable
+    only from a non-null finite `hoursToReset`, i.e. FROM A SUCCESSFUL PARSE. MEASURED ON THE MINI:
+    3,391 distinct `daemon.headroom` rows carry `limit_pct` of exactly two values — **1,482 at 100 and
+    1,853 at 95** — so the relaxed rung was reached 1,482 times, the earliest at
+    2026-07-28T11:01:01Z. THE PARSER IS NOT AND WAS NOT BLIND.
+    AND THE CHANGEOVER IS DATED TO THE HOUR, on the mini's own clock: the LAST `limit_pct: 100` row is
+    2026-08-12T17:03:56.867Z and the FIRST `daemon.usage_reset_unrecognised` row is
+    2026-08-12T18:10:08.645Z — a gap of about 66 minutes. The regex has ONE commit of history
+    (`373853a`, #531, W1-T197) and has never been edited since it shipped, so nothing on our side
+    changed at that moment.
+
+    (2) SO THE REGEX IS CORRECT HISTORY, NOT A MISTAKE.
+    THE FIX IS TO ACCEPT BOTH RATHER THAN REPLACE ONE. `parseResetInstant` (`src/lib/daemon.ts`) has THREE branches and every one is a human
+    form — a month-day form
+    `^([A-Za-z]{3,9})\\s+(\\d{1,2})\\s*(?:,|at)?\\s*(\\d{1,2})(?::(\\d{2}))?\\s*(am|pm)$`, a bare
+    time-of-day form, and a bare weekday form. There is NO `Date.parse` and no ISO branch anywhere in
+    the function. Given (1), those branches were matching real upstream text for at least a fortnight,
+    so deleting them to install an ISO parser would discard a working reader for a format that may
+    return. The upstream now emits perfectly valid ISO-8601 with offset and microseconds —
+    `2026-08-13T03:19:59.748109+00:00` — which `Date.parse` handles natively.
+    BOTH WINDOWS CARRY THE SAME SHAPE, so no second format is hiding: the mini's rows split across
+    `weekly (all models)` and `session (5h)` and ALL 56 distinct raws are ISO-shaped, with a control
+    of ZERO human-form raws among them.
+
+    (3) THE FALLBACK IS CONSERVATIVE, WHICH IS WHY (0) IS TRUE. `resolveHeadroomLimitPct`
+    (`src/lib/daemon.ts`) takes `hoursToReset: number | null`, and on `null` returns
+    `policy[policy.length - 1]?.limitPct`. `buildDefaultHeadroomPolicy` is
+    `[{maxHoursToReset: 24, limitPct: 100}, {maxHoursToReset: Infinity, limitPct: holdLimitPct}]`, so
+    the fallback resolves to `HEADROOM_LIMIT_PCT` = 95 (`src/lib/headroom.ts`) — the ORDINARY ceiling,
+    never the relaxed one. The function's own doc states the rule: `uncertainty is NEVER read as we
+    must be in the final day; the ceiling only ever relaxes on a CONFIRMED close reset, never on a
+    parse failure`. A READING TRAP WORTH NAMING: that doc calls the fallback rung the `LAST (widest)`
+    rung — widest in its `maxHoursToReset` bracket, STRICTEST in its `limitPct`. So the defect is
+    UNDER-USE of about five percentage points of headroom on a window's final day, in the safe
+    direction. It is NOT the dangerous direction, and no remedy should be justified as if it were.
+
+    (4) THE DEDUPE IS INERT BY CONSTRUCTION. The emitter suppresses with
+    `if (reportedUnrecognisedResets.has(raw)) return;`, seeded across restarts by
+    `priorUnrecognisedResetStrings` (`src/lib/daemon.ts`), which does `out.add(l.raw)` — keyed on the
+    WHOLE RAW STRING. Its own comment states the intent: `ONCE PER DISTINCT STRING, NOT PER TICK`,
+    sized against `~1,440 identical lines a day`. MICROSECOND PRECISION DEFEATS THAT EXACTLY: every
+    tick produces a string no previous tick produced. MEASURED ON THE MINI: 56 rows, 56 distinct raws,
+    ZERO suppressed — a 1:1 ratio. CARRIED FROM AZURE, not verifiable here: 335 rows, 335 distinct
+    raws, 0 suppressed. Two independent corpora, same ratio, same conclusion.
+    THE SECOND COST IS RETENTION: `daemon.usage_reset_unrecognised` is in
+    `DECISION_RELEVANT_LEDGER_STEPS` (`src/lib/ledger.ts`), so those rows compete for the
+    200-newest-per-step cap — the same cap that recently made 100 of 207 escalated ids invisible to a
+    different dedupe.
+
+    (5) THE DEDUPE OPTIONS, RECORDED AND NOT RANKED: key on `window` rather than `raw` (two values, so
+    at most two rows per boot); key on a truncated or second-precision form; or drop the set entirely
+    and log ONCE PER BOOT, which is what the comment was reaching for.
+    WHATEVER IS CHOSEN, A SUPPRESSED ROW MUST NOT MEAN A LOST SAMPLE. The emitter's own comment is the
+    argument: `CARRY THE STRING — the whole value is knowing WHAT could not be parsed. A line saying
+    only parse failed would have saved nobody the three-hour outage.` This repo has twice been unable
+    to diagnose a parse failure because the input was not kept, so a coarser KEY must still carry a
+    representative raw in the row it does emit."
+  acceptance:
+    - claim: the shard establishes that the parser previously matched and dates the changeover
+      proof: "grep: THE PARSER DID WORK AND THE DRIFT IS DATED in plan/tasks.d/W1-T482-usage-reset-format-drift-and-inert-dedupe.yaml"
+    - claim: the shard establishes the missing-instant fallback is the strict ceiling rather than a relaxation
+      proof: "grep: THE FALLBACK IS CONSERVATIVE in plan/tasks.d/W1-T482-usage-reset-format-drift-and-inert-dedupe.yaml"
+    - claim: the shard establishes the suppression set can never fire against microsecond precision
+      proof: "grep: THE DEDUPE IS INERT BY CONSTRUCTION in plan/tasks.d/W1-T482-usage-reset-format-drift-and-inert-dedupe.yaml"
+    - claim: the shard requires the human forms to be kept alongside a new ISO reader
+      proof: "grep: ACCEPT BOTH RATHER THAN REPLACE ONE in plan/tasks.d/W1-T482-usage-reset-format-drift-and-inert-dedupe.yaml"
+    - claim: the shard requires any coarser dedupe key to keep carrying the unparsed input
+      proof: "grep: A SUPPRESSED ROW MUST NOT MEAN A LOST SAMPLE in plan/tasks.d/W1-T482-usage-reset-format-drift-and-inert-dedupe.yaml"
+    - claim: the shard states plainly that the consequence is minor rather than dangerous
+      proof: "grep: THIS FINDING IS SMALL in plan/tasks.d/W1-T482-usage-reset-format-drift-and-inert-dedupe.yaml"
+    - claim: an ISO reset string resolves to an instant and the human forms still resolve
+      proof: "unit test: test/daemon.test.ts"
+  origin: recon#usage-reset-format-drift-2026-08-14
+  plan_refs: ["W1-T197", "W1-T249"]
+  files: [src/lib/daemon.ts, test/daemon.test.ts, test/usage-reset-unrecognised.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT. `sizingViolation` (`src/lib/task-linter.ts`) blocks at
+    `>=2 subsystems while risk<high`, and `files:` spans `src/lib/` and `test/`. The band is Rule 19's
+    SPAN, not blast radius — the runtime effect is one regex branch and one dedupe key.
+
+    `files:` IS DERIVED BY INVOCATION COUNT, COUNTING OCCURRENCES RATHER THAN LINES, and is kept to
+    three paths. `src/lib/daemon.ts` holds BOTH the parser and the emitter, so it is genuinely
+    touched. `test/daemon.test.ts` invokes `parseResetInstant(` 6 times and `resolveHeadroomLimitPct(`
+    8 — the heaviest parser coverage. `test/usage-reset-unrecognised.test.ts` is the ONLY file
+    invoking `priorUnrecognisedResetStrings(` (twice) and is where the dedupe change must be proven.
+    DELIBERATELY EXCLUDED, with reasons: `test/headroom-past-dated-ceiling.test.ts` (10
+    `resolveHeadroomLimitPct(` but only 1 `parseResetInstant(`) asserts the negative-hours clause, and
+    `test/headroom-resetless.test.ts` (5 and 1) asserts the null-instant fallback — this task makes
+    that fallback fire LESS OFTEN but does not change what it returns, so neither file's assertions
+    move.
+
+    DECLARING `src/lib/daemon.ts` IS EXPENSIVE AND IS DONE WITH EYES OPEN: 36 tasks already declare it
+    in `files:`, so `partitionByFileOverlap` will serialise this task against every one of them that
+    is eligible at the same tick. It is declared anyway because the parser and the emitter both live
+    there and cannot be fixed without it. The shard's own path is NOT declared — adding it converts
+    the endemic proof-scope warnings into one hard `rule15-filing` violation."
