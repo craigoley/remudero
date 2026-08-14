@@ -22,12 +22,34 @@ name: Fleet Heartbeat Watch
 #
 # ── BRANCH ABSENT MEANS NOT INSTALLED, AND IS SILENT ──────────────────────────────────────────
 # The single most important behaviour here. The beat script is committed to the repo but INSTALLED
-# on the mini separately, so between this workflow merging and that installation there is a window
-# — possibly days — in which the `heartbeat` branch does not exist at all. Firing then would open a
+# on each host separately, so between this workflow merging and that installation there is a window
+# — possibly days — in which a host's branch does not exist at all. Firing then would open a
 # needs-human issue every hour about a machine nobody has armed yet, which is precisely how a
-# label gets trained into noise and then ignored. So: no branch => NOT INSTALLED => exit 0 with a
-# message. Only a branch that EXISTS and has gone quiet is a finding. This is the same bound-fires-
-# on-a-healthy-condition trap W1-T312, W1-T380 and W1-T382 were each filed for, in a new guise.
+# label gets trained into noise and then ignored. So: no branch => NOT INSTALLED => silent. Only a
+# branch that EXISTS and has gone quiet is a finding. This is the same bound-fires-on-a-healthy-
+# condition trap W1-T312, W1-T380 and W1-T382 were each filed for, in a new guise.
+# AND THAT CLAUSE IS NOW PER BRANCH, WHICH IS THE PART MOST EASILY BROKEN. The loop below decides
+# installed-or-not for EACH branch on its own and never collapses to "some branch is fresh, so all
+# is well" — a single any-branch-is-fresh reading would reproduce the exact outage this watcher was
+# extended for.
+#
+# ── ONE BRANCH PER HOST, AND WHY A LIST RATHER THAN A JOB EACH (W1-T483) ──────────────────────
+# Each beat is a force-pushed PARENTLESS commit, so a branch carries exactly one beat and no
+# history, and two hosts beating to the same branch OVERWRITE each other. This watcher reads
+# `now - last commit`, so it would see whichever host beat most recently and a healthy host would
+# mask a dead one completely. MEASURED 2026-08-14: the Azure fleet was down 2h56m — 90% of a day's
+# downtime in one event — while `heartbeat` kept reporting `daemon live`, truthfully, about the
+# mini, and this watcher correctly stayed silent about the wrong machine.
+# TWO SHAPES WERE AVAILABLE AND THE SHARD RANKED NEITHER. One JOB per host reads well in the
+# Actions UI and isolates failures, but duplicates the whole body per host and makes the
+# absent-is-silent rule a copy-paste invariant — the kind that drifts. A LIST keeps that rule in
+# ONE place, costs one word per new host, and lets each entry be independently silent; its cost is
+# that all hosts share one job result and one issue thread, which the per-branch report below
+# offsets by naming every branch it read. The list is taken for the single-definition reason.
+# A THIRD SHAPE WAS REJECTED: discovering branches by prefix (`git ls-remote --heads 'heartbeat*'`)
+# would arm new hosts automatically, but any stray or abandoned `heartbeat-*` branch would then go
+# stale and alarm forever — a watcher that alarms on junk gets muted, and a muted watcher is worse
+# than none. An explicit list cannot do that.
 #
 # ── THE THRESHOLD, AND WHERE THE NUMBER COMES FROM ────────────────────────────────────────────
 # STALE_AFTER_MINUTES = 30, which is SIX TIMES the beat script's documented five-minute install
@@ -76,12 +98,27 @@ permissions:
   contents: read
 
 env:
-  HEARTBEAT_BRANCH: heartbeat
+  # ONE ENTRY PER HOST, space-separated. `heartbeat` is the mini's, already installed and left
+  # where it is. Adding a host is one word here plus `RMD_HEARTBEAT_BRANCH=<that word>` in its
+  # cron line — and an entry whose branch does not exist yet costs nothing, because absence is
+  # silent per branch.
+  #
+  # NAMING A BRANCH HERE ALSO GUARDS IT FROM THE REAPER, AND OWES A DECLARATION. `reapBranchesCommand`
+  # (src/run-task.ts) derives `namedInSource` from `git grep -F <branch> -- src/ scripts/ deploy/
+  # .github/`, so an entry in this list makes that branch permanently GUARDED — it can never be
+  # classified deletable. The cost is the other half of that mechanism: a branch guarded by the grep
+  # but missing from `DECLARED_BRANCH_GUARDS` is reported as DRIFT and `rmd reap-branches` exits 1
+  # naming it. That verb is a hand-run DRY RUN — no workflow, no gate, no daemon cadence calls it —
+  # so nothing automated goes red, and the message says exactly what to do. Declaring the name there
+  # is a one-line change to src/run-task.ts and is deliberately NOT part of W1-T483, whose scope is
+  # observability and which declares no `src/` path. Whoever adds the third host should expect the
+  # same alarm; its own doc calls that "the alarm working as intended".
+  HEARTBEAT_BRANCHES: "heartbeat heartbeat-azure"
   STALE_AFTER_MINUTES: "30"
 
 jobs:
   heartbeat-watch:
-    name: heartbeat-watch (reads the beat branch off-machine; silent until the beat is installed)
+    name: heartbeat-watch (reads every host's beat branch off-machine; silent per host until installed)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -157,46 +194,80 @@ jobs:
           beat brokeninstall | grep -q '^daemon_verdict=live$' || fail "the broken-install beat lost the daemon signal it must still carry"
           echo "self-check: the beat script separates healthy / dead-daemon / broken-install"
 
-      - name: Read the beat branch and judge its age
+          # (iii) THE RESTART BUDGET DEGRADES TO ABSENT, NEVER TO ZERO (W1-T483). No `remudero-daemon`
+          # exists on a runner, so this exercises the unreadable path for real rather than by
+          # stubbing it — whether the runner reaches it through "no container runtime" or through
+          # "inspect answered nothing" does not matter, because both must publish NO NUMBER.
+          # `restart_count=0` here would read as "the whole budget is untouched" — the most
+          # reassuring value in the range — off a read that never happened. The two branches are
+          # separated by name in test/fleet-heartbeat.test.ts; this clause only pins the outcome.
+          beat healthy | grep -q '^restart_source=' || fail "the beat dropped restart_source entirely"
+          ! beat healthy | grep -q '^restart_count=' || fail "an unreadable restart budget still published a count"
+          ! beat healthy | grep -q '^restart_max='   || fail "an unreadable restart budget still published a maximum"
+          echo "self-check: an unreadable restart budget is ABSENT, not zero"
+
+      - name: Read every host beat branch and judge each age
         # Skipped on `pull_request`: a PR touching these two files is exercising the SELF-CHECK
         # above, and must not go red merely because the operator's machine happens to be off.
         if: github.event_name != 'pull_request'
         run: |
           set -euo pipefail
           threshold_s=$(( STALE_AFTER_MINUTES * 60 ))
+          : > heartbeat-report.txt
+          watched=0
+          absent=0
+          stale=0
 
-          if [ -z "$(git ls-remote --heads origin "$HEARTBEAT_BRANCH")" ]; then
-            echo "no '$HEARTBEAT_BRANCH' branch on origin — the beat is NOT INSTALLED on the host yet."
-            echo "Silent by design: see this workflow's header. Install scripts/fleet-heartbeat.sh"
-            echo "on a five-minute cadence and this watcher arms itself on the first beat."
-            exit 0
-          fi
+          # THE LOOP NEVER EXITS EARLY, IN EITHER DIRECTION, AND THAT IS THE FIX. A `break` or an
+          # `exit 1` on the first stale branch would hide every host after it; an early success on
+          # the first fresh branch would hide every host after THAT — which is precisely the outage
+          # this was extended for, where one healthy machine's beat covered another's silence. So
+          # every branch is judged on its own and the verdict is combined only at the end.
+          for branch in $HEARTBEAT_BRANCHES; do
+            if [ -z "$(git ls-remote --heads origin "$branch")" ]; then
+              absent=$(( absent + 1 ))
+              echo "heartbeat-watch: '${branch}' does not exist on origin — that host has NOT INSTALLED the beat."
+              echo "  Silent by design: see this workflow's header. Install scripts/fleet-heartbeat.sh on a"
+              echo "  five-minute cadence with RMD_HEARTBEAT_BRANCH=${branch} and this watcher arms itself"
+              echo "  on the first beat."
+              continue
+            fi
+            watched=$(( watched + 1 ))
 
-          git fetch --no-tags --depth=1 origin "+refs/heads/${HEARTBEAT_BRANCH}:refs/remotes/origin/${HEARTBEAT_BRANCH}"
-          beat_epoch=$(git log -1 --format=%ct "origin/${HEARTBEAT_BRANCH}")
-          age_s=$(( $(date -u +%s) - beat_epoch ))
-          age_m=$(( age_s / 60 ))
-          subject=$(git log -1 --format=%s "origin/${HEARTBEAT_BRANCH}")
-          payload=$(git show "origin/${HEARTBEAT_BRANCH}:heartbeat.txt" 2>/dev/null || echo "(no heartbeat.txt on the branch)")
+            git fetch --no-tags --depth=1 origin "+refs/heads/${branch}:refs/remotes/origin/${branch}"
+            beat_epoch=$(git log -1 --format=%ct "origin/${branch}")
+            age_s=$(( $(date -u +%s) - beat_epoch ))
+            age_m=$(( age_s / 60 ))
+            subject=$(git log -1 --format=%s "origin/${branch}")
+            payload=$(git show "origin/${branch}:heartbeat.txt" 2>/dev/null || echo "(no heartbeat.txt on the branch)")
 
-          # THE LAST BEAT'S PAYLOAD, NOT JUST ITS AGE. "No beat for 71 minutes" is half an answer;
-          # "and the last one said the daemon had not polled in two hours", or "and the last one
-          # said node_modules was empty", is the whole one — and it is the difference between
-          # knowing the machine is gone and knowing which part of it is.
-          {
-            echo "Last beat was ${age_m} minute(s) ago (threshold: ${STALE_AFTER_MINUTES}m)."
-            echo "Last beat subject: ${subject}"
-            echo
-            echo "Last beat payload:"
-            echo "$payload"
-          } > heartbeat-report.txt
+            # THE LAST BEAT'S PAYLOAD, NOT JUST ITS AGE. "No beat for 71 minutes" is half an answer;
+            # "and the last one said the daemon had not polled in two hours", or "and the last one
+            # said node_modules was empty", is the whole one — and it is the difference between
+            # knowing the machine is gone and knowing which part of it is. The BRANCH IS NAMED on
+            # every block, because with more than one host an unlabelled payload cannot be
+            # attributed and the report would repeat the very confusion this closes.
+            {
+              echo "── ${branch} ──"
+              echo "Last beat was ${age_m} minute(s) ago (threshold: ${STALE_AFTER_MINUTES}m)."
+              echo "Last beat subject: ${subject}"
+              echo
+              echo "Last beat payload:"
+              echo "$payload"
+              echo
+            } >> heartbeat-report.txt
+
+            if [ "$age_s" -gt "$threshold_s" ]; then
+              stale=$(( stale + 1 ))
+              echo "heartbeat-watch: STALE — '${branch}' has not beaten for ${age_m} minute(s)." >&2
+            else
+              echo "heartbeat-watch: fresh — '${branch}' is ${age_m} minute(s) old."
+            fi
+          done
+
           cat heartbeat-report.txt
-
-          if [ "$age_s" -gt "$threshold_s" ]; then
-            echo "heartbeat-watch: STALE — no beat for ${age_m} minute(s)." >&2
-            exit 1
-          fi
-          echo "heartbeat-watch: fresh — beat is ${age_m} minute(s) old."
+          echo "heartbeat-watch: ${watched} branch(es) watched, ${absent} not installed, ${stale} stale."
+          [ "$stale" -eq 0 ] || exit 1
 
       - name: Open or update a needs-human issue when the beat has stopped
         if: failure() && github.event_name != 'pull_request'

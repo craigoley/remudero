@@ -91,6 +91,16 @@ interface BeatOpts {
   env?: Record<string, string>;
   /** A `date` to put on PATH ahead of the real one, for the BSD-branch tests. */
   dateStub?: string;
+  /**
+   * A container-runtime stub reached through `RMD_HEARTBEAT_DOCKER` (W1-T483). Written to the stub
+   * bin dir and named EXPLICITLY rather than shadowing `docker` on PATH, because this host really
+   * has `/usr/bin/docker` and a stub placed earlier on PATH would still be found by
+   * `command -v docker` — so the no-runtime branch could never be reached by shadowing. Omit it and
+   * the script is pointed at a path that does not exist, which is the no-runtime case.
+   */
+  dockerStub?: string;
+  /** A `hostname` to put on PATH, so `beat_host` can be asserted against a known answer. */
+  hostnameStub?: string;
   /** Applied to the copied script as [find, replace], with `find` asserted UNIQUE. */
   mutate?: [string, string];
 }
@@ -139,6 +149,19 @@ function runBeat(opts: BeatOpts = {}): Beat {
     writeFileSync(join(binDir, "date"), opts.dateStub, { mode: 0o755 });
     chmodSync(join(binDir, "date"), 0o755);
   }
+  if (opts.hostnameStub) {
+    writeFileSync(join(binDir, "hostname"), opts.hostnameStub, { mode: 0o755 });
+    chmodSync(join(binDir, "hostname"), 0o755);
+  }
+  // DEFAULT TO A RUNTIME THAT DOES NOT EXIST. Every pre-W1-T483 test predates the restart-budget
+  // probe and must keep asserting exactly what it asserted; pointing the probe at a missing binary
+  // gives them the absent-fields shape rather than whatever this machine's real docker happens to
+  // answer, so no existing expectation depends on the host.
+  const dockerPath = join(binDir, "rt-stub");
+  if (opts.dockerStub) {
+    writeFileSync(dockerPath, opts.dockerStub, { mode: 0o755 });
+    chmodSync(dockerPath, 0o755);
+  }
 
   const r = spawnSync("bash", [scriptPath], {
     encoding: "utf8",
@@ -148,6 +171,7 @@ function runBeat(opts: BeatOpts = {}): Beat {
       HOME: join(dir, "home"),
       RMD_ROOT: root,
       STUB_REC: rec,
+      RMD_HEARTBEAT_DOCKER: opts.dockerStub ? dockerPath : join(binDir, "no-such-runtime"),
       ...(opts.env ?? {}),
     },
   });
@@ -493,4 +517,302 @@ test("MUTANT: a reader that excludes daemon.alive from the prefix is caught — 
     v?.startsWith("STALE"),
     `dropping daemon.alive from the read must resurrect the false STALE this fix removed, got ${v}`,
   );
+});
+
+// ── W1-T483: THE RESTART BUDGET, AND THE ABSENT-NEVER-ZERO RULE ───────────────────────────────
+// `--restart=on-failure:N` caps the COUNT of automatic restarts and nothing restores it, while
+// every non-zero exit — a routine freshness restart as much as a crash — spends one. Publishing
+// the count while the fleet is UP is the only warning available; once the container is down there
+// is nothing left to inspect. The failure direction is unusually dangerous here: `restart_count=0`
+// is the most reassuring value in the range, so a read that FAILED must never produce it.
+
+/** A container-runtime stub that answers the one `inspect --format` line the script asks for. */
+const runtimeStub = (line: string): string => `#!/usr/bin/env bash\nprintf '%s\\n' ${JSON.stringify(line)}\n`;
+
+const FRESH_LEDGER = [
+  `{"ts":"${iso(9_000_000)}","step":"daemon.boot","head_sha":"0123456789abcdef0123456789abcdef01234567"}`,
+  `{"ts":"${iso(45_000)}","step":"daemon.alive","tick":3,"poll_interval_ms":60000}`,
+];
+
+test("the beat carries the container restart budget ALONGSIDE daemon liveness — both, or the field is worthless", () => {
+  const beat = runBeat({ ledger: FRESH_LEDGER, dockerStub: runtimeStub("1 5 on-failure") });
+  assert.equal(beat.status, 0, "a beat that reads a budget must still publish");
+  assert.equal(field(beat.published, "restart_count"), "1");
+  assert.equal(field(beat.published, "restart_max"), "5");
+  assert.equal(field(beat.published, "restart_policy"), "on-failure");
+  // ALONGSIDE is the operative word: a budget field that displaced the liveness signal would trade
+  // one blind spot for another, and liveness is the older and more important of the two.
+  assert.equal(field(beat.published, "daemon_verdict"), "live");
+  assert.equal(field(beat.published, "daemon_last_step"), "daemon.alive");
+});
+
+test("an UNREADABLE restart budget is ABSENT, never zero — the reassuring value must never come from a failed read", () => {
+  // No runtime stub: the script is pointed at a path that does not exist, which is exactly what a
+  // host without docker looks like. Shadowing `docker` on PATH could not produce this, because the
+  // real /usr/bin/docker would still answer `command -v`.
+  const beat = runBeat({ ledger: FRESH_LEDGER });
+  assert.equal(beat.status, 0, "an unreadable budget must not fail the beat");
+  assert.equal(field(beat.published, "restart_count"), undefined, "a failed read must publish NO count");
+  assert.equal(field(beat.published, "restart_max"), undefined, "and no maximum either");
+  assert.equal(field(beat.published, "restart_policy"), undefined, "and no policy");
+  const why = field(beat.published, "restart_source");
+  assert.match(String(why), /^unavailable — no /, `the reason must still be recorded, got ${why}`);
+  // And the rest of the beat is unharmed — an absent budget is not a broken beat.
+  assert.equal(field(beat.published, "daemon_verdict"), "live");
+});
+
+test("a runtime that answers with JUNK publishes no count either — a parse failure is a failed read", () => {
+  const beat = runBeat({ ledger: FRESH_LEDGER, dockerStub: runtimeStub("notanumber 5 on-failure") });
+  assert.equal(field(beat.published, "restart_count"), undefined, "a non-numeric count must be dropped");
+  assert.equal(field(beat.published, "restart_max"), undefined, "and the maximum with it — a lone bound is not a budget");
+  assert.match(String(field(beat.published, "restart_source")), /gave no numeric RestartCount/);
+});
+
+test("an UNCAPPED policy says `unlimited` — docker reports 0 there, which would read as no restarts left", () => {
+  const beat = runBeat({ ledger: FRESH_LEDGER, dockerStub: runtimeStub("3 0 unless-stopped") });
+  assert.equal(field(beat.published, "restart_count"), "3");
+  assert.equal(field(beat.published, "restart_max"), "unlimited", "0 means NO CAP for unless-stopped, not an exhausted one");
+  assert.equal(field(beat.published, "restart_policy"), "unless-stopped");
+});
+
+test("MUTANT: defaulting the restart count to 0 when the read fails is caught", () => {
+  const beat = runBeat({
+    ledger: FRESH_LEDGER,
+    mutate: ["if [ -n \"$RESTART_COUNT\" ]; then", 'RESTART_COUNT="${RESTART_COUNT:-0}"; if true; then'],
+  });
+  // THE MUTANT MUST PRODUCE THE DEFECT, which is what proves the real guard is load-bearing: with
+  // the emptiness test replaced by a `:-0` default, a read that never happened publishes the most
+  // reassuring value in the field's range. The unmutated script is asserted ABSENT two tests above,
+  // so the pair brackets the behaviour from both sides.
+  assert.equal(
+    field(beat.published, "restart_count"),
+    "0",
+    "the mutation must actually synthesise the zero — otherwise this test proves nothing about the guard",
+  );
+});
+
+// ── W1-T483: THE BEAT MUST NAME THE HOST IT RUNS ON ───────────────────────────────────────────
+// The live defect was not a missing beat. It was a beat that was ENTIRELY TRUTHFUL about a
+// different machine: `beat_host=Craigs-Mac-mini` while the Azure fleet was down for 2h56m. So the
+// assertion has to cover both halves — who is speaking, and whose ledger was read.
+
+test("the beat names the host it runs on AND carries that host's own ledger reading", () => {
+  const beat = runBeat({
+    ledger: FRESH_LEDGER,
+    hostnameStub: "#!/usr/bin/env bash\nprintf 'test-host-alpha\\n'\n",
+    dockerStub: runtimeStub("2 5 on-failure"),
+  });
+  assert.equal(field(beat.published, "beat_host"), "test-host-alpha", "the beat must say which machine is speaking");
+  // A ledger-DERIVED field, not merely the presence of a beat: this is what separates "a beat
+  // exists" from "this host reported on itself".
+  assert.equal(field(beat.published, "daemon_last_step"), "daemon.alive");
+  assert.equal(field(beat.published, "daemon_verdict"), "live");
+  assert.equal(field(beat.published, "restart_count"), "2", "and the budget it read is this host's too");
+});
+
+test("MUTANT: a beat_host pinned to a constant is caught — a hard-coded name is the defect in miniature", () => {
+  const beat = runBeat({
+    ledger: FRESH_LEDGER,
+    hostnameStub: "#!/usr/bin/env bash\nprintf 'test-host-alpha\\n'\n",
+    mutate: ["beat_host=$(hostname 2>/dev/null || printf 'unknown')", "beat_host=Craigs-Mac-mini"],
+  });
+  assert.notEqual(
+    field(beat.published, "beat_host"),
+    "test-host-alpha",
+    "the mutant must NOT report the real host — if it does, this test proves nothing",
+  );
+});
+
+test("A DEAD DAEMON STILL PUBLISHES — the beat is the reporter, and a reporter that goes quiet with its subject is useless", () => {
+  const beat = runBeat({
+    ledger: [`{"ts":"${iso(8_040_000)}","step":"daemon.iteration","task":"W1-T1"}`],
+    hostnameStub: "#!/usr/bin/env bash\nprintf 'test-host-alpha\\n'\n",
+    dockerStub: runtimeStub("5 5 on-failure"),
+  });
+  assert.equal(beat.status, 0, "a beat reporting a dead daemon is a SUCCESSFUL beat — the verdict rides in the payload");
+  assert.ok(
+    beat.calls.some((c) => sub(c) === "push"),
+    "it must still reach the remote; a silent beat is indistinguishable from a power cut",
+  );
+  assert.ok(String(field(beat.published, "daemon_verdict")).startsWith("STALE"), "and it must SAY the daemon is gone");
+  assert.equal(field(beat.published, "beat_host"), "test-host-alpha");
+  // The budget is still readable while the container exists, which is the whole early-warning case:
+  // 5 of 5 spent, and the next non-zero exit is the one nothing comes back from.
+  assert.equal(field(beat.published, "restart_count"), "5");
+  assert.equal(field(beat.published, "restart_max"), "5");
+});
+
+// ── W1-T483: THE WATCHER MUST JUDGE EVERY HOST INDEPENDENTLY ──────────────────────────────────
+// The subject here is the WORKFLOW's own bash, extracted from the committed YAML and run against a
+// stubbed `git` — the same drive-the-real-thing discipline `test/strict-probe.test.ts` uses for
+// `tsc`. Asserting on a re-implementation would prove nothing about the file GitHub actually runs.
+//
+// THE CONDITION THAT FAILED, and the reason this exists: two hosts beat, one dies, and the
+// watcher — reading a single branch — saw the survivor and stayed silent. Every test below is a
+// variation on "does one host's health hide another host's silence".
+
+const WATCH_WORKFLOW = join(REPO_ROOT, ".github", "workflows", "fleet-heartbeat-watch.yml");
+const WATCH_STEP_NAME = "Read every host beat branch and judge each age";
+
+/** The committed step's `run:` body, dedented. Extraction failures are LOUD by design. */
+function watchStepScript(): string {
+  const lines = readFileSync(WATCH_WORKFLOW, "utf8").split("\n");
+  const start = lines.findIndex((l) => l.trim() === `- name: ${WATCH_STEP_NAME}`);
+  assert.notEqual(start, -1, `the workflow has no step named "${WATCH_STEP_NAME}" — rename it here too`);
+  const runAt = lines.findIndex((l, i) => i > start && l.trim() === "run: |");
+  assert.notEqual(runAt, -1, "the step no longer opens a literal `run: |` block");
+  const body: string[] = [];
+  for (let i = runAt + 1; i < lines.length; i++) {
+    const l = lines[i];
+    if (l.trim() === "") {
+      body.push("");
+      continue;
+    }
+    if (!l.startsWith(" ".repeat(10))) break;
+    body.push(l.slice(10));
+  }
+  const script = body.join("\n");
+  // POSITIVE CONTROL ON THE EXTRACTION ITSELF. A rename, a re-indent or a reordering must fail HERE
+  // rather than silently hand every test below an empty script that trivially "passes" — which is
+  // the vacuous-pass shape this repo keeps re-finding.
+  assert.ok(script.includes("for branch in $HEARTBEAT_BRANCHES"), "the extracted block is not the branch loop");
+  assert.ok(script.includes('[ "$stale" -eq 0 ] || exit 1'), "the extracted block lost its combined verdict");
+  return script;
+}
+
+/** A `git` answering the five subcommands the watcher reaches. `STUB_BRANCHES` is `name:ageSeconds`
+ *  pairs; a branch absent from that list does not exist on the remote, which is the NOT-INSTALLED
+ *  case the watcher must stay silent about. */
+function watchGitStub(): string {
+  return [
+    "#!/usr/bin/env bash",
+    'sub="$1"; shift',
+    "lookup() {",
+    '  for e in $STUB_BRANCHES; do',
+    '    if [ "${e%%:*}" = "$1" ]; then printf "%s" "${e#*:}"; return 0; fi',
+    "  done",
+    "  return 1",
+    "}",
+    'case "$sub" in',
+    "  ls-remote)",
+    '    b="${@: -1}"',
+    '    if lookup "$b" >/dev/null; then printf "%s\\trefs/heads/%s\\n" "0000000000000000000000000000000000000000" "$b"; fi',
+    "    ;;",
+    "  fetch) : ;;",
+    "  log)",
+    '    fmt=""; ref=""',
+    '    for a in "$@"; do',
+    '      case "$a" in --format=*) fmt="${a#--format=}" ;; origin/*) ref="${a#origin/}" ;; esac',
+    "    done",
+    '    age="$(lookup "$ref")" || age=0',
+    '    if [ "$fmt" = "%ct" ]; then printf "%s\\n" "$(( $(date -u +%s) - age ))"',
+    '    else printf "heartbeat: %s reporting\\n" "$ref"; fi',
+    "    ;;",
+    "  show)",
+    '    ref="${1%%:*}"; ref="${ref#origin/}"',
+    '    printf "beat_host=%s\\nrestart_count=1\\n" "$ref"',
+    "    ;;",
+    "esac",
+    "exit 0",
+    "",
+  ].join("\n");
+}
+
+interface Watch {
+  status: number;
+  stdout: string;
+  stderr: string;
+  report: string;
+}
+
+function runWatch(opts: { branches: string; stub: string; staleAfterMinutes?: string; mutate?: [string, string] }): Watch {
+  const dir = mkdtempSync(join(tmpdir(), "heartbeat-watch-"));
+  const binDir = join(dir, "bin");
+  mkdirSync(binDir, { recursive: true });
+  writeFileSync(join(binDir, "git"), watchGitStub(), { mode: 0o755 });
+  chmodSync(join(binDir, "git"), 0o755);
+
+  let script = watchStepScript();
+  if (opts.mutate) {
+    const [find, replace] = opts.mutate;
+    const n = script.split(find).length - 1;
+    assert.equal(n, 1, `mutation target must be UNIQUE in the step, found ${n}: ${find}`);
+    script = script.replace(find, replace);
+  }
+  const scriptPath = join(dir, "watch.sh");
+  writeFileSync(scriptPath, script, { mode: 0o755 });
+
+  const r = spawnSync("bash", [scriptPath], {
+    cwd: dir,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      PATH: `${binDir}:${process.env.PATH ?? ""}`,
+      HEARTBEAT_BRANCHES: opts.branches,
+      STALE_AFTER_MINUTES: opts.staleAfterMinutes ?? "30",
+      STUB_BRANCHES: opts.stub,
+    },
+  });
+  const reportPath = join(dir, "heartbeat-report.txt");
+  const report = existsSync(reportPath) ? readFileSync(reportPath, "utf8") : "";
+  rmSync(dir, { recursive: true, force: true });
+  return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "", report };
+}
+
+test("A DEAD HOST IS FOUND WHILE ANOTHER HOST IS HEALTHY — the exact condition that failed on 2026-08-14", () => {
+  const w = runWatch({ branches: "heartbeat heartbeat-azure", stub: "heartbeat:60 heartbeat-azure:9000" });
+  assert.equal(w.status, 1, "a stale host must fail the job even though its sibling is fresh");
+  assert.match(w.stderr, /STALE — 'heartbeat-azure'/, "the stale host must be named");
+  assert.match(w.stdout, /fresh — 'heartbeat' is/, "and the healthy one still reported as healthy");
+  assert.match(w.report, /── heartbeat ──/, "the report must carry the healthy host's block");
+  assert.match(w.report, /── heartbeat-azure ──/, "and the dead one's — an unlabelled payload cannot be attributed");
+  assert.match(w.stdout, /2 branch\(es\) watched, 0 not installed, 1 stale\./);
+});
+
+test("A HOST THAT NEVER INSTALLED THE BEAT STAYS SILENT — not-installed is not a finding", () => {
+  const w = runWatch({ branches: "heartbeat heartbeat-azure", stub: "heartbeat:60" });
+  assert.equal(w.status, 0, "an absent branch must not open an issue about a machine nobody has armed");
+  assert.match(w.stdout, /'heartbeat-azure' does not exist on origin/);
+  assert.match(w.stdout, /NOT INSTALLED/);
+  assert.doesNotMatch(w.stderr, /STALE/, "and it must not be reported as stale either");
+  assert.match(w.stdout, /1 branch\(es\) watched, 1 not installed, 0 stale\./);
+});
+
+test("AN ABSENT HOST DOES NOT SILENCE A STALE SIBLING — the two rules compose rather than cancel", () => {
+  const w = runWatch({ branches: "heartbeat heartbeat-azure heartbeat-third", stub: "heartbeat:9000" });
+  assert.equal(w.status, 1, "one stale host is still a finding when two others are merely uninstalled");
+  assert.match(w.stdout, /1 branch\(es\) watched, 2 not installed, 1 stale\./);
+});
+
+test("EVERY BRANCH ABSENT is silent — the window between merging this and installing anything", () => {
+  const w = runWatch({ branches: "heartbeat heartbeat-azure", stub: "" });
+  assert.equal(w.status, 0, "a watcher armed before any host is cannot be allowed to alarm hourly");
+  assert.match(w.stdout, /0 branch\(es\) watched, 2 not installed, 0 stale\./);
+  assert.equal(w.report.trim(), "", "and it reads nothing, so there is nothing to report");
+});
+
+test("MUTANT: returning on the first FRESH branch is caught — that is the 2026-08-14 defect exactly", () => {
+  const w = runWatch({
+    branches: "heartbeat heartbeat-azure",
+    stub: "heartbeat:60 heartbeat-azure:9000",
+    mutate: [
+      `echo "heartbeat-watch: fresh — '\${branch}' is \${age_m} minute(s) old."`,
+      `echo "heartbeat-watch: fresh — '\${branch}' is \${age_m} minute(s) old."; exit 0`,
+    ],
+  });
+  assert.equal(w.status, 0, "the mutant must MISS the dead host — otherwise this proves nothing");
+  assert.doesNotMatch(w.stderr, /STALE/, "a healthy first host swallowing the rest is the whole defect");
+});
+
+test("MUTANT: failing INSIDE the loop is caught — one dead host must not hide the hosts after it", () => {
+  const w = runWatch({
+    branches: "heartbeat-azure heartbeat",
+    stub: "heartbeat-azure:9000 heartbeat:9000",
+    mutate: [
+      `echo "heartbeat-watch: STALE — '\${branch}' has not beaten for \${age_m} minute(s)." >&2`,
+      `echo "heartbeat-watch: STALE — '\${branch}' has not beaten for \${age_m} minute(s)." >&2; exit 1`,
+    ],
+  });
+  assert.equal(w.status, 1, "it still fails, which is why the count is what discriminates");
+  assert.doesNotMatch(w.report, /── heartbeat ──/, "the mutant must lose the SECOND host's block entirely");
 });
