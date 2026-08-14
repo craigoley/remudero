@@ -629,6 +629,118 @@ test("W1-T490: the entrypoint's freshness code is the SAME NUMBER as DAEMON_EXIT
   assert.equal(/^DAEMON_EXIT_STALE=(\d+)$/m.test(script.replace(/^DAEMON_EXIT_STALE=\d+$/m, "# gone")), false);
 });
 
+// ── W1-T498: THE FRESHNESS RETRY MUST NOT PAY THE CRASH THROTTLE ───────────────────────────────
+//
+// THE DEFECT. W1-T490 stopped a freshness restart from spending docker's `on-failure` BUDGET, but the
+// in-container retry still slept the FULL `RMD_RESTART_THROTTLE_S` (120s in production) before every
+// re-sync — a sleep sized for the measured 2026-08-13 lock storm (same boot failing 13-17s apart),
+// not for a freshness restart, which happens once per merge with a real fetch/checkout in between.
+// MEASURED (Azure, 2026-08-14): 16 freshness restarts x 115s saved = ~30.7 minutes of daemon idle a
+// day. `RMD_FRESHNESS_RESTART_PAUSE_S` (default 5) replaces that sleep in the freshness branch ONLY;
+// the crash-exit sleep and the exhausted-budget hand-off both keep the full throttle, each pinned
+// below, because shortening either would shorten the bound that guards an actual crash loop.
+
+/** Boot with a stub whose exit code changes per call, timing the whole run. */
+function bootSeqTimed(
+  home: string,
+  origin: string,
+  codes: readonly number[],
+  env: Record<string, string>,
+): { status: number; stderr: string; elapsedMs: number; calls: number } {
+  const stubs = mkdtempSync(join(tmpdir(), "entrypoint-stub-"));
+  const rec = mkdtempSync(join(tmpdir(), "entrypoint-rec-"));
+  writeNpmStub(stubs, rec);
+  writeSeqCmdStub(stubs, rec, "rmd-fake", codes);
+  const started = Date.now();
+  const r = spawnSync("bash", [SCRIPT, "rmd-fake", "daemon"], {
+    encoding: "utf8",
+    cwd: REPO_ROOT,
+    env: {
+      ...process.env,
+      PATH: `${stubs}:${process.env.PATH ?? ""}`,
+      HOME: home,
+      RMD_REPO_URL: origin,
+      RMD_REF: "main",
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_TERMINAL_PROMPT: "0",
+      ...env,
+    },
+  });
+  const elapsedMs = Date.now() - started;
+  let calls = 0;
+  try {
+    calls = readFileSync(join(rec, "rmd-fake"), "utf8").split("\n").filter(Boolean).length;
+  } catch {
+    calls = 0;
+  }
+  return { status: r.status ?? -1, stderr: r.stderr ?? "", elapsedMs, calls };
+}
+
+test("W1-T498: a freshness retry pauses its own short interval not the crash throttle", () => {
+  // The crash throttle is set HIGH (5s) and the freshness pause LOW (1s) — if the freshness branch
+  // ever slept the crash throttle instead of its own pause, this boot would take >=5s, not ~1s.
+  const run = bootSeqTimed(freshHome(), makeOrigin(), [STALE, 0], {
+    RMD_RESTART_THROTTLE_S: "5",
+    RMD_FRESHNESS_RESTART_PAUSE_S: "1",
+  });
+  assert.equal(run.calls, 2, "the freshness restart must still re-run in-container, as W1-T490 pinned");
+  assert.equal(run.status, 0, "and still hand back a clean exit");
+  assert.ok(run.elapsedMs >= 1000, `must pay its own 1s pause, took ${run.elapsedMs}ms`);
+  assert.ok(run.elapsedMs < 4000, `must NOT pay the 5s crash throttle, took ${run.elapsedMs}ms`);
+  assert.match(run.stderr, /sleeping 1s \(not the 5s crash throttle\)/);
+});
+
+test("W1-T498: a genuine crash still pays the full crash throttle", () => {
+  // A crash never reaches the freshness branch at all (W1-T490 DIRECTION 2), so it must still sleep
+  // the FULL RESTART_THROTTLE_S, unaffected by the new, smaller FRESHNESS_RESTART_PAUSE_S sitting
+  // right beside it.
+  const run = bootTimed(freshHome(), makeOrigin(), 1, {
+    RMD_RESTART_THROTTLE_S: "2",
+    RMD_FRESHNESS_RESTART_PAUSE_S: "1",
+  });
+  assert.equal(run.calls, 1, "a crash exits on its first attempt; it is never retried in-container");
+  assert.equal(run.status, 1);
+  assert.ok(run.elapsedMs >= 2000, `must sleep the FULL 2s crash throttle, took ${run.elapsedMs}ms`);
+  assert.match(run.stderr, /exited 1 — sleeping 2s/);
+});
+
+test("W1-T498: an exhausted freshness budget falls back onto the full throttle", () => {
+  // Once RMD_FRESHNESS_RESTART_MAX in-container restarts are spent, the LAST sleep before handing the
+  // container back to docker's count must be the full crash throttle, not the short freshness pause
+  // it paid on every restart up to that point.
+  const run = bootSeq(freshHome(), makeOrigin(), [STALE, STALE], {
+    RMD_RESTART_THROTTLE_S: "3",
+    RMD_FRESHNESS_RESTART_PAUSE_S: "1",
+    RMD_FRESHNESS_RESTART_MAX: "1",
+  });
+  assert.equal(run.calls, 2, "one in-container restart, then the budget is spent");
+  assert.equal(run.status, STALE, "the second stale exit is handed back to docker, counted once again");
+  assert.match(
+    run.stderr,
+    /sleeping 1s \(not the 3s crash throttle\)/,
+    "the in-container restart pays its own short pause",
+  );
+  assert.match(run.stderr, /sleeping 3s before exiting/, "the hand-off to docker pays the FULL crash throttle");
+});
+
+test("W1-T498: a non-numeric pause value is refused loudly and falls back", () => {
+  // A crash code, so the freshness branch is never reached — this isolates the validation itself,
+  // exactly as the existing RMD_RESTART_THROTTLE_S non-numeric test does for its own variable.
+  const run = bootTimed(freshHome(), makeOrigin(), 3, {
+    RMD_RESTART_THROTTLE_S: "1",
+    RMD_FRESHNESS_RESTART_PAUSE_S: "soon",
+  });
+  assert.equal(run.status, 3, "a rejected value must not break the boot");
+  assert.match(
+    run.stderr,
+    /RMD_FRESHNESS_RESTART_PAUSE_S is not a whole number of seconds — ignoring it and using 5/,
+  );
+  assert.ok(
+    run.elapsedMs >= 1000 && run.elapsedMs < 4000,
+    `must pay only the 1s crash throttle, not hang on the rejected value, took ${run.elapsedMs}ms`,
+  );
+});
+
 // ── THE THROTTLE IS ONLY REAL IF THE HOST ACTUALLY PASSES IT ────────────────────────────────
 //
 // The four tests above prove the ENTRYPOINT honours `RMD_RESTART_THROTTLE_S`, and they proved it
