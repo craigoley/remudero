@@ -310,6 +310,44 @@ else
   fi
 fi
 
+# ── probe: the IMAGE build sha (W1-T496) ───────────────────────────────────────────────────────
+# THE THIRD SHA, AND IT IS NOT A COPY OF THE OTHER TWO. `daemon_boot_head_sha` (the boot ledger
+# line) and `install_head_sha` (`git rev-parse` on INSTALL_DIR) both read the MOUNTED checkout —
+# W1-T494 files the case where the two agreed while both were stale, because a mount-side sha
+# cannot see anything baked. `deploy/Dockerfile` bakes a DIFFERENT sha into the IMAGE at build
+# time, twice over — a `LABEL org.opencontainers.image.revision` and a plain file,
+# `/etc/rmd-build-sha` (0444). Reading the file over `docker exec` is what makes a merged change
+# to a baked path (`deploy/entrypoint.sh`, an apt binary in `deploy/Dockerfile`) distinguishable
+# from a shipped one WITHOUT shelling into the host — see CLAUDE.md for which half of a diff that
+# is. Reuses `RESTART_CONTAINER`/`RESTART_RUNTIME` from the probe above: it is the same daemon
+# container, and a second env var to name it again would answer a question this repo already
+# answered once.
+# DEGRADES TO ABSENT, NEVER TO A LITERAL THAT READS AS HEALTHY — same law as RESTART_COUNT above.
+# THIS MATTERS HERE SPECIFICALLY: the Dockerfile's own `ARG RMD_BUILD_SHA=unknown` means an image
+# built without the build arg writes the literal string `unknown` to the file, and a heartbeat
+# that published that verbatim would look like a real, if odd, sha rather than an absent reading.
+# A build sha is git-hex, so anything else — `unknown` included — is rejected here, not printed.
+IMAGE_BUILD_SHA=""
+if [ "$RESTART_CONTAINER" = "none" ]; then
+  IMAGE_BUILD_SHA_SOURCE="skipped — RMD_HEARTBEAT_CONTAINER=none"
+elif ! command -v "$RESTART_RUNTIME" >/dev/null 2>&1; then
+  IMAGE_BUILD_SHA_SOURCE="unavailable — no ${RESTART_RUNTIME} on this host"
+else
+  IMAGE_BUILD_SHA_RAW="$("$RESTART_RUNTIME" exec "$RESTART_CONTAINER" cat /etc/rmd-build-sha 2>/dev/null | tr -d '[:space:]')"
+  case "$IMAGE_BUILD_SHA_RAW" in
+    '')
+      IMAGE_BUILD_SHA_SOURCE="unavailable — ${RESTART_RUNTIME} exec ${RESTART_CONTAINER} cat /etc/rmd-build-sha returned nothing"
+      ;;
+    *[!0-9a-fA-F]*)
+      IMAGE_BUILD_SHA_SOURCE="unavailable — ${RESTART_RUNTIME} exec ${RESTART_CONTAINER} cat /etc/rmd-build-sha gave a non-sha value"
+      ;;
+    *)
+      IMAGE_BUILD_SHA="$IMAGE_BUILD_SHA_RAW"
+      IMAGE_BUILD_SHA_SOURCE="${RESTART_RUNTIME} exec ${RESTART_CONTAINER} cat /etc/rmd-build-sha"
+      ;;
+  esac
+fi
+
 # The gap the MACHINE observed since its own last successful beat. This is what makes the
 # watcher's threshold refinable later against a measured distribution instead of intuition — a
 # force-pushed single-commit branch keeps no history of its own to measure.
@@ -344,6 +382,7 @@ disk_free_kb=${DISK_FREE_KB}
 prev_beat_ts=${PREV_BEAT_TS:-none}
 since_prev_beat_s=${SINCE_PREV_S:-unknown}
 restart_source=${RESTART_SOURCE}
+image_build_sha_source=${IMAGE_BUILD_SHA_SOURCE}
 EOF
 )"
 
@@ -357,6 +396,15 @@ restart_container=${RESTART_CONTAINER}
 restart_count=${RESTART_COUNT}
 restart_max=${RESTART_MAX}
 restart_policy=${RESTART_POLICY}"
+fi
+
+# Same shape as RESTART_COUNT immediately above: `image_build_sha_source` (in the heredoc) is
+# always present as the diagnosis, and `image_build_sha` itself is appended ONLY on a successful,
+# validated read — so `field(payload, "image_build_sha") === undefined` is the honest signal that
+# nothing was published, never a healthy-looking placeholder.
+if [ -n "$IMAGE_BUILD_SHA" ]; then
+  PAYLOAD="${PAYLOAD}
+image_build_sha=${IMAGE_BUILD_SHA}"
 fi
 
 # The subject line IS the phone-readable answer — it is what shows on the branch listing without
