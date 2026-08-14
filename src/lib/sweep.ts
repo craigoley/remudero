@@ -2620,6 +2620,48 @@ export async function runSweep(
   return summary;
 }
 
+/**
+ * W1-T463 — THE DIAGNOSIS FOR "a restricted light sweep ticks every 60s and a PR still sat
+ * 21-green and unreviewed for ~15 minutes". `runSweep`'s own `for (const pr of openPrs)` loop
+ * is SEQUENTIAL: every gated effect it fires is awaited before the next PR is even
+ * dispositioned. The restricted light sweep (`buildSweepLightHook`, run-task.ts) exists so a
+ * review can post WHILE a dispatch is in flight (`startInFlightTicker`, daemon.ts, ticks every
+ * `pollIntervalMs`) — but it used to hand its WHOLE `openPrs` snapshot to `runSweep` as ONE
+ * call, and `SweepDeps.postReview` (`buildSweepEffects`, run-task.ts) is not a cheap status
+ * flip: it runs the real `reviewCommand`, which materializes a worktree and EXECUTES every
+ * whitelisted proof for that PR (test/retro-sweep-ticker.test.ts pins the mechanism this
+ * closes: `startInFlightTicker` does not schedule its NEXT `pollIntervalMs` sleep until
+ * `sweepLight()` itself resolves, so the "every ~60s" promise only bounds when a pass STARTS,
+ * never how long it runs). One slow-to-judge PR therefore blocked every OTHER
+ * post-review-eligible PR queued behind it in the SAME pass — a fast, already-decided PR
+ * ordered later in that tick's `buildOpenPrViews` snapshot silently missed its review by
+ * however long the PRs ahead of it took, which is the observed ~15-minute shape.
+ *
+ * THE FIX IS SCOPED TO THIS ONE CALLER, NEVER `runSweep` ITSELF (which `rmd sweep` and the
+ * daemon's full per-poll sweep still call, unchanged, over the whole array in one sequential
+ * pass): every open PR gets its OWN `runSweep` call, all fired CONCURRENTLY. This is NOT a
+ * second review lane (design (ii)/(iv) — no new mechanism, no new per-PR mutex to build): each
+ * single-PR call still goes through the exact SAME dedup/disposition/ledger path `runSweep` has
+ * always used, and no PR is ever handed to more than one of these concurrent calls, so there is
+ * no race on any PR's own dedup key. The only cost is `readLedgerLines` now running once per
+ * PR's own call rather than once for the whole batch — a few extra small, local file reads,
+ * bounded by the open-PR count the light sweep already fetches every tick.
+ *
+ * AN EMPTY PASS STILL GETS EXACTLY ONE `runSweep` CALL. Mapping `openPrs` directly would call
+ * `runSweep` zero times on a quiet tick, silently dropping the `sweep.pass`/`sweep.summary`
+ * per-pass heartbeat `runSweep`'s own doc explains at length (a healthy quiet pass and a
+ * blind/dead one must stay distinguishable) — see `test/run-task.test.ts`'s "runs the
+ * restricted light sweep over an empty PR set" fixture, which pins exactly this.
+ */
+export async function runSweepLightPass(
+  openPrs: OpenPrView[],
+  deps: SweepDeps,
+  policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
+): Promise<SweepSummary[]> {
+  if (openPrs.length === 0) return [await runSweep([], deps, policy)];
+  return Promise.all(openPrs.map((pr) => runSweep([pr], deps, policy)));
+}
+
 /** One-line human render of a sweep summary, for both callers' console output. */
 export function renderSweepSummary(s: SweepSummary): string {
   const b = s.byDisposition;

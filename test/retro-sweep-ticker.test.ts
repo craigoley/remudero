@@ -185,6 +185,69 @@ test("W1-T276: the retro's light-sweep ticker never dispatches a task while the 
   assert.equal(runOneCalls, 0, "the light-sweep ticker restricted to sweepLight must never dispatch a task");
 });
 
+// ── W1-T463 — THE DIAGNOSIS: "a restricted light sweep ticks every 60s ... yet a PR sat
+// 21-green and unreviewed for ~15 minutes". `startInFlightTicker` (src/lib/daemon.ts, the SAME
+// ticker function this file's other tests exercise via the retro wiring) only schedules its
+// NEXT `pollIntervalMs` sleep AFTER the CURRENT `sweepLight()` call resolves — it never runs on
+// a fixed wall-clock schedule independent of that call's own duration. That is correct and
+// deliberate on its own (no overlapping `sweepLight()` calls, so no second concurrent
+// dedup-reader is ever introduced — design (iv)) — but it means "ticks every ~60s" only bounds
+// when a NEW pass STARTS, never how long that pass takes to finish. `buildSweepLightHook`'s
+// `postReview` effect (run-task.ts) runs the REAL `reviewCommand` — a worktree materialize plus
+// every whitelisted proof for that PR — never a cheap status flip, and `runSweep`'s own
+// per-PR loop is sequential, so a single `sweepLight()` call's wall time scales with however
+// many PRs are due for post-review AND how long each one's proofs take. A PR ordered behind a
+// slow sibling in that pass's `openPrs` snapshot silently misses the "checked every ~60s"
+// expectation by however long the PRs ahead of it take — the observed ~15-minute shape.
+// (`runSweepLightPass`, src/lib/sweep.ts, is W1-T463's fix for the OTHER half of this: it runs
+// every open PR's own `runSweep` call CONCURRENTLY rather than the whole snapshot sequentially,
+// so PRs no longer queue behind each other WITHIN one pass. This test pins the ticker-level
+// mechanism that made a slow pass matter in the first place — it is deliberately NOT about
+// sweepLight's internals, which this file's other tests treat as an opaque injected function.)
+test("W1-T463: the ticker's next tick does not begin until the CURRENT sweepLight() call resolves — 'ticks every ~60s' bounds when a pass starts, never how long it runs", async () => {
+  const plan = fixturePlan();
+  let sweepLightCalls = 0;
+  let releaseSlowPass: (() => void) | undefined;
+  const slowPass = new Promise<void>((resolve) => {
+    releaseSlowPass = resolve;
+  });
+  let stopChecks = 0;
+  const pending = runDaemon(plan, {
+    refreshMerged: () => () => false, // stay OPEN — this fixture drives a real in-flight runOne
+    runOne: async (): Promise<RunResult> => {
+      // The dispatch this ticker exists to route around — it only settles once the test
+      // releases it below, so the ticker stays "in flight" for the whole real-time window.
+      await slowPass;
+      return { taskId: "A", runId: "A-run", merged: true, costUsd: 0, verdict: "merged" };
+    },
+    checkStop: () => {
+      stopChecks++;
+      return stopChecks > 1 ? "test bound reached" : undefined;
+    },
+    sweepLight: async () => {
+      sweepLightCalls++;
+      if (sweepLightCalls === 1) {
+        // Simulates a real pass that outran pollIntervalMs (e.g. a post-review action's
+        // worktree-materialize-plus-proofs, or several such PRs queued in the same
+        // snapshot): it holds here across the real-time window below, and the ticker must
+        // not start a second sweepLight() call while this one is in flight — see
+        // startInFlightTicker's own doc for why overlap is refused, not merely absent by luck.
+        await slowPass;
+      }
+    },
+    sleep: async () => {}, // the injected mock clock — instantaneous, never itself gates real time
+  });
+  // Let REAL wall-clock time pass while the first sweepLight() call is still gated. If the
+  // ticker ran sweepLight() on a schedule independent of that call's own duration (the
+  // property this test would catch a regression of), several more calls would already have
+  // fired by now; instead it is coupled to the in-flight call's own completion.
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(sweepLightCalls, 1, "a slow sweepLight() call is never overlapped by a second one — the tick cadence is gated on ITS completion, not a fixed wall clock");
+  releaseSlowPass?.();
+  const summary = await pending;
+  assert.equal(summary.stopReason, "stopped");
+});
+
 test("W1-T276: no sweepLight wired -> a fired retro behaves exactly as before this ticker existed", async () => {
   const plan = fixturePlan();
   let runCalls = 0;

@@ -490,6 +490,7 @@ import {
   runCreditBackfill,
   runEscalationReconcile,
   runSweep,
+  runSweepLightPass,
   strikeCapForAnswer,
   terminalStateReason,
   toQuestionEntry,
@@ -15261,6 +15262,17 @@ export function buildSweepHook(
  * costs one logged tick, never the daemon's liveness (the daemon.ts caller
  * ALSO wraps this call — see `daemon.sweep_light.failed` — this inner catch
  * just names the failure distinctly on this module's own ledger step).
+ *
+ * W1-T463 — `runSweepLightPass`, NOT `runSweep`, over this pass's whole snapshot. The
+ * diagnosis for "a PR sat 21-green and unreviewed for ~15 minutes despite a ticking light
+ * sweep": `runSweep`'s own loop is sequential, and `postReview` below runs the REAL
+ * `reviewCommand` (worktree materialize + every whitelisted proof), not a cheap status flip —
+ * so one slow-to-judge PR used to block every OTHER post-review-eligible PR queued behind it in
+ * the SAME tick, and `startInFlightTicker` (daemon.ts) does not schedule its next tick until
+ * the whole pass resolves. `runSweepLightPass` (sweep.ts, see its own doc for the full
+ * diagnosis) fires one `runSweep` call PER open PR, concurrently, so a fast PR is never starved
+ * behind a slow one in the same pass — the SAME dedup/disposition/ledger path per PR, no second
+ * lane, no new per-PR mutex (design (ii)/(iv): each PR is handed to exactly one call).
  */
 export function buildSweepLightHook(
   owner: string,
@@ -15275,7 +15287,7 @@ export function buildSweepLightHook(
     try {
       const openPrs = buildOpenPrViews(owner, repo, ledgerPath);
       const effects = buildSweepEffects(owner, repo, config, ledgerPath, runId, plan, log, DEFAULT_SWEEP_POLICY);
-      await runSweep(
+      await runSweepLightPass(
         openPrs,
         { ...effects, ledgerPath, runId, log, actionable: (d) => d === "post-review" },
         DEFAULT_SWEEP_POLICY,

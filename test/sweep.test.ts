@@ -20,6 +20,7 @@ import {
   runCreditBackfill,
   runEscalationReconcile,
   runSweep,
+  runSweepLightPass,
   strikeCapForAnswer,
   toQuestionEntry,
   MAX_ESCALATION_CLOSES_PER_CYCLE,
@@ -2219,6 +2220,67 @@ test("runSweep: no postReview dep wired -> ledgered stand-down, no crash, no esc
   const disposed = readLedgerLines(deps.ledgerPath).filter((l) => l.step === "sweep.disposed");
   assert.equal(disposed[0].disposition, "post-review");
   assert.equal(disposed[0].acted, false);
+});
+
+// ── W1-T463 — THE DIAGNOSIS: `runSweep`'s own loop over `openPrs` is sequential, and the
+//    light sweep's `postReview` runs the REAL `reviewCommand` (a worktree materialize + every
+//    whitelisted proof), never a cheap status flip — so a slow-to-judge PR used to block every
+//    OTHER post-review-eligible PR queued behind it in the SAME restricted-light-sweep tick.
+//    `runSweepLightPass` fires one `runSweep` call PER open PR, concurrently, so this file's
+//    #584 fixture PR is never starved behind a slower sibling in the same pass again.
+
+test("runSweepLightPass: fires runSweep once PER open PR, CONCURRENTLY — a slow action for one PR never blocks another PR's action from completing (the #707-adjacent stall this closes)", async () => {
+  const lp = ledgerPath();
+  let releaseSlow: (() => void) | undefined;
+  const slowGate = new Promise<void>((resolve) => {
+    releaseSlow = resolve;
+  });
+  const order: number[] = [];
+  const deps = fakeDeps({
+    ledgerPath: lp,
+    postReview: async (p) => {
+      if (p.prNumber === 584) await slowGate; // PR 584's "review" never resolves until released
+      order.push(p.prNumber);
+    },
+  });
+  const slow = ungatedGreenPr(); // prNumber 584, the default fixture
+  const fast = ungatedGreenPr({ prNumber: 585, prUrl: "url/585", taskId: "W1-T585", headSha: "bbbb222" });
+  const pending = runSweepLightPass([slow, fast], deps, DEFAULT_SWEEP_POLICY);
+  // Flush pending microtasks WITHOUT ever releasing the slow gate. Under the pre-fix shape
+  // (one `runSweep(openPrs, ...)` call over the whole array) PR 585 could never be reached —
+  // let alone recorded here — until PR 584's gate released; runSweepLightPass reaches it anyway.
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(order, [585], "the fast PR's action completed while the slow PR's was still in flight");
+  releaseSlow?.();
+  await pending;
+  assert.deepEqual(order, [585, 584], "the slow PR's action still completes once released");
+});
+
+test("runSweepLightPass: each PR still gets its own dedup/disposition/ledger line — the SAME per-PR path runSweep has always used, no PR shared across the concurrent calls", async () => {
+  const lp = ledgerPath();
+  const calls: number[] = [];
+  const deps = fakeDeps({
+    ledgerPath: lp,
+    postReview: (p) => {
+      calls.push(p.prNumber);
+      appendLedger(lp, { run_id: "SWEEP-1", task_id: p.taskId ?? "", step: "review.posted", head_sha: p.headSha, state: "success" });
+    },
+  });
+  const a = ungatedGreenPr({ headSha: "aaaa584" }); // prNumber 584, taskId W1-T584
+  const b = ungatedGreenPr({ prNumber: 585, prUrl: "url/585", taskId: "W1-T585", headSha: "bbbb585" });
+  const summaries = await runSweepLightPass([a, b], deps, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual([...calls].sort(), [584, 585], "both PRs' post-review actions fired");
+  assert.equal(summaries.length, 2, "one summary per PR — no merged/lossy aggregate");
+  const disposed = readLedgerLines(lp).filter((l) => l.step === "sweep.disposed");
+  assert.equal(disposed.length, 2, "each PR still writes its own sweep.disposed line");
+  assert.ok(disposed.every((l) => l.acted === true));
+
+  // A second pass sees BOTH heads' posted verdicts and dedups both — proves the concurrent
+  // calls did not corrupt or drop either PR's own dedup key.
+  const calls2: number[] = [];
+  const deps2 = fakeDeps({ ledgerPath: lp, postReview: (p) => { calls2.push(p.prNumber); } });
+  await runSweepLightPass([a, b], deps2, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(calls2, [], "both heads already carry a posted verdict — neither re-fires");
 });
 
 // ── W1-T176: a required check with ZERO check runs is DETERMINISTIC-ACTION, ──
