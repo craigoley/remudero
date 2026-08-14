@@ -290,7 +290,7 @@ export type InjectCoverageImprovementResult =
  * (W1-T470 design note). This function is inert until that verb is wired into
  * `.github/workflows/ci.yml`'s coverage job — a SEPARATE PR, per Rule 25 (see the module doc).
  */
-export function injectCoverageImprovementTask(deps: InjectCoverageImprovementDeps): InjectCoverageImprovementResult {
+export const injectCoverageImprovementTask = (deps: InjectCoverageImprovementDeps): InjectCoverageImprovementResult => {
   const records = parseLcovFileRecords(deps.lcovText);
   const branchesPct = aggregateBranchesPct(records);
   const tier = classifyImprovementTier(branchesPct, { pass: deps.pass, block: deps.block });
@@ -334,4 +334,4 @@ export function injectCoverageImprovementTask(deps: InjectCoverageImprovementDep
   });
 
   return { action: "filed", branchesPct, signature, feedbackId: entry.id, files };
-}
+};
