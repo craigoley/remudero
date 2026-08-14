@@ -614,6 +614,38 @@ test("W1-T196 acceptance 4 — an attributable PR with a genuine block still esc
   assert.equal(deps.escalated[0].question.taskId, "W1-D");
 });
 
+// W1-T456 (DEFECT B): row 6 (`reviewState === "failure" && unmetCriteria.length > 0` ->
+// blocked-fixable) ALREADY routes a task-id-less PR correctly — this task's own gap was purely
+// that `buildOpenPrViews` (run-task.ts) never populated `unmetCriteria` for a filing PR at all,
+// so it fell through to row 7's escalate-only "criteria unrecoverable" unconditionally. Once
+// run-task.ts's new ledger read (the synthetic `PR-<n>` key `reviewCommand` already uses for
+// every task-id-less review) resolves real unmet criteria, THIS row — no sweep.ts change
+// needed — is what makes the failure resolvable by the fix rung without a task-id trailer.
+test("W1-T456 acceptance 3 — a task-id-less PR (a plan-filing PR's shape) with REAL unmet criteria routes to blocked-fixable, never the criteria-unrecoverable escalation", async () => {
+  const filingWithRealUnmet = pr({
+    prNumber: 900,
+    prUrl: "url/900",
+    taskId: undefined,
+    isPlanFiling: true,
+    reviewState: "failure",
+    checksState: "green",
+    priorStrikes: 0,
+    unmetCriteria: [criterion({ claim: "the filed shard's acceptance block is well-formed" })],
+  });
+  assert.equal(
+    deriveDisposition(filingWithRealUnmet, DEFAULT_SWEEP_POLICY, NOW).disposition,
+    "blocked-fixable",
+    "resolvable by the fix rung — no Remudero-Task: trailer required",
+  );
+
+  const deps = fakeDeps();
+  const summary = await runSweep([filingWithRealUnmet], deps);
+  assert.equal(summary.byDisposition["blocked-fixable"], 1);
+  assert.equal(deps.fixed.length, 1, "the fix rung is actually dispatched, not just routed");
+  assert.deepEqual(deps.fixed[0].evidence.unmetCriteria, filingWithRealUnmet.unmetCriteria);
+  assert.equal(deps.escalated.length, 0, "never reaches the criteria-unrecoverable escalation");
+});
+
 test("acceptance 3 — the pending ceiling is DATA: lowering the seeded ceiling flips the 4min fixture from wait to escalate with ZERO sweep-code changes", () => {
   const p = pendingStormPr(4);
   assert.equal(deriveDisposition(p, DEFAULT_SWEEP_POLICY, NOW).disposition, "wait", "baseline: 4min < the default 60min ceiling -> wait");

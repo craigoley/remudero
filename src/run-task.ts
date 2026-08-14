@@ -13932,17 +13932,36 @@ export function buildOpenPrViews(
     const reviewState = reviewStateFromRollup(pr.statusCheckRollup);
     const checksState = checksStateFromRollup(pr.statusCheckRollup, requiredContexts);
     const reviewOrphans = reviewOrphansFor(ledger, taskId, pr.headRefOid);
+    // W1-T456 (DEFECT B): a plan-only filing PR deliberately carries no `Remudero-Task:`
+    // trailer (#1527's correctness rule) — `taskId` above is `undefined` for it BY DESIGN, so
+    // `unmetCriteria` below used to stay `[]` unconditionally and every failing filing fell
+    // straight to sweep.ts's row 7 ("criteria unrecoverable... escalating"), no matter how
+    // fixable the actual failure was. `reviewCommand`/`escalationTaskIdFor` already key EVERY
+    // task-id-less PR's `review.posted` ledger line with the SAME synthetic `PR-<n>` id (see
+    // unmetFromLedger's caller doc there) — reading unmet criteria back through that key for a
+    // POSITIVELY-marked filing PR (`isPlanOnlyFilingPr`, the SAME emitter signal
+    // `resolveOpenPrTaskId` already consults two lines above, never inferred from the absent
+    // trailer alone) lets a REAL failure reach sweep.ts's row 6 (`unmetCriteria.length > 0` ->
+    // blocked-fixable, which `fixRungTaskFor`'s synthetic-task branch already knows how to
+    // dispatch against with no plan task at all) instead of always falling through to row 7.
+    // `criteriaRecoverable` below is DELIBERATELY untouched (see its own doc and W1-T453's
+    // regression lock, test/openpr-taskid-resolver.test.ts) — this widens WHERE unmet criteria
+    // can be READ FROM, never what "recoverable" means.
+    const filingUnmetKey = !taskId && isPlanOnlyFilingPr(ledger, pr.url) ? `PR-${pr.number}` : undefined;
+    const unmetKey = taskId ?? filingUnmetKey;
     return {
       prNumber: pr.number,
       prUrl: pr.url,
       taskId,
       reviewState,
       checksState,
-      unmetCriteria: reviewState === "failure" && taskId ? unmetFromLedger(ledger, taskId) : [],
+      unmetCriteria: reviewState === "failure" && unmetKey ? unmetFromLedger(ledger, unmetKey) : [],
       // W1-T440: whether a `Remudero-Task:` trailer resolved a task id AT ALL — i.e. whether
       // `unmetCriteria` above reflects a real ledger read or is `[]` only because there was
       // never a task id to read against. sweep.ts's row 7 reads this to name which empty a
-      // failing review with no unmet criteria actually is.
+      // failing review with no unmet criteria actually is. NOTE (W1-T456): `unmetCriteria` can
+      // now ALSO be populated for a task-id-less PR (the `filingUnmetKey` fallback above) — this
+      // stays `false` even then, on purpose (see the note above `filingUnmetKey`).
       criteriaRecoverable: taskId !== undefined,
       priorStrikes: priorStrikesFor(ledger, taskId, currentStrikeRegimeFor(ledger, taskId)),
       strikeHistory: deriveStrikeHistory(ledger, taskId),

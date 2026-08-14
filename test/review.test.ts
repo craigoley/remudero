@@ -46,6 +46,7 @@ import {
   reviewLedgerLegibilityFields,
   rubricAdvisorySection,
   interpolatedTitleStaticChunks,
+  shardDeclaredFilesInDiff,
   type PriorReviewVerdict,
   type ProofExecutor,
   type ProofSpawner,
@@ -2758,6 +2759,60 @@ test("fast-fail: a proof naming a test that DOES exist still resolves, still nar
     ["not ok 1 - a genuinely present title for the happy path", "# duration_ms 4"].join("\n"),
   );
   assert.equal(execWhitelistedProof(wp!, dir, 60_000, failing.spawner), "fail");
+});
+
+// ── W1-T456 (DEFECT A): a filing's forward-referenced proof is UNBUILT, never a false FAIL ──
+// See test/filing-forward-reference.test.ts for the full acceptance-level fixtures (all three
+// claims). These two lock the verdict-path SHAPE itself, at the point it changed: a proof
+// naming an exact test-file path that is absent on the head, and how that stops meaning an
+// automatic `executed_fail` once the SAME diff's own plan shard declares that exact path.
+
+test("W1-T456: an exact-path unit-test proof absent on the head, declared by the diff's own shard, is not_yet_built (never executed_fail)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-w456-fwdref-"));
+  const verdict = judgeCriterion(
+    { claim: "the forward-referenced test exists", proof: "unit test: test/filing-forward-reference.test.ts" },
+    new Set(),
+    undefined,
+    { cwd: dir, forwardReferenceFiles: new Set(["test/filing-forward-reference.test.ts"]) },
+  );
+  assert.equal(verdict.proof_exec, "not_yet_built");
+  assert.equal(verdict.proof_skip, "forward-reference");
+  assert.notEqual(verdict.proof_exec, "executed_fail");
+  assert.match(verdict.reason, /forward reference to work not yet built/);
+});
+
+test("W1-T456: the SAME absent path with no declaring shard in the diff still executes and fails like today (no blanket excuse)", () => {
+  const verdict = judgeCriterion(
+    { claim: "some future work is proven", proof: "unit test: test/totally-unrelated-fabricated.test.ts" },
+    new Set(),
+    undefined,
+    // forwardReferenceFiles is populated (this IS a filing-PR review) but names a DIFFERENT
+    // path — the proof under judgment here was never declared by any shard in this diff.
+    { cwd: "/nonexistent", exec: () => "fail", forwardReferenceFiles: new Set(["test/filing-forward-reference.test.ts"]) },
+  );
+  assert.equal(verdict.proof_exec, "executed_fail");
+  assert.equal(verdict.met, false);
+});
+
+test("shardDeclaredFilesInDiff: reads a plan shard's own files: list off an ADDED hunk only, never a coincidental match elsewhere in the diff", () => {
+  const diff = [
+    "diff --git a/plan/tasks.d/W1-T999-example.yaml b/plan/tasks.d/W1-T999-example.yaml",
+    "new file mode 100644",
+    "--- /dev/null",
+    "+++ b/plan/tasks.d/W1-T999-example.yaml",
+    "@@ -0,0 +1,2 @@",
+    "+- id: W1-T999",
+    "+  files: [src/foo.ts, test/filing-forward-reference.test.ts]",
+    "diff --git a/src/unrelated.ts b/src/unrelated.ts",
+    "index 111..222 100644",
+    "--- a/src/unrelated.ts",
+    "+++ b/src/unrelated.ts",
+    "@@ -1 +1 @@",
+    "-  files: [src/should-not-count.ts]",
+    "+  files: [src/should-not-count-either.ts]",
+  ].join("\n");
+  const declared = shardDeclaredFilesInDiff(diff);
+  assert.deepEqual([...declared].sort(), ["src/foo.ts", "test/filing-forward-reference.test.ts"]);
 });
 
 // ── W1-T359 coverage: the PR-comment branch, which was dead to the suite BEFORE this task ──
