@@ -1110,7 +1110,7 @@ export interface DaemonDeps {
    *  (below, in this file's idle branch) passes the runnable-depth census it already computed for
    *  `daemon.idle_reasons`/starvation this same tick — a hook that ignores the argument (every
    *  test predating the curve) still typechecks and behaves exactly as before. */
-  checkAutoTriage?: () => AutoTriageDecision;
+  checkAutoTriage?: (deferralPending: boolean) => AutoTriageDecision;
   /** impl-DJ: run ONE triage for the decided entry. Awaited under the light-sweep ticker. */
   runAutoTriage?: (feedbackId: string) => Promise<void>;
   /**
@@ -2498,6 +2498,11 @@ export async function runDaemon(
     // before this task, wrapped in an array — the safety property `DaemonOpts.laneCount`'s own
     // doc states.
     let dispatchSet: Task[];
+    // W1-T469 — THE RULING'S GATE, hoisted here because `partition` is scoped to the else-branch
+    // below while the rung now runs OUTSIDE the idle branch. Zero means the partitioner deferred
+    // nothing this tick; the forced-next path leaves it zero, which is correct (an operator-forced
+    // dispatch is not evidence that the queue collided).
+    let deferredPairings = 0;
     if (forcedNext) {
       dispatchSet = [forcedNext];
     } else {
@@ -2518,6 +2523,7 @@ export async function runDaemon(
       const candidates = runnableCandidates(planForBatch, isMerged, budget, dispatchOpts);
       const partition = partitionByFileOverlap(candidates);
       for (const d of partition.serialized) log("dispatch.serialized", serializedLedgerPayload(d));
+      deferredPairings = partition.serialized.length;
       dispatchSet = partition.dispatch;
     }
 
@@ -2579,12 +2585,43 @@ export async function runDaemon(
         starvationEscalated = false;
       }
 
+
+      await deps.sleep(pollIntervalMs);
+      continue;
+    }
+
+    // ── AUTO-TRIAGE RUNG — W1-T469, MOVED OUT OF THE IDLE BRANCH ──────────────
+    // THE OPERATOR'S RULING, NOT THIS SHARD'S: replace the idle conjunct with
+    // `partition.serialized.length > 0`. The rung used to sit INSIDE `if (dispatchSet.length
+    // === 0)`, so a BUSY TICK NEVER CONSULTED IT AND LOGGED NOTHING — 0 of 1,214
+    // `auto_triage.skipped` rows carry the old `daemon is not idle` reason (control: 666 carry
+    // the daily-cap reason). It now runs here, AFTER the dispatch decision.
+    //
+    // ★ WHY AFTER THE IDLE `continue` AND NOT BEFORE IT — THIS PLACEMENT COSTS NO DECISION, and
+    // that is a PROVABLE claim rather than a judgement call. `partitionByFileOverlap`
+    // (dispatch-overlap.ts) pushes a candidate to `serialized` ONLY when `dispatch.find(...)`
+    // already matched an occupant, and the first candidate always lands in `dispatch` because
+    // `find` over an empty array is undefined. So `serialized.length > 0` IMPLIES
+    // `dispatch.length >= 1` — a deferral cannot exist on an idle tick, and the decision an
+    // idle tick would reach here is "no deferral this pass", unconditionally.
+    // Running it BEFORE the `continue` would therefore add no information and would write that
+    // one row on all ~390 idle polls a night. That is not merely noise: `rotateLedger` keeps
+    // MAX_RETAINED_LINES_PER_STEP = 200 rows per step, so 390 identical refusals would flush the
+    // retained `auto_triage.skipped` window nightly and DESTROY the diagnostic this rung exists
+    // to provide — the same reasoning the `daemon.idle_reasons` cadence comment above records.
+    // `test/auto-triage-rung.test.ts` pins the implication so a partitioner change re-opens it.
+    //
+    // AND THE OLD GATE PROTECTED LESS THAN IT APPEARED: at `budget <= 0` the daemon logs
+    // `dispatch.wip_deferred` and does NOT continue, so `runnableCandidates(…, 0, …)` returns []
+    // and the idle branch was already entered with every lane full.
+    //
+    // STILL TRIPLE-BOUNDED — `minIntervalMinutes` and `maxPerDay` are the only bounds left after
+    // W1-T475, and this change deliberately loosens neither. Best-effort in the retro's idiom.
       // ── AUTO-TRIAGE RUNG (impl-DJ, recon-DC #2) ────────────────────────────────
       // The daemon's SECOND work-generating rung, and the first that fires on IDLE rather than on
       // CADENCE — recon-DC's critique of the retro is precisely that it "fires on cadence, not on
-      // idle". Placed HERE, inside the idle branch, because this is the one point where "nothing
-      // is dispatchable and nothing is in flight" is ALREADY known: the boolean is free, nothing
-      // is recomputed, and an idle poll costs exactly what it cost before.
+      // idle". W1-T469 MOVED IT OUT of the idle branch on the operator's ruling — see the banner
+      // above; the gate is now a DEFERRED PAIRING, not idleness, and every tick reaches a decision.
       //
       // DEFAULT OFF and triple-bounded (enabled / adaptive interval / maxPerDay — see
       // lib/auto-triage.ts). Best-effort in the retro's idiom: a throw here costs one logged
@@ -2592,7 +2629,7 @@ export async function runDaemon(
       if (deps.checkAutoTriage) {
         let decision: AutoTriageDecision | undefined;
         try {
-          decision = deps.checkAutoTriage();
+          decision = deps.checkAutoTriage(deferredPairings > 0);
         } catch (e) {
           log("auto_triage.check_failed", { error: String((e as Error)?.message ?? e) });
         }
@@ -2649,10 +2686,6 @@ export async function runDaemon(
           log("auto_triage.skipped", { reason: decision.reason });
         }
       }
-
-      await deps.sleep(pollIntervalMs);
-      continue;
-    }
 
     // A dispatchable task ends any starvation episode — re-arm so a LATER one escalates again.
     starvationEscalated = false;

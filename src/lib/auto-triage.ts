@@ -9,10 +9,16 @@ import { join } from "node:path";
  * ~68 feedback entries sit at `status: new` while the daemon idles: `triageCommand`'s only caller
  * is the CLI (run-task.ts), and nothing turns a feedback entry into a task unattended.
  *
- * WHAT IT DOES, AND EMPHATICALLY WHAT IT DOES NOT. At most ONE entry per idle period. recon-DC
+ * WHAT IT DOES, AND EMPHATICALLY WHAT IT DOES NOT. At most ONE entry per fire window. recon-DC
  * rejected draining the backlog in as many words — "the whole backlog is ~$64 unsupervised and 68
- * approvals — worse than idle" — and a triage run now measures ~$2.00, which makes restraint more
- * important, not less. Three independent bounds apply, and ALL must pass:
+ * approvals — worse than idle".
+ *
+ * THE PER-RUN COST IS ~$1.09 MEAN, NOT THE ~$2.00 THIS COMMENT USED TO CARRY. That figure was
+ * extrapolated from a SINGLE $2.03 run, and a single observation of a skewed quantity is a
+ * worst-case sample, not a mean — it inflated the projected daily spend by ~2x. RE-DERIVED over 70
+ * runs: mean $1.09, median $1.03, p90 $1.77, max $2.86, with only 5 of 70 at or above $2.00. The
+ * restraint below is still the point; it is simply bounded against a real distribution now.
+ * Three independent bounds apply, and ALL must pass:
  *   1. `enabled` — policy data, DEFAULT FALSE. A rung that ships on is a surprise, not a rung.
  *   2. `minIntervalMinutes` — the floor between two fires. This is what makes "one per idle
  *      PERIOD" enforceable rather than aspirational: the daemon polls every 60s and idled ~390
@@ -108,8 +114,19 @@ export interface AutoTriagePolicy {
 
 export interface AutoTriageInputs {
   policy: AutoTriagePolicy;
-  /** The daemon reached its idle branch this tick: nothing dispatchable, nothing in flight. */
-  idle: boolean;
+  /**
+   * W1-T469 — THE PARTITIONER DEFERRED AT LEAST ONE PAIRING THIS TICK, i.e. capacity AND runnable
+   * work both existed and `partitionByFileOverlap` refused to pair them. This REPLACES the former
+   * `idle` conjunct on the operator's ruling.
+   *
+   * WHY NOT `idle`, AND WHY NOT AN EMPTY-QUEUE SIGNAL. The old field was set only inside
+   * `daemon.ts`'s idle branch, so `if (!i.idle)` below was UNREACHABLE from the daemon and a BUSY
+   * TICK LOGGED NOTHING AT ALL — measured: 0 of 1,214 `auto_triage.skipped` rows carry its reason,
+   * against 666 carrying the daily-cap reason on the same corpus. `dispatchSet.length < budget` was
+   * rejected as the replacement because it also fires when the queue is simply EMPTY, which is now
+   * the normal state, so it would spend the daily cap on nothing. A DEFERRAL is the strong signal.
+   */
+  deferralPending: boolean;
   /** True when the shared triage lock is already held by a LIVE process (rung or hand-run). */
   lockHeld: boolean;
   marker: MarkerResolution;
@@ -134,7 +151,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  */
 export function decideAutoTriage(i: AutoTriageInputs): AutoTriageDecision {
   if (!i.policy.enabled) return { fire: false, reason: "auto-triage disabled (policy.autoTriage.enabled=false)" };
-  if (!i.idle) return { fire: false, reason: "daemon is not idle" };
+  if (!i.deferralPending) return { fire: false, reason: "no deferral this pass — the partitioner refused no pairing" };
   if (i.lockHeld) return { fire: false, reason: "triage lock held — a run is already in flight" };
   if (i.marker.kind === "corrupt") return { fire: false, reason: "auto-triage marker unreadable — failing closed" };
 
@@ -176,7 +193,15 @@ export function decideAutoTriage(i: AutoTriageInputs): AutoTriageDecision {
   // longest has, by construction, been declined by every prior fire — newest-first would starve the
   // tail forever, which is exactly the state the backlog is in now. (b) It is STABLE: the same
   // input yields the same pick, so a fire that fails and retries next period does not skip ahead.
-  return { fire: true, feedbackId: i.candidates[0], reason: "idle, under both bounds, oldest entry at status: new" };
+  // THE REASON NAMES THE GATE THAT ACTUALLY HELD. It read "idle, under both bounds, …" until
+  // W1-T469, which is the wording of a conjunct that no longer exists — a fired row asserting
+  // idleness while the rung fires precisely on a BUSY tick would send the next investigation
+  // looking for an idle period that never happened.
+  return {
+    fire: true,
+    feedbackId: i.candidates[0],
+    reason: "a pairing deferred, under both bounds, oldest entry at status: new",
+  };
 }
 
 /**

@@ -71,6 +71,7 @@ test("an injected disabled policy governs, whatever the checked-in policy says",
   const { config, cleanup } = tmpConfig();
   try {
     const decision = autoTriageCheck({
+      deferralPending: true,
       config,
       policy: policyFixture({ enabled: false, minIntervalMinutes: 60, maxPerDay: 4 }),
     });
@@ -89,6 +90,7 @@ test("an injected enabled policy is not refused for being disabled", () => {
   const { config, cleanup } = tmpConfig();
   try {
     const decision = autoTriageCheck({
+      deferralPending: true,
       config,
       policy: policyFixture({ enabled: true, minIntervalMinutes: 60, maxPerDay: 4 }),
     });
@@ -117,6 +119,7 @@ test("the injected maxPerDay bound is the one enforced", () => {
     writeFileSync(join(config.root, "state", "last-auto-triage.json"), JSON.stringify({ fires: recent }));
 
     const capped = autoTriageCheck({
+      deferralPending: true,
       config,
       now,
       policy: policyFixture({ enabled: true, minIntervalMinutes: 1, maxPerDay: 2 }),
@@ -125,6 +128,7 @@ test("the injected maxPerDay bound is the one enforced", () => {
     assert.match(capped.reason, /daily cap reached \(2\/2/, "the INJECTED cap of 2 is the one enforced");
 
     const roomy = autoTriageCheck({
+      deferralPending: true,
       config,
       now,
       policy: policyFixture({ enabled: true, minIntervalMinutes: 1, maxPerDay: 9 }),
@@ -143,6 +147,7 @@ test("the injected minIntervalMinutes bound is the one enforced", () => {
     writeFileSync(join(config.root, "state", "last-auto-triage.json"), JSON.stringify({ fires: [tenMinutesAgo] }));
 
     const tooSoon = autoTriageCheck({
+      deferralPending: true,
       config,
       now,
       policy: policyFixture({ enabled: true, minIntervalMinutes: 60, maxPerDay: 9 }),
@@ -151,6 +156,7 @@ test("the injected minIntervalMinutes bound is the one enforced", () => {
     assert.match(tooSoon.reason, /minInterval 60m/, "the INJECTED interval is the one enforced");
 
     const longEnough = autoTriageCheck({
+      deferralPending: true,
       config,
       now,
       policy: policyFixture({ enabled: true, minIntervalMinutes: 5, maxPerDay: 9 }),
@@ -171,7 +177,7 @@ test("the daemon hook builder forwards an injected policy to the check it wires"
       config,
       policy: policyFixture({ enabled: false, minIntervalMinutes: 60, maxPerDay: 4 }),
     });
-    const decision = hooks.checkAutoTriage();
+    const decision = hooks.checkAutoTriage(true);
 
     assert.equal(decision.fire, false);
     assert.match(decision.reason, /disabled/, "the injected policy reached the wired hook");
@@ -231,7 +237,7 @@ function decideAfter(sinceMinutesAgo: number, opts: { maxPerDay?: number; extraF
   ];
   return decideAutoTriage({
     policy: floorPolicy(opts.maxPerDay),
-    idle: true,
+    deferralPending: true,
     lockHeld: false,
     marker: { kind: "ok", marker: { fires } },
     now,
@@ -254,7 +260,7 @@ test("W1-T475 FALSIFIER: the 25th fire in a rolling day is REFUSED — the cap i
   );
   const d = decideAutoTriage({
     policy: shipped,
-    idle: true,
+    deferralPending: true,
     lockHeld: false,
     marker: { kind: "ok", marker: { fires: twentyFour } },
     now,
@@ -268,7 +274,7 @@ test("W1-T475 FALSIFIER: the 25th fire in a rolling day is REFUSED — the cap i
   const twentyThree = twentyFour.slice(0, 23);
   const under = decideAutoTriage({
     policy: shipped,
-    idle: true,
+    deferralPending: true,
     lockHeld: false,
     marker: { kind: "ok", marker: { fires: twentyThree } },
     now,
