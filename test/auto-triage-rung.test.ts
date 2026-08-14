@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { acquireDrainLock, DrainLockError } from "../src/lib/drain-lock.js";
+import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock } from "../src/lib/drain-lock.js";
 import {
   decideAutoTriage,
   newFeedbackIdsOldestFirst,
@@ -23,7 +23,7 @@ const ON: AutoTriagePolicy = {
   maxPerDay: 4,
 };
 const NOW = new Date("2026-08-01T12:00:00.000Z");
-const base = { idle: true, lockHeld: false, now: NOW, candidates: ["fb-1", "fb-2"] };
+const base = { deferralPending: true, lockHeld: false, now: NOW, candidates: ["fb-1", "fb-2"] };
 
 function tmp(p: string): string {
   return mkdtempSync(join(tmpdir(), p));
@@ -147,10 +147,15 @@ test("a corrupt marker file on disk resolves corrupt, not absent", () => {
   }
 });
 
-test("the rung does not fire when the daemon is not idle", () => {
-  const d = decideAutoTriage({ ...base, policy: ON, idle: false, marker: { kind: "absent" } });
+test("W1-T469: the rung does not fire when the partitioner deferred nothing, AND THE REFUSAL NAMES THAT CAUSE", () => {
+  const d = decideAutoTriage({ ...base, policy: ON, deferralPending: false, marker: { kind: "absent" } });
   assert.equal(d.fire, false);
-  assert.match((d as { reason: string }).reason, /not idle/);
+  // THE WHOLE DEFECT WAS A SILENT SKIP. A row saying only "skipped" is what this replaces: the
+  // former `daemon is not idle` reason appeared 0 times in 1,214 skip rows because the guard was
+  // unreachable twice over — the rung sat inside the idle branch AND `autoTriageCheck` hardcoded
+  // `idle: true`. The reason must name the gate that actually refused.
+  assert.match((d as { reason: string }).reason, /no deferral this pass/);
+  assert.doesNotMatch((d as { reason: string }).reason, /not idle/, "the stale reason must not survive the rename");
 });
 
 test("the rung does not fire when nothing is at status new", () => {
@@ -194,50 +199,88 @@ test("recordAutoTriageFire appends and trims to the rolling window", () => {
 
 // ── the RUNG inside the real loop ─────────────────────────────────────────────
 
-test("runDaemon: the rung fires ONCE across many idle ticks and never takes the daemon down", async () => {
+/**
+ * A plan whose two tasks DECLARE THE SAME FILE, so `partitionByFileOverlap` puts the first in
+ * `dispatch` and defers the second to `serialized` on EVERY pass.
+ *
+ * W1-T469 — WHY THE FIXTURE HAD TO CHANGE, AND WHY THIS IS NOT A PATCH TO MAKE A TEST GREEN. These
+ * loop fixtures used `refreshMerged: () => () => true`, i.e. EVERYTHING MERGED, so no task was ever
+ * a candidate, the partitioner never ran, and every tick was idle. That was the correct way to
+ * reach the rung when it lived INSIDE the idle branch. The ruling inverts exactly that: the gate is
+ * now a DEFERRED PAIRING, which by construction cannot occur on an idle tick, so the old fixture
+ * now drives the rung's refusal path rather than its fire path. Nothing about the old fixture
+ * exercises the shipped behaviour any more, so it is replaced rather than adjusted.
+ *
+ * NOTHING IS EVER MARKED MERGED HERE, deliberately: the collision must PERSIST across ticks so the
+ * interval bound — not an evaporating candidate set — is what stops the second fire.
+ */
+function collidingPairPlan(dir: string) {
+  const f = join(dir, "tasks.yaml");
+  writeFileSync(
+    f,
+    "- id: T1\n  title: t1\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n  status: queued\n  files: [src/shared.ts]\n" +
+      "- id: T2\n  title: t2\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n  status: queued\n  files: [src/shared.ts]\n",
+  );
+  return f;
+}
+
+test("runDaemon: the rung fires ONCE across many DEFERRING ticks and never takes the daemon down", async () => {
   const { runDaemon } = await import("../src/lib/daemon.js");
   const { loadPlan } = await import("../src/lib/plan.js");
   const dir = tmp("rmd-at-loop-");
   try {
-    const f = join(dir, "tasks.yaml");
-    writeFileSync(
-      f,
-      "- id: T1\n  title: t\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n",
-    );
-    const plan = loadPlan(f);
+    const plan = loadPlan(collidingPairPlan(dir));
 
     let fires = 0;
     let checks = 0;
     let stopChecks = 0;
+    const deferralArgs: boolean[] = [];
     const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
 
-    const summary = await runDaemon(plan, {
-      refreshMerged: () => () => true, // everything merged ⇒ every tick is IDLE
-      runOne: async (id) => {
-        throw new Error(`runOne must never run in this fixture (${id})`);
+    const summary = await runDaemon(
+      plan,
+      {
+        refreshMerged: () => () => false, // nothing merged ⇒ T1/T2 collide on EVERY pass
+        runOne: async (id) => ({ taskId: id, ok: true, merged: true }) as never,
+        checkStop: () => {
+          stopChecks++;
+          return stopChecks > 4 ? "test bound reached" : undefined;
+        },
+        sleep: async () => {},
+        // Fires on the first deferring tick only; every later tick is inside the interval.
+        checkAutoTriage: (deferralPending) => {
+          deferralArgs.push(deferralPending);
+          checks++;
+          return checks === 1
+            ? { fire: true, feedbackId: "fb-old", reason: "a pairing deferred, under both bounds" }
+            : { fire: false, reason: "only 0.5m since the last fire (minInterval 60m)" };
+        },
+        runAutoTriage: async () => {
+          fires++;
+          // FAIL-SOFT: a triage failure must be caught by the rung, never propagate.
+          throw new Error("simulated triage failure");
+        },
+        log: (step, extra = {}) => lines.push({ step, extra: extra ?? {} }),
       },
-      checkStop: () => {
-        stopChecks++;
-        return stopChecks > 4 ? "test bound reached" : undefined;
-      },
-      sleep: async () => {},
-      // Fires on the first idle tick only; every later tick is inside the interval.
-      checkAutoTriage: () => {
-        checks++;
-        return checks === 1
-          ? { fire: true, feedbackId: "fb-old", reason: "idle" }
-          : { fire: false, reason: "only 0.5m since the last fire (minInterval 60m)" };
-      },
-      runAutoTriage: async () => {
-        fires++;
-        // FAIL-SOFT: a triage failure must be caught by the rung, never propagate.
-        throw new Error("simulated triage failure");
-      },
-      log: (step, extra = {}) => lines.push({ step, extra: extra ?? {} }),
-    });
+      { laneCount: 2 },
+    );
+
+    // ANTI-VACUITY, AND IT IS THE POINT OF THE REWORK. Without these two the fixture would pass
+    // against a rung that is never consulted at all — which is precisely the state the old
+    // `refreshMerged: () => () => true` version was silently in.
+    assert.ok(
+      lines.some((l) => l.step === "dispatch.serialized"),
+      "the fixture must actually produce a deferral, or the gate below is untested",
+    );
+    assert.ok(checks > 0, "the rung must be consulted on a BUSY tick — it never was before W1-T469");
+    assert.deepEqual(
+      [...new Set(deferralArgs)],
+      [true],
+      "every consultation carried deferralPending=true — the ruling's gate, not idleness",
+    );
 
     assert.equal(summary.stopReason, "stopped", "a thrown triage must NOT take the daemon down");
-    assert.equal(fires, 1, "exactly one fire across every idle tick in the window");
+    assert.equal(fires, 1, "exactly one fire across every deferring tick in the window");
     assert.equal(lines.filter((l) => l.step === "auto_triage.fired").length, 1);
     assert.equal(
       lines.filter((l) => l.step === "auto_triage.run_failed").length,
@@ -246,8 +289,35 @@ test("runDaemon: the rung fires ONCE across many idle ticks and never takes the 
     );
     assert.ok(
       lines.filter((l) => l.step === "auto_triage.skipped").length >= 1,
-      "later idle ticks record why they did not fire",
+      "later deferring ticks record why they did not fire",
     );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T469: a deferral CANNOT occur on an idle tick, which is why the rung sits after the idle branch", async () => {
+  // THE INVARIANT THE PLACEMENT RESTS ON, pinned so a partitioner change re-opens the question
+  // rather than silently making the rung unreachable again. `partitionByFileOverlap` only defers a
+  // candidate that collided with an ALREADY-PLACED one, so a non-empty `serialized` forces a
+  // non-empty `dispatch`. Running the rung before the idle `continue` would therefore add no
+  // decision — it would only write one identical refusal on all ~390 idle polls a night, flushing
+  // the 200-row retained window this rung is diagnosed from.
+  const { partitionByFileOverlap } = await import("../src/lib/dispatch-overlap.js");
+  const { loadPlan } = await import("../src/lib/plan.js");
+  const dir = tmp("rmd-at-inv-");
+  try {
+    const plan = loadPlan(collidingPairPlan(dir));
+    const tasks = plan.tasks;
+
+    const p = partitionByFileOverlap(tasks);
+    assert.equal(p.serialized.length, 1, "the fixture collides, or this proves nothing");
+    assert.ok(p.dispatch.length >= 1, "a deferral implies a non-empty dispatch set — the invariant");
+
+    // And the degenerate direction: no candidates ⇒ no deferral, so an idle tick never defers.
+    const empty = partitionByFileOverlap([]);
+    assert.deepEqual(empty.serialized, [], "an empty candidate set defers nothing");
+    assert.deepEqual(empty.dispatch, [], "…and dispatches nothing — the idle tick");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -392,33 +462,251 @@ test("runDaemon: a THROWING checkAutoTriage is caught and ledgered, never fatal"
   const { loadPlan } = await import("../src/lib/plan.js");
   const dir = tmp("rmd-at-throw-");
   try {
-    const f = join(dir, "tasks.yaml");
-    writeFileSync(
-      f,
-      "- id: T1\n  title: t\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n",
-    );
+    // Same rework as the fixture above: the hook is only reached on a DEFERRING tick now, so an
+    // all-merged plan would never call it and this test would pass vacuously against a rung that
+    // cannot throw because it is never consulted.
     const lines: Array<{ step: string }> = [];
     let stopChecks = 0;
-    const summary = await runDaemon(loadPlan(f), {
-      refreshMerged: () => () => true,
-      runOne: async () => {
-        throw new Error("never");
+    let checks = 0;
+    const summary = await runDaemon(
+      loadPlan(collidingPairPlan(dir)),
+      {
+        refreshMerged: () => () => false,
+        runOne: async (id) => ({ taskId: id, ok: true, merged: true }) as never,
+        checkStop: () => {
+          stopChecks++;
+          return stopChecks > 2 ? "bound" : undefined;
+        },
+        sleep: async () => {},
+        checkAutoTriage: () => {
+          checks++;
+          throw new Error("policy unreadable");
+        },
+        log: (step) => lines.push({ step }),
       },
-      checkStop: () => {
-        stopChecks++;
-        return stopChecks > 2 ? "bound" : undefined;
-      },
-      sleep: async () => {},
-      checkAutoTriage: () => {
-        throw new Error("policy unreadable");
-      },
-      log: (step) => lines.push({ step }),
-    });
+      { laneCount: 2 },
+    );
+    assert.ok(checks > 0, "the throwing hook must actually be reached, or this asserts nothing");
     assert.equal(summary.stopReason, "stopped", "a throwing check must not take the daemon down");
     assert.ok(
       lines.filter((l) => l.step === "auto_triage.check_failed").length >= 1,
       "the failure is ledgered rather than swallowed",
     );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T469 DIRECTION TESTS ───────────────────────────────────────────────────
+// The ruling makes this rung fire on a signal that occurs on BUSY ticks, which is a far more
+// frequent condition than the idle gate it replaces. Every bound below therefore becomes
+// load-bearing for the first time, and each of these tests exists to prove one of them still
+// stops the rung — with a falsifier where a bound could be faked by an always-refusing rung.
+
+/** The real cap, not the 4 the older tests use — `maxPerDay: 24` is what ships in policy. */
+const CAP: AutoTriagePolicy = { enabled: true, minIntervalMinutes: 60, maxPerDay: 24 };
+
+/**
+ * `n` fires inside the rolling 24h window, newest 61 minutes ago.
+ *
+ * THE SPACING IS CHOSEN SO THE INTERVAL FLOOR IS NEVER THE THING THAT REFUSES: newest at 61m clears
+ * `minIntervalMinutes: 60`, and 24 fires at 55m apart span 22.1h, comfortably inside the window. A
+ * naive "one per hour" layout puts the oldest at exactly 24h, where `now - t < DAY_MS` is FALSE and
+ * silently drops it — the cap test would then read 23/24 and pass for the wrong reason.
+ */
+function firesInWindow(n: number): string[] {
+  return Array.from({ length: n }, (_, k) => new Date(NOW.getTime() - (61 + k * 55) * 60_000).toISOString());
+}
+
+test("W1-T469 THE CAP BINDS: the 25th fire in a rolling day is refused at the shipped maxPerDay of 24", () => {
+  const d = decideAutoTriage({
+    ...base,
+    policy: CAP,
+    marker: { kind: "ok", marker: { fires: firesInWindow(24) } },
+    now: NOW,
+  });
+  assert.equal(d.fire, false, "24 fires already in the window ⇒ the 25th must be refused");
+  assert.match((d as { reason: string }).reason, /daily cap reached \(24\/24 in the last 24h\)/);
+});
+
+test("W1-T469 THE CAP'S FALSIFIER: the 23rd fire in the same window STILL FIRES", () => {
+  // WITHOUT THIS THE TEST ABOVE IS WORTHLESS. A rung that refused unconditionally — which is
+  // exactly the failure mode the deferral gate could introduce if `deferralPending` were wired
+  // wrong — would satisfy the cap assertion perfectly. This pins the OTHER side of the boundary
+  // using an identically-constructed marker, so only the count differs between the two tests.
+  const d = decideAutoTriage({
+    ...base,
+    policy: CAP,
+    marker: { kind: "ok", marker: { fires: firesInWindow(22) } },
+    now: NOW,
+  });
+  assert.equal(d.fire, true, "22 in the window ⇒ the 23rd is under the cap and must fire");
+  assert.equal((d as { feedbackId: string }).feedbackId, "fb-1", "and it picks the oldest entry");
+});
+
+test("W1-T469 EMPTY RESERVOIR: an empty feedback dir yields no candidates, and the rung SPAWNS NOTHING", async () => {
+  // A rung that spins a worker up to discover there is nothing to triage is this repo's recurring
+  // bound-fires-on-a-healthy-condition defect. Read the reservoir with the REAL exported reader
+  // rather than hand-passing `candidates: []`, so an `newFeedbackIdsOldestFirst` regression that
+  // invented entries would fail here.
+  const { runDaemon } = await import("../src/lib/daemon.js");
+  const { loadPlan } = await import("../src/lib/plan.js");
+  const root = tmp("rmd-at-dry-");
+  const dir = tmp("rmd-at-dry-plan-");
+  try {
+    mkdirSync(join(root, "plan", "feedback"), { recursive: true });
+    const candidates = newFeedbackIdsOldestFirst(root);
+    assert.deepEqual(candidates, [], "the reservoir is genuinely empty");
+
+    let spawns = 0;
+    let stopChecks = 0;
+    const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+    await runDaemon(
+      loadPlan(collidingPairPlan(dir)),
+      {
+        refreshMerged: () => () => false,
+        runOne: async (id) => ({ taskId: id, ok: true, merged: true }) as never,
+        checkStop: () => (++stopChecks > 2 ? "bound" : undefined),
+        sleep: async () => {},
+        // The REAL decision function, driven by the REAL empty reservoir, on a genuinely
+        // deferring tick — so the only thing that can stop it is the candidate bound.
+        checkAutoTriage: (deferralPending) =>
+          decideAutoTriage({ policy: CAP, deferralPending, lockHeld: false, marker: { kind: "absent" }, now: NOW, candidates }),
+        runAutoTriage: async () => {
+          spawns++;
+        },
+        log: (step, extra = {}) => lines.push({ step, extra: extra ?? {} }),
+      },
+      { laneCount: 2 },
+    );
+
+    assert.ok(
+      lines.some((l) => l.step === "dispatch.serialized"),
+      "the tick really did defer — otherwise the gate, not the reservoir, is what refused",
+    );
+    assert.equal(spawns, 0, "NO worker is spawned to discover an empty reservoir");
+    const skipped = lines.filter((l) => l.step === "auto_triage.skipped");
+    assert.ok(skipped.length >= 1, "the refusal is ledgered");
+    assert.match(String(skipped[0]?.extra.reason ?? ""), /no feedback at status: new/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T469 HELD LOCK: a hand-run `rmd triage` holding the lock makes the rung refuse cleanly, spawning nothing", async () => {
+  // THE REVERSE DIRECTION of the end-to-end lock test above, which proves the CLI refuses while the
+  // RUNG holds. This proves the rung refuses while the CLI holds — the direction the ruling makes
+  // reachable far more often, because the rung is now consulted on busy ticks rather than only when
+  // the fleet is idle and nobody is likely to be typing.
+  const { runDaemon } = await import("../src/lib/daemon.js");
+  const { loadPlan } = await import("../src/lib/plan.js");
+  const root = tmp("rmd-at-held-");
+  const dir = tmp("rmd-at-held-plan-");
+  mkdirSync(join(root, "state"), { recursive: true });
+  const handRun = acquireDrainLock(triageLockPath(root)); // stands in for a hand-typed `rmd triage`
+  try {
+    // `lockHeld` derived exactly as `autoTriageCheck` derives it — a lock file plus a LIVE holder —
+    // rather than passed as a bare boolean, so the liveness rule is part of what this pins.
+    const held = readDrainLock(triageLockPath(root));
+    assert.ok(held, "the hand-run's lock is on disk");
+    const lockHeld = held !== null && defaultIsPidAlive(held.pid);
+    assert.equal(lockHeld, true, "and its holder is alive");
+
+    let spawns = 0;
+    let stopChecks = 0;
+    const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+    const summary = await runDaemon(
+      loadPlan(collidingPairPlan(dir)),
+      {
+        refreshMerged: () => () => false,
+        runOne: async (id) => ({ taskId: id, ok: true, merged: true }) as never,
+        checkStop: () => (++stopChecks > 2 ? "bound" : undefined),
+        sleep: async () => {},
+        checkAutoTriage: (deferralPending) =>
+          decideAutoTriage({
+            policy: CAP,
+            deferralPending,
+            lockHeld,
+            marker: { kind: "absent" },
+            now: NOW,
+            candidates: ["fb-1"],
+          }),
+        runAutoTriage: async () => {
+          spawns++;
+        },
+        log: (step, extra = {}) => lines.push({ step, extra: extra ?? {} }),
+      },
+      { laneCount: 2 },
+    );
+
+    // CLEANLY: a refusal, not a throw and not a half-state. The daemon keeps running, nothing is
+    // spawned, and the row says which of the several bounds refused.
+    assert.equal(summary.stopReason, "stopped", "a held lock refuses the rung, never the daemon");
+    assert.equal(spawns, 0, "no second triage is spawned against a live hand-run");
+    assert.equal(lines.filter((l) => l.step === "auto_triage.check_failed").length, 0, "refusal, not an error");
+    const skipped = lines.filter((l) => l.step === "auto_triage.skipped");
+    assert.ok(skipped.length >= 1, "the refusal is ledgered rather than silent");
+    assert.match(String(skipped[0]?.extra.reason ?? ""), /triage lock held — a run is already in flight/);
+    // And the hand-run's lock is untouched by the refusal — the rung must never steal it.
+    assert.equal(readDrainLock(triageLockPath(root))?.pid, held?.pid, "the holder's lock survives the refusal");
+  } finally {
+    handRun.release();
+    rmSync(root, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T469 THE SKIP NAMES ITS CAUSE: a refused tick's ledger row distinguishes the deferral gate from every other bound", async () => {
+  // The defect this whole task is about was a SILENT skip: 0 of 1,214 `auto_triage.skipped` rows
+  // carried the old gate's reason. It is not enough that the rung refuses — the row must say WHICH
+  // bound refused, or the next investigation is as blind as this one was. Drive four distinct
+  // refusals through the daemon and assert four distinguishable reasons reach the ledger.
+  const { runDaemon } = await import("../src/lib/daemon.js");
+  const { loadPlan } = await import("../src/lib/plan.js");
+  const dir = tmp("rmd-at-reasons-");
+  try {
+    const refusals = [
+      { name: "no deferral", inputs: { deferralPending: false }, expect: /no deferral this pass/ },
+      { name: "lock held", inputs: { lockHeld: true }, expect: /triage lock held/ },
+      { name: "corrupt marker", inputs: { marker: { kind: "corrupt" } as const }, expect: /failing closed/ },
+      { name: "daily cap", inputs: { marker: { kind: "ok", marker: { fires: firesInWindow(24) } } as const }, expect: /daily cap reached/ },
+    ];
+    const seen: string[] = [];
+    for (const r of refusals) {
+      let stopChecks = 0;
+      const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+      await runDaemon(
+        loadPlan(collidingPairPlan(dir)),
+        {
+          refreshMerged: () => () => false,
+          runOne: async (id) => ({ taskId: id, ok: true, merged: true }) as never,
+          checkStop: () => (++stopChecks > 1 ? "bound" : undefined),
+          sleep: async () => {},
+          checkAutoTriage: (deferralPending) =>
+            decideAutoTriage({
+              policy: CAP,
+              deferralPending,
+              lockHeld: false,
+              marker: { kind: "absent" },
+              now: NOW,
+              candidates: ["fb-1"],
+              ...r.inputs,
+            }),
+          runAutoTriage: async () => {
+            throw new Error(`must not spawn on the '${r.name}' refusal`);
+          },
+          log: (step, extra = {}) => lines.push({ step, extra: extra ?? {} }),
+        },
+        { laneCount: 2 },
+      );
+      const row = lines.find((l) => l.step === "auto_triage.skipped");
+      assert.ok(row, `the '${r.name}' refusal reached the ledger`);
+      const reason = String(row?.extra.reason ?? "");
+      assert.match(reason, r.expect, `the '${r.name}' row names its own cause`);
+      seen.push(reason);
+    }
+    assert.equal(new Set(seen).size, refusals.length, "all four reasons are DISTINGUISHABLE, not one generic string");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
