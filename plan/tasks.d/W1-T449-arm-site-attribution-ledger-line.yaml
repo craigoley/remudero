@@ -120,4 +120,57 @@
     still calls the bare function is the shape of a green, unreached fix.
     NO depends_on: armAndLogOutcome, armOutcomeArmed, SweepDeps.arm and the ledger run_id field are all on
     main today. SIBLING SIGNAL: feedback#fb-1785959546878-97abfb reports the same missing pr_number from an
-    unrelated incident and should be closed against this task if it triages here."
+    unrelated incident and should be closed against this task if it triages here.
+
+    -- AMENDMENT 2026-08-14, AFTER #1690 SHIPPED, WRITTEN ON THE MAC MINI --
+    #1690 (`fbabf4c`) landed this task and is credited by an anchored trailer. It closed criteria 1, 2
+    and 4. IT DID NOT FULLY CLOSE CRITERION 3, and this amendment records why, where, and how much it
+    matters. It is recorded HERE rather than as a new shard because a near-duplicate of a merged task
+    is worse than a correction to it.
+
+    (1) CRITERION 3 IS NOT FULLY SATISFIED. It claims, unqualified, that the clean-status direct merge
+    writes an `automerge.clean_status_direct_merge` line carrying `pr_number` and `pr_url`. #1690 emits
+    that line from `logArmAttribution`, reached ONLY via `armAndLogOutcome`, on a `direct-merged`
+    outcome. THE AT-OPEN PATH BYPASSES THE WRAPPER: `armAutoMergeAtOpen` (`src/run-task.ts`) returns
+    `attemptArm` directly, and its caller logs an `automerge.armed` line carrying `at` and `outcome`
+    and NOTHING ELSE -- no `pr_url`, no `pr_number`, no `lane` -- and never emits
+    `clean_status_direct_merge` even when the outcome IS a direct merge. RE-DERIVED at f947ba5 with a
+    positive control: `armAndLogOutcome` has SEVEN call sites and the at-open path is not one of them,
+    so the query shape finds a wrapper call wherever one exists.
+
+    (2) HOW MUCH IS LOST, MEASURED, AND THE TWO HALVES DIFFER SHARPLY. PROVENANCE: the MINI ledger, all
+    three forms (666 gz + 4 plain + 1 live), positive control `sweep.pass` = 1,897, negative control 0.
+    There is no ssh route to Azure and nothing here is a claim about that host.
+      - 742 distinct `automerge.armed` rows; 179 carry `at: open`, i.e. 24.1%, spanning 2026-07-29 to
+        2026-08-12. THE METADATA GAP IS NOT RARE: about one armed row in four cannot be attributed to a
+        PR or a lane, so any later analysis keyed on `pr_url` silently under-counts by roughly a
+        quarter.
+      - NO DIRECT MERGE HAS EVER OCCURRED AT OPEN on this host. All 179 at-open rows carry outcome
+        `armed`; the single lifetime `direct-merged` row is `dep-review-PR1343` (2026-08-05) and is not
+        at-open; and `automerge.clean_status_direct_merge` has ZERO rows in the whole corpus against a
+        working control of 128 `automerge.disarmed` rows.
+      SO THE MISSING-DECISION-RECORD RISK IS THEORETICAL AND THE METADATA GAP IS REAL. Do not justify
+      work here by claiming a merge went unrecorded; on this evidence none has.
+      AND THE LIVE RATE IS UNMEASURABLE FROM THIS HOST: the corpus is effectively dead after
+      2026-08-13, with ZERO `sweep.pass` rows after #1690 merged against only 2 `automerge.armed` rows,
+      both wrapper-attributed. The 24.1% is HISTORICAL and pre-#1690.
+
+    (3) WHAT IS REACHABLE AT OPEN, WHICH DECIDES THE SHAPE OF ANY FIX. ALL THREE FIELDS ARE REACHABLE
+    AT OPEN: `pr_url` is the caller own argument, `pr_number` derives from it via `prNumberFromRef`,
+    and `taskId` IS in scope at that call site (`ensureTaskTrailer(prUrl, taskId)` sits beside it), so
+    the draft-era assumption that an at-open arm has no task id is WRONG at today sha.
+    THE LANE UNION HAS NO VALUE FOR THIS SITE: `ArmLane` is review, operator or sweep, and an at-open
+    arm is none of the three. `armAndLogOutcome` is otherwise callable there, since `taskId` is already
+    optional and `arm` is injectable, so `armAutoMergeAtOpen` could be passed as the effect. The
+    obstacle is a one-member type extension, not a structural one, and mislabelling the site as
+    operator to avoid that extension would be worse than the gap itself.
+
+    (4) PROVENANCE OF THE FINDING, RECORDED BECAUSE ITS ONLY OTHER TRACE IS BEING DELETED. An abandoned
+    draft of this task, `8a024d42`, authored 2026-08-12T20:29:58 and superseded 94 minutes later by
+    #1690, sat unpushed in the operator checkout for two days. It logged from INSIDE `attemptArm`
+    rather than from the wrapper, so its placement WOULD have covered this path. Its own preflight
+    failed 2 of 23 steps (`ci:test` and `coverage-ratchet:test-with-coverage`) and it conflicts in all
+    four files against today main, so it is archived and dropped rather than revived.
+    THIS IS NOT AN ARGUMENT TO REVERT #1690 DESIGN. Logging from the wrapper keeps `attemptArm` a pure
+    decision function, which is the better arrangement; the draft is worth remembering only for the
+    site it happened to cover."
