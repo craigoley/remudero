@@ -4,7 +4,9 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  CAPABILITY_SNAPSHOT_FIX_CLASS,
   CI_GATE_TIMEOUT_FIX_CLASS,
+  COVERAGE_TIER_FIX_CLASS,
   DEFAULT_FIX_CLASSES,
   runPostFixReverification,
   type FixClass,
@@ -12,9 +14,10 @@ import {
   type PostFixReverificationDeps,
   type RedriveResult,
 } from "../src/lib/sweep.js";
-import { DEFAULT_SWEEP_POLICY } from "../src/lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, runSweep, type SweepDeps } from "../src/lib/sweep.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { appendLedger } from "../src/lib/ledger.js";
+import { sweepPostFixReverification } from "../src/run-task.js";
 
 // ── W1-T124 — POST-FIX RE-VERIFICATION, the drainage-side complement to the
 // W1-T121 queue governor: once a systemic fix merges, stale reds of that class
@@ -323,6 +326,162 @@ test("DEFAULT_FIX_CLASSES carries the mapping as a table row, not an inlined con
   assert.ok(Array.isArray(DEFAULT_FIX_CLASSES));
   assert.ok(DEFAULT_FIX_CLASSES.includes(CI_GATE_TIMEOUT_FIX_CLASS));
   assert.equal(CI_GATE_TIMEOUT_FIX_CLASS.fixPrNumber, 820);
+});
+
+// ── W1-T474 rows: #1758 (coverage-tier) and #1762 (capability-snapshot) — appended as DATA to
+// DEFAULT_FIX_CLASSES, never a branch in runPostFixReverification (design note i) ──────────────
+
+test("W1-T474 — DEFAULT_FIX_CLASSES carries the two new rows appended, never replacing the existing one", () => {
+  assert.ok(DEFAULT_FIX_CLASSES.includes(CI_GATE_TIMEOUT_FIX_CLASS), "the W1-T124 row is untouched");
+  assert.ok(DEFAULT_FIX_CLASSES.includes(COVERAGE_TIER_FIX_CLASS));
+  assert.ok(DEFAULT_FIX_CLASSES.includes(CAPABILITY_SNAPSHOT_FIX_CLASS));
+  assert.equal(COVERAGE_TIER_FIX_CLASS.fixPrNumber, 1758);
+  assert.equal(CAPABILITY_SNAPSHOT_FIX_CLASS.fixPrNumber, 1762);
+});
+
+test("W1-T474 — a PR blocked by coverage-ratchet against the stale pre-#1758 floor matches COVERAGE_TIER_FIX_CLASS and re-drives once #1758 has merged", async () => {
+  const candidate = pr({
+    prNumber: 1770,
+    prUrl: "url/1770",
+    reviewState: "success",
+    checksState: "red",
+    ciFailures: [
+      { name: "coverage-ratchet", logTail: "coverage-ratchet: BLOCKED -- coverage is below a floor:\n  - branches 71.20% is below the 72.00% floor" },
+    ],
+  });
+  const deps = fakeDeps();
+
+  // Not yet merged: untouched.
+  const before = await runPostFixReverification([candidate], new Set<number>(), deps);
+  assert.equal(before.results[0].outcome, "unmatched");
+  assert.equal(deps.redriveCalls.length, 0);
+
+  // #1758 has merged: matches and re-drives.
+  const after = await runPostFixReverification([candidate], new Set([1758]), deps);
+  assert.equal(after.results[0].outcome, "redriven");
+  assert.equal(after.results[0].fixClassId, COVERAGE_TIER_FIX_CLASS.id);
+  assert.equal(deps.redriveCalls[0].cls.fixPrNumber, 1758);
+});
+
+test("W1-T474 — a genuinely lower-coverage PR (no floor-blocked wording) never matches COVERAGE_TIER_FIX_CLASS", () => {
+  const genuinelyLow = pr({
+    checksState: "red",
+    ciFailures: [{ name: "coverage-ratchet", logTail: "coverage-ratchet: unexpected error reading lcov" }],
+  });
+  assert.equal(COVERAGE_TIER_FIX_CLASS.matchesFailure(genuinelyLow), false);
+});
+
+test("W1-T474 — a PR blocked by the claims check's stale capability-snapshot matches CAPABILITY_SNAPSHOT_FIX_CLASS and re-drives once #1762 has merged", async () => {
+  const candidate = pr({
+    prNumber: 1771,
+    prUrl: "url/1771",
+    reviewState: "success",
+    checksState: "red",
+    ciFailures: [
+      {
+        name: "claims",
+        logTail:
+          "generate-capability-snapshot: MASTER-PLAN.md's CAPABILITY SNAPSHOT block is STALE -- it does not match a fresh regeneration.",
+      },
+    ],
+  });
+  const deps = fakeDeps();
+
+  const before = await runPostFixReverification([candidate], new Set<number>(), deps);
+  assert.equal(before.results[0].outcome, "unmatched");
+
+  const after = await runPostFixReverification([candidate], new Set([1762]), deps);
+  assert.equal(after.results[0].outcome, "redriven");
+  assert.equal(after.results[0].fixClassId, CAPABILITY_SNAPSHOT_FIX_CLASS.id);
+  assert.equal(deps.redriveCalls[0].cls.fixPrNumber, 1762);
+});
+
+test("W1-T474 — a genuine claims failure unrelated to the capability snapshot never matches CAPABILITY_SNAPSHOT_FIX_CLASS", () => {
+  const genuineClaimsFailure = pr({
+    checksState: "red",
+    ciFailures: [{ name: "claims", logTail: "claims: FALSE -- plan/claims.yaml#some-other-claim" }],
+  });
+  assert.equal(CAPABILITY_SNAPSHOT_FIX_CLASS.matchesFailure(genuineClaimsFailure), false);
+});
+
+// ── W1-T474 wiring: sweepPostFixReverification (src/run-task.ts) — the real call site ──────────
+
+function fakeSweepDeps(
+  overrides: Partial<SweepDeps> = {},
+): SweepDeps & { fixed: Array<{ pr: OpenPrView }> } {
+  const fixed: Array<{ pr: OpenPrView }> = [];
+  return {
+    fixed,
+    arm: () => {},
+    close: () => {},
+    dispatchFix: (p) => {
+      fixed.push({ pr: p });
+    },
+    escalate: () => {},
+    ledgerPath: ledgerPath(),
+    runId: "SWEEP-WIRE-1",
+    ...overrides,
+  };
+}
+
+test("W1-T474 — sweepPostFixReverification pushes an empty commit (never a check re-run) naming the merged fix PR, on the matched PR's OWN head", async () => {
+  const pushes: Array<{ branch: string; head: string; message: string }> = [];
+  const candidate = ciGateTimeoutPr({ prNumber: 1780, prUrl: "url/1780", headRefName: "run-W1-T1780-1" });
+
+  const summary = await sweepPostFixReverification("o", "r", [candidate], ledgerPath(), "SWEEP-WIRE-2", () => {}, {
+    isMergedByNumber: (n) => n === 820,
+    pushEmptyCommit: (_repoRoot, branch, head, message) => {
+      pushes.push({ branch, head, message });
+      return "newsha";
+    },
+  });
+
+  assert.equal(summary.redriven, 1);
+  assert.equal(pushes.length, 1, "the redrive is an empty-commit push, the effect W1-T474 rationale (8) names");
+  assert.equal(pushes[0].branch, "run-W1-T1780-1");
+  assert.equal(pushes[0].head, candidate.headSha);
+  assert.match(pushes[0].message, /#820/, "names the merged fix PR");
+});
+
+test("W1-T474 — sweepPostFixReverification never pushes for a class whose fix has NOT merged (isMergedByNumber says so)", async () => {
+  let pushes = 0;
+  const candidate = ciGateTimeoutPr({ prNumber: 1781, prUrl: "url/1781", headRefName: "run-W1-T1781-1" });
+
+  const summary = await sweepPostFixReverification("o", "r", [candidate], ledgerPath(), "SWEEP-WIRE-3", () => {}, {
+    isMergedByNumber: () => false,
+    pushEmptyCommit: () => {
+      pushes++;
+      return "never";
+    },
+  });
+
+  assert.equal(summary.redriven, 0);
+  assert.equal(pushes, 0);
+});
+
+test("W1-T474 — the ordering the rationale requires: a PR redriven this pass is excluded before runSweep's fix rung ever sees it, so no strike is spent on it in the same pass", async () => {
+  const matched = ciGateTimeoutPr({ prNumber: 1790, prUrl: "url/1790", headRefName: "run-W1-T1790-1" });
+  const unrelated = unrelatedRedPr({ prNumber: 1791, prUrl: "url/1791" });
+  const openPrs = [matched, unrelated];
+
+  const reverifySummary = await sweepPostFixReverification("o", "r", openPrs, ledgerPath(), "SWEEP-WIRE-4", () => {}, {
+    isMergedByNumber: (n) => n === 820,
+    pushEmptyCommit: () => "newsha",
+  });
+  const redrivenThisPass = new Set(
+    reverifySummary.results.filter((r) => r.outcome === "redriven").map((r) => r.prNumber),
+  );
+  assert.deepEqual([...redrivenThisPass], [1790]);
+
+  const prsForFixRung = openPrs.filter((p) => !redrivenThisPass.has(p.prNumber));
+  const sweepDeps = fakeSweepDeps();
+  await runSweep(prsForFixRung, sweepDeps, DEFAULT_SWEEP_POLICY);
+
+  assert.deepEqual(
+    sweepDeps.fixed.map((f) => f.pr.prNumber),
+    [1791],
+    "the fix rung never spends a strike on the PR the re-verification rung just acted on this pass",
+  );
 });
 
 test("a custom class table is honored — covering a new systemic fix is a row, never a code change", async () => {
