@@ -1,0 +1,142 @@
+- id: W1-T485
+  title: "a task whose SUBSTANCE ships under ANOTHER task's trailer is credited to nobody and sits in the decision queue forever — W1-T458's advisory was live when it last happened and correctly did not fire, because a PR that resolves A task says nothing about which task it actually shipped"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  rationale: "**THE ONE CONCERN, STATED AS THE CASE THAT PROVES IT.** `e26f928` — *fix(compaction):
+    stop making workers run rmd preflight --ci-parity (#1777)* — merged 2026-08-14T05:55:00Z carrying
+    `Remudero-Task: W1-T464`, and shipped the substance of **W1-T472**, which is still `status:
+    blocked, verify: human` waiting on a ruling about work that is already on main. Found by CONTENT
+    SEARCH, not by message: `git log -S 'preflight --ci-parity' -- src/lib/compaction.ts` names that
+    commit. A message search would have missed it, because the message names the OTHER task.
+
+    **W1-T458 WAS ALREADY LIVE AND COULD NOT CATCH IT — THAT IS THE SCOPING ARGUMENT, AND IT IS
+    MEASURED RATHER THAN ASSUMED.** `2991c85` (#1772, *advise when an implementation diff has no task
+    resolved*) merged **2026-08-14T02:38:55Z**, THREE HOURS AND SIXTEEN MINUTES BEFORE #1777. Its
+    trigger is `unresolved_task_scope`, and its own doc says it is keyed on `taskDeclaredFiles` being
+    absent/empty and **\"NEVER off whether the report/diff carries a `Remudero-Task:` trailer\"**.
+    #1777 RESOLVED A TASK — W1-T464 — so the advisory correctly stayed silent. **W1-T458 ANSWERS
+    \"NO TASK AT ALL\"; IT CANNOT ANSWER \"THE WRONG TASK\", AND BY CONSTRUCTION NEVER WILL.** This
+    task is the remainder, not a near-duplicate, and W1-T458 must not be re-filed.
+
+    **A SECOND CONFIRMED CASE, AND IT PREDATES THE ADVISORY.** `39f198a` — *fix(coverage): judge
+    branches against absolute tiers, not a drifting floor (W1-T466) (#1758)* — merged
+    2026-08-13T23:07:13Z, before #1772 existed, and shipped the substance of **W1-T467**, also still
+    `status: blocked, verify: human`. Found the same way: the delta-floor symbols
+    (`branchesDeltaFloor`, `absoluteTier`, `BRANCH_TIERS`) return ZERO commits, while `branchesPct`
+    over `scripts/coverage-ratchet.mjs` returns 5 and names `39f198a` as the newest — the zero and the
+    hit together are what identify it.
+
+    **THE POPULATION, MEASURED NOT SAMPLED (Azure; the mini has no SSH route to this ledger or this
+    projection).** 510 tasks across `plan/tasks.d/` and `plan/tasks.yaml`. Merged set = the UNION of
+    `state/status.json` and an ANCHORED trailer scan of main's full history — projection **465**,
+    trailer **185**, union **515**; **50 trailer-only** (the projection misses them) and **330
+    projection-only** (a trailer scan misses them), so the union is load-bearing in BOTH directions.
+    **43 tasks are unmerged: 33 `verify: human`, 10 `verify: auto`; 32 queued, 9 blocked, 2 done.**
+    THE ANCHOR MATTERS AND HERE IS THE CONTROL: the anchored trailer regex finds 185 ids, while a
+    loose `W1-T\\d+` anywhere in the same bodies finds 473 — an over-count of 339.
+
+    **AND ONE PRIOR READING IS WRONG AND MUST NOT BE CARRIED FORWARD: A SHARD READING `queued` AFTER
+    ITS WORK MERGED IS NOT DRIFT. IT IS THE DESIGN.** Measured: **465 of 510 tasks have a shard
+    `status:` that disagrees with the projection** — 399 read `queued`, 38 have no `status:` at all,
+    28 read `blocked`. That is 91%, which is not a defect rate; it is the field being vestigial.
+    `state/status.json`'s own header says so in one line: *\"Machine-owned projection derived from
+    GitHub. tasks.yaml is never rewritten.\"* So W1-T463 reading `queued` after #1775 merged is
+    normal, and any task built to \"fix\" shard `status:` would be rewriting a file the fleet has
+    deliberately decided never to rewrite. **THE ONLY REAL LOSS IS CREDIT, AND CREDIT IS WHAT THIS
+    TASK IS ABOUT.**
+
+    **CREDIT ITSELF IS HEALTHIER THAN THE BRIEF SUGGESTED, WHICH IS WHY THE SCOPE IS NARROW.** The
+    projection records FIVE credit sources, not two — read off the live file rather than the code:
+      trailer 418 · ledger 32 · head-branch 11 · pr-field 3 · correction 1 · none 44
+    Every non-`none` source is merged. **W1-T463 was credited via `ledger`** (PR #1775) despite
+    carrying no trailer — control: the anchored regex finds 58 W1 trailers across the last 400
+    commits, so its zero for W1-T463 is real. **W1-T458 itself was credited via `ledger`** (#1772).
+    So the untrailered-merge route the brief worried about is already covered four ways over. What is
+    NOT covered is the case where the PR is correctly trailered — for a DIFFERENT task."
+  design: "(i) **WHAT TO DETECT, AND WHY IT IS A REPORT RATHER THAN A GATE.** A merge-time gate that
+    refused a PR for a trailer mismatch would fire on **every filing** — filings are REQUIRED to omit
+    the trailer (#1527 fixed a defect where one credited a task the moment its filing merged), so
+    \"no trailer\" is not the signal and a gate keyed on it is muted within a day. This repo has six
+    measured instances of a bound firing on a healthy condition (W1-T312, W1-T380, W1-T382 among
+    them). **THE DELIVERABLE IS A REPORT THAT NAMES SUSPECTS, NOT A REFUSAL.** A false positive costs
+    a line of output; a false refusal costs the fleet.
+
+    (ii) **THREE SHAPES ARE AVAILABLE. ARGUE THEM; THE SHARD RANKS NONE.**
+      (a) **A PROJECTION FIELD.** `projectPlan` (`src/lib/status.ts`) already resolves every task to
+          merged/not-merged and already records WHICH of the five sources credited it. It is the only
+          place that holds both halves. Adding a `looksShipped` observation there costs no new verb
+          and no new schedule, and every existing consumer inherits it. Cost: the projection is
+          written to `state/status.json` on a cadence and is already the file four analyses read, so
+          a noisy field is expensive to un-ship.
+      (b) **A `lint-plan` ROW.** It already walks every shard and already prints per-task findings.
+          Cost: `lint-plan` is a required CI check, and a new row on a task nobody is touching is a
+          row nobody reads — its own changed-tasks-only pass in CI means the report would be INVISIBLE
+          on exactly the PRs that are not about that task.
+      (c) **A PERIODIC RECONCILIATION.** A cadence job that re-runs the content test and opens one
+          needs-human issue. Cost: a new scheduled instrument, and this repo has four already; the
+          fleet-heartbeat watcher's own header records why a fifth needs justifying.
+
+    (iii) **THE PREDICATE, AND THE TWO WAYS TO GET IT WRONG.** The cheap proxy — *have all of a
+    shard's declared source paths been modified on main since it was filed?* — WAS TRIED AND
+    OVER-FLAGS BADLY: it returns **14 of the 43** unmerged tasks, including tasks from 2026-07-14 that
+    merely name a hot file. Spot-checking those 14 by `-S` on a distinctive symbol found no
+    supersession in any of them (`noUnusedLocals` returns ZERO commits; `runDiagnoseThenRetry`,
+    `treeFfSafe`, `claims.yaml` all resolve to unrelated work). **SO FILE-TOUCHED IS NOT THE
+    PREDICATE.** The predicate that found both real cases is `git log -S <symbol> -- <declared path>`,
+    which needs a SYMBOL rather than a path — and choosing one automatically is the actual design
+    problem this task has to solve. Candidate sources for that symbol, to be argued: the shard's own
+    `grep:` proof patterns (already single-line and already required to be distinctive), backticked
+    identifiers in its `rationale`/`design`, or its acceptance claims' nouns.
+    THE OTHER FAILURE DIRECTION IS SILENCE: a predicate tuned until it never false-positives will
+    also miss the next W1-T472. Prefer a report that names ten suspects a human dismisses in a minute
+    over one that names none.
+
+    (iv) **WHAT MUST NOT BE BUILT.** No change to shard `status:` — see the rationale; the projection
+    is machine-owned and `tasks.yaml` is never rewritten. No merge-time refusal. No second credit
+    path: credit already has five and the gap is not there. And **NOT A RE-FILING OF W1-T458**, whose
+    `unresolved_task_scope` advisory is live, correct, and answering a different question.
+
+    (v) NOT IN SCOPE: the `verify: human` queue's own length (a decision brief already reduced 35 to
+    four live decisions), the shard-status question above, and any change to how the projection
+    credits a merge."
+  acceptance:
+    - claim: "a task whose substance shipped under another task's trailer is named by the report"
+      proof: "unit test: test/status.test.ts"
+    - claim: "a task with no evidence of supersession is not named"
+      proof: "unit test: test/status.test.ts"
+    - claim: "the report never changes a shard status or refuses a merge"
+      proof: "unit test: test/status.test.ts"
+  origin: recon#substance-under-another-trailer-2026-08-14
+  plan_refs: ['W1-T458', 'W1-T472', 'W1-T467']
+  files: [src/lib/status.ts, test/status.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT. `files:` spans `src/lib/` and `test/`, and `sizingViolation`
+    (`src/lib/task-linter.ts`) blocks at >=2 subsystems below that band. The band is Rule 19's SPAN,
+    not blast radius — the deliverable is a report, and design (iv) forbids it changing anything.
+    `files:` WAS DERIVED BY INVOCATION COUNT, NOT PROSE MENTION. `projectPlan` (`src/lib/status.ts`)
+    is the only function that holds both halves of the predicate — the merged set and the credit
+    source — and over `test/` it appears 21 times in `test/status.test.ts`, 12 in
+    `test/status-atomic-write.test.ts`, 10 in `test/w1-t187-benchmark.test.ts` and 8 in
+    `test/run-task.test.ts`. `test/status.test.ts` is the home suite by weight and by subject; the
+    other three are declared on none.
+    **`src/run-task.ts` IS DELIBERATELY NOT DECLARED, AND THAT CONSTRAINS THE DESIGN RATHER THAN
+    MERELY OMITTING A PATH.** It is 19,588 lines and every task naming it serialises against every
+    other task that does (W1-T471, via `partitionByFileOverlap` in `src/lib/dispatch-overlap.ts`). A
+    NEW CLI VERB would live there, so design (ii)(a) — a field on the existing projection — is the
+    only one of the three shapes this `files:` list can carry. If the implementer prefers (b) or (c),
+    THE SHARD MUST BE AMENDED FIRST: `inverseScopeUntouchedFiles` (`src/lib/review.ts`) fails a
+    declared-but-untouched path exactly as `scopeViolationFiles` fails an undeclared one.
+    THIS SHARD'S OWN PATH IS DELIBERATELY NOT IN `files:` — adding it converts the `proof-scope`
+    warnings into a HARD `rule15-filing` violation, measured on W1-T464.
+    THE PROOFS ARE PURE-PATH FORWARD REFERENCES: the named tests do not exist yet, and a path is safe
+    to forward-reference where a symbol name would be a guess.
+    EVERY NUMBER HERE IS AZURE-ONLY AND DATED 2026-08-14 — 510 tasks, 43 unmerged, 465/510 status
+    disagreement, the five credit sources and their counts, and the 14-of-43 file-touched
+    over-flag. The mini has NO SSH ROUTE to that projection or that ledger. RE-DERIVE BEFORE
+    BUILDING; the union moved twice this week."
