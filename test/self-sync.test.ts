@@ -64,11 +64,13 @@ function headSha(dir: string): string {
 function spies(localDir: string) {
   const sayCalls: string[] = [];
   const warnCalls: string[] = [];
+  const logCalls: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   let reexecCalls = 0;
   const realGit: GitRunner = (args) => execFileSync("git", ["-C", localDir, ...args], { encoding: "utf8" });
   return {
     sayCalls,
     warnCalls,
+    logCalls,
     get reexecCalls() {
       return reexecCalls;
     },
@@ -76,6 +78,7 @@ function spies(localDir: string) {
       git: realGit,
       say: (msg: string) => sayCalls.push(msg),
       warn: (msg: string) => warnCalls.push(msg),
+      log: (step: string, extra?: Record<string, unknown>) => logCalls.push({ step, extra }),
       reexec: () => {
         reexecCalls += 1;
       },
@@ -90,7 +93,7 @@ test("checkCliFreshness: clean checkout behind origin/main (ff-possible) merges 
   const oldSha = headSha(localDir);
   publishNewCommit(originDir, "PUBLISHED");
 
-  const { sayCalls, warnCalls, deps } = spies(localDir);
+  const { sayCalls, warnCalls, logCalls, deps } = spies(localDir);
   const result = checkCliFreshness(localDir, {}, deps);
 
   assert.equal(result.status, "synced");
@@ -106,6 +109,7 @@ test("checkCliFreshness: clean checkout behind origin/main (ff-possible) merges 
   assert.ok(sayCalls[0].includes(oldSha.slice(0, 7)), "sync line names the OLD sha");
   assert.ok(sayCalls[0].includes(newSha.slice(0, 7)), "sync line names the NEW sha");
   assert.equal(warnCalls.length, 0, "no refusal on the happy path");
+  assert.equal(logCalls.length, 0, "W1-T486's log sink is refusal-only -- a successful sync ledgers nothing");
   if (result.status === "synced") {
     assert.equal(result.oldSha, oldSha);
     assert.equal(result.newSha, newSha);
@@ -133,7 +137,7 @@ test("checkCliFreshness: a DIRTY checkout behind origin/main is never mutated --
   // Uncommitted local edit -- dirty working tree.
   writeFileSync(join(localDir, "plan", "tasks.yaml"), planYaml("DIRTY-LOCAL"), "utf8");
 
-  const { sayCalls, warnCalls, deps } = spies(localDir);
+  const { sayCalls, warnCalls, logCalls, deps } = spies(localDir);
   const result = checkCliFreshness(localDir, {}, deps);
 
   assert.equal(result.status, "refused");
@@ -150,6 +154,22 @@ test("checkCliFreshness: a DIRTY checkout behind origin/main is never mutated --
   assert.equal(sayCalls.length, 0, "no sync line -- nothing was synced");
   assert.equal(warnCalls.length, 1);
   assert.match(warnCalls[0], /git pull --ff-only/, "stderr guidance carries the exact remedy command");
+
+  // W1-T486: the dirty refusal now leaves exactly one ledger-shaped row, carrying a COUNT of
+  // dirty paths -- never the paths themselves (a dirty tree can hold customer/credential material).
+  assert.equal(logCalls.length, 1, "exactly one row per distinct refusal reason per process");
+  assert.equal(logCalls[0].step, "self_sync.refused");
+  assert.equal(logCalls[0].extra?.reason, "dirty");
+  assert.equal(logCalls[0].extra?.old_sha, oldSha);
+  assert.equal(logCalls[0].extra?.new_sha, headSha(originDir), "the row names origin's sha too, same as the warn() message");
+  assert.equal(logCalls[0].extra?.count, 1, "one dirty path in the fixture -- the count must reflect it, not a guess");
+  for (const key of Object.keys(logCalls[0].extra ?? {})) {
+    assert.doesNotMatch(key, /path/i, "the row must never carry path content, only a count");
+  }
+  assert.ok(
+    !JSON.stringify(logCalls[0].extra).includes("tasks.yaml"),
+    "the dirty file's NAME must never appear in the ledgered row",
+  );
 });
 
 test("checkCliFreshness: a DIVERGED (non-ff) checkout is never mutated -- refuses, no merge attempted, reexec never called", () => {
@@ -162,7 +182,7 @@ test("checkCliFreshness: a DIVERGED (non-ff) checkout is never mutated -- refuse
   execFileSync("git", ["-C", localDir, "commit", "--quiet", "-m", "local work"]);
   const oldSha = headSha(localDir);
 
-  const { sayCalls, warnCalls, deps } = spies(localDir);
+  const { sayCalls, warnCalls, logCalls, deps } = spies(localDir);
   let reexecCalls = 0;
   const result = checkCliFreshness(localDir, {}, { ...deps, reexec: () => (reexecCalls += 1) });
 
@@ -175,6 +195,15 @@ test("checkCliFreshness: a DIVERGED (non-ff) checkout is never mutated -- refuse
   assert.equal(sayCalls.length, 0);
   assert.equal(warnCalls.length, 1);
   assert.equal(reexecCalls, 0, "reexec must never be called on a refusal");
+
+  // W1-T486: the diverged reason is now distinguishable from dirty in the ledger, and carries
+  // no `count` field -- that field is dirty-only (a diverged-but-clean tree has no path listing).
+  assert.equal(logCalls.length, 1);
+  assert.equal(logCalls[0].step, "self_sync.refused");
+  assert.equal(logCalls[0].extra?.reason, "diverged");
+  assert.equal(logCalls[0].extra?.old_sha, oldSha);
+  assert.equal(logCalls[0].extra?.new_sha, headSha(originDir));
+  assert.equal(logCalls[0].extra?.count, undefined, "diverged never carries a dirty-style count");
 });
 
 // ── AC3: up-to-date adds nothing ────────────────────────────────────────────────────────────
@@ -183,7 +212,7 @@ test("checkCliFreshness: an up-to-date checkout (fresh clone, HEAD == origin/mai
   const { localDir } = gitFixture(); // a fresh clone's HEAD already equals origin/main
   const before = headSha(localDir);
 
-  const { sayCalls, warnCalls, deps } = spies(localDir);
+  const { sayCalls, warnCalls, logCalls, deps } = spies(localDir);
   let reexecCalls = 0;
   const result = checkCliFreshness(localDir, {}, { ...deps, reexec: () => (reexecCalls += 1) });
 
@@ -192,6 +221,7 @@ test("checkCliFreshness: an up-to-date checkout (fresh clone, HEAD == origin/mai
   assert.equal(sayCalls.length, 0);
   assert.equal(warnCalls.length, 0);
   assert.equal(reexecCalls, 0);
+  assert.equal(logCalls.length, 0, "the non-refusal path never writes a W1-T486 ledger row");
 });
 
 // ── AC4: the re-exec cannot loop -- the guard env short-circuits the ENTIRE check ───────────

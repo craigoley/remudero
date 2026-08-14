@@ -67,9 +67,15 @@ test("a linked worktree that has DIVERGED is not refused — the worker never ha
   git(f.worktreeDir, ["add", "."]);
   git(f.worktreeDir, ["commit", "--quiet", "-m", "the worker's own commit"]);
 
-  const result = checkCliFreshness(f.worktreeDir, {});
+  const logCalls: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const result = checkCliFreshness(f.worktreeDir, {}, {
+    log: (step, extra) => logCalls.push({ step, extra }),
+  });
   assert.equal(result.status, "worktree", `expected a worktree verdict, got ${result.status}`);
   assert.notEqual(result.status, "refused", "a refusal here is what sent fourteen of fifteen runs to the checkout");
+  // W1-T486: the worktree branch returns BEFORE the refusal checks, so it must never emit a
+  // phantom `self_sync.refused` row -- a worktree taking this path was never actually refused.
+  assert.equal(logCalls.length, 0, "the worktree bypass ledgers nothing -- it is not a refusal");
 });
 
 test("a linked worktree that is merely BEHIND is not refused either — W1-T445's off-main path is cleared too", () => {
@@ -102,18 +108,32 @@ test("a MAIN checkout that has diverged STILL refuses — the guard protects the
   git(f.localDir, ["add", "."]);
   git(f.localDir, ["commit", "--quiet", "-m", "the operator's own commit"]);
 
-  const result = checkCliFreshness(f.localDir, {});
+  const logCalls: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const result = checkCliFreshness(f.localDir, {}, {
+    log: (step, extra) => logCalls.push({ step, extra }),
+  });
   assert.equal(result.status, "refused", "the operator's checkout must still be protected");
   if (result.status === "refused") assert.equal(result.reason, "diverged");
+  // W1-T486: the refusal that fires here (diverged, on the OPERATOR's own checkout) must still
+  // be ledgered — a worktree that CLEARS this refusal (tested above) must never log it either.
+  assert.equal(logCalls.length, 1);
+  assert.equal(logCalls[0].step, "self_sync.refused");
+  assert.equal(logCalls[0].extra?.reason, "diverged");
 });
 
 test("a DIRTY main checkout still refuses, with reason `dirty`", () => {
   const f = fixture();
   publish(f.originDir, "published");
   writeFileSync(join(f.localDir, "seed.txt"), "uncommitted operator edit\n", "utf8");
-  const result = checkCliFreshness(f.localDir, {});
+  const logCalls: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const result = checkCliFreshness(f.localDir, {}, {
+    log: (step, extra) => logCalls.push({ step, extra }),
+  });
   assert.equal(result.status, "refused");
   if (result.status === "refused") assert.equal(result.reason, "dirty");
+  assert.equal(logCalls.length, 1);
+  assert.equal(logCalls[0].extra?.reason, "dirty");
+  assert.equal(logCalls[0].extra?.count, 1, "one dirty file (seed.txt) in this fixture");
 });
 
 test("a main checkout on a NON-main branch still refuses off-main — W1-T445 is not weakened", () => {
