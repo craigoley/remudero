@@ -1205,3 +1205,109 @@ test("appendQuestionAnswer: NON-BLOCKING -- an unwritable store returns false, n
   assert.equal(threw, false, "a failed answer write must NEVER throw (mirrors appendQuestion's §2 non-blocking contract)");
   assert.equal(result, false, "the failure is reported as false, not swallowed silently");
 });
+
+// ── W1-T480: the empty tool set holds by TRUTHINESS, and nothing asserted it ──
+//
+// `src/lib/worker.ts` has the repository's ONLY occurrence of `options.tools`:
+//   if (args.tools) options.tools = args.tools;
+// An empty array is TRUTHY in JavaScript, so `tools: []` really does reach the SDK
+// and really does restrict the spawn. Written `if (args.tools?.length)` — a
+// one-character-class edit any reviewer would wave through as a defensive tidy-up —
+// the empty array becomes falsy, the option is never set, and the SDK default (ALL
+// Claude Code tools) applies instead. FIVE read-only spawn builders depend on that
+// truthiness: buildRiskJudgeSpawnArgs, buildEscalationJudgeSpawnArgs,
+// buildFlightJudgeSpawnArgs, buildDecisionSummarySpawnArgs and
+// buildFeedbackExpansionSpawnArgs.
+//
+// THE FIVE TESTS THAT CLAIM THE PROPERTY PROVE SOMETHING ELSE. Each asserts the
+// return value of a PURE BUILDER (`assert.deepEqual(args.tools, [])`), four of them
+// announcing the security property in their own title — and all five stay green
+// under that one-character change, because a builder that never calls spawnWorker
+// cannot observe what spawnWorker does with its result. `options.tools` appeared
+// ZERO times anywhere in test/ before this block.
+//
+// SAME SHAPE AS test/strict-probe.test.ts (W1-T98): "0 violations" reads identically
+// whether strict is genuinely wired or silently inert, so the remedy there is a probe
+// driven through the REAL path that must fail one way and pass the other — never an
+// assertion on an intermediate value. An empty tool list reads identically whether it
+// is applied or silently dropped, so it gets the same treatment here.
+//
+// THREE CASES, AND TWO OF THEM ARE THE DISCRIMINATOR:
+//   - `tools: []`    -> PRESENT and deep-equals []. THE FALSIFIER: under `?.length`
+//                       this is `undefined` and this assertion alone fails.
+//   - tools ABSENT   -> NOT SET AT ALL, so the SDK default applies. This is what stops
+//                       someone "fixing" the first case by assigning unconditionally,
+//                       which would silently restrict the implement worker to NO tools
+//                       — the opposite regression, and the more damaging one. Twelve
+//                       call sites rely on that default deliberately.
+//   - populated list -> passes through unchanged.
+//
+// NO `src/` CHANGE ACCOMPANIES THIS, DELIBERATELY (W1-T480 design (iv)): the code is
+// correct today. Making the guard an explicit `!== undefined` is exactly as unverified
+// as the edit this block exists to catch — until this block exists, at which point it
+// is safe for anyone to make.
+
+/**
+ * The success-path `queryFn` of {@link fakeQueryFn}, minus the process spawn and plus
+ * a capture of the SDK `options` object. These three cases are about what reaches the
+ * SDK, not about teardown, so they deliberately never invoke
+ * `params.options.spawnClaudeCodeProcess` — no real child is started and no pid has to
+ * be reaped. Injecting `queryFn` is `spawn-guard.ts`'s own documented escape from the
+ * live-spawn refusal, which is why this runs at all.
+ */
+function capturingQueryFn(sink: { options?: Record<string, unknown> }) {
+  return ((params: { prompt: string; options: Record<string, unknown> }) => {
+    sink.options = params.options;
+    return (async function* () {
+      yield {
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "done",
+        session_id: "s-tools",
+        total_cost_usd: 0,
+        num_turns: 1,
+      };
+    })();
+  }) as unknown as Parameters<typeof spawnWorker>[0]["queryFn"];
+}
+
+async function spawnAndCaptureOptions(prefix: string, extra: Record<string, unknown>) {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  const sink: { options?: Record<string, unknown> } = {};
+  const result = await spawnWorker({
+    ...e2eSpawnWorkerArgs(dir, extra),
+    runId: "run-tools-1",
+    taskId: "W1-T480",
+    queryFn: capturingQueryFn(sink),
+  } as Parameters<typeof spawnWorker>[0]);
+  assert.equal(result.text, "done", "the fake success envelope reached the caller — the spawn path really ran");
+  assert.ok(sink.options, "the injected queryFn observed the SDK options object");
+  return sink.options!;
+}
+
+test("W1-T480 FALSIFIER: an EMPTY tools array reaches the SDK as an empty array — the five read-only judges are restricted by this and nothing else", async () => {
+  const options = await spawnAndCaptureOptions("rmd-worker-tools-empty-", { tools: [] });
+
+  // THE WHOLE POINT. Under `if (args.tools?.length)` this key is absent and
+  // `options.tools` is undefined, so BOTH assertions below fail — while every
+  // builder test that claims this property stays green.
+  assert.ok("tools" in options, "an empty tool list must be PASSED THROUGH, not dropped as falsy");
+  assert.deepEqual(options.tools, [], "the SDK must receive exactly the empty list, restricting the spawn to no tools");
+});
+
+test("W1-T480: an ABSENT tools list leaves options.tools unset, so the SDK default applies — the 12 call sites that pass no tools key rely on this", async () => {
+  const options = await spawnAndCaptureOptions("rmd-worker-tools-absent-", {});
+
+  // The guard against "fixing" the case above by assigning unconditionally: that
+  // would send `undefined` (or an empty list) for every unrestricted spawn and
+  // silently strip the implement worker of its tools.
+  assert.equal("tools" in options, false, "no tools key must be set at all when the caller passes none — the SDK default must remain reachable");
+});
+
+test("W1-T480: a POPULATED tools list reaches the SDK unchanged", async () => {
+  const options = await spawnAndCaptureOptions("rmd-worker-tools-populated-", { tools: ["Bash", "Read"] });
+
+  assert.ok("tools" in options, "a populated tool list must be passed through");
+  assert.deepEqual(options.tools, ["Bash", "Read"], "the list must arrive byte-identical — neither reordered nor augmented");
+});
