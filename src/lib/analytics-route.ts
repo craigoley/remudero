@@ -217,7 +217,7 @@ function deriveWorkersByLaneModel(lines: ReadonlyArray<Record<string, unknown>>)
     const model = str(l.model);
     if (model === undefined) continue;
     const lane = str(l.lane) ?? "unknown";
-    const key = `${lane} ${model}`;
+    const key = `${lane}\0${model}`;
     const bucket = byKey.get(key) ?? { lane, model, count: 0, totalCostUsd: 0 };
     bucket.count += 1;
     bucket.totalCostUsd += num(l.total_cost_usd) ?? 0;
