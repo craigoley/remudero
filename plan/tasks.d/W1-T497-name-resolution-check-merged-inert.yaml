@@ -1,0 +1,123 @@
+- id: W1-T497
+  title: "proofNameResolutionViolations merged green, correct and never once invoked — no production call site supplies its resolver, so wire it at the changed-tasks pass where it costs a handful of proofs instead of 320, and assert it FIRES rather than merely returning the right value when called"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45
+  rationale: "MEASURED DORMANCY, NOT INFERRED. `proofNameResolutionViolations`
+    (src/lib/task-linter.ts, W1-T488/#1821) is pushed by `lintTask` alongside every sibling check,
+    but its first statement is a guard: absent `opts.resolveNameFilteredCandidates` it returns an
+    empty array. No production site supplies that resolver. THE PROOF IS AN ARTIFACT, NOT A
+    CALL-SITE GREP — a grep got exactly this backwards once, when a session piped through a filter
+    that excluded the file holding the caller. Three independent measurements, taken at 0a1179a:
+
+    (1) `rmd lint-plan` emits 598 warnings, and zero of its emitted check labels are
+    `proof-name-resolution`. Coverage control on the same output: `proof-dialect` 472,
+    `proof-scope` 395, `proof-resolvability` 177, `call-site` 2 — the label set is readable, and
+    `call-site` is the control that matters because it is gated the same way (`opts.moduleExists`)
+    and IS supplied, from src/run-task.ts. A gated check that is wired does surface; this one does
+    not.
+    (2) Driving `lintTask` over the real plan with the reviewer's own resolver bound to the
+    checkout moves `proof-name-resolution` from 0 to 19. The resolver is invoked 320 times, which
+    is the coverage control proving it reached its corpus, returning 68 resolved and 252 absent.
+    (3) It cannot redden a PR today and would not after wiring: both violation sites push a
+    hardcoded `warn`, and `lintPlanCommand` counts failing on `severity === block` only. Re-derived
+    rather than repeated.
+
+    WHY THE CHEAP HOME IS THE ONLY VIABLE ONE, AND THE NUMBER THAT DECIDES IT. Wiring the resolver
+    into a whole-plan pass is not a one-liner and must not be treated as one:
+    `resolveNameFilteredCandidates` shells out per proof, and over the full corpus of 320
+    name-filtered proofs it MEASURED 66.4 SECONDS, 207 ms per proof, on this host. `ci.yml`
+    describes that job as cheap pure JS with no network, so a 66-second addition would be a
+    material regression to a required check. BUT CI DOES NOT LINT THE WHOLE PLAN: its step is
+    `rmd lint-plan -- --base $BASE_SHA`, labelled PR-changed tasks only. Scoped there the resolver
+    runs over the proofs of the one or two tasks a PR touches, so the same wiring costs a fraction
+    of a second. The cost is a reason to choose the call site carefully, not a reason to leave a
+    merged check inert.
+
+    THE POPULATION IS TWO, AND THIS IS THE HALF THAT IS ACTUALLY A WIRING TASK. A sweep of every
+    optional-dep-gated check found six: `moduleExists`, `newMonolithIds` and `postMergeAmendment`
+    are all supplied from src/run-task.ts and are healthy (`post-merge-amendment` reads zero only
+    because it returns early unless the task is merged, and lint-plan is open-tasks-only);
+    `openTaskTitles` is unsupplied but INERT — supplying it against a 484-entry corpus still yields
+    zero, so wiring it would change nothing observable today. That leaves this check and
+    `findSupersessionEvidence` (src/lib/status.ts, W1-T485). THE SECOND IS DELIBERATELY NOT SCOPED
+    HERE and is not a wiring task at all: W1-T485 made it opt-in because `projectPlan` sits behind a
+    250 ms-polled console and one git log per task is an O(N)-subprocess cost, so its right home is
+    a question about a new surface rather than a missing argument. Filing it as wiring would
+    pre-empt that ruling.
+
+    WHY IT HAPPENED, RECORDED SO THE NEXT FILER SEES IT. Both dormant checks have their wiring site
+    in src/run-task.ts, and W1-T485's own note says why it refused to declare that path: it is
+    19,943 lines and every task naming it serialises against every other task that does
+    (`partitionByFileOverlap`, src/lib/dispatch-overlap.ts, W1-T471). That is a real cost, not a
+    filer's oversight. It is also surmountable, and three of the six gated deps prove it — each is
+    wired from that exact file. The tension is NOT `inverseScopeUntouchedFiles`: that predicate
+    punishes declaring a path you do not touch, which never bites a task that intends to wire."
+  design: |
+    (i) SUPPLY THE RESOLVER AT THE CHANGED-TASKS CALL SITE. `lintPlanCommand` (src/run-task.ts)
+    already builds a `LintOpts` there and already supplies `opts.moduleExists` from the same
+    checkout — this adds `resolveNameFilteredCandidates`, bound to the repo root, beside it. The
+    reviewer's OWN exported resolver is used verbatim, never reimplemented, so lint and review can
+    never disagree about what a proof's raw title resolves to.
+    (ii) SCOPED TO `--base`, DELIBERATELY. The whole-plan pass stays unwired: 66.4 s measured over
+    320 proofs against a job `ci.yml` calls cheap. If a later task wants whole-plan coverage it
+    needs a cache or a batched grep, and that is a different concern with a different budget.
+    (iii) SEVERITY IS UNCHANGED AND MUST STAY `warn`. The check already pushes hardcoded `warn` at
+    both sites and `lintPlanCommand` fails only on `block`, so wiring cannot turn a green PR red.
+    Do not take the opportunity to promote it; that is a separate ruling with 19 existing
+    violations behind it.
+    (iv) THE ACCEPTANCE IS THAT IT FIRES, NOT THAT IT COMPUTES. This is the whole lesson of the two
+    dormant checks: both shipped with correct, passing tests that exercised the FUNCTION and never
+    the WIRING. `test/task-linter-wiring.test.ts` already exists for exactly this and already
+    asserts of a sibling that the guard is "wired, not just implemented" — the new assertion joins
+    it rather than inventing a convention.
+    (v) FALSIFIER, BOTH DIRECTIONS. Against a fixture task carrying a name-filtered proof that
+    resolves to nothing, the changed-tasks pass EMITS a `proof-name-resolution` warning; with the
+    resolver argument removed it emits none. Deleting the wiring fails the first; the second is
+    what fails today.
+    (vi) NOT IN SCOPE: `findSupersessionEvidence`'s wiring, promoting the severity, whole-plan
+    coverage, `openTaskTitles`, and any change to the check's own logic.
+  acceptance:
+    - claim: "the changed-tasks lint pass supplies the reviewer's own resolver, so a name-filtered proof that resolves to nothing is reported instead of silently skipped"
+      proof: "unit test: test/task-linter-wiring.test.ts"
+    - claim: "removing the resolver argument makes the same fixture emit nothing, so the test fails on the wiring rather than on the check's logic"
+      proof: "unit test: test/task-linter-wiring.test.ts"
+    - claim: "the wired check stays advisory — a task whose only violation is a name-resolution one does not fail the lint run"
+      proof: "unit test: test/task-linter-wiring.test.ts"
+  risk: high
+  origin: oper#dormant-checks-recon-2026-08-14
+  plan_refs: ["W1-T488", "W1-T485", "W1-T471"]
+  files: [src/run-task.ts, test/task-linter-wiring.test.ts]
+  status: queued
+  attempts: 0
+  note: "risk:high IS SET UP FRONT. `files:` spans src/ and test/, and `sizingViolation`
+    (src/lib/task-linter.ts) blocks at >=2 subsystems below that band; it is independently
+    warranted because src/run-task.ts is 19,943 lines and declaring it serialises this task against
+    every other task that declares it (`partitionByFileOverlap`, W1-T471). THAT COST IS ACCEPTED ON
+    PURPOSE: the wiring site IS the deliverable, and a shard that omitted it would reproduce the
+    exact defect being fixed. budget_usd 45 — one argument at one call site, one fixture, three
+    assertions.
+
+    `files:` IS TWO PATHS AND BOTH WILL BE TOUCHED. src/run-task.ts holds `lintPlanCommand`, the
+    changed-tasks call site, and already supplies `opts.moduleExists` there, so the new argument
+    lands beside an existing one. test/task-linter-wiring.test.ts is the established home for
+    wired-not-merely-implemented assertions and already carries `lintPlanCommand`; the new cases
+    join it rather than starting a suite. NOTHING ELSE IS DECLARED: src/lib/task-linter.ts is NOT
+    touched — the check's logic is correct and this task must not edit it — and
+    `inverseScopeUntouchedFiles` (src/lib/review.ts) would fail a declared path the implementation
+    never reaches. test/run-task.test.ts is deliberately avoided as a home: CLAUDE.md records that
+    it crashes at FILE level under --experimental-test-coverage, which would nondeterministically
+    zero the coverage record for a wiring test.
+
+    PROOF NOTES: all three proofs are the pure-path form against a file that ALREADY EXISTS, so
+    each resolves to exactly one file and none can trip the zero-or-many warning W1-T488 added.
+    No proof names this shard, so the implementation is not capped at 0/N by self-reference — the
+    failure that needed an operator override on #1812.
+
+    ID PROVENANCE: origin/main's max is 495 and open PR #1836 mints W1-T496, so a next-id derived
+    from main alone would have collided — the shape that broke main for ~24 minutes on 2026-08-14.
+    `rmd next-task-id` independently returned W1-T497, and the id was re-derived immediately before
+    push."
