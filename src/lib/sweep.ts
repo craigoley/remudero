@@ -3732,9 +3732,54 @@ export const CI_GATE_TIMEOUT_FIX_CLASS: FixClass = {
     ),
 };
 
+/**
+ * W1-T474 row 1 — the coverage-tier fix (#1758, `39f198a`): `coverage-ratchet` reads
+ * `scripts/coverage-baseline.json` from the PR's OWN checked-out tree (the `pull_request`
+ * default `refs/pull/N/merge`, per W1-T474's rationale (7)), so a PR that merged BEFORE #1758
+ * raised the floor still fails against the file #1758 already fixed — its diff never touched
+ * coverage. Matches on the required check's recorded name AND the ratchet's own "BLOCKED"
+ * wording (`scripts/coverage-ratchet.mjs`), never on `checksState` alone — a PR that genuinely
+ * lowered coverage must never match this class.
+ */
+export const COVERAGE_TIER_FIX_CLASS: FixClass = {
+  id: "coverage-ratchet-stale-floor",
+  fixPrNumber: 1758,
+  description:
+    "coverage-ratchet blocked against a floor #1758 had already raised in scripts/coverage-baseline.json " +
+    "— the checked-out tree read the pre-fix floor, not a real coverage regression in this PR's own diff",
+  matchesFailure: (pr) =>
+    (pr.ciFailures ?? []).some(
+      (f) => f.name === "coverage-ratchet" && /BLOCKED -- coverage is below a floor/i.test(f.logTail),
+    ),
+};
+
+/**
+ * W1-T474 row 2 — the capability-snapshot regeneration (#1762, `b537b08`): the `claims` required
+ * check's `capability-snapshot:check` assertion (`scripts/generate-capability-snapshot.mjs`)
+ * fails whenever the checked-out `MASTER-PLAN.md` doesn't match a fresh regeneration — and, per
+ * rationale (7), the `pull_request` default checkout is the pinned merge ref against the OLD
+ * base, so every PR merged before #1762 regenerated the snapshot reads the stale block. Matches
+ * on the check's own STALE wording, never on checksState alone.
+ */
+export const CAPABILITY_SNAPSHOT_FIX_CLASS: FixClass = {
+  id: "capability-snapshot-stale",
+  fixPrNumber: 1762,
+  description:
+    "the claims check's capability-snapshot assertion failed on a MASTER-PLAN.md block #1762 had " +
+    "already regenerated — the checked-out tree carried the stale block, not this PR's own diff",
+  matchesFailure: (pr) =>
+    (pr.ciFailures ?? []).some(
+      (f) => f.name === "claims" && /CAPABILITY SNAPSHOT block is STALE/i.test(f.logTail),
+    ),
+};
+
 /** The live class table this reconciler consults by default — a new systemic fix is a row appended
  *  here (design note i), never a change to {@link runPostFixReverification}. */
-export const DEFAULT_FIX_CLASSES: readonly FixClass[] = [CI_GATE_TIMEOUT_FIX_CLASS];
+export const DEFAULT_FIX_CLASSES: readonly FixClass[] = [
+  CI_GATE_TIMEOUT_FIX_CLASS,
+  COVERAGE_TIER_FIX_CLASS,
+  CAPABILITY_SNAPSHOT_FIX_CLASS,
+];
 
 /**
  * The injected redrive effect's outcome. `fresh`, when present, is a brand
