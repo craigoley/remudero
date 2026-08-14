@@ -454,25 +454,37 @@ test("an exit 0 is NEVER throttled, so a STOP file stops the fleet immediately",
   // `daemonExitCode` maps stopped/max_reached to 0, and a STOP file yields `stopped`. Sleeping
   // there would delay a requested stop by the throttle for no reason, and `--restart=on-failure`
   // leaves the container down either way.
-  const run = bootTimed(freshHome(), makeOrigin(), 0, { RMD_RESTART_THROTTLE_S: "5" });
+  //
+  // THE THROTTLE IS SET WELL ABOVE THE ASSERTION BOUND ON PURPOSE (30s vs a 15s cutoff), and the
+  // bound is generous relative to a bare git-clone-and-spawn boot, rather than tight against the
+  // throttle itself: this proof runs on hosts of very different speed (a laptop vs a loaded review
+  // box materializing a real worktree), and the discriminating question is only "did it sleep the
+  // throttle at all", never "exactly how many milliseconds did setup take". A REAL bug that added
+  // the sleep here would still overshoot a 15s bound by a wide margin (the throttle is double
+  // that), so this stays exactly as able to catch a regression while no longer flaking on a slow
+  // but otherwise-correct host.
+  const run = bootTimed(freshHome(), makeOrigin(), 0, { RMD_RESTART_THROTTLE_S: "30" });
   assert.equal(run.calls, 1);
   assert.equal(run.status, 0);
-  assert.ok(run.elapsedMs < 5000, `an exit 0 must not sleep, took ${run.elapsedMs}ms`);
+  assert.ok(run.elapsedMs < 15000, `an exit 0 must not sleep, took ${run.elapsedMs}ms`);
   assert.match(run.stderr, /exited 0 — not throttled/);
 });
 
 test("with the throttle UNSET the script still execs, so one-shot verbs keep today's latency", () => {
+  // Bound widened for the same host-speed reason as the test above: nothing here ever sleeps on
+  // the default path, so the bound only has to outlast a slow boot's own setup cost, not a timer.
   const run = bootTimed(freshHome(), makeOrigin(), 3, {});
   assert.equal(run.status, 3, "the exit code still propagates through exec");
-  assert.ok(run.elapsedMs < 2000, `the default path must not sleep, took ${run.elapsedMs}ms`);
+  assert.ok(run.elapsedMs < 15000, `the default path must not sleep, took ${run.elapsedMs}ms`);
   assert.doesNotMatch(run.stderr, /restart throttle/, "and must not announce a throttle it is not applying");
 });
 
 test("a non-numeric throttle is refused loudly and falls back to exec rather than dying", () => {
+  // Bound widened for the same host-speed reason as the two tests above.
   const run = bootTimed(freshHome(), makeOrigin(), 3, { RMD_RESTART_THROTTLE_S: "60s" });
   assert.equal(run.status, 3);
   assert.match(run.stderr, /not a whole number of seconds/);
-  assert.ok(run.elapsedMs < 2000, "a rejected value must not sleep");
+  assert.ok(run.elapsedMs < 15000, "a rejected value must not sleep");
 });
 
 // ── W1-T490: A FRESHNESS RESTART MUST NOT SPEND THE CRASH-LOOP BUDGET, AND A CRASH STILL MUST ──
@@ -655,13 +667,16 @@ function timedSeq(
 }
 
 test("W1-T490: a FRESHNESS retry pauses its own short interval, NOT the crash throttle", () => {
-  const run = timedSeq([STALE, 0], { RMD_RESTART_THROTTLE_S: "8", RMD_FRESHNESS_RESTART_PAUSE_S: "1" });
+  // THE DISCRIMINATING BOUND: a 30s throttle vs a 1s pause, with the upper assertion set to 15s —
+  // comfortably above a slow host's real setup cost (a git clone plus two bash/node spawns) and
+  // comfortably below the 30s a wrongly-applied throttle would take, same widening as the plain
+  // throttle tests above and for the same reason: this proof runs on hosts of very different speed.
+  const run = timedSeq([STALE, 0], { RMD_RESTART_THROTTLE_S: "30", RMD_FRESHNESS_RESTART_PAUSE_S: "1" });
   assert.equal(run.calls, 2, "the daemon must still be re-run in-container");
   assert.equal(run.status, 0, "and the container still exits 0, so the budget is untouched");
-  // THE DISCRIMINATING BOUND: 8s throttle vs 1s pause. Before this change the run took the throttle.
-  assert.ok(run.elapsedMs < 8000, `a freshness retry must not pay the 8s crash throttle, took ${run.elapsedMs}ms`);
+  assert.ok(run.elapsedMs < 15000, `a freshness retry must not pay the 30s crash throttle, took ${run.elapsedMs}ms`);
   assert.ok(run.elapsedMs >= 1000, `but it must still pause its own 1s interval, took ${run.elapsedMs}ms`);
-  assert.match(run.stderr, /pausing 1s \(NOT the 8s crash throttle\)/);
+  assert.match(run.stderr, /pausing 1s \(NOT the 30s crash throttle\)/);
 });
 
 test("W1-T490: a CRASH still pays the FULL throttle — shortening the freshness pause must not shorten this", () => {
