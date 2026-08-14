@@ -1,0 +1,111 @@
+- id: W1-T488
+  title: "a `unit test: <title>` proof's body is regex-ESCAPED and matched as a LITERAL substring, and no author-facing surface says so — a proof using `.` as a wildcard resolves to zero tests, reads `not_executable`, and certifies nothing"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  rationale: "OBSERVED W1-T245/#651: 4 of 5 proofs executed and the 5th used `.` to stand for the
+    parentheses in the test's own title. It matched nothing, read `not_executable`, and that criterion
+    fell back to the keyword floor — silently, with the verdict otherwise looking healthy.
+    THE MECHANISM IS IN THE SOURCE AND IS CORRECT. `parseWhitelistedProof` (src/lib/review.ts) compiles
+    a non-path `unit test:` body to `--test-name-pattern escapeRegExp(trimmed)`. The escaping is the
+    W1-T112 round-3 fix and its own comment states why: node compiles that argument with `new RegExp`,
+    so a title echoing real syntax verbatim — the recorded case is `ProgramArguments end [rmd, digest]`
+    — became an unescaped CHARACTER CLASS that could never match the bracketed text it quoted, and
+    manufactured a FAIL for a test that genuinely passed. Escaping fixed that class. It also made every
+    metacharacter INERT, which is the defect filed here: a `.` an author wrote as a wildcard is now
+    matched as a literal dot.
+    THE TRAP IS AN ASYMMETRY BETWEEN THE TWO DIALECTS, AND ONLY ONE HALF IS DOCUMENTED. The shared
+    filing-prompt grammar (`ACCEPTANCE_PROOF_GRAMMAR`, src/lib/proof-grammar.ts) states that a `grep:`
+    pattern is a BASIC REGEX and names the refused metacharacters. NOTHING anywhere states that a
+    `unit test:` body is the opposite — a literal. Measured at head: `escap`/`literal substring` appear
+    NOWHERE in CLAUDE.md's proof-authoring bullets, nowhere in docs/, and nowhere in the grammar const.
+    An author reading both lines in sequence is actively led to believe the payloads behave alike.
+    WHAT ALREADY EXISTS AND WHY IT DOES NOT COVER THIS — established before filing, so this is not
+    re-work. (1) `lint-plan`'s `proof-resolvability` is TEXT SHAPE only: `looksLikeScenarioNarrative`
+    counts commas and length, so a short wildcard-bearing body is a `plausible single test title` and
+    passes. (2) W1-T369's ratchet (test/plan-proof-debt.test.ts, `PROOF_DEBT_CEILING = 0`) counts
+    BLOCKING lint-shape violations over plan/tasks.yaml alone; its `proofResolvesToCandidate` — which
+    WOULD catch this, since `resolveNameFilteredCandidates` greps the suite with a FIXED string — is
+    applied only to seven hard-coded paths, never to the live plan's name-filtered proofs. (3) W1-T387
+    (#1442) collapsed `rmd check-proof` onto the review executor, so an author WHO RUNS IT now sees
+    `no-match`; this task is the signal for the author who does not. None of the three turns a silent
+    `not_executable` into a pre-merge warning, and none of them tells the author the rule."
+  design: |
+    TWO DELIVERABLES, IN THIS ORDER. The escaping itself is CORRECT and does not move — this is
+    authoring-time visibility, never a change to what the executor does.
+
+    (1) SAY THE RULE WHERE THE AUTHOR ALREADY READS. A `unit test:` body that is not a `test/*.test.ts`
+    path is matched as a LITERAL substring of the test's own title after escaping: `.` `(` `)` `[` `]`
+    match themselves and never act as wildcards, so copy plain prose out of the title verbatim and use
+    no metacharacters. Put it in CLAUDE.md beside the existing `<exact-title substring>` bullet, and
+    STATE THE ASYMMETRY EXPLICITLY — a `grep:` pattern is a basic regex, a `unit test:` body is a
+    literal — because the asymmetry, not either half alone, is what misleads.
+    WHETHER IT ALSO BELONGS IN `ACCEPTANCE_PROOF_GRAMMAR` IS A JUDGEMENT, NOT A GIVEN. That module's
+    own comment says only BLOCKING rules earned a line, and it already steers filers to the whole-file
+    path form for which this trap cannot arise; a line that does not change what a filer writes is
+    prompt weight on every fire. Decide it in the PR body with a reason either way, and note that
+    test/proof-grammar.test.ts runs every example IN that text through the real parser, so any example
+    added must parse.
+
+    (2) THE LINT — RESOLVE, DO NOT GUESS. For each acceptance proof that parses as a NAME-FILTERED
+    `unit test:` (i.e. `parseWhitelistedProof` returns `nameFiltered`), call the reviewer's OWN
+    `resolveNameFilteredCandidates` — never a reimplementation, the same rule W1-T310 applied to
+    proof-scope, so lint and review can never disagree about what a proof names. WARN when it resolves
+    to ZERO, and report MANY as its own distinct outcome with the count: a substring matching many
+    titles executes, but certifies a wider set than the author named, and reads identically today.
+
+    (3) ZERO IS OVERLOADED AND THAT IS THE LOAD-BEARING RISK. For an unimplemented task the named title
+    legitimately does not exist yet — CLAUDE.md records forward-referencing a PATH as safe and a SYMBOL
+    NAME as a guess, and a filing-time check that fails on zero would refuse the legitimate half. So
+    this check is WARN, never BLOCK, and MEASURE BEFORE SHIPPING: count how many open tasks would warn
+    today and put the number in the PR body. IF THE WARN FIRES ON NEARLY EVERY NAME-FILTERED PROOF IT
+    IS NOISE, and the honest remedy is to narrow it to the high-precision case — a body that CONTAINED
+    A REGEX METACHARACTER WHICH ESCAPING MADE INERT — rather than to ship a warning authors learn to
+    scroll past. Recommend from the measurement; do not assume either shape.
+
+    (4) THE MESSAGE MUST NAME THE CAUSE, NOT THE SYMPTOM. `resolves to zero tests` repeats what the
+    reviewer already says too late. It must say the substring was matched LITERALLY, quote the escaped
+    metacharacters it found, and name the remedy (plain prose from the title, or the whole-file path
+    form).
+
+    NOT IN SCOPE: changing `escapeRegExp` or anything else the executor does (W1-T112 stands); making
+    any proof check BLOCKING; rewriting existing tasks' proofs (Standing rule 15, a separate PR); and
+    the `grep:`-side zero-hit ambiguity, which is its own open question.
+  acceptance:
+    - claim: "a name-filtered `unit test:` proof whose substring resolves to zero tests is reported by lint-plan as a WARN that names the literal-match cause, and never blocks a legitimate forward reference"
+      proof: "unit test: test/lint-proof-name-resolution.test.ts"
+    - claim: "a substring matching MANY test titles is reported as its own outcome with the count, distinctly from one matching none"
+      proof: "unit test: test/lint-proof-name-resolution.test.ts"
+    - claim: "the check resolves through the reviewer's own resolver rather than a reimplementation, so lint and review cannot disagree about what a proof names"
+      proof: "grep: resolveNameFilteredCandidates( in src/lib/task-linter.ts"
+    - claim: "the author-facing dialect guidance states that a unit-test proof body is matched literally after escaping, against a grep pattern's basic regex"
+      proof: "unit test: test/docs-claims.test.ts"
+  risk: high
+  origin: feedback#fb-1784821500625-cdcf8b
+  plan_refs: ["§5C", "W1-T112", "W1-T310", "W1-T369", "W1-T387"]
+  files: [src/lib/task-linter.ts, test/lint-proof-name-resolution.test.ts, CLAUDE.md, src/lib/proof-grammar.ts, test/docs-claims.test.ts]
+  status: queued
+  attempts: 0
+  note: "FILED FROM feedback#fb-1784821500625-cdcf8b (2026-07-23), triaged 2026-08-14.
+    verify:auto — every claim is decidable in-process: two of them over seeded fixture tasks through the
+    real resolver, one a call-site grep, one a doc claim in the house docs-claims shape.
+    risk:high on Rule 19 SIZING, not on blast radius: `files:` spans the linter, its new test, CLAUDE.md,
+    the shared prompt grammar and the docs-claims suite, which is >=2 modules and would fail sizing at
+    medium (the same call W1-T310 and #1225 both made). The runtime blast radius is small — a WARN
+    cannot refuse a dispatch (`lintTask` returns ok unless a violation is BLOCK).
+    budget_usd 55 — below W1-T310's 50-plus-survey shape only slightly: the code is one resolver call
+    per proof, and the real cost is design (3)'s measurement over the open queue plus the judgement about
+    whether the grammar const earns a line.
+    ON THE PROOFS. test/lint-proof-name-resolution.test.ts does not exist yet — a FORWARD REFERENCE TO A
+    PATH, which CLAUDE.md records as safe, and it is declared in files: so the worker creates it. The
+    grep proof names a SYMBOL WITH ITS CALL PAREN in a file the task declares, the idiomatic call-site
+    form the linter itself demands, and it MISSES main today (task-linter.ts does not call the resolver),
+    so it discriminates rather than reading executed_stale. test/docs-claims.test.ts EXISTS, so at least
+    one proof executes at filing time.
+    CLAUDE.md IS LEGAL IN THIS PR because the PR carries src/ already and therefore has no `planOnly`
+    carve-out to forfeit (W1-T387 design (vii)); it must NOT be bundled with a plan shard.
+    NO depends_on. W1-T387 (#1442) already merged, so `rmd check-proof` agrees with the executor —
+    that is the premise this task builds the pre-merge signal on top of, not an edge to wait for."
