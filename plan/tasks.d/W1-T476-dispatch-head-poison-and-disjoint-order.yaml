@@ -1,0 +1,100 @@
+- id: W1-T476
+  title: "the dispatch head is poisoned deterministically — `idOrdinal` ranks W2-T1 at ordinal 1 ahead of the whole W1 backlog and its empty `files:` overlaps every candidate, so production admits 1 lane where the pool holds 11 disjoint tasks: sort undeclared scope LAST, make the ordinal workstream-aware, and pack lanes disjointness-first"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80
+  rationale: "FILED FROM the operator's queue-ordering brief (oper#queue-order-2026-08-14),
+    SIMULATED on this filing session's host (a cloud container with the tree at e26f928, no
+    fleet ledger route) — every admission figure below is DERIVED from that run tonight, using
+    the REAL loadPlan, runnableCandidates, and partitionByFileOverlap with zero glob
+    reimplementation; ledger-gated eligibility legs (open-PR dedup, breaker, indeterminate,
+    lifetime cap) were stubbed fail-open and are named in the sim artifacts. MEASURED, THE
+    HEADLINE: at lanes 2/3/4 the production order admits 1/1/1; a greedy max-disjoint order
+    admits 2/3/4; twenty seeded random orders average 1.60/2.10/2.35 with min 1. THE BRIEF'S
+    CHEAPER FIX IS DEAD, MEASURED: removing the pre-partition truncation entirely, or widening
+    it to limit*3, is byte-identical to production (1/1/1) — truncation is not the binding
+    constraint. THE MECHANISM IS: compareDispatch (src/lib/drain.ts) sorts priority, then
+    idOrdinal — whose regex takes the LAST integer run, so W2-T1 ranks at ordinal 1 ahead of
+    every W1-T4xx — and W2-T1's `files:` is EMPTY, which overlappingPaths
+    (src/lib/dispatch-overlap.ts) treats fail-closed as overlapping EVERYTHING (measured
+    degree 27 of 27); first-declared-wins placement then serializes the entire pool behind
+    it. Excluding the four empty-`files:` eligibles (W2-T1, W2-T3, W1-T52, W1-T59) the PLAIN
+    production order admits full lanes at every width — a property of tonight's queue head,
+    not a guarantee; greedy packing is the only variant that fills lanes whenever a disjoint
+    set that large exists (greedy MIS 11 of 28 eligible tonight). CAVEAT, stated not buried:
+    whether W2-T1 is live-eligible on the Azure fleet is UNMEASURED from this host — the
+    sim's merged set is git-derived (488-id union of trailers and non-filing subjects) and
+    pre-trailer-era W2/W3 merges can be invisible to it; the comparator quirk and the
+    fail-closed empty-scope behavior are DERIVED from source regardless and bite ANY
+    undeclared task that ever becomes eligible. DETERMINISM (the operator's Q3): no LLM
+    anywhere — the fleet's re-dispatch-per-distinct-task already reads 1.89 against a 1.65
+    baseline (CARRIED from the operator's brief, host mini), and an unauditable re-ranker
+    would invite churn; every term below is a pure sort over parsed fields. NO WRITE HAZARD
+    (the operator's Q4): dispatchOrder is computed at read time inside nextRunnable and
+    runnableCandidates on every selection — this is a SORT CHANGE IN CODE, not a plan
+    mutation; W1-T60's origin-main plan blob and the W1-T340 per-tick snapshot are untouched.
+    ANTI-STARVATION: ascending id ordinal IS filing order (ids mint monotonically), so the
+    existing tiebreak already supplies the age term; priority: (W1-T422, merged, 3 users
+    today) remains the deliberate override and still sorts first."
+  design: |
+    (i) undeclaredScopeLast (src/lib/drain.ts): a comparator term in compareDispatch,
+    after priority and before the ordinal — tasks whose `files:` is empty or absent sort
+    AFTER every declared-scope task. The overlap semantics stay fail-closed (an undeclared
+    task still serializes against everything — that is correct); what changes is that it
+    can no longer do so from the QUEUE HEAD, where it starves every lane. The name is
+    load-bearing — the criterion greps it.
+    (ii) idOrdinal becomes workstream-aware: the workstream prefix ranks before the task
+    ordinal (W1 before W2 before W3 by their own numeric order is NOT the goal — the goal
+    is that W2-T1 stops outranking W1-T400 by an accident of the trailing-integer regex;
+    rank by (workstream number, task ordinal) so ids compare within their stream and
+    streams compare deliberately). The stale "first integer run" doc line is corrected in
+    the same edit.
+    (iii) lane packing becomes disjointness-first: runnableCandidates' selection loop, when
+    collecting more than one candidate, prefers the next ELIGIBLE task that is disjoint
+    (via the real overlappingPaths) from those already collected, falling back to
+    dispatchOrder position when no disjoint candidate remains — a greedy pack that
+    guarantees full lanes whenever the eligible set contains a disjoint set that large,
+    measured tonight as the only variant that does. Determinism: the scan order within
+    the pack is dispatchOrder itself, so equal inputs yield equal outputs.
+    (iv) FALSIFIER, both directions: a fixture pool reproducing tonight's shape (one
+    empty-files task ranked first by ordinal, N pairwise-disjoint declared tasks behind
+    it) must admit N at lanes=N under the new order where the old comparator admits 1
+    (reverting any of (i)-(iii) fails it), AND a pool with NO disjoint pair must admit
+    exactly 1 with the remainder serialized in dispatchOrder — the pack must not reorder
+    what it cannot improve (the stability containment: absent overlap differences, the
+    order is byte-identical to today's).
+    (v) NOT IN SCOPE: partitionByFileOverlap's semantics (first-declared-wins and
+    fail-closed empty scope both stay); any plan write, priority stamping, or shard edit;
+    the truncation width (measured innocent); LLM ranking (measured unnecessary and argued
+    against by the operator); backfilling `files:` on W2-T1/W2-T3/W1-T52/W1-T59 (their
+    merged-ness needs the Azure status corpus this host cannot read — flagged for the
+    operator instead).
+  acceptance:
+    - claim: "a pool led by an empty-files task admits full lanes under the new order where the old comparator admits one, and a no-disjoint pool keeps today's order byte-identical"
+      proof: "unit test: test/dispatch-order-disjoint.test.ts"
+    - claim: "undeclared scope sorts last as a named comparator term, not a filter that hides the task"
+      proof: "grep: undeclaredScopeLast in src/lib/drain.ts"
+  risk: high
+  origin: oper#queue-order-2026-08-14
+  plan_refs: ["W1-T422", "W1-T340", "W1-T60"]
+  files: [src/lib/drain.ts, test/dispatch-order-disjoint.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — every direction is fixture-decidable with the real partitioner; the
+    simulation scripts and outputs are preserved under the filing session's val/ artifacts.
+    risk:high — it changes WHAT THE FLEET RUNS NEXT, the highest-leverage deterministic
+    decision in the harness; containment is falsifier direction two (no-improvement pools
+    keep today's order byte-identical) and the untouched overlap semantics. Rule 19: two
+    files, one concern — the comparator and its pack live in drain.ts, their test beside
+    them. Rule 25: drain.ts is instrument-adjacent; the files: list is the containment and
+    is kept to invocation-count-derived entries only (dispatch-overlap.ts is READ, not
+    edited — overlappingPaths is imported already). PROOF NOTES: `undeclaredScopeLast` is 0
+    hits across src/ AND plan/ at e26f928 (measured, case-sensitive, single-line pattern),
+    so the grep discriminates at hits>=1/base=0 and names no existing symbol; the unit-test
+    proof is the pure-path form against a file declared in files:. LEDGER: no route from
+    this host — the 1.89/1.65 re-dispatch figures are CARRIED from the operator's brief
+    (host: mini); every admission figure is DERIVED from tonight's simulation on this
+    container. NO depends_on: comparator, selector and partitioner are all on main."
