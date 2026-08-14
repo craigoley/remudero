@@ -180,23 +180,53 @@ export function dispatchOrder(tasks: readonly Task[]): Task[] {
   return [...tasks].sort(compareDispatch);
 }
 
-/** Total order: `priority` ascending FIRST (absent ⇒ `+Infinity`, so it sorts last), then the
- *  existing id order (leading integer ascending, then the raw id) as the deterministic tiebreak —
- *  among prioritized tasks and among un-prioritized ones alike. */
+/**
+ * Total order: `priority` ascending FIRST (absent ⇒ `+Infinity`, so it sorts last); then
+ * `undeclaredScopeLast` (W1-T476) — a task whose `files:` is empty or absent sorts AFTER every
+ * task that declares one; then the workstream-aware id order (see {@link idOrdinal}) as the
+ * deterministic tiebreak — among prioritized tasks, among declared-scope tasks, and among
+ * un-prioritized/undeclared ones alike.
+ */
 export function compareDispatch(a: Task, b: Task): number {
   const pa = a.priority ?? Number.POSITIVE_INFINITY;
   const pb = b.priority ?? Number.POSITIVE_INFINITY;
   if (pa !== pb) return pa - pb;
+  const ua = undeclaredScopeLast(a);
+  const ub = undeclaredScopeLast(b);
+  if (ua !== ub) return ua - ub;
   const na = idOrdinal(a.id);
   const nb = idOrdinal(b.id);
-  if (na !== nb) return na - nb;
+  if (na.workstream !== nb.workstream) return na.workstream - nb.workstream;
+  if (na.ordinal !== nb.ordinal) return na.ordinal - nb.ordinal;
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }
 
-/** The first integer run in an id (`W1-T281` -> 281). Ids with none sort last, then lexicographically. */
-function idOrdinal(id: string): number {
-  const m = /(\d+)(?!.*\d)/.exec(id);
-  return m ? Number(m[1]) : Number.MAX_SAFE_INTEGER;
+/**
+ * W1-T476: 1 when `t.files` is absent or empty, 0 otherwise — an UNDECLARED-SCOPE task sorts
+ * LAST among its priority tier instead of by the accident of its id. This does NOT change
+ * `overlappingPaths`' fail-closed treatment of that same task (it still serializes against
+ * every co-dispatched candidate once it IS offered — see dispatch-overlap.ts); what changes is
+ * only that it can no longer do so from the QUEUE HEAD, where a single such task starved every
+ * lane behind it (MEASURED: 1 lane admitted where 11 disjoint tasks were eligible). The name is
+ * load-bearing — grepped by this task's own acceptance criterion.
+ */
+function undeclaredScopeLast(t: Task): number {
+  return t.files === undefined || t.files.length === 0 ? 1 : 0;
+}
+
+/**
+ * Workstream-aware id ordinal: `W<workstream>-T<ordinal>` parses into its two numeric parts,
+ * compared workstream-first then task-ordinal — so `W2-T1` no longer outranks `W1-T400` by the
+ * accident of a regex over the id's trailing digits (the PRIOR implementation here took the
+ * LAST integer run in the id — despite a doc comment that, wrongly, called it "the first integer
+ * run" — which is exactly the accident: `W2-T1`'s only integer run is `1`, so it ranked ordinal 1,
+ * ahead of the entire W1 backlog). Ids that don't match `W<n>-T<m>` (no workstream prefix) sort
+ * after every id that does, then lexicographically via `compareDispatch`'s own final tiebreak.
+ */
+function idOrdinal(id: string): { workstream: number; ordinal: number } {
+  const m = /^W(\d+)-T(\d+)/.exec(id);
+  if (!m) return { workstream: Number.MAX_SAFE_INTEGER, ordinal: Number.MAX_SAFE_INTEGER };
+  return { workstream: Number(m[1]), ordinal: Number(m[2]) };
 }
 
 export function nextRunnable(plan: Plan, isMerged: MergedSet, opts: NextRunnableOpts = {}): Task | undefined {
@@ -345,24 +375,66 @@ function isDispatchEligible(plan: Plan, t: Task, isMerged: MergedSet, opts: Next
 }
 
 /**
- * Up to `limit` runnable tasks, in FILE ORDER — the multi-candidate generalization
- * of {@link nextRunnable} for a concurrent dispatcher (P19 rung 1, W1-T171; wired
- * by the lane scheduler in W1-T172) to hand to `dispatch-overlap.ts`'s
+ * Up to `limit` runnable tasks, packed disjointness-first (W1-T476; see {@link
+ * packDisjointFirst}) over dispatchOrder — the multi-candidate generalization of
+ * {@link nextRunnable} for a concurrent dispatcher (P19 rung 1, W1-T171; wired by
+ * the lane scheduler in W1-T172) to hand to `dispatch-overlap.ts`'s
  * `partitionByFileOverlap`. Applies the EXACT SAME eligibility chain as
  * `nextRunnable` (see {@link isDispatchEligible}) — a task ineligible for solo
  * dispatch is never offered as a concurrent candidate either. `limit <= 0` yields
- * an empty array. This function does NOT itself check `files:` overlap between the
- * candidates it returns — that partition is `dispatch-overlap.ts`'s job, kept
- * separate so the DAG/status eligibility logic here never duplicates the pure glob
- * predicate there (and vice versa).
+ * an empty array. This function does not decide `files:` overlap ADMISSION —
+ * that partition remains `dispatch-overlap.ts`'s job, kept separate so the
+ * DAG/status eligibility logic here never duplicates the pure glob predicate
+ * there — but it DOES now consult that same predicate to choose WHICH `limit`
+ * candidates to offer, so a disjoint set doesn't get truncated away before
+ * `partitionByFileOverlap` ever sees it.
  */
 export function runnableCandidates(plan: Plan, isMerged: MergedSet, limit: number, opts: NextRunnableOpts = {}): Task[] {
-  const out: Task[] = [];
+  if (limit <= 0) return [];
+  const eligible: Task[] = [];
   for (const t of dispatchOrder(plan.tasks)) {
-    if (out.length >= limit) break;
-    if (isDispatchEligible(plan, t, isMerged, opts)) out.push(t);
+    if (isDispatchEligible(plan, t, isMerged, opts)) eligible.push(t);
   }
-  return out;
+  return packDisjointFirst(eligible, limit);
+}
+
+/**
+ * W1-T476's greedy disjointness-first pack: fills up to `limit` slots from `eligible` (already in
+ * dispatchOrder), on each slot preferring the EARLIEST remaining candidate that stays `files:`
+ * -disjoint from every candidate already collected — checked via the real `partitionByFileOverlap`
+ * (dispatch-overlap.ts), never a re-derived glob comparison — falling back to the next candidate
+ * in dispatchOrder when none remain disjoint. This REPLACES the previous plain truncation (take
+ * the first `limit` eligible tasks in dispatchOrder), which handed `partitionByFileOverlap`
+ * downstream a head that could contain far fewer than `limit` pairwise-disjoint tasks even when a
+ * disjoint set of size `limit` existed further back in the eligible list — MEASURED: at lanes
+ * 2/3/4 the plain-truncation order admitted 1/1/1 where a disjoint set of that size existed.
+ *
+ * DETERMINISM: the scan for the next disjoint candidate always walks `remaining` in its current
+ * (dispatchOrder-derived) order and takes the first match, so equal inputs yield equal outputs.
+ *
+ * STABILITY CONTAINMENT (the falsifier's second direction): when NO two candidates in `eligible`
+ * are pairwise disjoint, every slot after the first falls back to "next in dispatchOrder" — so
+ * the result is byte-identical to the old plain-truncation order. The pack never reorders what it
+ * cannot improve.
+ */
+function packDisjointFirst(eligible: readonly Task[], limit: number): Task[] {
+  const collected: Task[] = [];
+  const remaining = [...eligible];
+  while (collected.length < limit && remaining.length > 0) {
+    let pickIndex = remaining.findIndex((candidate) => isDisjointFromEvery(collected, candidate));
+    if (pickIndex === -1) pickIndex = 0; // no disjoint candidate remains — fall back to dispatchOrder position
+    collected.push(remaining[pickIndex]);
+    remaining.splice(pickIndex, 1);
+  }
+  return collected;
+}
+
+/** True iff `candidate`'s `files:` overlaps NONE of `collected` — one pairwise
+ *  `partitionByFileOverlap` check per already-collected task, so an undeclared-scope task (which
+ *  `overlappingPaths` fail-closes as overlapping everything) never passes once anything is
+ *  collected, exactly mirroring the real downstream partition's own verdict. */
+function isDisjointFromEvery(collected: readonly Task[], candidate: Task): boolean {
+  return collected.every((c) => partitionByFileOverlap([c, candidate]).dispatch.length === 2);
 }
 
 /** Reason a drain stopped — every terminal state is one of these. */
