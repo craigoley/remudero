@@ -347,10 +347,23 @@ cd "$TREE"
 # changes is only WHICH exits are charged to it.
 #
 # THE FRESHNESS LOOP IS ITSELF BOUNDED, so nothing here is unbounded in either direction. It retries
-# at most `RMD_FRESHNESS_RESTART_MAX` times (default 20) and sleeps the SAME throttle between
-# attempts, so a pathological restart-storm is rate-limited exactly as before and then falls through
-# to a real exit, handing the container back to docker's count. Rate here, count there, still — the
-# only difference is that routine freshness no longer spends the count.
+# at most `RMD_FRESHNESS_RESTART_MAX` times (default 20) and then falls through to a real exit,
+# handing the container back to docker's count. Rate here, count there, still — the only difference
+# is that routine freshness no longer spends the count.
+#
+# AND IT DOES NOT PAY THE CRASH-STORM SLEEP (W1-T490 follow-up). The freshness retry used to sleep
+# the FULL `RMD_RESTART_THROTTLE_S` — 120s in production — before re-syncing, which charged every
+# routine merge two minutes of daemon downtime for a restart that is healthy and WANTED. The
+# throttle exists to slow a CRASH LOOP: the MEASURED lock storm above, where the same boot fails the
+# same way 13-17s apart and only wall-clock separates the attempts. A freshness restart is not that
+# shape — it is one-per-merge, it does real work (a fetch and a checkout) between attempts, and it
+# is already bounded by the counter above.
+#
+# THE BOUND IS REPLACED, NOT REMOVED, which is what this task's shard demands of any change that
+# touches a cap. Dropping to zero would leave the in-container loop with NO rate limit at all, so
+# the pause becomes its own short interval — `RMD_FRESHNESS_RESTART_PAUSE_S`, default 5s — giving a
+# worst case of 20 x 5s per container life instead of 20 x 120s, still bounded on both axes. The
+# EXHAUSTED-budget exit and every genuine crash keep the full crash throttle, untouched.
 #
 # EXIT 0 IS NEVER THROTTLED. `daemonExitCode` maps stopped/max_reached to 0, and a `STOP` file
 # yields `stopped` — so an operator stopping the fleet from the host gets an immediate clean exit
@@ -393,6 +406,13 @@ case "$FRESHNESS_RESTART_MAX" in
     FRESHNESS_RESTART_MAX=20
     ;;
 esac
+FRESHNESS_RESTART_PAUSE_S="${RMD_FRESHNESS_RESTART_PAUSE_S:-5}"
+case "$FRESHNESS_RESTART_PAUSE_S" in
+  '' | *[!0-9]*)
+    log "RMD_FRESHNESS_RESTART_PAUSE_S is not a whole number of seconds — ignoring it and using 5"
+    FRESHNESS_RESTART_PAUSE_S=5
+    ;;
+esac
 
 # CAPTURE THE CODE IN THE SAME COMMAND THAT RUNS IT. `if "$@"; then ...; fi; rc=$?` reads $? from
 # the COMPOUND, which is 0 when the condition merely tested false — so a crashing daemon exited 0,
@@ -416,8 +436,8 @@ while :; do
   if [ "$rc" -eq "$DAEMON_EXIT_STALE" ] && [ "$freshness_restarts" -lt "$FRESHNESS_RESTART_MAX" ]; then
     freshness_restarts=$((freshness_restarts + 1))
     log "exited $rc (freshness) — restart ${freshness_restarts}/${FRESHNESS_RESTART_MAX} IN-CONTAINER, so docker's on-failure budget is not spent"
-    log "  sleeping ${RESTART_THROTTLE_S}s first, then re-running the fetch/checkout so the staleness actually clears"
-    sleep "$RESTART_THROTTLE_S"
+    log "  pausing ${FRESHNESS_RESTART_PAUSE_S}s (NOT the ${RESTART_THROTTLE_S}s crash throttle), then re-running the fetch/checkout so the staleness actually clears"
+    sleep "$FRESHNESS_RESTART_PAUSE_S"
     sync_tree
     log "checkout: $(git -C "$TREE" rev-parse HEAD) ($REF)"
     continue

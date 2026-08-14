@@ -615,6 +615,65 @@ test("W1-T490: the freshness loop belongs to SUPERVISED mode — with the thrott
   assert.doesNotMatch(run.stderr, /IN-CONTAINER/);
 });
 
+// ── W1-T490 FOLLOW-UP: A FRESHNESS RETRY MUST NOT PAY THE CRASH-STORM SLEEP ──────────────────
+//
+// The throttle exists to slow a CRASH LOOP — the measured lock storm where the same boot fails the
+// same way 13-17s apart and only wall-clock separates the attempts. A freshness restart is not that
+// shape: it is one-per-merge, it does real work (fetch + checkout) between attempts, and it is
+// already bounded by RMD_FRESHNESS_RESTART_MAX. Charging it the full 120s cost the fleet two
+// minutes of downtime per merge for a restart that is healthy and wanted.
+//
+// BOTH DIRECTIONS AGAIN, because the risk of shortening ANY sleep here is shortening the one that
+// bounds a crash. The pair below pins the short pause on the freshness path AND the full throttle
+// on the crash path, and a third pins the exhausted-budget exit back onto the crash throttle.
+
+/** Time a bootSeq run, so a sleep's presence or absence is observable. */
+function timedSeq(
+  codes: readonly number[],
+  env: Record<string, string>,
+): { status: number; stderr: string; calls: number; elapsedMs: number } {
+  const started = Date.now();
+  const r = bootSeq(freshHome(), makeOrigin(), codes, env);
+  return { ...r, elapsedMs: Date.now() - started };
+}
+
+test("W1-T490: a FRESHNESS retry pauses its own short interval, NOT the crash throttle", () => {
+  const run = timedSeq([STALE, 0], { RMD_RESTART_THROTTLE_S: "8", RMD_FRESHNESS_RESTART_PAUSE_S: "1" });
+  assert.equal(run.calls, 2, "the daemon must still be re-run in-container");
+  assert.equal(run.status, 0, "and the container still exits 0, so the budget is untouched");
+  // THE DISCRIMINATING BOUND: 8s throttle vs 1s pause. Before this change the run took the throttle.
+  assert.ok(run.elapsedMs < 8000, `a freshness retry must not pay the 8s crash throttle, took ${run.elapsedMs}ms`);
+  assert.ok(run.elapsedMs >= 1000, `but it must still pause its own 1s interval, took ${run.elapsedMs}ms`);
+  assert.match(run.stderr, /pausing 1s \(NOT the 8s crash throttle\)/);
+});
+
+test("W1-T490: a CRASH still pays the FULL throttle — shortening the freshness pause must not shorten this", () => {
+  const run = timedSeq([1, 1, 1], { RMD_RESTART_THROTTLE_S: "2", RMD_FRESHNESS_RESTART_PAUSE_S: "0" });
+  assert.equal(run.calls, 1, "a crash is still not retried in-container");
+  assert.equal(run.status, 1);
+  assert.ok(run.elapsedMs >= 2000, `a crash must still sleep the full 2s throttle, took ${run.elapsedMs}ms`);
+});
+
+test("W1-T490: an EXHAUSTED freshness budget falls back onto the crash throttle before handing over", () => {
+  // The hand-off to docker's count must be rate-limited like any other real exit, or the container
+  // would churn at the loop's speed once the in-container bound is spent.
+  const run = timedSeq([STALE, STALE, STALE], {
+    RMD_RESTART_THROTTLE_S: "2",
+    RMD_FRESHNESS_RESTART_PAUSE_S: "0",
+    RMD_FRESHNESS_RESTART_MAX: "1",
+  });
+  assert.equal(run.calls, 2, "the initial run plus exactly one in-container retry");
+  assert.equal(run.status, STALE);
+  assert.ok(run.elapsedMs >= 2000, `the exhausted exit must pay the full throttle, took ${run.elapsedMs}ms`);
+  assert.match(run.stderr, /1 in-container restarts are already spent/);
+});
+
+test("W1-T490: a non-numeric freshness pause is refused loudly and falls back to 5s", () => {
+  const run = timedSeq([STALE, 0], { RMD_RESTART_THROTTLE_S: "1", RMD_FRESHNESS_RESTART_PAUSE_S: "5s" });
+  assert.match(run.stderr, /RMD_FRESHNESS_RESTART_PAUSE_S is not a whole number of seconds/);
+  assert.equal(run.status, 0);
+});
+
 test("W1-T490: the entrypoint's freshness code is the SAME NUMBER as DAEMON_EXIT_STALE, not a drifting literal", () => {
   // THE DUPLICATION THIS PINS. The entrypoint cannot import src/lib/daemon.ts — it runs at exactly
   // the moment the daemon has failed, and the throttle note above records why nothing here may
