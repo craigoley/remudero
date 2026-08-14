@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { appendFileSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import type { Plan, Task } from "../src/lib/plan.js";
 import { nextRunnable, type MergedSet } from "../src/lib/drain.js";
@@ -15,6 +16,9 @@ import {
   ghGateway,
   isDispatchBreakerTripped,
   projectPlan,
+  proofGrepTargets,
+  findSupersessionEvidence,
+  buildGitLogSupersessionSearch,
   readLedgerLines,
   readLedgerTail,
   DEFAULT_MAX_TASK_DISPATCHES,
@@ -22,6 +26,8 @@ import {
   type BatchedPr,
   type GitHub,
   type PrRef,
+  type SupersessionCommit,
+  type SupersessionSearch,
 } from "../src/lib/status.js";
 
 /** A minimal task; fields not under test get sensible defaults. */
@@ -2147,4 +2153,225 @@ test("ruling scope: an unreadable head ref still fails CLOSED on a merged anchor
   const proj = deriveStatus(task({ id: "W1-T800" }), { ledgerPath: ledgerFile([]), github });
   assert.equal(proj.merged, false);
   assert.notEqual(proj.source, "trailer");
+});
+
+// -- W1-T485: SUBSTANCE THAT SHIPPED UNDER ANOTHER TASK'S TRAILER ----------------------------
+//
+// THE ROUTE NO CREDIT SOURCE COVERS. The projection resolves a merge through five sources
+// (trailer, ledger, head-branch, pr-field, correction) and every one of them credits the task the
+// PR NAMES. When a PR names task A correctly and ships task B's substance, B is credited by
+// nobody and sits in the decision queue indefinitely -- measured twice: #1758 shipped W1-T467's
+// substance under `Remudero-Task: W1-T466`, and #1777 shipped W1-T472's under
+// `Remudero-Task: W1-T464` three hours AFTER W1-T458's advisory went live and correctly stayed
+// silent, because a task WAS resolved. These tests pin that boundary from both sides.
+
+/** A search whose answers are fixture-driven, keyed `symbol@path`. */
+function fakeSearch(byKey: Record<string, readonly SupersessionCommit[] | null>): SupersessionSearch {
+  return (symbol, path) => byKey[`${symbol}@${path}`] ?? [];
+}
+
+const T472 = () =>
+  task({
+    id: "W1-T472",
+    files: ["src/lib/compaction.ts", "test/ci-parity-contract.test.ts"],
+    acceptance: [
+      {
+        claim: "the worker no longer runs the parity preflight",
+        proof: "grep: preflight --ci-parity in src/lib/compaction.ts",
+      },
+    ],
+  });
+
+const T472_KEY = "preflight --ci-parity@src/lib/compaction.ts";
+
+test("W1-T485: a task whose substance shipped under ANOTHER task's trailer is named", () => {
+  const evidence = findSupersessionEvidence(
+    T472(),
+    fakeSearch({
+      [T472_KEY]: [
+        {
+          sha: "e26f928",
+          subject: "fix(compaction): stop making workers run rmd preflight --ci-parity",
+          trailerTaskId: "W1-T464",
+        },
+      ],
+    }),
+  );
+  assert.equal(evidence?.creditedTaskId, "W1-T464", "the report must name the task that WAS credited");
+  assert.equal(evidence?.sha, "e26f928");
+  assert.equal(evidence?.symbol, "preflight --ci-parity", "and the task's own proof symbol that matched");
+  assert.equal(evidence?.path, "src/lib/compaction.ts", "inside a path the task itself declared");
+});
+
+test("W1-T485: a task with no evidence of supersession is NOT named", () => {
+  assert.equal(
+    findSupersessionEvidence(T472(), fakeSearch({})),
+    undefined,
+    "a symbol nothing shipped must produce no row -- a report that names everyone is muted within a day",
+  );
+});
+
+test("W1-T485: a commit carrying THIS task's OWN trailer is credit, not supersession", () => {
+  // The projection's `trailer` source already resolves this. Reporting it here would name every
+  // task that ever merged, which is the fastest possible way to make the report worthless.
+  assert.equal(
+    findSupersessionEvidence(
+      T472(),
+      fakeSearch({
+        [T472_KEY]: [
+          { sha: "aaa1111", subject: "fix(compaction): drop the parity preflight", trailerTaskId: "W1-T472" },
+        ],
+      }),
+    ),
+    undefined,
+  );
+});
+
+test("W1-T485: a commit carrying NO trailer is left to W1-T458's advisory, not double-reported", () => {
+  assert.equal(
+    findSupersessionEvidence(
+      T472(),
+      fakeSearch({ [T472_KEY]: [{ sha: "bbb2222", subject: "fix: drop the parity preflight" }] }),
+    ),
+    undefined,
+    "`unresolved_task_scope` (lib/review.ts) already fires on a diff that resolves no task",
+  );
+});
+
+test("W1-T485: a FAILED search is not evidence of absence -- and never evidence of presence", () => {
+  const nullSearch: SupersessionSearch = () => null;
+  assert.equal(findSupersessionEvidence(T472(), nullSearch), undefined, "a null read must not fabricate a row");
+});
+
+test("W1-T485: proofGrepTargets takes only `grep:` proofs, and only paths the task DECLARED", () => {
+  const t = task({
+    id: "W1-TX",
+    files: ["src/lib/a.ts"],
+    acceptance: [
+      { claim: "declared", proof: "grep: SENTINEL_ALPHA in src/lib/a.ts" },
+      { claim: "undeclared path", proof: "grep: SENTINEL_BETA in src/lib/b.ts" },
+      { claim: "its own shard", proof: "grep: SENTINEL_GAMMA in plan/tasks.d/W1-TX-thing.yaml" },
+      { claim: "a unit-test proof", proof: "unit test: test/a.test.ts" },
+      { claim: "path-less grep", proof: "grep: SENTINEL_DELTA" },
+    ],
+  });
+  assert.deepEqual(proofGrepTargets(t), [{ symbol: "SENTINEL_ALPHA", path: "src/lib/a.ts" }]);
+});
+
+test("W1-T485: the projection attaches supersededBy to an UNMERGED task and changes nothing else", () => {
+  const t = T472();
+  const before = JSON.stringify(t);
+  const plan: Plan = { tasks: [t], byId: new Map([[t.id, t]]) };
+  const byId = projectPlan(plan, {
+    ledgerPath: ledgerFile([]),
+    github: fakeGitHub({}),
+    supersessionSearch: fakeSearch({
+      [T472_KEY]: [
+        {
+          sha: "e26f928",
+          subject: "fix(compaction): stop making workers run rmd preflight --ci-parity",
+          trailerTaskId: "W1-T464",
+        },
+      ],
+    }),
+  });
+  const p = byId.get("W1-T472");
+  assert.equal(p?.supersededBy?.creditedTaskId, "W1-T464");
+  // AN OBSERVATION, NEVER A VERDICT. The three fields anything downstream gates on are untouched,
+  // and the Task object itself is not mutated -- the projection is machine-owned and tasks.yaml is
+  // never rewritten, which is exactly what a "fix the shard status" reading would have broken.
+  assert.equal(p?.merged, false, "merged must not move");
+  assert.equal(p?.status, "queued", "status must not move");
+  assert.equal(p?.source, "none", "the credit source must not move");
+  assert.equal(JSON.stringify(t), before, "the Task object itself must be untouched");
+});
+
+test("W1-T485: no search dep supplied means no field, and no search is ever called", () => {
+  let calls = 0;
+  const counting: SupersessionSearch = () => {
+    calls++;
+    return [];
+  };
+  const t = T472();
+  const plan: Plan = { tasks: [t], byId: new Map([[t.id, t]]) };
+  const bare = projectPlan(plan, { ledgerPath: ledgerFile([]), github: fakeGitHub({}) });
+  assert.equal(bare.get("W1-T472")?.supersededBy, undefined, "absent dep means absent field");
+  // ...and the opt-in path really is the only thing that spends a subprocess: with the dep supplied
+  // the search IS consulted. Without this half the assertion above would also pass if the feature
+  // were simply dead code.
+  projectPlan(plan, { ledgerPath: ledgerFile([]), github: fakeGitHub({}), supersessionSearch: counting });
+  assert.ok(calls > 0, "supplying the dep must actually drive the search");
+});
+
+test("W1-T485: a MERGED task is skipped -- its credit is the projection's own business", () => {
+  const t = task({
+    id: "W1-T12a",
+    files: ["src/lib/compaction.ts"],
+    acceptance: [{ claim: "c", proof: "grep: preflight --ci-parity in src/lib/compaction.ts" }],
+  });
+  const plan: Plan = { tasks: [t], byId: new Map([[t.id, t]]) };
+  const byId = projectPlan(plan, {
+    ledgerPath: ledgerFile([]),
+    github: fakeGitHub({
+      byHeadBranch: {
+        "W1-T12a": [{ number: 61, url: "u/61", state: "MERGED", headRefName: "run-W1-T12a-1784124446138" }],
+      },
+    }),
+    supersessionSearch: fakeSearch({
+      [T472_KEY]: [{ sha: "e26f928", subject: "s", trailerTaskId: "W1-T464" }],
+    }),
+  });
+  assert.equal(byId.get("W1-T12a")?.merged, true);
+  assert.equal(byId.get("W1-T12a")?.supersededBy, undefined, "a credited task is not a supersession suspect");
+});
+
+test("W1-T485: the git-log search parses trailers, and a throwing exec yields null rather than an empty list", () => {
+  const NUL = String.fromCharCode(0);
+  const RS = String.fromCharCode(30);
+  const search = buildGitLogSupersessionSearch({
+    exec: (args) => {
+      assert.ok(args.includes("-Spreflight --ci-parity"), `the pickaxe must carry the symbol: ${args.join(" ")}`);
+      assert.ok(args.includes("--") && args.includes("src/lib/compaction.ts"), "and bound the search to the path");
+      return [
+        `e26f928${NUL}fix(compaction): stop making workers run rmd preflight --ci-parity${NUL}Remudero-Task: W1-T464\n`,
+        `aaa1111${NUL}feat: unrelated${NUL}no trailer here\n`,
+      ].join(RS);
+    },
+  });
+  const got = search("preflight --ci-parity", "src/lib/compaction.ts");
+  assert.equal(got?.length, 2);
+  assert.equal(got?.[0]?.trailerTaskId, "W1-T464");
+  assert.equal(got?.[1]?.trailerTaskId, undefined, "a body with no trailer must not invent one");
+
+  const broken = buildGitLogSupersessionSearch({
+    exec: () => {
+      throw new Error("fatal: bad revision");
+    },
+  });
+  assert.equal(broken("x", "y"), null, "a failed read is null, never an empty list");
+});
+
+// THE DEFAULT `exec` LEAF, DRIVEN FOR REAL. Every test above injects `exec`, which leaves the
+// production `execFileSync` arrow and its catch arm unreachable -- the measured shape from #977/#978
+// ("when every test injects a fake, the seam's DEFAULT implementation and each catch arm are
+// unreachable"). These two drive the real `git log` in this repository: read-only, no network, and
+// asserting only what cannot drift -- that a symbol certain to exist resolves to at least one
+// commit, and that an unresolvable ref yields `null` rather than an empty list.
+test("W1-T485: the DEFAULT exec really shells out to git, and a bad ref degrades to null not []", () => {
+  const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const real = buildGitLogSupersessionSearch({ ref: "HEAD", cwd: repoRoot });
+  const hits = real("export function projectPlan", "src/lib/status.ts");
+  assert.notEqual(hits, null, "a readable ref must not report a failed read");
+  assert.ok((hits ?? []).length > 0, "a symbol that is in the file must resolve to at least one commit");
+  assert.ok(
+    (hits ?? []).every((c) => /^[0-9a-f]{7,40}$/.test(c.sha)),
+    "every record must carry a real sha, so the record split is not silently mis-parsing",
+  );
+
+  const bad = buildGitLogSupersessionSearch({ ref: "refs/heads/xyzzy-no-such-ref", cwd: repoRoot });
+  assert.equal(
+    bad("export function projectPlan", "src/lib/status.ts"),
+    null,
+    "an unresolvable ref is a FAILED READ -- returning [] here would read as `no evidence` and is the fail-open direction",
+  );
 });

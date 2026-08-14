@@ -348,6 +348,16 @@ export interface StatusProjection {
    * absent once a fresh heartbeat or an open PR resolves the row back to `running`.
    */
   orphaned?: true;
+  /**
+   * W1-T485: this task is NOT merged, yet one of its own `grep:` proof symbols was shipped to a
+   * declared path of its by a commit carrying a DIFFERENT task's `Remudero-Task:` trailer — the
+   * route no credit source covers, because the crediting task was named correctly and it was simply
+   * not this one. AN OBSERVATION, NEVER A VERDICT: nothing reads this to gate dispatch, refuse a
+   * merge or rewrite a shard, and `merged`/`status`/`source` are untouched beside it. Sparse, like
+   * `needsHuman`/`indeterminate`/`orphaned` — present ONLY when {@link DeriveDeps.supersessionSearch}
+   * was supplied AND it found such a commit.
+   */
+  supersededBy?: SupersessionEvidence;
 }
 
 /**
@@ -641,6 +651,14 @@ export interface DeriveDeps {
    * assert the pid-reuse arm without a real subprocess or a real pid wrap.
    */
   getProcessStartTime?: (pid: number) => number | null;
+  /**
+   * W1-T485 — OPT-IN, and absent by default ON PURPOSE. When supplied, {@link projectPlan} asks
+   * this for every UNMERGED task and attaches {@link StatusProjection.supersededBy} where it finds
+   * a commit that shipped the task's own proof symbol under a DIFFERENT task's trailer. Omitted,
+   * no search runs and no field is emitted, so the 250ms-polled console pays nothing — see
+   * {@link buildGitLogSupersessionSearch}'s note on why this is not wired into a hot path.
+   */
+  supersessionSearch?: SupersessionSearch;
 }
 
 /**
@@ -2543,6 +2561,155 @@ function taskIdsWithEscalationLines(lines: ReadonlyArray<Record<string, unknown>
   return ids;
 }
 
+// ── W1-T485: SUBSTANCE THAT SHIPPED UNDER ANOTHER TASK'S TRAILER ─────────────────────────────
+//
+// THE GAP THIS FILLS, AND THE ONE IT DOES NOT. W1-T458's `unresolved_task_scope` advisory
+// (lib/review.ts) fires when a merging implementation diff resolves NO task, and its own doc says
+// it is keyed on the resolved task's declared files "NEVER off whether the report/diff carries a
+// `Remudero-Task:` trailer". So it answers "no task at all". It cannot answer "the WRONG task",
+// and the measured case proves it: #1772 shipped that advisory at 2026-08-14T02:38:55Z, and
+// #1777 merged three hours and sixteen minutes later carrying `Remudero-Task: W1-T464` while
+// shipping W1-T472's substance. A task WAS resolved, so the advisory correctly stayed silent, and
+// W1-T472 is still `blocked`/`verify: human` waiting on a ruling about work already on main.
+//
+// A REPORT, NEVER A GATE. Nothing here refuses a merge, mutates a Task, or adds a credit path. A
+// merge-time refusal keyed on a trailer mismatch would fire on every FILING — filings are required
+// to omit the trailer (#1527) — and a bound that fires on a healthy condition gets muted, which
+// this repo has six measured instances of. A false positive here costs one line of output.
+
+/** One commit `git log -S` attributes to a symbol, with whatever trailer it carries. */
+export interface SupersessionCommit {
+  sha: string;
+  subject: string;
+  /** The `Remudero-Task:` trailer this commit carries, when it carries one. */
+  trailerTaskId?: string;
+}
+
+/** Evidence that an unmerged task's substance is already on main under ANOTHER task's trailer. */
+export interface SupersessionEvidence {
+  /** The task's OWN `grep:` proof pattern that matched — its most distinctive string. */
+  symbol: string;
+  /** The task's own declared path the symbol was searched in. */
+  path: string;
+  /** The task the crediting commit actually named — never this task. */
+  creditedTaskId: string;
+  sha: string;
+  subject: string;
+}
+
+/**
+ * Search history for a symbol within one path. Returns the commits that introduced or removed it,
+ * or `null` when the read itself FAILED — a failed search must never read as "no evidence", the
+ * same cannot-observe→defer polarity {@link deriveStatus}'s own `readFailed` rung keeps.
+ */
+export type SupersessionSearch = (symbol: string, path: string) => readonly SupersessionCommit[] | null;
+
+const TRAILER_RE = /^Remudero-Task:[ \t]*([A-Za-z0-9-]+)[ \t]*$/m;
+
+/**
+ * A task's `grep:` proof patterns paired with the declared path each names.
+ *
+ * WHY THE PROOF PATTERN AND NOT THE FILE PATH. The cheap predicate — "have all this task's declared
+ * paths moved on main since it was filed?" — was measured and REJECTED: it flags 14 of 43 unmerged
+ * tasks, and spot-checking every one of those 14 by symbol found no supersession in any (a task
+ * merely naming `src/run-task.ts` is flagged by a file that moves several times a day). A `grep:`
+ * proof pattern is the opposite: `proof-grep-safety` and `proof-resolvability` (lib/task-linter.ts)
+ * already force it to be single-line and distinctive enough to match its own subject and nothing
+ * else, so it is the best symbol the plan already carries.
+ *
+ * THE PATH MUST BE ONE THE TASK ITSELF DECLARED. A filing's proofs point at the shard file, which no
+ * implementation commit ever touches; requiring `files:` membership drops them without a special
+ * case. It also bounds the search to paths the task claims, so a broad pattern cannot wander.
+ *
+ * The `grep:` split MIRRORS {@link proofGrepSafetyViolations} (lib/task-linter.ts) rather than
+ * importing review.ts's `parseDialectGrep`, which is not exported — the same precedent, and the
+ * same reason: an " in " followed by a PATH-LIKE trailing token, with no fallback to the whole body.
+ */
+export function proofGrepTargets(task: Task): Array<{ symbol: string; path: string }> {
+  const declared = new Set(task.files ?? []);
+  const out: Array<{ symbol: string; path: string }> = [];
+  for (const c of task.acceptance ?? []) {
+    const proof = typeof c.proof === "string" ? c.proof : "";
+    const m = proof.trim().match(/^grep:\s*([\s\S]*)$/i);
+    if (!m) continue;
+    const split = m[1].match(/^([\s\S]*?)\s+in\s+(\S*[./]\S*)\s*$/i);
+    if (!split) continue;
+    const symbol = split[1].trim();
+    const path = split[2].trim();
+    if (!symbol || !declared.has(path)) continue;
+    out.push({ symbol, path });
+  }
+  return out;
+}
+
+/**
+ * The first evidence that this task's substance shipped under a DIFFERENT task's trailer, or
+ * `undefined` when there is none.
+ *
+ * THREE OUTCOMES ARE DELIBERATELY COLLAPSED TO "NO EVIDENCE", AND EACH FOR ITS OWN REASON:
+ *   - a commit carrying THIS task's trailer is CREDIT, not supersession — the projection's own
+ *     `trailer` source already handles it, and reporting it would name every task that ever merged;
+ *   - a commit carrying NO trailer is W1-T458's `unresolved_task_scope` territory, and duplicating
+ *     its finding here would put two instruments on one condition;
+ *   - a `null` search is a FAILED READ, never an absence (see {@link SupersessionSearch}).
+ * Only "a commit that names some OTHER task" survives, which is exactly the uncovered route.
+ */
+export function findSupersessionEvidence(task: Task, search: SupersessionSearch): SupersessionEvidence | undefined {
+  for (const { symbol, path } of proofGrepTargets(task)) {
+    const commits = search(symbol, path);
+    if (commits === null) continue; // a failed read is not evidence of absence
+    for (const c of commits) {
+      const credited = c.trailerTaskId;
+      if (!credited || credited === task.id) continue;
+      return { symbol, path, creditedTaskId: credited, sha: c.sha, subject: c.subject };
+    }
+  }
+  return undefined;
+}
+
+/**
+ * A {@link SupersessionSearch} backed by `git log -S`, the pickaxe that found both measured cases.
+ * `exec` is injectable so the predicate above is testable without a repository; a throwing exec
+ * yields `null` (failed read), never `[]`.
+ *
+ * NOT WIRED INTO ANY HOT PATH BY DEFAULT. `projectPlan` runs behind a 250ms-polled console, and one
+ * `git log` per task per projection would be the O(N)-subprocess cost W1-T187 and W1-T257 both
+ * already had to remove. The caller opts in by supplying `DeriveDeps.supersessionSearch`; absent it,
+ * no search runs and no field is emitted.
+ */
+export function buildGitLogSupersessionSearch(opts: {
+  ref?: string;
+  cwd?: string;
+  exec?: (args: string[]) => string;
+}): SupersessionSearch {
+  const ref = opts.ref ?? "origin/main";
+  const exec =
+    opts.exec ??
+    ((args: string[]) =>
+      execFileSync("git", args, { encoding: "utf8", cwd: opts.cwd, stdio: ["ignore", "pipe", "pipe"] }));
+  return (symbol, path) => {
+    let raw: string;
+    try {
+      // `-S<symbol>` with an explicit `--` so a symbol that looks like a flag or a path cannot be
+      // read as one. RECORD-SEPARATED output: \x1e between commits, \x00 between fields, so a
+      // subject or body containing a newline cannot split a record.
+      raw = exec(["log", ref, `-S${symbol}`, "--format=%H%x00%s%x00%b%x1e", "--", path]);
+    } catch {
+      return null;
+    }
+    const out: SupersessionCommit[] = [];
+    for (const record of raw.split("\x1e")) {
+      const trimmed = record.replace(/^\n+/, "");
+      if (!trimmed.trim()) continue;
+      const [sha, subject, body] = trimmed.split("\x00");
+      if (!sha || subject === undefined) continue;
+      const trailer = (body ?? "").match(TRAILER_RE);
+      out.push({ sha: sha.trim(), subject, ...(trailer ? { trailerTaskId: trailer[1] } : {}) });
+    }
+    return out;
+  };
+}
+
 /**
  * Derive every task in a plan and cache the projection to `cachePath`
  * (state/status.json). Returns a taskId -> projection map. Writes ONLY the cache.
@@ -2633,6 +2800,21 @@ export function projectPlan(
   }
   const byId = new Map<string, StatusProjection>();
   for (const task of plan.tasks) byId.set(task.id, deriveStatus(task, effectiveDeps));
+  // W1-T485 — attached HERE rather than inside `deriveStatus` so that function, which every
+  // precedence rung and every existing test drives, is left byte-identical: this is an additive
+  // observation about tasks the rungs have ALREADY resolved, not a new rung. Skips anything the
+  // projection judged merged (a merged task's credit is the projection's own business) and
+  // anything `indeterminate` (its `merged: false` was never actually observed — reporting a
+  // supersession off an unread state would be the fail-open direction W1-T119 exists to prevent).
+  const supersessionSearch = effectiveDeps.supersessionSearch;
+  if (supersessionSearch) {
+    for (const task of plan.tasks) {
+      const projection = byId.get(task.id);
+      if (!projection || projection.merged || projection.indeterminate) continue;
+      const evidence = findSupersessionEvidence(task, supersessionSearch);
+      if (evidence) byId.set(task.id, { ...projection, supersededBy: evidence });
+    }
+  }
   // TASK-LESS ESCALATIONS (W1-T283): the loop above is a function of plan.tasks ALONE, so an
   // escalation whose ledger `task_id` names no plan task (a triage/mount-probe id minted
   // outside the plan) had no row to attach to and could never render, however long it stayed
