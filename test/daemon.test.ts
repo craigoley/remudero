@@ -1185,6 +1185,34 @@ test("parseResetInstant: recognizes every /usage shape observed in this task's r
   assert.equal(parseResetInstant("not a recognized shape at all", now), null);
 });
 
+// ── W1-T482: the upstream flipped to ISO-8601 on 2026-08-12; the parser must accept BOTH ────
+
+test("parseResetInstant: recognizes ISO-8601 (the format /usage switched to on 2026-08-12), additively", () => {
+  const now = new Date("2026-08-14T12:00:00Z");
+  // The three shapes from the shard's own falsification table, run against the real function.
+  assert.deepEqual(parseResetInstant("2026-08-14T16:20:00.069763+00:00", now), new Date("2026-08-14T16:20:00.069763+00:00"));
+  assert.deepEqual(parseResetInstant("2026-08-14T16:20:00Z", now), new Date("2026-08-14T16:20:00Z"));
+  assert.deepEqual(parseResetInstant("2026-08-14T16:20:00+00:00", now), new Date("2026-08-14T16:20:00+00:00"));
+  // ADDITIVE, NOT A REPLACEMENT: every human form this parser matched before still matches.
+  assert.deepEqual(parseResetInstant("Jul 21 at 12am", JUL_20_2026_2200()), new Date(2026, 6, 21, 0, 0, 0, 0));
+  assert.notEqual(parseResetInstant("Monday", now), null, "human weekday form still parses");
+  assert.equal(parseResetInstant("not a recognized shape at all", now), null);
+});
+
+test("resolveHeadroomLimitPct: the falsification table — a successful ISO parse landing inside the final day relaxes, one further out does not", () => {
+  const now = new Date("2026-08-14T12:00:00Z");
+  const closeIso = parseResetInstant("2026-08-14T16:20:00Z", now); // ~4h out
+  const hoursToReset = closeIso ? (closeIso.getTime() - now.getTime()) / 3_600_000 : null;
+  assert.equal(resolveHeadroomLimitPct(hoursToReset), 100);
+  // "Monday" parses (unlike an unrecognised string, which falls back to `null`) but is always
+  // MORE than 24h out from any `now` — a successful parse is NOT sufficient for the relaxation;
+  // only landing inside the final day is.
+  const monday = parseResetInstant("Monday", now)!;
+  const mondayHours = (monday.getTime() - now.getTime()) / 3_600_000;
+  assert.ok(mondayHours > 24, `expected "Monday" to resolve beyond the final day, got ${mondayHours}h`);
+  assert.equal(resolveHeadroomLimitPct(mondayHours), HEADROOM_LIMIT_PCT);
+});
+
 test("resets_at renders IDENTICALLY for the same reset instant across boots — the observed 'Jul 21 at 12am' vs 'Jul 20 at 11:59pm' defect", () => {
   const now = JUL_20_2026_2200();
   const a = parseResetInstant("Jul 21 at 12am", now)!;
