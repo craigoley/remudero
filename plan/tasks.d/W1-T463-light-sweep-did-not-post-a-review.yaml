@@ -37,6 +37,95 @@
     for about fifteen minutes while the Azure sweep was on a W1-T453 implement run — the THIRD session
     PR this week to merge without the deterministic reviewer seeing it, all three merged by hand."
   design: |
+    (0) CRITERION ONE IS ANSWERED — AMENDED 2026-08-14, MEASURED ON AZURE. Every figure in this
+    section is Azure-only and CANNOT be verified from the mini, which has no SSH route to that
+    ledger. CRITERION THREE IS THEREFORE UNBLOCKED: it gated a second review lane on this answer,
+    and the answer is below.
+
+    THE LIGHT SWEEP WAS NEVER THE BOTTLENECK. NOTHING IN THE SWEEP FAILED, HUNG OR WAS SKIPPED. The
+    daemon's single JS thread was BLOCKED, so the ticker's timer could not be scheduled at all.
+    `waitForCiGreen` (`src/run-task.ts`) is declared `async` and contains ZERO `await`:
+      async function waitForCiGreen(prUrl, log, everySec = 6)
+        const v = ghJson(["pr", "view", prUrl, "--json", "statusCheckRollup"])   // execFileSync
+        execFileSync("sleep", [String(everySec)])                                // blocking child
+    Control for that zero: 166 occurrences of `await ` elsewhere in `src/run-task.ts`, so the query
+    works. `ghJson` (`src/lib/worker.ts`) is `execFileSync("gh", …)`, and the inter-poll delay is a
+    BLOCKING CHILD PROCESS, NOT A TIMER. `startInFlightTicker`'s own wait is
+    `await deps.sleep(pollIntervalMs)`, wired in production to
+    `(ms) => new Promise((resolve) => setTimeout(resolve, ms))` — a `setTimeout`. A frozen loop
+    cannot fire it. THE TICKER IS NOT STOPPED, NOT SLOW AND NOT REPLACED: IT CANNOT BE SCHEDULED.
+
+    THE DECISIVE EVIDENCE IS A MILLISECOND COLLISION. Re-derived from the deduped union: EXACTLY TWO
+    rows carry `ts` `2026-08-14T13:25:35.828Z` —
+      {"step":"daemon.alive","phase":"dispatch"}   and   {"step":"verdict","task_id":"W1-T481"}
+    An overdue timer firing the instant the thread was released. Control: a fabricated neighbouring
+    millisecond returns 0 rows, so the pair is real and not an artefact of the match.
+
+    AND THE REASON THIS LOOKED LIKE A LIVE, HEALTHY DAEMON THROUGHOUT: `appendLedger`
+    (`src/lib/ledger.ts`) is fully synchronous — `openSync`/`writeSync`/`closeSync` — so ROWS ARE
+    WRITTEN HAPPILY WHILE THE EVENT LOOP IS FROZEN. The 29 `ci.polling` rows inside the window prove
+    the THREAD was running; they prove nothing about whether the LOOP was turning. Anyone re-reading
+    this window from the ledger alone will reach the wrong conclusion without that fact.
+
+    THE WINDOW, VERBATIM: `daemon.alive` at 13:05:22 / 13:06:27 / 13:07:38 / 13:08:41 (+64s, +71s,
+    +63s — healthy cadence), that tick's own light sweep COMPLETING in 4.0s at 13:08:45 with TWO
+    `sweep.pass` and TWO `sweep.summary` rows (one pair per open PR — `runSweepLightPass` fires one
+    `runSweep` per PR), `implement.done` W1-T481 at 13:09:37, then 29 `ci.polling` rows and NOTHING
+    ELSE until 13:25:35.828. Inside 13:09:39–13:25:35 there are 31 rows total: 29 `ci.polling` plus
+    `automerge.armed` and `report.followups`, both at 13:09:39. NO `review.*`, NO `reviewer_outcome`,
+    NO `sweep.post_review.*` — SO NO REVIEWER RAN AND NO SWEEP WAS IN FLIGHT. #1793 was reviewable
+    with zero non-green checks throughout and merged 33 seconds after the thread was released.
+
+    THE SCALE, WHICH IS WHAT MAKES THIS URGENT RATHER THAN CURIOUS. 51 completed
+    `implement.done` -> `verdict` spans totalling 4.84 HOURS, median 481s (8m), max 1083s (18.0m).
+    467 `ci.polling` rows imply ~2,335 real polls at `everySec = 6` = 3.89 HOURS OF BLOCKING SLEEP
+    ALONE, against a 38.4h corpus span — ROUGHLY AN EIGHTH OF THE FLEET'S LIFE WITH THE EVENT LOOP
+    FROZEN, AND NO REVIEW CAN POST IN ANY OF IT. `pollToGate` (the merge wait, same file) is the
+    same shape and adds more; FOUR synchronous sleeps exist in the tree — `waitForCiGreen` and
+    `pollToGate` in `src/run-task.ts`, plus `src/lib/inbox.ts` and `src/spike.ts`.
+    ONE CAUSE EXPLAINS FOUR SYMPTOMS: the 39-minute review gap, the 14-minute liveness gap, the
+    heartbeat publishing `daemon STALE` on a healthy fleet, and #1793's 16m55s.
+
+    (0a) WHAT #1775 ALREADY ANSWERED, AND WHY IT WAS NOT ENOUGH. `015f81b` ("fix(sweep): diagnose and
+    fix the light sweep serializing post-review across PRs (W1-T463)") merged 2026-08-14T05:46:34Z
+    and shipped `runSweepLightPass`. It answered the THIRD candidate listed in (i) below — `runSweep`'s
+    sequential `for (const pr of openPrs)` loop — and that was a real fault correctly fixed. IT DID
+    NOT ANSWER THIS ONE: the diff names neither the event loop nor a synchronous call (0 hits for
+    `event loop|execFileSync\("sleep"|synchronous|waitForCiGreen|pollToGate`; control, 62 mentions of
+    `sweep`). AND THE SYMPTOM RECURRED WITH THAT FIX LIVE — the daemon booted 13:03:06 on
+    `281029a`, of which `015f81b` is an ancestor, and the stall began 5m35s later. That recurrence is
+    the proof criterion one needed a second answer, not a re-reading of the first.
+    NOTE ALSO THAT NONE OF (i)'s FIVE CANDIDATES IS THIS CAUSE. Every one of them assumes the fault
+    is INSIDE the sweep. It is not; it is in a rung that shares the sweep's thread.
+
+    (0b) THREE READINGS THAT MUST NOT BE CARRIED FORWARD, EACH REFUTED HERE.
+      - THE TICKER-COVERAGE GAP IS REAL BUT IS NOT THIS. `startInFlightTicker` wraps the implement
+        dispatch only, and four measured silences over 30 minutes (72.2m, 59.2m, 45.5m, 42.6m) each
+        contain exactly one `fix.dispatch`. That is a correct observation of a DIFFERENT window.
+        WIDENING THE TICKER WOULD NOT HAVE HELPED HERE — this silence happened INSIDE an implement
+        dispatch the ticker was already covering.
+      - THE PER-DISPATCH-TICKER HYPOTHESIS IS REFUTED TWICE. From source, the ticker is started ONCE
+        around the whole `Promise.allSettled` and stopped once after it, so there is no per-dispatch
+        ticker and no first-settle race. And the ledger refutes it in the OPPOSITE DIRECTION: the
+        silence BEGAN while both workers ran and ENDED when one settled. THE THREE-LANE FLIP IS NOT
+        IMPLICATED — the bug needs ONE worker and would behave identically at `dispatchLanes: 1`.
+      - IT IS NOT RATE LIMITS. Zero `sweep_light.error` rows at 13:xx (control: 23 in the union, 21
+        in the live file, newest 2026-08-14T07:12:23Z — six hours before the window), core 4803/5000
+        and graphql 3611/5000 at the time. W1-T468's 19-minute 403 blackout on 2026-08-13 was real
+        and is a DIFFERENT cause. Today's silence carries no error row of any kind, because nothing
+        failed; nothing ran.
+
+    (0c) A SECOND-ORDER EXPOSURE, NAMED BUT NOT SCOPED IN. `ghJson` carries `maxBuffer` and NO
+    TIMEOUT. #1721's `GH_CALL_TIMEOUT_MS = 60_000` is applied at exactly two `execFileSync` sites,
+    both inside `src/lib/status.ts`; `waitForCiGreen` bypasses that helper entirely, so a hung
+    `gh pr view` there is unbounded. THAT DID NOT HAPPEN ON 2026-08-14 — the polls were regular and
+    the loop advanced to a verdict — but it is live and worth a task of its own.
+
+    (0d) THE REMEDY IS DELIBERATELY NOT PROPOSED HERE. Making the wait genuinely asynchronous, or
+    moving the CI wait off the daemon's thread, is a change to `src/run-task.ts` — 19,588 lines and
+    the fleet's serialisation point — and it wants the operator's ruling and its own task. THIS
+    AMENDMENT'S ONLY JOB IS TO ANSWER CRITERION ONE AND UNBLOCK CRITERION THREE.
+
     (i) THE DIAGNOSIS IS THE FIRST DELIVERABLE AND IT GATES EVERYTHING BELOW IT. The question is
     exactly: WHY DID A RESTRICTED LIGHT SWEEP THAT TICKS EVERY 60s DURING AN IN-FLIGHT DISPATCH NOT
     POST A REVIEW FOR ~15 MINUTES? Candidates to separate, not assume: the ticker never started for
@@ -92,6 +181,25 @@
     the real hook. No suite is declared on a prose mention.
         RULE 19: `risk: high` SET UP FRONT because `files:` spans daemon, sweep and run-task; the band
     is the SPAN, not blast radius.
+        `files:` IS UNCHANGED BY THE 2026-08-14 AMENDMENT, AND THAT IS A RESULT RATHER THAN AN
+    OMISSION: `src/run-task.ts` was already declared, and that is where both `waitForCiGreen` and
+    `pollToGate` live. The provisional-on-criterion-one clause above resolves in favour of keeping
+    all three source paths — the finding lands in `src/run-task.ts`, and `src/lib/daemon.ts` remains
+    relevant because `startInFlightTicker` is the victim whose regression test criterion two wants.
+        THE NEIGHBOUR CLAUSE ABOVE IS NOW HALF-WRONG AND IS CORRECTED HERE RATHER THAN DELETED. It
+    says W1-T276 was a ticker COVERAGE gap where `runRetroTrigger` was a bare await, and that THIS
+    task is \"the opposite shape — dispatch IS wrapped by the ticker and a review still did not
+    land\". The observation was right and the inference was wrong: being wrapped by the ticker is NOT
+    SUFFICIENT, because the ticker is a timer on a thread another rung blocks. The two tasks are
+    closer than the boundary claimed — both are the loop being denied a turn — but they are still not
+    the same fix, so DO NOT FOLD THEM.
+        THE STATUS IS LEFT AT `queued` DELIBERATELY. #1775 merged a partial implementation without
+    updating this shard (no `Remudero-Task: W1-T463` trailer — control: the same anchored regex finds
+    58 such trailers across the last 400 commits, so the zero is real; it was credited by commit
+    subject instead). Criteria two, three and four are still unbuilt.
+        AND THE 2026-08-14 NUMBERS ARE AZURE-ONLY, PER THE RULE ABOVE: 4.84h across 51 spans, 467
+    `ci.polling` rows, 38.4h corpus span, 23 `sweep_light.error` rows. None of them is verifiable
+    from the mini. Re-derive before building.
         NO NUMBER HERE SHOULD BE QUOTED FORWARD: the 8 error rows, the 1,511/1,054/454 split and the
     299% / 2 GB figure were measured 2026-08-13. Re-derive before building."
   acceptance:
