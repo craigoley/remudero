@@ -1,0 +1,120 @@
+- id: W1-T472
+  title: "the worker spends 15-17 minutes of a lane on a `--ci-parity` result it then steps over — `preflightFailureNotice`'s ONE call site logs and speaks with no branch and no early return, so the fleet buys an answer it has already decided to ignore"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: "EITHER THE RESULT GATES SOMETHING, OR THE FLEET STOPS PAYING FOR IT. RUNNING IT AND
+    DISCARDING IT IS THE ONE OPTION THAT COSTS FULL PRICE FOR NOTHING. That is the whole concern, and
+    it is narrower than W1-T463 — see the note.
+    NOTHING GATES ON IT, EXACTLY. RE-DERIVED at 71cedbbc: `preflightFailureNotice`
+    (`src/lib/ci-parity.ts`) is named five times in `src/run-task.ts` and INVOKED EXACTLY ONCE
+    (measured: 1 occurrence of the name followed by `(`, 0 of them inside a comment; the other four
+    are the import and three doc references). The call site is, in full:
+      const preflightNotice = preflightFailureNotice(worktreePath);
+      if (preflightNotice) {
+        log(\"preflight.failed\", { detail: preflightNotice, worktree: worktreePath });
+        say(preflightNotice);
+      }
+    NO BRANCH. NO EARLY RETURN. NO VERDICT EFFECT. The next statement is
+    `failOnWorkerError(impl, \"implement\")`, which concerns the WORKER'S OWN error, not the preflight.
+    WHAT IT COSTS. THE SUITE RUNS FOUR TIMES PER CHANGE, two of them on the worker's lane: locally
+    `ci:test` -> `npm run test:ci` (plain) and `coverage-ratchet:test-with-coverage` (instrumented),
+    then the `ci` and `coverage-ratchet` JOBS in CI. RE-DERIVED at 71cedbbc from `CI_PARITY_TABLE`
+    (`src/lib/ci-parity.ts`) and `.github/workflows/ci.yml`. **`test-with-retry` WRAPS ALL FOUR** —
+    the coverage entry's own comment says it is `Routed through scripts/test-with-retry.mjs, exactly
+    as ci.yml's own coverage-ratchet job is (W1-T255)` — SO A FLAKE TAKES IT TO EIGHT, NOT FIVE.
+    AND THE LOCAL DOUBLE RUN IS INHERITED, NOT CHOSEN. `ci-parity.ts`'s header states the doctrine —
+    `one named step per job`, `THE STEP LIST IS DATA (CI_PARITY_TABLE, one entry per ci.yml job)`,
+    enforced by a `ci-parity:drift` step. CI runs the suite twice because `ci` and `coverage-ratchet`
+    are SEPARATE RUNNERS where sharing is impossible; the local mirror inherited a shape that only
+    makes sense remotely. NO COMMENT IN THE FILE WEIGHS THE DOUBLE RUN ON ITS MERITS."
+  design: "(i) THREE OPTIONS, ARGUED, AND THIS SHARD RANKS NONE OF THEM.
+      (a) GATE IT — refuse to push, or mark the verdict, on a red preflight. Costs the SAME 15-17
+      minutes and buys back the reds in (iii). THE COST IS ASYMMETRIC AND MUST BE SAID: gating makes a
+      FLAKY LOCAL RUN BLOCK A GOOD PR, and local flakes here are load-dependent on a contended box.
+      (b) DROP IT from the worker path. The machinery for a red PR already exists downstream: the
+      `blocked_ci` verdict sits in `NON_HALTING_VERDICTS` with a fix rung behind it, and the fallback
+      push preserves everything except the PR body's trailer (W1-T453). Frees 15-17 minutes of a lane
+      per change.
+      (c) COLLAPSE THE DOUBLE RUN and keep it advisory. The coverage pass ALREADY emits both artifacts
+      in one invocation — `--test-reporter=spec --test-reporter-destination=stdout` AND
+      `--test-reporter=lcov` — so collapsing removes the PLAIN run only. THE ARITHMETIC HONESTLY:
+      P + 2.5P -> 2.5P is **about 29% off local suite time, NOT half**. AND IT CHANGES NOTHING ABOUT
+      THE DISCARD — the result is still stepped over.
+    (a) AND (b) ARE NOT SYMMETRIC and must not be presented as a coin flip: (a) adds a new way to
+    block good work, (b) removes a signal that has sometimes been right.
+    (ii) WHAT THE PREFLIGHT HAS ACTUALLY CAUGHT — the case for (b). MEASURED ON THE MINI's ledger
+    (all three forms; positive control `sweep.pass` = 1,897): 27 distinct `preflight.failed` rows, of
+    which 12 are the 23-step `--ci-parity` shape and 15 are a 3-step shape. **ALL TWELVE FAILED ON
+    EXACTLY `ci:test` AND `coverage-ratchet:test-with-coverage`**, across 12 DISTINCT shas, all on
+    2026-08-12 between 02:45Z and 23:38Z. CONTROL: rows failing any NON-suite step = 0. So the other
+    21 steps have NEVER failed on that host, and the whole local failure history is `the suite went
+    red`. THE 21 CHEAP STEPS ARE NOT THE COST EITHER: all seven npm gates together measured 6
+    SECONDS on a quiet box (`claims` 4.17s, `cli-reference:check` 0.75s, `depcruise` 0.67s, rest
+    <=0.17s). CLOSED — do not re-investigate them.
+    (iii) THE STRONGEST ARGUMENT ON THE KEEP SIDE, WHICH WAS ASSUMED UNMEASURABLE AND IS NOT. Same
+    corpus: `blocked_ci` has 254 distinct rows over 228 distinct run_ids. Of the 132 that STATE a
+    reason, **81 ARE GENUINE (61%)** — `ci red before review` 54, `required check red:
+    coverage-ratchet` **20**, `ci-gate` 6, `ci` 1 — against 51 TIMEOUTS (39%); 122 rows state no
+    reason at all. `ci.stalled` is 0 with a WORKING control (the same extractor finds
+    `sweep.post_review.stalled.escalated`), so that conflator does not exist here; `fix.false_block`
+    is 2. **SO WORKERS DO PUSH CODE CI GENUINELY REJECTS, AND 20 OF THOSE REDS ARE
+    `coverage-ratchet` — A CHECK THE LOCAL PREFLIGHT MIRRORS AND COULD HAVE CAUGHT.** That is the
+    case for making the result GATE rather than deleting it, and it must not be buried.
+    (iv) THE SCOPE-SKIP MACHINERY ALREADY EXISTS, TWICE, so a fourth option is cheaper than it looks:
+    `runTriggerScopedJob` (`src/lib/ci-parity.ts`) is `the ONE shared shape for 'run a trigger, only
+    run the follow-up step(s) when it says REQUIRED'` and is already used by `mutation-ratchet` and
+    `containment-probe`; and `rmd preflight --fast` (W1-T373) with `FAST_GATE_STEPS` `never shells
+    npm run test:ci`. `isInPlanScope` (`src/lib/plan-architect.ts`) is three clauses and UNDER-CLAIMS
+    — measured with controls, `plan/**`, `MASTER-PLAN.md` and `docs/ORIENTATION.md` read IN while
+    `src/`, `test/`, `scripts/`, `.github/` and `package.json` read OUT — which is the safe direction.
+    (v) BUT NAME THE REAL TRAP, WHICH IS NOT THE PREDICATE. If `git fetch`/`git diff` fails — a stale
+    `origin/main`, a shallow clone, a network blip — **AN EMPTY CHANGED-FILES LIST IS
+    INDISTINGUISHABLE FROM `no source files changed`**, and every scoped skip fires at once. Worse,
+    `refreshOriginMain` and `changedFilesListPath` MEMOIZE the refresh and the listing PER (spawn,
+    repoRoot), so ONE failed fetch propagates to EVERY scoped step in the same run. **AN UNREADABLE
+    DIFF MUST BE A FAILURE, NEVER AN EMPTY SET** — this repo has seven measured instances of a read
+    that FAILED being reported as a read that SAID NO, and this would be the eighth."
+  acceptance:
+    - claim: "a red preflight either changes what the run does or is no longer paid for"
+      proof: "unit test: test/worker-preflight-visibility.test.ts"
+    - claim: "the local suite is not run twice for a reason no comment defends"
+      proof: "unit test: test/preflight-ci-parity.test.ts"
+    - claim: "a scoped skip treats an unreadable diff as a failure rather than an empty changed-files list"
+      proof: "unit test: test/preflight-ci-parity.test.ts"
+  origin: recon#preflight-result-discarded-2026-08-13
+  plan_refs: ["W1-T463", "W1-T453"]
+  files: [src/run-task.ts, src/lib/ci-parity.ts, test/worker-preflight-visibility.test.ts, test/preflight-ci-parity.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `src/run-task.ts` and
+    `src/lib/ci-parity.ts` plus their suites; `sizingViolation` (`src/lib/task-linter.ts`) refuses
+    `medium` at two subsystems. `verify: human` BECAUSE THE RULING IS THE DELIVERABLE: this shard
+    records three options and their evidence and ranks NONE of them.
+    HOW THIS DIFFERS FROM W1-T463, WHICH IT MUST NOT ABSORB. W1-T463 asks whether `--ci-parity` should
+    run in the worker AT ALL. THIS asks the narrower question that survives either answer: the result
+    is currently DISCARDED, so `gate it` and `stop paying for it` are the only coherent endpoints and
+    `keep running it advisory` is not one. If W1-T463 rules `drop it`, this shard closes with it; if
+    it rules `keep it`, this one is the whole remaining question.
+    `files:` DERIVED BY INVOCATION COUNT, NOT PROSE MENTION, at 71cedbbc:
+    `test/preflight-ci-parity.test.ts` 23 invocations / 48 mentions and
+    `test/worker-preflight-visibility.test.ts` 8 / 9 — the latter is the one that asserts what the
+    worker DOES with the notice, which is the shape option (a) changes. DELIBERATELY EXCLUDED, with
+    their counts so the choice is auditable: `test/ci-parity-contract.test.ts` (9 invocations, asserts
+    the drift contract, not the call site), `test/preflight-fast-mode.test.ts` (6),
+    `test/proof-exec-tmp-hygiene.test.ts` (2), and fourteen files at ZERO invocations that merely
+    mention `preflight`. POSITIVE CONTROL: 34 test files mention `preflight` at all, so the shortlist
+    is a filter and not an empty query. DROP ANY DECLARED PATH THE IMPLEMENTATION DOES NOT TOUCH.
+    THIS SHARD'S OWN PATH IS DELIBERATELY ABSENT FROM `files:`. Adding it clears 7 proof-scope
+    WARNINGS but converts them into ONE HARD Rule 15 violation, and W1-T468 merged green carrying the
+    same warnings — so the warnings are the correct endemic shape here, not a defect to fix.
+    PROVENANCE PER NUMBER, BECAUSE THE TWO HOSTS HAVE SEPARATE LEDGERS AND NO SSH ROUTE BETWEEN THEM.
+    Everything from `CI_PARITY_TABLE`, `.github/workflows/ci.yml`, `run-task.ts` and the predicates is
+    a TREE FACT at 71cedbbc and is host-independent. The 12 `preflight.failed` rows, the 254
+    `blocked_ci` rows and the 81/51 split are THE MINI's and are NOT claims about the Azure fleet. A
+    session compared two corpora tonight and called the difference a refutation; the totals coincided
+    at 30 and the trap was invisible. RE-DERIVE ON WHICHEVER HOST WILL ACT ON THIS."
