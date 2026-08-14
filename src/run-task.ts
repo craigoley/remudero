@@ -2858,6 +2858,24 @@ function summarizeCiFailure(f: CiFailure): string {
   return firstLine ? `${f.name} — ${firstLine}` : f.name;
 }
 
+/**
+ * W1-T487: render one of `runFixRung`'s three exhaustion-escalation evidence
+ * blocks (conflicting files / failing checks / unmet criteria). Each was a
+ * bare `.map().join("\n")` — silent on an empty list, so the heading above it
+ * (`Conflicting file(s):`, `Failing check(s):`, `Unmet criteria:`) rendered
+ * with nothing after it: a report that names a cause and supplies no
+ * instance. `collected` tells the reader WHICH kind of empty this is — the
+ * two are different and indistinguishable from a bare heading alone:
+ * evidence that was never gathered for this rung at all (`false`), versus
+ * evidence that WAS checked and came back with nothing outstanding
+ * (`true`). Either way the escalation still fires (design note iii) — this
+ * only changes what the body says, never whether it is sent.
+ */
+function renderEscalationEvidence<T>(items: readonly T[], format: (item: T) => string, collected: boolean): string {
+  if (items.length > 0) return items.map(format).join("\n");
+  return collected ? "(no evidence — this was checked and is empty)" : "(no evidence — this was never collected for this rung)";
+}
+
 /** Outcome of one full pass through the fix rung. */
 export interface FixRungOutcome {
   outcome: "fixed" | "escalated" | "stood_down";
@@ -3890,14 +3908,14 @@ export async function runFixRung(opts: {
       detail: stillConflicted
         ? `The CONFLICTED FIX RUNG (merge-conflict mode, W1-T94/W1-T106) dispatched ${strikes} bounded fix worker(s) ` +
           `on ${opts.branch} and the merge state is STILL dirty. Conflicting file(s):\n\n` +
-          (currentMergeConflict?.files ?? []).map((f) => `- ${f.path}`).join("\n")
+          renderEscalationEvidence(currentMergeConflict?.files ?? [], (f) => `- ${f.path}`, currentMergeConflict !== undefined)
         : noReviewYet
         ? `The blocked_ci FIX RUNG (ci-log mode, W1-T94/W1-T100/W1-T138) dispatched ${strikes} bounded fix worker(s) ` +
           `on ${opts.branch} and required checks are STILL red — no review has run yet. Failing check(s):\n\n` +
-          (currentCiFailures ?? []).map((f) => `- ${summarizeCiFailure(f)}`).join("\n")
+          renderEscalationEvidence(currentCiFailures ?? [], (f) => `- ${summarizeCiFailure(f)}`, currentCiFailures !== undefined)
         : `The blocked_review FIX RUNG (W1-T76) dispatched ${strikes} bounded fix worker(s) on ` +
           `${opts.branch} and the review gate is STILL failing. Unmet criteria:\n\n` +
-          unmet.map((c) => `- ${c.claim}\n  reason: ${c.reason}`).join("\n"),
+          renderEscalationEvidence(unmet, (c) => `- ${c.claim}\n  reason: ${c.reason}`, review.criteria.length > 0),
       options: stillConflicted
         ? [
             {
