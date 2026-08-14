@@ -19,5 +19,6 @@ raw: "DIALECT PROOF TEST-NAME SUBSTRINGS ARE SILENTLY REGEX-ESCAPED — a 'unit
   well-intentioned executable-dialect proof."
 attachments: []
 origin: cli
-status: new
+status: proposed
 proposal_pr: null
+summary: null
