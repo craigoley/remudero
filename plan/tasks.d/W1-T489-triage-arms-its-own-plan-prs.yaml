@@ -1,0 +1,116 @@
+- id: W1-T489
+  title: "`rmd triage` arms auto-merge on the plan PRs it opens and the operator has never ruled on it — observed live, armed 15:10:48Z and self-merged 15:15:54Z five minutes later; the behaviour is narrower than it looks and STRICTER than the implement lane, so the finding may be that only its invisibility was ever the problem"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  rationale: "OBSERVED LIVE ON THE MAC MINI, 2026-08-14, and re-derived at 66538eb6. A manual drain ran
+    `rmd triage fb-1784821500625-cdcf8b`. The session did NOT arm anything. The verb did, and said so:
+      `### [triage] triage PR gated — armed (armed) (review success): .../pull/1817`
+    GitHub agrees: PR #1817 carries `autoMergeRequest.enabledAt: 2026-08-14T15:10:48Z`,
+    `mergeMethod: SQUASH`. IT THEN MERGED ITSELF at 15:15:54Z — five minutes later, merge commit
+    66538eb6 — with no operator act between. A drain of ten would have produced ten self-merging plan
+    changes before anyone saw the first.
+    (1) THE ARM IS CONDITIONAL, AND THIS MATERIALLY NARROWS THE RULING. `triageCommand`
+    (`src/run-task.ts`) calls `armAndLogOutcome` only AFTER `waitForCiGreen` returns green — a
+    non-green ci returns 1 and leaves the PR open. `armAndLogOutcome` delegates to `armAutoMerge`,
+    which reads the prior review verdict via `priorReviewVerdictFromLedger` and gates on
+    `decideArmFromLedgerVerdict`, returning `ledger-refused` when the verdict does not permit. So the
+    arm sits behind TWO gates. What it does NOT do is branch on `reviewCommand`'s exit code: the
+    `(review success)` in the log line is REPORTED, not consulted.
+    (2) AND TRIAGE IS NOT THE ODD ONE — IT IS THE STRICTER ONE. THIS IS THE FACT THE RULING TURNS ON.
+    `armAutoMergeAtOpen` (`src/run-task.ts`) is `return attemptArm(prUrl, deps);` — NO verdict gate, NO
+    ci gate — and the IMPLEMENT lane calls it at PR-OPEN time, before any review has run, logging
+    `automerge.armed` with `at: open`. Its own comment states the reasoning: `Safe because GitHub's
+    required-status contract (ci + the REQUIRED remudero-review status) is what actually gates the
+    merge`. So the fleet's model is ARM EARLY AND LET THE REQUIRED CHECKS BE THE REAL GATE, and triage
+    follows that model more conservatively than the lane that ships code.
+    MEASURED ON THE MINI over the full three-form union (666 `.gz`, 4 plain, 1 live; coverage control
+    `run.start` = 257,438 / 914 / 200, every form non-zero): **744 distinct `automerge.armed` rows, 179
+    of them `at: open` — 24.1%** — and **128 `automerge.disarmed`** rows, so withdrawal is already a
+    modelled state (W1-T125's `disarmAutoMerge`). THE AZURE CORPUS IS NOT MERGED IN AND IS NOT
+    RE-DERIVED HERE: there is no ssh route from this host, so any Azure ratio must be measured there.
+    (3) THE ECONOMICS WERE MISREPORTED TO THIS SHARD AND ARE CORRECTED. A single observed run cost
+    $2.03 and was carried forward as if it were typical. RE-DERIVED over the same union: **70 triage
+    runs carrying a cost row, total $76.26, mean $1.09, median $1.03, p90 $1.77, max $2.86, and only 5
+    of 70 at or above $2.00.** The $2.03 sat in the top ~7%. At `maxPerDay: 24` that is **~$26/day
+    mean-based, ~$42/day at p90** — NOT the ~$49 one sample implied. The originally-carried $1.07 mean
+    was right; one run is not a distribution."
+  design: "(i) THE CASE FOR TODAY'S BEHAVIOUR IS REAL AND IS STATED FIRST, because a reader who meets
+    this shard as a complaint will misjudge it. A triage PR is plan-only, it has passed ci AND a review
+    the arm itself re-reads from the ledger, and the rung exists precisely to add work WITHOUT the
+    operator's attention. AN UNARMED TRIAGE PR SIMPLY QUEUES UP FOR HIM — which is the bottleneck the
+    rung was built to relieve. Requiring a human gate on every one converts an autonomous rung into a
+    slower manual one.
+    (ii) FOUR CANDIDATES, RANKED BY NOBODY. Recorded so the ruling has them side by side:
+      (a) ARM AS TODAY. Consistent with the implement lane, which arms EARLIER and with FEWER gates.
+      (b) ARM ONLY WHEN THE MINTED SHARD DECLARES A NON-EMPTY `files:`. Cheap and targets a measured
+          harm: thirteen triage-minted tasks shipped with an empty or absent `files:`, and
+          `overlappingPaths` returns the other side's ENTIRE list when one side is empty, so such a
+          task blocks every other candidate. W1-T476's `undeclaredScopeLast` demotes them but does not
+          stop a demoted blocker that becomes the only candidate.
+      (c) NEVER ARM; the operator gates every triage PR.
+      (d) ARM ONLY ON A REVIEW WITH EXECUTED PROOFS, not one that merely passed. NOTE THE TRAP THAT
+          MAKES THIS WEAKER THAN IT SOUNDS: a triage PR's proofs are `grep:` patterns against its OWN
+          NEW shard, so they discriminate trivially — base=0 because the file did not exist — which is
+          precisely the weak-discrimination case `executed_stale` was built to catch. `executed`
+          would be satisfied by construction and would gate almost nothing.
+    (iii) THE HONEST CANDIDATE CONCLUSION, AND IT MAY BE THE RIGHT ONE: THE BEHAVIOUR IS FINE AND ONLY
+    ITS INVISIBILITY WAS EVER THE PROBLEM. Nothing in `CLAUDE.md` or the operator guide says the verb
+    arms. A session running a commissioned drain discovered it from the verb's own stdout AFTER the
+    first PR had already self-merged. If that is the ruling, THE REMEDY IS A DOCUMENTED LINE, NOT A
+    CODE CHANGE — and `files:` below must be corrected before dispatch, because it would then touch
+    neither `src/run-task.ts` nor a new suite.
+    (iv) WHAT MAKES A RULING URGENT RATHER THAN EVENTUAL. W1-T469's implementation is in flight; once
+    it lands the rung fires on a serialized-deferral gate rather than on idleness, bounded only by
+    `maxPerDay: 24`. Against a reservoir of 87 entries at `status: new` and a measured 44% accept rate,
+    that is UP TO 24 SELF-MERGING PLAN CHANGES A DAY, UNATTENDED.
+    (v) AND UNATTENDED MINTING HAS ALREADY PRODUCED DUPLICATES — WITH A LIVE INSTANCE TODAY. 47 mint
+    events historically yielded only 21 distinct surviving tasks; W1-T388 and W1-T298 each minted five
+    times. TODAY, RE-DERIVED: **W1-T488 WAS MINTED TWICE WITHIN THE HOUR** — PR #1816 (a session
+    filing) added `plan/tasks.d/W1-T488-freshness-exit-spends-the-crashloop-budget.yaml` and PR #1817
+    (the triage run) added `plan/tasks.d/W1-T488-test-name-proofs-are-silently-escaped.yaml`. DIFFERENT
+    FILENAMES, SAME ID, so both merge cleanly and `loadPlan` then throws duplicate-task-id ON MAIN —
+    the exact poisoned-plan hazard `src/lib/auto-triage.ts`'s own header describes. #1817 HAS MERGED;
+    #1816 IS STILL OPEN AND UNARMED. The triage lock protects triage-against-triage only; it cannot
+    see a session's unpushed filing, because triage checks the tree and open PRs at ITS mint time."
+  acceptance:
+    - claim: "whether a triage PR arms is decided by a named, testable predicate rather than falling out of call order"
+      proof: "unit test: test/triage-arm-policy.test.ts"
+    - claim: "a triage PR whose review verdict does not permit arming is not armed"
+      proof: "unit test: test/triage-arm-policy.test.ts"
+    - claim: "the arming behaviour is discoverable without running the verb and reading its stdout"
+      proof: "unit test: test/triage-arm-policy.test.ts"
+    - claim: "the at-open arm used by the implement lane is pinned as ungated, so the asymmetry cannot drift unnoticed"
+      proof: "unit test: test/triage-arm-policy.test.ts"
+  origin: recon#triage-self-arms-2026-08-14
+  plan_refs: ["W1-T469", "W1-T476", "W1-T125"]
+  files: [src/run-task.ts, test/triage-arm-policy.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `src/` and `test/`; `sizingViolation`
+    (`src/lib/task-linter.ts`) refuses `medium` at two subsystems. The blast radius is one call site.
+    `verify: human` — design (ii) offers four incompatible directions and this shard picks none.
+    `src/run-task.ts` IS DECLARED RELUCTANTLY AND ONLY BECAUSE THE ARM CALL SITE GENUINELY LIVES THERE
+    (`triageCommand`, beside `armAndLogOutcome`). The cost is real and recorded rather than hidden: at
+    19,588 lines, every task declaring it serialises against every other that does (W1-T471), which is
+    why `files:` is held to TWO paths. IF THE RULING IS DESIGN (iii) — DOCUMENT, DO NOT CHANGE — THEN
+    THIS `files:` IS WRONG AND MUST BE CORRECTED TO THE DOC PATH BEFORE DISPATCH, or
+    `inverseScopeUntouchedFiles` (`src/lib/review.ts`) will fail the PR on a declared path the
+    implementation never touched.
+    EVERY CRITERION IS `unit test:` ON PURPOSE. A shard whose proofs are ALL `grep:`
+    patterns against its own file caps its own implementation at `proof_exec: 0/N` and needs an
+    operator override to proceed — that happened to #1812 today. An earlier draft pinned the
+    implement-lane comparison with a `grep:` against this shard's OWN path; `proof-scope` warned that the
+    scope guard would refuse a branch touching it, and adding that path is forbidden (it converts the
+    endemic warning into a hard `rule15-filing` violation), so the claim became a test instead.
+    PROVENANCE, PER NUMBER. The arm timestamps, the merge time and the two PR file lists are GitHub
+    API reads and are host-independent. The 744/179/128 arm counts and the 70-run cost distribution
+    are THE MAC MINI's ledger over its full three-form union, taken 2026-08-14; the two hosts keep
+    separate ledgers with NO SSH ROUTE, so no figure here is a claim about Azure. THE MINI'S DAEMON WAS
+    PAUSED THROUGHOUT (`state/PAUSE` since 2026-08-12T19:56, `daemon.pause` logged 14:56:56Z) and held
+    a live `drain.lock` at pid 52111 — so its ledger records no dispatch spend today, and the triage
+    run measured here was a hand-invoked CLI call, not the rung."
