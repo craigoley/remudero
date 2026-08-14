@@ -97,4 +97,79 @@
     proof is the pure-path form against a file declared in files:. LEDGER: no route from
     this host — the 1.89/1.65 re-dispatch figures are CARRIED from the operator's brief
     (host: mini); every admission figure is DERIVED from tonight's simulation on this
-    container. NO depends_on: comparator, selector and partitioner are all on main."
+    container. NO depends_on: comparator, selector and partitioner are all on main.
+
+    ── AMENDMENT 2026-08-14, AFTER #1782 SHIPPED — WRITTEN ON THE MAC MINI ──
+    THE CONSEQUENCE IS RETRACTED AND THE ORDERING CHANGE IS NOT. Both statements are true at once
+    and this amendment exists to hold them apart. What survives: `idOrdinal`'s regex really did take
+    the LAST integer run, W2-T1 really did sort to ordinal 1, an empty `files:` really does
+    fail-closed-overlap every candidate through `overlappingPaths` (`src/lib/dispatch-overlap.ts`),
+    and `undeclaredScopeLast` (`src/lib/drain.ts`) is a real improvement. What is RETRACTED is the
+    claimed CONSEQUENCE — that any of this was starving lanes on the live fleet. It was not.
+
+    (1) W2-T1 WAS ALREADY MERGED SO ITS ORDINAL-1 POSITION WAS INERT. `isDispatchEligible`
+    (`src/lib/drain.ts`) opens with `if (isMerged(t.id))` and returns false with `already-merged`
+    BEFORE any comparator runs — ordering is never consulted for a merged task. RE-DERIVED ON THE
+    MINI at f0ce71d: W2-T1 is `verify: auto`, `status: queued` in `plan/tasks.yaml`, so `verify`
+    never filtered it; it is filtered by `isMerged` alone. Merged-state PROVENANCE, per source:
+    present in the mini projection `~/Remudero/state/status.json` (mtime 2026-08-12 19:50), ABSENT
+    from the `origin/main` trailer scan — the union is load-bearing here, and the trailer half alone
+    would have missed it. Controls both directions: W1-T466 in union = 1, W1-T474 (filing only) = 0.
+
+    (2) THE BLOCKED_BY CENSUS — AZURE'S NUMBER IS CARRIED, THE MINI'S IS INDEPENDENT, AND THEY MUST
+    NOT BE MERGED. CARRIED FROM THE AZURE RECON, UNVERIFIABLE FROM HERE (no ssh route): 0 of 41
+    `dispatch.serialized` rows name a W2 or W3 task as `blocked_by`, against a control of 19 distinct
+    `blocked_by` values, every one a W1 task. RE-DERIVED INDEPENDENTLY ON THE MINI, a DIFFERENT
+    corpus: 33 distinct rows over the three-form union, 0 naming W2/W3, control 17 distinct
+    `blocked_by` values, all W1. Same direction, different population — corroboration, not
+    confirmation, and W1-T471's rule applies: a count is only a claim about the corpus it came from.
+    PER-FORM CONTROL, because the mini has rotated: 666 `.gz` files carrying 3 rows, 4 plain files
+    carrying 30, and the LIVE file carrying ZERO — so a live-only read would have returned 0 and
+    called the hazard absent. Negative control 0.
+
+    (3) MEASURED AGAINST AN ALREADY-RECOVERED BASELINE, so nobody credits this fix later. CARRIED
+    FROM AZURE, UNVERIFIABLE HERE: re-dispatch per distinct task was 1.89 on 2026-08-13 (17
+    dispatches / 9 tasks) and 1.00 on 2026-08-14 up to the boot (9 dispatches, 9 distinct, zero
+    repeats) — i.e. the metric had recovered BEFORE the fix went live, most plausibly because main
+    went green and PRs merged instead of being re-dispatched. THE MINI CANNOT CHECK THESE: it has no
+    `dispatch.decided` step at all (the family is `dispatch.concurrent_set` / `settled_set` /
+    `serialized` / `skipped` / `refused_already_merged`), and an extractor keyed to a step that does
+    not exist returns a zero that means nothing — caught here by a control that also read 0 on dates
+    the mini WAS active.
+
+    (4) THE HAZARD IS DEMOTED AND NOT CLOSED. `compareDispatch` now orders priority ->
+    `undeclaredScopeLast` -> workstream -> ordinal -> id, so an empty-`files:` task sorts LAST within
+    its priority tier. But `overlappingPaths` is UNCHANGED and still returns `[...filesB]` when one
+    side is empty, so a demoted total-blocker that becomes the ONLY eligible candidate still blocks
+    everything. The demotion buys ordering, not immunity.
+
+    (5) LIVE EXPOSURE TODAY IS ZERO, not one. RE-DERIVED ON THE MINI at f0ce71d, host-independent
+    tree facts: 504 tasks, 80 with empty or absent `files:`, 10 of those unmerged — and ALL TEN are
+    filtered before ordering. Eight are `verify: human` (W1-T10, W1-T12d, W1-T12e, W1-T13, W2-T2,
+    W3-T4, W3-T7, W12-T1), W3-T3 is `status: blocked`, and W1-T49 — the only `auto` + `queued` one —
+    has an unmet dep in W12-T1, which is ITSELF `verify: human`, so it cannot become eligible without
+    an operator act.
+
+    (6) WHAT THE CEILING ACTUALLY IS NOW, WHICH SUPERSEDES THIS SHARD'S HEADLINE FRAMING. The live
+    eligible set is TWO TASKS — W1-T474 and W1-T477 — and BOTH declare `src/run-task.ts`, so
+    production order admits 1 and greedy disjoint packing also admits 1: THE OPTIMUM EQUALS THE
+    PRODUCTION RESULT and there is no packing gain left to win. Re-derived on the mini: three tasks
+    pass the merged/verify/status/deps filters and W1-T470 is then removed by `isOpenPr` (its live
+    head `run-W1-T470-1786693777372`, PR #1783). `src/run-task.ts` is 19,588 lines and 255 `^export`
+    lines at f0ce71d — the shard's brief cites 251, a counting-method difference, not a conflict —
+    and a split is ruled out by W1-T471 (#1761) at 640 cross-section references with 128 of 368
+    symbols referenced from outside their defining section. THE CONSTRAINT IS TASK SUPPLY AND NOT
+    ORDERING.
+
+    (7) THE LESSON, WHICH IS THE DURABLE PART. A PLAN-DERIVED SIMULATION CANNOT ESTABLISH LIVE
+    ELIGIBILITY. The simulation that justified this task ran in a container with NO LEDGER ROUTE and
+    derived everything from the plan tree; it was CORRECT ABOUT THE PLAN AND WRONG ABOUT THE FLEET,
+    because `isMerged` alone invalidates a plan-only reading and merged state is not in the plan.
+    This shard's own note already flagged the caveat as unmeasured — `whether W2-T1 is live-eligible
+    on the Azure fleet is UNMEASURED from this host`. It was measured afterwards and the answer was
+    no. A simulation without the merged set is a claim about the plan, never about what will run.
+
+    (8) STATUS LEFT AS FOUND, DELIBERATELY. This shard still reads `status: queued` although #1782
+    merged and carries an anchored `Remudero-Task: W1-T476` trailer, so the union already credits it.
+    The field is not corrected here because it is INERT for exactly the reason this amendment is
+    about: `isMerged` is the first gate, so a stale `queued` cannot cause a re-dispatch."
