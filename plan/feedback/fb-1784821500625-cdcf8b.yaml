@@ -20,5 +20,22 @@ raw: "DIALECT PROOF TEST-NAME SUBSTRINGS ARE SILENTLY REGEX-ESCAPED — a 'unit
 attachments: []
 origin: cli
 status: proposed
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/1817
+summary:
+  headline: Silent test-name proof failures from regex-special characters
+  what_happened: Test-name proofs match literal substrings, with special
+    characters like '.' and '[' escaped to prevent false positives. Authors
+    writing regex patterns expecting wildcards get no warning that their pattern
+    won't match, and the proof silently fails to execute.
+  decision: Implement both guidance updates and automated lint checks to surface
+    test-name substring mismatches before merge.
+  options:
+    - label: Implement both (a) guidance + (b) lint
+      consequence: Clarify documentation + add rmd lint to warn on zero/many matches;
+        comprehensive fix catches errors at merge time.
+    - label: Implement guidance (a) only
+      consequence: Update proof-authoring docs to explain literal-substring matching;
+        lower effort but relies on author discipline.
+    - label: Implement lint (b) only
+      consequence: Add validation at merge time to catch mismatches; automated but
+        doesn't educate authors on why regex syntax fails.
