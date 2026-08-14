@@ -1,0 +1,128 @@
+- id: W1-T486
+  title: "`checkCliFreshness` is the only refusal path in the fleet that leaves no ledger row — it warns to stderr and returns, so nobody can say how often the dirty branch fires versus the diverged one, and W1-T446's ruling has sat unanswerable for two days"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  rationale: "RE-DERIVED ON THE MAC MINI at 9c9cac0. PROVENANCE PER NUMBER: every source fact is a tree
+    fact and host-independent; every ledger figure is THE MINI's own across all three forms. There is
+    no ssh route to Azure and nothing here is a claim about that host -- a session compared across
+    corpora this week and called the difference a refutation, which is the error this note avoids.
+
+    (0) THE ZERO IS SOUND BECAUSE EVERY FORM WAS READ, and that took two attempts. All four of
+    `checkCliFreshness`'s own refusal message substrings -- `never mutating uncommitted local state`,
+    `never merging or rebasing on your behalf`, `never moving a ref that is not main`, and
+    `not a fast-forward` -- return ZERO across the union of 666 gz + 4 plain + 1 live.
+    THE FIRST COVERAGE CONTROL WAS WRONG AND WOULD HAVE PASSED ANYWAY: `sweep.pass` reads 1,897, but
+    per form it is 0 in gz, 1,897 in plain, 0 in live -- so it proves the PLAIN form readable and says
+    NOTHING about the 666 gz files. Re-controlled on a gz-native step: `run.start` reads 257,438 in
+    gz, 914 in plain, 200 in live. Every non-empty form is demonstrably read and every form returns
+    zero on all four substrings.
+    THE ONLY FRESHNESS ROWS THAT EXIST COME FROM A DIFFERENT FUNCTION. `daemon.install_freshness` (11
+    distinct, emitted from `src/run-task.ts` via `ensureInstallFresh`) and
+    `daemon_selfrestart_for_freshness` (5 distinct on the mini, emitted from `src/lib/daemon.ts`) both
+    trace to `checkServiceFreshness`, the assessing sibling -- NOT to `checkCliFreshness`. Note
+    `self-sync.ts`'s own comment records 0 of those rows in 6,838 on the AZURE daemon; 5 here is a
+    different corpus, not a contradiction.
+
+    (1) IT IS THE ONLY REFUSAL PATH THAT LEAVES NO ROW, and that is the case for filing rather than a
+    general wish for telemetry. Verified at this sha: `dispatch.serialized` is emitted from 3 files,
+    `preflight.failed` from 1, `inflight.refused` from 1 and `sweep.dispose` from 1 (control: a
+    fabricated step name is emitted from 0). `src/lib/self-sync.ts` emits NONE -- zero `appendLedger`
+    and zero `emit(` against three `warn(` calls -- so its refusals exist only as stderr text in
+    whatever terminal happened to run the verb.
+
+    (2) THE CONSEQUENCE IS CONCRETE AND CURRENT: W1-T446 CANNOT BE RULED ON. That shard asks whether to
+    relax the dirty-tree guard, and nobody can say how often `dirty` fires versus `diverged`. A session
+    tried this week and reported, correctly, that the rates are NOT MEASURABLE. Worse, the shard's own
+    motivating exhibit was the wrong branch: the operator's checkout was cited as a live dirty-guard
+    refusal and measured CLEAN with one unpublished commit, so the branch that actually fired was the
+    `merge-base --is-ancestor HEAD origin/main` check -- DIVERGENCE, NOT DIRTINESS. W1-T446 has since
+    been amended (#1802). WITHOUT A ROW, THAT MISATTRIBUTION WAS ONLY CATCHABLE BY A HUMAN STANDING IN
+    THE TREE.
+
+    (3) THE BRANCHES, ENUMERATED, BECAUSE ONLY SOME ARE WORTH DISTINGUISHING. `checkCliFreshness`
+    returns eight shapes: `guarded` (twice -- the guard env and CI), `degraded` (twice -- fetch failed,
+    or HEAD/origin/main unresolvable), `up-to-date`, `worktree`, `refused: dirty`, `refused: diverged`,
+    `refused: off-main` (W1-T445), and `synced`. The three REFUSALS are what W1-T446 needs told apart;
+    `guarded` and `up-to-date` are the overwhelming common case and instrumenting them is what would
+    make this expensive.
+    W1-T452 CHANGED THE POPULATION AND ANY RATE MUST SAY WHICH SIDE OF IT IT WAS TAKEN ON. Its
+    `worktree` branch returns ABOVE the dirty check, and its own comment notes it also skips dirty,
+    which a worktree mid-task always is. MEASURED: `git worktree list` on the operator clone reports 83
+    entries (82 linked plus the checkout itself), against a control of 1 here. So a rate measured after
+    #1731 describes a materially different population than one measured before it.
+
+    (4) WHAT THE ROW SHOULD CARRY -- A COUNT SUFFICES AND PATHS ARE CONTENT. The precedent that worked
+    is #1584's `report_excerpt`, which paid for itself within a day: three excerpts identified a
+    failure mode costing $71.83 across four runs. The precedent that failed is `risk_judge.decision`,
+    which records THAT a parse failed and not WHAT failed to parse, leaving two escalations
+    permanently undiagnosable. The difference is whether the row carries the input.
+    HERE THE INPUT IS A `git status --porcelain` LISTING, AND PATHS IN A LEDGER ROW ARE CONTENT. A
+    recon established the risk judge's input is bounded because `RiskJudgeChange` carries no diff;
+    THERE IS NO SUCH BOUND HERE -- a dirty tree can hold anything, including paths that name customer
+    or credential material. A LINE COUNT CARRIES NO CONTENT AND WOULD HAVE SETTLED THE W1-T446 EXHIBIT
+    INSTANTLY: the observed case twice on 2026-08-12 was a single dirty line, and `count: 1` beside
+    `reason: dirty` would have shown at a glance that the guard was firing on trivia. So: the reason,
+    the two shas already in the message, and for the dirty branch a COUNT -- never the paths.
+
+    (5) THE CADENCE MUST BE ARGUED AGAINST THE RETENTION CAP, NOT ASSUMED. `checkCliFreshness` runs on
+    EVERY CLI invocation, so a row per call could dwarf every other step and would compete for the
+    200-newest-per-step rotation cap that once made 100 of 207 escalated ids invisible.
+    ONCE PER DISTINCT REASON PER PROCESS is the proposed cadence: at most three rows per invocation and
+    in practice one, which bounds the volume without losing the rate. AND IF ANY DEDUPE IS ADDED IT
+    MUST NOT KEY ON AN ALWAYS-UNIQUE VALUE -- the reset-format dedupe keyed on a string carrying
+    microseconds and suppressed 0 of 335. A three-value reason is a safe key precisely because it is
+    low-cardinality.
+
+    (6) AND THE SHAPE QUESTION, ANSWERED HONESTLY: THE CLI HAS NO LEDGER HANDLE TODAY. `self-sync.ts`
+    imports only `node:child_process`, `node:path` and one TYPE from `daemon.js` -- no config, no
+    ledger, no state. Acquiring one the obvious way means `loadConfig()`, which CREATES its config file
+    and calls `resolveClaudeBin()`, which throws where no claude binary exists; `ci-parity.ts` records
+    exactly that hazard and concludes a path meant to run anywhere must not acquire that dependency.
+    SO A ROW IS ONLY THE RIGHT SHAPE VIA AN INJECTED OPTIONAL SINK, never via `loadConfig()` -- the
+    same shape `ArmDeps.log?` already uses, defaulted off so every existing caller and fake keeps
+    working and no run-anywhere invocation gains a new failure mode."
+  acceptance:
+    - claim: "the shard establishes the refusal is unledgered with a control proving every corpus form was read"
+      proof: "grep: THE ZERO IS SOUND BECAUSE EVERY FORM WAS READ in plan/tasks.d/W1-T486-self-sync-refusal-leaves-no-ledger-row.yaml"
+    - claim: "the shard argues from the fact that every comparable refusal path does ledger"
+      proof: "grep: IT IS THE ONLY REFUSAL PATH THAT LEAVES NO ROW in plan/tasks.d/W1-T486-self-sync-refusal-leaves-no-ledger-row.yaml"
+    - claim: "the shard records that a rate measured after the worktree branch describes a different population"
+      proof: "grep: W1-T452 CHANGED THE POPULATION in plan/tasks.d/W1-T486-self-sync-refusal-leaves-no-ledger-row.yaml"
+    - claim: "the shard rules out putting dirty paths in the row and says what to carry instead"
+      proof: "grep: A COUNT SUFFICES AND PATHS ARE CONTENT in plan/tasks.d/W1-T486-self-sync-refusal-leaves-no-ledger-row.yaml"
+    - claim: "the shard bounds the write cadence against the rotation retention cap"
+      proof: "grep: ONCE PER DISTINCT REASON PER PROCESS in plan/tasks.d/W1-T486-self-sync-refusal-leaves-no-ledger-row.yaml"
+    - claim: "the shard establishes the CLI cannot reach a ledger today and names the only safe way in"
+      proof: "grep: THE CLI HAS NO LEDGER HANDLE TODAY in plan/tasks.d/W1-T486-self-sync-refusal-leaves-no-ledger-row.yaml"
+  origin: recon#self-sync-refusal-unledgered-2026-08-14
+  plan_refs: ["W1-T446", "W1-T445", "W1-T452"]
+  files: [src/lib/self-sync.ts, test/self-sync.test.ts, test/worktree-verb-containment.test.ts, test/self-sync-branch-guard.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT. `sizingViolation` (`src/lib/task-linter.ts`) blocks at
+    `>=2 subsystems while risk<high`, and `files:` spans `src/lib/` and `test/`. The band is Rule 19's
+    SPAN, not blast radius -- the change is an optional sink parameter and three call sites.
+
+    `verify: auto` IS CORRECT HERE EVEN THOUGH THE SUBJECT IS INSTRUMENTATION. Every criterion is
+    decidable over an INJECTED sink with no network and no real ledger: a fake records what was
+    emitted, and the three refusal branches are reachable with fixtures the declared suites already
+    build. This task does NOT ask the operator to rule on anything -- it exists so that W1-T446's
+    ruling BECOMES answerable, which is a different thing from making it here.
+
+    `files:` IS DERIVED BY INVOCATION COUNT, counting OCCURRENCES rather than lines. `src/lib/self-sync.ts`
+    holds every branch. On the test side, `checkCliFreshness(` is invoked 10 times in
+    `test/self-sync.test.ts`, 10 in `test/worktree-verb-containment.test.ts` (W1-T452's suite, which
+    owns the worktree branch that shadows dirty) and 5 in `test/self-sync-branch-guard.test.ts`
+    (W1-T445's suite, which owns off-main); every other file mentioning the symbol invokes it ZERO
+    times. All three are declared because the three refusal branches are split across them and a row
+    added to one branch must be proven on all three.
+    `src/run-task.ts` IS DELIBERATELY NOT DECLARED: it emits `daemon.install_freshness`, but that comes
+    from `ensureInstallFresh` and this task does not touch it. At 19,588 lines every task declaring it
+    serialises against every other that does (W1-T471).
+    The shard's own path is NOT declared: adding it converts the endemic proof-scope warnings into one
+    hard `rule15-filing` violation."
