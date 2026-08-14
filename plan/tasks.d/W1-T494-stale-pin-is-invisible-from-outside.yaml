@@ -1,0 +1,125 @@
+- id: W1-T494
+  title: "a dirty tree makes the daemon correctly declare itself fresh and run on stale code indefinitely, and NOTHING outside the host can see it — the daemon writes the evidence down and no consumer reads it, so a 10-commit-old orchestrator looked green on every diagnostic"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  rationale: "RE-DERIVED AT a5b6edf7 ON THE MAC MINI. Every tree fact below is host-independent; the
+    Azure row counts and shas are carried from the commissioning measurement and are marked ASSUMED
+    because this host has no route to that ledger, and the two hosts keep separate ones.
+    (1) THE GUARD IS CORRECT AND THIS TASK MUST NOT TOUCH IT. `daemonFreshnessFromService`
+    (`src/lib/self-sync.ts`) reads, verbatim — and note the dirty check is the SECOND, not the first:
+      if (svc.status !== \"assessed\") return { stale: false };
+      if (svc.dirty) return { stale: false };
+    Its own doc rejects the alternative in as many words: a restart on a dirty tree comes back on the
+    same old sha, reads the same staleness and exits again, so restarting is only correct when a
+    restart can actually CLEAR the condition. REMOVING THIS GUARD WOULD BUILD A CRASH LOOP.
+    (2) THE DAEMON ALREADY WRITES THE EVIDENCE. `daemon.tree_dirty` and `daemon.stale_code` fire
+    together, and `daemon.stale_code` carries BOTH `old_sha` AND `new_sha` — so the distance is not
+    something anything needs to re-derive. (ASSUMED, from the commissioning measurement: 3 rows each,
+    matching 3 entrypoint refusals 1:1, `66538eb` -> `50d039a` at 16:35:01.)
+    (3) AND NOTHING READS IT. MEASURED: `tree_dirty` appears only in `src/lib/self-sync.ts`,
+    `src/run-task.ts`, two `test/` files and three `plan/` files. It appears in NO `scripts/` and NO
+    `.github/` file. POSITIVE CONTROL on the same query and trees: `restart_count` IS found in
+    `scripts/fleet-heartbeat.sh` AND `.github/workflows/fleet-heartbeat-watch.yml`, so the query
+    reaches both and the absence is real rather than a blind spot.
+    (4) THE HEARTBEAT ALREADY PUBLISHES TWO SHAS, AND THAT IS EXACTLY WHY IT DID NOT HELP.
+    `scripts/fleet-heartbeat.sh` emits `daemon_boot_head_sha` AND `install_head_sha`. On the stuck
+    host BOTH READ `66538eb`: they AGREED, while both were ten commits behind. A comparison between
+    them can never catch this, because the install itself is what failed to advance. THE MISSING
+    QUANTITY IS DISTANCE FROM `origin/main`, AND THE BEAT NEVER ASKS — measured: no `git fetch`, no
+    `rev-list`, no `status --porcelain`, no `origin/main` reference anywhere in that script except one
+    comment.
+    (5) THE READING TRAP THAT KEPT IT HIDDEN, AND THE LINE IS NOT THE BUG. `deploy/entrypoint.sh` ends
+    its ref resolution with an UNCONDITIONAL `log \"checkout: $(git -C \"$TREE\" rev-parse HEAD)\"`,
+    and its own comment says why: `RECORD WHAT ACTUALLY RUNS… print it unconditionally — this line is
+    what makes 'which code ran' answerable after the fact.` IT IS DOING ITS DOCUMENTED JOB. The trap
+    is in the READER: a `checkout:` line proves which sha will run, NOT that a sync happened, and the
+    same sha appears both after a real checkout and after a refusal."
+  design: "(i) THE HONEST SCOPE IS ONE PUBLISHED FIELD, NOT A CONTAINMENT INVESTIGATION, and the
+    rationale for choosing that is the measurement rather than a preference. The escaped-write
+    mechanism (design iii) is structurally possible but UNPROVEN, and the rate is low — 3 refusals in
+    the container's whole ~24h log against 24 boots reaching the sync step, 21 of which advanced
+    normally (ASSUMED, commissioning measurement). A field that makes the condition visible from
+    outside the host is worth building at that rate; a forensic hunt for a once-a-day write is not.
+    (ii) WHERE IT SHOULD SURFACE — THE CANDIDATES, RANKED BY NOBODY.
+      THE HEARTBEAT is the one that matches where the failure actually hurt: nobody could see this
+      from off-host. It already tails the ledger for `daemon_last_step`, so a `pinned_sha` /
+      `code_age_commits` / `tree_dirty` field costs one more read of a file it already opens — NO
+      FETCH, because `daemon.stale_code` already carries both shas.
+      `DECISION_RELEVANT_LEDGER_STEPS` IS PROBABLY NOT NEEDED, AND THE BEAT'S OWN HEADER EXPLAINS WHY:
+      `rotateLedger` keeps MAX_RETAINED_LINES_PER_STEP = 200 newest PER STEP, and a heartbeat that
+      reads the MOST RECENT matching line — never a COUNT — is indifferent to archiving, unlike
+      `ABSENT_REPUSH_CAP` which counts and therefore did have to join the list. With 3 rows the step
+      is nowhere near the cap. SAY THIS OUT LOUD IN THE IMPLEMENTATION rather than adding a registry
+      entry reflexively.
+      THE CONSOLE'S GLANCE WIDGET already renders `deriveLastPoll` and could carry it — but the
+      console is reachable only where the host is, which is the same blind spot again.
+      A LOUDER ENTRYPOINT REFUSAL IS MEASURABLY NOT ENOUGH: the entrypoint already prints a clear
+      multi-line message and nobody saw it for hours. Louder-in-logs has already been tried.
+    (iii) THE CONTAINMENT QUESTION, SPLIT INTO WHAT IS PROVEN AND WHAT IS NOT.
+      PROVEN (measured on this host): a linked worktree's `.git` is a FILE containing
+      `gitdir: <parent>/.git/worktrees/<name>`, so the parent clone's path is trivially derivable —
+      `git rev-parse --git-common-dir` hands it over. From inside a worktree the parent's WORKING
+      FILES are both readable AND WRITABLE by ordinary path. THE PARENT CLONE IS NOT OUTSIDE THE CWD
+      IN ANY SENSE THE OS ENFORCES, so the containment preflight's outside-cwd assertion does not
+      cover it, and could not.
+      NOT PROVEN, AND MARKED ASSUMED: that this is HOW the two files became dirty. The window and the
+      content were established (both files were PR #1821's own work, one byte-identical to the merged
+      blob and one an earlier draft, mtimes inside that worker's run) but the write PATH was not. A
+      prior session could not establish it either. DO NOT LET AN IMPLEMENTER TREAT THE STRUCTURAL
+      POSSIBILITY AS THE PROVEN CAUSE.
+    (iv) WHAT A STALE ORCHESTRATOR ACTUALLY GETS WRONG, WHICH IS NARROWER THAN IT SOUNDS AND WORSE.
+      NOT the workers: `worktreeAdd` cuts each from `origin/main`, so dispatched work is built from
+      CURRENT code. THE ORCHESTRATOR IS THE OLD PART — the sweep's `DISPOSITION_RULES`, the fix rung's
+      classes, gate thresholds, and `judgeReview`, all of which load once at process start. So the
+      failure shape is a daemon applying YESTERDAY'S dispositions and YESTERDAY'S review rubric to
+      TODAY'S PRs, silently. THAT IS A CORRECTNESS PROBLEM, NOT A LATENCY ONE, and it is the argument
+      for sizing this above cosmetic.
+    (v) NOT IN SCOPE. Changing the guard, restarting on dirt, adding a containment control, or
+    cleaning the dirty tree automatically. This task makes the state VISIBLE; what to do about it is
+    a later ruling."
+  acceptance:
+    - claim: "a stale pinned sha is published where an off-host reader can see it without shelling into the host"
+      proof: "unit test: test/fleet-heartbeat-stale-pin.test.ts"
+    - claim: "a dirty tree is distinguishable from a healthy one in the published beat"
+      proof: "unit test: test/fleet-heartbeat-stale-pin.test.ts"
+    - claim: "the field derives from the ledger the beat already reads rather than adding a network fetch"
+      proof: "unit test: test/fleet-heartbeat-stale-pin.test.ts"
+    - claim: "a healthy up-to-date host publishes the field without it reading as a fault"
+      proof: "unit test: test/fleet-heartbeat-stale-pin.test.ts"
+  origin: recon#stale-pin-invisible-2026-08-14
+  plan_refs: ["W1-T446", "W1-T484", "W1-T490"]
+  files: [scripts/fleet-heartbeat.sh, test/fleet-heartbeat-stale-pin.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `scripts/` and `test/`. The blast radius is
+    one published field; the beat gates nothing and blocks nothing.
+    `verify: human` — design (ii) offers four surfaces and this shard ranks none, and the operator has
+    been minting this family one at a time.
+    `files:` IS TWO PATHS. `scripts/fleet-heartbeat.sh` is where the beat is assembled;
+    `test/fleet-heartbeat.test.ts` is NOT declared because the new assertions belong in their own file
+    rather than appended to a suite that already covers the BSD/GNU `date` divergence — two of its
+    tests are DECLARED host-parity divergences (`HOST_PARITY_BASELINE`, `src/lib/host-parity.ts`) and
+    a new file keeps this task's coverage off that fault line.
+    `src/lib/self-sync.ts` IS NOT DECLARED, DELIBERATELY. The guard there is correct and design (i)
+    forbids touching it; declaring it would trip `inverseScopeUntouchedFiles` (`src/lib/review.ts`) on
+    a file the implementation must not edit. `src/run-task.ts` is not declared either — nothing here
+    touches it, and at 19,588 lines naming it serialises this task against every other that does
+    (W1-T471).
+    RULE 25 IS NOT ENGAGED: `scripts/fleet-heartbeat.sh` matches NO `INSTRUMENT_SURFACE` pattern
+    (those cover `*-ratchet.mjs`, `diff-coverage.mjs`, `*-baseline.json`, `mutation-relevant-paths.json`,
+    `.github/workflows/`, `stryker.conf.json`), and `test/` is excluded from `isProductPath` — so this
+    changeset reads `entangled: false` and needs no special handling either way.
+    EVERY CRITERION IS `unit test:` WITH A TITLE THAT RESOLVES TO ONE FILE — `check-proof` now warns on
+    a title matching zero or many tests (W1-T488), and an all-`grep:`-self-referential shard caps its
+    own implementation at `proof_exec: 0/N` and draws a `proof-scope` warning that blocks in CI's
+    changed-tasks pass.
+    PROVENANCE. The guard text, the consumer absence with its `restart_count` control, the two sha
+    fields, the absence of any `origin/main` reference in the beat, the entrypoint's unconditional
+    `checkout:` log, and the worktree-to-parent writability are ALL measured on the mac mini at
+    a5b6edf7 and are tree facts. The Azure row counts, shas, timestamps and the 3-of-24 boot rate are
+    ASSUMED from the commissioning measurement — this host has no route to that ledger."
