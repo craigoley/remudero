@@ -257,10 +257,26 @@ forensic detail, so the narrative does not need to live here.
 - **`lint-plan` runs CHANGED-TASKS-ONLY in CI, so touching a task promotes its OWN pre-existing
   violations to blocking — including ones that are merely `warn` at dispatch.** `proof-resolvability`
   is demoted to `warn` at `preDispatchLint` but blocks in the changed-tasks gate. Once a task is in
-  your diff, clear EVERY violation on it, not just the dispatch-blocking ones. *(#984)*
+  your diff, clear EVERY violation on it, not just the dispatch-blocking ones. **AND `lint-plan`
+  EXITING 2 WITH `cannot resolve --base <ref>` MEANS YOUR BASE SHA IS POISONED, NOT YOUR DIFF** —
+  the message is `run-task.ts`'s own, returned as 2 rather than 1. CI passes
+  `BASE_SHA: ${{ github.event.pull_request.base.sha }}`, an EVENT-PAYLOAD SNAPSHOT, so **A RE-RUN
+  REPLAYS THE SAME POISONED SHA** and clears nothing; the remedy is merging current main into the
+  branch. Same snapshot class W1-T351/#1380 fixed for commitlint. *(#984; the base-sha half
+  2026-08-14)*
 - **`rmd next-task-id` reads the LOCAL checkout — `git pull` first or it returns an id you filed
   minutes ago.** It DOES account for open PRs once the checkout is current (`max 381 … open PRs
-  381`). *(it returned W1-T379 immediately after W1-T379 was filed in #1388; true tree max was 380)*
+  381`). **AND NO LOCK COVERS YOU AGAINST THE TRIAGE RUNG, WHICH MINTS UNATTENDED WHILE YOU TYPE —
+  `state/triage.lock` EXCLUDES TRIAGE-AGAINST-TRIAGE ONLY.** `decideAutoTriage` refuses on
+  `lockHeld` ("a run is already in flight"), and reservations live in `state/task-id-reservations`;
+  both are LOCAL state, so neither can see a session's unpushed filing on another host. MEASURED
+  2026-08-14: two shards both declared `- id: W1-T488` — a triage run's (#1817, 15:15:54Z) and a
+  session filing's (#1816, 15:25:37Z) — after which `loadPlan` REFUSED `origin/main` for ~24
+  minutes, taking every plan-reading verb with it, and the repair (#1820, 15:49:46Z) was itself
+  caught, merging only behind a temporary `enforce_admins` toggle. A tree read cannot see a
+  concurrent mint; `git log --oneline -S'- id: <candidate>' -- plan/` over a CURRENT fetch, plus the
+  open-PR list, is the view that can. *(it returned W1-T379 immediately after W1-T379 was filed in
+  #1388; true tree max was 380; the collision half 2026-08-14)*
 - **A shard whose `files:` spans two concerns fails Rule 19 sizing at `risk:medium` — set
   `risk:high` UP FRONT and record in the note that the band is Rule 19's SPAN, not blast radius.**
   Decomposing a predicate from its own falsifier is not a real decomposition. **And NEVER file an
@@ -370,7 +386,23 @@ forensic detail, so the narrative does not need to live here.
   rows; 135 blind, 17 provably false, 119 undecidable — OVERLAPPING categories, not a partition
   (they sum past 176) — the blind rows recorded no `head_sha`, so
   they can never be adjudicated. Any historical claim resting on that step name is unsound for rows
-  written before #981. *(#981)*
+  written before #981. **AND THE LANES ARE NOT EQUALLY GATED — THE OBVIOUS READING IS BACKWARDS, SO
+  READ BOTH ARMS BEFORE ARGUING FROM ONE:** `grep -n 'return attemptArm' src/run-task.ts` prints
+  them side by side. `triageCommand` arms only AFTER `waitForCiGreen` returns green, and
+  `armAutoMerge` then reads `priorReviewVerdictFromLedger` and gates on `decideArmFromLedgerVerdict`
+  — TWO gates; it never branches on `reviewCommand`'s exit code, so the `(review success)` in its
+  console line is REPORTED, not consulted. `armAutoMergeAtOpen` is `return attemptArm(prUrl,
+  deps);` — NO verdict gate and NO ci gate — and the implement lane calls it at PR-OPEN, before any
+  review. **So IMPLEMENTATION PRs, which change source, self-merge earlier and with fewer checks
+  than triage PRs, which only add plan text.** Operator ruling on W1-T489: DOCUMENTED, not changed —
+  a triage PR armed 15:10:48Z and self-merged 15:15:54Z, five minutes, no operator act. The
+  unattended rate is real now that W1-T469 fires the rung on `partition.serialized.length > 0`
+  rather than idleness, bounded only by `autoTriage.maxPerDay` (`plan/policy.yaml`, value 24) and
+  `minIntervalMinutes` 15. Cost per run is a QUERY, not a number to carry —
+  `zgrep -h '"step":"verdict"' state/ledger.*.ndjson.gz state/ledger.ndjson | …` over the union, per
+  the archive rule below; the operator's 2026-08-14 reading was a mean of $1.09 over 70 runs
+  (median $1.03, p90 $1.77, max $2.86), which supersedes any single-sample extrapolation.
+  *(#981; the lane-asymmetry half W1-T489, 2026-08-14)*
 - **On a zero match, `node --test --test-name-pattern` still emits `ok 1 - <RELATIVE test path>` —
   exclude the wrapper by the RELATIVE path, never the absolute one.** A control filtering on the
   absolute path counts the wrapper, returns 1, and reports a false pass, which would make every
