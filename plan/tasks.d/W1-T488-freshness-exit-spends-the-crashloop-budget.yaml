@@ -1,0 +1,152 @@
+- id: W1-T488
+  title: "a routine freshness restart — one per merge — spends a finite crash-loop budget that no amount of healthy running refunds, and Docker cannot tell it from a crash; detection now exists, so this is about not spending it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: "**THE LINE, VERBATIM AT 70a3e33.** `daemonExitCode` (`src/lib/daemon.ts`):
+      return stopReason === \"stopped\" || stopReason === \"max_reached\" ? 0 : 1;
+    And `DaemonStopReason` has FIVE members — `stopped | blocked | max_reached | error | stale` — so
+    **THREE OF THEM (`blocked`, `error`, `stale`) COLLAPSE TO THE SAME 1.** `stale` is the freshness
+    self-restart, one per merge, and the path `daemon.ts`'s own comment calls the one that *\"WANTS
+    exactly that restart (it is how a long-running daemon reaches merged code)\"*. `deploy/entrypoint.sh`
+    sees only `$rc`; Docker sees only non-zero.
+
+    **DOCKER CANNOT DISTINGUISH EXIT CODES AT ALL — ESTABLISHED BY EXPERIMENT, NOT ASSUMED (Azure,
+    2026-08-14, docker 29.1.3).** Three throwaway containers at `--restart=on-failure:2`:
+      `exit 1`  -> 3 boots, RestartCount=2, parked
+      `exit 42` -> 3 boots, RestartCount=2, parked   (IDENTICAL — the value is invisible to the policy)
+      `exit 0`  -> 1 boot,  RestartCount=0, no restart at all (the control)
+    **SO THE POLICY SEES ONLY ZERO/NON-ZERO, AND WHATEVER DISTINGUISHES A FRESHNESS EXIT FROM A CRASH
+    MUST BE THE ENTRYPOINT, NOT DOCKER.** That changes the shape of every option below.
+
+    **AND THE BUDGET IS FINITE AND NOT REFUNDED BY HEALTH — ALSO BY EXPERIMENT, SAME HOST, SAME DAY.**
+    Three more containers at `on-failure:2`: `exit 1` immediately, `sleep 20; exit 1`, and
+    `sleep 120; exit 1` — **ALL THREE PARKED PERMANENTLY AT RestartCount=2.** Two consecutive
+    two-minute healthy runs reset nothing. **THE ONLY OBSERVED RESET IS A MANUAL `docker start`.**
+
+    **THE CONSEQUENCE, MEASURED: A 2h56m OUTAGE — 90% OF A DAY'S TOTAL DOWNTIME — WITH NOTHING
+    RESTARTING THE FLEET UNTIL A HUMAN DID.** Uptime 86.4%; nine routine exit→boot gaps of 132–141s;
+    one of 10,539s.
+
+    **THE RATE, RE-DERIVED ON AZURE.** Per-form control: `.gz` archives 0 files (genuinely empty on
+    this host), plain archive 1, live 1; readability control `daemon.alive` 634 and 616; union
+    full-line deduped to 17,677 rows. **`daemon_selfrestart_for_freshness`: 14 rows, ALL 14 inside the
+    last 24 hours, 10 of them today.** Step names EXTRACTED (`\"step\":\"[^\"]*restart[^\"]*\"`)
+    rather than guessed — that is the only `restart` step the corpus carries. **AT A CAP OF 5, THAT IS
+    ROUGHLY HALF A DAY OF MERGING PER MANUAL RESET.** Live counter at filing: `RestartCount=1 / max 5`,
+    policy `on-failure`.
+
+    **AND `enforce_admins: true` HAS RAISED THE COST OF A SILENT STOP.** A red required check can no
+    longer be merged past by hand, so a stopped fleet no longer degrades into hand-merging — **THE
+    QUEUE SIMPLY HALTS.**
+
+    **THIS WAS PREDICTED IN WRITING AND LEFT TO THE OPERATOR.** `deploy/host-update.sh`'s daemon block
+    records that once `DaemonDeps.checkFreshness` was wired *\"every freshness self-restart pays this
+    sleep too\"*, estimates 13–30 restarts/day, and states that `--restart=on-failure:5`'s *\"own count
+    cap is the other half and only they can watch it.\"* Nothing was built for him to watch it with
+    until #1798."
+  design: "(0) **THIS IS PREVENTION, NOT DETECTION, AND THE FRAMING MATTERS.** #1798 shipped the alarm:
+    the beat publishes `restart_count`, `restart_max` and `restart_policy` to `origin/heartbeat-azure`
+    every five minutes from a HOST cron, independent of the daemon, and degrades those fields to ABSENT
+    rather than zero because a bare 0 reads as \"no restarts left\". VERIFIED LIVE AT FILING: a beat one
+    minute old carrying `beat_host=Remudero`, `restart_count=1`, `restart_max=5`,
+    `restart_policy=on-failure`. **SO THE OPERATOR CAN NOW SEE THE APPROACH TO EXHAUSTION, AND THE
+    HONEST QUESTION THIS TASK ANSWERS IS NOT `how would we know` BUT `how much is it worth to stop
+    spending the budget at all`.** Note the limit #1798 states about itself: a beat cannot report a
+    budget once the container is down — THE DETECTOR IS THE BEAT'S ABSENCE, and the fix for that is
+    already shipped.
+
+    (i) **THE LOOP OBJECTION IS CONDITIONAL, AND I TESTED IT RATHER THAN INHERITING IT.**
+    `deploy/entrypoint.sh` rejects an in-container retry loop on the grounds that *\"The
+    clone/fetch/checkout above runs ONCE, before this line — so an in-container retry loop would re-run
+    the daemon against the SAME tree forever and `stale` would never clear.\"* **THAT IS TRUE ONLY OF A
+    LOOP AROUND `\"$@\"`.** The bootstrap is already a shell FUNCTION, `checkout_target()`, invoked
+    twice in the script, with the fetch beside it — so a loop that re-runs the BOOTSTRAP and then the
+    daemon would clear staleness perfectly well. The stated reason is defeatable.
+    **THE SECOND OBJECTION IS THE ONE THAT HOLDS, AND IT IS STRUCTURAL:** *\"IT ALSO LEAVES
+    `--restart=on-failure:N` INTACT, which an internal loop would render inert: the container still
+    exits non-zero once per attempt, so N still counts attempts.\"* A looping container NEVER EXITS, so
+    the count cap never counts and the crash-loop bound disappears entirely. **DO NOT re-derive the
+    first objection; DO respect the second.**
+
+    (ii) **THE BOUND IS GENUINELY WANTED, AND THE COUNTER-EXAMPLE IS MEASURED.** 2026-08-13
+    22:23:40–22:26:10 carried **5 BOOTS, 3 EXITS AND 3 `rmd daemon REFUSED — a drain/daemon is already
+    running` LOCK COLLISIONS IN 150 SECONDS**, each printing the same \"sleeping 120s\" line while the
+    next boot arrived 13-17s later — **so the throttle did not rate-limit those either.** An unbounded
+    `always`/`unless-stopped` policy would have spun on that shape indefinitely. Any option that
+    removes the cap must say what replaces it.
+
+    (iii) **THE OPTIONS. ARGUE AND CHOOSE ONE; DO NOT BUILD MORE THAN ONE.**
+      (a) **A DISTINCT EXIT CODE FOR `stale`, WITH THE ENTRYPOINT DOING THE ACCOUNTING.** The
+          prerequisite for every other lever, including lowering the 120s throttle. Because Docker
+          cannot read the code (see the rationale's experiment), the entrypoint must: its own throttle
+          per case, its own retry accounting, or a marker file under the state root that a freshness
+          exit writes and a crash does not. Cost: it moves a bound that currently lives in the
+          container runtime into a shell script, and `daemonExitCode`'s two-value contract is asserted
+          by `test/daemon.test.ts` and `test/daemon-freshness.test.ts`.
+      (b) **CHANGE THE POLICY, NOT THE CODE: `--restart=unless-stopped` PLUS THE ENTRYPOINT'S EXISTING
+          THROTTLE.** No source change at all — the 120s sleep already rate-limits, and `unless-stopped`
+          removes the count cap that healthy merging is exhausting. Cost: it is exactly the unbounded
+          policy (ii)'s lock storm argues against, so it needs the entrypoint to grow the missing count
+          bound, and it touches `deploy/host-update.sh` rather than the paths declared below.
+      (c) **RESTART LESS OFTEN.** `checkServiceFreshness` (`src/lib/self-sync.ts`) compares SHAs only,
+          so a plan-only merge restarts the daemon exactly like a `src/` merge. Fewer restarts means
+          slower budget burn. Cost: it does not fix the mechanism — the budget is still finite, still
+          unrefunded, and still spent by healthy work; it only moves the date of the next manual reset.
+
+    (iv) **WHAT MUST NOT BE BUILT.** Nothing that removes the crash-loop bound without replacing it
+    (see (ii)). Nothing that makes the container loop internally (see (i)). No second alarm — #1798's
+    is live, correct, and independent of the daemon. And no change to the freshness check itself: it is
+    right, and running on stale code caused three separate failures on 2026-08-13.
+
+    (v) NOT IN SCOPE: the unbounded-`gh` exposure, the 120s throttle's VALUE (it can only be argued once
+    (a) or (b) lands), and the `enforce_admins` setting itself."
+  acceptance:
+    - claim: "a freshness stop is distinguishable from a crash at the point the container restarts on"
+      proof: "unit test: test/daemon.test.ts"
+    - claim: "a crash loop is still bounded after the change"
+      proof: "unit test: test/entrypoint-boot.test.ts"
+    - claim: "a deliberate stop still leaves the container down"
+      proof: "unit test: test/entrypoint-boot.test.ts"
+  origin: recon#freshness-exit-spends-crashloop-budget-2026-08-14
+  plan_refs: ['W1-T483', 'W1-T126']
+  files: [src/lib/daemon.ts, deploy/entrypoint.sh, test/daemon.test.ts, test/entrypoint-boot.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT. `files:` spans THREE subsystems — `src/lib/`, `deploy/` and
+    `test/` — and `sizingViolation` (`src/lib/task-linter.ts`) blocks at >=2 below that band. The band
+    is Rule 19's SPAN, not blast radius; the blast radius is one exit code and one shell branch.
+    `files:` WAS DERIVED BY INVOCATION COUNT, NOT PROSE MENTION, measured over `test/` at 70a3e33:
+    `daemonExitCode` appears 9 times in `test/daemon.test.ts` and 7 in `test/daemon-freshness.test.ts`;
+    `RMD_RESTART_THROTTLE_S` appears 13 times in `test/entrypoint-boot.test.ts` against 1 elsewhere, and
+    that suite carries 25 `entrypoint` references — the most of any. `test/daemon-freshness.test.ts` is
+    NOT declared: it is second by weight on the one symbol and untouched by the entrypoint half, and
+    `inverseScopeUntouchedFiles` (`src/lib/review.ts`) fails a declared-but-untouched path exactly as
+    `scopeViolationFiles` fails an undeclared one.
+    **THE DECLARED SET IS THE ONE OPTION (iii)(a) NEEDS, AND THAT IS DELIBERATE.** Option (a) is the
+    prerequisite the other two rest on, and it is the only one whose scope is knowable in advance.
+    **IF THE IMPLEMENTER TAKES (b) — the policy change — IT TOUCHES `deploy/host-update.sh` AND
+    `test/host-update-reclaim.test.ts` INSTEAD, AND THE SHARD MUST BE AMENDED FIRST** rather than the
+    path added mid-run. Option (c) touches `src/lib/self-sync.ts` and is likewise an amendment.
+    `src/run-task.ts` IS NOT DECLARED and must not be: it is 19,588 lines and every task naming it
+    serialises against every other that does (W1-T471, via `partitionByFileOverlap`).
+    THIS SHARD'S OWN PATH IS DELIBERATELY NOT IN `files:` — adding it converts the `proof-scope`
+    warnings into a HARD `rule15-filing` violation, measured on W1-T464.
+    **A TRAP IN THE PROOFS THEMSELVES, MEASURED AT FILING SO NOBODY CHASES IT.** Two criteria name
+    `test/entrypoint-boot.test.ts`, and a pure-path `unit test:` proof executes that file WHOLE.
+    **IN A CONTAINER IT READS 22 tests / 16 pass / 6 FAIL BEFORE THIS TASK CHANGES ANYTHING**, so
+    `rmd check-proof \"unit test: test/entrypoint-boot.test.ts\"` returns `verdict: fail` today. All six
+    are the git-identity/HOME family — `RMD_GIT_AUTHOR_NAME/_EMAIL override the default`, `a HOME that
+    does not exist yet is created`, and the three `MUTANT (defect …)` siblings — and they are
+    ENVIRONMENTAL: a container runs as a different user with `GIT_CONFIG_GLOBAL` redirected, and the
+    identical 22/16/6 appears on `origin/main` with no change applied. CI is the authority for that
+    suite; a local `fail` there is not the implementer's doing and must not be treated as one. DO NOT
+    \"fix\" those six, and do not repoint the criteria away from the file that is genuinely their home.
+    EVERY NUMBER HERE IS AZURE-ONLY AND DATED 2026-08-14: `RestartCount=1/5`, 14 freshness restarts in
+    24h (10 today), the 2h56m outage, the 150-second lock storm, and both container experiments. The
+    mini keeps a SEPARATE ledger with no SSH route and none of this is verifiable from there.
+    RE-DERIVE BEFORE BUILDING — the counter moved twice during the filing session itself."
