@@ -278,6 +278,13 @@ export interface SweepPolicy {
    * W1-T325: this is now literally true — `plan/policy.yaml`'s `sweep.dispatchLanes`
    * row is the source of the default below (read via {@link loadDefaultPolicy}), not
    * a source literal. The relocation retunes nothing; the value stays 2.
+   * W1-T473: ALSO the review lane ceiling — `runSweep` consults this SAME field a
+   * second time (`Math.max(1, policy.dispatchLanes)`, floored exactly like
+   * `daemon.ts`'s `laneCount`) to bound how many `post-review` PRs it runs
+   * CONCURRENTLY in one pass, honouring "the same lane number" dispatch uses
+   * rather than inventing a second, independently-tuned ceiling. This field's own
+   * MEANING is unchanged — still the dispatch-lane count `daemon.ts`'s `laneCount`
+   * and `test/policy-consumers.test.ts` read — `runSweep` is simply one more reader.
    */
   dispatchLanes: number;
   /**
@@ -1957,6 +1964,18 @@ export interface SweepDeps {
    * verdicts are per-head, so dedup is unconditional per `pr@head` — a fresh
    * push mints a new head and re-routes naturally. Optional — omitted, the
    * disposition is ledgered with a stand-down note and nothing runs.
+   *
+   * W1-T473: MAY be invoked CONCURRENTLY with other PRs' calls to this same
+   * function — `runSweep` no longer awaits one `postReview` before starting
+   * the next. Concurrency is bounded (`policy.dispatchLanes`, the SAME lane
+   * number dispatch uses) and every concurrent call is guaranteed a DISTINCT
+   * `${taskId}@${headSha}` key — `runSweep` claims each key synchronously
+   * before scheduling its call, so this function is never asked to run twice
+   * for the same task+head at once. A caller wiring a real effect here (e.g.
+   * spawning a reviewer worker) needs no locking of its own for THAT — it may
+   * still want its own guard against unrelated concurrent posters (see
+   * `postReviewStatusGuarded`'s `acquireReviewStatusLock`, which this dep's
+   * real wiring already goes through).
    */
   postReview?: (pr: OpenPrView) => void | Promise<void>;
   /**
@@ -1994,9 +2013,14 @@ export interface SweepDeps {
    * disposition acts, unchanged from before this existed. The daemon's
    * restricted light-sweep ticker (running CONCURRENTLY with an in-flight
    * `runOne`) wires `d => d === "post-review"` — only the deterministic,
-   * sha-pinned, mutex-serialized re-post is safe to run alongside a task;
-   * dispatchFix/close/escalate/depReview/arm stay strictly single-threaded,
-   * standing down here until the NEXT full sweep picks them up.
+   * sha-pinned re-post is safe to run alongside a task; dispatchFix/close/
+   * escalate/depReview/arm stay strictly single-threaded, standing down
+   * here until the NEXT full sweep picks them up. W1-T473: "mutex-serialized"
+   * described the WHOLE pass being single-threaded — post-review calls
+   * WITHIN one pass now run concurrently with each other too (bounded by
+   * `policy.dispatchLanes`, real per-`taskId@headSha` mutual exclusion —
+   * see `runSweep`'s own doc), so it is no longer accurate to call this ONE
+   * lane serialized; it is the one lane safe to run alongside `runOne`.
    */
   actionable?: (d: Disposition) => boolean;
   /**
@@ -2187,6 +2211,18 @@ const ZERO_COUNTS = (): Record<Disposition, number> => ({
  * the ONE gated action per PR (deduped against prior actions for idempotence),
  * writes one `sweep.disposed` ledger line per PR, and returns a summary both
  * callers can log.
+ *
+ * W1-T473 — REVIEW CONCURRENCY: every disposition EXCEPT `post-review` still
+ * runs exactly as before, one PR at a time, in `openPrs` order. `post-review`
+ * PRs are instead collected and run in a SECOND, bounded-concurrency phase
+ * after the walk — up to `Math.max(1, policy.dispatchLanes)` `postReview`
+ * calls in flight at once (the same lane number dispatch uses), each against
+ * a DISTINCT `${taskId}@${headSha}` key claimed synchronously during the walk
+ * (real mutual exclusion the single-threaded walk used to supply for free —
+ * see `PriorActions.postReviewed`'s doc). A review beyond budget stands down
+ * this pass and is re-derived on the next one — a ceiling, never a target: a
+ * pass with zero eligible reviews starts zero lanes. `summary.actions` still
+ * comes back in `openPrs` order regardless of which phase finalized each PR.
  */
 export async function runSweep(
   openPrs: OpenPrView[],
@@ -2206,12 +2242,119 @@ export async function runSweep(
   const prior = priorActionsFromLedger(ledgerLines);
 
   const byDisposition = ZERO_COUNTS();
-  const actions: SweepAction[] = [];
+  // Filled by INDEX, never pushed — post-review actions below are finalized
+  // out of pass order (concurrently, in a second phase), so `actions[i]` is
+  // the only way to keep the "in input order" invariant {@link
+  // SweepSummary.actions}'s own doc promises while still letting reviews run
+  // concurrently with each other.
+  const actions: SweepAction[] = new Array(openPrs.length);
   let actionsTaken = 0;
   // W1-T99: counted distinctly from actionsTaken/noneCount so a caller can tell
   // "nothing to do" from "something threw" at a glance — see renderSweepSummary.
   let actionsFailed = 0;
   let noneCount = 0;
+
+  // ── W1-T473 — REVIEW CONCURRENCY BUDGET STATE ──────────────────────────────
+  // `claimedReviewKeys` is the REAL mutual exclusion concurrency needs and
+  // never had before this task: `prior.postReviewed` (built once, above, from
+  // the ledger) is a snapshot taken BEFORE this pass's own postReview calls
+  // can write anything back — safe under a single-threaded walk (no second
+  // reader exists between that read and a ledger write), unsafe the moment
+  // two `post-review` PRs are handled at once. This set is consulted and
+  // updated SYNCHRONOUSLY, in the loop below, before any `postReview` call is
+  // even scheduled — no `await` ever separates a key's check from its claim,
+  // so two PRs sharing a `${taskId}@${headSha}` key can never both schedule a
+  // concurrent call for it (the acceptance-1 falsifier this task closes).
+  const claimedReviewKeys = new Set<string>();
+  // Reviews eligible this pass, deferred out of the main walk so they can run
+  // CONCURRENTLY with each other (bounded below), rather than one at a time
+  // inside it — see `reviewLanes` after the loop.
+  const pendingReviews: Array<{
+    index: number;
+    pr: OpenPrView;
+    reason: string;
+    question: ClarificationQuestion | undefined;
+  }> = [];
+
+  /**
+   * The tail every disposition shares once its `acted`/`actionError`/
+   * `standDownReason` are known — factored out so the main walk (synchronous
+   * dispositions) and the concurrent review batch (below) ledger and log
+   * IDENTICALLY. Unconditional counting (`actionsTaken`/`actionsFailed`)
+   * matches the original inline placement exactly: a deduped/wait PR reaches
+   * here with `acted:false` and no `actionError`, so neither counter moves.
+   */
+  function finalizeDisposition(
+    index: number,
+    pr: OpenPrView,
+    disposition: Disposition,
+    reason: string,
+    question: ClarificationQuestion | undefined,
+    acted: boolean,
+    deduped: boolean,
+    actionError: string | undefined,
+    standDownReason: string | undefined,
+    depReviewOutcome: string | undefined,
+  ): void {
+    if (standDownReason) {
+      // The site the TASK names ("a sweep disposition"), naming the state —
+      // never silent: a caller diffing the ledger sees exactly why a
+      // blocked-fixable disposition spent nothing this pass.
+      log("sweep.dispose.not_open", { pr_number: pr.prNumber, reason: standDownReason });
+    }
+
+    actions[index] = {
+      prNumber: pr.prNumber,
+      prUrl: pr.prUrl,
+      taskId: pr.taskId,
+      disposition,
+      reason,
+      acted,
+      question,
+      ...(actionError ? { actionError } : {}),
+    };
+
+    log("sweep.dispose", {
+      pr_number: pr.prNumber,
+      disposition,
+      acted,
+      reason,
+      deduped,
+      ...(actionError ? { action_error: actionError } : {}),
+      // W1-T254: the exact ambiguity that misread a dry-run line as a daemon
+      // action during the #707 diagnosis — THIS line (unlike the ledgered
+      // `sweep.disposed` below) fires unconditionally through the injected
+      // `log`, which the real wiring persists to the SAME ledger regardless
+      // of `--dry-run`. Tagged so a preview pass is never mistaken for one.
+      ...(deps.dryRun ? { dry_run: true } : {}),
+    });
+
+    // One ledger line per disposition (the INVARIANT). Skipped under --dry-run —
+    // a preview must leave no trace, so a real run afterward still acts. The
+    // rendered question rides along whenever one exists (W1-T78) — an
+    // UNANSWERED question stays ledgered on every subsequent sweep, even once
+    // `acted` goes false (deduped: no repeat escalate()).
+    if (!deps.dryRun) {
+      appendLine(deps.ledgerPath, {
+        run_id: deps.runId,
+        task_id: pr.taskId ?? "SWEEP",
+        step: "sweep.disposed",
+        pr_number: pr.prNumber,
+        pr_url: pr.prUrl,
+        disposition,
+        acted,
+        reason,
+        head_sha: pr.headSha,
+        ...(depReviewOutcome ? { dep_review_outcome: depReviewOutcome } : {}),
+        ...(actionError ? { action_error: actionError } : {}),
+        ...(standDownReason ? { stand_down_reason: standDownReason } : {}),
+        ...(question ? { question: question.question } : {}),
+      });
+    }
+
+    if (acted) actionsTaken++;
+    else if (actionError) actionsFailed++;
+  }
 
   // ── PER-PASS HEARTBEAT, WRITTEN BEFORE THE LOOP ────────────────────────────────────────────
   // A BLIND SWEEP AND A QUIET FLEET ARE INDISTINGUISHABLE without this. `sweep.disposed` writes a
@@ -2247,7 +2390,8 @@ export async function runSweep(
 
   log("sweep.pass", { enumerated: openPrs.length, dry_run: deps.dryRun === true });
 
-  for (const pr of openPrs) {
+  for (let prIndex = 0; prIndex < openPrs.length; prIndex++) {
+    const pr = openPrs[prIndex];
     const { disposition, reason } = deriveDisposition(pr, policy, now);
     byDisposition[disposition]++;
 
@@ -2329,6 +2473,11 @@ export async function runSweep(
     // poll). Named here and ledgered on THIS PR's own `sweep.disposed` line
     // below instead — the loop always reaches the next PR.
     let actionError: string | undefined;
+    // W1-T473: set true ONLY by the "post-review" case below when a real
+    // `postReview` dep is wired and eligible to run — this PR's finalize call
+    // is deferred to the bounded concurrent batch after the loop, never run
+    // inline here.
+    let deferredReview = false;
 
     if (acted) {
       // W1-T254 — LIGHT-SWEEP RESTRICTION: `actionable` defaults to
@@ -2336,9 +2485,11 @@ export async function runSweep(
       // the daemon's per-iteration full sweep are unchanged. The daemon's
       // restricted light-sweep ticker (running CONCURRENTLY with an
       // in-flight `runOne`) passes `d => d === "post-review"` so only that
-      // deterministic, sha-pinned, mutex-serialized re-post ever runs
-      // alongside a task — every other lane stands down here, re-derived
-      // and re-attempted (never dropped) on the very next full sweep.
+      // deterministic, sha-pinned re-post ever runs alongside a task —
+      // every other lane stands down here, re-derived and re-attempted
+      // (never dropped) on the very next full sweep. See `SweepDeps.actionable`'s
+      // own doc for why "mutex-serialized" no longer describes this ONE lane
+      // as of W1-T473.
       if (deps.actionable && !deps.actionable(disposition)) {
         acted = false;
         standDownReason = "deferred to full sweep (light pass)";
@@ -2514,7 +2665,14 @@ export async function runSweep(
               break;
             case "post-review":
               if (deps.postReview) {
-                await deps.postReview(pr);
+                // W1-T473: NEVER await inline — that is exactly the "reviews
+                // run one at a time" shape this task removes. This PR's own
+                // key is claimed and it is queued into `pendingReviews`
+                // immediately below (still inside this same synchronous
+                // switch/try, before any `await` in this iteration), and the
+                // actual call + finalize happen in the bounded concurrent
+                // batch after the loop.
+                deferredReview = true;
               } else {
                 acted = false;
                 standDownReason = "no postReview dep wired — ungated PR left for the operator lane";
@@ -2542,66 +2700,111 @@ export async function runSweep(
           });
         }
       }
-      if (acted) actionsTaken++;
-      else if (actionError) actionsFailed++;
     }
 
-    if (standDownReason) {
-      // The site the TASK names ("a sweep disposition"), naming the state —
-      // never silent: a caller diffing the ledger sees exactly why a
-      // blocked-fixable disposition spent nothing this pass.
-      log("sweep.dispose.not_open", { pr_number: pr.prNumber, reason: standDownReason });
+    if (deferredReview) {
+      // W1-T473 — THE MUTEX: claim (or refuse) this PR's review key
+      // SYNCHRONOUSLY, right here, with no `await` between the `has` check
+      // and the `add` — that is the entire guarantee two PRs sharing a
+      // `${taskId}@${headSha}` key can never both queue a concurrent
+      // `postReview` call for it (acceptance 1). A duplicate stands down
+      // exactly like any other dedup, never a crash or a silent drop.
+      const reviewKey = `${pr.taskId ?? ""}@${pr.headSha}`;
+      if (claimedReviewKeys.has(reviewKey)) {
+        finalizeDisposition(
+          prIndex,
+          pr,
+          disposition,
+          reason,
+          question,
+          false,
+          true,
+          undefined,
+          `duplicate review key (${reviewKey}) already claimed this pass — see PriorActions.postReviewed's doc`,
+          undefined,
+        );
+      } else {
+        claimedReviewKeys.add(reviewKey);
+        pendingReviews.push({ index: prIndex, pr, reason, question });
+      }
+      continue;
     }
 
-    actions.push({
-      prNumber: pr.prNumber,
-      prUrl: pr.prUrl,
-      taskId: pr.taskId,
-      disposition,
-      reason,
-      acted,
-      question,
-      ...(actionError ? { actionError } : {}),
-    });
-
-    log("sweep.dispose", {
-      pr_number: pr.prNumber,
-      disposition,
-      acted,
-      reason,
-      deduped: alreadyDone,
-      ...(actionError ? { action_error: actionError } : {}),
-      // W1-T254: the exact ambiguity that misread a dry-run line as a daemon
-      // action during the #707 diagnosis — THIS line (unlike the ledgered
-      // `sweep.disposed` below) fires unconditionally through the injected
-      // `log`, which the real wiring persists to the SAME ledger regardless
-      // of `--dry-run`. Tagged so a preview pass is never mistaken for one.
-      ...(deps.dryRun ? { dry_run: true } : {}),
-    });
-
-    // One ledger line per disposition (the INVARIANT). Skipped under --dry-run —
-    // a preview must leave no trace, so a real run afterward still acts. The
-    // rendered question rides along whenever one exists (W1-T78) — an
-    // UNANSWERED question stays ledgered on every subsequent sweep, even once
-    // `acted` goes false (deduped: no repeat escalate()).
-    if (!deps.dryRun) {
-      appendLine(deps.ledgerPath, {
-        run_id: deps.runId,
-        task_id: pr.taskId ?? "SWEEP",
-        step: "sweep.disposed",
-        pr_number: pr.prNumber,
-        pr_url: pr.prUrl,
-        disposition,
-        acted,
-        reason,
-        head_sha: pr.headSha,
-        ...(depReviewOutcome ? { dep_review_outcome: depReviewOutcome } : {}),
-        ...(actionError ? { action_error: actionError } : {}),
-        ...(standDownReason ? { stand_down_reason: standDownReason } : {}),
-        ...(question ? { question: question.question } : {}),
-      });
-    }
+    finalizeDisposition(prIndex, pr, disposition, reason, question, acted, alreadyDone, actionError, standDownReason, depReviewOutcome);
   }
+
+  // ── W1-T473 — REVIEW CONCURRENCY BUDGET ────────────────────────────────────
+  // Reviews get their OWN lane ceiling, honouring the SAME number dispatch
+  // uses (`policy.dispatchLanes`, `daemon.ts`'s `laneCount`) — a SECOND
+  // consultation of that one field, never a sibling policy key: dispatch's
+  // own meaning is untouched (still the field `daemon.ts`/
+  // `test/policy-consumers.test.ts` read), and a review ceiling is not a
+  // concept that needs its own live-reload gap yet. Floored at 1 exactly like
+  // `daemon.ts`'s `laneCount` — a misconfigured `dispatchLanes: 0` must never
+  // silently mean "review nothing".
+  //
+  // A CEILING, NOT A TARGET: `reviewLanes` only ever bounds `pendingReviews`
+  // — the reviews THIS PASS already found eligible, above. It never goes
+  // looking for work: a pass with zero eligible reviews runs `Promise.all([])`
+  // and starts zero lanes (acceptance 3).
+  const reviewLanes = Math.max(1, policy.dispatchLanes);
+  const runNow = pendingReviews.slice(0, reviewLanes);
+  const deferredToNextPass = pendingReviews.slice(reviewLanes);
+
+  // SKIP, NOT QUEUE OR BLOCK (design (iii)): a review beyond budget stands
+  // down THIS pass, `acted:false`, with no new persisted state — its ledger
+  // dedup key is untouched, so `deriveDisposition` reclassifies it
+  // "post-review" again next pass, typically within one poll interval
+  // (measured ~60s median). Queueing would survive past the pass that built
+  // it; blocking would risk this tick outrunning its own interval.
+  for (const job of deferredToNextPass) {
+    finalizeDisposition(
+      job.index,
+      job.pr,
+      "post-review",
+      job.reason,
+      job.question,
+      false,
+      false,
+      undefined,
+      `review budget exhausted this pass (${reviewLanes} lane(s) in use) — re-derived next pass`,
+      undefined,
+    );
+  }
+
+  // BOUNDED CONCURRENCY: at most `reviewLanes` calls in flight, each against a
+  // DISTINCT `taskId@headSha` key (mutual exclusion already enforced above,
+  // synchronously, before any of these were queued) — so running them
+  // together is safe, never a double-post race. `Promise.all`, not
+  // `allSettled`: each job's own try/catch below already turns a throw into
+  // `acted:false` + its own `sweep.action_failed` line, the SAME per-PR throw
+  // containment (W1-T254) every other disposition gets — nothing here can
+  // reject the outer promise.
+  const postReview = deps.postReview;
+  await Promise.all(
+    runNow.map(async (job) => {
+      let acted = true;
+      let actionError: string | undefined;
+      if (postReview) {
+        try {
+          await postReview(job.pr);
+        } catch (e) {
+          acted = false;
+          actionError = String((e as Error)?.message ?? e);
+          appendLine(deps.ledgerPath, {
+            run_id: deps.runId,
+            task_id: job.pr.taskId ?? "SWEEP",
+            step: "sweep.action_failed",
+            pr_number: job.pr.prNumber,
+            pr_url: job.pr.prUrl,
+            disposition: "post-review",
+            error: actionError,
+          });
+        }
+      }
+      finalizeDisposition(job.index, job.pr, "post-review", job.reason, job.question, acted, false, actionError, undefined, undefined);
+    }),
+  );
 
   const summary: SweepSummary = {
     total: openPrs.length,
