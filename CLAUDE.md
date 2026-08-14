@@ -205,20 +205,20 @@ forensic detail, so the narrative does not need to live here.
   ledger-only scan cannot see it. A ledger-built set gave 236 ids and offered long-merged work as
   runnable, naming W1-T227/W1-T192 as the frontier when both had merged weeks earlier (#527, #457).
   Trailers give 301; unioned with the ledger, 311.
-  **AND A TRAILER-ONLY SET UNDER-CREDITS, because the BRANCH NAME is a second, independent credit
+- **AND A TRAILER-ONLY SET UNDER-CREDITS, because the BRANCH NAME is a second, independent credit
   path.** `findMergedByHeadBranch` (`status.ts`) matches `run-<taskId>-<digits>` on the STRUCTURED
   head ref and credits a merge with no trailer at all. MEASURED: **#1657 carries ZERO
   `Remudero-Task:` lines** (`grep -acE '^Remudero-Task:'` on its body = 0) and W1-T444 is credited
   anyway, purely by its `run-W1-T444-1786560477` head. So union the two, or you will re-dispatch a
   task that shipped.
-  **THE TWO SCOPE-TIME CHECKS, AS COMMANDS — RUN BOTH BEFORE BUILDING A FILED TASK.** They answer
+- **THE TWO SCOPE-TIME CHECKS, AS COMMANDS — RUN BOTH BEFORE BUILDING A FILED TASK.** They answer
   DIFFERENT questions and neither substitutes for the other:
   `git ls-remote --heads origin 'run-<id>-*'`   # is someone working on it RIGHT NOW
   `gh api "repos/<owner>/<repo>/pulls?state=closed&per_page=100" --jq '[.[]|select(.merged_at!=null)|select(.body//""|test("(?m)^Remudero-Task:[ \t]*<id>[ \t]*$"))|.number]'`   # has it ALREADY SHIPPED
   Anchor the trailer test exactly (`^Remudero-Task:\s*<id>\s*$`, multiline) — GitHub's search is NOT
   exact-phrase, and unioning COMMIT SUBJECTS over-credits because `chore(plan): file W1-T411` names a
   task the filing never implemented. Add the head-ref query above when the trailer scan returns zero.
-  **NAME A SESSION BRANCH `run-<taskId>-<epochMs>` WHEN BUILDING A FILED TASK.** It is the only thing
+- **NAME A SESSION BRANCH `run-<taskId>-<epochMs>` WHEN BUILDING A FILED TASK.** It is the only thing
   that makes session work visible to the fleet: `isDispatchEligible` (`drain.ts`) consults
   `opts.isOpenPr`, and `projectPlan` attributes an OPEN PR by `/^run-(.+)-\d+$/` against
   `headRefName` — NOT by the trailer — so a PR on `fix/…`, `docs/…`, `chore/…` or `claude/…` is
@@ -322,7 +322,7 @@ forensic detail, so the narrative does not need to live here.
   (`src/lib/ledger.ts`) returns `<base>.<stamp>.ndjson` and **nothing in the repo runs `gzip`**, so
   PLAIN IS WHAT THE CODE WRITES and the `.gz` corpus is out-of-band compression that has not run
   since. Expect the plain half to grow; never assume either half is empty.
-  **Both one-sided globs are live defects, in OPPOSITE directions**: the sanctioned-until-now
+- **Both one-sided globs are live defects, in OPPOSITE directions**: the sanctioned-until-now
   `.gz`-only form hid **34,861 rows (8.3% of the corpus), every row rotated out since
   2026-08-05T10:56:55Z** — mostly `board_gateway.*` and `sweep.*`; and `ledger.*.ndjson` alone
   misses all 666 `.gz`. **`src/` HAD the same bug both ways; W1-T444/#1657 (commit 70d52c2) fixed
@@ -332,12 +332,12 @@ forensic detail, so the narrative does not need to live here.
   in-process reader**; the three-pattern zgrep stays the out-of-process shell idiom. The check:
   `grep -c ledgerRotationEntries src/lib/ledger-grep.ts src/run-task.ts` — non-zero in both, or
   this bullet has gone stale again.
-  **THE CONTROL MUST PROVE EACH FORM WAS READ, and a raw cross-archive count CANNOT** — rotations
+- **THE CONTROL MUST PROVE EACH FORM WAS READ, and a raw cross-archive count CANNOT** — rotations
   duplicate heavily, so `run.start` reads **257,438 raw lines across the `.gz` alone but only 779
   distinct over the full union**: a control like that stays six figures while a whole form is
   missed, which is exactly how this survived. Control by FILE COUNT PER FORM (`ls` each pattern,
   require every non-empty form to be non-zero), or by a per-form match count.
-  **And the archives are NOT cumulative snapshots.** `rotateLedger` keeps only
+- **And the archives are NOT cumulative snapshots.** `rotateLedger` keeps only
   `MAX_RETAINED_LINES_PER_STEP = 200` newest per step and archives the rest, so most history exists
   ONLY in older archives — deleting any destroys unique data and the newest subsumes nothing.
   Claims of the form "N occurrences", and especially "zero in the entire history", are unsupportable
@@ -431,7 +431,7 @@ forensic detail, so the narrative does not need to live here.
   **And note the two directions a control can be too weak: (c) is one — A CONTROL THAT PROVES THE
   CORPUS IS READABLE DOES NOT PROVE THE QUERY COVERS IT — and (a) is the other, where the control
   passes because you unwittingly ran a DIFFERENT engine than the sweep did.**
-  **(a) A POSIX REGEX ENGINE HERE SILENTLY DROPS `\s`/`\b` INSTEAD OF ERRORING, AND TWO DIFFERENT
+- **(a) A POSIX REGEX ENGINE HERE SILENTLY DROPS `\s`/`\b` INSTEAD OF ERRORING, AND TWO DIFFERENT
   TOOLS DO IT.** Both are GNU extensions; a POSIX engine matches something else and reports a clean
   zero. `awk` is mawk: over a file containing `  let b = 2;`, `/^[[:space:]]+(let|const)/` matches 1
   and `/^\s+(let|const)/` matches 0 — one session's declaration scan used the `\s` form, reported an
@@ -450,7 +450,7 @@ forensic detail, so the narrative does not need to live here.
   ignores `\b` while a terminal `-E` honours it — its own cited example,
   `git grep -lE '\busr/bin\b' -- CLAUDE.md`, returns 1 rather than the 0 it recorded, so the
   mechanism above replaces it)*
-  **(b) THE `grep` IN THIS HARNESS IS A ugrep WRAPPER WITH `-I` (ignore-binary) INJECTED, so a file
+- **(b) THE `grep` IN THIS HARNESS IS A ugrep WRAPPER WITH `-I` (ignore-binary) INJECTED, so a file
   holding ONE NUL byte is skipped entirely — no output, exit 1, indistinguishable from real
   absence.** THE POPULATION IS NOW ZERO AND A GATE HOLDS IT THERE — W1-T438/#1664 applied the
   durable fix (write the separator as the `\0` ESCAPE, byte-identical: same string, same length,
@@ -469,7 +469,7 @@ forensic detail, so the narrative does not need to live here.
   Today it returns three `.png` and no sources. `git grep --cached -I -l ''` is NOT a substitute: git
   sniffs only the first 8000 bytes, and the two files that mattered carried theirs at 51546 and 8609.
   *(2026-08-11; the count retired and the population emptied 2026-08-12)*
-  **(c) A GLOB THAT NAMES ONE FILE FORM ANSWERS FROM THE OTHER WITHOUT SAYING SO.** The ledger
+- **(c) A GLOB THAT NAMES ONE FILE FORM ANSWERS FROM THE OTHER WITHOUT SAYING SO.** The ledger
   union's `.gz`-only glob returned **0 hits for a pattern with 3 real hits** while its positive
   control read 257k lines — because the control proved the `.gz` half readable and said nothing
   about the plain half it never globbed. Under `bash` a non-matching glob passes through literally
@@ -477,7 +477,7 @@ forensic detail, so the narrative does not need to live here.
   three-pattern idiom and the per-form control are under "Ledger and evidence discipline" above.
   THE GENERAL FORM: control on COVERAGE (did every form get opened?), not on READABILITY (did
   something match?). *(2026-08-12)*
-  **(d) A QUERY CAN ANSWER THE WRONG QUESTION WITH A PERFECTLY GOOD ZERO, AND NO POSITIVE CONTROL
+- **(d) A QUERY CAN ANSWER THE WRONG QUESTION WITH A PERFECTLY GOOD ZERO, AND NO POSITIVE CONTROL
   SAVES YOU.** `git ls-remote --heads origin 'run-<id>-*'` reports live worker branches. GitHub
   DELETES the head on merge, so it returns 0 for every COMPLETED task — MEASURED:
   `run-W1-T444-1786560477` existed 19:01:20Z–19:25:15Z and the query reads 0 today, identical to a
@@ -488,7 +488,7 @@ forensic detail, so the narrative does not need to live here.
   return 1). The defect is that "is anyone working on this" was read as "has this been done". When a
   zero decides something, name the question the query actually answers, and find the OTHER query for
   the other question — both are under "Plan and task hygiene" above. *(2026-08-12)*
-  **(e) A CONTROL PROVES THE QUERY CAN SEE ITS CORPUS; IT DOES NOT PROVE THE CORPUS IS THE RIGHT ONE
+- **(e) A CONTROL PROVES THE QUERY CAN SEE ITS CORPUS; IT DOES NOT PROVE THE CORPUS IS THE RIGHT ONE
   — AND RE-RUNNING THE SAME WAY IS NOT A SECOND OPINION.** (a)-(d) are all ZEROS; THIS ONE IS A
   CONFIDENT NON-ZERO, which is why the section's own framing does not catch it. MEASURED 2026-08-13:
   `tsc` reported four `api-client` errors inside a session's ad-hoc container. The session stashed its
@@ -506,7 +506,7 @@ forensic detail, so the narrative does not need to live here.
   THE CHEAPEST INSTANCE OF THIS ONE IS A SINGLE COMMAND: `readlink -f <workspace-symlink>` prints
   EMPTY when the target sits outside the mount set, which would have settled it in seconds.
   *(2026-08-13)*
-  **(f) THE TWO SIDES OF A COMPARISON MUST COUNT THE SAME UNITS — `ls` COUNTS A DIRECTORY AS ONE
+- **(f) THE TWO SIDES OF A COMPARISON MUST COUNT THE SAME UNITS — `ls` COUNTS A DIRECTORY AS ONE
   ENTRY.** A naive `git ls-tree` vs `ls` tally read 114 vs 111 on an equal tree, because the tree
   side listed files recursively while `ls` collapsed each directory to one row. And ls-tree
   pathspecs do not glob like the shell: `git ls-tree HEAD -- '*.md'` returns ZERO at a root that
