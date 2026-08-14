@@ -1,0 +1,17 @@
+SF:src/lib/shared.ts
+FN:3,myFn
+FN:3,anonymous_1
+FN:7,otherFn
+FNDA:0,anonymous_1
+FNDA:11,myFn
+FNDA:0,otherFn
+DA:1,1
+DA:2,0
+DA:3,0
+DA:4,7
+DA:5,0
+DA:6,0
+DA:7,0
+DA:8,0
+DA:9,0
+end_of_record

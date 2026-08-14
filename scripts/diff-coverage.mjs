@@ -55,13 +55,26 @@ export function parseLcovHitsByFile(lcovText) {
       // FN:<line>,<name> — a function DECLARED at <line>. Under --enable-source-maps the
       // tsx-compiled map scores declaration lines DA:0 even when the function body is fully
       // covered (observed: FN:62 with FNDA:11 beside DA:62,0) — FNDA is the truth for them.
+      // MORE THAN ONE FN record can share a line (an exported function whose declaration line
+      // also carries an anonymous callback/default-param arrow) -- keep every name declared at
+      // that line, not just the last one parsed, so a shared line can still resolve to whichever
+      // of its functions was actually entered (W1-T481).
       const [ln, name] = line.slice(3).split(',');
       if (!fnLines.has(currentPath)) fnLines.set(currentPath, new Map());
-      fnLines.get(currentPath).set(Number(ln), name);
+      const linesAtPath = fnLines.get(currentPath);
+      const lnNum = Number(ln);
+      if (!linesAtPath.has(lnNum)) linesAtPath.set(lnNum, []);
+      linesAtPath.get(lnNum).push(name);
     } else if (line.startsWith('FNDA:') && current) {
+      // FNDA:<hits>,<name> — a hit count for a function NAME. More than one record can share a
+      // name (duplicate FN declarations for the same function), and the only question
+      // `declEntered` ever asks is whether ANY of them is non-zero -- so reduce by "ever
+      // non-zero" rather than last-wins, which could let a later 0 overwrite a real hit (W1-T481).
       const [hits, name] = line.slice(5).split(',');
       if (!fnHits.has(currentPath)) fnHits.set(currentPath, new Map());
-      fnHits.get(currentPath).set(name, Number(hits));
+      const hitsAtPath = fnHits.get(currentPath);
+      const prevHits = hitsAtPath.get(name) ?? 0;
+      hitsAtPath.set(name, prevHits > 0 ? prevHits : Number(hits));
     } else if (line.startsWith('DA:') && current) {
       const [lineNoStr, hitsStr] = line.slice(3).split(',');
       current.set(Number(lineNoStr), Number(hitsStr));
@@ -300,8 +313,11 @@ export function findUncoveredAddedLines(added, lcov) {
     const fnsAt = fnLines.get(file);
     const fnHit = fnHits.get(file);
     const declEntered = (ln) => {
-      const name = fnsAt?.get(ln);
-      return name !== undefined && (fnHit?.get(name) ?? 0) > 0;
+      // A line can carry more than one FN record (a shared declaration line, e.g. an exported
+      // function whose line also declares an anonymous callback) -- the line is covered if ANY
+      // function declared there was entered, not only the one that happened to parse last.
+      const names = fnsAt?.get(ln);
+      return names !== undefined && names.some((name) => (fnHit?.get(name) ?? 0) > 0);
     };
     const uncovered = [...lines.keys()]
       .filter((ln) => hitsByLine.has(ln) && hitsByLine.get(ln) === 0)

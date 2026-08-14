@@ -1,0 +1,14 @@
+diff --git a/src/lib/shared.ts b/src/lib/shared.ts
+new file mode 100644
+--- /dev/null
++++ b/src/lib/shared.ts
+@@ -0,0 +1,9 @@
++const X = 1;
++
++export function myFn(cb = () => 0): number {
++  return X + cb();
++}
++
++function otherFn(): number {
++  return X + 2;
++}

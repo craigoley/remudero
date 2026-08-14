@@ -146,6 +146,31 @@ test("diff-coverage CLI: an UNENTERED function (FNDA:0) still blocks on its unco
   assert.match(result.stderr.toString(), /src\/lib\/newfn\.ts:4/);
 });
 
+// ── W1-T481: a shared FN declaration line must not last-wins-resolve to the wrong function ──
+//
+// fnda-shared-decl.lcov declares TWO functions on the SAME line (3): `myFn` (called, FNDA:11)
+// and `anonymous_1` (a default-param callback, never called, FNDA:0). Before the fix, `fnLines`
+// keyed line 3 by whichever FN record parsed last (`anonymous_1`) and `fnHits` had no collision
+// to hide the bug -- the line resolved to the uncalled anonymous function and DA:3,0 blocked a
+// function that was genuinely entered 11 times. The same fixture also adds `otherFn` (line 7),
+// declared but never called and sharing no line with anyone -- it and its uncovered body (line 8)
+// must still block, proving the fix does not turn the gate permissive.
+test("diff-coverage CLI: a CALLED function sharing its declaration line with an uncalled anonymous callback does NOT block (the fnLines/fnHits last-wins collision, W1-T481)", () => {
+  const result = runDiffCoverage("fnda-shared-decl.lcov", "fnda-shared-decl.diff");
+  assert.doesNotMatch(
+    result.stderr.toString(),
+    /src\/lib\/shared\.ts:3\b/,
+    result.stdout?.toString() + result.stderr?.toString(),
+  );
+});
+
+test("diff-coverage CLI: the SAME shared-decl-line diff still blocks a genuinely uncovered, unshared, never-called function -- the collision fix costs no strictness", () => {
+  const result = runDiffCoverage("fnda-shared-decl.lcov", "fnda-shared-decl.diff");
+  assert.notEqual(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
+  assert.match(result.stderr.toString(), /src\/lib\/shared\.ts:7/);
+  assert.match(result.stderr.toString(), /src\/lib\/shared\.ts:8/);
+});
+
 // ── W1-T221: the `// diff-cov: process-boundary — <reason>` directive ────────
 //
 // Re-exec/exit glue (`spawnSync(process.execPath, …)` then `process.exit(…)`) cannot carry a
