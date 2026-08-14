@@ -394,6 +394,21 @@ case "$FRESHNESS_RESTART_MAX" in
     ;;
 esac
 
+# THE FRESHNESS RETRY GETS ITS OWN, SHORT PAUSE — SEPARATE FROM THE CRASH THROTTLE ABOVE. A
+# freshness restart is one per merge, with a real fetch and checkout between attempts; it is not
+# the shape the crash throttle exists to slow (the measured 2026-08-13 lock storm, same boot
+# failing the same way 13-17s apart). Sleeping the FULL `RESTART_THROTTLE_S` (120s in production)
+# before every in-container re-sync bought nothing but idle time. THE BOUND IS REPLACED, NOT
+# REMOVED: the loop above is still capped at `FRESHNESS_RESTART_MAX` attempts, so worst case is
+# now `FRESHNESS_RESTART_MAX` x `FRESHNESS_RESTART_PAUSE_S` instead of x `RESTART_THROTTLE_S`.
+FRESHNESS_RESTART_PAUSE_S="${RMD_FRESHNESS_RESTART_PAUSE_S:-5}"
+case "$FRESHNESS_RESTART_PAUSE_S" in
+  '' | *[!0-9]*)
+    log "RMD_FRESHNESS_RESTART_PAUSE_S is not a whole number of seconds — ignoring it and using 5"
+    FRESHNESS_RESTART_PAUSE_S=5
+    ;;
+esac
+
 # CAPTURE THE CODE IN THE SAME COMMAND THAT RUNS IT. `if "$@"; then ...; fi; rc=$?` reads $? from
 # the COMPOUND, which is 0 when the condition merely tested false — so a crashing daemon exited 0,
 # docker's `on-failure` saw a success, and the container stayed down through exactly the crash it
@@ -416,8 +431,8 @@ while :; do
   if [ "$rc" -eq "$DAEMON_EXIT_STALE" ] && [ "$freshness_restarts" -lt "$FRESHNESS_RESTART_MAX" ]; then
     freshness_restarts=$((freshness_restarts + 1))
     log "exited $rc (freshness) — restart ${freshness_restarts}/${FRESHNESS_RESTART_MAX} IN-CONTAINER, so docker's on-failure budget is not spent"
-    log "  sleeping ${RESTART_THROTTLE_S}s first, then re-running the fetch/checkout so the staleness actually clears"
-    sleep "$RESTART_THROTTLE_S"
+    log "  sleeping ${FRESHNESS_RESTART_PAUSE_S}s (not the ${RESTART_THROTTLE_S}s crash throttle) then re-running the fetch/checkout so the staleness actually clears"
+    sleep "$FRESHNESS_RESTART_PAUSE_S"
     sync_tree
     log "checkout: $(git -C "$TREE" rev-parse HEAD) ($REF)"
     continue
