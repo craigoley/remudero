@@ -1767,6 +1767,40 @@ interface GateOutcome {
 }
 
 /**
+ * W1-T463 — THE ASYNC DELAY BOTH POLL LOOPS BELOW NOW USE, replacing
+ * `execFileSync("sleep", …)`.
+ *
+ * WHY THIS MATTERS MORE THAN IT LOOKS. `execFileSync` blocks the single JS thread for its whole
+ * duration, so a CI wait froze EVERY timer in the daemon process — including
+ * `startInFlightTicker`'s own `await deps.sleep(pollIntervalMs)`, which is a `setTimeout`. The
+ * ticker was never stopped, slow or replaced: it COULD NOT BE SCHEDULED. The decisive evidence was
+ * a millisecond collision — `daemon.alive` and `verdict W1-T481` both at
+ * `2026-08-14T13:25:35.828Z`, an overdue timer firing the instant the thread was released.
+ *
+ * AND WHY THE LEDGER HID IT: `appendLedger` (`lib/ledger.ts`) is fully synchronous
+ * (`openSync`/`writeSync`/`closeSync`), so `ci.polling` rows kept appearing throughout. Those rows
+ * prove the THREAD was running; they prove nothing about whether the LOOP was turning.
+ */
+export function asyncSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * W1-T463 — the injectable seam for the two poll loops. Appended LAST on both signatures so no
+ * positional caller shifts (the repo's own idiom for adding a seam to a live function).
+ *
+ * `poll` exists so a test can drive the REAL loop without a network: the falsifier this task turns
+ * on is that a timer scheduled BEFORE the wait fires DURING it, which is unobservable if the only
+ * way to run the loop is to let it shell out to `gh`.
+ */
+export interface CiWaitDeps {
+  /** One `gh pr view --json …` reading. Defaults to the real {@link ghJson} call. */
+  poll?: (prUrl: string) => { state?: string; statusCheckRollup?: RollupEntry[] };
+  /** The inter-poll delay. Defaults to {@link asyncSleep}; never a blocking child process. */
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/**
  * Poll a PR to a terminal gate decision. Returns merged only on state MERGED.
  * A red required check short-circuits to blocked. Otherwise this polls until
  * {@link checkWaitStalled} sees no forward motion (pending is never treated as
@@ -1774,14 +1808,23 @@ interface GateOutcome {
  * PRs this repo ever booked as a check-wait timeout later merged, so a bound
  * on ELAPSED POLLS was firing on a healthy PR every single time it fired).
  */
-async function pollToGate(
+export async function pollToGate(
   prUrl: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
   everySec = 6,
+  deps: CiWaitDeps = {},
 ): Promise<GateOutcome> {
+  const poll =
+    deps.poll ??
+    ((u: string) =>
+      ghJson(["pr", "view", u, "--json", "state,statusCheckRollup"]) as {
+        state: string;
+        statusCheckRollup?: RollupEntry[];
+      });
+  const sleep = deps.sleep ?? asyncSleep;
   const readings: (RollupEntry[] | undefined)[] = [];
   for (let i = 0; ; i++) {
-    const v = ghJson(["pr", "view", prUrl, "--json", "state,statusCheckRollup"]) as {
+    const v = poll(prUrl) as {
       state: string;
       statusCheckRollup?: RollupEntry[];
     };
@@ -1812,7 +1855,7 @@ async function pollToGate(
         checks: roll.map((c) => `${c.name ?? c.context}:${c.conclusion ?? c.status ?? c.state}`),
       });
     }
-    execFileSync("sleep", [String(everySec)]);
+    await sleep(everySec * 1000);
   }
 }
 
@@ -1987,10 +2030,18 @@ async function waitForCiGreen(
   prUrl: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
   everySec = 6,
+  deps: CiWaitDeps = {},
 ): Promise<"green" | "red" | "timeout"> {
+  const poll =
+    deps.poll ??
+    ((u: string) =>
+      ghJson(["pr", "view", u, "--json", "statusCheckRollup"]) as {
+        statusCheckRollup?: RollupEntry[];
+      });
+  const sleep = deps.sleep ?? asyncSleep;
   const readings: (RollupEntry[] | undefined)[] = [];
   for (let i = 0; ; i++) {
-    const v = ghJson(["pr", "view", prUrl, "--json", "statusCheckRollup"]) as {
+    const v = poll(prUrl) as {
       statusCheckRollup?: RollupEntry[];
     };
     const state = ciGateFromRollup(v.statusCheckRollup);
@@ -2005,7 +2056,7 @@ async function waitForCiGreen(
       log("ci.stalled", { pending: stall.pending, identicalPolls: STALL_WINDOW });
       return "timeout";
     }
-    execFileSync("sleep", [String(everySec)]);
+    await sleep(everySec * 1000);
   }
 }
 

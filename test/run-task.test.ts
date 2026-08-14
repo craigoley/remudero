@@ -84,6 +84,8 @@ import { readlineAsk, type GitRunner, materializeOriginShards, escalateCommand, 
   runTask,
   buildOpenPrViews,
   STALL_WINDOW,
+  pollToGate,
+  waitForCiGreen,
 } from "../src/run-task.js";
 import { requestStop } from "../src/lib/fleet-control.js";
 import { LaunchdPlistError } from "../src/lib/launchd.js";
@@ -7819,4 +7821,151 @@ test("buildOpenPrViews: an UNREADABLE branch-protection read (gh api fails) sets
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+// ── W1-T463: THE CI WAIT BLOCKED THE EVENT LOOP ─────────────────────────────
+//
+// `waitForCiGreen` (src/run-task.ts) was declared `async` and contained ZERO
+// `await` — control at the time: 166 occurrences of `await ` elsewhere in that
+// file. Its two primitives were both synchronous: `ghJson` is
+// `execFileSync("gh", …)`, and the inter-poll delay was
+// `execFileSync("sleep", [String(everySec)])` — A BLOCKING CHILD PROCESS, NOT A
+// TIMER. So the single JS thread never yielded for the whole CI wait and EVERY
+// timer in the daemon froze, including `startInFlightTicker`'s own
+// `await deps.sleep(pollIntervalMs)`, which is a `setTimeout`.
+//
+// THE TICKER WAS NEVER STOPPED, SLOW OR REPLACED — IT COULD NOT BE SCHEDULED.
+// The decisive evidence was a millisecond collision on Azure: `daemon.alive`
+// and `verdict W1-T481` both stamped 2026-08-14T13:25:35.828Z, an overdue timer
+// firing the instant the thread was released.
+//
+// WHY THE LEDGER HID IT, AND WHY THIS TEST IS SHAPED THE WAY IT IS:
+// `appendLedger` is fully synchronous, so `ci.polling` rows kept appearing all
+// through the frozen window. Rows prove the THREAD ran; they prove NOTHING
+// about the LOOP. So asserting that the function returns the right verdict
+// proves nothing either — IT ALWAYS DID. The only assertion that discriminates
+// is that a timer scheduled BEFORE the wait actually FIRES DURING it, which is
+// what the first test below pins.
+
+test("W1-T463 FALSIFIER: a setTimeout scheduled BEFORE waitForCiGreen fires DURING the wait — the event loop turns instead of freezing", async () => {
+
+  let timerFired = false;
+  let firedBeforeReturn = false;
+  // Scheduled BEFORE the wait begins, and well inside the two 5ms delays below.
+  const timer = setTimeout(() => {
+    timerFired = true;
+  }, 1);
+
+  let polls = 0;
+  const outcome = await waitForCiGreen(
+    "https://github.com/o/r/pull/1",
+    () => {},
+    0.005, // 5ms per delay — real timers, just short
+    {
+      poll: () => {
+        // Pending twice, then green: two real delays elapse inside the call.
+        polls += 1;
+        if (polls >= 3) return { statusCheckRollup: [{ name: "ci", conclusion: "SUCCESS" }] };
+        return { statusCheckRollup: [{ name: "ci", status: "IN_PROGRESS" }] };
+      },
+    },
+  );
+  firedBeforeReturn = timerFired;
+  clearTimeout(timer);
+
+  assert.equal(outcome, "green", "the wait still reaches its verdict");
+  assert.equal(polls, 3, "it really polled through two delays rather than short-circuiting");
+  // THE WHOLE POINT. Under `execFileSync("sleep", …)` the thread never yields, so this
+  // callback cannot run until AFTER the function returns and this reads false.
+  assert.equal(firedBeforeReturn, true, "a timer scheduled before the wait must fire DURING it, not after");
+});
+
+test("W1-T463: pollToGate yields too — fixing only one of the two daemon-reachable sites would leave the symptom alive", async () => {
+
+  let timerFired = false;
+  const timer = setTimeout(() => {
+    timerFired = true;
+  }, 1);
+
+  let polls = 0;
+  const outcome = await pollToGate("https://github.com/o/r/pull/2", () => {}, 0.005, {
+    poll: () => {
+      polls += 1;
+      if (polls >= 3) return { state: "MERGED", statusCheckRollup: [] };
+      return { state: "OPEN", statusCheckRollup: [{ name: "ci", status: "IN_PROGRESS" }] };
+    },
+    // A REAL timer, injected so this case is deterministic: the loop can only reach the
+    // next poll if the event loop turns and fires it. Under the old
+    // `execFileSync("sleep", …)` there was no seam here at all and nothing yielded.
+    sleep: () => new Promise((resolve) => setTimeout(resolve, 1)),
+  });
+  const firedBeforeReturn = timerFired;
+  clearTimeout(timer);
+
+  assert.equal(outcome.merged, true, "the gate still reaches its terminal decision");
+  assert.equal(firedBeforeReturn, true, "pollToGate must yield during its wait as well");
+  assert.ok(polls >= 3, "it polled through at least two delays");
+});
+
+test("W1-T463: the poll CADENCE is unchanged — one delay of exactly everySec between polls, and ci.polling still logs at i===0 and every fifth poll", async () => {
+
+  const slept: number[] = [];
+  const polled: string[] = [];
+  let polls = 0;
+
+  await waitForCiGreen("https://github.com/o/r/pull/3", (step, extra) => {
+    if (step === "ci.polling") polled.push(String((extra ?? {}).ci ?? ""));
+  }, 6, {
+    poll: () => {
+      polls += 1;
+      if (polls >= 7) return { statusCheckRollup: [{ name: "ci", conclusion: "SUCCESS" }] };
+      return { statusCheckRollup: [{ name: "ci", status: "IN_PROGRESS" }] };
+    },
+    sleep: async (ms) => {
+      slept.push(ms);
+    },
+  });
+
+  // A faster cadence would burn the SECONDARY rate limit, which fires on request RATE
+  // rather than volume and has already cost this fleet a 19-minute review blackout at
+  // healthy quota. `everySec` is seconds; the delay must be exactly that in ms.
+  assert.deepEqual(
+    slept,
+    [6000, 6000, 6000, 6000, 6000, 6000],
+    "exactly one 6000ms delay between polls — no extra, no shorter",
+  );
+  // i === 0 || i % 5 === 0 over polls 0..5 (the 7th poll returns green before logging).
+  assert.equal(polled.length, 2, "ci.polling logs at i===0 and i===5, unchanged");
+});
+
+test("W1-T463 direction: a red rollup still returns red and never sleeps", async () => {
+  const slept: number[] = [];
+  const outcome = await waitForCiGreen("https://github.com/o/r/pull/4", () => {}, 6, {
+    poll: () => ({ statusCheckRollup: [{ name: "ci", conclusion: "FAILURE" }] }),
+    sleep: async (ms) => {
+      slept.push(ms);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    },
+  });
+  assert.equal(outcome, "red", "a failing required check is still red");
+  assert.deepEqual(slept, [], "a terminal verdict on the first read must not wait at all");
+});
+
+test("W1-T463 direction: a stalled rollup still returns timeout, so blocked_ci handling is unchanged", async () => {
+  const steps: string[] = [];
+  const outcome = await waitForCiGreen("https://github.com/o/r/pull/5", (s) => steps.push(s), 6, {
+    // Byte-identical rollup every read, and DELIBERATELY NOT a RUNNING status:
+    // `checkWaitStalled` short-circuits to not-stalled whenever
+    // `rollupHasRunningCheck(last)` is true, so an `IN_PROGRESS` fixture here would
+    // never terminate — it would spin forever and, with an instantly-resolving sleep,
+    // starve the event loop for the whole FILE. A `state`-shaped pending entry is
+    // pending to `ciGateFromRollup` and NOT running to `rollupHasRunningCheck`.
+    poll: () => ({ statusCheckRollup: [{ name: "ci", state: "PENDING" }] }),
+    // A real 1ms timer rather than an instant resolve: if a future edit ever does make
+    // this loop non-terminating, the per-test timeout fires instead of the whole file
+    // wedging with no output.
+    sleep: () => new Promise((resolve) => setTimeout(resolve, 1)),
+  });
+  assert.equal(outcome, "timeout", "no forward motion still ends the wait as a timeout");
+  assert.ok(steps.includes("ci.stalled"), "and it still names the stall so a blocked_ci reader can tell it from a slow build");
 });
