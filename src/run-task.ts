@@ -25,7 +25,7 @@ import {
 } from "./lib/config.js";
 import { readFileIfExists } from "./lib/fs-race-safe.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
-import { bodyVsDiffContractLines, IMPLEMENT_ROLE_LINES, outputContractLines, renderAnchorBlock, commitMessageContractLines, ciParityContractLines } from "./lib/compaction.js";
+import { bodyVsDiffContractLines, IMPLEMENT_ROLE_LINES, outputContractLines, renderAnchorBlock, commitMessageContractLines } from "./lib/compaction.js";
 import {
   lintFiledTasks,
   newMonolithIdsAgainstBase,
@@ -2685,11 +2685,13 @@ export function renderFixPrompt(opts: {
     // literal the implement contract uses, so the two prompts cannot drift.
     ...commitMessageContractLines(),
     `branch (only a run-<taskId>-<epochMs> head is creditable).`,
-    // impl-FV shape, same reason as commitMessageContractLines/bodyVsDiffContractLines above:
-    // the SAME literal the implement contract carries (W1-T295), so a fix-rung push cannot
-    // skip the gate the implement lane requires.
-    ...ciParityContractLines(),
-    `Only once that passes: \`git push origin HEAD\` (no -u) — never force-push. Your PR body`,
+    // W1-T464: this rung used to spread ciParityContractLines() here — the same
+    // `rmd preflight --ci-parity` obligation the implement contract carried (W1-T295) — but the
+    // orchestrator never gated on a preflight failure (run-task.ts's own handling of it has no
+    // branch, no early return), so the ~15-17 minute step was paid on every fix round without
+    // ever blocking one. Removed from BOTH prompts together (see lib/compaction.ts); the verb
+    // itself (`rmd preflight --ci-parity`) is untouched and remains the hand route's own gate.
+    `Then: \`git push origin HEAD\` (no -u) — never force-push. Your PR body`,
     `must substantiate EVERY task acceptance`,
     `criterion, not only the ones fixed here — the review floor judges the body against the`,
     // impl-FV: the SAME literal the implement contract carries, for the same reason
