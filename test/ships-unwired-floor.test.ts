@@ -279,6 +279,38 @@ diff --git a/src/lib/a.ts b/src/lib/a.ts
   assert.equal(undeclared.unwiredAdvisories?.length ?? 0, 0);
 });
 
+// W1-T458 — the fourth SHIPS-UNWIRED reason code, `unresolved_task_scope` (the #1731 near-miss:
+// a PR merged with no `Remudero-Task:` trailer, neither credit path resolved, and the daemon
+// re-dispatched the task it had just merged). Full acceptance coverage lives in
+// test/review-trailer-absent-advisory.test.ts; this is a sanity check that it shares this floor's
+// machinery (unwiredAdvisories, the same fail-closed/advisory-only discipline) cleanly.
+test("W1-T458: unresolved_task_scope fires only when NO task is resolved AND an open task's declared src/test scope overlaps the diff — always ADVISORY ONLY", () => {
+  const diff = `
+diff --git a/src/lib/c.ts b/src/lib/c.ts
++++ b/src/lib/c.ts
+@@
+-const x = 1;
++const x = 2;
+`.trim();
+  const openTaskDeclaredFiles = new Map([["W1-T452", ["src/lib/c.ts"]]]);
+
+  const v = judgeReview(SIMPLE_CRITERIA, { diff, report: SIMPLE_REPORT, openTaskDeclaredFiles });
+
+  assert.equal(v.state, "success", "unresolved_task_scope is ADVISORY ONLY — never fails the review");
+  const advisory = v.unwiredAdvisories?.find((a) => a.reasonCode === "unresolved_task_scope");
+  assert.ok(advisory);
+  assert.deepEqual(advisory?.symbols, ["src/lib/c.ts"]);
+
+  // Resolved (taskDeclaredFiles present) ⇒ silent, even with the same overlapping open task.
+  const resolved = judgeReview(SIMPLE_CRITERIA, {
+    diff,
+    report: SIMPLE_REPORT,
+    taskDeclaredFiles: ["src/lib/c.ts"],
+    openTaskDeclaredFiles,
+  });
+  assert.equal(resolved.unwiredAdvisories?.filter((a) => a.reasonCode === "unresolved_task_scope").length, 0);
+});
+
 // ── ACCEPTANCE #4 ────────────────────────────────────────────────────────────────────────
 // "the seam-default discount holds: an export referenced in its own file beyond its
 // definition is never flagged"

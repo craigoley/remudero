@@ -272,11 +272,34 @@ export interface ReviewEvidence {
    * check in this file defaults toward.
    */
   openTaskIds?: ReadonlySet<string>;
+  /**
+   * W1-T458 (the untrailered-implementation gap): task id → that OPEN task's declared `files:`
+   * scope, for EVERY open task in the loaded plan — a richer sibling of {@link openTaskIds} (ids
+   * only, no files), consulted ONLY to name which open task's scope an UNRESOLVED diff overlaps.
+   * "Unresolved" is read off {@link taskDeclaredFiles} being absent/empty — the SAME resolved-task
+   * signal {@link inverseScopeUntouchedFiles}/{@link scopeViolationFiles} already fail-closed on —
+   * NEVER off whether the report/diff carries a `Remudero-Task:` trailer. That distinction is
+   * load-bearing (#1731's rationale): `test/fixtures/golden-verdicts/scope-creep` injects {@link
+   * taskDeclaredFiles} directly and carries no trailer in any fixture file, so a trigger keyed on
+   * "no trailer in the body" would misfire on it and shift `golden.yaml`; keyed on "no task
+   * resolved" it stays untouched, because that fixture's task IS resolved (declared files are
+   * present) whether or not a trailer string appears anywhere. Absent/empty ⇒ the advisory never
+   * fires — same fail-closed default as every W1-T322/W1-T401 advisory input, and byte-identical
+   * to every caller/fixture that predates this task (no caller populates it yet; wiring the real
+   * plan data through at the `rmd review`/dispatch call sites is follow-up work outside this
+   * task's declared `src/run-task.ts`-free scope).
+   */
+  openTaskDeclaredFiles?: ReadonlyMap<string, readonly string[]>;
 }
 
 /** See {@link ReviewVerdict.unwiredAdvisories}'s doc for what each code means and why
  *  `net_state_claim` never appears here (retro-time only). */
-export type UnwiredReasonCode = "unwired_export" | "inverse_scope" | "scope_violation" | "net_state_claim";
+export type UnwiredReasonCode =
+  | "unwired_export"
+  | "inverse_scope"
+  | "scope_violation"
+  | "net_state_claim"
+  | "unresolved_task_scope";
 
 /** One SHIPS-UNWIRED advisory line (W1-T322) — see {@link ReviewVerdict.unwiredAdvisories}. */
 export interface UnwiredAdvisory {
@@ -482,8 +505,8 @@ export interface ReviewVerdict {
    * flips severity once a measured false-positive rate clears a stated threshold). This field
    * NEVER folds into `state`/`floorState`/`capped` — unlike every other structural field on this
    * interface (`criteriaTampered`, `changesetContradictions`, `instrumentEntangled`), which all
-   * force `state` to `"failure"`. Empty array when nothing to advise. THREE reason codes fire here
-   * (a fourth, `net_state_claim`, is retro-time only — see {@link "./retro.js".netStateCapabilityAdvisories}):
+   * force `state` to `"failure"`. Empty array when nothing to advise. FOUR reason codes fire here
+   * (a fifth, `net_state_claim`, is retro-time only — see {@link "./retro.js".netStateCapabilityAdvisories}):
    *   - `unwired_export`   — the diff adds an `export function` {@link scanUnreachedExports}
    *                          cannot find a real caller for, and the report carries neither a
    *                          `WIRED-AT: <file>::<symbol>` marker naming it nor a `SHIPS-UNWIRED:
@@ -509,6 +532,25 @@ export interface ReviewVerdict {
    *                          declared files" as "everything is out of scope" for its own (blocking,
    *                          fallback-only) purpose, a task declaring nothing is never treated here
    *                          as declaring everything.
+   *   - `unresolved_task_scope` — (W1-T458, the #1731 near-miss) NO task resolved for this PR
+   *                          (see {@link ReviewEvidence.taskDeclaredFiles}'s absent/empty
+   *                          fail-closed contract, the SAME resolved-task signal `inverse_scope`/
+   *                          `scope_violation` already read — never a literal "no trailer in the
+   *                          body" check, which would misfire on the `scope-creep` golden fixture)
+   *                          while the diff touches an implementation path (`src/`/`test/`) an
+   *                          OPEN task's declared `files:` scope also names (see {@link
+   *                          ReviewEvidence.openTaskDeclaredFiles}). AN INTERSECTION IS EVIDENCE,
+   *                          NOT PROOF (a task's `files:` list is declared, not derived — it can
+   *                          be stale in either direction), so the detail text is phrased as a
+   *                          QUESTION the PR author answers (naming the suspected task and the
+   *                          overlapping paths), never a claim that this PR IS that task. Restricted
+   *                          to `src/`/`test/` paths specifically because the measured false-positive
+   *                          rate over "touches any declared path" (52%, inflated by plan filings and
+   *                          docs PRs that should earn no credit) collapses to ~11% once narrowed to a
+   *                          declared `src/`/`test/` path — still an ADVISORY, never a refusal, at
+   *                          that rate. FAIL-CLOSED like `inverse_scope`/`scope_violation`: an absent
+   *                          or empty {@link ReviewEvidence.openTaskDeclaredFiles} has nothing to
+   *                          compare, so it never fires.
    * The caller (run-task.ts) ledgers each entry as a `review.unwired_advisory` line naming the
    * PR, the reason code and the symbols — the dataset W1-T323's measurement reads.
    */
@@ -2821,13 +2863,60 @@ function scopeViolationFiles(diffFiles: readonly string[], declaredFiles: readon
 }
 
 /**
+ * IMPLEMENTATION-SHAPED (W1-T458 design (ii)): true for a path this advisory's overlap check
+ * counts at all — `src/` or `test/` only. Narrowing to these two prefixes is what turns the raw
+ * "touches ANY declared path" false-positive rate (measured 52% — inflated by plan filings and
+ * docs PRs that legitimately touch a declared plan/doc path and should earn no task credit) into
+ * the honest ~11% ("touches a declared `src/`/`test/` path") the design's advisory-not-refusal
+ * call rests on.
+ */
+function isImplementationPath(path: string): boolean {
+  return path.startsWith("src/") || path.startsWith("test/");
+}
+
+/**
+ * UNRESOLVED-TASK-SCOPE (W1-T458, the #1731 near-miss — design (i)/(iii)): given the diff's own
+ * file list and EVERY open task's declared scope, name the open task(s) whose `files:` this diff
+ * overlaps — but ONLY when no task has been resolved for this PR at all. "Resolved" is read off
+ * `taskDeclaredFiles` being present/non-empty, the SAME signal {@link inverseScopeUntouchedFiles}/
+ * {@link scopeViolationFiles} already fail-close on — deliberately NEVER a literal scan of `report`
+ * for a `Remudero-Task:` trailer (design (iii): `test/fixtures/golden-verdicts/scope-creep`
+ * injects `taskDeclaredFiles` directly and carries no trailer in any fixture file at all; a
+ * trigger keyed on "no trailer in the body" would misfire on it and shift `golden.yaml`, while
+ * this one — keyed on "no task resolved" — correctly stays silent, because that fixture's task IS
+ * resolved).
+ *
+ * Only counts an overlap through an {@link isImplementationPath} path (design (ii)'s ~11% figure).
+ * FAIL-CLOSED like its siblings: a resolved task, or an absent/empty `openTaskDeclaredFiles`, has
+ * nothing (or no reason) to compare, so this never fires.
+ */
+function unresolvedTaskScopeOverlaps(
+  diffFiles: readonly string[],
+  taskDeclaredFiles: readonly string[] | undefined,
+  openTaskDeclaredFiles: ReadonlyMap<string, readonly string[]> | undefined,
+): Map<string, string[]> {
+  const taskResolved = !!taskDeclaredFiles && taskDeclaredFiles.length > 0;
+  const matches = new Map<string, string[]>();
+  if (taskResolved || !openTaskDeclaredFiles || openTaskDeclaredFiles.size === 0) return matches;
+
+  const implementationDiffFiles = new Set(diffFiles.filter(isImplementationPath));
+  if (implementationDiffFiles.size === 0) return matches;
+
+  for (const [taskId, files] of openTaskDeclaredFiles) {
+    const overlap = files.filter((f) => implementationDiffFiles.has(f));
+    if (overlap.length > 0) matches.set(taskId, overlap);
+  }
+  return matches;
+}
+
+/**
  * Assemble this review's {@link UnwiredAdvisory} list (design (ii)) — ADVISORY ONLY, never
  * consulted by `state`. `checkoutDir` mirrors {@link ReviewEvidence.headCheckoutDir}'s own
  * "absent ⇒ skip" contract: the `unwired_export` reason needs real files to read, so it is
  * silently skipped (not a false "nothing to advise") when no checkout was supplied — exactly the
  * degradation {@link judgeCriterion}'s own `execCtx` already applies to proof execution.
- * `inverse_scope`/`scope_violation` need no checkout (each is a pure diff-files/declared-files
- * comparison, just opposite directions) and always run.
+ * `inverse_scope`/`scope_violation`/`unresolved_task_scope` need no checkout (each is a pure
+ * diff-files/declared-files comparison) and always run.
  */
 function unwiredAdvisoriesFor(
   diff: string,
@@ -2836,6 +2925,7 @@ function unwiredAdvisoriesFor(
   checkoutDir: string | undefined,
   taskDeclaredFiles: string[] | undefined,
   openTaskIds: ReadonlySet<string> | undefined,
+  openTaskDeclaredFiles: ReadonlyMap<string, readonly string[]> | undefined,
 ): UnwiredAdvisory[] {
   const out: UnwiredAdvisory[] = [];
 
@@ -2874,6 +2964,22 @@ function unwiredAdvisoriesFor(
       reasonCode: "scope_violation",
       symbols: violating,
       detail: `diff touches file(s) outside the task's declared scope: ${violating.join(", ")}`,
+    });
+  }
+
+  const unresolvedOverlaps = unresolvedTaskScopeOverlaps(diffFiles, taskDeclaredFiles, openTaskDeclaredFiles);
+  if (unresolvedOverlaps.size > 0) {
+    const named = [...unresolvedOverlaps.entries()].map(([taskId, files]) => `${taskId}: ${files.join(", ")}`);
+    const symbols = [...new Set([...unresolvedOverlaps.values()].flat())].sort();
+    out.push({
+      reasonCode: "unresolved_task_scope",
+      symbols,
+      // A QUESTION, never a claim (design note): this is an overlap the gate cannot verify, not
+      // an assertion that this PR IS one of the named tasks.
+      detail:
+        `no task resolved for this PR, and this diff touches file(s) declared by open task(s) — ` +
+        `${named.join("; ")} — is one of these the task this PR implements? if so, add a ` +
+        `"Remudero-Task: <id>" trailer to the PR body so merge credit resolves.`,
     });
   }
 
@@ -3040,6 +3146,7 @@ export function judgeReview(
     evidence.headCheckoutDir,
     evidence.taskDeclaredFiles,
     evidence.openTaskIds,
+    evidence.openTaskDeclaredFiles,
   );
 
   const unmet = verdicts.filter((v) => !v.met);

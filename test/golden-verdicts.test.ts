@@ -69,10 +69,18 @@ function loadFixture(caseDir: string): Fixture {
     ? (parseYaml(readFileSync(declaredFilesPath, "utf8")) as string[])
     : undefined;
 
+  // W1-T458 — ReviewEvidence.openTaskDeclaredFiles: an OPTIONAL id → declared-files map for open
+  // tasks OTHER than this fixture's own (see scope-creep/open-task-declared-files.yaml). Absent
+  // for every case that predates this task, matching the fail-closed default.
+  const openTaskFilesPath = join(dir, "open-task-declared-files.yaml");
+  const openTaskDeclaredFiles = existsSync(openTaskFilesPath)
+    ? new Map(Object.entries(parseYaml(readFileSync(openTaskFilesPath, "utf8")) as Record<string, string[]>))
+    : undefined;
+
   const checkoutDir = join(dir, "checkout");
   const headCheckoutDir = existsSync(checkoutDir) ? checkoutDir : undefined;
 
-  return { evidence: { diff, report, taskDeclaredFiles, headCheckoutDir }, criteria, golden };
+  return { evidence: { diff, report, taskDeclaredFiles, openTaskDeclaredFiles, headCheckoutDir }, criteria, golden };
 }
 
 /** Assert the verdict `judgeReview` actually computed against every fact `golden.yaml` named —
@@ -147,6 +155,19 @@ test("GOLDEN — SCOPE CREEP: a diff touching a file outside the task's declared
   const { verdict, golden } = judgeCase("scope-creep");
   assert.equal(golden.violation, "scope-creep");
   assertGolden(verdict, golden);
+
+  // W1-T458 (acceptance #3): this fixture's task IS resolved (declared-files.yaml is non-empty)
+  // AND its report carries no `Remudero-Task:` trailer at all (design (iii)'s own example) AND
+  // (via open-task-declared-files.yaml) a DIFFERENT open task declares the very file this diff
+  // touches — three conditions that, keyed on "no trailer in the body" instead of "no task
+  // resolved", would together mis-fire the new advisory and shift this golden case. Keyed
+  // correctly, it must stay silent: the golden fixture does not shift.
+  assert.doesNotMatch(readFileSync(join(FIXTURES_ROOT, "scope-creep", "report.md"), "utf8"), /Remudero-Task:/);
+  assert.equal(
+    verdict.unwiredAdvisories?.filter((a) => a.reasonCode === "unresolved_task_scope").length ?? 0,
+    0,
+    "a resolved task must never trip unresolved_task_scope, trailer or no trailer",
+  );
 });
 
 test("GOLDEN — PROVENANCE-FREE: a report claiming a path was untouched while the diff touches it fails review", () => {

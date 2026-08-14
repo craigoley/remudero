@@ -134,3 +134,43 @@ diff --git a/src/lib/rogue-two.ts b/src/lib/rogue-two.ts
   assert.deepEqual(inverse?.symbols, ["src/lib/never-touched.ts"]);
   assert.deepEqual([...(violation?.symbols ?? [])].sort(), ["src/lib/rogue-one.ts", "src/lib/rogue-two.ts"]);
 });
+
+// ── ACCEPTANCE #4 (W1-T458) ──────────────────────────────────────────────────────────────
+// "the two existing scope comparisons keep their current behaviour in both directions" — proven
+// by running them BESIDE the new unresolved_task_scope advisory (ReviewEvidence.
+// openTaskDeclaredFiles) and showing every count above is unchanged.
+
+test("ACCEPTANCE #4 (W1-T458): inverse_scope and scope_violation are unaffected by openTaskDeclaredFiles / unresolved_task_scope sharing the same unwiredAdvisories array", () => {
+  const diff = `
+diff --git a/src/lib/a.ts b/src/lib/a.ts
++++ b/src/lib/a.ts
+@@
+-const x = 1;
++const x = 2;
+diff --git a/src/lib/rogue.ts b/src/lib/rogue.ts
++++ b/src/lib/rogue.ts
+@@
++export const rogue = true;
+`.trim();
+  const declaredFiles = ["src/lib/a.ts"]; // this PR's OWN task IS resolved
+
+  // An unrelated open task also happens to declare rogue.ts — if unresolved_task_scope's
+  // "resolved" check were wrong (e.g. keyed off something other than taskDeclaredFiles), this
+  // could smuggle a THIRD advisory in and change counts a reader keys off unwiredAdvisories.length
+  // for. It must not: scope_violation still names exactly rogue.ts, and unresolved_task_scope
+  // stays silent because the task IS resolved.
+  const openTaskDeclaredFiles = new Map([["W1-T999", ["src/lib/rogue.ts"]]]);
+
+  const v = judgeReview(SIMPLE_CRITERIA, { diff, report: SIMPLE_REPORT, taskDeclaredFiles: declaredFiles, openTaskDeclaredFiles });
+
+  const scopeViolation = v.unwiredAdvisories?.find((a) => a.reasonCode === "scope_violation");
+  assert.ok(scopeViolation, "scope_violation still fires exactly as before");
+  assert.deepEqual(scopeViolation?.symbols, ["src/lib/rogue.ts"]);
+  assert.equal(v.unwiredAdvisories?.filter((a) => a.reasonCode === "inverse_scope").length, 0);
+  assert.equal(
+    v.unwiredAdvisories?.filter((a) => a.reasonCode === "unresolved_task_scope").length,
+    0,
+    "a resolved task's PR never trips the new unresolved-task advisory",
+  );
+  assert.equal(v.unwiredAdvisories?.length, 1, "exactly one advisory total — the two checks stayed disjoint");
+});
