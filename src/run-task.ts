@@ -3180,17 +3180,32 @@ export async function dispatchFixPreflightStandDown(
 /**
  * W1-T177 SITE (iv): the real live-state reader `rmd drain`/`rmd daemon` wire
  * for `nextRunnable`'s in-flight guard — CONFIRMS a candidate in-flight PR
- * number with a fresh `gh pr view` read, never the `lastProj` snapshot
- * `isOpenPr` itself answers from. `undefined` on a failed/indeterminate read
- * — nextRunnable's own contract treats that as "still in-flight, skip it"
- * (fail-open toward the pre-existing skip, never toward a false dispatch).
+ * number with a fresh read, never the `lastProj` snapshot `isOpenPr` itself
+ * answers from. `undefined` on a failed/indeterminate read — nextRunnable's
+ * own contract treats that as "still in-flight, skip it" (fail-open toward
+ * the pre-existing skip, never toward a false dispatch).
+ *
+ * W1-T522: A BUDGET COST NOT A CORRECTNESS BUG — this always returned the
+ * right `state`, just over GraphQL, the exhausted budget. Reads over REST
+ * now (`liveStateFromRest`, the SAME composition `ghLiveState` above already
+ * uses), never `gh pr view --json state`. The three-valued OPEN/CLOSED/MERGED
+ * token is unchanged: `liveStateFromRest` folds REST's `.state`/`.merged`
+ * through `prStateFromRest` into the identical uppercase token GraphQL's
+ * `state` field already returned, so every caller (`isMergedByNumber`'s
+ * `=== "MERGED"` check included) reads the same values as before.
+ *
+ * `fetch` is injectable (defaults to the real `ghJson`) purely so the REST-not-GraphQL argv and
+ * the OPEN/CLOSED/MERGED fold are unit-testable with zero network — every real call site below
+ * still calls this with three args and gets the real fetcher, byte-identical to before.
  */
-function ghLiveStateByNumber(owner: string, repo: string, prNumber: number): string | undefined {
+export function ghLiveStateByNumber(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  fetch: GhApiFetcher = ghJson,
+): string | undefined {
   try {
-    const v = ghJson(["pr", "view", String(prNumber), "--repo", `${owner}/${repo}`, "--json", "state"]) as {
-      state?: string;
-    };
-    return v?.state;
+    return liveStateFromRest(owner, repo, prNumber, fetch);
   } catch {
     return undefined;
   }

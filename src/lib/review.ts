@@ -6,11 +6,13 @@ import { classifyFailure } from "./classify.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { reclaimStaleLock } from "./fs-race-safe.js";
 import { appendLedger } from "./ledger.js";
+import { liveStateFromRest, type GhApiFetcher } from "./open-prs-rest.js";
 import { isInPlanScope } from "./plan-architect.js";
 import { visibleCriteria, type AcceptanceCriterion } from "./plan.js";
 import { scanUnreachedExports, type UnreachedExport } from "./reachability.js";
 import { loadDefaultPolicy } from "./policy.js";
 import { readLedgerLines } from "./status.js";
+import { ghJson } from "./worker.js";
 
 /**
  * The JUDGE (MASTER-PLAN §12 rule 4 / rule 3B; task W1-T1C).
@@ -5776,13 +5778,44 @@ export interface PrLifecycleState {
 }
 
 /**
- * Real fetcher: shells to `gh` (untested by unit — it shells out, same as
- * {@link postReviewStatus}'s own `gh api` call) — {@link
- * postReviewStatusGuarded}'s default; tests inject a fake instead.
+ * ANCHORED ON `/pull/<n>`, mirroring `run-task.ts`'s own `prUrlTarget` — duplicated locally
+ * rather than imported because `run-task.ts` imports FROM `./review.js` (this module), so an
+ * import the other way would be circular. Returns `undefined` — never a guess — on anything
+ * that is not a PR URL.
  */
-export function fetchPrLifecycle(prUrl: string): PrLifecycleState {
-  const out = execFileSync("gh", ["pr", "view", prUrl, "--json", "state"], { encoding: "utf8" });
-  const state = String((JSON.parse(out) as { state?: string }).state ?? "").toUpperCase();
+function prLifecycleUrlTarget(prUrl: string): { owner: string; repo: string; number: number } | undefined {
+  const m = /^https?:\/\/[^/\s]+\/([^/\s]+)\/([^/\s]+)\/pull\/(\d+)(?:[/?#].*)?$/.exec(prUrl.trim());
+  return m ? { owner: m[1], repo: m[2], number: Number(m[3]) } : undefined;
+}
+
+/**
+ * W1-T522: real fetcher, now REST (`GET /repos/{o}/{r}/pulls/{n}`), never `gh pr view --json
+ * state` (GraphQL) — {@link postReviewStatusGuarded}'s default; tests inject a fake `fetch`
+ * instead of a fake `fetchLifecycle` closure, mirroring `ghLiveState`'s (run-task.ts, W1-T511)
+ * own shape.
+ *
+ * THE FAILING SITE IS NOT THE ONE ANYBODY NAMED: this is the ONLY `gh pr view <url> --json
+ * state` call in the fleet's review-posting path (the other GraphQL `state` reader,
+ * `ghLiveStateByNumber`, takes a number+repo, not a URL — see run-task.ts), and it was the one
+ * actually observed failing with `GraphQL: API rate limit already exceeded` on 2026-08-15.
+ *
+ * Reuses {@link liveStateFromRest} — the SAME REST composition `ghLiveState` already uses — so
+ * REST's two-valued `state`/`merged` fold is composed in exactly one place. THE TWO-VALUED FOLD
+ * IS BENIGN HERE: a naive `.state`-only read would mislabel a MERGED PR as merely `closed`, but
+ * `decideReviewStatusPost` (below) refuses posting on merged OR closed alike, so folding merged
+ * into `MERGED` (rather than leaving it `CLOSED`) changes no caller-visible decision here — see
+ * `prStateFromRest`'s own doc (open-prs-rest.ts) for why the same fold is NOT survivable at
+ * `terminalStateReason` (sweep.ts), which this function does not touch.
+ */
+export function fetchPrLifecycle(prUrl: string, fetch: GhApiFetcher = ghJson): PrLifecycleState {
+  const target = prLifecycleUrlTarget(prUrl);
+  if (!target) {
+    throw new Error(
+      `fetchPrLifecycle: cannot resolve owner/repo/number from ${JSON.stringify(prUrl)} — refusing to fall ` +
+        "back to `gh pr view --json state`, whose GraphQL budget exhaustion is the defect this read was moved off",
+    );
+  }
+  const state = liveStateFromRest(target.owner, target.repo, target.number, fetch);
   return { merged: state === "MERGED", closed: state === "CLOSED" };
 }
 

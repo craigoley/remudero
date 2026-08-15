@@ -8,6 +8,7 @@ import {
   acquireReviewStatusLock,
   decideReviewStatusPost,
   execGhStatusPost,
+  fetchPrLifecycle,
   lastPostedReviewStatusFromLedger,
   postReviewStatus,
   postReviewStatusGuarded,
@@ -17,6 +18,8 @@ import {
   type PostedReviewStatusRecord,
   type PrLifecycleState,
 } from "../src/lib/review.js";
+import { type GhApiFetcher } from "../src/lib/open-prs-rest.js";
+import { ghLiveStateByNumber } from "../src/run-task.js";
 import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
 import { readLedgerLines } from "../src/lib/status.js";
 
@@ -213,6 +216,89 @@ test("acquireReviewStatusLock: gives up with ReviewStatusLockTimeoutError rather
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── W1-T522 — the two remaining live PR-state reads move off the exhausted GraphQL budget ───
+//
+// `fetchPrLifecycle` (this module) was `gh pr view <url> --json state` — the ONE site the
+// 2026-08-15 recon actually caught failing (36/36 `sweep.post_review.failed` rows that day carry
+// `Command failed: gh pr view` + `GraphQL: API rate limit already exceeded`). `ghLiveStateByNumber`
+// (run-task.ts) reads the same three-valued token by number+repo and was folded into this same
+// task as a budget cost, not a correctness bug. Both now compose `liveStateFromRest` — the SAME
+// REST mapping `ghLiveState` (W1-T511) already uses — so there is exactly one place REST's
+// `state`/`merged` fold happens.
+
+/** A fake `GhApiFetcher`: routes by REST path, records every call, throws on an unrouted path —
+ *  mirrors `test/open-prs-rest.test.ts`'s own `fakeFetcher`, kept local since that helper is not
+ *  exported. */
+function fakeGhApiFetcher(routes: Record<string, unknown>): GhApiFetcher & { calls: string[] } {
+  const calls: string[] = [];
+  const fn = ((args: string[]) => {
+    const call = args.join(" ");
+    calls.push(call);
+    const path = args[1];
+    if (path === undefined || !(path in routes)) throw new Error(`unrouted gh call: ${call}`);
+    return routes[path];
+  }) as GhApiFetcher & { calls: string[] };
+  fn.calls = calls;
+  return fn;
+}
+
+const PR_URL = "https://github.com/craigoley/remudero/pull/1900";
+const REST_PATH = "repos/craigoley/remudero/pulls/1900";
+
+test("W1-T522: the review lifecycle read is served from the REST budget", () => {
+  const fetch = fakeGhApiFetcher({
+    [REST_PATH]: { number: 1900, html_url: PR_URL, state: "open", merged: false, updated_at: "t", head: {} },
+  });
+  const lifecycle = fetchPrLifecycle(PR_URL, fetch);
+  assert.deepEqual(lifecycle, { merged: false, closed: false });
+  // The whole point: the argv is the REST `api repos/.../pulls/N` call, never
+  // `pr view <url> --json state` (GraphQL, the exhausted budget).
+  assert.deepEqual(fetch.calls, ["api " + REST_PATH]);
+});
+
+test("W1-T522: a merged pull request is not reported as merely closed", () => {
+  const fetch = fakeGhApiFetcher({
+    [REST_PATH]: { number: 1900, html_url: PR_URL, state: "closed", merged: true, updated_at: "t", head: {} },
+  });
+  // REST reports a merged PR as {state:"closed", merged:true} — a naive `.state`-only read would
+  // mislabel it CLOSED. `merged` must win: `merged:true, closed:false`, exactly as `decideReviewStatusPost`
+  // expects (it already refuses on either, but the DISTINCTION is what `terminalStateReason`
+  // elsewhere depends on, and this pins the composition against silently collapsing it).
+  assert.deepEqual(fetchPrLifecycle(PR_URL, fetch), { merged: true, closed: false });
+});
+
+test("W1-T522: the by-number state read no longer spends the graph budget", () => {
+  const fetch = fakeGhApiFetcher({
+    [REST_PATH]: { number: 1900, html_url: PR_URL, state: "closed", merged: true, updated_at: "t", head: {} },
+  });
+  const state = ghLiveStateByNumber("craigoley", "remudero", 1900, fetch);
+  assert.equal(state, "MERGED");
+  // Same falsifier as the URL-keyed read above: the argv must be REST's `api` form, never
+  // `pr view <n> --repo <o>/<r> --json state` (GraphQL).
+  assert.deepEqual(fetch.calls, ["api " + REST_PATH]);
+});
+
+test("W1-T522: an indeterminate read stays indeterminate and never reads terminal", () => {
+  // A throwing fetch (rate limit, network, auth) must propagate as indeterminate — NEVER resolve
+  // to a value that reads as merged/closed/terminal. `fetchPrLifecycle` never catches (same as
+  // the `gh pr view` shell-out it replaces: a failure aborts the caller's `sweep.post_review`
+  // attempt whole, exactly the 36 observed 2026-08-15 failures, rather than silently reporting a
+  // false lifecycle that would stand review-posting down forever).
+  const throwingFetch: GhApiFetcher = () => {
+    throw new Error("GraphQL: API rate limit already exceeded");
+  };
+  assert.throws(() => fetchPrLifecycle(PR_URL, throwingFetch));
+
+  // `ghLiveStateByNumber` keeps its OWN pre-existing contract: a failed/indeterminate read is
+  // `undefined`, never a state string a caller could mistake for terminal.
+  assert.equal(ghLiveStateByNumber("craigoley", "remudero", 1900, throwingFetch), undefined);
+
+  // An UNKNOWN REST row (missing both `state` and `merged`) folds to neither merged nor closed —
+  // the fail-open direction `prStateFromRest`'s "UNKNOWN" fallback is designed to produce.
+  const unknownFetch = fakeGhApiFetcher({ [REST_PATH]: { number: 1900, html_url: PR_URL, updated_at: "t", head: {} } });
+  assert.deepEqual(fetchPrLifecycle(PR_URL, unknownFetch), { merged: false, closed: false });
 });
 
 // ── postReviewStatusGuarded — THE single guarded post site ──────────────────
