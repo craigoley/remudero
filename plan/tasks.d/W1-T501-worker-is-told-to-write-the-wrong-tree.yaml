@@ -1,0 +1,160 @@
+- id: W1-T501
+  title: "the orchestrator hands every worker an absolute path into the daemon's own checkout and 12 of 41 measured runs followed it there, dirtying the one tree whose dirtiness silently pins the fleet on old code"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  rationale: "MEASURED ON THE AZURE HOST (`Remudero`), 2026-08-15, CAPTURED LIVE DURING W1-T500's RUN
+    RATHER THAN INFERRED. The mini keeps a separate tree and none of these run counts are verifiable
+    from there.
+
+    (1) **THE LINE, VERBATIM FROM A LIVE WORKER'S OWN PROMPT.**
+      `- YOUR TASK'S OWN RECORD IS AT /home/node/Remudero/remudero/plan/tasks.d/W1-T500-….yaml — READ
+        IT FIRST.`
+    Built by `taskRecordContextLine` (`src/run-task.ts`) from `recordPath = taskRecordPath(planPath,
+    taskId)` (`src/lib/plan.ts`). **`planPath` IS THE ORCHESTRATOR'S PLAN PATH — THE DAEMON'S OWN
+    CHECKOUT — NOT THE WORKER'S WORKTREE**, so the path is correct for the process that builds it and
+    wrong for the process that reads it.
+
+    (2) **AND THE WORKER FOLLOWS IT.** W1-T500's transcript: every `file_path` its file tools used was
+    under `/home/node/Remudero/remudero/`, including 12 Write/Edit calls. **POSITIVE CONTROL:
+    `\"file_path\":\"/home/node/Remudero/worktrees` appears ZERO times** — it never addressed its own
+    worktree once, though its cwd IS the worktree. On the filesystem: the worktree's `src/lib/serve.ts`
+    kept its `worktree.add` mtime (10:35:14) untouched, while the PARENT's copy was written at
+    10:44:47 and a brand-new `test/serve-write-tier-wiring.test.ts` appeared there at 10:53:47 — both
+    inside the live window between `anchor.built` (10:35:56) and an `implement.done` that had not yet
+    fired.
+
+    (3) **THE RATE, COUNTING WRITE/EDIT CALLS ONLY — READS WERE SEPARATED OUT AND THAT CORRECTION
+    MATTERS.** A first pass counted every `file_path` and over-read the problem, because a recon phase
+    reads the plan and source heavily and harmlessly. Counting ONLY `Write`/`Edit`/`MultiEdit` across
+    all 41 surviving worker transcripts: **12 RUNS WROTE INTO THE DAEMON'S CHECKOUT (29%)**, of which
+    **7 WROTE THERE EXCLUSIVELY** — `W1-T404`(53), `W1-T458`(24), `W1-T486`(22), `W1-T500`(12),
+    `W1-T450`(11), `W1-T453`(10), `W1-T456`(7) — and 5 SPLIT their edits across both trees:
+    `W1-T461`(13/10), `W1-T470`(10/8), `W1-T488`(9/4), `W1-T498`(5/3), `W1-T497`(4/6).
+    **POSITIVE CONTROL: 29 runs wrote ONLY to their worktree**, so the query distinguishes the two and
+    the 12 is a real population rather than a parsing artifact.
+
+    (4) **THE COST IS NOT TIDINESS.** A dirty parent makes `daemonFreshnessFromService`
+    (`src/lib/self-sync.ts`) return `{ stale: false }` — CORRECTLY, since a restart cannot clear a
+    dirty tree — so the daemon never exits, never reaches merged code, and runs stale with every
+    diagnostic green. MEASURED: **~2 HOURS on 2026-08-14** and **THIRTEEN HOURS overnight into
+    2026-08-15**, the second while `origin/main` moved `2513d0d` -> `a0028d7`. **THAT GUARD IS NOT THE
+    DEFECT AND MUST NOT BE TOUCHED.**"
+  design: "(0) **THE SANDBOX IS EXONERATED, AND THIS MUST BE SAID FIRST BECAUSE THE OBVIOUS READING IS
+    THAT CONTAINMENT FAILED.**
+      - The preflight probe is SOUND and well-chosen: `defaultExecutor` (`src/lib/containment.ts`)
+        targets the sibling of `<config.root>/tmp/containment-probe-<token>/cwd`, and its own comment
+        rejects a `$TMPDIR` sibling because that 'would be writable and give a false pass'.
+      - **BUT `containmentProbePrompt` OPENS 'Using the Bash tool, run these THREE commands', AND THE
+        BASH TOOL IS THE ONLY THING THAT GOES THROUGH bwrap.** So `containment preflight PASSED —
+        outside-cwd write OS-DENIED` is TRUE, correctly measured, and IRRELEVANT to the write that
+        happened.
+      - **THE FILE TOOLS RUN UNSANDBOXED.** Namespace-proven: tini (pid 1), the daemon (46) and the
+        worker agent (3076) all share `mnt:[4026532256]`; only the inner bwrap child gets its own.
+      - bwrap's binds agree: read-write are the worktree, `/tmp/claude-1000/`,
+        `/home/node/Remudero/repos/remudero/.git` and a socket — everything else `--ro-bind /`. The
+        daemon's checkout is covered ONLY by that read-only bind, **so a bwrap-sandboxed process could
+        not have done this.** **DO NOT BUILD A CONTAINMENT FIX; THE CONTAINMENT IS WORKING.**
+
+    (i) **THREE CANDIDATE PATHS. ARGUE ALL THREE; NONE IS RANKED HERE.**
+      (a) **BUILD `recordPath` AGAINST THE WORKTREE.** The natural mirror of the current code. **BUT
+          ESTABLISH THE SHARD IS ACTUALLY THERE**: `worktreeAdd` cuts from origin/main, so a shard
+          FILED BUT NOT YET MERGED is absent from the worktree, and a worker told to read a missing
+          file is a different failure wearing the same fix. Needs a fallback or an existence check.
+      (b) **EMIT A RELATIVE PATH — `plan/tasks.d/<id>.yaml`.** The worker's cwd IS the worktree
+          (verified live: `readlink /proc/<pid>/cwd` returns the worktree), so no absolute anchor is
+          needed at all. Cheapest, and it cannot name the wrong tree by construction. Cost: it is
+          silently wrong if any consumer ever runs from another cwd, and it still points at a file
+          that may not exist under (a)'s unmerged-shard case.
+      (c) **INLINE THE RECORD INSTEAD OF PATHING TO IT.** The prompt already renders acceptance
+          criteria verbatim beside this line; carrying the whole shard body removes the read, and with
+          it the anchor. Cost: prompt size, and it loses the worker's ability to re-read.
+
+    (ii) **THE SWEEP FOR SIBLING SIGNPOSTS — MEASURED, AND THE ANSWER IS ONE.** Grepping every
+    `${recordPath|planPath|config.root|repoDir|ledgerPath|shardPath}` interpolation in
+    `src/run-task.ts`: the ONLY one that lands in WORKER PROMPT TEXT is
+    `taskRecordContextLine`. The rest are CLI banners and error strings — the `rmd daemon` header, the
+    `lint-plan --plan resolves OUTSIDE the repo root` message, `rmd correct`/`rmd trace` unknown-id
+    errors, and `git fetch`/`git show` failure text. **POSITIVE CONTROL: `${worktreePath}`
+    interpolations DO exist** (the materialized-worktree tip mismatch and two teardown-failure
+    messages), so the query shape finds both anchors and the single hit is real. **FIXING THIS ONE
+    LINE IS THEREFORE SUFFICIENT — but re-run that sweep before believing it, because a new prompt
+    builder is one PR away.**
+
+    (iii) **WHAT THIS DOES *NOT* ESTABLISH, AND THE SHARD MUST NOT CLAIM IT.** The push reads the
+    WORKTREE — `deps.push(opts.worktreePath, opts.branch)` calling `gitPushRunBranch(wt, …)`
+    (`src/run-task.ts`) — so the obvious inference is that parent-written work is discarded and the PR
+    ships empty. **THAT INFERENCE IS NOT SUPPORTED BY THE EVIDENCE AND WAS TESTED DIRECTLY.** #1709
+    came from `run-W1-T404-1786606793018`, the run with **53 parent writes and 0 worktree writes**, and
+    it MERGED carrying 8 files and several hundred added lines. So content reached the branch by some
+    route this recon did not identify — a Bash-tool write, a copy, or a later phase re-doing the work
+    in the worktree. **THE CONFIRMED HARM IS THE STALENESS PIN, NOT SILENT OUTPUT CORRUPTION.** An
+    implementer must not justify this task on corrupted PRs, and should treat 'does parent-written
+    work ever get lost' as OPEN.
+
+    (iv) **WHAT MUST NOT BE BUILT.**
+      - Nothing touching `daemonFreshnessFromService`'s dirty check — it is correct (see rationale 4).
+      - No containment or bwrap change — see (0).
+      - No cleanup automation for the daemon's checkout: a dirty parent may hold a live worker's only
+        copy of its work, and deleting it is the destructive direction. **THE RECOVERY QUESTION IS
+        SEPARATE AND UNFILED.**
+      - No second detector: `daemon.tree_dirty` and `daemon.stale_code` already fire and carry the
+        shas, and **W1-T494 (#1833) FILES THE FACT THAT NOTHING CONSUMES THEM.** Cite it; do not
+        duplicate it.
+
+    (v) **ADJACENT, NAMED AND NOT SCOPED IN.** `/home/craigoleyagent/.claude` is bind-mounted to
+    `/home/node/.claude`, so a worker's HOME carries a `projects` directory containing OPERATOR SESSION
+    TRANSCRIPTS — a worker can read them. Its own concern; not this task.
+
+    (vi) **AND ONE INCIDENT STAYS ASSUMED ON PURPOSE.** The 2026-08-15 overnight case cannot be
+    correlated: its three files now share an mtime identical to the nanosecond
+    (`10:33:11.520299418`), which is one bulk restore, not three authored writes. **THE LIVE W1-T500
+    CASE IS PROVEN; DO NOT LAUNDER THE OTHER INTO IT.**"
+  acceptance:
+    - claim: "the record path handed to a worker resolves inside the worker's own tree"
+      proof: "unit test: W1-T501: the task record line never names the orchestrator checkout"
+    - claim: "a worker whose shard is absent from its worktree still gets a usable instruction"
+      proof: "unit test: W1-T501: an absent worktree shard degrades without naming a foreign path"
+    - claim: "no worker prompt interpolates an orchestrator-rooted absolute path"
+      proof: "unit test: W1-T501: no worker prompt text carries an orchestrator absolute path"
+    - claim: "the acceptance criteria still render beside the record line"
+      proof: "unit test: W1-T501: the acceptance criteria still render beside the record line"
+  origin: recon#worker-told-to-write-the-wrong-tree-2026-08-15
+  plan_refs: ["W1-T494", "W1-T471", "W1-T497"]
+  files: [src/run-task.ts, test/recon-degrade.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `src/` and `test/`, and the blast radius is
+    genuinely high here because the wiring site is the file every other task contends for.
+    **`files:` WAS DERIVED BY INVOCATION COUNT ON THE SYMBOL THAT CHANGES, NOT PROSE MENTION**,
+    measured at `a0028d7`: `taskRecordContextLine` occurs in `src/run-task.ts` (**4**) and in
+    `test/recon-degrade.test.ts` (**4**), and in no other path. That is the whole declared set.
+    **PHRASE THAT COUNT CAREFULLY WHEN YOU QUOTE IT.** The original wording here read \"appears in
+    exactly TWO files\", and `bodyContradictsDiff` (`src/lib/review.ts`) FAILED the filing PR over it —
+    the detector opens the diff and reads any `exactly N files` as a claim about THE CHANGESET, which
+    for a one-file filing is false. It cannot tell a symbol-occurrence count from a scope claim, and it
+    is right not to guess. An implementer echoing that shape into their own PR body will be failed the
+    same way, so state occurrence counts as paths-and-counts rather than as a file TALLY.
+    **`test/plan-sharding.test.ts` IS DELIBERATELY NOT DECLARED** even though it scores **13** on
+    `taskRecordPath`, the highest of any file: it tests the PATH FUNCTION (`src/lib/plan.ts`, score 1),
+    which this task does not change — the change is to what the CALLER anchors that path against. A
+    declared-but-untouched path fails `inverseScopeUntouchedFiles` (`src/lib/review.ts`) exactly as an
+    undeclared one fails `scopeViolationFiles`.
+    **`src/run-task.ts` IS DECLARED DELIBERATELY AND THE COST IS ACCEPTED EXPLICITLY.** It is ~19,900
+    lines and `partitionByFileOverlap` (W1-T471) serialises every task that names it, so this task
+    will not run concurrently with any other that declares it. **THAT COST IS PAID ON PURPOSE**: the
+    line being fixed IS in that file, and avoiding it has already shipped two checks dormant. There is
+    no smaller honest declaration.
+    **THE ACCEPTANCE PROOFS ARE NAME-FILTERED, NOT PURE PATHS.** A pure path would run
+    `test/recon-degrade.test.ts` whole and couple every criterion to unrelated failures in it — the
+    shape that killed #1830 twice. Each of the four titles was checked to match **0** files on
+    `origin/main` today, against a positive control (`an exit 0 is NEVER throttled`) matching **1**;
+    each is under 100 characters with no comma, so `looksLikeScenarioNarrative`
+    (`src/lib/task-linter.ts`) cannot fail them.
+    EVERY NUMBER HERE IS AZURE-ONLY AND DATED 2026-08-15: the 12-of-41 write split, the 29 worktree-only
+    control, the live mtimes, and the two staleness windows. RE-DERIVE BEFORE BUILDING — worker
+    transcripts are per-run and only three worker-home directories survived to be counted."
