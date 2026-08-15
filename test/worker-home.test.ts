@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
+  WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH,
   WORKER_HOME_RC_FILES,
   WORKER_HOME_SYMLINKS,
   ensureWorkerKeychain,
@@ -158,6 +159,116 @@ test("materializeWorkerHome: self-heals a symlink pointing at a STALE real-HOME 
     rmSync(workerHome, { recursive: true, force: true });
     rmSync(realHome, { recursive: true, force: true });
     rmSync(staleTarget, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T505: narrow the `.claude` grant to a credential-only sibling ───────
+//
+// Today's grant hands a worker the operator's WHOLE `.claude` (measured 1.8GB: 10,101
+// session transcripts, a writable `settings.json` that can inject env vars into the
+// operator's NEXT session, `history.jsonl`, `skills/`, `plugins/`) to reach one 509-byte
+// `.credentials.json`. These four tests are the task's own falsifier, both directions:
+// present, the narrowed grant resolves a credential and hides everything else; absent,
+// today's wholesale behaviour still spawns a worker rather than refusing.
+
+test("W1-T505: the narrowed grant still resolves a readable credential", () => {
+  const workerHome = tmp();
+  const realHome = tmp();
+  try {
+    const credOnlyDir = join(realHome, WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH);
+    mkdirSync(credOnlyDir, { recursive: true });
+    writeFileSync(join(credOnlyDir, ".credentials.json"), '{"claudeAiOauth":{"accessToken":"x"}}');
+    // The operator's real .claude also exists, to prove the narrowed sibling wins.
+    mkdirSync(join(realHome, ".claude"), { recursive: true });
+
+    materializeWorkerHome({ workerHome, realHome });
+
+    const credPath = join(workerHome, ".claude", ".credentials.json");
+    assert.equal(
+      readFileSync(credPath, "utf8"),
+      '{"claudeAiOauth":{"accessToken":"x"}}',
+      "the credential must be readable through the redirected HOME's .claude slot",
+    );
+    assert.equal(
+      readlinkSync(join(workerHome, ".claude")),
+      credOnlyDir,
+      "the .claude slot must resolve to the credential-only sibling, not the operator's whole .claude",
+    );
+  } finally {
+    rmSync(workerHome, { recursive: true, force: true });
+    rmSync(realHome, { recursive: true, force: true });
+  }
+});
+
+test("W1-T505: a narrowed worker home cannot reach projects history or settings", () => {
+  const workerHome = tmp();
+  const realHome = tmp();
+  try {
+    const credOnlyDir = join(realHome, WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH);
+    mkdirSync(credOnlyDir, { recursive: true });
+    writeFileSync(join(credOnlyDir, ".credentials.json"), "{}");
+    // The operator's real .claude carries exactly the surfaces the task names.
+    mkdirSync(join(realHome, ".claude", "projects", "some-project"), { recursive: true });
+    writeFileSync(join(realHome, ".claude", "history.jsonl"), "operator prompt history\n");
+    writeFileSync(join(realHome, ".claude", "settings.json"), '{"env":{"INJECTED":"1"}}');
+
+    materializeWorkerHome({ workerHome, realHome });
+
+    assert.equal(existsSync(join(workerHome, ".claude", "projects")), false, "projects/ must not be reachable");
+    assert.equal(existsSync(join(workerHome, ".claude", "history.jsonl")), false, "history.jsonl must not be reachable");
+    assert.equal(existsSync(join(workerHome, ".claude", "settings.json")), false, "settings.json must not be reachable");
+  } finally {
+    rmSync(workerHome, { recursive: true, force: true });
+    rmSync(realHome, { recursive: true, force: true });
+  }
+});
+
+test("W1-T505: an absent credential-only directory falls back rather than refusing", () => {
+  const workerHome = tmp();
+  const realHome = tmp();
+  try {
+    // Today's shape only: no .claude-fleet sibling has been populated on this host yet.
+    mkdirSync(join(realHome, ".claude"), { recursive: true });
+    writeFileSync(join(realHome, ".claude", ".credentials.json"), "{}");
+    assert.equal(existsSync(join(realHome, WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH)), false, "fixture precondition");
+
+    assert.doesNotThrow(() => materializeWorkerHome({ workerHome, realHome }), "a missing narrowed dir must not refuse to spawn");
+
+    const claudeLink = join(workerHome, ".claude");
+    assert.ok(lstatSync(claudeLink).isSymbolicLink(), "the worker still gets a .claude grant");
+    assert.equal(
+      readlinkSync(claudeLink),
+      join(realHome, ".claude"),
+      "falls back to today's wholesale grant when the narrowed sibling is absent",
+    );
+  } finally {
+    rmSync(workerHome, { recursive: true, force: true });
+    rmSync(realHome, { recursive: true, force: true });
+  }
+});
+
+test("W1-T505: the narrowed grant is writable not read only", () => {
+  const workerHome = tmp();
+  const realHome = tmp();
+  try {
+    const credOnlyDir = join(realHome, WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH);
+    mkdirSync(credOnlyDir, { recursive: true });
+    writeFileSync(join(credOnlyDir, ".credentials.json"), "{}");
+
+    materializeWorkerHome({ workerHome, realHome });
+
+    // The token self-refreshes and is rewritten IN PLACE (deploy/host-update.sh's own
+    // rationale) — a write through the redirected HOME's slot must land on the real
+    // credential-only sibling, which only holds if the grant is read-write, not `:ro`.
+    writeFileSync(join(workerHome, ".claude", ".credentials.json"), '{"refreshed":true}');
+    assert.equal(
+      readFileSync(join(credOnlyDir, ".credentials.json"), "utf8"),
+      '{"refreshed":true}',
+      "a refresh write through the worker-home slot must reach the real credential-only directory",
+    );
+  } finally {
+    rmSync(workerHome, { recursive: true, force: true });
+    rmSync(realHome, { recursive: true, force: true });
   }
 });
 
