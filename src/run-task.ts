@@ -14840,15 +14840,33 @@ export function buildSweepEffects(
   // sweep.disposed row.
   armImpl: (prUrl: string, taskId: string | undefined) => ArmOutcome = armAutoMerge,
   // W1-T516 — appended LAST so no positional caller shifts, the same convention every dep
-  // above follows. Defaults to the LIVE `plan/policy.yaml` flag (`loadDefaultPolicy`, the
-  // same memoized-per-process reader every other W1-T253 consumer site uses) so production
-  // wiring picks up an operator's edit with no code change; a test overrides it directly to
-  // drive both sides of the gate without writing a fixture policy file.
-  armSessionPrs: boolean = loadDefaultPolicy().values.sweep.armSessionPrs,
+  // above follows. OPTIONAL with no default expression (rather than a bare `= loadDefaultPolicy()
+  // ...` default), so the `??` fallback below is the injection SEAM test/config-reader-seams.test.ts
+  // recognizes — the SAME `deps.policy ?? loadDefaultPolicy()` shape `dailyCostCeilingReloader`/
+  // `buildAccountUsageRoute`/`ceilingPolicy` already use, not a new pattern.
+  armSessionPrsOverride?: boolean,
 ): Pick<SweepDeps, "arm" | "close" | "dispatchFix" | "escalate" | "readLiveState" | "depReview" | "postReview" | "repushAbsent"> {
   const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
   const issues = issuesImpl ?? ghIssueGateway(owner, repo);
   const say = (msg: string) => console.error(`### rmd sweep — ${msg}`);
+  // Defaults to the LIVE `plan/policy.yaml` flag (`loadDefaultPolicy`, the same memoized-per-
+  // process reader every other W1-T253 consumer site uses) so production wiring picks up an
+  // operator's edit with no code change; a test overrides `armSessionPrsOverride` directly to
+  // drive both sides of the gate without writing a fixture policy file.
+  const armSessionPrs = armSessionPrsOverride ?? loadDefaultPolicy().values.sweep.armSessionPrs;
+  // W1-T516 — an `armImpl` WRAPPER, not a change to the `arm` dep's own `pr.taskId` argument
+  // below: test/arm-outcome-five-sites.test.ts source-locks that dep as an EXPRESSION body
+  // passing `pr.taskId` straight through (the impl-BI fix, proving the outcome is RETURNED,
+  // never discarded by a braced body). Re-deriving the PR number from `prUrl` — rather than
+  // threading `pr.prNumber` in — mirrors `logArmAttribution` immediately below, which already
+  // re-derives `prNumber` from `prUrl` for its own ledger fields instead of trusting a second,
+  // separately-passed number. `sweepArmTaskId` is skipped (raw `taskId` passed through
+  // unchanged) when the number cannot be parsed at all — a malformed `prUrl` is exactly the
+  // shape this must fail closed on, matching the pre-existing behaviour byte for byte.
+  const sweepArmImpl: (prUrl: string, taskId: string | undefined) => ArmOutcome = (prUrl, taskId) => {
+    const prNumber = prNumberFromRef(prUrl);
+    return armImpl(prUrl, prNumber === undefined ? taskId : sweepArmTaskId({ taskId, prNumber }, armSessionPrs));
+  };
 
   return {
     // impl-BI — RETURN THE OUTCOME. PR #968 taught `runSweep` to read this effect's return
@@ -14867,10 +14885,11 @@ export function buildSweepEffects(
     // sweep.ts, per this task's design), passed the `"sweep"` lane so its
     // `automerge.armed`/`automerge.arm_skipped` line reads apart from a review-lane arm on
     // the ledger alone, even with no task id on either.
-    // W1-T516: `sweepArmTaskId` resolves the SAME `PR-<n>` synthetic id the review lane
-    // already mints and ledgers under (gated on `armSessionPrs`) rather than passing
-    // `pr.taskId` raw, so a session PR (no `Remudero-Task:` trailer) is armable at all.
-    arm: (pr) => armAndLogOutcome(pr.prUrl, sweepArmTaskId(pr, armSessionPrs), log, armImpl, "sweep"),
+    // W1-T516: `armImpl` is `sweepArmImpl` above — it resolves the SAME `PR-<n>` synthetic id
+    // the review lane already mints and ledgers under (gated on `armSessionPrs`) rather than
+    // arming nothing for a session PR (no `Remudero-Task:` trailer). `pr.taskId` itself is
+    // still passed straight through here, unchanged from before this task.
+    arm: (pr) => armAndLogOutcome(pr.prUrl, pr.taskId, log, sweepArmImpl, "sweep"),
 
     // THE ABSENT-CHECK-SUITE REMEDY (W1-T186 follow-up). Routed through git-push.ts's leaf, so
     // the live-write guard applies and no new outward path exists. `commit-tree` plumbing means

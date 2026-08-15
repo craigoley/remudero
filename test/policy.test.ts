@@ -1014,7 +1014,11 @@ test("the synthetic id the sweep arms under matches the review lane", async () =
   const root = mkdtempSync(join(tmpdir(), "rmd-w1-t516-arm-"));
   const armed: Array<{ taskId: string | undefined }> = [];
   try {
-    const pr = sessionPr({ prNumber: 1234, taskId: undefined });
+    const pr = sessionPr({
+      prNumber: 1234,
+      prUrl: "https://github.com/acme/w1-t516-scratch/pull/1234",
+      taskId: undefined,
+    });
     const effects = buildSessionArmEffects(
       root,
       "w1-t516-scratch-repo-2",
