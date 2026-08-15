@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { runTask, taskRecordContextLine } from "../src/run-task.js";
+import { runTask, taskRecordContextLine, workerVisibleRecordPath } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
 import type { GitHub } from "../src/lib/status.js";
 import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/worker.js";
@@ -370,10 +370,15 @@ test("BEHAVIORAL: a degraded implement prompt NAMES the task's own record path a
 
   const prompt = String(spawnCalls[2].prompt);
   assert.match(prompt, /RECON CONTEXT ABSENT/, "the pre-existing absence note is still there");
+  // W1-T501: the pointer is now TREE-RELATIVE. It must still name the record the loader would
+  // resolve, but as a path the worker can open in its OWN worktree — the absolute orchestrator
+  // form is what sent workers writing into the daemon's checkout.
+  const relRecord = relative(dirname(dirname(planPath)), planPath);
   assert.ok(
-    prompt.includes(planPath),
-    `the prompt must name the EXACT record path the loader would resolve (${planPath})`,
+    prompt.includes(relRecord),
+    `the prompt must name the record the loader would resolve, tree-relative (${relRecord})`,
   );
+  assert.ok(!prompt.includes(planPath), "and NEVER the orchestrator's absolute path");
   assert.match(prompt, /READ IT FIRST/, "and tell the worker to open it before anything else");
   assert.match(prompt, /the widget is load-bearing/, "the acceptance criteria travel with it");
   assert.match(prompt, /the second criterion is also carried/, "every criterion, not just the first");
@@ -419,7 +424,9 @@ test("BEHAVIORAL: a NON-degraded implement prompt ALSO names the task's own reco
 
   const prompt = String(spawnCalls[1].prompt);
   assert.doesNotMatch(prompt, /RECON CONTEXT ABSENT/, "still no absence note on the healthy path");
-  assert.ok(prompt.includes(planPath), `the healthy prompt names the record path too (${planPath})`);
+  const relRecord = relative(dirname(dirname(planPath)), planPath);
+  assert.ok(prompt.includes(relRecord), `the healthy prompt names the record path too (${relRecord})`);
+  assert.ok(!prompt.includes(planPath), "tree-relative on the healthy path as well (W1-T501)");
   assert.match(prompt, /YOUR TASK'S OWN RECORD IS AT/, "with the same READ IT FIRST instruction");
   assert.match(prompt, /the repo has a README\.md/, "and recon's OBSERVED lines are still relayed");
 
@@ -446,7 +453,9 @@ test("BEHAVIORAL: the healthy path names the record even when recon's OBSERVED s
 
   assert.equal(spawnCalls.length, 2, "recon 'succeeded' — no degrade, so the healthy arm rendered");
   assert.equal(ledger.filter((l) => l.step === "recon.degraded").length, 0, "nothing degraded");
-  assert.ok(String(spawnCalls[1].prompt).includes(planPath), "the pointer is there even with no OBSERVED lines");
+  const relRecord = relative(dirname(dirname(planPath)), planPath);
+  assert.ok(String(spawnCalls[1].prompt).includes(relRecord), "the pointer is there even with no OBSERVED lines");
+  assert.ok(!String(spawnCalls[1].prompt).includes(planPath), "and still tree-relative (W1-T501)");
 });
 
 test("the record line is omitted, not thrown, when the record cannot be resolved", () => {
@@ -470,5 +479,127 @@ test("the record line is omitted, not thrown, when the record cannot be resolved
   const withCriteria = taskRecordContextLine("T-X", "/plan/tasks.d/T-X.yaml", [{ claim: "c1", proof: "p1" }]);
   for (const l of withCriteria.split("\n").slice(1)) {
     assert.doesNotMatch(l, /^\s*[-*+]\s/, `continuation line must not be a bullet: ${JSON.stringify(l)}`);
+  }
+});
+
+// ── W1-T501: THE RECORD PATH MUST MEAN THE WORKER'S TREE ────────────────────────────────────
+//
+// THE DEFECT. `taskRecordPath` resolves against the ORCHESTRATOR's `planPath` — the daemon's own
+// checkout — and that absolute answer went straight into the worker's prompt. Workers followed it:
+// counting Write/Edit calls only, 12 of 41 surviving transcripts wrote into the daemon's checkout
+// and 7 wrote there exclusively; 29 wrote only to their worktree (the control that makes those two
+// populations distinguishable). The harm is the STALENESS PIN, not lost work — a dirty parent makes
+// `daemonFreshnessFromService` report the daemon fresh, so it never restarts onto merged code.
+//
+// A STRING ASSERTION WOULD PROVE NOTHING, so these RESOLVE the emitted path against a worktree and
+// against the orchestrator's tree, and assert which one it lands in. The falsifier drives the SAME
+// helper with the pre-fix absolute form and shows it fails that assertion.
+
+/** The two trees a record path could land in, laid out the way production has them. */
+function twoTrees(): { orchestrator: string; worktree: string; planPath: string; record: string } {
+  const base = mkdtempSync(join(tmpdir(), "w1t501-"));
+  const orchestrator = join(base, "remudero");
+  const worktree = join(base, "worktrees", "run-W1-T501-1");
+  mkdirSync(join(orchestrator, "plan", "tasks.d"), { recursive: true });
+  mkdirSync(join(worktree, "plan", "tasks.d"), { recursive: true });
+  return {
+    orchestrator,
+    worktree,
+    planPath: join(orchestrator, "plan", "tasks.yaml"),
+    record: join(orchestrator, "plan", "tasks.d", "W1-T501-x.yaml"),
+  };
+}
+
+/** Pull the path back out of the rendered bullet, exactly as a worker reading it would. */
+function pathFromLine(line: string): string {
+  const m = line.match(/^- YOUR TASK'S OWN RECORD IS AT (\S+) —/);
+  assert.ok(m, `the bullet must name a path: ${JSON.stringify(line.slice(0, 90))}`);
+  return m![1];
+}
+
+test("W1-T501: the task record line never names the orchestrator checkout", () => {
+  const { orchestrator, worktree, planPath, record } = twoTrees();
+  const line = taskRecordContextLine("W1-T501", workerVisibleRecordPath(planPath, record));
+  const emitted = pathFromLine(line);
+
+  // THE ASSERTION THAT MATTERS: resolved against the WORKER's cwd it lands inside the worktree,
+  // and it does NOT land in the orchestrator's tree. Both directions, because a path that resolved
+  // nowhere would also satisfy "not in the orchestrator".
+  assert.equal(isAbsolute(emitted), false, "the emitted path must not be absolute");
+  const inWorktree = resolve(worktree, emitted);
+  assert.ok(inWorktree.startsWith(worktree + "/"), `must resolve inside the worktree, got ${inWorktree}`);
+  assert.ok(!inWorktree.startsWith(orchestrator + "/"), "and must not reach the orchestrator's tree");
+  assert.equal(emitted, join("plan", "tasks.d", "W1-T501-x.yaml"), "and it is the plain repo-relative path");
+
+  // FALSIFIER: the pre-W1-T501 form is the raw absolute answer. Same helper, same extraction — it
+  // resolves into the ORCHESTRATOR's tree, which is exactly the write that dirtied the daemon.
+  const before = pathFromLine(taskRecordContextLine("W1-T501", record));
+  assert.equal(isAbsolute(before), true, "sanity: the old form really was absolute");
+  assert.ok(
+    resolve(worktree, before).startsWith(orchestrator + "/"),
+    "the falsifier must land in the orchestrator's tree — otherwise this test proves nothing",
+  );
+});
+
+test("W1-T501: an absent worktree shard degrades without naming a foreign path", () => {
+  const { planPath } = twoTrees();
+
+  // Unresolvable record: the bullet is omitted entirely rather than pointing anywhere.
+  assert.equal(workerVisibleRecordPath(planPath, undefined), undefined, "nothing in, nothing out");
+  assert.equal(taskRecordContextLine("W1-T501", workerVisibleRecordPath(planPath, undefined)), "");
+
+  // AND THE ESCAPE CASE, which is the one that could smuggle a foreign tree back in: a record that
+  // sits OUTSIDE the plan's own root would relativise to `../…`. Refuse it — an omitted advisory
+  // line is strictly better than a path that climbs out of the worker's tree.
+  const foreign = join(mkdtempSync(join(tmpdir(), "w1t501-foreign-")), "plan", "tasks.d", "W1-T501-x.yaml");
+  const escaped = workerVisibleRecordPath(planPath, foreign);
+  assert.equal(escaped, undefined, "a record outside the plan's root is refused, not emitted as ../..");
+  assert.equal(taskRecordContextLine("W1-T501", escaped), "", "so no bullet is rendered at all");
+});
+
+test("W1-T501: no worker prompt text carries an orchestrator absolute path", async (t) => {
+  // BEHAVIOURAL — the REAL dispatch, not the helper. Whatever the implement worker is handed must
+  // contain no absolute path into the tree the plan was loaded from.
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const spawn: typeof spawnWorker = async (args) => {
+    spawnCalls.push(args);
+    if (spawnCalls.length === 1) return result({ sessionId: "s-recon", text: "REPORT\nOBSERVED: a thing\n" });
+    return result({ sessionId: "s-implement", text: "REPORT\nPR_URL: https://github.com/acme/remudero/pull/1\n" });
+  };
+  const { planPath } = await runFixture(t, spawn, FIXTURE_PLAN_WITH_ACCEPTANCE);
+  assert.equal(spawnCalls.length, 2, "the fixture reached a real implement spawn");
+
+  const prompt = String(spawnCalls[1].prompt);
+  // ANCHOR ON THE DIRECTORY THE PLAN ACTUALLY LIVES IN, not a computed repo root. This fixture is
+  // FLAT (`planPath` is `<root>/tasks.yaml`), so `dirname(dirname(planPath))` is `/tmp` and would
+  // match the prompt's own unrelated `/tmp/done` boilerplate — a false positive that says nothing
+  // about the defect. `dirname(planPath)` is the orchestrator tree here and `<repo>/plan` in
+  // production; either way, no worker prompt line has any business naming it absolutely.
+  const planDir = dirname(planPath);
+  assert.ok(!prompt.includes(planPath), "the plan's own absolute path must not appear");
+  for (const line of prompt.split("\n")) {
+    assert.ok(
+      !line.includes(`${planDir}/`),
+      `no prompt line may carry an orchestrator-rooted absolute path: ${JSON.stringify(line.slice(0, 100))}`,
+    );
+  }
+  // POSITIVE CONTROL on that sweep: the pointer really is present, so the zero above is a real
+  // absence rather than a prompt that simply never mentioned the record.
+  assert.match(prompt, /YOUR TASK'S OWN RECORD IS AT /, "the record bullet is still emitted");
+});
+
+test("W1-T501: the acceptance criteria still render beside the record line", () => {
+  const { planPath, record } = twoTrees();
+  const line = taskRecordContextLine("W1-T501", workerVisibleRecordPath(planPath, record), [
+    { claim: "the path resolves in the worker's tree", proof: "unit test: resolves in tree" },
+    { claim: "the second criterion also travels", proof: "grep: second in src/run-task.ts" },
+  ]);
+  assert.match(line, /Acceptance criteria, verbatim from that record:/);
+  assert.match(line, /the path resolves in the worker's tree/, "the first criterion travels");
+  assert.match(line, /the second criterion also travels/, "and every later one");
+  assert.match(line, /proof: unit test: resolves in tree/, "including each proof");
+  // The continuation lines must stay NON-BULLET so `contextBlocks` keeps them in this cited block.
+  for (const l of line.split("\n").slice(1)) {
+    assert.doesNotMatch(l, /^\s*[-*+]\s/, `continuation must not be a bullet: ${JSON.stringify(l)}`);
   }
 });
