@@ -1,0 +1,10 @@
+rmd id reservation
+id: W1-T522
+host: Remudero
+shell: bash 5.2.21(1)-release
+taken_at: 2026-08-15T21:41:24.390549124Z
+session: 3fea7f34-8439-4a36-a2b1-f9cd238a5dc1
+probe_pid: 3352874
+purpose: shard filing — convert the fleet's GraphQL PR-state reads to REST
+tree_max_at_take: W1-T519
+refs_seen_at_take: 515 516 520 521
