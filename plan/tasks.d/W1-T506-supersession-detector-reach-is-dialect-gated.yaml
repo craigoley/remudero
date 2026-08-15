@@ -1,0 +1,122 @@
+- id: W1-T506
+  title: "W1-T485's supersession detector is cheap enough to wire and would report nothing — its reach is gated on `grep:` proofs naming a declared path, so it sees 75 of 530 tasks and 9 after its own merged guard, and BOTH cases it was built for yield zero search targets because their proofs are all `unit test:`"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  rationale: "MEASURED ON THE MAC MINI AT 24d27da1, load ~4.0, nothing else of the session's running.
+    Every figure below came from driving the SHIPPED functions, never from reading them.
+    (1) THE COST OBJECTION DOES NOT SURVIVE MEASUREMENT, AND THAT IS THE FIRST THING TO SAY.
+    `buildGitLogSupersessionSearch` over every reachable task took 3521 / 3499 / 3571 ms across three
+    runs — a ~2% spread — and a SINGLE task took 85.5 ms (median of five). The premise it was
+    withheld on was one `git log` PER TASK, i.e. 530; the real figure is 101 searches over 75 tasks,
+    because most tasks produce no target at all. So a `--base` changed-set call site would cost a
+    fraction of a second and even a whole-plan sweep costs seconds. THE W1-T497 MOVE WORKS HERE.
+    (2) AND IT IS STILL NOT WORTH WIRING, FOR A REASON COST NEVER TOUCHED. `proofGrepTargets`
+    (`src/lib/status.ts`) yields a target ONLY for an acceptance criterion whose proof begins `grep:`
+    AND whose path is already in the task's declared `files:`. MEASURED over the merged plan view of
+    530 tasks: 75 yield at least one target (101 targets total); 119 carry a `grep:` proof at all, of
+    which 44 yield NOTHING because the path is not declared. POSITIVE CONTROL: all 530 tasks parse
+    with at least one acceptance criterion, so the zero-target majority is a predicate result and not
+    a load failure.
+    (3) BEHIND THE PROJECTION'S OWN GUARD THE ANSWER IS ZERO. `projectPlan` skips any task it judged
+    `merged` or `indeterminate` before searching. Against a merged union of 478 ids — the daemon's
+    `state/status.json` projection (438) unioned with an anchored `Remudero-Task:` trailer scan over
+    merged PRs (+40) — only 9 of the 75 reachable tasks are unmerged, and running the real detector
+    over those 9 returns NO EVIDENCE FOR ANY OF THEM. WIRED TODAY, THE FIELD WOULD BE EMPTY.
+    POSITIVE CONTROLS on that union: it holds W1-T500 (merged) and not W1-T504 (not merged); and on
+    the search itself, `buildFeedbackDocket(` in `src/run-task.ts` returns one commit while a
+    nonsense symbol returns zero, so a null result is a real absence rather than a broken exec.
+    (4) NEITHER MOTIVATING CASE IS REACHABLE, AND THE TWO PAIRS FAIL DIFFERENTLY. W1-T467 and W1-T472
+    — the pair whose substance shipped under other trailers — yield ZERO targets each: every one of
+    their proofs is `unit test:`, so `proofGrepTargets` returns an empty list and no wiring at any
+    call site can ever examine them. W1-T435 and W1-T436 DO yield one target each, and are excluded
+    for two independent reasons: both read merged in the union, and the commit that shipped
+    `buildFeedbackDocket(` carries NO `Remudero-Task:` trailer at all (measured: cd252715), which
+    `findSupersessionEvidence` collapses to no-evidence BY DESIGN as W1-T458's territory. So the
+    queue complaint has a different cause for that pair, and this task does not touch it.
+    (5) A LATENT PRECISION DEFECT, RECORDED BECAUSE WIDENING REACH WOULD EXPOSE IT. Bypassing the
+    merged guard, the detector returns 8 hits and ALL EIGHT are tasks already credited merged by
+    their own anchored trailer — W1-T246, W1-T267, W1-T274, W1-T277, W1-T297, W1-T337, W1-T379,
+    W1-T440. `git log` is reverse-chronological and the predicate returns the FIRST record, so for
+    any task whose symbol a LATER task edited, the newest editor reads as the crediting one. The
+    merged guard hides this today; anything that widens reach must fix it or inherit it."
+  design: "(i) THE ONE CONCERN IS REACH, NOT WIRING, AND AN IMPLEMENTER MUST NOT INVERT THAT. Wiring
+    a call site is the cheap part and rationale (1) proves it; a call site added before reach is
+    fixed pays a real cost for a field that is measurably empty — a third dormant thing, which is the
+    outcome this shard exists to prevent.
+    (ii) WHY THE REACH LIMIT IS GETTING WORSE RATHER THAN HOLDING STILL. The house style is moving
+    TOWARD `unit test:` proofs and away from `grep:` ones: name-filtered titles are what the filing
+    convention now asks for, and `proof-scope` warns whenever a `grep:` proof names a path outside
+    `files:` — which is precisely the 44-task population in rationale (2). Every such warning
+    resolved by rewriting the proof as a `unit test:` REMOVES a task from this detector's view. The
+    instrument is coupled to the dialect its own linter discourages.
+    (iii) THE DIRECTION, ARGUED NOT PRESCRIBED. The search needs a symbol and a path. A task's
+    declared `files:` already supplies paths for every task, and a `unit test:` proof supplies a test
+    title that `resolveNameFilteredCandidates` (`src/lib/review.ts`) ALREADY resolves to a file by
+    fixed-string grep — so a dialect-independent target set is derivable from material every task
+    carries. COST THAT HONESTLY: one search per declared file is more searches than 101, and
+    rationale (1)'s timings are the budget to measure against, not a licence to ignore. If the
+    widened set cannot be made to cost seconds, SAY SO AND STOP — a slower instrument that still
+    reports nothing is worse than the dormant one.
+    (iv) FIX THE ORDERING IN THE SAME CHANGE OR THE WIDENING IS NET-NEGATIVE. Rationale (5)'s eight
+    are invisible only because the merged guard filters them; a reach that includes more tasks will
+    surface the same shape for unmerged ones. The predicate should prefer the commit that INTRODUCED
+    the symbol rather than the one that most recently touched it, and must never report a task the
+    union already credits merged.
+    (v) DO NOT BUILD A DISPATCH CONSUMER — THE CANDIDATE IS ALREADY COVERED AT ZERO COST, AND THE
+    MEASUREMENT SAYS SO. `isDispatchEligible` (`src/lib/drain.ts`) already refuses `verify !== auto`,
+    and `assertRunnable` (`src/lib/plan.ts`) already throws on `status: blocked`. MEASURED: W1-T467
+    and W1-T472 are BOTH `verify: human` AND `status: blocked`, so they are refused twice over
+    already; W1-T435 and W1-T436 are `verify: auto` but read merged in the union. Every motivating
+    case is already refused by a check that costs nothing. THE VALUE IS ENTIRELY IN THE OPERATOR'S
+    QUEUE VIEW.
+    (vi) NOT IN SCOPE, EACH FOR A STATED REASON. The vestigial `status:` field is forbidden ground —
+    W1-T485's shard rules that the disagreement is the design, and rationale (4) shows it is a
+    SEPARATE cause of the same complaint, not this one. No new route: `/v1/analytics` shipped and
+    nothing reads it periodically, but choosing a reporting home before the detector reports anything
+    is the same inversion (i) forbids. No change to `findSupersessionEvidence`'s three deliberate
+    collapses — a trailer-less commit stays W1-T458's territory and a null search stays a failed read."
+  acceptance:
+    - claim: "a task carrying only unit-test proofs is visible to the supersession search"
+      proof: "unit test: a task whose proofs are all unit tests is reachable by the supersession search"
+    - claim: "target derivation no longer depends on which proof dialect a task happens to use"
+      proof: "unit test: the supersession search is not gated on a single proof dialect"
+    - claim: "a task the merged union already credits is never reported as superseded"
+      proof: "unit test: a task already credited merged is never reported as superseded"
+    - claim: "the evidence names the commit that introduced the symbol rather than the latest to touch it"
+      proof: "unit test: the search prefers the commit that introduced the symbol"
+  origin: recon#supersession-detector-reach-2026-08-15
+  plan_refs: ["W1-T485", "W1-T497", "W1-T458", "W1-T471"]
+  files: [src/lib/status.ts, test/status.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `src/` and `test/`, so `sizingViolation`
+    (`src/lib/task-linter.ts`) returns early before `subsystemsOf` is consulted. THE BAND IS THE SPAN,
+    NOT THE BLAST RADIUS: `supersededBy` is sparse and additive, nothing gates on it, and design (v)
+    forbids giving it a consumer.
+    `files:` WAS DERIVED BY INVOCATION COUNT ON THE THREE SYMBOLS THAT CHANGE, measured at 24d27da1.
+    `proofGrepTargets(`, `findSupersessionEvidence(` and `buildGitLogSupersessionSearch(` appear in
+    TWO files between them: `src/lib/status.ts` (2 / 2 / 1) and `test/status.test.ts` (1 / 5 / 4).
+    Nothing else in `src/` or `test/` invokes any of the three, so that is the whole declared set.
+    `src/run-task.ts` IS DELIBERATELY NOT DECLARED — nothing here touches it, and at ~19,900 lines
+    `partitionByFileOverlap` (W1-T471) serialises every task that names it.
+    NO NEW TEST FILE IS DECLARED. The existing detector tests live in `test/status.test.ts` and pin
+    the predicate this task changes, so that file is touched either way; adding a second declared
+    suite risks `inverseScopeUntouchedFiles` (`src/lib/review.ts`) if the implementer keeps the new
+    assertions beside the old ones, which is where they belong.
+    RULE 25 IS NOT ENGAGED: `src/lib/status.ts` matches no `INSTRUMENT_SURFACE` pattern and `test/`
+    is excluded from `isProductPath`, so this changeset reads `entangled: false`.
+    EVERY CRITERION IS A NAME-FILTERED `unit test:` TITLE, NOT A PURE PATH — a pure path would run
+    `test/status.test.ts` whole and couple every criterion to unrelated failures in a large shared
+    suite. Each of the four titles was checked to match zero files under `test/` today against a
+    positive control matching one, and each is under 100 characters with no comma, so
+    `looksLikeScenarioNarrative` (`src/lib/task-linter.ts`) cannot fail them.
+    EVERY NUMBER HERE IS DATED 2026-08-15 AND IS A QUERY, NOT A CONSTANT. The 530/75/101/119/44
+    counts, the 478-id union, the 9 unmerged-reachable tasks, the zero yield, the eight unguarded
+    hits and both timings move whenever a shard is filed, a proof is rewritten or a PR merges — three
+    of them moved during the session that took them. RE-DERIVE BEFORE BUILDING, and re-run the
+    timings on a quiet host rather than trusting these."

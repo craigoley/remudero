@@ -1,0 +1,128 @@
+- id: W1-T505
+  title: "every worker is granted the operator's entire ~/.claude read-write when it needs one 509-byte credential file — 1.8GB, 10,101 session transcripts, and a settings file that can inject env vars into the operator's next session, so narrow the grant to a credential-only directory without breaking token refresh or the headroom governor"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60
+  rationale: "MEASURED AT 24d27da, EACH FIGURE RE-DERIVED FOR THIS FILING. The operator's `~/.claude`
+    is 1.8GB, of which `projects/` is 1.5GB holding 10,101 `.jsonl` session transcripts across 2,883
+    project directories. The worker is granted ALL of it. The one thing it needs is
+    `.credentials.json` — 509 bytes, mode 600.
+
+    THE GRANT IS NOT ONLY THE CONTAINER MOUNT, AND THAT IS THE PART THAT MAKES THIS A CODE TASK
+    RATHER THAN AN OPERATOR COMMAND. `deploy/host-update.sh` does `-v CRED_DIR:CRED_MOUNT_DEST`, and
+    that script already accepts `RMD_CLAUDE_DIR` as an override — its own missing-credential warning
+    prints the fix. But the HOST path grants the same directory by SYMLINK:
+    `WORKER_HOME_SYMLINKS` (`src/lib/worker-home.ts`) lists `.claude` wholesale, and on the mini
+    `~/Remudero/worker-home/.claude` is a live symlink to `/Users/craigoleyagent/.claude` dated
+    2026-07-15. `deploy/host-update.sh`'s own comment closes the loop: the container HOME resolves
+    through that same grant. So ONE narrowing at the symlink table covers both surfaces, and an
+    environment variable alone covers only one of them.
+
+    THE READ-WRITE IS DELIBERATE AND MUST SURVIVE. `deploy/host-update.sh` records why: the token
+    self-refreshes on an 8-hour cycle and is rewritten in place, so a `:ro` mount or a single-FILE
+    mount ages out silently. The alternative was measured and rejected — a bare
+    `CLAUDE_CODE_OAUTH_TOKEN` authenticates but carries NO PLAN CONTEXT: A/B on the same account and
+    binary, the credential FILE yields `subscription_type` max and `rate_limits_available` true,
+    while the token alone yields null for both, leaving the headroom governor blind. ANY CHANGE THAT
+    BREAKS REFRESH OR HEADROOM IS A REGRESSION AND THIS TASK MUST FAIL RATHER THAN SHIP ONE.
+
+    IT IS A PERSISTENCE SURFACE, NOT ONLY AN EXPOSURE, AND THAT IS WHAT SETS THE SEVERITY. The
+    directory is writable by the worker and holds `settings.json`, whose keys today are `env`, `tui`,
+    `skipDangerousModePermissionPrompt` and `theme`. A worker could set an environment variable or
+    clear a dangerous-mode prompt for the operator's NEXT session. `skills/` and `plugins/` are both
+    populated and are extension points read at startup. `history.jsonl` carries 3,583 lines of the
+    operator's own prompt history. None of that is fleet work.
+
+    AND WORKER AND OPERATOR TRANSCRIPTS ARE COMMINGLED IN ONE TREE, so they cannot be separated for
+    audit: 1,534 of the 2,883 project directories are worker-shaped (`rmd-diag-`, `rmd-implak-`,
+    `rmd-proof-`, containment probes) because the worker's HOME `.claude` IS the operator's. Every
+    worker can therefore read every other worker's transcript and the operator's private sessions
+    with other assistants.
+
+    WHETHER A WORKER EVER READ ANY OF IT IS UNVERIFIED, AND IS STATED AS UNVERIFIED RATHER THAN AS
+    ZERO. The transcripts that would answer it live on Azure and this host has no route to them; the
+    mini's own worker homes hold only MCP transport debug logs (2,448 files under
+    `worker-home/Library/Caches/claude-cli-nodejs`), and a positive control on that corpus for a
+    read that certainly happened returned 0 too — so the query could not see reads at all and its
+    zero is worthless. DO NOT RECORD THIS AS PREVENTION-ONLY UNTIL THE AZURE SWEEP IS RUN.
+
+    WHAT THE MINIMUM ACTUALLY IS, IS ALSO UNVERIFIED — and the fleet says so itself.
+    `WORKER_HOME_SYMLINKS`'s own reason string reads: Claude Code session/config state, OAuth may
+    read under HOME — UNVERIFIED LIVE. `deploy/host-update.sh`'s preflight validates exactly one
+    path, `${CRED_DIR}/.credentials.json`, and nothing else. There is positive evidence the CLI can
+    populate a fresh directory: `materializeWorkerHome`'s own comment records that the CLI CREATES
+    `.claude` when HOME is redirected and the grant is missing. Establishing the true minimum is the
+    first half of this task, not an assumption inside it."
+  design: |
+    (i) ESTABLISH THE MINIMUM BEFORE NARROWING ANYTHING. In a THROWAWAY container — never the
+    fleet's, never `docker restart` on a live one — run the worker's own credential path against a
+    HOME whose `.claude` holds only `.credentials.json`, and record what the CLI creates, reads and
+    writes. The pass condition is the one the A/B above set: `subscription_type` and
+    `rate_limits_available` must read the same as they do today, or the headroom governor has gone
+    blind and the narrowing is refused.
+    (ii) NARROW THE GRANT AT ITS ONE DEFINITION. `WORKER_HOME_SYMLINKS` (`src/lib/worker-home.ts`)
+    stops listing `.claude` wholesale and grants a credential-only directory instead, defaulting to
+    a sibling the operator owns (`~/.claude-fleet`-shaped) and falling back to today's behaviour when
+    that directory is absent, so no host is broken by upgrading before it has been populated.
+    (iii) STILL READ-WRITE. The grant must remain writable for exactly the reason the deploy script
+    records — refresh rewrites the file in place. This task narrows WHAT is shared, never whether it
+    can be written.
+    (iv) FALSIFIER, BOTH DIRECTIONS. With the narrowed grant, a worker home resolves a readable
+    credential AND `projects/`, `history.jsonl` and `settings.json` are NOT reachable through it;
+    with the narrowed directory absent, the grant falls back and a worker still spawns. Deleting the
+    narrowing fails the first; making it unconditional fails the second.
+    (v) NOT IN SCOPE: the state volume, which is also mounted read-write and holds
+    `service-tokens.json` whose regeneration invalidates a bookmarked console URL — a separate
+    concern, named here so it is not lost. Also out: `:ro` mounts, replacing the credential file
+    with a bare token, the corporate use case, path boundaries, identity and the cell pilot.
+  acceptance:
+    - claim: "a worker home built with the narrowed grant resolves a readable credential, so refresh and the headroom governor keep working"
+      proof: "unit test: the narrowed grant still resolves a readable credential"
+    - claim: "the operator's transcripts, prompt history and settings are not reachable through a narrowed worker home"
+      proof: "unit test: a narrowed worker home cannot reach projects history or settings"
+    - claim: "a host without the credential-only directory falls back to today's behaviour rather than failing to spawn"
+      proof: "unit test: an absent credential-only directory falls back rather than refusing"
+    - claim: "the grant stays writable, because refresh rewrites the credential in place"
+      proof: "unit test: the narrowed grant is writable not read only"
+  risk: high
+  origin: oper#credential-mount-2026-08-15
+  plan_refs: ["W1-T293", "W1-T496"]
+  files: [src/lib/worker-home.ts, test/worker-home.test.ts]
+  status: queued
+  attempts: 0
+  note: "risk:high IS SET UP FRONT. `files:` spans src/ and test/, which `sizingViolation`
+    (`src/lib/task-linter.ts`) blocks at >=2 subsystems below that band, and it is independently
+    warranted: this edits the credential grant every spawn depends on, and getting it wrong takes
+    down the retro, containment and triage rungs at once — the deploy script's own warning says a
+    credential-dead worker refuses every spawn. budget_usd 60 — a container probe, one table, a
+    fallback, and a four-way falsifier.
+
+    `files:` IS TWO PATHS, DERIVED BY INVOCATION COUNT, AND BOTH WILL BE TOUCHED.
+    `src/lib/worker-home.ts` holds `WORKER_HOME_SYMLINKS` (4 src references) and
+    `materializeWorkerHome` (9), which is the whole mechanism. `test/worker-home.test.ts` is the home
+    suite by weight — 44 references against 35 in `test/worker-home-poisoned-slot.test.ts` and 14 in
+    `test/worker-home-per-run.test.ts`. `deploy/host-update.sh` is NOT declared: its `RMD_CLAUDE_DIR`
+    override already exists and needs no edit, so declaring it would fail
+    `inverseScopeUntouchedFiles` (`src/lib/review.ts`).
+
+    A BAKED-PATH WARNING APPLIES EVEN THOUGH NO DEPLOY FILE IS DECLARED. `src/` is baked into the
+    image, so this change reaches Azure only after an image rebuild — the W1-T496 (#1844) shape,
+    where a merged change to a baked path ships nothing until the image is rebuilt. The mini's
+    symlink path takes effect on the next spawn without one, so the two hosts will diverge until the
+    rebuild lands; say so in the PR rather than letting a green merge read as deployed.
+
+    PROOF NOTES: all four proofs are NAME-FILTERED titles, not pure paths — a pure path runs the
+    whole file and one unrelated failure fails every criterion. Each was verified to match ZERO files
+    today against a control title matching exactly one. No proof names this shard, so the
+    implementation is not capped at 0/N by self-reference.
+
+    ID PROVENANCE, AND A LIVE COLLISION FOUND WHILE MINTING. origin/main's max is 503 by both shard
+    filename and declaration. TWO OPEN PRs BOTH MINT W1-T504 — #1854
+    (`W1-T504-human-verification-queue-reaches-no-human.yaml`) and #1855
+    (`W1-T504-declared-scope-is-required-at-filing.yaml`) — so merging both poisons the plan. This
+    shard therefore takes 505. `rmd next-task-id` returned 504 in DEGRADED mode, printing
+    `open PRs not enumerated` after `gh pr list` failed: the verb answers with a wrong id and a
+    warning rather than refusing, which is how this trap keeps firing."

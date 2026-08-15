@@ -60,11 +60,21 @@ export function isQualitySuspect(events: CompactionEvent[]): boolean {
  * to commit (the implement OUTPUT CONTRACT above, and `renderFixPrompt`'s fix-rung
  * footer in run-task.ts), so the two can never drift.
  *
- * WHY IT EXISTS: `commitlint` is a REQUIRED check that lints the WHOLE base..head range
- * and runs ONLY in CI — there is no husky, no `core.hooksPath`, no `commit-msg` hook, so
- * nothing local tells a committer their message is malformed. The first signal is a red
- * required check on an open PR, where the W1-T76 fix rung has no move for a CI-check
- * failure and escalates a SPEC question instead (#304, #306, #406, #427/#428).
+ * WHY IT EXISTS: `commitlint` is a REQUIRED check. It does NOT lint the base..head commit
+ * range — W1-T129 relocated the gate to the PR TITLE ALONE (this repo squash-merges every
+ * PR via `COMMIT_OR_PR_TITLE`, so branch commits never reach main and linting them failed
+ * PRs over history that would never exist post-merge), and W1-T351 made that a LIVE
+ * `gh pr view` read in ci.yml rather than a stale opened-event snapshot. Verified against
+ * ci.yml (job `commitlint`, step "the PR title — read LIVE via `gh pr view`"): the only
+ * base..head mention left in that file is the comment explaining the relocation. A
+ * malformed TITLE still blocks the merge exactly like a failing test — there is no husky,
+ * no `core.hooksPath`, no `commit-msg` hook, so nothing local catches it first, and the
+ * W1-T76 fix rung has no move for a CI-check failure and escalates a SPEC question instead
+ * (#304, #306, #406, #427/#428). Because GitHub's `COMMIT_OR_PR_TITLE` squash title falls
+ * back to a lone commit's own subject when a PR has exactly ONE commit, the rules below
+ * govern BOTH the PR title and your run's FINAL commit subject — earlier checkpoint
+ * (`wip:`) commits are additional history that a squash-merge discards, not a linted
+ * artifact.
  *
  * The rules below are MEASURED against the real CLI (see test/commit-message.test.ts),
  * not inferred. In particular there is NO acronym exemption: `SSE stream severed`,
@@ -72,8 +82,12 @@ export function isQualitySuspect(events: CompactionEvent[]): boolean {
  */
 export function commitMessageContractLines(): string[] {
   return [
-    "- COMMIT MESSAGE — `commitlint` is a REQUIRED check and lints EVERY commit on the PR,",
-    "  so a malformed message blocks the merge exactly like a failing test:",
+    "- COMMIT MESSAGE — `commitlint` is a REQUIRED check, but it lints ONLY the PR TITLE (read",
+    "  LIVE via `gh pr view`, W1-T351) — NOT every commit on the branch. This repo squash-merges",
+    "  every PR, so branch commits never reach main; that is also why `wip:` checkpoint commits",
+    "  (see CHECKPOINT AS YOU GO, above) never block a merge. A malformed TITLE still blocks the",
+    "  merge exactly like a failing test, so these rules govern the PR title AND your run's FINAL",
+    "  commit subject (a lone-commit PR's squash title falls back to that commit's own subject):",
     "  * Conventional Commits: `type(scope): subject` — type is one of build|chore|ci|docs|",
     "    feat|fix|perf|refactor|revert|style|test, lower-case.",
     "  * The header (that whole first line) must be <= 100 CHARACTERS. Count characters, not",
@@ -208,6 +222,23 @@ export function outputContractLines(taskId: string): string[] {
   return [
     "# OUTPUT CONTRACT",
     "- Make ONLY the change described in TASK; one concern.",
+    // W1-T502: THE CADENCE INSTRUCTION. Until this line, the contract taught exactly one
+    // terminal act ("stage the changed file(s) and commit", below) — for the whole life of a
+    // run, everything a worker produced existed ONLY as dirty files and index entries in its
+    // worktree, which `reapStaleWorktrees` (worker.ts) `rm -rf`s without `git worktree prune`
+    // the moment it judges the run terminal. A linked worktree shares the PARENT CLONE's object
+    // store and refs — only HEAD and the index are per-worktree — so a commit made in here
+    // writes its objects into the parent's `.git/objects` and moves `refs/heads/<branch>`, both
+    // outside the reaper's reach; an uncheckpointed wipe leaves index archaeology or nothing, a
+    // checkpointed one leaves `git log <branch>`. These commits cost main NOTHING (see COMMIT
+    // MESSAGE below): this repo squash-merges every PR, so `wip:` commits never reach main.
+    "- CHECKPOINT AS YOU GO: after each meaningful unit of work — a test newly green, a decision",
+    "  taken, an approach abandoned — commit everything on THIS run's branch with subject",
+    "  `wip: <what>` and a body carrying a `[remudero-context]` block: one line each for decided /",
+    "  remaining / failed. This worktree is reapable and its dirty files are your ONLY copy of the",
+    "  work until you commit it — checkpoints land in the parent clone's shared object store and",
+    "  survive a worktree wipe; nothing else does. Checkpoints are ADDITIONAL commits, never a",
+    "  substitute for the terminal commit below.",
     // W1-T105 — the operator's requirement, verbatim: "ensure that if any
     // implementations come back with follow-up research, actions, tasks, etc —
     // they get added to the plan." Anything discovered that is OUT OF SCOPE for
@@ -249,8 +280,11 @@ export function outputContractLines(taskId: string): string[] {
     "  e.g. `until [ -f /tmp/done ]; do sleep 20; done` — or simply run the command in the",
     "  foreground and wait for it to return.",
     "  Then: `git push origin HEAD` (NOT `-u` — the shared .git/config is",
-    "  outside the sandbox write scope, WS-0 FF10f), and open a PR with `gh pr create --fill",
-    "  --base main`.",
+    "  outside the sandbox write scope, WS-0 FF10f), and open a PR with an EXPLICIT, conventional",
+    "  `--title` rather than deriving one: checkpointing (above) means a multi-commit run branch",
+    "  is normal, and `gh pr create --fill` derives a multi-commit PR's title from the BRANCH",
+    "  NAME, which is not a conventional subject. Pass it yourself, e.g. `gh pr create --title",
+    "  \"type(scope): subject\" --fill --base main`.",
     ...commitMessageContractLines(),
     `- Include this exact trailer as the LAST line of the PR body: Remudero-Task: ${taskId}`,
     // W1-T81/T82 class (PRs #677/#683): a correct, fully-tested PR still FAILED review because

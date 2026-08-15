@@ -1,33 +1,44 @@
 # ORIENTATION
 
-_MAINTAINED BY `rmd retro` — regenerated 2026-08-13T00:01:20.643Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
+_MAINTAINED BY `rmd retro` — regenerated 2026-08-15T13:30:47.799Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
 
 A fresh Architect session should be able to orient from THIS doc alone plus the plan index —
 not by re-deriving state from the full plan and ledger.
 
 ## Current state
 
-34 run(s) since the last retro marker. Verdicts: {"blocked":2,"blocked_ci":5,"incomplete":6,"merged":7,"no_pr":14}.
+46 run(s) since the last retro marker. Verdicts: {"already_satisfied":1,"blocked":4,"blocked_ci":12,"blocked_containment":6,"incomplete":7,"merged":12,"no_pr":4}.
 
 ### Shipped since marker
-- W1-T393 → https://github.com/craigoley/remudero/pull/1521
-- W1-T394 → https://github.com/craigoley/remudero/pull/1492 (gate-side merge; run ended blocked_ci)
-- W1-T397 → https://github.com/craigoley/remudero/pull/1495 (gate-side merge; run ended blocked_ci)
-- W1-T398 → https://github.com/craigoley/remudero/pull/1505 (gate-side merge; run ended blocked)
-- W1-T399 → https://github.com/craigoley/remudero/pull/1542
-- W1-T400 → https://github.com/craigoley/remudero/pull/1551
-- W1-T401 → https://github.com/craigoley/remudero/pull/1552
-- W1-T402 → https://github.com/craigoley/remudero/pull/1543
-- W1-T406 → https://github.com/craigoley/remudero/pull/1559 (gate-side merge; run ended blocked_ci)
-- W1-T407 → https://github.com/craigoley/remudero/pull/1584
-- W1-T408 → https://github.com/craigoley/remudero/pull/1588
-- W1-T410 → https://github.com/craigoley/remudero/pull/1591 (gate-side merge; run ended blocked)
+- W1-T404 → https://github.com/craigoley/remudero/pull/1709 (gate-side merge; run ended incomplete)
+- W1-T449 → https://github.com/craigoley/remudero/pull/1690 (gate-side merge; run ended blocked_ci)
+- W1-T450 → https://github.com/craigoley/remudero/pull/1695
+- W1-T453 → https://github.com/craigoley/remudero/pull/1753 (gate-side merge; run ended blocked_ci)
+- W1-T454 → https://github.com/craigoley/remudero/pull/1740
+- W1-T456 → https://github.com/craigoley/remudero/pull/1766 (gate-side merge; run ended blocked)
+- W1-T457 → https://github.com/craigoley/remudero/pull/1771
+- W1-T458 → https://github.com/craigoley/remudero/pull/1772
+- W1-T461 → https://github.com/craigoley/remudero/pull/1773 (gate-side merge; run ended blocked_ci)
+- W1-T463 → https://github.com/craigoley/remudero/pull/1775 (gate-side merge; run ended blocked_ci)
+- W1-T468 → https://github.com/craigoley/remudero/pull/1780 (gate-side merge; run ended incomplete)
+- W1-T470 → https://github.com/craigoley/remudero/pull/1783 (gate-side merge; run ended blocked_ci)
+- W1-T473 → https://github.com/craigoley/remudero/pull/1781
+- W1-T474 → https://github.com/craigoley/remudero/pull/1791
+- W1-T476 → https://github.com/craigoley/remudero/pull/1782
+- W1-T477 → https://github.com/craigoley/remudero/pull/1800 (gate-side merge; run ended blocked_ci)
+- W1-T482 → https://github.com/craigoley/remudero/pull/1808
+- W1-T486 → https://github.com/craigoley/remudero/pull/1812 (gate-side merge; run ended incomplete)
+- W1-T487 → https://github.com/craigoley/remudero/pull/1815
+- W1-T488 → https://github.com/craigoley/remudero/pull/1821 (gate-side merge; run ended blocked_ci)
+- W1-T495 → https://github.com/craigoley/remudero/pull/1835
+- W1-T496 → https://github.com/craigoley/remudero/pull/1844 (gate-side merge; run ended blocked)
+- W1-T497 → https://github.com/craigoley/remudero/pull/1842
+- W1-T498 → https://github.com/craigoley/remudero/pull/1843
+- W1-T500 → https://github.com/craigoley/remudero/pull/1849 (gate-side merge; run ended blocked_ci)
 
 ## Next runnable task
 
-**W1-T449** — a sweep arm and a hand arm are indistinguishable in the ledger — the sweep's arm dep is bare armAutoMerge (no automerge.armed line at all) and the clean-status direct merge COMPLETES a PR reporting only to stdout; give every arm/merge site one attribution line naming the PR and the lane
-
-- risk: medium · depends_on: (none)
+(none runnable right now — the DAG is exhausted, every remaining task is blocked/unmet, or awaits `verify: human`)
 
 ## Never-do invariants (MASTER-PLAN §12 Standing rules — extracted verbatim; §12 is authoritative)
 
