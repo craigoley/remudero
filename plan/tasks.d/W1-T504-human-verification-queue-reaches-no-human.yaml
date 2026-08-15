@@ -1,0 +1,131 @@
+- id: W1-T504
+  title: "the fleet's largest human-owed queue reaches no human surface — every `verify: human` site in src/ is an EXCLUSION, `needsHuman` is set ONLY from an open escalation issue, and the weekly docket gathers five channels of which the plan is not one, so 31 tasks wait on a person who is never told"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: "RE-DERIVED ON THE MAC MINI AT 24d27da1. Every fact below is a tree fact or a GitHub
+    read taken today; nothing is carried from a brief.
+    (1) THE POPULATION. 38 task records declare `verify: human` across `plan/tasks.yaml` and
+    `plan/tasks.d/`, 37 distinct ids. Unioning the two merge-credit paths CLAUDE.md requires —
+    anchored `Remudero-Task:` trailers on merged PRs AND `run-<id>-<digits>` head refs
+    (`findMergedByHeadBranch`) — over 1358 merged PRs credits 454 ids, of which 6 are in that set,
+    leaving 31 NOT CREDITED MERGED. POSITIVE CONTROL on the union: W1-T435 reads credited and
+    W1-T500 flipped from uncredited to credited mid-session when #1849 merged at 13:03:33Z, so the
+    set tracks live state rather than a stale snapshot. THE COUNT IS A QUERY, NOT A CONSTANT — it
+    moves whenever a shard is filed or credited, and an implementer must re-run it rather than
+    quote this line.
+    (2) EVERY `verify` SITE IN `src/` IS AN EXCLUSION, WHICH IS THE WHOLE FINDING. `isDispatchEligible`
+    (`src/lib/drain.ts`) returns false at `t.verify !== \"auto\"`; `assertRunnable` (`src/lib/plan.ts`)
+    THROWS `not auto-runnable by the proto-runner`; and three `task-linter.ts` predicates return
+    early on `task.verify === \"human\"`. MEASURED: those are ALL of them. So the field's only effect
+    anywhere in the product is to remove a task from machine attention — nothing converts it into
+    human attention. POSITIVE CONTROL: `verify` is greppable in `src/lib/drain.ts` (7 hits), so the
+    absence is a real absence rather than a blind query.
+    (3) AND THE ONE SURFACE THAT COULD CARRY THEM DOES NOT. `projectPlan` (`src/lib/status.ts`) sets
+    `needsHuman: true` in exactly one place, inside the loop over tasks carrying an OPEN escalation
+    issue, alongside `escalationIssueUrl`/`escalationTitle`. The console's NEEDS ME section — the
+    whole content of the Decisions tab since W1-T336 — filters on that flag (`if (!t.needsHuman)
+    continue;` in the shell's own script, `src/lib/serve.ts`). A `verify: human` task sets no flag,
+    so it renders in no section, and the operator's only route to the queue is reading YAML.
+    (4) THE WEEKLY DOCKET DOES NOT COVER IT EITHER, AND ITS OWN HEADER SAYS WHICH FIVE IT COVERS.
+    `buildFeedbackDocket` (`src/lib/feedback-docket.ts`, W1-T436, SHIPPED — the module exists and
+    `run-task.ts` imports both it and `synthesizeFeedbackDocketProposal` behind a
+    `state/last-feedback-docket.json` marker) gathers reframe texts, `operator_feedback` ledger
+    lines, rejected-feedback reasons, question answers and operator notes. THE PLAN IS NOT ONE OF
+    THE FIVE. So the synthesis rung cannot surface this queue either, by construction.
+    (5) THE CHANNEL IS NOT MERELY UNBUILT — IT IS THE OLDEST BACKLOG IN THE REPO. The uncredited set
+    spans W1-T12 and W1-T13 through W1-T499, so it holds work parked for the entire life of the
+    project beside work filed this week. A queue nothing renders is a queue nothing ages."
+  design: "(i) THE SCOPE IS THE PROJECTION AND ITS RENDER, AND NOTHING ELSE. This task makes an
+    existing, already-computed plan fact visible on the surface that already exists. It adds NO new
+    route, and an implementer who finds themselves designing one has left scope.
+    (ii) DO NOT SIMPLY SET `needsHuman: true` — THAT IS THE OBVIOUS FIX AND IT IS WRONG TWICE.
+      FIRST, IT BREAKS THE AFFORDANCE. The shell's escalation action renders from
+      `if (!live || !live.needsHuman || !live.escalationIssueUrl) return \"\";` — a needsHuman row
+      with no escalation issue yields an empty affordance, so the row would appear with nothing to
+      click and no statement of what is being asked.
+      SECOND, IT CONTRADICTS THE DOCTRINE THE INBOX ENCODES. `src/lib/inbox.ts`'s own header states
+      that approval controls fail by FATIGUE and that the cure is surfacing only what is genuinely
+      actionable; dropping a queue of this size into the section built on that principle is the
+      failure mode, not the fix. CARRY A DISTINCT KIND on the projection and let the console GROUP
+      by it — which is also what the operator asked for in his own words, threads BY TYPE.
+    (iii) THE HONEST OBJECTION, ARGUED RATHER THAN WAVED PAST: GITHUB ISSUES ARE ALREADY A THREADED,
+    PERSISTENT, ARCHIVABLE, LABELLED INBOX WITH NOTIFICATIONS AND A PHONE APP, AND THE FLEET ALREADY
+    OPENS THEM. Escalations carry `needs-human`, `escalation-blocked`, `escalation-grill`,
+    `escalation-manual` and `fleet-notice` (`src/lib/escalate.ts`), and `POST /v1/manual/approve`
+    treats CLOSING the issue as the check-off. A saved search over those labels is a real inbox and
+    costs nothing to build.
+      WHAT DEFEATS IT FOR THIS QUEUE, MEASURED: an escalation issue is opened only when a RUN
+      escalates. A `verify: human` task is never dispatched (design ii's `isDispatchEligible`
+      refusal), so it never runs, so it never escalates, so IT NEVER ACQUIRES AN ISSUE AT ALL. The
+      GitHub inbox cannot show this population because nothing ever files it there. That is an
+      argument about THIS queue only — it is NOT an argument that the console should replace GitHub
+      for escalations, and this shard does not make one.
+    (iv) THE OTHER HALF OF THE REPLY DIRECTION, MEASURED AND DELIBERATELY NOT SCOPED IN. Nothing in
+    `src/` reads GitHub issue COMMENTS: the sole `comment` call is escalate.ts's own
+    `run([\"issue\", \"comment\", …])`, a WRITE. POSITIVE CONTROL: `gh … issue` is greppable across
+    five `src/` files, so the read-absence is real. LIVE: #1444 carries 17 comments, of which 15 are
+    the fleet's own `Another escalation observed the same condition` dedup posts and 2 are human
+    analysis — one of them titled a CORRECTION to the other. Both sit unread by anything. AND THE
+    ONE MECHANISM THAT COULD INGEST THEM IS WIRED TO NOTHING: `issues-intake.ts` (W1-T57) turns open
+    issues on MANAGED repos into `plan/feedback/` entries, `.remudero/managed-repos.json` reads
+    `{\"repos\": []}`, and that module's own header records remudero's exclusion as standing operator
+    decision G-6. NAMED HERE SO NOBODY REBUILDS IT AS PART OF THIS TASK; it is its own concern and
+    the human-comment rate (2 in eight days) is too thin to justify it from this evidence.
+    (v) NOT IN SCOPE, EACH FOR A STATED REASON. Threading and archive — the operator's other two
+    asks — are deliberately absent: `POST /v1/feedback` ALREADY accepts `replyTo` and
+    `reframeProposal` (`src/lib/inbox.ts`) ALREADY keeps an appendable `reframeHistory` with
+    retraction via `supersedes`, so the threading primitives exist and generalising them is a
+    second task that should be argued on its own evidence, not smuggled in behind a render fix.
+    Also out: any change to `escalate.ts`, to the docket's five sources, or to
+    `/v1/questions/answer` — which is MOUNTED WITH NO CONSOLE UI (zero references in
+    `src/lib/serve.ts`, against a control of two for `/v1/inbox/reframe` and four for
+    `/v1/skills/run`), and is a sibling gap this shard names and does not fix."
+  acceptance:
+    - claim: "a task the plan marks for human verification reaches the needs-me projection"
+      proof: "unit test: a verify human task appears in the needs-me projection"
+    - claim: "the projection distinguishes why a row needs a person rather than flattening the kinds"
+      proof: "unit test: the projection names why a row needs a human"
+    - claim: "a human-verify task already credited merged is not offered as outstanding work"
+      proof: "unit test: a merged verify human task is not offered as outstanding"
+    - claim: "an escalation row keeps the action affordance it renders today"
+      proof: "unit test: an escalation row keeps its existing affordance"
+  origin: recon#human-input-channel-census-2026-08-15
+  plan_refs: ["W1-T435", "W1-T436", "W1-T110", "W1-T164", "W1-T336"]
+  files: [src/lib/status.ts, src/lib/serve.ts, test/human-verify-queue-surfaces.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across two `src/` modules plus `test/`, so
+    `sizingViolation` (`src/lib/task-linter.ts`) returns early before `subsystemsOf` is consulted.
+    THE BAND IS THE SPAN, NOT THE BLAST RADIUS: the change is a projection field and the section
+    that already renders that projection, and it gates nothing.
+    `files:` WAS DERIVED BY INVOCATION COUNT ON THE SYMBOL THAT CHANGES. `projectPlan(` is invoked
+    in `test/status.test.ts` (11), `src/run-task.ts` (6), `src/lib/panel-graph.ts` (6),
+    `test/status-atomic-write.test.ts` (5), `test/needs-me-taskless.test.ts` (3) and others — but
+    the DEFINITION is in `src/lib/status.ts`, and callers are unchanged by a new sparse field, so
+    only the definition site is declared. `src/lib/serve.ts` is declared because design (ii)
+    requires the render to distinguish the kind, and a projection field nothing renders is this
+    repo's documented dormant-check failure.
+    THE EXISTING SUITES ARE DELIBERATELY NOT DECLARED. `test/status.test.ts` scores highest on
+    `projectPlan` and is NOT declared: a declared-but-untouched path fails
+    `inverseScopeUntouchedFiles` (`src/lib/review.ts`) exactly as an undeclared one fails
+    `scopeViolationFiles`, and a new file also keeps this task's coverage off a shared suite — the
+    `test/run-task.test.ts` coverage-channel lesson generalised.
+    A CLIENT-SCRIPT CHANGE OWES THE PLAYWRIGHT SUITES. `src/lib/serve.ts`'s console JS lives inside
+    a backtick template literal, so the implementer must keep backticks out of client comments and
+    run the real `test/serve.*.test.ts` browser suites, not only the node ones.
+    RULE 25 IS NOT ENGAGED: neither declared `src/` path matches any `INSTRUMENT_SURFACE` pattern
+    and `test/` is excluded from `isProductPath`, so this changeset reads `entangled: false`.
+    EVERY CRITERION IS A NAME-FILTERED `unit test:` TITLE, NOT A PURE PATH — a pure path runs the
+    whole file and couples every criterion to unrelated failures in it. Each of the four titles was
+    checked to match zero files under `test/` today against a positive control matching one, and
+    each is under 100 characters with no comma, so `looksLikeScenarioNarrative`
+    (`src/lib/task-linter.ts`) cannot fail them.
+    PROVENANCE: the 38/37/31 counts, the exclusion-site census, the single `needsHuman` assignment,
+    the docket's five sources, the empty managed-repos list, the issue-comment read-absence and the
+    #1444 comment split are ALL measured on the mac mini at 24d27da1 on 2026-08-15. RE-DERIVE THE
+    COUNTS BEFORE BUILDING — three of them moved during the session that took them."
