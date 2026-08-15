@@ -1,0 +1,119 @@
+- id: W1-T515
+  title: "two suites write into the LIVE `plan/tasks.d/` — one leaves untracked litter that makes every rmd verb refuse, the other edits a TRACKED task record in place — and the fixture seam they would need already exists in this repo, three lines away from one of them"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: "MEASURED ON THE MAC MINI AT f6a39982 in a scratch worktree; no suite was run in a
+    daemon checkout.
+    (1) THE POPULATION IS TWO, AND THE OBVIOUS QUERY FINDS NEITHER. Classifying PER FILE — bind a
+    variable to a repo-root-anchored `plan/` path, then follow the write through that variable —
+    yields `test/task-linter-wiring.test.ts` and `test/changed-tasks-raw-text.test.ts`. POSITIVE
+    CONTROL: the first of those is the case already known, and it appears. THE LINE-SCOPED FORM OF
+    THE SAME QUERY RETURNS ZERO, including for that known case, because the path is built on one
+    line and written on the next — so a `grep 'writeFileSync(.*join(REPO_ROOT.*plan'` reads clean
+    on a repo where two suites are doing it.
+    (2) THEY DIFFER IN KIND, AND THE HARM SPLITS WITH THEM.
+      `task-linter-wiring` creates an UNTRACKED probe shard (`zzz-w1-t497-wiring-probe.yaml`) and
+      removes it in a `finally`.
+      `changed-tasks-raw-text` EDITS A TRACKED SHARD IN PLACE —
+      `W1-T428-changed-tasks-gate-blind-to-dropped-fields.yaml` — and restores it in a `finally`.
+    (3) AND THE DAEMON-PIN MECHANISM REACHES ONLY ONE OF THEM, WHICH IS THE OPPOSITE OF THE
+    INTUITION AND MUST BE STATED. `daemonFreshnessFromService` (`src/lib/self-sync.ts`) computes
+    dirtiness as `git status --porcelain -uno` — `-uno` EXCLUDES UNTRACKED FILES — so the probe
+    shard's litter can NEVER set `svc.dirty` and can never produce the silent stale-code pin. Only
+    the TRACKED in-place edit can. The untracked writer has its own consequence instead:
+    `checkCliFreshness` in the same module reads a BARE `git status --porcelain`, so leftover
+    litter makes it refuse with `reason: \"dirty\"` and every rmd verb in that checkout stops.
+    Loud and recoverable, where the tracked case is silent.
+    (4) THE RACE IS NOT HYPOTHETICAL AND ITS SYMPTOM IS ALREADY FIXED ELSEWHERE. `node --test`
+    parallelises across suites; a reader enumerated `plan/tasks.d/`, the probe's cleanup removed
+    the file, and the read hit ENOENT, crashing that suite at file level. #1873 makes `loadPlan`
+    skip a shard that vanished between listing and reading. THAT IS THE SYMPTOM'S FIX, NOT THE
+    CAUSE'S — cite it, do not redo it.
+    (5) AND THE SECOND WRITER IS ALREADY COSTING TIME. `test/changed-tasks-raw-text.test.ts` flaked
+    in a both-sides comparison during W1-T512's validation and was hand-attributed in isolation
+    before it could be dismissed; a second session did the same for a sibling file. The failures
+    are not reproducible in isolation, which is exactly what makes them expensive."
+  design: "(i) THE SEAM ALREADY EXISTS AND IS USED THREE LINES FROM ONE OF THE OFFENDERS.
+    `buildCountingFixture` (`test/lint-plan-open-only.test.ts`) builds its plan with
+    `mkdtempSync(join(REPO_ROOT, \"test\", \".tmp-…\"))` — INSIDE the repo root, under `test/`. And
+    `task-linter-wiring.test.ts`'s OWN SECOND TEST already uses a self-contained fixture plan for
+    the same reason. The pattern is established; neither offender is inventing anything.
+    (ii) AND TMPDIR IS NOT AN OPTION — THIS IS WHY THE LIVE DIRECTORY WAS CHOSEN, NOT CARELESSNESS.
+    `lintPlanCommand` (`src/run-task.ts`) refuses BY NAME when `--plan` resolves outside the
+    resolved repo root (W1-T120's read-identity guard) and returns 2 before any `--base` plumbing
+    runs. A fixture must therefore live under the repo root. AN IMPLEMENTER WHO REACHES FOR
+    `os.tmpdir()` WILL GET EXIT 2 AND MISREAD IT AS A BASE-RESOLUTION FAILURE — the exact
+    confusion that guard's own comment says it exists to prevent.
+    (iii) THE TWO NEED DIFFERENT FIXTURES, AND THAT IS THE REAL WORK. The probe test only needs its
+    shard to be ABSENT AT THE BASE REF so `changedTaskIds` counts it new-in-scope; an untracked
+    file under a temp plan root satisfies that. The tracked test needs the OPPOSITE: a base blob
+    that EXISTS, because its assertion is `0 changed` then `1 changed` after an edit, and its own
+    control asserts the plan tree is clean vs HEAD first. That one needs a COMMITTED fixture shard
+    it may edit and restore — not a temp directory, which has no HEAD blob at all.
+    (iv) `finally` IS SUFFICIENT IN PRACTICE, AND SAYING SO HONESTLY NARROWS NOTHING. MEASURED: no
+    test timeout is configured anywhere — not in `package.json`'s test script, not in either suite
+    (POSITIVE CONTROL: the word is greppable in 47 test files, so the absence is real), so node's
+    default is no timeout and there is no abort path that skips the handler. Only a hard kill does.
+    The tracked writer additionally fails LOUD on inherited dirt, because its own first assertion
+    is that the plan tree is clean vs HEAD. SO THIS IS NOT URGENT ON THE TRACKED SIDE — it is worth
+    doing because the fix is the same shape for both and leaving one behind keeps the class alive.
+    (v) THE EXISTING LIVE-WRITE GUARD IS THE WRONG MODULE AND MUST NOT BE EXTENDED.
+    `test/live-write-guard-command-sites.test.ts` drives `assertLiveWriteAllowed`
+    (`src/lib/live-write-guard.ts`), which fences OUTWARD effects — `git push`, `gh pr create`,
+    `gh issue create`, `gh pr merge`. Writing into this repo's own `plan/` tree is not an outward
+    effect and that guard neither sees nor should see it.
+    (vi) A GUARD IS POSSIBLE AND IS NAMED, NOT SCOPED IN. A suite asserting `git status --porcelain
+    -- plan/` is empty after the run would turn the convention into a check. It is left out because
+    it would have to run LAST across a parallel runner to mean anything, which is a scheduling
+    question this task should not answer while it is still moving two files.
+    (vii) NOT IN SCOPE, EACH FOR A STATED REASON. `loadPlan`'s ENOENT guard (#1873, merged — the
+    symptom); `daemonFreshnessFromService`'s dirty check, which is CORRECT because a restart on a
+    dirty tree provably cannot clear the condition; the detection gap for a pinned daemon
+    (W1-T494/#1833); and worker-side writes into the wrong tree (W1-T501), which is the same
+    mechanism from a different actor and is separately filed."
+  acceptance:
+    - claim: "the wiring probe shard is created outside the live plan tree"
+      proof: "unit test: the wiring probe shard lands outside the live plan tree"
+    - claim: "the changed-task base comparison edits a fixture rather than a real task record"
+      proof: "unit test: the changed-task base comparison runs against a fixture shard"
+    - claim: "the live plan directory is unchanged after either suite runs"
+      proof: "unit test: the plan tree is unchanged after the suite runs"
+  origin: recon#suites-write-live-plan-2026-08-15
+  plan_refs: ["W1-T494", "W1-T501", "W1-T120", "W1-T497"]
+  files: [test/task-linter-wiring.test.ts, test/changed-tasks-raw-text.test.ts, test/fixtures/live-plan-writers/tasks.yaml]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT — `moduleIdFromPath` folds a `.test` basename onto its source,
+    so `task-linter-wiring` and `changed-tasks-raw-text` are TWO subsystems and `sizingViolation`
+    (`src/lib/task-linter.ts`) would demand the band anyway. THE BAND IS THE SPAN: the blast radius
+    is two test files and a fixture, and no `src/` behaviour changes.
+    `files:` WAS DERIVED BY THE SAME PER-FILE QUERY THE RATIONALE REPORTS — the two suites that
+    bind a repo-root-anchored `plan/` path and write through it — PLUS the fixture the tracked case
+    needs a committed base blob for. It is DELIBERATELY NOT the fifteen files that merely reference
+    a repo-root-anchored plan path: those read, and a declared-but-untouched path fails
+    `inverseScopeUntouchedFiles` (`src/lib/review.ts`) exactly as an undeclared one fails
+    `scopeViolationFiles`. DECLARE WHAT YOU WILL TOUCH — #1869 shipped a 22-file overrun against a
+    two-path declaration and merged on an advisory.
+    NO `src/` PATH IS DECLARED because none changes. If an implementer finds that the tracked
+    test cannot be moved without a product seam, that is a FINDING TO REPORT rather than a licence
+    to widen — design (ii) already establishes why the obvious seam is refused.
+    RULE 25 IS NOT ENGAGED: `test/` is excluded from `isProductPath` and no declared path matches
+    an `INSTRUMENT_SURFACE` pattern, so this changeset cannot pair a product path with an
+    instrument one — the pairing that is failing a PR elsewhere today.
+    EVERY CRITERION IS A NAME-FILTERED `unit test:` TITLE, NOT A PURE PATH — a pure path runs the
+    whole file and couples every criterion to unrelated failures in it, and one of these very files
+    is a known flake source. Each of the three titles was checked to match zero files under `test/`
+    today against a positive control matching one, and each is under 100 characters with no comma.
+    THE ID WAS RESERVED THROUGH THE ALLOCATOR THAT LANDED TODAY, not by a hand-rolled sweep:
+    `refs/rmd-id/W1-T515` was created on origin with a unique orphan payload before this record was
+    written (W1-T509/#1870). The sweep was run anyway as a cross-check and agreed; it was
+    redundant, which was that task's stated acceptance.
+    EVERY FIGURE HERE IS DATED 2026-08-15 AND IS A QUERY, NOT A CONSTANT — the two-writer
+    population, the `-uno` asymmetry, the absent test timeout and the fixture pattern all move as
+    the tests move. RE-DERIVE BEFORE BUILDING, especially the per-file classification, because the
+    line-scoped form of that query reads zero on a repo where the problem is present."
