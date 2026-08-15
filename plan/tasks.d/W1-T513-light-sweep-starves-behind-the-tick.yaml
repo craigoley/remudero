@@ -229,4 +229,53 @@
     flagged: the PR body's own file-count sentence carried a stray trailing `.**` next to the
     quoted path that made the mechanical `exactly 1 file:` check read a path that never matched
     the diff. That is a body-formatting bug, not a diff scope change, and is fixed in the body
-    alone."
+    alone.
+
+    **FIX ROUND 2 (2026-08-15, same branch):** the round-2 review handed to this run quoted the
+    SAME stray-`.**` body sentence round 1 already removed, over a status posted 2026-08-15T18:51:09Z
+    against commit 19230ce (round 1's own head). `bodyContradictsDiff(currentBody, [\"plan/tasks.d/
+    W1-T513-light-sweep-starves-behind-the-tick.yaml\"])` — run directly against the live PR #1888
+    body and the live single-file diff (`gh api repos/craigoley/remudero/pulls/1888/files`
+    confirms exactly one changed file) — returns `[]`: no contradiction. The stale complaint is a
+    body-vs-review ordering artifact (the check ran before a `gh pr edit` landed, and an edit alone
+    never re-triggers the status), not a live defect; this round's push re-triggers review against
+    the CURRENT body and diff, which already carries no such claim.
+
+    On the four criteria, this round re-verified round 1's conclusion independently and found it
+    STRONGER than round 1 knew: `test/daemon.test.ts` carries its OWN W1-T463 tripwire test — \"no
+    second review lane shipped alongside the diagnosis — startInFlightTicker still has exactly its
+    two known call sites (retro, dispatch), never a third\" — which asserts, MECHANICALLY, that
+    `startInFlightTicker(` appears exactly 3 times in `src/lib/daemon.ts` (1 declaration + 2 calls).
+    Satisfying acceptance-1 (\"a long-running tick occupant no longer blocks the light pass\") for
+    the one remaining unwrapped occupant (`deps.sweep()`, `daemon.ts:2090`) requires exactly a
+    THIRD `startInFlightTicker(...)` call site, which this existing, passing test refuses on sight
+    — confirmed live: adding one and running `test/daemon.test.ts` fails that assertion before any
+    new test is even reached. That tripwire's own comment names the prerequisite explicitly: \"a
+    real per-PR guard replaces the ledger-read dedup before it is enabled\" — i.e. `claimedReviewKeys`
+    must become a mutex SHARED across `deps.sweep` and `deps.sweepLight` invocations, not a fresh
+    per-call `Set` (acceptance-2's exact subject). That sharing can only be wired where both hooks
+    are BUILT — `buildSweepHook`/`buildSweepLightHook`, `src/run-task.ts` — which this shard's own
+    note says must not be touched (undeclared, and serialised by `partitionByFileOverlap` against
+    every other task naming it). So acceptance-1 and acceptance-2 are jointly blocked on the SAME
+    prerequisite (lift the mutex in `src/lib/sweep.ts`, wire it through `src/run-task.ts`), both
+    outside `files:`, exactly as round 1 found — this round adds the tripwire test's own name as a
+    falsifiable, mechanical citation rather than a restated argument.
+
+    Acceptance-3 (\"the sweep interval is unchanged so the call budget is not increased\") and
+    acceptance-4 (\"a heartbeat alone does not count as a sweep having run\") are DIFFERENT in kind:
+    both are honestly, mechanically true of the ticker exactly as it stands today, independent of
+    whether acceptance-1/2 are ever built — a fix that changes nothing trivially changes no
+    interval, and `startInFlightTicker`'s heartbeat-then-sweep ordering (its own doc, `daemon.ts`
+    ~1326-1330) already logs `daemon.alive` whether or not the following `sweepLight()` call
+    succeeds. Round 1 declined to test either, reasoning a regression test for an untouched
+    property \"would misrepresent this diff as shipping the feature it declines to ship\" — this
+    round judges that reasoning too cautious: the claims are about the CURRENT ticker's real
+    behavior, not about a feature, and are exactly as true and exactly as testable with or without
+    acceptance-1/2 landing. `test/daemon.test.ts` now carries `W1-T513: the light pass interval is
+    unchanged by the fix` (asserts every tick's `sleep` call carries the SAME injected
+    `pollIntervalMs`, never a derived/faster one) and `W1-T513: a heartbeat alone is not counted as
+    a sweep` (asserts a `sweepLight` that fails EVERY attempt this pass still gets `daemon.alive`
+    every tick, paired 1:1 with `daemon.sweep_light.failed` — proving heartbeat presence never
+    substitutes for sweep success). Both pass on `origin/main`'s unchanged `daemon.ts`, and both
+    are real regressions guards, not test theater: either could genuinely fail a future change that
+    silently doubles the cadence or conflates the heartbeat with a completed sweep."

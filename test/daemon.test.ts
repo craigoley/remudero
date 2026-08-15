@@ -2230,6 +2230,108 @@ test("W1-T254: no sweepLight wired -> the daemon dispatches exactly as before th
   assert.equal(s.stopReason, "max_reached");
 });
 
+// ── W1-T513 (round 2) — two of the shard's four acceptance criteria are provable TODAY, against
+// the ticker exactly as it stands, with no `startInFlightTicker` call site added. See this PR's
+// own report for why the other two (a long tick occupant no longer blocks the light pass; two
+// light passes cannot double review one PR) are NOT attempted here: `test/daemon.test.ts`'s own
+// W1-T463 tripwire ("no second review lane shipped … never a third [call site]") fails on sight
+// the moment a third `startInFlightTicker(...)` call is added, and the mutex that would make a
+// third caller safe (`claimedReviewKeys`, `src/lib/sweep.ts`) is shared with `deps.sweepLight`
+// only through `src/run-task.ts`'s hook builders — a file this shard's own `files:` note says
+// must not be touched. These two ARE genuinely, honestly provable against the ticker's EXISTING
+// behavior, so they are added rather than left unmet alongside the two that cannot be.
+
+test("W1-T513: the light pass interval is unchanged by the fix", async () => {
+  const plan = fixturePlan();
+  const merged = new Set<string>();
+  const seenIntervals: number[] = [];
+  let releaseRunOne: (() => void) | undefined;
+  const runOneGate = new Promise<void>((resolve) => {
+    releaseRunOne = resolve;
+  });
+  let sleeps = 0;
+  // A deliberately weird value: if the ticker ever computed its OWN cadence (e.g. half the
+  // interval, to sweep "more often"), a bare `pollIntervalMs` echo would still coincidentally
+  // pass on common round numbers — this one only passes if the ticker truly reuses the exact
+  // injected value, never a derived one.
+  const configuredIntervalMs = 12345;
+  const sleep: DaemonDeps["sleep"] = async (ms) => {
+    seenIntervals.push(ms);
+    sleeps++;
+    if (sleeps >= 3) releaseRunOne?.();
+  };
+  const s = await runDaemon(
+    plan,
+    {
+      refreshMerged: () => (id) => merged.has(id),
+      runOne: async (id) => {
+        await runOneGate;
+        merged.add(id);
+        return okResult(id);
+      },
+      sweepLight: async () => {},
+      sleep,
+    },
+    { max: 1, pollIntervalMs: configuredIntervalMs },
+  );
+  assert.equal(s.stopReason, "max_reached");
+  assert.ok(seenIntervals.length >= 3, `the ticker slept at least 3 times (saw ${seenIntervals.length})`);
+  assert.ok(
+    seenIntervals.every((ms) => ms === configuredIntervalMs),
+    `every light-pass tick used the SAME configured pollIntervalMs (${configuredIntervalMs}), never a ` +
+      `second, faster cadence that would increase the call budget — saw ${JSON.stringify(seenIntervals)}`,
+  );
+});
+
+test("W1-T513: a heartbeat alone is not counted as a sweep", async () => {
+  const plan = fixturePlan();
+  const merged = new Set<string>();
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  let lightSweepAttempts = 0;
+  let sleeps = 0;
+  let releaseRunOne: (() => void) | undefined;
+  const runOneGate = new Promise<void>((resolve) => {
+    releaseRunOne = resolve;
+  });
+  const sleep: DaemonDeps["sleep"] = async (_ms) => {
+    sleeps++;
+    if (sleeps >= 3) releaseRunOne?.();
+  };
+  const s = await runDaemon(
+    plan,
+    {
+      refreshMerged: () => (id) => merged.has(id),
+      runOne: async (id) => {
+        await runOneGate;
+        merged.add(id);
+        return okResult(id);
+      },
+      // The light pass NEVER once succeeds this whole pass — every attempt throws. If a
+      // `daemon.alive` heartbeat row were ever mistaken for "a sweep ran", this scenario would
+      // read as a healthy sweeping daemon; it must instead read as a heartbeat next to a wall of
+      // failures.
+      sweepLight: async () => {
+        lightSweepAttempts++;
+        throw new Error("gh: rate limited");
+      },
+      sleep,
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { max: 1 },
+  );
+  assert.equal(s.stopReason, "max_reached");
+  assert.ok(lightSweepAttempts >= 3, `the light pass was genuinely attempted every tick (saw ${lightSweepAttempts})`);
+  const heartbeats = lines.filter((l) => l.step === "daemon.alive");
+  const failures = lines.filter((l) => l.step === "daemon.sweep_light.failed");
+  assert.ok(heartbeats.length >= 3, `the heartbeat kept firing every tick regardless (saw ${heartbeats.length})`);
+  assert.equal(
+    failures.length,
+    heartbeats.length,
+    "every single heartbeat this pass paired with a FAILED sweep attempt, never a successful one — " +
+      "proving the heartbeat's mere presence never stands in for evidence that a sweep actually ran",
+  );
+});
+
 test("a THROWING onCircuitBreak hook does not kill the loop", async () => {
   const plan = fixturePlan();
   let hookCalls = 0;
