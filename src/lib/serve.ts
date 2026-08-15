@@ -40,7 +40,17 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
 import { createOrReadExclusive } from "./fs-race-safe.js";
-import { assertWriteTiersComplete, createService, type Route, type ServiceOptions, type ServiceTokens, type SseRoute } from "./service.js";
+import {
+  assertWriteTiersComplete,
+  createConfirmNonceStore,
+  createService,
+  makeConfirmNonceRoute,
+  type ConfirmNonceStore,
+  type Route,
+  type ServiceOptions,
+  type ServiceTokens,
+  type SseRoute,
+} from "./service.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
 import type { GitHub } from "./status.js";
 import {
@@ -177,6 +187,16 @@ export interface ServeDeps {
    * to the token rather than locking the operator out.
    */
   identity?: ServiceOptions["identity"];
+  /**
+   * W1-T500: the {@link ConfirmNonceStore} both `POST /v1/confirm` (mounted by
+   * {@link buildServeRoutes}) and `createService`'s own dispatch (`enforceWriteTiers`'s HIGH-tier
+   * check) must consult -- the SAME instance, or a route issuing into one store and a dispatch
+   * consuming from another would refuse every nonce it just issued. {@link buildServeServer}
+   * resolves this ONCE (a fresh {@link createConfirmNonceStore} when omitted) and threads that one
+   * instance to both. OPTIONAL here the same way `lastSeen` above is: a test can inject its own to
+   * assert on a known nonce; `rmd serve`'s own CLI wiring never has to construct one itself.
+   */
+  confirmNonces?: ConfirmNonceStore;
 }
 
 /** Matches {@link buildBatchedGithub}'s own default `ttlMs` (status.ts) — kept as one named
@@ -1291,11 +1311,36 @@ export function renderShellHtml(
     // fetch() rejects only on a NETWORK failure -- an HTTP 401/404/500 resolves normally, which is
     // why every call site discarding this result showed the operator nothing. Check .ok HERE, once,
     // so all twelve write controls are covered by one place rather than twelve patches.
-    return fetch(path, {
-      method: "POST",
-      headers: { ...writeAuthHeaders(), "content-type": "application/json" },
-      body: JSON.stringify(body ?? {}),
-    }).then(function (res) {
+    //
+    // impl-W1-T500: the five paths below are the console's own HIGH-tier write routes (service.ts's
+    // Route.tier "high", declared at panel-actions.ts's /v1/manual/approve + /v1/drain/kick +
+    // /v1/drain/run, panel-graph.ts's /v1/inbox/approve, panel-skill-run.ts's /v1/skills/run). A
+    // HIGH-tier call now costs one extra round trip -- POST the exact method+path+payload to
+    // /v1/confirm, then replay THIS SAME call carrying the nonce it returns (X-Confirm-Nonce) --
+    // design (ii)'s client half of W1-T404's second factor. Declared INSIDE this function, not as a
+    // module-level const, so postJson stays the one self-contained unit
+    // test/serve-write-errors.test.ts already extracts and sandboxes.
+    var HIGH_TIER_WRITE_PATHS = ["/v1/manual/approve", "/v1/drain/kick", "/v1/drain/run", "/v1/inbox/approve", "/v1/skills/run"];
+    var payload = JSON.stringify(body ?? {});
+    var doWrite = function (nonce) {
+      var headers = { ...writeAuthHeaders(), "content-type": "application/json" };
+      if (nonce) headers["x-confirm-nonce"] = nonce;
+      return fetch(path, { method: "POST", headers: headers, body: payload });
+    };
+    // A confirm request that itself fails (401/403/500/network) is returned/rejected AS-IS into the
+    // exact same .then/.catch below a direct write failure already goes through -- one error path,
+    // never a second one a HIGH-tier route would need its own banner wording for.
+    var chain = HIGH_TIER_WRITE_PATHS.indexOf(path) !== -1
+      ? fetch("/v1/confirm", {
+          method: "POST",
+          headers: { ...writeAuthHeaders(), "content-type": "application/json" },
+          body: JSON.stringify({ method: "POST", path: path, payload: payload }),
+        }).then(function (res) {
+          if (!res.ok) return res;
+          return res.json().then(function (confirmed) { return doWrite(confirmed.nonce); });
+        })
+      : doWrite(undefined);
+    return chain.then(function (res) {
       // impl-EA: the acknowledgement fires HERE, on the ok path only, for the same reason #1003 put
       // the .ok check here - one place covers all twelve write controls, so nobody has to remember
       // to add it to the thirteenth.
@@ -4372,6 +4417,11 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
   };
 
   const lastSeen = deps.lastSeen ?? createLastSeenStore(lastSeenPath(deps.fleetControlRoot));
+  // W1-T500: SAME instance `createService`'s dispatch consults (see ServeDeps.confirmNonces's own
+  // doc for why that has to be true) -- {@link buildServeServer} resolves this once and threads it
+  // through `deps.confirmNonces`, so a direct `buildServeRoutes` caller (a test) that omits it still
+  // gets a route that issues real nonces, just not ones any dispatch is wired to consume.
+  const confirmNonces = deps.confirmNonces ?? createConfirmNonceStore();
   const daemonHealthDeps: DaemonHealthDeps = {
     ledgerPath: deps.ledgerPath,
     diskPath: deps.daemonHealth?.diskPath ?? deps.fleetControlRoot,
@@ -4458,6 +4508,16 @@ export function buildServeRoutes(deps: ServeDeps): Route[] {
       ledgerPath: deps.ledgerPath,
     }),
     buildVersionRoute(consoleSha),
+    // W1-T500: the nonce-issuance route design (iv)'s second factor needs to exist AT ALL -- built
+    // (service.ts, W1-T404) and exported, but mounted nowhere until now, which is why every
+    // HIGH-tier write was one flag flip away from a `confirm_nonce_required` with no way to
+    // satisfy it. `scope: "write"` (its own declared shape) means `assertWriteTiersComplete` below
+    // requires a `tier` too -- makeConfirmNonceRoute deliberately declares none of its own
+    // (service.ts's own doc: "requesting a nonce for an action grants nothing by itself"), so this
+    // is the one route mounted here rather than reused verbatim -- LOW, the same bookkeeping-grade
+    // consequence buildAuthScopeRoute above already claims for the least consequential thing a
+    // write token can do.
+    { ...makeConfirmNonceRoute(confirmNonces), tier: "low" as const },
   ];
 
   // W1-T404 design (iii): `ci-parity:drift`-shaped completeness, run inside the PRODUCT function
@@ -4481,12 +4541,27 @@ export function buildServeServer(deps: ServeDeps): Server {
     deps.board.github,
     deps.boardGithubRefreshMs ?? DEFAULT_BOARD_PREWARM_MS,
   );
+  // W1-T500: resolved ONCE, here, and threaded to BOTH `buildServeRoutes` (the mounted
+  // `POST /v1/confirm` route's issuing store, via `deps.confirmNonces` below) and `createService`
+  // (the `enforceWriteTiers` HIGH-tier dispatch check's consuming store) -- the one shared
+  // instance ServeDeps.confirmNonces's own doc requires; resolving it independently in each place
+  // (each defaulting on its own) would issue nonces into a store the dispatch never consults.
+  const confirmNonces = deps.confirmNonces ?? createConfirmNonceStore();
   const server = createService({
     tokens: deps.tokens,
     identity: deps.identity,
-    routes: buildServeRoutes(deps),
+    routes: buildServeRoutes({ ...deps, confirmNonces }),
     sse: [prewarm.route],
     log: deps.log,
+    confirmNonces,
+    // W1-T404 design (iii), turned on LAST (design iii, this task): a no-op until now for want of
+    // the two other pieces this task adds -- the issuing route (buildServeRoutes, above) and the
+    // console's own client round trip (postJson, above). Both now real: a HIGH-tier write from a
+    // credential whose granted tier reaches HIGH (tailnet identity, unraised, still "high") is
+    // refused without a nonce and satisfied with one; the bearer write token stays PINNED at "low"
+    // (W1-T404's own ruling, not raised here) and so never reaches a MIDDLE or HIGH route at all,
+    // nonce or not -- see ServiceOptions.enforceWriteTiers's own doc and bearerTokenProvider's.
+    enforceWriteTiers: true,
   });
   server.on("close", prewarm.stop);
   return server;

@@ -87,6 +87,19 @@ export function bearerTokenId(req: IncomingMessage): string {
 
 /** Read + JSON-parse a request body. Rejects (never throws synchronously) on a socket error or malformed JSON — callers turn a rejection into a 400. */
 function readJsonBody(req: IncomingMessage): Promise<unknown> {
+  // W1-T500: the dispatch may already have drained this stream for a HIGH-tier nonce check (see
+  // service.ts's RAW_BODY_CACHE). Reading it again would wait on an ended stream forever, which is
+  // what hung every HIGH-tier route the first time enforcement was switched on.
+  const cached = (req as unknown as Record<symbol, unknown>)[Symbol.for("remudero.service.rawBody")];
+  if (typeof cached === "string") {
+    const trimmed = cached.trim();
+    if (!trimmed) return Promise.resolve({});
+    try {
+      return Promise.resolve(JSON.parse(trimmed));
+    } catch {
+      return Promise.reject(new Error("body is not valid JSON"));
+    }
+  }
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     req.on("data", (chunk: Buffer) => chunks.push(chunk));

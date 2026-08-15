@@ -123,6 +123,12 @@ function serveDepsFor(deps: PanelActionDeps): ServeDeps {
     fleetControlRoot: deps.root,
     questionsRoot: deps.root,
     tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
+    // W1-T500: enforcement is ON in `buildServeServer` now, and the bearer token is PINNED to
+    // `writeTier: "low"` (W1-T404's own ruling, deliberately not raised). These tests exercise
+    // MIDDLE-tier handlers (`/v1/control/*`, `/v1/quiet-hours`), so they must arrive the way the
+    // operator actually reaches them — over the tailnet, whose grantor declares `writeTier: "high"`.
+    // Asserting 403 here instead would delete the handler coverage these tests exist for.
+    identity: { trustedLocalAddress: "127.0.0.1", capability: TAILNET_CAP },
     pollMs: 50,
     log: () => {},
   };
@@ -139,12 +145,53 @@ async function withService<T>(deps: PanelActionDeps, fn: (baseUrl: string) => Pr
   }
 }
 
+/** The ACL app-capability `identityGrantedScopes` looks for — see serveDepsFor's note. */
+const TAILNET_CAP = "remudero:console";
+
 function post(base: string, path: string, token: string, body: unknown) {
   return fetch(`${base}${path}`, {
     method: "POST",
-    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json", ...tailnetHeaders() },
     body: JSON.stringify(body),
   });
+}
+
+/**
+ * W1-T500: the tailnet grantor's Gate-2 header. OPT-IN via `tailnetGrant`, because the bearer token
+ * is pinned to `writeTier: "low"` and identity is consulted FIRST — a blanket header would grant
+ * READ_WRITE to the READ token too and silently delete the scope tests below.
+ */
+let tailnetGrant = true;
+function tailnetHeaders(): Record<string, string> {
+  return tailnetGrant ? { "tailscale-app-capabilities": JSON.stringify({ [TAILNET_CAP]: {} }) } : {};
+}
+/**
+ * W1-T500: a HIGH-tier write (`/v1/manual/approve`, `/v1/drain/kick`, `/v1/drain/run`) needs the
+ * server-issued second factor as well as a sufficient tier — POST the exact method+path+payload to
+ * the mounted `/v1/confirm`, then replay carrying the nonce. Mirrors the console client's own
+ * round trip in serve.ts's `postJson`.
+ */
+async function postHigh(base: string, path: string, token: string, body: unknown) {
+  const payload = JSON.stringify(body);
+  const headers = { authorization: `Bearer ${token}`, "content-type": "application/json", ...tailnetHeaders() };
+  const confirmed = await fetch(`${base}/v1/confirm`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ method: "POST", path, payload }),
+  });
+  if (!confirmed.ok) return confirmed;
+  const { nonce } = (await confirmed.json()) as { nonce: string };
+  return fetch(`${base}${path}`, { method: "POST", headers: { ...headers, "x-confirm-nonce": nonce }, body: payload });
+}
+
+/** Run `fn` with the tailnet grant OFF, so only the bearer credential is in play. */
+async function asBearerOnly<T>(fn: () => Promise<T>): Promise<T> {
+  tailnetGrant = false;
+  try {
+    return await fn();
+  } finally {
+    tailnetGrant = true;
+  }
 }
 
 // ── bearerTokenId ────────────────────────────────────────────────────────────
@@ -172,7 +219,9 @@ test("bearerTokenId: no Authorization header -> 'unknown', never throws", () => 
 test("every panel action route is write-scoped: a read-only token gets 403", async () => {
   const root = tmpRoot();
   await withService(depsFor(root), async (base) => {
-    const res = await post(base, "/v1/control/pause", READ_TOKEN, {});
+    // BEARER-ONLY: this pins the SCOPE gate, so the tailnet grant must be out of the way — it is
+    // consulted first and would hand READ_WRITE to the read token, deleting the assertion.
+    const res = await asBearerOnly(() => post(base, "/v1/control/pause", READ_TOKEN, {}));
     assert.equal(res.status, 403);
     const body = (await res.json()) as { error: string; required_scope: string };
     assert.equal(body.error, "forbidden");
@@ -253,7 +302,7 @@ test("POST /v1/control/pause: malformed JSON body -> 400, no side effect", async
   await withService(depsFor(root), async (base) => {
     const res = await fetch(`${base}/v1/control/pause`, {
       method: "POST",
-      headers: { authorization: `Bearer ${WRITE_TOKEN}`, "content-type": "application/json" },
+      headers: { authorization: `Bearer ${WRITE_TOKEN}`, "content-type": "application/json", ...tailnetHeaders() },
       body: "not json{{{",
     });
     assert.equal(res.status, 400);
@@ -312,7 +361,7 @@ test("POST /v1/control/stop: no body at all is valid (reason is optional)", asyn
   await withService(depsFor(root), async (base) => {
     const res = await fetch(`${base}/v1/control/stop`, {
       method: "POST",
-      headers: { authorization: `Bearer ${WRITE_TOKEN}` },
+      headers: { authorization: `Bearer ${WRITE_TOKEN}`, ...tailnetHeaders() },
     });
     assert.equal(res.status, 200);
   });
@@ -441,7 +490,7 @@ test("POST /v1/manual/approve: closes the GitHub issue, then ledgers panel.manua
   const issueUrl = "https://github.com/craigoley/remudero/issues/42";
 
   await withService(deps, async (base) => {
-    const res = await post(base, "/v1/manual/approve", WRITE_TOKEN, { taskId: "W2-T3", issueUrl });
+    const res = await postHigh(base, "/v1/manual/approve", WRITE_TOKEN, { taskId: "W2-T3", issueUrl });
     assert.equal(res.status, 200);
     assert.deepEqual(await res.json(), { ok: true, taskId: "W2-T3", issueUrl });
   });
@@ -463,7 +512,7 @@ test("POST /v1/manual/approve: issues.close throwing -> 500, no ledger line (nev
   const deps = depsFor(root, throwing);
 
   await withService(deps, async (base) => {
-    const res = await post(base, "/v1/manual/approve", WRITE_TOKEN, {
+    const res = await postHigh(base, "/v1/manual/approve", WRITE_TOKEN, {
       taskId: "W2-T3",
       issueUrl: "https://github.com/craigoley/remudero/issues/999",
     });
@@ -476,7 +525,7 @@ test("POST /v1/manual/approve: missing issueUrl -> 400, issues.close never calle
   const root = tmpRoot();
   const issues = fakeIssueCloser();
   await withService(depsFor(root, issues), async (base) => {
-    const res = await post(base, "/v1/manual/approve", WRITE_TOKEN, { taskId: "W2-T3" });
+    const res = await postHigh(base, "/v1/manual/approve", WRITE_TOKEN, { taskId: "W2-T3" });
     assert.equal(res.status, 400);
   });
   assert.deepEqual(issues.closed, []);
@@ -613,7 +662,9 @@ test("POST /v1/drain/feedback: missing drainRunId -> 400, no side effect", async
 test("POST /v1/drain/feedback: write-scoped -- a read-only token gets 403", async () => {
   const root = tmpRoot();
   await withService(depsFor(root), async (base) => {
-    const res = await post(base, "/v1/drain/feedback", READ_TOKEN, { taskId: "T", verdict: "good", drainRunId: "DRAIN-1" });
+    const res = await asBearerOnly(() =>
+      post(base, "/v1/drain/feedback", READ_TOKEN, { taskId: "T", verdict: "good", drainRunId: "DRAIN-1" }),
+    );
     assert.equal(res.status, 403);
   });
 });
@@ -781,7 +832,7 @@ test("POST /v1/drain/kick writes a KICK_REQUESTED-<taskId> marker AND ledgers co
   const root = mkdtempSync(join(tmpdir(), "panel-kick-"));
   const deps = depsFor(root);
   await withService(deps, async (base) => {
-    const res = await post(base, "/v1/drain/kick", WRITE_TOKEN, { taskId: "W1-T259" });
+    const res = await postHigh(base, "/v1/drain/kick", WRITE_TOKEN, { taskId: "W1-T259" });
     assert.equal(res.status, 200);
     assert.deepEqual(await res.json(), { armed: true, taskId: "W1-T259" });
   });
@@ -803,7 +854,7 @@ test("POST /v1/drain/kick with a missing/unsafe taskId is a 400 with NO marker w
   const deps = depsFor(root);
   await withService(deps, async (base) => {
     for (const bad of [{}, { taskId: "" }, { taskId: "../evil" }, { taskId: "a/b" }]) {
-      const res = await post(base, "/v1/drain/kick", WRITE_TOKEN, bad);
+      const res = await postHigh(base, "/v1/drain/kick", WRITE_TOKEN, bad);
       assert.equal(res.status, 400, JSON.stringify(bad));
     }
   });
@@ -815,7 +866,7 @@ test("POST /v1/drain/run writes the DRAIN_REQUESTED marker AND ledgers console.d
   const root = mkdtempSync(join(tmpdir(), "panel-drain-"));
   const deps = depsFor(root);
   await withService(deps, async (base) => {
-    const res = await post(base, "/v1/drain/run", WRITE_TOKEN, {});
+    const res = await postHigh(base, "/v1/drain/run", WRITE_TOKEN, {});
     assert.equal(res.status, 200);
     assert.deepEqual(await res.json(), { armed: true });
   });

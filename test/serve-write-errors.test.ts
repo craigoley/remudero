@@ -179,3 +179,64 @@ test("every postJson call site is covered by the helper — no call site does it
   }
   assert.match(clientFn("postJson"), /res\.ok/, "the .ok check must live in the HELPER, covering every site at once");
 });
+
+// ── W1-T500: the CLIENT half of the second factor ────────────────────────────────────────────
+// design (ii) taught `postJson` to obtain a nonce before a HIGH-tier write. It shipped with NO
+// falsifier — `HIGH_TIER_WRITE_PATHS` occurred twice in src/ and ZERO times in test/ — so nothing
+// stopped the round trip being deleted, or being applied to every write. These pin both directions
+// against the REAL extracted client function, the same sandbox the tests above use.
+
+test("W1-T500: a HIGH-tier write obtains a nonce first and replays the SAME payload carrying it", async () => {
+  const calls: Array<{ path: string; init: any }> = [];
+  const h = harness(async (path, init) => {
+    calls.push({ path, init: init as any });
+    if (path === "/v1/confirm") {
+      return { ok: true, status: 200, json: async () => ({ nonce: "N-123" }) };
+    }
+    return { ok: true, status: 200, json: async () => ({}) };
+  });
+
+  await h.postJson("/v1/drain/run", { taskId: "W1-T1" });
+
+  assert.equal(calls.length, 2, "one confirm, then the write");
+  assert.equal(calls[0].path, "/v1/confirm");
+  const confirmBody = JSON.parse(calls[0].init.body as string);
+  assert.equal(confirmBody.method, "POST");
+  assert.equal(confirmBody.path, "/v1/drain/run");
+  assert.equal(calls[1].path, "/v1/drain/run");
+  assert.equal(calls[1].init.headers["x-confirm-nonce"], "N-123", "the write carries the issued nonce");
+  assert.equal(
+    calls[1].init.body,
+    confirmBody.payload,
+    "the replayed bytes are EXACTLY the ones the nonce was bound to — the binding is the point",
+  );
+});
+
+test("W1-T500 FALSIFIER: a LOW-tier write goes straight out, with no confirm round trip", async () => {
+  // Without this the test above would pass against a client that confirmed on EVERY write, which
+  // would double every request the console makes and burn a nonce per keystroke-grade action.
+  const calls: string[] = [];
+  const h = harness(async (path) => {
+    calls.push(path);
+    return { ok: true, status: 200, json: async () => ({}) };
+  });
+
+  await h.postJson("/v1/operator-notes/add", { text: "hi" });
+
+  assert.deepEqual(calls, ["/v1/operator-notes/add"], "exactly one request, and never /v1/confirm");
+});
+
+test("W1-T500: a FAILED confirm is surfaced as-is and the write never goes out", async () => {
+  const calls: string[] = [];
+  const h = harness(async (path) => {
+    calls.push(path);
+    // `.text()` too: a non-ok response flows into postJson's own error path, which reads the body
+    // as text to build the banner. A stub missing it fails the test for the wrong reason.
+    return { ok: false, status: 403, json: async () => ({ error: "forbidden" }), text: async () => "forbidden" };
+  });
+
+  const res = await h.postJson("/v1/skills/run", { skill: "plan" });
+
+  assert.equal(res.status, 403, "the confirm's own failure is the result");
+  assert.deepEqual(calls, ["/v1/confirm"], "a refused confirm must not be followed by the write");
+});

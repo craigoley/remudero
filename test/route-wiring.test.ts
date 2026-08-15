@@ -160,6 +160,10 @@ async function withProductionServer<T>(fn: (h: Harness) => Promise<T>): Promise<
     fleetControlRoot: fleetRoot,
     questionsRoot,
     tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
+    // W1-T500: enforcement is on and the bearer token is pinned `low`; these routes are MIDDLE and
+    // HIGH, so the request must arrive the way the operator's does — over the tailnet, whose
+    // grantor declares `writeTier: "high"`.
+    identity: { trustedLocalAddress: "127.0.0.1", capability: TAILNET_CAP },
     pollMs: 50,
     log: () => {},
   };
@@ -174,12 +178,38 @@ async function withProductionServer<T>(fn: (h: Harness) => Promise<T>): Promise<
   }
 }
 
-async function post(base: string, path: string, body: unknown, token = WRITE_TOKEN): Promise<Response> {
-  return fetch(`${base}${path}`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-    body: JSON.stringify(body ?? {}),
-  });
+/** The ACL app-capability the tailnet grantor looks for. */
+const TAILNET_CAP = "remudero:console";
+
+/** HIGH-tier routes also need the server-issued second factor — confirm, then replay with it. */
+const HIGH_TIER = new Set(["/v1/manual/approve", "/v1/drain/kick", "/v1/drain/run", "/v1/inbox/approve", "/v1/skills/run"]);
+
+async function post(
+  base: string,
+  path: string,
+  body: unknown,
+  token = WRITE_TOKEN,
+  /** BEARER-ONLY: omit the tailnet grant, which is consulted FIRST and would hand READ_WRITE to
+   *  the read token — deleting the scope assertion this flag exists to protect. */
+  opts: { tailnet?: boolean } = {},
+): Promise<Response> {
+  const payload = JSON.stringify(body ?? {});
+  const headers: Record<string, string> = {
+    authorization: `Bearer ${token}`,
+    "content-type": "application/json",
+    ...(opts.tailnet === false ? {} : { "tailscale-app-capabilities": JSON.stringify({ [TAILNET_CAP]: {} }) }),
+  };
+  if (HIGH_TIER.has(path)) {
+    const confirmed = await fetch(`${base}/v1/confirm`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ method: "POST", path, payload }),
+    });
+    if (!confirmed.ok) return confirmed;
+    const { nonce } = (await confirmed.json()) as { nonce: string };
+    headers["x-confirm-nonce"] = nonce;
+  }
+  return fetch(`${base}${path}`, { method: "POST", headers, body: payload });
 }
 
 /** Every ledger step recorded at the INJECTED ledger path. Empty ⇒ the route wrote to another one. */
@@ -389,7 +419,13 @@ test("every wiring-covered write route rejects the read token", async () => {
   await withProductionServer(async (h) => {
     for (const key of COVERED) {
       const routePath = key.slice("POST ".length);
-      const res = await post(h.base, routePath, { taskId: "W1-T100", issueUrl: "https://x/1", answer: "a" }, READ_TOKEN);
+      const res = await post(
+        h.base,
+        routePath,
+        { taskId: "W1-T100", issueUrl: "https://x/1", answer: "a" },
+        READ_TOKEN,
+        { tailnet: false },
+      );
       await res.arrayBuffer();
       assert.equal(res.status, 403, `${key} must reject a read-only token`);
     }

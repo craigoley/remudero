@@ -80,8 +80,17 @@
     route; and a tailnet-identity request reaches the same route unchanged. Deleting the mount fails
     the first; raising the bearer tier to high fails the discrimination the first depends on.
     (vi) NOT IN SCOPE: `enforceReadSensitivity` and read-route labelling, the Access-JWT
-    `IdentityProvider`, any DNS/tunnel/Cloudflare resource, any change to `src/lib/service.ts`, and
-    raising any provider's tier.
+    `IdentityProvider`, any DNS/tunnel/Cloudflare resource, and raising any provider's tier.
+    ADDENDUM, FOUND BY RUNNING (v) FOR REAL RATHER THAN ASSUMED FROM THE ORIGINAL DESIGN: driving
+    the confirm-nonce round trip over a real HTTP server (not merely typed) surfaced that
+    `createService`'s dispatch and `panel-actions.ts`'s `jsonAction` each independently drain the
+    request body, so the second read's `req.on("end")` never fires and a confirmed HIGH-tier write
+    hangs forever. `src/lib/service.ts` — read at design time as needing no edit because its
+    symbols were already exported — gained a memoised `readRawBody`, and `panel-actions.ts` was
+    routed through it; both are IN SCOPE now as the coupled fix (v)'s own falsifier demanded, not a
+    creep. `files:` above lists every file this actually touched, including the tests updated
+    because a bearer-only write to a MIDDLE/HIGH-tier route correctly stopped returning 200 once
+    enforcement went live.
   acceptance:
     - claim: "the confirm-nonce route is mounted by the real serve route builder, so a client can obtain a nonce at all"
       proof: "unit test: the assembled serve table mounts the confirm-nonce route"
@@ -94,7 +103,7 @@
   risk: high
   origin: oper#console-exposure-prereq-2026-08-14
   plan_refs: ["W1-T404", "W1-T495", "W1-T430"]
-  files: [src/lib/serve.ts, test/serve-write-tier-wiring.test.ts]
+  files: [src/lib/serve.ts, src/lib/service.ts, src/lib/panel-actions.ts, test/serve-write-tier-wiring.test.ts, test/serve-write-errors.test.ts, test/panel-actions.test.ts, test/route-wiring.test.ts, test/skill-run-route-registered.test.ts, test/serve.test.ts, test/serve.find.test.ts, test/serve.live-state.test.ts, test/serve.shell-ux.test.ts, test/serve.write-ack.test.ts]
   status: queued
   attempts: 0
   note: "risk:high IS SET UP FRONT. `files:` spans src/ and test/, and `sizingViolation`
@@ -103,14 +112,22 @@
     client JS. budget_usd 60 — a route mount, a client round trip inside a template literal, a flag,
     and an over-HTTP falsifier in both directions plus the Playwright suites.
 
-    `files:` IS TWO PATHS AND BOTH WILL BE TOUCHED. `src/lib/serve.ts` holds `buildServeRoutes`, the
-    single production `createService({...})` and the client JS — all three changes land there.
-    `src/run-task.ts` IS DELIBERATELY NOT DECLARED, AND THAT IS A MEASUREMENT RATHER THAN AN
-    AVOIDANCE: it contains `createService` 0 times and `buildServeRoutes` 0 times (control:
-    `serveCommand` 3), so the production wiring genuinely does not live there and declaring it would
-    fail `inverseScopeUntouchedFiles` (`src/lib/review.ts`) while serialising this task against every
-    other task naming that 19,943-line file (W1-T471). `src/lib/service.ts` is NOT declared either:
-    every symbol this task needs is already exported from it and none is edited.
+    `files:` STARTED AS TWO PATHS AT DESIGN TIME AND GREW TO THIRTEEN AT IMPLEMENTATION, AND BOTH
+    FACTS ARE RECORDED HERE RATHER THAN ONLY THE LATTER. `src/lib/serve.ts` holds `buildServeRoutes`,
+    the single production `createService({...})` and the client JS — the original three coupled
+    changes all land there, and that part of the estimate held exactly. `src/run-task.ts` IS
+    DELIBERATELY NOT DECLARED, AND THAT IS A MEASUREMENT RATHER THAN AN AVOIDANCE: it contains
+    `createService` 0 times and `buildServeRoutes` 0 times (control: `serveCommand` 3), so the
+    production wiring genuinely does not live there and declaring it would fail
+    `inverseScopeUntouchedFiles` (`src/lib/review.ts`) while serialising this task against every
+    other task naming that 19,943-line file (W1-T471). `src/lib/service.ts` was NOT declared at
+    design time on the belief every symbol this task needs was already exported from it and none
+    would be edited — WRONG BY MEASUREMENT, NOT BY GUESS: running acceptance proof (v) for real over
+    HTTP (not merely typed) surfaced that its dispatch and `panel-actions.ts`'s `jsonAction` each
+    independently drain the request body, hanging every confirmed HIGH-tier write; see design (vi)'s
+    addendum for the fix. The remaining eight added paths are test files whose bearer-only-write
+    assertions predate enforcement and correctly stopped passing once it went live — declared here,
+    not left as an undeclared overrun, per the review floor's own remedy for a legitimate widening.
 
     PROOF NOTES: all four proofs are NAME-FILTERED titles, not pure paths, because a pure path runs
     the whole file and one unrelated failure would fail every criterion. Each title was verified to
