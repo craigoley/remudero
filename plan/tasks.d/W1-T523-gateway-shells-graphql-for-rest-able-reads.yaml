@@ -1,5 +1,5 @@
 - id: W1-T523
-  title: "every read ghGateway makes shells `gh pr view`/`gh pr list` over GraphQL, and one projectPlan pass issues 788 of them — yet only statusCheckRollup and autoMergeRequest have no REST form, so the budget that hit 5,520 of 5,000 today is spent almost entirely on fields REST serves for free"
+  title: "every read ghGateway makes shells `gh pr view`/`gh pr list` over GraphQL, and one projectPlan pass issues 788 of them — yet statusCheckRollup ALONE has no REST form, so the budget that hit 5,520 of 5,000 today is spent almost entirely on fields REST serves for free"
   repo: remudero
   depends_on: []
   type: implement
@@ -31,18 +31,41 @@
     projection. A CACHE IS THE WRONG LEVER AND THIS SHARD SAYS SO RATHER THAN LEAVING IT OPEN.
 
     (3) **WHAT ACTUALLY NEEDS GraphQL, FIELD BY FIELD.** Across every `--json` request in `src/`:
-    `state` 12, `url` 11, `number` 9, `headRefName` 8, `body` 8, `title` 4, `headRefOid` 3, `files` 2,
-    `mergeable` 1, `author` 1 — ALL REST-SERVABLE. Only **`statusCheckRollup` (5) and
-    `autoMergeRequest` (1)** have no REST form; the rollup is a `CheckRun`/`StatusContext` union and
-    must stay on GraphQL. So the conversion surface is large and the exclusion is small and nameable.
+    `state` 12, `url` 11, `number` 9, `body` 8, `headRefName` 8, `title` 4, `headRefOid` 3, `files` 2,
+    `author` 1, `commits` 1, `mergeCommit` 1, `mergeable` 1 — ALL REST-SERVABLE.
+    **`statusCheckRollup` (5) IS THE ONLY EXCLUSION**: it is a `CheckRun`/`StatusContext` union with
+    no single REST field and must stay on GraphQL. So the conversion surface is large and the
+    exclusion is small, single and nameable.
+    CORRECTED 2026-08-15 AFTER FILING — AN EARLIER READING OF THIS SHARD NAMED `autoMergeRequest` (1)
+    AS A SECOND EXCLUSION AND THAT IS WRONG. THE REPO ITSELF DISPROVES IT: `mapRestPr`
+    (`src/lib/open-prs-rest.ts`) already reads `autoMergeRequest: row.auto_merge ?? null`, and its doc
+    states why the conversion is TOTAL rather than approximate — 'Its sole consumer is
+    `autoMergeArmed: pr.autoMergeRequest != null`, so nullity is the entire contract; REST's object
+    differs from GraphQL's in key names only, and no consumer reads a key.' Confirmed independently
+    against the LIVE REST pull object for PR 1905, which carries the `auto_merge` key; the positive
+    control is that the SAME read finds NO `statusCheckRollup` key, so the instrument distinguishes
+    the two. W1-T522 (#1906) had this right in its field table and this shard did not — the two would
+    otherwise have merged contradicting each other. **`autoMergeRequest` IS THEREFORE IN SCOPE FOR
+    CONVERSION, NOT CARVED OUT**; both of its read sites are in `src/lib/status.ts`, already declared,
+    so this corrects a carve-out rather than widening the task.
 
-    (4) **THE SITE COUNT IS 28 AGAINST 25, NOT 108 AGAINST 32 — THE LARGER FIGURE WAS A BARE-SUBSTRING
-    ARTIFACT.** Counting actual argument arrays (`\"pr\", \"view\"` 21, `\"pr\", \"list\"` 7) against
-    `\"api\"` 25. The shell mangled two word-boundary attempts before this was measured in Python; the
-    positive control that caught it was `ghJson`, which read 0 under the broken form and 34 under the
-    working one. ANY RE-DERIVATION HERE MUST CARRY A CONTROL THAT WOULD FAIL LOUDLY.
+    (4) **THE SITE COUNT IS A QUERY, NOT A CONSTANT — RE-TAKEN 2026-08-15 AND IT HAD ALREADY MOVED.**
+    Counting actual argument arrays: `\"pr\", \"view\"` **22** and `\"pr\", \"list\"` **7** against
+    `\"api\"` **32**, so **29 GraphQL sites against 32 REST** — where the same query taken hours
+    earlier on this same day read 21 and 7 against 25. The `ghJson` control read **34 on both
+    takings**, so the movement is the tree moving under the figure, not the method changing. NOT 108
+    AGAINST 32: that larger figure was a BARE-SUBSTRING ARTIFACT. The shell mangled two word-boundary
+    attempts before this was measured in Python, and ANY RE-DERIVATION HERE MUST CARRY A CONTROL THAT
+    WOULD FAIL LOUDLY.
+    AND THE RE-TAKING WEAKENS THIS PARAGRAPH'S OWN ARGUMENT, WHICH IS WHY IT IS RECORDED RATHER THAN
+    QUIETLY UPDATED: `src/` IS NOW REST-MAJORITY BY SITE COUNT, so 'most call sites shell GraphQL' is
+    no longer true and MUST NOT BE ARGUED. THE VOLUME ARGUMENT IS UNTOUCHED AND IS THE REAL CASE —
+    rationale (1)'s 788 invocations per `projectPlan` pass all sit downstream of ONE gateway, and a
+    site count says nothing about how often a site FIRES. An implementer who justifies this task on
+    the site count is arguing from the weaker of the two figures.
 
-    (5) **WHERE THE SITES LIVE.** `src/run-task.ts` 14, `src/lib/status.ts` 10, and one each in
+    (5) **WHERE THE SITES LIVE**, from the same 2026-08-15 re-taking. `src/run-task.ts` 15,
+    `src/lib/status.ts` 10, and one each in
     `src/lib/feedback-landing.ts`, `src/lib/review.ts`, `src/lib/trace.ts`, `src/lib/worker.ts`. The
     VOLUME is all downstream of `ghGateway` (`src/lib/status.ts`), which is why this task is scoped
     there and not to the 19,943-line `src/run-task.ts` (W1-T471)."
@@ -71,7 +94,15 @@
     rollup fails the second; leaving a converted read on `gh pr view` fails the first.
     (vii) NOT IN SCOPE, EACH OWNED OR REFUSED ELSEWHERE. The rate-limit FLOOR — see the split below.
     Batching `findMergedByTrailer` — a real and separate win, but it changes a precedence rung rather
-    than a transport. W1-T521 (#1903), which owns a rollup read discarding a whole sweep pass. And
+    than a transport. W1-T521 (#1903), which owns a rollup read discarding a whole sweep pass.
+    W1-T522 (#1906, MERGED 2026-08-15), WHICH IS THIS SHARD'S SIBLING AND NOT A DUPLICATE OF IT —
+    THE TWO WERE FILED 33 SECONDS APART FROM THE SAME RECON AND NOTHING IN EITHER SAID WHICH HALF WAS
+    WHICH, WHICH IS THE ONLY REASON THIS PARAGRAPH EXISTS. THE BOUNDARY IS THE FILE SET AND THE TWO DO
+    NOT OVERLAP: W1-T522 converted the review-lifecycle reads in `src/lib/review.ts` and
+    `src/run-task.ts`; this task converts `ghGateway` in `src/lib/status.ts`, which W1-T522 does not
+    declare and never edited. Its closing line hands this one over in as many words — 'this task moves
+    two and the table is the record for whoever moves the next one' — and that same table is what
+    corrects rationale (3) above. DO NOT READ THE PAIR AS REDUNDANT AND CLOSE ONE. And
     sweeping less often, which trades one stall for another: the cadence is what keeps
     time-to-review at a 7.3s median once a PR is reached.
 
@@ -92,7 +123,7 @@
     - claim: "a gateway pass issues no pull-request view or list invocation for the converted reads"
       proof: "unit test: W1-T523: the converted reads issue no pr view or pr list"
   origin: recon#graphql-budget-exhausted-2026-08-15
-  plan_refs: ["W1-T511", "W1-T521", "W1-T257", "W1-T377", "W1-T119"]
+  plan_refs: ["W1-T511", "W1-T521", "W1-T522", "W1-T257", "W1-T377", "W1-T119"]
   files: [src/lib/status.ts, test/status-rest-transport.test.ts]
   status: queued
   attempts: 0
@@ -128,7 +159,8 @@
     ID PROVENANCE, AND A LIVE COLLISION CAUGHT BY THE GATE. origin/main's max is 519 by both
     declaration and shard filename; `refs/rmd-id/` held 515, 516, 520 and 521, with 520 and 521 also
     carried by open PRs #1901 and #1903. W1-T522 WAS SWEPT CLEAN AND WAS TAKEN BY ANOTHER LANE BETWEEN
-    THE SWEEP AND THE PUSH — the ref came back holding a foreign sha rather than this session's unique
+    THE SWEEP AND THE PUSH — that lane's filing is #1906, the sibling design (vii) draws the boundary
+    against — the ref came back holding a foreign sha rather than this session's unique
     orphan payload, which is the ONLY reason the collision was visible; a tag or `--force-with-lease`
     would both have succeeded silently against a ref already holding the same sha. This id was then
     re-swept and taken at `refs/rmd-id/W1-T523`, verified by RE-READING the ref and matching it against
