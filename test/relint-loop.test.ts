@@ -62,6 +62,7 @@ const CLEAN_TASK = (id: string): string =>
     "  verify: auto",
     "  status: queued",
     "  attempts: 0",
+    "  files: [test/relint-loop.test.ts]",
     "  acceptance:",
     '    - claim: "the thing holds"',
     '      proof: "unit test: test/relint-loop.test.ts"',
@@ -80,6 +81,7 @@ const DIRTY_TASK = (id: string): string =>
     "  verify: auto",
     "  status: queued",
     "  attempts: 0",
+    "  files: [test/relint-loop.test.ts]",
     "  acceptance:",
     '    - claim: "the thing holds"',
     '      proof: "the existing suite passes unchanged and the behaviour is correct"',
@@ -331,10 +333,14 @@ test("THE REPLAY: W1-T286 as the triage worker actually wrote it is caught BEFOR
 
     const violations = lintFiledTasks(root, ["W1-T286"]);
 
-    // THE INCIDENT, EXACTLY: six blocking violations, four proof-dialect and two proof-resolvability.
-    assert.equal(violations.length, 6, `expected the six that failed lint-plan; got ${JSON.stringify(violations.map((v) => v.check))}`);
+    // THE INCIDENT, EXACTLY: six blocking violations, four proof-dialect and two proof-resolvability —
+    // PLUS a seventh, declared-scope (W1-T504), added by this suite: the shard's own `note:` says
+    // its missing `files:` is deliberate (the alert API never named the flagged paths), but the new
+    // check has no such carve-out, so the real W1-T286 record now also legitimately trips it.
+    assert.equal(violations.length, 7, `expected the seven that now fail lint-plan; got ${JSON.stringify(violations.map((v) => v.check))}`);
     assert.equal(violations.filter((v) => v.check === "proof-dialect").length, 4);
     assert.equal(violations.filter((v) => v.check === "proof-resolvability").length, 2);
+    assert.equal(violations.filter((v) => v.check === "declared-scope").length, 1);
     assert.ok(violations.every((v) => v.severity === "block"));
 
     // And it is worker-fixable, so the loop would have relinted rather than refused outright.
@@ -352,8 +358,13 @@ test("THE REPLAY: W1-T286 as the triage worker actually wrote it is caught BEFOR
 
 test("THE REPLAY, corrected: the same task with executable proofs lints clean — the loop CAN converge", () => {
   const shard = readFileSync(join(__dirname, "fixtures", "w1-t286-as-filed.yaml"), "utf8");
-  // Replace every prose proof with the dialect the prompt now teaches; change nothing else.
-  const fixed = shard.replace(/^(\s+)proof: ".*"$/gm, '$1proof: "unit test: test/relint-loop.test.ts"');
+  // Replace every prose proof with the dialect the prompt now teaches; change nothing else, EXCEPT
+  // also declaring files: (W1-T504) — the real record's `note:` documents that omission as
+  // deliberate at FILING time (the alert API had not been read yet), but a "corrected" redraft is
+  // exactly the moment the flagged site IS known, so a converged redraft also names it.
+  const fixed = shard
+    .replace(/^(\s+)proof: ".*"$/gm, '$1proof: "unit test: test/relint-loop.test.ts"')
+    .replace(/^(- id: W1-T286)$/m, '$1\n  files: [src/lib/config.ts]');
   const tasks = parseTasksFromYaml(fixed, "w1-t286-fixed");
   const blocking = lintTask(tasks[0]).violations.filter((v) => v.severity === "block");
 
