@@ -512,6 +512,7 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
       ),
   },
   npmScriptEntry("learnings-budget-ratchet", "learnings-budget-ratchet"),
+  npmScriptEntry("claude-md-budget-ratchet", "claude-md-budget-ratchet"),
   npmScriptEntry("jscpd-gate", "jscpd"),
   npmScriptEntry("claims", "claims"),
   {
