@@ -1,0 +1,87 @@
+- id: W1-T518
+  title: "the id allocator's advisory read consults a local directory that is empty by construction in a worker sandbox — firstUnreservedAtOrAbove returns its own input when the dir is absent, so `rmd next-task-id` reports free every id the remote already holds"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55
+  risk: medium
+  rationale: "MEASURED at 7524463. firstUnreservedAtOrAbove (src/lib/task-id-reservation.ts)
+    takes a DIRECTORY and folds liveReservedIds over it — `if (!existsSync(dir)) return startId;`
+    then `while (held.has(id)) id++`. Every input is LOCAL: it never reads origin, and an ABSENT
+    directory is not an error but a silent 'nothing is reserved', returning the caller's own
+    starting number unchanged. In a worker that directory is a tmp mkdir inside the sandbox,
+    discarded when the process exits, so the fail direction is toward REPORTING FREE.
+    MEANWHILE THE DURABLE STORE EXISTS AND IS READABLE. `refs/rmd-id/*` on origin holds real
+    reservations today — W1-T515 and W1-T516, both anchored to the empty tree
+    4b825dc642cb6eb9a060e54bf8d69288fbee4904 and both authored `rmd-id reservation
+    <pid>@Craigs-Mac-mini` — and `git ls-remote origin 'refs/rmd-id/*'` returns them to any
+    credential that can read the repo, including a session credential that CANNOT write them.
+    So the advisory reader is blind to a store it is allowed to see.
+    THE ADVISORY CONTRACT IS CORRECT AND IS NOT WHAT CHANGES. That function's own doc rules out
+    making the read claim anything: 'Reporting a number and claiming it are different acts, and
+    only the caller that will actually FILE should claim' — an operator asking what id is next
+    thousands of times must not burn thousands of ids. This task does not touch that. It changes
+    only WHICH STORE the read consults, so a report that is already advisory stops being wrong.
+    WHY IT MATTERS RATHER THAN BEING TIDY: eight id collisions are on record and two of them
+    refused loadPlan on origin/main, taking every plan-reading verb down with it — most recently
+    for about twenty-four minutes. A reader that reports an id the remote already holds is the
+    input to exactly that failure, and it is the ONE half of the allocator that is not blocked
+    on a credential: writing refs/rmd-id/* is refused HTTP 403 for a session token, but reading
+    it is not."
+  design: |
+    (i) firstUnreservedAtOrAbove gains an INJECTED reader for remotely-held ids, defaulting to
+    the local directory fold it already performs, so no existing caller changes behaviour and
+    the pure/no-I/O property of the module's fold is preserved: the reader is supplied, never
+    opened here.
+    (ii) THE FAIL DIRECTION FLIPS. An absent local directory today returns the input unchanged —
+    'nothing is reserved' — which is the reading that produces a collision. When the remote is
+    UNREACHABLE the answer must be UNKNOWN rather than FREE, surfaced to the caller instead of
+    silently folded into a number. Reporting a number the reader could not substantiate is the
+    defect, not the absence of a number.
+    (iii) IT REMAINS ADVISORY. No reservation is taken, no ref is written, no id is claimed. The
+    function's doc contract is quoted in the test so a later change cannot quietly convert the
+    reader into a claimer.
+    (iv) FALSIFIER, BOTH DIRECTIONS: an id held only on the REMOTE is skipped by the read (a
+    reader that consults only the local dir fails this), AND an id held nowhere is still
+    returned unchanged (a reader that skipped everything would pass the first and fail this --
+    the false-positive containment).
+    (v) NOT IN SCOPE, each for a stated reason: reserveTaskIdRemote's single call site, which is
+    a WRITE path and is blocked on a credential this session measured at HTTP 403 rather than on
+    code; the namespace itself, which is proven creatable by the two live refs above and needs no
+    redesign; making `rmd next-task-id` reserve, which its own doc refuses and which 277
+    cli.invoked rows in one hour would have turned into 277 burned ids; and reapBranchesCommand's
+    drift enumeration, which never sees refs/rmd-id/* because it reads --heads only.
+  acceptance:
+    - claim: "an id held only on the remote is skipped by the advisory read"
+      proof: "unit test: the advisory read sees a reservation held on the remote"
+    - claim: "an unreachable remote is reported as unknown rather than folded into a free number"
+      proof: "unit test: an unreachable remote degrades the advisory read instead of reporting free"
+    - claim: "the pre-change local-only reader is shown returning an id the remote holds, so the defect is pinned"
+      proof: "unit test: a local only reader reports an id that the remote already holds"
+  origin: oper#id-allocator-unreachable-2026-08-15
+  plan_refs: ["W1-T509"]
+  files: [src/lib/task-id-reservation.ts, test/task-id-reservation.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — the fold is pure and its reader is injected, so every criterion is
+    decidable from fixtures with no network, no spawn and no remote. risk:medium is Rule 19's
+    SPAN and it is honest: subsystemsOf folds a .test basename onto its source, so
+    src/lib/task-id-reservation.ts and test/task-id-reservation.test.ts are ONE subsystem, and
+    the blast radius matches — one parameter added with a default that preserves today's
+    behaviour, no import added to any other module. FILES DERIVED BY INVOCATION: the function,
+    its doc contract and its existing suite all live in that one module and its one test file,
+    both of which exist today. NOTHING under src/run-task.ts is declared, because the CLI call
+    site only forwards a value and clause (v) puts the write path out of scope; an implementer
+    who concludes the wiring belongs there MUST AMEND THIS SHARD TO DECLARE IT FIRST rather than
+    overrunning — #1869 shipped a 22-file overrun against a two-path declaration.
+    PROOF NOTES: all three proofs are the NAME-FILTERED `unit test:` form, never the whole-file
+    path form, so each names the behaviour it proves rather than a file that would pass on any
+    test in it. Each title was verified to match ZERO files today via `grep -rlF` over test/,
+    against a control matching one, so every one discriminates head from base. Each is plain
+    prose under 100 characters with no comma and no regex metacharacter, so
+    looksLikeScenarioNarrative does not fire and proofNameResolutionViolations cannot either.
+    Zero candidates today is the legitimate forward reference for an unimplemented task; what
+    must hold now is that the proofs PARSE. NO depends_on: firstUnreservedAtOrAbove,
+    liveReservedIds and the suite are all on main at 7524463."

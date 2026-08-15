@@ -198,8 +198,11 @@ test("CALIBRATION: the detection finds the readers recon-EJ measured, and no mor
   // /v1/policy/daily-cost-ceiling(/clear)) — the same bound `buildAccountUsageRoute`'s reader
   // already reads for the ACCOUNT strip's render, now also consulted at write time so a write
   // never validates against a hardcoded copy of the committed row. ONE line, shared by both
-  // routes, rather than the seam appearing twice.
-  assert.equal(readers.length, 14, `expected 14 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
+  // routes, rather than the seam appearing twice. FIFTEEN since `buildSweepEffects`'s
+  // `armSessionPrs` (run-task.ts, W1-T516) landed — a FOURTEENTH consumer, also SEAMED
+  // (`armSessionPrsOverride ?? loadDefaultPolicy()`), gating whether the sweep arms a session
+  // PR (no plan task id) under the review lane's own PR-<n> synthetic id.
+  assert.equal(readers.length, 15, `expected 15 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
 
   // `symbolise` labels the LAST bare `const policy = loadPolicy(...)` as daemonCommand's, because that
   // reader carries no distinctive identifier of its own. Today exactly ONE such line survives —

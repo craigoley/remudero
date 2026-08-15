@@ -488,6 +488,11 @@ function armOpenCappedFakeGh(branch: string, callLogPath: string, headSha: strin
       "  echo 'https://github.com/acme/remudero/issues/501'",
       "  exit 0",
       "fi",
+      // W1-T511: `ghLiveState` reads live PR state over REST (`gh api repos/{o}/{r}/pulls/{n}`).
+      // This arm MUST precede the generic `api` arm below, which answers `[]` for the open-issue
+      // dedup read — an array folds to NOT-OPEN, so without this the fix rung stands down
+      // (`fix.stood_down`) before the branch under test is reached.
+      "if [[ \"$1\" == 'api' && \"$2\" =~ ^repos/[^/]+/[^/]+/pulls/[0-9]+$ ]]; then echo '{\"state\":\"open\",\"merged\":false}'; exit 0; fi",
       "if [[ \"$1\" == 'api' ]]; then echo '[]'; exit 0; fi",
       "exit 1",
       "",

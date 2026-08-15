@@ -1,0 +1,100 @@
+- id: W1-T519
+  title: "the plan corpus is a public, indexed list of this system's known weaknesses including the unbuilt ones, and nothing tells the fleet's own filers that a security-shaped finding filed here is PUBLISHED BEFORE IT IS FIXED — SECURITY.md already routes OUTSIDE reporters to a private advisory but no signal routes triage, recon or a retro: add an advisory-routing WARN to the task linter, warn-only by construction"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  rationale: "FILED FROM the public-exposure recon of 2026-08-15 (operator-directed), evidence
+    derived at 3cac8ce over the origin/main plan blobs and the full 1558-commit history.
+    MEASURED, and the number matters because it is SMALLER than it looks: the corpus has ever
+    named about two dozen security-shaped tasks, and the large majority carry local evidence
+    the fix already merged — the shard documents the gap AND its closure. Filtering to the
+    genuinely-open-with-no-fix-evidence set leaves SIX: W1-T2 (validate-before-spawn / settings
+    schema pin), W1-T10 (scoped-PAT injection), W1-T204 (gate-config in-band edits), W1-T216
+    (the forge-attack drill, never run), W1-T239 (worker-home symlink allowlist), W1-T493
+    (console route-scope audit). Five of the six are verify:human operator actions, not code a
+    reader can turn against a running fleet — but all six are world-readable with measured
+    preconditions attached, because filing a task IS publishing on this repo.
+    THE PATTERN THAT MAKES THIS TIMELY: W1-T493, W1-T495 and W1-T500 each documented a console
+    auth gap BEFORE it was built (495 and 500 have since merged; 493 is open) — and DNS for
+    console.remudero.com now resolves, so the console is being stood up. The origin itself is
+    NOT reachable from the tree (serve binds loopback, refuses wildcards, publishes no port, and
+    no tunnel config exists here), but the corpus that describes its auth model is public today.
+    THE HALF THAT ALREADY EXISTS: SECURITY.md (W1-T23, #320) routes OUTSIDE reporters to a
+    private GitHub advisory — verified enabled (private vulnerability reporting = true) — and
+    says plainly 'do not open a public issue'. Nothing says the same thing to the fleet's OWN
+    filers: triage, recon sessions and retros mint shards into the public corpus with no signal
+    that a security-shaped finding has a private path. W1-T61 (a duplicate SECURITY.md task) was
+    withdrawn as a pre-dialect zombie and its note leaves re-filing open; this is the narrow,
+    instrument-shaped half of closing that loop, not a second SECURITY.md.
+    THE HONEST OBJECTION, STATED UP FRONT: the fleet cannot drain a private advisory — loadPlan
+    reads plan/tasks.d/ on origin/main, so a finding held in an advisory is invisible to
+    dispatch and its fix must be HUMAN-BUILT. That is judged correct, not a defect: the gaps a
+    public reader could weaponise are exactly the ones a human should build with the operator
+    watching. The rule below is therefore a WARN and only a warn — it informs the routing
+    decision, it never makes it."
+  design: |
+    THE SHAPE: one new violation family in src/lib/task-linter.ts, same idiom as its siblings.
+    (i) THE PREDICATE, AS REVIEWED DATA: a matcher list (T427's per-entry-reason discipline —
+    a reviewer reads reasons, not lists) over the task's title, rationale, design and note.
+    Entries aim at PRECISION over recall: authentication/authorisation weakness, token or
+    credential leakage, secret handling, sandbox/containment escape or bypass, scope
+    enforcement on a reachable route, prompt-injection escalation. Vocabulary this repo uses
+    benignly (scope, route, session, grant, tier bare) must NOT match — the recon that filed
+    this measured a naive keyword predicate at 87 of 95 open tasks, which would make the warn
+    wallpaper. The falsifier below holds the floor.
+    (ii) WARN-ONLY BY CONSTRUCTION: severity is the literal "warn" with NO opts knob — unlike
+    proofDialect/proofResolvability there is deliberately no way to run this rule blocking, in
+    any caller, so it can never stall dispatch, the changed-tasks gate, or a filing (a7b83d8:
+    a warn never reaches lint-plan's exit code, in any mode). The routing decision this warn
+    informs is the operator's; starving the queue to advisories would be the opposite failure.
+    (iii) THE MESSAGE NAMES THE ROUTE: matched category, matched entry's reason, and the
+    instruction — consider a private security advisory (SECURITY.md, 'Report a vulnerability')
+    with public disclosure after the fix lands, instead of a public shard.
+    (iv) FALSIFIER, BOTH DIRECTIONS: a fixture task describing a sandbox-escape gap draws
+    exactly one advisory-routing warn naming its matched category; a routine fixture in fleet
+    vocabulary (a coverage-ratchet task using scope, route and grant in their benign senses)
+    draws ZERO; and lint outcomes with and without the warn are exit-identical, proven by
+    asserting the violation's severity is "warn" and that no blocking count changes.
+    NOT IN SCOPE: retroactive triage of the ten open security-shaped shards named above (the
+    operator rules on those; the recon report lists them); any blocking severity anywhere; the
+    task-drafting prompt contracts (W1-T512's surface — mirroring the predicate there is a
+    follow-up once the predicate has observed precision).
+  acceptance:
+    - claim: "a task whose text names an auth, token, sandbox or reachable-route weakness draws a warn that names the private-advisory path"
+      proof: "unit test: security-shaped task draws an advisory-routing warn"
+    - claim: "the rule has no blocking mode anywhere — severity is the warn literal with no opts knob, and a routine fleet-vocabulary task draws zero warns"
+      proof: "unit test: advisory routing warn never blocks a filing"
+    - claim: "the rule lands beside the other violation families in the linter as one idiom"
+      proof: "grep: advisoryRoutingViolations in src/lib/task-linter.ts"
+  risk: medium
+  origin: "oper#public-exposure-recon-2026-08-15"
+  plan_refs: ["W1-T61", "W1-T493", "§5D"]
+  files: [src/lib/task-linter.ts, test/task-linter.test.ts]
+  status: queued
+  attempts: 0
+  note: "risk:medium is Rule 19's SPAN, matching W1-T504's precedent for a single linter rule
+    plus its falsifier — two files, one concern; blast radius is smaller still because the rule
+    is warn-only by construction. Rule 25 (W1-T297): src/lib/task-linter.ts is instrument
+    surface, so this diff rides alone and its two-file files: enforces that by construction.
+    PROOF NOTES: both unit proofs are name-filtered titles verified to match ZERO files under
+    test/ at 3cac8ce (control: a known-real title substring matched 1) — the implementing test
+    must carry each title as ONE verbatim string literal, never assembled across a
+    concatenation seam (impl-AG). The grep proof names a NEW load-bearing symbol at an
+    EXISTING path — 0 hits at 3cac8ce via the executor's own argv (grep -arn --), so it misses
+    the merge-base and cannot land executed_stale (W1-T273).
+    MINT NOTE — THE 2ff09b1 HAZARD HAPPENED, THIS IS THE RECORD: this task was first filed as
+    W1-T517 (swept free at 3cac8ce, TAKEN=0), but refs/rmd-id/W1-T517 could NOT be reserved from
+    the filing session — the push proxy refuses non-branch refs with HTTP 403, and
+    reserveTaskIdRemote has a SINGLE call site inside triage's mint, so a hand-filed shard never
+    passes through it. With the id unreserved, two concurrent triage mints then took it: #1891
+    (W1-T517 sibling-job-disagreement) and #1893 (W1-T518 reservation-read), both merging before
+    the first PR (#1892) did. #1892 merged anyway because its changed-tasks lint ran against its
+    PINNED pre-collision base and never saw the duplicate — landing a SECOND W1-T517 on main and
+    breaking loadPlan (duplicate task id W1-T517, confirmed at 4d72e91). This shard is the
+    follow-up fix: it renames the later arrival to W1-T519 (max+1 at bc90fc6, control W1-T518=1),
+    restoring plan integrity. The incident is itself evidence for the reservation-read gap #1893
+    (W1-T518) names — a hand-filed shard cannot reserve, so it cannot be made atomic from here.
+    LEDGER: UNMEASURED — no route to state/ from this session; nothing here needs it."
