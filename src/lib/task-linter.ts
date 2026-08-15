@@ -1552,31 +1552,37 @@ export const ADVISORY_ROUTING_LEXICON: ReadonlyArray<AdvisoryRoutingMatcher> = [
   },
 ];
 
-/** True iff `task`'s narrative text (title + rationale + note — see the module comment above for
- *  why `design:` is not among them) names a security-shaped weakness matching one of {@link
- *  ADVISORY_ROUTING_LEXICON}'s phrase entries. Returns AT MOST ONE violation — the first matching
- *  category, in table order — never one per hit or one per field, so a task whose text matches
- *  several entries still draws exactly one warn (the falsifier's "exactly one" requirement).
- *  WARN-only, unconditionally: no `opts` parameter exists to override it (see the module comment
- *  above, "WARN-ONLY BY CONSTRUCTION"). */
-export function advisoryRoutingViolation(task: Task): LintViolation | undefined {
+/** `task`'s narrative text (title + rationale + note — see the module comment above for why
+ *  `design:` is not among them) matched against {@link ADVISORY_ROUTING_LEXICON}'s phrase
+ *  entries. Named and shaped PLURAL, an ARRAY, matching this file's majority violation-family
+ *  idiom (`proofShapeViolations`, `headlessFitnessViolations`, `dispatchPriorityViolations`,
+ *  `duplicateTitleViolations` — every one returns `LintViolation[]`, spread straight into
+ *  `lintTask`'s aggregator) — this is criterion 3's own point, "lands beside the other violation
+ *  families ... as one idiom". Length is 0 or 1, NEVER more: only the FIRST matching category,
+ *  in table order, is returned — never one per hit or one per field, so a task whose text
+ *  matches several entries still draws exactly one warn (the falsifier's "exactly one"
+ *  requirement). WARN-only, unconditionally: no `opts` parameter exists to override it (see the
+ *  module comment above, "WARN-ONLY BY CONSTRUCTION"). */
+export function advisoryRoutingViolations(task: Task): LintViolation[] {
   const text = [task.title, task.rationale, task.note].filter(Boolean).join("\n");
   for (const entry of ADVISORY_ROUTING_LEXICON) {
     if (!entry.pattern.test(text)) continue;
-    return {
-      check: "advisory-routing",
-      severity: "warn",
-      message:
-        `task ${task.id}'s text names a ${entry.category} (${entry.reason}) — filing a task IS ` +
-        "publishing on this public repo, before any fix lands. Consider routing this finding to a " +
-        'private security advisory (SECURITY.md, "Report a vulnerability") with public disclosure ' +
-        "after the fix ships, instead of — or alongside — a public task shard. This is ADVISORY " +
-        "ONLY: the fleet cannot act on a finding held in a private advisory (loadPlan reads " +
-        "plan/tasks.d/ on origin/main), so the routing decision, and any resulting fix, remains " +
-        "the operator's to make; this check never blocks dispatch or a filing.",
-    };
+    return [
+      {
+        check: "advisory-routing",
+        severity: "warn",
+        message:
+          `task ${task.id}'s text names a ${entry.category} (${entry.reason}) — filing a task IS ` +
+          "publishing on this public repo, before any fix lands. Consider routing this finding to a " +
+          'private security advisory (SECURITY.md, "Report a vulnerability") with public disclosure ' +
+          "after the fix ships, instead of — or alongside — a public task shard. This is ADVISORY " +
+          "ONLY: the fleet cannot act on a finding held in a private advisory (loadPlan reads " +
+          "plan/tasks.d/ on origin/main), so the routing decision, and any resulting fix, remains " +
+          "the operator's to make; this check never blocks dispatch or a filing.",
+      },
+    ];
   }
-  return undefined;
+  return [];
 }
 
 // ── DUPLICATE-CLOSURE AT KNOWLEDGE INTAKE (W1-T420) ──────────────────────────
@@ -1859,9 +1865,9 @@ export interface LintOpts {
  *  runs only when `opts.mountMaxTurns` is supplied, duplicate-title (W1-T420) is a
  *  no-op absent `opts.openTaskTitles`, proof-name-resolution (W1-T488) is a no-op
  *  absent `opts.resolveNameFilteredCandidates`, and dispatch-priority (W1-T422) and
- *  advisory-routing (W1-T519) always run — advisory-routing is a no-op only when the
- *  task's title/rationale/note match none of {@link ADVISORY_ROUTING_LEXICON}, and can
- *  never block (see {@link advisoryRoutingViolation}'s module comment). */
+ *  advisory-routing (W1-T519) always run — advisory-routing is a no-op (empty array) only
+ *  when the task's title/rationale/note match none of {@link ADVISORY_ROUTING_LEXICON}, and
+ *  can never block (see {@link advisoryRoutingViolations}'s module comment). */
 export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   const violations: LintViolation[] = [];
   const sizing = sizingViolation(task);
@@ -1886,8 +1892,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   const declaredScope = declaredScopeViolation(task);
   if (declaredScope) violations.push(declaredScope);
   violations.push(...dispatchPriorityViolations(task));
-  const advisory = advisoryRoutingViolation(task);
-  if (advisory) violations.push(advisory);
+  violations.push(...advisoryRoutingViolations(task));
   if (opts.mountMaxTurns !== undefined) {
     const warn = budgetSanityWarning(opts.mountMaxTurns, opts.calibration);
     if (warn) violations.push(warn);
