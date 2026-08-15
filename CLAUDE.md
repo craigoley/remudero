@@ -254,10 +254,10 @@ forensic detail, so the narrative does not need to live here.
   live in a shard you didn't read, and `rmd lint-plan` then blocks the push.
   `grep -rhoE '^\s*- id: W1-T[0-9]+' plan/tasks.yaml plan/tasks.d/ | grep -oE 'T[0-9]+'` → max+1.
   *(#770 — renumbered to W1-T257; #775 — to W1-T261; same collision twice in one session)*
-- **`lint-plan` runs CHANGED-TASKS-ONLY in CI, so touching a task promotes its OWN pre-existing
-  violations to blocking — including ones that are merely `warn` at dispatch.** `proof-resolvability`
-  is demoted to `warn` at `preDispatchLint` but blocks in the changed-tasks gate. Once a task is in
-  your diff, clear EVERY violation on it, not just the dispatch-blocking ones. **AND `lint-plan`
+- **A `warn` NEVER REACHES `lint-plan`'s EXIT CODE — this bullet claimed the changed-tasks pass
+  promotes one, and a session acted on that twice.** `lintPlanCommand` (`src/run-task.ts`) increments
+  `failing` only inside `if (blocking.length)`, then `return failing > 0 ? 1 : 0`. `proof-resolvability`
+  is demoted at `preDispatchLint` and stays advisory in CI. **AND `lint-plan`
   EXITING 2 WITH `cannot resolve --base <ref>` MEANS YOUR BASE SHA IS POISONED, NOT YOUR DIFF** —
   the message is `run-task.ts`'s own, returned as 2 rather than 1. CI passes
   `BASE_SHA: ${{ github.event.pull_request.base.sha }}`, an EVENT-PAYLOAD SNAPSHOT, so **A RE-RUN
