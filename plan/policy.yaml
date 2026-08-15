@@ -378,8 +378,13 @@ sweep:
   # this path (`armFailureAction` only classifies a "clean status" refusal as a direct
   # merge; a draft's refusal message never matches, so it stays `arm-error-ignored`) —
   # undraft and the next sweep pass arms it.
+  #
+  # FLIPPED ON 2026-08-15 by operator ruling, once the repository reported
+  # `allow_update_branch: true`. Before that this flag would have produced a stalled queue rather
+  # than no queue: nothing in the fleet updates a stale branch, so an armed PR falling behind a
+  # strict required check would have sat armed and stuck until a human intervened.
   armSessionPrs:
-    value: false
+    value: true
     origin: "net-new"
 
 drain:
