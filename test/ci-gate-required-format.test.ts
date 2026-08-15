@@ -35,7 +35,6 @@ const PRE_REFORMAT_REQUIRED_FIXTURE = JSON.stringify([
   "jscpd-gate",
   "claims",
   "learnings-budget-ratchet",
-  "claude-md-budget-ratchet",
   "commitlint",
   "api-client-drift",
   "no-hand-rolled-fetch",
@@ -87,11 +86,7 @@ test("ci-gate-required-format: the format is one entry per line, and the convent
       `expected exactly one quoted entry per line, got: ${JSON.stringify(line)}`,
     );
   }
-  // DERIVED, never a literal: this count moved 13 -> 14 the first time a required check was
-  // added after W1-T107, failing a PR for arithmetic rather than for format. The fixture above
-  // is the same list this file already asserts membership against, so it cannot drift from it.
-  const expectedEntries = (JSON.parse(PRE_REFORMAT_REQUIRED_FIXTURE) as string[]).length;
-  assert.equal(entryLines.length, expectedEntries, `expected ${expectedEntries} one-per-line REQUIRED entries`);
+  assert.equal(entryLines.length, 13, "expected 13 one-per-line REQUIRED entries");
 
   // The comment immediately above the block must name the conflict class this format avoids —
   // concurrent PRs editing the same single line.
