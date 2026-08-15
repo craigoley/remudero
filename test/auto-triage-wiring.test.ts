@@ -93,7 +93,7 @@ test("THE FLAG IS OBEYED THROUGH THE WIRING: the wired hook's decision tracks th
   process.env.HOME = home;
   try {
     const deps = await captureDeps(planPath);
-    const decision = deps.checkAutoTriage!(true);
+    const decision = deps.checkAutoTriage!({ deferralPending: true, dispatchCount: 1, laneBudget: 1 });
     const shipped = loadPolicy(policyPath(process.cwd())).values.autoTriage;
 
     if (!shipped.enabled) {
@@ -152,7 +152,7 @@ test("THE LOCK IS CONTENDED THROUGH THE WIRING: a held lock refuses the wired ho
     const held = acquireDrainLock(triageLockPath(root));
     try {
       const deps = await captureDeps(planPath);
-      const decision = deps.checkAutoTriage!(true);
+      const decision = deps.checkAutoTriage!({ deferralPending: true, dispatchCount: 1, laneBudget: 1 });
       assert.equal(decision.fire, false, "a held lock must stop the wired rung");
     } finally {
       held.release();

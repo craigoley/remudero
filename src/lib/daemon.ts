@@ -1163,7 +1163,11 @@ export interface DaemonDeps {
    *  (below, in this file's idle branch) passes the runnable-depth census it already computed for
    *  `daemon.idle_reasons`/starvation this same tick — a hook that ignores the argument (every
    *  test predating the curve) still typechecks and behaves exactly as before. */
-  checkAutoTriage?: (deferralPending: boolean) => AutoTriageDecision;
+  checkAutoTriage?: (signals: {
+    deferralPending: boolean;
+    dispatchCount: number;
+    laneBudget: number;
+  }) => AutoTriageDecision;
   /** impl-DJ: run ONE triage for the decided entry. Awaited under the light-sweep ticker. */
   runAutoTriage?: (feedbackId: string) => Promise<void>;
   /**
@@ -2556,6 +2560,10 @@ export async function runDaemon(
     // nothing this tick; the forced-next path leaves it zero, which is correct (an operator-forced
     // dispatch is not evidence that the queue collided).
     let deferredPairings = 0;
+    // W1-T469 follow-up: HOISTED for the same reason `deferredPairings` was — the rung reads it
+    // outside this branch. Left at 0 on the forced-next path: an operator-forced dispatch is not
+    // evidence of spare capacity, and 0 makes `dispatchCount < laneBudget` false there.
+    let laneBudget = 0;
     if (forcedNext) {
       dispatchSet = [forcedNext];
     } else {
@@ -2577,7 +2585,97 @@ export async function runDaemon(
       const partition = partitionByFileOverlap(candidates);
       for (const d of partition.serialized) log("dispatch.serialized", serializedLedgerPayload(d));
       deferredPairings = partition.serialized.length;
+      laneBudget = budget;
       dispatchSet = partition.dispatch;
+    }
+
+    // ── AUTO-TRIAGE RUNG — RUNS BEFORE THE IDLE BRANCH (operator ruling, reversing W1-T469) ──
+    // THE STARVED STATE IS THE IDLE STATE, WHICH IS WHY THIS MOVED AGAIN. W1-T469 placed this
+    // AFTER the idle `continue` and justified it: a deferral implies a non-empty dispatch set, so
+    // an idle tick could only ever reach "no deferral this pass". That reasoning was correct and
+    // the GATE it served was circular — a deferral needs two eligible tasks to collide, so a fleet
+    // with nothing eligible can never produce one, and the rung that CREATES work could only fire
+    // when work already existed. MEASURED on a starved daemon: `auto_triage.skipped — no deferral
+    // this pass` beside `dispatch.starvation.escalated — blocked: 5, unmet_deps: 3`, ~87 feedback
+    // entries unread, thirteen hours.
+    //
+    // So the second trigger — `dispatchCount < laneBudget`, the queue failing to fill free
+    // capacity — is EXACTLY an idle-tick condition, and leaving the rung below the `continue`
+    // would have shipped the new gate as dead code.
+    //
+    // THE COST THIS ACCEPTS, STATED RATHER THAN DISCOVERED LATER. Running before the branch means
+    // an idle tick now writes an `auto_triage.skipped` row whenever the interval or the cap holds
+    // it: at a 60s poll and a 15m floor that is ~14 rows per fire, and `rotateLedger` retains
+    // MAX_RETAINED_LINES_PER_STEP = 200 per step. That volume is the price of the rung reaching a
+    // decision in the only state that needs it, and each row NAMES which bound held — which is
+    // the diagnostic, not noise. If it proves too loud, dedupe on reason-change the way
+    // `daemon.idle_reasons` already does above; do not solve it by moving this back down.
+    // DEFAULT OFF and bounded by `minIntervalMinutes` + `maxPerDay` (lib/auto-triage.ts) — the
+    // only two bounds left since W1-T475 deleted the adaptive curve. Best-effort in the retro's
+    // idiom: a throw here costs one logged tick, never the daemon.
+    if (deps.checkAutoTriage) {
+      let decision: AutoTriageDecision | undefined;
+      try {
+        decision = deps.checkAutoTriage({
+            deferralPending: deferredPairings > 0,
+            dispatchCount: dispatchSet.length,
+            laneBudget,
+          });
+      } catch (e) {
+        log("auto_triage.check_failed", { error: String((e as Error)?.message ?? e) });
+      }
+      if (decision?.fire) {
+        // IN-FLIGHT GUARD (W1-T300, the #1184/#1185 duplicate-triage race): the SAME shape as
+        // the task lane's `isOpenPr`/`readLiveState` pair above, keyed on feedback id instead of
+        // task id. `decideAutoTriage` only knows the entry's own `status: new` — it cannot see an
+        // already-open PR carrying this id's `origin: feedback#<id>` provenance, so that read
+        // happens here, right before the fire it would otherwise duplicate.
+        const openPrNumber = deps.isFeedbackOpenPr?.(decision.feedbackId);
+        let inFlight = openPrNumber !== undefined;
+        if (inFlight && openPrNumber !== undefined) {
+          // W1-T177's confirming-read discipline, applied verbatim: a cached OPEN can be stale
+          // (merged/closed since), so a fresh read stands the guard down rather than parking the
+          // entry forever on yesterday's snapshot.
+          const liveState = deps.readFeedbackLiveState?.(decision.feedbackId, openPrNumber);
+          if (liveState !== undefined && liveState !== "OPEN") {
+            inFlight = false;
+            log("auto_triage.stood_down", {
+              feedback: decision.feedbackId,
+              pr_number: openPrNumber,
+              state: liveState,
+              reason: "cached in-flight read was stale",
+            });
+          }
+        }
+        if (inFlight) {
+          // LEDGERED refusal naming the id and the open PR number (design's clause 3) — a silent
+          // skip here is indistinguishable from the starvation W1-T298 is about.
+          log("auto_triage.skipped_inflight", {
+            feedback: decision.feedbackId,
+            pr_number: openPrNumber,
+            reason: "an open triage PR already carries this feedback id's provenance",
+          });
+        } else {
+          log("auto_triage.fired", { feedback: decision.feedbackId, reason: decision.reason });
+          if (deps.runAutoTriage) {
+            const fired = decision;
+            try {
+              // W1-T276's wrapper, reused verbatim. Triage holds for MINUTES after opening its PR
+              // (a CI-polling tail) and this loop is single-threaded, so an unwrapped await would
+              // black out every sweep for that whole duration — the exact defect W1-T276 fixed for
+              // the retro. The ticker keeps dispositioning PRs while triage runs.
+              await sweepLightDuringRetro(deps, pollIntervalMs, log, () => deps.runAutoTriage!(fired.feedbackId));
+            } catch (e) {
+              log("auto_triage.run_failed", {
+                feedback: fired.feedbackId,
+                error: String((e as Error)?.message ?? e),
+              });
+            }
+          }
+        }
+      } else if (decision) {
+        log("auto_triage.skipped", { reason: decision.reason });
+      }
     }
 
     if (dispatchSet.length === 0) {
@@ -2642,103 +2740,6 @@ export async function runDaemon(
       await deps.sleep(pollIntervalMs);
       continue;
     }
-
-    // ── AUTO-TRIAGE RUNG — W1-T469, MOVED OUT OF THE IDLE BRANCH ──────────────
-    // THE OPERATOR'S RULING, NOT THIS SHARD'S: replace the idle conjunct with
-    // `partition.serialized.length > 0`. The rung used to sit INSIDE `if (dispatchSet.length
-    // === 0)`, so a BUSY TICK NEVER CONSULTED IT AND LOGGED NOTHING — 0 of 1,214
-    // `auto_triage.skipped` rows carry the old `daemon is not idle` reason (control: 666 carry
-    // the daily-cap reason). It now runs here, AFTER the dispatch decision.
-    //
-    // ★ WHY AFTER THE IDLE `continue` AND NOT BEFORE IT — THIS PLACEMENT COSTS NO DECISION, and
-    // that is a PROVABLE claim rather than a judgement call. `partitionByFileOverlap`
-    // (dispatch-overlap.ts) pushes a candidate to `serialized` ONLY when `dispatch.find(...)`
-    // already matched an occupant, and the first candidate always lands in `dispatch` because
-    // `find` over an empty array is undefined. So `serialized.length > 0` IMPLIES
-    // `dispatch.length >= 1` — a deferral cannot exist on an idle tick, and the decision an
-    // idle tick would reach here is "no deferral this pass", unconditionally.
-    // Running it BEFORE the `continue` would therefore add no information and would write that
-    // one row on all ~390 idle polls a night. That is not merely noise: `rotateLedger` keeps
-    // MAX_RETAINED_LINES_PER_STEP = 200 rows per step, so 390 identical refusals would flush the
-    // retained `auto_triage.skipped` window nightly and DESTROY the diagnostic this rung exists
-    // to provide — the same reasoning the `daemon.idle_reasons` cadence comment above records.
-    // `test/auto-triage-rung.test.ts` pins the implication so a partitioner change re-opens it.
-    //
-    // AND THE OLD GATE PROTECTED LESS THAN IT APPEARED: at `budget <= 0` the daemon logs
-    // `dispatch.wip_deferred` and does NOT continue, so `runnableCandidates(…, 0, …)` returns []
-    // and the idle branch was already entered with every lane full.
-    //
-    // STILL TRIPLE-BOUNDED — `minIntervalMinutes` and `maxPerDay` are the only bounds left after
-    // W1-T475, and this change deliberately loosens neither. Best-effort in the retro's idiom.
-      // ── AUTO-TRIAGE RUNG (impl-DJ, recon-DC #2) ────────────────────────────────
-      // The daemon's SECOND work-generating rung, and the first that fires on IDLE rather than on
-      // CADENCE — recon-DC's critique of the retro is precisely that it "fires on cadence, not on
-      // idle". W1-T469 MOVED IT OUT of the idle branch on the operator's ruling — see the banner
-      // above; the gate is now a DEFERRED PAIRING, not idleness, and every tick reaches a decision.
-      //
-      // DEFAULT OFF and triple-bounded (enabled / adaptive interval / maxPerDay — see
-      // lib/auto-triage.ts). Best-effort in the retro's idiom: a throw here costs one logged
-      // tick, never the daemon.
-      if (deps.checkAutoTriage) {
-        let decision: AutoTriageDecision | undefined;
-        try {
-          decision = deps.checkAutoTriage(deferredPairings > 0);
-        } catch (e) {
-          log("auto_triage.check_failed", { error: String((e as Error)?.message ?? e) });
-        }
-        if (decision?.fire) {
-          // IN-FLIGHT GUARD (W1-T300, the #1184/#1185 duplicate-triage race): the SAME shape as
-          // the task lane's `isOpenPr`/`readLiveState` pair above, keyed on feedback id instead of
-          // task id. `decideAutoTriage` only knows the entry's own `status: new` — it cannot see an
-          // already-open PR carrying this id's `origin: feedback#<id>` provenance, so that read
-          // happens here, right before the fire it would otherwise duplicate.
-          const openPrNumber = deps.isFeedbackOpenPr?.(decision.feedbackId);
-          let inFlight = openPrNumber !== undefined;
-          if (inFlight && openPrNumber !== undefined) {
-            // W1-T177's confirming-read discipline, applied verbatim: a cached OPEN can be stale
-            // (merged/closed since), so a fresh read stands the guard down rather than parking the
-            // entry forever on yesterday's snapshot.
-            const liveState = deps.readFeedbackLiveState?.(decision.feedbackId, openPrNumber);
-            if (liveState !== undefined && liveState !== "OPEN") {
-              inFlight = false;
-              log("auto_triage.stood_down", {
-                feedback: decision.feedbackId,
-                pr_number: openPrNumber,
-                state: liveState,
-                reason: "cached in-flight read was stale",
-              });
-            }
-          }
-          if (inFlight) {
-            // LEDGERED refusal naming the id and the open PR number (design's clause 3) — a silent
-            // skip here is indistinguishable from the starvation W1-T298 is about.
-            log("auto_triage.skipped_inflight", {
-              feedback: decision.feedbackId,
-              pr_number: openPrNumber,
-              reason: "an open triage PR already carries this feedback id's provenance",
-            });
-          } else {
-            log("auto_triage.fired", { feedback: decision.feedbackId, reason: decision.reason });
-            if (deps.runAutoTriage) {
-              const fired = decision;
-              try {
-                // W1-T276's wrapper, reused verbatim. Triage holds for MINUTES after opening its PR
-                // (a CI-polling tail) and this loop is single-threaded, so an unwrapped await would
-                // black out every sweep for that whole duration — the exact defect W1-T276 fixed for
-                // the retro. The ticker keeps dispositioning PRs while triage runs.
-                await sweepLightDuringRetro(deps, pollIntervalMs, log, () => deps.runAutoTriage!(fired.feedbackId));
-              } catch (e) {
-                log("auto_triage.run_failed", {
-                  feedback: fired.feedbackId,
-                  error: String((e as Error)?.message ?? e),
-                });
-              }
-            }
-          }
-        } else if (decision) {
-          log("auto_triage.skipped", { reason: decision.reason });
-        }
-      }
 
     // A dispatchable task ends any starvation episode — re-arm so a LATER one escalates again.
     starvationEscalated = false;

@@ -9368,7 +9368,7 @@ export function retroTriggerCheck(
  * change exists to remove.
  */
 export function buildAutoTriageDaemonHooks(deps: {
-  check?: (deferralPending: boolean) => AutoTriageDecision;
+  check?: (signals: { deferralPending: boolean; dispatchCount: number; laneBudget: number }) => AutoTriageDecision;
   runTriage?: (feedbackId: string) => Promise<number>;
   config?: Config;
   now?: () => Date;
@@ -9376,17 +9376,17 @@ export function buildAutoTriageDaemonHooks(deps: {
    *  Production passes none and the checked-in `plan/policy.yaml` governs, exactly as before. */
   policy?: Policy;
 } = {}): {
-  checkAutoTriage: (deferralPending: boolean) => AutoTriageDecision;
+  checkAutoTriage: (signals: { deferralPending: boolean; dispatchCount: number; laneBudget: number }) => AutoTriageDecision;
   runAutoTriage: (feedbackId: string) => Promise<void>;
 } {
   const check =
     deps.check ??
-    ((deferralPending: boolean) =>
-      autoTriageCheck({ config: deps.config, now: deps.now?.(), policy: deps.policy, deferralPending }));
+    ((signals: { deferralPending: boolean; dispatchCount: number; laneBudget: number }) =>
+      autoTriageCheck({ config: deps.config, now: deps.now?.(), policy: deps.policy, ...signals }));
   const runTriage = deps.runTriage ?? ((feedbackId: string) => triageCommand([feedbackId]));
   const configFor = () => deps.config ?? loadConfig();
   return {
-    checkAutoTriage: (deferralPending: boolean) => check(deferralPending),
+    checkAutoTriage: (signals: { deferralPending: boolean; dispatchCount: number; laneBudget: number }) => check(signals),
     runAutoTriage: async (feedbackId) => {
       // RECORD THE FIRE FIRST, deliberately. If triage throws or the process dies mid-run, the
       // marker has already advanced and the interval bound still holds — the failure costs one
@@ -9416,7 +9416,14 @@ export function buildAutoTriageDaemonHooks(deps: {
  * flipped (#1093). Production still passes nothing and reads the checked-in file exactly as before.
  */
 export function autoTriageCheck(
-  opts: { config?: Config; now?: Date; policy?: Policy; deferralPending?: boolean } = {},
+  opts: {
+    config?: Config;
+    now?: Date;
+    policy?: Policy;
+    deferralPending?: boolean;
+    dispatchCount?: number;
+    laneBudget?: number;
+  } = {},
 ): AutoTriageDecision {
   const config = opts.config ?? loadConfig();
   const policy = opts.policy ?? loadPolicy(policyPath(repoRoot));
@@ -9429,6 +9436,11 @@ export function autoTriageCheck(
     // FALSE so a caller that does not supply the signal REFUSES rather than fires — the hand route
     // (`rmd triage <id>`) does not come through here.
     deferralPending: opts.deferralPending ?? false,
+    // BOTH DEFAULT TO 0 so the capacity trigger is FALSE (`0 < 0`) for a caller that supplies
+    // nothing — the same fail-closed rule `deferralPending` states above. The hand route
+    // (`rmd triage <id>`) does not come through here and must never be fired by omission.
+    dispatchCount: opts.dispatchCount ?? 0,
+    laneBudget: opts.laneBudget ?? 0,
     // A lock whose holder is DEAD is not held — the same liveness rule `acquireDrainLock` itself
     // applies, so a crashed run cannot wedge the rung shut forever.
     lockHeld: held !== null && defaultIsPidAlive(held.pid),
