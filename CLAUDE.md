@@ -599,11 +599,16 @@ forensic detail, so the narrative does not need to live here.
   itself: it covers process STARTUP only and hands in-process staleness to the WS-2 self-updater.
   *(re-derived 2026-08-11; the operator-facing table is docs/operator-guide.md's
   "What a merged fix reaches before you restart")*
-- **If a suite dies with `Cannot find package 'tsx'`, check the canonical `node_modules` is
-  NON-EMPTY before diagnosing the code.** `bin/rmd` execs `$DIR/node_modules/.bin/tsx`, so an
-  emptied `node_modules` kills every rmd verb and the launchd supervisor while the already-running
-  daemon keeps working from resident memory — the fleet looks alive and cannot restart.
-  *(2026-08-06 — 52 consecutive supervisor failures; last good DEPLOY row 9s before the dir mtime)*
+- **A suite failing WIDE with ONE repeated message is an environment fault — read the message
+  before the diff. THE DISCRIMINATOR IS THE RATIO, NOT A VERSION NUMBER.** `Cannot find package
+  'tsx'` means the shared `node_modules` is empty (the bullet above), and the fleet then looks
+  alive but cannot restart *(2026-08-06 — 52 supervisor failures)*. A repeated
+  `browserType.launch` means the installed Playwright build is not the pinned one — 96 of 97
+  failures, one message; no real regression does that. Run
+  `node -p "require('playwright-core/browsers.json').browsers.find(b=>b.name==='chromium').revision"`
+  against `ls ~/Library/Caches/ms-playwright`. FIX THE ENVIRONMENT — alias the build where the
+  runner looks; **never edit the pin**. Container-scoped: the mini already carries the expected
+  revision. *(2026-08-15)*
 - **Run EVERY `rmd` verb as `RMD_SELF_SYNC_DONE=1 ./bin/rmd <verb>` — there are no read-only verbs.**
   `checkCliFreshness` (`src/lib/self-sync.ts`) runs `git(["merge", "--ff-only", "origin/main"])` on a
   checkout that is CLEAN and BEHIND, before the verb's own work. So `status`, `lint-plan` and
