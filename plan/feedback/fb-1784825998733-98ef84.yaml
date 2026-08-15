@@ -12,5 +12,24 @@ raw: "INBOX DEP CLASSIFIER CALLS MERGED TASKS UNMET — daemon-side classificati
   throttled surfaced as throttled, never as unmet."
 attachments: []
 origin: cli
-status: new
-proposal_pr: null
+status: proposed
+proposal_pr: https://github.com/craigoley/remudero/pull/1860
+summary:
+  headline: Daemon Reporting Merged Tasks as Unmet
+  what_happened: The classifier daemon is incorrectly marking three successfully
+    merged pull requests as unmerged. This is likely caused by either incorrect
+    resolver configuration or system delays being treated as missing data
+    instead of temporary errors.
+  decision: Audit the MergedResolver configuration on both daemon and manual
+    paths. Update error handling to show throttled reads as throttled, not
+    unmet.
+  options:
+    - label: Investigate and fix
+      consequence: Resolves root cause and improves error visibility; requires
+        development time and redeployment.
+    - label: Fix error handling immediately
+      consequence: Stops conflating throttled reads with missing data; does not
+        address possible configuration mismatch.
+    - label: Rollback daemon
+      consequence: Stops false reports now; loses recent improvements to the daemon
+        classification logic.

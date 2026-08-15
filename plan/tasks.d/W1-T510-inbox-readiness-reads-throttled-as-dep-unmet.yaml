@@ -1,0 +1,124 @@
+- id: W1-T510
+  title: "the inbox readiness predicate has no third value — an INDETERMINATE (throttled/auth/transport/truncated) dep read carries `merged: false` into `ReadinessContext.isMerged`, so `classifyProposal` accuses a verifiably-merged dependency of being unmerged and refuses the ratification with `dep-unmet`"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 65.00
+  rationale: "DERIVED FROM SOURCE at this checkout, not from the incident report — the report's own
+    evidence line was left as an unpasted placeholder, so every claim below was re-derived and the
+    two hypotheses it offered were adjudicated against the code.
+    HYPOTHESIS ONE IS REFUTED, AND SAYING SO IS PART OF THE FILING. `classifyProposal` has exactly
+    four production call sites and ALL FOUR inject a GitHub-DERIVED resolver, never the decorative
+    yaml field: src/run-task.ts:17384 (`rmd inbox`) and src/run-task.ts:17462 (the approve/reframe
+    re-classify helper) both build `(t) => deriveStatus(t, deriveDeps).merged`; src/lib/panel-graph.ts:1104
+    (the console's /v1/inbox routes) and src/lib/status-board.ts:1336 (the board's INBOX section) both
+    read a `projectPlan` projection. This matches W1-T367's own audit finding that every production
+    caller passes an explicit derived resolver. The resolver is production derivation. Nothing here
+    is a wiring mistake, and a worker must not go looking for one.
+    HYPOTHESIS TWO IS THE DEFECT, AND IT IS A TYPE-LEVEL COLLAPSE AT THE CONSUMER. `MergedResolver`
+    is two-valued (`(t) => boolean`) and `ReadinessContext.isMerged` is declared as one, so it CANNOT
+    carry W1-T119's third value. `derivePrPrecedence` (src/lib/status.ts:2213-2220) returns
+    `{ status: \"queued\", merged: false, source: \"throttled\", indeterminate: true, unavailableReason }`
+    when the read FAILED and no prior observation exists — a projection whose OWN doc (status.ts:301-312)
+    says a caller gating off it 'MUST treat `indeterminate` as DO NOT ACT, never as an ordinary queued
+    task, because the evidence a not merged conclusion would rest on was never actually consulted'.
+    All four injections read `.merged` and drop `indeterminate` on the floor. `unmetOutsideDeps`
+    (src/lib/inbox.ts:367) then feeds that false into `unmetDependencies`, and classifyProposal:452
+    emits `dep-unmet: <task>-><dep> not merged` — a POSITIVE FACTUAL CLAIM about a dependency nobody
+    read. Two of the four sites collapse a second way: `projection.get(t.id)?.merged ?? false`
+    (panel-graph.ts:1104) and `?.merged === true` (status-board.ts:1336) also read an ABSENT map entry
+    as not-merged, the same null-versus-empty conflation W1-T415 names at the gateway.
+    THE FIX SHAPE ALREADY EXISTS TWENTY LINES ABOVE ONE OF THE BROKEN SITES. `deriveQueueHead`
+    (status-board.ts:1252-1255) derives `isMerged` AND a companion
+    `isIndeterminate = (id) => projections.get(id)?.indeterminate === true`, and hands both to
+    `runnableCandidates`, whose gate (src/lib/drain.ts:340) skips rather than concludes. `deriveInbox`,
+    the very next function in the same file, derives only `isMerged`. The dispatch path honours the
+    distinction; the readiness path does not.
+    WHY THIS IS NOT MERELY COSMETIC. `rmd approve` refuses anything not READY, so an unobserved read
+    becomes a refusal to ratify — correct in POLARITY (cannot-observe means wait) but stated as a lie
+    the operator cannot act on, and indistinguishable from a genuinely unmerged dependency that needs
+    real work. The reported instance named three deps (W1-T197, credited by `sweep.credit_backfill`
+    with `verdict.merged` pr 531 — a rung `isMergedLine` (status.ts:1216) does recognise; W1-T163/#647;
+    W1-T167/#606) and the proposal it blocked was P34, which was later ratified and CLOSED in R12, so
+    the block was TRANSIENT — the signature of a throttle window, not of a missing dependency."
+  design: |
+    (i) THE CONTEXT GAINS A THIRD VALUE, AND THE CLASSIFIER A DISTINCT REASON. Add an optional
+    `depsUnobservable?: (taskId: string) => GhFailureReason | undefined` to `ReadinessContext`
+    (src/lib/inbox.ts) — optional, defaulting to "nothing is unobservable", exactly as
+    `draftSpawnedAt` and `GitHub.readFailed`/`readTruncated` are optional, so every existing fixture
+    and any caller that never had a reason to think about it behaves precisely as today. USE THAT
+    NAME: three of this task's proofs grep for it at the call sites, and the audit is the point.
+    A dep whose read is unobservable must NEVER appear in the `dep-unmet` list. Split it out into its
+    own `PredicateFailure` — a new `FailingPredicate` member (e.g. `deps_observable`) whose detail
+    names the dep AND the classified reason, e.g. `deps-unobservable: W1-T197 (rate_limit) — GitHub
+    could not be read, this is not a claim that it is unmerged`.
+    (ii) THE POLARITY DOES NOT FLIP — DO NOT "FIX" THIS INTO A READY. An unobservable dep keeps the
+    proposal out of READY and keeps `rmd approve` refusing. Cannot-observe means WAIT, never spend
+    (W1-T130's polarity): a version that ratifies on an unread dependency ships a plan PR whose
+    dependency may not exist, which is worse than the defect. What changes is WHAT IS SAID and that
+    it SELF-CLEARS the moment a read succeeds — nothing about what is permitted.
+    (iii) ABSENCE FROM THE PROJECTION MAP IS NOT EVIDENCE EITHER. `?? false` (panel-graph.ts:1104)
+    and `=== true` (status-board.ts:1336) both conclude not-merged for an id the projection simply
+    does not carry. Decide it explicitly per site and write the decision in the code: either the map
+    is complete by construction for every id a fragment can name (then say why, and it stays), or a
+    missing entry is unobservable (then it routes through (i)). Do not leave it implicit.
+    (iv) WIRE ALL FOUR INJECTIONS — THIS IS THE AUDIT THE REPORT ASKED FOR. src/run-task.ts:17384
+    and :17462 derive per task via `deriveStatus`, so both must read the WHOLE projection
+    (`indeterminate`/`unavailableReason`) instead of `.merged` alone. src/lib/panel-graph.ts:1104 and
+    src/lib/status-board.ts:1336 already hold a `StatusProjection`, so both get the signal for free —
+    status-board's own `deriveQueueHead` (1252-1255) is the template, and `deriveInbox` should read
+    like it. NO NEW GITHUB READS: every site consumes a projection or a derivation it ALREADY makes.
+    (v) THE RENDER SURFACES MUST NOT SAY "not merged" EITHER. `refusalReason` (inbox.ts:1155),
+    `renderInbox` (789), `summarizeInboxPoll` (852) and the board's `headNotReadyReason`
+    (status-board.ts:1351) all restate the failing predicate; each must carry the new reason through
+    with its classified cause rather than folding it back into a dep-unmet string. The `inbox.classified`
+    ledger line (run-task.ts:17400) already logs `reasons`, so legibility follows for free — verify
+    that rather than adding a new ledger step.
+    NOT IN SCOPE, DELIBERATELY: retry/backoff/waiting for quota (W1-T119 (v) refused it and so does
+    this); the gateway's truncation signal (W1-T415 owns `readTruncated` and this task only CONSUMES
+    whatever `indeterminate` already means); adding `previousProjection` to the CLI path's `DeriveDeps`
+    (a real gap — the CLI derives per task with no monotonic-under-darkness carry-forward — but it is
+    W1-T179's surface, and this task must work with or without it); and any change to `deriveStatus`,
+    `MergedResolver`'s own signature, or the dispatch selector.
+  acceptance:
+    - claim: "a dependency whose GitHub read is indeterminate is reported as unobservable with its classified reason and NEVER appears in a dep-unmet list — the classifier makes no not-merged claim about a task nobody read"
+      proof: "unit test: test/inbox-deps-unobservable.test.ts"
+    - claim: "the discrimination holds in both directions: a genuinely absent dep still reads dep-unmet exactly as today, and a merged dep still classifies READY — deferring everything is not the fix"
+      proof: "unit test: test/inbox-deps-unobservable.test.ts"
+    - claim: "an unobservable dep still keeps the proposal out of READY and still makes approve refuse, and the refusal names the throttle rather than the dependency"
+      proof: "unit test: test/inbox-deps-unobservable.test.ts"
+    - claim: "the CLI injections (rmd inbox and the approve/reframe re-classify helper) supply the unobservable signal"
+      proof: "grep: depsUnobservable in src/run-task.ts"
+    - claim: "the console/HTTP inbox injection supplies the unobservable signal"
+      proof: "grep: depsUnobservable in src/lib/panel-graph.ts"
+    - claim: "the status board's INBOX section injection supplies the unobservable signal, like the QUEUE HEAD section beside it already does"
+      proof: "grep: depsUnobservable in src/lib/status-board.ts"
+  risk: high
+  origin: feedback#fb-1784825998733-98ef84
+  plan_refs: ["W1-T110", "W1-T119", "W1-T130", "W1-T367", "W1-T415", "§7B"]
+  files: [src/lib/inbox.ts, src/run-task.ts, src/lib/panel-graph.ts, src/lib/status-board.ts, test/inbox-deps-unobservable.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — `classifyProposal` is a PURE function over an injected context, so every claim
+    is decidable in-process against seeded projections. No network, nothing spawned, no operator present.
+    risk:high IS RULE 19'S SPAN, DECLARED UP FRONT rather than shipped as a violation: the contract
+    lives in src/lib/inbox.ts and its only producers are the four injection sites, which Rule 19 counts
+    as three further subsystems. Splitting the contract from its callers would leave a widened
+    ReadinessContext nothing supplies — a dead field, which is the failure mode this repo files tasks
+    about. The blast radius is smaller than the band suggests; the part worth reviewing is design (ii),
+    because a version that flips an unobservable dep to READY ratifies against a dependency that may
+    not exist.
+    budget_usd 65 — the cost is design (iii)'s per-site absence ruling and the both-directions fixture
+    of criterion 2, not the optional field, which is a few lines.
+    ON THE PROOFS: test/inbox-deps-unobservable.test.ts does not exist yet — a forward reference to a
+    PATH, and it is declared in files: so the worker creates it. The three grep proofs name
+    `depsUnobservable`, which exists NOWHERE in src/ today (verified at filing), so none of them can
+    pass before the work is done; they are the injection AUDIT the report asked for, one per path.
+    WHAT THIS TASK DOES NOT RE-DERIVE: that the injected resolvers are production derivation. All four
+    were read at filing and all four are. A worker that spends budget re-auditing that has been sent
+    to the wrong place — the rationale records the refutation so it is not relitigated a third time.
+    NO depends_on: the `indeterminate`/`unavailableReason` fields this consumes shipped with W1-T119
+    and are live in src/lib/status.ts today. W1-T415 would widen WHEN indeterminate fires (truncation);
+    it is a plan_ref, not an edge, because this fix is correct with or without it."
