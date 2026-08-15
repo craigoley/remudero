@@ -1,0 +1,132 @@
+- id: W1-T526
+  title: "under strict:true only one PR can merge before the rest go behind, but runSweepLightPass reviews all of them concurrently — so clearing a queue of N costs N+(N-1)+…+1 reviews instead of N, and the eight open PRs tonight sit seven-deep behind"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: "MEASURED ON THE MINI AT f1a82a2, 2026-08-15, ENTIRELY OVER REST (the GraphQL budget has
+    been exhausted four times today).
+
+    (1) **THE LIVE STATE, READ RATHER THAN ASSUMED.** `allow_update_branch: true`,
+    `allow_auto_merge: true`, and branch protection on `main` carries `strict: true` over 2 required
+    contexts. Of the EIGHT open PRs, **SEVEN read `mergeable_state: behind`** — #1904, #1903, #1902,
+    #1901, #1899, #1886, #1863 — with `updated_at` spanning 21:18Z to 21:45Z. Only #1905 is not
+    behind, and it is `blocked` awaiting review.
+
+    (2) **AND THAT ANSWERS THE QUESTION THE PROPOSAL RESTS ON: NOTHING AUTO-UPDATES.**
+    `allow_update_branch` OFFERS the button; it does not press it. Seven PRs stayed `behind` for up
+    to forty minutes with no head change — #1899 has been observed green, armed and behind for over
+    an hour. **SO A POSTED VERDICT IS NOT SPONTANEOUSLY INVALIDATED, AND THE WASTE IS OPERATOR-PACED
+    RATHER THAN AUTOMATIC.** Any shard claiming the fleet silently burns verdicts on its own is
+    wrong; this one does not claim it. W1-T520 (#1901) owns the stale-armed-PR question itself.
+
+    (3) **THE WASTE IS REAL ANYWAY, AND IT IS QUADRATIC IN THE QUEUE.** `strict: true` means a PR must
+    be up to date to merge. Merging any one PR puts every OTHER open PR behind. Updating a behind PR
+    creates a NEW HEAD, and a verdict is SHA-PINNED — `priorActionsFromLedger` keys `postReviewed` on
+    `${taskId}@${headSha}` — so the update discards that PR's verdict and the sweep re-reviews at
+    `reviewState === \"none\"`. Clearing a queue of N therefore costs N + (N-1) + … + 1 reviews rather
+    than N. **AT TONIGHT'S EIGHT, THAT IS 36 REVIEWS TO LAND 8 PRs.** The pacing is the operator's;
+    the multiplier is the design's.
+
+    (4) **AND THE SWEEP REVIEWS ALL OF THEM AT ONCE, WHICH IS WHAT MAKES IT MULTIPLICATIVE RATHER THAN
+    MERELY UNLUCKY.** `runSweepLightPass` (`src/lib/sweep.ts`) ends
+    `return Promise.all(openPrs.map((pr) => runSweep([pr], deps, policy)))` — one `runSweep` per open
+    PR, concurrently. Every queued PR earns a verdict in the same pass, one merges, and the rest are
+    behind before the next tick.
+
+    (5) **THE MUTEX IS NOT THE MECHANISM, AND MUST NOT BE MISTAKEN FOR IT.** W1-T513 (#1888, commit
+    bc8723f) made `claimedReviewKeys` a CROSS-CALL mutex — `const claimedReviewKeys =
+    inFlightReviewKeys` — so two concurrent passes cannot both review one `taskId@headSha`. That is
+    mutual exclusion on a KEY, not a queue over PRs: eight DISTINCT keys still review eight PRs in one
+    pass. And it releases the key the instant an attempt settles, success or failure alike, by design.
+
+    (6) **WHAT COULD NOT BE RE-DERIVED HERE, STATED AS A LIMIT RATHER THAN A ZERO.** The 117
+    `sweep.post_review.attempt` rows and 65 failures are AZURE figures and this host has no route to
+    that ledger. The mini's live ledger carries `review.posted` 201 and `review.post_refused` 70 but
+    **ZERO `sweep.post_review.attempt` and ZERO `sweep.pass`** (positive control: 16,886 rows in the
+    file), because the sweeping daemon is the other host. THE PER-PR ATTEMPT COUNT IS THEREFORE
+    UNMEASURED, NOT ABSENT — re-derive it on Azure before sizing the saving."
+  design: |
+    (i) CHOOSE ONE MERGEABLE PR PER PASS AND REVIEW ONLY THAT ONE. The disposition walk is unchanged;
+    what changes is that `post-review` is admitted for at most one PR per pass, the rest standing down
+    with a named reason exactly as the light-pass restriction already does. Every other disposition
+    (arm, fix, close, escalate) is UNTOUCHED — this is a review-admission rule, not a new lane.
+    (ii) THE ORDERING RULE IS OLDEST-HEAD-FIRST, AND IT IS CHOSEN BECAUSE IT CANNOT STARVE. Ranking by
+    "most ready" or by plan order lets a newly-pushed PR overtake forever; ranking by the age of the
+    head being reviewed is monotone — a PR that loses this pass is strictly older next pass, so every
+    PR reaches the front in bounded time. SAY THIS IN THE TEST, NOT ONLY IN THE PROSE: the starvation
+    falsifier is that the loser of one pass wins a later one.
+    (iii) A CHOSEN PR THAT CANNOT MERGE MUST NOT HOLD THE QUEUE — THIS IS THE FAILURE MODE THIS DESIGN
+    MOST LIKELY SHIPS WITH. Selection considers only PRs whose disposition this pass is `post-review`;
+    a red, conflicted, question-blocked or strike-exhausted PR is dispositioned elsewhere and is never
+    a candidate, so it cannot be chosen and then stall everything behind it. And a chosen PR whose
+    review FAILS releases the slot for the next pass rather than reserving it.
+    (iv) NOT A LOCK, AND NOT A CAP ON ANYTHING ELSE. `reviewLanes` already bounds concurrency; this
+    bounds ADMISSION. Do not implement it by lowering `reviewLanes` to 1 — that would serialise
+    reviews without reducing how many are attempted, which is the opposite of the point.
+    (v) THE COST ARGUMENT, HONESTLY BOUNDED. Serialising cuts REVIEW spend by roughly the queue depth,
+    but the sweep must still ENUMERATE every open PR each pass to choose one, so enumeration is
+    untouched and becomes the floor. AND IT WILL NOT FIX THE EXHAUSTION: `projectPlan` issues 788 `gh`
+    invocations per pass across six call sites (W1-T523, #1905), and `used` moved 7,499 -> 7,517
+    entirely at `remaining: 0` while ledger-visible calls account for only ~531 of the day — the
+    majority is spawned workers running `gh` unmetered (W1-T522, #1906). **THIS TASK REMOVES WASTED
+    WORK. IT DOES NOT RESCUE THE BUDGET, AND MUST NOT BE SOLD AS DOING SO.**
+    (vi) DO NOT SWEEP LESS OFTEN. The cadence is what keeps time-to-review at a 7.3s median once a PR
+    is reached; slowing it trades one stall for another.
+    (vii) NOT IN SCOPE, EACH OWNED OR UNFILED ELSEWHERE. W1-T520 (#1901) — whether an armed, behind PR
+    is visible at all. W1-T511 (#1887) — moving `ghLiveState` to REST. W1-T522 (#1906) / W1-T523
+    (#1905) — the transport conversion and the unmetered worker spend.
+    AND ONE ADJACENT DEFECT FOUND WHILE MEASURING, RECORDED SO IT IS NOT LOST AND DELIBERATELY NOT
+    ABSORBED: a review attempt that THROWS writes only `sweep.action_failed`, while
+    `priorActionsFromLedger` builds its `postReviewed` dedup set from `review.posted` and
+    `review.post_refused` ONLY. So a failed attempt leaves NO dedup key and is re-attempted every
+    pass, unbounded — and when the cause is rate-limit exhaustion, each retry deepens it. THAT IS THE
+    RATE-LIMIT FLOOR, IT IS STILL UNFILED, AND IT IS A SEPARATE SHARD.
+  acceptance:
+    - claim: "one pass reviews a single mergeable pull request even when several are eligible"
+      proof: "unit test: W1-T526: one pass reviews a single eligible pull request"
+    - claim: "the pull request that loses a pass wins a later one so nothing starves"
+      proof: "unit test: W1-T526: the loser of one pass wins a later pass"
+    - claim: "a pull request that cannot merge is never chosen and never holds the queue"
+      proof: "unit test: W1-T526: an unmergeable pull request never holds the queue"
+    - claim: "every other disposition still acts for every pull request in the same pass"
+      proof: "unit test: W1-T526: arming and fixing still act on every pull request"
+  origin: recon#strict-turns-concurrent-review-into-waste-2026-08-15
+  plan_refs: ["W1-T513", "W1-T520", "W1-T511", "W1-T522", "W1-T523"]
+  files: [src/lib/sweep.ts, test/sweep-review-admission.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `src/` and `test/`, and independently
+    warranted: this changes which PRs get reviewed at all, so a wrong admission rule does not fail
+    loudly, it silently stops reviewing something. budget_usd 45 — one admission rule, an ordering
+    with a starvation falsifier, and a not-holding-the-queue falsifier.
+
+    `files:` DERIVED BY WORD-BOUNDED INVOCATION COUNT (in Python — a bare substring inflated
+    `ghLiveState` from 6 to 11 today by matching `ghLiveStateByNumber`). `src/lib/sweep.ts` holds
+    `runSweepLightPass`, `claimedReviewKeys` and the `post-review` admission arm — the change lives
+    nowhere else. `test/sweep-review-admission.test.ts` is NEW: `test/sweep.test.ts` is the existing
+    home by weight but carries the whole disposition surface, and an admission rule wants a file whose
+    failures cannot be confused with a disposition regression. `src/run-task.ts` IS NOT DECLARED —
+    `buildSweepLightHook` merely passes `actionable`, the rule belongs in the sweep, and it is a
+    19,943-line file `partitionByFileOverlap` (W1-T471) serialises against every task naming it.
+
+    THE PROPOSAL'S OWN PREMISE WAS CHECKED AND PARTLY REFUTED, WHICH IS WHY RATIONALE (2) EXISTS.
+    Nothing auto-updates a behind PR, so the fleet does not silently burn verdicts; the quadratic cost
+    is real but is paid at the operator's pace. A future reader who finds the queue too slow should
+    re-read (2) before concluding the fleet is thrashing.
+
+    PROOF NOTES: all four proofs are NAME-FILTERED titles, not pure paths — a pure path runs the whole
+    file and one unrelated failure fails every criterion. Each was verified to match ZERO files today
+    against a control matching exactly one, and each is under 100 characters with no comma so
+    `looksLikeScenarioNarrative` (`src/lib/task-linter.ts`) cannot fail them. No proof names this
+    shard.
+
+    ID PROVENANCE: `refs/rmd-id/` held 515, 516, 520-525 and origin/main's max is 522, so 524 and 525
+    were BOTH already reserved above main's tip — this shard took 526. The push was gated on a
+    fresh-fetch suffix-aware re-sweep with a known-taken control reading >= 1, its EXIT CODE checked
+    directly rather than through a pipe, and the ref RE-READ and matched against this session's own
+    unique orphan payload. W1-T522 was lost to another lane between sweep and push earlier today, and
+    only the unique payload made that visible."
