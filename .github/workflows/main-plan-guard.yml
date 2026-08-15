@@ -1,0 +1,76 @@
+name: main-plan-guard
+
+# W1-T491 — DOES THE PLAN STILL LOAD ON `main`?
+#
+# THE DEFECT THIS ANSWERS, MEASURED TWICE. Two PRs cut from the SAME base never see each other:
+# each runs `lint-plan` against its OWN tree, each is correctly green, and each can add a
+# differently-NAMED shard declaring the SAME task id. Merging both produces a `main` on which
+# `loadPlan` refuses. Neither PR was wrong; the pair was. Nothing on `main` then notices — every
+# other gate is `pull_request`-triggered — so the breakage stays invisible until the next PR opens
+# or the daemon next syncs. The first such outage ran ~24 minutes; the second ran over an hour,
+# crash-looped the daemon on `PlanError` from `syncPlanOrRefuse`, turned every open PR red
+# regardless of its diff, and ended in a manual `enforce_admins` toggle.
+#
+# WHAT THIS IS, STATED HONESTLY: DETECTION, NOT PREVENTION. The break has already landed by the
+# time this runs. The value is TIME-TO-DETECTION — a red check on `main` within about a minute of
+# the merge, instead of at whatever hour the next PR opens. Prevention is a separate layer:
+# `strict: true` branch protection stops a stale base merging at all. Neither makes the other
+# redundant — `strict: true` cannot see a break that arrives by a direct push, an admin merge, or
+# a cause that is not a collision, and this cannot stop anything from landing.
+#
+# IT FAILS LOUDLY AND OPENS NOTHING. No issue, no ledger step, no new signal: the operator is the
+# only one who can repair a broken `main`, and a red check on the commit is what reaches him
+# without reading a log. `daemon.tree_dirty` and `daemon.stale_code` already demonstrate the
+# failure mode of a signal nothing consumes (W1-T494); this deliberately does not add a third.
+#
+# WHY `loadPlan` AND NOT `rmd lint-plan`. `lintPlanCommand` returns 1 for ORDINARY violations —
+# `main` carries 179 of those today — and 2 for a plan that cannot be read at all. Gating on
+# `lint-plan` would therefore be permanently red and would tell the operator nothing. `loadPlan`
+# asks exactly the question that went unanswered: does the plan parse and resolve? It catches the
+# duplicate-id class and, via `loadPlanFromYaml`, a `depends_on` naming a task outside the blob.
+#
+# WHY ITS OWN WORKFLOW AND NOT A `push:` ON `ci.yml`. This fleet merges roughly twenty a day;
+# adding `push:` to `ci.yml` buys twenty full suite runs to answer one question that costs seconds.
+# This job installs and loads the plan, and runs no tests.
+
+on:
+  push:
+    branches: [main]
+  # Manual re-check after a repair lands, without waiting for the next merge.
+  workflow_dispatch:
+
+# DELIBERATELY NO `paths:` FILTER. A path-filtered required-shaped check can go silently absent,
+# which is the failure class `ci.yml`'s own unconditional jobs exist to avoid. The plan can also be
+# broken by a change that touches no `plan/` path at all — a shard merged by one PR colliding with
+# a monolith entry from another — so filtering on `plan/**` would miss the very pairing that
+# caused both outages.
+
+permissions:
+  contents: read
+
+concurrency:
+  # Newest tip wins: an older push's answer is worthless once a newer commit is on main, and a
+  # repair pushed while this is mid-flight should not race its own predecessor.
+  group: main-plan-guard
+  cancel-in-progress: true
+
+jobs:
+  plan-load:
+    name: plan-load
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Install (clean, from lockfile)
+        run: npm ci
+      - name: Load the plan on this tip
+        # `loadPlan` merges plan/tasks.yaml with every plan/tasks.d/ shard and throws PlanError on
+        # a duplicate id or an unresolvable depends_on. A throw exits non-zero and reddens main.
+        run: |
+          node --import tsx -e '
+            import { loadPlan } from "./src/lib/plan.js";
+            const plan = loadPlan("plan/tasks.yaml");
+            console.log(`main-plan-guard: plan loads — ${plan.tasks.length} task(s)`);
+          '
