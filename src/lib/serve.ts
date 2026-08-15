@@ -578,6 +578,12 @@ export function renderShellHtml(
   .ask-type-badge.ask-type-question {
     background: rgba(87, 214, 140, 0.14); color: var(--status-merged); border-color: var(--status-merged);
   }
+  /* W1-T507: the human-verify-pending badge -- SAME pill shape as the ask-type badges above,
+     a DISTINCT colour (the queued tone) so a verify:human row reads as its own kind rather
+     than as an escalation (which keeps the amber ask-type-action/needs-human tone). */
+  .ask-type-badge.ask-type-verify {
+    background: rgba(163, 172, 194, 0.16); color: var(--status-queued); border-color: var(--status-queued);
+  }
   #stale-badge {
     display: inline-block; margin: 0.25rem 0 0; padding: 0.15rem 0.5rem; border-radius: 999px;
     font-size: 0.75rem; font-weight: 600; background: var(--status-needs-human); color: #241a02;
@@ -2404,6 +2410,18 @@ export function renderShellHtml(
   function needsMeDraftingHtml(p) {
     return \`\${statusBadge("needs-human")}<span class="task-id">\${escapeHtml(p.proposalId)}</span><span class="detail">DRAFTING — \${escapeHtml(p.summary)} · running <span class="elapsed" data-started="\${escapeHtml(p.spawnedAt)}">…</span></span>\`;
   }
+  // W1-T507: the OTHER reason a row needs a person -- a task filed 'verify: human' in the plan
+  // itself, never dispatched (isDispatchEligible/assertRunnable/task-linter.ts all exclude it
+  // from machine attention on sight), so it never runs and never escalates. No action affordance
+  // renders here on purpose: unlike an escalation row, there is no issue to view and no PR to
+  // point at -- nothing in src/ has ever dispatched this task, so nothing exists yet to click.
+  // This row's only job is making the queue itself visible, which is this task's whole point.
+  function needsMeVerifyRowHtml(t) {
+    return (
+      \`\${statusBadge("needs-human")}<span class="ask-type-badge ask-type-verify">Verify</span>\` +
+      \`<span class="task-id">\${escapeHtml(t.taskId)}</span><span class="detail">awaiting human verification -- filed verify: human, never auto-dispatched</span>\`
+    );
+  }
   function renderNeedsMe(tasks, feedbackEntries, inboxReady, inboxDrafting) {
     const rows = [];
     const shown = new Set();
@@ -2416,6 +2434,17 @@ export function renderShellHtml(
       // one. Falls back to startedAt only for a row with no escalationOpenedAt at all (should not
       // happen for a real needsHuman row, but never let a missing field erase the row's age).
       rows.push({ key: \`task:\${t.taskId}\`, html: needsMeTaskRowHtml(t), taskId: t.taskId, ts: t.escalationOpenedAt ?? t.startedAt });
+    }
+    // W1-T507: a DISTINCT kind, grouped in its OWN pass immediately after the escalation rows
+    // above -- never folded into the \`needsHuman\` loop, so an escalation row's own affordance
+    // (view issue / mark handled) is untouched by this addition. Reaches this list via its OWN
+    // sparse field (status.ts's projectPlan-level \`verifyHumanPending\`, set only once a task is
+    // filed verify: human AND not yet credited merged) -- never a widened \`needsHuman\`, per this
+    // task's design.
+    for (const t of tasks) {
+      if (!t.verifyHumanPending) continue;
+      shown.add(t.taskId);
+      rows.push({ key: \`verify:\${t.taskId}\`, html: needsMeVerifyRowHtml(t), taskId: t.taskId });
     }
     for (const e of feedbackEntries ?? []) {
       if (e.status === "grilling") rows.push({ key: \`fbg:\${e.id}\`, html: needsMeGrillHtml(e), ts: e.ts });

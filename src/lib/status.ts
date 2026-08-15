@@ -368,6 +368,35 @@ export interface StatusProjection {
    * was supplied AND it found such a commit.
    */
   supersededBy?: SupersessionEvidence;
+  /**
+   * W1-T507: this task is filed `verify: human` in the plan AND this projection's own `merged`
+   * is false — the plan has already excluded it from every machine-dispatch path
+   * (`isDispatchEligible` in `src/lib/drain.ts`, `assertRunnable` in `src/lib/plan.ts`, and three
+   * `task-linter.ts` predicates all return/throw on `task.verify === "human"`), so nothing else
+   * in `src/` ever converts that exclusion into a signal a person can see. Set by
+   * {@link deriveStatus} itself (unlike `supersededBy` immediately above, which needs an
+   * external git-log search dependency `deriveStatus` does not take, and is therefore attached
+   * one level up in {@link projectPlan}): this flag is a pure function of `task` plus THIS
+   * call's own already-resolved `merged`/`indeterminate`, so computing it here keeps every
+   * caller — `projectPlan`'s hoisted pass and a standalone `deriveStatus(task, deps)` call
+   * alike — DERIVATION-EQUIVALENT, never diverging by which path reached it.
+   *
+   * DELIBERATELY A DIFFERENT FIELD FROM `needsHuman`, never a widened one. `needsHuman` backs
+   * the NEEDS ME escalation row's own "view issue"/"mark handled" affordance
+   * (`escalationIssueUrl`/`escalationTitle`), which a `verify: human` task never has — it is
+   * never DISPATCHED, so it never RUNS, so it never escalates. Setting `needsHuman` here would
+   * render that affordance with nothing to click. A DISTINCT KIND instead, so a caller (the
+   * console) groups by it rather than flattening two different reasons a row needs a person
+   * into one flag.
+   *
+   * "Already credited merged" is exactly this projection's OWN `merged` — the same field every
+   * other precedence rung already resolves from EITHER credit path (an anchored
+   * `Remudero-Task:` trailer, or a `run-<taskId>-<digits>` head ref), so a task credited through
+   * either route is correctly excluded here too, same as everywhere else `merged` gates.
+   * Sparse, like `needsHuman`/`indeterminate`/`orphaned`/`supersededBy` — present only when
+   * applicable.
+   */
+  verifyHumanPending?: true;
 }
 
 /**
@@ -2548,6 +2577,36 @@ export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
   // independently-resolved PR reference.
   if (projection.status === "running" && projection.prUrl && deps.github.autoMergeArmed?.(projection.prUrl)) {
     projection.armedAwaitingMerge = true;
+  }
+
+  // W1-T507: the OTHER reason a row needs a person — a task filed `verify: human` in the plan
+  // itself. `isDispatchEligible` (`src/lib/drain.ts`), `assertRunnable` (`src/lib/plan.ts`) and
+  // three `task-linter.ts` predicates all treat `task.verify === "human"` as an EXCLUSION from
+  // machine attention and nothing else — the field's only effect anywhere else in this product
+  // — so nothing before this point ever tells a person such a task is theirs to look at.
+  //
+  // COMPUTED HERE, deliberately NOT at the projectPlan level (unlike W1-T485's own
+  // `supersededBy`, attached there because it needs an external git-log search dependency this
+  // function does not take). This flag is a pure function of `task` plus THIS call's own
+  // already-resolved `merged`/`indeterminate` — computing it here keeps every caller
+  // (projectPlan's hoisted pass AND a standalone `deriveStatus(task, deps)` call alike)
+  // DERIVATION-EQUIVALENT, exactly the invariant test/w1-t187-equivalence.test.ts's own
+  // criterion 1 guards over the full production-scale corpus. `merged` is always false at this
+  // point (an earlier guard above already returned `base` directly once `base.merged`), so only
+  // `indeterminate` needs checking: while set, this cycle's GitHub read genuinely failed, so
+  // "not yet credited" was never actually observed — flagging this off an unread state would be
+  // the fail-open direction W1-T119 exists to prevent, same discipline the supersession loop in
+  // {@link projectPlan} applies to its own field.
+  //
+  // DELIBERATELY A DIFFERENT FIELD FROM `needsHuman`, never a widened one (design (ii)):
+  // `needsHuman`, set just above when applicable, backs the NEEDS ME escalation row's own "view
+  // issue"/"mark handled" affordance (`escalationIssueUrl`/`escalationTitle`), which a
+  // `verify: human` task never has — it is never DISPATCHED, so it never escalates. Setting
+  // `needsHuman` here would render that affordance with nothing to click. A DISTINCT KIND
+  // instead, so a caller (the console) groups by it rather than flattening two different
+  // reasons a row needs a person into one flag.
+  if (task.verify === "human" && !projection.indeterminate) {
+    projection.verifyHumanPending = true;
   }
 
   return projection;
