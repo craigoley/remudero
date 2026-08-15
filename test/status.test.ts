@@ -2243,19 +2243,112 @@ test("W1-T485: a FAILED search is not evidence of absence -- and never evidence 
   assert.equal(findSupersessionEvidence(T472(), nullSearch), undefined, "a null read must not fabricate a row");
 });
 
-test("W1-T485: proofGrepTargets takes only `grep:` proofs, and only paths the task DECLARED", () => {
+test("W1-T506: proofGrepTargets pairs every symbol (grep: or unit test:) with every declared path", () => {
   const t = task({
     id: "W1-TX",
-    files: ["src/lib/a.ts"],
+    files: ["src/lib/a.ts", "src/lib/b.ts"],
     acceptance: [
-      { claim: "declared", proof: "grep: SENTINEL_ALPHA in src/lib/a.ts" },
-      { claim: "undeclared path", proof: "grep: SENTINEL_BETA in src/lib/b.ts" },
-      { claim: "its own shard", proof: "grep: SENTINEL_GAMMA in plan/tasks.d/W1-TX-thing.yaml" },
-      { claim: "a unit-test proof", proof: "unit test: test/a.test.ts" },
-      { claim: "path-less grep", proof: "grep: SENTINEL_DELTA" },
+      { claim: "declared-shape grep", proof: "grep: SENTINEL_ALPHA in src/lib/a.ts" },
+      { claim: "a path-less grep still carries a symbol now", proof: "grep: SENTINEL_DELTA" },
+      { claim: "a unit-test proof carries a symbol too", proof: "unit test: exercises the sentinel path" },
+      { claim: "prose with no dialect prefix yields nothing", proof: "the thing behaves correctly" },
     ],
   });
-  assert.deepEqual(proofGrepTargets(t), [{ symbol: "SENTINEL_ALPHA", path: "src/lib/a.ts" }]);
+  assert.deepEqual(proofGrepTargets(t), [
+    { symbol: "SENTINEL_ALPHA", path: "src/lib/a.ts" },
+    { symbol: "SENTINEL_ALPHA", path: "src/lib/b.ts" },
+    { symbol: "SENTINEL_DELTA", path: "src/lib/a.ts" },
+    { symbol: "SENTINEL_DELTA", path: "src/lib/b.ts" },
+    { symbol: "exercises the sentinel path", path: "src/lib/a.ts" },
+    { symbol: "exercises the sentinel path", path: "src/lib/b.ts" },
+  ]);
+});
+
+test("W1-T506: a task declaring no files yields no targets, whatever its proofs say", () => {
+  const t = task({ id: "W1-TX", files: [], acceptance: [{ claim: "c", proof: "grep: SENTINEL in src/lib/a.ts" }] });
+  assert.deepEqual(proofGrepTargets(t), []);
+});
+
+// -- W1-T506: REACH IS NO LONGER GATED ON A SINGLE PROOF DIALECT -----------------------------
+//
+// W1-T485's detector only ever examined a `grep:` proof whose OWN body named a path already in
+// `files:` -- both of its motivating cases (W1-T467, W1-T472) are entirely `unit test:` proofs and
+// were therefore invisible to it, and the house filing convention is moving FURTHER toward
+// `unit test:` and away from `grep:`. These four pin the widened reach and the two latent-precision
+// fixes rationale (5)/design (iv) of this task's shard required alongside it.
+
+test("a task whose proofs are all unit tests is reachable by the supersession search", () => {
+  const t = task({
+    id: "W1-TY",
+    files: ["src/lib/only-unit.ts"],
+    acceptance: [{ claim: "only a unit test proof", proof: "unit test: exercises the new behavior" }],
+  });
+  assert.ok(
+    proofGrepTargets(t).length > 0,
+    "a task carrying only unit-test proofs must still yield at least one search target",
+  );
+  const evidence = findSupersessionEvidence(
+    t,
+    fakeSearch({
+      "exercises the new behavior@src/lib/only-unit.ts": [
+        { sha: "c0ffee1", subject: "feat: land the sentinel behavior", trailerTaskId: "W1-T900" },
+      ],
+    }),
+  );
+  assert.equal(
+    evidence?.creditedTaskId,
+    "W1-T900",
+    "an all-unit-test task's substance must be discoverable, not structurally invisible",
+  );
+});
+
+test("the supersession search is not gated on a single proof dialect", () => {
+  const grepOnly = task({
+    id: "W1-TZ1",
+    files: ["src/lib/g.ts"],
+    acceptance: [{ claim: "g", proof: "grep: GREP_SYMBOL in src/lib/g.ts" }],
+  });
+  const unitOnly = task({
+    id: "W1-TZ2",
+    files: ["src/lib/u.ts"],
+    acceptance: [{ claim: "u", proof: "unit test: UNIT_SYMBOL" }],
+  });
+  assert.ok(proofGrepTargets(grepOnly).length > 0, "a grep: proof still yields a target");
+  assert.ok(
+    proofGrepTargets(unitOnly).length > 0,
+    "a unit test: proof yields a target too -- the same function, the same reach, no dialect check between them",
+  );
+});
+
+test("a task already credited merged is never reported as superseded", () => {
+  const evidence = findSupersessionEvidence(
+    T472(),
+    fakeSearch({
+      [T472_KEY]: [{ sha: "e26f928", subject: "s", trailerTaskId: "W1-T464" }],
+    }),
+    { merged: true },
+  );
+  assert.equal(
+    evidence,
+    undefined,
+    "a task the merged union already credits must never be reported, regardless of the caller",
+  );
+});
+
+test("the search prefers the commit that introduced the symbol", () => {
+  const evidence = findSupersessionEvidence(
+    T472(),
+    fakeSearch({
+      // git log order: newest first. The LATEST touch (W1-T900) must lose to the commit that
+      // actually introduced the symbol (W1-T464), which git log reports LAST.
+      [T472_KEY]: [
+        { sha: "newest1", subject: "fix: a later touch of the same symbol", trailerTaskId: "W1-T900" },
+        { sha: "oldest1", subject: "feat: original introduction of the symbol", trailerTaskId: "W1-T464" },
+      ],
+    }),
+  );
+  assert.equal(evidence?.creditedTaskId, "W1-T464", "the introducing commit must be credited, not the latest editor");
+  assert.equal(evidence?.sha, "oldest1");
 });
 
 test("W1-T485: the projection attaches supersededBy to an UNMERGED task and changes nothing else", () => {
