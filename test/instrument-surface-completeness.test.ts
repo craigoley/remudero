@@ -4,7 +4,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { INSTRUMENT_SURFACE, INSTRUMENT_SURFACE_EXCLUSIONS, judgeReview } from "../src/lib/review.js";
+import { INSTRUMENT_SURFACE, INSTRUMENT_SURFACE_EXCLUSIONS, detectInstrumentEntanglement, judgeReview } from "../src/lib/review.js";
 
 // ── W1-T402: "INSTRUMENT_SURFACE was hand-enumerated against one day's tree and missed the rule
 // files of five REQUIRED jobs ... and the only thing asking anyone to re-check membership is a
@@ -189,4 +189,49 @@ test("instrument-surface completeness: every gate-rule-like path this tree's own
       `(src/lib/review.ts): ${gaps.join(", ")} — a diff can touch these to change what a CI gate ` +
       `measures with nothing flagging it`,
   );
+});
+
+// ── AN INSTRUMENT PATH UNDER `src/` MUST BE EXPRESSIBLE ──────────────────────────────────────
+//
+// `isProductPath` is unconditionally `src/` and not `test/`, so before the subtraction in
+// `detectInstrumentEntanglement` a `src/` file named by INSTRUMENT_SURFACE landed in BOTH the
+// instrument set and the product set, and `entangled` was true on that ONE file plus a workflow.
+// Adding any `src/` path to the surface could therefore never change a verdict — the exemption was
+// inexpressible. These pin the fix in BOTH directions: it must become expressible, and it must not
+// quietly neuter the rule, which is the failure shape a green suite would otherwise hide.
+
+const WORKFLOW = ".github/workflows/ci.yml";
+const RATCHET = "scripts/claude-md-budget-ratchet.mjs";
+
+test("a workflow shipped beside genuine product code still entangles", () => {
+  // THE FALSIFIER. If this ever reads false, the subtraction has disabled the rule rather than
+  // narrowed it, and every other assertion here would still pass.
+  const r = detectInstrumentEntanglement([WORKFLOW, RATCHET, "src/lib/dispatch-overlap.ts"]);
+  assert.equal(r.entangled, true, "a real product path beside an instrument must still fail the PR");
+  assert.deepEqual(r.srcPaths, ["src/lib/dispatch-overlap.ts"], "and the product path is named");
+});
+
+test("the reviewer's own module is never treated as an instrument", () => {
+  // `src/lib/review.ts` is NOT on the surface, so it must still count as product — otherwise the
+  // reviewer would be exempt from the rule it enforces.
+  const r = detectInstrumentEntanglement([WORKFLOW, "src/lib/review.ts"]);
+  assert.equal(r.entangled, true, "review.ts is product code and must stay subject to Rule 25");
+  assert.ok(r.srcPaths.includes("src/lib/review.ts"));
+});
+
+test("a surface path under src is subtracted from the product set", () => {
+  // THE EXEMPTION, EXPRESSIBLE. Driven with a path the LIVE surface already matches so the test
+  // needs no hypothetical: a `-ratchet.mjs` under `src/` matches `^scripts/...` only from `scripts/`,
+  // so this uses the surface's own membership test rather than inventing a pattern.
+  const surfaced = INSTRUMENT_SURFACE.some((p) => new RegExp(p).test(RATCHET));
+  assert.equal(surfaced, true, "control: the ratchet really is on the surface");
+  const r = detectInstrumentEntanglement([WORKFLOW, RATCHET]);
+  assert.equal(r.entangled, false, "an instrument-only diff is the sanctioned shape");
+  assert.deepEqual(r.srcPaths, [], "and nothing instrument-shaped leaks into the product set");
+});
+
+test("a diff carrying no instrument path never entangles whatever else it holds", () => {
+  const r = detectInstrumentEntanglement(["src/lib/dispatch-overlap.ts", "src/run-task.ts", "test/x.test.ts"]);
+  assert.equal(r.entangled, false, "product-only is a sanctioned shape too");
+  assert.deepEqual(r.instrumentPaths, [], "control: the instrument set really is empty here");
 });
