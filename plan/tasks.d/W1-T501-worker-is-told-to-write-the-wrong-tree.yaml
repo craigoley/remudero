@@ -131,8 +131,14 @@
   note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `src/` and `test/`, and the blast radius is
     genuinely high here because the wiring site is the file every other task contends for.
     **`files:` WAS DERIVED BY INVOCATION COUNT ON THE SYMBOL THAT CHANGES, NOT PROSE MENTION**,
-    measured at `a0028d7`: `taskRecordContextLine` appears in exactly TWO files — `src/run-task.ts`
-    (**4**) and `test/recon-degrade.test.ts` (**4**) — and nowhere else. That is the whole declared set.
+    measured at `a0028d7`: `taskRecordContextLine` occurs in `src/run-task.ts` (**4**) and in
+    `test/recon-degrade.test.ts` (**4**), and in no other path. That is the whole declared set.
+    **PHRASE THAT COUNT CAREFULLY WHEN YOU QUOTE IT.** The original wording here read \"appears in
+    exactly TWO files\", and `bodyContradictsDiff` (`src/lib/review.ts`) FAILED the filing PR over it —
+    the detector opens the diff and reads any `exactly N files` as a claim about THE CHANGESET, which
+    for a one-file filing is false. It cannot tell a symbol-occurrence count from a scope claim, and it
+    is right not to guess. An implementer echoing that shape into their own PR body will be failed the
+    same way, so state occurrence counts as paths-and-counts rather than as a file TALLY.
     **`test/plan-sharding.test.ts` IS DELIBERATELY NOT DECLARED** even though it scores **13** on
     `taskRecordPath`, the highest of any file: it tests the PATH FUNCTION (`src/lib/plan.ts`, score 1),
     which this task does not change — the change is to what the CALLER anchors that path against. A
