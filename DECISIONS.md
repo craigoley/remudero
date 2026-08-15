@@ -1227,3 +1227,88 @@ ordering IS the finding**, and it is now: rule the second factor → W1-T404 →
 
 - Rollback: revert this PR — removes only this entry. No task record, no runtime code, no gate and
   no generated artifact is touched by it, and no ledger line is written.
+
+## 2026-08-14 — RULING: publish the console at console.remudero.com behind Cloudflare, accepting that Cloudflare reads it (OPERATOR-RULED)
+
+*Operator-ruled closure, recorded at the operator's instruction. This entry decides the question the
+2026-08-12 relay auth entry named and deliberately left open; it takes no other decision.*
+
+### What this closes
+
+The **2026-08-12 — RELAY AUTH MODEL (Tier 2)** entry ratified model (b) and then refused a second
+ruling in as many words:
+
+> **THE SHORTCUT, PRICED RATHER THAN ASSUMED.** A tunnel product (Cloudflare Tunnel or similar) gives
+> a real domain, TLS and human auth TODAY and forecloses nothing later. Its cost is a third party in
+> the trust path, terminating TLS and seeing every console response. §6A's no-telemetry posture
+> deserves an explicit ruling on that rather than arriving as a default because it was convenient.
+> **This entry does not take that decision.**
+
+That entry also listed the same tension first among the three things it named as open: *"A
+TRANSPARENT PROXY TERMINATING TLS READS EVERY CONSOLE RESPONSE … Either the relay is trusted with
+that, or the console contract grows an end-to-end encrypted mode."* **This entry takes that decision,
+and closes that open question #1.** The two are meant to be read as a pair; the 2026-08-12 entry is
+correct as written and is not amended.
+
+### The ruling
+
+The console is published at **`console.remudero.com`**, behind Cloudflare Tunnel with Cloudflare
+Access as the human auth layer.
+
+**Cloudflare terminates TLS and can therefore see every console response in clear** — plan state,
+task verdicts, costs, operator notes. That is the cost, stated plainly rather than discovered later.
+
+**It is accepted deliberately, not by default.** The 2026-08-12 entry's objection was not that the
+cost was unknown but that it risked being paid silently because the path was convenient. It is paid
+here on the record.
+
+### Why the cost is acceptable
+
+**The same content already sits with GitHub.** The repository, the PR bodies and the shard text
+already carry plan state, verdicts, costs and operator notes, hosted by a third party under exactly
+this arrangement. Cloudflare sees a SUBSET of what GitHub already holds. What is bought with it is a
+hosted identity layer — human auth, TLS and a real domain — that the fleet would otherwise have to
+build and secure itself, and building an auth surface badly is the larger risk of the two.
+
+**§6A's scope, stated as the reasoning rather than as a caveat.** §6A's no-telemetry posture governs
+what the fleet **SENDS UNPROMPTED**. It does not govern what a transport the operator chose observes
+while serving a request the operator made. Those are different properties, and conflating them would
+forbid every hosted dependency the project already relies on, GitHub included. The posture is intact:
+nothing new is emitted on its own initiative.
+
+### The tailnet path is not retired, and an Access provider cannot weaken it
+
+The unmediated tailnet path remains available as a fallback. Re-derived from `src/lib/service.ts`
+rather than assumed:
+
+- `ServiceOptions.identity` and `ServiceOptions.providers` are **separate fields**. `identity` carries
+  the tailnet grantor; `providers` is the W1-T430 seam, documented as "consulted AFTER the two
+  built-in grantors above (tailnet identity, then the bearer token)". Attaching a provider does not
+  reach the `identity` field at all.
+- `grantedScopes` loops the providers and returns on the first truthy grant, falling through
+  otherwise — an `undefined` return means "not my credential, try the next", never a denial.
+
+**So a Cloudflare Access `IdentityProvider` is purely ADDITIVE.** It adds a way in; it removes none,
+and it cannot deny a request another grantor would have allowed. If the hosted path is ever
+unacceptable, withdrawing it is subtraction, not redesign.
+
+### What this entry does NOT decide
+
+The DNS mechanism. `remudero.com` remains the marketing site and the console is a subdomain of it,
+but HOW that subdomain is delegated — a nameserver move versus a partial/CNAME setup, and which
+Cloudflare plan each requires — is not ruled here. A recon raised a plan-gating constraint on the
+partial path that could not be verified today, and recording an unverified constraint as ruled is
+exactly the failure this pair of entries exists to avoid. The subdomain is settled; the mechanism is
+an implementation question for whoever sets it up.
+
+Open questions 2 (enrollment token lifecycle) and 3 (the offline case) from the 2026-08-12 entry
+remain open and are untouched by this ruling.
+
+### Filed with this record: nothing
+
+No task is filed. This is a ruling on a question already named in the record, not new work; W1-T404's
+write tiers remain the security prerequisite for exposing the console to anything beyond the operator,
+and that ordering is unchanged by where the console is published.
+
+- Rollback: revert this PR — removes only this entry. No task record, no runtime code, no gate and
+  no generated artifact is touched by it, and no ledger line is written.
