@@ -14680,6 +14680,29 @@ export function escalationTaskIdFor(pr: { taskId?: string; prNumber: number }): 
 }
 
 /**
+ * W1-T516 — the SWEEP's OWN task-id resolution for one PR's arm attempt, gated on the
+ * `sweep.armSessionPrs` policy flag.
+ *
+ * THE DEFECT THIS CLOSES. `buildSweepEffects`'s `arm` dep used to pass `pr.taskId` RAW to
+ * {@link armAndLogOutcome}, while the review lane (`task_id: taskId ?? PR-<n>`), the
+ * escalation lane ({@link escalationTaskIdFor}), and `approveCommand` all mint the SAME
+ * `PR-<n>` synthetic id for exactly this case — a PR with no `Remudero-Task:` trailer. The
+ * sweep was the ONE caller that did not, so `armAutoMerge`'s `if (!taskId)` branch refused
+ * every session PR the sweep reviewed, unconditionally.
+ *
+ * OFF (the default): returns `pr.taskId` unchanged — a session PR still resolves to
+ * `undefined` and `armAutoMerge` still refuses at `no-task-id`, byte-for-byte the pre-
+ * existing behaviour.
+ *
+ * ON: mints the SAME `PR-<n>` fallback {@link escalationTaskIdFor} already mints, so the id
+ * this arm passes is the exact key `decideArmFromLedgerVerdict` already finds the review
+ * lane's own verdict under — no new ledger shape, no second synthetic id.
+ */
+export function sweepArmTaskId(pr: { taskId?: string; prNumber: number }, armSessionPrs: boolean): string | undefined {
+  return armSessionPrs ? escalationTaskIdFor(pr) : pr.taskId;
+}
+
+/**
  * THE TASK THE FIX RUNG REPAIRS AGAINST — the plan task when the PR has one, otherwise a SYNTHETIC
  * stand-in keyed by the SAME id the review lane and the escalation lane already mint.
  *
@@ -14816,6 +14839,12 @@ export function buildSweepEffects(
   // finally reaches the ledger with the PR identity + a `"sweep"` lane, not only the
   // sweep.disposed row.
   armImpl: (prUrl: string, taskId: string | undefined) => ArmOutcome = armAutoMerge,
+  // W1-T516 — appended LAST so no positional caller shifts, the same convention every dep
+  // above follows. Defaults to the LIVE `plan/policy.yaml` flag (`loadDefaultPolicy`, the
+  // same memoized-per-process reader every other W1-T253 consumer site uses) so production
+  // wiring picks up an operator's edit with no code change; a test overrides it directly to
+  // drive both sides of the gate without writing a fixture policy file.
+  armSessionPrs: boolean = loadDefaultPolicy().values.sweep.armSessionPrs,
 ): Pick<SweepDeps, "arm" | "close" | "dispatchFix" | "escalate" | "readLiveState" | "depReview" | "postReview" | "repushAbsent"> {
   const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
   const issues = issuesImpl ?? ghIssueGateway(owner, repo);
@@ -14838,7 +14867,10 @@ export function buildSweepEffects(
     // sweep.ts, per this task's design), passed the `"sweep"` lane so its
     // `automerge.armed`/`automerge.arm_skipped` line reads apart from a review-lane arm on
     // the ledger alone, even with no task id on either.
-    arm: (pr) => armAndLogOutcome(pr.prUrl, pr.taskId, log, armImpl, "sweep"),
+    // W1-T516: `sweepArmTaskId` resolves the SAME `PR-<n>` synthetic id the review lane
+    // already mints and ledgers under (gated on `armSessionPrs`) rather than passing
+    // `pr.taskId` raw, so a session PR (no `Remudero-Task:` trailer) is armable at all.
+    arm: (pr) => armAndLogOutcome(pr.prUrl, sweepArmTaskId(pr, armSessionPrs), log, armImpl, "sweep"),
 
     // THE ABSENT-CHECK-SUITE REMEDY (W1-T186 follow-up). Routed through git-push.ts's leaf, so
     // the live-write guard applies and no new outward path exists. `commit-tree` plumbing means

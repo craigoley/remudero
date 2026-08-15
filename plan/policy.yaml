@@ -363,6 +363,24 @@ sweep:
     origin: "net-new"
     min: 60000
     max: 86400000
+  # W1-T516: gates whether the SWEEP arms a PR that carries no plan task id (a session
+  # filing — no `Remudero-Task:` trailer). `armAutoMerge` (src/run-task.ts) refuses at its
+  # first line when the task id passed to it is falsy, and the sweep's own arm dep used to
+  # pass `pr.taskId` RAW rather than the `PR-<n>` synthetic id the review lane already mints
+  # and ledgers under (`escalationTaskIdFor`) — so a session PR was reviewed and never armed.
+  # DEFAULT OFF, and this is not "the same checks" in the sense that phrase suggests: most
+  # session PRs are shard filings, which are structurally CAPPED (zero executed proofs) and
+  # `decideAutoMergeArm` arms a capped verdict anyway when `planOnly` — so flipping this ON
+  # means shards merge unattended on structural checks alone (lint-plan, the plan-PR emitter,
+  # the plan-index check), never an executed proof. The operator already ruled that
+  # acceptable for triage (W1-T489); this flag says it out loud rather than discovering it.
+  # The escape hatch is native and costs nothing: a DRAFT PR can never be direct-merged by
+  # this path (`armFailureAction` only classifies a "clean status" refusal as a direct
+  # merge; a draft's refusal message never matches, so it stays `arm-error-ignored`) —
+  # undraft and the next sweep pass arms it.
+  armSessionPrs:
+    value: false
+    origin: "net-new"
 
 drain:
   max:

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
@@ -16,7 +17,15 @@ import {
   writeDailyCostCeilingOverride,
   type Policy,
 } from "../src/lib/policy.js";
-import { lintPlanCommand } from "../src/run-task.js";
+import {
+  armAutoMerge,
+  armFailureAction,
+  buildSweepEffects,
+  escalationTaskIdFor,
+  lintPlanCommand,
+  sweepArmTaskId,
+  type ArmDeps,
+} from "../src/run-task.js";
 // The SOURCE constants plan/policy.yaml claims to lift — imported so the drift lock below
 // compares against the real thing, never a second copy of the literal.
 //
@@ -28,10 +37,12 @@ import { lintPlanCommand } from "../src/run-task.js";
 import { DEFAULT_PRUNE_GRACE_MS } from "../src/lib/worker.js";
 import { buildDefaultHeadroomPolicy, DEFAULT_POLL_INTERVAL_MS } from "../src/lib/daemon.js";
 import { fixStrikeCap } from "../src/lib/config.js";
-import { DEFAULT_SWEEP_POLICY } from "../src/lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, type OpenPrView } from "../src/lib/sweep.js";
 import { DEFAULT_MAX } from "../src/lib/drain.js";
 import { HEADROOM_LIMIT_PCT } from "../src/lib/headroom.js";
 import { DEFAULT_RETRO_MERGES_THRESHOLD, DEFAULT_RETRO_DAYS_THRESHOLD } from "../src/lib/retro.js";
+import type { Config } from "../src/lib/config.js";
+import type { Plan } from "../src/lib/plan.js";
 
 const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 const SHIPPED = policyPath(REPO_ROOT);
@@ -91,6 +102,10 @@ function goodRaw(): Record<string, unknown> {
       tmpMaxAgeMs: { value: 3_600_000, origin: "net-new", min: 60_000, max: 86_400_000 },
       dispatchLanes: { value: 2, origin: "lifted:src/lib/sweep.ts:359 (DEFAULT_SWEEP_POLICY.dispatchLanes)", min: 1, max: 4 },
       dailyCostCeilingUsd: { value: 500, origin: "lifted:src/lib/sweep.ts:365 (DEFAULT_SWEEP_POLICY.dailyCostCeilingUsd)", min: 100, max: 2500 },
+      // W1-T516: gates whether the sweep arms a session PR (no plan task id) under the
+      // review lane's own PR-<n> synthetic id. DEFAULT OFF, net-new — no prior source
+      // literal ever gated this.
+      armSessionPrs: { value: false, origin: "net-new" },
     },
     drain: {
       max: { value: 10, origin: "lifted:src/lib/drain.ts:243 (DEFAULT_MAX)", min: 1, max: 100 },
@@ -466,6 +481,9 @@ test("every LIFTED field records origin=lifted:<source-site> — the net-new fie
     // reaper's, measured at p99 of intra-run ledger gaps), and citing worker.ts's pruneGraceMs
     // site as its origin would claim a source-site copy that never happened.
     "worktreeReapGraceMs",
+    // W1-T516: `sweep.armSessionPrs` joins them too — no prior literal ever gated the sweep's
+    // arm dep on a task-id presence; it simply passed `pr.taskId` raw.
+    "sweep.armSessionPrs",
   ]);
   const liftedPaths = Object.keys(p.origin).filter((path) => !NET_NEW.has(path));
   assert.ok(liftedPaths.length > 0);
@@ -911,4 +929,174 @@ test("W1-T332 acceptance 4 — provenance is 'overridden' when a valid override 
 test("W1-T332 — the override path is state/-resident, matching fleet-control.ts's <root>/state/ location", () => {
   const root = "/tmp/does-not-need-to-exist-for-this-check";
   assert.equal(dailyCostCeilingOverridePath(root), join(root, "state", "DAILY_COST_CEILING_OVERRIDE"));
+});
+
+// ── W1-T516 — the sweep arms a session PR (no plan task id) once the sweep.armSessionPrs
+// policy flag is on, under the SAME PR-<n> synthetic id the review/escalation lanes already
+// mint — and stays unarmed, exactly as before, whenever the flag is off. ─────────────────────
+
+/** A minimal, overridable `OpenPrView` fixture — a checks-green, review-success PR that
+ *  carries no `Remudero-Task:` trailer (the session-PR shape this task is about). */
+function sessionPr(over: Partial<OpenPrView> = {}): OpenPrView {
+  return {
+    prNumber: 970,
+    prUrl: "https://github.com/acme/w1-t516-scratch/pull/970",
+    taskId: undefined,
+    reviewState: "success",
+    checksState: "green",
+    unmetCriteria: [],
+    priorStrikes: 0,
+    lastActivityAt: new Date().toISOString(),
+    headSha: "deadbeef",
+    autoMergeArmed: false,
+    ...over,
+  };
+}
+
+/** A throwaway, scoped `buildSweepEffects` call — config/plan are never touched by the `arm`
+ *  effect itself, so a fresh tmp root and an empty plan are all any of these tests need. The
+ *  repo name is deliberately NOT this checkout's own, mirroring the dispatchFix e2e test above,
+ *  so `resolveOwnerRepo()`'s comparison inside buildSweepEffects never matches it by accident. */
+function buildSessionArmEffects(
+  root: string,
+  repo: string,
+  armImpl: ((prUrl: string, taskId: string | undefined) => ArmOutcomeForTest) | undefined,
+  armSessionPrs: boolean,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+) {
+  const config = { claudeBin: "/bin/true", root } as Config;
+  const plan = { tasks: [], byId: new Map() } as unknown as Plan;
+  return buildSweepEffects(
+    "acme",
+    repo,
+    config,
+    join(root, "ledger.ndjson"),
+    "SWEEP-1",
+    plan,
+    log,
+    DEFAULT_SWEEP_POLICY,
+    undefined, // reviewRunner — its own default, unreached by the arm effect
+    undefined, // spawnImpl
+    undefined, // pushEmptyCommit
+    undefined, // issuesImpl
+    undefined, // stallNotice
+    armImpl, // armImpl — undefined keeps the REAL armAutoMerge, per default param semantics
+    armSessionPrs,
+  );
+}
+
+// Local alias so the helper above type-checks without importing ArmOutcome just for a signature.
+type ArmOutcomeForTest = ReturnType<typeof armAutoMerge>;
+
+test("the sweep arms a pull request that carries no task id", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-w1-t516-arm-"));
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const armed: Array<{ prUrl: string; taskId: string | undefined }> = [];
+  try {
+    const effects = buildSessionArmEffects(
+      root,
+      "w1-t516-scratch-repo-1",
+      (prUrl, taskId) => { armed.push({ prUrl, taskId }); return "armed"; },
+      true, // armSessionPrs ON
+      (step, extra) => { logs.push({ step, extra }); },
+    );
+    const pr = sessionPr({ prNumber: 970, taskId: undefined });
+    const outcome = await effects.arm(pr);
+    assert.equal(outcome, "armed", "flag ON: a task-id-less PR now arms instead of being refused");
+    assert.deepEqual(armed, [{ prUrl: pr.prUrl, taskId: "PR-970" }], "armed under the synthetic PR-<n> id, not undefined");
+    assert.ok(logs.some((l) => l.step === "automerge.armed"), "the arm reaches the ledger, not only stdout");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the synthetic id the sweep arms under matches the review lane", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-w1-t516-arm-"));
+  const armed: Array<{ taskId: string | undefined }> = [];
+  try {
+    const pr = sessionPr({ prNumber: 1234, taskId: undefined });
+    const effects = buildSessionArmEffects(
+      root,
+      "w1-t516-scratch-repo-2",
+      (_prUrl, taskId) => { armed.push({ taskId }); return "armed"; },
+      true,
+      () => {},
+    );
+    await effects.arm(pr);
+    // escalationTaskIdFor is the SAME mint the escalation lane uses and the review lane already
+    // ledgers a session PR's verdict under (task_id: taskId ?? PR-<n>) — byte-identical, not
+    // merely equal in shape, is what makes decideArmFromLedgerVerdict's key lookup hit.
+    assert.equal(armed[0]?.taskId, escalationTaskIdFor(pr));
+    assert.equal(armed[0]?.taskId, "PR-1234");
+    // And the pure resolver itself agrees, independent of the buildSweepEffects wiring above.
+    assert.equal(sweepArmTaskId(pr, true), escalationTaskIdFor(pr));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a policy flag off leaves a session pull request unarmed", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-w1-t516-arm-"));
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  try {
+    const pr = sessionPr({ prNumber: 42, taskId: undefined });
+    const effects = buildSessionArmEffects(
+      root,
+      "w1-t516-scratch-repo-3",
+      undefined, // no fake — this exercises the REAL armAutoMerge gate
+      false, // armSessionPrs OFF (the shipped default)
+      (step, extra) => { logs.push({ step, extra }); },
+    );
+    const outcome = await effects.arm(pr);
+    assert.equal(
+      outcome,
+      "no-task-id",
+      "off, the sweep still passes the RAW (absent) task id and armAutoMerge still refuses at its first line",
+    );
+    assert.ok(logs.some((l) => l.step === "automerge.arm_skipped"), "the refusal is ledgered, never silently discarded");
+    assert.ok(!logs.some((l) => l.step === "automerge.armed"), "nothing was armed");
+    // Same fact, off the pure resolver directly: the flag OFF is a no-op over pr.taskId.
+    assert.equal(sweepArmTaskId(pr, false), pr.taskId);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ── acceptance 4: the native escape hatch (design note iii) — a draft PR's `gh pr merge --auto`
+// refusal never reads as "clean status", so attemptArm's fallback can never direct-merge it. ──
+
+function armDepsForDraftTest(over: Partial<ArmDeps> = {}): ArmDeps & { said: string[] } {
+  const said: string[] = [];
+  return {
+    said,
+    headSha: () => "abc1234",
+    ledgerLines: () => [
+      { step: "review.posted", task_id: "PR-591", state: "success", head_sha: "abc1234", proof_exec: ["executed_pass"] },
+    ],
+    armAuto: () => {},
+    mergeDirect: () => {},
+    disableAuto: () => {},
+    say: (m) => { said.push(m); },
+    ...over,
+  };
+}
+
+test("a draft pull request is never direct-merged", () => {
+  // A representative `gh pr merge --auto` refusal on a draft PR — GitHub's real wording varies,
+  // but the one invariant this test locks is the one attemptArm's fallback keys on: it is NOT
+  // the "clean status" class (a draft is, definitionally, not yet mergeable at all).
+  const draftStderr = "GraphQL: Pull request is in draft state and pending review (mergePullRequest)";
+  assert.equal(armFailureAction(draftStderr), "ignore", "a draft refusal must never classify as clean-status");
+
+  const merged: string[] = [];
+  const deps = armDepsForDraftTest({
+    armAuto: () => {
+      const e = new Error("gh failed") as Error & { stderr: string };
+      e.stderr = draftStderr;
+      throw e;
+    },
+    mergeDirect: (u) => { merged.push(u); },
+  });
+  assert.equal(armAutoMerge("url/591", "PR-591", deps), "arm-error-ignored");
+  assert.deepEqual(merged, [], "the clean-status direct-merge fallback never fires for a draft refusal");
 });
