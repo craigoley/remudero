@@ -1,0 +1,181 @@
+- id: W1-T525
+  title: "there is no single point where a gh call can be counted, so a proactive rate-limit floor cannot be built until one exists"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  rationale: "FILED FROM the rate-limit-floor recon of 2026-08-15 (operator-directed), on host
+    Remudero under bash 5.2.21, evidence derived at origin/main f1a82a2 and over the FULL ledger
+    union at /home/craigoleyagent/rmd-state2/state (per form: gz 0 files, plain 2, live 1;
+    coverage control on run.start = 0 / 128 / 98; union full-line deduped to 37,027 rows).
+    THE OPERATOR ASKED FOR THE FLOOR ITSELF. This shard is deliberately NOT that, and the
+    substitution is the finding: THE FLOOR IS BLOCKED ON THIS SEAM. Filing the floor today would
+    file a task nobody can build.
+    THERE IS NO CHOKE POINT TODAY. Measured at f1a82a2: src/ carries 48 raw `gh` exec sites
+    (execFileSync/execFile/spawn/spawnSync/execSync against the literal \"gh\") spread over 17
+    files — src/run-task.ts 22, src/lib/status.ts 4, src/lib/review.ts 3, then fourteen files
+    with one or two each. The four helpers a prior reading credited do not cover them: `ghJson`
+    is defined in src/lib/worker.ts and has 11 call sites, `ghGateway` 8, `ghJsonAsync` 1, and
+    `ghApiJson` DOES NOT EXIST (0 definitions, 0 call sites, against a negative control of 0 for
+    `ghZzqJson`). So roughly forty call sites reach `gh` with no shared entry point, and a
+    counter placed on the helpers would meter under a third of the orchestrator.
+    NOTHING READS THE HEADER, AND NOTHING EVEN RECEIVES IT. `x-ratelimit` / `X-RateLimit` /
+    `X-Ratelimit` each match ZERO files under src/ and test/, against a positive control
+    (`isGhRateLimitError`, 2 src files) and a negative control at 0. Stronger: ZERO sites pass
+    `-i` or `--include` to `gh`, so today the header is discarded at the transport layer before
+    any code could read it. GitHub returns it on every response — verified live:
+    X-Ratelimit-Limit, -Remaining, -Reset, -Resource, -Used on an ordinary repos read.
+    THE TWO SOURCES DISAGREE AND THE HEADER WINS. Read back to back in one command, an ordinary
+    `gh api repos/craigoley/remudero` response carried core used=1741 remaining=3259
+    reset=1786832677, while `gh api rate_limit` reported used=40 remaining=4960
+    reset=1786832984 — different counters with DIFFERENT RESETS, not a rounding difference. A
+    floor built on the rate_limit probe would read 4,960 remaining while the bucket the fleet is
+    actually spending sat at 3,259. Whoever builds the floor must read the header off the SAME
+    response as the call being paced. This is measured, it is load-bearing, and it is the reason
+    the meter belongs at the call rather than in a poller.
+    THE COST IS ESCALATING AND IT IS THE CADENCE RE-TRYING. Re-derived today: 133
+    `sweep.post_review.attempt`, 49 done, 84 failed — 63.2%, up from 27% earlier in the same
+    day — and ALL 84 carry `API rate limit already exceeded`, with 47 of them inside hour 21
+    alone. GraphQL stood at remaining 0 with used 7,985 against a limit of 5,000.
+    A FLOOR HERE CANNOT REACH A SINGLE WORKER, and that has to be said before anyone builds it.
+    hooks/deny-floor.sh states the asymmetry in its own words: the orchestrator's poster calls
+    `gh` via execFileSync directly from the `rmd run-task` process, 'never through a Claude Code
+    Bash tool call — so it never reaches this hook at all; only a spawned worker's Bash call
+    does'. The two surfaces are therefore DISJOINT: a seam in src/ meters the orchestrator and
+    reaches none of the 19 workers that ran today, and the PreToolUse hook sees every worker
+    `gh` call and none of the orchestrator's. The worker half is a SEPARATE task and is named
+    below rather than absorbed."
+  design: |
+    THE SHAPE: one metered entry point for `gh`, feeding the pacer that already exists. No new
+    ledger step, no retry, no floor policy, no worker-side change.
+
+    (i) THE SEAM. `ghJson` (src/lib/worker.ts) becomes the single place a `gh` invocation is
+    issued and observed. It gains the header read — pass `-i`/`--include` (today ZERO sites do),
+    split headers from body, parse `X-Ratelimit-Remaining`, `-Used`, `-Limit`, `-Reset` and
+    `-Resource`, return the body exactly as before. The signature must stay source-compatible:
+    its 11 call sites and the `GhApiFetcher` shape (src/lib/open-prs-rest.ts, 7) are load-bearing
+    and this task changes no caller's contract.
+
+    (ii) EXTEND THE PACER DO NOT REPLACE IT. `GhCallPacer` (src/lib/open-prs-rest.ts) already has
+    exactly the right shape — one shared instance per daemon start, `wait()` before a guarded
+    call, `recordResult()` after — and it already changes behaviour on a classified failure by
+    widening DEFAULT_GH_PACE_MIN_GAP_MS to DEFAULT_GH_PACE_RATE_LIMIT_GAP_MS. What it lacks is a
+    PROACTIVE input: it only ever learns from a call that ALREADY failed. Feed the parsed
+    remaining into `recordResult` so the gap widens BEFORE exhaustion instead of after it. That
+    is the whole behavioural change in this task.
+
+    THIS IS WHY NO NEW LEDGER STEP IS NEEDED. The pacer is a live consumer that exists today, so
+    the meter's output changes behaviour the moment it lands. W1-T494/#1833 recorded
+    `daemon.tree_dirty` and `daemon.stale_code` firing with nothing reading either; a new step
+    here would be a third. If the meter ever needs to be visible, it belongs on a line something
+    already reads, not on a step of its own.
+
+    (iii) THE FREE PROBE IS NOT THE SOURCE. `gh api rate_limit` costs nothing — measured, ten
+    such calls moved the header's `used` by 4 in a window where ten real calls moved it by 23,
+    the residual being concurrent fleet traffic — so it is tempting as a poller. It is still the
+    WRONG source, because it answers about a different bucket with a different reset (see the
+    rationale's side-by-side). A test must pin that the floor's reading comes from the paced
+    call's own response.
+
+    (iv) WHAT THIS UNBLOCKS, SPECIFIED BUT NOT BUILT. Once every orchestrator call is metered, a
+    floor is a policy over one number, and DEGRADE DO NOT RETRY is its rule: the failure class is
+    exhaustion and 133 attempts producing 84 failures is what retrying looks like. Degrading is
+    NOT uniform per lane and the follow-on task must say so — skipping a REVIEW leaves a green PR
+    unmerged and is recoverable on the next pass once the budget resets; skipping a DISPATCH
+    leaves work undone and the task re-selected, which is also recoverable but wastes a
+    selection; skipping a FIX-RUNG strike must not consume the strike. Ranked candidate for the
+    stand-down's visibility: reuse the existing `budget.warning` step, which is already emitted
+    and therefore already has a reader, rather than minting a new one.
+
+    (v) THE WORKER HALF, RANKED AND NOT BUILT HERE. The 19 spawned workers are the bulk of the
+    burn and no src/ seam can see them. Ranked by reach:
+      1. THE PreToolUse HOOK (hooks/deny-floor.sh). It ALREADY sees every worker Bash call and
+         already inspects `gh api` command text for the W1-T203 forge rule, so the interception
+         point exists and is proven. It is a POSIX shell script with no state, so a budget test
+         there needs a cheap read — and `gh api rate_limit` being free is exactly what makes this
+         viable, with the bucket caveat above applying in full.
+      2. A PRE-SPAWN CHECK (refuse to dispatch below a threshold). Coarse but trivial: it costs
+         one read per spawn, not per call, and it cannot stop a worker already running.
+      3. AN ENV-CARRIED BUDGET THE PROMPT NAMES. Ranked last and close to useless — it relies on
+         the worker choosing to obey, which is not a floor.
+
+    WHAT MUST NOT BE BUILT: the floor policy itself (that is the follow-on this unblocks); any
+    retry or backoff loop; a new ledger step; a worker-side hook change; a second rate-limit
+    parser beside the one this adds; a cadence change; and any conversion of a `gh pr view` call
+    site — W1-T522 (#1906, merged) already converted src/lib/review.ts and src/run-task.ts, and
+    W1-T523 (#1905, open) converts src/lib/status.ts's `ghGateway`.
+  acceptance:
+    - claim: "a gh call is issued and observed in one place rather than at forty sites"
+      proof: "unit test: W1-T525: every gh call routes through the metered entry point"
+    - claim: "the budget reading comes from the response that carried it"
+      proof: "unit test: W1-T525: the rate limit header is parsed off the response that carried it"
+    - claim: "a low reading changes pacing before any call has failed"
+      proof: "unit test: W1-T525: a low remaining reading widens the pacer without any failure"
+    - claim: "the free probe is refused as the source because it answers about another bucket"
+      proof: "unit test: W1-T525: the free budget probe is never used as the floor's source"
+    - claim: "the substitution for the requested task is stated rather than quietly made"
+      proof: "grep: THE FLOOR IS BLOCKED ON THIS SEAM in plan/tasks.d/W1-T525-metered-gh-seam-the-rate-limit-floor-needs.yaml"
+    - claim: "the absent choke point is recorded with the count that establishes it"
+      proof: "grep: THERE IS NO CHOKE POINT TODAY in plan/tasks.d/W1-T525-metered-gh-seam-the-rate-limit-floor-needs.yaml"
+    - claim: "the seam's reach is bounded honestly before it is built"
+      proof: "grep: A FLOOR HERE CANNOT REACH A SINGLE WORKER in plan/tasks.d/W1-T525-metered-gh-seam-the-rate-limit-floor-needs.yaml"
+    - claim: "the two budget sources are separated so the wrong one is not read"
+      proof: "grep: THE TWO SOURCES DISAGREE AND THE HEADER WINS in plan/tasks.d/W1-T525-metered-gh-seam-the-rate-limit-floor-needs.yaml"
+    - claim: "the existing pacer is extended rather than duplicated"
+      proof: "grep: EXTEND THE PACER DO NOT REPLACE IT in plan/tasks.d/W1-T525-metered-gh-seam-the-rate-limit-floor-needs.yaml"
+    - claim: "a retry is refused and degrading is required per lane"
+      proof: "grep: DEGRADE DO NOT RETRY in plan/tasks.d/W1-T525-metered-gh-seam-the-rate-limit-floor-needs.yaml"
+    - claim: "a dead signal is refused with its precedent"
+      proof: "grep: NO NEW LEDGER STEP IS NEEDED in plan/tasks.d/W1-T525-metered-gh-seam-the-rate-limit-floor-needs.yaml"
+    - claim: "the out-of-bounds work is named so it is not rebuilt"
+      proof: "grep: WHAT MUST NOT BE BUILT in plan/tasks.d/W1-T525-metered-gh-seam-the-rate-limit-floor-needs.yaml"
+    - claim: "the declared scope is derived by measurement"
+      proof: "grep: DERIVED BY INVOCATION COUNT in plan/tasks.d/W1-T525-metered-gh-seam-the-rate-limit-floor-needs.yaml"
+  risk: high
+  origin: "oper#rate-limit-floor-recon-2026-08-15"
+  plan_refs: ["W1-T522", "W1-T523", "W1-T468", "W1-T494", "W1-T203"]
+  files: [src/lib/open-prs-rest.ts, src/lib/worker.ts, test/open-prs-rest.test.ts]
+  status: queued
+  attempts: 0
+  note: "risk:high is set UP FRONT and it is Rule 19's SPAN, not blast radius: the files: list
+    crosses two source modules because the meter is read in one and consumed in the other.
+    Blast radius is bounded — the transport gains a header parse and the pacer gains one input,
+    and no caller's contract changes.
+    files: DERIVED BY INVOCATION COUNT at f1a82a2 with WORD BOUNDARIES (symbol followed by a
+    non-word character), never a bare substring — the inflation control reproduces on the symbol
+    that caused a wrong files: list yesterday: `ghJson` bare = 34 against 11 word-boundary, with
+    `ghJsonAsync` accounting for 1. src/lib/open-prs-rest.ts scores `GhCallPacer` 10,
+    `GhApiFetcher` 7 and defines `paceGhEntry`; src/lib/worker.ts defines `ghJson`; the test home
+    test/open-prs-rest.test.ts scores `GhCallPacer` 15 and `paceGhEntry` 11, higher than any
+    other test path (test/status.test.ts 7 and 1). Negative control `GhCallPacerZzq` = 0 files.
+    src/run-task.ts is DELIBERATELY NOT DECLARED despite scoring `ghJson` 23: those are call
+    sites whose contract this task preserves, so nothing there needs editing, and W1-T471 makes
+    a 19,943-line declaration pure contention. src/lib/status.ts is not declared either — its
+    `ghGateway` conversion is W1-T523 (#1905, open) and declaring it here would collide.
+    THE THIRD TASK T522 NAMED IS THIS ONE, AND IT WAS STILL UNFILED UNTIL NOW. W1-T522's own
+    'TWO SHARDS NOT ONE' clause named the floor as its sibling; this shard is the prerequisite
+    that clause did not know about, so the floor is now sequenced BEHIND this rather than beside
+    it. Cited, not duplicated: W1-T522 (#1906, merged) converted src/lib/review.ts and
+    src/run-task.ts; W1-T523 (#1905, open) converts src/lib/status.ts.
+    PROOF NOTES: the four unit proofs are NAME-FILTERED titles, each verified to match ZERO files
+    under test/ at f1a82a2 with `grep -rlF`, against a positive control matching 1. The
+    implementing test must carry each title as ONE verbatim string literal, never assembled
+    across a concatenation seam (impl-AG). Each grep pattern is TEXT INSIDE THIS SHARD rather
+    than a path slug, is single-line, contains no ' in ' that would mis-split the dialect parser,
+    and contains no '*' — three candidate patterns read 0 yesterday because '*' is a BRE
+    quantifier under the executor's own `grep -arn` argv.
+    MINT NOTE: W1-T525 was taken by pushing refs/rmd-id/W1-T525 with a UNIQUE ORPHAN PAYLOAD OVER
+    THE EMPTY TREE (4b825dc6), commit ced27798, message carrying a host-pid-nanosecond nonce,
+    under --force-with-lease=refs/rmd-id/W1-T525: so a concurrent minter would have lost rather
+    than both winning. The push's EXIT CODE WAS CHECKED DIRECTLY rather than through a pipe — a
+    session yesterday printed GATE PASSED on a rejected push because `if git push ... | tail -2`
+    evaluates tail's exit, not git's — and the ref was then re-read and its nonce matched against
+    the one written. Tree max at take was W1-T522 (id field and filenames agree); reservation
+    refs already held 515, 516, 520, 521, 522, 523, 524, and the open PRs mint 520, 521 and 523,
+    so 524 is reserved-but-unfiled and was skipped rather than reused.
+    LINT: proof-scope warns once per grep proof here because each names this shard's own path
+    while files: correctly omits it; that check is warn-only everywhere (`opts.proofScope`
+    defaults to warn and no src/ caller sets it), so it cannot block the changed-tasks gate.
+    LEDGER: measured over the full three-form union as recorded in the rationale."
