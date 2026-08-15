@@ -12,5 +12,6 @@ raw: "INBOX DEP CLASSIFIER CALLS MERGED TASKS UNMET — daemon-side classificati
   throttled surfaced as throttled, never as unmet."
 attachments: []
 origin: cli
-status: new
+status: proposed
 proposal_pr: null
+summary: null
