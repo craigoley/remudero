@@ -1,0 +1,136 @@
+- id: W1-T527
+  title: "isBlockedCi is `pr.checksState === \"red\"` and nothing asks why, so a PR red because origin/main will not load and a PR red because its own diff is wrong take the identical dispatch — and a strike spent on a cause the rung cannot reach is the budget that would have fixed a real defect"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: "MEASURED ON THE MINI AT a9427bf, 2026-08-15, over REST throughout (the GraphQL budget has
+    been exhausted four times today).
+
+    (1) **THE PREDICATE IS ONE FIELD AND CARRIES NO CAUSE.** `isBlockedCi` (`src/lib/sweep.ts`) is
+    `return pr.checksState === \"red\";`, and the blocked-fixable row's `when` is `(pr) =>
+    isBlockedCi(pr)`. Four causes observed today reach that same arm.
+
+    (2) **AND THE EVIDENCE TO TELL THEM APART IS ALREADY IN HAND — THIS IS THE FINDING THAT MAKES THE
+    TASK CHEAP.** `CiFailure` (`src/lib/sweep.ts`) already carries `{ name, logTail, sha?,
+    outsidePrRange? }`, and `OpenPrView.ciFailures` is populated whenever `checksState === \"red\"`.
+    The check NAME and its LOG TAIL are therefore free at disposition time. **NO NEW GitHub CALL IS
+    NEEDED FOR THREE OF THE FOUR DISCRIMINATORS**, which matters on a day that reached 7,965 against a
+    5,000 ceiling.
+
+    (3) **AND THE FOURTH IS FREE TOO, BECAUSE THE FULL SWEEP SEES EVERY PR AT ONCE.** `runSweep` takes
+    `openPrs: OpenPrView[]` — the whole array — and it is the FULL sweep that dispatches fixes; only
+    `runSweepLightPass` splits them one per call, and that pass is restricted to `post-review` anyway.
+    So **BASE-CAUSED IS OBSERVABLE AS A CROSS-PR FACT**: the same required checks failing on EVERY open
+    PR in one pass is a property of the base, not of any diff. That costs nothing extra and needs no
+    local worktree run.
+
+    (4) **THE STRIKE IS SPENT AT DISPATCH, AND A STAND-DOWN SPENDS NONE — SO THE ROUTING IS FREE.**
+    `priorActionsFromLedger` skips any row where `line.acted !== true`, and only an `acted:true`
+    blocked-fixable row seeds `fixed` with `${pr}@${headSha}`. A disposition that stands down with a
+    named `standDownReason` therefore consumes no strike and re-derives next pass. **THE EXISTING
+    MECHANISM IS THE WHOLE ROUTING; THIS TASK ADDS A PREDICATE, NOT A SUBSYSTEM.**
+
+    (5) **THE COST OF NOT CLASSIFYING, MEASURED.** The fix rung burned both strikes plus a third worker
+    on #1830 against a defect that was never in that PR's diff. And the gate-conflict class already
+    proves the refusal path works: #1863's Rule 25 deadlock was REFUSED rather than patched, escalating
+    as issue #1877 — open, labelled `needs-human`/`escalation-blocked`, naming the PR. That is the
+    behaviour the other three classes should get and do not.
+
+    (6) **WHAT COULD NOT BE RE-DERIVED HERE, STATED AS A LIMIT.** The 96-of-97 `browserType.launch`
+    failures and the four base-stranded PRs are CI/Azure observations; `browserType.launch` reads 0 in
+    the mini's live ledger against a positive control of 17,035 rows in the same file, because those
+    runs happened elsewhere. THE PER-CLASS FREQUENCIES ARE UNMEASURED HERE, NOT ABSENT — re-derive them
+    on Azure before sizing the saving. What IS established on this host is the predicate, the evidence
+    already carried, and the strike mechanism, and those are what the design turns on."
+  design: |
+    (i) CLASSIFY, DO NOT ROUTE. Add a pure predicate over `OpenPrView[]` + the PR's own `ciFailures`
+    returning one of four causes, and let the EXISTING arms act on it. No new lane, no new rung.
+    (ii) THE FOUR DISCRIMINATORS, IN PRECEDENCE ORDER, EACH FROM DATA ALREADY READ.
+      BASE-CAUSED — the same required check names failing on EVERY open PR this pass. A cross-PR fact,
+      free because `runSweep` holds the whole array. Checked FIRST: it exonerates every diff at once.
+      GATE CONFLICT — the review verdict names an unsatisfiable condition (Rule 25 `entangled`), which
+      is explicitly non-suppressible, so no re-review can soften it and no patch can satisfy both gates.
+      FLAKE / ENVIRONMENT — a near-total failure ratio within one check whose `logTail` repeats a
+      single message. `ci` and `coverage-ratchet` run the same glob in DIFFERENT environments, so their
+      disagreement is evidence rather than a regression — W1-T517 (#1898) shipped that sibling-job
+      predicate in `src/lib/host-parity.ts`; CONSUME IT IF IT FITS, NEVER REIMPLEMENT IT.
+      IN-DIFF — the residue, and the fix rung's existing territory, unchanged.
+    (iii) WHAT EACH CLASS DOES, AND ONLY ONE OF THE FOUR CHANGES BEHAVIOUR AT ALL.
+      IN-DIFF: dispatch exactly as today.
+      GATE CONFLICT: refuse and escalate, exactly as today — this is already correct and must stay
+      byte-identical.
+      BASE-CAUSED and ENVIRONMENT: STAND DOWN with a named reason and NO STRIKE. They have no route
+      today and fall through to the ci-log dispatch, which is where the waste is.
+    (iv) THE CLASSIFICATION MUST HAPPEN STRICTLY BEFORE SELECTION, because the strike is spent at
+    dispatch. A misclassified dispatch cannot be refunded afterwards.
+    (v) DO NOT ADD A THIRD STRIKE. The two-strike cap is the operator's evidence discipline in code: if
+    two patches have not moved the symptom, the answer is more data rather than another patch.
+    (vi) AND DO NOT ADD A LEDGER STEP NOTHING CONSUMES. The classification is carried on the existing
+    `sweep.disposed` line's reason/stand-down fields, which `priorActionsFromLedger` ALREADY reads.
+    `daemon.tree_dirty` and `daemon.stale_code` both fire and nothing reads either (W1-T494) — that is
+    the outcome to avoid. THE ACTING RUNG IS THE DISPATCH DECISION ITSELF.
+    (vii) A WARNING FROM THE ONE PRECEDENT THAT ALREADY EXISTS HERE. `CiFailure.outsidePrRange` is
+    W1-T186's attribution evidence and its only consumer is `describeCiFailures`, a REASON STRING — it
+    is narrated and never acted on. THIS TASK MUST NOT ADD A SECOND SUCH FIELD.
+
+    (viii) **THE THREE-WAY SPLIT, STATED SO THESE ARE NOT READ AS DUPLICATES.** W1-T526 (#1908) owns
+    the review QUEUE — which PR to review next; its selection only sees PRs whose disposition this pass
+    is `post-review`, so a red PR is never chosen. W1-T520 (#1901) owns the UPDATE half — pressing
+    GitHub's update-branch so a behind PR can merge. THIS task owns WHAT TO DO WITH A PR THAT IS
+    ALREADY RED. The queue decides what to review; this decides whether a red PR is worth a worker.
+    (ix) NOT IN SCOPE: the rate-limit floor, WHICH IS STILL UNFILED AND IS NAMED HERE ONLY SO IT IS NOT
+    LOST — a review attempt that throws writes only `sweep.action_failed`, while
+    `priorActionsFromLedger` builds `postReviewed` from `review.posted` and `review.post_refused` only,
+    so a failed attempt leaves no dedup key and retries every pass without bound. Separate shard.
+  acceptance:
+    - claim: "a check failing on every open pull request at once is classified as base-caused"
+      proof: "unit test: W1-T527: a check failing on every open pull request reads base-caused"
+    - claim: "a base-caused red pull request stands down and spends no fix strike"
+      proof: "unit test: W1-T527: a base-caused red pull request spends no strike"
+    - claim: "a pull request red only in its own diff still dispatches the fix rung unchanged"
+      proof: "unit test: W1-T527: an in-diff red pull request still dispatches the rung"
+    - claim: "an unsatisfiable gate conflict still refuses and escalates rather than standing down"
+      proof: "unit test: W1-T527: a gate conflict still escalates rather than standing down"
+  origin: recon#red-has-four-causes-2026-08-15
+  plan_refs: ["W1-T526", "W1-T520", "W1-T517", "W1-T186", "W1-T494"]
+  files: [src/lib/sweep.ts, test/sweep-blocked-routing.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `src/` and `test/`, and independently
+    warranted: this decides whether a red PR gets a worker at all, so a wrong classification does not
+    fail loudly, it silently stops fixing something. budget_usd 40 — one pure predicate, three
+    discriminators over data already read, and a stand-down that reuses the existing mechanism.
+
+    `files:` DERIVED BY WORD-BOUNDED INVOCATION COUNT IN PYTHON (a bare substring inflated `ghLiveState`
+    from 6 to 11 today). `src/lib/sweep.ts` scores `standDownReason` 19, `isBlockedCi` 12, `ciFailures`
+    10, `deriveDisposition` 8, `describeCiFailures` 4, `CiFailure` 3 — the predicate, the evidence and
+    the stand-down all live there. `test/sweep-blocked-routing.test.ts` is the ESTABLISHED routing home
+    (`isBlockedCi` 7, `deriveDisposition` 5) rather than a new file, because these assertions are
+    exactly what that suite already covers. `src/run-task.ts` IS NOT DECLARED: it scores `ciFailures`
+    28 but as the PRODUCER (`fetchCiFailures`), which needs no change — the classification consumes what
+    it already emits — and it is a 19,943-line file `partitionByFileOverlap` (W1-T471) serialises
+    against every task naming it. `src/lib/host-parity.ts` is NOT declared either: W1-T517's predicate
+    is reused, not edited, and `inverseScopeUntouchedFiles` (`src/lib/review.ts`) fails a declared path
+    the implementation never reaches.
+
+    THE BEST OUTCOME WAS AVAILABLE AND IS THE ONE TAKEN: the classification is the whole task and the
+    routing is free. Rationale (4) is why — a stand-down already spends no strike, so naming the cause
+    is sufficient for the existing arms to do the right thing. An implementer who finds themselves
+    building a new rung has left the design.
+
+    PROOF NOTES: all four proofs are NAME-FILTERED titles, not pure paths — a pure path runs the whole
+    file and one unrelated failure fails every criterion. Each was verified to match ZERO files today
+    against a control matching exactly one, and each is under 100 characters with no comma so
+    `looksLikeScenarioNarrative` (`src/lib/task-linter.ts`) cannot fail them. No proof names this shard.
+
+    ID PROVENANCE: `refs/rmd-id/` held 515, 516 and 520-526 while origin/main's max is 522, so the
+    allocator is running ahead of the plan. **524 IS RESERVED BUT UNFILED AND WAS DELIBERATELY SKIPPED
+    RATHER THAN REUSED.** This shard took 527 behind a fresh-fetch suffix-aware re-sweep with a
+    known-taken control reading >= 1, pushed under `--force-with-lease` with the exit code captured
+    into a VARIABLE rather than read through a pipe, and the ref then RE-READ and its NONCE
+    (host-pid-nanosecond) matched against the one written. W1-T522 was lost to another lane between
+    sweep and push earlier today; only a unique payload makes that visible."
