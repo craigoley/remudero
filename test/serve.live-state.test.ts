@@ -115,6 +115,10 @@ function fixtureDeps(root: string, tasks: Task[], github: GitHub = fakeGitHub(),
     fleetControlRoot: root,
     questionsRoot: root,
     tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
+    // W1-T500: enforcement is ON in buildServeServer and the bearer token is pinned
+    // `writeTier: "low"`, so MIDDLE/HIGH controls need the tailnet grant the operator
+    // actually arrives with (Serve injects the capability header; grantor tier "high").
+    identity: { trustedLocalAddress: "127.0.0.1", capability: "remudero:console" },
     pollMs,
   };
 }
@@ -163,7 +167,7 @@ after(async () => {
 // THIS tab earlier in the session: it is seeded into sessionStorage BEFORE the page's own script
 // runs (page.addInitScript), never appended to the navigated URL.
 async function openShell(base: string, opts: { reducedMotion?: boolean; token?: string } = {}): Promise<{ context: BrowserContext; page: Page }> {
-  const context = await browser.newContext();
+  const context = await browser.newContext({ extraHTTPHeaders: { "tailscale-app-capabilities": JSON.stringify({ "remudero:console": {} }) } });
   if (opts.reducedMotion) await context.grantPermissions([]);
   const page = await context.newPage();
   if (opts.reducedMotion) await page.emulateMedia({ reducedMotion: "reduce" });
@@ -363,7 +367,7 @@ test("prefers-reduced-motion: the animated live indicator is replaced by a stati
 test("SSE stream severed: the connection indicator flips to disconnected -- never keeps claiming live", async () => {
   const root = tmpRoot();
   await withShell(fixtureDeps(root, [task({ id: "W1-T1" })]), async (base) => {
-    const context = await browser.newContext();
+    const context = await browser.newContext({ extraHTTPHeaders: { "tailscale-app-capabilities": JSON.stringify({ "remudero:console": {} }) } });
     await context.route("**/v1/status/stream", (route) => route.abort());
     const page = await context.newPage();
     try {
@@ -386,7 +390,7 @@ test("SSE stream severed: the connection indicator flips to disconnected -- neve
 test("poll failures: a transient 'reconnecting' indicator, escalating to a visibly-stamped-stale board after consecutive failures, cleared by the next success", async () => {
   const root = tmpRoot();
   await withShell(fixtureDeps(root, [task({ id: "W1-T1" })]), async (base) => {
-    const context = await browser.newContext();
+    const context = await browser.newContext({ extraHTTPHeaders: { "tailscale-app-capabilities": JSON.stringify({ "remudero:console": {} }) } });
     let shouldFail = true;
     await context.route("**/v1/status", (route) => (shouldFail ? route.abort() : route.continue()));
     const page = await context.newPage();
@@ -442,7 +446,7 @@ test("poll failures alongside a healthy SSE connection: staleness is gated on ge
   const root = tmpRoot();
   const deps = fixtureDeps(root, [task({ id: "W1-T1" })]);
   await withShell(deps, async (base) => {
-    const context = await browser.newContext();
+    const context = await browser.newContext({ extraHTTPHeaders: { "tailscale-app-capabilities": JSON.stringify({ "remudero:console": {} }) } });
     // /v1/status (the REST poll) is broken for the WHOLE test -- but /v1/status/stream (SSE) is
     // left alone, so a genuine ledger change still reaches the client via the OTHER transport.
     await context.route("**/v1/status", (route) => route.abort());
@@ -485,7 +489,7 @@ test("poll failures alongside a healthy SSE connection: staleness is gated on ge
 test("a /v1/status fetch that hangs (never resolves -- W1-T187's real 35-58s stall, seeded here) lands in the SAME reconnecting lifecycle as an HTTP error, and never leaks a raw exception string", async () => {
   const root = tmpRoot();
   await withShell(fixtureDeps(root, [task({ id: "W1-T1" })]), async (base) => {
-    const context = await browser.newContext();
+    const context = await browser.newContext({ extraHTTPHeaders: { "tailscale-app-capabilities": JSON.stringify({ "remudero:console": {} }) } });
     // deliberately never call route.continue()/fulfill()/abort() -- the request is reachable but
     // never settles, distinct from a network error (abort) or an HTTP error response.
     await context.route("**/v1/status", () => {});
@@ -718,7 +722,7 @@ test("skeleton lifecycle: NOW/NEEDS ME/RECENT show ONLY their first-paint skelet
   const deps = fixtureDeps(root, [task({ id: "W1-T1" })]);
   appendFileSync(deps.board.ledgerPath, runStart("W1-T1")); // NOW gets real data; NEEDS ME/RECENT stay empty
   await withShell(deps, async (base) => {
-    const context = await browser.newContext();
+    const context = await browser.newContext({ extraHTTPHeaders: { "tailscale-app-capabilities": JSON.stringify({ "remudero:console": {} }) } });
     let releaseFirstPoll = () => {};
     const firstPollHeld = new Promise<void>((resolve) => (releaseFirstPoll = resolve));
     let firstRequestSeen = false;

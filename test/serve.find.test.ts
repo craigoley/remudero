@@ -121,6 +121,10 @@ function fixtureDeps(root: string): ServeDeps {
     fleetControlRoot: root,
     questionsRoot: root,
     tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
+    // W1-T500: enforcement is ON in buildServeServer and the bearer token is pinned
+    // `writeTier: "low"`, so MIDDLE/HIGH controls need the tailnet grant the operator
+    // actually arrives with (Serve injects the capability header; grantor tier "high").
+    identity: { trustedLocalAddress: "127.0.0.1", capability: "remudero:console" },
     pollMs: 50,
   };
 }
@@ -167,7 +171,7 @@ after(async () => {
 // already pasted it into THIS tab earlier in the session: it is seeded into sessionStorage BEFORE
 // the page's own script runs (page.addInitScript), never appended to the navigated URL.
 async function openShell(base: string, token: string = READ_TOKEN): Promise<Page> {
-  const context = await browser.newContext();
+  const context = await browser.newContext({ extraHTTPHeaders: { "tailscale-app-capabilities": JSON.stringify({ "remudero:console": {} }) } });
   const page = await context.newPage();
   if (token !== READ_TOKEN) {
     await page.addInitScript((writeToken) => {

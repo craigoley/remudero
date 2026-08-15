@@ -157,6 +157,10 @@ function depsFor(root: string, plan: Plan, over: Partial<ServeDeps> = {}): Serve
     fleetControlRoot: root,
     questionsRoot: root,
     tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
+    // W1-T500: enforcement is ON in buildServeServer and the bearer token is pinned
+    // `writeTier: "low"`, so MIDDLE/HIGH controls need the tailnet grant the operator
+    // actually arrives with (Serve injects the capability header; grantor tier "high").
+    identity: { trustedLocalAddress: "127.0.0.1", capability: "remudero:console" },
     pollMs: 50,
     ...over,
   };
@@ -177,12 +181,34 @@ function get(base: string, path: string, token: string) {
   return fetch(`${base}${path}`, { headers: { authorization: `Bearer ${token}` } });
 }
 
-function post(base: string, path: string, token: string, body: unknown) {
-  return fetch(`${base}${path}`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
+const TAILNET_CAP = "remudero:console";
+const HIGH_TIER = new Set(["/v1/manual/approve", "/v1/drain/kick", "/v1/drain/run", "/v1/inbox/approve", "/v1/skills/run"]);
+
+/**
+ * W1-T500: enforcement is on. The bearer token is pinned `writeTier: "low"`, so a MIDDLE/HIGH route
+ * needs the tailnet grant (Serve's capability header; grantor tier "high"), and a HIGH route needs
+ * the server-issued nonce as well. `tailnet: false` drops the grant so the bearer-scope assertions
+ * below still mean something — identity is consulted FIRST.
+ */
+async function post(base: string, path: string, token: string, body: unknown, opts: { tailnet?: boolean } = {}) {
+  const payload = JSON.stringify(body);
+  const headers: Record<string, string> = {
+    authorization: `Bearer ${token}`,
+    "content-type": "application/json",
+    ...(opts.tailnet === false ? {} : { "tailscale-app-capabilities": JSON.stringify({ [TAILNET_CAP]: {} }) }),
+  };
+  if (HIGH_TIER.has(path) && opts.tailnet !== false) {
+    const confirmed = await fetch(`${base}/v1/confirm`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ method: "POST", path, payload }),
+    });
+    if (confirmed.ok) {
+      const { nonce } = (await confirmed.json()) as { nonce: string };
+      headers["x-confirm-nonce"] = nonce;
+    }
+  }
+  return fetch(`${base}${path}`, { method: "POST", headers, body: payload });
 }
 
 /**
@@ -391,6 +417,10 @@ test("GET /v1/status over a full 183-task plan: first-paint-to-data under budget
     fleetControlRoot: root,
     questionsRoot: root,
     tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
+    // W1-T500: enforcement is ON in buildServeServer and the bearer token is pinned
+    // `writeTier: "low"`, so MIDDLE/HIGH controls need the tailnet grant the operator
+    // actually arrives with (Serve injects the capability header; grantor tier "high").
+    identity: { trustedLocalAddress: "127.0.0.1", capability: "remudero:console" },
     pollMs: 50,
   };
 

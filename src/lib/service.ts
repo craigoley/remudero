@@ -505,15 +505,37 @@ export function makeConfirmNonceRoute(store: ConfirmNonceStore): Route {
   };
 }
 
+/**
+ * W1-T500: the raw body, MEMOISED ON THE REQUEST. A request stream can be read exactly once, and
+ * turning `enforceWriteTiers` on made the HIGH-tier nonce check the FIRST reader — the dispatch
+ * drains the body to bind the nonce to the exact bytes, and every HIGH-tier handler then waits
+ * forever on a stream that has already ended. That is not hypothetical: it HANGS
+ * `/v1/manual/approve`, `/v1/drain/kick`, `/v1/drain/run`, `/v1/inbox/approve` and
+ * `/v1/skills/run`, all five of which reach `readJsonBody` through `jsonAction`.
+ *
+ * The cache is keyed by `Symbol.for` so the two independent readers in this repo — this one and
+ * panel-actions.ts's `readJsonBody`, which do NOT share a primitive — resolve the same symbol
+ * without importing each other. Whichever reads first buffers; the second gets the bytes rather
+ * than an ended stream. `unshift` was rejected as the alternative: it is illegal once `end` has
+ * fired, which is exactly when the dispatch finishes reading.
+ */
+export const RAW_BODY_CACHE = Symbol.for("remudero.service.rawBody");
+
 /** Read + buffer a request body verbatim, never JSON-parsed here — the ONE primitive both
  *  {@link makeConfirmNonceRoute} and createService's dispatch bind a nonce's `payload` against,
  *  so "the exact bytes a client sent" can never drift between the two call sites. Rejects (never
  *  throws synchronously) on a socket error, mirroring panel-actions.ts's own `readJsonBody`. */
 function readRawBody(req: IncomingMessage): Promise<string> {
+  const cached = (req as unknown as Record<symbol, unknown>)[RAW_BODY_CACHE];
+  if (typeof cached === "string") return Promise.resolve(cached);
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     req.on("data", (chunk: Buffer) => chunks.push(chunk));
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("end", () => {
+      const raw = Buffer.concat(chunks).toString("utf8");
+      (req as unknown as Record<symbol, unknown>)[RAW_BODY_CACHE] = raw;
+      resolve(raw);
+    });
     req.on("error", reject);
   });
 }

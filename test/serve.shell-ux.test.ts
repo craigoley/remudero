@@ -110,6 +110,10 @@ function fixtureDeps(root: string): ServeDeps {
     fleetControlRoot: root,
     questionsRoot: root,
     tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
+    // W1-T500: enforcement is ON in buildServeServer and the bearer token is pinned
+    // `writeTier: "low"`, so MIDDLE/HIGH controls need the tailnet grant the operator
+    // actually arrives with (Serve injects the capability header; grantor tier "high").
+    identity: { trustedLocalAddress: "127.0.0.1", capability: "remudero:console" },
     pollMs: 50,
   };
 }
@@ -151,7 +155,7 @@ after(async () => {
 // already pasted it into THIS tab earlier in the session: it is seeded into sessionStorage BEFORE
 // the page's own script runs (page.addInitScript), never appended to the navigated URL.
 async function openShell(base: string, token: string = READ_TOKEN): Promise<Page> {
-  const context = await browser.newContext();
+  const context = await browser.newContext({ extraHTTPHeaders: { "tailscale-app-capabilities": JSON.stringify({ "remudero:console": {} }) } });
   const page = await context.newPage();
   if (token !== READ_TOKEN) {
     await page.addInitScript((writeToken) => {
@@ -355,6 +359,10 @@ test("W1-T222: a read-only bookmark's inline card renders NO write affordance (M
     fleetControlRoot: root,
     questionsRoot: root,
     tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
+    // W1-T500: enforcement is ON in buildServeServer and the bearer token is pinned
+    // `writeTier: "low"`, so MIDDLE/HIGH controls need the tailnet grant the operator
+    // actually arrives with (Serve injects the capability header; grantor tier "high").
+    identity: { trustedLocalAddress: "127.0.0.1", capability: "remudero:console" },
     pollMs: 50,
   };
   await withShell(deps, async (base) => {
@@ -440,6 +448,10 @@ test("W1-T223: NEEDS ME auto-expands by default when non-empty (the same collaps
     fleetControlRoot: root,
     questionsRoot: root,
     tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
+    // W1-T500: enforcement is ON in buildServeServer and the bearer token is pinned
+    // `writeTier: "low"`, so MIDDLE/HIGH controls need the tailnet grant the operator
+    // actually arrives with (Serve injects the capability header; grantor tier "high").
+    identity: { trustedLocalAddress: "127.0.0.1", capability: "remudero:console" },
     pollMs: 50,
   };
   await withShell(deps, async (base) => {
@@ -799,7 +811,7 @@ test("W1-T336: reachSection activates the real owning tab for a real section, an
 });
 
 test("W1-T335 reachSection: activates the owning tab when a section genuinely IS tab-owned, proven independently against a fixture that presents the tabbed shape", async () => {
-  const context = await browser.newContext();
+  const context = await browser.newContext({ extraHTTPHeaders: { "tailscale-app-capabilities": JSON.stringify({ "remudero:console": {} }) } });
   const page = await context.newPage();
   try {
     // A minimal, independent stand-in for a tabbed shape: a tablist plus two panels, each hidden

@@ -103,6 +103,10 @@ function depsFor(root: string, withTask = true): ServeDeps {
     fleetControlRoot: root,
     questionsRoot: root,
     tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
+    // W1-T500: /v1/skills/run is HIGH-tier and enforcement is on. The bearer token is pinned
+    // `low`, so the request must arrive over the tailnet (grantor tier "high") AND carry the
+    // server-issued nonce — both supplied by `post` below.
+    identity: { trustedLocalAddress: "127.0.0.1", capability: TAILNET_CAP },
     pollMs: 50,
   };
 }
@@ -118,11 +122,31 @@ async function withServeServer<T>(deps: ServeDeps, fn: (baseUrl: string) => Prom
   }
 }
 
-function post(base: string, body: unknown, token?: string) {
+const TAILNET_CAP = "remudero:console";
+
+/**
+ * A HIGH-tier write: tailnet grant for the tier, plus the confirm round trip for the second
+ * factor. `tailnet: false` drops the grant so the bearer-scope assertions still mean something —
+ * identity is consulted FIRST and would otherwise hand READ_WRITE to any caller.
+ */
+async function post(base: string, body: unknown, token?: string, opts: { tailnet?: boolean } = {}) {
+  const payload = JSON.stringify(body);
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    ...(token ? { authorization: `Bearer ${token}` } : {}),
+    ...(opts.tailnet === false ? {} : { "tailscale-app-capabilities": JSON.stringify({ [TAILNET_CAP]: {} }) }),
+  };
+  const confirmed = await fetch(`${base}/v1/confirm`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ method: "POST", path: "/v1/skills/run", payload }),
+  });
+  if (!confirmed.ok) return fetch(`${base}/v1/skills/run`, { method: "POST", headers, body: payload });
+  const { nonce } = (await confirmed.json()) as { nonce: string };
   return fetch(`${base}/v1/skills/run`, {
     method: "POST",
-    headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
-    body: JSON.stringify(body),
+    headers: { ...headers, "x-confirm-nonce": nonce },
+    body: payload,
   });
 }
 
@@ -172,10 +196,14 @@ test("POST /v1/skills/run refuses a read token and refuses anonymous", async () 
   const root = tmpRoot();
   writeSkillYaml(root, "plan");
   await withServeServer(depsFor(root), async (base) => {
-    const anon = await post(base, { skill: "plan", mode: "clarify", taskId: "W1-T900" });
+    // BEARER-ONLY on both: identity is consulted first and grants READ_WRITE to anyone presenting
+    // the capability header, which would turn both of these assertions into no-ops.
+    const anon = await post(base, { skill: "plan", mode: "clarify", taskId: "W1-T900" }, undefined, { tailnet: false });
     assert.equal(anon.status, 401, "anonymous must not execute a skill");
 
-    const readOnly = await post(base, { skill: "plan", mode: "clarify", taskId: "W1-T900" }, READ_TOKEN);
+    const readOnly = await post(base, { skill: "plan", mode: "clarify", taskId: "W1-T900" }, READ_TOKEN, {
+      tailnet: false,
+    });
     assert.ok(readOnly.status === 401 || readOnly.status === 403, `a read token must not execute a skill, got ${readOnly.status}`);
   });
 });

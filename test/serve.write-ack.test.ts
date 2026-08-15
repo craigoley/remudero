@@ -92,6 +92,10 @@ function fixtureDeps(): ServeDeps {
     fleetControlRoot: root,
     questionsRoot: root,
     tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
+    // W1-T500: enforcement is ON in buildServeServer and the bearer token is pinned
+    // `writeTier: "low"`, so MIDDLE/HIGH controls need the tailnet grant the operator
+    // actually arrives with (Serve injects the capability header; grantor tier "high").
+    identity: { trustedLocalAddress: "127.0.0.1", capability: "remudero:console" },
     pollMs: 50,
   };
 }
@@ -124,7 +128,7 @@ after(async () => {
 /** Open the shell with an ACCEPTED write token seeded into sessionStorage, so the write controls
  *  are live (W1-T202: the write token never rides the URL; only the read token does). */
 async function openShellWithWrite(base: string): Promise<Page> {
-  const context = await browser.newContext();
+  const context = await browser.newContext({ extraHTTPHeaders: { "tailscale-app-capabilities": JSON.stringify({ "remudero:console": {} }) } });
   const page = await context.newPage();
   await page.addInitScript((t) => {
     window.sessionStorage.setItem("rmd-console-write-token", t);
