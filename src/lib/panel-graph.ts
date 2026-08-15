@@ -70,6 +70,7 @@ import {
   isDispatchBreakerTripped,
   dispatchesWithoutNewOwnedPr,
   DEFAULT_MAX_TASK_DISPATCHES,
+  type GhFailureReason,
   type GitHub,
   type StatusProjection,
 } from "./status.js";
@@ -1101,7 +1102,17 @@ function classifyAllProposals(deps: PanelGraphDeps): {
 
   const plan = loadPlan(deps.planPath);
   const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub });
+  // W1-T510: absence from `projection` cannot happen for any id `classifyProposal`'s own
+  // `unmetOutsideDeps` can name here — `projectPlan` derives one entry per `plan.tasks` (see
+  // its own loop, lib/status.ts), the EXACT SAME `plan` this `projection` and `ctx.plan` both
+  // come from, so an id genuinely absent from the plan already fails via `unmetDependencies`'s
+  // `!d` branch and never reaches `isMerged`/`depsUnobservable` at all. `?? false` here is
+  // therefore never an absent-as-unmerged conflation — it is dead code on a present entry.
   const isMerged: MergedResolver = (t) => projection.get(t.id)?.merged ?? false;
+  const depsUnobservable = (taskId: string): GhFailureReason | undefined => {
+    const p = projection.get(taskId);
+    return p?.indeterminate ? (p.unavailableReason ?? "unknown") : undefined;
+  };
   const allIds = new Set(proposals.map((p) => p.id));
   // W1-T190: the console must never offer the ratify affordance on a proposal the
   // ledger already carries `ratify.approved` for, even when the registry entry itself
@@ -1113,6 +1124,7 @@ function classifyAllProposals(deps: PanelGraphDeps): {
     classifyProposal(proposal, drafts[proposal.id], {
       plan,
       isMerged,
+      depsUnobservable,
       grepAnchorTrue: (anchor) => gitGrepAnchorTrue(deps.root, "origin/main", anchor),
       openProposalIds: new Set([...allIds].filter((id) => id !== proposal.id)),
       isRatified: (id) => isRatifiedInLedger(ledgerLines, id),

@@ -10,6 +10,7 @@ import { dirname } from "node:path";
 import type { MergedResolver, Plan } from "./plan.js";
 import { parseTasksFromYaml, PlanError, unmetDependencies } from "./plan.js";
 import { lintPlan, lintTask } from "./task-linter.js";
+import type { GhFailureReason } from "./status.js";
 
 /** A draft-lint finding: the linter's own {@link "./task-linter.js".LintViolation}s (whose
  *  `check` is a strict LintCheck) PLUS the draft rung's own `draft-parse` finding for a fragment
@@ -261,7 +262,7 @@ export function parseDraftInFlightCache(text: string | undefined): DraftInFlight
 
 // ── The readiness predicate (rule 2, policy-as-data) ───────────────────────────────────────
 
-export type FailingPredicate = "drafted" | "deps_merged" | "evidence_anchors" | "lint_clean" | "no_conflict";
+export type FailingPredicate = "drafted" | "deps_merged" | "deps_observable" | "evidence_anchors" | "lint_clean" | "no_conflict";
 
 export interface PredicateFailure {
   predicate: FailingPredicate;
@@ -317,6 +318,28 @@ export interface ReadinessContext {
    * fixture/caller that never had a reason to think about drafting-in-flight is unaffected.
    */
   draftSpawnedAt?: (proposalId: string) => string | undefined;
+  /**
+   * W1-T510: the readiness predicate's THIRD value for a dependency's landed-ness. `isMerged`
+   * above is (necessarily — see {@link "./plan.js".MergedResolver}'s own two-valued signature,
+   * untouched by this task) a plain boolean, so it CANNOT itself distinguish "read, and not
+   * merged" from "never actually read" (throttled/auth/transport/truncated — W1-T119's
+   * `indeterminate`). This is that distinction, queried per DEPENDENCY task id: returns the
+   * classified {@link GhFailureReason} when the id's latest GitHub read was indeterminate, or
+   * `undefined` when it was genuinely observed (merged either way, `isMerged`'s answer stands).
+   * OPTIONAL, exactly like {@link isRatified}'s/{@link draftSpawnedAt}'s own optional siblings —
+   * every existing fixture/caller that never had a reason to think about an unobservable read
+   * behaves precisely as before (every id reports observed, so `isMerged`'s verdict is trusted
+   * outright, exactly as pre-W1-T510).
+   *
+   * {@link classifyProposal} consults this for every dependency id `isMerged` reported unmerged:
+   * an id THIS reports unobservable for is NEVER folded into the `deps_merged` dep-unmet
+   * predicate (the read never actually concluded "not merged", so no such claim is made) — it
+   * surfaces instead as its own `deps_observable` predicate naming the classified reason. THE
+   * POLARITY DOES NOT FLIP: an unobservable dep still keeps the proposal out of READY and
+   * `rmd approve` still refuses it — cannot-observe means WAIT (W1-T130), never READY on an
+   * unread dependency. Only WHAT IS SAID changes.
+   */
+  depsUnobservable?: (taskId: string) => GhFailureReason | undefined;
 }
 
 /**
@@ -358,23 +381,47 @@ function mergedPlan(base: Plan, fragment: Plan): Plan {
   return { tasks: [...byId.values()], byId };
 }
 
+/** One dependency `unmetOutsideDeps` found INDETERMINATE rather than genuinely unmerged —
+ *  `pair` mirrors the plain `task->dep` shape the `deps_merged` predicate's own list uses. */
+interface UnobservableDep {
+  pair: string;
+  depId: string;
+  reason: GhFailureReason;
+}
+
 /**
  * Dependency ids a drafted fragment's tasks name OUTSIDE the fragment itself (already
  * merged) that are not (yet) merged. A drafted task depending on a SIBLING task in the
  * SAME fragment is exempt — both land in the same plan PR together, so that is an
  * intra-fragment ordering concern, not an unmet-dependency one.
+ *
+ * W1-T510: `isMerged` is a plain boolean, so a dependency whose GitHub read was actually
+ * INDETERMINATE (throttled/auth/transport/truncated) reports the same `false` as a
+ * genuinely unmerged one — `isMerged` alone cannot tell the two apart. `depsUnobservable`
+ * (per-dep-id, {@link ReadinessContext.depsUnobservable}) resolves that ambiguity: any
+ * unmerged dep it names unobservable is split into `unobservable`, NEVER `unmet` — the
+ * caller must never claim "not merged" about a dependency nobody actually read.
  */
-function unmetOutsideDeps(basePlan: Plan, fragmentPlan: Plan, isMerged: MergedResolver): string[] {
+function unmetOutsideDeps(
+  basePlan: Plan,
+  fragmentPlan: Plan,
+  isMerged: MergedResolver,
+  depsUnobservable?: (taskId: string) => GhFailureReason | undefined,
+): { unmet: string[]; unobservable: UnobservableDep[] } {
   const fragmentIds = new Set(fragmentPlan.tasks.map((t) => t.id));
   const merged = mergedPlan(basePlan, fragmentPlan);
-  const out: string[] = [];
+  const unmet: string[] = [];
+  const unobservable: UnobservableDep[] = [];
   for (const task of fragmentPlan.tasks) {
     for (const dep of unmetDependencies(merged, task, isMerged)) {
       if (fragmentIds.has(dep)) continue;
-      out.push(`${task.id}->${dep}`);
+      const pair = `${task.id}->${dep}`;
+      const reason = depsUnobservable?.(dep);
+      if (reason) unobservable.push({ pair, depId: dep, reason });
+      else unmet.push(pair);
     }
   }
-  return out;
+  return { unmet, unobservable };
 }
 
 function blockingLintMessages(basePlan: Plan, fragmentPlan: Plan): string[] {
@@ -447,9 +494,20 @@ export function classifyProposal(
   if ("error" in fragment) {
     reasons.push({ predicate: "lint_clean", detail: `draft-unclean: fragment failed to parse — ${fragment.error}` });
   } else {
-    const unmet = unmetOutsideDeps(ctx.plan, fragment.plan, ctx.isMerged);
+    const { unmet, unobservable } = unmetOutsideDeps(ctx.plan, fragment.plan, ctx.isMerged, ctx.depsUnobservable);
     if (unmet.length > 0) {
       reasons.push({ predicate: "deps_merged", detail: `dep-unmet: ${unmet.join(", ")} not merged` });
+    }
+    // W1-T510: an unobservable dep is NEVER folded into `dep-unmet` above — it names the
+    // classified reason instead of accusing an unread dependency of being unmerged. Still an
+    // AND-clause failure (the proposal stays NOT READY — cannot-observe means wait, W1-T130),
+    // just an honest one.
+    if (unobservable.length > 0) {
+      const detail = unobservable.map((u) => `${u.depId} (${u.reason})`).join(", ");
+      reasons.push({
+        predicate: "deps_observable",
+        detail: `deps-unobservable: ${detail} — GitHub could not be read, this is not a claim that it is unmerged`,
+      });
     }
     const blocking = blockingLintMessages(ctx.plan, fragment.plan);
     if (blocking.length > 0) {
