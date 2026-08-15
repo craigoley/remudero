@@ -202,6 +202,12 @@ test("dispatchFix REFUSES a synthetic PR whose head claims another task, before 
       // `dispatchFix` now asks for `headRefName,body` in ONE call (never two `gh pr view`s).
       'if (f && f.includes("headRefName")) process.stdout.write(JSON.stringify({ headRefName: "run-W1-T999-1785600000000", body: "" }));',
       'else if (f === "state") process.stdout.write(JSON.stringify({ state: "OPEN" }));',
+      // W1-T511: `ghLiveState` reads live PR state over REST now (`gh api repos/{o}/{r}/pulls/{n}`),
+      // not `gh pr view --json state`. Without this arm the read falls through to the `{}` default,
+      // `prStateFromRest` folds that to NOT-OPEN, and the refusal under test never runs — the run
+      // stands down at `sweep.fix.not_open` instead. REST reports an open PR as
+      // `{state:"open",merged:false}`, which is what that fold expects.
+      'else if (a[0] === "api" && typeof a[1] === "string" && /^repos\\/[^/]+\\/[^/]+\\/pulls\\/\\d+$/.test(a[1])) process.stdout.write(JSON.stringify({ state: "open", merged: false }));',
       'else process.stdout.write("{}");',
       "",
     ].join("\n"),
