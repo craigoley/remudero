@@ -1,0 +1,93 @@
+- id: W1-T517
+  title: "two jobs run the same test glob on one head and disagree, and nothing reads the disagreement — coverage-ratchet failed #1886 on a file its diff never touched while ci passed the same suite on the same sha, and the retry re-measured the same process instead of a second environment"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60
+  risk: medium
+  rationale: "MEASURED ON #1886 (head ad5904c, 2026-08-15). `coverage-ratchet` failed on
+    test/daemon.test.ts's W1-T356 orphan-sweep wiring test — A FILE THAT DIFF DOES NOT TOUCH
+    (its three paths are src/lib/status.ts, src/lib/serve.ts and a new suite) — while the `ci`
+    job ran to `conclusion: success` ON THE SAME HEAD SHA. Re-running the failed job alone
+    cleared it. `remudero-review` had already posted PASS with 4 criteria substantiated, and
+    every other check was green, so ONE job's disagreement with its own sibling held the PR.
+    THE RETRY CANNOT SEE THIS, AND THAT IS THE MECHANISM RATHER THAN AN OVERSIGHT.
+    scripts/test-with-retry.mjs re-runs THE WHOLE COMMAND ONCE, in the same job, on the same
+    runner, moments later — so it varies the INPUT (a second attempt) and not the ENVIRONMENT.
+    CLAUDE.md's own (e) clause names this exact shape: an environmental defect reproduces
+    exactly, so agreement between two readings taken the same way is one measurement performed
+    twice. `FLAKE-RETRY: retry ALSO failed` is what let a flake read as a hard failure.
+    THE SUITES ARE THE SAME SET, AND THE DIFFERENCE THAT REMAINS IS THE REASON THIS REPORTS
+    RATHER THAN CONCLUDES. Both jobs run the glob `test/**/*.test.ts` through
+    scripts/test-with-retry.mjs — the coverage-ratchet step's own name says it 'runs the same
+    test/**/*.test.ts glob under coverage'. But `ci` runs `npm run test:ci`, which imports
+    ./test/setup/tmp-hygiene.ts, and the coverage step does NOT import it, adding
+    --enable-source-maps --experimental-test-coverage instead. So the TEST SET is identical and
+    the EXECUTION ENVIRONMENT is not: temp-dir creation is unwrapped and unswept on the coverage
+    side, and timings differ by an order of magnitude (the W1-T356 test took 5716ms there).
+    A disagreement is therefore strong evidence of instability and NOT proof of noise — a
+    coverage-only or hygiene-only failure is a real signal about that environment.
+    THE CHEAPER FIX WAS CHECKED FIRST AND IS STRUCTURALLY REFUSED. HOST_PARITY_BASELINE
+    (src/lib/host-parity.ts) ALREADY NAMES this very test — 'the three known whole-suite flakes
+    (test/worker-containment, the W1-T356 wiring suite, the lint-plan --base/--all byte-identity
+    test)' — and in the same breath forbids putting it there: 'a flake is not a divergence and
+    must not be declared as one', stated twice in that file. So the known flake lives in a prose
+    comment with no machine-readable home, which is precisely why nothing can act on it."
+  design: |
+    (i) a pure function over the check-runs already fetched for a head: given the per-job
+    outcomes, report the SIBLING DISAGREEMENTS — jobs that ran and reached opposite conclusions
+    on the same sha. Pure, no I/O, no network: the caller supplies the rollup it already holds,
+    the way every other advisory in this repo takes its evidence as an argument.
+    (ii) IT REPORTS, IT DOES NOT DECIDE. No auto-merge, no re-run, no stand-down, no gate. Both
+    contexts are required and enforce_admins is on; a rung that merged past a red required check
+    would be strictly worse than the defect. The output is one line naming the two jobs, the
+    sha, and the failing test — the thing a human or the fix rung can act on and cannot see today.
+    (iii) THE VERDICT IS 'DISAGREEMENT', NOT 'FLAKE', and the rationale's instrumentation
+    difference is why. Calling it a flake would assert the two environments are equivalent when
+    the coverage side omits tmp-hygiene; naming the disagreement leaves the judgement where the
+    evidence actually supports it.
+    (iv) FALSIFIER, BOTH DIRECTIONS: a head where one job passed and a sibling failed yields a
+    disagreement naming both jobs (a detector that reported nothing fails this), AND a head where
+    every job failed yields none (a detector that fired on any red would pass the first and fail
+    this — the false-positive containment). A head with a single job cannot disagree with itself.
+    (v) NOT IN SCOPE, each for a stated reason: re-running the failed job (an action, and this
+    task is the report that would justify one); scripts/test-with-retry.mjs, whose same-process
+    retry is the mechanism named above but whose fix is a second ENVIRONMENT and a larger change;
+    HOST_PARITY_BASELINE, which refuses flakes by its own contract; a flake REGISTRY, which would
+    need a list somebody maintains where this needs none; and the ci/coverage-ratchet
+    instrumentation gap itself, which is a real finding this task only has to survive, not close.
+  acceptance:
+    - claim: "a head whose jobs disagree is reported with both job names"
+      proof: "unit test: a head where one job passed and a sibling failed is reported as a disagreement"
+    - claim: "a head whose jobs all failed yields no disagreement, so the check cannot fire on a real red"
+      proof: "unit test: a head where every job failed yields no disagreement"
+    - claim: "the report names the disagreement rather than asserting the failure was noise"
+      proof: "unit test: the report names a disagreement and never claims the run was a flake"
+  origin: oper#flake-cross-check-2026-08-15
+  plan_refs: ["W1-T255", "W1-T356"]
+  files: [src/lib/host-parity.ts, test/host-parity.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — the function is a pure fold over an outcome list, decidable from fixtures
+    with no spawn, no network and no runner. risk:medium is Rule 19's SPAN and it is honest:
+    subsystemsOf folds a .test basename onto its source, so src/lib/host-parity.ts and
+    test/host-parity.test.ts are ONE subsystem, and the blast radius matches — one new exported
+    predicate plus its tests, adding no import to any other module and changing no existing
+    behaviour. FILES DERIVED BY INVOCATION, NOT BY GUESS: host-parity.ts is where this repo
+    already reasons about a test outcome that is not a defect, and it is the file that already
+    names this very flake in prose, so the new predicate joins the module that owns the question
+    rather than opening a new one. NOTHING under scripts/ or .github/ is declared because clause
+    (v) puts the retry script and the workflow out of scope; if an implementer concludes the
+    predicate belongs at a call site instead, THIS SHARD MUST BE AMENDED TO DECLARE THAT PATH
+    FIRST rather than overrunning — #1869 shipped a 22-file overrun against a two-path
+    declaration. PROOF NOTES: all three proofs are the NAME-FILTERED `unit test:` form, never the
+    whole-file path form, so each names the behaviour it proves rather than a file that would pass
+    on any test in it. Each title was verified to match ZERO files today via `grep -rlF` over
+    test/, against a control string matching one, so every one discriminates head from base. Each
+    is plain prose under 100 characters with no comma and no regex metacharacter, so
+    looksLikeScenarioNarrative does not fire and proofNameResolutionViolations cannot either.
+    Zero candidates today is the legitimate forward reference for an unimplemented task; what
+    must hold now is that the proofs PARSE. NO depends_on: the check-run rollup, host-parity.ts
+    and its suite are all on main at 3cac8ce."

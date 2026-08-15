@@ -426,6 +426,30 @@ export function fetchSinglePrRest(
   };
 }
 
+/**
+ * W1-T511: `ghLiveState`'s (run-task.ts) REST substitute — ONE fetch, no rollup.
+ *
+ * WHY NOT {@link fetchSinglePrRest}. That function ALSO fetches the head sha's two rollup
+ * endpoints (`checkRunsRestArgs` + `combinedStatusRestArgs`) for callers that need
+ * `statusCheckRollup`. The post-review disposition this replaces reads exactly ONE field —
+ * `state` — so paying for a rollup nobody asked for would triple the request cost of a call whose
+ * entire point is staying cheap on the budget that is NOT the one exhausted. This function issues
+ * `singlePrRestArgs` and nothing else, then hands the row to {@link prStateFromRest} — the
+ * composition design (i) describes: fold REST's `.state` with `.merged`/`.merged_at` into the
+ * same three-valued OPEN/CLOSED/MERGED token `gh pr view --json state` (GraphQL) already returned,
+ * so `terminalStateReason` and every other consumer of the token cannot tell which transport
+ * served it.
+ *
+ * `statusCheckRollup` reads are UNTOUCHED by this function and by this task (design (iii)): a
+ * caller that also needs the rollup still goes through {@link fetchSinglePrRest} or the existing
+ * `gh pr view --json statusCheckRollup` GraphQL reads elsewhere — moving those is explicitly out
+ * of scope here.
+ */
+export function liveStateFromRest(owner: string, repo: string, prNumber: number, fetch: GhApiFetcher): string {
+  const row = fetch(singlePrRestArgs(owner, repo, prNumber)) as RestPullRow;
+  return prStateFromRest(row);
+}
+
 /* ────────────────────────────────────────────────────────────────────────────────────────────
  * THE BOARD GATEWAY'S ENUMERATION (W1-T265) — the SECOND consumer of this module.
  *
