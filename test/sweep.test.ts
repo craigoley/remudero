@@ -615,6 +615,72 @@ test("W1-T196 acceptance 4 — an attributable PR with a genuine block still esc
   assert.equal(deps.escalated[0].question.taskId, "W1-D");
 });
 
+// ── W1-T514: the blocked-ambiguous dedup set is SHA-KEYED, exactly like every ──
+//    sibling arm (`armed`/`fixed`/`depReviewed`) — PR-number-only let one
+//    `acted:true` line at head A silence a genuinely NEW block at a later head
+//    B forever, making `escalate()`'s own head-aware composite key (W1-T195)
+//    unreachable for its intended beneficiary.
+
+test("W1-T514: a new head re-earns its own escalation", async () => {
+  const shared = ledgerPath();
+  const first = fakeDeps({ ledgerPath: shared });
+  await runSweep([strikesExhaustedPr()], first);
+  assert.equal(first.escalated.length, 1, "escalates on the first head");
+
+  // The SAME PR, re-dispositioned blocked-ambiguous at a DIFFERENT head sha.
+  const secondHead: OpenPrView = { ...strikesExhaustedPr(), headSha: "cccc333" };
+  const second = fakeDeps({ ledgerPath: shared });
+  await runSweep([secondHead], second);
+  assert.equal(
+    second.escalated.length,
+    1,
+    "a new head must re-earn its own escalation — the sha-keyed sibling arms already work this way",
+  );
+});
+
+test("W1-T514: the same head still escalates only once", async () => {
+  const shared = ledgerPath();
+  const first = fakeDeps({ ledgerPath: shared });
+  await runSweep([strikesExhaustedPr()], first);
+  assert.equal(first.escalated.length, 1, "escalates on the first pass");
+
+  // The SAME PR at the SAME head, re-dispositioned blocked-ambiguous again.
+  const second = fakeDeps({ ledgerPath: shared });
+  await runSweep([strikesExhaustedPr()], second);
+  assert.equal(
+    second.escalated.length,
+    0,
+    "a held condition at an UNCHANGED head must not storm — same key, still deduped",
+  );
+});
+
+test("W1-T514: the escalation carries the head it was raised against", async () => {
+  const deps = fakeDeps();
+  await runSweep([strikesExhaustedPr()], deps);
+  assert.equal(deps.escalated.length, 1);
+  assert.equal(
+    deps.escalated[0].pr.headSha,
+    strikesExhaustedPr().headSha,
+    "the PR passed to escalate() carries its head sha — the real wiring (run-task.ts) reads " +
+      "exactly this field into escalate()'s own headSha dedup dimension (W1-T195)",
+  );
+});
+
+test("W1-T514: an unattributable filing still stands down", async () => {
+  const deps = fakeDeps();
+  const summary = await runSweep([unattributableFilingPr()], deps);
+  assert.equal(summary.byDisposition["blocked-ambiguous"], 1);
+  assert.equal(
+    deps.escalated.length,
+    0,
+    "a plan-filing PR with no Remudero-Task trailer stands down (W1-T196) — the sha-keyed dedup " +
+      "change must not disturb the unattributable-filing carve-out, which is checked BEFORE it",
+  );
+  const disposed = readLedgerLines(deps.ledgerPath).filter((l) => l.step === "sweep.disposed");
+  assert.equal(disposed[0].acted, false);
+  assert.match(String(disposed[0].stand_down_reason), /task id unresolved/);
+});
+
 // W1-T456 (DEFECT B): row 6 (`reviewState === "failure" && unmetCriteria.length > 0` ->
 // blocked-fixable) ALREADY routes a task-id-less PR correctly — this task's own gap was purely
 // that `buildOpenPrViews` (run-task.ts) never populated `unmetCriteria` for a filing PR at all,

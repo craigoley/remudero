@@ -479,7 +479,17 @@ function credFixture(offsetMs: number): string {
 /** Every flag the END-TO-END VERIFIED invocation carries. Dropping any one must fail a test. */
 const REQUIRED_FLAGS: ReadonlyArray<{ flag: string; why: string }> = [
   { flag: "--restart=on-failure:5", why: "exit 0 is a deliberate stop and must not restart" },
-  { flag: "--privileged", why: "the bwrap sandbox the worker settings require" },
+  // W1-T508: `--privileged` IS GONE, AND THE FOUR FLAGS BELOW ARE WHAT REPLACED IT. The old entry
+  // recorded it as "the bwrap sandbox the worker settings require", which read as a CAPABILITY
+  // grant — it never was: `CapEff` reads all-zero under every combination tried, `--privileged`
+  // included, because a uid-1000 process holds nothing a bounding set contains. What bwrap
+  // actually needs is CONFINEMENT relaxed (seccomp, apparmor, masked /proc paths), and that is
+  // exactly what these four express — with capabilities DROPPED rather than granted wholesale.
+  // Each is listed separately on purpose: this list exists so that dropping ANY ONE fails a test.
+  { flag: "--cap-drop ALL", why: "the replacement is narrower than --privileged, not equivalent to it" },
+  { flag: "--security-opt seccomp=unconfined", why: "bwrap needs the syscalls seccomp masks" },
+  { flag: "--security-opt apparmor=unconfined", why: "apparmor refuses the unshare bwrap performs" },
+  { flag: "--security-opt systempaths=unconfined", why: "a masked /proc breaks the sandbox probe" },
   { flag: "--user 1000:1000", why: "claude refuses bypassPermissions as uid 0" },
   { flag: "-e GH_TOKEN=", why: "the gh credential helper reads it at call time" },
   { flag: "-e RMD_RESTART_THROTTLE_S=", why: "docker caps restart COUNT, never RATE (#1645)" },
