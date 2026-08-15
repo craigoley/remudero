@@ -20,5 +20,6 @@ raw: "RUN-LANE PROSE PROOFS CANNOT SELF-MERGE — an implement/fix task whose pl
   rule-15 split requirement."
 attachments: []
 origin: cli
-status: new
+status: rejected
 proposal_pr: null
+summary: null
