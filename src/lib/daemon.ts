@@ -1344,7 +1344,7 @@ function startInFlightTicker(
   deps: DaemonDeps,
   pollIntervalMs: number,
   log: (step: string, extra?: Record<string, unknown>) => void,
-  phase: "dispatch" | "retro",
+  phase: "dispatch" | "retro" | "sweep",
 ): { stop: () => Promise<void> } {
   let active = true;
   const ticker = deps.sweepLight
@@ -2085,11 +2085,32 @@ export async function runDaemon(
     // relaunches, which re-runs the same sweep and throws again. A reconciler
     // that cannot reach GitHub must cost the daemon one logged iteration, never
     // its life.
+    //
+    // W1-T513 — THE THIRD TICKER CALL SITE. `deps.sweep()` (the full reconciler, over EVERY
+    // open PR, sequentially) was the one remaining long tick occupant with no ticker of its
+    // own: retro and dispatch (below) both already tick `sweepLight` while they run, so a
+    // green, review-eligible PR still posted within one poll interval during either of those
+    // — but a slow full sweep (a real `gh` walk over every open PR) starved the light pass for
+    // its own entire duration, with no ticker running at all. Wrapping it here was UNSAFE
+    // before this same task lifted {@link "./sweep.js".inFlightReviewKeys} out of `runSweep`
+    // into a module-level, cross-call mutex: without that, this ticker's own `sweepLight()`
+    // ticks would run CONCURRENTLY with `deps.sweep()`'s own `runSweep` walk and could both
+    // decide to post a review for the same PR at once (the exact race
+    // `test/daemon.test.ts`'s "TODAY's post-review dedup is a ledger READ, not a mutex"
+    // fixture demonstrated). With that mutex now shared process-wide, the two concurrent
+    // callers arbitrate the SAME `${taskId}@${headSha}` key correctly, so ticking here is safe
+    // exactly like the retro/dispatch sites are. Same discipline as both: cleared on every
+    // exit path via `finally`, a `sweepLight()` already in flight is allowed to finish rather
+    // than aborted, and a ticker hiccup is ledgered (`daemon.sweep_light.failed`) but never
+    // propagated.
     if (deps.sweep) {
+      const stopSweepTicker = startInFlightTicker(deps, pollIntervalMs, log, "sweep").stop;
       try {
         await deps.sweep();
       } catch (e) {
         log("daemon.sweep.failed", { error: String((e as Error)?.message ?? e) });
+      } finally {
+        await stopSweepTicker();
       }
     }
 

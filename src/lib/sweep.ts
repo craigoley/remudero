@@ -2218,6 +2218,33 @@ const ZERO_COUNTS = (): Record<Disposition, number> => ({
 });
 
 /**
+ * W1-T513 — THE CROSS-CALL REVIEW-KEY MUTEX. Before this task, `claimedReviewKeys` (below) was
+ * declared FRESH INSIDE every `runSweep` call, so it only ever arbitrated between PRs handled by
+ * that ONE call — real protection for `runSweepLightPass`'s own concurrent per-PR calls (W1-T473),
+ * but no protection at all between two SEPARATE `runSweep` invocations running at the same time:
+ * the daemon's full `deps.sweep()` walk racing a `sweepLight()` tick, or two overlapping light
+ * passes fired from two different `startInFlightTicker` instances. `test/daemon.test.ts`'s own
+ * "TODAY's post-review dedup is a ledger READ, not a mutex" fixture demonstrated the resulting
+ * race directly: two concurrent `runSweep([pr], …)` calls over the identical PR both scheduled
+ * `postReview` for it, because neither call's `Set` ever saw the other's claim.
+ *
+ * MODULE-SCOPED SO IT IS SHARED BY EVERY CALLER IN THE SAME PROCESS, WITHOUT NEW WIRING: `rmd
+ * sweep`, the daemon's full-sweep hook, and its light-sweep hook (`buildSweepHook`/
+ * `buildSweepLightHook`, `src/run-task.ts`) already build a FRESH `SweepDeps` object every call
+ * but run in the SAME process — a module-level `Set` is therefore visible to all of them with no
+ * change needed outside this file.
+ *
+ * NOT PROCESS-GLOBAL-FOREVER: a key is added the instant it is claimed (synchronously, no
+ * `await` between the check and the add — unchanged from before this task) and REMOVED the
+ * instant that claim's fate is decided, in `runSweep` below — either the scheduled `postReview`
+ * call settles (success or failure) or the job stands down this pass (review budget exhausted).
+ * A key never survives past the single in-flight attempt that claimed it, so a LEGITIMATE later
+ * pass over the same still-unreviewed head is never permanently locked out — only a genuinely
+ * CONCURRENT second claim for a key already in flight is refused.
+ */
+const inFlightReviewKeys = new Set<string>();
+
+/**
  * THE SHARED ENTRY POINT (acceptance 4): BOTH `rmd sweep` and the daemon poll
  * loop call this ONE function. Re-derives every open PR's disposition fresh, takes
  * the ONE gated action per PR (deduped against prior actions for idempotence),
@@ -2266,9 +2293,9 @@ export async function runSweep(
   let actionsFailed = 0;
   let noneCount = 0;
 
-  // ── W1-T473 — REVIEW CONCURRENCY BUDGET STATE ──────────────────────────────
+  // ── W1-T473/W1-T513 — REVIEW CONCURRENCY BUDGET STATE ──────────────────────
   // `claimedReviewKeys` is the REAL mutual exclusion concurrency needs and
-  // never had before this task: `prior.postReviewed` (built once, above, from
+  // never had before W1-T473: `prior.postReviewed` (built once, above, from
   // the ledger) is a snapshot taken BEFORE this pass's own postReview calls
   // can write anything back — safe under a single-threaded walk (no second
   // reader exists between that read and a ledger write), unsafe the moment
@@ -2276,8 +2303,16 @@ export async function runSweep(
   // updated SYNCHRONOUSLY, in the loop below, before any `postReview` call is
   // even scheduled — no `await` ever separates a key's check from its claim,
   // so two PRs sharing a `${taskId}@${headSha}` key can never both schedule a
-  // concurrent call for it (the acceptance-1 falsifier this task closes).
-  const claimedReviewKeys = new Set<string>();
+  // concurrent call for it.
+  //
+  // W1-T513: now the module-level {@link inFlightReviewKeys}, not a fresh
+  // per-call `Set` — a fresh Set only ever arbitrated between PRs inside THIS
+  // one call, never between two SEPARATE, genuinely concurrent `runSweep`
+  // calls (the daemon's full sweep racing a light-pass tick, or two
+  // overlapping light passes). Sharing the module-level Set closes that gap
+  // with no change to this function's own claim/stand-down logic below —
+  // only WHERE the Set lives moved, never HOW it is consulted.
+  const claimedReviewKeys = inFlightReviewKeys;
   // Reviews eligible this pass, deferred out of the main walk so they can run
   // CONCURRENTLY with each other (bounded below), rather than one at a time
   // inside it — see `reviewLanes` after the loop.
@@ -2286,6 +2321,11 @@ export async function runSweep(
     pr: OpenPrView;
     reason: string;
     question: ClarificationQuestion | undefined;
+    // W1-T513: carried alongside the job so both release sites (deferred-to-next-pass,
+    // below, and the runNow lane below that) can release the SAME key they claimed —
+    // recomputing it from `pr` a second time would work too, but carrying it removes any
+    // chance of the two computations drifting apart.
+    reviewKey: string;
   }> = [];
 
   /**
@@ -2718,12 +2758,17 @@ export async function runSweep(
     }
 
     if (deferredReview) {
-      // W1-T473 — THE MUTEX: claim (or refuse) this PR's review key
+      // W1-T473/W1-T513 — THE MUTEX: claim (or refuse) this PR's review key
       // SYNCHRONOUSLY, right here, with no `await` between the `has` check
-      // and the `add` — that is the entire guarantee two PRs sharing a
-      // `${taskId}@${headSha}` key can never both queue a concurrent
-      // `postReview` call for it (acceptance 1). A duplicate stands down
-      // exactly like any other dedup, never a crash or a silent drop.
+      // and the `add` — that is the entire guarantee two PRs (or, since
+      // W1-T513, two genuinely CONCURRENT `runSweep` calls anywhere in this
+      // process) sharing a `${taskId}@${headSha}` key can never both queue a
+      // concurrent `postReview` call for it. A duplicate stands down exactly
+      // like any other dedup, never a crash or a silent drop. Released in
+      // EXACTLY one of two places once this claim's fate is decided: the
+      // `deferredToNextPass` loop below (budget exhausted, never scheduled)
+      // or the `runNow` lane's own `finally` further down (scheduled and
+      // settled) — never both, and never neither.
       const reviewKey = `${pr.taskId ?? ""}@${pr.headSha}`;
       if (claimedReviewKeys.has(reviewKey)) {
         finalizeDisposition(
@@ -2740,7 +2785,7 @@ export async function runSweep(
         );
       } else {
         claimedReviewKeys.add(reviewKey);
-        pendingReviews.push({ index: prIndex, pr, reason, question });
+        pendingReviews.push({ index: prIndex, pr, reason, question, reviewKey });
       }
       continue;
     }
@@ -2772,7 +2817,15 @@ export async function runSweep(
   // "post-review" again next pass, typically within one poll interval
   // (measured ~60s median). Queueing would survive past the pass that built
   // it; blocking would risk this tick outrunning its own interval.
+  //
+  // W1-T513: also RELEASES this job's `reviewKey` from the module-level
+  // {@link inFlightReviewKeys} mutex — it was claimed above to keep two
+  // callers from BOTH queueing it this pass, but it is never actually run
+  // this pass, so holding the claim any longer would wrongly block a
+  // legitimately concurrent NEXT pass (or a concurrent full sweep) from
+  // picking it up.
   for (const job of deferredToNextPass) {
+    claimedReviewKeys.delete(job.reviewKey);
     finalizeDisposition(
       job.index,
       job.pr,
@@ -2800,22 +2853,36 @@ export async function runSweep(
     runNow.map(async (job) => {
       let acted = true;
       let actionError: string | undefined;
-      if (postReview) {
-        try {
-          await postReview(job.pr);
-        } catch (e) {
-          acted = false;
-          actionError = String((e as Error)?.message ?? e);
-          appendLine(deps.ledgerPath, {
-            run_id: deps.runId,
-            task_id: job.pr.taskId ?? "SWEEP",
-            step: "sweep.action_failed",
-            pr_number: job.pr.prNumber,
-            pr_url: job.pr.prUrl,
-            disposition: "post-review",
-            error: actionError,
-          });
+      try {
+        if (postReview) {
+          try {
+            await postReview(job.pr);
+          } catch (e) {
+            acted = false;
+            actionError = String((e as Error)?.message ?? e);
+            appendLine(deps.ledgerPath, {
+              run_id: deps.runId,
+              task_id: job.pr.taskId ?? "SWEEP",
+              step: "sweep.action_failed",
+              pr_number: job.pr.prNumber,
+              pr_url: job.pr.prUrl,
+              disposition: "post-review",
+              error: actionError,
+            });
+          }
         }
+      } finally {
+        // W1-T513: release `job.reviewKey` from the module-level {@link
+        // inFlightReviewKeys} mutex the instant this attempt SETTLES —
+        // success or failure alike, and BEFORE `finalizeDisposition`, which
+        // only ledgers/logs and never gates a future pass. On success
+        // `postReview` has already durably written the "reviewed" state a
+        // later pass's own fresh ledger read will see (so it never even
+        // reaches this claim again); on failure nothing was written, so a
+        // later pass legitimately retries — either way, holding this claim
+        // any longer than the attempt itself would only block work, never
+        // protect any.
+        claimedReviewKeys.delete(job.reviewKey);
       }
       finalizeDisposition(job.index, job.pr, "post-review", job.reason, job.question, acted, false, actionError, undefined, undefined);
     }),
@@ -2870,6 +2937,13 @@ export async function runSweep(
  * per-pass heartbeat `runSweep`'s own doc explains at length (a healthy quiet pass and a
  * blind/dead one must stay distinguishable) — see `test/run-task.test.ts`'s "runs the
  * restricted light sweep over an empty PR set" fixture, which pins exactly this.
+ *
+ * W1-T513 ADDENDUM: "no PR is ever handed to more than one of these concurrent calls" above is
+ * true only WITHIN one `runSweepLightPass` invocation's own `openPrs.map` — it says nothing
+ * about a SECOND, separately-fired call (another light pass tick, or the daemon's full
+ * `deps.sweep()`) running at the same time over the SAME PR. That cross-call case is exactly
+ * what {@link inFlightReviewKeys} now closes, module-wide, inside `runSweep` itself — this
+ * function needed no change of its own to inherit that protection.
  */
 export async function runSweepLightPass(
   openPrs: OpenPrView[],
