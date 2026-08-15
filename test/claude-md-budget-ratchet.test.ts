@@ -42,7 +42,7 @@ test("claude-md-budget-ratchet CLI: file AT the cap -> zero exit (the gate ACCEP
   assert.match(result.stdout, /OK -- .* is at or under the size budget cap/);
 });
 
-test("claude-md-budget-ratchet CLI: file OVER the cap -> non-zero exit, names the overage in bytes (acceptance criteria 1 and 3)", () => {
+test("the claude-md budget failure names the overage in bytes (file OVER the cap -> non-zero exit, acceptance criteria 1 and 3)", () => {
   const result = run(SAMPLE, "over-cap-baseline.json");
   assert.notEqual(result.status, 0, result.stdout + result.stderr);
   assert.match(result.stderr, /BLOCKED/);
