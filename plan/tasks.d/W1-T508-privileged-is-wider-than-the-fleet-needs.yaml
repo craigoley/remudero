@@ -1,4 +1,4 @@
-- id: W1-T505
+- id: W1-T508
   title: "the fleet's container runs --privileged and does not need it — three security-opt relaxations with zero capabilities pass the same containment preflight, while --privileged additionally exposes all 41 capabilities in the bounding set and 16 host block devices including the disk holding the token and the ledger"
   repo: remudero
   depends_on: []
