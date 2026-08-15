@@ -7,7 +7,15 @@
   risk: high
   principles: {tdd: strict}
   budget_usd: 25.00
-  rationale: "MEASURED ON THE AZURE HOST (`Remudero`), 2026-08-15. Ledger corpus per form: `.gz`
+  rationale: "**RESOLVED 2026-08-15 BY OPERATOR RULING: OPTION (D) — NOTHING IS BUILT.** The
+    measurement below stands and is not withdrawn; what changed is that design (ii)'s central
+    sentence was checked against the function body and found FALSE, which inverts the option it was
+    steering away from. See design's RULING clause for the correction and for why (A) and (C) lose.
+    THIS SECTION IS THE RECORD OF HOW THE PROBLEM WAS READ BEFORE THAT CHECK, AND IS DELIBERATELY
+    LEFT INTACT — per MASTER-PLAN §8A the fix for a wrong sentence is to correct it in place, not to
+    delete the analysis that carried it.
+
+    MEASURED ON THE AZURE HOST (`Remudero`), 2026-08-15. Ledger corpus per form: `.gz`
     **0 files**, plain 2, live 1 — COVERAGE control on a step present in every non-empty form
     (`run.start`): gz 0 / plain 128 / live 85, so the gz zero is an empty form, not a missed glob.
     Union, full-line deduped: **31,288 rows** spanning **161.6 hours**.
@@ -47,7 +55,57 @@
       fix rung (`fix.dispatch`->`fix.done`)           n=17  median  0.0 min                        (bookkeeping rows, not the work)
     **THE IMPLEMENT RUN IS THE ONLY MULTI-MINUTE RUNG, AND IT IS THE ONE ALREADY WRAPPED** — sweeps
     land inside 38 of its 68 spans. The reviewer rungs are sub-minute and are NOT the problem."
-  design: "(0) **WHAT IS NOT WRONG — RECORD IT SO NOBODY RE-INVESTIGATES IT.** Reviews are FAST:
+  design: "**RULING (2026-08-15): THIS TASK RESOLVES AS OPTION (D). NOTHING IS BUILT. THE FOUR
+    OPTIONS BELOW ARE KEPT AS THE RECORD OF WHAT WAS CONSIDERED; THIS CLAUSE SAYS WHICH WON AND
+    WHY.** Do not re-open it by re-proposing (A), (B) or (C) — each is refused here on evidence,
+    with the check that refuses it named so a future reader can re-run it rather than re-argue it.
+
+    **CORRECTION 1 — DESIGN (ii) BELOW IS FALSE, AND IT INVERTS THE TASK. RE-DERIVED FROM THE
+    FUNCTION BODY, NOT FROM ITS REPUTATION.** `startInFlightTicker` (`src/lib/daemon.ts`) loops
+    `await deps.sleep(pollIntervalMs)` -> `log(\"daemon.alive\", …)` -> `await deps.sweepLight!()`,
+    and its own doc fixes that ordering in terms: *IT IS LOGGED BEFORE `sweepLight()`, NOT AFTER*.
+    **RUNNING THE LIGHT SWEEP IS THE TICKER'S JOB.** It is not a heartbeat with a sweep attached, so
+    (ii)'s *it does not make the sweep run* is wrong and every inference drawn from it is unsafe.
+
+    **AND THREE OF THE FOUR LONG RUNGS ALREADY CARRY IT, SO OPTION (B) IS MOSTLY SHIPPED.** Implement
+    dispatch takes `startInFlightTicker(deps, pollIntervalMs, log, \"dispatch\")`; retro and
+    auto-triage both reach `startInFlightTicker(deps, pollIntervalMs, log, \"retro\")` through
+    `sweepLightDuringRetro`, which has two call sites — the retro trigger and `deps.runAutoTriage`.
+    **THE ONE UNWRAPPED LONG RUNG IS `deps.sweep()` ITSELF**, awaited bare in the poll loop.
+
+    **AND WRAPPING THAT LAST ONE IS BOTH INCOHERENT AND UNSAFE, WHICH IS WHAT DECIDES THE TASK.** It
+    would run light passes CONCURRENTLY WITH THE FULL SWEEP — sweeping more while already sweeping —
+    and `claimedReviewKeys` is declared inside `runSweep` (`src/lib/sweep.ts`), so it is PER-CALL:
+    two concurrent passes each build their own Set and can post two verdicts for one head. **SO (A)
+    AND (B) COLLAPSE INTO THE SAME DOUBLE-REVIEW RACE, AND THERE IS NOTHING SAFE LEFT TO WRAP.**
+
+    **CORRECTION 2 — THE CADENCE METRIC IS AN UPPER BOUND ON STARVATION, NOT A MEASURE OF IT.**
+    `sweep.pass` is logged at the START of `runSweep`, before the per-PR loop, so an inter-pass gap
+    includes however long that pass spends executing its GATED ACTIONS — a fix dispatch, a real
+    `reviewCommand` with worktree materialisation. **STARVATION AND WORKING ARE THE SAME SHAPE IN
+    THIS METRIC**, and rationale (1) does not separate them.
+    RE-DERIVED ON THE MINI CORPUS (a different host, same code — this host has no route to the Azure
+    ledger). Per-form COVERAGE control: gz 666 files / 4,257,015 rows, plain 4 / 64,663, live 1 /
+    14,147, `run.start` non-zero in all three. Cadence n=**1,896**, **median 63s — IDENTICAL TO
+    AZURE'S 63s**, 82% within 90s, **106 gaps over five minutes**. Classified by what happens LATE in
+    each gap (after one cadence period, so a burst of concurrent pass rows cannot mask a silence):
+    **41 ci wait (6.3h), 2 fix rung (1.2h), 39 other-rows-only (6.0h), and 24 where the SWEEP OR
+    REVIEW WAS STILL WORKING (127.2h).** **GENUINE TICK-HELD TIME IS ~7.5h OF 177.9h — ABOUT 4.2%**,
+    against the 5.6% rationale (1) reports, and the hours that look worst are the sweep working.
+
+    **WHY (A) LOSES, AND THE ORIGINAL BRIEF'S BUDGET PREMISE WAS WRONG.** #1866 is a `chore(plan)`
+    commit that touched one file, its own shard: **W1-T511 IS FILED, NOT BUILT**, and `ghLiveState`
+    (`src/run-task.ts`) still calls `gh pr view --json state` over GraphQL. So design (iv)'s
+    arithmetic is UNCHANGED — 11,213 calls against a 5,000/hour limit, 31 review attempts killed.
+    (A) doubles the heaviest caller to reclaim ~4%, and it cannot even be attempted until
+    `claimedReviewKeys` is lifted out of `runSweep`.
+
+    **WHY (C) LOSES: THERE IS NOTHING LEFT TO BOUND.** `waitForCiGreen` (`src/run-task.ts`) already
+    caps at `maxIters = 60, everySec = 6`. **W1-T382 IS QUEUED AND ARGUES THAT CAP IS A
+    100%-FALSE-POSITIVE BOUND — ALL 21 PRs IT EVER BOOKED AS A CHECK-WAIT TIMEOUT LATER MERGED** —
+    so tightening it makes that defect worse. Cite W1-T382; do not file a second task for it.
+
+    (0) **WHAT IS NOT WRONG — RECORD IT SO NOBODY RE-INVESTIGATES IT.** Reviews are FAST:
     `sweep.post_review.attempt` -> `review.posted` is **median 7.3s, p90 36.6s, n=81**, and the spawned
     half is faster still at median 3.3s (n=34). And they are GENUINELY CONCURRENT — `runSweepLightPass`
     (`src/lib/sweep.ts`) ends `return Promise.all(openPrs.map((pr) => runSweep([pr], deps, policy)))`.
@@ -58,7 +116,9 @@
     anywhere in the tick defers the next `sweepLight` until it returns. `sweepLight` is driven from
     `src/lib/daemon.ts` (18 references there), which is why the tick and the light pass share a thread.
 
-    (ii) **THE CRUX, AND IT IS EASY TO GET BACKWARDS — STATE WHICH PROBLEM ANY FIX SOLVES.**
+    (ii) **SUPERSEDED BY CORRECTION 1 IN THE RULING ABOVE — THE FIRST BOLD SENTENCE OF THIS CLAUSE
+    IS FALSE. KEPT VERBATIM AS THE RECORD OF HOW IT WAS READ BEFORE THE FUNCTION BODY WAS CHECKED.**
+    THE CRUX, AND IT IS EASY TO GET BACKWARDS — STATE WHICH PROBLEM ANY FIX SOLVES.
     `startInFlightTicker` exists because a long dispatch once silenced `daemon.alive` entirely. **IT
     KEEPS THE HEARTBEAT ALIVE. IT DOES NOT MAKE THE SWEEP RUN.** Measurement (3) proves the two are
     already decoupled: the heartbeat wrote 68 rows through the long clusters. **SO EXTENDING THE
