@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -170,4 +170,54 @@ test("taskRecordPath SKIPS an unparseable shard rather than throwing — it may 
 test("taskRecordPath tolerates a missing plan file entirely", () => {
   // An unreadable MONOLITH is the same fail-soft case as an unparseable shard.
   assert.equal(taskRecordPath(join(tmpdir(), "no-such-plan-dir-xyzzy", "tasks.yaml"), "T-ANY"), undefined);
+});
+
+// ── A SHARD THAT VANISHES BETWEEN LISTING AND READING ────────────────────────────────────────
+// `loadPlan` lists `tasks.d/` and then reads each entry, so anything removing a shard in that
+// window used to make the whole load throw. Measured in CI as a FILE-LEVEL crash of whichever
+// suite was reading the plan while `test/task-linter-wiring.test.ts` cleaned up its probe shard —
+// `node --test` parallelises across files and 39 suites read this directory. It is reachable in
+// production too: a filing or a `git checkout` can remove a shard mid-read.
+
+test("a shard listed but gone by the time it is read is SKIPPED, not fatal", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-plan-race-"));
+  const planPath = join(dir, "tasks.yaml");
+  writeFileSync(planPath, "- id: T1\n  title: t1\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n");
+  const shardDir = join(dir, "tasks.d");
+  mkdirSync(shardDir, { recursive: true });
+
+  // A DANGLING SYMLINK is the deterministic stand-in for the race: `readdir` lists it, so it
+  // reaches the read loop exactly as a real shard would, and `readFileSync` then answers ENOENT
+  // exactly as a shard deleted a millisecond earlier does. Deleting a real file before the call
+  // would prove nothing — it would never be listed, so the guard would never be reached.
+  symlinkSync(join(shardDir, "no-such-target.yaml"), join(shardDir, "zzz-vanished.yaml"));
+
+  const plan = loadPlan(planPath);
+  assert.deepEqual(plan.tasks.map((t) => t.id), ["T1"], "the surviving task loads; the vanished shard is simply absent");
+});
+
+test("FALSIFIER: an unreadable shard that STILL EXISTS is still fatal — only ENOENT is forgiven", () => {
+  // Without this, the guard above could be a blanket `continue` that swallowed real corruption.
+  // A DIRECTORY in the slot reads EISDIR, not ENOENT, so it must still throw.
+  const dir = mkdtempSync(join(tmpdir(), "rmd-plan-eisdir-"));
+  const planPath = join(dir, "tasks.yaml");
+  writeFileSync(planPath, "- id: T1\n  title: t1\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n");
+  const shardDir = join(dir, "tasks.d");
+  mkdirSync(join(shardDir, "not-a-file.yaml"), { recursive: true });
+
+  assert.throws(() => loadPlan(planPath), PlanError, "a shard that exists but cannot be read must still fail loud");
+});
+
+test("FALSIFIER: a MALFORMED shard is still fatal — the guard sits before the parse, not around it", () => {
+  // EISDIR above covers the other errnos; this covers the other way a shard can be bad. The guard
+  // is inside the readFileSync catch ONLY, so parseTasksFromYaml is outside it by construction —
+  // asserted rather than argued, because a guard moved one line outward would swallow this too.
+  const dir = mkdtempSync(join(tmpdir(), "rmd-plan-malformed-"));
+  const planPath = join(dir, "tasks.yaml");
+  writeFileSync(planPath, "- id: T1\n  title: t1\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n");
+  const shardDir = join(dir, "tasks.d");
+  mkdirSync(shardDir, { recursive: true });
+  writeFileSync(join(shardDir, "broken.yaml"), "this: [is not: valid\n  yaml at all\n");
+
+  assert.throws(() => loadPlan(planPath), PlanError, "a shard that reads fine but parses badly must still fail loud");
 });

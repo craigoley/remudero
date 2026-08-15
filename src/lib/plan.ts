@@ -339,6 +339,16 @@ export function loadPlan(path: string): Plan {
     try {
       shardText = readFileSync(shardPath, "utf8");
     } catch (err) {
+      // A shard that VANISHED BETWEEN THE LISTING AND THIS READ is a race, not corruption, and
+      // skipping it is the only correct answer — it is not in the plan any more. Throwing here
+      // made `loadPlan` fail whenever anything removed a shard concurrently: measured in CI as a
+      // FILE-LEVEL crash of whichever suite happened to be reading the plan while
+      // `test/task-linter-wiring.test.ts` cleaned up its probe shard, since `node --test`
+      // parallelises across files and 39 suites read this directory. It is reachable in
+      // production too — a filing or a `git checkout` can remove a shard mid-read.
+      // ENOENT ONLY: every other errno (EACCES, EIO, EISDIR) still throws, because those mean the
+      // shard is there and unreadable, which is exactly the corruption this guard must not hide.
+      if ((err as NodeJS.ErrnoException)?.code === "ENOENT") continue;
       throw new PlanError(`cannot read plan shard (${shardPath}): ${String(err)}`);
     }
     for (const t of parseTasksFromYaml(shardText, shardPath)) {
