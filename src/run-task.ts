@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   architectModel,
@@ -4481,8 +4481,66 @@ function commitsAhead(worktreePath: string, base: string): number {
 }
 
 /**
+ * W1-T501 — MAKE THE RECORD PATH MEAN THE WORKER'S TREE, NOT THE ORCHESTRATOR'S.
+ *
+ * THE DEFECT THIS CLOSES. {@link taskRecordPath} resolves against `planPath`, which is the
+ * ORCHESTRATOR's plan file — the daemon's own checkout. Interpolated raw into
+ * {@link taskRecordContextLine}, that handed every worker an absolute path into the one tree it
+ * must not touch, and workers followed it: counting Write/Edit calls only, 12 of 41 surviving
+ * worker transcripts wrote into the daemon's checkout and 7 wrote there exclusively (W1-T404 with
+ * 53, W1-T458 24, W1-T486 22, W1-T500 12, W1-T450 11, W1-T453 10, W1-T456 7). Positive control on
+ * the same query: 29 runs wrote only to their own worktree, so the two populations are
+ * distinguishable and that count is real.
+ *
+ * WHY THE HARM IS NOT LOST WORK. The worker pushes from inside its own sandbox and
+ * `gitPushRunBranch` is a FALLBACK — its guard reads `if (!branchOnOrigin)` with the comment "the
+ * worker itself normally pushes from inside its own sandbox; this fallback runs on whatever the
+ * worktree holds". #1709 merged intact from the 53-parent/0-worktree run, so nothing was being
+ * dropped. The measured harm is the STALENESS PIN: a dirty parent makes
+ * `daemonFreshnessFromService` report `{ stale: false }` — correctly, since a restart provably
+ * cannot clear a dirty tree — so the daemon never exits and never reaches merged code (~2 hours on
+ * 2026-08-14, ~13 hours overnight while origin/main moved 2513d0d -> a0028d7).
+ *
+ * WHY RELATIVE RATHER THAN RE-ANCHORED AT THE WORKTREE. The shard argues three candidates and ranks
+ * none. A relative path is the only one that is correct in BOTH trees and cannot name the wrong one
+ * under either architecture — re-anchoring merely moves which absolute root can be wrong. Every
+ * spawn that carries this line runs with `cwd: worktreePath` (verified in the code path, not from a
+ * process listing: the review spawn's `withTempDir("review", …)` scratch never receives it), so a
+ * repo-relative path resolves inside the worker's own tree by construction.
+ *
+ * FAIL-SOFT, AND IT REFUSES RATHER THAN GUESSES. `taskRecordPath` anchors every answer at
+ * `dirname(planPath)` — it returns `planPath` itself for the monolith, or `<plan dir>/tasks.d/<f>`
+ * for a shard — so the tree root is `dirname(dirname(planPath))`, which is the anchor the
+ * neighbouring `learningsDir` already uses and needs no new plumbing. NOT the module-level
+ * `repoRoot`: that is resolved from `process.cwd()` at import time and is unrelated to an injected
+ * `opts.planPath`. If the relative form would escape that root (`..`) or come back absolute, this
+ * returns `undefined` and
+ * the bullet is OMITTED. Omitting one advisory line is strictly better than emitting a path that
+ * points outside the worker's tree, which is the defect itself.
+ */
+export function workerVisibleRecordPath(
+  planPath: string,
+  recordPath: string | undefined,
+): string | undefined {
+  if (!recordPath) return undefined;
+  if (!isAbsolute(recordPath)) return recordPath; // already tree-relative — nothing to re-anchor
+  // The tree `planPath` LIVES IN, never the module-level `repoRoot`: that one is resolved from
+  // `process.cwd()` at import time, so for an injected `opts.planPath` it names an unrelated tree
+  // and every answer would escape as `../..`. `dirname(planPath)/..` is the same anchor the
+  // neighbouring `learningsDir` already uses.
+  const rel = relative(dirname(dirname(planPath)), recordPath);
+  if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return undefined;
+  return rel;
+}
+
+/**
  * SAY WHERE — the one CONTEXT bullet naming the task's own record on disk, shared by BOTH
  * context paths so neither can drift and the degraded path cannot gain a duplicate.
+ *
+ * THE PATH MUST ALREADY BE WORKER-VISIBLE (W1-T501): callers pass
+ * {@link workerVisibleRecordPath}'s output, never {@link taskRecordPath}'s raw absolute answer.
+ * This function interpolates whatever it is given, so the anchoring decision lives in exactly one
+ * place rather than being re-made at each call site.
  *
  * `recordPath` is {@link taskRecordPath}'s output and is `undefined` when the record cannot be
  * resolved (unreadable/unparseable plan file); that yields `""` here, so an advisory line can
@@ -5579,7 +5637,10 @@ async function runTask(
     // survives `reconObservedToContext`, and that section can be empty. See that function's doc.
     // ONE lookup, both arms: `taskRecordPath` is fail-soft and yields `undefined` rather than
     // throwing, and the helper renders nothing for an undefined path.
-    const recordPath = taskRecordPath(planPath, taskId);
+    // W1-T501: re-anchor to the WORKER's tree before this reaches any prompt. `taskRecordPath`
+    // resolves against the orchestrator's `planPath`, and that absolute answer is what sent
+    // workers writing into the daemon's own checkout.
+    const recordPath = workerVisibleRecordPath(planPath, taskRecordPath(planPath, taskId));
     const reconContext = reconDegradedSubtype
       ? reconDegradedContextNote(reconDegradedSubtype, taskId, recordPath, task.acceptance ?? [])
       : reconObservedToContext(recon, taskId, recordPath);
