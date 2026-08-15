@@ -984,7 +984,7 @@ export function renderShellHtml(
   <div id="up-next-body">
     <!-- W1-T202: starts DISABLED (the safe default -- no write affordance renders armed until a
          client-held write token actually proves out; see probeWriteScope/applyControlStatus). -->
-    <div class="up-next-actions"><button type="button" id="drain-now-btn" data-confirming="false" aria-pressed="false" disabled title="Read-only — enter a write token to enable this action">Drain now</button></div>
+    <div class="up-next-actions"><button type="button" id="drain-now-btn" data-confirming="false" aria-pressed="false" disabled title="Read-only — enter a write token to enable this action">Gather now</button></div>
     <ul id="up-next-list" class="row-list">${skeletonRows(3)}</ul>
   </div>
 </section>
@@ -1751,7 +1751,7 @@ export function renderShellHtml(
     return \`\${rows.length} open\${ago ? \` · oldest \${ago}\` : ""}\`;
   }
   function upNextSummaryText(head) {
-    if (head.length === 0) return "drain queue is empty";
+    if (head.length === 0) return "nothing waiting to gather";
     const more = head.length > 1 ? \` (+\${head.length - 1} more)\` : "";
     return \`next: \${head[0].id}\${more}\`;
   }
@@ -2506,7 +2506,7 @@ export function renderShellHtml(
       html: \`\${statusBadge("queued")}<span class="task-id">\${escapeHtml(c.id)}</span><span class="detail">\${escapeHtml(c.title)} · \${(c.dependsOn ?? []).length} dep(s)</span><button type="button" class="up-next-run-btn"\${writeGateAttrs()} data-task-id="\${escapeHtml(c.id)}" data-confirming="false" aria-pressed="false">Run</button>\${rowChevronHtml()}\`,
       taskId: c.id,
     }));
-    reconcileRows(document.getElementById("up-next-list"), rows, "drain queue is empty");
+    reconcileRows(document.getElementById("up-next-list"), rows, "nothing waiting to gather");
     finishSectionRender("up-next", head.length === 0, () => upNextSummaryText(head));
     return new Set(head.map((c) => c.id));
   }
@@ -3308,7 +3308,7 @@ export function renderShellHtml(
     btn.dataset.confirming = "false";
     btn.setAttribute("aria-pressed", "false");
     btn.classList.remove("confirming");
-    btn.textContent = "Drain now";
+    btn.textContent = "Gather now";
     clearTimeout(drainConfirmTimer);
   }
   document.getElementById("drain-now-btn").addEventListener("click", () => {
@@ -3318,7 +3318,7 @@ export function renderShellHtml(
       btn.dataset.confirming = "true";
       btn.setAttribute("aria-pressed", "true");
       btn.classList.add("confirming");
-      btn.textContent = "Confirm drain now?";
+      btn.textContent = "Confirm gather now?";
       clearTimeout(drainConfirmTimer);
       drainConfirmTimer = setTimeout(() => resetDrainButton(), 8000);
       return;
@@ -3538,7 +3538,7 @@ export function renderShellHtml(
     if (!badge) return;
     if (hasWriteScope) {
       badge.dataset.writeState = "write";
-      badge.textContent = "Write access enabled — Accept, Reject, Mark handled, Run, Drain and fleet control are live.";
+      badge.textContent = "Write access enabled — Accept, Reject, Mark handled, Run, Gather and fleet control are live.";
     } else if (writeToken) {
       badge.dataset.writeState = "rejected";
       badge.textContent = "Write token REJECTED — every write control is disabled. Clear it and paste a current one from: rmd console-url --write";
