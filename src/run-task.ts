@@ -18731,7 +18731,10 @@ function buildSynthesizeMasterPlanPrompt(input: Parameters<SynthesizeDraftFn>[0]
   ].join("\n");
 }
 
-function buildSynthesizeTasksYamlPrompt(input: Parameters<SynthesizeDraftFn>[0], feedback: string[] | undefined): string {
+/** EXPORTED for W1-T512's contract test: the other four drafting prompts are exported and their
+ *  field lists are asserted by DRIVING them, and asserting this one from source text instead
+ *  would be the weaker check on the one lane whose worker is furthest from the plan. */
+export function buildSynthesizeTasksYamlPrompt(input: Parameters<SynthesizeDraftFn>[0], feedback: string[] | undefined): string {
   const feedbackBlock =
     feedback && feedback.length > 0
       ? [
@@ -18749,7 +18752,10 @@ function buildSynthesizeTasksYamlPrompt(input: Parameters<SynthesizeDraftFn>[0],
     ``,
     `Draft a CHANGE-LEVEL plan/tasks.yaml SEED (progressive adoption — NEVER a big-bang respec) from the`,
     `ratified goals below. Every task you emit MUST pass \`rmd lint-plan\` (§5C Layer A) AT BIRTH:`,
-    `  - every task needs id/title/repo/type/acceptance, and an origin: field citing the SPECIFIC answer`,
+    `  - every task needs id/title/repo/type/acceptance/files, and an origin: field citing the SPECIFIC answer`,
+    `  - files: is the repo-relative paths the task will touch. NEVER omit it and never leave it empty:`,
+    `    an undeclared scope is fail-closed at dispatch (overlappingPaths reports it as overlapping`,
+    `    every co-dispatched candidate), so the task can never batch and serialises the lane.`,
     `    id or candidate source that justified it (e.g. origin: "onboard:<answer-id>") — never omitted,`,
     `    never a generic "architect".`,
     `  - every acceptance criterion's proof: must be EXECUTABLE dialect — "unit test: <literal test`,
