@@ -1607,6 +1607,36 @@ export function decideSweepArm(pr: OpenPrView, ledgerLines: ReadonlyArray<Record
   return decideAutoMergeArm({ state: "success", capped: facts.capped, planOnly: facts.planOnly }, false, override);
 }
 
+/** One PR {@link findArmedStalledPrs} flagged — both facts it joined, named plainly. */
+export interface ArmedStalledPr {
+  prNumber: number;
+  prUrl: string;
+  headSha: string;
+}
+
+/**
+ * W1-T520: THE JOIN NOBODY MAKES. The sweep already holds both facts about every open PR
+ * separately — `autoMergeArmed` (is GitHub auto-merge already armed on this head?) and
+ * `mergeState` (is the head behind its base?) — but nothing puts them together, so a PR that
+ * armed itself and then stalled behind `origin/main` looks identical to one still waiting on
+ * CI, on every surface and in the ledger. This closes that gap.
+ *
+ * PURE fold over the per-PR facts the caller already fetched (design note i) — no I/O, no
+ * GitHub call, the same shape every other decision in this module takes. It REPORTS; it does
+ * not ACT (design note ii): no branch update, no merge, no disarm, no re-arm — whether
+ * `allow_update_branch` already covers this on its own is an observation nobody has made from a
+ * session yet, so acting on the stall is a separate, later ruling.
+ *
+ * THE QUIET CASE MUST BE FREE (design note iii): an armed-and-up-to-date PR and a
+ * behind-but-never-armed PR both yield nothing here. Only the JOIN of both facts — armed AND
+ * behind — reports, so this never degenerates into "every open PR, every pass."
+ */
+export function findArmedStalledPrs(prs: readonly OpenPrView[]): ArmedStalledPr[] {
+  return prs
+    .filter((pr) => pr.autoMergeArmed && pr.mergeState === "behind")
+    .map((pr) => ({ prNumber: pr.prNumber, prUrl: pr.prUrl, headSha: pr.headSha }));
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // W1-T78 — the CLARIFICATION-QUESTION rung (ratifies P22's new rung): an
 // ambiguous (BLOCKED-AMBIGUOUS) block yields a SPECIFIC, decidable operator

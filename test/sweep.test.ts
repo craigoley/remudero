@@ -9,6 +9,7 @@ import {
   DISPOSITION_RULES,
   checksStateFromRollup,
   deriveDisposition,
+  findArmedStalledPrs,
   isBlockedCi,
   isPureConcurrentAddition,
   listRetirableEscalationIssues,
@@ -2860,4 +2861,23 @@ test("arm outcome: a NEW head sha re-earns an arm attempt even after a prior suc
   await runSweep([movedHead], second, DEFAULT_SWEEP_POLICY);
 
   assert.deepEqual(calls, ["newsha0000"], "the new head re-earned the arm attempt");
+});
+
+// ── W1-T520 — findArmedStalledPrs: the join between "armed" and "behind" ────
+
+test("an armed pull request that has fallen behind is reported as needing an update", () => {
+  const stalled = pr({ prNumber: 42, prUrl: "url/42", autoMergeArmed: true, mergeState: "behind" });
+  assert.deepEqual(findArmedStalledPrs([stalled]), [
+    { prNumber: 42, prUrl: "url/42", headSha: stalled.headSha },
+  ]);
+});
+
+test("an armed pull request that is up to date is not reported", () => {
+  const current = pr({ prNumber: 43, prUrl: "url/43", autoMergeArmed: true, mergeState: "clean" });
+  assert.deepEqual(findArmedStalledPrs([current]), []);
+});
+
+test("an unarmed stale pull request is left alone", () => {
+  const unarmed = pr({ prNumber: 44, prUrl: "url/44", autoMergeArmed: false, mergeState: "behind" });
+  assert.deepEqual(findArmedStalledPrs([unarmed]), []);
 });
