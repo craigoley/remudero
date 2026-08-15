@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+  advisoryRoutingViolation,
   assertLintClean,
   budgetSanityWarning,
   changedTaskIds,
@@ -1486,4 +1487,101 @@ test("W1-T180 ACCEPTANCE 5: the check stays PURE — task-linter.ts imports neit
     postMergeAmendment: { statusResolvable: true, merged: true, baseAcceptance: W1_T155_BASE_CRITERIA, followUpFiled: false },
   });
   assert.equal(v.length, 1);
+});
+
+// ── ADVISORY-ROUTING (W1-T519 — a security-shaped filing is PUBLISHED before it's fixed) ────
+
+test("ACCEPTANCE 1 (W1-T519): security-shaped task draws an advisory-routing warn", () => {
+  const t = task({
+    id: "FIX-SANDBOX-ESCAPE",
+    title: "a worker sandbox escape lets a compromised task read host files outside its worktree",
+  });
+  const v = advisoryRoutingViolation(t);
+  assert.ok(v, "expected an advisory-routing warn");
+  assert.equal(v?.check, "advisory-routing");
+  assert.equal(v?.severity, "warn");
+  assert.match(v!.message, /sandbox\/containment escape or bypass/);
+  assert.match(v!.message, /private security advisory/);
+  assert.match(v!.message, /SECURITY\.md/);
+  // exactly ONE — design point (iv) — never one per hit, one per field
+  const res = lintTask(t);
+  assert.equal(res.violations.filter((x) => x.check === "advisory-routing").length, 1);
+});
+
+test("ACCEPTANCE 2 (W1-T519): a routine fleet-vocabulary task (scope, route, grant, tier used benignly) draws ZERO advisory-routing warns", () => {
+  const t = task({
+    id: "FIX-ROUTINE-VOCAB",
+    title:
+      "the coverage-ratchet task widens session grant reporting within the route's declared files scope, per risk tier",
+    rationale: "this task's own declared scope is one module; the grant is a duplicate-title match, not a permission",
+  });
+  assert.equal(advisoryRoutingViolation(t), undefined);
+  const res = lintTask(t);
+  assert.equal(res.violations.filter((x) => x.check === "advisory-routing").length, 0);
+});
+
+test("ACCEPTANCE 2 (W1-T519): advisory routing warn never blocks a filing", () => {
+  const t = task({
+    id: "FIX-ADVISORY-NO-BLOCK",
+    title: "an authentication bypass gap lets an unauthenticated route reach host secrets",
+    files: ["test/foo.test.ts"],
+  });
+  const v = advisoryRoutingViolation(t);
+  assert.ok(v, "expected an advisory-routing warn");
+  assert.equal(v?.severity, "warn");
+  const res = lintTask(t);
+  assert.equal(res.ok, true, "a warn-only violation must never flip lintTask.ok to false");
+  const blockingCount = res.violations.filter((x) => x.severity === "block").length;
+  assert.equal(blockingCount, 0);
+  // EXIT-IDENTICAL, both directions (design point iv): the same otherwise-clean fixture, with
+  // and without the security-shaped title, carries the identical blocking-violation count — the
+  // warn changes visibility only, never dispatch eligibility.
+  const withoutTrigger = task({
+    id: "FIX-ADVISORY-NO-BLOCK-CONTROL",
+    title: "an ordinary task title",
+    files: ["test/foo.test.ts"],
+  });
+  assert.equal(advisoryRoutingViolation(withoutTrigger), undefined);
+  assert.equal(
+    lintTask(withoutTrigger).violations.filter((x) => x.severity === "block").length,
+    blockingCount,
+  );
+});
+
+test("advisoryRoutingViolation matches the measured live-corpus fixture shapes: token/credential leak, route-scope-enforcement audit — and stays silent on a bare 'mutation escape' (W1-T393's own vocabulary)", () => {
+  const tokenLeak = task({
+    id: "FIX-TOKEN-LEAK",
+    title: "a read-token leak is a confidentiality incident; a write-token leak is unbounded spend",
+  });
+  assert.equal(advisoryRoutingViolation(tokenLeak)?.check, "advisory-routing");
+  assert.match(advisoryRoutingViolation(tokenLeak)!.message, /token or credential leakage/);
+
+  const routeScope = task({
+    id: "FIX-ROUTE-SCOPE-AUDIT",
+    title: "prove every console route's scope is enforced server-side before the console is exposed",
+  });
+  assert.equal(advisoryRoutingViolation(routeScope)?.check, "advisory-routing");
+  assert.match(advisoryRoutingViolation(routeScope)!.message, /scope enforcement on a reachable route/);
+
+  const mutationEscape = task({
+    id: "FIX-MUTATION-ESCAPE",
+    title: "report lifetime mutant totals, survivors and escapes alongside the run count",
+    rationale: "whether the mutation gate has EVER caught a real escape is currently unknown, not 'no'",
+  });
+  assert.equal(advisoryRoutingViolation(mutationEscape), undefined);
+});
+
+test("ACCEPTANCE 3 (W1-T519): advisoryRoutingViolations lands beside the other violation families as one idiom — grep: advisoryRoutingViolations in src/lib/task-linter.ts", () => {
+  const src = readFileSync(fileURLToPath(new URL("../src/lib/task-linter.ts", import.meta.url)), "utf8");
+  assert.match(src, /export function advisoryRoutingViolation\(/);
+  assert.match(src, /advisoryRoutingViolation\(task\)/); // wired into lintTask's aggregator
+});
+
+test("advisory-routing carries NO severity override anywhere in LintOpts — warn-only by construction, unlike proofDialect/proofResolvability", () => {
+  const src = readFileSync(fileURLToPath(new URL("../src/lib/task-linter.ts", import.meta.url)), "utf8");
+  const fnStart = src.indexOf("export function advisoryRoutingViolation(");
+  assert.ok(fnStart >= 0);
+  const fnSrc = src.slice(fnStart, src.indexOf("\n}", fnStart));
+  assert.ok(!fnSrc.includes("opts"), "advisoryRoutingViolation must take no LintOpts parameter at all");
+  assert.ok(!/advisoryRouting\?:\s*LintSeverity/.test(src), "LintOpts must carry no advisoryRouting severity knob");
 });

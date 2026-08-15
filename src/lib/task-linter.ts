@@ -59,6 +59,14 @@ import {
  * (W1-T310) warns EVERYWHERE by default (`opts.proofScope`, default "warn") — see
  * that check's own module comment for the measured retrofit count behind the call, and
  * dispatch-priority (W1-T422) always warns, unconditionally, like budget-sanity.
+ * advisory-routing (W1-T519) is WARN-only BY CONSTRUCTION — it carries no `opts` severity
+ * knob at all, anywhere, the only violation family with that property: a task whose title,
+ * rationale or note names a security-shaped weakness (auth, token/credential, secret,
+ * sandbox/containment, route-scope enforcement, prompt-injection) draws a warn pointing at
+ * SECURITY.md's private advisory path, because filing a task shard IS publishing the finding
+ * on this public repo before any fix lands — but the fleet cannot itself act on a finding held
+ * in a private advisory (loadPlan only reads plan/tasks.d/ on origin/main), so the routing
+ * decision stays the operator's alone and this check can never withhold a task from dispatch.
  */
 
 export type LintCheck =
@@ -80,7 +88,8 @@ export type LintCheck =
   | "duplicate-title"
   | "duplicate-learning"
   | "dispatch-priority"
-  | "declared-scope";
+  | "declared-scope"
+  | "advisory-routing";
 export type LintSeverity = "block" | "warn";
 
 export interface LintViolation {
@@ -1439,6 +1448,137 @@ export function dispatchPriorityViolations(task: Task): LintViolation[] {
   return violations;
 }
 
+// ── ADVISORY-ROUTING (W1-T519 — a security-shaped filing is PUBLISHED before it's fixed) ────
+//
+// SECURITY.md (W1-T23, #320) already routes OUTSIDE reporters to a private GitHub security
+// advisory and says plainly "do not open a public issue" — but nothing tells the fleet's OWN
+// filers (triage, a recon session, a retro) that the same rule applies to a task shard: filing a
+// task IS publishing on this repo, world-readable the moment it merges, and it can name a
+// precondition-measured weakness that is not yet fixed. loadPlan reads plan/tasks.d/ on
+// origin/main, so the fleet cannot itself act on a finding held in a private advisory — any fix
+// there is necessarily HUMAN-BUILT — which is why this check is a WARN, never a gate: it informs
+// the operator's routing choice for THIS filing, it never makes that choice (see "WARN-ONLY BY
+// CONSTRUCTION" below).
+//
+// PRECISION OVER RECALL, MEASURED. A naive single-word scan (auth/token/secret/sandbox/scope/
+// route/grant) over the live corpus (546 task blocks — every plan/tasks.d/ shard plus the
+// monolith, 2026-08-15) hits 345/546 (63%) — wallpaper, not a signal, because this repo
+// legitimately uses "scope", "route", "session", "grant" and "tier" in ordinary, non-security
+// senses dozens of times a week (a task's declared files: scope, an HTTP route, a review
+// session, a duplicate-title grant match, a risk tier). Every entry below instead matches a
+// PHRASE naming an actual weakness shape (a bypass, a leak, an unscoped reachable route) and
+// never fires on a bare noun. Re-run over the SAME corpus with the phrase table below: 5/546
+// (0.9%), every hit inspected and genuine — W1-T10's scoped-PAT injection, W1-T371/W1-T169's
+// "token leak"/"leaked" write-token discussions, W1-T493's route-scope-enforcement audit, and
+// this task's own rationale (which quotes "auth gap" describing W1-T493/495/500 — a legitimate
+// hit, not a false one: this shard's own text genuinely discusses a security-shaped topic).
+//
+// FIELDS: title + rationale + note — the free-text prose fields a filer actually writes into.
+// The task record that requested this check also names `design:`, but that field is DROPPED by
+// the plan parser before a {@link Task} object exists (see {@link rawChangedTaskIds}'s own
+// comment on the six fields the parser never carries into a parsed Task) — this module is a PURE
+// function over an already-loaded Task (module comment, top of file), so there is no `design:`
+// text here to match against. Matching only the fields the linter actually receives is the
+// honest version of the rule; a follow-up teaching the parser to retain `design:` on Task would
+// let this check see it too, with zero changes to the matcher table itself.
+//
+// WARN-ONLY BY CONSTRUCTION: severity is the literal "warn" below, with NO {@link LintOpts} knob
+// anywhere — unlike proofDialect/proofResolvability there is deliberately no way to run this rule
+// blocking, in any caller, so it can never stall dispatch, the changed-tasks gate, or a filing.
+// The routing decision this warn informs is the operator's; starving the queue over an advisory
+// judgment call would be the opposite failure this repo has already paid for once (a ruling
+// dispatched instead of parked for a human, W1-T326/#1302 — see {@link rulingVerifyViolation}).
+
+export interface AdvisoryRoutingMatcher {
+  /** Surfaced in the warn message — the category text acceptance criterion 1 checks for. */
+  category: string;
+  /** PRECISION-FIRST: must fire only on phrasing that names an actual weakness shape, never on
+   *  a bare noun this repo also uses benignly (scope/route/session/grant/tier). */
+  pattern: RegExp;
+  /** WHY this phrase is security-shaped — read by a reviewer auditing the table, not consumed by
+   *  the matcher itself (T427's per-entry-reason discipline: a reviewer reads reasons, not a
+   *  bare list — see {@link ENFORCEMENT_DATA} in review.ts for the same discipline applied
+   *  elsewhere). */
+  reason: string;
+}
+
+/** DATA table — a new phrase is a row here, zero engine changes (mirrors {@link
+ *  SUBSYSTEM_LEXICON} / {@link HEADLESS_FORBIDDEN_LEXICON} above). Categories match the design's
+ *  own six: authentication/authorization weakness, token or credential leakage, secret handling,
+ *  sandbox/containment escape or bypass, scope enforcement on a reachable route,
+ *  prompt-injection escalation. See the module comment above for the measured 5/546 vs 345/546
+ *  precision comparison this table earns. */
+export const ADVISORY_ROUTING_LEXICON: ReadonlyArray<AdvisoryRoutingMatcher> = [
+  {
+    category: "authentication/authorization weakness",
+    pattern: /\b(?:auth(?:entication|orisation|orization)?|privilege)[- ]?(?:bypass|escalation|gap|hole|flaw)\b/i,
+    reason:
+      "names a bypass/escalation/gap/hole/flaw IN the auth model or a privilege boundary, not an " +
+      "ordinary passing mention of 'authentication' or 'authorization'",
+  },
+  {
+    category: "token or credential leakage",
+    pattern:
+      /\b(?:token|credential|pat|api[- ]key)[- ]?(?:leak(?:age|ed|s)?|exfiltrat\w*|expos(?:ure|ed|es)|injection)\b/i,
+    reason:
+      "names a token/credential/PAT/API key that leaks, is exfiltrated, exposed, or injected — " +
+      "not a routine token refresh or rotation",
+  },
+  {
+    category: "secret handling",
+    pattern: /\b(?:hardcoded|plaintext)[- ]secret\b|\bsecret[- ](?:handling|exposure|leak(?:age)?)\b/i,
+    reason: "names a secret that is hardcoded, stored in plaintext, mishandled, or exposed",
+  },
+  {
+    category: "sandbox/containment escape or bypass",
+    pattern: /\b(?:sandbox|containment|symlink)[- ](?:escape|bypass)\b/i,
+    reason:
+      "names an escape from or bypass of a sandbox/containment/symlink boundary — deliberately " +
+      "NOT a bare 'escape' (a mutation-testing 'escape count', W1-T393, uses the same word for an " +
+      "unrelated concept and must not match)",
+  },
+  {
+    category: "scope enforcement on a reachable route",
+    pattern:
+      /\b(?:unscoped|unauthenticated|unauthorized)[- ](?:route|endpoint)\b|\broute[- ]scope[- ](?:audit|enforcement|gap|bypass)\b|\bscope[- ]enforcement[- ](?:gap|bypass|missing|audit)\b|\broute(?:'s)?\s+scope\s+(?:is\s+)?enforced\b/i,
+    reason:
+      "names a reachable route/endpoint with missing, bypassable, or newly-audited scope " +
+      "enforcement — not an ordinary 'in scope' or 'route' mention",
+  },
+  {
+    category: "prompt-injection escalation",
+    pattern: /\bprompt[- ]injection[- ](?:escalation|attack|exploit)\b/i,
+    reason: "names prompt injection escalating into a further exploit, not a routine prompting mention",
+  },
+];
+
+/** True iff `task`'s narrative text (title + rationale + note — see the module comment above for
+ *  why `design:` is not among them) names a security-shaped weakness matching one of {@link
+ *  ADVISORY_ROUTING_LEXICON}'s phrase entries. Returns AT MOST ONE violation — the first matching
+ *  category, in table order — never one per hit or one per field, so a task whose text matches
+ *  several entries still draws exactly one warn (the falsifier's "exactly one" requirement).
+ *  WARN-only, unconditionally: no `opts` parameter exists to override it (see the module comment
+ *  above, "WARN-ONLY BY CONSTRUCTION"). */
+export function advisoryRoutingViolation(task: Task): LintViolation | undefined {
+  const text = [task.title, task.rationale, task.note].filter(Boolean).join("\n");
+  for (const entry of ADVISORY_ROUTING_LEXICON) {
+    if (!entry.pattern.test(text)) continue;
+    return {
+      check: "advisory-routing",
+      severity: "warn",
+      message:
+        `task ${task.id}'s text names a ${entry.category} (${entry.reason}) — filing a task IS ` +
+        "publishing on this public repo, before any fix lands. Consider routing this finding to a " +
+        'private security advisory (SECURITY.md, "Report a vulnerability") with public disclosure ' +
+        "after the fix ships, instead of — or alongside — a public task shard. This is ADVISORY " +
+        "ONLY: the fleet cannot act on a finding held in a private advisory (loadPlan reads " +
+        "plan/tasks.d/ on origin/main), so the routing decision, and any resulting fix, remains " +
+        "the operator's to make; this check never blocks dispatch or a filing.",
+    };
+  }
+  return undefined;
+}
+
 // ── DUPLICATE-CLOSURE AT KNOWLEDGE INTAKE (W1-T420) ──────────────────────────
 //
 // ONE PURE MODULE (src/lib/knowledge-dedup.ts's `bestNearDuplicate`), TWO CONSUMERS HERE, TWO
@@ -1718,8 +1858,10 @@ export interface LintOpts {
  *  post-merge-amendment is a no-op absent `opts.postMergeAmendment` — budget-sanity
  *  runs only when `opts.mountMaxTurns` is supplied, duplicate-title (W1-T420) is a
  *  no-op absent `opts.openTaskTitles`, proof-name-resolution (W1-T488) is a no-op
- *  absent `opts.resolveNameFilteredCandidates`, and dispatch-priority (W1-T422) always
- *  runs but is a no-op absent `task.priority`. */
+ *  absent `opts.resolveNameFilteredCandidates`, and dispatch-priority (W1-T422) and
+ *  advisory-routing (W1-T519) always run — advisory-routing is a no-op only when the
+ *  task's title/rationale/note match none of {@link ADVISORY_ROUTING_LEXICON}, and can
+ *  never block (see {@link advisoryRoutingViolation}'s module comment). */
 export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   const violations: LintViolation[] = [];
   const sizing = sizingViolation(task);
@@ -1744,6 +1886,8 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   const declaredScope = declaredScopeViolation(task);
   if (declaredScope) violations.push(declaredScope);
   violations.push(...dispatchPriorityViolations(task));
+  const advisory = advisoryRoutingViolation(task);
+  if (advisory) violations.push(advisory);
   if (opts.mountMaxTurns !== undefined) {
     const warn = budgetSanityWarning(opts.mountMaxTurns, opts.calibration);
     if (warn) violations.push(warn);
