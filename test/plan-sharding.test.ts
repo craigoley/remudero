@@ -176,7 +176,7 @@ test("taskRecordPath tolerates a missing plan file entirely", () => {
 // `loadPlan` lists `tasks.d/` and then reads each entry, so anything removing a shard in that
 // window used to make the whole load throw. Measured in CI as a FILE-LEVEL crash of whichever
 // suite was reading the plan while `test/task-linter-wiring.test.ts` cleaned up its probe shard —
-// `node --test` parallelises across files and 39 suites read this directory. It is reachable in
+// `node --test` parallelises across files and 39 suites name this directory. It is reachable in
 // production too: a filing or a `git checkout` can remove a shard mid-read.
 
 test("a shard listed but gone by the time it is read is SKIPPED, not fatal", () => {
