@@ -1,0 +1,86 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { dirname, join } from "node:path";
+
+// ── W1-T503: CLAUDE.md SIZE AS A CI RATCHET (MASTER-PLAN §8A) ────────────────────────────────────
+//
+// CLAUDE.md is injected in full into every session on every lane -- until this ratchet it was the
+// fleet's largest per-session injectable with no budget at all, while the learnings corpus at a
+// fifth its weight already had one (scripts/learnings-budget-ratchet.mjs). Same ratchet shape --
+// a byte-size CEILING against scripts/claude-md-budget-baseline.json -- except CLAUDE.md's cap
+// carries ZERO headroom over the measured figure at capture: its own charter says every addition
+// must be paid for by a fold. Every test below drives the actual CLI
+// (scripts/claude-md-budget-ratchet.mjs) as a subprocess against a planted fixture, so the
+// assertion is on the real exit code a CI job would see -- the falsifier fixture proves the gate
+// is ACTIVE, not merely present.
+//
+// (scripts/claude-md-budget-ratchet.mjs is a plain .mjs file outside tsconfig's `include`, so it
+// is exercised here only via its CLI surface, mirroring test/learnings-budget-ratchet.test.ts's
+// convention for its sibling script.)
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = join(__dirname, "..");
+const SCRIPT = join(REPO_ROOT, "scripts", "claude-md-budget-ratchet.mjs");
+const FIXTURES = join(__dirname, "fixtures", "claude-md-budget-ratchet");
+const SAMPLE = join(FIXTURES, "sample.md");
+
+function run(file: string, baseline: string) {
+  return spawnSync(process.execPath, [SCRIPT, "--file", file, "--baseline", join(FIXTURES, baseline)], {
+    encoding: "utf8",
+  });
+}
+
+// ── Basic ceiling behavior: the fixture file is a fixed 172 bytes ────────────────────────────────
+
+test("claude-md-budget-ratchet CLI: file AT the cap -> zero exit (the gate ACCEPTS, acceptance criterion 2)", () => {
+  const result = run(SAMPLE, "at-cap-baseline.json");
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /is 172 bytes \(cap 172 bytes\)/);
+  assert.match(result.stdout, /OK -- .* is at or under the size budget cap/);
+});
+
+test("the claude-md budget failure names the overage in bytes (file OVER the cap -> non-zero exit, acceptance criteria 1 and 3)", () => {
+  const result = run(SAMPLE, "over-cap-baseline.json");
+  assert.notEqual(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stderr, /BLOCKED/);
+  assert.match(result.stderr, /is 172 bytes > cap 165 bytes \(7 bytes over\)/);
+});
+
+test("claude-md-budget-ratchet CLI: baseline with no capBytes at all -> no crash, no false block", () => {
+  const result = run(SAMPLE, "no-cap-baseline.json");
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /cap unset/);
+});
+
+test("claude-md-budget-ratchet CLI: a missing target file is rejected, not silently treated as zero bytes", () => {
+  const result = run(join(FIXTURES, "does-not-exist.md"), "at-cap-baseline.json");
+  assert.notEqual(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stderr, /claude-md-budget-ratchet:/);
+});
+
+// ── The real committed CLAUDE.md + its committed baseline: currently within budget (what CI checks) ─
+
+test("the REAL committed CLAUDE.md is currently within the recorded size budget cap", () => {
+  const result = spawnSync(process.execPath, [SCRIPT], { cwd: REPO_ROOT, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /OK -- CLAUDE.md is at or under the size budget cap/);
+});
+
+test("the real baseline carries ZERO headroom -- capBytes equals measuredBytes, unlike the learnings baseline", () => {
+  const baseline = JSON.parse(readFileSync(join(REPO_ROOT, "scripts", "claude-md-budget-baseline.json"), "utf8"));
+  assert.equal(baseline.capBytes, baseline.measuredBytes, JSON.stringify(baseline));
+});
+
+test("claude-md-budget-ratchet module: importing (not spawning as the entry script) does not re-invoke main() -- process.argv[1] is undefined when eval'd", () => {
+  const scriptUrl = pathToFileURL(SCRIPT).href;
+  const result = spawnSync(process.execPath, [
+    "--input-type=module",
+    "-e",
+    `await import(${JSON.stringify(scriptUrl)}); console.log("imported-without-main-invocation");`,
+  ]);
+  assert.equal(result.status, 0, result.stdout?.toString() + result.stderr?.toString());
+  assert.match(result.stdout.toString(), /imported-without-main-invocation/);
+});

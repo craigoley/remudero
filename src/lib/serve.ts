@@ -1228,11 +1228,21 @@ export function renderShellHtml(
   // indistinguishable from success on a 401/404/500 (recon-BV).
   // NOTE ON ESCAPING: this whole script is inside a TS template literal, so this function uses
   // string concatenation and single quotes ONLY -- no backtick, no dollar-brace. See CLAUDE.md.
-  function showWriteError(path, status, detail) {
+  function showWriteError(path, status, detail, needsTrusted) {
     var el = document.getElementById("write-error-banner");
     if (!el) return;
     var msg;
-    if (status === 401 || status === 403) {
+    if (status === 403 && needsTrusted) {
+      // THE REFUSAL THAT USED TO MISDIRECT. The token is valid and this tab really can write --
+      // this one action asks for more than the link it was opened with carries. Sending the
+      // person for a fresh token (the branch below) hands them another one that fails the same
+      // way, which is worse than saying nothing. Name the consequence and the remedy, never the
+      // predicate: see DECISIONS.md's vocabulary ruling for the register.
+      msg = "This action needs a trusted connection.\\n"
+          + "Open the console at its tailnet address and try again - the same action works there.\\n"
+          + "The link this tab was opened with can read the fleet and make routine changes, "
+          + "but not this one.";
+    } else if (status === 401 || status === 403) {
       // THE EXPECTED, RECURRING CASE. W1-T202 put the write token in sessionStorage on XSS
       // grounds, so it dies with the tab and with every browser restart -- by design. Tell the
       // operator how to get a new one; never weaken the storage, and never print a token.
@@ -1355,9 +1365,16 @@ export function renderShellHtml(
       // Surface the server's own message when it supplies one; fall back to the bare status.
       return res.text().then(function (raw) {
         var detail = "";
-        try { var j = JSON.parse(raw); detail = (j && (j.error || j.message)) ? String(j.error || j.message) : ""; }
+        var needsTrusted = "";
+        try {
+          var j = JSON.parse(raw);
+          detail = (j && (j.error || j.message)) ? String(j.error || j.message) : "";
+          // W1-T500 left this body unread: the server names what the action needs, and the
+          // client threw it away, so a refusal on a valid token read as a missing token.
+          needsTrusted = (j && j.required_tier) ? String(j.required_tier) : "";
+        }
         catch (e) { detail = String(raw || "").slice(0, 200); }
-        showWriteError(path, res.status, detail);
+        showWriteError(path, res.status, detail, needsTrusted);
         return res;
       }, function () { showWriteError(path, res.status, ""); return res; });
     }, function (err) {

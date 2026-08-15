@@ -1,0 +1,136 @@
+- id: W1-T528
+  title: "W1-T520 shipped the detector and withheld the action on purpose — its precondition is now discharged, so press the button: update ONE armed-and-behind PR per pass, oldest head first, because updating all of them costs N+(N-1)+…+1 reviews"
+  repo: remudero
+  depends_on: ["W1-T520"]
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  rationale: "THIS IS THE ACTION HALF OF W1-T520 AND IT IS A NEW SHARD RATHER THAN AN AMENDMENT,
+    BECAUSE RULE 21 FORBIDS AMENDING A MERGED RECORD. W1-T520 is merged and deliberately withheld
+    this: its design (ii) reads 'IT REPORTS, IT DOES NOT ACT', design (v) puts the update-branch
+    endpoint out of scope, all three of its acceptance criteria are detector assertions, and its
+    `files:` excludes `src/run-task.ts`. **CLAUSE (v) CONDITIONED THAT EXCLUSION ON AN OBSERVED STALL,
+    AND THERE IS NOW ONE IN QUANTITY.** Read the pair together: W1-T520 detects, this acts. Neither is
+    a duplicate of the other.
+
+    (1) **THE GAP IS STILL TOTAL, RE-DERIVED AT a0aefc8.** `update-branch`, `updateBranch` and
+    `update_branch` each read **0** across `src/**/*.ts`, against a POSITIVE CONTROL of **9** `pulls/`
+    hits in the same glob. The only mentions of updating anywhere are ADVICE STRINGS aimed at a
+    person — `src/run-task.ts` and `src/lib/sweep.ts` both tell a human to merge origin/main by hand.
+
+    (2) **THE MERGE AUTHORISATION WAS NEVER THE BOTTLENECK.** Eleven PRs went green, earned PASS
+    verdicts and sat. The fleet merged four in 44 minutes — #1905, #1899, #1901, #1908 — and every one
+    was unblocked by a MANUAL update-branch call. So the queue could merge and could not advance
+    itself: one PR up to date at a time, and only because a human updated it.
+
+    (3) **AND THE SETTING DOES NOT DO IT.** `allow_update_branch: true` OFFERS the button; it does not
+    press it. Measured tonight: EIGHT OF NINE open PRs read `mergeable_state: behind` and SEVEN of
+    those were armed, unchanged for hours.
+
+    (4) **THE ENDPOINT IS REST AND THE CLI ALREADY WRAPS IT.** `gh pr update-branch` exists as a
+    first-class verb ('Update a pull request branch'), established from LOCAL help without calling it.
+    A session confirmed `X-Ratelimit-Resource: core` on the `pulls` endpoint with separate core and
+    graphql buckets — **BUT DELIBERATELY DID NOT CALL THE VERB, BECAUSE IT MUTATES AND WOULD HAVE
+    DISCARDED A LIVE VERDICT ON SOMEONE ELSE'S PR.** So the RESOURCE FAMILY is confirmed and THAT
+    VERB'S OWN RESPONSE IS NOT. See design (v).
+
+    (5) **AND THIS CONSUMES A SIGNAL THAT WOULD OTHERWISE JOIN THE FIRED-AND-UNREAD SET.** W1-T520
+    (#1914) emits `sweep.armed_stalled` from `armedButStalled`, a pure fold beside `decideSweepArm`.
+    Nothing reads it yet. `daemon.tree_dirty` and `daemon.stale_code` both fire and nothing reads
+    either (W1-T494); this task is what stops the new row becoming the third."
+  design: |
+    (i) CONSUME THE DETECTOR, NEVER RE-IMPLEMENT IT. `armedButStalled` (`src/lib/sweep.ts`) already
+    returns the armed-and-behind set. This task selects ONE from that set and acts. A second predicate
+    computing the same thing is the failure to avoid.
+    (ii) ONE PER PASS, OLDEST HEAD FIRST. Updating mints a NEW HEAD and a verdict is sha-pinned —
+    `priorActionsFromLedger` keys `postReviewed` on `${taskId}@${headSha}` — so every update DISCARDS
+    the verdict it was waiting on. Merging one PR puts every other behind, so updating the whole set
+    each pass costs N+(N-1)+…+1: THIRTY-SIX REVIEWS FOR TONIGHT'S EIGHT. It was observed — updating one
+    put four others behind and the fleet re-updated them itself. Oldest head first is the only rule
+    that cannot starve: a loser is strictly older next pass.
+    (iii) **THE ORDERING IS SHARED WITH W1-T526 BUT THE POPULATIONS ARE DISJOINT, AND THAT RESOLVES THE
+    OVERLAP RATHER THAN CREATING ONE.** W1-T526 (#1908, merged, NOT YET BUILT) selects among PRs whose
+    disposition this pass is `post-review` — no verdict on this head. This selects among armed-and-
+    behind PRs — a verdict EXISTS and auto-merge is on. A PR cannot be in both sets at once, so the two
+    queues never contend for the same PR on the same pass. WHAT THEY SHARE IS THE COMPARATOR, NOT THE
+    FILTER. **WHICHEVER OF THE TWO IS BUILT FIRST EXPORTS THE OLDEST-HEAD-FIRST COMPARATOR FROM
+    `src/lib/sweep.ts` AND THE SECOND CONSUMES IT** — that rule is order-independent, so neither lane
+    has to wait on the other, and two lanes cannot ship two orderings that disagree.
+    (iv) NEVER CHOOSE ANY OF THESE, EACH OBSERVED TODAY:
+      A RED, BLOCKED OR AWAITING-HUMAN PR — it would hold the queue, this design's usual failure.
+      A DRAFT — the operator's hold, and the only veto left once arming is on. NEVER TOUCH ONE.
+      AN IN-FLIGHT `run-W1-T<id>-<epoch>` HEAD — #1902's worker pushed at 22:35 and the PR LOST its
+      `remudero-review` on the new head. Updating under a live worker races its own push. Settled
+      versus in-flight is decidable from what the fleet already reads: `isDispatchEligible`
+      (`src/lib/drain.ts`) consults `opts.isOpenPr`, and `projectPlan` attributes heads via
+      `/^run-(.+)-\d+$/`.
+      A PR ALREADY CURRENT — `armedButStalled` already excludes it, and the test must pin that, or
+      every pass mints heads and re-reviews forever.
+    (v) **ESTABLISH THE ENDPOINT'S FAILURE MODES SAFELY, AND THIS SHARD DOES NOT PRETEND TO SETTLE
+    THEM.** It is asynchronous; it can 422 on a conflict, which is a REPORT-AND-SKIP and NEVER a retry;
+    and whether it refuses a DIVERGED branch as opposed to a merely behind one is UNVERIFIED here. The
+    implementer establishes these against a throwaway PR in a scratch repo, never against a live one —
+    a call on a real PR discards a real verdict. IF A FAILURE MODE CANNOT BE ESTABLISHED WITHOUT A LIVE
+    CALL, REPORT IT RATHER THAN GUESSING.
+    (vi) FALSIFIER, BOTH DIRECTIONS. With several armed-and-behind PRs, exactly ONE is updated and it
+    is the oldest head; and a red PR, a draft, and an in-flight `run-*` head present in the same set
+    are each left alone. Choosing more than one fails the first; choosing any excluded shape fails the
+    second.
+    (vii) WHAT THIS DOES NOT FIX, STATED SO IT IS NOT SOLD AS ONE. It does not reduce GraphQL spend:
+    `projectPlan` issues 788 `gh` invocations per pass across six call sites (W1-T523, merged), and
+    `used` moved 7,499 -> 7,517 entirely at `remaining: 0` while ledger-visible calls account for only
+    ~531 of the day — the majority is spawned workers running `gh` unmetered (W1-T522, merged).
+    (viii) NOT IN SCOPE: W1-T526 (#1908) the review queue; W1-T527 (#1910) what to do with a PR that is
+    already red; W1-T525 (#1907) the metered `gh` seam. AND THE RATE-LIMIT FLOOR IS STILL UNFILED — a
+    review attempt that throws writes only `sweep.action_failed` while `postReviewed` is built from
+    `review.posted` and `review.post_refused`, so a failed attempt leaves no dedup key and retries every
+    pass unbounded. Named so it is not lost; a separate shard.
+  acceptance:
+    - claim: "one armed and behind pull request is updated per pass and it is the oldest head"
+      proof: "unit test: W1-T528: one pull request is updated per pass and it is the oldest head"
+    - claim: "a draft pull request is never updated because it is the operator's hold"
+      proof: "unit test: W1-T528: a draft pull request is never updated"
+    - claim: "a branch with a live worker pushing to it is skipped rather than raced"
+      proof: "unit test: W1-T528: an in-flight run branch is skipped rather than raced"
+    - claim: "a conflict is reported and skipped rather than retried"
+      proof: "unit test: W1-T528: a conflicting update is reported and skipped"
+  origin: recon#nothing-presses-the-update-button-2026-08-15
+  plan_refs: ["W1-T520", "W1-T526", "W1-T527", "W1-T523", "W1-T494"]
+  files: [src/lib/sweep.ts, src/run-task.ts, test/sweep.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `src/` and `test/`, and independently
+    warranted: this WRITES to GitHub on the fleet's behalf and every write discards a verdict, so a
+    wrong selection does not fail loudly, it burns reviews. budget_usd 55 — a selector, one gated
+    effect, and a four-way falsifier.
+
+    **`src/run-task.ts` IS DECLARED, AND THE COST IS ACCEPTED EXPLICITLY RATHER THAN AVOIDED.** W1-T520
+    excluded it because it wired no effect; this task wires one, and the effect belongs in
+    `buildSweepEffects` beside every other gated action. That serialises this task against every other
+    task naming that 19,943-line file (`partitionByFileOverlap`, W1-T471). THAT IS THE PRICE OF THE
+    ACTION HALF AND IT IS PAID KNOWINGLY — declaring it up front is what W1-T520's own note demands of
+    an implementer who concludes the call site is needed, and #1869 shipped a 22-file overrun against a
+    two-path declaration by not doing this.
+    `files:` DERIVED BY WORD-BOUNDED INVOCATION COUNT IN PYTHON (a bare substring inflated `ghLiveState`
+    from 6 to 11 today). `src/lib/sweep.ts` holds `armedButStalled` and the comparator; `src/run-task.ts`
+    holds `buildSweepEffects`; `test/sweep.test.ts` is the module's existing suite and W1-T520's own
+    declared test home.
+
+    DEPENDS_ON W1-T520 IS LOAD-BEARING, NOT DECORATIVE: `armedButStalled` is on #1914 and NOT YET on
+    origin/main — measured 0 occurrences in `src/lib/sweep.ts` at a0aefc8. Dispatching this before that
+    lands would have nothing to consume.
+
+    PROOF NOTES: all four proofs are NAME-FILTERED titles, not pure paths — a pure path runs the whole
+    file and one unrelated failure fails every criterion. Each was verified to match ZERO files today
+    against a control matching exactly one, and each is under 100 characters with no comma so
+    `looksLikeScenarioNarrative` (`src/lib/task-linter.ts`) cannot fail them. No proof names this shard.
+
+    ID PROVENANCE: `refs/rmd-id/` held 515, 516 and 520-527 while origin/main's max is 526, so the
+    allocator runs ahead of the plan. **524 IS RESERVED BUT UNFILED AND WAS SKIPPED RATHER THAN
+    REUSED.** This took 528 behind a fresh-fetch suffix-aware re-sweep with a known-taken control
+    reading >= 1, pushed under `--force-with-lease` with the exit code captured into a VARIABLE rather
+    than read through a pipe, and the ref RE-READ and its host-pid-nanosecond NONCE matched against the
+    one written. W1-T522 was lost to another lane between sweep and push earlier today; only a unique
+    payload makes that visible."

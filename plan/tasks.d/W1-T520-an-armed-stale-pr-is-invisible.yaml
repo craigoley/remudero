@@ -1,0 +1,86 @@
+- id: W1-T520
+  title: "an armed pull request that stalls is invisible — the sweep can tell that a PR is armed and can tell that it is behind, and nothing joins those two facts, so a PR that arms itself and then stops looks identical to one still waiting for CI"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55
+  risk: medium
+  rationale: "MEASURED at 3df93bc. NOTHING IN THE FLEET UPDATES A STALE BRANCH: update-branch,
+    updateBranch and update_branch are ZERO hits each across src/**/*.ts, against a positive control
+    of 9 `pulls/` hits in the same glob. The only mentions of updating are ADVICE STRINGS aimed at a
+    person — `src/run-task.ts` says 'merge origin/main into the branch by hand, resolve the conflict,
+    then push', and `src/lib/sweep.ts` says 'Remedy: merge origin/main into the branch to resolve the
+    conflict'. Sessions did it by hand four times on 2026-08-15.
+    THE ACTION HALF MAY ALREADY BE COVERED, AND THAT IS WHY THIS TASK IS THE DETECTION HALF. The
+    repository's `allow_update_branch` READ FALSE at 20:52Z and TRUE at 21:0xZ the same evening — the
+    operator flipped it between two readings of this same recon. Whether that setting makes GitHub
+    keep an auto-merge-armed PR up to date on its own is UNVERIFIED from a session: branch protection
+    is not readable here (`/branches/main/protection` returns HTTP 403 to the fine-grained session
+    credential), and no open PR was in the `behind` state to observe. So an updater is NOT scoped in:
+    it may be redundant, and building a redundant one is the W1-T513 shape this repo has already paid
+    for twice.
+    WHAT IS TRUE EITHER WAY IS THAT NOBODY CAN SEE THE STALL. The sweep already holds both facts
+    separately — it reads each open PR's live state, and `decideSweepArm` (`src/lib/sweep.ts`) already
+    decides arming per PR — but nothing joins 'this PR is armed' to 'this PR is behind'. So an armed
+    PR that has stopped is indistinguishable from one still waiting for CI, in the ledger and on every
+    surface. If GitHub does auto-update, this predicate stays quiet and costs nothing; if it does not,
+    this is the only thing that would tell anyone. That asymmetry is the argument for building the
+    detector before the action.
+    URGENCY: `armSessionPrs` (W1-T516/#1890) is on main and defaults off. The moment it is enabled,
+    session PRs arm themselves, and a stall becomes the failure mode that silently re-creates the
+    queue the flag exists to drain — six PRs were stacked behind the operator on 2026-08-15."
+  design: |
+    (i) a PURE predicate in src/lib/sweep.ts, beside decideSweepArm: given the per-PR facts the
+    sweep already holds — whether auto-merge is enabled, and whether the head is behind the base —
+    return the PRs that are ARMED AND STALLED. No I/O, no network, no GitHub call: the caller
+    supplies what it already fetched, the shape every other decision in this module takes.
+    (ii) IT REPORTS, IT DOES NOT ACT. No branch update, no merge, no disarm, no re-arm. The output
+    is a ledger line naming the PR and both facts. Acting is a separate ruling that depends on an
+    observation nobody has yet: whether `allow_update_branch: true` already covers it.
+    (iii) THE QUIET CASE IS THE COMMON CASE AND MUST BE FREE. A PR that is armed and up to date, and
+    a PR that is behind but not armed, both yield nothing. A detector that fired on either would
+    report every open PR every pass, which is the noise floor that makes an advisory unreadable.
+    (iv) FALSIFIER, BOTH DIRECTIONS: an armed-and-behind PR is reported (a predicate that returned
+    nothing fails this), AND an armed-and-current PR plus a behind-but-unarmed PR both yield nothing
+    (a predicate that fired on either would pass the first and fail this — the false-positive
+    containment).
+    (v) NOT IN SCOPE, each for a stated reason: calling GitHub's update-branch endpoint, because
+    `allow_update_branch` is now true and the action may be redundant — establish that from an
+    observed stall first; `buildSweepEffects` (src/run-task.ts), because no effect is added and that
+    file serialises every task naming it under W1-T471; disarming or re-arming, which changes what
+    merges without a human and is a separate ruling; and the `armSessionPrs` flag itself, which is
+    shipped and defaults off.
+  acceptance:
+    - claim: "a pull request that is armed and has fallen behind its base is reported"
+      proof: "unit test: an armed pull request that has fallen behind is reported as needing an update"
+    - claim: "a pull request that is armed and up to date yields nothing, so the common case is silent"
+      proof: "unit test: an armed pull request that is up to date is not reported"
+    - claim: "a stale pull request that was never armed yields nothing, so the predicate cannot fire on every open pull request"
+      proof: "unit test: an unarmed stale pull request is left alone"
+  origin: oper#stale-armed-pr-2026-08-15
+  plan_refs: ["W1-T516", "W1-T517"]
+  files: [src/lib/sweep.ts, test/sweep.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — the predicate is a pure fold over per-PR facts the caller supplies, decidable
+    from fixtures with no network and no spawn. risk:medium is Rule 19's SPAN and it is honest:
+    subsystemsOf folds a .test basename onto its source, so src/lib/sweep.ts and test/sweep.test.ts
+    are ONE subsystem, and the blast radius matches — one new exported predicate beside
+    decideSweepArm, adding no import to any other module and changing no existing behaviour.
+    FILES DERIVED BY INVOCATION: src/lib/sweep.ts is where this repo already makes a per-PR decision
+    about arming, and test/sweep.test.ts is that module's existing suite; both exist today.
+    src/run-task.ts is DELIBERATELY NOT DECLARED — no effect is wired, and that file serialises every
+    task naming it (W1-T471, 19,943 lines). An implementer who concludes the report needs a call site
+    there MUST AMEND THIS SHARD TO DECLARE IT FIRST rather than overrunning; #1869 shipped a 22-file
+    overrun against a two-path declaration.
+    A CAUTION FOR WHOEVER BUILDS IT: src/lib/sweep.ts changed on 2026-08-15 under W1-T513 (#1888,
+    the shared review-key mutex), so re-read the module before assuming its shape.
+    PROOF NOTES: all three proofs are the NAME-FILTERED `unit test:` form, never the whole-file path
+    form, so each names the behaviour it proves rather than a file that would pass on any test in it.
+    Each title was verified to match ZERO files today via `grep -rlF` over test/, against a control
+    matching one, so every one discriminates head from base. Each is plain prose under 100 characters
+    with no comma and no regex metacharacter, so looksLikeScenarioNarrative does not fire and
+    proofNameResolutionViolations cannot either. Zero candidates today is the legitimate forward
+    reference for an unimplemented task; what must hold now is that the proofs PARSE."
