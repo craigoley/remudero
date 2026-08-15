@@ -284,3 +284,161 @@ export function reserveTaskIdBlock(
   }
   return { ids: handles.map((h) => h.id), handles, releaseAll };
 }
+
+// ── REMOTE RESERVATION (W1-T509) — the substrate the design above never had ───
+//
+// EVERYTHING ABOVE IS RIGHT AND STAYS. `O_EXCL` is a genuine create-if-absent and the
+// contention-advances rule is the correct policy. What it lacked was a substrate any OTHER
+// writer can see: `taskIdReservationsDir` resolves under `<config.root>/state`, and for a worker
+// that is a path inside a bwrap sandbox discarded when the worker exits — not merely local,
+// EPHEMERAL BY CONSTRUCTION. Two writers on two hosts never observe each other's files, which is
+// why eight id collisions landed in four days and two of them refused `loadPlan` on origin/main.
+//
+// THE SUBSTRATE EVERY WRITER SHARES IS THE REMOTE'S REF STORE, AND THREE OBVIOUS WAYS TO USE IT
+// DO NOT LOCK. All four results below were reproduced against the real remote at c271f298:
+//
+//   (1) A TAG IS NOT A LOCK. `git push <sha>:refs/tags/X` onto an EXISTING tag holding that SAME
+//       sha exits 0 with `Everything up-to-date`. A reservation is exactly that case whenever
+//       writers share an anchor commit, so the second writer is told it succeeded. Only a
+//       DIFFERING sha is rejected (`the tag already exists in the remote`).
+//   (2) `--force-with-lease=<ref>:` (an empty expected value, i.e. "require this ref to be
+//       absent") DOES NOT RESCUE IT: against an existing ref holding that sha it also exits 0
+//       with `Everything up-to-date`, because git elides the push when local and remote already
+//       agree — no ref update is negotiated, so no lease is ever checked. CONTROL: the identical
+//       lease against a genuinely absent ref creates it.
+//   (3) `git update-ref --stdin` with `create` is LOCAL ONLY. It reports success and the remote
+//       never hears about it (measured: local ref 1, remote ref 0).
+//
+// (4) WHAT DOES WORK IS A PAYLOAD UNIQUE TO THE WRITER. Push an ORPHAN commit — no parents, empty
+//     tree — and two writers can never share a sha. The second push is then a non-fast-forward
+//     against an unrelated history, which the server refuses STRUCTURALLY rather than by policy:
+//     writer A -> `[new reference]` rc=0; writer B on the SAME id -> rc=1 rejected; writer B on a
+//     different id -> rc=0. THE CAS IS A PROPERTY OF THE PAYLOAD, NOT OF THE NAMESPACE.
+//
+// THE NAMESPACE IS `refs/rmd-id/`, AND THAT IS ABOUT CLONE HYGIENE RATHER THAN LOCKING. Measured:
+// with probe refs live, a default `git fetch` brought down NONE of them while a probe TAG on the
+// same fetch DID — so a tag scheme would put a ref per id in every clone forever. It is also
+// outside `reapBranchesCommand`'s view by construction: that command enumerates
+// `git ls-remote --heads`, which is `refs/heads/` only, so a reservation can never read as
+// undeclared branch drift against `DECLARED_BRANCH_GUARDS`.
+
+/** The ref a reserved id occupies. Suffix-aware by construction: the id is the whole token, so
+ *  `W1-T1` and `W1-T1B` are different refs and neither folds onto the other. */
+export function taskIdReservationRef(taskId: string): string {
+  return `refs/rmd-id/${taskId}`;
+}
+
+/** The outcome of one remote reservation attempt. `taken` is contention (advance); `unreachable`
+ *  is a failed READ of the world and must never be read as "free" — the fail-closed direction. */
+export type RemoteReserveOutcome = "created" | "taken" | "unreachable";
+
+export interface RemoteRefReserver {
+  /** A payload unique to THIS writer. Two writers must never produce the same value, or
+   *  falsification (1) returns and the lock silently stops locking. */
+  mintAnchor(): string;
+  /** Create-if-absent of {@link taskIdReservationRef}. Never throws — an unreachable remote is an
+   *  OUTCOME, because a thrown error at this seam reads identically to contention at the caller. */
+  attempt(taskId: string, anchor: string): RemoteReserveOutcome;
+}
+
+/** Distinguishes CONTENTION from an unreachable remote. git exits 1 for both, so the only signal
+ *  is the message: a rejected update names the ref-update refusal, anything else (DNS, auth,
+ *  proxy, timeout) is a failed read of the world. Defaulting the unknown case to `unreachable`
+ *  is deliberate — mistaking a network failure for contention would silently skip an id, while
+ *  mistaking contention for unreachability only refuses to mint, which is recoverable. */
+export function classifyPushFailure(stderr: string): RemoteReserveOutcome {
+  return /non-fast-forward|already exists|fetch first|rejected/i.test(stderr) ? "taken" : "unreachable";
+}
+
+export interface RemoteReserveDeps {
+  /** Runs a git argv; returns its exit status, stdout and stderr. Injected by tests. */
+  run(args: string[]): { status: number; stdout: string; stderr: string };
+  /** Overrides the anchor for a test that needs two writers to be distinguishable. */
+  anchor?: () => string;
+}
+
+/**
+ * The real reserver: an orphan commit over the empty tree, pushed to the id's own ref.
+ *
+ * `commit-tree` with NO `-p` is what makes the payload unrelated to every other writer's, which
+ * is the entire locking argument (see (4) above). The message carries pid+host+time so an
+ * operator inspecting a stuck reservation can see who holds it, and it doubles as the uniqueness
+ * source — two writers on one host in the same millisecond still differ by pid.
+ */
+export function gitRemoteRefReserver(deps: RemoteReserveDeps): RemoteRefReserver {
+  return {
+    mintAnchor() {
+      if (deps.anchor) return deps.anchor();
+      const tree = deps.run(["hash-object", "-t", "tree", "/dev/null"]).stdout.trim();
+      const msg = `rmd-id reservation ${process.pid}@${hostname()} ${new Date().toISOString()}`;
+      return deps.run(["commit-tree", tree, "-m", msg]).stdout.trim();
+    },
+    attempt(taskId, anchor) {
+      const res = deps.run(["push", "origin", `${anchor}:${taskIdReservationRef(taskId)}`]);
+      if (res.status === 0) return "created";
+      return classifyPushFailure(res.stderr);
+    },
+  };
+}
+
+export interface ReserveRemoteOpts {
+  /** How far above `startId` to advance before refusing. Bounded and LOUD: an unbounded retry
+   *  against a network service is how 11,213 GraphQL calls were spent against a 5,000/hour limit
+   *  in one morning, and this loop talks to the same host. */
+  maxScan?: number;
+  /** Renders `W1-T<n>`; injected only so a test can drive a different workstream prefix. */
+  idFor?: (n: number) => string;
+}
+
+export interface RemoteReservationHandle {
+  readonly id: number;
+  readonly taskId: string;
+  readonly ref: string;
+  readonly anchor: string;
+  readonly attempts: number;
+}
+
+/**
+ * Reserve the first id at or above `startId` that no other writer holds ON THE REMOTE.
+ *
+ * SAME POLICY AS {@link reserveTaskIdFrom}: contention ADVANCES rather than refusing, so two
+ * writers that minted the same candidate both leave with an id and neither poisons the plan.
+ *
+ * AN UNREACHABLE REMOTE REFUSES TO MINT, and that is the fail-closed choice rather than an
+ * oversight. A writer that cannot reserve could mint optimistically and reconcile later — but
+ * "mint optimistically" is precisely today's behaviour, and today's behaviour took `origin/main`
+ * down twice. Refusing is loud, local, and immediately actionable; the caller has not yet spent
+ * anything when it fires.
+ *
+ * NOTHING RELEASES A RESERVATION, AND THAT IS DELIBERATE. An abandoned filing burns an id
+ * forever; ids are integers and a ref is a few dozen bytes, so the whole corpus of ~550 costs
+ * around 24 KiB. Release-on-merge would add a distributed-state problem (who releases, on what
+ * event, what if it half-fails) to buy back something free, and a gap in the id sequence is
+ * already normal — this repo carries four ids that were filed and folded away. A HOLE IS NOT A
+ * DEFECT; A COLLISION IS.
+ */
+export function reserveTaskIdRemote(
+  startId: number,
+  reserver: RemoteRefReserver,
+  opts: ReserveRemoteOpts = {},
+): RemoteReservationHandle {
+  const maxScan = opts.maxScan ?? 50;
+  const idFor = opts.idFor ?? ((n: number) => `W1-T${n}`);
+  const anchor = reserver.mintAnchor();
+  let attempts = 0;
+  for (let n = startId; n < startId + maxScan; n++) {
+    attempts++;
+    const outcome = reserver.attempt(idFor(n), anchor);
+    if (outcome === "created") return { id: n, taskId: idFor(n), ref: taskIdReservationRef(idFor(n)), anchor, attempts };
+    if (outcome === "unreachable") {
+      throw new TaskIdReservationError(
+        `cannot reach origin to reserve ${idFor(n)} — refusing to mint rather than minting optimistically, ` +
+          "which is the behaviour that has already refused loadPlan on origin/main twice",
+      );
+    }
+  }
+  throw new TaskIdReservationError(
+    `no free task id in ${idFor(startId)}..${idFor(startId + maxScan - 1)} — ` +
+      `${maxScan} consecutive ids are reserved on origin (attempted ${attempts})`,
+  );
+}

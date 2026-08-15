@@ -1,4 +1,4 @@
-import { execFile, execFileSync } from "node:child_process";
+import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
@@ -232,7 +232,9 @@ import { mintNextTaskId, type MintDegradation, type MintSources } from "./lib/ta
 import {
   firstUnreservedAtOrAbove,
   reserveTaskIdBlock,
+  gitRemoteRefReserver,
   reserveTaskIdFrom,
+  reserveTaskIdRemote,
   type TaskIdReservationBlock,
   taskIdReservationsDir,
   type TaskIdReservationHandle,
@@ -16588,13 +16590,39 @@ async function triageCommandLocked(
       info: { purpose: `rmd triage ${feedbackId} (run ${runId})` },
     });
     reservationHandle = reservation;
-    // The id the WORKER is told to use — the reserved one, which equals the mint's whenever there
-    // was no contention (the overwhelmingly common case).
-    const reservedTaskId = `W1-T${reservation.id}`;
+    // W1-T509: AND RESERVE IT WHERE EVERY OTHER WRITER CAN SEE IT. The local reservation above is
+    // O_EXCL-atomic and correct, but `taskIdReservationsDir` resolves under this process's own
+    // `config.root` — inside a worker that is a sandbox path discarded on exit, so two writers on
+    // two hosts never observe each other. This second reserve is the SAME create-if-absent policy
+    // against the one store every writer shares: the remote's ref namespace. Contention advances
+    // exactly as it does locally; an unreachable origin THROWS rather than falling through, and
+    // the paid worker is still unstarted when it does.
+    const remoteReservation = reserveTaskIdRemote(
+      reservation.id,
+      gitRemoteRefReserver({
+        run: (args) => {
+          // spawnSync, not execFileSync: a rejected push is a NORMAL outcome here (contention),
+          // and a throwing runner would make it indistinguishable from an unreachable remote —
+          // the exact conflation `classifyPushFailure` exists to prevent.
+          // `worktreePath`, NOT the module-level `repoRoot`: the reservation must be pushed to
+          // the SAME `origin` this filing will push its branch to. Building it from the install
+          // root sent it at whatever remote the install happened to point at — which, under a
+          // test driving a fixture origin, is a different server entirely.
+          const r = spawnSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" });
+          return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+        },
+      }),
+    );
+    // The id the WORKER is told to use — the REMOTE reservation's, which equals the local one
+    // whenever no other writer held it (the overwhelmingly common case). The remote is the
+    // authority because it is the only store every writer can see.
+    const reservedTaskId = remoteReservation.taskId;
     log("triage.id_minted", {
       minted_id: reservedTaskId,
       mint_id: mint.id,
-      reserved_above_mint: reservation.id !== mint.n,
+      reserved_above_mint: remoteReservation.id !== mint.n,
+      remote_ref: remoteReservation.ref,
+      remote_attempts: remoteReservation.attempts,
       max_seen: mint.maxSeen,
       source_monolith: mint.sources.monolith,
       source_shards: mint.sources.shards,
