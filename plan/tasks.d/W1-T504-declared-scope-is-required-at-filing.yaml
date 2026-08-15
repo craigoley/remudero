@@ -1,0 +1,119 @@
+- id: W1-T504
+  title: "an undeclared files: scope lints clean and then serialises the fleet — 80 of 530 tasks carry one, 13 of them minted unattended by triage: make a missing or empty files: a blocking linter violation"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55
+  rationale: "MEASURED at 24d27da on a container with NO daemon (process table enumerated
+    pattern-free: firecracker init, environment-manager, the agent and its own shells — nothing
+    else), so nothing here was read off a live fleet. THE TWO HALVES, EACH RE-DERIVED WITH A
+    POSITIVE CONTROL. (1) THE LINTER DOES NOT CHECK IT: files-required / requireFiles /
+    filesDeclared are ZERO hits in src/lib/task-linter.ts, against a control of 5 `task.files ??
+    []` sites in that same file and 18 existing check names (budget-sanity, call-site,
+    dispatch-priority, duplicate-learning, duplicate-title, headless-fitness, monolith-filing,
+    post-merge-amendment, proof-dialect, proof-grep-safety, proof-name-resolution,
+    proof-resolvability, proof-scope, proof-shape, provenance, rule15-filing, ruling-verify,
+    sizing) — so the query can see the field and the absence is real. (2) THE DISPATCHER IS
+    FAIL-CLOSED ON IT: overlappingPaths (src/lib/dispatch-overlap.ts) states in its own doc that
+    an absent or EMPTY list on either side 'is reported as overlapping every entry of the other
+    side', or ['*'] when both are empty. So an undeclared task does not fail to dispatch — it
+    OVERLAPS EVERY CO-DISPATCHED CANDIDATE, can never batch, and serialises the lane.
+    W1-T476's undeclaredScopeLast (src/lib/drain.ts) demotes such a task to the END of its
+    priority tier and says so explicitly: 'This does NOT change overlappingPaths' fail-closed
+    treatment of that same task (it still serializes against every co-dispatched candidate once
+    it IS offered)'. Demotion is not containment — a demoted total-blocker that becomes the only
+    eligible candidate still blocks everything behind it.
+    THE POPULATION IS HISTORICAL AND MEASURED, NOT HYPOTHETICAL: 80 of 530 tasks carry an absent
+    or empty files:, 74 of them in the pre-shard monolith and 6 in shards. Thirteen were minted
+    unattended by triage (W1-T44 through W1-T50, W1-T56, W1-T57, W1-T286, W2-T3, W3-T7, W3-T8 —
+    all thirteen confirmed present and bare). The monolith itself shows the convention arriving
+    mid-file: 195 of its 269 records DO declare a scope, so the absence is an era, not a design
+    choice, and no bare record documents a deliberate one.
+    WHY THIS IS URGENT RATHER THAN TIDY, RECORDED AND NOT SCOPED IN: decideAutoMergeArm
+    (src/lib/review.ts) reads state !== success -> refuse; !capped -> arm; planOnly -> ARM, with
+    the stated reason that such a PR 'structurally has no executable proof … gated
+    deterministically by lint-plan + the plan-PR emitter + plan-index checks, not by proof
+    execution (W1-T205)'. A triage PR is plan-only by construction, so it reaches that branch and
+    arms with ZERO executed proofs — which makes lint-plan one of the three gates standing between
+    an unattended mint and main, and it does not check this. The auto-triage rung also now fires
+    on starved ticks and is capped at maxPerDay 24, at a re-derived median $0.98 / mean $0.99 over
+    n=27 runs, about $23.54/day. LEDGER: UNREACHABLE from this host, so no ledger figure is used —
+    the cost numbers above are quoted from plan/policy.yaml's own recorded measurement."
+  design: |
+    (i) a new DEFAULT-BLOCK check in src/lib/task-linter.ts, in the shape rulingVerifyViolation
+    already establishes (a structural trigger, enforced by the linter, parked by the dispatcher):
+    a task whose files: is absent, or present and empty, yields one violation at severity
+    "block". The predicate is undeclaredScopeLast's own — `t.files === undefined ||
+    t.files.length === 0` — restated rather than imported, so drain.ts keeps no new dependency
+    and the two can be pinned against each other by test rather than by coupling. Wired into
+    lintTask alongside the other checks; nothing outside this module changes.
+    (ii) SEVERITY IS block, NOT warn, AND THE REASON IS MEASURED RATHER THAN STYLISTIC.
+    lintPlanCommand ends `return failing > 0 ? 1 : 0` — the exit code counts BLOCKING violations
+    only, in every mode, and `warned` never reaches it. So a warn is inert in CI in all three
+    scopes, not merely weaker. block is also what makes the check reach assertLintClean(task,
+    preDispatchLint) inside runTask, which is the choke point that already refuses a task before
+    any probe or spawn.
+    (iii) THEREFORE NO DISPATCH-SIDE CHANGE IS NEEDED AND NONE IS MADE. The obvious second half —
+    teaching isDispatchEligible to refuse an undeclared-scope task — is NOT in scope, because a
+    default-block check already reaches dispatch through assertLintClean. Adding a fourth guard to
+    drain.ts would duplicate a refusal that the linter rule delivers for free at the same point in
+    the run. This is stated so a reader does not file it as the missing half.
+    (iv) THE COST TO EXISTING RECORDS IS BOUNDED AND WAS MEASURED BEFORE THE SEVERITY WAS CHOSEN.
+    CI runs `npm run lint-plan -- --base "$BASE_SHA"` — the step is named 'rmd lint-plan
+    (PR-changed tasks only)' — so an untouched historical record is never linted and main does not
+    redden retroactively. The shard-blindness that once made every shard look new to --base is
+    already fixed (materializeOriginShards), and its own doc names this exact hazard: it 'stops
+    being harmless the moment a new default-BLOCK check (like proof-dialect) can land on one'.
+    At the dispatch choke point the marginal cost is NINE tasks, not eighty: of the 64 bare
+    records that are in lint-plan's default open scope, 5 are already filtered by verify or
+    status, and of the remaining 59 exactly 50 ALREADY block at preDispatchLint on their own
+    pre-existing violations. The nine newly refused are W1-T2, W1-T7, W1-T22, W1-T49 and
+    W1-T281 through W1-T285. Those nine are precisely the live exposure — undeclared, otherwise
+    dispatch-eligible, held back today only by unmet dependencies rather than by any guard.
+    (v) FALSIFIER, BOTH DIRECTIONS: an absent files: and an empty files: each produce a blocking
+    violation (a check that only caught one of the two spellings fails this), AND a task
+    declaring at least one path produces none (a check that flagged every task would pass the
+    first two and fail this — the false-positive containment).
+    (vi) NOT IN SCOPE, EACH FOR A STATED REASON: the triage prompt (src/lib/triage.ts mentions
+    neither verify nor files: — zero hits against a control of 31 verify hits in
+    src/lib/task-linter.ts — so a minted shard's fields are whatever the worker copies from an
+    exemplar; that is the common cause behind this hole, but a prompt line is advice to a worker
+    and the whole point of this task is a guard that does not depend on the worker complying);
+    retro-fitting the 80 existing records (a separate sweep, and --base means they do not block
+    anything today); overlappingPaths' fail-closed semantics, which are correct and stay;
+    undeclaredScopeLast's ordering, which stays; and decideAutoMergeArm's planOnly branch, which
+    is recorded above as motivation and is a ruling for the operator, not a change here.
+  acceptance:
+    - claim: "a task whose files list is absent is refused by the linter as a blocking violation"
+      proof: "unit test: a task with no files declared is refused by the linter as a blocking violation"
+    - claim: "a task whose files list is present but empty is refused by the same blocking check"
+      proof: "unit test: a task declaring an empty files list is refused with the same blocking check"
+    - claim: "a task declaring at least one path is not flagged, so the check cannot fire on a healthy filing"
+      proof: "unit test: a task declaring at least one path passes the declared-scope check"
+  risk: medium
+  origin: oper#undeclared-scope-2026-08-15
+  plan_refs: ["W1-T476", "W1-T324", "W1-T245"]
+  files: [src/lib/task-linter.ts, test/task-linter.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — the check is a pure predicate over a Task and its verdict is
+    fixture-decidable with no I/O, no spawn and no network. risk:medium is Rule 19's SPAN and it
+    is honest: subsystemsOf folds a .test basename onto its source, so src/lib/task-linter.ts and
+    test/task-linter.test.ts are ONE subsystem, and the blast radius matches — a single new
+    violation function plus its wiring, adding no import to any other module. The tests go in the
+    existing test/task-linter.test.ts because that is where every sibling rule's tests already
+    live (12 ruling-verify references there today, among 87 tests); it is not
+    test/run-task.test.ts, the file CLAUDE.md warns loses coverage records nondeterministically.
+    budget_usd 55 — one predicate, one wiring line, three fixtures, no new module.
+    PROOF NOTES: all three proofs are the NAME-FILTERED `unit test:` form, deliberately not the
+    whole-file path form, so each names the behaviour it proves rather than a file that would pass
+    on any test in it. Each title was verified to match ZERO files today via `grep -rlF -- '<title>'
+    test/`, against a control string that matches 1 — so every one discriminates head from base.
+    Each is plain prose under 100 characters with no comma and no regex metacharacter, so
+    looksLikeScenarioNarrative does not fire and proofNameResolutionViolations cannot fire either
+    (it is warn-only and keys on metacharacters). Zero candidates today is the legitimate forward
+    reference CLAUDE.md sanctions for an unimplemented task; what must hold now is that the proofs
+    PARSE, and they do. NO depends_on: lintTask, the LintViolation shape, rulingVerifyViolation's
+    precedent and assertLintClean's dispatch call site are all on main at 24d27da."
