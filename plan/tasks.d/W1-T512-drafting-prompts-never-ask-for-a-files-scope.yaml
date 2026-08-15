@@ -1,0 +1,134 @@
+- id: W1-T512
+  title: "NO task-drafting prompt asks for a `files:` scope — the brief's own counts were TypeScript property names, not prompt text — so W1-T504's block check deadlocks three redraft loops that were never told what to fix, and the fix is the prompts rather than an exemption that would keep the generators producing bare records"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: "MEASURED ON THE MAC MINI AT 044cd793 IN A SCRATCH WORKTREE, never a daemon checkout.
+    (1) THE COUNT THAT COMMISSIONED THIS TASK IS AN ARTEFACT, AND CORRECTING IT STRENGTHENS THE
+    CASE. The figures in circulation — `files:` appearing 0 times in `src/lib/inbox.ts`, 2 in
+    `src/lib/triage.ts`, 3 in `src/lib/plan-architect.ts` — read as though two prompts already ask
+    for a scope. THEY DO NOT. Every one of those 5 hits is a TYPESCRIPT PROPERTY NAME, not prompt
+    text: `{ action: \"propose\"; …; files: string[] }` and `input.changedFiles` in triage.ts, the
+    same result-type plus `outOfPlanScopeFiles` in plan-architect.ts. THE TRUE FIGURE IS ZERO
+    ACROSS EVERY DRAFTING PROMPT. POSITIVE CONTROL: prompt text in `src/lib/inbox.ts` IS greppable
+    (`You are` and `proof` each read 1), so the zero is a real absence rather than a blind query.
+    (2) AND THE ENUMERATION MISSES TWO PROMPTS. Beyond inbox/triage/plan-architect there are
+    `filedTaskRelintPrompt` (`src/lib/relint.ts`) — the redraft prompt for the lanes that EDIT a
+    worktree — and `buildSynthesizeTasksYamlPrompt` (`src/run-task.ts`), the onboarding seed
+    drafter. FIVE prompts mint tasks; none names a scope.
+    (3) THE CONTRACTS ARE EXPLICIT ABOUT WHAT THEY WANT, WHICH IS WHY A WORKER NEVER GUESSES IT.
+    `inboxDraftPrompt` enumerates the schema in terms — `id/title/repo/depends_on/type/verify/
+    risk/status/attempts/acceptance/origin at minimum` — and `buildSynthesizeTasksYamlPrompt`
+    enumerates `every task needs id/title/repo/type/acceptance`. `files` is absent from BOTH
+    lists. A drafting worker is told precisely which fields to emit, and this is not one of them.
+    (4) THE DEADLOCK IS REAL AND WIDER THAN ONE FILTER. `lintFiledTasks` (`src/lib/relint.ts`)
+    keeps only `severity === \"block\"` and drives `draftPlanUntilClean` for the triage and plan
+    lanes. THE INBOX LANE DOES NOT USE IT AT ALL and carries TWO independent block-filters of its
+    own in `src/lib/inbox.ts`: the draft rung's own loop (`for (const v of lintTask(task).violations)
+    if (v.severity === \"block\")`) and `classifyProposal`'s `lintPlan(merged, () => ({}))` behind the
+    `lint_clean` predicate. So a default-block `declared-scope` check stalls the redraft loop in
+    three places, and the worker is asked to fix a field no prompt ever named.
+    (5) THE WORKER CAN ANSWER — THIS IS NOT A KNOWLEDGE PROBLEM. `INBOX_DRAFT_WORKER_TOOLS`
+    (`src/run-task.ts`) is `[\"Read\", \"Grep\", \"Glob\"]` and the spawn runs with `cwd: worktreePath`
+    against a REAL worktree cut from origin/main. The drafting worker can read the source tree it
+    is planning against; it simply is never asked for the paths. The hypothesis that a draft
+    'genuinely cannot know its paths yet' is therefore FALSE for the inbox lane, which is the lane
+    that matters most because its drafts merge through `rmd approve`.
+    (6) THE MEASUREMENT THAT SIZES IT, carried from the W1-T504 build and NOT re-run here: head
+    7076 tests / 52 fail against base 7071 / 5 — 48 regressions across 21 files, concentrated in
+    relint-loop, onboard-synthesize and inbox. That build is the evidence; this shard does not
+    reproduce it.
+    (7) AND A CORRECTION THAT MUST NOT PROPAGATE: `type: research` matches ZERO tasks anywhere in
+    the plan. Re-derived here — the whole type histogram is implement 530, diagnose 4, manual 3,
+    against a control of 530 for `implement`. Earlier briefs claimed twelve research tasks and five
+    research-typed offenders; that is false, and a research exemption would be untested surface
+    guarding nothing."
+  design: "(i) THE CHANGE IS THE OUTPUT CONTRACT IN FIVE PROMPTS, AND NOTHING ELSE. Each prompt that
+    mints a task gains `files:` in the field list it already enumerates, with one line saying what
+    the list is FOR — the paths this task will touch, used by `partitionByFileOverlap`
+    (`src/lib/dispatch-overlap.ts`) to decide what can run beside it. No linter change, no severity
+    knob, no dispatch change: those belong to W1-T504, which is already filed.
+    (ii) THE ALTERNATIVE IS REJECTED, AND ON EVIDENCE RATHER THAN TASTE. The obvious cheaper fix is
+    to let `lintFiledTasks` treat `declared-scope` as non-driving, so the redraft loop is never
+    asked to fix it. IT IS REJECTED FOR TWO REASONS. First it is INCOMPLETE: rationale (4) shows
+    the inbox lane never calls `lintFiledTasks`, so a change confined there leaves the draft rung
+    and `classifyProposal` still stalling — the one-predicate framing is true only of two lanes of
+    three. Second, and worse, IT PRESERVES THE HOLE: exempting the generator means every newly
+    drafted task keeps merging with no scope, which is the exact population W1-T504 exists to stop
+    and the reason thirteen triage-minted shards already shipped bare. An exemption at the
+    generator is not a smaller version of this fix; it is the opposite of it.
+    (iii) THE OBJECTION TO PROMPTS-AS-A-LAYER IS FAIR AND IS ANSWERED BY SEQUENCE, NOT BY DENIAL. A
+    prompt is advice, and advice is exactly what failed before — the triage prompt says nothing
+    about `files:` and thirteen bare shards shipped. THE ANSWER IS THAT THE GUARD ALREADY EXISTS
+    AND IS THE OTHER TASK: W1-T504 makes a missing scope blocking, so a worker that ignores this
+    prompt is refused rather than merged. Advice alone was insufficient; advice PLUS a guard is the
+    pair, and this shard is the half that has to land first or the guard deadlocks the drafter.
+    (iv) DEPENDENCY DIRECTION, STATED BECAUSE THE OBVIOUS EDGE CANNOT BE DRAWN. The ordering this
+    task needs is W1-T504 depending on THIS one, not the reverse — and that edge cannot be added,
+    because W1-T504's record is already merged and Rule 21 forbids amending it
+    (`postMergeAmendmentViolations`, `src/lib/task-linter.ts`). So `depends_on` here is EMPTY and
+    the sequencing is a dispatch-order matter for the operator rather than a graph edge. AN
+    IMPLEMENTER MUST NOT ADD THE EDGE TO W1-T504 TO 'FIX' THIS.
+    (v) THE FIXTURE COST BELONGS TO W1-T504, NOT HERE, AND THE MEASUREMENT SAYS SO. NO SUITE PINS
+    THE SCHEMA FIELD LIST: `schema v1`, `id/title/repo`, `at minimum` and `every task needs` each
+    match ZERO test files, against a control finding those phrases in `src/lib/inbox.ts` (2) and
+    `src/run-task.ts` (1). So extending a prompt's field list breaks no existing prompt-content
+    assertion, and this task's test surface is NEW assertions in ONE new file. The ~21 files the
+    W1-T504 build named are fixtures that construct Tasks with no `files:`; they only fail once the
+    BLOCK check lands, so they are that task's cost. A shard declaring twenty paths would serialise
+    against half the plan through `partitionByFileOverlap`, which is the defect this pair is about.
+    (vi) NOT IN SCOPE, EACH FOR A STATED REASON. The linter rule itself (W1-T504, filed and
+    merged); any severity override knob (rejected in (ii)); retro-fitting the eighty existing bare
+    records (a separate sweep, and CI's `--base` scoping means they block nothing today); and
+    `overlappingPaths`' fail-closed semantics, which are correct and stay. W1-T504's design (iii)
+    asserts 'nothing outside this module changes' — the build falsified that, and this shard is the
+    evidence; it is CITED here and NOT amended there."
+  acceptance:
+    - claim: "each prompt that drafts a task names a files scope among the fields it requires"
+      proof: "unit test: every task-drafting prompt requires a files scope in its output contract"
+    - claim: "the inbox draft contract lists files in the schema enumeration it already carries"
+      proof: "unit test: the inbox draft contract names files among its required fields"
+    - claim: "a drafted fragment that declares no scope is still caught rather than silently filed"
+      proof: "unit test: a drafted fragment without a files scope is caught before it reaches the plan"
+    - claim: "the onboarding seed drafter carries the same requirement as the other lanes"
+      proof: "unit test: the onboard synthesize contract requires a files scope too"
+  origin: recon#drafting-prompts-omit-scope-2026-08-15
+  plan_refs: ["W1-T504", "W1-T471", "W1-T476"]
+  files: [src/lib/inbox.ts, src/lib/triage.ts, src/lib/plan-architect.ts, src/lib/relint.ts, src/run-task.ts, test/drafting-prompts-require-scope.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across four `src/lib` modules plus `src/` and
+    `test/`, so `sizingViolation` (`src/lib/task-linter.ts`) returns early before `subsystemsOf` is
+    consulted. The band is the SPAN; the edit itself is a field name and one explanatory line per
+    prompt.
+    `files:` WAS DERIVED BY INVOCATION COUNT ON THE PROMPT SYMBOLS THAT CHANGE, at 044cd793:
+    `inboxDraftPrompt(` and `inboxDraftRelintPrompt(` — `src/lib/inbox.ts` (2 and 2);
+    `triagePrompt(` — `src/lib/triage.ts` (1); `planArchitectPrompt(` —
+    `src/lib/plan-architect.ts` (1); `filedTaskRelintPrompt(` — `src/lib/relint.ts` (2);
+    `buildSynthesizeTasksYamlPrompt(` — `src/run-task.ts` (2). Those are the definition sites and
+    they are the whole declared source set.
+    **`src/run-task.ts` IS DECLARED BECAUSE THE CHANGE GENUINELY LIVES THERE** — the onboarding
+    seed prompt is defined in that file, not merely called from it — and the cost is accepted
+    explicitly: at ~19,900 lines `partitionByFileOverlap` (W1-T471) serialises this task against
+    every other declaring it. There is no smaller honest declaration that still fixes that lane.
+    THE EXISTING PROMPT SUITES ARE DELIBERATELY NOT DECLARED. `test/inbox-approve.test.ts` (5),
+    `test/plan-architect.test.ts` (9), `test/triage.test.ts` (7) and the others INVOKE these
+    prompts but design (v) measured that none asserts the schema field list, so none needs
+    touching; a declared-but-untouched path fails `inverseScopeUntouchedFiles`
+    (`src/lib/review.ts`) exactly as an undeclared one fails `scopeViolationFiles`. The new
+    assertions go in ONE new file for the same reason.
+    RULE 25 IS NOT ENGAGED: no declared `src/` path matches an `INSTRUMENT_SURFACE` pattern and
+    `test/` is excluded from `isProductPath`.
+    EVERY CRITERION IS A NAME-FILTERED `unit test:` TITLE, NOT A PURE PATH — a pure path runs the
+    whole file and couples every criterion to unrelated failures in it. Each of the four titles was
+    checked to match zero files under `test/` today against a positive control matching one, and
+    each is under 100 characters with no comma and no regex metacharacter.
+    EVERY FIGURE HERE IS DATED 2026-08-15 AND IS A QUERY, NOT A CONSTANT — the five prompts, the
+    zero-mention count with its greppability control, the tool grant, the type histogram and the
+    schema-phrase absence all move as the code moves. RE-DERIVE BEFORE BUILDING, especially the
+    property-name artefact in rationale (1), because a naive `grep -c 'files:'` will reproduce the
+    misleading 2 and 3."
