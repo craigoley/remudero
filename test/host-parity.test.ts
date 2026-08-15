@@ -22,9 +22,11 @@ import { fileURLToPath } from "node:url";
 import {
   HOST_PARITY_BASELINE,
   diffHostParity,
+  findSiblingDisagreements,
   normaliseTestPath,
   readTapFailures,
   renderHostParityReport,
+  renderSiblingDisagreement,
   runHostParity,
   type DeclaredDivergence,
 } from "../src/lib/host-parity.js";
@@ -275,4 +277,76 @@ test("the report names the counts a reader needs, and never invents one it did n
   });
   assert.match(rendered, /HOST PARITY \(mini\) at 11dcbf0: 6496 tests, 1 failing/);
   assert.match(rendered, /1 declared, 0 undeclared/);
+});
+
+// ── PART TWO: SIBLING JOBS ON ONE SHA ─────────────────────────────────────────────────────────
+//
+// MEASURED ON #1886 (head ad5904c): `coverage-ratchet` failed the W1-T356 wiring test while `ci`
+// ran the same glob on the same sha to success. The fixtures below use that same shape — two
+// sibling jobs, one sha, one test — because it is the case that motivated this predicate.
+
+const WIRING = id({ file: "test/daemon.test.ts", title: "W1-T356 orphan-sweep wiring test" });
+
+test("a head where one job passed and a sibling failed is reported as a disagreement", () => {
+  const disagreements = findSiblingDisagreements([
+    { job: "ci", sha: "ad5904c", conclusion: "success" },
+    { job: "coverage-ratchet", sha: "ad5904c", conclusion: "failure", failingTest: WIRING },
+  ]);
+  assert.equal(disagreements.length, 1, "both job names are reported as ONE disagreement, not two");
+  assert.deepEqual(disagreements[0]?.passed, ["ci"]);
+  assert.deepEqual(disagreements[0]?.failed, ["coverage-ratchet"]);
+  assert.deepEqual(disagreements[0]?.failingTests, [WIRING]);
+  assert.equal(disagreements[0]?.sha, "ad5904c");
+});
+
+test("a head where every job failed yields no disagreement", () => {
+  // THE FALSE-POSITIVE CONTAINMENT: a detector that fired on any red would report this sha too.
+  // All-red is agreement, not disagreement — and a real, unanimous failure must not be muted here.
+  const disagreements = findSiblingDisagreements([
+    { job: "ci", sha: "deadbee", conclusion: "failure", failingTest: WIRING },
+    { job: "coverage-ratchet", sha: "deadbee", conclusion: "failure", failingTest: WIRING },
+  ]);
+  assert.deepEqual(disagreements, []);
+});
+
+test("a head with a single job cannot disagree with itself", () => {
+  const disagreements = findSiblingDisagreements([{ job: "ci", sha: "abc1234", conclusion: "success" }]);
+  assert.deepEqual(disagreements, []);
+});
+
+test("a job that was skipped or cancelled is neither pole, so it cannot manufacture a disagreement", () => {
+  const disagreements = findSiblingDisagreements([
+    { job: "ci", sha: "cafebabe", conclusion: "success" },
+    { job: "docs-lint", sha: "cafebabe", conclusion: "skipped" },
+  ]);
+  assert.deepEqual(disagreements, [], "a skipped job never ran the suite, so it has nothing to disagree with");
+});
+
+test("a disagreement on one sha does not leak into another sha's siblings", () => {
+  const disagreements = findSiblingDisagreements([
+    { job: "ci", sha: "sha-one", conclusion: "success" },
+    { job: "coverage-ratchet", sha: "sha-one", conclusion: "failure", failingTest: WIRING },
+    { job: "ci", sha: "sha-two", conclusion: "success" },
+    { job: "coverage-ratchet", sha: "sha-two", conclusion: "success" },
+  ]);
+  assert.deepEqual(
+    disagreements.map((d) => d.sha),
+    ["sha-one"],
+    "sha-two agreed and must not appear",
+  );
+});
+
+test("the report names a disagreement and never claims the run was a flake", () => {
+  const [disagreement] = findSiblingDisagreements([
+    { job: "ci", sha: "ad5904c", conclusion: "success" },
+    { job: "coverage-ratchet", sha: "ad5904c", conclusion: "failure", failingTest: WIRING },
+  ]);
+  assert.ok(disagreement, "the fixture above must produce a disagreement for this to test anything");
+  const report = renderSiblingDisagreement(disagreement);
+  assert.match(report, /DISAGREEMENT/, "the verdict word must appear");
+  assert.match(report, /\bci\b/);
+  assert.match(report, /coverage-ratchet/);
+  assert.match(report, /ad5904c/);
+  assert.match(report, new RegExp(WIRING.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.doesNotMatch(report.toLowerCase(), /flake/, "naming the disagreement must not assert it was noise");
 });
