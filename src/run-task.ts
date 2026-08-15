@@ -17338,6 +17338,38 @@ export function buildInboxDraftHook(
 }
 
 /**
+ * W1-T510: the CLI's `isMerged` + `depsUnobservable` pair for {@link ReadinessContext} —
+ * shared by `rmd inbox` ({@link inboxCommand}) and the `rmd approve`/`rmd reframe`
+ * re-classify helper ({@link loadProposalForRatify}) so both derive the SAME third value
+ * the SAME way, never diverging. `deriveStatus(t, deriveDeps)` is memoized PER TASK ID
+ * (`projectionOf`) so a dependency named by both `isMerged` and `depsUnobservable` —
+ * the common case, since {@link unmetOutsideDeps} in lib/inbox.ts calls `isMerged` first
+ * and only consults `depsUnobservable` for the ids it reports unmerged — is derived ONCE,
+ * never twice: no new GitHub reads over what this CLI already made pre-W1-T510.
+ */
+/** EXPORTED for its own coverage: the memoising seam W1-T510's readiness split rests on. Its
+ *  body is reachable from no other test — both `inboxCommand` call sites need a live plan and
+ *  a real GitHub gateway, which is why these lines arrived uncovered. */
+export function buildDepsReadinessAccessors(plan: Plan, deriveDeps: DeriveDeps): { isMerged: MergedResolver; depsUnobservable: (taskId: string) => GhFailureReason | undefined } {
+  const projectionOf = new Map<string, StatusProjection>();
+  const derive = (t: Task): StatusProjection => {
+    const cached = projectionOf.get(t.id);
+    if (cached) return cached;
+    const projection = deriveStatus(t, deriveDeps);
+    projectionOf.set(t.id, projection);
+    return projection;
+  };
+  const isMerged: MergedResolver = (t) => derive(t).merged;
+  const depsUnobservable = (taskId: string): GhFailureReason | undefined => {
+    const t = plan.byId.get(taskId);
+    if (!t) return undefined; // not in the plan at all — unmetDependencies' own `!d` branch handles this, never isMerged
+    const projection = derive(t);
+    return projection.indeterminate ? (projection.unavailableReason ?? "unknown") : undefined;
+  };
+  return { isMerged, depsUnobservable };
+}
+
+/**
  * `rmd inbox [--dry-run]` — the ratification inbox's deterministic core, wired live
  * (MASTER-PLAN P25(i), W1-T110). The actual readiness predicate ({@link
  * classifyProposal}) is a PURE function, unit-tested exhaustively over fixtures
@@ -17409,7 +17441,7 @@ export async function inboxCommand(rest: string[], deps: { config?: Config } = {
   }
 
   const deriveDeps: DeriveDeps = { ledgerPath, github: ghGateway(owner, repo) };
-  const isMerged: MergedResolver = (t) => deriveStatus(t, deriveDeps).merged;
+  const { isMerged, depsUnobservable } = buildDepsReadinessAccessors(plan, deriveDeps);
   const openProposalIds = new Set(proposals.map((p) => p.id));
   // W1-T190: re-derive "already ratified" from the ledger on every `rmd inbox` pass, never
   // from the registry's own state — a proposal ratify.approved already fired for is reported
@@ -17420,6 +17452,7 @@ export async function inboxCommand(rest: string[], deps: { config?: Config } = {
     classifyProposal(p, drafts[p.id], {
       plan,
       isMerged,
+      depsUnobservable,
       grepAnchorTrue: (a: EvidenceAnchor) => gitGrepAnchorTrue(repoRoot, "origin/main", a),
       openProposalIds,
       isRatified: (id) => isRatifiedInLedger(ledgerLinesForRatify, id),
@@ -17487,7 +17520,7 @@ function loadProposalForRatify(
   if (!proposal) return { proposal: undefined, proposals, drafts, draftsPath };
 
   const deriveDeps: DeriveDeps = { ledgerPath, github: ghGateway(owner, repo) };
-  const isMerged: MergedResolver = (t) => deriveStatus(t, deriveDeps).merged;
+  const { isMerged, depsUnobservable } = buildDepsReadinessAccessors(plan, deriveDeps);
   // W1-T190: read the ledger ONCE here and cross-check it, never the registry's own copy of
   // "is this ratified" (there isn't one) — a proposal the ledger already carries
   // ratify.approved for is `ratified`, no matter what stale/drifted state the registry entry
@@ -17496,6 +17529,7 @@ function loadProposalForRatify(
   const ctx: ReadinessContext = {
     plan,
     isMerged,
+    depsUnobservable,
     grepAnchorTrue: (a: EvidenceAnchor) => gitGrepAnchorTrue(repoRoot, "origin/main", a),
     openProposalIds: new Set(proposals.map((p) => p.id)),
     isRatified: (id) => isRatifiedInLedger(ledgerLines, id),

@@ -86,6 +86,7 @@ import {
   projectPlan,
   readLedgerLines,
   type DeriveDeps,
+  type GhFailureReason,
   type GitHub,
   type LedgerReader,
   type StatusProjection,
@@ -1333,10 +1334,22 @@ function deriveInbox(
   }
   const proposals = readProposalRegistry();
   const drafts = readDraftCache();
+  // W1-T510: `projections` carries one entry per `plan.tasks` (projectPlan's own loop,
+  // lib/status.ts) — the SAME `plan` passed in here — so an id genuinely absent from it is
+  // also necessarily absent from `plan.byId`, which already fails via `unmetDependencies`'s
+  // `!d` branch before `isMerged`/`depsUnobservable` are ever consulted; `=== true` below is
+  // never an absent-as-unmerged conflation on a real dependency id. Mirrors `deriveQueueHead`'s
+  // own `isMerged`/`isIndeterminate` pair (immediately above in this file) — the dispatch path's
+  // template this readiness path now follows.
   const isMerged: MergedResolver = (t) => projections.get(t.id)?.merged === true;
+  const depsUnobservable = (taskId: string): GhFailureReason | undefined => {
+    const p = projections.get(taskId);
+    return p?.indeterminate === true ? (p.unavailableReason ?? "unknown") : undefined;
+  };
   const ctx: ReadinessContext = {
     plan,
     isMerged,
+    depsUnobservable,
     grepAnchorTrue,
     openProposalIds: new Set(proposals.map((p) => p.id)),
     isRatified: (id) => isRatifiedInLedger(lines, id),
