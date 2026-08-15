@@ -11,5 +11,6 @@ raw: "FEEDBACK BRIDGE IS EDGE-TRIGGERED ONLY — feedback-landing lands captures
   to edges repeats the escalation-channel mistake."
 attachments: []
 origin: cli
-status: new
+status: proposed
 proposal_pr: null
+summary: null

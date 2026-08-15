@@ -1,0 +1,118 @@
+- id: W1-T524
+  title: "THE FEEDBACK BRIDGE HAS NO TRIGGER OF ITS OWN — landFeedback's ONLY call site is inside captureFeedback, so the level-triggered scan it already performs runs ONLY when someone files NEW feedback; an entry stranded by a landing failure waits for an unrelated future capture instead of for a sweep"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "FEEDBACK fb-1784826522421-1d57e9, VERIFIED AT SOURCE 2026-08-15 — and the verification
+    NARROWS the finding, which is why it is written here rather than taken from the filing. The feedback
+    says the bridge 'performs no level-triggered sweep of pre-existing untracked plan/feedback files'.
+    HALF TRUE, and the true half is the expensive one to get wrong. The MECHANISM is ALREADY
+    level-triggered: landPending (src/lib/feedback-landing.ts:336-354, reached via landFeedback:381) calls
+    listRelFiles(root, FEEDBACK_REL_DIR) and lands EVERY file whose local blob differs from
+    `origin/main:<rel>` — it re-derives the unlanded set from OBSERVED DISK on every call, skips what is
+    already identical upstream, and returns {landed:false, files:[]} when nothing differs. It does not
+    track which entry the caller just wrote. So a pre-existing untracked entry IS swept — by the next
+    call. THE DEFECT IS THE TRIGGER, NOT THE SCAN. A grep for `landFeedback(` across src/ finds exactly
+    ONE non-comment call site: src/lib/feedback.ts:908, inside captureFeedback. There is no daemon rung
+    (no `feedback` occurrence in src/lib/sweep.ts other than the unrelated `operator_feedback` ledger
+    read at :1805-1833), no daemonBoot step (daemon.ts's boot rungs are sweepTmp / sweepLocks /
+    sweepOrphanWorkers, :1555), no per-iteration hook (daemon.ts:2106-2131 ticks deps.sweep and
+    deps.sweepOrphans and nothing else), and no call from sweepCommand (run-task.ts:15199). THE BRIDGE
+    IS A PASSENGER ON THE CAPTURE PATH. That is exactly the escalation-channel shape the feedback names:
+    the recovery pass for a failed landing is scheduled by the very event whose failure it exists to
+    repair. THE OBSERVED INCIDENT IS CONSISTENT WITH THIS AND WITH NOTHING ELSE (2026-07-23:
+    fb-1784818107548-b32f2b filed 14:48Z did not land; fb-cdcf8b filed 15:45Z landed via #658 at 16:09Z;
+    triage refused b32f2b as not-on-origin at 16:59Z). b32f2b was not on origin at 16:59Z even though a
+    LATER capture's full-disk scan had run at 15:45Z — so its landing did not merely lack a trigger, it
+    was ALSO failing while triggered (the bridge never throws: every failure resolves to
+    {landed:false, error} and captureFeedback swallows it, feedback.ts:908-912). b32f2b is on origin/main
+    today and was triaged into plan/tasks.yaml:301-377, so the entry was eventually rescued — the class
+    was not. WHY THIS IS NOT ALREADY DECIDED: W1-T243 (plan/tasks.yaml:3307) built the bridge and its
+    criterion 3 promises 'the bridge sweeps stragglers later instead of dropping them' — 'later' is the
+    unowned word. It names no rung, no cadence and no boot pass, and its design section listed a daemon
+    landing rung as option (b) NOT TAKEN (option (a), land-on-write, is what shipped). MASTER-PLAN P22
+    (§ near line 1804) is the settled DOCTRINE this task applies, not a duplicate of it: 'every sync
+    RE-DERIVES disposition from OBSERVED state, so a missed edge never strands work and a second pass
+    over unchanged state does nothing'; W1-T150/#358 is the credit-backfill precedent the feedback cites
+    by name."
+  design: |
+    WIRE A TRIGGER; DO NOT REWRITE THE SCAN. The reconciliation loop already exists and is correct —
+    duplicating listRelFiles/blob-compare logic in a new rung would be a second implementation of the
+    unlanded predicate, which is the W1-T207/W1-T240 five-patches mistake. What is missing is a caller.
+    THE SHAPE: export ONE named rung from src/lib/feedback-landing.ts (`sweepUnlandedFeedback`) that
+    wraps landFeedback with the summary a rung needs (how many entries were unlanded, whether a PR was
+    opened/reused, the error string when the bridge could not reach origin), and give it TWO call sites
+    that mirror the orphan sweep exactly (daemon.ts:1555 for boot, :2117-2131 for each poll):
+      (i) BOOT — daemonBoot runs it once, before the first poll, so a daemon starting on a checkout with
+          stranded entries reconciles them without waiting for anyone to file anything.
+      (ii) CADENCE — one pass per daemon iteration alongside deps.sweep/deps.sweepOrphans. Injected and
+          OPTIONAL by the same contract: omitted ⇒ behaviour identical to today.
+    Wire the injection where `rmd serve` builds its deps (run-task.ts), and give `rmd sweep` the same
+    pass so an operator has a manual level-trigger that is not "file a dummy feedback entry".
+    NO NEW POLICY DIAL unless the daemon's own cadence is measurably wrong for this: the rung rides the
+    existing per-iteration sweep cadence. A separate interval would be a plan/policy.yaml row with
+    schema bounds in src/lib/policy.ts (the file's own rule) and MUST NOT be a source literal — but
+    prefer shipping with no dial at all.
+    THREE PROPERTIES THE IMPLEMENTATION IS ON THE HOOK FOR, all of them the reason a periodic rung is
+    riskier than a one-shot:
+      - IDEMPOTENT AND QUIET. A pass over unchanged state must do NOTHING: no force-push, no PR churn,
+        no per-poll log line. landPending's `unlanded.length === 0` early return already gives the git
+        half; the rung must not emit a heartbeat log every poll on top of it (the daemon logs at ~93s).
+      - NEVER COSTS LIVENESS. Same contract as deps.sweep: a git/gh/offline failure is one logged tick
+        (`daemon.feedback_landing_sweep.failed`), never a throw out of the loop. The bridge already
+        never throws; the rung must not reintroduce one.
+      - NEVER TOUCHES THE WORKING TREE. The W1-T60 rule feedback-landing.ts is built around (scratch
+        GIT_INDEX_FILE, blobs written to the object DB, :357-366). A rung that runs unattended every
+        poll must not dirty the daemon's own checkout — that is the W1-T191 failure re-run at cadence.
+    STATE THE HONEST BOUND IN THE PR BODY, do not let the rung imply more than it does: this reconciles
+    the checkout the daemon READS. An entry captured on a machine no daemon watches is still stranded,
+    and that residue is W1-T397's territory (upstream/host feedback), not this task's.
+    ALSO IN SCOPE, because the incident needs it: when the bridge fails, the failure must be
+    OBSERVABLE somewhere an operator looks — today it is swallowed twice over (landFeedback returns an
+    error field; captureFeedback discards it). The rung's summary is the natural place to surface a
+    persistently-unlandable entry rather than sweeping it silently forever.
+    NOT IN SCOPE: changing the bridge's tree-building, the shared-branch force-push discipline, the
+    gated-PR path (§2 — the sweep PROPOSES, the gate merges), triage's pending-landing message
+    (W1-T243), or rescuing any specific entry by hand.
+  acceptance:
+    - claim: "a plan/feedback entry that was already untracked BEFORE the daemon started is landed by the boot pass, with no new capture and no operator git command"
+      proof: "unit test: test/feedback-landing-sweep.test.ts"
+    - claim: "an entry that becomes unlanded while the daemon is live — one whose earlier landing failed, or one written by a process that never called captureFeedback — is reconciled within one sweep cadence"
+      proof: "unit test: test/feedback-landing-sweep.test.ts"
+    - claim: "a pass over unchanged state does nothing: no push, no PR, no per-poll log line (P22's second half, and the reason this is safe to run every iteration)"
+      proof: "unit test: test/feedback-landing-sweep.test.ts"
+    - claim: "an offline/gh-less/git-failing pass costs the daemon one logged tick and never its liveness, and never dirties the daemon's own working tree"
+      proof: "unit test: test/feedback-landing-sweep.test.ts"
+    - claim: "the daemon itself calls the rung — the boot and per-iteration call sites exist in daemon.ts, not just a named export nothing reaches"
+      proof: "grep: sweepUnlandedFeedback( in src/lib/daemon.ts"
+    - claim: "the PRODUCER supplies it: the deps object `rmd serve`/`rmd sweep` build in run-task.ts passes the rung, so the wired daemon is the one that runs (the #1066 rung whose producer never supplied)"
+      proof: "grep: sweepUnlandedFeedback( in src/run-task.ts"
+  risk: high
+  origin: feedback#fb-1784826522421-1d57e9
+  plan_refs: ["§7B", "§2"]
+  files: [src/lib/feedback-landing.ts, src/lib/daemon.ts, src/run-task.ts, test/feedback-landing-sweep.test.ts]
+  status: queued
+  attempts: 0
+  note: "FILED 2026-08-15 by triage of fb-1784826522421-1d57e9, verified at source: landFeedback has ONE
+    call site (src/lib/feedback.ts:908) and no rung anywhere in daemon.ts / sweep.ts / sweepCommand.
+    NOT a duplicate of W1-T243: that task built the bridge and shipped option (a) (land-on-write); this
+    task owns the word 'later' in its criterion 3 — the trigger it never named. W1-T243's tasks.yaml
+    status field is decorative (the mechanism is live in src/lib/feedback-landing.ts with
+    test/feedback-landing.test.ts beside it), so NO depends_on is declared; if a dispatcher disagrees,
+    the correct dep is W1-T243 and nothing else.
+    risk:high — RULE 19 / #588 MERITS TEST, YES: criterion 1 is ONE cross-file invariant unsatisfiable
+    piecewise — 'a boot pass lands an entry stranded before startup' needs the rung
+    (src/lib/feedback-landing.ts), its daemonBoot/poll call sites (src/lib/daemon.ts) and the deps the
+    producer supplies (src/run-task.ts) present in the SAME test; a rung without its caller is exactly
+    the merged-green-and-unreached class, so decomposing the trigger from the thing it triggers would
+    ship the defect this task exists to close.
+    It also argues UP on its own terms: the new caller runs UNATTENDED EVERY POLL against a force-pushed
+    shared branch: a rung that force-pushes noisily or dirties the daemon checkout is worse than the
+    stranding it fixes, which is why three of the criteria are about doing NOTHING correctly.
+    budget_usd 60 — the scan, the tree building and the gated-PR path all already exist; the cost is the
+    fixture daemon loop and the never-throws/never-dirty assertions.
+    SCOPE BOUND, restated so a worker does not quietly widen it: this reconciles the checkout the daemon
+    reads. Multi-host feedback remains W1-T397's."
