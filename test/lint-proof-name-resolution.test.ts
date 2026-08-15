@@ -48,6 +48,7 @@ test("ACCEPTANCE 1: a name-filtered `unit test:` proof resolving to ZERO tests i
 test("ACCEPTANCE 1: a WARNing proof-name-resolution violation never flips lintTask's ok to false", () => {
   const t = task({
     id: "W1-T488-ZERO-NOBLOCK",
+    files: ["src/lib/example.ts"],
     acceptance: [{ claim: "the retry loop halts", proof: "unit test: retry loop halts at N attempts (bounded)" }],
   });
   const resolve = (): NameFilterResolution => ({ status: "absent" });

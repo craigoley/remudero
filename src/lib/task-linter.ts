@@ -79,7 +79,8 @@ export type LintCheck =
   | "rule15-filing"
   | "duplicate-title"
   | "duplicate-learning"
-  | "dispatch-priority";
+  | "dispatch-priority"
+  | "declared-scope";
 export type LintSeverity = "block" | "warn";
 
 export interface LintViolation {
@@ -1225,6 +1226,42 @@ export function rulingVerifyViolation(task: Task): LintViolation | undefined {
   };
 }
 
+// ── DECLARED SCOPE (W1-T504 — an undeclared files: lints clean and then serializes the fleet) ─
+//
+// 80 of 530 tasks carry an absent or empty `files:`, 13 of them minted unattended by triage.
+// The linter never checked this: `overlappingPaths` (dispatch-overlap.ts) is fail-closed on an
+// undeclared scope — it reports such a task as overlapping EVERY co-dispatched candidate — and
+// `undeclaredScopeLast` (drain.ts, W1-T476) only demotes it to the end of its priority tier.
+// Demotion is not containment: a demoted total-blocker that becomes the only eligible candidate
+// still serializes everything behind it. This check closes that gap at the choke point that
+// already exists — `assertLintClean` inside `runTask` refuses a task before any probe or spawn —
+// by making a missing or empty `files:` a BLOCKING violation, the same severity shape
+// {@link rulingVerifyViolation} established (a structural trigger, enforced by the linter,
+// parked by the dispatcher). No dispatcher-side change is needed or made: a default-block check
+// already reaches dispatch through `assertLintClean`, so teaching `isDispatchEligible` the same
+// refusal would only duplicate it.
+//
+// THE PREDICATE IS `undeclaredScopeLast`'s OWN (`t.files === undefined || t.files.length === 0`),
+// restated here rather than imported — drain.ts keeps no new dependency on this module, and the
+// two can be pinned against each other by test rather than by coupling.
+
+/** A task whose `files:` is absent, or present and empty — W1-T504's exact shape. The predicate
+ *  is `undeclaredScopeLast`'s own (drain.ts, W1-T476), restated rather than imported so this
+ *  module gains no new dependency. See the module comment above for why this is `block`, not
+ *  `warn`, and why no dispatcher-side change accompanies it. */
+export function declaredScopeViolation(task: Task): LintViolation | undefined {
+  if (!(task.files === undefined || task.files.length === 0)) return undefined;
+  return {
+    check: "declared-scope",
+    severity: "block",
+    message:
+      `task ${task.id} declares no files: (absent or empty) — an undeclared scope lints clean ` +
+      "today and then overlaps every co-dispatched candidate at the dispatcher (overlappingPaths " +
+      "is fail-closed on it), serializing the lane. Declare at least one repo-relative path this " +
+      "task touches.",
+  };
+}
+
 // ── RULE-15 FILING (W1-T384 — a filing shape the review guard can only refuse) ─
 //
 // THE INCIDENT, TWICE IN THREE DAYS. #1295 (W1-T324's dispatched run) went green on
@@ -1704,6 +1741,8 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   if (ruling) violations.push(ruling);
   const rule15 = rule15FilingViolation(task);
   if (rule15) violations.push(rule15);
+  const declaredScope = declaredScopeViolation(task);
+  if (declaredScope) violations.push(declaredScope);
   violations.push(...dispatchPriorityViolations(task));
   if (opts.mountMaxTurns !== undefined) {
     const warn = budgetSanityWarning(opts.mountMaxTurns, opts.calibration);

@@ -386,6 +386,7 @@ function probeShardYaml(): string {
     "  risk: low",
     "  status: queued",
     "  attempts: 0",
+    "  files: [test/task-linter-wiring.test.ts]",
     "  acceptance:",
     '    - claim: "a fixture claim naming a name-filtered proof that resolves to nothing"',
     `      proof: "${PROBE_PROOF}"`,

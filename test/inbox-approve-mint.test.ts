@@ -42,6 +42,7 @@ const P34_STYLE_FRAGMENT = [
   "  status: queued",
   "  attempts: 0",
   "  origin: feedback#fb-example",
+  "  files: [src/lib/example.ts]",
   "- id: NEW-2",
   "  title: second drafted task, depends on the first",
   "  repo: remudero",
@@ -52,6 +53,7 @@ const P34_STYLE_FRAGMENT = [
   "  status: queued",
   "  attempts: 0",
   "  origin: feedback#fb-example",
+  "  files: [src/lib/example.ts]",
   "",
 ].join("\n");
 

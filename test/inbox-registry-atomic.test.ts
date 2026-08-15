@@ -476,8 +476,9 @@ test("W1-T240 claim 4: `rmd approve`'s real dispatch (approveCommand) actually r
   const config = fixtureConfig();
   try {
     const registryPath = seedRegistry(config, [{ id: "P-APPROVE", summary: "approvable", evidenceAnchors: [] }]);
-    // A lint-clean, dep-free, single-task fragment (no `files:`/acceptance criteria, so
-    // neither the sizing nor headless-fitness/proof-shape/provenance checks can fire) --
+    // A lint-clean, dep-free, single-task fragment (no acceptance criteria, so neither the
+    // sizing nor headless-fitness/proof-shape/provenance checks can fire; one placeholder
+    // `files:` entry so the declared-scope check (W1-T504) doesn't fire either) --
     // matching anchorFingerprint([]) === "" (P-APPROVE carries no evidence anchors), so the
     // REAL classifyProposal this command runs derives state "ready" without any git/gh call.
     const draftsPath = join(config.root, "state", "inbox-drafts.json");
@@ -486,7 +487,8 @@ test("W1-T240 claim 4: `rmd approve`'s real dispatch (approveCommand) actually r
       JSON.stringify({
         "P-APPROVE": {
           proposalId: "P-APPROVE",
-          fragmentYaml: "- id: W1-T240-FIXTURE\n  title: fixture drafted task\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n",
+          fragmentYaml:
+            "- id: W1-T240-FIXTURE\n  title: fixture drafted task\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n  files: [src/lib/example.ts]\n",
           stampLine: "- P-APPROVE (plan) — RATIFIED -> W1-T240-FIXTURE.",
           anchorFingerprint: "",
         },

@@ -155,6 +155,7 @@ function fixtureTask(id: string, clean: boolean): string {
     "  verify: auto",
     "  status: queued",
     "  attempts: 0",
+    "  files: [test/lint-plan-merge-evidence.test.ts]",
     "  acceptance:",
     '    - claim: "the thing holds"',
     `      proof: "${proof}"`,
