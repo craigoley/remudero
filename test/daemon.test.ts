@@ -2230,16 +2230,16 @@ test("W1-T254: no sweepLight wired -> the daemon dispatches exactly as before th
   assert.equal(s.stopReason, "max_reached");
 });
 
-// ── W1-T513 (round 2) — two of the shard's four acceptance criteria are provable TODAY, against
-// the ticker exactly as it stands, with no `startInFlightTicker` call site added. See this PR's
-// own report for why the other two (a long tick occupant no longer blocks the light pass; two
-// light passes cannot double review one PR) are NOT attempted here: `test/daemon.test.ts`'s own
-// W1-T463 tripwire ("no second review lane shipped … never a third [call site]") fails on sight
-// the moment a third `startInFlightTicker(...)` call is added, and the mutex that would make a
-// third caller safe (`claimedReviewKeys`, `src/lib/sweep.ts`) is shared with `deps.sweepLight`
-// only through `src/run-task.ts`'s hook builders — a file this shard's own `files:` note says
-// must not be touched. These two ARE genuinely, honestly provable against the ticker's EXISTING
-// behavior, so they are added rather than left unmet alongside the two that cannot be.
+// ── W1-T513 — all four acceptance criteria ─────────────────────────────────────────────────
+// Round 2 shipped two of the four against the ticker exactly as it stood, with no third
+// `startInFlightTicker` call site: the other two were left unmet because the mutex that would
+// make a third caller safe (`claimedReviewKeys`, `src/lib/sweep.ts`) was declared FRESH inside
+// every `runSweep` call, so it only ever arbitrated PRs inside ONE call — never between two
+// genuinely concurrent callers. This round lifts that mutex to a module-level, cross-call
+// `Set` (`inFlightReviewKeys`, `src/lib/sweep.ts`) shared by every caller in the process with NO
+// change needed outside that one file, which is what makes wrapping `deps.sweep()` with its own
+// ticker (below, and in `src/lib/daemon.ts`) finally safe: the two tests immediately below prove
+// each half directly.
 
 test("W1-T513: the light pass interval is unchanged by the fix", async () => {
   const plan = fixturePlan();
@@ -2329,6 +2329,117 @@ test("W1-T513: a heartbeat alone is not counted as a sweep", async () => {
     heartbeats.length,
     "every single heartbeat this pass paired with a FAILED sweep attempt, never a successful one — " +
       "proving the heartbeat's mere presence never stands in for evidence that a sweep actually ran",
+  );
+});
+
+test("W1-T513: a long tick occupant does not block the light pass", async () => {
+  const plan = fixturePlan();
+  // Nothing dispatchable this run — the ONLY long-running tick occupant this scenario
+  // exercises is `deps.sweep()` itself (the full reconciler), never dispatch, so a light-pass
+  // tick observed here can only be explained by `deps.sweep()`'s OWN ticker (W1-T513), not the
+  // pre-existing dispatch ticker.
+  const isMerged = mergedSetOf("A", "B", "C", "D");
+  const root = mkdtempSync(join(tmpdir(), "daemon-t513-sweep-ticks-"));
+  let releaseSweep: (() => void) | undefined;
+  const sweepGate = new Promise<void>((resolve) => {
+    releaseSweep = resolve;
+  });
+  let lightSweepAttempts = 0;
+  let sleeps = 0;
+  const sleep: DaemonDeps["sleep"] = async (_ms) => {
+    sleeps++;
+    // Let `deps.sweep()` finally return once the light pass has genuinely ticked a few times
+    // WHILE it was still in flight — the falsifier this test exists to catch is `deps.sweep()`
+    // resolving (or the light pass never firing) before that happens.
+    if (sleeps >= 3) releaseSweep?.();
+    if (sleeps >= 6) requestStop(root, "test done polling");
+  };
+  const s = await runDaemon(plan, {
+    refreshMerged: () => isMerged,
+    runOne: async (id) => okResult(id),
+    sweep: async () => {
+      await sweepGate;
+    },
+    sweepLight: async () => {
+      lightSweepAttempts++;
+    },
+    checkStop: () => stopDetail(root),
+    sleep,
+  });
+  assert.equal(s.stopReason, "stopped");
+  assert.ok(
+    lightSweepAttempts >= 2,
+    `the light pass ticked at least twice WHILE the long-running deps.sweep() occupant was still ` +
+      `in flight (saw ${lightSweepAttempts} attempt(s)) — proving that occupant no longer blocks it`,
+  );
+});
+
+test("W1-T513: two light passes cannot double review one pull request", async () => {
+  // A single-PR ledger scenario, driven straight through `runSweep` (the shared entry point
+  // BOTH the daemon's `deps.sweep()` walk and every `sweepLight()` tick ultimately call) —
+  // exercises the module-level, cross-call mutex `src/lib/sweep.ts` now shares (W1-T513),
+  // rather than re-deriving the whole daemon loop's timing to force two REAL concurrent
+  // `sweepLight()` ticks. Two overlapping `runSweep([pr], …)` calls over the SAME PR are
+  // exactly what two overlapping light passes (or a light pass racing the full sweep) reduce
+  // to at this shared layer.
+  const root = mkdtempSync(join(tmpdir(), "daemon-t513-double-review-"));
+  const ledgerPath = join(root, "ledger.ndjson");
+  const pr = {
+    prNumber: 9513,
+    prUrl: "url/9513",
+    taskId: "W1-T9513",
+    reviewState: "none",
+    checksState: "green",
+    unmetCriteria: [],
+    priorStrikes: 0,
+    lastActivityAt: "2026-08-15T12:00:00Z",
+    headSha: "bbbb222",
+    autoMergeArmed: false,
+  } as never;
+  let postReviewCalls = 0;
+  let releaseGate: (() => void) | undefined;
+  const gate = new Promise<void>((resolve) => {
+    releaseGate = resolve;
+  });
+  const disposeLines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const deps = {
+    ledgerPath,
+    runId: "T513-DOUBLE-REVIEW",
+    now: () => Date.parse("2026-08-15T12:00:00Z"),
+    arm: () => {},
+    close: () => {},
+    dispatchFix: () => {},
+    escalate: () => {},
+    log: (step: string, extra: Record<string, unknown> = {}) => disposeLines.push({ step, extra }),
+    postReview: async () => {
+      postReviewCalls++;
+      // Held open deliberately: the SECOND concurrent `runSweep` call (below) is invoked, and
+      // must run its own synchronous claim check, BEFORE this first attempt ever settles —
+      // exactly the overlap window two real, independently-ticking light passes would hit.
+      await gate;
+    },
+  } as never;
+  // Both calls are invoked synchronously in this array literal, in order: the FIRST runs to
+  // its own internal `await gate` (inside `postReview`) before the SECOND is even called (no
+  // `await` separates the mutex claim from the `postReview` call it schedules), so the second
+  // call's own claim attempt genuinely observes the first call's still-held key.
+  const runs = Promise.all([runSweep([pr], deps, DEFAULT_SWEEP_POLICY), runSweep([pr], deps, DEFAULT_SWEEP_POLICY)]);
+  releaseGate?.();
+  const [first, second] = await runs;
+  assert.equal(postReviewCalls, 1, "only ONE of the two concurrent passes over the same PR ever reached postReview");
+  const firstAction = first.actions[0];
+  const secondAction = second.actions[0];
+  assert.equal(firstAction.disposition, "post-review");
+  assert.equal(firstAction.acted, true, "the first pass to claim the review key genuinely acted");
+  assert.equal(secondAction.disposition, "post-review");
+  assert.equal(secondAction.acted, false, "the second, concurrent pass stood down rather than double-reviewing");
+  const standDown = disposeLines.find(
+    (l) => l.step === "sweep.dispose.not_open" && typeof l.extra.reason === "string" && /duplicate review key/.test(l.extra.reason as string),
+  );
+  assert.ok(
+    standDown,
+    "the second pass's stand-down is explicitly ledgered against the shared review-key mutex, never a silent drop " +
+      `(saw steps: ${JSON.stringify(disposeLines.map((l) => l.step))})`,
   );
 });
 
@@ -2650,25 +2761,28 @@ test("idle reasons: an idle daemon SAYS why, and does not repeat an unchanged pi
   assert.equal(s, undefined, "the fixture stopped the loop, not the daemon");
 });
 
-// ── W1-T463 acceptance 4: "if a lane ships, a real per-PR guard replaces the ledger-read
-//    dedup before it is enabled" ────────────────────────────────────────────────────────────
-// This task's diagnosis (see test/retro-sweep-ticker.test.ts and src/lib/sweep.ts's
-// `runSweepLightPass`) closed the ~15-minute stall WITHOUT shipping a second review lane —
-// design (ii)/(iii): a per-kind dispatch budget is a follow-up, gated on this diagnosis, never
-// bundled with it. These two tests are the tripwire this criterion asks for: the first pins
-// that NO second lane exists in the shipped daemon wiring; the second demonstrates WHY one
-// can't ship on today's dedup alone, so both must be revisited together before either changes.
+// ── W1-T463 acceptance 4 / W1-T513 — "if a lane ships, a real per-PR guard replaces the
+//    ledger-read dedup before it is enabled" ────────────────────────────────────────────────
+// W1-T463's own diagnosis (see test/retro-sweep-ticker.test.ts and src/lib/sweep.ts's
+// `runSweepLightPass`) closed the ~15-minute stall WITHOUT shipping a second review lane, and
+// this file's tripwire pinned that NO third `startInFlightTicker` call site existed until the
+// per-PR guard below stopped being a fresh-per-call `Set` and became a real, module-level,
+// cross-call mutex ({@link "../src/lib/sweep.js".inFlightReviewKeys}). W1-T513 is that guard:
+// the first test below now pins the OPPOSITE invariant — a third call site (`deps.sweep()`,
+// daemon.ts) DOES exist, because it is finally safe to ship one.
 
 const daemonSrc = readFileSync(fileURLToPath(new URL("../src/lib/daemon.ts", import.meta.url)), "utf8");
 
-test("W1-T463: no second review lane shipped alongside the diagnosis — startInFlightTicker still has exactly its two known call sites (retro, dispatch), never a third", () => {
+test("W1-T513: a third startInFlightTicker call site now exists (retro, dispatch, sweep) — safe because the review-key mutex is shared across calls, not per-call", () => {
   const calls = [...daemonSrc.matchAll(/\bstartInFlightTicker\(/g)];
-  // Three occurrences total: the function's own `function startInFlightTicker(` declaration,
-  // plus exactly two CALL sites. A third call site would mean a new, independently-scheduled
-  // ticker exists — the shape design (ii) forbids shipping without the per-PR guard below.
-  assert.equal(calls.length, 3, `expected 1 declaration + 2 call sites, found ${calls.length} occurrence(s) of startInFlightTicker(`);
+  // Four occurrences total: the function's own `function startInFlightTicker(` declaration,
+  // plus exactly three CALL sites. Before W1-T513 this pinned exactly THREE (1 declaration + 2
+  // calls) and forbade a third — see the design note this task's shard carries for why that
+  // was safe advice only until the per-PR mutex below stopped being per-call.
+  assert.equal(calls.length, 4, `expected 1 declaration + 3 call sites (retro, dispatch, sweep), found ${calls.length} occurrence(s) of startInFlightTicker(`);
   assert.match(daemonSrc, /startInFlightTicker\(deps, pollIntervalMs, log, "retro"\)/, "the retro call site is unchanged");
   assert.match(daemonSrc, /startInFlightTicker\(deps, pollIntervalMs, log, "dispatch"\)\.stop/, "the dispatch call site is unchanged");
+  assert.match(daemonSrc, /startInFlightTicker\(deps, pollIntervalMs, log, "sweep"\)\.stop/, "W1-T513's new sweep call site exists");
 });
 
 test("W1-T463: DaemonOpts still carries exactly ONE lane-sizing knob (laneCount, dispatch-only) — no second, per-kind budget was introduced", () => {
@@ -2684,8 +2798,8 @@ test("W1-T463: DaemonOpts still carries exactly ONE lane-sizing knob (laneCount,
   assert.deepEqual(laneFields, ["laneCount"], `DaemonOpts's only lane/budget-shaped field must still be laneCount; found ${JSON.stringify(laneFields)}`);
 });
 
-test("W1-T463: TODAY's post-review dedup is a ledger READ, not a mutex — two concurrent passes over the SAME PR can both act before either's ledger write lands (design (iv): the hazard a second lane must close first, not inherit)", async () => {
-  const root = mkdtempSync(join(tmpdir(), "rmd-daemon-t463-mutex-"));
+test("W1-T513: the review-key mutex is now cross-call — two concurrent runSweep passes over the SAME PR never both post (closes the exact race design (iv) named)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-daemon-t513-mutex-"));
   const ledgerPath = join(root, "ledger.ndjson");
   const pr = {
     prNumber: 584,
@@ -2700,13 +2814,9 @@ test("W1-T463: TODAY's post-review dedup is a ledger READ, not a mutex — two c
     autoMergeArmed: false,
   } as never;
   let posted = 0;
-  // A gate that lets BOTH concurrent passes reach `runSweep`'s own dedup READ before either one
-  // finishes its `postReview` (and hence its ledger write) — exactly the race window design
-  // (iv) names: "two reviews could both read before either writes".
-  let arrivals = 0;
-  let releaseBoth: (() => void) | undefined;
-  const bothArrived = new Promise<void>((resolve) => {
-    releaseBoth = resolve;
+  let releaseGate: (() => void) | undefined;
+  const gate = new Promise<void>((resolve) => {
+    releaseGate = resolve;
   });
   const deps = {
     ledgerPath,
@@ -2717,18 +2827,22 @@ test("W1-T463: TODAY's post-review dedup is a ledger READ, not a mutex — two c
     dispatchFix: () => {},
     escalate: () => {},
     postReview: async () => {
-      arrivals++;
-      if (arrivals >= 2) releaseBoth?.();
-      await bothArrived; // both lanes are now PAST the dedup read, neither has posted yet
+      // Held open until BOTH `runSweep` calls below have been invoked — the first call's own
+      // claim on the review key is already made (synchronously, before `postReview` is ever
+      // scheduled) by the time this fires, so the second call's claim attempt genuinely
+      // observes it still held, exactly the overlap design (iv) originally named as unguarded.
+      await gate;
       posted++;
     },
   } as never;
-  await Promise.all([runSweep([pr], deps, DEFAULT_SWEEP_POLICY), runSweep([pr], deps, DEFAULT_SWEEP_POLICY)]);
+  const runs = Promise.all([runSweep([pr], deps, DEFAULT_SWEEP_POLICY), runSweep([pr], deps, DEFAULT_SWEEP_POLICY)]);
+  releaseGate?.();
+  await runs;
   assert.equal(
     posted,
-    2,
-    "TWO concurrent passes over the same PR both posted — today's ledger-read dedup does not " +
-      "arbitrate between simultaneous readers; a second lane MUST replace this with a real " +
-      "per-PR mutex before it is enabled, never inherit this dedup as-is",
+    1,
+    "only ONE of the two concurrent passes over the same PR posted — the module-level review-key " +
+      "mutex (src/lib/sweep.ts's inFlightReviewKeys, W1-T513) now arbitrates between simultaneous " +
+      "callers, closing the race this test used to demonstrate was open",
   );
 });

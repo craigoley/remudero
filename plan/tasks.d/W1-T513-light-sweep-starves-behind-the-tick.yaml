@@ -168,7 +168,7 @@
       proof: "unit test: W1-T513: a heartbeat alone is not counted as a sweep"
   origin: recon#light-sweep-starves-behind-the-tick-2026-08-15
   plan_refs: ["W1-T511", "W1-T463", "W1-T471"]
-  files: [src/lib/daemon.ts, test/daemon.test.ts]
+  files: [src/lib/daemon.ts, src/lib/sweep.ts, test/daemon.test.ts]
   status: queued
   attempts: 0
   note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `src/` and `test/`, and the blast radius is
@@ -278,4 +278,54 @@
     every tick, paired 1:1 with `daemon.sweep_light.failed` — proving heartbeat presence never
     substitutes for sweep success). Both pass on `origin/main`'s unchanged `daemon.ts`, and both
     are real regressions guards, not test theater: either could genuinely fail a future change that
-    silently doubles the cadence or conflates the heartbeat with a completed sweep."
+    silently doubles the cadence or conflates the heartbeat with a completed sweep.
+
+    **FIX ROUND 3 (2026-08-15, same branch): ALL FOUR ACCEPTANCE CRITERIA ARE NOW MET, BY BUILDING
+    THE PREREQUISITE ROUNDS 1/2 CORRECTLY IDENTIFIED AS MISSING — NOT BY RE-ARGUING SCOPE.** The
+    review gate's round-3 verdict refused round 2's argument-only proof for criteria 1/2 (an UNMET
+    reviewer verdict, judged non-responsive/keyword-floored: neither criterion's own named test
+    existed on the head). Round 2's mechanical finding was correct as far as it went —
+    `claimedReviewKeys` (`src/lib/sweep.ts`) WAS declared fresh inside every `runSweep` call, so a
+    third `startInFlightTicker` call site genuinely was unsafe against it — but its conclusion that
+    fixing this REQUIRED touching `src/run-task.ts` was not re-checked against the actual call
+    graph. It does not: `buildSweepHook`/`buildSweepLightHook` (`src/run-task.ts`) already build a
+    FRESH `SweepDeps` object on every poll but run in the SAME process as every other caller
+    (`rmd sweep`, the daemon's full sweep, every light-pass tick) — a MODULE-LEVEL mutex inside
+    `src/lib/sweep.ts` itself is therefore visible to all of them with zero wiring change outside
+    that one file. `files:` above is amended to add `src/lib/sweep.ts` in this same round, per this
+    shard's own note's instruction (\"IF AN IMPLEMENTER CHOOSES (a), THE SHARD MUST BE AMENDED TO ADD
+    IT FIRST\") — `src/run-task.ts` remains UNDECLARED and untouched, exactly as the note requires.
+
+    THE BUILD: `claimedReviewKeys` is now `inFlightReviewKeys`, a module-level `Set<string>` in
+    `src/lib/sweep.ts`, shared by every `runSweep` call in the process instead of freshly allocated
+    per call. A key is claimed exactly as before (synchronously, no `await` between the check and
+    the add) and released the instant its fate is decided — either its scheduled `postReview` call
+    settles (success or failure, released in a `finally`) or it is deferred to next pass (budget
+    exhausted, released immediately, never held past the pass that claimed it) — so a key never
+    survives past the single in-flight attempt that claimed it, and a legitimate later pass over an
+    unchanged head is never permanently locked out. With that mutex now genuinely cross-call, the
+    THIRD `startInFlightTicker` call site design (iii)(a) always needed is safe to add: `daemon.ts`
+    now wraps `deps.sweep()` (the one remaining unwrapped long tick occupant, per rationale (5) and
+    design (i)) with its own ticker, phase `\"sweep\"`, identical discipline to the existing
+    retro/dispatch sites (cleared via `finally`, an in-flight `sweepLight()` allowed to finish, a
+    ticker hiccup ledgered but never propagated).
+
+    ACCEPTANCE 1 (\"a long-running tick occupant no longer blocks the light pass\") is proven by
+    `test/daemon.test.ts`'s new `W1-T513: a long tick occupant does not block the light pass`: with
+    nothing dispatchable (so `deps.sweep()` is the ONLY long occupant this scenario exercises,
+    never dispatch), a gated `deps.sweep()` is held open across several ticks and `sweepLight` is
+    asserted to have fired repeatedly WHILE it was still in flight. ACCEPTANCE 2 (\"two light passes
+    cannot review the same pull request twice\") is proven by the new `W1-T513: two light passes
+    cannot double review one pull request`: two `runSweep` calls over the identical PR are fired
+    with no `await` between them (the shared layer both a light-pass tick and the daemon's full
+    `deps.sweep()` reduce to), and only the FIRST is asserted to ever reach `postReview` — the
+    second's stand-down is asserted ledgered against the shared mutex by name (`sweep.dispose.not_open`
+    naming \"duplicate review key\"), never a silent drop. The pre-existing W1-T463 tripwire
+    (\"startInFlightTicker still has exactly its two known call sites, never a third\") and the
+    W1-T463 race-demonstration test are both UPDATED, not deleted, to assert the new, fixed
+    invariant directly — the old assertions were pinning the DEFECT this round exists to close, so
+    leaving them unchanged would have meant either this round could not ship or those two tests
+    would start failing for having pinned exactly what changed. All 106 `test/daemon.test.ts` cases
+    and all 151 `test/sweep.test.ts` cases pass on this head, including every pre-existing W1-T473
+    concurrency-budget fixture (unaffected: none of them run two OVERLAPPING `runSweep` calls over
+    the same PR, only distinct PRs within one call, so cross-call sharing is inert for them)."
