@@ -554,7 +554,12 @@ forensic detail, so the narrative does not need to live here.
   holds ten `.md` files — a query-shape zero the mismatch then "confirms". The check: filter BOTH
   sides to the same unit first — `diff <(git ls-tree --name-only HEAD | grep '\.md$' | sort)
   <(ls -1 *.md | sort)` — and demand a positive control on whichever side reads zero.
-  *(2026-08-14, both directions measured)*
+  AND WHEN TWO NUMBERS DISAGREE, SUSPECT THE CAPTURE BEFORE THE TOOL. A session read `lint-plan` as
+  166 failing against its own summary of 179 and called the verb self-contradictory; the count came
+  from `^✗ W1-T` and the plan carries FOUR workstreams — W1 166 + W3 9 + W2 3 + W12 1 = 179, and
+  the groups summing to the total IS the control. Its retry read 0: `cmd 2>&1 > f` sends stderr to
+  the TERMINAL, and this verb puts violations on stderr, the summary on stdout. Use `> out 2> err`.
+  *(2026-08-14, both directions; the capture half 2026-08-15)*
 
 ## Operating this host
 
