@@ -77,6 +77,10 @@ jobs:
       # same UNCONDITIONAL shape — no path filter, runs every PR; a corpus-growing PR that pushes
       # the active learnings corpus past the recorded cap goes red until compressed or the cap is
       # deliberately raised.
+      # `claude-md-budget-ratchet` (W1-T503, mirrors `learnings-budget-ratchet` onto CLAUDE.md, the
+      # fleet's largest per-session injectable) added: same UNCONDITIONAL shape — no path filter,
+      # runs every PR; a PR that grows CLAUDE.md past its recorded zero-headroom byte cap goes red
+      # until it folds something back out or the cap is deliberately raised.
       # `commitlint` (W1-T31, §6A Conventional Commits) added: same UNCONDITIONAL shape — no path
       # filter, runs every PR; lints only this PR's own base..head commit range.
       # `api-client-drift` (W3-T1b, §7A "packages/api-client is GENERATED... drift between the
@@ -113,6 +117,7 @@ jobs:
         "jscpd-gate",
         "claims",
         "learnings-budget-ratchet",
+        "claude-md-budget-ratchet",
         "commitlint",
         "api-client-drift",
         "no-hand-rolled-fetch",

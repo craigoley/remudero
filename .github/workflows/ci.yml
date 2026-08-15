@@ -338,6 +338,35 @@ jobs:
       - name: Knowledge budget ratchet (blocks a PR that pushes the active learnings corpus over the recorded cap)
         run: npm run --silent learnings-budget-ratchet
 
+  claude-md-budget-ratchet:
+    # W1-T503 — CLAUDE.md is the fleet's largest per-session injectable ("a context tax paid per
+    # session", per its own header) and was, until this job landed, the only one without a budget
+    # while the learnings corpus at roughly a fifth its weight already carried one
+    # (`learnings-budget-ratchet` above). Same ratchet shape, but a CEILING on CLAUDE.md's raw
+    # on-disk BYTE length (not the learnings gate's per-entry char sum — CLAUDE.md is injected as
+    # one file, so its byte length IS the injectable weight) compared against the recorded cap in
+    # scripts/claude-md-budget-baseline.json. Runs UNCONDITIONALLY (no path filter, no `if:`) so it
+    # always registers a check run, same fail-closed shape as `ci`/`coverage-ratchet`/
+    # `learnings-budget-ratchet` above — a conditionally-skipped required check deadlocks merge
+    # forever (LEARNINGS: the #102-class skipped-check deadlock).
+    #
+    # UNLIKE the learnings baseline, the cap carries ZERO headroom: CLAUDE.md's own charter is that
+    # compression is a deliverable, not just accretion, so every addition is supposed to be paid
+    # for by a fold. scripts/claude-md-budget-ratchet.mjs names the overage in bytes on a
+    # PR that grows the file past the cap; that cap changes only via a deliberate, reviewed diff on
+    # scripts/claude-md-budget-baseline.json, never lowered to make a red PR pass.
+    name: claude-md-budget-ratchet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Install (clean, from lockfile)
+        run: npm ci
+      - name: CLAUDE.md budget ratchet (blocks a PR that pushes CLAUDE.md over the recorded byte cap)
+        run: node scripts/claude-md-budget-ratchet.mjs
+
   jscpd-gate:
     # §5 TIER 2, quality gate 3/4 (W1-T97) — a duplication CEILING: copy-pasted code rots
     # independently and silently. Runs UNCONDITIONALLY (no path filter, no `if:`) so it always

@@ -1,0 +1,6 @@
+{
+  "_comment": "CLAUDE.md budget ratchet CEILING (W1-T503). Captured via `wc -c CLAUDE.md`. UNLIKE scripts/learnings-budget-baseline.json, capBytes carries ZERO headroom over measuredBytes -- CLAUDE.md's own charter is that compression is a deliverable, not just accretion (a retro that adds a rule must also fold, sharpen, or delete the ones it supersedes), so every addition is supposed to be paid for by a fold, not banked against slack. A PR that grows the file goes CI-red on scripts/claude-md-budget-ratchet.mjs until that same PR folds something back out, or a reviewed cap raise (a deliberate, visible diff on this file, exactly like the coverage floor) says why growth is right this time. Never raise this to paper over an unreviewed dump of new rules.",
+  "capturedAt": "2026-08-15",
+  "measuredBytes": 61046,
+  "capBytes": 61046
+}
