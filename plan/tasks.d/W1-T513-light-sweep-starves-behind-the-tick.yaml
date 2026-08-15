@@ -196,4 +196,22 @@
     EVERY FIGURE HERE IS AZURE-ONLY AND DATED 2026-08-15: the 2,613-sample cadence, the 41-gap
     classification, the 68-versus-180 discriminator, the rung profile, and the 656-pass call volume.
     RE-DERIVE BEFORE BUILDING — and heed rationale (4): measure gaps against a window several times the
-    median cadence or the analysis manufactures starvation that is not there."
+    median cadence or the analysis manufactures starvation that is not there.
+
+    **RUN CONFIRMATION (2026-08-15, run-W1-T513-1786818104512):** dispatched over an hour after PR
+    #1880 (17:17:39Z) merged the ruling above WITHOUT a `Remudero-Task:` trailer, so `deriveStatus`
+    kept reading this task as open and redispatched it. This run independently re-verified the
+    ruling's load-bearing claims against `origin/main` before acting (standing rule 7 — do not
+    trust a prompt's description of code over the code itself): `startInFlightTicker`
+    (`src/lib/daemon.ts:1343`) does drive `deps.sweepLight!()` inside its own loop body; it wraps
+    implement dispatch (`daemon.ts:2806`) and retro/auto-triage via `sweepLightDuringRetro`
+    (`daemon.ts:2413`, `2667`); `deps.sweep()` is awaited bare with no ticker at `daemon.ts:2090`;
+    and `claimedReviewKeys` (`sweep.ts:2268`) is declared per-call inside `runSweep`, confirming
+    the double-review race the ruling names. Every implementation path is therefore still either
+    forbidden by the ruling's own 'do not re-open (A)/(B)/(C)' instruction or blocked on the
+    undeclared `src/lib/sweep.ts` scope, so this run again changes no source — see the acceptance
+    criteria walkthrough in this PR's own body for why each of the four proofs stays unmet. Its
+    only difference from #1880 is the `Remudero-Task: W1-T513` trailer every PR this run's own
+    contract opens is required to carry: carrying it is what lets `deriveStatus` finally register
+    the resolution and stop the redispatch cycle, without touching the vestigial `status:` field
+    W1-T485 forbids rewriting."
