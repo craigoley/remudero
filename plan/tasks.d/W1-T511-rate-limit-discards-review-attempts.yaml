@@ -1,0 +1,146 @@
+- id: W1-T511
+  title: "a GraphQL rate limit silently discards a quarter of all review attempts and nothing notices — 31 of 114 attempts aborted on a one-field read that REST could serve from a separate, healthy budget"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  rationale: "MEASURED ON THE AZURE HOST (`Remudero`), 2026-08-15. Ledger corpus, per form: `.gz` **0
+    files**, plain 2, live 1 — COVERAGE control on a step present in every non-empty form
+    (`run.start`): gz 0 / plain 128 / live 85, so the gz zero is an empty form rather than a missed
+    glob. Union, full-line deduped: **31,017 rows**.
+
+    (1) **THE LOSS RATE.** `sweep.post_review.attempt` **114**, `sweep.post_review.done` 83,
+    **`sweep.post_review.failed` 31 — 27%.** Every one of the 31 carries a single error class,
+    verbatim:
+      `Command failed: gh pr view …/pull/<N> --json state`
+      `GraphQL: API rate limit already exceeded for user ID 4397075.`
+    **THE ATTEMPT IS DISCARDED WHOLE — no retry, no deferral, no operator-visible signal.** The PR
+    stays pending and is only reached on a later pass.
+
+    (2) **AND THE REVIEWER IS NOT SLOW, SO THE SYMPTOM MISATTRIBUTES.** `sweep.post_review.attempt` ->
+    `review.posted`: **n=81, median 7.3s, p90 36.6s, max 151.3s.** The spawned half is no slower —
+    `review.reviewer` -> `review.posted`: n=34, **median 3.3s**, p90 24.0s (spawn rate 34 `success` /
+    86 `not_attempted` = 28%). And reviews are genuinely concurrent: `runSweepLightPass`
+    (`src/lib/sweep.ts`) ends `return Promise.all(openPrs.map((pr) => runSweep([pr], deps, policy)))`,
+    with `claimedReviewKeys` declared INSIDE `runSweep`, which each concurrent call receives holding a
+    single PR — so it guards double-review without serialising across PRs. **THE LATENCY IS IN
+    REACHING THE PR, NOT IN REVIEWING IT.**
+
+    (3) **THE CALL THAT FAILS NEEDS ONE FIELD.** It is `ghLiveState` (`src/run-task.ts`):
+    `gh pr view <url> --json state`, reached through `SweepDeps.readLiveState` at two sites in
+    `src/lib/sweep.ts`'s post-review disposition. `gh pr view --json` is GraphQL; **`state` HAS A REST
+    EQUIVALENT.**
+
+    (4) **THE TWO BUDGETS ARE SEPARATE, AND ONE WAS HEALTHY THROUGHOUT.** Measured during the
+    exhaustion window and again after: GraphQL sat at zero while core stayed in the thousands
+    (`graphql 4990/5000, core 4564/5000` on recovery; `graphql 4751, core 4509` after this recon's own
+    probes). GraphQL resets hourly at :08.
+
+    (5) **THE VOLUME IS NOT A RUNAWAY LOOP, AND THAT MATTERS FOR THE FIX.** **656 `sweep.pass` rows
+    today** — roughly one every two minutes — each doing a `buildOpenPrViews` list read plus per-PR
+    live-state reads. A day of that at a handful of GraphQL calls per open PR reaches five figures
+    without any loop misbehaving. **THE HEAVIEST CALLER IS THE PASS CADENCE ITSELF, NOT A BUG.**"
+  design: "(i) **THE SUBSTITUTION, AND THE TRAP THAT MAKES IT NON-TRIVIAL — MEASURED, NOT REASONED.**
+    The obvious change is `gh pr view <url> --json state` -> `gh api repos/{o}/{r}/pulls/{n} --jq
+    .state`. **THAT IS WRONG AS WRITTEN AND WOULD BREAK THE REVIEWER FOR EVERY PR AT ONCE.** The two
+    shapes disagree, measured live on the same pair of PRs:
+      PR#1862  GraphQL `state` = **MERGED**   REST `.state` = **closed**  `.merged` = true
+      PR#1863  GraphQL `state` = OPEN         REST `.state` = open        `.merged` = false
+    **GraphQL RETURNS THREE VALUES; REST RETURNS TWO.** REST folds MERGED and CLOSED together, so a
+    naive swap reports every merged PR as merely closed to a stand-down decision that turns on exactly
+    that distinction. The correct REST form composes `.state` with `.merged` (or `.merged_at`) and
+    upper-cases, reproducing GraphQL's three-valued answer.
+
+    (ii) **AND THE REST SUBSTRATE ALREADY EXISTS — THIS IS AN EXTENSION, NOT A NEW SUBSYSTEM.**
+    `src/lib/open-prs-rest.ts` already carries `rollupFromRest`, which composes a status rollup out of
+    REST parts and is covered by `test/open-prs-rest.test.ts`. A `liveStateFromRest` sibling belongs
+    beside it, for the same reason and with the same test home.
+
+    (iii) **WHICH CALLS MAY MOVE AND WHICH MUST NOT — SWEPT, NOT GUESSED.** Field sets requested
+    across `src/` by `gh pr view`: `body` (4 sites), `statusCheckRollup` (3), `state` (3),
+    `number,url,state,headRefName` (3), `headRefName` (2), `files` (2), and singletons including
+    `state,mergeable,url` and `state,statusCheckRollup`.
+    **`statusCheckRollup` GENUINELY NEEDS GraphQL** — it is a union of CheckRun AND StatusContext
+    nodes, which is why reading `/check-runs` alone would drop `remudero-review` entirely. Everything
+    else in that list has a REST equivalent. **THIS TASK MOVES ONE CALL — `ghLiveState` — AND NOTHING
+    ELSE. DO NOT BULK-CONVERT.** A wrong field shape here breaks the reviewer for every PR
+    simultaneously, and (i) shows the shape trap is real rather than hypothetical.
+
+    (iv) **THE DEFERRAL QUESTION, AND WHETHER IT IS EVEN NEEDED.** A 403 from a rate limiter is
+    TRANSIENT AND SELF-CLEARING; recording it as `sweep.post_review.failed` conflates *could not run*
+    with *ran and failed* — the same conflation this repo has corrected repeatedly.
+    **BUT IF THE SUBSTITUTION LANDS, THE 31 ABORTS DISAPPEAR AT SOURCE**, and a deferral subsystem
+    would be dead code guarding a call that no longer spends the exhausted budget.
+    **SO: PREFER THE SUBSTITUTION. IF A DEFERRAL IS BUILT AT ALL IT MUST BE BOUNDED — AN UNBOUNDED
+    RETRY IS WHAT BURNED THE BUDGET IN THE FIRST PLACE.**
+
+    (v) **THE SIBLING CASE SHARES THE MECHANISM BUT NOT THE FIX.** All **23** `sweep_light.error` rows
+    are **HTTP 403 on `pulls?state=open`**, one class, where `buildOpenPrViews` (`src/run-task.ts`)
+    throws before any PR is reached and the whole pass is discarded. Same trigger, different blast
+    radius: that one loses a PASS, this one loses an ATTEMPT. **IT IS NOT FIXED HERE** — it is a list
+    read, not a per-PR read, and moving it is its own change with its own field-shape risk. Named so
+    the next reader does not assume this task covered it.
+
+    (vi) **SURFACING — AND THE REASON TO BE SPARING.** 31 silent aborts produced ZERO operator signal.
+    But `daemon.tree_dirty` and `daemon.stale_code` already fire, carry their shas, and **nothing
+    consumes them** (W1-T494, #1833), and two checks shipped dormant this week. **DO NOT ADD A THIRD
+    DEAD STEP.** The heartbeat is the surface that reaches an operator off-host: it publishes 31 fields
+    today including `restart_count` and `image_build_sha`, and **zero rate-limit fields** (control:
+    `restart_count` matches 3 times in `scripts/fleet-heartbeat.sh`). **IF THE SUBSTITUTION REMOVES
+    THE ABORTS, NO NEW SIGNAL IS NEEDED AND NONE SHOULD BE ADDED.** Argue it only if aborts survive.
+
+    (vii) **WHAT MUST NOT BE BUILT.** No bulk REST conversion (iii). No unbounded retry (iv). No third
+    dead ledger step (vi). No change to `statusCheckRollup` readers. And nothing touching the light
+    pass's cadence — see below.
+
+    (viii) **THE SECOND CAUSE, NAMED AND NOT SCOPED IN — IT IS BIGGER THAN THIS ONE.** The light pass
+    STARVES while the main tick is occupied. Measured today: a **39.3-minute `daemon.alive` gap**
+    (14:09->14:49) carrying three `run.start` rows and ZERO verdicts, and a **74.9-minute gap** where
+    cadence degraded to one sweep per 25 minutes. **THIS IS NOT A FROZEN LOOP** — sweeps kept running
+    through both, which is the discriminator W1-T463/#1813 established; a frozen loop stops sweeps
+    too. `startInFlightTicker` (`src/lib/daemon.ts`) wraps the IMPLEMENT DISPATCH ONLY, so the fix rung
+    and the reviewer rung run inside the main tick with no ticker. Normal cadence for contrast:
+    `daemon.alive` median 63s with 95% inside 90s, but `sweep.pass` median 110s with **only 47% inside
+    90s and a 70-minute max**. **THAT NEEDS ITS OWN SHARD AND MUST NOT BE ABSORBED HERE.**"
+  acceptance:
+    - claim: "a live PR state read no longer spends the GraphQL budget"
+      proof: "unit test: W1-T511: the live state read is served from the REST budget"
+    - claim: "a merged PR is not reported as merely closed"
+      proof: "unit test: W1-T511: a merged pull request is distinguished from a closed one"
+    - claim: "an open PR still reads as open through the new path"
+      proof: "unit test: W1-T511: an open pull request still reads open through the rest path"
+    - claim: "a rollup read still uses the graph because REST cannot serve it"
+      proof: "unit test: W1-T511: the rollup read is left on the graph path"
+  origin: recon#rate-limit-discards-review-attempts-2026-08-15
+  plan_refs: ["W1-T494", "W1-T463", "W1-T471"]
+  files: [src/run-task.ts, src/lib/open-prs-rest.ts, test/open-prs-rest.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `src/` and `test/`, and the blast radius is
+    genuinely high: `ghLiveState` feeds the post-review stand-down decision, so a wrong field shape
+    misjudges every PR at once. Design (i) measures that trap rather than assuming it away.
+    **`files:` WAS DERIVED BY INVOCATION COUNT**, measured at `044cd79`: `ghLiveState` occurs in
+    `src/run-task.ts` **11** times and in no other source path — it is defined and wired there, which
+    is why `src/run-task.ts` IS declared despite W1-T471's serialisation cost; the change genuinely
+    lives there and there is no smaller honest declaration. `src/lib/open-prs-rest.ts` scores
+    `rollupFromRest` **3** and is the existing REST-composition home the new sibling belongs beside.
+    The test home is `test/open-prs-rest.test.ts` at **15** on the same symbols — the highest of any
+    test path (`test/run-task.test.ts` 10, `test/drain.test.ts` 8, `test/sweep.test.ts` 5).
+    **`src/lib/sweep.ts` IS DELIBERATELY NOT DECLARED** despite scoring `readLiveState` 4 and
+    `post_review` 4: it consumes the injected dep and does not need to change if the substitution is
+    shape-preserving, and a declared-but-untouched path fails `inverseScopeUntouchedFiles`
+    (`src/lib/review.ts`) exactly as an undeclared one fails `scopeViolationFiles`. If an implementer
+    concludes a deferral IS needed after all, `sweep.ts` is where it lives and **the shard must be
+    amended first** rather than the path added mid-run.
+    **THE ACCEPTANCE PROOFS ARE NAME-FILTERED, NOT PURE PATHS.** A pure path runs a whole suite and one
+    unrelated failure fails every criterion — the shape that killed #1830 twice. Each of the four
+    titles was checked to match **0** paths on `origin/main` today against a positive control (`an
+    exit 0 is NEVER throttled`) matching **1**, and each is under 100 characters with no comma so
+    `looksLikeScenarioNarrative` (`src/lib/task-linter.ts`) cannot fail them.
+    EVERY FIGURE HERE IS AZURE-ONLY AND DATED 2026-08-15: the 31-of-114 loss rate, the 7.3s median,
+    the 656 passes, the 23 `sweep_light.error` rows, the two-versus-three-valued state comparison, and
+    both gap measurements. RE-DERIVE BEFORE BUILDING — the budgets recover hourly, so the abort count
+    is a function of when you look."
