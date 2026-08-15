@@ -1,0 +1,134 @@
+- id: W1-T509
+  title: "the id allocator is a counter read from a tree four writers cannot see each other in — give `task-id-reservation.ts` a SHARED substrate by reserving `refs/rmd-id/<id>` on origin, and note that BOTH obvious primitives silently fail to lock: a tag AND an expect-absent lease both return `Everything up-to-date` when the sha matches"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: "MEASURED ON THE MAC MINI AT a96e9227, 2026-08-15, BY EXPERIMENT AGAINST THE REAL REMOTE
+    IN A SCRATCH NAMESPACE THAT WAS DELETED AFTERWARDS. Every mechanism claim below was executed,
+    not read, and two of them CONTRADICT the design brief that commissioned this shard.
+    (1) THE RATE, AND WHY MINT-TIME CHECKING CANNOT WIN. Eight id collisions in four days. The
+    decisive one merged TWICE THREE SECONDS APART — `ff83dba4` at 14:08:36Z and `47ceaf8a` at
+    14:08:39Z, both declaring `W1-T505` — and `loadPlan` then refused `origin/main` outright, taking
+    every plan-reading verb with it. Reproduced: `duplicate task id 'W1-T505'`, against a positive
+    control of the pre-collision tree loading 530 tasks. A session that minted an id, re-checked, and
+    pushed still lost the id BETWEEN its own mint and its own push. A snapshot of a tree no other
+    writer has pushed to yet is not a check anyone can win.
+    (2) **THE TAG FORM SILENTLY FAILS TO LOCK — AN IMPLEMENTER WHO REACHES FOR IT SHIPS A LOCK THAT
+    NEVER LOCKS AND EVERY TEST PASSES.** MEASURED, three pushes to the same tag:
+      create                    -> rc=0  `* [new tag]`
+      push again, SAME sha      -> rc=0  `Everything up-to-date`   <- THE FALSIFICATION
+      push again, DIFFERENT sha -> rc=1  `the tag already exists in the remote`
+    A reservation is EXACTLY the same-sha case if every writer anchors on the same commit, so the
+    second writer is told it succeeded.
+    (3) **AND THE EXPECT-ABSENT LEASE FAILS THE SAME WAY, WHICH THE BRIEF DID NOT ANTICIPATE.**
+    `git push --force-with-lease=refs/rmd-id/<id>: origin <sha>:refs/rmd-id/<id>` — an empty expected
+    value, i.e. `require this ref to be absent` — ALSO returned rc=0 `Everything up-to-date` against
+    an existing ref holding that same sha. POSITIVE CONTROL: the identical lease against a genuinely
+    absent ref created it, rc=0 `[new reference]`. So the lease is not the missing ingredient; git
+    elides the push entirely when local and remote already agree, and no ref update is negotiated.
+    (4) **THE PRIMITIVE THAT DOES WORK IS A UNIQUE SHA PER WRITER, NOT A NAMESPACE AND NOT A LEASE.**
+    MEASURED with two orphan commits over an empty tree (`git commit-tree $(git hash-object -t tree
+    /dev/null)`), which share no history:
+      writer A -> free id             rc=0  `* [new reference]`
+      writer B -> the SAME id         rc=1  REJECTED, non-fast-forward
+      writer B -> a different id      rc=0  `[new reference]`   (positive control)
+    Unrelated histories can never fast-forward, so the rejection is structural rather than lucky.
+    THAT is the create-if-absent CAS, and it is a property of the PAYLOAD, not of `refs/tags/`.
+    (5) THE NAMESPACE CHOICE IS ABOUT CLONE POLLUTION, AND IS ALSO MEASURED. With 9 probe refs live
+    under `refs/rmd-id/*`, a default `git fetch` brought down ZERO of them. POSITIVE CONTROL on the
+    same fetch: the single probe TAG did land locally. So a tag scheme would put a ref per id in
+    every clone forever and a custom namespace puts none.
+    (6) **AND THE SUBSTRATE FINDING IS WHY THIS IS A FIX AND NOT A REWRITE.**
+    `src/lib/task-id-reservation.ts` ALREADY implements exactly this idea — its own doc names the
+    defect (`the mint is a SNAPSHOT`, sharding `traded a conflict you cannot merge for a merge that
+    poisons the plan`) and it is `O_EXCL`-atomic by construction. It has simply never had a substrate
+    any other writer can see: it writes one file per id under `<root>/state/task-id-reservations`,
+    and on this host that directory has existed since 2026-08-14 and is EMPTY. POSITIVE CONTROL:
+    `last-auto-triage.json` sits beside it, so state in that directory does persist — the
+    reservations are the thing that never accumulates. THE DESIGN WAS ALWAYS RIGHT AND NEVER HAD
+    SOMEWHERE TO WRITE."
+  design: "(i) WHERE IT HOOKS IN: BETWEEN MINT AND USE, NEVER BESIDE THE PUSH. `mintNextTaskIdWithHistory`
+    computes a candidate from four sources; NONE of them reserves. `reserveTaskIdFrom` already takes
+    that answer as a STARTING point and only ever moves upward. Keep that contract exactly and swap
+    what it consults: attempt `refs/rmd-id/W1-T<n>` with a per-process orphan commit; on rejection
+    increment and retry. **BOUND THE RETRY AND FAIL LOUD** — a small fixed ceiling, then refuse with
+    the attempted range named. An unbounded retry loop against a network service is what spent 11,213
+    GraphQL calls in one morning, and this loop would run against the same host.
+    (ii) IT MAKES THE PUSH GATE REDUNDANT, AND SAYING SO IS PART OF THE VALUE. The gate sessions
+    currently hand-roll — re-sweep every remote branch, compare, then `if [ $TAKEN -eq 0 ]; then git
+    push` — is a local approximation of this primitive with a window between the sweep and the push.
+    With a reservation held from mint time the window is closed at the source, and the hand-rolled
+    gate should be retired rather than kept as a belt.
+    (iii) NEVER RELEASE, AND THE COST ARGUMENT IS THE WHOLE ARGUMENT. An abandoned filing burns an
+    id. Ids are integers; the plan is near 530; a ref is a 41-byte file and the probe namespace held
+    9 with no measurable effect. Release-on-merge adds a distributed-state problem (who releases, on
+    what event, what if it half-fails) to buy back something free. **RECOMMEND NEVER RELEASING**, and
+    treat a gap in the id sequence as normal rather than as evidence of anything.
+    (iv) OFFLINE MUST REFUSE, NOT MINT OPTIMISTICALLY. A writer that cannot reach origin cannot
+    reserve, and an optimistic mint is precisely today's failure with extra steps. Refusing matches
+    the fail-closed posture the rest of the fleet already takes, and the failure is loud and local.
+    (v) THE COORDINATION-FREE ALTERNATIVES LOSE, AND ONE OF THIS BRIEF'S REASONS DOES NOT SURVIVE
+    RE-DERIVATION — SAY SO RATHER THAN REPEATING IT. `taskRecordPath` (`src/lib/plan.ts`) builds
+    `plan/tasks.d/<id>-<slug>.yaml` FROM the id, and `idOrdinal` feeds `compareDispatch`
+    (`src/lib/drain.ts`) as a real tiebreak after priority and `undeclaredScopeLast` — so id SHAPE
+    and id ORDER are both load-bearing, and ~530 existing ids cannot be migrated. THE CLAIM THAT DOES
+    NOT HOLD: that a timestamp id breaks the `/^run-(.+)-\\d+$/` head-branch pattern. MEASURED —
+    `run-W1-T1786799102812-1786802635382` captures `W1-T1786799102812`, CORRECTLY, because `.+` is
+    GREEDY and leaves only the final `-<epoch>` to the suffix. The real fragility is narrower and
+    worth recording accurately: once the id is itself `\\d+`, that pattern's correctness rests
+    entirely on the quantifier staying greedy, so a one-character edit to `.+?` would silently
+    misattribute every credit. That is an argument for keeping ids non-numeric-suffixed, not the
+    argument the brief made.
+    (vi) NOT IN SCOPE. No change to what the mint COMPUTES — the four sources were fixed twice and
+    are untouched. No id-format change. No detection or branch-protection work: W1-T491 files the
+    push-triggered plan-load check and records `strict: true` protection as the operator's call.
+    THOSE ARE DETECTION AND PREVENTION-BY-REBASE; THIS IS ALLOCATION, AND A CORRECT ALLOCATOR MAKES
+    NEITHER REDUNDANT — a plan can still break by a hand edit or a bad merge, and detection is what
+    catches that."
+  acceptance:
+    - claim: "a second writer reserving an id another writer holds is refused rather than told it succeeded"
+      proof: "unit test: a second reservation of the same task id is refused"
+    - claim: "the reservation payload is unique per writer so an identical-sha push cannot pass silently"
+      proof: "unit test: the reservation anchor differs per writer"
+    - claim: "a writer that cannot reach the remote refuses to mint rather than minting optimistically"
+      proof: "unit test: an unreachable remote refuses to mint an id"
+    - claim: "retrying past a taken id is bounded and fails loudly rather than looping"
+      proof: "unit test: reservation retries are bounded and name the attempted range"
+  origin: recon#id-allocator-substrate-2026-08-15
+  plan_refs: ["W1-T491", "W1-T471"]
+  files: [src/lib/task-id-reservation.ts, src/run-task.ts, test/task-id-reservation.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across two `src/` modules plus `test/`, so
+    `sizingViolation` (`src/lib/task-linter.ts`) returns early before `subsystemsOf` is consulted.
+    The blast radius is genuinely high too: this sits in the path every filing takes.
+    `files:` WAS DERIVED BY INVOCATION COUNT ON THE SYMBOLS THAT CHANGE, measured at a96e9227.
+    `reserveTaskIdFrom(` — `src/lib/task-id-reservation.ts` (2), `src/run-task.ts` (1),
+    `test/task-id-reservation.test.ts` (12). `mintNextTaskIdWithHistory(` — `src/run-task.ts` (5),
+    `test/next-task-id-history.test.ts` (4). `taskIdReservationsDir(` — `src/run-task.ts` (4), plus
+    one each in the module and two suites. `releaseTaskIdReservation(` matches NOTHING anywhere,
+    which is design (iii)'s recommendation already being the status quo.
+    **`src/run-task.ts` IS DECLARED DELIBERATELY AND THE COST IS ACCEPTED.** It is where the mint is
+    called and where `taskIdReservationsDir` is consulted four times, so the wiring genuinely lives
+    there; at ~19,900 lines `partitionByFileOverlap` (W1-T471) serialises this task against every
+    other that names it. That cost is paid on purpose — avoiding it has already shipped two checks
+    dormant.
+    `test/next-task-id-history.test.ts` IS NOT DECLARED: it pins what the mint COMPUTES, which design
+    (vi) forbids changing. A declared-but-untouched path fails `inverseScopeUntouchedFiles`
+    (`src/lib/review.ts`) exactly as an undeclared one fails `scopeViolationFiles`.
+    RULE 25 IS NOT ENGAGED: neither `src/` path matches an `INSTRUMENT_SURFACE` pattern and `test/`
+    is excluded from `isProductPath`.
+    EVERY CRITERION IS A NAME-FILTERED `unit test:` TITLE, NOT A PURE PATH — a pure path runs the
+    whole file and one unrelated failure fails every criterion. Each of the four titles was checked
+    to match zero files under `test/` today against a positive control matching one, and each is
+    under 100 characters with no comma.
+    THE NETWORK FIGURES ARE THIS HOST ON THIS DAY AND ARE NOT THE BRIEF'S. Reservation pushes ran
+    1133/1163/1170/1220/1521 ms against an `ls-remote` baseline of 152/157/161 ms — a marginal cost
+    near one second, roughly double the 0.55s/55ms carried into the brief from another session. One
+    second per filing is still cheap; RE-MEASURE ON THE HOST THAT WILL PAY IT rather than quoting
+    either figure. Every probe ref created for these measurements was deleted and the remote verified
+    back to zero under both `refs/rmd-id/*` and the probe tag."
