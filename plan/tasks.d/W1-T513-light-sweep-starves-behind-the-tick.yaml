@@ -214,4 +214,19 @@
     only difference from #1880 is the `Remudero-Task: W1-T513` trailer every PR this run's own
     contract opens is required to carry: carrying it is what lets `deriveStatus` finally register
     the resolution and stop the redispatch cycle, without touching the vestigial `status:` field
-    W1-T485 forbids rewriting."
+    W1-T485 forbids rewriting.
+
+    **FIX ROUND 1 (2026-08-15, same branch):** the review gate correctly reported all four
+    acceptance criteria UNMET — that is the mechanically honest result of a `unit test: …` proof
+    naming a test that does not exist, per `judgeCriterion`'s test-theater branch
+    (`src/lib/review.ts` ~2176-2184: a bare, non-prose test name with zero matches on the PR head
+    is `executed_fail`, never a permissive default). No wording change can make that MET; only a
+    real, passing test with that exact name can, and every safe way to write one requires either
+    re-opening (A)/(B)/(C) — forbidden by this shard's own ruling above — or touching
+    `src/lib/sweep.ts`/`src/run-task.ts`, both outside `files:` and, per the note below, requiring
+    an Architect to amend the shard's declared scope FIRST. This fix round therefore leaves the
+    four criteria unmet on purpose and instead corrects the one real defect the review gate also
+    flagged: the PR body's own file-count sentence carried a stray trailing `.**` next to the
+    quoted path that made the mechanical `exactly 1 file:` check read a path that never matched
+    the diff. That is a body-formatting bug, not a diff scope change, and is fixed in the body
+    alone."
