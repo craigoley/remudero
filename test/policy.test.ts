@@ -39,7 +39,7 @@ const SHIPPED = policyPath(REPO_ROOT);
 /** A minimal, valid `plan/tasks.yaml` body — just enough for `loadPlan` to accept it;
  *  these lint-plan integration tests are about `plan/policy.yaml`, not task shape. */
 const MINIMAL_VALID_TASKS_YAML =
-  "- id: FIXTURE-T1\n  title: policy lint fixture\n  repo: remudero\n  type: implement\n  origin: architect\n  risk: medium\n";
+  "- id: FIXTURE-T1\n  title: policy lint fixture\n  repo: remudero\n  type: implement\n  origin: architect\n  risk: medium\n  files: [src/lib/example.ts]\n";
 
 /** Build a fixture `<dir>/plan/{tasks.yaml,policy.yaml}` pair — `tasks.yaml` always
  *  minimal-valid, `policy.yaml` the caller's raw table — and return the tasks.yaml path

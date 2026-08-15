@@ -209,7 +209,8 @@ test("rmd lint-plan --plan <outside root> --base HEAD: still refused BY NAME —
 test("rmd lint-plan --plan <inside root>: the summary line carries the absolute path + content hash of the plan file actually opened", async () => {
   const fixtureDir = mkdtempSync(join(repoRoot, "test", ".tmp-w1-t120-"));
   const fixturePlan = join(fixtureDir, "tasks.yaml");
-  const raw = "- id: FIXTURE-T1\n  title: identity fixture\n  repo: remudero\n  type: implement\n  origin: architect\n  risk: medium\n";
+  const raw =
+    "- id: FIXTURE-T1\n  title: identity fixture\n  repo: remudero\n  type: implement\n  origin: architect\n  risk: medium\n  files: [src/lib/example.ts]\n";
   writeFileSync(fixturePlan, raw, "utf8");
   try {
     assert.equal(isPathOutsideRoot(repoRoot, fixturePlan), false, "sanity: the fixture must be IN-root for this test to exercise the identity line rather than the refusal");
