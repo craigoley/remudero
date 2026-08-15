@@ -231,6 +231,7 @@ export function filedTaskRelintPrompt(lane: string, filedIds: ReadonlyArray<stri
   return [
     `The task(s) you just filed (${filedIds.join(", ")}) FAILED the plan's own linter (rmd lint-plan) and CANNOT be proposed as-is. CI runs this same linter as a REQUIRED check, so a PR filed this way could not merge. Fix EVERY blocking violation below by editing the plan files in this working directory, then print your verdict line again.`,
     `Do NOT re-file under different ids and do NOT touch any task other than ${filedIds.join(", ")} — every other violation in this plan belongs to someone else.`,
+    "If a violation names a missing or empty `files:`, declare the repo-relative paths that task will touch — an undeclared scope is fail-closed at dispatch and serialises the lane. Never omit it and never leave it empty.",
     "",
     ...relintGuidanceLines(violations),
     "",

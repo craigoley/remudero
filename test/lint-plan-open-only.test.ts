@@ -176,6 +176,7 @@ function fixtureTask(id: string, status: string, clean: boolean): string {
     "  verify: auto",
     `  status: ${status}`,
     "  attempts: 0",
+    "  files: [test/lint-plan-open-only.test.ts]",
     "  acceptance:",
     '    - claim: "the thing holds"',
     `      proof: "${proof}"`,

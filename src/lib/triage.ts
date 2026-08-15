@@ -202,6 +202,10 @@ export function triagePrompt(entry: FeedbackEntry, runId: string, mintedId?: str
     "  NEVER append a new task to plan/tasks.yaml: 69 filings appending to one 12.5k-line file all",
     "  collide at EOF, which is the conflict storm W1-T122 sharded the plan to prevent.",
     "  REWIRING an EXISTING task edits wherever that task already lives (the monolith or its shard).",
+    "  EVERY new or rewired task MUST declare `files:` — the repo-relative paths it will touch.",
+    "  An absent or EMPTY list is fail-closed at dispatch: overlappingPaths reports it as overlapping",
+    "  every co-dispatched candidate, so the task can never batch and serialises the lane behind it.",
+    "  You have Read/Grep/Glob here — derive the paths, never omit the field and never leave it empty.",
     "  MASTER-PLAN.md remains a legitimate target for a plan amendment. Every new or rewired task MUST carry",
     `  \`origin: feedback#${entry.id}\` so the provenance is traceable.`,
     ...(mintedId

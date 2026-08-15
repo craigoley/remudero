@@ -164,7 +164,7 @@ const SIBLING_TITLE_A = "the citation-loop worker records which learnings a task
 const SIBLING_TITLE_B = "the citation-loop worker records which learnings a task actually cited during its retro";
 
 test("ACCEPTANCE 3: a sibling task title above cutoff WARNS, and lintTask stays ok:true", () => {
-  const candidate = task({ id: "W1-T900", title: SIBLING_TITLE_A });
+  const candidate = task({ id: "W1-T900", title: SIBLING_TITLE_A, files: ["src/lib/example.ts"] });
   const opts: LintOpts = { openTaskTitles: [{ id: "W1-T901", text: SIBLING_TITLE_B }] };
 
   const direct = duplicateTitleViolations(candidate, opts);

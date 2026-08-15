@@ -94,6 +94,7 @@ const CLEAN_TASKS_YAML = `
   verify: auto
   risk: medium
   origin: "onboard:elicit-priorities"
+  files: [src/catalog/search.ts]
   acceptance:
     - claim: "the widget catalog search ships"
       proof: "unit test: widget catalog search returns results"

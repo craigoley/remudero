@@ -43,6 +43,7 @@ test("ACCEPTANCE 1: a `demonstration:` proof on a verify:human task lints clean 
   const t = task({
     id: "FIX-DEMO-HUMAN-CLEAN",
     verify: "human",
+    files: ["src/lib/example.ts"],
     acceptance: [{ claim: "the chaos drill recovers within SLA", proof: DEMO_PROOF }],
   });
   assert.deepEqual(proofDialectViolations(t), []);

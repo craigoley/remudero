@@ -1,0 +1,155 @@
+- id: W1-T514
+  title: "the sweep's escalate gate is keyed by PR NUMBER while every sibling dedup set is keyed by pr@head, so a PR that escalated once never escalates again however it breaks later — and W1-T195 built the head-aware transport dedup for this exact caller, which the upstream gate makes unreachable"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  rationale: "MEASURED ON THE MINI's FULL LEDGER UNION, 2026-08-15. Corpus per form — `.gz` 666
+    files, plain 4, live 1, 671 total. COVERAGE control (rows opened per form, so a form that was
+    never globbed is visible rather than silent): gz 4,257,015 rows / 2,547,918 `sweep.disposed`;
+    plain 64,663 / 7,827; live 13,736 / 1,157. Full-line deduped that is **16,598 distinct disposed
+    lines over 773 PRs**, spanning 2026-07-17T22:02:56Z .. 2026-08-13T00:30:31Z. The rotations
+    duplicate heavily, so the raw 2.5M is NOT the population and is not cited as one.
+
+    THE DEFECT IS ONE KEY, AND ITS SIBLINGS ARE THE CONTROL. In `runSweep` (`src/lib/sweep.ts`) the
+    `alreadyDone` switch keys `mergeable` on `${pr.prNumber}@${pr.headSha}`, `blocked-fixable` and
+    `conflicted` on the same, `dep-review` on the same, and `post-review` on
+    `${pr.taskId}@${pr.headSha}` — each with its own comment saying why a new head must RE-EARN the
+    attempt. `blocked-ambiguous` alone reads `prior.escalated.has(pr.prNumber)`, with no comment
+    justifying the difference, and `priorActionsFromLedger` fills it with a bare `escalated.add(pr)`.
+    `prior.armed`'s own comment states the rule the escalate arm does not follow: keyed by PR number
+    alone the set had NO EXPIRY, and one `acted:true` line deduped that PR forever.
+
+    THE CONSEQUENCE, COUNTED. 214 PRs escalated at least once. **54 of them were later dispositioned
+    `blocked-ambiguous` at a DIFFERENT head sha with the escalation suppressed — 468 rows.** Every
+    one of those 468 carries NO `stand_down_reason`, which is the discriminator that makes them the
+    DEDUP GATE rather than one of the named stand-downs beside it (the unattributable-filing arm and
+    the ABSENT re-push arm both write a reason; re-running the same query with `stand_down_reason is
+    None` required returns the identical 54/468, so the two sets do not overlap at all). **14 of the
+    suppressed rows read `fix strikes exhausted` at the later head** — a fresh, actionable,
+    ladder-exhausted block silenced by an issue opened against a sha that no longer exists.
+
+    AND THE TRANSPORT ALREADY SOLVED THIS — THE GATE IN FRONT OF IT IS WHAT MAKES THE FIX DORMANT.
+    `escalate()` (`src/lib/escalate.ts`) carries a COMPOSITE dedup key whose optional dimensions are
+    `headSha` and `cause`, and its own doc names the beneficiaries verbatim: the fix rung's
+    strike-exhaustion escalate and THE CLARIFICATION RUNG'S BLOCKED-AMBIGUOUS ESCALATE 'get the real
+    fix W1-T195 exists for: a new push (new headSha) or a different cause on the same sha each open
+    their own issue instead of being silenced by a stale one.' Because `prior.escalated` decides
+    whether `escalate()` is CALLED AT ALL, and it is PR-keyed, that head dimension is never reached
+    for the very caller W1-T195 cites. This is the dormancy genre W1-T488/W1-T497 and W1-T114 all
+    belong to — a correct mechanism, merged and tested, that no production path can invoke.
+
+    THE AUTHOR ALREADY NAMED THE FAILURE, IN THE FILE. The ABSENT re-push arm keeps `acted` false and
+    explains why in terms: `acted:true` on a blocked-ambiguous line feeds `prior.escalated`, so
+    claiming it 'would tell every later pass this PR was already escalated — and the PR would then
+    never escalate at all, which is the very silent-forever failure this remedy exists to end.' That
+    is a local workaround for one arm of one disposition. The permanence it works around is general.
+
+    CONTROL THAT THE SHA-KEYED SETS REALLY DO RE-EARN, so the 54 are not an artifact of PRs simply
+    never changing head: 24 PRs took a real fix dispatch at MORE THAN ONE head (`prior.fixed`,
+    sha-keyed), against **1** PR ever escalated at more than one head. The `armed` set is NOT usable
+    as a control here and is deliberately not cited as one — `pr.autoMergeArmed === true` (GitHub's
+    observed state) short-circuits before its sha-keyed fallback is consulted, so its 0 says nothing
+    about keying."
+  design: |
+    (i) KEY THE ESCALATE SET THE WAY EVERY SIBLING IS KEYED. `priorActionsFromLedger`
+    (`src/lib/sweep.ts`) stores `${pr}@${head_sha}` for the blocked-ambiguous arm, and the
+    `alreadyDone` switch reads `prior.escalated.has(`${pr.prNumber}@${pr.headSha}`)`. Both edits are
+    one line each and sit beside the sibling arms they are being made to match. NOTHING ELSE IN THE
+    SWITCH CHANGES.
+    (ii) ADD NO NEW SIGNAL — THE CONSUMER ALREADY EXISTS AND IS THE POINT. This task wires no ledger
+    step and no new field. What it does is make `escalate()`'s existing `headSha` dimension reachable
+    from the sweep, so a new head opens its own issue exactly as W1-T195 designed. An implementer who
+    reaches for a new step has misread the task: `daemon.tree_dirty` and `daemon.stale_code` (W1-T494,
+    #1833) both fire and nothing reads either, and that is the outcome to avoid.
+    (iii) THE STORM IS THE REAL RISK AND MUST BE ARGUED, NOT ASSUMED AWAY. Sha-keying means a PR that
+    pushes ten times can open ten issues. Two bounds already exist to mirror rather than invent:
+    `escalate()`'s own open-issue search (it never matches a CLOSED issue, so an operator's resolution
+    does not silence a recurrence) and `policy.reviewOrphanCap`, which caps how many times one PR may
+    re-earn a lane before escalating instead. IF A BOUND IS NEEDED, MIRROR `reviewOrphanCap`. DO NOT
+    REVERT TO PR-KEYING as the bound — that is the defect. And cost it: `sweepEscalationReconcile`
+    (the closure leg) already runs on the daemon's own poll cadence, so the steady-state issue count
+    is bounded by open PRs, not by pushes.
+    (iv) FALSIFIER, BOTH DIRECTIONS, AT THE SAME PR. A PR escalated at head A and re-dispositioned
+    blocked-ambiguous at head B escalates AGAIN; the SAME PR re-dispositioned at head A does NOT.
+    Reverting the key fails the first; dropping the dedup entirely fails the second.
+    (v) THE UNATTRIBUTABLE-FILING ARM MUST KEEP STANDING DOWN. A plan-filing PR with no
+    `Remudero-Task:` trailer stands down with a named reason and never escalates; that arm is checked
+    BEFORE the dedup and must be unaffected by this change, or every plan PR starts escalating per
+    push.
+    (vi) NOT IN SCOPE, AND EACH IS OWNED OR REFUSED ELSEWHERE. The sweep's cadence and what occupies
+    the main tick — W1-T513 (#1868). Rate-limited review attempts — W1-T511 (#1866). An elapsed-time
+    ceiling on `blocked-fixable`: COSTED AND REFUSED, see the note. The `escalated` set's behaviour
+    across a ledger rotation (one PR in the corpus escalated twice, consistent with its earlier row
+    rotating out of the retained window) — real, but it is `DECISION_RELEVANT_LEDGER_STEPS`'s concern,
+    not this key's.
+  acceptance:
+    - claim: "a pull request escalated at one head escalates again when a later head is blocked"
+      proof: "unit test: W1-T514: a new head re-earns its own escalation"
+    - claim: "the same head still escalates only once so a held condition does not storm"
+      proof: "unit test: W1-T514: the same head still escalates only once"
+    - claim: "the escalate call carries the head sha so the transport can tell two heads apart"
+      proof: "unit test: W1-T514: the escalation carries the head it was raised against"
+    - claim: "a plan filing with no task trailer still stands down instead of escalating"
+      proof: "unit test: W1-T514: an unattributable filing still stands down"
+  origin: recon#red-prs-sat-unfixed-2026-08-15
+  plan_refs: ["W1-T195", "W1-T513", "W1-T511", "W1-T382", "W1-T114"]
+  files: [src/lib/sweep.ts, test/sweep.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `src/` and `test/`, and the blast radius
+    is independently high: this changes when the fleet opens a needs-human issue, so getting it wrong
+    is either a silent PR or an issue storm, and W1-T114's own history records 57 issues opened in one
+    day when an escalation bound misbehaved. budget_usd 35 — two one-line key changes and a four-way
+    falsifier.
+
+    `files:` IS TWO PATHS, DERIVED BY INVOCATION COUNT at origin/main, and both will be touched.
+    `src/lib/sweep.ts` holds `alreadyDone` (13 references, all there) and `prior.escalated` (2), and
+    is the only `src/` file that mentions either. `test/sweep.test.ts` is the home suite by weight —
+    `escalated` scores 45 there against 8 in `test/sweep-absent-repush.test.ts` and 1 in
+    `test/sweep-conflicted-disposition.test.ts`. `src/lib/escalate.ts` IS DELIBERATELY NOT DECLARED:
+    its composite key already carries `headSha` and needs no edit — the whole point is that it is
+    correct and unreachable — so declaring it would fail `inverseScopeUntouchedFiles`
+    (`src/lib/review.ts`). `src/run-task.ts` is NOT declared and must not be: the change does not live
+    there, and it is ~19,900 lines that `partitionByFileOverlap` (W1-T471) serialises against every
+    other task naming it.
+
+    TWO NEGATIVE FINDINGS FROM THE SAME RECON, RECORDED HERE SO THEY ARE NOT RE-FILED.
+    (1) BLOCKED-AMBIGUOUS IS NOT TERMINAL, and any shard resting on that premise is wrong.
+    Dispositions are re-derived fresh every pass and the rule table carries no memory of the prior
+    one. Measured over the same union: **280 transitions OUT of blocked-ambiguous across 220 of 773
+    PRs — 117 to post-review, 96 to blocked-fixable, 29 to mergeable, 37 to wait, 1 to stale.** A red
+    PR is not in that state at all: `isBlockedCi` claims it one row earlier as `blocked-fixable`.
+    (2) AN ELAPSED-TIME CEILING ON `blocked-fixable` WAS COSTED AND REFUSED, and refusing it is the
+    finding. Separating heads eventually dispatched to (213) from heads never dispatched to (78) by
+    minutes-since-first-red gives a FALSE-POSITIVE RATE OF 74% AT 10 MINUTES, 84% AT 30, and 92% AT
+    60; the never-dispatched population is SHORTER-lived (max 60.9m) than the eventually-dispatched
+    one (max 134.7m, p90 43.0m), so no threshold separates them. A stand-down-count derivative does no
+    better (44-67%). That bound would have been the FOURTH instance of the family CLAUDE.md already
+    names — W1-T312's ci-gate cap, W1-T380's deploy ceiling, W1-T382's 21-of-21 check-wait — a bound
+    that fires on a healthy condition.
+
+    WHAT THE RECON COULD NOT MEASURE, STATED AS A LIMIT RATHER THAN A ZERO. The two PRs that prompted
+    it (#1863, #1864) were handled by the AZURE daemon, and this host has NO ROUTE to that ledger — no
+    ssh key, no HTTP on the probed ports, and the tailnet carries only the mini. Their per-pass
+    disposition sequence is therefore UNMEASURED, not absent, and every figure above comes from the
+    mini's corpus, which ends 2026-08-13 and contains neither PR (positive control: #1844, #1849 and
+    #1830 also read 0 rows there, so the zero is corpus age, not a broken query). RE-DERIVE ON AZURE
+    BEFORE BUILDING. What IS established for those two from GitHub: both went red (14:53 open ->
+    15:10:46Z first red; 14:54 -> 15:12:16Z) and sat 20.7 and 23.2 minutes with no fix commit, no
+    comment, no issue and no `remudero-review` status on either original head, until a human pushed.
+
+    PROOF NOTES: all four proofs are NAME-FILTERED titles, not pure paths — a pure path runs the whole
+    suite and one unrelated failure fails every criterion. Each title was verified to match ZERO paths
+    on origin/main today against a positive control matching exactly one, and each is under 100
+    characters with no comma, so `looksLikeScenarioNarrative` (`src/lib/task-linter.ts`) cannot fail
+    them. No proof names this shard, so the implementation is not capped at 0/N by self-reference.
+
+    ID PROVENANCE: origin/main's max is 513 by BOTH declaration and shard filename, matched
+    suffix-aware so `W1-T51` cannot be read as `W1-T513`; no open PR carries a `plan/` file at all, so
+    no id is minted behind one. Re-swept against a fresh fetch immediately before push and gated on
+    the sweep reading zero, with a positive control requiring a known-taken id to read 1 — the id trap
+    has fired eight times in four days and twice took `origin/main` down."

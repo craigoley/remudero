@@ -86,6 +86,7 @@ const CLEAN_FRAGMENT = `
   status: queued
   attempts: 0
   origin: architect
+  files: [src/lib/example.ts]
   acceptance:
     - claim: "the candidate does the thing"
       proof: "unit test: fixture X -> observable Y"
@@ -278,6 +279,7 @@ test("a drafted task depending on a SIBLING task in the same fragment is exempt 
   status: queued
   attempts: 0
   origin: architect
+  files: [src/lib/example.ts]
   acceptance: [{claim: "a", proof: "unit test: fixture -> observable"}]
 - id: W1-T911
   title: "sibling B, depends on sibling A"
@@ -289,6 +291,7 @@ test("a drafted task depending on a SIBLING task in the same fragment is exempt 
   status: queued
   attempts: 0
   origin: architect
+  files: [src/lib/example.ts]
   acceptance: [{claim: "b", proof: "unit test: fixture -> observable"}]
 `;
   const anchor: EvidenceAnchor = { description: "x", pattern: "landed", path: "MASTER-PLAN.md" };

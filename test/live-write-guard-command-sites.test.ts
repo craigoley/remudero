@@ -300,7 +300,7 @@ test("GUARDED SITE approve push and pr-create: the REAL un-injected gateway reac
         "P-GUARD": {
           proposalId: "P-GUARD",
           fragmentYaml:
-            "- id: NEW-1\n  title: fixture drafted task\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n",
+            "- id: NEW-1\n  title: fixture drafted task\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n  files: [src/lib/example.ts]\n",
           stampLine: "- P-GUARD (plan) — RATIFIED -> NEW-1.",
           anchorFingerprint: "",
         },
@@ -381,7 +381,7 @@ test("GUARDED SITE approve degraded-mint refusal: the REAL gateway throws before
         "P-DEGRADE": {
           proposalId: "P-DEGRADE",
           fragmentYaml:
-            "- id: NEW-1\n  title: fixture drafted task\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n",
+            "- id: NEW-1\n  title: fixture drafted task\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n  files: [src/lib/example.ts]\n",
           stampLine: "- P-DEGRADE (plan) — RATIFIED -> NEW-1.",
           anchorFingerprint: "",
         },

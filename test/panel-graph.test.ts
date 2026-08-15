@@ -1095,6 +1095,7 @@ const READY_FRAGMENT = `
   status: queued
   attempts: 0
   origin: architect
+  files: [src/lib/example.ts]
   acceptance:
     - claim: "the candidate does the thing"
       proof: "unit test: fixture X -> observable Y"
@@ -1108,6 +1109,7 @@ const READY_FRAGMENT = `
   status: queued
   attempts: 0
   origin: architect
+  files: [src/lib/example.ts]
   acceptance:
     - claim: "the candidate does the other thing"
       proof: "unit test: fixture Y -> observable Z"

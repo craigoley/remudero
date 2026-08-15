@@ -360,7 +360,7 @@ test("planHealthSweep: an OPEN task violating a standing rule (Rule 19 sizing) i
       { claim: "launchctl loads the unit", proof: "unit test asserts the unit" },
     ],
   });
-  const clean = task({ id: "W1-T-CLEAN" });
+  const clean = task({ id: "W1-T-CLEAN", files: ["src/lib/bar.ts"] });
   const report = planHealthSweep([violating, clean]);
   assert.equal(report.flags.length, 1);
   assert.equal(report.flags[0]!.taskId, "W1-T-SEED");
@@ -416,14 +416,14 @@ test("planHealthSweep: a task whose yaml status says 'merged' is still linted wh
 });
 
 test("planHealthSweep: a WARN-only violation (budget-sanity) is never filed as a corrective task", () => {
-  const t = task({ id: "W1-T-WARN" });
+  const t = task({ id: "W1-T-WARN", files: ["src/lib/foo.ts"] });
   const report = planHealthSweep([t], () => ({ mountMaxTurns: 10, calibration: { avgTurns: 45.2 } }));
   assert.deepEqual(report.flags, []);
   assert.deepEqual(report.correctiveTasks, []);
 });
 
 test("renderPlanHealth reports 'no violations' when the open queue is clean", () => {
-  const report = planHealthSweep([task({ id: "W1-T-CLEAN" })]);
+  const report = planHealthSweep([task({ id: "W1-T-CLEAN", files: ["src/lib/foo.ts"] })]);
   assert.match(renderPlanHealth(report), /No violations/);
 });
 
