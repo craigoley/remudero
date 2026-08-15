@@ -427,9 +427,10 @@ test("W1-T497 ACCEPTANCE 1+3: the --base changed-tasks pass WARNS on a zero-reso
   // directory under a parallel runner, which is the ENOENT crash #1873/#1874 guards the symptom of.
   // The probe still has to be ABSENT AT THE BASE REF for `changedTaskIds` to count it new-in-scope,
   // and an untracked file under the COMMITTED fixture satisfies that exactly as it did before.
-  const fixturePlan = join(REPO_ROOT, "test", "fixtures", "live-plan-writers", "tasks.yaml");
-  const shardPath = join(REPO_ROOT, "test", "fixtures", "live-plan-writers", "tasks.d", "zzz-w1-t497-wiring-probe.yaml");
+  const fixturePlan = join(REPO_ROOT, "test", "fixtures", "live-plan-writers", "wiring", "tasks.yaml");
+  const shardPath = join(REPO_ROOT, "test", "fixtures", "live-plan-writers", "wiring", "tasks.d", "zzz-w1-t497-wiring-probe.yaml");
   assert.equal(existsSync(shardPath), false, "the probe shard must not already exist on disk");
+  mkdirSync(dirname(shardPath), { recursive: true }); // the fixture ships no tasks.d until a probe needs one
   const livePlanBefore = execFileSync("git", ["-C", REPO_ROOT, "status", "--porcelain", "--", "plan/"], { encoding: "utf8" }).trim();
   writeFileSync(shardPath, probeShardYaml(), "utf8");
   try {

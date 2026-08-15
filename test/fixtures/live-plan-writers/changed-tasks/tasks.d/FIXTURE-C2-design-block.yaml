@@ -1,7 +1,7 @@
-# W1-T515: the shard `test/changed-tasks-raw-text.test.ts` edits in place. It carries a `design:`
-# block because that suite's whole point is that a DESIGN-ONLY edit — parsed-invisible, raw-visible
-# — must still count as changed. Editing this instead of a real task record keeps `plan/` untouched.
-- id: FIXTURE-T2
+# W1-T515: the shard `test/changed-tasks-raw-text.test.ts` edits in place and restores. It carries a
+# `design:` block because that suite's whole point is that a DESIGN-ONLY edit — parsed-invisible,
+# raw-visible — must still count as changed.
+- id: FIXTURE-C2
   title: "a fixture shard carrying a design block for the raw-text changed-task probe"
   repo: remudero
   depends_on: []

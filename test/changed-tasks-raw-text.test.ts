@@ -106,8 +106,10 @@ test("a design-only edit to a real shard raises the --base checked count from 0 
   // The fixture is COMMITTED so `--base HEAD` can resolve it (`git show <ref>:<relPath>` exits 2 on
   // a path absent at the ref, which is why a temp directory cannot serve this test at all), and it
   // lives UNDER the repo root because an explicit `--plan` outside it is refused by name (W1-T120).
-  const fixturePlan = join(REPO_ROOT, "test", "fixtures", "live-plan-writers", "tasks.yaml");
-  const target = join(REPO_ROOT, "test", "fixtures", "live-plan-writers", "tasks.d", "FIXTURE-T2-design-block.yaml");
+  // ONE ROOT PER SUITE: these two suites run concurrently, so a shared fixture root would put the
+  // wiring probe's shard inside this test's "0 changed" control — the same cross-suite race, moved.
+  const fixturePlan = join(REPO_ROOT, "test", "fixtures", "live-plan-writers", "changed-tasks", "tasks.yaml");
+  const target = join(REPO_ROOT, "test", "fixtures", "live-plan-writers", "changed-tasks", "tasks.d", "FIXTURE-C2-design-block.yaml");
   const original = readFileSync(target, "utf8");
   const planDirtyDuringRun: string[] = [];
   try {
@@ -164,7 +166,7 @@ test("the changed-task base comparison runs against a fixture shard", () => {
   assert.match(targetLine!, /fixtures/, "the design-only edit must target test/fixtures, never a real task record");
   assert.doesNotMatch(targetLine!, /"plan",\s*"tasks\.d"/, "the edit must not address the live plan/tasks.d/ directory");
   // The fixture it edits must actually carry a design block, or the probe would assert nothing.
-  const fixture = readFileSync(join(REPO_ROOT, "test", "fixtures", "live-plan-writers", "tasks.d", "FIXTURE-T2-design-block.yaml"), "utf8");
+  const fixture = readFileSync(join(REPO_ROOT, "test", "fixtures", "live-plan-writers", "changed-tasks", "tasks.d", "FIXTURE-C2-design-block.yaml"), "utf8");
   assert.match(fixture, /design: \|/, "the fixture shard must carry the design block the probe edits");
   // CONTROL: repo-root-anchored joins are still present in this file, so a zero above would be
   // the query failing rather than the fix working.
