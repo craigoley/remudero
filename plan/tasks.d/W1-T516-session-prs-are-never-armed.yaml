@@ -1,0 +1,129 @@
+- id: W1-T516
+  title: "the sweep already reviews a session PR and already knows how to arm one — it just passes `pr.taskId` RAW where three other lanes mint a `PR-<n>` fallback, so `armAutoMerge` refuses at its first line and nothing merges; the fix is one argument plus a policy flag, not a merge-policy subsystem"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  rationale: "MEASURED ON THE MAC MINI AT c7b94b15 from source and from the live repo settings over
+    REST; no GraphQL was spent.
+    (1) THE EXCLUDING PREDICATE IS ONE LINE, AND IT IS NOT BRANCH-NAMING. `armAutoMerge`
+    (`src/run-task.ts`) opens `if (!taskId) { … return \"no-task-id\"; }` — BEFORE the head read and
+    before the ledger verdict. A session branch carries no task id, so the call returns
+    `no-task-id` and `attemptArm` is never reached. THE GAP IS ARMING, NOT SEEING: the sweep
+    enumerates and reviews these PRs already.
+    (2) AND THE SWEEP IS THE ONLY LANE THAT PASSES THE ID RAW. Its dep reads
+    `arm: (pr) => armAndLogOutcome(pr.prUrl, pr.taskId, log, armImpl, \"sweep\")`. THREE OTHER LANES
+    ALREADY MINT A SYNTHETIC ID FOR EXACTLY THIS CASE: the review lane keys its ledger to
+    `taskId ?? PR-<n>`, `escalationTaskIdFor` returns `pr.taskId ?? PR-<n>`
+    with a doc saying `PR-<n>` is 'NOT a new convention — it is the SAME synthetic id the review
+    lane already mints at four call sites', and `approveCommand` passes a literal PR-<n>
+    because a ratification PR carries no trailer BY DESIGN. So the fallback exists, is documented
+    as the house identity, and the sweep is the one caller that does not use it.
+    (3) WHICH MAKES THE LEDGER GATE WORK UNCHANGED, AND THAT IS THE LOAD-BEARING PART.
+    `decideArmFromLedgerVerdict` looks the verdict up by task id, and the sweep's own review of a
+    session PR is ALREADY ledgered under `PR-<n>` (the review lane's `task_id: taskId ?? PR-<n>`).
+    Pass the same fallback at the arm and the key matches by construction — no new ledger shape, no
+    second verdict store, no change to `decideAutoMergeArm`.
+    (4) THE CLEAN-STATUS CASE IS ALREADY SOLVED, SO A NEW ARM PATH INHERITS IT. GitHub refuses
+    `--auto` on an already-mergeable PR, and `attemptArm` catches exactly that: `armFailureAction`
+    returns `direct-merge` on `/clean status/i` and the fallback merges immediately
+    (`automerge.clean_status_direct_merge`). Anything else returns `ignore`. Both branches live
+    below `armAutoMerge`, so this task adds no GitHub mechanics.
+    (5) THE REPO PRECONDITIONS HOLD, READ FROM THE LIVE SETTINGS: `allow_auto_merge: true`, branch
+    protection on `main` with TWO required checks (`remudero-review`, `ci-gate`), `strict: false`,
+    `enforce_admins: true`, and `required_pull_request_reviews: null` — NOTHING WAITS ON A HUMAN
+    APPROVAL, which is precisely why arming merges rather than queueing.
+    (6) AND THE 2026-03-25 422 REPORT DOES NOT APPLY HERE — DO NOT CARRY IT. It concerns merge
+    queues and rulesets; this repo uses classic branch protection, and arm-at-open demonstrably
+    works today (`armAutoMergeAtOpen` fires ~16s after PR-open and PRs merge on it). An
+    implementer who assumes the inverted behaviour will build a gate nothing needs."
+  design: "(i) THE CHANGE IS ONE ARGUMENT AND ONE FLAG. Pass the existing `PR-<n>` fallback at the
+    sweep's arm dep instead of the raw `pr.taskId`, and gate the whole behaviour on a
+    `plan/policy.yaml` key the operator can flip. That store already carries `sweep`, `autoTriage`,
+    `retro`, `headroom`, `launchd` and `dailyCostCeilingUsd`, so the shape is established and
+    `loadPolicy` already reads it.
+    (ii) STATE PLAINLY WHAT THE FLAG TURNS ON, BECAUSE IT IS NOT 'THE SAME CHECKS' IN THE SENSE THE
+    PHRASE SUGGESTS. `decideAutoMergeArm` (`src/lib/review.ts`) refuses when `state !== success`,
+    arms when `!capped`, and — the branch that matters — ARMS WHEN `capped && planOnly`. Most
+    session PRs are shard filings, which are exactly that shape. SO ENABLING THIS MEANS SHARDS
+    MERGE UNATTENDED ON STRUCTURAL CHECKS ALONE — `lint-plan`, the plan-PR emitter and the
+    plan-index check — with ZERO EXECUTED PROOFS. The operator already ruled that acceptable for
+    triage (W1-T489); this shard says it out loud so it is a decision rather than a discovery.
+    (iii) THE ESCAPE HATCH IS NATIVE AND COSTS NOTHING — DRAFT. A draft PR cannot be merged, and
+    `gh pr merge --auto` on one fails with a message that does NOT match `/clean status/i`, so
+    `armFailureAction` classifies it `ignore` and `attemptArm` returns `arm-error-ignored`. A DRAFT
+    CAN THEREFORE NEVER BE DIRECT-MERGED BY THIS PATH — that is the safety property, and it already
+    holds. Undraft and the next sweep pass arms it. NO LABEL, NO FIELD, NO CONVENTION.
+    THE ONE COST, STATED: the sweep does not filter drafts (measured — the only `draft` mention
+    across `sweep.ts` and `open-prs-rest.ts` is a comment listing `mergeable_state` values, against
+    a control finding `draft` in three other `src/lib` files), so a long-lived draft burns one
+    failed `gh` call per pass. Cheap, but not free; an implementer may add a `pr.draft` skip if the
+    view already carries it, and must NOT add a new GitHub read to get it.
+    (iv) WHY AN ESCAPE HATCH IS NEEDED AT ALL, WITH THE MEASURED CASE. The gates catch correctness;
+    they do not catch REDUNDANCY OR SEQUENCING. #1873 and #1874 were independent PRs for the same
+    fix, both green — both would have merged. Only the operator's choice of #1874 stopped a
+    duplicate landing.
+    (v) 'PER REPO' IS NOT A REAL DIMENSION TODAY AND MUST NOT BE BUILT AS ONE. D-11 rules one
+    instance per codebase on a measured collision inventory — repo-blind ledger keys, one drain
+    lock, one worktree pool — so per-repo and per-instance are the same setting. A single boolean
+    in `plan/policy.yaml` is the honest shape; a per-repo map would be a dimension that cannot vary.
+    (vi) A CONSOLE ROUTE IS OUT OF SCOPE, AND THE REASON IS A COST NOT A PREFERENCE.
+    `enforceWriteTiers` went ON with W1-T500, `assertWriteTiersComplete` throws on any unlabelled
+    write route, and a route that changes what merges without a human is `high` — which means it
+    also owes the confirm-nonce round trip (issue at `POST /v1/confirm`, replay via
+    `X-Confirm-Nonce`, single-use, bound to method+path+payload). That is a second task. The flag
+    ships editable in `plan/policy.yaml`, where `dailyCostCeilingUsd` and `quiet-hours` set the
+    precedent for a console route arriving LATER.
+    (vii) NOT IN SCOPE. `armAutoMergeAtOpen` (the implement lane's ungated arm) is untouched —
+    this task changes the SWEEP path only. No change to `decideAutoMergeArm`, to
+    `armFailureAction`, or to the review lane's own id fallback, all of which are already correct."
+  acceptance:
+    - claim: "the sweep arms a pull request that has no plan task id"
+      proof: "unit test: the sweep arms a pull request that carries no task id"
+    - claim: "the synthetic id the sweep arms under is the one the review lane already ledgers"
+      proof: "unit test: the synthetic id the sweep arms under matches the review lane"
+    - claim: "the behaviour is off unless the policy flag is set"
+      proof: "unit test: a policy flag off leaves a session pull request unarmed"
+    - claim: "a draft pull request is never merged by the clean-status fallback"
+      proof: "unit test: a draft pull request is never direct-merged"
+  origin: oper#session-pr-automerge-2026-08-15
+  plan_refs: ["W1-T489", "W1-T500", "W1-T230", "W1-T125"]
+  files: [src/run-task.ts, src/lib/policy.ts, plan/policy.yaml, test/policy.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT — and it was RAISED from medium by the linter rather than
+    argued into place, which is worth recording. `sizingViolation` (`src/lib/task-linter.ts`) reads
+    the span as TWO subsystems (`policy`, `run-task`) and refuses medium: `subsystemsOf` folds
+    `test/policy.test.ts` onto `src/lib/policy.ts`, but `src/run-task.ts` is its own. THE BAND IS
+    THE SPAN. The blast radius happens to deserve the same band for a different reason — this
+    changes what merges without a human — which is why design (ii) states the effect out loud and
+    (iii) requires the hatch.
+    `files:` WAS DERIVED BY INVOCATION COUNT. `loadPolicy(` and `policyPath(` appear in
+    `src/run-task.ts` (11 and 10) and `src/lib/policy.ts` (2 and 2); `test/policy.test.ts` scores
+    8 and 1 and is the policy suite. `src/run-task.ts` IS DECLARED BECAUSE THE ARM DEP LIVES THERE
+    — the sweep's `arm:` closure is constructed in that file, not in `sweep.ts` — and the W1-T471
+    serialisation cost is accepted explicitly. `plan/policy.yaml` is declared because the flag's
+    default ships in it.
+    `src/lib/sweep.ts` IS DELIBERATELY NOT DECLARED: it consumes an injected `arm` dep and needs no
+    edit for this change. `test/auto-triage-policy-seam.test.ts` and `test/retro-trigger-check.test.ts`
+    also invoke `loadPolicy` but pin OTHER keys and are not touched; a declared-but-untouched path
+    fails `inverseScopeUntouchedFiles` (`src/lib/review.ts`) exactly as an undeclared one fails
+    `scopeViolationFiles`. DECLARE WHAT YOU WILL TOUCH — #1869 shipped a 22-file overrun against a
+    two-path declaration and merged on an advisory.
+    RULE 25 IS NOT ENGAGED: no declared path matches an `INSTRUMENT_SURFACE` pattern, and `plan/`
+    and `test/` are excluded from `isProductPath`, so this cannot pair a product path with an
+    instrument one.
+    EVERY CRITERION IS A NAME-FILTERED `unit test:` TITLE, NOT A PURE PATH. Each of the four was
+    checked to match zero files under `test/` today against a positive control matching one, and
+    each is under 100 characters with no comma.
+    THE ID WAS RESERVED THROUGH THE REF ALLOCATOR, NOT A HAND-ROLLED SWEEP ALONE:
+    `reserveTaskIdRemote` has a single call site (`triageCommand`'s mint), so a hand-filed shard
+    does not pass through it — `refs/rmd-id/W1-T516` was therefore created directly on origin with
+    a unique orphan payload before this record was written, and a fresh-fetch sweep cross-checked
+    it at zero with a known-taken control reading above one.
+    EVERY FIGURE HERE IS DATED 2026-08-15 AND IS A QUERY, NOT A CONSTANT — the predicate's location,
+    the three fallback call sites, the branch-protection settings and the draft classification all
+    move as the code and the repo settings move. RE-DERIVE BEFORE BUILDING."
