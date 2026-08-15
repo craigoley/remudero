@@ -1,4 +1,4 @@
-- id: W1-T504
+- id: W1-T510
   title: "the inbox readiness predicate has no third value — an INDETERMINATE (throttled/auth/transport/truncated) dep read carries `merged: false` into `ReadinessContext.isMerged`, so `classifyProposal` accuses a verifiably-merged dependency of being unmerged and refuses the ratification with `dep-unmet`"
   repo: remudero
   depends_on: []
