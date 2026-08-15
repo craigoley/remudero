@@ -67,28 +67,38 @@ const CORPUS: BatchedPr[] = [
   },
 ];
 
-/** A `ghGateway` whose `gh` is a fixture: the SEARCH form, answering from the same corpus. */
+/**
+ * A `ghGateway` whose `gh` is a fixture: the SEARCH form, answering from the same corpus.
+ *
+ * W1-T523: the transport moved off `gh pr list --search` (GraphQL) onto `gh api
+ * search/issues?q=…` (REST) — the query-qualifier language (`in:body`) is unchanged, only the
+ * argv shape carrying it is, so this fixture routes on the NEW shape rather than the old one.
+ */
 function searchGateway(calls: string[][]) {
   return ghGateway("craigoley", "remudero", {
     exec: (args) => {
       calls.push(args);
-      if (args.includes("--search")) {
-        const term = args[args.indexOf("--search") + 1];
+      const arg1 = typeof args[1] === "string" ? args[1] : "";
+      if (args[0] === "api" && arg1.startsWith("search/issues?q=")) {
+        const q = decodeURIComponent(arg1.slice("search/issues?q=".length).split("&")[0]);
         // FUZZY BY CONTRACT: the real search matches the body full-text index, so a PR merely
         // discussing the id comes back too. Modelling it faithfully is the whole point — a fixture
         // that returned only exact matches would prove the two agree by construction.
-        const id = term.match(/Remudero-Task: (\S+)"/)?.[1] ?? "";
-        const hits = CORPUS.filter((p) => (p.body ?? "").includes(id));
-        return JSON.stringify(hits.map((p) => ({ number: p.number, url: p.url, state: p.state })).slice(0, 1));
+        const id = q.match(/Remudero-Task: (\S+)"/)?.[1] ?? "";
+        const perPage = Number(arg1.match(/per_page=(\d+)/)?.[1] ?? 1);
+        const hits = CORPUS.filter((p) => (p.body ?? "").includes(id)).slice(0, perPage);
+        return JSON.stringify({
+          items: hits.map((p) => ({ number: p.number, html_url: p.url, state: "closed", pull_request: { merged_at: "2026-01-01T00:00:00Z" } })),
+        });
       }
-      if (args.includes("view")) {
-        const url = args[args.indexOf("view") + 1];
-        const row = CORPUS.find((p) => p.url === url);
-        if (args.includes("files")) return JSON.stringify({ files: [{ path: "src/lib/x.ts" }] });
-        return JSON.stringify({ headRefName: row?.headRefName, body: row?.body });
+      if (args[0] === "api" && /^repos\/[^/]+\/[^/]+\/pulls\/\d+$/.test(arg1)) {
+        const n = Number(arg1.split("/").pop());
+        const row = CORPUS.find((p) => p.number === n);
+        return JSON.stringify({ number: row?.number, html_url: row?.url, state: "closed", merged_at: "2026-01-01T00:00:00Z", body: row?.body, head: { ref: row?.headRefName } });
       }
-      // Every other `pr list` (the merged/open head-branch enumerations) returns a LIST — a bare
-      // object here made `cands.filter` throw, which is a fixture defect, not a code one.
+      if (args.includes("--paginate")) return "src/lib/x.ts\n";
+      // Every other paginated pulls list (the merged/open head-branch enumerations) returns a LIST
+      // — a bare object here made `cands.filter` throw, which is a fixture defect, not a code one.
       return "[]";
     },
   });
@@ -152,8 +162,9 @@ test("the search gateway DOES spend one per task — the cost this swap removes,
   const calls: string[][] = [];
   const gw = searchGateway(calls);
   for (const id of ["W1-T24", "W1-T395", "W1-T999", "W1-T413"]) gw.findMergedByTrailer(id);
-  const searches = calls.filter((c) => c.includes("--search"));
+  const searches = calls.filter((c) => c[0] === "api" && typeof c[1] === "string" && c[1].startsWith("search/issues?q="));
   assert.equal(searches.length, 4, "one search per task — over a 441-task plan that is the exhaustion");
-  // And it is the GraphQL-backed `--search` flag specifically, not a plain list.
-  assert.ok(searches.every((c) => c.includes("pr") && c.includes("list")));
+  // W1-T523: moved off GraphQL's `search()` connection (`pr list --search`) onto REST's own
+  // `/search/issues` — off the account's GraphQL budget, never a `pr`/`list` invocation.
+  assert.ok(searches.every((c) => c[0] === "api" && !c.includes("pr") && !c.includes("list")));
 });

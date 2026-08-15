@@ -284,18 +284,21 @@ test("buildBatchedGithub returns null (never []) for the open slice when the fet
   assert.equal(g.readFailed?.(), true);
 });
 
-test("ghGateway issues the REAL --state open argv and parses the rows", () => {
+test("ghGateway issues the REAL REST pulls?state=open argv and parses the rows", () => {
+  // W1-T523: `--json headRefName` off `gh pr list --state open` (GraphQL) moved to `gh api
+  // repos/…/pulls?state=open&…` (REST) — the wire shape is REST's (`html_url`, `head.ref`),
+  // not the `gh --json` shape (`url`, `headRefName`) the pre-conversion fixture modelled.
   const argvs: string[][] = [];
   const g = ghGateway("craigoley", "remudero", {
     exec: (args) => {
       argvs.push(args);
-      return JSON.stringify([{ number: 1377, url: "u/1377", state: "OPEN", headRefName: `run-${TASK_ID}-1` }]);
+      return JSON.stringify([{ number: 1377, html_url: "u/1377", state: "open", head: { ref: `run-${TASK_ID}-1` } }]);
     },
   });
 
   const open = g.listOpenHeadBranches?.();
   assert.deepEqual(open?.map((p) => p.number), [1377]);
   const argv = argvs.at(-1) ?? [];
-  assert.ok(argv.includes("--state") && argv[argv.indexOf("--state") + 1] === "open", `--state open, got ${argv.join(" ")}`);
-  assert.ok(argv.includes("headRefName") || argv.some((a) => a.includes("headRefName")), "the head ref is requested");
+  assert.equal(argv[0], "api", "gh api is REST; gh pr list --json is GraphQL");
+  assert.ok(typeof argv[1] === "string" && argv[1].includes("state=open"), `state=open, got ${argv.join(" ")}`);
 });

@@ -9,18 +9,18 @@ import { daemonCommand } from "../src/run-task.js";
 
 /**
  * The daemon's merged-status projection (run-task.ts `daemonCommand` -> `refreshMerged`) must
- * answer from the SINGLE non-search `gh pr list` batch, never from GitHub's GraphQL `search()`
- * connection.
+ * answer from the SINGLE non-search `gh pr list` batch, never from GitHub's search surface.
  *
- * WHY THIS FILE EXISTS: with `search()` throttled account-wide, `ghGateway.findMergedByTrailer`
- * (a `--search` query) fails, `tryJson` sets the gateway's sticky `failed` flag, and
- * `deriveStatus`'s `readFailed()` gate then discards the DEFINITIVE negative that the
- * SUCCESSFUL non-search head-branch batch had already produced -- so every task derived
- * `indeterminate` and the daemon dispatched nothing. `buildBatchedGithub` answers both
- * questions client-side from one fetch, so no `--search` argv is ever constructed.
+ * WHY THIS FILE EXISTS: with search throttled account-wide, `ghGateway.findMergedByTrailer`
+ * (a search query — W1-T523: `gh api search/issues?q=…`, REST; before it, GraphQL's `search()`
+ * connection) fails, `tryJson` sets the gateway's sticky `failed` flag, and `deriveStatus`'s
+ * `readFailed()` gate then discards the DEFINITIVE negative that the SUCCESSFUL non-search
+ * head-branch batch had already produced -- so every task derived `indeterminate` and the daemon
+ * dispatched nothing. `buildBatchedGithub` answers both questions client-side from one fetch, so
+ * no search argv is ever constructed.
  *
- * Both gateways expose the SAME `opts.exec` seam, so one throwing-on-`--search` fake drives
- * every case below without a network round-trip.
+ * Both gateways expose the SAME `opts.exec` seam, so one throwing-on-search fake drives every
+ * case below without a network round-trip.
  */
 function task(over: Partial<Task> = {}): Task {
   return {
@@ -67,17 +67,19 @@ const MERGED_PR_JSON = JSON.stringify([
   },
 ]);
 
-/** Records every argv the gateway constructs, and REFUSES any `--search` query the way the
- *  throttled GraphQL `search()` connection does (HTTP 200 + an error `gh` surfaces as a throw). */
+/** Records every argv the gateway constructs, and REFUSES any search query the way a throttled
+ *  search surface does (HTTP 200 + an error `gh` surfaces as a throw) — W1-T523: keyed on REST's
+ *  `search/issues?q=…` now, not GraphQL's `--search` flag, since `ghGateway.findMergedByTrailer`
+ *  moved onto REST's own Search API, which carries its own (separate, still throttleable) limit. */
 function searchRefusingExec(argvLog: string[][]): (args: string[]) => string {
   return (args: string[]) => {
     argvLog.push(args);
-    if (args.includes("--search")) {
-      throw new Error("GraphQL: API rate limit already exceeded for user ID 4397075.");
+    const url = args[1] ?? "";
+    if (args[0] === "api" && url.startsWith("search/issues?q=")) {
+      throw new Error("API rate limit exceeded for the search API.");
     }
     // The merged PR lives in the CLOSED half of the REST enumeration; the open half and every
     // later page are empty, which is what stops both walks.
-    const url = args[1] ?? "";
     if (args[0] === "api" && url.includes("state=closed") && /[?&]page=1(&|$)/.test(url)) return MERGED_PR_JSON;
     return "[]";
   };
@@ -88,7 +90,10 @@ function onePlan(id: string): Plan {
   return { tasks, byId: new Map(tasks.map((t) => [t.id, t])) };
 }
 
-test("daemonCommand derives its merged-status projection from a gateway that builds NO --search argv", async () => {
+/** True for an argv this gateway's search transport built — W1-T523: REST's `search/issues?q=…`. */
+const isSearch = (a: string[]): boolean => a[0] === "api" && typeof a[1] === "string" && a[1].startsWith("search/issues?q=");
+
+test("daemonCommand derives its merged-status projection from a gateway that builds NO search argv", async () => {
   // loadConfig() takes no injection and reads $HOME, so redirect HOME at a throwaway dir: the
   // REAL daemonCommand then runs against tmp state, never the live daemon's root or drain lock.
   // --dry-run calls refreshMerged() and returns BEFORE any lock, spawn, or sweep -- so this
@@ -121,13 +126,13 @@ test("daemonCommand derives its merged-status projection from a gateway that bui
 
   assert.equal(seen.length, 1, "refreshMerged built exactly ONE gateway for the projection");
   assert.equal(
-    argvLog.filter((a) => a.includes("--search")).length,
+    argvLog.filter(isSearch).length,
     0,
-    "the daemon's projection constructs NO --search argv -- the throttled path is never touched",
+    "the daemon's projection constructs NO search argv -- the throttled path is never touched",
   );
 });
 
-test("the batched projection gateway credits a merged task while every --search is refused", () => {
+test("the batched projection gateway credits a merged task while every search is refused", () => {
   const argvLog: string[][] = [];
   const github = buildBatchedGithub("o", "r", { exec: searchRefusingExec(argvLog) });
 
@@ -136,7 +141,7 @@ test("the batched projection gateway credits a merged task while every --search 
   assert.equal(proj?.merged, true, "the merged, owned, anchored PR is credited from the batch");
   assert.equal(proj?.prNumber, 777);
   assert.notEqual(proj?.indeterminate, true, "a working non-search read must never defer");
-  assert.equal(argvLog.filter((a) => a.includes("--search")).length, 0);
+  assert.equal(argvLog.filter(isSearch).length, 0);
 });
 
 test("the batched projection gateway reports a genuine none, not indeterminate, when search is refused", () => {
@@ -157,11 +162,11 @@ test("falsifier: the pre-change ghGateway degrades the SAME task to indeterminat
   const proj = projectPlan(onePlan("W1-T999"), { ledgerPath: emptyLedger(), github }).get("W1-T999");
 
   // This is the jam: the non-search head-branch batch succeeded and said "no merged PR owns
-  // run-W1-T999-*", but the refused trailer --search poisoned readFailed() and that definitive
+  // run-W1-T999-*", but the refused trailer search poisoned readFailed() and that definitive
   // negative was discarded -- so the daemon skipped the task every tick.
   assert.equal(proj?.indeterminate, true, "ghGateway defers -- the behaviour this change replaces");
   assert.ok(
-    argvLog.some((a) => a.includes("--search")),
-    "and it got there by constructing a --search argv the batched gateway never builds",
+    argvLog.some(isSearch),
+    "and it got there by constructing a search argv the batched gateway never builds",
   );
 });

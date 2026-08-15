@@ -64,22 +64,31 @@ const CORPUS: BatchedPr[] = [
   },
 ];
 
+/**
+ * W1-T523: the transport moved off `gh pr list --search` (GraphQL) onto `gh api
+ * search/issues?q=…` (REST) — the query-qualifier language (`in:body`) is unchanged, only the
+ * argv shape carrying it is, so this fixture routes on the NEW shape rather than the old one.
+ */
 function searchGateway(calls: string[][]) {
   return ghGateway("craigoley", "remudero", {
     exec: (args) => {
       calls.push(args);
-      if (args.includes("--search")) {
-        const term = args[args.indexOf("--search") + 1];
-        const id = term.match(/Remudero-Task: (\S+)"/)?.[1] ?? "";
+      const arg1 = typeof args[1] === "string" ? args[1] : "";
+      if (args[0] === "api" && arg1.startsWith("search/issues?q=")) {
+        const q = decodeURIComponent(arg1.slice("search/issues?q=".length).split("&")[0]);
+        const id = q.match(/Remudero-Task: (\S+)"/)?.[1] ?? "";
+        const perPage = Number(arg1.match(/per_page=(\d+)/)?.[1] ?? 1);
         // FUZZY BY CONTRACT — substring, exactly as GitHub's body index behaves.
-        const hits = id ? CORPUS.filter((p) => (p.body ?? "").includes(id)) : [];
-        return JSON.stringify(hits.map((p) => ({ number: p.number, url: p.url, state: p.state })).slice(0, 1));
+        const hits = id ? CORPUS.filter((p) => (p.body ?? "").includes(id)).slice(0, perPage) : [];
+        return JSON.stringify({
+          items: hits.map((p) => ({ number: p.number, html_url: p.url, state: "closed", pull_request: { merged_at: "2026-01-01T00:00:00Z" } })),
+        });
       }
-      if (args.includes("view")) {
-        const row = CORPUS.find((p) => p.url === args[args.indexOf("view") + 1]);
-        if (args.includes("files")) return JSON.stringify({ files: [{ path: "src/lib/x.ts" }] });
-        return JSON.stringify({ headRefName: row?.headRefName, body: row?.body });
+      if (args[0] === "api" && /^repos\/[^/]+\/[^/]+\/pulls\/\d+$/.test(arg1)) {
+        const row = CORPUS.find((p) => p.number === Number(arg1.split("/").pop()));
+        return JSON.stringify({ number: row?.number, html_url: row?.url, state: "closed", merged_at: "2026-01-01T00:00:00Z", body: row?.body, head: { ref: row?.headRefName } });
       }
+      if (args.includes("--paginate")) return "src/lib/x.ts\n";
       return "[]";
     },
   });
@@ -133,16 +142,17 @@ test("the batched gateway spends ZERO searches over a plan-sized id set", () => 
   const calls: string[][] = [];
   const gw = batchedGateway(calls);
   for (let i = 0; i < 50; i += 1) gw.findMergedByTrailer(`W1-T${i}`);
-  assert.equal(calls.filter((c) => c.includes("--search")).length, 0);
+  assert.equal(calls.filter((c) => c[0] === "api" && typeof c[1] === "string" && c[1].startsWith("search/issues?q=")).length, 0);
 });
 
 test("the search gateway spends EXACTLY one per id — the control the cost claim needs", () => {
   const calls: string[][] = [];
   const gw = searchGateway(calls);
   for (let i = 0; i < 50; i += 1) gw.findMergedByTrailer(`W1-T${i}`);
-  const searches = calls.filter((c) => c.includes("--search"));
-  assert.equal(searches.length, 50, "one GraphQL search per id — twice per retro, over a 441-task plan");
-  assert.ok(searches.every((c) => c.includes("pr") && c.includes("list")));
+  const searches = calls.filter((c) => c[0] === "api" && typeof c[1] === "string" && c[1].startsWith("search/issues?q="));
+  assert.equal(searches.length, 50, "one search per id — twice per retro, over a 441-task plan, now off REST rather than GraphQL");
+  // W1-T523: REST's `/search/issues`, never `pr`/`list` (GraphQL's `search()` connection).
+  assert.ok(searches.every((c) => c[0] === "api" && !c.includes("pr") && !c.includes("list")));
 });
 
 test("each gateway keeps its OWN failure state, so one pass's outage cannot leak into the other", () => {
