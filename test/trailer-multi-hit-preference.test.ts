@@ -240,26 +240,29 @@ test("a candidate whose changeset cannot be READ is kept, never dropped — miss
 test("ghGateway widens past --limit 1 and returns every hit, leaving findMergedByTrailer's single answer untouched", () => {
   // The expensive half: unlike the batched twin this DOES pay a wider fetch, which is why it is a
   // separate method — existing callers keep the one-hit answer and pay nothing new.
+  // W1-T523: the transport moved from `gh pr list --search --limit N` (GraphQL) to
+  // `gh api search/issues?q=…&per_page=N` (REST) — `per_page` is this transport's `--limit`.
   const calls: string[][] = [];
-  const rows = [
-    { number: 1016, url: "u/1016", state: "MERGED" },
-    { number: 720, url: "u/720", state: "MERGED" },
+  const items = [
+    { number: 1016, html_url: "u/1016", state: "closed", pull_request: { merged_at: "2026-01-02T00:00:00Z" } },
+    { number: 720, html_url: "u/720", state: "closed", pull_request: { merged_at: "2026-01-01T00:00:00Z" } },
   ];
   const gw = ghGateway("acme", "remudero", {
     exec: (args) => {
       calls.push(args);
-      return JSON.stringify(args.includes(String(TRAILER_ALL_LIMIT)) ? rows : rows.slice(0, 1));
+      const perPage = Number(args[1].match(/per_page=(\d+)/)?.[1] ?? 0);
+      return JSON.stringify({ items: items.slice(0, perPage) });
     },
   });
 
   assert.equal(gw.findMergedByTrailer("W1-T254")?.number, 1016, "the single answer is unchanged: newest only");
   const one = calls.at(-1)!;
-  assert.equal(one[one.indexOf("--limit") + 1], "1", "and it still asks for exactly one");
+  assert.ok(one[1].includes("per_page=1") && !one[1].includes(`per_page=${TRAILER_ALL_LIMIT}`), "and it still asks for exactly one");
 
   assert.deepEqual(gw.findMergedByTrailerAll?.("W1-T254")?.map((p) => p.number), [1016, 720], "the wider read returns both");
   const all = calls.at(-1)!;
-  assert.equal(all[all.indexOf("--limit") + 1], String(TRAILER_ALL_LIMIT), "asking for the bounded set, not unbounded");
-  assert.ok(all.includes("--state") && all[all.indexOf("--state") + 1] === "merged", "still merged-only");
+  assert.ok(all[1].includes(`per_page=${TRAILER_ALL_LIMIT}`), "asking for the bounded set, not unbounded");
+  assert.ok(decodeURIComponent(all[1]).includes("is:merged"), "still merged-only");
 });
 
 test("ghGateway: a FAILED wider read returns null, never [] — failure and absence stay distinguishable", () => {

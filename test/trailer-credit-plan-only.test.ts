@@ -225,16 +225,20 @@ test("a non-merged trailer hit on a hand-named branch still reports trailer-pr-n
 // implementation — the seam-default trap this repo has recorded before. These drive the REAL
 // gateway bodies through an injected exec and assert the argv, the parse, and each failure arm.
 
-test("ghGateway.changedFiles asks pr view for files and returns the paths", () => {
+test("ghGateway.changedFiles asks the REST pulls/files endpoint and returns the paths", () => {
+  // W1-T523: `--json files` off `gh pr view` (GraphQL) moved to `gh api --paginate
+  // repos/…/pulls/{n}/files --jq '.[].filename'` (REST) — mirrors buildBatchedGithub's own
+  // changedFiles, which already reads this exact shape for the same reason (no REST field
+  // selection, so filenames come off `--jq` rather than a parsed JSON document).
   const calls: string[][] = [];
   const gh = ghGateway("craigoley", "remudero", {
     exec: (args) => {
       calls.push(args);
-      return JSON.stringify({ files: [{ path: "plan/tasks.yaml" }, { path: "src/lib/status.ts" }] });
+      return "plan/tasks.yaml\nsrc/lib/status.ts\n";
     },
   });
   assert.deepEqual(gh.changedFiles?.(PR_URL), ["plan/tasks.yaml", "src/lib/status.ts"]);
-  assert.deepEqual(calls, [["pr", "view", PR_URL, "--json", "files"]]);
+  assert.deepEqual(calls, [["api", "--paginate", "repos/craigoley/remudero/pulls/1471/files", "--jq", ".[].filename"]]);
 });
 
 test("ghGateway.changedFiles reports UNAVAILABLE on a gh failure and on a row set with no usable path", () => {
@@ -244,8 +248,8 @@ test("ghGateway.changedFiles reports UNAVAILABLE on a gh failure and on a row se
     },
   });
   assert.equal(boom.changedFiles?.(PR_URL), undefined, "a failed read is unavailable, never 'no files'");
-  const malformed = ghGateway("craigoley", "remudero", { exec: () => JSON.stringify({ files: [{}, {}] }) });
-  assert.equal(malformed.changedFiles?.(PR_URL), undefined, "rows carrying no path are a malformed read");
+  const malformed = ghGateway("craigoley", "remudero", { exec: () => "\n\n" });
+  assert.equal(malformed.changedFiles?.(PR_URL), undefined, "a blank jq output is a malformed read");
 });
 
 test("buildBatchedGithub.changedFiles pages the files endpoint, then MEMOISES it — including a failure", () => {
