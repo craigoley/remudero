@@ -1607,6 +1607,63 @@ export function decideSweepArm(pr: OpenPrView, ledgerLines: ReadonlyArray<Record
   return decideAutoMergeArm({ state: "success", capped: facts.capped, planOnly: facts.planOnly }, false, override);
 }
 
+/** One armed-and-stalled PR: both facts that make it stalled, carried together. */
+export interface ArmedStalledPr {
+  prNumber: number;
+  prUrl: string;
+  /** The task this PR credits, when the gateway resolved one. */
+  taskId?: string;
+  /** The head the arm is pinned to — the sha a later verdict would be bound to. */
+  headSha: string;
+}
+
+/**
+ * W1-T520 — ARMED AND BEHIND, THE TWO FACTS NOTHING JOINED.
+ *
+ * The sweep already holds both halves per PR and never puts them together:
+ * {@link OpenPrView.autoMergeArmed} says a PR has asked GitHub to merge it, and
+ * {@link OpenPrView.mergeState} says its head is `behind` the base. Separately,
+ * each is unremarkable. TOGETHER they describe a PR that has done everything it
+ * can and stopped: it will not merge, nothing will retry it, and it is
+ * indistinguishable in the ledger and on every surface from a PR still waiting
+ * for CI.
+ *
+ * WHY THE DETECTOR AND NOT THE FIX. `allow_update_branch` OFFERS the update
+ * button; it does not press it. Re-derived 2026-08-15: with that setting TRUE,
+ * EIGHT OF NINE open PRs read `behind` and SEVEN of those were armed, unchanged
+ * for hours. But this predicate is deliberately INERT about that — it reports
+ * and does not act, because acting means minting a NEW HEAD, and a verdict is
+ * sha-pinned (`priorActionsFromLedger` keys `postReviewed` on
+ * `${taskId}@${headSha}`), so every update discards the verdict it was waiting
+ * on. Clearing N that way costs N+(N-1)+…+1 reviews. The action half needs a
+ * selection rule and its own ruling; this shard scopes it OUT.
+ *
+ * PURE, AND FAIL-QUIET. No I/O, no GitHub call: the caller supplies what it
+ * already fetched, the shape every other decision in this module takes. A PR
+ * whose `mergeState` was never read is `undefined` and yields nothing — an
+ * unread fact is not a stall, the same fail-closed default `mergeState` carries
+ * everywhere else in this file.
+ *
+ * THE QUIET CASE IS THE COMMON CASE AND IS FREE. Armed-and-current yields
+ * nothing; behind-but-unarmed yields nothing. A detector that fired on either
+ * would name every open PR every pass, which is the noise floor that makes an
+ * advisory unreadable.
+ */
+export function armedButStalled(prs: readonly OpenPrView[]): ArmedStalledPr[] {
+  const out: ArmedStalledPr[] = [];
+  for (const pr of prs) {
+    if (pr.autoMergeArmed !== true) continue;
+    if (pr.mergeState !== "behind") continue;
+    out.push({
+      prNumber: pr.prNumber,
+      prUrl: pr.prUrl,
+      ...(pr.taskId === undefined ? {} : { taskId: pr.taskId }),
+      headSha: pr.headSha,
+    });
+  }
+  return out;
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // W1-T78 — the CLARIFICATION-QUESTION rung (ratifies P22's new rung): an
 // ambiguous (BLOCKED-AMBIGUOUS) block yields a SPECIFIC, decidable operator
@@ -2902,6 +2959,24 @@ export async function runSweep(
     actions_taken: actionsTaken,
     actions_failed: actionsFailed,
   });
+  // W1-T520 — the stall report. One line PER STALLED PR naming both facts, and NOTHING when the
+  // set is empty, which is the common case: a quiet pass writes no row at all rather than a
+  // `stalled: 0` heartbeat nobody reads. Emitted through `appendLine` (the same durable sink
+  // `sweep.disposed` uses) rather than `log`, because `log` is an optional narration hook a caller
+  // may leave unwired — see `deps.log`'s own contract. This REPORTS only; see
+  // {@link armedButStalled} for why the update is deliberately not taken here.
+  for (const stalled of armedButStalled(openPrs)) {
+    appendLine(deps.ledgerPath, {
+      run_id: deps.runId,
+      task_id: stalled.taskId ?? "SWEEP",
+      step: "sweep.armed_stalled",
+      pr_number: stalled.prNumber,
+      pr_url: stalled.prUrl,
+      head_sha: stalled.headSha,
+      auto_merge_armed: true,
+      merge_state: "behind",
+    });
+  }
   return summary;
 }
 
