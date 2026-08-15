@@ -20,6 +20,7 @@
  *        useless as one that marks nothing.
  */
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -76,7 +77,9 @@ test("the REAL monolith splits into exactly its own task ids, so the block bound
 
 // ── (ii) the real --base path: #1544's vacuous result, reproduced then locked out ───────────
 
-async function runLintPlanBase(): Promise<{ exitCode: number; stdout: string }> {
+/** W1-T515: `planPath` is now explicit. It used to default to the LIVE `plan/tasks.yaml`, which is
+ *  what made the design-only probe below edit a real task record — see that test's own note. */
+async function runLintPlanBase(planPathArg?: string): Promise<{ exitCode: number; stdout: string }> {
   const logs: string[] = [];
   const origLog = console.log;
   const origError = console.error;
@@ -85,7 +88,7 @@ async function runLintPlanBase(): Promise<{ exitCode: number; stdout: string }> 
   console.error = (m: string) => logs.push(String(m));
   console.warn = () => {};
   try {
-    const exitCode = await lintPlanCommand(["--base", "HEAD"]);
+    const exitCode = await lintPlanCommand(planPathArg ? ["--plan", planPathArg, "--base", "HEAD"] : ["--base", "HEAD"]);
     return { exitCode, stdout: logs.join("\n") };
   } finally {
     console.log = origLog;
@@ -95,13 +98,23 @@ async function runLintPlanBase(): Promise<{ exitCode: number; stdout: string }> 
 }
 
 test("a design-only edit to a real shard raises the --base checked count from 0 to 1 — the #1544 shape locked out", async () => {
-  const target = join(REPO_ROOT, "plan", "tasks.d", "W1-T428-changed-tasks-gate-blind-to-dropped-fields.yaml");
+  // W1-T515: THE FIXTURE, NOT A REAL TASK RECORD. This probe used to edit
+  // `plan/tasks.d/W1-T428-…yaml` in place and restore it in the `finally` below. That worked, but
+  // it dirtied the LIVE plan tree for the duration of the run — and `node --test` parallelises
+  // across suites, so every other reader of `plan/tasks.d/` saw a mutating directory. It flaked in
+  // two separate both-sides comparisons in one afternoon, each needing manual attribution.
+  // The fixture is COMMITTED so `--base HEAD` can resolve it (`git show <ref>:<relPath>` exits 2 on
+  // a path absent at the ref, which is why a temp directory cannot serve this test at all), and it
+  // lives UNDER the repo root because an explicit `--plan` outside it is refused by name (W1-T120).
+  const fixturePlan = join(REPO_ROOT, "test", "fixtures", "live-plan-writers", "tasks.yaml");
+  const target = join(REPO_ROOT, "test", "fixtures", "live-plan-writers", "tasks.d", "FIXTURE-T2-design-block.yaml");
   const original = readFileSync(target, "utf8");
+  const planDirtyDuringRun: string[] = [];
   try {
     // CONTROL first: with the plan tree clean vs HEAD, --base reports zero changed tasks. If
     // this repo's plan/ is ever dirty at test time the control names it, instead of the real
     // assertion below failing mysteriously.
-    const before = await runLintPlanBase();
+    const before = await runLintPlanBase(fixturePlan);
     assert.match(before.stdout, /0 task\(s\) checked \(0 new\/changed vs HEAD\)/, "control: plan tree must be clean vs HEAD");
     // The design-only edit: one trailing marker inside the design block — parsed-invisible
     // (design is a dropped field), raw-visible (the record's bytes change).
@@ -109,12 +122,16 @@ test("a design-only edit to a real shard raises the --base checked count from 0 
     const edited = original.replace("design: |", "design: |\n    (raw-text regression probe — parsed-invisible)");
     assert.notEqual(edited, original);
     writeFileSync(target, edited, "utf8");
-    const after = await runLintPlanBase();
+    // DURING, not only after: the window in which the tree is dirty IS the race, so a suite that
+    // cleans up perfectly still has to be checked mid-flight.
+    planDirtyDuringRun.push(execFileSync("git", ["-C", REPO_ROOT, "status", "--porcelain", "--", "plan/"], { encoding: "utf8" }).trim());
+    const after = await runLintPlanBase(fixturePlan);
     assert.match(
       after.stdout,
       /1 task\(s\) checked \(1 new\/changed vs HEAD\)/,
       "a design-only edit must be IN scope — 0 checked here is #1544's vacuous result",
     );
+    assert.equal(planDirtyDuringRun[0], "", "the LIVE plan/ tree must stay clean WHILE this test runs, not merely after");
   } finally {
     writeFileSync(target, original, "utf8");
   }
@@ -137,4 +154,19 @@ test("a plan whose dir has NO tasks.d reads as an empty shard corpus, never a th
     console.log = origLog;
     console.error = origError;
   }
+});
+
+// ── W1-T515: the design-only probe edits a fixture, never a real task record ──────────────────
+test("the changed-task base comparison runs against a fixture shard", () => {
+  const src = readFileSync(fileURLToPath(new URL("./changed-tasks-raw-text.test.ts", import.meta.url)), "utf8");
+  const targetLine = src.split("\n").find((l) => l.includes("const target = join("));
+  assert.ok(targetLine, "the edit target line must still exist");
+  assert.match(targetLine!, /fixtures/, "the design-only edit must target test/fixtures, never a real task record");
+  assert.doesNotMatch(targetLine!, /"plan",\s*"tasks\.d"/, "the edit must not address the live plan/tasks.d/ directory");
+  // The fixture it edits must actually carry a design block, or the probe would assert nothing.
+  const fixture = readFileSync(join(REPO_ROOT, "test", "fixtures", "live-plan-writers", "tasks.d", "FIXTURE-T2-design-block.yaml"), "utf8");
+  assert.match(fixture, /design: \|/, "the fixture shard must carry the design block the probe edits");
+  // CONTROL: repo-root-anchored joins are still present in this file, so a zero above would be
+  // the query failing rather than the fix working.
+  assert.match(src, /join\(REPO_ROOT/, "control: repo-root-anchored joins are still greppable in this file");
 });

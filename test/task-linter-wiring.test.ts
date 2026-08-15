@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -418,11 +419,25 @@ async function runLintPlanCapturingEverything(args: string[]): Promise<{ exitCod
 test("W1-T497 ACCEPTANCE 1+3: the --base changed-tasks pass WARNS on a zero-resolving name-filtered proof, and the warning stays advisory (no block, exit 0)", async () => {
   // Placed as a NEW, untracked shard under the REAL plan/tasks.d/: absent from `git show
   // HEAD:...`, so `changedTaskIds` counts it as new-in-scope without editing any tracked file.
-  const shardPath = join(REPO_ROOT, "plan", "tasks.d", "zzz-w1-t497-wiring-probe.yaml");
+  // W1-T515: THE FIXTURE PLAN, NOT THE LIVE ONE. This probe used to land under the real
+  // `plan/tasks.d/`. It never dirtied TRACKED state — `checkServiceFreshness` reads
+  // `--porcelain -uno`, so untracked litter can never pin the daemon — but `checkCliFreshness`
+  // reads a BARE `--porcelain`, so a crash between the write and the cleanup made every `rmd`
+  // verb in this checkout refuse with `reason: "dirty"`. It also raced every other reader of that
+  // directory under a parallel runner, which is the ENOENT crash #1873/#1874 guards the symptom of.
+  // The probe still has to be ABSENT AT THE BASE REF for `changedTaskIds` to count it new-in-scope,
+  // and an untracked file under the COMMITTED fixture satisfies that exactly as it did before.
+  const fixturePlan = join(REPO_ROOT, "test", "fixtures", "live-plan-writers", "tasks.yaml");
+  const shardPath = join(REPO_ROOT, "test", "fixtures", "live-plan-writers", "tasks.d", "zzz-w1-t497-wiring-probe.yaml");
   assert.equal(existsSync(shardPath), false, "the probe shard must not already exist on disk");
+  const livePlanBefore = execFileSync("git", ["-C", REPO_ROOT, "status", "--porcelain", "--", "plan/"], { encoding: "utf8" }).trim();
   writeFileSync(shardPath, probeShardYaml(), "utf8");
   try {
-    const { exitCode, combined } = await runLintPlanCapturingEverything(["--base", "HEAD"]);
+    // DURING, not only after: the dirty window IS the race, so the live tree is checked while the
+    // probe is on disk rather than once it has been cleaned up.
+    const livePlanDuring = execFileSync("git", ["-C", REPO_ROOT, "status", "--porcelain", "--", "plan/"], { encoding: "utf8" }).trim();
+    assert.equal(livePlanDuring, livePlanBefore, "the LIVE plan/ tree must be untouched WHILE the probe shard exists");
+    const { exitCode, combined } = await runLintPlanCapturingEverything(["--plan", fixturePlan, "--base", "HEAD"]);
     assert.match(
       combined,
       new RegExp(`⚠ ${PROBE_ID}: \\[proof-name-resolution\\]`),
@@ -455,4 +470,23 @@ test("W1-T497 ACCEPTANCE 2: whole-plan mode (no --base) stays UNWIRED on purpose
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── W1-T515: the probe no longer lands in the live plan tree ─────────────────────────────────
+test("the wiring probe shard lands outside the live plan tree", () => {
+  // Asserted on the SOURCE of the probe's own path, so a future edit that points it back at
+  // `plan/tasks.d/` fails here rather than being found by a flake three PRs later.
+  const src = readFileSync(fileURLToPath(new URL("./task-linter-wiring.test.ts", import.meta.url)), "utf8");
+  const probeLine = src.split("\n").find((l) => l.includes('"zzz-w1-t497-wiring-probe.yaml"'));
+  assert.ok(probeLine, "the probe path line must still exist");
+  assert.match(probeLine!, /fixtures/, "the probe shard must be built under test/fixtures, never the live plan tree");
+  assert.doesNotMatch(probeLine!, /"plan",\s*"tasks\.d"/, "the probe must not address the live plan/tasks.d/ directory");
+  // CONTROL: the query can see a live-plan path when one is present — this file still contains
+  // REPO_ROOT-anchored joins, so a silent zero here would be the query failing, not the fix working.
+  assert.match(src, /join\(REPO_ROOT/, "control: repo-root-anchored joins are still greppable in this file");
+});
+
+test("the plan tree is unchanged after the suite runs", () => {
+  const porcelain = execFileSync("git", ["-C", REPO_ROOT, "status", "--porcelain", "--", "plan/"], { encoding: "utf8" }).trim();
+  assert.equal(porcelain, "", `this suite must leave plan/ byte-identical; saw:\n${porcelain}`);
 });

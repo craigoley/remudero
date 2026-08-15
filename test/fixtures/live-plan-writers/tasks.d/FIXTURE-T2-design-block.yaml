@@ -1,0 +1,20 @@
+# W1-T515: the shard `test/changed-tasks-raw-text.test.ts` edits in place. It carries a `design:`
+# block because that suite's whole point is that a DESIGN-ONLY edit — parsed-invisible, raw-visible
+# — must still count as changed. Editing this instead of a real task record keeps `plan/` untouched.
+- id: FIXTURE-T2
+  title: "a fixture shard carrying a design block for the raw-text changed-task probe"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: medium
+  status: queued
+  attempts: 0
+  origin: architect
+  files: [src/lib/example.ts]
+  design: |
+    A design block is a DROPPED field: the parsed view never sees it, so an edit confined to it is
+    invisible to a parsed comparison and visible only in the record's raw bytes.
+  acceptance:
+    - claim: "the fixture shard parses and lints"
+      proof: "unit test: a fixture shard carrying a design block"
