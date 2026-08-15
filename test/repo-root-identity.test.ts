@@ -108,7 +108,7 @@ test("rmd lint-plan: cwd wins over install location — a SEPARATE work tree's o
     execFileSync("git", ["-C", other, "init", "--quiet", "-b", "main"]);
     mkdirSync(join(other, "plan"), { recursive: true });
     const fixtureTask = (id: string, title: string): string =>
-      `- id: ${id}\n  title: ${title}\n  repo: remudero\n  type: implement\n  origin: architect\n  risk: medium\n`;
+      `- id: ${id}\n  title: ${title}\n  repo: remudero\n  type: implement\n  origin: architect\n  risk: medium\n  files: [src/lib/example.ts]\n`;
     const otherPlan = fixtureTask("OTHER-T1", "fixture one") + fixtureTask("OTHER-T2", "fixture two") + fixtureTask("OTHER-T3", "fixture three");
     writeFileSync(join(other, "plan", "tasks.yaml"), otherPlan, "utf8");
 
