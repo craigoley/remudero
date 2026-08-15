@@ -11,6 +11,7 @@
   repo: remudero
   type: implement
   origin: "test fixture (W1-T180 coverage, not a real plan entry)"
+  files: [test/run-task.test.ts]
   acceptance:
     - claim: "the fixture's original criterion"
       proof: "unit test: test/run-task.test.ts::LINTDI-1 original criterion proof"

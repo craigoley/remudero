@@ -8,6 +8,7 @@ import {
   changedTaskIds,
   criteriaAdded,
   DATA_ARTIFACT_CLASSES,
+  declaredScopeViolation,
   followUpCarriesCriteria,
   HEADLESS_FORBIDDEN_LEXICON,
   headlessFitnessViolations,
@@ -166,7 +167,11 @@ test("ACCEPTANCE 2: a multi-criteria SINGLE-concern task (W1-T4 shape) is NOT fl
     res.violations.some((v) => v.check === "sizing"),
     false,
   );
-  assert.equal(res.ok, true);
+  // W1_T4_SHAPE deliberately carries no files: (the real, still-open record's own shape), so
+  // it now also legitimately trips the new declared-scope check (W1-T504) — that is correct,
+  // not a false positive from sizing, which is what this test isolates.
+  const blocking = res.violations.filter((v) => v.severity === "block").map((v) => v.check);
+  assert.deepEqual(blocking, ["declared-scope"], "sizing must not block — only the pre-existing bare-scope gap does");
 });
 
 // W1-T3E shape (Reviewer rubric): 4 criteria, ONE subsystem (the review.ts
@@ -625,6 +630,7 @@ test("W1-T246 ACCEPTANCE 1: unit test: W1-T79 criterion-2 prose proof yields a b
 test("W1-T246 ACCEPTANCE 2: unit test: a well-formed unit test: proof yields no proof-dialect violation", () => {
   const clean = task({
     id: "FIX-DIALECT-CLEAN",
+    files: ["test/foo.test.ts"],
     acceptance: [{ claim: "does the thing", proof: "unit test: test/foo.test.ts" }],
   });
   assert.deepEqual(proofDialectViolations(clean), []);
@@ -694,6 +700,7 @@ test("a unit test: proof whose body reads as a runtime narrative (the W1-T79-cri
 test("W1-T246 ACCEPTANCE 3: unit test: proofDialect warn mode returns ok true with the violation surfaced, never blocking", () => {
   const t = task({
     id: "FIX-DIALECT-WARN-MODE",
+    files: ["src/lib/example.ts"],
     acceptance: [{ claim: "does the thing", proof: "a prose paragraph describing what happened, not a dialect proof" }],
   });
   const blockRes = lintTask(t); // default severity is "block"
@@ -822,6 +829,7 @@ test("a well-formed-looking grep: proof missing its in <path> clause is ALSO a p
 test("proofResolvability warn mode returns ok true with the violation surfaced, never blocking — the SAME rollout convention as proofDialect (W1-T246)", () => {
   const t = task({
     id: "FIX-RESOLVABILITY-WARN-MODE",
+    files: ["src/lib/example.ts"],
     acceptance: [{ claim: "does the thing", proof: "unit test: given state one, given state two, given state three" }],
   });
   const blockRes = lintTask(t); // default severity is "block"
@@ -912,6 +920,36 @@ test("FALSIFIER: W1-T355's own shape (files include DECISIONS.md, verify:human) 
   });
   assert.equal(rulingVerifyViolation(t), undefined);
   assert.equal(lintTask(t).ok, true);
+});
+
+// ── DECLARED SCOPE (W1-T504 — an undeclared files: lints clean and then serializes the fleet) ──
+
+test("a task with no files declared is refused by the linter as a blocking violation", () => {
+  const t = task({ id: "FIX-SCOPE-ABSENT", files: undefined });
+  const v = declaredScopeViolation(t);
+  assert.ok(v, "expected a declared-scope violation");
+  assert.equal(v?.severity, "block");
+  const res = lintTask(t);
+  assert.equal(res.ok, false);
+  assert.ok(res.violations.some((x) => x.check === "declared-scope"));
+});
+
+test("a task declaring an empty files list is refused with the same blocking check", () => {
+  const t = task({ id: "FIX-SCOPE-EMPTY", files: [] });
+  const v = declaredScopeViolation(t);
+  assert.ok(v, "expected a declared-scope violation");
+  assert.equal(v?.severity, "block");
+  assert.equal(v?.check, "declared-scope");
+  const res = lintTask(t);
+  assert.equal(res.ok, false);
+  assert.ok(res.violations.some((x) => x.check === "declared-scope"));
+});
+
+test("a task declaring at least one path passes the declared-scope check", () => {
+  const t = task({ id: "FIX-SCOPE-DECLARED", files: ["src/lib/task-linter.ts"] });
+  assert.equal(declaredScopeViolation(t), undefined);
+  const res = lintTask(t);
+  assert.ok(!res.violations.some((x) => x.check === "declared-scope"));
 });
 
 // ── RULE-15 FILING (W1-T384 — a shape the review guard can only ever refuse) ──
@@ -1041,7 +1079,7 @@ test("SELF-REFERENCE: W1-T353's own ruling-shaped TITLE (word 'ruling' appears r
 // ── BUDGET-SANITY (soft) ──────────────────────────────────────────────────────
 
 test("budget-sanity WARNS (never blocks) when mount max_turns is below the class mean", () => {
-  const t = task({ id: "FIX-BUDGET" });
+  const t = task({ id: "FIX-BUDGET", files: ["src/lib/example.ts"] });
   const warn = budgetSanityWarning(20, { avgTurns: 45.2 });
   assert.ok(warn);
   assert.equal(warn?.severity, "warn");
@@ -1079,8 +1117,20 @@ test("ACCEPTANCE 5: assertLintClean THROWS TaskLintError for a malformed task; a
   // proof-dialect AND proof-resolvability offender (its criterion 3 is a `grep:`-prefixed
   // proof with no `in <path>` clause: W1-T246, then W1-T101), so this ACCEPTANCE-5 check
   // (which predates both and is about sizing/headless-fitness/proof-shape/provenance)
-  // isolates the SAME way the pre-dispatch call site does for the legacy backlog.
-  assert.doesNotThrow(() => assertLintClean(W1_T4_SHAPE, { proofDialect: "warn", proofResolvability: "warn" }));
+  // isolates the SAME way the pre-dispatch call site does for the legacy backlog. It ALSO
+  // carries no files: — one of the 80 historical bare-scope records the new declared-scope
+  // check (W1-T504) now legitimately blocks on, so the isolation is to THAT check alone.
+  try {
+    assertLintClean(W1_T4_SHAPE, { proofDialect: "warn", proofResolvability: "warn" });
+    assert.fail("expected declared-scope to throw — W1_T4_SHAPE carries no files:");
+  } catch (e) {
+    if (!(e instanceof TaskLintError)) throw e;
+    assert.deepEqual(
+      e.violations.map((v) => v.check),
+      ["declared-scope"],
+      "sizing/proof-dialect/proof-resolvability must stay isolated — only declared-scope throws here",
+    );
+  }
 });
 
 // ── ACCEPTANCE 6: the canonical regression fixture ────────────────────────────
@@ -1276,6 +1326,7 @@ test("lintPlan runs the same checks across every task in a loaded plan", () => {
   verify: auto
   risk: medium
   origin: architect
+  files: [src/lib/example.ts]
   acceptance:
     - claim: "does the thing"
       proof: "grep: no old callers remain in src/lib/example.ts"
@@ -1287,6 +1338,7 @@ test("lintPlan runs the same checks across every task in a loaded plan", () => {
   verify: auto
   risk: medium
   origin: architect
+  files: [src/lib/example.ts]
   acceptance:
     - claim: "does the thing overnight"
       proof: "works"
@@ -1345,7 +1397,7 @@ test("W1-T180 ACCEPTANCE 1 (helper): criteriaAdded reports the gained entry vs t
 test("W1-T180 ACCEPTANCE 1: reword/reorder-only changes (SAME set, different order/whitespace) do NOT trip it", () => {
   const reworded = [{ claim: "  status   regresses to queued on a read failure is fixed ", proof: "unit test: test/status.test.ts" }];
   assert.deepEqual(criteriaAdded(W1_T155_BASE_CRITERIA, reworded), []);
-  const amended = task({ id: "W1-T155", acceptance: reworded });
+  const amended = task({ id: "W1-T155", files: ["src/lib/status.ts"], acceptance: reworded });
   const res = lintTask(amended, {
     postMergeAmendment: { statusResolvable: true, merged: true, baseAcceptance: W1_T155_BASE_CRITERIA, followUpFiled: false },
   });
@@ -1354,8 +1406,8 @@ test("W1-T180 ACCEPTANCE 1: reword/reorder-only changes (SAME set, different ord
 
 test("W1-T180 ACCEPTANCE 2: the SAME PR filing a follow-up task carrying the amended criteria PASSES — the check gates the orphaning, not the amending", () => {
   const addedCriterion = { claim: "monotonic under darkness", proof: "unit test: test/status.test.ts::monotonic under darkness" };
-  const amended = task({ id: "W1-T155", acceptance: [...W1_T155_BASE_CRITERIA, addedCriterion] });
-  const followUp = task({ id: "W1-T179", acceptance: [addedCriterion] });
+  const amended = task({ id: "W1-T155", files: ["src/lib/status.ts"], acceptance: [...W1_T155_BASE_CRITERIA, addedCriterion] });
+  const followUp = task({ id: "W1-T179", files: ["src/lib/status.ts"], acceptance: [addedCriterion] });
   const changedSet = [amended, followUp];
   for (const t of changedSet) {
     const added = criteriaAdded(W1_T155_BASE_CRITERIA, t.acceptance ?? []);
@@ -1386,6 +1438,7 @@ test("W1-T180 ACCEPTANCE 2 (helper): followUpCarriesCriteria is FALSE with no es
 test("W1-T180 ACCEPTANCE 4: an UNREADABLE derived status fails OPEN — a status-read failure never reds an otherwise-valid plan PR", () => {
   const amended = task({
     id: "W1-T155",
+    files: ["src/lib/status.ts"],
     acceptance: [...W1_T155_BASE_CRITERIA, { claim: "a brand new criterion", proof: "unit test: test/status.test.ts::brand new" }],
   });
   const res = lintTask(amended, {
@@ -1403,6 +1456,7 @@ test("W1-T180 ACCEPTANCE 4: an UNREADABLE derived status fails OPEN — a status
 test("W1-T180: absent LintOpts.postMergeAmendment entirely is a no-op (the pre-dispatch call site, which never dispatches an already-merged task)", () => {
   const amended = task({
     id: "W1-T155",
+    files: ["src/lib/status.ts"],
     acceptance: [...W1_T155_BASE_CRITERIA, { claim: "a brand new criterion", proof: "unit test: test/status.test.ts::brand new" }],
   });
   assert.deepEqual(postMergeAmendmentViolations(amended), []);
@@ -1412,6 +1466,7 @@ test("W1-T180: absent LintOpts.postMergeAmendment entirely is a no-op (the pre-d
 test("W1-T180: an amended task whose derived status is NOT merged (still open/queued) is untouched — ordinary authoring, not a post-merge amendment", () => {
   const amended = task({
     id: "W1-T155",
+    files: ["src/lib/status.ts"],
     acceptance: [...W1_T155_BASE_CRITERIA, { claim: "a brand new criterion", proof: "unit test: test/status.test.ts::brand new" }],
   });
   const res = lintTask(amended, {

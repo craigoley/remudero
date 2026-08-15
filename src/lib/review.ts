@@ -5170,11 +5170,32 @@ function isProductPath(path: string): boolean {
  * diff. `instrumentPaths`/`srcPaths` are the OBSERVED EVIDENCE named in the
  * failure text and the fix rung's escalation (W1-T186 emitter discipline).
  */
-function detectInstrumentEntanglement(
+export function detectInstrumentEntanglement(
   diffFiles: string[],
 ): { entangled: boolean; instrumentPaths: string[]; srcPaths: string[] } {
   const instrumentPaths = diffFiles.filter((f) => INSTRUMENT_SURFACE_RE.test(f));
-  const srcPaths = diffFiles.filter(isProductPath);
+  // A PATH ON THE INSTRUMENT SURFACE IS NOT PRODUCT CODE, EVEN WHEN IT LIVES UNDER `src/`.
+  //
+  // WHY THIS SUBTRACTION EXISTS. `isProductPath` is unconditionally `src/` and not `test/`, so
+  // before this line a `src/` file named by {@link INSTRUMENT_SURFACE} landed in BOTH arrays and
+  // `entangled` was true on that one file plus a workflow — with nothing else in the diff. That made
+  // the exemption INEXPRESSIBLE: adding any `src/` path to the surface could never change a verdict,
+  // because the same path re-entered as product. MEASURED on #1863's real file list with a candidate
+  // path added to the surface: still `entangled: true`.
+  //
+  // AND IT PRESERVES THE RULE'S REASON RATHER THAN MUTING IT. The premise is that "the code's own
+  // falsifiers were graded by the very version of the instrument that shipped beside them" — which is
+  // a statement about PRODUCT code and the instrument measuring it. A file that IS the instrument has
+  // no product falsifiers of its own to be mis-graded; it is the measuring device, not the measured.
+  // So subtracting it is faithful to the premise, not a relaxation of it. Everything genuinely
+  // product-shaped still counts: `src/lib/review.ts` is not on the surface and stays product, which
+  // is what keeps the reviewer subject to its own rule.
+  //
+  // INERT AT THIS SHA, DELIBERATELY. No pattern in {@link INSTRUMENT_SURFACE} matches anything under
+  // `src/` today, so this subtraction removes nothing from any present diff and changes no verdict —
+  // it only makes a future exemption POSSIBLE to express. Granting one is a separate decision and is
+  // NOT taken here.
+  const srcPaths = diffFiles.filter((f) => isProductPath(f) && !INSTRUMENT_SURFACE_RE.test(f));
   return { entangled: instrumentPaths.length > 0 && srcPaths.length > 0, instrumentPaths, srcPaths };
 }
 

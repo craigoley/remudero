@@ -2099,7 +2099,17 @@ interface PriorActions {
   /** `${prNumber}@${headSha}` — fix dispatch is head-keyed. */
   fixed: Set<string>;
   closed: Set<number>;
-  escalated: Set<number>;
+  /**
+   * `pr@head` keys, exactly like `armed`/`fixed`/`depReviewed` above (W1-T514).
+   * PR-number-only until this task, which let one `acted:true` blocked-ambiguous
+   * line at head A dedup the SAME PR forever — including a genuinely NEW block at
+   * a later head B, where `escalate()`'s own composite key (`headSha`, `cause` —
+   * W1-T195) already knows how to open a fresh issue instead of appending to a
+   * stale one. That transport-side fix was unreachable as long as this gate never
+   * let a second head through. A new head must re-earn the attempt, same as every
+   * sibling arm; the SAME head still dedupes (no per-push storm).
+   */
+  escalated: Set<string>;
   /** `pr@head` keys whose dep-review reached a TERMINAL outcome (arm/escalate/refuse). */
   depReviewed: Set<string>;
   /**
@@ -2132,7 +2142,7 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
   const armed = new Set<string>();
   const fixed = new Set<string>();
   const closed = new Set<number>();
-  const escalated = new Set<number>();
+  const escalated = new Set<string>();
   const depReviewed = new Set<string>();
   const postReviewed = new Set<string>();
   const absentRepushes = new Map<number, { count: number; shas: Set<string> }>();
@@ -2178,7 +2188,9 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
         closed.add(pr);
         break;
       case "blocked-ambiguous":
-        escalated.add(pr);
+        // W1-T514: SHA-KEYED, exactly like `fixed`/`armed` above — a new head
+        // must re-earn the attempt rather than being deduped by a stale one.
+        escalated.add(`${pr}@${typeof line.head_sha === "string" ? line.head_sha : ""}`);
         break;
       case "dep-review":
         // Only a TERMINAL outcome dedups; a "hold" must re-run next sweep so a
@@ -2433,7 +2445,10 @@ export async function runSweep(
         alreadyDone = prior.closed.has(pr.prNumber);
         break;
       case "blocked-ambiguous":
-        alreadyDone = prior.escalated.has(pr.prNumber);
+        // W1-T514: sha-keyed, exactly like every sibling arm above — a new
+        // head re-earns its own escalation rather than being deduped by a
+        // stale head's `acted:true` line forever.
+        alreadyDone = prior.escalated.has(`${pr.prNumber}@${pr.headSha}`);
         break;
       case "dep-review":
         alreadyDone = prior.depReviewed.has(`${pr.prNumber}@${pr.headSha}`);

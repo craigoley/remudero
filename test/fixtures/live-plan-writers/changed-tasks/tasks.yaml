@@ -1,0 +1,23 @@
+# W1-T515 FIXTURE — a plan root the live-plan-writer suites lint INSTEAD of the real plan/.
+#
+# COMMITTED ON PURPOSE: `lintPlanCommand`'s --base runs `git show <ref>:<relPath>` and exits 2 when
+# that path is absent at the ref, so a temp directory cannot serve a --base run. UNDER the repo root
+# on purpose too: an explicit --plan resolving outside it is refused by name (W1-T120).
+#
+# ONE ROOT PER SUITE, AND THAT IS THE WHOLE POINT. These two suites run CONCURRENTLY under
+# `node --test`. A shared root puts one suite's probe shard inside the other's "0 changed"
+# assertion — the same cross-suite race this task exists to remove, merely relocated.
+- id: FIXTURE-C1
+  title: "a fixture monolith task for the raw-text changed-task probe"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: medium
+  status: queued
+  attempts: 0
+  origin: architect
+  files: [src/lib/example.ts]
+  acceptance:
+    - claim: "the changed-tasks fixture parses and lints"
+      proof: "unit test: a fixture monolith task for the raw-text probe"

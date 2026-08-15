@@ -594,26 +594,32 @@ USER node
 # bwrap creates user and mount namespaces, which Docker's DEFAULT seccomp and AppArmor profiles
 # restrict. TWO things are required, and only one of them is the container's business.
 #
-# 1. `--privileged`, AND `--cap-add` DOES NOT SUBSTITUTE FOR IT. This corrects what this comment
-#    said in two earlier drafts, which recorded `--cap-add SYS_ADMIN --cap-add NET_ADMIN` as the
-#    working set. MEASURED since: a NON-ROOT process gets NO effective capabilities regardless of
-#    `--cap-add` — `CapEff: 0000000000000000` was read inside the container even with `--privileged`
-#    AND `--cap-add SYS_ADMIN` present. Capabilities in a bounding set are not capabilities a uid
-#    1000 process holds. So the caps have to come from the container being privileged, and the
-#    `--cap-add` flags were never what made those runs work. Recording a flag set transcribed from
-#    a successful run is only as good as the causal claim attached to it, and that claim was wrong.
+# 1. CONFINEMENT, NOT A CAPABILITY — `--privileged` WAS NEVER GRANTING ONE. This corrects what
+#    this comment said in three earlier drafts: first `--cap-add SYS_ADMIN --cap-add NET_ADMIN`,
+#    then `--privileged` itself, both read as the working set because a capability-shaped fix
+#    hides a confinement-shaped cause. MEASURED (W1-T508, 2026-08-15, throwaway containers, an
+#    eleven-row bwrap matrix, three repeats): the image runs as non-root `node`, so `CapEff` reads
+#    `0000000000000000` under EVERY flag combination tried, `--privileged` included — capabilities
+#    were never the mechanism. What bwrap actually needs is settable seccomp, settable AppArmor,
+#    and an unmasked `/proc`, and `--cap-drop ALL --security-opt seccomp=unconfined
+#    --security-opt apparmor=unconfined --security-opt systempaths=unconfined` reproduces
+#    `--privileged`'s pass on the fleet's own containment preflight (`defaultExecutor`,
+#    src/lib/containment.ts) IDENTICALLY, while dropping any ONE of the three relaxations fails —
+#    all three are load-bearing, none is decorative. The prize is what `--privileged` grants
+#    OUTSIDE the sandbox rather than inside it: the full 41-capability bounding set and all 16 host
+#    block devices, `nvme0n1p1` (the host root filesystem) among them, versus zero and zero for
+#    the narrow form. THIS IS NOT A CLAIM THE RESULT IS SANDBOXED — seccomp and AppArmor are both
+#    OFF for the whole container either way — the defensible claim is fewer capabilities and no
+#    device access.
 #
 # 2. `kernel.apparmor_restrict_unprivileged_userns=0` ON THE HOST. Ubuntu 24.04 ships it ENABLED
 #    and it blocks bubblewrap's nested user namespace. MEASURED both ways: with it OFF, bwrap works
 #    with no setuid binary at all; with it ON, even setuid bwrap fails at `apply-seccomp`, because
 #    a nested userns is capability-restricted. This is a HOST sysctl and no image can set it — it
 #    is written here because nothing else in the system will tell anyone, and the failure it
-#    produces looks like a broken sandbox rather than a host setting.
-#
-# `--security-opt apparmor=unconfined --security-opt seccomp=unconfined` remain in the measured
-# invocation. Whether they are still needed once (1) and (2) hold is UNMEASURED — nobody has
-# removed them one at a time. This comment should not imply the set is minimal, because it is not
-# known to be.
+#    produces looks like a broken sandbox rather than a host setting. Whether
+#    `--security-opt apparmor=unconfined` subsumes this sysctl is ASSUMED, NOT MEASURED — nobody
+#    has flipped it back to Ubuntu's default (1) on this host and re-run the matrix.
 #
 # NOTE ALSO: this image sets no `USER`, so it runs as root by default. With REQ 8 baked in there
 # is no longer any reason to start as root — nothing needs apt at run time — so prefer

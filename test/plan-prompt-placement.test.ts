@@ -49,6 +49,7 @@ const TASK_YAML = (id: string, title: string): string =>
     "  verify: auto",
     "  status: queued",
     "  attempts: 0",
+    "  files: [src/lib/example.ts]",
     "",
   ].join("\n");
 

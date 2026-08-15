@@ -1,0 +1,199 @@
+- id: W1-T513
+  title: "the light sweep runs inside the main tick and starves behind whatever occupies it, so a green PR can wait tens of minutes for a review that takes seven seconds — 41 sweep gaps over five minutes, 15.2 starved hours in a 161.6-hour corpus"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  rationale: "**RESOLVED 2026-08-15 BY OPERATOR RULING: OPTION (D) — NOTHING IS BUILT.** The
+    measurement below stands and is not withdrawn; what changed is that design (ii)'s central
+    sentence was checked against the function body and found FALSE, which inverts the option it was
+    steering away from. See design's RULING clause for the correction and for why (A) and (C) lose.
+    THIS SECTION IS THE RECORD OF HOW THE PROBLEM WAS READ BEFORE THAT CHECK, AND IS DELIBERATELY
+    LEFT INTACT — per MASTER-PLAN §8A the fix for a wrong sentence is to correct it in place, not to
+    delete the analysis that carried it.
+
+    MEASURED ON THE AZURE HOST (`Remudero`), 2026-08-15. Ledger corpus per form: `.gz`
+    **0 files**, plain 2, live 1 — COVERAGE control on a step present in every non-empty form
+    (`run.start`): gz 0 / plain 128 / live 85, so the gz zero is an empty form, not a missed glob.
+    Union, full-line deduped: **31,288 rows** spanning **161.6 hours**.
+
+    (1) **THE CADENCE, WHOLE-CORPUS.** `sweep.pass` inter-pass gaps, n=**2,613**:
+    **median 63s, p75 111s, p90 118s, p99 441s, max 187.0 min**; **72% land within 90s**.
+    **41 gaps exceed 5 minutes and 12 exceed 15 minutes**, totalling **15.2 starved hours** — 9.4% of
+    the corpus.
+
+    (2) **WHAT HOLDS THE TICK, CLASSIFIED RATHER THAN GUESSED.** Each of the 41 gaps attributed by
+    what logged inside it:
+      **ci wait held the tick   23 gaps  331 min**
+      daemon restart / outage   10 gaps  368 min   (an outage, NOT starvation — excluded from the case)
+      **fix rung held the tick   6 gaps  202 min**
+      other rung                 2 gaps   10 min
+    **EXCLUDING RESTARTS: 31 GAPS, ~9 HOURS.** The CI wait is the most FREQUENT occupant; the fix rung
+    is the longest per instance.
+
+    (3) **AND IT IS NOT A FROZEN EVENT LOOP — RE-DERIVED EXPLICITLY, BECAUSE THE FIRST HEURISTIC GOT
+    IT BACKWARDS.** Across all 42 `ci.polling` clusters longer than five minutes, the ledger carries
+    **68 `daemon.alive` rows AND 180 `sweep.pass` rows**. A frozen loop stops both (the discriminator
+    W1-T463/#1813 established); here the heartbeat keeps writing and sweeps largely still land.
+    **THE TICK IS OCCUPIED, NOT FROZEN.**
+
+    (4) **AND ONE MEASUREMENT WAS WRONG BEFORE IT WAS RIGHT — RECORDED SO IT IS NOT REPEATED.** A first
+    pass counted `ci.polling` clusters longer than SIXTY SECONDS and found '41 of 49 with no sweep
+    inside'. **THAT THRESHOLD MANUFACTURES STARVATION**: with a 63s median cadence, a 60-90s window
+    frequently contains zero sweeps by sampling alone. Re-run at a five-minute threshold the same
+    clusters are mostly healthy. **ANY FUTURE MEASUREMENT HERE MUST USE A WINDOW SEVERAL TIMES THE
+    CADENCE, OR IT WILL RE-DISCOVER A PHANTOM.**
+
+    (5) **THE RUNG DURATION PROFILE, LEDGER-DERIVED.** Time between each rung's own boundary rows, and
+    how often a `sweep.pass` fails to land inside:
+      implement run (`run.start`->`verdict`)          n=68  median **28.3 min**  p90 82.5  max 174.2   no sweep inside: 30/68
+      review spawned (`review.reviewer`->`posted`)    n=34  median  0.1 min  p90  0.4  max   2.5
+      post-review (`attempt`->`done`)                 n=85  median  0.2 min  p90  0.8  max   2.6
+      fix rung (`fix.dispatch`->`fix.done`)           n=17  median  0.0 min                        (bookkeeping rows, not the work)
+    **THE IMPLEMENT RUN IS THE ONLY MULTI-MINUTE RUNG, AND IT IS THE ONE ALREADY WRAPPED** — sweeps
+    land inside 38 of its 68 spans. The reviewer rungs are sub-minute and are NOT the problem."
+  design: "**RULING (2026-08-15): THIS TASK RESOLVES AS OPTION (D). NOTHING IS BUILT. THE FOUR
+    OPTIONS BELOW ARE KEPT AS THE RECORD OF WHAT WAS CONSIDERED; THIS CLAUSE SAYS WHICH WON AND
+    WHY.** Do not re-open it by re-proposing (A), (B) or (C) — each is refused here on evidence,
+    with the check that refuses it named so a future reader can re-run it rather than re-argue it.
+
+    **CORRECTION 1 — DESIGN (ii) BELOW IS FALSE, AND IT INVERTS THE TASK. RE-DERIVED FROM THE
+    FUNCTION BODY, NOT FROM ITS REPUTATION.** `startInFlightTicker` (`src/lib/daemon.ts`) loops
+    `await deps.sleep(pollIntervalMs)` -> `log(\"daemon.alive\", …)` -> `await deps.sweepLight!()`,
+    and its own doc fixes that ordering in terms: *IT IS LOGGED BEFORE `sweepLight()`, NOT AFTER*.
+    **RUNNING THE LIGHT SWEEP IS THE TICKER'S JOB.** It is not a heartbeat with a sweep attached, so
+    (ii)'s *it does not make the sweep run* is wrong and every inference drawn from it is unsafe.
+
+    **AND THREE OF THE FOUR LONG RUNGS ALREADY CARRY IT, SO OPTION (B) IS MOSTLY SHIPPED.** Implement
+    dispatch takes `startInFlightTicker(deps, pollIntervalMs, log, \"dispatch\")`; retro and
+    auto-triage both reach `startInFlightTicker(deps, pollIntervalMs, log, \"retro\")` through
+    `sweepLightDuringRetro`, which has two call sites — the retro trigger and `deps.runAutoTriage`.
+    **THE ONE UNWRAPPED LONG RUNG IS `deps.sweep()` ITSELF**, awaited bare in the poll loop.
+
+    **AND WRAPPING THAT LAST ONE IS BOTH INCOHERENT AND UNSAFE, WHICH IS WHAT DECIDES THE TASK.** It
+    would run light passes CONCURRENTLY WITH THE FULL SWEEP — sweeping more while already sweeping —
+    and `claimedReviewKeys` is declared inside `runSweep` (`src/lib/sweep.ts`), so it is PER-CALL:
+    two concurrent passes each build their own Set and can post two verdicts for one head. **SO (A)
+    AND (B) COLLAPSE INTO THE SAME DOUBLE-REVIEW RACE, AND THERE IS NOTHING SAFE LEFT TO WRAP.**
+
+    **CORRECTION 2 — THE CADENCE METRIC IS AN UPPER BOUND ON STARVATION, NOT A MEASURE OF IT.**
+    `sweep.pass` is logged at the START of `runSweep`, before the per-PR loop, so an inter-pass gap
+    includes however long that pass spends executing its GATED ACTIONS — a fix dispatch, a real
+    `reviewCommand` with worktree materialisation. **STARVATION AND WORKING ARE THE SAME SHAPE IN
+    THIS METRIC**, and rationale (1) does not separate them.
+    RE-DERIVED ON THE MINI CORPUS (a different host, same code — this host has no route to the Azure
+    ledger). Per-form COVERAGE control: gz 666 files / 4,257,015 rows, plain 4 / 64,663, live 1 /
+    14,147, `run.start` non-zero in all three. Cadence n=**1,896**, **median 63s — IDENTICAL TO
+    AZURE'S 63s**, 82% within 90s, **106 gaps over five minutes**. Classified by what happens LATE in
+    each gap (after one cadence period, so a burst of concurrent pass rows cannot mask a silence):
+    **41 ci wait (6.3h), 2 fix rung (1.2h), 39 other-rows-only (6.0h), and 24 where the SWEEP OR
+    REVIEW WAS STILL WORKING (127.2h).** **GENUINE TICK-HELD TIME IS ~7.5h OF 177.9h — ABOUT 4.2%**,
+    against the 5.6% rationale (1) reports, and the hours that look worst are the sweep working.
+
+    **WHY (A) LOSES, AND THE ORIGINAL BRIEF'S BUDGET PREMISE WAS WRONG.** #1866 is a `chore(plan)`
+    commit that touched one file, its own shard: **W1-T511 IS FILED, NOT BUILT**, and `ghLiveState`
+    (`src/run-task.ts`) still calls `gh pr view --json state` over GraphQL. So design (iv)'s
+    arithmetic is UNCHANGED — 11,213 calls against a 5,000/hour limit, 31 review attempts killed.
+    (A) doubles the heaviest caller to reclaim ~4%, and it cannot even be attempted until
+    `claimedReviewKeys` is lifted out of `runSweep`.
+
+    **WHY (C) LOSES: THERE IS NOTHING LEFT TO BOUND.** `waitForCiGreen` (`src/run-task.ts`) already
+    caps at `maxIters = 60, everySec = 6`. **W1-T382 IS QUEUED AND ARGUES THAT CAP IS A
+    100%-FALSE-POSITIVE BOUND — ALL 21 PRs IT EVER BOOKED AS A CHECK-WAIT TIMEOUT LATER MERGED** —
+    so tightening it makes that defect worse. Cite W1-T382; do not file a second task for it.
+
+    (0) **WHAT IS NOT WRONG — RECORD IT SO NOBODY RE-INVESTIGATES IT.** Reviews are FAST:
+    `sweep.post_review.attempt` -> `review.posted` is **median 7.3s, p90 36.6s, n=81**, and the spawned
+    half is faster still at median 3.3s (n=34). And they are GENUINELY CONCURRENT — `runSweepLightPass`
+    (`src/lib/sweep.ts`) ends `return Promise.all(openPrs.map((pr) => runSweep([pr], deps, policy)))`.
+    **THE REVIEWER IS NOT THE PROBLEM AND MUST NOT BE 'OPTIMISED'.**
+
+    (i) **THE MECHANISM.** `startInFlightTicker` (`src/lib/daemon.ts`) wraps the IMPLEMENT DISPATCH
+    ONLY. The fix rung and the reviewer rung run inside the main tick with no ticker, so a long await
+    anywhere in the tick defers the next `sweepLight` until it returns. `sweepLight` is driven from
+    `src/lib/daemon.ts` (18 references there), which is why the tick and the light pass share a thread.
+
+    (ii) **SUPERSEDED BY CORRECTION 1 IN THE RULING ABOVE — THE FIRST BOLD SENTENCE OF THIS CLAUSE
+    IS FALSE. KEPT VERBATIM AS THE RECORD OF HOW IT WAS READ BEFORE THE FUNCTION BODY WAS CHECKED.**
+    THE CRUX, AND IT IS EASY TO GET BACKWARDS — STATE WHICH PROBLEM ANY FIX SOLVES.
+    `startInFlightTicker` exists because a long dispatch once silenced `daemon.alive` entirely. **IT
+    KEEPS THE HEARTBEAT ALIVE. IT DOES NOT MAKE THE SWEEP RUN.** Measurement (3) proves the two are
+    already decoupled: the heartbeat wrote 68 rows through the long clusters. **SO EXTENDING THE
+    TICKER TO THE OTHER RUNGS WOULD MAKE THE FLEET LOOK HEALTHIER WITHOUT SHORTENING A SINGLE PR'S
+    WAIT** — the reads-like-success shape this repo has measured repeatedly. **AN IMPLEMENTER WHO
+    REACHES FOR THE TICKER MUST SAY WHICH OF THE TWO PROBLEMS THEY ARE SOLVING.**
+
+    (iii) **THE ALTERNATIVES. ARGUE ALL FOUR; NONE IS RANKED HERE.**
+      (a) **RUN THE LIGHT PASS ON ITS OWN TIMER**, independent of the tick. Closest to what the
+          operator wants. **COST — AND IT IS A REAL RACE, NOT A THEORETICAL ONE:** `claimedReviewKeys`
+          is declared INSIDE `runSweep` (`src/lib/sweep.ts`, 4 references), so it is PER-CALL. Two
+          concurrent passes each construct their own Set and could double-review the same PR. A
+          verdict is a sha-pinned commit status, so a duplicate post is an idempotent overwrite rather
+          than a wrong verdict — but the spawned reviewer half would run twice, which costs money.
+          This option REQUIRES lifting the mutex out of `runSweep` first.
+      (b) **EXTEND `startInFlightTicker` TO THE OTHER RUNGS.** Small and local. **BUT SEE (ii)** — on
+          this evidence it treats the symptom that is already absent.
+      (c) **BOUND THE RUNGS THAT HOLD THE TICK.** The fix rung already caps at two strikes, but that
+          caps ATTEMPTS, not DURATION; nothing found caps how long a single occupant may hold the
+          tick. A duration cap is the smallest change that shortens the tail directly.
+      (d) **DO NOTHING BUT SURFACE IT.** The median is 63s and 72% land inside 90s. **THE TAIL MAY
+          SIMPLY BE THE COST OF A SINGLE-THREADED DAEMON**, in which case the honest remedy is
+          visibility rather than concurrency.
+
+    (iv) **AND COST ANY PROPOSAL THAT SWEEPS MORE OFTEN — THIS IS A HARD CONSTRAINT.** The cadence is
+    already the heaviest GitHub caller: **656 `sweep.pass` rows in a day**, roughly one per two
+    minutes, each a list read plus per-PR live-state reads. That day reached **11,213 calls against a
+    5,000/hour GraphQL limit**. **A PROPOSAL THAT HALVES THE INTERVAL DOUBLES THE HEAVIEST CALLER ON A
+    BUDGET THAT IS ALREADY EXHAUSTING.** Any option must state its call-volume delta.
+
+    (v) **THE OTHER HALF OF THE SYMPTOM IS OWNED ELSEWHERE — CITE, DO NOT DUPLICATE.** W1-T511
+    (#1866) owns the rate-limit half: **31 of 114 review attempts (27%) died on `GraphQL: API rate
+    limit already exceeded`**, discarded whole with no retry and no alarm. That and this task produce
+    the same operator-visible symptom by different mechanisms. **DO NOT ABSORB IT.**
+
+    (vi) **WHAT MUST NOT BE BUILT.** No reviewer optimisation (see (0)). No second heartbeat. No
+    unbounded concurrency without lifting `claimedReviewKeys` first (see (iii)(a)). And nothing that
+    increases sweep frequency without the call-volume arithmetic in (iv)."
+  acceptance:
+    - claim: "a long-running tick occupant no longer blocks the light pass"
+      proof: "unit test: W1-T513: a long tick occupant does not block the light pass"
+    - claim: "two light passes cannot review the same pull request twice"
+      proof: "unit test: W1-T513: two light passes cannot double review one pull request"
+    - claim: "the sweep interval is unchanged so the call budget is not increased"
+      proof: "unit test: W1-T513: the light pass interval is unchanged by the fix"
+    - claim: "a heartbeat alone does not count as a sweep having run"
+      proof: "unit test: W1-T513: a heartbeat alone is not counted as a sweep"
+  origin: recon#light-sweep-starves-behind-the-tick-2026-08-15
+  plan_refs: ["W1-T511", "W1-T463", "W1-T471"]
+  files: [src/lib/daemon.ts, test/daemon.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `src/` and `test/`, and the blast radius is
+    genuinely high: the light pass is what posts every review, so a change that stalls or duplicates it
+    affects every PR at once.
+    **`files:` WAS DERIVED BY INVOCATION COUNT**, measured at `e7d0a97`: `src/lib/daemon.ts` scores
+    `sweepLight` **18** and `startInFlightTicker` **4** — the tick and the light pass are both driven
+    from there, and every option in design (iii) touches it. The test home is `test/daemon.test.ts` at
+    **7** on those symbols.
+    **`src/lib/sweep.ts` IS DELIBERATELY NOT DECLARED** despite scoring `claimedReviewKeys` **4** and
+    `runSweepLightPass` **1**: it only needs to change under option (iii)(a), which is argued and NOT
+    ranked. **IF AN IMPLEMENTER CHOOSES (a), THE SHARD MUST BE AMENDED TO ADD IT FIRST** rather than
+    the path added mid-run — `inverseScopeUntouchedFiles` (`src/lib/review.ts`) fails a
+    declared-but-untouched path exactly as `scopeViolationFiles` fails an undeclared one, so declaring
+    it now would fail every option except one. `test/retro-sweep-ticker.test.ts` (score 4) and
+    `test/sweep.test.ts` (score 8) are likewise left undeclared for the same reason.
+    **`src/run-task.ts` IS NOT DECLARED AND MUST NOT BE**: it scores `runSweepLightPass` 4 but only as
+    the CLI wiring, the change does not live there, and it is ~19,900 lines that
+    `partitionByFileOverlap` (W1-T471) serialises against every other task naming it.
+    **THE ACCEPTANCE PROOFS ARE NAME-FILTERED, NOT PURE PATHS.** A pure path runs a whole suite and one
+    unrelated failure fails every criterion — the shape that killed #1830 twice. Each of the four
+    titles was checked to match **0** paths on `origin/main` today against a positive control (`an exit
+    0 is NEVER throttled`) matching **1**, and each is under 100 characters with no comma so
+    `looksLikeScenarioNarrative` (`src/lib/task-linter.ts`) cannot fail them.
+    EVERY FIGURE HERE IS AZURE-ONLY AND DATED 2026-08-15: the 2,613-sample cadence, the 41-gap
+    classification, the 68-versus-180 discriminator, the rung profile, and the 656-pass call volume.
+    RE-DERIVE BEFORE BUILDING — and heed rationale (4): measure gaps against a window several times the
+    median cadence or the analysis manufactures starvation that is not there."

@@ -855,6 +855,87 @@ test("MUTANT (the defect that actually shipped): dropping the -e leaves the thro
   );
 });
 
+// ── `--privileged` IS WIDER THAN THE FLEET NEEDS (W1-T508) ──────────────────────────────────
+//
+// MEASURED (2026-08-15, throwaway containers, never the fleet's own): an eleven-row bwrap matrix
+// found `--cap-drop ALL --security-opt seccomp=unconfined --security-opt apparmor=unconfined
+// --security-opt systempaths=unconfined` passes the fleet's own containment preflight
+// (`defaultExecutor`, src/lib/containment.ts) IDENTICALLY to `--privileged`, while dropping any
+// ONE of the three relaxations fails. `--privileged` additionally grants the full 41-capability
+// bounding set and all 16 host block devices, `nvme0n1p1` (the host root disk, holding the GH
+// token and the ledger) among them — none of which the sandbox ever used. These four tests read
+// the printed invocation the same way the throttle chain above does: BY EFFECT on
+// `--print-daemon-run`'s own output, not by grepping the script's source for a flag name.
+
+/** Raw text of the printed DAEMON container's `docker run` block (not the console container). */
+function daemonRunBlock(scriptPath = HOST_UPDATE): string {
+  const printed = spawnSync("bash", [scriptPath, "--print-daemon-run"], {
+    encoding: "utf8",
+    cwd: REPO_ROOT,
+  });
+  assert.equal(printed.status, 0, `--print-daemon-run failed: ${printed.stderr}`);
+  const block = printed.stdout.slice(
+    printed.stdout.indexOf("docker run -d --name remudero-daemon"),
+    printed.stdout.indexOf("./bin/rmd daemon"),
+  );
+  assert.ok(block.length > 0, "the daemon invocation must be present in --print-daemon-run output");
+  return block;
+}
+
+test("W1-T505: the printed daemon invocation drops blanket privilege", () => {
+  const block = daemonRunBlock();
+  assert.doesNotMatch(
+    block,
+    /--privileged\b/,
+    `the printed invocation must not carry --privileged any more: ${block}`,
+  );
+});
+
+test("W1-T505: the printed invocation carries all three relaxations", () => {
+  const block = daemonRunBlock();
+  // Measured as a MATRIX, not independently: dropping any one of these three fails the fleet's
+  // own containment preflight, so all three must be present together.
+  for (const opt of [
+    "--security-opt seccomp=unconfined",
+    "--security-opt apparmor=unconfined",
+    "--security-opt systempaths=unconfined",
+  ]) {
+    assert.ok(block.includes(opt), `the printed invocation must carry ${JSON.stringify(opt)}: ${block}`);
+  }
+});
+
+test("W1-T505: the printed invocation adds back no capability", () => {
+  const block = daemonRunBlock();
+  assert.ok(
+    block.includes("--cap-drop ALL"),
+    `the printed invocation must empty the bounding capability set: ${block}`,
+  );
+  assert.doesNotMatch(
+    block,
+    /--cap-add\b/,
+    `the printed invocation must not add any capability back — that is the whole prize: ${block}`,
+  );
+});
+
+test("W1-T505: the recorded doctrine names confinement rather than capability", () => {
+  const dockerfile = readFileSync(join(REPO_ROOT, "deploy", "Dockerfile"), "utf8");
+  const reqStart = dockerfile.indexOf("REQ 9:");
+  assert.ok(reqStart >= 0, "deploy/Dockerfile must still carry the REQ 9 sandbox-permissions doctrine");
+  const nextReq = dockerfile.indexOf("# ── REQ", reqStart + 1);
+  const doctrine = dockerfile.slice(reqStart, nextReq > 0 ? nextReq : dockerfile.length);
+
+  assert.match(
+    doctrine,
+    /CONFINEMENT, NOT A CAPABILITY/,
+    "the doctrine must name confinement (settable seccomp/AppArmor, unmasked /proc) as the requirement",
+  );
+  assert.doesNotMatch(
+    doctrine,
+    /the caps have to come from the container being privileged/,
+    "the doctrine must no longer carry the superseded capability-shaped explanation",
+  );
+});
+
 // ── MUTANTS: each reproduces a defect that actually shipped ─────────────────────────────────
 
 function mutate(find: string, replace: string): string {

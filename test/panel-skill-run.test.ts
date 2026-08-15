@@ -163,6 +163,7 @@ test("buildClarifyGrill: a clean task still gets ONE task-specific question, nev
     status: "queued",
     attempts: 0,
     origin: "architect",
+    files: ["src/lib/example.ts"],
     acceptance: [{ claim: "does the thing", proof: "unit test: does the thing" }],
   } as unknown as Task;
   const lint = lintTask(task);

@@ -4,7 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
+  classifyPushFailure,
   firstUnreservedAtOrAbove,
+  gitRemoteRefReserver,
+  reserveTaskIdRemote,
+  taskIdReservationRef,
+  type RemoteRefReserver,
+  type RemoteReserveOutcome,
   liveReservedIds,
   readTaskIdReservation,
   reserveTaskIdFrom,
@@ -164,4 +170,128 @@ test("the reservation record is human-readable and names its purpose for the ope
   assert.match(raw, /"purpose": "rmd triage fb-abc \(run R1\)"/, "an operator running `cat` must see WHO holds it and WHY");
   assert.match(raw, /"pid"/);
   assert.match(handle.path, /W1-T00281\.json$/, "zero-padded so `ls` sorts numerically");
+});
+
+// ── REMOTE RESERVATION (W1-T509) ─────────────────────────────────────────────
+//
+// THE ONLY TEST THAT MATTERS IS THE CONCURRENT ONE. A suite asserting that ONE reservation
+// succeeds proves nothing here — the pre-W1-T509 allocator passes that, and passed it while eight
+// id collisions landed in four days. Every test below drives TWO writers at the SAME candidate.
+
+/** A fake remote whose ref store is a Map: create-if-absent, exactly what the real server does for
+ *  an orphan payload. `taken` is returned for an occupied ref REGARDLESS of the anchor offered,
+ *  which is the property falsification (1) shows `refs/tags/` does NOT have. */
+function fakeRemote(): { refs: Map<string, string>; reserverFor: (anchor: string) => RemoteRefReserver } {
+  const refs = new Map<string, string>();
+  return {
+    refs,
+    reserverFor: (anchor: string) => ({
+      mintAnchor: () => anchor,
+      attempt: (taskId, offered): RemoteReserveOutcome => {
+        const ref = taskIdReservationRef(taskId);
+        const held = refs.get(ref);
+        if (held === undefined) { refs.set(ref, offered); return "created"; }
+        return "taken";
+      },
+    }),
+  };
+}
+
+test("a second reservation of the same task id is refused", () => {
+  const remote = fakeRemote();
+  const a = reserveTaskIdRemote(700, remote.reserverFor("anchor-A"));
+  const b = reserveTaskIdRemote(700, remote.reserverFor("anchor-B"));
+  assert.equal(a.taskId, "W1-T700", "the first writer takes the candidate");
+  assert.notEqual(b.taskId, a.taskId, "the second writer must NOT be handed the same id");
+  assert.equal(b.taskId, "W1-T701", "contention advances rather than refusing — both writers leave with an id");
+  assert.equal(b.attempts, 2, "the loser attempted the taken id once, then advanced exactly once");
+  // SUFFIX-AWARE: the ref is the whole token, so a suffixed id is a different ref entirely.
+  assert.notEqual(taskIdReservationRef("W1-T1"), taskIdReservationRef("W1-T1B"));
+});
+
+test("the reservation anchor differs per writer", () => {
+  // THE REGRESSION GUARD FOR FALSIFICATION (1). A tag-shaped remote accepts a push whose sha
+  // already matches — `Everything up-to-date`, rc=0 — so two writers sharing an anchor would BOTH
+  // be told they won. This asserts the anchor is per-writer AND that a shared-anchor remote is
+  // exactly what breaks, so nobody "simplifies" the payload back to a common commit.
+  const remote = fakeRemote();
+  const a = reserveTaskIdRemote(800, remote.reserverFor("anchor-A"));
+  const b = reserveTaskIdRemote(800, remote.reserverFor("anchor-B"));
+  assert.notEqual(a.anchor, b.anchor, "two writers must never present the same payload");
+  assert.equal(remote.refs.get(a.ref), "anchor-A", "the ref holds the winner's own anchor");
+
+  // A TAG-SHAPED remote: an occupied ref accepts an IDENTICAL sha and reports success. Under it,
+  // the second writer is handed the FIRST writer's id — the silent double-allocation this task exists to stop.
+  const tagRefs = new Map<string, string>();
+  const tagLike = (anchor: string): RemoteRefReserver => ({
+    mintAnchor: () => anchor,
+    attempt: (taskId, offered): RemoteReserveOutcome => {
+      const ref = taskIdReservationRef(taskId);
+      const held = tagRefs.get(ref);
+      if (held === undefined) { tagRefs.set(ref, offered); return "created"; }
+      return held === offered ? "created" : "taken"; // <- `Everything up-to-date`
+    },
+  });
+  const shared = "same-anchor-both-writers";
+  const t1 = reserveTaskIdRemote(900, tagLike(shared));
+  const t2 = reserveTaskIdRemote(900, tagLike(shared));
+  assert.equal(t1.taskId, t2.taskId, "FALSIFICATION 1 REPRODUCED: a shared anchor hands both writers W1-T900");
+});
+
+test("an unreachable remote refuses to mint an id", () => {
+  const dead: RemoteRefReserver = { mintAnchor: () => "anchor", attempt: () => "unreachable" };
+  assert.throws(
+    () => reserveTaskIdRemote(500, dead),
+    (e: unknown) => {
+      assert.ok(e instanceof TaskIdReservationError);
+      assert.match((e as Error).message, /refusing to mint/);
+      return true;
+    },
+    "an unreachable remote must refuse, never fall through to an optimistic mint",
+  );
+  // The classifier is what separates the two, and it defaults the UNKNOWN case to unreachable.
+  assert.equal(classifyPushFailure("! [rejected] (non-fast-forward)"), "taken");
+  assert.equal(classifyPushFailure("hint: Updates were rejected because the tag already exists"), "taken");
+  assert.equal(classifyPushFailure("fatal: unable to access: Could not resolve host: github.com"), "unreachable");
+  assert.equal(classifyPushFailure("ssh: connect to host github.com port 22: Operation timed out"), "unreachable");
+});
+
+test("reservation retries are bounded and name the attempted range", () => {
+  const allTaken: RemoteRefReserver = { mintAnchor: () => "anchor", attempt: () => "taken" };
+  assert.throws(
+    () => reserveTaskIdRemote(600, allTaken, { maxScan: 5 }),
+    (e: unknown) => {
+      assert.ok(e instanceof TaskIdReservationError);
+      assert.match((e as Error).message, /W1-T600\.\.W1-T604/, "the failure must NAME the range it attempted");
+      return true;
+    },
+  );
+});
+
+test("the bounded loop stops at maxScan rather than hammering the remote", () => {
+  let attempts = 0;
+  const counting: RemoteRefReserver = { mintAnchor: () => "a", attempt: () => { attempts++; return "taken"; } };
+  try { reserveTaskIdRemote(600, counting, { maxScan: 5 }); } catch { /* expected */ }
+  assert.equal(attempts, 5, "an unbounded retry against a network service is the failure mode this bound exists for");
+});
+
+test("the git-backed reserver pushes an orphan payload to the id's own ref", () => {
+  const calls: string[][] = [];
+  const reserver = gitRemoteRefReserver({
+    run: (args) => {
+      calls.push(args);
+      if (args[0] === "hash-object") return { status: 0, stdout: "TREE\n", stderr: "" };
+      if (args[0] === "commit-tree") return { status: 0, stdout: "ORPHAN\n", stderr: "" };
+      return { status: 0, stdout: "", stderr: "" };
+    },
+    anchor: undefined,
+  });
+  const anchor = reserver.mintAnchor();
+  assert.equal(anchor, "ORPHAN");
+  const commitTree = calls.find((c) => c[0] === "commit-tree");
+  assert.ok(commitTree, "the anchor must come from commit-tree");
+  assert.ok(!commitTree!.includes("-p"), "NO parent — an orphan is what makes two writers' payloads unrelated");
+  assert.equal(reserver.attempt("W1-T509", anchor), "created");
+  const push = calls.find((c) => c[0] === "push");
+  assert.deepEqual(push, ["push", "origin", "ORPHAN:refs/rmd-id/W1-T509"]);
 });

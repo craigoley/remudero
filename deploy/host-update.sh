@@ -268,9 +268,22 @@ host-update: DAEMON-MODE INVOCATION — printed only. Nothing has been started a
   # printed BECAUSE THIS FLEET DRAINS ITS OWN SOURCE REPO, and it is the consent record W1-T109
   # exists to capture: if you are pointing this at a DIFFERENT repo, delete the flag rather than
   # carrying it by habit. Read this line before you paste it.
+  #
+  # NO LONGER \`--privileged\` (W1-T508). MEASURED on this host in throwaway containers: bubblewrap's
+  # nested user+mount namespace needs settable seccomp, settable AppArmor and an unmasked /proc — not
+  # a capability — so \`--cap-drop ALL\` plus the three \`--security-opt\` relaxations below pass the
+  # fleet's own containment preflight (\`defaultExecutor\`, src/lib/containment.ts) IDENTICALLY to
+  # \`--privileged\`, while emptying the bounding capability set (41 -> 0) and removing all 16 host
+  # block devices \`--privileged\` exposes, \`nvme0n1p1\` (the host root disk) among them. This is NOT
+  # a sandboxed container — seccomp and AppArmor are both off for the whole thing — it is fewer
+  # capabilities and no device access. See deploy/Dockerfile's REQ 9 comment for the full doctrine.
+  # THIS ONLY CHANGES THE PRINTED TEXT: the operator re-runs \`docker run\` by hand to apply it.
   docker run -d --name remudero-daemon \\
     --restart=on-failure:5 \\
-    --privileged \\
+    --cap-drop ALL \\
+    --security-opt seccomp=unconfined \\
+    --security-opt apparmor=unconfined \\
+    --security-opt systempaths=unconfined \\
     --user 1000:1000 \\
     -e GH_TOKEN="\$GH_TOKEN" \\
     -e RMD_RESTART_THROTTLE_S="\${RMD_RESTART_THROTTLE_S:-}" \\

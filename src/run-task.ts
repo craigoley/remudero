@@ -1,4 +1,4 @@
-import { execFile, execFileSync } from "node:child_process";
+import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
@@ -149,6 +149,7 @@ import {
   fetchOpenPrsRest,
   fetchSinglePrRest,
   hydrateMergeStates,
+  liveStateFromRest,
   mapRestPr,
   paceGhEntry,
   singlePrRestArgs,
@@ -232,7 +233,9 @@ import { mintNextTaskId, type MintDegradation, type MintSources } from "./lib/ta
 import {
   firstUnreservedAtOrAbove,
   reserveTaskIdBlock,
+  gitRemoteRefReserver,
   reserveTaskIdFrom,
+  reserveTaskIdRemote,
   type TaskIdReservationBlock,
   taskIdReservationsDir,
   type TaskIdReservationHandle,
@@ -2974,15 +2977,26 @@ export interface FixRungOutcome {
 
 /**
  * W1-T177: the real live-state reader every fix-rung/sweep spending site
- * wires — ONE fresh `gh pr view --json state` read, never a cached snapshot.
- * A throw (rate limit, network, auth) reports `ok:false` — INDETERMINATE,
- * never treated as terminal (`terminalStateReason` is never even called on
- * it; see every call site's fail-open handling).
+ * wires — ONE fresh read, never a cached snapshot. A throw (rate limit,
+ * network, auth) reports `ok:false` — INDETERMINATE, never treated as
+ * terminal (`terminalStateReason` is never even called on it; see every call
+ * site's fail-open handling).
+ *
+ * W1-T511: reads over REST (`liveStateFromRest`, one `GET /pulls/{n}` call),
+ * never `gh pr view --json state` (GraphQL). Measured 2026-08-15: 31 of 114
+ * `sweep.post_review` attempts aborted whole on exactly this call's GraphQL
+ * error while the REST/core budget sat healthy throughout — see this task's
+ * rationale. `prUrlTarget` parses owner/repo/number from the URL every call
+ * site here already passes; a URL that fails to parse is treated exactly
+ * like a failed fetch (`ok:false`), never a crash, mirroring the pre-existing
+ * catch-and-fail-open contract.
  */
 function ghLiveState(prUrl: string): LiveStateResult {
+  const target = prUrlTarget(prUrl);
+  if (!target) return { ok: false };
   try {
-    const v = ghJson(["pr", "view", prUrl, "--json", "state"]) as { state?: string };
-    return v?.state ? { ok: true, state: v.state } : { ok: false };
+    const state = liveStateFromRest(target.owner, target.repo, target.number, ghJson);
+    return state ? { ok: true, state } : { ok: false };
   } catch {
     return { ok: false };
   }
@@ -14678,6 +14692,29 @@ export function escalationTaskIdFor(pr: { taskId?: string; prNumber: number }): 
 }
 
 /**
+ * W1-T516 — the SWEEP's OWN task-id resolution for one PR's arm attempt, gated on the
+ * `sweep.armSessionPrs` policy flag.
+ *
+ * THE DEFECT THIS CLOSES. `buildSweepEffects`'s `arm` dep used to pass `pr.taskId` RAW to
+ * {@link armAndLogOutcome}, while the review lane (`task_id: taskId ?? PR-<n>`), the
+ * escalation lane ({@link escalationTaskIdFor}), and `approveCommand` all mint the SAME
+ * `PR-<n>` synthetic id for exactly this case — a PR with no `Remudero-Task:` trailer. The
+ * sweep was the ONE caller that did not, so `armAutoMerge`'s `if (!taskId)` branch refused
+ * every session PR the sweep reviewed, unconditionally.
+ *
+ * OFF (the default): returns `pr.taskId` unchanged — a session PR still resolves to
+ * `undefined` and `armAutoMerge` still refuses at `no-task-id`, byte-for-byte the pre-
+ * existing behaviour.
+ *
+ * ON: mints the SAME `PR-<n>` fallback {@link escalationTaskIdFor} already mints, so the id
+ * this arm passes is the exact key `decideArmFromLedgerVerdict` already finds the review
+ * lane's own verdict under — no new ledger shape, no second synthetic id.
+ */
+export function sweepArmTaskId(pr: { taskId?: string; prNumber: number }, armSessionPrs: boolean): string | undefined {
+  return armSessionPrs ? escalationTaskIdFor(pr) : pr.taskId;
+}
+
+/**
  * THE TASK THE FIX RUNG REPAIRS AGAINST — the plan task when the PR has one, otherwise a SYNTHETIC
  * stand-in keyed by the SAME id the review lane and the escalation lane already mint.
  *
@@ -14814,10 +14851,34 @@ export function buildSweepEffects(
   // finally reaches the ledger with the PR identity + a `"sweep"` lane, not only the
   // sweep.disposed row.
   armImpl: (prUrl: string, taskId: string | undefined) => ArmOutcome = armAutoMerge,
+  // W1-T516 — appended LAST so no positional caller shifts, the same convention every dep
+  // above follows. OPTIONAL with no default expression (rather than a bare `= loadDefaultPolicy()
+  // ...` default), so the `??` fallback below is the injection SEAM test/config-reader-seams.test.ts
+  // recognizes — the SAME `deps.policy ?? loadDefaultPolicy()` shape `dailyCostCeilingReloader`/
+  // `buildAccountUsageRoute`/`ceilingPolicy` already use, not a new pattern.
+  armSessionPrsOverride?: boolean,
 ): Pick<SweepDeps, "arm" | "close" | "dispatchFix" | "escalate" | "readLiveState" | "depReview" | "postReview" | "repushAbsent"> {
   const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
   const issues = issuesImpl ?? ghIssueGateway(owner, repo);
   const say = (msg: string) => console.error(`### rmd sweep — ${msg}`);
+  // Defaults to the LIVE `plan/policy.yaml` flag (`loadDefaultPolicy`, the same memoized-per-
+  // process reader every other W1-T253 consumer site uses) so production wiring picks up an
+  // operator's edit with no code change; a test overrides `armSessionPrsOverride` directly to
+  // drive both sides of the gate without writing a fixture policy file.
+  const armSessionPrs = armSessionPrsOverride ?? loadDefaultPolicy().values.sweep.armSessionPrs;
+  // W1-T516 — an `armImpl` WRAPPER, not a change to the `arm` dep's own `pr.taskId` argument
+  // below: test/arm-outcome-five-sites.test.ts source-locks that dep as an EXPRESSION body
+  // passing `pr.taskId` straight through (the impl-BI fix, proving the outcome is RETURNED,
+  // never discarded by a braced body). Re-deriving the PR number from `prUrl` — rather than
+  // threading `pr.prNumber` in — mirrors `logArmAttribution` immediately below, which already
+  // re-derives `prNumber` from `prUrl` for its own ledger fields instead of trusting a second,
+  // separately-passed number. `sweepArmTaskId` is skipped (raw `taskId` passed through
+  // unchanged) when the number cannot be parsed at all — a malformed `prUrl` is exactly the
+  // shape this must fail closed on, matching the pre-existing behaviour byte for byte.
+  const sweepArmImpl: (prUrl: string, taskId: string | undefined) => ArmOutcome = (prUrl, taskId) => {
+    const prNumber = prNumberFromRef(prUrl);
+    return armImpl(prUrl, prNumber === undefined ? taskId : sweepArmTaskId({ taskId, prNumber }, armSessionPrs));
+  };
 
   return {
     // impl-BI — RETURN THE OUTCOME. PR #968 taught `runSweep` to read this effect's return
@@ -14836,7 +14897,11 @@ export function buildSweepEffects(
     // sweep.ts, per this task's design), passed the `"sweep"` lane so its
     // `automerge.armed`/`automerge.arm_skipped` line reads apart from a review-lane arm on
     // the ledger alone, even with no task id on either.
-    arm: (pr) => armAndLogOutcome(pr.prUrl, pr.taskId, log, armImpl, "sweep"),
+    // W1-T516: `armImpl` is `sweepArmImpl` above — it resolves the SAME `PR-<n>` synthetic id
+    // the review lane already mints and ledgers under (gated on `armSessionPrs`) rather than
+    // arming nothing for a session PR (no `Remudero-Task:` trailer). `pr.taskId` itself is
+    // still passed straight through here, unchanged from before this task.
+    arm: (pr) => armAndLogOutcome(pr.prUrl, pr.taskId, log, sweepArmImpl, "sweep"),
 
     // THE ABSENT-CHECK-SUITE REMEDY (W1-T186 follow-up). Routed through git-push.ts's leaf, so
     // the live-write guard applies and no new outward path exists. `commit-tree` plumbing means
@@ -16588,13 +16653,39 @@ async function triageCommandLocked(
       info: { purpose: `rmd triage ${feedbackId} (run ${runId})` },
     });
     reservationHandle = reservation;
-    // The id the WORKER is told to use — the reserved one, which equals the mint's whenever there
-    // was no contention (the overwhelmingly common case).
-    const reservedTaskId = `W1-T${reservation.id}`;
+    // W1-T509: AND RESERVE IT WHERE EVERY OTHER WRITER CAN SEE IT. The local reservation above is
+    // O_EXCL-atomic and correct, but `taskIdReservationsDir` resolves under this process's own
+    // `config.root` — inside a worker that is a sandbox path discarded on exit, so two writers on
+    // two hosts never observe each other. This second reserve is the SAME create-if-absent policy
+    // against the one store every writer shares: the remote's ref namespace. Contention advances
+    // exactly as it does locally; an unreachable origin THROWS rather than falling through, and
+    // the paid worker is still unstarted when it does.
+    const remoteReservation = reserveTaskIdRemote(
+      reservation.id,
+      gitRemoteRefReserver({
+        run: (args) => {
+          // spawnSync, not execFileSync: a rejected push is a NORMAL outcome here (contention),
+          // and a throwing runner would make it indistinguishable from an unreachable remote —
+          // the exact conflation `classifyPushFailure` exists to prevent.
+          // `worktreePath`, NOT the module-level `repoRoot`: the reservation must be pushed to
+          // the SAME `origin` this filing will push its branch to. Building it from the install
+          // root sent it at whatever remote the install happened to point at — which, under a
+          // test driving a fixture origin, is a different server entirely.
+          const r = spawnSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" });
+          return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+        },
+      }),
+    );
+    // The id the WORKER is told to use — the REMOTE reservation's, which equals the local one
+    // whenever no other writer held it (the overwhelmingly common case). The remote is the
+    // authority because it is the only store every writer can see.
+    const reservedTaskId = remoteReservation.taskId;
     log("triage.id_minted", {
       minted_id: reservedTaskId,
       mint_id: mint.id,
-      reserved_above_mint: reservation.id !== mint.n,
+      reserved_above_mint: remoteReservation.id !== mint.n,
+      remote_ref: remoteReservation.ref,
+      remote_attempts: remoteReservation.attempts,
       max_seen: mint.maxSeen,
       source_monolith: mint.sources.monolith,
       source_shards: mint.sources.shards,
@@ -17310,6 +17401,38 @@ export function buildInboxDraftHook(
 }
 
 /**
+ * W1-T510: the CLI's `isMerged` + `depsUnobservable` pair for {@link ReadinessContext} —
+ * shared by `rmd inbox` ({@link inboxCommand}) and the `rmd approve`/`rmd reframe`
+ * re-classify helper ({@link loadProposalForRatify}) so both derive the SAME third value
+ * the SAME way, never diverging. `deriveStatus(t, deriveDeps)` is memoized PER TASK ID
+ * (`projectionOf`) so a dependency named by both `isMerged` and `depsUnobservable` —
+ * the common case, since {@link unmetOutsideDeps} in lib/inbox.ts calls `isMerged` first
+ * and only consults `depsUnobservable` for the ids it reports unmerged — is derived ONCE,
+ * never twice: no new GitHub reads over what this CLI already made pre-W1-T510.
+ */
+/** EXPORTED for its own coverage: the memoising seam W1-T510's readiness split rests on. Its
+ *  body is reachable from no other test — both `inboxCommand` call sites need a live plan and
+ *  a real GitHub gateway, which is why these lines arrived uncovered. */
+export function buildDepsReadinessAccessors(plan: Plan, deriveDeps: DeriveDeps): { isMerged: MergedResolver; depsUnobservable: (taskId: string) => GhFailureReason | undefined } {
+  const projectionOf = new Map<string, StatusProjection>();
+  const derive = (t: Task): StatusProjection => {
+    const cached = projectionOf.get(t.id);
+    if (cached) return cached;
+    const projection = deriveStatus(t, deriveDeps);
+    projectionOf.set(t.id, projection);
+    return projection;
+  };
+  const isMerged: MergedResolver = (t) => derive(t).merged;
+  const depsUnobservable = (taskId: string): GhFailureReason | undefined => {
+    const t = plan.byId.get(taskId);
+    if (!t) return undefined; // not in the plan at all — unmetDependencies' own `!d` branch handles this, never isMerged
+    const projection = derive(t);
+    return projection.indeterminate ? (projection.unavailableReason ?? "unknown") : undefined;
+  };
+  return { isMerged, depsUnobservable };
+}
+
+/**
  * `rmd inbox [--dry-run]` — the ratification inbox's deterministic core, wired live
  * (MASTER-PLAN P25(i), W1-T110). The actual readiness predicate ({@link
  * classifyProposal}) is a PURE function, unit-tested exhaustively over fixtures
@@ -17381,7 +17504,7 @@ export async function inboxCommand(rest: string[], deps: { config?: Config } = {
   }
 
   const deriveDeps: DeriveDeps = { ledgerPath, github: ghGateway(owner, repo) };
-  const isMerged: MergedResolver = (t) => deriveStatus(t, deriveDeps).merged;
+  const { isMerged, depsUnobservable } = buildDepsReadinessAccessors(plan, deriveDeps);
   const openProposalIds = new Set(proposals.map((p) => p.id));
   // W1-T190: re-derive "already ratified" from the ledger on every `rmd inbox` pass, never
   // from the registry's own state — a proposal ratify.approved already fired for is reported
@@ -17392,6 +17515,7 @@ export async function inboxCommand(rest: string[], deps: { config?: Config } = {
     classifyProposal(p, drafts[p.id], {
       plan,
       isMerged,
+      depsUnobservable,
       grepAnchorTrue: (a: EvidenceAnchor) => gitGrepAnchorTrue(repoRoot, "origin/main", a),
       openProposalIds,
       isRatified: (id) => isRatifiedInLedger(ledgerLinesForRatify, id),
@@ -17459,7 +17583,7 @@ function loadProposalForRatify(
   if (!proposal) return { proposal: undefined, proposals, drafts, draftsPath };
 
   const deriveDeps: DeriveDeps = { ledgerPath, github: ghGateway(owner, repo) };
-  const isMerged: MergedResolver = (t) => deriveStatus(t, deriveDeps).merged;
+  const { isMerged, depsUnobservable } = buildDepsReadinessAccessors(plan, deriveDeps);
   // W1-T190: read the ledger ONCE here and cross-check it, never the registry's own copy of
   // "is this ratified" (there isn't one) — a proposal the ledger already carries
   // ratify.approved for is `ratified`, no matter what stale/drifted state the registry entry
@@ -17468,6 +17592,7 @@ function loadProposalForRatify(
   const ctx: ReadinessContext = {
     plan,
     isMerged,
+    depsUnobservable,
     grepAnchorTrue: (a: EvidenceAnchor) => gitGrepAnchorTrue(repoRoot, "origin/main", a),
     openProposalIds: new Set(proposals.map((p) => p.id)),
     isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
@@ -18731,7 +18856,10 @@ function buildSynthesizeMasterPlanPrompt(input: Parameters<SynthesizeDraftFn>[0]
   ].join("\n");
 }
 
-function buildSynthesizeTasksYamlPrompt(input: Parameters<SynthesizeDraftFn>[0], feedback: string[] | undefined): string {
+/** EXPORTED for W1-T512's contract test: the other four drafting prompts are exported and their
+ *  field lists are asserted by DRIVING them, and asserting this one from source text instead
+ *  would be the weaker check on the one lane whose worker is furthest from the plan. */
+export function buildSynthesizeTasksYamlPrompt(input: Parameters<SynthesizeDraftFn>[0], feedback: string[] | undefined): string {
   const feedbackBlock =
     feedback && feedback.length > 0
       ? [
@@ -18749,7 +18877,10 @@ function buildSynthesizeTasksYamlPrompt(input: Parameters<SynthesizeDraftFn>[0],
     ``,
     `Draft a CHANGE-LEVEL plan/tasks.yaml SEED (progressive adoption — NEVER a big-bang respec) from the`,
     `ratified goals below. Every task you emit MUST pass \`rmd lint-plan\` (§5C Layer A) AT BIRTH:`,
-    `  - every task needs id/title/repo/type/acceptance, and an origin: field citing the SPECIFIC answer`,
+    `  - every task needs id/title/repo/type/acceptance/files, and an origin: field citing the SPECIFIC answer`,
+    `  - files: is the repo-relative paths the task will touch. NEVER omit it and never leave it empty:`,
+    `    an undeclared scope is fail-closed at dispatch (overlappingPaths reports it as overlapping`,
+    `    every co-dispatched candidate), so the task can never batch and serialises the lane.`,
     `    id or candidate source that justified it (e.g. origin: "onboard:<answer-id>") — never omitted,`,
     `    never a generic "architect".`,
     `  - every acceptance criterion's proof: must be EXECUTABLE dialect — "unit test: <literal test`,

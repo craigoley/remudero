@@ -1102,6 +1102,16 @@ function statefulFakeGh(opts: {
     "    process.exit(0);",
     "  }",
     "}",
+    // W1-T511: `ghLiveState` (the fix rung's real, non-injected terminal-state
+    // reader) now goes over REST (`gh api repos/{o}/{r}/pulls/{n}`) rather than
+    // `gh pr view --json state` — same `stateSeq` counter, translated to REST's
+    // `state`+`merged` shape so `prStateFromRest` folds it back to the identical
+    // GraphQL token this stub answered before.
+    'if (args[0] === "api" && typeof args[1] === "string" && /^repos\\/[^/]+\\/[^/]+\\/pulls\\/\\d+$/.test(args[1])) {',
+    `  const v = next("state", ${JSON.stringify(opts.stateSeq ?? ["OPEN"])});`,
+    '  process.stdout.write(JSON.stringify(v === "MERGED" ? { state: "closed", merged: true } : { state: v.toLowerCase(), merged: false }));',
+    "  process.exit(0);",
+    "}",
     'if (args[0] === "pr" && args[1] === "edit") { process.exit(0); }',
     'if (args[0] === "issue" && args[1] === "create") {',
     `  process.stdout.write(${JSON.stringify(opts.issueUrl ?? "https://github.com/acme/remudero/issues/1")} + "\\n");`,
@@ -4984,9 +4994,15 @@ test("buildSweepEffects.dispatchFix: a conflicted cold PR runs the REAL git-work
   mkdirSync(worktreesDir(config), { recursive: true });
 
   // A stateful `gh` stub: `--json headRefName` always answers this PR's real
-  // creditable branch; `--json state` answers OPEN once (dispatchFix's own
-  // preflight, BEFORE any git side effect) then MERGED forever after (so
+  // creditable branch; the live-state read answers OPEN once (dispatchFix's
+  // own preflight, BEFORE any git side effect) then MERGED forever after (so
   // runFixRung's site-(i) check stands the rung down on its first round).
+  // W1-T511: that live-state read is `ghLiveState`, which now goes over REST
+  // (`gh api repos/{o}/{r}/pulls/{n}`, singlePrRestArgs's own shape) rather
+  // than `gh pr view --json state` (GraphQL) — so the stub answers the REST
+  // argv, composing MERGED/OPEN via the SAME `state`+`merged` fold
+  // `prStateFromRest` uses (a merged PR reads `{state:"closed",merged:true}`
+  // on REST, never a bare "MERGED" token).
   const bin = mkdtempSync(join(tmpdir(), "gh-dispatchfix-"));
   const counterFile = join(bin, "state-calls");
   writeFileSync(counterFile, "0");
@@ -4999,10 +5015,10 @@ const idx = args.indexOf("--json");
 const field = idx >= 0 ? args[idx + 1] : undefined;
 if (args[0] === "pr" && args[1] === "view" && field && field.startsWith("headRefName")) {
   process.stdout.write(JSON.stringify({ headRefName: ${JSON.stringify(branch)}, body: "" }));
-} else if (args[0] === "pr" && args[1] === "view" && field === "state") {
+} else if (args[0] === "api" && typeof args[1] === "string" && /^repos\\/[^/]+\\/[^/]+\\/pulls\\/\\d+$/.test(args[1])) {
   const n = parseInt(fs.readFileSync(${JSON.stringify(counterFile)}, "utf8") || "0", 10);
   fs.writeFileSync(${JSON.stringify(counterFile)}, String(n + 1));
-  process.stdout.write(JSON.stringify({ state: n === 0 ? "OPEN" : "MERGED" }));
+  process.stdout.write(n === 0 ? JSON.stringify({ state: "open", merged: false }) : JSON.stringify({ state: "closed", merged: true }));
 } else {
   process.stdout.write("{}");
 }
@@ -6482,6 +6498,7 @@ const SYNTHESIZE_CLEAN_TASKS_YAML = `
   verify: auto
   risk: medium
   origin: "onboard:elicit-priorities"
+  files: [src/catalog/search.ts]
   acceptance:
     - claim: "the widget catalog search ships"
       proof: "unit test: widget catalog search returns results"
