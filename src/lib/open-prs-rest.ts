@@ -374,6 +374,13 @@ export function mapRestPr(row: RestPullRow): OpenPrRest {
  * WRONG rather than indeterminate, so the W1-T119 indeterminate-skip (which fails safe when the
  * gateway CANNOT answer) never engaged — `readFailed()` was `false` throughout.
  *
+ * AND IT IS NOW THE LIVE-STATE PATH TOO (W1-T511). `readLiveStateRest` (`src/run-task.ts`) reads a
+ * single PR over REST and delegates the three-valued answer here, because `gh pr view --json state`
+ * is GraphQL and that budget is the one that runs out — 31 of 114 review attempts died on it in one
+ * measured day. Callers of that read compare against the GraphQL enum, so this function's
+ * `MERGED`/`OPEN`/`CLOSED` output is load-bearing for a stand-down decision, not just for dispatch
+ * credit. A second REST mapping would drift from this one; there must stay exactly one.
+ *
  * `merged_at` is returned by BOTH endpoints (`null` when unmerged), so this predicate is correct
  * for both row shapes and no caller has to know which one it holds. VERIFIED against this repo,
  * 2026-07-31: over one real 100-row `state=closed` list page, `merged` was absent on 100/100 rows

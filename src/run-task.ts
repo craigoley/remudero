@@ -151,6 +151,7 @@ import {
   hydrateMergeStates,
   mapRestPr,
   paceGhEntry,
+  prStateFromRest,
   singlePrRestArgs,
   type GhApiFetcher,
   type GhCallPacer,
@@ -2981,10 +2982,47 @@ export interface FixRungOutcome {
  * never treated as terminal (`terminalStateReason` is never even called on
  * it; see every call site's fail-open handling).
  */
+/**
+ * Read a PR's live state over REST, three-valued, as the GraphQL enum was.
+ *
+ * WHY THIS MOVED OFF `gh pr view --json state` (W1-T511). That read is GraphQL, and GraphQL is the
+ * budget that runs out: MEASURED 2026-08-15, 31 of 114 `sweep.post_review.attempt` rows — 27% —
+ * ended in `sweep.post_review.failed`, every one carrying `GraphQL: API rate limit already
+ * exceeded` from this one call. The attempt was then DISCARDED WHOLE, so the PR stayed pending and
+ * the reviewer read as slow when it is not (`attempt` -> `posted` is a 7.3s median over n=81).
+ * REST is a SEPARATE budget and was healthy throughout the same window.
+ *
+ * AND A NAIVE `--jq .state` SWAP WOULD HAVE SHIPPED A WORSE DEFECT. GraphQL's `state` is
+ * THREE-valued (`OPEN`/`CLOSED`/`MERGED`); REST's `.state` is TWO-valued and folds merged into
+ * `closed`. MEASURED against real PRs: #1862 reads `closed` with `merged:true` where GraphQL said
+ * `MERGED`, and #1873 reads `closed` with `merged:false` where GraphQL said `CLOSED`. The
+ * stand-down decision this feeds turns on exactly that distinction, so the composition is
+ * delegated to {@link prStateFromRest}, which already resolves it from `merged`/`merged_at` and is
+ * pinned by fixtures captured verbatim from a live response — NOT re-derived here, per W1-T265.
+ *
+ * THROWS ON AN UNPARSEABLE URL, exactly as {@link headShaRestArgs} does and for the same reason: a
+ * fallback to the GraphQL argv would reproduce the exhaustion this read was migrated off, while
+ * reading as fixed. {@link ghLiveState} converts that throw into its own fail-soft `ok:false`.
+ */
+export function readLiveStateRest(prUrl: string, fetch: GhApiFetcher = ghJson): string {
+  const target = prUrlTarget(prUrl);
+  if (!target) {
+    throw new Error(
+      `live-state read: cannot resolve owner/repo/number from ${JSON.stringify(prUrl)} — refusing to fall back ` +
+        "to `gh pr view --json state`, whose GraphQL budget exhaustion is the defect this read was migrated off",
+    );
+  }
+  const row = fetch(singlePrRestArgs(target.owner, target.repo, target.number)) as RestPullRow;
+  return prStateFromRest(row);
+}
+
 function ghLiveState(prUrl: string): LiveStateResult {
   try {
-    const v = ghJson(["pr", "view", prUrl, "--json", "state"]) as { state?: string };
-    return v?.state ? { ok: true, state: v.state } : { ok: false };
+    const state = readLiveStateRest(prUrl);
+    // `UNKNOWN` is `prStateFromRest`'s answer for a row carrying no state at all — indeterminate,
+    // not a verdict. The fail-soft contract above requires that reach callers as `ok:false`, which
+    // they treat exactly as if no check ran, never as a foreign state.
+    return state && state !== "UNKNOWN" ? { ok: true, state } : { ok: false };
   } catch {
     return { ok: false };
   }

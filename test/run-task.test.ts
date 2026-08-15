@@ -1083,6 +1083,22 @@ function statefulFakeGh(opts: {
     "}",
     'const idx = args.indexOf("--json");',
     "const field = idx >= 0 ? args[idx + 1] : undefined;",
+    // W1-T511: the live-state read is `gh api repos/{o}/{r}/pulls/{n}` now, not `gh pr view --json
+    // state`, so this fake has to answer on $1=api or every terminal-state read below falls through
+    // to the exit-1 arm and the run never stands down. The SAME argv also serves `readHeadShaRest`,
+    // which is why the row carries `head.sha` too — the two reads are indistinguishable here by
+    // construction, exactly as they are to GitHub.
+    //
+    // AND THE FIXTURE MUST INVERT THE THREE-VALUED MAPPING TO STAY HONEST. `stateSeq` is written in
+    // GraphQL's enum because that is what the callers still compare against; REST reports MERGED and
+    // CLOSED as the same `"closed"` and separates them only by `merged`. Emitting `{state: v}` raw
+    // would hand the production mapping a value REST never produces and prove nothing.
+    'if (args[0] === "api" && /^repos\\/[^/]+\\/[^/]+\\/pulls\\/\\d+$/.test(args[1] || "")) {',
+    `  const v = next("state", ${JSON.stringify(opts.stateSeq ?? ["OPEN"])});`,
+    '  const rest = v === "MERGED" ? { state: "closed", merged: true } : v === "CLOSED" ? { state: "closed", merged: false } : { state: String(v).toLowerCase(), merged: false };',
+    '  process.stdout.write(JSON.stringify({ number: 1, html_url: "u", updated_at: "t", head: { ref: "b", sha: "stub1234" }, ...rest }));',
+    "  process.exit(0);",
+    "}",
     'if (args[0] === "pr" && args[1] === "view") {',
     `  if (field === "headRefName") { process.stdout.write(JSON.stringify({ headRefName: ${JSON.stringify(opts.branch)} })); process.exit(0); }`,
     '  if (field === "body") { process.stdout.write(JSON.stringify({ body: "" })); process.exit(0); }',
@@ -4984,9 +5000,14 @@ test("buildSweepEffects.dispatchFix: a conflicted cold PR runs the REAL git-work
   mkdirSync(worktreesDir(config), { recursive: true });
 
   // A stateful `gh` stub: `--json headRefName` always answers this PR's real
-  // creditable branch; `--json state` answers OPEN once (dispatchFix's own
+  // creditable branch; the LIVE-STATE read answers OPEN once (dispatchFix's own
   // preflight, BEFORE any git side effect) then MERGED forever after (so
   // runFixRung's site-(i) check stands the rung down on its first round).
+  //
+  // W1-T511: that read is `gh api repos/{o}/{r}/pulls/{n}` now, and it answers in REST's OWN shape
+  // — `{state:"closed", merged:true}` for the merged round, never the GraphQL enum. A stub that
+  // emitted `{state:"MERGED"}` would keep this test green while the production mapping went
+  // untested, which is the whole defect the migration had to avoid.
   const bin = mkdtempSync(join(tmpdir(), "gh-dispatchfix-"));
   const counterFile = join(bin, "state-calls");
   writeFileSync(counterFile, "0");
@@ -4999,10 +5020,11 @@ const idx = args.indexOf("--json");
 const field = idx >= 0 ? args[idx + 1] : undefined;
 if (args[0] === "pr" && args[1] === "view" && field && field.startsWith("headRefName")) {
   process.stdout.write(JSON.stringify({ headRefName: ${JSON.stringify(branch)}, body: "" }));
-} else if (args[0] === "pr" && args[1] === "view" && field === "state") {
+} else if (args[0] === "api" && /^repos\\/[^/]+\\/[^/]+\\/pulls\\/\\d+$/.test(args[1] || "")) {
   const n = parseInt(fs.readFileSync(${JSON.stringify(counterFile)}, "utf8") || "0", 10);
   fs.writeFileSync(${JSON.stringify(counterFile)}, String(n + 1));
-  process.stdout.write(JSON.stringify({ state: n === 0 ? "OPEN" : "MERGED" }));
+  const rest = n === 0 ? { state: "open", merged: false } : { state: "closed", merged: true };
+  process.stdout.write(JSON.stringify({ number: 42, html_url: "u", updated_at: "t", head: { ref: ${JSON.stringify(branch)}, sha: "stub1234" }, ...rest }));
 } else {
   process.stdout.write("{}");
 }
@@ -5052,7 +5074,7 @@ if (args[0] === "pr" && args[1] === "view" && field && field.startsWith("headRef
     assert.ok(!logs.some((l) => l.step === "sweep.fix.uncreditable_head"), "the branch WAS creditable");
     assert.ok(!logs.some((l) => l.step === "sweep.fix.error"), "the real git/arg-building path never threw");
     assert.ok(logs.some((l) => l.step === "fix.stood_down"), "runFixRung's OWN terminal check fired — reached past dispatchFix's arg-building");
-    assert.equal(parseInt(readFileSync(counterFile, "utf8"), 10), 2, "exactly two `--json state` reads: dispatchFix's preflight, then runFixRung's site-(i) check");
+    assert.equal(parseInt(readFileSync(counterFile, "utf8"), 10), 2, "exactly two live-state reads: dispatchFix's preflight, then runFixRung's site-(i) check");
   } finally {
     process.env.PATH = oldPath;
     rmSync(root, { recursive: true, force: true });

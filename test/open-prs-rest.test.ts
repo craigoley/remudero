@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -20,6 +20,7 @@ import {
   singlePrRestArgs,
   type GhApiFetcher,
 } from "../src/lib/open-prs-rest.js";
+import { readLiveStateRest } from "../src/run-task.js";
 import { checksStateFromRollup } from "../src/lib/sweep.js";
 import { fixCommand } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
@@ -483,4 +484,81 @@ test("paceGhEntry: a NON-rate-limit throw reports back rateLimited=false, so an 
     ),
   );
   assert.deepEqual(seen, ["wait", "result:false"]);
+});
+
+// ── W1-T511: THE LIVE-STATE READ MOVED OFF THE EXHAUSTED BUDGET ──────────────────────────────
+//
+// `gh pr view --json state` is GraphQL, and GraphQL is the budget that runs out: 31 of 114
+// `sweep.post_review.attempt` rows (27%) died on that one call in a measured day, each discarded
+// whole with no retry and no alarm. `readLiveStateRest` reads the same fact over REST, a separate
+// budget that was healthy throughout the same window.
+//
+// THE TRAP THESE PIN. GraphQL's `state` is THREE-valued; REST's is TWO-valued and folds merged into
+// `closed`. A test covering only OPEN and CLOSED would pass while shipping the exact defect — every
+// merged PR reported as merely closed to a stand-down decision that turns on that distinction. So
+// all three states are asserted, and the MERGED-vs-CLOSED pair is the one that matters.
+
+/** Shapes captured from the live REST endpoint, 2026-08-15 (PRs 1863, 1862, 1873). */
+const REST_OPEN = { number: 1863, state: "open", merged: false, merged_at: null };
+const REST_MERGED = { number: 1862, state: "closed", merged: true, merged_at: "2026-08-15T15:08:05Z" };
+const REST_CLOSED = { number: 1873, state: "closed", merged: false, merged_at: null };
+const PR_URL = (n: number) => `https://github.com/craigoley/remudero/pull/${n}`;
+
+test("W1-T511: an open pull request still reads open through the rest path", () => {
+  const seen: string[][] = [];
+  const got = readLiveStateRest(PR_URL(1863), (a) => { seen.push(a); return REST_OPEN; });
+  assert.equal(got, "OPEN", "the GraphQL enum value, not REST's lowercase");
+  assert.deepEqual(seen[0], ["api", "repos/craigoley/remudero/pulls/1863"], "and it is a REST argv");
+  assert.ok(!seen[0].includes("pr"), "never `gh pr view` — that is the exhausted budget");
+});
+
+test("W1-T511: a merged pull request is distinguished from a closed one", () => {
+  // THE ASSERTION THAT MATTERS. Both rows carry `state:"closed"`; only `merged`/`merged_at`
+  // separates them, and a naive `--jq .state` swap would collapse both to CLOSED.
+  const merged = readLiveStateRest(PR_URL(1862), () => REST_MERGED);
+  const closed = readLiveStateRest(PR_URL(1873), () => REST_CLOSED);
+  assert.equal(merged, "MERGED", "a merged PR must not read as merely closed");
+  assert.equal(closed, "CLOSED", "and a genuinely closed one must not read as merged");
+  assert.notEqual(merged, closed, "the two must never collapse — REST's .state alone cannot tell them apart");
+  assert.equal(REST_MERGED.state, REST_CLOSED.state, "control: REST really does report both as `closed`");
+});
+
+test("W1-T511: the live state read is served from the REST budget", () => {
+  // The argv is the whole claim: an `api` call spends core, a `pr view` call spends GraphQL.
+  for (const n of [1863, 1862, 1873]) {
+    const seen: string[][] = [];
+    readLiveStateRest(PR_URL(n), (a) => { seen.push(a); return REST_OPEN; });
+    assert.equal(seen[0][0], "api", `PR ${n} must be read over REST`);
+    assert.ok(!seen[0].includes("--json"), `PR ${n} must not carry a GraphQL --json field set`);
+  }
+});
+
+test("W1-T511: the rollup read is left on the graph path", () => {
+  // NOT A BULK CONVERSION. `statusCheckRollup` is a CheckRun/StatusContext union with no REST
+  // equivalent, so its call sites stay on GraphQL deliberately; this pins that they were not swept
+  // along, which is what a well-meaning follow-up would do.
+  const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+  const rollupSites = src.split("\n").filter((l) => l.includes('"statusCheckRollup"'));
+  assert.ok(rollupSites.length > 0, "control: the rollup sites still exist to be checked");
+  for (const line of rollupSites) {
+    assert.ok(line.includes('"pr", "view"'), `a rollup read must stay on gh pr view: ${line.trim().slice(0, 80)}`);
+  }
+});
+
+test("W1-T511: an unaddressable PR url is refused rather than falling back to the graph", () => {
+  // THE REFUSAL ARM, and it is not decoration. The tempting rescue for a url this cannot parse is
+  // `gh pr view <url> --json state`, which works on anything GitHub accepts — and spends the exact
+  // budget the migration exists to stop spending. So it throws, and `ghLiveState` turns that into
+  // its ordinary fail-soft `ok:false`, indistinguishable to callers from a read that never ran.
+  let spent = 0;
+  for (const bad of ["", "not a url", "https://github.com/acme/repo/issues/7", "https://github.com/acme/pull/7"]) {
+    assert.throws(
+      () => readLiveStateRest(bad, () => { spent += 1; return REST_OPEN; }),
+      /cannot resolve owner\/repo\/number/,
+      `must refuse ${JSON.stringify(bad)}`,
+    );
+  }
+  assert.equal(spent, 0, "and it must refuse BEFORE spending a call, not after");
+  // Control: the same helper accepts a well-formed url, so the throws above are the url's fault.
+  assert.equal(readLiveStateRest(PR_URL(1863), () => REST_OPEN), "OPEN");
 });
