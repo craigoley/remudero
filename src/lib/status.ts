@@ -2607,60 +2607,100 @@ export type SupersessionSearch = (symbol: string, path: string) => readonly Supe
 const TRAILER_RE = /^Remudero-Task:[ \t]*([A-Za-z0-9-]+)[ \t]*$/m;
 
 /**
- * A task's `grep:` proof patterns paired with the declared path each names.
+ * A task's proof-derived symbols paired with every path the task declared.
  *
- * WHY THE PROOF PATTERN AND NOT THE FILE PATH. The cheap predicate — "have all this task's declared
- * paths moved on main since it was filed?" — was measured and REJECTED: it flags 14 of 43 unmerged
- * tasks, and spot-checking every one of those 14 by symbol found no supersession in any (a task
- * merely naming `src/run-task.ts` is flagged by a file that moves several times a day). A `grep:`
- * proof pattern is the opposite: `proof-grep-safety` and `proof-resolvability` (lib/task-linter.ts)
- * already force it to be single-line and distinctive enough to match its own subject and nothing
- * else, so it is the best symbol the plan already carries.
+ * W1-T506 WIDENED THIS FROM `grep:`-ONLY. The instrument used to require a `grep:` proof whose
+ * OWN body named a declared path (`SYMBOL in path/to/file`) — dialect-gated, and getting WORSE as
+ * filing convention moves proofs from `grep:` to `unit test:` (a `unit test:` proof carries a test
+ * TITLE, never an "in <path>" clause, so it produced zero targets no matter how many tasks used it;
+ * MEASURED 2026-08-15: both of W1-T485's own motivating cases, W1-T467 and W1-T472, are all-`unit
+ * test:` and were therefore invisible to the old predicate). The fix stops asking the proof BODY for
+ * a path at all: a task's declared `files:` already supplies one for EVERY task regardless of
+ * dialect, so pathing comes from `files:` and symbols come from whichever dialect prefix a proof
+ * carries — `grep:` or `unit test:` — making derivation dialect-independent by construction rather
+ * than by adding a second special case.
  *
- * THE PATH MUST BE ONE THE TASK ITSELF DECLARED. A filing's proofs point at the shard file, which no
- * implementation commit ever touches; requiring `files:` membership drops them without a special
- * case. It also bounds the search to paths the task claims, so a broad pattern cannot wander.
+ * WHY THE PROOF TEXT AND NOT THE FILE PATH ALONE, STILL. The cheap predicate — "have all this
+ * task's declared paths moved on main since it was filed?" — was measured and REJECTED: it flags 14
+ * of 43 unmerged tasks, and spot-checking every one of those 14 by symbol found no supersession in
+ * any (a task merely naming `src/run-task.ts` is flagged by a file that moves several times a day).
+ * A `grep:` proof pattern is the opposite: `proof-grep-safety` and `proof-resolvability`
+ * (lib/task-linter.ts) already force it to be single-line and distinctive enough to match its own
+ * subject and nothing else. A `unit test:` proof's raw name is the same kind of distinctive literal
+ * by the SAME precedent {@link resolveNameFilteredCandidates} (lib/review.ts) already trusts: a
+ * fixed-string search for a test's own title.
+ *
+ * EVERY SYMBOL IS PAIRED WITH EVERY DECLARED PATH, not just a path the proof body happens to name —
+ * COST THAT HONESTLY: this is `O(proofs x files)` rather than `O(proofs)`, still seconds per rationale
+ * (1) of this task's shard, never the O(N)-subprocess-per-task shape W1-T187/W1-T257 removed.
  *
  * The `grep:` split MIRRORS {@link proofGrepSafetyViolations} (lib/task-linter.ts) rather than
  * importing review.ts's `parseDialectGrep`, which is not exported — the same precedent, and the
- * same reason: an " in " followed by a PATH-LIKE trailing token, with no fallback to the whole body.
+ * same reason: an " in " followed by a PATH-LIKE trailing token is stripped from the SYMBOL when
+ * present (kept for continuity with proofs already written that way), but is no longer required —
+ * a path-less `grep:` body still yields a symbol now that the path always comes from `files:`.
  */
 export function proofGrepTargets(task: Task): Array<{ symbol: string; path: string }> {
-  const declared = new Set(task.files ?? []);
-  const out: Array<{ symbol: string; path: string }> = [];
+  const declared = task.files ?? [];
+  const symbols: string[] = [];
   for (const c of task.acceptance ?? []) {
     const proof = typeof c.proof === "string" ? c.proof : "";
-    const m = proof.trim().match(/^grep:\s*([\s\S]*)$/i);
-    if (!m) continue;
-    const split = m[1].match(/^([\s\S]*?)\s+in\s+(\S*[./]\S*)\s*$/i);
-    if (!split) continue;
-    const symbol = split[1].trim();
-    const path = split[2].trim();
-    if (!symbol || !declared.has(path)) continue;
-    out.push({ symbol, path });
+    const trimmed = proof.trim();
+    const grepMatch = trimmed.match(/^grep:\s*([\s\S]*)$/i);
+    if (grepMatch) {
+      const split = grepMatch[1].match(/^([\s\S]*?)\s+in\s+(\S*[./]\S*)\s*$/i);
+      const symbol = (split ? split[1] : grepMatch[1]).trim();
+      if (symbol) symbols.push(symbol);
+      continue;
+    }
+    const unitMatch = trimmed.match(/^unit test:\s*([\s\S]*)$/i);
+    if (unitMatch) {
+      const symbol = unitMatch[1].trim();
+      if (symbol) symbols.push(symbol);
+    }
   }
+  if (symbols.length === 0 || declared.length === 0) return [];
+  const out: Array<{ symbol: string; path: string }> = [];
+  for (const symbol of symbols) for (const path of declared) out.push({ symbol, path });
   return out;
 }
 
 /**
- * The first evidence that this task's substance shipped under a DIFFERENT task's trailer, or
+ * The evidence that this task's substance shipped under a DIFFERENT task's trailer, or
  * `undefined` when there is none.
  *
- * THREE OUTCOMES ARE DELIBERATELY COLLAPSED TO "NO EVIDENCE", AND EACH FOR ITS OWN REASON:
+ * FOUR OUTCOMES ARE DELIBERATELY COLLAPSED TO "NO EVIDENCE", AND EACH FOR ITS OWN REASON:
+ *   - `opts.merged` is true — the union the caller already resolved this task's merge state
+ *     against credits it merged, so reporting it here as "superseded" would contradict a stronger,
+ *     already-resolved signal. THIS GUARD LIVES HERE, NOT ONLY AT THE `projectPlan` CALL SITE
+ *     (W1-T506): `projectPlan` already skips a merged task before calling in, but the predicate
+ *     must hold the same invariant when driven directly, so widening reach can never regress it;
  *   - a commit carrying THIS task's trailer is CREDIT, not supersession — the projection's own
  *     `trailer` source already handles it, and reporting it would name every task that ever merged;
  *   - a commit carrying NO trailer is W1-T458's `unresolved_task_scope` territory, and duplicating
  *     its finding here would put two instruments on one condition;
  *   - a `null` search is a FAILED READ, never an absence (see {@link SupersessionSearch}).
  * Only "a commit that names some OTHER task" survives, which is exactly the uncovered route.
+ *
+ * THE OLDEST QUALIFYING COMMIT WINS, NOT THE NEWEST (W1-T506, rationale (5) of this task's shard).
+ * `search` returns commits in `git log`'s reverse-chronological order (newest first) — walking that
+ * order forward and returning the first hit credits whichever task most recently touched the SAME
+ * symbol, not the task that introduced it. Reversed, the last (oldest) commit `git log -S` reports
+ * for a symbol is the one closest to its introduction, so it is checked FIRST.
  */
-export function findSupersessionEvidence(task: Task, search: SupersessionSearch): SupersessionEvidence | undefined {
+export function findSupersessionEvidence(
+  task: Task,
+  search: SupersessionSearch,
+  opts?: { merged?: boolean },
+): SupersessionEvidence | undefined {
+  if (opts?.merged) return undefined;
   for (const { symbol, path } of proofGrepTargets(task)) {
     const commits = search(symbol, path);
     if (commits === null) continue; // a failed read is not evidence of absence
-    for (const c of commits) {
-      const credited = c.trailerTaskId;
-      if (!credited || credited === task.id) continue;
+    for (let i = commits.length - 1; i >= 0; i--) {
+      const c = commits[i];
+      const credited = c?.trailerTaskId;
+      if (!c || !credited || credited === task.id) continue;
       return { symbol, path, creditedTaskId: credited, sha: c.sha, subject: c.subject };
     }
   }
@@ -2811,7 +2851,10 @@ export function projectPlan(
     for (const task of plan.tasks) {
       const projection = byId.get(task.id);
       if (!projection || projection.merged || projection.indeterminate) continue;
-      const evidence = findSupersessionEvidence(task, supersessionSearch);
+      // `merged` is always false here (the loop above already skipped a merged projection) --
+      // passed explicitly anyway so the invariant is the PREDICATE's, not just this loop's, per
+      // findSupersessionEvidence's own doc comment on why the guard lives at both places.
+      const evidence = findSupersessionEvidence(task, supersessionSearch, { merged: projection.merged });
       if (evidence) byId.set(task.id, { ...projection, supersededBy: evidence });
     }
   }
