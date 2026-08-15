@@ -1,0 +1,153 @@
+- id: W1-T505
+  title: "the fleet's container runs --privileged and does not need it — three security-opt relaxations with zero capabilities pass the same containment preflight, while --privileged additionally exposes all 41 capabilities in the bounding set and 16 host block devices including the disk holding the token and the ledger"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  rationale: "MEASURED ON THE AZURE HOST (`Remudero`), 2026-08-15, IN THROWAWAY CONTAINERS ONLY — the
+    fleet's own container was never touched. All DERIVED unless marked.
+
+    (1) **THE MATRIX, RE-DERIVED ACROSS ELEVEN CONFIGURATIONS.** Probe:
+    `bwrap --unshare-user --unshare-pid --ro-bind / / --dev /dev --proc /proc -- /bin/true`.
+      default                                    -> FAIL (`No permissions to create new namespace`)
+      `--cap-add SYS_ADMIN` alone                -> FAIL
+      `seccomp=unconfined` alone                 -> FAIL
+      `apparmor=unconfined` alone                -> FAIL
+      `systempaths=unconfined` alone             -> FAIL
+      `seccomp + apparmor` (no systempaths)      -> FAIL
+      `SYS_ADMIN + seccomp + systempaths`        -> FAIL
+      `SYS_ADMIN + apparmor + systempaths`       -> FAIL
+      `--privileged`                             -> OK
+      **THREE PROFILES, ZERO CAPABILITIES**      -> **OK**
+      **THREE PROFILES + `--cap-drop ALL`**      -> **OK**
+    **DROPPING ANY ONE OF THE THREE FAILS**, stable across three repeats.
+
+    (2) **SO THE REQUIREMENT IS NOT A CAPABILITY.** It is settable seccomp, settable AppArmor, and
+    unmasked `/proc`. **THIS EXTENDS `deploy/Dockerfile`'s OWN RECORDED FINDING RATHER THAN
+    CONTRADICTING IT** — that comment records that `--cap-add` does not substitute for `--privileged`
+    and that `CapEff: 0000000000000000` was read inside the container even WITH `--privileged` and
+    `--cap-add SYS_ADMIN`. Both are true and now explained: capabilities were never the mechanism,
+    because the image runs as non-root `node`, so `CapEff` is 0 either way. Confinement was.
+
+    (3) **AND IT SURVIVES THE FLEET'S OWN PREFLIGHT, NOT A PROXY.** `defaultExecutor`
+    (`src/lib/containment.ts`) builds `<config.root>/tmp/containment-probe-<token>/cwd`, binds only
+    that cwd read-write, and reads two facts. Replaying that exact shape — `--new-session
+    --die-with-parent --unshare-net --unshare-pid --unshare-user --cap-drop ALL --ro-bind / /
+    --bind <cwd> <cwd> --dev /dev --proc /proc` — and running `containmentProbePrompt`'s own commands:
+      `--privileged`  -> outsideWriteCreated=false  insideWriteCreated=true
+      **NARROW**      -> outsideWriteCreated=false  insideWriteCreated=true
+    **IDENTICAL, AND THAT PAIR IS EXACTLY WHAT `containmentHolds` REQUIRES FOR A PASS.**
+
+    (4) **THE ISOLATION AND SDK LAYERS ARE UNAFFECTED, MEASURED THE SAME WAY.** Under both forms,
+    inside the sandbox: `aliases=0 functions=0` (what `isolation.ts`'s `inherited-functions` check
+    asserts), a socat listener on the proxy port binds successfully inside `--unshare-net`,
+    `getent hosts github.com` fails (`NET_ISOLATED`, so the netns really isolates), and
+    `CapEff: 0000000000000000`. **`--privileged` BUYS NOTHING INSIDE THE SANDBOX.**
+
+    (5) **WHAT IT BUYS OUTSIDE IT — THE PRIZE, MEASURED AT THE OUTER CONTAINER.**
+                          `--privileged`              narrow
+      `CapBnd`            `000001ffffffffff` (all 41) **`0000000000000000` (none)**
+      devices visible     190                         **15**
+      host block devices  **16**                      **0**
+    The 16 include `nvme0n1p1`, which `findmnt -no SOURCE /` confirms IS the host root filesystem —
+    the disk holding `~/.gh-token` (mode `-rw-------`), the irreplaceable ledger, and the checkout a
+    daemon pushes to `main` from. `GH_TOKEN` is also in the container's env (1 match). A raw block
+    device bypasses file permissions entirely."
+  design: "(i) **THE CANDIDATE INVOCATION, VERBATIM.** Replace `--privileged` with:
+      `--cap-drop ALL --security-opt seccomp=unconfined --security-opt apparmor=unconfined --security-opt systempaths=unconfined`
+    `--cap-drop ALL` is measured as safe (row 11 of the matrix) and is not merely cosmetic: it empties
+    the BOUNDING set, which is the difference the table in (5) is about.
+
+    (ii) **WHICH HALF THIS IS, AND IT SHIPS NOTHING BY ITSELF — SAY SO IN THE PR.**
+    `deploy/host-update.sh --print-daemon-run` PRINTS the canonical invocation; it does not run it.
+    The operator launches the container by hand, so **MERGING THIS CHANGES THE PRINTED TEXT AND
+    NOTHING ELSE UNTIL HE RE-RUNS `docker run`.** That is the documentation half. It is NOT the image
+    half: `deploy/entrypoint.sh` changes ship only on a rebuild (W1-T496, #1844), and this task
+    touches no entrypoint. **DO NOT CHANGE THE RUNNING CONTAINER — that is the operator's act, and
+    dropping `--privileged` accidentally produced three consecutive `blocked_containment` failures.**
+
+    (iii) **THE HOST SYSCTL DEPENDENCY, AND IT IS HONESTLY UNRESOLVED.** `deploy/Dockerfile` records
+    `kernel.apparmor_restrict_unprivileged_userns=0` as required; Ubuntu 24.04 ships it ENABLED (1),
+    and this host reads **0** (DERIVED). **WHETHER `apparmor=unconfined` SUBSUMES IT IS ASSUMED, NOT
+    MEASURED** — establishing it requires flipping a host sysctl, which this recon would not do on a
+    live fleet host. The reasoning that makes it plausible: Ubuntu's restriction gates userns creation
+    on the AppArmor profile carrying `userns` permission, and an UNCONFINED process is not subject to
+    a profile at all. **THE CHECK IS TWO COMMANDS ON A THROWAWAY HOST** — set the sysctl to 1, re-run
+    matrix row 10 — **and it matters for anyone running this outside this one box.** An implementer
+    must either measure it or carry it forward marked ASSUMED; they must not quietly drop it.
+
+    (iv) **THE RESIDUAL, STATED HONESTLY — THIS IS NOT `SANDBOXED`.** `seccomp=unconfined` removes the
+    syscall filter for the whole container and `apparmor=unconfined` removes the MAC policy.
+    **THE DEFENSIBLE CLAIM IS `FEWER CAPABILITIES AND NO DEVICE ACCESS`, NOT `SANDBOXED`.** A PR that
+    claims more than that is overselling a real but partial win.
+
+    (v) **A CUSTOM SECCOMP PROFILE IS THE OBVIOUS NEXT QUESTION AND IS SCOPED OUT.** Docker's default
+    profile blocks `unshare(CLONE_NEWUSER)`; a derived profile allowing only that would be strictly
+    better than `unconfined`. It is NOT attempted here: the default profile is ~50 syscall rules plus
+    architecture and errno stanzas, deriving a variant means carrying and version-tracking a JSON copy
+    of Docker's upstream default, and AppArmor and `systempaths` would still both need relaxing — so
+    it removes one of three relaxations at a maintenance cost this task cannot justify. **FILE IT
+    SEPARATELY IF IT IS WANTED. THE NARROW FORM IS ALREADY A WIN OVER `--privileged`.**
+
+    (vi) **WHAT MUST NOT BE BUILT.** No change to the running container. No `deploy/entrypoint.sh`
+    change (that is the image half). No claim that the result is sandboxed (see (iv)). No custom
+    seccomp profile (see (v)). And nothing that weakens the preflight to make a flag set pass — the
+    preflight failing closed is the property that caught yesterday's accident.
+
+    (vii) **COST FINDINGS RECORDED AS CONTEXT, NOT SCOPE — THE OPERATOR HAS RULED.** `Standard_D4als_v7`
+    is $117.53/mo on-demand; **3-year reservation $44.61 (-62%) is the ruling**, 1-year $69.25 (-41%).
+    **SPOT IS REJECTED** at ~$22.04 (-81%): a 30-second SIGTERM eviction against 10-40 minute workers,
+    and no SIGTERM handler exists on the drain path. **THE DISK GOES TO P10** (+$14.43/mo, 128 GiB);
+    the 2026-08-08 exhaustion at 27/29 GB was docker growth (data root 8.2 GB today).
+    **AND THE CORRECTED FIGURE, WHICH SHOULD REPLACE THE 2.4 GB ASSUMPTION WHEREVER IT APPEARS: THE
+    IRREPLACEABLE PART OF STATE IS 9.2 MB** — two plain rotations plus a live ledger. Sizing is
+    settled: two lanes peak at load 5.80 on 4 vCPU (145% oversubscribed) with memory at 2,810 MB of
+    7,937 (35%) and zero swap. **CPU-BOUND; BUY vCPU, NOT RAM.** None of this is in scope here."
+  acceptance:
+    - claim: "the printed daemon invocation no longer grants blanket privilege"
+      proof: "unit test: W1-T505: the printed daemon invocation drops blanket privilege"
+    - claim: "the printed invocation carries all three relaxations the matrix proved load-bearing"
+      proof: "unit test: W1-T505: the printed invocation carries all three relaxations"
+    - claim: "the invocation adds no capability back"
+      proof: "unit test: W1-T505: the printed invocation adds back no capability"
+    - claim: "the recorded doctrine matches the measured requirement"
+      proof: "unit test: W1-T505: the recorded doctrine names confinement rather than capability"
+  origin: recon#privileged-is-wider-than-needed-2026-08-15
+  plan_refs: ["W1-T496", "W1-T471"]
+  files: [deploy/host-update.sh, deploy/Dockerfile, test/entrypoint-boot.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `deploy/` and `test/`, and the blast radius
+    is genuinely high: a wrong flag set makes `containmentHolds` fail closed and STOPS EVERY DISPATCH,
+    which is what happened when `--privileged` was dropped accidentally.
+    **`files:` WAS DERIVED BY INVOCATION COUNT, NOT PROSE MENTION**, measured at `24d27da`:
+    `--privileged` occurs in `deploy/host-update.sh` (**1**, the printed invocation) and
+    `deploy/Dockerfile` (**2**, the recorded doctrine that must be corrected with it), and in no other
+    tracked path — `deploy/verify-image.sh`, `docs/operator-guide.md` and `README.md` all score **0**,
+    against a control of **3** `docker run` occurrences in `host-update.sh` itself, so the query
+    reaches those files and the zeros are real. The test home is `test/entrypoint-boot.test.ts`, which
+    scores **9** on `print-daemon-run`/`daemonRunEnvNames` — the highest of any path, and it already
+    carries the chain test asserting what the printed invocation passes.
+    **`test/host-update-reclaim.test.ts` IS DELIBERATELY NOT DECLARED** despite scoring **5**: it
+    covers the reclaim path, which this task does not touch, and a declared-but-untouched path fails
+    `inverseScopeUntouchedFiles` (`src/lib/review.ts`) exactly as an undeclared one fails
+    `scopeViolationFiles`.
+    **`src/run-task.ts` IS NOT DECLARED AND MUST NOT BE.** Nothing here touches it; it is ~19,900
+    lines and **138 of 261 shards already declare it**, so `partitionByFileOverlap` (W1-T471)
+    serialises every one of them against each other. Adding a 139th for a change that lives entirely
+    in `deploy/` would be pure contention.
+    **THIS SHARD'S OWN PATH IS DELIBERATELY ABSENT FROM `files:`** — adding it converts the
+    `proof-scope` warnings into a HARD `rule15-filing` violation.
+    **THE ACCEPTANCE PROOFS ARE NAME-FILTERED, NOT PURE PATHS.** A pure path runs
+    `test/entrypoint-boot.test.ts` whole, and that suite fails under an inherited
+    `RMD_RESTART_THROTTLE_S` — which would fail every criterion here for an unrelated reason, the
+    shape that killed #1830 twice. Each of the four titles was checked to match **0** paths on
+    `origin/main` today against a positive control (`an exit 0 is NEVER throttled`) matching **1**,
+    and each is under 100 characters with no comma so `looksLikeScenarioNarrative`
+    (`src/lib/task-linter.ts`) cannot fail them.
+    EVERY MEASUREMENT HERE IS AZURE-ONLY AND DATED 2026-08-15, taken in THROWAWAY containers: the
+    eleven-row matrix, the preflight replay, the `CapBnd`/device table, and the sysctl reading of 0.
+    RE-DERIVE THE MATRIX BEFORE BUILDING — and never against the fleet's own container."
