@@ -483,6 +483,8 @@ export function classifyProposal(
  * file, it only produces text the harness parses with {@link parseDraftedCandidate} and
  * caches state-side. Mirrors lib/plan-architect.ts's single-prompt-definition discipline.
  */
+const SCOPE_HINT = "files: — the repo-relative paths this task will touch";
+
 export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, runId: string): string {
   // W1-T194: retraction is STRUCTURAL, not rhetorical — a round the operator marked
   // `retracted` (via `rmd reframe --supersedes`) is OMITTED from this prompt entirely,
@@ -539,10 +541,16 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
     "",
     "=== OUTPUT (exactly this shape, nothing else) ===",
     "Print ONE or more new tasks.yaml entries (schema v1 — id/title/repo/depends_on/type/verify/",
-    "risk/status/attempts/acceptance/origin at minimum) between the two FRAGMENT markers below,",
+    "risk/status/attempts/acceptance/origin/files at minimum) between the two FRAGMENT markers below,",
+    // W1-T509-adjacent, W1-T512: `files:` is in that list because an ABSENT or EMPTY one is
+    // fail-closed at dispatch — `overlappingPaths` (lib/dispatch-overlap.ts) reports an
+    // undeclared task as overlapping EVERY co-dispatched candidate, so it can never batch and
+    // serialises the lane behind it. You have Read/Grep/Glob over a real worktree; name the
+    // paths you actually expect to touch rather than guessing or omitting the field.
     "then ONE stamp line for MASTER-PLAN.md's proposal list between the two markers below that —",
     "the same shape as an existing RATIFIED stamp (`- P## (...) — RATIFIED <date> -> <task ids>.`),",
     "with the task-id list written as the placeholders (e.g. `-> NEW-1/NEW-2.`).",
+    `Every task MUST declare ${SCOPE_HINT} — never omit it and never leave it empty.`,
     "RAW YAML ONLY between the FRAGMENT markers — do NOT wrap it in a markdown code fence",
     "(no ```yaml or ``` line before or after it); the harness parses the fragment as YAML",
     "verbatim, and a fence around it fails that parse.",

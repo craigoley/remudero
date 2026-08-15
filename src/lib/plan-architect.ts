@@ -272,6 +272,10 @@ export function planArchitectPrompt(
     "collide at EOF, which is the conflict storm W1-T122 sharded the plan to prevent — and CI's",
     "`lint-plan` FAILS a new task found in the monolith, so a PR filed that way cannot merge.",
     "REWIRING an EXISTING task edits wherever that task already lives (the monolith or its shard).",
+    "EVERY new or rewired task MUST declare `files:` — the repo-relative paths it will touch.",
+    "An absent or EMPTY list is fail-closed at dispatch: overlappingPaths reports it as overlapping",
+    "every co-dispatched candidate, so the task can never batch and serialises the lane behind it.",
+    "You have Read/Grep/Glob here — derive the paths, never omit the field and never leave it empty.",
     // impl-FS defect 3 (surfaced by this PR's own aggregate-lint assertion, not by the recon): this
     // prompt named `origin:` NOWHERE, while `provenanceViolation` (lib/task-linter.ts) BLOCKS a task
     // that lacks one. Fixing only the placement rule would have moved the first run's failure from
