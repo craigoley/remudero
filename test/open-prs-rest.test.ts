@@ -12,6 +12,7 @@ import {
   DEFAULT_GH_PACE_RATE_LIMIT_GAP_MS,
   fetchOpenPrsRest,
   fetchSinglePrRest,
+  liveStateFromRest,
   mapRestPr,
   openPrsRestArgs,
   paceGhEntry,
@@ -246,6 +247,50 @@ test("fetchSinglePrRest carries the uppercase state token routeFix gates on alon
   assert.equal(got.state, "OPEN");
   assert.equal(got.number, 806);
   assert.deepEqual(got.statusCheckRollup, GRAPHQL_ROLLUP);
+});
+
+// ── W1-T511: liveStateFromRest, ghLiveState's REST substitute ─────────────────────────────────
+//
+// `ghLiveState` (run-task.ts) was `gh pr view <url> --json state` — GraphQL — and measured
+// 2026-08-15 to abort 31 of 114 `sweep.post_review` attempts whole when that budget hit zero,
+// while REST/core sat healthy throughout. These four pin the REST substitute: it spends only the
+// REST budget, it reproduces GraphQL's three-valued MERGED/CLOSED/OPEN token (REST alone folds
+// MERGED into "closed"), and it never reaches for the rollup endpoints `statusCheckRollup` still
+// needs GraphQL for — this task moves exactly one call.
+
+test("W1-T511: the live state read is served from the REST budget", () => {
+  const fetch = fakeFetcher({
+    "repos/craigoley/remudero/pulls/806": { number: 806, html_url: "u", state: "open", merged: false, updated_at: "t", head: {} },
+  });
+  liveStateFromRest(OWNER, REPO, 806, fetch);
+  assert.deepEqual(fetch.calls, ["repos/craigoley/remudero/pulls/806"]);
+});
+
+test("W1-T511: a merged pull request is distinguished from a closed one", () => {
+  const merged = fakeFetcher({
+    "repos/craigoley/remudero/pulls/806": { number: 806, html_url: "u", state: "closed", merged: true, updated_at: "t", head: {} },
+  });
+  assert.equal(liveStateFromRest(OWNER, REPO, 806, merged), "MERGED");
+
+  const closed = fakeFetcher({
+    "repos/craigoley/remudero/pulls/807": { number: 807, html_url: "u", state: "closed", merged: false, updated_at: "t", head: {} },
+  });
+  assert.equal(liveStateFromRest(OWNER, REPO, 807, closed), "CLOSED");
+});
+
+test("W1-T511: an open pull request still reads open through the rest path", () => {
+  const fetch = fakeFetcher({
+    "repos/craigoley/remudero/pulls/806": { number: 806, html_url: "u", state: "open", merged: false, updated_at: "t", head: {} },
+  });
+  assert.equal(liveStateFromRest(OWNER, REPO, 806, fetch), "OPEN");
+});
+
+test("W1-T511: the rollup read is left on the graph path", () => {
+  const fetch = fakeFetcher({
+    "repos/craigoley/remudero/pulls/806": { number: 806, html_url: "u", state: "open", merged: false, updated_at: "t", head: {} },
+  });
+  liveStateFromRest(OWNER, REPO, 806, fetch);
+  assert.equal(fetch.calls.some((c) => c.includes("check-runs") || c.includes("/status")), false);
 });
 
 // ── the falsifier: checksState must survive the transport swap unchanged ──────

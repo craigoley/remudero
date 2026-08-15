@@ -149,6 +149,7 @@ import {
   fetchOpenPrsRest,
   fetchSinglePrRest,
   hydrateMergeStates,
+  liveStateFromRest,
   mapRestPr,
   paceGhEntry,
   singlePrRestArgs,
@@ -2976,15 +2977,26 @@ export interface FixRungOutcome {
 
 /**
  * W1-T177: the real live-state reader every fix-rung/sweep spending site
- * wires — ONE fresh `gh pr view --json state` read, never a cached snapshot.
- * A throw (rate limit, network, auth) reports `ok:false` — INDETERMINATE,
- * never treated as terminal (`terminalStateReason` is never even called on
- * it; see every call site's fail-open handling).
+ * wires — ONE fresh read, never a cached snapshot. A throw (rate limit,
+ * network, auth) reports `ok:false` — INDETERMINATE, never treated as
+ * terminal (`terminalStateReason` is never even called on it; see every call
+ * site's fail-open handling).
+ *
+ * W1-T511: reads over REST (`liveStateFromRest`, one `GET /pulls/{n}` call),
+ * never `gh pr view --json state` (GraphQL). Measured 2026-08-15: 31 of 114
+ * `sweep.post_review` attempts aborted whole on exactly this call's GraphQL
+ * error while the REST/core budget sat healthy throughout — see this task's
+ * rationale. `prUrlTarget` parses owner/repo/number from the URL every call
+ * site here already passes; a URL that fails to parse is treated exactly
+ * like a failed fetch (`ok:false`), never a crash, mirroring the pre-existing
+ * catch-and-fail-open contract.
  */
 function ghLiveState(prUrl: string): LiveStateResult {
+  const target = prUrlTarget(prUrl);
+  if (!target) return { ok: false };
   try {
-    const v = ghJson(["pr", "view", prUrl, "--json", "state"]) as { state?: string };
-    return v?.state ? { ok: true, state: v.state } : { ok: false };
+    const state = liveStateFromRest(target.owner, target.repo, target.number, ghJson);
+    return state ? { ok: true, state } : { ok: false };
   } catch {
     return { ok: false };
   }
