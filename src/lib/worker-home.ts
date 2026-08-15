@@ -89,12 +89,32 @@ export interface WorkerHomeSymlink {
 }
 
 /**
+ * W1-T505: the credential-only sibling of the operator's real `.claude` that a worker's
+ * `.claude` grant PREFERS. MEASURED at filing: the operator's whole `.claude` is 1.8GB —
+ * 10,101 session transcripts, a `settings.json` that can inject env vars into the
+ * operator's NEXT session, `history.jsonl`, `skills/`, `plugins/` — against the one thing a
+ * worker actually needs, `.credentials.json` (509 bytes). When `<realHome>/.claude-fleet`
+ * exists, {@link workerHomePlan} resolves the `.claude` grant to IT instead of the
+ * operator's full `.claude`; when it does not exist, the grant falls back to today's
+ * wholesale behaviour (see {@link workerHomePlan}) so no host is broken by upgrading before
+ * this sibling has been populated (design points (ii)/(iv), W1-T505).
+ */
+export const WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH = ".claude-fleet";
+
+/**
  * The explicit allowlist of real-HOME paths a worker needs back, symlinked
  * individually. Mirrors env.ts's ALLOWLIST discipline: name each grant and its
  * reason, never inherit the rest of HOME wholesale.
  */
 export const WORKER_HOME_SYMLINKS: readonly WorkerHomeSymlink[] = [
-  { relPath: ".claude", reason: "Claude Code session/config state (OAuth may read under HOME — unverified live, see LEARNINGS.md)" },
+  {
+    relPath: ".claude",
+    reason:
+      "Claude Code session/config state — narrowed (W1-T505) to prefer a credential-only sibling " +
+      "(WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH, e.g. ~/.claude-fleet) over the operator's whole .claude " +
+      "(transcripts, history, settings, skills), falling back to today's wholesale grant only when that " +
+      "sibling is absent. OAuth may read under HOME — unverified live, see LEARNINGS.md.",
+  },
   { relPath: ".config/gh", reason: "gh CLI auth token, so a worker can open/merge PRs" },
   { relPath: ".gitconfig", reason: "git author identity for commits the worker makes" },
   {
@@ -163,6 +183,9 @@ export function lostWorkerHomeGrants(plan: WorkerHomePlan): WorkerHomeGrantOutco
 /** The HOME-relative slot Claude Code resolves its keychain through. */
 const LOGIN_KEYCHAIN_REL = join("Library", "Keychains", "login.keychain-db");
 
+/** The HOME-relative slot the `.claude` grant occupies — the one W1-T505 narrows. */
+const CLAUDE_REL = ".claude";
+
 export function workerHomePlan(opts: {
   workerHome: string;
   realHome: string;
@@ -175,18 +198,35 @@ export function workerHomePlan(opts: {
    * 2026-07-21). Unset ⇒ the pre-T235 grant to the real login keychain.
    */
   workerKeychainPath?: string;
+  /**
+   * W1-T505: injectable existence check, so the `.claude` narrowing below is
+   * unit-testable without touching the real filesystem (same discipline as
+   * `EnsureWorkerKeychainOpts.exists`). Defaults to the real `existsSync`.
+   */
+  exists?: (path: string) => boolean;
 }): WorkerHomePlan {
+  const exists = opts.exists ?? existsSync;
+  // W1-T505: the `.claude` grant PREFERS a credential-only sibling the operator owns
+  // (`<realHome>/.claude-fleet`) over the operator's whole `.claude`. Falls back to
+  // today's wholesale grant when that sibling is absent — design point (ii)/(iv): no
+  // host is broken by upgrading before the sibling has been populated.
+  const claudeCredentialDir = join(opts.realHome, WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH);
+  const narrowedClaudeTarget = exists(claudeCredentialDir) ? claudeCredentialDir : join(opts.realHome, CLAUDE_REL);
+
   return {
     workerHome: opts.workerHome,
     rcFiles: WORKER_HOME_RC_FILES.map((f) => join(opts.workerHome, f)),
-    symlinks: WORKER_HOME_SYMLINKS.map((s) => ({
-      from: join(opts.workerHome, s.relPath),
-      to:
-        opts.workerKeychainPath && s.relPath === LOGIN_KEYCHAIN_REL
-          ? opts.workerKeychainPath
-          : join(opts.realHome, s.relPath),
-      reason: s.reason,
-    })),
+    symlinks: WORKER_HOME_SYMLINKS.map((s) => {
+      let to: string;
+      if (opts.workerKeychainPath && s.relPath === LOGIN_KEYCHAIN_REL) {
+        to = opts.workerKeychainPath;
+      } else if (s.relPath === CLAUDE_REL) {
+        to = narrowedClaudeTarget;
+      } else {
+        to = join(opts.realHome, s.relPath);
+      }
+      return { from: join(opts.workerHome, s.relPath), to, reason: s.reason };
+    }),
   };
 }
 
@@ -208,6 +248,8 @@ export function materializeWorkerHome(opts: {
   realHome: string;
   /** See {@link workerHomePlan} — the W1-T235 dedicated worker keychain. */
   workerKeychainPath?: string;
+  /** See {@link workerHomePlan} — injectable for the W1-T505 `.claude` narrowing's tests. */
+  exists?: (path: string) => boolean;
 }): WorkerHomePlan {
   const plan = workerHomePlan(opts);
 
