@@ -119,14 +119,37 @@ export interface AutoTriageInputs {
    * work both existed and `partitionByFileOverlap` refused to pair them. This REPLACES the former
    * `idle` conjunct on the operator's ruling.
    *
-   * WHY NOT `idle`, AND WHY NOT AN EMPTY-QUEUE SIGNAL. The old field was set only inside
-   * `daemon.ts`'s idle branch, so `if (!i.idle)` below was UNREACHABLE from the daemon and a BUSY
-   * TICK LOGGED NOTHING AT ALL — measured: 0 of 1,214 `auto_triage.skipped` rows carry its reason,
-   * against 666 carrying the daily-cap reason on the same corpus. `dispatchSet.length < budget` was
-   * rejected as the replacement because it also fires when the queue is simply EMPTY, which is now
-   * the normal state, so it would spend the daily cap on nothing. A DEFERRAL is the strong signal.
+   * WHY NOT `idle`. The pre-W1-T469 field was set only inside `daemon.ts`'s idle branch, so its
+   * guard was UNREACHABLE from the daemon and a BUSY TICK LOGGED NOTHING AT ALL — measured: 0 of
+   * 1,214 `auto_triage.skipped` rows carried its reason, against 666 carrying the daily-cap reason
+   * on the same corpus.
+   *
+   * THIS IS NO LONGER THE ONLY TRIGGER — see {@link AutoTriageInputs.dispatchCount}. W1-T469 shipped
+   * it as the sole conjunct and that was CIRCULAR: a deferral requires TWO eligible tasks to collide,
+   * so with zero eligible tasks there is nothing to defer, and the rung that CREATES work could only
+   * fire when work already existed. MEASURED on a starved daemon: `auto_triage.skipped — "no deferral
+   * this pass"` beside `dispatch.starvation.escalated — blocked: 5, unmet_deps: 3`, with ~87 feedback
+   * entries unread while the fleet starved for thirteen hours.
    */
   deferralPending: boolean;
+  /**
+   * How many tasks this tick ACTUALLY dispatched, and the lane budget it had to fill. Together they
+   * carry the second trigger: `dispatchCount < laneBudget` means THE QUEUE COULD NOT FILL THE
+   * AVAILABLE CAPACITY, which is precisely the state that most needs more tasks.
+   *
+   * NUMBERS, NOT A PRECOMPUTED BOOLEAN, so this module owns the predicate and can name WHICH state
+   * refused it — a caller passing `capacityUnfilled: false` could not tell "the governor left no
+   * lanes" apart from "the queue filled every lane", and those are opposite conditions.
+   *
+   * ★ THIS DOES NOT FIRE ON A FULL FLEET, and that is arithmetic rather than a promise.
+   * `laneDispatchBudget` (`src/lib/drain.ts`) returns `Math.min(lanes, headroom)` over two
+   * `Math.max(0, …)` terms, so the budget is never negative; when the governor holds every lane it
+   * is exactly 0, `runnableCandidates` returns `[]` at `limit <= 0`, and `0 < 0` is FALSE. The four
+   * states, enumerated: lanes full ⇒ 0/0, silent. Starved ⇒ 0/N, FIRES. Partial fill ⇒ 1/N, FIRES
+   * (the queue ran out below capacity — still "send more work"). Full fill ⇒ N/N, silent.
+   */
+  dispatchCount: number;
+  laneBudget: number;
   /** True when the shared triage lock is already held by a LIVE process (rung or hand-run). */
   lockHeld: boolean;
   marker: MarkerResolution;
@@ -151,7 +174,22 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  */
 export function decideAutoTriage(i: AutoTriageInputs): AutoTriageDecision {
   if (!i.policy.enabled) return { fire: false, reason: "auto-triage disabled (policy.autoTriage.enabled=false)" };
-  if (!i.deferralPending) return { fire: false, reason: "no deferral this pass — the partitioner refused no pairing" };
+  // ── THE TRIGGER: EITHER SIGNAL, NOT BOTH (operator ruling, reversing W1-T469) ────────────────
+  // Two DIFFERENT shapes of "the fleet could use more work", and the second is the one the starved
+  // state produces. Requiring the first ALONE was circular — see `deferralPending`'s own doc.
+  const capacityUnfilled = i.dispatchCount < i.laneBudget;
+  if (!i.deferralPending && !capacityUnfilled) {
+    // THE REFUSAL NAMES WHICH BRANCH DECLINED, because one undifferentiated string would rebuild
+    // the exact blindness W1-T469 existed to fix, one layer further in. The two false cases are
+    // OPPOSITE conditions and must never read the same in the ledger.
+    return {
+      fire: false,
+      reason:
+        i.laneBudget <= 0
+          ? "no trigger this pass — no pairing deferred, and the governor left no lane capacity to fill"
+          : `no trigger this pass — no pairing deferred, and the queue filled all ${i.laneBudget} available lane(s)`,
+    };
+  }
   if (i.lockHeld) return { fire: false, reason: "triage lock held — a run is already in flight" };
   if (i.marker.kind === "corrupt") return { fire: false, reason: "auto-triage marker unreadable — failing closed" };
 
@@ -197,10 +235,16 @@ export function decideAutoTriage(i: AutoTriageInputs): AutoTriageDecision {
   // W1-T469, which is the wording of a conjunct that no longer exists — a fired row asserting
   // idleness while the rung fires precisely on a BUSY tick would send the next investigation
   // looking for an idle period that never happened.
+  // AND THE FIRED ROW NAMES ITS TRIGGER TOO. A fire that said only "under both bounds" would leave
+  // the next investigation unable to tell a collision-driven fire from a starvation-driven one —
+  // the same question the refusal above answers, asked from the other side.
+  const trigger = i.deferralPending
+    ? "a pairing deferred"
+    : `capacity went unfilled (${i.dispatchCount}/${i.laneBudget} lanes)`;
   return {
     fire: true,
     feedbackId: i.candidates[0],
-    reason: "a pairing deferred, under both bounds, oldest entry at status: new",
+    reason: `${trigger}, under both bounds, oldest entry at status: new`,
   };
 }
 

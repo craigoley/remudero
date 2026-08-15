@@ -23,7 +23,16 @@ const ON: AutoTriagePolicy = {
   maxPerDay: 4,
 };
 const NOW = new Date("2026-08-01T12:00:00.000Z");
-const base = { deferralPending: true, lockHeld: false, now: NOW, candidates: ["fb-1", "fb-2"] };
+// dispatchCount === laneBudget so the CAPACITY trigger is false and these cases isolate the
+// deferral path; the capacity path has its own tests below.
+const base = {
+  deferralPending: true,
+  dispatchCount: 1,
+  laneBudget: 1,
+  lockHeld: false,
+  now: NOW,
+  candidates: ["fb-1", "fb-2"],
+};
 
 function tmp(p: string): string {
   return mkdtempSync(join(tmpdir(), p));
@@ -147,15 +156,22 @@ test("a corrupt marker file on disk resolves corrupt, not absent", () => {
   }
 });
 
-test("W1-T469: the rung does not fire when the partitioner deferred nothing, AND THE REFUSAL NAMES THAT CAUSE", () => {
-  const d = decideAutoTriage({ ...base, policy: ON, deferralPending: false, marker: { kind: "absent" } });
+test("NEITHER TRIGGER: no pairing deferred AND the queue filled every lane — refused, naming both", () => {
+  // The only remaining false case when capacity exists: the queue filled it. Both sub-states are
+  // named, because the two false cases are OPPOSITE conditions (see the lanes-full test below) and
+  // one undifferentiated string would rebuild the blindness W1-T469 existed to fix.
+  const d = decideAutoTriage({
+    ...base,
+    policy: ON,
+    deferralPending: false,
+    dispatchCount: 2,
+    laneBudget: 2,
+    marker: { kind: "absent" },
+  });
   assert.equal(d.fire, false);
-  // THE WHOLE DEFECT WAS A SILENT SKIP. A row saying only "skipped" is what this replaces: the
-  // former `daemon is not idle` reason appeared 0 times in 1,214 skip rows because the guard was
-  // unreachable twice over — the rung sat inside the idle branch AND `autoTriageCheck` hardcoded
-  // `idle: true`. The reason must name the gate that actually refused.
-  assert.match((d as { reason: string }).reason, /no deferral this pass/);
-  assert.doesNotMatch((d as { reason: string }).reason, /not idle/, "the stale reason must not survive the rename");
+  assert.match((d as { reason: string }).reason, /no pairing deferred/);
+  assert.match((d as { reason: string }).reason, /filled all 2 available lane/);
+  assert.doesNotMatch((d as { reason: string }).reason, /not idle/, "the stale reason must not survive");
 });
 
 test("the rung does not fire when nothing is at status new", () => {
@@ -248,8 +264,8 @@ test("runDaemon: the rung fires ONCE across many DEFERRING ticks and never takes
         },
         sleep: async () => {},
         // Fires on the first deferring tick only; every later tick is inside the interval.
-        checkAutoTriage: (deferralPending) => {
-          deferralArgs.push(deferralPending);
+        checkAutoTriage: (signals) => {
+          deferralArgs.push(signals.deferralPending);
           checks++;
           return checks === 1
             ? { fire: true, feedbackId: "fb-old", reason: "a pairing deferred, under both bounds" }
@@ -570,8 +586,8 @@ test("W1-T469 EMPTY RESERVOIR: an empty feedback dir yields no candidates, and t
         sleep: async () => {},
         // The REAL decision function, driven by the REAL empty reservoir, on a genuinely
         // deferring tick — so the only thing that can stop it is the candidate bound.
-        checkAutoTriage: (deferralPending) =>
-          decideAutoTriage({ policy: CAP, deferralPending, lockHeld: false, marker: { kind: "absent" }, now: NOW, candidates }),
+        checkAutoTriage: (signals) =>
+          decideAutoTriage({ policy: CAP, ...signals, lockHeld: false, marker: { kind: "absent" }, now: NOW, candidates }),
         runAutoTriage: async () => {
           spawns++;
         },
@@ -623,10 +639,10 @@ test("W1-T469 HELD LOCK: a hand-run `rmd triage` holding the lock makes the rung
         runOne: async (id) => ({ taskId: id, ok: true, merged: true }) as never,
         checkStop: () => (++stopChecks > 2 ? "bound" : undefined),
         sleep: async () => {},
-        checkAutoTriage: (deferralPending) =>
+        checkAutoTriage: (signals) =>
           decideAutoTriage({
             policy: CAP,
-            deferralPending,
+            ...signals,
             lockHeld,
             marker: { kind: "absent" },
             now: NOW,
@@ -667,7 +683,11 @@ test("W1-T469 THE SKIP NAMES ITS CAUSE: a refused tick's ledger row distinguishe
   const dir = tmp("rmd-at-reasons-");
   try {
     const refusals = [
-      { name: "no deferral", inputs: { deferralPending: false }, expect: /no deferral this pass/ },
+      {
+        name: "no trigger",
+        inputs: { deferralPending: false, dispatchCount: 1, laneBudget: 1 },
+        expect: /no pairing deferred, and the queue filled all 1 available lane/,
+      },
       { name: "lock held", inputs: { lockHeld: true }, expect: /triage lock held/ },
       { name: "corrupt marker", inputs: { marker: { kind: "corrupt" } as const }, expect: /failing closed/ },
       { name: "daily cap", inputs: { marker: { kind: "ok", marker: { fires: firesInWindow(24) } } as const }, expect: /daily cap reached/ },
@@ -683,10 +703,10 @@ test("W1-T469 THE SKIP NAMES ITS CAUSE: a refused tick's ledger row distinguishe
           runOne: async (id) => ({ taskId: id, ok: true, merged: true }) as never,
           checkStop: () => (++stopChecks > 1 ? "bound" : undefined),
           sleep: async () => {},
-          checkAutoTriage: (deferralPending) =>
+          checkAutoTriage: (signals) =>
             decideAutoTriage({
               policy: CAP,
-              deferralPending,
+              ...signals,
               lockHeld: false,
               marker: { kind: "absent" },
               now: NOW,
@@ -710,4 +730,210 @@ test("W1-T469 THE SKIP NAMES ITS CAUSE: a refused tick's ledger row distinguishe
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── THE CORRECTION: FIRE ON EITHER SIGNAL (operator ruling, reversing W1-T469) ────────────────
+// W1-T469 shipped `deferralPending` as the SOLE trigger and it was circular: a deferral needs two
+// eligible tasks to collide, so a fleet with nothing eligible can never produce one, and the rung
+// that CREATES work could only fire when work already existed. Measured on a starved daemon:
+// `auto_triage.skipped — no deferral this pass` beside `dispatch.starvation.escalated`, ~87
+// feedback entries unread, thirteen hours. These pin the second trigger AND its boundaries.
+
+test("STARVED: capacity exists and NOTHING is eligible — the rung FIRES, which is the whole correction", () => {
+  const d = decideAutoTriage({
+    ...base,
+    policy: CAP,
+    deferralPending: false, // nothing collided, because nothing was eligible to collide
+    dispatchCount: 0,
+    laneBudget: 3,
+    marker: { kind: "absent" },
+  });
+  assert.equal(d.fire, true, "the starved fleet is exactly the state that most needs more tasks");
+  assert.equal((d as { feedbackId: string }).feedbackId, "fb-1");
+  assert.match((d as { reason: string }).reason, /capacity went unfilled \(0\/3 lanes\)/);
+});
+
+test("STARVED FALSIFIER: the same call inside minIntervalMinutes does NOT fire", () => {
+  // Without this the test above would pass against a rung that fires unconditionally — which, with
+  // the capacity trigger true on every idle tick of a starved fleet, is every tick. The interval is
+  // one of only two bounds left after W1-T475 deleted the adaptive curve.
+  const d = decideAutoTriage({
+    ...base,
+    policy: CAP, // minIntervalMinutes: 60
+    deferralPending: false,
+    dispatchCount: 0,
+    laneBudget: 3,
+    now: new Date(NOW.getTime() + 10 * 60_000), // 10m after the recorded fire
+    marker: { kind: "ok", marker: { fires: [NOW.toISOString()] } },
+  });
+  assert.equal(d.fire, false, "the interval floor still binds on the capacity path");
+  assert.match((d as { reason: string }).reason, /only 10\.0m since the last fire \(minInterval 60m\)/);
+});
+
+test("minInterval BINDS ACROSS TWO CONSECUTIVE TICKS: two polls inside the floor yield exactly one fire", () => {
+  // `minIntervalMinutes` had no independent path into the decision before #1814 wired it directly —
+  // it reached here only through the adaptive curve's `depth <= depthFloor` arm, and that curve is
+  // gone. This drives the marker the way the daemon does: fire, record, poll again.
+  const starved = { ...base, policy: CAP, deferralPending: false, dispatchCount: 0, laneBudget: 3 };
+  const first = decideAutoTriage({ ...starved, marker: { kind: "absent" }, now: NOW });
+  assert.equal(first.fire, true, "tick 1 fires");
+
+  const marker = { kind: "ok" as const, marker: { fires: [NOW.toISOString()] } };
+  let fires = 0;
+  for (const minutes of [1, 14, 59]) {
+    const again = decideAutoTriage({ ...starved, marker, now: new Date(NOW.getTime() + minutes * 60_000) });
+    if (again.fire) fires++;
+  }
+  assert.equal(fires, 0, "every subsequent poll inside the floor is refused — one fire, not four");
+});
+
+test("LANES FULL is NOT the starved state: budget 0 fires nothing, by arithmetic not by promise", () => {
+  // `laneDispatchBudget` (src/lib/drain.ts) is Math.min(lanes, headroom) over two Math.max(0, …)
+  // terms, so the governor holding every lane yields exactly 0 — and `0 < 0` is false. This is the
+  // case a naive "dispatchSet is empty ⇒ idle" reading would have fired on.
+  const d = decideAutoTriage({
+    ...base,
+    policy: CAP,
+    deferralPending: false,
+    dispatchCount: 0,
+    laneBudget: 0,
+    marker: { kind: "absent" },
+  });
+  assert.equal(d.fire, false, "a full fleet must never be read as a starved one");
+  assert.match((d as { reason: string }).reason, /the governor left no lane capacity to fill/);
+});
+
+test("THE TWO FALSE CASES READ DIFFERENTLY: lanes-full and queue-filled are distinguishable in the ledger", () => {
+  const common = { ...base, policy: CAP, deferralPending: false, marker: { kind: "absent" as const } };
+  const lanesFull = decideAutoTriage({ ...common, dispatchCount: 0, laneBudget: 0 });
+  const queueFilled = decideAutoTriage({ ...common, dispatchCount: 2, laneBudget: 2 });
+  assert.equal(lanesFull.fire, false);
+  assert.equal(queueFilled.fire, false);
+  assert.notEqual(
+    lanesFull.reason,
+    queueFilled.reason,
+    "opposite conditions must not share a reason string — that is the W1-T469 defect one layer in",
+  );
+});
+
+test("PARTIAL FILL still fires: the queue ran out below capacity, which is also send-more-work", () => {
+  const d = decideAutoTriage({
+    ...base,
+    policy: CAP,
+    deferralPending: false,
+    dispatchCount: 1,
+    laneBudget: 3,
+    marker: { kind: "absent" },
+  });
+  assert.equal(d.fire, true);
+  assert.match((d as { reason: string }).reason, /capacity went unfilled \(1\/3 lanes\)/);
+});
+
+test("EITHER SIGNAL: a deferral still fires on its own, and names the deferral rather than capacity", () => {
+  const d = decideAutoTriage({
+    ...base,
+    policy: CAP,
+    deferralPending: true,
+    dispatchCount: 2,
+    laneBudget: 2, // capacity trigger FALSE, so only the deferral can be firing
+    marker: { kind: "absent" },
+  });
+  assert.equal(d.fire, true);
+  assert.match((d as { reason: string }).reason, /^a pairing deferred,/);
+});
+
+test("STARVED BUT EMPTY RESERVOIR: the rung declines rather than spinning up to find nothing", () => {
+  // A bound firing on a healthy condition is this repo's recurring defect; a rung that spends a
+  // fire to discover zero entries would be another. Driven through the REAL exported reader.
+  const root = tmp("rmd-at-starved-dry-");
+  try {
+    mkdirSync(join(root, "plan", "feedback"), { recursive: true });
+    const candidates = newFeedbackIdsOldestFirst(root);
+    assert.deepEqual(candidates, [], "the reservoir is genuinely empty");
+    const d = decideAutoTriage({
+      ...base,
+      policy: CAP,
+      deferralPending: false,
+      dispatchCount: 0,
+      laneBudget: 3,
+      marker: { kind: "absent" },
+      candidates,
+    });
+    assert.equal(d.fire, false);
+    assert.match((d as { reason: string }).reason, /no feedback at status: new/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("STARVED BUT LOCK HELD: a stale hand-run lock still stops the capacity path, cleanly", () => {
+  // A 29-hour stale `triage.lock` blocked the rung entirely; the refusal must stay a refusal on the
+  // NEW path too, and must still name the lock rather than the trigger.
+  const root = tmp("rmd-at-starved-lock-");
+  mkdirSync(join(root, "state"), { recursive: true });
+  const handRun = acquireDrainLock(triageLockPath(root));
+  try {
+    const held = readDrainLock(triageLockPath(root));
+    const lockHeld = held !== null && defaultIsPidAlive(held.pid);
+    assert.equal(lockHeld, true);
+    const d = decideAutoTriage({
+      ...base,
+      policy: CAP,
+      deferralPending: false,
+      dispatchCount: 0,
+      laneBudget: 3,
+      lockHeld,
+      marker: { kind: "absent" },
+    });
+    assert.equal(d.fire, false);
+    assert.match((d as { reason: string }).reason, /triage lock held/);
+  } finally {
+    handRun.release();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runDaemon: THE RUNG IS REACHED ON A STARVED TICK — the placement, not just the predicate", () => {
+  // THE CORRECTION IS TWO CHANGES AND THIS PINS THE SECOND. W1-T469 placed the rung AFTER the idle
+  // branch's `continue`, which was sound for a deferral-only gate (a deferral implies a non-empty
+  // dispatch set) and FATAL for the capacity gate, because the starved state IS the idle state.
+  // Adding the trigger without moving the rung would have shipped it as dead code, and every unit
+  // test above would still have passed.
+  return (async () => {
+    const { runDaemon } = await import("../src/lib/daemon.js");
+    const { loadPlan } = await import("../src/lib/plan.js");
+    const dir = tmp("rmd-at-starved-loop-");
+    try {
+      const f = join(dir, "tasks.yaml");
+      writeFileSync(f, "- id: T1\n  title: t\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n");
+      const seen: Array<{ deferralPending: boolean; dispatchCount: number; laneBudget: number }> = [];
+      let stopChecks = 0;
+      const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+      await runDaemon(
+        loadPlan(f),
+        {
+          refreshMerged: () => () => true, // everything merged ⇒ nothing eligible ⇒ STARVED/idle
+          runOne: async () => {
+            throw new Error("nothing is eligible in this fixture");
+          },
+          checkStop: () => (++stopChecks > 1 ? "bound" : undefined),
+          sleep: async () => {},
+          checkAutoTriage: (signals) => {
+            seen.push(signals);
+            return { fire: false, reason: "stubbed" };
+          },
+          log: (step, extra = {}) => lines.push({ step, extra: extra ?? {} }),
+        },
+        { laneCount: 2 },
+      );
+
+      assert.ok(lines.some((l) => l.step === "daemon.idle"), "the fixture really is an idle tick");
+      assert.ok(seen.length > 0, "THE RUNG WAS CONSULTED ON A STARVED TICK — it was not, before this change");
+      assert.equal(seen[0].deferralPending, false, "nothing collided, because nothing was eligible");
+      assert.equal(seen[0].dispatchCount, 0, "and nothing dispatched");
+      assert.ok(seen[0].laneBudget > 0, `capacity was free (budget ${seen[0].laneBudget}), which is what makes it starved`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  })();
 });
