@@ -119,6 +119,69 @@ test("firstUnreservedAtOrAbove READS reservations without taking one — the adv
   assert.equal(firstUnreservedAtOrAbove(700, dir, { isPidAlive: ALIVE }), 700, "released ⇒ reported free again");
 });
 
+// ── ADVISORY READ SEES THE REMOTE (W1-T518) ──────────────────────────────────
+//
+// `dir` is a worker sandbox's local, ephemeral directory — empty by construction on a fresh
+// worker, whether or not the remote (`refs/rmd-id/*`) holds anything. Every test below leaves
+// `dir` UNCREATED, exactly that sandbox state, and drives the injected `readRemoteHeld` reader
+// to prove what the read sees and does not see.
+
+test("the advisory read sees a reservation held on the remote", () => {
+  const dir = join(scratch(), "task-id-reservations"); // never created — nothing held LOCALLY
+  const readRemoteHeld = () => new Set([700]);
+
+  assert.equal(
+    firstUnreservedAtOrAbove(700, dir, { isPidAlive: ALIVE, readRemoteHeld }),
+    701,
+    "an id held ONLY on the remote is skipped, exactly as a local reservation would be",
+  );
+  assert.equal(existsSync(dir), false, "the read must not have created the local dir");
+  // ADVISORY, PER THE FUNCTION'S OWN DOC CONTRACT: "Reporting a number and claiming it are
+  // different acts, and only the caller that will actually FILE should claim." Seeing the remote
+  // must not start claiming it — no ref, no file, nothing written by this call.
+  assert.equal(
+    firstUnreservedAtOrAbove(700, dir, { isPidAlive: ALIVE, readRemoteHeld }),
+    701,
+    "stable across calls — a read, not a claim",
+  );
+});
+
+test("an unreachable remote degrades the advisory read instead of reporting free", () => {
+  const dir = join(scratch(), "task-id-reservations"); // never created — the sandbox-empty case
+  const readRemoteHeld = (): Set<number> | "unknown" => "unknown";
+
+  assert.equal(
+    firstUnreservedAtOrAbove(700, dir, { isPidAlive: ALIVE, readRemoteHeld }),
+    "unknown",
+    "a failed read of the remote must surface as unknown, never fold into a free number",
+  );
+});
+
+test("a local only reader reports an id that the remote already holds", () => {
+  // PINS THE DEFECT this task closes: with no `readRemoteHeld` injected — the exact call every
+  // caller made before this change — an id reserved ONLY on the remote is invisible, and the read
+  // reports it free. `rmd next-task-id` made this call unmodified in a worker sandbox, where `dir`
+  // is empty by construction, and reported free for ids the remote already held.
+  const dir = join(scratch(), "task-id-reservations"); // local dir has nothing
+  assert.equal(
+    firstUnreservedAtOrAbove(700, dir, { isPidAlive: ALIVE }),
+    700,
+    "a local-only reader is blind to a remote-held id — this is the collision input, not a fix",
+  );
+});
+
+test("an id held nowhere — neither locally nor on the remote — is still returned unchanged", () => {
+  // THE OTHER HALF OF THE FALSIFIER: a reader that skipped everything would pass the "sees the
+  // remote" test above by accident if it also over-reported. This pins the false-positive side.
+  const dir = join(scratch(), "task-id-reservations");
+  const readRemoteHeld = () => new Set([701, 702]); // holds NEIGHBORS, not 700 itself
+  assert.equal(
+    firstUnreservedAtOrAbove(700, dir, { isPidAlive: ALIVE, readRemoteHeld }),
+    700,
+    "an id nobody holds must still be reported as itself",
+  );
+});
+
 test("an exhausted scan window throws rather than looping forever", () => {
   const dir = join(scratch(), "task-id-reservations");
   // Fill the whole window with LIVE reservations, then ask for one more.
