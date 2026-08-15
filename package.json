@@ -50,6 +50,7 @@
     "capability-snapshot:check": "tsx scripts/generate-capability-snapshot.mjs --check",
     "spike": "tsx src/spike.ts",
     "learnings-budget-ratchet": "node scripts/learnings-budget-ratchet.mjs",
+    "claude-md-budget-ratchet": "node scripts/claude-md-budget-ratchet.mjs",
     "commitlint": "commitlint",
     "changelog": "commit-and-tag-version"
   },

@@ -338,6 +338,34 @@ jobs:
       - name: Knowledge budget ratchet (blocks a PR that pushes the active learnings corpus over the recorded cap)
         run: npm run --silent learnings-budget-ratchet
 
+  claude-md-budget-ratchet:
+    # §5 TIER 2 (W1-T503, MASTER-PLAN §8A) — CLAUDE.md is injected in full into every session on
+    # every lane and, until this job, was the fleet's largest per-session injectable with no
+    # budget at all, while the learnings corpus above at a fifth its weight already had one. Same
+    # ratchet shape as `learnings-budget-ratchet` above, except this cap carries ZERO HEADROOM:
+    # CLAUDE.md's own charter says every addition must be paid for by a fold ("compression is a
+    # deliverable, not just accretion"), so scripts/claude-md-budget-baseline.json's capBytes is
+    # set to the measured size at capture, not a figure with room to grow into. Runs
+    # UNCONDITIONALLY (no path filter, no `if:`) so it always registers a check run, same
+    # fail-closed shape as `ci`/`coverage-ratchet`/`learnings-budget-ratchet` above — a
+    # conditionally-skipped required check deadlocks merge forever (LEARNINGS: the #102-class
+    # skipped-check deadlock).
+    #
+    # scripts/claude-md-budget-ratchet.mjs names the overage in bytes on a PR that pushes
+    # CLAUDE.md past the cap; that cap only ever ratchets UP (a deliberate, reviewed bump when
+    # growth is genuinely right), never down to make a red PR pass.
+    name: claude-md-budget-ratchet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Install (clean, from lockfile)
+        run: npm ci
+      - name: CLAUDE.md size ratchet (blocks a PR that grows CLAUDE.md past the recorded cap)
+        run: npm run --silent claude-md-budget-ratchet
+
   jscpd-gate:
     # §5 TIER 2, quality gate 3/4 (W1-T97) — a duplication CEILING: copy-pasted code rots
     # independently and silently. Runs UNCONDITIONALLY (no path filter, no `if:`) so it always
