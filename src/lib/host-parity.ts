@@ -417,3 +417,120 @@ export function runHostParity(deps: HostParityDeps): HostParityOutcome {
   }
   return { status: drift ? "drift" : "clean", pole: deps.pole, reading, diff, confirmed, unconfirmed, report, captured };
 }
+
+/**
+ * lib/host-parity.ts — PART TWO: SIBLING JOBS, ONE SHA, OPPOSITE ANSWERS.
+ *
+ * MEASURED ON #1886 (head `ad5904c`). `coverage-ratchet` failed on the W1-T356 orphan-sweep wiring
+ * test — a file that PR's diff never touches — while `ci` ran the SAME `test/**\/*.test.ts` glob
+ * on the SAME sha to `conclusion: success`. Re-running the failed job alone cleared it, because
+ * `scripts/test-with-retry.mjs` re-runs the whole command once IN THE SAME JOB, on the same
+ * runner, moments later — a second reading of the same environment, not a second environment.
+ * `FLAKE-RETRY: retry ALSO failed` is what let that one job's disagreement with its own sibling
+ * hold the PR while nothing compared it against the sibling that disagreed.
+ *
+ * NOT THE SAME QUESTION AS ABOVE. Everything above this comment diffs ONE pole's failure set
+ * against a hand-declared baseline. This diffs TWO siblings against EACH OTHER, on the sha they
+ * share, with no baseline at all — `ci` and `coverage-ratchet` are not different host poles, they
+ * are the same runner class running the same glob through the same retry wrapper, so a disagreement
+ * between them is not "expected drift to declare", it is exactly the signal HOST_PARITY_BASELINE's
+ * own doc refuses to swallow: "a flake is not a divergence and must not be declared as one." This
+ * predicate does not decide which; it names that they disagreed.
+ *
+ * REPORTS, NEVER DECIDES — see the module doc's "NOT A GATE" clause, which applies here unchanged.
+ * No auto-merge, no re-run, no stand-down, no gate: the output is one line naming the two jobs, the
+ * sha and the failing test, for a human or a fix rung to act on. It cannot itself act.
+ *
+ * THE VERDICT IS "DISAGREEMENT", NOT "FLAKE". Calling it a flake would assert the two runs are
+ * equivalent measurements of the same thing; naming the disagreement leaves the judgement exactly
+ * where the evidence supports it — see the rationale of the task that added this, plan/tasks.d/
+ * W1-T517-sibling-job-disagreement-is-unread.yaml, for the instrumentation gap (coverage-ratchet
+ * omits ./test/setup/tmp-hygiene.ts; `ci` does not) that makes a real difference between the two
+ * runs plausible rather than assuming noise.
+ */
+
+/**
+ * One job's conclusion for one sha, the way the caller's already-fetched check-run rollup holds
+ * it (GitHub's check-runs API shape, trimmed to what this predicate reads — no fetch happens here).
+ */
+export interface CheckRunConclusion {
+  /** The job's name as GitHub reports it — e.g. `"ci"`, `"coverage-ratchet"`. */
+  job: string;
+  sha: string;
+  /**
+   * GitHub's own vocabulary (`"success" | "failure" | "neutral" | "cancelled" | "skipped" |
+   * "timed_out" | "action_required"`, typed as `string` so a caller need not import GitHub's own
+   * enum here). Only `"success"` and `"failure"` are read as opposing poles — a job that was
+   * `"skipped"` or `"cancelled"` did not reach an answer at all, so it cannot disagree with one
+   * that did, and treating it as either pole would manufacture a disagreement out of a job that
+   * never ran the suite.
+   */
+  conclusion: string;
+  /** The test this job's failure named, when `conclusion` is `"failure"`. Omitted on success, or
+   *  when the failure named no single test (e.g. a build step, not a test run). */
+  failingTest?: DivergenceId;
+}
+
+/** Two or more siblings that ran the SAME sha and reached OPPOSITE conclusions. */
+export interface SiblingDisagreement {
+  sha: string;
+  /** Job names that reached `"success"` on this sha, sorted. */
+  passed: string[];
+  /** Job names that reached `"failure"` on this sha, sorted. */
+  failed: string[];
+  /** The failing tests the failed jobs named, deduped and sorted. Empty when every failed job
+   *  named no single test. */
+  failingTests: DivergenceId[];
+}
+
+/**
+ * findSiblingDisagreements — THE PURE FOLD over an already-fetched check-run rollup.
+ *
+ * Pure, no I/O, no network: the caller supplies the rollup it already holds, the way every other
+ * advisory in this repo takes its evidence as an argument (see {@link diffHostParity}).
+ *
+ * GROUPS BY SHA, then within each group asks only whether BOTH poles are present: at least one
+ * `"success"` and at least one `"failure"`. A sha with every job on the same conclusion (all green,
+ * or — the false-positive containment this task's design calls out by name — ALL RED) yields no
+ * disagreement, because agreement is not the thing this reports. A sha with exactly one job cannot
+ * satisfy "at least one of each", so a single job never disagrees with itself.
+ */
+export function findSiblingDisagreements(checkRuns: readonly CheckRunConclusion[]): SiblingDisagreement[] {
+  const bySha = new Map<string, CheckRunConclusion[]>();
+  for (const run of checkRuns) {
+    const group = bySha.get(run.sha) ?? [];
+    group.push(run);
+    bySha.set(run.sha, group);
+  }
+
+  const disagreements: SiblingDisagreement[] = [];
+  for (const [sha, runs] of bySha) {
+    const passed = [...new Set(runs.filter((r) => r.conclusion === "success").map((r) => r.job))].sort();
+    const failed = [...new Set(runs.filter((r) => r.conclusion === "failure").map((r) => r.job))].sort();
+    if (passed.length === 0 || failed.length === 0) continue; // one pole absent ⇒ agreement, not disagreement
+    const failingTests = [
+      ...new Set(
+        runs
+          .filter((r) => r.conclusion === "failure" && r.failingTest)
+          .map((r) => r.failingTest as DivergenceId),
+      ),
+    ].sort();
+    disagreements.push({ sha, passed, failed, failingTests });
+  }
+  return disagreements.sort((a, b) => a.sha.localeCompare(b.sha));
+}
+
+/**
+ * The human-facing line for one {@link SiblingDisagreement} — names both jobs, the sha and the
+ * failing test(s), and states the verdict as a disagreement rather than a flake. See the section
+ * doc above for why: asserting equivalence between two runs that differ in what they import
+ * (tmp-hygiene.ts) is a claim this predicate has no evidence for either way.
+ */
+export function renderSiblingDisagreement(d: SiblingDisagreement): string {
+  const tests = d.failingTests.length ? ` over ${d.failingTests.join(", ")}` : "";
+  return (
+    `SIBLING DISAGREEMENT at ${d.sha}: ${d.failed.join(", ")} failed while ${d.passed.join(", ")} passed ` +
+    `the same suite${tests} — this reports the disagreement between siblings, not a verdict on ` +
+    "which side is right."
+  );
+}
