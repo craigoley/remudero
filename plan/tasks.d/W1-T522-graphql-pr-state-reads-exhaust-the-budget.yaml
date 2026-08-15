@@ -1,0 +1,219 @@
+- id: W1-T522
+  title: "the fleet's remaining live PR-state reads run on GraphQL, the one budget that is exhausted, and the review-posting rung dies with it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 70.00
+  rationale: "FILED FROM the rate-limit recon of 2026-08-15 (operator-directed), on host
+    Remudero under bash 5.2.21, evidence derived at origin/main 659fe5a and over the FULL
+    ledger union at /home/craigoleyagent/rmd-state2/state (per form: gz 0 files, plain 2, live
+    1; coverage control on run.start = 0 / 128 / 96; union full-line deduped to 36,302 rows
+    spanning 2026-08-08T21:59Z to 2026-08-15T21:32Z). A first sweep of the same corpus at
+    <repo>/state read ZERO on every step INCLUDING its own positive control, which is how the
+    wrong path was caught rather than reported.
+    THE FAILING SITE IS NOT THE ONE ANYBODY NAMED. Every `sweep.post_review.failed` row is one
+    class — 36 of 36 carry `Command failed: gh pr view` AND `GraphQL: API rate limit already
+    exceeded` — and ALL 36 are dated 2026-08-15 (0 on 08-13, 0 on 08-14), so this is acute, not
+    chronic. W1-T511 (#1887) moved `ghLiveState` to REST and merged at 19:33:30Z; the daemon
+    then re-booted at 21:28:20Z on head_sha 70b3762, which DOES carry `liveStateFromRest`
+    (grep, 2 src files, control prStateFromRest = 1) — and THREE MORE failures landed at
+    21:31:00Z and 21:32:13Z on that fresh code, argv verbatim `gh pr view
+    https://github.com/craigoley/remudero/pull/1900 --json state`. So this is a SURVIVING SITE,
+    not a stale daemon, and the three-clocks reading was checked before it was ruled out.
+    The URL form belongs to `fetchPrLifecycle` (src/lib/review.ts) — the ONLY `--json state`
+    site taking a URL; the other, `ghLiveStateByNumber` (src/run-task.ts), takes a number plus
+    `--repo`. Both are enumerated below and neither was named in the brief that commissioned
+    this recon.
+    THE SWEEP IS ALREADY REST, so the standing hypothesis that its per-PR reads are the bulk is
+    DISPROVED, not merely doubted. `buildOpenPrViews` reads the list through `fetchOpenPrsRest`
+    and hydrates merge state through `hydrateMergeStates`, both REST; its own doc records the
+    2026-07-28 incident that moved it. The two `deps.readLiveState` call sites in
+    src/lib/sweep.ts sit inside `case blocked-fixable` and `case conflicted` ONLY — they do not
+    fire per PR per pass. Today's 1,719 disposals: wait 892, blocked-ambiguous 522,
+    blocked-fixable 177, post-review 85, mergeable 26, stale 17, conflicted ZERO. So the
+    sweep's whole GraphQL-capable exposure today is 177 + 85 = 262 reads, against ci.polling 236
+    and pr.polling 33.
+    THE CONVERSION CANNOT BOUND THE BUDGET, and the shard says so rather than overselling
+    itself. Ledger-visible GraphQL-capable calls today total roughly 531. Sampled live over 250
+    seconds while the fleet ran, GraphQL `used` moved 7,499 to 7,517 — about 4.3 per minute, or
+    260 per hour, which alone would never reach 5,000. Yet `used` stood at 7,517 against a
+    limit of 5,000 with `remaining: 0`. Two things follow. The burn is BURSTY and its majority
+    is INVISIBLE to the ledger — 17 `run.start` rows today, each a spawned worker running `gh`
+    freely inside its own sandbox with nothing metering it. And every call made while exhausted
+    STILL INCREMENTS `used` (7,499 to 7,517 happened entirely at remaining 0), so an
+    unthrottled fleet keeps paying for calls that return nothing.
+    WHAT THIS TASK IS WORTH, STATED HONESTLY: it does not stop exhaustion. It takes the fleet's
+    review-posting critical path OFF the budget that is exhausted, so the rung survives an
+    exhaustion somebody else caused. That is the whole claim.
+    NOT A REPEAT OF W1-T511's REFUSAL. That shard refused a bulk conversion because a wrong
+    field shape breaks the reviewer for every PR at once. This one does not re-argue that: it
+    converts TWO named sites whose field needs are `{merged, closed}` and a three-valued state
+    respectively, both already served by an EXISTING tested mapping, and it leaves every other
+    site alone with a table saying which could move later and which never can."
+  design: |
+    THE SHAPE: two call sites move to the existing REST mapping. No new mapping, no retry, no
+    new ledger step, no cadence change.
+
+    (i) `fetchPrLifecycle` (src/lib/review.ts) — THE ONE THAT IS ACTUALLY FAILING. It shells
+    `gh pr view <prUrl> --json state`, upper-cases, and returns `{merged: state === "MERGED",
+    closed: state === "CLOSED"}`. REST serves both fields directly: `.merged` is already a
+    boolean and `.state === "closed"` is the closed test. Reuse `liveStateFromRest`
+    (src/lib/open-prs-rest.ts) and derive the pair from its three-valued answer, so there is
+    exactly one place where REST's two-valued state is composed with `merged`.
+
+    THE TWO-VALUED FOLD IS BENIGN HERE AND FATAL THERE, and an implementer must not generalise
+    from this site. At `fetchPrLifecycle` a naive `.state`-only swap would mislabel a MERGED PR
+    as `closed`, and `decideReviewStatusPost` refuses on merged OR closed — so the bug would be
+    invisible. At `terminalStateReason` (src/lib/sweep.ts) the same fold is not survivable:
+    it treats ANY value other than the literal "OPEN" as terminal, so a lower-cased "open"
+    makes `rmd fix` refuse every live PR. `prStateFromRest`'s own doc already states this and
+    forbids simplifying it to `state.toUpperCase()`. Do not restate that reasoning as new; cite
+    it and reuse the function.
+
+    (ii) `ghLiveStateByNumber` (src/run-task.ts) — FOLDED IN, NOT FILED SEPARATELY. It is
+    A BUDGET COST NOT A CORRECTNESS BUG: it returns GraphQL's three-valued `state` unchanged,
+    so it is right today and merely expensive. A session claimed it was returning a wrong value
+    and retracted that; do not re-derive the retracted claim. Its three call sites all pass a
+    number and a repo, so the REST target is `repos/{owner}/{repo}/pulls/{number}` with no URL
+    parsing at all.
+
+    (iii) WHAT MUST NOT CHANGE. `LiveStateResult` is `{ok, state?}` and `ok: false` means an
+    INDETERMINATE read — explicitly NOT `state: "UNKNOWN"`, which `terminalStateReason` treats
+    as terminal. A conversion that collapses those two ships a silent behaviour change: every
+    rate-limited read would start reading terminal and stand the fix rung down. `ghLiveState`
+    already keeps them apart post-W1-T511; the new sites must too, and the suite must pin it.
+
+    (iv) THE SITE TABLE, DERIVED NOT GUESSED, at 659fe5a with word boundaries. src/ carries 21
+    `["pr","view",...]` sites and 7 `["pr","list",...]` sites against 25 `["api",...]` sites —
+    28 versus 25, NOT the 108-versus-32 the brief carried. That figure came from a bare
+    substring over all tracked files, which reads 124 versus 168 and REVERSES the imbalance.
+    The word-boundary lesson reproduces exactly on the named example: `ghLiveState` bare = 11,
+    word-boundary = 6, `ghLiveStateByNumber` = 5.
+
+    field set                                  n   REST-able
+    statusCheckRollup                          3   NO — CheckRun/StatusContext union
+    state,statusCheckRollup                    1   NO — the rollup half blocks it
+    body                                       4   yes — .body
+    state                                      2   yes — .state + .merged (the two sites here)
+    headRefName                                2   yes — .head.ref
+    files                                      2   yes — /pulls/{n}/files
+    state,mergeable,url                        1   yes — .mergeable may be null while computing
+    number,url,state,title                     1   yes
+    number,url,state,mergeCommit               1   yes — .merge_commit_sha
+    headRefOid,headRefName,body,url,number     1   yes — .head.sha
+    headRefOid,commits                         1   yes — needs a second call, /pulls/{n}/commits
+    headRefName,body                           1   yes
+    autoMergeRequest                           1   yes — .auto_merge
+    pr list: number,url,state,headRefName      3   yes — already done by fetchOpenPrsRest
+    pr list: number,url,state                  2   yes
+    pr list: url                               1   yes
+    pr list: title,body,headRefName            1   yes
+
+    ONLY the four rollup-bearing rows are genuinely stuck on GraphQL. Everything else could
+    move; this task moves two and the table is the record for whoever moves the next one.
+
+    (v) TWO SHARDS NOT ONE — THE SPLIT IS RECOMMENDED AND THIS IS THE FIRST HALF. NOTHING READS
+    THE REMAINING HEADER: `x-ratelimit` and `X-RateLimit` each match ZERO files under src/ and
+    test/, against a positive control (`isGhRateLimitError`, 2 src files) and a negative
+    control at 0. `GhCallPacer` exists but is REACTIVE SPACING, not a floor — it widens 1.5s to
+    10s only AFTER a call is classified rate-limited, and it guards THREE sites
+    (src/lib/status.ts twice, src/run-task.ts once) all of which are REST. The GraphQL sites
+    that actually exhaust are unguarded entirely. A proactive floor — read the remaining
+    budget, stand down above a threshold — is a real and probably larger task, and it belongs
+    in its own shard because it shares a cause with this one and nothing else: different files,
+    different falsifiers, and it must cover callers this conversion never touches.
+
+    DO NOT PROPOSE A RETRY. The failure class is exhaustion; retrying against an exhausted
+    budget deepens exactly what it reacts to, and the live sample above shows failed calls
+    still increment `used`.
+
+    AND DO NOT SWEEP LESS OFTEN WITHOUT COSTING IT. The cadence is what keeps time-to-review at
+    a 7.3s median once a PR is reached. Today ran 1,731 `sweep.pass` rows against 916 on 08-13
+    and 957 on 08-14 — the cadence roughly DOUBLED today and that deserves its own look, but
+    the sweep's reads are REST, so slowing it would not return one GraphQL point.
+
+    WHAT MUST NOT BE BUILT: a retry or backoff loop; a new ledger step (`daemon.tree_dirty` and
+    `daemon.stale_code` already fire unconsumed, W1-T494/#1833); a second REST state mapping
+    beside `prStateFromRest`; a change to the sweep cadence; any conversion of a
+    rollup-bearing site; and the budget floor itself, which is the sibling shard.
+  acceptance:
+    - claim: "the review-posting lifecycle read no longer spends the exhausted budget"
+      proof: "unit test: W1-T522: the review lifecycle read is served from the REST budget"
+    - claim: "a merged pull request is not reported as merely closed by the new read"
+      proof: "unit test: W1-T522: a merged pull request is not reported as merely closed"
+    - claim: "the by-number state read is moved off the graph as well"
+      proof: "unit test: W1-T522: the by-number state read no longer spends the graph budget"
+    - claim: "an indeterminate read is still indeterminate and never reads as terminal"
+      proof: "unit test: W1-T522: an indeterminate read stays indeterminate and never reads terminal"
+    - claim: "the surviving site is named against the measurement that found it"
+      proof: "grep: THE FAILING SITE IS NOT THE ONE ANYBODY NAMED in plan/tasks.d/W1-T522-graphql-pr-state-reads-exhaust-the-budget.yaml"
+    - claim: "the sweep hypothesis is disproved rather than left open"
+      proof: "grep: THE SWEEP IS ALREADY REST in plan/tasks.d/W1-T522-graphql-pr-state-reads-exhaust-the-budget.yaml"
+    - claim: "the task refuses to claim it bounds the budget"
+      proof: "grep: THE CONVERSION CANNOT BOUND THE BUDGET in plan/tasks.d/W1-T522-graphql-pr-state-reads-exhaust-the-budget.yaml"
+    - claim: "the folded-in offender is classified so the retracted claim is not repeated"
+      proof: "grep: A BUDGET COST NOT A CORRECTNESS BUG in plan/tasks.d/W1-T522-graphql-pr-state-reads-exhaust-the-budget.yaml"
+    - claim: "the trap is scoped to where it is fatal rather than generalised"
+      proof: "grep: THE TWO-VALUED FOLD IS BENIGN HERE AND FATAL THERE in plan/tasks.d/W1-T522-graphql-pr-state-reads-exhaust-the-budget.yaml"
+    - claim: "the absent backoff is recorded with the controls that establish it"
+      proof: "grep: NOTHING READS THE REMAINING HEADER in plan/tasks.d/W1-T522-graphql-pr-state-reads-exhaust-the-budget.yaml"
+    - claim: "the split is recommended rather than silently absorbed"
+      proof: "grep: TWO SHARDS NOT ONE in plan/tasks.d/W1-T522-graphql-pr-state-reads-exhaust-the-budget.yaml"
+    - claim: "a retry is refused with the reason it deepens the failure"
+      proof: "grep: DO NOT PROPOSE A RETRY in plan/tasks.d/W1-T522-graphql-pr-state-reads-exhaust-the-budget.yaml"
+    - claim: "the out-of-bounds work is named so it is not rebuilt"
+      proof: "grep: WHAT MUST NOT BE BUILT in plan/tasks.d/W1-T522-graphql-pr-state-reads-exhaust-the-budget.yaml"
+    - claim: "the declared scope is derived by measurement"
+      proof: "grep: DERIVED BY INVOCATION COUNT in plan/tasks.d/W1-T522-graphql-pr-state-reads-exhaust-the-budget.yaml"
+  risk: high
+  origin: "oper#rate-limit-recon-2026-08-15"
+  plan_refs: ["W1-T511", "W1-T468", "W1-T177", "W1-T494"]
+  files: [src/lib/review.ts, src/run-task.ts, test/review-status-gate.test.ts]
+  status: queued
+  attempts: 0
+  note: "risk:high is set UP FRONT and it is Rule 19's SPAN, not blast radius: the files: list
+    crosses two source modules because the two offending sites live in two modules and
+    converting one without the other leaves the budget cost in place. Blast radius is small —
+    both changes are read-path substitutions behind an existing tested mapping.
+    files: DERIVED BY INVOCATION COUNT at 659fe5a with WORD BOUNDARIES (symbol followed by a
+    non-word character), never a bare substring — the lesson cost a session a wrong files: list
+    today when `ghLiveState` matched `ghLiveStateByNumber`, measured here as bare 11 versus
+    word-boundary 6 plus 5. `fetchPrLifecycle` scores src/run-task.ts 5 and src/lib/review.ts 2;
+    `ghLiveStateByNumber` scores src/run-task.ts 5 and NO other src path; the test home is
+    test/review-status-gate.test.ts, which scores `postReviewStatusGuarded` 17 and
+    `PrLifecycleState` 4, higher than any other test path. Negative control
+    `fetchPrLifecycleZzq` = 0 files.
+    src/run-task.ts IS DECLARED DELIBERATELY, against the usual W1-T471 contention argument
+    (19,943 lines): `ghLiveStateByNumber` is defined AND called only there, so the change
+    genuinely lives in that path and cannot be made anywhere else. src/lib/open-prs-rest.ts is
+    deliberately NOT declared — `liveStateFromRest` and `prStateFromRest` are reused unchanged,
+    and declaring a file this task never edits would fail inverseScopeUntouchedFiles.
+    src/lib/sweep.ts is not declared either: it consumes injected deps and needs no edit.
+    PROOF NOTES: the four unit proofs are NAME-FILTERED titles, each verified to match ZERO
+    files under test/ at 659fe5a with `grep -rlF`, against a positive control matching 1. The
+    implementing test must carry each title as ONE verbatim string literal, never assembled
+    across a concatenation seam (impl-AG). Each grep proof names text that exists in THIS
+    shard's prose and is not a filename slug; all are single-line, and no pattern contains the
+    ' in ' sequence that would mis-split the dialect parser.
+    MINT NOTE: W1-T522 was taken by pushing refs/rmd-id/W1-T522 DIRECTLY with a unique orphan
+    payload (blob b07960c9, commit 7c15b688, no parent), pushed under
+    --force-with-lease=refs/rmd-id/W1-T522: so a concurrent minter would have lost the race
+    rather than both winning it, then verified by ls-remote to carry MY sha. This CONTRADICTS
+    W1-T519's note that the push proxy refuses non-branch refs with HTTP 403 — from this
+    session it succeeded, and W1-T509 owns the reservation work either way.
+    Tree max at take was W1-T519 (id field and shard filenames agree); reservation refs already
+    held 515, 516, 520 and 521; the two open PRs minting shards (#1901, #1903) mint exactly 520
+    and 521, so refs and tree agree. The apparent outlier W1-T1786799102812 is documented prose
+    inside W1-T509's shard about branch-name parsing, not an id — checked, not assumed.
+    LINT: 506 task(s) checked before, 507 after — the one extra is the control that this shard
+    loaded. Open failing is UNCHANGED at 179 (172 with a merged implementation, 7 with none),
+    against a control of 179 marker lines the same query finds. Warnings move 598 to 608: all
+    ten are [proof-scope] on THIS task, one per grep proof, because each names this shard's own
+    path while files: correctly does not list it. That check is warn-only EVERYWHERE —
+    `opts.proofScope` defaults to \"warn\" and no caller in src/ ever sets it (grep: the only
+    references are the definition and its own doc) — so it cannot block the changed-tasks gate,
+    and W1-T511's own filing carried the same ten and merged. Recorded rather than left for a
+    reviewer to rediscover.
+    LEDGER: measured over the full three-form union as recorded in the rationale."
