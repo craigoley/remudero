@@ -17347,7 +17347,10 @@ export function buildInboxDraftHook(
  * and only consults `depsUnobservable` for the ids it reports unmerged — is derived ONCE,
  * never twice: no new GitHub reads over what this CLI already made pre-W1-T510.
  */
-function buildDepsReadinessAccessors(plan: Plan, deriveDeps: DeriveDeps): { isMerged: MergedResolver; depsUnobservable: (taskId: string) => GhFailureReason | undefined } {
+/** EXPORTED for its own coverage: the memoising seam W1-T510's readiness split rests on. Its
+ *  body is reachable from no other test — both `inboxCommand` call sites need a live plan and
+ *  a real GitHub gateway, which is why these lines arrived uncovered. */
+export function buildDepsReadinessAccessors(plan: Plan, deriveDeps: DeriveDeps): { isMerged: MergedResolver; depsUnobservable: (taskId: string) => GhFailureReason | undefined } {
   const projectionOf = new Map<string, StatusProjection>();
   const derive = (t: Task): StatusProjection => {
     const cached = projectionOf.get(t.id);

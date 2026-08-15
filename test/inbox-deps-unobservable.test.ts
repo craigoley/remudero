@@ -282,3 +282,84 @@ test("an unobservable dep keeps the proposal out of READY, and rmd approve refus
   assert.match(refusalReason(classification), /deps-unobservable/);
   assert.match(refusalReason(classification), /rate_limit/);
 });
+
+// ── buildDepsReadinessAccessors (W1-T510) — the memoising seam the split rests on ─────────────
+//
+// These nine lines arrived UNCOVERED and blocked #1881 at diff-coverage. Both `inboxCommand` call
+// sites need a live plan and a real GitHub gateway, so the body was reachable from no test; it is
+// exported for exactly this, and driven here against injected gateways.
+
+import { buildDepsReadinessAccessors } from "../src/run-task.js";
+import { type GitHub } from "../src/lib/status.js";
+
+const ACCESSOR_PLAN_YAML = `
+- id: ACC-1
+  title: accessor fixture one
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: medium
+  origin: architect
+  files: [src/lib/example.ts]
+  acceptance:
+    - claim: "does the thing"
+      proof: "unit test: accessor fixture one"
+`;
+
+/** A gateway whose read either succeeds cleanly or fails with a classified reason. */
+function gatewayFor(opts: { failed?: boolean; reason?: string } = {}): GitHub {
+  return {
+    prByRef: () => null,
+    findMergedByTrailer: () => null,
+    headRefName: () => undefined,
+    prBody: () => undefined,
+    ...(opts.failed ? { readFailed: () => true } : {}),
+    ...(opts.reason ? { readFailureReason: () => opts.reason } : {}),
+  } as unknown as GitHub;
+}
+
+function accessorFixture(gh: GitHub): { plan: Plan; deps: { ledgerPath: string; github: GitHub; readLedger: () => string[] }; ledgerReads: () => number } {
+  const plan = loadPlanFromYaml(ACCESSOR_PLAN_YAML, "accessor-fixture");
+  let reads = 0;
+  // `readLedger` is called ONCE per deriveStatus, so counting it counts derivations — which is how
+  // the memoisation is asserted without reaching into the closure.
+  const deps = { ledgerPath: join(mkdtempSync(join(tmpdir(), "acc-")), "ledger.ndjson"), github: gh, readLedger: () => { reads++; return []; } };
+  return { plan, deps, ledgerReads: () => reads };
+}
+
+test("the readiness accessors derive each task once and reuse the projection", () => {
+  const { plan, deps, ledgerReads } = accessorFixture(gatewayFor());
+  const { isMerged, depsUnobservable } = buildDepsReadinessAccessors(plan, deps as never);
+  const t = plan.byId.get("ACC-1")!;
+  assert.equal(isMerged(t), false, "a clean gateway with no credit reads not-merged");
+  assert.equal(ledgerReads(), 1, "the first call derives");
+  // The SAME task through the OTHER accessor must hit the cache, which is the whole point of the
+  // shared `projectionOf` map — `unmetOutsideDeps` calls isMerged first and depsUnobservable after.
+  assert.equal(depsUnobservable("ACC-1"), undefined, "an observable dep reports no reason");
+  assert.equal(ledgerReads(), 1, "the second accessor must REUSE the projection, never derive twice");
+  isMerged(t);
+  assert.equal(ledgerReads(), 1, "a repeat call is cached too");
+});
+
+test("an unobservable dependency reports its classified reason, not a false unmerged", () => {
+  const { plan, deps } = accessorFixture(gatewayFor({ failed: true, reason: "rate_limit" }));
+  const { isMerged, depsUnobservable } = buildDepsReadinessAccessors(plan, deps as never);
+  assert.equal(depsUnobservable("ACC-1"), "rate_limit", "a throttled read must surface as a REASON");
+  // FALSIFIER: the same task still reads not-merged through isMerged — which is precisely why the
+  // reason is needed. A caller seeing only `false` cannot tell throttled from genuinely unmerged.
+  assert.equal(isMerged(plan.byId.get("ACC-1")!), false);
+});
+
+test("an unobservable dependency with no classified reason falls back to unknown", () => {
+  const { plan, deps } = accessorFixture(gatewayFor({ failed: true }));
+  const { depsUnobservable } = buildDepsReadinessAccessors(plan, deps as never);
+  assert.equal(depsUnobservable("ACC-1"), "unknown", "an unclassified failure must not yield undefined");
+});
+
+test("a dependency absent from the plan reports no reason at all", () => {
+  const { plan, deps, ledgerReads } = accessorFixture(gatewayFor({ failed: true, reason: "auth" }));
+  const { depsUnobservable } = buildDepsReadinessAccessors(plan, deps as never);
+  assert.equal(depsUnobservable("NO-SUCH-TASK"), undefined, "unmetDependencies' own missing-dep branch owns this case");
+  assert.equal(ledgerReads(), 0, "an unknown id must never trigger a derivation");
+});
