@@ -1312,3 +1312,75 @@ and that ordering is unchanged by where the console is published.
 
 - Rollback: revert this PR — removes only this entry. No task record, no runtime code, no gate and
   no generated artifact is touched by it, and no ledger line is written.
+
+## 2026-08-15 — RULING: the Spanish name is the brand, the Americanized vocabulary is the interface (OPERATOR-RULED)
+
+*Operator-ruled direction record, recorded at the operator's instruction.* The repository, the binary
+(`rmd`) and `remudero.com` do not change. What changes is the words the console shows a person.
+
+### The line, and it is the whole safety of this ruling
+
+**Console strings and documentation are free to change. Ledger step names, function names and file
+paths are not.** Those are query keys: renaming one breaks every historical question anyone can ask
+of the record, silently and permanently. A button reading differently breaks nothing.
+
+Concretely, and this ruling binds future work to it: routes such as `/v1/drain/run` are an API
+contract; `state/drain.lock` is read by the daemon, the entrypoint and every runbook; ledger steps
+and function names are how the ledger is queried and the code is navigated. **A diff that renames one
+of those in the name of vocabulary is a failed change, not a judgement call.**
+
+### The measurement that justifies confining this to the surface
+
+Re-derived from `src/lib/serve.ts` and `src/`, with an invented control term reading 0 in both:
+
+| term | rendered in `serve.ts` | across `src/` |
+|---|---|---|
+| `cell` | 0 | 19 |
+| `ratchet` | 0 | 116 |
+| `shard` | 3 | 166 |
+| `rung` | 4 | 693 |
+| `drain` | 55 | 627 |
+
+**The abstract words are substrate, not interface.** `cell` and `ratchet` are never rendered at all;
+`rung` renders four times against 693 uses in source. Renaming them would be a large, risky diff that
+no operator would ever see the benefit of. They are therefore explicitly OUT of scope for vocabulary
+work, now and later.
+
+### What is already correct, so nobody "fixes" it
+
+`mount` is genuine ranch English used correctly — a cowboy's mount is the set of horses he rides, and
+the fleet already says `mount sonnet/high`. `lane`, `gate`, `ledger` and `sweep` are already concrete
+and stay. **These are not candidates for renaming.**
+
+### The one surface word that is wrong, and the word that replaces it
+
+`drain` renders 55 times in `src/lib/serve.ts` — the most-rendered vocabulary word on the console —
+and it points backwards. To anyone who did not build this, *drain* means empty, or shut down. It in
+fact **dispatches queued work: it starts things.**
+
+**It becomes `gather`.** A gather is the attested ranch act of bringing scattered stock in so it can
+be worked, used as both verb and noun ("the gather"). It is chosen over `roundup` because it is a
+plain verb in active voice, where `roundup` is a noun pressed into service as one — and because the
+same word carries the button, the confirmation and the empty state, so the action keeps one name
+through the whole flow.
+
+Applied to the rendered strings only: the UP NEXT button and its confirm step, the empty-state text,
+and the write-access status sentence. Routes, the lock file, identifiers, CSS hooks, data attributes
+and ledger steps are untouched and were asserted byte-identical.
+
+### The standing rule for every future term
+
+**Every proposed word must be attested ranch English with a source. An invented Western-sounding word
+is worse than the abstract one it replaces.** The researched vocabulary available: *remuda* (the herd
+of spare mounts a crew remounts from), *wrangler* (the Americanized *remudero*), *cavvy* (the Plains
+corruption of *caballada*), *string* (the horses assigned to one rider), *mount*, *rep* (a
+neighbouring outfit's representative who cuts out his own brand), and *cattle guard*.
+
+### And the register, which already exists here but not in the product
+
+The voice this asks for is already written in this repository every day — the plain-language
+paragraph that closes every recon report. Plain, friendly, and explained without being dumbed down.
+It has simply never reached the console. Future surface work should sound like that paragraph.
+
+- Rollback: revert this PR — removes only this entry and the rendered strings it names. No task
+  record, no route, no lock file, no ledger step and no generated artifact is touched by it.
