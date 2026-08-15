@@ -280,6 +280,16 @@ test("W1-T522: the by-number state read no longer spends the graph budget", () =
   assert.deepEqual(fetch.calls, ["api " + REST_PATH]);
 });
 
+test("W1-T522: a non-PR URL refuses rather than falling back to the exhausted GraphQL budget", () => {
+  // `prLifecycleUrlTarget` returns `undefined` for anything that is not `.../pull/<n>` (an
+  // issue URL, a commit URL, a bare string, …). `fetchPrLifecycle` must throw immediately in
+  // that case — never call `fetch` at all, and never fall back to `gh pr view --json state`,
+  // the GraphQL call whose budget exhaustion this whole task exists to route around.
+  const fetch = fakeGhApiFetcher({ [REST_PATH]: { number: 1900, html_url: PR_URL, state: "open", merged: false, updated_at: "t", head: {} } });
+  assert.throws(() => fetchPrLifecycle("https://github.com/craigoley/remudero/issues/1900", fetch), /cannot resolve owner\/repo\/number/);
+  assert.deepEqual(fetch.calls, []);
+});
+
 test("W1-T522: an indeterminate read stays indeterminate and never reads terminal", () => {
   // A throwing fetch (rate limit, network, auth) must propagate as indeterminate — NEVER resolve
   // to a value that reads as merged/closed/terminal. `fetchPrLifecycle` never catches (same as
