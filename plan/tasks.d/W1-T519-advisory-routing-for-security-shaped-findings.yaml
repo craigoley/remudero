@@ -1,4 +1,4 @@
-- id: W1-T517
+- id: W1-T519
   title: "the plan corpus is a public, indexed list of this system's known weaknesses including the unbuilt ones, and nothing tells the fleet's own filers that a security-shaped finding filed here is PUBLISHED BEFORE IT IS FIXED — SECURITY.md already routes OUTSIDE reporters to a private advisory but no signal routes triage, recon or a retro: add an advisory-routing WARN to the task linter, warn-only by construction"
   repo: remudero
   depends_on: []
@@ -85,10 +85,16 @@
     concatenation seam (impl-AG). The grep proof names a NEW load-bearing symbol at an
     EXISTING path — 0 hits at 3cac8ce via the executor's own argv (grep -arn --), so it misses
     the merge-base and cannot land executed_stale (W1-T273).
-    MINT NOTE: the id was swept free (TAKEN=0, control W1-T516=3) at 3cac8ce, but the
-    refs/rmd-id/W1-T517 reservation could NOT be taken from the filing session — its push proxy
-    refuses non-branch refs with HTTP 403 (reserveTaskIdRemote's create-if-absent needs a route
-    this session lacks). The filing PR names the one-line reservation for the operator; until
-    it merges or the ref is taken, a concurrent triage mint could claim 517 — the 2ff09b1
-    hazard — and the filing session re-sweeps the ref on every PR event and renumbers if beaten.
+    MINT NOTE — THE 2ff09b1 HAZARD HAPPENED, THIS IS THE RECORD: this task was first filed as
+    W1-T517 (swept free at 3cac8ce, TAKEN=0), but refs/rmd-id/W1-T517 could NOT be reserved from
+    the filing session — the push proxy refuses non-branch refs with HTTP 403, and
+    reserveTaskIdRemote has a SINGLE call site inside triage's mint, so a hand-filed shard never
+    passes through it. With the id unreserved, two concurrent triage mints then took it: #1891
+    (W1-T517 sibling-job-disagreement) and #1893 (W1-T518 reservation-read), both merging before
+    the first PR (#1892) did. #1892 merged anyway because its changed-tasks lint ran against its
+    PINNED pre-collision base and never saw the duplicate — landing a SECOND W1-T517 on main and
+    breaking loadPlan (duplicate task id W1-T517, confirmed at 4d72e91). This shard is the
+    follow-up fix: it renames the later arrival to W1-T519 (max+1 at bc90fc6, control W1-T518=1),
+    restoring plan integrity. The incident is itself evidence for the reservation-read gap #1893
+    (W1-T518) names — a hand-filed shard cannot reserve, so it cannot be made atomic from here.
     LEDGER: UNMEASURED — no route to state/ from this session; nothing here needs it."
