@@ -1,0 +1,121 @@
+# W1-T502 — a run's work is dirty files until the terminal commit; checkpoints make it durable.
+# Method provenance: adapted from gstack (github.com/garrytan/gstack, MIT) continuous-checkpoint
+# mode — event-based WIP commits carrying a structured `[gstack-context]` body. Only the
+# methodology transfers; the shard below re-derives the Remudero defect from Remudero's own
+# incidents and cites the mechanism that makes the fix durable HERE (shared worktree object store).
+
+- id: W1-T502
+  title: "a run's only copy of hours of work is dirty files in a reapable worktree until the terminal commit — teach the output contract event-based `wip:` checkpoint commits whose objects and branch ref land in the parent clone's shared .git and survive a wipe, correcting the stale every-commit commitlint claim that forbids them"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40
+  rationale: "THE CONTRACT ITSELF CREATES THE EXPOSURE. `outputContractLines`
+    (src/lib/compaction.ts) teaches exactly one terminal act — `Otherwise: stage the changed
+    file(s) and commit.` — so for the whole life of a run, everything the worker has produced
+    exists ONLY as dirty files and index entries in its worktree. `reapStaleWorktrees`
+    (src/lib/worker.ts) `rm -rf`s entries it judges terminal without `git worktree prune`, and on
+    2026-07-31 it destroyed an agent's working tree TWICE in about eleven minutes mid-command; the
+    work survived only via `GIT_INDEX_FILE=<clone>/.git/worktrees/<name>/index` archaeology over
+    staged blobs — and only because blobs HAPPENED to be staged. CLAUDE.md's own rule from that
+    incident tells the OPERATOR to `commit more often than feels necessary`; nothing teaches the
+    WORKER the same discipline. Re-derived during this recon (2026-08-14): a live implement run's
+    worktree held 17 uncommitted `src/lib/serve.ts` edit hunks and a 217-line new test file as
+    their only copy, thirteen hours after the run began. The W1-T501 filing (#1847, merged
+    2026-08-15) names this gap in as many words — a dirty tree may hold a live worker's only copy
+    of its work, and the recovery question is separate and unfiled. This is that filing.
+
+    THE MECHANISM THAT MAKES A CHECKPOINT DURABLE, AND WHY IT IS FREE. A linked worktree shares
+    the parent clone's object store and refs — only HEAD and the index are per-worktree — so a
+    commit made inside the worktree writes its objects into the parent's `.git/objects` and moves
+    `refs/heads/<run-branch>`, both outside the reaper's `rm -rf`. A checkpointed run's recovery
+    after a wipe is `git log <run-branch>`; an uncheckpointed one is index archaeology or nothing.
+    And the commits cost main NOTHING: this repo squash-merges every PR, so branch commits never
+    reach main — ci.yml's own commitlint comment states it verbatim.
+
+    THE LINE THAT FORBIDS THE FIX IS FALSE. `commitMessageContractLines` (src/lib/compaction.ts)
+    opens by telling every worker commitlint `lints EVERY commit on the PR`. It does not: the gate
+    was RELOCATED to the PR title by W1-T129 precisely because linting the base..head range failed
+    PRs over commits that would never exist post-merge, and W1-T351 made that a live `gh pr view`
+    read. Verified at cfaa6b5: no workflow lints a commit range — the only base..head mention in
+    ci.yml is the comment explaining its removal. A worker told that every commit blocks the merge
+    will never write a `wip:` subject, so the stale claim and the checkpoint cadence cannot
+    coexist; correcting it is part of teaching the cadence, not a second concern.
+
+    METHOD PROVENANCE, AND WHAT DOES NOT TRANSFER. gstack's continuous-checkpoint mode commits at
+    event boundaries with a structured `[gstack-context]` body (decisions taken, remaining work,
+    failed approaches) and squashes before ship. The squash half does NOT transfer — remudero's
+    squash-merge already collapses branch history — and gstack's restore path reads checkpoint
+    FILES, not commits, so only the cadence-plus-structured-body rung is taken here."
+  design: |
+    (i) THE CADENCE INSTRUCTION lives in `outputContractLines` (src/lib/compaction.ts): after each
+    meaningful unit of work — a test newly green, a decision taken, an approach abandoned — commit
+    everything on the run branch with subject `wip: <what>` and a body carrying a
+    `[remudero-context]` block, one line each for decided / remaining / failed. Because
+    `outputContractLines` renders at the head of both `renderImplementPrompt` and
+    `renderAnchorBlock`, the cadence survives compaction with no extra wiring — that sharing is
+    the module's own stated design.
+    (ii) CORRECT THE STALE CLAIM in `commitMessageContractLines` in the same edit: commitlint is a
+    required check on the PR TITLE, read live (W1-T351); branch commits never reach main
+    (squash-merge, W1-T129). The title rules it teaches (type, case, length) stay — they now
+    describe the PR title and the run's FINAL commit, below.
+    (iii) THE TWO REAL COMMITLINT INTERACTIONS. First: the run's FINAL commit keeps today's
+    conventional-subject requirement — GitHub's `COMMIT_OR_PR_TITLE` squash title uses the commit's
+    own subject when a PR has exactly one commit, so a lone `wip:` commit could land a
+    non-conventional subject on main; checkpoints are strictly ADDITIONAL, earlier commits.
+    Second: `gh pr create --fill` derives a multi-commit PR's title from the branch, which is not
+    conventional — amend the contract's pr-create line so the worker passes an explicit
+    conventional title rather than deriving one.
+    (iv) RECON IS UNTOUCHED: `renderReconPrompt` renders neither `outputContractLines` nor the
+    anchor, and the falsifier asserts that asymmetry holds after the change.
+    (v) FALSIFIER DIRECTION: tests drive the REAL render functions and assert the cadence
+    instruction present in the implement prompt and the anchor and absent from recon; deleting the
+    contract lines fails them.
+    (vi) NOT IN SCOPE: any harness-side enforcement or consumption of checkpoints — `runFixRung`
+    (src/run-task.ts) dispatches a patch worker with no diagnosis phase, and teaching the strike
+    resume to read the last `[remudero-context]` body is a separate concern for a separate filing.
+    Also not in scope: `reapStaleWorktrees`, push behavior (`gitPushRunBranch`), and any sandbox
+    or hook change — W1-T501's filing already rules the containment path out for its half.
+  acceptance:
+    - claim: "the implement output contract teaches an event-based checkpoint cadence with a structured context body, so a run's work becomes durable commits as it happens rather than at the end"
+      proof: "unit test: the implement output contract instructs event-based checkpoint commits"
+    - claim: "the contract's commitlint guidance now states the title-only truth ci.yml documents, replacing the stale every-commit claim that made checkpoint commits look merge-blocking"
+      proof: "unit test: the commit message contract states the title-only commitlint scope"
+    - claim: "the contract tells the worker to pass an explicit conventional PR title instead of deriving one from a multi-commit branch"
+      proof: "unit test: a multi-commit run branch is told to pass an explicit conventional PR title"
+    - claim: "the structured checkpoint body marker is taught in the contract source itself"
+      proof: "grep: remudero-context in src/lib/compaction.ts"
+  risk: high
+  origin: oper#gstack-recon-2026-08-15
+  plan_refs: ["W1-T452", "W1-T494"]
+  files: [src/lib/compaction.ts, test/worker-checkpoint-contract.test.ts]
+  status: queued
+  attempts: 0
+  note: "risk:high IS SET UP FRONT because `files:` spans src/ and test/ and `sizingViolation`
+    (src/lib/task-linter.ts) blocks at >=2 subsystems below that band — the band is Rule 19's SPAN,
+    not blast radius: this is prompt text plus its falsifiers, zero behavioral surface. budget_usd
+    40 — contract lines, one stale-claim correction, and render-level tests.
+
+    `files:` IS TWO PATHS AND BOTH WILL BE TOUCHED. The contract text lives in
+    src/lib/compaction.ts BY THAT MODULE'S OWN DESIGN — its header explains the shared-constant
+    rationale (one literal, rendered by both the turn-0 prompt and the post-compaction anchor, so
+    the two can never drift). src/run-task.ts is DELIBERATELY NOT DECLARED and that is a
+    measurement, not an avoidance: `outputContractLines` and `commitMessageContractLines` are
+    DEFINED in compaction.ts and run-task.ts merely spreads them into its prompt, so the change
+    never edits it — and declaring the 19,943-line file would serialise this task against every
+    other task naming it (the W1-T497 precedent, refusing the same cost). test/run-task.test.ts is
+    avoided as a home because CLAUDE.md records it intermittently zeroing coverage at file level.
+
+    PROOF NOTES: three name-filtered titles, each verified at cfaa6b5 to match ZERO test files
+    today (`grep -rlF` over test/, control title matching exactly one) — the legitimate forward
+    reference for an unimplemented task. The grep proof names an explicit path; its pattern
+    matches 0 in that file today and stays path-scoped to src/lib/compaction.ts, so after this
+    filing merges it still misses the merge-base at the implement PR's review.
+
+    ID PROVENANCE: origin/main's max is W1-T501 by both shard filename and declaration — the
+    #1847 filing merged MID-RECON (main moved cfaa6b5 -> 4ee438d between drafting and push, caught
+    by the mandated pre-push re-check); the only open PR (#1849) implements W1-T500 and mints no
+    id. The id trap has fired five times in three days, twice with main's max sitting behind an
+    open PR's mint."

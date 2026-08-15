@@ -1,0 +1,109 @@
+# W1-T503 — CLAUDE.md is the largest per-session injectable and the only one without a budget.
+# Method provenance: gstack (github.com/garrytan/gstack, MIT) meters context spend explicitly and
+# decays unused knowledge. The decay policy does not transfer (it grades human-curated skills;
+# remudero's learnings lifecycle already covers supersession) — the transferable rung is the
+# BUDGET AS A CI INSTRUMENT, and remudero already owns the exact template: the learnings ratchet.
+
+- id: W1-T503
+  title: "CLAUDE.md is the fleet's largest per-session injectable and the only one without a budget — 61,046 bytes, up 6,416 in a single day, while the learnings corpus at a fifth its weight is CI-capped — so cap it with the same ceiling-ratchet instrument the learnings store already has, gated in ci-gate's REQUIRED set"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35
+  rationale: "THE ASYMMETRY, MEASURED AT cfaa6b5. CLAUDE.md is injected in full into every session
+    on every lane — its own header calls itself `a context tax paid per session` — and it is
+    61,046 bytes across 679 lines, roughly fifteen thousand tokens per session on the common
+    four-chars-per-token heuristic. The learnings corpus, which CLAUDE.md itself names as where
+    knowledge actually lives, has a CI ceiling: scripts/learnings-budget-ratchet.mjs caps ACTIVE
+    injectable weight against scripts/learnings-budget-baseline.json (measured 12,691 chars at
+    capture), and the `learnings-budget-ratchet` job sits in ci-gate's REQUIRED set. So the
+    SMALLER injectable is budgeted and the one nearly five times its weight is not.
+
+    THE GROWTH IS CURRENT, NOT HISTORIC. On 2026-08-14 alone CLAUDE.md grew 6,416 bytes across
+    three merges — 54,630 bytes after #1793 to 55,511 (#1821), 58,493 (#1829), 61,046 (#1844) —
+    the very day #1793's operating-document review landed corrections and a restructure. Growth
+    outran curation on the same calendar day the curation shipped.
+
+    THE FILE'S OWN CHARTER DEMANDS THIS AND NOTHING ENFORCES IT. Its header: compression is a
+    deliverable, not just accretion — a retro that adds a rule must also fold, sharpen, or delete
+    the ones it supersedes. The learnings ratchet's header says the quiet part in as many words:
+    compression as a deliverable stays aspirational unless CI enforces it. That sentence was
+    written for the learnings store and then applied only there.
+
+    WHY A ZERO-HEADROOM CAP, UNLIKE THE LEARNINGS BASELINE. The learnings baseline carried
+    headroom for near-term retro growth because retros APPEND there by design. CLAUDE.md's charter
+    is the opposite — every addition is supposed to be paid for by a fold — so the cap is the
+    measured figure at capture, no headroom: a PR that grows the file goes red until the same PR
+    folds something or a reviewed cap raise says why growth is right this time. Raising the cap is
+    a deliberate, visible diff on a baseline file, exactly like the coverage floor.
+
+    WHY INSTRUMENT-ONLY IS THE WHOLE TASK. Every declared path is Rule 25 INSTRUMENT_SURFACE
+    (scripts/*-ratchet.mjs, scripts/*-baseline.json, .github/workflows/) plus the instrument's own
+    test, so the implement PR is instrument-plus-test with no src/ change. The job must run
+    UNCONDITIONALLY — no path filter, no `if:` — because a conditionally-skipped required check is
+    the #102-class merge deadlock ci-gate.yml exists to avoid, and REQUIRED membership in
+    ci-gate.yml is what makes the ceiling a gate rather than advice."
+  design: |
+    (i) scripts/claude-md-budget-ratchet.mjs: self-contained plain-node .mjs (house convention —
+    no src/ import), measures CLAUDE.md's byte length, compares against `capBytes` in
+    scripts/claude-md-budget-baseline.json, exits nonzero naming the overage in bytes. Pure
+    functions (measure, evaluate) exported so the test can exercise logic and the spawned CLI both,
+    mirroring scripts/learnings-budget-ratchet.mjs.
+    (ii) THE BASELINE records capturedAt, measuredBytes, and capBytes EQUAL to the measured figure
+    at capture — zero headroom, with the json's own comment carrying the charter argument so a
+    future reader does not mistake the tightness for an accident.
+    (iii) ci.yml gains a `claude-md-budget-ratchet` job with the same unconditional fail-closed
+    shape as `learnings-budget-ratchet`, and ci-gate.yml's REQUIRED list gains the check name in
+    the same PR — a green job nobody waits on is advice, not a budget.
+    (iv) FALSIFIER FIXTURES, BOTH DIRECTIONS: an over-cap fixture fails and its message names the
+    overage in bytes; an at-cap fixture passes; the spawned-CLI path is exercised directly (exit
+    code and stderr), the same shape test/learnings-budget-ratchet.test.ts pins.
+    (v) NOT IN SCOPE: any edit to CLAUDE.md itself, any compression pass, any src/ change, and any
+    change to the learnings ratchet. This is the instrument only; the first fold that pays for the
+    next rule is ordinary retro work once the gate exists.
+  acceptance:
+    - claim: "a CLAUDE.md bigger than the recorded capBytes turns the gate red and the failure is attributable without rerunning anything"
+      proof: "unit test: the claude-md budget ratchet fails a file that outgrows the baseline"
+    - claim: "a CLAUDE.md at or under the recorded capBytes passes, so the gate cannot block a healthy PR"
+      proof: "unit test: the claude-md budget ratchet passes a file at exactly the ceiling"
+    - claim: "the red-path message quantifies the excess so the fixing session knows the size of the fold it owes"
+      proof: "unit test: the claude-md budget failure names the overage in bytes"
+    - claim: "the check gates merges rather than advising — it is in ci-gate's REQUIRED set"
+      proof: "grep: claude-md-budget-ratchet in .github/workflows/ci-gate.yml"
+  risk: high
+  origin: oper#gstack-recon-2026-08-15
+  plan_refs: ["W1-T38"]
+  files: [.github/workflows/ci.yml, .github/workflows/ci-gate.yml, scripts/claude-md-budget-ratchet.mjs, scripts/claude-md-budget-baseline.json, test/claude-md-budget-ratchet.test.ts]
+  status: queued
+  attempts: 0
+  note: "risk:high IS SET UP FRONT because `files:` spans three subsystems — .github/workflows/,
+    scripts/, test/ — and `sizingViolation` (src/lib/task-linter.ts) blocks at >=2 below that
+    band; the band is Rule 19's SPAN, not blast radius (a read-only measurement job that can only
+    ever fail a PR, never change runtime behavior). budget_usd 35 — one small .mjs mirrored from
+    an existing sibling, a baseline json, two workflow stanzas, and fixture tests.
+
+    EVERY DECLARED PATH IS INSTRUMENT SURFACE. scripts/*-ratchet.mjs, scripts/*-baseline.json and
+    .github/workflows/ are Rule 25 INSTRUMENT_SURFACE, so this task composes with instrument
+    isolation instead of fighting it: the implement PR carries no src/ line and cannot trip a
+    mixed-surface violation. ci-gate.yml is declared because REQUIRED membership is part of the
+    one concern — the learnings precedent shows the pair ships together (job in ci.yml, name in
+    ci-gate.yml's REQUIRED list).
+
+    MEASUREMENT PROVENANCE: byte figures via `git cat-file -p <sha>:CLAUDE.md | wc -c` at f947ba5
+    (54,630), 5a32472 (55,511), 38cc6ad (58,493), a0028d7 (61,046), all merged 2026-08-14; the
+    learnings cap read from scripts/learnings-budget-baseline.json (measuredChars 12691); REQUIRED
+    membership read from ci-gate.yml's env block, which lists learnings-budget-ratchet today.
+
+    PROOF NOTES: three name-filtered titles, each verified at cfaa6b5 to match ZERO test files
+    today (`grep -rlF` over test/, control title matching exactly one) — legitimate forward
+    references for an unimplemented instrument. The grep proof names an explicit path; the
+    pattern `claude-md-budget-ratchet` occurs nowhere in the tree today outside this shard, and
+    the proof is path-scoped to .github/workflows/ci-gate.yml, so it misses the merge-base at the
+    implement PR's review and discriminates the implement's own diff.
+
+    ID PROVENANCE: origin/main's max is W1-T501 by both shard filename and declaration — the
+    #1847 filing merged MID-RECON (main moved cfaa6b5 -> 4ee438d between drafting and push, caught
+    by the mandated pre-push re-check); the only open PR (#1849) implements W1-T500 and mints no
+    id."
