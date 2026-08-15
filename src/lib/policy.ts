@@ -67,6 +67,13 @@ export interface PolicyValues {
      *  plan/policy.yaml row for the incident that made retuning it a plan PR instead of a
      *  src/ edit + CI + deploy. A RELOCATION of the pre-existing source literal, not a retune. */
     dailyCostCeilingUsd: number;
+    /** W1-T516: gates whether the SWEEP arms a PR that carries no plan task id (a session
+     *  filing) under the same synthetic `PR-<n>` id the review/escalation lanes already mint
+     *  (`escalationTaskIdFor`). DEFAULT OFF — see this field's plan/policy.yaml row for what
+     *  turning it on actually admits (a capped, plan-only PR merges on structural checks
+     *  alone, with zero executed proofs). NET-NEW: no prior source literal ever gated this;
+     *  the sweep's arm dep simply passed `pr.taskId` raw. */
+    armSessionPrs: boolean;
   };
   drain: {
     max: number;
@@ -168,6 +175,7 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   "sweep.tmpMaxAgeMs": "net-new",
   "sweep.dispatchLanes": "lifted",
   "sweep.dailyCostCeilingUsd": "lifted",
+  "sweep.armSessionPrs": "net-new",
   "drain.max": "lifted",
   "autoTriage.enabled": "net-new",
   "autoTriage.minIntervalMinutes": "net-new",
@@ -353,6 +361,7 @@ export function validatePolicy(raw: unknown): Policy {
   const tmpMaxAgeMs = numberField("sweep.tmpMaxAgeMs", sweepRaw.tmpMaxAgeMs, origin);
   const dispatchLanes = numberField("sweep.dispatchLanes", sweepRaw.dispatchLanes, origin);
   const dailyCostCeilingUsd = numberField("sweep.dailyCostCeilingUsd", sweepRaw.dailyCostCeilingUsd, origin, bounds);
+  const armSessionPrs = booleanField("sweep.armSessionPrs", sweepRaw.armSessionPrs, origin);
 
   const drainRaw = raw.drain;
   if (!isPlainObject(drainRaw)) throw new PolicyError("policy.yaml: 'drain' must be a mapping.");
@@ -403,7 +412,7 @@ export function validatePolicy(raw: unknown): Policy {
       worktreeReapGraceMs,
       pollIntervalMs,
       fixStrikeCap,
-      sweep: { staleDays, strikeCap: sweepStrikeCap, wipLimit, tmpMaxAgeMs, dispatchLanes, dailyCostCeilingUsd },
+      sweep: { staleDays, strikeCap: sweepStrikeCap, wipLimit, tmpMaxAgeMs, dispatchLanes, dailyCostCeilingUsd, armSessionPrs },
       drain: { max: drainMax },
       retro: { mergesThreshold: retroMergesThreshold, daysThreshold: retroDaysThreshold },
       autoTriage,
