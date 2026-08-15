@@ -1,0 +1,144 @@
+- id: W1-T498
+  title: "the in-container freshness retry sleeps the full crash throttle before re-syncing, so every routine merge buys two minutes of daemon idle for a restart that is healthy and wanted — 16 restarts on the measured day, ~30 minutes of idle time a day"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  rationale: "MEASURED ON THE AZURE HOST (`Remudero`), 2026-08-14, ALL DERIVED UNLESS MARKED. The mini
+    keeps a separate ledger with no SSH route and none of the row counts are verifiable from there.
+
+    (1) **WHAT ALREADY SHIPPED, AND IS NOT THIS TASK.** W1-T490 merged as #1825 (`feeebd2`):
+    `daemonExitCode` (`src/lib/daemon.ts`) returns `DAEMON_EXIT_STALE` (75, `EX_TEMPFAIL`) for a
+    freshness stop, and `deploy/entrypoint.sh` retries IN-CONTAINER for that one code so the retry no
+    longer spends docker's `--restart=on-failure:5` budget. **THAT HALF IS DONE. DO NOT REOPEN IT.**
+
+    (2) **WHAT IS NOT DONE.** The in-container retry then sleeps the FULL `RMD_RESTART_THROTTLE_S`
+    before re-running `sync_tree` — **120s in production** (the live daemon container carries
+    `RMD_RESTART_THROTTLE_S=120`). The throttle exists to slow a CRASH LOOP: the measured 2026-08-13
+    lock storm where the same boot failed the same way 13-17s apart and only wall-clock separated the
+    attempts. **A FRESHNESS RESTART IS NOT THAT SHAPE** — one per merge, with a real fetch and
+    checkout between attempts.
+
+    (3) **THE SIZE OF IT, RE-DERIVED RATHER THAN ASSUMED — AND THE BRIEF'S OWN ESTIMATE WAS LOW ON
+    ONE INPUT AND HIGH ON THE OTHER.** Ledger union, both non-empty forms, full-line deduped to
+    **20,236 rows**; per-form file counts `.gz` 0 / plain 1 / live 1, readability control
+    `daemon.alive` **634 plain and 681 live**, so neither form was missed.
+    **`daemon_selfrestart_for_freshness`: 20 rows total, 16 of them on 2026-08-14, 4 on 2026-08-13.**
+    **MERGES ARE NOT THE MULTIPLIER — 60 PRs MERGED ON 2026-08-14 (00:26:40Z to 18:14:41Z) AGAINST 16
+    RESTARTS**, because the daemon batches: many merges land between two freshness checks. Anyone
+    sizing this from the merge rate overestimates it by ~4x.
+    **SO THE SAVING IS 16 x 115s = ~30.7 MINUTES OF DAEMON IDLE PER DAY.**
+
+    (4) **AND THE PAUSE IS SMALL AGAINST THE BOOT IT PRECEDES.** `daemon.boot` to first productive row
+    (`dispatch.start`/`run.start`/`sweep.pass`/`daemon.alive`), n=36: **median 25.6s, p25 23.2s, p75
+    27.4s**. So a freshness cycle costs ~145.6s today and ~30.6s after this change — the 5s pause adds
+    about a fifth on top of a boot that is unavoidable."
+  design: "(i) **THE WORK EXISTS AND WAS MEASURED. DO NOT REDESIGN IT.** PR #1830 carried exactly this
+    change before being closed as superseded; its remaining delta against main was
+    `deploy/entrypoint.sh` **+26/-6** and `test/entrypoint-boot.test.ts` **+98/-5**, and the entrypoint
+    half was only:
+      - a new `RMD_FRESHNESS_RESTART_PAUSE_S` (default 5) with the same numeric-validation `case`
+        block `RMD_FRESHNESS_RESTART_MAX` already uses, placed BELOW the `exec` gate; and
+      - **ONE LINE**: `sleep \"$RESTART_THROTTLE_S\"` -> `sleep \"$FRESHNESS_RESTART_PAUSE_S\"` in the
+        freshness branch, with the log line naming both values so the distinction is visible in
+        `docker logs`.
+    Worst case becomes **20 x 5s per container life instead of 20 x 120s**, still bounded by
+    `RMD_FRESHNESS_RESTART_MAX`. **THE BOUND IS REPLACED, NOT REMOVED** — which is what W1-T490's own
+    shard demands of any change touching a cap.
+
+    (ii) **HARD REQUIREMENT, AND THE ONE THING THAT MAKES THIS RISKY: THE CRASH PATH AND THE
+    EXHAUSTED-BUDGET HAND-OFF BOTH KEEP THE FULL THROTTLE, EACH PINNED BY ITS OWN TEST.** Shortening
+    any sleep in that block risks shortening the one that bounds a crash loop. A change that speeds up
+    freshness AND speeds up crash restarts is a regression wearing a fix's clothes, and it would look
+    identical in the diff.
+
+    (iii) **IS 5s EVEN RIGHT? ZERO IS DEFENSIBLE AND THE ARGUMENT IS WORTH RECORDING RATHER THAN
+    ASSUMED AWAY.** The value is proposed, not measured. **THE LOOP IS ALREADY RATE-LIMITED BY THE
+    BOOT ITSELF**: each iteration re-runs `sync_tree` AND a full daemon boot, median 25.6s, so the
+    pause contributes under a fifth of each cycle and removing it entirely would save a further
+    16 x 5s = ~80s/day — negligible against the 30.7 minutes the main change buys.
+    **WHAT THE PAUSE GUARDS, AND WHY IT IS KEPT ANYWAY:** a freshness exit that somehow recurred
+    immediately — a boot that fails fast before reaching the productive rows, so the 25.6s floor does
+    not apply — would spin at the pause interval until the cap. 5s makes that floor EXPLICIT and
+    tunable independent of how fast the daemon happens to boot; zero makes the loop's rate an
+    emergent property of boot speed, which is the kind of implicit bound this repo has been bitten by
+    before. **CHOOSE 5s, RECORD THAT ZERO WAS CONSIDERED, AND DO NOT SPEND THE TASK ARGUING IT.**
+
+    (iv) **WHY #1830 WAS CLOSED, AND THE TWO THINGS THAT MUST NOT REPEAT.**
+      (a) **IT WAS A DUPLICATE DISPATCH.** W1-T490 merged as #1825 at **16:55:46Z**; the worker opened
+          #1830 at **16:58:33Z** — three minutes later — solving the same task the opposite way.
+      (b) **ITS ORIGINAL DESIGN WAS FAIL-OPEN.** It kept `stale` on exit 1 and moved crashes to 2, so
+          `deploy/entrypoint.sh` branched on a bare `rc -eq 1` — **THE CODE NODE RETURNS FOR ANY
+          UNCAUGHT EXCEPTION** — and every generic failure would have skipped the crash throttle.
+          **THE RULE WORTH CARRYING FORWARD: THE UNUSUAL CODE MARKS THE SPECIAL CASE, SO ANYTHING
+          UNRECOGNISED LANDS IN THE SAFE DEFAULT.** That design was resolved away before closure and
+          must not come back; the merged 75-for-`stale` split is correct.
+      (c) **AND IT FAILED REVIEW TWICE FOR A REASON THAT WAS NEVER ITS DIFF.** Its two unmet criteria
+          were proved by a PURE-PATH `unit test: test/entrypoint-boot.test.ts`, which runs the file
+          WHOLE; two tests in that file fail whenever `RMD_RESTART_THROTTLE_S` is present in the
+          environment the proof executor inherits, and **THAT REPRODUCES ON `origin/main` UNTOUCHED**.
+          **THAT DEFECT IS NOT THIS TASK AND IS NOT YET FILED** — a scan of `plan/tasks.d/` on
+          `origin/main` and of both open PRs (#1836, #1838) finds no shard for it; the only match for
+          `RMD_RESTART_THROTTLE_S` is W1-T490's own invocation-count note (positive control on the
+          same query and trees: 5 shards match `entrypoint`). **IT NEEDS ITS OWN SHARD. DO NOT FILE IT
+          FROM HERE AND DO NOT FIX IT HERE.**
+
+    (v) **THE DELIVERY PROBLEM, WHICH THIS SHARD MUST STATE IN TERMS: MERGING THIS CHANGES NOTHING.**
+    `deploy/entrypoint.sh` is **BAKED INTO THE IMAGE** (`COPY deploy/entrypoint.sh
+    /usr/local/bin/rmd-entrypoint`), not read from the bind-mounted checkout. The running image was
+    built **2026-08-12T23:09** at `a25b3054`, and its entrypoint has **ZERO** references to
+    `DAEMON_EXIT_STALE` or `exit 75` — **SO #1825 IS ALREADY MERGED AND INERT**, and this task lands
+    on top of a fix that is not yet running. The build is `.github/workflows/acr-build.yml` via
+    `az acr build`, **`workflow_dispatch` ONLY** and deliberately so per its own header, followed by a
+    `deploy/host-update.sh` pull. **NEITHER IS THIS TASK'S JOB.** W1-T496 (open, #1836,
+    `plan/tasks.d/W1-T496-image-baked-paths-ship-nothing.yaml`) files that visibility gap; cite it and
+    do not duplicate it.
+
+    (vi) **NOT IN SCOPE.** The `RMD_RESTART_THROTTLE_S` VALUE itself; the proof-harness environment
+    leak in (iv)(c); the image build cadence; and `deploy/host-update.sh`'s printed invocation — the
+    new variable has a working default of 5, so nothing needs to pass it, and widening to that script
+    would drag `test/host-update-reclaim.test.ts` in behind it."
+  acceptance:
+    - claim: "a freshness retry pauses its own short interval rather than the crash throttle"
+      proof: "unit test: W1-T498: a freshness retry pauses its own short interval not the crash throttle"
+    - claim: "a genuine crash still pays the full crash throttle after the change"
+      proof: "unit test: W1-T498: a genuine crash still pays the full crash throttle"
+    - claim: "an exhausted freshness budget hands back to docker at the full throttle"
+      proof: "unit test: W1-T498: an exhausted freshness budget falls back onto the full throttle"
+    - claim: "a non-numeric pause value is refused loudly rather than breaking the boot"
+      proof: "unit test: W1-T498: a non-numeric pause value is refused loudly and falls back"
+  origin: recon#freshness-retry-pays-crash-throttle-2026-08-14
+  plan_refs: ["W1-T490", "W1-T483", "W1-T496"]
+  files: [deploy/entrypoint.sh, test/entrypoint-boot.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT. `files:` spans TWO subsystems — `deploy/` and `test/` — and
+    `sizingViolation` (`src/lib/task-linter.ts`) blocks at >=2 below that band. The band is Rule 19's
+    SPAN, not blast radius; the blast radius is one new variable and ONE changed `sleep` line.
+    **`files:` WAS DERIVED BY INVOCATION COUNT, NOT PROSE MENTION**, measured on `origin/main`:
+    `deploy/entrypoint.sh` scores `RESTART_THROTTLE_S` **10** and `FRESHNESS_RESTART` **8** — highest
+    on both, and it is the file that changes; `test/entrypoint-boot.test.ts` scores **16** and **1** —
+    the highest `RESTART_THROTTLE_S` count of any file and the home of every existing throttle test.
+    `deploy/host-update.sh` scores **3** and `test/host-update-reclaim.test.ts` **1**; both are
+    DELIBERATELY NOT DECLARED per design (vi), because the new variable defaults and needs no
+    plumbing. `src/lib/daemon.ts` scores **0** on both and is not declared — the exit code it owns
+    already shipped. `src/run-task.ts` is NOT declared and must not be: nothing here touches it, and
+    every task naming it serialises against every other that does.
+    **THIS SHARD'S OWN PATH IS DELIBERATELY ABSENT FROM `files:`** — adding it converts the
+    `proof-scope` warnings into a HARD `rule15-filing` violation.
+    **THE ACCEPTANCE PROOFS ARE NAME-FILTERED, NOT PURE PATHS, AND THAT IS THE MOST LOAD-BEARING
+    DECISION IN THIS FILING.** A pure `unit test: test/entrypoint-boot.test.ts` runs the file WHOLE,
+    and that file currently fails two tests whenever `RMD_RESTART_THROTTLE_S` is present in the
+    inherited environment — which would fail EVERY criterion of this shard for a reason unrelated to
+    it. **THAT IS EXACTLY HOW #1830 DIED, TWICE.** The four titles above are forward references the
+    implementer must create verbatim; each was checked to match **0** files on `origin/main` today
+    (positive control on the same query: the existing title `an exit 0 is NEVER throttled` matches
+    **1**), so none can collide with an existing test, and each is under 100 characters with no comma
+    so `looksLikeScenarioNarrative` (`src/lib/task-linter.ts`) cannot fail them.
+    EVERY NUMBER HERE IS AZURE-ONLY AND DATED 2026-08-14: the 16 freshness restarts, the 60 merges,
+    the 25.6s boot median, the 20,236-row union, and the image build stamp. RE-DERIVE BEFORE BUILDING
+    — and note that an image build closes none of this, it only makes #1825 live so that this change
+    has something to sit on."

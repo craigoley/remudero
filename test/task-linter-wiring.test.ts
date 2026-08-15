@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { runTask } from "../src/run-task.js";
+import { runTask, lintPlanCommand } from "../src/run-task.js";
 import { assertLintClean } from "../src/lib/task-linter.js";
 import { loadPlan } from "../src/lib/plan.js";
 import type { Config } from "../src/lib/config.js";
@@ -12,6 +12,7 @@ import type { GitHub } from "../src/lib/status.js";
 import type { spawnWorker } from "../src/lib/worker.js";
 
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 // ── §5C Layer A pre-dispatch guard is WIRED into the run path (W1-T20c) ───────
 
@@ -345,4 +346,112 @@ test("impl-AK: the pre-dispatch gate passes ONE options object to both lint call
 test("rmd lint-plan is wired into the CLI dispatch", () => {
   assert.match(runTaskSrc, /cmd === "lint-plan"/);
   assert.match(runTaskSrc, /lintPlanCommand/);
+});
+
+// ── W1-T497: `proofNameResolutionViolations` (task-linter.ts, W1-T488) is WIRED at the
+// `--base` changed-tasks call site in `lintPlanCommand` — behavioral, through the REAL
+// lintPlanCommand path, never a source grep on the wiring line itself. Mirrors
+// test/changed-tasks-raw-text.test.ts's own "the real --base path" shape.
+//
+// Before this task, `lintTask` never received `opts.resolveNameFilteredCandidates` from any
+// production call site, so the check (correct, unit-tested in isolation in
+// test/lint-proof-name-resolution.test.ts) always returned `[]` in a real run. The three tests
+// below prove: (1) it now FIRES through the real --base path, (2) it stays silent through the
+// whole-plan path where the resolver is deliberately never supplied — the same differential
+// that would fail test (1) alone if the `if (scope)` wiring were ever deleted, and (3) firing
+// never fails the run — severity stays `warn`.
+
+/** A fixture whose only interesting trait is a name-filtered `unit test:` proof that resolves
+ *  to ZERO tests today: metacharacter-bearing, non-scenario-narrative, guaranteed absent from
+ *  the corpus — the exact high-precision shape test/lint-proof-name-resolution.test.ts's own
+ *  ACCEPTANCE 1 already proves trips `proofNameResolutionViolations`.
+ *
+ *  ASSEMBLED FROM TWO HALVES ON PURPOSE — never one contiguous literal. `resolveNameFilteredCandidates`
+ *  greps `test/**\/*.test.ts` (its own TEST_GLOB) with a FIXED STRING, and THIS FILE is itself
+ *  inside that glob — a literal label written whole here would trivially "resolve" to this very
+ *  file (the self-reference trap the task's own note names), certifying nothing. */
+const PROBE_ID = "W1-T90497";
+const PROBE_LABEL = "zzz-w1-t497-wiring-probe-nonexistent" + "-title [marker]";
+const PROBE_PROOF = `unit test: ${PROBE_LABEL}`;
+
+function probeShardYaml(): string {
+  return [
+    `- id: ${PROBE_ID}`,
+    `  title: "W1-T497 wiring probe (fixture only — never a real task)"`,
+    "  repo: remudero",
+    "  origin: architect",
+    "  depends_on: []",
+    "  type: implement",
+    "  verify: auto",
+    "  risk: low",
+    "  status: queued",
+    "  attempts: 0",
+    "  acceptance:",
+    '    - claim: "a fixture claim naming a name-filtered proof that resolves to nothing"',
+    `      proof: "${PROBE_PROOF}"`,
+    "",
+  ].join("\n");
+}
+
+/** Captures console.log/error/warn during a `lintPlanCommand` call into ONE combined stream —
+ *  the warning this task cares about is printed via console.warn (the soft-violation branch),
+ *  distinct from test/lint-plan-open-only.test.ts's own helper, which discards warn entirely. */
+async function runLintPlanCapturingEverything(args: string[]): Promise<{ exitCode: number; combined: string }> {
+  const origLog = console.log;
+  const origError = console.error;
+  const origWarn = console.warn;
+  const lines: string[] = [];
+  console.log = (m?: unknown) => void lines.push(String(m));
+  console.error = (m?: unknown) => void lines.push(String(m));
+  console.warn = (m?: unknown) => void lines.push(String(m));
+  try {
+    const exitCode = await lintPlanCommand(args);
+    return { exitCode, combined: lines.join("\n") };
+  } finally {
+    console.log = origLog;
+    console.error = origError;
+    console.warn = origWarn;
+  }
+}
+
+test("W1-T497 ACCEPTANCE 1+3: the --base changed-tasks pass WARNS on a zero-resolving name-filtered proof, and the warning stays advisory (no block, exit 0)", async () => {
+  // Placed as a NEW, untracked shard under the REAL plan/tasks.d/: absent from `git show
+  // HEAD:...`, so `changedTaskIds` counts it as new-in-scope without editing any tracked file.
+  const shardPath = join(REPO_ROOT, "plan", "tasks.d", "zzz-w1-t497-wiring-probe.yaml");
+  assert.equal(existsSync(shardPath), false, "the probe shard must not already exist on disk");
+  writeFileSync(shardPath, probeShardYaml(), "utf8");
+  try {
+    const { exitCode, combined } = await runLintPlanCapturingEverything(["--base", "HEAD"]);
+    assert.match(
+      combined,
+      new RegExp(`⚠ ${PROBE_ID}: \\[proof-name-resolution\\]`),
+      `the --base pass must WARN proof-name-resolution for ${PROBE_ID}; saw:\n${combined}`,
+    );
+    assert.match(combined, /resolves to ZERO tests today/, "the warning carries the check's own zero-match message");
+    assert.doesNotMatch(combined, new RegExp(`✗ ${PROBE_ID}`), "a name-resolution-only violation must never BLOCK");
+    assert.equal(exitCode, 0, "a warn-only violation must not fail the lint-plan run");
+  } finally {
+    rmSync(shardPath, { force: true });
+  }
+});
+
+test("W1-T497 ACCEPTANCE 2: whole-plan mode (no --base) stays UNWIRED on purpose — the IDENTICAL fixture is silent there, proving the warning above depends on the --base wiring, not the check's own logic", async () => {
+  // A self-contained fixture plan (mirrors test/lint-plan-open-only.test.ts's
+  // buildCountingFixture), never the live 484-task plan — whole-plan mode deliberately never
+  // supplies `opts.resolveNameFilteredCandidates` (the 66s-over-320-proofs regression this
+  // task's rationale measured), so this must stay silent regardless of corpus size.
+  const dir = mkdtempSync(join(REPO_ROOT, "test", ".tmp-w1-t497-wiring-"));
+  try {
+    mkdirSync(join(dir, "plan"), { recursive: true });
+    const tasksPath = join(dir, "plan", "tasks.yaml");
+    writeFileSync(tasksPath, probeShardYaml(), "utf8");
+    const { combined } = await runLintPlanCapturingEverything(["--plan", tasksPath]);
+    assert.doesNotMatch(
+      combined,
+      /proof-name-resolution/,
+      `whole-plan mode must never fire proof-name-resolution (the resolver is never supplied there); saw:\n${combined}`,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

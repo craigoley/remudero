@@ -9029,6 +9029,16 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     // impl-DO: the CALL-SITE check needs to know whether a module already exists, and the linter
     // is pure — so the predicate is supplied here, the one place holding a real checkout to ask.
     opts.moduleExists = (rel: string) => existsSync(join(repoRoot, rel));
+    // W1-T497: the reviewer's OWN `resolveNameFilteredCandidates` (review.ts), bound to this
+    // checkout, wired ONLY in --base mode (`scope` is populated iff `baseRef` was given). It
+    // shells out per proof — measured ~207ms/proof over the full corpus — so wiring it into the
+    // whole-plan pass too would be a material regression to a job `ci.yml` calls cheap pure JS
+    // with no network; scoped here it costs a fraction of a second over the one or two tasks a
+    // PR actually touches. Never reimplemented, so lint and review can never disagree about what
+    // a proof's raw title resolves to.
+    if (scope) {
+      opts.resolveNameFilteredCandidates = (rawName: string) => resolveNameFilteredCandidates(repoRoot, rawName);
+    }
     const { violations } = lintTask(task, opts);
     const blocking = violations.filter((v) => v.severity === "block");
     const soft = violations.filter((v) => v.severity === "warn");

@@ -642,6 +642,33 @@ forensic detail, so the narrative does not need to live here.
   -- <path>` is scoped to the path, cannot reach another session's work, and cannot silently no-op.
   *(2026-08-13 — the eight-file pop, and the `push <path>` claim re-derived and retracted)*
 
+- **A merge to a BAKED path ships nothing until an operator triggers an image rebuild — know which
+  half of your diff you are in before you call a merge "shipped."** On a container host the daemon
+  runs from a **bind-mounted checkout** (`<state-root> -> .../Remudero`, the entrypoint `cd`s into
+  it), while its own **entrypoint script and every apt-level binary come from the image**. A path
+  read from the mount ships the instant it merges; a path baked into the image sits inert in a
+  MERGED, GREEN-EVERYWHERE commit until `.github/workflows/acr-build.yml` (`workflow_dispatch`
+  only, run by the operator from the Actions tab — deliberately not on every merge or every push;
+  see that workflow's own header) is triggered and the new image is deployed. The failure mode is
+  not a red check: docker still restarts the container, the daemon still logs `exited N`, and every
+  diagnostic that reads the MOUNT still says the code is current — because it is; only the image is
+  not. MEASURED 2026-08-14: the running image was 124 commits behind `origin/main`, including a
+  Dockerfile fix and an entrypoint fix, and neither showed up as a failure anywhere off-host.
+
+  | ships on merge (the mount)                          | needs an image rebuild (the image)         |
+  |------------------------------------------------------|---------------------------------------------|
+  | `src/`, `test/`, `plan/`, `scripts/`, `bin/`          | `deploy/entrypoint.sh` — the EXECUTED entrypoint (`COPY … /usr/local/bin/rmd-entrypoint`) |
+  | `deploy/*.sh` run BY THE OPERATOR from the checkout (`host-update.sh`, `verify-image.sh`) | `deploy/Dockerfile` itself — every apt binary (`jq`, `tini`, `bubblewrap`, `socat`), the node version, the `/app` snapshot |
+  | `package.json` / the lockfile — via the mount and `ensureInstallFresh`, no rebuild needed | — |
+
+  **`node_modules` is the row people get wrong, because it resolves to the MOUNT, not the image.**
+  `/app` carries its own `node_modules` that the entrypoint never falls back to; the one the daemon
+  actually loads from is the same inode as the checkout's, so a dependency bump behaves like a
+  mount-side change even though "a dependency" sounds image-shaped. `scripts/fleet-heartbeat.sh`
+  publishes `image_build_sha` (read from `/etc/rmd-build-sha`, baked in by the Dockerfile) alongside
+  the two checkout shas it already carried (`daemon_boot_head_sha`, `install_head_sha`) so this
+  boundary is checkable from the beat without shelling into the host. *(W1-T496, 2026-08-14)*
+
 ## Code traps
 
 - **`src/lib/serve.ts`'s client JS lives inside a backtick template literal — never put a backtick
