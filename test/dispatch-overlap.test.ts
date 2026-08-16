@@ -244,3 +244,81 @@ test("W1-T533: DEFAULT_OVERLAP_WARNING_POLICY clears the 2% instance and exclude
   assert.ok(6 / 277 <= ceiling, "the measured rare instance must clear the default ceiling");
   assert.ok(103 / 277 > ceiling, "the measured hub must NOT clear the default ceiling");
 });
+
+// ── W1-T533 — THE SELECTION ITSELF, WHICH NO TEST ABOVE REACHES ──────────────────────────────
+//
+// Every test above shares exactly ONE path, so the loop that picks the RAREST of several never
+// executes its body — `diff-coverage` reported `src/lib/dispatch-overlap.ts:368-371` as added
+// lines with zero covering tests, and it would have blocked this PR the moment CI's suite went
+// green (it never ran here: coverage-ratchet died at its suite step on an unrelated base defect,
+// fixed by #1971). The gap was not only coverage: "rarest" was asserted nowhere, so a `>` for a
+// `<` would have shipped.
+test("W1-T533: the rarest of several shared paths is the one scored", () => {
+  const counts = declarationCountsByPath([
+    ...Array.from({ length: 103 }, (_, i) => task({ id: `W1-HUB${i}`, files: ["src/run-task.ts"] })),
+    ...Array.from({ length: 6 }, (_, i) => task({ id: `W1-RARE${i}`, files: ["src/lib/open-prs-rest.ts"] })),
+    ...Array.from({ length: 40 }, (_, i) => task({ id: `W1-MID${i}`, files: ["src/lib/sweep.ts"] })),
+  ]);
+  // The hub is listed FIRST so a loop that simply keeps `shared[0]` scores 103 and stays silent —
+  // this ordering is what makes the assertion discriminate rather than pass by luck.
+  const candidate = task({ id: "W1-NEW", files: ["src/run-task.ts", "src/lib/sweep.ts", "src/lib/open-prs-rest.ts"] });
+  const openPr = { id: "77", files: ["src/run-task.ts", "src/lib/sweep.ts", "src/lib/open-prs-rest.ts"] };
+
+  const warnings = rareOverlapWarnings(candidate, [openPr], counts, 277);
+  assert.equal(warnings.length, 1, "one row per overlapping PR, not one per shared path");
+  assert.equal(warnings[0].rarestPath, "src/lib/open-prs-rest.ts", "the MINIMUM, not the first or the last");
+  assert.equal(warnings[0].declaredByCount, 6);
+
+  // And the reverse order reaches the same answer — the result is the minimum, not an artifact
+  // of which path the intersection happened to yield first.
+  const reversed = task({ id: "W1-NEW2", files: ["src/lib/open-prs-rest.ts", "src/lib/sweep.ts", "src/run-task.ts"] });
+  assert.equal(rareOverlapWarnings(reversed, [openPr], counts, 277)[0]?.rarestPath, "src/lib/open-prs-rest.ts");
+});
+
+// ── W1-T533 — THE FALSIFIER FOR THE HUB-SILENCE CLAIM, UNDER A NON-LITERAL SPELLING ───────────
+//
+// Criterion 2 ("an overlap only on a hub path is not reported") is what the shard calls the whole
+// design, and it held ONLY for byte-identical spellings. `intersectingEntries` reports the RAW
+// strings from BOTH sides while `globsIntersect` matched them through glob/normalization
+// semantics, so a shared entry can be a spelling no shard ever declared — and scoring that as
+// 0 declarations made a 37% hub read as MAXIMALLY RARE. MEASURED before the fix: a candidate
+// declaring `src/*.ts`, `src/**`, or `./src/run-task.ts` against a PR touching `src/run-task.ts`
+// (103/277) all warned at `count=0`, while the identical literal spelling stayed silent.
+test("W1-T533: a hub reached by a glob or a ./ spelling is still not reported", () => {
+  const counts = declarationCountsByPath(
+    Array.from({ length: 103 }, (_, i) => task({ id: `W1-HUB${i}`, files: ["src/run-task.ts"] })),
+  );
+  const openPr = { id: "88", files: ["src/run-task.ts"] };
+
+  // CONTROL FIRST: the literal spelling must be silent, or this test proves nothing about the
+  // spellings below — it would just be asserting that everything is silent.
+  assert.deepEqual(
+    rareOverlapWarnings(task({ id: "W1-LIT", files: ["src/run-task.ts"] }), [openPr], counts, 277),
+    [],
+    "control: the hub's own literal spelling is silent",
+  );
+
+  for (const spelling of ["src/*.ts", "src/**", "./src/run-task.ts"]) {
+    assert.deepEqual(
+      rareOverlapWarnings(task({ id: "W1-G", files: [spelling] }), [openPr], counts, 277),
+      [],
+      `a hub reached via ${spelling} must stay silent — it is declared by 103 of 277 shards`,
+    );
+  }
+
+  // And the fix does not silence the case the feature exists for: a genuinely rare path still
+  // warns even when the candidate reaches it through a glob, because the concrete declared side
+  // is carried in the same intersection and IS scored.
+  const rareCounts = declarationCountsByPath(
+    Array.from({ length: 6 }, (_, i) => task({ id: `W1-R${i}`, files: ["src/lib/open-prs-rest.ts"] })),
+  );
+  const stillWarns = rareOverlapWarnings(
+    task({ id: "W1-G2", files: ["src/lib/*.ts"] }),
+    [{ id: "99", files: ["src/lib/open-prs-rest.ts"] }],
+    rareCounts,
+    277,
+  );
+  assert.equal(stillWarns.length, 1, "a rare path reached through a glob still warns");
+  assert.equal(stillWarns[0].rarestPath, "src/lib/open-prs-rest.ts");
+  assert.equal(stillWarns[0].declaredByCount, 6);
+});

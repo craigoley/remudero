@@ -362,15 +362,33 @@ export function rareOverlapWarnings(
     if (prFiles.length === 0) continue;
     const shared = intersectingEntries(candidateFiles, prFiles);
     if (shared.length === 0) continue;
-    let rarestPath = shared[0];
-    let rarestCount = declarationCounts.get(rarestPath) ?? 0;
-    for (const path of shared.slice(1)) {
-      const count = declarationCounts.get(path) ?? 0;
-      if (count < rarestCount) {
+    // SCORE ONLY PATHS THE COUNTS MAP ACTUALLY KNOWS, AND THE `?? 0` THIS REPLACES IS WHY.
+    // `intersectingEntries` reports the RAW strings from BOTH sides, while `globsIntersect`
+    // matched them through normalization/glob semantics — so a shared entry can be a spelling
+    // that no shard ever DECLARED, and `declarationCounts` (keyed on declared strings) has no
+    // entry for it. Defaulting such a path to 0 scored it as MAXIMALLY RARE, which inverted the
+    // one falsifier design (v) calls "the whole design": measured against a hub declared by
+    // 103 of 277 shards (37%), a candidate declaring `src/*.ts`, `src/**`, or `./src/run-task.ts`
+    // matched it and warned at `count=0`, while the identical literal spelling stayed correctly
+    // silent. Globs are not an exotic case here — matching them is the whole reason
+    // `globsIntersect` exists.
+    //
+    // Scoring the KNOWN entries fixes both directions at once, because a bridged pair always
+    // carries the concrete declared side too: `{src/*.ts, src/run-task.ts}` scores 103 and stays
+    // silent, `{src/lib/open-prs-rest.ts}` scores 6 and warns. When NOTHING shared is known, this
+    // reports nothing — the right direction for a purely advisory signal (design iii), since a
+    // warning naming a path no shard declares tells a filer nothing they could act on.
+    let rarestPath: string | undefined;
+    let rarestCount = 0;
+    for (const path of shared) {
+      const count = declarationCounts.get(path);
+      if (count === undefined) continue;
+      if (rarestPath === undefined || count < rarestCount) {
         rarestPath = path;
         rarestCount = count;
       }
     }
+    if (rarestPath === undefined) continue;
     if (rarestCount / totalShardCount <= policy.rareDeclarationRatioCeiling) {
       warnings.push({ withPr: pr.id, rarestPath, declaredByCount: rarestCount, totalShardCount });
     }
