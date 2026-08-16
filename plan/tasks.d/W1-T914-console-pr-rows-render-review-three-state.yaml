@@ -50,7 +50,7 @@
       proof: "unit test: test/console-review-three-state.test.ts"
     - claim: "the row binds the existing review-state vocabulary and the existing combined-status read rather than a second derivation"
       proof: "unit test: test/console-review-three-state.test.ts"
-  risk: medium
+  risk: high
   origin: feedback#fb-1784901239119-1be356
   plan_refs: ["§7", "§7B"]
   files:
