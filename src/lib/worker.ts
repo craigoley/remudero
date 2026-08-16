@@ -432,19 +432,37 @@ export const CLAUDE_EXECUTABLE_LOCATIONS: ClaudeExecutableCandidate[] = [
   { label: "native-installer (~/.local/bin)", resolve: (_env, home) => join(home, ".local", "bin", "claude") },
 ];
 
+/** The cause of a probed candidate's `--version` failure — an errno/exit
+ * `code` (e.g. `EACCES`, `ENOEXEC`) plus at most a truncated first line of
+ * stderr. Deliberately narrow (W1-T901 design (iii)): never the child
+ * environment (the W1-T442 billing/credential boundary) and never an
+ * unbounded stderr dump into an escalation issue body. */
+export interface CanExecuteFailure {
+  code?: string;
+  message?: string;
+}
+
 /** One resolution attempt, kept for the refusal reason: which label, which
- * path, whether it existed, and whether it ran (only meaningful if it did). */
+ * path, whether it existed, whether it ran (only meaningful if it did), and
+ * — when it existed but didn't run — the probe's cause (W1-T901). */
 export interface SearchedClaudeCandidate {
   label: string;
   path: string;
   existed: boolean;
   ran: boolean;
+  cause?: CanExecuteFailure;
 }
 
-/** `SearchedClaudeCandidate` -> its one-word outcome, for the refusal message. */
+/** `SearchedClaudeCandidate` -> its outcome, for the refusal message. A
+ * candidate that exists but didn't run names its cause when one was
+ * captured — `exists, --version failed (EACCES: ...)` — so a non-executable
+ * husk is distinguishable from a binary that runs and crashes (W1-T901);
+ * with no cause it falls back to the bare W1-T113 message unchanged. */
 function describeSearched(s: SearchedClaudeCandidate): string {
   if (!s.existed) return "missing";
-  return s.ran ? "ok" : "exists, --version failed";
+  if (s.ran) return "ok";
+  const parts = [s.cause?.code, s.cause?.message].filter((p): p is string => !!p);
+  return parts.length ? `exists, --version failed (${parts.join(": ")})` : "exists, --version failed";
 }
 
 /**
@@ -495,8 +513,14 @@ export interface ResolveClaudeExecutableDeps {
    * this routes around). Returns `undefined` when `claude` is not on PATH.
    */
   which?: () => string | undefined;
-  /** Does this path actually run? (`--version`, discarding output.) */
-  canExecute?: (path: string) => boolean;
+  /**
+   * Does this path actually run? (`--version`.) `true` on success, kept as
+   * cheap as ever. A failure may answer a bare `false` (every existing
+   * injection site does this, and stays valid unchanged — W1-T901 design (i))
+   * or a `CanExecuteFailure` carrying the probe's cause for the refusal
+   * message to render.
+   */
+  canExecute?: (path: string) => boolean | CanExecuteFailure;
   /** The candidate table — DATA, defaults to `CLAUDE_EXECUTABLE_LOCATIONS`. */
   locations?: ClaudeExecutableCandidate[];
 }
@@ -510,12 +534,33 @@ function defaultWhich(): string | undefined {
   }
 }
 
-function defaultCanExecute(path: string): boolean {
+/** Cap on the captured stderr excerpt (W1-T901 design (iii)) — a diagnosis
+ * needs a first line, not a dump. */
+const CAN_EXECUTE_FAILURE_MESSAGE_MAX = 200;
+
+/** `execFileSync`'s thrown error -> a `CanExecuteFailure`: the errno/exit
+ * `code` Node attaches to a failed spawn (`EACCES`, `ENOEXEC`, `ENOENT`, ...)
+ * plus at most a truncated first non-empty line of stderr. Deliberately does
+ * NOT touch the error's `.cmd` (may embed argv) or read `process.env` — the
+ * child's environment never enters this message (W1-T442 rule). */
+function describeExecFailure(err: unknown): CanExecuteFailure {
+  const e = err as (NodeJS.ErrnoException & { stderr?: Buffer | string | null }) | undefined;
+  const code = typeof e?.code === "string" ? e.code : undefined;
+  const stderrText = e?.stderr ? e.stderr.toString() : "";
+  const firstLine = stderrText.split("\n").find((line) => line.trim().length > 0)?.trim();
+  const message = firstLine ? firstLine.slice(0, CAN_EXECUTE_FAILURE_MESSAGE_MAX) : undefined;
+  return { code, message };
+}
+
+function defaultCanExecute(path: string): boolean | CanExecuteFailure {
   try {
-    execFileSync(path, ["--version"], { stdio: "ignore" });
+    // stdout ignored (never needed); stderr piped so a real failure's cause
+    // (e.g. a crashing binary's first diagnostic line) is capturable —
+    // still bounded and never the child env, per describeExecFailure above.
+    execFileSync(path, ["--version"], { stdio: ["ignore", "ignore", "pipe"] });
     return true;
-  } catch {
-    return false;
+  } catch (err) {
+    return describeExecFailure(err);
   }
 }
 
@@ -555,8 +600,13 @@ export function resolveClaudeExecutable(cache: ClaudeExecutableCache, deps: Reso
     const path = candidate.resolve(env, home);
     if (!path) continue;
     const existed = exists(path);
-    const ran = existed && canExecute(path);
-    searched.push({ label: candidate.label, path, existed, ran });
+    // Only a probed (existing) candidate can carry a cause — a missing
+    // candidate is never probed at all (W1-T113's exists/missing
+    // distinction, unchanged by W1-T901).
+    const probe = existed ? canExecute(path) : false;
+    const ran = probe === true;
+    const cause = existed && !ran && typeof probe === "object" ? probe : undefined;
+    searched.push({ label: candidate.label, path, existed, ran, cause });
     if (ran) {
       cache.resolved = path;
       return path;
