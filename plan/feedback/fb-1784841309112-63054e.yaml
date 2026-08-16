@@ -14,5 +14,6 @@ raw: "APPROVE IS NOT ATOMIC AND DIES ON GRAPHQL — rmd approve P37 committed th
   throttled rather than burning the shared window."
 attachments: []
 origin: cli
-status: new
+status: rejected
 proposal_pr: null
+summary: null
