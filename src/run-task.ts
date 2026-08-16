@@ -336,6 +336,7 @@ import {
   ensureJudgeableBody,
   filingAcceptanceCriteria,
   probeExistingPlanPr,
+  reconcileChangesetClaim,
   regeneratePlanIndexAndCommit,
   regeneratePlanIndexFile,
 } from "./lib/plan-pr-emitter.js";
@@ -6936,6 +6937,64 @@ export function repairRetroAcceptanceBlock(
   }
 }
 
+/**
+ * W1-T533 — the WIRING half of {@link reconcileChangesetClaim}. Runs AFTER the harness has
+ * regenerated `docs/ORIENTATION.md` and `plan/plan-index.json` and pushed them into the PR the
+ * Architect worker already opened, which is the moment the worker's (then-true) one-file claim
+ * becomes false. Sits beside {@link repairRetroAcceptanceBlock} because it is the same seam,
+ * the same position and the same best-effort contract: a retro must never fail because a body
+ * repair failed, so every throw is caught and ledgered rather than propagating.
+ *
+ * The path list is read from the WORKTREE against the merge base, never from `gh pr diff` —
+ * the diff text would have to be re-parsed back into paths, and the worktree already holds the
+ * authoritative answer at the exact commit that was just pushed.
+ *
+ * Deps are injected LAST and default by object-spread (never `??`, which V8 instruments as a
+ * branch and leaves the untaken real side permanently uncovered) — the discipline
+ * {@link repairRetroAcceptanceBlock} established directly above.
+ */
+export function reconcileRetroChangesetClaim(
+  prUrl: string,
+  worktreePath: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  deps: {
+    fetchBody?: (url: string) => string;
+    editBody?: (url: string, body: string) => void;
+    changedPaths?: (worktreePath: string) => string[];
+  } = {},
+): "reconciled" | "already-agrees" | "error" {
+  const { fetchBody, editBody, changedPaths } = {
+    fetchBody: defaultRetroFetchBody,
+    editBody: defaultRetroEditBody,
+    changedPaths: defaultRetroChangedPaths,
+    ...deps,
+  };
+  try {
+    const paths = changedPaths(worktreePath);
+    const reconciled = reconcileChangesetClaim(fetchBody(prUrl), paths);
+    if (!reconciled) return "already-agrees";
+    editBody(prUrl, reconciled);
+    log("changeset.reconciled", { pr_url: prUrl, paths });
+    return "reconciled";
+  } catch (e) {
+    log("changeset.reconcile.error", { error: String((e as Error)?.message ?? e) });
+    return "error";
+  }
+}
+
+/** Every path this branch changed against its merge base, which is what the PR's diff shows. */
+function defaultRetroChangedPaths(worktreePath: string): string[] {
+  const base = execFileSync("git", ["-C", worktreePath, "merge-base", "origin/main", "HEAD"], {
+    encoding: "utf8",
+  }).trim();
+  return execFileSync("git", ["-C", worktreePath, "diff", "--name-only", `${base}...HEAD`], {
+    encoding: "utf8",
+  })
+    .split("\n")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 function defaultRetroFetchBody(url: string): string {
   const view = ghJson(["pr", "view", url, "--json", "body"]) as { body?: string };
   return view.body ?? "";
@@ -10119,6 +10178,13 @@ async function retroCommand(
     // deterministic backstop so a worker's shape mistake doesn't fail the whole retro
     // CLOSED at remudero-review. Best-effort: never lets this crash an otherwise-fine retro.
     repairRetroAcceptanceBlock(prUrl, log);
+
+    // W1-T533: and reconcile the body's CHANGESET claim with what this branch actually carries.
+    // Must run HERE — after regenerateOrientation/regeneratePlanIndexAndCommit and their push
+    // above — because those are what widen a one-file diff to three AFTER the worker wrote a
+    // body that was true when written. #974/#1685/#1943/#1944 all failed `bodyContradictsDiff`
+    // on exactly that gap. Same best-effort contract as the repair directly above.
+    reconcileRetroChangesetClaim(prUrl, worktreePath, log);
 
     // DETERMINISTIC GUARD: a retro is PLAN-ONLY. If the diff touches src/ or test/,
     // fail closed (the retro may never carry code — one concern).

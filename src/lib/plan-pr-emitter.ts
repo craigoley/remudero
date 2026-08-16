@@ -414,3 +414,71 @@ export function probeExistingPlanPr(fetch: GhApiFetcher, owner: string, repo: st
   if (!row?.html_url || typeof row.number !== "number") return undefined;
   return { prUrl: row.html_url, prNumber: row.number };
 }
+
+/** The harness-owned changeset section {@link reconcileChangesetClaim} maintains. BARE, so it
+ *  cannot be mistaken for the `## Acceptance` header `parseAcceptanceBlock` scans for. */
+export const CHANGESET_HEADER = "## Changed files (recomputed by the harness)";
+
+/**
+ * W1-T533 — RECONCILE A RETRO PR BODY WITH THE CHANGESET THE HARNESS ITSELF WIDENED.
+ *
+ * THE DEFECT IS AN ORDERING ONE, AND THAT IS WHY "COMPUTE THE SENTENCE AT RENDER TIME" IS NOT
+ * THE FIX. `retroCommand` (run-task.ts) runs the Architect worker, which edits MASTER-PLAN.md,
+ * pushes, and OPENS THE PR — writing its body. At that instant the body's claim is TRUE: the
+ * diff really is one file. ONLY THEN does the harness run `regenerateOrientation` and
+ * {@link regeneratePlanIndexAndCommit} and push those commits into the PR the worker already
+ * opened (run-task.ts says so in its own words: "ORIENTATION.md/plan-index.json were
+ * regenerated AFTER the worker's own push"). So the author cannot compute the right answer —
+ * the two extra files do not exist in the diff when it writes — and the harness invalidates a
+ * true body by its own subsequent action. The repair therefore belongs where the widening
+ * happens, not where the body is authored.
+ *
+ * FOUR MEASURED INSTANCES, all the identical three-path shape: #974 (merged pre-gate),
+ * #1685 (refused, later repaired and merged), #1943 and #1944 — the last two 23 minutes apart
+ * with a byte-identical failure message.
+ *
+ * WHAT IT REPAIRS, keyed to `bodyContradictsDiff`'s TWO arms (lib/review.ts) rather than to
+ * prose in general — a checker that guessed at natural language would be worse than the gap:
+ *   (a) a COUNT claim, `exactly <n> file(s)[: a, b]`, whose count disagrees with the real
+ *       changeset or whose enumeration names a path the diff does not carry;
+ *   (b) a `no <path>` claim naming a path the diff DOES carry — the arm #1943 tripped by
+ *       saying "No docs/ORIENTATION.md" while carrying it.
+ *
+ * THE REPLACEMENT DELIBERATELY AVOIDS THE WORD "exactly". Arm (a) fires only on that literal,
+ * so a recomputed sentence that used it would re-arm the very tripwire this exists to disarm
+ * the moment a later run changes the file count again. The canonical section enumerates paths
+ * and states no count at all — there is no number to go stale.
+ *
+ * PURE: no I/O, no git, no network. The caller supplies the paths it already computed, which is
+ * the shape every other decision in this module takes.
+ *
+ * @returns the corrected body, or `undefined` when the body already agrees with the changeset —
+ *   so a caller can skip the edit entirely rather than rewriting an identical body.
+ */
+export function reconcileChangesetClaim(body: string, changedPaths: readonly string[]): string | undefined {
+  const paths = [...changedPaths].filter((p) => p.trim().length > 0).sort();
+  if (paths.length === 0) return undefined;
+
+  let out = body;
+
+  // (a) Neutralise a stale count claim. Rewritten to a countless enumeration rather than to a
+  // corrected count, so the sentence cannot go stale again on the next run.
+  out = out.replace(
+    /\bexactly\s+\w+\s+files?\b(?:\s*:\s*[^\n.]*)?/gi,
+    () => "the files enumerated below",
+  );
+
+  // (b) Drop a `no <path>` denial for a path the diff actually carries. Only those — a denial
+  // about a path genuinely absent (`no src/`) is TRUE and must survive, because it is the
+  // reader's assurance that this stayed on the plan side.
+  for (const p of paths) {
+    const esc = p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    out = out.replace(new RegExp(`,?\\s*\\bno\\s+\`?${esc}\`?`, "gi"), "");
+  }
+
+  const section = [CHANGESET_HEADER, "", ...paths.map((p) => `- \`${p}\``), ""].join("\n");
+  const existing = new RegExp(`${CHANGESET_HEADER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[\\s\\S]*?(?=\\n## |$)`);
+  out = existing.test(out) ? out.replace(existing, section) : `${out.replace(/\s*$/, "")}\n\n${section}`;
+
+  return out === body ? undefined : out;
+}
