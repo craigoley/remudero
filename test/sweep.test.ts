@@ -9,6 +9,7 @@ import {
   DEFAULT_CLARIFY_POLICY,
   DEFAULT_SWEEP_POLICY,
   DISPOSITION_RULES,
+  actionableGateFailuresFromReasons,
   armedButStalled,
   checksStateFromRollup,
   deriveDisposition,
@@ -510,6 +511,98 @@ test("deriveDisposition: failing review with unset criteriaRecoverable -> blocke
     "review failing with no actionable unmet criteria (contradictory) — escalating",
     "byte-identical to the pre-W1-T440 wording",
   );
+});
+
+// W1-T923: a review failure that NAMES its own remedy (a GATE failure, not an unmet acceptance
+// criterion) could never reach the fix rung, because the only route in was keyed on
+// `unmetCriteria`, and a gate failure leaves that list empty (the #1991 motivating case: 12/12
+// criteria `executed_pass`, `unmet_criteria: []`, yet the review still failed and named its own
+// fix). `actionableGateFailures` is the sibling list this task adds — see its own doc on
+// `OpenPrView` (lib/sweep.ts) for the full design.
+
+test("W1-T923: a gate failure with a named remedy routes to the fix rung", () => {
+  const p = pr({
+    reviewState: "failure",
+    checksState: "green",
+    unmetCriteria: [],
+    priorStrikes: 0,
+    actionableGateFailures: [{ reason: "DECISIONS.md must credit the operator, not the worker" }],
+  });
+  const r = deriveDisposition(p, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(r.disposition, "blocked-fixable");
+  assert.match(r.reason, /1 actionable gate failure/);
+  assert.match(r.reason, /named remedy/);
+});
+
+test("W1-T923: a remedy with two forms is never treated as actionable", () => {
+  // #1991's own falsifier: the provenance check accepted `Chosen (RECOMMENDED, auto)` OR an
+  // operator-attribution line, crediting different authors — a CHOICE between forms, which must
+  // be EXCLUDED from the actionable list entirely, never included-but-flagged.
+  assert.deepEqual(
+    actionableGateFailuresFromReasons(["credit via Chosen (RECOMMENDED, auto)", "credit via an operator-attribution line"]),
+    [],
+    "a two-form remedy is excluded outright",
+  );
+  // Sanity: the exclusion is specific to a CHOICE, not to naming a remedy at all — a single
+  // reason still produces exactly one actionable entry, carried through verbatim.
+  assert.deepEqual(
+    actionableGateFailuresFromReasons(["credit via Chosen (RECOMMENDED, auto)"]),
+    [{ reason: "credit via Chosen (RECOMMENDED, auto)" }],
+  );
+  // Sanity: zero named reasons (#1991's OWN ledger shape, `reasons: []`) is also excluded —
+  // nothing structured was named, so nothing is claimed to be.
+  assert.deepEqual(actionableGateFailuresFromReasons([]), []);
+});
+
+test("W1-T923: the recoverable field is untouched by the new list", () => {
+  // The exact combination design note (i) requires stay legible: unmetCriteria empty,
+  // criteriaRecoverable false (no Remudero-Task: trailer to resolve criteria from), AND a
+  // non-empty actionableGateFailures, all at once.
+  const p = pr({
+    taskId: undefined,
+    reviewState: "failure",
+    checksState: "green",
+    unmetCriteria: [],
+    criteriaRecoverable: false,
+    priorStrikes: 0,
+    actionableGateFailures: [{ reason: "credit via Chosen (RECOMMENDED, auto)" }],
+  });
+  const r = deriveDisposition(p, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(r.disposition, "blocked-fixable", "the actionable gate failure still routes to the fix rung");
+  assert.equal(p.criteriaRecoverable, false, "criteriaRecoverable's own VALUE is never touched by this list");
+  assert.doesNotMatch(r.reason, /unrecoverable/, "row 7's unrecoverable wording never fires once row 6 claims the PR");
+});
+
+test("W1-T923: a PR without the new list keeps its existing disposition", () => {
+  // Byte-identical to the pre-W1-T923 fixture/assertion at "failing review with NO actionable
+  // criteria -> blocked-ambiguous (contradictory)" — a PR that carries neither list must still
+  // land on row 7, unchanged, proving the new disjunct never widens what row 7 already claimed.
+  const p = pr({ reviewState: "failure", unmetCriteria: [], priorStrikes: 0 });
+  assert.equal(p.actionableGateFailures, undefined, "the fixture helper does not set this field by default");
+  const r = deriveDisposition(p, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(r.disposition, "blocked-ambiguous");
+  assert.equal(
+    r.reason,
+    "review failing with no actionable unmet criteria (contradictory) — escalating",
+    "byte-identical to the pre-W1-T923 wording",
+  );
+});
+
+test("W1-T923: the class field alone never decides actionability", () => {
+  // #1991 itself is classed `test_theater` — the class this design would otherwise treat as
+  // unautomatable — while naming its own single-form remedy. `OpenPrView` carries no
+  // `failure_class` field at all (design note v forbids keying on it), so this fixture proves
+  // the routing predicate qualifies the PR purely off `actionableGateFailures` being populated,
+  // with nothing resembling a classifier bucket anywhere in the input.
+  const p = pr({
+    reviewState: "failure",
+    checksState: "green",
+    unmetCriteria: [],
+    priorStrikes: 0,
+    actionableGateFailures: [{ reason: "test theater: added tests assert nothing, but the DECISIONS.md fix is X" }],
+  });
+  const r = deriveDisposition(p, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(r.disposition, "blocked-fixable", "a judgement-classed row with a named single-form remedy still qualifies");
 });
 
 test("deriveDisposition: in-flight (pending review, pending checks, not stale) -> blocked-ambiguous (the #161 fix — never armed pre-green)", () => {

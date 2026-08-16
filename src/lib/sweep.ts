@@ -485,6 +485,19 @@ export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
 };
 
 /**
+ * W1-T923 — one GATE failure (never an unmet acceptance criterion — see
+ * {@link OpenPrView.actionableGateFailures}'s own doc) whose remedy is a SINGLE,
+ * unambiguous form, so the fix rung can act on it directly. `reason` is carried
+ * VERBATIM from the ledger's structured `reasons` array (the SAME array
+ * {@link CriterionVerdict.reason} is built from for an unmet criterion) — never
+ * parsed out of `failure_reason` prose (design note vi: structured, or honestly
+ * absent, never a regex over free text presented as robust).
+ */
+export interface ActionableGateFailure {
+  reason: string;
+}
+
+/**
  * One open PR's OBSERVED state, as the sweep sees it — the input to the pure
  * predicate. The real gateway builds this from `gh pr list --state open --json …`
  * + the review/CI derivation status.ts already does; tests inject fixtures.
@@ -536,6 +549,37 @@ export interface OpenPrView {
    * meaning would read as silently crediting an unattributed PR, which #1527 forbids.
    */
   criteriaRecoverable?: boolean;
+  /**
+   * W1-T923 — a SIBLING list to {@link unmetCriteria}, never a widening of it. The motivating
+   * gap: PR #1991 failed review with `unmet_criteria: []` (every acceptance criterion passed,
+   * 12/12 `executed_pass`) yet its `failure_reason` named the exact remedy — a GATE failure,
+   * not an unmet criterion, so both `blocked-fixable` rows below (`unmetCriteria.length > 0` /
+   * `isBlockedCi`) missed it and it fell to row 7's escalate-only "criteria unrecoverable/
+   * contradictory", where NOTHING about the named remedy is ever read. This list is what a
+   * gate failure's OWN structured remedy populates instead.
+   *
+   * ONE ENTRY PER GATE FAILURE WITH A SINGLE-FORM REMEDY ONLY (design note iv): a remedy that
+   * offers a CHOICE between forms (#1991's own falsifier — the provenance check accepted either
+   * `Chosen (RECOMMENDED, auto)` OR an operator-attribution line, crediting different authors) is
+   * EXCLUDED from this list entirely, never included-but-flagged — a worker picking the wrong one
+   * of several named options misattributes a ratified ruling, which is worse than asking a human.
+   *
+   * NEVER KEYED ON `failure_class` (design note v): PR #1991 is classed `test_theater` — the
+   * class this design would otherwise treat as unautomatable — while its `failure_reason` names
+   * two exact strings; keying on that field alone mis-sorts the very case this list exists for.
+   * Whatever populates this list must key on the STRUCTURED presence of a single-form remedy,
+   * never on which bucket the classifier sorted the failure into.
+   *
+   * `criteriaRecoverable` (immediately above) is DELIBERATELY untouched by this field's own
+   * producer — a PR can carry `unmetCriteria: []`, `criteriaRecoverable: false` (no trailer to
+   * resolve criteria from) AND a non-empty `actionableGateFailures` all at once; that combination
+   * stays legible rather than being collapsed into one signal (design note i).
+   *
+   * `[]`/undefined when no gate failure named a single-form remedy — DISPOSITION_RULES' row 7
+   * (blocked-ambiguous, "no actionable unmet criteria") stays byte-identical for every PR that
+   * does not carry this list (design note iii).
+   */
+  actionableGateFailures?: ActionableGateFailure[];
   /** Fix-rung strikes ALREADY attempted for this PR (from the ledger). */
   priorStrikes: number;
   /** A NEWER open PR crediting the same task supersedes this one. */
@@ -1009,6 +1053,29 @@ const MS_PER_DAY = 86_400_000;
  */
 export function isBlockedCi(pr: OpenPrView): boolean {
   return pr.checksState === "red";
+}
+
+/**
+ * W1-T923 (design note iv) — given the STRUCTURED `reasons` a gate failure's ledger row
+ * carried, decide whether it names a SINGLE, unambiguous remedy. Exactly one reason is one
+ * automatable form and is copied through VERBATIM (never re-derived); zero or TWO-OR-MORE
+ * reasons are excluded entirely — a remedy offering a CHOICE between forms (the #1991
+ * falsifier: the provenance check accepted `Chosen (RECOMMENDED, auto)` OR an
+ * operator-attribution line, crediting different authors) must be EXCLUDED from the
+ * actionable list, not merely flagged inside it, because a worker acting on the wrong one
+ * of several named options misattributes a ratified ruling — the file where a false claim
+ * does the most damage.
+ *
+ * PURE AND EXPORTED so the "single form vs a choice" predicate has its OWN direct test
+ * coverage, never only indirectly through the wider routing pipeline —
+ * `run-task.ts`'s `actionableGateFailuresFromLedger` is the ONLY caller, mapping the
+ * ledger's raw `reasons` array through this before it ever reaches
+ * {@link OpenPrView.actionableGateFailures}. Reads NOTHING about `failure_class` — it never
+ * even sees it — so a judgement-classed row (`test_theater`, the class #1991 itself carries)
+ * qualifies exactly the same as any other, by construction (design note v).
+ */
+export function actionableGateFailuresFromReasons(reasons: readonly string[]): ActionableGateFailure[] {
+  return reasons.length === 1 ? [{ reason: reasons[0] }] : [];
 }
 
 /**
@@ -1490,7 +1557,10 @@ function pendingAgeMinutes(pr: OpenPrView, now: number): number | undefined {
  *      there if IT still fails. FIX FIRST: this PR reaches the question rung
  *      (row 11) only by exhausting the ladder through row 4, never straight here.
  *   6. FAILING + actionable unmet criteria, strikes left -> blocked-fixable (fix rung).
- *      Only reached with checks NOT red (row 5 above already claimed that case).
+ *      Only reached with checks NOT red (row 5 above already claimed that case). W1-T923:
+ *      ALSO matches a GATE failure (empty unmetCriteria) that named its own single-form
+ *      remedy via {@link OpenPrView.actionableGateFailures} — a third disjunct, never a
+ *      separate row (see that field's own doc for the #1991 motivating case).
  *   7. FAILING + no actionable criteria (contradictory)  -> blocked-ambiguous (escalate).
  *   7.5. CONFLICTED (W1-T106, the #170 DIRTY strand): `mergeState === "dirty"`
  *      — ABOVE mergeable, so a conflicting PR is NEVER armed no matter how
@@ -1669,10 +1739,22 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // red `remudero-review` alone (checksStateFromRollup excludes it from the
     // checks gate), so a checks-green PR whose review is failing lands here
     // instead of being claimed by row 5 above.
+    //
+    // W1-T923: a THIRD disjunct, never a new rule (design note iii) — a GATE failure (empty
+    // `unmetCriteria`) that named its own single-form remedy routes here exactly like a
+    // criterion failure does, via `actionableGateFailures` (see that field's own doc). This is
+    // the ONLY change to this row: when `unmetCriteria` is non-empty the `when`/`reason` below
+    // are byte-identical to before this task, and a PR that carries neither list still falls
+    // through to row 7 unchanged.
     disposition: "blocked-fixable",
-    when: (pr) => pr.reviewState === "failure" && pr.unmetCriteria.length > 0,
-    reason: (pr, policy) =>
-      `${pr.unmetCriteria.length} unmet criteri${pr.unmetCriteria.length === 1 ? "on" : "a"} — strike ${pr.priorStrikes + 1}/${policy.strikeCap}`,
+    when: (pr) => pr.reviewState === "failure" && (pr.unmetCriteria.length > 0 || (pr.actionableGateFailures?.length ?? 0) > 0),
+    reason: (pr, policy) => {
+      if (pr.unmetCriteria.length > 0) {
+        return `${pr.unmetCriteria.length} unmet criteri${pr.unmetCriteria.length === 1 ? "on" : "a"} — strike ${pr.priorStrikes + 1}/${policy.strikeCap}`;
+      }
+      const n = pr.actionableGateFailures!.length;
+      return `${n} actionable gate failure${n === 1 ? "" : "s"} (named remedy) — strike ${pr.priorStrikes + 1}/${policy.strikeCap}`;
+    },
   },
   {
     // W1-T440: the SAME empty (`pr.unmetCriteria` is `[]`) has two distinct causes, and the
