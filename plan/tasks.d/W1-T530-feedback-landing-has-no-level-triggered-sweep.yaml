@@ -1,0 +1,146 @@
+- id: W1-T530
+  title: "THE FEEDBACK LANDING BRIDGE IS EDGE-TRIGGERED — `landFeedback` has exactly ONE call site (inside `captureFeedback`), so an entry written while landing was unavailable, or on a host where no further capture ever happens, is stranded off origin/main forever and `rmd triage` refuses it as not-on-origin: give the bridge a boot-time and per-poll level-triggered pass"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  rationale: "VERIFIED AT SOURCE at this checkout, not taken from the report. `landFeedback`
+    (src/lib/feedback-landing.ts:381) has EXACTLY ONE production call site in the whole tree:
+    src/lib/feedback.ts:908, inside `captureFeedback`, immediately after the local
+    `writeFileSync` of the entry. A grep for `landFeedback(` across src/ returns that call, the
+    export itself, and doc comments — nothing else. No serve rung, no drain rung, no sweep rung,
+    no boot path invokes it. The bridge therefore fires on ONE EDGE ONLY: a capture on this host.
+    THE SCAN IS ALREADY LEVEL-SHAPED; THE TRIGGER IS NOT — this is the precise distinction a worker
+    must not blur. `landPending` (feedback-landing.ts:336-379) already reconciles the WHOLE inbox:
+    it lists every file under plan/feedback/, hash-objects each against `origin/main:<rel>`, and
+    lands every one whose blob differs, returning `{landed:false, files:[]}` when nothing differs.
+    So the reconciliation logic this task needs EXISTS AND IS CORRECT; what is missing is a caller
+    that runs it when NO capture is happening. Nothing is to be rewritten inside `landPending`.
+    WHY THAT LEAVES ENTRIES STRANDED, three live routes, none hypothetical: (1) an entry written
+    BEFORE the bridge shipped (W1-T243 / PR #599, 2026-07-23) and never followed by another capture
+    on that host; (2) a capture whose landing attempt failed — offline, no `gh`, unauthenticated,
+    `gh pr create` refused — which by contract NEVER fails the capture (feedback.ts:907-912 swallows
+    it) and leaves the entry as an untracked local file with no retry scheduled; (3) an entry
+    captured against a `root` that never sees another capture (a worker worktree, a second machine,
+    a one-shot container). In all three the local file is the durable buffer §7B promises, and
+    nothing ever picks it back up. OBSERVED, from the originating report (2026-07-23): fb-b32f2b
+    filed 14:48Z never landed, while fb-cdcf8b filed 15:45Z landed via #658 at 16:09Z, and `rmd
+    triage` refused b32f2b at 16:59Z as not-on-origin — one inbox, two entries, one arbitrary
+    survivor.
+    THE COST IS THE WHOLE §7B LOOP, NOT ONE ENTRY. `triageCommand` deliberately reads the entry from
+    a FRESH origin/main worktree (never a possibly-stale repoRoot), so an unlanded entry is not
+    merely un-audited — it is UNTRIAGEABLE, and an untracked file is destroyed by routine `git clean
+    -fd`. That is the W1-T191 class of defect (a durable artifact no PR is ever cut from) reopened
+    through the retry hole.
+    THE DOCTRINE IS ALREADY RATIFIED AND THIS IS ITS UNAPPLIED CASE. MASTER-PLAN P22
+    (LEVEL-TRIGGERED RECONCILIATION, W1-T76/T77/T78) states every sync RE-DERIVES disposition from
+    OBSERVED state so a missed edge never strands work, and P30 applied exactly that to credit —
+    `sweep.credit_backfill` (src/lib/sweep.ts:3467-3527) re-derives merge credit every pass instead
+    of trusting the run-end edge. The landing bridge is the same argument applied to the INBOX, and
+    it is the one organ in this family still edge-only.
+    NOT A DUPLICATE OF W1-T243, AND THE DIFFERENCE IS ON THE RECORD. W1-T243's design listed
+    '(b) DAEMON LANDING RUNG' as one of three options to WEIGH and shipped option (a) — land at
+    capture time. Its criterion 3 ('a later bridge pass picks the stranded entry up') is satisfied
+    today only by the NEXT CAPTURE, which is exactly the edge that may never come. This task builds
+    the rung (b) named but did not commit to."
+  design: |
+    (i) ONE NEW EXPORTED ENTRY POINT, IN THE MODULE THAT ALREADY OWNS THE MECHANISM.
+    Add `sweepFeedbackLanding(root, opts)` to src/lib/feedback-landing.ts as a thin, NAMED wrapper
+    over the existing `landPending`/`landFeedback` path plus one observability line. USE THAT NAME:
+    two of this task's proofs grep for it at the wiring sites, and the wiring audit is the point.
+    It MUST NOT reimplement the scan, the scratch-index discipline (W1-T60: never mutate the
+    caller's index/working tree), the rebuild-from-current-origin/main force-push, or the shared
+    `feedback-landing` branch + ONE gated PR. It inherits all of that unchanged.
+    (ii) TWO TRIGGERS, BOTH MODELLED ON THE ORPHAN SWEEP THAT ALREADY DOES THIS.
+    `sweepOrphanWorkers` is the precedent to copy verbatim in SHAPE: a boot-time run (daemon.ts's
+    `daemonBoot` param, daemon.ts:1555/1656) plus an optional per-poll `sweepOrphans` dep
+    (daemon.ts:1137, invoked in the loop) whose doc states why both exist — 'a stray from a run that
+    ended between polls, rather than only at the last boot, is still found within one cycle'. That
+    sentence is this task's requirement with the noun changed. Wire the same pair for landing, with
+    the real injection in src/run-task.ts's daemon command beside the existing
+    `sweepOrphanWorkers({...})` call (run-task.ts:12351). BOTH ARE OPTIONAL DEPS: omitted ⇒ the loop
+    behaves exactly as today, so every existing daemon fixture is unaffected. ONE FIXTURE MUST CROSS
+    THE SEAM (criterion 1, and it is why this task is risk:high rather than three shards): the boot
+    test supplies the REAL `sweepFeedbackLanding` to the REAL boot path — the git/gh seams are stubbed,
+    the two modules under test are NOT — so a sweep nobody calls, or a boot rung wired to a stub, both
+    fail it.
+    (iii) BEST-EFFORT BY CONTRACT, LIKE EVERY OTHER RUNG BESIDE IT. A throw, an offline host, a
+    missing/unauthenticated `gh` costs ONE LOGGED TICK and never halts the daemon — `landPending`
+    already never throws and resolves failure to `{landed:false, files:[], error}`; the wiring adds
+    its own try/catch anyway, matching `sweep`/`sweepOrphans`/`alertPoll`.
+    (iv) NO NEW CADENCE POLICY ROW — AND THIS IS A RULING, NOT AN OMISSION. The rung rides the
+    EXISTING poll interval (the same one `sweep`/`sweepOrphans` ride), so there is no new tunable to
+    drift out of plan/policy.yaml and no second scheduler. The cost defence is that a pass over
+    already-landed state is LOCAL-ONLY: a `git fetch` the daemon already performs each tick plus one
+    `hash-object`/`rev-parse` per inbox file, and NOT ONE `gh` CALL unless something is genuinely
+    unlanded. If measurement shows the fetch-per-tick is material, file the interval as a follow-on
+    policy row (the W1-T325/W1-T330 shape) — do NOT hardcode a literal interval here.
+    (v) IDEMPOTENCE IS THE ACCEPTANCE, NOT AN ASPIRATION. A second pass over unchanged state must do
+    NOTHING observable: no push, no `gh pr create`, no `gh pr merge --auto`, no duplicate PR. This is
+    P22's 'a second pass over unchanged state does nothing' and it is what makes a per-tick rung safe
+    at all. `findPendingLandingPr` + the skip-if-identical-upstream filter already give it; pin it.
+    (vi) OBSERVABILITY: one ledger line per acting pass naming the files landed and the PR url
+    (e.g. `feedback.landing_sweep`), and NO line — or a summary-only line — for a quiet pass, so a
+    ~93-second cadence cannot flood the ledger. Follow `sweep.credit_backfill`'s own
+    per-candidate-silent / summary-always split rather than inventing a second convention.
+    EXPLICITLY NOT IN SCOPE: changing `captureFeedback`'s at-capture landing (it stays — this is a
+    BACKSTOP, not a replacement); the `decisions-landing` kind and `landContent`'s carry-forward
+    path (W1-T191 owns those; the new entry point covers plan/feedback/ only); triage's
+    pending-landing message (W1-T243's criterion 4); and any change to `landPending`'s internals.
+  acceptance:
+    - claim: "THE CROSS-FILE INVARIANT, ONE TEST, NOT SATISFIABLE PIECEWISE: a pre-existing plan/feedback/*.yaml that was NEVER seen by any capture in this process lands on the shared gated landing PR when the daemon's OWN boot pass runs — the single fixture drives daemon.ts's boot path with the REAL sweepFeedbackLanding from feedback-landing.ts (no stub for either side), so neither file satisfies it alone: the sweep alone is a function nothing reaches, the boot rung alone lands nothing"
+      proof: "unit test: test/feedback-landing-sweep.test.ts"
+    - claim: "an entry whose at-capture landing failed (offline / no gh / gh pr create refused) is picked up by a LATER periodic pass without any further capture and without any human git command"
+      proof: "unit test: test/feedback-landing-sweep.test.ts"
+    - claim: "a pass over already-landed state does nothing observable — no branch push, no second landing PR, no gh call — so the rung is safe at the daemon's own poll cadence"
+      proof: "unit test: test/feedback-landing-sweep.test.ts"
+    - claim: "the rung is best-effort: a throwing or offline landing attempt costs one logged tick and never halts the daemon loop, and it never mutates the caller's index or working tree"
+      proof: "unit test: test/feedback-landing-sweep.test.ts"
+    - claim: "the daemon loop and its boot path both carry the level-triggered landing rung, mirroring the orphan sweep's boot-plus-poll pair — the rung is CALLED there, not merely mentioned"
+      proof: "grep: sweepFeedbackLanding( in src/lib/daemon.ts"
+    - claim: "the real daemon command wires the rung — it is not an optional dep nothing ever supplies"
+      proof: "grep: sweepFeedbackLanding( in src/run-task.ts"
+  risk: high
+  origin: feedback#fb-1784826522421-1d57e9
+  plan_refs: ["§7B", "§2", "W1-T243", "W1-T191", "W1-T117", "W1-T60"]
+  files: [src/lib/feedback-landing.ts, src/lib/daemon.ts, src/run-task.ts, test/feedback-landing-sweep.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — every claim is decidable in-process: `landPending` already takes injectable
+    `git`/`gh` seams (LandFeedbackOpts, the W1-T243 test seam `captureFeedback` threads as
+    `opts.land`), and the daemon loop is driven by injected deps in test/daemon.test.ts today. No
+    network, nothing spawned, no operator present.
+    RISK:HIGH — RULE 19 / #588 MERITS TEST = YES, ONE LINE: criterion 1 asserts ONE cross-file
+    invariant that is unsatisfiable piecewise — a single fixture drives daemon.ts's boot pass with the
+    REAL sweepFeedbackLanding from feedback-landing.ts, so the module and its wiring must land
+    together or the rung merges green and unreached.
+    WHY NOT DECOMPOSED (the alternative was worked, not waved off): the linter's own span here is
+    feedback-landing (the module), daemon + run-task (the two wiring sites) and feedback-landing-sweep
+    (the new fixture path). A per-subsystem split cannot reach risk:medium in ANY arrangement — the
+    module task still spans its own new fixture file (a second concern by basename), and every wiring
+    task's criteria must say 'daemon', which the SUBSYSTEM_LEXICON tags regardless of files:. So
+    decomposition would produce three tasks, each STILL flagged, two of which merge dead code: a
+    sweep nothing calls, then an optional dep nothing supplies. That is exactly the modules-merged-
+    green-and-unreached failure this plan already ate eleven times. The span is real and it is the
+    task: risk:high is the honest label, not a smaller lie.
+    THE HIGH BAND IS EARNED ON SUBSTANCE TOO, not just to clear the check: the rung adds an autonomous
+    push+PR path on a ~93-second cadence. It argues DOWN because it adds NO new push mechanism — it
+    calls an already-shipped, already-gated, already-idempotent bridge that force-pushes ONE shared
+    branch behind ONE PR and never writes main directly (§2). Criterion 3 is the one to review
+    hardest: a non-idempotent pass would spam PRs at poll cadence, which is worse than the defect.
+    budget_usd 55 — the entry point is thin; the cost is the four fixtures (boot pass, retry pass,
+    quiet-pass idempotence, throwing pass) and the daemon wiring, not new landing logic.
+    ON THE PROOFS: test/feedback-landing-sweep.test.ts does not exist yet — a forward reference to a
+    PATH, declared in files: so the worker creates it. It is kept SEPARATE from the existing
+    test/feedback-landing.test.ts deliberately: that file pins W1-T243's and W1-T191's criteria by
+    verbatim title and must not be churned. `sweepFeedbackLanding` exists NOWHERE in src/ today
+    (verified at filing), so neither grep proof can pass before the work is done — they are the
+    wiring audit, one per site.
+    WHAT THIS TASK DOES NOT RE-DERIVE: that `landPending` already scans the whole inbox and is
+    idempotent, and that `landFeedback`'s only caller is `captureFeedback`. Both were read at source
+    at filing. A worker that spends budget re-auditing them, or that 'fixes' the scan, has been sent
+    to the wrong place — the defect is the TRIGGER, not the reconciliation.
+    NO depends_on: the bridge it wraps shipped with W1-T243 (PR #599) and is live in
+    src/lib/feedback-landing.ts today; W1-T243's remaining criteria are independent of this rung."
