@@ -1,0 +1,177 @@
+- id: W1-T903
+  title: "rmd approve commits and pushes the ratification branch and only THEN shells `gh pr create`, which is GraphQL — so an exhausted GraphQL budget strands a pushed branch with no PR, and the re-run pushes a SECOND branch instead of finishing the first"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 75.00
+  rationale: |
+    FILED FROM feedback fb-1784841309112-63054e (origin cli, 2026-07-23T21:15:09Z), which reported
+    `rmd approve P37` committing the ratification, pushing the branch, then dying at `gh pr create`
+    on GraphQL exhaustion — run APPROVE-P37-1784840840230 left pushed with no PR.
+
+    THE ORDERING IS STILL IN THE TREE, READ RATHER THAN INFERRED. `approveProposal`
+    (src/lib/inbox.ts) calls `gateway.createRatificationBranch(payload)` and then
+    `gateway.openPlanPr(branch, proposalId)`, in that order, with the ledger append AFTER both.
+    The CLI gateway's `createRatificationBranch` (src/run-task.ts) ends in `gitPushRunBranch`, and
+    its `openPlanPr` shells `execFileSync("gh", ["pr", "create", ...])`. So the push happens first
+    and the PR-create is the step that can fail with the work already published.
+
+    AND THE CATCH MAKES THE STRANDING PERMANENT RATHER THAN RECOVERABLE. `approveCommand`'s catch
+    logs `approve.error`, releases the id block, and REMOVES the worktree — while the branch it
+    already pushed stays on the remote. The registry entry is untouched, so the proposal remains
+    READY and a second `rmd approve` mints a NEW runId, a NEW `run-APPROVE-<id>-<ms>` branch and a
+    SECOND push of the same ratification. Nothing in the approve path reads the remote for a branch
+    this proposal already pushed. That is the feedback's "refusing or duplicating", and it is the
+    duplicating half.
+
+    `gh pr create` IS GraphQL AND THE REPO HAS THE ERROR VERBATIM. W1-T372 records a `run.error`
+    line at 2026-08-05T02:54:07.579Z carrying `Command failed: gh pr create --repo
+    craigoley/remudero ...` followed by `GraphQL: API rate limit already exceeded`, with GraphQL
+    measured at 5031/5000 used while REST core held 4848/5000 remaining. src/lib/daemon-health.ts
+    states the same fact in its own header. This task does not re-derive that; it cites it.
+
+    TWO OF THE FEEDBACK'S FOUR ASKS ARE ALREADY ANSWERED AND ARE DELIBERATELY NOT REBUILT HERE.
+    Ask (c), "ratify.approved ledgered only once the PR exists": ALREADY TRUE — `approveProposal`
+    appends `ratify.approved` after `openPlanPr` returns, carrying `pr_url` and `branch`, and the
+    registry prune (W1-T190) runs after that. Only the NUMBER is missing, and this task adds that
+    one field rather than re-arguing the ordering. Ask (d), a session-wide gh budget discipline
+    that backs off and surfaces throttled as throttled: ALREADY FILED as W1-T525 (the metered gh
+    seam that reads the rate-limit header off the call's own response) and W1-T529 (the floor that
+    stands down rather than retrying), with W1-T510 owning the inbox dep display that reads
+    throttled as dep-unmet and W1-T511 owning the review attempts the same exhaustion discarded.
+    THIS TASK ADDS NO BACKOFF, NO RETRY AND NO SECOND PACER.
+
+    WHAT THIS TASK IS WORTH, STATED HONESTLY: it does not stop GraphQL exhaustion and does not
+    reduce anyone else's burn. It takes the ratification path OFF the exhausted budget and makes a
+    half-finished approve finishable, so an exhaustion somebody else caused costs a retry rather
+    than an orphan branch and a hand-repaired plan PR.
+  design: |
+    THE SHAPE: one transport swap and one resumption probe, both on the ratification path only.
+
+    (i) CREATE OVER REST. The ratification PR is opened with `gh api --method POST
+    repos/{owner}/{repo}/pulls` carrying `title`, `body`, `head` and `base`, and the PR is read
+    back from the response's `html_url` and `number`. This is a PURE TRANSPORT SWAP at this site
+    and nowhere else, because `openPlanPr` ALREADY authors an explicit `--title` and an explicit
+    `--body` (the `buildPlanPrBody` + `filingAcceptanceCriteria` block) — there is no `--fill`
+    autofill to replace, so no body has to be invented to make the swap.
+
+    THE FOUR `--fill` SITES ARE OUT OF SCOPE AND THE REASON IS THE BODY, NOT THE TRANSPORT.
+    `ghPrCreateFillCommand` (src/run-task.ts) serves the implement, retro, plan and triage paths
+    and appends `--fill`, which derives the PR body from the branch diff. REST has no autofill, so
+    converting those four means AUTHORING a body at each site — a behaviour change with its own
+    review-gate consequences (a hand-authored body is exactly the population `rmd check-acceptance`
+    was built for). That is a separate task and must not be folded in here.
+
+    (ii) THE RESUMPTION PROBE, AND IT MUST BE REST TOO. Before creating anything, the approve path
+    asks GitHub whether a PR already exists for the head branch it is about to push — `gh api
+    repos/{owner}/{repo}/pulls` filtered by head, which is the same REST surface
+    `fetchOpenPrsRest` (src/lib/open-prs-rest.ts) already reads. A probe that shells `gh pr list`
+    would reintroduce the dependency this task exists to remove.
+
+    (iii) ADOPT, COMPLETE, OR PROCEED — THREE OUTCOMES, NOT TWO. For a proposal whose prior run
+    pushed `run-APPROVE-<id>-<ms>`:
+      - a PR already exists on that branch: ADOPT it, ledger `ratify.approved` with its url and
+        number, prune the registry entry, and open NOTHING;
+      - the branch exists on the remote with no PR: COMPLETE it — create the PR over REST against
+        the ALREADY PUSHED head, without a second worktree, a second commit or a second push;
+      - no branch and no PR: today's path, unchanged.
+    The prior branch must be found from evidence rather than guessed: the ledger already carries
+    this proposal's `approve.error` and `approve.id_materialized` lines under a `run_id` of the
+    form `APPROVE-<proposalId>-<ms>`, and the branch is `run-<run_id>`. Reading the ledger for the
+    proposal's own prior run is the cheap half; the remote read confirms it.
+
+    (iv) IDEMPOTENT, NOT MERELY RESUMABLE. Adopting an existing PR must be safe to run twice: the
+    second run finds `ratify.approved` already in the ledger and refuses as ALREADY RATIFIED, which
+    is `refusalReason`'s existing `ratified` branch and needs no new state. Do not invent a lock or
+    a marker file for this.
+
+    (v) THE LEDGER LINE GAINS THE NUMBER AND NOTHING ELSE. `ratify.approved` already carries
+    `pr_url` and `branch`; add `pr_number` from the REST response so the resume path and the
+    console can key on an integer rather than parsing a URL. NO NEW LEDGER STEP — `approve.error`
+    already exists and already fires on this path, and W1-T494 recorded two steps firing with
+    nothing reading them; a third is a report, not a fix.
+
+    (vi) THE ID RESERVATION MUST NOT BE DOUBLE-SPENT. `materializeDraftTaskIds` mints and reserves
+    the drafted fragment's ids inside `createRatificationBranch`, and the catch releases them. A
+    COMPLETE-the-branch resume must NOT re-mint: the ids are already committed in the pushed
+    branch's plan/tasks.yaml, so re-minting would file the same tasks under different ids or punch
+    a phantom-id hole (W1-T199/224/247/263, the trap W1-T311 owns). The resume path reads the ids
+    from the pushed commit, never from a fresh mint.
+
+    (vii) A THROTTLED CREATE MUST READ AS THROTTLED. When the REST create itself fails on a rate
+    limit, the command must say the branch is pushed and the PR is missing, name the resume verb,
+    and leave the proposal READY — not report a generic failure that reads as "nothing happened".
+    Classification reuses `isGhRateLimitError`; this task adds no backoff and no wait.
+
+    WHAT MUST NOT BE BUILT: any retry, sleep or backoff loop (W1-T529 owns the floor and its rule
+    is degrade, not retry); a second rate-limit parser or pacer (W1-T525 owns the seam); a new
+    ledger step; a conversion of the four `ghPrCreateFillCommand` sites; any change to what
+    `approveProposal` refuses; a merge or auto-merge arm on the adopted PR; and a change to the
+    console's approve route, which spawns this same CLI and inherits the fix for free.
+  acceptance:
+    - claim: "a re-run of approve adopts its own pushed branch and opens the missing pull request"
+      proof: "unit test: test/approve-resumable-rest.test.ts"
+    - claim: "the ratification pull request is created over REST and issues no gh pr create"
+      proof: "unit test: test/approve-resumable-rest.test.ts"
+    - claim: "a resumed approve never pushes a second branch and never re-mints its task ids"
+      proof: "unit test: test/approve-resumable-rest.test.ts"
+    - claim: "ratify.approved is written only after the pull request exists and carries its number"
+      proof: "unit test: test/approve-resumable-rest.test.ts"
+    - claim: "a throttled create surfaces as throttled and leaves the proposal approvable again"
+      proof: "unit test: test/approve-resumable-rest.test.ts"
+  risk: high
+  origin: "feedback#fb-1784841309112-63054e"
+  plan_refs: ["W1-T372", "W1-T311", "W1-T190", "W1-T525", "W1-T529", "W1-T510", "W1-T511", "W1-T327", "W1-T530"]
+  files: [src/run-task.ts, src/lib/inbox.ts, src/lib/plan-pr-emitter.ts, test/approve-resumable-rest.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    verify:auto — every claim is an assertion over an injected `RatifyGateway` and a seeded ledger,
+    with no operator present. It builds a mechanism and writes no DECISIONS.md entry, so W1-T353's
+    verify:human rule for ruling-shaped tasks does not apply.
+
+    risk:high is set UP FRONT and it is Rule 19's SPAN: three src modules, because the decision
+    lives in one (inbox.ts), the side effects in another (run-task.ts) and the emitter helper in a
+    third (plan-pr-emitter.ts). Blast radius is independently real — a wrong adopt would ledger
+    `ratify.approved` against a PR that is not this ratification, which permanently marks a
+    proposal ratified. Design (iii) and (iv) are where that risk is managed.
+
+    budget_usd 75 — a transport swap with an explicit body already in hand, a REST head-branch
+    probe, a three-outcome resume, and a falsifier that must count invocations rather than
+    behaviour.
+
+    files: DERIVED BY INVOCATION COUNT, never a bare substring. Over the union
+    `approveProposal|RatifyGateway|openPlanPr|createRatificationBranch`: src/run-task.ts 17 and
+    src/lib/inbox.ts 16 are the only src paths above 2, and src/lib/serve.ts scores 2 as ROUTE
+    WIRING only — the console's approve route spawns this same CLI through `ratifyCliGateway`, so
+    it inherits the change and is DELIBERATELY NOT DECLARED (declaring an untouched path fails
+    `inverseScopeUntouchedFiles`). src/lib/plan-pr-emitter.ts scores `buildPlanPrBody` plus
+    `filingAcceptanceCriteria` 5 and is the shared gate-compliant plan-PR emitter W1-T136 factored,
+    which is where the REST create and head-probe helper belongs rather than a fifth private copy.
+    src/lib/open-prs-rest.ts is NOT declared: `fetchOpenPrsRest` and the `GhApiFetcher` shape are
+    REUSED unchanged, and W1-T525 and W1-T529 both declare that file, so declaring it here would
+    serialise this behind two queued tasks for no edit.
+    src/run-task.ts IS DECLARED DELIBERATELY against the usual W1-T471 contention argument:
+    `approveCommand` and its gateway are defined ONLY there, so the change cannot be made anywhere
+    else.
+    THE TEST HOME IS NEW ON PURPOSE. test/inbox-approve.test.ts scores 22 on the same symbol union
+    and is the existing DECISION suite; a transport-and-resumption falsifier seeds a stranded
+    branch and counts gh invocations, and adding it to the highest-contention approve suite in the
+    tree maximises conflict with every other approve-touching task. Same reasoning W1-T523 used for
+    test/status-rest-transport.test.ts.
+
+    PROOF NOTES: all five proofs are the WHOLE-FILE path form over
+    test/approve-resumable-rest.test.ts, which does not exist yet — a FORWARD REFERENCE TO A PATH,
+    which CLAUDE.md records as safe, unlike forward-referencing a symbol name. The path is declared
+    in files: so the implementer creates it. No `grep:` proof is used, so the line-based and
+    basic-regex traps do not arise and no proof-scope warning is raised against this shard.
+
+    PLATFORM FACT, CHECKED RATHER THAN ASSUMED: GitHub's REST create-a-pull-request endpoint is
+    `POST /repos/{owner}/{repo}/pulls` taking `title`, `body`, `head` and `base`, and its response
+    carries both `number` and `html_url` — so design (i)'s read-back needs no second call and
+    design (v)'s `pr_number` comes from the same response.
+
+    NO depends_on: this needs neither W1-T525's meter nor W1-T529's floor. Those bound the burn;
+    this removes one caller from the burning budget, and either is useful without the other.

@@ -14,5 +14,23 @@ raw: "APPROVE IS NOT ATOMIC AND DIES ON GRAPHQL — rmd approve P37 committed th
   throttled rather than burning the shared window."
 attachments: []
 origin: cli
-status: new
-proposal_pr: null
+status: proposed
+proposal_pr: https://github.com/craigoley/remudero/pull/1937
+summary:
+  headline: Approval process crashes mid-way; code pushed but pull request missing
+  what_happened: Approval process for P37 pushed code successfully but crashed
+    when trying to create the pull request due to GitHub API rate-limit
+    exhaustion. Code is stranded with no PR, and this has happened five times
+    today.
+  decision: "Refactor approve for resilience: resumable operation, REST API PR
+    creation, post-PR ledgering, and rate-limit backoff."
+  options:
+    - label: Implement all four fixes
+      consequence: Approval process becomes resilient; can resume after failures and
+        handle API limits gracefully without stranding code.
+    - label: Switch PR creation to REST API only
+      consequence: Eliminates the GraphQL rate-limit dependency; prevents future
+        rate-limit crashes but doesn't address stranded PRs or add resumability.
+    - label: Do nothing—manual intervention per incident
+      consequence: Stranded PRs and rate-limit crashes recur daily; each incident
+        requires manual recovery and blocks dependent operations.
