@@ -266,6 +266,7 @@ function ensurePrOpen(kind: LandingKind, gh: GhExec, unlanded: string[]): { prUr
   const body = kind.prBody(unlanded);
   let prUrl: string | undefined;
   try {
+    assertLiveWriteAllowed("gh-pr-create", `opening the landing PR for ${kind.branch}`);
     const out = gh(["pr", "create", "--base", "main", "--head", kind.branch, "--title", kind.prTitle, "--body", body]);
     prUrl = out.match(/https:\/\/\S+\/pull\/\d+/)?.[0];
   } catch (e) {
