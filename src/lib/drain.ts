@@ -22,6 +22,7 @@ import type { CostGovernorResult, QueueGovernorResult } from "./sweep.js";
 import { checkDispatchGovernors, governorDeferPayload } from "./dispatch-governor.js";
 import { unmetDependencies, type Plan, type Task } from "./plan.js";
 import { partitionByFileOverlap, serializedLedgerPayload, settledSetPayload } from "./dispatch-overlap.js";
+import { taskIdFromRunBranch } from "./status.js";
 
 /** A merged predicate — DERIVED FROM GITHUB in the real runner (status.ts). */
 export type MergedSet = (taskId: string) => boolean;
@@ -34,6 +35,34 @@ export type MergedSet = (taskId: string) => boolean;
  * a second read path.
  */
 export type OpenPrCheck = (taskId: string) => number | undefined;
+
+/**
+ * W1-T534 (design (i) — ONE SWEEP PER PASS, NEVER ONE CALL PER CANDIDATE): the set of task ids
+ * with a `run-<id>-<epochMs>` branch currently pushed to origin, parsed from the raw multi-line
+ * output of a SINGLE `git ls-remote --heads origin 'run-*'` call — measured at 199 ms for 46 refs
+ * and IDENTICAL `core` remaining before/after, so `ls-remote` speaks the git protocol and spends
+ * neither the REST nor the GraphQL budget, against one round trip per candidate if probed
+ * individually. Each line is `<sha>\trefs/heads/<branch>`; a bare `refs/heads/<branch>` or
+ * `<branch>` line is also accepted, so a caller can feed either raw `ls-remote` output or a plain
+ * ref-name list. Reuses `taskIdFromRunBranch` (status.ts) — the ONE named extractor this repo
+ * already tests for the `run-<taskId>-<epochMs>` shape — rather than a second regex, so the
+ * anchoring (design (iii): a shorter id can never satisfy a longer branch's ordinal, because the
+ * extractor's own greedy match always consumes every digit of the ordinal before the trailing
+ * `-<epochMs>`) is proven once and shared, never re-derived here. A line that doesn't parse is
+ * skipped, never thrown — a malformed ref degrades to "not observed", never a crashed pass.
+ */
+export function runBranchTaskIds(lsRemoteOutput: string): ReadonlySet<string> {
+  const ids = new Set<string>();
+  for (const rawLine of lsRemoteOutput.split("\n")) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const ref = line.includes("\t") ? line.split("\t")[1] : line;
+    const branch = ref.replace(/^refs\/heads\//, "");
+    const id = taskIdFromRunBranch(branch);
+    if (id !== undefined) ids.add(id);
+  }
+  return ids;
+}
 
 /** Optional in-flight-skip controls for {@link nextRunnable} (W1-T80). */
 export interface NextRunnableOpts {
@@ -131,6 +160,30 @@ export interface NextRunnableOpts {
    * ledgered reason from "open-pr" to the freshly observed terminal state.
    */
   onStoodDown?: (task: Task, prNumber: number, state: string) => void;
+  /**
+   * W1-T534: true when a `run-<taskId>-<epochMs>` branch already exists on origin — AUGMENTS
+   * `isOpenPr`, never replaces it (design (ii)): `isOpenPr` reads a CACHED projection
+   * (`run-task.ts`'s `lastProj`, re-derived once per drain TICK), so a PR opened — or a branch
+   * merely PUSHED, ahead of its PR — after that snapshot was taken is invisible to it, and
+   * `isOpenPr` returns `undefined` even though the same id is already in flight. This probe
+   * closes exactly that blind spot: it is consulted regardless of what `isOpenPr` answered,
+   * because the two checks cover disjoint windows rather than one superseding the other. Build
+   * the closure from ONE {@link runBranchTaskIds} sweep per PASS — never one `ls-remote` per
+   * candidate, which is the whole cost argument — e.g. `(id) => sweep.has(id)`. Omitted ⇒
+   * behaves EXACTLY as before this check existed.
+   */
+  hasPushedRunBranch?: (taskId: string) => boolean;
+  /**
+   * Called once per task excluded because its run branch already exists on origin (W1-T534) —
+   * the SAME kind of event `onSkip` already logs (design (v): "REUSE THE ROW THAT ALREADY
+   * EXISTS"), just for the window `isOpenPr` cannot see, so the real wiring rides the same
+   * `dispatch.skipped` row with a distinct reason string rather than minting a new one. No PR
+   * number is available in this window — that IS the defect this closes: the branch predates or
+   * outpaces the cached PR snapshot — so this callback is PR-number-free where `onSkip` is not.
+   * The refusal is a SKIP, never a terminal state (design (iv)): the task is not marked done,
+   * burns no strike, and is offered again on a later pass once the branch is gone.
+   */
+  onSkipRunBranch?: (task: Task) => void;
 }
 
 /**
@@ -370,6 +423,15 @@ function isDispatchEligible(plan: Plan, t: Task, isMerged: MergedSet, opts: Next
       opts.onSkip?.(t, openPrNumber);
       return false; // IN-FLIGHT (or unreadable — fail OPEN) — never a duplicate fresh build.
     }
+  }
+  // W1-T534: the STALE-ABSENT window `isOpenPr` structurally cannot see — a PR opened, or a
+  // branch merely pushed ahead of its PR, after the cached projection was taken. Checked LAST,
+  // after every probe above (including `isOpenPr`/`readLiveState`) has had its say: this is an
+  // ADDITIONAL refusal input, never a replacement, so a task `isOpenPr` already confirmed
+  // in-flight (or stood down) is decided by that richer check first.
+  if (opts.hasPushedRunBranch?.(t.id)) {
+    opts.onSkipRunBranch?.(t);
+    return false; // A run branch for this id is already on origin — never a duplicate fresh build.
   }
   return true;
 }

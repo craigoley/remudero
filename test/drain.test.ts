@@ -17,6 +17,7 @@ import {
   renderRundown,
   renderSummary,
   resumeCommand,
+  runBranchTaskIds,
   runDrain,
   runnableCandidates,
   type CuratedSelection,
@@ -367,6 +368,105 @@ test("W1-T177 runDrain integration: a FAILED/INDETERMINATE live-state read at th
   assert.ok(indeterminateLine, "the failed/indeterminate read is LEDGERED — never a silent swallow");
   assert.equal(indeterminateLine?.extra.task, "A");
   assert.equal(indeterminateLine?.extra.pr_number, 143);
+});
+
+// ── W1-T534: the STALE-ABSENT window `isOpenPr` cannot see. `isOpenPr` reads a cached
+// projection, so a PR opened (or a branch merely pushed ahead of its PR) after that snapshot
+// was taken is invisible to it. `hasPushedRunBranch` closes that window with one ref sweep per
+// pass, parsed by `runBranchTaskIds`/`taskIdFromRunBranch` (status.ts) — never a second regex.
+
+test("W1-T534: runBranchTaskIds parses a raw `git ls-remote --heads origin 'run-*'` line into the task id it names", () => {
+  const sweep = runBranchTaskIds(
+    ["abc123\trefs/heads/run-W1-T534-1786886488695", "", "def456\trefs/heads/run-W1-T80-1700000000000"].join("\n"),
+  );
+  assert.deepEqual([...sweep].sort(), ["W1-T534", "W1-T80"]);
+});
+
+test("W1-T534: a candidate with an existing run branch is refused", () => {
+  const plan = fixturePlan(); // A -> B -> C (chain), D independent, H human-only
+  const skipped: string[] = [];
+  const next = nextRunnable(plan, NONE_MERGED, {
+    // isOpenPr deliberately omitted/blind here — the cached projection never saw this PR/branch,
+    // which is exactly the window this probe exists to close.
+    hasPushedRunBranch: (id) => id === "A",
+    onSkipRunBranch: (t) => skipped.push(t.id),
+  });
+  assert.deepEqual(skipped, ["A"]);
+  assert.equal(next?.id, "D", "A is refused by the ref sweep alone; D is the next runnable candidate");
+});
+
+test("W1-T534: a candidate with no run branch still dispatches", () => {
+  const plan = fixturePlan();
+  const next = nextRunnable(plan, NONE_MERGED, {
+    hasPushedRunBranch: () => false,
+    onSkipRunBranch: () => assert.fail("no skip expected — no run branch exists on origin"),
+  });
+  assert.equal(next?.id, "A", "an empty sweep changes nothing — dispatch proceeds exactly as before this check existed");
+});
+
+test("W1-T534: hasPushedRunBranch omitted ⇒ nextRunnable behaves EXACTLY as before this check existed", () => {
+  const plan = fixturePlan();
+  assert.equal(nextRunnable(plan, NONE_MERGED)?.id, "A");
+});
+
+test("W1-T534: a shorter task id does not match a longer branch", () => {
+  const dir = mkdtempSync(join(tmpdir(), "drain-w1t534-"));
+  const f = join(dir, "tasks.yaml");
+  writeFileSync(
+    f,
+    `
+- id: W1-T51
+  title: shorter id
+  repo: remudero
+  type: implement
+  depends_on: []
+  status: queued
+- id: W1-T512
+  title: longer id, same prefix
+  repo: remudero
+  type: implement
+  depends_on: []
+  status: queued
+`,
+  );
+  const plan = loadPlan(f);
+  // ONE branch exists on origin, naming the LONGER id only. A naive `branchName.includes(taskId)`
+  // check would wrongly match "W1-T51" too — "run-W1-T512-..." contains "W1-T51" as its first
+  // eleven characters. runBranchTaskIds/taskIdFromRunBranch's anchored, greedy-ordinal parse never
+  // makes that mistake: it names exactly W1-T512.
+  const sweep = runBranchTaskIds("abc123\trefs/heads/run-W1-T512-1690000000000\n");
+  assert.deepEqual([...sweep], ["W1-T512"], "the sweep names the FULL ordinal, never a truncated prefix");
+
+  const skipped: string[] = [];
+  const candidates = runnableCandidates(plan, NONE_MERGED, 10, {
+    hasPushedRunBranch: (id) => sweep.has(id),
+    onSkipRunBranch: (t) => skipped.push(t.id),
+  }).map((t) => t.id);
+  assert.deepEqual(skipped, ["W1-T512"], "only the id the branch actually names is refused");
+  assert.deepEqual(candidates, ["W1-T51"], "the shorter id is untouched by the longer branch and still dispatches");
+});
+
+test("W1-T534: a refused candidate stays eligible and burns no strike", () => {
+  const plan = fixturePlan();
+  const broken: string[] = [];
+  const lifetimeCapped: string[] = [];
+  const skipped: string[] = [];
+  const opts = {
+    hasPushedRunBranch: (id: string) => id === "A",
+    onSkipRunBranch: (t: { id: string }) => skipped.push(t.id),
+    onCircuitBreak: (t: { id: string }) => broken.push(t.id),
+    onLifetimeCapExceeded: (t: { id: string }) => lifetimeCapped.push(t.id),
+  };
+  const firstPass = nextRunnable(plan, NONE_MERGED, opts);
+  assert.deepEqual(skipped, ["A"]);
+  assert.equal(firstPass?.id, "D", "A is skipped this pass, not treated as blocked/merged");
+  assert.deepEqual(broken, [], "a ref-sweep refusal never trips the circuit breaker");
+  assert.deepEqual(lifetimeCapped, [], "a ref-sweep refusal never burns the lifetime dispatch cap");
+
+  // Once the branch is gone (reap-branches has swept it, or it never existed on this later pass),
+  // the SAME task is offered again — this was a SKIP, never a terminal state (design (iv)).
+  const secondPass = nextRunnable(plan, NONE_MERGED, { hasPushedRunBranch: () => false });
+  assert.equal(secondPass?.id, "A", "A is runnable again on the next pass once its branch is gone");
 });
 
 // ── P29(ii): the per-task dispatch CIRCUIT BREAKER — the backstop that makes
