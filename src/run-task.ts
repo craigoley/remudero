@@ -270,6 +270,7 @@ import {
   parseDraftCache,
   parseProposalRegistry,
   parseSupersedesExpr,
+  priorApproveRunBranch,
   pruneRatifiedProposals,
   proposalsNeedingDraft,
   ratifyTelemetry,
@@ -330,8 +331,10 @@ import { regenerateOrientation } from "./lib/orientation.js";
 import {
   buildPlanPrBody,
   bodyNeedsAcceptanceRepair,
+  createPlanPrRest,
   ensureJudgeableBody,
   filingAcceptanceCriteria,
+  probeExistingPlanPr,
   regeneratePlanIndexAndCommit,
   regeneratePlanIndexFile,
 } from "./lib/plan-pr-emitter.js";
@@ -17755,10 +17758,11 @@ export async function approveCommand(rest: string[], deps: { config?: Config; ga
 
   let repoDir: string | undefined;
   let worktreePath: string | undefined;
-  // Filed task id(s), captured by createRatificationBranch (it runs first — approveProposal
-  // always calls createRatificationBranch(payload) before openPlanPr) for openPlanPr's
-  // Acceptance-criteria auto-authorship below — the closure approach lets openPlanPr's
-  // signature (part of the RatifyGateway interface other tests fake) stay unchanged.
+  // Filed task id(s), captured by whichever of createRatificationBranch/completeRatificationBranch
+  // ran (approveProposal calls exactly one of them, always before openPlanPr — see inbox.ts's
+  // own doc) for openPlanPr's Acceptance-criteria auto-authorship below — the closure approach
+  // lets openPlanPr's signature (part of the RatifyGateway interface other tests fake) stay
+  // unchanged. Stays empty for an ADOPTED PR (openPlanPr never runs on that path at all).
   let filedTaskIds: string[] = [];
   // W1-T311: the block {@link materializeDraftTaskIds} reserves for this approve's placeholder
   // ids — held until the PR actually exists (released below, once `result.ok`), so a
@@ -17766,18 +17770,60 @@ export async function approveCommand(rest: string[], deps: { config?: Config; ga
   // ids. Released on any failure path too (the catch around `approveProposal` below) — every
   // reserved id, used or not, must come back, or it is a phantom-id hole (W1-T199/224/247/263).
   let idBlock: TaskIdReservationBlock | undefined;
+  // W1-T903: shared by findPushedBranch (resume evidence) and createRatificationBranch (fresh
+  // PROCEED) — both need the same clone, and only one of the two ever runs per approve call.
+  const ensureRepoDir = (): string => {
+    repoDir = repoDir ?? join(config.root, "repos", repo);
+    if (!existsSync(repoDir)) {
+      mkdirSync(dirname(repoDir), { recursive: true });
+      execFileSync("gh", ["repo", "clone", `${owner}/${repo}`, repoDir], { stdio: "inherit" });
+    }
+    return repoDir;
+  };
   const gateway: RatifyGateway = deps.gateway ?? {
+    // W1-T903 design (iii): evidence (ledger) + a real remote read — never guessed. A cheap
+    // ledger-only miss (the overwhelming majority of approve calls: no prior run at all) never
+    // touches git or clones anything.
+    findPushedBranch(id) {
+      const candidate = priorApproveRunBranch(readLedgerLines(ledgerPath), id);
+      if (!candidate) return undefined;
+      const dir = ensureRepoDir();
+      const remote = execFileSync("git", ["-C", dir, "ls-remote", "--heads", "origin", candidate], { encoding: "utf8" });
+      return remote.trim().length > 0 ? candidate : undefined;
+    },
+    // W1-T903 design (ii): the SAME REST surface fetchOpenPrsRest (open-prs-rest.ts) reads,
+    // never `gh pr list` — a probe issues no GraphQL call at all.
+    findExistingPr(branch) {
+      return probeExistingPlanPr(ghJson, owner, repo, branch);
+    },
+    // W1-T903 design (iii)/(vi): COMPLETE an already-pushed branch — check it out (no `-b` onto
+    // a fresh commit, the branch's OWN remote tip), and read filed task ids back from what is
+    // ALREADY COMMITTED, never re-mint. No write, no commit, no push.
+    completeRatificationBranch(branch) {
+      const dir = ensureRepoDir();
+      const pruned = pruneStaleRuns(dir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
+      if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
+      worktreePath = join(worktreesDir(config), branch);
+      worktreeAdd(dir, worktreePath, branch, `origin/${branch}`);
+      writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
+      // The merge-base diff isolates ONLY what this branch added to plan/tasks.yaml, unaffected
+      // by anything origin/main gained afterward (a plain two-dot diff would not be) — same
+      // `- id: <id>` per-line shape the fresh-mint path below extracts, just over the diff's
+      // ADDED lines rather than the freshly-materialized fragment text.
+      const diff = execFileSync("git", ["-C", worktreePath, "diff", "origin/main...HEAD", "--", "plan/tasks.yaml"], { encoding: "utf8" });
+      filedTaskIds = diff
+        .split("\n")
+        .map((line) => /^\+- id:\s*(\S+)/.exec(line)?.[1])
+        .filter((id): id is string => id !== undefined);
+      return branch;
+    },
     createRatificationBranch(payload) {
-      repoDir = join(config.root, "repos", repo);
-      if (!existsSync(repoDir)) {
-        mkdirSync(dirname(repoDir), { recursive: true });
-        execFileSync("gh", ["repo", "clone", `${owner}/${repo}`, repoDir], { stdio: "inherit" });
-      }
-      const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
+      const dir = ensureRepoDir();
+      const pruned = pruneStaleRuns(dir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
       if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
       const branch = `run-${runId}`;
       worktreePath = join(worktreesDir(config), branch);
-      worktreeAdd(repoDir, worktreePath, branch, "origin/main");
+      worktreeAdd(dir, worktreePath, branch, "origin/main");
       writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
 
       // W1-T311: MINT + RESERVE the drafted fragment's placeholder (`NEW-<n>`) ids from the
@@ -17850,14 +17896,15 @@ export async function approveCommand(rest: string[], deps: { config?: Config; ga
         criteria: filingAcceptanceCriteria(ids, ["plan/tasks.yaml", "MASTER-PLAN.md"]),
       });
       assertLiveWriteAllowed("gh-pr-create", `opening a PR against ${owner}/${repo}`);
-      const out = execFileSync(
-        "gh",
-        ["pr", "create", "--repo", `${owner}/${repo}`, "--base", "main", "--head", branch, "--title", `chore(plan): ratify ${id} via rmd approve`, "--body", body],
-        { encoding: "utf8" },
-      );
-      const prUrl = out.match(/https:\/\/github\.com\/[^\s]+\/pull\/\d+/)?.[0];
-      if (!prUrl) throw new Error("rmd approve: `gh pr create` produced no PR url");
-      return prUrl;
+      // W1-T903 design (i): REST, not `gh pr create` (GraphQL) — a pure transport swap, since
+      // title/body are already fully authored above (no `--fill` autofill to replace).
+      const created = createPlanPrRest(ghJson, owner, repo, {
+        title: `chore(plan): ratify ${id} via rmd approve`,
+        body,
+        head: branch,
+        base: "main",
+      });
+      return created.prUrl;
     },
   };
 
@@ -17914,13 +17961,19 @@ export async function approveCommand(rest: string[], deps: { config?: Config; ga
     return next.length === current.length ? null : next;
   });
 
-  if (!repoDir || !worktreePath) {
-    // Unreachable in practice — the gateway above always sets these before returning a
-    // branch — but fail LOUD rather than silently skip cleanup/gate if it ever were.
+  // W1-T903: an ADOPTED PR (result.adopted) never called createRatificationBranch or
+  // completeRatificationBranch at all (design iii's "open NOTHING") — repoDir/worktreePath
+  // legitimately stay unset on that one path. Every OTHER success path still sets both before
+  // returning a branch, so the guard below still fires loud on a genuine gateway contract
+  // violation rather than silently skipping cleanup/gate.
+  if (!result.adopted && (!repoDir || !worktreePath)) {
     throw new Error("rmd approve: gateway reported success but never created a ratification branch");
   }
   const ownedRepoDir = repoDir;
   const ownedWorktreePath = worktreePath;
+  const removeApproveWorktree = () => {
+    if (ownedRepoDir && ownedWorktreePath) worktreeRemove(ownedRepoDir, ownedWorktreePath);
+  };
 
   try {
     // RUN-OWNERSHIP GUARD (W1-T62 precedent) — never trailer/gate/arm a PR that is not
@@ -17929,7 +17982,7 @@ export async function approveCommand(rest: string[], deps: { config?: Config; ga
     if (ownership) {
       log("verdict", ownership.ledger);
       console.error(`rmd approve: claimed PR ${result.prUrl} is not this run's own branch (${result.branch})`);
-      worktreeRemove(ownedRepoDir, ownedWorktreePath);
+      removeApproveWorktree();
       return 1;
     }
     // W1-T136 (#387 correctness rule): NO `ensureTaskTrailer` call here — a ratification
@@ -17940,13 +17993,13 @@ export async function approveCommand(rest: string[], deps: { config?: Config; ga
     // credit that trailer's id as DONE on merge — see lib/plan-pr-emitter.ts's doc
     // comment). proposalId (e.g. "P19") never collides with a real task id's W1-Txxx
     // shape, but a filing PR carries NO Remudero-Task trailer at all, full stop.
-    log("pr.opened", { pr_url: result.prUrl, branch: result.branch });
-    console.log(`rmd approve: ${proposalId} — plan PR opened: ${result.prUrl}`);
+    log("pr.opened", { pr_url: result.prUrl, branch: result.branch, adopted: result.adopted === true });
+    console.log(`rmd approve: ${proposalId} — plan PR ${result.adopted ? "adopted" : "opened"}: ${result.prUrl}`);
 
     const ci = await waitForCiGreen(result.prUrl, (s, extra) => log(s, extra));
     if (ci !== "green") {
       console.log(`ci ${ci} — PR left OPEN: ${result.prUrl}`);
-      worktreeRemove(ownedRepoDir, ownedWorktreePath);
+      removeApproveWorktree();
       return 1;
     }
     const prNum = result.prUrl.match(/\/pull\/(\d+)/)?.[1] ?? result.prUrl;
@@ -17956,19 +18009,19 @@ export async function approveCommand(rest: string[], deps: { config?: Config; ga
     // therefore falls back to `PR-${view.number}` and its review.posted ledger
     // line is keyed to that same fallback, not `proposalId`.
     const armOutcome = armAndLogOutcome(result.prUrl, `PR-${prNum}`, log);
-    worktreeRemove(ownedRepoDir, ownedWorktreePath);
+    removeApproveWorktree();
     console.log(`rmd approve: ${proposalId} gated — ${armReportPhrase(armOutcome)} (review ${reviewCode === 0 ? "success" : "failure"}): ${result.prUrl}`);
     return reviewCode;
   } catch (e) {
     log("approve.error", { error: String((e as Error)?.message ?? e) });
     try {
-      worktreeRemove(ownedRepoDir, ownedWorktreePath);
+      removeApproveWorktree();
     } catch {
       /* best-effort */
     }
     throw e;
   } finally {
-    removeRunLock(ownedWorktreePath);
+    if (ownedWorktreePath) removeRunLock(ownedWorktreePath);
   }
 }
 

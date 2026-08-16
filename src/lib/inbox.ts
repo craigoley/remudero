@@ -11,6 +11,7 @@ import type { MergedResolver, Plan } from "./plan.js";
 import { parseTasksFromYaml, PlanError, unmetDependencies } from "./plan.js";
 import { lintPlan, lintTask } from "./task-linter.js";
 import type { GhFailureReason } from "./status.js";
+import { isGhRateLimitError } from "./status.js";
 
 /** A draft-lint finding: the linter's own {@link "./task-linter.js".LintViolation}s (whose
  *  `check` is a strict LintCheck) PLUS the draft rung's own `draft-parse` finding for a fragment
@@ -353,6 +354,35 @@ export interface ReadinessContext {
  */
 export function isRatifiedInLedger(ledgerLines: { step?: unknown; task_id?: unknown }[], proposalId: string): boolean {
   return ledgerLines.some((l) => l.step === "ratify.approved" && l.task_id === proposalId);
+}
+
+/**
+ * W1-T903: the branch a PRIOR `rmd approve <proposalId>` run would have pushed, derived PURELY
+ * from ledger evidence — `approveCommand` (run-task.ts) mints `run_id`s of the shape
+ * `APPROVE-<proposalId>-<ms>` and its gateway always pushes `run-<run_id>`, so any ledger line
+ * this proposal's own run_id ever appended (`approve.id_materialized`, `approve.error`,
+ * `worktree.prune`, ...) names the branch by construction. EVIDENCE ONLY — the REMOTE read that
+ * turns "a run_id exists" into "and it actually got pushed" is the caller's job (design iii);
+ * this function never touches git or GitHub.
+ *
+ * SAFE TO TAKE THE MOST RECENT MATCH ONLY. `approveProposal` is reachable again for this
+ * proposal only when the ledger does NOT already carry `ratify.approved` for it (a ratified
+ * proposal classifies `ratified` and is refused before any gateway call, see refusalReason) — so
+ * every EARLIER `APPROVE-<proposalId>-*` run already failed short of ratifying it, and only the
+ * latest is worth resuming. `run_id`'s `<ms>` suffix is `Date.now()`, a fixed digit count for
+ * centuries yet, so plain string comparison sorts it exactly as a numeric one would.
+ */
+export function priorApproveRunBranch(ledgerLines: { run_id?: unknown; task_id?: unknown }[], proposalId: string): string | undefined {
+  const prefix = `APPROVE-${proposalId}-`;
+  let best: string | undefined;
+  for (const line of ledgerLines) {
+    const runId = line.run_id;
+    if (typeof runId !== "string" || line.task_id !== proposalId) continue;
+    if (!runId.startsWith(prefix)) continue;
+    if (!/^\d+$/.test(runId.slice(prefix.length))) continue;
+    if (best === undefined || runId > best) best = runId;
+  }
+  return best === undefined ? undefined : `run-${best}`;
 }
 
 /**
@@ -1201,20 +1231,90 @@ export interface RatificationPayload {
   stampLine: string;
 }
 
-/** Git/GitHub side effects `approveProposal` drives. Each method is called AT MOST ONCE,
- *  and only when the classification is READY — a non-ready classification never reaches
- *  either. */
+/** Git/GitHub side effects `approveProposal` drives. `createRatificationBranch`/`openPlanPr`
+ *  are each called AT MOST ONCE on a READY classification that is NOT resuming a prior push
+ *  (see the three OPTIONAL methods below, W1-T903) — a non-ready classification calls neither. */
 export interface RatifyGateway {
   /** Apply the fragment to plan/tasks.yaml + the stamp to MASTER-PLAN.md in ONE branch,
-   *  commit, and push it. Returns the branch name actually pushed. */
+   *  commit, and push it. Returns the branch name actually pushed. Never called when a
+   *  prior-run branch is resumed (`findPushedBranch` below) — the whole point of resuming
+   *  is skipping a second mint/commit/push. */
   createRatificationBranch(payload: RatificationPayload): string;
-  /** Open the plan PR for the pushed branch. Returns its URL. */
+  /** Open the plan PR for the pushed branch. Returns its URL. Skipped when `findExistingPr`
+   *  already found one (ADOPT) — a found PR is never re-created. */
   openPlanPr(branch: string, proposalId: string): string;
+
+  /**
+   * OPTIONAL (W1-T903 design iii). The branch a PRIOR run of THIS proposal already pushed to
+   * the remote, CONFIRMED still present there — `undefined` when there is no such evidence, the
+   * branch is gone, or the gateway does not implement resumption at all. Omitting this method
+   * (every gateway that predates this feature) is exactly the pre-W1-T903 PROCEED path:
+   * `approveProposal` falls straight through to `createRatificationBranch`.
+   */
+  findPushedBranch?(proposalId: string): string | undefined;
+
+  /**
+   * OPTIONAL (W1-T903 design ii/iii). True when a PR already exists for `branch` — checked
+   * BEFORE anything is created, so a prior run's `gh`/REST create that actually succeeded
+   * server-side but never returned a usable reference to the CLI is ADOPTED rather than
+   * duplicated. Called only after `findPushedBranch` names a confirmed branch.
+   */
+  findExistingPr?(branch: string): { prUrl: string; prNumber: number } | undefined;
+
+  /**
+   * OPTIONAL (W1-T903 design iii/vi). COMPLETE an already-pushed branch that carries no PR
+   * yet: prepare whatever `openPlanPr`'s body needs (e.g. the filed task ids, read back from
+   * the ALREADY-COMMITTED plan/tasks.yaml) with NO new worktree commit, no re-push and no
+   * re-mint. Returns the same branch name, mirroring `createRatificationBranch`'s contract.
+   * Called only when `findPushedBranch` found a branch and `findExistingPr` found no PR on it.
+   */
+  completeRatificationBranch?(branch: string, proposalId: string): string;
 }
 
 export type ApproveResult =
-  | { ok: true; proposalId: string; branch: string; prUrl: string; payload: RatificationPayload }
+  | {
+      ok: true;
+      proposalId: string;
+      branch: string;
+      prUrl: string;
+      /** W1-T903 design (v): from the REST response when freshly created/adopted, or parsed
+       *  off `prUrl` for a legacy gateway that only ever returned a bare url — `undefined` only
+       *  when neither source yields a usable integer. */
+      prNumber?: number;
+      payload: RatificationPayload;
+      /** W1-T903: true when this PR was ADOPTED from a prior run rather than opened by this
+       *  one — `createRatificationBranch`/`openPlanPr` were both skipped. */
+      adopted?: boolean;
+    }
   | { ok: false; proposalId: string; state: InboxState; refusal: string };
+
+/** GitHub's PR url is always `.../pull/<number>` — the same idiom this codebase already uses
+ *  ad hoc at a dozen call sites (e.g. run-task.ts's `armAndLogOutcome` prNum derivation).
+ *  `undefined` on anything that doesn't match, never a thrown parse error — a malformed/legacy
+ *  url degrades to "no number recorded" rather than blocking the ratification it decorates. */
+function prNumberFromUrl(url: string): number | undefined {
+  const n = Number(url.match(/\/pull\/(\d+)/)?.[1]);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+/**
+ * W1-T903 design (vii): when the ratification's PR-create step throws a rate-limit-classified
+ * error, describe it so it reads as THROTTLED — the branch survived, the pull request is what's
+ * missing, and a plain re-run resumes it — never a bare failure that reads as "nothing
+ * happened". A non-rate-limit failure is returned with its own message UNCHANGED: this reshapes
+ * only the one class it exists for. NO NEW LEDGER STEP (design v) — the caller's existing
+ * `approve.error` line carries this text verbatim, exactly as it already carries any other
+ * gateway failure's message.
+ */
+export function describeApproveGatewayError(e: unknown, proposalId: string, branch: string): string {
+  const message = String((e as Error)?.message ?? e);
+  if (!isGhRateLimitError(e)) return message;
+  return (
+    `rmd approve: PR create throttled (GitHub rate limit) — branch ${branch} is pushed and its ` +
+    `pull request is still missing; nothing was lost. Re-run 'rmd approve ${proposalId}' to ` +
+    `resume it — no new branch will be pushed. Original error: ${message}`
+  );
+}
 
 /** Human-readable reason a classification cannot be approved right now — every non-ready
  *  or deferred state names ITS failing predicate(s)/trigger, never a bare refusal. */
@@ -1241,10 +1341,27 @@ export interface RatifyLedgerDeps {
 /**
  * `rmd approve <P##>` — valid ONLY for a READY classification. Approving anything else is
  * REFUSED, naming the state, with ZERO gateway calls (a bit on a non-ready item initiates
- * NOTHING — rule 15). On a READY classification, calls {@link RatifyGateway.createRatificationBranch}
- * then {@link RatifyGateway.openPlanPr} EXACTLY once each, with the payload carrying the
- * cached draft's fragment + stamp verbatim. Every outcome — approved or refused — ledgers
- * exactly one `ratify.*` line (`ratify.approved` / `ratify.approve_refused`).
+ * NOTHING — rule 15). On a READY classification with NO evidence of a prior push, calls
+ * {@link RatifyGateway.createRatificationBranch} then {@link RatifyGateway.openPlanPr} EXACTLY
+ * once each (today's PROCEED path, unchanged), with the payload carrying the cached draft's
+ * fragment + stamp verbatim.
+ *
+ * W1-T903 design (iii): when `gateway.findPushedBranch` names a branch a PRIOR run of this
+ * SAME proposal already pushed (evidence the caller has already confirmed against the remote),
+ * this checks for an existing PR FIRST — never creating anything before asking:
+ *   - a PR is found (ADOPT): neither `createRatificationBranch` nor `openPlanPr` is called at
+ *     all — the found PR is ledgered as this proposal's ratification, and nothing is opened.
+ *   - no PR, but `completeRatificationBranch` is offered (COMPLETE): that replaces
+ *     `createRatificationBranch` (no second mint/commit/push), then `openPlanPr` runs as usual.
+ *   - the gateway offers `findPushedBranch` but not `completeRatificationBranch`: falls back to
+ *     the PROCEED path — safe (a fresh branch is always correct), just not the cheapest option.
+ *
+ * Every outcome — approved (any of the three shapes above) or refused — ledgers exactly one
+ * `ratify.*` line (`ratify.approved` / `ratify.approve_refused`), and `ratify.approved` is
+ * appended ONLY after a pull request is confirmed to exist (adopted or freshly opened) — never
+ * before, and never on a thrown gateway error (design vii: a throttled `openPlanPr` propagates,
+ * decorated via {@link describeApproveGatewayError}, and ledgers nothing here at all — the
+ * proposal stays exactly as READY as it was before this call).
  */
 export function approveProposal(
   classification: InboxClassification,
@@ -1267,16 +1384,50 @@ export function approveProposal(
     fragmentYaml: classification.draft.fragmentYaml,
     stampLine: classification.draft.stampLine,
   };
-  const branch = gateway.createRatificationBranch(payload);
-  const prUrl = gateway.openPlanPr(branch, classification.proposalId);
+
+  const resumeBranch = gateway.findPushedBranch?.(classification.proposalId);
+  const adopted = resumeBranch !== undefined ? gateway.findExistingPr?.(resumeBranch) : undefined;
+
+  let branch: string;
+  if (adopted) {
+    branch = resumeBranch as string;
+  } else if (resumeBranch !== undefined && gateway.completeRatificationBranch) {
+    branch = gateway.completeRatificationBranch(resumeBranch, classification.proposalId);
+  } else {
+    branch = gateway.createRatificationBranch(payload);
+  }
+
+  let prUrl: string;
+  let prNumber: number | undefined;
+  if (adopted) {
+    prUrl = adopted.prUrl;
+    prNumber = adopted.prNumber;
+  } else {
+    try {
+      prUrl = gateway.openPlanPr(branch, classification.proposalId);
+    } catch (e) {
+      throw new Error(describeApproveGatewayError(e, classification.proposalId, branch), { cause: e as Error });
+    }
+    prNumber = prNumberFromUrl(prUrl);
+  }
+
   appendLedger(deps.ledgerPath, {
     run_id: deps.runId,
     task_id: classification.proposalId,
     step: "ratify.approved",
     pr_url: prUrl,
+    pr_number: prNumber,
     branch,
   });
-  return { ok: true, proposalId: classification.proposalId, branch, prUrl, payload };
+  return {
+    ok: true,
+    proposalId: classification.proposalId,
+    branch,
+    prUrl,
+    prNumber,
+    payload,
+    ...(adopted ? { adopted: true } : {}),
+  };
 }
 
 /** The harness-authored commit message for a `rmd approve` ratification branch — never
