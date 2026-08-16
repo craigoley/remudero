@@ -229,7 +229,7 @@ test("fetchOpenPrsRest propagates a fetch failure instead of degrading to an emp
 
 // ── W1-T521: a throwing rollup read must cost only ITS pr, never the whole enumeration ─────────
 
-test("W1-T521: a rollup read that throws for one pr drops only that pr's checks — every OTHER pr's disposition still comes back", () => {
+test("W1-T521: a failed rollup read drops one pull request rather than the pass — every OTHER pr's disposition still comes back", () => {
   const OTHER_SHA = "8f2a9c1d4e6b0357a1c9d4e6b0357a1c9d4e6b03";
   const fetch = fakeFetcher({
     "repos/craigoley/remudero/pulls?state=open&per_page=100": [
@@ -253,12 +253,12 @@ test("W1-T521: a rollup read that throws for one pr drops only that pr's checks 
   assert.equal(pr807.rollupUnreadable, undefined);
 });
 
-test("W1-T521: the list call itself still throws — a total outage never degrades to a healthy-looking empty queue", () => {
+test("W1-T521: the enumeration still throws when the list call itself fails — a total outage never degrades to a healthy-looking empty queue", () => {
   const fetch = fakeFetcher({});
   assert.throws(() => fetchOpenPrsRest(OWNER, REPO, fetch), /unrouted gh api path/);
 });
 
-test("W1-T521: a pr whose rollup could not be read is never disposed as green — checksStateFromRollup reads it as none, not green", () => {
+test("W1-T521: a pull request with an unreadable rollup is never disposed as green — checksStateFromRollup reads it as none, not green", () => {
   const fetch = fakeFetcher({
     "repos/craigoley/remudero/pulls?state=open&per_page=100": [
       { number: 806, html_url: "u1", updated_at: "t1", body: "", head: { ref: "b1", sha: SHA }, auto_merge: null },
