@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { approveCommand, buildSweepEffects, planCommand, triageCommand } from "../src/run-task.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+import { ghPrMergeSquash, type WorkerResult } from "../src/lib/worker.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 
 // ── WHY THIS FILE EXISTS ─────────────────────────────────────────────────────────────
@@ -851,5 +851,143 @@ test("GUARDED SITE sweep fix-rung push: dispatchFix drives runFixRung to its bes
   } finally {
     process.env.PATH = savedPath;
     for (const d of [bare, root, shimDir]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T921: THE CLOSE MUST NOT DELETE THE HEAD BRANCH ───────────────────────────────
+// DECISIONS.md's 2026-08-16 ruling (W1-T919) gates the fleet on IRREVERSIBILITY rather than
+// outwardness, and rests that on closing preserving the head branch while merging destroys it.
+// #1873 (closed, branch intact) vs #1874 (merged, branch taken) is the measured pair — but #1873
+// was closed BY A HUMAN, and the fleet's own close carried `--delete-branch` until this change.
+//
+// THE ASSERTION IS THE ARGUMENT VECTOR, AND IT IS A PAIR. A single "close keeps the branch" read
+// cannot tell "survived a closure" from "survives generally", which is the control failure the
+// ruling itself records. So both acts are driven through one recording `gh` shim and shown to
+// DIFFER: the close carries no `--delete-branch`; the merge still does. The second direction is
+// mandatory — W1-T447 wants merged branches reaped, and this must not regress that.
+function recordingGhShim(dir: string, logPath: string): void {
+  writeFileSync(
+    join(dir, "gh"),
+    ["#!/bin/sh", `printf '%s\\n' "$*" >> ${JSON.stringify(logPath)}`, "exit 0", ""].join("\n"),
+    { mode: 0o755 },
+  );
+}
+
+test("W1-T921: a sweep close does not delete the head branch", () => {
+  const root = mkdtempSync(join(tmpdir(), "w1t921-close-"));
+  const captured: string[][] = [];
+  try {
+    const effects = buildSweepEffects(
+      "acme",
+      "sandboxrepo",
+      { claudeBin: "/usr/bin/true", root } as never,
+      join(root, "ledger.ndjson"),
+      "SWEEP-CLOSE-1",
+      { tasks: [] } as never,
+      () => {},
+      undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, undefined,
+      (file, args) => { captured.push([file, ...args]); },
+    );
+    effects.close(
+      { prNumber: 42, prUrl: "https://github.com/acme/sandboxrepo/pull/42" } as never,
+      "superseded-by #43",
+    );
+    assert.equal(captured.length, 1, `expected one gh invocation, got ${JSON.stringify(captured)}`);
+    const argv = captured[0];
+    assert.ok(argv.includes("close"), `not a close invocation: ${JSON.stringify(argv)}`);
+    assert.ok(
+      !argv.includes("--delete-branch"),
+      `the fleet close must not delete the head branch — argv was ${JSON.stringify(argv)}`,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T921: a merge still deletes its branch", () => {
+  const shimDir = mkdtempSync(join(tmpdir(), "w1t921-merge-shim-"));
+  const logPath = join(shimDir, "argv.log");
+  const savedPath = process.env.PATH;
+  try {
+    recordingGhShim(shimDir, logPath);
+    process.env.PATH = `${shimDir}:${savedPath}`;
+    withLiveWritesAllowed(() => ghPrMergeSquash("https://github.com/acme/sandboxrepo/pull/44"));
+    const merged = readFileSync(logPath, "utf8").trim();
+    assert.ok(merged.includes("pr merge"), `not a merge invocation: ${merged}`);
+    assert.ok(
+      merged.includes("--delete-branch"),
+      `the merge path must keep deleting its branch (W1-T447) — argv was ${merged}`,
+    );
+  } finally {
+    process.env.PATH = savedPath;
+    rmSync(shimDir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T921: the close argv is pinned against silent reinstatement", () => {
+  const root = mkdtempSync(join(tmpdir(), "w1t921-pin-"));
+  const captured: string[][] = [];
+  try {
+    const effects = buildSweepEffects(
+      "acme",
+      "sandboxrepo",
+      { claudeBin: "/usr/bin/true", root } as never,
+      join(root, "ledger.ndjson"),
+      "SWEEP-CLOSE-2",
+      { tasks: [] } as never,
+      () => {},
+      undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, undefined,
+      (file, args) => { captured.push([file, ...args]); },
+    );
+    effects.close(
+      { prNumber: 7, prUrl: "https://github.com/acme/sandboxrepo/pull/7" } as never,
+      "superseded-by #8",
+    );
+    assert.deepEqual(captured[0], [
+      "gh",
+      "pr",
+      "close",
+      "https://github.com/acme/sandboxrepo/pull/7",
+      "--comment",
+      "Closed by rmd sweep: superseded-by #8",
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// The three cases above all INJECT `ghRunImpl`, which would leave its DEFAULT body — the real
+// `execFileSync` — unreachable, the exact shape CLAUDE.md records from #978 (every test supplies
+// its own seam, so the default and its catch arm never run). This one takes the default and really
+// shells out, against a recording `gh` shim on PATH rather than the live one.
+test("W1-T921: the default close runner really shells out and still omits the flag", () => {
+  const root = mkdtempSync(join(tmpdir(), "w1t921-default-"));
+  const shimDir = mkdtempSync(join(tmpdir(), "w1t921-default-shim-"));
+  const logPath = join(shimDir, "argv.log");
+  const savedPath = process.env.PATH;
+  try {
+    recordingGhShim(shimDir, logPath);
+    process.env.PATH = `${shimDir}:${savedPath}`;
+    const effects = buildSweepEffects(
+      "acme",
+      "sandboxrepo",
+      { claudeBin: "/usr/bin/true", root } as never,
+      join(root, "ledger.ndjson"),
+      "SWEEP-CLOSE-3",
+      { tasks: [] } as never,
+      () => {},
+    );
+    effects.close(
+      { prNumber: 9, prUrl: "https://github.com/acme/sandboxrepo/pull/9" } as never,
+      "superseded-by #10",
+    );
+    const argv = readFileSync(logPath, "utf8").trim();
+    assert.ok(argv.includes("pr close"), `the default runner did not shell out: ${argv}`);
+    assert.ok(!argv.includes("--delete-branch"), `default runner reinstated the flag: ${argv}`);
+  } finally {
+    process.env.PATH = savedPath;
+    for (const d of [root, shimDir]) rmSync(d, { recursive: true, force: true });
   }
 });
