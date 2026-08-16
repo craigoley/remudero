@@ -1,0 +1,115 @@
+- id: W1-T921
+  title: "the W1-T919 ruling rests on closing being reversible because the head branch survives — but the sweep's own close passes `--delete-branch`, so the fleet's close destroys exactly the evidence the ruling cites, and any disposition built on that entry inherits a false premise"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  rationale: "**THIS OWNS THE CLOSE PATH'S DESTRUCTIVENESS. W1-T919 (#1987, MERGED) OWNS THE GATING
+    AXIS ITSELF AND IS NOT REOPENED HERE; W1-T447 OWNS BRANCH ACCUMULATION AND WANTS DELETION.** The
+    boundary is that the ruling says WHAT MAY RUN UNATTENDED, and this says the one act it classified
+    as safe is not implemented that way.
+
+    (1) **THE MERGED RULING'S EVIDENCE IS CONTRADICTED BY THE FLEET'S OWN CLOSE.** `DECISIONS.md`'s
+    2026-08-16 entry states `closing is reversible and merging is not, and the head branch is the
+    evidence`, citing #1873 (closed, branch survives) against #1874 (merged, branch gone to
+    `--delete-branch`). **BUT THE SWEEP'S CLOSE CLOSURE IN `buildSweepEffects` (`src/run-task.ts`)
+    INVOKES `gh pr close <url> --comment ... --delete-branch`.** #1873's branch survived because a
+    HUMAN closed it. When the FLEET closes, the branch is destroyed — so the pair the ruling rests on
+    does not describe the fleet's own path, and closing-as-implemented is irreversible in exactly the
+    respect the ruling relies on.
+
+    (2) **AND THE RULING ANTICIPATES A DISPOSITION BEING BUILT ON IT.** Its scope paragraph says the
+    disposition `follows behind it, cites this entry, and carries its own evidence`. Anything built on
+    a reversibility premise that the close path falsifies is unsafe by construction, and the entry is
+    MERGED — Rule 21 forbids amending it, so the correction must be a task.
+
+    (3) **THE PATH IS LIVE AND HAS ACTED, SO THIS IS NOT THEORETICAL.** Over the reachable ledger
+    union (three forms; per-form file counts 666 gz / 5 plain / 1 live as the coverage control),
+    `\"disposition\":\"stale\"` reads **3,425 rows across 11 distinct PR numbers, 3,413 with
+    `acted: true`** — and **EVERY reason is `superseded-by #N`; `abandoned — no activity` reads 0**,
+    so the supersession arm is the entire observed population and the age arm has never fired. The
+    close is reached through `deps.close(pr, reason)` (`src/lib/sweep.ts`) from the `stale`
+    disposition, whose predicate is `when: (pr) => pr.supersededBy != null`.
+
+    (4) **AND THE CLOSE IS THE ONE ACT `assertLiveWriteAllowed` DOES NOT FENCE.** `LiveWriteBoundary`
+    (`src/lib/live-write-guard.ts`) is exactly `git-push | gh-pr-create | gh-pr-merge |
+    gh-issue-create` — **there is no close boundary** — while all merge sites ARE fenced (22
+    occurrences overall as the positive control that the grep sees its corpus). So the most
+    destructive form of close runs through the only unfenced gh command site in the sweep's deps.
+
+    (5) **A COMMISSIONING PREMISE DID NOT SURVIVE AND IS CORRECTED HERE.** It was put to this recon
+    that supersession is an undetected case needing a new disposition. **FALSE — BOTH HALVES ALREADY
+    EXIST.** `supersededBy` is computed in `src/run-task.ts` as the highest-numbered other OPEN pull
+    request crediting the same task (`resolveOpenPrTaskId`, which unions trailer and run-branch), and
+    the `stale` row already closes on it. The gap is not detection; it is that the close is
+    destructive."
+  design: |
+    (i) DROP `--delete-branch` FROM THE SWEEP'S CLOSE, AND ONLY FROM THERE. The flag stays on every
+    MERGE invocation — W1-T447 establishes that merged branches SHOULD be reaped and counts four
+    `--delete-branch` sites; this touches the one that closes an UNMERGED pull request. A closed PR
+    whose branch survives can be reopened; one whose branch is gone cannot.
+    (ii) THE TEST IS AN ARGV ASSERTION, NOT A BEHAVIOUR SIMULATION. No test today asserts the close
+    closure's argument vector (`"close"` matches only fixtures and unrelated `req.on("close")` handlers
+    across `test/`). `test/live-write-guard-command-sites.test.ts` already imports and drives
+    `buildSweepEffects`, so the falsifier belongs beside the other GUARDED SITE cases: capture the
+    spawn, assert `--delete-branch` is ABSENT from a close and PRESENT on a merge, so a future edit
+    cannot silently reinstate it.
+    (iii) DO NOT ADD A LEDGER STEP. `sweep.disposed` already carries the disposition and is already in
+    `DECISION_RELEVANT_LEDGER_STEPS` (`src/lib/ledger.ts`), which is what makes `prior.closed` survive
+    rotation. `daemon.tree_dirty`, `daemon.stale_code`, `CiFailure.outsidePrRange`, `dh-rate-limit`
+    and `dispatch.stood_down` are five measured fired-and-unread signals; this must not be a sixth.
+    THE ACTOR HERE IS THE CLOSE CALL ITSELF, WHICH IS WHY NO NEW SIGNAL IS NEEDED.
+    (iv) DO NOT WIDEN `LiveWriteBoundary`. Adding a `gh-pr-close` boundary would gate the close behind
+    the same fence as merge, which the W1-T919 ruling deliberately declined to do — it ruled on the
+    AXIS and changed no act's classification. Making the close non-destructive is what makes its
+    current ungated status correct; fencing it instead would re-open a decision already taken.
+    (v) FALSIFIER, BOTH DIRECTIONS. A sweep close must not carry `--delete-branch`; and a merge must
+    still carry it. The second direction is what keeps this from regressing W1-T447's accumulation
+    problem, and it is mandatory rather than decorative.
+    (vi) NOT IN SCOPE: the `supersededBy` predicate's reach (it sees only OPEN peers, so a loser whose
+    winner has already MERGED is invisible — a separate concern, and the one that let #1955 sit);
+    W1-T447's reaper; and any change to which acts `assertLiveWriteAllowed` fences.
+  acceptance:
+    - claim: "a sweep close of an unmerged pull request does not pass the branch-deleting flag"
+      proof: "unit test: W1-T921: a sweep close does not delete the head branch"
+    - claim: "a merge still deletes its branch so accumulation does not regress"
+      proof: "unit test: W1-T921: a merge still deletes its branch"
+    - claim: "the close argument vector is asserted so a future edit cannot silently reinstate deletion"
+      proof: "unit test: W1-T921: the close argv is pinned against silent reinstatement"
+  origin: recon#close-deletes-the-branch-the-ruling-preserves-2026-08-16
+  plan_refs: ["W1-T919", "W1-T447", "W1-T533"]
+  files: [src/run-task.ts, test/live-write-guard-command-sites.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT. Not Rule 19 span — the two paths sit in one subsystem — but
+    blast radius: this changes what an UNATTENDED destructive act does to a branch, and getting the
+    direction backwards would either strand branches (regressing W1-T447) or keep destroying work the
+    W1-T919 ruling assumes survives. budget_usd 35 — one flag and a pinned argv assertion.
+
+    `files:` DERIVED BY WORD-BOUNDED INVOCATION COUNT. `src/run-task.ts` scores `delete-branch` 5 and
+    holds `buildSweepEffects` (18) where the close closure lives, so THE CHANGE GENUINELY LIVES THERE
+    and the serialisation cost W1-T471 describes is ACCEPTED rather than dodged — the flag cannot be
+    removed from anywhere else. `test/live-write-guard-command-sites.test.ts` already imports
+    `buildSweepEffects` and is the GUARDED SITE suite, which is why the falsifier goes there and NOT in
+    `test/run-task.test.ts` — that file intermittently crashes at FILE level under
+    `--experimental-test-coverage` and would make a coverage-load-bearing assertion nondeterministic.
+    `src/lib/sweep.ts` is NOT declared: it holds the `stale` predicate and the `deps.close` call but
+    neither changes, and declaring an untouched path fails `inverseScopeUntouchedFiles`
+    (`src/lib/review.ts`).
+
+    ID PROVENANCE, AND THE SWEEP HAS A HOLE THIS FILING MEASURED. `refs/rmd-id/*` was swept alongside
+    tracked shards and the shard FILENAMES inside every open pull request's diff. **W1-T919 READ 0
+    ACROSS ALL THREE AND IS TAKEN** — #1987 claimed it in its TITLE while touching only `DECISIONS.md`,
+    so an id asserted in prose with no shard file and no reservation is invisible to every sweep; the
+    positive control that caught it was probing a known-taken id and getting zero. **AND W1-T920 WAS
+    LOST BETWEEN SWEEP AND PUSH**: the gated push was REJECTED with exit code 1 captured into a
+    variable rather than read through a pipe, a fresh re-read showed another lane's commit on that
+    ref, and this took 921 behind a second gated push whose host-pid-nanosecond nonce was RE-READ off
+    origin and matched.
+
+    PROOF NOTES: all three proofs are NAME-FILTERED titles, not pure paths — a pure path runs the whole
+    file and one unrelated failure fails every criterion. Each is under 100 characters with no comma so
+    `looksLikeScenarioNarrative` (`src/lib/task-linter.ts`) cannot fail them."
