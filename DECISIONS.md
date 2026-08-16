@@ -1384,3 +1384,43 @@ It has simply never reached the console. Future surface work should sound like t
 
 - Rollback: revert this PR — removes only this entry and the rendered strings it names. No task
   record, no route, no lock file, no ledger step and no generated artifact is touched by it.
+
+## 2026-08-16 — RULING: the fleet gates on IRREVERSIBILITY, not on outwardness (W1-T919)
+
+**THE PRINCIPLE.** What earns a gate is whether an act can be taken back, not whether it reaches
+outside this machine. Outwardness is a proxy that mis-sorts in both directions: opening an issue is
+outward and trivially reversible; deleting a branch is local and not.
+
+**AND THE FENCE IS NOT MISSING A MERGE — THE FIRST DRAFT OF THIS ENTRY SAID IT WAS, AND THAT WAS
+WRONG.** Measured at origin/main: `assertLiveWriteAllowed` guards four acts — `gh-issue-create`,
+`gh-pr-create`, `gh-pr-merge`, `git-push` — and ALL THREE merge invocations in `realArmDeps`
+(`src/run-task.ts`) are immediately preceded by `assertLiveWriteAllowed("gh-pr-merge", …)`: the
+`--auto` arm, the clean-status direct merge, and `--disable-auto`. `ghPrMergeSquash`
+(`src/lib/worker.ts`) gates the same way. The omission claim is recorded here only because a ruling
+that rested on it would have been false in its most quotable sentence.
+
+**THE REAL FINDING IS NARROWER AND SHARPER: ARMING DEFERS AN IRREVERSIBLE ACT PAST THE FENCE.**
+`gh pr merge --auto` does not merge. It hands the merge to GitHub, which performs it LATER — when
+the checks go green, with no local gate traversed AT THAT MOMENT. The fence is crossed once, at
+arming time, by a process that then exits; the irreversible act happens afterwards, unattended, on
+someone else's schedule. So the gate is real but its coverage is POINT-IN-TIME, and the act it
+authorises is not.
+
+**REVERSIBILITY, MEASURED WITH A CONTROL THAT DISCRIMINATES.** Closing a pull request is fully
+reversible and merging is not, and the head branch is the evidence: **#1873 (closed, unmerged)
+still has `fix/loadplan-enoent-shard-race` on origin; #1874 (merged) has no
+`fix/loadplan-enoent-race` at all** — `--delete-branch` took it. One pair, opposite outcomes,
+same query. An earlier attempt at this measurement used a single branch and could not tell branch
+survival from branch survival-in-general; it is recorded as insufficient rather than quietly
+replaced.
+
+**THE FALSIFIER THIS RULING MUST SURVIVE, AND IT IS WHY NOTHING HERE AUTHORISES AUTOMATIC CLOSURE.**
+**IDENTITY ALONE IS NEVER SUFFICIENT.** #1873 and #1874 carried byte-identical titles and identical
+file lists and were created 74 seconds apart — and the one that merged was chosen by an ARGUED
+difference, not a mechanical one. A detector keyed on identity would have closed the better pull
+request. Any future disposition built on this ruling must therefore act on a REASON, never on a
+match, and this entry must not be read as "duplicates may be closed automatically."
+
+**WHAT THIS ENTRY DOES NOT DO.** It does not amend `assertLiveWriteAllowed`, add an act to its list,
+or change any disposition. The ruling comes first; the disposition follows behind it, cites this
+entry, and carries its own evidence.
