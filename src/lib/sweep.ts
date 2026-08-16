@@ -873,6 +873,157 @@ export function isBlockedCi(pr: OpenPrView): boolean {
 }
 
 /**
+ * W1-T527 — WHY a PR is red, which {@link isBlockedCi} deliberately does not ask. Four causes
+ * reached the identical `blocked-fixable` dispatch, and only ONE of them is the fix rung's
+ * territory:
+ *
+ *   - `base-caused`   — the same required check failing on EVERY open PR this pass. A property of
+ *                       origin/main, not of any diff. NO edit to any of those diffs would help.
+ *   - `gate-conflict` — the review names an unsatisfiable condition (Standing rule 25
+ *                       entanglement), which is explicitly NON-SUPPRESSIBLE, so no re-review can
+ *                       soften it and no single patch can satisfy both gates.
+ *   - `environment`   — a near-total failure ratio inside ONE check whose log tail repeats a
+ *                       single message (the Playwright build-mismatch shape: 96 of 97 failures
+ *                       carrying the same `browserType.launch` line).
+ *   - `in-diff`       — the residue, and the fix rung's existing territory, unchanged.
+ *
+ * PRECEDENCE IS THE SHARD'S, NOT AN OPTIMISATION: base-caused is asked FIRST because it exonerates
+ * every diff in the pass at once, so it must win over any per-PR reading of the same failure.
+ *
+ * PURE FOLD, NO I/O: every discriminator reads evidence the sweep ALREADY holds — `ciFailures`
+ * (populated whenever `checksState === "red"`) and the whole `openPrs` array `runSweep` is handed.
+ * On a day that reached 7,965 GitHub calls against a 5,000 ceiling, a classifier that cost a
+ * network read per PR would not be worth having.
+ */
+export type RedCause = "base-caused" | "gate-conflict" | "environment" | "in-diff";
+
+/**
+ * The Standing rule 25 refusal text `renderReviewSummary` emits (`src/lib/review.ts`, the
+ * `instrumentEntanglement` arm). Matched as TEXT because the structured
+ * `ReviewVerdict.instrumentEntangled` boolean is not carried on {@link OpenPrView} — see
+ * {@link namesUnsatisfiableGate}'s own doc for what that costs and why it is still safe.
+ */
+const UNSATISFIABLE_GATE_MARKER = /entangled: instrument path\(s\)/i;
+
+/** A log tail shorter than this cannot establish a ratio — too few lines to be near-total. */
+const ENVIRONMENT_MIN_TAIL_LINES = 4;
+/** The share of log-tail lines that must be the SAME line before one message is "near-total". */
+const ENVIRONMENT_REPEAT_RATIO = 0.9;
+
+/**
+ * The required check failing on EVERY open PR in this pass, or `undefined`.
+ *
+ * THE VACUITY GUARD IS THE LOAD-BEARING PART. With a single open PR, "failing on every open PR" is
+ * trivially true of that PR's own failure, and a lone genuinely-broken diff would exonerate itself
+ * and never be fixed. One PR is not a cross-PR measurement, so fewer than two returns `undefined`
+ * — the same discipline as requiring a positive control before believing a query.
+ *
+ * A pass containing any PR that is NOT failing this check (green, pending, or failing something
+ * else) yields `undefined`: a base outage reddens all of them, so a survivor is evidence AGAINST
+ * the base being the cause. That is deliberately the conservative direction — it fails toward
+ * dispatching the fix rung, never toward silently standing down.
+ */
+export function baseCausedCheckName(pr: OpenPrView, allPrs: readonly OpenPrView[]): string | undefined {
+  const own = pr.ciFailures ?? [];
+  if (own.length === 0) return undefined;
+  if (allPrs.length < 2) return undefined;
+  for (const failure of own) {
+    const onEveryPr = allPrs.every((other) =>
+      (other.ciFailures ?? []).some((candidate) => candidate.name === failure.name),
+    );
+    if (onEveryPr) return failure.name;
+  }
+  return undefined;
+}
+
+/**
+ * True when the review named a condition no patch can satisfy (Standing rule 25 entanglement).
+ *
+ * READS BOTH CARRIERS BECAUSE ONE OF THEM IS CURRENTLY INERT, AND THAT IS WORTH STATING RATHER
+ * THAN HIDING: `OpenPrView.reviewSummary` is hardwired to `undefined` at BOTH of its producer
+ * sites in `src/run-task.ts`, so in a live sweep today only the `unmetCriteria` reason can carry
+ * the marker. The summary arm is read anyway because the field is typed, populated in
+ * reconstruction paths, and costs nothing — but this predicate is NOT the safety property.
+ *
+ * THE SAFETY PROPERTY IS STRUCTURAL, NOT DETECTIVE. A rule-25 refusal fails the `remudero-review`
+ * COMMIT STATUS, and `checksStateFromRollup` excludes that context from `checksState` by
+ * construction (W1-T394), so such a PR is review-red and never checks-red. Since the stand-down
+ * below fires only on `ciFailures`-derived evidence, a gate conflict CANNOT be stood down even if
+ * this predicate returns false. Detection changes the ledger's reason text; it does not change
+ * whether the escalation survives.
+ */
+export function namesUnsatisfiableGate(pr: OpenPrView): boolean {
+  if (pr.reviewSummary && UNSATISFIABLE_GATE_MARKER.test(pr.reviewSummary)) return true;
+  return pr.unmetCriteria.some((criterion) => UNSATISFIABLE_GATE_MARKER.test(criterion.reason));
+}
+
+/**
+ * The check whose log tail is one message repeated near-totally, or `undefined`.
+ *
+ * W1-T517's `findSiblingDisagreements` (`src/lib/host-parity.ts`) IS THE OTHER HALF OF THIS
+ * DISCRIMINATOR AND IS DELIBERATELY NOT CALLED HERE — it requires BOTH poles (at least one
+ * `success` and one `failure` on the same sha), and {@link OpenPrView} carries `ciFailures`, which
+ * is failures-only and populated only when `checksState === "red"`. There is no success pole to
+ * hand it. Feeding it would need the producer (`fetchCiFailures`, `src/run-task.ts`) to emit
+ * passing runs too, and this task does not declare that file. Reimplementing its fold here is
+ * exactly what its own doc forbids, so the ratio arm carries this class alone and the sibling arm
+ * is named as available work rather than faked.
+ */
+export function environmentFaultCheckName(pr: OpenPrView): string | undefined {
+  for (const failure of pr.ciFailures ?? []) {
+    const lines = failure.logTail
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    if (lines.length < ENVIRONMENT_MIN_TAIL_LINES) continue;
+    const counts = new Map<string, number>();
+    for (const line of lines) counts.set(line, (counts.get(line) ?? 0) + 1);
+    let mostRepeated = 0;
+    for (const count of counts.values()) if (count > mostRepeated) mostRepeated = count;
+    if (mostRepeated / lines.length >= ENVIRONMENT_REPEAT_RATIO) return failure.name;
+  }
+  return undefined;
+}
+
+/**
+ * The pure fold itself — see {@link RedCause} for the four classes and why this order.
+ */
+export function classifyRedCause(pr: OpenPrView, allPrs: readonly OpenPrView[]): RedCause {
+  if (baseCausedCheckName(pr, allPrs) !== undefined) return "base-caused";
+  if (namesUnsatisfiableGate(pr)) return "gate-conflict";
+  if (environmentFaultCheckName(pr) !== undefined) return "environment";
+  return "in-diff";
+}
+
+/**
+ * The two classes the fix rung cannot reach, and therefore the only two that change behaviour.
+ *
+ * `in-diff` dispatches exactly as before this task existed; `gate-conflict` refuses and escalates
+ * exactly as before (design note iii: that path is already correct and stays byte-identical). A
+ * stand-down leaves `acted:false`, and `priorActionsFromLedger` skips every row where
+ * `line.acted !== true` — so no strike is spent and the PR is re-derived fresh next pass.
+ */
+export function redCauseStandsDown(cause: RedCause): boolean {
+  return cause === "base-caused" || cause === "environment";
+}
+
+/**
+ * The stand-down reason carried on the existing `sweep.disposed` line — NOT a new ledger step.
+ * Design note (vi): `daemon.tree_dirty` and `daemon.stale_code` both fire with nothing reading
+ * either, and `CiFailure.outsidePrRange` is narrated by `describeCiFailures` and never acted on.
+ * This class is READ by the dispatch decision itself, which is what makes it an actor rather than
+ * a fourth dead signal.
+ */
+export function describeRedCause(cause: RedCause, pr: OpenPrView, allPrs: readonly OpenPrView[]): string {
+  if (cause === "base-caused") {
+    const name = baseCausedCheckName(pr, allPrs) ?? "a required check";
+    return `red cause: base-caused — ${name} is failing on all ${allPrs.length} open PRs this pass, so it is not this diff; no strike spent`;
+  }
+  const name = environmentFaultCheckName(pr) ?? "a required check";
+  return `red cause: environment — ${name} repeats one message across its whole log tail, an environment fault rather than a diff defect; no strike spent`;
+}
+
+/**
  * The four named "why is this actually blocked" states an escalation must distinguish
  * (W1-T186) — never a single overloaded `checksState`/`reviewState` pair. Exactly one applies
  * (or none, for an ordinary review-failure/contradictory block, where these four facts say
@@ -2658,6 +2809,18 @@ export async function runSweep(
               if (terminal) {
                 acted = false;
                 standDownReason = terminal;
+                break;
+              }
+              // W1-T527 — CLASSIFY BEFORE SELECTING, because the strike is spent at
+              // dispatch and cannot be refunded afterwards. `classifyRedCause` is a pure
+              // fold over evidence already in hand (this PR's `ciFailures` plus the WHOLE
+              // `openPrs` array this pass was handed), so it costs no GitHub call. Only
+              // base-caused and environment stand down; `in-diff` and `gate-conflict` fall
+              // through to the dispatch below exactly as they did before this existed.
+              const redCause = classifyRedCause(pr, openPrs);
+              if (redCauseStandsDown(redCause)) {
+                acted = false;
+                standDownReason = describeRedCause(redCause, pr, openPrs);
                 break;
               }
               // W1-T100: the evidence shape follows the SAME `isBlockedCi`
