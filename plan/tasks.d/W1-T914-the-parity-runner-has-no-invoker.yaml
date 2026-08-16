@@ -1,0 +1,105 @@
+- id: W1-T914
+  title: "the host-parity runner has no invoker, so the baseline can neither be pruned nor populated — runHostParity already computes the healed and undeclared lists that would report its own staleness, and nothing in the repo ever calls it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55
+  risk: medium
+  rationale: "MEASURED at d2f50ff. `runHostParity` (src/lib/host-parity.ts) already returns
+    `healed` — 'declared for this pole and NOT observed — the baseline is stale and would mute a
+    real failure' in its own words — alongside `undeclared`. THE REPORTING IS BUILT. Its ONLY
+    caller is `scripts/host-parity.ts`, and NOTHING INVOKES THAT SCRIPT: `git grep -ln host-parity
+    -- .github/` returns EMPTY, there is no npm script matching /parity/, and no daemon rung calls
+    it. POSITIVE CONTROL for the same query shape: `scripts/diff-coverage.mjs` IS invoked from
+    .github/workflows/ci.yml. So this is a built-and-never-wired capability, the class
+    test/producer-completeness.test.ts and the SHIPS-UNWIRED floor already exist to catch, one
+    level up — at the RUNNER rather than at a field.
+    THE CONSEQUENCE IS MEASURED, IN BOTH DIRECTIONS.
+    (a) A HEALED ENTRY IS NEVER PRUNED. The single `pole: \"ci\"` entry — recon-gaps-relayed's
+    byte-identity test — was declared in #1659 at 19:14 on 2026-08-12 and healed by #1682 at 22:54
+    THE SAME EVENING, which raised the `ci` job's checkout to `fetch-depth: 0` precisely so
+    `origin/main` resolves; that workflow's own comment names this test as the reason. The entry
+    has stood for four days describing a divergence the repo itself fixed within four hours.
+    (b) A WHOLE POLE WAS NEVER BASELINED. `HostPole` is `mini | ci | azure` (#1707 gave the
+    container its own pole 'instead of reporting as ci'), and HOST_PARITY_BASELINE declares FOUR
+    `mini` entries, ONE `ci` entry and ZERO `azure` entries. Eleven failures reproduce on a
+    container host today and not one is declared anywhere.
+    AND THE ELEVEN ARE DIVERGENCES, NOT FLAKES — established by REPETITION UNDER VARIED
+    CONDITIONS, which is the only discriminator that separates the two. Two independent
+    whole-suite runs on one host at one sha produced BYTE-IDENTICAL failure sets (sha256 prefix
+    823a8bc31a144d5b both, 7277 tests / 11 fail each), and every implicated file re-run WHOLE in
+    isolation reproduced its exact failures twice more — once under load and once idle. Four
+    observations, zero variation. Most name their own coupling by construction: `daemonBoot` reads
+    `process.env`, `emissionsCommand` reads the real ledger corpus, `reapStaleWorktrees` reaps real
+    worktrees, and the W1-T505 tests assert a printed `docker run` invocation.
+    NOT IN THIS TASK, and cited rather than re-investigated: CI's own undeclared failure is
+    `git commit-tree` refusing without a committer identity, because `actions/checkout` sets
+    `safe.directory` and credentials but never `user.name`/`user.email`. #1971 is in flight for it."
+  design: |
+    (i) GIVE THE EXISTING RUNNER AN INVOKER. Nothing here re-implements the diff: `runHostParity`
+    already computes `healed` and `undeclared` correctly, and this task must not duplicate that.
+    The gap is that no caller exists, so the report is written for nobody.
+    (ii) IT REPORTS, IT DOES NOT GATE. `runHostParity`'s own doc rules a gate out and gives the
+    reason: four bounds in this repo have fired on a healthy condition, and a host-divergence check
+    that blocked merges would be the fifth. The runner already writes a `plan/feedback/` record and
+    exits 0; the wiring must preserve both.
+    (iii) A POLE WITH NO DECLARED ENTRIES MUST READ AS UNBASELINED, NOT AS CLEAN. Today an empty
+    pole and a perfectly-parity-clean pole are indistinguishable in the output, which is why
+    `azure` could sit unpopulated without anyone noticing. That distinction is the one new fact
+    this task adds, and it is the direction the current code cannot express.
+    (iv) THE FLAKE/DIVERGENCE DISTINCTION IS ENFORCED BY REPETITION, NOT BY JUDGEMENT. The file
+    states twice that a flake is not a divergence and must not be declared as one. Whatever
+    populates a pole must require a failure to reproduce across N runs before it is declarable, so
+    the rule is structural rather than a convention every future session has to remember.
+    (v) FALSIFIER, BOTH DIRECTIONS: a pole with zero declared entries is reported as unbaselined (a
+    change that reported nothing fails this), AND a pole that is genuinely parity-clean is NOT
+    reported as unbaselined (one that flagged every pole would pass the first and fail this — the
+    false-positive containment).
+    (vi) NOT IN SCOPE, each for a stated reason: EDITING HOST_PARITY_BASELINE, which is the bulk
+    update the file's own rule anticipates and forbids, and which cannot be done honestly until a
+    repetition-enforced run produces the evidence; DELETING it, because it is the only thing
+    between a session and attributing every host artifact to its own diff; the eleven container
+    divergences themselves, which are the INPUT to this mechanism rather than its subject; and CI's
+    commit-tree identity failure, which #1971 already fixes.
+  acceptance:
+    - claim: "a pole with no declared entries is reported as unbaselined rather than silently clean"
+      proof: "unit test: a pole with no declared entries is reported as unbaselined rather than clean"
+    - claim: "a declared entry that stopped reproducing is surfaced rather than left to rot"
+      proof: "unit test: a declared entry that stopped failing is surfaced where a human will see it"
+    - claim: "the runner is reachable from a caller that actually executes, not built and unwired"
+      proof: "unit test: the parity runner is reachable from a caller that actually runs"
+  origin: oper#parity-baseline-stale-2026-08-16
+  plan_refs: ["W1-T517"]
+  files: [scripts/host-parity.ts, test/host-parity.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — the reachability and unbaselined-pole assertions are decidable from
+    fixtures with no network, no spawn and no second host.
+    risk:medium is Rule 19's SPAN and it is honest: `subsystemsOf` folds a `.test` basename onto
+    its source, so scripts/host-parity.ts and test/host-parity.test.ts are ONE subsystem
+    (`host-parity`), and the blast radius matches — a runner nothing currently calls cannot regress
+    a caller.
+    FILES DERIVED BY WORD-BOUNDED INVOCATION COUNT: `runHostParity` reads src=2 / test=9 /
+    scripts=2, and scripts/host-parity.ts is the sole caller and therefore the sole site where the
+    missing invoker can be added; test/host-parity.test.ts is that module's existing suite and
+    already owns the baseline's assertions. `src/lib/host-parity.ts` is DELIBERATELY NOT DECLARED —
+    the diff and its `healed` list are already correct there and clause (i) forbids re-implementing
+    them; an implementer who concludes the unbaselined-pole distinction must live in the library
+    MUST AMEND THIS SHARD TO DECLARE IT FIRST rather than overrunning (#1869 shipped a 22-file
+    overrun against a two-path declaration). The same applies to `.github/workflows/` and
+    `package.json` if the chosen invoker is a CI job or an npm script.
+    PROOF NOTES: all three proofs are the NAME-FILTERED `unit test:` form, never a whole-file path,
+    so each names the behaviour it proves rather than a file that would pass on any test in it.
+    Each title was verified to match ZERO files today via `grep -rlF` over test/, against a control
+    matching one, so every one discriminates head from base. Each is plain prose under 100
+    characters with no comma and no regex metacharacter, so looksLikeScenarioNarrative does not
+    fire and proofNameResolutionViolations cannot either. Zero candidates today is the legitimate
+    forward reference for an unimplemented task.
+    ID PROVENANCE: refs/rmd-id/W1-T914 COULD NOT BE MINTED — the gated push returned HTTP 403, the
+    credential limit W1-T518/#1893 files. The gate refused rather than leaving a corrupt ref, and
+    the ABSENCE was confirmed by re-reading the ref and matching a host-pid-nanosecond nonce, not
+    assumed. W1-T914 was free by all three sweeps at mint time: absent from refs/rmd-id/* (28 refs,
+    max W1-T913), absent from plan/tasks.d/ (max W1-T912) and absent from run-* head branches,
+    against a positive control of refs/rmd-id/W1-T913 reading 1."
