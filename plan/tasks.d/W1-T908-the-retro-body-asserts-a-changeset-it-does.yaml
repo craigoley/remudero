@@ -1,0 +1,101 @@
+- id: W1-T908
+  title: "rmd retro regenerates three files and then writes a PR body claiming it changed one, naming a file it just rewrote as untouched — bodyContradictsDiff catches it correctly and four PRs have paid for it, because the body is authored before two of the three files exist"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  rationale: "FILED 2026-08-16 AGAINST origin/main, AFTER THE BUILD RATHER THAN BEFORE IT — the
+    implementation is #1955 and this record was omitted from that PR's own diff. That omission is
+    itself an instance of the defect being filed: #1955's body asserted a three-path changeset
+    including this shard while its diff carried two paths and no shard.
+
+    (1) **THIS IS A GENERATOR DEFECT NOT AN AUTHOR DEFECT.** Four PRs carry the IDENTICAL changeset —
+    `MASTER-PLAN.md`, `docs/ORIENTATION.md`, `plan/plan-index.json` — and each body claimed a
+    single-file changeset. #974 merged before the detector existed. #1685 was REFUSED by its own
+    review on this contradiction and merged only after repair. #1943 was repaired BY HAND, and its
+    commit list is the defect in git: retro sync, then regenerate ORIENTATION, then regenerate the
+    plan index, then re-head so a corrected body earns a fresh verdict. #1944 was still exhibiting it
+    live at derivation, `remudero-review=failure`. No author wrote four identical wrong bodies; one
+    generator did.
+
+    (2) **THE BODY IS RENDERED BEFORE TWO OF THE THREE FILES EXIST, AND THAT IS WHY A TEMPLATE CANNOT
+    FIX IT.** `retroCommand` (`src/run-task.ts`) spawns the Architect worker, which `retroPrompt`
+    instructs to run `gh pr create` — so the worker opens the PR with a body IT wrote. Only afterwards
+    does `regenerateOrientation` commit `docs/ORIENTATION.md`, and only then does
+    `regeneratePlanIndexAndCommit` commit `plan/plan-index.json`. At authoring time two of the three
+    paths are not on disk.
+
+    (3) **AND REORDERING IS NOT THE REMEDY.** `docs/ORIENTATION.md` is regenerated FROM what the
+    Architect just wrote, so it cannot run first; making the worker wait on the harness would mean the
+    worker no longer opens its own PR. What already exists is a rung that runs AFTER all three commits,
+    already fetches the body, and already edits it through injectable seams:
+    `repairRetroAcceptanceBlock`. It simply never fires here, because `bodyNeedsAcceptanceRepair`
+    judges a body with a healthy Acceptance block and a false scope claim to be healthy.
+
+    (4) **THE SCOPE CHARACTERISATION WAS NEVER WRONG — ONLY THE COUNT.** `isInPlanScope` returns TRUE
+    for all three paths (run, not asserted), and FALSE for `src/run-task.ts` as a control. The
+    detector fires on the count, so #974's `planOnly` carve-out was never what was at issue.
+
+    (5) **THE COMPANIONS CANNOT SIMPLY BE DROPPED.** `docs/ORIENTATION.md` is harness-owned and
+    carries its own regenerated banner; `plan/plan-index.json` is a line index whose staleness reds
+    `plan-index:check` post-push — the #287 failure `regeneratePlanIndexAndCommit`'s own comment
+    cites. The three-file changeset is CORRECT. Only the sentence describing it was wrong."
+  design: |
+    (i) EMIT PATHS, NEVER A COUNT. `retroChangesetSentence` renders the sentence from the paths the
+    run actually wrote, and `repairRetroChangesetClaim` replaces the templated claim in the fetched
+    body. It joins `repairRetroAcceptanceBlock` at the SAME call site, which already sits after both
+    regenerations — so the changeset is read at a point where every companion file exists.
+    (ii) **A HARDCODED THREE IS THE SAME DEFECT WEARING A NEW NUMBER.** Replacing a wrong count with
+    a right one leaves the next retro that regenerates two files, or four, wrong again with nobody's
+    code having changed. Arity must be driven at one, two and four in test.
+    (iii) DO NOT DUPLICATE THE DETECTOR. The local count-claim regex must NOT be imported from
+    `src/lib/review.ts`; the two are held together by a FALSIFIER instead — hand the repaired body to
+    the real `bodyContradictsDiff` and require silence. A second copy of the detector's authority is
+    how the two drift apart.
+    (iv) AND STOP ASKING THE WORKER FOR A CLAIM IT CANNOT KNOW. `retroPrompt` must instruct the
+    Architect NOT to describe the changed-file set at all — it cannot know it at authoring time, so
+    asking is what manufactures the false sentence.
+    (v) THE REPAIR MUST BE OBSERVABLE ON A LINE SOMETHING ALREADY READS — no new ledger step. There
+    are already measured fired-and-unread signals (`daemon.tree_dirty`, `daemon.stale_code`,
+    W1-T494); a new step here would be another.
+    (vi) NOT IN SCOPE. Reordering `retroCommand`; dropping either companion file; changing
+    `isInPlanScope` or `bodyContradictsDiff`; and the separate `check-proof` versus `executed_stale`
+    gap — a proof reading `verdict: pass` locally can still substantiate nothing in review, which hit
+    twice on #1943 and capped #1189 at 2/4. Named here so it is not absorbed.
+  acceptance:
+    - claim: "the emitted body names every path the run actually wrote and no others"
+      proof: "unit test: W1-T908: the retro body names every path the run wrote and no others"
+    - claim: "a run writing a different number of files is still described correctly"
+      proof: "unit test: W1-T908: a run that writes a different number of files still names them all"
+    - claim: "the templated single-file claim does not survive the repair"
+      proof: "unit test: W1-T908: the templated one-file claim is replaced rather than left standing"
+    - claim: "the changeset is read at a point where the companion files already exist"
+      proof: "unit test: W1-T908: the changeset is read after the harness companions are committed"
+  origin: "recon#retro-body-changeset-2026-08-16"
+  plan_refs: ["W1-T274", "W1-T494", "W1-T287"]
+  files: [src/run-task.ts, test/retro-acceptance-repair.test.ts]
+  status: queued
+  attempts: 0
+  note: "risk:high IS SET UP FRONT — Rule 19 SPAN across src/ and test/, and independently warranted:
+    this edits a PR body automatically, so a wrong repair rewrites a human-visible claim without
+    anyone reading it.
+    FILED AFTER THE BUILD, AND THAT IS RECORDED RATHER THAN HIDDEN. #1955 implements this and its
+    body originally asserted this shard as part of its own changeset while never committing it; two
+    of its acceptance proofs greped this file and were removed rather than left to fail closed, since
+    a `grep:` proof that misses is `executed_fail` and OVERRIDES the keyword floor. Restoring those
+    two proofs is safe once this merges.
+    THE ID WAS NOT MINTED HERE. `refs/rmd-id/W1-T908` was ALREADY held by the implementing lane —
+    a genuine reservation over the empty tree by remudero-worker at 2026-08-16T11:32:34Z, three
+    minutes before #1955 opened. A gated push with a fresh nonce was attempted and CORRECTLY REFUSED
+    (exit 1, readback sha not the one written), which is exactly what the force-with-lease gate is
+    for; the id was then used rather than re-taken. Positive control: refs/rmd-id/W1-T527 read 1.
+    files: MATCHES THE IMPLEMENTATION'S OWN DIFF rather than being derived independently, because the
+    build already exists: #1955 touches src/run-task.ts (+113) and test/retro-acceptance-repair.test.ts
+    (+174/-2), and nothing else. Declaring a path that PR does not touch would fail
+    inverseScopeUntouchedFiles.
+    PROOF NOTES: the four proofs are NAME-FILTERED titles, each verified present exactly once under
+    test/ on the implementing branch and absent from origin/main, and each under 100 characters with
+    no comma."
