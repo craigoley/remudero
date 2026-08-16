@@ -3089,6 +3089,27 @@ export async function runSweep(
               disposition: "post-review",
               error: actionError,
             });
+            // W1-T529 design (v) — THE MISSING DEDUP KEY. `sweep.action_failed` alone leaves
+            // NO key `PriorActions.postReviewed` can see: that set is built ONLY from
+            // `review.posted`/`review.post_refused` lines (see its own doc above), never from
+            // `sweep.disposed`/`sweep.action_failed`. Without this, a thrown attempt —
+            // including a guarded call standing down at the floor once one is wired ahead of
+            // this call (lib/open-prs-rest.ts's `GhCallPacer`) — re-attempts THIS EXACT HEAD
+            // every following pass, without bound: a floor bounds the RATE of calls but, on
+            // its own, not the REPEAT of the attempt, and each retry against an exhausted
+            // budget only deepens it. This records the SAME outcome shape
+            // `postReviewStatusGuarded` (lib/review.ts) already writes for a graceful
+            // refusal — recording the throw as an OUTCOME the existing dedup already reads,
+            // never a second mechanism (design v's own "the honest shape"). `acted` stays
+            // `false` above regardless, so this never touches the fix-strike lane's own
+            // `acted:true`-gated dedup (design iv) — a different lane, a different set.
+            appendLine(deps.ledgerPath, {
+              run_id: deps.runId,
+              task_id: job.pr.taskId ?? "SWEEP",
+              step: "review.post_refused",
+              head_sha: job.pr.headSha,
+              reason: `post-review attempt threw — standing down rather than retrying this head unbounded: ${actionError}`,
+            });
           }
         }
       } finally {
@@ -3098,10 +3119,11 @@ export async function runSweep(
         // only ledgers/logs and never gates a future pass. On success
         // `postReview` has already durably written the "reviewed" state a
         // later pass's own fresh ledger read will see (so it never even
-        // reaches this claim again); on failure nothing was written, so a
-        // later pass legitimately retries — either way, holding this claim
-        // any longer than the attempt itself would only block work, never
-        // protect any.
+        // reaches this claim again); on failure (W1-T529) the `review.post_refused`
+        // line just above plays the same role — either way this pr@head will not
+        // re-claim the SAME key next pass, so releasing it here costs nothing and
+        // holding it any longer than the attempt itself would only block work,
+        // never protect any.
         claimedReviewKeys.delete(job.reviewKey);
       }
       finalizeDisposition(job.index, job.pr, "post-review", job.reason, job.question, acted, false, actionError, undefined, undefined);
