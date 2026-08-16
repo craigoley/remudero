@@ -414,3 +414,145 @@ export function probeExistingPlanPr(fetch: GhApiFetcher, owner: string, repo: st
   if (!row?.html_url || typeof row.number !== "number") return undefined;
   return { prUrl: row.html_url, prNumber: row.number };
 }
+
+// ── 8. Retro changeset-claim reconciliation (W1-T911) ───────────────────────────────────────
+//
+// `retroCommand` (run-task.ts) spawns the Architect worker, which edits MASTER-PLAN.md, pushes,
+// and OPENS THE PR — writing a body whose changeset claim is TRUE at that instant (the diff
+// really is one file). Only AFTER the worker returns does the harness commit
+// `docs/ORIENTATION.md` (regenerateOrientation) and `plan/plan-index.json`
+// (regeneratePlanIndexAndCommit) into that SAME PR, widening the diff the body already
+// described. `bodyContradictsDiff` (review.ts) then reads the widened diff against the
+// now-stale body and refuses it — four real instances (#974, #1685, #1943, #1944), the last two
+// 23 minutes apart with a byte-identical "exactly one file" failure. The claim's author (the
+// Architect) cannot be the one to fix this: it does not exist anymore by the time the body goes
+// stale, and it never knew what the harness would append after it returned.
+//
+// This is a PURE reconciler — no git, no network, no I/O — taking the body and the paths the
+// caller already computed (run-task.ts reads them via `gh pr diff --name-only`, after both
+// harness commits land). It repairs ONLY the two arms `bodyContradictsDiff` actually keys on
+// (that function's own doc forbids guessing at prose beyond them):
+//
+//   (a) a stated file COUNT ("exactly N files[: a, b]") that disagrees with the real changeset.
+//       Repaired by replacing the whole count-shaped claim with a sentence that ENUMERATES the
+//       real paths and states no count at all — never a recomputed number, which would just be
+//       the same defect wearing a new number the next time the harness regenerates a different
+//       arity of companion file. See {@link retroChangesetSentence}.
+//   (b) a "no <path>" DENIAL for a path the diff actually carries — what #1943 tripped by
+//       writing "No docs/ORIENTATION.md" while carrying it. Repaired by DROPPING that specific
+//       denial (never rewriting it into a new claim, which could itself go stale). A denial the
+//       diff does NOT refute — "no src/" on a genuinely plan-only retro — is TRUE and SURVIVES:
+//       it is the reader's real assurance the retro carried no code, so only a denial the diff
+//       actually contradicts is ever touched.
+//
+// Deliberately NOT built on top of `bodyContradictsDiff`'s own detection regexes (imported or
+// otherwise): sharing symbols would let a future widening of the detector silently change what
+// this rewrites without either side noticing. The two are held together by a FALSIFIER instead
+// (test/retro-changeset-claim.test.ts drives the real `bodyContradictsDiff` over this function's
+// output and requires it to fall silent), which is the same discipline run-task.ts's prior
+// arm-(a)-only rung (W1-T908) already used.
+
+/** Matches the count-shaped claim `bodyContradictsDiff`'s arm (a) reads, including an optional
+ *  colon-led enumeration ("exactly one file: MASTER-PLAN.md"). Built fresh per call: a
+ *  module-level `/g` regex carries `lastIndex` between calls, so a shared instance would answer
+ *  `.test()` differently on a second invocation over the same input. */
+function changesetCountClaimRe(): RegExp {
+  return /\bexactly\s+\w+\s+files?\b(?:\s*:\s*[^\s,]+(?:\s*,\s*[^\s,]+)*)?/gi;
+}
+
+/**
+ * Render the changeset as PATHS AND NEVER A COUNT — the canonical replacement for arm (a)'s
+ * claim. A count is what failed four PRs; a corrected count is the same defect wearing a new
+ * number, wrong again the moment a later run regenerates a different arity of companion file.
+ * Naming the paths is correct for any arity by construction. Sorted so the sentence is stable
+ * across two runs over the same changeset.
+ */
+export function retroChangesetSentence(paths: readonly string[]): string {
+  const sorted = [...paths].sort();
+  if (sorted.length === 0) return "no files";
+  if (sorted.length === 1) return sorted[0];
+  return `${sorted.slice(0, -1).join(", ")} and ${sorted[sorted.length - 1]}`;
+}
+
+/** Arm (a): replace every count-shaped claim in `body` with {@link retroChangesetSentence}'s
+ *  enumeration. `undefined` when there is nothing to repair. */
+function reconcileChangesetCountClaim(body: string, paths: readonly string[]): string | undefined {
+  if (!changesetCountClaimRe().test(body)) return undefined;
+  return body.replace(changesetCountClaimRe(), retroChangesetSentence(paths));
+}
+
+/** Matches a `no <path>` denial the way `bodyContradictsDiff`'s arm (b) does — a path-shaped
+ *  token is anything containing `.` or `/`, so "no bugs"/"no issues" never match here at all
+ *  (nothing to check a diff against, and nothing this reconciler should ever touch). */
+const NO_PATH_CLAIM_RE = /\bno\s+([A-Za-z0-9_./-]+)/gi;
+
+/** A path-SHAPED token — the same guard `bodyContradictsDiff`'s arm (b) uses to stay silent on
+ *  "no bugs"/"no issues", mirrored here (not imported — see the module-comment falsifier note
+ *  above) rather than shared. */
+function looksLikeChangesetPath(token: string): boolean {
+  return /[./]/.test(token);
+}
+
+/** Does `file` fall under the claimed-absent `path` (an exact file, or a directory prefix)? */
+function fileUnderClaimedPath(file: string, path: string): boolean {
+  const normalized = path.replace(/\/$/, "");
+  return file === normalized || file.startsWith(`${normalized}/`);
+}
+
+/**
+ * Tidy the punctuation a dropped `no <path>` clause leaves behind: a dangling comma right
+ * before whatever now ends the clause (a full stop, end of line, or end of body), a bare comma
+ * right after whatever began it, two commas left adjacent by a middle drop, and doubled interior
+ * spacing. Never touches a newline — a paragraph break is structural, not residue.
+ */
+function cleanupDroppedNoPathClauses(text: string): string {
+  return text
+    .replace(/,([ \t]*)(?=[.!?]|\n|$)/g, "$1")
+    .replace(/(^|[.!?\n][ \t]*),([ \t]*)/g, "$1$2")
+    .replace(/,([ \t]*),/g, ",$1")
+    .replace(/[ \t]{2,}/g, " ");
+}
+
+/** Arm (b): drop every `no <path>` denial the real `paths` refute; a denial `paths` does NOT
+ *  refute is TRUE and survives untouched (design (iv) — see the module comment above).
+ *  `undefined` when there is nothing to repair. */
+function reconcileNoPathDenials(body: string, paths: readonly string[]): string | undefined {
+  let changed = false;
+  const out = body.replace(NO_PATH_CLAIM_RE, (whole: string, rawToken: string) => {
+    const token = rawToken.replace(/[,.\s]+$/, "");
+    if (!looksLikeChangesetPath(token)) return whole;
+    const refuted = paths.some((f) => fileUnderClaimedPath(f, token));
+    if (!refuted) return whole;
+    changed = true;
+    return "";
+  });
+  if (!changed) return undefined;
+  return cleanupDroppedNoPathClauses(out);
+}
+
+/**
+ * THE PURE RECONCILER (W1-T911 design (i)). Given a retro PR body and the real changeset it
+ * ultimately carries (both companion files included), returns the corrected body — or `undefined`
+ * when the body already agrees with `paths` and needs no edit at all, so a caller can distinguish
+ * "healthy" from "rewritten" without diffing strings.
+ *
+ * Runs BOTH arms in sequence (arm (a) first, since its replacement sentence can itself introduce
+ * new prose for arm (b) to read, never the reverse — arm (b) only removes text). See the module
+ * comment above this section for the two arms' individual contracts and the falsifier discipline
+ * that holds this function and `bodyContradictsDiff` together without sharing a regex.
+ */
+export function reconcileRetroChangesetClaim(body: string, paths: readonly string[]): string | undefined {
+  let current = body;
+  let changed = false;
+  const afterCount = reconcileChangesetCountClaim(current, paths);
+  if (afterCount !== undefined) {
+    current = afterCount;
+    changed = true;
+  }
+  const afterDenials = reconcileNoPathDenials(current, paths);
+  if (afterDenials !== undefined) {
+    current = afterDenials;
+    changed = true;
+  }
+  return changed ? current : undefined;
+}
