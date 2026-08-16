@@ -1,0 +1,125 @@
+- id: W1-T534
+  title: "dispatch DOES refuse a second run on an open PR — but `isOpenPr` reads a cached projection, so a PR opened after the snapshot is invisible and the same id runs twice; measured five times, and one 199ms `ls-remote` per pass closes it for zero API budget"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: medium
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: "**THIS OWNS THE SAME-ID CASE. W1-T533 (#1957, OPEN) OWNS TWO IDS FOR ONE PROBLEM, WHICH
+    NEEDS SEMANTIC MATCHING THIS DOES NOT.** Same id needs no matching at all: the branch name carries
+    the id. The boundary is that this refuses a duplicate RUN, and W1-T533 only warns about a possible
+    duplicate CONCERN.
+
+    (1) **THE COMMISSIONING PREMISE IS WRONG AND THE CORRECTION IS THE TASK.** It was put to this recon
+    that 'nothing refuses a second run while an open `run-<taskId>-*` PR already exists'. **FALSE.**
+    `isDispatchEligible` (`src/lib/drain.ts`) reads `opts.isOpenPr?.(t.id)` and, when a number comes
+    back, confirms it against `opts.readLiveState` and returns false — its own comment says
+    `never a duplicate fresh build`, and it FAILS OPEN (an unreadable live state still refuses). The
+    guard exists and is correct.
+
+    (2) **WHAT IS ACTUALLY BROKEN IS THE SNAPSHOT BEHIND IT.** In `src/run-task.ts` the daemon's
+    `isOpenPr` closes over `lastProj` — the projection captured by the previous `refreshMerged()` —
+    and returns `p?.prState === \"OPEN\" ? p.prNumber : undefined`. **IT IS A CACHE READ, NOT A FRESH
+    ONE.** A PR opened AFTER that projection was taken is simply absent, so `isOpenPr` returns
+    `undefined` and the guard never engages. W1-T177 already added a live confirmation for the
+    STALE-OPEN direction (a cached OPEN that has since merged); **THERE IS NO CONFIRMATION FOR THE
+    STALE-ABSENT DIRECTION**, and that asymmetry is the defect.
+
+    (3) **AND IT HAS FIRED — FIVE TIMES, MEASURED, NOT INFERRED.** Over all 800 PRs (233 carrying a
+    `run-<id>-<epoch>` head across 221 ids; positive control: 211 ids have exactly ONE such head, so
+    the parse works), **TEN ids have more than one run branch, and FIVE of those pairs had the second
+    branch created while the first PR was still OPEN** — computed from `closed_at`, never by eye:
+      W1-T350  #1377 open -> #1378 created 47 min later
+      W1-T463  #1811 open -> #1813 created 14 min later
+      W1-T481  #1796 open -> #1797 created  5 min later
+      W1-T511  #1885 open -> #1887 created  9 min later
+      W1-T525  #1925 open -> #1927 created 10 min later
+    **CONTROL THAT THE CLASSIFIER DISCRIMINATES: the other FIVE multi-run ids are cleanly sequential**
+    — the second dispatched only after the first had merged, which is correct re-dispatch and must
+    stay allowed. Span 2026-08-05 to 2026-08-16.
+
+    (4) **AND THE FIX IS NEARLY FREE, WHICH IS THE OTHER HALF OF THE ARGUMENT.** ONE
+    `git ls-remote --heads origin 'run-*'` returned **46 refs in 199 ms**, and **`core` remaining was
+    IDENTICAL before and after (4982 -> 4982)** — `ls-remote` speaks the git protocol, so it spends
+    **NEITHER the REST budget NOR GraphQL**. A claim that it costs core was put to this recon and is
+    refuted by that reading. This matters because GraphQL exhaustion has already driven a mint
+    DEGRADED and lost an id.
+
+    (5) **AND A PUSHED BRANCH EXISTS BEFORE ITS PR DOES**, so one ref sweep closes BOTH windows at
+    once: the snapshot-staleness window in (2) and the pushed-but-no-PR window a PR-based check can
+    never see."
+  design: |
+    (i) ONE SWEEP PER PASS, NEVER ONE CALL PER CANDIDATE. `git ls-remote --heads origin 'run-*'` once,
+    parsed into a set of task ids, consulted locally for every candidate in that pass. Rationale (4)
+    is the cost: 199 ms and no API budget for the whole pass, against one round trip per candidate if
+    done naively.
+    (ii) IT AUGMENTS `isOpenPr`, IT DOES NOT REPLACE IT. The existing chain is correct and its order is
+    load-bearing (the free `excludeIds` check first, then the probes). The ref sweep is an ADDITIONAL
+    refusal input for the case `isOpenPr` structurally cannot see, and it must be injectable the way
+    every other probe in `NextRunnableOpts` already is, so a fixture drives it with no network.
+    (iii) MATCH THE ID EXACTLY. `run-<id>-<epoch>` must parse with the id anchored — `W1-T51` must
+    never satisfy `W1-T512`. The same suffix-aware discipline the id allocator already needs.
+    (iv) THE LOSER STAYS ELIGIBLE. A refusal here is a SKIP, not a terminal state: the task is not
+    marked done, burns no strike, escalates nothing, and is offered again on the next pass once the
+    branch is gone. That is the existing contract for this arm.
+    (v) AND REUSE THE ROW THAT ALREADY EXISTS. `onSkip` is wired in `src/lib/daemon.ts` to
+    `log(\"dispatch.skipped\", { task, reason: \"open-pr\", pr_number })`. A ref-sweep refusal is the
+    same event with a different reason string, so it rides that row rather than minting a new step.
+    **DO NOT ADD A FIFTH FIRED-AND-UNREAD SIGNAL** — `daemon.tree_dirty`, `daemon.stale_code`,
+    `CiFailure.outsidePrRange` and `dh-rate-limit` are four measured instances.
+    (vi) FALSIFIER, BOTH DIRECTIONS. A candidate whose `run-<id>-*` branch exists on origin is refused
+    even when the cached projection shows no open PR; and a candidate with NO such branch is dispatched
+    exactly as today. The second is what keeps this from halting the fleet — rationale (3)'s five
+    sequential re-dispatches must all still run.
+    (vii) NOT IN SCOPE: W1-T533 (#1957) and the two-ids case; the `reap-branches` sweep, which reads
+    the same refs for a different purpose and is not refactored here; and any change to
+    `refreshMerged`'s own cadence, which is a projection-cost question rather than a correctness one.
+  acceptance:
+    - claim: "a candidate whose run branch already exists on origin is refused"
+      proof: "unit test: W1-T534: a candidate with an existing run branch is refused"
+    - claim: "a candidate with no run branch on origin still dispatches"
+      proof: "unit test: W1-T534: a candidate with no run branch still dispatches"
+    - claim: "the branch match is anchored so a shorter id cannot satisfy a longer one"
+      proof: "unit test: W1-T534: a shorter task id does not match a longer branch"
+    - claim: "a refused candidate stays eligible and burns no strike"
+      proof: "unit test: W1-T534: a refused candidate stays eligible and burns no strike"
+  origin: recon#same-id-second-run-2026-08-16
+  plan_refs: ["W1-T533", "W1-T177", "W1-T471", "W1-T494"]
+  files: [src/lib/drain.ts, test/drain.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: medium` IS SET UP FRONT — Rule 19 SPAN folds `src/lib/drain.ts` and `test/drain.test.ts`
+    onto ONE subsystem, and the blast radius matches: one additional injectable probe inside an
+    existing predicate, changing no other module. It is a REFUSAL though, so a wrong match stops work
+    dispatching — which is why design (vi)'s second direction is mandatory rather than decorative.
+    budget_usd 40.
+
+    `files:` DERIVED BY WORD-BOUNDED INVOCATION COUNT IN PYTHON. `src/lib/drain.ts` holds
+    `isDispatchEligible` (9) and `isOpenPr` (16) — the predicate and its input both live there.
+    `test/drain.test.ts` is its suite (`isOpenPr` 27, `OpenPrCheck` 9, `readLiveState` 8).
+    `src/run-task.ts` is NOT declared even though it holds the stale `lastProj` closure (`isOpenPr`
+    17): the fix is an ADDITIONAL probe in the predicate, not a repair of the projection's freshness,
+    and that file serialises every task naming it (W1-T471, 19,943 lines). AN IMPLEMENTER WHO CONCLUDES
+    THE PROJECTION ITSELF MUST CHANGE MUST AMEND THIS SHARD TO DECLARE IT rather than overrunning.
+
+    THREE CLAIMS PUT TO THIS RECON DID NOT SURVIVE AND ARE CORRECTED IN THE RATIONALE, because the
+    brief asked for scepticism about its own evidence. 'Nothing refuses a second run' — false, see (1).
+    '`ls-remote` spends the core budget' — false, see (4); it spends neither. And 'the query lives only
+    in `reap-branches`' — it appears in `src/lib/worker.ts` (6) and `src/run-task.ts` (7) as well; what
+    IS true is that it is absent from `src/lib/drain.ts` (0 hits, positive control `isDispatchEligible`
+    9), which is the claim that matters.
+
+    PROOF NOTES: all four proofs are NAME-FILTERED titles, not pure paths — a pure path runs the whole
+    file and one unrelated failure fails every criterion. Each was verified to match ZERO files today
+    against a control matching exactly one, and each is under 100 characters with no comma so
+    `looksLikeScenarioNarrative` (`src/lib/task-linter.ts`) cannot fail them.
+
+    ID PROVENANCE: `refs/rmd-id/*` was swept ALONGSIDE shards and open PRs and held 515, 516, 520-533
+    and 901-908 — **531, 532 AND 533 ARE RESERVED AND 531/532 ARE UNFILED; ALL WERE SKIPPED RATHER THAN
+    REUSED**, which is why this is 534. The ref sweep is the only instrument that sees a
+    reserved-but-unfiled id. Pushed under `--force-with-lease` with the refspec BRACED (the bare form
+    applies zsh's `:r` modifier and ships a corrupt refspec the exit code does not catch), the exit code
+    captured into a VARIABLE rather than read through a pipe, and the ref RE-READ with its
+    host-pid-nanosecond NONCE matched against the one written."
