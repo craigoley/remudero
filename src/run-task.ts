@@ -336,6 +336,7 @@ import {
   ensureJudgeableBody,
   filingAcceptanceCriteria,
   probeExistingPlanPr,
+  reconcileRetroChangesetClaim,
   regeneratePlanIndexAndCommit,
   regeneratePlanIndexFile,
 } from "./lib/plan-pr-emitter.js";
@@ -6945,6 +6946,53 @@ function defaultRetroEditBody(url: string, body: string): void {
   execFileSync("gh", ["pr", "edit", url, "--body", body], { stdio: "pipe" });
 }
 
+function defaultRetroFetchFiles(url: string): string[] {
+  const view = ghJson(["pr", "view", url, "--json", "files"]) as { files?: { path: string }[] };
+  return (view.files ?? []).map((f) => f.path);
+}
+
+/**
+ * THE RETRO'S CHANGESET-CLAIM REPAIR RUNG (W1-T911), same seam and same best-effort contract as
+ * {@link repairRetroAcceptanceBlock} right above it. `retroCommand` opens the PR (and the
+ * Architect worker writes its body) BEFORE `regenerateOrientation`/`regeneratePlanIndexAndCommit`
+ * push docs/ORIENTATION.md and plan/plan-index.json into that same PR — a body claiming "exactly
+ * one file" was TRUE when the worker wrote it and is FALSE by the time anything reads it. This
+ * rung fetches the PR's CURRENT body and CURRENT file list and, via the pure
+ * {@link reconcileRetroChangesetClaim} (lib/plan-pr-emitter.ts), repairs only the two claim shapes
+ * `bodyContradictsDiff` keys on — never a general rewrite.
+ *
+ * Best-effort by contract, exactly like its sibling: a reconcile failure is ledgered
+ * (`changeset_claim.reconcile.error`) and never propagates into an otherwise-fine retro.
+ */
+export function repairRetroChangesetClaim(
+  prUrl: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  deps: {
+    fetchBody?: (url: string) => string;
+    fetchFiles?: (url: string) => string[];
+    editBody?: (url: string, body: string) => void;
+  } = {},
+): "reconciled" | "unchanged" | "error" {
+  const { fetchBody, fetchFiles, editBody } = {
+    fetchBody: defaultRetroFetchBody,
+    fetchFiles: defaultRetroFetchFiles,
+    editBody: defaultRetroEditBody,
+    ...deps,
+  };
+  try {
+    const body = fetchBody(prUrl);
+    const files = fetchFiles(prUrl);
+    const reconciled = reconcileRetroChangesetClaim(body, files);
+    if (reconciled === undefined) return "unchanged";
+    editBody(prUrl, reconciled);
+    log("changeset_claim.reconciled", { pr_url: prUrl });
+    return "reconciled";
+  } catch (e) {
+    log("changeset_claim.reconcile.error", { error: String((e as Error)?.message ?? e) });
+    return "error";
+  }
+}
+
 export function reviewTaskIdFromBody(body: string): string | undefined {
   const matches = [...body.matchAll(/^Remudero-Task:\s*(\S+)\s*$/gm)];
   return matches.length ? matches[matches.length - 1][1] : undefined;
@@ -10146,6 +10194,13 @@ async function retroCommand(
     // deterministic backstop so a worker's shape mistake doesn't fail the whole retro
     // CLOSED at remudero-review. Best-effort: never lets this crash an otherwise-fine retro.
     repairRetroAcceptanceBlock(prUrl, log);
+
+    // W1-T911: the Architect's changeset claim ("exactly one file") was true when it opened
+    // this PR and false by the time anything reads it — ORIENTATION.md/plan-index.json were
+    // regenerated and pushed into this SAME PR above, AFTER the worker's own push. Same
+    // best-effort seam as the acceptance-block repair just above: never lets a reconcile
+    // failure fail an otherwise-fine retro.
+    repairRetroChangesetClaim(prUrl, log);
 
     // DETERMINISTIC GUARD: a retro is PLAN-ONLY. If the diff touches src/ or test/,
     // fail closed (the retro may never carry code — one concern).

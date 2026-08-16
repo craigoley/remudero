@@ -56,7 +56,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import type { AcceptanceCriterion } from "./plan.js";
-import { parseAcceptanceBlock } from "./review.js";
+import { bodyContradictsDiff, parseAcceptanceBlock } from "./review.js";
 import { shapeCommitMessage } from "./commit-message.js";
 import type { GhApiFetcher } from "./open-prs-rest.js";
 
@@ -413,4 +413,86 @@ export function probeExistingPlanPr(fetch: GhApiFetcher, owner: string, repo: st
   const row = rows?.[0];
   if (!row?.html_url || typeof row.number !== "number") return undefined;
   return { prUrl: row.html_url, prNumber: row.number };
+}
+
+// ── 8. Retro changeset-claim reconciliation (W1-T911) ────────────────────────────────────────
+//
+// WHY THIS EXISTS. `retroCommand` spawns the Architect worker, which edits MASTER-PLAN.md,
+// pushes, and OPENS THE PR — writing a body whose changeset claim ("exactly one file: …") is
+// TRUE at that instant. Only AFTER the worker returns does `retroCommand` call
+// `regenerateOrientation` and `regeneratePlanIndexAndCommit` and push docs/ORIENTATION.md and
+// plan/plan-index.json into the SAME PR (run-task.ts's own comment at that call site: those two
+// files "were regenerated AFTER the worker's own push"). The harness invalidates a true body by
+// its own subsequent action, and `bodyContradictsDiff` (lib/review.ts) correctly reports the
+// resulting contradiction every time (#974, #1685, #1943, #1944 — all the identical three-path
+// shape). The fix belongs where the widening happens, not in the Architect's prompt (the author
+// cannot know what the harness writes after it returns) and not by narrowing the changeset
+// (docs/ORIENTATION.md and plan/plan-index.json are both HARNESS-OWNED and load-bearing).
+//
+// A PURE FOLD — no git, no network, no I/O. Takes the body and the paths the caller already
+// fetched for the PR and returns the corrected body, or `undefined` when the body already agrees
+// with `files` (i.e. `bodyContradictsDiff(body, files).length === 0`).
+//
+// REPAIRS ONLY THE TWO ARMS `bodyContradictsDiff` ACTUALLY KEYS ON — never prose in general, per
+// that function's own doc comment ("a checker that guesses at natural language would be a worse
+// tripwire than the gap it closes"):
+//   (a) an "exactly N files[: a, b]" claim whose count disagrees with `files.length`, or whose
+//       enumeration names a path `files` does not contain. Replaced with a canonical enumeration
+//       that NEVER writes the word "exactly" and NEVER writes a count — arm (a) fires only on
+//       that literal, so a recomputed number would just re-arm the same tripwire the next time a
+//       retro's file count changes. There is no number left to go stale.
+//   (b) a "no <path>" denial for a path `files` DOES contain. Dropped outright — a denial the
+//       diff does NOT refute (e.g. "no src/" on a plan-only retro) is TRUE and is never even
+//       reported by `bodyContradictsDiff`, so it is never touched here; only a denial the diff
+//       actually refutes may be dropped.
+//
+// Loose prose that trips neither arm (e.g. "edits MASTER-PLAN.md and nothing else") survives
+// untouched — rewriting it would itself be the natural-language guessing this module refuses to
+// do.
+
+/** The canonical, count-free enumeration `reconcileRetroChangesetClaim` splices in for arm (a) —
+ *  never "exactly N files", so there is no number for a later run to re-invalidate. */
+function canonicalFilesClause(files: readonly string[]): string {
+  return `the following files: ${files.map((f) => `\`${f}\``).join(", ")}`;
+}
+
+/** Collapse the punctuation seams a dropped arm-(b) denial can leave behind — e.g. "No src/, no
+ *  test/, no docs/ORIENTATION.md." losing its last item becomes "No src/, no test/, .". Cosmetic
+ *  only: `bodyContradictsDiff` cares about the literal claim text being gone, not about the
+ *  surrounding punctuation, but a body full of visible seams would be a worse repair than none. */
+function tidyPunctuationSeams(body: string): string {
+  return body
+    .replace(/([.!?])[ \t]*,[ \t]*/g, "$1 ")
+    .replace(/,[ \t]*,/g, ",")
+    .replace(/:[ \t]*,/g, ":")
+    .replace(/,[ \t]*\./g, ".")
+    .replace(/[ \t]{2,}/g, " ");
+}
+
+/**
+ * Reconcile a retro PR body's changeset claim against the files it ACTUALLY carries.
+ *
+ * Returns `undefined` when the body already agrees with `files` — this must NEVER rewrite a
+ * healthy body (the false-positive containment half of the falsifier: a reconciler that rewrote
+ * every pass would fail this even while passing the repair half).
+ */
+export function reconcileRetroChangesetClaim(body: string, files: readonly string[]): string | undefined {
+  const contradictions = bodyContradictsDiff(body, [...files]);
+  if (contradictions.length === 0) return undefined;
+
+  let out = body;
+  const handled = new Set<string>();
+  for (const { claim } of contradictions) {
+    if (handled.has(claim)) continue;
+    handled.add(claim);
+    if (/^exactly\s+/i.test(claim)) {
+      out = out.split(claim).join(canonicalFilesClause(files));
+    } else if (/^no\s+/i.test(claim)) {
+      out = out.split(claim).join("");
+    }
+    // Any other shape `bodyContradictsDiff` might one day report is left alone here — this
+    // reconciler repairs ONLY the two arms named above, per its own doc comment.
+  }
+  out = tidyPunctuationSeams(out);
+  return out === body ? undefined : out;
 }
