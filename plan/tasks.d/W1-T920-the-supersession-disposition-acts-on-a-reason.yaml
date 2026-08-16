@@ -1,0 +1,166 @@
+- id: W1-T920
+  title: "the sweep can read a supersession verdict on an open PR and dispose of it, gated behind a policy flag defaulting off, acting on the verdict's REASON and never on a match"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  rationale: "THIS IS THE DISPOSITION HALF. W1-T919's ruling (DECISIONS.md, #1987, merged
+    2026-08-16T17:54:44Z) is the authority it cites and it says in terms what this task must obey:
+    'Any future disposition built on this ruling must therefore act on a REASON, never on a match,
+    and this entry must not be read as duplicates may be closed automatically.' That sentence is the
+    specification, not a caveat.
+
+    (1) **ITS DEPENDENCY DOES NOT EXIST YET, AND THAT IS THE FIRST THING AN IMPLEMENTER MUST CHECK.**
+    Re-derived at origin/main f889862: `supersessionVerdict` and `SupersessionVerdict` each read
+    **ZERO** files across `src/` and `test/`, against positive controls of `findMergedByTrailer`
+    (8 src / 96 test), `armSessionPrs` (2/2) and `assertLiveWriteAllowed` (8/1), and a negative
+    control of 0 for `supersessionVerdictZzq`. `git log -S supersessionVerdict` over origin/main
+    returns **0 commits**, against a control of **117** for `findMergedByTrailer`. No open PR carries
+    it. **SO THE DETECTOR IS NOT BUILT, NOT FILED, AND NOT IN FLIGHT.** `depends_on` is empty only
+    because there is no id to name; this task MUST NOT be dispatched until a detection shard exists
+    and has merged, or it will have nothing to read — the same trap W1-T528 avoided by depending on
+    W1-T520 explicitly.
+
+    (2) **THE PREMISE THAT CLOSING WAS NEVER BUILT IS FALSE, AND THE TRUTH IS WORSE.** A prior reading
+    reported zero `pr close` across `src/`. Measured: **ONE**, in `buildSweepEffects`'s `close`
+    effect (`src/run-task.ts`), against a positive control of 5 for `[\"pr\", \"merge\"]`. So the
+    sweep already closes pull requests today. **AND IT CLOSES THEM WITH `--delete-branch`** — the
+    argv is `[\"pr\", \"close\", pr.prUrl, \"--comment\", …, \"--delete-branch\"]`. That is precisely
+    the act W1-T919's own reversibility measurement identifies as irreversible: #1873 (closed,
+    unmerged) still has `fix/loadplan-enoent-shard-race` on origin, while #1874 (merged with
+    `--delete-branch`) has no branch at all. **THE EXISTING CLOSE IS THEREFORE NOT THE REVERSIBLE ACT
+    THE RULING BLESSED**, and it is not fenced: `assertLiveWriteAllowed` appears ZERO times within
+    twenty lines of that call.
+
+    (3) **AND `assertLiveWriteAllowed` HAS NO CLOSE VERB.** Re-derived from its own type,
+    `LiveWriteBoundary` (`src/lib/live-write-guard.ts`) = `git-push | gh-pr-create | gh-pr-merge |
+    gh-issue-create`, with call counts gh-pr-merge 6, gh-pr-create 4, git-push 3, gh-issue-create 1.
+    W1-T919 recorded the same four and stated it does NOT amend that list. So adding a boundary is
+    IN SCOPE HERE and must be said out loud — see design (iii).
+
+    (4) **WHY THIS IS WORTH BUILDING AT ALL, WITH THE POPULATION LIMIT STATED RATHER THAN DESIGNED
+    AROUND.** #1955 carried the same `Remudero-Task: W1-T908` as #1969, the same title and an
+    identical `+287/-2` over the same two paths, and merging it would have deleted `syncCommand` and
+    reverted `lint-plan`'s broken-base degradation — two fixes already on main. But a trailer-keyed
+    verdict sees the fleet's own work and not the operator's: **121 of the last 200 PRs carry no
+    trailer at all**, and both measured duplicate races were trailerless `fix/…` branches
+    (#1873/#1874). This disposition therefore covers the trailered lane and nothing else. That is a
+    scope statement, not a defect, and it must appear in the shard rather than be discovered."
+  design: |
+    THE SHAPE: a disposition that reads a verdict, records it with its evidence, and — only when a
+    policy flag is on — acts. No new detector. No new ledger step without a named reader.
+
+    (i) THE FLAG DEFAULTS OFF AND THE OFF PATH IS ASSERTED FIRST. Copy `armSessionPrs` exactly, which
+    is the pattern that let the operator enable a sweep act deliberately: a boolean under `sweep.` in
+    `plan/policy.yaml` declared through `booleanField` (`src/lib/policy.ts`, where
+    `sweep.armSessionPrs` is registered "net-new"), read via `loadDefaultPolicy().values.sweep.…`,
+    with a `…Override?: boolean` parameter so a test drives both arms without touching the file.
+    **THE FIRST TEST WRITTEN MUST BE THE OFF PATH**, and it must assert BYTE-FOR-BYTE today's
+    behaviour: no close attempted, no branch touched, no state changed, and the same disposition the
+    PR would have received before this existed. A flag whose off path is merely "probably inert" is
+    not gated.
+
+    (ii) IT ACTS ON THE VERDICT'S REASON, NEVER ON A MATCH — AND THE FALSIFIER IS #1873/#1874.
+    W1-T919 measured them: byte-identical titles, identical file lists, created 74 seconds apart, and
+    the one that merged was chosen by an ARGUED difference. **A DETECTOR KEYED ON IDENTITY WOULD HAVE
+    CLOSED THE BETTER PULL REQUEST.** So the acceptance must drive that exact shape — same trailer,
+    same title, same file list — and assert the disposition takes NO action, because the verdict
+    reports unique. Flagging it fails the suite. This is the test that protects the design from
+    itself.
+
+    (iii) INDETERMINATE MUST NEVER CLOSE, AND THIS IS A THIRD OUTCOME NOT A FALSY SECOND. A read
+    failure — the trailer scan threw, the diff query errored, the merged-by-trailer lookup was
+    rate-limited — is NOT a finding of uniqueness and must not be collapsed into one. The verdict is
+    three-valued (superseded / unique / indeterminate) and only `superseded` may act. The same
+    fail-open direction the sweep already uses for `readLiveState`'s `ok:false`: an unreadable answer
+    behaves exactly as if no check ran.
+
+    (iv) THE DIFF FINDING CARRIES ITS OWN CORPUS CONTROL. The hand method that worked on #1955 read
+    **131 lines with ZERO hunks** naming four symbols already on main — **the line count WAS the
+    control**. A diff that reads empty because the query was wrong is indistinguishable, from the
+    result alone, from a diff that is genuinely empty. So the verdict must carry the raw size
+    alongside the hunk finding, and a zero-length read must resolve to `indeterminate`, never to
+    `superseded`.
+
+    (v) THE VERDICT NAMES ITS EVIDENCE, NOT ITS CONCLUSION. "Superseded" alone is unauditable. It must
+    carry the superseding PR number, the shared task id, and the diff finding with its control — that
+    is what made the #1955 diagnosis checkable in one read.
+
+    (vi) ADDING A `gh-pr-close` BOUNDARY IS PART OF THIS TASK AND IS SAID OUT LOUD. Rationale (3):
+    there is no close verb today and the existing close is unfenced AND carries `--delete-branch`.
+    Under W1-T919's axis the deletion is the irreversible part, not the closing. The implementer must
+    therefore either (a) add `gh-pr-close` to `LiveWriteBoundary` and fence the new act, or (b) make
+    the new act reversible by construction — close WITHOUT `--delete-branch` — and say which, with
+    the reason. **DO NOT WIDEN OR NARROW THE FOUR EXISTING VERBS**; that is the operator's ruling and
+    W1-T919 explicitly declined to make it. And the pre-existing unfenced `close` effect is NOT
+    retrofitted here: naming it is this shard's job, changing it is a separate one.
+
+    (vii) NO NEW LEDGER STEP WITHOUT A NAMED READER IN THE SAME PR. Five fired-and-unread signals are
+    measured — `daemon.tree_dirty`, `daemon.stale_code`, `CiFailure.outsidePrRange`, `dh-rate-limit`
+    and `dispatch.stood_down`, the last with three emitters, no reader, and absent from both
+    `LEDGER_STEP_PATTERN` (`src/lib/autonomy.ts`) and `DECISION_RELEVANT_LEDGER_STEPS`
+    (`src/lib/ledger.ts`), so it does not even survive rotation. Prefer the `sweep.disposed` row this
+    disposition already writes, with its own reason string, exactly as W1-T916 rides `dispatch.skipped`.
+
+    WHAT MUST NOT BE BUILT: the detector itself (rationale (1) — a separate shard); any force-push or
+    branch deletion in any form, which stay forbidden regardless of the axis; a change to the four
+    existing `LiveWriteBoundary` verbs; a retrofit of the pre-existing `close` effect; a second
+    trailer-reading path when `findMergedByTrailer` exists; and any default that makes the fleet close
+    a pull request without the operator turning it on.
+  acceptance:
+    - claim: "with the flag off the disposition changes nothing at all"
+      proof: "unit test: W1-T920: the disposition is inert while its policy flag is off"
+    - claim: "a superseded verdict acts only once the flag is turned on"
+      proof: "unit test: W1-T920: a superseded verdict acts only with the flag on"
+    - claim: "a PR identical in trailer and title and file list is never acted on"
+      proof: "unit test: W1-T920: an identical but unique pull request is never disposed"
+    - claim: "an indeterminate read is never treated as a finding"
+      proof: "unit test: W1-T920: an indeterminate verdict never closes anything"
+    - claim: "the verdict carries the superseding PR and the diff control rather than a bare label"
+      proof: "unit test: W1-T920: the disposition records its evidence and its corpus control"
+  origin: recon#supersession-disposition-2026-08-16
+  plan_refs: ["W1-T919", "W1-T916", "W1-T528", "W1-T494"]
+  files: [src/lib/sweep.ts, src/run-task.ts, src/lib/policy.ts, test/sweep.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across three source modules and a suite, and
+    independently warranted: this is the first disposition that can CLOSE a pull request on the
+    fleet's own judgement. A wrong verdict does not fail loudly, it discards someone's work.
+    budget_usd 55 — one policy flag, one disposition arm, a five-way falsifier.
+
+    `src/run-task.ts` IS DECLARED AND THE SERIALISATION COST IS ACCEPTED IN WRITING: the sweep's
+    effects are built in `buildSweepEffects` there, the existing `close` effect lives there, and
+    `loadDefaultPolicy` is read there. That serialises this task against every other task naming that
+    file (`partitionByFileOverlap`, W1-T471) and is paid knowingly rather than avoided by declaring a
+    path the change cannot touch. `src/lib/policy.ts` carries the flag beside `sweep.armSessionPrs`;
+    `src/lib/sweep.ts` carries the disposition; `test/sweep.test.ts` is the sweep's own suite.
+    `src/lib/live-write-guard.ts` is deliberately NOT declared: whether a `gh-pr-close` boundary is
+    added at all is design (vi)'s open choice, and declaring a path the chosen option may not touch
+    would fail `inverseScopeUntouchedFiles` (`src/lib/review.ts`). An implementer choosing option (a)
+    must amend `files:` in the same PR and say so.
+
+    TWO PREMISES FROM THE COMMISSIONING BRIEF DID NOT SURVIVE RE-DERIVATION AND ARE CORRECTED IN THE
+    RATIONALE. Closing was reported as never built; it reads ONE occurrence in `src/run-task.ts`
+    against a control of 5 for `[\"pr\", \"merge\"]`, and it carries `--delete-branch`. And
+    `supersessionVerdict` was described as something the sweep reads today; it reads ZERO everywhere
+    with four working positive controls. Both are recorded because a task built on either would have
+    been wrong in its first paragraph.
+
+    PROOF NOTES: all five proofs are NAME-FILTERED titles, not pure paths — a pure path runs the whole
+    file and one unrelated failure fails every criterion. Each was verified to match ZERO files under
+    `test/` at f889862 against a positive control matching exactly one, and each is under 100
+    characters with no comma so `looksLikeScenarioNarrative` (`src/lib/task-linter.ts`) cannot fail
+    them. No proof names this shard.
+
+    ID PROVENANCE: tree max was W1-T918 and the reservation refs ran to W1-T917, so the allocator sat
+    BEHIND the plan rather than ahead of it. **W1-T919 IS CONSUMED BY THE DECISIONS RULING IN #1987**
+    — it carries that id in its title with no shard and no trailer commit, which is why this task is
+    920 rather than 919. W1-T920 was verified free on origin/main (0), in the reservation refs (0)
+    and across every open PR's file list (0), against a positive control of 1 for the known-taken
+    W1-T916. It was taken as a UNIQUE ORPHAN PAYLOAD OVER THE EMPTY TREE carrying a
+    host-pid-nanosecond nonce, pushed under `--force-with-lease` with the refspec variable braced and
+    the exit code captured INTO A VARIABLE rather than read through a pipe, then the ref was RE-READ
+    and its nonce matched against the one written."
