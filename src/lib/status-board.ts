@@ -59,6 +59,7 @@ import {
   type CrashLoopVerdict,
   type CrashLoopWindow,
 } from "./daemon.js";
+import { aggregateCacheHitTotals, cacheHitRatio, formatCacheHitFigure, type CacheHitGrain, type CacheHitTotals } from "./digest.js";
 import { deployAutoPath, deployFailedAlertPath, sameCommit } from "./deployer.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { runnableCandidates, type MergedSet } from "./drain.js";
@@ -445,6 +446,20 @@ export interface HeadroomDegraded {
   ageMs?: number;
 }
 
+/**
+ * W1-T929: the cache-hit ratio (feedback fb-1785237559155-feef92, MASTER-PLAN §8A), per run and
+ * per task class, over the SAME read ledger window {@link buildStatusBoard}'s other sections
+ * already opened — `found: false` when nothing in that window carries usable cache-token data
+ * yet (mirrors digest.ts's `DigestSummary.cacheHit` soft-compose discard, design note (iv)).
+ * `totals` is digest.ts's own {@link CacheHitTotals}, computed by its {@link
+ * aggregateCacheHitTotals}: ONE traversal, so `rmd status` and the daily digest can never
+ * disagree on WHICH lines count.
+ */
+export interface CacheHitSection {
+  found: boolean;
+  totals?: CacheHitTotals;
+}
+
 export interface StatusBoardModel {
   generatedAt: string;
   liveness: LivenessSection;
@@ -454,6 +469,7 @@ export interface StatusBoardModel {
   queueHead: QueueHeadSection;
   inbox: InboxSection;
   headroom: HeadroomSection;
+  cacheHit: CacheHitSection;
 }
 
 // ── Deps ─────────────────────────────────────────────────────────────────────────────────────
@@ -1605,6 +1621,11 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
   const inbox = deriveInbox(plan, lines, projections, ghUnknownReason, readProposalRegistry, readDraftCache, grepAnchorTrue);
   const headroom = deriveHeadroom(lines, nowMs, (deps.resolveHeadroomEnabled ?? (() => true))());
 
+  // ── W1-T929: CACHE HIT — same `lines` window every other section above already read, one
+  // extra traversal (digest.ts's aggregateCacheHitTotals), no second ledger read. ──────────────
+  const cacheHitTotals = aggregateCacheHitTotals(lines);
+  const cacheHit: CacheHitSection = { found: cacheHitTotals !== undefined, totals: cacheHitTotals };
+
   return {
     generatedAt: new Date(nowMs).toISOString(),
     liveness,
@@ -1614,6 +1635,7 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
     queueHead,
     inbox,
     headroom,
+    cacheHit,
   };
 }
 
@@ -1781,6 +1803,54 @@ function renderHeadroomBlock(h: HeadroomSection): string[] {
   return out;
 }
 
+/** Render one {@link CacheHitTotals} grain map (`byRun`/`byClass`) as one line, e.g.
+ *  `by run  : R1=83.3% (coverage 100%), R2=UNKNOWN (coverage 0%)` — sorted by key, deterministic.
+ *  Formats via digest.ts's {@link formatCacheHitFigure} — the ONE formatting rule, shared rather
+ *  than re-spelled here (design note (i)). */
+function renderCacheHitGrains(grains: Record<string, CacheHitGrain>): string {
+  return Object.keys(grains)
+    .sort()
+    .map((key) => `${key}=${formatCacheHitFigure(grains[key])}`)
+    .join(", ");
+}
+
+/** Sum every {@link CacheHitGrain} in `byClass` into one board-wide total — `byClass` already
+ *  partitions every call line in the window exactly once (including the "unknown" bucket), so
+ *  summing it (rather than `byRun`) can never double-count a line. */
+function sumCacheHitGrains(byClass: Record<string, CacheHitGrain>): CacheHitGrain {
+  return Object.values(byClass).reduce<CacheHitGrain>(
+    (sum, g) => ({
+      cacheRead: sum.cacheRead + g.cacheRead,
+      input: sum.input + g.input,
+      cacheCreation: sum.cacheCreation + g.cacheCreation,
+      callLines: sum.callLines + g.callLines,
+      coveredLines: sum.coveredLines + g.coveredLines,
+    }),
+    { cacheRead: 0, input: 0, cacheCreation: 0, callLines: 0, coveredLines: 0 },
+  );
+}
+
+function renderCacheHitBlock(c: CacheHitSection): string[] {
+  const out = ["── CACHE HIT ────────────────────────────────────────────"];
+  if (!c.found || !c.totals) {
+    out.push("no cache-token data in this window");
+    return out;
+  }
+  // ONE board-wide figure, off the SAME `cacheHitRatio` arithmetic digest.ts exports (design
+  // note (i), "ONE DERIVATION, TWO RENDERERS") — called directly here, not via a pre-rendered
+  // string, so this total is provably the SAME formula as the digest's, applied to this board's
+  // own combined-across-classes total rather than a second opinion of it.
+  const overall = sumCacheHitGrains(c.totals.byClass);
+  const overallRatio = cacheHitRatio(overall);
+  const overallCoveragePct = overall.callLines > 0 ? Math.round((overall.coveredLines / overall.callLines) * 100) : 0;
+  const overallFigure =
+    overallRatio === undefined ? `UNKNOWN (coverage ${overallCoveragePct}%)` : `${(overallRatio * 100).toFixed(1)}% (coverage ${overallCoveragePct}%)`;
+  out.push(`overall : ${overallFigure}`);
+  out.push(`by run  : ${renderCacheHitGrains(c.totals.byRun)}`);
+  out.push(`by class: ${renderCacheHitGrains(c.totals.byClass)}`);
+  return out;
+}
+
 /** The text projection of {@link StatusBoardModel} — every field it prints comes off the model
  *  passed in, never a fresh read, so `--json` and the default text output can never disagree
  *  (they are the SAME derivation, rendered twice). */
@@ -1792,6 +1862,7 @@ export function renderStatusBoardText(model: StatusBoardModel): string {
   lines.push(...renderBlockersBlock(model.blockers), "");
   lines.push(...renderQueueHeadBlock(model.queueHead), "");
   lines.push(...renderInboxBlock(model.inbox), "");
-  lines.push(...renderHeadroomBlock(model.headroom));
+  lines.push(...renderHeadroomBlock(model.headroom), "");
+  lines.push(...renderCacheHitBlock(model.cacheHit));
   return lines.join("\n");
 }
