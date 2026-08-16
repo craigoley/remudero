@@ -1424,3 +1424,66 @@ match, and this entry must not be read as "duplicates may be closed automaticall
 **WHAT THIS ENTRY DOES NOT DO.** It does not amend `assertLiveWriteAllowed`, add an act to its list,
 or change any disposition. The ruling comes first; the disposition follows behind it, cites this
 entry, and carries its own evidence.
+
+## 2026-08-16 — RULING: sessions may READ with `az vm run-command`, never MUTATE, and must DISCLOSE — recorded as ADVICE, not as a control
+
+**THE RULING.** A session may use `az vm run-command` for READ-ONLY inspection of the fleet host, must
+DISCLOSE every such use in its report, and must never use it to mutate. It is not authorised for any
+act that changes state on the VM.
+
+**AND THIS ENTRY IS ADVISORY, WHICH IS THE POINT OF WRITING IT DOWN RATHER THAN THE WEAKNESS OF IT.**
+Nothing refuses this verb, measured at origin/main: `hooks/deny-floor.sh` carries **0** rules naming
+`az` or `azure` against a positive control of **4** naming `gh`; **0** tracked files name
+`vm run-command` against a control of **9** naming `az `; and this file carried **0** lines on it
+across **1,426** before this entry. So the rule binds only because a session reads it. That is the
+same unenforced-prose class CLAUDE.md's own header warns about, and recording it as if it were a
+control would be worse than naming the exposure honestly. **THE GUARD DOES NOT EXIST; THE NORM IS ALL
+THERE IS.**
+
+**WHY IT IS WORTH KEEPING ANYWAY.** It is the only route to the host that survives an SSH outage or a
+Docker API failure, needs no inbound port, and on 2026-08-15 it answered a question four pull requests
+were blocked on: worker liveness read **2, not 0**, so the shortcut everyone had assumed would have
+killed live work. A capability that earns its keep is not made safer by going unmentioned.
+
+**THE EXPOSURE, MEASURED.** A session inherits the operator's own login. `~/.azure/azureProfile.json`
+names `CraigOley@gmail.com`, `type: user`, whose role assignment is **Owner at SUBSCRIPTION scope** —
+not VM scope, not resource-group scope. The MSAL cache is mode **600** owned by `craigoleyagent`, the
+account every lane runs as, and it holds a **RefreshToken that silently re-mints**: its mtime moved
+during the recon that produced this entry, from reads that never prompted for anything. The Activity
+Log's own claims name `appid 04b07795-8ddb-461a-bbee-02f9e1bf7b46` — the Azure CLI's public client —
+with `authnmethodsreferences: pwd,mfa`. **SO MFA PROTECTED THE SIGN-IN AND DOES NOT PROTECT EACH USE.**
+
+**THE GOOD NEWS, RECORDED SO IT IS NOT RE-INVESTIGATED: THE EXPOSURE RUNS ONE WAY.** The VM carries
+**no managed identity** — IMDS's token endpoint returns HTTP **400** `Identity not found` against a
+positive control of HTTP **200** on the instance endpoint, and the control-plane `identity` block is
+`null`. A compromised worker therefore cannot reach the control plane from inside the box. The risk is
+the cached login on disk, not the machine's own credentials.
+
+**WHAT THE LOG DOES NOT CARRY, WHICH IS HOW MUCH WEIGHT THE DISCLOSURE NORM ACTUALLY BEARS.** Twelve
+invocations in thirty hours are recorded, and the **COMMAND TEXT IS ABSENT FROM EVERY ROW** — the union
+of every `properties` key across all of them is `entity`, `eventCategory`, `hierarchy`, `message`,
+`serviceRequestId`, `statusCode`, with `description` empty throughout. **A READ-ONLY USE AND A
+DESTRUCTIVE ONE ARE THEREFORE INDISTINGUISHABLE AFTER THE FACT.** Worse for attribution, the `ipaddr`
+claim carries the operator's home address rather than the VM's, so the record points at the wrong
+origin. Read them through the ARM REST `eventtypes/management` endpoint: `az monitor activity-log list`
+returned **2 events and 0 runCommand** over the same window where REST returned **49 and 36**.
+
+**A FIGURE FROM THE COMMISSIONING BRIEF, CORRECTED.** The audit trail is NOT shorter than the fleet's
+own record. The Activity Log's 90-day default **OUTLIVES** the ledger's retained union, which spans
+**8 days** (2026-08-08 → 2026-08-16). Nothing exports the Activity Log, so 90 days is what there is —
+but it is the longer of the two, not the shorter.
+
+**HOW THIS SITS WITH W1-T919.** That ruling's axis — the fleet gates on IRREVERSIBILITY, not on
+outwardness — makes this the **MOST GATE-WORTHY CAPABILITY ANY LANE CURRENTLY HOLDS**: arbitrary root,
+unbounded blast radius, and no reversibility whatever for a destructive command. **BUT IT DOES NOT
+DECIDE THIS CASE**, and this entry does not pretend otherwise: W1-T919 says in terms that it "does not
+amend `assertLiveWriteAllowed`, add an act to its list, or change any disposition." The axis tells you
+how to weigh this verb; it does not fence it. That is why this is a separate entry rather than a
+corollary.
+
+**THE OPEN QUESTION, NAMED AND NOT ANSWERED HERE.** Whether the daemon account should hold a
+purpose-scoped principal instead of the operator's personal login. Nothing in this entry revokes or
+narrows the operator's own access — he needs it. The question is only whether a *session* should
+inherit it, and that is a decision about provisioning, not about this verb.
+
+**Rollback:** delete this entry. It changes no behaviour, so nothing else moves.
