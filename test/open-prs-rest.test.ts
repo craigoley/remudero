@@ -548,7 +548,8 @@ test("W1-T525: every gh call routes through the metered entry point", () => {
   // `api` is metered — `-i` is added, and the rest of the argv survives verbatim.
   const api = meteredGhArgs(["api", "repos/craigoley/remudero", "--jq", ".full_name"]);
   assert.equal(api.metered, true);
-  assert.deepEqual(api.args, ["api", "-i", "repos/craigoley/remudero", "--jq", ".full_name"]);
+  assert.deepEqual(api.args, ["api", "repos/craigoley/remudero", "--jq", ".full_name", "-i"],
+    "appended, never spliced in front of the endpoint — argv[1] must stay the path");
 
   // FALSIFIER, and the reason the gate is not cosmetic: `--include` is an `api`-only flag. Adding
   // it to `gh pr view` would make every one of those call sites an unknown-flag error.
@@ -565,7 +566,7 @@ test("W1-T525: every gh call routes through the metered entry point", () => {
     seen.push(a);
     return "HTTP/2.0 200 OK\r\nx-ratelimit-remaining: 42\r\n\r\n{\"ok\":true}";
   });
-  assert.deepEqual(seen, [["api", "-i", "repos/x"]]);
+  assert.deepEqual(seen, [["api", "repos/x", "-i"]]);
   assert.deepEqual(body, { ok: true }, "the body is returned exactly as before");
 });
 

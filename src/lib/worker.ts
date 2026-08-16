@@ -2604,6 +2604,13 @@ export function resetGhRateLimitReading(): void {
  * of its call sites: same signature, same return, same throw. It additionally records the response's
  * own rate-limit headers when it can.
  *
+ * `-i` IS APPENDED, NOT INSERTED, AND THAT POSITION IS LOAD-BEARING. `gh api <path>` carries its
+ * endpoint as the FIRST positional, and both this repo's own call sites and every `gh` fake in the
+ * suite read it there; splicing a flag in front of it shifts the endpoint out from under them (it
+ * cost four fix-rung tests, which read the shifted argv as "no such PR" and stood down at
+ * `sweep.fix.not_open`). Appending leaves the endpoint at argv[1] for every reader and is a shape
+ * this codebase already ships — `["api", "rate_limit", "--jq", …]` puts a flag after the path too.
+ *
  * `-i` IS ADDED ONLY FOR `gh api`, AND THAT RESTRICTION IS NOT COSMETIC. `--include` is an `api`
  * subcommand flag; `gh pr view` has no such flag (verified against the installed CLI's own help),
  * and `ghJson` is called with `["pr", "view", …]` today. Adding it unconditionally would turn every
@@ -2618,7 +2625,7 @@ export function resetGhRateLimitReading(): void {
  */
 export function meteredGhArgs(args: string[]): { args: string[]; metered: boolean } {
   const metered = args[0] === "api" && !args.includes("-i") && !args.includes("--include");
-  return { args: metered ? ["api", "-i", ...args.slice(1)] : args, metered };
+  return { args: metered ? [...args, "-i"] : args, metered };
 }
 
 /** How {@link ghJson} shells out. Injectable LAST so no existing positional caller shifts. */
