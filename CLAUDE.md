@@ -40,9 +40,9 @@ forensic detail, so the narrative does not need to live here.
   (`git show <sha> -- src/… > /tmp/x.diff`). If that blocks too, your lcov under-reports and a
   local block means "investigate", not "stop". **And never QUOTE a coverage percentage from a local
   run** — carried figures must come from CI's own logs: one local attempt produced a 2.06pt spread
-  on a static tree against CI's ~0.14pt, another measured the after-tree twice (total LF
-  byte-identical at 97591) and reported it as a before/after delta. The local instrument decides
-  "investigate vs proceed"; CI's log is the only citable number.
+  on a static tree against CI's ~0.14pt, another measured the same after-tree twice and reported it
+  as a before/after delta. The local instrument decides "investigate vs proceed"; CI's log is the
+  only citable number.
   *(#981; #973/#975 both blocked locally yet merged green; local-spread instances 2026-08-14)*
 - **Verify every PR-body claim about your own diff against `git diff --numstat`, and RE-VERIFY after
   each follow-up commit.** `bodyContradictsDiff` (`src/lib/review.ts`, W1-T274) OPENS THE DIFF and
@@ -69,9 +69,9 @@ forensic detail, so the narrative does not need to live here.
   which would have manufactured a four-file regression that does not exist. This COMPOUNDS the
   compare-both-sides discipline rather than being covered by it: comparing failure SETS instead of
   counts does not save you when one side is truncated, because the truncated set is a subset either
-  way. Require `# tests` / `# pass` / `# fail` on BOTH sides before diffing them, and normalise paths
-  first when the sides ran in different trees. *(2026-08-09 — the run was truncated by the session's
-  own `pkill -f`, the self-match rule under "Operating this host")*
+  way. Require `# tests`/`# pass`/`# fail` on BOTH sides before diffing, and normalise paths first
+  when the sides ran in different trees. *(2026-08-09 — truncated by the session's own `pkill -f`,
+  the self-match rule under "Operating this host")*
 
 ## Writing proofs and acceptance criteria
 
@@ -394,15 +394,12 @@ forensic detail, so the narrative does not need to live here.
   console line is REPORTED, not consulted. `armAutoMergeAtOpen` is `return attemptArm(prUrl,
   deps);` — NO verdict gate and NO ci gate — and the implement lane calls it at PR-OPEN, before any
   review. **So IMPLEMENTATION PRs, which change source, self-merge earlier and with fewer checks
-  than triage PRs, which only add plan text.** Operator ruling on W1-T489: DOCUMENTED, not changed —
-  a triage PR armed 15:10:48Z and self-merged 15:15:54Z, five minutes, no operator act. The
-  unattended rate is real now that W1-T469 fires the rung on `partition.serialized.length > 0`
-  rather than idleness, bounded only by `autoTriage.maxPerDay` (`plan/policy.yaml`, value 24) and
-  `minIntervalMinutes` 15. Cost per run is a QUERY, not a number to carry —
-  `zgrep -h '"step":"verdict"' state/ledger.*.ndjson.gz state/ledger.ndjson | …` over the union, per
-  the archive rule below; the operator's 2026-08-14 reading was a mean of $1.09 over 70 runs
-  (median $1.03, p90 $1.77, max $2.86), which supersedes any single-sample extrapolation.
-  *(#981; the lane-asymmetry half W1-T489, 2026-08-14)*
+  than triage PRs, which only add plan text.** Operator ruling on W1-T489: DOCUMENTED, not changed.
+  The unattended rate is real now that W1-T469 fires the rung on `partition.serialized.length > 0`
+  rather than idleness, bounded by `autoTriage.maxPerDay`/`minIntervalMinutes` (`plan/policy.yaml`).
+  Cost per run is a QUERY, not a number to carry — re-derive it over the
+  ledger union (archive rule below) rather than quoting the figure `src/lib/auto-triage.ts` already
+  carries. *(#981; the lane-asymmetry half W1-T489, 2026-08-14)*
 - **On a zero match, `node --test --test-name-pattern` still emits `ok 1 - <RELATIVE test path>` —
   exclude the wrapper by the RELATIVE path, never the absolute one.** A control filtering on the
   absolute path counts the wrapper, returns 1, and reports a false pass, which would make every
@@ -462,16 +459,16 @@ forensic detail, so the narrative does not need to live here.
   that delivered nothing, and a check-wait bound where 21 of 21 booked PRs later merged.
   *(W1-T312, W1-T380/#1392, W1-T382/#1401)*
 - **A ZERO IS NOT A MEASUREMENT UNTIL A POSITIVE CONTROL PROVES THE QUERY COULD SEE ITS CORPUS.
-  RUN ONE ON EVERY SWEEP WHOSE ANSWER YOU INTEND TO ACT ON — not just when a zero looks suspicious.**
-  FOUR distinct instruments here answer WRONG rather than erroring, and STOP EXPECTING THIS LIST TO
-  BE COMPLETE: three of the four were found by ACCIDENT within one week, each by a falsifier that
+  RUN ONE ON EVERY SWEEP WHOSE ANSWER YOU INTEND TO ACT ON.**
+  FOUR distinct instruments here answer WRONG rather than erroring; do not expect this list complete
+  — three of the four were found by ACCIDENT within one week, each by a falsifier that
   reddened nothing or a target visible in the file — never by reading the query. Enumerating the
-  hazards has lost that race twice; the control is the only instrument that generalises, because it
-  tests the QUERY rather than your memory of which tool is broken. A control costs one command: match
-  something you can SEE, in the same corpus, with the same tool and flags.
-  **And note the two directions a control can be too weak: (c) is one — A CONTROL THAT PROVES THE
-  CORPUS IS READABLE DOES NOT PROVE THE QUERY COVERS IT — and (a) is the other, where the control
-  passes because you unwittingly ran a DIFFERENT engine than the sweep did.**
+  hazards has lost that race twice; the control is the only instrument that generalises — it tests
+  the QUERY, not your memory of which tool is broken. A control costs one command: match something
+  you can SEE, in the same corpus, with the same tool and flags.
+  **Two directions a control can be too weak: (c) — A CONTROL THAT PROVES THE CORPUS IS READABLE
+  DOES NOT PROVE THE QUERY COVERS IT — and (a), where the control passes because you unwittingly ran
+  a DIFFERENT engine than the sweep did.**
 - **(a) A POSIX REGEX ENGINE HERE SILENTLY DROPS `\s`/`\b` INSTEAD OF ERRORING, AND TWO DIFFERENT
   TOOLS DO IT.** Both are GNU extensions; a POSIX engine matches something else and reports a clean
   zero. `awk` is mawk: over a file containing `  let b = 2;`, `/^[[:space:]]+(let|const)/` matches 1
@@ -504,10 +501,8 @@ forensic detail, so the narrative does not need to live here.
   `rg` alone is unsafe. `/usr/bin/grep` is unaffected, which is why it went unnoticed for months: a
   human at a terminal never sees it. Use `grep -ar`, `rg -la` or `git grep` for ANY sweep that
   decides a `files:` list, a violation count or a scope audit. **NEVER TRUST A COUNT HERE — RUN THE
-  QUERY:** `git ls-files -z | xargs -0 perl -0777 -ne 'print "$ARGV\n" if /\0/'`. The previous
-  wording said "EXACTLY FOUR", named four files, and was wrong twice within days — first when
-  `src/lib/verdict-calibration.ts` joined unnoticed, then when the fix emptied the set entirely.
-  Today it returns three `.png` and no sources. `git grep --cached -I -l ''` is NOT a substitute: git
+  QUERY:** `git ls-files -z | xargs -0 perl -0777 -ne 'print "$ARGV\n" if /\0/'` — a carried count
+  goes stale the moment the set changes. `git grep --cached -I -l ''` is NOT a substitute: git
   sniffs only the first 8000 bytes, and the two files that mattered carried theirs at 51546 and 8609.
   *(2026-08-11; the count retired and the population emptied 2026-08-12)*
 - **(c) A GLOB THAT NAMES ONE FILE FORM ANSWERS FROM THE OTHER WITHOUT SAYING SO.** The ledger
@@ -532,21 +527,18 @@ forensic detail, so the narrative does not need to live here.
 - **(e) A CONTROL PROVES THE QUERY CAN SEE ITS CORPUS; IT DOES NOT PROVE THE CORPUS IS THE RIGHT ONE
   — AND RE-RUNNING THE SAME WAY IS NOT A SECOND OPINION.** (a)-(d) are all ZEROS; THIS ONE IS A
   CONFIDENT NON-ZERO, which is why the section's own framing does not catch it. MEASURED 2026-08-13:
-  `tsc` reported four `api-client` errors inside a session's ad-hoc container. The session stashed its
-  changes, re-ran on a CLEAN TREE, got the IDENTICAL FOUR, and reported them as pre-existing in TWO PR
-  bodies. **THAT CONTROLLED FOR THE TREE AND NOT FOR THE ENVIRONMENT.** The cause was never in the
-  repo: `node_modules/@remudero/api-client -> ../../packages/api-client` is a RELATIVE link, and that
+  `tsc` reported four `api-client` errors inside a session's ad-hoc container; stashing and re-running
+  on a CLEAN TREE got the IDENTICAL FOUR, reported as pre-existing. **THAT CONTROLLED FOR THE TREE AND
+  NOT FOR THE ENVIRONMENT.** The cause was never in the repo:
+  `node_modules/@remudero/api-client -> ../../packages/api-client` is a RELATIVE link, and that
   container mounted `node_modules` and `.git` but never `packages/`, so the link resolved to nothing.
-  Mount `packages/` and `apps/`, change nothing else: `tsc` exits 0. CI ran the same check as a
-  required step, green, the whole time. AN ENVIRONMENTAL DEFECT REPRODUCES EXACTLY — so agreement
-  between two readings taken THE SAME WAY is not corroboration, it is one measurement performed twice,
-  and the confidence it buys is counterfeit.
-  THE CHECK, AND IT NAMES WHAT TO VARY: when a result surprises you, RE-RUN IT SOMEWHERE ELSE before
-  believing it — a second host, CI's own logs, or a differently-provisioned container. Vary the
-  ENVIRONMENT, not just the input; re-running the same command in the same place tests neither.
-  THE CHEAPEST INSTANCE OF THIS ONE IS A SINGLE COMMAND: `readlink -f <workspace-symlink>` prints
-  EMPTY when the target sits outside the mount set, which would have settled it in seconds.
-  *(2026-08-13)*
+  Mounting `packages/` and `apps/` alone made `tsc` exit 0; CI ran the same check as a required step,
+  green, the whole time. AN ENVIRONMENTAL DEFECT REPRODUCES EXACTLY, so agreement between two readings
+  taken the same way is one measurement performed twice, and the confidence it buys is counterfeit.
+  THE CHECK: when a result surprises you, RE-RUN IT SOMEWHERE ELSE before believing it — a second
+  host, CI's own logs, or a differently-provisioned container. Vary the ENVIRONMENT, not just the
+  input. CHEAPEST INSTANCE: `readlink -f <workspace-symlink>` prints EMPTY when the target sits
+  outside the mount set, which would have settled it in seconds. *(2026-08-13)*
 - **(f) THE TWO SIDES OF A COMPARISON MUST COUNT THE SAME UNITS — `ls` COUNTS A DIRECTORY AS ONE
   ENTRY.** A naive `git ls-tree` vs `ls` tally read 114 vs 111 on an equal tree, because the tree
   side listed files recursively while `ls` collapsed each directory to one row. And ls-tree
@@ -554,11 +546,10 @@ forensic detail, so the narrative does not need to live here.
   holds ten `.md` files — a query-shape zero the mismatch then "confirms". The check: filter BOTH
   sides to the same unit first — `diff <(git ls-tree --name-only HEAD | grep '\.md$' | sort)
   <(ls -1 *.md | sort)` — and demand a positive control on whichever side reads zero.
-  AND WHEN TWO NUMBERS DISAGREE, SUSPECT THE CAPTURE BEFORE THE TOOL. A session read `lint-plan` as
-  166 failing against its own summary of 179 and called the verb self-contradictory; the count came
-  from `^✗ W1-T` and the plan carries FOUR workstreams — W1 166 + W3 9 + W2 3 + W12 1 = 179, and
-  the groups summing to the total IS the control. Its retry read 0: `cmd 2>&1 > f` sends stderr to
-  the TERMINAL, and this verb puts violations on stderr, the summary on stdout. Use `> out 2> err`.
+  AND WHEN TWO NUMBERS DISAGREE, SUSPECT THE CAPTURE BEFORE THE TOOL. A `lint-plan` violation count
+  that disagreed with its own summary traced to workstream subtotals summing correctly (the control)
+  and a retry reading 0 traced to `cmd 2>&1 > f`, which sends stderr to the TERMINAL while this verb
+  puts violations on stderr and the summary on stdout. Use `> out 2> err`.
   *(2026-08-14, both directions; the capture half 2026-08-15)*
 
 ## Operating this host
