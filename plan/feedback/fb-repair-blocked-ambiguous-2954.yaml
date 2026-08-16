@@ -1,0 +1,107 @@
+id: fb-repair-blocked-ambiguous-2954
+ts: 2026-08-16T11:09:44.788Z
+raw: >-
+  SWEEP REPAIR RECURRENCE: the "blocked-ambiguous" surface was repaired for 20
+  distinct PRs between 2026-08-13T00:00:00.000Z and 2026-08-20T00:00:00.000Z
+  (threshold 3, window 7d).
+
+
+  Root cause is UNOBSERVED — this is a recurrence report, not a diagnosis: the
+  sweep classifies and repairs the INSTANCE (each PR below), it does not
+  investigate why the CLASS keeps recurring.
+
+
+  EVIDENCE (read verbatim off each PR's own sweep.disposed ledger row, never
+  invented):
+
+  - PR #1685 (https://github.com/craigoley/remudero/pull/1685) at 480897d,
+  2026-08-13T00:09:36.123Z: review failing with no actionable unmet criteria
+  (contradictory) — escalating
+
+  - PR #1690 (https://github.com/craigoley/remudero/pull/1690) at d318021,
+  2026-08-13T00:50:56.037Z: fix strikes exhausted (2/2) — ci failed on d318021 —
+  escalating
+
+  - PR #1692 (https://github.com/craigoley/remudero/pull/1692) at f0a935f,
+  2026-08-13T02:00:08.745Z: stale-pending — checks pending 65m (>= 60m ceiling)
+  — escalating
+
+  - PR #1694 (https://github.com/craigoley/remudero/pull/1694) at e7404b2,
+  2026-08-13T02:20:17.821Z: stale-pending — checks pending 60m (>= 60m ceiling)
+  — escalating
+
+  - PR #1697 (https://github.com/craigoley/remudero/pull/1697) at fdd88fa,
+  2026-08-13T03:01:11.473Z: stale-pending — checks pending 61m (>= 60m ceiling)
+  — escalating
+
+  - PR #1699 (https://github.com/craigoley/remudero/pull/1699) at 039792d,
+  2026-08-13T03:06:59.055Z: stale-pending — checks pending 61m (>= 60m ceiling)
+  — escalating
+
+  - PR #1703 (https://github.com/craigoley/remudero/pull/1703) at 1519f85,
+  2026-08-13T07:28:55.818Z: stale-pending — checks pending 72m (>= 60m ceiling)
+  — escalating
+
+  - PR #1706 (https://github.com/craigoley/remudero/pull/1706) at 36221aa,
+  2026-08-13T11:56:16.855Z: not positively mergeable — checks green, review none
+  — escalating
+
+  - PR #1707 (https://github.com/craigoley/remudero/pull/1707) at 329d22b,
+  2026-08-13T11:56:13.726Z: not positively mergeable — checks green, review none
+  — escalating
+
+  - PR #1708 (https://github.com/craigoley/remudero/pull/1708) at b0ad4b2,
+  2026-08-13T11:56:10.673Z: not positively mergeable — checks green, review none
+  — escalating
+
+  - PR #1721 (https://github.com/craigoley/remudero/pull/1721) at 5193b24,
+  2026-08-13T12:29:12.318Z: review failing — criteria unrecoverable (no
+  Remudero-Task: trailer to resolve them from) — escalating
+
+  - PR #1725 (https://github.com/craigoley/remudero/pull/1725) at b4eddca,
+  2026-08-13T13:13:52.455Z: review failing — criteria unrecoverable (no
+  Remudero-Task: trailer to resolve them from) — escalating
+
+  - PR #1775 (https://github.com/craigoley/remudero/pull/1775) at 7bd0754,
+  2026-08-14T04:50:49.659Z: merge conflict (mergeState dirty) involves a
+  deletion (or no file evidence was captured) — never auto-resolved — files:
+  none captured — escalating
+
+  - PR #1830 (https://github.com/craigoley/remudero/pull/1830) at 2d98d61,
+  2026-08-14T17:00:50.567Z: merge conflict (mergeState dirty) involves a
+  deletion (or no file evidence was captured) — never auto-resolved — files:
+  none captured — escalating
+
+  - PR #1863 (https://github.com/craigoley/remudero/pull/1863) at f6060a8,
+  2026-08-15T22:58:15.785Z: review orphaned by a push, again — the sweep has
+  already re-reviewed this PR 3 time(s) (>= 2 cap) — escalating instead of
+  retrying indefinitely
+
+  - PR #1886 (https://github.com/craigoley/remudero/pull/1886) at 392d6f6,
+  2026-08-15T22:58:14.696Z: review orphaned by a push, again — the sweep has
+  already re-reviewed this PR 2 time(s) (>= 2 cap) — escalating instead of
+  retrying indefinitely
+
+  - PR #1902 (https://github.com/craigoley/remudero/pull/1902) at 2fcb541,
+  2026-08-16T00:18:08.292Z: review orphaned by a push, again — the sweep has
+  already re-reviewed this PR 2 time(s) (>= 2 cap) — escalating instead of
+  retrying indefinitely
+
+  - PR #1912 (https://github.com/craigoley/remudero/pull/1912) at d6f4333,
+  2026-08-16T00:29:08.549Z: merge conflict (mergeState dirty) involves a
+  deletion (or no file evidence was captured) — never auto-resolved — files:
+  none captured — escalating
+
+  - PR #1943 (https://github.com/craigoley/remudero/pull/1943) at 787d00a,
+  2026-08-16T09:02:33.261Z: review failing with no actionable unmet criteria
+  (contradictory) — escalating
+
+  - PR #1944 (https://github.com/craigoley/remudero/pull/1944) at bf0ea4c,
+  2026-08-16T09:02:30.389Z: review failing with no actionable unmet criteria
+  (contradictory) — escalating
+attachments: []
+origin: repair#blocked-ambiguous
+status: new
+proposal_pr: null
+summary: null
+expansion: null
