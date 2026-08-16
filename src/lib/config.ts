@@ -20,6 +20,21 @@ export interface Config {
   /** Workspace root; everything the fleet touches lives under it (§4A). */
   root: string;
   /**
+   * The daemon's OWN git checkout — the one tree the deploy supervisor is allowed to
+   * fast-forward (W1-T924, fb-1784913390318-1fcb63). Optional; defaults to
+   * `join(config.root, "daemon-install")` (see {@link resolveInstallRoot},
+   * lib/install-root.ts) — derived from `config.root`, NEVER a hardcoded absolute path
+   * (public-repo hygiene, same precedent as {@link workerZdotdir}/{@link workerHomeDir}).
+   *
+   * WHY THIS EXISTS: before this field, the deploy supervisor's `deployRunCommand` passed
+   * `installPath: repoRoot` — the toplevel of WHATEVER CHECKOUT invoked the CLI, which on the
+   * mini is the operator's own WIP tree. `lib/install-root.ts` owns resolving this field,
+   * deciding whether the resulting tree is fit to deploy into, and provisioning it
+   * (`rmd install-checkout`); this field is only ever the NOUN it resolves against — it carries
+   * no behavior itself.
+   */
+  installRoot?: string;
+  /**
    * Isolated ZDOTDIR handed to every worker shell (see {@link workerZdotdir}).
    * Optional in the config file; defaults to `<root>/../.config/remudero/zdotdir`.
    */

@@ -128,6 +128,14 @@ import { reapWorkerScratch, sweepStaleWorkerScratch } from "./lib/worker-scratch
 import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateServeLaunchdPlist, generateSupervisorLaunchdPlist, launchctlGuiTarget, launchdPlistPath, parseSupervisorStartInterval, SERVE_LABEL, serveLogPaths, SUPERVISOR_LABEL } from "./lib/launchd.js";
 import { realDeployDeps, requestDeploy, runDeployCycle } from "./lib/deployer.js";
 import { runOperatorSync, type OperatorSyncDeps } from "./lib/operator-sync.js";
+import {
+  assessInstallForDeploy,
+  checkInstallSeparation,
+  describeInstallState,
+  inspectInstallRoot,
+  provisionInstallRoot,
+  resolveInstallRoot,
+} from "./lib/install-root.js";
 import { buildStatusBoard, renderStatusBoardText, type ServiceName } from "./lib/status-board.js";
 import { buildDigest, buildMarkerAwareDigest, consoleCardUrl, sendDigest, sendMarkerAwareDigest, sendRundown } from "./lib/digest.js";
 import { createLastSeenStore, hashToken, lastSeenPath } from "./lib/last-seen.js";
@@ -13268,6 +13276,14 @@ async function deployCommand(rest: string[]): Promise<number> {
  * its interval). No-op unless a deploy is triggered AND the daemon is idle. `--dry-run`
  * runs the whole sequence (fetch/compare/idle-check/pull) but SKIPS the real kickstart —
  * so validation can exercise it against the real install without restarting production.
+ *
+ * W1-T924: fast-forwards the RESOLVED install root (`lib/install-root.ts`), never `repoRoot` —
+ * the toplevel of whatever checkout invoked this CLI, which on the mini is the operator's own
+ * WIP tree. FAIL SAFE, NOT FAIL FAST (design note vi): an unresolvable or unfit install root
+ * (absent, dirty, off-main/detached, diverged, or a separation-invariant violation) makes this a
+ * no-op with a NAMED reason, leaving the running daemon untouched — it never falls back to
+ * `repoRoot`, which would silently restore the exact defect this closes under a new name.
+ * Provisioning the install root is exclusively `rmd install-checkout`'s job, not this one's.
  */
 async function deployRunCommand(rest: string[]): Promise<number> {
   const badArg = unknownArgError("deploy-run", rest, [], ["--dry-run"]);
@@ -13276,9 +13292,15 @@ async function deployRunCommand(rest: string[]): Promise<number> {
     return 2;
   }
   const config = loadConfig();
+  const installRoot = resolveInstallRoot(config);
+  const assessment = assessInstallForDeploy(installRoot, { operatorRepoRoot: repoRoot, stateRoot: config.root });
+  if (!assessment.ok) {
+    console.log(`### rmd deploy-run — no-op: ${assessment.reason}`);
+    return 0;
+  }
   const uid = typeof process.getuid === "function" ? process.getuid() : 0;
   const deps = realDeployDeps({
-    installPath: repoRoot,
+    installPath: assessment.installRoot,
     stateRoot: config.root,
     daemonLabel: DAEMON_LABEL,
     // The console is restarted by the SAME cycle, after the daemon verifies healthy: `rmd serve`
@@ -13293,6 +13315,58 @@ async function deployRunCommand(rest: string[]): Promise<number> {
   const result = runDeployCycle(deps, { dryRun: rest.includes("--dry-run") });
   console.log(`### rmd deploy-run — ${result.deployed ? "DEPLOYED" : "no-op"}: ${result.reason}`);
   return result.reason.startsWith("dirty-tree-conflict") || result.rolledBackTo ? 1 : 0;
+}
+
+/**
+ * `rmd install-checkout [--write]` — provision or refuse the daemon's dedicated install
+ * checkout (W1-T924, design note iii), mirroring `daemon-plist`'s W1-T12d boundary: prints by
+ * default, `--write` actually provisions. Never runs `launchctl` and never regenerates the
+ * launchd units itself (that's W1-T925, deliberately out of scope — every plist generator bakes
+ * `join(repoRoot, "bin", "rmd")` and that is a separate refusal with its own suite).
+ *
+ * MIGRATION IS A FIRST-CLASS OUTPUT (design note v): the mini is running the shared checkout
+ * today, so the default (no `--write`) print names the exact sequence for an EXISTING install —
+ * provision, regenerate the units (W1-T925), reload them by hand (W1-T12d) — without attempting
+ * any of it itself.
+ */
+async function installCheckoutCommand(rest: string[]): Promise<number> {
+  const badArg = unknownArgError("install-checkout", rest, [], ["--write"]);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const config = loadConfig();
+  const installRoot = resolveInstallRoot(config);
+  const separation = checkInstallSeparation({ installRoot, stateRoot: config.root, operatorRepoRoot: repoRoot });
+  if (!separation.ok) {
+    console.error(`### rmd install-checkout — refused: ${separation.reason}`);
+    return 1;
+  }
+
+  if (!rest.includes("--write")) {
+    const state = inspectInstallRoot(installRoot);
+    console.log(`### rmd install-checkout — install root: ${installRoot}`);
+    console.log(`    state: ${describeInstallState(installRoot, state)}`);
+    console.log(
+      `\n# migration sequence for an EXISTING (shared) install — none of this runs automatically:\n` +
+        `1. rmd install-checkout --write            # provision the dedicated checkout at ${installRoot}\n` +
+        `2. rmd daemon-plist --repo <name> --write   # regenerate the daemon unit to bake in the new install (W1-T925)\n` +
+        `3. rmd deploy-plist --write                 # regenerate the deploy-supervisor unit the same way (W1-T925)\n` +
+        `4. launchctl unload/load the regenerated units by hand   # reload stays the operator's action (W1-T12d)`,
+    );
+    return 0;
+  }
+
+  const originUrl = execFileSync("git", ["-C", repoRoot, "config", "--get", "remote.origin.url"], {
+    encoding: "utf8",
+  }).trim();
+  const outcome = provisionInstallRoot(installRoot, originUrl);
+  if (outcome.action === "refused") {
+    console.error(`### rmd install-checkout — refused (${outcome.reason}): ${outcome.detail}`);
+    return 1;
+  }
+  console.log(`### rmd install-checkout — ${outcome.action} at ${installRoot}`);
+  return 0;
 }
 
 /**
@@ -20159,6 +20233,11 @@ const COMMANDS: readonly CommandSpec[] = [
       "rmd deploy-plist [--interval <s>] [--write]   # generate the deploy-supervisor launchd unit (a periodic `rmd deploy-run`, default every 120s). Mirrors daemon-plist: prints by default, --write installs it; `launchctl load` is an operator action. Opt into auto-on-new-main (behind the health-check) by touching state/DEPLOY_AUTO.",
   },
   {
+    name: "install-checkout",
+    usage:
+      "rmd install-checkout [--write]   # W1-T924: provision or refuse the daemon's DEDICATED install checkout (resolved from config.installRoot, default <config.root>/daemon-install — never the checkout the command was invoked from), the tree `rmd deploy-run` fast-forwards. Mirrors daemon-plist: prints the current state + the migration sequence by default, --write actually acts. Four states, named explicitly: ABSENT -> clone origin/main; HEALTHY -> ff-only to origin/main; DIRTY/off-main/detached/diverged -> REFUSE, mutate nothing (a local edit on the install checkout is a bug, never auto-cleaned); a non-empty non-git directory -> REFUSE, never rm -rf. Refuses first if the resolved install root and state root would nest, or if the install root would sit inside the operator's own checkout. Never runs launchctl and never regenerates a launchd unit itself (W1-T925's job).",
+  },
+  {
     name: "serve",
     usage:
       "rmd serve [--port <n>] [--host <addr>]   # the operator console FRONT DOOR (W1-T139, MASTER-PLAN §7/§7B): one HTTP surface (service.ts) serving the live board (board.ts), fleet-control + question/manual-approve write actions (panel-actions.ts), the feedback inbox + plan→task→PR graph (panel-graph.ts), and a minimal HTML shell at GET /; bearer tokens are generated on first run and persisted 0600 under <config.root>/state/service-tokens.json, and rotate by stopping serve, deleting that file, and starting again; the startup banner prints the READ token only (a bookmark grants view, not control) and never the write token, because stdout is commonly redirected to a log; --port defaults to 4317 (matches apps/dashboard's own default); --host defaults to 127.0.0.1, also reads RMD_SERVE_HOST, accepts a COMMA-SEPARATED list so the console can be reachable locally AND from the phone (e.g. 127.0.0.1,<tailnet-ip>), and REFUSES wildcards like 0.0.0.0 anywhere in that list; blocks until SIGINT/SIGTERM",
@@ -20775,6 +20854,9 @@ export async function main(
   }
   if (cmd === "deploy-plist") {
     process.exit(await deployPlistCommand(rest));
+  }
+  if (cmd === "install-checkout") {
+    process.exit(await installCheckoutCommand(rest));
   }
   if (cmd === "serve") {
     process.exit(await serveCommand(rest));
