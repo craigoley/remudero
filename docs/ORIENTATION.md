@@ -1,44 +1,35 @@
 # ORIENTATION
 
-_MAINTAINED BY `rmd retro` — regenerated 2026-08-15T13:30:47.799Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
+_MAINTAINED BY `rmd retro` — regenerated 2026-08-16T08:30:01.993Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
 
 A fresh Architect session should be able to orient from THIS doc alone plus the plan index —
 not by re-deriving state from the full plan and ledger.
 
 ## Current state
 
-46 run(s) since the last retro marker. Verdicts: {"already_satisfied":1,"blocked":4,"blocked_ci":12,"blocked_containment":6,"incomplete":7,"merged":12,"no_pr":4}.
+31 run(s) since the last retro marker. Verdicts: {"blocked":1,"blocked_ci":12,"blocked_isolation":1,"incomplete":4,"merged":8,"no_pr":2,"pr_attribution_failed":3}.
 
 ### Shipped since marker
-- W1-T404 → https://github.com/craigoley/remudero/pull/1709 (gate-side merge; run ended incomplete)
-- W1-T449 → https://github.com/craigoley/remudero/pull/1690 (gate-side merge; run ended blocked_ci)
-- W1-T450 → https://github.com/craigoley/remudero/pull/1695
-- W1-T453 → https://github.com/craigoley/remudero/pull/1753 (gate-side merge; run ended blocked_ci)
-- W1-T454 → https://github.com/craigoley/remudero/pull/1740
-- W1-T456 → https://github.com/craigoley/remudero/pull/1766 (gate-side merge; run ended blocked)
-- W1-T457 → https://github.com/craigoley/remudero/pull/1771
-- W1-T458 → https://github.com/craigoley/remudero/pull/1772
-- W1-T461 → https://github.com/craigoley/remudero/pull/1773 (gate-side merge; run ended blocked_ci)
-- W1-T463 → https://github.com/craigoley/remudero/pull/1775 (gate-side merge; run ended blocked_ci)
-- W1-T468 → https://github.com/craigoley/remudero/pull/1780 (gate-side merge; run ended incomplete)
-- W1-T470 → https://github.com/craigoley/remudero/pull/1783 (gate-side merge; run ended blocked_ci)
-- W1-T473 → https://github.com/craigoley/remudero/pull/1781
-- W1-T474 → https://github.com/craigoley/remudero/pull/1791
-- W1-T476 → https://github.com/craigoley/remudero/pull/1782
-- W1-T477 → https://github.com/craigoley/remudero/pull/1800 (gate-side merge; run ended blocked_ci)
-- W1-T482 → https://github.com/craigoley/remudero/pull/1808
-- W1-T486 → https://github.com/craigoley/remudero/pull/1812 (gate-side merge; run ended incomplete)
-- W1-T487 → https://github.com/craigoley/remudero/pull/1815
-- W1-T488 → https://github.com/craigoley/remudero/pull/1821 (gate-side merge; run ended blocked_ci)
-- W1-T495 → https://github.com/craigoley/remudero/pull/1835
-- W1-T496 → https://github.com/craigoley/remudero/pull/1844 (gate-side merge; run ended blocked)
-- W1-T497 → https://github.com/craigoley/remudero/pull/1842
-- W1-T498 → https://github.com/craigoley/remudero/pull/1843
-- W1-T500 → https://github.com/craigoley/remudero/pull/1849 (gate-side merge; run ended blocked_ci)
+- W1-T502 → https://github.com/craigoley/remudero/pull/1856 (gate-side merge; run ended pr_attribution_failed)
+- W1-T503 → https://github.com/craigoley/remudero/pull/1863 (gate-side merge; run ended incomplete)
+- W1-T504 → https://github.com/craigoley/remudero/pull/1869
+- W1-T505 → https://github.com/craigoley/remudero/pull/1864 (gate-side merge; run ended incomplete)
+- W1-T506 → https://github.com/craigoley/remudero/pull/1879 (gate-side merge; run ended pr_attribution_failed)
+- W1-T508 → https://github.com/craigoley/remudero/pull/1878 (gate-side merge; run ended pr_attribution_failed)
+- W1-T510 → https://github.com/craigoley/remudero/pull/1881 (gate-side merge; run ended blocked_ci)
+- W1-T514 → https://github.com/craigoley/remudero/pull/1889
+- W1-T516 → https://github.com/craigoley/remudero/pull/1890
+- W1-T517 → https://github.com/craigoley/remudero/pull/1898
+- W1-T523 → https://github.com/craigoley/remudero/pull/1917
+- W1-T526 → https://github.com/craigoley/remudero/pull/1926
+- W1-T529 → https://github.com/craigoley/remudero/pull/1933
+- W1-T531 → https://github.com/craigoley/remudero/pull/1929
 
 ## Next runnable task
 
-(none runnable right now — the DAG is exhausted, every remaining task is blocked/unmet, or awaits `verify: human`)
+**W1-T905** — THE SWEEP REPAIRS THE INSTANCE AND NEVER FILES THE CLASS — every repair verb names a classified surface on its own `sweep.disposed` row and no recurring surface ever becomes a §7B feedback entry, so a category the fleet repairs fifteen times is rediscovered by hand each time
+
+- risk: high · depends_on: (none)
 
 ## Never-do invariants (MASTER-PLAN §12 Standing rules — extracted verbatim; §12 is authoritative)
 
