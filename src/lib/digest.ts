@@ -17,11 +17,168 @@ import type { LastSeenStore } from "./last-seen.js";
  */
 
 /** One ledger line, loosely typed like {@link readLedgerLines}'s return. */
-type LedgerLine = Record<string, unknown>;
+export type LedgerLine = Record<string, unknown>;
 
 /** Ledger lines with `ts >= sinceIso`, in original (chronological) order. */
 export function collectSince(lines: LedgerLine[], sinceIso: string): LedgerLine[] {
   return lines.filter((l) => typeof l.ts === "string" && (l.ts as string) >= sinceIso);
+}
+
+// ── W1-T929: THE CACHE-HIT RATIO — cache_read/(cache_read+input+cache_creation) ─────────────
+//
+// worker.ts's TokenUsage already nests `cacheRead`/`input`/`cacheCreation` on the `tokens`
+// field of every worker AND brain-plane ledger line (workerLedgerFields, W1-T6); nothing read
+// it. This is the ONE derivation (design note (i)): `cacheHitRatio` is the sole arithmetic,
+// `aggregateCacheHitTotals` is the sole grouping traversal, and BOTH this module's `summarize`
+// and status-board.ts's `buildStatusBoard` walk it — the two surfaces can disagree on how they
+// RENDER a figure, never on what the figure IS.
+
+/** The three token counts a cache-hit ratio is derived from — exactly the fields worker.ts's
+ *  `TokenUsage` nests on every ledgered call line (`tokens.cacheRead`/`input`/`cacheCreation`). */
+export interface CacheHitTokens {
+  cacheRead: number;
+  input: number;
+  cacheCreation: number;
+}
+
+/**
+ * THE cache-hit ratio (feedback fb-1785237559155-feef92, MASTER-PLAN §8A): `cache_read /
+ * (cache_read + input + cache_creation)` — the SAME formula the feedback named, computed off
+ * ONE set of summed token counts (a single line, or a whole run/class grain). Exported so
+ * status-board.ts calls this SAME function (grep-provable: `cacheHitRatio(` in
+ * src/lib/status-board.ts) instead of re-deriving a second opinion of the same number.
+ *
+ * Returns `undefined` — NEVER `0` — when the denominator is zero: a line predating the cache
+ * columns, or a call whose envelope carried no tokens at all (e.g. a genuine transport
+ * failure), is UNKNOWN, not a fabricated 0% hit rate (design note (iii)).
+ */
+export function cacheHitRatio(tokens: CacheHitTokens): number | undefined {
+  const denom = tokens.cacheRead + tokens.input + tokens.cacheCreation;
+  return denom > 0 ? tokens.cacheRead / denom : undefined;
+}
+
+/**
+ * One grouping's (one run, or one task class) summed token totals, plus how many of its call
+ * lines actually carried usable token data — the `coveredLines`/`callLines` pair a `cacheHitRatio`
+ * of `undefined` renders its coverage fraction from (design note (iii): "UNKNOWN … WITH THE
+ * COVERAGE FRACTION beside the figure").
+ */
+export interface CacheHitGrain extends CacheHitTokens {
+  /** Total worker/brain-plane call lines observed for this grouping. */
+  callLines: number;
+  /** Of `callLines`, how many carried a non-zero token envelope (usable data). */
+  coveredLines: number;
+}
+
+/** Both grains the feedback asked for (design note (ii)): per RUN (a single bad run legible)
+ *  and per task CLASS (the grain that detects a regression), over the SAME window. */
+export interface CacheHitTotals {
+  /** Keyed by ledger `run_id`. */
+  byRun: Record<string, CacheHitGrain>;
+  /**
+   * Keyed by the run's `run.start` line `task_class` field — mirrors retro.ts's
+   * `aggregateByClass`: a run whose `run.start` line predates W1-T167, or fell outside this
+   * window, is grouped under `"unknown"` rather than dropped, so an omitted class is itself a
+   * fact this table shows, not silently loses.
+   */
+  byClass: Record<string, CacheHitGrain>;
+}
+
+/** A ledger line is a worker/brain-plane CALL line iff it carries `workerLedgerFields`' `model`
+ *  + `effort` pair (W1-T6) — present on every call, predating the cache columns themselves, so
+ *  this predicate never mistakes a `run.start`/`verdict`/poll line for a call that just has no
+ *  token data. */
+function isCallLine(l: LedgerLine): boolean {
+  return typeof l.model === "string" && typeof l.effort === "string";
+}
+
+/** The line's token counts, off its nested `tokens` field (worker.ts's `TokenUsage`, spread
+ *  verbatim by `appendLedger` — never snake_cased), or `undefined` when the shape isn't there
+ *  at all (a line predating `tokens`, or malformed). */
+function lineTokens(l: LedgerLine): CacheHitTokens | undefined {
+  const t = l.tokens;
+  if (!t || typeof t !== "object") return undefined;
+  const { cacheRead, input, cacheCreation } = t as Record<string, unknown>;
+  return typeof cacheRead === "number" && typeof input === "number" && typeof cacheCreation === "number"
+    ? { cacheRead, input, cacheCreation }
+    : undefined;
+}
+
+function emptyCacheHitGrain(): CacheHitGrain {
+  return { cacheRead: 0, input: 0, cacheCreation: 0, callLines: 0, coveredLines: 0 };
+}
+
+/** Fold one call line into `grain` — always counts toward `callLines`; only adds to the token
+ *  totals (and `coveredLines`) when the line's envelope actually carried a non-zero denominator,
+ *  so an uncovered call can never silently pass as a healthy 0% hit rate. */
+function foldCacheHitLine(grain: CacheHitGrain, tokens: CacheHitTokens): void {
+  grain.callLines++;
+  if (tokens.cacheRead + tokens.input + tokens.cacheCreation <= 0) return;
+  grain.coveredLines++;
+  grain.cacheRead += tokens.cacheRead;
+  grain.input += tokens.input;
+  grain.cacheCreation += tokens.cacheCreation;
+}
+
+/**
+ * Group `lines` (any ledger window) into per-run and per-class {@link CacheHitGrain} totals —
+ * the ONE traversal both `summarize` (below) and status-board.ts's `buildStatusBoard` walk, so
+ * the two surfaces can never disagree on WHICH lines count or how they're bucketed.
+ *
+ * `undefined` when NOTHING in `lines` carries usable cache data at all (design note (iv), the
+ * same soft-compose discipline `DigestSummary.inbox` already keeps) — the caller then omits its
+ * cache-hit output entirely rather than printing an all-UNKNOWN table for a window that simply
+ * predates this feature.
+ */
+export function aggregateCacheHitTotals(lines: LedgerLine[]): CacheHitTotals | undefined {
+  const taskClassByRun = new Map<string, string>();
+  for (const l of lines) {
+    if (l.step === "run.start" && typeof l.run_id === "string") {
+      taskClassByRun.set(l.run_id, typeof l.task_class === "string" ? l.task_class : "unknown");
+    }
+  }
+  const byRun = new Map<string, CacheHitGrain>();
+  const byClass = new Map<string, CacheHitGrain>();
+  let anyCovered = false;
+  for (const l of lines) {
+    if (!isCallLine(l) || typeof l.run_id !== "string") continue;
+    const tokens = lineTokens(l);
+    if (!tokens) continue;
+    if (tokens.cacheRead + tokens.input + tokens.cacheCreation > 0) anyCovered = true;
+
+    const runGrain = byRun.get(l.run_id) ?? emptyCacheHitGrain();
+    foldCacheHitLine(runGrain, tokens);
+    byRun.set(l.run_id, runGrain);
+
+    const taskClass = taskClassByRun.get(l.run_id) ?? "unknown";
+    const classGrain = byClass.get(taskClass) ?? emptyCacheHitGrain();
+    foldCacheHitLine(classGrain, tokens);
+    byClass.set(taskClass, classGrain);
+  }
+  if (!anyCovered) return undefined;
+  return { byRun: Object.fromEntries(byRun), byClass: Object.fromEntries(byClass) };
+}
+
+/**
+ * Format ONE {@link CacheHitGrain} as `NN.N% (coverage NN%)`, or `UNKNOWN (coverage NN%)` when
+ * {@link cacheHitRatio} returns `undefined` (design note (iii)) — the ONE formatting rule both
+ * this module's {@link renderCacheHitLine} and status-board.ts's own per-grain render share, so
+ * "UNKNOWN" vs a real percentage never reads differently across the two surfaces.
+ */
+export function formatCacheHitFigure(g: CacheHitGrain): string {
+  const ratio = cacheHitRatio(g);
+  const coveragePct = g.callLines > 0 ? Math.round((g.coveredLines / g.callLines) * 100) : 0;
+  return ratio === undefined ? `UNKNOWN (coverage ${coveragePct}%)` : `${(ratio * 100).toFixed(1)}% (coverage ${coveragePct}%)`;
+}
+
+/** Render one {@link CacheHitTotals} grain map as one digest line, e.g.
+ *  `cache hit by run: R1=83.3% (coverage 100%), R2=UNKNOWN (coverage 0%)` — sorted by key so the
+ *  render is deterministic. */
+export function renderCacheHitLine(label: string, grains: Record<string, CacheHitGrain>): string {
+  const parts = Object.keys(grains)
+    .sort()
+    .map((key) => `${key}=${formatCacheHitFigure(grains[key])}`);
+  return `${label}: ${parts.join(", ")}`;
 }
 
 export interface DigestSummary {
@@ -53,6 +210,14 @@ export interface DigestSummary {
    * hasn't run yet) renders byte-identical to before this field existed.
    */
   inbox?: InboxPollSummary;
+  /**
+   * W1-T929: cache-hit ratio totals for this window, per run and per task class (design note
+   * (ii)) — `undefined` when NOTHING in the window carries usable cache-token data, so
+   * {@link renderDigest} SOFT-COMPOSES this one exactly like `inbox` above: it OMITS the
+   * "cache hit by …" lines entirely rather than printing an all-UNKNOWN table for a window
+   * that simply predates this feature (design note (iv)). See {@link aggregateCacheHitTotals}.
+   */
+  cacheHit?: CacheHitTotals;
   /**
    * W1-T178 (verdict stability): count of `review.downgrade_suppressed` ledger
    * lines inside the window — a semantic-lane downgrade suppressed because the
@@ -98,6 +263,7 @@ export function summarize(lines: LedgerLine[], sinceIso: string): DigestSummary 
       summary.inbox = l.inbox as InboxPollSummary;
     }
   }
+  summary.cacheHit = aggregateCacheHitTotals(since);
   return summary;
 }
 
@@ -141,6 +307,10 @@ export function renderDigest(s: DigestSummary, consoleBaseUrl?: string): string 
     // absent entirely (not a "(no poll this window)" placeholder) line otherwise, see the
     // `inbox` field's doc on DigestSummary.
     ...(s.inbox ? [`inbox: ${renderInboxPollSummary(s.inbox)}`] : []),
+    // W1-T929: soft-composed — present only when the window carries usable cache-token data
+    // (see the `cacheHit` field's doc on DigestSummary), two lines (per-run, per-class), never
+    // a "(no data)" placeholder otherwise.
+    ...(s.cacheHit ? [renderCacheHitLine("cache hit by run", s.cacheHit.byRun), renderCacheHitLine("cache hit by class", s.cacheHit.byClass)] : []),
     `verdict downgrades suppressed: ${s.verdictDowngradesSuppressed}`,
     `notional cost: $${s.costUsd.toFixed(2)}`,
   ];
