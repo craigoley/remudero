@@ -15549,6 +15549,15 @@ export function buildSweepEffects(
 
     close: (pr, reason) => {
       try {
+        // W1-T920 — THE SUPERSESSION DISPOSITION REUSES THIS SAME EFFECT, DELIBERATELY: design
+        // note (vi) requires either (a) a new `gh-pr-close` LiveWriteBoundary + fencing, or (b)
+        // making the new act reversible by construction. Option (b) is chosen, and it costs
+        // ZERO new code here — W1-T921 (immediately below) already stripped `--delete-branch`
+        // from THIS call, so a supersession close (lib/sweep.ts's `DISPOSITION_RULES`, the
+        // `pr.supersessionVerdict.status === "superseded"` row, disposition "stale") is
+        // reversible by construction the moment it reaches this same site. No second close path,
+        // no widened/narrowed `LiveWriteBoundary` verb set.
+        //
         // W1-T921: NO `--delete-branch` HERE, AND THAT ABSENCE IS THE WHOLE CHANGE. DECISIONS.md's
         // 2026-08-16 ruling (W1-T919) gates the fleet on IRREVERSIBILITY rather than outwardness,
         // and rests that on closing preserving the head branch while merging destroys it — measured
