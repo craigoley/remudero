@@ -30,6 +30,7 @@ import {
   runHostParity,
   type DeclaredDivergence,
 } from "../src/lib/host-parity.js";
+import { reportUnbaselinedPole, runHostParityCli } from "../scripts/host-parity.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -277,6 +278,89 @@ test("the report names the counts a reader needs, and never invents one it did n
   });
   assert.match(rendered, /HOST PARITY \(mini\) at 11dcbf0: 6496 tests, 1 failing/);
   assert.match(rendered, /1 declared, 0 undeclared/);
+});
+
+// ── W1-T918: THE RUNNER GETS AN INVOKER ───────────────────────────────────────────────────────
+//
+// Everything above drives `runHostParity` straight from src/lib/host-parity.ts — which is exactly
+// how `scripts/host-parity.ts`'s own wiring went unexercised: the ONE thing that called the
+// runner was never itself called by anything, test included. The three tests below import from
+// `../scripts/host-parity.js` instead, so they are themselves the "actual caller" the runner was
+// missing — and cover the one new fact this task adds (a pole with nothing declared is
+// UNBASELINED, not clean) alongside a confirmation that a stale declared entry still surfaces.
+
+test("a pole with no declared entries is reported as unbaselined rather than clean", () => {
+  const baseline: DeclaredDivergence[] = [{ test: id(BSD), pole: "mini", reason: "declared for this fixture only" }];
+  assert.match(
+    reportUnbaselinedPole("azure", baseline) ?? "",
+    /UNBASELINED/,
+    "azure has zero entries in this fixture baseline, so it must read as never-baselined",
+  );
+  // THE FALSE-POSITIVE CONTAINMENT: a pole that DOES have declared entries must never be flagged,
+  // however clean its run — a checker that flagged every pole would pass the assertion above and
+  // fail this one.
+  assert.equal(
+    reportUnbaselinedPole("mini", baseline),
+    undefined,
+    "mini has a declared entry in this fixture baseline, so it must NOT be reported as unbaselined",
+  );
+
+  const written: string[] = [];
+  const { unbaselined } = runHostParityCli({
+    pole: "azure",
+    baseline,
+    runSuite: () => tap([]),
+    write: (s) => written.push(s),
+  });
+  assert.equal(unbaselined, true);
+  assert.match(written[0] ?? "", /UNBASELINED/, "the notice must reach the same text a human reads");
+});
+
+test("a declared entry that stopped failing is surfaced where a human will see it", () => {
+  // One mini entry is dropped from the observed set, so the diff must call it healed even though
+  // nothing undeclared appeared alongside it — the case the existing end-to-end tests never
+  // exercised on its own.
+  const stillFailing = ALL_MINI.slice(1);
+  const captured: string[] = [];
+  const written: string[] = [];
+  const { outcome } = runHostParityCli({
+    pole: "mini",
+    runSuite: () => tap(stillFailing),
+    capture: (r) => captured.push(r),
+    write: (s) => written.push(s),
+  });
+  assert.equal(outcome.status, "drift", "a healed entry alone is still drift — the baseline is stale");
+  assert.equal(captured.length, 1, "the stale entry must be written, not left silent");
+  assert.match(captured[0] ?? "", /DECLARED BUT PASSING/);
+  assert.match(captured[0] ?? "", new RegExp(id(ALL_MINI[0] as { title: string; file: string }).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.match(written[0] ?? "", /DECLARED BUT PASSING/, "and the same text is what the caller prints");
+});
+
+test("the parity runner is reachable from a caller that actually runs", () => {
+  // The falsifier for "built and unwired": this calls the SAME exported function the CLI
+  // entrypoint calls, with fake seams, and proves it actually reaches runHostParity end to end —
+  // real drift, real capture, real output — rather than merely existing on disk.
+  const captured: string[] = [];
+  const written: string[] = [];
+  const asked: string[] = [];
+  const { outcome, unbaselined } = runHostParityCli({
+    pole: "mini",
+    headSha: "abc1234",
+    runSuite: () => tap([...ALL_MINI, NOVEL]),
+    confirm: (candidate) => {
+      asked.push(candidate);
+      return true; // reproduced alone
+    },
+    capture: (raw) => captured.push(raw),
+    write: (s) => written.push(s),
+  });
+  assert.equal(outcome.status, "drift", "the caller must reach the real runHostParity, not a stub");
+  assert.deepEqual(asked, [id(NOVEL)], "the caller must wire the confirm seam through, not bypass it");
+  assert.equal(captured.length, 1, "the caller must reach the capture seam too");
+  assert.equal(written.length, 1, "the caller must actually write its output");
+  assert.match(written[0] ?? "", /NEW DIVERGENCE on mini/);
+  assert.match(written[0] ?? "", /abc1234/, "the headSha the caller was given must reach the printed report");
+  assert.equal(unbaselined, false, "mini has declared entries in the real baseline, so this run is not unbaselined");
 });
 
 // ── PART TWO: SIBLING JOBS ON ONE SHA ─────────────────────────────────────────────────────────
