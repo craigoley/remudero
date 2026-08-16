@@ -180,6 +180,17 @@ const DECLARED: readonly Declared[] = [
   },
   {
     kind: "chmod",
+    file: "toolchain-refusal-errno.test.ts",
+    key: "0o644",
+    count: 2,
+    reason:
+      "SAFE AT EVERY UID, same shape as spawn-nopid-diagnosis.test.ts above: 0o644 has no execute bit at all, so " +
+      "the OS refuses to exec it for root too (W1-T901). Both sites build a non-executable husk that the REAL " +
+      "(uninjected) defaultCanExecute probe must report as a real EACCES — the whole point is that a stubbed " +
+      "canExecute cannot falsify this, so it has to survive root.",
+  },
+  {
+    kind: "chmod",
     file: "serve-plist.test.ts",
     key: "0o644",
     count: 1,
