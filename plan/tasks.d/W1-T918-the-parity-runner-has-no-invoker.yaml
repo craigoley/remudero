@@ -1,4 +1,4 @@
-- id: W1-T915
+- id: W1-T918
   title: "the host-parity runner has no invoker, so the baseline can neither be pruned nor populated — runHostParity already computes the healed and undeclared lists that would report its own staleness, and nothing in the repo ever calls it"
   repo: remudero
   depends_on: []
