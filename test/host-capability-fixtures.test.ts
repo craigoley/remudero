@@ -198,6 +198,27 @@ const DECLARED: readonly Declared[] = [
       "not a denial fixture at all — it reproduces the mode launchd's own umask produces, so the boot path can be " +
       "shown to REPAIR it back to 0o600. Nothing is asserted to fail, so no uid changes the outcome.",
   },
+  {
+    kind: "chmod",
+    file: "check-proof-base.test.ts",
+    key: "0o200",
+    count: 1,
+    reason:
+      "W1-T912: simulates the base run's grep child COULD NOT EXECUTE (an environment gap, never a false " +
+      "discrimination) — WRITE-ONLY so buildBaseProofDir's own writeFileSync still succeeds (baseCheckoutDir comes " +
+      "back genuinely defined) but the grep spawn that needs READ access is refused. Neither EISDIR nor ENOTDIR " +
+      "reaches this: both would fail the PRECEDING write too, which this fixture needs to succeed. Root bypasses " +
+      `the read denial, so the covered branch is skipped rather than falsified there. ${CHMOD_REMEDY}`,
+  },
+  {
+    kind: "chmod",
+    file: "check-proof-base.test.ts",
+    key: "0o600",
+    count: 1,
+    reason:
+      "the same fixture's own teardown, restoring write+read on the 0o200 file above so rmSync can remove it — not " +
+      `a denial itself, but paired with the site above and audited by the same depth-matched walk. ${CHMOD_REMEDY}`,
+  },
   // ── platform-varying real binaries ──────────────────────────────────────────────────────────
   {
     kind: "platform-tool",
