@@ -30,5 +30,6 @@ raw: 'SWEEP LOOPS FOREVER ON A REVIEW-FAILING PR IT CANNOT FIX-DISPATCH (root
   rewritten to the executable grep: dialect to merge #779).'
 attachments: []
 origin: cli
-status: new
+status: rejected
 proposal_pr: null
+summary: null
