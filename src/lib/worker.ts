@@ -2508,6 +2508,65 @@ export function runWorktreeReapRung(
 // ── gh helpers (run outside the sandbox; TLS fails under Seatbelt) ─────────
 
 /**
+ * `gh`'s `X-Ratelimit-*` response headers, parsed off the SAME response the metered call itself
+ * carried (W1-T525 design (iii)) — never a separate `gh api rate_limit` probe. That probe is
+ * FREE (measured: ten such calls moved `used` by 4 while ten real calls moved it by 23) which is
+ * exactly what makes it tempting, but it answers about a DIFFERENT bucket with a DIFFERENT reset
+ * — measured back to back, an ordinary `gh api repos/…` call carried remaining=3259 while `gh api
+ * rate_limit` in the same window reported remaining=4960. A floor read from the probe would be
+ * wrong by the gap between those two numbers. All fields are `undefined` when the header was
+ * absent, which is every `gh` invocation this file issues that is not `gh api …` — `pr view`,
+ * `pr list`, etc. are answered over GraphQL internally and carry no REST rate-limit header for
+ * the CLI to expose.
+ */
+export interface GhRateLimitReading {
+  remaining?: number;
+  used?: number;
+  limit?: number;
+  reset?: number;
+  resource?: string;
+}
+
+/** One `X-Ratelimit-*` field out of an HTTP header block, case-insensitively (RFC 7230). */
+function ghRateLimitHeaderField(headerBlock: string, name: string): string | undefined {
+  return headerBlock.match(new RegExp(`^${name}:\\s*(.+?)\\s*$`, "im"))?.[1];
+}
+
+/**
+ * Parse `X-Ratelimit-Remaining`/`-Used`/`-Limit`/`-Reset`/`-Resource` off ONE response's raw
+ * header block. This is the ONLY place in this file that reads these headers — see {@link ghJson}
+ * for the single call site that supplies the block.
+ */
+export function parseGhRateLimitHeaders(headerBlock: string): GhRateLimitReading {
+  const num = (name: string): number | undefined => {
+    const raw = ghRateLimitHeaderField(headerBlock, name);
+    return raw === undefined ? undefined : Number(raw);
+  };
+  return {
+    remaining: num("X-Ratelimit-Remaining"),
+    used: num("X-Ratelimit-Used"),
+    limit: num("X-Ratelimit-Limit"),
+    reset: num("X-Ratelimit-Reset"),
+    resource: ghRateLimitHeaderField(headerBlock, "X-Ratelimit-Resource"),
+  };
+}
+
+/**
+ * Split `gh api -i`'s combined stdout into its HTTP header block and its JSON body — mirroring
+ * curl's `-i`: a status line, the response headers (CRLF-terminated, per measurement), one blank
+ * line, then the body. Anything that does not start with an HTTP status line (every `gh`
+ * invocation this file issues that is not `gh api …`, which never receives `-i` — see
+ * {@link ghJson}) is returned whole as `body` with an empty `headers` block, so a caller with no
+ * reading to parse can never mis-split real JSON.
+ */
+export function splitGhHeaderBlock(out: string): { headers: string; body: string } {
+  if (!out.startsWith("HTTP/")) return { headers: "", body: out };
+  const sep = out.match(/\r?\n\r?\n/);
+  if (!sep || sep.index === undefined) return { headers: "", body: out };
+  return { headers: out.slice(0, sep.index), body: out.slice(sep.index + sep[0].length) };
+}
+
+/**
  * Shared `gh ... --json` invocation + parse, used by ~13 call sites across run-task.ts (mostly
  * single-PR `pr view` reads, O(1) regardless of repo size). W1-T181's sibling-audit named exactly
  * ONE of those callers as repo-size-SCALING: run-task.ts's `buildOpenPrViews` (`pr list --state
@@ -2517,10 +2576,37 @@ export function runWorktreeReapRung(
  * therefore set here, on the ONE shared codepath, rather than duplicated per call site — it is
  * strictly headroom (`1 << 24` = 16 MiB, the orientation.ts:72 in-repo precedent) for every other
  * O(1) caller, since a larger ceiling costs nothing unless it is actually approached.
+ *
+ * W1-T525: THE METERED ENTRY POINT — the single place a `gh` invocation is issued AND observed.
+ * For a `gh api …` call this now passes `-i`/`--include` (today ZERO sites do — the rationale's
+ * "NOTHING READS THE HEADER, AND NOTHING EVEN RECEIVES IT"), splits the response into its header
+ * block and body, parses the rate-limit reading off THAT header block, and — when `onRateLimit`
+ * is supplied — hands the reading back before returning, so a caller can feed it to
+ * `GhCallPacer.recordResult` (lib/open-prs-rest.ts) and widen pacing proactively, before any call
+ * has failed (design ii). `-i` is added ONLY for `gh api` calls: it is not a flag `gh pr
+ * view`/`gh pr list`/etc. accept (confirmed against `gh`'s own `--help`), and those subcommands
+ * are answered over GraphQL internally, so they carry no REST rate-limit header to read either
+ * way. The parsed body returned is byte-for-byte what `JSON.parse(out)` returned before this
+ * change, and `onRateLimit` is optional — every existing call site (all 11 today) omits it and is
+ * therefore unaffected: this changes no caller's contract.
+ *
+ * `exec` is injectable (mirrors `GhApiFetcher`/`ghGateway`'s own `opts.exec` seam elsewhere in
+ * this codebase) purely so this metered entry point itself is testable with zero network and no
+ * real `gh` binary — this leaf previously had no test driving it at all. Every real caller omits
+ * it and gets the genuine `execFileSync`.
  */
-export function ghJson(args: string[]): unknown {
-  const out = execFileSync("gh", args, { encoding: "utf8", maxBuffer: 1 << 24 });
-  return JSON.parse(out);
+export function ghJson(
+  args: string[],
+  onRateLimit?: (reading: GhRateLimitReading) => void,
+  exec: (file: string, execArgs: string[], opts: { encoding: "utf8"; maxBuffer: number }) => string = execFileSync,
+): unknown {
+  const isApiCall = args[0] === "api";
+  const execArgs = isApiCall ? ["api", "-i", ...args.slice(1)] : args;
+  const out = exec("gh", execArgs, { encoding: "utf8", maxBuffer: 1 << 24 });
+  if (!isApiCall) return JSON.parse(out);
+  const { headers, body } = splitGhHeaderBlock(out);
+  if (onRateLimit) onRateLimit(parseGhRateLimitHeaders(headers));
+  return JSON.parse(body);
 }
 
 export function ghPrView(prUrl: string): { state: string; mergeable: string; url: string } {
