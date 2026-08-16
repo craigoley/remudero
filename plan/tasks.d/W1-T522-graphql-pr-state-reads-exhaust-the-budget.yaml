@@ -114,16 +114,17 @@
     ONLY the four rollup-bearing rows are genuinely stuck on GraphQL. Everything else could
     move; this task moves two and the table is the record for whoever moves the next one.
 
-    (v) TWO SHARDS NOT ONE — THE SPLIT IS RECOMMENDED AND THIS IS THE FIRST HALF. NOTHING READS
-    THE REMAINING HEADER: `x-ratelimit` and `X-RateLimit` each match ZERO files under src/ and
-    test/, against a positive control (`isGhRateLimitError`, 2 src files) and a negative
-    control at 0. `GhCallPacer` exists but is REACTIVE SPACING, not a floor — it widens 1.5s to
-    10s only AFTER a call is classified rate-limited, and it guards THREE sites
-    (src/lib/status.ts twice, src/run-task.ts once) all of which are REST. The GraphQL sites
-    that actually exhaust are unguarded entirely. A proactive floor — read the remaining
-    budget, stand down above a threshold — is a real and probably larger task, and it belongs
-    in its own shard because it shares a cause with this one and nothing else: different files,
-    different falsifiers, and it must cover callers this conversion never touches.
+    (v) TWO SHARDS NOT ONE — THE SPLIT IS RECOMMENDED AND THIS IS THE FIRST HALF.
+    NOTHING READS THE REMAINING HEADER: `x-ratelimit` and `X-RateLimit` each match ZERO
+    files under src/ and test/, against a positive control (`isGhRateLimitError`, 2 src
+    files) and a negative control at 0. `GhCallPacer` exists but is REACTIVE SPACING, not
+    a floor — it widens 1.5s to 10s only AFTER a call is classified rate-limited, and it
+    guards THREE sites (src/lib/status.ts twice, src/run-task.ts once) all of which are
+    REST. The GraphQL sites that actually exhaust are unguarded entirely. A proactive
+    floor — read the remaining budget, stand down above a threshold — is a real and
+    probably larger task, and it belongs in its own shard because it shares a cause with
+    this one and nothing else: different files, different falsifiers, and it must cover
+    callers this conversion never touches.
 
     DO NOT PROPOSE A RETRY. The failure class is exhaustion; retrying against an exhausted
     budget deepens exactly what it reacts to, and the live sample above shows failed calls
