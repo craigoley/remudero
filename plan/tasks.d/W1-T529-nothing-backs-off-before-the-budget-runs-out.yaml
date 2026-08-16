@@ -1,0 +1,138 @@
+- id: W1-T529
+  title: "the rate-limit floor, and it guards the SMALLER half — the orchestrator's own calls back off before exhaustion while spawned workers stay unmetered, and the meter the fleet already has reads a counter that was 3,111 ahead of the bucket doing the work"
+  repo: remudero
+  depends_on: ["W1-T525"]
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 50.00
+  rationale: "**THIS SHARD GUARDS THE SMALLER HALF AND SAYS SO FIRST, SO IT IS NOT OVERSOLD.** MEASURED:
+    `used` moved 7,499 -> 7,517 entirely at `remaining: 0` while ledger-visible calls account for only
+    ~531 of the day — the majority is SPAWNED WORKERS running `gh` unmetered. `hooks/deny-floor.sh`
+    records the disjointness itself: the orchestrator's `gh` calls go through `execFileSync` from the
+    `rmd run-task` process and never reach that PreToolUse hook at all; only a spawned worker's Bash
+    call does. **THE TWO SURFACES ARE DISJOINT AND THIS TASK REACHES ONLY ONE OF THEM.** See design
+    (vii) for the worker half, which is ranked and deliberately not taken here.
+
+    (1) **THE COST, RE-DERIVED AND ESCALATING.** GraphQL was exhausted FOUR TIMES today, peaking at
+    7,965 used against a 5,000 ceiling. `sweep.post_review` failures went 27% -> 56% -> 63.2% (84 of
+    133), with 47 inside hour 21 alone. `rmd next-task-id` went DEGRADED — 'cannot enumerate open
+    PRs' — **WHICH IS HOW W1-T522 WAS TAKEN BETWEEN A SWEEP AND A PUSH.** Exhaustion now causes
+    collisions, not merely delay.
+
+    (2) **AND THE RETRY IS UNBOUNDED BY OMISSION, WHICH IS THE SHARPEST FINDING.** A review attempt
+    that throws writes only `sweep.action_failed`, while `priorActionsFromLedger` (`src/lib/sweep.ts`)
+    builds `postReviewed` from `review.posted` AND `review.post_refused` ONLY. So a failed attempt
+    leaves NO dedup key and is re-attempted every pass, without bound. When the cause is exhaustion,
+    **EACH RETRY DEEPENS WHAT IT REACTS TO.**
+
+    (3) **THE HEADER IS DISCARDED AT THE TRANSPORT LAYER.** Re-derived at 6a3aa72: **52 raw `gh` exec
+    sites across 18 files** (positive control: 166 `execFileSync(` total), and **ZERO** pass
+    `-i`/`--include`, so `x-ratelimit-remaining` never reaches any code that could read it. GitHub
+    returns it on every response.
+
+    (4) **A METER ALREADY EXISTS, READS THE WRONG COUNTER, AND GATES NOTHING — THIS CORRECTS THE
+    PREMISE THAT NOTHING READS THE LIMIT.** `readGhRateLimitRemaining` (`src/lib/daemon-health.ts`)
+    shells `gh api rate_limit` and returns `resources.core.remaining`. Its ONLY consumer is
+    `src/lib/serve.ts`, painting the `dh-rate-limit` glance value. No decision reads it. **AND IT IS
+    THE FREE PROBE, NOT THE WORKING BUCKET.** Measured back-to-back tonight: `gh api rate_limit`
+    reported **4,875** while a real `repos/{owner}/{repo}` read reported `x-ratelimit-remaining`
+    **1,764 of 5,000** — **A GAP OF 3,111**, with both reads returning a number (the control that
+    makes the comparison valid). A floor built on the probe would have seen plenty while the bucket
+    doing the work was nearly spent.
+
+    (5) **SO THE METER MUST SIT AT THE CALL, AND `GhCallPacer` IS THE THING TO EXTEND RATHER THAN
+    REPLACE.** It lives in `src/lib/open-prs-rest.ts` and already widens its gap on a CLASSIFIED
+    FAILURE — it is reactive and lacks only a proactive input. Building a second pacer beside it is
+    the duplication to avoid."
+  design: |
+    (i) READ THE HEADER AT THE CALL, NOT THE PROBE. The guarded call passes `-i`/`--include` and the
+    pacer parses `x-ratelimit-remaining` off the response it already made. NO EXTRA CALL: rationale (4)
+    is why the free probe is the wrong source, and an extra probe per guarded call would also spend
+    the thing being conserved.
+    (ii) EXTEND `GhCallPacer`, NEVER FORK IT. `createGhCallPacer` (`src/lib/open-prs-rest.ts`) already
+    owns the gap and the classified-failure widening. The floor is a THIRD input to the same object,
+    not a second pacer. Its `now`/`sleepSync` injectability is the test seam and must be preserved.
+    (iii) DEGRADE, DO NOT RETRY. The failure class is exhaustion; a retry deepens it. Below the floor a
+    guarded call STANDS DOWN and the pass re-derives next tick.
+    (iv) WHAT EACH LANE'S STAND-DOWN MEANS, STATED SO THE COST IS CHOSEN RATHER THAN DISCOVERED.
+      A SKIPPED REVIEW leaves a GREEN PR UNMERGED — visible, recoverable next pass.
+      A SKIPPED DISPATCH WASTES A SELECTION — the queue re-picks next pass.
+      A SKIPPED FIX STRIKE MUST NOT CONSUME THE STRIKE. W1-T527 established that a stand-down writes
+      nothing because `priorActionsFromLedger` skips rows where `acted !== true`. **THE FLOOR MUST
+      PRESERVE THAT EXISTING PROPERTY RATHER THAN INVENT A SECOND MECHANISM** — a floor that spends a
+      strike it never used is worse than no floor.
+    (v) AND FIX THE MISSING DEDUP KEY IN THE SAME CHANGE, BECAUSE A FLOOR WITHOUT IT BOUNDS THE RATE
+    AND NOT THE REPEAT. A stand-down (and a thrown attempt) must leave a key `postReviewed` can see,
+    or the attempt returns the instant the budget recovers and the storm resumes at full speed. The
+    honest shape is to record the refusal as an OUTCOME the existing dedup already reads, rather than
+    to widen what counts as an attempt.
+    (vi) USE THE SIGNAL THAT EXISTS. W1-T525 names the existing `budget.warning` step for visibility.
+    **DO NOT MINT A FOURTH FIRED-AND-UNREAD ROW** — `daemon.tree_dirty`, `daemon.stale_code` and
+    `CiFailure.outsidePrRange` are three measured instances, and rationale (4)'s `dh-rate-limit` glance
+    is arguably a fourth already. The consumer here is the pacer's own decision, which is what makes
+    this a gate rather than a report.
+    (vii) THE WORKER HALF IS THE BULK AND THIS CANNOT REACH IT — RANKED, NOT TAKEN.
+      FIRST: the `PreToolUse` hook (`hooks/deny-floor.sh`) already sees every worker `gh` call, and
+      `rate_limit` being FREE makes a stateless check viable there — ten probe calls moved `used` by 4
+      where ten real calls moved it by 23. Note rationale (4): the probe is the wrong number for a
+      precise floor but adequate for a coarse worker cutoff, and that trade must be stated wherever it
+      is built.
+      SECOND: a pre-spawn check — coarser, one decision per worker rather than per call.
+      LAST: an env-carried budget, which is close to useless because it relies on the worker obeying.
+    (viii) NOT IN SCOPE: W1-T522 and W1-T523 (both merged) own the REST conversions —
+    **CONVERSION REDUCES THE BURN; ONLY A FLOOR BOUNDS IT**. W1-T525 (#1907) owns the metered seam this
+    depends on. The worker-side floor is (vii) and is a separate shard.
+  acceptance:
+    - claim: "a guarded call below the floor stands down instead of spending the budget"
+      proof: "unit test: W1-T529: a guarded call below the floor stands down"
+    - claim: "the remaining count is read from the call's own response rather than a separate probe"
+      proof: "unit test: W1-T529: the floor reads the call's own response header"
+    - claim: "a stand-down leaves the fix strike unspent"
+      proof: "unit test: W1-T529: a floor stand-down leaves the fix strike unspent"
+    - claim: "a refused attempt leaves a dedup key so it does not retry every pass"
+      proof: "unit test: W1-T529: a refused attempt leaves a dedup key behind"
+  origin: recon#nothing-backs-off-before-exhaustion-2026-08-15
+  plan_refs: ["W1-T525", "W1-T522", "W1-T523", "W1-T527", "W1-T494"]
+  files: [src/lib/open-prs-rest.ts, src/lib/sweep.ts, test/open-prs-rest.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `src/` and `test/`, and independently
+    warranted: this makes the fleet REFUSE its own calls, so a floor set wrong does not fail loudly, it
+    stops the fleet working. budget_usd 50 — one input to an existing pacer, a per-lane stand-down, and
+    a dedup key.
+
+    **W1-T525 IS FILED AND NOT BUILT, WHICH IS WHY `depends_on` IS LOAD-BEARING RATHER THAN
+    DECORATIVE.** Re-derived: the only commit on origin/main naming W1-T525 is its own `chore(plan)`
+    filing (#1907, 0370eb0). A floor with nowhere to read the header is unbuildable, so this must not
+    be dispatched before that seam exists.
+
+    `files:` DERIVED BY WORD-BOUNDED INVOCATION COUNT IN PYTHON (a bare substring inflated
+    `ghLiveState` from 6 to 11 today). `src/lib/open-prs-rest.ts` scores `GhCallPacer` 8 and
+    `createGhCallPacer` 2 — the pacer's home. `src/lib/sweep.ts` scores `postReviewed` 11 and
+    `priorActionsFromLedger` 6 — where the missing dedup key lives. `test/open-prs-rest.test.ts` is the
+    pacer's existing suite at `createGhCallPacer` 13. `src/lib/daemon-health.ts` is NOT declared: its
+    `readGhRateLimitRemaining` is the WRONG source per rationale (4) and this task does not repair it —
+    doing so would be a second concern, and declaring an untouched path fails
+    `inverseScopeUntouchedFiles` (`src/lib/review.ts`). `src/run-task.ts` is NOT declared: it scores
+    `GhCallPacer` 4 but only as wiring, and it serialises every task naming it (W1-T471).
+
+    TWO FIGURES IN THE COMMISSIONING BRIEF DID NOT SURVIVE RE-DERIVATION AND ARE CORRECTED HERE.
+    `ghApiJson` was reported as 0 definitions and 0 call sites; it reads **3** — a module-LOCAL helper
+    in `src/lib/onboard/inventory.ts` with two onboarding call sites. The substance holds (there is no
+    general REST helper) but the count does not. And 'nothing reads x-ratelimit-remaining' is true of
+    the HEADER and false of the LIMIT: `readGhRateLimitRemaining` reads it via the free probe, and the
+    console displays it. Rationale (4) is that correction.
+
+    PROOF NOTES: all four proofs are NAME-FILTERED titles, not pure paths — a pure path runs the whole
+    file and one unrelated failure fails every criterion. Each was verified to match ZERO files today
+    against a control matching exactly one, and each is under 100 characters with no comma so
+    `looksLikeScenarioNarrative` (`src/lib/task-linter.ts`) cannot fail them.
+
+    ID PROVENANCE: `refs/rmd-id/` held 515, 516 and 520-528. **524 IS RESERVED BUT UNFILED AND WAS
+    SKIPPED RATHER THAN REUSED.** This took 529 behind a fresh-fetch suffix-aware re-sweep with a
+    known-taken control reading 3, pushed under `--force-with-lease` with the exit code captured into a
+    VARIABLE rather than read through a pipe, then the ref RE-READ and its host-pid-nanosecond NONCE
+    matched against the one written. W1-T522 was lost to another lane between sweep and push earlier
+    today — the collision this floor's absence caused, and the reason the nonce discipline exists."
