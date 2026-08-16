@@ -12710,6 +12710,16 @@
     (rule 2), 5%/95% initial, overridable via the P37 policy file with no code edit. Imputed ledger dollar figures
     are never read on this path. VERIFY FROM SOURCE the headroom read path + the pause drain-and-hold semantics
     before wiring (distrust this note).
+    THE FLAG GOVERNS THIS GATE (operator ruling fb-1784894405468-a4153e clause 1+5, mechanism built by W1-T259
+    and LIVE today): this reserve gate is NOT a second, independent switch — it rides the SAME `headroom.enabled`
+    posture the daemon idle curve already resolves (`opts.headroomEnabled ?? true` in src/lib/daemon.ts, resolved
+    for the live entry by `resolveHeadroomEnabled` in src/lib/config.ts: config `headroom.enabled` / env
+    `RMD_HEADROOM_ENABLED`, env winning both ways, with plan/policy.yaml's `headroom.enabled` row as the
+    documented home). Read the resolved posture, do not add a flag. When DISABLED, the reserve is still READ and
+    LEDGERED (telemetry with `enforced:false`) but NO headroom condition pauses dispatch — and an unreadable read
+    while disabled is ABSENT TELEMETRY, never a hold, so the bounded-degraded/escalate posture below is the
+    ENABLED-path obligation only. DEFAULT: enabled=true (DECISIONS.md 2026-07-28 supersedes a4153e's default
+    clause only); this host opts out explicitly.
   acceptance:
     - claim: "with weekly headroom ABOVE the operator reserve, dispatch continues; imputed ledger dollar figures gate NOTHING on this path"
       proof: "unit test: test/headroom-reserve.test.ts"
@@ -12717,18 +12727,36 @@
       proof: "unit test: test/headroom-reserve.test.ts"
     - claim: "the reserve/ceiling is POLICY DATA (5% / ceiling 95% initial, HEADROOM_LIMIT_PCT=95), overridable via the P37 policy file with zero code edit"
       proof: "unit test: test/headroom-reserve.test.ts"
-    - claim: "an UNREADABLE headroom read does NOT silent-proceed as if unlimited — cannot-read-the-budget is rendered as the bounded-degraded/escalate posture, never proceed-as-if-unlimited (W1-T130 / W1-T197 falsifier)"
+    - claim: "with the governor ENABLED, an UNREADABLE headroom read does NOT silent-proceed as if unlimited — cannot-read-the-budget is rendered as the bounded-degraded/escalate posture, never proceed-as-if-unlimited (W1-T130 / W1-T197 falsifier)"
+      proof: "unit test: test/headroom-reserve.test.ts"
+    - claim: "THE a4153e CLAUSE-5 FALSIFIER — with headroom.enabled=false, NO headroom condition pauses dispatch: at/over the reserve dispatch proceeds with no drain-and-hold and no escalation, and the reserve is still ledgered as telemetry (enforced:false)"
+      proof: "unit test: test/headroom-reserve.test.ts"
+    - claim: "with headroom.enabled=false an UNREADABLE read is ABSENT TELEMETRY, never a hold — dispatch proceeds, no bounded-degraded pause, no escalation"
       proof: "unit test: test/headroom-reserve.test.ts"
   risk: high
-  origin: architect
-  plan_refs: ["P34", "§9", "§4B"]
-  files: [src/lib/daemon.ts, src/run-task.ts]
+  origin: feedback#fb-1784894405468-a4153e
+  plan_refs: ["P34", "§9", "§4B", "W1-T259"]
+  files: [src/lib/daemon.ts, src/run-task.ts, test/headroom-reserve.test.ts]
   status: queued
   attempts: 0
   note: "P34 clause (c), ratified 2026-07-23. Reserve = 5% weekly / HEADROOM_LIMIT_PCT=95 (round i), P37-tunable,
     P43-revisitable. Builds on W1-T197 (which already reads headroom and carries the verify-from-source mandate)
     and reuses W1-T11 pause drain-and-hold. The round-1 per-unattended-window DOLLAR CEILING is DISCARDED IN FULL
-    (round 3): imputed dollars gate nothing; headroom is the only constraint."
+    (round 3): imputed dollars gate nothing; headroom is the only constraint.
+    AMENDED 2026-08-16 by intake triage of OPERATOR RULING fb-1784894405468-a4153e (2026-07-24), clause 5, which
+    is the ONLY clause of that ruling still unlanded — the flag itself was built by W1-T259 (PR #768: config
+    `headroom.enabled` + env `RMD_HEADROOM_ENABLED`, resolveHeadroomEnabled), its default was superseded to TRUE
+    by the 2026-07-28 operator ruling in DECISIONS.md, and W1-T252's plan/policy.yaml `headroom.enabled` row has
+    since shipped. W1-T259's own note recorded this amendment as 'tracked separately' and no task carried it, so
+    it is carried HERE, on the task the ruling names: the design now states that this gate READS the existing
+    posture rather than adding a second switch, and two acceptance criteria were ADDED (the clause-5 falsifier —
+    disabled means nothing pauses dispatch — and the disabled-plus-unreadable case, absent telemetry never a
+    hold), with the pre-existing unreadable criterion scoped to the ENABLED path so the two cannot contradict.
+    Nothing else about this task is reopened: reserve 5%/95%, dispatch-only pause, imputed dollars gate nothing,
+    risk:high and depends_on:[W1-T197] all stand. `files:` also gains test/headroom-reserve.test.ts, the path all
+    six proofs already name — undeclared, it would have tripped run-task's scope guard at the END of the run
+    (the W1-T310 cost shape). ORIGIN PROVENANCE: filed by the architect as P34 clause (c) ratification; the
+    origin field now names the ruling that last amended it, per §7B intake provenance."
 
 - id: W1-T250
   title: "P34 clause (d) — MODEL EFFICIENCY is part of the envelope: per-class weekly-limit burn accounting, cheap models for plan-only filings / sweeps / judge calls and capable models for implementation, routing objective = weekly-limit burn per model class; genuinely ATOMIC cross-file coupling (.remudero/mounts.yaml per-class rows + src/lib/retro.ts accounting), one invariant proven by a single test/class-burn.test.ts"

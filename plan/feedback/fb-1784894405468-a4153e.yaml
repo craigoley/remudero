@@ -22,5 +22,6 @@ raw: "HEADROOM GOVERNOR BECOMES A FLAG, DEFAULT OFF — OPERATOR RULING
   headroom condition pauses dispatch, proven by test."
 attachments: []
 origin: cli
-status: new
+status: proposed
 proposal_pr: null
+summary: null
