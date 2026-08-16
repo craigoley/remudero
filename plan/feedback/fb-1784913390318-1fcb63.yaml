@@ -22,5 +22,6 @@ raw: "DAEMON GETS ITS OWN CHECKOUT — the daemon runs from the operator's WIP
   not."
 attachments: []
 origin: cli
-status: new
+status: proposed
 proposal_pr: null
+summary: null

@@ -1,0 +1,114 @@
+- id: W1-T926
+  title: "the acceptance fb-1784913390318-1fcb63 actually asks for is a LIVE launchd restart taken with an arbitrarily dirty operator checkout — no headless suite can produce that, and the last time this was left to be observed involuntarily it cost five hand-cleared PRs: drill it once, deliberately, and write down what it showed"
+  repo: remudero
+  depends_on: ["W1-T924", "W1-T925"]
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  rationale: |
+    FILED FROM fb-1784913390318-1fcb63 (2026-07-24, origin cli). ITS ACCEPTANCE IS TWO SENTENCES
+    AND ONLY THE FIRST IS HEADLESS-PROVABLE: "arbitrary operator dirt in ~/Remudero/remudero has
+    zero effect on daemon restart, dispatch, or deploy; a launchd restart with any operator-tree
+    state comes up healthy; proven by test where feasible and BY A DOCUMENTED LIVE DRILL WHERE
+    NOT." W1-T924 and W1-T925 cover the feasible half against real git fixtures. THIS TASK IS THE
+    NAMED REMAINDER, filed rather than left implicit so it cannot be quietly dropped as "covered by
+    the unit tests".
+
+    THE REPO ALREADY DISTINGUISHES THESE TWO THINGS AND HAS THE MACHINERY FOR BOTH.
+    `scripts/recovery-drill.mjs` drives `runDeployCycle` against real disposable repos (a real
+    origin, a real `install` clone reset one commit behind, real `merge --ff-only` and `reset
+    --hard` deps) and independently re-reads the head afterwards rather than trusting the returned
+    result. That is the SHAPE this drill should take for everything short of the launchd boundary.
+    Beyond it, the plan's own precedent is `verify: human` and a written record: W1-T147's forge
+    drill ("a security drill's conclusion is an operator's to draw"), W1-T214's restore drill, and
+    the W1-T12e commissioning drills LEARNINGS.md records as never having been run.
+
+    WHY THE LIVE HALF IS NOT OPTIONAL HERE. The failure this whole filing exists to end was
+    INVISIBLE TO EVERY GREEN TEST IN THE REPO: `checkCliFreshness` refused on a dirty tree,
+    `main()` exited 1, `KeepAlive{SuccessfulExit:false}` restarted it, and the loop reported itself
+    only as `LastExitStatus=256` in launchd's own accounting while five consecutive PRs waited for
+    a human. NOTHING ABOUT THAT CHAIN CROSSES A TEST BOUNDARY — it is a property of the unit, the
+    supervisor and the operator's tree at the same instant, on one machine.
+
+    AND THE DRILL HAS A SECOND JOB THAT MAKES IT WORTH A TASK RATHER THAN A CHECKLIST: it is the
+    only thing that can catch a REGRESSION of the topology. Once the units point at the install
+    checkout, nothing stops a future `daemon-plist --write` run from the wrong directory, an
+    operator `git clone` into the install path, or a new artifact writer resolving a path from
+    `repoRoot`. A drill that can be re-run is the level-triggered check on an invariant that is
+    otherwise only ever asserted at generation time.
+  design: |
+    (i) TWO HALVES, EXPLICITLY LABELLED, AND MOST OF IT IS THE FIRST. A script
+    (`scripts/operator-dirt-drill.mjs`, sibling to `recovery-drill.mjs`) builds disposable repos —
+    a real origin, an install clone, an operator checkout — dirties the operator checkout in EACH
+    OBSERVED SHAPE, and asserts the install head advanced while the operator tree is byte-for-byte
+    untouched. The shapes are taken from the record, not invented:
+      - UNTRACKED DAEMON EXHAUST: an unlanded `plan/feedback/<id>.yaml` (the W1-T243 class).
+      - A TRACKED MODIFICATION: a locally-appended `DECISIONS.md` (the W1-T191 class).
+      - AN UNTRACKED SCRATCH DIRECTORY: the `?? .claude/` class that stalled self-sync twice
+        (W1-T446's exhibit).
+      - OFF-MAIN: the operator checkout sitting on a feature branch (the W1-T445 class).
+      - DIVERGED: a local commit origin/main does not have.
+    Each shape is a row in a DATA table, so a sixth costs a line — the same posture the linter's
+    lexicons take.
+
+    (ii) THE LIVE HALF IS A WRITTEN PROCEDURE PLUS ITS OBSERVED RESULT, in `docs/deploy-supervisor.md`
+    beside the install/enable section it already carries. It must record, for a real
+    `launchctl kickstart -k` taken while the operator checkout is dirty: what the daemon's exit
+    status was, whether `daemon.boot` came up healthy, what the supervisor's next cycle decided,
+    and — stated honestly — every way the drill was LESS FAITHFUL than the real incident (W1-T147's
+    "including the deltas" clause). A drill whose deltas are not written down is a claim, not
+    evidence.
+
+    (iii) THE SCRIPT MUST NOT BE ABLE TO TOUCH PRODUCTION BY ACCIDENT. Disposable fixtures by
+    default; anything that would kickstart, bootout or write a real unit sits behind an explicit
+    live flag that also refuses unless the resolved install root is a fixture path. The drill for a
+    crash-loop must not be able to CAUSE one.
+
+    (iv) IT MUST BE RE-RUNNABLE AND CHEAP, because an artifact that runs once is a document. No
+    network, no `gh`, no LLM: real git against temp directories, exactly as `recovery-drill.mjs`
+    does today.
+
+    (v) NOT IN SCOPE: building the install checkout or the resolver (W1-T924), the unit generators
+    (W1-T925), the periodic fault-injection DRILL LIBRARY proposed in fb-1785237583569-3304ae
+    (this is one drill, not a scheduler for drills), and any change to the freshness predicates
+    themselves.
+  acceptance:
+    - claim: "the drill dirties a disposable operator checkout in each recorded shape — untracked exhaust, a tracked modification, scratch, off-main and diverged — and asserts the install head advanced while the operator tree is unchanged"
+      proof: "unit test: test/operator-dirt-drill.test.ts"
+    - claim: "the drill runs against disposable fixtures and refuses to act on a real install root or load any unit unless an explicit live flag is given"
+      proof: "unit test: test/operator-dirt-drill.test.ts"
+    - claim: "the dirt shapes are a data table a sixth case can be added to without editing the drill logic"
+      proof: "unit test: test/operator-dirt-drill.test.ts"
+    - claim: "the live launchd half is documented as a procedure WITH its observed result and its honest deltas, not as an intention"
+      proof: "unit test: test/operator-dirt-drill.test.ts"
+  risk: high
+  origin: feedback#fb-1784913390318-1fcb63
+  plan_refs: ["§4A", "W1-T147", "W1-T191", "W1-T243", "W1-T445", "W1-T446", "W1-T924", "W1-T925"]
+  files: [scripts/operator-dirt-drill.mjs, test/operator-dirt-drill.test.ts, docs/deploy-supervisor.md]
+  status: queued
+  attempts: 0
+  note: |
+    verify:human IS THE POINT OF THIS SHARD, not a hedge. The fourth criterion names a live launchd
+    restart, which `headlessFitnessViolations` flags on any `verify: auto` task and rightly so — a
+    headless worker has no operator and no loaded unit. The plan's own remedy for that flag is
+    "move to verify:human", and the drill precedents (W1-T147, W1-T214, W1-T12e) all sit there.
+    The first three criteria ARE headless and are what the worker actually builds; the human step
+    is running the live half once and recording what it showed.
+    `depends_on: [W1-T924, W1-T925]` — drilling the invariant before the invariant exists would
+    document today's defect at some length and prove nothing. No file overlap with either, so this
+    serialises on the DAG only.
+    risk:high is Rule 19's SPAN: `files:` crosses `scripts/`, `test/` and `docs/`, and the
+    acceptance text hits the `daemon` and `launchd` tags. Raised up front.
+    `scripts/recovery-drill.mjs` IS NOT DECLARED and must not be edited: it drills the deploy
+    ROLLBACK path and is a working artifact of its own. It is the MODEL for the fixture shape, not
+    a host for a second drill — `inverseScopeUntouchedFiles` and the single-concern rule both point
+    the same way.
+    THE PROOF IS A FORWARD REFERENCE TO A PATH, never to a symbol or a test title: the file does
+    not exist yet, a path parses now and executes once it does, and a grep proof naming an existing
+    symbol would match the merge base too and be downgraded to `executed_stale` (the W1-T443
+    lesson).
+    NOTHING HERE SHOULD BE QUOTED FORWARD AS CURRENT: the five hand-cleared PRs, the ~16:09Z
+    2026-07-24 loop and `LastExitStatus=256` are the FEEDBACK's observations from the mini on
+    2026-07-23/24, and the drill exists precisely to replace them with observations somebody chose
+    to make.
