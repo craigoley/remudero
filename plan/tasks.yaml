@@ -12717,18 +12717,34 @@
       proof: "unit test: test/headroom-reserve.test.ts"
     - claim: "the reserve/ceiling is POLICY DATA (5% / ceiling 95% initial, HEADROOM_LIMIT_PCT=95), overridable via the P37 policy file with zero code edit"
       proof: "unit test: test/headroom-reserve.test.ts"
-    - claim: "an UNREADABLE headroom read does NOT silent-proceed as if unlimited — cannot-read-the-budget is rendered as the bounded-degraded/escalate posture, never proceed-as-if-unlimited (W1-T130 / W1-T197 falsifier)"
+    - claim: "an UNREADABLE headroom read does NOT silent-proceed as if unlimited — cannot-read-the-budget is rendered as the bounded-degraded/escalate posture, never proceed-as-if-unlimited (W1-T130 / W1-T197 falsifier); with the governor DISABLED this becomes absent telemetry, never a hold"
+      proof: "unit test: test/headroom-reserve.test.ts"
+    - claim: "the reserve gate rides the ONE headroom.enabled switch (W1-T259): with headroom.enabled=false NO headroom condition pauses dispatch — the reserve gate never pauses, never escalates, and headroom is still read and ledgered with enforced:false (telemetry without enforcement)"
       proof: "unit test: test/headroom-reserve.test.ts"
   risk: high
-  origin: architect
+  origin: feedback#fb-1784894405468-a4153e
   plan_refs: ["P34", "§9", "§4B"]
-  files: [src/lib/daemon.ts, src/run-task.ts]
+  files: [src/lib/daemon.ts, src/run-task.ts, test/headroom-reserve.test.ts]
   status: queued
   attempts: 0
-  note: "P34 clause (c), ratified 2026-07-23. Reserve = 5% weekly / HEADROOM_LIMIT_PCT=95 (round i), P37-tunable,
+  note: "P34 clause (c), ratified 2026-07-23. Originally origin:architect; re-stamped
+    origin:feedback#fb-1784894405468-a4153e when that ruling amended this task (architect remains the filer).
+    Reserve = 5% weekly / HEADROOM_LIMIT_PCT=95 (round i), P37-tunable,
     P43-revisitable. Builds on W1-T197 (which already reads headroom and carries the verify-from-source mandate)
     and reuses W1-T11 pause drain-and-hold. The round-1 per-unattended-window DOLLAR CEILING is DISCARDED IN FULL
-    (round 3): imputed dollars gate nothing; headroom is the only constraint."
+    (round 3): imputed dollars gate nothing; headroom is the only constraint.
+    AMENDMENT — OPERATOR RULING fb-1784894405468-a4153e (2026-07-24), clause 5, applied here: this gate does NOT
+    ship as an unconditional pause. ALL headroom-based dispatch gating rides the ONE headroom.enabled switch that
+    W1-T259 already built and shipped (config `headroom.enabled` + env `RMD_HEADROOM_ENABLED`, resolved by
+    resolveHeadroomEnabled in src/lib/config.ts; policy home is W1-T252's plan/policy.yaml row, now landed via
+    W1-T253). The implementer REUSES that resolved posture — do NOT add a second switch, a second reader, or a
+    second default. The fifth acceptance claim above is the ruling's falsifier for this task: disabled means the
+    reserve gate never pauses and never escalates, while headroom is still READ and LEDGERED (enforced:false), and
+    an unreadable read while disabled is absent telemetry, never a hold. DEFAULT: the a4153e default-OFF clause was
+    SUPERSEDED by the 2026-07-28 operator ruling (DECISIONS.md) — the governor now ships ENABLED by default and
+    opting into overflow is the deliberate act; THIS host carries the explicit `headroom.enabled: false`. Only the
+    default moved; the one-switch architecture and clause 4 (imputed dollars gate nothing; the per-run turn limit
+    and budget_usd remain the runaway guards) stand unchanged. Drain-side consumer is W1-T290's, not this task's."
 
 - id: W1-T250
   title: "P34 clause (d) — MODEL EFFICIENCY is part of the envelope: per-class weekly-limit burn accounting, cheap models for plan-only filings / sweeps / judge calls and capable models for implementation, routing objective = weekly-limit burn per model class; genuinely ATOMIC cross-file coupling (.remudero/mounts.yaml per-class rows + src/lib/retro.ts accounting), one invariant proven by a single test/class-burn.test.ts"
