@@ -15401,6 +15401,14 @@ export function buildSweepEffects(
     if (existsSync(feedbackEntryPath(repoRoot, filing.id))) return; // already filed this window
     captureFeedback(repoRoot, { id: filing.id, raw: filing.raw, origin: filing.origin as FeedbackOrigin });
   },
+  // W1-T921 — appended LAST, the same convention every dep above follows. The `close` effect below
+  // is the ONE `gh` site in this object whose ARGUMENT VECTOR is the thing under test: whether it
+  // carries `--delete-branch`. Without a seam that vector is unobservable offline, because asserting
+  // it would mean closing a real pull request. Default is the real `execFileSync`, so production
+  // wiring is unchanged; a test passes a recorder and reads the argv back.
+  ghRunImpl: (file: string, args: readonly string[]) => void = (file, args) => {
+    execFileSync(file, [...args], { stdio: "pipe" });
+  },
 ): Pick<
   SweepDeps,
   | "arm"
@@ -15541,9 +15549,20 @@ export function buildSweepEffects(
 
     close: (pr, reason) => {
       try {
-        execFileSync("gh", ["pr", "close", pr.prUrl, "--comment", `Closed by rmd sweep: ${reason}`, "--delete-branch"], {
-          stdio: "pipe",
-        });
+        // W1-T921: NO `--delete-branch` HERE, AND THAT ABSENCE IS THE WHOLE CHANGE. DECISIONS.md's
+        // 2026-08-16 ruling (W1-T919) gates the fleet on IRREVERSIBILITY rather than outwardness,
+        // and rests that on closing preserving the head branch while merging destroys it — measured
+        // on #1873 (closed, branch intact) against #1874 (merged, branch taken). But #1873 was
+        // closed BY A HUMAN; this closure is the FLEET's close, and with the flag it destroyed the
+        // very branch the ruling cites. The work was never actually lost — GitHub keeps
+        // `refs/pull/<n>/head` permanently, so #1874's head object is still served today — but a
+        // deleted branch cannot be reopened without first being restored, and the ruling exists to
+        // authorise THIS actor. Rule 21 forbids amending the merged entry, so the effects layer is
+        // where it is reconciled.
+        //
+        // THE MERGE PATHS KEEP THE FLAG AND MUST: W1-T447 wants merged branches reaped, where the
+        // branch is genuinely spent. This is the one site that closes an UNMERGED pull request.
+        ghRunImpl("gh", ["pr", "close", pr.prUrl, "--comment", `Closed by rmd sweep: ${reason}`]);
       } catch (e) {
         log("sweep.close.error", { pr_number: pr.prNumber, error: String((e as Error)?.message ?? e) });
       }
