@@ -9083,6 +9083,24 @@ export function candidateFilesFromArgs(rest: readonly string[]): string[] {
     .filter((f) => f.length > 0);
 }
 
+/**
+ * W1-T917 — the ENTIRE advisory decision, including the `--offline` suppression, as one pure-ish
+ * exported function. Pushed out of `nextTaskIdCommand` deliberately: what stays in the command is a
+ * two-line print loop, and everything a test could meaningfully assert lives here instead of behind
+ * a coverage exemption the gate would (correctly) refuse.
+ */
+export function overlapAdvisoryLines(
+  rest: readonly string[],
+  offline: boolean,
+  owner: string,
+  repo: string,
+  planPath: string,
+  deps: OverlapWarningDeps = {},
+): string[] {
+  if (offline) return [];
+  return overlapWarningLinesFor(candidateFilesFromArgs(rest), owner, repo, planPath, deps);
+}
+
 export async function nextTaskIdCommand(rest: string[], overlapDeps: OverlapWarningDeps = {}): Promise<number> {
   const badArg = unknownArgError("next-task-id", rest, ["--plan", "--files"], ["--offline"]);
   if (badArg) {
@@ -9124,13 +9142,8 @@ export async function nextTaskIdCommand(rest: string[], overlapDeps: OverlapWarn
   // W1-T917 — the rare-overlap advisory. Printed AFTER the id, never instead of it: the mint's own
   // output is byte-identical whether this warns, stays silent, or fails outright. `--offline`
   // suppresses it for the same reason it suppresses the open-PR sweep above.
-  if (!offline) {
-    // diff-cov: process-boundary — CLI print loop: the parse is `candidateFilesFromArgs` and the
-    // decision is `overlapWarningLinesFor`, both pure and both driven by the falsifier. What remains
-    // here is argv -> stdout glue that cannot carry a DA record without a live network sweep.
-    for (const line of overlapWarningLinesFor(candidateFilesFromArgs(rest), self.owner, self.repo, planPath, overlapDeps))
-      (overlapDeps.say ?? console.log)(line);
-  }
+  for (const line of overlapAdvisoryLines(rest, offline, self.owner, self.repo, planPath, overlapDeps))
+    (overlapDeps.say ?? console.log)(line);
   return mint.degraded.length ? 1 : 0;
 }
 

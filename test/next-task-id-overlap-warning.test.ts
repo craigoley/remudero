@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { candidateFilesFromArgs, overlapWarningLinesFor, rareOverlapWarningLines } from "../src/run-task.js";
+import { candidateFilesFromArgs, overlapAdvisoryLines, overlapWarningLinesFor, rareOverlapWarningLines } from "../src/run-task.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import type { OpenPrFileScope } from "../src/lib/dispatch-overlap.js";
 
@@ -117,4 +117,21 @@ test("W1-T917: the files flag parses into candidate paths", () => {
   ]);
   assert.deepEqual(candidateFilesFromArgs([]), [], "absent flag ⇒ no candidate, so no open-PR read");
   assert.deepEqual(candidateFilesFromArgs(["--files", " , ,"]), [], "blank entries are dropped, not passed through");
+});
+
+test("W1-T917: the offline flag suppresses the advisory entirely", () => {
+  const scopes = [{ id: "#1873", files: ["src/lib/plan.ts"] }];
+  let swept = 0;
+  const deps = { plan: () => planFixture(), scopes: () => { swept++; return scopes; } };
+  assert.deepEqual(
+    overlapAdvisoryLines(["--files", "src/lib/plan.ts"], true, "o", "r", PLAN_PATH, deps),
+    [],
+    "--offline must read no open PR and print nothing",
+  );
+  assert.equal(swept, 0, "and must not spend a single REST call");
+  assert.equal(
+    overlapAdvisoryLines(["--files", "src/lib/plan.ts"], false, "o", "r", PLAN_PATH, deps).length,
+    1,
+    "while the same call online does warn — the falsifier for the suppression",
+  );
 });
