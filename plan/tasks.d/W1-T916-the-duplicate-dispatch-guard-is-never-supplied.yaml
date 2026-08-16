@@ -1,0 +1,166 @@
+- id: W1-T916
+  title: "W1-T534's duplicate-dispatch guard is declared consumed and never supplied, so optional chaining makes it evaluate to undefined on every pass and the window it exists to close is open on origin/main"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: "THE BOUNDARY FIRST, BECAUSE FIVE SHARDS FROM THIS WEEKEND RISK READING AS ONE ANOTHER.
+    W1-T532 (#1957) owns rarity-weighted overlap for two-ids-one-problem. W1-T534 owns the
+    stale-snapshot half of duplicate dispatch and SHIPPED ITS PREDICATE. THIS OWNS ONE THING: SUPPLYING
+    THAT PREDICATE'S ARGUMENT. It adds no detector, no row and no policy.
+
+    (1) **THE DEFECT, RE-DERIVED AT 443c5f6.** `hasPushedRunBranch` is declared as an OPTIONAL dep on
+    `NextRunnableOpts` and consumed in `nextRunnable` as `opts.hasPushedRunBranch?.(t.id)`, both in
+    `src/lib/drain.ts`, and NOTHING IN `src/` EVER PASSES IT — the only suppliers anywhere are seven
+    references inside `test/drain.test.ts`. Positive control: `isDispatchEligible` spans 8 `src/`
+    files. Negative control: `hasPushedRunBranchZzq` reads 0. Its sibling `onSkipRunBranch` is
+    unsupplied in exactly the same way.
+
+    (2) **THE FAILURE MODE IS WHY IT SURVIVED REVIEW, AND IT IS THE POINT OF THIS TASK.** The optional
+    chaining operator makes the miss invisible in BOTH directions: at runtime `opts.hasPushedRunBranch?.(t.id)`
+    short-circuits to `undefined`, which is falsy, so the guard silently never fires and no error is
+    ever raised; and at type-check the field is optional, so omitting it is legal. NO 'UNUSED EXPORT'
+    RULE WOULD FLAG IT — the symbol IS used, at its own consumption site. `depcruise` is already wired
+    as a CI job and CANNOT EXPRESS THIS: it operates on module dependency graphs, not on whether a
+    call site passes an argument.
+
+    (3) **THE SIBLING ALREADY PROVES THE WIRING SHAPE.** `onSkip` — same file, same options object,
+    same optional shape — IS supplied in production at three sites: twice in `src/lib/drain.ts`
+    (inside `runDrain`'s `skipOpts` and the lanes path) and once in `src/lib/daemon.ts`'s
+    `dispatchOpts`, each logging `dispatch.skipped` with `reason: \"open-pr\"`. Those three objects are
+    exactly where the missing argument belongs. This is a wiring omission beside a wired sibling, not
+    a design gap.
+
+    (4) **THE COST, AND ITS HONEST LIMIT.** Duplicate work is real and measured today: #1873 and #1874
+    shipped the same `loadPlan` ENOENT fix over the IDENTICAL two paths — `src/lib/plan.ts` and
+    `test/plan-sharding.test.ts` — with #1874 merged and #1873 closed unmerged. **BUT THAT PAIR IS OUT
+    OF THIS GUARD'S SCOPE AND THE SHARD SAYS SO RATHER THAN BORROWING THE NUMBER**: both sat on
+    `fix/…` branches, and the predicate parses `run-<id>-<epochMs>` ONLY, so it could not have seen
+    them. The in-scope instance is #1975, on `run-W1-T911-1786889125459`, which rebuilt
+    `reconcileRetroChangesetClaim` over three paths after that work was already closed as superseded.
+    So the guard covers the `run-*` lane and nothing else; the `fix/…` and hand-named-branch class
+    needs a different mechanism and is NOT claimed here.
+
+    (5) **AND THE ID-COLLISION EVIDENCE IS LIVE WHILE THIS IS FILED.** Sweeping shard files in every
+    open PR's DIFF rather than by branch name found #1974 and #1976 BOTH minting W1-T915 right now,
+    and #1973 — on `run-TRIAGE-fb-1784901239119-1be356-1786888776855`, a branch no `run-W1-T*` glob
+    matches — minting 913 and 914. That is the same family of defect one layer up: a check that cannot
+    see the population it is meant to guard."
+  design: |
+    THE SHAPE: pass the argument that is already declared, consumed and tested. No new predicate, no
+    new ledger step, no policy change.
+
+    (i) THE SWEEP IS ONE `ls-remote` PER PASS AND THE PARSER ALREADY EXISTS. `runBranchTaskIds`
+    (`src/lib/drain.ts`) is exported and unit-tested and turns raw `git ls-remote --heads origin
+    'run-*'` output into a set of task ids, reusing `taskIdFromRunBranch` (`src/lib/status.ts`) rather
+    than a second regex. Its own doc records the cost measurement this task rests on — 46 refs in
+    199 ms with `core` remaining IDENTICAL before and after — because `ls-remote` speaks the git
+    protocol and spends neither the REST nor the GraphQL budget. BUILD THE CLOSURE FROM ONE SWEEP PER
+    PASS (`(id) => sweep.has(id)`), NEVER ONE CALL PER CANDIDATE; the per-candidate form is the whole
+    cost argument inverted.
+
+    (ii) THE SWEEP MUST BE INJECTED, BECAUSE `drain.ts` IS A PURE MODULE. Measured: `src/lib/drain.ts`
+    carries ZERO `execFileSync`/`execSync`/`spawn` calls and no `node:child_process` import, against a
+    control of 93 in `src/run-task.ts`. So the ref read belongs behind a new optional `DrainDeps`
+    field beside the existing `refreshMerged`/`isOpenPr`/`readLiveState`, supplied by the caller —
+    exactly the injection discipline `runOne` and `isOpenPr` already follow. `src/lib/daemon.ts`
+    builds its own `dispatchOpts` and calls `nextRunnable` directly, so it is the second supplier site
+    and needs the same closure.
+
+    (iii) WHAT THE LOSER DOES — A SKIP, NEVER A TERMINAL STATE. `onSkipRunBranch` is already declared
+    for this and its doc already rules on it: ride the EXISTING `dispatch.skipped` row with a distinct
+    reason string. The task is NOT marked done, burns NO strike, does NOT escalate, and is offered
+    again on a later pass once the branch is gone. Two rows are explicitly refused. `dispatch.stood_down`
+    must NOT gain a fourth emitter: it has three emitters and NO reader — absent from
+    `LEDGER_STEP_PATTERN` (`src/lib/autonomy.ts`), which carries its sibling `fix.stood_down`, and
+    absent from `DECISION_RELEVANT_LEDGER_STEPS` (`src/lib/ledger.ts`, 25-entry control), so it does
+    not even survive rotation. And no new step is minted, because that would be this task's own defect
+    one layer up.
+
+    (iv) THE ACCEPTANCE MUST PROVE THE ARGUMENT IS PASSED, NOT THAT THE PREDICATE WORKS. THIS IS THE
+    WHOLE LESSON. `test/drain.test.ts` ALREADY asserts the predicate's behaviour in isolation, by
+    injecting `hasPushedRunBranch` itself — and every one of those assertions PASSES TODAY AGAINST THE
+    BROKEN PRODUCTION WIRING, because the test supplies what production omits. A test of that shape
+    proves nothing about this defect. The falsifier must drive the REAL supplier construction and fail
+    when the argument is dropped.
+
+    (v) THE FALSIFIER, BOTH DIRECTIONS, OR IT IS UNVERIFIED. With the supplier wired, a task whose
+    `run-<id>-<epochMs>` branch exists on origin is REFUSED and rides `dispatch.skipped`; with the
+    supplier dropped from the same construction, the SAME task DISPATCHES. Both, in one test file, or
+    the wiring is unproven.
+
+    WHAT MUST NOT BE BUILT: a lint rule for unsupplied optional deps (see the note — the corrective
+    precedent is a filing convention, not a guard); any change to `runBranchTaskIds`' parse; a second
+    ref-reading path when `ls-remote` already exists in `src/run-task.ts` and `src/lib/worker.ts`;
+    a new ledger step; per-candidate ref probing; and any attempt to cover `fix/…` or hand-named
+    branches, which this predicate cannot see by construction.
+  acceptance:
+    - claim: "the production dispatch path supplies the pushed-branch predicate rather than omitting it"
+      proof: "unit test: W1-T916: the real dispatch options carry a pushed-branch supplier"
+    - claim: "a task whose run branch is already on origin is refused a fresh dispatch"
+      proof: "unit test: W1-T916: a task with a pushed run branch is refused a second dispatch"
+    - claim: "dropping the supplier lets the same task dispatch again"
+      proof: "unit test: W1-T916: dropping the supplier lets the same task dispatch"
+    - claim: "the refusal is a skip that leaves the task eligible on a later pass"
+      proof: "unit test: W1-T916: a refused task stays eligible and burns no strike"
+  origin: recon#detectors-without-suppliers-2026-08-16
+  plan_refs: ["W1-T534", "W1-T532", "W1-T528", "W1-T520", "W1-T471"]
+  files: [src/lib/drain.ts, src/lib/daemon.ts, src/run-task.ts, test/drain.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across three `src/` modules and a suite, and
+    independently warranted: this changes what the fleet REFUSES to dispatch, so a wrong predicate
+    does not fail loudly, it stops work being picked up. budget_usd 45 — one injected field, three
+    supplier sites, a four-way falsifier.
+
+    **`src/run-task.ts` IS DECLARED AND THE SERIALISATION COST IS ACCEPTED IN WRITING.** The supplier
+    genuinely lives there: `runDrain` is called from `src/run-task.ts` where `DrainDeps` is
+    constructed, and that file already runs `git ls-remote` (7 references) while `src/lib/drain.ts`
+    cannot exec at all. Declaring it serialises this task against every other task naming that
+    19,943-line file (`partitionByFileOverlap`, W1-T471). That is the price of wiring an effect and it
+    is paid knowingly rather than avoided by declaring a path the change does not touch.
+
+    `files:` DERIVED BY WORD-BOUNDED INVOCATION COUNT IN PYTHON (a bare substring inflated
+    `ghLiveState` from 6 to 11 in an earlier session). `src/lib/drain.ts` scores `hasPushedRunBranch`
+    2, `onSkipRunBranch` 2, `runBranchTaskIds` 2, `nextRunnable` 19 and `onSkip` 10 — the predicate's
+    home and two of three supplier sites. `src/lib/daemon.ts` scores `nextRunnable` 17 and `onSkip` 1
+    — the third. `test/drain.test.ts` scores `hasPushedRunBranch` 7, `runBranchTaskIds` 6 and
+    `nextRunnable` 49, the highest of any test path. `src/lib/status.ts` is NOT declared:
+    `taskIdFromRunBranch` is reused unchanged, and declaring an untouched path fails
+    `inverseScopeUntouchedFiles` (`src/lib/review.ts`).
+
+    **WHY NO LINT RULE IS PROPOSED, WHICH IS THE MOST USEFUL THING THE RECON FOUND.** The
+    detector-without-supplier pattern is A FILING FACT, NOT A CODE FACT: each shard scoped its
+    detector and deferred its action honestly in prose — W1-T520's design says 'IT REPORTS, IT DOES
+    NOT ACT'. And the corrective precedent already exists and WORKED UNAIDED: W1-T528 filed the action
+    half as its own shard with `depends_on: [\"W1-T520\"]` and shipped it end to end, which is why
+    `armedButStalled` — named in the commissioning brief as an instance — has TWO call sites today
+    (`selectUpdateBranchTarget`, and the emitter) feeding `updateBranchViaGh`. That refutation shrank
+    the population from four to three and is the reason this shard is narrow. A convention that has
+    already corrected itself once is a stronger answer than a guard nobody can express.
+
+    **THE OTHER TWO ARE OUT OF SCOPE, NAMED SO THEY ARE NOT REDISCOVERED.**
+    `CiFailure.outsidePrRange` is DOCUMENTED AS DELIBERATE NARRATION by `src/lib/sweep.ts` itself and
+    is not a defect. `dispatch.stood_down` is untidy telemetry costing nothing today. Neither is
+    filed, and neither should be folded in here.
+
+    PROOF NOTES: all four proofs are NAME-FILTERED titles, not pure paths — a pure path runs the whole
+    file and one unrelated failure fails every criterion. Each was verified to match ZERO files under
+    `test/` at 443c5f6 against a positive control matching exactly one, and each is under 100
+    characters with no comma so `looksLikeScenarioNarrative` (`src/lib/task-linter.ts`) cannot fail
+    them. No proof names this shard.
+
+    ID PROVENANCE: tree max was W1-T912 (id field and shard filenames agree) while `refs/rmd-id/`
+    already held 515, 516, 520-534 and 901-915 — SO THE ALLOCATOR RUNS AHEAD OF THE PLAN AND SEVERAL
+    IDS ARE RESERVED BUT UNFILED. The ref sweep is the only instrument that sees those. Sweeping shard
+    files in every open PR's DIFF rather than by branch name found #1974 and #1976 BOTH minting
+    W1-T915, and #1973 minting 913 and 914 on `run-TRIAGE-fb-1784901239119-1be356-1786888776855` — a
+    branch no `run-W1-T*` glob matches. W1-T916 was verified free on origin/main (0) and in the ref
+    list (0), taken as a UNIQUE ORPHAN PAYLOAD OVER THE EMPTY TREE (4b825dc6) carrying a
+    host-pid-nanosecond nonce, pushed under `--force-with-lease` with the REFSPEC VARIABLE BRACED and
+    the exit code captured INTO A VARIABLE rather than read through a pipe, then the ref was RE-READ
+    and its nonce matched against the one written. Positive control: known-taken W1-T534 reads 2 and
+    W1-T528 reads 3."
