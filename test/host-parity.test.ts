@@ -30,6 +30,12 @@ import {
   runHostParity,
   type DeclaredDivergence,
 } from "../src/lib/host-parity.js";
+import {
+  isConfirmedDivergence,
+  reportUnbaselinedPole,
+  runHostParityCli,
+  shouldCaptureCli,
+} from "../scripts/host-parity.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -277,6 +283,120 @@ test("the report names the counts a reader needs, and never invents one it did n
   });
   assert.match(rendered, /HOST PARITY \(mini\) at 11dcbf0: 6496 tests, 1 failing/);
   assert.match(rendered, /1 declared, 0 undeclared/);
+});
+
+// ── W1-T918: THE RUNNER GETS AN INVOKER ───────────────────────────────────────────────────────
+//
+// Everything above drives `runHostParity` straight from src/lib/host-parity.ts — which is exactly
+// how `scripts/host-parity.ts`'s own wiring went unexercised: the ONE thing that called the
+// runner was never itself called by anything, test included. The three tests below import from
+// `../scripts/host-parity.js` instead, so they are themselves the "actual caller" the runner was
+// missing — and cover the one new fact this task adds (a pole with nothing declared is
+// UNBASELINED, not clean) alongside a confirmation that a stale declared entry still surfaces.
+
+test("a pole with no declared entries is reported as unbaselined rather than clean", () => {
+  const baseline: DeclaredDivergence[] = [{ test: id(BSD), pole: "mini", reason: "declared for this fixture only" }];
+  assert.match(
+    reportUnbaselinedPole("azure", baseline) ?? "",
+    /UNBASELINED/,
+    "azure has zero entries in this fixture baseline, so it must read as never-baselined",
+  );
+  // THE FALSE-POSITIVE CONTAINMENT: a pole that DOES have declared entries must never be flagged,
+  // however clean its run — a checker that flagged every pole would pass the assertion above and
+  // fail this one.
+  assert.equal(
+    reportUnbaselinedPole("mini", baseline),
+    undefined,
+    "mini has a declared entry in this fixture baseline, so it must NOT be reported as unbaselined",
+  );
+
+  const written: string[] = [];
+  const { unbaselined } = runHostParityCli({
+    pole: "azure",
+    baseline,
+    runSuite: () => tap([]),
+    write: (s) => written.push(s),
+  });
+  assert.equal(unbaselined, true);
+  assert.match(written[0] ?? "", /UNBASELINED/, "the notice must reach the same text a human reads");
+});
+
+test("a declared entry that stopped failing is surfaced where a human will see it", () => {
+  // One mini entry is dropped from the observed set, so the diff must call it healed even though
+  // nothing undeclared appeared alongside it — the case the existing end-to-end tests never
+  // exercised on its own.
+  const stillFailing = ALL_MINI.slice(1);
+  const captured: string[] = [];
+  const written: string[] = [];
+  const { outcome } = runHostParityCli({
+    pole: "mini",
+    runSuite: () => tap(stillFailing),
+    capture: (r) => captured.push(r),
+    write: (s) => written.push(s),
+  });
+  assert.equal(outcome.status, "drift", "a healed entry alone is still drift — the baseline is stale");
+  assert.equal(captured.length, 1, "the stale entry must be written, not left silent");
+  assert.match(captured[0] ?? "", /DECLARED BUT PASSING/);
+  assert.match(captured[0] ?? "", new RegExp(id(ALL_MINI[0] as { title: string; file: string }).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.match(written[0] ?? "", /DECLARED BUT PASSING/, "and the same text is what the caller prints");
+});
+
+test("the parity runner is reachable from a caller that actually runs", () => {
+  // The falsifier for "built and unwired": this calls the SAME exported function the CLI
+  // entrypoint calls, with fake seams, and proves it actually reaches runHostParity end to end —
+  // real drift, real capture, real output — rather than merely existing on disk.
+  const captured: string[] = [];
+  const written: string[] = [];
+  const asked: string[] = [];
+  const { outcome, unbaselined } = runHostParityCli({
+    pole: "mini",
+    headSha: "abc1234",
+    runSuite: () => tap([...ALL_MINI, NOVEL]),
+    confirm: (candidate) => {
+      asked.push(candidate);
+      return true; // reproduced alone
+    },
+    capture: (raw) => captured.push(raw),
+    write: (s) => written.push(s),
+  });
+  assert.equal(outcome.status, "drift", "the caller must reach the real runHostParity, not a stub");
+  assert.deepEqual(asked, [id(NOVEL)], "the caller must wire the confirm seam through, not bypass it");
+  assert.equal(captured.length, 1, "the caller must reach the capture seam too");
+  assert.equal(written.length, 1, "the caller must actually write its output");
+  assert.match(written[0] ?? "", /NEW DIVERGENCE on mini/);
+  assert.match(written[0] ?? "", /abc1234/, "the headSha the caller was given must reach the printed report");
+  assert.equal(unbaselined, false, "mini has declared entries in the real baseline, so this run is not unbaselined");
+});
+
+// ── THE TWO PURE HALVES THE REAL CLI ENTRYPOINT SPLITS OFF ───────────────────────────────────
+//
+// `isMainModule()`'s guarded block spawns the real suite and re-execs git — neither is safe to
+// run from this suite (the former would recursively re-run the whole suite it is itself part
+// of). The decision logic it delegates to is pulled out into these two pure functions precisely
+// so it can be covered here instead, leaving only irreducible process-boundary glue behind the
+// `// diff-cov: process-boundary` directive in scripts/host-parity.ts.
+
+test("isConfirmedDivergence: a re-run that still names the id is confirmed", () => {
+  assert.equal(isConfirmedDivergence(id(NOVEL), tap([NOVEL])), true);
+});
+
+test("isConfirmedDivergence: a re-run that passes clean is NOT confirmed", () => {
+  assert.equal(isConfirmedDivergence(id(NOVEL), tap([])), false);
+});
+
+test("isConfirmedDivergence: a truncated re-run (no summary) is treated as confirmed, not cleared", () => {
+  // INCONCLUSIVE must not clear a divergence — the same discipline `readTapFailures` enforces for
+  // a killed run above, just observed through the CLI's own confirm seam this time.
+  assert.equal(isConfirmedDivergence(id(NOVEL), tap([NOVEL], { summary: false })), true);
+});
+
+test("shouldCaptureCli: HOST_PARITY_REPORT_ONLY=1 means print-only, so capture is false", () => {
+  assert.equal(shouldCaptureCli({ HOST_PARITY_REPORT_ONLY: "1" }), false);
+});
+
+test("shouldCaptureCli: any other value or an unset env writes for real", () => {
+  assert.equal(shouldCaptureCli({}), true);
+  assert.equal(shouldCaptureCli({ HOST_PARITY_REPORT_ONLY: "0" }), true);
 });
 
 // ── PART TWO: SIBLING JOBS ON ONE SHA ─────────────────────────────────────────────────────────
