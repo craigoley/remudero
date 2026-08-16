@@ -16,5 +16,22 @@ raw: "OPERATOR-CHECKOUT SYNC IS MANUAL TOIL — the W1-T79 auto-sync guard
 attachments: []
 origin: cli
 status: proposed
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/1949
+summary:
+  headline: Add rmd sync verb to automate operator checkout recipe
+  what_happened: W1-T79 blocks auto-sync when the tree is dirty. Operator manually
+    ran the same cleanup recipe five times on 2026-07-23—removing untracked
+    duplicates, handling DECISIONS.md, and pulling.
+  decision: Build rmd sync verb that auto-dedupes untracked files, preserves local
+    work, applies W1-T191 to DECISIONS.md, and fast-forwards (refusing only on
+    true divergence).
+  options:
+    - label: Build rmd sync verb
+      consequence: Operator runs one command instead of five per session; faster
+        checkouts and lower error risk.
+    - label: Enhance W1-T79 to auto-detect benign dirt patterns
+      consequence: Reduces friction at guard level, but pattern-matching grows complex
+        and may miss edge cases.
+    - label: Document recipe and rely on operator discipline
+      consequence: Zero development cost, but repetitive manual work persists with
+        ongoing error risk.
