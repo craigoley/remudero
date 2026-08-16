@@ -109,8 +109,30 @@ function makeOrigin(feedbackId?: string): string {
  *  instead of dying at the first gh call. `pr view --json headRefName` echoes back the run's
  *  OWN branch so the run-ownership guard passes. `opts.failPrList` makes `gh pr list` (the
  *  mint's `openPrTexts` enumerator, W1-T311) fail non-zero — used by the degraded-mint test
- *  below to reach the real gateway's refusal/catch path rather than its success path. */
-function writeGhShim(dir: string, opts: { failPrList?: boolean } = {}): void {
+ *  below to reach the real gateway's refusal/catch path rather than its success path.
+ *
+ *  `bareOrigin` backs the W1-T903 REST cases (`gh api ... pulls` create/probe/single-GET) —
+ *  `openPlanPr`/`readHeadShaRest`/`fetchPrLifecycle` all read this same REST surface now, never
+ *  `gh pr create`/`gh pr list`. The single-PR GET's `head.sha` is read LIVE off whichever
+ *  `run-*` branch this test's own gateway just pushed to `bareOrigin`, so a caller's `rev-parse
+ *  HEAD` on a worktree checked out from it always matches. `opts.matchRealBranch` makes
+ *  `headRefName` resolve the SAME way (rather than the static `RMD_SHIM_BRANCH` env var below) —
+ *  used only by the full-success drive, where the run-ownership guard must actually PASS.
+ *  `opts.ciConclusion` overrides `statusCheckRollup`'s `ci` conclusion (default `SUCCESS`) —
+ *  `"FAILURE"` drives `waitForCiGreen` RED on its first poll instead of green, reaching
+ *  approveCommand's `ci !== "green"` cleanup branch rather than the review/arm continuation.
+ *  `opts.failPrDiff` makes `gh pr diff` (inside `runReview`) exit non-zero — an exception
+ *  `reviewCommand` does not itself catch, reaching approveCommand's outer `catch` cleanup. */
+function writeGhShim(
+  dir: string,
+  bareOrigin: string,
+  opts: { failPrList?: boolean; matchRealBranch?: boolean; ciConclusion?: string; failPrDiff?: boolean } = {},
+): void {
+  // Resolves to whichever `run-*` branch this test's own gateway most recently pushed to
+  // `bareOrigin` — evaluated FRESH on every shim invocation (never cached), so a case fired
+  // before the push (e.g. `pr list` during the mint) sees nothing and a case fired after (the
+  // ownership/head-sha/lifecycle reads below) sees the real ref.
+  const resolveBranch = `branch=$(git -C ${JSON.stringify(bareOrigin)} for-each-ref --format='%(refname:short)' 'refs/heads/run-*' | head -1)`;
   writeFileSync(
     join(dir, "gh"),
     [
@@ -120,13 +142,44 @@ function writeGhShim(dir: string, opts: { failPrList?: boolean } = {}): void {
       opts.failPrList
         ? '  *"pr list"*) echo "gh: rate limit exceeded" 1>&2; exit 1 ;;'
         : '  *"pr list"*) echo "[]" ;;',
+      // `ensureRepoDir`'s clone (only reached when `repoDir` does not exist yet — every OTHER
+      // test here pre-clones it, so this case never fires for them). Real `git clone` from the
+      // SAME throwaway bare origin, with repo-local identity (a bare CI runner has none) so the
+      // gateway's own `git commit` downstream does not die for want of one.
+      '  *"repo clone"*)',
+      `    git clone --quiet ${JSON.stringify(bareOrigin)} "$4"`,
+      '    git -C "$4" config user.name remudero-test',
+      '    git -C "$4" config user.email test@remudero.invalid',
+      "    ;;",
       '  *"pr create"*)',
       '    echo "https://github.com/craigoley/remudero/pull/4242" ;;',
-      '  *"headRefName"*)',
-      '    # echo back whatever branch the caller is on, read from the shim env',
-      '    printf \'{"headRefName":"%s"}\\n\' "${RMD_SHIM_BRANCH:-main}" ;;',
+      // W1-T903: `openPlanPr`'s REST create — `gh api --method POST repos/.../pulls`. Matched on
+      // "POST"+"pulls" together, which never collides with the plain single-PR GET below (no
+      // "POST") or the status-post call (no "pulls").
+      '  *"POST"*"pulls"*)',
+      '    echo \'{"html_url":"https://github.com/craigoley/remudero/pull/4242","number":4242}\'',
+      "    ;;",
+      // W1-T903: `probeExistingPlanPr`'s resumption probe — `gh api repos/.../pulls?head=...`.
+      // Empty ⇒ no prior PR found, so a resumed branch falls to COMPLETE, never ADOPT.
+      '  *"pulls?head="*) echo "[]" ;;',
+      // The single-PR REST GET (`readHeadShaRest`/`fetchPrLifecycle`/`reviewViewArgs`) — every
+      // caller of `repos/.../pulls/<n>` shares this one row. `head.sha` is read LIVE off
+      // whichever `run-*` branch the gateway actually pushed, so a worktree materialized from
+      // it (`materializeReviewWorktree`) lands on exactly the sha this response claims.
+      '  *"/pulls/"*)',
+      `    ${resolveBranch}`,
+      `    sha=$(git -C ${JSON.stringify(bareOrigin)} rev-parse "$branch" 2>/dev/null)`,
+      '    printf \'{"number":4242,"html_url":"https://github.com/craigoley/remudero/pull/4242","state":"OPEN","merged_at":null,"body":"","updated_at":"2026-08-16T00:00:00Z","head":{"ref":"%s","sha":"%s"}}\\n\' "$branch" "$sha"',
+      "    ;;",
+      opts.matchRealBranch
+        ? '  *"headRefName"*)\n' + `    ${resolveBranch}\n` + '    printf \'{"headRefName":"%s"}\\n\' "${branch:-main}" ;;'
+        : '  *"headRefName"*)\n' + "    # echo back whatever branch the caller is on, read from the shim env\n" + '    printf \'{"headRefName":"%s"}\\n\' "${RMD_SHIM_BRANCH:-main}" ;;',
+      // W1-T903 (via waitForCiGreen): resolved on the FIRST poll — never a real wait.
+      `  *"statusCheckRollup"*) echo '{"statusCheckRollup":[{"name":"ci","conclusion":"${opts.ciConclusion ?? "SUCCESS"}"}]}' ;;`,
       '  *"--json body"*) echo \'{"body":""}\' ;;',
-      '  *"pr diff"*) echo "" ;;',
+      opts.failPrDiff
+        ? '  *"pr diff"*) echo "gh: transient diff failure" 1>&2; exit 1 ;;'
+        : '  *"pr diff"*) echo "" ;;',
       '  *"pr edit"*) exit 0 ;;',
       "  *) exit 0 ;;",
       "esac",
@@ -167,7 +220,7 @@ async function withHarness(
     execFileSync("git", ["-C", repoDir, "config", "user.name", "remudero-test"], { encoding: "utf8" });
     execFileSync("git", ["-C", repoDir, "config", "user.email", "test@remudero.invalid"], { encoding: "utf8" });
 
-    writeGhShim(shimDir);
+    writeGhShim(shimDir, bare);
     process.env.PATH = `${shimDir}:${savedPath}`;
 
     await body({ configRoot, setBranch: (b) => { process.env.RMD_SHIM_BRANCH = b; } });
@@ -272,7 +325,7 @@ test("GUARDED SITE approve push and pr-create: the REAL un-injected gateway reac
       "utf8",
     );
     process.env.HOME = home;
-    writeGhShim(shimDir);
+    writeGhShim(shimDir, bare);
     process.env.PATH = `${shimDir}:${savedPath}`;
 
     // The repo the real gateway worktrees from, at the path resolveOwnerRepo() derives.
@@ -333,6 +386,305 @@ test("GUARDED SITE approve push and pr-create: the REAL un-injected gateway reac
   }
 });
 
+// ── W1-T903 — approveCommand's REAL gateway: ensureRepoDir's clone branch, and a full
+// success drive past REST create/ownership/ci-green/review/arm ──────────────────────────────
+// Every test above pre-clones `repoDir` before calling `approveCommand`, so `ensureRepoDir`'s
+// `!existsSync(repoDir)` branch (the `mkdirSync` + `gh repo clone`) never fires, and every one
+// leaves `RMD_SHIM_BRANCH` unset (or absent), so `checkPrOwnership` always REFUSES — the run
+// never reaches the post-ownership block (`log("pr.opened", ...)`, the ci-green gate, the
+// review + arm, or their own `removeApproveWorktree()`/`removeRunLock` cleanup). This test
+// closes both gaps in one drive: `repoDir` starts absent (the shim's `repo clone` case performs
+// a REAL `git clone` off the same throwaway origin), and `writeGhShim`'s `matchRealBranch`
+// option makes `headRefName` answer with the gateway's OWN pushed branch, so the ownership
+// guard actually PASSES. `spawnReviewer` is hardcoded `false` inside `reviewCommand`'s own call
+// to `runReview` (the deterministic keyword/proof floor, never an LLM) — the ONLY reason this
+// is reachable offline at all. `materializeReviewWorktree` genuinely attempts a `git fetch` +
+// `worktree add` against THIS repo's real checkout (see its own doc — `reviewCommand` has no
+// injectable seam here), but the fixture's branch was never pushed to the REAL github.com
+// origin, so that add fails fast and gracefully (a named `MaterializationFailure`, never a
+// throw) and review falls back to keyword-only, exactly as it does for any operator's
+// `rmd review` run against a checkout with no matching ref.
+test("GUARDED SITE approve fresh-clone + full drive: ensureRepoDir clones, and the run reaches ci-green + review + the post-arm cleanup", async () => {
+  const bare = makeOrigin(undefined);
+  const home = mkdtempSync(join(tmpdir(), "cmdsite-appfullhome-"));
+  const root = mkdtempSync(join(tmpdir(), "cmdsite-appfullroot-"));
+  const shimDir = mkdtempSync(join(tmpdir(), "cmdsite-appfullshim-"));
+  const savedHome = process.env.HOME;
+  const savedPath = process.env.PATH;
+  try {
+    mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+    writeFileSync(
+      join(home, ".config", "remudero", "config.json"),
+      JSON.stringify({ claudeBin: "/usr/bin/true", root }, null, 2),
+      "utf8",
+    );
+    process.env.HOME = home;
+    writeGhShim(shimDir, bare, { matchRealBranch: true });
+    process.env.PATH = `${shimDir}:${savedPath}`;
+
+    // Deliberately NO pre-clone here (the one thing every other approve fixture does) — this is
+    // the whole point: `config.root/repos/<repo>` starts absent, so the real gateway's own
+    // `ensureRepoDir` performs the `mkdirSync` + `gh repo clone` itself.
+
+    mkdirSync(join(root, "state"), { recursive: true });
+    writeFileSync(
+      join(root, "state", "inbox-proposals.json"),
+      JSON.stringify({ proposals: [{ id: "P-FULL", summary: "full-drive fixture", evidenceAnchors: [] }] }, null, 2),
+      "utf8",
+    );
+    writeFileSync(
+      join(root, "state", "inbox-drafts.json"),
+      JSON.stringify({
+        "P-FULL": {
+          proposalId: "P-FULL",
+          fragmentYaml:
+            "- id: NEW-1\n  title: fixture drafted task\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n  files: [src/lib/example.ts]\n",
+          stampLine: "- P-FULL (plan) — RATIFIED -> NEW-1.",
+          anchorFingerprint: "",
+        },
+      }),
+      "utf8",
+    );
+
+    const code = await withLiveWritesAllowed(() => approveCommand(["P-FULL"], { config: { claudeBin: "/usr/bin/true", root } as never }));
+
+    // ensureRepoDir really cloned it (never pre-created by this test).
+    const repoDir = join(root, "repos", "remudero");
+    assert.ok(existsSync(join(repoDir, ".git")), "ensureRepoDir must have cloned repoDir itself");
+
+    const ledgerLines = readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    // Past the ownership guard (this run's own branch, unlike the pr-create test above, which
+    // leaves it unset and so refuses) — `pr.opened` only logs once ownership clears.
+    const opened = ledgerLines.find((l) => l.step === "pr.opened");
+    assert.ok(opened, `expected a pr.opened ledger line; steps=${JSON.stringify(ledgerLines.map((l) => l.step))}`);
+    assert.equal(opened?.adopted, false, "a fresh PROCEED PR is never adopted");
+    // No approve.error — the run reached its own return, never an uncaught throw.
+    assert.ok(!ledgerLines.some((l) => l.step === "approve.error"), "the full drive must not throw");
+    // The worktree this run created is gone — proof `removeApproveWorktree()` actually ran
+    // AFTER the arm attempt (the post-review cleanup this test exists to reach), not merely
+    // defined.
+    const worktrees = existsSync(join(root, "worktrees")) ? readdirSync(join(root, "worktrees")).filter((d) => d.startsWith("run-")) : [];
+    assert.deepEqual(worktrees, [], `expected the approve run's own worktree to be removed; found ${JSON.stringify(worktrees)}`);
+    // reviewCommand always returns a number; the CLI's own exit code is that number verbatim.
+    assert.equal(typeof code, "number");
+  } finally {
+    process.env.HOME = savedHome;
+    process.env.PATH = savedPath;
+    for (const d of [bare, home, root, shimDir]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T903 — approveCommand's REAL gateway: RESUME (findPushedBranch confirmed, no PR found,
+// completeRatificationBranch checks the pushed branch out and reads its ALREADY-filed ids) ────
+// A prior run's OWN ledger evidence (`priorApproveRunBranch`) plus a real remote read is what
+// `findPushedBranch` requires — this seeds both: a ledger line shaped exactly like the one
+// `approveCommand`'s own `log()` appends, and an already-pushed branch (with a CONCRETE id
+// already committed, never a placeholder) on the SAME throwaway origin the fresh gateway
+// clones from. `writeGhShim`'s default `pulls?head=` probe answers `[]` (no PR found), so
+// `approveProposal` (lib/inbox.ts) falls to COMPLETE, never ADOPT — the only way to drive
+// `completeRatificationBranch` itself (checkout, no re-mint, filed-id extraction from the
+// branch's own diff) rather than a fresh `createRatificationBranch`.
+test("GUARDED SITE approve resume: findPushedBranch/completeRatificationBranch drive the REAL RESUME gateway", async () => {
+  const bare = makeOrigin(undefined);
+  const home = mkdtempSync(join(tmpdir(), "cmdsite-appresumehome-"));
+  const root = mkdtempSync(join(tmpdir(), "cmdsite-appresumeroot-"));
+  const shimDir = mkdtempSync(join(tmpdir(), "cmdsite-appresumeshim-"));
+  const savedHome = process.env.HOME;
+  const savedPath = process.env.PATH;
+  try {
+    mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+    writeFileSync(
+      join(home, ".config", "remudero", "config.json"),
+      JSON.stringify({ claudeBin: "/usr/bin/true", root }, null, 2),
+      "utf8",
+    );
+    process.env.HOME = home;
+    writeGhShim(shimDir, bare, { matchRealBranch: true });
+    process.env.PATH = `${shimDir}:${savedPath}`;
+
+    const originUrl = execFileSync("git", ["-C", REPO_ROOT, "config", "--get", "remote.origin.url"], {
+      encoding: "utf8",
+    }).trim();
+    const repoName = originUrl.match(/[/:]([^/:]+)\/([^/]+?)(?:\.git)?$/)![2];
+    const repoDir = join(root, "repos", repoName);
+    mkdirSync(dirname(repoDir), { recursive: true });
+    execFileSync("git", ["clone", "--quiet", bare, repoDir], { encoding: "utf8", env: GIT_ENV });
+    execFileSync("git", ["-C", repoDir, "config", "user.name", "remudero-test"], { encoding: "utf8" });
+    execFileSync("git", ["-C", repoDir, "config", "user.email", "test@remudero.invalid"], { encoding: "utf8" });
+
+    // A PRIOR run's branch, already pushed to the SAME origin, carrying a CONCRETE id (never
+    // NEW-1 — completeRatificationBranch must read it back as-is, no re-mint).
+    const priorBranch = "run-APPROVE-P-RESUME-1700000000000";
+    const priorClone = mkdtempSync(join(tmpdir(), "cmdsite-appresumeprior-"));
+    execFileSync("git", ["clone", "--quiet", bare, priorClone], { encoding: "utf8", env: GIT_ENV });
+    execFileSync("git", ["-C", priorClone, "checkout", "--quiet", "-b", priorBranch], { encoding: "utf8", env: GIT_ENV });
+    appendFileSync(join(priorClone, "plan", "tasks.yaml"), VALID_TASK("W1-T50", "filed by a prior approve run"));
+    execFileSync("git", ["-C", priorClone, "add", "-A"], { encoding: "utf8", env: GIT_ENV });
+    execFileSync("git", ["-C", priorClone, "commit", "--quiet", "-m", "chore(plan): ratify P-RESUME via rmd approve"], {
+      encoding: "utf8",
+      env: GIT_ENV,
+    });
+    execFileSync("git", ["-C", priorClone, "push", "--quiet", "origin", priorBranch], { encoding: "utf8", env: GIT_ENV });
+    rmSync(priorClone, { recursive: true, force: true });
+
+    mkdirSync(join(root, "state"), { recursive: true });
+    writeFileSync(
+      join(root, "state", "inbox-proposals.json"),
+      JSON.stringify({ proposals: [{ id: "P-RESUME", summary: "resume fixture", evidenceAnchors: [] }] }, null, 2),
+      "utf8",
+    );
+    writeFileSync(
+      join(root, "state", "inbox-drafts.json"),
+      JSON.stringify({
+        "P-RESUME": {
+          proposalId: "P-RESUME",
+          fragmentYaml:
+            "- id: NEW-1\n  title: fixture drafted task\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n  files: [src/lib/example.ts]\n",
+          stampLine: "- P-RESUME (plan) — RATIFIED -> NEW-1.",
+          anchorFingerprint: "",
+        },
+      }),
+      "utf8",
+    );
+    // The ledger evidence `priorApproveRunBranch` reads — shaped exactly like the run this
+    // branch was really pushed by would have appended (run_id `APPROVE-<id>-<epoch>`, task_id
+    // the proposal id). `priorApproveRunBranch` keys ONLY on `run_id`/`task_id`, never `step` —
+    // NEVER `ratify.approved` here: that step is what marks a proposal ALREADY RATIFIED
+    // (`ledgerAlreadyApproved`, lib/inbox.ts) and would refuse this approve before either
+    // gateway method fires, the opposite of what this fixture needs. `worktree.prune` is the
+    // step the PRIOR run's own `createRatificationBranch` really appends first.
+    writeFileSync(
+      join(root, "state", "ledger.ndjson"),
+      JSON.stringify({ run_id: "APPROVE-P-RESUME-1700000000000", task_id: "P-RESUME", step: "worktree.prune", lane: "approve" }) + "\n",
+      "utf8",
+    );
+
+    await withLiveWritesAllowed(() => approveCommand(["P-RESUME"], { config: { claudeBin: "/usr/bin/true", root } as never })).catch(
+      () => undefined,
+    );
+
+    const ledgerLines = readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    // COMPLETE, never ADOPT/PROCEED: exactly one `pr.opened`, on the PRIOR branch, and no
+    // SECOND run- branch (a fresh createRatificationBranch) ever reached the origin.
+    const opened = ledgerLines.filter((l) => l.step === "pr.opened");
+    assert.equal(opened.length, 1, `expected exactly one pr.opened line; steps=${JSON.stringify(ledgerLines.map((l) => l.step))}`);
+    assert.equal(opened[0]?.branch, priorBranch, "the resumed run must open its PR on the PRIOR branch, never a new one");
+    const refs = execFileSync("git", ["-C", bare, "for-each-ref", "--format=%(refname:short)"], { encoding: "utf8" });
+    const runBranches = refs.split("\n").filter((l) => l.startsWith("run-"));
+    assert.deepEqual(runBranches, [priorBranch], `expected no second branch to reach the origin; refs=${JSON.stringify(runBranches)}`);
+  } finally {
+    process.env.HOME = savedHome;
+    process.env.PATH = savedPath;
+    for (const d of [bare, home, root, shimDir]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+/** Shared setup for the two ownership-passed, post-`result.ok` cleanup-branch drives below —
+ *  both need a pre-cloned `repoDir`, a READY `NEW-1` proposal, and `matchRealBranch` (the
+ *  ownership guard must PASS so execution reaches PAST it, unlike the plain pr-create test
+ *  above), differing only in what `gh` answers once it does. */
+async function withApproveFullHarness(
+  proposalId: string,
+  shimOpts: { ciConclusion?: string; failPrDiff?: boolean },
+  drive: (root: string) => Promise<number | undefined>,
+): Promise<Array<Record<string, unknown>>> {
+  const bare = makeOrigin(undefined);
+  const home = mkdtempSync(join(tmpdir(), "cmdsite-appcleanhome-"));
+  const root = mkdtempSync(join(tmpdir(), "cmdsite-appcleanroot-"));
+  const shimDir = mkdtempSync(join(tmpdir(), "cmdsite-appcleanshim-"));
+  const savedHome = process.env.HOME;
+  const savedPath = process.env.PATH;
+  try {
+    mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+    writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/usr/bin/true", root }, null, 2), "utf8");
+    process.env.HOME = home;
+    writeGhShim(shimDir, bare, { matchRealBranch: true, ...shimOpts });
+    process.env.PATH = `${shimDir}:${savedPath}`;
+
+    const originUrl = execFileSync("git", ["-C", REPO_ROOT, "config", "--get", "remote.origin.url"], { encoding: "utf8" }).trim();
+    const repoName = originUrl.match(/[/:]([^/:]+)\/([^/]+?)(?:\.git)?$/)![2];
+    const repoDir = join(root, "repos", repoName);
+    mkdirSync(dirname(repoDir), { recursive: true });
+    execFileSync("git", ["clone", "--quiet", bare, repoDir], { encoding: "utf8", env: GIT_ENV });
+    execFileSync("git", ["-C", repoDir, "config", "user.name", "remudero-test"], { encoding: "utf8" });
+    execFileSync("git", ["-C", repoDir, "config", "user.email", "test@remudero.invalid"], { encoding: "utf8" });
+
+    mkdirSync(join(root, "state"), { recursive: true });
+    writeFileSync(
+      join(root, "state", "inbox-proposals.json"),
+      JSON.stringify({ proposals: [{ id: proposalId, summary: "cleanup-branch fixture", evidenceAnchors: [] }] }, null, 2),
+      "utf8",
+    );
+    writeFileSync(
+      join(root, "state", "inbox-drafts.json"),
+      JSON.stringify({
+        [proposalId]: {
+          proposalId,
+          fragmentYaml:
+            "- id: NEW-1\n  title: fixture drafted task\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n  files: [src/lib/example.ts]\n",
+          stampLine: `- ${proposalId} (plan) — RATIFIED -> NEW-1.`,
+          anchorFingerprint: "",
+        },
+      }),
+      "utf8",
+    );
+
+    await drive(root);
+
+    return readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+  } finally {
+    process.env.HOME = savedHome;
+    process.env.PATH = savedPath;
+    for (const d of [bare, home, root, shimDir]) rmSync(d, { recursive: true, force: true });
+  }
+}
+
+// ── run-task.ts's `if (ci !== "green") { ...; removeApproveWorktree(); return 1; }` ─────────
+// The full-drive test above resolves `ci` GREEN on its first poll, so it never reaches THIS
+// branch. `ciConclusion: "FAILURE"` makes `waitForCiGreen` return RED on that same first poll
+// instead — the run never reaches `reviewCommand` at all, but does reach its own
+// cleanup-and-return-1 immediately after ownership clears.
+test("GUARDED SITE approve ci-red: the REAL gateway reaches the ci!==green cleanup branch", async () => {
+  let code: number | undefined;
+  const ledgerLines = await withApproveFullHarness("P-CIRED", { ciConclusion: "FAILURE" }, async (root) => {
+    code = await withLiveWritesAllowed(() => approveCommand(["P-CIRED"], { config: { claudeBin: "/usr/bin/true", root } as never }));
+    return code;
+  });
+  assert.equal(code, 1, "a red ci must exit 1 (the PR is left open for inspection, never armed)");
+  assert.ok(ledgerLines.some((l) => l.step === "ci.stalled" || l.step === "pr.opened"), "the run must have reached past ownership");
+  assert.ok(!ledgerLines.some((l) => l.step === "approve.error"), "a red ci is a clean return, never a throw");
+});
+
+// ── run-task.ts's `catch (e) { ...; removeApproveWorktree(); throw e; }` ────────────────────
+// Neither drive above ever throws PAST `result.ok` (the full-success test completes cleanly;
+// the ci-red test returns 1 cleanly) — this is the only remaining branch: `gh pr diff` (inside
+// `runReview`, called only once `ci` IS green) fails non-zero, an exception `reviewCommand`
+// does not itself catch, unwinding through approveCommand's own `catch` — proving it removes
+// the worktree/run-lock and RE-THROWS, rather than swallowing a genuine mid-review failure.
+test("GUARDED SITE approve review-throws: the REAL gateway reaches the catch-cleanup-and-rethrow branch", async () => {
+  let threw: unknown;
+  const ledgerLines = await withApproveFullHarness("P-REVTHROW", { failPrDiff: true }, async (root) => {
+    await withLiveWritesAllowed(() => approveCommand(["P-REVTHROW"], { config: { claudeBin: "/usr/bin/true", root } as never })).catch(
+      (e) => {
+        threw = e;
+      },
+    );
+    return undefined;
+  });
+  assert.ok(threw, "a mid-review gh failure must unwind all the way out of approveCommand, never resolve silently");
+  assert.ok(ledgerLines.some((l) => l.step === "approve.error"), "the catch block's own ledger line must have fired");
+  assert.ok(ledgerLines.some((l) => l.step === "pr.opened"), "the throw happened AFTER the PR opened (mid-review), not before");
+});
+
 // ── run-task.ts:12761-12775 and :12841-12855 — approveCommand's REAL gateway on a DEGRADED
 // mint (W1-T311) ───────────────────────────────────────────────────────────────────────────
 // The success test above proves the mint+reserve closures execute; this one proves the
@@ -356,7 +708,7 @@ test("GUARDED SITE approve degraded-mint refusal: the REAL gateway throws before
       "utf8",
     );
     process.env.HOME = home;
-    writeGhShim(shimDir, { failPrList: true });
+    writeGhShim(shimDir, bare, { failPrList: true });
     process.env.PATH = `${shimDir}:${savedPath}`;
 
     const originUrl = execFileSync("git", ["-C", REPO_ROOT, "config", "--get", "remote.origin.url"], {

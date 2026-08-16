@@ -58,6 +58,7 @@ import { join } from "node:path";
 import type { AcceptanceCriterion } from "./plan.js";
 import { parseAcceptanceBlock } from "./review.js";
 import { shapeCommitMessage } from "./commit-message.js";
+import type { GhApiFetcher } from "./open-prs-rest.js";
 
 // ── 1. Acceptance-block rendering (the missing counterpart to parseAcceptanceBlock) ─────────
 
@@ -350,4 +351,66 @@ export function regeneratePlanIndexAndCommit(opts: RegeneratePlanIndexOpts): Reg
     });
     return { relPath, committed: true, diff };
   }
+}
+
+// ── 7. Ratification PR — REST create + resumption probe (W1-T903) ───────────────────────────
+//
+// `rmd approve`'s ratification PR used to open over `gh pr create`, which is GraphQL — an
+// exhausted GraphQL budget stranded an already-pushed ratification branch with no PR, and the
+// naive re-run pushed a SECOND branch rather than finishing the first. Both primitives below are
+// a PURE TRANSPORT SWAP at this ONE site: `openPlanPr` (run-task.ts) already authors an explicit
+// `--title` and `--body` (buildPlanPrBody + filingAcceptanceCriteria above), so unlike the four
+// `--fill` sites this module's header doc excludes, no body has to be invented to make the swap.
+// `fetch` is the SAME {@link GhApiFetcher} `fetchOpenPrsRest` (open-prs-rest.ts) already takes,
+// reused unchanged rather than re-derived — real callers pass `ghJson` (lib/worker.ts).
+
+/** `gh api --method POST repos/{owner}/{repo}/pulls` argv — the REST create call. */
+export function ratifyPrCreateRestArgs(owner: string, repo: string, opts: { title: string; body: string; head: string; base: string }): string[] {
+  return ["api", "--method", "POST", `repos/${owner}/${repo}/pulls`, "-f", `title=${opts.title}`, "-f", `body=${opts.body}`, "-f", `head=${opts.head}`, "-f", `base=${opts.base}`];
+}
+
+/** A ratification PR reference, read back from ONE REST response — `number` and `html_url` are
+ *  both present on both the create response and the list-by-head probe response below, so
+ *  neither caller ever needs a second call to learn the other. */
+export interface RatifyPrRef {
+  prUrl: string;
+  prNumber: number;
+}
+
+/**
+ * Open the ratification PR over REST. Throws on a malformed/absent response — mirrors the
+ * `if (!prUrl) throw ...` this replaces (a create that produced no usable reference must fail
+ * loud, not silently ledger nothing and report success).
+ */
+export function createPlanPrRest(fetch: GhApiFetcher, owner: string, repo: string, opts: { title: string; body: string; head: string; base: string }): RatifyPrRef {
+  const row = fetch(ratifyPrCreateRestArgs(owner, repo, opts)) as { html_url?: string; number?: number };
+  if (!row?.html_url || typeof row.number !== "number") {
+    throw new Error("rmd approve: `gh api ... pulls` (POST) produced no html_url/number");
+  }
+  return { prUrl: row.html_url, prNumber: row.number };
+}
+
+/**
+ * `gh api repos/{owner}/{repo}/pulls?head=...` argv, filtered to ONE head branch — the SAME
+ * REST surface {@link "./open-prs-rest.js".fetchOpenPrsRest} already reads, never `gh pr list`
+ * (which would reintroduce the GraphQL dependency this task exists to remove). `state=open`:
+ * a stranded ratification's own prior attempt, if it created a PR at all, created an OPEN one
+ * moments earlier — never merged or manually closed by the time the SAME proposal is re-approved.
+ */
+export function ratifyPrProbeRestArgs(owner: string, repo: string, headBranch: string): string[] {
+  return ["api", `repos/${owner}/${repo}/pulls?head=${owner}:${headBranch}&state=open`];
+}
+
+/**
+ * The resumption probe (W1-T903 design ii): whether a PR already exists for `headBranch`, asked
+ * BEFORE anything is created — covers a prior run whose `gh`/REST create actually succeeded
+ * server-side but never returned a usable reference to the CLI. `undefined` means "none found";
+ * a probe failure throws exactly as the create call does, rather than swallowing an error that
+ * could otherwise hide a real PR the caller would go on to duplicate.
+ */
+export function probeExistingPlanPr(fetch: GhApiFetcher, owner: string, repo: string, headBranch: string): RatifyPrRef | undefined {
+  const rows = fetch(ratifyPrProbeRestArgs(owner, repo, headBranch)) as Array<{ html_url?: string; number?: number }>;
+  const row = rows?.[0];
+  if (!row?.html_url || typeof row.number !== "number") return undefined;
+  return { prUrl: row.html_url, prNumber: row.number };
 }
