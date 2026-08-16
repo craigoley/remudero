@@ -103,15 +103,59 @@ export interface GhBudgetReading {
 export const DEFAULT_GH_PACE_LOW_WATER_FRACTION = 0.1;
 
 /**
+ * W1-T529 — THE FLOOR. The share of a bucket's limit AT OR BELOW WHICH a guarded call STANDS
+ * DOWN instead of running, rather than merely widening the gap before it.
+ *
+ * DELIBERATELY LOWER than {@link DEFAULT_GH_PACE_LOW_WATER_FRACTION}. Low-water (0.1) is pacing —
+ * it still spends the call it warns about (see that constant's own doc: "refuses no call, stands
+ * nothing down"). A single shared threshold would either make ordinary pacing start refusing
+ * calls at 10% remaining (too eager — most of a poll cycle's slack lives between 10% and 2%) or
+ * make the floor as loose as pacing (too late — by the time low-water triggers, several more
+ * calls at the widened gap could still exhaust what's left). Sitting BELOW low-water means pacing
+ * has already been slowing calls down for a while before the floor ever refuses one, so refusal
+ * is the last resort, never the first response to a bucket getting thin.
+ */
+export const DEFAULT_GH_PACE_FLOOR_FRACTION = 0.02;
+
+/**
+ * Thrown by {@link GhCallPacer.wait} when the bucket the LAST guarded call reported (via
+ * `recordResult`'s `budget`) sat at or below the floor (W1-T529 design (iii): "DEGRADE, DO NOT
+ * RETRY — the failure class is exhaustion; a retry deepens it"). `call` is never invoked when
+ * this throws: {@link paceGhEntry} rethrows it straight out of its own un-try'd `wait()` call
+ * (see that function's body), so a stand-down never reaches — and never spends — the guarded
+ * call it refused. Carries the reading that tripped it so a caller (or a test) can read WHICH
+ * bucket and how close to empty it was without re-parsing the message.
+ */
+export class GhPaceFloorStandDownError extends Error {
+  readonly resource: string;
+  readonly remaining: number;
+  readonly limit: number;
+  constructor(budget: GhBudgetReading) {
+    super(
+      `gh call pacer stood down: ${budget.resource} at ${budget.remaining}/${budget.limit}, at or below the floor — refusing rather than spending what's left`,
+    );
+    this.name = "GhPaceFloorStandDownError";
+    this.resource = budget.resource;
+    this.remaining = budget.remaining;
+    this.limit = budget.limit;
+  }
+}
+
+/**
  * Paces a set of independent `gh` call sites sharing one daemon poll tick (W1-T468 design (ii)).
  * `wait()` blocks the caller until at least the pacer's CURRENT gap has elapsed since the last
  * call any guarded site made through this same instance, and `recordResult()` feeds a call's
  * classified outcome back in so a rate-limit hit widens the gap for what follows (design (iii)).
  */
 export interface GhCallPacer {
-  /** Block until it is safe to issue the next guarded `gh` call, then record that a call is
-   *  starting now. Call this IMMEDIATELY BEFORE the guarded call, never after — pacing bounds the
-   *  gap BETWEEN calls, never a call's own duration. */
+  /**
+   * Block until it is safe to issue the next guarded `gh` call, then record that a call is
+   * starting now. Call this IMMEDIATELY BEFORE the guarded call, never after — pacing bounds the
+   * gap BETWEEN calls, never a call's own duration.
+   *
+   * W1-T529: THROWS {@link GhPaceFloorStandDownError} instead of returning when the last
+   * `recordResult` reading sat at or below the floor — the guarded call this gates must not run.
+   */
   wait(): void;
   /**
    * Record how the call `wait()` just gated actually resolved: `true` for a rate-limit-classified
@@ -126,6 +170,13 @@ export interface GhCallPacer {
    * widens the gap PROACTIVELY, the same as `rateLimited: true`, so pacing degrades before
    * exhaustion instead of only reacting after a call has already failed (design ii). Omitting it
    * (every caller before W1-T525) leaves this reactive-only, unchanged.
+   *
+   * W1-T529: the SAME `budget`, when its share is at or below {@link DEFAULT_GH_PACE_FLOOR_FRACTION}
+   * (or `opts.floorFraction`), ALSO arms the floor — the very next `wait()` on this pacer throws
+   * {@link GhPaceFloorStandDownError} instead of letting its guarded call run. This is a THIRD
+   * input to the same object (design ii: "EXTEND GhCallPacer, NEVER FORK IT"), never a second
+   * pacer — low-water widening and the floor read the identical reading, just at two thresholds
+   * with two different responses.
    */
   recordResult(rateLimited: boolean, budget?: GhBudgetReading): void;
 }
@@ -144,6 +195,8 @@ export function createGhCallPacer(
     minGapMs?: number;
     rateLimitGapMs?: number;
     lowWaterFraction?: number;
+    /** W1-T529: overrides {@link DEFAULT_GH_PACE_FLOOR_FRACTION}. */
+    floorFraction?: number;
     now?: () => number;
     sleepSync?: (ms: number) => void;
   } = {},
@@ -151,12 +204,28 @@ export function createGhCallPacer(
   const minGapMs = opts.minGapMs ?? DEFAULT_GH_PACE_MIN_GAP_MS;
   const rateLimitGapMs = opts.rateLimitGapMs ?? DEFAULT_GH_PACE_RATE_LIMIT_GAP_MS;
   const lowWaterFraction = opts.lowWaterFraction ?? DEFAULT_GH_PACE_LOW_WATER_FRACTION;
+  const floorFraction = opts.floorFraction ?? DEFAULT_GH_PACE_FLOOR_FRACTION;
   const now = opts.now ?? (() => Date.now());
   const sleepSync = opts.sleepSync ?? defaultBlockingSleepSync;
   let lastCallAt: number | undefined;
   let gapMs = minGapMs;
+  // W1-T529: the reading that armed the floor, set by `recordResult` and CONSUMED by the very
+  // next `wait()` — never left to latch. This pacer lives for the pacer's OWNER's whole
+  // lifetime, not per-call and not per-tick (lib/open-prs-rest.ts's module doc: "one instance
+  // threaded through every guarded site"; run-task.ts builds exactly ONE per daemon boot) — so a
+  // floor that refused every future call once tripped would refuse forever: nothing would ever
+  // call through it again to observe a bucket that had since reset. Consuming the trip on the
+  // ONE call it refuses means the call after that is always let through to re-derive — spending
+  // a little budget to find out, rather than none ever again — which is what "the pass
+  // re-derives next tick" (design iii) means from the pacer's own seat, not just the caller's.
+  let standDown: GhBudgetReading | undefined;
   return {
     wait() {
+      if (standDown) {
+        const reading = standDown;
+        standDown = undefined;
+        throw new GhPaceFloorStandDownError(reading);
+      }
       if (lastCallAt !== undefined) {
         const remaining = gapMs - (now() - lastCallAt);
         if (remaining > 0) sleepSync(remaining);
@@ -169,6 +238,10 @@ export function createGhCallPacer(
       // rather than widening on every call. A reactive `rateLimited` still widens regardless.
       const lowWater = budget !== undefined && budget.limit > 0 && budget.remaining <= budget.limit * lowWaterFraction;
       gapMs = rateLimited || lowWater ? rateLimitGapMs : minGapMs;
+      // W1-T529: re-armed fresh from THIS call's own reading every time — never accumulated, so
+      // a later healthy reading clears a stale trip exactly as `gapMs` already narrows back on
+      // one (there is no "widen forever" state for either input to inherit).
+      standDown = budget !== undefined && budget.limit > 0 && budget.remaining <= budget.limit * floorFraction ? budget : undefined;
     },
   };
 }
@@ -192,6 +265,14 @@ function defaultBlockingSleepSync(ms: number): void {
  * no gap and no result recorded — the exact pre-W1-T468 behavior, so every existing caller that
  * does not pass a pacer is unaffected byte-for-byte. Rethrows `call`'s own error unchanged (never
  * wraps it), so a caller's existing catch/classify logic keeps working verbatim.
+ *
+ * W1-T529: `pacer.wait()` is called OUTSIDE this function's own `try` — deliberately, so a
+ * {@link GhPaceFloorStandDownError} it throws propagates straight out of THIS call, un-caught and
+ * un-rewrapped, before `call` ever runs. That is the stand-down: nothing here classifies it,
+ * counts it as a `rate_limit` result, or feeds it back to `recordResult` a second time (it was
+ * already the reading `recordResult` armed the floor from). A caller sees exactly the same shape
+ * it already handles for any other thrown `gh` failure — see this module's own header doc ("a
+ * fetch failure still throws exactly as `ghJson` throws today").
  */
 export function paceGhEntry<T>(pacer: GhCallPacer | undefined, isRateLimited: (err: unknown) => boolean, call: () => T): T {
   if (!pacer) return call();

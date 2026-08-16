@@ -8,11 +8,13 @@ import {
   checkRunsRestArgs,
   combinedStatusRestArgs,
   createGhCallPacer,
+  DEFAULT_GH_PACE_FLOOR_FRACTION,
   DEFAULT_GH_PACE_LOW_WATER_FRACTION,
   DEFAULT_GH_PACE_MIN_GAP_MS,
   DEFAULT_GH_PACE_RATE_LIMIT_GAP_MS,
   fetchOpenPrsRest,
   fetchSinglePrRest,
+  GhPaceFloorStandDownError,
   liveStateFromRest,
   mapRestPr,
   openPrsRestArgs,
@@ -22,9 +24,10 @@ import {
   singlePrRestArgs,
   type GhApiFetcher,
 } from "../src/lib/open-prs-rest.js";
-import { checksStateFromRollup } from "../src/lib/sweep.js";
+import { checksStateFromRollup, DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
 import { fixCommand } from "../src/run-task.js";
 import { ghJson, type GhRateLimitReading } from "../src/lib/worker.js";
+import { readLedgerLines } from "../src/lib/status.js";
 import type { Config } from "../src/lib/config.js";
 
 const OWNER = "craigoley";
@@ -725,4 +728,173 @@ test("W1-T525: the free budget probe is never used as the floor's source", () =>
   assert.ok(start !== -1 && end !== -1 && end > start, "could not isolate ghJson's own source for the structural check");
   const ghJsonSrc = src.slice(start, end);
   assert.doesNotMatch(ghJsonSrc, /rate_limit/, "the metered entry point must never shell out to the free `gh api rate_limit` probe");
+});
+
+// ── W1-T529 — THE FLOOR: below it, a guarded call stands down instead of spending the budget,
+// fed from the call's own response (never a probe), and the sweep never turns that refusal into
+// an unbounded retry or a spent fix-rung strike. ──
+
+test("W1-T529: a guarded call below the floor stands down", () => {
+  const clock = fakeClock();
+  const pacer = createGhCallPacer({ now: clock.now, sleepSync: clock.sleepSync, minGapMs: 1000, rateLimitGapMs: 9000 });
+  let calls = 0;
+  const call = () => {
+    calls += 1;
+    return "ok";
+  };
+
+  const first = paceGhEntry(pacer, () => false, call);
+  assert.equal(first, "ok");
+  assert.equal(calls, 1, "the first guarded call actually ran");
+
+  // The first call's own response reported the bucket at 20/5000 (0.4%) — at/below the 2% floor.
+  const nearlyEmpty = { remaining: 20, limit: 5000, resource: "core" };
+  assert.ok(
+    nearlyEmpty.remaining <= nearlyEmpty.limit * DEFAULT_GH_PACE_FLOOR_FRACTION,
+    "the fixture must actually sit at/below the exported floor fraction",
+  );
+  pacer.recordResult(false, nearlyEmpty);
+
+  assert.throws(
+    () => paceGhEntry(pacer, () => false, call),
+    (err: unknown) => err instanceof GhPaceFloorStandDownError,
+    "the SECOND guarded call stands down instead of running",
+  );
+  assert.equal(calls, 1, "the refused call was never invoked — nothing more was spent chasing an exhausted bucket");
+});
+
+test("W1-T529: the floor reads the call's own response header", () => {
+  // The reading comes from ghJson's onRateLimit — parsed off the SAME response the guarded call
+  // itself returned (W1-T525 design iii), never a second probe (see the sibling "free budget
+  // probe" test above for the general case). This pins that the FLOOR specifically consumes that
+  // exact reading, not a value from anywhere else.
+  const out = 'HTTP/2.0 200 OK\r\nX-Ratelimit-Limit: 5000\r\nX-Ratelimit-Remaining: 40\r\nX-Ratelimit-Resource: core\r\n\r\n{"ok":true}';
+  const { exec, calls } = fakeGhExec([out]);
+  let reading: GhRateLimitReading | undefined;
+  const body = ghJson(["api", "repos/o/r/pulls"], (r) => (reading = r), exec);
+  assert.deepEqual(body, { ok: true });
+  assert.equal(calls.length, 1, "one real call — the reading came from it, not a second probe");
+  assert.ok(
+    reading?.remaining !== undefined && reading.limit !== undefined && reading.resource !== undefined,
+    "the response actually carried a full in-bucket reading to feed the floor",
+  );
+
+  const clock = fakeClock();
+  const pacer = createGhCallPacer({ now: clock.now, sleepSync: clock.sleepSync });
+  pacer.wait();
+  // The caller's own glue (not built by this task — see the module doc's design (i)): thread the
+  // SAME reading `onRateLimit` handed back into the pacer, exactly as a future `ghJson(...,
+  // reading => pacer.recordResult(false, reading))` caller would.
+  pacer.recordResult(false, { remaining: reading!.remaining!, limit: reading!.limit!, resource: reading!.resource! });
+
+  assert.throws(
+    () => pacer.wait(),
+    (err: unknown) => err instanceof GhPaceFloorStandDownError,
+    "the reading fed back from that same call's header — never a probe — is what trips the floor",
+  );
+});
+
+/** Minimal `OpenPrView` fixture — mirrors test/sweep.test.ts's own `pr()` helper (not imported:
+ *  that file's helper is module-local, and this task's declared scope is this test file only). */
+function w1t529Pr(over: Partial<OpenPrView> = {}): OpenPrView {
+  return {
+    prNumber: 529,
+    prUrl: "https://github.com/o/r/pull/529",
+    taskId: "W1-T529FIXTURE",
+    reviewState: "pending",
+    checksState: "pending",
+    unmetCriteria: [],
+    priorStrikes: 0,
+    lastActivityAt: "2026-08-15T12:00:00Z",
+    headSha: "cccc333",
+    autoMergeArmed: false,
+    ...over,
+  };
+}
+
+function w1t529LedgerPath(): string {
+  return join(mkdtempSync(join(tmpdir(), "rmd-w1t529-")), "ledger.ndjson");
+}
+
+const W1T529_SWEEP_NOW = Date.parse("2026-08-16T12:00:00Z");
+
+test("W1-T529: a floor stand-down leaves the fix strike unspent", async () => {
+  const lp = w1t529LedgerPath();
+  // checksState green + reviewState failure + non-empty unmetCriteria -> "blocked-fixable",
+  // exactly test/sweep.test.ts's own `blockedFixablePr()` shape.
+  const blockedFixable = w1t529Pr({
+    reviewState: "failure",
+    checksState: "green",
+    unmetCriteria: [{ claim: "criterion one", proof: "unit test: it works", met: false, reason: "not done", proof_exec: "executed_fail" }],
+  });
+
+  // Pass 1: the fix rung's own guarded gh call stands down at the floor — the pacer refuses
+  // before anything is spent, and dispatchFix surfaces that as a thrown GhPaceFloorStandDownError
+  // exactly like any other guarded-call throw (W1-T254's existing per-PR containment).
+  const dispatched1: OpenPrView[] = [];
+  const deps1: SweepDeps = {
+    arm: () => {},
+    close: () => {},
+    dispatchFix: (p) => {
+      dispatched1.push(p);
+      throw new GhPaceFloorStandDownError({ remaining: 20, limit: 5000, resource: "core" });
+    },
+    escalate: () => {},
+    ledgerPath: lp,
+    runId: "SWEEP-1",
+    now: () => W1T529_SWEEP_NOW,
+  };
+  const summary1 = await runSweep([blockedFixable], deps1, DEFAULT_SWEEP_POLICY);
+  assert.equal(dispatched1.length, 1, "the fix rung was actually attempted this pass");
+  const action1 = summary1.actions.find((a) => a.prNumber === 529);
+  assert.equal(action1?.acted, false, "a floor stand-down is never credited as acted (W1-T527's existing property)");
+  assert.match(action1?.actionError ?? "", /stood down/, "the thrown stand-down is attributed on this PR's own action");
+
+  // Pass 2, SAME ledger, SAME pr@head: `priorActionsFromLedger`'s `fixed` set is built ONLY from
+  // `sweep.disposed` lines with `acted:true` — pass 1's line was `acted:false`, so it never
+  // entered that set. Nothing spent the strike, so the fix rung dispatches again rather than
+  // treating the refusal as a used-up attempt.
+  const dispatched2: OpenPrView[] = [];
+  const deps2: SweepDeps = { ...deps1, dispatchFix: (p) => { dispatched2.push(p); } };
+  await runSweep([blockedFixable], deps2, DEFAULT_SWEEP_POLICY);
+  assert.equal(dispatched2.length, 1, "the strike was never spent — the SAME pr@head re-earns the dispatch next pass");
+});
+
+test("W1-T529: a refused attempt leaves a dedup key behind", async () => {
+  const lp = w1t529LedgerPath();
+  // reviewState none + checksState green -> "post-review", exactly test/sweep.test.ts's own
+  // `ungatedGreenPr()` shape.
+  const ungatedGreen = w1t529Pr({ reviewState: "none", checksState: "green" });
+
+  // Pass 1: postReview throws — the shape a floor stand-down takes once wired ahead of the real
+  // review runner (run-task.ts's `postReview` dep rethrows on failure; out of this task's scope).
+  const attempts1: OpenPrView[] = [];
+  const deps1: SweepDeps = {
+    arm: () => {},
+    close: () => {},
+    dispatchFix: () => {},
+    escalate: () => {},
+    postReview: (p) => {
+      attempts1.push(p);
+      throw new GhPaceFloorStandDownError({ remaining: 20, limit: 5000, resource: "core" });
+    },
+    ledgerPath: lp,
+    runId: "SWEEP-1",
+    now: () => W1T529_SWEEP_NOW,
+  };
+  await runSweep([ungatedGreen], deps1, DEFAULT_SWEEP_POLICY);
+  assert.equal(attempts1.length, 1, "the post-review lane was actually attempted this pass");
+
+  const refusal = readLedgerLines(lp).find((l) => l.step === "review.post_refused");
+  assert.ok(refusal, "the thrown attempt left a review.post_refused outcome line PriorActions.postReviewed reads");
+  assert.equal(refusal?.task_id, "W1-T529FIXTURE");
+  assert.equal(refusal?.head_sha, "cccc333");
+
+  // Pass 2, SAME ledger, SAME pr@head: the dedup key from pass 1 must suppress a repeat attempt —
+  // without it, the same head would re-attempt every pass, without bound, against a budget the
+  // floor exists precisely because it is exhausted.
+  const attempts2: OpenPrView[] = [];
+  const deps2: SweepDeps = { ...deps1, postReview: (p) => { attempts2.push(p); } };
+  await runSweep([ungatedGreen], deps2, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(attempts2, [], "the dedup key left behind by the refusal suppresses the repeat attempt");
 });
