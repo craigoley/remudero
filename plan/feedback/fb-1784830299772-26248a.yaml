@@ -11,5 +11,6 @@ raw: "AA16B6 ROOT CAUSE (follow-up): the npm-global claude symlink was rewritten
   preflight naming the real errno."
 attachments: []
 origin: cli
-status: new
+status: proposed
 proposal_pr: null
+summary: null

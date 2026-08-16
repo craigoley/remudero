@@ -1,0 +1,111 @@
+- id: W1-T901
+  title: "the spawn preflight already SEES an unlaunchable claude and then throws the errno away — `defaultCanExecute` is `catch { return false }`, so a 500-byte non-executable husk and a crashing binary both render as `exists, --version failed`"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: "FILED FROM THE aa16b6 ROOT-CAUSE FOLLOW-UP (feedback fb-1784830299772-26248a, incident
+    2026-07-23). The npm-global `claude` symlink was rewritten at 16:05Z to `bin/claude.exe`, an
+    ASCII-text launcher with NO EXEC BIT — a half-completed global update frozen mid-swap — and every
+    SDK spawn died from ~16:14Z. The failure was EACCES-on-a-script; the SDK reported a canned
+    musl/glibc diagnosis, and the operator spent the incident chasing an architecture mismatch that
+    never existed. THE COST OF THIS INCIDENT WAS DIAGNOSIS TIME, NOT DETECTION TIME.
+    WHAT THE FEEDBACK ASKS FOR IS, IN THE MAIN, ALREADY BUILT — this task deliberately files only the
+    one part that is not, and the implementer must NOT re-derive the rest:
+      - PER-SPAWN LAUNCHABILITY PREFLIGHT: SHIPPED (W1-T113). `resolveClaudeExecutable`
+        (`src/lib/worker.ts`) walks env override, live PATH, then the install table, probing
+        `exists` AND `canExecute` on each candidate, and throws `ClaudeToolchainBlockedError`
+        (`reasonClass: \"blocked_toolchain\"`) rather than letting a raw ENOENT surface from inside the
+        SDK. `spawnWorker` calls it before any keychain or worker-home work, so the SDK's own message
+        is no longer the fleet's first diagnosis.
+      - THAT REFUSAL IS ALREADY CLASSIFIED AND ROUTED: `daemon.ts`'s `isSpawnInfraBlocked` escalates it
+        once per distinct reason, and `ledger.ts`'s `isSpawnInfraBlockedError` keeps it off the
+        fix-rung strike ledger (W1-T127) because no worker ran and nothing was billed.
+      - AUTOUPDATER OFF IN THE CHILD: SHIPPED (W1-T236). `src/lib/env.ts` grants
+        `DISABLE_AUTOUPDATER=1` to every worker through the allowlist.
+      - PATH+VERSION PIN AT PREFLIGHT: SHIPPED (W1-T236). `readBinaryPin`/`checkBinaryPin`
+        (`src/lib/env.ts`) compare `deploy/Dockerfile`'s `ARG CLAUDE_CODE_VERSION` against
+        `claude --version`, three-state with `unknown` on a failed read, and `src/run-task.ts` ledgers
+        the rung as `preflight.binary_pin`.
+      - THE ASYNC SPAWN ERRNO: SHIPPED (W1-T442) — `spawnDetachedGroup`'s dropped `error` object now
+        reaches a callback in `worker.ts`.
+      - BOOT-TIME RECORD of the resolved binary: FILED and queued as W1-T357. Not this task.
+    THE ONE REMAINING HOLE, QUOTED FROM SOURCE at this filing. `defaultCanExecute` is
+    `try { execFileSync(path, ['--version'], {stdio:'ignore'}); return true } catch { return false }`
+    — the caught error, the only object in the whole path that carries EACCES / ENOEXEC / ENOENT, is
+    discarded on the spot. `describeSearched` therefore has nothing but a boolean to render, and emits
+    the string `exists, --version failed` for ALL of: a file with no exec bit (this incident), a
+    wrong-architecture binary (the SDK's guess), a binary that starts and crashes, and a shell wrapper
+    exiting non-zero. The refusal message that reaches the escalation issue names every searched path
+    and cannot say WHY any of them lost. That is the same defect W1-T442 fixed one module over, on the
+    surface that actually fired on 2026-07-23."
+  design: |
+    KEEP THE PROBE'S ERROR INSTEAD OF DISCARDING IT, AND RENDER IT. Nothing about the resolution ORDER,
+    the candidate table, the cache, or the thrown class changes; this is a diagnosis-fidelity change.
+    (i) THE SEAM. `canExecute` today answers a boolean. Widen the probe so a failure can carry its
+    cause — an errno/`code` string plus a short one-line message — while a SUCCESS stays exactly as
+    cheap as it is now. `ResolveClaudeExecutableDeps.canExecute` is INJECTED BY TESTS AND BY
+    `spawnWorker`'s callers, so whatever shape is chosen must keep the existing boolean-returning
+    injections working or must update every injection site in one change; establish which from source
+    before writing, and prefer the option that does not force unrelated call sites to churn.
+    (ii) WHAT GETS RECORDED. `SearchedClaudeCandidate` gains the cause alongside `existed`/`ran`, and
+    `describeSearched` renders it: `exists, --version failed (EACCES: not executable)` rather than
+    today's bare `exists, --version failed`. A MISSING candidate still reports `missing` and probes
+    nothing — the exists/missing distinction W1-T113 built is load-bearing and must survive.
+    (iii) NEVER THE ENVIRONMENT, NEVER THE OUTPUT WHOLESALE. Put the errno/`code` and at most a
+    truncated first line of stderr on the message. Not `env` (the billing boundary, credentials — the
+    W1-T442 rule), and not an unbounded stderr dump into an escalation issue body.
+    (iv) THE DEDUP KEY MOVES ONCE, AND THAT IS ACCEPTABLE — SAY SO IN THE PR BODY. `daemon.ts`
+    escalates a `blocked_toolchain` refusal content-keyed by `reason`, so enriching the message changes
+    that key exactly once, at deploy. Worst case is one extra issue for an already-open cause; the
+    alternative — keeping the message frozen so the key never moves — is what makes the message useless.
+    Do not add a second, unenriched "key" string to dodge this.
+    (v) FALSIFIER, AND IT MUST BE A REAL FILE. Drive the husk case literally: write a non-executable
+    ASCII file, point a candidate at it, and assert the refusal names EACCES (or the platform's actual
+    code — assert what the OS returns, never a hard-coded constant the test also invents). A stubbed
+    `canExecute: () => false` cannot distinguish the fix from the defect, which is the whole point one
+    level up.
+    EXPLICITLY NOT IN SCOPE, each with its reason:
+      - A "HUSK SIGNATURE" heuristic (`bin/` containing only `claude.exe`), which the sibling feedback
+        proposes. Once the errno is named, the signature adds nothing but a hard-coded model of one
+        vendor's packaging bug that goes stale the next time the installer changes.
+      - GATING OR DISABLING THE HOST'S GLOBAL CLI UPDATER. That is host configuration, not repo code;
+        the in-repo half (`DISABLE_AUTOUPDATER=1` in every worker child) already shipped.
+      - REPAIRING OR REINSTALLING the binary, or retrying the spawn. Make the cause legible first —
+        the W1-T442 rule about not adding a bound to an unmeasured population applies unchanged.
+      - The boot-time resolution record (W1-T357) and the no-pid spawn errno (W1-T442).
+  acceptance:
+    - claim: "a candidate that exists but will not run records the real errno from the version probe, so a non-executable file is distinguishable from a binary that runs and crashes"
+      proof: "unit test: test/toolchain-refusal-errno.test.ts"
+    - claim: "the toolchain refusal message carries that cause for every searched candidate that was probed, while a missing candidate is still reported as missing and never probed"
+      proof: "unit test: test/toolchain-refusal-errno.test.ts"
+    - claim: "the refusal never carries the child environment or an unbounded stderr dump"
+      proof: "unit test: test/toolchain-refusal-errno.test.ts"
+    - claim: "the existing resolution contract is unchanged — the same candidate order, the same cache behaviour, and an error still tagged blocked_toolchain carrying every searched path"
+      proof: "unit test: test/worker.test.ts"
+  risk: high
+  origin: feedback#fb-1784830299772-26248a
+  plan_refs: ["W1-T113", "W1-T236", "W1-T442"]
+  files: [src/lib/worker.ts, test/worker.test.ts, test/toolchain-refusal-errno.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — nothing here needs an operator ruling; the one open choice (design (i), the
+    probe's return shape) is an engineering call the implementer settles against the live injection
+    sites, not a policy the plan withheld.
+    risk:high is Rule 19's SPAN plus a genuinely live surface: `resolveClaudeExecutable` is on the path
+    of EVERY worker spawn on a host running a daemon, and a resolver that wrongly rejects a good binary
+    grounds the whole fleet. The change itself is one probe, one field and one render.
+    `test/worker.test.ts` IS DECLARED DELIBERATELY, not defensively: it asserts
+    `/exists, --version failed/` today (worker.test.ts:496), so it is the suite that goes red the moment
+    the message gains its cause — the W1-T442/W1-T407 lesson about a `files:` that omits the suite the
+    change breaks.
+    `test/daemon.test.ts` and `test/strike-accounting.test.ts` are NOT declared and were checked: both
+    construct their own toolchain-blocked fixture strings and never read the real message.
+    budget_usd 45 — small edit, and the cost is the falsifier: a real non-executable file, a real probe,
+    and the platform's actual errno rather than one the test asserts into existence.
+    WHAT THIS TASK IS NOT: it is not a re-file of W1-T236, whose two halves shipped
+    (`DISABLE_AUTOUPDATER=1` in env.ts, the `preflight.binary_pin` rung in run-task.ts), and it is not a
+    re-file of W1-T113, whose preflight already catches this class. It closes the sliver both left: the
+    refusal knows the binary is unlaunchable and cannot say why."
