@@ -21,6 +21,13 @@ import {
   singlePrRestArgs,
   type GhApiFetcher,
 } from "../src/lib/open-prs-rest.js";
+import {
+  ghJson,
+  lastGhRateLimitReading,
+  meteredGhArgs,
+  parseGhRateLimitHeaders,
+  resetGhRateLimitReading,
+} from "../src/lib/worker.js";
 import { checksStateFromRollup } from "../src/lib/sweep.js";
 import { fixCommand } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
@@ -528,4 +535,161 @@ test("paceGhEntry: a NON-rate-limit throw reports back rateLimited=false, so an 
     ),
   );
   assert.deepEqual(seen, ["wait", "result:false"]);
+});
+
+/**
+ * W1-T525 — the metered `gh` seam the rate-limit floor needs. There was no single point where a
+ * call could be counted (48 raw exec sites over 17 files at filing), and ZERO sites passed `-i`, so
+ * the header GitHub returns on every response was discarded at the transport layer. These tests
+ * drive the real entry point and the real pacer, never a restated copy of either.
+ */
+
+test("W1-T525: every gh call routes through the metered entry point", () => {
+  // `api` is metered — `-i` is added, and the rest of the argv survives verbatim.
+  const api = meteredGhArgs(["api", "repos/craigoley/remudero", "--jq", ".full_name"]);
+  assert.equal(api.metered, true);
+  assert.deepEqual(api.args, ["api", "-i", "repos/craigoley/remudero", "--jq", ".full_name"]);
+
+  // FALSIFIER, and the reason the gate is not cosmetic: `--include` is an `api`-only flag. Adding
+  // it to `gh pr view` would make every one of those call sites an unknown-flag error.
+  const view = meteredGhArgs(["pr", "view", "https://example/1", "--json", "state"]);
+  assert.equal(view.metered, false);
+  assert.deepEqual(view.args, ["pr", "view", "https://example/1", "--json", "state"], "passed through byte for byte");
+
+  // Already-included argv is not double-flagged.
+  assert.equal(meteredGhArgs(["api", "-i", "rate_limit"]).metered, false);
+
+  // And the entry point really uses that plan: a recorder sees the `-i` argv, not the caller's.
+  const seen: string[][] = [];
+  const body = ghJson(["api", "repos/x"], (a) => {
+    seen.push(a);
+    return "HTTP/2.0 200 OK\r\nx-ratelimit-remaining: 42\r\n\r\n{\"ok\":true}";
+  });
+  assert.deepEqual(seen, [["api", "-i", "repos/x"]]);
+  assert.deepEqual(body, { ok: true }, "the body is returned exactly as before");
+});
+
+test("W1-T525: the rate limit header is parsed off the response that carried it", () => {
+  resetGhRateLimitReading();
+  const raw = [
+    "HTTP/2.0 200 OK",
+    "content-type: application/json",
+    "X-RateLimit-Limit: 5000",
+    "X-RateLimit-Remaining: 1764",
+    "X-RateLimit-Used: 3236",
+    "X-RateLimit-Reset: 1786832677",
+    "X-RateLimit-Resource: core",
+    "",
+    '{"full_name":"craigoley/remudero"}',
+  ].join("\r\n");
+  const out = ghJson(["api", "repos/craigoley/remudero"], () => raw);
+  assert.deepEqual(out, { full_name: "craigoley/remudero" });
+
+  const reading = lastGhRateLimitReading();
+  assert.equal(reading?.remaining, 1764);
+  assert.equal(reading?.limit, 5000);
+  assert.equal(reading?.resource, "core", "the family is recorded — core and graphql reset separately");
+
+  // FALSIFIER — a partial header set must yield NO reading rather than a fabricated zero, because
+  // a zero would read as "exhausted" and widen the pacer on a parse bug rather than on evidence.
+  assert.equal(parseGhRateLimitHeaders("x-ratelimit-remaining: 12"), undefined);
+  assert.equal(parseGhRateLimitHeaders("x-ratelimit-remaining: notanumber\nx-ratelimit-limit: 5000"), undefined);
+  // ISOLATES THE COUNT GUARD: everything else present, only `remaining` missing. Without this the
+  // count guard can be deleted and the reset/resource guard alone still returns undefined — the
+  // mutation survives and the assertion above proves nothing about that line.
+  assert.equal(
+    parseGhRateLimitHeaders(
+      ["x-ratelimit-limit: 5000", "x-ratelimit-used: 10", "x-ratelimit-reset: 1", "x-ratelimit-resource: core"].join("\n"),
+    ),
+    undefined,
+    "a missing remaining count must not be inferred from limit minus used",
+  );
+
+  // And a non-`api` call records nothing at all.
+  resetGhRateLimitReading();
+  ghJson(["pr", "view", "u", "--json", "state"], () => '{"state":"OPEN"}');
+  assert.equal(lastGhRateLimitReading(), undefined, "an unmetered call must not leave a stale reading");
+});
+
+test("W1-T525: a low remaining reading widens the pacer without any failure", () => {
+  let clock = 0;
+  const slept: number[] = [];
+  const pacer = createGhCallPacer({
+    minGapMs: 100,
+    rateLimitGapMs: 9000,
+    now: () => clock,
+    sleepSync: (ms) => {
+      slept.push(ms);
+      clock += ms;
+    },
+  });
+
+  // A SUCCESSFUL call — rateLimited false — whose own response says the bucket is nearly gone.
+  pacer.wait();
+  pacer.recordResult(false, { remaining: 100, limit: 5000, resource: "core" });
+  clock += 1;
+  pacer.wait();
+  assert.deepEqual(slept, [8999], "the gap widened before anything failed");
+
+  // FALSIFIER — a healthy reading on the same successful call leaves the gap narrow.
+  const slept2: number[] = [];
+  let clock2 = 0;
+  const p2 = createGhCallPacer({
+    minGapMs: 100,
+    rateLimitGapMs: 9000,
+    now: () => clock2,
+    sleepSync: (ms) => {
+      slept2.push(ms);
+      clock2 += ms;
+    },
+  });
+  p2.wait();
+  p2.recordResult(false, { remaining: 4000, limit: 5000, resource: "core" });
+  clock2 += 1;
+  p2.wait();
+  assert.deepEqual(slept2, [99], "a healthy bucket must not slow anything down");
+
+  // And omitting the reading entirely is the pre-W1-T525 pacer, byte for byte.
+  const slept3: number[] = [];
+  let clock3 = 0;
+  const p3 = createGhCallPacer({
+    minGapMs: 100,
+    rateLimitGapMs: 9000,
+    now: () => clock3,
+    sleepSync: (ms) => {
+      slept3.push(ms);
+      clock3 += ms;
+    },
+  });
+  p3.wait();
+  p3.recordResult(false);
+  clock3 += 1;
+  p3.wait();
+  assert.deepEqual(slept3, [99], "no reading supplied ⇒ unchanged behaviour");
+});
+
+test("W1-T525: the free budget probe is never used as the floor's source", () => {
+  resetGhRateLimitReading();
+  // The measured disagreement, as a fixture: the FREE probe's body says 4960 remaining while the
+  // response's OWN headers say 1764. The reading must come from the headers — the bucket this call
+  // actually spent — never from the probe payload.
+  const raw = [
+    "HTTP/2.0 200 OK",
+    "X-RateLimit-Limit: 5000",
+    "X-RateLimit-Remaining: 1764",
+    "X-RateLimit-Used: 3236",
+    "X-RateLimit-Reset: 1786832677",
+    "X-RateLimit-Resource: core",
+    "",
+    '{"resources":{"core":{"remaining":4960,"limit":5000,"used":40,"reset":1786832984}}}',
+  ].join("\r\n");
+  const body = ghJson(["api", "rate_limit"], () => raw) as {
+    resources: { core: { remaining: number } };
+  };
+  assert.equal(body.resources.core.remaining, 4960, "the probe payload is still returned untouched");
+  assert.equal(
+    lastGhRateLimitReading()?.remaining,
+    1764,
+    "but the recorded reading is the header's, not the probe's — a gap of 3196 on one response",
+  );
 });

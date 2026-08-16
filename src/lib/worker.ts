@@ -2611,11 +2611,26 @@ export function resetGhRateLimitReading(): void {
  * for byte and simply yields no reading — the seam meters what it can rather than breaking what it
  * cannot.
  */
-export function ghJson(args: string[]): unknown {
+/**
+ * The argv `ghJson` will actually run, and whether it will be metered — exported PURE so the
+ * routing decision is assertable without shelling out. See {@link ghJson} for why `-i` is gated on
+ * the `api` subcommand.
+ */
+export function meteredGhArgs(args: string[]): { args: string[]; metered: boolean } {
   const metered = args[0] === "api" && !args.includes("-i") && !args.includes("--include");
-  const effective = metered ? ["api", "-i", ...args.slice(1)] : args;
-  const out = execFileSync("gh", effective, { encoding: "utf8", maxBuffer: 1 << 24 });
-  if (!metered) return JSON.parse(out);
+  return { args: metered ? ["api", "-i", ...args.slice(1)] : args, metered };
+}
+
+/** How {@link ghJson} shells out. Injectable LAST so no existing positional caller shifts. */
+export type GhExec = (args: string[]) => string;
+
+const defaultGhExec: GhExec = (args) =>
+  execFileSync("gh", args, { encoding: "utf8", maxBuffer: 1 << 24 });
+
+export function ghJson(args: string[], exec: GhExec = defaultGhExec): unknown {
+  const plan = meteredGhArgs(args);
+  const out = exec(plan.args);
+  if (!plan.metered) return JSON.parse(out);
   const { headers, body } = splitGhIncludedResponse(out);
   const reading = parseGhRateLimitHeaders(headers);
   if (reading) lastReading = reading;
