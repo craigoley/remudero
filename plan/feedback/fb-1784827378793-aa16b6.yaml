@@ -14,5 +14,6 @@ raw: "WORKER SPAWN LAYER DOWN: CLAUDE NATIVE BINARY FAILS TO LAUNCH — every
   doctrine instead of failing inside the rung."
 attachments: []
 origin: cli
-status: new
+status: rejected
 proposal_pr: null
+summary: null
