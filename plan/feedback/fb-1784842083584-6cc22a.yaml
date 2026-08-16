@@ -42,5 +42,20 @@ raw: "STUCK-PR PARAMEDIC RUNG — the sweep polls every open PR but its action
 attachments: []
 origin: cli
 status: proposed
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/1941
+summary:
+  headline: Authorize PR paramedic to automate repair cycles
+  what_happened: Sweep system escalates ~15 monthly PRs matching 8 known repair
+    patterns. Operators manually apply the same recipes repeatedly; no
+    automation prevents the cycle.
+  decision: Deploy the PR paramedic with core verbs first; add remaining verbs as
+    specifications complete.
+  options:
+    - label: Phase 1 now, others after specs
+      consequence: Automates most common blockers immediately; minimal risk; others
+        follow once ready
+    - label: Deploy all 8 verbs together
+      consequence: Covers all repair patterns at once but requires all specs finalized first
+    - label: Keep manual escalations, skip paramedic
+      consequence: Zero change risk; operator archaeology and manual workload continue
+        unchanged
