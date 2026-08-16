@@ -1425,7 +1425,12 @@ match, and this entry must not be read as "duplicates may be closed automaticall
 or change any disposition. The ruling comes first; the disposition follows behind it, cites this
 entry, and carries its own evidence.
 
-## 2026-08-16 — RULING: sessions may READ with `az vm run-command`, never MUTATE, and must DISCLOSE — recorded as ADVICE, not as a control
+## 2026-08-16 — RULING: sessions may READ with `az vm run-command`, never MUTATE, and must DISCLOSE — recorded as ADVICE, not as a control (OPERATOR-RULED)
+
+*Operator-ruled direction record, recorded at the operator's instruction.* The wording — sessions may
+READ, never MUTATE, and must DISCLOSE — is the operator's, as is the ruling that it be recorded as
+advice rather than built as a control. The measurements below were gathered to support that decision,
+not to make it; this entry is not a machine auto-choose resolution and is not stamped as one.
 
 **THE RULING.** A session may use `az vm run-command` for READ-ONLY inspection of the fleet host, must
 DISCLOSE every such use in its report, and must never use it to mutate. It is not authorised for any
