@@ -4,6 +4,9 @@ import {
   globsIntersect,
   partitionByFileOverlap,
   serializedLedgerPayload,
+  rareOverlapWarnings,
+  declarationCountsByPath,
+  DEFAULT_OVERLAP_WARNING_POLICY,
 } from "../src/lib/dispatch-overlap.js";
 import type { Task } from "../src/lib/plan.js";
 
@@ -154,4 +157,90 @@ test("globsIntersect: two disjoint wildcard globs over the same directory still 
   // "*.ts" and "drain.*" both admit "drain.ts" — the fail-closed bias for wildcard
   // comparisons this module documents (over-approximate rather than under-detect).
   assert.equal(globsIntersect("src/lib/*.ts", "src/lib/drain.*"), true);
+});
+
+// ── W1-T533: rarity-weighted overlap warning (advisory only) ───────────────
+//
+// The measured distribution the whole feature is sized against (task
+// rationale (4)/(3)): src/lib/open-prs-rest.ts is declared by 6 of 277 shards
+// (2%) — the path four concurrent PRs actually converged on. src/run-task.ts
+// is declared by 103 of 277 shards (37%) — the hub raw overlap would flag
+// uselessly. Both counts recur across the tests below.
+
+test("W1-T533: an overlap on a rare path is reported", () => {
+  const counts = new Map([["src/lib/open-prs-rest.ts", 6]]);
+  const totalShardCount = 277; // 6/277 ≈ 2%
+  const candidate = task({ id: "W1-NEW", files: ["src/lib/open-prs-rest.ts", "src/lib/unrelated.ts"] });
+  const openPr = { id: "1930", files: ["src/lib/open-prs-rest.ts"] };
+
+  const warnings = rareOverlapWarnings(candidate, [openPr], counts, totalShardCount);
+
+  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0].withPr, "1930");
+  assert.equal(warnings[0].rarestPath, "src/lib/open-prs-rest.ts");
+  assert.equal(warnings[0].declaredByCount, 6);
+  assert.equal(warnings[0].totalShardCount, 277);
+});
+
+test("W1-T533: an overlap on a hub path alone is not reported", () => {
+  const counts = new Map([["src/run-task.ts", 103]]);
+  const totalShardCount = 277; // 103/277 ≈ 37%
+  const candidate = task({ id: "W1-NEW", files: ["src/run-task.ts"] });
+  const openPr = { id: "1930", files: ["src/run-task.ts"] };
+
+  const warnings = rareOverlapWarnings(candidate, [openPr], counts, totalShardCount);
+
+  assert.deepEqual(warnings, []);
+});
+
+test("W1-T533: the rare-overlap report refuses nothing", () => {
+  const counts = new Map([["src/lib/open-prs-rest.ts", 6]]);
+  const totalShardCount = 277;
+  const candidate = task({ id: "W1-NEW", files: ["src/lib/open-prs-rest.ts"] });
+  const openPr = { id: "1930", files: ["src/lib/open-prs-rest.ts"] };
+
+  // The warning fires...
+  const warnings = rareOverlapWarnings(candidate, [openPr], counts, totalShardCount);
+  assert.equal(warnings.length, 1);
+
+  // ...yet the SAME candidate still dispatches on its own: nothing in this
+  // module wires the warning into partitionByFileOverlap's decision, and a
+  // solitary candidate has no in-pass collision to serialize against.
+  const partition = partitionByFileOverlap([candidate]);
+  assert.deepEqual(partition.dispatch.map((t) => t.id), ["W1-NEW"]);
+  assert.deepEqual(partition.serialized, []);
+});
+
+test("W1-T533: the rarity threshold is policy data", () => {
+  const counts = new Map([["src/lib/medium.ts", 40]]); // 40/277 ≈ 14%
+  const totalShardCount = 277;
+  const candidate = task({ id: "W1-NEW", files: ["src/lib/medium.ts"] });
+  const openPr = { id: "1", files: ["src/lib/medium.ts"] };
+
+  // The default policy (5% ceiling) does not consider 14% rare.
+  assert.deepEqual(rareOverlapWarnings(candidate, [openPr], counts, totalShardCount), []);
+
+  // A fixture-supplied policy object moves the threshold with zero code
+  // change — the same discipline SweepPolicy already follows.
+  const loosePolicy = { rareDeclarationRatioCeiling: 0.2 };
+  const warnings = rareOverlapWarnings(candidate, [openPr], counts, totalShardCount, loosePolicy);
+  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0].rarestPath, "src/lib/medium.ts");
+});
+
+test("W1-T533: declarationCountsByPath counts each declaring task once per path", () => {
+  const a = task({ id: "W1-A", files: ["src/lib/x.ts", "src/lib/x.ts", "src/lib/y.ts"] });
+  const b = task({ id: "W1-B", files: ["src/lib/x.ts"] });
+  const c = task({ id: "W1-C" }); // undeclared files: — contributes nothing
+  const counts = declarationCountsByPath([a, b, c]);
+
+  assert.equal(counts.get("src/lib/x.ts"), 2);
+  assert.equal(counts.get("src/lib/y.ts"), 1);
+  assert.equal(counts.has("src/lib/z.ts"), false);
+});
+
+test("W1-T533: DEFAULT_OVERLAP_WARNING_POLICY clears the 2% instance and excludes the 37% hub", () => {
+  const ceiling = DEFAULT_OVERLAP_WARNING_POLICY.rareDeclarationRatioCeiling;
+  assert.ok(6 / 277 <= ceiling, "the measured rare instance must clear the default ceiling");
+  assert.ok(103 / 277 > ceiling, "the measured hub must NOT clear the default ceiling");
 });
