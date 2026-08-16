@@ -41,6 +41,7 @@ import {
   laneDispatchBudget,
   type MergedSet,
   type NextRunnableOpts,
+  runBranchTaskIds,
   type OpenPrCheck,
   tallyDispatchFilters,
   type IdleReasonBucket,
@@ -801,6 +802,14 @@ export interface DaemonDeps {
    * dispatch behaves exactly as before this breaker existed.
    */
   isCircuitTripped?: (taskId: string) => boolean;
+  /**
+   * W1-T916 — the same supplier `DrainDeps` takes, for the daemon's own dispatch path. Raw
+   * `git ls-remote --heads origin 'run-*'` output, read ONCE PER TICK and parsed by
+   * `runBranchTaskIds` (drain.ts). Injected for the same reason it is there: this module reads its
+   * world through deps, and the raw-output shape makes one-sweep-per-tick the only form that
+   * type-checks. Optional — omitted, dispatch behaves exactly as before this existed.
+   */
+  readPushedRunBranches?: () => string;
   /**
    * WHAT THE BREAKER SAW for a task, supplied by the SAME memoised evaluation the
    * `isCircuitTripped`/`isIndeterminate` predicates answered from (run-task.ts's
@@ -2548,8 +2557,24 @@ export async function runDaemon(
     // `idleReasons`'s `DispatchFilterReason` tally (see drain.ts's doc) — collected here, per
     // tick, so the starvation census below can name it alongside `blocked`/`unmet-deps`.
     const circuitBrokenThisTick: string[] = [];
-    const dispatchOpts: NextRunnableOpts = {
+    // W1-T916 — ONE SWEEP PER TICK, resolved before the options object so the closure below is a
+      // set-membership test rather than a round trip per candidate.
+      const pushedRunBranches = deps.readPushedRunBranches
+        ? runBranchTaskIds(deps.readPushedRunBranches())
+        : undefined;
+      const dispatchOpts: NextRunnableOpts = {
       isOpenPr: deps.isOpenPr,
+      // W1-T916: the argument W1-T534 declared and nothing supplied — see DrainDeps'
+      // `readPushedRunBranches` for why the reader is injected and the parse hoisted.
+      ...(pushedRunBranches
+        ? {
+            hasPushedRunBranch: (id: string) => pushedRunBranches.has(id),
+            // Rides the EXISTING `dispatch.skipped` row with its own reason — no new step, and
+            // deliberately not `dispatch.stood_down`, which has three emitters and no reader.
+            onSkipRunBranch: (t: Task) =>
+              log("dispatch.skipped", { task: t.id, reason: "run-branch-already-pushed" }),
+          }
+        : {}),
       onFiltered: idleReasons.onFiltered,
       // IN-FLIGHT (W1-T80): a legible skip on console + ledger; the daemon
       // keeps polling rather than treating an open PR as a block.

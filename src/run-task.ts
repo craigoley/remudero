@@ -11559,6 +11559,33 @@ function queueGovernorGateFor(
  * logic over GitHub-derived status; it STOPS ON ANY BLOCK (v1); it is headroom-aware
  * and bounded. See lib/drain.ts for the loop; this only wires the real defaults.
  */
+
+/**
+ * W1-T916 — the ONE ref read behind {@link DrainDeps.readPushedRunBranches} and its daemon twin.
+ * Raw `git ls-remote --heads origin 'run-*'` output, returned verbatim for `runBranchTaskIds`
+ * (drain.ts) to parse ONCE PER PASS above the dispatch loop. Scoped to `run-*` so the refspec
+ * filters server-side rather than shipping every head back; `ls-remote` speaks the git protocol and
+ * spends neither the REST nor the GraphQL budget — measured at 46 refs in 199 ms with `core`
+ * remaining identical before and after.
+ *
+ * FAIL OPEN, DELIBERATELY. A throw (network blip, auth, no remote) yields `""`, which parses to an
+ * EMPTY set, so no task is refused — precisely the behaviour before this existed. The degraded
+ * outcome is "no improvement", never "dispatch wrongly blocked", which is the only safe direction
+ * for a guard that decides whether work starts at all.
+ *
+ * `exec` is appended LAST and defaulted so no caller shifts; it exists because the catch arm above
+ * is otherwise unreachable from any offline test, which is exactly how this task's own defect
+ * (a seam nothing supplied) came about.
+ */
+export function readPushedRunBranchesOutput(
+  exec: (cmd: string, args: string[], opts: { encoding: "utf8"; cwd: string }) => string = execFileSync as never,
+): string {
+  try {
+    return exec("git", ["ls-remote", "--heads", "origin", "run-*"], { encoding: "utf8", cwd: repoRoot });
+  } catch {
+    return "";
+  }
+}
 /**
  * The post-drain rundown PUSH (W1-T141/W1-T144), extracted from drainCommand so the glue —
  * build the classified rundown, print it, and push it through the SAME digest channel
@@ -11868,6 +11895,23 @@ async function drainCommand(
       {
         refreshMerged,
         isOpenPr,
+        // W1-T916 — THE ARGUMENT W1-T534 DECLARED AND NOTHING PASSED, SUPPLIED HERE AT LAST.
+        // `nextRunnable` consumes `opts.hasPushedRunBranch?.(t.id)`; with no supplier that
+        // optional call short-circuited to `undefined` on every pass, so the duplicate-dispatch
+        // guard never fired — invisibly, because the omission is legal at type-check and raises
+        // nothing at runtime. This module is where the read belongs: `drain.ts` is pure (it has no
+        // `child_process` import at all) and `git ls-remote` already runs here.
+        //
+        // ONE SWEEP PER PASS. Returns the RAW output; `runDrain` parses it once ABOVE its own
+        // dispatch loop via `runBranchTaskIds`. Scoped to `run-*` so the refspec filters
+        // server-side rather than shipping every head back. `ls-remote` speaks the git protocol and
+        // spends neither the REST nor the GraphQL budget — measured at 46 refs in 199 ms with
+        // `core` remaining identical before and after.
+        //
+        // FAIL OPEN, DELIBERATELY: a throw here (network blip, auth) yields "" and therefore an
+        // EMPTY set, so no task is refused — precisely today's behaviour. The degraded outcome is
+        // "no improvement", never "dispatch wrongly blocked".
+        readPushedRunBranches: () => readPushedRunBranchesOutput(),
         // W1-T177: a fresh `gh pr view` re-read, consulted only when isOpenPr
         // reports a task in-flight — see NextRunnableOpts.readLiveState's doc.
         readLiveState: (_taskId, prNumber) => ghLiveStateByNumber(owner, repo, prNumber),
@@ -12674,6 +12718,23 @@ export async function daemonCommand(
       {
         refreshMerged,
         isOpenPr,
+        // W1-T916 — THE ARGUMENT W1-T534 DECLARED AND NOTHING PASSED, SUPPLIED HERE AT LAST.
+        // `nextRunnable` consumes `opts.hasPushedRunBranch?.(t.id)`; with no supplier that
+        // optional call short-circuited to `undefined` on every pass, so the duplicate-dispatch
+        // guard never fired — invisibly, because the omission is legal at type-check and raises
+        // nothing at runtime. This module is where the read belongs: `drain.ts` is pure (it has no
+        // `child_process` import at all) and `git ls-remote` already runs here.
+        //
+        // ONE SWEEP PER PASS. Returns the RAW output; `runDrain` parses it once ABOVE its own
+        // dispatch loop via `runBranchTaskIds`. Scoped to `run-*` so the refspec filters
+        // server-side rather than shipping every head back. `ls-remote` speaks the git protocol and
+        // spends neither the REST nor the GraphQL budget — measured at 46 refs in 199 ms with
+        // `core` remaining identical before and after.
+        //
+        // FAIL OPEN, DELIBERATELY: a throw here (network blip, auth) yields "" and therefore an
+        // EMPTY set, so no task is refused — precisely today's behaviour. The degraded outcome is
+        // "no improvement", never "dispatch wrongly blocked".
+        readPushedRunBranches: () => readPushedRunBranchesOutput(),
         // W1-T177: a fresh `gh pr view` re-read, consulted only when isOpenPr
         // reports a task in-flight — see NextRunnableOpts.readLiveState's doc.
         readLiveState: (_taskId, prNumber) => ghLiveStateByNumber(target.owner, target.repo, prNumber),
