@@ -74,6 +74,10 @@ import type { RetroTriggerDecision } from "./retro.js";
 // only shapes the `sweepOrphanWorkers`/`sweepOrphans` injection points below,
 // the same discipline `RunResult`/`StatusProjection` above already follow.
 import type { OrphanSweepReport } from "./worker-containment.js";
+// Type-only (erased at build) — same discipline as OrphanSweepReport above.
+// `LandFeedbackResult` only shapes the `sweepFeedbackLanding` boot param and
+// `DaemonDeps.sweepFeedbackLanding` injection points below (W1-T530).
+import type { LandFeedbackResult } from "./feedback-landing.js";
 
 /**
  * Reason the scheduler loop returned — every terminal state is one of these.
@@ -1136,6 +1140,20 @@ export interface DaemonDeps {
    */
   sweepOrphans?: () => Promise<OrphanSweepReport> | OrphanSweepReport;
   /**
+   * W1-T530 FEEDBACK-LANDING SWEEP (ratifies P22, the same argument `sweepOrphans` above
+   * already applies to strays): the SAME `sweepFeedbackLanding` entry point
+   * (feedback-landing.ts) `daemonBoot`'s own `sweepFeedbackLanding` param below runs once at
+   * boot, wired here so it ALSO runs once per poll iteration — an entry captured while landing
+   * was unavailable (offline, no `gh`, `gh pr create` refused), or on a host that never
+   * captures again, is otherwise stranded off `origin/main` forever because `landFeedback`'s
+   * only caller is `captureFeedback`. Idempotent by contract (a pass over already-landed state
+   * pushes nothing — see `LandFeedbackResult.pushed`), so riding the daemon's own poll cadence
+   * is safe. Optional: omitted ⇒ the loop behaves exactly as before this sweep existed.
+   * Best-effort by the same contract as `sweep`/`sweepOrphans` above (own try/catch, logged,
+   * never halts the loop).
+   */
+  sweepFeedbackLanding?: () => Promise<LandFeedbackResult> | LandFeedbackResult;
+  /**
    * W1-T160: evaluate the retro cadence trigger this tick — fires on
    * merges-since-marker >= N OR days-since-marker >= D (policy data),
    * whichever crosses first (retro.ts's `evaluateRetroTrigger`, the pure
@@ -1562,6 +1580,18 @@ export function daemonBoot(
    * shifts. Omitted ⇒ the field is absent, exactly as before, and the supervisor fails eager.
    */
   bootHeadSha?: string,
+  /**
+   * W1-T530 part (ii): "the level-triggered feedback-landing backstop runs once here, at boot,
+   * mirroring `sweepOrphanWorkers` above" — run once here, logged either way as
+   * `daemon.feedback_landing_sweep` naming whether it pushed and how many files, so a
+   * pre-existing stranded entry (never seen by any capture in THIS process) is picked up the
+   * moment the daemon comes up, not only on its next per-poll pass. The real command wires
+   * `feedback-landing.ts`'s own `sweepFeedbackLanding`. Synchronous, like `sweepOrphanWorkers`
+   * above (`landFeedback`'s own mechanism never awaits — see that module's header). Appended
+   * LAST, after `bootHeadSha`, so no positional caller shifts. Omitted ⇒ no sweep at boot,
+   * behavior unchanged from before W1-T530.
+   */
+  sweepFeedbackLanding?: () => LandFeedbackResult,
 ): BootAssertion {
   const assertion = assertCleanBoot(env, allowApiKey);
   log("daemon.boot", {
@@ -1659,6 +1689,21 @@ export function daemonBoot(
       log("daemon.orphan_sweep", { killed: report.killed.length, left_alone: report.leftAlone.length });
     } catch (err) {
       log("daemon.orphan_sweep", { error: String((err as Error)?.message ?? err) });
+    }
+  }
+  // W1-T530 part (ii): the boot-time half of the feedback-landing sweep — see this param's own
+  // doc, above. A sweep failure is logged, never thrown onward — boot continues (T197: the
+  // daemon sleeps through problems, never dies over a `git`/`gh` hiccup).
+  if (sweepFeedbackLanding) {
+    try {
+      const result = sweepFeedbackLanding();
+      log("daemon.feedback_landing_sweep", {
+        landed: result.landed,
+        pushed: result.pushed ?? false,
+        file_count: result.files.length,
+      });
+    } catch (err) {
+      log("daemon.feedback_landing_sweep", { error: String((err as Error)?.message ?? err) });
     }
   }
   return assertion;
@@ -2127,6 +2172,26 @@ export async function runDaemon(
         log("daemon.orphan_sweep", { killed: report.killed.length, left_alone: report.leftAlone.length });
       } catch (e) {
         log("daemon.orphan_sweep.failed", { error: String((e as Error)?.message ?? e) });
+      }
+    }
+
+    // FEEDBACK-LANDING SWEEP (W1-T530 design part ii): runs alongside the orphan sweep above,
+    // on the SAME "once per iteration" cadence — daemon BOOT already runs it once (see
+    // `daemonBoot`'s own `sweepFeedbackLanding` param, above); this is the "each poll" half, so
+    // an entry captured (or a landing attempt that failed) BETWEEN polls — not only stranded
+    // before the last boot — is still found within one cycle. Best-effort by the same contract
+    // as `deps.sweepOrphans`: a `git`/`gh` hiccup costs one logged tick, never the daemon's
+    // liveness. Optional — omitted, the loop behaves exactly as before this sweep existed.
+    if (deps.sweepFeedbackLanding) {
+      try {
+        const result = await deps.sweepFeedbackLanding();
+        log("daemon.feedback_landing_sweep", {
+          landed: result.landed,
+          pushed: result.pushed ?? false,
+          file_count: result.files.length,
+        });
+      } catch (e) {
+        log("daemon.feedback_landing_sweep.failed", { error: String((e as Error)?.message ?? e) });
       }
     }
 
