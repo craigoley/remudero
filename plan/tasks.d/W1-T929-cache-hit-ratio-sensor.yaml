@@ -1,0 +1,94 @@
+- id: W1-T929
+  title: "THE CACHE-HIT RATIO IS LEDGERED BUT NEVER READ — `cache_read_input_tokens`/`cache_creation_input_tokens` land on every worker line and NOTHING derives a ratio from them, so §8A's stable-first/volatile-last ordering rule has a live instrument and no dial: derive cache_read/(cache_read+input+cache_creation) per run and per class and surface it in the daily digest and `rmd status`"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  rationale: |
+    FILED FROM fb-1785237559155-feef92 (2026-07-28, origin cli), item (1).
+    THE SENSOR'S INPUT ALREADY EXISTS — THIS IS NOT A LEDGER TASK. `src/lib/worker.ts` carries
+    `TokenUsage {input, output, cacheRead, cacheCreation}`, `cacheTokenLedgerFields` (which mirrors
+    the nested camelCase pair as FLAT snake_case `cache_read_input_tokens` /
+    `cache_creation_input_tokens`), and `workerLedgerFields` spreads both onto EVERY worker and
+    brain-plane call site. Verified at filing time by reading the source, not the plan.
+    WHAT IS MISSING IS EVERY CONSUMER. `summarize`/`DigestSummary` (src/lib/digest.ts) reduces the
+    window to `merged` / `blocked` / `escalations` / `costUsd` /
+    `verdictDowngradesSuppressed` and touches NO token field at all; `buildStatusBoard` /
+    `renderStatusBoardText` (src/lib/status-board.ts) render spend, counts and freshness and no
+    cache figure. Re-derive both before editing — if a ratio has appeared since, this task is moot
+    and should be closed rather than duplicated.
+    WHY IT MATTERS, IN THE PLAN'S OWN WORDS. MASTER-PLAN §8A's ORDERING RULE is explicitly staked
+    on this number: "caches key on EXACT PREFIX BYTES", cache reads price at ~1/10th of fresh input,
+    and the rule is "MEASURABLE, not a matter of opinion" BECAUSE the envelope carries these two
+    fields. Today that claim is unredeemed — the bytes are recorded and no surface reads them, so a
+    prompt-architecture regression that pushes a volatile block early and destroys reuse is
+    INVISIBLE to every operator surface. The dominant failure is silent and gradual: the ratio
+    falls, spend rises, and nothing names the cause.
+    DELIBERATELY NOT W1-T35. W1-T35 (queued) owns the ASSEMBLY ORDERING and the ledger COLUMNS;
+    the columns are already live in worker.ts. This task adds no column, changes no prompt
+    assembly, and edits neither worker.ts nor any prompt template — it is purely a DERIVATION over
+    lines already written plus two render sites. That separation is what lets the two dispatch
+    independently instead of serialising on worker.ts.
+  design: |
+    (i) ONE DERIVATION, TWO RENDERERS. The ratio is defined ONCE as an exported pure function in
+    `src/lib/digest.ts` — `cache_read / (cache_read + input + cache_creation)`, exactly the
+    feedback's formula — and `src/lib/status-board.ts` IMPORTS it rather than spelling a second
+    opinion. digest.ts already imports from status.ts, so the dependency direction is established;
+    two independent arithmetics for one ratio is the drift this repo has already paid for
+    (policy.yaml's "a surface documented to disagree with the code").
+    (ii) TWO GRAINS, BOTH ASKED FOR: PER RUN (grouped on run id) and PER CLASS (grouped on the
+    `taskClass` field `RunSummary`/`aggregateByClass` already carry). Per-class is the one that
+    detects a regression; per-run is what makes a single bad run legible.
+    (iii) AN ABSENT DENOMINATOR IS "UNKNOWN", NEVER 0.0. Lines predating the cache columns, and
+    brain-plane calls that report no tokens, must render as unknown WITH THE COVERAGE FRACTION
+    beside the figure — not silently averaged into a healthy-looking number. This is the repo's own
+    standing discipline, not a nicety: MASTER-PLAN's current baseline blacks out `avg turns` at 29%
+    coverage and prints "⚠ DO NOT USE" rather than a number, and board.ts already distinguishes
+    `liveSpendPending` from a defined `liveSpendUsd: 0`. A ratio computed over a partly-dark window
+    and printed bare is the same defect in a new column.
+    (iv) SOFT-COMPOSE THE DIGEST LINE, exactly as `DigestSummary.inbox` already does: when no line
+    in the window carries a cache field the digest OMITS the line entirely and renders byte-identical
+    to today. A window with no cache data must not grow a "(none)" placeholder.
+    (v) NO THRESHOLD, NO ALERT, NO GATE. This task REPORTS. It files no escalation, defers no
+    dispatch, and adds no policy row — "a falling ratio is a regression nobody sees" is answered by
+    making it visible. Anything that ACTS on the number is a separate, evidenced decision once
+    several cycles of readings exist.
+    (vi) EXPLICITLY NOT IN SCOPE: editing src/lib/worker.ts or any prompt template, adding or
+    renaming a ledger field, the §8A assembly-ordering change (W1-T35), and any console/HTML surface
+    (`rmd status` text + `--json` project the same model, which is the whole surface here).
+  acceptance:
+    - claim: "the ratio is cache_read/(cache_read+input+cache_creation), derived from ledger lines already written, exported once from digest.ts"
+      proof: "unit test: test/cache-hit-sensor.test.ts"
+    - claim: "the ratio is reported at BOTH grains — per run and per task class — over the same window"
+      proof: "unit test: test/cache-hit-sensor.test.ts"
+    - claim: "a window whose lines carry no cache fields renders UNKNOWN with its coverage fraction, never 0.0, and the digest omits the line entirely rather than printing a placeholder"
+      proof: "unit test: test/cache-hit-sensor.test.ts"
+    - claim: "`rmd status` renders the same figure the digest does by importing the one derivation, not a second arithmetic"
+      proof: "grep: cacheHitRatio( in src/lib/status-board.ts"
+  risk: high
+  origin: feedback#fb-1785237559155-feef92
+  plan_refs: ["§8A", "§9", "W1-T35", "W1-T253"]
+  files: [src/lib/digest.ts, src/lib/status-board.ts, test/cache-hit-sensor.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high is Rule 19's SPAN, not blast radius — `files:` crosses `src/lib` and `test/`, the
+    grade W1-T310's ruling established for any task carrying a src change plus its new test. The
+    blast radius argues DOWN: nothing here gates dispatch, spends, merges or writes a ledger field;
+    the worst failure is a wrong number on a report.
+    budget_usd 55 — one pure derivation and two render sites, close to W1-T907's 55.
+    THE TEST PATH IS DECLARED IN `files:` (W1-T310): every proof above names a path inside the
+    declared list, so the scope guard cannot refuse this run after the work is done.
+    NO depends_on. W1-T35 is queued and this task is correct in EITHER ordering: the columns it
+    reads are already live in worker.ts today, and if W1-T35 later changes prompt assembly the
+    ratio simply starts reading better — which is precisely the observation W1-T35 wants and
+    currently has no instrument for. Deliberately does NOT declare src/lib/worker.ts, so the two
+    can batch rather than serialise.
+    SIBLINGS FROM THE SAME FEEDBACK: W1-T930 (turn-efficiency sensor, retro.ts) and W1-T931
+    (cost-anomaly sentinel). W1-T931 also declares src/lib/status-board.ts and will therefore
+    SERIALISE behind or ahead of this one — that is the partitioner working correctly on a real
+    shared file, not a filing defect.
+    THE FEEDBACK'S FOURTH ASK (a Batch API lane) IS REFUSED, NOT DEFERRED — see the MASTER-PLAN §9
+    amendment this filing carries; it is a platform fact, not a preference.
