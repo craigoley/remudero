@@ -15,5 +15,6 @@ raw: "OPERATOR-CHECKOUT SYNC IS MANUAL TOIL — the W1-T79 auto-sync guard
   recipe the operator types twice is a spec."
 attachments: []
 origin: cli
-status: new
+status: proposed
 proposal_pr: null
+summary: null

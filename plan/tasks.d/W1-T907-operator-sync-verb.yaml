@@ -1,0 +1,119 @@
+- id: W1-T907
+  title: "THE SANCTIONED DEDUPE-THEN-PULL RECIPE HAS NO VERB — the operator hand-types it because the dirt that stalls `checkCliFreshness` is untracked copies of paths the incoming diff ALREADY carries, which is exactly the case W1-T446's intersect-only fix cannot unstick: give it an explicit, non-destructive `rmd sync` that discards only byte-identical dirt, preserves everything else aside with a named report, and ff-pulls"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  rationale: |
+    FILED FROM fb-1784856771241-14ea45 (2026-07-24, origin cli): the operator typed the same
+    dedupe-then-pull recipe FIVE times on 2026-07-23 alone, against the W1-T79 auto-sync refusal.
+    THE RECIPE IS NOT COVERED BY ANY QUEUED TASK, AND THE REASON IS A PATH FACT, not a preference.
+    W1-T446 (queued, verify:human) proposes to scope `checkCliFreshness`'s dirty check by
+    INTERSECTING dirty paths with `git diff --name-only HEAD..origin/main`, and its own design (iv)
+    states the byte-identical discard is "a strictly larger change", "not needed to fix the observed
+    incident", and must be "decided separately". THAT SEPARATE DECISION IS THIS FILING'S SUBJECT, and
+    the intersection alone provably does NOT help the recipe's population:
+      - an untracked `plan/feedback/<id>.yaml` is dirt precisely BECAUSE the landing bridge already
+        committed that same path on origin/main (W1-T243/#599), so the path IS in the incoming diff;
+      - the uncommitted `DECISIONS.md` auto-log is a TRACKED modification of a file origin/main also
+        advances (W1-T191/#966), so that path is in the incoming diff too.
+    Every path in the benign population therefore lands in the INTERSECTION and keeps refusing after
+    W1-T446 ships. Intersection fixes the `?? .claude/` class (a path the merge never writes); it does
+    not fix the operator's class (a path the merge writes with bytes the tree already has).
+    THE OTHER THREE DIRT SOURCES ARE ALREADY CLOSED OR HOMED and are NOT re-decided here:
+    runtime exhaust (`state/`, `plan/questions.ndjson`) is gitignored (W1-T256 block in `.gitignore`);
+    decision records land via the bridge (W1-T191/#966); pre-existing untracked feedback entries get a
+    level-triggered sweep in W1-T530 (queued, origin fb-1784826522421-1d57e9, the sibling this feedback
+    names). What NONE of them gives is the operator a way to CLEAR a checkout that already carries the
+    residue — a sweep that lands an entry on main does not remove the local untracked copy, it CREATES
+    the byte-identical duplicate this verb exists to retire.
+    WHY A VERB AND NOT A RELAXED GUARD. `checkCliFreshness` runs at EVERY CLI entry and its contract is
+    "never mutating uncommitted local state" (self-sync.ts) — W1-T445/#1662 tightened it for moving a
+    ref it should not have. An implicit deletion on every `rmd` invocation is the wrong direction and
+    is not what the feedback asks for: it asks for the recipe the operator already runs by hand,
+    invoked deliberately, once.
+    DATES ARE NOT QUOTED FORWARD: the five-repetitions count is 2026-07-23 in the operator's own
+    checkout; the W1-T446/W1-T530 statuses were read as `queued` at filing time.
+  design: |
+    (i) SCOPE — ONE NEW VERB, `rmd sync`, plus its module. THIS TASK MUST NOT EDIT
+    `src/lib/self-sync.ts`. The entry-point guard keeps its never-mutate contract (W1-T79, W1-T445),
+    W1-T446 remains the only task that may change its predicate, and keeping the file out of `files:`
+    is what lets both dispatch in the same batch instead of serialising.
+    (ii) THE THREE-WAY CLASSIFICATION IS THE WHOLE DESIGN. For every dirty path from `git status
+    --porcelain` (untracked included), compare local bytes against the origin/main blob with
+    `git hash-object` — the deployer already spells this as `sameAsIncoming`/`discardLocal` in
+    `src/lib/deployer.ts` and REUSING that predicate is preferred over a third spelling (W1-T446
+    design (ii) makes the same call about `treeFfSafe`; note the honest cost it names — `deployer.ts`
+    drags `node:fs`, `fleet-control` and `ledger` in, which is acceptable HERE because this is one
+    explicit verb and not the every-invocation entry path).
+      IDENTICAL   -> the file's bytes equal the origin/main blob at that path: remove it (untracked)
+                     or `checkout --` it (tracked). Provably lossless: the content is on main.
+      DIVERGENT   -> the path exists on origin/main with DIFFERENT bytes, or does not exist there at
+                     all: NEVER deleted, NEVER overwritten. Copy it aside, then clear the working
+                     copy only if the ff needs the path, and NAME it in the report.
+      BLOCKING    -> a local commit not an ancestor of origin/main (true divergence): refuse whole,
+                     mutate nothing, delete nothing, move no ref — same words the guard uses today.
+    (iii) PRESERVE-ASIDE IS A NAMED, DURABLE REPORT, not stdout. Write the preserved copies under a
+    timestamped directory in `state/` (gitignored by the W1-T256 block, so the rescue cannot itself
+    dirty the tree) and print the absolute path plus one line per preserved file. "Preserve
+    genuinely-local files aside with a named report (never destroy unlanded content)" is the
+    feedback's own acceptance and is the clause that makes the deletion safe to sanction.
+    (iv) THE DECISIONS.md CASE IS PRESERVE-AND-DIFF, per W1-T191. `DECISIONS.md` is tracked and gets
+    appended locally; records now reach main through the landing bridge (`plan/decisions.d` shards).
+    So: if the local file's appended records are ALL present on origin/main's copy, restore to origin
+    and say so; if ANY appended record is absent from origin, preserve the local file aside FIRST and
+    report the absent records by heading — losing an unlanded decision record is the exact failure
+    W1-T191 was built to end.
+    (v) `--dry-run` PRINTS THE IDENTICAL PLAN AND MUTATES NOTHING. This is the reviewable surface and
+    the falsifier for "never destroys": the classification must be computable and printable before a
+    single byte moves.
+    (vi) THE PULL IS FF-ONLY. After the tree is clean, `git merge --ff-only origin/main` (or an
+    equivalent `pull --ff-only`); never merge, never rebase, never reset --hard on the operator's
+    behalf. Off-`main` checkouts refuse exactly as W1-T445 established.
+    (vii) EXPLICITLY NOT IN SCOPE: changing `checkCliFreshness` (W1-T446 owns it), un-ignoring any
+    `.gitignore` entry, auto-invoking this verb from the guard, the daemon, or any launchd unit, and
+    the dedicated install-checkout structural fix (fb-1784913390318-1fcb63).
+    (viii) THE FALSIFIER MUST DRIVE REAL GIT REPOS (real origin + real clone), as
+    `test/self-sync.test.ts` already does, and MUST ASSERT THE REF ACTUALLY ADVANCED — a test that
+    only checks "did not refuse" passes for an implementation that cleans the tree and pulls nothing.
+  acceptance:
+    - claim: "an untracked file whose bytes equal the origin/main blob at that path is removed and the ff-pull then advances HEAD to origin/main"
+      proof: "unit test: test/operator-sync.test.ts"
+    - claim: "a dirty file with no origin/main counterpart, or one whose bytes differ from it, is never deleted — it is copied to the preserve directory and named in the report before anything else runs"
+      proof: "unit test: test/operator-sync.test.ts"
+    - claim: "a locally-appended DECISIONS.md is restored to origin only when every appended record is already on origin/main, and is otherwise preserved aside with the absent records named (W1-T191)"
+      proof: "unit test: test/operator-sync.test.ts"
+    - claim: "a local commit that is not an ancestor of origin/main refuses the whole verb: no file removed, no file moved, HEAD unchanged"
+      proof: "unit test: test/operator-sync.test.ts"
+    - claim: "--dry-run prints the same three-way classification and mutates nothing — no deletion, no preserve copy, HEAD unchanged"
+      proof: "unit test: test/operator-sync.test.ts"
+    - claim: "the verb is registered in the COMMANDS registry and actually dispatched, so generated help and docs/cli-reference.md carry it"
+      proof: "grep: runOperatorSync( in src/run-task.ts"
+  risk: high
+  origin: feedback#fb-1784856771241-14ea45
+  plan_refs: ["W1-T79", "W1-T191", "W1-T243", "W1-T446", "W1-T530"]
+  files: [src/run-task.ts, src/lib/operator-sync.ts, test/operator-sync.test.ts, docs/cli-reference.md]
+  status: queued
+  attempts: 0
+  note: |
+    verify:auto ON PURPOSE, and it is the deliberate contrast with W1-T446. That task is
+    verify:human because relaxing an AUTOMATIC safety guard is a policy call no session may make
+    alone. This is an EXPLICIT operator verb the operator asked for in writing, whose destructive
+    step is confined to bytes provably already on origin/main, and whose every other branch is
+    preserve-and-report — a contract a test can falsify end to end against real repos.
+    risk:high is Rule 19's SPAN, not blast radius: `subsystemsOf` reads `files:` plus acceptance
+    text and this set crosses `src/`, `src/lib`, `test/` and `docs/`. Raised up front.
+    `docs/cli-reference.md` IS DECLARED because it is GENERATED from the same COMMANDS registry
+    (`scripts/generate-cli-reference.mjs`, W1-T47) and is committed — adding a verb without
+    regenerating it leaves the checked-in file stale, and `test/help-registry.test.ts` pins the
+    registry<->dispatch coverage the sixth acceptance criterion greps for.
+    `src/lib/self-sync.ts` IS DELIBERATELY ABSENT from `files:` — see design (i). If the
+    implementation finds it genuinely needs a new export from that module, that is a scope-guard
+    flag and a re-file, not a silent edit: W1-T446 is queued against the same function.
+    NO depends_on: nothing here needs W1-T446, W1-T530 or the sweep to land first, and the verb is
+    correct in every ordering — if W1-T446 ships first the guard simply stops refusing on the
+    `?? .claude/` class, which this verb never had to handle anyway.
+    THE VERB NAME IS FREE: there is no `name: "sync"` entry in the COMMANDS registry and no
+    `rmd sync` line in docs/cli-reference.md, checked at filing.
