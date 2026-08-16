@@ -96,6 +96,15 @@ export interface LandFeedbackResult {
   prUrl?: string;
   /** Set only when landing was attempted but failed — never thrown, always swallowed by the caller. */
   error?: string;
+  /**
+   * True iff THIS call actually force-pushed the landing branch (new or changed content).
+   * False for every no-op path: nothing unlanded (`landed: false`), and the ALREADY-LANDED
+   * short-circuit in {@link finishLanding} (`landed: true` with the same content already on
+   * the branch, awaiting its gate). {@link sweepFeedbackLanding} uses this to tell an ACTING
+   * pass (worth a detailed ledger line) from a QUIET one (worth a summary at most) — see its
+   * own doc for why that split exists (W1-T530).
+   */
+  pushed?: boolean;
 }
 
 function defaultGit(root: string): GitExec {
@@ -237,6 +246,46 @@ function remoteBranchTree(git: GitExec, branch: string): string | null {
   }
 }
 
+/**
+ * Open (or reuse) the ONE shared PR for `kind.branch`'s CURRENT tip. Shared by both
+ * `finishLanding` branches below (W1-T530): the fresh-push path (content just changed) and the
+ * ALREADY-LANDED short-circuit (content unchanged but no PR was ever successfully opened for it
+ * — the "pushed fine, `gh pr create` failed" retry gap this split closes). Never pushes anything
+ * itself — the caller already decided whether a push was needed.
+ *
+ * ALREADY-OPEN IS A ONE-CALL NO-OP (`gh pr list` only, no create/merge): auto-merge is armed
+ * only in the SAME call that actually creates the PR, never re-armed on a later call that finds
+ * it already open. Without this, EVERY quiet pass over an already-open PR would re-issue
+ * `gh pr merge` — a repeated `gh` MUTATION call on a pass this task's own acceptance requires do
+ * nothing observable (criterion 3).
+ */
+function ensurePrOpen(kind: LandingKind, gh: GhExec, unlanded: string[]): { prUrl?: string; error?: string } {
+  const existing = findPendingLandingPr({ gh, branch: kind.branch });
+  if (existing) return { prUrl: existing };
+
+  const body = kind.prBody(unlanded);
+  let prUrl: string | undefined;
+  try {
+    assertLiveWriteAllowed("gh-pr-create", `opening the landing PR for ${kind.branch}`);
+    const out = gh(["pr", "create", "--base", "main", "--head", kind.branch, "--title", kind.prTitle, "--body", body]);
+    prUrl = out.match(/https:\/\/\S+\/pull\/\d+/)?.[0];
+  } catch (e) {
+    // Content is (or was already) on the branch — only opening the PR failed (no `gh`, no
+    // auth). A future call (or a human `gh pr create`) can pick the PR up from there.
+    return { error: `\`gh pr create\` failed for ${kind.branch}: ${String((e as Error)?.message ?? e)}` };
+  }
+  if (prUrl) {
+    try {
+      assertLiveWriteAllowed("gh-pr-merge", `arming auto-merge on ${prUrl}`);
+      gh(["pr", "merge", prUrl, "--auto", "--squash"]);
+    } catch {
+      // Best-effort — the ci + remudero-review gate decides; GitHub does the merging
+      // either way (Standing rule 3B), this call only arms auto-merge when it can.
+    }
+  }
+  return { prUrl };
+}
+
 function finishLanding(
   kind: LandingKind,
   git: GitExec,
@@ -267,8 +316,16 @@ function finishLanding(
   //
   // FAILS OPEN: an unreadable/absent remote ref (the first landing for this branch, or no
   // remote-tracking ref configured) falls through to the push, i.e. to the previous behaviour.
+  //
+  // W1-T530: unchanged content does not mean nothing is left to do — a PRIOR call may have
+  // pushed this exact tree and then had its OWN `gh pr create` fail (offline `gh`, no auth).
+  // Without retrying the PR here, that entry sits on the branch forever with no open PR and no
+  // further push ever fires again for IDENTICAL content — exactly the retry gap this task's
+  // level-triggered sweep exists to close. `ensurePrOpen` is a no-op besides one `gh pr list`
+  // when a PR is already open (the common case), so this costs nothing on a truly quiet pass.
   if (remoteBranchTree(git, kind.branch) === treeSha) {
-    return { landed: true, files: unlanded, prUrl: findPendingLandingPr({ gh, branch: kind.branch }) };
+    const { prUrl, error } = ensurePrOpen(kind, gh, unlanded);
+    return { landed: true, files: unlanded, prUrl, error, pushed: false };
   }
 
   const message = kind.commitMessage(unlanded);
@@ -297,32 +354,14 @@ function finishLanding(
   assertLiveWriteAllowed("git-push", `force-pushing the ${kind.branch} branch`);
   git(["push", "--force", "origin", `${commitSha}:refs/heads/${kind.branch}`]);
 
-  let prUrl = findPendingLandingPr({ gh, branch: kind.branch });
-  if (!prUrl) {
-    const body = kind.prBody(unlanded);
-    try {
-      const out = gh(["pr", "create", "--base", "main", "--head", kind.branch, "--title", kind.prTitle, "--body", body]);
-      prUrl = out.match(/https:\/\/\S+\/pull\/\d+/)?.[0];
-    } catch (e) {
-      // Pushed fine, opening the PR failed (no `gh`, no auth) — still landed on the
-      // branch; a future call (or a human `gh pr create`) can pick the PR up from there.
-      return {
-        landed: true,
-        files: unlanded,
-        error: `pushed to ${kind.branch} but \`gh pr create\` failed: ${String((e as Error)?.message ?? e)}`,
-      };
-    }
+  const { prUrl, error } = ensurePrOpen(kind, gh, unlanded);
+  if (error) {
+    // Pushed fine, opening the PR failed (no `gh`, no auth) — still landed on the branch; a
+    // future call (or a human `gh pr create`) can pick the PR up from there. `pushed: true`
+    // because the branch content itself DID move this call — see LandFeedbackResult.pushed.
+    return { landed: true, files: unlanded, error: `pushed to ${kind.branch} but ${error}`, pushed: true };
   }
-  if (prUrl) {
-    try {
-      assertLiveWriteAllowed("gh-pr-merge", `arming auto-merge on ${prUrl}`);
-      gh(["pr", "merge", prUrl, "--auto", "--squash"]);
-    } catch {
-      // Best-effort — the ci + remudero-review gate decides; GitHub does the merging
-      // either way (Standing rule 3B), this call only arms auto-merge when it can.
-    }
-  }
-  return { landed: true, files: unlanded, prUrl };
+  return { landed: true, files: unlanded, prUrl, pushed: true };
 }
 
 /**
@@ -380,6 +419,61 @@ function landPending(root: string, kind: LandingKind, opts: LandFeedbackOpts): L
 
 export function landFeedback(root: string, opts: LandFeedbackOpts = {}): LandFeedbackResult {
   return landPending(root, FEEDBACK_LANDING_KIND, opts);
+}
+
+export interface SweepFeedbackLandingOpts extends LandFeedbackOpts {
+  /**
+   * One ledger line per call — see this function's own doc for the acting/quiet split.
+   * Optional: omitted, no line is emitted (the caller can still inspect the returned
+   * {@link LandFeedbackResult} directly, e.g. a one-off `rmd feedback land`).
+   */
+  log?: (step: string, extra?: Record<string, unknown>) => void;
+}
+
+/**
+ * THE LEVEL-TRIGGERED BACKSTOP OVER {@link landFeedback} (W1-T530, ratifies P22 the same way
+ * `sweep.credit_backfill` already did for merge credit). `landFeedback` is the bridge's
+ * mechanism and it is already correct and idempotent (see its own doc); the ONE thing missing
+ * is a caller that runs it when no capture is happening at all — `captureFeedback` (feedback.ts)
+ * is its only call site, so an entry captured while landing was unavailable (offline, no `gh`,
+ * `gh pr create` refused — all swallowed by contract) or on a host that never captures again is
+ * stranded off `origin/main` forever, and `rmd triage` refuses it as not-on-origin because it
+ * deliberately reads from a fresh origin/main worktree, never `root`.
+ *
+ * A THIN WRAPPER, NOT A REWRITE: this re-runs the exact same whole-inbox scan/reconcile
+ * `landFeedback` already performs — nothing about the scratch-index discipline (W1-T60), the
+ * rebuild-from-current-origin/main force-push, or the shared `feedback-landing` branch/PR
+ * changes. Calling it twice over unchanged state is safe by the SAME idempotence
+ * `findPendingLandingPr` + the tree-compare short-circuit in {@link finishLanding} already give
+ * `landFeedback` — see {@link LandFeedbackResult.pushed}. Best-effort like every other rung
+ * beside it (`sweep`/`sweepOrphans`/`alertPoll`, daemon.ts): a throw here never reaches the
+ * caller, resolving instead to `landFeedback`'s own `{ landed: false, files: [], error }`.
+ *
+ * OBSERVABILITY IS THE ACTING/QUIET SPLIT `sweep.credit_backfill` already uses (sweep.ts): a
+ * pass that actually force-pushed new/changed content (`pushed: true`) names the files landed
+ * and the PR url — that is the one line worth reading. A pass that pushed nothing — nothing
+ * unlanded at all, OR the same content already sitting on the branch awaiting its gate — logs a
+ * count-only summary instead, so the daemon's own poll cadence (as low as tens of seconds)
+ * cannot flood the ledger with a repeated file list for content that has not changed since the
+ * last time this ran.
+ */
+export function sweepFeedbackLanding(root: string, opts: SweepFeedbackLandingOpts = {}): LandFeedbackResult {
+  const { log, ...landOpts } = opts;
+  const result = landFeedback(root, landOpts);
+  if (log) {
+    if (result.pushed) {
+      log("feedback.landing_sweep", {
+        pushed: true,
+        landed: result.landed,
+        files: result.files,
+        pr_url: result.prUrl,
+        error: result.error,
+      });
+    } else {
+      log("feedback.landing_sweep", { pushed: false, landed: result.landed, file_count: result.files.length });
+    }
+  }
+  return result;
 }
 
 export interface LandContentInput {
