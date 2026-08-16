@@ -490,21 +490,16 @@ forensic detail, so the narrative does not need to live here.
   mechanism above replaces it)*
 - **(b) THE `grep` IN THIS HARNESS IS A ugrep WRAPPER WITH `-I` (ignore-binary) INJECTED, so a file
   holding ONE NUL byte is skipped entirely — no output, exit 1, indistinguishable from real
-  absence.** THE POPULATION IS NOW ZERO AND A GATE HOLDS IT THERE — W1-T438/#1664 applied the
-  durable fix (write the separator as the `\0` ESCAPE, byte-identical: same string, same length,
-  same sha256), and `test/no-raw-nul.test.ts` walks `git ls-files`, reads bytes, and fails naming
-  path@offset if a raw NUL returns. So the flag-every-session era is over for TRACKED sources.
-  **WHAT REMAINS TRUE, AND IS THE REASON THIS CLAUSE SURVIVES:** the tool is still blind, so any
-  UNTRACKED or newly-added file the gate has not seen yet reads as absent. MEASURED while it was
-  live: `grep -rl criterionKey src/` returned EMPTY while `grep -arl` returned the file. **BARE `rg`
-  IS BLIND THE SAME WAY** (`rg -l` EMPTY, `rg -la` fine), so "use grep -a or rg" is NOT the rule —
-  `rg` alone is unsafe. `/usr/bin/grep` is unaffected, which is why it went unnoticed for months: a
-  human at a terminal never sees it. Use `grep -ar`, `rg -la` or `git grep` for ANY sweep that
-  decides a `files:` list, a violation count or a scope audit. **NEVER TRUST A COUNT HERE — RUN THE
-  QUERY:** `git ls-files -z | xargs -0 perl -0777 -ne 'print "$ARGV\n" if /\0/'` — a carried count
-  goes stale the moment the set changes. `git grep --cached -I -l ''` is NOT a substitute: git
-  sniffs only the first 8000 bytes, and the two files that mattered carried theirs at 51546 and 8609.
-  *(2026-08-11; the count retired and the population emptied 2026-08-12)*
+  absence.** A GATE NOW HOLDS THE TRACKED POPULATION AT ZERO (W1-T438/#1664; `test/no-raw-nul.test.ts`
+  walks `git ls-files` and fails naming path@offset), so this is no longer a flag-every-session
+  hazard for tracked sources. **WHAT SURVIVES: the tool is still blind**, so any UNTRACKED or
+  newly-added file the gate has not seen reads as absent, and **BARE `rg` IS BLIND THE SAME WAY**
+  (`rg -l` empty, `rg -la` fine) — "use grep -a or rg" is NOT the rule. `/usr/bin/grep` is
+  unaffected, which is why it hid for months. Use `grep -ar`, `rg -la` or `git grep` for ANY sweep
+  deciding a `files:` list, a violation count or a scope audit. Never carry a count; run
+  `git ls-files -z | xargs -0 perl -0777 -ne 'print "$ARGV\n" if /\0/'`. `git grep --cached -I -l ''`
+  is NOT a substitute — git sniffs only the first 8000 bytes. *(2026-08-11; folded 2026-08-16)*
+
 - **(c) A GLOB THAT NAMES ONE FILE FORM ANSWERS FROM THE OTHER WITHOUT SAYING SO.** The ledger
   union's `.gz`-only glob returned **0 hits for a pattern with 3 real hits** while its positive
   control read 257k lines — because the control proved the `.gz` half readable and said nothing
@@ -551,6 +546,13 @@ forensic detail, so the narrative does not need to live here.
   and a retry reading 0 traced to `cmd 2>&1 > f`, which sends stderr to the TERMINAL while this verb
   puts violations on stderr and the summary on stdout. Use `> out 2> err`.
   *(2026-08-14, both directions; the capture half 2026-08-15)*
+
+- **(g) A CHECK THAT IS ABSENT IS NOT A CHECK THAT PASSED — A ROLLUP SHOWS NEITHER.** Asking whether
+  a red was base-caused or in-diff, a sweep read `success` for a required check on three sibling PRs
+  and concluded the fault was in the diff. Those heads PREDATED the check's introduction, so it had
+  never run on them: absence, not agreement. `baseCausedCheckName` (`src/lib/sweep.ts`) needs the
+  check failing on EVERY open PR, so one older head silently refutes a real base outage. Restrict
+  the comparison to heads built after the check first appeared. *(2026-08-16, #1919)*
 
 ## Operating this host
 
