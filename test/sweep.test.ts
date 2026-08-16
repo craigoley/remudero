@@ -2295,8 +2295,16 @@ test("runSweep: no postReview dep wired -> ledgered stand-down, no crash, no esc
 //    OTHER post-review-eligible PR queued behind it in the SAME restricted-light-sweep tick.
 //    `runSweepLightPass` fires one `runSweep` call PER open PR, concurrently, so this file's
 //    #584 fixture PR is never starved behind a slower sibling in the same pass again.
+//
+//    W1-T526 caps `post-review` admission at ONE PR per pass (see test/sweep-review-admission
+//    .test.ts for that rule's own acceptance fixtures) — the two tests below now prove the
+//    CONCURRENT-FAN-OUT property this section is actually about using a DIFFERENT disposition
+//    (`blocked-fixable`) that W1-T526 leaves untouched (design (i): every disposition other
+//    than post-review is unchanged), so they stay a regression lock for the #707-adjacent
+//    stall without also re-asserting the now-superseded "every eligible PR reviews every pass"
+//    behavior.
 
-test("runSweepLightPass: fires runSweep once PER open PR, CONCURRENTLY — a slow action for one PR never blocks another PR's action from completing (the #707-adjacent stall this closes)", async () => {
+test("runSweepLightPass: fires runSweep once PER open PR, CONCURRENTLY — a slow action for one PR never blocks another PR's own action from completing (the #707-adjacent stall this closes)", async () => {
   const lp = ledgerPath();
   let releaseSlow: (() => void) | undefined;
   const slowGate = new Promise<void>((resolve) => {
@@ -2306,21 +2314,33 @@ test("runSweepLightPass: fires runSweep once PER open PR, CONCURRENTLY — a slo
   const deps = fakeDeps({
     ledgerPath: lp,
     postReview: async (p) => {
-      if (p.prNumber === 584) await slowGate; // PR 584's "review" never resolves until released
+      await slowGate; // the ONE admitted PR's "review" never resolves until released
+      order.push(p.prNumber);
+    },
+    dispatchFix: (p) => {
       order.push(p.prNumber);
     },
   });
-  const slow = ungatedGreenPr(); // prNumber 584, the default fixture
-  const fast = ungatedGreenPr({ prNumber: 585, prUrl: "url/585", taskId: "W1-T585", headSha: "bbbb222" });
+  // `slow` (584) is the only post-review-eligible PR here, so W1-T526 admits it into the review
+  // lane above (gated on `slowGate`). `fast` (11) derives a DIFFERENT disposition
+  // (blocked-fixable) this task leaves untouched — its own dispatch must still fire
+  // concurrently, unblocked by the slow review, exactly as W1-T463 fixed.
+  const slow = ungatedGreenPr(); // prNumber 584
+  const fast = blockedFixablePr(); // prNumber 11
   const pending = runSweepLightPass([slow, fast], deps, DEFAULT_SWEEP_POLICY);
-  // Flush pending microtasks WITHOUT ever releasing the slow gate. Under the pre-fix shape
-  // (one `runSweep(openPrs, ...)` call over the whole array) PR 585 could never be reached —
+  // Flush pending microtasks WITHOUT ever releasing the slow gate. Under the pre-W1-T463 shape
+  // (one `runSweep(openPrs, ...)` call over the whole array) PR 11 could never be reached —
   // let alone recorded here — until PR 584's gate released; runSweepLightPass reaches it anyway.
   await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(order, [585], "the fast PR's action completed while the slow PR's was still in flight");
-  releaseSlow?.();
+  try {
+    assert.deepEqual(order, [11], "the fast PR's fix dispatch completed while the slow PR's review was still in flight");
+  } finally {
+    // Always release, even if the assertion above throws — an unreleased gate would leave this
+    // PR's review key claimed in the module-level mutex for the rest of THIS file's test run.
+    releaseSlow?.();
+  }
   await pending;
-  assert.deepEqual(order, [585, 584], "the slow PR's action still completes once released");
+  assert.deepEqual(order, [11, 584], "the slow PR's review still completes once released");
 });
 
 test("runSweepLightPass: each PR still gets its own dedup/disposition/ledger line — the SAME per-PR path runSweep has always used, no PR shared across the concurrent calls", async () => {
@@ -2333,21 +2353,32 @@ test("runSweepLightPass: each PR still gets its own dedup/disposition/ledger lin
       appendLedger(lp, { run_id: "SWEEP-1", task_id: p.taskId ?? "", step: "review.posted", head_sha: p.headSha, state: "success" });
     },
   });
-  const a = ungatedGreenPr({ headSha: "aaaa584" }); // prNumber 584, taskId W1-T584
-  const b = ungatedGreenPr({ prNumber: 585, prUrl: "url/585", taskId: "W1-T585", headSha: "bbbb585" });
+  // Both derive `post-review`; `a` carries the OLDER head, so W1-T526 admits it and `b` stands
+  // down — but BOTH still get their own dedup/disposition/ledger line, never a merged/lossy
+  // aggregate, which is this test's own point.
+  const a = ungatedGreenPr({ headSha: "aaaa584", lastActivityAt: "2026-07-15T00:00:00Z" }); // prNumber 584, taskId W1-T584
+  const b = ungatedGreenPr({ prNumber: 585, prUrl: "url/585", taskId: "W1-T585", headSha: "bbbb585", lastActivityAt: "2026-07-16T00:00:00Z" });
   const summaries = await runSweepLightPass([a, b], deps, DEFAULT_SWEEP_POLICY);
-  assert.deepEqual([...calls].sort(), [584, 585], "both PRs' post-review actions fired");
-  assert.equal(summaries.length, 2, "one summary per PR — no merged/lossy aggregate");
+  assert.deepEqual(calls, [584], "only the ONE admitted (oldest-head) PR's post-review action fired this pass");
+  assert.equal(summaries.length, 2, "one summary per PR — no merged/lossy aggregate, even for the standing-down PR");
   const disposed = readLedgerLines(lp).filter((l) => l.step === "sweep.disposed");
   assert.equal(disposed.length, 2, "each PR still writes its own sweep.disposed line");
-  assert.ok(disposed.every((l) => l.acted === true));
+  const admittedLine = disposed.find((l) => l.pr_number === 584);
+  const standingDownLine = disposed.find((l) => l.pr_number === 585);
+  assert.equal(admittedLine?.acted, true, "the admitted PR's review really ran");
+  assert.equal(standingDownLine?.acted, false, "the non-admitted PR stood down rather than sharing the lane");
 
-  // A second pass sees BOTH heads' posted verdicts and dedups both — proves the concurrent
-  // calls did not corrupt or drop either PR's own dedup key.
+  // A second pass over the SAME (stale) snapshot dedups the admitted PR's now-posted verdict —
+  // proving the concurrent per-PR calls did not corrupt or drop its own dedup key.
   const calls2: number[] = [];
-  const deps2 = fakeDeps({ ledgerPath: lp, postReview: (p) => { calls2.push(p.prNumber); } });
+  const deps2 = fakeDeps({
+    ledgerPath: lp,
+    postReview: (p) => {
+      calls2.push(p.prNumber);
+    },
+  });
   await runSweepLightPass([a, b], deps2, DEFAULT_SWEEP_POLICY);
-  assert.deepEqual(calls2, [], "both heads already carry a posted verdict — neither re-fires");
+  assert.deepEqual(calls2, [], "584 is already reviewed (deduped) and its fixture is still the oldest head, so it is chosen again but does nothing; 585 stands down exactly as before");
 });
 
 // ── W1-T176: a required check with ZERO check runs is DETERMINISTIC-ACTION, ──
