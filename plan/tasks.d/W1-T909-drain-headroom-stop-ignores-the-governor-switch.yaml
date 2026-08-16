@@ -1,0 +1,114 @@
+- id: W1-T909
+  title: "the governor switch does not reach the drain: with `headroom.enabled: false` the daemon dispatches at 99% but `rmd drain` still returns headroom_exhausted at the 95% ceiling — the at/near-limit stop is the one headroom gate never put behind the flag, in BOTH runDrain loops"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: |
+    OPERATOR RULING fb-1784894405468-a4153e (2026-07-24), clause 1 and clause 5, with the DEFAULT clause
+    superseded 2026-07-28 (DECISIONS.md) and the mechanism kept verbatim: ONE switch gates ALL headroom-based
+    dispatch gating, and the falsifier is that with `headroom.enabled=false` NO headroom condition pauses
+    dispatch. THE DAEMON HALF SHIPPED AND IS NOT REOPENED HERE. THE DRAIN HALF DID NOT.
+    MEASURED FROM SOURCE IN THIS TREE, not remembered:
+    (1) `runDrain`'s single-lane loop (src/lib/drain.ts) reads usage, computes
+        `over = snap ? headroomExhausted(snap, opts.headroomLimitPct) : null`, and on `over` logs
+        `drain.headroom` and RETURNS `summary("headroom_exhausted", ...)` — with NO consultation of
+        `headroomEnabled`, which is resolved one screen above it. `runDrainLanes`' pass loop carries the same
+        block, same order, same omission. Only the branch BELOW it — W1-T290's unreadable-degraded ceiling —
+        is gated, and it is gated correctly.
+    (2) The omission is DELIBERATE AND WRITTEN DOWN, which is why it needs a task rather than a bug report:
+        `DrainOpts.headroomEnabled`'s own doc says it "Gates ONLY the new unreadable-degraded ceiling below
+        (`headroom_degraded`) — the existing at/near-limit `headroom_exhausted` stop is unconditional,
+        unchanged by this option, on both loops", and W1-T290 fenced that stop out of scope as "already
+        correct at both sites". Correct about the UNREADABLE distinction; silent about the FLAG, which is the
+        gap this task closes.
+    (3) THE SWITCH IS ALREADY WIRED AT THE CALL SITE — nothing needs plumbing. `drainCommand` (src/run-task.ts)
+        sets `opts.headroomEnabled = resolveHeadroomEnabled(config)`, and this host carries
+        `headroom.enabled: false` explicitly in ~/.config/remudero/config.json (DECISIONS.md, 2026-07-28). The
+        posture arrives at the loop and the at-limit branch ignores it.
+    (4) `opts.headroomLimitPct` is unset by `drainCommand`, so the stop fires at the HEADROOM_LIMIT_PCT=95
+        default — i.e. exactly the 95% ceiling the operator ruled against holding, on a host that opted out.
+    (5) THE PATH IS LIVE, NOT VESTIGIAL, AND IT IS NOT THE DAEMON'S. `runDaemon` has its own headroom block and
+        never calls `runDrain`; `rmd drain` is the one-shot dispatch path, and W1-T417 records that a container
+        "runs one-shot drains with no daemon". So on the deployment shape with no daemon at all, the ONLY
+        headroom gate in the process is the one that ignores the switch.
+    NOT A REOPENING OF A SETTLED QUESTION: the ruling is settled and this task changes none of it. It is the
+    unbuilt remainder of clause 1, and it is the reason clause 5's falsifier ("no headroom condition pauses
+    dispatch") is provable today only on the daemon.
+  design: |
+    PUT THE AT/NEAR-LIMIT STOP BEHIND THE SAME RESOLVED POSTURE THE UNREADABLE BRANCH ALREADY READS, in BOTH
+    loops (`runDrain`'s single-lane loop and `runDrainLanes`' pass loop) — one switch, never a second, and
+    never one loop only: a fix that lands in one is the latent fail-open W1-T290 named when it ported the
+    ceiling to both.
+    DISABLED — TELEMETRY WITHOUT ENFORCEMENT (ruling clause 2, adopted from the daemon's shape). A readable
+    at/over-ceiling reading still LOGS its `drain.headroom` line, now carrying `enforced: false` and the
+    over/under fact, and the loop CONTINUES to dispatch. Copy the daemon's line shape rather than inventing a
+    second one — `daemon.headroom` already emits `enforced`, `over_ceiling` and the disabled-governor note, and
+    test/daemon-headroom-symmetry.test.ts exists because the enforcing/disabled asymmetry in that same block
+    once emitted NOTHING in the posture the operator was actually in. Do not reproduce that here: the reading
+    is logged in EVERY posture on a good read, or the console's burn number silently freezes.
+    ENABLED — UNCHANGED, AND THAT IS A REGRESSION LOCK, NOT A COURTESY. An at/over-ceiling reading still ends
+    the drain with `headroom_exhausted` and the same summary detail, so a host that never opted out sees
+    byte-identical behaviour. `DrainOpts.headroomEnabled` keeps defaulting to `true`, so every existing caller
+    and every existing test is unchanged; only an EXPLICIT opt-out moves.
+    UPDATE THE FIELD DOC WITH THE CODE. `DrainOpts.headroomEnabled`'s comment currently states the opposite of
+    what will then be true ("the existing at/near-limit `headroom_exhausted` stop is unconditional"); leaving
+    it is how the next reader re-derives the wrong contract. `StopReason`'s `headroom_exhausted` doc should say
+    it is reachable only while the governor is enabled.
+    EXPLICITLY NOT IN SCOPE: the unreadable-degraded ceiling and its gating (W1-T290, already correct);
+    `readUsageSnapshot`'s no-signal polarity (ratified, W1-T267); the daemon's own block (shipped, W1-T259 —
+    do not re-litigate or "harmonise" it); the resolver `resolveHeadroomEnabled` and the `headroom.enabled`
+    policy row (both shipped); `headroomLimitPct` / the curve values (policy data, plan/policy.yaml); and
+    anything about container usage sources (W1-T417's ruling, parked).
+    UNCHANGED BY THIS TASK (ruling clause 4, restated so nobody widens it): imputed ledger dollars gate
+    NOTHING, and the per-run turn limit plus the `budget_usd` tripwire remain the runaway guards — this task
+    removes a throttle on an opted-out host, it does not remove a runaway guard.
+    VERIFY FROM SOURCE before editing (distrust this record): both loops' headroom blocks, the `headroomEnabled`
+    resolution at each loop head, `drainCommand`'s `opts.headroomEnabled` assignment, and the daemon's
+    `daemon.headroom` line shape.
+  acceptance:
+    - claim: "governor DISABLED + a readable at/over-ceiling window: runDrain DISPATCHES instead of returning headroom_exhausted — the a4153e clause-5 falsifier on the drain path"
+      proof: "unit test: test/drain-headroom-governor.test.ts"
+    - claim: "the multi-lane pass loop honours the same switch — both loops, never one, so --lanes is not a fail-open bypass"
+      proof: "unit test: test/drain-headroom-governor.test.ts"
+    - claim: "governor DISABLED + a good read: the reading is still LEDGERED with enforced:false (telemetry without enforcement, ruling clause 2) rather than going silent"
+      proof: "unit test: test/drain-headroom-governor.test.ts"
+    - claim: "governor ENABLED (the default, and every unconfigured caller): an at/over-ceiling reading still stops the drain headroom_exhausted exactly as today — the regression lock"
+      proof: "unit test: test/drain-headroom-governor.test.ts"
+  origin: feedback#fb-1784894405468-a4153e
+  plan_refs: ["W1-T259", "W1-T249", "W1-T290", "W1-T197", "P34"]
+  files: [src/lib/drain.ts, test/drain-headroom-governor.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    WHY A NEW TASK AND NOT THE AMENDMENT THE RULING ASKED FOR. Clause 5 says "W1-T249's acceptance gains the
+    flag criterion". W1-T249 HAS SINCE SHIPPED — test/headroom-reserve.test.ts opens "These four tests are this
+    task's own named acceptance proof", and `escalateHeadroomReserve` is wired in src/run-task.ts — and
+    `postMergeAmendmentViolations` (src/lib/task-linter.ts, W1-T180) blocks amending a merged task's criteria.
+    That is exactly the W1-T264 precedent recorded in DECISIONS.md (a residual of a merged task filed as its
+    own shard rather than appended to it). So the clause-5 criterion is CARRIED HERE, against the site where it
+    is actually false, instead of being written into a record no worker will ever run again.
+    WHAT IS ALREADY DONE — DO NOT REBUILD IT. The flag itself (config `headroom.enabled` + env
+    `RMD_HEADROOM_ENABLED` via `resolveHeadroomEnabled`), the daemon's telemetry-without-enforcement block, the
+    once-per-episode reserve escalation behind the same switch, the plan/policy.yaml `headroom.enabled` row
+    (default true, W1-T252/W1-T253) and the 2026-07-28 default flip are all SHIPPED. The daemon-side falsifier
+    is proven in test/daemon.test.ts. This task is the drain-side remainder and nothing else.
+    risk:high ON MERIT, not only on span. It changes WHEN a dispatch path stops throttling itself, and the
+    failure direction is asymmetric — a wrong edit dispatches through a genuinely exhausted window on hosts
+    that never opted out. The design answers that with the default (`?? true`) untouched and an explicit
+    ENABLED-unchanged criterion, the same discipline W1-T259 used for the daemon. `sizingViolation` also reads
+    the span as two subsystems once the test path is declared, which W1-T310 records as the standing tension —
+    high is the honest band on both counts.
+    files: DERIVED, NOT GUESSED. Both headroom blocks and the `DrainOpts`/`StopReason` docs are all in
+    src/lib/drain.ts; the new suite is declared because W1-T310's check requires every proof path to sit inside
+    the declared list. src/run-task.ts is DELIBERATELY NOT DECLARED — `drainCommand` already resolves and
+    passes `opts.headroomEnabled`, so it needs no edit, and a declared-but-untouched path fails
+    `inverseScopeUntouchedFiles` exactly as an undeclared one fails the scope guard. A NEW suite rather than
+    test/drain.test.ts keeps the falsifier a named artifact and keeps the declared span at one src file.
+    ON THE PROOFS: four whole-file `unit test:` paths, no `grep:` — a call-site grep would match at the merge
+    base (`headroomEnabled` already appears in src/lib/drain.ts for the unreadable branch) and be downgraded to
+    executed_stale, proving nothing about the branch that matters.
+    EVERY SOURCE FACT HERE IS DATED 2026-08-16 AND IS A QUERY, NOT A CONSTANT. Re-derive before building.
