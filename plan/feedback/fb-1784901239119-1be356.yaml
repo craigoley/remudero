@@ -17,5 +17,22 @@ raw: "REVIEW STATUS LIFECYCLE: POST PENDING IMMEDIATELY — remudero-review is
   Complements W1-T254, which fixes the latency; this fixes the legibility."
 attachments: []
 origin: cli
-status: new
-proposal_pr: null
+status: proposed
+proposal_pr: https://github.com/craigoley/remudero/pull/1973
+summary:
+  headline: Display 'reviewing' status instead of misleading 'done'
+  what_happened: "Review status only updates when complete, so PRs appear done
+    while reviews run silently. Worst case: reviews stalled 20+ minutes
+    undetected."
+  decision: Implement the full three-part fix for pending-status visibility and
+    traceability.
+  options:
+    - label: Full three-part implementation
+      consequence: PRs show 'reviewing' status instead of done; stalled reviews
+        traceable via unique ID; operator sees progress immediately
+    - label: Pending-posting only (without tracking)
+      consequence: Partial improvement but stuck reviews remain hard to trace and some
+        detection processes still skip status updates
+    - label: Keep current system (no changes)
+      consequence: Avoids engineering effort but PRs continue appearing done while
+        reviewing; operator confusion and delayed detection persist

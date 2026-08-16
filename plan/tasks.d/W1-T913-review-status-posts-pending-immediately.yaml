@@ -1,0 +1,110 @@
+- id: W1-T913
+  title: "remudero-review is posted ONLY in terminal states, so between a new head and its re-post the required check sits as 'Expected' among ~22 green checks and the PR reads green-at-a-glance while the review has not run — post state=pending the moment a head is detected as needing review"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  rationale: "OPERATOR REPORT 2026-07-24 (feedback fb-1784901239119-1be356, restated 18:53 the same day as
+    fb-1784919225707-0fab8b): 'looks green rather than in progress while it's running'. Observed worst case
+    #707, where the re-post starved 20+ minutes behind an unbounded runOne.
+    VERIFIED AT SOURCE, and it is exactly as reported. `postReviewStatus` / `postReviewStatusGuarded`
+    (src/lib/review.ts) are called ONCE per review, AFTER `judgeReview` has computed a verdict — the state
+    posted is always terminal (success/failure). There is no site anywhere in the tree that posts
+    `remudero-review` in a non-terminal state, so between a new head appearing and its verdict landing the
+    required context is genuinely ABSENT, which GitHub renders as 'Expected — waiting for status to be
+    reported'. docs/review-gate.md's own framing ('the orchestrator posting unconditionally is what
+    guarantees a required check is never missing') is about the TERMINAL post; it says nothing about the
+    interval before it, which is the whole of this defect.
+    THIS IS LEGIBILITY, NOT GATING, AND THE PLATFORM FACT SAYS SO. GitHub's combined status is 'pending if
+    there are no statuses OR a context is pending', and a required context that is either Expected or pending
+    blocks the merge identically (docs.github.com/en/rest/commits/statuses,
+    .../pull-requests/reference/status-checks). So moving from absent to pending CANNOT open a merge that was
+    closed, and cannot close one that was open — it changes ONLY what the PR page and the console show. That
+    merge-neutrality is the argument for doing it, and it is also the falsifier the implementation owes.
+    IT IS NOT THE SAME DEFECT AS THE LATENCY, AND MUST NOT BE FOLDED INTO IT. W1-T254 (shipped, #720) and
+    W1-T463 (queued, diagnosing the frozen event loop behind `waitForCiGreen`'s synchronous sleep) both make
+    the review land SOONER. Neither makes the interim state VISIBLE, and a review that is merely fast is still
+    silent while it runs. W1-T225 is the third neighbour and is the closest: it names ABSENT as the worst of
+    the three states and re-dispatches a review orphaned by a push — this task gives that same interval a
+    name on the PR page instead of leaving it indistinguishable from a check that has not started."
+  design: |
+    (a) EVERY DETECTOR POSTS PENDING FIRST. The three sites the feedback names, all confirmed present:
+      - the run lane — `runReview` (src/run-task.ts) resolves the head sha live and then reviews;
+      - the W1-T254 light-sweep ticker — `buildSweepLightHook` (src/run-task.ts) calls `runSweep` with
+        `actionable: (d) => d === "post-review"`, i.e. the ONE disposition that means 'this head needs a
+        review'; the disposition rows live at src/lib/sweep.ts (the `checksState === "green" &&
+        reviewState === "none"` rows);
+      - `rmd review <n>` — `reviewCommand`'s own start, which today posts nothing until it has judged.
+    The pending post happens at DETECTION, before the expensive part (worktree materialization, proof
+    execution, the advisory reviewer spawn), because the whole point is to cover the interval those consume.
+
+    (b) THE LOAD-BEARING CONSTRAINT — A NAIVE PENDING POST SILENTLY DISABLES THE SWEEP'S OWN RE-POST LANE.
+    `reviewStateFromRollup` (src/run-task.ts) reads the rollup and returns "none" only when NO
+    `remudero-review` entry exists; ANY entry that is not SUCCESS/FAILURE/ERROR — including a pending this
+    task itself posts — returns "pending". Every post-review disposition in src/lib/sweep.ts, and the ABSENT
+    classifier that feeds W1-T176's named reason, key on `reviewState === "none"`. So the first pending post
+    makes the head look already-attended-to, the sweep stops offering `post-review` for it, and if the owning
+    run dies the PR sits pending FOREVER with nothing re-driving it. That trades a visible 20-minute gap for
+    an invisible permanent one, which is strictly worse and is the failure this design exists to prevent.
+    THE REMEDY IS THE OWNERSHIP RECORD, NOT A SPECIAL CASE. A remudero-posted pending must be distinguishable
+    from 'reviewed', and a pending whose owner is gone or stale must remain actionable to the sweep. Decide
+    and STATE which signal carries that — the ledger line, the status description, or a third state on
+    `OpenPrView.reviewState` — but a pending that no path can re-drive does not ship.
+
+    (c) IDEMPOTENT PER HEAD, AND IT CARRIES ITS OWNER. Re-posting pending for a head that already carries this
+    run's pending is a no-op (no status churn, no second API call), and the posted status names the posting
+    run_id so a stuck pending is traceable to the run that owns it — that traceability IS the handle (b) needs
+    and is not decoration.
+
+    (d) ONE POST SITE. The pending post goes through the existing guarded poster, never a second raw
+    `gh api .../statuses/...` call: `postReviewStatusGuarded` (src/lib/review.ts) is where W1-T135's retry,
+    W1-T228's closed-lifecycle refusal and the W1-T203 reviewer identity (`REMUDERO_REVIEWER_TOKEN`) all
+    live, and a second poster would bypass all three at once. hooks/deny-floor.sh refuses worker-originated
+    status POSTs and MUST keep refusing them — no change there.
+
+    (e) A PENDING CAN NEVER ARM. `decideAutoMergeArmAtSha` / `resolveReviewProvenance` (src/lib/review.ts)
+    admit only a provenance-verified SUCCESS; prove that a pending is inert on that path, in both directions
+    (it neither arms nor is mistaken for the forged-failure DoS W1-T203 closed).
+
+    EXPLICITLY NOT IN SCOPE: changing when a review RUNS (W1-T254 / W1-T463 own the latency), weakening
+    sha-binding or invalidation (W1-T225 is explicit that this must never be undone), and the console
+    rendering (W1-T914, filed from the same feedback, depends on this).
+  acceptance:
+    - claim: "every path that detects a head needing review — the run lane, the light-sweep ticker's post-review disposition, and rmd review's own start — posts remudero-review=pending BEFORE the review work begins, and the terminal state replaces it on completion"
+      proof: "unit test: test/review-status-pending.test.ts"
+    - claim: "THE STUCK-PENDING FALSIFIER — a pending this system posted does not make the head read as reviewed: the sweep's post-review disposition still offers that head, so a dead owner cannot strand it pending forever"
+      proof: "unit test: test/review-status-pending.test.ts"
+    - claim: "a second pending post for the same head is a no-op, and the posted pending names the posting run_id"
+      proof: "unit test: test/review-status-pending.test.ts"
+    - claim: "a pending remudero-review never arms auto-merge and is never read as a verdict in either direction"
+      proof: "unit test: test/review-status-pending.test.ts"
+    - claim: "the pending post goes through the one guarded post site rather than a second raw poster"
+      proof: "grep: postReviewPending( in src/lib/review.ts"
+  risk: high
+  origin: feedback#fb-1784901239119-1be356
+  plan_refs: ["§4B", "§5C"]
+  files:
+    - src/lib/review.ts
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - test/review-status-pending.test.ts
+  status: queued
+  attempts: 0
+  note: "FILED 2026-08-16 from feedback fb-1784901239119-1be356. fb-1784919225707-0fab8b (2026-07-24T18:53Z)
+    is the SAME report restated and is covered by this filing plus W1-T914 — it is named here so a later
+    triage of it lands on this task instead of filing a third.
+    SOURCE-VERIFIED AT FILING, so an implementer does not re-derive it: `reviewStateFromRollup`
+    (src/run-task.ts) returns 'pending' for any non-SUCCESS/FAILURE/ERROR entry and 'none' only for a missing
+    one; src/lib/sweep.ts's post-review rows and its ABSENT classifier all key on `reviewState === \"none\"`;
+    `postReviewStatusGuarded` (src/lib/review.ts) is the single post site and already carries the retry,
+    lifecycle and identity rules. Re-derive line numbers before editing — this file moves constantly.
+    PLATFORM FACT, RESEARCHED RATHER THAN ASSUMED: pending is a first-class commit-status state and a required
+    context blocks the merge whether it reads Expected or pending, so this change is merge-neutral by
+    construction. That is why it is filed as legibility work and why criterion four exists.
+    NEW SUITE ON PURPOSE. test/review-status-pending.test.ts is new rather than an append to
+    test/run-task.test.ts (which fails at FILE level under coverage, zeroing every record in it) or to
+    test/sweep.test.ts (216 tests that would make a whole-file proof uninformative about the new behaviour).
+    risk: high by Rule 19's SPAN count — three source files, one of them the required merge gate's own poster.
+    budget_usd 80 matches W1-T225, the nearest-shaped neighbour."
