@@ -23,5 +23,20 @@ raw: "DAEMON GETS ITS OWN CHECKOUT — the daemon runs from the operator's WIP
 attachments: []
 origin: cli
 status: proposed
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/1997
+summary:
+  headline: Separate daemon installation folder from work folder
+  what_happened: Daemon and operators share one folder; both write to it. Daemon's
+    own output files poison restart cycles, causing crash-loops that disabled
+    automation and broke five deployments.
+  decision: Create separate, operator-protected daemon installation folder managed
+    only by deploy supervisor.
+  options:
+    - label: Implement this sprint
+      consequence: Daemon becomes immune to operator folder changes; crash-loops stop
+        permanently.
+    - label: Phase implementation
+      consequence: Deploy software mitigations first, move folder separation to next sprint.
+    - label: Reject
+      consequence: Use gitignore and auto-commit fixes only; daemon remains vulnerable
+        to shared folder pollution.
