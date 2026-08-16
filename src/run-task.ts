@@ -363,6 +363,12 @@ import {
   taskRecordPath,
 } from "./lib/plan.js";
 import {
+  DEFAULT_OVERLAP_WARNING_POLICY,
+  declarationCountsByPath,
+  rareOverlapWarnings,
+  type OpenPrFileScope,
+} from "./lib/dispatch-overlap.js";
+import {
   assertLintClean,
   changedTaskIds,
   rawChangedTaskIds,
@@ -8970,8 +8976,101 @@ export function checkProofCommand(rest: string[]): number {
   return CHECK_PROOF_EXIT.noMatch;
 }
 
-export async function nextTaskIdCommand(rest: string[]): Promise<number> {
-  const badArg = unknownArgError("next-task-id", rest, ["--plan"], ["--offline"]);
+/**
+ * W1-T917 — read each OPEN pull request's ACTUAL CHANGED FILES over REST, as
+ * {@link OpenPrFileScope} rows for {@link rareOverlapWarnings}.
+ *
+ * PROVENANCE IS THE WHOLE POINT. `OpenPrFileScope` is `{ id, files? }` — agnostic about where the
+ * paths came from — so it accepts a PR's real diff rather than a shard's declared `files:`. Both
+ * measured races were TRAILERLESS `fix/…` branches with NO SHARD (#1873/#1874 74 seconds apart;
+ * #1975 behind #1969 by 32 minutes), so a scope built from declarations would see NEITHER.
+ *
+ * REST, NOT GraphQL: `gh pr list` (which {@link openPrMintTexts} uses) spends the GraphQL budget
+ * that has been exhausted repeatedly; `repos/{o}/{r}/pulls` and `pulls/{n}/files` spend core, which
+ * is the healthy bucket. One list call plus one per open PR.
+ */
+export function openPrFileScopes(
+  owner: string,
+  repo: string,
+  fetchJson: (args: string[]) => unknown = ghJson,
+): OpenPrFileScope[] {
+  const rows = fetchJson(["api", `repos/${owner}/${repo}/pulls?state=open&per_page=100`]) as Array<{
+    number?: number;
+  }>;
+  const scopes: OpenPrFileScope[] = [];
+  for (const row of rows) {
+    if (typeof row.number !== "number") continue;
+    const files = fetchJson(["api", `repos/${owner}/${repo}/pulls/${row.number}/files?per_page=100`]) as Array<{
+      filename?: string;
+    }>;
+    scopes.push({
+      id: `#${row.number}`,
+      files: files.map((f) => f.filename).filter((f): f is string => typeof f === "string"),
+    });
+  }
+  return scopes;
+}
+
+/**
+ * W1-T917 — the human-facing lines. Each names the OPEN PR and the SHARED RARE PATH, because those
+ * two facts are what change a filer's next move; a count would not.
+ */
+export function rareOverlapWarningLines(warnings: ReadonlyArray<{ prId: string; rarestPath: string; declaringShards: number }>): string[] {
+  return warnings.map(
+    (w) =>
+      `(heads up: ${w.prId} is already open and touches ${w.rarestPath}, declared by only ${w.declaringShards} shard(s) — check it is not the same job)`,
+  );
+}
+
+/** W1-T917 — injectable seams so the falsifier drives the real caller with no network. */
+export type OverlapWarningDeps = {
+  scopes?: (owner: string, repo: string) => OpenPrFileScope[];
+  plan?: (planPath: string) => Plan;
+  say?: (line: string) => void;
+};
+
+/**
+ * W1-T917 — THE READER. `rareOverlapWarnings` shipped with W1-T533/#1968 and had ZERO callers
+ * outside its own module; W1-T533's design (iv) forbids exactly that ("this must print where a
+ * filer already reads, or it is not worth building"). This is the call site, and the mint path is
+ * the one surface a filer always crosses.
+ *
+ * ADVISORY, NEVER A GATE (W1-T533 design iii): this returns lines to PRINT. It cannot refuse a
+ * mint, cannot change the id, and cannot alter the exit code — a false block on legitimately
+ * adjacent work would be worse than the duplication it prevents.
+ *
+ * AND IT DEGRADES RATHER THAN THROWS. This puts network I/O into the verb an operator runs before
+ * every filing; an advisory that can break the verb it advises is worse than none. Any failure —
+ * unreachable, rate-limited, malformed — yields NO lines, exactly as the reservation notice below
+ * already degrades to silence.
+ */
+export function overlapWarningLinesFor(
+  candidateFiles: readonly string[],
+  owner: string,
+  repo: string,
+  planPath: string,
+  deps: OverlapWarningDeps = {},
+): string[] {
+  if (candidateFiles.length === 0) return [];
+  try {
+    const plan = (deps.plan ?? loadPlan)(planPath);
+    const counts = declarationCountsByPath(plan.tasks);
+    const scopes = (deps.scopes ?? ((o, r) => openPrFileScopes(o, r)))(owner, repo);
+    const warnings = rareOverlapWarnings(
+      { files: [...candidateFiles] },
+      scopes,
+      counts,
+      plan.tasks.length,
+      DEFAULT_OVERLAP_WARNING_POLICY,
+    );
+    return rareOverlapWarningLines(warnings as ReadonlyArray<{ prId: string; rarestPath: string; declaringShards: number }>);
+  } catch {
+    return [];
+  }
+}
+
+export async function nextTaskIdCommand(rest: string[], overlapDeps: OverlapWarningDeps = {}): Promise<number> {
+  const badArg = unknownArgError("next-task-id", rest, ["--plan", "--files"], ["--offline"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
     return 2;
@@ -9008,6 +9107,17 @@ export async function nextTaskIdCommand(rest: string[]): Promise<number> {
     /* no readable reservation store ⇒ report the mint alone, exactly as before this existed */
   }
   if (offline) console.log("(--offline: open plan PRs were NOT read — this id is a floor, not a guarantee)");
+  // W1-T917 — the rare-overlap advisory. Printed AFTER the id, never instead of it: the mint's own
+  // output is byte-identical whether this warns, stays silent, or fails outright. `--offline`
+  // suppresses it for the same reason it suppresses the open-PR sweep above.
+  if (!offline) {
+    const candidateFiles = (flagValue(rest, "--files") ?? "")
+      .split(",")
+      .map((f) => f.trim())
+      .filter((f) => f.length > 0);
+    for (const line of overlapWarningLinesFor(candidateFiles, self.owner, self.repo, planPath, overlapDeps))
+      (overlapDeps.say ?? console.log)(line);
+  }
   return mint.degraded.length ? 1 : 0;
 }
 
