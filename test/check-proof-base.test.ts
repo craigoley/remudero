@@ -85,7 +85,7 @@ test("a proof that matches head and not base is reported as discriminating", () 
 
 // ── Acceptance #2: matches BOTH head and base ⇒ reported stale, under the reviewer's own name ────
 
-test("a proof matching both head and base is reported stale rather than passing", () => {
+test("a proof matching both trees is reported stale rather than passing", () => {
   const head = headFixture(`this line carries ${NEEDLE}\n`);
   try {
     const { code, out } = runCheckProof(["--base", FAKE_BASE_REF, ...PROOF_ARGV], head, {
