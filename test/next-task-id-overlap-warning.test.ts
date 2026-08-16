@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { overlapWarningLinesFor, rareOverlapWarningLines } from "../src/run-task.js";
+import { candidateFilesFromArgs, overlapWarningLinesFor, rareOverlapWarningLines } from "../src/run-task.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import type { OpenPrFileScope } from "../src/lib/dispatch-overlap.js";
 
@@ -108,4 +108,13 @@ test("W1-T917: the warning line names the pull request and the rare path", () =>
   assert.match(lines[0], /#1874/);
   assert.match(lines[0], /src\/lib\/plan\.ts/);
   assert.match(lines[0], /2 of 277/, "the rarity is shown as the ratio a filer can judge");
+});
+
+test("W1-T917: the files flag parses into candidate paths", () => {
+  assert.deepEqual(candidateFilesFromArgs(["--files", "src/lib/plan.ts, test/plan-sharding.test.ts"]), [
+    "src/lib/plan.ts",
+    "test/plan-sharding.test.ts",
+  ]);
+  assert.deepEqual(candidateFilesFromArgs([]), [], "absent flag ⇒ no candidate, so no open-PR read");
+  assert.deepEqual(candidateFilesFromArgs(["--files", " , ,"]), [], "blank entries are dropped, not passed through");
 });

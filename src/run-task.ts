@@ -9071,6 +9071,18 @@ export function overlapWarningLinesFor(
   }
 }
 
+/**
+ * W1-T917 — parse `--files a,b,c` into the candidate path list. Exported and PURE so the falsifier
+ * reaches it directly: it is the testable half of the wiring below, and folding it in with the
+ * print loop would have hidden a pure function behind a coverage exemption.
+ */
+export function candidateFilesFromArgs(rest: readonly string[]): string[] {
+  return (flagValue([...rest], "--files") ?? "")
+    .split(",")
+    .map((f) => f.trim())
+    .filter((f) => f.length > 0);
+}
+
 export async function nextTaskIdCommand(rest: string[], overlapDeps: OverlapWarningDeps = {}): Promise<number> {
   const badArg = unknownArgError("next-task-id", rest, ["--plan", "--files"], ["--offline"]);
   if (badArg) {
@@ -9113,11 +9125,10 @@ export async function nextTaskIdCommand(rest: string[], overlapDeps: OverlapWarn
   // output is byte-identical whether this warns, stays silent, or fails outright. `--offline`
   // suppresses it for the same reason it suppresses the open-PR sweep above.
   if (!offline) {
-    const candidateFiles = (flagValue(rest, "--files") ?? "")
-      .split(",")
-      .map((f) => f.trim())
-      .filter((f) => f.length > 0);
-    for (const line of overlapWarningLinesFor(candidateFiles, self.owner, self.repo, planPath, overlapDeps))
+    // diff-cov: process-boundary — CLI print loop: the parse is `candidateFilesFromArgs` and the
+    // decision is `overlapWarningLinesFor`, both pure and both driven by the falsifier. What remains
+    // here is argv -> stdout glue that cannot carry a DA record without a live network sweep.
+    for (const line of overlapWarningLinesFor(candidateFilesFromArgs(rest), self.owner, self.repo, planPath, overlapDeps))
       (overlapDeps.say ?? console.log)(line);
   }
   return mint.degraded.length ? 1 : 0;
