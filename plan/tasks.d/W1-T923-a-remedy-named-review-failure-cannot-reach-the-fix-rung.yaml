@@ -1,0 +1,175 @@
+- id: W1-T923
+  title: "a review failure that NAMES its remedy cannot reach the fix rung when every acceptance criterion passed, because the only route in is keyed on unmet criteria and a gate failure leaves that list empty"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  rationale: "FILED FROM the fix-rung recon of 2026-08-16, evidence re-derived at origin/main 8d3e609
+    and over the full ledger union (union deduped across all three forms).
+
+    (1) **THE MOTIVATING CASE, WITH ITS OWN LEDGER ROW AS THE EVIDENCE.** #1991 failed review and
+    NOTHING fired — no strike, no dispatch. Its `review.posted` row reads `task_id: PR-1991`,
+    `state: failure`, `unmet_criteria: []`, `reasons: []`, `proof_exec: [executed_pass x12]`,
+    `failure_class: test_theater`, and a `failure_reason` naming the two exact strings that would
+    satisfy the check. Its 49 sweep rows carry `wait`, one `post-review`, and light-pass
+    `blocked-ambiguous` deferrals — **ZERO `blocked-fixable`**, against a positive control of 105
+    `blocked-fixable acted:true` rows elsewhere in the same corpus.
+
+    (2) **THE CAUSE IS NOT A MISSING TASK ID, AND THE OBVIOUS FIX IS ALREADY SHIPPED.** The
+    commissioning hypothesis was `armAutoMerge`'s `if (!taskId)` shape, fixed by passing
+    `taskId ?? PR-<n>`. Re-derived: THAT ID ALREADY EXISTS AND IS ALREADY USED — the row above is
+    keyed `PR-1991`, minted by `escalationTaskIdFor` (`src/run-task.ts`), and W1-T456's comment
+    records that `fixRungTaskFor`'s synthetic-task branch 'already knows how to dispatch against
+    with no plan task at all'. **THE DISPATCH SIDE IS ALREADY TRAILER-AGNOSTIC.** Nothing inside the
+    rung refused #1991; the rung was never REACHED.
+
+    (3) **THE REAL GATE IS THE ROUTE IN.** Both `blocked-fixable` rows of `DISPOSITION_RULES`
+    (`src/lib/sweep.ts`) require `pr.unmetCriteria.length > 0` or `isBlockedCi(pr)`. For #1991
+    neither held — every acceptance criterion PASSED (12 of 12 `executed_pass`), so the list is
+    empty for the one reason nobody designed for: **THE VERDICT FAILED ON A GATE, NOT ON A
+    CRITERION.** Row 7 then correctly routes it to `blocked-ambiguous`. That is not a bug in the
+    routing; it is a population gap upstream of it.
+
+    (4) **THE POPULATION, MEASURED AND NOT OVERSOLD.** Across 41 failing reviews of 261 posted:
+    by class, `unmet_criteria` 17, `changeset_contradiction` 16, `instrument_entangled` 3,
+    `criteria_tampered` 2, `test_theater` 2, `no_criteria` 1. **22 carry a non-empty
+    `unmet_criteria` and 19 do not.** Splitting by whether the `failure_reason` names a concrete
+    remedy: **18 remedy-named against 23 judgement-or-other — a MINORITY, not a majority.** The
+    cross-tab is the actual target: **15 OF 41 ARE REMEDY-NAMED AND HAVE AN EMPTY
+    `unmet_criteria`**, so they name their own fix and can never reach the rung. **37%, AND THE
+    SHARD SAYS 37% RATHER THAN CLAIMING A MAJORITY.**
+    One caution recorded because it nearly shipped a false zero: a first census read **0** failing
+    reviews against a live control of 261 `review.posted` rows, because it searched verdict prose
+    instead of the structured fields. Every figure above comes from `failure_class`,
+    `unmet_criteria` and `failure_reason` on the row itself.
+
+    (5) **AND A SEPARATE FINDING THE IMPLEMENTER MUST NOT BUILD ON: THE CLASSIFIER DISAGREES WITH
+    THE REASON.** #1991 is classified `failure_class: test_theater` — the class this design would
+    call unautomatable — while its `failure_reason` names two exact strings. **A PREDICATE KEYED ON
+    `failure_class` ALONE MIS-SORTS THE MOTIVATING CASE.** That is a defect in the classifier, not
+    in the rung, and it is NOT fixed here; it is recorded so nobody keys the new list on that field."
+  design: |
+    THE SHAPE: populate a NEW actionable list from GATE failures, keyed on the `PR-<n>` id that
+    already exists, and let the existing routing consume it. No new detector, no new rung, no
+    loosening of any existing field.
+
+    (i) A SIBLING LIST, NEVER A WIDENING OF `criteriaRecoverable`. **OPERATOR RULING, 2026-08-16:
+    THE PROHIBITION STANDS.** `criteriaRecoverable`'s own doc pins it strictly to "did a
+    `Remudero-Task:` trailer resolve a task id", says widening it "would read as silently crediting
+    an unattributed PR, which #1527 forbids", and `test/openpr-taskid-resolver.test.ts` locks a
+    plan-only filing PR to `criteriaRecoverable: false` regardless. **DO NOT TOUCH THAT FIELD, ITS
+    MEANING, OR ITS LOCK.** The new list is an independent sibling on `OpenPrView` carrying gate
+    failures; a PR may have an empty `unmetCriteria`, `criteriaRecoverable: false`, and a non-empty
+    actionable list all at once, and that combination must stay legible rather than being collapsed.
+
+    (ii) POPULATED WHERE THE EXISTING ONE IS, FROM THE SAME LEDGER READ. `buildOpenPrViews`
+    (`src/run-task.ts`) already computes `filingUnmetKey = !taskId && isPlanOnlyFilingPr(...) ?
+    PR-<n> : undefined` and `unmetKey = taskId ?? filingUnmetKey`. The gate-failure read belongs
+    beside it, keyed on `taskId ?? PR-<prNumber>` with NO `isPlanOnlyFilingPr` restriction — that
+    restriction is what confines today's carve-out to plan filings, and #1991 is a `DECISIONS.md`
+    PR, not a filing. This widens WHERE an actionable failure can be read from; it does not widen
+    what "recoverable" means, which is exactly the line W1-T456 already drew for `unmetCriteria`.
+
+    (iii) THE ROUTE IN IS ONE ADDITIONAL DISJUNCT, NOT A NEW RULE. `DISPOSITION_RULES`'
+    `blocked-fixable` rows gate on `pr.unmetCriteria.length > 0 || isBlockedCi(pr)`. Add the new
+    list as a third disjunct so a gate failure with a named remedy routes the same way a criterion
+    failure does. Row 7's `blocked-ambiguous` arm and both of its reason strings must stay
+    byte-identical for every PR that does NOT carry the new list — that is the regression the
+    suite has to pin first.
+
+    (iv) THE PREDICATE IS ONE REMEDY FORM VERSUS A CHOICE, AND IT IS THE PREDICATE RATHER THAN A
+    CAVEAT. A remedy with a single form is automatable; a remedy offering a CHOICE is not. #1991 is
+    the case that proves it: the provenance check accepts `Chosen (RECOMMENDED, auto)` OR an
+    operator-attribution line, and those credit different authors. **A WORKER PICKING THE WRONG ONE
+    MISATTRIBUTES A RATIFIED RULING IN `DECISIONS.md`, THE FILE WHERE A FALSE CLAIM DOES THE MOST
+    DAMAGE.** So a two-form remedy must be EXCLUDED from the actionable list, not merely flagged
+    inside it, and the falsifier must drive exactly that shape.
+
+    (v) DO NOT KEY ON `failure_class`. Rationale (5): #1991 is `test_theater` while naming two exact
+    strings, so that field mis-sorts the motivating case. Whatever populates the new list must key on
+    the presence of a single-form remedy, and a test must pin that a `test_theater`-classed row with
+    a named single-form remedy still qualifies — otherwise this task reproduces the very mis-sort it
+    documents.
+
+    (vi) STRUCTURED, NOT PARSED OUT OF PROSE, AND SAY SO IF THAT IS NOT POSSIBLE. The row already
+    carries `failure_class`, `unmet_criteria`, `reasons` and `failure_reason` as fields. A regex over
+    human-readable verdict prose is brittle and rots silently, which is worse than no automation. If
+    the single-form remedy cannot be identified without parsing prose, THE HONEST OUTCOME IS TO
+    REPORT THAT AND EMIT A STRUCTURED REMEDY FROM THE CHECK ITSELF instead — a smaller, sounder task
+    than a parser nobody will notice going stale.
+
+    (vii) CONTAINMENT ALREADY EXISTS AND IS NOT WEAKENED. The two-strike cap stands untouched — it is
+    evidence discipline in code, and if two patches have not moved the symptom the answer is more
+    data, not another patch. Under W1-T919's ruling the fleet gates on IRREVERSIBILITY: a fix
+    worker's push is a commit on a branch, which is reversible, and it mints a new head that re-earns
+    review. That containment claim is NOT re-derived here and must be verified by the implementer
+    before it is relied on.
+
+    (viii) EDITING A SESSION PR IS A DIFFERENCE OF DEGREE, NOT KIND — the fleet already reviews, arms
+    and merges them (W1-T516). Recorded because it is the honest objection, not because it blocks.
+
+    WHAT MUST NOT BE BUILT: any change to `criteriaRecoverable`'s meaning, its value, or its
+    regression lock; a weakening of the two-strike cap; a predicate keyed on `failure_class`; a regex
+    over `failure_reason` prose presented as robust; a new ledger step (five fired-and-unread signals
+    are already measured — `daemon.tree_dirty`, `daemon.stale_code`, `CiFailure.outsidePrRange`,
+    `dh-rate-limit`, `dispatch.stood_down`); and any attempt to fix the classifier disagreement,
+    which is its own concern.
+  acceptance:
+    - claim: "a gate failure naming a single-form remedy reaches the fix rung"
+      proof: "unit test: W1-T923: a gate failure with a named remedy routes to the fix rung"
+    - claim: "a remedy offering a choice of forms is excluded rather than flagged"
+      proof: "unit test: W1-T923: a remedy with two forms is never treated as actionable"
+    - claim: "the trailer-keyed recoverable field keeps its meaning and its value"
+      proof: "unit test: W1-T923: the recoverable field is untouched by the new list"
+    - claim: "a PR with no actionable list routes exactly as it does today"
+      proof: "unit test: W1-T923: a PR without the new list keeps its existing disposition"
+    - claim: "a judgement-classed row with a named single-form remedy still qualifies"
+      proof: "unit test: W1-T923: the class field alone never decides actionability"
+  origin: recon#fix-rung-never-reaches-a-session-pr-2026-08-16
+  plan_refs: ["W1-T456", "W1-T516", "W1-T527", "W1-T440", "W1-T919"]
+  files: [src/lib/sweep.ts, src/run-task.ts, test/sweep.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across two source modules and a suite, and
+    independently warranted: this widens what the fleet will dispatch a worker AT, and a wrong
+    predicate spends a strike editing someone's pull request. budget_usd 55 — one populated list, one
+    routing disjunct, a five-way falsifier.
+
+    **`src/run-task.ts` IS DECLARED AND THE SERIALISATION COST IS ACCEPTED IN WRITING.** The change
+    genuinely lives there: `buildOpenPrViews` computes `filingUnmetKey`/`unmetKey`, `isPlanOnlyFilingPr`
+    scores 5 there, `escalationTaskIdFor` 9 and `fixRungTaskFor` 6. Declaring it serialises this task
+    against every other naming that file (`partitionByFileOverlap`, W1-T471), and that is paid
+    knowingly rather than avoided by declaring a path the change cannot touch.
+
+    `files:` DERIVED BY WORD-BOUNDED INVOCATION COUNT at 8d3e609. `src/lib/sweep.ts` scores
+    `unmetCriteria` 20, `DISPOSITION_RULES` 18 and `criteriaRecoverable` 6 — the field and the routing.
+    `test/sweep.test.ts` scores `unmetCriteria` 30, `DISPOSITION_RULES` 6 and `criteriaRecoverable` 5,
+    the highest relevant test path. Negative control `unmetCriteriaZzq` = 0 files. `src/lib/review.ts`
+    is NOT declared: `failure_class` is emitted there but design (v) forbids keying on it, so nothing
+    in that file changes and declaring it would fail `inverseScopeUntouchedFiles`.
+    `test/openpr-taskid-resolver.test.ts` is NOT declared either — it holds `criteriaRecoverable`'s
+    regression lock, which design (i) forbids touching.
+
+    THE COMMISSIONING HYPOTHESIS DID NOT SURVIVE AND THE SHARD SAYS SO IN RATIONALE (2): the
+    `taskId ?? PR-<n>` fix is already shipped and the id is already in use, so a task built on it
+    would have changed nothing. The real gap is upstream of the rung, in what populates the list the
+    routing reads.
+
+    PROOF NOTES: all five proofs are NAME-FILTERED titles, not pure paths — a pure path runs the whole
+    file and one unrelated failure fails every criterion. Each was verified to match ZERO files under
+    `test/` at 8d3e609 against a positive control matching exactly one, and each is under 100
+    characters with no comma so `looksLikeScenarioNarrative` (`src/lib/task-linter.ts`) cannot fail
+    them. No proof names this shard.
+
+    ID PROVENANCE: tree max was W1-T921 and the reservation refs ran to W1-T922. W1-T923 was verified
+    free across FOUR surfaces, not three: origin/main `plan/` (0), the reservation refs (0), every open
+    PR's file list (0), AND **EVERY OPEN PR TITLE (0)** — the fourth added because W1-T919 read 0 across
+    refs, shards and diffs while being taken, by a PR that claimed it in a TITLE and touched only
+    `DECISIONS.md`. The title sweep proved itself on the way past, finding #1987 naming W1-T919.
+    Positive control: known-taken W1-T916 reads 2 on origin/main. Taken as a UNIQUE ORPHAN PAYLOAD OVER
+    THE EMPTY TREE with a host-pid-nanosecond nonce, pushed under `--force-with-lease` with the refspec
+    variable braced and the exit code captured INTO A VARIABLE rather than read through a pipe, then the
+    ref was RE-READ and its nonce matched against the one written."
