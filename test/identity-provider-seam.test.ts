@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { createService, type IdentityProvider, type Route } from "../src/lib/service.js";
+import { generateKeyPairSync, sign, type KeyObject } from "node:crypto";
+import {
+  createService,
+  cloudflareAccessIdentityProvider,
+  type CloudflareAccessJwk,
+  type CloudflareAccessKeyCache,
+  type IdentityProvider,
+  type Route,
+} from "../src/lib/service.js";
 
 // ── W1-T430: the auth/identity seam (MASTER-PLAN §6A) ──
 //
@@ -185,5 +193,187 @@ test("seam: an unknown/unregistered provider still grants nothing -- deny stays 
   await withServer(server, async (base) => {
     const res = await fetch(`${base}/state`, { headers: { [FIXTURE_HEADER]: FIXTURE_SECRET } });
     assert.equal(res.status, 401);
+  });
+});
+
+// ── W1-T531: the third grantor -- Cloudflare Access JWT (MASTER-PLAN §6A) ──
+//
+// Same seam, third adopter: `cloudflareAccessIdentityProvider` validates the
+// `Cf-Access-Jwt-Assertion` header's SIGNATURE against a cached key set rather than trusting the
+// header's mere presence, and must never throw -- `grant` runs inside `createService`'s
+// unawaited, uncaught `void (async () => { ... })()`, so an exception here would kill the whole
+// process rather than deny one request.
+
+const ACCESS_TEAM_DOMAIN = "https://example.cloudflareaccess.com";
+const ACCESS_AUDIENCE = "console-app-tag";
+const ACCESS_KID = "seam-test-kid";
+
+const { publicKey: accessPublicKey, privateKey: accessPrivateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+// A second, unrelated keypair -- stands in for an ATTACKER who does not hold Cloudflare's real
+// private key but can still craft a syntactically valid, correctly-shaped JWT.
+const { privateKey: forgedPrivateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+
+function accessJwk(): CloudflareAccessJwk {
+  const jwk = accessPublicKey.export({ format: "jwk" }) as Record<string, unknown>;
+  return { ...jwk, kid: ACCESS_KID } as CloudflareAccessJwk;
+}
+
+function base64url(input: Buffer): string {
+  return input.toString("base64url");
+}
+
+/** Build a Cloudflare-Access-shaped JWT signed with the given key -- `signingKey` defaults to the
+ *  real key so most callers only ever override the claims or the kid to construct a bad token. */
+function makeAccessAssertion(opts: {
+  claims?: Record<string, unknown>;
+  kid?: string;
+  alg?: string;
+  signingKey?: KeyObject;
+}): string {
+  const header = { alg: opts.alg ?? "RS256", typ: "JWT", kid: opts.kid ?? ACCESS_KID };
+  const claims = {
+    iss: ACCESS_TEAM_DOMAIN,
+    aud: [ACCESS_AUDIENCE],
+    exp: Math.floor(Date.now() / 1000) + 3600,
+    email: "operator@example.com",
+    ...opts.claims,
+  };
+  const headerB64 = base64url(Buffer.from(JSON.stringify(header)));
+  const payloadB64 = base64url(Buffer.from(JSON.stringify(claims)));
+  const signingInput = `${headerB64}.${payloadB64}`;
+  const signature = sign("RSA-SHA256", Buffer.from(signingInput), opts.signingKey ?? accessPrivateKey);
+  return `${signingInput}.${base64url(signature)}`;
+}
+
+function cachedKeys(keys: readonly CloudflareAccessJwk[] | undefined): CloudflareAccessKeyCache {
+  return { keys: () => keys };
+}
+
+function buildAccessRoutes(): Route[] {
+  return [
+    {
+      method: "GET",
+      path: "/state",
+      scope: "read",
+      handler: (_req, res) => {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+      },
+    },
+  ];
+}
+
+test("W1-T531: an access grant validates the assertion rather than trusting the header", async () => {
+  const provider = cloudflareAccessIdentityProvider({
+    teamDomain: ACCESS_TEAM_DOMAIN,
+    audience: ACCESS_AUDIENCE,
+    keys: cachedKeys([accessJwk()]),
+  });
+  const server = createService({
+    tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
+    providers: [provider],
+    routes: buildAccessRoutes(),
+  });
+  await withServer(server, async (base) => {
+    // A correctly signed assertion (real key, matching kid/claims) is granted.
+    const valid = await fetch(`${base}/state`, {
+      headers: { "cf-access-jwt-assertion": makeAccessAssertion({}) },
+    });
+    assert.equal(valid.status, 200);
+
+    // The load-bearing case: an assertion with the IDENTICAL header and claims -- same kid, same
+    // iss/aud/exp -- but signed by a DIFFERENT private key (an attacker who never had
+    // Cloudflare's real key) must be refused. If this provider trusted the header's mere
+    // presence/shape rather than verifying the signature against the cached public key, this
+    // forged token would pass exactly like the valid one above.
+    const forged = await fetch(`${base}/state`, {
+      headers: { "cf-access-jwt-assertion": makeAccessAssertion({ signingKey: forgedPrivateKey }) },
+    });
+    assert.equal(forged.status, 401);
+
+    // A bare, non-JWT string in the header is also just "not my credential" -- 401, not a crash.
+    const garbage = await fetch(`${base}/state`, { headers: { "cf-access-jwt-assertion": "not-a-jwt-at-all" } });
+    assert.equal(garbage.status, 401);
+  });
+});
+
+test("W1-T531: an unreadable key set denies and never grants", async () => {
+  // The cache never populated (e.g. no successful fetch yet) -- `keys()` returns `undefined`, so
+  // even a CORRECTLY signed, fully valid assertion has no key to verify against.
+  const provider = cloudflareAccessIdentityProvider({
+    teamDomain: ACCESS_TEAM_DOMAIN,
+    audience: ACCESS_AUDIENCE,
+    keys: cachedKeys(undefined),
+  });
+  const server = createService({
+    tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
+    providers: [provider],
+    routes: buildAccessRoutes(),
+  });
+  await withServer(server, async (base) => {
+    const res = await fetch(`${base}/state`, {
+      headers: { "cf-access-jwt-assertion": makeAccessAssertion({}) },
+    });
+    assert.equal(res.status, 401);
+  });
+});
+
+test("W1-T531: a throwing validator cannot take the console down", async () => {
+  // A key cache whose `keys()` itself throws -- stands in for "network failure, rotated key,
+  // malformed key set" (rationale 4), the exact class of failure a JWT validator is prone to.
+  const throwingKeys: CloudflareAccessKeyCache = {
+    keys: () => {
+      throw new Error("simulated key-cache failure");
+    },
+  };
+  const provider = cloudflareAccessIdentityProvider({
+    teamDomain: ACCESS_TEAM_DOMAIN,
+    audience: ACCESS_AUDIENCE,
+    keys: throwingKeys,
+  });
+  const server = createService({
+    tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
+    providers: [provider],
+    routes: buildAccessRoutes(),
+  });
+  await withServer(server, async (base) => {
+    // The throwing provider denies rather than crashing the request...
+    const res = await fetch(`${base}/state`, {
+      headers: { "cf-access-jwt-assertion": makeAccessAssertion({}) },
+    });
+    assert.equal(res.status, 401);
+
+    // ...and, more importantly, the SERVER PROCESS is still alive to answer the NEXT request --
+    // if `grant`'s throw had propagated out of `createService`'s unawaited, uncaught IIFE, the
+    // whole test process would be gone and this second request would never get a response at
+    // all (not even a clean 401/500).
+    const stillAlive = await fetch(`${base}/state`, { headers: { authorization: `Bearer ${READ_TOKEN}` } });
+    assert.equal(stillAlive.status, 200);
+  });
+});
+
+test("W1-T531: the tailnet provider still grants when access declines", async () => {
+  // Both the tailnet identity grantor AND the Cloudflare Access provider are configured, but the
+  // request carries only tailnet identity headers -- no `Cf-Access-Jwt-Assertion` at all, so the
+  // access provider recognizes nothing here and declines (`undefined`, not a denial of the whole
+  // request). Additive by construction (design i): registering the third provider must not take
+  // anything away from the first.
+  const provider = cloudflareAccessIdentityProvider({
+    teamDomain: ACCESS_TEAM_DOMAIN,
+    audience: ACCESS_AUDIENCE,
+    keys: cachedKeys([accessJwk()]),
+  });
+  const server = createService({
+    tokens: { read: READ_TOKEN, write: WRITE_TOKEN },
+    identity: { trustedLocalAddress: "127.0.0.1", capability: CAPABILITY },
+    providers: [provider],
+    routes: buildRoutes(),
+  });
+  await withServer(server, async (base) => {
+    const capHeader = { "tailscale-app-capabilities": JSON.stringify({ [CAPABILITY]: [{ role: "member" }] }) };
+    const write = await fetch(`${base}/control/pause`, { method: "POST", headers: capHeader });
+    assert.equal(write.status, 200);
+    const read = await fetch(`${base}/state`, { headers: capHeader });
+    assert.equal(read.status, 200);
   });
 });
