@@ -336,6 +336,19 @@ export interface SweepPolicy {
    * it by accident.
    */
   reviewOrphanCap: number;
+  /**
+   * W1-T905 — "repair the instance, FILE THE CLASS" (fb-1784842083584-6cc22a, second half). A
+   * classified surface (a `sweep.disposed` row's own `disposition`) that at least this many
+   * DISTINCT PRs have been REPAIRED for (`acted: true`) inside {@link repairFilingWindowDays}
+   * is due for exactly ONE `repair#<surface>` §7B feedback entry — see {@link dueRepairFilings},
+   * this row's consumer. "One occurrence is a repair, a recurrence is a defect" (design note ii):
+   * a threshold of 1 would file on the very first repair, which this row's own
+   * `plan/policy.yaml` bound (min 2) forecloses.
+   */
+  repairFilingThreshold: number;
+  /** W1-T905 — the RECURRENCE WINDOW (days) {@link repairFilingThreshold} counts distinct-PR
+   *  repairs within. See {@link dueRepairFilings}. */
+  repairFilingWindowDays: number;
 }
 
 /**
@@ -393,6 +406,8 @@ export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
   // (seconds), and far below the 7h45m #921 sat in its silent loop.
   absentCeilingMinutes: 10,
   reviewOrphanCap: 2,
+  repairFilingThreshold: POLICY_SWEEP.repairFilingThreshold,
+  repairFilingWindowDays: POLICY_SWEEP.repairFilingWindowDays,
 };
 
 /**
@@ -2361,6 +2376,25 @@ export interface SweepDeps {
    * Returns the same summary shape so `rmd sweep --dry-run` can print the plan.
    */
   dryRun?: boolean;
+  /**
+   * W1-T905 — "repair the instance, FILE THE CLASS" (fb-1784842083584-6cc22a, second half).
+   * Best-effort capture of a §7B feedback entry for ONE classified surface {@link
+   * dueRepairFilings} found due this pass. Optional: omitted, `runSweep` computes nothing and
+   * files nothing — a pre-existing fixture with no knowledge of this dep keeps compiling and
+   * behaving exactly as before this task. NEVER allowed to fail the pass that produced the
+   * repairs it reports on: `runSweep` wraps every call in the SAME per-PR throw containment the
+   * action switch already has (W1-T254) — a throw here is swallowed, the rest of the pass (and
+   * every later PR in it) is untouched.
+   *
+   * The real wiring (`buildSweepEffects`, src/run-task.ts) is the ONE place this calls
+   * `captureFeedback` (src/lib/feedback.ts) — and is ALSO where the dedup check lives: an
+   * `existsSync` read on `feedbackEntryPath(root, filing.id)` before ever writing, mirroring
+   * `src/lib/issues-intake.ts`'s own caller-side dedup for `fb-issue-<owner>-<repo>-<n>`. This
+   * pure module never touches the filesystem itself (design note ix) — {@link dueRepairFilings}
+   * recomputes fresh from ledger rows every call, with no memory of what was already filed; the
+   * injected dep's own idempotent write is the entire "no second store" guarantee (design iii).
+   */
+  captureRepairFeedback?: (filing: RepairFilingCapture) => void | Promise<void>;
 }
 
 /** What one PR's reconciliation did this sweep. */
@@ -2520,6 +2554,158 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
   return { armed, fixed, closed, escalated, depReviewed, postReviewed, absentRepushes };
 }
 
+// ── W1-T905 — "repair the instance, FILE THE CLASS" (fb-1784842083584-6cc22a, second half) ──
+//
+// A `sweep.disposed` row already NAMES a classified surface on its own `disposition` field
+// every time the sweep repairs a PR (`DISPOSITION_RULES` above), but nothing ever rolls that
+// classification up across PRs — a defect the fleet repairs fifteen times is rediscovered by
+// hand fifteen times, the exact operator-archaeology channel §7B exists to close (rationale).
+//
+// THIS IS NOT A ROUTER, A LANE OR A RUNG (design note i): no new disposition, no new `when:`,
+// no new repair verb. The ONE thing added is the bridge from a RECURRING classified surface to
+// a §7B feedback entry — a pure fold ({@link dueRepairFilings}) over rows that already exist,
+// plus one injected capture dep ({@link SweepDeps.captureRepairFeedback}).
+
+/** The dispositions {@link priorActionsFromLedger}'s own switch above treats as an actual
+ *  REPAIR verb having fired (`fixed`/`closed`/`escalated`) — `mergeable` (armed) is the HEALTHY
+ *  outcome, not a defect, and `dep-review`/`post-review`/`wait` are ROUTING/no-op states with no
+ *  repair verb of their own. Recurrence filing is scoped to exactly these four so a `mergeable`
+ *  PR arming fifteen times (ordinary, healthy throughput) never floods the §7B inbox — the
+ *  wrong-recurrence-key failure mode this task's own risk note names explicitly. */
+const REPAIR_SURFACE_DISPOSITIONS: ReadonlySet<Disposition> = new Set(["blocked-fixable", "blocked-ambiguous", "stale", "conflicted"]);
+
+/** One PR's own repair, as read off its `sweep.disposed` row — never invented (design v). */
+export interface RepairFilingInstance {
+  prNumber: number;
+  prUrl: string;
+  /** The ledgered disposition `reason` verbatim — for a CI-failure surface this already embeds
+   *  the failing check name(s) + sha(s) `describeCiFailures` names, when observed. */
+  reason: string;
+  headSha: string;
+  /** The `sweep.disposed` row's own ledgered timestamp (ISO-8601, stamped by `appendLedger`). */
+  ts: string;
+}
+
+/** One classified surface due for exactly ONE `repair#<surface>` feedback entry this pass —
+ *  {@link dueRepairFilings}'s output, and {@link SweepDeps.captureRepairFeedback}'s input via
+ *  {@link renderRepairFilingRaw}/the `repair#<surface>` origin string `runSweep` builds from it. */
+export interface RepairFilingRecurrence {
+  surface: Disposition;
+  threshold: number;
+  windowDays: number;
+  windowStart: string;
+  windowEnd: string;
+  /** Distinct PRs (by `prNumber`) repaired for `surface` inside the window — length >= threshold. */
+  instances: RepairFilingInstance[];
+  /** Deterministic — `fb-repair-<surface>-<window-bucket>` (mirrors `src/lib/issues-intake.ts`'s
+   *  `fb-issue-<owner>-<repo>-<n>`): STABLE for the SAME surface across every pass inside the
+   *  SAME window, so the real wiring's `existsSync` dedup (design iii) never re-files twice for
+   *  one window, and a genuinely new window can file again once the pattern persists into it. */
+  id: string;
+}
+
+/**
+ * PURE fold over already-written `sweep.disposed` ledger rows (design vi — no new ledger row,
+ * nothing new to read): for each {@link REPAIR_SURFACE_DISPOSITIONS} surface, counts the
+ * DISTINCT PRs (`acted: true`) repaired for it inside the CURRENT policy window (an epoch-
+ * anchored bucket of `policy.repairFilingWindowDays`, so the same window yields the same bucket
+ * — and therefore the same {@link RepairFilingRecurrence.id} — on every call for as long as
+ * `now` stays inside it). A surface reaching `policy.repairFilingThreshold` distinct PRs is
+ * DUE — "fifteen PRs repaired for one surface must produce ONE entry, never fifteen, and a
+ * single repair must produce NONE: one occurrence is a repair, a recurrence is a defect"
+ * (design ii, verbatim). Counting DISTINCT PRs, not raw rows, is deliberate: a single PR stuck
+ * on the same surface across many sweep passes (re-dispatched each time) must never inflate the
+ * count on its own — recurrence is measured across the FLEET's PRs, never one PR's retry count.
+ *
+ * No I/O, no dedup memory of its own — recomputes fresh from `lines` every call. The caller
+ * (`runSweep`) decides whether a returned candidate is ACTUALLY worth writing (via the injected
+ * {@link SweepDeps.captureRepairFeedback}, whose real wiring is what performs the idempotent
+ * write — see that field's own doc).
+ */
+export function dueRepairFilings(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  now: number,
+  policy: Pick<SweepPolicy, "repairFilingThreshold" | "repairFilingWindowDays">,
+): RepairFilingRecurrence[] {
+  const windowMs = policy.repairFilingWindowDays * 24 * 60 * 60 * 1000;
+  const bucket = Math.floor(now / windowMs);
+  const windowStart = bucket * windowMs;
+  const windowEnd = windowStart + windowMs;
+
+  const bySurface = new Map<Disposition, Map<number, RepairFilingInstance>>();
+  for (const line of lines) {
+    if (line.step !== "sweep.disposed" || line.acted !== true) continue;
+    const surface = line.disposition as Disposition;
+    if (!REPAIR_SURFACE_DISPOSITIONS.has(surface)) continue;
+    const ts = typeof line.ts === "string" ? line.ts : undefined;
+    if (!ts) continue;
+    const tsMs = Date.parse(ts);
+    if (!Number.isFinite(tsMs) || tsMs < windowStart || tsMs >= windowEnd) continue;
+    const prNumber = typeof line.pr_number === "number" ? line.pr_number : undefined;
+    if (prNumber === undefined) continue;
+    const perPr = bySurface.get(surface) ?? new Map<number, RepairFilingInstance>();
+    // Last-write-wins per PR (lines are read in ledger/append order) — a PR re-dispatched
+    // several times this window is counted ONCE, carrying its MOST RECENT repair's evidence.
+    perPr.set(prNumber, {
+      prNumber,
+      prUrl: typeof line.pr_url === "string" ? line.pr_url : "",
+      reason: typeof line.reason === "string" ? line.reason : "(no reason captured)",
+      headSha: typeof line.head_sha === "string" ? line.head_sha : "",
+      ts,
+    });
+    bySurface.set(surface, perPr);
+  }
+
+  const due: RepairFilingRecurrence[] = [];
+  for (const [surface, perPr] of bySurface) {
+    const instances = [...perPr.values()].sort((a, b) => a.prNumber - b.prNumber);
+    if (instances.length < policy.repairFilingThreshold) continue;
+    due.push({
+      surface,
+      threshold: policy.repairFilingThreshold,
+      windowDays: policy.repairFilingWindowDays,
+      windowStart: new Date(windowStart).toISOString(),
+      windowEnd: new Date(windowEnd).toISOString(),
+      instances,
+      id: `fb-repair-${surface}-${bucket}`,
+    });
+  }
+  return due;
+}
+
+/** What {@link SweepDeps.captureRepairFeedback} is invoked with — the real wiring's exact
+ *  `captureFeedback` arguments (id + origin + raw), decoupled from `src/lib/feedback.ts`'s own
+ *  option shape so this module imports no effect from it (design ix). */
+export interface RepairFilingCapture {
+  id: string;
+  /** `repair#<surface>` — built by `runSweep` from {@link RepairFilingRecurrence.surface}. */
+  origin: string;
+  raw: string;
+}
+
+/**
+ * Render ONE due surface's evidence body (design v): the classified surface, the window/
+ * threshold that triggered filing, and — per repaired PR — the PR number/url, head sha and the
+ * disposition `reason` already ledgered for it (which, for a CI-failure surface, already names
+ * the failing check(s) + sha(s) `describeCiFailures` captured). NEVER invents a cause: root
+ * cause is explicitly stated as unobserved, since this fold only ever reports RECURRENCE.
+ */
+export function renderRepairFilingRaw(filing: RepairFilingRecurrence): string {
+  const lines = filing.instances.map(
+    (i) => `- PR #${i.prNumber} (${i.prUrl || "url not captured"}) at ${i.headSha ? i.headSha.slice(0, 7) : "sha not captured"}, ${i.ts}: ${i.reason}`,
+  );
+  return [
+    `SWEEP REPAIR RECURRENCE: the "${filing.surface}" surface was repaired for ${filing.instances.length} distinct PRs ` +
+      `between ${filing.windowStart} and ${filing.windowEnd} (threshold ${filing.threshold}, window ${filing.windowDays}d).`,
+    "",
+    "Root cause is UNOBSERVED — this is a recurrence report, not a diagnosis: the sweep classifies " +
+      "and repairs the INSTANCE (each PR below), it does not investigate why the CLASS keeps recurring.",
+    "",
+    "EVIDENCE (read verbatim off each PR's own sweep.disposed ledger row, never invented):",
+    ...lines,
+  ].join("\n");
+}
+
 const ZERO_COUNTS = (): Record<Disposition, number> => ({
   mergeable: 0,
   "blocked-fixable": 0,
@@ -2601,6 +2787,11 @@ export async function runSweep(
   // SweepSummary.actions}'s own doc promises while still letting reviews run
   // concurrently with each other.
   const actions: SweepAction[] = new Array(openPrs.length);
+  // W1-T905: this pass's OWN newly-appended `sweep.disposed` rows, mirrored here as they are
+  // written (never re-read from disk) so the repair-filing fold after the loop can see a
+  // recurrence that crossed threshold WITHIN this very pass — `ledgerLines` above was read
+  // before this pass's own writes and is never refreshed.
+  const passDisposedRows: Array<Record<string, unknown>> = [];
   let actionsTaken = 0;
   // W1-T99: counted distinctly from actionsTaken/noneCount so a caller can tell
   // "nothing to do" from "something threw" at a glance — see renderSweepSummary.
@@ -2701,7 +2892,7 @@ export async function runSweep(
     // UNANSWERED question stays ledgered on every subsequent sweep, even once
     // `acted` goes false (deduped: no repeat escalate()).
     if (!deps.dryRun) {
-      appendLine(deps.ledgerPath, {
+      const disposedLine = {
         run_id: deps.runId,
         task_id: pr.taskId ?? "SWEEP",
         step: "sweep.disposed",
@@ -2715,7 +2906,13 @@ export async function runSweep(
         ...(actionError ? { action_error: actionError } : {}),
         ...(standDownReason ? { stand_down_reason: standDownReason } : {}),
         ...(question ? { question: question.question } : {}),
-      });
+      };
+      appendLine(deps.ledgerPath, disposedLine);
+      // W1-T905: mirrored in-memory, with THIS PASS'S OWN `ts` (never re-read off disk — see
+      // `passDisposedRows`'s own doc) — `appendLine`/`appendLedger` stamp their own write-time
+      // `ts` on the real ledger line, which this never touches; the copy below exists solely so
+      // `dueRepairFilings` can see a same-pass recurrence without a second ledger read.
+      passDisposedRows.push({ ...disposedLine, ts: new Date(now).toISOString() });
     }
 
     if (acted) actionsTaken++;
@@ -3304,6 +3501,28 @@ export async function runSweep(
           head_sha: target.headSha,
           error: String((e as Error)?.message ?? e),
         });
+      }
+    }
+  }
+  // W1-T905 — "repair the instance, FILE THE CLASS". A PURE fold ({@link dueRepairFilings}) over
+  // this pass's own view of `sweep.disposed` (the ledger's prior rows PLUS this pass's own,
+  // mirrored above) followed by AT MOST ONE best-effort capture per due surface. `dryRun` and an
+  // unwired `captureRepairFeedback` both leave no trace, matching every other action in this
+  // module. Wrapped in the SAME per-PR throw containment the action switch already has (W1-T254,
+  // design viii): a capture/landing failure here must never fail the pass that produced the
+  // repairs it reports on, and never touches any OTHER PR's disposition this pass or any later
+  // one — the fold recomputes fresh from ledger state every call, with no memory of its own.
+  if (!deps.dryRun && deps.captureRepairFeedback) {
+    const due = dueRepairFilings([...ledgerLines, ...passDisposedRows], now, policy);
+    for (const filing of due) {
+      try {
+        await deps.captureRepairFeedback({
+          id: filing.id,
+          origin: `repair#${filing.surface}`,
+          raw: renderRepairFilingRaw(filing),
+        });
+      } catch (e) {
+        log("sweep.repair_filing.error", { surface: filing.surface, id: filing.id, error: String((e as Error)?.message ?? e) });
       }
     }
   }

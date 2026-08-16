@@ -119,9 +119,11 @@ import {
   type FixDispatchEvidence,
   type MergeConflictEvidence,
   type OpenPrView,
+  type RepairFilingCapture,
 } from "../src/lib/sweep.js";
 import type { Mount } from "../src/lib/mounts.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
+import { feedbackEntryPath, readFeedbackEntry } from "../src/lib/feedback.js";
 import { worktreesDir } from "../src/lib/worker.js";
 import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/worker.js";
 import { loadPlan } from "../src/lib/plan.js";
@@ -7107,6 +7109,49 @@ if (args[0] === "label" && args[1] === "create") {
     process.env.PATH = oldPath;
     rmSync(root, { recursive: true, force: true });
     rmSync(bin, { recursive: true, force: true });
+  }
+});
+
+// W1-T905: `buildSweepEffects`'s `captureRepairFeedbackImpl` default (unlike every other
+// injectable dep on this function) closes over the module-level `repoRoot` const directly —
+// there is no fixture-root seam for it, the SAME "UNREDIRECTABLE" shape
+// test/config-reader-seams.test.ts already documents for `repoRoot`/`loadDefaultPolicy()`
+// consumers. So, exactly like test/feedback-landing.test.ts's own "write a REAL entry into
+// THIS checkout's own plan/feedback/" precedent, this drives the DEFAULT wiring end to end
+// against the real checkout, with a fresh timestamped id so it can never collide, cleaned up
+// in `finally` regardless of outcome. `captureFeedback`'s own landing attempt is best-effort
+// and NEVER throws (feedback.ts's own doc); its force-push leg is refused outright by the
+// live-write guard under the test runner, so this never pushes or opens a PR against the
+// real repo — only the local `plan/feedback/<id>.yaml` write (feedback.ts's durable half)
+// is observable here, exactly what `readFeedbackEntry` below confirms.
+test("buildSweepEffects.captureRepairFeedback: the DEFAULT wiring (no override) runs the real existsSync dedup + real captureFeedback against repoRoot (W1-T905)", () => {
+  const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+  const id = `fb-repair-w1t905-coverage-${Date.now()}`;
+  const entryPath = feedbackEntryPath(REPO_ROOT, id);
+  assert.ok(!existsSync(entryPath), "sanity: this fresh, timestamped id must not already exist in this checkout");
+  try {
+    const effects = buildSweepEffects(
+      "acme", "remudero", { root: REPO_ROOT } as never, join(REPO_ROOT, "ledger.ndjson"), "SWEEP-COV-1",
+      { tasks: [] } as never,
+      () => {},
+    );
+    assert.ok(effects.captureRepairFeedback, "the default wiring must expose captureRepairFeedback");
+    const filing: RepairFilingCapture = { id, raw: "W1-T905 coverage fixture — repair#coverage-fixture", origin: "repair#coverage-fixture" };
+
+    effects.captureRepairFeedback!(filing);
+    assert.ok(existsSync(entryPath), "the DEFAULT captureRepairFeedbackImpl really wrote a real entry under repoRoot");
+    const entry = readFeedbackEntry(REPO_ROOT, id);
+    assert.equal(entry.status, "new");
+    assert.equal(entry.origin, "repair#coverage-fixture");
+    assert.equal(entry.raw, filing.raw);
+
+    // A SECOND call at the SAME id must hit the existsSync dedup and return without a second
+    // write — proving the guard line itself, not only the write beneath it.
+    const before = readFileSync(entryPath, "utf8");
+    effects.captureRepairFeedback!({ ...filing, raw: "a second, different raw body that must never land" });
+    assert.equal(readFileSync(entryPath, "utf8"), before, "the existsSync dedup must have skipped a second write");
+  } finally {
+    rmSync(entryPath, { force: true });
   }
 });
 
