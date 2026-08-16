@@ -12,5 +12,22 @@ raw: "FEEDBACK BRIDGE IS EDGE-TRIGGERED ONLY — feedback-landing lands captures
 attachments: []
 origin: cli
 status: proposed
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/1923
+summary:
+  headline: Feedback bridge ignores pre-existing untracked files
+  what_happened: Feedback-landing only processes files while actively running
+    (edge-triggered), leaving older untracked feedback/*.yaml filings
+    permanently stranded. On 2026-07-23, fb-b32f2b filed at 14:48Z was never
+    landed; later fb-cdcf8b filed at 15:45Z was successfully processed.
+  decision: Add boot-time and periodic level-triggered sweeps of all untracked
+    plan/feedback/*.yaml to reconcile pre-existing backlog.
+  options:
+    - label: Full sweep + periodic reconciliation
+      consequence: Boot and periodic sweeps catch all existing and future stragglers;
+        prevents repeating the escalation-channel design mistake.
+    - label: Boot-time sweep only (no periodic)
+      consequence: Clears initial backlog but leaves gaps if feedback-landing restarts
+        without coverage between sweeps.
+    - label: Manually recover stranded filings now
+      consequence: Fixes fb-b32f2b and similar cases immediately but doesn't prevent
+        future occurrences of same problem.
