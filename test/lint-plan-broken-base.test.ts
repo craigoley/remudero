@@ -30,17 +30,11 @@ import { lintPlanCommand } from "../src/run-task.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-// `commit-tree` refuses without an author/committer identity, and CI runners carry none —
-// unlike a developer's machine, which usually has `user.name`/`user.email` set globally. Every
-// other fixture in this suite that mints a real commit (e.g. inbox-approve.test.ts) sets these
-// explicitly for the same reason; this is not a signing identity, just a label on an unreachable,
-// gc-reaped commit.
-const GIT_IDENTITY_ENV = {
-  GIT_AUTHOR_NAME: "t",
-  GIT_AUTHOR_EMAIL: "t@t",
-  GIT_COMMITTER_NAME: "t",
-  GIT_COMMITTER_EMAIL: "t@t",
-};
+/** The fixture's OWN committer. `commit-tree` refuses with "Author identity unknown" when neither
+ *  the repo nor the global config names one, and `actions/checkout` configures neither — so this
+ *  fixture passed on every developer machine and failed on every CI runner, taking three unrelated
+ *  PRs to `blocked_ci` with it. Supplying an identity here is what makes it self-sufficient. */
+const FIXTURE_IDENTITY = { name: "remudero test fixture", email: "fixture@remudero.invalid" };
 
 function git(args: string[], env?: NodeJS.ProcessEnv): string {
   return execFileSync("git", args, {
@@ -92,10 +86,31 @@ function baseCommitWithDuplicate(id: string): string {
     }).trim();
     git(["update-index", "--add", "--cacheinfo", `100644,${blob},plan/tasks.d/zzz-planted-duplicate.yaml`], env);
     const tree = git(["write-tree"], env);
-    return git(
-      ["commit-tree", tree, "-p", "HEAD", "-m", "planted: a base carrying a duplicate id"],
-      GIT_IDENTITY_ENV,
+    // IDENTITY IS SUPPLIED, NOT BORROWED. `commit-tree` refuses with "Author identity unknown"
+    // when neither the repo nor the global config names one, and `actions/checkout` configures
+    // NEITHER — so this fixture passed on every developer machine and failed on every CI runner,
+    // taking three unrelated PRs to `blocked_ci` with it. Reproduced locally by unsetting the
+    // repo's user.email/user.name: `# fail 1`, this test, the other two green. Passing the four
+    // env vars git already honours makes the fixture self-sufficient, so it depends on nothing
+    // the checkout happens to have configured.
+    const sha = git(["commit-tree", tree, "-p", "HEAD", "-m", "planted: a base carrying a duplicate id"], {
+      GIT_AUTHOR_NAME: FIXTURE_IDENTITY.name,
+      GIT_AUTHOR_EMAIL: FIXTURE_IDENTITY.email,
+      GIT_COMMITTER_NAME: FIXTURE_IDENTITY.name,
+      GIT_COMMITTER_EMAIL: FIXTURE_IDENTITY.email,
+    });
+    // THE ASSERTION THAT WOULD HAVE CAUGHT THIS. Delete the four env vars above and this fails
+    // two different ways, both real: on a host with a configured identity the commit is authored
+    // by THAT identity and the equality below breaks, and on a host without one `commit-tree`
+    // refuses outright and there is no sha to read. Either way the fixture stops depending
+    // silently on whatever the checkout happened to configure.
+    assert.match(sha, /^[0-9a-f]{40}$/, "commit-tree must return a real commit sha");
+    assert.equal(
+      git(["show", "-s", "--format=%ae", sha]),
+      FIXTURE_IDENTITY.email,
+      "the base commit must be authored by the fixture's OWN identity, never one borrowed from the checkout",
     );
+    return sha;
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
