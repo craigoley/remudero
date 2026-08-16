@@ -8,7 +8,7 @@ import {
   checkRunsRestArgs,
   combinedStatusRestArgs,
   createGhCallPacer,
-  DEFAULT_GH_PACE_LOW_REMAINING_FLOOR,
+  DEFAULT_GH_PACE_LOW_WATER_FRACTION,
   DEFAULT_GH_PACE_MIN_GAP_MS,
   DEFAULT_GH_PACE_RATE_LIMIT_GAP_MS,
   fetchOpenPrsRest,
@@ -649,12 +649,58 @@ test("W1-T525: a low remaining reading widens the pacer without any failure", ()
   const clock = fakeClock();
   const pacer = createGhCallPacer({ now: clock.now, sleepSync: clock.sleepSync, minGapMs: 1000, rateLimitGapMs: 9000 });
   pacer.wait(); // t=0
-  // A clean call (`rateLimited: false`) that nonetheless carried a low remaining reading.
-  assert.ok(1 <= DEFAULT_GH_PACE_LOW_REMAINING_FLOOR, "the test reading must actually be AT/BELOW the floor it exercises");
-  pacer.recordResult(false, 1);
+  // A clean call (`rateLimited: false`) that nonetheless carried a low IN-BUCKET reading.
+  const low = { remaining: 400, limit: 5000, resource: "core" };
+  assert.ok(
+    low.remaining <= low.limit * DEFAULT_GH_PACE_LOW_WATER_FRACTION,
+    "the test reading must actually be AT/BELOW the share of its OWN bucket that the pacer compares against",
+  );
+  pacer.recordResult(false, low);
   clock.advance(500);
   pacer.wait();
   assert.deepEqual(clock.sleeps, [8500], "the widened 9000ms gap governs — a low reading alone widened it, with zero failures recorded");
+});
+
+test("W1-T525: the low-water mark is read per bucket, so a full small bucket does not widen and a drained large one does", () => {
+  // THE POINT OF CARRYING `resource` AND `limit` RATHER THAN A BARE NUMBER. `search` caps at 30
+  // and `core` at 5,000, so no single absolute floor is right for both: a floor of 100 would widen
+  // on a COMPLETELY FULL search bucket, and would not widen on a core bucket down to its last 2%.
+  const full = { remaining: 30, limit: 30, resource: "search" };
+  const drained = { remaining: 400, limit: 5000, resource: "core" };
+
+  const a = fakeClock();
+  const p1 = createGhCallPacer({ now: a.now, sleepSync: a.sleepSync, minGapMs: 1000, rateLimitGapMs: 9000 });
+  p1.wait();
+  p1.recordResult(false, full);
+  a.advance(500);
+  p1.wait();
+  assert.deepEqual(a.sleeps, [500], "a FULL search bucket (30/30) stays at the narrow gap — an absolute floor of 100 would have widened it");
+
+  const b = fakeClock();
+  const p2 = createGhCallPacer({ now: b.now, sleepSync: b.sleepSync, minGapMs: 1000, rateLimitGapMs: 9000 });
+  p2.wait();
+  p2.recordResult(false, drained);
+  b.advance(500);
+  p2.wait();
+  assert.deepEqual(b.sleeps, [8500], "a core bucket at 400/5000 (8%) widens — below its OWN tenth, though far above any small-bucket floor");
+});
+
+test("W1-T525: a reading with no usable denominator never widens the pacer on its own", () => {
+  // FAIL TOWARD NOT WIDENING. A limit of 0 carries no share to compare against; treating it as
+  // "0 >= remaining" would widen on every single call and silently halve the fleet's throughput.
+  const clock = fakeClock();
+  const pacer = createGhCallPacer({ now: clock.now, sleepSync: clock.sleepSync, minGapMs: 1000, rateLimitGapMs: 9000 });
+  pacer.wait();
+  pacer.recordResult(false, { remaining: 0, limit: 0, resource: "unknown" });
+  clock.advance(500);
+  pacer.wait();
+  assert.deepEqual(clock.sleeps, [500], "no denominator, no proactive widening");
+
+  // FALSIFIER: the reactive arm is untouched — a real rate-limit failure still widens.
+  pacer.recordResult(true, { remaining: 0, limit: 0, resource: "unknown" });
+  clock.advance(500);
+  pacer.wait();
+  assert.deepEqual(clock.sleeps, [500, 8500], "a classified rate-limit failure widens regardless of the reading");
 });
 
 test("W1-T525: the free budget probe is never used as the floor's source", () => {
