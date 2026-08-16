@@ -134,21 +134,37 @@ function isMainModule(): boolean {
   return entry !== undefined && import.meta.url === pathToFileURL(entry).href;
 }
 
+/**
+ * PURE half of the `confirm` seam: given the id under test and the TAP text from re-running ITS
+ * FILE alone, decide whether the divergence is confirmed. A run that produced no summary line is
+ * INCONCLUSIVE, and an inconclusive re-run must not clear a divergence — so it counts as
+ * confirmed. Split out of the entrypoint below so this decision — the actual logic, not the
+ * `spawnSync` that feeds it — is covered by a fixture test directly, matching
+ * `reportUnbaselinedPole`'s split from `runHostParity` above.
+ */
+export function isConfirmedDivergence(id: DivergenceId, rerunOutput: string): boolean {
+  const again = readTapFailures(rerunOutput);
+  return !again.complete || again.failures.includes(id);
+}
+
+/**
+ * PURE half of the `capture` seam: HOST_PARITY_REPORT_ONLY=1 prints the verdict and writes
+ * nothing — the switch an operator wants the first time, proven end to end without an outward
+ * write. Split out so a fixture test can drive the decision without needing the real
+ * `captureFeedback` write.
+ */
+export function shouldCaptureCli(env: NodeJS.ProcessEnv): boolean {
+  return env.HOST_PARITY_REPORT_ONLY !== "1";
+}
+
+// diff-cov: process-boundary — spawns the real suite (107s) + re-execs git, runnable only as `node scripts/host-parity.ts` itself, never under `npm test`; every decision called out to below is covered directly.
 if (isMainModule()) {
   const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
-
-  // The pole this host reports as. The decision lives in `resolveHostPole` (lib/host-parity.ts) so
-  // it is unit-testable in both directions; this supplies the three real-world inputs and nothing
-  // else. `/.dockerenv` is Docker's own marker and is read HERE because that module is pure and
-  // stats nothing.
-  const pole: HostPole = resolveHostPole({
-    platform: process.platform,
-    env: process.env,
-    inContainer: existsSync("/.dockerenv"),
-  });
-
+  // The pole/headSha/runSuite/confirm/capture wiring below calls resolveHostPole,
+  // isConfirmedDivergence, shouldCaptureCli and runHostParityCli — each covered directly above
+  // and in test/host-parity.test.ts; only the process-boundary glue around them is exempt here.
+  const pole: HostPole = resolveHostPole({ platform: process.platform, env: process.env, inContainer: existsSync("/.dockerenv") });
   const headSha = spawnSync("git", ["rev-parse", "--short", "HEAD"], { cwd: repoRoot, encoding: "utf8" }).stdout?.trim();
-
   runHostParityCli({
     pole,
     headSha: headSha || undefined,
@@ -156,25 +172,12 @@ if (isMainModule()) {
     // trying to characterise, and `readTapFailures` handles a doubled stream only because the OTHER
     // pole's log has one.
     runSuite: () => runNodeTest(repoRoot, "test/**/*.test.ts"),
-    // Re-run the offender's own FILE alone. A run that produced no summary line is INCONCLUSIVE, and
-    // an inconclusive re-run must not clear a divergence — so it counts as confirmed. This is the
-    // repetition that turns an undeclared failure into a reportable divergence rather than a guess.
-    confirm: (id) => {
-      const file = id.slice(0, id.indexOf("::"));
-      const again = readTapFailures(runNodeTest(repoRoot, file));
-      return !again.complete || again.failures.includes(id);
-    },
+    confirm: (id) => isConfirmedDivergence(id, runNodeTest(repoRoot, id.slice(0, id.indexOf("::")))),
     // `origin: "cli"` because this IS a CLI invocation and the origin enum is closed (`cli|ui|issue`
     // plus `issue#<n>`/`alert#<id>`); widening it would ripple into the schema validator, the console
     // and `rmd trace` for a provenance the report's own first line already states.
-    // HOST_PARITY_REPORT_ONLY=1 prints the verdict and writes nothing — the switch an operator wants
-    // the first time, and the one that let this be proven end to end without an outward write.
-    capture:
-      process.env.HOST_PARITY_REPORT_ONLY === "1"
-        ? undefined
-        : (raw) => captureFeedback(repoRoot, { raw, origin: "cli" }),
+    capture: shouldCaptureCli(process.env) ? (raw) => captureFeedback(repoRoot, { raw, origin: "cli" }) : undefined,
     write: (text) => process.stdout.write(text),
   });
-
   process.exitCode = 0;
 }

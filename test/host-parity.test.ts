@@ -30,7 +30,12 @@ import {
   runHostParity,
   type DeclaredDivergence,
 } from "../src/lib/host-parity.js";
-import { reportUnbaselinedPole, runHostParityCli } from "../scripts/host-parity.js";
+import {
+  isConfirmedDivergence,
+  reportUnbaselinedPole,
+  runHostParityCli,
+  shouldCaptureCli,
+} from "../scripts/host-parity.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -361,6 +366,37 @@ test("the parity runner is reachable from a caller that actually runs", () => {
   assert.match(written[0] ?? "", /NEW DIVERGENCE on mini/);
   assert.match(written[0] ?? "", /abc1234/, "the headSha the caller was given must reach the printed report");
   assert.equal(unbaselined, false, "mini has declared entries in the real baseline, so this run is not unbaselined");
+});
+
+// ── THE TWO PURE HALVES THE REAL CLI ENTRYPOINT SPLITS OFF ───────────────────────────────────
+//
+// `isMainModule()`'s guarded block spawns the real suite and re-execs git — neither is safe to
+// run from this suite (the former would recursively re-run the whole suite it is itself part
+// of). The decision logic it delegates to is pulled out into these two pure functions precisely
+// so it can be covered here instead, leaving only irreducible process-boundary glue behind the
+// `// diff-cov: process-boundary` directive in scripts/host-parity.ts.
+
+test("isConfirmedDivergence: a re-run that still names the id is confirmed", () => {
+  assert.equal(isConfirmedDivergence(id(NOVEL), tap([NOVEL])), true);
+});
+
+test("isConfirmedDivergence: a re-run that passes clean is NOT confirmed", () => {
+  assert.equal(isConfirmedDivergence(id(NOVEL), tap([])), false);
+});
+
+test("isConfirmedDivergence: a truncated re-run (no summary) is treated as confirmed, not cleared", () => {
+  // INCONCLUSIVE must not clear a divergence — the same discipline `readTapFailures` enforces for
+  // a killed run above, just observed through the CLI's own confirm seam this time.
+  assert.equal(isConfirmedDivergence(id(NOVEL), tap([NOVEL], { summary: false })), true);
+});
+
+test("shouldCaptureCli: HOST_PARITY_REPORT_ONLY=1 means print-only, so capture is false", () => {
+  assert.equal(shouldCaptureCli({ HOST_PARITY_REPORT_ONLY: "1" }), false);
+});
+
+test("shouldCaptureCli: any other value or an unset env writes for real", () => {
+  assert.equal(shouldCaptureCli({}), true);
+  assert.equal(shouldCaptureCli({ HOST_PARITY_REPORT_ONLY: "0" }), true);
 });
 
 // ── PART TWO: SIBLING JOBS ON ONE SHA ─────────────────────────────────────────────────────────
