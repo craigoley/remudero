@@ -367,6 +367,7 @@ import {
   declarationCountsByPath,
   rareOverlapWarnings,
   type OpenPrFileScope,
+  type RareOverlapWarning,
 } from "./lib/dispatch-overlap.js";
 import {
   assertLintClean,
@@ -9015,10 +9016,11 @@ export function openPrFileScopes(
  * W1-T917 — the human-facing lines. Each names the OPEN PR and the SHARED RARE PATH, because those
  * two facts are what change a filer's next move; a count would not.
  */
-export function rareOverlapWarningLines(warnings: ReadonlyArray<{ prId: string; rarestPath: string; declaringShards: number }>): string[] {
+export function rareOverlapWarningLines(warnings: readonly RareOverlapWarning[]): string[] {
   return warnings.map(
     (w) =>
-      `(heads up: ${w.prId} is already open and touches ${w.rarestPath}, declared by only ${w.declaringShards} shard(s) — check it is not the same job)`,
+      `(heads up: ${w.withPr} is already open and touches ${w.rarestPath}, declared by only ` +
+      `${w.declaredByCount} of ${w.totalShardCount} shards — check it is not the same job)`,
   );
 }
 
@@ -9063,7 +9065,7 @@ export function overlapWarningLinesFor(
       plan.tasks.length,
       DEFAULT_OVERLAP_WARNING_POLICY,
     );
-    return rareOverlapWarningLines(warnings as ReadonlyArray<{ prId: string; rarestPath: string; declaringShards: number }>);
+    return rareOverlapWarningLines(warnings);
   } catch {
     return [];
   }
