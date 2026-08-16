@@ -1,0 +1,527 @@
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test } from "node:test";
+import { runOperatorSync, type GitRunner } from "../src/lib/operator-sync.js";
+import { syncCommand } from "../src/run-task.js";
+
+const DECISIONS_FILE_NAME = "DECISIONS.md";
+
+// ── W1-T907: `rmd sync` — the sanctioned dedupe-then-pull recipe as one explicit verb.
+// Same discipline as test/self-sync.test.ts (real, throwaway git repos, no git mocking): every
+// assertion below drives ACTUAL git plumbing (fetch, hash-object, rev-parse, status --porcelain,
+// merge-base --is-ancestor, merge --ff-only) so a "did not refuse" pass can never stand in for
+// "the ref actually advanced" (design (viii)).
+
+function gitFixture(): { originDir: string; localDir: string } {
+  const root = mkdtempSync(join(tmpdir(), "rmd-operator-sync-"));
+  const originDir = join(root, "origin");
+  const localDir = join(root, "local");
+  mkdirSync(join(originDir, "plan", "feedback"), { recursive: true });
+  const git = (dir: string, args: string[]) => execFileSync("git", args, { cwd: dir, encoding: "utf8" });
+  git(originDir, ["init", "--quiet", "-b", "main"]);
+  git(originDir, ["config", "user.email", "test@example.com"]);
+  git(originDir, ["config", "user.name", "Test"]);
+  writeFileSync(join(originDir, "plan", "tasks.yaml"), "orig: base\n", "utf8");
+  writeFileSync(join(originDir, "DECISIONS.md"), "# decisions\n", "utf8");
+  git(originDir, ["add", "."]);
+  git(originDir, ["commit", "--quiet", "-m", "init"]);
+  execFileSync("git", ["clone", "--quiet", originDir, localDir], { encoding: "utf8" });
+  git(localDir, ["config", "user.email", "test@example.com"]);
+  git(localDir, ["config", "user.name", "Test"]);
+  return { originDir, localDir };
+}
+
+function commitOnOrigin(originDir: string, relPath: string, content: string, message: string): void {
+  const full = join(originDir, relPath);
+  mkdirSync(join(full, ".."), { recursive: true });
+  writeFileSync(full, content, "utf8");
+  execFileSync("git", ["add", "."], { cwd: originDir });
+  execFileSync("git", ["commit", "--quiet", "-m", message], { cwd: originDir });
+}
+
+function headSha(dir: string): string {
+  return execFileSync("git", ["-C", dir, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+}
+
+/** Real, repoDir-scoped git runner + recording say/warn spies — mirrors test/self-sync.test.ts's
+ *  spies() helper. */
+function spies(localDir: string) {
+  const sayCalls: string[] = [];
+  const warnCalls: string[] = [];
+  const realGit: GitRunner = (args) => execFileSync("git", ["-C", localDir, ...args], { encoding: "utf8" });
+  return {
+    sayCalls,
+    warnCalls,
+    deps: {
+      git: realGit,
+      say: (msg: string) => sayCalls.push(msg),
+      warn: (msg: string) => warnCalls.push(msg),
+    },
+  };
+}
+
+// ── AC1: an untracked byte-identical file is discarded and the ff-pull advances HEAD ────────
+
+test("runOperatorSync: an untracked file whose bytes equal the origin/main blob at that path is removed, and the ff-pull then advances HEAD to origin/main", () => {
+  const { originDir, localDir } = gitFixture();
+  const oldSha = headSha(localDir);
+  // The exact incident shape from the rationale: the landing bridge already committed this path
+  // on origin/main, and the checkout independently carries an untracked copy with IDENTICAL bytes
+  // (e.g. daemon exhaust that was also captured upstream).
+  commitOnOrigin(originDir, "plan/feedback/abc.yaml", "entry: abc\n", "land abc");
+  mkdirSync(join(localDir, "plan", "feedback"), { recursive: true });
+  writeFileSync(join(localDir, "plan", "feedback", "abc.yaml"), "entry: abc\n", "utf8");
+
+  const { sayCalls, warnCalls, deps } = spies(localDir);
+  const result = runOperatorSync(localDir, {}, deps);
+
+  assert.equal(result.status, "synced");
+  const newSha = headSha(localDir);
+  assert.notEqual(newSha, oldSha, "HEAD must have actually advanced");
+  assert.equal(newSha, headSha(originDir), "HEAD must land exactly on origin/main's sha");
+  assert.equal(
+    readFileSync(join(localDir, "plan", "feedback", "abc.yaml"), "utf8"),
+    "entry: abc\n",
+    "the ff-merge re-creates the path with origin's bytes",
+  );
+  assert.equal(warnCalls.length, 0, "no refusal on the happy path");
+  assert.ok(sayCalls.some((l) => /discarded 1 byte-identical/.test(l)));
+  if (result.status === "synced") {
+    assert.deepEqual(result.discarded, ["plan/feedback/abc.yaml"]);
+    assert.deepEqual(result.preserved, []);
+  }
+});
+
+// ── AC2: a divergent dirty file is never deleted, always preserved aside first ──────────────
+
+test("runOperatorSync: an untracked file with NO origin/main counterpart is never deleted -- copied to the preserve directory and named in the report, left in place, and the unrelated ff still succeeds", () => {
+  const { originDir, localDir } = gitFixture();
+  commitOnOrigin(originDir, "plan/tasks.yaml", "orig: published\n", "publish");
+  mkdirSync(join(localDir, "scratch"), { recursive: true });
+  writeFileSync(join(localDir, "scratch", "local-only.txt"), "MINE\n", "utf8");
+
+  const { deps } = spies(localDir);
+  const result = runOperatorSync(localDir, {}, deps);
+
+  assert.equal(result.status, "synced");
+  assert.equal(headSha(localDir), headSha(originDir), "the ff still advances -- this file never blocked it");
+  assert.equal(
+    readFileSync(join(localDir, "scratch", "local-only.txt"), "utf8"),
+    "MINE\n",
+    "never deleted -- the file the sync never needed to touch is left exactly where it was",
+  );
+  if (result.status === "synced") {
+    assert.equal(result.preserved.length, 1);
+    assert.equal(result.preserved[0].path, "scratch/local-only.txt");
+    assert.match(result.preserved[0].reason, /no origin\/main counterpart/);
+    assert.ok(result.reportPath, "a report path must be named");
+    const preservedCopy = join(result.reportPath as string, "scratch", "local-only.txt");
+    assert.equal(readFileSync(preservedCopy, "utf8"), "MINE\n", "the preserved COPY carries the original bytes");
+    const report = readFileSync(join(result.reportPath as string, "report.md"), "utf8");
+    assert.match(report, /scratch\/local-only\.txt/, "the report names the preserved path");
+  }
+});
+
+test("runOperatorSync: a TRACKED file whose local bytes differ from the origin/main blob at that (incoming) path is preserved aside BEFORE the ff clears it -- never overwritten in place", () => {
+  const { originDir, localDir } = gitFixture();
+  commitOnOrigin(originDir, "plan/tasks.yaml", "orig: published\n", "publish");
+  // Local dirties the SAME tracked path the incoming diff also changes, with DIFFERENT bytes.
+  writeFileSync(join(localDir, "plan", "tasks.yaml"), "orig: local-edit\n", "utf8");
+
+  const { deps } = spies(localDir);
+  const result = runOperatorSync(localDir, {}, deps);
+
+  assert.equal(result.status, "synced");
+  assert.equal(headSha(localDir), headSha(originDir));
+  assert.equal(
+    readFileSync(join(localDir, "plan", "tasks.yaml"), "utf8"),
+    "orig: published\n",
+    "the working copy ends on origin's content -- the ff needed this path and cleared it AFTER preserving",
+  );
+  if (result.status === "synced") {
+    assert.equal(result.preserved.length, 1);
+    assert.equal(result.preserved[0].path, "plan/tasks.yaml");
+    assert.match(result.preserved[0].reason, /differs from the origin\/main blob/);
+    const preservedCopy = join(result.reportPath as string, "plan", "tasks.yaml");
+    assert.equal(
+      readFileSync(preservedCopy, "utf8"),
+      "orig: local-edit\n",
+      "the LOCAL edit survives, byte for byte, under the preserve directory -- nothing unlanded was lost",
+    );
+  }
+});
+
+// ── AC3: DECISIONS.md is preserve-and-diff by heading (W1-T191) ─────────────────────────────
+
+test("runOperatorSync: a locally-appended DECISIONS.md is RESTORED to origin when every appended heading is already on origin/main", () => {
+  const { originDir, localDir } = gitFixture();
+  commitOnOrigin(originDir, "DECISIONS.md", "# decisions\n## RECORD-1\nAlready landed.\n", "land RECORD-1");
+  // Local independently appended the SAME record (e.g. its own auto-log ran before it pulled).
+  writeFileSync(join(localDir, "DECISIONS.md"), "# decisions\n## RECORD-1\nAlready landed.\n", "utf8");
+
+  const { deps } = spies(localDir);
+  const result = runOperatorSync(localDir, {}, deps);
+
+  assert.equal(result.status, "synced");
+  assert.equal(headSha(localDir), headSha(originDir));
+  assert.equal(
+    readFileSync(join(localDir, "DECISIONS.md"), "utf8"),
+    "# decisions\n## RECORD-1\nAlready landed.\n",
+    "restored to exactly origin's landed copy",
+  );
+  if (result.status === "synced") {
+    assert.deepEqual(result.discarded, ["DECISIONS.md"]);
+    assert.deepEqual(result.preserved, []);
+  }
+});
+
+test("runOperatorSync: a locally-appended DECISIONS.md record ABSENT from origin/main is preserved aside with the absent heading named, and is never deleted", () => {
+  const { originDir, localDir } = gitFixture();
+  // Origin advances a DIFFERENT, unrelated path -- DECISIONS.md itself is untouched upstream, so
+  // the local append is genuinely unlanded (not merely lagging the bridge).
+  commitOnOrigin(originDir, "plan/tasks.yaml", "orig: published\n", "publish");
+  writeFileSync(join(localDir, "DECISIONS.md"), "# decisions\n## RECORD-2\nNot landed yet.\n", "utf8");
+
+  const { deps } = spies(localDir);
+  const result = runOperatorSync(localDir, {}, deps);
+
+  assert.equal(result.status, "synced");
+  assert.equal(headSha(localDir), headSha(originDir));
+  assert.equal(
+    readFileSync(join(localDir, "DECISIONS.md"), "utf8"),
+    "# decisions\n## RECORD-2\nNot landed yet.\n",
+    "never deleted or overwritten -- DECISIONS.md was not part of the incoming diff, so nothing needed to clear it",
+  );
+  if (result.status === "synced") {
+    assert.equal(result.preserved.length, 1);
+    assert.equal(result.preserved[0].path, "DECISIONS.md");
+    assert.match(result.preserved[0].reason, /## RECORD-2/, "the absent record is named BY HEADING");
+    const preservedCopy = join(result.reportPath as string, "DECISIONS.md");
+    assert.equal(readFileSync(preservedCopy, "utf8"), "# decisions\n## RECORD-2\nNot landed yet.\n");
+  }
+});
+
+// ── AC4: BLOCKING -- a true history divergence refuses the whole verb ───────────────────────
+
+test("runOperatorSync: a local commit that is not an ancestor of origin/main refuses the WHOLE verb -- no file removed, no file moved, HEAD unchanged", () => {
+  const { originDir, localDir } = gitFixture();
+  commitOnOrigin(originDir, "plan/tasks.yaml", "orig: published-on-origin\n", "publish");
+  // Local makes its OWN unpublished commit -- a real, non-ff divergence.
+  writeFileSync(join(localDir, "plan", "tasks.yaml"), "orig: local-only-commit\n", "utf8");
+  execFileSync("git", ["-C", localDir, "add", "."]);
+  execFileSync("git", ["-C", localDir, "commit", "--quiet", "-m", "local work"]);
+  const oldSha = headSha(localDir);
+  // Byte-identical dirt too, to prove even provably-lossless discards never run on this branch.
+  mkdirSync(join(localDir, "plan", "feedback"), { recursive: true });
+  writeFileSync(join(localDir, "plan", "feedback", "abc.yaml"), "untouched\n", "utf8");
+
+  const { sayCalls, warnCalls, deps } = spies(localDir);
+  const result = runOperatorSync(localDir, {}, deps);
+
+  assert.equal(result.status, "refused");
+  if (result.status === "refused") assert.equal(result.reason, "blocking");
+  assert.equal(headSha(localDir), oldSha, "HEAD must not move");
+  assert.equal(
+    readFileSync(join(localDir, "plan", "tasks.yaml"), "utf8"),
+    "orig: local-only-commit\n",
+    "the local commit's content survives untouched",
+  );
+  assert.ok(existsSync(join(localDir, "plan", "feedback", "abc.yaml")), "no file removed on this branch");
+  assert.equal(sayCalls.length, 0, "no plan printed -- nothing was classified");
+  assert.equal(warnCalls.length, 1);
+  assert.ok(!existsSync(join(localDir, "state")), "no preserve directory written on this branch");
+});
+
+// ── AC5: --dry-run prints the identical plan and mutates nothing ────────────────────────────
+
+test("runOperatorSync: --dry-run prints the same three-way classification and mutates nothing -- no deletion, no preserve copy, HEAD unchanged", () => {
+  const { originDir, localDir } = gitFixture();
+  const oldSha = headSha(localDir);
+  commitOnOrigin(originDir, "plan/feedback/abc.yaml", "entry: abc\n", "land abc");
+  mkdirSync(join(localDir, "plan", "feedback"), { recursive: true });
+  writeFileSync(join(localDir, "plan", "feedback", "abc.yaml"), "entry: abc\n", "utf8"); // identical
+  mkdirSync(join(localDir, "scratch"), { recursive: true });
+  writeFileSync(join(localDir, "scratch", "local-only.txt"), "MINE\n", "utf8"); // divergent
+
+  const { sayCalls, warnCalls, deps } = spies(localDir);
+  const result = runOperatorSync(localDir, { dryRun: true }, deps);
+
+  assert.equal(result.status, "dry-run");
+  assert.equal(headSha(localDir), oldSha, "HEAD unchanged");
+  assert.ok(existsSync(join(localDir, "plan", "feedback", "abc.yaml")), "identical file not deleted");
+  assert.ok(existsSync(join(localDir, "scratch", "local-only.txt")), "divergent file not touched");
+  assert.ok(!existsSync(join(localDir, "state")), "no preserve directory written in dry-run");
+  assert.equal(warnCalls.length, 0);
+  if (result.status === "dry-run") {
+    assert.deepEqual(result.identical, ["plan/feedback/abc.yaml"]);
+    assert.equal(result.preserved.length, 1);
+    assert.equal(result.preserved[0].path, "scratch/local-only.txt");
+  }
+  assert.ok(sayCalls.some((l) => /--dry-run/.test(l)));
+  assert.ok(sayCalls.some((l) => /Nothing was mutated/.test(l)));
+});
+
+// ── Off-main refusal (design (vi)): same rule W1-T445 established for the CLI entry guard ───
+
+test("runOperatorSync: an off-main checkout refuses -- never moves a ref that is not main", () => {
+  const { originDir, localDir } = gitFixture();
+  commitOnOrigin(originDir, "plan/tasks.yaml", "orig: published\n", "publish");
+  execFileSync("git", ["-C", localDir, "checkout", "--quiet", "-b", "feature"]);
+  const oldSha = headSha(localDir);
+
+  const { warnCalls, deps } = spies(localDir);
+  const result = runOperatorSync(localDir, {}, deps);
+
+  assert.equal(result.status, "refused");
+  if (result.status === "refused") assert.equal(result.reason, "off-main");
+  assert.equal(headSha(localDir), oldSha, "HEAD must not move");
+  assert.equal(warnCalls.length, 1);
+  assert.match(warnCalls[0], /not `main`/);
+});
+
+// ── Already up to date: a total no-op ────────────────────────────────────────────────────────
+
+test("runOperatorSync: already up to date with origin/main is a total no-op", () => {
+  const { localDir } = gitFixture();
+  const oldSha = headSha(localDir);
+  const { sayCalls, warnCalls, deps } = spies(localDir);
+  const result = runOperatorSync(localDir, {}, deps);
+  assert.equal(result.status, "up-to-date");
+  assert.equal(headSha(localDir), oldSha);
+  assert.equal(warnCalls.length, 0);
+  assert.equal(sayCalls.length, 1);
+});
+
+// ── `syncCommand` — main()'s wrapper: arg validation + exit-code translation only ───────────
+// (the git-driving logic is exercised directly above, against a fixture, never via this
+// process's OWN checkout — see syncCommand's own doc for why repoDir/deps are injectable.)
+
+test("syncCommand: an unexpected argument fails loud -- usage printed, exit 2, no git ever run", () => {
+  const errCalls: string[] = [];
+  const originalError = console.error;
+  console.error = (msg?: unknown) => {
+    errCalls.push(String(msg));
+  };
+  let gitCalled = false;
+  try {
+    const code = syncCommand(["--bogus"], {
+      repoDir: "/does-not-matter",
+      deps: { git: (() => ((gitCalled = true), "")) as GitRunner },
+    });
+    assert.equal(code, 2);
+    assert.ok(errCalls.some((l) => /unexpected argument '--bogus'/.test(l)));
+  } finally {
+    console.error = originalError;
+  }
+  assert.equal(gitCalled, false, "a bad-arg refusal must spawn nothing -- not even one git call");
+});
+
+test("syncCommand: translates runOperatorSync's status into main()'s exit code -- synced/up-to-date -> 0, refused/degraded -> 1", () => {
+  const { originDir, localDir } = gitFixture();
+  commitOnOrigin(originDir, "plan/tasks.yaml", "orig: published\n", "publish");
+  const { deps } = spies(localDir);
+
+  const okCode = syncCommand([], { repoDir: localDir, deps });
+  assert.equal(okCode, 0, "a real synced run must exit 0");
+
+  // Already up to date now (the run above advanced it) -- still 0.
+  const alreadyCode = syncCommand([], { repoDir: localDir, deps });
+  assert.equal(alreadyCode, 0);
+
+  // A genuinely blocked repo must exit 1 -- off-main AND still behind (headSha !== originSha),
+  // so the branch check actually gets reached instead of the up-to-date short-circuit.
+  execFileSync("git", ["-C", localDir, "checkout", "--quiet", "-b", "feature"]);
+  commitOnOrigin(originDir, "plan/tasks.yaml", "orig: published-again\n", "publish again");
+  const offMainCode = syncCommand([], { repoDir: localDir, deps });
+  assert.equal(offMainCode, 1, "an off-main refusal must exit non-zero");
+});
+
+// ── W1-T907 (diff-coverage repair): the DEFAULT seam and every catch arm. The tests above inject a
+// `git` runner, so `defaultGit` and the five failure arms were unreachable — the exact shape
+// CLAUDE.md warns about ("when every test injects a fake, the seam's DEFAULT implementation and each
+// catch arm are unreachable"). These drive them for real.
+
+/** A GitRunner that succeeds by default and throws for whichever subcommand the test names. */
+function throwingOn(match: (args: string[]) => boolean, ok: (args: string[]) => string = () => ""): GitRunner {
+  return (args) => {
+    if (match(args)) throw new Error(`stub refusal: git ${args.join(" ")}`);
+    return ok(args);
+  };
+}
+
+test("W1-T907: the real default git runner is used when no runner is injected", () => {
+  // NO deps.git — this is the only test that exercises `defaultGit`, which every other test replaces.
+  // The fixture has no `origin` remote, so the real `git fetch origin` genuinely fails and the
+  // fetch-failed arm is reached through the real seam rather than a stub.
+  const root = mkdtempSync(join(tmpdir(), "rmd-operator-sync-default-"));
+  execFileSync("git", ["-C", root, "init", "--quiet", "-b", "main"]);
+  execFileSync("git", ["-C", root, "config", "user.email", "t@example.com"]);
+  execFileSync("git", ["-C", root, "config", "user.name", "t"]);
+  writeFileSync(join(root, "README.md"), "x\n");
+  execFileSync("git", ["-C", root, "add", "-A"]);
+  execFileSync("git", ["-C", root, "commit", "--quiet", "-m", "init"]);
+
+  const warned: string[] = [];
+  const result = runOperatorSync(root, {}, { say: () => {}, warn: (m) => warned.push(m) });
+  assert.equal(result.status, "degraded", "no origin remote ⇒ the real fetch fails");
+  assert.equal(result.reason, "fetch-failed");
+  assert.ok(
+    warned.some((w) => w.includes("git fetch origin failed")),
+    `the real seam's failure is reported; got ${JSON.stringify(warned)}`,
+  );
+});
+
+test("W1-T907: an unresolvable HEAD or origin main degrades rather than throwing", () => {
+  const { localDir } = gitFixture();
+  const warned: string[] = [];
+  const result = runOperatorSync(
+    localDir,
+    {},
+    {
+      git: throwingOn((a) => a[0] === "rev-parse"),
+      say: () => {},
+      warn: (m) => warned.push(m),
+    },
+  );
+  assert.equal(result.status, "degraded");
+  assert.equal(result.reason, "resolve-failed");
+  assert.ok(warned.some((w) => w.includes("could not resolve HEAD/origin/main")));
+});
+
+test("W1-T907: a failed fast-forward refuses and says the local files are unaffected", () => {
+  const { originDir, localDir } = gitFixture();
+  // Put the local behind origin, or the run reports up-to-date and the merge arm is never reached —
+  // the arm under test only exists on the behind path.
+  writeFileSync(join(originDir, "plan", "tasks.yaml"), "orig: advanced\n", "utf8");
+  execFileSync("git", ["-C", originDir, "add", "."]);
+  execFileSync("git", ["-C", originDir, "commit", "--quiet", "-m", "advance"]);
+  const real: GitRunner = (args) => execFileSync("git", ["-C", localDir, ...args], { encoding: "utf8" });
+  const warned: string[] = [];
+  const result = runOperatorSync(
+    localDir,
+    {},
+    {
+      // Everything real except the merge, which refuses — the arm that must never leave the operator
+      // believing their own work was touched.
+      git: (args) => {
+        if (args[0] === "merge") throw new Error("fatal: Not possible to fast-forward, aborting.");
+        return real(args);
+      },
+      say: () => {},
+      warn: (m) => warned.push(m),
+    },
+  );
+  assert.equal(result.status, "refused");
+  assert.equal(result.reason, "pull-failed");
+  assert.ok(
+    warned.some((w) => w.includes("genuinely-local files are unaffected")),
+    `the refusal must reassure about local work; got ${JSON.stringify(warned)}`,
+  );
+});
+
+test("W1-T907: an unreadable branch name and an absent DECISIONS file are tolerated", () => {
+  const { originDir, localDir } = gitFixture();
+  // Behind origin, and DECISIONS.md DELETED locally so `git status --porcelain` reports it dirty —
+  // that is what routes through classifyDecisions, where both reads must degrade to "" rather than
+  // throw: the local readFileSync (ENOENT) and the `git show origin/main:DECISIONS.md`.
+  writeFileSync(join(originDir, "plan", "tasks.yaml"), "orig: advanced\n", "utf8");
+  execFileSync("git", ["-C", originDir, "add", "."]);
+  execFileSync("git", ["-C", originDir, "commit", "--quiet", "-m", "advance"]);
+  // Delete from the WORKING TREE only (not `git rm`): the path stays TRACKED, which is what
+  // `isTracked` requires before classifyDecisions is consulted, while readFileSync now throws.
+  rmSync(join(localDir, DECISIONS_FILE_NAME));
+
+  const real: GitRunner = (args) => execFileSync("git", ["-C", localDir, ...args], { encoding: "utf8" });
+  const result = runOperatorSync(
+    localDir,
+    { dryRun: true },
+    {
+      git: (args) => {
+        if (args[0] === "symbolic-ref") throw new Error("fatal: ref HEAD is not a symbolic ref");
+        if (args[0] === "show" && String(args[1]).includes("DECISIONS.md")) throw new Error("fatal: path does not exist");
+        return real(args);
+      },
+      say: () => {},
+      warn: () => {},
+    },
+  );
+  assert.notEqual(result.status, "degraded", "neither unreadable read may degrade the whole run");
+});
+
+// ── COVERAGE OF THE ARMS NO INJECTED-FAKE TEST REACHES ──────────────────────────────────────
+//
+// `classifyDecisions` reads the local DECISIONS.md and origin/main's copy, and BOTH reads are
+// wrapped in a catch that degrades to the empty string. Every test above supplies a fixture where
+// both reads succeed, so neither catch arm ran and diff-coverage flagged both lines. These drive
+// them for real: one deletes the tracked file so `readFileSync` throws, the other makes only the
+// `git show` invocation throw while every other git call stays real.
+
+test("classifyDecisions degrades to empty when the local DECISIONS.md cannot be read — a tracked file deleted locally is still dirty", () => {
+  const { originDir, localDir } = gitFixture();
+  commitOnOrigin(originDir, "plan/tasks.yaml", "orig: advanced\n", "advance origin");
+  // DELETED, not emptied: the path is tracked and shows as dirty, but readFileSync throws.
+  rmSync(join(localDir, DECISIONS_FILE_NAME));
+  const s = spies(localDir);
+
+  const result = runOperatorSync(localDir, { dryRun: true }, s.deps);
+
+  // With the local side empty there are no locally-added headings, so nothing is missing from
+  // origin and the verdict is `restorable` — the file is offered for discard rather than
+  // preserved on the strength of content nobody could read.
+  assert.equal(result.status, "dry-run");
+  if (result.status !== "dry-run") return;
+  assert.ok(
+    result.restored.includes(DECISIONS_FILE_NAME),
+    `an unreadable local copy must classify as restorable, got ${JSON.stringify(result)}`,
+  );
+  assert.deepEqual(
+    result.preserved.filter((p) => p.path === DECISIONS_FILE_NAME),
+    [],
+    "and must never be preserved for headings that could not be read",
+  );
+});
+
+test("classifyDecisions degrades to empty when origin/main's DECISIONS.md cannot be shown — every locally-added heading is then preserved", () => {
+  const { originDir, localDir } = gitFixture();
+  commitOnOrigin(originDir, "plan/tasks.yaml", "orig: advanced\n", "advance origin");
+  writeFileSync(
+    join(localDir, DECISIONS_FILE_NAME),
+    "# decisions\n\n## 2026-08-16 a local record\n\nbody\n",
+    "utf8",
+  );
+  // Only the origin-side read fails; fetch, rev-parse, status and the rest stay real, so this is
+  // the genuine "the blob is missing on origin/main" shape rather than a wholesale git mock.
+  const s = spies(localDir);
+  let showsRefused = 0;
+  const realGit = s.deps.git;
+  const deps = {
+    ...s.deps,
+    git: ((args: string[]) => {
+      if (args[0] === "show" && args[1] === `origin/main:${DECISIONS_FILE_NAME}`) {
+        showsRefused += 1;
+        throw new Error("fatal: path 'DECISIONS.md' does not exist in 'origin/main'");
+      }
+      return realGit(args);
+    }) as GitRunner,
+  };
+
+  const result = runOperatorSync(localDir, { dryRun: true }, deps);
+
+  assert.equal(showsRefused, 1, "the catch arm was reached through the real call path, exactly once");
+  assert.equal(result.status, "dry-run");
+  if (result.status !== "dry-run") return;
+  const kept = result.preserved.find((p) => p.path === DECISIONS_FILE_NAME);
+  assert.ok(kept, `an unreadable origin copy must PRESERVE, not discard: ${JSON.stringify(result)}`);
+  assert.match(
+    kept!.reason,
+    /2026-08-16 a local record/,
+    "and must name the heading it could not find on origin, so the operator sees what was kept",
+  );
+  assert.ok(
+    !result.restored.includes(DECISIONS_FILE_NAME),
+    "failing open to discard here would delete records nobody could prove had landed",
+  );
+});

@@ -127,6 +127,7 @@ import { makeTempDir, sweepStaleTempDirs, withTempDir, type TempSweepOpts, type 
 import { reapWorkerScratch, sweepStaleWorkerScratch } from "./lib/worker-scratch.js";
 import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateServeLaunchdPlist, generateSupervisorLaunchdPlist, launchctlGuiTarget, launchdPlistPath, parseSupervisorStartInterval, SERVE_LABEL, serveLogPaths, SUPERVISOR_LABEL } from "./lib/launchd.js";
 import { realDeployDeps, requestDeploy, runDeployCycle } from "./lib/deployer.js";
+import { runOperatorSync, type OperatorSyncDeps } from "./lib/operator-sync.js";
 import { buildStatusBoard, renderStatusBoardText, type ServiceName } from "./lib/status-board.js";
 import { buildDigest, buildMarkerAwareDigest, consoleCardUrl, sendDigest, sendMarkerAwareDigest, sendRundown } from "./lib/digest.js";
 import { createLastSeenStore, hashToken, lastSeenPath } from "./lib/last-seen.js";
@@ -16345,6 +16346,33 @@ export async function wipeTestCommand(
 }
 
 /**
+ * `rmd sync [--dry-run]` — the sanctioned dedupe-then-pull recipe as one explicit verb
+ * (W1-T907). All the classification/preserve/discard/ff logic lives in
+ * {@link runOperatorSync} (src/lib/operator-sync.ts), which also does its own
+ * printing (say/warn) — this wrapper is arg-validation + exit-code translation only,
+ * same shape as every other flags-only subcommand below.
+ *
+ * `opts.repoDir`/`opts.deps` are injectable (default: the real `repoRoot` + real git) purely so
+ * a test can drive the arg-validation branch and the exit-code translation without ever letting
+ * runOperatorSync touch THIS process's own checkout — `repoRoot` below is a module-level
+ * constant resolved once at import time (no `--repo-root` override reaches here for `sync`
+ * today), so an un-injectable version of this function could only be safely exercised via
+ * runOperatorSync's own direct unit tests (test/operator-sync.test.ts), never via `main()`.
+ */
+export function syncCommand(
+  rest: string[],
+  opts: { repoDir?: string; deps?: OperatorSyncDeps } = {},
+): number {
+  const badArg = unknownArgError("sync", rest, [], ["--dry-run"]);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const result = runOperatorSync(opts.repoDir ?? repoRoot, { dryRun: rest.includes("--dry-run") }, opts.deps);
+  return result.status === "refused" || result.status === "degraded" ? 1 : 0;
+}
+
+/**
  * `rmd stop [--reason <text>]` — the fleet control set (W1-T11, MASTER-PLAN §4A/§4B).
  * Writes the STOP flag file. A `rmd drain` already running halts within one tick
  * (checked FIRST, every iteration, ahead of PAUSE); a NEW `rmd drain` refuses to
@@ -19780,6 +19808,11 @@ const COMMANDS: readonly CommandSpec[] = [
       "rmd up [--port <n>] [--host <addr>] [--allow-off-main]   # full resume (W1-T169): runs install-freshness FIRST (W1-T151 — a lockfile-changing pull triggers `npm ci` before anything starts), REFUSES to resume an off-main checkout unless --allow-off-main is given, loads the daemon launchd service, confirms/starts the serve launchd service, and prints a resume report (daemon pid, the console URL WITH its READ token via `rmd console-url`, the in-flight/queued head, needs-human count). IDEMPOTENT: already-up verifies + reports the running state, never a double start.",
   },
   {
+    name: "sync",
+    usage:
+      "rmd sync [--dry-run]   # W1-T907: the sanctioned dedupe-then-pull recipe as one explicit verb, for exactly the case checkCliFreshness refuses (behind origin/main AND dirty) that W1-T446's intersect-only fix cannot unstick — three-way classifies every `git status --porcelain` path against the origin/main blob (git hash-object vs git rev-parse <ref>:<path>, the same predicate deployer.ts's sameAsIncoming/discardLocal already established): IDENTICAL (local bytes == origin/main's blob at that path, or a DECISIONS.md whose every appended `## ...` record already landed via plan/decisions.d, W1-T191) is discarded/restored as provably lossless; everything else (no origin/main counterpart, differing bytes, or an unlanded DECISIONS.md record) is COPIED ASIDE under state/sync-<timestamp>/ with a named report BEFORE any discard runs and is NEVER deleted, cleared from the working tree only if the fast-forward actually needs that path; a local commit that is not an ancestor of origin/main (BLOCKING) refuses the WHOLE verb, mutating nothing. Then `git merge --ff-only origin/main` — never merge, never rebase, never reset --hard. --dry-run prints the identical classification and mutates nothing. Off-main/detached checkouts refuse exactly as W1-T445 established for the CLI entry guard. Does not touch checkCliFreshness's own predicate (W1-T446 owns that).",
+  },
+  {
     name: "status",
     usage:
       "rmd status [--json]   # W1-T279+W1-T280: ONE verb answering 'is it running' AND 'why is it stalled' from ONE read model. LOCAL (no network): LIVENESS (daemon/serve/deploy-supervisor running/pid/boot-time, running HEAD vs origin/main with a STALE flag, crash-loop), LATCHES (every state marker — STOP/PAUSE/QUIET_HOURS/DEPLOY_FAILED/DEPLOY_AUTO/inflight locks/pending kicks/drain-now — with its age and stated consequence), LAST CYCLE (the newest daemon.summary). DERIVED: BLOCKERS BY CLASS (circuit-broken w/ reset note, dispatch.indeterminate w/ gh-window note, blocked PRs by sweep.ts's own named reason), QUEUE HEAD (next dispatchables, perpetual-attempt tasks flagged with observed per-cycle cost), INBOX (ready/not-ready counts, head not-ready reason), HEADROOM (newest telemetry + enforcement on/off from the same switch the daemon reads) — these read a batched GitHub gateway and degrade to a stated unknown on an outage, never a gate on the local sections. Each section ends with at most one next action. --json emits the exact same read model the text renders. Read-only: writes nothing, spawns nothing, always exits 0 (bad args aside).",
@@ -20246,6 +20279,15 @@ export async function main(
     // why the precise one had never run. Every OTHER verb keeps the refusal: `review`,
     // `lint-plan`, `triage`, `approve` and the rest read the plan, and a stale plan gives a
     // wrong answer — which is the whole point of the gate.
+  } else if (cmd === "sync") {
+    // W1-T907: `rmd sync` is the explicit operator verb that EXISTS to unstick exactly the case
+    // this gate refuses below (behind origin/main AND dirty) — gating it behind that same
+    // refusal would mean it could only ever run when it had nothing left to do. This does NOT
+    // touch `checkCliFreshness`'s own predicate (W1-T446 owns that; design (i) of the task
+    // record keeps self-sync.ts out of this task's `files:` entirely) — it only exempts THIS
+    // verb's own entry point from a guard whose refusal is the exact problem it exists to fix.
+    // src/lib/operator-sync.ts owns its own, independent safety (the BLOCKING/off-main refusals
+    // and the preserve-aside-before-discard ordering), unrelated to this gate's dirty check.
   } else {
     const freshness = (deps.checkFreshness ?? checkCliFreshness)(repoRoot, process.env);
     if (freshness.status === "refused") {
@@ -20374,6 +20416,10 @@ export async function main(
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(await upCommand(rest)) cannot carry a DA hit without forking the process; upCommand's own logic — install-freshness-first, the off-main refuse, the idempotent load sequencing, and the resume report — is unit-tested in test/rmd-down-up.test.ts (same irreducible-glue shape as the sibling console-url/away dispatch cases).
   if (cmd === "up") {
     process.exit(await upCommand(rest));
+  }
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(syncCommand(rest)) cannot carry a DA hit without forking the process; syncCommand's own logic (arg validation, exit-code translation) and the git-driving classify/preserve/discard/ff-pull logic it wraps (runOperatorSync) are unit-tested directly in test/operator-sync.test.ts (same irreducible-glue shape as the sibling emissions/ledger-grep dispatch cases).
+  if (cmd === "sync") {
+    process.exit(syncCommand(rest));
   }
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(await statusCommand(rest)) cannot carry a DA hit without forking the process; statusCommand's own logic (arg validation, the queryService closure, --json vs text) plus the read model it calls (buildStatusBoard/renderStatusBoardText) are unit-tested in test/status-board.test.ts (same irreducible-glue shape as the sibling console-url/away/down/up dispatch cases).
   if (cmd === "status") {
