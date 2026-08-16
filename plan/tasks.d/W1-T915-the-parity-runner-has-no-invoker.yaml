@@ -1,4 +1,4 @@
-- id: W1-T914
+- id: W1-T915
   title: "the host-parity runner has no invoker, so the baseline can neither be pruned nor populated — runHostParity already computes the healed and undeclared lists that would report its own staleness, and nothing in the repo ever calls it"
   repo: remudero
   depends_on: []
@@ -97,9 +97,9 @@
     characters with no comma and no regex metacharacter, so looksLikeScenarioNarrative does not
     fire and proofNameResolutionViolations cannot either. Zero candidates today is the legitimate
     forward reference for an unimplemented task.
-    ID PROVENANCE: refs/rmd-id/W1-T914 COULD NOT BE MINTED — the gated push returned HTTP 403, the
+    ID PROVENANCE: refs/rmd-id/W1-T915 COULD NOT BE MINTED — the gated push returned HTTP 403, the
     credential limit W1-T518/#1893 files. The gate refused rather than leaving a corrupt ref, and
     the ABSENCE was confirmed by re-reading the ref and matching a host-pid-nanosecond nonce, not
-    assumed. W1-T914 was free by all three sweeps at mint time: absent from refs/rmd-id/* (28 refs,
+    assumed. W1-T915 was free by all three sweeps at mint time: absent from refs/rmd-id/* (28 refs,
     max W1-T913), absent from plan/tasks.d/ (max W1-T912) and absent from run-* head branches,
     against a positive control of refs/rmd-id/W1-T913 reading 1."
