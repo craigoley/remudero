@@ -1,5 +1,5 @@
 import { appendLedger } from "./ledger.js";
-import { readLedgerLines, readMergeCreditedTaskIds } from "./status.js";
+import { readLedgerLines, readMergeCreditedTaskIds, taskIdFromRunBranch } from "./status.js";
 import { loadDefaultPolicy } from "./policy.js";
 import { cappedOverrideFromLedger, decideAutoMergeArm, postedArmFactsFromLedger, REVIEW_CONTEXT } from "./review.js";
 import type { ArmDecision, CriterionVerdict } from "./review.js";
@@ -465,6 +465,34 @@ export interface OpenPrView {
    * (its own deterministic judge), NEVER the fix rung (which would push commits
    * onto a Dependabot branch) and never the clarification rung. */
   isDependabot?: boolean;
+  /**
+   * W1-T528: is this PR a DRAFT? The operator's hold, and — once GitHub's own auto-merge is
+   * armed — the ONLY veto {@link selectUpdateBranchTarget} still has to check for itself
+   * (a red/blocked/already-current PR is already excluded by {@link armedButStalled}'s own
+   * two-fact filter, never re-checked here). `true` excludes a PR from that selection; unset
+   * reads as "not a draft", the SAME fail-open default this module applies to every other
+   * unread fact (e.g. an unread `mergeState`, {@link armedButStalled}'s own doc).
+   *
+   * PRODUCER WIRED: `mapRestPr` (lib/open-prs-rest.ts) carries GitHub's `draft` through as
+   * `OpenPrRest.isDraft`, and `buildOpenPrViews` (run-task.ts) assigns it here, so the
+   * exclusion below fires against the real gateway rather than only in unit tests. This
+   * shipped one PR later than the mechanism: the original W1-T528 `files:` (Rule 19)
+   * excluded `lib/open-prs-rest.ts`, which left the field with NO producer and failed
+   * `test/producer-completeness.test.ts` — the standing check that stops an unwired tenth
+   * field from landing silently. Wiring it was the smaller correction, because the field
+   * guards an ACTION (this is the only thing standing between the update rung and a PR the
+   * operator has deliberately put on hold), so allowlisting it in `KNOWN_UNWIRED` would have
+   * shipped an inert safety exclusion.
+   *
+   * `draft` IS returned by the `/pulls` LIST endpoint — it is part of GitHub's
+   * `pull-request-simple` schema, unlike {@link RestPullRow.merged}, whose absence from list
+   * rows caused the 2026-07-31 merged-ness incident. `undefined` therefore means "GitHub
+   * omitted it", not "not a draft"; the check below is `=== true`, so an absent field leaves
+   * a PR eligible for update. That fail-open direction is deliberate and narrow: GitHub
+   * refuses to arm auto-merge on a draft in the first place, and only ARMED PRs reach here,
+   * so the exposure is an operator drafting an already-armed PR.
+   */
+  isDraft?: boolean;
   /**
    * W1-T196: true when this PR is a plan-FILING PR — one that introduces new
    * task(s) into `plan/tasks.yaml` and, per W1-T136 criterion 5, deliberately
@@ -1769,6 +1797,18 @@ export interface ArmedStalledPr {
 }
 
 /**
+ * W1-T528 — the terminal outcome of ONE `gh pr update-branch` request (design v: async, and this
+ * shard does not pretend to settle every failure mode — only these three are established without
+ * a live call against a real PR).
+ *  - `"updated"`: GitHub ACCEPTED the request (the update itself completes asynchronously).
+ *  - `"conflict"`: GitHub refused (a real merge conflict, or a diverged-not-merely-behind head) —
+ *    reported on the ledger and never retried by this same call.
+ *  - `"error"`: any other failure (network, auth, rate limit) — informational; a later pass's own
+ *    fresh selection may try again, this call does not.
+ */
+export type UpdateBranchOutcome = "updated" | "conflict" | "error";
+
+/**
  * W1-T520 — ARMED AND BEHIND, THE TWO FACTS NOTHING JOINED.
  *
  * The sweep already holds both halves per PR and never puts them together:
@@ -1813,6 +1853,55 @@ export function armedButStalled(prs: readonly OpenPrView[]): ArmedStalledPr[] {
     });
   }
   return out;
+}
+
+/**
+ * W1-T528 — THE ACTION HALF OF W1-T520. SELECTS AT MOST ONE PR FROM {@link armedButStalled}'S
+ * OWN SET, NEVER A SECOND PREDICATE COMPUTING THE SAME TWO FACTS (design note i).
+ *
+ * ONE PER PASS, OLDEST HEAD FIRST (design ii): updating mints a NEW head and a verdict is
+ * sha-pinned (`priorActionsFromLedger` keys `postReviewed` on `${taskId}@${headSha}`), so every
+ * update discards the verdict it was waiting on — updating the WHOLE stalled set each pass costs
+ * N+(N-1)+…+1 reviews (observed: updating one put four others behind and the fleet re-updated
+ * them itself). {@link oldestActivityFirst} is the SAME comparator {@link selectReviewAdmission}
+ * (W1-T526) uses for its own disjoint population (design iii) — a loser this pass is strictly
+ * older next pass, the only ranking that cannot starve a PR forever.
+ *
+ * TWO EXCLUSIONS ON TOP OF THE DETECTOR'S OWN TWO FACTS (design iv) — a red/blocked/
+ * awaiting-human PR and an already-current PR need NO re-check here: an armed PR whose checks
+ * are red cannot itself read `mergeState: "behind"`, and a current PR is not `"behind"` at all,
+ * so both are already excluded by `armedButStalled` and re-testing either would be the second
+ * predicate this design forbids.
+ *  - A DRAFT ({@link OpenPrView.isDraft} `=== true`) — the operator's hold. NEVER touched.
+ *  - AN IN-FLIGHT HEAD: {@link taskIdFromRunBranch} reads the task id a `run-<taskId>-<epochMs>`
+ *    branch attributes to (the SAME extractor `projectPlan`, status.ts, already uses) and, when
+ *    it names a task present in `inFlightTaskIds`, that PR is skipped — a live worker is still
+ *    pushing to this exact head (the #1902 shape: a mid-pass push raced its own PR's
+ *    `remudero-review`). Intended as `liveInflightRuns` (run-task.ts) — "in flight" here means
+ *    exactly what it means everywhere else in the fleet (see that function's own doc), never a
+ *    second, looser definition. A head that is not a run-branch at all (foreign/human-authored)
+ *    can never match and is never excluded by this rule.
+ */
+export function selectUpdateBranchTarget(
+  prs: readonly OpenPrView[],
+  now: number,
+  inFlightTaskIds: ReadonlySet<string> = new Set(),
+): ArmedStalledPr | undefined {
+  const stalled = armedButStalled(prs);
+  if (stalled.length === 0) return undefined;
+  const byNumber = new Map<number, OpenPrView>(prs.map((pr) => [pr.prNumber, pr]));
+  const eligible = stalled.filter((s) => {
+    const view = byNumber.get(s.prNumber);
+    if (!view) return false; // cannot happen — armedButStalled only derives from `prs` itself
+    if (view.isDraft === true) return false;
+    const runTaskId = taskIdFromRunBranch(view.headRefName);
+    if (runTaskId !== undefined && inFlightTaskIds.has(runTaskId)) return false;
+    return true;
+  });
+  if (eligible.length === 0) return undefined;
+  const eligibleViews = eligible.map((s) => byNumber.get(s.prNumber)!);
+  const winnerView = oldestActivityFirst(eligibleViews, now);
+  return eligible.find((s) => s.prNumber === winnerView?.prNumber);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -2238,6 +2327,23 @@ export interface SweepDeps {
    * escalation runs — never a silent no-op, the stand-down is named on the disposed line.
    */
   repushAbsent?: (pr: OpenPrView) => Promise<string | undefined>;
+  /**
+   * W1-T528 — press the update-branch button. Invoked AT MOST ONCE per pass, on the SINGLE PR
+   * {@link selectUpdateBranchTarget} chose (never a loop, never a second attempt on the same
+   * target THIS pass — see `runSweep`'s own wiring). Optional: omitted, the pass reports the
+   * whole stalled set via `sweep.armed_stalled` exactly as before this existed and requests
+   * nothing. A `"conflict"` outcome (GitHub 422) is REPORTED via a ledger line and never
+   * retried by this call (design v) — whether a LATER pass tries the same or a different PR is
+   * that pass's own fresh selection, not a retry loop here.
+   */
+  updateBranch?: (pr: ArmedStalledPr) => UpdateBranchOutcome | Promise<UpdateBranchOutcome>;
+  /**
+   * W1-T528: task ids with a LIVE in-flight run right now — intended as `liveInflightRuns`
+   * (run-task.ts) mapped to its own `taskId` field. Consulted by {@link selectUpdateBranchTarget}
+   * to skip a head a live worker is still pushing to. Omitted ⇒ empty set ⇒ no PR is excluded on
+   * this axis, exactly as if every PR's worker had already finished.
+   */
+  inFlightTaskIds?: ReadonlySet<string>;
   /** Absolute path to state/ledger.ndjson — dedup source + sweep.disposed sink. */
   ledgerPath: string;
   /** The sweep's run id (e.g. SWEEP-<epochMs> / DAEMON-<epochMs>). */
@@ -3148,8 +3254,8 @@ export async function runSweep(
   // set is empty, which is the common case: a quiet pass writes no row at all rather than a
   // `stalled: 0` heartbeat nobody reads. Emitted through `appendLine` (the same durable sink
   // `sweep.disposed` uses) rather than `log`, because `log` is an optional narration hook a caller
-  // may leave unwired — see `deps.log`'s own contract. This REPORTS only; see
-  // {@link armedButStalled} for why the update is deliberately not taken here.
+  // may leave unwired — see `deps.log`'s own contract. This still REPORTS the WHOLE set; W1-T528
+  // (right below) is what ACTS, and only on one of them.
   for (const stalled of armedButStalled(openPrs)) {
     appendLine(deps.ledgerPath, {
       run_id: deps.runId,
@@ -3161,6 +3267,45 @@ export async function runSweep(
       auto_merge_armed: true,
       merge_state: "behind",
     });
+  }
+  // W1-T528 — PRESS THE BUTTON. {@link selectUpdateBranchTarget} picks AT MOST ONE PR from the
+  // set just reported — oldest head first, draft/in-flight excluded (see that function's own
+  // doc) — and, when `deps.updateBranch` is wired, requests GitHub update it. Never a loop: one
+  // call, whatever the outcome — a conflict is REPORTED and skipped, never retried by this same
+  // pass (design v). `dryRun` leaves no trace, mirroring every other action in this module.
+  if (!deps.dryRun && deps.updateBranch) {
+    const target = selectUpdateBranchTarget(openPrs, now, deps.inFlightTaskIds ?? new Set());
+    if (target) {
+      appendLine(deps.ledgerPath, {
+        run_id: deps.runId,
+        task_id: target.taskId ?? "SWEEP",
+        step: "sweep.update_branch.attempted",
+        pr_number: target.prNumber,
+        pr_url: target.prUrl,
+        head_sha: target.headSha,
+      });
+      try {
+        const outcome = await deps.updateBranch(target);
+        appendLine(deps.ledgerPath, {
+          run_id: deps.runId,
+          task_id: target.taskId ?? "SWEEP",
+          step: `sweep.update_branch.${outcome}`,
+          pr_number: target.prNumber,
+          pr_url: target.prUrl,
+          head_sha: target.headSha,
+        });
+      } catch (e) {
+        appendLine(deps.ledgerPath, {
+          run_id: deps.runId,
+          task_id: target.taskId ?? "SWEEP",
+          step: "sweep.update_branch.error",
+          pr_number: target.prNumber,
+          pr_url: target.prUrl,
+          head_sha: target.headSha,
+          error: String((e as Error)?.message ?? e),
+        });
+      }
+    }
   }
   return summary;
 }
@@ -3271,14 +3416,33 @@ export function selectReviewAdmission(
   policy: SweepPolicy,
   now: number,
 ): OpenPrView | undefined {
-  let winner: OpenPrView | undefined;
+  return oldestActivityFirst(
+    openPrs.filter((pr) => deriveDisposition(pr, policy, now).disposition === "post-review"),
+    now,
+  );
+}
+
+/**
+ * THE OLDEST-HEAD-FIRST COMPARATOR ITSELF — lifted out of {@link selectReviewAdmission} (W1-T526)
+ * so W1-T528's disjoint `update-branch` selection can CONSUME it rather than shipping a second
+ * ordering that could silently disagree (design note iii, W1-T528's own doc: "whichever of the
+ * two is built first exports the oldest-head-first comparator from `src/lib/sweep.ts` and the
+ * second consumes it"). Byte-identical logic to what {@link selectReviewAdmission} always ran —
+ * see that function's own doc, directly above, for the full starvation argument this ranking
+ * exists to satisfy; it applies unchanged to any `{prNumber, lastActivityAt}` population, not
+ * only the post-review one.
+ */
+export function oldestActivityFirst<T extends { prNumber: number; lastActivityAt: string }>(
+  candidates: readonly T[],
+  now: number,
+): T | undefined {
+  let winner: T | undefined;
   let winnerAgeMs = -Infinity;
-  for (const pr of openPrs) {
-    if (deriveDisposition(pr, policy, now).disposition !== "post-review") continue;
-    const pushedAt = Date.parse(pr.lastActivityAt);
+  for (const candidate of candidates) {
+    const pushedAt = Date.parse(candidate.lastActivityAt);
     const ageMs = Number.isNaN(pushedAt) ? -Infinity : now - pushedAt;
-    if (!winner || ageMs > winnerAgeMs || (ageMs === winnerAgeMs && pr.prNumber < winner.prNumber)) {
-      winner = pr;
+    if (!winner || ageMs > winnerAgeMs || (ageMs === winnerAgeMs && candidate.prNumber < winner.prNumber)) {
+      winner = candidate;
       winnerAgeMs = ageMs;
     }
   }
