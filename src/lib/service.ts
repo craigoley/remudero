@@ -44,7 +44,7 @@
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { createPublicKey, randomBytes, timingSafeEqual, verify as verifySignature } from "node:crypto";
 
 /** Bearer scope a route (or SSE stream) requires. `write` implies `read`. */
 export type Scope = "read" | "write";
@@ -632,6 +632,213 @@ function bearerTokenProvider(tokens: ServiceTokens): IdentityProvider {
     // from a single token that used to reach every write route. Defaulting this to `"high"`
     // would ship the change as a no-op that silently re-grants everything.
     writeTier: "low",
+  };
+}
+
+/**
+ * W1-T531 (MASTER-PLAN §6A, plan_refs W1-T500/W1-T430/W1-T404/W1-T495/W1-T431): the third
+ * {@link IdentityProvider}, attached purely through the seam design (i) already proves additive —
+ * no change to {@link grantedScopes}, to the two built-in grantors above, or to the tailnet path.
+ *
+ * Cloudflare Access puts a verified identity in front of a request BEFORE it reaches this
+ * process, carried in the `Cf-Access-Jwt-Assertion` header — but Cloudflare's own "Validate JWTs"
+ * guidance is explicit that the header's mere PRESENCE is not sufficient to avoid identity
+ * spoofing; the JWT's signature, audience, issuer and expiry must all be verified against
+ * Cloudflare's own published keys. This is that verification, never the header alone.
+ */
+
+/** One JSON Web Key as Cloudflare Access's certs endpoint (`{TEAM_DOMAIN}/cdn-cgi/access/certs`)
+ *  returns it — the exact shape `crypto.createPublicKey({ format: "jwk", key })` accepts, so no
+ *  third-party JWT library is needed to verify a Cloudflare Access assertion. */
+export interface CloudflareAccessJwk {
+  kid: string;
+  kty: string;
+  [field: string]: unknown;
+}
+
+/**
+ * design (iii): the CACHED key set {@link cloudflareAccessIdentityProvider}'s `grant` reads
+ * SYNCHRONOUSLY — `grant` cannot `await` a fetch (rationale 5), so whatever populates this cache
+ * does so entirely out of band (see {@link createCloudflareAccessKeyCache}). `keys()` returning
+ * `undefined`/empty, or returning a set with no matching `kid`, is a DENIAL for that request —
+ * never an inline fetch, never a pinned certificate.
+ */
+export interface CloudflareAccessKeyCache {
+  /** Current JWKS keys, or `undefined` before the first successful fetch. */
+  keys(): readonly CloudflareAccessJwk[] | undefined;
+  /**
+   * Fire-and-forget: called when a request's `kid` isn't in the current cache, so an
+   * implementation MAY schedule an out-of-band refresh for the NEXT request (design iii: "a
+   * refresh scheduled out of band"). Never awaited by `grant` — a slow or failing refresh must
+   * never affect the CURRENT request's synchronous denial. Optional: a cache refreshed purely on
+   * its own timer can leave this a no-op.
+   */
+  scheduleRefresh?(): void;
+}
+
+/** Configuration for {@link cloudflareAccessIdentityProvider}. */
+export interface CloudflareAccessOptions {
+  /** The operator's Cloudflare Access team domain, e.g. `https://example.cloudflareaccess.com` —
+   *  checked against the JWT's `iss` claim, and used by {@link createCloudflareAccessKeyCache} to
+   *  build the certs endpoint URL. No trailing slash. */
+  teamDomain: string;
+  /** The Access application's AUD tag — checked against the JWT's `aud` claim (Cloudflare emits
+   *  this as an array of one, so a bare string `aud` is also accepted). */
+  audience: string;
+  /** Out-of-band-refreshed key cache — see {@link CloudflareAccessKeyCache}. */
+  keys: CloudflareAccessKeyCache;
+  /** Injectable clock, defaults to `Date.now` — lets a test assert on expiry without sleeping. */
+  now?: () => number;
+  log?: (step: string, extra?: Record<string, unknown>) => void;
+}
+
+/** Cloudflare Access signs with RS256 today; RS384/RS512 are accepted defensively since nothing
+ *  about the verification changes for them. Any other `alg` (including `none`) is refused. */
+const CLOUDFLARE_ACCESS_JWT_ALG_TO_NODE: Record<string, string> = {
+  RS256: "RSA-SHA256",
+  RS384: "RSA-SHA384",
+  RS512: "RSA-SHA512",
+};
+
+interface CloudflareAccessClaims {
+  aud?: string | string[];
+  iss?: string;
+  exp?: number;
+  [field: string]: unknown;
+}
+
+function decodeJwtSegment<T>(segment: string): T {
+  return JSON.parse(Buffer.from(segment, "base64url").toString("utf8")) as T;
+}
+
+/**
+ * design (iv): every claim checked, ALL of them — signature against the cached key set, `aud`
+ * against the configured application tag, issuer against the team domain, and expiry. Header
+ * PRESENCE is deliberately not one of them (this function only runs once the header is known
+ * present — see {@link cloudflareAccessIdentityProvider}). Returns the verified claims, or
+ * `undefined` for any failure: malformed token, unrecognized `alg`, unknown `kid`, bad signature,
+ * wrong `aud`/`iss`, or expired. This function does not itself catch a throw (e.g. a `kid`-matched
+ * JWK that `createPublicKey` rejects as malformed) — {@link cloudflareAccessIdentityProvider}'s
+ * own try/catch is the one true backstop (design ii): every path here is a denial, but the
+ * BACKSTOP, not this function, is what makes "never throw" true.
+ */
+function verifyCloudflareAccessAssertion(
+  assertion: string,
+  opts: CloudflareAccessOptions,
+  now: () => number,
+): CloudflareAccessClaims | undefined {
+  const parts = assertion.split(".");
+  if (parts.length !== 3) return undefined;
+  const [headerB64, payloadB64, signatureB64] = parts;
+  const header = decodeJwtSegment<{ kid?: string; alg?: string }>(headerB64);
+  const nodeAlg = header.alg ? CLOUDFLARE_ACCESS_JWT_ALG_TO_NODE[header.alg] : undefined;
+  if (!header.kid || !nodeAlg) return undefined;
+
+  const keys = opts.keys.keys();
+  const jwk = keys?.find((k) => k.kid === header.kid);
+  if (!jwk) {
+    // design (iii): a cache miss (empty cache, or no key matching this kid) denies THIS request
+    // and schedules a refresh for the next one — never an inline fetch from inside `grant`.
+    opts.keys.scheduleRefresh?.();
+    return undefined;
+  }
+
+  const publicKey = createPublicKey({ key: jwk, format: "jwk" });
+  const signedInput = Buffer.from(`${headerB64}.${payloadB64}`, "utf8");
+  const signature = Buffer.from(signatureB64, "base64url");
+  // THE load-bearing check: a forged assertion can carry any header/payload it likes (including
+  // a `kid` that matches a real cached key) but cannot produce a signature that verifies against
+  // that key's PUBLIC half without the matching private key Cloudflare alone holds.
+  if (!verifySignature(nodeAlg, signedInput, publicKey, signature)) return undefined;
+
+  const claims = decodeJwtSegment<CloudflareAccessClaims>(payloadB64);
+  const audiences = Array.isArray(claims.aud) ? claims.aud : claims.aud ? [claims.aud] : [];
+  if (!audiences.includes(opts.audience)) return undefined;
+  if (claims.iss !== opts.teamDomain) return undefined;
+  if (typeof claims.exp !== "number" || claims.exp * 1000 <= now()) return undefined;
+
+  return claims;
+}
+
+/**
+ * The Cloudflare Access grantor, wrapped as an {@link IdentityProvider} — W1-T430's seam, third
+ * adopter. design (ii): THE WHOLE GRANT BODY IS WRAPPED — any failure, expected (malformed token,
+ * unknown key, bad signature) or not (a key cache that itself throws), returns `undefined` rather
+ * than propagating, because `grant` runs inside `createService`'s unawaited, uncaught
+ * `void (async () => { ... })()` — an exception here does not deny the request, it kills the
+ * process (rationale 4). design (vi): a verified assertion maps to a scope + write tier and
+ * NOTHING else — no role/admin layer; {@link Scope} stays exactly `"read" | "write"`.
+ */
+export function cloudflareAccessIdentityProvider(opts: CloudflareAccessOptions): IdentityProvider {
+  const now = opts.now ?? (() => Date.now());
+  const log = opts.log ?? (() => {});
+  return {
+    name: "cloudflare-access",
+    grant: (req) => {
+      try {
+        const header = req.headers["cf-access-jwt-assertion"];
+        const assertion = Array.isArray(header) ? header[0] : header;
+        if (!assertion) return undefined; // not my credential -- try the next provider.
+        const claims = verifyCloudflareAccessAssertion(assertion, opts, now);
+        return claims ? READ_WRITE : undefined;
+      } catch (e) {
+        // design (ii): NEVER throw. A validator that CAN throw (network failure, rotated key,
+        // malformed key set) must still only ever deny, log, and fall through to the next
+        // provider -- never propagate out of the fatal, uncaught IIFE that calls `grant`.
+        log("service.access_jwt_error", { error: String((e as Error)?.message ?? e) });
+        return undefined;
+      }
+    },
+    // design (v), PROPOSED and argued on merits, not copied from either built-in grantor: the
+    // identity here is strongly verified (a signed assertion, not a bearer secret a header could
+    // forge) but reachable from ANY network, unlike `tailscaleIdentityProvider` (`high`, gated on
+    // a private-network interface) -- and it is a real per-caller credential, unlike
+    // `bearerTokenProvider` (`low`, one shared secret). `middle` reaches `/v1/control/stop` but
+    // not the five HIGH-tier routes, which keep requiring the tailnet.
+    writeTier: "middle",
+  };
+}
+
+/**
+ * design (iii): populates/refreshes a {@link CloudflareAccessKeyCache} from Cloudflare's own
+ * certs endpoint (`{TEAM_DOMAIN}/cdn-cgi/access/certs`) entirely OFF the request path --
+ * {@link cloudflareAccessIdentityProvider}'s `grant` only ever reads whatever `refresh()` last
+ * wrote. A failed refresh (network error, non-200, malformed body) leaves the PREVIOUS keys in
+ * place rather than clearing them: a transient outage denies nothing a moment-old cache still
+ * recognizes, and an unknown `kid` stays a per-request denial either way, never a crash.
+ * `scheduleRefresh` reentrancy-guards so a burst of cache misses fires at most one fetch at a
+ * time, never a fetch storm. Not wired into `rmd serve` by this task (note: that wiring, plus the
+ * Access application/tunnel/DNS ordering, are operator acts and separate tasks) -- exported so
+ * that wiring has a ready-made default rather than reinventing one.
+ */
+export function createCloudflareAccessKeyCache(
+  teamDomain: string,
+  fetchImpl: typeof fetch = fetch,
+  log: (step: string, extra?: Record<string, unknown>) => void = () => {},
+): CloudflareAccessKeyCache & { refresh(): Promise<void> } {
+  let cached: readonly CloudflareAccessJwk[] | undefined;
+  let refreshing: Promise<void> | undefined;
+  const refresh = async (): Promise<void> => {
+    try {
+      const res = await fetchImpl(`${teamDomain}/cdn-cgi/access/certs`);
+      if (!res.ok) throw new Error(`certs endpoint returned ${res.status}`);
+      const body = (await res.json()) as { keys?: CloudflareAccessJwk[] };
+      if (!Array.isArray(body.keys)) throw new Error("certs response missing a keys array");
+      cached = body.keys;
+    } catch (e) {
+      log("service.access_key_refresh_failed", { error: String((e as Error)?.message ?? e) });
+      // deliberately no rethrow and no clearing of `cached` -- see this function's own doc.
+    }
+  };
+  return {
+    keys: () => cached,
+    scheduleRefresh: () => {
+      if (refreshing) return; // one in-flight fetch at a time -- never a fetch storm.
+      refreshing = refresh().finally(() => {
+        refreshing = undefined;
+      });
+    },
+    refresh,
   };
 }
 

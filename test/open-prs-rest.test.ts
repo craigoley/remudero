@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -8,6 +8,7 @@ import {
   checkRunsRestArgs,
   combinedStatusRestArgs,
   createGhCallPacer,
+  DEFAULT_GH_PACE_LOW_WATER_FRACTION,
   DEFAULT_GH_PACE_MIN_GAP_MS,
   DEFAULT_GH_PACE_RATE_LIMIT_GAP_MS,
   fetchOpenPrsRest,
@@ -23,6 +24,7 @@ import {
 } from "../src/lib/open-prs-rest.js";
 import { checksStateFromRollup } from "../src/lib/sweep.js";
 import { fixCommand } from "../src/run-task.js";
+import { ghJson, type GhRateLimitReading } from "../src/lib/worker.js";
 import type { Config } from "../src/lib/config.js";
 
 const OWNER = "craigoley";
@@ -573,4 +575,154 @@ test("paceGhEntry: a NON-rate-limit throw reports back rateLimited=false, so an 
     ),
   );
   assert.deepEqual(seen, ["wait", "result:false"]);
+});
+
+// ── W1-T525: `ghJson` becomes the metered entry point. There is no real `gh` binary driving
+// these — `exec` is injected (mirrors `GhApiFetcher`/`ghGateway`'s own `opts.exec` seam), which is
+// exactly what makes this leaf testable at all: no test in this repo drove it before this task. ──
+
+/** A fake `gh -i`-shaped exec: records every argv it was called with and returns one canned
+ *  response string per call, in order. Throws if asked for more calls than it was given. */
+function fakeGhExec(responses: string[]): { exec: (file: string, args: string[], opts: unknown) => string; calls: string[][] } {
+  const calls: string[][] = [];
+  const exec = (_file: string, args: string[], _opts: unknown): string => {
+    calls.push(args);
+    if (calls.length > responses.length) throw new Error(`unexpected extra gh exec call: ${args.join(" ")}`);
+    return responses[calls.length - 1];
+  };
+  return { exec, calls };
+}
+
+test("W1-T525: every gh call routes through the metered entry point", () => {
+  // A `gh api` call: issuing it and observing its rate-limit header happen in this ONE call to
+  // ghJson — no separate probe, no second function. `-i` is added automatically (design i: today
+  // ZERO sites pass it).
+  const apiOut = 'HTTP/2.0 200 OK\r\nX-Ratelimit-Remaining: 4098\r\n\r\n{"ok":true}';
+  const api = fakeGhExec([apiOut]);
+  const readings: GhRateLimitReading[] = [];
+  const body = ghJson(["api", "repos/o/r/pulls"], (r) => readings.push(r), api.exec);
+  assert.deepEqual(body, { ok: true }, "the body is still returned exactly as before");
+  assert.equal(api.calls.length, 1, "issuing the call and reading its header happen in ONE invocation");
+  assert.deepEqual(api.calls[0], ["api", "repos/o/r/pulls", "-i"],
+    "`-i` is APPENDED for a gh api call — never spliced in front of the endpoint, which must stay argv[1]");
+  assert.deepEqual(readings, [{ remaining: 4098, used: undefined, limit: undefined, reset: undefined, resource: undefined }]);
+
+  // A non-`api` gh subcommand (`pr view`, `pr list`, …) is the OTHER half of the ~13 pre-existing
+  // callers and routes through the exact same `ghJson` symbol — but carries no HTTP response, so
+  // `-i` is never added (it is not a flag those subcommands accept) and `onRateLimit` is never
+  // invoked, since there is nothing to observe.
+  const view = fakeGhExec(['{"state":"OPEN"}']);
+  const readings2: GhRateLimitReading[] = [];
+  const prBody = ghJson(["pr", "view", "https://github.com/o/r/pull/1", "--json", "state"], (r) => readings2.push(r), view.exec);
+  assert.deepEqual(prBody, { state: "OPEN" });
+  assert.equal(view.calls.length, 1);
+  assert.deepEqual(view.calls[0], ["pr", "view", "https://github.com/o/r/pull/1", "--json", "state"], "no -i is added for a non-api call");
+  assert.deepEqual(readings2, [], "a non-api call carries no header, so onRateLimit is never invoked");
+});
+
+test("W1-T525: the rate limit header is parsed off the response that carried it", () => {
+  // Two calls, two DIFFERENT buckets — the exact shape the rationale measured live: an ordinary
+  // REST read (core, remaining=3259) back to back with a different bucket (search) reporting a
+  // different remaining/reset. Each reading must reflect ONLY the response that carried it, never
+  // a value bled over from the other call or from any shared/global state.
+  const core = 'HTTP/2.0 200 OK\r\nX-Ratelimit-Limit: 5000\r\nX-Ratelimit-Remaining: 3259\r\nX-Ratelimit-Used: 1741\r\nX-Ratelimit-Reset: 1786832677\r\nX-Ratelimit-Resource: core\r\n\r\n{"a":1}';
+  const search = 'HTTP/2.0 200 OK\r\nX-Ratelimit-Limit: 30\r\nX-Ratelimit-Remaining: 12\r\nX-Ratelimit-Used: 18\r\nX-Ratelimit-Reset: 1786832999\r\nX-Ratelimit-Resource: search\r\n\r\n{"b":2}';
+  const { exec } = fakeGhExec([core, search]);
+  const readings: GhRateLimitReading[] = [];
+  const body1 = ghJson(["api", "repos/o/r/pulls"], (r) => readings.push(r), exec);
+  const body2 = ghJson(["api", "search/issues?q=x"], (r) => readings.push(r), exec);
+  assert.deepEqual(body1, { a: 1 });
+  assert.deepEqual(body2, { b: 2 });
+  assert.deepEqual(
+    readings[0],
+    { remaining: 3259, used: 1741, limit: 5000, reset: 1786832677, resource: "core" },
+    "the FIRST call's reading is the first response's own header",
+  );
+  assert.deepEqual(
+    readings[1],
+    { remaining: 12, used: 18, limit: 30, reset: 1786832999, resource: "search" },
+    "the SECOND call's reading is the second response's own header, not the first call's",
+  );
+});
+
+test("W1-T525: a low remaining reading widens the pacer without any failure", () => {
+  const clock = fakeClock();
+  const pacer = createGhCallPacer({ now: clock.now, sleepSync: clock.sleepSync, minGapMs: 1000, rateLimitGapMs: 9000 });
+  pacer.wait(); // t=0
+  // A clean call (`rateLimited: false`) that nonetheless carried a low IN-BUCKET reading.
+  const low = { remaining: 400, limit: 5000, resource: "core" };
+  assert.ok(
+    low.remaining <= low.limit * DEFAULT_GH_PACE_LOW_WATER_FRACTION,
+    "the test reading must actually be AT/BELOW the share of its OWN bucket that the pacer compares against",
+  );
+  pacer.recordResult(false, low);
+  clock.advance(500);
+  pacer.wait();
+  assert.deepEqual(clock.sleeps, [8500], "the widened 9000ms gap governs — a low reading alone widened it, with zero failures recorded");
+});
+
+test("W1-T525: the low-water mark is read per bucket, so a full small bucket does not widen and a drained large one does", () => {
+  // THE POINT OF CARRYING `resource` AND `limit` RATHER THAN A BARE NUMBER. `search` caps at 30
+  // and `core` at 5,000, so no single absolute floor is right for both: a floor of 100 would widen
+  // on a COMPLETELY FULL search bucket, and would not widen on a core bucket down to its last 2%.
+  const full = { remaining: 30, limit: 30, resource: "search" };
+  const drained = { remaining: 400, limit: 5000, resource: "core" };
+
+  const a = fakeClock();
+  const p1 = createGhCallPacer({ now: a.now, sleepSync: a.sleepSync, minGapMs: 1000, rateLimitGapMs: 9000 });
+  p1.wait();
+  p1.recordResult(false, full);
+  a.advance(500);
+  p1.wait();
+  assert.deepEqual(a.sleeps, [500], "a FULL search bucket (30/30) stays at the narrow gap — an absolute floor of 100 would have widened it");
+
+  const b = fakeClock();
+  const p2 = createGhCallPacer({ now: b.now, sleepSync: b.sleepSync, minGapMs: 1000, rateLimitGapMs: 9000 });
+  p2.wait();
+  p2.recordResult(false, drained);
+  b.advance(500);
+  p2.wait();
+  assert.deepEqual(b.sleeps, [8500], "a core bucket at 400/5000 (8%) widens — below its OWN tenth, though far above any small-bucket floor");
+});
+
+test("W1-T525: a reading with no usable denominator never widens the pacer on its own", () => {
+  // FAIL TOWARD NOT WIDENING. A limit of 0 carries no share to compare against; treating it as
+  // "0 >= remaining" would widen on every single call and silently halve the fleet's throughput.
+  const clock = fakeClock();
+  const pacer = createGhCallPacer({ now: clock.now, sleepSync: clock.sleepSync, minGapMs: 1000, rateLimitGapMs: 9000 });
+  pacer.wait();
+  pacer.recordResult(false, { remaining: 0, limit: 0, resource: "unknown" });
+  clock.advance(500);
+  pacer.wait();
+  assert.deepEqual(clock.sleeps, [500], "no denominator, no proactive widening");
+
+  // FALSIFIER: the reactive arm is untouched — a real rate-limit failure still widens.
+  pacer.recordResult(true, { remaining: 0, limit: 0, resource: "unknown" });
+  clock.advance(500);
+  pacer.wait();
+  assert.deepEqual(clock.sleeps, [500, 8500], "a classified rate-limit failure widens regardless of the reading");
+});
+
+test("W1-T525: the free budget probe is never used as the floor's source", () => {
+  // Behavioral: the reading comes from the ONE call already being made. If ghJson reached for the
+  // free `gh api rate_limit` probe as a convenient second source, this fake would see TWO calls.
+  const out = 'HTTP/2.0 200 OK\r\nX-Ratelimit-Remaining: 500\r\n\r\n{"ok":true}';
+  const { exec, calls } = fakeGhExec([out]);
+  let reading: GhRateLimitReading | undefined;
+  ghJson(["api", "repos/o/r/pulls"], (r) => (reading = r), exec);
+  assert.equal(calls.length, 1, "the reading is sourced from the ONE paced call — no second probe call was made");
+  assert.ok(
+    !calls.some((c) => c.some((a) => a.includes("rate_limit"))),
+    "no argv passed to gh ever names the free rate_limit probe",
+  );
+  assert.equal(reading?.remaining, 500, "the reading came from the paced call's own header");
+
+  // Structural: the metered entry point's own source never names the probe endpoint at all, so a
+  // future edit cannot quietly wire it in as a shortcut.
+  const src = readFileSync(new URL("../src/lib/worker.ts", import.meta.url), "utf8");
+  const start = src.indexOf("export function ghJson(");
+  const end = src.indexOf("\nexport function ghPrView(");
+  assert.ok(start !== -1 && end !== -1 && end > start, "could not isolate ghJson's own source for the structural check");
+  const ghJsonSrc = src.slice(start, end);
+  assert.doesNotMatch(ghJsonSrc, /rate_limit/, "the metered entry point must never shell out to the free `gh api rate_limit` probe");
 });
