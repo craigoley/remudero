@@ -450,3 +450,78 @@ test("W1-T907: an unreadable branch name and an absent DECISIONS file are tolera
   );
   assert.notEqual(result.status, "degraded", "neither unreadable read may degrade the whole run");
 });
+
+// ── COVERAGE OF THE ARMS NO INJECTED-FAKE TEST REACHES ──────────────────────────────────────
+//
+// `classifyDecisions` reads the local DECISIONS.md and origin/main's copy, and BOTH reads are
+// wrapped in a catch that degrades to the empty string. Every test above supplies a fixture where
+// both reads succeed, so neither catch arm ran and diff-coverage flagged both lines. These drive
+// them for real: one deletes the tracked file so `readFileSync` throws, the other makes only the
+// `git show` invocation throw while every other git call stays real.
+
+test("classifyDecisions degrades to empty when the local DECISIONS.md cannot be read — a tracked file deleted locally is still dirty", () => {
+  const { originDir, localDir } = gitFixture();
+  commitOnOrigin(originDir, "plan/tasks.yaml", "orig: advanced\n", "advance origin");
+  // DELETED, not emptied: the path is tracked and shows as dirty, but readFileSync throws.
+  rmSync(join(localDir, DECISIONS_FILE_NAME));
+  const s = spies(localDir);
+
+  const result = runOperatorSync(localDir, { dryRun: true }, s.deps);
+
+  // With the local side empty there are no locally-added headings, so nothing is missing from
+  // origin and the verdict is `restorable` — the file is offered for discard rather than
+  // preserved on the strength of content nobody could read.
+  assert.equal(result.status, "dry-run");
+  if (result.status !== "dry-run") return;
+  assert.ok(
+    result.restored.includes(DECISIONS_FILE_NAME),
+    `an unreadable local copy must classify as restorable, got ${JSON.stringify(result)}`,
+  );
+  assert.deepEqual(
+    result.preserved.filter((p) => p.path === DECISIONS_FILE_NAME),
+    [],
+    "and must never be preserved for headings that could not be read",
+  );
+});
+
+test("classifyDecisions degrades to empty when origin/main's DECISIONS.md cannot be shown — every locally-added heading is then preserved", () => {
+  const { originDir, localDir } = gitFixture();
+  commitOnOrigin(originDir, "plan/tasks.yaml", "orig: advanced\n", "advance origin");
+  writeFileSync(
+    join(localDir, DECISIONS_FILE_NAME),
+    "# decisions\n\n## 2026-08-16 a local record\n\nbody\n",
+    "utf8",
+  );
+  // Only the origin-side read fails; fetch, rev-parse, status and the rest stay real, so this is
+  // the genuine "the blob is missing on origin/main" shape rather than a wholesale git mock.
+  const s = spies(localDir);
+  let showsRefused = 0;
+  const realGit = s.deps.git;
+  const deps = {
+    ...s.deps,
+    git: ((args: string[]) => {
+      if (args[0] === "show" && args[1] === `origin/main:${DECISIONS_FILE_NAME}`) {
+        showsRefused += 1;
+        throw new Error("fatal: path 'DECISIONS.md' does not exist in 'origin/main'");
+      }
+      return realGit(args);
+    }) as GitRunner,
+  };
+
+  const result = runOperatorSync(localDir, { dryRun: true }, deps);
+
+  assert.equal(showsRefused, 1, "the catch arm was reached through the real call path, exactly once");
+  assert.equal(result.status, "dry-run");
+  if (result.status !== "dry-run") return;
+  const kept = result.preserved.find((p) => p.path === DECISIONS_FILE_NAME);
+  assert.ok(kept, `an unreadable origin copy must PRESERVE, not discard: ${JSON.stringify(result)}`);
+  assert.match(
+    kept!.reason,
+    /2026-08-16 a local record/,
+    "and must name the heading it could not find on origin, so the operator sees what was kept",
+  );
+  assert.ok(
+    !result.restored.includes(DECISIONS_FILE_NAME),
+    "failing open to discard here would delete records nobody could prove had landed",
+  );
+});
