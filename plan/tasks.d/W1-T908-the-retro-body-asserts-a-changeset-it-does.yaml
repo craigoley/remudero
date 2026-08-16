@@ -1,0 +1,173 @@
+- id: W1-T908
+  title: "the retro's PR body asserts a changeset the run does not compute, so every retro claims one file while writing three"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "FILED AND BUILT IN ONE RUN from the operator-directed retro-body diagnosis of
+    2026-08-16, on host vm (pid1 process_api, the ephemeral cloud container — NOT the mini) under
+    bash 5.2.21, evidence derived at origin/main fa6e8d7.
+    THIS IS A GENERATOR DEFECT NOT AN AUTHOR DEFECT, which is why it recurs every cycle: no retro
+    can get this right by trying harder, because the sentence is written before the facts exist.
+    FOUR INSTANCES, EACH RE-DERIVED FROM GITHUB TODAY, AND ALL FOUR CARRY THE IDENTICAL THREE-FILE
+    CHANGESET — MASTER-PLAN.md, docs/ORIENTATION.md, plan/plan-index.json:
+      #974  merged BEFORE the detector existed; body claimed 'exactly one file: MASTER-PLAN'.
+      #1685 its review REFUSED it on this exact contradiction; it merged later after repair. Its
+            body still carries the phrase in a disclaiming sentence, so a phrase grep alone
+            misreads its state — the verdict is the evidence, not the body text.
+      #1943 open. Its body no longer carries the phrase and its head carries NO posted verdict,
+            because it was HAND-REPAIRED: its own commit list is
+            'r20 retro sync' then 'regenerate docs/ORIENTATION.md' then
+            'regenerate plan/plan-index.json' then 're-head so the corrected body earns a fresh'
+            verdict. A human paid for this instance by hand.
+      #1944 open, and the ONLY one exhibiting it live at derivation time:
+            remudero-review=failure, message verbatim
+            'body contradicts its own diff: claimed \"exactly one file\", actual changed files:
+            MASTER-PLAN.md,'. Created 08:52:15Z against #1943's 08:29:43Z — 22m32s apart.
+    THE ORDERING IS THE DEFECT AND IT IS VISIBLE IN BOTH THE CODE AND THE GIT LOG. In
+    `retroCommand` (src/run-task.ts) the sequence is: spawn the Architect worker, which edits
+    MASTER-PLAN.md, commits, pushes and OPENS THE PR WITH A BODY IT AUTHORED; only THEN
+    `regenerateOrientation` commits docs/ORIENTATION.md; only THEN
+    `regeneratePlanIndexAndCommit` commits plan/plan-index.json; only then the branch is pushed
+    again. The body is therefore authored at a moment when two of the three files DO NOT YET
+    EXIST. #1943's four commits are that sequence in git, in order.
+    THE PROMPT INDUCES THE FALSE SENTENCE. `retroPrompt` (src/run-task.ts) instructs the worker
+    'Produce a PLAN-ONLY sync PR — edit ONLY MASTER-PLAN.md' and 'NEVER touch
+    docs/ORIENTATION.md'. Both statements are true ABOUT THE WORKER and false about the RUN, and
+    the worker faithfully turns them into a scope claim about the PR.
+    THE REPAIR RUNG ALREADY EXISTS AND ALREADY RUNS LATE ENOUGH.
+    `repairRetroAcceptanceBlock` is called AFTER both companions are committed and pushed, it
+    already fetches the body and edits it through injectable `fetchBody`/`editBody` seams, and
+    its own hardcoded criterion ALREADY STATES THE THREE-FILE TRUTH in prose. It simply never
+    fires on this defect, because it is gated on `bodyNeedsAcceptanceRepair` — a body with a
+    healthy Acceptance block and a false scope claim is judged healthy and left alone.
+    THE COMPANIONS ARE NOT REMOVABLE AND THE NEXT READER WILL ASK. docs/ORIENTATION.md is
+    harness-owned and carries its own regenerated banner; plan/plan-index.json is a line index
+    whose staleness reds `plan-index:check` post-push (the #287 failure `regeneratePlanIndex`'s
+    own comment cites). Dropping either from the changeset is possible only by leaving the index
+    stale. THE THREE-FILE CHANGESET IS CORRECT — ONLY THE COUNT WAS EVER WRONG.
+    isInPlanScope WAS NEVER THE PROBLEM. Run rather than asserted at fa6e8d7: TRUE for
+    MASTER-PLAN.md, docs/ORIENTATION.md and plan/plan-index.json alike, FALSE for src/run-task.ts
+    and for test/x.test.ts as controls. The scope characterisation was always accurate; the
+    detector fires on the COUNT."
+  design: |
+    THE SHAPE: the sentence about the changeset stops being templated and starts being computed,
+    at the one point in the run where the changeset is knowable. No ordering change to the
+    companions, no new command, no change to what the retro writes.
+
+    (i) COMPUTE, DO NOT TEMPLATE. A repair that runs beside `repairRetroAcceptanceBlock` reads
+    the PR's real changed paths and rewrites the body's changeset sentence to NAME THEM. Paths,
+    never a count — see (iii). The read is the PR's own file list, so it observes whatever the
+    run actually produced rather than whatever the prompt predicted.
+
+    (ii) THIS IS NOT AN ORDERING FIX AND THE DISTINCTION MATTERS. The body genuinely cannot be
+    written correctly at authoring time: the worker opens the PR before the companions exist, and
+    no reordering fixes that without either making the worker wait on the harness or making the
+    harness regenerate before the worker runs — the second is impossible, because ORIENTATION.md
+    is regenerated FROM what the Architect just wrote. The correct home is the post-hoc rung that
+    already runs after all three commits and already edits the body. A diff read bolted onto the
+    worker's own render would run too early and would still be wrong.
+
+    (iii) EMIT PATHS NEVER COUNTS. `bodyContradictsDiff` reads 'exactly N files' as a scope claim
+    and fails the PR on it; that phrasing is what refused four PRs. The replacement sentence must
+    name the paths and must not contain a count, so a run that regenerates two files or four is
+    correct without anyone editing a number. A HARDCODED THREE IS THE SAME DEFECT WEARING A NEW
+    NUMBER.
+
+    (iv) STOP THE PROMPT INDUCING IT. `retroPrompt`'s scope instruction stays — the worker really
+    must not touch src/ or test/ — but it must stop telling the worker to characterise the PR's
+    changeset, because the worker cannot know it. The instruction becomes about what the worker
+    edits, and the body sentence becomes the harness's to write.
+
+    (v) THE SEAM SHAPE, AND WHY IT IS NOT A NEW READ PATH. The changed-path read is an injectable
+    parameter appended LAST so no positional caller shifts (the #977/#978 rule), defaulting to
+    the same `gh` call the surrounding code already makes. Tests inject a recorder; the default
+    is exercised so the seam's own body is not left uncovered.
+
+    WHAT MUST NOT BE BUILT: any change to `isInPlanScope` — it is correct and was never
+    implicated; any reordering of `regenerateOrientation` or `regeneratePlanIndexAndCommit`;
+    any removal of either companion from the changeset; a new ledger step where an existing one
+    would do; a retry; and any edit to #1943 or #1944 themselves, which are the operator's.
+
+    THE ADJACENT ITEM, NAMED AND DELIBERATELY NOT FILED HERE: `rmd check-proof` answers 'does it
+    match?' while the reviewer SEPARATELY downgrades a proof matching both head and base to
+    `executed_stale`, so a proof reads `verdict: pass` locally and substantiates nothing in
+    review. It hit twice in one body on #1943 and #1189 merged at 2/4 because of it. It is a
+    SEPARATE CONCERN from this one and another lane is filing it; it is named here so it is not
+    absorbed into this task or lost.
+  acceptance:
+    - claim: "the emitted body names every path the run actually wrote and no others"
+      proof: "unit test: W1-T908: the retro body names every path the run wrote and no others"
+    - claim: "a run writing a different number of files is still described correctly"
+      proof: "unit test: W1-T908: a run that writes a different number of files still names them all"
+    - claim: "the templated single-file claim does not survive the repair"
+      proof: "unit test: W1-T908: the templated one-file claim is replaced rather than left standing"
+    - claim: "the changeset is read at a point where the companion files already exist"
+      proof: "unit test: W1-T908: the changeset is read after the harness companions are committed"
+    - claim: "the recurrence is attributed to the generator rather than to any author"
+      proof: "grep: THIS IS A GENERATOR DEFECT NOT AN AUTHOR DEFECT in plan/tasks.d/W1-T908-the-retro-body-asserts-a-changeset-it-does.yaml"
+    - claim: "the ordering that makes the claim unknowable is recorded with where it is visible"
+      proof: "grep: THE ORDERING IS THE DEFECT AND IT IS VISIBLE IN BOTH THE CODE AND THE GIT LOG in plan/tasks.d/W1-T908-the-retro-body-asserts-a-changeset-it-does.yaml"
+    - claim: "the prompt's own contribution to the false sentence is named"
+      proof: "grep: THE PROMPT INDUCES THE FALSE SENTENCE in plan/tasks.d/W1-T908-the-retro-body-asserts-a-changeset-it-does.yaml"
+    - claim: "the existing late-running rung is identified rather than a new one invented"
+      proof: "grep: THE REPAIR RUNG ALREADY EXISTS AND ALREADY RUNS LATE ENOUGH in plan/tasks.d/W1-T908-the-retro-body-asserts-a-changeset-it-does.yaml"
+    - claim: "the companions are justified so a later reader does not delete them"
+      proof: "grep: THE THREE-FILE CHANGESET IS CORRECT — ONLY THE COUNT WAS EVER WRONG in plan/tasks.d/W1-T908-the-retro-body-asserts-a-changeset-it-does.yaml"
+    - claim: "the predicate that was never at fault is protected from a well-meant fix"
+      proof: "grep: isInPlanScope WAS NEVER THE PROBLEM in plan/tasks.d/W1-T908-the-retro-body-asserts-a-changeset-it-does.yaml"
+    - claim: "a fixed replacement number is refused as the same defect"
+      proof: "grep: A HARDCODED THREE IS THE SAME DEFECT WEARING A NEW NUMBER in plan/tasks.d/W1-T908-the-retro-body-asserts-a-changeset-it-does.yaml"
+    - claim: "the out-of-bounds work is enumerated so it is not rebuilt"
+      proof: "grep: WHAT MUST NOT BE BUILT in plan/tasks.d/W1-T908-the-retro-body-asserts-a-changeset-it-does.yaml"
+    - claim: "the adjacent stale-proof concern is named without being absorbed"
+      proof: "grep: THE ADJACENT ITEM, NAMED AND DELIBERATELY NOT FILED HERE in plan/tasks.d/W1-T908-the-retro-body-asserts-a-changeset-it-does.yaml"
+    - claim: "the declared scope is derived by measurement rather than by guess"
+      proof: "grep: DERIVED BY INVOCATION COUNT in plan/tasks.d/W1-T908-the-retro-body-asserts-a-changeset-it-does.yaml"
+  risk: high
+  origin: "oper#retro-body-changeset-2026-08-16"
+  plan_refs: ["W1-T274", "W1-T39", "W1-T136"]
+  files: [src/run-task.ts, test/retro-acceptance-repair.test.ts]
+  status: queued
+  attempts: 0
+  note: "risk:high is set UP FRONT and it is Rule 19's SPAN, not blast radius. The span is
+    unavoidable: both symbols this task edits — `retroPrompt` and `repairRetroAcceptanceBlock` —
+    are defined in src/run-task.ts, so the monolith cannot be left undeclared the way W1-T525
+    deliberately left it. Blast radius is bounded: one prompt string and one post-hoc body
+    repair, both on a path that only `rmd retro` reaches.
+    files: DERIVED BY INVOCATION COUNT at fa6e8d7 with WORD BOUNDARIES via git grep -cE, never a
+    bare substring. `repairRetroAcceptanceBlock` scores src/run-task.ts 2 and
+    test/retro-acceptance-repair.test.ts 9, and ZERO other files in either tree.
+    `retroPrompt` scores src/run-task.ts 3 and no test file at all. Negative control
+    `repairRetroAcceptanceBlockZzq` = 0 files. Nothing else is declared: `bodyContradictsDiff`
+    scores 4 src files and 13 test files but is the DETECTOR, which is correct and unchanged —
+    declaring its files would be scope inflation, and its own suite is not this task's home.
+    This shard's own path is absent from files: by design.
+    PROOF NOTES: the four unit proofs are NAME-FILTERED titles, each verified with `grep -rlF` to
+    match ZERO files under test/ at fa6e8d7, against a positive control matching 1. The
+    implementing test must carry each title as ONE verbatim string literal, never assembled
+    across a concatenation seam (impl-AG). Each grep pattern is TEXT INSIDE THIS SHARD rather
+    than a path slug, is single-line, carries no ' in ' that would mis-split the dialect parser,
+    and carries no '*' — a BRE quantifier under the executor's own `grep -arn` argv.
+    MINT NOTE, AND THE PROTOCOL WAS SUBSTITUTED — READ THIS BEFORE COPYING IT. The operator's
+    protocol is a gated push to refs/rmd-id/W1-T908 with a unique orphan payload over the empty
+    tree. THIS SESSION'S GIT PROXY REFUSES THAT NAMESPACE. Discriminated with two probes rather
+    than guessed: the same orphan payload pushed to refs/heads/ exits 0, while an ordinary commit
+    pushed to refs/rmd-id/ exits 1 with HTTP 403 — so the refusal is the NAMESPACE, not the
+    payload. The take was therefore made on refs/heads/rmd-id/W1-T908 with every other property
+    intact: orphan commit 46914b86 over the empty tree 4b825dc6, message carrying the
+    host-pid-nanosecond nonce mint-W1-T908-vm-10479-1786879185846969321, the push's EXIT CODE
+    CAPTURED IN A VARIABLE rather than read through a pipe, and the ref then re-read and its
+    nonce matched. That capture earned its keep: the refused refs/rmd-id push printed
+    'Everything up-to-date' as its LAST line while exiting 1, so a `| tail` would have read it as
+    success. READ-side positive control on the real namespace: refs/rmd-id/W1-T907 and
+    refs/rmd-id/W1-T905 each read 1, W1-T908 read 0, and a nonsense id read 0 — so the query
+    could see its corpus and 908 was genuinely free. Tree max at take was 907 across
+    plan/tasks.yaml and plan/tasks.d (547 ids), reservation refs held 515-516, 520-532 and
+    901-907, and the three open PRs carried no W1-T id. 524, 529 and 530 are reserved-but-unfiled
+    and were skipped rather than reused.
+    LINT: proof-scope warns once per grep proof here because each names this shard's own path
+    while files: correctly omits it; that check is warn-only, so it cannot block the changed-tasks
+    gate."
