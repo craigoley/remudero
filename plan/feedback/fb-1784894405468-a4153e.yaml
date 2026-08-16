@@ -22,5 +22,22 @@ raw: "HEADROOM GOVERNOR BECOMES A FLAG, DEFAULT OFF — OPERATOR RULING
   headroom condition pauses dispatch, proven by test."
 attachments: []
 origin: cli
-status: new
-proposal_pr: null
+status: proposed
+proposal_pr: https://github.com/craigoley/remudero/pull/1953
+summary:
+  headline: Headroom Governor Disabled by Default, Operator Enables as Needed
+  what_happened: Dispatch throttling via headroom governor is now disabled by
+    default because budget and turn limits already prevent runaway. Headroom
+    data is still logged for weekly review.
+  decision: Set headroom.enabled to false; monitor headroom data weekly; enable
+    the flag only if dispatch throttling becomes necessary.
+  options:
+    - label: "Monitoring mode: keep flag disabled"
+      consequence: Headroom data visible weekly, dispatch protected by budget and turn
+        limits, no automatic headroom-based throttling
+    - label: Enable headroom throttling
+      consequence: Set headroom.enabled true; dispatch throttles when headroom
+        percent_used exceeds threshold for additional safeguard
+    - label: Custom configuration
+      consequence: Specify different default, alert threshold, or telemetry frequency
+        before policy deployment

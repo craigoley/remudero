@@ -47,8 +47,10 @@
     keeps the library default (enforcement ON) unchanged and moves ONLY the live host to OFF via config/env — an
     inherited flag can never silently change the enforcement semantics the ratified curve encodes. Implemented
     directly by an operator-directed session 2026-07-25 per the ruling; credited via the merging PR's
-    Remudero-Task trailer. W1-T249's own acceptance still needs the flag criterion added (ruling clause 5) and
-    W1-T252 remains the policy-file home — both tracked separately.
+    Remudero-Task trailer. BOTH follow-ons named here are now CLOSED: ruling clause 5's flag criterion was added to
+    W1-T249's acceptance in plan/tasks.yaml (fifth claim, proof test/headroom-reserve.test.ts — triage of
+    fb-1784894405468-a4153e), and W1-T252's plan/policy.yaml `headroom.enabled` row is live (read by
+    src/lib/policy.ts's booleanField, wired by W1-T253), so the interim config/env carrier is no longer the only home.
     AMENDMENT — OPERATOR RULING 2026-07-25 (post-merge, supersedes a4153e's DEFAULT clause only): the shipped
     default of resolveHeadroomEnabled flips FALSE -> TRUE. The flag architecture this task built is unchanged and
     still governs (one switch, env over config in both directions, telemetry-without-enforcement when off); what
