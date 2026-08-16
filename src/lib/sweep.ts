@@ -3408,7 +3408,15 @@ export async function runSweep(
             // `acted:true`-gated dedup (design iv) — a different lane, a different set.
             appendLine(deps.ledgerPath, {
               run_id: deps.runId,
-              task_id: job.pr.taskId ?? "SWEEP",
+              // W1-T529 (v) — THE EMPTY STRING, NEVER THE "SWEEP" PLACEHOLDER, AND THE DIFFERENCE
+              // IS THE WHOLE DEDUP. The consult site reads
+              // `prior.postReviewed.has(`${pr.taskId ?? ""}@${pr.headSha}`)`, so a task-id-less PR
+              // looks up `@<sha>`. Writing "SWEEP" here produced `SWEEP@<sha>`: a row that reads
+              // correctly in the ledger, matches nothing, and left the attempt repeating every
+              // pass — MEASURED against this file before the fix, 3 attempts across 3 passes for a
+              // PR carrying no task id. The `sweep.action_failed` line above is diagnostic and may
+              // keep its placeholder; this one is a KEY and must match its lookup exactly.
+              task_id: job.pr.taskId ?? "",
               step: "review.post_refused",
               head_sha: job.pr.headSha,
               reason: `post-review attempt threw — standing down rather than retrying this head unbounded: ${actionError}`,
