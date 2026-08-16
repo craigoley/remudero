@@ -4636,23 +4636,94 @@ export function resolveServePort(rest: string[], configPort?: number): number {
   return n;
 }
 
-/** Loopback. The default bind: reachable from this machine and from nothing else. */
+/** Loopback. The default bind: reachable from this machine and from nothing else. UNCHANGED by
+ *  this task — see {@link resolveServeHosts}'s own doc for why the default stays exactly this,
+ *  containerized or not: "exposure must be typed, never inherited" (R-4) applies here too. */
 export const DEFAULT_SERVE_HOST = "127.0.0.1";
 
 /**
- * Wildcard binds, refused by name. `server.listen(port)` with no host defaults to `::`, which
- * accepts from EVERY interface — which is what `rmd serve` actually did while printing
- * "listening on http://localhost:4317". Anyone on any network the host is attached to could
- * reach the console, and the only thing between them and fleet-control write actions was a
- * bearer token that the same command printed to a world-readable log.
+ * W1-T915: the one wildcard spelling {@link assertBindableHost} will accept — and ONLY when the
+ * caller also names {@link CONTAINER_NETWORK_ENV} — because it is the one that matches the actual
+ * defect. `remudero-serve` runs in a container with no published port: `DEFAULT_SERVE_HOST`
+ * (loopback) answers neither Docker's `-p` NAT nor a sibling container (the Cloudflare Tunnel
+ * client the 2026-08-14 DECISIONS.md ruling puts on this same box), because both reach a
+ * container over ITS interface inside the container's own network namespace, never over its
+ * loopback. `0.0.0.0` there is the address that namespace needs to gain.
+ *
+ * This is deliberately NOT what {@link WILDCARD_HOSTS}'s existing refusal is about. That refusal
+ * guards a BARE HOST, where "every interface" means every network the host's own NIC joins — home
+ * wifi, a coffee-shop LAN, whatever's plugged in, with a bearer token as the only thing standing
+ * between a stranger on that LAN and a write route. Inside a container, "every interface" is
+ * bounded by Docker's own network isolation to that container's namespace; nothing here publishes
+ * a port to the host's other networks or to the public internet on its own — that stays an
+ * operator act (`docker run -p`, or co-locating the tunnel client). So the container's namespace
+ * gains an address; nothing wider does, and never silently: see {@link CONTAINER_NETWORK_ENV}.
+ */
+export const CONTAINER_ALL_INTERFACES_HOST = "0.0.0.0";
+
+/**
+ * The env var that must be set to exactly {@link CONTAINER_NETWORK_VALUE} before
+ * {@link assertBindableHost} will accept {@link CONTAINER_ALL_INTERFACES_HOST} as a `--host`/
+ * `RMD_SERVE_HOST` value — same shape as {@link TRUSTED_PROXY_TAILSCALE}'s single accepted value,
+ * refused for anything else (an unset var, a typo, `"1"`, `"true"`) rather than treated as a
+ * loose boolean. Deliberately a SEPARATE knob from the host value itself, not folded into it:
+ * typing `--host 0.0.0.0` alone must keep failing exactly as loudly as before (the existing
+ * `resolveServeHost`/`resolveServeHosts` wildcard tests assert this, unchanged by this task), so
+ * a template copy-paste or a fat-fingered address can never silently open every interface on a
+ * bare host. Only a caller who names BOTH "I mean 0.0.0.0" (the host value) AND "I am declaring a
+ * container's own network namespace, not a host's" (this var) gets through — exposure stays
+ * something someone typed, it just now takes two independent things typed together instead of
+ * being permanently unreachable no matter how deliberately they were typed.
+ */
+export const CONTAINER_NETWORK_ENV = "RMD_SERVE_NETWORK";
+
+/** The only value {@link CONTAINER_NETWORK_ENV} accepts. See that constant's own doc. */
+export const CONTAINER_NETWORK_VALUE = "container";
+
+/**
+ * Wildcard binds, refused by name — UNLESS `host` is exactly {@link CONTAINER_ALL_INTERFACES_HOST}
+ * and `allowContainerWildcard` says the caller declared {@link CONTAINER_NETWORK_ENV}. Plain
+ * `server.listen(port)` with no host defaults to `::`, which accepts from EVERY interface — which
+ * is what `rmd serve` actually did while printing "listening on http://localhost:4317". On a bare
+ * host anyone on any network that host is attached to could reach the console, and the only thing
+ * between them and fleet-control write actions was a bearer token the same command printed to a
+ * world-readable log. `::`, `*` and `""` stay refused unconditionally: only `0.0.0.0`, and only
+ * with the explicit container declaration, is the one case this task carves out — see
+ * {@link CONTAINER_ALL_INTERFACES_HOST}'s doc for why that specific pairing is safe.
  */
 export const WILDCARD_HOSTS = new Set(["0.0.0.0", "::", "*", ""]);
+
+function assertBindableHost(host: string, raw: string, allowContainerWildcard: boolean): void {
+  if (allowContainerWildcard && host === CONTAINER_ALL_INTERFACES_HOST) return;
+  if (WILDCARD_HOSTS.has(host)) {
+    throw new Error(
+      `--host ${JSON.stringify(raw)} binds EVERY interface. Name the interface(s) you mean ` +
+        `(e.g. ${DEFAULT_SERVE_HOST} for local only, or "${DEFAULT_SERVE_HOST},<tailnet-ip>" ` +
+        `to keep the console reachable locally AND from the phone) — or, inside a container with ` +
+        `no published port, set ${CONTAINER_NETWORK_ENV}=${CONTAINER_NETWORK_VALUE} alongside ` +
+        `${JSON.stringify(CONTAINER_ALL_INTERFACES_HOST)} to declare that "every interface" means ` +
+        `only this container's own network namespace (W1-T915).`,
+    );
+  }
+  if (host.startsWith("--")) {
+    throw new Error(`--host expects an address, got the flag ${JSON.stringify(raw)}`);
+  }
+}
 
 /**
  * Resolve the interface `rmd serve` binds to: `--host <addr>`, else `RMD_SERVE_HOST`, else
  * `configHost` (config.json's `serve.host` — W1-T152, so a launchd unit and a hand-run serve
  * agree without the operator retyping the address), else loopback. A wildcard is REFUSED rather
- * than silently accepted — exposure must be a thing someone typed, naming the interface they meant.
+ * than silently accepted — exposure must be a thing someone typed, naming the interface they
+ * meant — with exactly one carve-out (W1-T915): `0.0.0.0` is accepted when
+ * `env[CONTAINER_NETWORK_ENV] === CONTAINER_NETWORK_VALUE`, because inside a container that value
+ * names the container's own network namespace, not "every network this host is attached to". The
+ * DEFAULT (`raw === undefined`, nobody named anything) is UNCHANGED — still always loopback,
+ * containerized or not: R-4 ("exposure must be typed, never inherited") applies to the carve-out
+ * exactly as it applies to every other interface this function resolves. `remudero-serve` closes
+ * the measured defect by SETTING `RMD_SERVE_HOST=0.0.0.0` and `RMD_SERVE_NETWORK=container` in
+ * its own launch config — an operator/deploy act, same as every other `RMD_SERVE_HOST` value —
+ * not by this function inventing a default nobody typed.
  *
  * Remote access is expressed by naming the interface, not by opening all of them. This fleet is
  * reached from the operator's phone over Tailscale, so the tailnet address is the correct value
@@ -4671,13 +4742,17 @@ export function resolveServeHosts(rest: string[], env: NodeJS.ProcessEnv = proce
   // read as a working server that answers no one. Fall through to the wildcard check below,
   // which names the empty string, so the operator gets a message rather than a silent no-op.
   if (hosts.length === 0) hosts.push("");
-  for (const host of hosts) assertBindableHost(host, raw);
+  const allowContainerWildcard = env[CONTAINER_NETWORK_ENV] === CONTAINER_NETWORK_VALUE;
+  for (const host of hosts) assertBindableHost(host, raw, allowContainerWildcard);
   return hosts;
 }
 
 /**
  * SINGLE-HOST CONVENIENCE, retained because most callers want one address. Returns the FIRST
- * resolved host — never a wildcard, since {@link resolveServeHosts} has already refused those.
+ * resolved host — never an UNDECLARED wildcard, since {@link resolveServeHosts} has already
+ * refused those; it CAN return {@link CONTAINER_ALL_INTERFACES_HOST} when the caller explicitly
+ * declared {@link CONTAINER_NETWORK_ENV} (W1-T915), the one wildcard spelling that is no longer
+ * unconditionally refused.
  */
 export function resolveServeHost(rest: string[], env: NodeJS.ProcessEnv = process.env): string {
   return resolveServeHosts(rest, env)[0] as string;
@@ -4753,19 +4828,6 @@ export function resolveServeIdentity(
     );
   }
   return { trustedLocalAddress: DEFAULT_SERVE_HOST, capability: identityCapability };
-}
-
-function assertBindableHost(host: string, raw: string): void {
-  if (WILDCARD_HOSTS.has(host)) {
-    throw new Error(
-      `--host ${JSON.stringify(raw)} binds EVERY interface. Name the interface(s) you mean ` +
-        `(e.g. ${DEFAULT_SERVE_HOST} for local only, or "${DEFAULT_SERVE_HOST},<tailnet-ip>" ` +
-        `to keep the console reachable locally AND from the phone).`,
-    );
-  }
-  if (host.startsWith("--")) {
-    throw new Error(`--host expects an address, got the flag ${JSON.stringify(raw)}`);
-  }
 }
 
 // ── SERVICE LIFECYCLE (W1-T152) ───────────────────────────────────────────────────────────
