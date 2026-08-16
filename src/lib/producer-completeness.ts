@@ -216,6 +216,13 @@ export const KNOWN_UNWIRED: Readonly<Record<string, string>> = {
   // lib/sweep.ts's operatorVerdictEvidence, reading the operator_feedback ledger step and
   // plan/questions.ndjson — removed here per this file's own "removing a field from this list
   // means wiring it" rule.
+  supersessionVerdict:
+    "W1-T920 declared the field, the SupersessionVerdict shape, and the gated disposition row " +
+    "that reads it — but the DETECTOR (a trailer scan + diff comparison, with its own corpus " +
+    "control) is a separate, out-of-scope shard per that task's own design note ('WHAT MUST NOT " +
+    "BE BUILT'). Until that detector wires a producer into buildOpenPrViews, this field is always " +
+    "undefined in the real gateway, so the gated row it feeds never matches in production even " +
+    "with sweep.supersessionDisposal on — the fail-open direction.",
 };
 
 /** What the audit concluded. Both lists must be empty for the check to pass. */

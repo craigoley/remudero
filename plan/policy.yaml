@@ -422,6 +422,31 @@ sweep:
     min: 1
     max: 30
 
+  # W1-T920: gates the SUPERSESSION disposition — closing an open PR whose task is already
+  # covered by another PR, per a `SupersessionVerdict` the sweep reads off the PR (lib/sweep.ts).
+  # DEFAULT OFF, and the off path is asserted byte-for-byte identical to today's behaviour
+  # (test/sweep.test.ts, "W1-T920: the disposition is inert while its policy flag is off") —
+  # copying `armSessionPrs`'s own shape immediately above: a boolean an operator flips
+  # deliberately, never a default that closes a pull request on its own.
+  #
+  # ACTS ON THE VERDICT'S REASON, NEVER ON A MATCH (DECISIONS.md, W1-T919's 2026-08-16 ruling,
+  # #1987): the disposition row this flag gates reads ONLY `pr.supersessionVerdict.status` —
+  # never the PR's own title, trailer, or file list — so two PRs identical in every one of those
+  # (the #1873/#1874 falsifier: byte-identical titles and file lists, the better one chosen by an
+  # ARGUED difference) are disposed however their OWN verdicts read, never by their resemblance to
+  # each other. A verdict that could not be read (indeterminate) is a THIRD outcome, not a falsy
+  # "unique" — it never closes anything either.
+  #
+  # NET-NEW: no prior source literal gated this — `SupersessionVerdict`/`supersessionVerdict`
+  # read ZERO files across src/ and test/ before this task (re-derived at f889862). THE DETECTOR
+  # THAT POPULATES `OpenPrView.supersessionVerdict` IS OUT OF SCOPE HERE (a separate shard, per
+  # this task's own design note) — `supersessionVerdict` is therefore always absent from the real
+  # gateway today, so turning this flag on changes nothing in production until that detector
+  # lands; only a caller-supplied fixture (this shard's own tests) can exercise the acting arm.
+  supersessionDisposal:
+    value: false
+    origin: "net-new"
+
 drain:
   max:
     value: 10

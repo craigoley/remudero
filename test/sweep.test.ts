@@ -42,6 +42,7 @@ import {
   type StrikeAttempt,
   type SweepDeps,
   type SweepPolicy,
+  type SupersessionVerdict,
 } from "../src/lib/sweep.js";
 import type { CriterionVerdict } from "../src/lib/review.js";
 import { readLedgerLines } from "../src/lib/status.js";
@@ -371,6 +372,98 @@ test("deriveDisposition: a newer PR crediting the same task -> stale (superseded
   const r = deriveDisposition(supersededOrphanPr(), DEFAULT_SWEEP_POLICY, NOW);
   assert.equal(r.disposition, "stale");
   assert.match(r.reason, /superseded-by #99/);
+});
+
+// ── W1-T920 — the supersession disposition acts on a REASON, never on a match ──────────────────
+
+function supersededVerdict(over: Partial<SupersessionVerdict> = {}): SupersessionVerdict {
+  return {
+    status: "superseded",
+    evidence: {
+      supersedingPrNumber: 1969,
+      taskId: "W1-T908",
+      // The #1955 hand-diagnosis measured EXACTLY this shape: 131 raw lines, zero matched
+      // hunks, four symbols already on main — the corpus control the reason must carry.
+      diff: { rawLineCount: 131, matchedHunks: 0 },
+    },
+    detail: "trailer + diff read match #1969",
+    ...over,
+  };
+}
+
+test("W1-T920: the disposition is inert while its policy flag is off", () => {
+  // The off path must be BYTE-FOR-BYTE today's behaviour: a verdict present on the PR, with the
+  // flag at its shipped default (off), must change NOTHING — not the disposition, not the reason,
+  // not even which DISPOSITION_RULES row matched.
+  assert.equal(DEFAULT_SWEEP_POLICY.supersessionDisposalEnabled, false, "the flag defaults off");
+  const withVerdict = pr({ supersessionVerdict: supersededVerdict() });
+  const withoutVerdict = pr();
+  assert.deepEqual(
+    deriveDisposition(withVerdict, DEFAULT_SWEEP_POLICY, NOW),
+    deriveDisposition(withoutVerdict, DEFAULT_SWEEP_POLICY, NOW),
+    "a superseded verdict with the flag off must derive the identical disposition as no verdict at all",
+  );
+});
+
+test("W1-T920: a superseded verdict acts only with the flag on", () => {
+  const p = pr({ supersessionVerdict: supersededVerdict() });
+  const off = deriveDisposition(p, DEFAULT_SWEEP_POLICY, NOW);
+  assert.notEqual(off.disposition, "stale", "flag off: the verdict alone never closes anything");
+
+  const on: SweepPolicy = { ...DEFAULT_SWEEP_POLICY, supersessionDisposalEnabled: true };
+  const result = deriveDisposition(p, on, NOW);
+  assert.equal(result.disposition, "stale", "flag on + a superseded verdict: closes");
+  assert.match(result.reason, /#1969/);
+});
+
+test("W1-T920: an identical but unique pull request is never disposed", () => {
+  // The #1873/#1874 falsifier (DECISIONS.md, W1-T919's 2026-08-16 ruling): byte-identical
+  // titles, identical file lists, created 74 seconds apart — the one that merged was chosen by
+  // an ARGUED difference, never a match. A detector keyed on identity would have closed the
+  // better pull request. Two PRs sharing the SAME task id here (the closest this fixture shape
+  // can get to "identical in trailer and title and file list") must still be disposed however
+  // their OWN verdicts read, never by their resemblance to each other.
+  const on: SweepPolicy = { ...DEFAULT_SWEEP_POLICY, supersessionDisposalEnabled: true };
+  const uniqueTwin = pr({
+    prNumber: 1873,
+    taskId: "W1-T908",
+    supersessionVerdict: { status: "unique", detail: "argued distinct — not the same change" },
+  });
+  const result = deriveDisposition(uniqueTwin, on, NOW);
+  assert.notEqual(result.disposition, "stale", "a 'unique' verdict never closes, flag on or not");
+  assert.doesNotMatch(result.reason, /superseded/i);
+});
+
+test("W1-T920: an indeterminate verdict never closes anything", () => {
+  // Three-valued, not a falsy second value (design note iii): an unreadable answer is NOT a
+  // finding of uniqueness and must not be collapsed into one.
+  const on: SweepPolicy = { ...DEFAULT_SWEEP_POLICY, supersessionDisposalEnabled: true };
+  const indeterminate = pr({
+    supersessionVerdict: { status: "indeterminate", detail: "diff query errored — rate limited" },
+  });
+  assert.notEqual(deriveDisposition(indeterminate, on, NOW).disposition, "stale");
+
+  // Absent entirely (the real gateway today, per OpenPrView.supersessionVerdict's SCOPE note)
+  // behaves identically to indeterminate — the fail-open direction readLiveState's ok:false
+  // already uses elsewhere in this module.
+  assert.deepEqual(
+    deriveDisposition(indeterminate, on, NOW),
+    deriveDisposition(pr(), on, NOW),
+    "no verdict at all disposes exactly like an indeterminate one",
+  );
+});
+
+test("W1-T920: the disposition records its evidence and its corpus control", () => {
+  const on: SweepPolicy = { ...DEFAULT_SWEEP_POLICY, supersessionDisposalEnabled: true };
+  const result = deriveDisposition(pr({ supersessionVerdict: supersededVerdict() }), on, NOW);
+  assert.equal(result.disposition, "stale");
+  // The superseding PR + the shared task id — never a bare "superseded" label.
+  assert.match(result.reason, /#1969/);
+  assert.match(result.reason, /W1-T908/);
+  // The corpus control travels WITH the hunk finding (design note iv) — a bare hunk count alone
+  // cannot distinguish a genuinely empty diff from one whose read broke.
+  assert.match(result.reason, /131 raw line/);
+  assert.match(result.reason, /0 hunk/);
 });
 
 test("deriveDisposition: failing review with strikes exhausted -> blocked-ambiguous", () => {
