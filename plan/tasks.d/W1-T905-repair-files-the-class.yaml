@@ -1,0 +1,127 @@
+- id: W1-T905
+  title: "THE SWEEP REPAIRS THE INSTANCE AND NEVER FILES THE CLASS — every repair verb names a classified surface on its own `sweep.disposed` row and no recurring surface ever becomes a §7B feedback entry, so a category the fleet repairs fifteen times is rediscovered by hand each time"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "FILED FROM feedback fb-1784842083584-6cc22a (2026-07-23), whose FIRST half is now
+    substantially BUILT and is deliberately NOT re-filed here — saying so is part of the filing, because
+    re-proposing it would re-decide a settled decomposition.
+    WHAT THE FEEDBACK ASKED FOR AND ALREADY HAS. Its premise was an action vocabulary of
+    {arm, direct-merge, close, escalate}. `SweepDeps` (src/lib/sweep.ts) today injects `arm`,
+    `dispatchFix`, `close`, `escalate`, `depReview`, `postReview` AND `updateBranch`, and
+    `DISPOSITION_RULES` is a DATA table classifying each open PR into one of eight named dispositions
+    (mergeable / blocked-fixable / stale / blocked-ambiguous / dep-review / post-review / conflicted /
+    wait) with a named reason per row. Its verb (1) is the post-review lane (W1-T254/#720, its budget and
+    mutex W1-T473/#1781); verb (3) is update-branch (W1-T520 detects, W1-T528 presses); verb (6)'s ROOT
+    CAUSE was fixed at the gate itself (fb-1784917146019-88250d, accepted, PR #775), leaving no historical
+    instances to repair. The classify-and-route core it wanted has since been decomposed ON PURPOSE into
+    per-surface shards — W1-T527 (four causes of red, whose design says in terms 'CLASSIFY, DO NOT ROUTE …
+    no new lane, no new rung'), W1-T526 (the review queue), W1-T520/W1-T528 (the update half), W1-T124
+    (post-fix re-verification) — and the escalation-quality family (W1-T186, W1-T487, W1-T176, W1-T177)
+    already makes an escalation name the OBSERVED blocker rather than an inferred symptom.
+    WHAT IS UNBUILT AND UNFILED IS THE SECOND HALF — 'repair the instance, FILE THE CLASS'. Measured over
+    this tree: `root-cause feedback` / `file the class` / `repair the instance` match in ONE file only, the
+    feedback entry itself; ZERO tasks in plan/tasks.yaml or plan/tasks.d/ carry
+    `origin: feedback#fb-1784842083584-6cc22a`. No sweep path calls `captureFeedback` — its production
+    callers are the CLI, the panel routes, `src/lib/issues-intake.ts` (GitHub issues) and
+    `src/lib/coverage-improvement.ts`; the repair seam files nothing. So the fleet now repairs the SAME
+    surface every pass and the class-level defect behind it is only ever found by an operator reading
+    ledger rows by hand, which is the operator-archaeology channel the feedback exists to close.
+    THE MECHANISM IS ALREADY IN HAND, WHICH IS WHY THIS IS CHEAP. `captureFeedback`
+    (src/lib/feedback.ts) accepts an explicit deterministic `id`, and its own doc states that a re-run's
+    `existsSync` on that path IS the whole dedup mechanism — no second store; `src/lib/issues-intake.ts`
+    is the working precedent (`fb-issue-<owner>-<repo>-<n>` is both id and dedup key). Landing is already
+    best-effort and NEVER throws (feedback.ts swallows a landing failure by contract), so a capture cannot
+    fail a sweep pass. What is missing is a caller and a machine origin: `isValidFeedbackOrigin` accepts
+    `cli|ui|issue`, `issue#<n>` and `alert#<source>-<id>` and has no term for a harness-observed repair."
+  design: |
+    (i) THIS IS NOT A ROUTER, A LANE OR A RUNG, AND AN IMPLEMENTER WHO BUILDS ONE HAS LEFT THE DESIGN.
+    No new disposition, no new `when:`, no change to any dispatch condition, no new repair verb. The
+    per-surface split (W1-T527 / W1-T526 / W1-T520 / W1-T528) is settled and owns those questions. This
+    task adds ONE thing: the bridge from a RECURRING classified surface to a §7B feedback entry.
+    (ii) FILE THE CLASS, NOT THE INSTANCE — key on the SURFACE and only on RECURRENCE. Fifteen PRs
+    repaired for one surface must produce ONE entry, never fifteen, and a single repair must produce NONE:
+    one occurrence is a repair, a recurrence is a defect. The threshold and its window are POLICY DATA
+    (P37): a `sweep:` row in plan/policy.yaml with `origin: "net-new"` and bounds in the table's own
+    convention, read through the existing `loadPolicy(policyPath(root))` — never a literal in sweep.ts.
+    (iii) DEDUP IS THE ID, NOT A SECOND STORE. Compose a deterministic id from the surface and the window
+    (the `fb-issue-…` shape of src/lib/issues-intake.ts) and let `captureFeedback`'s existing `existsSync`
+    check be the entire idempotence guarantee, so a second pass over unchanged state files nothing. This
+    is the same level-triggered discipline the sweep already holds for actions (a `sweep.disposed`
+    `acted: true` row suppresses the repeat).
+    (iv) NAME THE ORIGIN SO `rmd trace` CAN FOLLOW IT. Extend the origin grammar with a
+    `repair#<surface>` machine origin beside `issue#<n>` and `alert#<source>-<id>` — same closed-grammar
+    validation, same fail-loud rejection of a malformed value. A machine-origin entry that cannot be
+    traced back to the surface that produced it is the thing this avoids.
+    (v) EVIDENCE, READ — NEVER INVENTED. The entry body carries the classified surface plus the evidence
+    the sweep ALREADY holds for it: the PR numbers, the disposition reason / stand-down reason, and the
+    failing check names and shas `CiFailure` already carries. If a field was not observed it is stated as
+    unobserved; the entry never manufactures a cause.
+    (vi) NO NEW LEDGER ROW NOTHING READS. Fold over the `sweep.disposed` rows that already exist rather
+    than emitting a parallel record — `daemon.tree_dirty` and `daemon.stale_code` both fire and nothing
+    reads either (W1-T494), and W1-T527's design names that outcome as the one to avoid.
+    (vii) A FEEDBACK ENTRY, NEVER A TASK — STANDING RULE 15. The output is `status: new` in
+    plan/feedback/, triaged by `rmd triage` like any other entry and gated by the same PR + review. It
+    proposes nothing, ratifies nothing and edits no task file.
+    (viii) BEST EFFORT, STRUCTURALLY. Filing runs behind the same per-PR throw containment the action
+    switch already has (W1-T254): a capture, landing or PR failure leaves the repair and every later PR in
+    the pass untouched. A sweep that fails because its bookkeeping failed is worse than one that files
+    nothing.
+    (ix) THE PURE FOLD LIVES IN sweep.ts AND THE EFFECT IS INJECTED. sweep.ts calls no `gh`/git/filesystem
+    effect directly — every external effect is a `SweepDeps` member wired in `buildSweepEffects`
+    (src/run-task.ts). The recurrence fold ('which surfaces are due for filing') is a pure function over
+    the rows; the capture is one more injected dep. `src/run-task.ts` IS DECLARED and the serialisation
+    cost of naming that file (`partitionByFileOverlap`, W1-T471) is accepted knowingly, exactly as
+    W1-T528 accepted it for the action half.
+    (x) OUT OF SCOPE, NAMED SO IT IS NOT SMUGGLED IN: any new repair verb; the merge authority (unchanged
+    — the operator's until P41 rules otherwise); escalation wording (W1-T186 / W1-T487); the landing
+    trigger itself (W1-T530 owns the level-triggered landing pass, and this consumes whatever it ships);
+    and the operator-decision card (fb-1784770111145-cf7c24).
+  acceptance:
+    - claim: "one classified surface repaired repeatedly inside the policy window files EXACTLY ONE machine-origin feedback entry naming that surface"
+      proof: "unit test: test/sweep-repair-filing.test.ts"
+    - claim: "a surface repaired fewer times than the policy threshold files NOTHING, and the threshold and window are read from plan/policy.yaml rather than a literal"
+      proof: "unit test: test/sweep-repair-filing.test.ts"
+    - claim: "a second pass over the same recurring surface files nothing new — the deterministic id is the whole dedup and no second store exists"
+      proof: "unit test: test/sweep-repair-filing.test.ts"
+    - claim: "the entry carries the observed evidence read off the existing sweep.disposed rows (PR numbers, disposition reason, failing check names) and is a feedback entry with status new, never a task"
+      proof: "unit test: test/sweep-repair-filing.test.ts"
+    - claim: "a capture or landing failure leaves the repair and the rest of the sweep pass unchanged — filing is best effort and never blocks a repair"
+      proof: "unit test: test/sweep-repair-filing.test.ts"
+    - claim: "the machine origin is a first-class term in the closed origin grammar so a filed entry traces back to the surface that produced it"
+      proof: "grep: repair# in src/lib/feedback.ts"
+  origin: feedback#fb-1784842083584-6cc22a
+  plan_refs: ["§7B", "§5D"]
+  files: [src/lib/sweep.ts, src/lib/feedback.ts, src/run-task.ts, plan/policy.yaml, test/sweep-repair-filing.test.ts]
+  status: queued
+  attempts: 0
+  note: "TRIAGE RECORD for fb-1784842083584-6cc22a, so a later reader knows what was deliberately NOT
+    filed. The feedback's first half (repair verbs + classify/route) is either SHIPPED (post-review lane
+    W1-T254/#720 and W1-T473/#1781; the ci-gate re-aggregation fix PR #775; the escalation-naming family
+    W1-T186/W1-T487/W1-T176/W1-T177; the post-fix re-verification rung W1-T124/W1-T474) or already FILED
+    per-surface (W1-T520, W1-T526, W1-T527, W1-T528) — and the flake-retry verb (2) is W1-T255 from
+    fb-1784818107548-b32f2b, the interrupted-lane verb (8) is W1-T903. Re-filing a paramedic ROUTER over
+    that decomposition would contradict W1-T527's explicit 'no new lane, no new rung' ruling, so it is
+    refused here rather than re-argued. The ONLY clause no filing absorbed is the second half — auto-file
+    the root cause — which is what this shard is, narrowed to it.
+    risk: high — Rule 19 SPAN across src/, test/ and plan/policy.yaml, and independently warranted: this
+    WRITES into the §7B inbox and, through the landing bridge, opens a PR, so a wrong recurrence key does
+    not fail loudly, it floods the Architect's front door. That failure mode is why (ii) keys on the
+    SURFACE and (iii) makes the id the dedup.
+    budget_usd 60 — a pure fold over rows that already exist, one injected dep, one policy row, one
+    grammar term, and a five-way falsifier.
+    files: DERIVED, not guessed. src/lib/sweep.ts holds DISPOSITION_RULES, the disposed rows and the
+    SweepDeps surface; src/lib/feedback.ts holds captureFeedback, FEEDBACK_ORIGINS and
+    isValidFeedbackOrigin; src/run-task.ts holds buildSweepEffects, the only place an effect may be wired;
+    plan/policy.yaml holds the P37 sweep table this threshold belongs in; test/sweep-repair-filing.test.ts
+    is a NEW suite rather than an append to the 200+-test test/sweep.test.ts, which every sweep task in
+    flight already contends for. Nothing is declared that the implementation does not touch.
+    PROOFS: whole-file `unit test:` form — the suite does not exist yet, so a name-filtered title would
+    match zero tests forever. The single grep proof pins the origin grammar term, which is the one thing a
+    whole-file run could pass without.
+    depends_on EMPTY, deliberately: the rows this folds are written today, and W1-T530 (level-triggered
+    landing) only improves durability of an entry this files — it does not gate it."
