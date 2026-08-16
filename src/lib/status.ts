@@ -21,7 +21,17 @@ import type { Plan, Task, TaskStatus } from "./plan.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { labelledIssuesRestArgs, NEEDS_HUMAN_LABEL, parseLabelledIssuesRest } from "./escalate.js";
 import { isHolderStale } from "./fs-race-safe.js";
-import { type BoardPrRest, fetchBoardPrsRest, type GhCallPacer, paceGhEntry } from "./open-prs-rest.js";
+import {
+  boardPrsRestArgs,
+  type BoardPrRest,
+  fetchBoardPrsRest,
+  type GhCallPacer,
+  mapRestPr,
+  paceGhEntry,
+  prStateFromRest,
+  type RestPullRow,
+  singlePrRestArgs,
+} from "./open-prs-rest.js";
 import { isInPlanScope } from "./plan-architect.js";
 
 /**
@@ -358,6 +368,35 @@ export interface StatusProjection {
    * was supplied AND it found such a commit.
    */
   supersededBy?: SupersessionEvidence;
+  /**
+   * W1-T507: this task is filed `verify: human` in the plan AND this projection's own `merged`
+   * is false — the plan has already excluded it from every machine-dispatch path
+   * (`isDispatchEligible` in `src/lib/drain.ts`, `assertRunnable` in `src/lib/plan.ts`, and three
+   * `task-linter.ts` predicates all return/throw on `task.verify === "human"`), so nothing else
+   * in `src/` ever converts that exclusion into a signal a person can see. Set by
+   * {@link deriveStatus} itself (unlike `supersededBy` immediately above, which needs an
+   * external git-log search dependency `deriveStatus` does not take, and is therefore attached
+   * one level up in {@link projectPlan}): this flag is a pure function of `task` plus THIS
+   * call's own already-resolved `merged`/`indeterminate`, so computing it here keeps every
+   * caller — `projectPlan`'s hoisted pass and a standalone `deriveStatus(task, deps)` call
+   * alike — DERIVATION-EQUIVALENT, never diverging by which path reached it.
+   *
+   * DELIBERATELY A DIFFERENT FIELD FROM `needsHuman`, never a widened one. `needsHuman` backs
+   * the NEEDS ME escalation row's own "view issue"/"mark handled" affordance
+   * (`escalationIssueUrl`/`escalationTitle`), which a `verify: human` task never has — it is
+   * never DISPATCHED, so it never RUNS, so it never escalates. Setting `needsHuman` here would
+   * render that affordance with nothing to click. A DISTINCT KIND instead, so a caller (the
+   * console) groups by it rather than flattening two different reasons a row needs a person
+   * into one flag.
+   *
+   * "Already credited merged" is exactly this projection's OWN `merged` — the same field every
+   * other precedence rung already resolves from EITHER credit path (an anchored
+   * `Remudero-Task:` trailer, or a `run-<taskId>-<digits>` head ref), so a task credited through
+   * either route is correctly excluded here too, same as everywhere else `merged` gates.
+   * Sparse, like `needsHuman`/`indeterminate`/`orphaned`/`supersededBy` — present only when
+   * applicable.
+   */
+  verifyHumanPending?: true;
 }
 
 /**
@@ -2540,6 +2579,36 @@ export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
     projection.armedAwaitingMerge = true;
   }
 
+  // W1-T507: the OTHER reason a row needs a person — a task filed `verify: human` in the plan
+  // itself. `isDispatchEligible` (`src/lib/drain.ts`), `assertRunnable` (`src/lib/plan.ts`) and
+  // three `task-linter.ts` predicates all treat `task.verify === "human"` as an EXCLUSION from
+  // machine attention and nothing else — the field's only effect anywhere else in this product
+  // — so nothing before this point ever tells a person such a task is theirs to look at.
+  //
+  // COMPUTED HERE, deliberately NOT at the projectPlan level (unlike W1-T485's own
+  // `supersededBy`, attached there because it needs an external git-log search dependency this
+  // function does not take). This flag is a pure function of `task` plus THIS call's own
+  // already-resolved `merged`/`indeterminate` — computing it here keeps every caller
+  // (projectPlan's hoisted pass AND a standalone `deriveStatus(task, deps)` call alike)
+  // DERIVATION-EQUIVALENT, exactly the invariant test/w1-t187-equivalence.test.ts's own
+  // criterion 1 guards over the full production-scale corpus. `merged` is always false at this
+  // point (an earlier guard above already returned `base` directly once `base.merged`), so only
+  // `indeterminate` needs checking: while set, this cycle's GitHub read genuinely failed, so
+  // "not yet credited" was never actually observed — flagging this off an unread state would be
+  // the fail-open direction W1-T119 exists to prevent, same discipline the supersession loop in
+  // {@link projectPlan} applies to its own field.
+  //
+  // DELIBERATELY A DIFFERENT FIELD FROM `needsHuman`, never a widened one (design (ii)):
+  // `needsHuman`, set just above when applicable, backs the NEEDS ME escalation row's own "view
+  // issue"/"mark handled" affordance (`escalationIssueUrl`/`escalationTitle`), which a
+  // `verify: human` task never has — it is never DISPATCHED, so it never escalates. Setting
+  // `needsHuman` here would render that affordance with nothing to click. A DISTINCT KIND
+  // instead, so a caller (the console) groups by it rather than flattening two different
+  // reasons a row needs a person into one flag.
+  if (task.verify === "human" && !projection.indeterminate) {
+    projection.verifyHumanPending = true;
+  }
+
   return projection;
 }
 
@@ -2998,23 +3067,87 @@ export function ghGateway(owner: string, repo: string, opts: { exec?: (args: str
       return null;
     }
   };
+  // Same sticky-failure bookkeeping as `tryJson`, for the ONE call here (`changedFiles`) that
+  // reads plain `--jq`-filtered lines rather than a JSON document — mirrors
+  // `buildBatchedGithub`'s own `changedFiles` below, which pays this exact same shape for the
+  // exact same reason (`--paginate` without `--jq` emits one JSON array PER PAGE, which
+  // `JSON.parse` rejects outright).
+  const tryLines = (args: string[]): string[] | null => {
+    try {
+      return run(args).split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+    } catch (err) {
+      failed = true;
+      const e = err as NodeJS.ErrnoException & { status?: number | null; stderr?: string | Buffer };
+      failureReason = classifyGhFailure(e?.status, e?.stderr != null ? String(e.stderr) : undefined, e?.code);
+      return null;
+    }
+  };
+  // `ref` is either a bare PR number (`task.pr`) or a full PR URL (a ledger `pr.opened` line) —
+  // the two shapes every real call site here ever passes. REST addresses a PR by number only, so
+  // both are folded down to one here rather than re-derived at each call site.
+  const prNumberFromRef = (ref: string | number): number | undefined => {
+    if (typeof ref === "number") return Number.isInteger(ref) ? ref : undefined;
+    const fromPath = ref.match(/\/pull\/(\d+)(?:[/?#]|$)/)?.[1];
+    if (fromPath) return Number(fromPath);
+    return /^\d+$/.test(ref.trim()) ? Number(ref.trim()) : undefined;
+  };
+  const fetchPrRow = (ref: string | number): RestPullRow | null => {
+    const n = prNumberFromRef(ref);
+    return n === undefined ? null : tryJson<RestPullRow>(singlePrRestArgs(owner, repo, n));
+  };
+  /** One REST search-issues result item — the shape actually needed off it, not the whole schema. */
+  interface RestSearchItem {
+    number: number;
+    html_url: string;
+    state?: string;
+    pull_request?: { merged_at?: string | null };
+  }
+  // Body/head-branch search, REST's `/search/issues` (NOT `gh pr list --search`, which — like
+  // every other `pr view`/`pr list` invocation — is answered off GraphQL's `search()` connection
+  // regardless of the flags passed to it). GitHub's query-qualifier language (`repo:`, `is:pr`,
+  // `is:merged`, `in:body`, `head:`) is shared verbatim between the GraphQL and REST search
+  // surfaces, so the query string itself does not change — only the transport does. `sort=created`
+  // `order=desc` pins the ordering the pre-conversion callers already relied on (`findMergedByTrailer`'s
+  // own doc: "newest first") rather than falling back to search's relevance-ranked default, which a
+  // bare `--limit 1` read cannot afford to leave unspecified.
+  const searchMergedPrs = (query: string, limit: number): PrRef[] | null => {
+    const q = `repo:${slug} is:pr is:merged ${query}`;
+    const res = tryJson<{ items?: RestSearchItem[] }>([
+      "api", `search/issues?q=${encodeURIComponent(q)}&sort=created&order=desc&per_page=${limit}`,
+    ]);
+    if (!res) return null;
+    return (res.items ?? []).slice(0, limit).map((it) => ({
+      number: it.number,
+      url: it.html_url,
+      state: prStateFromRest({ state: it.state, merged_at: it.pull_request?.merged_at }),
+    }));
+  };
+  const listPullsByState = (state: "open" | "closed", maxItems: number): RestPullRow[] | null => {
+    const perPage = 100;
+    const out: RestPullRow[] = [];
+    for (let page = 1; out.length < maxItems; page += 1) {
+      const rows = tryJson<RestPullRow[]>(boardPrsRestArgs(owner, repo, state, page, perPage));
+      if (rows === null) return null;
+      out.push(...rows);
+      if (rows.length < perPage) break;
+    }
+    return out.slice(0, maxItems);
+  };
   return {
     prByRef(ref) {
       // "title" rides along on this SAME fetch (W1-T184) — a decoration, never an extra
-      // `gh` call: lib/board.ts's RECENT activity feed reads it off the SAME PrRef this
+      // call: lib/board.ts's RECENT activity feed reads it off the SAME PrRef this
       // method already returns for every other caller.
-      const pr = tryJson<PrRef>(["pr", "view", String(ref), "--repo", slug, "--json", "number,url,state,title"]);
-      return pr && typeof pr.number === "number" ? pr : null;
+      const row = fetchPrRow(ref);
+      return row && typeof row.number === "number"
+        ? { number: row.number, url: row.html_url, state: prStateFromRest(row), title: row.title }
+        : null;
     },
     findMergedByTrailer(taskId) {
       // GitHub body search for the exact trailer, merged PRs only, newest first.
       // Fuzzy (P16 / W1-T69) — callers must re-verify via headRefName + prBody
       // before crediting; this is a first pass, never the authority.
-      const list = tryJson<PrRef[]>([
-        "pr", "list", "--repo", slug, "--state", "merged",
-        "--search", `"Remudero-Task: ${taskId}" in:body`,
-        "--json", "number,url,state", "--limit", "1",
-      ]);
+      const list = searchMergedPrs(`"Remudero-Task: ${taskId}" in:body`, 1);
       return list && list.length > 0 ? list[0] : null;
     },
     findMergedByTrailerAll(taskId) {
@@ -3023,12 +3156,7 @@ export function ghGateway(owner: string, repo: string, opts: { exec?: (args: str
       // changing what `findMergedByTrailer` returns: existing callers keep the one-hit answer and
       // pay nothing new. TRAILER_ALL_LIMIT bounds it — a task with more than that many merged
       // trailer-bearing PRs has a bigger problem than attribution.
-      const list = tryJson<PrRef[]>([
-        "pr", "list", "--repo", slug, "--state", "merged",
-        "--search", `"Remudero-Task: ${taskId}" in:body`,
-        "--json", "number,url,state", "--limit", String(TRAILER_ALL_LIMIT),
-      ]);
-      return list ?? null;
+      return searchMergedPrs(`"Remudero-Task: ${taskId}" in:body`, TRAILER_ALL_LIMIT);
     },
     findMergedByHeadBranch(taskId) {
       // Merged PRs whose HEAD BRANCH is `run-<taskId>-*` (W1-T256). `head:` is a
@@ -3039,57 +3167,71 @@ export function ghGateway(owner: string, repo: string, opts: { exec?: (args: str
       // rides along and the caller re-asserts `run-<taskId>-\d+` ownership before
       // crediting. null on a `gh` FAILURE (→ readFailed()/W1-T119), [] on a
       // genuine no-such-branch — the two must stay distinguishable.
-      return tryJson<PrRef[]>([
-        "pr", "list", "--repo", slug, "--state", "merged",
-        "--search", `head:run-${taskId}-`,
-        "--json", "number,url,state,headRefName", "--limit", "10",
-      ]);
+      //
+      // REST's search-issues result carries no `head` field (it is an Issue shape, not a
+      // PullRequest one), unlike GraphQL's search connection which resolved `headRefName`
+      // straight off the same fetch — so each (bounded, ≤10) hit pays one more REST read to
+      // recover it, the same bounded per-match follow-up shape `changedFiles`/
+      // `hydrateMergeStates` already use elsewhere in this file.
+      const hits = searchMergedPrs(`head:run-${taskId}-`, 10);
+      if (hits === null) return null;
+      return hits.map((h) => {
+        const row = tryJson<RestPullRow>(singlePrRestArgs(owner, repo, h.number));
+        return { ...h, headRefName: row ? mapRestPr(row).headRefName : undefined };
+      });
     },
     listMergedHeadBranches() {
       // ONE list of every merged PR's head ref (W1-T257) — projectPlan matches run-<taskId>-*
       // CLIENT-SIDE for the whole plan from this single fetch. Deterministic LIST API, NOT the
       // eventually-consistent body full-text index. null on a `gh` FAILURE (→ readFailed()/W1-T119).
-      return tryJson<PrRef[]>([
-        "pr", "list", "--repo", slug, "--state", "merged",
-        "--json", "number,url,state,headRefName", "--limit", "1000",
-      ]);
+      // REST's `/pulls?state=closed` carries CLOSED-and-unmerged rows too, exactly like
+      // `fetchBoardPrsRest`'s own COLD half — `prStateFromRest` (not `state.toUpperCase()`) is
+      // what separates a genuinely merged row from a closed-unmerged one here.
+      const rows = listPullsByState("closed", 1000);
+      if (rows === null) return null;
+      return rows
+        .filter((r) => prStateFromRest(r) === "MERGED")
+        .map((r) => ({ number: r.number, url: r.html_url, state: "MERGED", headRefName: r.head?.ref ?? "" }));
     },
     listOpenHeadBranches() {
       // W1-T377: the OPEN twin of listMergedHeadBranches — one list of every open PR's head ref,
       // matched `run-<taskId>-*` CLIENT-SIDE by projectPlan. Deterministic LIST API, never the
       // body full-text index. null on a `gh` FAILURE (→ readFailed()/W1-T119), [] on genuinely
       // no open PRs — the two must stay distinguishable.
-      return tryJson<PrRef[]>([
-        "pr", "list", "--repo", slug, "--state", "open",
-        "--json", "number,url,state,headRefName", "--limit", "1000",
-      ]);
+      const rows = listPullsByState("open", 1000);
+      if (rows === null) return null;
+      return rows.map((r) => ({ number: r.number, url: r.html_url, state: "OPEN", headRefName: r.head?.ref ?? "" }));
     },
     headRefName(prUrl) {
-      const view = tryJson<{ headRefName?: string }>(["pr", "view", prUrl, "--json", "headRefName"]);
-      return view?.headRefName;
+      const row = fetchPrRow(prUrl);
+      return row ? mapRestPr(row).headRefName : undefined;
     },
     prBody(prUrl) {
-      const view = tryJson<{ body?: string }>(["pr", "view", prUrl, "--json", "body"]);
-      return view?.body;
+      const row = fetchPrRow(prUrl);
+      return row ? mapRestPr(row).body : undefined;
     },
     changedFiles(prUrl) {
-      // W1-T413. `--json files` on the SAME `pr view` transport this gateway already pays per
-      // call for `headRefName` and `prBody`, so the residual hand-named-branch case costs one
-      // more read on a gateway that is per-task by construction. `tryJson` returns undefined on
-      // a `gh` failure, which is the UNAVAILABLE signal the caller keeps today's answer for.
-      const view = tryJson<{ files?: Array<{ path?: string }> }>(["pr", "view", prUrl, "--json", "files"]);
-      if (!view?.files) return undefined;
-      const paths = view.files.map((f) => f.path).filter((p): p is string => typeof p === "string");
+      // W1-T413. Mirrors `buildBatchedGithub`'s own `changedFiles` below: `/pulls/{n}/files` has
+      // no field-selection story the way `gh --json` did, so this reads filenames straight off
+      // `--jq` rather than parsing (and discarding most of) the full file-diff payload.
+      // `tryLines` returns null on a `gh`/REST failure, which is the UNAVAILABLE signal the
+      // caller keeps today's answer for.
+      const n = prNumberFromRef(prUrl);
+      if (n === undefined) return undefined;
+      const lines = tryLines(["api", "--paginate", `repos/${slug}/pulls/${n}/files`, "--jq", ".[].filename"]);
+      if (!lines) return undefined;
       // A row set that parsed but yielded no usable path is a MALFORMED read, not an empty PR —
       // report it as unavailable rather than as a changeset that touches nothing.
-      return paths.length > 0 ? paths : undefined;
+      return lines.length > 0 ? lines : undefined;
     },
     autoMergeArmed(prUrl) {
-      const view = tryJson<{ autoMergeRequest?: unknown }>(["pr", "view", prUrl, "--json", "autoMergeRequest"]);
-      return view?.autoMergeRequest != null;
+      const row = fetchPrRow(prUrl);
+      return (row ? mapRestPr(row).autoMergeRequest : null) != null;
     },
     issueByUrl(url) {
-      const view = tryJson<{ state?: string; title?: string }>(["issue", "view", url, "--json", "state,title"]);
+      const n = url.match(/\/issues\/(\d+)/)?.[1];
+      if (!n) return null;
+      const view = tryJson<{ state?: string; title?: string }>(["api", `repos/${slug}/issues/${n}`]);
       return view && typeof view.state === "string" ? { state: view.state, title: view.title } : null;
     },
     readFailed() {

@@ -337,6 +337,32 @@ jobs:
         run: npm ci
       - name: Knowledge budget ratchet (blocks a PR that pushes the active learnings corpus over the recorded cap)
         run: npm run --silent learnings-budget-ratchet
+      # W1-T503 (MASTER-PLAN §8A) — CLAUDE.md is injected in full into every session on every
+      # lane and was the fleet's largest per-session injectable with no budget at all, while the
+      # learnings corpus above at a fifth its weight already had one. It rides HERE, as a step in
+      # the sibling budget job, rather than as a job of its own, and that placement is load-bearing
+      # rather than tidy: CI_PARITY_TABLE is asserted against ci.yml BY JOB NAME in both directions
+      # (test/preflight-ci-parity.test.ts, via parseCiJobNames) and nothing asserts a job's STEP
+      # list, so a new job would force a table entry in src/lib/ci-parity.ts — a product path —
+      # beside this workflow, which is the Rule 25 pairing that held this change all day. A step
+      # needs no entry and no src/ file.
+      #
+      # ENFORCEMENT IS UNCHANGED BY THE PLACEMENT. A `run:` step carries no continue-on-error, so a
+      # non-zero exit fails `learnings-budget-ratchet`, which ci-gate.yml already lists as REQUIRED.
+      # The ratchet gains no new required check and loses no teeth.
+      #
+      # DO NOT "COMPLETE" THIS by adding a matching runStep() to CI_PARITY_TABLE's entry: that edit
+      # touches src/lib/ci-parity.ts and re-creates the exact pairing this placement avoids. The
+      # cost of leaving it out is that `rmd preflight --ci-parity` does not mirror this step
+      # locally — a fidelity gap, not a gate failure.
+      #
+      # The cap carries ZERO HEADROOM: CLAUDE.md's own charter says every addition must be paid for
+      # by a fold ("compression is a deliverable, not just accretion"), so
+      # scripts/claude-md-budget-baseline.json's capBytes is the measured size at capture, not a
+      # figure with room to grow into. It only ever ratchets UP, by a reviewed bump that says why
+      # growth is right — never down to make a red PR pass.
+      - name: CLAUDE.md size ratchet (blocks a PR that grows CLAUDE.md past the recorded cap)
+        run: npm run --silent claude-md-budget-ratchet
 
   jscpd-gate:
     # §5 TIER 2, quality gate 3/4 (W1-T97) — a duplication CEILING: copy-pasted code rots

@@ -636,17 +636,31 @@ test("an injected gateway returning a clean not-found (zero-exit, empty result) 
 });
 
 test("W1-T256: the REAL ghGateway.findMergedByHeadBranch queries merged PRs by the structured head:run-<taskId>- ref (NOT the body index), and credits an owned hit end-to-end", () => {
-  const capturedSearches: string[] = [];
+  // W1-T523: the search transport moved off `gh pr list --search` (GraphQL) onto `gh api
+  // search/issues?q=...` (REST) — the query-qualifier language (`in:body`/`head:`) is unchanged,
+  // only the argv shape carrying it is, so this asserts the SAME corroboration behavior against
+  // the NEW shape rather than the old one.
+  const capturedQueries: string[] = [];
   const github = ghGateway("craigoley", "remudero", {
     exec: (args) => {
-      const s = args.includes("--search") ? args[args.indexOf("--search") + 1] : "";
-      if (s) capturedSearches.push(s);
-      if (s.includes("in:body")) return "[]"; // the eventually-consistent body search MISSED it
-      if (s.startsWith("head:")) {
-        // the deterministic head-ref read finds this task's own merged run branch
-        return JSON.stringify([{ number: 61, url: "u/61", state: "MERGED", headRefName: "run-W1-T12a-1784124446138" }]);
+      const arg1 = typeof args[1] === "string" ? args[1] : "";
+      if (args[0] === "api" && arg1.startsWith("search/issues?q=")) {
+        const q = decodeURIComponent(arg1.slice("search/issues?q=".length).split("&")[0]);
+        capturedQueries.push(q);
+        if (q.includes("in:body")) return JSON.stringify({ items: [] }); // eventually-consistent body search MISSED it
+        if (q.includes("head:")) {
+          // the deterministic head-ref search finds this task's own merged run PR (headRefName
+          // rides in on a bounded follow-up single-PR REST read — search/issues carries no head).
+          return JSON.stringify({
+            items: [{ number: 61, html_url: "u/61", state: "closed", pull_request: { merged_at: "2026-01-01T00:00:00Z" } }],
+          });
+        }
+        return JSON.stringify({ items: [] });
       }
-      return "[]";
+      if (args[0] === "api" && arg1 === "repos/craigoley/remudero/pulls/61") {
+        return JSON.stringify({ number: 61, html_url: "u/61", head: { ref: "run-W1-T12a-1784124446138" } });
+      }
+      return JSON.stringify({ items: [] });
     },
   });
   const proj = deriveStatus(task({ id: "W1-T12a" }), { ledgerPath: ledgerFile([]), github });
@@ -654,8 +668,8 @@ test("W1-T256: the REAL ghGateway.findMergedByHeadBranch queries merged PRs by t
   assert.equal(proj.source, "head-branch");
   assert.equal(proj.prNumber, 61);
   assert.ok(
-    capturedSearches.includes("head:run-W1-T12a-"),
-    `expected a head:run-W1-T12a- ref search (structured, not in:body); saw ${JSON.stringify(capturedSearches)}`,
+    capturedQueries.some((q) => q.includes("head:run-W1-T12a-")),
+    `expected a head:run-W1-T12a- ref search (structured, not in:body); saw ${JSON.stringify(capturedQueries)}`,
   );
 });
 

@@ -81,26 +81,39 @@ const CORPUS: BatchedPr[] = [
   },
 ];
 
-/** `ghGateway` over the corpus, modelling the SEARCH faithfully: fuzzy, newest-first, `--limit 1`. */
+/**
+ * `ghGateway` over the corpus, modelling the SEARCH faithfully: fuzzy, newest-first, `per_page=1`.
+ *
+ * W1-T523: the transport moved off `gh pr list --search --limit 1` (GraphQL) onto `gh api
+ * search/issues?q=…&sort=created&order=desc&per_page=1` (REST) — the query-qualifier language
+ * (`in:body`) and the newest-first ordering `--limit 1` depended on are unchanged, only the argv
+ * shape carrying them is, so this fixture routes on the NEW shape rather than the old one.
+ */
 function searchGateway(calls: string[][] = []): GitHub {
   return ghGateway("craigoley", "remudero", {
     exec: (args) => {
       calls.push(args);
-      if (args.includes("--search")) {
-        const term = args[args.indexOf("--search") + 1];
-        const id = term.match(/Remudero-Task: (\S+)"/)?.[1] ?? "";
+      const arg1 = typeof args[1] === "string" ? args[1] : "";
+      if (args[0] === "api" && arg1.startsWith("search/issues?q=")) {
+        const q = decodeURIComponent(arg1.slice("search/issues?q=".length).split("&")[0]);
+        const id = q.match(/Remudero-Task: (\S+)"/)?.[1] ?? "";
         // FUZZY BY CONTRACT — the real search hits the body full-text index, so a PR merely
         // DISCUSSING the id comes back too. A fixture returning only exact matches would prove
         // agreement by construction, which is the whole failure mode this corpus exists to avoid.
-        const hits = CORPUS.filter((p) => (p.body ?? "").includes(id)).sort((a, b) => b.number - a.number);
-        return JSON.stringify(hits.map((p) => ({ number: p.number, url: p.url, state: p.state })).slice(0, 1));
+        const perPage = Number(arg1.match(/per_page=(\d+)/)?.[1] ?? 1);
+        const hits = CORPUS.filter((p) => (p.body ?? "").includes(id))
+          .sort((a, b) => b.number - a.number)
+          .slice(0, perPage);
+        return JSON.stringify({
+          items: hits.map((p) => ({ number: p.number, html_url: p.url, state: "closed", pull_request: { merged_at: "2026-01-01T00:00:00Z" } })),
+        });
       }
-      if (args.includes("view")) {
-        const url = args[args.indexOf("view") + 1];
-        const row = CORPUS.find((p) => p.url === url);
-        if (args.includes("files")) return JSON.stringify({ files: [{ path: "src/lib/x.ts" }] });
-        return JSON.stringify({ headRefName: row?.headRefName, body: row?.body });
+      if (args[0] === "api" && /^repos\/[^/]+\/[^/]+\/pulls\/\d+$/.test(arg1)) {
+        const n = Number(arg1.split("/").pop());
+        const row = CORPUS.find((p) => p.number === n);
+        return JSON.stringify({ number: row?.number, html_url: row?.url, state: "closed", merged_at: "2026-01-01T00:00:00Z", body: row?.body, head: { ref: row?.headRefName } });
       }
+      if (args.includes("--paginate")) return "src/lib/x.ts\n";
       return "[]";
     },
   });
@@ -178,16 +191,21 @@ test("projectPlan over the drain's own plan spends ZERO GraphQL searches on the 
   const calls: string[][] = [];
   const proj = projectPlan(planOfIds("batched"), { ledgerPath: emptyLedger("cost-batched"), github: batchedGateway(calls) });
   assert.equal(proj.size, PLAN_IDS.length, "REACHED THE CODE: every task was really projected");
-  assert.equal(calls.filter((c) => c.includes("--search")).length, 0, "zero searches for the whole plan");
+  assert.equal(
+    calls.filter((c) => c[0] === "api" && typeof c[1] === "string" && c[1].startsWith("search/issues?q=")).length,
+    0,
+    "zero searches for the whole plan",
+  );
 });
 
 test("projectPlan over the SAME plan spends exactly one search PER TASK on the unbatched gateway — the cost removed", () => {
   const calls: string[][] = [];
   const proj = projectPlan(planOfIds("search"), { ledgerPath: emptyLedger("cost-search"), github: searchGateway(calls) });
   assert.equal(proj.size, PLAN_IDS.length);
-  const searches = calls.filter((c) => c.includes("--search"));
-  assert.equal(searches.length, PLAN_IDS.length, "one GraphQL search per task — over ~441 tasks that is the exhaustion");
-  assert.ok(searches.every((c) => c.includes("pr") && c.includes("list")));
+  const searches = calls.filter((c) => c[0] === "api" && typeof c[1] === "string" && c[1].startsWith("search/issues?q="));
+  assert.equal(searches.length, PLAN_IDS.length, "one search per task — over ~441 tasks that is the exhaustion, now off REST rather than GraphQL");
+  // W1-T523: REST's `/search/issues`, never `pr`/`list` (GraphQL's `search()` connection).
+  assert.ok(searches.every((c) => c[0] === "api" && !c.includes("pr") && !c.includes("list")));
 });
 
 // ── 3. drainCommand's DEFAULT is the batched gateway ────────────────────────────────────────

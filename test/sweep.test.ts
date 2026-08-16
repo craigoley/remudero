@@ -7,6 +7,7 @@ import {
   DEFAULT_CLARIFY_POLICY,
   DEFAULT_SWEEP_POLICY,
   DISPOSITION_RULES,
+  armedButStalled,
   checksStateFromRollup,
   deriveDisposition,
   isBlockedCi,
@@ -2860,4 +2861,70 @@ test("arm outcome: a NEW head sha re-earns an arm attempt even after a prior suc
   await runSweep([movedHead], second, DEFAULT_SWEEP_POLICY);
 
   assert.deepEqual(calls, ["newsha0000"], "the new head re-earned the arm attempt");
+});
+
+// ── W1-T520: ARMED AND BEHIND, THE TWO FACTS NOTHING JOINED ──────────────────────────────────
+// The sweep already knows a PR is armed and already knows its head is behind the base, and never
+// puts them together — so a PR that armed itself and then stopped reads exactly like one still
+// waiting for CI. Measured 2026-08-15 with `allow_update_branch: true`: eight of nine open PRs
+// read `behind` and seven of those were armed, unchanged for hours. The flag offers the update
+// button; it does not press it.
+
+test("an armed pull request that has fallen behind is reported as needing an update", () => {
+  const stalled = pr({ prNumber: 41, autoMergeArmed: true, mergeState: "behind", headSha: "beef111" });
+
+  const found = armedButStalled([stalled]);
+
+  assert.deepEqual(
+    found,
+    [{ prNumber: 41, prUrl: "https://github.com/o/r/pull/1", taskId: "W1-TX", headSha: "beef111" }],
+    "both facts together are the stall, and the report carries each of them",
+  );
+});
+
+test("an armed pull request that is up to date is not reported", () => {
+  // THE COMMON CASE, AND IT MUST BE FREE. A detector that fired here would name every armed PR
+  // every pass, which is the noise floor that makes an advisory unreadable.
+  assert.deepEqual(armedButStalled([pr({ autoMergeArmed: true, mergeState: "clean" })]), []);
+  // An UNREAD mergeState is not a stall either — same fail-closed default the field carries
+  // everywhere else in the module.
+  assert.deepEqual(armedButStalled([pr({ autoMergeArmed: true })]), []);
+});
+
+test("an unarmed stale pull request is left alone", () => {
+  // The other half of the false-positive containment: behind is ordinary, and on its own says
+  // nothing about whether anything is waiting on this PR.
+  assert.deepEqual(armedButStalled([pr({ autoMergeArmed: false, mergeState: "behind" })]), []);
+  // And the two together, over a realistic mixed pass: only the armed-and-behind one is named.
+  const mixed = [
+    pr({ prNumber: 1, autoMergeArmed: true, mergeState: "clean" }),
+    pr({ prNumber: 2, autoMergeArmed: false, mergeState: "behind" }),
+    pr({ prNumber: 3, autoMergeArmed: true, mergeState: "behind", headSha: "cafe222" }),
+    pr({ prNumber: 4, autoMergeArmed: true, mergeState: "dirty" }),
+  ];
+  assert.deepEqual(armedButStalled(mixed).map((s) => s.prNumber), [3]);
+});
+
+test("a stalled pull request is reported on the ledger, and a quiet pass writes no row at all", async () => {
+  // THE WIRING, DRIVEN THROUGH runSweep RATHER THAN THE PREDICATE ALONE. The shard's design clause
+  // (ii) is that the OUTPUT is a ledger line naming the PR and both facts; a predicate nobody calls
+  // would satisfy the three assertions above and report nothing in production.
+  const rows: Array<Record<string, unknown>> = [];
+  const stalled = pr({ prNumber: 77, autoMergeArmed: true, mergeState: "behind", headSha: "d0d0777" });
+  const deps = fakeDeps({ appendLine: (_p, line) => { rows.push(line); } });
+
+  await runSweep([stalled], deps, DEFAULT_SWEEP_POLICY);
+
+  const reported = rows.filter((r) => r.step === "sweep.armed_stalled");
+  assert.equal(reported.length, 1, `one row for the one stalled PR; saw ${JSON.stringify(rows.map((r) => r.step))}`);
+  assert.equal(reported[0].pr_number, 77);
+  assert.equal(reported[0].head_sha, "d0d0777", "the row pins the head the arm is bound to");
+  assert.equal(reported[0].auto_merge_armed, true, "both facts travel on the row");
+  assert.equal(reported[0].merge_state, "behind");
+
+  // AND THE QUIET CASE WRITES NOTHING — not a `stalled: 0` heartbeat. A row per pass per PR is the
+  // noise floor that makes an advisory unreadable.
+  const quiet: Array<Record<string, unknown>> = [];
+  await runSweep([pr({ autoMergeArmed: true, mergeState: "clean" })], fakeDeps({ appendLine: (_p, line) => { quiet.push(line); } }), DEFAULT_SWEEP_POLICY);
+  assert.equal(quiet.filter((r) => r.step === "sweep.armed_stalled").length, 0);
 });

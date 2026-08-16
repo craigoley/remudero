@@ -1,4 +1,4 @@
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { defaultIsPidAlive } from "./drain-lock.js";
@@ -197,6 +197,28 @@ export function reserveTaskIdFrom(startId: number, dir: string, opts: ReserveTas
   );
 }
 
+/** What {@link firstUnreservedAtOrAbove} reports: an id, or `"unknown"` when a store it needed to
+ *  consult could not be read. `"unknown"` is a first-class outcome, not an exception — the read is
+ *  advisory and must never crash an operator's query, but it must also never fold an unreadable
+ *  store into a false "nothing reserved". */
+export type FirstUnreservedResult = number | "unknown";
+
+export interface FirstUnreservedOpts {
+  isPidAlive?: (pid: number) => boolean;
+  /**
+   * Reads which ids are held on a store OTHER than `dir` — in production, the remote's
+   * `refs/rmd-id/*` namespace (W1-T509), which every writer shares and `dir` (a worker sandbox's
+   * local, ephemeral directory) does not. Returns the held ids, or the literal `"unknown"` when
+   * that store could not be read.
+   *
+   * DEFAULTS TO REPORTING NOTHING HELD — today's local-only behaviour, unchanged for every
+   * existing caller. The reader is INJECTED, never opened here: this function still performs no
+   * I/O beyond `dir`, and a caller that never supplies one gets exactly the read it got before
+   * this parameter existed.
+   */
+  readRemoteHeld?: () => Set<number> | "unknown";
+}
+
 /**
  * The first id at or above `startId` that no LIVE holder has claimed — WITHOUT reserving it.
  *
@@ -205,14 +227,20 @@ export function reserveTaskIdFrom(startId: number, dir: string, opts: ReserveTas
  * reservation held by a process that exits microseconds later reserves nothing anyway. Reporting
  * a number and claiming it are different acts, and only the caller that will actually FILE should
  * claim.
+ *
+ * THE FAIL DIRECTION IS NOT SYMMETRIC BETWEEN THE TWO STORES. `dir` missing is a NORMAL state — a
+ * fresh worker sandbox that has reserved nothing locally yet — and reads as "nothing held here",
+ * exactly as it always has. `readRemoteHeld` reporting `"unknown"` is DIFFERENT: it means a store
+ * that may hold something could not be consulted, and folding that into a number would be exactly
+ * the defect this function exists to close — reporting an id FREE when the remote already holds
+ * it. So `"unknown"` propagates straight through as this function's own result instead of being
+ * silently treated as "nothing held there either".
  */
-export function firstUnreservedAtOrAbove(
-  startId: number,
-  dir: string,
-  opts: { isPidAlive?: (pid: number) => boolean } = {},
-): number {
-  if (!existsSync(dir)) return startId;
+export function firstUnreservedAtOrAbove(startId: number, dir: string, opts: FirstUnreservedOpts = {}): FirstUnreservedResult {
+  const remoteHeld = opts.readRemoteHeld ? opts.readRemoteHeld() : new Set<number>();
+  if (remoteHeld === "unknown") return "unknown";
   const held = new Set(liveReservedIds(dir, opts));
+  for (const id of remoteHeld) held.add(id);
   let id = startId;
   while (held.has(id)) id++;
   return id;

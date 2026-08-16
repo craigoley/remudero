@@ -1,0 +1,109 @@
+- id: W1-T521
+  title: "one unguarded rollup read discards every disposition in the sweep pass — `fetchOpenPrsRest` maps `rollupFor` over every open PR with two ungated fetches each, so any one of them throwing loses the whole batch; the throw is CORRECT at the list call and wrong one layer down"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: medium
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  rationale: "MEASURED ON THE MAC MINI AT 07d4e44b, from source and from live GitHub state over REST.
+    (1) THE SHAPE. `fetchOpenPrsRest` (`src/lib/open-prs-rest.ts`) makes ONE list call and then
+    `rows.map((row) => ({ ...pr, statusCheckRollup: rollupFor(owner, repo, pr.headRefOid, fetch) }))`.
+    `rollupFor` makes TWO ungated fetches per PR — the check-runs endpoint and the combined-status
+    endpoint — inside that map. Neither is wrapped. So a pass over N open PRs issues 1 + 2N
+    unguarded reads, and ANY ONE of the 2N throws out of the map and discards the enumeration
+    entirely: every OTHER PR's disposition is lost with it. MEASURED at filing: 7 open PRs, so 15
+    unguarded reads per pass, 14 of which can individually void the other six PRs' dispositions.
+    (2) THE THROW IS DELIBERATE AND THE REASON IS SOUND — FOR THE LIST CALL ONLY. That function's
+    own doc says: 'Throws on a failed fetch, exactly as the ghJson call it replaces threw. That is
+    deliberate: a swallowed error here would turn a total outage into a silent zero open PRs, which
+    the sweep would read as a healthy empty queue — strictly worse than the blindness being fixed.'
+    THAT ARGUMENT IS CORRECT AND MUST SURVIVE. It does not extend to `rollupFor`: once the LIST has
+    returned, the queue's SIZE is known, so a failed rollup for one PR cannot be mistaken for an
+    empty queue. It can only make ONE PR's check state unknown. Conflating the two costs the pass.
+    (3) THE SIBLING PATH IS ALREADY GUARDED, WHICH IS THE PROOF THIS IS AN OVERSIGHT RATHER THAN A
+    POLICY. `hydrateMergeStates` in the SAME module loops PRs with a per-PR `try { … } catch { }`,
+    so a failed merge-state read drops that PR's merge state and the batch survives. The enumeration
+    does the same kind of per-PR work with no such guard. RE-DERIVE BOTH BEFORE CHANGING EITHER: a
+    session's first reading of this had the layers backwards — it reported `hydrateMergeStates` as
+    the unguarded one and proposed a fix there, which would have changed nothing.
+    (4) AND A SECOND CLAIM FROM THAT SAME READING IS FALSE — RECORDED SO IT DOES NOT PROPAGATE. It
+    is NOT true that a red PR matching no disposition row leaves no trace. `disposePr` ends with a
+    no-rule fallback returning `blocked-ambiguous` with reason 'default (no rule matched) —
+    escalating', and its comment states the terminal row matches unconditionally, so the no-match
+    arm is unreachable by construction. Every enumerated PR gets a disposition. THE LOSS IS THE
+    ENUMERATION, NOT THE ROUTING.
+    (5) THE OBSERVABLE COST. Every `sweep_light.error` row measured on 2026-08-15 was a rate limit,
+    and GraphQL was exhausted three times that day; 31 of 112 `sweep.post_review.attempt` rows died
+    the same way. Two PRs (#1878, #1881) sat red and undispatched for 38 and 31 minutes while the
+    sweep demonstrably merged six other PRs in the same window, and neither carried a fix-rung
+    commit or an escalation when a human finally intervened. THAT PAIR IS CONSISTENT WITH THIS
+    DEFECT AND IS NOT PROOF OF IT — the daemon that ran those passes is the Azure host and this
+    host has no route to its ledger, so the attribution is UNPROVEN and the shard does not claim it."
+  design: "(i) THE CHANGE IS A PER-PR GUARD INSIDE THE ENUMERATION, AND NOTHING ELSE. Wrap the
+    `rollupFor` call so a throwing rollup yields that PR with an UNREADABLE rollup rather than
+    unwinding the map. The list call keeps throwing exactly as it does today — rationale (2) is the
+    reason, and an implementer who guards the list too has broken the property that doc protects.
+    (ii) AN UNREADABLE ROLLUP MUST NOT READ AS GREEN, AND THAT IS THE WHOLE SAFETY ARGUMENT.
+    `checksStateFromRollup` returns `none` for an empty rollup and `pending` when required contexts
+    are configured but none has registered. Substituting `[]` for a FAILED read would therefore
+    present a PR whose checks could not be observed as one whose checks have not started —
+    indistinguishable from a healthy early PR, and the arming path treats `pending` as not-yet-green
+    rather than refusing. THE FAILED READ MUST BE DISTINGUISHABLE FROM AN ABSENT ONE. The
+    projection already has the vocabulary for this shape (`indeterminate` + a classified reason,
+    `src/lib/status.ts`); reuse that idea rather than inventing a second one, and make the resulting
+    disposition fail toward doing nothing, never toward arm.
+    (iii) DO NOT ADD A RETRY. The failure class measured here is rate-limit exhaustion, and a retry
+    against an exhausted budget deepens the exhaustion it is reacting to — that is how 11,213
+    GraphQL calls were spent against a 5,000/hour limit in one morning. One read, one outcome; the
+    next pass re-derives.
+    (iv) THE PACER IS NOT THE FIX AND MUST NOT BE WIDENED HERE. `paceGhEntry` already paces the
+    ENTRY call against the daemon's other burst call sites (W1-T468), which reduces how often the
+    list is throttled. It does nothing for the 2N rollup reads that follow, and pacing those would
+    change the pass's wall-clock profile — a separate question with its own evidence.
+    (v) NOT IN SCOPE, EACH FOR A STATED REASON. `hydrateMergeStates`, already guarded (rationale 3).
+    `disposePr`'s routing, which is complete (rationale 4). The `sweep_light.error` ledger row,
+    which already fires and is how the failure was seen at all. And the fix rung itself — whether it
+    would have repaired #1878/#1881 is unknown for the reason rationale (5) gives, and a task built
+    on that assumption would be built on an unproven premise."
+  acceptance:
+    - claim: "a rollup read that throws costs that pull request only, not the enumeration"
+      proof: "unit test: a failed rollup read drops one pull request rather than the pass"
+    - claim: "a failing list call still throws, so a total outage never reads as an empty queue"
+      proof: "unit test: the enumeration still throws when the list call itself fails"
+    - claim: "a pull request whose rollup could not be read is never presented as green"
+      proof: "unit test: a pull request with an unreadable rollup is never disposed as green"
+  origin: recon#sweep-enumeration-degradation-2026-08-15
+  plan_refs: ["W1-T468", "W1-T394", "W1-T103"]
+  files: [src/lib/open-prs-rest.ts, test/open-prs-rest.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: medium` IS SET UP FRONT and `sizingViolation` (`src/lib/task-linter.ts`) agrees:
+    `subsystemsOf` folds `test/open-prs-rest.test.ts` onto `src/lib/open-prs-rest.ts`, so the span
+    is ONE subsystem. The blast radius is likewise contained — the guard changes what one failed
+    read costs, and design (ii) forbids the direction that would widen it.
+    `files:` WAS DERIVED BY INVOCATION COUNT. `rollupFor(` appears in `src/lib/open-prs-rest.ts`
+    (3) and nowhere else; `fetchOpenPrsRest(` in that module (1), `src/run-task.ts` (1) and
+    `test/open-prs-rest.test.ts` (3). The DEFINITIONS and the suite that drives them are the whole
+    declared set.
+    `src/run-task.ts` IS DELIBERATELY NOT DECLARED. It CALLS `fetchOpenPrsRest` but needs no edit —
+    the guard lives entirely inside the enumeration — and at ~19,900 lines declaring it would
+    serialise this task against every other that names it (W1-T471) for nothing. If an implementer
+    finds a caller change is genuinely required, that is a FINDING TO REPORT rather than a licence
+    to widen. The six suites that invoke `buildOpenPrViews` are not declared either: they build
+    `OpenPrView` fixtures by hand and never reach this function.
+    RULE 25 IS NOT ENGAGED: neither declared path matches an `INSTRUMENT_SURFACE` pattern and
+    `test/` is excluded from `isProductPath`.
+    EVERY CRITERION IS A NAME-FILTERED `unit test:` TITLE, NOT A PURE PATH. Each of the three was
+    checked to match zero files under `test/` today against a positive control matching one, and
+    each is under 100 characters with no comma.
+    THE ID WAS RESERVED THROUGH THE REF ALLOCATOR: `reserveTaskIdRemote` has a single call site
+    (`triageCommand`'s mint) so a hand-filed shard does not pass through it, and
+    `refs/rmd-id/W1-T521` was therefore created directly on origin with a unique orphan payload
+    before this record was written, cross-checked by a fresh-fetch sweep reading zero against a
+    known-taken control above one.
+    EVERY FIGURE HERE IS DATED 2026-08-15 AND IS A QUERY, NOT A CONSTANT — the 1+2N arithmetic, the
+    seven open PRs, the guarded-sibling asymmetry and the no-match fallback all move as the code
+    moves. RE-DERIVE BEFORE BUILDING, especially rationale (3): the layers are easy to transpose
+    and a session already did."
