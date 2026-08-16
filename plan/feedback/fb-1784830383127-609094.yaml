@@ -14,5 +14,6 @@ raw: "AA16B6 ROOT CAUSE, COMPLETE: at 16:05-16:06Z on 2026-07-23 the claude-code
   only claude.exe as the known husk signature."
 attachments: []
 origin: cli
-status: new
+status: rejected
 proposal_pr: null
+summary: null
