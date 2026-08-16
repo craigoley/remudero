@@ -1,0 +1,138 @@
+- id: W1-T531
+  title: "the console has two grantors and no way in from a browser: file the third IdentityProvider, a Cloudflare Access JWT grantor that validates the assertion rather than trusting the header — and it must never throw, because grantedScopes is called inside an unawaited async IIFE with no catch"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: "MEASURED ON THE MAC MINI AT 023752e4, 2026-08-16, over REST throughout.
+
+    (1) **BOTH OPERATOR PREREQUISITES ARE ON MAIN.** `DECISIONS.md` carries the 2026-08-14 ruling
+    publishing the console at `console.remudero.com` behind Cloudflare Tunnel and Access, stating
+    that **Cloudflare terminates TLS and can therefore see every console response in clear**, accepted
+    deliberately. That same entry already concludes a Cloudflare Access `IdentityProvider` is purely
+    ADDITIVE. And `enforceWriteTiers` shipped (W1-T500), so the write routes no longer fall to one
+    undifferentiated grant.
+
+    (2) **THE SEAM EXISTS AND IS ADDITIVE BY CONSTRUCTION.** `IdentityProvider` is exported from
+    `src/lib/service.ts`; `ServiceOptions.providers` is appended AFTER the two built-in grantors;
+    and `grantedScopes` is a plain `for` loop that returns on the FIRST truthy grant and treats
+    `undefined` as 'try the next provider', NEVER as a denial. So a new provider adds a way in and
+    removes none — THE TAILNET PATH SURVIVES UNTOUCHED, which is what the operator falls back to
+    during a Cloudflare outage.
+
+    (3) **THERE IS NO SESSION CONCEPT, SO THIS IS A BUILD RATHER THAN AN EXTENSION.** Measured across
+    `src/` with working controls (`bearer` 86, `ServiceTokens` 23): `Set-Cookie` 0,
+    `passwordHash|bcrypt|argon2` 0, `Cf-Access|cloudflareaccess` 0. **ONE CORRECTION TO THE BRIEF
+    THAT COMMISSIONED THIS: `expiresAt` reads 19, NOT 0** — but every hit is in
+    `src/lib/worker-home.ts` (the Claude OAuth credential staleness window), none in the service
+    layer, so the conclusion stands while the figure did not. A verified email arrives as a CLAIM TO
+    READ, never a session to issue.
+
+    (4) **THE PROVIDER CAN TAKE THE CONSOLE DOWN, AND THAT IS THE LOAD-BEARING FINDING.**
+    `grantedScopes` is called INSIDE the request listener's `void (async () => { … })();` in
+    `src/lib/service.ts`, which carries no `.catch()`. Under Node 22 an unhandled rejection is fatal,
+    so a provider that throws does not deny a request — IT KILLS THE PROCESS. A JWT validator is
+    exactly the kind that can throw: network failure, rotated key, malformed key set. This is the
+    same class as the token store's unvalidated `JSON.parse` in the same file.
+
+    (5) **AND THE INTERFACE IS SYNCHRONOUS, WHICH DECIDES THE WHOLE DESIGN.**
+    `grant(req: IncomingMessage, allowQueryToken: boolean): ReadonlySet<Scope> | undefined` returns a
+    Set, NOT a Promise. So the validator CANNOT fetch the key set inline. It must verify against an
+    ALREADY-CACHED key set and refresh out of band. An implementer who plans an `await` inside
+    `grant` has to change a shared interface, and that is a different task.
+
+    (6) **VERIFIED AGAINST CURRENT CLOUDFLARE DOCS, NOT THE BRIEF.** The page is
+    'Validate JWTs' under cloudflare-one/access-controls/applications/http-apps/authorization-cookie
+    (two older doc URLs 404 — the path moved). Confirmed: the assertion arrives in the
+    `Cf-Access-Jwt-Assertion` header; public certs live at `{TEAM_DOMAIN}/cdn-cgi/access/certs`; the
+    `aud` claim must be validated; and Cloudflare states in terms that **validation of the header
+    alone is NOT sufficient — the JWT and signature must be confirmed to avoid identity spoofing.**
+    **TWO BRIEF CLAIMS DID NOT SURVIVE.** The docs say keys rotate 'periodically' and give NO
+    six-week figure — cite rotation, never a period. And they say validation is required *unless the
+    application is connected to Access through Cloudflare Tunnel*, which is exactly this deployment;
+    the repo's own synthwatch precedent overrides that convenience — the API is the real security
+    boundary, the dashboard only hides buttons — so the origin validates anyway."
+  design: |
+    (i) ONE PROVIDER, ADDED TO `ServiceOptions.providers`. No change to `grantedScopes`, to the two
+    built-in grantors, or to the tailnet path. The seam is already the entire gate.
+    (ii) IT MUST NOT THROW, EVER. Wrap the whole grant body; on ANY failure return `undefined`,
+    which the loop reads as 'try the next provider'. A failed validation therefore DENIES by falling
+    through, NEVER grants, and NEVER crashes. This repo has corrected seven instances of a read that
+    FAILED being reported as a read that SAID NO; here the dangerous direction is the opposite one,
+    and the containment is the same: `undefined`, plus a log line, never an exception and never a
+    grant.
+    (iii) THE KEY SET IS CACHED, NOT PINNED, AND REFRESHED OFF THE REQUEST PATH. Because `grant` is
+    synchronous (rationale 5), verification reads a cached JWKS. A cache miss or a key id absent from
+    the cache is a DENIAL for that request plus a refresh scheduled out of band — never an inline
+    fetch, never a pinned certificate.
+    (iv) THE CLAIMS THAT MUST BE CHECKED, ALL OF THEM: signature against the cached key set, `aud`
+    against the configured application tag, issuer against the team domain, and expiry. Header
+    presence is not one of them.
+    (v) THE TIER, ARGUED ON MERITS RATHER THAN COPIED. `tailscaleIdentityProvider` carries
+    `writeTier: "high"` because the caller is a device on the operator's private network;
+    `bearerTokenProvider` carries `low`, and W1-T404's own comment calls that the sharpest ruling
+    because defaulting it high would have shipped a no-op that silently re-granted everything.
+    AN ACCESS GRANT SITS BETWEEN THEM: the identity is strongly verified, but it is reachable from
+    ANY network and its confidentiality already belongs to Cloudflare by the accepted ruling.
+    **PROPOSED: `middle`** — enough for `/v1/control/stop`, not enough for the five high routes,
+    which keep requiring the tailnet. An implementer who wants `high` must argue it separately and
+    owes the confirm-nonce round trip (single-use, 5-minute TTL, bound to method+path+payload).
+    **DO NOT RAISE THE BEARER TOKEN WHILE HERE.**
+    (vi) SCOPE CANNOT EXPRESS ADMIN AND THIS TASK DOES NOT INVENT IT. `Scope` is exactly
+    `"read" | "write"` (`src/lib/service.ts`) — no `anon`, no `admin`. So a verified email maps to a
+    scope plus a write tier and nothing more. **THE ROLE MODEL IS A SEPARATE TASK; DO NOT SMUGGLE IT
+    IN** as an enum widening, a per-email map with more than one shape, or a claims-to-roles layer.
+    (vii) THE ORDERING HAZARD, STATED HERE BECAUSE IT IS NOT IN SCOPE AND IS EASY TO GET WRONG.
+    **THE ACCESS APPLICATION MUST EXIST BEFORE THE TUNNEL ROUTE PUBLISHES THE HOSTNAME**, or the
+    hostname is open to anyone for the interval between the two acts. Cloudflare's warning about this
+    lives on a different page from the dangerous step. The tunnel, the DNS record, the Access
+    application and the role model are OPERATOR ACTS AND SEPARATE TASKS — none is filed here.
+    (viii) W1-T431's RELAY CLIENT IS ORTHOGONAL, AND LIKELY DEAD, BUT IS NOT RETIRED HERE.
+    `src/lib/relay-client.ts` merged as 0e36f324/#1641, yet `relayServer`, `relay-server` and
+    `brokerSession` ALL READ 0 across `src/` — the hosted half never existed. `cloudflared` does that
+    job and is maintained by someone else, so `rmd relay` is very likely dead code. **SAYING SO IS
+    THIS SHARD'S WHOLE OBLIGATION; retiring it is a separate decision with its own evidence.**
+  acceptance:
+    - claim: "an access grant verifies the assertion signature rather than trusting the header"
+      proof: "unit test: W1-T531: an access grant validates the assertion rather than trusting the header"
+    - claim: "an unreadable or stale key set denies the request and never grants"
+      proof: "unit test: W1-T531: an unreadable key set denies and never grants"
+    - claim: "a validator that throws cannot take the service process down"
+      proof: "unit test: W1-T531: a throwing validator cannot take the console down"
+    - claim: "the tailnet grantor still grants when the access provider declines"
+      proof: "unit test: W1-T531: the tailnet provider still grants when access declines"
+  origin: recon#access-jwt-grantor-2026-08-16
+  plan_refs: ["W1-T500", "W1-T430", "W1-T404", "W1-T495", "W1-T431"]
+  files: [src/lib/service.ts, test/identity-provider-seam.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `src/` and `test/`, and independently
+    warranted twice over: this adds a way to obtain a write grant, and it lands in a function whose
+    thrown exception is process-fatal rather than a refusal. A wrong grant does not fail loudly.
+
+    `files:` DERIVED BY WORD-BOUNDED INVOCATION COUNT IN PYTHON. `src/lib/service.ts` scores
+    `IdentityProvider` 15, `ServiceOptions` 15, `Scope` 13, `writeTier` 8, `grantedScopes` 7 — the
+    seam, the tier vocabulary and the fatal IIFE all live in that one file.
+    `test/identity-provider-seam.test.ts` is the ESTABLISHED seam suite (`IdentityProvider` 5,
+    `ServiceOptions` 4) rather than a new file, because these assertions are exactly what it already
+    covers. `src/lib/serve.ts` IS NOT DECLARED: it scores `ServiceOptions` 5 but only constructs the
+    options object; wiring a configured provider there is a deployment act, not this build.
+    `src/lib/relay-client.ts` IS NOT DECLARED — design (viii) reports on it and changes nothing.
+
+    ID PROVENANCE. origin/main's shard max is 528 while `refs/rmd-id/` already held 525-530, so the
+    allocator runs ahead of the plan; 524, 529 and 530 are RESERVED BUT UNFILED and were SKIPPED
+    rather than reused. 531 was taken with an orphan commit over the empty tree carrying a
+    host-pid-nanosecond nonce, pushed under `--force-with-lease` against an explicit zero sha, with
+    the push's exit code captured INTO A VARIABLE and the ref then RE-READ and its nonce matched
+    against the one written. A positive control (`refs/rmd-id/W1-T527`) read 1 throughout.
+    THE FIRST TWO MINT ATTEMPTS FAILED ON A ZSH TRAP WORTH RECORDING: `\"$SHA:refs/...\"` applies
+    zsh's `:r` history modifier to `$SHA` and ships a corrupt refspec (`...a233e52efs/rmd-id/...`).
+    Brace the variable. The gate caught it because the readback did not match, which is the point of
+    reading the ref back rather than trusting the exit code alone.
+
+    PROOF NOTES: all four proofs are NAME-FILTERED titles, not pure paths. Each was verified to match
+    ZERO files today against a control matching exactly one, and each is under 100 characters with no
+    comma so `looksLikeScenarioNarrative` cannot fail them. No proof names this shard."
