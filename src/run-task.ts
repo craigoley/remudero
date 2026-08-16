@@ -337,6 +337,7 @@ import {
   ensureJudgeableBody,
   filingAcceptanceCriteria,
   probeExistingPlanPr,
+  reconcileRetroChangesetClaim,
   regeneratePlanIndexAndCommit,
   regeneratePlanIndexFile,
 } from "./lib/plan-pr-emitter.js";
@@ -6957,49 +6958,7 @@ function defaultRetroChangedFiles(url: string): string[] {
 }
 
 /**
- * W1-T908 — the COUNT-SHAPED changeset claim, the thing `bodyContradictsDiff` refuses.
- *
- * Deliberately NOT imported from lib/review.ts: this rung must not hold a share of the detector's
- * authority, or a future widening there would silently change what gets rewritten here. The
- * relationship is pinned the other way round instead — a test drives the REAL
- * `bodyContradictsDiff` over this function's output and requires it to stay silent, so the two
- * are held together by a falsifier rather than by a shared symbol.
- *
- * Built fresh per call. A module-level `/g` regex carries `lastIndex` between calls, so a shared
- * instance would make `.test()` answer differently on the second invocation with the same input.
- */
-function changesetCountClaimRe(): RegExp {
-  return /\bexactly\s+\w+\s+files?\b(?:\s*:\s*[^\s,]+(?:\s*,\s*[^\s,]+)*)?/gi;
-}
-
-/**
- * W1-T908 — render the changeset as PATHS AND NEVER A COUNT.
- *
- * A count is what failed four PRs, and replacing a wrong count with a right one would be the same
- * defect wearing a new number: the next retro that regenerates two files or four would be wrong
- * again with nobody's code having changed. Naming the paths is correct for any arity by
- * construction. Sorted so the sentence is stable across two runs over the same changeset.
- */
-export function retroChangesetSentence(paths: readonly string[]): string {
-  const sorted = [...paths].sort();
-  if (sorted.length === 0) return "no files";
-  if (sorted.length === 1) return sorted[0];
-  return `${sorted.slice(0, -1).join(", ")} and ${sorted[sorted.length - 1]}`;
-}
-
-/**
- * W1-T908 — replace every count-shaped changeset claim in `body` with the real paths.
- *
- * Returns `undefined` when there is nothing to repair, so the caller can distinguish "healthy"
- * from "rewritten" without comparing strings.
- */
-export function repairChangesetClaimInBody(body: string, paths: readonly string[]): string | undefined {
-  if (!changesetCountClaimRe().test(body)) return undefined;
-  return body.replace(changesetCountClaimRe(), retroChangesetSentence(paths));
-}
-
-/**
- * W1-T908 — THE RETRO'S CHANGESET-CLAIM REPAIR RUNG, the sibling of
+ * W1-T911 — THE RETRO'S CHANGESET-CLAIM REPAIR RUNG, the sibling of
  * {@link repairRetroAcceptanceBlock} and called from the same place for the same reason.
  *
  * WHY A POST-HOC RUNG RATHER THAN A BETTER TEMPLATE. `retroCommand` spawns the Architect, which
@@ -7010,6 +6969,13 @@ export function repairChangesetClaimInBody(body: string, paths: readonly string[
  * cannot fix it either: ORIENTATION.md is regenerated FROM what the Architect just wrote, so it
  * cannot run first. The only point where the changeset is knowable is after all three commits —
  * which is exactly where this runs.
+ *
+ * The actual string fold is {@link "./lib/plan-pr-emitter.js".reconcileRetroChangesetClaim} — a
+ * PURE reconciler living beside every other plan-PR body primitive, repairing BOTH arms
+ * `bodyContradictsDiff` reads (originally W1-T908's count-only rung; W1-T911 added the "no
+ * <path>" denial arm and moved the fold here). This rung stays the I/O seam: it reads the PR
+ * body and the real changeset, hands both to the pure fold, and writes back only if it changed
+ * anything.
  *
  * Deps injected LAST and defaulted by object-spread (never `??`, which V8 instruments as a branch
  * and would leave the untaken real side permanently uncovered) — the same discipline
@@ -7036,7 +7002,7 @@ export function repairRetroChangesetClaim(
   try {
     const paths = changedFiles(prUrl);
     const body = fetchBody(prUrl);
-    const repaired = repairChangesetClaimInBody(body, paths);
+    const repaired = reconcileRetroChangesetClaim(body, paths);
     if (repaired === undefined) return "healthy";
     editBody(prUrl, repaired);
     // A step of its own rather than reusing `acceptance.repaired`: that line means a different
