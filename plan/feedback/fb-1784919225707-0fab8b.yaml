@@ -13,5 +13,6 @@ raw: "REVIEW STATUS LIFECYCLE: POST PENDING IMMEDIATELY — remudero-review post
   (fb-1784770111145-cf7c24). Complements W1-T254 (latency); this is legibility."
 attachments: []
 origin: cli
-status: new
+status: rejected
 proposal_pr: null
+summary: null
