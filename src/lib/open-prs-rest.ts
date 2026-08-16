@@ -74,6 +74,17 @@ export const DEFAULT_GH_PACE_MIN_GAP_MS = 1_500;
 export const DEFAULT_GH_PACE_RATE_LIMIT_GAP_MS = 10_000;
 
 /**
+ * The `X-Ratelimit-Remaining` floor {@link GhCallPacer.recordResult}'s optional `remaining`
+ * argument compares against (W1-T525 design (ii)): a reading AT OR BELOW this widens the gap
+ * exactly as a classified `rate_limit` failure would, PROACTIVELY — before any call has actually
+ * failed. This governs pacing only, never a hard stop; the follow-on floor task (design (iv))
+ * owns the actual degrade-a-lane policy. The value is deliberately conservative rather than tuned
+ * to any one bucket's size, since the same pacer already guards call sites against more than one
+ * resource (core, search, …) with different limits.
+ */
+export const DEFAULT_GH_PACE_LOW_REMAINING_FLOOR = 100;
+
+/**
  * Paces a set of independent `gh` call sites sharing one daemon poll tick (W1-T468 design (ii)).
  * `wait()` blocks the caller until at least the pacer's CURRENT gap has elapsed since the last
  * call any guarded site made through this same instance, and `recordResult()` feeds a call's
@@ -84,9 +95,19 @@ export interface GhCallPacer {
    *  starting now. Call this IMMEDIATELY BEFORE the guarded call, never after — pacing bounds the
    *  gap BETWEEN calls, never a call's own duration. */
   wait(): void;
-  /** Record how the call `wait()` just gated actually resolved: `true` for a rate-limit-classified
-   *  failure, `false` for anything else (including success). */
-  recordResult(rateLimited: boolean): void;
+  /**
+   * Record how the call `wait()` just gated actually resolved: `true` for a rate-limit-classified
+   * failure, `false` for anything else (including success).
+   *
+   * `remaining`, when supplied, is the `X-Ratelimit-Remaining` reading `ghJson` (lib/worker.ts,
+   * W1-T525) parsed off the SAME response the guarded call itself returned — never a separate
+   * probe (design iii: the probe answers about a different bucket with a different reset). A
+   * reading at or below {@link DEFAULT_GH_PACE_LOW_REMAINING_FLOOR} (or `opts.lowRemainingFloor`)
+   * widens the gap PROACTIVELY, the same as `rateLimited: true`, so pacing degrades before
+   * exhaustion instead of only reacting after a call has already failed (design ii). Omitting it
+   * (every caller before W1-T525) leaves this reactive-only, unchanged.
+   */
+  recordResult(rateLimited: boolean, remaining?: number): void;
 }
 
 /**
@@ -102,12 +123,14 @@ export function createGhCallPacer(
   opts: {
     minGapMs?: number;
     rateLimitGapMs?: number;
+    lowRemainingFloor?: number;
     now?: () => number;
     sleepSync?: (ms: number) => void;
   } = {},
 ): GhCallPacer {
   const minGapMs = opts.minGapMs ?? DEFAULT_GH_PACE_MIN_GAP_MS;
   const rateLimitGapMs = opts.rateLimitGapMs ?? DEFAULT_GH_PACE_RATE_LIMIT_GAP_MS;
+  const lowRemainingFloor = opts.lowRemainingFloor ?? DEFAULT_GH_PACE_LOW_REMAINING_FLOOR;
   const now = opts.now ?? (() => Date.now());
   const sleepSync = opts.sleepSync ?? defaultBlockingSleepSync;
   let lastCallAt: number | undefined;
@@ -120,8 +143,9 @@ export function createGhCallPacer(
       }
       lastCallAt = now();
     },
-    recordResult(rateLimited) {
-      gapMs = rateLimited ? rateLimitGapMs : minGapMs;
+    recordResult(rateLimited, remaining) {
+      const lowRemaining = remaining !== undefined && remaining <= lowRemainingFloor;
+      gapMs = rateLimited || lowRemaining ? rateLimitGapMs : minGapMs;
     },
   };
 }
