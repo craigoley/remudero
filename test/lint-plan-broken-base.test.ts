@@ -30,6 +30,12 @@ import { lintPlanCommand } from "../src/run-task.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
+/** The fixture's OWN committer. `commit-tree` refuses with "Author identity unknown" when neither
+ *  the repo nor the global config names one, and `actions/checkout` configures neither — so this
+ *  fixture passed on every developer machine and failed on every CI runner, taking three unrelated
+ *  PRs to `blocked_ci` with it. Supplying an identity here is what makes it self-sufficient. */
+const FIXTURE_IDENTITY = { name: "remudero test fixture", email: "fixture@remudero.invalid" };
+
 function git(args: string[], env?: NodeJS.ProcessEnv): string {
   return execFileSync("git", args, {
     cwd: REPO_ROOT,
@@ -87,12 +93,24 @@ function baseCommitWithDuplicate(id: string): string {
     // repo's user.email/user.name: `# fail 1`, this test, the other two green. Passing the four
     // env vars git already honours makes the fixture self-sufficient, so it depends on nothing
     // the checkout happens to have configured.
-    return git(["commit-tree", tree, "-p", "HEAD", "-m", "planted: a base carrying a duplicate id"], {
-      GIT_AUTHOR_NAME: "remudero test fixture",
-      GIT_AUTHOR_EMAIL: "fixture@remudero.invalid",
-      GIT_COMMITTER_NAME: "remudero test fixture",
-      GIT_COMMITTER_EMAIL: "fixture@remudero.invalid",
+    const sha = git(["commit-tree", tree, "-p", "HEAD", "-m", "planted: a base carrying a duplicate id"], {
+      GIT_AUTHOR_NAME: FIXTURE_IDENTITY.name,
+      GIT_AUTHOR_EMAIL: FIXTURE_IDENTITY.email,
+      GIT_COMMITTER_NAME: FIXTURE_IDENTITY.name,
+      GIT_COMMITTER_EMAIL: FIXTURE_IDENTITY.email,
     });
+    // THE ASSERTION THAT WOULD HAVE CAUGHT THIS. Delete the four env vars above and this fails
+    // two different ways, both real: on a host with a configured identity the commit is authored
+    // by THAT identity and the equality below breaks, and on a host without one `commit-tree`
+    // refuses outright and there is no sha to read. Either way the fixture stops depending
+    // silently on whatever the checkout happened to configure.
+    assert.match(sha, /^[0-9a-f]{40}$/, "commit-tree must return a real commit sha");
+    assert.equal(
+      git(["show", "-s", "--format=%ae", sha]),
+      FIXTURE_IDENTITY.email,
+      "the base commit must be authored by the fixture's OWN identity, never one borrowed from the checkout",
+    );
+    return sha;
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
