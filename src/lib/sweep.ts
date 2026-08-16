@@ -3189,7 +3189,78 @@ export async function runSweepLightPass(
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
 ): Promise<SweepSummary[]> {
   if (openPrs.length === 0) return [await runSweep([], deps, policy)];
-  return Promise.all(openPrs.map((pr) => runSweep([pr], deps, policy)));
+  // W1-T526 — THE QUEUE-ADMISSION RULE (see {@link selectReviewAdmission}'s own doc for the
+  // full diagnosis and the starvation/holding falsifiers it exists to satisfy). At most ONE
+  // open PR is admitted to `post-review` THIS pass; every other PR's own `deps.actionable` is
+  // wrapped so a `post-review` disposition it would otherwise win stands down with the SAME
+  // "deferred to full sweep (light pass)" reason every other gated disposition already gets
+  // from this restricted caller — never a new reason string, never a new mechanism.
+  const now = deps.now ? deps.now() : Date.now();
+  const admitted = selectReviewAdmission(openPrs, policy, now);
+  return Promise.all(
+    openPrs.map((pr) => {
+      const baseActionable = deps.actionable;
+      const scopedDeps: SweepDeps =
+        admitted?.prNumber === pr.prNumber
+          ? deps
+          : {
+              ...deps,
+              actionable: (d) => (d === "post-review" ? false : baseActionable ? baseActionable(d) : true),
+            };
+      return runSweep([pr], scopedDeps, policy);
+    }),
+  );
+}
+
+/**
+ * W1-T526 — WHICH ONE OPEN PR, IF ANY, {@link runSweepLightPass} admits into `post-review` this
+ * pass. Branch protection's `strict: true` means only ONE open PR can merge before every OTHER
+ * one reads `behind`, and a `behind` PR's next push mints a NEW head sha — `postReviewed`
+ * (`priorActionsFromLedger`, above) is sha-pinned, so that push throws away the very verdict
+ * this lane just posted. Before this task `runSweepLightPass` fanned every post-review-eligible
+ * PR out to its own concurrent `runSweep` call (design note, its own doc above), so a queue of N
+ * such PRs cost N + (N-1) + … + 1 reviews to land N merges instead of N — quadratic in queue
+ * depth, and the eight-open-PR incident this task fixes measured 36 reviews to land 8.
+ *
+ * PURE, OVER THE WHOLE SNAPSHOT, USING THE SAME CLASSIFIER `runSweep` ITSELF USES:
+ * {@link deriveDisposition} decides eligibility — a red, conflicted, blocked-ambiguous, or
+ * strike-exhausted PR never derives `post-review` in the first place, so it is never a
+ * candidate here and can never hold the queue (design iii: only a PR this pass would actually
+ * dispatch `post-review` for is ever chosen, and a chosen PR whose review fails leaves no new
+ * ledger/dedup state, so the very next pass re-derives eligibility fresh and may choose it
+ * again, or may not — the slot is never reserved).
+ *
+ * OLDEST-HEAD-FIRST, CHOSEN BECAUSE IT CANNOT STARVE (design ii): ranking by "most ready" or by
+ * `openPrs` order lets a freshly-pushed PR overtake forever. Ranking by the age of the head
+ * itself is monotone instead — a PR that loses this pass is STRICTLY OLDER next pass (nothing
+ * un-ages a head), so every eligible PR reaches the front of the queue within a bounded number
+ * of passes: the starvation falsifier is that the loser of one pass wins a later one once
+ * nothing older remains. {@link OpenPrView.lastActivityAt} is the SAME clock
+ * `absentChecksRepushDecision` (above) already reads as "when this head was pushed" — a push
+ * always advances it — reused here rather than a second, independent age source. An unreadable
+ * age (`Date.parse` -> `NaN`) never outranks a readable one (fails toward not jumping the
+ * queue on state we cannot date, the same direction `absentChecksRepushDecision` fails); it can
+ * still be chosen when it is the only eligible PR. Ties (equal age, or all ages unreadable)
+ * break on ascending PR number, purely for a deterministic, test-stable choice — the ordering
+ * rule itself does not depend on which side of a tie wins.
+ */
+export function selectReviewAdmission(
+  openPrs: readonly OpenPrView[],
+  policy: SweepPolicy,
+  now: number,
+): OpenPrView | undefined {
+  let winner: OpenPrView | undefined;
+  let winnerAgeMs = -Infinity;
+  for (const pr of openPrs) {
+    if (deriveDisposition(pr, policy, now).disposition !== "post-review") continue;
+    const pushedAt = Date.parse(pr.lastActivityAt);
+    const ageMs = Number.isNaN(pushedAt) ? -Infinity : now - pushedAt;
+    if (!winner || ageMs > winnerAgeMs || (ageMs === winnerAgeMs && pr.prNumber < winner.prNumber)) {
+      winner = pr;
+      winnerAgeMs = ageMs;
+    }
+  }
+  return winner;
 }
 
 /** One-line human render of a sweep summary, for both callers' console output. */
