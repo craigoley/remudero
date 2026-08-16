@@ -80,7 +80,19 @@ function baseCommitWithDuplicate(id: string): string {
     }).trim();
     git(["update-index", "--add", "--cacheinfo", `100644,${blob},plan/tasks.d/zzz-planted-duplicate.yaml`], env);
     const tree = git(["write-tree"], env);
-    return git(["commit-tree", tree, "-p", "HEAD", "-m", "planted: a base carrying a duplicate id"]);
+    // IDENTITY IS SUPPLIED, NOT BORROWED. `commit-tree` refuses with "Author identity unknown"
+    // when neither the repo nor the global config names one, and `actions/checkout` configures
+    // NEITHER — so this fixture passed on every developer machine and failed on every CI runner,
+    // taking three unrelated PRs to `blocked_ci` with it. Reproduced locally by unsetting the
+    // repo's user.email/user.name: `# fail 1`, this test, the other two green. Passing the four
+    // env vars git already honours makes the fixture self-sufficient, so it depends on nothing
+    // the checkout happens to have configured.
+    return git(["commit-tree", tree, "-p", "HEAD", "-m", "planted: a base carrying a duplicate id"], {
+      GIT_AUTHOR_NAME: "remudero test fixture",
+      GIT_AUTHOR_EMAIL: "fixture@remudero.invalid",
+      GIT_COMMITTER_NAME: "remudero test fixture",
+      GIT_COMMITTER_EMAIL: "fixture@remudero.invalid",
+    });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
