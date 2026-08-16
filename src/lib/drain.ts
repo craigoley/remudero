@@ -1168,6 +1168,24 @@ export interface DrainDeps {
    */
   readLiveState?: (taskId: string, prNumber: number) => string | undefined;
   /**
+   * W1-T916 — THE SUPPLIER W1-T534 DECLARED AND NOBODY PASSED. Raw `git ls-remote --heads origin
+   * 'run-*'` output, read ONCE PER PASS and parsed by {@link runBranchTaskIds} into the closure
+   * {@link NextRunnableOpts.hasPushedRunBranch} consumes. Injected rather than executed here
+   * because THIS MODULE IS PURE — it carries no `child_process` import and no `execFileSync`, the
+   * same discipline `refreshMerged`/`isOpenPr`/`runOne` already follow.
+   *
+   * WHY A READER AND NOT A PREDICATE: the cost argument is ONE REF SWEEP PER PASS (46 refs in
+   * 199 ms, `core` remaining identical before and after, because `ls-remote` speaks the git
+   * protocol and spends neither budget) against one round trip per candidate. Handing this module
+   * a per-task predicate would let a caller satisfy the type while making exactly the
+   * per-candidate call the design refuses; handing it the RAW OUTPUT makes one-sweep-per-pass the
+   * only shape that type-checks, and the parse is hoisted ABOVE the dispatch loop for the same
+   * reason.
+   *
+   * Optional — omitted, dispatch behaves EXACTLY as before this existed.
+   */
+  readPushedRunBranches?: () => string;
+  /**
    * The per-task dispatch CIRCUIT BREAKER (P29(ii)), re-derived from the
    * ledger each call — same freshness contract as `refreshMerged`/`isOpenPr`.
    * Optional — omitted, dispatch behaves exactly as before this breaker
@@ -1346,6 +1364,12 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
     return s;
   };
 
+  // W1-T916 — ONE SWEEP PER PASS, NEVER ONE PER CANDIDATE. Resolved BEFORE the dispatch loop so
+  // every iteration below tests set membership rather than making a round trip; hoisting is the
+  // whole cost argument, not a micro-optimisation.
+  const pushedRunBranches = deps.readPushedRunBranches
+    ? runBranchTaskIds(deps.readPushedRunBranches())
+    : undefined;
   while (attempted.length < max) {
     // FLEET CONTROL (W1-T11): checked FIRST, every tick — a hard STOP wins any
     // race against PAUSE and against picking up the next task. Neither check
@@ -1452,6 +1476,21 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
 
     const skipOpts: NextRunnableOpts = {
       isOpenPr: deps.isOpenPr,
+      // W1-T916: the argument W1-T534 declared and nothing supplied. `pushedRunBranches` is
+      // resolved ONCE above this loop, so this closure is a set-membership test and never a round
+      // trip. Undefined when no reader was injected ⇒ `hasPushedRunBranch` stays undefined ⇒
+      // `nextRunnable` behaves exactly as before, which is what keeps this additive.
+      ...(pushedRunBranches
+        ? {
+            hasPushedRunBranch: (id: string) => pushedRunBranches.has(id),
+            // RIDES THE EXISTING ROW (W1-T534 design (v)): `dispatch.skipped` with its own reason,
+            // never a new step and never `dispatch.stood_down`, which has no reader at all. The
+            // task is NOT marked done and burns NO strike — it is offered again once the branch is
+            // gone, so this is a skip and never a terminal state.
+            onSkipRunBranch: (t: Task) =>
+              log("dispatch.skipped", { task: t.id, reason: "run-branch-already-pushed" }),
+          }
+        : {}),
       // IN-FLIGHT (W1-T80): a legible skip on console + ledger, then the drain
       // proceeds to the next runnable task — an open PR must not halt the drain
       // the way a block does.
@@ -1665,6 +1704,12 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
     return s;
   };
 
+  // W1-T916 — ONE SWEEP PER PASS, NEVER ONE PER CANDIDATE. Resolved BEFORE the dispatch loop so
+  // every iteration below tests set membership rather than making a round trip; hoisting is the
+  // whole cost argument, not a micro-optimisation.
+  const pushedRunBranches = deps.readPushedRunBranches
+    ? runBranchTaskIds(deps.readPushedRunBranches())
+    : undefined;
   while (attempted.length < max) {
     const stopped = deps.checkStop?.();
     if (stopped) {
@@ -1758,6 +1803,21 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
 
     const skipOpts: NextRunnableOpts = {
       isOpenPr: deps.isOpenPr,
+      // W1-T916: the argument W1-T534 declared and nothing supplied. `pushedRunBranches` is
+      // resolved ONCE above this loop, so this closure is a set-membership test and never a round
+      // trip. Undefined when no reader was injected ⇒ `hasPushedRunBranch` stays undefined ⇒
+      // `nextRunnable` behaves exactly as before, which is what keeps this additive.
+      ...(pushedRunBranches
+        ? {
+            hasPushedRunBranch: (id: string) => pushedRunBranches.has(id),
+            // RIDES THE EXISTING ROW (W1-T534 design (v)): `dispatch.skipped` with its own reason,
+            // never a new step and never `dispatch.stood_down`, which has no reader at all. The
+            // task is NOT marked done and burns NO strike — it is offered again once the branch is
+            // gone, so this is a skip and never a terminal state.
+            onSkipRunBranch: (t: Task) =>
+              log("dispatch.skipped", { task: t.id, reason: "run-branch-already-pushed" }),
+          }
+        : {}),
       onSkip: (t, prNumber) => log("dispatch.skipped", { task: t.id, reason: "open-pr", pr_number: prNumber }),
       readLiveState: deps.readLiveState
         ? (taskId, prNumber) => {

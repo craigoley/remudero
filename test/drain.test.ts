@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
-import type { RunResult } from "../src/run-task.js";
+import { drainCommand, readPushedRunBranchesOutput, type RunResult } from "../src/run-task.js";
+import type { Config } from "../src/lib/config.js";
 import type { UsageSnapshot } from "../src/lib/headroom.js";
 import {
   IDLE_REASON_ID_CAP,
@@ -21,6 +22,7 @@ import {
   runDrain,
   runnableCandidates,
   type CuratedSelection,
+  type DrainDeps,
   type DrainSummary,
   type MergedSet,
   type OpenPrCheck,
@@ -1462,4 +1464,226 @@ test("W1-T343: laneCount 2 with ZERO WIP headroom this tick ledgers dispatch.wip
   assert.deepEqual(deferred!.extra, { lane_count: 2, wip_limit: 4, observed_open_count: 4 });
   assert.deepEqual(ran.sort(), ["A", "B"], "once headroom frees up, the SAME runnable work dispatches");
   assert.deepEqual(summary.merged.sort(), ["A", "B"]);
+});
+
+// ── W1-T916 — THE SUPPLIER W1-T534 DECLARED AND NOBODY PASSED ────────────────────────────────
+//
+// WHY THESE ARE runDrain INTEGRATION TESTS AND NOT MORE nextRunnable UNITS. The W1-T534 tests
+// above inject `hasPushedRunBranch` into `nextRunnable` by hand, and EVERY ONE OF THEM PASSED
+// AGAINST THE BROKEN PRODUCTION WIRING — because they supplied precisely what production omitted.
+// A test of that shape cannot see this defect at all. These drive `runDrain` with the real
+// `DrainDeps` and assert the argument REACHES the predicate, which is the only thing that was
+// ever missing.
+//
+// The failure mode is why it survived review: `opts.hasPushedRunBranch?.(t.id)` short-circuits to
+// `undefined` when unsupplied, which is falsy, so the guard silently never fired; and the field is
+// optional, so omitting it is legal at type-check. Nothing raised, nothing failed, nothing warned.
+
+/** Raw `git ls-remote --heads origin 'run-*'` output naming exactly the given task ids. */
+function lsRemoteRunBranches(...taskIds: string[]): string {
+  return taskIds.map((id, i) => `${"abc123def456"}${i}\trefs/heads/run-${id}-178688648869${i}`).join("\n");
+}
+
+test("W1-T916: the real dispatch options carry a pushed-branch supplier", async () => {
+  // THE ONE TEST THAT COULD HAVE CAUGHT THIS. It does not build DrainDeps itself — it drives the
+  // PRODUCTION construction in `drainCommand` and captures what that passes. Every other test in
+  // this file supplies the dep by hand, which is exactly why none of them saw the defect: the
+  // predicate was always fine, the argument was never sent.
+  const root = mkdtempSync(join(tmpdir(), "w1t916-supplier-"));
+  mkdirSync(join(root, "state"), { recursive: true });
+  const planDir = mkdtempSync(join(tmpdir(), "w1t916-plan-"));
+  const planPath = join(planDir, "tasks.yaml");
+  writeFileSync(planPath, "- id: W1-T916F\n  title: a\n  repo: remudero\n  type: implement\n  depends_on: []\n  status: queued\n");
+  let captured: DrainDeps | undefined;
+  try {
+    // `runDrain` is injected so the loop never runs — a wiring test must not be able to spawn a
+    // worker against a nonexistent claudeBin.
+    await drainCommand([], {
+      config: { claudeBin: "/nonexistent/claude-not-installed", root } as Config,
+      planPath,
+      skipGitSync: true,
+      notifyChannel: { send: () => true } as never,
+      runDrain: async (_plan: Plan, deps: DrainDeps): Promise<DrainSummary> => {
+        captured = deps;
+        return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, resumeCommand: "rmd drain" };
+      },
+    });
+    assert.ok(captured, "runDrain was reached and its DrainDeps captured");
+    assert.equal(
+      typeof captured.readPushedRunBranches,
+      "function",
+      "FALSIFIER: this is the assertion that fails if the supplier is dropped from drainCommand again",
+    );
+    // And it must actually return ls-remote-shaped output the parser can consume, not merely exist.
+    const parsed = runBranchTaskIds(captured.readPushedRunBranches!());
+    assert.ok(parsed instanceof Set, "the reader's output is what runBranchTaskIds parses");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(planDir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T916: a task with a pushed run branch is refused a second dispatch", async () => {
+  const plan = fixturePlan();
+  const ran: string[] = [];
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  await runDrain(
+    plan,
+    {
+      refreshMerged: () => () => false,
+      // isOpenPr deliberately omitted — the cached projection is blind to a branch pushed ahead of
+      // its PR, which is exactly the window this guard closes.
+      readPushedRunBranches: () => lsRemoteRunBranches("A"),
+      runOne: async (id) => {
+        ran.push(id);
+        return okResult(id);
+      },
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { max: 1 },
+  );
+  assert.ok(!ran.includes("A"), "the duplicate build never started");
+  assert.deepEqual(ran, ["D"], "D is the next runnable candidate once A is refused");
+  const skip = lines.find((l) => l.step === "dispatch.skipped" && l.extra.reason === "run-branch-already-pushed");
+  assert.ok(skip, "the refusal rides the EXISTING dispatch.skipped row — no new step was minted");
+  assert.equal(skip?.extra.task, "A");
+  assert.ok(
+    !lines.some((l) => l.step === "dispatch.stood_down"),
+    "and never dispatch.stood_down, which has three emitters and no reader",
+  );
+});
+
+test("W1-T916: dropping the supplier lets the same task dispatch", async () => {
+  // THE FALSIFIER. Byte-identical to the test above except that `readPushedRunBranches` is gone.
+  // If this dispatched A in both cases the guard would be inert; if it refused A in both the test
+  // would be asserting nothing about the wiring. Only the pair discriminates.
+  const plan = fixturePlan();
+  const ran: string[] = [];
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  await runDrain(
+    plan,
+    {
+      refreshMerged: () => () => false,
+      // readPushedRunBranches deliberately omitted — this IS production before this change.
+      runOne: async (id) => {
+        ran.push(id);
+        return okResult(id);
+      },
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { max: 1 },
+  );
+  assert.deepEqual(ran, ["A"], "with no supplier the guard cannot fire and the duplicate build starts");
+  assert.ok(
+    !lines.some((l) => l.extra.reason === "run-branch-already-pushed"),
+    "and no refusal is recorded, because nothing was ever asked",
+  );
+});
+
+test("W1-T916: a refused task stays eligible and burns no strike", async () => {
+  const plan = fixturePlan();
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  // Pass 1: A's branch is on origin, so A is refused.
+  await runDrain(
+    plan,
+    {
+      refreshMerged: () => () => false,
+      readPushedRunBranches: () => lsRemoteRunBranches("A"),
+      runOne: async (id) => okResult(id),
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { max: 1 },
+  );
+  assert.ok(
+    !lines.some((l) => l.step === "dispatch.circuit_broken" || l.step === "dispatch.stood_down"),
+    "a refusal is a SKIP — it escalates nothing and trips no breaker",
+  );
+  // Pass 2, same plan, branch now gone: A is offered again. A terminal state would have kept it
+  // out; a skip does not.
+  const ran2: string[] = [];
+  await runDrain(
+    plan,
+    {
+      refreshMerged: () => () => false,
+      readPushedRunBranches: () => "",
+      runOne: async (id) => {
+        ran2.push(id);
+        return okResult(id);
+      },
+      log: () => {},
+    },
+    { max: 1 },
+  );
+  assert.deepEqual(ran2, ["A"], "once the branch is gone the task is dispatched — it was never marked done");
+});
+
+test("W1-T916: the ref reader fails open so a git outage never blocks dispatch", () => {
+  // BOTH ARMS. The happy path returns the raw output verbatim for `runBranchTaskIds` to parse; the
+  // throw path returns "" — an EMPTY set — so nothing is refused. That direction is deliberate: a
+  // guard deciding whether work starts at all must degrade to "no improvement", never to "dispatch
+  // wrongly blocked". The catch arm is unreachable without this injected exec, which is the same
+  // class of gap — a seam nothing supplied — that this whole task exists to close.
+  const raw = "abc\trefs/heads/run-W1-T916-1786886488695";
+  assert.equal(readPushedRunBranchesOutput(() => raw), raw, "the happy path returns output verbatim");
+  assert.deepEqual([...runBranchTaskIds(readPushedRunBranchesOutput(() => raw))], ["W1-T916"]);
+  const thrown = readPushedRunBranchesOutput(() => {
+    throw new Error("ls-remote: could not read from remote repository");
+  });
+  assert.equal(thrown, "", "a throw yields empty output");
+  assert.equal(runBranchTaskIds(thrown).size, 0, "which parses to an empty set — nothing is refused");
+});
+
+test("W1-T916: the lane dispatch path refuses a pushed run branch too", async () => {
+  // runDrainLanes is a SEPARATE pass loop from runDrain's, with its own options object. Wiring one
+  // and not the other would leave the guard inert on exactly the path the daemon uses under
+  // concurrency, and no single-lane test would notice.
+  const plan = fixturePlan();
+  const ran: string[] = [];
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  await runDrain(
+    plan,
+    {
+      refreshMerged: () => () => false,
+      readPushedRunBranches: () => lsRemoteRunBranches("A"),
+      runOne: async (id) => {
+        ran.push(id);
+        return okResult(id);
+      },
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { max: 1, laneCount: 2 },
+  );
+  assert.ok(!ran.includes("A"), "A is refused on the LANES path as well as the single-lane one");
+  const skip = lines.find((l) => l.extra.reason === "run-branch-already-pushed");
+  assert.ok(skip, "and the same existing dispatch.skipped row carries it");
+  assert.equal(skip?.extra.task, "A");
+});
+
+test("W1-T916: the daemon dispatch path carries the same supplier", async () => {
+  // The daemon builds its OWN NextRunnableOpts and calls nextRunnable directly, so drainCommand
+  // being wired proves nothing about it. Wiring one loop and not the other would leave the guard
+  // inert on the path that actually runs in production.
+  const plan = fixturePlan();
+  const ran: string[] = [];
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const merged = new Set<string>();
+  await runDaemon(
+    plan,
+    {
+      refreshMerged: () => (id) => merged.has(id),
+      readPushedRunBranches: () => lsRemoteRunBranches("A"),
+      runOne: async (id) => {
+        ran.push(id);
+        merged.add(id);
+        return okResult(id);
+      },
+      log: (step, extra = {}) => lines.push({ step, extra }),
+      sleep: async () => {},
+    },
+    { max: 1 },
+  );
+  assert.ok(!ran.includes("A"), "A carries a pushed run branch and the daemon refuses it too");
+  const skip = lines.find((l) => l.extra.reason === "run-branch-already-pushed");
+  assert.ok(skip, "riding the same existing dispatch.skipped row, not a new step");
+  assert.equal(skip?.extra.task, "A");
 });
