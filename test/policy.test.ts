@@ -106,6 +106,10 @@ function goodRaw(): Record<string, unknown> {
       // review lane's own PR-<n> synthetic id. DEFAULT OFF, net-new — no prior source
       // literal ever gated this.
       armSessionPrs: { value: false, origin: "net-new" },
+      // W1-T905: recurrence threshold/window for filing a §7B feedback entry off a classified
+      // surface's repeated `sweep.disposed` rows — net-new, no prior source literal.
+      repairFilingThreshold: { value: 3, origin: "net-new", min: 2, max: 15 },
+      repairFilingWindowDays: { value: 7, origin: "net-new", min: 1, max: 30 },
     },
     drain: {
       max: { value: 10, origin: "lifted:src/lib/drain.ts:243 (DEFAULT_MAX)", min: 1, max: 100 },
@@ -484,6 +488,11 @@ test("every LIFTED field records origin=lifted:<source-site> — the net-new fie
     // W1-T516: `sweep.armSessionPrs` joins them too — no prior literal ever gated the sweep's
     // arm dep on a task-id presence; it simply passed `pr.taskId` raw.
     "sweep.armSessionPrs",
+    // W1-T905: `sweep.repairFilingThreshold`/`sweep.repairFilingWindowDays` join them too — no
+    // consumer of `sweep.disposed` rows existed before this task, so there is no prior literal
+    // to cite as either field's source.
+    "sweep.repairFilingThreshold",
+    "sweep.repairFilingWindowDays",
   ]);
   const liftedPaths = Object.keys(p.origin).filter((path) => !NET_NEW.has(path));
   assert.ok(liftedPaths.length > 0);

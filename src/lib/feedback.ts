@@ -49,30 +49,39 @@ export const FEEDBACK_ORIGINS = ["cli", "ui", "issue"] as const;
 export type NamedFeedbackOrigin = (typeof FEEDBACK_ORIGINS)[number];
 
 /**
- * `FeedbackOrigin` is the named closed enum above PLUS `issue#<n>` and `alert#<id>` —
- * machine-origin provenance for one specific managed-repo GitHub issue (W1-T57) or one specific
- * GitHub alert (code-scanning/Dependabot/secret-scanning; W1-T56, MASTER-PLAN §5D/§7B:
- * "machine-origin feedback... flows through the §7B feedback inbox (`origin: alert#<id>` /
- * `origin: issue#<n>`)"). This is a DIFFERENT axis than the named enum's "issue" value (a human
- * capturing feedback that references remudero's own tracker) — `issue#<n>`/`alert#<id>` instead
- * name WHICH managed-repo issue or alert produced this entry, so `rmd trace` (W1-T43) can point
- * straight back at it.
+ * `FeedbackOrigin` is the named closed enum above PLUS `issue#<n>`, `alert#<id>` and
+ * `repair#<surface>` — machine-origin provenance for one specific managed-repo GitHub issue
+ * (W1-T57), one specific GitHub alert (code-scanning/Dependabot/secret-scanning; W1-T56,
+ * MASTER-PLAN §5D/§7B: "machine-origin feedback... flows through the §7B feedback inbox
+ * (`origin: alert#<id>` / `origin: issue#<n>`)"), or one classified `sweep.disposed` surface
+ * that RECURRED at or above policy threshold (W1-T905, "repair the instance, file the class" —
+ * fb-1784842083584-6cc22a's second half: `src/lib/sweep.ts`'s `dueRepairFilings`, wired via
+ * `SweepDeps.captureRepairFeedback` in `src/run-task.ts`'s `buildSweepEffects`). This is a
+ * DIFFERENT axis than the named enum's "issue" value (a human capturing feedback that
+ * references remudero's own tracker) — `issue#<n>`/`alert#<id>`/`repair#<surface>` instead name
+ * WHICH managed-repo issue, alert, or classified surface produced this entry, so `rmd trace`
+ * (W1-T43) can point straight back at it.
  */
-export type FeedbackOrigin = NamedFeedbackOrigin | `issue#${number}` | `alert#${string}`;
+export type FeedbackOrigin = NamedFeedbackOrigin | `issue#${number}` | `alert#${string}` | `repair#${string}`;
 
 const MACHINE_ORIGIN_ISSUE = /^issue#\d+$/;
 /** `alert#<source>-<id>` — source is one of ops.ts's three ALERT_SOURCES, id is that source's own alert number. */
 const MACHINE_ORIGIN_ALERT = /^alert#(code-scanning|dependabot|secret-scanning)-.+$/;
+/** `repair#<surface>` (W1-T905) — surface is a `sweep.disposed` row's own `disposition` value
+ *  (`DISPOSITION_RULES`, src/lib/sweep.ts — e.g. `blocked-fixable`, `stale`), always
+ *  lower-kebab-case, never invented text: the SAME closed grammar every disposition already is. */
+const MACHINE_ORIGIN_REPAIR = /^repair#[a-z][a-z-]*$/;
 
 /**
- * True for any valid {@link FeedbackOrigin} — the named enum, a well-formed `issue#<n>`, or a
- * well-formed `alert#<source>-<id>`.
+ * True for any valid {@link FeedbackOrigin} — the named enum, a well-formed `issue#<n>`, a
+ * well-formed `alert#<source>-<id>`, or a well-formed `repair#<surface>`.
  */
 export function isValidFeedbackOrigin(origin: string): origin is FeedbackOrigin {
   return (
     (FEEDBACK_ORIGINS as readonly string[]).includes(origin) ||
     MACHINE_ORIGIN_ISSUE.test(origin) ||
-    MACHINE_ORIGIN_ALERT.test(origin)
+    MACHINE_ORIGIN_ALERT.test(origin) ||
+    MACHINE_ORIGIN_REPAIR.test(origin)
   );
 }
 
@@ -886,7 +895,8 @@ export function captureFeedback(root: string, opts: CaptureFeedbackOptions): Fee
   const origin = opts.origin ?? "cli";
   if (!isValidFeedbackOrigin(origin)) {
     throw new FeedbackError(
-      `invalid origin "${origin}" — must be one of ${FEEDBACK_ORIGINS.join(", ")}, "issue#<n>" (machine-origin, W1-T57), or "alert#<source>-<id>" (machine-origin, W1-T56)`,
+      `invalid origin "${origin}" — must be one of ${FEEDBACK_ORIGINS.join(", ")}, "issue#<n>" (machine-origin, W1-T57), ` +
+        `"alert#<source>-<id>" (machine-origin, W1-T56), or "repair#<surface>" (machine-origin, W1-T905)`,
     );
   }
   const id = opts.id ?? generateFeedbackId();

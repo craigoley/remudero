@@ -387,6 +387,41 @@ sweep:
     value: true
     origin: "net-new"
 
+  # W1-T905: "repair the instance, FILE THE CLASS" (fb-1784842083584-6cc22a, second half). A
+  # `sweep.disposed` row already NAMES a classified surface on its own `disposition` field
+  # (mergeable/blocked-fixable/stale/blocked-ambiguous/dep-review/post-review/conflicted/wait —
+  # DISPOSITION_RULES, src/lib/sweep.ts) every time the sweep repairs a PR, but nothing ever
+  # rolls that classification up across PRs — so a defect the fleet repairs fifteen times is
+  # rediscovered by hand fifteen times. These two rows are the threshold/window a RECURRING
+  # surface must cross before it is worth ONE `repair#<surface>` §7B feedback entry (never a
+  # task, never a new disposition/lane/rung — see the task's own design note i/vii). NET-NEW:
+  # no prior source literal ever counted or windowed this: no consumer of `sweep.disposed` rows
+  # existed before this task.
+  #
+  # repairFilingThreshold min: 2 — "one occurrence is a repair, a recurrence is a defect" (design
+  # note ii, verbatim): a threshold of 1 would file on the very first repair, which is exactly
+  # what this task exists to NOT do. max: 15 answers the task's own headline complaint directly
+  # ("a category the fleet repairs fifteen times is rediscovered by hand each time") — by 15
+  # distinct PRs sharing one surface, this MUST already have filed, so the bound itself forecloses
+  # the complaint's own number ever being reached silently again.
+  repairFilingThreshold:
+    value: 3
+    origin: "net-new"
+    min: 2
+    max: 15
+
+  # repairFilingWindowDays follows sweep.staleDays's own min:1 convention (a window of zero days
+  # is not a window) and a max of 30 (a month) — long enough to catch a slow-recurring defect
+  # without letting the window grow so wide that an unrelated, long-dormant surface's old repairs
+  # get counted alongside a fresh one. A WRONG recurrence key here does not fail loudly — it
+  # floods the Architect's front door (this task's own risk note) — so both bounds stay
+  # deliberately narrow rather than generously wide.
+  repairFilingWindowDays:
+    value: 7
+    origin: "net-new"
+    min: 1
+    max: 30
+
 drain:
   max:
     value: 10

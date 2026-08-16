@@ -74,6 +74,15 @@ export interface PolicyValues {
      *  alone, with zero executed proofs). NET-NEW: no prior source literal ever gated this;
      *  the sweep's arm dep simply passed `pr.taskId` raw. */
     armSessionPrs: boolean;
+    /** W1-T905: the RECURRENCE count — a classified surface (a `sweep.disposed` row's own
+     *  `disposition`) that a `sweep.disposed acted: true` row names at least this many DISTINCT
+     *  PRs for, inside {@link PolicyValues.sweep.repairFilingWindowDays}, is due for exactly ONE
+     *  `repair#<surface>` §7B feedback entry — "one occurrence is a repair, a recurrence is a
+     *  defect." NET-NEW: no prior source literal ever counted this. */
+    repairFilingThreshold: number;
+    /** W1-T905: the RECURRENCE window (days) {@link PolicyValues.sweep.repairFilingThreshold}
+     *  counts distinct-PR repairs within — see that field's doc. NET-NEW. */
+    repairFilingWindowDays: number;
   };
   drain: {
     max: number;
@@ -176,6 +185,8 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   "sweep.dispatchLanes": "lifted",
   "sweep.dailyCostCeilingUsd": "lifted",
   "sweep.armSessionPrs": "net-new",
+  "sweep.repairFilingThreshold": "net-new",
+  "sweep.repairFilingWindowDays": "net-new",
   "drain.max": "lifted",
   "autoTriage.enabled": "net-new",
   "autoTriage.minIntervalMinutes": "net-new",
@@ -362,6 +373,8 @@ export function validatePolicy(raw: unknown): Policy {
   const dispatchLanes = numberField("sweep.dispatchLanes", sweepRaw.dispatchLanes, origin);
   const dailyCostCeilingUsd = numberField("sweep.dailyCostCeilingUsd", sweepRaw.dailyCostCeilingUsd, origin, bounds);
   const armSessionPrs = booleanField("sweep.armSessionPrs", sweepRaw.armSessionPrs, origin);
+  const repairFilingThreshold = numberField("sweep.repairFilingThreshold", sweepRaw.repairFilingThreshold, origin);
+  const repairFilingWindowDays = numberField("sweep.repairFilingWindowDays", sweepRaw.repairFilingWindowDays, origin);
 
   const drainRaw = raw.drain;
   if (!isPlainObject(drainRaw)) throw new PolicyError("policy.yaml: 'drain' must be a mapping.");
@@ -412,7 +425,17 @@ export function validatePolicy(raw: unknown): Policy {
       worktreeReapGraceMs,
       pollIntervalMs,
       fixStrikeCap,
-      sweep: { staleDays, strikeCap: sweepStrikeCap, wipLimit, tmpMaxAgeMs, dispatchLanes, dailyCostCeilingUsd, armSessionPrs },
+      sweep: {
+        staleDays,
+        strikeCap: sweepStrikeCap,
+        wipLimit,
+        tmpMaxAgeMs,
+        dispatchLanes,
+        dailyCostCeilingUsd,
+        armSessionPrs,
+        repairFilingThreshold,
+        repairFilingWindowDays,
+      },
       drain: { max: drainMax },
       retro: { mergesThreshold: retroMergesThreshold, daysThreshold: retroDaysThreshold },
       autoTriage,

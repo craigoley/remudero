@@ -187,6 +187,7 @@ import {
   setFeedbackStatus,
   FeedbackError,
   type FeedbackEntry,
+  type FeedbackOrigin,
   type SummarizeDeps,
 } from "./lib/feedback.js";
 import { findPendingLandingPr, recordDecision, sweepFeedbackLanding } from "./lib/feedback-landing.js";
@@ -522,6 +523,7 @@ import {
   type PostFixReverificationSummary,
   type QueueGovernorResult,
   type PostReviewStallVerdict,
+  type RepairFilingCapture,
   type StrikeAttempt,
   type SweepDeps,
   type SweepPolicy,
@@ -14946,9 +14948,29 @@ export function buildSweepEffects(
   // adapter always called the real `updateBranchViaGh` (a live, mutating `gh` call). Default is
   // `updateBranchViaGh` itself, so production wiring is unchanged.
   updateBranchImpl: (pr: ArmedStalledPr) => Promise<UpdateBranchOutcome> = updateBranchViaGh,
+  // W1-T905 — appended LAST, the same convention every dep above follows. Wraps the real
+  // `captureFeedback` with the SAME caller-side `existsSync` dedup `src/lib/issues-intake.ts`'s
+  // `pollIssues` already uses for its own deterministic id (`fb-issue-<owner>-<repo>-<n>`) — see
+  // `SweepDeps.captureRepairFeedback`'s own doc for why the dedup check belongs HERE, in the one
+  // place effects are wired, rather than inside sweep.ts's pure fold. Injectable so a test can
+  // assert the dedup/capture behavior without writing a real plan/feedback/ entry; production
+  // wiring is unchanged.
+  captureRepairFeedbackImpl: (filing: RepairFilingCapture) => void = (filing) => {
+    if (existsSync(feedbackEntryPath(repoRoot, filing.id))) return; // already filed this window
+    captureFeedback(repoRoot, { id: filing.id, raw: filing.raw, origin: filing.origin as FeedbackOrigin });
+  },
 ): Pick<
   SweepDeps,
-  "arm" | "close" | "dispatchFix" | "escalate" | "readLiveState" | "depReview" | "postReview" | "repushAbsent" | "updateBranch"
+  | "arm"
+  | "close"
+  | "dispatchFix"
+  | "escalate"
+  | "readLiveState"
+  | "depReview"
+  | "postReview"
+  | "repushAbsent"
+  | "updateBranch"
+  | "captureRepairFeedback"
 > {
   const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
   const issues = issuesImpl ?? ghIssueGateway(owner, repo);
@@ -15283,6 +15305,10 @@ export function buildSweepEffects(
     // W1-T528 — the action half of W1-T520. `runSweep` calls this AT MOST ONCE per pass, on the
     // single PR `selectUpdateBranchTarget` chose — see `SweepDeps.updateBranch`'s own doc.
     updateBranch: (pr) => updateBranchImpl(pr),
+
+    // W1-T905 — "repair the instance, FILE THE CLASS". `runSweep` calls this AT MOST ONCE per
+    // due surface, best-effort — see `SweepDeps.captureRepairFeedback`'s own doc.
+    captureRepairFeedback: (filing) => captureRepairFeedbackImpl(filing),
   };
 }
 
