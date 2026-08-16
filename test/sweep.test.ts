@@ -22,10 +22,12 @@ import {
   runEscalationReconcile,
   runSweep,
   runSweepLightPass,
+  selectUpdateBranchTarget,
   strikeCapForAnswer,
   toQuestionEntry,
   MAX_ESCALATION_CLOSES_PER_CYCLE,
   RETIRABLE_ESCALATION_LABELS,
+  type ArmedStalledPr,
   type CiFailure,
   type ClarificationQuestion,
   type ConflictFileDiff,
@@ -2958,4 +2960,224 @@ test("a stalled pull request is reported on the ledger, and a quiet pass writes 
   const quiet: Array<Record<string, unknown>> = [];
   await runSweep([pr({ autoMergeArmed: true, mergeState: "clean" })], fakeDeps({ appendLine: (_p, line) => { quiet.push(line); } }), DEFAULT_SWEEP_POLICY);
   assert.equal(quiet.filter((r) => r.step === "sweep.armed_stalled").length, 0);
+});
+
+// ── W1-T528: THE ACTION HALF — nothing presses the update button ─────────────────────────────
+// W1-T520 detects the armed-and-behind set and only reports it (above). This selects AT MOST ONE
+// from that set — oldest head first — and, when `deps.updateBranch` is wired, asks GitHub to
+// update it. See `selectUpdateBranchTarget`'s own doc (lib/sweep.ts) for the full design.
+
+test("W1-T528: one pull request is updated per pass and it is the oldest head", async () => {
+  const older = pr({
+    prNumber: 501,
+    prUrl: "url/501",
+    taskId: "W1-A",
+    autoMergeArmed: true,
+    mergeState: "behind",
+    headSha: "aaa501",
+    lastActivityAt: "2026-07-10T00:00:00Z",
+  });
+  const younger = pr({
+    prNumber: 502,
+    prUrl: "url/502",
+    taskId: "W1-B",
+    autoMergeArmed: true,
+    mergeState: "behind",
+    headSha: "bbb502",
+    lastActivityAt: "2026-07-16T00:00:00Z",
+  });
+
+  // The pure selector picks the older head regardless of input order.
+  assert.equal(selectUpdateBranchTarget([younger, older], NOW)?.prNumber, 501);
+  assert.equal(selectUpdateBranchTarget([older, younger], NOW)?.prNumber, 501);
+
+  // Wired through runSweep: exactly ONE update-branch attempt, and it names the older PR —
+  // never both, however many PRs are armed-and-behind this pass.
+  const calls: ArmedStalledPr[] = [];
+  const rows: Array<Record<string, unknown>> = [];
+  const deps = fakeDeps({
+    updateBranch: (target) => {
+      calls.push(target);
+      return "updated";
+    },
+    appendLine: (_p, line) => {
+      rows.push(line);
+    },
+  });
+  await runSweep([younger, older], deps, DEFAULT_SWEEP_POLICY);
+
+  assert.equal(calls.length, 1, "never more than one update-branch call per pass");
+  assert.equal(calls[0].prNumber, 501, "the older head, not the younger one");
+  const attempted = rows.filter((r) => r.step === "sweep.update_branch.attempted");
+  assert.equal(attempted.length, 1);
+  assert.equal(attempted[0].pr_number, 501);
+  assert.equal(attempted[0].head_sha, "aaa501");
+  assert.equal(rows.filter((r) => r.step === "sweep.update_branch.updated").length, 1);
+});
+
+test("W1-T528: a draft pull request is never updated", async () => {
+  const draftOldest = pr({
+    prNumber: 511,
+    prUrl: "url/511",
+    taskId: "W1-C",
+    autoMergeArmed: true,
+    mergeState: "behind",
+    headSha: "ccc511",
+    lastActivityAt: "2026-07-01T00:00:00Z",
+    isDraft: true,
+  });
+  const notDraft = pr({
+    prNumber: 512,
+    prUrl: "url/512",
+    taskId: "W1-D",
+    autoMergeArmed: true,
+    mergeState: "behind",
+    headSha: "ddd512",
+    lastActivityAt: "2026-07-15T00:00:00Z",
+  });
+
+  // The draft is OLDER (would win on age alone) but the operator's hold vetoes it outright.
+  assert.equal(
+    selectUpdateBranchTarget([draftOldest, notDraft], NOW)?.prNumber,
+    512,
+    "the non-draft PR is picked instead",
+  );
+
+  // And when the ONLY armed-and-behind PR is a draft, nothing is selected at all.
+  assert.equal(selectUpdateBranchTarget([draftOldest], NOW), undefined);
+
+  const calls: ArmedStalledPr[] = [];
+  await runSweep(
+    [draftOldest],
+    fakeDeps({
+      updateBranch: (t) => {
+        calls.push(t);
+        return "updated";
+      },
+    }),
+    DEFAULT_SWEEP_POLICY,
+  );
+  assert.deepEqual(calls, [], "NEVER touch a draft, even as the sole candidate");
+});
+
+test("W1-T528: an in-flight run branch is skipped rather than raced", async () => {
+  const inFlight = pr({
+    prNumber: 521,
+    prUrl: "url/521",
+    taskId: "W1-T900",
+    autoMergeArmed: true,
+    mergeState: "behind",
+    headSha: "eee521",
+    headRefName: "run-W1-T900-1786845000000",
+    lastActivityAt: "2026-07-01T00:00:00Z",
+  });
+  const settled = pr({
+    prNumber: 522,
+    prUrl: "url/522",
+    taskId: "W1-E",
+    autoMergeArmed: true,
+    mergeState: "behind",
+    headSha: "fff522",
+    lastActivityAt: "2026-07-15T00:00:00Z",
+  });
+  const inFlightTaskIds = new Set(["W1-T900"]);
+
+  // inFlight is OLDER (would win on age alone) but a live worker is still pushing to this exact
+  // head — the #1902 shape (a mid-pass push racing its own PR's remudero-review).
+  assert.equal(selectUpdateBranchTarget([inFlight, settled], NOW, inFlightTaskIds)?.prNumber, 522);
+
+  // A head that is NOT a run-branch at all (foreign/human-authored) is never excluded by this rule.
+  assert.equal(
+    selectUpdateBranchTarget([{ ...inFlight, headRefName: "some-hand-authored-branch" }], NOW, inFlightTaskIds)
+      ?.prNumber,
+    521,
+  );
+
+  // And when EVERY armed-and-behind PR is in-flight, nothing is selected.
+  assert.equal(selectUpdateBranchTarget([inFlight], NOW, inFlightTaskIds), undefined);
+
+  const calls: ArmedStalledPr[] = [];
+  await runSweep(
+    [inFlight],
+    fakeDeps({
+      updateBranch: (t) => {
+        calls.push(t);
+        return "updated";
+      },
+      inFlightTaskIds,
+    }),
+    DEFAULT_SWEEP_POLICY,
+  );
+  assert.deepEqual(calls, [], "raced against its own worker's push — skipped, not updated");
+});
+
+test("W1-T528: a conflicting update is reported and skipped", async () => {
+  const target = pr({
+    prNumber: 531,
+    prUrl: "url/531",
+    taskId: "W1-F",
+    autoMergeArmed: true,
+    mergeState: "behind",
+    headSha: "ggg531",
+  });
+  const calls: ArmedStalledPr[] = [];
+  const rows: Array<Record<string, unknown>> = [];
+  const deps = fakeDeps({
+    updateBranch: (t) => {
+      calls.push(t);
+      return "conflict";
+    },
+    appendLine: (_p, line) => {
+      rows.push(line);
+    },
+  });
+
+  await runSweep([target], deps, DEFAULT_SWEEP_POLICY);
+
+  assert.equal(calls.length, 1, "attempted exactly once — a conflict is never retried within the same pass");
+  const conflictRows = rows.filter((r) => r.step === "sweep.update_branch.conflict");
+  assert.equal(conflictRows.length, 1, "the conflict is reported on the ledger");
+  assert.equal(conflictRows[0].pr_number, 531);
+  assert.equal(rows.filter((r) => r.step === "sweep.update_branch.updated").length, 0, "never counted as updated");
+
+  // A SECOND, wholly separate `runSweep` call (a later pass) is a fresh selection, never a retry
+  // loop this call itself runs — this call above made exactly one attempt and stopped.
+  await runSweep([target], deps, DEFAULT_SWEEP_POLICY);
+  assert.equal(calls.length, 2, "a later PASS may try again — but this call attempted no retry on its own");
+});
+
+test("selectUpdateBranchTarget: an already-current or unarmed PR is never a candidate — armedButStalled's own filter, not re-checked here", () => {
+  assert.equal(selectUpdateBranchTarget([pr({ prNumber: 541, autoMergeArmed: true, mergeState: "clean" })], NOW), undefined);
+  assert.equal(selectUpdateBranchTarget([pr({ prNumber: 542, autoMergeArmed: false, mergeState: "behind" })], NOW), undefined);
+  assert.equal(selectUpdateBranchTarget([], NOW), undefined);
+});
+
+test("runSweep: updateBranch omitted takes no effect — the pass still reports the stalled set exactly as W1-T520 always did", async () => {
+  const stalled = pr({ prNumber: 551, autoMergeArmed: true, mergeState: "behind", headSha: "hhh551" });
+  const rows: Array<Record<string, unknown>> = [];
+  await runSweep([stalled], fakeDeps({ appendLine: (_p, line) => { rows.push(line); } }), DEFAULT_SWEEP_POLICY);
+  assert.equal(rows.filter((r) => r.step === "sweep.armed_stalled").length, 1);
+  assert.equal(rows.filter((r) => String(r.step).startsWith("sweep.update_branch")).length, 0);
+});
+
+test("runSweep: dryRun takes no update-branch effect and leaves no ledger trace", async () => {
+  const stalled = pr({ prNumber: 552, autoMergeArmed: true, mergeState: "behind", headSha: "iii552" });
+  const calls: ArmedStalledPr[] = [];
+  const rows: Array<Record<string, unknown>> = [];
+  await runSweep(
+    [stalled],
+    fakeDeps({
+      dryRun: true,
+      updateBranch: (t) => {
+        calls.push(t);
+        return "updated";
+      },
+      appendLine: (_p, line) => {
+        rows.push(line);
+      },
+    }),
+    DEFAULT_SWEEP_POLICY,
+  );
+  assert.deepEqual(calls, []);
+  assert.equal(rows.filter((r) => String(r.step).startsWith("sweep.update_branch")).length, 0);
 });

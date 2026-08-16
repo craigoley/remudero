@@ -504,6 +504,7 @@ import {
   strikeCapForAnswer,
   terminalStateReason,
   toQuestionEntry,
+  type ArmedStalledPr,
   type CiFailure,
   type ClarificationQuestion,
   type CostGovernorResult,
@@ -521,6 +522,7 @@ import {
   type StrikeAttempt,
   type SweepDeps,
   type SweepPolicy,
+  type UpdateBranchOutcome,
   ABSENT_REPUSH_CAP,
   DEFAULT_FIX_CLASSES,
   detectPostReviewStall,
@@ -1453,6 +1455,45 @@ export function armReportPhrase(outcome: ArmOutcome): string {
  */
 export function armFailureAction(stderrText: string): "direct-merge" | "ignore" {
   return /clean status/i.test(stderrText) ? "direct-merge" : "ignore";
+}
+
+/**
+ * W1-T528: PURE classifier for a failed `gh pr update-branch`, same shape as {@link
+ * armFailureAction} directly above. Design clause (v): this shard does NOT pretend to have
+ * observed a real 422/diverged response — it was never called against a live PR (a call on a
+ * real PR discards a real verdict). Anything that plausibly names a conflict or a divergence is
+ * classified `"conflict"` — reported and never retried by {@link updateBranchViaGh}'s own caller;
+ * everything else is `"error"` — informational, retried only by a LATER pass's own fresh
+ * selection, never by this call. Exported so a future task can correct this classification
+ * against `gh`'s ACTUAL response shape without guessing here first.
+ */
+export function classifyUpdateBranchFailure(stderrText: string): "conflict" | "error" {
+  return /conflict|divergent|diverged|422/i.test(stderrText) ? "conflict" : "error";
+}
+
+/**
+ * W1-T528's real gateway: `gh pr update-branch <url>`, GitHub's own REST-backed wrapper for the
+ * update button nothing else presses (see W1-T520's `armedButStalled`, lib/sweep.ts). Called AT
+ * MOST ONCE per sweep pass, on the ONE PR `selectUpdateBranchTarget` chose — never a retry loop
+ * of its own (see `SweepDeps.updateBranch`'s own doc for why the caller never calls this twice
+ * for the same target within one pass).
+ *
+ * REUSES the `"gh-pr-merge"` live-write boundary rather than a dedicated `"gh-pr-update-branch"`
+ * one: `lib/live-write-guard.ts`'s `LiveWriteBoundary` union lives outside this task's declared
+ * `files:` (Rule 19) — see `updateBranch`'s follow-up note. Both boundaries guard the identical
+ * hazard class (a mutating `gh pr` write against the live repo from an offline test), so this is
+ * an honest reuse, not a bypass; a dedicated label is a one-line follow-up once that file is in
+ * scope for some other task.
+ */
+export async function updateBranchViaGh(pr: ArmedStalledPr): Promise<UpdateBranchOutcome> {
+  assertLiveWriteAllowed("gh-pr-merge", `requesting gh pr update-branch on ${pr.prUrl}`);
+  try {
+    execFileSync("gh", ["pr", "update-branch", pr.prUrl], { stdio: "pipe" });
+    return "updated";
+  } catch (e) {
+    const msg = String((e as { stderr?: unknown })?.stderr ?? (e as Error)?.message ?? e);
+    return classifyUpdateBranchFailure(msg);
+  }
 }
 
 /**
@@ -14872,7 +14913,15 @@ export function buildSweepEffects(
   // recognizes — the SAME `deps.policy ?? loadDefaultPolicy()` shape `dailyCostCeilingReloader`/
   // `buildAccountUsageRoute`/`ceilingPolicy` already use, not a new pattern.
   armSessionPrsOverride?: boolean,
-): Pick<SweepDeps, "arm" | "close" | "dispatchFix" | "escalate" | "readLiveState" | "depReview" | "postReview" | "repushAbsent"> {
+  // W1-T528 — appended LAST, the same convention every dep above follows: without it, a
+  // successful `gh pr update-branch` request is unreachable from any offline test, because the
+  // adapter always called the real `updateBranchViaGh` (a live, mutating `gh` call). Default is
+  // `updateBranchViaGh` itself, so production wiring is unchanged.
+  updateBranchImpl: (pr: ArmedStalledPr) => Promise<UpdateBranchOutcome> = updateBranchViaGh,
+): Pick<
+  SweepDeps,
+  "arm" | "close" | "dispatchFix" | "escalate" | "readLiveState" | "depReview" | "postReview" | "repushAbsent" | "updateBranch"
+> {
   const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
   const issues = issuesImpl ?? ghIssueGateway(owner, repo);
   const say = (msg: string) => console.error(`### rmd sweep — ${msg}`);
@@ -15202,6 +15251,10 @@ export function buildSweepEffects(
     // blocked-fixable disposition actually spends a fix-rung strike — see
     // `SweepDeps.readLiveState`'s own doc for the fail-open contract.
     readLiveState: (pr) => ghLiveState(pr.prUrl),
+
+    // W1-T528 — the action half of W1-T520. `runSweep` calls this AT MOST ONCE per pass, on the
+    // single PR `selectUpdateBranchTarget` chose — see `SweepDeps.updateBranch`'s own doc.
+    updateBranch: (pr) => updateBranchImpl(pr),
   };
 }
 
@@ -15258,9 +15311,13 @@ export async function sweepCommand(rest: string[]): Promise<number> {
   const prsForFixRung = openPrs.filter((pr) => !redrivenThisPass.has(pr.prNumber));
 
   const effects = buildSweepEffects(owner, repo, config, ledgerPath, runId, plan, log, DEFAULT_SWEEP_POLICY);
+  // W1-T528: "in flight" for `selectUpdateBranchTarget` means exactly what it means everywhere
+  // else in the fleet (see `liveInflightRuns`'s own doc) — the SAME per-task lock directory the
+  // drain/daemon dispatch path already reads, never a second, looser definition.
+  const inflightDir = join(config.root, "state", "inflight");
   const summary = await runSweep(
     prsForFixRung,
-    { ...effects, ledgerPath, runId, log, dryRun },
+    { ...effects, ledgerPath, runId, log, dryRun, inFlightTaskIds: new Set(liveInflightRuns(inflightDir).map((r) => r.taskId)) },
     DEFAULT_SWEEP_POLICY,
   );
 
@@ -15714,7 +15771,14 @@ export function buildSweepHook(
       );
       const prsForFixRung = openPrs.filter((pr) => !redrivenThisPass.has(pr.prNumber));
       const effects = buildSweepEffects(owner, repo, config, ledgerPath, runId, plan, log, DEFAULT_SWEEP_POLICY);
-      await runSweep(prsForFixRung, { ...effects, ledgerPath, runId, log }, DEFAULT_SWEEP_POLICY);
+      // W1-T528: same in-flight lock directory every other dispatch-path reader consults —
+      // see `sweepCommand`'s own comment on this exact line for the full rationale.
+      const inflightDir = join(config.root, "state", "inflight");
+      await runSweep(
+        prsForFixRung,
+        { ...effects, ledgerPath, runId, log, inFlightTaskIds: new Set(liveInflightRuns(inflightDir).map((r) => r.taskId)) },
+        DEFAULT_SWEEP_POLICY,
+      );
       // fb-1784756088300-6a481e: the escalation-lifecycle reconciler rung — closes stale
       // needs-human issues whose referenced task has since resolved, on the daemon's own
       // cadence. The missing third leg of the escalation lifecycle (creation W1-T8, dedup
@@ -15798,7 +15862,22 @@ export function buildSweepLightHook(
       const effects = buildSweepEffects(owner, repo, config, ledgerPath, runId, plan, log, DEFAULT_SWEEP_POLICY);
       await runSweepLightPass(
         openPrs,
-        { ...effects, ledgerPath, runId, log, actionable: (d) => d === "post-review" },
+        {
+          ...effects,
+          ledgerPath,
+          runId,
+          log,
+          actionable: (d) => d === "post-review",
+          // W1-T528: `runSweepLightPass` fans ONE `runSweep` call out PER open PR, concurrently
+          // (this function's own doc, directly above) — `selectUpdateBranchTarget`'s "oldest
+          // head first" only holds ACROSS the whole open-PR set one `runSweep` call sees, so N
+          // single-PR calls here could each pick "the oldest of one" and update-branch N PRs in
+          // one tick, exactly the N+(N-1)+…+1 cost this shard exists to prevent. `updateBranch`
+          // joins dispatchFix/close/escalate/depReview/arm on the list that stands down here
+          // until the NEXT FULL sweep (`sweepCommand`/the daemon poll rung, both of which call
+          // `runSweep` ONCE over the whole set) picks it back up.
+          updateBranch: undefined,
+        },
         DEFAULT_SWEEP_POLICY,
       );
     } catch (e) {
