@@ -914,3 +914,91 @@ test("W1-T529: a refused attempt leaves a dedup key behind", async () => {
   await runSweep([ungatedGreen], deps2, DEFAULT_SWEEP_POLICY);
   assert.deepEqual(attempts2, [], "the dedup key left behind by the refusal suppresses the repeat attempt");
 });
+
+// ── W1-T529 (v): the dedup key must MATCH ITS LOOKUP, and a task id is where it stopped ──────
+//
+// The refusal row shipped keyed `taskId ?? "SWEEP"` while the consult site reads
+// `${pr.taskId ?? ""}@${pr.headSha}`. For a PR that HAS a task id the two are identical, so the
+// existing suite could not see the difference; for a task-id-LESS PR the row reads `SWEEP@<sha>`,
+// the lookup asks for `@<sha>`, and the attempt repeated every pass. MEASURED against the file
+// before this fix: 3 attempts across 3 passes.
+
+function t529bLedger(): string {
+  return join(mkdtempSync(join(tmpdir(), "rmd-t529b-")), "ledger.ndjson");
+}
+
+function t529bDeps(ledgerPath: string, postReview: (pr: OpenPrView) => void): SweepDeps {
+  return {
+    arm: () => {},
+    close: () => {},
+    dispatchFix: () => {},
+    escalate: () => {},
+    ledgerPath,
+    runId: "SWEEP-T529",
+    now: () => Date.parse("2026-08-16T02:00:00Z"),
+    postReview: async (pr: OpenPrView) => postReview(pr),
+  } as unknown as SweepDeps;
+}
+
+const t529bPr = (over: Partial<OpenPrView> = {}): OpenPrView =>
+  ({
+    prNumber: 529,
+    prUrl: "https://github.com/o/r/pull/529",
+    taskId: "W1-T529",
+    headSha: "cafe529",
+    reviewState: "none",
+    checksState: "green",
+    priorStrikes: 0,
+    strikeHistory: [],
+    unmetCriteria: [],
+    ...over,
+  }) as unknown as OpenPrView;
+
+const throwsRateLimit = (seen: string[]) => (pr: OpenPrView) => {
+  seen.push(pr.headSha);
+  throw new Error("GraphQL: API rate limit already exceeded for user ID 4397075.");
+};
+
+test("W1-T529: a refused attempt leaves a dedup key behind", async () => {
+  const lp = t529bLedger();
+  const seen: string[] = [];
+  await runSweep([t529bPr()], t529bDeps(lp, throwsRateLimit(seen)), DEFAULT_SWEEP_POLICY);
+  const refusal = readFileSync(lp, "utf8").split("\n").filter(Boolean)
+    .map((l) => JSON.parse(l) as Record<string, unknown>)
+    .find((l) => l.step === "review.post_refused");
+  assert.ok(refusal, "a thrown attempt records the outcome the existing dedup reads");
+  assert.equal(refusal!.head_sha, "cafe529", "keyed by head, so a NEW head re-earns its own attempt");
+});
+
+test("W1-T529: a task-id-less PR is deduped too, which is where the SWEEP placeholder broke the key", async () => {
+  // THE CASE THAT DISCRIMINATES. `taskId ?? "SWEEP"` and `taskId ?? ""` agree for every PR that
+  // carries a task id — only this one can tell them apart, which is why the defect shipped.
+  const lp = t529bLedger();
+  const seen: string[] = [];
+  const anon = t529bPr({ taskId: undefined });
+
+  for (let pass = 0; pass < 3; pass++) {
+    await runSweep([anon], t529bDeps(lp, throwsRateLimit(seen)), DEFAULT_SWEEP_POLICY);
+  }
+  assert.equal(seen.length, 1, "one attempt across three passes — a single-pass assertion cannot see this");
+
+  const refusal = readFileSync(lp, "utf8").split("\n").filter(Boolean)
+    .map((l) => JSON.parse(l) as Record<string, unknown>)
+    .find((l) => l.step === "review.post_refused")!;
+  assert.equal(refusal.task_id, "", "the empty string — the placeholder would key SWEEP@sha against a @sha lookup");
+});
+
+test("W1-T529: three passes over the same failing attempt spend one attempt, not one per pass", async () => {
+  const lp = t529bLedger();
+  const seen: string[] = [];
+  for (let pass = 0; pass < 3; pass++) {
+    await runSweep([t529bPr()], t529bDeps(lp, throwsRateLimit(seen)), DEFAULT_SWEEP_POLICY);
+  }
+  assert.equal(seen.length, 1, "the refusal deduped the two later passes");
+
+  // SHA-SCOPED, the property the fix rung's `isBlockedCi` gets by recomputing per head: a new
+  // head is a different key and re-earns exactly one attempt, so the repeat is bounded without
+  // freezing the PR forever.
+  await runSweep([t529bPr({ headSha: "beef530" })], t529bDeps(lp, throwsRateLimit(seen)), DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(seen, ["cafe529", "beef530"], "a new head re-earns one attempt of its own");
+});
