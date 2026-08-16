@@ -1,0 +1,112 @@
+- id: W1-T925
+  title: "every generated launchd unit bakes `join(repoRoot, \"bin\", \"rmd\")` — the checkout the operator HAPPENED TO BE STANDING IN — so which tree the fleet runs from is decided by a `cd`, and the generator that already refuses a self-target and an ANTHROPIC key does not refuse this"
+  repo: remudero
+  depends_on: ["W1-T924"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45.00
+  rationale: |
+    FILED FROM fb-1784913390318-1fcb63 (2026-07-24, origin cli), the second half of its structural
+    fix: "a dedicated install checkout ... from which the launchd daemon runs". W1-T924 gives the
+    install a resolved path and makes the supervisor write it. THIS TASK IS WHAT MAKES THE FLEET
+    ACTUALLY RUN FROM IT — without it, W1-T924 keeps a pristine checkout fresh while the daemon
+    goes on executing the operator's WIP tree.
+
+    THE DEFECT IS FOUR IDENTICAL LINES, quoted from `src/run-task.ts` in this tree at triage — one
+    per unit, daemon / supervisor / digest / serve:
+      `const rmdBin = join(repoRoot, "bin", "rmd");`
+    and each is handed straight to its generator (`generateLaunchdPlist`,
+    `generateSupervisorLaunchdPlist`, `generateDigestLaunchdPlist`, `generateServeLaunchdPlist`).
+    `repoRoot` is `git rev-parse --show-toplevel` of the cwd. SO THE ANSWER TO "WHICH SOURCE TREE
+    IS PRODUCTION?" IS "WHEREVER SOMEBODY RAN `rmd daemon-plist` FROM, ONCE, MONTHS AGO."
+
+    AND IT LANDS IN `ProgramArguments[0]`, WHICH launchd EXECS DIRECTLY — the module header of
+    `src/lib/launchd.ts` makes exactly that point about absolute paths. W1-T446's own note records
+    the consequence as MEASURED FACT on the mini (2026-08-14): `com.remudero.daemon` and
+    `com.remudero.serve` BOTH run `/Users/craigoleyagent/Remudero/remudero/bin/rmd` — the operator
+    checkout. That is not a misconfiguration to be corrected by hand; it is the only thing this
+    code can produce.
+
+    THE GENERATOR ALREADY REFUSES TWO OTHER FOOT-GUNS AT GENERATION TIME, WHICH IS THE PRECEDENT
+    AND THE ARGUMENT. `generateLaunchdPlist` throws `LaunchdPlistError` when `rmdBin`/`root` are
+    not absolute, throws when the assembled `EnvironmentVariables` block carries any `ANTHROPIC_*`
+    key, and — W1-T109 — refuses a self-targeting unit outright, in its own words "fail at
+    generation, the cheapest layer, not at boot as a KeepAlive crash-loop". Pointing the fleet at a
+    tree an operator edits IS a KeepAlive crash-loop generator: a `checkCliFreshness` refusal on a
+    dirty tree exits 1 (`self-sync.ts`; `main()` maps `refused` to `process.exit(1)`) into
+    `KeepAlive{SuccessfulExit:false}`, which is the ~16:09Z 2026-07-24 loop the feedback reports
+    with `LastExitStatus=256`. THE MISSING REFUSAL IS THE SAME SHAPE AS THE TWO THAT EXIST.
+
+    WHAT IS ALREADY CORRECT AND MUST NOT BE TOUCHED: `root` (the plist's `WorkingDirectory` and the
+    parent of `state/logs`) is `config.root`, NOT `repoRoot` — measured in this tree, `logDir =
+    join(opts.root, "state", "logs")` and `config.root` defaults to `join(homedir(), "Remudero")`.
+    The workspace root is already the right noun in the right place. ONLY THE BINARY PATH IS WRONG.
+  design: |
+    (i) THE BINARY COMES FROM THE INSTALL ROOT, and it is resolved ONCE at the call sites rather
+    than four times by hand: `join(resolveInstallRoot(config), "bin", "rmd")` (W1-T924's export).
+    All four generators get the same value or none does — a fleet where the daemon runs the install
+    and the console runs the operator tree is a third state nobody wants to debug.
+
+    (ii) THE REFUSAL BELONGS IN THE GENERATOR, NOT THE CALL SITE, for exactly the reason W1-T109
+    put the self-target gate there: a refusal at the call site can be bypassed by the next caller,
+    and a plist is a file that outlives the session that wrote it. The generators take the install
+    root and throw `LaunchdPlistError` when `rmdBin` does not resolve inside it — the same error
+    type, the same fail-at-generation posture, and the message must name the remedy (provision the
+    install checkout, then regenerate) rather than merely stating the mismatch.
+
+    (iii) THE ESCAPE HATCH MUST BE ARGUED, NOT ASSUMED. `--allow-self-target` is the existing model:
+    an explicit flag that bakes consent into the unit. A developer generating a unit for a scratch
+    checkout is a real case (that is how the mini got here), so decide EXPLICITLY whether an
+    equivalent opt-out exists, and if it does, whether the consent is baked into the unit the way
+    `--allow-self-target` is. PREFER A REFUSAL WITH NO OPT-OUT AS THE FLOOR and argue up from it;
+    do not add a flag because it feels symmetrical.
+
+    (iv) DEGRADE HONESTLY WHEN THE INSTALL DOES NOT EXIST YET. Generation must refuse and point at
+    the provisioning verb — never generate a unit whose `ProgramArguments[0]` does not exist,
+    because launchd's failure mode for a missing binary is a spawn error retried forever, which is
+    the crash-loop shape one level down from the one this fixes.
+
+    (v) NOT IN SCOPE: the resolver and provisioner themselves (W1-T924 owns them, and this task
+    consumes that export) · `launchdPlistPath`, the labels, `ThrottleInterval` or the
+    `EnvironmentVariables` allowlist · unloading/reloading anything · anything under `deploy/`
+    (that is the container path, which clones its own tree in `entrypoint.sh` and has never had
+    this defect).
+  acceptance:
+    - claim: "a generated unit's first program argument is the install checkout's `bin/rmd` no matter which directory the generator was invoked from"
+      proof: "unit test: test/launchd.test.ts"
+    - claim: "generating a unit whose binary path falls outside the install root is refused at generation, with the remedy named"
+      proof: "unit test: test/launchd.test.ts"
+    - claim: "all four units — daemon, serve, supervisor and digest — take the same install-derived binary, so no unit is left on the cwd-derived path"
+      proof: "unit test: test/launchd.test.ts"
+    - claim: "generation refuses when the install checkout does not exist rather than emitting a unit that points at a missing binary"
+      proof: "unit test: test/launchd.test.ts"
+    - claim: "the existing self-target consent gate, the ANTHROPIC-key assertion and the absolute-path assertions all still fire unchanged"
+      proof: "unit test: test/launchd.test.ts"
+  risk: high
+  origin: feedback#fb-1784913390318-1fcb63
+  plan_refs: ["§4A", "W1-T109", "W1-T924", "W1-T926"]
+  files: [src/lib/launchd.ts, src/run-task.ts, test/launchd.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    `depends_on: [W1-T924]` IS LOAD-BEARING, not bookkeeping: this task CONSUMES that task's
+    resolver export, and both declare `src/run-task.ts`, so `partitionByFileOverlap` would
+    serialise them anyway. Declaring the dependency makes the order intentional instead of
+    incidental.
+    risk:high is Rule 19's SPAN, not blast radius: `subsystemsOf` reads `files:` plus acceptance
+    text, this set crosses `src/` / `src/lib` / `test/`, and the acceptance text hits both the
+    `daemon` and `launchd` tags. Raised up front.
+    `test/launchd.test.ts` IS DECLARED AND THE REASON IS STRUCTURAL, not defensive: it is the suite
+    that pins the CURRENT generator contract, so it is the one that moves the moment a fifth
+    refusal exists. This is the recurring correction W1-T442/T443/T444/T445 each had to make after
+    filing — made up front here.
+    ACCEPTANCE WORDING AVOIDS THE HEADLESS LEXICON ON PURPOSE (Rule 18): every criterion is about
+    the TEXT this generator produces, which is a pure function of its arguments and assertable with
+    no live service anywhere. Anything that requires a real unit to be loaded is W1-T926's, and
+    that task is `verify: human` for exactly that reason.
+    THE MEASURED PRODUCTION READING (both services on
+    `/Users/craigoleyagent/Remudero/remudero/bin/rmd`) IS W1-T446's, DATED 2026-08-14 ON THE MINI,
+    and is quoted as provenance rather than as a current fact — re-derive it before building. The
+    four `const rmdBin = join(repoRoot, "bin", "rmd");` lines were read in this working tree at
+    triage.

@@ -9,6 +9,7 @@ import {
   DEFAULT_CLARIFY_POLICY,
   DEFAULT_SWEEP_POLICY,
   DISPOSITION_RULES,
+  actionableGateFailuresFromReasons,
   armedButStalled,
   checksStateFromRollup,
   deriveDisposition,
@@ -42,6 +43,7 @@ import {
   type StrikeAttempt,
   type SweepDeps,
   type SweepPolicy,
+  type SupersessionVerdict,
 } from "../src/lib/sweep.js";
 import type { CriterionVerdict } from "../src/lib/review.js";
 import { readLedgerLines } from "../src/lib/status.js";
@@ -373,6 +375,98 @@ test("deriveDisposition: a newer PR crediting the same task -> stale (superseded
   assert.match(r.reason, /superseded-by #99/);
 });
 
+// ── W1-T920 — the supersession disposition acts on a REASON, never on a match ──────────────────
+
+function supersededVerdict(over: Partial<SupersessionVerdict> = {}): SupersessionVerdict {
+  return {
+    status: "superseded",
+    evidence: {
+      supersedingPrNumber: 1969,
+      taskId: "W1-T908",
+      // The #1955 hand-diagnosis measured EXACTLY this shape: 131 raw lines, zero matched
+      // hunks, four symbols already on main — the corpus control the reason must carry.
+      diff: { rawLineCount: 131, matchedHunks: 0 },
+    },
+    detail: "trailer + diff read match #1969",
+    ...over,
+  };
+}
+
+test("W1-T920: the disposition is inert while its policy flag is off", () => {
+  // The off path must be BYTE-FOR-BYTE today's behaviour: a verdict present on the PR, with the
+  // flag at its shipped default (off), must change NOTHING — not the disposition, not the reason,
+  // not even which DISPOSITION_RULES row matched.
+  assert.equal(DEFAULT_SWEEP_POLICY.supersessionDisposalEnabled, false, "the flag defaults off");
+  const withVerdict = pr({ supersessionVerdict: supersededVerdict() });
+  const withoutVerdict = pr();
+  assert.deepEqual(
+    deriveDisposition(withVerdict, DEFAULT_SWEEP_POLICY, NOW),
+    deriveDisposition(withoutVerdict, DEFAULT_SWEEP_POLICY, NOW),
+    "a superseded verdict with the flag off must derive the identical disposition as no verdict at all",
+  );
+});
+
+test("W1-T920: a superseded verdict acts only with the flag on", () => {
+  const p = pr({ supersessionVerdict: supersededVerdict() });
+  const off = deriveDisposition(p, DEFAULT_SWEEP_POLICY, NOW);
+  assert.notEqual(off.disposition, "stale", "flag off: the verdict alone never closes anything");
+
+  const on: SweepPolicy = { ...DEFAULT_SWEEP_POLICY, supersessionDisposalEnabled: true };
+  const result = deriveDisposition(p, on, NOW);
+  assert.equal(result.disposition, "stale", "flag on + a superseded verdict: closes");
+  assert.match(result.reason, /#1969/);
+});
+
+test("W1-T920: an identical but unique pull request is never disposed", () => {
+  // The #1873/#1874 falsifier (DECISIONS.md, W1-T919's 2026-08-16 ruling): byte-identical
+  // titles, identical file lists, created 74 seconds apart — the one that merged was chosen by
+  // an ARGUED difference, never a match. A detector keyed on identity would have closed the
+  // better pull request. Two PRs sharing the SAME task id here (the closest this fixture shape
+  // can get to "identical in trailer and title and file list") must still be disposed however
+  // their OWN verdicts read, never by their resemblance to each other.
+  const on: SweepPolicy = { ...DEFAULT_SWEEP_POLICY, supersessionDisposalEnabled: true };
+  const uniqueTwin = pr({
+    prNumber: 1873,
+    taskId: "W1-T908",
+    supersessionVerdict: { status: "unique", detail: "argued distinct — not the same change" },
+  });
+  const result = deriveDisposition(uniqueTwin, on, NOW);
+  assert.notEqual(result.disposition, "stale", "a 'unique' verdict never closes, flag on or not");
+  assert.doesNotMatch(result.reason, /superseded/i);
+});
+
+test("W1-T920: an indeterminate verdict never closes anything", () => {
+  // Three-valued, not a falsy second value (design note iii): an unreadable answer is NOT a
+  // finding of uniqueness and must not be collapsed into one.
+  const on: SweepPolicy = { ...DEFAULT_SWEEP_POLICY, supersessionDisposalEnabled: true };
+  const indeterminate = pr({
+    supersessionVerdict: { status: "indeterminate", detail: "diff query errored — rate limited" },
+  });
+  assert.notEqual(deriveDisposition(indeterminate, on, NOW).disposition, "stale");
+
+  // Absent entirely (the real gateway today, per OpenPrView.supersessionVerdict's SCOPE note)
+  // behaves identically to indeterminate — the fail-open direction readLiveState's ok:false
+  // already uses elsewhere in this module.
+  assert.deepEqual(
+    deriveDisposition(indeterminate, on, NOW),
+    deriveDisposition(pr(), on, NOW),
+    "no verdict at all disposes exactly like an indeterminate one",
+  );
+});
+
+test("W1-T920: the disposition records its evidence and its corpus control", () => {
+  const on: SweepPolicy = { ...DEFAULT_SWEEP_POLICY, supersessionDisposalEnabled: true };
+  const result = deriveDisposition(pr({ supersessionVerdict: supersededVerdict() }), on, NOW);
+  assert.equal(result.disposition, "stale");
+  // The superseding PR + the shared task id — never a bare "superseded" label.
+  assert.match(result.reason, /#1969/);
+  assert.match(result.reason, /W1-T908/);
+  // The corpus control travels WITH the hunk finding (design note iv) — a bare hunk count alone
+  // cannot distinguish a genuinely empty diff from one whose read broke.
+  assert.match(result.reason, /131 raw line/);
+  assert.match(result.reason, /0 hunk/);
+});
+
 test("deriveDisposition: failing review with strikes exhausted -> blocked-ambiguous", () => {
   const r = deriveDisposition(strikesExhaustedPr(), DEFAULT_SWEEP_POLICY, NOW);
   assert.equal(r.disposition, "blocked-ambiguous");
@@ -417,6 +511,98 @@ test("deriveDisposition: failing review with unset criteriaRecoverable -> blocke
     "review failing with no actionable unmet criteria (contradictory) — escalating",
     "byte-identical to the pre-W1-T440 wording",
   );
+});
+
+// W1-T923: a review failure that NAMES its own remedy (a GATE failure, not an unmet acceptance
+// criterion) could never reach the fix rung, because the only route in was keyed on
+// `unmetCriteria`, and a gate failure leaves that list empty (the #1991 motivating case: 12/12
+// criteria `executed_pass`, `unmet_criteria: []`, yet the review still failed and named its own
+// fix). `actionableGateFailures` is the sibling list this task adds — see its own doc on
+// `OpenPrView` (lib/sweep.ts) for the full design.
+
+test("W1-T923: a gate failure with a named remedy routes to the fix rung", () => {
+  const p = pr({
+    reviewState: "failure",
+    checksState: "green",
+    unmetCriteria: [],
+    priorStrikes: 0,
+    actionableGateFailures: [{ reason: "DECISIONS.md must credit the operator, not the worker" }],
+  });
+  const r = deriveDisposition(p, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(r.disposition, "blocked-fixable");
+  assert.match(r.reason, /1 actionable gate failure/);
+  assert.match(r.reason, /named remedy/);
+});
+
+test("W1-T923: a remedy with two forms is never treated as actionable", () => {
+  // #1991's own falsifier: the provenance check accepted `Chosen (RECOMMENDED, auto)` OR an
+  // operator-attribution line, crediting different authors — a CHOICE between forms, which must
+  // be EXCLUDED from the actionable list entirely, never included-but-flagged.
+  assert.deepEqual(
+    actionableGateFailuresFromReasons(["credit via Chosen (RECOMMENDED, auto)", "credit via an operator-attribution line"]),
+    [],
+    "a two-form remedy is excluded outright",
+  );
+  // Sanity: the exclusion is specific to a CHOICE, not to naming a remedy at all — a single
+  // reason still produces exactly one actionable entry, carried through verbatim.
+  assert.deepEqual(
+    actionableGateFailuresFromReasons(["credit via Chosen (RECOMMENDED, auto)"]),
+    [{ reason: "credit via Chosen (RECOMMENDED, auto)" }],
+  );
+  // Sanity: zero named reasons (#1991's OWN ledger shape, `reasons: []`) is also excluded —
+  // nothing structured was named, so nothing is claimed to be.
+  assert.deepEqual(actionableGateFailuresFromReasons([]), []);
+});
+
+test("W1-T923: the recoverable field is untouched by the new list", () => {
+  // The exact combination design note (i) requires stay legible: unmetCriteria empty,
+  // criteriaRecoverable false (no Remudero-Task: trailer to resolve criteria from), AND a
+  // non-empty actionableGateFailures, all at once.
+  const p = pr({
+    taskId: undefined,
+    reviewState: "failure",
+    checksState: "green",
+    unmetCriteria: [],
+    criteriaRecoverable: false,
+    priorStrikes: 0,
+    actionableGateFailures: [{ reason: "credit via Chosen (RECOMMENDED, auto)" }],
+  });
+  const r = deriveDisposition(p, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(r.disposition, "blocked-fixable", "the actionable gate failure still routes to the fix rung");
+  assert.equal(p.criteriaRecoverable, false, "criteriaRecoverable's own VALUE is never touched by this list");
+  assert.doesNotMatch(r.reason, /unrecoverable/, "row 7's unrecoverable wording never fires once row 6 claims the PR");
+});
+
+test("W1-T923: a PR without the new list keeps its existing disposition", () => {
+  // Byte-identical to the pre-W1-T923 fixture/assertion at "failing review with NO actionable
+  // criteria -> blocked-ambiguous (contradictory)" — a PR that carries neither list must still
+  // land on row 7, unchanged, proving the new disjunct never widens what row 7 already claimed.
+  const p = pr({ reviewState: "failure", unmetCriteria: [], priorStrikes: 0 });
+  assert.equal(p.actionableGateFailures, undefined, "the fixture helper does not set this field by default");
+  const r = deriveDisposition(p, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(r.disposition, "blocked-ambiguous");
+  assert.equal(
+    r.reason,
+    "review failing with no actionable unmet criteria (contradictory) — escalating",
+    "byte-identical to the pre-W1-T923 wording",
+  );
+});
+
+test("W1-T923: the class field alone never decides actionability", () => {
+  // #1991 itself is classed `test_theater` — the class this design would otherwise treat as
+  // unautomatable — while naming its own single-form remedy. `OpenPrView` carries no
+  // `failure_class` field at all (design note v forbids keying on it), so this fixture proves
+  // the routing predicate qualifies the PR purely off `actionableGateFailures` being populated,
+  // with nothing resembling a classifier bucket anywhere in the input.
+  const p = pr({
+    reviewState: "failure",
+    checksState: "green",
+    unmetCriteria: [],
+    priorStrikes: 0,
+    actionableGateFailures: [{ reason: "test theater: added tests assert nothing, but the DECISIONS.md fix is X" }],
+  });
+  const r = deriveDisposition(p, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(r.disposition, "blocked-fixable", "a judgement-classed row with a named single-form remedy still qualifies");
 });
 
 test("deriveDisposition: in-flight (pending review, pending checks, not stale) -> blocked-ambiguous (the #161 fix — never armed pre-green)", () => {

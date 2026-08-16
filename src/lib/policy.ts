@@ -83,6 +83,13 @@ export interface PolicyValues {
     /** W1-T905: the RECURRENCE window (days) {@link PolicyValues.sweep.repairFilingThreshold}
      *  counts distinct-PR repairs within — see that field's doc. NET-NEW. */
     repairFilingWindowDays: number;
+    /** W1-T920: gates the SUPERSESSION disposition (lib/sweep.ts's `DISPOSITION_RULES`,
+     *  the `pr.supersessionVerdict.status === "superseded"` row) — DEFAULT OFF, copying
+     *  `armSessionPrs`'s own shape immediately above. See this field's plan/policy.yaml row
+     *  for why the off path is byte-for-byte today's behaviour and why turning it on still
+     *  changes nothing in production until a (separate, out-of-scope) detector populates
+     *  `OpenPrView.supersessionVerdict`. NET-NEW: no prior source literal ever gated this. */
+    supersessionDisposal: boolean;
   };
   drain: {
     max: number;
@@ -187,6 +194,7 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   "sweep.armSessionPrs": "net-new",
   "sweep.repairFilingThreshold": "net-new",
   "sweep.repairFilingWindowDays": "net-new",
+  "sweep.supersessionDisposal": "net-new",
   "drain.max": "lifted",
   "autoTriage.enabled": "net-new",
   "autoTriage.minIntervalMinutes": "net-new",
@@ -375,6 +383,7 @@ export function validatePolicy(raw: unknown): Policy {
   const armSessionPrs = booleanField("sweep.armSessionPrs", sweepRaw.armSessionPrs, origin);
   const repairFilingThreshold = numberField("sweep.repairFilingThreshold", sweepRaw.repairFilingThreshold, origin);
   const repairFilingWindowDays = numberField("sweep.repairFilingWindowDays", sweepRaw.repairFilingWindowDays, origin);
+  const supersessionDisposal = booleanField("sweep.supersessionDisposal", sweepRaw.supersessionDisposal, origin);
 
   const drainRaw = raw.drain;
   if (!isPlainObject(drainRaw)) throw new PolicyError("policy.yaml: 'drain' must be a mapping.");
@@ -435,6 +444,7 @@ export function validatePolicy(raw: unknown): Policy {
         armSessionPrs,
         repairFilingThreshold,
         repairFilingWindowDays,
+        supersessionDisposal,
       },
       drain: { max: drainMax },
       retro: { mergesThreshold: retroMergesThreshold, daysThreshold: retroDaysThreshold },

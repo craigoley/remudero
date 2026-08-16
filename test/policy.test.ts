@@ -110,6 +110,10 @@ function goodRaw(): Record<string, unknown> {
       // surface's repeated `sweep.disposed` rows — net-new, no prior source literal.
       repairFilingThreshold: { value: 3, origin: "net-new", min: 2, max: 15 },
       repairFilingWindowDays: { value: 7, origin: "net-new", min: 1, max: 30 },
+      // W1-T920: gates the supersession disposition — DEFAULT OFF, net-new (no prior source
+      // literal ever gated it; the detector that populates a verdict is a separate, out-of-scope
+      // shard).
+      supersessionDisposal: { value: false, origin: "net-new" },
     },
     drain: {
       max: { value: 10, origin: "lifted:src/lib/drain.ts:243 (DEFAULT_MAX)", min: 1, max: 100 },
@@ -493,6 +497,10 @@ test("every LIFTED field records origin=lifted:<source-site> — the net-new fie
     // to cite as either field's source.
     "sweep.repairFilingThreshold",
     "sweep.repairFilingWindowDays",
+    // W1-T920: `sweep.supersessionDisposal` joins them too — no prior literal ever gated
+    // closing a PR off a supersession verdict; the disposition and the verdict shape are
+    // both net-new.
+    "sweep.supersessionDisposal",
   ]);
   const liftedPaths = Object.keys(p.origin).filter((path) => !NET_NEW.has(path));
   assert.ok(liftedPaths.length > 0);

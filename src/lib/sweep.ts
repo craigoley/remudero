@@ -146,6 +146,67 @@ export type Disposition =
   | "wait";
 
 /**
+ * W1-T920 — a THREE-VALUED finding (design note iii): "unreadable" is a distinct outcome, never
+ * collapsed into "unique". Only `"superseded"` may ever gate a close — see
+ * {@link OpenPrView.supersessionVerdict} and the `DISPOSITION_RULES` row it feeds.
+ *
+ *   - `"superseded"`  — another PR (open or merged) already covers this PR's task; evidence is
+ *     REQUIRED (see {@link SupersessionEvidence}) — "superseded" alone is unauditable.
+ *   - `"unique"`      — the trailer/diff read completed and found no supersession. Distinct from
+ *     "indeterminate": this is a POSITIVE finding, not a default.
+ *   - `"indeterminate"` — the read itself failed or was inconclusive (a trailer scan threw, a diff
+ *     query errored, a merged-by-trailer lookup was rate-limited, or the diff read back EMPTY with
+ *     no corpus control to trust — design note iv). Behaves exactly like `"unique"` for the
+ *     disposition (never acts), but is named separately so a caller can tell "checked, none found"
+ *     from "could not check" — the same fail-open direction `readLiveState`'s `ok:false` already
+ *     uses elsewhere in this module.
+ */
+export type SupersessionStatus = "superseded" | "unique" | "indeterminate";
+
+/**
+ * W1-T920 (design note iv) — the diff finding carries its OWN corpus control. A diff read that
+ * comes back with zero hunks is indistinguishable, from the hunk count ALONE, from a diff read
+ * that broke and returned nothing — the #1955 hand-diagnosis measured exactly this shape (131
+ * lines, zero hunks, four symbols already on main). `rawLineCount` is the control: a verdict
+ * built from a zero-length raw read must never claim `"superseded"` — see the DISPOSITION_RULES
+ * row's own doc for how a detector is expected to enforce this before ever setting `status`.
+ */
+export interface SupersessionDiffFinding {
+  /** Total diff lines the read observed, BEFORE any hunk matching — the corpus control. */
+  rawLineCount: number;
+  /** Hunks matched against symbols already present on the superseding PR/task. */
+  matchedHunks: number;
+}
+
+/**
+ * W1-T920 (design note v) — the evidence a `"superseded"` verdict NAMES, never a bare label.
+ * This is what made the #1955 diagnosis checkable in one read: the superseding PR number, the
+ * shared task id, and the diff finding with its own control, together in one place.
+ */
+export interface SupersessionEvidence {
+  /** The PR (open or merged) whose work already covers this PR's task. */
+  supersedingPrNumber: number;
+  /** The plan task both PRs share — the trailer this verdict was matched on. */
+  taskId: string;
+  diff: SupersessionDiffFinding;
+}
+
+/**
+ * W1-T920 — one open PR's supersession finding, read (never computed) by the disposition. See
+ * {@link OpenPrView.supersessionVerdict}'s own doc for the honest scope note: the DETECTOR that
+ * populates this is a separate, out-of-scope shard (this task's own design note, "WHAT MUST NOT
+ * BE BUILT") — this type and the disposition row that reads it are the full wired MECHANISM,
+ * unit-tested against caller-supplied verdicts, but nothing in the real gateway sets one yet.
+ */
+export interface SupersessionVerdict {
+  status: SupersessionStatus;
+  /** REQUIRED when `status === "superseded"`; absent otherwise. */
+  evidence?: SupersessionEvidence;
+  /** Human-legible explanation, always present — e.g. why a read came back indeterminate. */
+  detail: string;
+}
+
+/**
  * One failing required CI check's name + the tail of its log — the W1-T94
  * ci-log fix mode's ONLY input. Defined HERE (not in run-task.ts, which
  * imports it) because {@link OpenPrView} carries it and run-task.ts already
@@ -350,6 +411,17 @@ export interface SweepPolicy {
   /** W1-T905 — the RECURRENCE WINDOW (days) {@link repairFilingThreshold} counts distinct-PR
    *  repairs within. See {@link dueRepairFilings}. */
   repairFilingWindowDays: number;
+  /**
+   * W1-T920 — gates the SUPERSESSION disposition row in {@link DISPOSITION_RULES}: with this
+   * `false` (the default), `OpenPrView.supersessionVerdict` is never consulted and the row never
+   * matches, byte-for-byte today's behaviour, no matter what a verdict says. `true` lets a
+   * `"superseded"` verdict (never a bare "unique"/"indeterminate" one, and never the PR's own
+   * resemblance to another) close the PR. A ROW in this table, not a special-cased read outside
+   * it (unlike `sweep.armSessionPrs`, which gates an ARM task-id resolution rather than a
+   * disposition): this flag governs exactly the same kind of threshold `staleDays` already does
+   * for the row immediately below it, so it lives beside it.
+   */
+  supersessionDisposalEnabled: boolean;
 }
 
 /**
@@ -409,7 +481,21 @@ export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
   reviewOrphanCap: 2,
   repairFilingThreshold: POLICY_SWEEP.repairFilingThreshold,
   repairFilingWindowDays: POLICY_SWEEP.repairFilingWindowDays,
+  supersessionDisposalEnabled: POLICY_SWEEP.supersessionDisposal,
 };
+
+/**
+ * W1-T923 — one GATE failure (never an unmet acceptance criterion — see
+ * {@link OpenPrView.actionableGateFailures}'s own doc) whose remedy is a SINGLE,
+ * unambiguous form, so the fix rung can act on it directly. `reason` is carried
+ * VERBATIM from the ledger's structured `reasons` array (the SAME array
+ * {@link CriterionVerdict.reason} is built from for an unmet criterion) — never
+ * parsed out of `failure_reason` prose (design note vi: structured, or honestly
+ * absent, never a regex over free text presented as robust).
+ */
+export interface ActionableGateFailure {
+  reason: string;
+}
 
 /**
  * One open PR's OBSERVED state, as the sweep sees it — the input to the pure
@@ -478,10 +564,63 @@ export interface OpenPrView {
    * meaning would read as silently crediting an unattributed PR, which #1527 forbids.
    */
   criteriaRecoverable?: boolean;
+  /**
+   * W1-T923 — a SIBLING list to {@link unmetCriteria}, never a widening of it. The motivating
+   * gap: PR #1991 failed review with `unmet_criteria: []` (every acceptance criterion passed,
+   * 12/12 `executed_pass`) yet its `failure_reason` named the exact remedy — a GATE failure,
+   * not an unmet criterion, so both `blocked-fixable` rows below (`unmetCriteria.length > 0` /
+   * `isBlockedCi`) missed it and it fell to row 7's escalate-only "criteria unrecoverable/
+   * contradictory", where NOTHING about the named remedy is ever read. This list is what a
+   * gate failure's OWN structured remedy populates instead.
+   *
+   * ONE ENTRY PER GATE FAILURE WITH A SINGLE-FORM REMEDY ONLY (design note iv): a remedy that
+   * offers a CHOICE between forms (#1991's own falsifier — the provenance check accepted either
+   * `Chosen (RECOMMENDED, auto)` OR an operator-attribution line, crediting different authors) is
+   * EXCLUDED from this list entirely, never included-but-flagged — a worker picking the wrong one
+   * of several named options misattributes a ratified ruling, which is worse than asking a human.
+   *
+   * NEVER KEYED ON `failure_class` (design note v): PR #1991 is classed `test_theater` — the
+   * class this design would otherwise treat as unautomatable — while its `failure_reason` names
+   * two exact strings; keying on that field alone mis-sorts the very case this list exists for.
+   * Whatever populates this list must key on the STRUCTURED presence of a single-form remedy,
+   * never on which bucket the classifier sorted the failure into.
+   *
+   * `criteriaRecoverable` (immediately above) is DELIBERATELY untouched by this field's own
+   * producer — a PR can carry `unmetCriteria: []`, `criteriaRecoverable: false` (no trailer to
+   * resolve criteria from) AND a non-empty `actionableGateFailures` all at once; that combination
+   * stays legible rather than being collapsed into one signal (design note i).
+   *
+   * `[]`/undefined when no gate failure named a single-form remedy — DISPOSITION_RULES' row 7
+   * (blocked-ambiguous, "no actionable unmet criteria") stays byte-identical for every PR that
+   * does not carry this list (design note iii).
+   */
+  actionableGateFailures?: ActionableGateFailure[];
   /** Fix-rung strikes ALREADY attempted for this PR (from the ledger). */
   priorStrikes: number;
   /** A NEWER open PR crediting the same task supersedes this one. */
   supersededBy?: number;
+  /**
+   * W1-T920 — a {@link SupersessionVerdict} for this PR, gated behind
+   * `policy.supersessionDisposalEnabled` (default OFF) in `DISPOSITION_RULES`'s supersession row.
+   * Distinct from {@link supersededBy} immediately above: that field is a bare NUMBER, matched
+   * unconditionally (no policy gate) purely on "a newer open PR shares this task's trailer" — the
+   * kind of IDENTITY match design note (ii) forbids relying on alone (the #1873/#1874 falsifier:
+   * byte-identical titles and file lists, the better one decided by an ARGUED difference, never a
+   * match). This field instead carries a REASON — evidence a detector is expected to have
+   * verified before ever claiming `"superseded"` — and the row it feeds reads ONLY `status`,
+   * never any of the PR's own fields, so two PRs identical in every OTHER respect are still
+   * disposed however their OWN verdicts read.
+   *
+   * SCOPE (honest, mirrors how `pendingAnswer`/`isPlanFiling` shipped their mechanism ahead of
+   * their producer): this field, {@link SupersessionVerdict}, and its `DISPOSITION_RULES` row are
+   * the full MECHANISM, wired end-to-end and unit-tested here — but nothing in `run-task.ts`
+   * populates it yet. THE DETECTOR (a trailer scan + diff comparison, per design note (iv)'s
+   * corpus-control requirement) is a SEPARATE, out-of-scope shard (this task's own design note,
+   * "WHAT MUST NOT BE BUILT") — `supersessionVerdict` is therefore always `undefined` in the real
+   * gateway today, so `sweep.supersessionDisposal` being ON changes nothing in production until
+   * that detector lands and wires a producer here. See `KNOWN_UNWIRED` (lib/producer-completeness.ts).
+   */
+  supersessionVerdict?: SupersessionVerdict;
   /** ISO-8601 timestamp of the PR's last activity (for the stale window). */
   lastActivityAt: string;
   /** The head commit sha — keys fix-dispatch idempotence (a new push re-earns a strike). */
@@ -929,6 +1068,29 @@ const MS_PER_DAY = 86_400_000;
  */
 export function isBlockedCi(pr: OpenPrView): boolean {
   return pr.checksState === "red";
+}
+
+/**
+ * W1-T923 (design note iv) — given the STRUCTURED `reasons` a gate failure's ledger row
+ * carried, decide whether it names a SINGLE, unambiguous remedy. Exactly one reason is one
+ * automatable form and is copied through VERBATIM (never re-derived); zero or TWO-OR-MORE
+ * reasons are excluded entirely — a remedy offering a CHOICE between forms (the #1991
+ * falsifier: the provenance check accepted `Chosen (RECOMMENDED, auto)` OR an
+ * operator-attribution line, crediting different authors) must be EXCLUDED from the
+ * actionable list, not merely flagged inside it, because a worker acting on the wrong one
+ * of several named options misattributes a ratified ruling — the file where a false claim
+ * does the most damage.
+ *
+ * PURE AND EXPORTED so the "single form vs a choice" predicate has its OWN direct test
+ * coverage, never only indirectly through the wider routing pipeline —
+ * `run-task.ts`'s `actionableGateFailuresFromLedger` is the ONLY caller, mapping the
+ * ledger's raw `reasons` array through this before it ever reaches
+ * {@link OpenPrView.actionableGateFailures}. Reads NOTHING about `failure_class` — it never
+ * even sees it — so a judgement-classed row (`test_theater`, the class #1991 itself carries)
+ * qualifies exactly the same as any other, by construction (design note v).
+ */
+export function actionableGateFailuresFromReasons(reasons: readonly string[]): ActionableGateFailure[] {
+  return reasons.length === 1 ? [{ reason: reasons[0] }] : [];
 }
 
 /**
@@ -1410,6 +1572,16 @@ function reviewPendingIsStale(pr: OpenPrView, policy: SweepPolicy, now: number):
  * {@link SweepPolicy} or a row here, with ZERO change to {@link deriveDisposition}
  * (acceptance 3):
  *
+ *   0. VERDICT-SUPERSEDED (W1-T920, DECISIONS.md #1987) — `policy.supersessionDisposalEnabled`
+ *      is on AND `pr.supersessionVerdict.status === "superseded"` -> close, reason naming the
+ *      verdict's own evidence (superseding PR + task id + diff finding). ORDERED FIRST, ahead of
+ *      row 1's bare `supersededBy` match, because a REASON-bearing verdict is the more precise
+ *      finding when both are present. Reads ONLY `status` — never the PR's own title/trailer/file
+ *      list — so two PRs identical in every other respect are disposed however their OWN verdicts
+ *      read (the #1873/#1874 falsifier design note (ii) names). DEFAULT OFF, and with no producer
+ *      yet setting `supersessionVerdict` in the real gateway (a separate, out-of-scope detector
+ *      shard), this row never matches in production regardless of the flag — see
+ *      `OpenPrView.supersessionVerdict`'s own SCOPE note.
  *   1. SUPERSEDED  — a newer PR credits the same task: close regardless of review.
  *   2. STALE       — no activity in >= policy.staleDays: abandoned, close.
  *   3. ANSWERED (W1-T78) — an operator answered a clarification question AND the
@@ -1439,7 +1611,10 @@ function reviewPendingIsStale(pr: OpenPrView, policy: SweepPolicy, now: number):
  *      there if IT still fails. FIX FIRST: this PR reaches the question rung
  *      (row 11) only by exhausting the ladder through row 4, never straight here.
  *   6. FAILING + actionable unmet criteria, strikes left -> blocked-fixable (fix rung).
- *      Only reached with checks NOT red (row 5 above already claimed that case).
+ *      Only reached with checks NOT red (row 5 above already claimed that case). W1-T923:
+ *      ALSO matches a GATE failure (empty unmetCriteria) that named its own single-form
+ *      remedy via {@link OpenPrView.actionableGateFailures} — a third disjunct, never a
+ *      separate row (see that field's own doc for the #1991 motivating case).
  *   7. FAILING + no actionable criteria (contradictory)  -> blocked-ambiguous (escalate).
  *   7.5. CONFLICTED (W1-T106, the #170 DIRTY strand): `mergeState === "dirty"`
  *      — ABOVE mergeable, so a conflicting PR is NEVER armed no matter how
@@ -1509,6 +1684,32 @@ function reviewPendingIsStale(pr: OpenPrView, policy: SweepPolicy, now: number):
  * speak to it directly.
  */
 export const DISPOSITION_RULES: readonly DispositionRule[] = [
+  {
+    // W1-T920 (DECISIONS.md #1987, the 2026-08-16 ruling) — ROUTED THROUGH THE EXISTING "stale"
+    // disposition, never a new one: `runSweep`'s "stale" case already closes via `deps.close`
+    // (the SAME effect W1-T921 already made reversible — no `--delete-branch`, see that call
+    // site's own comment) and already writes ONE `sweep.disposed` ledger row (design note vii —
+    // "no new ledger step without a named reader"). This is a NEW ROW, not a change to the
+    // existing `supersededBy` row immediately below: that row matches on a bare NUMBER
+    // (unconditional, no policy gate); this one matches on a REASON-bearing verdict, gated
+    // behind `policy.supersessionDisposalEnabled` (default OFF), and reads NOTHING about the
+    // PR itself besides `status` — never title, trailer, or file list (design note ii, the
+    // #1873/#1874 falsifier). `"unique"` and `"indeterminate"` are BOTH inert here: an
+    // unreadable verdict must never be treated as a finding (design note iii).
+    disposition: "stale",
+    when: (pr, policy) => policy.supersessionDisposalEnabled === true && pr.supersessionVerdict?.status === "superseded",
+    // Guards `evidence` defensively (never a `!` assertion) even though `when` above already
+    // requires `status === "superseded"`: a malformed verdict must degrade to a legible reason,
+    // never throw and abort the whole sweep pass over one bad producer.
+    reason: (pr) => {
+      const ev = pr.supersessionVerdict?.evidence;
+      if (!ev) return `superseded — but the verdict carried no evidence (${pr.supersessionVerdict?.detail ?? "malformed verdict"})`;
+      return (
+        `superseded by #${ev.supersedingPrNumber} (task ${ev.taskId}) — diff: ${ev.diff.matchedHunks} hunk(s) ` +
+        `over ${ev.diff.rawLineCount} raw line(s) [corpus control]`
+      );
+    },
+  },
   {
     disposition: "stale",
     when: (pr) => pr.supersededBy != null,
@@ -1592,10 +1793,22 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // red `remudero-review` alone (checksStateFromRollup excludes it from the
     // checks gate), so a checks-green PR whose review is failing lands here
     // instead of being claimed by row 5 above.
+    //
+    // W1-T923: a THIRD disjunct, never a new rule (design note iii) — a GATE failure (empty
+    // `unmetCriteria`) that named its own single-form remedy routes here exactly like a
+    // criterion failure does, via `actionableGateFailures` (see that field's own doc). This is
+    // the ONLY change to this row: when `unmetCriteria` is non-empty the `when`/`reason` below
+    // are byte-identical to before this task, and a PR that carries neither list still falls
+    // through to row 7 unchanged.
     disposition: "blocked-fixable",
-    when: (pr) => pr.reviewState === "failure" && pr.unmetCriteria.length > 0,
-    reason: (pr, policy) =>
-      `${pr.unmetCriteria.length} unmet criteri${pr.unmetCriteria.length === 1 ? "on" : "a"} — strike ${pr.priorStrikes + 1}/${policy.strikeCap}`,
+    when: (pr) => pr.reviewState === "failure" && (pr.unmetCriteria.length > 0 || (pr.actionableGateFailures?.length ?? 0) > 0),
+    reason: (pr, policy) => {
+      if (pr.unmetCriteria.length > 0) {
+        return `${pr.unmetCriteria.length} unmet criteri${pr.unmetCriteria.length === 1 ? "on" : "a"} — strike ${pr.priorStrikes + 1}/${policy.strikeCap}`;
+      }
+      const n = pr.actionableGateFailures!.length;
+      return `${n} actionable gate failure${n === 1 ? "" : "s"} (named remedy) — strike ${pr.priorStrikes + 1}/${policy.strikeCap}`;
+    },
   },
   {
     // W1-T440: the SAME empty (`pr.unmetCriteria` is `[]`) has two distinct causes, and the

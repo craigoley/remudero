@@ -1,0 +1,172 @@
+- id: W1-T924
+  title: "THE INSTALL IS A NOUN THE CODE NEVER RESOLVES — `deployRunCommand` passes `installPath: repoRoot` (src/run-task.ts), so the supervisor ff-only-pulls WHATEVER CHECKOUT IT WAS INVOKED FROM, which on the mini is the operator's WIP tree: give the install its own checkout, written ONLY by the supervisor, and resolve it from config rather than from cwd"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: |
+    FILED FROM fb-1784913390318-1fcb63 (2026-07-24, origin cli). THE STRUCTURAL HALF OF THAT
+    FILING IS UNOWNED BY ANY QUEUED TASK, and the plan says so in writing: W1-T907's design (vii)
+    lists "the dedicated install-checkout structural fix (fb-1784913390318-1fcb63)" among the things
+    it explicitly does NOT do. The three mitigations the feedback names as landing separately —
+    the runtime-artifact gitignore, land-on-capture (W1-T243/#599) and the W1-T191 DECISIONS.md
+    bridge — all shrink the DIRT. None of them makes the daemon stop running from the tree the
+    operator is editing.
+
+    THE DEFECT, QUOTED FROM SOURCE, read in this tree at triage:
+      `src/run-task.ts`, deployRunCommand:  `installPath: repoRoot,`
+      `src/lib/deployer.ts`:                `const git = (args) => exec("git", ["-C", o.installPath, ...args]);`
+      `src/lib/deployer.ts`, the field doc: `/** The daemon's git checkout to fast-forward (its install path / repoRoot). */`
+    `repoRoot` is `resolveRepoRoot(process.argv.slice(2), process.cwd())` — `git rev-parse
+    --show-toplevel` of wherever the supervisor's unit happened to be pointed. THE DOC-COMMENT
+    ITSELF SPELLS THE CONFLATION OUT (`its install path / repoRoot`): two different nouns joined
+    by a slash, and nothing anywhere resolves the first one.
+
+    AND THE PROSE ALREADY DESCRIBES THE THING THAT DOES NOT EXIST. `docs/deploy-supervisor.md`
+    says the supervisor runs "the exact manual redeploy — fast-forward the daemon's checkout",
+    reports failures against "the install", and tells the operator "the install has already been
+    rolled back". Every one of those sentences presumes a checkout that is the daemon's and
+    nobody else's. THE REPO HAS BEEN DOCUMENTING AN INSTALL CHECKOUT IT NEVER BUILT.
+
+    WHAT THE SHARING COSTS, in three measured failure modes rather than one:
+      1. THE DEPLOY ABORTS. `treeFfSafe` intersects dirty paths with the incoming diff and returns
+         `dirty-tree-conflict` BEFORE `pullFf` — W1-T443's shard quotes the live row verbatim
+         ("locally-modified files conflict with the fast-forward: src/lib/worker.ts,
+         src/run-task.ts"). Operator scratch grounded the deploy three times on 07-23/24 per the
+         feedback.
+      2. THE DAEMON CRASH-LOOPS ON ITS OWN EXHAUST. `checkCliFreshness` refuses on a dirty tree at
+         CLI ENTRY, and `main()` turns any `refused` into `process.exit(1)` — stated in
+         `src/lib/self-sync.ts`'s own W1-T452 comment ("`main()` turns any `refused` into
+         `process.exit(1)`, so every subsequent verb died IN THE PLACE THE WORKER WAS TOLD TO
+         WORK"). `generateLaunchdPlist` writes `KeepAlive{SuccessfulExit:false}`, so exit 1 is
+         restarted forever. The feedback reports exactly that from ~16:09Z 2026-07-24 with
+         `LastExitStatus=256` (= 1 << 8). THE AUTOMATION WAS DOWN, NOT SLOW — five consecutive PRs
+         needed hand-clearing.
+      3. THE SUPERVISOR CANNOT EVEN ASK THE RIGHT QUESTION. fb-1784766956423-6635d1 (status:
+         rejected) already found that `decideDeployTrigger` reads `installHead` from the checkout,
+         so a hand-pulled checkout equalises `checkout == origin` and reports "up-to-date" while
+         the long-lived process still runs pre-pull code. A DEDICATED INSTALL CHECKOUT IS THE
+         PRECONDITION FOR THAT COMPARISON MEANING ANYTHING, because it is the only tree whose head
+         nobody but the supervisor moves.
+
+    WHAT IS ALREADY CLOSED AND MUST NOT BE RE-LITIGATED HERE, measured in this tree:
+      - `state/` AND `plan/questions.ndjson` ARE ALREADY GITIGNORED (`.gitignore`, the W1-T256
+        block, alongside `.claude/`), and `generateLaunchdPlist` already derives its log directory
+        from `join(opts.root, "state", "logs")` where `root` is `config.root` — whose default is
+        `join(homedir(), "Remudero")`, the PARENT of the checkout. So the "route exhaust to state/
+        outside any repo tree" clause is MOSTLY ALREADY TRUE BY DEFAULT. What is missing is the
+        INVARIANT: nothing refuses a config that puts the state root back inside the install tree,
+        and that is the clause this task owns (design (iv)).
+      - `checkServiceFreshness` NO LONGER COUNTS UNTRACKED FILES — it reads `git status --porcelain
+        -uno`, and its comment explains the alignment with `deploy/entrypoint.sh` at length. The
+        feedback's "counts untracked files" reading applies to `checkCliFreshness`, the OTHER
+        function, whose unscoped dirty check is W1-T446's scope (verify:human) and is NOT touched
+        here.
+  design: |
+    (i) SCOPE — ONE RESOLVED NOUN AND ITS PROVISIONER. A new module (`src/lib/install-root.ts`)
+    owns: resolving the install root, deciding whether it is fit to deploy into, and provisioning
+    it. `src/run-task.ts` changes at ONE line of substance — `deployRunCommand` passes the resolved
+    install root instead of `repoRoot` — plus the registration of the provisioning verb. THE
+    LAUNCHD UNITS ARE W1-T925's, DELIBERATELY: every plist generator bakes
+    `join(repoRoot, "bin", "rmd")` and that is a separate refusal with its own suite.
+
+    (ii) THE DEFAULT MUST BE DERIVED, NEVER A HARDCODED ABSOLUTE PATH. `config.ts` already sets
+    that precedent twice in its own comments ("Derived from `config.root`, NEVER a hardcoded
+    absolute path (public-repo hygiene)"). So: `config.installRoot ?? join(config.root,
+    "daemon-install")`, with the Config type carrying the optional field. The feedback's
+    `~/Remudero/daemon-install` is exactly that default on the mini and must not be written down
+    as a literal.
+
+    (iii) PROVISION-OR-REFUSE, NEVER DEPLOY-INTO-WHATEVER-IS-THERE. The verb (`rmd
+    install-checkout`, printing by default and acting under `--write`, mirroring `daemon-plist`'s
+    W1-T12d boundary) must handle four states explicitly and say which it found:
+      ABSENT      -> clone origin/main into it.
+      HEALTHY     -> a clean checkout on `main` whose HEAD is an ancestor of origin/main: ff-only
+                     to origin/main, nothing else.
+      DIRTY/OFF   -> dirty, detached, on another branch, or carrying a commit origin/main does not
+                     have: REFUSE, name the state, mutate NOTHING. The install checkout is the one
+                     tree in the system where a local edit is a BUG, so a refusal is a real signal
+                     and a `reset --hard` would destroy the evidence of how it got there.
+      NOT-A-REPO  -> a non-empty directory that is not a git checkout: refuse, never rm -rf.
+    A CLONE IS PREFERRED OVER A LINKED WORKTREE and the reason is measured: `checkCliFreshness`
+    now returns `{status: "worktree"}` for any linked worktree (W1-T452/#1731) and skips both
+    refusals AND the sync, so an install-as-worktree would be a tree the freshness path silently
+    declines to reason about. A clone also cannot be moved by anything happening in the operator's
+    `.git`.
+
+    (iv) THE SEPARATION INVARIANT IS THE PART A TEST CAN ACTUALLY HOLD. Resolution must REFUSE
+    when the resolved state root is inside the install root, or when the install root is inside a
+    checkout the operator writes (including "install root == repoRoot", which is today's
+    production configuration). That single predicate is what makes "the install tree is clean by
+    construction" a checkable property rather than an aspiration, and it is the clause that stops
+    a future artifact writer from re-creating this defect one file at a time.
+
+    (v) MIGRATION IS A FIRST-CLASS OUTPUT, NOT A README LINE. The mini is running the shared
+    configuration TODAY, so the verb's default (no `--write`) output must print the exact sequence
+    for an existing install: provision, then regenerate the units (W1-T925), then reload them. It
+    must NOT attempt the reload itself — loading a unit stays the operator's action (W1-T12d).
+
+    (vi) FAIL SAFE, NOT FAIL FAST, ON THE DEPLOY PATH. If the install root cannot be resolved or
+    is unfit, `deploy-run` must NO-OP WITH A NAMED REASON and leave the running daemon alone. It
+    must never fall back to `repoRoot` — a silent fallback restores the exact defect under a new
+    name, and the whole point is that a WIP tree can never ground the fleet.
+
+    (vii) EXPLICITLY NOT IN SCOPE: `checkCliFreshness`'s dirty predicate (W1-T446 owns it,
+    verify:human) · the `rmd sync` verb (W1-T907) · the plist generators (W1-T925) · the live
+    drill (W1-T926) · `describeFailureKind` / the DEPLOY_FAILED row (W1-T443) · un-ignoring
+    anything in `.gitignore` · moving `state/`, whose default already sits outside the checkout.
+  acceptance:
+    - claim: "the deploy cycle fast-forwards the RESOLVED install root, never the checkout the command was invoked from"
+      proof: "unit test: test/install-root.test.ts"
+    - claim: "an install root that is absent is provisioned as a clean clone, and one that is dirty, off-main or diverged is refused with the state named and nothing mutated"
+      proof: "unit test: test/install-root.test.ts"
+    - claim: "a configuration whose state root resolves INSIDE the install root, or whose install root equals the operator checkout, is refused rather than silently accepted"
+      proof: "unit test: test/install-root.test.ts"
+    - claim: "arbitrary dirt in the operator checkout — untracked, tracked-modified, or a feature branch — changes neither the resolved install root nor the deploy decision"
+      proof: "unit test: test/install-root.test.ts"
+    - claim: "an unresolvable or unfit install root makes the deploy cycle a no-op with a named reason and never falls back to the invoking checkout"
+      proof: "unit test: test/install-root.test.ts"
+    - claim: "the resolver is actually wired into the deploy path rather than exported unused"
+      proof: "grep: resolveInstallRoot( in src/run-task.ts"
+  risk: high
+  origin: feedback#fb-1784913390318-1fcb63
+  plan_refs: ["§4A", "W1-T79", "W1-T443", "W1-T446", "W1-T907", "W1-T925", "W1-T926"]
+  files: [src/lib/install-root.ts, src/lib/config.ts, src/run-task.ts, test/install-root.test.ts, docs/cli-reference.md]
+  status: queued
+  attempts: 0
+  note: |
+    verify:auto, and the contrast with W1-T446 is deliberate. That task is verify:human because it
+    RELAXES a safety guard. This one relaxes nothing: it gives an existing operation a correctly
+    resolved target, and every branch of it is a refusal or a no-op that a test can falsify against
+    real repos. The operator asked for this structure in writing, with acceptance criteria.
+    risk:high is Rule 19's SPAN, not blast radius: `subsystemsOf` reads `files:` plus acceptance
+    text and this set crosses `src/`, `src/lib`, `test/` and `docs/`, and the acceptance text hits
+    the `daemon` tag. Raised up front — the W1-T400/W1-T407 lesson.
+    `docs/cli-reference.md` IS DECLARED because it is GENERATED from the COMMANDS registry
+    (`scripts/generate-cli-reference.mjs`, W1-T47) and committed — adding a verb without
+    regenerating it leaves the checked-in file stale (the W1-T907 precedent).
+    `src/run-task.ts` IS DECLARED AND THE COST IS ACKNOWLEDGED: W1-T490's shard refuses to declare
+    it because it serialises against every other task naming it (`partitionByFileOverlap`,
+    W1-T471). It is unavoidable here — the defective line and the verb registry both live there —
+    and W1-T925 declares it too, which is why that task carries `depends_on: [W1-T924]` rather than
+    racing this one.
+    `src/lib/deployer.ts` IS DELIBERATELY ABSENT. `DeployDeps` ALREADY takes `installPath` as an
+    injected option; the defect is entirely in what the CALLER passes. If the implementation finds
+    it must change deployer.ts, that is a scope-guard flag and a re-file — W1-T443 is queued
+    against that module and `inverseScopeUntouchedFiles` fails a declared-but-untouched path just
+    as `scopeViolationFiles` fails an undeclared one.
+    THE FALSIFIER MUST DRIVE REAL GIT REPOS (a real origin, a real install clone, a real operator
+    checkout), as `test/self-sync.test.ts` and `scripts/recovery-drill.mjs` both already do —
+    `recovery-drill.mjs` builds exactly this fixture shape today (`installDir = join(dir,
+    "install")`, cloned from a real origin and reset one commit behind). A separation proven only
+    against a stubbed git runner would pass while the real `-C <path>` still pointed at the
+    operator's tree, which is the defect one level down.
+    AND ASSERT THE REFS, NOT THE STATUS: after a cycle, the INSTALL head must have advanced and the
+    OPERATOR head must be byte-for-byte where it was, dirt included. A test that only checks
+    `reason !== "dirty-tree-conflict"` passes for an implementation that cleaned the wrong tree.
+    NO DATE, SHA OR COUNT HERE SHOULD BE QUOTED FORWARD: the three groundings, the ~16:09Z
+    crash-loop and `LastExitStatus=256` are the FEEDBACK's observations of 2026-07-23/24 on the
+    mini; the source quotes were read in this working tree at triage and must be re-derived before
+    building.
