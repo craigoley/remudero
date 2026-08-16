@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { LiveWriteBlockedError, withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { classifyUpdateBranchFailure, updateBranchViaGh } from "../src/run-task.js";
 import { test } from "node:test";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -3180,4 +3182,83 @@ test("runSweep: dryRun takes no update-branch effect and leaves no ledger trace"
   );
   assert.deepEqual(calls, []);
   assert.equal(rows.filter((r) => String(r.step).startsWith("sweep.update_branch")).length, 0);
+});
+
+// ── W1-T528: the update-branch leaf, and why it needed its own coverage ──────────────────
+//
+// `updateBranchViaGh` and `classifyUpdateBranchFailure` (both run-task.ts) shipped with every
+// sweep-side test injecting a fake `updateBranch` dep, so the REAL leaf — its guard, its
+// `execFileSync`, and its catch arm — was reached by nothing. That is the seam-default gap
+// CLAUDE.md names: when every test supplies its own fake, the default implementation and each
+// catch arm are unreachable, and diff-coverage blocks on exactly those lines.
+//
+// These drive the real leaf through a PATH-shimmed `gh`, so "the command ran" and "the command
+// did NOT run" are both evidence on disk rather than assumptions.
+
+function shimGh(script: string): { dir: string; log: string; restore: () => void } {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-t528-gh-"));
+  const log = join(dir, "calls.log");
+  writeFileSync(
+    join(dir, "gh"),
+    ["#!/bin/sh", `printf '%s\\n' "$*" >> ${JSON.stringify(log)}`, script, ""].join("\n"),
+    { mode: 0o755 },
+  );
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${dir}:${oldPath}`;
+  return { dir, log, restore: () => void (process.env.PATH = oldPath) };
+}
+
+const ghCalls = (log: string): string[] =>
+  existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(Boolean) : [];
+
+const TARGET = { prNumber: 7, prUrl: "https://github.com/acme/remudero/pull/7", headSha: "d00d" };
+
+test("W1-T528: the update-branch leaf refuses under the test runner and gh is never invoked", async () => {
+  const gh = shimGh("exit 0");
+  try {
+    let caught: unknown;
+    try {
+      await updateBranchViaGh(TARGET);
+    } catch (e) {
+      caught = e;
+    }
+    assert.ok(caught instanceof LiveWriteBlockedError, "the leaf refused with LiveWriteBlockedError");
+    assert.match(String((caught as Error).message), /gh-pr-merge/, "the error names the boundary it guards");
+    assert.deepEqual(ghCalls(gh.log), [], "gh was never invoked — no live branch update happened");
+  } finally {
+    gh.restore();
+  }
+});
+
+test("W1-T528: an exempted update-branch call reaches gh once and reports updated", async () => {
+  const gh = shimGh("exit 0");
+  try {
+    const outcome = await withLiveWritesAllowed(() => updateBranchViaGh(TARGET));
+    assert.equal(outcome, "updated", "a clean exit is reported as updated");
+    const calls = ghCalls(gh.log);
+    assert.equal(calls.length, 1, "exactly one gh call — this leaf never retries within a pass");
+    assert.match(calls[0], /pr update-branch/, "and it is the update-branch call, not a merge");
+  } finally {
+    gh.restore();
+  }
+});
+
+test("W1-T528: a failing update-branch is classified from its own stderr, never thrown at the caller", async () => {
+  const gh = shimGh('echo "merge conflict between base and head" >&2; exit 1');
+  try {
+    const outcome = await withLiveWritesAllowed(() => updateBranchViaGh(TARGET));
+    assert.equal(outcome, "conflict", "the catch arm classifies rather than propagating");
+    assert.equal(ghCalls(gh.log).length, 1, "still exactly one call — a failure is not retried here");
+  } finally {
+    gh.restore();
+  }
+});
+
+test("W1-T528: the failure classifier separates a conflict from an ordinary error", () => {
+  for (const s of ["merge conflict", "branch has diverged", "divergent histories", "HTTP 422"]) {
+    assert.equal(classifyUpdateBranchFailure(s), "conflict", `"${s}" names a conflict`);
+  }
+  for (const s of ["gh: command not found", "HTTP 500", "network unreachable", ""]) {
+    assert.equal(classifyUpdateBranchFailure(s), "error", `"${s}" is an ordinary error`);
+  }
 });
