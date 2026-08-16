@@ -1,0 +1,75 @@
+- id: W1-T914
+  title: "the console's PR rows carry a link and nothing else — no review state at all — so a PR whose review has not run renders identically to one that passed; render the three-state and never collapse pending into green"
+  repo: remudero
+  depends_on: [W1-T913]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "OPERATOR REPORT 2026-07-24 (feedback fb-1784901239119-1be356, clause c; restated as
+    fb-1784919225707-0fab8b): the console's PR rows must render the same three-state the PR page will, and
+    pending must never collapse into green.
+    VERIFIED AT SOURCE AND IT IS WORSE THAN THE FEEDBACK ASSUMES — the console does not collapse the three
+    states, it renders NONE of them. `reviewState` appears in exactly three source files (src/run-task.ts,
+    src/lib/sweep.ts, src/lib/block-reason.ts) and in ZERO console files: the row templates in src/lib/serve.ts
+    emit only `prLink` (a `#<n>` anchor built from `prUrl`/`prNumber`), and src/lib/board.ts's entry model
+    carries `prNumber`, `prUrl`, `prTitle`, `costUsd`, `numTurns` and no review field of any kind. So a PR
+    that is green-and-approved, a PR whose review is running, and a PR whose review is red all render the
+    same anchor. The operator's 'reads green-at-a-glance' complaint about the PR page is reproduced exactly,
+    and unmitigated, on the surface they actually rule from.
+    THE READ ALREADY EXISTS — THIS IS PLUMBING, NOT A NEW SENSOR. src/lib/open-prs-rest.ts already fetches the
+    combined commit status for a head and documents the `success | failure | pending | error` shape, and it is
+    explicit that only real `statuses[]` rows become entries (it refuses to synthesise a pending GraphQL never
+    reported). Nothing new needs to be measured; the value has to reach a row."
+  design: |
+    THREE STATES, NAMED, WITH ABSENT NOT LAUNDERED INTO ANY OF THEM. The row renders reviewed-green,
+    reviewed-red, and review-in-progress distinctly. A FOURTH case exists and must not be folded away: a head
+    with no remudero-review at all (either pre-W1-T913 or a genuinely unattended head) is UNKNOWN, and
+    W1-T225's ruling applies — absent is the worst of the states, so it renders as absent, never as pending
+    and never as green.
+    ONE MODEL, NOT A SECOND DERIVATION. src/lib/status-board.ts is explicit that the text renderer and --json
+    both project ONE model 'so the console's future Now tab can never disagree with the terminal', and
+    src/lib/sweep.ts already mints the state vocabulary (W1-T186). Bind to those; do not invent a second
+    review-state taxonomy for the console, and do not add a second GitHub read where
+    src/lib/open-prs-rest.ts's combined-status fetch already answers it.
+    CANNOT-READ IS NOT A STATE. MASTER-PLAN's own fixture — the board rendering `merged 0/160` because a
+    failed GitHub read returned an empty set — is the trap here: a read that fails must render as unreadable
+    with its last-known age, never as an absent or a green review.
+    DEPENDS ON W1-T913 AND THE DEPENDENCY IS REAL, NOT TIDY: until something posts a pending, the in-progress
+    state is not observable from GitHub at all, and this task would be rendering a value that is always
+    absent. Do not start it earlier by inferring 'in progress' from local run state — that is a second
+    derivation and it is exactly what the one-model rule above forbids.
+    NOT AN IA CHANGE. This adds a state to rows that already exist; the tab separation is W1-T334/W1-T335/
+    W1-T336's and must not be pulled in here (W1-T314 was withdrawn for being exactly that size).
+  acceptance:
+    - claim: "a PR row renders reviewed-green, reviewed-red and review-in-progress as three distinct states, and pending is never rendered as green"
+      proof: "unit test: test/console-review-three-state.test.ts"
+    - claim: "a head carrying NO remudero-review renders as absent/unknown — never collapsed into pending and never into green"
+      proof: "unit test: test/console-review-three-state.test.ts"
+    - claim: "a failed GitHub read renders as unreadable with its last-known age, never as a review state the console did not observe"
+      proof: "unit test: test/console-review-three-state.test.ts"
+    - claim: "the row binds the existing review-state vocabulary and the existing combined-status read rather than a second derivation"
+      proof: "unit test: test/console-review-three-state.test.ts"
+  risk: medium
+  origin: feedback#fb-1784901239119-1be356
+  plan_refs: ["§7", "§7B"]
+  files:
+    - src/lib/board.ts
+    - src/lib/serve.ts
+    - src/lib/panel-graph.ts
+    - test/console-review-three-state.test.ts
+  status: queued
+  attempts: 0
+  note: "FILED 2026-08-16 from feedback fb-1784901239119-1be356 (clause c). The mechanism half is W1-T913;
+    fb-1784919225707-0fab8b is the same report restated and is covered by the pair.
+    `files:` IS DECLARED AS THE HONEST SPAN AND ONE PATH MAY GO UNUSED — the model may already reach serve.ts
+    through src/lib/board.ts alone, in which case src/lib/panel-graph.ts is an `inverse_scope` ADVISORY, not
+    a gate. DROP an unused path rather than editing a file to satisfy the list (the W1-T463 precedent). It is
+    declared because the projection route is the plausible seam for the combined-status value and a
+    scope_guard refusal mid-run costs a whole dispatch.
+    SOURCE-VERIFIED AT FILING: `reviewState` has zero occurrences under src/lib/serve.ts, src/lib/board.ts and
+    src/lib/panel-graph.ts; src/lib/board.ts's entry interface carries prNumber/prUrl/prTitle and no review
+    field; src/lib/open-prs-rest.ts already documents the four-value combined-status shape and its
+    no-synthesised-pending rule.
+    risk: medium — read-only rendering over a value another task produces, no gate and no spend path, argued
+    up only by the three-file span."
