@@ -349,6 +349,20 @@ export interface RestPullRow {
   auto_merge?: unknown;
   /** The PR title (W1-T184's RECENT decoration). Absent only on a malformed row. */
   title?: string;
+  /**
+   * W1-T528: true when the PR is a draft — the operator's hold, which the sweep's
+   * update-branch rung refuses to touch (`selectUpdateBranchTarget`, lib/sweep.ts).
+   *
+   * RETURNED BY BOTH ENDPOINTS, unlike {@link RestPullRow.merged} directly above. `draft` is
+   * part of GitHub's `pull-request-simple` schema, which is what the `/pulls` LIST endpoint
+   * returns; it is NOT one of the single-PR-only fields (`mergeable`, `mergeable_state`,
+   * `merged`, `merged_by`, `rebaseable`, `comments`, `commits`, `additions`, `deletions`,
+   * `changed_files`). Reading it off a list row therefore yields a real boolean rather than
+   * the silent `undefined` that made every merged pull collapse to `"CLOSED"` on 2026-07-31.
+   * Still typed OPTIONAL so a malformed row degrades to `undefined` instead of `false` —
+   * see the consumer's doc for why that distinction is kept rather than defaulted away.
+   */
+  draft?: boolean;
 }
 
 /** The enumeration's output row — structurally what `gh pr list --json …` produced. */
@@ -377,6 +391,13 @@ export interface OpenPrRest {
    * test only — see the task's own `note`).
    */
   rollupUnreadable?: true;
+  /**
+   * W1-T528: GitHub's `draft`, under the `gh --json` name this interface mirrors. Consumed by
+   * `buildOpenPrViews` (run-task.ts) as `OpenPrView.isDraft`, whose doc holds the fail-direction
+   * reasoning. Preserved as `undefined` when the row omits it — never defaulted to `false`,
+   * which would launder "GitHub did not say" into "definitely not a draft".
+   */
+  isDraft?: boolean;
 }
 
 /**
@@ -404,6 +425,13 @@ export function mapRestPr(row: RestPullRow): OpenPrRest {
     updatedAt: row.updated_at,
     body: row.body ?? "",
     autoMergeRequest: row.auto_merge ?? null,
+    // W1-T528: passed through UNDEFAULTED — `?? false` here would make a malformed row assert
+    // "not a draft" rather than "unknown", and the operator's hold is the one fact this rung
+    // must not guess at. SPARSE, following `rollupUnreadable`'s convention in this same module:
+    // the key is present only when GitHub said something, so a row omitting `draft` maps to
+    // exactly the pre-W1-T528 object and the shape-identity assertion above it stays meaningful
+    // (`deepStrictEqual` compares own keys, so an always-present `isDraft: undefined` would not).
+    ...(row.draft === undefined ? {} : { isDraft: row.draft }),
   };
 }
 

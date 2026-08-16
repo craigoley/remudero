@@ -135,6 +135,22 @@ test("mapRestPr carries autoMergeRequest null when auto-merge is unarmed and non
   assert.equal(armed.autoMergeRequest != null, true);
 });
 
+test("W1-T528: mapRestPr carries the draft flag through as isDraft and leaves an absent one undefined", () => {
+  // The producer half of OpenPrView.isDraft. `selectUpdateBranchTarget` (lib/sweep.ts) refuses to
+  // press update-branch on a draft — the operator's hold — and it checks `=== true`, so the THREE
+  // states have to stay distinguishable all the way from the REST row. Defaulting the absent case
+  // to `false` here would launder "GitHub did not say" into "definitely not a draft" and make the
+  // exclusion silently unreachable, which is the failure this test exists to pin.
+  const base = { number: 1, html_url: "u", updated_at: "t", head: { ref: "b", sha: "s" } };
+
+  assert.equal(mapRestPr({ ...base, draft: true }).isDraft, true, "a drafted PR arrives as true");
+  assert.equal(mapRestPr({ ...base, draft: false }).isDraft, false, "a ready PR arrives as false, not undefined");
+
+  const absent = mapRestPr(base);
+  assert.equal(absent.isDraft, undefined, "a row omitting draft stays undefined rather than defaulting to false");
+  assert.equal(absent.isDraft === true, false, "and so is not excluded by the === true check downstream");
+});
+
 test("mapRestPr defaults a missing head ref to the empty string so the dependabot branch-prefix predicate never throws", () => {
   const got = mapRestPr({ number: 1, html_url: "u", updated_at: "t", head: {} });
   assert.equal(got.headRefName, "");

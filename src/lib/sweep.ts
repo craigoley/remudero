@@ -473,15 +473,24 @@ export interface OpenPrView {
    * reads as "not a draft", the SAME fail-open default this module applies to every other
    * unread fact (e.g. an unread `mergeState`, {@link armedButStalled}'s own doc).
    *
-   * SCOPE, HONEST, mirrors how {@link isPlanFiling} shipped its mechanism ahead of its
-   * producer: this field and the exclusion it drives are the full MECHANISM, wired end-to-end
-   * and unit-tested here — but `run-task.ts`'s `buildOpenPrViews` does not populate it yet.
-   * The REST list row GitHub returns already carries `draft`, but plumbing it through
-   * requires editing `lib/open-prs-rest.ts`'s `RestPullRow`/`mapRestPr` — a file this task's
-   * own `files:` declaration (Rule 19) deliberately excludes. Until that producer wiring
-   * lands (filed as a follow-up), this is always `undefined` from the real gateway, so a
-   * genuinely-drafted armed-and-behind PR is not yet caught in production — named here rather
-   * than silently assumed safe.
+   * PRODUCER WIRED: `mapRestPr` (lib/open-prs-rest.ts) carries GitHub's `draft` through as
+   * `OpenPrRest.isDraft`, and `buildOpenPrViews` (run-task.ts) assigns it here, so the
+   * exclusion below fires against the real gateway rather than only in unit tests. This
+   * shipped one PR later than the mechanism: the original W1-T528 `files:` (Rule 19)
+   * excluded `lib/open-prs-rest.ts`, which left the field with NO producer and failed
+   * `test/producer-completeness.test.ts` — the standing check that stops an unwired tenth
+   * field from landing silently. Wiring it was the smaller correction, because the field
+   * guards an ACTION (this is the only thing standing between the update rung and a PR the
+   * operator has deliberately put on hold), so allowlisting it in `KNOWN_UNWIRED` would have
+   * shipped an inert safety exclusion.
+   *
+   * `draft` IS returned by the `/pulls` LIST endpoint — it is part of GitHub's
+   * `pull-request-simple` schema, unlike {@link RestPullRow.merged}, whose absence from list
+   * rows caused the 2026-07-31 merged-ness incident. `undefined` therefore means "GitHub
+   * omitted it", not "not a draft"; the check below is `=== true`, so an absent field leaves
+   * a PR eligible for update. That fail-open direction is deliberate and narrow: GitHub
+   * refuses to arm auto-merge on a draft in the first place, and only ARMED PRs reach here,
+   * so the exposure is an operator drafting an already-armed PR.
    */
   isDraft?: boolean;
   /**

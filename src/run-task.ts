@@ -13879,6 +13879,8 @@ interface RawOpenPr {
   body: string;
   autoMergeRequest: unknown;
   statusCheckRollup?: RollupCheck[];
+  /** W1-T528: GitHub's `draft`, carried by `mapRestPr` (lib/open-prs-rest.ts). */
+  isDraft?: boolean;
 }
 
 const REVIEW_CTX = "remudero-review";
@@ -14391,6 +14393,11 @@ export function buildOpenPrViews(
       // The ABSENT-check-suite remedy pushes an empty commit to THIS branch. Already fetched
       // for isDependabot above — carried through rather than re-queried.
       headRefName: pr.headRefName,
+      // W1-T528: the operator's hold, straight off the SAME list row the enumeration already
+      // fetched — no extra request, because `draft` rides on GitHub's `pull-request-simple`
+      // schema. This is the producer `test/producer-completeness.test.ts` demands; without it
+      // `selectUpdateBranchTarget`'s draft exclusion would be permanently inert in production.
+      isDraft: pr.isDraft,
       reviewSummary: undefined,
       // W1-T100: the ci-log fix mode's input — only worth fetching when checks
       // are actually red (a PR gate that already needs blocked_ci's rung).
