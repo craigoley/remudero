@@ -265,18 +265,17 @@ forensic detail, so the narrative does not need to live here.
   branch. Same snapshot class W1-T351/#1380 fixed for commitlint. *(#984; the base-sha half
   2026-08-14)*
 - **`rmd next-task-id` reads the LOCAL checkout — `git pull` first or it returns an id you filed
-  minutes ago.** It DOES account for open PRs once the checkout is current (`max 381 … open PRs
-  381`). **AND NO LOCK COVERS YOU AGAINST THE TRIAGE RUNG, WHICH MINTS UNATTENDED WHILE YOU TYPE —
-  `state/triage.lock` EXCLUDES TRIAGE-AGAINST-TRIAGE ONLY.** `decideAutoTriage` refuses on
-  `lockHeld` ("a run is already in flight"), and reservations live in `state/task-id-reservations`;
-  both are LOCAL state, so neither can see a session's unpushed filing on another host. MEASURED
-  2026-08-14: two shards both declared `- id: W1-T488` — a triage run's (#1817, 15:15:54Z) and a
-  session filing's (#1816, 15:25:37Z) — after which `loadPlan` REFUSED `origin/main` for ~24
-  minutes, taking every plan-reading verb with it, and the repair (#1820, 15:49:46Z) was itself
-  caught, merging only behind a temporary `enforce_admins` toggle. A tree read cannot see a
-  concurrent mint; `git log --oneline -S'- id: <candidate>' -- plan/` over a CURRENT fetch, plus the
-  open-PR list, is the view that can. *(it returned W1-T379 immediately after W1-T379 was filed in
-  #1388; true tree max was 380; the collision half 2026-08-14)*
+  minutes ago.** It DOES account for open PRs once current. **NO LOCK COVERS THE TRIAGE RUNG, WHICH
+  MINTS UNATTENDED WHILE YOU TYPE**: `state/triage.lock` excludes triage-against-triage only, and
+  `state/task-id-reservations` is LOCAL, so neither sees another host's unpushed filing. TWICE a
+  double-mint has made `loadPlan` REFUSE `origin/main`, taking every plan-reading verb with it —
+  W1-T488 on 2026-08-14 (#1816/#1817; repair #1820 merged only behind a temporary `enforce_admins`
+  toggle) and **W1-T533+W1-T534 on 2026-08-16, repaired by RENUMBERING the loser to W1-T911/W1-T912
+  (#1964)**. **AND `refs/rmd-id/` RESERVATION (W1-T509) DOES NOT CLOSE IT** — `reserveTaskIdRemote`
+  has ONE call site, the triage mint, so a hand-filed shard bypasses it and the second collision
+  happened WITH the allocator live. Sweep `refs/rmd-id/*` alongside shards and open PRs — only that
+  sees a RESERVED-BUT-UNFILED id (531/532 were) — then re-sweep on a fresh fetch immediately before
+  pushing. *(#1388: returned W1-T379 right after #1388 filed it, true max 380)*
 - **A shard whose `files:` spans two concerns fails Rule 19 sizing at `risk:medium` — set
   `risk:high` UP FRONT and record in the note that the band is Rule 19's SPAN, not blast radius.**
   Decomposing a predicate from its own falsifier is not a real decomposition. **And NEVER file an
@@ -414,23 +413,23 @@ forensic detail, so the narrative does not need to live here.
   `state/service-tokens.json`. So this is a PLACEMENT defect, not a gitignore one — do not propose
   un-ignoring it. On the mini a report there is merely local; **in a cloud container it is
   destruction**, because nothing syncs it and the container is reclaimed. MEASURED at d968c50: **29
-  distinct `state/*.md` paths are cited across 43 tracked files** — `CLAUDE.md`, `MASTER-PLAN.md`,
-  `DECISIONS.md`, `deploy/Dockerfile`, five modules under `src/`, five suites, ~26 shards and five
-  `plan/feedback/` records — and **all 29 are absent from a fresh checkout**, so every one is a
-  pointer no worker can follow. A session already re-derived a whole finding from scratch after
-  `state/recon-retro-test-github-calls.md` turned out not to exist. The durable homes that already
-  work: the PR body, the shard's own `rationale`/`note`, and `plan/feedback/` — which is tracked AND
-  has a landing mechanism (`landFeedback`, `src/lib/feedback-landing.ts`) that rebuilds from
-  origin/main and pushes, so it survives the container by construction. **Nothing in this repo tells
-  a session where to write a report** — `renderReconPrompt` asks only for a REPORT in the transcript,
-  no mount doctrine mentions one, and nothing in this file INSTRUCTS a `state/` write (its `state/`
-  mentions are citations and read idioms). The convention lives only in the operator's briefs, which
-  is why the rule has to live here. THE COMPLIANT SHAPE, and this file's own ledger-union bullet
-  above is the example: it CARRIES its measured figures with their dates and the re-run query
-  (`MAX_RETAINED_LINES_PER_STEP = 200` is symbol-anchored — the check IS the name), and any
-  `state/` path is a supplementary pointer, not the evidence. *(established 2026-08-11; the rule was
-  practised and unwritten — a grep for it across CLAUDE.md, MASTER-PLAN.md and DECISIONS.md returns
-  nothing)*
+  distinct `state/*.md` paths cited across 43 tracked files — and all 29 absent from a fresh
+  checkout**, so every one is a pointer no worker can follow; a session re-derived a whole finding
+  from scratch after `state/recon-retro-test-github-calls.md` turned out not to exist. The durable
+  homes: the PR body, the shard's own `rationale`/`note`, and `plan/feedback/` — tracked AND landed
+  by `landFeedback` (`src/lib/feedback-landing.ts`), which rebuilds from origin/main and pushes, so
+  it survives the container by construction. **Nothing in this repo tells a session where to write a
+  report**; the convention lives only in the operator's briefs, which is why the rule lives here. THE
+  COMPLIANT SHAPE is this file's own ledger-union bullet: it CARRIES its figures with their dates and
+  a re-run query (`MAX_RETAINED_LINES_PER_STEP = 200` is symbol-anchored — the check IS the name),
+  and any `state/` path is a supplementary pointer, never the evidence. *(established 2026-08-11)*
+- **A fixture shelling git PLUMBING fails on every CI runner and passes on every dev machine, so it
+  reads as flaky when it is deterministic.** `commit-tree` refuses `Author identity unknown` unless
+  an identity is set, and `actions/checkout` sets NEITHER repo nor global: the fault is ambient
+  config the fixture inherited locally. Reproduce before believing "flaky" —
+  `GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null` plus unsetting the repo's
+  `user.email`/`user.name` reproduces CI exactly. Fix the FIXTURE (pass the identity env vars git
+  honours), never the workflow, never a skip. *(#1971, after #1964's retry failed the same way)*
 
 ## Investigation discipline
 
