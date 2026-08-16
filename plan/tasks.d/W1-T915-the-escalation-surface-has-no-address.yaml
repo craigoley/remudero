@@ -1,0 +1,110 @@
+- id: W1-T915
+  title: "the fleet's escalation surface is built, correct and unreachable — needs-me already renders every open escalation, but serve binds 127.0.0.1:4317 inside a container with no published port, so the queue the operator is meant to read has no address from any host he uses"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: "MEASURED ON THE MAC MINI AT origin/main d5ae796b, 2026-08-16, over REST throughout.
+
+    (1) **ROUTING IS NOT THE DEFECT, AND THIS SHARD EXISTS BECAUSE THE OPPOSITE WAS ASSUMED TWICE.**
+    An escalation ALREADY reaches the console's needs-me queue. `src/lib/board.ts` documents the
+    predicate as an unsuperseded escalation carried on `needsHuman`, `isBlockedRow` is
+    `row.status === \"blocked\" || row.needsHuman === true`, and the board FALLS BACK TO THE
+    ESCALATION'S OWN TITLE when no plan task owns the row — a branch that exists precisely so an
+    escalation with no Task still renders. `serve.ts` renders those rows through `renderNeedsMe`,
+    keyed on `escalationOpenedAt`. board.ts even cites two prior instances by number, PRs that
+    'carried `needsHuman: true` with open escalation issues (#1161, #1158)'. **FILING A ROUTING TASK
+    WOULD FILE WORK THAT HAS SHIPPED.**
+
+    (2) **THE DEFECT IS REACH.** `DEFAULT_SERVE_HOST` is `\"127.0.0.1\"` and `DEFAULT_SERVE_PORT` is
+    `4317` (`src/lib/serve.ts`). The console runs inside `remudero-serve` with NO PUBLISHED PORT, up
+    43 hours at derivation. A loopback bind inside a container is reachable only from that
+    container's own network namespace, so there is no address for the queue from any host the
+    operator uses. **THE SURFACE EXISTS, WORKS, AND HAS NO ADDRESS.**
+
+    (3) **AND THE ONE CREDENTIAL THAT EXISTS DOES NOT AUTHENTICATE.** The token printed at boot
+    returns **401 on `/v1/status`**. So even a reader who reached the port would be refused. Two
+    independent failures on the same path — no route, and no working credential — which is why this
+    is not a networking chore.
+
+    (4) **THE COST IS MEASURED IN THE OPERATOR'S OWN DAY.** Four escalations were raised on
+    2026-08-16 — issues #1877, #1895, #1963, #1965 — and he read none of them. The obvious reading is
+    that he ignores the queue; the measured reading is that he cannot open it. He spends the day in
+    GitHub because GitHub is the only escalation surface with an address.
+
+    (5) **SO THE NOTIFICATION QUESTION IS DOWNSTREAM OF REACHABILITY, NOT BESIDE IT.** 'Nobody opens
+    the queue' and 'nobody can open the queue' demand different work, and only the second is true
+    today. A notification task filed now would page the operator toward a URL that resolves for
+    nobody. Re-ask it AFTER this lands, when a non-read becomes evidence about attention rather than
+    about plumbing."
+  design: |
+    (i) THE PATH IS ALREADY DECIDED AND MUST NOT BE RE-LITIGATED. `DECISIONS.md` carries the
+    2026-08-14 operator ruling publishing the console at `console.remudero.com` behind Cloudflare
+    Tunnel and Access, accepting in terms that Cloudflare terminates TLS and sees every console
+    response in clear. This task does not reopen that; it makes the origin ready to be reached
+    through it.
+    (ii) AND THE AUTHENTICATION HALF IS ALREADY FILED — CITE IT, DO NOT REBUILD IT. W1-T531
+    (`plan/tasks.d/W1-T531-access-jwt-identity-provider.yaml`, #1924) files the Access-JWT
+    `IdentityProvider` that turns a Cloudflare-verified email into a scope and a write tier. THIS
+    TASK OWNS THE ORIGIN'S REACHABILITY; W1-T531 OWNS WHO MAY READ IT. They are sequential, not
+    duplicates: a published origin with no JWT grantor is open, and a JWT grantor on an unreachable
+    origin grants nothing.
+    (iii) WHAT THIS TASK ACTUALLY CHANGES. The bind must be addressable from outside the container's
+    namespace, and the boot credential must authenticate. Both are properties of the serve process
+    and its container, not of the queue — no change to `renderNeedsMe`, to `needsHuman`, to
+    `isBlockedRow`, or to any escalation writer.
+    (iv) THE 401 IS A SEPARATE FAILURE FROM THE BIND AND MUST BE PROVEN SEPARATELY. Fixing the bind
+    without fixing the credential ships a reachable console that refuses every request; fixing the
+    credential without the bind changes nothing observable. A test must drive each independently, and
+    the falsifier for each must fail when only the other is repaired.
+    (v) DO NOT WIDEN THE BIND AS THE REMEDY ON ITS OWN. serve.ts's own doc already warns that
+    'anyone on any network the host is attached to could' reach a widened bind. The sanctioned reach
+    is the tunnel, which terminates at Cloudflare and enters the origin over loopback — so the
+    container's namespace, not the public internet, is what must gain the address.
+    (vi) NOT IN SCOPE, EACH OWNED ELSEWHERE. The Cloudflare tunnel, the DNS record and the Access
+    application are OPERATOR ACTS (W1-T531 records the ordering hazard: the Access application must
+    exist before the tunnel route publishes the hostname, or the hostname is briefly open to
+    anyone). The role model is a separate task. Notification and paging are DELIBERATELY DEFERRED
+    per rationale (5). And the fix rung is NOT touched — it resolved several PRs unattended today in
+    one or two strikes, and none of the four escalations above would have been prevented by a better
+    fix worker.
+  acceptance:
+    - claim: "the console is reachable from outside the container network namespace"
+      proof: "unit test: W1-T915: the console bind is addressable from outside its namespace"
+    - claim: "the boot credential authenticates against the status route"
+      proof: "unit test: W1-T915: the boot credential authenticates rather than returning 401"
+    - claim: "repairing only the bind still refuses every request"
+      proof: "unit test: W1-T915: a reachable console with a bad credential still refuses"
+    - claim: "the needs-me queue and its escalation rows are left unchanged"
+      proof: "unit test: W1-T915: the needs-me escalation rows are untouched by the reach change"
+  origin: "oper#console-has-no-address-2026-08-16"
+  plan_refs: ["W1-T531", "W1-T507", "W1-T500", "W1-T152"]
+  files: [src/lib/serve.ts, test/serve-reachability.test.ts]
+  status: queued
+  attempts: 0
+  note: "risk:high IS SET UP FRONT — Rule 19 SPAN across src/ and test/, and independently warranted:
+    this changes what can reach an authenticated control surface, so a wrong widening does not fail
+    loudly, it exposes the fleet's write routes.
+    files: DERIVED BY WORD-BOUNDED INVOCATION COUNT. `src/lib/serve.ts` defines both
+    `DEFAULT_SERVE_HOST` and `DEFAULT_SERVE_PORT` and carries the bind's own warning doc;
+    `test/serve-reachability.test.ts` is NEW because the existing serve suites are Playwright DOM
+    tests and a bind/credential falsifier wants its own file. `src/lib/board.ts` IS DELIBERATELY NOT
+    DECLARED — rationale (1) establishes the queue is already correct, and declaring a path the
+    implementation never edits fails `inverseScopeUntouchedFiles`.
+    EVERY BEHAVIOURAL CLAIM WAS RE-DERIVED AGAINST THE TREE RATHER THAN TAKEN FROM THE BRIEF, because
+    a prior instruction in this series named eight symbols that do not exist and two sessions
+    correctly stopped. Controls used throughout: `renderNeedsMe` read 6 in serve.ts and `isBlockedCi`
+    read 4 files, against `needs_me` (snake case) reading 0 — which is why the camel form is cited.
+    WHAT WAS NOT VERIFIED HERE, STATED AS A LIMIT: that issues #1877, #1895, #1963 and #1965 render
+    as rows TODAY. The code path is established; the live projection was not read, because the
+    console cannot be reached from this host — which is the task.
+    ID PROVENANCE: refs/rmd-id/ held 914 while origin/main's shard max was 912 and the open-PR max
+    was 911, so the allocator runs ahead of the plan. 915 was taken with an orphan commit over the
+    empty tree carrying a host-pid-nanosecond nonce, pushed under --force-with-lease against an
+    explicit zero sha, exit code captured INTO A VARIABLE, and the ref RE-READ and its nonce matched.
+    Positive control refs/rmd-id/W1-T527 read 1. The refspec variable is BRACED: an unbraced
+    \"$SHA:refs/...\" applies zsh's :r history modifier and ships a corrupt refspec, which cost two
+    failed mints earlier in this series."
