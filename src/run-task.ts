@@ -6945,6 +6945,111 @@ function defaultRetroEditBody(url: string, body: string): void {
   execFileSync("gh", ["pr", "edit", url, "--body", body], { stdio: "pipe" });
 }
 
+/**
+ * W1-T908 — the changed-path read for {@link repairRetroChangesetClaim}. Appended LAST in that
+ * function's deps object so no existing positional caller shifts (#977/#978), and exercised by a
+ * test that really shells out, so the default is not left as an uncovered seam.
+ */
+function defaultRetroChangedFiles(url: string): string[] {
+  const out = execFileSync("gh", ["pr", "diff", url, "--name-only"], { encoding: "utf8", maxBuffer: 1 << 26 });
+  return out.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+}
+
+/**
+ * W1-T908 — the COUNT-SHAPED changeset claim, the thing `bodyContradictsDiff` refuses.
+ *
+ * Deliberately NOT imported from lib/review.ts: this rung must not hold a share of the detector's
+ * authority, or a future widening there would silently change what gets rewritten here. The
+ * relationship is pinned the other way round instead — a test drives the REAL
+ * `bodyContradictsDiff` over this function's output and requires it to stay silent, so the two
+ * are held together by a falsifier rather than by a shared symbol.
+ *
+ * Built fresh per call. A module-level `/g` regex carries `lastIndex` between calls, so a shared
+ * instance would make `.test()` answer differently on the second invocation with the same input.
+ */
+function changesetCountClaimRe(): RegExp {
+  return /\bexactly\s+\w+\s+files?\b(?:\s*:\s*[^\s,]+(?:\s*,\s*[^\s,]+)*)?/gi;
+}
+
+/**
+ * W1-T908 — render the changeset as PATHS AND NEVER A COUNT.
+ *
+ * A count is what failed four PRs, and replacing a wrong count with a right one would be the same
+ * defect wearing a new number: the next retro that regenerates two files or four would be wrong
+ * again with nobody's code having changed. Naming the paths is correct for any arity by
+ * construction. Sorted so the sentence is stable across two runs over the same changeset.
+ */
+export function retroChangesetSentence(paths: readonly string[]): string {
+  const sorted = [...paths].sort();
+  if (sorted.length === 0) return "no files";
+  if (sorted.length === 1) return sorted[0];
+  return `${sorted.slice(0, -1).join(", ")} and ${sorted[sorted.length - 1]}`;
+}
+
+/**
+ * W1-T908 — replace every count-shaped changeset claim in `body` with the real paths.
+ *
+ * Returns `undefined` when there is nothing to repair, so the caller can distinguish "healthy"
+ * from "rewritten" without comparing strings.
+ */
+export function repairChangesetClaimInBody(body: string, paths: readonly string[]): string | undefined {
+  if (!changesetCountClaimRe().test(body)) return undefined;
+  return body.replace(changesetCountClaimRe(), retroChangesetSentence(paths));
+}
+
+/**
+ * W1-T908 — THE RETRO'S CHANGESET-CLAIM REPAIR RUNG, the sibling of
+ * {@link repairRetroAcceptanceBlock} and called from the same place for the same reason.
+ *
+ * WHY A POST-HOC RUNG RATHER THAN A BETTER TEMPLATE. `retroCommand` spawns the Architect, which
+ * edits MASTER-PLAN.md, commits, pushes and OPENS THE PR WITH A BODY IT AUTHORED. Only then does
+ * `regenerateOrientation` commit docs/ORIENTATION.md, and only then does
+ * `regeneratePlanIndexAndCommit` commit plan/plan-index.json. The body is therefore written at a
+ * moment when two of the three files DO NOT YET EXIST, and no wording can fix that. Reordering
+ * cannot fix it either: ORIENTATION.md is regenerated FROM what the Architect just wrote, so it
+ * cannot run first. The only point where the changeset is knowable is after all three commits —
+ * which is exactly where this runs.
+ *
+ * Deps injected LAST and defaulted by object-spread (never `??`, which V8 instruments as a branch
+ * and would leave the untaken real side permanently uncovered) — the same discipline
+ * `repairRetroAcceptanceBlock` uses.
+ *
+ * Best-effort by contract, like its sibling: `retroCommand` must never fail because a repair
+ * attempt failed, so every throw is caught and ledgered rather than propagating.
+ */
+export function repairRetroChangesetClaim(
+  prUrl: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  deps: {
+    fetchBody?: (url: string) => string;
+    editBody?: (url: string, body: string) => void;
+    changedFiles?: (url: string) => string[];
+  } = {},
+): "repaired" | "healthy" | "error" {
+  const { fetchBody, editBody, changedFiles } = {
+    fetchBody: defaultRetroFetchBody,
+    editBody: defaultRetroEditBody,
+    changedFiles: defaultRetroChangedFiles,
+    ...deps,
+  };
+  try {
+    const paths = changedFiles(prUrl);
+    const body = fetchBody(prUrl);
+    const repaired = repairChangesetClaimInBody(body, paths);
+    if (repaired === undefined) return "healthy";
+    editBody(prUrl, repaired);
+    // A step of its own rather than reusing `acceptance.repaired`: that line means a different
+    // repair happened, and a line whose reason belongs to another decision is worse than a terse
+    // one (CLAUDE.md, #981). `changed_files` is carried so a later reading can adjudicate the row
+    // instead of being blind to what was named.
+    log("changeset_claim.repaired", { pr_url: prUrl, changed_files: paths });
+    return "repaired";
+  } catch (e) {
+    log("changeset_claim.repair.error", { error: String((e as Error)?.message ?? e) });
+    return "error";
+  }
+}
+
 export function reviewTaskIdFromBody(body: string): string | undefined {
   const matches = [...body.matchAll(/^Remudero-Task:\s*(\S+)\s*$/gm)];
   return matches.length ? matches[matches.length - 1][1] : undefined;
@@ -10119,6 +10224,10 @@ async function retroCommand(
     // deterministic backstop so a worker's shape mistake doesn't fail the whole retro
     // CLOSED at remudero-review. Best-effort: never lets this crash an otherwise-fine retro.
     repairRetroAcceptanceBlock(prUrl, log);
+    // W1-T908: and the CHANGESET sentence, for the same reason and at the same point. Both
+    // companions above are committed and pushed by now, so this is the first moment in the run
+    // where the PR's real file set can be read at all.
+    repairRetroChangesetClaim(prUrl, log);
 
     // DETERMINISTIC GUARD: a retro is PLAN-ONLY. If the diff touches src/ or test/,
     // fail closed (the retro may never carry code — one concern).
@@ -10187,6 +10296,10 @@ function retroPrompt(gatherReport: string, calTable: string, runId: string): str
     "NEVER touch docs/ORIENTATION.md — it is HARNESS-OWNED: the harness deterministically regenerates",
     "it from this same gather right after you finish and commits it separately. Any edit you make to it",
     "is overwritten.",
+    "W1-T908: do NOT describe the PR's changed-file set in the body — not as a list and above all",
+    "not as a COUNT. The harness commits docs/ORIENTATION.md and plan/plan-index.json onto this",
+    "same PR after you finish, so any such sentence is written before two of the three files exist",
+    "and is wrong every time. Never write 'exactly N files'; the harness names the paths for you.",
     "",
     "=== DETERMINISTIC GATHER (no LLM produced this) ===",
     gatherReport,
