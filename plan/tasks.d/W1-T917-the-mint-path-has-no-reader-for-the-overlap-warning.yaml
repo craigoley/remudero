@@ -1,0 +1,112 @@
+- id: W1-T917
+  title: "rareOverlapWarnings is correct, tested and invoked by nothing outside its own file — W1-T533 shipped the scoring and excluded the call site by design, so the warning is the fifth fired-and-unread signal its own design forbids; this owns the caller"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  rationale: "MEASURED ON THE MAC MINI AT origin/main, 2026-08-16, over REST throughout.
+
+    (1) **THE BOUNDARY, FIRST, SO THIS IS NOT READ AS A REBUILD. W1-T533 OWNS THE SCORING; THIS OWNS
+    THE CALL SITE.** The rarity-weighted predicate shipped as #1968 — `rareOverlapWarnings`,
+    `declarationCountsByPath`, `OverlapWarningPolicy`, `DEFAULT_OVERLAP_WARNING_POLICY`,
+    `RareOverlapWarning` and `OpenPrFileScope` are all exported from `src/lib/dispatch-overlap.ts` on
+    main. **NOTHING HERE CHANGES THAT PREDICATE.** W1-T533's own note excludes `src/run-task.ts` by
+    design ('the 37% hub this task exists to ignore'), which is precisely why the reader could not be
+    wired there and why this task exists.
+
+    (2) **THERE IS NO READER, MEASURED WITH A WORKING CONTROL.** `rareOverlapWarnings` has ZERO
+    callers outside `src/lib/dispatch-overlap.ts` across `src/`, `bin/` and `scripts/`, and in `test/`
+    only its own suite touches it. POSITIVE CONTROL, same query shape: its sibling
+    `partitionByFileOverlap` returns 18 hits outside that file, with real imports in
+    `src/lib/daemon.ts`. So the query sees callers elsewhere when they exist; the zero is a
+    measurement.
+
+    (3) **WHICH MAKES IT THE FIFTH OF A MEASURED FAMILY, AND W1-T533's DESIGN (iv) FORBIDS EXACTLY
+    THIS**: 'this must print where a filer already reads, or it is not worth building —
+    `daemon.tree_dirty`, `daemon.stale_code`, `CiFailure.outsidePrRange` and `dh-rate-limit` are four
+    measured fired-and-unread signals. DO NOT ADD A FIFTH.' A correct, tested, uninvoked predicate is
+    that fifth signal.
+
+    (4) **THE PROVENANCE FINDING THAT MAKES THE WIRING WORTH DOING — THIS IS THE DESIGN'S FOUNDATION.**
+    `OpenPrFileScope` is `{ id: string; files?: readonly string[] }` — AGNOSTIC ABOUT WHERE THE PATHS
+    CAME FROM. It takes a path list, not a shard. So it can be fed a pull request's ACTUAL CHANGED
+    FILES from `pulls/{n}/files` over REST rather than a shard's declared `files:`. **THAT DISTINCTION
+    IS THE WHOLE VALUE**: both measured races were TRAILERLESS `fix/…` branches with NO SHARD AT ALL —
+    #1873/#1874 (byte-identical titles, identical file lists, created 74 SECONDS apart) and #1975
+    behind #1969 (a second symbol for the same rung, 32 MINUTES later while the first was open). **A
+    SCOPE BUILT FROM DECLARED `files:` WOULD SEE NEITHER.** Fed from the diff, it sees both.
+
+    (5) **AND THE COST IS ONE REST CALL PER OPEN PR, ON THE HEALTHY BUCKET.** `nextTaskIdCommand`
+    (`src/run-task.ts`) already sweeps open PRs through `openPrMintTexts`, but fetches TEXTS for id
+    mining rather than files. The addition is `pulls/{n}/files` per open PR — CORE budget, NOT
+    GraphQL, which has been exhausted six times in two days. Core sits near its ceiling; GraphQL does
+    not."
+  design: |
+    (i) THE CALLER ONLY. `nextTaskIdCommand` gains the warning; the predicate is imported and called
+    unchanged. No edit to `src/lib/dispatch-overlap.ts` — declaring it would fail
+    `inverseScopeUntouchedFiles`, and W1-T533 owns it regardless.
+    (ii) FEED IT THE DIFF, NOT THE DECLARATION. Build each `OpenPrFileScope` from the open PR's actual
+    changed files over REST. Rationale (4) is why: declared paths cannot see either measured race.
+    (iii) WARN, NEVER REFUSE — W1-T533's design (iii) carried forward verbatim. The verb prints each
+    warning naming the OPEN PR and the SHARED RARE PATH, then returns its normal exit code. It does not
+    refuse a mint, does not change the id it reports, and does not gate anything. A false block on
+    legitimately adjacent work would be worse than the duplication it prevents.
+    (iv) AND IT MUST DEGRADE, NOT THROW. The open-PR file read is network I/O on a budget that has been
+    exhausted repeatedly; a failed read must print no warning and leave the mint's own output byte-
+    identical, exactly as the existing reservation notice already degrades ('no readable reservation
+    store ⇒ report the mint alone'). An advisory that can break the verb it advises is worse than none.
+    (v) FALSIFIER, BOTH DIRECTIONS, AND THE SECOND IS THE WHOLE DESIGN. A candidate sharing a rare path
+    with an open PR is reported; a candidate sharing ONLY `src/run-task.ts` — declared by 103 of 277
+    shards — is NOT. And the #1873/#1874 file pair (`src/lib/plan.ts`, `test/plan-sharding.test.ts`)
+    must be driven through the real caller and shown to report, since that is the one duplicate we can
+    name.
+    (vi) NOT IN SCOPE. The predicate itself, its threshold and its scoring (W1-T533/#1968). The
+    hub-path-under-any-spelling assertion — a separate, smaller task against the merged predicate,
+    deliberately not mixed in here so what is being reviewed stays legible. The same-id dispatch gap
+    (W1-T534) and the `hasPushedRunBranch` supplier gap: both are correct for the SAME-ID case and
+    NEITHER is motivated by these two instances, so nobody should re-rank them on a rate they do not
+    own. Wiring this into `drain`/dispatch, which would make it blocking.
+  acceptance:
+    - claim: "the mint path prints a warning when a candidate shares a rare path with an open pull request"
+      proof: "unit test: W1-T917: the mint path warns on a rare path shared with an open pull request"
+    - claim: "a candidate sharing only a hub path with an open pull request produces no warning"
+      proof: "unit test: W1-T917: the mint path stays silent on a hub path alone"
+    - claim: "the warning never changes the minted id or the exit code"
+      proof: "unit test: W1-T917: the overlap warning never changes the minted id"
+    - claim: "an unreadable open pull request file list degrades to no warning rather than throwing"
+      proof: "unit test: W1-T917: an unreadable open pull request list degrades to silence"
+  origin: oper#mint-path-overlap-reader-2026-08-16
+  plan_refs: ["W1-T533", "W1-T471", "W1-T494", "W1-T534"]
+  files: [src/run-task.ts, test/next-task-id-overlap-warning.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT — Rule 19 SPAN across `src/` and `test/`, and independently
+    warranted: this adds network I/O to the verb an operator runs before every filing, so a wrong
+    degradation path breaks minting itself rather than merely printing a bad warning.
+
+    **THE W1-T471 SERIALISATION COST IS ACCEPTED IN WRITING.** `src/run-task.ts` is a 19,943-line file
+    and `partitionByFileOverlap` serialises this task against every other task declaring it. That cost
+    is taken deliberately because `nextTaskIdCommand` lives there and there is no filing surface that
+    reaches a filer without it: W1-T533 excluded the path BY DESIGN, so a task that owns the call site
+    must declare what W1-T533 would not. Declaring `src/lib/dispatch-overlap.ts` instead would fail
+    `inverseScopeUntouchedFiles` — the implementation never edits it.
+    `test/next-task-id-overlap-warning.test.ts` is NEW rather than an existing suite: the falsifier
+    drives a verb's console output plus an injected open-PR file reader, which is a different shape
+    from `test/dispatch-overlap.test.ts`'s pure-predicate assertions, and that suite belongs to
+    W1-T533.
+
+    ID PROVENANCE, AND THE SWEEP THAT BRANCH NAMES WOULD HAVE MISSED. `refs/rmd-id/*` held 916 while
+    origin/main's shard max was 912. **A BRANCH-NAME SWEEP OVER OPEN PRs RETURNED NOTHING AT ALL**,
+    while sweeping SHARD FILENAMES INSIDE EVERY OPEN PR'S DIFF found 913, 914, 915 and 916 — the
+    triage lane mints W1-T9xx on `run-TRIAGE-*` heads, so head-ref matching is blind to it and that
+    hole produced a live collision. 917 was taken with an orphan commit over the empty tree carrying a
+    host-pid-nanosecond nonce, pushed under `--force-with-lease` against an explicit zero sha, with the
+    exit code captured INTO A VARIABLE and the ref then RE-READ and its nonce matched. The refspec
+    variable is BRACED — the bare form applies zsh's `:r` history modifier and ships a corrupt refspec
+    the exit code does not catch. Positive control `refs/rmd-id/W1-T527` read 1.
+
+    PROOF NOTES: all four proofs are NAME-FILTERED titles, each verified to match ZERO files today
+    against a control matching exactly one, and each under 100 characters with no comma."
