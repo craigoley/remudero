@@ -558,7 +558,8 @@ test("W1-T525: every gh call routes through the metered entry point", () => {
   const body = ghJson(["api", "repos/o/r/pulls"], (r) => readings.push(r), api.exec);
   assert.deepEqual(body, { ok: true }, "the body is still returned exactly as before");
   assert.equal(api.calls.length, 1, "issuing the call and reading its header happen in ONE invocation");
-  assert.deepEqual(api.calls[0], ["api", "-i", "repos/o/r/pulls"], "`-i` is inserted for a gh api call");
+  assert.deepEqual(api.calls[0], ["api", "repos/o/r/pulls", "-i"],
+    "`-i` is APPENDED for a gh api call — never spliced in front of the endpoint, which must stay argv[1]");
   assert.deepEqual(readings, [{ remaining: 4098, used: undefined, limit: undefined, reset: undefined, resource: undefined }]);
 
   // A non-`api` gh subcommand (`pr view`, `pr list`, …) is the OTHER half of the ~13 pre-existing

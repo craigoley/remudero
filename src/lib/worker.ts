@@ -2601,7 +2601,7 @@ export function ghJson(
   exec: (file: string, execArgs: string[], opts: { encoding: "utf8"; maxBuffer: number }) => string = execFileSync,
 ): unknown {
   const isApiCall = args[0] === "api";
-  const execArgs = isApiCall ? ["api", "-i", ...args.slice(1)] : args;
+  const execArgs = isApiCall ? [...args, "-i"] : args;
   const out = exec("gh", execArgs, { encoding: "utf8", maxBuffer: 1 << 24 });
   if (!isApiCall) return JSON.parse(out);
   const { headers, body } = splitGhHeaderBlock(out);
