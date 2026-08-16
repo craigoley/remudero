@@ -17,5 +17,6 @@ raw: "REVIEW STATUS LIFECYCLE: POST PENDING IMMEDIATELY — remudero-review is
   Complements W1-T254, which fixes the latency; this fixes the legibility."
 attachments: []
 origin: cli
-status: new
+status: proposed
 proposal_pr: null
+summary: null

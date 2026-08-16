@@ -1,0 +1,151 @@
+- id: W1-T914
+  title: "`remudero-review` is posted ONLY in terminal states, so a head between push and verdict carries NO status at all — the PR reads green-at-a-glance among ~22 green checks while the review has not run, and nothing says which run owns the gap"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 90.00
+  rationale: "OPERATOR REPORT 2026-07-24 (feedback fb-1784901239119-1be356, re-filed verbatim four hours
+    later as fb-1784919225707-0fab8b — ONE report, two captures): 'looks green rather than in progress
+    while it's running'. Worst observed case #707, where the re-post starved 20+ minutes behind an
+    unbounded runOne.
+    VERIFIED FROM SOURCE AT FILING, and three of these correct what a reader would assume.
+    (a) THE TYPE IS TERMINAL-ONLY BY CONSTRUCTION. `ReviewState` (src/lib/review.ts:44) is
+    `\"success\" | \"failure\"`, and its own comment says so: 'GitHub statuses also allow
+    `pending`/`error`; the gate uses these two.' There is no pending poster anywhere — the single write
+    site is `postReviewStatusGuarded` (review.ts:6056) wrapping `postReviewStatus` (review.ts:5636), and
+    both take a rolled-up VERDICT. So between a new head and its verdict the required context is
+    literally absent, which GitHub renders as 'Expected' — visually indistinguishable from a check that
+    is about to pass, and sorted in among the green ones.
+    (b) THE READER ALREADY HAS A PENDING STATE; ONLY THE WRITER DOES NOT. `reviewStateFromRollup`
+    (src/run-task.ts:14053) maps any non-SUCCESS/FAILURE/ERROR rollup entry to `\"pending\"`, and
+    `OpenPrView.reviewState` (src/lib/sweep.ts:425) is already
+    `\"success\" | \"failure\" | \"pending\" | \"none\"`. The vocabulary exists and nothing ever emits
+    the third value.
+    (c) AND THAT IS EXACTLY WHY THIS IS NOT A ONE-LINE CHANGE. The post-review disposition
+    (sweep.ts:1678) fires on `pr.checksState === \"green\" && pr.reviewState === \"none\"`, and the
+    W1-T176 ABSENT/zero-runs sub-shape (sweep.ts:1112) keys on the SAME `\"none\"`. A naive pending post
+    flips `reviewState` to `\"pending\"` on the very head it was announcing, the post-review row stops
+    matching, and THE PENDING STARVES THE REVIEW IT EXISTS TO ANNOUNCE — a deadlock strictly worse than
+    today's silence, because a required context stuck non-green never merges (MASTER-PLAN, CI mechanics:
+    'a conditionally-SKIPPED required check DEADLOCKS merge forever — expected, pending = never green').
+    (d) THE RUN_ID PLUMBING IS ALREADY THERE: `postReviewStatusGuarded` takes `runId` (review.ts:6010)
+    and ledgers `run_id` on its attempt lines (review.ts:6075, 6091). Clause (b) of the report needs the
+    field carried onto the pending post, not invented.
+    THIS IS THE LEGIBILITY HALF, NOT THE LATENCY HALF. W1-T254 shipped the light-sweep ticker (#720,
+    15a2168) and W1-T463 owns why that ticker can still be starved by a blocked event loop. Neither
+    makes the gap VISIBLE while it lasts, and the operator's complaint is about the gap being invisible,
+    not about its length."
+  design: |
+    THE ASK, RESTATED AS THREE PROPERTIES. (a) every path that DETECTS a head needing review — the run
+    lane, the W1-T254 light-sweep ticker (`buildSweepLightHook` in src/run-task.ts, `actionable: (d) => d
+    === "post-review"`), and `rmd review`'s own start — posts `state=pending` with a description naming
+    the review as in flight, BEFORE the work begins, and flips it to the terminal state on completion.
+    (b) that pending is idempotent per head and carries the posting `run_id`. (c) the status board's read
+    model carries review-in-flight as its OWN state, never collapsed into green.
+
+    THE DISPOSITION IS THE HARD PART AND IT MUST BE FIXED IN THE SAME DIFF. `reviewState === "none"` is
+    today read as "no review has happened", and after this change it means "no review has been ANNOUNCED
+    either". The post-review row (sweep.ts:1678) and the ABSENT/zero-runs discriminator (sweep.ts:1112)
+    must both be re-expressed against the real predicate — NO LIVE REVIEW OWNS THIS HEAD — where a
+    pending whose owning run is gone, or older than a stated bound, counts as NOT LIVE and is
+    re-dispatched exactly as `"none"` is today. AN IMPLEMENTATION THAT POSTS PENDING WITHOUT TOUCHING
+    THOSE TWO PREDICATES HAS SHIPPED A DEADLOCK, not a feature; that is the falsifier criterion 4 exists
+    to hold.
+
+    A PENDING IS THE WEAKEST EVIDENCE THERE IS, AND W1-T228's PRECEDENCE MUST EXTEND DOWNWARD TO SAY SO.
+    `postReviewStatusGuarded` already refuses a CAPPED/keyword-only success over an executed verdict on
+    the same SHA, and refuses any write to a merged/closed PR. A pending must be refused over ANY
+    terminal verdict on the same head sha — otherwise a second detector arriving after a verdict wipes a
+    green gate and un-merges a mergeable PR. Same lock, same ledgered-refusal discipline, one more rung
+    at the bottom of the existing ladder. DO NOT ADD A SECOND POST SITE: the whole point of W1-T228 was
+    that one writer enforces every rule.
+
+    THE PENDING MUST NOT BE LEDGERED AS `review.posted`. `priorReviewVerdictFromLedger` (review.ts:3452)
+    recovers the prior verdict last-one-wins from `review.posted`; W1-T178's stability rule and W1-T230's
+    ledger-keyed arm decision both read it. A pending recorded on that step would present itself as a
+    verdict, corrupt the stability prior and feed the arm path a non-verdict. Use a DISTINCT step, and
+    check whether it needs adding to `DECISION_RELEVANT_LEDGER_STEPS` (src/lib/ledger.ts) so a rotation
+    cannot silently erase the ownership record clause (b) exists to preserve.
+
+    PREFER A SEPARATE POSTER OVER WIDENING `ReviewState`. `ReviewState` is the type `judgeReview` and
+    every summary builder return; widening it to include a non-verdict makes every exhaustive switch on
+    it accept a value that is not a judgement. Argue the shape explicitly in the PR body either way — but
+    the default is a narrow pending poster reusing the guard, never a third member of the verdict type.
+
+    OWNERSHIP IS THE POINT OF CLAUSE (b), NOT DECORATION. The status description carries the posting
+    `run_id`, and the ledger line records `(head_sha, run_id, ts)`. Idempotence is per HEAD: a second
+    detector observing an existing pending for the same head posts nothing and ledgers the no-op, so N
+    detectors produce ONE pending. That is also what makes a stuck pending diagnosable — it names the run
+    that owes the verdict.
+
+    THE DENY FLOOR STILL HOLDS. hooks/deny-floor.sh (W1-T203) refuses a worker `gh api -X POST
+    .../statuses/...`. The pending is posted by the ORCHESTRATOR/sweep process, exactly like the verdict
+    is today; nothing inside a reviewer worker gains a write path, and no carve-out is added.
+
+    CLAUSE (c) LANDS IN THE READ MODEL, NOT IN A SECOND DERIVATION. `buildStatusBoard`
+    (src/lib/status-board.ts) is the ONE model both `rmd status` text and `--json` project, and its own
+    doc names the console's Now tab (fb-1784770111145-cf7c24) as the intended consumer precisely so the
+    two can never disagree. Review-in-flight becomes a distinct state IN THAT MODEL; whatever renders PR
+    rows projects it. Do not add a console-only render of a fact the model does not carry.
+
+    EXPLICITLY NOT IN SCOPE: reducing the LATENCY of the re-post (W1-T254 shipped, W1-T463 owns the
+    residue); a second review lane (W1-T473); weakening push-invalidates-review (W1-T225); changing which
+    contexts are REQUIRED on main; and building the console's Now tab itself (W1-T314).
+  acceptance:
+    - claim: "the run lane, the light-sweep ticker and `rmd review`'s own start each post remudero-review state=pending on the head BEFORE the review runs, and flip it to the terminal state on completion"
+      proof: "unit test: test/review-pending-status.test.ts"
+    - claim: "a second detector observing an existing pending for the same head posts no second pending and ledgers the no-op, and the pending carries the posting run_id"
+      proof: "unit test: test/review-pending-status.test.ts"
+    - claim: "a pending is refused over any terminal verdict on the same head sha, and over a merged or closed PR, with the refusal ledgered — the existing single post site enforces it"
+      proof: "unit test: test/review-pending-status.test.ts"
+    - claim: "THE STARVATION FALSIFIER — a head whose only remudero-review is a pending whose owning run is gone is still dispositioned post-review, and the W1-T176 zero-runs discriminator still fires on it"
+      proof: "unit test: test/sweep-review-pending.test.ts"
+    - claim: "the pending is recorded on its own ledger step, so priorReviewVerdictFromLedger still recovers the last real verdict and the arm path reads no non-verdict"
+      proof: "unit test: test/review-pending-status.test.ts"
+    - claim: "the status board's read model carries review-in-flight as its own state and never collapses it into green"
+      proof: "unit test: test/status-board-review-pending.test.ts"
+    - claim: "the pending poster is a named export the detection paths call"
+      proof: "grep: postReviewPending( in src/lib/review.ts"
+  risk: high
+  origin: feedback#fb-1784901239119-1be356
+  plan_refs: ["§5C", "§5D"]
+  files:
+    - src/lib/review.ts
+    - src/lib/sweep.ts
+    - src/lib/status-board.ts
+    - src/run-task.ts
+    - test/review-pending-status.test.ts
+    - test/sweep-review-pending.test.ts
+    - test/status-board-review-pending.test.ts
+  status: queued
+  attempts: 0
+  note: "FILED 2026-08-16 from feedback fb-1784901239119-1be356, source-verified at filing: every line
+    and symbol cited in the rationale was read, not recalled.
+    ONE REPORT, TWO CAPTURES. fb-1784919225707-0fab8b (2026-07-24T18:53) is the same operator complaint
+    re-typed shorter; it names the same three clauses, the same #707 fixture and the same W1-T254
+    relationship. Recorded here so the second entry is triaged as a duplicate of this task rather than
+    re-derived into a second one.
+    risk:high BY RULE 19's SPAN COUNT — review.ts (the merge-gate writer), sweep.ts (the disposition
+    table), run-task.ts (the detection paths) and status-board.ts. The blast radius argues high on its
+    own too, and unusually: the FAILURE MODE OF A BAD IMPLEMENTATION IS A PERMANENTLY UNMERGEABLE FLEET,
+    because a required context left pending never goes green. That is why criterion 4 is a falsifier and
+    not a nice-to-have.
+    verify:auto — every claim is decidable in-process. The post site already takes an injectable poster
+    (`opts.post`, review.ts:6059) and an injectable lifecycle read, the sweep's dispositions are pure
+    functions over an `OpenPrView`, and `buildStatusBoard` takes an injected GitHub gateway. Nothing here
+    needs a live PR.
+    NEW SUITES, DELIBERATELY. The proofs name three new files rather than appending to
+    test/run-task.test.ts or test/sweep.test.ts: both are coverage-load-bearing suites where two PRs
+    appending to the tail conflict (the W1-T480/W1-T912 finding). Existing suites may still be EXTENDED
+    where a regression genuinely belongs beside its neighbours; the declared three are where the new
+    behaviour's own proofs live.
+    SIBLINGS, AND THE BOUNDARY WITH EACH. W1-T254 (shipped, #720/15a2168) and W1-T463 own the LATENCY of
+    the re-post; this owns whether the gap is VISIBLE while it lasts — do not fold them. W1-T228 owns the
+    precedence ladder this extends downward by one rung. W1-T230 owns the arm decision, which is exactly
+    why the pending must not be ledgered as a verdict. W1-T225 owns re-posting after a push and MUST NOT
+    be weakened: a pending is an ANNOUNCEMENT, never a carried-forward approval.
+    NO NUMBER HERE SHOULD BE QUOTED FORWARD — the '~22 green checks' and the #707 20-minute figure are the
+    operator's 2026-07-24 observation. Re-derive before building.
+    NO depends_on: nothing filed blocks this, and W1-T463's diagnosis does not change what this posts."
