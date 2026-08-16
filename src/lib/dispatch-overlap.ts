@@ -102,18 +102,15 @@ function patternsIntersect(a: string, b: string, i: number, j: number, memo: Map
 }
 
 /**
- * The overlapping glob pairs between two tasks' `files:` lists. An absent or
- * EMPTY list on EITHER side is fail-closed: it cannot be proven disjoint from
- * anything, so it is reported as overlapping every entry of the other side (or,
- * if the other side is ALSO absent/empty, a single synthetic `"*"` marker so the
- * pair still overlaps even though neither declared any concrete path).
+ * The literal/glob-matched shared entries between two `files:` lists — no
+ * fail-closed synthesis, just the pairwise glob intersection. Factored out of
+ * {@link overlappingPaths} so its fail-closed absent/empty handling (RIGHT
+ * for the pre-dispatch collision guard below) and the plain intersection
+ * (RIGHT for the rarity-weighted advisory further down, where an undeclared
+ * scope must produce NO signal rather than a synthetic one) share one glob-
+ * comparison loop instead of two hand-written copies that could drift apart.
  */
-function overlappingPaths(a: Task, b: Task): string[] {
-  const filesA = a.files ?? [];
-  const filesB = b.files ?? [];
-  if (filesA.length === 0 && filesB.length === 0) return ["*"];
-  if (filesA.length === 0) return [...filesB];
-  if (filesB.length === 0) return [...filesA];
+function intersectingEntries(filesA: readonly string[], filesB: readonly string[]): string[] {
   const hits = new Set<string>();
   for (const fa of filesA) {
     for (const fb of filesB) {
@@ -124,6 +121,22 @@ function overlappingPaths(a: Task, b: Task): string[] {
     }
   }
   return [...hits];
+}
+
+/**
+ * The overlapping glob pairs between two tasks' `files:` lists. An absent or
+ * EMPTY list on EITHER side is fail-closed: it cannot be proven disjoint from
+ * anything, so it is reported as overlapping every entry of the other side (or,
+ * if the other side is ALSO absent/empty, a single synthetic `"*"` marker so the
+ * pair still overlaps even though neither declared any concrete path).
+ */
+function overlappingPaths(a: Pick<Task, "files">, b: Pick<Task, "files">): string[] {
+  const filesA = a.files ?? [];
+  const filesB = b.files ?? [];
+  if (filesA.length === 0 && filesB.length === 0) return ["*"];
+  if (filesA.length === 0) return [...filesB];
+  if (filesB.length === 0) return [...filesA];
+  return intersectingEntries(filesA, filesB);
 }
 
 /**
@@ -209,4 +222,176 @@ export function settledSetPayload(
     rejected: tasks.filter((t) => t.status === "rejected").length,
     lane_count: laneCount,
   };
+}
+
+/*
+ * ── W1-T533: RARITY-WEIGHTED OVERLAP WARNING (ADVISORY ONLY) ────────────────
+ *
+ * Four concurrent PRs (#1927/#1930/#1931/#1933) converged on
+ * `src/lib/open-prs-rest.ts`, a path only 6 of 277 shards declare (2%). RAW
+ * overlap — what `overlappingPaths` above computes — is useless as a
+ * filing-time signal for this: `src/run-task.ts` alone is declared by 103 of
+ * 277 shards (37%), and 18% of all shard PAIRS share at least one path, so a
+ * detector on bare intersection would flag roughly a fifth of the plan.
+ * WEIGHTING the overlap by how rare the shared path is, and reporting only
+ * the rare end, is precise across the 87% of paths named by three shards or
+ * fewer, and silent at the handful of hubs (design (i)/(iv), the task shard's
+ * own rationale (3)/(4)).
+ *
+ * ADVISORY, NEVER BLOCKING (design iii). Everything below is a pure function
+ * returning data for a human to read at the filing surface — it has no hook
+ * into `partitionByFileOverlap` above, `isDispatchEligible` (drain.ts), or
+ * any minting path, and adds none. Wiring this into dispatch would make it a
+ * FIFTH fired-and-unread signal alongside `daemon.tree_dirty`,
+ * `daemon.stale_code`, `CiFailure.outsidePrRange` and `dh-rate-limit` —
+ * design (iv) is explicit that this must not become that.
+ */
+
+/**
+ * How many of the plan's shards declare each repo-relative path — the rarity
+ * a shared path is scored against. {@link declarationCountsByPath} derives
+ * this from a task list; a caller may also hand in its own map (e.g. a
+ * cached count, or a fixture with a synthetic distribution) since this
+ * module performs no I/O of its own and never reads `plan/tasks.d` directly.
+ */
+export type PathDeclarationCounts = ReadonlyMap<string, number>;
+
+/**
+ * Counts how many DISTINCT tasks declare each `files:` entry — the raw input
+ * the rarity weighting is scored against. A task listing the same path twice
+ * counts it once (rarity is about how many SHARDS name a path, not how many
+ * times). Pure, synchronous, no I/O — `tasks` is whatever plan snapshot the
+ * caller already holds; `totalShardCount` for {@link rareOverlapWarnings} is
+ * simply `tasks.length` of that same snapshot.
+ */
+export function declarationCountsByPath(tasks: readonly Pick<Task, "files">[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const t of tasks) {
+    for (const path of new Set(t.files ?? [])) {
+      counts.set(path, (counts.get(path) ?? 0) + 1);
+    }
+  }
+  return counts;
+}
+
+/**
+ * The threshold the rarity weighting is scored against — POLICY DATA, not a
+ * literal buried in the predicate, the same discipline {@link
+ * DEFAULT_SWEEP_POLICY} (sweep.ts) already follows for its own thresholds. A
+ * fixture moves this by constructing its own policy object and passing it to
+ * {@link rareOverlapWarnings}; no code change is required to retune it.
+ */
+export interface OverlapWarningPolicy {
+  /**
+   * A shared path counts as RARE — worth an advisory warning — when the
+   * fraction of the plan's shards declaring it is AT OR BELOW this ceiling.
+   * Sized against the measured distribution (task rationale (3)/(4)): the 2%
+   * instance (`src/lib/open-prs-rest.ts`, 6/277) must clear it, the 37% hub
+   * (`src/run-task.ts`, 103/277) must not, and the 87% of all declared paths
+   * named by <=3 shards (well under 1.1%) sit far inside the ceiling with
+   * room to spare as the plan grows — the two-tailed sizing design (ii)
+   * requires.
+   */
+  rareDeclarationRatioCeiling: number;
+}
+
+export const DEFAULT_OVERLAP_WARNING_POLICY: OverlapWarningPolicy = {
+  rareDeclarationRatioCeiling: 0.05,
+};
+
+/**
+ * The open-PR side of a rarity check — just enough shape to score against,
+ * not a full GitHub PR view (this module has no GitHub dependency and never
+ * will — see the module doc's "NO LLM on this path" discipline extended to
+ * "no network I/O either"). `id` is whatever the filing surface should print
+ * (a PR number, `"#1930"`, a URL) — opaque to this function.
+ */
+export interface OpenPrFileScope {
+  id: string;
+  files?: readonly string[];
+}
+
+/**
+ * One advisory: `withPr` already declares `rarestPath`, the RAREST path
+ * `candidate` shares with it (there may be other, less-rare shared paths;
+ * only the rarest is named, since it is the one that cleared the ceiling).
+ */
+export interface RareOverlapWarning {
+  withPr: string;
+  rarestPath: string;
+  declaredByCount: number;
+  totalShardCount: number;
+}
+
+/**
+ * The rarity-weighted companion to `overlappingPaths` above. UNLIKE that
+ * function, this is deliberately NOT fail-closed: a candidate or open PR
+ * with an absent or empty `files:` produces NO warning, rather than the
+ * synthetic overlap-everything bias `overlappingPaths` applies for the
+ * pre-dispatch guard. That bias is right for a collision GUARD (which this
+ * is not — design iii); reused here it would fire this advisory against
+ * every open PR whenever a candidate's scope is merely undeclared, exactly
+ * the noise design (iv) forbids.
+ *
+ * For each `openPrs` entry sharing at least one path with `candidate`, finds
+ * the RAREST shared path (lowest declaration count) and reports the pair iff
+ * that path's declaration ratio is at or below
+ * `policy.rareDeclarationRatioCeiling` — i.e. a pair is reported only when
+ * their rarest shared ground is itself rare. A pair sharing ONLY a hub path
+ * (e.g. `src/run-task.ts`) is silent: the falsifier design (v) requires in
+ * both directions, and the one that IS the point of this predicate.
+ *
+ * PURE, ADVISORY DATA ONLY (design iii): the return value is a list of
+ * `{withPr, rarestPath, ...}` rows for a human to print at the filing
+ * surface (design iv — where a filer already reads, not a new dashboard).
+ * Nothing here inspects or influences `partitionByFileOverlap`'s dispatch
+ * decision, mints no task, and refuses no dispatch.
+ */
+export function rareOverlapWarnings(
+  candidate: Pick<Task, "files">,
+  openPrs: readonly OpenPrFileScope[],
+  declarationCounts: PathDeclarationCounts,
+  totalShardCount: number,
+  policy: OverlapWarningPolicy = DEFAULT_OVERLAP_WARNING_POLICY,
+): RareOverlapWarning[] {
+  const candidateFiles = candidate.files ?? [];
+  if (candidateFiles.length === 0 || totalShardCount <= 0) return [];
+  const warnings: RareOverlapWarning[] = [];
+  for (const pr of openPrs) {
+    const prFiles = pr.files ?? [];
+    if (prFiles.length === 0) continue;
+    const shared = intersectingEntries(candidateFiles, prFiles);
+    if (shared.length === 0) continue;
+    // SCORE ONLY PATHS THE COUNTS MAP ACTUALLY KNOWS, AND THE `?? 0` THIS REPLACES IS WHY.
+    // `intersectingEntries` reports the RAW strings from BOTH sides, while `globsIntersect`
+    // matched them through normalization/glob semantics — so a shared entry can be a spelling
+    // that no shard ever DECLARED, and `declarationCounts` (keyed on declared strings) has no
+    // entry for it. Defaulting such a path to 0 scored it as MAXIMALLY RARE, which inverted the
+    // one falsifier design (v) calls "the whole design": measured against a hub declared by
+    // 103 of 277 shards (37%), a candidate declaring `src/*.ts`, `src/**`, or `./src/run-task.ts`
+    // matched it and warned at `count=0`, while the identical literal spelling stayed correctly
+    // silent. Globs are not an exotic case here — matching them is the whole reason
+    // `globsIntersect` exists.
+    //
+    // Scoring the KNOWN entries fixes both directions at once, because a bridged pair always
+    // carries the concrete declared side too: `{src/*.ts, src/run-task.ts}` scores 103 and stays
+    // silent, `{src/lib/open-prs-rest.ts}` scores 6 and warns. When NOTHING shared is known, this
+    // reports nothing — the right direction for a purely advisory signal (design iii), since a
+    // warning naming a path no shard declares tells a filer nothing they could act on.
+    let rarestPath: string | undefined;
+    let rarestCount = 0;
+    for (const path of shared) {
+      const count = declarationCounts.get(path);
+      if (count === undefined) continue;
+      if (rarestPath === undefined || count < rarestCount) {
+        rarestPath = path;
+        rarestCount = count;
+      }
+    }
+    if (rarestPath === undefined) continue;
+    if (rarestCount / totalShardCount <= policy.rareDeclarationRatioCeiling) {
+      warnings.push({ withPr: pr.id, rarestPath, declaredByCount: rarestCount, totalShardCount });
+    }
+  }
+  return warnings;
 }
