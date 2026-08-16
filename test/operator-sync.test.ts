@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { runOperatorSync, type GitRunner } from "../src/lib/operator-sync.js";
 import { syncCommand } from "../src/run-task.js";
+
+const DECISIONS_FILE_NAME = "DECISIONS.md";
 
 // ── W1-T907: `rmd sync` — the sanctioned dedupe-then-pull recipe as one explicit verb.
 // Same discipline as test/self-sync.test.ts (real, throwaway git repos, no git mocking): every
@@ -421,14 +423,22 @@ test("W1-T907: a failed fast-forward refuses and says the local files are unaffe
 });
 
 test("W1-T907: an unreadable branch name and an absent DECISIONS file are tolerated", () => {
-  const { localDir } = gitFixture();
+  const { originDir, localDir } = gitFixture();
+  // Behind origin, and DECISIONS.md DELETED locally so `git status --porcelain` reports it dirty —
+  // that is what routes through classifyDecisions, where both reads must degrade to "" rather than
+  // throw: the local readFileSync (ENOENT) and the `git show origin/main:DECISIONS.md`.
+  writeFileSync(join(originDir, "plan", "tasks.yaml"), "orig: advanced\n", "utf8");
+  execFileSync("git", ["-C", originDir, "add", "."]);
+  execFileSync("git", ["-C", originDir, "commit", "--quiet", "-m", "advance"]);
+  // Delete from the WORKING TREE only (not `git rm`): the path stays TRACKED, which is what
+  // `isTracked` requires before classifyDecisions is consulted, while readFileSync now throws.
+  rmSync(join(localDir, DECISIONS_FILE_NAME));
+
   const real: GitRunner = (args) => execFileSync("git", ["-C", localDir, ...args], { encoding: "utf8" });
   const result = runOperatorSync(
     localDir,
     { dryRun: true },
     {
-      // symbolic-ref throws (detached HEAD shape) and `git show origin/main:DECISIONS.md` throws
-      // (the file does not exist at the ref) — both must degrade to a default, never propagate.
       git: (args) => {
         if (args[0] === "symbolic-ref") throw new Error("fatal: ref HEAD is not a symbolic ref");
         if (args[0] === "show" && String(args[1]).includes("DECISIONS.md")) throw new Error("fatal: path does not exist");
@@ -438,8 +448,5 @@ test("W1-T907: an unreadable branch name and an absent DECISIONS file are tolera
       warn: () => {},
     },
   );
-  assert.ok(
-    result.status !== "degraded" || result.reason !== "resolve-failed",
-    "an unreadable branch name must not be mistaken for an unresolvable HEAD",
-  );
+  assert.notEqual(result.status, "degraded", "neither unreadable read may degrade the whole run");
 });
