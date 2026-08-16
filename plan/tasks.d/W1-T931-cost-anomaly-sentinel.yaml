@@ -1,0 +1,104 @@
+- id: W1-T931
+  title: "A RUN CAN SPEND ANY AMOUNT SHORT OF THE $500 DAILY CEILING AND THE $100 `budget_usd` TRIPWIRE WITHOUT ANYTHING NOTICING — both guards are absolute and neither has fired in ten cycles, so an expensive run is only ever visible in aggregate: ledger `cost.anomaly` when a run exceeds its own class median by a policy-data multiplier, and surface it in NEEDS ME"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 75.00
+  rationale: |
+    FILED FROM fb-1785237559155-feef92 (2026-07-28, origin cli), item (4).
+    THE TWO EXISTING GUARDS ARE BOTH ABSOLUTE, AND THE PLAN ALREADY SAYS THEY DO NOT MEASURE RUNS.
+    `sweep.dailyCostCeilingUsd` is 500 (plan/policy.yaml, raised 150 -> 500 on 2026-08-04 after the
+    governor fired for the first time ever at $152.28) and gates the DAY, not the run. `budget_usd`
+    is 100 per task and MASTER-PLAN's own baseline records "0/31 trips, tenth cycle running", peak
+    run $26.380 (W1-T504) — "a tripwire nothing has approached in ten cycles is not measuring runs".
+    So the entire band between a normal run and $100 is unpoliced and unremarked.
+    THE FIXTURE IS ON THE RECORD: the W1-T7 arc burned $9.32 across strikes to a blocked verdict.
+    Nothing tripped, nothing was named, and the money is only legible by reading the ledger by hand
+    afterwards. That is the exact shape this sentinel exists to catch — not a runaway, an OUTLIER.
+    A CLASS MEDIAN IS THE RIGHT BASELINE AND THE INPUTS EXIST. `aggregateByClass` /
+    `ClassCalibration` (src/lib/retro.ts) already group ledgered runs by `taskClass` with per-run
+    cost; `cost_usd` rides every verdict line. A relative multiplier adapts as the fleet's cost
+    profile moves, which an absolute constant provably does not — that is why both existing
+    constants are stale by ten cycles.
+    RE-DERIVE BEFORE EDITING: confirm at head that no `cost.anomaly` step is already emitted and
+    that no NEEDS ME row already renders one. If either has appeared, close this rather than
+    duplicate it.
+  design: |
+    (i) THE THRESHOLD IS POLICY DATA, NEVER A SOURCE LITERAL — the whole point of W1-T252/W1-T253's
+    substrate, and the mistake `dailyCostCeilingUsd` and `budget_usd` both made. Add SCHEMA-BOUNDED
+    rows to plan/policy.yaml carrying `origin: net-new` (no prior source literal exists to lift
+    from) with min/max bounds and a comment stating the measured basis, exactly as every neighbouring
+    row does: the MULTIPLIER over the class median, and the MINIMUM SAMPLE the median needs before
+    the sentinel may speak at all.
+    (ii) A THIN CLASS IS SILENT, NOT ANOMALOUS. The per-class contrast has been UNDER-SAMPLED for
+    ten cycles — one `src` row, every time — so a median over n=1 or n=2 is noise and would fire on
+    the first slightly-long run. Below the minimum-sample row the sentinel emits NOTHING and says
+    why; the honest failure here is silence, never a false alarm, because a sentinel that cries wolf
+    in NEEDS ME is worse than no sentinel (it trains the operator to skim the queue).
+    (iii) MEDIAN, NOT MEAN, AND THAT IS LOAD-BEARING. The mean is dragged by the very outlier being
+    detected; policy.yaml's own autoTriage comment records this repo quoting "the single worst run
+    ever recorded as typical, overstating the median by 2.04x". Use the median.
+    (iv) ONE ROW PER RUN, IDEMPOTENT. A repeated pass over the same ledger must not re-ledger the
+    same anomaly or stack duplicate NEEDS ME rows. Dedup on run id.
+    (v) IT REPORTS; IT NEVER ACTS. `cost.anomaly` defers no dispatch, kills no worker, blocks no
+    merge and changes no mount. The runaway guards (the per-run turn limit and `budget_usd`) stay
+    exactly as they are — MASTER-PLAN's clause 4 that "imputed dollars gate nothing" is untouched by
+    a row that only makes an outlier VISIBLE.
+    (vi) THE CALL SITE IS A REAL DECISION — NAME IT, DO NOT DEFAULT INTO IT. Preference, stated:
+    hang the pass off the existing cost-governance path in src/lib/sweep.ts (where
+    `dailyCostCeilingUsd` and the cost governor already live and which already runs on the daemon's
+    cadence) rather than threading a new call through src/run-task.ts's many `log("verdict", …)`
+    sites — run-task.ts is 19,489 lines and the fleet's hottest overlap file, and a fifth verdict
+    call site there buys nothing this pass cannot get by reading the ledger. VERIFY that path from
+    source; if it genuinely does not reach, that is a scope-guard flag and a re-file, not a silent
+    edit of run-task.ts.
+    (vii) SHIPPED WIRED OR NOT AT ALL. W1-T322/W1-T323 exist because capabilities have shipped here
+    with no caller. The detector, its policy rows and its NEEDS ME row are ONE invariant and are
+    unsatisfiable piecewise: the detector alone ledgers nothing an operator sees, and a NEEDS ME row
+    alone has no producer. That coupling is the risk:high rationale below (Rule 19 / PR 588 merits
+    test), not a decomposition failure.
+    (viii) EXPLICITLY NOT IN SCOPE: retuning `dailyCostCeilingUsd` or `budget_usd`, any dispatch or
+    merge gate, per-account or per-instance cost division (W1-T408's env share), and the console/HTML
+    surfaces — `rmd status` text and `--json` project one model, which is the whole surface here.
+  acceptance:
+    - claim: "a run whose cost exceeds its class MEDIAN by the policy multiplier ledgers exactly one `cost.anomaly` row, and a run under it ledgers none"
+      proof: "unit test: test/cost-anomaly.test.ts"
+    - claim: "the multiplier and the minimum-sample floor are read from plan/policy.yaml with its schema bounds enforced — no source literal gates this"
+      proof: "unit test: test/cost-anomaly.test.ts"
+    - claim: "a class with fewer runs than the minimum-sample floor emits nothing and names the reason — the median is never taken over a thin sample"
+      proof: "unit test: test/cost-anomaly.test.ts"
+    - claim: "a repeated pass over the same ledger re-ledgers nothing and stacks no duplicate row (idempotent on run id)"
+      proof: "unit test: test/cost-anomaly.test.ts"
+    - claim: "an anomalous run surfaces as a NEEDS ME row naming the run, its class, its cost and the median it exceeded — the sentinel is wired, not shipped dark"
+      proof: "grep: costAnomaly in src/lib/status-board.ts"
+    - claim: "the sentinel gates nothing — no dispatch deferred, no worker stopped, no merge blocked by a cost.anomaly row"
+      proof: "unit test: test/cost-anomaly.test.ts"
+  risk: high
+  origin: feedback#fb-1785237559155-feef92
+  plan_refs: ["§9", "§4", "W1-T252", "W1-T253", "W1-T330", "W1-T148"]
+  files: [src/lib/cost-anomaly.ts, src/lib/sweep.ts, src/lib/status-board.ts, plan/policy.yaml, test/cost-anomaly.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high on BOTH of Rule 19's counts, deliberately: SPAN (src/lib, plan/, test/) and the
+    atomic-coupling exit (design (vii)) — the detector, the policy rows and the NEEDS ME row prove
+    ONE invariant that no subset can satisfy, the same shape W1-T250 was graded on. It is NOT
+    decomposed into three untestable halves.
+    budget_usd 75 — above the two sibling sensors (55 each) because this one spans five files and
+    writes a ledger step, below the 100 tripwire.
+    THE TEST PATH IS DECLARED IN `files:` (W1-T310); every proof above names a declared path.
+    plan/policy.yaml IS DECLARED because the rows are part of the shipped invariant, not a follow-up
+    — a multiplier left as a source constant is exactly the defect W1-T330 and W1-T331 had to
+    correct afterwards for `dailyCostCeilingUsd`.
+    A RUNNING DAEMON WILL NOT PICK UP A RETUNED MULTIPLIER MID-FLIGHT: `loadDefaultPolicy` memoizes
+    for the process lifetime (policy.yaml's own `dailyCostCeilingUsd` comment). State the shipped
+    values' basis in the row comments so a later reader can retune by plan PR without re-deriving.
+    NO depends_on: W1-T252/W1-T253 are the substrate and are LANDED, so the loader this reads
+    already exists.
+    SIBLINGS FROM THE SAME FEEDBACK: W1-T929 (cache-hit ratio) and W1-T930 (turn-efficiency per
+    merge). W1-T929 also declares src/lib/status-board.ts, so these two SERIALISE — correct
+    partitioner behaviour on a genuinely shared file, and cheaper than two half-tasks racing it.
+    THE FEEDBACK'S BATCH-LANE ASK IS REFUSED ON PLATFORM FACTS, not deferred — MASTER-PLAN §9
+    amendment, same filing.

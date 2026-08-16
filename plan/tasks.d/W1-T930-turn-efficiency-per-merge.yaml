@@ -1,0 +1,84 @@
+- id: W1-T930
+  title: "THE RETRO MEASURES TURNS PER RUN AND CALLS IT EFFICIENCY — `TypeCalibration`/`ClassCalibration` carry `avgTurns` over ALL runs and no output-token column at all, so five refused runs look cheaper than one long merge: add output tokens and turns per MERGED PR, per class, with the denominator's coverage printed beside it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 55.00
+  rationale: |
+    FILED FROM fb-1785237559155-feef92 (2026-07-28, origin cli), item (3).
+    WHAT THE RETRO ACTUALLY COMPUTES TODAY, read from source at filing time: `ClassCalibration`
+    (src/lib/retro.ts) is `{taskClass, runs, totalCostUsd, avgCostUsd, avgTurns, merged, mergeRate}`
+    and `aggregateByClass` builds `avgTurns` as `totalTurns / rs.length` — turns per RUN. There is
+    NO output-token field on either calibration interface. `classCalibrationTable` renders what
+    those fields hold and nothing more.
+    THE DENOMINATOR IS THE DEFECT. Turns-per-RUN improves when a class produces MORE refused runs,
+    because each refusal is short and dilutes the mean; turns-per-MERGE cannot be gamed that way —
+    it rises exactly when a class needs more work to land the same result, which is the earliest
+    quality-regression signal available and the one the feedback names.
+    OUTPUT TOKENS ARE THE DOMINANT SPEND TERM AND ARE ABSENT ENTIRELY. Output prices ~5x input
+    across the line-up, and `TokenUsage.output` is already recorded on every worker line by
+    `workerLedgerFields` (src/lib/worker.ts) — so the retro reports total dollars and average turns
+    while never reporting the single quantity those dollars are mostly made of.
+    THE PLAN HAS ALREADY BEEN BURNED BY EXACTLY THIS TABLE, TWICE, AND BOTH BURNS ARE CONSTRAINTS
+    ON THIS TASK, NOT COLOUR. (a) TURN COVERAGE: the current baseline reads 4 of 14 credited runs
+    (29%) reporting nonzero turns, and MASTER-PLAN blacks the column out — "`37` is an
+    under-estimate, not an average". (b) THE MERGE COLUMN IS KNOWN WRONG: the gather credited 8 of
+    30 real ships, because the dominant merge path is GATE-SIDE — the PR merges after the run
+    already ended blocked, so the run writes no `merged` verdict, and policy.yaml records a
+    77-POINT method gap between ledger-verdict merge counting and per-run trailer matching. A
+    turns-per-MERGE figure divided by a ledger-verdict merge count would inherit that error and
+    print it as an efficiency trend.
+  design: |
+    (i) NEW FIELDS ON THE EXISTING AGGREGATE, NOT A NEW ORGAN. Extend `ClassCalibration` (and its
+    `aggregateByClass` producer) with output tokens and turns per MERGED PR, and render them in
+    `classCalibrationTable` beside the columns already there. Same file, same shape, same ordering
+    guarantees — this is a column addition, not a second accounting.
+    (ii) NAME THE MERGE DENOMINATOR EXPLICITLY AND PRINT WHICH ONE WAS USED. CLAUDE.md's standing
+    rule derives merge state from the `Remudero-Task:` trailer, never from a ledger verdict line.
+    Whichever the gather can actually reach, the rendered row must SAY which denominator produced
+    it. A row that does not name its merge source is unreadable against the 77-point gap and must
+    not be emitted.
+    (iii) COVERAGE TRAVELS WITH THE NUMBER, and a thin denominator is BLACKED OUT rather than
+    printed. Reuse the existing discipline verbatim: MASTER-PLAN prints `37 ⚠ 29% coverage — DO NOT
+    USE` rather than suppressing or laundering the figure. A class with zero merges in the window
+    renders as such — never a division by zero, never an omitted row that reads as "fine".
+    (iv) TREND, NOT VERDICT. The sensor reports a per-cycle number; it files no task, opens no
+    escalation and changes no mount. "A class whose turns-per-merge climbs is the earliest quality
+    regression signal" is a claim the fleet cannot evaluate until several comparable cycles exist,
+    and the plan's own no-re-base rule (the per-class contrast has been under-sampled for ten
+    cycles) forbids acting on n=1.
+    (v) EXPLICITLY NOT IN SCOPE: changing any mount row in `.remudero/mounts.yaml`, changing the
+    retro CADENCE (W1-T264's policy rows), the model-class weekly-burn accounting (W1-T250/#898,
+    shipped — burn is a share of the weekly LIMIT, never imputed dollars, and this task must not
+    reintroduce a dollar objective), and editing src/lib/worker.ts (the `output` field is already
+    recorded).
+  acceptance:
+    - claim: "output tokens and turns are reported per MERGED PR, per task class, alongside the existing per-run figures rather than replacing them"
+      proof: "unit test: test/turn-efficiency.test.ts"
+    - claim: "the rendered row NAMES which merge denominator produced it, and a row that cannot name its merge source is not emitted"
+      proof: "unit test: test/turn-efficiency.test.ts"
+    - claim: "a class with thin turn coverage or zero merges in the window is blacked out with its coverage fraction — never a divide-by-zero, never a bare number"
+      proof: "unit test: test/turn-efficiency.test.ts"
+    - claim: "the per-merge figures are produced by the existing class aggregate, not a second accounting path"
+      proof: "grep: turnsPerMerge in src/lib/retro.ts"
+  risk: high
+  origin: feedback#fb-1785237559155-feef92
+  plan_refs: ["§9", "W1-T167", "W1-T250", "W1-T264"]
+  files: [src/lib/retro.ts, test/turn-efficiency.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    risk:high is Rule 19's SPAN (src/lib + test/), the grade W1-T310's ruling settled for a src
+    change plus its new test. Blast radius argues DOWN: the retro gather is a report; a wrong column
+    misleads a reader and gates nothing.
+    budget_usd 55 — two derived columns on an existing aggregate plus their renderer.
+    THE TEST PATH IS DECLARED IN `files:` (W1-T310).
+    NO depends_on, and DELIBERATELY NOT ON W1-T250 (which SHIPPED as #898): the weekly-burn
+    accounting answers "which model class burns the window"; this answers "how much output and how
+    many turns does a class spend per thing that actually LANDED". Different numerator, different
+    denominator, same file — an implementer must not collapse them.
+    SCOPE IS ONE FILE ON PURPOSE. src/lib/retro.ts is the single home of both calibration
+    aggregates and their renderers, so this needs no cross-file coupling and can batch against the
+    sibling filings (W1-T929, W1-T931) rather than serialising with them.
