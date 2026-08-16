@@ -2518,9 +2518,108 @@ export function runWorktreeReapRung(
  * strictly headroom (`1 << 24` = 16 MiB, the orientation.ts:72 in-repo precedent) for every other
  * O(1) caller, since a larger ceiling costs nothing unless it is actually approached.
  */
+/**
+ * W1-T525 — one call's rate-limit reading, taken off THE RESPONSE THAT SPENT IT.
+ *
+ * `resource` is load-bearing and is why this is not a single number: `X-Ratelimit-Resource` names
+ * WHICH bucket the response drew from, and `core` and `graphql` are separate buckets that reset
+ * separately. A meter that records a remaining count without its family measures the wrong thing —
+ * it would let a healthy `core` reading mask an exhausted `graphql` one, which is exactly the
+ * failure this seam exists to make visible.
+ */
+export interface GhRateLimitReading {
+  remaining: number;
+  limit: number;
+  used: number;
+  reset: number;
+  resource: string;
+}
+
+/**
+ * Split `gh api -i` output into its header block and its body. `gh` emits the status line, the
+ * headers, a blank line, then the body — CRLF against a real server, but tolerant of LF here so a
+ * fixture need not carry carriage returns. Returns the whole input as `body` with empty `headers`
+ * when no blank-line separator is present, so a caller that somehow received an un-included
+ * response still parses exactly as it did before this existed.
+ */
+export function splitGhIncludedResponse(raw: string): { headers: string; body: string } {
+  const crlf = raw.indexOf("\r\n\r\n");
+  const lf = raw.indexOf("\n\n");
+  const at = crlf >= 0 && (lf < 0 || crlf <= lf) ? crlf : lf;
+  const width = at === crlf && crlf >= 0 ? 4 : 2;
+  if (at < 0) return { headers: "", body: raw };
+  return { headers: raw.slice(0, at), body: raw.slice(at + width) };
+}
+
+/**
+ * Parse a {@link GhRateLimitReading} out of a header block, or `undefined` when the headers do not
+ * carry a complete one.
+ *
+ * FAIL TOWARD "NO READING", NEVER TOWARD A FABRICATED ONE. A partial or non-numeric header set
+ * returns `undefined` rather than a zero — a zero would read as "budget exhausted" and would widen
+ * the pacer on a parse bug rather than on evidence. Header names are matched case-insensitively
+ * because GitHub has shipped both `X-RateLimit-` and `x-ratelimit-` spellings.
+ */
+export function parseGhRateLimitHeaders(headers: string): GhRateLimitReading | undefined {
+  const field = (name: string): string | undefined => {
+    const m = new RegExp(`^${name}:[ \\t]*(.+)$`, "im").exec(headers);
+    return m ? m[1].trim() : undefined;
+  };
+  const num = (name: string): number | undefined => {
+    const raw = field(name);
+    if (raw === undefined || !/^\d+$/.test(raw)) return undefined;
+    return Number(raw);
+  };
+  const remaining = num("x-ratelimit-remaining");
+  const limit = num("x-ratelimit-limit");
+  const used = num("x-ratelimit-used");
+  const reset = num("x-ratelimit-reset");
+  const resource = field("x-ratelimit-resource");
+  if (remaining === undefined || limit === undefined || used === undefined) return undefined;
+  if (reset === undefined || !resource) return undefined;
+  return { remaining, limit, used, reset, resource };
+}
+
+/** The most recent reading {@link ghJson} observed, or `undefined` before any metered call. */
+let lastReading: GhRateLimitReading | undefined;
+
+/**
+ * W1-T525 — read the budget off the call that spent it. THE FREE `gh api rate_limit` PROBE IS NOT
+ * THE SOURCE AND MUST NEVER BECOME ONE: measured back to back, the probe reported 4,960 remaining
+ * while an ordinary `repos/{owner}/{repo}` read on the same host reported 3,259 — different
+ * counters with different resets, not rounding. A floor reading the probe would see plenty while
+ * the bucket the fleet is actually spending was nearly gone.
+ */
+export function lastGhRateLimitReading(): GhRateLimitReading | undefined {
+  return lastReading;
+}
+
+/** Test-only reset so one suite's metered call cannot leak a reading into the next. */
+export function resetGhRateLimitReading(): void {
+  lastReading = undefined;
+}
+
+/**
+ * W1-T525 — THE METERED ENTRY POINT. Behaviourally identical to its pre-W1-T525 self for every one
+ * of its call sites: same signature, same return, same throw. It additionally records the response's
+ * own rate-limit headers when it can.
+ *
+ * `-i` IS ADDED ONLY FOR `gh api`, AND THAT RESTRICTION IS NOT COSMETIC. `--include` is an `api`
+ * subcommand flag; `gh pr view` has no such flag (verified against the installed CLI's own help),
+ * and `ghJson` is called with `["pr", "view", …]` today. Adding it unconditionally would turn every
+ * one of those calls into an unknown-flag error. So a non-`api` invocation is passed through byte
+ * for byte and simply yields no reading — the seam meters what it can rather than breaking what it
+ * cannot.
+ */
 export function ghJson(args: string[]): unknown {
-  const out = execFileSync("gh", args, { encoding: "utf8", maxBuffer: 1 << 24 });
-  return JSON.parse(out);
+  const metered = args[0] === "api" && !args.includes("-i") && !args.includes("--include");
+  const effective = metered ? ["api", "-i", ...args.slice(1)] : args;
+  const out = execFileSync("gh", effective, { encoding: "utf8", maxBuffer: 1 << 24 });
+  if (!metered) return JSON.parse(out);
+  const { headers, body } = splitGhIncludedResponse(out);
+  const reading = parseGhRateLimitHeaders(headers);
+  if (reading) lastReading = reading;
+  return JSON.parse(body);
 }
 
 export function ghPrView(prUrl: string): { state: string; mergeable: string; url: string } {

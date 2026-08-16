@@ -85,9 +85,37 @@ export interface GhCallPacer {
    *  gap BETWEEN calls, never a call's own duration. */
   wait(): void;
   /** Record how the call `wait()` just gated actually resolved: `true` for a rate-limit-classified
-   *  failure, `false` for anything else (including success). */
-  recordResult(rateLimited: boolean): void;
+   *  failure, `false` for anything else (including success).
+   *
+   *  W1-T525 adds an OPTIONAL second argument: the rate-limit reading taken off that call's own
+   *  response. Optional so every existing caller compiles and behaves byte-identically — omitting
+   *  it is exactly the pre-W1-T525 reactive-only pacer. */
+  recordResult(rateLimited: boolean, budget?: GhBudgetReading): void;
 }
+
+/**
+ * W1-T525 — the pacer's PROACTIVE input: what the bucket this call just drew from has left.
+ *
+ * Deliberately structural rather than a bare number, because `resource` names WHICH bucket
+ * (`core` and `graphql` are separate and reset separately), and a pacer fed a remaining count
+ * without its family would slow every call on one bucket's exhaustion.
+ */
+export interface GhBudgetReading {
+  remaining: number;
+  limit: number;
+  resource: string;
+}
+
+/**
+ * The share of a bucket's limit at or below which {@link createGhCallPacer} widens its gap WITHOUT
+ * waiting for a failure. 0.1 keeps the pre-W1-T525 behaviour for the overwhelming majority of
+ * calls — a bucket has to be down to its last tenth before spacing changes.
+ *
+ * THIS IS PACING, NOT A FLOOR. It widens the gap between calls; it refuses no call, stands nothing
+ * down and returns no error. The floor policy — thresholds, stand-downs, per-lane degradation — is
+ * W1-T529, which `depends_on` this task precisely so it has a number to read.
+ */
+export const DEFAULT_GH_PACE_LOW_WATER_FRACTION = 0.1;
 
 /**
  * Build a {@link GhCallPacer}. `now`/`sleepSync` are injectable (mirrors this codebase's other
@@ -102,12 +130,14 @@ export function createGhCallPacer(
   opts: {
     minGapMs?: number;
     rateLimitGapMs?: number;
+    lowWaterFraction?: number;
     now?: () => number;
     sleepSync?: (ms: number) => void;
   } = {},
 ): GhCallPacer {
   const minGapMs = opts.minGapMs ?? DEFAULT_GH_PACE_MIN_GAP_MS;
   const rateLimitGapMs = opts.rateLimitGapMs ?? DEFAULT_GH_PACE_RATE_LIMIT_GAP_MS;
+  const lowWaterFraction = opts.lowWaterFraction ?? DEFAULT_GH_PACE_LOW_WATER_FRACTION;
   const now = opts.now ?? (() => Date.now());
   const sleepSync = opts.sleepSync ?? defaultBlockingSleepSync;
   let lastCallAt: number | undefined;
@@ -120,8 +150,15 @@ export function createGhCallPacer(
       }
       lastCallAt = now();
     },
-    recordResult(rateLimited) {
-      gapMs = rateLimited ? rateLimitGapMs : minGapMs;
+    recordResult(rateLimited, budget) {
+      // W1-T525 — a call that ALREADY failed still widens, exactly as before. What is new is the
+      // second arm: a SUCCESSFUL call whose own response says the bucket is nearly gone widens too,
+      // so the gap opens BEFORE exhaustion rather than after it. A reading with a non-positive
+      // limit is ignored rather than treated as low — a nonsense denominator must not manufacture
+      // a slowdown out of a parse bug.
+      const low =
+        !!budget && budget.limit > 0 && budget.remaining <= budget.limit * lowWaterFraction;
+      gapMs = rateLimited || low ? rateLimitGapMs : minGapMs;
     },
   };
 }
