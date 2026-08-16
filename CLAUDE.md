@@ -368,12 +368,6 @@ forensic detail, so the narrative does not need to live here.
   without every form. *(recon-AE §0; re-derived 2026-08-05, and CORRECTED 2026-08-12 after the
   `.gz`-only idiom returned a silent **0** for a pattern with 3 real hits — its own positive control
   passing at 257k the whole time)*
-- **A new ledger step that any DECISION reads must be added to `DECISION_RELEVANT_LEDGER_STEPS`
-  (`src/lib/ledger.ts`) in the same PR.** `priorActionsFromLedger` enforces `ABSENT_REPUSH_CAP` by
-  COUNTING `sweep.absent_repush` lines, so a rotation archiving them resets the count to zero and
-  every rotation re-earns the PR another empty commit — the unbounded loop the cap exists to
-  prevent. `test/ledger-rotation.test.ts` re-derives the expected set from every consumer's source;
-  a scoped local run cannot catch this. *(#977 — the bound lives in the ledger, so the line IS the bound)*
 - **A ledger line must carry the reason from the DECISION THAT PRODUCED ITS OUTCOME.**
   `automerge.armed` once logged `outcome: "ledger-refused"` beside `reason: "verdict is a full PASS"`
   — outcome from the gate that refused, reason from `decideAutoMergeArm` which had APPROVED, with
@@ -552,6 +546,12 @@ forensic detail, so the narrative does not need to live here.
   never run on them: absence, not agreement. `baseCausedCheckName` (`src/lib/sweep.ts`) needs the
   check failing on EVERY open PR, so one older head silently refutes a real base outage. Restrict
   the comparison to heads built after the check first appeared. *(2026-08-16, #1919)*
+- **(h) A CHANGE THAT REMOVES AN ACCESS PATH MUST PROVE THE REPLACEMENT FIRST, FROM A NEW SESSION
+  — AN EXISTING CONNECTION IS NOT EVIDENCE.** `PasswordAuthentication no` went live against a
+  0-byte `authorized_keys`; two pre-change sessions survived only because sshd never
+  re-authenticates an established connection, and no third could have opened by any method. Prove
+  the replacement under `BatchMode=yes` (which fails rather than prompting) and keep the old path
+  until it does. The recurring shape is CREDENTIAL AND ACCESS ROTATION, not ssh. *(2026-08-16)*
 
 ## Operating this host
 
