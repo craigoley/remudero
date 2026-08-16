@@ -494,6 +494,7 @@ import {
 } from "./lib/status.js";
 import {
   DEFAULT_SWEEP_POLICY,
+  actionableGateFailuresFromReasons,
   armOutcomeArmed,
   checkCostGovernor,
   checkQueueGovernor,
@@ -517,6 +518,7 @@ import {
   strikeCapForAnswer,
   terminalStateReason,
   toQuestionEntry,
+  type ActionableGateFailure,
   type ArmedStalledPr,
   type CiFailure,
   type ClarificationQuestion,
@@ -14582,6 +14584,46 @@ function unmetFromLedger(lines: Array<Record<string, unknown>>, taskId: string):
 }
 
 /**
+ * W1-T923's producer: recover a GATE failure's named remedy for a task/PR from the ledger — the
+ * SAME `review.posted` scan {@link unmetFromLedger} runs above, but reading it for the shape
+ * that function's OWN result leaves empty: a failing review whose `unmet_criteria` came back
+ * `[]` (no unmet acceptance criterion), which is exactly the #1991 motivating case (12/12
+ * criteria `executed_pass`, `unmet_criteria: []`, yet `state: "failure"`).
+ *
+ * STRUCTURED, NEVER PARSED (design note vi): this reads the LENGTH of the ledger's structured
+ * `reasons` array, never the CONTENT of `failure_reason` (`verdict.summary`, free prose a regex
+ * over which design note vi forbids). Exactly ONE structured reason is treated as one
+ * unambiguous, single-form remedy (design note iv) and copied through VERBATIM — the same
+ * pass-through {@link unmetFromLedger} already does for a criterion's own `reason`, never a
+ * re-derivation. TWO OR MORE reasons name a CHOICE between forms (or several independent
+ * problems) and are EXCLUDED entirely, never included-but-flagged: #1991's own falsifier is a
+ * provenance check that accepts `Chosen (RECOMMENDED, auto)` OR an operator-attribution line,
+ * crediting different authors — a worker acting on the wrong one misattributes a ratified
+ * `DECISIONS.md` ruling. ZERO reasons (today's shape for most gate failures, including #1991's
+ * OWN ledger row, which carries `reasons: []`) yields `[]`: nothing structured was named, so
+ * nothing is claimed to be — the honest outcome design note vi asks for rather than a parser.
+ *
+ * `failure_class`/`failure_reason` are NEVER read here (design note v): #1991 is classed
+ * `test_theater` — the class this design would otherwise treat as unautomatable — while its
+ * `reasons` (once a check populates them) would still name the remedy; keying on the class would
+ * mis-sort the very case this function exists for. The single-form-vs-choice DECISION itself is
+ * {@link actionableGateFailuresFromReasons} (lib/sweep.ts) — this function's own job is only the
+ * ledger scan, mirroring `unmetFromLedger` immediately above.
+ */
+function actionableGateFailuresFromLedger(lines: Array<Record<string, unknown>>, key: string): ActionableGateFailure[] {
+  let unmetCount = 0;
+  let reasons: string[] = [];
+  for (const line of lines) {
+    if (line.step !== "review.posted" || line.task_id !== key) continue;
+    if (line.state === "success") { unmetCount = 0; reasons = []; continue; }
+    unmetCount = Array.isArray(line.unmet_criteria) ? line.unmet_criteria.length : 0;
+    reasons = Array.isArray(line.reasons) ? line.reasons.map(String) : [];
+  }
+  if (unmetCount > 0) return [];
+  return actionableGateFailuresFromReasons(reasons);
+}
+
+/**
  * Fix strikes already attempted for a PR — a straight `fix.dispatch` (task_id)
  * count. W1-T78 fixed the cold-dispatch `log` wrapper (`buildSweepEffects`'s
  * `dispatchFix`) to stamp the REAL `task.id` on every `fix.dispatch`/`fix.review`
@@ -14832,6 +14874,12 @@ export function buildOpenPrViews(
     // can be READ FROM, never what "recoverable" means.
     const filingUnmetKey = !taskId && isPlanOnlyFilingPr(ledger, pr.url) ? `PR-${pr.number}` : undefined;
     const unmetKey = taskId ?? filingUnmetKey;
+    // W1-T923 (design note ii): the SAME synthetic `PR-<n>` fallback {@link escalationTaskIdFor}
+    // already mints, but WITH NO `isPlanOnlyFilingPr` restriction — that restriction is what
+    // confines `filingUnmetKey` above to plan filings, and #1991 (the motivating case) is a
+    // `DECISIONS.md` PR, not a filing. This widens WHERE a gate failure's remedy can be READ
+    // FROM; it does not touch `unmetKey`/`criteriaRecoverable` or what either means.
+    const gateFailureKey = taskId ?? `PR-${pr.number}`;
     return {
       prNumber: pr.number,
       prUrl: pr.url,
@@ -14846,6 +14894,10 @@ export function buildOpenPrViews(
       // now ALSO be populated for a task-id-less PR (the `filingUnmetKey` fallback above) — this
       // stays `false` even then, on purpose (see the note above `filingUnmetKey`).
       criteriaRecoverable: taskId !== undefined,
+      // W1-T923: a SIBLING read, off the SAME `review.posted` ledger line `unmetCriteria` above
+      // already scans — see `actionableGateFailuresFromLedger`'s own doc for why it is keyed
+      // differently (no `isPlanOnlyFilingPr` gate) and why it never parses `failure_reason`.
+      actionableGateFailures: reviewState === "failure" ? actionableGateFailuresFromLedger(ledger, gateFailureKey) : [],
       priorStrikes: priorStrikesFor(ledger, taskId, currentStrikeRegimeFor(ledger, taskId)),
       strikeHistory: deriveStrikeHistory(ledger, taskId),
       supersededBy,
