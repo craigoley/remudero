@@ -12,5 +12,20 @@ raw: "AA16B6 ROOT CAUSE (follow-up): the npm-global claude symlink was rewritten
 attachments: []
 origin: cli
 status: proposed
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/1932
+summary:
+  headline: Auto-updater overwrote spawnable binary; decide on build safeguards
+  what_happened: On 2026-07-23 16:05Z, CLI auto-updater partially completed and
+    overwrote the npm-global claude symlink with a non-executable script,
+    breaking SDK spawns for ~45 minutes. Error messages blamed musl/glibc, but
+    the real cause was EACCES (permission denied) on script execution.
+  decision: "Implement three controls: pin binary path+version in build, disable
+    or gate auto-update on this host, and add spawn_binary_unlaunchable error
+    with real errno."
+  options:
+    - label: Implement all three safeguards
+      consequence: Prevents recurrence; requires build change and deployment coordination.
+    - label: Gate auto-updater immediately
+      consequence: Mitigates risk fast; leaves binary management gap unresolved.
+    - label: Add diagnostic error only
+      consequence: Improves debugging; doesn't prevent binary corruption from auto-update.
