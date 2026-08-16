@@ -30,6 +30,18 @@ import { lintPlanCommand } from "../src/run-task.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
+// `commit-tree` refuses without an author/committer identity, and CI runners carry none —
+// unlike a developer's machine, which usually has `user.name`/`user.email` set globally. Every
+// other fixture in this suite that mints a real commit (e.g. inbox-approve.test.ts) sets these
+// explicitly for the same reason; this is not a signing identity, just a label on an unreachable,
+// gc-reaped commit.
+const GIT_IDENTITY_ENV = {
+  GIT_AUTHOR_NAME: "t",
+  GIT_AUTHOR_EMAIL: "t@t",
+  GIT_COMMITTER_NAME: "t",
+  GIT_COMMITTER_EMAIL: "t@t",
+};
+
 function git(args: string[], env?: NodeJS.ProcessEnv): string {
   return execFileSync("git", args, {
     cwd: REPO_ROOT,
@@ -80,7 +92,10 @@ function baseCommitWithDuplicate(id: string): string {
     }).trim();
     git(["update-index", "--add", "--cacheinfo", `100644,${blob},plan/tasks.d/zzz-planted-duplicate.yaml`], env);
     const tree = git(["write-tree"], env);
-    return git(["commit-tree", tree, "-p", "HEAD", "-m", "planted: a base carrying a duplicate id"]);
+    return git(
+      ["commit-tree", tree, "-p", "HEAD", "-m", "planted: a base carrying a duplicate id"],
+      GIT_IDENTITY_ENV,
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
