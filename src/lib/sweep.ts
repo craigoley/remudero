@@ -5,6 +5,7 @@ import { cappedOverrideFromLedger, decideAutoMergeArm, postedArmFactsFromLedger,
 import type { ArmDecision, CriterionVerdict } from "./review.js";
 import type { QuestionEntry } from "./worker.js";
 import { FLEET_NOTICE_LABEL, NEEDS_HUMAN_LABEL, type AskType, type IssueGateway, type OpenIssue } from "./escalate.js";
+import { GhPaceFloorStandDownError } from "./open-prs-rest.js";
 
 /**
  * lib/sweep.ts — the level-triggered PR-pipeline reconciler (W1-T77, ratifies
@@ -2486,6 +2487,71 @@ interface PriorActions {
   absentRepushes: Map<number, { count: number; shas: Set<string> }>;
 }
 
+/**
+ * W1-T529 (iv) — WHAT EACH LANE'S STAND-DOWN COSTS, NAMED SO THE COST IS CHOSEN RATHER THAN
+ * DISCOVERED, and carried verbatim into the PR's own `stand_down_reason` so a declined pass is
+ * legible instead of looking idle.
+ *
+ * THIS TABLE NAMES A COST; IT DOES NOT DECIDE ANYTHING. By the time it is read the guarded call
+ * has ALREADY been refused — {@link GhPaceFloorStandDownError} is thrown by `GhCallPacer.wait()`
+ * BEFORE the call it guards ever runs (lib/open-prs-rest.ts's `paceGhEntry`, whose `wait()` sits
+ * outside its own `try` precisely so this propagates un-rewrapped). So there is no "should this
+ * lane stand down" branch to gate: the lane already did. A disposition missing from this table
+ * still stands down, under the generic reason in {@link budgetFloorStandDown} — the table only
+ * makes the specific cost sayable, which is what design (iv) asks for.
+ */
+const BUDGET_FLOOR_LANE_COST: Partial<Record<Disposition, string>> = {
+  // Design (iv), verbatim: "A SKIPPED REVIEW leaves a GREEN PR UNMERGED — visible, recoverable
+  // next pass." RECOVERABLE is the load-bearing half — see `budgetFloorStandDown`'s own doc for
+  // the refusal key this deliberately does NOT write.
+  "post-review": "a green PR is left unmerged this pass and re-derives next tick",
+  // Design (iv), verbatim: "A SKIPPED FIX STRIKE MUST NOT CONSUME THE STRIKE."
+  "blocked-fixable": "a fix dispatch is skipped and NO strike is spent",
+  // Same lane, same dedup set (`fixed`) — W1-T106 folded `conflicted` into it, so it inherits
+  // that guarantee rather than getting a second one.
+  conflicted: "a conflict fix dispatch is skipped and NO strike is spent",
+  // Arming is idempotent at the GitHub level, so a deferred arm loses nothing but a tick.
+  mergeable: "an auto-merge arm is deferred one pass; arming is idempotent so nothing is lost",
+  // An escalation not raised is strictly better than one raised twice; the PR stays open and is
+  // re-derived whole next pass.
+  "blocked-ambiguous": "an escalation is deferred; the PR stays open and is re-derived next pass",
+  // The hold/terminal outcome is re-read from live state next pass, so nothing is carried.
+  "dep-review": "a dependency review is deferred one pass and re-read from live state",
+  // Closing a stale PR is the least urgent action the sweep takes.
+  stale: "a stale-PR close is deferred one pass",
+};
+
+/**
+ * W1-T529 (iv) — IS THIS THROW THE BUDGET FLOOR, AND WHAT DOES DECLINING THIS LANE COST? Returns
+ * the `standDownReason` to record when it is, and `undefined` for every other throw — which stays
+ * on the ordinary `actionError`/`sweep.action_failed` path, byte-for-byte unchanged.
+ *
+ * WHY THE TWO CLASSES MUST NOT SHARE A PATH. A stand-down is not a failed action: the call never
+ * ran, nothing about THIS PR was observed, and nothing about it is known to be wrong. Routing it
+ * through `actionError` would (a) count it in `actionsFailed`, and (b) in the post-review lane
+ * write a `review.post_refused` row — and that row is not a diagnostic, it is a VERDICT.
+ * {@link OpenPrView.reviewPostRefused}'s own doc says a second absence at the same sha is
+ * escalated rather than retried, because "the one deterministic remedy already ran its course for
+ * this exact push"; `reviewPostRefusedFor` (run-task.ts) keys it `taskId@headSha`, so a head
+ * marked that way is never re-reviewed until a NEW PUSH mints a new sha. A PR that was merely
+ * unaffordable for one tick would be deduped permanently and then escalated as ambiguous. That
+ * same doc already draws exactly this line for the transient case: `review.post_failed` "does NOT
+ * set this — that case must keep retrying, never escalate on a mere network hiccup." An exhausted
+ * budget is that class, not the refusal class.
+ *
+ * AND NO SECOND NO-STRIKE MECHANISM (design (iv) in writing: "PRESERVE THAT EXISTING PROPERTY
+ * RATHER THAN INVENT A SECOND MECHANISM"). Every caller sets `acted = false`, and that alone is
+ * the guarantee: {@link priorActionsFromLedger} admits a `sweep.disposed` row into
+ * `armed`/`fixed`/`escalated`/`closed`/`depReviewed` only when `line.acted === true`, so a
+ * stood-down lane seeds no dedup key, spends no strike, and is re-derived whole next pass — the
+ * property W1-T527 established, reused rather than reimplemented.
+ */
+function budgetFloorStandDown(e: unknown, disposition: Disposition): string | undefined {
+  if (!(e instanceof GhPaceFloorStandDownError)) return undefined;
+  const cost = BUDGET_FLOOR_LANE_COST[disposition] ?? "this lane's action is skipped and re-derives next tick";
+  return `gh budget at or below the stand-down floor (${e.resource} at ${e.remaining}/${e.limit}) — ${cost}`;
+}
+
 function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorActions {
   const armed = new Set<string>();
   const fixed = new Set<string>();
@@ -3259,23 +3325,35 @@ export async function runSweep(
           }
         } catch (e) {
           acted = false;
-          actionError = String((e as Error)?.message ?? e);
-          // W1-T99 — the canonical crash this task fixes (2026-07-17: the first live
-          // BLOCKED-class escalation's `gh issue create` threw on a missing label and
-          // took the WHOLE reconciler down with it). This PR's own `sweep.disposed`
-          // line below already carries `action_error`; this is a SEPARATE, distinctly
-          // named step so a failed action is grep-able on its own, never buried inside
-          // the per-pass disposed record. Reached only when !deps.dryRun (acted is
-          // gated on that above), so a preview run still leaves no trace.
-          appendLine(deps.ledgerPath, {
-            run_id: deps.runId,
-            task_id: pr.taskId ?? "SWEEP",
-            step: "sweep.action_failed",
-            pr_number: pr.prNumber,
-            pr_url: pr.prUrl,
-            disposition,
-            error: actionError,
-          });
+          // W1-T529 (iv) — DEGRADE, DO NOT RETRY, AND DO NOT CALL IT A FAILURE. A budget floor
+          // stand-down means the guarded call was refused BEFORE it ran, so this lane did not
+          // fail — it declined. Recorded as a stand-down (this PR's own `sweep.disposed` line
+          // carries `stand_down_reason`, the field every other non-actionable disposition
+          // already uses) rather than as an `actionError`, so it neither counts in
+          // `actionsFailed` nor writes the `sweep.action_failed` row below. `acted` is false
+          // either way, which is the whole no-strike guarantee — see `budgetFloorStandDown`.
+          const floorStandDown = budgetFloorStandDown(e, disposition);
+          if (floorStandDown !== undefined) {
+            standDownReason = floorStandDown;
+          } else {
+            actionError = String((e as Error)?.message ?? e);
+            // W1-T99 — the canonical crash this task fixes (2026-07-17: the first live
+            // BLOCKED-class escalation's `gh issue create` threw on a missing label and
+            // took the WHOLE reconciler down with it). This PR's own `sweep.disposed`
+            // line below already carries `action_error`; this is a SEPARATE, distinctly
+            // named step so a failed action is grep-able on its own, never buried inside
+            // the per-pass disposed record. Reached only when !deps.dryRun (acted is
+            // gated on that above), so a preview run still leaves no trace.
+            appendLine(deps.ledgerPath, {
+              run_id: deps.runId,
+              task_id: pr.taskId ?? "SWEEP",
+              step: "sweep.action_failed",
+              pr_number: pr.prNumber,
+              pr_url: pr.prUrl,
+              disposition,
+              error: actionError,
+            });
+          }
         }
       }
     }
@@ -3376,51 +3454,80 @@ export async function runSweep(
     runNow.map(async (job) => {
       let acted = true;
       let actionError: string | undefined;
+      // W1-T529 (iv): set INSTEAD of `actionError` when the throw is a budget floor stand-down —
+      // carried onto this PR's own `sweep.disposed` line as `stand_down_reason`, the same field
+      // every other declined disposition already uses.
+      let standDownReason: string | undefined;
       try {
         if (postReview) {
           try {
             await postReview(job.pr);
           } catch (e) {
             acted = false;
-            actionError = String((e as Error)?.message ?? e);
-            appendLine(deps.ledgerPath, {
-              run_id: deps.runId,
-              task_id: job.pr.taskId ?? "SWEEP",
-              step: "sweep.action_failed",
-              pr_number: job.pr.prNumber,
-              pr_url: job.pr.prUrl,
-              disposition: "post-review",
-              error: actionError,
-            });
-            // W1-T529 design (v) — THE MISSING DEDUP KEY. `sweep.action_failed` alone leaves
-            // NO key `PriorActions.postReviewed` can see: that set is built ONLY from
-            // `review.posted`/`review.post_refused` lines (see its own doc above), never from
-            // `sweep.disposed`/`sweep.action_failed`. Without this, a thrown attempt —
-            // including a guarded call standing down at the floor once one is wired ahead of
-            // this call (lib/open-prs-rest.ts's `GhCallPacer`) — re-attempts THIS EXACT HEAD
-            // every following pass, without bound: a floor bounds the RATE of calls but, on
-            // its own, not the REPEAT of the attempt, and each retry against an exhausted
-            // budget only deepens it. This records the SAME outcome shape
-            // `postReviewStatusGuarded` (lib/review.ts) already writes for a graceful
-            // refusal — recording the throw as an OUTCOME the existing dedup already reads,
-            // never a second mechanism (design v's own "the honest shape"). `acted` stays
-            // `false` above regardless, so this never touches the fix-strike lane's own
-            // `acted:true`-gated dedup (design iv) — a different lane, a different set.
-            appendLine(deps.ledgerPath, {
-              run_id: deps.runId,
-              // W1-T529 (v) — THE EMPTY STRING, NEVER THE "SWEEP" PLACEHOLDER, AND THE DIFFERENCE
-              // IS THE WHOLE DEDUP. The consult site reads
-              // `prior.postReviewed.has(`${pr.taskId ?? ""}@${pr.headSha}`)`, so a task-id-less PR
-              // looks up `@<sha>`. Writing "SWEEP" here produced `SWEEP@<sha>`: a row that reads
-              // correctly in the ledger, matches nothing, and left the attempt repeating every
-              // pass — MEASURED against this file before the fix, 3 attempts across 3 passes for a
-              // PR carrying no task id. The `sweep.action_failed` line above is diagnostic and may
-              // keep its placeholder; this one is a KEY and must match its lookup exactly.
-              task_id: job.pr.taskId ?? "",
-              step: "review.post_refused",
-              head_sha: job.pr.headSha,
-              reason: `post-review attempt threw — standing down rather than retrying this head unbounded: ${actionError}`,
-            });
+            // W1-T529 (iv) — THE ONE THROW THAT MUST NOT LEAVE A DEDUP KEY. Design (v) (the
+            // `review.post_refused` arm below) is right about every ORDINARY throw: without a key
+            // the attempt repeats every pass, unbounded. It is exactly wrong about this one.
+            //
+            // A floor stand-down says nothing about this PR — the guarded call never ran — while
+            // `review.post_refused` is read by `reviewPostRefusedFor` (run-task.ts) as a VERDICT
+            // that ESCALATES this head rather than retrying it, keyed `taskId@headSha` so only a
+            // NEW PUSH ever clears it. Writing it here converts "unaffordable for one tick" into
+            // "permanently refused, then escalated as blocked-ambiguous" — for a PR nothing ever
+            // looked at. Design (iv) names the correct cost instead: "a green PR is left unmerged,
+            // visible, recoverable next pass", and RECOVERABLE is only true if no key is written.
+            // The precedent is already here: `review.post_failed` (a transient `gh` error)
+            // deliberately does not set `reviewPostRefused` either — "never escalate on a mere
+            // network hiccup" (OpenPrView.reviewPostRefused's own doc).
+            //
+            // AND THE REPEAT IS STILL BOUNDED, just not by a key. The pacer CONSUMES its trip on
+            // the one call it refuses (`standDown` is cleared inside `wait()` before it throws,
+            // lib/open-prs-rest.ts), so the very next guarded call is let through to re-derive
+            // against a live reading and the floor cannot re-fire without a fresh sub-floor one.
+            // What design (v) bounds is a throw that RECURS ON ITS OWN; this one cannot.
+            const floorStandDown = budgetFloorStandDown(e, "post-review");
+            if (floorStandDown !== undefined) {
+              standDownReason = floorStandDown;
+            } else {
+              actionError = String((e as Error)?.message ?? e);
+              appendLine(deps.ledgerPath, {
+                run_id: deps.runId,
+                task_id: job.pr.taskId ?? "SWEEP",
+                step: "sweep.action_failed",
+                pr_number: job.pr.prNumber,
+                pr_url: job.pr.prUrl,
+                disposition: "post-review",
+                error: actionError,
+              });
+              // W1-T529 design (v) — THE MISSING DEDUP KEY. `sweep.action_failed` alone leaves
+              // NO key `PriorActions.postReviewed` can see: that set is built ONLY from
+              // `review.posted`/`review.post_refused` lines (see its own doc above), never from
+              // `sweep.disposed`/`sweep.action_failed`. Without this, a thrown attempt —
+              // including a guarded call standing down at the floor once one is wired ahead of
+              // this call (lib/open-prs-rest.ts's `GhCallPacer`) — re-attempts THIS EXACT HEAD
+              // every following pass, without bound: a floor bounds the RATE of calls but, on
+              // its own, not the REPEAT of the attempt, and each retry against an exhausted
+              // budget only deepens it. This records the SAME outcome shape
+              // `postReviewStatusGuarded` (lib/review.ts) already writes for a graceful
+              // refusal — recording the throw as an OUTCOME the existing dedup already reads,
+              // never a second mechanism (design v's own "the honest shape"). `acted` stays
+              // `false` above regardless, so this never touches the fix-strike lane's own
+              // `acted:true`-gated dedup (design iv) — a different lane, a different set.
+              appendLine(deps.ledgerPath, {
+                run_id: deps.runId,
+                // W1-T529 (v) — THE EMPTY STRING, NEVER THE "SWEEP" PLACEHOLDER, AND THE DIFFERENCE
+                // IS THE WHOLE DEDUP. The consult site reads
+                // `prior.postReviewed.has(`${pr.taskId ?? ""}@${pr.headSha}`)`, so a task-id-less PR
+                // looks up `@<sha>`. Writing "SWEEP" here produced `SWEEP@<sha>`: a row that reads
+                // correctly in the ledger, matches nothing, and left the attempt repeating every
+                // pass — MEASURED against this file before the fix, 3 attempts across 3 passes for a
+                // PR carrying no task id. The `sweep.action_failed` line above is diagnostic and may
+                // keep its placeholder; this one is a KEY and must match its lookup exactly.
+                task_id: job.pr.taskId ?? "",
+                step: "review.post_refused",
+                head_sha: job.pr.headSha,
+                reason: `post-review attempt threw — standing down rather than retrying this head unbounded: ${actionError}`,
+              });
+            }
           }
         }
       } finally {
@@ -3437,7 +3544,7 @@ export async function runSweep(
         // never protect any.
         claimedReviewKeys.delete(job.reviewKey);
       }
-      finalizeDisposition(job.index, job.pr, "post-review", job.reason, job.question, acted, false, actionError, undefined, undefined);
+      finalizeDisposition(job.index, job.pr, "post-review", job.reason, job.question, acted, false, actionError, standDownReason, undefined);
     }),
   );
 

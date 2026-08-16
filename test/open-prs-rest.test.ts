@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -864,7 +864,30 @@ test("W1-T529: a floor stand-down leaves the fix strike unspent", async () => {
   assert.equal(dispatched1.length, 1, "the fix rung was actually attempted this pass");
   const action1 = summary1.actions.find((a) => a.prNumber === 529);
   assert.equal(action1?.acted, false, "a floor stand-down is never credited as acted (W1-T527's existing property)");
-  assert.match(action1?.actionError ?? "", /stood down/, "the thrown stand-down is attributed on this PR's own action");
+
+  // W1-T529 (iv): a stand-down is NOT a failed action, and the two are now recorded apart. The
+  // reason rides `stand_down_reason` on this PR's own `sweep.disposed` line — the field every
+  // other declined disposition already uses — not `actionError`, so the pass does not report a
+  // failure it did not have.
+  assert.equal(action1?.actionError, undefined, "a declined lane is not a failed action");
+  assert.equal(summary1.actionsFailed, 0, "and it does not move the failure counter");
+  const lines1 = readLedgerLines(lp);
+  assert.equal(
+    lines1.filter((l) => l.step === "sweep.action_failed").length,
+    0,
+    "nor does it write the failure row — nothing failed, the call was refused before it ran",
+  );
+  const disposed1 = lines1.find((l) => l.step === "sweep.disposed");
+  assert.match(
+    String(disposed1?.stand_down_reason ?? ""),
+    /gh budget at or below the stand-down floor \(core at 20\/5000\)/,
+    "the reading that tripped the floor is named, so a declined pass is legible rather than idle",
+  );
+  assert.match(
+    String(disposed1?.stand_down_reason ?? ""),
+    /NO strike is spent/,
+    "and design (iv)'s cost for THIS lane is named on the line itself",
+  );
 
   // Pass 2, SAME ledger, SAME pr@head: `priorActionsFromLedger`'s `fixed` set is built ONLY from
   // `sweep.disposed` lines with `acted:true` — pass 1's line was `acted:false`, so it never
@@ -876,14 +899,31 @@ test("W1-T529: a floor stand-down leaves the fix strike unspent", async () => {
   assert.equal(dispatched2.length, 1, "the strike was never spent — the SAME pr@head re-earns the dispatch next pass");
 });
 
-test("W1-T529: a refused attempt leaves a dedup key behind", async () => {
+// ── W1-T529 (iv) — THE CARVE-OUT (v) NEEDS, AND WHY IT IS NOT A WEAKENING ────────────────────
+//
+// Design (v)'s key is right for every ORDINARY throw and is asserted, unchanged, by the generic
+// cases further down (`throwsRateLimit`): without it the same head re-attempts every pass,
+// unbounded. This test covers the ONE class where that key is the wrong answer, and it used to
+// assert the opposite — it was written with the floor error standing in for "a thrown attempt"
+// before (iv) existed to tell the two apart.
+//
+// `review.post_refused` is not a diagnostic. `reviewPostRefusedFor` (run-task.ts) reads it as a
+// VERDICT — a second absence at the same sha ESCALATES rather than retries — keyed
+// `taskId@headSha`, so only a NEW PUSH clears it. A budget stand-down never even ran the call, so
+// that key would strand a green PR as permanently-refused-then-escalated over one unaffordable
+// tick. The precedent is already in the same doc: `review.post_failed` (a transient `gh` error)
+// deliberately does not set it either.
+//
+// THE REPEAT IS STILL BOUNDED — by the pacer, not by a key: `wait()` clears `standDown` before
+// throwing, so the floor cannot re-fire without a fresh sub-floor reading.
+test("W1-T529: a budget floor stand-down leaves no refusal key so the head recovers", async () => {
   const lp = w1t529LedgerPath();
   // reviewState none + checksState green -> "post-review", exactly test/sweep.test.ts's own
   // `ungatedGreenPr()` shape.
   const ungatedGreen = w1t529Pr({ reviewState: "none", checksState: "green" });
 
-  // Pass 1: postReview throws — the shape a floor stand-down takes once wired ahead of the real
-  // review runner (run-task.ts's `postReview` dep rethrows on failure; out of this task's scope).
+  // Pass 1: the guarded call the review runner makes is refused AT THE PACER — `paceGhEntry`
+  // rethrows `GhPaceFloorStandDownError` out of its un-try'd `wait()` before `call` ever runs.
   const attempts1: OpenPrView[] = [];
   const deps1: SweepDeps = {
     arm: () => {},
@@ -898,21 +938,137 @@ test("W1-T529: a refused attempt leaves a dedup key behind", async () => {
     runId: "SWEEP-1",
     now: () => W1T529_SWEEP_NOW,
   };
-  await runSweep([ungatedGreen], deps1, DEFAULT_SWEEP_POLICY);
+  const summary1 = await runSweep([ungatedGreen], deps1, DEFAULT_SWEEP_POLICY);
   assert.equal(attempts1.length, 1, "the post-review lane was actually attempted this pass");
 
-  const refusal = readLedgerLines(lp).find((l) => l.step === "review.post_refused");
-  assert.ok(refusal, "the thrown attempt left a review.post_refused outcome line PriorActions.postReviewed reads");
+  // THE ASSERTION THAT DISCRIMINATES. On the tree before this change the SAME fixture wrote this
+  // row, and the PR was never reviewed at this head again.
+  const lines1 = readLedgerLines(lp);
+  assert.deepEqual(
+    lines1.filter((l) => l.step === "review.post_refused"),
+    [],
+    "a budget stand-down writes NO refusal key — that row escalates a head, and nothing looked at this one",
+  );
+  assert.deepEqual(
+    lines1.filter((l) => l.step === "sweep.action_failed"),
+    [],
+    "and no failure row either: the call was refused before it ran",
+  );
+  assert.equal(summary1.actionsFailed, 0, "a declined lane does not move the failure counter");
+
+  const disposed1 = lines1.find((l) => l.step === "sweep.disposed");
+  assert.equal(disposed1?.acted, false, "still not credited as acted — the no-strike property, unchanged");
+  assert.match(
+    String(disposed1?.stand_down_reason ?? ""),
+    /left unmerged this pass and re-derives next tick/,
+    "design (iv)'s cost for THIS lane, named on the line rather than discovered later",
+  );
+
+  // Passes 2 and 3, SAME ledger, SAME pr@head — THE BOUND, IN THE RECOVERY DIRECTION. The pacer
+  // consumed its trip on the one call it refused, so the budget is affordable again. A single
+  // pass proves nothing here: what must hold is that the head was not deduped, so the review
+  // lands on the very next pass and lands exactly ONCE (pass 3 is deduped by its own success).
+  const attempts2: OpenPrView[] = [];
+  const deps2: SweepDeps = {
+    ...deps1,
+    // A SUCCEEDING review runner, faithfully: the real `postReview` dep durably writes the
+    // `review.posted` outcome a later pass's own fresh ledger read sees — that is what the lane's
+    // `finally` means by "already durably written the reviewed state". A fake that only records
+    // the call would make pass 3 look like a storm this code did not cause.
+    postReview: (p) => {
+      attempts2.push(p);
+      appendFileSync(lp, `${JSON.stringify({ run_id: "SWEEP-2", task_id: p.taskId ?? "", step: "review.posted", head_sha: p.headSha })}\n`);
+    },
+  };
+  await runSweep([ungatedGreen], deps2, DEFAULT_SWEEP_POLICY);
+  assert.equal(attempts2.length, 1, "no key was left behind, so the SAME pr@head re-earns its attempt next pass");
+
+  await runSweep([ungatedGreen], deps2, DEFAULT_SWEEP_POLICY);
+  assert.equal(attempts2.length, 1, "and pass 3 is deduped by pass 2's own verdict — recovery is not a retry storm");
+});
+
+// ── W1-T529 (iv) — THE FALSIFIER: an ORDINARY throw is untouched by any of the above ──────────
+test("W1-T529: an ordinary post-review throw still leaves its refusal key", async () => {
+  const lp = w1t529LedgerPath();
+  const ungatedGreen = w1t529Pr({ reviewState: "none", checksState: "green" });
+  const attempts: OpenPrView[] = [];
+  const deps: SweepDeps = {
+    arm: () => {},
+    close: () => {},
+    dispatchFix: () => {},
+    escalate: () => {},
+    postReview: (p) => {
+      attempts.push(p);
+      throw new Error("gh: connection reset by peer");
+    },
+    ledgerPath: lp,
+    runId: "SWEEP-FALSIFIER",
+    now: () => W1T529_SWEEP_NOW,
+  };
+  const summary = await runSweep([ungatedGreen], deps, DEFAULT_SWEEP_POLICY);
+  assert.equal(attempts.length, 1, "the lane was attempted");
+
+  // Everything design (v) shipped, still exactly as it shipped — the carve-out above is keyed on
+  // the error CLASS, so widening it to any other throw would fail here.
+  const lines = readLedgerLines(lp);
+  const refusal = lines.find((l) => l.step === "review.post_refused");
+  assert.ok(refusal, "an ordinary throw still leaves the outcome PriorActions.postReviewed reads");
   assert.equal(refusal?.task_id, "W1-T529FIXTURE");
   assert.equal(refusal?.head_sha, "cccc333");
+  assert.equal(lines.filter((l) => l.step === "sweep.action_failed").length, 1, "and is still recorded as a failure");
+  assert.equal(summary.actionsFailed, 1, "and still counted as one");
+  assert.equal(
+    lines.find((l) => l.step === "sweep.disposed")?.stand_down_reason,
+    undefined,
+    "and carries no stand-down reason — it did not stand down, it failed",
+  );
 
-  // Pass 2, SAME ledger, SAME pr@head: the dedup key from pass 1 must suppress a repeat attempt —
-  // without it, the same head would re-attempt every pass, without bound, against a budget the
-  // floor exists precisely because it is exhausted.
-  const attempts2: OpenPrView[] = [];
-  const deps2: SweepDeps = { ...deps1, postReview: (p) => { attempts2.push(p); } };
+  // And it stays deduped, which is the property (v) exists for.
+  const deps2: SweepDeps = { ...deps, postReview: (p) => { attempts.push(p); } };
   await runSweep([ungatedGreen], deps2, DEFAULT_SWEEP_POLICY);
-  assert.deepEqual(attempts2, [], "the dedup key left behind by the refusal suppresses the repeat attempt");
+  assert.equal(attempts.length, 1, "the refusal key suppresses the repeat attempt, unchanged by (iv)");
+});
+
+// ── W1-T529 (iv) — EACH LANE NAMES ITS OWN COST, WHICH IS THE WHOLE POINT OF THE CLAUSE ───────
+test("W1-T529: two lanes standing down on the same floor name different costs", async () => {
+  const floor = () => {
+    throw new GhPaceFloorStandDownError({ remaining: 20, limit: 5000, resource: "core" });
+  };
+  const base = (lp: string): SweepDeps => ({
+    arm: () => {},
+    close: () => {},
+    dispatchFix: floor,
+    escalate: () => {},
+    postReview: floor,
+    ledgerPath: lp,
+    runId: "SWEEP-LANES",
+    now: () => W1T529_SWEEP_NOW,
+  });
+
+  const lpReview = w1t529LedgerPath();
+  await runSweep([w1t529Pr({ reviewState: "none", checksState: "green" })], base(lpReview), DEFAULT_SWEEP_POLICY);
+  const reviewReason = String(readLedgerLines(lpReview).find((l) => l.step === "sweep.disposed")?.stand_down_reason ?? "");
+
+  const lpFix = w1t529LedgerPath();
+  await runSweep(
+    [
+      w1t529Pr({
+        reviewState: "failure",
+        checksState: "green",
+        unmetCriteria: [{ claim: "c", proof: "unit test: t", met: false, reason: "no", proof_exec: "executed_fail" }],
+      }),
+    ],
+    base(lpFix),
+    DEFAULT_SWEEP_POLICY,
+  );
+  const fixReason = String(readLedgerLines(lpFix).find((l) => l.step === "sweep.disposed")?.stand_down_reason ?? "");
+
+  assert.match(reviewReason, /green PR is left unmerged/, "the review lane's cost, design (iv) verbatim");
+  assert.match(fixReason, /NO strike is spent/, "the fix lane's cost, design (iv) verbatim");
+  assert.notEqual(reviewReason, fixReason, "a per-LANE cost — one shared generic string would not be design (iv)");
+  for (const r of [reviewReason, fixReason]) {
+    assert.match(r, /core at 20\/5000/, "and both name the reading that tripped the floor");
+  }
 });
 
 // ── W1-T529 (v): the dedup key must MATCH ITS LOOKUP, and a task id is where it stopped ──────
