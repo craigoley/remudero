@@ -23,5 +23,18 @@ raw: "COST SENSORS AND LEVERS — the fleet spends without measuring its own
 attachments: []
 origin: cli
 status: proposed
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/2004
+summary:
+  headline: Authorize fleet cost-measurement system
+  what_happened: Fleet spends without measuring cost efficiency. Proposal adds
+    four sensors and enables batch lane for 50% savings on offline work.
+  decision: Select and authorize one implementation path below.
+  options:
+    - label: Full suite (all 4 sensors + batch lane)
+      consequence: Complete cost visibility plus 50% batch savings; 2–3 sprint investment
+    - label: Rapid path (batch lane + core sensors)
+      consequence: Quick 50% batch savings and cache tracking; defer advanced sensors
+        to later
+    - label: Delay pending analysis
+      consequence: Maintain status quo this cycle; commission detailed implementation
+        roadmap for review
