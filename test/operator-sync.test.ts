@@ -336,3 +336,110 @@ test("syncCommand: translates runOperatorSync's status into main()'s exit code -
   const offMainCode = syncCommand([], { repoDir: localDir, deps });
   assert.equal(offMainCode, 1, "an off-main refusal must exit non-zero");
 });
+
+// ── W1-T907 (diff-coverage repair): the DEFAULT seam and every catch arm. The tests above inject a
+// `git` runner, so `defaultGit` and the five failure arms were unreachable — the exact shape
+// CLAUDE.md warns about ("when every test injects a fake, the seam's DEFAULT implementation and each
+// catch arm are unreachable"). These drive them for real.
+
+/** A GitRunner that succeeds by default and throws for whichever subcommand the test names. */
+function throwingOn(match: (args: string[]) => boolean, ok: (args: string[]) => string = () => ""): GitRunner {
+  return (args) => {
+    if (match(args)) throw new Error(`stub refusal: git ${args.join(" ")}`);
+    return ok(args);
+  };
+}
+
+test("W1-T907: the real default git runner is used when no runner is injected", () => {
+  // NO deps.git — this is the only test that exercises `defaultGit`, which every other test replaces.
+  // The fixture has no `origin` remote, so the real `git fetch origin` genuinely fails and the
+  // fetch-failed arm is reached through the real seam rather than a stub.
+  const root = mkdtempSync(join(tmpdir(), "rmd-operator-sync-default-"));
+  execFileSync("git", ["-C", root, "init", "--quiet", "-b", "main"]);
+  execFileSync("git", ["-C", root, "config", "user.email", "t@example.com"]);
+  execFileSync("git", ["-C", root, "config", "user.name", "t"]);
+  writeFileSync(join(root, "README.md"), "x\n");
+  execFileSync("git", ["-C", root, "add", "-A"]);
+  execFileSync("git", ["-C", root, "commit", "--quiet", "-m", "init"]);
+
+  const warned: string[] = [];
+  const result = runOperatorSync(root, {}, { say: () => {}, warn: (m) => warned.push(m) });
+  assert.equal(result.status, "degraded", "no origin remote ⇒ the real fetch fails");
+  assert.equal(result.reason, "fetch-failed");
+  assert.ok(
+    warned.some((w) => w.includes("git fetch origin failed")),
+    `the real seam's failure is reported; got ${JSON.stringify(warned)}`,
+  );
+});
+
+test("W1-T907: an unresolvable HEAD or origin main degrades rather than throwing", () => {
+  const { localDir } = gitFixture();
+  const warned: string[] = [];
+  const result = runOperatorSync(
+    localDir,
+    {},
+    {
+      git: throwingOn((a) => a[0] === "rev-parse"),
+      say: () => {},
+      warn: (m) => warned.push(m),
+    },
+  );
+  assert.equal(result.status, "degraded");
+  assert.equal(result.reason, "resolve-failed");
+  assert.ok(warned.some((w) => w.includes("could not resolve HEAD/origin/main")));
+});
+
+test("W1-T907: a failed fast-forward refuses and says the local files are unaffected", () => {
+  const { originDir, localDir } = gitFixture();
+  // Put the local behind origin, or the run reports up-to-date and the merge arm is never reached —
+  // the arm under test only exists on the behind path.
+  writeFileSync(join(originDir, "plan", "tasks.yaml"), "orig: advanced\n", "utf8");
+  execFileSync("git", ["-C", originDir, "add", "."]);
+  execFileSync("git", ["-C", originDir, "commit", "--quiet", "-m", "advance"]);
+  const real: GitRunner = (args) => execFileSync("git", ["-C", localDir, ...args], { encoding: "utf8" });
+  const warned: string[] = [];
+  const result = runOperatorSync(
+    localDir,
+    {},
+    {
+      // Everything real except the merge, which refuses — the arm that must never leave the operator
+      // believing their own work was touched.
+      git: (args) => {
+        if (args[0] === "merge") throw new Error("fatal: Not possible to fast-forward, aborting.");
+        return real(args);
+      },
+      say: () => {},
+      warn: (m) => warned.push(m),
+    },
+  );
+  assert.equal(result.status, "refused");
+  assert.equal(result.reason, "pull-failed");
+  assert.ok(
+    warned.some((w) => w.includes("genuinely-local files are unaffected")),
+    `the refusal must reassure about local work; got ${JSON.stringify(warned)}`,
+  );
+});
+
+test("W1-T907: an unreadable branch name and an absent DECISIONS file are tolerated", () => {
+  const { localDir } = gitFixture();
+  const real: GitRunner = (args) => execFileSync("git", ["-C", localDir, ...args], { encoding: "utf8" });
+  const result = runOperatorSync(
+    localDir,
+    { dryRun: true },
+    {
+      // symbolic-ref throws (detached HEAD shape) and `git show origin/main:DECISIONS.md` throws
+      // (the file does not exist at the ref) — both must degrade to a default, never propagate.
+      git: (args) => {
+        if (args[0] === "symbolic-ref") throw new Error("fatal: ref HEAD is not a symbolic ref");
+        if (args[0] === "show" && String(args[1]).includes("DECISIONS.md")) throw new Error("fatal: path does not exist");
+        return real(args);
+      },
+      say: () => {},
+      warn: () => {},
+    },
+  );
+  assert.ok(
+    result.status !== "degraded" || result.reason !== "resolve-failed",
+    "an unreadable branch name must not be mistaken for an unresolvable HEAD",
+  );
+});
