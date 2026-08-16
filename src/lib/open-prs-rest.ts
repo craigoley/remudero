@@ -314,6 +314,22 @@ export interface OpenPrRest {
   body: string;
   autoMergeRequest: unknown;
   statusCheckRollup?: RestRollupEntry[];
+  /**
+   * W1-T521: true when THIS pr's rollup fetch threw (rate limit exhaustion, a 404 on a head
+   * deleted mid-pass, a network blip) and `statusCheckRollup` above is therefore ABSENT rather
+   * than an observed empty rollup. Mirrors `status.ts`'s `indeterminate` sparse-field convention
+   * (present only alongside the fact it qualifies, so a caller that never checks it keeps working
+   * unchanged) rather than inventing a second vocabulary for the same "read failed" shape.
+   *
+   * `checksStateFromRollup` (lib/sweep.ts) already reads an absent/empty rollup as `"none"` —
+   * never `"green"` — so a PR carrying this flag can never be disposed `mergeable` off a failed
+   * read. But `"none"` alone is indistinguishable from a PR whose checks genuinely have not
+   * started yet (design note ii), which is its own hazard for anything that reasons about HOW
+   * LONG a PR has been checkless. This field carries the distinguishing fact for such a future
+   * consumer; wiring one in is out of this task's scope (declared files are this module and its
+   * test only — see the task's own `note`).
+   */
+  rollupUnreadable?: true;
 }
 
 /**
@@ -398,15 +414,27 @@ function rollupFor(owner: string, repo: string, sha: string, fetch: GhApiFetcher
 /**
  * The sweep's open-PR enumeration, REST only — a drop-in for the `gh pr list --json …` call.
  *
- * Throws on a failed fetch, exactly as the `ghJson` call it replaces threw. That is deliberate:
- * a swallowed error here would turn a total outage into a silent "zero open PRs", which the
- * sweep would read as a healthy empty queue — strictly worse than the blindness being fixed.
+ * The LIST call throws on a failed fetch, exactly as the `ghJson` call it replaces threw. That
+ * is deliberate: a swallowed error here would turn a total outage into a silent "zero open PRs",
+ * which the sweep would read as a healthy empty queue — strictly worse than the blindness being
+ * fixed. Once the list has returned, though, the queue's SIZE is already known, so that same
+ * argument does not extend to the PER-PR rollup read below (W1-T521): a throw there can only
+ * make ONE pr's checks unknown, and letting it unwind the whole `.map()` would cost every OTHER
+ * pr's disposition too — a much larger loss for a much smaller failure. `rollupFor` is therefore
+ * guarded per PR: a throwing read yields THAT pr with `rollupUnreadable: true` and no
+ * `statusCheckRollup`, rather than aborting the enumeration. No retry — the observed failure
+ * class is rate-limit exhaustion, and retrying against an exhausted budget only deepens it; the
+ * next sweep pass re-derives.
  */
 export function fetchOpenPrsRest(owner: string, repo: string, fetch: GhApiFetcher): OpenPrRest[] {
   const rows = fetch(openPrsRestArgs(owner, repo)) as RestPullRow[];
   return rows.map((row) => {
     const pr = mapRestPr(row);
-    return { ...pr, statusCheckRollup: rollupFor(owner, repo, pr.headRefOid, fetch) };
+    try {
+      return { ...pr, statusCheckRollup: rollupFor(owner, repo, pr.headRefOid, fetch) };
+    } catch {
+      return { ...pr, rollupUnreadable: true as const };
+    }
   });
 }
 
