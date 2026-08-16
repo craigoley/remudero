@@ -227,6 +227,51 @@ test("fetchOpenPrsRest propagates a fetch failure instead of degrading to an emp
   assert.throws(() => fetchOpenPrsRest(OWNER, REPO, fetch), /unrouted gh api path/);
 });
 
+// ── W1-T521: a throwing rollup read must cost only ITS pr, never the whole enumeration ─────────
+
+test("W1-T521: a rollup read that throws for one pr drops only that pr's checks — every OTHER pr's disposition still comes back", () => {
+  const OTHER_SHA = "8f2a9c1d4e6b0357a1c9d4e6b0357a1c9d4e6b03";
+  const fetch = fakeFetcher({
+    "repos/craigoley/remudero/pulls?state=open&per_page=100": [
+      { number: 806, html_url: "u1", updated_at: "t1", body: "", head: { ref: "b1", sha: SHA }, auto_merge: null },
+      { number: 807, html_url: "u2", updated_at: "t2", body: "", head: { ref: "b2", sha: OTHER_SHA }, auto_merge: null },
+    ],
+    // PR 806's head has NO routed check-runs/status path, so `rollupFor` throws for it.
+    [`repos/craigoley/remudero/commits/${OTHER_SHA}/check-runs?per_page=100`]: REST_CHECK_RUNS,
+    [`repos/craigoley/remudero/commits/${OTHER_SHA}/status`]: REST_COMBINED,
+  });
+
+  const got = fetchOpenPrsRest(OWNER, REPO, fetch);
+
+  assert.equal(got.length, 2, "the pass still enumerates BOTH prs — the throw did not unwind the map");
+  const [pr806, pr807] = got;
+  assert.equal(pr806.number, 806);
+  assert.equal(pr806.statusCheckRollup, undefined, "the failed pr carries no rollup, never a substituted []");
+  assert.equal(pr806.rollupUnreadable, true, "the failed pr is marked unreadable, not silently dropped");
+  assert.equal(pr807.number, 807);
+  assert.deepEqual(pr807.statusCheckRollup, GRAPHQL_ROLLUP, "the OTHER pr's rollup is unaffected by pr 806's throw");
+  assert.equal(pr807.rollupUnreadable, undefined);
+});
+
+test("W1-T521: the list call itself still throws — a total outage never degrades to a healthy-looking empty queue", () => {
+  const fetch = fakeFetcher({});
+  assert.throws(() => fetchOpenPrsRest(OWNER, REPO, fetch), /unrouted gh api path/);
+});
+
+test("W1-T521: a pr whose rollup could not be read is never disposed as green — checksStateFromRollup reads it as none, not green", () => {
+  const fetch = fakeFetcher({
+    "repos/craigoley/remudero/pulls?state=open&per_page=100": [
+      { number: 806, html_url: "u1", updated_at: "t1", body: "", head: { ref: "b1", sha: SHA }, auto_merge: null },
+    ],
+    // No routed check-runs/status path for SHA — rollupFor throws.
+  });
+
+  const [pr] = fetchOpenPrsRest(OWNER, REPO, fetch);
+  assert.equal(pr.rollupUnreadable, true);
+  assert.notEqual(checksStateFromRollup(pr.statusCheckRollup, REQUIRED), "green");
+  assert.equal(checksStateFromRollup(pr.statusCheckRollup, REQUIRED), "none");
+});
+
 test("fetchSinglePrRest carries the uppercase state token routeFix gates on alongside the composed rollup", () => {
   const fetch = fakeFetcher({
     "repos/craigoley/remudero/pulls/806": {
