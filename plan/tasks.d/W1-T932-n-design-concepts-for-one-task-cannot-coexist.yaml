@@ -1,0 +1,149 @@
+- id: W1-T932
+  title: "N design concepts for one task cannot coexist, because two of three are marked stale by arithmetic before a human ever compares them"
+  repo: remudero
+  type: implement
+  verify: auto
+  risk: high
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: "**THE BLOCKER IS NOT THE IMAGE CHANNEL. IT IS THAT SIBLING CONCEPTS KILL EACH OTHER.**
+    The operator wants to send an image to the fleet, get several design concepts back, and pick one —
+    including for a product already built. Open three concept PRs against one task today and the two
+    lower-numbered ones are disposed `stale` before anyone looks at them.
+
+    (1) **THE ARITHMETIC, RE-DERIVED AT 5d81b8f.** `src/run-task.ts` computes `supersededBy` as the
+    highest-numbered OTHER open PR crediting the same task, keyed on `resolveOpenPrTaskId`:
+    `const peers = taskId ? (byTask.get(taskId) ?? []) : []`, `const newest = peers.length ?
+    Math.max(...peers) : pr.number`, `const supersededBy = newest > pr.number ? newest : undefined`.
+    Three concept PRs on one task therefore give the two lower-numbered ones a `supersededBy` BY
+    ARITHMETIC — no policy, no judgement, no evidence.
+
+    (2) **THERE ARE THREE `stale` ROWS IN `DISPOSITION_RULES` (`src/lib/sweep.ts`), NOT TWO, AND THE
+    ORDER IS WHAT MATTERS.** Verified at 5d81b8f, in table order: a VERDICT row
+    (`policy.supersessionDisposalEnabled === true && pr.supersessionVerdict?.status === 'superseded'`,
+    W1-T920 / `DECISIONS.md` #1987); then the BARE-NUMBER row (`when: (pr) => pr.supersededBy != null`,
+    reason `superseded-by #N`); then an AGE row (`ageDays >= policy.staleDays`). `deriveDisposition`
+    selects with `DISPOSITION_RULES.find(...)`, so it is FIRST-MATCH-WINS.
+
+    (3) **THE OLDER ROW HAS GAINED NO GATE, SO THIS TASK DID NOT SHRINK.** The bare-number row is still
+    `when: (pr) => pr.supersededBy != null` with no policy argument at all, while the verdict row above
+    it is gated `false` (`plan/policy.yaml` `sweep.supersessionDisposal: value: false`). With the gate
+    OFF the verdict row cannot match, so the bare-number row is what actually fires — which is exactly
+    the case a concept PR hits.
+
+    (4) **AND THE SEAM THIS EXTENDS HAS NO PRODUCER YET, WHICH THE SHARD MUST NOT PRETEND OTHERWISE.**
+    `supersessionVerdict` is referenced only in `src/lib/sweep.ts` (11), `src/lib/policy.ts` (2),
+    `src/run-task.ts` (1) and `src/lib/producer-completeness.ts` (1) — and that last one is the gate
+    that TRACKS knowingly-unproduced fields, not a producer. Control: `supersededBy` spans six files
+    with real producers. `plan/policy.yaml` says it in its own words: turning the flag on 'changes
+    nothing in production until that detector lands'.
+
+    (5) **THE FIRING COUNT IS UNVERIFIED AND IS DELIBERATELY NOT REPEATED HERE.** A brief claimed the
+    `stale` rule has fired 3,413 times. That number could not be re-derived: the only ledger reachable
+    from the filing host is `/root/Remudero/state/ledger.ndjson`, 320 lines, holding exactly two step
+    kinds — `cli.invoked` (309) and `deploy.skip` (11) — with ZERO `sweep.*` rows, so it is a CLI
+    invocation log and not the fleet's decision ledger. Per-form coverage control: of the three
+    rotation forms only the live one exists (`.gz` 0 files, rotated-plain 0 files, live 1). Positive
+    control FAILED as it must on the wrong corpus — `run.start`, `sweep.disposed` and `review.posted`
+    all read 0. **TREAT THE COUNT AS UNMEASURED UNTIL SOMEONE RUNS IT WHERE THE DAEMON WRITES.**"
+  design: |
+    (i) SCOPE, AND IT IS DELIBERATELY NARROW: a task shape in which N open PRs COEXIST without
+    superseding one another until a human selects. NOT the image channel, NOT the selection UI, NOT the
+    concept generator. Those are sequenced below and are separate shards.
+    (ii) THE SEAM IS THE EVIDENCE-BEARING VERDICT AND ITS POLICY GATE, NOT THE ARITHMETIC. W1-T920
+    already moved supersession from a bare number toward an auditable verdict whose own doc says
+    "'superseded' alone is unauditable". A concept PR is NOT superseded by a sibling concept, and the
+    verdict should be able to SAY so, with a reason, rather than the sweep inferring death from a
+    higher PR number. THIS PUSHES THAT EXISTING MIGRATION ONE STEP FURTHER AND DOES NOT DISABLE THE
+    OLDER ROW — a guard that works for ordinary duplicate PRs must keep working.
+    (iii) PROPOSE THE MECHANISM, DO NOT BUILD IT. The mechanism must let the bare-number row YIELD when
+    a verdict positively asserts sibling-concept coexistence, and must fail CLOSED: an absent,
+    unreadable or malformed verdict leaves today's behaviour exactly as it is. `"unique"` and
+    `"indeterminate"` are already inert in the verdict row for that reason (design note iii there).
+    (iv) THE DISPOSITION VOCABULARY HAS NO SLOT FOR THIS AND THAT IS THE SECOND HALF OF THE PROBLEM.
+    `Disposition` is `mergeable | blocked-fixable | stale | blocked-ambiguous | dep-review |
+    post-review | conflicted | wait`. There is NO "held for selection", and every terminal path is
+    merge or close. A concept awaiting a human choice is none of these. Naming that disposition is a
+    SEPARATE shard, sequenced next, because adding a vocabulary member touches every consumer.
+    (v) NAME THE CONSUMER IN THE SAME PR OR DO NOT EMIT. Seven mechanisms here are already
+    built-and-unread — `hasPushedRunBranch`, `armedButStalled`, `dispatch.stood_down`,
+    `CiFailure.outsidePrRange`, `dh-rate-limit`, `rareOverlapWarnings`, `rmd coverage-improve` — and
+    rationale (4) makes `supersessionVerdict` itself an eighth, producer-less today. A new field whose
+    only reader is a test would be the ninth. The consumer here is `deriveDisposition`'s own row, which
+    is what makes this a gate rather than a report.
+    (vi) DO NOT ROUTE THIS THROUGH `plan/feedback/`. It holds 149 entries, 76 at `status: new`, with
+    nothing ageing them out; adding a queue to a queue nobody drains is not a design.
+    (vii) THE SURFACE IS GITHUB, NOT THE CONSOLE, AND SAYING SO HONESTLY IS PART OF THE TASK. GitHub
+    renders images in PR and issue bodies, authenticated, from a phone, today. The console binds
+    `127.0.0.1:4317` with no published port, and `/v1/questions/answer` and `/v1/operator-notes/add`
+    have ZERO console-UI references against controls of 2 and 4. A PR BODY CARRYING N IMAGES IS THE
+    ONLY REACHABLE SIDE-BY-SIDE VIEW THAT EXISTS.
+    (viii) SEQUENCING, and it is the point of filing this one first:
+      FIRST  — supersession survival (THIS SHARD): N concepts coexist as open PRs.
+      SECOND — a selection disposition: the vocabulary member from (iv), plus its terminal path.
+      THIRD  — the image channel, behind W1-T915's reachability work.
+      INDEPENDENT — critique-and-snapshot, which can proceed at ANY time and is NOT a prerequisite.
+      **THE PRIOR RECON EXPLICITLY REFUSED TO CALL CRITIQUE THE ENABLER, because doing so "would be
+      dressing up an unrelated task". THAT REFUSAL IS RECORDED HERE SO NOBODY RE-RANKS IT.**
+    (ix) DO NOT ASSUME SCREENSHOTTING WORKS. A Playwright build mismatch broke 96 of 97 browser suite
+    runs this weekend, and the fix was a host-local alias that exists on no other machine. Any design
+    that needs a rendered screenshot must state that dependency rather than inherit it.
+    (x) THE JUDGEMENT PROBLEM IS THE REAL RISK, AND THE SELECTION SURFACE IS THE VALUABLE HALF.
+    Divergence is nearly free now; the bottleneck is judgement. The failure mode this invites is work
+    that looks polished at first glance and unravels the moment you use it — the form is there, the fit
+    is not. FOUR CONCEPTS NOBODY CAN COMPARE ARE WORSE THAN ONE. Build the ability to hold and compare
+    before the ability to generate more.
+  acceptance:
+    - claim: "a concept PR is not disposed stale merely because a higher-numbered sibling is open"
+      proof: "unit test: W1-T932: a sibling concept survives a higher numbered peer"
+    - claim: "an ordinary duplicate PR is still disposed stale by the existing bare-number row"
+      proof: "unit test: W1-T932: an ordinary duplicate is still disposed stale"
+    - claim: "an absent or malformed verdict leaves today's disposition unchanged"
+      proof: "unit test: W1-T932: an unreadable verdict changes no disposition"
+    - claim: "the coexistence path is gated by policy and is off by default"
+      proof: "unit test: W1-T932: concept coexistence is off by default"
+  origin: recon#n-concepts-cannot-coexist-2026-08-16
+  plan_refs: ["W1-T920", "W1-T915", "W1-T471"]
+  files: [src/lib/sweep.ts, test/sweep.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: high` IS SET UP FRONT. This changes the predicate that decides whether an open PR is
+    left alone or marked dead. Set wrong in one direction it strands real duplicates open forever; set
+    wrong in the other it keeps killing the concepts it exists to protect. That is blast radius, not
+    Rule 19 span — the declared span is one module and its own suite.
+
+    `files:` DERIVED BY WORD-BOUNDED INVOCATION COUNT (`git grep -cw`) AT 5d81b8f. `src/lib/sweep.ts`
+    scores `DISPOSITION_RULES` 24, `supersessionVerdict` 11, `supersessionDisposalEnabled` 6,
+    `supersededBy` 6, `SupersessionStatus` 2 — every symbol this touches has its home there.
+    `test/sweep.test.ts` is the matching suite at 6/6/5. **`src/run-task.ts` IS DELIBERATELY NOT
+    DECLARED** even though it scores `DISPOSITION_RULES` 7 and `supersededBy` 4: it holds the
+    ARITHMETIC that computes the bare number, and this task does not change that arithmetic — it
+    changes whether a row acts on it. 103 of 277 shards declare that path and it serialises every task
+    naming it (W1-T471), so declaring it for wiring alone would cost the whole dispatch pool.
+
+    **ID PROVENANCE, AND THE RESERVATION DID NOT TAKE — THIS IS RECORDED RATHER THAN GLOSSED.** Four
+    surfaces were swept at 5d81b8f: `refs/rmd-id/*` max 929 over 40 refs; shard FILENAMES on
+    origin/main max 931 over 312 files; every OPEN PR's file list (1 open PR, #2002, 7 files, no shard
+    paths); and every OPEN PR's TITLE, max W1-T924 (#2002) — the title surface being the one that
+    caught a W1-T919 claim when the first three read 0. Tree max across `plan/tasks.yaml` and every
+    shard is 931, so 932. The `refs/rmd-id/W1-T932` push was attempted with a unique orphan commit over
+    the EMPTY TREE (4b825dc6) carrying a host-pid-nanosecond nonce, the variable braced in the refspec,
+    and the exit code captured into a variable rather than read through a pipe: it FAILED with exit 1
+    (`send-pack: unexpected disconnect`), and the readback confirms `refs/rmd-id/W1-T932` is ABSENT on
+    origin against a positive control where `refs/rmd-id/W1-T929` reads 1 line. This filing host cannot
+    write non-branch refs — the same refusal a `refs/rmd-id/W1-T517` attempt hit here on 2026-08-16.
+    **SO THIS ID IS UNRESERVED AND RESTS ON THE FOUR-SURFACE SWEEP ALONE; A CONCURRENT MINT ELSEWHERE
+    COULD STILL COLLIDE.**
+
+    PROOF NOTES: all four proofs are NAME-FILTERED titles, never pure paths — a pure path runs the
+    whole file and one unrelated failure fails every criterion. Each is under 100 characters with no
+    comma, so `looksLikeScenarioNarrative` (`src/lib/task-linter.ts`) cannot fail it, and each matches
+    ZERO files today against a control matching exactly one. Forward-referencing these titles is
+    correct for an unbuilt task: what must hold today is that the proof PARSES.
+
+    VERIFICATION STATE AT FILING: the arithmetic and all three `stale` rows were re-derived at 5d81b8f
+    (rationale 1-3). A spawned worker's `Read` tool WAS measured to render a `.png` as a viewable image
+    — an isolated worker described a generated 180x180 probe's three colour bands in the correct
+    left-to-right order and its white corner square, content unavailable from the filename or headers —
+    so design (viii)'s image channel is viable and its sequencing is unchanged. The firing count is
+    UNVERIFIED, per rationale (5)."
