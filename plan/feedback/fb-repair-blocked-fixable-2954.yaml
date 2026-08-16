@@ -1,0 +1,75 @@
+id: fb-repair-blocked-fixable-2954
+ts: 2026-08-16T11:09:49.763Z
+raw: >-
+  SWEEP REPAIR RECURRENCE: the "blocked-fixable" surface was repaired for 18
+  distinct PRs between 2026-08-13T00:00:00.000Z and 2026-08-20T00:00:00.000Z
+  (threshold 3, window 7d).
+
+
+  Root cause is UNOBSERVED — this is a recurrence report, not a diagnosis: the
+  sweep classifies and repairs the INSTANCE (each PR below), it does not
+  investigate why the CLASS keeps recurring.
+
+
+  EVIDENCE (read verbatim off each PR's own sweep.disposed ledger row, never
+  invented):
+
+  - PR #1709 (https://github.com/craigoley/remudero/pull/1709) at 7f85a96,
+  2026-08-13T11:56:07.839Z: required checks red — ci-log fix, strike 1/2
+
+  - PR #1728 (https://github.com/craigoley/remudero/pull/1728) at 94c97e3,
+  2026-08-13T14:01:58.926Z: required checks red — ci-log fix, strike 1/2
+
+  - PR #1739 (https://github.com/craigoley/remudero/pull/1739) at 5fca958,
+  2026-08-13T19:36:58.758Z: required checks red — ci-log fix, strike 1/2
+
+  - PR #1744 (https://github.com/craigoley/remudero/pull/1744) at 6d0892a,
+  2026-08-13T21:02:25.171Z: required checks red — ci-log fix, strike 1/2
+
+  - PR #1756 (https://github.com/craigoley/remudero/pull/1756) at 64f862c,
+  2026-08-13T22:09:34.742Z: required checks red — ci-log fix, strike 1/2
+
+  - PR #1783 (https://github.com/craigoley/remudero/pull/1783) at af3034a,
+  2026-08-14T12:15:42.763Z: required checks red — ci-log fix, strike 1/2
+
+  - PR #1797 (https://github.com/craigoley/remudero/pull/1797) at db36c22,
+  2026-08-14T14:00:00.785Z: 1 unmet criterion — strike 1/2
+
+  - PR #1820 (https://github.com/craigoley/remudero/pull/1820) at ba2f42d,
+  2026-08-14T15:51:25.202Z: required checks red — ci-log fix, strike 1/2
+
+  - PR #1830 (https://github.com/craigoley/remudero/pull/1830) at 8925d5b,
+  2026-08-14T19:45:18.801Z: 2 unmet criteria — strike 1/2
+
+  - PR #1849 (https://github.com/craigoley/remudero/pull/1849) at 69677b8,
+  2026-08-15T13:03:36.058Z: required checks red — ci-log fix, strike 1/2
+
+  - PR #1863 (https://github.com/craigoley/remudero/pull/1863) at 91b7d72,
+  2026-08-15T16:51:38.866Z: 1 unmet criterion — strike 1/2
+
+  - PR #1886 (https://github.com/craigoley/remudero/pull/1886) at ad5904c,
+  2026-08-15T20:31:35.752Z: required checks red — ci-log fix, strike 1/2
+
+  - PR #1888 (https://github.com/craigoley/remudero/pull/1888) at 2647d1d,
+  2026-08-15T20:27:36.337Z: 2 unmet criteria — strike 1/2
+
+  - PR #1913 (https://github.com/craigoley/remudero/pull/1913) at d05f090,
+  2026-08-16T00:18:05.709Z: required checks red — ci-log fix, strike 2/2
+
+  - PR #1934 (https://github.com/craigoley/remudero/pull/1934) at 42c4dd1,
+  2026-08-16T04:29:27.719Z: required checks red — ci-log fix, strike 1/2
+
+  - PR #1936 (https://github.com/craigoley/remudero/pull/1936) at 1a10888,
+  2026-08-16T05:29:30.056Z: required checks red — ci-log fix, strike 1/2
+
+  - PR #1940 (https://github.com/craigoley/remudero/pull/1940) at 2bf5691,
+  2026-08-16T08:06:46.501Z: required checks red — ci-log fix, strike 1/2
+
+  - PR #1948 (https://github.com/craigoley/remudero/pull/1948) at 3ec3735,
+  2026-08-16T11:04:00.944Z: required checks red — ci-log fix, strike 1/2
+attachments: []
+origin: repair#blocked-fixable
+status: new
+proposal_pr: null
+summary: null
+expansion: null

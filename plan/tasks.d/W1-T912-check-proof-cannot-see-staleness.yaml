@@ -1,0 +1,89 @@
+- id: W1-T912
+  title: "check-proof answers a different question than the reviewer asks — it reports whether a proof MATCHES, while the reviewer separately downgrades a proof matching both head and base to executed_stale, so a proof reads verdict:pass locally and substantiates nothing in review"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 45
+  risk: high
+  rationale: "MEASURED at fa6e8d7. `rmd check-proof` executes a proof and prints
+    `parse:`/`hits:`/`verdict:`, all derived from ONE tree — the working tree. The reviewer
+    applies a SECOND test the CLI never performs: a proof matching BOTH head and merge-base
+    discriminates nothing and is downgraded to `executed_stale` (W1-T273 for `grep:`, extended
+    to `unit test:` by W1-T362). So the two disagree by construction, and the CLI is the
+    optimistic one.
+    MEASURED CONSEQUENCE, TWICE IN ONE BODY. On #1943 a session wrote three `grep:` proofs and
+    check-proof returned `verdict: pass` for all three. Run by hand against the merge base,
+    TWO of them matched both sides — `DO NOT USE` read head 1 / base 2, and `Retro proposals`
+    read head 3 / base 3. Both would have been downgraded. They were replaced only because the
+    session happened to run the base comparison itself; nothing in the tooling asked for it.
+    AND THE COST IS ON RECORD. #1189 MERGED AT 2/4 because two of its proofs never counted, with
+    nothing on the PR saying so. A proof that reads green locally and is silently discounted in
+    review is worse than one that fails, because the author stops looking.
+    EVERYTHING NEEDED ALREADY EXISTS. The executor resolves and runs a proof against a tree;
+    the merge base is one `git merge-base` away; the reviewer's own staleness rule is already
+    written down. What is missing is that the CLI reads ONE tree and reports ONE number."
+  design: |
+    (i) `rmd check-proof` gains an OPTIONAL `--base <ref>`. Absent, behaviour is byte-identical
+    to today — no existing caller, script or brief changes — so this cannot regress the verb
+    that every filing session already runs.
+    (ii) WITH `--base`, it executes the SAME proof against BOTH trees and prints HEAD N /
+    BASE M alongside the existing verdict, plus a distinct verdict when the proof matches both
+    — the reviewer's `executed_stale`, named identically so the local word and the review word
+    are the same word.
+    (iii) IT REPORTS, IT DOES NOT RE-RANK. No change to the reviewer, to `executed_stale`
+    itself, or to any exit-code mapping other than the new stale case. This converts a CI-time
+    refusal into a local one; it does not move where the decision lives.
+    (iv) FALSIFIER, BOTH DIRECTIONS: a proof matching head and NOT base reports a
+    discriminating result (a check that called everything stale fails this), AND a proof
+    matching BOTH reports stale (one that never fired would pass the first and fail this — the
+    false-positive containment). The #1943 pair are the natural fixtures: one head-only, one
+    matching both.
+    (v) NOT IN SCOPE, each for a stated reason: the reviewer's own staleness computation, which
+    is correct and is the thing being mirrored rather than changed; `check-acceptance`, a
+    different verb answering a different question; making `--base` DEFAULT, because that would
+    change the behaviour of every existing invocation and turn a read into a git operation; and
+    auto-suggesting a replacement pattern, which is a guess at intent this task does not need.
+  acceptance:
+    - claim: "a proof matching head but not base is reported as discriminating"
+      proof: "unit test: a proof that matches head and not base is reported as discriminating"
+    - claim: "a proof matching both head and base is reported stale under the reviewer's own name for it"
+      proof: "unit test: a proof matching both trees is reported stale rather than passing"
+    - claim: "omitting the base flag leaves the existing output unchanged, so no current caller shifts"
+      proof: "unit test: check proof without a base flag behaves exactly as it does today"
+  origin: oper#check-proof-staleness-2026-08-16
+  plan_refs: ["W1-T273", "W1-T362"]
+  files: [src/run-task.ts, test/check-proof-base.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — the comparison is decidable from two fixture trees with no network and
+    no spawn beyond the executor this verb already drives.
+    risk:high IS SET UP FRONT and is Rule 19's SPAN, NOT blast radius — the two are pulling in
+    opposite directions here and the band follows the span, as the rule requires. The span is
+    two subsystems (`run-task`, `check-proof-base`) because `subsystemsOf` folds a `.test`
+    basename onto its SOURCE, and there is no `src/lib/check-proof-base.ts` for the new suite
+    to fold onto, so it counts as its own concern. Naming the suite to fold onto `run-task`
+    would mean appending to test/run-task.test.ts, which is forbidden for a coverage-load-bearing
+    test (that file crashes at FILE level under coverage, zeroing every record in it). The real
+    blast radius is SMALL: an OPTIONAL flag whose absence preserves today's behaviour exactly.
+    Filed at medium first and corrected only after `lint-plan` said so, which is recorded here
+    rather than quietly amended.
+    FILES DERIVED BY WORD-BOUNDED INVOCATION COUNT: `checkProofCommand` lives in src/run-task.ts
+    and is the only definition of this verb; the suite is a NEW file rather than an append,
+    per the rule that a coverage-load-bearing test must not share a file that can crash at file
+    level. `src/lib/review.ts` is DELIBERATELY NOT DECLARED — clause (v) puts the reviewer's own
+    staleness computation out of scope, and an implementer who concludes the shared predicate
+    must move there MUST AMEND THIS SHARD TO DECLARE IT FIRST rather than overrunning; #1869
+    shipped a 22-file overrun against a two-path declaration.
+    FILED, NOT BUILT, and deliberately kept separate from W1-T533 rather than absorbed into it:
+    they share a session's motivation and nothing else — one repairs a body the harness
+    invalidated, the other reports a discrimination the CLI never measured.
+    PROOF NOTES: all three proofs are the NAME-FILTERED `unit test:` form, never the whole-file
+    path form. Each title was verified to match ZERO files today via `grep -rlF` over test/,
+    against a control matching one, so every one discriminates head from base. Each is plain
+    prose under 100 characters with no comma and no regex metacharacter, so
+    looksLikeScenarioNarrative does not fire and proofNameResolutionViolations cannot either.
+    Zero candidates today is the legitimate forward reference for an unimplemented task.
+    ID PROVENANCE: refs/rmd-id/W1-T534 could not be minted — the same HTTP 403 credential limit
+    recorded on W1-T533 and filed as W1-T518/#1893. Free by every readable signal at mint time. RENUMBERED W1-T534 -> W1-T912 to unbreak origin/main, where two shards declared W1-T534 and loadPlan therefore refused the whole tree. ONLY the id line and this note change: the acceptance criteria are deliberately LEFT BYTE-IDENTICAL, including the forward-referencing unit-test titles that still read W1-T534, because editing a claim: or proof: field is exactly what Standing rule 15 forbids outside a plan-only diff and this repair has to travel with a source change. Whoever builds this task should rename those titles then, as ordinary authoring work. The ID PROVENANCE paragraph above is left as written: it records what was true at mint time and it is the direct cause, since no lane could write refs/rmd-id at all (HTTP 403, filed as W1-T518/#1893) and so none could gate against the others."
