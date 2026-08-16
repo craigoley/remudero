@@ -7896,6 +7896,22 @@ export function describeMintWithHistory(mint: MintedTaskIdWithHistory): string {
  * run over TEST_GLOB; when the title resolves to no file, that glob survived into the spawn, so the
  * "one child process" was `node --test` over the ENTIRE SUITE, with no timeout. Writing nothing is
  * not the same as doing nothing. The branch below refuses that run by default.
+ *
+ * W1-T912, OPTIONAL `--base <ref>`: THIS VERB ANSWERED A DIFFERENT QUESTION THAN THE REVIEWER ASKS.
+ * Without `--base`, everything above still describes the whole verb — one tree, one verdict. The
+ * reviewer applies a SECOND test this CLI never performed: a proof that matches BOTH the PR head and
+ * its merge-base discriminates nothing and is downgraded to `executed_stale` (W1-T273 for `grep:`,
+ * extended to `unit test:` by W1-T362) — so a proof could read `verdict: pass` here and count for
+ * nothing in review, with nothing local ever having asked the second question. `--base <ref>` asks
+ * it: it runs the SAME proof again against `<ref>` (via {@link buildBaseProofDir}, the exact builder
+ * `rmd review`'s own wiring uses, injected with `<ref>` in place of the real merge-base) and prints a
+ * `base:` line alongside the existing `verdict:` line, plus a `discrimination:` line naming the
+ * reviewer's own `executed_stale` when both trees agree. Absent `--base`, none of this runs — every
+ * line above and the function's return value are byte-identical to before this task, so no existing
+ * caller shifts. It REPORTS, it does not RE-RANK: no change to the reviewer, to `executed_stale`
+ * itself, or to any exit code other than the new stale case (see {@link CHECK_PROOF_EXIT}). Like
+ * {@link materialiseBaseProofBlobs} itself, only `grep:` proofs get a base blob materialized — a
+ * `unit test:` proof reports `NOT COMPARABLE` rather than silently skipping the check.
  */
 /** Opt-in for the one `check-proof` path that would otherwise run the ENTIRE suite — see the
  *  `unresolvable` branch in {@link checkProofCommand}. */
@@ -7923,6 +7939,10 @@ export const CHECK_PROOF_FULL_SUITE_FLAG = "--allow-full-suite";
  *                       distinct from exit 1's "looked, found nothing" (W1-T219). Inconclusive,
  *                       not evidence either way — review.ts also degrades this to the keyword
  *                       floor, so it must not read as `fail` either.
+ *   - `executedStale` (5) — NEW (W1-T912). ONLY reachable with `--base <ref>`: the proof passed on
+ *                       BOTH the working tree and `<ref>`, so it discriminates nothing — the exact
+ *                       shape review.ts's own `executed_stale` (W1-T273/W1-T362) downgrades. Absent
+ *                       `--base` this code is never returned, so every existing caller is unaffected.
  */
 export const CHECK_PROOF_EXIT = {
   pass: 0,
@@ -7930,6 +7950,7 @@ export const CHECK_PROOF_EXIT = {
   refused: 2,
   noMatch: 3,
   execError: 4,
+  executedStale: 5,
 } as const;
 
 /** Fallback when plan/policy.yaml cannot be read: that file's own documented floor for
@@ -8806,11 +8827,38 @@ export function autonomyRateCommand(rest: string[], opts: { stateDir?: string; c
   return 0;
 }
 
-export function checkProofCommand(rest: string[]): number {
-  // Matched as a STANDALONE token, never a substring: a proof body is free text that could
-  // legitimately quote this flag's name.
+export function checkProofCommand(
+  rest: string[],
+  deps: {
+    /** W1-T912: injectable ONLY for tests. Real callers (the CLI dispatch below) omit this and
+     *  get {@link buildBaseProofDir}'s own default `git show` — see its doc for why that is the
+     *  right default. Overriding `showBlob` here is what makes a `--base` comparison decidable
+     *  from two literal fixture trees with NO spawn beyond the executor this verb already
+     *  drives (execWhitelistedProof's own grep/`node --test`) — the "base" tree never needs a
+     *  real git rev to exist for a test. */
+    baseBlobDeps?: { showBlob?: (cwd: string, rev: string, repoRelPath: string) => string; makeDir?: () => string };
+  } = {},
+): number {
+  // Matched as STANDALONE tokens, never a substring: a proof body is free text that could
+  // legitimately quote either flag's name.
   const allowFullSuite = rest.includes(CHECK_PROOF_FULL_SUITE_FLAG);
-  const proof = rest.filter((t) => t !== CHECK_PROOF_FULL_SUITE_FLAG).join(" ").trim();
+  const baseFlagIdx = rest.indexOf("--base");
+  const baseRef = baseFlagIdx >= 0 ? rest[baseFlagIdx + 1] : undefined;
+  if (baseFlagIdx >= 0 && baseRef === undefined) {
+    console.error("rmd check-proof: --base needs a <ref> argument, e.g. `--base origin/main`\n" + USAGE);
+    return CHECK_PROOF_EXIT.refused;
+  }
+  const proof = rest
+    .filter((t, i) => {
+      if (t === CHECK_PROOF_FULL_SUITE_FLAG) return false;
+      // Only ever excludes the flag token AND its value token — guarded by baseFlagIdx >= 0 so
+      // an ABSENT --base (index -1, +1 = 0) can never accidentally eat argv[0]. This is the
+      // exact shape that keeps every caller who omits --base byte-identical to before this task.
+      if (baseFlagIdx >= 0 && (i === baseFlagIdx || i === baseFlagIdx + 1)) return false;
+      return true;
+    })
+    .join(" ")
+    .trim();
   if (!proof) {
     console.error("rmd check-proof: give me a proof, e.g. `rmd check-proof 'grep: foo in src/lib/bar.ts'`\n" + USAGE);
     return CHECK_PROOF_EXIT.refused;
@@ -8938,9 +8986,99 @@ export function checkProofCommand(rest: string[]): number {
       "note:       a `grep:` pattern is a BASIC REGULAR EXPRESSION, not a literal — `[`, `*`, `^`, `$`\n" +
         "            are metacharacters. Do NOT re-check this with `grep -F`; that is a different matcher.",
     );
-  if (outcome === "pass") return CHECK_PROOF_EXIT.pass;
-  if (outcome === "fail") return CHECK_PROOF_EXIT.fail;
-  return CHECK_PROOF_EXIT.noMatch;
+  const headExit =
+    outcome === "pass" ? CHECK_PROOF_EXIT.pass : outcome === "fail" ? CHECK_PROOF_EXIT.fail : CHECK_PROOF_EXIT.noMatch;
+
+  // W1-T912: --base ABSENT ⇒ nothing below this line ever runs, and every line printed above (and
+  // `headExit`, this function's return value with no --base) is byte-identical to before this task —
+  // no existing caller shifts. See this function's own doc comment for the full design.
+  if (baseRef === undefined) return headExit;
+
+  console.log(`base ref:   ${baseRef}`);
+  // Reuses the SAME builder `rmd review` wires (buildBaseProofDir -> materialiseBaseProofBlobs),
+  // injected with `<ref>` in place of the real `git merge-base origin/main HEAD` — everything
+  // downstream (blob materialization, the absent/unreadable distinction) is the reviewer's own
+  // mechanism, not a second implementation kept in sync by hand.
+  const { baseCheckoutDir, baseUnreadablePaths } = buildBaseProofDir([{ proof }], process.cwd(), {
+    mergeBase: () => baseRef,
+    ...deps.baseBlobDeps,
+  });
+  // Mirrors grepProofTargetPath (review.ts, unexported): the compiled argv's LAST element for a
+  // `grep:` proof is its target path; `undefined` for every other kind, since only a `grep:`
+  // proof ever gets a base blob materialized (materialiseBaseProofBlobs's own scope).
+  const grepTargetPath = w.kind === "grep" ? w.args[w.args.length - 1] : undefined;
+
+  if (baseCheckoutDir === undefined) {
+    if (grepTargetPath !== undefined && baseUnreadablePaths.has(grepTargetPath)) {
+      console.log(
+        `base:       UNREADABLE — \`git show ${baseRef}:${grepTargetPath}\` failed to read; the base\n` +
+          "            comparison is inconclusive and never counted as a false discrimination — the same\n" +
+          "            base_unreadable degrade the reviewer itself uses (W1-T460).",
+      );
+    } else if (grepTargetPath !== undefined) {
+      console.log(
+        `base:       ABSENT at ${baseRef} — ${grepTargetPath} did not exist there, so this proof could not\n` +
+          "            have matched before the work existed (a forward reference) — the strongest possible\n" +
+          "            form of discriminating.",
+      );
+    } else {
+      console.log(
+        `base:       NOT COMPARABLE — only \`grep:\` proofs get a base blob materialized today (kind=${w.kind}),\n` +
+          "            the same scope materialiseBaseProofBlobs has for the reviewer itself; base comparison\n" +
+          "            skipped, the verdict above stands unchanged.",
+      );
+    }
+    console.log("discrimination: unknown — reported verdict above stands unchanged");
+    return headExit;
+  }
+
+  let baseDiag: { stdout: string; status: number | null; signal: NodeJS.Signals | null } | undefined;
+  const baseCapturingSpawn: ProofSpawner = (command, spawnArgs, spawnCwd, spawnTimeoutMs) => {
+    try {
+      const out = defaultProofSpawner(command, spawnArgs, spawnCwd, spawnTimeoutMs);
+      baseDiag = { stdout: out, status: 0, signal: null };
+      return out;
+    } catch (e) {
+      const err = e as NodeJS.ErrnoException & {
+        status?: number | null;
+        signal?: NodeJS.Signals | null;
+        stdout?: string | Buffer | null;
+      };
+      baseDiag = {
+        stdout: typeof err.stdout === "string" ? err.stdout : (err.stdout?.toString("utf8") ?? ""),
+        status: typeof err.status === "number" ? err.status : null,
+        signal: err.signal ?? null,
+      };
+      throw e;
+    }
+  };
+  let baseOutcome: "pass" | "fail" | "no-match";
+  try {
+    baseOutcome = execWhitelistedProof(w, baseCheckoutDir, checkProofTimeoutMs(), baseCapturingSpawn);
+  } catch (e) {
+    console.log(
+      `base:       COULD NOT EXECUTE — ${String((e as Error)?.message ?? e)} — an environment gap, never\n` +
+        "            evidence either way, same as the reviewer's own base_unknown degrade.",
+    );
+    console.log("discrimination: unknown — reported verdict above stands unchanged");
+    return headExit;
+  }
+  if (baseDiag) {
+    const baseHits = baseDiag.stdout.split("\n").filter((l) => l.trim() !== "").length;
+    console.log(`base hits:  ${baseHits}`);
+  }
+  console.log(`base:       ${baseOutcome}`);
+
+  if (outcome === "pass" && baseOutcome === "pass") {
+    console.log(
+      "discrimination: executed_stale — this proof matches BOTH head and base, so it discriminates NOTHING;\n" +
+        "                the reviewer downgrades exactly this shape (W1-T273/W1-T362) and this verdict would\n" +
+        "                count for nothing in review despite reading pass above.",
+    );
+    return CHECK_PROOF_EXIT.executedStale;
+  }
+  console.log("discrimination: discriminates — head and base disagree; this proof tells done from not-done.");
+  return headExit;
 }
 
 /**
@@ -19872,7 +20010,7 @@ const COMMANDS: readonly CommandSpec[] = [
   {
     name: "check-proof",
     usage:
-      "rmd check-proof <proof> [--allow-full-suite]   # run ONE acceptance proof through the REVIEWER'S OWN parser and executor and print what it does: parse kind, resolved candidate file(s), the exact argv, the verdict, exit code and hit count. A `grep:` pattern is a BASIC REGULAR EXPRESSION (`[ * ^ $` are metacharacters) — verifying with `grep -F` is a DIFFERENT matcher and reports a false green (PR #1071). A `unit test:` proof naming a TITLE rather than a test/<file>.test.ts PATH is resolved to its file first; when it resolves to none, the run is REFUSED rather than falling back to the whole-suite glob (--allow-full-suite overrides, time-boxed). EXIT CODE IS THE VERDICT: 0 pass, 1 fail (genuinely unmet — overrides the keyword floor), 2 refused (nothing executed — bad usage, an unparseable proof, or an unresolved name run declined), 3 no-match (ran and named nothing — degrades to the keyword floor, NEVER read as fail), 4 exec_error (a timeout/spawn failure/grep-exit-2 — inconclusive, also degrades). READ-ONLY: writes no cache, no ledger line, no state file",
+      "rmd check-proof <proof> [--allow-full-suite] [--base <ref>]   # run ONE acceptance proof through the REVIEWER'S OWN parser and executor and print what it does: parse kind, resolved candidate file(s), the exact argv, the verdict, exit code and hit count. A `grep:` pattern is a BASIC REGULAR EXPRESSION (`[ * ^ $` are metacharacters) — verifying with `grep -F` is a DIFFERENT matcher and reports a false green (PR #1071). A `unit test:` proof naming a TITLE rather than a test/<file>.test.ts PATH is resolved to its file first; when it resolves to none, the run is REFUSED rather than falling back to the whole-suite glob (--allow-full-suite overrides, time-boxed). --base <ref> (W1-T912, OPTIONAL — omitting it leaves every line and exit code above byte-identical) re-runs the SAME proof against <ref> and prints a `base:`/`discrimination:` line: a proof that ALSO matches at <ref> discriminates nothing and reports `executed_stale`, the reviewer's OWN name for the exact downgrade it applies at review time (W1-T273/W1-T362) — so a local `verdict: pass` that would count for nothing in review is visible before a PR ever opens. Only `grep:` proofs get a base blob materialized (same scope the reviewer itself has); a `unit test:` proof reports NOT COMPARABLE. EXIT CODE IS THE VERDICT: 0 pass, 1 fail (genuinely unmet — overrides the keyword floor), 2 refused (nothing executed — bad usage, an unparseable proof, or an unresolved name run declined), 3 no-match (ran and named nothing — degrades to the keyword floor, NEVER read as fail), 4 exec_error (a timeout/spawn failure/grep-exit-2 — inconclusive, also degrades), 5 executed_stale (--base only — passed on both trees, never read as fail). READ-ONLY: writes no cache, no ledger line, no state file",
   },
   {
     name: "reap-branches",
