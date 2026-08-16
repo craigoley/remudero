@@ -127,6 +127,7 @@ import { makeTempDir, sweepStaleTempDirs, withTempDir, type TempSweepOpts, type 
 import { reapWorkerScratch, sweepStaleWorkerScratch } from "./lib/worker-scratch.js";
 import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateServeLaunchdPlist, generateSupervisorLaunchdPlist, launchctlGuiTarget, launchdPlistPath, parseSupervisorStartInterval, SERVE_LABEL, serveLogPaths, SUPERVISOR_LABEL } from "./lib/launchd.js";
 import { realDeployDeps, requestDeploy, runDeployCycle } from "./lib/deployer.js";
+import { runOperatorSync, type OperatorSyncDeps } from "./lib/operator-sync.js";
 import { buildStatusBoard, renderStatusBoardText, type ServiceName } from "./lib/status-board.js";
 import { buildDigest, buildMarkerAwareDigest, consoleCardUrl, sendDigest, sendMarkerAwareDigest, sendRundown } from "./lib/digest.js";
 import { createLastSeenStore, hashToken, lastSeenPath } from "./lib/last-seen.js";
@@ -6945,6 +6946,111 @@ function defaultRetroEditBody(url: string, body: string): void {
   execFileSync("gh", ["pr", "edit", url, "--body", body], { stdio: "pipe" });
 }
 
+/**
+ * W1-T908 — the changed-path read for {@link repairRetroChangesetClaim}. Appended LAST in that
+ * function's deps object so no existing positional caller shifts (#977/#978), and exercised by a
+ * test that really shells out, so the default is not left as an uncovered seam.
+ */
+function defaultRetroChangedFiles(url: string): string[] {
+  const out = execFileSync("gh", ["pr", "diff", url, "--name-only"], { encoding: "utf8", maxBuffer: 1 << 26 });
+  return out.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+}
+
+/**
+ * W1-T908 — the COUNT-SHAPED changeset claim, the thing `bodyContradictsDiff` refuses.
+ *
+ * Deliberately NOT imported from lib/review.ts: this rung must not hold a share of the detector's
+ * authority, or a future widening there would silently change what gets rewritten here. The
+ * relationship is pinned the other way round instead — a test drives the REAL
+ * `bodyContradictsDiff` over this function's output and requires it to stay silent, so the two
+ * are held together by a falsifier rather than by a shared symbol.
+ *
+ * Built fresh per call. A module-level `/g` regex carries `lastIndex` between calls, so a shared
+ * instance would make `.test()` answer differently on the second invocation with the same input.
+ */
+function changesetCountClaimRe(): RegExp {
+  return /\bexactly\s+\w+\s+files?\b(?:\s*:\s*[^\s,]+(?:\s*,\s*[^\s,]+)*)?/gi;
+}
+
+/**
+ * W1-T908 — render the changeset as PATHS AND NEVER A COUNT.
+ *
+ * A count is what failed four PRs, and replacing a wrong count with a right one would be the same
+ * defect wearing a new number: the next retro that regenerates two files or four would be wrong
+ * again with nobody's code having changed. Naming the paths is correct for any arity by
+ * construction. Sorted so the sentence is stable across two runs over the same changeset.
+ */
+export function retroChangesetSentence(paths: readonly string[]): string {
+  const sorted = [...paths].sort();
+  if (sorted.length === 0) return "no files";
+  if (sorted.length === 1) return sorted[0];
+  return `${sorted.slice(0, -1).join(", ")} and ${sorted[sorted.length - 1]}`;
+}
+
+/**
+ * W1-T908 — replace every count-shaped changeset claim in `body` with the real paths.
+ *
+ * Returns `undefined` when there is nothing to repair, so the caller can distinguish "healthy"
+ * from "rewritten" without comparing strings.
+ */
+export function repairChangesetClaimInBody(body: string, paths: readonly string[]): string | undefined {
+  if (!changesetCountClaimRe().test(body)) return undefined;
+  return body.replace(changesetCountClaimRe(), retroChangesetSentence(paths));
+}
+
+/**
+ * W1-T908 — THE RETRO'S CHANGESET-CLAIM REPAIR RUNG, the sibling of
+ * {@link repairRetroAcceptanceBlock} and called from the same place for the same reason.
+ *
+ * WHY A POST-HOC RUNG RATHER THAN A BETTER TEMPLATE. `retroCommand` spawns the Architect, which
+ * edits MASTER-PLAN.md, commits, pushes and OPENS THE PR WITH A BODY IT AUTHORED. Only then does
+ * `regenerateOrientation` commit docs/ORIENTATION.md, and only then does
+ * `regeneratePlanIndexAndCommit` commit plan/plan-index.json. The body is therefore written at a
+ * moment when two of the three files DO NOT YET EXIST, and no wording can fix that. Reordering
+ * cannot fix it either: ORIENTATION.md is regenerated FROM what the Architect just wrote, so it
+ * cannot run first. The only point where the changeset is knowable is after all three commits —
+ * which is exactly where this runs.
+ *
+ * Deps injected LAST and defaulted by object-spread (never `??`, which V8 instruments as a branch
+ * and would leave the untaken real side permanently uncovered) — the same discipline
+ * `repairRetroAcceptanceBlock` uses.
+ *
+ * Best-effort by contract, like its sibling: `retroCommand` must never fail because a repair
+ * attempt failed, so every throw is caught and ledgered rather than propagating.
+ */
+export function repairRetroChangesetClaim(
+  prUrl: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  deps: {
+    fetchBody?: (url: string) => string;
+    editBody?: (url: string, body: string) => void;
+    changedFiles?: (url: string) => string[];
+  } = {},
+): "repaired" | "healthy" | "error" {
+  const { fetchBody, editBody, changedFiles } = {
+    fetchBody: defaultRetroFetchBody,
+    editBody: defaultRetroEditBody,
+    changedFiles: defaultRetroChangedFiles,
+    ...deps,
+  };
+  try {
+    const paths = changedFiles(prUrl);
+    const body = fetchBody(prUrl);
+    const repaired = repairChangesetClaimInBody(body, paths);
+    if (repaired === undefined) return "healthy";
+    editBody(prUrl, repaired);
+    // A step of its own rather than reusing `acceptance.repaired`: that line means a different
+    // repair happened, and a line whose reason belongs to another decision is worse than a terse
+    // one (CLAUDE.md, #981). `changed_files` is carried so a later reading can adjudicate the row
+    // instead of being blind to what was named.
+    log("changeset_claim.repaired", { pr_url: prUrl, changed_files: paths });
+    return "repaired";
+  } catch (e) {
+    log("changeset_claim.repair.error", { error: String((e as Error)?.message ?? e) });
+    return "error";
+  }
+}
+
 export function reviewTaskIdFromBody(body: string): string | undefined {
   const matches = [...body.matchAll(/^Remudero-Task:\s*(\S+)\s*$/gm)];
   return matches.length ? matches[matches.length - 1][1] : undefined;
@@ -10146,6 +10252,10 @@ async function retroCommand(
     // deterministic backstop so a worker's shape mistake doesn't fail the whole retro
     // CLOSED at remudero-review. Best-effort: never lets this crash an otherwise-fine retro.
     repairRetroAcceptanceBlock(prUrl, log);
+    // W1-T908: and the CHANGESET sentence, for the same reason and at the same point. Both
+    // companions above are committed and pushed by now, so this is the first moment in the run
+    // where the PR's real file set can be read at all.
+    repairRetroChangesetClaim(prUrl, log);
 
     // DETERMINISTIC GUARD: a retro is PLAN-ONLY. If the diff touches src/ or test/,
     // fail closed (the retro may never carry code — one concern).
@@ -10214,6 +10324,10 @@ function retroPrompt(gatherReport: string, calTable: string, runId: string): str
     "NEVER touch docs/ORIENTATION.md — it is HARNESS-OWNED: the harness deterministically regenerates",
     "it from this same gather right after you finish and commits it separately. Any edit you make to it",
     "is overwritten.",
+    "W1-T908: do NOT describe the PR's changed-file set in the body — not as a list and above all",
+    "not as a COUNT. The harness commits docs/ORIENTATION.md and plan/plan-index.json onto this",
+    "same PR after you finish, so any such sentence is written before two of the three files exist",
+    "and is wrong every time. Never write 'exactly N files'; the harness names the paths for you.",
     "",
     "=== DETERMINISTIC GATHER (no LLM produced this) ===",
     gatherReport,
@@ -16232,6 +16346,33 @@ export async function wipeTestCommand(
 }
 
 /**
+ * `rmd sync [--dry-run]` — the sanctioned dedupe-then-pull recipe as one explicit verb
+ * (W1-T907). All the classification/preserve/discard/ff logic lives in
+ * {@link runOperatorSync} (src/lib/operator-sync.ts), which also does its own
+ * printing (say/warn) — this wrapper is arg-validation + exit-code translation only,
+ * same shape as every other flags-only subcommand below.
+ *
+ * `opts.repoDir`/`opts.deps` are injectable (default: the real `repoRoot` + real git) purely so
+ * a test can drive the arg-validation branch and the exit-code translation without ever letting
+ * runOperatorSync touch THIS process's own checkout — `repoRoot` below is a module-level
+ * constant resolved once at import time (no `--repo-root` override reaches here for `sync`
+ * today), so an un-injectable version of this function could only be safely exercised via
+ * runOperatorSync's own direct unit tests (test/operator-sync.test.ts), never via `main()`.
+ */
+export function syncCommand(
+  rest: string[],
+  opts: { repoDir?: string; deps?: OperatorSyncDeps } = {},
+): number {
+  const badArg = unknownArgError("sync", rest, [], ["--dry-run"]);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const result = runOperatorSync(opts.repoDir ?? repoRoot, { dryRun: rest.includes("--dry-run") }, opts.deps);
+  return result.status === "refused" || result.status === "degraded" ? 1 : 0;
+}
+
+/**
  * `rmd stop [--reason <text>]` — the fleet control set (W1-T11, MASTER-PLAN §4A/§4B).
  * Writes the STOP flag file. A `rmd drain` already running halts within one tick
  * (checked FIRST, every iteration, ahead of PAUSE); a NEW `rmd drain` refuses to
@@ -19667,6 +19808,11 @@ const COMMANDS: readonly CommandSpec[] = [
       "rmd up [--port <n>] [--host <addr>] [--allow-off-main]   # full resume (W1-T169): runs install-freshness FIRST (W1-T151 — a lockfile-changing pull triggers `npm ci` before anything starts), REFUSES to resume an off-main checkout unless --allow-off-main is given, loads the daemon launchd service, confirms/starts the serve launchd service, and prints a resume report (daemon pid, the console URL WITH its READ token via `rmd console-url`, the in-flight/queued head, needs-human count). IDEMPOTENT: already-up verifies + reports the running state, never a double start.",
   },
   {
+    name: "sync",
+    usage:
+      "rmd sync [--dry-run]   # W1-T907: the sanctioned dedupe-then-pull recipe as one explicit verb, for exactly the case checkCliFreshness refuses (behind origin/main AND dirty) that W1-T446's intersect-only fix cannot unstick — three-way classifies every `git status --porcelain` path against the origin/main blob (git hash-object vs git rev-parse <ref>:<path>, the same predicate deployer.ts's sameAsIncoming/discardLocal already established): IDENTICAL (local bytes == origin/main's blob at that path, or a DECISIONS.md whose every appended `## ...` record already landed via plan/decisions.d, W1-T191) is discarded/restored as provably lossless; everything else (no origin/main counterpart, differing bytes, or an unlanded DECISIONS.md record) is COPIED ASIDE under state/sync-<timestamp>/ with a named report BEFORE any discard runs and is NEVER deleted, cleared from the working tree only if the fast-forward actually needs that path; a local commit that is not an ancestor of origin/main (BLOCKING) refuses the WHOLE verb, mutating nothing. Then `git merge --ff-only origin/main` — never merge, never rebase, never reset --hard. --dry-run prints the identical classification and mutates nothing. Off-main/detached checkouts refuse exactly as W1-T445 established for the CLI entry guard. Does not touch checkCliFreshness's own predicate (W1-T446 owns that).",
+  },
+  {
     name: "status",
     usage:
       "rmd status [--json]   # W1-T279+W1-T280: ONE verb answering 'is it running' AND 'why is it stalled' from ONE read model. LOCAL (no network): LIVENESS (daemon/serve/deploy-supervisor running/pid/boot-time, running HEAD vs origin/main with a STALE flag, crash-loop), LATCHES (every state marker — STOP/PAUSE/QUIET_HOURS/DEPLOY_FAILED/DEPLOY_AUTO/inflight locks/pending kicks/drain-now — with its age and stated consequence), LAST CYCLE (the newest daemon.summary). DERIVED: BLOCKERS BY CLASS (circuit-broken w/ reset note, dispatch.indeterminate w/ gh-window note, blocked PRs by sweep.ts's own named reason), QUEUE HEAD (next dispatchables, perpetual-attempt tasks flagged with observed per-cycle cost), INBOX (ready/not-ready counts, head not-ready reason), HEADROOM (newest telemetry + enforcement on/off from the same switch the daemon reads) — these read a batched GitHub gateway and degrade to a stated unknown on an outage, never a gate on the local sections. Each section ends with at most one next action. --json emits the exact same read model the text renders. Read-only: writes nothing, spawns nothing, always exits 0 (bad args aside).",
@@ -20133,6 +20279,15 @@ export async function main(
     // why the precise one had never run. Every OTHER verb keeps the refusal: `review`,
     // `lint-plan`, `triage`, `approve` and the rest read the plan, and a stale plan gives a
     // wrong answer — which is the whole point of the gate.
+  } else if (cmd === "sync") {
+    // W1-T907: `rmd sync` is the explicit operator verb that EXISTS to unstick exactly the case
+    // this gate refuses below (behind origin/main AND dirty) — gating it behind that same
+    // refusal would mean it could only ever run when it had nothing left to do. This does NOT
+    // touch `checkCliFreshness`'s own predicate (W1-T446 owns that; design (i) of the task
+    // record keeps self-sync.ts out of this task's `files:` entirely) — it only exempts THIS
+    // verb's own entry point from a guard whose refusal is the exact problem it exists to fix.
+    // src/lib/operator-sync.ts owns its own, independent safety (the BLOCKING/off-main refusals
+    // and the preserve-aside-before-discard ordering), unrelated to this gate's dirty check.
   } else {
     const freshness = (deps.checkFreshness ?? checkCliFreshness)(repoRoot, process.env);
     if (freshness.status === "refused") {
@@ -20261,6 +20416,10 @@ export async function main(
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(await upCommand(rest)) cannot carry a DA hit without forking the process; upCommand's own logic — install-freshness-first, the off-main refuse, the idempotent load sequencing, and the resume report — is unit-tested in test/rmd-down-up.test.ts (same irreducible-glue shape as the sibling console-url/away dispatch cases).
   if (cmd === "up") {
     process.exit(await upCommand(rest));
+  }
+  // diff-cov: process-boundary — main() CLI dispatch: process.exit(syncCommand(rest)) cannot carry a DA hit without forking the process; syncCommand's own logic (arg validation, exit-code translation) and the git-driving classify/preserve/discard/ff-pull logic it wraps (runOperatorSync) are unit-tested directly in test/operator-sync.test.ts (same irreducible-glue shape as the sibling emissions/ledger-grep dispatch cases).
+  if (cmd === "sync") {
+    process.exit(syncCommand(rest));
   }
   // diff-cov: process-boundary — main() CLI dispatch: process.exit(await statusCommand(rest)) cannot carry a DA hit without forking the process; statusCommand's own logic (arg validation, the queryService closure, --json vs text) plus the read model it calls (buildStatusBoard/renderStatusBoardText) are unit-tested in test/status-board.test.ts (same irreducible-glue shape as the sibling console-url/away/down/up dispatch cases).
   if (cmd === "status") {
