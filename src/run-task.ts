@@ -441,12 +441,14 @@ import {
   isTddStrict,
   judgeReview,
   judgeRubric,
+  lastPendingReviewStatusFromLedger,
   rubricAdvisorySection,
   scopeAdvisorySection,
   keywordOnlyAnnotation,
   acceptanceBlockDiagnostics,
   parseAcceptanceBlock,
   parseReviewerVerdicts,
+  postReviewPending,
   postReviewStatusGuarded,
   priorReviewVerdictFromLedger,
   resolveAutoMergeArm,
@@ -2252,6 +2254,30 @@ async function runReview(args: {
 }): Promise<ReviewVerdict & { headSha: string; reviewerOutcome: string }> {
   const { owner, repo, prUrl, task, report, log, say } = args;
   const headSha = readHeadShaRest(prUrl);
+  // W1-T913 (fb-1784901239119-1be356, PR #707): post `remudero-review=pending` the MOMENT this
+  // head is detected as needing review — before the diff fetch, the advisory reviewer spawn or
+  // worktree materialization consume the review's own latency budget. Before this, the required
+  // context stayed genuinely ABSENT (GitHub renders "Expected") for that whole interval, so the PR
+  // read green-at-a-glance among ~22 other checks while the review had not run at all. Goes
+  // through the ONE guarded post site (postReviewPending -> postReviewStatusGuarded); a refused
+  // `{posted:false}` result is ALREADY ledgered by that call. A THROW (e.g. a transient lifecycle
+  // read failure — `fetchLifecycle` has no retry of its own, unlike the post itself) is caught
+  // HERE and degrades the SAME way: legibility is strictly additive, so a pending-post hiccup must
+  // never abort the review it exists to make visible — the terminal post below still runs and is
+  // what actually gates the merge, exactly as it always has.
+  try {
+    await postReviewPending({
+      owner,
+      repo,
+      sha: headSha,
+      taskId: task.id,
+      runId: args.runId,
+      ledgerPath: args.ledgerPath,
+      fetchLifecycle: () => fetchPrLifecycle(prUrl),
+    });
+  } catch (e) {
+    log("review.pending_post.error", { error: String((e as Error)?.message ?? e) });
+  }
   const diff = execFileSync("gh", ["pr", "diff", prUrl], { encoding: "utf8", maxBuffer: 1 << 26 });
   const criteria = task.acceptance ?? [];
 
@@ -7049,6 +7075,9 @@ interface ReviewCommandDeps {
   loadConfig?: () => Config;
   materialize?: typeof materializeReviewWorktree;
   runReview?: typeof runReview;
+  /** W1-T913: injectable so a test can observe the pending post without a real `gh` spawn — see
+   *  `postReviewPending`'s call site below. Defaults to the real {@link postReviewPending}. */
+  postReviewPending?: typeof postReviewPending;
 }
 
 /**
@@ -7175,7 +7204,15 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     loadConfig: loadConfigDep,
     materialize,
     runReview: runReviewDep,
-  } = { fetchView: ghJson, loadConfig, materialize: materializeReviewWorktree, runReview, ...deps };
+    postReviewPending: postReviewPendingDep,
+  } = {
+    fetchView: ghJson,
+    loadConfig,
+    materialize: materializeReviewWorktree,
+    runReview,
+    postReviewPending,
+    ...deps,
+  };
 
   // `--repo <name>` or `--repo <owner>/<name>` lets the runner post remudero-review to a
   // repo OTHER than this checkout (e.g. remudero-sandbox for the daemon's live commissioning,
@@ -7254,6 +7291,29 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId ?? `PR-${view.number}`, step, lane: "review", ...extra });
 
   console.log(`### rmd review PR #${view.number} — criteria from ${source}`);
+
+  // W1-T913: `rmd review`'s OWN START posts remudero-review=pending — before this line, the
+  // command posted nothing until it had judged, so the worktree materialization below (its own
+  // measurable latency) sat behind the SAME absent-required-context window `runReview`'s own
+  // pending post (see its call site) closes for the run lane. Idempotent per head
+  // (`postReviewPending`'s own no-op guard): `runReviewDep` below reaches the SAME call a second
+  // time and finds it already posted, so this is never a duplicate API call, only earlier
+  // coverage of a latency window unique to this manual/sweep-dispatched path. A throw (e.g. a
+  // transient lifecycle-read failure) degrades the SAME way `runReview`'s own call site does —
+  // best-effort legibility, never a reason this command fails to review the PR at all.
+  try {
+    await postReviewPendingDep({
+      owner,
+      repo,
+      sha: view.headRefOid,
+      taskId: taskId ?? `PR-${view.number}`,
+      runId,
+      ledgerPath,
+      fetchLifecycle: () => fetchPrLifecycle(view.url),
+    });
+  } catch (e) {
+    log("review.pending_post.error", { error: String((e as Error)?.message ?? e) });
+  }
 
   // W1-T185 (Gap 2): materialize a throwaway worktree at the PR head so
   // whitelisted proofs actually EXECUTE on this manual path, matching what
@@ -14874,6 +14934,14 @@ export function buildOpenPrViews(
     // can be READ FROM, never what "recoverable" means.
     const filingUnmetKey = !taskId && isPlanOnlyFilingPr(ledger, pr.url) ? `PR-${pr.number}` : undefined;
     const unmetKey = taskId ?? filingUnmetKey;
+    // W1-T913: the SAME synthetic `PR-<n>` fallback `reviewCommand`/`runReview` already key every
+    // `review.pending_posted`/`review.posted` ledger line with (task.id there, `taskId ?? PR-<n>`
+    // here) — never a second, independently-derived key. Only consulted when the LIVE rollup
+    // itself reads "pending" (never speculatively), and only trusted when the ledger's own
+    // `head_sha` still matches the CURRENT head — an older pending record surviving under a
+    // superseded head must never be read as dating the head observed right now.
+    const pendingRecord = reviewState === "pending" ? lastPendingReviewStatusFromLedger(ledger, unmetKey ?? `PR-${pr.number}`) : undefined;
+    const reviewPendingSince = pendingRecord && pendingRecord.headSha === pr.headRefOid ? pendingRecord.postedAt : undefined;
     // W1-T923 (design note ii): the SAME synthetic `PR-<n>` fallback {@link escalationTaskIdFor}
     // already mints, but WITH NO `isPlanOnlyFilingPr` restriction — that restriction is what
     // confines `filingUnmetKey` above to plan filings, and #1991 (the motivating case) is a
@@ -14885,6 +14953,7 @@ export function buildOpenPrViews(
       prUrl: pr.url,
       taskId,
       reviewState,
+      reviewPendingSince,
       checksState,
       unmetCriteria: reviewState === "failure" && unmetKey ? unmetFromLedger(ledger, unmetKey) : [],
       // W1-T440: whether a `Remudero-Task:` trailer resolved a task id AT ALL — i.e. whether

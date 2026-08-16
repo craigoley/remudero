@@ -435,6 +435,15 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "dep-review.decided",
   "review.posted",
   "review.post_refused",
+  // W1-T913: `postReviewPending` (review.ts) writes this the moment a review is DETECTED, before
+  // any judging happens, and `lastPendingReviewStatusFromLedger` READS IT BACK to decide two
+  // things: whether a pending status was already posted for THIS head (idempotence per head), and
+  // how long the review has been pending — the `ts` on this very line is the staleness clock
+  // `OpenPrView.reviewPendingSince` carries. A rotation dropping it therefore does not merely lose
+  // a record: it re-posts a duplicate pending status on the next pass and resets the clock, so a
+  // review stalled for hours reads as freshly detected and never surfaces as stalled. Same
+  // "the line IS the bound" discipline as its two siblings immediately above.
+  "review.pending_posted",
   "automerge.capped_override_granted",
   "daemon.boot",
   // W1-…/impl-DF: the idle rung's reason tally. A HUMAN reads this to tell "starved of work"

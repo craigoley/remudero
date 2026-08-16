@@ -44,6 +44,18 @@ export const REVIEW_CONTEXT = "remudero-review";
 export type ReviewState = "success" | "failure";
 
 /**
+ * W1-T913: the wider range {@link postReviewStatus}/{@link postReviewStatusGuarded} may POST —
+ * {@link ReviewState} widened with `pending`, kept as a SEPARATE type on purpose. `ReviewState`
+ * is a JUDGED verdict (`ReviewVerdict.state`/`floorState`, `judgeReview`'s whole output shape) and
+ * must never admit "pending" — the judge computes a verdict, it never computes "in progress".
+ * `PostableReviewState` is strictly the POSTING surface: the DETECTION-time pending post this task
+ * adds is a fact about timing (a review has started, not yet finished), never a verdict, so it
+ * gets its own type rather than widening `ReviewState` everywhere that type is already used for
+ * judged-verdict exhaustiveness.
+ */
+export type PostableReviewState = ReviewState | "pending";
+
+/**
  * Observed outcome of executing a criterion's proof against the PR head (W1-T65,
  * ratifies P15). Recorded per-criterion on {@link CriterionVerdict} and surfaced on
  * the `review.posted` ledger line + console summary (run-task.ts) so an OBSERVED
@@ -3756,7 +3768,13 @@ export const REVIEWER_TOKEN_ENV = "REMUDERO_REVIEWER_TOKEN";
  * under this context for the sha in question.
  */
 export interface ReviewStatusEntry {
-  state: ReviewState;
+  /**
+   * W1-T913: widened to {@link PostableReviewState} — a LIVE read off GitHub can genuinely be
+   * `pending` now that {@link postReviewPending} posts one. {@link decideAutoMergeArmAtSha}'s own
+   * doc covers why a pending is never armed and never confused with the untrusted-poster/absent
+   * case.
+   */
+  state: PostableReviewState;
   /**
    * GitHub's `creator.login` for this status — the one field a poster cannot
    * spoof (server-attributed from the authenticating credential, never from
@@ -3783,7 +3801,10 @@ export interface ReviewStatusEntry {
  *   legitimate merge instead of only a hostile one).
  * - A status posted by `trustedLogin` → its own `state`, unchanged — the
  *   autonomous merge path is byte-identical to pre-W1-T203 for every
- *   non-forged PR (criterion 3).
+ *   non-forged PR (criterion 3). W1-T913: this now includes a trusted
+ *   `pending` passing straight through, unfiltered by provenance — it is
+ *   {@link decideAutoMergeArmAtSha} below that keeps a `pending` from ever
+ *   being read as a verdict, never this function pretending it is "absent".
  *
  * Pure and case-insensitive on the login compare (GitHub logins are
  * case-insensitive for uniqueness, so a byte-exact compare would be a false
@@ -3792,7 +3813,7 @@ export interface ReviewStatusEntry {
 export function resolveReviewProvenance(
   entry: ReviewStatusEntry | undefined,
   trustedLogin: string,
-): ReviewState | "absent" {
+): PostableReviewState | "absent" {
   if (!entry) return "absent";
   if (!entry.posterLogin || entry.posterLogin.trim().toLowerCase() !== trustedLogin.trim().toLowerCase()) {
     return "absent";
@@ -3828,6 +3849,19 @@ export function decideAutoMergeArmAtSha(entry: ReviewStatusEntry | undefined, tr
   }
   if (resolved === "failure") {
     return { arm: false, reason: "remudero-review is not success" };
+  }
+  // W1-T913 (design (e)): a trusted PENDING is neither "success" nor "failure" nor "absent" — it
+  // is a review genuinely in progress. NAMED explicitly, ahead of the untrusted-poster/no-status
+  // fallback below, so a pending is never worded as if it were forged or missing (it is neither)
+  // and never as a failure (arming stays withheld exactly the same either way, but the REASON
+  // must stay honest — "never read as a verdict in either direction" is the falsifier).
+  if (resolved === "pending") {
+    return {
+      arm: false,
+      reason:
+        "remudero-review is pending at this sha (review in progress, posted by the trusted reviewer " +
+        "identity) — waiting for a terminal verdict, not read as a pass or a fail",
+    };
   }
   return {
     arm: false,
@@ -5638,7 +5672,7 @@ export async function postReviewStatus(
     owner: string;
     repo: string;
     sha: string;
-    state: ReviewState;
+    state: PostableReviewState;
     description?: string;
   },
   retryOpts: PostReviewStatusRetryOpts = {},
@@ -5768,6 +5802,42 @@ export function lastPostedReviewStatusFromLedger(
 }
 
 /**
+ * W1-T913 — THE OWNERSHIP RECORD design (b) requires: a `remudero-review=pending` post is
+ * distinguishable from "reviewed", and traceable to the run that posted it, via a `ts`-stamped
+ * ledger line ({@link postReviewPending} writes `review.pending_posted`) — deliberately a
+ * DIFFERENT step than `review.posted` (which {@link lastPostedReviewStatusFromLedger} scans and
+ * which never carries a non-terminal `state`), so a pending post can never be mistaken for a
+ * terminal verdict by that function's own W1-T228 precedence read. `runId`/`postedAt` are what
+ * `sweep.ts`'s stuck-pending remedy needs: a pending whose owner is long gone (or simply old) must
+ * remain something the sweep can re-drive rather than read as "already attended to" forever.
+ */
+export interface PendingReviewStatusRecord {
+  headSha: string;
+  /** The `run_id` that posted this pending — the traceability handle design (c) calls for. */
+  runId: string;
+  /** The ledger's own `ts` on the `review.pending_posted` line — the staleness clock. */
+  postedAt: string;
+}
+
+export function lastPendingReviewStatusFromLedger(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  taskId: string | undefined,
+): PendingReviewStatusRecord | undefined {
+  if (!taskId) return undefined;
+  let prior: PendingReviewStatusRecord | undefined;
+  for (const line of lines) {
+    if (line.step !== "review.pending_posted" || line.task_id !== taskId) continue;
+    if (typeof line.head_sha !== "string") continue;
+    prior = {
+      headSha: line.head_sha,
+      runId: typeof line.run_id === "string" ? line.run_id : "",
+      postedAt: typeof line.ts === "string" ? line.ts : "",
+    };
+  }
+  return prior;
+}
+
+/**
  * The CURRENT PR lifecycle {@link decideReviewStatusPost}'s LIFECYCLE rule
  * checks against — fetched FRESH (never a snapshot from before ci/the
  * reviewer spawn ran) by {@link postReviewStatusGuarded}.
@@ -5822,7 +5892,7 @@ export function fetchPrLifecycle(prUrl: string, fetch: GhApiFetcher = ghJson): P
 /** One posting attempt {@link decideReviewStatusPost} judges. */
 export interface ReviewStatusPostAttempt {
   headSha: string;
-  state: ReviewState;
+  state: PostableReviewState;
   evidence: ReviewEvidenceStrength;
 }
 
@@ -5999,7 +6069,7 @@ export interface PostReviewStatusGuardedOpts {
   owner: string;
   repo: string;
   sha: string;
-  state: ReviewState;
+  state: PostableReviewState;
   description?: string;
   /** The PR the lock/ledger key off — every real caller already keys its
    * `review.posted` ledger lines by this same id (the task id, or the
@@ -6022,7 +6092,7 @@ export interface PostReviewStatusGuardedOpts {
     owner: string;
     repo: string;
     sha: string;
-    state: ReviewState;
+    state: PostableReviewState;
     description?: string;
   }) => void | Promise<void>;
   lockOpts?: AcquireReviewStatusLockOpts;
@@ -6106,4 +6176,102 @@ export async function postReviewStatusGuarded(
   } finally {
     handle.release();
   }
+}
+
+// ── W1-T913: post remudero-review=pending at DETECTION, before judging ──────
+
+export interface PostReviewPendingOpts {
+  owner: string;
+  repo: string;
+  sha: string;
+  /** The PR the ledger/lock key off — same convention as {@link PostReviewStatusGuardedOpts.taskId}. */
+  taskId: string;
+  runId: string;
+  ledgerPath: string;
+  fetchLifecycle: () => PrLifecycleState;
+  /** Injected raw poster (tests) — forwarded to {@link postReviewStatusGuarded} unchanged. */
+  post?: PostReviewStatusGuardedOpts["post"];
+  lockOpts?: AcquireReviewStatusLockOpts;
+}
+
+export interface PostReviewPendingResult {
+  posted: boolean;
+  reason?: string;
+}
+
+/**
+ * THE ONE PENDING-POST ENTRY POINT (design (a)/(d)) — every detector (`runReview`'s own start,
+ * `reviewCommand`'s own start, and transitively the sweep's post-review dispatch, which calls
+ * `reviewCommand`) calls this ONCE, at DETECTION, before the worktree/proof/reviewer-spawn work a
+ * review's own latency is spent on. Goes through {@link postReviewStatusGuarded} — the SAME single
+ * guarded post site the terminal verdict uses — never a second raw `gh api .../statuses/...` call,
+ * so the W1-T135 retry, W1-T228 lifecycle refusal and W1-T203 reviewer identity all still apply to
+ * a pending post exactly as they do to a terminal one.
+ *
+ * TWO REFUSALS, BOTH DECIDED HERE (before ever touching the lock/network), NEITHER a decision
+ * {@link postReviewStatusGuarded}'s own precedence rule can make on its own:
+ *
+ *   1. NEVER REGRESS A TERMINAL VERDICT TO PENDING. {@link decideReviewStatusPost}'s precedence
+ *      rule only refuses `executed -> no_evidence` on the SAME head; a pending attempt is always
+ *      `no_evidence`, so a prior `no_evidence` TERMINAL verdict (a keyword-only/CAPPED success or
+ *      failure) for this exact head would sail through that rule and get overwritten by a pending
+ *      — a real posted verdict regressing to "in progress" on the SAME sha it already judged. This
+ *      function refuses that itself: ANY terminal `review.posted` for this head is left standing.
+ *   2. IDEMPOTENT PER HEAD (design (c)): a `review.pending_posted` line already recorded for this
+ *      exact head is a no-op — no status churn, no second `gh api` call — REGARDLESS of which run
+ *      owns it. A dead owner's stuck pending is re-driven by the SWEEP recognizing the pending is
+ *      stale (see `sweep.ts`'s `reviewPendingIsStale`/the extended post-review disposition row),
+ *      never by this function racing a second pending post against the first.
+ *
+ * The posted status carries the posting `run_id` in its description (design (c)'s traceability
+ * handle) AND on the `review.pending_posted` ledger line this function writes on a successful
+ * post — the SAME line {@link lastPendingReviewStatusFromLedger} reads back, and the one
+ * `sweep.ts`'s `OpenPrView.reviewPendingSince` producer (`buildOpenPrViews`, run-task.ts) derives
+ * its staleness clock from.
+ */
+export async function postReviewPending(opts: PostReviewPendingOpts): Promise<PostReviewPendingResult> {
+  const lines = readLedgerLines(opts.ledgerPath);
+  const priorTerminal = lastPostedReviewStatusFromLedger(lines, opts.taskId);
+  if (priorTerminal && priorTerminal.headSha === opts.sha) {
+    return {
+      posted: false,
+      reason:
+        `a terminal ${priorTerminal.state} verdict is already posted for ${opts.sha.slice(0, 7)} — never ` +
+        "regressing it to pending (W1-T913)",
+    };
+  }
+  const priorPending = lastPendingReviewStatusFromLedger(lines, opts.taskId);
+  if (priorPending && priorPending.headSha === opts.sha) {
+    return {
+      posted: false,
+      reason:
+        `remudero-review is already pending for ${opts.sha.slice(0, 7)} (owned by run ${priorPending.runId}) ` +
+        "— no-op (W1-T913 idempotent-per-head)",
+    };
+  }
+  const description = `remudero-review: review in progress (owned by run ${opts.runId})`.slice(0, 140);
+  const result = await postReviewStatusGuarded({
+    owner: opts.owner,
+    repo: opts.repo,
+    sha: opts.sha,
+    state: "pending",
+    description,
+    taskId: opts.taskId,
+    // A pending attempt has, by construction, observed nothing yet — always `no_evidence`.
+    evidence: "no_evidence",
+    ledgerPath: opts.ledgerPath,
+    runId: opts.runId,
+    fetchLifecycle: opts.fetchLifecycle,
+    post: opts.post,
+    lockOpts: opts.lockOpts,
+  });
+  if (result.posted) {
+    appendLedger(opts.ledgerPath, {
+      run_id: opts.runId,
+      task_id: opts.taskId,
+      step: "review.pending_posted",
+      head_sha: opts.sha,
+    });
+  }
+  return result;
 }
