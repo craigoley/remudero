@@ -1,0 +1,128 @@
+- id: W1-T533
+  title: "the allocator stops two lanes taking one number and nothing stops two lanes taking one problem — four concurrent PRs converged on a file six shards declare, and the signal that would have caught it is overlap WEIGHTED BY RARITY, because raw overlap flags 37% of the plan"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: medium
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: "**THIS IS ADVISORY DETECTION, NOT A GUARD, AND THE FIRST CLAUSE SAYS SO.** 'Two tasks
+    describe the same problem' is a semantic judgement no predicate here can make. What IS decidable is
+    'another open PR already declares the rare file you are about to edit', and that is what this
+    reports. A false block on legitimately adjacent work would be worse than the duplication it
+    prevents, so nothing here blocks.
+
+    (1) **THE MEASURED RATE, AND TWO OF THE FOUR CLAIMED INSTANCES DID NOT SURVIVE RE-DERIVATION.**
+    HOLDS — **#1873/#1874**: two independent PRs, byte-identical titles ('skip a shard that vanished
+    between listing and reading') and IDENTICAL file lists (`src/lib/plan.ts`,
+    `test/plan-sharding.test.ts`); #1874 merged, #1873 closed unmerged, both green.
+    HOLDS BUT IS A DIFFERENT SHAPE — **#1881**: not two PRs. Two lanes on ONE branch, commits `4bc1afc9`
+    then `1ce15f7b` 38 minutes later, the second pre-empting a session's identical in-flight work.
+    **NO CROSS-PR SIGNAL CAN SEE THIS**, and this task does not claim to.
+    DOES NOT HOLD — **W1-T527/W1-T530 as one concern under two ids**: `W1-T530` on main is
+    `plan/tasks.d/W1-T530-feedback-landing-has-no-level-triggered-sweep.yaml`, an unrelated concern
+    built by #1934. `classifyRedCause` has ONE definition on main (3 references in `src/lib/sweep.ts`,
+    positive control `isBlockedCi` 44) — no second implementation shipped.
+    DOES NOT HOLD — **#1928 as a six-cycle waste**: it MERGED at 2026-08-16T01:56:03Z, touching only
+    `plan/feedback/fb-1784827378793-aa16b6.yaml`, and its body records grounding that found the concern
+    already answered and 'adds NO redundant task'. **THAT IS THE GUARD WORKING, NOT FAILING.**
+
+    (2) **AND THE FOUR-PR RACE IS NOT A SAME-ID RACE — THIS IS THE CORRECTION THAT SETS THE SCOPE.**
+    Measured by trailer and head ref: **#1927 carries `Remudero-Task: W1-T525` on `run-W1-T525-*`,
+    #1931 carries W1-T528 on `run-W1-T528-*`, #1933 carries W1-T529 on `run-W1-T529-*`, and #1930
+    carries NO trailer on a `claude/…` session branch.** FOUR DISTINCT IDS, OR NONE. So
+    `isDispatchEligible` was never asked to refuse a second run on one id, and an
+    `ls-remote 'run-<id>-*'` check in dispatch would have refused NOTHING here. The same-id guard is a
+    real gap and is NOT this task; see design (vi).
+
+    (3) **WHAT THEY ACTUALLY SHARED WAS ONE RARE FILE.** All four touched `src/lib/open-prs-rest.ts`,
+    which **6 of 277 shards declare (2%)**. That is the signal.
+
+    (4) **AND RAW OVERLAP IS USELESS, WHICH IS WHY THE WEIGHTING IS THE WHOLE DESIGN.**
+    `src/run-task.ts` is declared by **103 of 277 shards (37%)**, and 18% of all shard PAIRS share at
+    least one path — a detector on raw intersection would flag a fifth of the plan. But **324 of 370
+    distinct declared paths (87%) are named by three shards or fewer**, so a rarity-weighted signal is
+    precise across the overwhelming majority of the tree and noisy only at a handful of hubs.
+
+    (5) **ONE HYPOTHESIS WAS TESTED AND ABANDONED BECAUSE ITS CONTROL FAILED — RECORDED SO IT IS NOT
+    RETRIED.** Exact-set matching (two shards declaring the IDENTICAL `files:` set) looked precise:
+    only 68 of 38,226 pairs (0.17%) collide exactly, against 7,059 (18%) sharing any path. **BUT THE
+    POSITIVE CONTROL FAILED**: the known #1873/#1874 duplicate is ABSENT from the exact-set population,
+    because that fix was untrailered and never had a shard at all. A signal that cannot see the one
+    duplicate we can name is not validated, whatever its selectivity looks like."
+  design: |
+    (i) WEIGHT THE OVERLAP BY RARITY, AND REPORT ONLY THE RARE END. The existing `overlappingPaths`
+    (`src/lib/dispatch-overlap.ts`) already computes intersection; this adds a pure companion that
+    scores an overlap by how many shards declare each shared path and reports only overlaps whose
+    rarest shared path is below a threshold. `src/run-task.ts` at 37% must never trigger it;
+    `src/lib/open-prs-rest.ts` at 2% must.
+    (ii) THE THRESHOLD IS POLICY DATA, NOT A LITERAL, so a fixture can move it — the same discipline
+    `SweepPolicy` already follows. Rationale (4) is the distribution it must be sized against, and the
+    sizing must be justified against BOTH tails: a threshold that admits `src/run-task.ts` is useless,
+    and one that admits nothing reports nothing.
+    (iii) ADVISORY, NEVER BLOCKING. The output is a WARNING at the filing surface naming the open PR
+    and the shared rare path. It does not refuse a mint, does not refuse a dispatch, and does not
+    change any disposition.
+    (iv) AND THE CONSUMER IS A PERSON, WHICH IS THE POINT. `daemon.tree_dirty`, `daemon.stale_code`,
+    `CiFailure.outsidePrRange` and `dh-rate-limit` are four measured fired-and-unread signals. **DO NOT
+    ADD A FIFTH.** This must print where a filer already reads, or it is not worth building — the
+    operator caught all the real instances by reading, and the warning's job is to put the fact in
+    front of the next one.
+    (v) FALSIFIER, BOTH DIRECTIONS. A candidate sharing a 2%-path with an open PR is reported; a
+    candidate sharing only `src/run-task.ts` with an open PR is NOT. The second is the whole design —
+    a detector that fails it is the proxy that fires on a third of the plan.
+    (vi) NOT IN SCOPE, AND ONE OF THESE IS A REAL SEPARATE GAP.
+      **THE SAME-ID CASE.** `isDispatchEligible` (`src/lib/drain.ts`) gates on `isMerged(t.id)` — keyed
+      on the TASK ID — so work merged under a DIFFERENT id stays dispatchable, and no `ls-remote`
+      appears in that file at all (0 hits, positive control `isDispatchEligible` 9; the query lives in
+      `reap-branches`). That is a genuine hole, but rationale (2) shows it is NOT what produced the
+      four-PR race, so filing it here would attach a real fix to the wrong evidence. Separate shard.
+      **THE TWO-LANES-ONE-BRANCH SHAPE** (#1881). No cross-PR signal can see it.
+      **SEMANTIC MATCHING.** Out of reach; see the first clause.
+  acceptance:
+    - claim: "an overlap on a rarely declared path with an open pull request is reported"
+      proof: "unit test: W1-T533: an overlap on a rare path is reported"
+    - claim: "an overlap only on a hub path that a third of the plan declares is not reported"
+      proof: "unit test: W1-T533: an overlap on a hub path alone is not reported"
+    - claim: "the report never refuses a mint or a dispatch"
+      proof: "unit test: W1-T533: the rare-overlap report refuses nothing"
+    - claim: "the rarity threshold is policy data a fixture can move"
+      proof: "unit test: W1-T533: the rarity threshold is policy data"
+  origin: recon#two-lanes-one-problem-2026-08-16
+  plan_refs: ["W1-T471", "W1-T509", "W1-T494"]
+  files: [src/lib/dispatch-overlap.ts, test/dispatch-overlap.test.ts]
+  status: queued
+  attempts: 0
+  note: "`risk: medium` IS SET UP FRONT — Rule 19 SPAN folds `src/lib/dispatch-overlap.ts` and
+    `test/dispatch-overlap.test.ts` onto ONE subsystem (`subsystemsOf` folds a `.test` basename onto
+    its source), and the blast radius matches: one new pure predicate beside `overlappingPaths`, adding
+    no import to any other module and changing no existing behaviour. It is ADVISORY, so a wrong
+    threshold prints a bad warning rather than stalling a lane. budget_usd 40 — one scored predicate, a
+    policy threshold, and a two-direction falsifier.
+
+    `files:` DERIVED BY WORD-BOUNDED INVOCATION COUNT IN PYTHON. `src/lib/dispatch-overlap.ts` holds
+    `overlappingPaths` (3) and `partitionByFileOverlap` (2) — the overlap machinery's own home, and the
+    smallest file that owns it. `test/dispatch-overlap.test.ts` is its existing suite
+    (`partitionByFileOverlap` 19). `src/lib/drain.ts` is NOT declared: it scores 23 but only as the
+    CONSUMER, and wiring the warning into dispatch would make this blocking, which design (iii)
+    forbids. **`src/lib/sweep.ts` IS NOT DECLARED AND WAS NOT READ FOR THIS FILING — another lane may
+    be in it.** `src/run-task.ts` is NOT declared: it is the 37% hub this task exists to ignore, and it
+    serialises every task naming it (W1-T471).
+
+    TWO OF THE FOUR COMMISSIONING INSTANCES DID NOT SURVIVE RE-DERIVATION AND RATIONALE (1) RECORDS
+    BOTH, because the rate was offered as the argument and the honest rate is TWO, not four — one of
+    which (#1881) no cross-PR signal can see. A future reader tempted to widen this on volume should
+    re-derive before doing so.
+
+    PROOF NOTES: all four proofs are NAME-FILTERED titles, not pure paths — a pure path runs the whole
+    file and one unrelated failure fails every criterion. Each was verified to match ZERO files today
+    against a control matching exactly one, and each is under 100 characters with no comma so
+    `looksLikeScenarioNarrative` (`src/lib/task-linter.ts`) cannot fail them.
+
+    ID PROVENANCE: `refs/rmd-id/*` was swept ALONGSIDE shards and open PRs and held 515, 516, 520-532
+    and 901-908 — **531 AND 532 WERE RESERVED-BUT-UNFILED AND WERE SKIPPED RATHER THAN REUSED**, which
+    is why this is 533. Pushed under `--force-with-lease` with the refspec BRACED (`\"${SHA}:refs/…\"`
+    — the bare form applies zsh's `:r` modifier and ships a corrupt refspec that the exit code does not
+    catch), the exit code captured into a VARIABLE rather than read through a pipe, and the ref then
+    RE-READ and its host-pid-nanosecond NONCE matched against the one written."
