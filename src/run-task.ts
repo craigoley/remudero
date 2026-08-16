@@ -9044,12 +9044,39 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       const tmpFile = join(tmpDir, "tasks.yaml");
       writeFileSync(tmpFile, oldRaw, "utf8");
       materializeOriginShards(repoRoot, dirname(relPath), tmpDir, undefined, baseRef);
-      const oldPlan = loadPlan(tmpFile);
-      scope = changedTaskIds(oldPlan.tasks, plan.tasks);
-      oldById = new Map(oldPlan.tasks.map((t) => [t.id, t]));
-      // Tasks this PR introduces outright (absent at the base ref) — the only tasks that
-      // can possibly BE a post-merge-amendment follow-up (W1-T180).
-      newTaskIds = new Set(plan.tasks.filter((t) => !oldById!.has(t.id)).map((t) => t.id));
+      // A BASE THAT DOES NOT PARSE IS NOT THIS PR'S DEFECT, AND MUST NOT BE ITS FAILURE.
+      // `loadPlan` refuses a tree carrying a duplicate id, and the base tree is whatever
+      // origin/main happens to be — so one bad merge to main turned this REQUIRED check red on
+      // every open PR at once, including the plan-repair PR that would have fixed it. That is a
+      // deadlock: the gate proving the plan loads cannot pass while the plan does not load, and
+      // the only exit was an admin merge (the W1-T488 repair, #1820, went out that way).
+      //
+      // So the PARSED comparison degrades and the RAW one carries on. Everything below that
+      // needs `oldPlan` is skipped — `oldById`, `newTaskIds` and `newMonolithIds` are all
+      // already `| undefined` and every consumer already guards them, so this is a state the
+      // code was built to hold rather than a new one. `rawChangedTaskIds` further down needs
+      // only the base's raw TEXT, which is on disk regardless of whether it parses, so the
+      // changed-tasks scope survives and the check still lints exactly this PR's own tasks.
+      //
+      // FAIL-CLOSED IS PRESERVED WHERE IT BELONGS: a broken HEAD plan still fails, loudly and
+      // earlier — `loadPlan(planPath)` above this block throws before any of it runs.
+      let oldPlan: Plan | undefined;
+      try {
+        oldPlan = loadPlan(tmpFile);
+      } catch (e) {
+        console.error(
+          `### rmd lint-plan: the base plan at ${baseRef} does not itself load ` +
+            `(${(e as Error).message}) — this PR is linted against its own changed task records ` +
+            `instead. The base needs repairing; nothing here is wrong with this branch.`,
+        );
+      }
+      scope = oldPlan ? changedTaskIds(oldPlan.tasks, plan.tasks) : new Set<string>();
+      if (oldPlan) {
+        oldById = new Map(oldPlan.tasks.map((t) => [t.id, t]));
+        // Tasks this PR introduces outright (absent at the base ref) — the only tasks that
+        // can possibly BE a post-merge-amendment follow-up (W1-T180).
+        newTaskIds = new Set(plan.tasks.filter((t) => !oldById!.has(t.id)).map((t) => t.id));
+      }
       // impl-DS: ids NEW to the MONOLITH specifically. `oldRaw` above is the base's plan/tasks.yaml
       // blob — the monolith ALONE, before shards are materialized beside it — so this is a per-FILE
       // comparison, not a merged-plan one, and it costs no extra git call.

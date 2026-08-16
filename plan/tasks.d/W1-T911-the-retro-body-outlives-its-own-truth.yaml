@@ -1,4 +1,4 @@
-- id: W1-T533
+- id: W1-T911
   title: "the retro's PR body is true when written and false when read — the Architect opens the PR after editing MASTER-PLAN.md, then the harness regenerates two more files into that same PR, so a one-file claim the worker could not have got right fails bodyContradictsDiff every cycle"
   repo: remudero
   depends_on: []
@@ -110,4 +110,4 @@
     corrupt ref, and the absence was confirmed by re-reading the ref and matching a
     host-pid-nanosecond nonce. 533 was free by every readable signal at mint time (no
     refs/rmd-id entry, no run-branch, no tree entry) against a positive control of
-    refs/rmd-id/W1-T532 reading 1; 524/529/530/532 were skipped as reserved-but-unfiled."
+    refs/rmd-id/W1-T532 reading 1; 524/529/530/532 were skipped as reserved-but-unfiled. RENUMBERED W1-T533 -> W1-T911 to unbreak origin/main, where two shards declared W1-T533 and loadPlan therefore refused the whole tree. ONLY the id line and this note change: the acceptance criteria are deliberately LEFT BYTE-IDENTICAL, including the forward-referencing unit-test titles that still read W1-T533, because editing a claim: or proof: field is exactly what Standing rule 15 forbids outside a plan-only diff and this repair has to travel with a source change. Whoever builds this task should rename those titles then, as ordinary authoring work. The ID PROVENANCE paragraph above is left as written: it records what was true at mint time and it is the direct cause, since no lane could write refs/rmd-id at all (HTTP 403, filed as W1-T518/#1893) and so none could gate against the others."
