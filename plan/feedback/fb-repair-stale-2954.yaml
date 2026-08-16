@@ -1,0 +1,36 @@
+id: fb-repair-stale-2954
+ts: 2026-08-16T11:09:47.266Z
+raw: >-
+  SWEEP REPAIR RECURRENCE: the "stale" surface was repaired for 5 distinct PRs
+  between 2026-08-13T00:00:00.000Z and 2026-08-20T00:00:00.000Z (threshold 3,
+  window 7d).
+
+
+  Root cause is UNOBSERVED — this is a recurrence report, not a diagnosis: the
+  sweep classifies and repairs the INSTANCE (each PR below), it does not
+  investigate why the CLASS keeps recurring.
+
+
+  EVIDENCE (read verbatim off each PR's own sweep.disposed ledger row, never
+  invented):
+
+  - PR #1689 (https://github.com/craigoley/remudero/pull/1689) at 8a024d4,
+  2026-08-13T00:48:59.477Z: superseded-by #1690
+
+  - PR #1796 (https://github.com/craigoley/remudero/pull/1796) at f872e93,
+  2026-08-14T14:00:03.209Z: superseded-by #1797
+
+  - PR #1811 (https://github.com/craigoley/remudero/pull/1811) at 8ab8350,
+  2026-08-14T14:50:24.377Z: superseded-by #1813
+
+  - PR #1885 (https://github.com/craigoley/remudero/pull/1885) at 59754b3,
+  2026-08-15T18:21:09.557Z: superseded-by #1887
+
+  - PR #1925 (https://github.com/craigoley/remudero/pull/1925) at 34355e3,
+  2026-08-16T01:43:31.080Z: superseded-by #1927
+attachments: []
+origin: repair#stale
+status: new
+proposal_pr: null
+summary: null
+expansion: null
