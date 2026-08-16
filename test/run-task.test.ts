@@ -2005,11 +2005,18 @@ test("W1-T70 (end-to-end): reviewCommand resolves the LAST-LINE trailer id (not 
     "Remudero-Task: W1-T70",
   ].join("\n");
   const configRoot = mkdtempSync(join(tmpdir(), "rmd-review-e2e-"));
+  // W1-T913: REST-SHAPED (`html_url`/`head.{ref,sha}`/`updated_at`), not the gh-cli shape this
+  // fixture carried before — `prArg` ("999") is bare-numeric, so `reviewCommand` takes the REST
+  // arm (`reviewPrNumber` resolves it) and runs this raw row through `mapRestPr`, which reads
+  // exactly these REST field names. Before this task nothing downstream synchronously
+  // dereferenced the mapped `url`/`headRefOid`/`headRefName` in a way a wrong-shaped fixture would
+  // surface; `postReviewPending`'s own `fetchLifecycle` (reviewCommand's new pending-post call)
+  // is the first thing that does, which is what caught this fixture/production shape mismatch.
   const view = {
-    headRefOid: "deadbeefcafe",
-    headRefName: "run-W1-T70-e2e",
     body,
-    url: "https://github.com/acme/remudero/pull/999",
+    html_url: "https://github.com/acme/remudero/pull/999",
+    head: { ref: "run-W1-T70-e2e", sha: "deadbeefcafe" },
+    updated_at: new Date(0).toISOString(),
     number: 999,
   };
   let seenTaskId: string | undefined;

@@ -435,6 +435,21 @@ export interface OpenPrView {
    */
   checksPendingSince?: string;
   /**
+   * W1-T913 — THE OWNERSHIP RECORD'S OTHER HALF (the ledger side lives in `lib/review.ts`'s
+   * `review.pending_posted` line / {@link "./review.js".lastPendingReviewStatusFromLedger}): the
+   * `ts` this run's `postReviewPending` posted its CURRENT-head pending at, when `reviewState ===
+   * "pending"`. This is the staleness clock the post-review disposition row below needs — a naive
+   * pending post would make `reviewState` read "pending" forever and the post-review row (which
+   * used to key on `reviewState === "none"` alone) would never offer this head again, silently
+   * stranding a PR whose owning run died mid-review. `undefined` when unreadable (rotation lost
+   * the line, or the record belongs to a DIFFERENT head than the one currently observed) —
+   * deliberately read as STALE, never as fresh, by {@link reviewPendingIsStale}: the safe
+   * direction here is re-driving an already-finished review (idempotent — see
+   * `postReviewPending`'s own no-op-per-head guard), never stranding one whose state we can't
+   * date.
+   */
+  reviewPendingSince?: string;
+  /**
    * The unmet acceptance criteria from a failing review ([] otherwise). W1-T456: for a
    * task-id-less PLAN-FILING PR (no `Remudero-Task:` trailer, #1527) `buildOpenPrViews` can
    * ALSO populate this from the ledger, keyed by the same synthetic `PR-<n>` id
@@ -1348,6 +1363,45 @@ function pendingAgeMinutes(pr: OpenPrView, now: number): number | undefined {
 }
 
 /**
+ * W1-T913: how many minutes `remudero-review` has read PENDING (posted by this system itself,
+ * {@link "./review.js".postReviewPending}) on this head, or undefined when there is nothing to
+ * date. Mirrors {@link pendingAgeMinutes}'s own fallback discipline exactly: the precise field
+ * ({@link OpenPrView.reviewPendingSince}, the ledger's own `ts` on the `review.pending_posted`
+ * line) wins when present; `lastActivityAt` is the coarser stand-in otherwise (a field the real
+ * gateway already populates for every PR), so a pending PR is never stranded merely because the
+ * newer field's own producer lagged or a rotation ate its ledger line.
+ */
+function reviewPendingAgeMinutes(pr: OpenPrView, now: number): number | undefined {
+  const raw = pr.reviewPendingSince ?? pr.lastActivityAt;
+  if (!raw) return undefined;
+  const parsed = Date.parse(raw);
+  if (Number.isNaN(parsed)) return undefined;
+  return (now - parsed) / 60_000;
+}
+
+/**
+ * W1-T913 — THE STUCK-PENDING FALSIFIER'S PREDICATE (design (b)): is a currently-PENDING
+ * `remudero-review` old enough that the sweep should stop trusting it as "already attended to"
+ * and offer this head to the post-review lane again? Reuses `policy.pendingCeilingMinutes` — the
+ * SAME ceiling `checksState === "pending"` already waits out (W1-T114) — rather than a second,
+ * independently-tuned threshold: both questions are "how long is merely in-flight before it reads
+ * as stuck", and one policy row answering both keeps them from drifting apart.
+ *
+ * UNDATED READS STALE — the OPPOSITE error direction from {@link absentChecksRepushDecision}'s
+ * own "never re-push on state we cannot date" refusal: that remedy's caution exists because a
+ * wrong re-push discards a real, in-flight check run. Re-offering this head to the post-review
+ * lane risks no such loss — {@link "./review.js".postReviewPending}'s own idempotent-per-head
+ * guard makes a redundant pending post a no-op, and a redundant `reviewCommand` re-run simply
+ * re-posts the SAME terminal verdict once it judges. "a pending that no path can re-drive does
+ * not ship" (the task's own design note) means the unreadable case must lean toward actionable,
+ * never toward silently stranding a PR whose owning run died mid-review.
+ */
+function reviewPendingIsStale(pr: OpenPrView, policy: SweepPolicy, now: number): boolean {
+  const age = reviewPendingAgeMinutes(pr, now);
+  return age === undefined || age >= policy.pendingCeilingMinutes;
+}
+
+/**
  * THE POLICY TABLE — the ordered rules mapping observed PR-state -> disposition.
  * Precedence is table order (first match wins); the terminal rule matches
  * unconditionally, so a disposition is ALWAYS produced (the no-disposition=none
@@ -1674,13 +1728,53 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // posting a FRESH verdict; the prior verdict is NEVER carried forward),
     // only the stated reason differs, so an operator reading the ledger can
     // tell "never reviewed" from "orphaned by a push" apart at a glance.
+    //
+    // W1-T913 — THE STUCK-PENDING FALSIFIER: `reviewState === "pending"` also matches here, but
+    // ONLY once {@link reviewPendingIsStale} says the pending has sat past `pendingCeilingMinutes`
+    // (or its age is unreadable). This is design (b)'s load-bearing constraint: a naive pending
+    // post would make `reviewStateFromRollup` return "pending" instead of "none" and this row
+    // would never offer the head again, silently disabling the sweep's own re-post/re-drive lane
+    // the moment a review's owning run died mid-flight. A FRESH pending (not yet stale) is
+    // deliberately EXCLUDED here — the row immediately below claims that shape as `wait`, so an
+    // in-flight review is never redundantly re-dispatched every sweep tick.
     disposition: "post-review",
-    when: (pr) => pr.checksState === "green" && pr.reviewState === "none" && pr.requiredContextsUnreadable !== true,
-    reason: (pr) =>
-      pr.reviewOrphanedByPush === true
+    when: (pr, policy, _ageDays, now) =>
+      pr.checksState === "green" &&
+      pr.requiredContextsUnreadable !== true &&
+      (pr.reviewState === "none" || (pr.reviewState === "pending" && reviewPendingIsStale(pr, policy, now))),
+    reason: (pr, policy, _ageDays, now) => {
+      if (pr.reviewState === "pending") {
+        const age = reviewPendingAgeMinutes(pr, now);
+        return (
+          `checks green, remudero-review pending ${age !== undefined ? `${Math.floor(age)}m` : "for an undated interval"} ` +
+          `(>= ${policy.pendingCeilingMinutes}m ceiling, or unreadable) — treating the stuck pending as ` +
+          `unattended and re-running the review lane on #${pr.prNumber}`
+        );
+      }
+      return pr.reviewOrphanedByPush === true
         ? `checks green, review orphaned by a push (reviewed on an earlier head, silent on this one) — ` +
           `re-running the review lane on #${pr.prNumber}`
-        : `checks green, review never posted — running the review lane on #${pr.prNumber}`,
+        : `checks green, review never posted — running the review lane on #${pr.prNumber}`;
+    },
+  },
+  {
+    // W1-T913: a FRESH (not-yet-stale) `remudero-review` pending — a review this system itself
+    // already dispatched (`postReviewPending`, `lib/review.ts`) is genuinely IN FLIGHT. Ordered
+    // STRICTLY AFTER the post-review row above so a STALE pending is claimed there first; anything
+    // reaching this row has already failed that row's staleness check, i.e. is still within
+    // `pendingCeilingMinutes`. Without this row a fresh pending would fall through to the terminal
+    // catch-all below and ESCALATE every sweep tick for the entire duration of an ordinary review
+    // — the exact green-at-a-glance defect this task fixes would be traded for an escalation storm
+    // on every PR merely being reviewed, which is strictly worse than the silence it replaces.
+    disposition: "wait",
+    when: (pr) => pr.checksState === "green" && pr.reviewState === "pending",
+    reason: (pr, policy, _ageDays, now) => {
+      const age = reviewPendingAgeMinutes(pr, now);
+      return (
+        `checks green, remudero-review pending ${age !== undefined ? `${Math.floor(age)}m` : "0m"} ` +
+        `(< ${policy.pendingCeilingMinutes}m ceiling) — a review is already in flight, waiting`
+      );
+    },
   },
   {
     // WAIT (W1-T114, the 30-issue predicate-storm fix, LIVE INCIDENT
