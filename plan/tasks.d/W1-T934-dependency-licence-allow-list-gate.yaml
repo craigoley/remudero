@@ -1,0 +1,171 @@
+- id: W1-T934
+  title: "no dependency-licence policy exists — nothing in the gate wall reads what LICENCE a newly introduced package ships under, so a copyleft dependency enters the tree of an Apache-2.0 product with every check green"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "FROM feedback fb-1785237573352-6c7b7e item (1), the ONE item of six that grounding
+    did not already find answered. The other five are recorded in the note below as NOT filed,
+    with what already answers each, so this task is not re-opened as a six-part programme.
+    WHAT WAS VERIFIED ABSENT, from the tree rather than assumed. A sweep of plan/tasks.yaml, every
+    plan/tasks.d/ shard, DECISIONS.md and .github/workflows/ for licence terms returns exactly two
+    things, NEITHER of which is a dependency-licence policy. (a) W1-T439 pins THIS REPO's OWN
+    licence identity — that LICENSE, package.json and README keep agreeing on Apache-2.0. It reads
+    three declarations about remudero itself and says nothing whatever about node_modules. (b) The
+    2026-08-11 DECISIONS.md entry (PR #1599) is an options memo on whether the HARNESS relicenses,
+    explicitly `not a ruling`. Neither reads the lockfile. The inbound direction — what licence
+    arrives WITH a dependency — is unguarded, and that is the direction that can contaminate.
+    THE GATE WALL GENUINELY DOES NOT COVER THIS, checked scanner by scanner rather than by
+    reputation. osv-scanner-pr.yml scans for VULNERABILITIES (`fail-on-vuln: true`), not licences.
+    dependency-review.yml runs actions/dependency-review-action v5 but passes it only
+    `comment-summary-in-pr: always` under `continue-on-error: true` — no `allow-licenses`, no
+    `license-check`, and a step-level continue-on-error yields a SUCCESS job conclusion, so even
+    the summary it comments is advisory by construction. CodeQL, Semgrep, depcruise, jscpd,
+    leak-grep and the ratchets read source, never package metadata.
+    WHY IT MATTERS HERE SPECIFICALLY, and this is not a generic best-practice filing. MASTER-PLAN
+    §6A commits the core to Apache-2.0 as a `one-way door, accepted knowingly`, with the BSL/SSPL
+    escape hatch CLOSED. A product under that commitment is exactly the product for which a
+    strong-copyleft dependency is a genuine problem rather than a paperwork nuisance, and W1-T439's
+    own measured lesson applies unchanged: a licence change rode 21-of-22 green and only a human
+    reading the diff stopped it. A dependency bump is a WEAKER review surface than that, because
+    the dep-review lane auto-arms minor/patch bumps unattended (docs/dep-review.md) — no human
+    reads those diffs at all, by design."
+  design: |
+    (i) THE MECHANISM IS THE EXISTING dependency-review-action, NOT A BESPOKE LOCKFILE WALKER, and
+    the reason is that the action is already SHA-pinned in this tree and is inherently DIFF-SCOPED.
+    `allow-licenses` fails a PR that INTRODUCES a dependency whose licence is not on the list, and
+    considers only dependencies the PR adds. That IS the feedback's `CI-blocking on new deps only`
+    clause, with no grandfathering machinery to build and no baseline file to drift — existing
+    dependencies are never re-litigated because the action never looks at them. A hand-rolled
+    lockfile scan would need its own allow-list, its own baseline and its own ratchet, and is
+    explicitly NOT the chosen route.
+    (ii) USE `allow-licenses`, NEVER `deny-licenses`. The two are MUTUALLY EXCLUSIVE (supplying
+    both raises an error), and `deny-licenses` is DEPRECATED upstream for possible removal in the
+    next major. A deny-list is also the wrong shape for the ask: it fails open on every licence
+    nobody thought to enumerate, whereas the feedback asks for an ALLOWED-list with copyleft
+    flagged as the consequence, not as the enumeration.
+    (iii) THE UNKNOWN-LICENCE HOLE IS THE PART THAT NEEDS CARE — a gate that passes what it could
+    not read reproduces the defect class this repo already refuses (ci-gate fails closed on an
+    unreadable check-runs API precisely because `does not know` must never read as `yes`). Verify
+    against the pinned action version before wiring: an unresolvable licence is NOT covered by
+    `allow-licenses` alone, `fail-on-unknown-license` is the switch that closes it, and
+    `allow-dependencies-licenses` is the per-package exemption valve for the packages that must
+    then be excused BY NAME with a reason. Note also that a non-SPDX `OTHER` is normalised to
+    `LicenseRef-clearlydefined-OTHER`, so any list entry intending to name it must use that
+    spelling. Whatever is chosen, an introduced dependency whose licence cannot be determined must
+    fail or be exempted by name — never pass silently.
+    (iv) A SECOND, LICENCE-ONLY JOB — do NOT make the existing advisory job blocking. That job's
+    vulnerability arm would become blocking too, which overlaps osv-scanner-pr and reverses
+    W1-T211's deliberate per-scanner advisory/blocking ruling as a side effect. Add a dedicated job
+    running the same pinned action with the licence check on and the vulnerability check off,
+    leaving the existing warn-only summary job exactly as it is.
+    (v) IT MUST BE UNCONDITIONAL TO BE REQUIRED. Adding the new job's name to ci-gate.yml's
+    REQUIRED array is what converts it from a raced check into an awaited gate (W1-T211's finding),
+    and ci-gate.yml's own header states the hard constraint: a required check that CAN be skipped —
+    job `if:`, path filter, or a skipped reusable caller — is the synthwatch #102 deadlock class.
+    No path filter, no `if:`, no actor exemption. DERIVE THE CHECK-RUN NAME FROM A LIVE PR's
+    check-runs API rather than reading it off the yaml: the existing job in this file declares
+    `name: Review`, so the registered name is not the job id, and `scan-pr / osv-scan` is already
+    in REQUIRED as a name that had to be verified live rather than inferred. A wrong name in
+    REQUIRED deadlocks every PR.
+    (vi) THE ALLOW-LIST IS DATA WITH A RECORDED DERIVATION. Seed it from the permissive family the
+    feedback names (MIT / Apache-2.0 / BSD-2-Clause / BSD-3-Clause / ISC and the like), but MEASURE
+    the licence distribution of the CURRENT lockfile first and record it in the PR body. If a
+    currently-installed dependency sits outside the seeded list, that is information the operator
+    needs — it does not block this task (the gate is diff-scoped and will not fire on it), and it
+    must not be silently widened away by adding its licence to the list without saying so.
+    (vii) NOT IN SCOPE, named so it is not inferred: this repo's own licence (W1-T439 owns it);
+    the relay's licence (undecided, and this task takes no position); any change to
+    osv-scanner-pr.yml or to the advisory/blocking status of any OTHER scanner (W1-T211's ruling
+    stands); and a transitive-licence audit of the installed tree, which is a different task with a
+    different shape from a diff-scoped PR gate.
+  acceptance:
+    - claim: "a PR that introduces a dependency under a strong-copyleft licence turns the gate red, and the failure names the package and the licence"
+      proof: "unit test: test/dependency-licence-policy.test.ts"
+    - claim: "a PR that introduces a dependency under a permissive licence on the allow-list passes, so the gate is not red on arrival"
+      proof: "unit test: test/dependency-licence-policy.test.ts"
+    - claim: "an introduced dependency whose licence cannot be determined FAILS or is exempted by name with a reason, never passes silently"
+      proof: "unit test: test/dependency-licence-policy.test.ts"
+    - claim: "the gate is diff-scoped — an already-installed dependency outside the allow-list does not fail a PR that did not introduce it"
+      proof: "unit test: test/dependency-licence-policy.test.ts"
+    - claim: "the licence job DEFINED in .github/workflows/dependency-review.yml is listed in .github/workflows/ci-gate.yml's REQUIRED array under that same check-run name, and carries no continue-on-error, no path filter and no if: condition — one assertion reading BOTH files, unsatisfiable by either alone"
+      proof: "unit test: test/dependency-licence-policy.test.ts"
+  risk: high
+  origin: feedback#fb-1785237573352-6c7b7e
+  plan_refs: ["§5", "§5C", "§6A"]
+  files: [.github/workflows/dependency-review.yml, .github/workflows/ci-gate.yml, test/dependency-licence-policy.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — nothing here needs an operator ruling. The allow-list VALUE is named by the
+    feedback and constrained by MASTER-PLAN §6A's existing Apache-2.0 commitment; design (vi)
+    requires the current lockfile's distribution to be REPORTED rather than used to widen the list
+    silently, which is the only place an operator judgement could be smuggled in.
+    ONE FILING FROM A SIX-ITEM ENTRY, and the five NOT filed are recorded here so a later intake
+    does not re-file them:
+      (2) OSV-SCANNER SKIPPING — already decided and wired. `scan-pr / osv-scan` IS in ci-gate.yml's
+          REQUIRED array, and osv-scanner-pr.yml carries `fail-on-vuln: true` with the Dependabot
+          actor exemption REMOVED and the reason written into the file (W1-T211). The advisory
+          `skipping`-shaped job the filing likely observed is osv-scanner.yml, which is the
+          push/schedule SARIF scan, `fail-on-vuln: false` BY DESIGN and not the PR gate.
+      (3) PERF-BUDGET RATCHET — `no performance gate exists` is false as stated. BOTH hot paths the
+          filing names already carry ABSOLUTE, CI-executed budgets: test/w1-t187-benchmark.test.ts
+          asserts projectPlan over the production-scale corpus under a hard 500 ms ceiling, and
+          test/serve.first-paint.test.ts asserts the <2 s first-paint-to-data budget through a real
+          browser. Both ride the REQUIRED `ci` job, so a 10x projection regression already reds the
+          PR. What is genuinely absent is a RATCHET with a tolerance band — and W1-T187's own suite
+          documents why that is a live design hazard rather than a missing chore: the ceiling had
+          to be skipped under coverage instrumentation after PRs #474/#475 flaked it while touching
+          zero source. Generalising a timing gate is a real proposal; it is not this filing's
+          premise, and filing it on a false premise would have been the wrong shape.
+      (4) CONSOLE A11Y — already SHIPPED. test/serve.shell-ux.test.ts imports AxeBuilder from
+          @axe-core/playwright (already a devDependency), scans the booted shell, fails on any
+          critical/serious violation and additionally asserts an approximate score >= 90. It runs
+          under the REQUIRED `ci` job, so it already blocks.
+      (5) DOCS GATE — already SHIPPED, and in the exact registry-derived form the filing asks for.
+          checkVerbCoverage (test/docs-claims.test.ts, W1-T213) derives its obligation from the
+          COMMANDS registry in src/run-task.ts, so a verb added later is caught automatically;
+          it is wired as claim `docs-verb-coverage` in plan/claims.yaml and executed by the
+          REQUIRED `claims` check. The named first customers are already covered — console-url and
+          status appear in docs/operator-guide.md's command table.
+      (6) SECRETS-AT-REST — the DOCTRINE is already ratified as MASTER-PLAN Standing rule 24, and
+          both fixtures the filing gestures at are closed: R-5 (both bearer tokens in a 0644
+          serve.log, WRITE token in the console URL) was fixed and the tokens ROTATED in #473, and
+          R-31 (undocumented rotation path) was documented in the same PR. A fresh open-ended recon
+          enumeration is not obviously additive over a ratified rule with its fixtures closed, and
+          filing an unbounded recon on top of settled doctrine is the padding failure mode.
+    RISK:HIGH — RULE 19 / #588 MERITS TEST = YES, ONE LINE: criterion 5 asserts ONE cross-file
+    invariant that is unsatisfiable piecewise — a single assertion reads the job NAME out of
+    dependency-review.yml and the REQUIRED array out of ci-gate.yml and demands they agree, so
+    neither file alone can satisfy it and the two must land in the same commit.
+    WHY NOT DECOMPOSED (the alternative was worked, not waved off): the linter's span here is
+    dependency-review (the new licence-only job), ci-gate (the REQUIRED entry that makes it await)
+    and dependency-licence-policy (the suite asserting both). A depends_on spine cannot order these
+    safely, because BOTH intermediate states are worse than the status quo, by this repo's own
+    measured failure classes: job-first leaves an unlisted check that ci-gate RACES rather than
+    awaits — precisely the W1-T211 finding this task exists to close, i.e. a gate that merges green
+    and never gates; REQUIRED-first puts a name in the array with no job behind it, which is the
+    synthwatch #102 deadlock class named in ci-gate.yml's own header and would wedge EVERY PR in the
+    fleet until reverted. The third `concern` is the single suite that proves the coupling, which
+    cannot be split from either half without ceasing to assert the invariant. The span is real and
+    it is the task: risk:high is the honest label, not a smaller lie.
+    THE ORIGINAL risk:medium ARGUMENT, kept because it is still true and still not enough: the span
+    is two workflow files plus one suite, with no src/ path. It argued UP from low because a wrong
+    check-run name in REQUIRED deadlocks every PR (design (v)) — a fleet-stopping failure mode
+    rather than a local one. That same fleet-stopping mode is what makes the pieces unsplittable,
+    so the argument lands at high rather than medium.
+    RULE 25 CHECKED BEFORE FILING: `.github/workflows/` IS instrument surface, so this diff must
+    carry NO isProductPath src/ path or judgeReview forces the review to failure, unsuppressibly.
+    `files:` is therefore deliberately src/-free and the acceptance is a config-assertion suite in
+    the shape test/scanner-gate-config.test.ts already uses — `test/` is excluded from
+    isProductPath, so workflows-plus-test is a legal changeset. An implementer who finds they need
+    a src/ seam has misread the design.
+    COORDINATE ON ci-gate.yml: W1-T211 also declares that file, and REQUIRED is a folded-scalar
+    JSON array with one name PER LINE precisely so two concurrent additions append lines instead of
+    colliding on one. Append; do not reflow the array.
+    budget_usd 60 HELD AT THE RISK RAISE — risk:high here buys ATOMICITY, not volume: the work is
+    the same two workflow edits and one suite it was at medium, so the figure does not move.
+    No product code and no algorithm to discover; the real cost is design (iii)'s
+    unknown-licence direction and design (v)'s live check-run-name derivation, both of which must be
+    verified against the pinned action and a real PR rather than reasoned about."
