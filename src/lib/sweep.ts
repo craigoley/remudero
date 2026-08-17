@@ -1,6 +1,7 @@
 import { appendLedger } from "./ledger.js";
 import { readLedgerLines, readMergeCreditedTaskIds, taskIdFromRunBranch } from "./status.js";
 import { loadDefaultPolicy } from "./policy.js";
+import { loadDefaultCostAnomalyPolicy, recordCostAnomalies, type CostAnomalyPolicy } from "./cost-anomaly.js";
 import { cappedOverrideFromLedger, decideAutoMergeArm, postedArmFactsFromLedger, REVIEW_CONTEXT } from "./review.js";
 import type { ArmDecision, CriterionVerdict } from "./review.js";
 import type { QuestionEntry } from "./worker.js";
@@ -2703,6 +2704,15 @@ export interface SweepDeps {
    * injected dep's own idempotent write is the entire "no second store" guarantee (design iii).
    */
   captureRepairFeedback?: (filing: RepairFilingCapture) => void | Promise<void>;
+  /**
+   * W1-T931 COST-ANOMALY SENTINEL — the `plan/policy.yaml` `costAnomaly.multiplier`/
+   * `costAnomaly.minSamples` policy this pass consults (see `src/lib/cost-anomaly.ts`'s module
+   * header for the full rationale). Optional: omitted, `runSweep` resolves
+   * `loadDefaultCostAnomalyPolicy()` (memoized for the process lifetime, same "load once" shape
+   * `loadDefaultPolicy` above already uses) — a test that wants a different multiplier/minSamples
+   * without touching `plan/policy.yaml` on disk passes its own {@link CostAnomalyPolicy} here.
+   */
+  costAnomalyPolicy?: CostAnomalyPolicy;
 }
 
 /** What one PR's reconciliation did this sweep. */
@@ -3152,6 +3162,29 @@ export async function runSweep(
   // recovery, so arming parity costs this pass no extra ledger read.
   const ledgerLines = readLedger(deps.ledgerPath);
   const prior = priorActionsFromLedger(ledgerLines);
+
+  // ── W1-T931 COST-ANOMALY SENTINEL ───────────────────────────────────────────────────────────
+  // Hung off THIS pass, not a new src/run-task.ts verdict call site (design note vi): `runSweep`
+  // already read the whole ledger just above, and already runs on the daemon's cadence,
+  // drainage included — exactly the "cost-governance path" `checkCostGovernor`/
+  // `dailyCostCeilingUsd` already live on. Independent of `openPrs` (a zero-PR pass still checks
+  // the ledger for a class median outlier), guarded by `!deps.dryRun` like every other ledger
+  // write this module performs, and wrapped in the SAME per-pass throw containment the repair-
+  // filing capture below uses — a detector failure must never fail the reconciliation pass it
+  // shares a ledger read with. `recordCostAnomalies` itself is idempotent per run id (it reads
+  // this SAME `ledgerLines` for already-ledgered `cost.anomaly` rows before writing any more) and
+  // performs NO effect beyond that one ledger append — no dispatch, no merge, no worker control
+  // (design note v).
+  if (!deps.dryRun) {
+    try {
+      recordCostAnomalies(ledgerLines, deps.costAnomalyPolicy ?? loadDefaultCostAnomalyPolicy(), {
+        ledgerPath: deps.ledgerPath,
+        writeLedger: appendLine,
+      });
+    } catch (e) {
+      log("sweep.cost_anomaly.error", { error: String((e as Error)?.message ?? e) });
+    }
+  }
 
   const byDisposition = ZERO_COUNTS();
   // Filled by INDEX, never pushed — post-review actions below are finalized

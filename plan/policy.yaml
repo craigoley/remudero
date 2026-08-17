@@ -628,3 +628,57 @@ worktreeReapBoot:
   enabled:
     value: false
     origin: "net-new"
+
+# W1-T931 COST-ANOMALY SENTINEL (fb-1785237559155-feef92, item 4) — the two EXISTING cost guards
+# are both ABSOLUTE and neither measures a RUN against its own kind: `sweep.dailyCostCeilingUsd`
+# above gates the fleet's DAY (fired exactly once, ever, at $152.28), and `budget_usd`/
+# DEFAULT_BUDGET_USD (run-task.ts, per-run) sits at $100 with MASTER-PLAN's own baseline recording
+# "0/31 trips, tenth cycle running", peak run $26.380 (W1-T504) — a tripwire nothing has approached
+# in ten cycles is not measuring runs. The entire band between an ordinary run and $100 is
+# unpoliced. This sentinel closes it RELATIVELY, never absolutely: a run costing more than
+# `multiplier` times its own task CLASS's median cost (src/lib/cost-anomaly.ts's
+# `detectCostAnomalies`, over the same per-run `cost_usd`/`taskClass` ledger fields
+# src/lib/retro.ts's `aggregateByClass` already reads) ledgers exactly one `cost.anomaly` row,
+# idempotent per run id, and surfaces in `rmd status`'s NEEDS ME (src/lib/status-board.ts). It
+# REPORTS ONLY (design note v) — no dispatch deferred, no worker stopped, no merge blocked.
+# BOTH rows below are net-new: no source literal of either shape (a cost multiplier over a class
+# median, a minimum-sample floor before a median is trusted) ever existed in src/ to lift from.
+costAnomaly:
+  # (iii) MEDIAN, NOT MEAN, AND THAT IS LOAD-BEARING — the mean is dragged by the very outlier
+  # being detected. This row is the multiplier a run's own cost must clear over its class's
+  # MEDIAN before it counts as an outlier rather than ordinary class variance.
+  # MEASURED BASIS (net-new — no source literal to lift, so this leans on the two nearest
+  # measured cost-variance data points this SAME file already carries): `autoTriage.maxPerDay`'s
+  # own comment records one class's WORST-BUT-LEGITIMATE run at 2.04x its class median (n=27,
+  # $0.27–$2.00, median $0.98) — ordinary variance this sentinel must NOT trip on (design ii:
+  # "a sentinel that cries wolf ... trains the operator to skim the queue"). `dailyCostCeilingUsd`
+  # immediately above records the other end: the day its governor first fired, $152.28 observed
+  # against a normal day's ~$15 — roughly 10x, the INCIDENT signature. 3x sits with daylight
+  # above the 2.04x ordinary-variance ceiling and well below the ~10x incident signature — close
+  # enough to this task's own named fixture (the W1-T7 arc, $9.32 across strikes to a blocked
+  # verdict) to have caught it against any class whose median sits under ~$3.11, without
+  # inventing a number this fleet has not yet ledgered enough class-scoped runs to measure
+  # directly (design ii's own diagnosis: the per-class contrast has been under-sampled for ten
+  # cycles, "one `src` row, every time").
+  multiplier:
+    value: 3
+    origin: "net-new"
+    min: 2
+    max: 8
+  # (ii) A THIN CLASS IS SILENT, NOT ANOMALOUS — "a median over n=1 or n=2 is noise and would
+  # fire on the first slightly-long run" (design, verbatim). This row is the floor a class's own
+  # settled-run count must clear before its median is trusted at all; below it the sentinel
+  # emits nothing and names why, never a false alarm over an under-sampled class.
+  # MEASURED BASIS (net-new): min=3 is the smallest n at which a median is actually a MEDIAN
+  # rather than an average-of-two or a bare single value — design note ii names n=1/n=2
+  # explicitly as noise, so the bound forecloses an editor relaxing this row into the exact case
+  # that note calls out. 5 asks for one run more than that floor: modest enough that a
+  # routinely-dispatched class clears it within days at this fleet's own observed cadence
+  # (autoTriage alone ledgers up to 24 fires/day), strict enough that a class this same file's
+  # `multiplier` comment just named as under-sampled ("one `src` row, every time") stays silent
+  # rather than guessing at a median it does not yet have enough runs to trust.
+  minSamples:
+    value: 5
+    origin: "net-new"
+    min: 3
+    max: 15
