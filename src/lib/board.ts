@@ -86,6 +86,30 @@ export interface BoardRow extends StatusProjection {
    * never `$0.000 / 0 turns` as fact.
    */
   liveSpendPending?: boolean;
+  /**
+   * W1-T914 (feedback fb-1784901239119-1be356 clause c / fb-1784919225707-0fab8b): the row's
+   * OWN `remudero-review` three-state, so a PR whose review has not run stops rendering
+   * identically to one that passed. Present only alongside {@link StatusProjection.prUrl} — a
+   * row with no PR has no review to render.
+   *
+   *   "success"    — reviewed-green: the last posted `remudero-review` was a pass.
+   *   "failure"    — reviewed-red: the last posted `remudero-review` was a fail.
+   *   "pending"    — review-in-progress (W1-T913's detection-time post) — NEVER rendered as
+   *                  "success"; that is the exact collapse this task exists to stop.
+   *   "none"       — ABSENT, not merely unreviewed: no `remudero-review` status has ever posted
+   *                  for this head (pre-W1-T913, or a genuinely unattended head). Per W1-T225's
+   *                  ruling, absent is the WORST of the states — it renders as absent, never as
+   *                  "pending" and never as green.
+   *   "unreadable" — the GitHub read behind this value FAILED (rate limit, network, an
+   *                  unresolvable head) — a CANNOT-READ, not a state GitHub actually reported.
+   *                  Renders as unreadable (with the snapshot's own `generated_at` as its
+   *                  last-known age), never silently folded into "none" or a stale green/red.
+   *
+   * Bound to {@link GitHub.reviewState} (status.ts) — the SAME combined-status read
+   * open-prs-rest.ts's `combinedStatusRestArgs` already documents and run-task.ts's sweep-side
+   * `reviewStateFromRollup` already consumes — never a second, console-only derivation.
+   */
+  reviewState?: "success" | "failure" | "pending" | "none" | "unreadable";
 }
 
 /** GET /v1/status's body — one {@link BoardRow} per plan task, as of `generated_at`. */
@@ -186,6 +210,8 @@ export function computeBoardSnapshot(deps: BoardDeps): BoardSnapshot {
         row.liveSpendPending = true;
       }
     }
+    const reviewState = deriveReviewState(p.prUrl, deps.github);
+    if (reviewState) row.reviewState = reviewState;
     return row;
   });
   // ONE freshness/honesty payload for the header (fb-1784902052582-c124f9): the counts derive
@@ -354,6 +380,39 @@ function safeReadFailed(github: BoardDeps["github"]): boolean {
     return github.readFailed?.() ?? false;
   } catch {
     return true;
+  }
+}
+
+/**
+ * W1-T914: the row's `reviewState` — bound to {@link GitHub.reviewState} (status.ts's
+ * combined-status read), never a second derivation. Returns `undefined` for a row with no PR at
+ * all (nothing to render), so the caller only ever sets {@link BoardRow.reviewState} when there
+ * is something to say.
+ *
+ * THE THREE FAIL-SOFT CASES, KEPT DISTINCT ON PURPOSE (this task's whole point):
+ *   - the gateway doesn't implement {@link GitHub.reviewState} at all (an older fixture/gateway)
+ *     -> `"none"`: honestly unresolved, never a guessed pending or green.
+ *   - the method itself returned a real value (INCLUDING its own `"none"`) -> that value,
+ *     verbatim — this is the ONLY arm that can produce `"pending"`/`"success"`/`"failure"`.
+ *   - the method returned `undefined` (its own read failed) OR THREW -> `"unreadable"` when
+ *     `readFailed()` confirms GitHub is having a bad day, `"none"` otherwise (a `prUrl` this
+ *     gateway simply cannot resolve a head for, e.g. it fell out of the batched index) — the
+ *     SAME failure/absence split {@link safeReadFailed} already draws for the header tally, so
+ *     a genuine outage never renders as "no review posted" and a merely-unresolvable PR never
+ *     renders as "GitHub is down".
+ */
+export function deriveReviewState(
+  prUrl: string | undefined,
+  github: BoardDeps["github"],
+): BoardRow["reviewState"] {
+  if (!prUrl) return undefined;
+  if (!github.reviewState) return "none";
+  try {
+    const state = github.reviewState(prUrl);
+    if (state !== undefined) return state;
+    return safeReadFailed(github) ? "unreadable" : "none";
+  } catch {
+    return safeReadFailed(github) ? "unreadable" : "none";
   }
 }
 

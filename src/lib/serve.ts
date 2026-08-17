@@ -501,6 +501,23 @@ export function renderShellHtml(
   .status-label.status-needs-human { color: var(--status-needs-human); }
   .status-label.status-merged { color: var(--status-merged); }
   .status-label.status-queued { color: var(--status-queued); }
+  /* W1-T914: the review three-state dot/label, mirroring .status-dot/.status-label's own
+     swatch-then-matching-text convention rather than a new pattern. Reuses the SAME status
+     color variables (never new ones) — success=merged-green, failure=blocked-red,
+     pending=running-blue, unreadable=needs-human-amber (an outage is attention-worthy, same as
+     a stopped task); "none" (absent) gets the neutral queued-grey, never green or blue. */
+  .review-dot { display: inline-block; width: 0.5em; height: 0.5em; border-radius: 50%; margin: 0 0.15em; }
+  .review-label { font-size: 0.75rem; font-weight: 600; background: none; }
+  .review-dot.review-success { background: var(--status-merged); }
+  .review-dot.review-failure { background: var(--status-blocked); }
+  .review-dot.review-pending { background: var(--status-running); }
+  .review-dot.review-none { background: var(--status-queued); }
+  .review-dot.review-unreadable { background: var(--status-needs-human); }
+  .review-label.review-success { color: var(--status-merged); }
+  .review-label.review-failure { color: var(--status-blocked); }
+  .review-label.review-pending { color: var(--status-running); }
+  .review-label.review-none { color: var(--status-queued); }
+  .review-label.review-unreadable { color: var(--status-needs-human); }
   .empty { color: var(--text-faint); font-size: 0.875rem; }
   /* W1-T154: first-paint skeleton — a pulsing placeholder bar, never a blank/empty block. */
   .row.skeleton { opacity: 0.7; }
@@ -1406,10 +1423,26 @@ export function renderShellHtml(
     if (m > 0) return \`\${m}m\${s % 60}s\`;
     return \`\${s}s\`;
   }
+  // ── W1-T914 (fb-1784901239119-1be356 clause c / fb-1784919225707-0fab8b): the review
+  // three-state, rendered right beside the PR link so a PR whose review has not run stops
+  // looking identical to one that passed. FIVE distinct labels/classes — "pending" is NEVER
+  // rendered with the "success" class or label, and an absent review ("none") is never rendered
+  // as "pending" either (W1-T225: absent is the worst of the states, not a friendlier one). ──
+  const REVIEW_STATE_LABELS = {
+    success: "review passed",
+    failure: "review failed",
+    pending: "review pending",
+    none: "not yet reviewed",
+    unreadable: "review status unreadable",
+  };
+  function reviewBadge(state) {
+    if (!state || !REVIEW_STATE_LABELS[state]) return "";
+    return \` <span class="review-dot review-\${state}" aria-hidden="true"></span><span class="review-label review-\${state}">\${REVIEW_STATE_LABELS[state]}</span>\`;
+  }
   function prLink(t) {
     if (!t.prUrl) return "";
     const label = t.prNumber !== undefined ? \`#\${t.prNumber}\` : t.prUrl;
-    return \` · <a href="\${t.prUrl}" target="_blank" rel="noreferrer">\${label}</a>\`;
+    return \` · <a href="\${t.prUrl}" target="_blank" rel="noreferrer">\${label}</a>\${reviewBadge(t.reviewState)}\`;
   }
 
   // ── W1-T183: TIME RENDERING -- local + relative TOGETHER ('14:23:05 · 8s ago'), never a raw
