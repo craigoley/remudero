@@ -1,0 +1,248 @@
+- id: W1-T965
+  title: "HARVESTED FOLLOW-UP CANDIDATES DIE AS ARCHITECT PROMPT TEXT — the harvest mines them, dedups them and renders them into a prompt section that is their terminus, so a research follow-up a worker paid to discover reaches no lane that can act on it: route them into plan/feedback/ as deterministic-id entries and let the EXISTING triage lane decide task-versus-no-task, exactly as it already does for the alert lane"
+  repo: remudero
+  depends_on: ["W1-T963"]
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 80.00
+  rationale: |
+    FILED FROM A RECON AT 55bf8c5. Every line number below was RE-READ on this branch's base
+    b316693 and DRIFT WAS MEASURED, not assumed: feedback.ts :48/:65/:67/:73/:79/:588/:835,
+    worker.ts :1607, triage.ts :308, retro.ts :1463/:1531/:2116/:2121, sweep.ts :4032/:4036,
+    run-task.ts :16006/:16386 and policy.yaml :434 ALL hold unchanged. ONE drift: the recon cited
+    `renderFollowupCandidates` at retro.ts:2205; its declaration is at :2206 (its call site at
+    :1531 is unmoved).
+
+    (1) THE TERMINUS IS PROMPT TEXT. A `research` follow-up is a first-class member of the
+    follow-up union (`FollowupEntry`, src/lib/worker.ts:1607-1610, kinds research|task|action),
+    parsed by `parseFollowups` (worker.ts:1623), ledgered as one `report.followups` row
+    (run-task.ts:4934), mined by `mineFollowups` (retro.ts:2139), deduped against `openTitles`,
+    and rendered by `renderFollowupCandidates` (retro.ts:2206) into a section headed "Follow-up
+    harvest (W1-T105) — PROPOSAL CANDIDATES, never auto-filed (rule 15)". That Architect prompt
+    text is where it ends. Nothing downstream can act on it.
+
+    (2) THE PATTERN THIS COPIES ALREADY SHIPS, AND THAT IS WHY RULE 15 IS NOT IN TENSION. A
+    non-human, non-alert MACHINE writer already creates feedback entries: the sweep repair filer
+    writes `origin: repair#<surface>` — src/lib/sweep.ts:4032 guards on
+    `!deps.dryRun && deps.captureRepairFeedback`, :4036 invokes it, the implementation is
+    src/run-task.ts:16006-16007 (an `existsSync(feedbackEntryPath(...))` guard immediately
+    followed by `captureFeedback`), wired at src/run-task.ts:16386, and bounded by
+    plan/policy.yaml:434 (`repairFilingThreshold: 3`) and :446 (`repairFilingWindowDays: 7`).
+    Three such entries are on disk. THE WORKER STILL FILES NOTHING under this task either — the
+    harvest writes an INTAKE record and triage does the filing, which is the same division of
+    labour the alert lane has had since W1-T56.
+
+    (3) TRIAGE NEEDS NO CHANGE, AND THIS WAS MEASURED RATHER THAN ASSUMED. `decideTriage`
+    (src/lib/triage.ts:308-313) takes `{verdict, changedFiles}` and reads ZERO fields of the
+    entry. A whitespace-collapsing vocabulary scan of the RENDERED triage prompt — collapsed
+    because the prompt is stitched from wrapped string literals and a single-line grep would be
+    unsound — scored `defect` 0, `bug` 0, `broken` 0, `fix` 0, `repro` 0, `regression` 0,
+    `symptom` 0, against same-invocation controls `question` 3, `ambigu` 4, `research` 2,
+    `propose` 5, `answer` 3. The lane does not assume a defect report; a research-shaped entry is
+    squarely in scope.
+
+    (4) TWO BLOCKERS, BOTH IN ONE FILE. `FeedbackOrigin` (feedback.ts:65) is a CLOSED union —
+    `FEEDBACK_ORIGINS = ["cli","ui","issue"]` (:48) widened by three regexes (:67, :69, :73) and
+    gated by `isValidFeedbackOrigin` (:79-86). MEASURED against the real predicate:
+    `isValidFeedbackOrigin('followup#abc')` === false, with same-invocation controls
+    `'cli'` === true, `'alert#code-scanning-82'` === true, `'xyzzy'` === false. And
+    `FollowupEntry.type` has NO field in `FeedbackEntry`, so research|task|action drops SILENTLY
+    unless encoded into `origin` or into `raw`.
+
+    (5) THE DETERMINISTIC ID IS THE MECHANISM, NOT POLISH. `CaptureFeedbackOptions.id`'s own doc
+    (feedback.ts:835-838) states that machine-origin intake passes a deterministic id derived from
+    the source item "so a re-run's `existsSync` check on that exact path is the whole dedup
+    mechanism — no second store". Without it nothing compares content and the same follow-up lands
+    fresh every harvest. THE CORPUS ALREADY HAS THIS PROBLEM: re-implementing the repo's own
+    `significantWords` + 0.6 containment over all 149 entries (149 opened against 149 from an
+    independent enumeration; controls self-match true, nonsense-vs-real false) found 411
+    near-duplicate ordered pairs out of 22052 compared, 349 of them where the covering entry was
+    ALREADY REJECTED.
+
+    (6) THE CAP IS REQUIRED BECAUSE THE EMISSION RATE IS UNKNOWN. E — distinct new candidates per
+    day surviving the openTitles dedup — COULD NOT BE MEASURED: the production ledger was
+    unreachable, `report.followups` rows read 0 in the only reachable ledger and that zero is a
+    scope artifact rather than an absence. Consumption WAS measured from git log over
+    plan/feedback/*.yaml: 5.00/day (7d), 2.86/day (14d), 2.47/day (30d). The backlog is 64 `new`
+    of 149 total with a head aged 15.34 days. The best available proxy for E is MASTER-PLAN's
+    rendered candidate-pool series across 103 revisions, ~9/day, which would roughly DOUBLE the
+    backlog every 10-16 days. An uncapped writer is therefore not shippable on the evidence
+    available.
+
+    (7) THE DEPENDENCY IS LOAD-BEARING AND IS NOT A FORMALITY. This change routes MORE work into
+    the triage lane. On 2026-08-17 that lane opened NINE PRs for one feedback id and MERGED FOUR
+    of them, three with a diff that was empty against their own declared scope. W1-T963 (filed as
+    #2085, merged 21:28:50Z, status queued and UNBUILT) is the gate for exactly that: it makes the
+    generated triage proof discriminate and refuses an empty diff. Shipping this router before
+    that gate lands amplifies a defect whose fix is already filed and sitting in the queue.
+  design: |
+    THE SHAPE: one new origin arm, one deterministic-id write beside the existing render, one
+    policy-bounded cap. No triage change.
+
+    (i) A FOURTH ORIGIN ARM. `FeedbackOrigin` (feedback.ts:65) gains a `followup#${string}` arm and
+    `isValidFeedbackOrigin` (:79-86) a fourth `MACHINE_ORIGIN_FOLLOWUP` regex beside the three at
+    :67/:69/:73. The regex must be a CLOSED grammar the way `MACHINE_ORIGIN_REPAIR` (:73) is —
+    never a permissive catch-all — because it is the only thing that will ever check this value.
+
+    (ii) THE KIND MUST SURVIVE THE CROSSING. `research|task|action` has no field in
+    `FeedbackEntry`. Encoding it into the origin (`followup#<kind>-<key>`) keeps the entry shape
+    byte-identical to every existing capture and makes the kind recoverable by the same predicate
+    that validates the origin. Encoding it into `raw` instead is permitted only if the builder
+    states why, because `raw` is what the triage worker reads as the human's own words.
+
+    (iii) THE WRITE GOES BESIDE THE RENDER, NOT INSTEAD OF IT. The candidate list is already
+    computed and already deduped where `renderFollowupCandidates` is called (retro.ts:1531, inside
+    `renderGather` at :1463). The prompt section STAYS — this task adds a second consumer of the
+    same list, it does not replace the first. A builder who deletes the render has changed what
+    the Architect sees, which is not this task.
+
+    (iv) THE ID MUST BE CONTENT-STABLE, AND THAT IS WHAT CRITERIA 3 AND 6 TEST. Derive it from the
+    candidate's own text and kind, not from the run id — a run-keyed id passes criterion 3 (a
+    re-run of the SAME harvest) and fails criterion 6 (a LATER harvest re-offering the same
+    candidate), which is precisely the distinction that matters.
+
+    (v) THE CAP IS A POLICY VALUE WITH BOUNDS, following `repairFilingThreshold`'s own shape in
+    plan/policy.yaml (`value`/`origin`/`min`/`max` at :434-438). Overflow is LEDGERED, never
+    dropped silently: a cap that discards without a trace is indistinguishable from an emitter
+    that produced nothing, which is the observability failure this repo has paid for repeatedly.
+
+    (vi) THE FALSIFIER IS A PAIR IN EVERY DIRECTION. "A deduped candidate writes nothing" is
+    satisfied perfectly by a writer that never writes; "an entry is created" is satisfied by a
+    writer that writes everything. Criteria 1 and 5 must run in the SAME suite invocation so one
+    run carries both directions. THE WEAKEST POSSIBLE CRITERION HERE IS "A FEEDBACK ENTRY EXISTS"
+    — it passes whether or not the routing worked, and W1-T963 is filed against exactly that class
+    of non-discriminating proof.
+
+    (vii) ESTABLISH FROM SOURCE THAT NOTHING PRUNES plan/feedback/. Criterion 6's guarantee is
+    path-existence, which holds only while rejected entries persist; 47 of 149 entries are
+    `status: rejected` today. THIS RECON'S OWN READING: `git grep -nE 'unlinkSync|rmSync|rimraf'`
+    over src/lib/feedback.ts and src/lib/inbox.ts returns two hits, BOTH lock-file reclaims
+    (inbox.ts:1102, :1123), against a control of 15 files using `unlinkSync` elsewhere in src/ —
+    so nothing appears to prune entries. THE BUILDER MUST RE-ESTABLISH THIS RATHER THAN INHERIT
+    IT, and if any pruner or archiver is found, must state in writing what that means for
+    criterion 6 before relying on path existence.
+
+    (viii) OUT OF SCOPE, EACH WITH ITS REASON. `src/lib/triage.ts` — rationale (3) shows the lane
+    needs no change. The four-call-site emitter gap (only fix/recon/implement can emit follow-ups
+    at all; review, sweep, retro, triage and auto-triage cannot) — that governs WHAT IS PRODUCED,
+    this task governs where what IS produced goes. `openapi/daemon.yaml` — see the note. And the
+    triage lane's re-dispatch behaviour, which is W1-T963's neighbour and not this task's.
+  acceptance:
+    - claim: "a candidate the openTitles dedup rejected produces no entry at all"
+      proof: "unit test: W1-T965: a deduped candidate produces no feedback entry"
+    - claim: "two identical candidates in one harvest produce exactly one entry rather than two"
+      proof: "unit test: W1-T965: two identical candidates in one harvest produce exactly one entry"
+    - claim: "re-running the same harvest writes nothing new so the id is content-stable"
+      proof: "unit test: W1-T965: re-running the same harvest produces zero new entries"
+    - claim: "the written origin satisfies the repo's own validator rather than merely looking right"
+      proof: "unit test: W1-T965: the written origin satisfies the real validator"
+    - claim: "the follow-up kind survives the crossing and is recoverable from the entry alone"
+      proof: "unit test: W1-T965: research and task candidates with identical text produce distinct entries"
+    - claim: "a candidate whose prior entry was rejected is not re-created while that entry exists"
+      proof: "unit test: W1-T965: a rejected entry is not re-created while it exists"
+    - claim: "a harvest over the cap writes exactly cap entries and the overflow is ledgered"
+      proof: "unit test: W1-T965: a harvest over the cap writes exactly cap entries and ledgers the overflow"
+  risk: high
+  origin: "oper#route-followups-to-feedback-2026-08-17"
+  plan_refs: ["W1-T963", "W1-T105", "W1-T56"]
+  files: [src/lib/feedback.ts, src/lib/retro.ts, src/run-task.ts, plan/policy.yaml, test/retro.test.ts, test/feedback.test.ts]
+  status: queued
+  attempts: 0
+  note: |
+    depends_on: W1-T963 IS LOAD-BEARING AND IS ARGUED IN rationale (7), NOT ONLY DECLARED HERE.
+    This task increases the arrival rate at a lane that, on 2026-08-17, opened nine PRs for one
+    feedback id and merged four, three of them empty against their own declared scope. W1-T963
+    (#2085, merged 21:28:50Z, status queued and unbuilt) is the gate for that class. Building this
+    first would amplify a filed, unbuilt defect.
+
+    verify: human IS SET UP FRONT, AND THE REASON IS SPECIFIC RATHER THAN REFLEXIVE: this change
+    gives ONE automated lane a new way to create work for ANOTHER automated lane. No test can
+    decide whether that loop is wanted; an operator must. `isDispatchEligible` (src/lib/drain.ts)
+    returns false at `t.verify !== "auto"` BEFORE the linter is consulted, so this shard can never
+    be picked up by the drain — the intended effect, not a side effect.
+
+    risk: high IS SET UP FRONT AND THE BAND IS RULE 19'S SPAN. `sizingViolation`
+    (src/lib/task-linter.ts) exempts only `risk === "high"` and returns clean only below two
+    subsystems, so TWO concerns is the threshold. This shard's `files:` spans five — feedback
+    schema, retro, run-task wiring, policy, and two suites — so no list satisfying its own scope
+    could pass at risk:medium. AND THE COUNT IS NOT BOUNDED BY THE FILE LIST: `subsystemsOf`
+    (task-linter.ts:175) derives subsystems from the ACCEPTANCE-CRITERIA TEXT as well as from
+    `files:` (:185-189), so seven criteria naming dedup, origin validation, ledgering and policy
+    can only raise it further. The band is set where the rule requires and would not be reachable
+    at medium by trimming the file list.
+
+    FILES DERIVED BY INVOCATION COUNT AT b316693, NOT GUESSED. `captureFeedback`: feedback.ts=5,
+    run-task.ts=7, retro.ts=0 — that zero in retro.ts IS THE GAP this task closes.
+    `isValidFeedbackOrigin`: feedback.ts=2, everywhere else 0 — the origin arm has one home.
+    `renderFollowupCandidates`: retro.ts=2 (declaration :2206, call site :1531), 0 elsewhere.
+    `mineFollowups`: retro.ts=9, run-task.ts=2 — run-task.ts is where the retro lane's deps are
+    wired, which is why it is declared. `FollowupEntry`: worker.ts=4, 0 in all three others — the
+    type is read, never redefined, so src/lib/worker.ts is NOT declared. CONTROL: `routeSpecialists`
+    reads 0 in all four modules, so these counts discriminate rather than matching everything.
+    plan/policy.yaml is declared for the cap, following `repairFilingThreshold`'s own
+    value/origin/min/max shape at :434-438. test/retro.test.ts and test/feedback.test.ts both
+    exist today.
+
+    src/lib/triage.ts IS DELIBERATELY NOT DECLARED. `decideTriage` (triage.ts:308-313) reads zero
+    fields of the entry, and the rendered prompt already handles inquiry-shaped input by the
+    measured vocabulary scan in rationale (3). AN IMPLEMENTER WHO CONCLUDES OTHERWISE MUST AMEND
+    THIS SHARD TO DECLARE IT FIRST rather than overrunning.
+
+    openapi/daemon.yaml IS DELIBERATELY NOT DECLARED, AND THE COMPOUNDING IS RECORDED HERE RATHER
+    THAN HIDDEN. That schema (:405-453) narrows `origin` to `cli|ui|issue` (:429-434) and
+    `packages/api-client/src/schema.d.ts:117-128` inherits it, so it ALREADY excludes 25 live
+    on-disk entries (21 `alert#`, 3 `repair#`, 1 `recon#`) served through `GET /v1/feedback`.
+    Adding a `followup#` form compounds a PRE-EXISTING defect. It is a separate filing, and a
+    builder must not quietly widen into it.
+
+    CRITERION 4 HAS ALREADY FAILED IN PRODUCTION, WHICH IS WHY IT IS A CRITERION.
+    plan/feedback/fb-deny-floor-never-probed-2026-08-11.yaml carries
+    `origin: recon#deny-floor-never-probed-2026-08-11`, which `isValidFeedbackOrigin` REJECTS, and
+    it has sat undetected since 2026-08-11. MEASURED by running the real predicate over all 149
+    entries: 149 opened against 149 independently enumerated, exactly 1 invalid, with controls
+    `'cli'` true, `'alert#code-scanning-82'` true, `'followup#abc'` false, `'xyzzy'` false.
+    NOTHING VALIDATES THESE FILES ON WRITE OR ON READ — no zod/ajv/yup in package.json (control:
+    `yaml` and `typescript` both present), `lintPlanCommand` never touches them (its one hit over
+    its own line range is a commit-subject literal, control `violations` 3 hits in the same
+    window), no CI workflow validates them (whitespace-collapsing scan over all 15 workflow files,
+    control `lint-plan` hits three of them), and no test walks the real corpus. So a criterion
+    asserting the origin merely LOOKS right would be satisfied by the exact defect already on disk.
+
+    PROOF NOTES: all seven proofs are the NAME-FILTERED `unit test:` form, never the whole-file
+    path form, so each names the behaviour it proves rather than a file that would pass on any test
+    in it. Each title is plain prose under 100 characters with no comma, no `"; "` and no regex
+    metacharacter, so `looksLikeScenarioNarrative` cannot fail them and `parseTestTarget`'s
+    escaped-literal match has nothing to mis-handle. Each was verified to match ZERO files today
+    via `grep -rlF` over test/ against a control matching one — they are FORWARD references to
+    titles this task will create.
+
+    ID PROVENANCE — FIVE SURFACES, EACH WITH ITS OWN POSITIVE CONTROL, COVERAGE ASSERTED SEPARATELY
+    FROM READABILITY. W1-T965 read 0 on all five at b316693: refs/rmd-id/* (62 refs enumerated;
+    control refs/rmd-id/W1-T946 = 1, negative W1-T999999 = 0), shard FILENAMES on origin/main (333
+    enumerated against 333 from an independent `ls`; control W1-T964 = 1), ids DECLARED anywhere in
+    plan/ on origin/main (588 distinct; control W1-T964 = 1), every OPEN PR's file list, and
+    plan/tasks.yaml (255 ids, max 280; control W1-T280 = 1). SURFACE 4's ZERO WAS CONTROLLED RATHER
+    THAN ASSUMED: there are currently NO open PRs, and the SAME endpoint queried with
+    `state=closed` returned 5 rows, so the empty set is real rather than a failed query. ALTERNATION
+    QUERIES USED `-E`: a `git grep` without it treats `|` as a literal and returns a structurally
+    blind zero that a readability control cannot catch.
+    965 IS THE LOWEST FREE ID ABOVE 964, AND THE REFS EXPLAIN WHY IT IS NOT SIMPLY THE NEXT NUMBER
+    IN EVERY CASE: refs/rmd-id already reserves 960, 961, 962, 1000, 1001, 1002, 1003 and 100000.
+    Those below 965 are holes rather than obstacles here, but 1000-1003 would block a later filing
+    that assumed contiguity. REFS ARE BLOCKING BUT NOT AUTHORITATIVE IN THE ABSENT DIRECTION: 62
+    refs against 588 declared ids, so a ref reading absent proves nothing — the tree is the
+    authority and the refs only add.
+
+    THE RESERVATION WAS REFUSED. The gated push to refs/rmd-id/W1-T965 used an orphan commit over
+    the empty tree (4b825dc642cb6eb9a060e54bf8d69288fbee4904) carrying nonce
+    vm-9152-1787006728701740655, a braced refspec, and the exit status captured into a variable
+    rather than read through a pipe. PUSH_EXIT_CODE=1, stderr verbatim:
+      error: RPC failed; HTTP 403 curl 22 The requested URL returned error: 403
+      send-pack: unexpected disconnect while reading sideband packet
+      fatal: the remote end hung up unexpectedly
+      Everything up-to-date
+    The readback `git ls-remote origin refs/rmd-id/W1-T965` returned 0 lines while a control
+    readback of refs/rmd-id/W1-T946 returned 1, so the ref genuinely does not exist and the query
+    that checked was working. This is the same credential limit W1-T518 files; it is recorded here
+    and NOT treated as blocking, so this id rests on the five-surface sweep alone.
