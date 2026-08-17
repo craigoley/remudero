@@ -392,3 +392,69 @@ test("costAnomalyLine/recordCostAnomalies: the injected deps carry nothing but a
   const deps: CostAnomalyDeps = { ledgerPath: ledgerTmpPath(), writeLedger: () => {} };
   assert.deepEqual(Object.keys(deps).sort(), ["ledgerPath", "writeLedger"]);
 });
+
+// ── THE MALFORMED-ROW ARMS, AND THE SWEEP'S OWN CATCH ────────────────────────────────────────
+//
+// The suite above drives every SEMANTIC refusal — out-of-bound value, wrong `origin`, min > max —
+// against rows that are structurally well formed. The STRUCTURAL arms in `numberRow` were left
+// unreached, and so was `loadCostAnomalyPolicy`'s YAML-parse catch and the sweep's own
+// best-effort catch, which diff-coverage flagged. Every one is reachable without a seam: the
+// parser takes raw input, the loader takes a path, and `runSweep` already accepts an injected
+// policy.
+
+test("parseCostAnomalyPolicy: a row that is not a mapping is refused, naming the field it wanted", () => {
+  // The `multiplier: 3` shorthand a hand-editor would reach for — a bare number where the schema
+  // wants `{value, origin, min, max}`. Accepting it would read `value` off a number as undefined.
+  throwsCostAnomalyPolicyError(
+    () => parseCostAnomalyPolicy({ costAnomaly: { multiplier: 3, minSamples: { value: 5, origin: "net-new", min: 3, max: 15 } } }),
+    /must be a mapping with 'value'\/'origin'\/'min'\/'max'/,
+  );
+});
+
+test("parseCostAnomalyPolicy: a non-finite value is refused, and the message quotes what it got", () => {
+  for (const bad of ["3", null, Number.NaN]) {
+    throwsCostAnomalyPolicyError(
+      () => parseCostAnomalyPolicy({
+        costAnomaly: {
+          multiplier: { value: bad, origin: "net-new", min: 2, max: 8 },
+          minSamples: { value: 5, origin: "net-new", min: 3, max: 15 },
+        },
+      }),
+      /must be a finite number/,
+    );
+  }
+});
+
+test("parseCostAnomalyPolicy: a non-finite bound is refused — a .nan bound would accept every value", () => {
+  // The comment above this arm names the real hazard: every comparison against NaN is false, so a
+  // NaN bound silently disables the range check rather than failing it. Both bounds are driven.
+  for (const [min, max] of [[Number.NaN, 8], [2, Number.POSITIVE_INFINITY], ["2", 8]] as Array<[unknown, unknown]>) {
+    throwsCostAnomalyPolicyError(
+      () => parseCostAnomalyPolicy({
+        costAnomaly: {
+          multiplier: { value: 3, origin: "net-new", min, max },
+          minSamples: { value: 5, origin: "net-new", min: 3, max: 15 },
+        },
+      }),
+      /numeric finite 'min'\/'max' bounds/,
+    );
+  }
+});
+
+test("loadCostAnomalyPolicy: a file that is not valid YAML is refused, naming the path", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-cost-anomaly-badyaml-"));
+  const bad = join(dir, "policy.yaml");
+  // Unclosed flow mapping — a real parse failure, not a schema one, so it takes the loader's own
+  // catch rather than reaching parseCostAnomalyPolicy at all.
+  writeFileSync(bad, "costAnomaly: { multiplier: [1, 2\n", "utf8");
+
+  throwsCostAnomalyPolicyError(() => loadCostAnomalyPolicy(bad), /is not valid YAML/);
+  // AND IT NAMES WHICH FILE. A message that omitted the path would send the reader to the
+  // committed policy.yaml, which is fine — the whole value of this arm is pointing elsewhere.
+  try {
+    loadCostAnomalyPolicy(bad);
+    assert.fail("must throw");
+  } catch (e) {
+    assert.match(String((e as Error).message), new RegExp(bad.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+});
