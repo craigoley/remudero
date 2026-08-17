@@ -9,9 +9,10 @@ import {
   DAEMON_EXIT_STALE,
   daemonExitCode,
   runDaemon,
+  type DaemonDeps,
   type DaemonFreshness,
 } from "../src/lib/daemon.js";
-import { requestStop, stopDetail } from "../src/lib/fleet-control.js";
+import { pauseDetail, requestPause, requestStop, resumeFleet, stopDetail } from "../src/lib/fleet-control.js";
 import type { MergedSet } from "../src/lib/drain.js";
 
 // W1-T126 — DAEMON SELF-FRESHNESS. The same small linear plan test/daemon.test.ts uses
@@ -268,4 +269,113 @@ test("stale + installNeeded but NO runInstall dep injected: still restarts (opti
   });
 
   assert.equal(s.stopReason, "stale", "installNeeded with no runInstall wired never throws or hangs");
+});
+
+// ── W1-T936: PAUSE must be read before SELF-FRESHNESS ──────────────────────────
+// Before this fix, `checkFreshness` was consulted (and could exit "stale") strictly
+// above `checkPause` in `runDaemon`'s tick loop, so a paused daemon on a checkout
+// that never fast-forwards its own ref hit the freshness exit on every tick, exited
+// nonzero, and launchd's KeepAlive{SuccessfulExit:false} relaunched it straight back
+// into the same PAUSE flag — the 2026-08-17 relaunch storm.
+
+test("W1-T936: a paused daemon never exits for freshness", async () => {
+  const plan = fixturePlan();
+  const root = mkdtempSync(join(tmpdir(), "daemon-pause-freshness-never-exits-"));
+  requestPause(root, "quiet hours");
+  const clock = fakeClock();
+  const lines: Array<{ step: string }> = [];
+  let ticks = 0;
+
+  const s = await runDaemon(plan, {
+    refreshMerged: () => () => false,
+    runOne: async (id) => okResult(id),
+    sleep: clock.sleep,
+    log: (step) => lines.push({ step }),
+    checkPause: () => pauseDetail(root),
+    // Origin/main is behind this process's boot sha on EVERY tick — if freshness
+    // were consulted while paused, this would fire the "stale" exit immediately.
+    checkFreshness: (): DaemonFreshness => ({ stale: true, oldSha: OLD_SHA, newSha: NEW_SHA }),
+    // Stop after several paused heartbeats so the test terminates deterministically,
+    // without ever clearing the PAUSE flag.
+    checkStop: () => (++ticks >= 4 ? (requestStop(root, "test done"), stopDetail(root)) : undefined),
+  });
+
+  assert.notEqual(s.stopReason, "stale", "PAUSE must be honoured before a restart decision is taken");
+  assert.equal(s.stopReason, "stopped", "the run only ends because the test's own STOP fired, never freshness");
+  assert.ok(
+    lines.some((l) => l.step === "daemon.pause"),
+    "the daemon idled in-process on the pause heartbeat",
+  );
+  assert.equal(
+    lines.filter((l) => l.step === "daemon_selfrestart_for_freshness").length,
+    0,
+    "a stale checkout never triggers the freshness restart while PAUSE is set",
+  );
+});
+
+test("W1-T936: PAUSE is read before the freshness check", async () => {
+  const plan = fixturePlan();
+  const root = mkdtempSync(join(tmpdir(), "daemon-pause-before-freshness-order-"));
+  const clock = fakeClock();
+  const order: string[] = [];
+  let ticks = 0;
+
+  const s = await runDaemon(plan, {
+    refreshMerged: () => () => true, // nothing runnable -> every tick idles
+    runOne: async (id) => okResult(id),
+    sleep: clock.sleep,
+    // Never paused, so both deps are consulted every tick — the recorded order
+    // proves the SOURCE ORDER of the two reads, not just short-circuiting.
+    checkPause: () => {
+      order.push("pause");
+      return pauseDetail(root);
+    },
+    checkFreshness: (): DaemonFreshness => {
+      order.push("freshness");
+      return { stale: false };
+    },
+    checkStop: () => (++ticks >= 3 ? (requestStop(root, "test done"), stopDetail(root)) : undefined),
+  });
+
+  assert.equal(s.stopReason, "stopped");
+  assert.ok(order.length >= 4, "both reads really were consulted across multiple ticks");
+  for (let i = 0; i < order.length; i += 2) {
+    assert.deepEqual(
+      order.slice(i, i + 2),
+      ["pause", "freshness"],
+      `tick starting at call ${i}: pause must be read before freshness`,
+    );
+  }
+});
+
+test("W1-T936: clearing PAUSE lets the freshness exit fire", async () => {
+  const plan = fixturePlan();
+  const root = mkdtempSync(join(tmpdir(), "daemon-pause-clear-freshness-fires-"));
+  requestPause(root, "starts paused"); // boots straight into an already-paused fleet
+  const lines: Array<{ step: string }> = [];
+  let sleeps = 0;
+  const sleep: DaemonDeps["sleep"] = async (_ms) => {
+    sleeps++;
+    // The "operator" runs `rmd resume` after a couple of paused heartbeats —
+    // origin/main is ALREADY stale the whole time, it just can't be acted on
+    // until the hold clears.
+    if (sleeps === 2) resumeFleet(root);
+  };
+
+  const s = await runDaemon(plan, {
+    refreshMerged: () => () => false,
+    runOne: async (id) => okResult(id),
+    sleep,
+    log: (step) => lines.push({ step }),
+    checkPause: () => pauseDetail(root),
+    checkFreshness: (): DaemonFreshness => ({ stale: true, oldSha: OLD_SHA, newSha: NEW_SHA }),
+  });
+
+  assert.equal(s.stopReason, "stale", "once PAUSE clears, the SAME process notices the stale checkout and restarts");
+  const heartbeats = lines.filter((l) => l.step === "daemon.pause");
+  assert.equal(heartbeats.length, 2, "exactly two paused heartbeats occurred before resume");
+  assert.ok(
+    lines.some((l) => l.step === "daemon_selfrestart_for_freshness"),
+    "the freshness restart fires on the very next tick after the hold clears",
+  );
 });
