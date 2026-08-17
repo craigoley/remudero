@@ -15,5 +15,6 @@ raw: "GLOBAL LEARNINGS ARTIFACT MISSING — every worker spawn logs
   measure, don't assume)."
 attachments: []
 origin: cli
-status: new
+status: proposed
 proposal_pr: null
+summary: null
